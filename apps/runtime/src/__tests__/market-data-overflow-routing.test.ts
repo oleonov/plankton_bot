@@ -191,6 +191,7 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
       maxTrackedTokens: 100,
       discoveryPollIntervalMs: 10_000,
       discoveryBatchSize: 10,
+      tieredPricingCacheTtlMs: 0,
     });
 
     await module.start();
@@ -374,6 +375,7 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
       maxTrackedTokens: 100,
       discoveryPollIntervalMs: 10_000,
       discoveryBatchSize: 10,
+      tieredPricingCacheTtlMs: 0,
     });
 
     await module.start();
@@ -450,6 +452,7 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
       maxTrackedTokens: 100,
       discoveryPollIntervalMs: 10_000,
       discoveryBatchSize: 10,
+      tieredPricingCacheTtlMs: 0,
     });
 
     await module.start();

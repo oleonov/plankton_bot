@@ -24,8 +24,10 @@ import type {
   MarketPricingStreamMetricsSnapshot,
   MarketPricingStreamUpdate,
   Market,
+  TrackedForPricing,
   NormalizedMarket,
   MarketTradeCountProvider,
+  V4AdmissionTelemetrySnapshot,
 } from "@krabs/domain";
 import { createConditionId, createTokenId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -73,6 +75,7 @@ const FALLBACK_POLL_TIMEOUT_MAX_MS = 30_000;
 const TRANSIENT_POLL_WARN_THROTTLE_MS = 15 * 60_000;
 const GAMMA_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 const PUBLIC_TRADE_COUNT_ENRICH_CONCURRENCY = 5;
+const DEFAULT_TIERED_PRICING_CACHE_TTL_MS = 60_000;
 
 export interface MarketDataTrackedRoleCounts {
   executionCritical: number;
@@ -151,6 +154,7 @@ export interface MarketDataStreamActivitySnapshot {
   readonly narrowRefCountLeaks: number;
   readonly marketResolvedEvents: number;
   readonly newMarketEvents: number;
+  readonly v4AdmissionTelemetry: V4AdmissionTelemetrySnapshot | null;
   readonly gammaFallbackCount: number;
   readonly gammaFallbackTrackedTokenCount: number;
   readonly gammaFallbackExecutionCriticalCount: number;
@@ -197,6 +201,8 @@ export interface MarketDataModuleDeps {
   fallbackPollRatePerSec?: number;
   /** Drop stale gap tokens after this age instead of re-polling forever. Default: 30s. */
   fallbackStaleTokenAgeMs?: number;
+  /** Cache the expensive priority-universe DB scan/sort. Default: 60s. */
+  tieredPricingCacheTtlMs?: number;
   /** Optional Data API enrichment for D9_LOSS_EXIT liquidity signal. */
   tradeCountProvider?: MarketTradeCountProvider;
   /**
@@ -274,6 +280,11 @@ export class MarketDataModule implements RuntimeModule {
   private readonly discoveryPollFailureWarn: WarnThrottleState = createWarnThrottleState();
   private pricingPollBackoffUntilMs = 0;
   private discoveryPollBackoffUntilMs = 0;
+  private tieredPricingCache: {
+    maxTokens: number;
+    capturedAtMs: number;
+    value: TrackedForPricing;
+  } | null = null;
   /**
    * True when the stream-level circuit breaker is open — the module degrades to
    * poll-only mode, polling the full WS-tier each cycle. Readable by Task 5.
@@ -442,6 +453,7 @@ export class MarketDataModule implements RuntimeModule {
       narrowRefCountLeaks: streamMetrics?.narrowRefCountLeaks ?? 0,
       marketResolvedEvents: streamMetrics?.marketResolvedEvents ?? 0,
       newMarketEvents: streamMetrics?.newMarketEvents ?? 0,
+      v4AdmissionTelemetry: readV4AdmissionTelemetry(this.deps.marketRepo),
       gammaFallbackCount: gammaFallbackCounts.total,
       gammaFallbackTrackedTokenCount: gammaFallbackCounts.total,
       gammaFallbackExecutionCriticalCount: gammaFallbackCounts.executionCritical,
@@ -477,9 +489,7 @@ export class MarketDataModule implements RuntimeModule {
 
       // Determine tracked WS-tier markets (executionCritical + entryCandidates).
       if (this.deps.maxTrackedTokens != null) {
-        const tiered = this.deps.marketRepo.findTrackedForPricingTiered({
-          maxTokens: this.deps.maxTrackedTokens,
-        });
+        const tiered = this.getTieredTrackedForPricing(this.deps.maxTrackedTokens, Date.now());
         this.syncWsTierRoles({
           executionCritical: tiered.executionCritical,
           entryCandidates: tiered.entryCandidates,
@@ -830,6 +840,33 @@ export class MarketDataModule implements RuntimeModule {
       }
       this.polling = false;
     }
+  }
+
+  private getTieredTrackedForPricing(maxTokens: number, nowMs: number): TrackedForPricing {
+    const ttlMs = this.deps.tieredPricingCacheTtlMs ?? DEFAULT_TIERED_PRICING_CACHE_TTL_MS;
+    if (
+      this.tieredPricingCache &&
+      this.tieredPricingCache.maxTokens === maxTokens &&
+      nowMs - this.tieredPricingCache.capturedAtMs <= ttlMs
+    ) {
+      return this.tieredPricingCache.value;
+    }
+    const value = this.deps.marketRepo.findTrackedForPricingTiered({ maxTokens });
+    const v4Telemetry = readV4AdmissionTelemetry(this.deps.marketRepo);
+    if (v4Telemetry) {
+      this.log.debug(
+        {
+          evaluatedTotal: v4Telemetry.evaluatedTotal,
+          admitCountTotal: v4Telemetry.admitCountTotal,
+          rejectCountTotal: v4Telemetry.rejectCountTotal,
+          admitRate: v4Telemetry.admitRate,
+          rejectCountByReason: v4Telemetry.rejectCountByReason,
+        },
+        "V4 admission telemetry updated",
+      );
+    }
+    this.tieredPricingCache = { maxTokens, capturedAtMs: nowMs, value };
+    return value;
   }
 
   private async enrichPricingWithPublicTradeCounts(
@@ -1547,6 +1584,17 @@ function zeroFallbackReasonCounts(): MarketDataFallbackReasonCounts {
     streamUnavailable: 0,
     featureFreshness: 0,
   };
+}
+
+function readV4AdmissionTelemetry(
+  marketRepo: MarketRepository,
+): V4AdmissionTelemetrySnapshot | null {
+  const getter = (
+    marketRepo as Partial<{
+      getV4AdmissionTelemetrySnapshot: () => V4AdmissionTelemetrySnapshot;
+    }>
+  ).getV4AdmissionTelemetrySnapshot;
+  return typeof getter === "function" ? getter.call(marketRepo) : null;
 }
 
 function getTrackedTokenRefreshBudgetMs(

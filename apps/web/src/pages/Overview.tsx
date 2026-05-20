@@ -151,6 +151,15 @@ function formatPct(value?: number | null): string {
   return value == null ? "—" : `${(value * 100).toFixed(0)}%`;
 }
 
+function formatTopCounts(counts?: Record<string, number>, limit = 3): string {
+  const entries = Object.entries(counts ?? {})
+    .filter(([, count]) => count > 0)
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, limit);
+  if (entries.length === 0) return "none";
+  return entries.map(([key, count]) => `${key}:${count}`).join(", ");
+}
+
 function r23HealthColor(metrics?: R23MetricsData): string {
   if (!metrics) return "var(--text-muted)";
   if ((metrics.current.decision_tick_latency_p95_ms ?? 0) > 30_000) return "var(--red)";
@@ -176,6 +185,9 @@ function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
         }ms`,
         `GC max: ${coverage.gc_pause_max_ms?.toFixed(0) ?? "—"}ms`,
         `R23 cache hit rate: ${formatPct(coverage.r23_cache_hit_rate)}`,
+        `V4 admit rate: ${formatPct(coverage.v4_admit_rate)}`,
+        `V4 top categories: ${formatTopCounts(coverage.v4_admit_count_by_category, 5)}`,
+        `V4 reject reasons: ${formatTopCounts(coverage.v4_reject_count_by_reason, 5)}`,
         `Plankton weekly reference: ${coverage.plankton_reference_weekly}`,
       ].join("\n")
     : "Coverage metrics unavailable";
@@ -211,6 +223,16 @@ function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
               coverage.event_loop_lag_max_ms?.toFixed(0) ?? "—"
             }ms · GC ${coverage.gc_pause_max_ms?.toFixed(0) ?? "—"}ms`
           : "Awaiting runtime diagnostics"}
+      </div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        {coverage
+          ? `V4 ${formatPct(coverage.v4_admit_rate)} · ${coverage.v4_admit_count_total}/${coverage.v4_evaluated_total} admit`
+          : "Awaiting V4 admission telemetry"}
+      </div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        {coverage
+          ? `rejects ${formatTopCounts(coverage.v4_reject_count_by_reason, 2)}`
+          : "Awaiting V4 reject telemetry"}
       </div>
     </div>
   );

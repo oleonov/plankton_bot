@@ -42,7 +42,7 @@ function makeMarket(
   return {
     tokenId: createTokenId(tokenId),
     conditionId: `cond-${tokenId}`,
-    slug: `slug-${tokenId}`,
+    slug: `bitcoin-${tokenId}`,
     eventSlug: null,
     question: "Q?",
     outcome: "YES",

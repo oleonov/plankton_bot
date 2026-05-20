@@ -1,13 +1,18 @@
 import type Database from "better-sqlite3";
 import type {
-  HeuristicCategory,
   MarketRepository,
   Market,
   MarketScoreUpdate,
   TrackedForPricing,
+  V4AdmissionTelemetrySnapshot,
 } from "@krabs/domain";
 import type { TokenId } from "@krabs/domain";
-import { createTokenId, deriveCategory } from "@krabs/domain";
+import {
+  createTokenId,
+  createV4AdmissionTelemetrySnapshot,
+  evaluateV4Selection,
+  recordV4AdmissionTelemetry,
+} from "@krabs/domain";
 import type { Regime } from "@krabs/domain";
 
 // Rank for entry-candidate ordering: lower rank = higher priority.
@@ -24,14 +29,29 @@ const SELECTION_STATUS_RANK: Record<string, number> = {
 const FEATURE_FRESHNESS_MS = 4 * 60 * 60 * 1000;
 const R30_HIGH_CONFIDENCE_SCORE = 0.3699;
 const R30_ACTIVE_POOL_SCORE = 0.2529;
-const PLANKTON_PRIORITY_CATEGORY_BIAS: Record<HeuristicCategory, number> = {
-  politics: 1_200,
-  stocks: 800,
-  sports: 600,
-  esports: 300,
-  crypto: -200,
-  other: -400,
-  weather: -1_000,
+const V4_CATEGORY_PRIORITY_BIAS: Record<string, number> = {
+  "crypto-btc": 1_200,
+  "crypto-eth": 1_100,
+  "crypto-sol": 950,
+  "crypto-xrp": 900,
+  geopolitics: 1_000,
+  politics: 800,
+  "price-binary": 700,
+  stocks: 600,
+  esports: 450,
+  entertainment: 350,
+  weather: 250,
+  other: 100,
+};
+
+type SelectionFeatures = {
+  liquidity: number | null;
+  volume24h: number | null;
+};
+
+type PricingCandidate = {
+  market: Market;
+  features: SelectionFeatures;
 };
 
 // Step 3 (audit doc §D3/§P2) **score-column ownership invariant**.
@@ -81,8 +101,13 @@ export class SqliteMarketRepository implements MarketRepository {
         bind: (stmt: Database.Statement, market: Market) => void,
       ) => void)
     | null = null;
+  private v4AdmissionTelemetry = createV4AdmissionTelemetrySnapshot();
 
   constructor(private readonly db: Database.Database) {}
+
+  getV4AdmissionTelemetrySnapshot(): V4AdmissionTelemetrySnapshot {
+    return this.v4AdmissionTelemetry;
+  }
 
   private getUpsertStmt(): Database.Statement {
     if (!this.upsertStmt) this.upsertStmt = this.db.prepare(UPSERT_MARKET_SQL);
@@ -243,6 +268,8 @@ export class SqliteMarketRepository implements MarketRepository {
     const rows = this.db
       .prepare(
         `SELECT m.*,
+                latest.liquidity AS latest_liquidity,
+                latest.volume_24h AS latest_volume_24h,
                 CASE WHEN (
                   EXISTS (SELECT 1 FROM positions
                           WHERE positions.token_id = m.token_id
@@ -252,6 +279,14 @@ export class SqliteMarketRepository implements MarketRepository {
                                AND orders.status IN ('pending','open'))
                 ) THEN 1 ELSE 0 END AS is_critical
          FROM markets m
+         LEFT JOIN market_snapshots latest
+           ON latest.id = (
+             SELECT ms.id
+               FROM market_snapshots ms
+              WHERE ms.token_id = m.token_id
+              ORDER BY ms.captured_at DESC
+              LIMIT 1
+           )
          WHERE m.active = 1
            AND (
              (
@@ -273,13 +308,20 @@ export class SqliteMarketRepository implements MarketRepository {
       .all() as (Record<string, unknown> & { is_critical: number })[];
 
     const executionCritical: Market[] = [];
-    const tradableOnly: Market[] = [];
+    const tradableOnly: PricingCandidate[] = [];
 
     for (const row of rows) {
+      const market = this.rowToMarket(row);
       if (row.is_critical === 1) {
-        executionCritical.push(this.rowToMarket(row));
+        executionCritical.push(market);
       } else {
-        tradableOnly.push(this.rowToMarket(row));
+        tradableOnly.push({
+          market,
+          features: {
+            liquidity: readNullableNumber(row.latest_liquidity),
+            volume24h: readNullableNumber(row.latest_volume_24h),
+          },
+        });
       }
     }
 
@@ -296,34 +338,58 @@ export class SqliteMarketRepository implements MarketRepository {
     //
     // `effectiveScore` treats stale scores (features_captured_at < now − 4h)
     // as null so a stale non-null score never outranks a fresh lower score.
-    const candidates = tradableOnly.filter((m) => !criticalIds.has(String(m.tokenId)));
+    const candidates = tradableOnly.filter((candidate) => {
+      return !criticalIds.has(String(candidate.market.tokenId));
+    });
+    const admittedCandidates: PricingCandidate[] = [];
+    const rejectedCandidates: PricingCandidate[] = [];
     const nowMs = Date.now();
+    let v4AdmissionTelemetry = createV4AdmissionTelemetrySnapshot(new Date(nowMs).toISOString());
+    for (const candidate of candidates) {
+      const result = evaluateV4Selection({
+        slug: candidate.market.slug,
+        eventSlug: candidate.market.eventSlug,
+        question: candidate.market.question,
+        liquidity: candidate.features.liquidity,
+        volume24h: candidate.features.volume24h,
+      });
+      v4AdmissionTelemetry = recordV4AdmissionTelemetry(v4AdmissionTelemetry, result);
+      if (result.admit) admittedCandidates.push(candidate);
+      else rejectedCandidates.push(candidate);
+    }
+    this.v4AdmissionTelemetry = v4AdmissionTelemetry;
     const planktonPriorityByToken = new Map(
-      candidates.map((market) => [String(market.tokenId), planktonPriorityScore(market, nowMs)]),
+      admittedCandidates.map((candidate) => [
+        String(candidate.market.tokenId),
+        planktonPriorityScore(candidate.market, candidate.features, nowMs),
+      ]),
     );
-    candidates.sort((a, b) => {
-      const pa = planktonPriorityByToken.get(String(a.tokenId)) ?? 0;
-      const pb = planktonPriorityByToken.get(String(b.tokenId)) ?? 0;
+    admittedCandidates.sort((a, b) => {
+      const pa = planktonPriorityByToken.get(String(a.market.tokenId)) ?? 0;
+      const pb = planktonPriorityByToken.get(String(b.market.tokenId)) ?? 0;
       if (pa !== pb) return pb - pa;
-      const rankA = SELECTION_STATUS_RANK[a.selectionStatus ?? "unknown"] ?? 99;
-      const rankB = SELECTION_STATUS_RANK[b.selectionStatus ?? "unknown"] ?? 99;
+      const rankA = SELECTION_STATUS_RANK[a.market.selectionStatus ?? "unknown"] ?? 99;
+      const rankB = SELECTION_STATUS_RANK[b.market.selectionStatus ?? "unknown"] ?? 99;
       if (rankA !== rankB) return rankA - rankB;
-      const sa = effectiveScore(a, nowMs);
-      const sb = effectiveScore(b, nowMs);
+      const sa = effectiveScore(a.market, nowMs);
+      const sb = effectiveScore(b.market, nowMs);
       if (sa !== sb) {
         if (sa === null) return 1;
         if (sb === null) return -1;
         return sb - sa;
       }
-      if (a.createdAt !== b.createdAt) {
-        return a.createdAt < b.createdAt ? 1 : -1;
+      if (a.market.createdAt !== b.market.createdAt) {
+        return a.market.createdAt < b.market.createdAt ? 1 : -1;
       }
-      return String(a.tokenId).localeCompare(String(b.tokenId));
+      return String(a.market.tokenId).localeCompare(String(b.market.tokenId));
     });
 
     const remaining = Math.max(0, opts.maxTokens - executionCritical.length);
-    const entryCandidates = candidates.slice(0, remaining);
-    const discoveryOnly = candidates.slice(remaining);
+    const entryCandidates = admittedCandidates.slice(0, remaining).map((c) => c.market);
+    const discoveryOnly = [
+      ...admittedCandidates.slice(remaining).map((c) => c.market),
+      ...rejectedCandidates.map((c) => c.market),
+    ];
 
     return { executionCritical, entryCandidates, discoveryOnly };
   }
@@ -408,9 +474,15 @@ function effectiveScore(market: Market, nowMs: number): number | null {
   return market.score;
 }
 
-function planktonPriorityScore(market: Market, nowMs: number): number {
+function planktonPriorityScore(market: Market, features: SelectionFeatures, nowMs: number): number {
   const score = effectiveScore(market, nowMs);
-  const category = deriveCategory(market.slug, market.eventSlug);
+  const v4 = evaluateV4Selection({
+    slug: market.slug,
+    eventSlug: market.eventSlug,
+    question: market.question,
+    liquidity: features.liquidity,
+    volume24h: features.volume24h,
+  });
   const horizonDays = horizonDaysFromNow(market.endDate, nowMs);
   let priority = 0;
 
@@ -425,9 +497,13 @@ function planktonPriorityScore(market: Market, nowMs: number): number {
 
   if (market.tickSize === 0.001) priority += 50_000;
   if (horizonDays != null && horizonDays > 30) priority += 25_000;
-  priority += PLANKTON_PRIORITY_CATEGORY_BIAS[category];
+  if (v4.category) priority += V4_CATEGORY_PRIORITY_BIAS[v4.category] ?? 0;
 
   return priority;
+}
+
+function readNullableNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function horizonDaysFromNow(endDate: string | null, nowMs: number): number | null {

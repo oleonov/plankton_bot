@@ -53,8 +53,9 @@ export class MarketSelectionCache implements SelectedMarketCache {
 
   subscribe(): void {
     this.unsub = this.bus.subscribe("NormalizedMarketUpdated", async (payload) => {
+      const policy = this.marketSelectionPolicy?.();
       for (const market of payload.markets) {
-        this.processMarket(market);
+        this.processMarket(market, policy);
       }
     });
     // Drop eligibility for tokens that exit the tracked universe so `eligible`
@@ -99,7 +100,7 @@ export class MarketSelectionCache implements SelectedMarketCache {
     };
   }
 
-  private processMarket(market: NormalizedMarket): void {
+  private processMarket(market: NormalizedMarket, policy?: MarketSelectionPolicy): void {
     const tokenId = String(market.tokenId);
     if (!market.tradable) {
       // Untracked/preserved-for-lifecycle tokens are out of scope for the
@@ -123,7 +124,7 @@ export class MarketSelectionCache implements SelectedMarketCache {
         midPrice: market.midPrice,
         liquidity: market.liquidity ?? null,
       },
-      this.marketSelectionPolicy?.(),
+      policy,
     );
     if (evalResult.finalStatus === "INCLUDE") {
       this.selectionRuleAdmitted++;

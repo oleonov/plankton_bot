@@ -701,7 +701,7 @@ describe("GET /status", () => {
       DELETE FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity';
       DELETE FROM runtime_metrics WHERE metric_name IN ('algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
-      VALUES ('market_data_stream_activity', 1, '{"trackedTokenCount":2,"wsEventsReceivedPerSec":7.5,"shardCount":2}', '2026-05-18T00:00:00Z');
+      VALUES ('market_data_stream_activity', 1, '{"trackedTokenCount":2,"wsEventsReceivedPerSec":7.5,"shardCount":2,"v4AdmissionTelemetry":{"evaluatedTotal":10,"admitCountTotal":2,"rejectCountTotal":8,"admitRate":0.2,"admitCountByCategory":{"crypto-btc":2},"seenCountByCategory":{"crypto-btc":3},"admitRateByCategory":{"crypto-btc":0.6666666667},"rejectCountByReason":{"rejected_category_not_in_hot_cats":5,"rejected_liquidity_below_100":2,"rejected_volume_below_5":1}}}', '2026-05-18T00:00:00Z');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES
         ('algo_decision_latency', 123, '{"p95Ms":123,"p99Ms":456}', '2026-05-18T00:00:00Z'),
@@ -743,6 +743,18 @@ describe("GET /status", () => {
     expect(body.data.event_loop_lag_max_ms).toBe(37);
     expect(body.data.gc_pause_max_ms).toBe(4);
     expect(body.data.http_errors_by_class_1h).toEqual({ "gamma-pricing:timeout": 2 });
+    expect(body.data.v4_evaluated_total).toBe(10);
+    expect(body.data.v4_admit_count_total).toBe(2);
+    expect(body.data.v4_reject_count_total).toBe(8);
+    expect(body.data.v4_admit_rate).toBe(0.2);
+    expect(body.data.v4_admit_count_by_category).toEqual({ "crypto-btc": 2 });
+    expect(body.data.v4_seen_count_by_category).toEqual({ "crypto-btc": 3 });
+    expect(body.data.v4_admit_rate_by_category).toEqual({ "crypto-btc": 0.6666666667 });
+    expect(body.data.v4_reject_count_by_reason).toEqual({
+      rejected_category_not_in_hot_cats: 5,
+      rejected_liquidity_below_100: 2,
+      rejected_volume_below_5: 1,
+    });
 
     conn.db.exec(
       `DELETE FROM runtime_metrics WHERE metric_name IN ('market_data_stream_activity', 'algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class')`,

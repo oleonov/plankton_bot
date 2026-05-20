@@ -244,6 +244,27 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
     expect(repo.findTrackedForPricingTiered).toHaveBeenCalledWith({ maxTokens: 1000 });
   });
 
+  it("caches tiered pricing universe between poll cycles", async () => {
+    const tiered = makeTiered(["c1"], ["e1"], ["d1"]);
+    const repo = createMockRepo(tiered);
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      tieredPricingCacheTtlMs: 60_000,
+    });
+
+    await mod.poll();
+    await mod.poll();
+
+    expect(repo.findTrackedForPricingTiered).toHaveBeenCalledTimes(1);
+  });
+
   it("legacy flat path used when maxTrackedTokens is undefined", async () => {
     const tiered = makeTiered([], ["e1", "e2"], []);
     const repo = createMockRepo(tiered);

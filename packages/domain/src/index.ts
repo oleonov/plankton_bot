@@ -81,6 +81,20 @@ export type { R23DipTriggerContext, R23DipTriggerResult } from "./r23-dip-trigge
 export { deriveCategory, HEURISTIC_CATEGORIES } from "./category.js";
 export type { HeuristicCategory } from "./category.js";
 export {
+  HOT_CATS_40,
+  createV4AdmissionTelemetrySnapshot,
+  deriveV4SelectionCategory,
+  evaluateV4Selection,
+  recordV4AdmissionTelemetry,
+} from "./v4-selection.js";
+export type {
+  V4AdmissionRejectReason,
+  V4AdmissionTelemetrySnapshot,
+  V4SelectionCategory,
+  V4SelectionInput,
+  V4SelectionResult,
+} from "./v4-selection.js";
+export {
   loadLogisticModel,
   predictScore,
   ModelArtifactSchemaError,

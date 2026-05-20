@@ -347,6 +347,14 @@ export interface CoverageMetricsData {
   event_loop_lag_p95_ms: number | null;
   gc_pause_max_ms: number | null;
   http_errors_by_class_1h: Record<string, number>;
+  v4_admit_count_total: number;
+  v4_admit_count_by_category: Record<string, number>;
+  v4_reject_count_total: number;
+  v4_reject_count_by_reason: Record<string, number>;
+  v4_admit_rate: number;
+  v4_seen_count_by_category: Record<string, number>;
+  v4_admit_rate_by_category: Record<string, number>;
+  v4_evaluated_total: number;
   captured_at: string | null;
 }
 

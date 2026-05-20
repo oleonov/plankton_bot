@@ -31,7 +31,7 @@ function makeMarket(
   return {
     tokenId: createTokenId(tokenId),
     conditionId: `cond-${tokenId}`,
-    slug: `slug-${tokenId}`,
+    slug: `bitcoin-${tokenId}`,
     eventSlug: null,
     question: "Q?",
     outcome: "YES",
@@ -72,6 +72,17 @@ function insertOrder(tokenId: string, status: "pending" | "open" | "filled"): vo
   ).run(`ord-${tokenId}`, `cord-${tokenId}`, tokenId, `cond-${tokenId}`, status);
 }
 
+function insertSnapshot(
+  tokenId: string,
+  overrides: { liquidity?: number | null; volume24h?: number | null } = {},
+): void {
+  db.prepare(
+    `INSERT INTO market_snapshots
+       (token_id, best_bid, best_ask, last_price, volume_24h, liquidity, captured_at)
+     VALUES (?,0.1,0.2,0.15,?,?,datetime('now'))`,
+  ).run(tokenId, overrides.volume24h ?? null, overrides.liquidity ?? null);
+}
+
 beforeEach(() => {
   tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-tiered-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
@@ -107,6 +118,52 @@ describe("findTrackedForPricingTiered", () => {
     expect(result.executionCritical).toHaveLength(0);
     expect(result.entryCandidates).toHaveLength(3);
     expect(result.discoveryOnly).toHaveLength(2);
+  });
+
+  it("V4 priority pool excludes low-liquidity or low-volume markets from entryCandidates", () => {
+    repo.save(makeMarket("good", { slug: "bitcoin-good" }));
+    repo.save(makeMarket("low-liq", { slug: "bitcoin-low-liq" }));
+    repo.save(makeMarket("low-vol", { slug: "bitcoin-low-vol" }));
+    insertSnapshot("good", { liquidity: 100, volume24h: 5 });
+    insertSnapshot("low-liq", { liquidity: 99.99, volume24h: 100 });
+    insertSnapshot("low-vol", { liquidity: 100, volume24h: 4.99 });
+
+    const result = repo.findTrackedForPricingTiered({ maxTokens: 10 });
+
+    expect(result.entryCandidates.map((m) => String(m.tokenId))).toEqual(["good"]);
+    expect(result.discoveryOnly.map((m) => String(m.tokenId)).sort()).toEqual([
+      "low-liq",
+      "low-vol",
+    ]);
+  });
+
+  it("exposes latest V4 admission telemetry from the tiered pricing scan", () => {
+    repo.save(makeMarket("good", { slug: "bitcoin-good" }));
+    repo.save(makeMarket("low-liq", { slug: "bitcoin-low-liq" }));
+    repo.save(makeMarket("cold", { slug: "unclassified-cold-market" }));
+    insertSnapshot("good", { liquidity: 100, volume24h: 5 });
+    insertSnapshot("low-liq", { liquidity: 99, volume24h: 100 });
+    insertSnapshot("cold", { liquidity: 100, volume24h: 100 });
+
+    repo.findTrackedForPricingTiered({ maxTokens: 10 });
+    const telemetry = repo.getV4AdmissionTelemetrySnapshot();
+
+    expect(telemetry.evaluatedTotal).toBe(3);
+    expect(telemetry.admitCountTotal).toBe(1);
+    expect(telemetry.rejectCountTotal).toBe(2);
+    expect(telemetry.admitRate).toBeCloseTo(1 / 3, 6);
+    expect(telemetry.seenCountByCategory["crypto-btc"]).toBe(2);
+    expect(telemetry.admitCountByCategory["crypto-btc"]).toBe(1);
+    expect(telemetry.rejectCountByReason.rejected_liquidity_below_100).toBe(1);
+    expect(telemetry.rejectCountByReason.rejected_category_not_in_hot_cats).toBe(1);
+  });
+
+  it("V4 priority pool treats missing liveness metadata as pass for hot categories", () => {
+    repo.save(makeMarket("missing-snapshot", { slug: "ethereum-missing-snapshot" }));
+
+    const result = repo.findTrackedForPricingTiered({ maxTokens: 10 });
+
+    expect(result.entryCandidates.map((m) => String(m.tokenId))).toEqual(["missing-snapshot"]);
   });
 
   it("executionCritical: markets with open positions are always included", () => {

@@ -75,6 +75,7 @@ import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js
 import { SlidingLatencyWindow, type LatencySnapshot } from "./decision-metrics.js";
 import { DecisionPersistenceBuffer } from "./async-decision-persistence.js";
 import { DecisionWorkerPool } from "./decision-worker-pool.js";
+import { ContinuationTradeCountCache } from "./continuation-trade-count-cache.js";
 import type {
   DecisionMetricsDelta,
   DecisionPlanningInput,
@@ -597,6 +598,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly persistence: DecisionPersistenceBuffer;
   private readonly decisionWorkerPool: DecisionWorkerPool;
+  private readonly continuationTradeCountCache: ContinuationTradeCountCache | null;
 
   // Market cache — updated on every NormalizedMarketUpdated
   private readonly marketCache = new Map<string, NormalizedMarket>();
@@ -677,6 +679,12 @@ export class AlgoDecisionModule implements RuntimeModule {
       batchSize: deps.decisionWorkerBatchSize ?? 100,
       log: this.log,
     });
+    this.continuationTradeCountCache = deps.tradeCountProvider
+      ? new ContinuationTradeCountCache({
+          provider: deps.tradeCountProvider,
+          log: this.log,
+        })
+      : null;
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────────────
@@ -955,12 +963,15 @@ export class AlgoDecisionModule implements RuntimeModule {
       : Date.now();
   }
 
-  private getPostBuyFillSellCooldown(now: number): {
+  private getPostBuyFillSellCooldown(
+    now: number,
+    executionPolicy: ExecutionPolicy | null = this.deps.executionPolicy?.() ?? null,
+  ): {
     cooldownMs: number;
     ageMs: number;
     lastBuyFillAt: number;
   } | null {
-    const cooldownMs = this.deps.executionPolicy?.().postBuyFillSellCooldownMs ?? 0;
+    const cooldownMs = executionPolicy?.postBuyFillSellCooldownMs ?? 0;
     if (cooldownMs <= 0 || !Number.isFinite(cooldownMs)) return null;
 
     const lastBuyFillAt = this.lastBuyFillByWallet.get(this.walletCooldownKey());
@@ -1176,7 +1187,10 @@ export class AlgoDecisionModule implements RuntimeModule {
     // all tokens that already have a leg (continuation gate is the only
     // consumer). Serial cache-misses inside the per-token loop would stack
     // ~75ms × N latency on the sweep; one parallel prefetch collapses it.
-    await this.prefetchContinuationTradeCounts(tokenIds);
+    const executionPolicy = this.deps.executionPolicy?.() ?? null;
+    const postBuyCooldown = this.getPostBuyFillSellCooldown(now, executionPolicy);
+    this.scheduleContinuationTradeCounts(tokenIds);
+    await Promise.resolve();
     if (this.isPaused()) return;
 
     const inputs: DecisionPlanningInput[] = [];
@@ -1188,7 +1202,12 @@ export class AlgoDecisionModule implements RuntimeModule {
         if (this.isPaused()) return;
       }
       processed++;
-      const input = await this.createDecisionPlanningInput(String(tokenId) as TokenId, now);
+      const input = await this.createDecisionPlanningInput(
+        String(tokenId) as TokenId,
+        now,
+        executionPolicy,
+        postBuyCooldown,
+      );
       if (input) inputs.push(input);
     }
 
@@ -1196,7 +1215,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     for (const plan of plans) {
       if (this.isPaused()) return;
       this.applyDecisionMetricsDelta(plan.metrics);
-      this.applyDecisionPlanSideEffects(plan.sideEffects);
+      this.applyDecisionPlanSideEffects(plan.sideEffects, executionPolicy);
       for (const suppression of plan.suppressions) {
         this.recordDecisionSuppressed(suppression as SuppressionFacts);
       }
@@ -1230,13 +1249,14 @@ export class AlgoDecisionModule implements RuntimeModule {
   private async createDecisionPlanningInput(
     tokenId: TokenId,
     now: number,
+    executionPolicy: ExecutionPolicy | null,
+    postBuyCooldown: { cooldownMs: number; ageMs: number; lastBuyFillAt: number } | null,
   ): Promise<DecisionPlanningInput | null> {
     const legState = this.getCachedLegState(tokenId);
     const selectedForEntry = this.deps.selectedMarketCache.isEligible(tokenId);
     if (!legState && !selectedForEntry) return null;
 
     const market = this.marketCache.get(String(tokenId)) ?? null;
-    const executionPolicy = this.deps.executionPolicy?.() ?? null;
     const prevMidPrice = this.prevMidPrices.get(String(tokenId)) ?? null;
     const position = legState ? this.getCachedPosition(tokenId) : null;
     const continuationFacts =
@@ -1280,7 +1300,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       continuationMode: this.continuationMode,
       r23MaxMidpoint,
       dropReferencePrice,
-      postBuyCooldown: this.getPostBuyFillSellCooldown(now),
+      postBuyCooldown,
     };
   }
 
@@ -1289,7 +1309,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     legState: LegState,
   ): Promise<ContinuationFacts | null> {
     const legLocalCount = (legState.buyCount ?? 0) + (legState.sellCount ?? 0);
-    const { count, source } = await this.resolveContinuationTradeCount(
+    const { count, source } = this.resolveContinuationTradeCount(
       market.conditionId as ConditionId,
       legLocalCount,
     );
@@ -1320,7 +1340,10 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
   }
 
-  private applyDecisionPlanSideEffects(sideEffects: readonly DecisionPlanSideEffect[]): void {
+  private applyDecisionPlanSideEffects(
+    sideEffects: readonly DecisionPlanSideEffect[],
+    executionPolicy: ExecutionPolicy | null,
+  ): void {
     for (const sideEffect of sideEffects) {
       if (sideEffect.kind === "dust_recovered") {
         try {
@@ -1347,7 +1370,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         continue;
       }
       if (sideEffect.kind === "sell_residual_reject") {
-        if (!this.deps.executionPolicy?.().dustAbandonment.enabled) continue;
+        if (!executionPolicy?.dustAbandonment.enabled) continue;
         const { count, markedAbandoned } = this.deps.legStateRepo.incrementSellResidualReject(
           sideEffect.tokenId,
           sideEffect.timestamp,
@@ -1448,10 +1471,10 @@ export class AlgoDecisionModule implements RuntimeModule {
    * `countTrades` calls inside `evaluateToken` (cache will still help on
    * subsequent ticks within the TTL).
    */
-  private async prefetchContinuationTradeCounts(tokenIds: readonly TokenId[]): Promise<void> {
+  private scheduleContinuationTradeCounts(tokenIds: readonly TokenId[]): void {
     if (this.continuationMode !== "market_wide") return;
-    const provider = this.deps.tradeCountProvider;
-    if (!provider) return;
+    const cache = this.continuationTradeCountCache;
+    if (!cache) return;
 
     const conditionIds: ConditionId[] = [];
     const seen = new Set<string>();
@@ -1466,14 +1489,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       conditionIds.push(cid);
     }
     if (conditionIds.length === 0) return;
-
-    if (provider.prefetch) {
-      await provider.prefetch(conditionIds, CONTINUATION_TRADE_COUNT_CAP);
-    } else {
-      await Promise.all(
-        conditionIds.map((id) => provider.countTrades(id, CONTINUATION_TRADE_COUNT_CAP)),
-      );
-    }
+    cache.schedule(conditionIds, CONTINUATION_TRADE_COUNT_CAP);
   }
 
   /**
@@ -1483,17 +1499,21 @@ export class AlgoDecisionModule implements RuntimeModule {
    * per-leg `buyCount + sellCount`. The chosen source is returned so
    * suppression telemetry can flag fallback paths for the operator.
    */
-  private async resolveContinuationTradeCount(
+  private resolveContinuationTradeCount(
     conditionId: ConditionId,
     legLocalCount: number,
-  ): Promise<{ count: number; source: TradeCountSource }> {
-    if (this.continuationMode === "leg_local" || !this.deps.tradeCountProvider) {
+  ): { count: number; source: TradeCountSource } {
+    if (this.continuationMode === "leg_local" || !this.continuationTradeCountCache) {
       return { count: legLocalCount, source: "leg_local" };
     }
-    const fetched = await this.deps.tradeCountProvider.countTrades(
+    const fetched = this.continuationTradeCountCache.read(
       conditionId,
       CONTINUATION_TRADE_COUNT_CAP,
     );
+    if (fetched === undefined) {
+      this.continuationTradeCountCache.schedule([conditionId], CONTINUATION_TRADE_COUNT_CAP);
+      return { count: legLocalCount, source: "leg_local_fallback" };
+    }
     if (fetched === null) {
       return { count: legLocalCount, source: "leg_local_fallback" };
     }
@@ -1817,11 +1837,10 @@ export class AlgoDecisionModule implements RuntimeModule {
     // rules and must remain reachable for existing inventory.
     let continuationFacts: ContinuationFacts | null = null;
     if (legState) {
-      const { count: tradeCount, source: tradeCountSource } =
-        await this.resolveContinuationTradeCount(
-          market.conditionId as ConditionId,
-          emissionFacts.legTradeCount,
-        );
+      const { count: tradeCount, source: tradeCountSource } = this.resolveContinuationTradeCount(
+        market.conditionId as ConditionId,
+        emissionFacts.legTradeCount,
+      );
       continuationFacts = {
         tradeCount,
         tradeCountSource,

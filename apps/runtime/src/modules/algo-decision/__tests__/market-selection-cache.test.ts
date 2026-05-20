@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { InProcessEventBus } from "@krabs/event-bus";
 import {
   SelectionRuleEngine,
@@ -115,6 +115,28 @@ describe("MarketSelectionCache", () => {
       selectionRuleRejected: 0,
     });
 
+    cache.dispose();
+  });
+
+  it("reads market selection policy once per normalized market batch", async () => {
+    const bus = new InProcessEventBus();
+    const policy = vi.fn().mockReturnValue({
+      maxMidPrice: 0.5,
+      minLiquidity: 100,
+      zeroCoverageCategories: [],
+      blockDailyCryptoStrikes: false,
+    });
+    const cache = new MarketSelectionCache(bus, EMPTY_ENGINE, policy);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket({ tokenId: TOK_A }), makeMarket({ tokenId: TOK_B })],
+      timestamp: Date.now(),
+    });
+
+    expect(policy).toHaveBeenCalledTimes(1);
+    expect(cache.isEligible(TOK_A)).toBe(true);
+    expect(cache.isEligible(TOK_B)).toBe(true);
     cache.dispose();
   });
 

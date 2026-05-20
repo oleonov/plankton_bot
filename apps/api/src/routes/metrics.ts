@@ -105,6 +105,7 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const runtimeDiagnostics = parseJsonObject(runtimeDiagnosticsRow?.labels);
     const eventLoopLag = readObject(runtimeDiagnostics, "eventLoopLagMs");
     const gcPause = readObject(runtimeDiagnostics, "gcPauseMs");
+    const v4AdmissionTelemetry = readObject(stream, "v4AdmissionTelemetry");
     const wsTracked = readNumber(stream, "trackedTokenCount") ?? 0;
     const eventsPerSec = readNumber(stream, "wsEventsReceivedPerSec") ?? 0;
     const shardCount = readNumber(stream, "shardCount") ?? 0;
@@ -139,6 +140,14 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       event_loop_lag_p95_ms: readNumber(eventLoopLag, "p95Ms"),
       gc_pause_max_ms: readNumber(gcPause, "maxMs"),
       http_errors_by_class_1h: aggregateHttpErrors(httpErrorRows),
+      v4_admit_count_total: readNumber(v4AdmissionTelemetry, "admitCountTotal") ?? 0,
+      v4_admit_count_by_category: readNumberRecord(v4AdmissionTelemetry, "admitCountByCategory"),
+      v4_reject_count_total: readNumber(v4AdmissionTelemetry, "rejectCountTotal") ?? 0,
+      v4_reject_count_by_reason: readNumberRecord(v4AdmissionTelemetry, "rejectCountByReason"),
+      v4_admit_rate: readNumber(v4AdmissionTelemetry, "admitRate") ?? 0,
+      v4_seen_count_by_category: readNumberRecord(v4AdmissionTelemetry, "seenCountByCategory"),
+      v4_admit_rate_by_category: readNumberRecord(v4AdmissionTelemetry, "admitRateByCategory"),
+      v4_evaluated_total: readNumber(v4AdmissionTelemetry, "evaluatedTotal") ?? 0,
       captured_at: streamRow?.captured_at ?? null,
     });
   });
@@ -283,6 +292,21 @@ function readObject(
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function readNumberRecord(
+  obj: Record<string, unknown> | null,
+  key: string,
+): Record<string, number> {
+  const value = readObject(obj, key);
+  if (!value) return {};
+  const out: Record<string, number> = {};
+  for (const [recordKey, recordValue] of Object.entries(value)) {
+    if (typeof recordValue === "number" && Number.isFinite(recordValue)) {
+      out[recordKey] = recordValue;
+    }
+  }
+  return out;
 }
 
 function aggregateHttpErrors(
