@@ -151,7 +151,7 @@ describe("LiveUserEventStream", () => {
 
     sockets[0]!.emitOpen();
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(sockets[0]!.sent.at(-1)).toBe("{}");
+    expect(sockets[0]!.sent.at(-1)).toBe("PING");
 
     await vi.advanceTimersByTimeAsync(15_001);
     expect(onGapDetected).toHaveBeenCalledWith(expect.objectContaining({ reason: "pong-timeout" }));
@@ -161,6 +161,39 @@ describe("LiveUserEventStream", () => {
 
     await vi.advanceTimersByTimeAsync(2_000);
     expect(sockets.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("accepts PONG heartbeat responses", async () => {
+    const sockets: FakeUserSocket[] = [];
+    const onGapDetected = vi.fn();
+    const onError = vi.fn();
+
+    const stream = new LiveUserEventStream({
+      auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
+      traderAddress: "0xours",
+      createWebSocket: () => {
+        const socket = new FakeUserSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      handlers: {
+        onTradeEvents: vi.fn(),
+        onOrderEvents: vi.fn(),
+        onGapDetected,
+        onError,
+      },
+    });
+    stream.setConditionIds(["cond-1"]);
+
+    sockets[0]!.emitOpen();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sockets[0]!.sent.at(-1)).toBe("PING");
+    sockets[0]!.emitRaw("PONG");
+    await vi.advanceTimersByTimeAsync(15_001);
+
+    expect(onGapDetected).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(1);
   });
 
   it("treats malformed payloads as gaps without crashing the stream", async () => {

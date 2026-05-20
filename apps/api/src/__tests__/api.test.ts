@@ -701,7 +701,7 @@ describe("GET /status", () => {
       DELETE FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity';
       DELETE FROM runtime_metrics WHERE metric_name IN ('algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
-      VALUES ('market_data_stream_activity', 1, '{"trackedTokenCount":2,"wsEventsReceivedPerSec":7.5,"shardCount":2,"v4AdmissionTelemetry":{"evaluatedTotal":10,"admitCountTotal":2,"rejectCountTotal":8,"admitRate":0.2,"admitCountByCategory":{"crypto-btc":2},"seenCountByCategory":{"crypto-btc":3},"admitRateByCategory":{"crypto-btc":0.6666666667},"rejectCountByReason":{"rejected_category_not_in_hot_cats":5,"rejected_liquidity_below_100":2,"rejected_volume_below_5":1}}}', '2026-05-18T00:00:00Z');
+      VALUES ('market_data_stream_activity', 1, '{"trackedTokenCount":2,"wsEventsReceivedPerSec":7.5,"shardCount":2,"v4AdmissionTelemetry":{"evaluatedTotal":10,"admitCountTotal":2,"rejectCountTotal":8,"admitRate":0.2,"admitCountByCategory":{"crypto-btc":2},"seenCountByCategory":{"crypto-btc":3},"admitRateByCategory":{"crypto-btc":0.6666666667},"rejectCountByReason":{"rejected_category_not_in_hot_cats":5,"rejected_liquidity_below_100":2,"rejected_volume_below_5":1,"rejected_no_orderbook_proxy":0}}}', '2026-05-18T00:00:00Z');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES
         ('algo_decision_latency', 123, '{"p95Ms":123,"p99Ms":456}', '2026-05-18T00:00:00Z'),
@@ -754,6 +754,7 @@ describe("GET /status", () => {
       rejected_category_not_in_hot_cats: 5,
       rejected_liquidity_below_100: 2,
       rejected_volume_below_5: 1,
+      rejected_no_orderbook_proxy: 0,
     });
 
     conn.db.exec(

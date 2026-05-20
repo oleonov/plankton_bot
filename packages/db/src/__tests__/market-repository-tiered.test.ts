@@ -74,13 +74,22 @@ function insertOrder(tokenId: string, status: "pending" | "open" | "filled"): vo
 
 function insertSnapshot(
   tokenId: string,
-  overrides: { liquidity?: number | null; volume24h?: number | null } = {},
+  overrides: {
+    liquidity?: number | null;
+    volume24h?: number | null;
+    bestBid?: number | null;
+    bestAsk?: number | null;
+  } = {},
 ): void {
+  const liquidity = Object.hasOwn(overrides, "liquidity") ? overrides.liquidity : 100;
+  const volume24h = Object.hasOwn(overrides, "volume24h") ? overrides.volume24h : 5;
+  const bestBid = Object.hasOwn(overrides, "bestBid") ? overrides.bestBid : 0.1;
+  const bestAsk = Object.hasOwn(overrides, "bestAsk") ? overrides.bestAsk : 0.2;
   db.prepare(
     `INSERT INTO market_snapshots
        (token_id, best_bid, best_ask, last_price, volume_24h, liquidity, captured_at)
-     VALUES (?,0.1,0.2,0.15,?,?,datetime('now'))`,
-  ).run(tokenId, overrides.volume24h ?? 5, overrides.liquidity ?? 100);
+     VALUES (?,?,?,?,?,?,datetime('now'))`,
+  ).run(tokenId, bestBid, bestAsk, 0.15, volume24h, liquidity);
 }
 
 beforeEach(() => {
@@ -168,7 +177,16 @@ describe("findTrackedForPricingTiered", () => {
     expect(result.discoveryOnly.map((m) => String(m.tokenId))).toEqual(["missing-snapshot"]);
   });
 
-  it("V4 telemetry exposes null-heavy liquidity rejection", () => {
+  it("V4 priority pool admits null-liquidity markets through the orderbook proxy", () => {
+    repo.save(makeMarket("proxy", { slug: "ethereum-orderbook-proxy" }));
+    insertSnapshot("proxy", { liquidity: null, volume24h: null, bestBid: 0.4, bestAsk: 0.45 });
+
+    const result = repo.findTrackedForPricingTiered({ maxTokens: 10 });
+
+    expect(result.entryCandidates.map((m) => String(m.tokenId))).toEqual(["proxy"]);
+  });
+
+  it("V4 telemetry exposes null-liquidity orderbook proxy rejection", () => {
     repo.save(makeMarket("valid", { slug: "ethereum-valid" }));
     insertSnapshot("valid", { liquidity: 100, volume24h: 5 });
     for (let i = 0; i < 5; i++) {
@@ -180,7 +198,7 @@ describe("findTrackedForPricingTiered", () => {
 
     expect(telemetry.evaluatedTotal).toBe(6);
     expect(telemetry.admitCountTotal).toBe(1);
-    expect(telemetry.rejectCountByReason.rejected_liquidity_below_100).toBe(5);
+    expect(telemetry.rejectCountByReason.rejected_no_orderbook_proxy).toBe(5);
     expect(telemetry.admitRate).toBeCloseTo(1 / 6, 6);
   });
 

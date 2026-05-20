@@ -1784,7 +1784,7 @@ describe("LiveMarketDataGateway", () => {
       stream.setTokenIds(["tok-a"]);
       sockets[0]!.emitOpen();
       vi.advanceTimersByTime(10_000);
-      expect(sockets[0]!.sent).toContain("{}");
+      expect(sockets[0]!.sent).toContain("PING");
       vi.advanceTimersByTime(15_000);
       expect(onGapDetected).toHaveBeenCalledWith(
         expect.objectContaining({ reason: "pong-timeout", tokenIds: ["tok-a"] }),
@@ -1795,6 +1795,44 @@ describe("LiveMarketDataGateway", () => {
       vi.advanceTimersByTime(1_100);
 
       expect(sockets).toHaveLength(2);
+
+      stream.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("createMarketPricingStream accepts PONG heartbeat responses", () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: DeferredCloseMarketSocket[] = [];
+      gw = new LiveMarketDataGateway({
+        client,
+        createWebSocket: () => {
+          const socket = new DeferredCloseMarketSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      });
+
+      const onError = vi.fn();
+      const onGapDetected = vi.fn();
+      const stream = gw.createMarketPricingStream({
+        onUpdates: vi.fn(),
+        onError,
+        onGapDetected,
+      });
+
+      stream.setTokenIds(["tok-a"]);
+      sockets[0]!.emitOpen();
+      vi.advanceTimersByTime(10_000);
+      expect(sockets[0]!.sent).toContain("PING");
+      sockets[0]!.emitText("PONG");
+      vi.advanceTimersByTime(15_001);
+
+      expect(onGapDetected).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      expect(sockets).toHaveLength(1);
 
       stream.close();
     } finally {

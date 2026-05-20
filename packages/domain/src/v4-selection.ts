@@ -28,6 +28,7 @@ export const HOT_CATS_40: readonly V4SelectionCategory[] = [
 ];
 
 const HOT_CATS_40_SET = new Set<V4SelectionCategory>(HOT_CATS_40);
+const ORDERBOOK_PROXY_MAX_SPREAD = 0.1;
 
 export interface V4SelectionInput {
   slug: string;
@@ -35,19 +36,28 @@ export interface V4SelectionInput {
   question?: string | null;
   liquidity?: number | null;
   volume24h?: number | null;
+  bestBid?: number | null;
+  bestAsk?: number | null;
   primaryCategory?: V4SelectionCategory | null;
 }
 
 export interface V4SelectionResult {
   admit: boolean;
   category: V4SelectionCategory | null;
-  reason: "admit" | "category_not_hot" | "liquidity_too_low" | "volume24h_too_low";
+  reason:
+    | "admit"
+    | "category_not_hot"
+    | "liquidity_too_low"
+    | "volume24h_too_low"
+    | "missing_data"
+    | "orderbook_proxy_unavailable";
 }
 
 export type V4AdmissionRejectReason =
   | "rejected_category_not_in_hot_cats"
   | "rejected_liquidity_below_100"
   | "rejected_volume_below_5"
+  | "rejected_no_orderbook_proxy"
   | "rejected_missing_data"
   | "rejected_other_combination";
 
@@ -69,13 +79,23 @@ export function evaluateV4Selection(input: V4SelectionInput): V4SelectionResult 
   if (category == null || !HOT_CATS_40_SET.has(category)) {
     return { admit: false, category, reason: "category_not_hot" };
   }
-  if (input.liquidity == null || input.liquidity < 100) {
-    return { admit: false, category, reason: "liquidity_too_low" };
+
+  const hasPopulatedPath =
+    input.liquidity != null &&
+    input.liquidity >= 100 &&
+    input.volume24h != null &&
+    input.volume24h >= 5;
+  if (hasPopulatedPath || hasOrderbookProxy(input.bestBid, input.bestAsk)) {
+    return { admit: true, category, reason: "admit" };
   }
-  if (input.volume24h != null && input.volume24h < 5) {
-    return { admit: false, category, reason: "volume24h_too_low" };
+
+  if (input.liquidity == null) {
+    return { admit: false, category, reason: "orderbook_proxy_unavailable" };
   }
-  return { admit: true, category, reason: "admit" };
+  if (input.liquidity < 100) return { admit: false, category, reason: "liquidity_too_low" };
+  if (input.volume24h == null) return { admit: false, category, reason: "missing_data" };
+  if (input.volume24h < 5) return { admit: false, category, reason: "volume24h_too_low" };
+  return { admit: false, category, reason: "missing_data" };
 }
 
 export function createV4AdmissionTelemetrySnapshot(
@@ -229,9 +249,23 @@ function toTelemetryRejectReason(result: V4SelectionResult): V4AdmissionRejectRe
       return "rejected_liquidity_below_100";
     case "volume24h_too_low":
       return "rejected_volume_below_5";
+    case "orderbook_proxy_unavailable":
+      return "rejected_no_orderbook_proxy";
+    case "missing_data":
+      return "rejected_missing_data";
     case "admit":
       return "rejected_other_combination";
   }
+}
+
+function hasOrderbookProxy(
+  bestBid: number | null | undefined,
+  bestAsk: number | null | undefined,
+): boolean {
+  if (bestBid == null || bestAsk == null) return false;
+  if (!Number.isFinite(bestBid) || !Number.isFinite(bestAsk)) return false;
+  const spread = bestAsk - bestBid;
+  return spread >= 0 && spread < ORDERBOOK_PROXY_MAX_SPREAD;
 }
 
 function zeroCategoryCounts(): Record<V4SelectionCategory, number> {
@@ -246,6 +280,7 @@ function zeroRejectReasonCounts(): Record<V4AdmissionRejectReason, number> {
     rejected_category_not_in_hot_cats: 0,
     rejected_liquidity_below_100: 0,
     rejected_volume_below_5: 0,
+    rejected_no_orderbook_proxy: 0,
     rejected_missing_data: 0,
     rejected_other_combination: 0,
   };

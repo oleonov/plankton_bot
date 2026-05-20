@@ -304,6 +304,7 @@ export const handlers = [
         rejected_category_not_in_hot_cats: 900,
         rejected_liquidity_below_100: 480,
         rejected_volume_below_5: 200,
+        rejected_no_orderbook_proxy: 0,
       },
       v4_admit_rate: 0.21,
       v4_seen_count_by_category: { "crypto-btc": 240, geopolitics: 130, weather: 120 },

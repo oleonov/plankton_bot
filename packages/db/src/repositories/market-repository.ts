@@ -47,6 +47,8 @@ const V4_CATEGORY_PRIORITY_BIAS: Record<string, number> = {
 type SelectionFeatures = {
   liquidity: number | null;
   volume24h: number | null;
+  bestBid: number | null;
+  bestAsk: number | null;
 };
 
 type PricingCandidate = {
@@ -270,6 +272,8 @@ export class SqliteMarketRepository implements MarketRepository {
         `SELECT m.*,
                 latest.liquidity AS latest_liquidity,
                 latest.volume_24h AS latest_volume_24h,
+                latest.best_bid AS latest_best_bid,
+                latest.best_ask AS latest_best_ask,
                 CASE WHEN (
                   EXISTS (SELECT 1 FROM positions
                           WHERE positions.token_id = m.token_id
@@ -320,6 +324,8 @@ export class SqliteMarketRepository implements MarketRepository {
           features: {
             liquidity: readNullableNumber(row.latest_liquidity),
             volume24h: readNullableNumber(row.latest_volume_24h),
+            bestBid: readNullableNumber(row.latest_best_bid),
+            bestAsk: readNullableNumber(row.latest_best_ask),
           },
         });
       }
@@ -352,6 +358,8 @@ export class SqliteMarketRepository implements MarketRepository {
         question: candidate.market.question,
         liquidity: candidate.features.liquidity,
         volume24h: candidate.features.volume24h,
+        bestBid: candidate.features.bestBid,
+        bestAsk: candidate.features.bestAsk,
       });
       v4AdmissionTelemetry = recordV4AdmissionTelemetry(v4AdmissionTelemetry, result);
       if (result.admit) admittedCandidates.push(candidate);
@@ -482,6 +490,8 @@ function planktonPriorityScore(market: Market, features: SelectionFeatures, nowM
     question: market.question,
     liquidity: features.liquidity,
     volume24h: features.volume24h,
+    bestBid: features.bestBid,
+    bestAsk: features.bestAsk,
   });
   const horizonDays = horizonDaysFromNow(market.endDate, nowMs);
   let priority = 0;

@@ -9,7 +9,7 @@ const USER_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
 const PING_INTERVAL_MS = 10_000;
 const PONG_TIMEOUT_MS = 15_000;
 const RECONNECT_DELAY_MS = 2_000;
-const HEARTBEAT_PING = "{}";
+const HEARTBEAT_PING = "PING";
 const HEARTBEAT_PONG = "PONG";
 
 export interface UserEventStreamAuth {

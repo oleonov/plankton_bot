@@ -27,7 +27,7 @@ const METRICS_WINDOW_MS = 10 * 60 * 1000;
 // the window doesn't rotate (still <10 min) so samples accumulate into tens of
 // MB before rotation. The cap keeps p50/p95 accuracy while bounding memory.
 const MAX_LATENCY_SAMPLES_PER_WINDOW = 10_000;
-const HEARTBEAT_PING = "{}";
+const HEARTBEAT_PING = "PING";
 const HEARTBEAT_PONG = "PONG";
 const PING_INTERVAL_MS = 10_000;
 const PONG_TIMEOUT_MS = 15_000;
