@@ -10,6 +10,7 @@ import type {
   TokenId,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import type { CooldownRegistry } from "./cooldown-registry.js";
 
 const PRICE_SCALE = 10_000;
 const BUY_COOLDOWN_MS = [30 * 60_000, 60 * 60_000, 24 * 60 * 60_000] as const;
@@ -29,6 +30,7 @@ export interface SamePriceCooldownModuleDeps {
   orderRepo: OrderRepository;
   cooldownRepo: OrderPriceCooldownRepository;
   log: Logger;
+  cooldownRegistry?: CooldownRegistry | undefined;
 }
 
 export interface SamePriceCooldownPlacementArgs {
@@ -47,6 +49,7 @@ export class SamePriceCooldownModule implements RuntimeModule {
   }
 
   async start(): Promise<void> {
+    this.hydrateRegistry();
     this.unsubs = [
       this.deps.bus.subscribe("OrderCancelled", (event) => this.handleOrderCancelled(event)),
       this.deps.bus.subscribe("FillReceived", (event) => this.handleFillReceived(event)),
@@ -64,8 +67,41 @@ export class SamePriceCooldownModule implements RuntimeModule {
     return { ok: true, detail: "running" };
   }
 
+  private hydrateRegistry(): void {
+    const registry = this.deps.cooldownRegistry;
+    if (!registry) return;
+    const nowMs = Date.now();
+    for (const row of this.deps.cooldownRepo.findAll()) {
+      if (row.cooldownUntilTsUtc <= nowMs) continue;
+      registry.hydrate(
+        {
+          tokenId: row.tokenId,
+          side: row.side,
+          priceX10000: row.priceX10000,
+          staleCancelCount: row.staleCancelCount,
+          cooldownUntilTsUtc: row.cooldownUntilTsUtc,
+        },
+        row.lastEventTsUtc,
+      );
+    }
+  }
+
   canPlaceOrder(args: SamePriceCooldownPlacementArgs): SamePriceCooldownPlacementDecision {
     const priceX10000 = priceToX10000(args.price);
+    const cached = this.deps.cooldownRegistry?.get(
+      args.tokenId,
+      args.side,
+      priceX10000,
+      args.nowMs,
+    );
+    if (cached) {
+      return {
+        allowed: false,
+        reason: SAME_PRICE_COOLDOWN_REASON,
+        staleCancelCount: cached.staleCancelCount,
+        cooldownUntilTsUtc: cached.cooldownUntilTsUtc,
+      };
+    }
     const row = this.deps.cooldownRepo.get(args.tokenId, args.side, priceX10000);
     if (!row || args.nowMs >= row.cooldownUntilTsUtc) {
       return {
@@ -75,6 +111,16 @@ export class SamePriceCooldownModule implements RuntimeModule {
         cooldownUntilTsUtc: row?.cooldownUntilTsUtc ?? null,
       };
     }
+    this.deps.cooldownRegistry?.upsert(
+      {
+        tokenId: row.tokenId,
+        side: row.side,
+        priceX10000: row.priceX10000,
+        staleCancelCount: row.staleCancelCount,
+        cooldownUntilTsUtc: row.cooldownUntilTsUtc,
+      },
+      args.nowMs,
+    );
 
     return {
       allowed: false,
@@ -85,6 +131,7 @@ export class SamePriceCooldownModule implements RuntimeModule {
   }
 
   resetToken(tokenId: TokenId): number {
+    this.deps.cooldownRegistry?.deleteByTokenId(tokenId);
     return this.deps.cooldownRepo.deleteByTokenId(tokenId);
   }
 
@@ -131,6 +178,16 @@ export class SamePriceCooldownModule implements RuntimeModule {
     };
 
     this.deps.cooldownRepo.upsert(next);
+    this.deps.cooldownRegistry?.upsert(
+      {
+        tokenId: next.tokenId,
+        side: next.side,
+        priceX10000: next.priceX10000,
+        staleCancelCount: next.staleCancelCount,
+        cooldownUntilTsUtc: next.cooldownUntilTsUtc,
+      },
+      nowMs,
+    );
     this.log.info(
       {
         orderId: String(order.orderId),
@@ -146,16 +203,19 @@ export class SamePriceCooldownModule implements RuntimeModule {
   }
 
   private async handleFillReceived(event: RuntimeEventMap["FillReceived"]): Promise<void> {
+    this.deps.cooldownRegistry?.delete(event.tokenId, event.side, priceToX10000(event.price));
     this.deps.cooldownRepo.delete(event.tokenId, event.side, priceToX10000(event.price));
 
     const order = this.deps.orderRepo.findById(event.orderId);
     if (order && fillResetNeedsOrderPrice(event, order)) {
+      this.deps.cooldownRegistry?.delete(order.tokenId, order.side, priceToX10000(order.price));
       this.deps.cooldownRepo.delete(order.tokenId, order.side, priceToX10000(order.price));
     }
   }
 
   private async handlePositionUpdated(event: RuntimeEventMap["PositionUpdated"]): Promise<void> {
     if (!isClosedOrFlatPosition(event.position)) return;
+    this.deps.cooldownRegistry?.deleteByTokenId(event.position.tokenId);
     const deleted = this.deps.cooldownRepo.deleteByTokenId(event.position.tokenId);
     if (deleted > 0) {
       this.log.info(
@@ -167,8 +227,10 @@ export class SamePriceCooldownModule implements RuntimeModule {
 
   private async handleMarketResolved(event: RuntimeEventMap["MarketResolved"]): Promise<void> {
     let deleted = 0;
-    for (const tokenId of event.tokenIds)
+    for (const tokenId of event.tokenIds) {
+      this.deps.cooldownRegistry?.deleteByTokenId(tokenId);
       deleted += this.deps.cooldownRepo.deleteByTokenId(tokenId);
+    }
     if (deleted > 0) {
       this.log.info(
         { conditionId: event.conditionId, tokenCount: event.tokenIds.length, deleted },

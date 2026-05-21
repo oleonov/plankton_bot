@@ -5,6 +5,15 @@ export const STAGE_TIMER_NAMES = [
   "coalescing_flush",
   "latency_summary",
   "diagnostics_write",
+  "metrics_flush_total",
+  "metrics_flush_sqlite_writes",
+  "metrics_flush_snapshot_serialize",
+  "risk_signal_approval",
+  "signal_to_order_bridge",
+  "worker_non_update_events",
+  "discovery_poll_publish",
+  "signal_path_aggregate",
+  "cooldown_registry_sweep",
 ] as const;
 
 export type StageTimerName = (typeof STAGE_TIMER_NAMES)[number];
@@ -71,6 +80,15 @@ const stageTimers: Record<StageTimerName, StageTimerReservoir> = {
   coalescing_flush: new StageTimerReservoir(),
   latency_summary: new StageTimerReservoir(),
   diagnostics_write: new StageTimerReservoir(),
+  metrics_flush_total: new StageTimerReservoir(),
+  metrics_flush_sqlite_writes: new StageTimerReservoir(),
+  metrics_flush_snapshot_serialize: new StageTimerReservoir(),
+  risk_signal_approval: new StageTimerReservoir(),
+  signal_to_order_bridge: new StageTimerReservoir(),
+  worker_non_update_events: new StageTimerReservoir(),
+  discovery_poll_publish: new StageTimerReservoir(),
+  signal_path_aggregate: new StageTimerReservoir(),
+  cooldown_registry_sweep: new StageTimerReservoir(),
 };
 
 export function recordStageDuration(stage: StageTimerName, durationMs: number): void {
@@ -85,6 +103,15 @@ export function snapshotStageTimers(): StageTimerSnapshotMap {
     coalescing_flush: stageTimers.coalescing_flush.snapshot(),
     latency_summary: stageTimers.latency_summary.snapshot(),
     diagnostics_write: stageTimers.diagnostics_write.snapshot(),
+    metrics_flush_total: stageTimers.metrics_flush_total.snapshot(),
+    metrics_flush_sqlite_writes: stageTimers.metrics_flush_sqlite_writes.snapshot(),
+    metrics_flush_snapshot_serialize: stageTimers.metrics_flush_snapshot_serialize.snapshot(),
+    risk_signal_approval: stageTimers.risk_signal_approval.snapshot(),
+    signal_to_order_bridge: stageTimers.signal_to_order_bridge.snapshot(),
+    worker_non_update_events: stageTimers.worker_non_update_events.snapshot(),
+    discovery_poll_publish: stageTimers.discovery_poll_publish.snapshot(),
+    signal_path_aggregate: stageTimers.signal_path_aggregate.snapshot(),
+    cooldown_registry_sweep: stageTimers.cooldown_registry_sweep.snapshot(),
   };
 }
 

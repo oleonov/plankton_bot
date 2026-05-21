@@ -77,7 +77,13 @@ export function collectStreamUpdates(
           updates.push(update);
         } else {
           suppressedTradingNoopCount++;
-          incrementSuppressionReason(suppressedTradingNoopByReason, current, next);
+          incrementSuppressionReason(
+            suppressedTradingNoopByReason,
+            eventType,
+            current,
+            next,
+            update,
+          );
         }
         if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
         noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
@@ -143,7 +149,7 @@ export function collectStreamUpdates(
         updates.push(update);
       } else {
         suppressedTradingNoopCount++;
-        incrementSuppressionReason(suppressedTradingNoopByReason, current, next);
+        incrementSuppressionReason(suppressedTradingNoopByReason, eventType, current, next, update);
       }
       if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       bookEventCount++;
@@ -165,7 +171,7 @@ export function collectStreamUpdates(
         updates.push(update);
       } else {
         suppressedTradingNoopCount++;
-        incrementSuppressionReason(suppressedTradingNoopByReason, current, next);
+        incrementSuppressionReason(suppressedTradingNoopByReason, eventType, current, next, update);
       }
       if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
@@ -186,7 +192,7 @@ export function collectStreamUpdates(
         updates.push(update);
       } else {
         suppressedTradingNoopCount++;
-        incrementSuppressionReason(suppressedTradingNoopByReason, current, next);
+        incrementSuppressionReason(suppressedTradingNoopByReason, eventType, current, next, update);
       }
       if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
@@ -221,7 +227,7 @@ export function collectStreamUpdates(
         updates.push(update);
       } else {
         suppressedTradingNoopCount++;
-        incrementSuppressionReason(suppressedTradingNoopByReason, current, next);
+        incrementSuppressionReason(suppressedTradingNoopByReason, eventType, current, next, update);
       }
       if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
@@ -281,29 +287,42 @@ function isNoopTopOfBookUpdate(
 
 function createEmptySuppressionCounts(): MutableSuppressionCounts {
   return {
-    topOfBook: 0,
-    acceptingOrdersOrBook: 0,
-    minSizeOrSource: 0,
+    topOfBookOnly: 0,
+    bookOnly: 0,
+    lastTradeOnly: 0,
+    tickSizeOnly: 0,
+    mixedNonCritical: 0,
   };
 }
 
 function incrementSuppressionReason(
   counts: MutableSuppressionCounts,
+  eventType: string,
   current: MarketPricingSnapshot,
   next: MarketPricingSnapshot,
+  update: MarketPricingStreamUpdate,
 ): void {
-  if (current.bestBid === next.bestBid && current.bestAsk === next.bestAsk) {
-    counts.topOfBook++;
-    return;
-  }
-  if (
-    current.acceptingOrders === next.acceptingOrders &&
-    current.enableOrderBook === next.enableOrderBook
-  ) {
-    counts.acceptingOrdersOrBook++;
-    return;
-  }
-  counts.minSizeOrSource++;
+  counts[classifySuppressedTradingNoopReason(eventType, current, next, update)]++;
+}
+
+export function classifySuppressedTradingNoopReason(
+  eventType: string,
+  current: MarketPricingSnapshot,
+  next: MarketPricingSnapshot,
+  update: MarketPricingStreamUpdate,
+): keyof TradingNoopSuppressionCounts {
+  if (update.tickSize != null || eventType === "tick_size_change") return "tickSizeOnly";
+  if (update.book != null || eventType === "book") return "bookOnly";
+
+  const topOfBookChanged = current.bestBid !== next.bestBid || current.bestAsk !== next.bestAsk;
+  const lastTradeChanged =
+    current.lastTradePrice !== next.lastTradePrice || current.lastTradeAt !== next.lastTradeAt;
+  const topOfBookEvent = eventType === "best_bid_ask" || eventType === "price_change";
+
+  if (lastTradeChanged && (topOfBookChanged || topOfBookEvent)) return "mixedNonCritical";
+  if (lastTradeChanged || eventType === "last_trade_price") return "lastTradeOnly";
+  if (topOfBookChanged || topOfBookEvent) return "topOfBookOnly";
+  return "mixedNonCritical";
 }
 
 function getCurrentPricing(

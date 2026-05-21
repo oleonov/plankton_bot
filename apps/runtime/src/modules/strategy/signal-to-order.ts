@@ -28,10 +28,16 @@ import type {
   TokenId,
   Order,
 } from "@krabs/domain";
-import { canPlaceBuyOrderForMarket, createCommandId, isAlive } from "@krabs/domain";
+import {
+  canPlaceBuyOrderForMarket,
+  createCommandId,
+  isAlive,
+  recordStageDuration,
+} from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
 import { buildClientOrderId } from "@krabs/domain/node";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
@@ -53,6 +59,7 @@ import {
   type CandidateBookResolution,
 } from "./candidate-book-cache.js";
 import { isExecutableOrderSize, resolveEffectiveMinOrderSize } from "../../min-order-size.js";
+import type { SignalPathTelemetry } from "./signal-path-telemetry.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 100;
 const MIN_SIZE_EPSILON = 1e-9;
@@ -94,6 +101,7 @@ export interface SignalToOrderBridgeDeps {
   profileId?: ProfileId;
   /** Runtime observability for pricing-mode and opportunistic-taker decisions. */
   runtimeMetrics?: RuntimeMetricWriter | undefined;
+  signalPathTelemetry?: SignalPathTelemetry | undefined;
   /**
    * Defense-in-depth BUY-side guard. Mirrors the check that
    * RiskInventoryModule.handleSignal already runs upstream, so a stale market
@@ -195,297 +203,127 @@ export class SignalToOrderBridge {
   }
 
   private async handleApproved(payload: RuntimeEventMap["SignalApproved"]): Promise<void> {
-    const { signal, market: embeddedMarket } = payload;
-    // Snapshot the policy once so the full approval flow uses a consistent view,
-    // even if the provider hot-reloads mid-decision.
-    const policy = this.getPolicy();
+    const bridgeStartMs = performance.now();
+    try {
+      const { signal, market: embeddedMarket } = payload;
+      // Snapshot the policy once so the full approval flow uses a consistent view,
+      // even if the provider hot-reloads mid-decision.
+      const policy = this.getPolicy();
 
-    // Primary source: the NormalizedMarket snapshot captured at signal-generation
-    // time in algo-decision-module. This is the same snapshot the pre-entry
-    // gate's `isAlive` already accepted, so re-running `isAlive` here cannot
-    // flip state from "healthy" to "no_bid" due to a book transition between
-    // `SignalProduced` and the bridge build. `marketCache.get` stays as a
-    // defensive fallback for events that may be in-flight during rollout of
-    // this change; it can be removed once all in-flight events drain.
-    const baseMarket = embeddedMarket ?? this.marketCache.get(String(signal.tokenId));
+      // Primary source: the NormalizedMarket snapshot captured at signal-generation
+      // time in algo-decision-module. This is the same snapshot the pre-entry
+      // gate's `isAlive` already accepted, so re-running `isAlive` here cannot
+      // flip state from "healthy" to "no_bid" due to a book transition between
+      // `SignalProduced` and the bridge build. `marketCache.get` stays as a
+      // defensive fallback for events that may be in-flight during rollout of
+      // this change; it can be removed once all in-flight events drain.
+      const baseMarket = embeddedMarket ?? this.marketCache.get(String(signal.tokenId));
 
-    if (!baseMarket) {
-      this.log.warn(
-        { signalId: signal.signalId, tokenId: signal.tokenId },
-        "approved signal has no cached market — cannot build order command",
-      );
-      await this.publishConversionSkipped(signal, "market-cache-miss", ["market-cache-miss"], {
-        cacheStatus: "disabled",
-      });
-      return;
-    }
-
-    // BUY-side admission guard (defense-in-depth). RiskInventoryModule already
-    // ran the same check upstream, but the bridge sees the freshest snapshot
-    // (post candidate-book merge) and the resolution tracker may have flipped
-    // a condition to resolved between approval and conversion.
-    //
-    // Prefer the cached snapshot here: NormalizedMarketUpdated may have arrived
-    // after SignalApproved and flipped `active`/`tradable`/`endDate` — the
-    // embedded snapshot is frozen at signal-generation time and would miss it.
-    // Fall back to embedded if no cache entry exists yet.
-    if (signal.side === "buy") {
-      const cachedMarket = this.marketCache.get(String(signal.tokenId));
-      const admissionMarket = cachedMarket ?? baseMarket;
-      const cacheStatus = cachedMarket ? "fresh" : "embedded";
-      const buyBlock = this.evaluateBuyAdmission(admissionMarket);
-      if (buyBlock) {
-        this.log.info(
-          {
-            signalId: signal.signalId,
-            tokenId: String(signal.tokenId),
-            reason: buyBlock,
-            cacheStatus,
-          },
-          "approved BUY skipped — market not eligible for placement",
+      if (!baseMarket) {
+        this.log.warn(
+          { signalId: signal.signalId, tokenId: signal.tokenId },
+          "approved signal has no cached market — cannot build order command",
         );
-        await this.publishConversionSkipped(signal, "marketability", [buyBlock], {
-          conditionId: admissionMarket.conditionId,
-          active: admissionMarket.active,
-          tradable: admissionMarket.tradable,
-          endDate: admissionMarket.endDate,
-          cacheStatus,
+        await this.publishConversionSkipped(signal, "market-cache-miss", ["market-cache-miss"], {
+          cacheStatus: "disabled",
         });
         return;
       }
-    }
 
-    // Hard-liveness on the embedded snapshot. Same function, same semantics as
-    // algo-decision-module.ts:389 — eliminates the residual tail where the
-    // book transitioned to `no_bid` in the gap between pre-entry and bridge.
-    const embeddedLiveness = isAlive({
-      acceptingOrders: baseMarket.acceptingOrders,
-      enableOrderBook: baseMarket.enableOrderBook,
-      bestBid: baseMarket.bestBid,
-      bestAsk: baseMarket.bestAsk,
-    });
-    if (!embeddedLiveness.healthy) {
-      const onlyExpectedFlags = embeddedLiveness.reasons.every(
-        (r) => r === "not_accepting_orders" || r === "order_book_disabled",
-      );
-      const diag = {
-        signalId: signal.signalId,
-        tokenId: signal.tokenId,
-        reasons: embeddedLiveness.reasons,
-        cacheStatus: "embedded",
-      };
-      const msg = "approved signal skipped — market not live for order placement";
-      if (onlyExpectedFlags) this.log.debug(diag, msg);
-      else this.log.warn(diag, msg);
-      await this.publishConversionSkipped(signal, "hard-liveness", embeddedLiveness.reasons, {
+      // BUY-side admission guard (defense-in-depth). RiskInventoryModule already
+      // ran the same check upstream, but the bridge sees the freshest snapshot
+      // (post candidate-book merge) and the resolution tracker may have flipped
+      // a condition to resolved between approval and conversion.
+      //
+      // Prefer the cached snapshot here: NormalizedMarketUpdated may have arrived
+      // after SignalApproved and flipped `active`/`tradable`/`endDate` — the
+      // embedded snapshot is frozen at signal-generation time and would miss it.
+      // Fall back to embedded if no cache entry exists yet.
+      if (signal.side === "buy") {
+        const cachedMarket = this.marketCache.get(String(signal.tokenId));
+        const admissionMarket = cachedMarket ?? baseMarket;
+        const cacheStatus = cachedMarket ? "fresh" : "embedded";
+        const buyBlock = this.evaluateBuyAdmission(admissionMarket);
+        if (buyBlock) {
+          this.log.info(
+            {
+              signalId: signal.signalId,
+              tokenId: String(signal.tokenId),
+              reason: buyBlock,
+              cacheStatus,
+            },
+            "approved BUY skipped — market not eligible for placement",
+          );
+          await this.publishConversionSkipped(signal, "marketability", [buyBlock], {
+            conditionId: admissionMarket.conditionId,
+            active: admissionMarket.active,
+            tradable: admissionMarket.tradable,
+            endDate: admissionMarket.endDate,
+            cacheStatus,
+          });
+          return;
+        }
+      }
+
+      // Hard-liveness on the embedded snapshot. Same function, same semantics as
+      // algo-decision-module.ts:389 — eliminates the residual tail where the
+      // book transitioned to `no_bid` in the gap between pre-entry and bridge.
+      const embeddedLiveness = isAlive({
         acceptingOrders: baseMarket.acceptingOrders,
         enableOrderBook: baseMarket.enableOrderBook,
         bestBid: baseMarket.bestBid,
         bestAsk: baseMarket.bestAsk,
-        cacheStatus: "embedded",
       });
-      return;
-    }
-
-    // Pricing: optionally fold in a fresher candidate book on top of the
-    // embedded base so the order price reflects the newest observed top of
-    // book. If the fresh book is unavailable or disabled, fall back to the
-    // embedded snapshot's bestBid/bestAsk.
-    const pricing = await this.resolvePricingMarket(signal, baseMarket);
-    const market = pricing.market;
-
-    const executionTerms = this.resolveExecutionTerms(signal, market, policy);
-    const canary = this.buildDeadSideCanary(signal, market, policy);
-
-    if (executionTerms.kind === "unavailable") {
-      this.log.warn(
-        {
+      if (!embeddedLiveness.healthy) {
+        const onlyExpectedFlags = embeddedLiveness.reasons.every(
+          (r) => r === "not_accepting_orders" || r === "order_book_disabled",
+        );
+        const diag = {
           signalId: signal.signalId,
           tokenId: signal.tokenId,
-          side: signal.side,
-          bestBid: market.bestBid,
-          bestAsk: market.bestAsk,
-          cacheStatus: pricing.cacheStatus,
-        },
-        "approved signal skipped — no bestBid/bestAsk for execution price",
-      );
-      await this.publishConversionSkipped(
-        signal,
-        "execution-terms",
-        ["execution-price-unavailable"],
-        { cacheStatus: pricing.cacheStatus },
-      );
-      this.writeObservation({
-        signal,
-        clientOrderId: null,
-        market,
-        policy,
-        executionTerms,
-        canary,
-        skippedReason: "execution-price-unavailable",
-      });
-      return;
-    }
-    if (executionTerms.kind === "invalid") {
-      this.log.warn(
-        {
-          signalId: signal.signalId,
-          tokenId: signal.tokenId,
-          side: signal.side,
-          price: executionTerms.price,
-          tickSize: executionTerms.tickSize,
-          validationReason: executionTerms.validationReason,
-          cacheStatus: pricing.cacheStatus,
-        },
-        "approved signal skipped — invalid execution price",
-      );
-      await this.publishConversionSkipped(signal, "execution-terms", ["execution-price-invalid"], {
-        cacheStatus: pricing.cacheStatus,
-        price: executionTerms.price,
-        tickSize: executionTerms.tickSize,
-        minPrice: executionTerms.minPrice,
-        maxPrice: executionTerms.maxPrice,
-        validationReason: executionTerms.validationReason,
-      });
-      this.writeObservation({
-        signal,
-        clientOrderId: null,
-        market,
-        policy,
-        executionTerms,
-        canary,
-        skippedReason: "execution-price-invalid",
-      });
-      return;
-    }
-    if (executionTerms.kind === "skip-wide-spread" || executionTerms.kind === "skip-one-sided") {
-      const reason =
-        executionTerms.kind === "skip-wide-spread" ? "spread-above-cap" : "one-sided-book";
-      this.log.info(
-        {
-          signalId: signal.signalId,
-          tokenId: signal.tokenId,
-          reason,
-          pricingMode: policy.pricing.mode,
-          ...executionTerms.diagnostics,
-          cacheStatus: pricing.cacheStatus,
-        },
-        "approved signal skipped — bounded-midpoint pricing guardrail",
-      );
-      await this.publishConversionSkipped(signal, "execution-terms", [reason], {
-        cacheStatus: pricing.cacheStatus,
-        pricingMode: policy.pricing.mode,
-        ...executionTerms.diagnostics,
-      });
-      this.writeObservation({
-        signal,
-        clientOrderId: null,
-        market,
-        policy,
-        executionTerms,
-        canary,
-        skippedReason: reason,
-      });
-      return;
-    }
+          reasons: embeddedLiveness.reasons,
+          cacheStatus: "embedded",
+        };
+        const msg = "approved signal skipped — market not live for order placement";
+        if (onlyExpectedFlags) this.log.debug(diag, msg);
+        else this.log.warn(diag, msg);
+        await this.publishConversionSkipped(signal, "hard-liveness", embeddedLiveness.reasons, {
+          acceptingOrders: baseMarket.acceptingOrders,
+          enableOrderBook: baseMarket.enableOrderBook,
+          bestBid: baseMarket.bestBid,
+          bestAsk: baseMarket.bestAsk,
+          cacheStatus: "embedded",
+        });
+        return;
+      }
 
-    if (signal.side === "buy" && executionTerms.price > policy.entryPriceCeiling) {
-      this.log.info(
-        {
-          signalId: signal.signalId,
-          tokenId: signal.tokenId,
-          price: executionTerms.price,
-          ceiling: policy.entryPriceCeiling,
-          cacheStatus: pricing.cacheStatus,
-        },
-        "approved signal skipped — BUY price above entry ceiling",
-      );
-      await this.publishConversionSkipped(
-        signal,
-        "execution-terms",
-        ["price-above-entry-ceiling"],
-        {
-          cacheStatus: pricing.cacheStatus,
-          price: executionTerms.price,
-          ceiling: policy.entryPriceCeiling,
-        },
-      );
-      this.writeObservation({
-        signal,
-        clientOrderId: null,
-        market,
-        policy,
-        executionTerms,
-        canary,
-        skippedReason: "price-above-entry-ceiling",
-      });
-      return;
-    }
+      // Pricing: optionally fold in a fresher candidate book on top of the
+      // embedded base so the order price reflects the newest observed top of
+      // book. If the fresh book is unavailable or disabled, fall back to the
+      // embedded snapshot's bestBid/bestAsk.
+      const pricing = await this.resolvePricingMarket(signal, baseMarket);
+      const market = pricing.market;
 
-    const nowMs = this.now();
+      const executionTerms = this.resolveExecutionTerms(signal, market, policy);
+      const canary = this.buildDeadSideCanary(signal, market, policy);
 
-    if (
-      signal.side === "sell" &&
-      executionTerms.kind === "ok" &&
-      shouldSkipSellBelowSignalFloor(
-        signal.suggestedPrice,
-        executionTerms.price,
-        policy.pricing.minExitPriceSignalRatio,
-      )
-    ) {
-      const floor = signal.suggestedPrice * policy.pricing.minExitPriceSignalRatio;
-      this.log.info(
-        {
-          signalId: signal.signalId,
-          tokenId: signal.tokenId,
-          signalPrice: signal.suggestedPrice,
-          executionPrice: executionTerms.price,
-          minRatio: policy.pricing.minExitPriceSignalRatio,
-          floor,
-          cacheStatus: pricing.cacheStatus,
-        },
-        "approved SELL skipped — execution price below signal-distance floor",
-      );
-      await this.publishConversionSkipped(
-        signal,
-        "execution-terms",
-        ["sell-price-below-signal-floor"],
-        {
-          cacheStatus: pricing.cacheStatus,
-          signalPrice: signal.suggestedPrice,
-          executionPrice: executionTerms.price,
-          minRatio: policy.pricing.minExitPriceSignalRatio,
-          floor,
-        },
-      );
-      this.writeObservation({
-        signal,
-        clientOrderId: null,
-        market,
-        policy,
-        executionTerms,
-        canary,
-        skippedReason: "sell-price-below-signal-floor",
-      });
-      return;
-    }
-
-    if (canary) {
-      const diagnostics = {
-        ...canary,
-        cacheStatus: pricing.cacheStatus,
-        price: executionTerms.price,
-      };
-      if (policy.deadSideGuard.mode === "enforce" && canary.enforceHit) {
-        this.log.info(
-          { signalId: signal.signalId, tokenId: signal.tokenId, ...diagnostics },
-          "approved signal skipped — BUY on dead side near endDate",
+      if (executionTerms.kind === "unavailable") {
+        this.log.warn(
+          {
+            signalId: signal.signalId,
+            tokenId: signal.tokenId,
+            side: signal.side,
+            bestBid: market.bestBid,
+            bestAsk: market.bestAsk,
+            cacheStatus: pricing.cacheStatus,
+          },
+          "approved signal skipped — no bestBid/bestAsk for execution price",
         );
         await this.publishConversionSkipped(
           signal,
           "execution-terms",
-          ["dead-side-near-end"],
-          diagnostics,
+          ["execution-price-unavailable"],
+          { cacheStatus: pricing.cacheStatus },
         );
         this.writeObservation({
           signal,
@@ -494,116 +332,65 @@ export class SignalToOrderBridge {
           policy,
           executionTerms,
           canary,
-          skippedReason: "dead-side-near-end",
+          skippedReason: "execution-price-unavailable",
         });
         return;
       }
-      // observe mode, or enforce mode but outside configured X: emit the shadow
-      // canary marker so metrics can choose the enforcement X post-hoc. Covers
-      // *every* BUY with bestAsk ≤ askCeiling regardless of timeToEndMs bucket.
-      // Gated by policy.telemetry.deadSideCanary — enforcement always runs above.
-      if (policy.telemetry.deadSideCanary) {
-        this.log.info(
-          { signalId: signal.signalId, tokenId: signal.tokenId, ...diagnostics },
-          "dead-side-near-end canary observation",
+      if (executionTerms.kind === "invalid") {
+        this.log.warn(
+          {
+            signalId: signal.signalId,
+            tokenId: signal.tokenId,
+            side: signal.side,
+            price: executionTerms.price,
+            tickSize: executionTerms.tickSize,
+            validationReason: executionTerms.validationReason,
+            cacheStatus: pricing.cacheStatus,
+          },
+          "approved signal skipped — invalid execution price",
         );
+        await this.publishConversionSkipped(
+          signal,
+          "execution-terms",
+          ["execution-price-invalid"],
+          {
+            cacheStatus: pricing.cacheStatus,
+            price: executionTerms.price,
+            tickSize: executionTerms.tickSize,
+            minPrice: executionTerms.minPrice,
+            maxPrice: executionTerms.maxPrice,
+            validationReason: executionTerms.validationReason,
+          },
+        );
+        this.writeObservation({
+          signal,
+          clientOrderId: null,
+          market,
+          policy,
+          executionTerms,
+          canary,
+          skippedReason: "execution-price-invalid",
+        });
+        return;
       }
-    }
-
-    const orderSize = resolveOrderSize(signal, executionTerms.price);
-    const effectiveMinOrderSize = resolveEffectiveMinOrderSize(market.minOrderSize);
-    if (!isExecutableOrderSize(orderSize, market.minOrderSize)) {
-      this.log.info(
-        {
-          signalId: signal.signalId,
-          tokenId: signal.tokenId,
-          side: signal.side,
-          orderSize,
-          minOrderSize: market.minOrderSize ?? null,
-          effectiveMinOrderSize,
-          cacheStatus: pricing.cacheStatus,
-        },
-        "approved signal skipped — order size below exchange minimum",
-      );
-      await this.publishConversionSkipped(signal, "execution-terms", ["order-size-below-minimum"], {
-        cacheStatus: pricing.cacheStatus,
-        orderSize,
-        minOrderSize: market.minOrderSize ?? null,
-        effectiveMinOrderSize,
-      });
-      this.writeObservation({
-        signal,
-        clientOrderId: null,
-        market,
-        policy,
-        executionTerms,
-        canary,
-        skippedReason: "order-size-below-minimum",
-      });
-      return;
-    }
-
-    const duplicateSell = this.findSamePriceOpenSellOrder(
-      signal.tokenId,
-      signal.side,
-      executionTerms.price,
-      market.tickSize,
-      policy,
-    );
-    if (duplicateSell) {
-      this.log.debug(
-        {
-          signalId: signal.signalId,
-          tokenId: signal.tokenId,
-          existingOrderId: duplicateSell.orderId,
-          existingPrice: duplicateSell.price,
-          executionPrice: executionTerms.price,
-          cacheStatus: pricing.cacheStatus,
-        },
-        "approved SELL skipped — acceptable-price sell order already open",
-      );
-      await this.publishConversionSkipped(
-        signal,
-        "execution-terms",
-        ["sell-order-acceptable-price-already-open"],
-        {
-          cacheStatus: pricing.cacheStatus,
-          existingOrderId: String(duplicateSell.orderId),
-          existingPrice: duplicateSell.price,
-          executionPrice: executionTerms.price,
-        },
-      );
-      this.writeObservation({
-        signal,
-        clientOrderId: null,
-        market,
-        policy,
-        executionTerms,
-        canary,
-        skippedReason: "sell-order-acceptable-price-already-open",
-      });
-      return;
-    }
-
-    if (signal.side === "sell" && this.deps.orderLifetime) {
-      const placementDecision = this.deps.orderLifetime.canPlaceExitOrder(signal.tokenId, nowMs);
-      if (!placementDecision.allowed) {
-        const reason = placementDecision.reason ?? "order-lifetime-placement-blocked";
+      if (executionTerms.kind === "skip-wide-spread" || executionTerms.kind === "skip-one-sided") {
+        const reason =
+          executionTerms.kind === "skip-wide-spread" ? "spread-above-cap" : "one-sided-book";
         this.log.info(
           {
             signalId: signal.signalId,
             tokenId: signal.tokenId,
-            mode: placementDecision.mode,
-            budgetPerMinute: placementDecision.budgetPerMinute,
-            remainingBudget: placementDecision.remainingBudget,
+            reason,
+            pricingMode: policy.pricing.mode,
+            ...executionTerms.diagnostics,
+            cacheStatus: pricing.cacheStatus,
           },
-          "approved SELL skipped — order lifetime placement gate",
+          "approved signal skipped — bounded-midpoint pricing guardrail",
         );
         await this.publishConversionSkipped(signal, "execution-terms", [reason], {
           cacheStatus: pricing.cacheStatus,
-          mode: placementDecision.mode,
-          budgetPerMinute: placementDecision.budgetPerMinute,
-          remainingBudget: placementDecision.remainingBudget,
+          pricingMode: policy.pricing.mode,
+          ...executionTerms.diagnostics,
         });
         this.writeObservation({
           signal,
@@ -616,35 +403,154 @@ export class SignalToOrderBridge {
         });
         return;
       }
-    }
 
-    if (this.deps.samePriceCooldown) {
-      const placementDecision = this.deps.samePriceCooldown.canPlaceOrder({
-        tokenId: signal.tokenId,
-        side: signal.side,
-        price: executionTerms.price,
-        nowMs,
-      });
-      if (!placementDecision.allowed) {
-        const reason = placementDecision.reason ?? "same-price-cooldown";
+      if (signal.side === "buy" && executionTerms.price > policy.entryPriceCeiling) {
+        this.log.info(
+          {
+            signalId: signal.signalId,
+            tokenId: signal.tokenId,
+            price: executionTerms.price,
+            ceiling: policy.entryPriceCeiling,
+            cacheStatus: pricing.cacheStatus,
+          },
+          "approved signal skipped — BUY price above entry ceiling",
+        );
+        await this.publishConversionSkipped(
+          signal,
+          "execution-terms",
+          ["price-above-entry-ceiling"],
+          {
+            cacheStatus: pricing.cacheStatus,
+            price: executionTerms.price,
+            ceiling: policy.entryPriceCeiling,
+          },
+        );
+        this.writeObservation({
+          signal,
+          clientOrderId: null,
+          market,
+          policy,
+          executionTerms,
+          canary,
+          skippedReason: "price-above-entry-ceiling",
+        });
+        return;
+      }
+
+      const nowMs = this.now();
+
+      if (
+        signal.side === "sell" &&
+        executionTerms.kind === "ok" &&
+        shouldSkipSellBelowSignalFloor(
+          signal.suggestedPrice,
+          executionTerms.price,
+          policy.pricing.minExitPriceSignalRatio,
+        )
+      ) {
+        const floor = signal.suggestedPrice * policy.pricing.minExitPriceSignalRatio;
+        this.log.info(
+          {
+            signalId: signal.signalId,
+            tokenId: signal.tokenId,
+            signalPrice: signal.suggestedPrice,
+            executionPrice: executionTerms.price,
+            minRatio: policy.pricing.minExitPriceSignalRatio,
+            floor,
+            cacheStatus: pricing.cacheStatus,
+          },
+          "approved SELL skipped — execution price below signal-distance floor",
+        );
+        await this.publishConversionSkipped(
+          signal,
+          "execution-terms",
+          ["sell-price-below-signal-floor"],
+          {
+            cacheStatus: pricing.cacheStatus,
+            signalPrice: signal.suggestedPrice,
+            executionPrice: executionTerms.price,
+            minRatio: policy.pricing.minExitPriceSignalRatio,
+            floor,
+          },
+        );
+        this.writeObservation({
+          signal,
+          clientOrderId: null,
+          market,
+          policy,
+          executionTerms,
+          canary,
+          skippedReason: "sell-price-below-signal-floor",
+        });
+        return;
+      }
+
+      if (canary) {
+        const diagnostics = {
+          ...canary,
+          cacheStatus: pricing.cacheStatus,
+          price: executionTerms.price,
+        };
+        if (policy.deadSideGuard.mode === "enforce" && canary.enforceHit) {
+          this.log.info(
+            { signalId: signal.signalId, tokenId: signal.tokenId, ...diagnostics },
+            "approved signal skipped — BUY on dead side near endDate",
+          );
+          await this.publishConversionSkipped(
+            signal,
+            "execution-terms",
+            ["dead-side-near-end"],
+            diagnostics,
+          );
+          this.writeObservation({
+            signal,
+            clientOrderId: null,
+            market,
+            policy,
+            executionTerms,
+            canary,
+            skippedReason: "dead-side-near-end",
+          });
+          return;
+        }
+        // observe mode, or enforce mode but outside configured X: emit the shadow
+        // canary marker so metrics can choose the enforcement X post-hoc. Covers
+        // *every* BUY with bestAsk ≤ askCeiling regardless of timeToEndMs bucket.
+        // Gated by policy.telemetry.deadSideCanary — enforcement always runs above.
+        if (policy.telemetry.deadSideCanary) {
+          this.log.info(
+            { signalId: signal.signalId, tokenId: signal.tokenId, ...diagnostics },
+            "dead-side-near-end canary observation",
+          );
+        }
+      }
+
+      const orderSize = resolveOrderSize(signal, executionTerms.price);
+      const effectiveMinOrderSize = resolveEffectiveMinOrderSize(market.minOrderSize);
+      if (!isExecutableOrderSize(orderSize, market.minOrderSize)) {
         this.log.info(
           {
             signalId: signal.signalId,
             tokenId: signal.tokenId,
             side: signal.side,
-            executionPrice: executionTerms.price,
-            staleCancelCount: placementDecision.staleCancelCount,
-            cooldownUntilTsUtc: placementDecision.cooldownUntilTsUtc,
+            orderSize,
+            minOrderSize: market.minOrderSize ?? null,
+            effectiveMinOrderSize,
             cacheStatus: pricing.cacheStatus,
           },
-          "approved signal skipped — same-price cooldown active",
+          "approved signal skipped — order size below exchange minimum",
         );
-        await this.publishConversionSkipped(signal, "execution-terms", [reason], {
-          cacheStatus: pricing.cacheStatus,
-          executionPrice: executionTerms.price,
-          staleCancelCount: placementDecision.staleCancelCount,
-          cooldownUntilTsUtc: placementDecision.cooldownUntilTsUtc,
-        });
+        await this.publishConversionSkipped(
+          signal,
+          "execution-terms",
+          ["order-size-below-minimum"],
+          {
+            cacheStatus: pricing.cacheStatus,
+            orderSize,
+            minOrderSize: market.minOrderSize ?? null,
+            effectiveMinOrderSize,
+          },
+        );
         this.writeObservation({
           signal,
           clientOrderId: null,
@@ -652,80 +558,201 @@ export class SignalToOrderBridge {
           policy,
           executionTerms,
           canary,
-          skippedReason: reason,
+          skippedReason: "order-size-below-minimum",
         });
         return;
       }
-    }
 
-    const clientOrderId = buildClientOrderId({
-      signalId: signal.signalId,
-      tokenId: signal.tokenId,
-      side: signal.side,
-    });
+      const duplicateSell = this.findSamePriceOpenSellOrder(
+        signal.tokenId,
+        signal.side,
+        executionTerms.price,
+        market.tickSize,
+        policy,
+      );
+      if (duplicateSell) {
+        this.log.debug(
+          {
+            signalId: signal.signalId,
+            tokenId: signal.tokenId,
+            existingOrderId: duplicateSell.orderId,
+            existingPrice: duplicateSell.price,
+            executionPrice: executionTerms.price,
+            cacheStatus: pricing.cacheStatus,
+          },
+          "approved SELL skipped — acceptable-price sell order already open",
+        );
+        await this.publishConversionSkipped(
+          signal,
+          "execution-terms",
+          ["sell-order-acceptable-price-already-open"],
+          {
+            cacheStatus: pricing.cacheStatus,
+            existingOrderId: String(duplicateSell.orderId),
+            existingPrice: duplicateSell.price,
+            executionPrice: executionTerms.price,
+          },
+        );
+        this.writeObservation({
+          signal,
+          clientOrderId: null,
+          market,
+          policy,
+          executionTerms,
+          canary,
+          skippedReason: "sell-order-acceptable-price-already-open",
+        });
+        return;
+      }
 
-    const cmd: PlaceOrderCommand = {
-      type: "PlaceOrderCommand",
-      commandId: createCommandId(randomUUID()),
-      clientOrderId,
-      source: signal.reason === "operator" ? "operator" : "strategy",
-      tokenId: signal.tokenId,
-      conditionId: signal.conditionId,
-      side: signal.side,
-      size: orderSize,
-      price: executionTerms.price,
-      ...(executionTerms.postOnly !== undefined ? { postOnly: executionTerms.postOnly } : {}),
-      orderType: "GTC",
-      tickSize: market.tickSize,
-      negRisk: market.negRisk,
-      sequenceInTick: signal.sequenceInTick,
-      signalReason: signal.reason,
-      signalId: signal.signalId,
-      decisionRuleId: signal.decisionRuleId,
-      signalTimestamp: signal.generatedAt,
-      metadata: {
-        cacheStatus: pricing.cacheStatus,
-        marketData: {
-          bookSource: market.bookSource ?? "unknown",
-          minOrderSize: market.minOrderSize ?? null,
-          effectiveMinOrderSize,
-        },
-      },
-    };
+      if (signal.side === "sell" && this.deps.orderLifetime) {
+        const placementDecision = this.deps.orderLifetime.canPlaceExitOrder(signal.tokenId, nowMs);
+        if (!placementDecision.allowed) {
+          const reason = placementDecision.reason ?? "order-lifetime-placement-blocked";
+          this.log.info(
+            {
+              signalId: signal.signalId,
+              tokenId: signal.tokenId,
+              mode: placementDecision.mode,
+              budgetPerMinute: placementDecision.budgetPerMinute,
+              remainingBudget: placementDecision.remainingBudget,
+            },
+            "approved SELL skipped — order lifetime placement gate",
+          );
+          await this.publishConversionSkipped(signal, "execution-terms", [reason], {
+            cacheStatus: pricing.cacheStatus,
+            mode: placementDecision.mode,
+            budgetPerMinute: placementDecision.budgetPerMinute,
+            remainingBudget: placementDecision.remainingBudget,
+          });
+          this.writeObservation({
+            signal,
+            clientOrderId: null,
+            market,
+            policy,
+            executionTerms,
+            canary,
+            skippedReason: reason,
+          });
+          return;
+        }
+      }
 
-    this.log.info(
-      {
+      if (this.deps.samePriceCooldown) {
+        const placementDecision = this.deps.samePriceCooldown.canPlaceOrder({
+          tokenId: signal.tokenId,
+          side: signal.side,
+          price: executionTerms.price,
+          nowMs,
+        });
+        if (!placementDecision.allowed) {
+          const reason = placementDecision.reason ?? "same-price-cooldown";
+          const sample =
+            this.deps.signalPathTelemetry?.recordLateCooldown(signal.signalId) ?? false;
+          if (sample) {
+            this.log.info(
+              {
+                signalId: signal.signalId,
+                tokenId: signal.tokenId,
+                side: signal.side,
+                executionPrice: executionTerms.price,
+                staleCancelCount: placementDecision.staleCancelCount,
+                cooldownUntilTsUtc: placementDecision.cooldownUntilTsUtc,
+                cacheStatus: pricing.cacheStatus,
+              },
+              "signal_debug_sample",
+            );
+          }
+          await this.publishConversionSkipped(signal, "execution-terms", [reason], {
+            cacheStatus: pricing.cacheStatus,
+            executionPrice: executionTerms.price,
+            staleCancelCount: placementDecision.staleCancelCount,
+            cooldownUntilTsUtc: placementDecision.cooldownUntilTsUtc,
+          });
+          this.writeObservation({
+            signal,
+            clientOrderId: null,
+            market,
+            policy,
+            executionTerms,
+            canary,
+            skippedReason: reason,
+          });
+          return;
+        }
+      }
+
+      const clientOrderId = buildClientOrderId({
         signalId: signal.signalId,
-        clientOrderId: String(clientOrderId),
+        tokenId: signal.tokenId,
         side: signal.side,
-        price: cmd.price,
-        size: cmd.size,
-        postOnly: cmd.postOnly ?? null,
-        pricingMode: policy.pricing.mode,
-        executionPricingMode: executionTerms.pricedMode,
-        ...(executionTerms.pricingDiagnostics
-          ? { pricingDiagnostics: executionTerms.pricingDiagnostics }
-          : {}),
-        ...(executionTerms.pricingShadow ? { pricingShadow: executionTerms.pricingShadow } : {}),
-      },
-      "signal converted to order command",
-    );
-    this.recordPricingMetrics(signal, executionTerms);
+      });
 
-    this.writeObservation({
-      signal,
-      clientOrderId: String(clientOrderId),
-      market,
-      policy,
-      executionTerms,
-      canary,
-      skippedReason: null,
-    });
+      const cmd: PlaceOrderCommand = {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId(randomUUID()),
+        clientOrderId,
+        source: signal.reason === "operator" ? "operator" : "strategy",
+        tokenId: signal.tokenId,
+        conditionId: signal.conditionId,
+        side: signal.side,
+        size: orderSize,
+        price: executionTerms.price,
+        ...(executionTerms.postOnly !== undefined ? { postOnly: executionTerms.postOnly } : {}),
+        orderType: "GTC",
+        tickSize: market.tickSize,
+        negRisk: market.negRisk,
+        sequenceInTick: signal.sequenceInTick,
+        signalReason: signal.reason,
+        signalId: signal.signalId,
+        decisionRuleId: signal.decisionRuleId,
+        signalTimestamp: signal.generatedAt,
+        metadata: {
+          cacheStatus: pricing.cacheStatus,
+          marketData: {
+            bookSource: market.bookSource ?? "unknown",
+            minOrderSize: market.minOrderSize ?? null,
+            effectiveMinOrderSize,
+          },
+        },
+      };
 
-    await this.deps.bus.publish("PlaceOrderRequested", {
-      command: cmd,
-      timestamp: Date.now(),
-    });
+      this.log.info(
+        {
+          signalId: signal.signalId,
+          clientOrderId: String(clientOrderId),
+          side: signal.side,
+          price: cmd.price,
+          size: cmd.size,
+          postOnly: cmd.postOnly ?? null,
+          pricingMode: policy.pricing.mode,
+          executionPricingMode: executionTerms.pricedMode,
+          ...(executionTerms.pricingDiagnostics
+            ? { pricingDiagnostics: executionTerms.pricingDiagnostics }
+            : {}),
+          ...(executionTerms.pricingShadow ? { pricingShadow: executionTerms.pricingShadow } : {}),
+        },
+        "signal converted to order command",
+      );
+      this.recordPricingMetrics(signal, executionTerms);
+
+      this.writeObservation({
+        signal,
+        clientOrderId: String(clientOrderId),
+        market,
+        policy,
+        executionTerms,
+        canary,
+        skippedReason: null,
+      });
+
+      await this.deps.bus.publish("PlaceOrderRequested", {
+        command: cmd,
+        timestamp: Date.now(),
+      });
+    } finally {
+      recordStageDuration("signal_to_order_bridge", performance.now() - bridgeStartMs);
+    }
   }
 
   /**

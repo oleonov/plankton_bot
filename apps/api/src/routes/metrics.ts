@@ -89,6 +89,11 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
         "SELECT labels FROM runtime_metrics WHERE metric_name = 'runtime_diagnostics' ORDER BY captured_at DESC, id DESC LIMIT 1",
       )
       .get() as { labels: string | null } | undefined;
+    const signalPathRow = db
+      .prepare(
+        "SELECT labels FROM runtime_metrics WHERE metric_name = 'signal_path_activity' ORDER BY captured_at DESC, id DESC LIMIT 1",
+      )
+      .get() as { labels: string | null } | undefined;
     const httpErrorRows = db
       .prepare(
         `SELECT value, labels
@@ -103,6 +108,8 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const latency = parseJsonObject(latencyRow?.labels);
     const r23Cache = parseJsonObject(r23CacheRow?.labels);
     const runtimeDiagnostics = parseJsonObject(runtimeDiagnosticsRow?.labels);
+    const signalPath = parseJsonObject(signalPathRow?.labels);
+    const cooldownTelemetry = readObject(signalPath, "cooldown");
     const eventLoopLag = readObject(runtimeDiagnostics, "eventLoopLagMs");
     const gcPause = readObject(runtimeDiagnostics, "gcPauseMs");
     const stageTimers = readObject(runtimeDiagnostics, "stageTimers");
@@ -156,10 +163,11 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       suppressed_trading_noop_count_total: suppressedTradingNoopCountTotal,
       suppressed_trading_noop_per_sec: suppressedTradingNoopPerSec,
       suppressed_trading_noop_by_reason: {
-        top_of_book: readNumber(suppressedTradingNoopByReason, "topOfBook") ?? 0,
-        accepting_orders_or_book:
-          readNumber(suppressedTradingNoopByReason, "acceptingOrdersOrBook") ?? 0,
-        min_size_or_source: readNumber(suppressedTradingNoopByReason, "minSizeOrSource") ?? 0,
+        top_of_book_only: readNumber(suppressedTradingNoopByReason, "topOfBookOnly") ?? 0,
+        book_only: readNumber(suppressedTradingNoopByReason, "bookOnly") ?? 0,
+        last_trade_only: readNumber(suppressedTradingNoopByReason, "lastTradeOnly") ?? 0,
+        tick_size_only: readNumber(suppressedTradingNoopByReason, "tickSizeOnly") ?? 0,
+        mixed_non_critical: readNumber(suppressedTradingNoopByReason, "mixedNonCritical") ?? 0,
       },
       hub_filter_checked: hubFilterChecked,
       hub_filter_checked_per_sec: hubFilterCheckedPerSec,
@@ -206,6 +214,103 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
         "diagnostics_write",
         "p95Ms",
       ),
+      stage_metrics_flush_total_max_ms: readStageTimerValue(
+        stageTimers,
+        "metrics_flush_total",
+        "maxMs",
+      ),
+      stage_metrics_flush_total_p95_ms: readStageTimerValue(
+        stageTimers,
+        "metrics_flush_total",
+        "p95Ms",
+      ),
+      stage_metrics_flush_sqlite_writes_max_ms: readStageTimerValue(
+        stageTimers,
+        "metrics_flush_sqlite_writes",
+        "maxMs",
+      ),
+      stage_metrics_flush_sqlite_writes_p95_ms: readStageTimerValue(
+        stageTimers,
+        "metrics_flush_sqlite_writes",
+        "p95Ms",
+      ),
+      stage_metrics_flush_snapshot_serialize_max_ms: readStageTimerValue(
+        stageTimers,
+        "metrics_flush_snapshot_serialize",
+        "maxMs",
+      ),
+      stage_metrics_flush_snapshot_serialize_p95_ms: readStageTimerValue(
+        stageTimers,
+        "metrics_flush_snapshot_serialize",
+        "p95Ms",
+      ),
+      stage_risk_signal_approval_max_ms: readStageTimerValue(
+        stageTimers,
+        "risk_signal_approval",
+        "maxMs",
+      ),
+      stage_risk_signal_approval_p95_ms: readStageTimerValue(
+        stageTimers,
+        "risk_signal_approval",
+        "p95Ms",
+      ),
+      stage_signal_to_order_bridge_max_ms: readStageTimerValue(
+        stageTimers,
+        "signal_to_order_bridge",
+        "maxMs",
+      ),
+      stage_signal_to_order_bridge_p95_ms: readStageTimerValue(
+        stageTimers,
+        "signal_to_order_bridge",
+        "p95Ms",
+      ),
+      stage_worker_non_update_events_max_ms: readStageTimerValue(
+        stageTimers,
+        "worker_non_update_events",
+        "maxMs",
+      ),
+      stage_worker_non_update_events_p95_ms: readStageTimerValue(
+        stageTimers,
+        "worker_non_update_events",
+        "p95Ms",
+      ),
+      stage_discovery_poll_publish_max_ms: readStageTimerValue(
+        stageTimers,
+        "discovery_poll_publish",
+        "maxMs",
+      ),
+      stage_discovery_poll_publish_p95_ms: readStageTimerValue(
+        stageTimers,
+        "discovery_poll_publish",
+        "p95Ms",
+      ),
+      stage_signal_path_aggregate_max_ms: readStageTimerValue(
+        stageTimers,
+        "signal_path_aggregate",
+        "maxMs",
+      ),
+      stage_signal_path_aggregate_p95_ms: readStageTimerValue(
+        stageTimers,
+        "signal_path_aggregate",
+        "p95Ms",
+      ),
+      stage_cooldown_registry_sweep_max_ms: readStageTimerValue(
+        stageTimers,
+        "cooldown_registry_sweep",
+        "maxMs",
+      ),
+      stage_cooldown_registry_sweep_p95_ms: readStageTimerValue(
+        stageTimers,
+        "cooldown_registry_sweep",
+        "p95Ms",
+      ),
+      signals_suppressed_early_cooldown_total:
+        readNumber(cooldownTelemetry, "signalsSuppressedEarlyCooldownTotal") ?? 0,
+      signals_suppressed_early_cooldown_by_token: readNumberRecord(
+        cooldownTelemetry,
+        "signalsSuppressedEarlyCooldownByToken",
+      ),
+      cooldown_registry_size: readNumber(cooldownTelemetry, "cooldownRegistrySize") ?? 0,
       http_errors_by_class_1h: aggregateHttpErrors(httpErrorRows),
       ws_heartbeat: wsHeartbeat,
       ws_worker_memory: wsWorkerMemory,

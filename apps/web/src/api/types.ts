@@ -344,9 +344,11 @@ export interface CoverageMetricsData {
   suppressed_trading_noop_count_total: number;
   suppressed_trading_noop_per_sec: number;
   suppressed_trading_noop_by_reason: {
-    top_of_book: number;
-    accepting_orders_or_book: number;
-    min_size_or_source: number;
+    top_of_book_only: number;
+    book_only: number;
+    last_trade_only: number;
+    tick_size_only: number;
+    mixed_non_critical: number;
   };
   hub_filter_checked: number;
   hub_filter_checked_per_sec: number;
@@ -377,6 +379,27 @@ export interface CoverageMetricsData {
   stage_latency_summary_p95_ms: number | null;
   stage_diagnostics_write_max_ms: number | null;
   stage_diagnostics_write_p95_ms: number | null;
+  stage_metrics_flush_total_max_ms: number | null;
+  stage_metrics_flush_total_p95_ms: number | null;
+  stage_metrics_flush_sqlite_writes_max_ms: number | null;
+  stage_metrics_flush_sqlite_writes_p95_ms: number | null;
+  stage_metrics_flush_snapshot_serialize_max_ms: number | null;
+  stage_metrics_flush_snapshot_serialize_p95_ms: number | null;
+  stage_risk_signal_approval_max_ms: number | null;
+  stage_risk_signal_approval_p95_ms: number | null;
+  stage_signal_to_order_bridge_max_ms: number | null;
+  stage_signal_to_order_bridge_p95_ms: number | null;
+  stage_worker_non_update_events_max_ms: number | null;
+  stage_worker_non_update_events_p95_ms: number | null;
+  stage_discovery_poll_publish_max_ms: number | null;
+  stage_discovery_poll_publish_p95_ms: number | null;
+  stage_signal_path_aggregate_max_ms: number | null;
+  stage_signal_path_aggregate_p95_ms: number | null;
+  stage_cooldown_registry_sweep_max_ms: number | null;
+  stage_cooldown_registry_sweep_p95_ms: number | null;
+  signals_suppressed_early_cooldown_total: number;
+  signals_suppressed_early_cooldown_by_token: Record<string, number>;
+  cooldown_registry_size: number;
   http_errors_by_class_1h: Record<string, number>;
   ws_heartbeat: {
     pingSent: number;

@@ -454,9 +454,11 @@ export class MarketDataModule implements RuntimeModule {
       suppressedTradingNoopCountTotal: streamMetrics?.suppressedTradingNoopCountTotal ?? 0,
       suppressedTradingNoopPerSec: streamMetrics?.suppressedTradingNoopPerSec ?? 0,
       suppressedTradingNoopByReason: streamMetrics?.suppressedTradingNoopByReason ?? {
-        topOfBook: 0,
-        acceptingOrdersOrBook: 0,
-        minSizeOrSource: 0,
+        topOfBookOnly: 0,
+        bookOnly: 0,
+        lastTradeOnly: 0,
+        tickSizeOnly: 0,
+        mixedNonCritical: 0,
       },
       hubFilterChecked: streamMetrics?.hubFilterChecked ?? 0,
       hubFilterCheckedPerSec: streamMetrics?.hubFilterCheckedPerSec ?? 0,
@@ -1052,10 +1054,12 @@ export class MarketDataModule implements RuntimeModule {
         "discovery poll batch complete",
       );
       if (snapshots.length > 0) {
+        const publishStartMs = performance.now();
         await this.deps.bus.publish("MarketSnapshotReceived", {
           markets: snapshots,
           timestamp: nowMs,
         });
+        recordStageDuration("discovery_poll_publish", performance.now() - publishStartMs);
       }
 
       await this.flushDiscoveryBatchEviction(new Set(tokenIds), nowMs);
@@ -1097,12 +1101,14 @@ export class MarketDataModule implements RuntimeModule {
       }
     }
     if (removedTokenIds.length > 0) {
+      const publishStartMs = performance.now();
       await this.deps.bus.publish("TrackedMarketsChanged", {
         addedTokenIds: [],
         removedTokenIds: removedTokenIds.map((t) => createTokenId(t)),
         activeTokenIds: [...wsTier].map((t) => createTokenId(t)),
         timestamp: nowMs,
       });
+      recordStageDuration("discovery_poll_publish", performance.now() - publishStartMs);
     }
     this.lastDiscoveryBatchTokenIds = new Set(currentBatchTokens);
   }

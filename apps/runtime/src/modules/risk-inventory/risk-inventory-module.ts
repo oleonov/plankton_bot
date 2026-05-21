@@ -15,6 +15,7 @@
 
 import type Database from "better-sqlite3";
 import { withImmediate } from "@krabs/db";
+import { performance } from "node:perf_hooks";
 import type {
   RuntimeModule,
   EventBus,
@@ -31,7 +32,7 @@ import type {
   Position,
   TokenId,
 } from "@krabs/domain";
-import { canPlaceBuyOrderForMarket } from "@krabs/domain";
+import { canPlaceBuyOrderForMarket, recordStageDuration, roundToTick } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { findActivePositions } from "../../active-positions.js";
@@ -42,6 +43,12 @@ import { InventoryHandler } from "./inventory-handler.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
 import type { OrderCapacityMetricsSample, WalletBudgetControlDb } from "../../wallet-buy-budget.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
+import {
+  priceToX10000,
+  SAME_PRICE_COOLDOWN_REASON,
+} from "../same-price-cooldown/same-price-cooldown-module.js";
+import type { CooldownRegistry } from "../same-price-cooldown/cooldown-registry.js";
+import type { SignalPathTelemetry } from "../strategy/signal-path-telemetry.js";
 
 export interface RiskInventoryModuleDeps {
   bus: EventBus;
@@ -62,6 +69,8 @@ export interface RiskInventoryModuleDeps {
   redeemInFlightGuard?: ((conditionId: string) => boolean) | undefined;
   runtimeMetrics?: RuntimeMetricWriter | undefined;
   runtimeControl?: RuntimeControl | undefined;
+  cooldownRegistry?: CooldownRegistry | undefined;
+  signalPathTelemetry?: SignalPathTelemetry | undefined;
   rejectionLogCooldownMs?: number | undefined;
   /**
    * Optional fail-closed BUY-side guard. When supplied, BUYs are pre-screened
@@ -373,79 +382,127 @@ export class RiskInventoryModule implements RuntimeModule {
   // ─── Signal evaluation ────────────────────────────────────────────
 
   private async handleSignal(payload: RuntimeEventMap["SignalProduced"]): Promise<void> {
-    const { signal, market } = payload;
-    this.signalsProcessed++;
-
-    if (this.deps.runtimeControl?.isPaused()) {
-      this.logPausedSignalIgnored(signal);
-      return;
-    }
-
-    // BUY-side admission guard (defense-in-depth before riskGate). Blocks new
-    // BUYs on markets that have already ended, gone inactive, lost tradability,
-    // resolved, or aren't physically capable of accepting an order. SELL and
-    // REDEEM signals bypass this check entirely.
-    const buyBlock = signal.side === "buy" ? this.evaluateBuyAdmission(market) : null;
-    if (buyBlock) {
-      this.signalsRejectedCount++;
-      this.logRejectedSignal(
-        {
-          signalId: signal.signalId,
-          tokenId: String(signal.tokenId),
-          reasons: [buyBlock],
-        },
-        "BUY signal rejected — market not eligible for placement",
-      );
-      await this.deps.bus.publish("SignalRejected", {
-        signal,
-        market,
-        reason: buyBlock,
-        rejectedAt: this.now(),
-      });
-      return;
-    }
-
+    const startMs = performance.now();
     try {
-      const decision = await this.riskGate.evaluate(signal);
+      const { signal, market } = payload;
+      this.signalsProcessed++;
 
-      if (decision.approved) {
-        this.signalsApprovedCount++;
-        this.log.info(
-          { signalId: signal.signalId, checks: decision.checksPassed },
-          "signal approved",
-        );
-        await this.deps.bus.publish("SignalApproved", {
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.logPausedSignalIgnored(signal);
+        return;
+      }
+
+      if (this.shouldSuppressEarlySellCooldown(signal, market)) {
+        this.deps.signalPathTelemetry?.recordEarlyCooldown(signal.signalId);
+        this.deps.cooldownRegistry?.recordEarlySuppression(signal.tokenId);
+        await this.deps.bus.publish("SignalConversionSkipped", {
           signal,
-          market,
-          approvedAt: this.now(),
+          stage: "execution-terms",
+          reasons: [SAME_PRICE_COOLDOWN_REASON],
+          diagnostics: {
+            gate: "early-same-price-cooldown",
+            price: signal.suggestedPrice,
+          },
+          skippedAt: this.now(),
         });
-      } else {
+        return;
+      }
+
+      // BUY-side admission guard (defense-in-depth before riskGate). Blocks new
+      // BUYs on markets that have already ended, gone inactive, lost tradability,
+      // resolved, or aren't physically capable of accepting an order. SELL and
+      // REDEEM signals bypass this check entirely.
+      const buyBlock = signal.side === "buy" ? this.evaluateBuyAdmission(market) : null;
+      if (buyBlock) {
         this.signalsRejectedCount++;
+        this.deps.signalPathTelemetry?.recordRejected(signal.signalId, buyBlock);
         this.logRejectedSignal(
           {
             signalId: signal.signalId,
             tokenId: String(signal.tokenId),
-            reasons: decision.rejectionReasons,
+            reasons: [buyBlock],
           },
-          "signal rejected",
+          "BUY signal rejected — market not eligible for placement",
         );
         await this.deps.bus.publish("SignalRejected", {
           signal,
           market,
-          reason: decision.rejectionReasons.join("; "),
+          reason: buyBlock,
+          rejectedAt: this.now(),
+        });
+        return;
+      }
+
+      try {
+        const decision = await this.riskGate.evaluate(signal);
+
+        if (decision.approved) {
+          this.signalsApprovedCount++;
+          const sample = this.deps.signalPathTelemetry?.recordApproved(signal.signalId) ?? false;
+          if (sample) {
+            this.log.info(
+              { signalId: signal.signalId, checks: decision.checksPassed },
+              "signal_debug_sample",
+            );
+          }
+          await this.deps.bus.publish("SignalApproved", {
+            signal,
+            market,
+            approvedAt: this.now(),
+          });
+        } else {
+          this.signalsRejectedCount++;
+          const reason = decision.rejectionReasons.join("; ");
+          this.deps.signalPathTelemetry?.recordRejected(signal.signalId, reason);
+          this.logRejectedSignal(
+            {
+              signalId: signal.signalId,
+              tokenId: String(signal.tokenId),
+              reasons: decision.rejectionReasons,
+            },
+            "signal rejected",
+          );
+          await this.deps.bus.publish("SignalRejected", {
+            signal,
+            market,
+            reason,
+            rejectedAt: this.now(),
+          });
+        }
+      } catch (err) {
+        this.signalsRejectedCount++;
+        this.deps.signalPathTelemetry?.recordRejected(
+          signal.signalId,
+          "internal error during risk evaluation",
+        );
+        this.log.error({ err, signalId: signal.signalId }, "signal evaluation failed");
+        await this.deps.bus.publish("SignalRejected", {
+          signal,
+          market,
+          reason: "internal error during risk evaluation",
           rejectedAt: this.now(),
         });
       }
-    } catch (err) {
-      this.signalsRejectedCount++;
-      this.log.error({ err, signalId: signal.signalId }, "signal evaluation failed");
-      await this.deps.bus.publish("SignalRejected", {
-        signal,
-        market,
-        reason: "internal error during risk evaluation",
-        rejectedAt: this.now(),
-      });
+    } finally {
+      recordStageDuration("risk_signal_approval", performance.now() - startMs);
     }
+  }
+
+  private shouldSuppressEarlySellCooldown(
+    signal: RuntimeEventMap["SignalProduced"]["signal"],
+    market: RuntimeEventMap["SignalProduced"]["market"],
+  ): boolean {
+    if (signal.side !== "sell") return false;
+    const registry = this.deps.cooldownRegistry;
+    if (!registry) return false;
+    const tickRoundedPrice = roundToTick(signal.suggestedPrice, market.tickSize);
+    const active = registry.get(
+      signal.tokenId,
+      signal.side,
+      priceToX10000(tickRoundedPrice),
+      this.now(),
+    );
+    return active != null;
   }
 
   // ─── Fill application ─────────────────────────────────────────────

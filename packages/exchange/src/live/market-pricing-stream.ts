@@ -21,7 +21,6 @@ import type {
   MarketPricingWorkerCommand,
   MarketPricingWorkerData,
   MarketPricingWorkerEvent,
-  WorkerMemorySnapshot,
   WorkerUpdateEnvelope,
   WorkerHeartbeatSnapshot,
   WorkerUpdateBatchCounts,
@@ -65,8 +64,6 @@ const DEFAULT_LAG_WARN_MS = 2_000;
 const DEFAULT_OVERFLOW_POLICY: OverflowPolicy = "drop-oldest";
 const DEFAULT_WORKER_OLD_SPACE_MB = 200;
 const DEFAULT_WORKER_YOUNG_SPACE_MB = 32;
-const DEFAULT_WORKER_MEMORY_SAMPLE_MS = 10_000;
-const DEFAULT_WORKER_MEMORY_WARN_RSS_MB = 250;
 const DEFAULT_WORKER_START_STAGGER_MS = 750;
 // Minimum interval between lag warnings per shard to avoid log spam.
 const LAG_WARN_COOLDOWN_MS = 30_000;
@@ -135,16 +132,6 @@ interface WorkerHeartbeatAggregate {
   timeoutSuppressedByInbound: number;
   workerEventLoopLagMaxMs: number;
   byShard: Record<string, WorkerHeartbeatSnapshot>;
-}
-
-interface WorkerMemoryAggregate {
-  rssMb: number;
-  heapUsedMb: number;
-  heapTotalMb: number;
-  externalMb: number;
-  arrayBuffersMb: number;
-  maxRssMb: number;
-  byWorker: Record<string, WorkerMemorySnapshot>;
 }
 
 interface LiveMarketPricingStreamDeps {
@@ -271,7 +258,6 @@ type WorkerGroupDeps = Readonly<{
   shardBreakerOpenMs: number;
   shardBreakerOpenMaxMs: number;
   streamStableMs: number;
-  onMemory: (workerId: number, memory: WorkerMemorySnapshot) => void;
 }>;
 
 export class LiveMarketPricingStream implements MarketPricingStream {
@@ -318,7 +304,6 @@ export class LiveMarketPricingStream implements MarketPricingStream {
   // Shard breaker states indexed by shardId (shards map may not contain open shards)
   private readonly shardBreakerStates = new Map<number, ShardBreakerState>();
   private readonly heartbeatByShard = new Map<number, WorkerHeartbeatSnapshot>();
-  private readonly memoryByWorker = new Map<number, WorkerMemorySnapshot>();
 
   constructor(private readonly deps: LiveMarketPricingStreamDeps) {
     this.now = deps.now ?? Date.now;
@@ -433,7 +418,6 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       maxQueueDepth: this.totalMaxQueueDepth,
       queueOverflows: this.totalQueueOverflows,
       wsHeartbeat: this.getHeartbeatAggregate(),
-      wsWorkerMemory: this.getWorkerMemoryAggregate(),
     };
   }
 
@@ -462,34 +446,6 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       timeoutSuppressedByInbound,
       workerEventLoopLagMaxMs,
       byShard,
-    };
-  }
-
-  private getWorkerMemoryAggregate(): WorkerMemoryAggregate {
-    const byWorker: Record<string, WorkerMemorySnapshot> = {};
-    let rssMb = 0;
-    let heapUsedMb = 0;
-    let heapTotalMb = 0;
-    let externalMb = 0;
-    let arrayBuffersMb = 0;
-    let maxRssMb = 0;
-    for (const [workerId, memory] of this.memoryByWorker) {
-      byWorker[String(workerId)] = memory;
-      rssMb += memory.rssMb;
-      heapUsedMb += memory.heapUsedMb;
-      heapTotalMb += memory.heapTotalMb;
-      externalMb += memory.externalMb;
-      arrayBuffersMb += memory.arrayBuffersMb;
-      maxRssMb = Math.max(maxRssMb, memory.rssMb);
-    }
-    return {
-      rssMb: Number(rssMb.toFixed(1)),
-      heapUsedMb: Number(heapUsedMb.toFixed(1)),
-      heapTotalMb: Number(heapTotalMb.toFixed(1)),
-      externalMb: Number(externalMb.toFixed(1)),
-      arrayBuffersMb: Number(arrayBuffersMb.toFixed(1)),
-      maxRssMb: Number(maxRssMb.toFixed(1)),
-      byWorker,
     };
   }
 
@@ -630,9 +586,6 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       shardBreakerOpenMs: this.shardBreakerOpenMs,
       shardBreakerOpenMaxMs: this.shardBreakerOpenMaxMs,
       streamStableMs: this.streamStableMs,
-      onMemory: (id, memory) => {
-        this.memoryByWorker.set(id, memory);
-      },
     });
     this.workerGroups.set(workerId, group);
     return group;
@@ -643,7 +596,6 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       if (group.getShardCount() > 0) continue;
       group.close();
       this.workerGroups.delete(workerId);
-      this.memoryByWorker.delete(workerId);
     }
   }
 
@@ -1444,8 +1396,6 @@ class WorkerMarketPricingGroup {
       workerId: this.workerId,
       heartbeatJitterSeedMs: (this.workerId * 977) % PING_INTERVAL_MS,
       startDelayMs: this.workerId * DEFAULT_WORKER_START_STAGGER_MS,
-      memorySampleMs: DEFAULT_WORKER_MEMORY_SAMPLE_MS,
-      memoryWarnRssMb: DEFAULT_WORKER_MEMORY_WARN_RSS_MB,
     };
     const worker = new Worker(new URL("./market-pricing-shard-worker.js", import.meta.url), {
       workerData,
@@ -1476,78 +1426,87 @@ class WorkerMarketPricingGroup {
   private handleWorkerMessage(message: unknown): void {
     if (!message || typeof message !== "object") return;
     const event = message as MarketPricingWorkerEvent;
-    if (event.type === "memory") {
-      this.deps.onMemory(event.workerId, event.memory);
-      return;
-    }
-    if (event.type === "error" && event.error.shardId == null) {
-      this.reportWorkerFailure(deserializeWorkerError(event.error), { gap: false });
-      return;
-    }
-    const shardId = resolveWorkerEventShardId(event);
-    if (shardId == null) return;
-    const deps = this.shardDeps.get(shardId);
-    if (!deps) return;
-    switch (event.type) {
-      case "update-batch-buffer": {
-        this.shardQueueDepth.set(shardId, event.queueDepth);
-        const decodeStartMs = performance.now();
-        const envelope = decodeWorkerUpdateEnvelope(event.payload);
-        recordStageDuration("ipc_decode", performance.now() - decodeStartMs);
-        deps.onMessageMetrics(envelope.metrics);
-        if (
-          envelope.bookEventCount > 0 ||
-          envelope.marketResolvedEventCount > 0 ||
-          envelope.newMarketEventCount > 0
-        ) {
-          deps.onWorkerEventCounts?.({
-            bookEventCount: envelope.bookEventCount,
-            marketResolvedEventCount: envelope.marketResolvedEventCount,
-            newMarketEventCount: envelope.newMarketEventCount,
-          });
-        }
-        void deps.onWorkerUpdateBatch?.(envelope.updates, envelope.lifecycleEvents, {
-          parsedUpdateCount: envelope.parsedUpdateCount,
-          emittedUpdateCount: envelope.emittedUpdateCount,
-          noopUpdateCount: envelope.noopUpdateCount,
-          suppressedTradingNoopCount: envelope.suppressedTradingNoopCount,
-          suppressedTradingNoopByReason: envelope.suppressedTradingNoopByReason,
+    if (event.type === "update-batch-buffer") {
+      const shardId = event.shardId;
+      const deps = this.shardDeps.get(shardId);
+      if (!deps) return;
+      this.shardQueueDepth.set(shardId, event.queueDepth);
+      const decodeStartMs = performance.now();
+      const envelope = decodeWorkerUpdateEnvelope(event.payload);
+      recordStageDuration("ipc_decode", performance.now() - decodeStartMs);
+      deps.onMessageMetrics(envelope.metrics);
+      if (
+        envelope.bookEventCount > 0 ||
+        envelope.marketResolvedEventCount > 0 ||
+        envelope.newMarketEventCount > 0
+      ) {
+        deps.onWorkerEventCounts?.({
+          bookEventCount: envelope.bookEventCount,
+          marketResolvedEventCount: envelope.marketResolvedEventCount,
+          newMarketEventCount: envelope.newMarketEventCount,
         });
-        break;
       }
-      case "records":
-        this.shardQueueDepth.set(shardId, event.queueDepth);
-        deps.onMessageMetrics(event.metrics);
-        void deps.onRecords(event.records);
-        break;
-      case "error":
-        void deps.onError(deserializeWorkerError(event.error));
-        break;
-      case "gap":
-        deps.onGapDetected(event.reason, event.timestamp, event.tokenIds);
-        break;
-      case "reconnect-scheduled":
-        deps.onReconnectScheduled();
-        break;
-      case "queue-overflow":
-        deps.onQueueOverflow(shardId, event.droppedTokenIds, event.timestamp);
-        break;
-      case "lag-warning":
-        deps.onLagWarning(shardId, event.drainMs);
-        break;
-      case "queue-depth":
-        this.shardQueueDepth.set(shardId, event.depth);
-        deps.onShardQueueDepth(event.depth);
-        break;
-      case "breaker-state":
-        this.shardBreakerReopenAt.set(shardId, event.reopenAtMs);
-        this.shardDesired.set(shardId, normalizeTokenIds(event.tokenIds));
-        this.refreshDesiredTokenIds();
-        deps.onBreakerStateChanged(shardId, event.state);
-        break;
-      case "heartbeat":
-        deps.onHeartbeat?.(shardId, event.heartbeat);
-        break;
+      void deps.onWorkerUpdateBatch?.(envelope.updates, envelope.lifecycleEvents, {
+        parsedUpdateCount: envelope.parsedUpdateCount,
+        emittedUpdateCount: envelope.emittedUpdateCount,
+        noopUpdateCount: envelope.noopUpdateCount,
+        suppressedTradingNoopCount: envelope.suppressedTradingNoopCount,
+        suppressedTradingNoopByReason: envelope.suppressedTradingNoopByReason,
+      });
+      return;
+    }
+    if (event.type === "records") {
+      const shardId = event.shardId;
+      if (shardId == null) return;
+      const deps = this.shardDeps.get(shardId);
+      if (!deps) return;
+      this.shardQueueDepth.set(shardId, event.queueDepth);
+      deps.onMessageMetrics(event.metrics);
+      void deps.onRecords(event.records);
+      return;
+    }
+    const nonUpdateStartMs = performance.now();
+    try {
+      if (event.type === "error" && event.error.shardId == null) {
+        this.reportWorkerFailure(deserializeWorkerError(event.error), { gap: false });
+        return;
+      }
+      const shardId = resolveWorkerEventShardId(event);
+      if (shardId == null) return;
+      const deps = this.shardDeps.get(shardId);
+      if (!deps) return;
+      switch (event.type) {
+        case "error":
+          void deps.onError(deserializeWorkerError(event.error));
+          break;
+        case "gap":
+          deps.onGapDetected(event.reason, event.timestamp, event.tokenIds);
+          break;
+        case "reconnect-scheduled":
+          deps.onReconnectScheduled();
+          break;
+        case "queue-overflow":
+          deps.onQueueOverflow(shardId, event.droppedTokenIds, event.timestamp);
+          break;
+        case "lag-warning":
+          deps.onLagWarning(shardId, event.drainMs);
+          break;
+        case "queue-depth":
+          this.shardQueueDepth.set(shardId, event.depth);
+          deps.onShardQueueDepth(event.depth);
+          break;
+        case "breaker-state":
+          this.shardBreakerReopenAt.set(shardId, event.reopenAtMs);
+          this.shardDesired.set(shardId, normalizeTokenIds(event.tokenIds));
+          this.refreshDesiredTokenIds();
+          deps.onBreakerStateChanged(shardId, event.state);
+          break;
+        case "heartbeat":
+          deps.onHeartbeat?.(shardId, event.heartbeat);
+          break;
+      }
+    } finally {
+      recordStageDuration("worker_non_update_events", performance.now() - nonUpdateStartMs);
     }
   }
 
@@ -1669,9 +1628,11 @@ function deserializeWorkerError(error: {
 
 function createEmptySuppressionCounts(): TradingNoopSuppressionCounts {
   return {
-    topOfBook: 0,
-    acceptingOrdersOrBook: 0,
-    minSizeOrSource: 0,
+    topOfBookOnly: 0,
+    bookOnly: 0,
+    lastTradeOnly: 0,
+    tickSizeOnly: 0,
+    mixedNonCritical: 0,
   };
 }
 
@@ -1680,9 +1641,11 @@ function addSuppressionCounts(
   right: TradingNoopSuppressionCounts,
 ): TradingNoopSuppressionCounts {
   return {
-    topOfBook: left.topOfBook + right.topOfBook,
-    acceptingOrdersOrBook: left.acceptingOrdersOrBook + right.acceptingOrdersOrBook,
-    minSizeOrSource: left.minSizeOrSource + right.minSizeOrSource,
+    topOfBookOnly: left.topOfBookOnly + right.topOfBookOnly,
+    bookOnly: left.bookOnly + right.bookOnly,
+    lastTradeOnly: left.lastTradeOnly + right.lastTradeOnly,
+    tickSizeOnly: left.tickSizeOnly + right.tickSizeOnly,
+    mixedNonCritical: left.mixedNonCritical + right.mixedNonCritical,
   };
 }
 

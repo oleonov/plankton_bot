@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { collectStreamUpdates } from "../live/market-pricing-record-parser.js";
+import {
+  classifySuppressedTradingNoopReason,
+  collectStreamUpdates,
+} from "../live/market-pricing-record-parser.js";
 import type { MarketPricingSnapshot } from "@krabs/domain";
 
 describe("collectStreamUpdates", () => {
@@ -101,9 +104,11 @@ describe("collectStreamUpdates", () => {
     expect(result.emittedUpdateCount).toBe(0);
     expect(result.suppressedTradingNoopCount).toBe(1);
     expect(result.suppressedTradingNoopByReason).toEqual({
-      topOfBook: 1,
-      acceptingOrdersOrBook: 0,
-      minSizeOrSource: 0,
+      topOfBookOnly: 1,
+      bookOnly: 0,
+      lastTradeOnly: 0,
+      tickSizeOnly: 0,
+      mixedNonCritical: 0,
     });
     expect(result.updates).toHaveLength(0);
     expect(state.get("token-a")?.bestBid).toBe(0.4);
@@ -220,9 +225,46 @@ describe("collectStreamUpdates", () => {
 
     expect(result.emittedUpdateCount).toBe(0);
     expect(result.suppressedTradingNoopCount).toBe(1);
+    expect(result.suppressedTradingNoopByReason.lastTradeOnly).toBe(1);
     expect(result.updates).toHaveLength(0);
     expect(state.get("token-a")?.lastTradePrice).toBe(0.44);
     expect(state.get("token-a")?.lastTradeAt).toBe("2026-05-21T00:01:00.000Z");
+  });
+
+  it("classifies mixed non-critical suppression buckets by event semantics", () => {
+    const current: MarketPricingSnapshot = {
+      bestBid: 0.4,
+      bestAsk: 0.46,
+      acceptingOrders: true,
+      enableOrderBook: true,
+      lastTradePrice: 0.43,
+      lastTradeAt: "2026-05-21T00:00:00.000Z",
+      bookSource: "clob",
+    };
+    const next: MarketPricingSnapshot = {
+      ...current,
+      lastTradePrice: 0.44,
+      lastTradeAt: "2026-05-21T00:01:00.000Z",
+    };
+
+    expect(
+      classifySuppressedTradingNoopReason("price_change", current, next, {
+        tokenId: "token-a",
+        pricing: next,
+      }),
+    ).toBe("mixedNonCritical");
+    expect(
+      classifySuppressedTradingNoopReason("last_trade_price", current, next, {
+        tokenId: "token-a",
+        pricing: next,
+      }),
+    ).toBe("lastTradeOnly");
+    expect(
+      classifySuppressedTradingNoopReason("best_bid_ask", current, current, {
+        tokenId: "token-a",
+        pricing: current,
+      }),
+    ).toBe("topOfBookOnly");
   });
 
   it("keeps lifecycle events separate while suppressing no-op pricing updates", () => {

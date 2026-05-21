@@ -46,16 +46,6 @@ export interface WorkerHeartbeatSnapshot {
   readonly workerEventLoopLagMaxMs: number;
 }
 
-export interface WorkerMemorySnapshot {
-  readonly rssMb: number;
-  readonly heapUsedMb: number;
-  readonly heapTotalMb: number;
-  readonly externalMb: number;
-  readonly arrayBuffersMb: number;
-  readonly heapLimitMb: number | null;
-  readonly capturedAt: number;
-}
-
 export interface WorkerUpdateEnvelope {
   readonly updates: readonly MarketPricingStreamUpdate[];
   readonly lifecycleEvents: readonly MarketPricingLifecycleEvent[];
@@ -134,11 +124,6 @@ export type MarketPricingWorkerEvent =
       readonly type: "heartbeat";
       readonly shardId: number;
       readonly heartbeat: WorkerHeartbeatSnapshot;
-    }
-  | {
-      readonly type: "memory";
-      readonly workerId: number;
-      readonly memory: WorkerMemorySnapshot;
     };
 
 export interface MarketPricingWorkerData {
@@ -154,6 +139,4 @@ export interface MarketPricingWorkerData {
   readonly streamStableMs: number;
   readonly heartbeatJitterSeedMs: number;
   readonly startDelayMs: number;
-  readonly memorySampleMs: number;
-  readonly memoryWarnRssMb: number;
 }

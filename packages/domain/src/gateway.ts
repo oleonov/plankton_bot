@@ -267,9 +267,11 @@ export interface MarketPricingStreamLatencySummary {
 }
 
 export interface TradingNoopSuppressionCounts {
-  readonly topOfBook: number;
-  readonly acceptingOrdersOrBook: number;
-  readonly minSizeOrSource: number;
+  readonly topOfBookOnly: number;
+  readonly bookOnly: number;
+  readonly lastTradeOnly: number;
+  readonly tickSizeOnly: number;
+  readonly mixedNonCritical: number;
 }
 
 export interface MarketPricingStreamMetricsSnapshot {
@@ -335,7 +337,7 @@ export interface MarketPricingStreamMetricsSnapshot {
       >
     >;
   }>;
-  /** Per dedicated WS worker memory telemetry, emitted from worker context. */
+  /** Process-wide memory telemetry emitted from the runtime main thread. */
   readonly wsWorkerMemory?: Readonly<{
     readonly rssMb: number;
     readonly heapUsedMb: number;

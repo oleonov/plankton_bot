@@ -20,6 +20,15 @@ describe("buildRuntimeDiagnosticsSnapshot", () => {
         coalescing_flush: { count: 0, maxMs: 0, p95Ms: 0 },
         latency_summary: { count: 0, maxMs: 0, p95Ms: 0 },
         diagnostics_write: { count: 0, maxMs: 0, p95Ms: 0 },
+        metrics_flush_total: { count: 0, maxMs: 0, p95Ms: 0 },
+        metrics_flush_sqlite_writes: { count: 0, maxMs: 0, p95Ms: 0 },
+        metrics_flush_snapshot_serialize: { count: 0, maxMs: 0, p95Ms: 0 },
+        risk_signal_approval: { count: 0, maxMs: 0, p95Ms: 0 },
+        signal_to_order_bridge: { count: 0, maxMs: 0, p95Ms: 0 },
+        worker_non_update_events: { count: 0, maxMs: 0, p95Ms: 0 },
+        discovery_poll_publish: { count: 0, maxMs: 0, p95Ms: 0 },
+        signal_path_aggregate: { count: 0, maxMs: 0, p95Ms: 0 },
+        cooldown_registry_sweep: { count: 0, maxMs: 0, p95Ms: 0 },
       },
     );
 

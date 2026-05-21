@@ -1,4 +1,3 @@
-import { getHeapStatistics } from "node:v8";
 import { parentPort, workerData } from "node:worker_threads";
 import type { MarketPricingSnapshot } from "@krabs/domain";
 import { BoundedQueue } from "./bounded-queue.js";
@@ -26,7 +25,6 @@ import type {
   MarketPricingWorkerEvent,
   SerializedWorkerError,
   WorkerHeartbeatSnapshot,
-  WorkerMemorySnapshot,
   WorkerUpdateEnvelope,
 } from "./market-pricing-worker-protocol.js";
 import { computeReconnectDelayMs } from "./reconnect-backoff.js";
@@ -35,7 +33,6 @@ type ShardBreakerState = "closed" | "open" | "half-open";
 
 const LAG_WARN_COOLDOWN_MS = 30_000;
 const EVENT_LOOP_SAMPLE_MS = 1_000;
-const MB = 1024 * 1024;
 
 if (!parentPort) {
   throw new Error("market-pricing-shard-worker requires parentPort");
@@ -44,13 +41,11 @@ if (!parentPort) {
 class WorkerMarketPricingController {
   private readonly shards = new Map<number, WorkerMarketPricingShard>();
   private readonly pendingTokenIdsByShard = new Map<number, readonly string[]>();
-  private memoryTimer: ReturnType<typeof setInterval> | null = null;
   private activationTimer: ReturnType<typeof setTimeout> | null = null;
   private active = false;
   private closed = false;
 
   constructor(private readonly cfg: MarketPricingWorkerData) {
-    this.startMemorySampler();
     const delayMs = Math.max(0, cfg.startDelayMs);
     if (delayMs === 0) {
       this.activate();
@@ -82,10 +77,6 @@ class WorkerMarketPricingController {
 
   close(): void {
     this.closed = true;
-    if (this.memoryTimer) {
-      clearInterval(this.memoryTimer);
-      this.memoryTimer = null;
-    }
     if (this.activationTimer) {
       clearTimeout(this.activationTimer);
       this.activationTimer = null;
@@ -110,24 +101,6 @@ class WorkerMarketPricingController {
     for (const [shardId, tokenIds] of pending) {
       this.setShardTokenIds(shardId, tokenIds);
     }
-  }
-
-  private startMemorySampler(): void {
-    const sampleMs = Math.max(5_000, this.cfg.memorySampleMs);
-    this.memoryTimer = setInterval(() => {
-      const memory = readMemorySnapshot();
-      this.post({ type: "memory", workerId: this.cfg.workerId, memory });
-      if (memory.rssMb >= this.cfg.memoryWarnRssMb) {
-        this.post({
-          type: "error",
-          error: {
-            message: "market websocket worker memory high",
-            code: "MARKET_WS_WORKER_MEMORY_HIGH",
-            tokenCount: totalTokenCount(this.shards),
-          },
-        });
-      }
-    }, sampleMs);
   }
 
   private post(message: MarketPricingWorkerEvent): void {
@@ -667,32 +640,6 @@ parentPort.on("message", (message: MarketPricingWorkerCommand) => {
     controller.close();
   }
 });
-
-function readMemorySnapshot(): WorkerMemorySnapshot {
-  const memory = process.memoryUsage();
-  const heapLimitMb = getHeapStatistics().heap_size_limit / MB;
-  return {
-    rssMb: roundMb(memory.rss),
-    heapUsedMb: roundMb(memory.heapUsed),
-    heapTotalMb: roundMb(memory.heapTotal),
-    externalMb: roundMb(memory.external),
-    arrayBuffersMb: roundMb(memory.arrayBuffers),
-    heapLimitMb: Number.isFinite(heapLimitMb) ? Number(heapLimitMb.toFixed(1)) : null,
-    capturedAt: Date.now(),
-  };
-}
-
-function totalTokenCount(shards: ReadonlyMap<number, WorkerMarketPricingShard>): number {
-  let count = 0;
-  for (const shard of shards.values()) {
-    count += shard.getDesiredTokenCount();
-  }
-  return count;
-}
-
-function roundMb(bytes: number): number {
-  return Number((bytes / MB).toFixed(1));
-}
 
 function serializeUnknownError(error: unknown): SerializedWorkerError {
   if (error instanceof Error) {

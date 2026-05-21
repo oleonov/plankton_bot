@@ -173,6 +173,8 @@ import { RefreshableSelectionRuleEngine } from "./selection-rule-engine-factory.
 import { backfillLegStateTransitionsFromLedger } from "./modules/leg-state/leg-state-transition-backfill.js";
 import { OrderLifetimeModule } from "./modules/order-lifetime/order-lifetime-module.js";
 import { SamePriceCooldownModule } from "./modules/same-price-cooldown/same-price-cooldown-module.js";
+import { CooldownRegistry } from "./modules/same-price-cooldown/cooldown-registry.js";
+import { SignalPathTelemetry } from "./modules/strategy/signal-path-telemetry.js";
 import { RedeemSweepModule } from "./modules/redeem-sweep/redeem-sweep-module.js";
 import { buildRuntimeDiagnosticsSnapshot } from "./runtime-diagnostics.js";
 import { isGatewayOrderReject } from "./order-rejection-classification.js";
@@ -214,6 +216,24 @@ function summarizeFillLatency(samplesMs: readonly number[]): Record<string, numb
     p95Ms: percentile(sorted, 0.95),
     maxMs: sorted[sorted.length - 1]!,
   };
+}
+
+function buildProcessMemoryTelemetry(memory: NodeJS.MemoryUsage): Record<string, unknown> {
+  const rssMb = roundBytesToMb(memory.rss);
+  return {
+    rssMb,
+    heapUsedMb: roundBytesToMb(memory.heapUsed),
+    heapTotalMb: roundBytesToMb(memory.heapTotal),
+    externalMb: roundBytesToMb(memory.external),
+    arrayBuffersMb: roundBytesToMb(memory.arrayBuffers),
+    maxRssMb: rssMb,
+    byWorker: {},
+    source: "process",
+  };
+}
+
+function roundBytesToMb(bytes: number): number {
+  return Number((bytes / 1024 / 1024).toFixed(1));
 }
 
 function createOrderCapacityWindow(now = Date.now()): OrderCapacityWindow {
@@ -878,6 +898,8 @@ async function main(): Promise<void> {
   });
 
   // 7g. Risk + Inventory module
+  const signalPathTelemetry = new SignalPathTelemetry();
+  const cooldownRegistry = new CooldownRegistry(log.child({ component: "cooldown-registry" }));
   const riskInventoryModule = new RiskInventoryModule({
     bus,
     positionRepo: repos.position,
@@ -898,6 +920,8 @@ async function main(): Promise<void> {
     redeemInFlightGuard: (conditionId) =>
       redeemSweepModule?.isConditionInRedeemFlight(conditionId) ?? false,
     runtimeMetrics,
+    cooldownRegistry,
+    signalPathTelemetry,
     resolutionTracker: marketResolutionTracker,
     markToMarketEnabled: true,
     latestUsablePriceForToken,
@@ -1109,6 +1133,7 @@ async function main(): Promise<void> {
     orderRepo: repos.order,
     cooldownRepo: repos.orderPriceCooldown,
     log,
+    cooldownRegistry,
   });
   const entryLifecycleModule = new EntryLifecycleModule({
     bus,
@@ -1136,6 +1161,7 @@ async function main(): Promise<void> {
     observations: executionPolicyObservationRepo,
     profileId: activeProfile as import("@krabs/domain").ProfileId,
     runtimeMetrics,
+    signalPathTelemetry,
     resolutionTracker: marketResolutionTracker,
     orderLifetime: orderLifetimeModule,
     samePriceCooldown: samePriceCooldownModule,
@@ -1521,6 +1547,12 @@ async function main(): Promise<void> {
   const insertMarketDataStreamActivity = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('market_data_stream_activity', 1, ?, ?)",
   );
+  const deleteSignalPathActivity = ledgerConn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'signal_path_activity'",
+  );
+  const insertSignalPathActivity = ledgerConn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('signal_path_activity', 1, ?, ?)",
+  );
   const upsertSignalActivity = ledgerConn.db.transaction((labels: string, capturedAt: string) => {
     deleteSignalActivity.run();
     insertSignalActivity.run(labels, capturedAt);
@@ -1545,6 +1577,12 @@ async function main(): Promise<void> {
     (labels: string, capturedAt: string) => {
       deleteMarketDataStreamActivity.run();
       insertMarketDataStreamActivity.run(labels, capturedAt);
+    },
+  );
+  const upsertSignalPathActivity = ledgerConn.db.transaction(
+    (labels: string, capturedAt: string) => {
+      deleteSignalPathActivity.run();
+      insertSignalPathActivity.run(labels, capturedAt);
     },
   );
   const readRiskEventCount = (
@@ -1756,175 +1794,236 @@ async function main(): Promise<void> {
 
   // Flush signal + scanner activity to DB every 30 seconds, reset windows every 10 minutes
   setInterval(() => {
-    const now = Date.now();
-    if (now - signalWindow.lastReset > SIGNAL_WINDOW_MS) {
-      signalWindow.produced = 0;
-      signalWindow.approved = 0;
-      signalWindow.rejected = 0;
-      signalWindow.entryApproved = 0;
-      signalWindow.exitApproved = 0;
-      signalWindow.lastReset = now;
-    }
-    if (now - conversionWindow.lastReset > SIGNAL_WINDOW_MS) {
-      conversionWindow.converted = 0;
-      conversionWindow.conversionSkippedByReason.clear();
-      conversionWindow.cacheStatusByStatus.clear();
-      conversionWindow.exchangeAccepted = 0;
-      conversionWindow.exchangeRejectedByCode.clear();
-      conversionWindow.exchangeRejectedByReason.clear();
-      conversionWindow.fills = 0;
-      conversionWindow.fillLatencySamplesMs = [];
-      conversionWindow.cooldownBypassByReason.clear();
-      conversionWindow.hotQuoteRefreshes = 0;
-      conversionWindow.hotLaneActionsByType.clear();
-      conversionWindow.hotLaneStatesByState.clear();
-      conversionWindow.queueJumpAccepted = 0;
-      conversionWindow.queueJumpFills = 0;
-      conversionWindow.lastReset = now;
-    }
-    pruneEntryFillLatencyTracker(entryOrderPlacedAtMsByOrderId, now);
-    upsertSignalActivity(
-      JSON.stringify({
-        produced: signalWindow.produced,
-        approved: signalWindow.approved,
-        rejected: signalWindow.rejected,
-        entryApproved: signalWindow.entryApproved,
-        exitApproved: signalWindow.exitApproved,
-        windowStartMs: signalWindow.lastReset,
-      }),
-      new Date().toISOString(),
-    );
-    upsertSignalConversionActivity(
-      JSON.stringify({
-        converted: conversionWindow.converted,
-        conversionSkippedByReason: Object.fromEntries(conversionWindow.conversionSkippedByReason),
-        cacheStatusByStatus: Object.fromEntries(conversionWindow.cacheStatusByStatus),
-        exchangeAccepted: conversionWindow.exchangeAccepted,
-        exchangeRejectedByCode: Object.fromEntries(conversionWindow.exchangeRejectedByCode),
-        exchangeRejectedByReason: Object.fromEntries(conversionWindow.exchangeRejectedByReason),
-        fills: conversionWindow.fills,
-        fillLatencyMs: summarizeFillLatency(conversionWindow.fillLatencySamplesMs),
-        cooldownBypassByReason: Object.fromEntries(conversionWindow.cooldownBypassByReason),
-        hotQuoteRefreshes: conversionWindow.hotQuoteRefreshes,
-        hotLaneActionsByType: Object.fromEntries(conversionWindow.hotLaneActionsByType),
-        hotLaneStatesByState: Object.fromEntries(conversionWindow.hotLaneStatesByState),
-        queueJumpAccepted: conversionWindow.queueJumpAccepted,
-        queueJumpFills: conversionWindow.queueJumpFills,
-        windowStartMs: conversionWindow.lastReset,
-      }),
-      new Date().toISOString(),
-    );
-    const riskEventSince1h = new Date(now - 60 * 60 * 1000).toISOString();
-    const riskEventSince24h = new Date(now - 24 * 60 * 60 * 1000).toISOString();
-    const riskEventsLast1h = readRiskEventCount(countRiskEventsSince, riskEventSince1h);
-    const riskEventsLast24h = readRiskEventCount(countRiskEventsSince, riskEventSince24h);
-    const signalTelemetryRiskEventsLast1h = readRiskEventCount(
-      countSignalTelemetryRiskEventsSince,
-      riskEventSince1h,
-      SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
-    );
-    const signalTelemetryRiskEventsLast24h = readRiskEventCount(
-      countSignalTelemetryRiskEventsSince,
-      riskEventSince24h,
-      SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
-    );
-    const riskEventVolume = buildRiskEventVolumeSnapshot({
-      last1h: riskEventsLast1h,
-      last24h: riskEventsLast24h,
-      signalTelemetryLast1h: signalTelemetryRiskEventsLast1h,
-      signalTelemetryLast24h: signalTelemetryRiskEventsLast24h,
-      thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,
-      windowStartMs: now - 24 * 60 * 60 * 1000,
-    });
-    upsertRiskEventVolume(JSON.stringify(riskEventVolume), new Date().toISOString());
-    if (
-      riskEventVolume.warning &&
-      now - lastRiskEventVolumeWarningAtMs >= RISK_EVENT_WARNING_COOLDOWN_MS
-    ) {
-      lastRiskEventVolumeWarningAtMs = now;
-      log.warn(
-        {
-          riskEventsLast1h: riskEventVolume.last1h,
-          riskEventsLast24h: riskEventVolume.last24h,
-          signalTelemetryRiskEventsLast1h: riskEventVolume.signalTelemetryLast1h,
-          signalTelemetryRiskEventsLast24h: riskEventVolume.signalTelemetryLast24h,
-          operationalRiskEventsLast1h: riskEventVolume.operationalLast1h,
-          operationalRiskEventsLast24h: riskEventVolume.operationalLast24h,
-          thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,
-        },
-        "risk_events growth threshold exceeded",
+    const metricsFlushStartMs = performance.now();
+    const serializeLabels = (value: unknown): string => {
+      const startMs = performance.now();
+      try {
+        return JSON.stringify(value);
+      } finally {
+        recordStageDuration("metrics_flush_snapshot_serialize", performance.now() - startMs);
+      }
+    };
+    const writeMetric = (write: () => void): void => {
+      const startMs = performance.now();
+      try {
+        write();
+      } finally {
+        recordStageDuration("metrics_flush_sqlite_writes", performance.now() - startMs);
+      }
+    };
+    try {
+      const now = Date.now();
+      if (now - signalWindow.lastReset > SIGNAL_WINDOW_MS) {
+        signalWindow.produced = 0;
+        signalWindow.approved = 0;
+        signalWindow.rejected = 0;
+        signalWindow.entryApproved = 0;
+        signalWindow.exitApproved = 0;
+        signalWindow.lastReset = now;
+      }
+      if (now - conversionWindow.lastReset > SIGNAL_WINDOW_MS) {
+        conversionWindow.converted = 0;
+        conversionWindow.conversionSkippedByReason.clear();
+        conversionWindow.cacheStatusByStatus.clear();
+        conversionWindow.exchangeAccepted = 0;
+        conversionWindow.exchangeRejectedByCode.clear();
+        conversionWindow.exchangeRejectedByReason.clear();
+        conversionWindow.fills = 0;
+        conversionWindow.fillLatencySamplesMs = [];
+        conversionWindow.cooldownBypassByReason.clear();
+        conversionWindow.hotQuoteRefreshes = 0;
+        conversionWindow.hotLaneActionsByType.clear();
+        conversionWindow.hotLaneStatesByState.clear();
+        conversionWindow.queueJumpAccepted = 0;
+        conversionWindow.queueJumpFills = 0;
+        conversionWindow.lastReset = now;
+      }
+      pruneEntryFillLatencyTracker(entryOrderPlacedAtMsByOrderId, now);
+      writeMetric(() =>
+        upsertSignalActivity(
+          serializeLabels({
+            produced: signalWindow.produced,
+            approved: signalWindow.approved,
+            rejected: signalWindow.rejected,
+            entryApproved: signalWindow.entryApproved,
+            exitApproved: signalWindow.exitApproved,
+            windowStartMs: signalWindow.lastReset,
+          }),
+          new Date().toISOString(),
+        ),
       );
-    }
-    if (userOrderStreamModule) {
-      upsertUserOrderStreamActivity(
-        JSON.stringify(userOrderStreamModule.getMetricsSnapshot()),
-        new Date().toISOString(),
+      writeMetric(() =>
+        upsertSignalConversionActivity(
+          serializeLabels({
+            converted: conversionWindow.converted,
+            conversionSkippedByReason: Object.fromEntries(
+              conversionWindow.conversionSkippedByReason,
+            ),
+            cacheStatusByStatus: Object.fromEntries(conversionWindow.cacheStatusByStatus),
+            exchangeAccepted: conversionWindow.exchangeAccepted,
+            exchangeRejectedByCode: Object.fromEntries(conversionWindow.exchangeRejectedByCode),
+            exchangeRejectedByReason: Object.fromEntries(conversionWindow.exchangeRejectedByReason),
+            fills: conversionWindow.fills,
+            fillLatencyMs: summarizeFillLatency(conversionWindow.fillLatencySamplesMs),
+            cooldownBypassByReason: Object.fromEntries(conversionWindow.cooldownBypassByReason),
+            hotQuoteRefreshes: conversionWindow.hotQuoteRefreshes,
+            hotLaneActionsByType: Object.fromEntries(conversionWindow.hotLaneActionsByType),
+            hotLaneStatesByState: Object.fromEntries(conversionWindow.hotLaneStatesByState),
+            queueJumpAccepted: conversionWindow.queueJumpAccepted,
+            queueJumpFills: conversionWindow.queueJumpFills,
+            windowStartMs: conversionWindow.lastReset,
+          }),
+          new Date().toISOString(),
+        ),
       );
-    }
-    upsertMarketDataStreamActivity(
-      JSON.stringify({
-        ...marketDataModule.getMetricsSnapshot(),
-        ...marketScannerModule.getHintMetricsSnapshot(),
-        ...resolutionModule.getHintMetricsSnapshot(),
-      }),
-      new Date().toISOString(),
-    );
-    // Reset scanner window on same schedule as signal window
-    if (now - scannerWindow.lastReset > SIGNAL_WINDOW_MS) {
-      scannerWindow.candidatesConsidered = 0;
-      scannerWindow.blockedByResolutionBuffer = 0;
-      scannerWindow.blockedByWindow = 0;
-      scannerWindow.scanPrimeSkippedByPolicy = 0;
-      scannerWindow.lastReset = now;
-    }
-    if (now - orderCapacityWindow.lastReset > SIGNAL_WINDOW_MS) {
-      resetOrderCapacityWindow(orderCapacityWindow, now);
-    }
-    deleteScanner.run();
-    insertScanner.run(
-      JSON.stringify({
-        candidatesConsidered: scannerWindow.candidatesConsidered,
-        blockedByResolutionBuffer: scannerWindow.blockedByResolutionBuffer,
-        blockedByWindow: scannerWindow.blockedByWindow,
-        scanPrimeSkippedByPolicy: scannerWindow.scanPrimeSkippedByPolicy,
-      }),
-      new Date().toISOString(),
-    );
-    deleteExecutionQueue.run();
-    insertExecutionQueue.run(
-      JSON.stringify(executionModule.getDiagnostics()),
-      new Date().toISOString(),
-    );
-    deleteOrderCapacityActivity.run();
-    insertOrderCapacityActivity.run(
-      JSON.stringify(serializeOrderCapacityWindow(orderCapacityWindow)),
-      new Date().toISOString(),
-    );
-
-    // Write trading-state snapshot every 10 minutes
-    const SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
-    if (now - lastSnapshotMs >= SNAPSHOT_INTERVAL_MS) {
-      lastSnapshotMs = now;
-
-      const sa = signalWindow;
-      const tradingState = resolveTradingState({
-        signalWindow: {
-          produced: sa.produced,
-          approved: sa.approved,
-          rejected: sa.rejected,
-          entryApproved: sa.entryApproved,
-          exitApproved: sa.exitApproved,
-        },
+      const signalPathSnapshot = signalPathTelemetry.snapshotAndReset();
+      const signalPathAggregateStartMs = performance.now();
+      try {
+        signalPathTelemetry.logAggregate(log, signalPathSnapshot, 30);
+      } finally {
+        recordStageDuration(
+          "signal_path_aggregate",
+          performance.now() - signalPathAggregateStartMs,
+        );
+      }
+      writeMetric(() =>
+        upsertSignalPathActivity(
+          serializeLabels({
+            ...signalPathSnapshot,
+            cooldown: cooldownRegistry.snapshot(),
+          }),
+          new Date().toISOString(),
+        ),
+      );
+      const riskEventSince1h = new Date(now - 60 * 60 * 1000).toISOString();
+      const riskEventSince24h = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+      const riskEventsLast1h = readRiskEventCount(countRiskEventsSince, riskEventSince1h);
+      const riskEventsLast24h = readRiskEventCount(countRiskEventsSince, riskEventSince24h);
+      const signalTelemetryRiskEventsLast1h = readRiskEventCount(
+        countSignalTelemetryRiskEventsSince,
+        riskEventSince1h,
+        SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
+      );
+      const signalTelemetryRiskEventsLast24h = readRiskEventCount(
+        countSignalTelemetryRiskEventsSince,
+        riskEventSince24h,
+        SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
+      );
+      const riskEventVolume = buildRiskEventVolumeSnapshot({
+        last1h: riskEventsLast1h,
+        last24h: riskEventsLast24h,
+        signalTelemetryLast1h: signalTelemetryRiskEventsLast1h,
+        signalTelemetryLast24h: signalTelemetryRiskEventsLast24h,
+        thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,
+        windowStartMs: now - 24 * 60 * 60 * 1000,
+      });
+      writeMetric(() =>
+        upsertRiskEventVolume(serializeLabels(riskEventVolume), new Date().toISOString()),
+      );
+      if (
+        riskEventVolume.warning &&
+        now - lastRiskEventVolumeWarningAtMs >= RISK_EVENT_WARNING_COOLDOWN_MS
+      ) {
+        lastRiskEventVolumeWarningAtMs = now;
+        log.warn(
+          {
+            riskEventsLast1h: riskEventVolume.last1h,
+            riskEventsLast24h: riskEventVolume.last24h,
+            signalTelemetryRiskEventsLast1h: riskEventVolume.signalTelemetryLast1h,
+            signalTelemetryRiskEventsLast24h: riskEventVolume.signalTelemetryLast24h,
+            operationalRiskEventsLast1h: riskEventVolume.operationalLast1h,
+            operationalRiskEventsLast24h: riskEventVolume.operationalLast24h,
+            thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,
+          },
+          "risk_events growth threshold exceeded",
+        );
+      }
+      if (userOrderStreamModule) {
+        writeMetric(() =>
+          upsertUserOrderStreamActivity(
+            serializeLabels(userOrderStreamModule.getMetricsSnapshot()),
+            new Date().toISOString(),
+          ),
+        );
+      }
+      writeMetric(() =>
+        upsertMarketDataStreamActivity(
+          serializeLabels({
+            ...marketDataModule.getMetricsSnapshot(),
+            ...marketScannerModule.getHintMetricsSnapshot(),
+            ...resolutionModule.getHintMetricsSnapshot(),
+            wsWorkerMemory: buildProcessMemoryTelemetry(process.memoryUsage()),
+          }),
+          new Date().toISOString(),
+        ),
+      );
+      // Reset scanner window on same schedule as signal window
+      if (now - scannerWindow.lastReset > SIGNAL_WINDOW_MS) {
+        scannerWindow.candidatesConsidered = 0;
+        scannerWindow.blockedByResolutionBuffer = 0;
+        scannerWindow.blockedByWindow = 0;
+        scannerWindow.scanPrimeSkippedByPolicy = 0;
+        scannerWindow.lastReset = now;
+      }
+      if (now - orderCapacityWindow.lastReset > SIGNAL_WINDOW_MS) {
+        resetOrderCapacityWindow(orderCapacityWindow, now);
+      }
+      writeMetric(() => {
+        deleteScanner.run();
+        insertScanner.run(
+          serializeLabels({
+            candidatesConsidered: scannerWindow.candidatesConsidered,
+            blockedByResolutionBuffer: scannerWindow.blockedByResolutionBuffer,
+            blockedByWindow: scannerWindow.blockedByWindow,
+            scanPrimeSkippedByPolicy: scannerWindow.scanPrimeSkippedByPolicy,
+          }),
+          new Date().toISOString(),
+        );
+      });
+      writeMetric(() => {
+        deleteExecutionQueue.run();
+        insertExecutionQueue.run(
+          serializeLabels(executionModule.getDiagnostics()),
+          new Date().toISOString(),
+        );
+      });
+      writeMetric(() => {
+        deleteOrderCapacityActivity.run();
+        insertOrderCapacityActivity.run(
+          serializeLabels(serializeOrderCapacityWindow(orderCapacityWindow)),
+          new Date().toISOString(),
+        );
       });
 
-      insertSnapshot.run(
-        tradingState,
-        sa.produced,
-        sa.approved,
-        sa.rejected,
-        new Date().toISOString(),
-      );
-      pruneSnapshots.run();
+      // Write trading-state snapshot every 10 minutes
+      const SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
+      if (now - lastSnapshotMs >= SNAPSHOT_INTERVAL_MS) {
+        lastSnapshotMs = now;
+
+        const sa = signalWindow;
+        const tradingState = resolveTradingState({
+          signalWindow: {
+            produced: sa.produced,
+            approved: sa.approved,
+            rejected: sa.rejected,
+            entryApproved: sa.entryApproved,
+            exitApproved: sa.exitApproved,
+          },
+        });
+
+        writeMetric(() => {
+          insertSnapshot.run(
+            tradingState,
+            sa.produced,
+            sa.approved,
+            sa.rejected,
+            new Date().toISOString(),
+          );
+          pruneSnapshots.run();
+        });
+      }
+    } finally {
+      recordStageDuration("metrics_flush_total", performance.now() - metricsFlushStartMs);
     }
   }, 30_000);
 
@@ -1963,7 +2062,17 @@ async function main(): Promise<void> {
   } catch (err) {
     log.warn({ err }, "gc_pause_observer_unavailable");
   }
+  let diagnosticsTickCount = 0;
   const runtimeDiagnosticsTimer = setInterval(() => {
+    diagnosticsTickCount++;
+    if (diagnosticsTickCount % 10 === 0) {
+      const cooldownSweepStartMs = performance.now();
+      try {
+        cooldownRegistry.sweepExpired(Date.now());
+      } finally {
+        recordStageDuration("cooldown_registry_sweep", performance.now() - cooldownSweepStartMs);
+      }
+    }
     const eventLoopLag = {
       p50Ms: Math.round(loopLag.percentile(50) / 1e6),
       p95Ms: Math.round(loopLag.percentile(95) / 1e6),

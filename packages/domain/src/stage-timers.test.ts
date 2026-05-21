@@ -28,4 +28,22 @@ describe("stage timers", () => {
 
     expect(snapshotStageTimers().hub_dispatch.count).toBe(0);
   });
+
+  it("exposes R75 timer groups in the same reset registry", () => {
+    resetStageTimers();
+    recordStageDuration("metrics_flush_total", 12);
+    recordStageDuration("risk_signal_approval", 3);
+    recordStageDuration("worker_non_update_events", 1);
+    recordStageDuration("signal_path_aggregate", 2);
+    recordStageDuration("cooldown_registry_sweep", 4);
+
+    const snapshot = snapshotAndResetStageTimers();
+
+    expect(snapshot.metrics_flush_total.maxMs).toBe(12);
+    expect(snapshot.risk_signal_approval.count).toBe(1);
+    expect(snapshot.worker_non_update_events.p95Ms).toBe(1);
+    expect(snapshot.signal_path_aggregate.maxMs).toBe(2);
+    expect(snapshot.cooldown_registry_sweep.maxMs).toBe(4);
+    expect(snapshotStageTimers().metrics_flush_total.count).toBe(0);
+  });
 });
