@@ -400,6 +400,12 @@ export interface CoverageMetricsData {
   signals_suppressed_early_cooldown_total: number;
   signals_suppressed_early_cooldown_by_token: Record<string, number>;
   cooldown_registry_size: number;
+  cooldown_signal_dedupe_total: number;
+  cooldown_signal_dedupe_early_only: number;
+  cooldown_signal_dedupe_late_only: number;
+  cooldown_signal_dedupe_early_and_late: number;
+  cooldown_signal_dedupe_duplicate_early: number;
+  cooldown_signal_dedupe_duplicate_late: number;
   http_errors_by_class_1h: Record<string, number>;
   ws_heartbeat: {
     pingSent: number;

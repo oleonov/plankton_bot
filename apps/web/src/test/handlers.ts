@@ -350,6 +350,12 @@ export const handlers = [
       signals_suppressed_early_cooldown_total: 12,
       signals_suppressed_early_cooldown_by_token: { "token-1": 12 },
       cooldown_registry_size: 3,
+      cooldown_signal_dedupe_total: 12,
+      cooldown_signal_dedupe_early_only: 7,
+      cooldown_signal_dedupe_late_only: 5,
+      cooldown_signal_dedupe_early_and_late: 0,
+      cooldown_signal_dedupe_duplicate_early: 0,
+      cooldown_signal_dedupe_duplicate_late: 0,
       http_errors_by_class_1h: { "gamma-pricing:timeout": 2 },
       ws_heartbeat: {
         pingSent: 20,

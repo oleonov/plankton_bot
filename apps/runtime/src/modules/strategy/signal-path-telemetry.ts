@@ -4,9 +4,22 @@ export interface SignalPathAggregateSnapshot {
   readonly signalsApproved: number;
   readonly signalsSkippedLateCooldown: number;
   readonly signalsSkippedEarlyCooldown: number;
+  readonly cooldownSignalDedupe: CooldownSignalDedupeSnapshot;
   readonly signalsRejectedByReason: Readonly<Record<string, number>>;
   readonly sampleSignalId: string | null;
 }
+
+export interface CooldownSignalDedupeSnapshot {
+  readonly total: number;
+  readonly earlyOnly: number;
+  readonly lateOnly: number;
+  readonly earlyAndLate: number;
+  readonly duplicateEarly: number;
+  readonly duplicateLate: number;
+}
+
+const COOLDOWN_PHASE_EARLY = 1;
+const COOLDOWN_PHASE_LATE = 2;
 
 export class SignalPathTelemetry {
   private signalsApproved = 0;
@@ -14,8 +27,11 @@ export class SignalPathTelemetry {
   private signalsSkippedEarlyCooldown = 0;
   private sampleSignalId: string | null = null;
   private readonly signalsRejectedByReason = new Map<string, number>();
+  private readonly cooldownSignalPhases = new Map<string, number>();
   private approvedDebugCounter = 0;
   private lateCooldownDebugCounter = 0;
+  private duplicateEarlyCooldownSignals = 0;
+  private duplicateLateCooldownSignals = 0;
 
   recordApproved(signalId: string): boolean {
     this.signalsApproved++;
@@ -27,6 +43,7 @@ export class SignalPathTelemetry {
   recordLateCooldown(signalId: string): boolean {
     this.signalsSkippedLateCooldown++;
     this.sampleSignalId = signalId;
+    this.recordCooldownPhase(signalId, COOLDOWN_PHASE_LATE);
     this.lateCooldownDebugCounter++;
     return this.lateCooldownDebugCounter % 100 === 0;
   }
@@ -34,6 +51,7 @@ export class SignalPathTelemetry {
   recordEarlyCooldown(signalId: string): void {
     this.signalsSkippedEarlyCooldown++;
     this.sampleSignalId = signalId;
+    this.recordCooldownPhase(signalId, COOLDOWN_PHASE_EARLY);
   }
 
   recordRejected(signalId: string, reason: string): void {
@@ -46,6 +64,7 @@ export class SignalPathTelemetry {
       signalsApproved: this.signalsApproved,
       signalsSkippedLateCooldown: this.signalsSkippedLateCooldown,
       signalsSkippedEarlyCooldown: this.signalsSkippedEarlyCooldown,
+      cooldownSignalDedupe: this.snapshotCooldownSignalDedupe(),
       signalsRejectedByReason: Object.fromEntries(this.signalsRejectedByReason),
       sampleSignalId: this.sampleSignalId,
     };
@@ -53,6 +72,9 @@ export class SignalPathTelemetry {
     this.signalsSkippedLateCooldown = 0;
     this.signalsSkippedEarlyCooldown = 0;
     this.signalsRejectedByReason.clear();
+    this.cooldownSignalPhases.clear();
+    this.duplicateEarlyCooldownSignals = 0;
+    this.duplicateLateCooldownSignals = 0;
     this.sampleSignalId = null;
     return snapshot;
   }
@@ -77,11 +99,53 @@ export class SignalPathTelemetry {
         signals_approved: snapshot.signalsApproved,
         signals_skipped_late_cooldown: snapshot.signalsSkippedLateCooldown,
         signals_skipped_early_cooldown: snapshot.signalsSkippedEarlyCooldown,
+        cooldown_signal_dedupe_total: snapshot.cooldownSignalDedupe.total,
+        cooldown_signal_dedupe_early_only: snapshot.cooldownSignalDedupe.earlyOnly,
+        cooldown_signal_dedupe_late_only: snapshot.cooldownSignalDedupe.lateOnly,
+        cooldown_signal_dedupe_early_and_late: snapshot.cooldownSignalDedupe.earlyAndLate,
+        cooldown_signal_dedupe_duplicate_early: snapshot.cooldownSignalDedupe.duplicateEarly,
+        cooldown_signal_dedupe_duplicate_late: snapshot.cooldownSignalDedupe.duplicateLate,
         ...rejectedFields,
         sample_signal_id: snapshot.sampleSignalId,
       },
       "signal path aggregate",
     );
+  }
+
+  private recordCooldownPhase(signalId: string, phase: number): void {
+    const current = this.cooldownSignalPhases.get(signalId) ?? 0;
+    if ((current & phase) !== 0) {
+      if (phase === COOLDOWN_PHASE_EARLY) {
+        this.duplicateEarlyCooldownSignals++;
+      } else {
+        this.duplicateLateCooldownSignals++;
+      }
+      return;
+    }
+    this.cooldownSignalPhases.set(signalId, current | phase);
+  }
+
+  private snapshotCooldownSignalDedupe(): CooldownSignalDedupeSnapshot {
+    let earlyOnly = 0;
+    let lateOnly = 0;
+    let earlyAndLate = 0;
+    for (const phase of this.cooldownSignalPhases.values()) {
+      if (phase === COOLDOWN_PHASE_EARLY) {
+        earlyOnly++;
+      } else if (phase === COOLDOWN_PHASE_LATE) {
+        lateOnly++;
+      } else if (phase === (COOLDOWN_PHASE_EARLY | COOLDOWN_PHASE_LATE)) {
+        earlyAndLate++;
+      }
+    }
+    return {
+      total: this.cooldownSignalPhases.size,
+      earlyOnly,
+      lateOnly,
+      earlyAndLate,
+      duplicateEarly: this.duplicateEarlyCooldownSignals,
+      duplicateLate: this.duplicateLateCooldownSignals,
+    };
   }
 }
 

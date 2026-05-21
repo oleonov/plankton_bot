@@ -110,6 +110,7 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const runtimeDiagnostics = parseJsonObject(runtimeDiagnosticsRow?.labels);
     const signalPath = parseJsonObject(signalPathRow?.labels);
     const cooldownTelemetry = readObject(signalPath, "cooldown");
+    const cooldownSignalDedupe = readObject(signalPath, "cooldownSignalDedupe");
     const eventLoopLag = readObject(runtimeDiagnostics, "eventLoopLagMs");
     const gcPause = readObject(runtimeDiagnostics, "gcPauseMs");
     const stageTimers = readObject(runtimeDiagnostics, "stageTimers");
@@ -311,6 +312,13 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
         "signalsSuppressedEarlyCooldownByToken",
       ),
       cooldown_registry_size: readNumber(cooldownTelemetry, "cooldownRegistrySize") ?? 0,
+      cooldown_signal_dedupe_total: readNumber(cooldownSignalDedupe, "total") ?? 0,
+      cooldown_signal_dedupe_early_only: readNumber(cooldownSignalDedupe, "earlyOnly") ?? 0,
+      cooldown_signal_dedupe_late_only: readNumber(cooldownSignalDedupe, "lateOnly") ?? 0,
+      cooldown_signal_dedupe_early_and_late: readNumber(cooldownSignalDedupe, "earlyAndLate") ?? 0,
+      cooldown_signal_dedupe_duplicate_early:
+        readNumber(cooldownSignalDedupe, "duplicateEarly") ?? 0,
+      cooldown_signal_dedupe_duplicate_late: readNumber(cooldownSignalDedupe, "duplicateLate") ?? 0,
       http_errors_by_class_1h: aggregateHttpErrors(httpErrorRows),
       ws_heartbeat: wsHeartbeat,
       ws_worker_memory: wsWorkerMemory,
