@@ -1,5 +1,9 @@
 import type { ParsedRecordMetrics } from "./market-pricing-ws-protocol.js";
-import type { MarketPricingLifecycleEvent, MarketPricingStreamUpdate } from "@krabs/domain";
+import type {
+  MarketPricingLifecycleEvent,
+  MarketPricingStreamUpdate,
+  TradingNoopSuppressionCounts,
+} from "@krabs/domain";
 
 export type MarketPricingWorkerCommand =
   | {
@@ -56,10 +60,22 @@ export interface WorkerUpdateEnvelope {
   readonly updates: readonly MarketPricingStreamUpdate[];
   readonly lifecycleEvents: readonly MarketPricingLifecycleEvent[];
   readonly metrics: ParsedRecordMetrics;
+  readonly parsedUpdateCount: number;
+  readonly emittedUpdateCount: number;
   readonly noopUpdateCount: number;
+  readonly suppressedTradingNoopCount: number;
+  readonly suppressedTradingNoopByReason: TradingNoopSuppressionCounts;
   readonly bookEventCount: number;
   readonly marketResolvedEventCount: number;
   readonly newMarketEventCount: number;
+}
+
+export interface WorkerUpdateBatchCounts {
+  readonly parsedUpdateCount: number;
+  readonly emittedUpdateCount: number;
+  readonly noopUpdateCount: number;
+  readonly suppressedTradingNoopCount: number;
+  readonly suppressedTradingNoopByReason: TradingNoopSuppressionCounts;
 }
 
 export type MarketPricingWorkerEvent =

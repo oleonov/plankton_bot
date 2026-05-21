@@ -13,6 +13,14 @@ describe("buildRuntimeDiagnosticsSnapshot", () => {
         external: 4 * 1024 * 1024,
         arrayBuffers: 2 * 1024 * 1024,
       },
+      {
+        ipc_decode: { count: 1, maxMs: 2, p95Ms: 2 },
+        handle_worker_batch: { count: 0, maxMs: 0, p95Ms: 0 },
+        hub_dispatch: { count: 0, maxMs: 0, p95Ms: 0 },
+        coalescing_flush: { count: 0, maxMs: 0, p95Ms: 0 },
+        latency_summary: { count: 0, maxMs: 0, p95Ms: 0 },
+        diagnostics_write: { count: 0, maxMs: 0, p95Ms: 0 },
+      },
     );
 
     expect(snapshot.eventLoopLagMs).toEqual({ p50Ms: 10, p95Ms: 25, p99Ms: 40, maxMs: 55 });
@@ -31,5 +39,6 @@ describe("buildRuntimeDiagnosticsSnapshot", () => {
       external: 4,
       arrayBuffers: 2,
     });
+    expect(snapshot.stageTimers.ipc_decode).toEqual({ count: 1, maxMs: 2, p95Ms: 2 });
   });
 });

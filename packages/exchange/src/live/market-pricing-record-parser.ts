@@ -3,6 +3,7 @@ import {
   type MarketPricingLifecycleEvent,
   type MarketPricingSnapshot,
   type MarketPricingStreamUpdate,
+  type TradingNoopSuppressionCounts,
 } from "@krabs/domain";
 import { mapOrderBook } from "../mappers.js";
 import {
@@ -12,12 +13,20 @@ import {
 } from "./market-data-stream-shared.js";
 import { noteLatencySample } from "./market-pricing-ws-protocol.js";
 
+type MutableSuppressionCounts = {
+  -readonly [K in keyof TradingNoopSuppressionCounts]: TradingNoopSuppressionCounts[K];
+};
+
 export interface CollectStreamUpdatesResult {
   readonly rawRecordCount: number;
   readonly updates: readonly MarketPricingStreamUpdate[];
   readonly lifecycleEvents: readonly MarketPricingLifecycleEvent[];
   readonly eventCount: number;
+  readonly parsedUpdateCount: number;
+  readonly emittedUpdateCount: number;
   readonly noopUpdateCount: number;
+  readonly suppressedTradingNoopCount: number;
+  readonly suppressedTradingNoopByReason: TradingNoopSuppressionCounts;
   readonly bookEventCount: number;
   readonly marketResolvedEventCount: number;
   readonly newMarketEventCount: number;
@@ -33,7 +42,10 @@ export function collectStreamUpdates(
   const lifecycleEvents: MarketPricingLifecycleEvent[] = [];
   const latencySamplesMs: number[] = [];
   let eventCount = 0;
+  let parsedUpdateCount = 0;
   let noopUpdateCount = 0;
+  let suppressedTradingNoopCount = 0;
+  const suppressedTradingNoopByReason = createEmptySuppressionCounts();
   let bookEventCount = 0;
   let marketResolvedEventCount = 0;
   let newMarketEventCount = 0;
@@ -58,9 +70,15 @@ export function collectStreamUpdates(
           lastTradeAt: parseOptionalIsoTimestamp(raw.timestamp) ?? current.lastTradeAt ?? null,
           bookSource: "clob",
         };
-        pricingByToken.set(tokenId, next);
-        updates.push({ tokenId, pricing: next });
+        const update = { tokenId, pricing: next };
         eventCount++;
+        parsedUpdateCount++;
+        if (recordParsedUpdate(pricingByToken, tokenId, current, next, update)) {
+          updates.push(update);
+        } else {
+          suppressedTradingNoopCount++;
+          incrementSuppressionReason(suppressedTradingNoopByReason, current, next);
+        }
         if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
         noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
       }
@@ -118,9 +136,15 @@ export function collectStreamUpdates(
         minOrderSize: book.minOrderSize ?? current.minOrderSize ?? null,
         bookSource: "clob",
       };
-      pricingByToken.set(tokenId, next);
-      updates.push({ tokenId, pricing: next, book });
+      const update = { tokenId, pricing: next, book };
       eventCount++;
+      parsedUpdateCount++;
+      if (recordParsedUpdate(pricingByToken, tokenId, current, next, update)) {
+        updates.push(update);
+      } else {
+        suppressedTradingNoopCount++;
+        incrementSuppressionReason(suppressedTradingNoopByReason, current, next);
+      }
       if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       bookEventCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
@@ -134,9 +158,15 @@ export function collectStreamUpdates(
         bestAsk: parseOptionalNumber(raw.best_ask),
         bookSource: "clob",
       };
-      pricingByToken.set(tokenId, next);
-      updates.push({ tokenId, pricing: next });
+      const update = { tokenId, pricing: next };
       eventCount++;
+      parsedUpdateCount++;
+      if (recordParsedUpdate(pricingByToken, tokenId, current, next, update)) {
+        updates.push(update);
+      } else {
+        suppressedTradingNoopCount++;
+        incrementSuppressionReason(suppressedTradingNoopByReason, current, next);
+      }
       if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
       continue;
@@ -149,9 +179,15 @@ export function collectStreamUpdates(
         lastTradeAt: parseOptionalIsoTimestamp(raw.timestamp) ?? current.lastTradeAt ?? null,
         bookSource: "clob",
       };
-      pricingByToken.set(tokenId, next);
-      updates.push({ tokenId, pricing: next });
+      const update = { tokenId, pricing: next };
       eventCount++;
+      parsedUpdateCount++;
+      if (recordParsedUpdate(pricingByToken, tokenId, current, next, update)) {
+        updates.push(update);
+      } else {
+        suppressedTradingNoopCount++;
+        incrementSuppressionReason(suppressedTradingNoopByReason, current, next);
+      }
       if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
       continue;
@@ -166,6 +202,7 @@ export function collectStreamUpdates(
         tickSize: nextTickSize,
       });
       eventCount++;
+      parsedUpdateCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
       continue;
     }
@@ -177,9 +214,15 @@ export function collectStreamUpdates(
         bestAsk: parseOptionalNumber(raw.best_ask) ?? current.bestAsk,
         bookSource: "clob",
       };
-      pricingByToken.set(tokenId, next);
-      updates.push({ tokenId, pricing: next });
+      const update = { tokenId, pricing: next };
       eventCount++;
+      parsedUpdateCount++;
+      if (recordParsedUpdate(pricingByToken, tokenId, current, next, update)) {
+        updates.push(update);
+      } else {
+        suppressedTradingNoopCount++;
+        incrementSuppressionReason(suppressedTradingNoopByReason, current, next);
+      }
       if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
     }
@@ -190,7 +233,11 @@ export function collectStreamUpdates(
     updates,
     lifecycleEvents,
     eventCount,
+    parsedUpdateCount,
+    emittedUpdateCount: updates.length,
     noopUpdateCount,
+    suppressedTradingNoopCount,
+    suppressedTradingNoopByReason,
     bookEventCount,
     marketResolvedEventCount,
     newMarketEventCount,
@@ -198,11 +245,65 @@ export function collectStreamUpdates(
   };
 }
 
+function recordParsedUpdate(
+  pricingByToken: Map<string, MarketPricingSnapshot>,
+  tokenId: string,
+  current: MarketPricingSnapshot,
+  next: MarketPricingSnapshot,
+  update: MarketPricingStreamUpdate,
+): boolean {
+  pricingByToken.set(tokenId, next);
+  return !isTradingSemanticNoop(current, next, update);
+}
+
+export function isTradingSemanticNoop(
+  prev: MarketPricingSnapshot,
+  next: MarketPricingSnapshot,
+  update: MarketPricingStreamUpdate,
+): boolean {
+  if (update.tickSize != null) return false;
+  if (update.book != null) return false;
+  if (prev.bestBid !== next.bestBid) return false;
+  if (prev.bestAsk !== next.bestAsk) return false;
+  if (prev.acceptingOrders !== next.acceptingOrders) return false;
+  if (prev.enableOrderBook !== next.enableOrderBook) return false;
+  if (prev.minOrderSize !== next.minOrderSize) return false;
+  if (prev.bookSource !== next.bookSource) return false;
+  return true;
+}
+
 function isNoopTopOfBookUpdate(
   current: MarketPricingSnapshot,
   next: MarketPricingSnapshot,
 ): boolean {
   return current.bestBid === next.bestBid && current.bestAsk === next.bestAsk;
+}
+
+function createEmptySuppressionCounts(): MutableSuppressionCounts {
+  return {
+    topOfBook: 0,
+    acceptingOrdersOrBook: 0,
+    minSizeOrSource: 0,
+  };
+}
+
+function incrementSuppressionReason(
+  counts: MutableSuppressionCounts,
+  current: MarketPricingSnapshot,
+  next: MarketPricingSnapshot,
+): void {
+  if (current.bestBid === next.bestBid && current.bestAsk === next.bestAsk) {
+    counts.topOfBook++;
+    return;
+  }
+  if (
+    current.acceptingOrders === next.acceptingOrders &&
+    current.enableOrderBook === next.enableOrderBook
+  ) {
+    counts.acceptingOrdersOrBook++;
+    return;
+  }
+  counts.minSizeOrSource++;
 }
 
 function getCurrentPricing(

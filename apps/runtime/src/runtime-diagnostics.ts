@@ -1,4 +1,5 @@
 import type { LatencySnapshot } from "./modules/algo-decision/decision-metrics.js";
+import type { StageTimerSnapshotMap } from "@krabs/domain";
 
 export interface EventLoopLagSnapshot {
   p50Ms: number;
@@ -17,12 +18,14 @@ export interface RuntimeDiagnosticsSnapshot {
     external: number;
     arrayBuffers: number;
   };
+  stageTimers: StageTimerSnapshotMap;
 }
 
 export function buildRuntimeDiagnosticsSnapshot(
   eventLoopLagMs: EventLoopLagSnapshot,
   gcPauseMs: LatencySnapshot,
   memory: NodeJS.MemoryUsage,
+  stageTimers: StageTimerSnapshotMap,
 ): RuntimeDiagnosticsSnapshot {
   return {
     eventLoopLagMs,
@@ -34,6 +37,7 @@ export function buildRuntimeDiagnosticsSnapshot(
       external: bytesToMiB(memory.external),
       arrayBuffers: bytesToMiB(memory.arrayBuffers),
     },
+    stageTimers,
   };
 }
 

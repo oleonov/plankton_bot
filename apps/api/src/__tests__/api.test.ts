@@ -701,12 +701,12 @@ describe("GET /status", () => {
       DELETE FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity';
       DELETE FROM runtime_metrics WHERE metric_name IN ('algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
-      VALUES ('market_data_stream_activity', 1, '{"trackedTokenCount":2,"wsEventsReceivedPerSec":7.5,"rawWsRecords":120,"rawWsRecordsPerSec":2,"parsedUpdates":90,"parsedUpdatesPerSec":1.5,"noopUpdates":30,"noopUpdatesPerSec":0.5,"hubFilterChecked":450,"hubFilterCheckedPerSec":7.5,"hubFilterPassed":90,"hubFilterPassedPerSec":1.5,"shardCount":2,"wsHeartbeat":{"pingSent":4,"pongReceived":3,"timeoutFired":1,"timeoutSuppressedByInbound":2,"workerEventLoopLagMaxMs":11,"byShard":{"0":{"pingSent":2,"pongReceived":2,"timeoutFired":0,"timeoutSuppressedByInbound":1,"lastPingSentAt":1779292800000,"lastPongAt":1779292800010,"lastInboundMessageAt":1779292800010,"workerEventLoopLagMaxMs":5}}},"v4AdmissionTelemetry":{"evaluatedTotal":10,"admitCountTotal":2,"rejectCountTotal":8,"admitRate":0.2,"admitCountByCategory":{"crypto-btc":2},"seenCountByCategory":{"crypto-btc":3},"admitRateByCategory":{"crypto-btc":0.6666666667},"rejectCountByReason":{"rejected_category_not_in_hot_cats":5,"rejected_liquidity_below_100":2,"rejected_volume_below_5":1,"rejected_no_orderbook_proxy":0}}}', '2026-05-18T00:00:00Z');
+      VALUES ('market_data_stream_activity', 1, '{"trackedTokenCount":2,"wsEventsReceivedPerSec":7.5,"rawWsRecords":120,"rawWsRecordsPerSec":2,"parsedUpdates":90,"parsedUpdatesPerSec":1.5,"emittedUpdates":15,"emittedUpdatesPerSec":0.25,"noopUpdates":30,"noopUpdatesPerSec":0.5,"suppressedTradingNoopCountTotal":75,"suppressedTradingNoopPerSec":1.25,"suppressedTradingNoopByReason":{"topOfBook":70,"acceptingOrdersOrBook":3,"minSizeOrSource":2},"hubFilterChecked":450,"hubFilterCheckedPerSec":7.5,"hubFilterPassed":90,"hubFilterPassedPerSec":1.5,"shardCount":2,"wsHeartbeat":{"pingSent":4,"pongReceived":3,"timeoutFired":1,"timeoutSuppressedByInbound":2,"workerEventLoopLagMaxMs":11,"byShard":{"0":{"pingSent":2,"pongReceived":2,"timeoutFired":0,"timeoutSuppressedByInbound":1,"lastPingSentAt":1779292800000,"lastPongAt":1779292800010,"lastInboundMessageAt":1779292800010,"workerEventLoopLagMaxMs":5}}},"v4AdmissionTelemetry":{"evaluatedTotal":10,"admitCountTotal":2,"rejectCountTotal":8,"admitRate":0.2,"admitCountByCategory":{"crypto-btc":2},"seenCountByCategory":{"crypto-btc":3},"admitRateByCategory":{"crypto-btc":0.6666666667},"rejectCountByReason":{"rejected_category_not_in_hot_cats":5,"rejected_liquidity_below_100":2,"rejected_volume_below_5":1,"rejected_no_orderbook_proxy":0}}}', '2026-05-18T00:00:00Z');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES
         ('algo_decision_latency', 123, '{"p95Ms":123,"p99Ms":456}', '2026-05-18T00:00:00Z'),
         ('r23_cache_activity', 0.5, '{"hitRate":0.5,"hits":1,"misses":1,"invocations":2}', '2026-05-18T00:00:00Z'),
-        ('runtime_diagnostics', 12, '{"eventLoopLagMs":{"p95Ms":12,"maxMs":37},"gcPauseMs":{"maxMs":4}}', '2026-05-18T00:00:00Z');
+        ('runtime_diagnostics', 12, '{"eventLoopLagMs":{"p95Ms":12,"maxMs":37},"gcPauseMs":{"maxMs":4},"stageTimers":{"ipc_decode":{"maxMs":1.2,"p95Ms":0.8},"handle_worker_batch":{"maxMs":2.2,"p95Ms":1.8},"hub_dispatch":{"maxMs":3.2,"p95Ms":2.8},"coalescing_flush":{"maxMs":4.2,"p95Ms":3.8},"latency_summary":{"maxMs":5.2,"p95Ms":4.8},"diagnostics_write":{"maxMs":6.2,"p95Ms":5.8}}}', '2026-05-18T00:00:00Z');
     `);
     conn.db
       .prepare(
@@ -735,8 +735,17 @@ describe("GET /status", () => {
     expect(body.data.raw_ws_records_per_sec).toBe(2);
     expect(body.data.parsed_updates).toBe(90);
     expect(body.data.parsed_updates_per_sec).toBe(1.5);
+    expect(body.data.emitted_updates).toBe(15);
+    expect(body.data.emitted_updates_per_sec).toBe(0.25);
     expect(body.data.noop_updates).toBe(30);
     expect(body.data.noop_updates_per_sec).toBe(0.5);
+    expect(body.data.suppressed_trading_noop_count_total).toBe(75);
+    expect(body.data.suppressed_trading_noop_per_sec).toBe(1.25);
+    expect(body.data.suppressed_trading_noop_by_reason).toEqual({
+      top_of_book: 70,
+      accepting_orders_or_book: 3,
+      min_size_or_source: 2,
+    });
     expect(body.data.hub_filter_checked).toBe(450);
     expect(body.data.hub_filter_checked_per_sec).toBe(7.5);
     expect(body.data.hub_filter_passed).toBe(90);
@@ -752,6 +761,12 @@ describe("GET /status", () => {
     expect(body.data.event_loop_lag_p95_ms).toBe(12);
     expect(body.data.event_loop_lag_max_ms).toBe(37);
     expect(body.data.gc_pause_max_ms).toBe(4);
+    expect(body.data.stage_ipc_decode_max_ms).toBe(1.2);
+    expect(body.data.stage_handle_worker_batch_p95_ms).toBe(1.8);
+    expect(body.data.stage_hub_dispatch_max_ms).toBe(3.2);
+    expect(body.data.stage_coalescing_flush_p95_ms).toBe(3.8);
+    expect(body.data.stage_latency_summary_max_ms).toBe(5.2);
+    expect(body.data.stage_diagnostics_write_p95_ms).toBe(5.8);
     expect(body.data.http_errors_by_class_1h).toEqual({ "gamma-pricing:timeout": 2 });
     expect(body.data.ws_heartbeat.pingSent).toBe(4);
     expect(body.data.ws_heartbeat.workerEventLoopLagMaxMs).toBe(11);

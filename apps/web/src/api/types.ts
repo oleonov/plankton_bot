@@ -337,8 +337,17 @@ export interface CoverageMetricsData {
   raw_ws_records_per_sec: number;
   parsed_updates: number;
   parsed_updates_per_sec: number;
+  emitted_updates: number;
+  emitted_updates_per_sec: number;
   noop_updates: number;
   noop_updates_per_sec: number;
+  suppressed_trading_noop_count_total: number;
+  suppressed_trading_noop_per_sec: number;
+  suppressed_trading_noop_by_reason: {
+    top_of_book: number;
+    accepting_orders_or_book: number;
+    min_size_or_source: number;
+  };
   hub_filter_checked: number;
   hub_filter_checked_per_sec: number;
   hub_filter_passed: number;
@@ -356,6 +365,18 @@ export interface CoverageMetricsData {
   event_loop_lag_max_ms: number | null;
   event_loop_lag_p95_ms: number | null;
   gc_pause_max_ms: number | null;
+  stage_ipc_decode_max_ms: number | null;
+  stage_ipc_decode_p95_ms: number | null;
+  stage_handle_worker_batch_max_ms: number | null;
+  stage_handle_worker_batch_p95_ms: number | null;
+  stage_hub_dispatch_max_ms: number | null;
+  stage_hub_dispatch_p95_ms: number | null;
+  stage_coalescing_flush_max_ms: number | null;
+  stage_coalescing_flush_p95_ms: number | null;
+  stage_latency_summary_max_ms: number | null;
+  stage_latency_summary_p95_ms: number | null;
+  stage_diagnostics_write_max_ms: number | null;
+  stage_diagnostics_write_p95_ms: number | null;
   http_errors_by_class_1h: Record<string, number>;
   ws_heartbeat: {
     pingSent: number;

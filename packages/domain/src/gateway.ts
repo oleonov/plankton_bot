@@ -266,6 +266,12 @@ export interface MarketPricingStreamLatencySummary {
   readonly maxMs: number;
 }
 
+export interface TradingNoopSuppressionCounts {
+  readonly topOfBook: number;
+  readonly acceptingOrdersOrBook: number;
+  readonly minSizeOrSource: number;
+}
+
 export interface MarketPricingStreamMetricsSnapshot {
   readonly windowStartMs: number;
   readonly wsEventsReceived: number;
@@ -280,8 +286,13 @@ export interface MarketPricingStreamMetricsSnapshot {
   readonly rawWsRecordsPerSec?: number;
   readonly parsedUpdates?: number;
   readonly parsedUpdatesPerSec?: number;
+  readonly emittedUpdates?: number;
+  readonly emittedUpdatesPerSec?: number;
   readonly noopUpdates?: number;
   readonly noopUpdatesPerSec?: number;
+  readonly suppressedTradingNoopCountTotal?: number;
+  readonly suppressedTradingNoopPerSec?: number;
+  readonly suppressedTradingNoopByReason?: TradingNoopSuppressionCounts;
   readonly hubFilterChecked?: number;
   readonly hubFilterCheckedPerSec?: number;
   readonly hubFilterPassed?: number;

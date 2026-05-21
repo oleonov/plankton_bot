@@ -29,7 +29,8 @@ import type {
   MarketTradeCountProvider,
   V4AdmissionTelemetrySnapshot,
 } from "@krabs/domain";
-import { createConditionId, createTokenId } from "@krabs/domain";
+import { createConditionId, createTokenId, recordStageDuration } from "@krabs/domain";
+import { performance } from "node:perf_hooks";
 import type { Logger } from "../../logger.js";
 import {
   classifyHttpError,
@@ -124,8 +125,13 @@ export interface MarketDataStreamActivitySnapshot {
   readonly rawWsRecordsPerSec: number;
   readonly parsedUpdates: number;
   readonly parsedUpdatesPerSec: number;
+  readonly emittedUpdates: number;
+  readonly emittedUpdatesPerSec: number;
   readonly noopUpdates: number;
   readonly noopUpdatesPerSec: number;
+  readonly suppressedTradingNoopCountTotal: number;
+  readonly suppressedTradingNoopPerSec: number;
+  readonly suppressedTradingNoopByReason: MarketPricingStreamMetricsSnapshot["suppressedTradingNoopByReason"];
   readonly hubFilterChecked: number;
   readonly hubFilterCheckedPerSec: number;
   readonly hubFilterPassed: number;
@@ -441,8 +447,17 @@ export class MarketDataModule implements RuntimeModule {
       rawWsRecordsPerSec: streamMetrics?.rawWsRecordsPerSec ?? 0,
       parsedUpdates: streamMetrics?.parsedUpdates ?? 0,
       parsedUpdatesPerSec: streamMetrics?.parsedUpdatesPerSec ?? 0,
+      emittedUpdates: streamMetrics?.emittedUpdates ?? 0,
+      emittedUpdatesPerSec: streamMetrics?.emittedUpdatesPerSec ?? 0,
       noopUpdates: streamMetrics?.noopUpdates ?? 0,
       noopUpdatesPerSec: streamMetrics?.noopUpdatesPerSec ?? 0,
+      suppressedTradingNoopCountTotal: streamMetrics?.suppressedTradingNoopCountTotal ?? 0,
+      suppressedTradingNoopPerSec: streamMetrics?.suppressedTradingNoopPerSec ?? 0,
+      suppressedTradingNoopByReason: streamMetrics?.suppressedTradingNoopByReason ?? {
+        topOfBook: 0,
+        acceptingOrdersOrBook: 0,
+        minSizeOrSource: 0,
+      },
       hubFilterChecked: streamMetrics?.hubFilterChecked ?? 0,
       hubFilterCheckedPerSec: streamMetrics?.hubFilterCheckedPerSec ?? 0,
       hubFilterPassed: streamMetrics?.hubFilterPassed ?? 0,
@@ -1107,46 +1122,51 @@ export class MarketDataModule implements RuntimeModule {
   }
 
   private async flushPendingStreamUpdates(): Promise<void> {
-    if (this.pendingStreamUpdatesByToken.size === 0) return;
-    const nowMs = Date.now();
-    const updates = [...this.pendingStreamUpdatesByToken.values()];
-    this.pendingStreamUpdatesByToken.clear();
-    const changedMarkets: NormalizedMarket[] = [];
+    const startMs = performance.now();
+    try {
+      if (this.pendingStreamUpdatesByToken.size === 0) return;
+      const nowMs = Date.now();
+      const updates = [...this.pendingStreamUpdatesByToken.values()];
+      this.pendingStreamUpdatesByToken.clear();
+      const changedMarkets: NormalizedMarket[] = [];
 
-    for (const update of updates) {
-      const tokenKey = String(update.tokenId);
-      const tracked = this.trackedMarketsByToken.get(tokenKey);
-      if (!tracked) continue;
-      const current = syncTrackedMarket(this.marketCache.get(tokenKey) ?? null, tracked, nowMs);
-      const nextMarket = applyStreamUpdate(current, update, nowMs);
-      this.lastPricingUpdateAtByToken.set(tokenKey, nowMs);
-      this.marketCache.set(tokenKey, nextMarket);
-      const lastPublished = this.lastPublishedMarketByToken.get(tokenKey) ?? null;
-      if (lastPublished == null || didMarketPricingChange(lastPublished, nextMarket)) {
-        changedMarkets.push(nextMarket);
+      for (const update of updates) {
+        const tokenKey = String(update.tokenId);
+        const tracked = this.trackedMarketsByToken.get(tokenKey);
+        if (!tracked) continue;
+        const current = syncTrackedMarket(this.marketCache.get(tokenKey) ?? null, tracked, nowMs);
+        const nextMarket = applyStreamUpdate(current, update, nowMs);
+        this.lastPricingUpdateAtByToken.set(tokenKey, nowMs);
+        this.marketCache.set(tokenKey, nextMarket);
+        const lastPublished = this.lastPublishedMarketByToken.get(tokenKey) ?? null;
+        if (lastPublished == null || didMarketPricingChange(lastPublished, nextMarket)) {
+          changedMarkets.push(nextMarket);
+        }
       }
-    }
 
-    if (changedMarkets.length === 0) return;
-    this.lastSuccessfulDataMs = nowMs;
-    if (this.deps.runtimeControl?.isPaused()) {
+      if (changedMarkets.length === 0) return;
+      this.lastSuccessfulDataMs = nowMs;
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.log.debug(
+          { coalescedUpdates: updates.length, changedMarkets: changedMarkets.length },
+          "stream snapshot suppressed while runtime is paused",
+        );
+        return;
+      }
       this.log.debug(
-        { coalescedUpdates: updates.length, changedMarkets: changedMarkets.length },
-        "stream snapshot suppressed while runtime is paused",
+        {
+          coalescedUpdates: updates.length,
+          changedMarkets: changedMarkets.length,
+        },
+        "publishing coalesced stream market snapshot",
       );
-      return;
+      await this.deps.bus.publish("MarketSnapshotReceived", {
+        markets: changedMarkets,
+        timestamp: nowMs,
+      });
+    } finally {
+      recordStageDuration("coalescing_flush", performance.now() - startMs);
     }
-    this.log.debug(
-      {
-        coalescedUpdates: updates.length,
-        changedMarkets: changedMarkets.length,
-      },
-      "publishing coalesced stream market snapshot",
-    );
-    await this.deps.bus.publish("MarketSnapshotReceived", {
-      markets: changedMarkets,
-      timestamp: nowMs,
-    });
   }
 
   private async handleLifecycleEvents(

@@ -1,11 +1,14 @@
 import {
+  recordStageDuration,
   type MarketPricingLifecycleEvent,
   type MarketPricingFullBookReason,
   type MarketPricingSnapshot,
   type MarketPricingStream,
   type MarketPricingStreamMetricsSnapshot,
   type MarketPricingStreamUpdate,
+  type TradingNoopSuppressionCounts,
 } from "@krabs/domain";
+import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
 import {
   normalizeWebSocketPayload,
@@ -21,6 +24,7 @@ import type {
   WorkerMemorySnapshot,
   WorkerUpdateEnvelope,
   WorkerHeartbeatSnapshot,
+  WorkerUpdateBatchCounts,
 } from "./market-pricing-worker-protocol.js";
 import {
   arraysEqual,
@@ -86,7 +90,9 @@ interface StreamTelemetryWindow {
   windowStartMs: number;
   rawWsRecords: number;
   parsedUpdates: number;
+  emittedUpdates: number;
   noopUpdates: number;
+  suppressedTradingNoopCount: number;
 }
 
 export class LatencySampleRingBuffer {
@@ -216,7 +222,7 @@ interface ShardCallbacks {
   onWorkerUpdateBatch?: (
     updates: readonly MarketPricingStreamUpdate[],
     lifecycleEvents: readonly MarketPricingLifecycleEvent[],
-    noopUpdateCount: number,
+    counts: WorkerUpdateBatchCounts,
   ) => Promise<void> | void;
   /** Worker shards include parsed event-type counts with their compact batches. */
   onWorkerEventCounts?: (counts: {
@@ -297,7 +303,11 @@ export class LiveMarketPricingStream implements MarketPricingStream {
   private telemetryWindow: StreamTelemetryWindow;
   private rawWsRecords = 0;
   private parsedUpdates = 0;
+  private emittedUpdates = 0;
   private noopUpdates = 0;
+  private suppressedTradingNoopCount = 0;
+  private suppressedTradingNoopByReason: TradingNoopSuppressionCounts =
+    createEmptySuppressionCounts();
   // Lifetime queue metrics (not window-rotated; monotonically increasing)
   private totalQueueOverflows = 0;
   private totalMaxQueueDepth = 0;
@@ -406,8 +416,16 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       rawWsRecordsPerSec: this.telemetryRate(this.telemetryWindow.rawWsRecords, nowMs),
       parsedUpdates: this.parsedUpdates,
       parsedUpdatesPerSec: this.telemetryRate(this.telemetryWindow.parsedUpdates, nowMs),
+      emittedUpdates: this.emittedUpdates,
+      emittedUpdatesPerSec: this.telemetryRate(this.telemetryWindow.emittedUpdates, nowMs),
       noopUpdates: this.noopUpdates,
       noopUpdatesPerSec: this.telemetryRate(this.telemetryWindow.noopUpdates, nowMs),
+      suppressedTradingNoopCountTotal: this.suppressedTradingNoopCount,
+      suppressedTradingNoopPerSec: this.telemetryRate(
+        this.telemetryWindow.suppressedTradingNoopCount,
+        nowMs,
+      ),
+      suppressedTradingNoopByReason: { ...this.suppressedTradingNoopByReason },
       bookEventsReceived: this.window.bookEventsReceived,
       marketResolvedEvents: this.window.marketResolvedEvents,
       newMarketEvents: this.window.newMarketEvents,
@@ -577,8 +595,8 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       onWorkerEventCounts: (counts) => {
         this.recordWorkerEventCounts(counts);
       },
-      onWorkerUpdateBatch: async (updates, lifecycleEvents, noopUpdateCount) => {
-        await this.handleWorkerUpdateBatch(updates, lifecycleEvents, noopUpdateCount);
+      onWorkerUpdateBatch: async (updates, lifecycleEvents, counts) => {
+        await this.handleWorkerUpdateBatch(updates, lifecycleEvents, counts);
       },
       onHeartbeat: (sid, heartbeat) => {
         this.heartbeatByShard.set(sid, heartbeat);
@@ -772,7 +790,11 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     const {
       updates,
       lifecycleEvents,
+      parsedUpdateCount,
+      emittedUpdateCount,
       noopUpdateCount,
+      suppressedTradingNoopCount,
+      suppressedTradingNoopByReason,
       bookEventCount,
       marketResolvedEventCount,
       newMarketEventCount,
@@ -792,10 +814,13 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       await this.deps.handlers.onLifecycleEvents?.(lifecycleEvents);
     }
     this.rotateTelemetryWindow(nowMs);
-    this.parsedUpdates += updates.length;
-    this.noopUpdates += noopUpdateCount;
-    this.telemetryWindow.parsedUpdates += updates.length;
-    this.telemetryWindow.noopUpdates += noopUpdateCount;
+    this.recordUpdateCounters({
+      parsedUpdateCount,
+      emittedUpdateCount,
+      noopUpdateCount,
+      suppressedTradingNoopCount,
+      suppressedTradingNoopByReason,
+    });
     if (updates.length === 0) return;
     this.window.wsUpdatesApplied += updates.length;
     await this.deps.handlers.onUpdates(updates);
@@ -804,24 +829,41 @@ export class LiveMarketPricingStream implements MarketPricingStream {
   private async handleWorkerUpdateBatch(
     updates: readonly MarketPricingStreamUpdate[],
     lifecycleEvents: readonly MarketPricingLifecycleEvent[],
-    noopUpdateCount: number,
+    counts: WorkerUpdateBatchCounts,
   ): Promise<void> {
-    const nowMs = this.now();
-    this.rotateWindow(nowMs);
-    for (const update of updates) {
-      this.pricingByToken.set(update.tokenId, update.pricing);
+    const startMs = performance.now();
+    try {
+      const nowMs = this.now();
+      this.rotateWindow(nowMs);
+      for (const update of updates) {
+        this.pricingByToken.set(update.tokenId, update.pricing);
+      }
+      if (lifecycleEvents.length > 0) {
+        await this.deps.handlers.onLifecycleEvents?.(lifecycleEvents);
+      }
+      this.rotateTelemetryWindow(nowMs);
+      this.recordUpdateCounters(counts);
+      if (updates.length === 0) return;
+      this.window.wsUpdatesApplied += updates.length;
+      await this.deps.handlers.onUpdates(updates);
+    } finally {
+      recordStageDuration("handle_worker_batch", performance.now() - startMs);
     }
-    if (lifecycleEvents.length > 0) {
-      await this.deps.handlers.onLifecycleEvents?.(lifecycleEvents);
-    }
-    this.rotateTelemetryWindow(nowMs);
-    this.parsedUpdates += updates.length;
-    this.noopUpdates += noopUpdateCount;
-    this.telemetryWindow.parsedUpdates += updates.length;
-    this.telemetryWindow.noopUpdates += noopUpdateCount;
-    if (updates.length === 0) return;
-    this.window.wsUpdatesApplied += updates.length;
-    await this.deps.handlers.onUpdates(updates);
+  }
+
+  private recordUpdateCounters(counts: WorkerUpdateBatchCounts): void {
+    this.parsedUpdates += counts.parsedUpdateCount;
+    this.emittedUpdates += counts.emittedUpdateCount;
+    this.noopUpdates += counts.noopUpdateCount;
+    this.suppressedTradingNoopCount += counts.suppressedTradingNoopCount;
+    this.suppressedTradingNoopByReason = addSuppressionCounts(
+      this.suppressedTradingNoopByReason,
+      counts.suppressedTradingNoopByReason,
+    );
+    this.telemetryWindow.parsedUpdates += counts.parsedUpdateCount;
+    this.telemetryWindow.emittedUpdates += counts.emittedUpdateCount;
+    this.telemetryWindow.noopUpdates += counts.noopUpdateCount;
+    this.telemetryWindow.suppressedTradingNoopCount += counts.suppressedTradingNoopCount;
   }
 
   private recordWorkerEventCounts(counts: {
@@ -873,7 +915,9 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       windowStartMs: nowMs,
       rawWsRecords: 0,
       parsedUpdates: 0,
+      emittedUpdates: 0,
       noopUpdates: 0,
+      suppressedTradingNoopCount: 0,
     };
   }
 
@@ -1447,7 +1491,9 @@ class WorkerMarketPricingGroup {
     switch (event.type) {
       case "update-batch-buffer": {
         this.shardQueueDepth.set(shardId, event.queueDepth);
+        const decodeStartMs = performance.now();
         const envelope = decodeWorkerUpdateEnvelope(event.payload);
+        recordStageDuration("ipc_decode", performance.now() - decodeStartMs);
         deps.onMessageMetrics(envelope.metrics);
         if (
           envelope.bookEventCount > 0 ||
@@ -1460,11 +1506,13 @@ class WorkerMarketPricingGroup {
             newMarketEventCount: envelope.newMarketEventCount,
           });
         }
-        void deps.onWorkerUpdateBatch?.(
-          envelope.updates,
-          envelope.lifecycleEvents,
-          envelope.noopUpdateCount,
-        );
+        void deps.onWorkerUpdateBatch?.(envelope.updates, envelope.lifecycleEvents, {
+          parsedUpdateCount: envelope.parsedUpdateCount,
+          emittedUpdateCount: envelope.emittedUpdateCount,
+          noopUpdateCount: envelope.noopUpdateCount,
+          suppressedTradingNoopCount: envelope.suppressedTradingNoopCount,
+          suppressedTradingNoopByReason: envelope.suppressedTradingNoopByReason,
+        });
         break;
       }
       case "records":
@@ -1617,6 +1665,25 @@ function deserializeWorkerError(error: {
   result.name = error.name ?? "Error";
   if (error.stack) result.stack = error.stack;
   return result;
+}
+
+function createEmptySuppressionCounts(): TradingNoopSuppressionCounts {
+  return {
+    topOfBook: 0,
+    acceptingOrdersOrBook: 0,
+    minSizeOrSource: 0,
+  };
+}
+
+function addSuppressionCounts(
+  left: TradingNoopSuppressionCounts,
+  right: TradingNoopSuppressionCounts,
+): TradingNoopSuppressionCounts {
+  return {
+    topOfBook: left.topOfBook + right.topOfBook,
+    acceptingOrdersOrBook: left.acceptingOrdersOrBook + right.acceptingOrdersOrBook,
+    minSizeOrSource: left.minSizeOrSource + right.minSizeOrSource,
+  };
 }
 
 function countOpenShards(states: Map<number, ShardBreakerState>): number {

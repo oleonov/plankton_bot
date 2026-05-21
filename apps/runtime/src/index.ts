@@ -52,7 +52,7 @@ installClobErrorSanitizer(
 );
 
 import { randomUUID } from "node:crypto";
-import { monitorEventLoopDelay, PerformanceObserver } from "node:perf_hooks";
+import { monitorEventLoopDelay, performance, PerformanceObserver } from "node:perf_hooks";
 import process from "node:process";
 import { loadEnv } from "@krabs/config";
 import { InProcessEventBus } from "@krabs/event-bus";
@@ -73,7 +73,13 @@ import {
   SqliteStateTransitionRepository,
 } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
-import { createBotRunId, ENTRY_REASONS, resolveTradingState } from "@krabs/domain";
+import {
+  createBotRunId,
+  ENTRY_REASONS,
+  recordStageDuration,
+  resolveTradingState,
+  snapshotAndResetStageTimers,
+} from "@krabs/domain";
 import type { TokenId } from "@krabs/domain";
 import {
   DataApiTradeCountProvider,
@@ -1965,10 +1971,12 @@ async function main(): Promise<void> {
       maxMs: Math.round(loopLag.max / 1e6),
     };
     const gcPause = gcPauseWindow.snapshot();
+    const stageTimers = snapshotAndResetStageTimers();
     const diagnostics = buildRuntimeDiagnosticsSnapshot(
       eventLoopLag,
       gcPause,
       process.memoryUsage(),
+      stageTimers,
     );
     log.info(
       {
@@ -1976,11 +1984,13 @@ async function main(): Promise<void> {
       },
       "event_loop_lag",
     );
+    const diagnosticsWriteStartMs = performance.now();
     runtimeMetrics.writeLatest(
       "runtime_diagnostics",
       diagnostics.eventLoopLagMs.p95Ms,
       JSON.stringify(diagnostics),
     );
+    recordStageDuration("diagnostics_write", performance.now() - diagnosticsWriteStartMs);
     loopLag.reset();
   }, 30_000).unref();
 

@@ -1,10 +1,12 @@
-import type {
-  MarketPricingFullBookReason,
-  MarketPricingLifecycleEvent,
-  MarketPricingStream,
-  MarketPricingStreamMetricsSnapshot,
-  MarketPricingStreamUpdate,
+import {
+  recordStageDuration,
+  type MarketPricingFullBookReason,
+  type MarketPricingLifecycleEvent,
+  type MarketPricingStream,
+  type MarketPricingStreamMetricsSnapshot,
+  type MarketPricingStreamUpdate,
 } from "@krabs/domain";
+import { performance } from "node:perf_hooks";
 import { LiveMarketPricingStream } from "./market-pricing-stream.js";
 import type { MarketDataWebSocketLike } from "./market-data-stream-shared.js";
 
@@ -242,33 +244,38 @@ export class SharedMarketPricingStreamHub {
   }
 
   private async dispatchUpdates(updates: readonly MarketPricingStreamUpdate[]): Promise<void> {
-    this.rotateHubTelemetryWindow(Date.now());
-    for (const view of this.views.values()) {
-      if (view.closed) continue;
-      const viewTokenIds = view.tokenIdSet ?? (view.tokenIdSet = new Set(view.tokenIds));
-      if (viewTokenIds.size === 0) continue;
-      const viewFullBookTokenIds =
-        view.fullBookTokenIdSet ?? (view.fullBookTokenIdSet = computeFullBookTokenIdSet(view));
-      const filtered: MarketPricingStreamUpdate[] = [];
+    const startMs = performance.now();
+    try {
+      this.rotateHubTelemetryWindow(Date.now());
+      for (const view of this.views.values()) {
+        if (view.closed) continue;
+        const viewTokenIds = view.tokenIdSet ?? (view.tokenIdSet = new Set(view.tokenIds));
+        if (viewTokenIds.size === 0) continue;
+        const viewFullBookTokenIds =
+          view.fullBookTokenIdSet ?? (view.fullBookTokenIdSet = computeFullBookTokenIdSet(view));
+        const filtered: MarketPricingStreamUpdate[] = [];
 
-      for (const update of updates) {
-        this.hubFilterChecked++;
-        this.hubTelemetryWindow.hubFilterChecked++;
-        if (!viewTokenIds.has(update.tokenId)) continue;
-        this.hubFilterPassed++;
-        this.hubTelemetryWindow.hubFilterPassed++;
-        if (update.book == null || viewFullBookTokenIds.has(update.tokenId)) {
-          filtered.push(update);
-          continue;
+        for (const update of updates) {
+          this.hubFilterChecked++;
+          this.hubTelemetryWindow.hubFilterChecked++;
+          if (!viewTokenIds.has(update.tokenId)) continue;
+          this.hubFilterPassed++;
+          this.hubTelemetryWindow.hubFilterPassed++;
+          if (update.book == null || viewFullBookTokenIds.has(update.tokenId)) {
+            filtered.push(update);
+            continue;
+          }
+          filtered.push({
+            ...update,
+            book: null,
+          });
         }
-        filtered.push({
-          ...update,
-          book: null,
-        });
-      }
 
-      if (filtered.length === 0) continue;
-      await view.handlers.onUpdates(filtered);
+        if (filtered.length === 0) continue;
+        await view.handlers.onUpdates(filtered);
+      }
+    } finally {
+      recordStageDuration("hub_dispatch", performance.now() - startMs);
     }
   }
 

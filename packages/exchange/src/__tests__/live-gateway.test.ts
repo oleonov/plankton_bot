@@ -1634,7 +1634,7 @@ describe("LiveMarketDataGateway", () => {
       timestamp: "1766789471958",
     });
 
-    // The ingress queue drains asynchronously; waitFor lets all 5 items process.
+    // R73b suppresses last-trade-only frames before IPC; state still carries forward.
     await vi.waitFor(() => {
       expect(updates).toEqual([
         {
@@ -1642,14 +1642,6 @@ describe("LiveMarketDataGateway", () => {
           bestBid: 0.07,
           bestAsk: 0.09,
           lastTradePrice: null,
-          hasBook: false,
-          tickSize: null,
-        },
-        {
-          tokenId: "tok-stream",
-          bestBid: 0.07,
-          bestAsk: 0.09,
-          lastTradePrice: 0.08,
           hasBook: false,
           tickSize: null,
         },

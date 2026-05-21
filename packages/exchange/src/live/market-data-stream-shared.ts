@@ -1,4 +1,5 @@
-import type { MarketPricingStreamLatencySummary } from "@krabs/domain";
+import { recordStageDuration, type MarketPricingStreamLatencySummary } from "@krabs/domain";
+import { performance } from "node:perf_hooks";
 
 export interface MarketDataWebSocketLike {
   send(data: string): void;
@@ -57,20 +58,25 @@ export function normalizeWebSocketPayload(data: unknown): string | null {
 export function summarizeLatencySamples(
   latencySamplesMs: readonly number[],
 ): MarketPricingStreamLatencySummary | null {
-  if (latencySamplesMs.length === 0) return null;
-  const sorted = [...latencySamplesMs].sort((left, right) => left - right);
-  const count = sorted.length;
-  const sum = sorted.reduce((acc, value) => acc + value, 0);
-  const pickQuantile = (quantile: number): number => {
-    const index = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * quantile));
-    return sorted[index] ?? 0;
-  };
-  return {
-    count,
-    avgMs: Number((sum / count).toFixed(2)),
-    minMs: sorted[0] ?? 0,
-    p50Ms: pickQuantile(0.5),
-    p95Ms: pickQuantile(0.95),
-    maxMs: sorted[sorted.length - 1] ?? 0,
-  };
+  const startMs = performance.now();
+  try {
+    if (latencySamplesMs.length === 0) return null;
+    const sorted = [...latencySamplesMs].sort((left, right) => left - right);
+    const count = sorted.length;
+    const sum = sorted.reduce((acc, value) => acc + value, 0);
+    const pickQuantile = (quantile: number): number => {
+      const index = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * quantile));
+      return sorted[index] ?? 0;
+    };
+    return {
+      count,
+      avgMs: Number((sum / count).toFixed(2)),
+      minMs: sorted[0] ?? 0,
+      p50Ms: pickQuantile(0.5),
+      p95Ms: pickQuantile(0.95),
+      maxMs: sorted[sorted.length - 1] ?? 0,
+    };
+  } finally {
+    recordStageDuration("latency_summary", performance.now() - startMs);
+  }
 }

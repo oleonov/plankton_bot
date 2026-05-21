@@ -105,6 +105,7 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const runtimeDiagnostics = parseJsonObject(runtimeDiagnosticsRow?.labels);
     const eventLoopLag = readObject(runtimeDiagnostics, "eventLoopLagMs");
     const gcPause = readObject(runtimeDiagnostics, "gcPauseMs");
+    const stageTimers = readObject(runtimeDiagnostics, "stageTimers");
     const v4AdmissionTelemetry = readObject(stream, "v4AdmissionTelemetry");
     const wsHeartbeat = readObject(stream, "wsHeartbeat");
     const wsWorkerMemory = readObject(stream, "wsWorkerMemory");
@@ -114,8 +115,14 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const rawWsRecordsPerSec = readNumber(stream, "rawWsRecordsPerSec") ?? 0;
     const parsedUpdates = readNumber(stream, "parsedUpdates") ?? 0;
     const parsedUpdatesPerSec = readNumber(stream, "parsedUpdatesPerSec") ?? 0;
+    const emittedUpdates = readNumber(stream, "emittedUpdates") ?? 0;
+    const emittedUpdatesPerSec = readNumber(stream, "emittedUpdatesPerSec") ?? 0;
     const noopUpdates = readNumber(stream, "noopUpdates") ?? 0;
     const noopUpdatesPerSec = readNumber(stream, "noopUpdatesPerSec") ?? 0;
+    const suppressedTradingNoopCountTotal =
+      readNumber(stream, "suppressedTradingNoopCountTotal") ?? 0;
+    const suppressedTradingNoopPerSec = readNumber(stream, "suppressedTradingNoopPerSec") ?? 0;
+    const suppressedTradingNoopByReason = readObject(stream, "suppressedTradingNoopByReason");
     const hubFilterChecked = readNumber(stream, "hubFilterChecked") ?? 0;
     const hubFilterCheckedPerSec = readNumber(stream, "hubFilterCheckedPerSec") ?? 0;
     const hubFilterPassed = readNumber(stream, "hubFilterPassed") ?? 0;
@@ -142,8 +149,18 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       raw_ws_records_per_sec: rawWsRecordsPerSec,
       parsed_updates: parsedUpdates,
       parsed_updates_per_sec: parsedUpdatesPerSec,
+      emitted_updates: emittedUpdates,
+      emitted_updates_per_sec: emittedUpdatesPerSec,
       noop_updates: noopUpdates,
       noop_updates_per_sec: noopUpdatesPerSec,
+      suppressed_trading_noop_count_total: suppressedTradingNoopCountTotal,
+      suppressed_trading_noop_per_sec: suppressedTradingNoopPerSec,
+      suppressed_trading_noop_by_reason: {
+        top_of_book: readNumber(suppressedTradingNoopByReason, "topOfBook") ?? 0,
+        accepting_orders_or_book:
+          readNumber(suppressedTradingNoopByReason, "acceptingOrdersOrBook") ?? 0,
+        min_size_or_source: readNumber(suppressedTradingNoopByReason, "minSizeOrSource") ?? 0,
+      },
       hub_filter_checked: hubFilterChecked,
       hub_filter_checked_per_sec: hubFilterCheckedPerSec,
       hub_filter_passed: hubFilterPassed,
@@ -161,6 +178,34 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       event_loop_lag_max_ms: readNumber(eventLoopLag, "maxMs"),
       event_loop_lag_p95_ms: readNumber(eventLoopLag, "p95Ms"),
       gc_pause_max_ms: readNumber(gcPause, "maxMs"),
+      stage_ipc_decode_max_ms: readStageTimerValue(stageTimers, "ipc_decode", "maxMs"),
+      stage_ipc_decode_p95_ms: readStageTimerValue(stageTimers, "ipc_decode", "p95Ms"),
+      stage_handle_worker_batch_max_ms: readStageTimerValue(
+        stageTimers,
+        "handle_worker_batch",
+        "maxMs",
+      ),
+      stage_handle_worker_batch_p95_ms: readStageTimerValue(
+        stageTimers,
+        "handle_worker_batch",
+        "p95Ms",
+      ),
+      stage_hub_dispatch_max_ms: readStageTimerValue(stageTimers, "hub_dispatch", "maxMs"),
+      stage_hub_dispatch_p95_ms: readStageTimerValue(stageTimers, "hub_dispatch", "p95Ms"),
+      stage_coalescing_flush_max_ms: readStageTimerValue(stageTimers, "coalescing_flush", "maxMs"),
+      stage_coalescing_flush_p95_ms: readStageTimerValue(stageTimers, "coalescing_flush", "p95Ms"),
+      stage_latency_summary_max_ms: readStageTimerValue(stageTimers, "latency_summary", "maxMs"),
+      stage_latency_summary_p95_ms: readStageTimerValue(stageTimers, "latency_summary", "p95Ms"),
+      stage_diagnostics_write_max_ms: readStageTimerValue(
+        stageTimers,
+        "diagnostics_write",
+        "maxMs",
+      ),
+      stage_diagnostics_write_p95_ms: readStageTimerValue(
+        stageTimers,
+        "diagnostics_write",
+        "p95Ms",
+      ),
       http_errors_by_class_1h: aggregateHttpErrors(httpErrorRows),
       ws_heartbeat: wsHeartbeat,
       ws_worker_memory: wsWorkerMemory,
@@ -331,6 +376,14 @@ function readNumberRecord(
     }
   }
   return out;
+}
+
+function readStageTimerValue(
+  stageTimers: Record<string, unknown> | null,
+  stageName: string,
+  key: "maxMs" | "p95Ms",
+): number | null {
+  return readNumber(readObject(stageTimers, stageName), key);
 }
 
 function aggregateHttpErrors(
