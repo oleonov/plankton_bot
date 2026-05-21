@@ -20,6 +20,8 @@ describe("collectStreamUpdates", () => {
     );
 
     expect(result.eventCount).toBe(1);
+    expect(result.rawRecordCount).toBe(1);
+    expect(result.noopUpdateCount).toBe(0);
     expect(result.updates).toHaveLength(1);
     expect(result.updates[0]?.tokenId).toBe("token-a");
     expect(result.updates[0]?.pricing.bestBid).toBe(0.42);
@@ -58,6 +60,38 @@ describe("collectStreamUpdates", () => {
 
     expect(result.updates[0]?.pricing.bestBid).toBe(0.41);
     expect(result.updates[0]?.pricing.bestAsk).toBe(0.46);
+    expect(result.noopUpdateCount).toBe(0);
+  });
+
+  it("counts top-of-book no-op updates", () => {
+    const state = new Map<string, MarketPricingSnapshot>([
+      [
+        "token-a",
+        {
+          bestBid: 0.4,
+          bestAsk: 0.46,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          lastTradePrice: null,
+        },
+      ],
+    ]);
+
+    const result = collectStreamUpdates(
+      [
+        {
+          event_type: "best_bid_ask",
+          asset_id: "token-a",
+          best_bid: "0.40",
+          best_ask: "0.46",
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      state,
+      Date.now(),
+    );
+
+    expect(result.noopUpdateCount).toBe(1);
   });
 
   it("emits lifecycle events without requiring raw record cloning on the parent", () => {

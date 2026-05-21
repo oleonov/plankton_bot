@@ -58,6 +58,7 @@ export function isPongPayload(payload: unknown): boolean {
 }
 
 export interface ParsedRecordMetrics {
+  readonly rawRecordCount: number;
   readonly eventCount: number;
   readonly latencySamplesMs: readonly number[];
 }
@@ -85,7 +86,7 @@ export function collectStreamUpdatesMetricsOnly(
     }
   }
 
-  return { eventCount, latencySamplesMs };
+  return { rawRecordCount: records.length, eventCount, latencySamplesMs };
 }
 
 export function extractTokenIdsFromRecords(records: readonly unknown[]): readonly string[] {

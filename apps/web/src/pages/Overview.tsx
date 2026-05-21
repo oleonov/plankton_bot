@@ -194,6 +194,14 @@ function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
         `WS worker memory: rss ${workerMemory?.rssMb?.toFixed(1) ?? "—"} MiB, max worker ${
           workerMemory?.maxRssMb?.toFixed(1) ?? "—"
         } MiB`,
+        `WS pipeline: raw ${coverage.raw_ws_records_per_sec.toFixed(
+          1,
+        )}/s, parsed ${coverage.parsed_updates_per_sec.toFixed(
+          1,
+        )}/s, noop ${coverage.noop_updates_per_sec.toFixed(1)}/s`,
+        `Hub filter: checked ${coverage.hub_filter_checked_per_sec.toFixed(
+          1,
+        )}/s, passed ${coverage.hub_filter_passed_per_sec.toFixed(1)}/s`,
         `R23 cache hit rate: ${formatPct(coverage.r23_cache_hit_rate)}`,
         `V4 admit rate: ${formatPct(coverage.v4_admit_rate)}`,
         `V4 top categories: ${formatTopCounts(coverage.v4_admit_count_by_category, 5)}`,
@@ -247,6 +255,20 @@ function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
               workerMemory?.maxRssMb?.toFixed(1) ?? "—"
             } MiB`
           : "Awaiting WS worker memory"}
+      </div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        {coverage
+          ? `raw ${coverage.raw_ws_records_per_sec.toFixed(1)}/s · parsed ${coverage.parsed_updates_per_sec.toFixed(
+              1,
+            )}/s · noop ${coverage.noop_updates_per_sec.toFixed(1)}/s`
+          : "Awaiting WS pipeline telemetry"}
+      </div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        {coverage
+          ? `hub ${coverage.hub_filter_passed_per_sec.toFixed(
+              1,
+            )}/${coverage.hub_filter_checked_per_sec.toFixed(1)} pass/check/s`
+          : "Awaiting hub filter telemetry"}
       </div>
       <div className="value-sm" style={{ color: "var(--text-dim)" }}>
         {coverage

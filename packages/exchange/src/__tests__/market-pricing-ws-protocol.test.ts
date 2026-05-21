@@ -48,6 +48,7 @@ describe("market-pricing WS protocol helpers", () => {
       nowMs,
     );
 
+    expect(metrics.rawRecordCount).toBe(1);
     expect(metrics.eventCount).toBe(2);
     expect(metrics.latencySamplesMs).toEqual([1000, 500, 250]);
   });

@@ -333,6 +333,16 @@ export interface CoverageMetricsData {
   markets_active: number;
   coverage_pct: number;
   events_per_sec: number;
+  raw_ws_records: number;
+  raw_ws_records_per_sec: number;
+  parsed_updates: number;
+  parsed_updates_per_sec: number;
+  noop_updates: number;
+  noop_updates_per_sec: number;
+  hub_filter_checked: number;
+  hub_filter_checked_per_sec: number;
+  hub_filter_passed: number;
+  hub_filter_passed_per_sec: number;
   shard_count: number;
   rotation_cycle_hours: number;
   positions_opened_24h: number;

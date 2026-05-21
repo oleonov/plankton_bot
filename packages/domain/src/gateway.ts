@@ -276,6 +276,16 @@ export interface MarketPricingStreamMetricsSnapshot {
   readonly reconnectCount: number;
   readonly wsEventGapDetected: number;
   readonly wsLatencyMs: MarketPricingStreamLatencySummary | null;
+  readonly rawWsRecords?: number;
+  readonly rawWsRecordsPerSec?: number;
+  readonly parsedUpdates?: number;
+  readonly parsedUpdatesPerSec?: number;
+  readonly noopUpdates?: number;
+  readonly noopUpdatesPerSec?: number;
+  readonly hubFilterChecked?: number;
+  readonly hubFilterCheckedPerSec?: number;
+  readonly hubFilterPassed?: number;
+  readonly hubFilterPassedPerSec?: number;
   readonly fullBookTokenCount?: number;
   readonly bookEventsReceived?: number;
   readonly narrowSubscribeCount?: number;

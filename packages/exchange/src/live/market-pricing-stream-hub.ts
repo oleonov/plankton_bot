@@ -8,6 +8,8 @@ import type {
 import { LiveMarketPricingStream } from "./market-pricing-stream.js";
 import type { MarketDataWebSocketLike } from "./market-data-stream-shared.js";
 
+const HUB_TELEMETRY_WINDOW_MS = 60_000;
+
 interface StreamHandlers {
   readonly onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
   readonly onLifecycleEvents?: (
@@ -65,8 +67,16 @@ interface StreamViewState {
   readonly id: number;
   readonly handlers: StreamHandlers;
   tokenIds: string[];
+  tokenIdSet: ReadonlySet<string> | null;
   fullBookTokenIdsByReason: Map<MarketPricingFullBookReason, string[]>;
+  fullBookTokenIdSet: ReadonlySet<string> | null;
   closed: boolean;
+}
+
+interface HubTelemetryWindow {
+  windowStartMs: number;
+  hubFilterChecked: number;
+  hubFilterPassed: number;
 }
 
 export class SharedMarketPricingStreamHub {
@@ -77,6 +87,9 @@ export class SharedMarketPricingStreamHub {
   private narrowSubscribeCount = 0;
   private narrowUnsubscribeCount = 0;
   private narrowRefCountLeaks = 0;
+  private hubTelemetryWindow = this.createEmptyHubTelemetryWindow(Date.now());
+  private hubFilterChecked = 0;
+  private hubFilterPassed = 0;
 
   constructor(deps: SharedMarketPricingStreamHubDeps) {
     this.lowLevelStream = new LiveMarketPricingStream({
@@ -131,7 +144,9 @@ export class SharedMarketPricingStreamHub {
       id,
       handlers,
       tokenIds: [],
+      tokenIdSet: null,
       fullBookTokenIdsByReason: new Map(),
+      fullBookTokenIdSet: null,
       closed: false,
     });
     return new SharedMarketPricingStreamView(this, id);
@@ -140,7 +155,9 @@ export class SharedMarketPricingStreamHub {
   setViewTokenIds(viewId: number, tokenIds: readonly string[]): void {
     const view = this.views.get(viewId);
     if (!view || view.closed) return;
-    view.tokenIds = normalizeTokenIds(tokenIds);
+    const normalized = normalizeTokenIds(tokenIds);
+    view.tokenIds = normalized;
+    view.tokenIdSet = null;
     this.syncLowLevelStream();
   }
 
@@ -157,6 +174,7 @@ export class SharedMarketPricingStreamHub {
     } else {
       view.fullBookTokenIdsByReason.set(reason, normalized);
     }
+    view.fullBookTokenIdSet = null;
     this.syncLowLevelStream();
   }
 
@@ -174,9 +192,18 @@ export class SharedMarketPricingStreamHub {
   }
 
   getMetricsSnapshot(): MarketPricingStreamMetricsSnapshot {
+    const nowMs = Date.now();
+    this.rotateHubTelemetryWindow(nowMs);
     const base = this.lowLevelStream.getMetricsSnapshot();
     return {
       ...base,
+      hubFilterChecked: this.hubFilterChecked,
+      hubFilterCheckedPerSec: this.hubTelemetryRate(
+        this.hubTelemetryWindow.hubFilterChecked,
+        nowMs,
+      ),
+      hubFilterPassed: this.hubFilterPassed,
+      hubFilterPassedPerSec: this.hubTelemetryRate(this.hubTelemetryWindow.hubFilterPassed, nowMs),
       fullBookTokenCount: this.aggregateFullBookTokenIds.size,
       narrowSubscribeCount: this.narrowSubscribeCount,
       narrowUnsubscribeCount: this.narrowUnsubscribeCount,
@@ -215,15 +242,21 @@ export class SharedMarketPricingStreamHub {
   }
 
   private async dispatchUpdates(updates: readonly MarketPricingStreamUpdate[]): Promise<void> {
+    this.rotateHubTelemetryWindow(Date.now());
     for (const view of this.views.values()) {
       if (view.closed) continue;
-      const viewTokenIds = new Set(view.tokenIds);
+      const viewTokenIds = view.tokenIdSet ?? (view.tokenIdSet = new Set(view.tokenIds));
       if (viewTokenIds.size === 0) continue;
-      const viewFullBookTokenIds = collectViewFullBookTokenIds(view);
+      const viewFullBookTokenIds =
+        view.fullBookTokenIdSet ?? (view.fullBookTokenIdSet = computeFullBookTokenIdSet(view));
       const filtered: MarketPricingStreamUpdate[] = [];
 
       for (const update of updates) {
+        this.hubFilterChecked++;
+        this.hubTelemetryWindow.hubFilterChecked++;
         if (!viewTokenIds.has(update.tokenId)) continue;
+        this.hubFilterPassed++;
+        this.hubTelemetryWindow.hubFilterPassed++;
         if (update.book == null || viewFullBookTokenIds.has(update.tokenId)) {
           filtered.push(update);
           continue;
@@ -237,6 +270,27 @@ export class SharedMarketPricingStreamHub {
       if (filtered.length === 0) continue;
       await view.handlers.onUpdates(filtered);
     }
+  }
+
+  private rotateHubTelemetryWindow(nowMs: number): void {
+    if (nowMs - this.hubTelemetryWindow.windowStartMs <= HUB_TELEMETRY_WINDOW_MS) return;
+    this.hubTelemetryWindow = this.createEmptyHubTelemetryWindow(nowMs);
+  }
+
+  private hubTelemetryRate(count: number, nowMs: number): number {
+    const elapsedSeconds = Math.max(
+      1,
+      Math.floor((nowMs - this.hubTelemetryWindow.windowStartMs) / 1000),
+    );
+    return Number((count / elapsedSeconds).toFixed(3));
+  }
+
+  private createEmptyHubTelemetryWindow(nowMs: number): HubTelemetryWindow {
+    return {
+      windowStartMs: nowMs,
+      hubFilterChecked: 0,
+      hubFilterPassed: 0,
+    };
   }
 
   private async dispatchLifecycleEvents(
@@ -305,7 +359,7 @@ function normalizeTokenIds(tokenIds: readonly string[]): string[] {
   ].sort();
 }
 
-function collectViewFullBookTokenIds(view: StreamViewState): Set<string> {
+function computeFullBookTokenIdSet(view: StreamViewState): ReadonlySet<string> {
   const tokenIds = new Set<string>();
   for (const values of view.fullBookTokenIdsByReason.values()) {
     for (const tokenId of values) tokenIds.add(tokenId);

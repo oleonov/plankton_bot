@@ -2109,6 +2109,98 @@ describe("SharedMarketPricingStreamHub", () => {
     viewB.close();
   });
 
+  it("rebuilds cached view token set after setTokenIds", async () => {
+    const socket = new FakeMarketSocket();
+    const hub = new SharedMarketPricingStreamHub({
+      createWebSocket: () => socket,
+    });
+    const seenTokenIds: string[] = [];
+    const view = hub.createStream({
+      onUpdates: async (updates) => {
+        seenTokenIds.push(...updates.map((update) => update.tokenId));
+      },
+    });
+
+    view.setTokenIds(["tok-a"]);
+    socket.emitOpen();
+    socket.emitJson({
+      event_type: "best_bid_ask",
+      asset_id: "tok-a",
+      best_bid: "0.10",
+      best_ask: "0.11",
+      timestamp: "1766789469958",
+    });
+    await vi.waitFor(() => {
+      expect(seenTokenIds).toEqual(["tok-a"]);
+    });
+
+    view.setTokenIds(["tok-b"]);
+    socket.emitJson({
+      event_type: "best_bid_ask",
+      asset_id: "tok-a",
+      best_bid: "0.12",
+      best_ask: "0.13",
+      timestamp: "1766789469959",
+    });
+    socket.emitJson({
+      event_type: "best_bid_ask",
+      asset_id: "tok-b",
+      best_bid: "0.20",
+      best_ask: "0.21",
+      timestamp: "1766789469960",
+    });
+
+    await vi.waitFor(() => {
+      expect(seenTokenIds).toEqual(["tok-a", "tok-b"]);
+    });
+    expect(view.getMetricsSnapshot?.()?.hubFilterChecked).toBe(3);
+    expect(view.getMetricsSnapshot?.()?.hubFilterPassed).toBe(2);
+    view.close();
+  });
+
+  it("rebuilds cached full-book token set after setFullBookTokenIds", async () => {
+    const socket = new FakeMarketSocket();
+    const hub = new SharedMarketPricingStreamHub({
+      createWebSocket: () => socket,
+    });
+    const hasBook: boolean[] = [];
+    const view = hub.createStream({
+      onUpdates: async (updates) => {
+        hasBook.push(...updates.map((update) => update.book != null));
+      },
+    });
+
+    view.setTokenIds(["tok-a"]);
+    view.setFullBookTokenIds?.("hot-set", ["tok-a"]);
+    socket.emitOpen();
+    socket.emitJson({
+      event_type: "book",
+      asset_id: "tok-a",
+      bids: [{ price: "0.04", size: "10" }],
+      asks: [{ price: "0.05", size: "10" }],
+      min_order_size: "5",
+      timestamp: "1766789469958",
+    });
+    await vi.waitFor(() => {
+      expect(hasBook).toEqual([true]);
+    });
+
+    view.setFullBookTokenIds?.("hot-set", []);
+    socket.emitJson({
+      event_type: "book",
+      asset_id: "tok-a",
+      bids: [{ price: "0.06", size: "10" }],
+      asks: [{ price: "0.07", size: "10" }],
+      min_order_size: "5",
+      timestamp: "1766789469959",
+    });
+
+    await vi.waitFor(() => {
+      expect(hasBook).toEqual([true, false]);
+    });
+    view.close();
+  });
+
   it("reference-counts narrow full-book interest across views and reasons", () => {
     const socket = new FakeMarketSocket();
     const hub = new SharedMarketPricingStreamHub({
