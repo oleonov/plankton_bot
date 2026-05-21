@@ -347,9 +347,11 @@ class WorkerMarketPricingShard {
         updates: parsed.updates,
         lifecycleEvents: parsed.lifecycleEvents,
         metrics: {
+          rawRecordCount: parsed.rawRecordCount,
           eventCount: parsed.eventCount,
           latencySamplesMs: parsed.latencySamplesMs,
         },
+        noopUpdateCount: parsed.noopUpdateCount,
         bookEventCount: parsed.bookEventCount,
         marketResolvedEventCount: parsed.marketResolvedEventCount,
         newMarketEventCount: parsed.newMarketEventCount,

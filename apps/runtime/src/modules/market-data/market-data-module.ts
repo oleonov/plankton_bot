@@ -120,6 +120,16 @@ export interface MarketDataStreamActivitySnapshot {
   readonly wsEventsReceived: number;
   readonly wsEventsReceivedPerSec: number;
   readonly wsUpdatesApplied: number;
+  readonly rawWsRecords: number;
+  readonly rawWsRecordsPerSec: number;
+  readonly parsedUpdates: number;
+  readonly parsedUpdatesPerSec: number;
+  readonly noopUpdates: number;
+  readonly noopUpdatesPerSec: number;
+  readonly hubFilterChecked: number;
+  readonly hubFilterCheckedPerSec: number;
+  readonly hubFilterPassed: number;
+  readonly hubFilterPassedPerSec: number;
   readonly trackedTokenCount: number;
   /**
    * ADR-021 §D-F #1 — WS-tier capacity utilisation as a 0–100 integer.
@@ -427,6 +437,16 @@ export class MarketDataModule implements RuntimeModule {
       wsEventsReceived: streamMetrics?.wsEventsReceived ?? 0,
       wsEventsReceivedPerSec: streamMetrics?.wsEventsReceivedPerSec ?? 0,
       wsUpdatesApplied: streamMetrics?.wsUpdatesApplied ?? 0,
+      rawWsRecords: streamMetrics?.rawWsRecords ?? 0,
+      rawWsRecordsPerSec: streamMetrics?.rawWsRecordsPerSec ?? 0,
+      parsedUpdates: streamMetrics?.parsedUpdates ?? 0,
+      parsedUpdatesPerSec: streamMetrics?.parsedUpdatesPerSec ?? 0,
+      noopUpdates: streamMetrics?.noopUpdates ?? 0,
+      noopUpdatesPerSec: streamMetrics?.noopUpdatesPerSec ?? 0,
+      hubFilterChecked: streamMetrics?.hubFilterChecked ?? 0,
+      hubFilterCheckedPerSec: streamMetrics?.hubFilterCheckedPerSec ?? 0,
+      hubFilterPassed: streamMetrics?.hubFilterPassed ?? 0,
+      hubFilterPassedPerSec: streamMetrics?.hubFilterPassedPerSec ?? 0,
       trackedTokenCount,
       wsCapUtilizationPct,
       shardCount: streamMetrics?.shardCount ?? 0,

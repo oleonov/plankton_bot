@@ -56,6 +56,7 @@ export interface WorkerUpdateEnvelope {
   readonly updates: readonly MarketPricingStreamUpdate[];
   readonly lifecycleEvents: readonly MarketPricingLifecycleEvent[];
   readonly metrics: ParsedRecordMetrics;
+  readonly noopUpdateCount: number;
   readonly bookEventCount: number;
   readonly marketResolvedEventCount: number;
   readonly newMarketEventCount: number;

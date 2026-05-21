@@ -110,6 +110,16 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const wsWorkerMemory = readObject(stream, "wsWorkerMemory");
     const wsTracked = readNumber(stream, "trackedTokenCount") ?? 0;
     const eventsPerSec = readNumber(stream, "wsEventsReceivedPerSec") ?? 0;
+    const rawWsRecords = readNumber(stream, "rawWsRecords") ?? 0;
+    const rawWsRecordsPerSec = readNumber(stream, "rawWsRecordsPerSec") ?? 0;
+    const parsedUpdates = readNumber(stream, "parsedUpdates") ?? 0;
+    const parsedUpdatesPerSec = readNumber(stream, "parsedUpdatesPerSec") ?? 0;
+    const noopUpdates = readNumber(stream, "noopUpdates") ?? 0;
+    const noopUpdatesPerSec = readNumber(stream, "noopUpdatesPerSec") ?? 0;
+    const hubFilterChecked = readNumber(stream, "hubFilterChecked") ?? 0;
+    const hubFilterCheckedPerSec = readNumber(stream, "hubFilterCheckedPerSec") ?? 0;
+    const hubFilterPassed = readNumber(stream, "hubFilterPassed") ?? 0;
+    const hubFilterPassedPerSec = readNumber(stream, "hubFilterPassedPerSec") ?? 0;
     const shardCount = readNumber(stream, "shardCount") ?? 0;
     const universeActive = marketCounts.activeTradable;
     const coveragePct = universeActive > 0 ? (wsTracked / universeActive) * 100 : 0;
@@ -128,6 +138,16 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       markets_active: marketCounts.active,
       coverage_pct: coveragePct,
       events_per_sec: eventsPerSec,
+      raw_ws_records: rawWsRecords,
+      raw_ws_records_per_sec: rawWsRecordsPerSec,
+      parsed_updates: parsedUpdates,
+      parsed_updates_per_sec: parsedUpdatesPerSec,
+      noop_updates: noopUpdates,
+      noop_updates_per_sec: noopUpdatesPerSec,
+      hub_filter_checked: hubFilterChecked,
+      hub_filter_checked_per_sec: hubFilterCheckedPerSec,
+      hub_filter_passed: hubFilterPassed,
+      hub_filter_passed_per_sec: hubFilterPassedPerSec,
       shard_count: shardCount,
       rotation_cycle_hours: rotationCycleHours,
       positions_opened_24h: positionsOpened24h.cnt,

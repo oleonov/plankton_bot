@@ -13,9 +13,11 @@ import {
 import { noteLatencySample } from "./market-pricing-ws-protocol.js";
 
 export interface CollectStreamUpdatesResult {
+  readonly rawRecordCount: number;
   readonly updates: readonly MarketPricingStreamUpdate[];
   readonly lifecycleEvents: readonly MarketPricingLifecycleEvent[];
   readonly eventCount: number;
+  readonly noopUpdateCount: number;
   readonly bookEventCount: number;
   readonly marketResolvedEventCount: number;
   readonly newMarketEventCount: number;
@@ -31,6 +33,7 @@ export function collectStreamUpdates(
   const lifecycleEvents: MarketPricingLifecycleEvent[] = [];
   const latencySamplesMs: number[] = [];
   let eventCount = 0;
+  let noopUpdateCount = 0;
   let bookEventCount = 0;
   let marketResolvedEventCount = 0;
   let newMarketEventCount = 0;
@@ -58,6 +61,7 @@ export function collectStreamUpdates(
         pricingByToken.set(tokenId, next);
         updates.push({ tokenId, pricing: next });
         eventCount++;
+        if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
         noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
       }
       continue;
@@ -117,6 +121,7 @@ export function collectStreamUpdates(
       pricingByToken.set(tokenId, next);
       updates.push({ tokenId, pricing: next, book });
       eventCount++;
+      if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       bookEventCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
       continue;
@@ -132,6 +137,7 @@ export function collectStreamUpdates(
       pricingByToken.set(tokenId, next);
       updates.push({ tokenId, pricing: next });
       eventCount++;
+      if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
       continue;
     }
@@ -146,6 +152,7 @@ export function collectStreamUpdates(
       pricingByToken.set(tokenId, next);
       updates.push({ tokenId, pricing: next });
       eventCount++;
+      if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
       continue;
     }
@@ -173,19 +180,29 @@ export function collectStreamUpdates(
       pricingByToken.set(tokenId, next);
       updates.push({ tokenId, pricing: next });
       eventCount++;
+      if (isNoopTopOfBookUpdate(current, next)) noopUpdateCount++;
       noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
     }
   }
 
   return {
+    rawRecordCount: records.length,
     updates,
     lifecycleEvents,
     eventCount,
+    noopUpdateCount,
     bookEventCount,
     marketResolvedEventCount,
     newMarketEventCount,
     latencySamplesMs,
   };
+}
+
+function isNoopTopOfBookUpdate(
+  current: MarketPricingSnapshot,
+  next: MarketPricingSnapshot,
+): boolean {
+  return current.bestBid === next.bestBid && current.bestAsk === next.bestAsk;
 }
 
 function getCurrentPricing(

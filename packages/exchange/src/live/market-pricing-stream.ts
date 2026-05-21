@@ -41,6 +41,7 @@ import { computeReconnectDelayMs } from "./reconnect-backoff.js";
 
 const DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION = 500;
 const METRICS_WINDOW_MS = 10 * 60 * 1000;
+const STREAM_TELEMETRY_WINDOW_MS = 60_000;
 // Cap per-window latency samples. Each reconnect can burst thousands of samples
 // (one per WS event × ~500 tokens/shard × 20 shards). Under a reconnect storm
 // the window doesn't rotate (still <10 min) so samples accumulate into tens of
@@ -72,13 +73,53 @@ interface StreamWindow {
   windowStartMs: number;
   wsEventsReceived: number;
   wsUpdatesApplied: number;
-  latencySamplesMs: number[];
+  latencySamples: LatencySampleRingBuffer;
   reconnectCount: number;
   wsEventGapDetected: number;
   wsGapsByShard: Record<string, number>;
   bookEventsReceived: number;
   marketResolvedEvents: number;
   newMarketEvents: number;
+}
+
+interface StreamTelemetryWindow {
+  windowStartMs: number;
+  rawWsRecords: number;
+  parsedUpdates: number;
+  noopUpdates: number;
+}
+
+export class LatencySampleRingBuffer {
+  private readonly samples: Float64Array;
+  private writeIdx = 0;
+  private filled = false;
+
+  constructor(private readonly capacity: number) {
+    if (!Number.isInteger(capacity) || capacity <= 0) {
+      throw new Error("latency sample capacity must be a positive integer");
+    }
+    this.samples = new Float64Array(capacity);
+  }
+
+  push(value: number): void {
+    this.samples[this.writeIdx] = value;
+    this.writeIdx = (this.writeIdx + 1) % this.capacity;
+    if (this.writeIdx === 0) this.filled = true;
+  }
+
+  pushMany(values: readonly number[]): void {
+    for (const value of values) this.push(value);
+  }
+
+  toArray(): number[] {
+    if (!this.filled) {
+      return Array.from(this.samples.slice(0, this.writeIdx));
+    }
+    return [
+      ...Array.from(this.samples.slice(this.writeIdx)),
+      ...Array.from(this.samples.slice(0, this.writeIdx)),
+    ];
+  }
 }
 
 interface WorkerHeartbeatAggregate {
@@ -175,6 +216,7 @@ interface ShardCallbacks {
   onWorkerUpdateBatch?: (
     updates: readonly MarketPricingStreamUpdate[],
     lifecycleEvents: readonly MarketPricingLifecycleEvent[],
+    noopUpdateCount: number,
   ) => Promise<void> | void;
   /** Worker shards include parsed event-type counts with their compact batches. */
   onWorkerEventCounts?: (counts: {
@@ -252,6 +294,10 @@ export class LiveMarketPricingStream implements MarketPricingStream {
   private pendingDesiredTokenIds: string[] | null = null;
   private closed = false;
   private window: StreamWindow;
+  private telemetryWindow: StreamTelemetryWindow;
+  private rawWsRecords = 0;
+  private parsedUpdates = 0;
+  private noopUpdates = 0;
   // Lifetime queue metrics (not window-rotated; monotonically increasing)
   private totalQueueOverflows = 0;
   private totalMaxQueueDepth = 0;
@@ -286,7 +332,9 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     this.streamStableMs = deps.streamStableMs ?? DEFAULT_STREAM_STABLE_MS;
     this.useWorkerShards = deps.useWorkerShards ?? false;
     this.wsWorkerCount = Math.max(0, deps.wsWorkerCount ?? Number.POSITIVE_INFINITY);
-    this.window = this.createEmptyWindow(this.now());
+    const nowMs = this.now();
+    this.window = this.createEmptyWindow(nowMs);
+    this.telemetryWindow = this.createEmptyTelemetryWindow(nowMs);
   }
 
   setTokenIds(tokenIds: readonly string[]): void {
@@ -336,6 +384,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
   getMetricsSnapshot(): MarketPricingStreamMetricsSnapshot {
     const nowMs = this.now();
     this.rotateWindow(nowMs);
+    this.rotateTelemetryWindow(nowMs);
     const elapsedSeconds = Math.max(1, Math.floor((nowMs - this.window.windowStartMs) / 1000));
     // Aggregate current queue depth across all shards.
     let totalQueueDepth = 0;
@@ -352,7 +401,13 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       reconnectCount: this.window.reconnectCount,
       wsEventGapDetected: this.window.wsEventGapDetected,
       wsGapsByShard: { ...this.window.wsGapsByShard },
-      wsLatencyMs: summarizeLatencySamples(this.window.latencySamplesMs),
+      wsLatencyMs: summarizeLatencySamples(this.window.latencySamples.toArray()),
+      rawWsRecords: this.rawWsRecords,
+      rawWsRecordsPerSec: this.telemetryRate(this.telemetryWindow.rawWsRecords, nowMs),
+      parsedUpdates: this.parsedUpdates,
+      parsedUpdatesPerSec: this.telemetryRate(this.telemetryWindow.parsedUpdates, nowMs),
+      noopUpdates: this.noopUpdates,
+      noopUpdatesPerSec: this.telemetryRate(this.telemetryWindow.noopUpdates, nowMs),
       bookEventsReceived: this.window.bookEventsReceived,
       marketResolvedEvents: this.window.marketResolvedEvents,
       newMarketEvents: this.window.newMarketEvents,
@@ -522,8 +577,8 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       onWorkerEventCounts: (counts) => {
         this.recordWorkerEventCounts(counts);
       },
-      onWorkerUpdateBatch: async (updates, lifecycleEvents) => {
-        await this.handleWorkerUpdateBatch(updates, lifecycleEvents);
+      onWorkerUpdateBatch: async (updates, lifecycleEvents, noopUpdateCount) => {
+        await this.handleWorkerUpdateBatch(updates, lifecycleEvents, noopUpdateCount);
       },
       onHeartbeat: (sid, heartbeat) => {
         this.heartbeatByShard.set(sid, heartbeat);
@@ -575,17 +630,17 @@ export class LiveMarketPricingStream implements MarketPricingStream {
   }
 
   private recordParsedMetrics(metrics: ParsedRecordMetrics): void {
-    const { eventCount, latencySamplesMs } = metrics;
+    const { rawRecordCount, eventCount, latencySamplesMs } = metrics;
+    const nowMs = this.now();
+    this.rotateTelemetryWindow(nowMs);
+    this.rawWsRecords += rawRecordCount;
+    this.telemetryWindow.rawWsRecords += rawRecordCount;
     if (eventCount > 0) {
-      this.rotateWindow(this.now());
+      this.rotateWindow(nowMs);
       this.window.wsEventsReceived += eventCount;
     }
     if (latencySamplesMs.length > 0) {
-      this.window.latencySamplesMs.push(...latencySamplesMs);
-      const overflow = this.window.latencySamplesMs.length - MAX_LATENCY_SAMPLES_PER_WINDOW;
-      if (overflow > 0) {
-        this.window.latencySamplesMs.splice(0, overflow);
-      }
+      this.window.latencySamples.pushMany(latencySamplesMs);
     }
   }
 
@@ -717,6 +772,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     const {
       updates,
       lifecycleEvents,
+      noopUpdateCount,
       bookEventCount,
       marketResolvedEventCount,
       newMarketEventCount,
@@ -735,6 +791,11 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     if (lifecycleEvents.length > 0) {
       await this.deps.handlers.onLifecycleEvents?.(lifecycleEvents);
     }
+    this.rotateTelemetryWindow(nowMs);
+    this.parsedUpdates += updates.length;
+    this.noopUpdates += noopUpdateCount;
+    this.telemetryWindow.parsedUpdates += updates.length;
+    this.telemetryWindow.noopUpdates += noopUpdateCount;
     if (updates.length === 0) return;
     this.window.wsUpdatesApplied += updates.length;
     await this.deps.handlers.onUpdates(updates);
@@ -743,6 +804,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
   private async handleWorkerUpdateBatch(
     updates: readonly MarketPricingStreamUpdate[],
     lifecycleEvents: readonly MarketPricingLifecycleEvent[],
+    noopUpdateCount: number,
   ): Promise<void> {
     const nowMs = this.now();
     this.rotateWindow(nowMs);
@@ -752,6 +814,11 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     if (lifecycleEvents.length > 0) {
       await this.deps.handlers.onLifecycleEvents?.(lifecycleEvents);
     }
+    this.rotateTelemetryWindow(nowMs);
+    this.parsedUpdates += updates.length;
+    this.noopUpdates += noopUpdateCount;
+    this.telemetryWindow.parsedUpdates += updates.length;
+    this.telemetryWindow.noopUpdates += noopUpdateCount;
     if (updates.length === 0) return;
     this.window.wsUpdatesApplied += updates.length;
     await this.deps.handlers.onUpdates(updates);
@@ -773,18 +840,40 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     this.window = this.createEmptyWindow(nowMs);
   }
 
+  private rotateTelemetryWindow(nowMs: number): void {
+    if (nowMs - this.telemetryWindow.windowStartMs <= STREAM_TELEMETRY_WINDOW_MS) return;
+    this.telemetryWindow = this.createEmptyTelemetryWindow(nowMs);
+  }
+
+  private telemetryRate(count: number, nowMs: number): number {
+    const elapsedSeconds = Math.max(
+      1,
+      Math.floor((nowMs - this.telemetryWindow.windowStartMs) / 1000),
+    );
+    return Number((count / elapsedSeconds).toFixed(3));
+  }
+
   private createEmptyWindow(nowMs: number): StreamWindow {
     return {
       windowStartMs: nowMs,
       wsEventsReceived: 0,
       wsUpdatesApplied: 0,
-      latencySamplesMs: [],
+      latencySamples: new LatencySampleRingBuffer(MAX_LATENCY_SAMPLES_PER_WINDOW),
       reconnectCount: 0,
       wsEventGapDetected: 0,
       wsGapsByShard: {},
       bookEventsReceived: 0,
       marketResolvedEvents: 0,
       newMarketEvents: 0,
+    };
+  }
+
+  private createEmptyTelemetryWindow(nowMs: number): StreamTelemetryWindow {
+    return {
+      windowStartMs: nowMs,
+      rawWsRecords: 0,
+      parsedUpdates: 0,
+      noopUpdates: 0,
     };
   }
 
@@ -1371,7 +1460,11 @@ class WorkerMarketPricingGroup {
             newMarketEventCount: envelope.newMarketEventCount,
           });
         }
-        void deps.onWorkerUpdateBatch?.(envelope.updates, envelope.lifecycleEvents);
+        void deps.onWorkerUpdateBatch?.(
+          envelope.updates,
+          envelope.lifecycleEvents,
+          envelope.noopUpdateCount,
+        );
         break;
       }
       case "records":
