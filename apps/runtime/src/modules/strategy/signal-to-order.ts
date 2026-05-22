@@ -648,7 +648,13 @@ export class SignalToOrderBridge {
         if (!placementDecision.allowed) {
           const reason = placementDecision.reason ?? "same-price-cooldown";
           const sample =
-            this.deps.signalPathTelemetry?.recordLateCooldown(signal.signalId) ?? false;
+            this.deps.signalPathTelemetry?.recordLateCooldown(
+              signal.signalId,
+              String(signal.tokenId),
+              signal.side === "buy" ? "BUY" : "SELL",
+              executionTerms.price,
+              market.tickSize,
+            ) ?? false;
           if (sample) {
             this.log.info(
               {

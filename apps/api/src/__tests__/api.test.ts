@@ -708,7 +708,7 @@ describe("GET /status", () => {
         ('r23_cache_activity', 0.5, '{"hitRate":0.5,"hits":1,"misses":1,"invocations":2}', '2026-05-18T00:00:00Z'),
         ('runtime_diagnostics', 12, '{"eventLoopLagMs":{"p95Ms":12,"maxMs":37},"gcPauseMs":{"maxMs":4},"stageTimers":{"ipc_decode":{"maxMs":1.2,"p95Ms":0.8},"handle_worker_batch":{"maxMs":2.2,"p95Ms":1.8},"hub_dispatch":{"maxMs":3.2,"p95Ms":2.8},"coalescing_flush":{"maxMs":4.2,"p95Ms":3.8},"latency_summary":{"maxMs":5.2,"p95Ms":4.8},"diagnostics_write":{"maxMs":6.2,"p95Ms":5.8},"metrics_flush_total":{"maxMs":7.2,"p95Ms":6.8},"metrics_flush_sqlite_writes":{"maxMs":8.2,"p95Ms":7.8},"metrics_flush_snapshot_serialize":{"maxMs":9.2,"p95Ms":8.8},"risk_signal_approval":{"maxMs":10.2,"p95Ms":9.8},"signal_to_order_bridge":{"maxMs":11.2,"p95Ms":10.8},"worker_non_update_events":{"maxMs":12.2,"p95Ms":11.8},"discovery_poll_publish":{"maxMs":13.2,"p95Ms":12.8},"signal_path_aggregate":{"maxMs":14.2,"p95Ms":13.8},"cooldown_registry_sweep":{"maxMs":15.2,"p95Ms":14.8}}}', '2026-05-18T00:00:00Z');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
-      VALUES ('signal_path_activity', 1, '{"cooldown":{"signalsSuppressedEarlyCooldownTotal":12,"signalsSuppressedEarlyCooldownByToken":{"tok-a":10,"tok-b":2},"cooldownRegistrySize":3},"cooldownSignalDedupe":{"total":9,"earlyOnly":5,"lateOnly":3,"earlyAndLate":1,"duplicateEarly":2,"duplicateLate":4}}', '2026-05-18T00:00:00Z');
+      VALUES ('signal_path_activity', 1, '{"cooldown":{"signalsSuppressedEarlyCooldownTotal":12,"signalsSuppressedEarlyCooldownByToken":{"tok-a":10,"tok-b":2},"cooldownRegistrySize":3},"cooldownSignalDedupe":{"total":9,"earlyOnly":5,"lateOnly":3,"earlyAndLate":1,"duplicateEarly":2,"duplicateLate":4},"cooldownPriceDedupe":{"total":8,"earlyOnly":2,"lateOnly":3,"earlyAndLate":3,"duplicateEarly":1,"duplicateLate":2,"skippedNoPrice":6}}', '2026-05-18T00:00:00Z');
     `);
     conn.db
       .prepare(
@@ -792,6 +792,13 @@ describe("GET /status", () => {
     expect(body.data.cooldown_signal_dedupe_early_and_late).toBe(1);
     expect(body.data.cooldown_signal_dedupe_duplicate_early).toBe(2);
     expect(body.data.cooldown_signal_dedupe_duplicate_late).toBe(4);
+    expect(body.data.cooldown_price_dedupe_total).toBe(8);
+    expect(body.data.cooldown_price_dedupe_early_only).toBe(2);
+    expect(body.data.cooldown_price_dedupe_late_only).toBe(3);
+    expect(body.data.cooldown_price_dedupe_early_and_late).toBe(3);
+    expect(body.data.cooldown_price_dedupe_duplicate_early).toBe(1);
+    expect(body.data.cooldown_price_dedupe_duplicate_late).toBe(2);
+    expect(body.data.cooldown_price_dedupe_skipped_no_price).toBe(6);
     expect(body.data.http_errors_by_class_1h).toEqual({ "gamma-pricing:timeout": 2 });
     expect(body.data.ws_heartbeat.pingSent).toBe(4);
     expect(body.data.ws_heartbeat.workerEventLoopLagMaxMs).toBe(11);

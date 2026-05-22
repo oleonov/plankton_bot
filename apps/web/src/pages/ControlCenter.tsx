@@ -4,11 +4,10 @@ import { Badge } from "../components/Badge.tsx";
 import { ConfirmAction } from "../components/ConfirmAction.tsx";
 import { SwitchProfileWizard } from "../components/wizards/SwitchProfileWizard.tsx";
 import { ResumeLiveWizard } from "../components/wizards/ResumeLiveWizard.tsx";
-import { ResetLedgerWizard } from "../components/wizards/ResetLedgerWizard.tsx";
 import { formatAgo } from "../utils/format.ts";
 import type { ProfileDTO } from "../api/types.ts";
 
-type Wizard = "switch" | "resume-live" | "reset" | null;
+type Wizard = "switch" | "resume-live" | null;
 
 function ProfileCard({
   profile,
@@ -115,15 +114,11 @@ export function ControlCenter() {
               isPending={pause.isPending}
             />
           )}
-          <button className="btn-danger" onClick={() => setWizard("reset")}>
-            Reset Ledger
-          </button>
         </div>
       </div>
 
       {wizard === "switch" && <SwitchProfileWizard onClose={() => setWizard(null)} />}
       {wizard === "resume-live" && <ResumeLiveWizard onClose={() => setWizard(null)} />}
-      {wizard === "reset" && <ResetLedgerWizard onClose={() => setWizard(null)} />}
     </div>
   );
 }

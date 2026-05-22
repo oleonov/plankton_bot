@@ -1,18 +1,35 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { SignalPathTelemetry } from "./signal-path-telemetry.js";
+import { PRICE_KEY_WINDOW_MS, SignalPathTelemetry } from "./signal-path-telemetry.js";
+
+const TOKEN_ID = "token-1";
+const SIDE = "SELL";
+const PRICE = 0.423;
+const TICK_SIZE = 0.01;
+
+function recordEarly(telemetry: SignalPathTelemetry, signalId: string): void {
+  telemetry.recordEarlyCooldown(signalId, TOKEN_ID, SIDE, PRICE, TICK_SIZE);
+}
+
+function recordLate(telemetry: SignalPathTelemetry, signalId: string): void {
+  telemetry.recordLateCooldown(signalId, TOKEN_ID, SIDE, PRICE, TICK_SIZE);
+}
 
 describe("SignalPathTelemetry cooldown diagnostics", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("deduplicates early and late cooldown phases by signal id per window", () => {
     const telemetry = new SignalPathTelemetry();
 
-    telemetry.recordEarlyCooldown("early-only-1");
-    telemetry.recordEarlyCooldown("early-only-2");
-    telemetry.recordLateCooldown("late-only-1");
-    telemetry.recordEarlyCooldown("both-1");
-    telemetry.recordLateCooldown("both-1");
-    telemetry.recordEarlyCooldown("early-only-1");
-    telemetry.recordLateCooldown("late-only-1");
+    recordEarly(telemetry, "early-only-1");
+    recordEarly(telemetry, "early-only-2");
+    recordLate(telemetry, "late-only-1");
+    recordEarly(telemetry, "both-1");
+    recordLate(telemetry, "both-1");
+    recordEarly(telemetry, "early-only-1");
+    recordLate(telemetry, "late-only-1");
 
     const snapshot = telemetry.snapshotAndReset();
 
@@ -28,20 +45,111 @@ describe("SignalPathTelemetry cooldown diagnostics", () => {
     });
   });
 
-  it("resets cooldown dedupe state with the aggregate window", () => {
+  it("deduplicates early and late cooldown phases by token side price and time bucket", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000_000);
     const telemetry = new SignalPathTelemetry();
 
-    telemetry.recordEarlyCooldown("signal-1");
-    telemetry.recordLateCooldown("signal-2");
+    telemetry.recordEarlyCooldown("early-random-1", TOKEN_ID, SIDE, 0.424, TICK_SIZE);
+    telemetry.recordLateCooldown("late-random-1", TOKEN_ID, SIDE, 0.423, TICK_SIZE);
 
-    expect(telemetry.snapshotAndReset().cooldownSignalDedupe.total).toBe(2);
-    expect(telemetry.snapshotAndReset().cooldownSignalDedupe).toEqual({
+    const snapshot = telemetry.snapshotAndReset();
+
+    expect(snapshot.cooldownPriceDedupe).toEqual({
+      total: 1,
+      earlyOnly: 0,
+      lateOnly: 0,
+      earlyAndLate: 1,
+      duplicateEarly: 0,
+      duplicateLate: 0,
+      skippedNoPrice: 0,
+    });
+  });
+
+  it("keeps identical token side price signals in separate time buckets independent", () => {
+    const now = vi.spyOn(Date, "now");
+    const telemetry = new SignalPathTelemetry();
+
+    now.mockReturnValue(1_000_000);
+    recordEarly(telemetry, "early-random-1");
+    now.mockReturnValue(1_000_000 + PRICE_KEY_WINDOW_MS + 1);
+    recordLate(telemetry, "late-random-1");
+
+    const snapshot = telemetry.snapshotAndReset();
+
+    expect(snapshot.cooldownPriceDedupe).toEqual({
+      total: 2,
+      earlyOnly: 1,
+      lateOnly: 1,
+      earlyAndLate: 0,
+      duplicateEarly: 0,
+      duplicateLate: 0,
+      skippedNoPrice: 0,
+    });
+  });
+
+  it("skips price-key dedupe for null price but preserves signal-id dedupe", () => {
+    const telemetry = new SignalPathTelemetry();
+
+    telemetry.recordEarlyCooldown("signal-1", TOKEN_ID, SIDE, null, TICK_SIZE);
+    telemetry.recordLateCooldown("signal-1", TOKEN_ID, SIDE, undefined, TICK_SIZE);
+
+    const snapshot = telemetry.snapshotAndReset();
+
+    expect(snapshot.cooldownSignalDedupe.earlyAndLate).toBe(1);
+    expect(snapshot.cooldownPriceDedupe).toEqual({
       total: 0,
       earlyOnly: 0,
       lateOnly: 0,
       earlyAndLate: 0,
       duplicateEarly: 0,
       duplicateLate: 0,
+      skippedNoPrice: 2,
+    });
+  });
+
+  it("skips price-key dedupe for zero tick size", () => {
+    const telemetry = new SignalPathTelemetry();
+
+    telemetry.recordEarlyCooldown("signal-1", TOKEN_ID, SIDE, PRICE, 0);
+
+    const snapshot = telemetry.snapshotAndReset();
+
+    expect(snapshot.cooldownSignalDedupe.earlyOnly).toBe(1);
+    expect(snapshot.cooldownPriceDedupe).toEqual({
+      total: 0,
+      earlyOnly: 0,
+      lateOnly: 0,
+      earlyAndLate: 0,
+      duplicateEarly: 0,
+      duplicateLate: 0,
+      skippedNoPrice: 1,
+    });
+  });
+
+  it("resets cooldown dedupe state with the aggregate window", () => {
+    const telemetry = new SignalPathTelemetry();
+
+    recordEarly(telemetry, "signal-1");
+    recordLate(telemetry, "signal-2");
+
+    expect(telemetry.snapshotAndReset().cooldownSignalDedupe.total).toBe(2);
+    const reset = telemetry.snapshotAndReset();
+    expect(reset.cooldownSignalDedupe).toEqual({
+      total: 0,
+      earlyOnly: 0,
+      lateOnly: 0,
+      earlyAndLate: 0,
+      duplicateEarly: 0,
+      duplicateLate: 0,
+    });
+    expect(reset.cooldownPriceDedupe).toEqual({
+      total: 0,
+      earlyOnly: 0,
+      lateOnly: 0,
+      earlyAndLate: 0,
+      duplicateEarly: 0,
+      duplicateLate: 0,
+      skippedNoPrice: 0,
     });
   });
 });

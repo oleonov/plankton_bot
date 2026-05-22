@@ -393,7 +393,13 @@ export class RiskInventoryModule implements RuntimeModule {
       }
 
       if (this.shouldSuppressEarlySellCooldown(signal, market)) {
-        this.deps.signalPathTelemetry?.recordEarlyCooldown(signal.signalId);
+        this.deps.signalPathTelemetry?.recordEarlyCooldown(
+          signal.signalId,
+          String(signal.tokenId),
+          signal.side === "buy" ? "BUY" : "SELL",
+          signal.suggestedPrice,
+          market.tickSize,
+        );
         this.deps.cooldownRegistry?.recordEarlySuppression(signal.tokenId);
         await this.deps.bus.publish("SignalConversionSkipped", {
           signal,

@@ -1,3 +1,4 @@
+import { roundToTick } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 
 export interface SignalPathAggregateSnapshot {
@@ -5,8 +6,10 @@ export interface SignalPathAggregateSnapshot {
   readonly signalsSkippedLateCooldown: number;
   readonly signalsSkippedEarlyCooldown: number;
   readonly cooldownSignalDedupe: CooldownSignalDedupeSnapshot;
+  readonly cooldownPriceDedupe: CooldownPriceDedupeSnapshot;
   readonly signalsRejectedByReason: Readonly<Record<string, number>>;
   readonly sampleSignalId: string | null;
+  readonly heap: SignalPathTelemetryHeapSnapshot;
 }
 
 export interface CooldownSignalDedupeSnapshot {
@@ -18,8 +21,23 @@ export interface CooldownSignalDedupeSnapshot {
   readonly duplicateLate: number;
 }
 
+export interface CooldownPriceDedupeSnapshot extends CooldownSignalDedupeSnapshot {
+  readonly skippedNoPrice: number;
+}
+
+export interface SignalPathTelemetryHeapSnapshot {
+  readonly signalIdMapSize: number;
+  readonly priceKeyMapSize: number;
+  readonly heapBeforeBytes: number;
+  readonly heapAfterBytes: number;
+  readonly deltaBytes: number;
+}
+
+export const PRICE_KEY_WINDOW_MS = 5000;
+
 const COOLDOWN_PHASE_EARLY = 1;
 const COOLDOWN_PHASE_LATE = 2;
+type CooldownTelemetrySide = "BUY" | "SELL";
 
 export class SignalPathTelemetry {
   private signalsApproved = 0;
@@ -28,10 +46,14 @@ export class SignalPathTelemetry {
   private sampleSignalId: string | null = null;
   private readonly signalsRejectedByReason = new Map<string, number>();
   private readonly cooldownSignalPhases = new Map<string, number>();
+  private readonly cooldownPriceKeyPhases = new Map<string, number>();
   private approvedDebugCounter = 0;
   private lateCooldownDebugCounter = 0;
   private duplicateEarlyCooldownSignals = 0;
   private duplicateLateCooldownSignals = 0;
+  private duplicateEarlyCooldownPriceKeys = 0;
+  private duplicateLateCooldownPriceKeys = 0;
+  private cooldownPriceDedupeSkippedNoPrice = 0;
 
   recordApproved(signalId: string): boolean {
     this.signalsApproved++;
@@ -40,17 +62,31 @@ export class SignalPathTelemetry {
     return this.approvedDebugCounter % 100 === 0;
   }
 
-  recordLateCooldown(signalId: string): boolean {
+  recordLateCooldown(
+    signalId: string,
+    tokenId: string,
+    side: CooldownTelemetrySide,
+    price: number | null | undefined,
+    tickSize: number | null | undefined,
+  ): boolean {
     this.signalsSkippedLateCooldown++;
     this.sampleSignalId = signalId;
+    this.recordCooldownPricePhase(tokenId, side, price, tickSize, COOLDOWN_PHASE_LATE);
     this.recordCooldownPhase(signalId, COOLDOWN_PHASE_LATE);
     this.lateCooldownDebugCounter++;
     return this.lateCooldownDebugCounter % 100 === 0;
   }
 
-  recordEarlyCooldown(signalId: string): void {
+  recordEarlyCooldown(
+    signalId: string,
+    tokenId: string,
+    side: CooldownTelemetrySide,
+    price: number | null | undefined,
+    tickSize: number | null | undefined,
+  ): void {
     this.signalsSkippedEarlyCooldown++;
     this.sampleSignalId = signalId;
+    this.recordCooldownPricePhase(tokenId, side, price, tickSize, COOLDOWN_PHASE_EARLY);
     this.recordCooldownPhase(signalId, COOLDOWN_PHASE_EARLY);
   }
 
@@ -60,26 +96,63 @@ export class SignalPathTelemetry {
   }
 
   snapshotAndReset(): SignalPathAggregateSnapshot {
+    const heapBeforeBytes = process.memoryUsage().heapUsed;
+    const signalIdMapSize = this.cooldownSignalPhases.size;
+    const priceKeyMapSize = this.cooldownPriceKeyPhases.size;
     const snapshot: SignalPathAggregateSnapshot = {
       signalsApproved: this.signalsApproved,
       signalsSkippedLateCooldown: this.signalsSkippedLateCooldown,
       signalsSkippedEarlyCooldown: this.signalsSkippedEarlyCooldown,
       cooldownSignalDedupe: this.snapshotCooldownSignalDedupe(),
+      cooldownPriceDedupe: this.snapshotCooldownPriceDedupe(),
       signalsRejectedByReason: Object.fromEntries(this.signalsRejectedByReason),
       sampleSignalId: this.sampleSignalId,
+      heap: {
+        signalIdMapSize,
+        priceKeyMapSize,
+        heapBeforeBytes,
+        heapAfterBytes: 0,
+        deltaBytes: 0,
+      },
     };
     this.signalsApproved = 0;
     this.signalsSkippedLateCooldown = 0;
     this.signalsSkippedEarlyCooldown = 0;
     this.signalsRejectedByReason.clear();
     this.cooldownSignalPhases.clear();
+    this.cooldownPriceKeyPhases.clear();
     this.duplicateEarlyCooldownSignals = 0;
     this.duplicateLateCooldownSignals = 0;
+    this.duplicateEarlyCooldownPriceKeys = 0;
+    this.duplicateLateCooldownPriceKeys = 0;
+    this.cooldownPriceDedupeSkippedNoPrice = 0;
     this.sampleSignalId = null;
-    return snapshot;
+    const heapAfterBytes = process.memoryUsage().heapUsed;
+    return {
+      ...snapshot,
+      heap: {
+        signalIdMapSize,
+        priceKeyMapSize,
+        heapBeforeBytes,
+        heapAfterBytes,
+        deltaBytes: heapAfterBytes - heapBeforeBytes,
+      },
+    };
   }
 
   logAggregate(logger: Logger, snapshot: SignalPathAggregateSnapshot, periodSec: number): void {
+    logger.debug(
+      {
+        event: "signal_path_telemetry_snapshot_heap",
+        priceKeyMapSize: snapshot.heap.priceKeyMapSize,
+        signalIdMapSize: snapshot.heap.signalIdMapSize,
+        heapBeforeBytes: snapshot.heap.heapBeforeBytes,
+        heapAfterBytes: snapshot.heap.heapAfterBytes,
+        deltaBytes: snapshot.heap.deltaBytes,
+      },
+      "signal path telemetry snapshot heap",
+    );
+
     const total =
       snapshot.signalsApproved +
       snapshot.signalsSkippedLateCooldown +
@@ -105,6 +178,13 @@ export class SignalPathTelemetry {
         cooldown_signal_dedupe_early_and_late: snapshot.cooldownSignalDedupe.earlyAndLate,
         cooldown_signal_dedupe_duplicate_early: snapshot.cooldownSignalDedupe.duplicateEarly,
         cooldown_signal_dedupe_duplicate_late: snapshot.cooldownSignalDedupe.duplicateLate,
+        cooldown_price_dedupe_total: snapshot.cooldownPriceDedupe.total,
+        cooldown_price_dedupe_early_only: snapshot.cooldownPriceDedupe.earlyOnly,
+        cooldown_price_dedupe_late_only: snapshot.cooldownPriceDedupe.lateOnly,
+        cooldown_price_dedupe_early_and_late: snapshot.cooldownPriceDedupe.earlyAndLate,
+        cooldown_price_dedupe_duplicate_early: snapshot.cooldownPriceDedupe.duplicateEarly,
+        cooldown_price_dedupe_duplicate_late: snapshot.cooldownPriceDedupe.duplicateLate,
+        cooldown_price_dedupe_skipped_no_price: snapshot.cooldownPriceDedupe.skippedNoPrice,
         ...rejectedFields,
         sample_signal_id: snapshot.sampleSignalId,
       },
@@ -125,28 +205,84 @@ export class SignalPathTelemetry {
     this.cooldownSignalPhases.set(signalId, current | phase);
   }
 
-  private snapshotCooldownSignalDedupe(): CooldownSignalDedupeSnapshot {
-    let earlyOnly = 0;
-    let lateOnly = 0;
-    let earlyAndLate = 0;
-    for (const phase of this.cooldownSignalPhases.values()) {
-      if (phase === COOLDOWN_PHASE_EARLY) {
-        earlyOnly++;
-      } else if (phase === COOLDOWN_PHASE_LATE) {
-        lateOnly++;
-      } else if (phase === (COOLDOWN_PHASE_EARLY | COOLDOWN_PHASE_LATE)) {
-        earlyAndLate++;
-      }
+  private recordCooldownPricePhase(
+    tokenId: string,
+    side: CooldownTelemetrySide,
+    price: number | null | undefined,
+    tickSize: number | null | undefined,
+    phase: number,
+  ): void {
+    if (
+      price == null ||
+      !Number.isFinite(price) ||
+      tickSize == null ||
+      !Number.isFinite(tickSize) ||
+      tickSize <= 0
+    ) {
+      this.cooldownPriceDedupeSkippedNoPrice++;
+      return;
     }
+
+    const tickRoundedPrice = roundToTick(price, tickSize);
+    const timeBucket = Math.floor(Date.now() / PRICE_KEY_WINDOW_MS);
+    const key = `${tokenId}|${side}|${tickRoundedPrice}|${timeBucket}`;
+    const current = this.cooldownPriceKeyPhases.get(key) ?? 0;
+    if ((current & phase) !== 0) {
+      if (phase === COOLDOWN_PHASE_EARLY) {
+        this.duplicateEarlyCooldownPriceKeys++;
+      } else {
+        this.duplicateLateCooldownPriceKeys++;
+      }
+      return;
+    }
+    this.cooldownPriceKeyPhases.set(key, current | phase);
+  }
+
+  private snapshotCooldownSignalDedupe(): CooldownSignalDedupeSnapshot {
+    return snapshotCooldownDedupe(
+      this.cooldownSignalPhases,
+      this.duplicateEarlyCooldownSignals,
+      this.duplicateLateCooldownSignals,
+    );
+  }
+
+  private snapshotCooldownPriceDedupe(): CooldownPriceDedupeSnapshot {
     return {
-      total: this.cooldownSignalPhases.size,
-      earlyOnly,
-      lateOnly,
-      earlyAndLate,
-      duplicateEarly: this.duplicateEarlyCooldownSignals,
-      duplicateLate: this.duplicateLateCooldownSignals,
+      ...snapshotCooldownDedupe(
+        this.cooldownPriceKeyPhases,
+        this.duplicateEarlyCooldownPriceKeys,
+        this.duplicateLateCooldownPriceKeys,
+      ),
+      skippedNoPrice: this.cooldownPriceDedupeSkippedNoPrice,
     };
   }
+}
+
+function snapshotCooldownDedupe(
+  phases: ReadonlyMap<string, number>,
+  duplicateEarly: number,
+  duplicateLate: number,
+): CooldownSignalDedupeSnapshot {
+  let earlyOnly = 0;
+  let lateOnly = 0;
+  let earlyAndLate = 0;
+  for (const phase of phases.values()) {
+    if (phase === COOLDOWN_PHASE_EARLY) {
+      earlyOnly++;
+    } else if (phase === COOLDOWN_PHASE_LATE) {
+      lateOnly++;
+    } else if (phase === (COOLDOWN_PHASE_EARLY | COOLDOWN_PHASE_LATE)) {
+      earlyAndLate++;
+    }
+  }
+  return {
+    total: phases.size,
+    earlyOnly,
+    lateOnly,
+    earlyAndLate,
+    duplicateEarly,
+    duplicateLate,
+  };
 }
 
 function sanitizeReason(reason: string): string {
