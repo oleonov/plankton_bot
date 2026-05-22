@@ -3,7 +3,7 @@ set -e
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 SERVER_USER="root"
-SERVER_HOST="old.server.ip"
+SERVER_HOST="your.server.ip"
 SERVER_PATH="/opt/krabs"
 GHCR_OWNER="oleonov"
 GHCR_PACKAGE="krabs"
@@ -142,17 +142,17 @@ docker pull ${GHCR_IMAGE}:${IMAGE_TAG}
 
 cd ${SERVER_PATH}
 
-# docker-compose up -d with --force-recreate replaces containers in-place.
+# docker compose up -d with --force-recreate replaces containers in-place.
 # No separate "down" step — if the script dies after pull but before up,
 # the old containers keep running with the old image.
 echo "Replacing containers (force-recreate)..."
-docker-compose --env-file .env.production up -d --force-recreate --remove-orphans
+docker compose --env-file .env.production up -d --force-recreate --remove-orphans
 
 echo "Cleaning up dangling images..."
 docker image prune -f
 
 echo "Container status:"
-docker-compose --env-file .env.production ps
+docker compose --env-file .env.production ps
 ENDSSH
 
 # Step 6: Health check + update deploy metadata
@@ -218,7 +218,7 @@ echo -e "\n${GREEN}=== Deployment complete! ===${NC}"
 echo -e "Dashboard: https://bot.example.com"
 echo -e "Image:     ${GHCR_IMAGE}:${GIT_SHA}"
 echo -e "\nTo check status:"
-echo -e "  ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} 'cd ${SERVER_PATH} && docker-compose --env-file .env.production ps'"
+echo -e "  ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} 'cd ${SERVER_PATH} && docker compose --env-file .env.production ps'"
 echo -e "\nTo view logs:"
-echo -e "  ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} 'cd ${SERVER_PATH} && docker-compose --env-file .env.production logs -f krabs-runtime'"
-echo -e "  ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} 'cd ${SERVER_PATH} && docker-compose --env-file .env.production logs -f krabs-api'"
+echo -e "  ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} 'cd ${SERVER_PATH} && docker compose --env-file .env.production logs -f krabs-runtime'"
+echo -e "  ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER_HOST} 'cd ${SERVER_PATH} && docker compose --env-file .env.production logs -f krabs-api'"
