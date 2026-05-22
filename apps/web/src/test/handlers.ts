@@ -356,6 +356,13 @@ export const handlers = [
       cooldown_signal_dedupe_early_and_late: 0,
       cooldown_signal_dedupe_duplicate_early: 0,
       cooldown_signal_dedupe_duplicate_late: 0,
+      cooldown_price_dedupe_total: 10,
+      cooldown_price_dedupe_early_only: 4,
+      cooldown_price_dedupe_late_only: 4,
+      cooldown_price_dedupe_early_and_late: 2,
+      cooldown_price_dedupe_duplicate_early: 0,
+      cooldown_price_dedupe_duplicate_late: 0,
+      cooldown_price_dedupe_skipped_no_price: 0,
       http_errors_by_class_1h: { "gamma-pricing:timeout": 2 },
       ws_heartbeat: {
         pingSent: 20,

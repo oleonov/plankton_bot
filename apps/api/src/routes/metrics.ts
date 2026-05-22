@@ -111,6 +111,7 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const signalPath = parseJsonObject(signalPathRow?.labels);
     const cooldownTelemetry = readObject(signalPath, "cooldown");
     const cooldownSignalDedupe = readObject(signalPath, "cooldownSignalDedupe");
+    const cooldownPriceDedupe = readObject(signalPath, "cooldownPriceDedupe");
     const eventLoopLag = readObject(runtimeDiagnostics, "eventLoopLagMs");
     const gcPause = readObject(runtimeDiagnostics, "gcPauseMs");
     const stageTimers = readObject(runtimeDiagnostics, "stageTimers");
@@ -319,6 +320,14 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       cooldown_signal_dedupe_duplicate_early:
         readNumber(cooldownSignalDedupe, "duplicateEarly") ?? 0,
       cooldown_signal_dedupe_duplicate_late: readNumber(cooldownSignalDedupe, "duplicateLate") ?? 0,
+      cooldown_price_dedupe_total: readNumber(cooldownPriceDedupe, "total") ?? 0,
+      cooldown_price_dedupe_early_only: readNumber(cooldownPriceDedupe, "earlyOnly") ?? 0,
+      cooldown_price_dedupe_late_only: readNumber(cooldownPriceDedupe, "lateOnly") ?? 0,
+      cooldown_price_dedupe_early_and_late: readNumber(cooldownPriceDedupe, "earlyAndLate") ?? 0,
+      cooldown_price_dedupe_duplicate_early: readNumber(cooldownPriceDedupe, "duplicateEarly") ?? 0,
+      cooldown_price_dedupe_duplicate_late: readNumber(cooldownPriceDedupe, "duplicateLate") ?? 0,
+      cooldown_price_dedupe_skipped_no_price:
+        readNumber(cooldownPriceDedupe, "skippedNoPrice") ?? 0,
       http_errors_by_class_1h: aggregateHttpErrors(httpErrorRows),
       ws_heartbeat: wsHeartbeat,
       ws_worker_memory: wsWorkerMemory,

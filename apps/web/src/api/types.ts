@@ -406,6 +406,13 @@ export interface CoverageMetricsData {
   cooldown_signal_dedupe_early_and_late: number;
   cooldown_signal_dedupe_duplicate_early: number;
   cooldown_signal_dedupe_duplicate_late: number;
+  cooldown_price_dedupe_total: number;
+  cooldown_price_dedupe_early_only: number;
+  cooldown_price_dedupe_late_only: number;
+  cooldown_price_dedupe_early_and_late: number;
+  cooldown_price_dedupe_duplicate_early: number;
+  cooldown_price_dedupe_duplicate_late: number;
+  cooldown_price_dedupe_skipped_no_price: number;
   http_errors_by_class_1h: Record<string, number>;
   ws_heartbeat: {
     pingSent: number;
