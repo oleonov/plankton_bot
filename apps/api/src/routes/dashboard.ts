@@ -44,6 +44,11 @@ export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, op
             AND LOWER(f.side) = 'sell'
             AND f.filled_at >= positions.opened_at
             AND f.filled_at <= COALESCE(positions.closed_at, datetime('now'))
+       )
+       AND NOT EXISTS (
+         SELECT 1
+           FROM settlement_ledger sl
+          WHERE sl.position_id = positions.position_id
        )`,
     );
     const resolvedClosed = readClosedWinrate(
@@ -145,7 +150,7 @@ function readExitMultiples(db: Database.Database, sinceIso: string): number[] {
           AND f.filled_at >= p.opened_at
           AND f.filled_at <= p.closed_at
         GROUP BY p.position_id, p.avg_entry_price
-       HAVING multiple IS NOT NULL`,
+       HAVING multiple IS NOT NULL AND multiple >= 2.0`,
     )
     .all(sinceIso) as ExitMultipleRow[];
   return rows
