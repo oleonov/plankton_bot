@@ -403,6 +403,35 @@ describe("migration 058 — market snapshot public trade count", () => {
   });
 });
 
+describe("migration 060 — exit taker fallback log", () => {
+  it("creates fallback audit table and position index", () => {
+    db.exec(readMigration("060_exit_taker_fallback_log.sql"));
+
+    const columns = db.prepare("PRAGMA table_info(exit_taker_fallback_log)").all() as Array<{
+      name: string;
+    }>;
+    expect(columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "ts",
+        "position_id",
+        "token_id",
+        "profit_ratio",
+        "qty",
+        "best_bid",
+        "result",
+        "failure_reason",
+      ]),
+    );
+
+    const indexes = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'exit_taker_fallback_log'",
+      )
+      .all() as Array<{ name: string }>;
+    expect(indexes.map((index) => index.name)).toContain("idx_exit_taker_fallback_position");
+  });
+});
+
 describe("migration 051 — algo token mode state", () => {
   it("creates additive mode-state storage and indexes", () => {
     db.exec(readMigration("051_algo_token_mode_state.sql"));

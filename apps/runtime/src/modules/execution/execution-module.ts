@@ -71,6 +71,14 @@ import {
 } from "../../internal-order-reasons.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
+  buildExitTakerFallbackCommand,
+  exitTakerFallbackAttemptSince,
+  readExitTakerFallbackMetadata,
+  shouldFireTakerFallback,
+  type ExitTakerFallbackLogRepository,
+  type ExitTakerFallbackMetadata,
+} from "./exit-taker-fallback.js";
+import {
   buildReservationSnapshot,
   getOpenOrderCountForToken,
   getReservedSellSize,
@@ -170,6 +178,7 @@ export interface ExecutionModuleDeps {
   legStateRepo?: LegStateRepository | undefined;
   repriceChainPolicy?: (() => RepriceChainPolicyConfig) | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
+  exitTakerFallbackLog?: ExitTakerFallbackLogRepository | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -196,6 +205,11 @@ export class ExecutionModule implements RuntimeModule {
   private cancelCompleted = 0;
   private placeLatencyTotalMs = 0;
   private cancelLatencyTotalMs = 0;
+  private exitTakerFallbackFiredTotal = 0;
+  private exitTakerFallbackFilledTotal = 0;
+  private exitTakerFallbackFailedTotal = 0;
+  private readonly exitTakerFallbackByOrderId = new Map<string, ExitTakerFallbackMetadata>();
+  private readonly exitTakerFallbackByClientOrderId = new Map<string, ExitTakerFallbackMetadata>();
   private unsubs: Array<() => void> = [];
   private started = false;
 
@@ -222,6 +236,7 @@ export class ExecutionModule implements RuntimeModule {
       this.deps.bus.subscribe("CancelOrderRequested", (p) => this.handleCancel(p.command)),
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
+      this.deps.bus.subscribe("FillReceived", (p) => this.handleFillReceived(p)),
     );
     this.started = true;
     this.log.info("execution module started");
@@ -241,6 +256,28 @@ export class ExecutionModule implements RuntimeModule {
     for (const tokenId of payload.removedTokenIds) {
       this.marketCache.delete(String(tokenId));
     }
+  }
+
+  private async handleFillReceived(payload: RuntimeEventMap["FillReceived"]): Promise<void> {
+    const orderKey = String(payload.orderId);
+    const clientOrderKey = String(payload.clientOrderId);
+    const metadata =
+      this.exitTakerFallbackByOrderId.get(orderKey) ??
+      this.exitTakerFallbackByClientOrderId.get(clientOrderKey);
+    if (!metadata) return;
+
+    this.exitTakerFallbackByOrderId.delete(orderKey);
+    this.exitTakerFallbackByClientOrderId.delete(clientOrderKey);
+    this.exitTakerFallbackFilledTotal++;
+    this.insertExitTakerFallbackLog({
+      ts: payload.timestamp,
+      positionId: metadata.positionId,
+      tokenId: String(payload.tokenId),
+      profitRatio: metadata.profitRatio,
+      qty: payload.size,
+      bestBid: metadata.bestBid,
+      result: "filled",
+    });
   }
 
   async stop(): Promise<void> {
@@ -297,6 +334,9 @@ export class ExecutionModule implements RuntimeModule {
     gatewayRejectsLast10mByCode: Record<string, number>;
     internalReservationRejectsLast10m: number;
     sellSizeClamps: number;
+    exitTakerFallbackFiredTotal: number;
+    exitTakerFallbackFilledTotal: number;
+    exitTakerFallbackFailedTotal: number;
   } {
     const queue = this.queue?.diagnostics;
     const reservations = this.getReservationSnapshot();
@@ -396,6 +436,9 @@ export class ExecutionModule implements RuntimeModule {
       gatewayRejectsLast10mByCode: this.getGatewayRejectsLast10mByCode(),
       internalReservationRejectsLast10m: this.getInternalReservationRejectsLast10m(),
       sellSizeClamps: this.sellSizeClamps,
+      exitTakerFallbackFiredTotal: this.exitTakerFallbackFiredTotal,
+      exitTakerFallbackFilledTotal: this.exitTakerFallbackFilledTotal,
+      exitTakerFallbackFailedTotal: this.exitTakerFallbackFailedTotal,
     };
   }
 
@@ -730,6 +773,11 @@ export class ExecutionModule implements RuntimeModule {
         errorMessage: result.errorMessage ?? null,
         errorDetails: result.errorDetails ?? null,
       });
+      this.recordExitTakerFallbackFailure(
+        cmd,
+        now,
+        result.errorMessage ? `gateway:${result.errorMessage}` : `gateway:${reason}`,
+      );
 
       if (cmd.side === "sell") {
         const isMinSizeRejection =
@@ -748,6 +796,7 @@ export class ExecutionModule implements RuntimeModule {
         exchangeErrorDetails,
         cmd.commandId,
       );
+      this.recordExitTakerFallbackFailure(cmd, now, "gateway:missing-order-id");
       const rejectedOrder = this.buildOrder(cmd, "rejected", null, {
         errorCode,
         errorMessage: result.errorMessage ?? reason,
@@ -799,6 +848,7 @@ export class ExecutionModule implements RuntimeModule {
     const orderId = createOrderId(result.orderId);
     const order = this.buildOrder(cmd, "open", result.orderId);
     this.deps.orderRepo.save(order);
+    this.recordExitTakerFallbackPlaced(cmd, orderId, now);
 
     this.log.info({ commandId: cmd.commandId, orderId: result.orderId }, "order placed");
 
@@ -1466,6 +1516,7 @@ export class ExecutionModule implements RuntimeModule {
       const policy = this.deps.repriceChainPolicy();
       const legState = this.deps.legStateRepo.get(cmd.tokenId);
       if (shouldBlockRepriceChain(legState, now, policy)) {
+        const fallbackCommand = this.buildExitTakerFallbackForChainCap(cmd, now);
         try {
           this.deps.riskEventRepo?.insert({
             eventType: "signal_suppressed",
@@ -1484,6 +1535,24 @@ export class ExecutionModule implements RuntimeModule {
             { err, tokenId: String(cmd.tokenId) },
             "failed to persist sell-replace-chain-cap risk event",
           );
+        }
+        if (fallbackCommand) {
+          this.sellReplaceLocks.set(key, {
+            orderId: existingSell.orderId,
+            command: fallbackCommand,
+            createdAt: now,
+          });
+          await this.deps.bus.publish("CancelOrderRequested", {
+            command: {
+              type: "CancelOrderCommand",
+              commandId: createCommandId(
+                `sell-taker-fallback-${String(existingSell.orderId)}-${now}`,
+              ),
+              orderId: existingSell.orderId,
+              reason: existingLock ? "sell_replace_retry" : "sell_replace_reprice",
+            },
+            timestamp: now,
+          });
         }
         await this.rejectOrder(cmd, "sell-replace-chain-cap", ExchangeErrorCode.LivePolicyBlocked);
         return true;
@@ -1506,6 +1575,134 @@ export class ExecutionModule implements RuntimeModule {
       ExchangeErrorCode.LivePolicyBlocked,
     );
     return true;
+  }
+
+  private buildExitTakerFallbackForChainCap(
+    cmd: PlaceOrderCommand,
+    now: number,
+  ): PlaceOrderCommand | null {
+    const position = this.deps.positionRepo?.findByTokenId(cmd.tokenId) ?? null;
+    const policy = this.deps.executionPolicy?.().exitTakerFallback;
+    const logRepo = this.deps.exitTakerFallbackLog;
+    if (!policy || !logRepo) return null;
+
+    const attemptsLast24h = position
+      ? logRepo.countAttempts(String(position.positionId), exitTakerFallbackAttemptSince(now))
+      : 0;
+    const decision = shouldFireTakerFallback({
+      policy,
+      runtimeMode: this.deps.runtimeMode,
+      position,
+      market: this.marketCache.get(String(cmd.tokenId)),
+      chainCapped: true,
+      attemptsLast24h,
+    });
+
+    if (!decision.fire) {
+      this.recordExitTakerFallbackSkipped(decision, cmd, now);
+      return null;
+    }
+
+    this.exitTakerFallbackFiredTotal++;
+    this.log.debug(
+      {
+        event: "exit_taker_fallback_fired",
+        positionId: decision.positionId,
+        tokenId: String(cmd.tokenId),
+        profitRatio: decision.profitRatio,
+        bestBid: decision.bestBid,
+        qty: decision.qty,
+        requiredProfitRatio: decision.requiredProfitRatio,
+        attemptsLast24h: decision.attemptsLast24h,
+      },
+      "exit taker fallback fired",
+    );
+    return buildExitTakerFallbackCommand(cmd, decision, now);
+  }
+
+  private recordExitTakerFallbackSkipped(
+    decision: Exclude<ReturnType<typeof shouldFireTakerFallback>, { fire: true }>,
+    cmd: PlaceOrderCommand,
+    now: number,
+  ): void {
+    if (!decision.positionId) return;
+    if (
+      decision.reason === "policy-disabled" ||
+      decision.reason === "not-live-lite" ||
+      decision.reason === "not-chain-capped" ||
+      decision.reason === "ratio-below-threshold" ||
+      decision.reason === "attempt-limit"
+    ) {
+      return;
+    }
+    this.exitTakerFallbackFailedTotal++;
+    this.insertExitTakerFallbackLog({
+      ts: now,
+      positionId: decision.positionId,
+      tokenId: String(cmd.tokenId),
+      profitRatio: decision.profitRatio ?? 0,
+      qty: decision.qty,
+      bestBid: decision.bestBid,
+      result: "failed",
+      failureReason: decision.reason,
+    });
+  }
+
+  private recordExitTakerFallbackPlaced(
+    cmd: PlaceOrderCommand,
+    orderId: OrderId,
+    now: number,
+  ): void {
+    const metadata = readExitTakerFallbackMetadata(cmd);
+    if (!metadata) return;
+    this.exitTakerFallbackByOrderId.set(String(orderId), metadata);
+    this.exitTakerFallbackByClientOrderId.set(String(cmd.clientOrderId), metadata);
+    this.insertExitTakerFallbackLog({
+      ts: now,
+      positionId: metadata.positionId,
+      tokenId: String(cmd.tokenId),
+      profitRatio: metadata.profitRatio,
+      qty: cmd.size,
+      bestBid: metadata.bestBid,
+      result: "placed",
+    });
+  }
+
+  private recordExitTakerFallbackFailure(
+    cmd: PlaceOrderCommand,
+    now: number,
+    failureReason: string,
+  ): void {
+    const metadata = readExitTakerFallbackMetadata(cmd);
+    if (!metadata) return;
+    this.exitTakerFallbackFailedTotal++;
+    this.insertExitTakerFallbackLog({
+      ts: now,
+      positionId: metadata.positionId,
+      tokenId: String(cmd.tokenId),
+      profitRatio: metadata.profitRatio,
+      qty: cmd.size,
+      bestBid: metadata.bestBid,
+      result: "failed",
+      failureReason,
+    });
+  }
+
+  private insertExitTakerFallbackLog(record: {
+    ts: number;
+    positionId: string;
+    tokenId: string;
+    profitRatio: number;
+    qty: number;
+    bestBid: number;
+    result: "placed" | "filled" | "failed";
+    failureReason?: string | null;
+  }): void {
+    try {
+      this.deps.exitTakerFallbackLog?.insert(record);
+    } catch (err) {
+      this.log.warn({ err, positionId: record.positionId }, "failed to persist exit taker fallback");
+    }
   }
 
   private findOpenSellOrdersForToken(tokenId: TokenId): Order[] {

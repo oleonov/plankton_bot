@@ -37,6 +37,7 @@ describe("ledger.db schema", () => {
     expect(names).toContain("market_resolutions");
     expect(names).toContain("bot_runs");
     expect(names).toContain("runtime_metrics");
+    expect(names).toContain("exit_taker_fallback_log");
     expect(names).toContain("risk_events");
     expect(names).toContain("decision_signal_log");
     expect(names).toContain("algo_token_mode_state");

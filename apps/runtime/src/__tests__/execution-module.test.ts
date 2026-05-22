@@ -8,6 +8,7 @@ import {
   createConditionId,
   DEFAULT_EXECUTION_POLICY,
   ExchangeErrorCode,
+  type ExecutionPolicy,
 } from "@krabs/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -35,10 +36,24 @@ import type {
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
+import type {
+  ExitTakerFallbackLogRecord,
+  ExitTakerFallbackLogRepository,
+} from "../modules/execution/exit-taker-fallback.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
 
 const BOT_RUN_ID = createBotRunId("test-run-1");
+const DEFAULT_TEST_EXECUTION_POLICY: ExecutionPolicy = {
+  ...DEFAULT_EXECUTION_POLICY,
+  exitTakerFallback: {
+    enabled: true,
+    profitRatioMultiplier: 5,
+    requireChainCapped: true,
+    maxAttemptsPer24h: 1,
+    priceAnchor: "best_bid",
+  },
+};
 
 function makePlaceCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand {
   return {
@@ -248,6 +263,34 @@ function createMockLegStateRepo(): LegStateRepository {
     markAbandoned: vi.fn(),
     resetAbandoned: vi.fn(),
     applyRepriceChainEvent: vi.fn(),
+  };
+}
+
+function createMockExitTakerFallbackLog(
+  attempts = 0,
+): ExitTakerFallbackLogRepository & { records: ExitTakerFallbackLogRecord[] } {
+  return {
+    records: [],
+    countAttempts: vi.fn().mockReturnValue(attempts),
+    insert(record: ExitTakerFallbackLogRecord) {
+      this.records.push(record);
+    },
+  };
+}
+
+function cappedLegState(now = Date.now()) {
+  return {
+    tokenId: createTokenId("tok-yes"),
+    buyCount: 1,
+    sellCount: 0,
+    lastAction: "BUY" as const,
+    firstTradePrice: 0.01,
+    firstTradeAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+    lastTradeAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+    updatedAt: new Date(now).toISOString(),
+    repriceChainEvents24hJson: JSON.stringify(
+      Array.from({ length: 13 }, (_, index) => new Date(now - index * 60_000).toISOString()),
+    ),
   };
 }
 
@@ -1296,7 +1339,7 @@ describe("ExecutionModule", () => {
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
-      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      executionPolicy: () => DEFAULT_TEST_EXECUTION_POLICY,
       legStateRepo,
     });
     const rejectOrder = getRejectOrderCaller(dustMod).rejectOrder.bind(dustMod);
@@ -1337,7 +1380,7 @@ describe("ExecutionModule", () => {
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
-      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      executionPolicy: () => DEFAULT_TEST_EXECUTION_POLICY,
       legStateRepo,
     });
     const rejectOrder = getRejectOrderCaller(dustMod).rejectOrder.bind(dustMod);
@@ -1911,6 +1954,146 @@ describe("ExecutionModule", () => {
     expect(rejected[0].reason).toBe("sell-replace-pending");
     expect(rejected[0].errorCode).toBe("LIVE_POLICY_BLOCKED");
     expect(replaceMod.getDiagnostics().cancelReplacePendingCount).toBe(0);
+
+    await replaceMod.stop();
+  });
+
+  it("places a postOnly=false best-bid SELL fallback when chain-capped profit is deep", async () => {
+    const existingSell = openSellAt(0.3, { size: 20, sizeUsdc: 6 });
+    const orders: Order[] = [existingSell];
+    orderRepo.findOpen = vi
+      .fn()
+      .mockImplementation(() => orders.filter((order) => order.status === "open"));
+    orderRepo.findById = vi
+      .fn()
+      .mockImplementation((orderId) => orders.find((order) => order.orderId === orderId) ?? null);
+    orderRepo.findByTokenId = vi
+      .fn()
+      .mockImplementation((tokenId) => orders.filter((order) => order.tokenId === tokenId));
+    orderRepo.findByClientOrderId = vi
+      .fn()
+      .mockImplementation(
+        (clientOrderId) =>
+          orders.find(
+            (order) =>
+              order.clientOrderId === clientOrderId &&
+              (order.status === "pending" || order.status === "open"),
+          ) ?? null,
+      );
+    orderRepo.updateStatus = vi.fn().mockImplementation((orderId, status) => {
+      const order = orders.find((entry) => entry.orderId === orderId);
+      if (order) order.status = status;
+    });
+    orderRepo.save = vi.fn().mockImplementation((order: Order) => {
+      orders.push(order);
+    });
+    const legStateRepo = createMockLegStateRepo();
+    legStateRepo.get = vi.fn().mockReturnValue(cappedLegState());
+    const fallbackLog = createMockExitTakerFallbackLog();
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(
+        makePosition({ size: 20, avgEntryPrice: 0.01, costBasisUsdc: 0.2 }),
+      ),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+      executionPolicy: () => DEFAULT_TEST_EXECUTION_POLICY,
+      legStateRepo,
+      repriceChainPolicy: () => DEFAULT_TEST_EXECUTION_POLICY.repriceChain,
+      exitTakerFallbackLog: fallbackLog,
+    });
+
+    await replaceMod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: 0.15, bestAsk: 0.16 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-chain-capped-fallback"),
+        clientOrderId: "plk_sell_chain_capped_fallback" as ClientOrderId,
+        side: "sell",
+        price: 0.18,
+        size: 20,
+        postOnly: true,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "existing-sell" });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect((gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
+      clientOrderId: "plk_sell_chain_capped_fallback",
+      side: "sell",
+      price: 0.15,
+      size: 20,
+      postOnly: false,
+    });
+    expect(fallbackLog.records.some((record) => record.result === "placed")).toBe(true);
+    expect(replaceMod.getDiagnostics()).toMatchObject({
+      exitTakerFallbackFiredTotal: 1,
+      exitTakerFallbackFailedTotal: 0,
+    });
+
+    await replaceMod.stop();
+  });
+
+  it("records a failed fallback attempt when chain-capped profit lacks a best bid", async () => {
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([openSellAt(0.3)]);
+    const legStateRepo = createMockLegStateRepo();
+    legStateRepo.get = vi.fn().mockReturnValue(cappedLegState());
+    const fallbackLog = createMockExitTakerFallbackLog();
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(
+        makePosition({ size: 20, avgEntryPrice: 0.01, costBasisUsdc: 0.2 }),
+      ),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+      executionPolicy: () => DEFAULT_TEST_EXECUTION_POLICY,
+      legStateRepo,
+      repriceChainPolicy: () => DEFAULT_TEST_EXECUTION_POLICY.repriceChain,
+      exitTakerFallbackLog: fallbackLog,
+    });
+
+    await replaceMod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: null, bestAsk: 0.16 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-chain-capped-no-bid"),
+        clientOrderId: "plk_sell_chain_capped_no_bid" as ClientOrderId,
+        side: "sell",
+        price: 0.12,
+        size: 20,
+        postOnly: true,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(fallbackLog.records).toContainEqual(
+      expect.objectContaining({ result: "failed", failureReason: "invalid-best-bid" }),
+    );
+    expect(replaceMod.getDiagnostics()).toMatchObject({
+      exitTakerFallbackFiredTotal: 0,
+      exitTakerFallbackFailedTotal: 1,
+    });
 
     await replaceMod.stop();
   });

@@ -94,6 +94,11 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
         "SELECT labels FROM runtime_metrics WHERE metric_name = 'signal_path_activity' ORDER BY captured_at DESC, id DESC LIMIT 1",
       )
       .get() as { labels: string | null } | undefined;
+    const executionQueueRow = db
+      .prepare(
+        "SELECT labels FROM runtime_metrics WHERE metric_name = 'execution_queue' ORDER BY captured_at DESC, id DESC LIMIT 1",
+      )
+      .get() as { labels: string | null } | undefined;
     const httpErrorRows = db
       .prepare(
         `SELECT value, labels
@@ -109,6 +114,7 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const r23Cache = parseJsonObject(r23CacheRow?.labels);
     const runtimeDiagnostics = parseJsonObject(runtimeDiagnosticsRow?.labels);
     const signalPath = parseJsonObject(signalPathRow?.labels);
+    const executionQueue = parseJsonObject(executionQueueRow?.labels);
     const cooldownTelemetry = readObject(signalPath, "cooldown");
     const cooldownSignalDedupe = readObject(signalPath, "cooldownSignalDedupe");
     const cooldownPriceDedupe = readObject(signalPath, "cooldownPriceDedupe");
@@ -328,6 +334,12 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       cooldown_price_dedupe_duplicate_late: readNumber(cooldownPriceDedupe, "duplicateLate") ?? 0,
       cooldown_price_dedupe_skipped_no_price:
         readNumber(cooldownPriceDedupe, "skippedNoPrice") ?? 0,
+      exit_taker_fallback_fired_total:
+        readNumber(executionQueue, "exitTakerFallbackFiredTotal") ?? 0,
+      exit_taker_fallback_filled_total:
+        readNumber(executionQueue, "exitTakerFallbackFilledTotal") ?? 0,
+      exit_taker_fallback_failed_total:
+        readNumber(executionQueue, "exitTakerFallbackFailedTotal") ?? 0,
       http_errors_by_class_1h: aggregateHttpErrors(httpErrorRows),
       ws_heartbeat: wsHeartbeat,
       ws_worker_memory: wsWorkerMemory,
