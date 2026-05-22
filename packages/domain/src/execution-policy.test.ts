@@ -182,7 +182,6 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       fallbackMinNotionalUsdc: 1,
       marketableBuyMinNotionalUsdc: 1,
     });
-    expect(policy.exitTakerFallback).toEqual(DEFAULT_EXECUTION_POLICY.exitTakerFallback);
     expect(policy.deadSideGuard.mode).toBe("enforce");
     expect(policy.pricing.mode).toBe("bounded-midpoint");
     expect(policy.pricing.minExitPriceSignalRatio).toBe(0.6);
@@ -225,50 +224,6 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     );
     expect(issues).toHaveLength(0);
     expect(policy.sellReplaceMinPriceDeltaTicks).toBe(1);
-  });
-
-  it("defaults exit taker fallback to one best-bid attempt at 5x D8 threshold", () => {
-    expect(DEFAULT_EXECUTION_POLICY.exitTakerFallback).toEqual({
-      enabled: true,
-      profitRatioMultiplier: 5,
-      requireChainCapped: true,
-      maxAttemptsPer24h: 1,
-      priceAnchor: "best_bid",
-    });
-  });
-
-  it("parses exit taker fallback with safe field-level fallback", () => {
-    const { policy, issues } = parseExecutionPolicyJson(
-      JSON.stringify({
-        exitTakerFallback: {
-          enabled: false,
-          profitRatioMultiplier: 6,
-          requireChainCapped: false,
-          maxAttemptsPer24h: 2,
-          priceAnchor: "best_bid",
-        },
-      }),
-    );
-    expect(issues).toHaveLength(0);
-    expect(policy.exitTakerFallback).toEqual({
-      enabled: false,
-      profitRatioMultiplier: 6,
-      requireChainCapped: false,
-      maxAttemptsPer24h: 2,
-      priceAnchor: "best_bid",
-    });
-
-    const invalid = parseExecutionPolicyJson(
-      JSON.stringify({
-        exitTakerFallback: {
-          profitRatioMultiplier: 0,
-          maxAttemptsPer24h: 99,
-          priceAnchor: "mid",
-        },
-      }),
-    );
-    expect(invalid.policy.exitTakerFallback).toEqual(DEFAULT_EXECUTION_POLICY.exitTakerFallback);
-    expect(invalid.issues.some((issue) => issue.includes("exitTakerFallback"))).toBe(true);
   });
 
   it("defaults and parses the post-BUY fill SELL cooldown", () => {

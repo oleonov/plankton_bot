@@ -15,7 +15,6 @@ import type {
   ExecutionPolicy,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
-  ExitTakerFallbackPolicy,
   DropTriggerPolicy,
   DustAbandonmentPolicyConfig,
   MarketSelectionPolicy,
@@ -125,14 +124,6 @@ export const DEFAULT_OPPORTUNISTIC_TAKER_POLICY: OpportunisticTakerPolicy = {
   safetyBuffer: 1.05,
   fallbackMinNotionalUsdc: 1,
   marketableBuyMinNotionalUsdc: 1,
-};
-
-export const DEFAULT_EXIT_TAKER_FALLBACK_POLICY: ExitTakerFallbackPolicy = {
-  enabled: true,
-  profitRatioMultiplier: 5,
-  requireChainCapped: true,
-  maxAttemptsPer24h: 1,
-  priceAnchor: "best_bid",
 };
 
 export const DEFAULT_REDEEM_SWEEP_POLICY: RedeemSweepPolicy = {
@@ -263,7 +254,6 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   profitTarget: DEFAULT_PROFIT_TARGET_POLICY,
   dustAbandonment: DEFAULT_DUST_ABANDONMENT_POLICY,
   repriceChain: DEFAULT_REPRICE_CHAIN_POLICY,
-  exitTakerFallback: DEFAULT_EXIT_TAKER_FALLBACK_POLICY,
   lossExit: DEFAULT_LOSS_EXIT_POLICY,
   depositActivation: DEFAULT_DEPOSIT_ACTIVATION_POLICY,
 };
@@ -323,9 +313,6 @@ const BOUND_LADDER_USDC_CAP_MAX = 10_000;
 const BOUND_TAKER_SAFETY_BUFFER_MIN = 1;
 const BOUND_TAKER_SAFETY_BUFFER_MAX = 10;
 const BOUND_TAKER_MIN_NOTIONAL_MAX = 1_000;
-const BOUND_EXIT_TAKER_PROFIT_MULTIPLIER_MIN = 1;
-const BOUND_EXIT_TAKER_PROFIT_MULTIPLIER_MAX = 100;
-const BOUND_EXIT_TAKER_ATTEMPTS_MAX = 24;
 const BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS = 30_000;
 const BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS = 24 * 60 * 60_000;
 const BOUND_REDEEM_SWEEP_RETRY_COUNT_MAX = 10;
@@ -443,7 +430,6 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const profitTarget = parseProfitTarget(obj.profitTarget, issues);
   const dustAbandonment = parseDustAbandonment(obj.dustAbandonment, issues);
   const repriceChain = parseRepriceChain(obj.repriceChain, issues);
-  const exitTakerFallback = parseExitTakerFallback(obj.exitTakerFallback, issues);
   const lossExit = parseLossExit(obj.lossExit, issues);
   const depositActivation = parseDepositActivation(obj.depositActivation, issues);
 
@@ -477,7 +463,6 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       profitTarget,
       dustAbandonment,
       repriceChain,
-      exitTakerFallback,
       lossExit,
       depositActivation,
     },
@@ -568,51 +553,6 @@ function parseRepriceChain(raw: unknown, issues: string[]): RepriceChainPolicyCo
       BOUND_ORDER_LIFETIME_COUNT_MAX,
       issues,
       "repriceChain.maxChainCount",
-    ),
-  };
-}
-
-function parseExitTakerFallback(raw: unknown, issues: string[]): ExitTakerFallbackPolicy {
-  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
-    if (raw !== undefined) issues.push("exitTakerFallback must be an object");
-    return DEFAULT_EXIT_TAKER_FALLBACK_POLICY;
-  }
-  const obj = raw as Record<string, unknown>;
-  return {
-    enabled: booleanOr(
-      obj.enabled,
-      DEFAULT_EXIT_TAKER_FALLBACK_POLICY.enabled,
-      issues,
-      "exitTakerFallback.enabled",
-    ),
-    profitRatioMultiplier: clampedNumber(
-      obj.profitRatioMultiplier,
-      DEFAULT_EXIT_TAKER_FALLBACK_POLICY.profitRatioMultiplier,
-      BOUND_EXIT_TAKER_PROFIT_MULTIPLIER_MIN,
-      BOUND_EXIT_TAKER_PROFIT_MULTIPLIER_MAX,
-      issues,
-      "exitTakerFallback.profitRatioMultiplier",
-    ),
-    requireChainCapped: booleanOr(
-      obj.requireChainCapped,
-      DEFAULT_EXIT_TAKER_FALLBACK_POLICY.requireChainCapped,
-      issues,
-      "exitTakerFallback.requireChainCapped",
-    ),
-    maxAttemptsPer24h: clampedInt(
-      obj.maxAttemptsPer24h,
-      DEFAULT_EXIT_TAKER_FALLBACK_POLICY.maxAttemptsPer24h,
-      0,
-      BOUND_EXIT_TAKER_ATTEMPTS_MAX,
-      issues,
-      "exitTakerFallback.maxAttemptsPer24h",
-    ),
-    priceAnchor: enumOr(
-      obj.priceAnchor,
-      ["best_bid"] as const,
-      DEFAULT_EXIT_TAKER_FALLBACK_POLICY.priceAnchor,
-      issues,
-      "exitTakerFallback.priceAnchor",
     ),
   };
 }

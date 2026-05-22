@@ -108,14 +108,6 @@ export interface OpportunisticTakerPolicy {
   marketableBuyMinNotionalUsdc: number;
 }
 
-export interface ExitTakerFallbackPolicy {
-  enabled: boolean;
-  profitRatioMultiplier: number;
-  requireChainCapped: boolean;
-  maxAttemptsPer24h: number;
-  priceAnchor: "best_bid";
-}
-
 export interface RedeemSweepPolicy {
   enabled: boolean;
   intervalMs: number;
@@ -150,7 +142,6 @@ export interface ExecutionPolicyDTO {
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
   opportunisticTaker?: OpportunisticTakerPolicy;
-  exitTakerFallback?: ExitTakerFallbackPolicy;
   redeemSweep?: RedeemSweepPolicy;
   raceProtection?: RaceProtectionPolicy;
   telemetry: ExecutionTelemetryPolicy;
@@ -422,9 +413,6 @@ export interface CoverageMetricsData {
   cooldown_price_dedupe_duplicate_early: number;
   cooldown_price_dedupe_duplicate_late: number;
   cooldown_price_dedupe_skipped_no_price: number;
-  exit_taker_fallback_fired_total: number;
-  exit_taker_fallback_filled_total: number;
-  exit_taker_fallback_failed_total: number;
   http_errors_by_class_1h: Record<string, number>;
   ws_heartbeat: {
     pingSent: number;

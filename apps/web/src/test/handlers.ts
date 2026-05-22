@@ -363,9 +363,6 @@ export const handlers = [
       cooldown_price_dedupe_duplicate_early: 0,
       cooldown_price_dedupe_duplicate_late: 0,
       cooldown_price_dedupe_skipped_no_price: 0,
-      exit_taker_fallback_fired_total: 3,
-      exit_taker_fallback_filled_total: 1,
-      exit_taker_fallback_failed_total: 2,
       http_errors_by_class_1h: { "gamma-pricing:timeout": 2 },
       ws_heartbeat: {
         pingSent: 20,

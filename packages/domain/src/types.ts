@@ -819,14 +819,6 @@ export interface RepriceChainPolicyConfig {
   maxChainCount: number;
 }
 
-export interface ExitTakerFallbackPolicy {
-  enabled: boolean;
-  profitRatioMultiplier: number;
-  requireChainCapped: boolean;
-  maxAttemptsPer24h: number;
-  priceAnchor: "best_bid";
-}
-
 export interface ExecutionPolicy {
   version: number;
   entryPriceCeiling: number;
@@ -873,7 +865,6 @@ export interface ExecutionPolicy {
   dustAbandonment: DustAbandonmentPolicyConfig;
   /** CHANGE C — per-token 24h reprice chain cap config. */
   repriceChain: RepriceChainPolicyConfig;
-  exitTakerFallback: ExitTakerFallbackPolicy;
   /** D9_LOSS_EXIT — R96 liquidity-aware loss exit trigger. Disabled by default. */
   lossExit: D9LossExitPolicy;
   depositActivation: DepositActivationPolicy;

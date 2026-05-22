@@ -124,7 +124,7 @@ describe("bootstrapLedgerDb busy_timeout scoping", () => {
 });
 
 describe("bootstrapLedgerDb split-ledger migration runner", () => {
-  it("creates a clean ledger and records replay-safe migrations through 060", () => {
+  it("creates a clean ledger and records replay-safe migrations through 055", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-runner-clean-"));
     try {
       const c = bootstrapLedgerDb(path.join(dir, "ledger.db"));
@@ -138,17 +138,9 @@ describe("bootstrapLedgerDb split-ledger migration runner", () => {
         expect(names).toContain("053_taker_buy_gross_fill_sizes.sql");
         expect(names).toContain("054_redeem_log.sql");
         expect(names).toContain("055_redeem_log_unique_in_flight.sql");
-        expect(names).toContain("060_exit_taker_fallback_log.sql");
         expect(
           c.db
             .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='redeem_log'")
-            .get(),
-        ).toBeTruthy();
-        expect(
-          c.db
-            .prepare(
-              "SELECT name FROM sqlite_master WHERE type='table' AND name='exit_taker_fallback_log'",
-            )
             .get(),
         ).toBeTruthy();
       } finally {
@@ -176,7 +168,7 @@ describe("bootstrapLedgerDb split-ledger migration runner", () => {
       try {
         const row = second.db
           .prepare("SELECT name FROM schema_migrations WHERE name = ?")
-          .get("060_exit_taker_fallback_log.sql");
+          .get("055_redeem_log_unique_in_flight.sql");
         expect(row).toBeTruthy();
       } finally {
         second.close();

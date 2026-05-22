@@ -118,7 +118,6 @@ import {
 } from "./modules/soft-ranking/score-distribution-snapshot.js";
 import { softRankingDisabledCleanup } from "./soft-ranking-disabled-cleanup.js";
 import { ExecutionModule } from "./modules/execution/execution-module.js";
-import { SqliteExitTakerFallbackLogRepository } from "./modules/execution/exit-taker-fallback.js";
 import { ExchangeStateStore } from "./modules/execution/exchange-state-store.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
 import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
@@ -867,7 +866,6 @@ async function main(): Promise<void> {
   const exchangeStateStore = new ExchangeStateStore({
     balanceRejectBlockMs: config.executionSellBalanceRejectBlockMs,
   });
-  const exitTakerFallbackLog = new SqliteExitTakerFallbackLogRepository(ledgerConn.db);
   const reconcileTrigger: { fn: (() => void) | undefined } = { fn: undefined };
   const executionModule = new ExecutionModule({
     gateway: exchangeGateway,
@@ -897,7 +895,6 @@ async function main(): Promise<void> {
     legStateRepo: repos.legState,
     repriceChainPolicy: () => currentExecutionPolicy().repriceChain,
     riskEventRepo: repos.riskEvent,
-    exitTakerFallbackLog,
   });
 
   // 7g. Risk + Inventory module
