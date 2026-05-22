@@ -1970,6 +1970,11 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       1,
       JSON.stringify({ mode: "midpoint-anchored", side: "sell" }),
     );
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "exit_anchor_mode_total",
+      1,
+      JSON.stringify({ mode: "midpoint" }),
+    );
   });
 
   it("keeps maker pricing when opportunistic taker is disabled", async () => {

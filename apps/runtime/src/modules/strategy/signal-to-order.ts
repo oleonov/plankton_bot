@@ -1095,6 +1095,9 @@ export class SignalToOrderBridge {
     if (priced?.anchorTicksUsed !== undefined) {
       ok.anchorTicksUsed = priced.anchorTicksUsed;
     }
+    if (priced?.exitAnchorMode !== undefined) {
+      ok.exitAnchorMode = priced.exitAnchorMode;
+    }
     if (pricingShadow && ok.kind === "ok") {
       ok.pricingShadow = pricingShadow;
     }

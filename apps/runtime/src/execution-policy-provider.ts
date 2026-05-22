@@ -148,6 +148,7 @@ function summarizePolicy(policy: ExecutionPolicy): Record<string, unknown> {
   return {
     entryPriceCeiling: policy.entryPriceCeiling,
     exitOrderTtlMs: policy.exitOrderTtlMs,
+    exitTtlByLiquidity: policy.exitTtlByLiquidity,
     entryMinMarketAgeSeconds: policy.entryMinMarketAgeSeconds,
     marketSelection: policy.marketSelection,
     deadSideGuard: policy.deadSideGuard,

@@ -15,6 +15,7 @@ import type {
   ExecutionPolicy,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
+  ExitTtlByLiquidityPolicyConfig,
   DropTriggerPolicy,
   DustAbandonmentPolicyConfig,
   MarketSelectionPolicy,
@@ -127,6 +128,12 @@ export const DEFAULT_OPPORTUNISTIC_TAKER_POLICY: OpportunisticTakerPolicy = {
   marketableBuyMinNotionalUsdc: 1,
 };
 
+export const DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY: ExitTtlByLiquidityPolicyConfig = {
+  enabled: true,
+  thinMs: 24 * 60 * 60_000,
+  mediumMs: 6 * 60 * 60_000,
+};
+
 export const DEFAULT_REDEEM_SWEEP_POLICY: RedeemSweepPolicy = {
   enabled: true,
   intervalMs: 10 * 60_000,
@@ -222,7 +229,8 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   version: 1,
   entryPriceCeiling: 0.45,
   entryMinMarketAgeSeconds: DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS,
-  exitOrderTtlMs: 1_800_000,
+  exitOrderTtlMs: 4 * 60 * 60_000,
+  exitTtlByLiquidity: DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY,
   sellReplaceMinPriceDeltaTicks: 2,
   exitRepriceThresholdPct: 0.3,
   exitRepriceThresholdTicks: 10,
@@ -283,7 +291,7 @@ const BOUND_MIN_EXIT_SIGNAL_RATIO_MAX = 1;
 const BOUND_ENTRY_CEILING_MIN = 0.05;
 const BOUND_ENTRY_CEILING_MAX = 0.99;
 const BOUND_EXIT_TTL_MIN_MS = 10_000;
-const BOUND_EXIT_TTL_MAX_MS = 60 * 60_000;
+const BOUND_EXIT_TTL_MAX_MS = 24 * 60 * 60_000;
 const BOUND_SELL_REPLACE_MIN_PRICE_DELTA_TICKS_MIN = 1;
 const BOUND_SELL_REPLACE_MIN_PRICE_DELTA_TICKS_MAX = 20;
 const BOUND_ENTRY_MIN_AGE_MIN_S = 0;
@@ -370,6 +378,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
     issues,
     "exitOrderTtlMs",
   );
+  const exitTtlByLiquidity = parseExitTtlByLiquidity(obj.exitTtlByLiquidity, issues);
   const sellReplaceMinPriceDeltaTicks = clampedInt(
     obj.sellReplaceMinPriceDeltaTicks,
     DEFAULT_EXECUTION_POLICY.sellReplaceMinPriceDeltaTicks ?? 2,
@@ -462,6 +471,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       entryPriceCeiling,
       entryMinMarketAgeSeconds,
       exitOrderTtlMs,
+      exitTtlByLiquidity,
       sellReplaceMinPriceDeltaTicks,
       exitRepriceThresholdPct,
       exitRepriceThresholdTicks,
@@ -644,6 +654,34 @@ function parseDynamicChainCap(raw: unknown, issues: string[]): DynamicChainCapPo
       BOUND_ORDER_LIFETIME_COUNT_MAX,
       issues,
       "repriceChain.dynamicChainCap.capUnknown",
+    ),
+  };
+}
+
+function parseExitTtlByLiquidity(raw: unknown, issues: string[]): ExitTtlByLiquidityPolicyConfig {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("exitTtlByLiquidity must be an object");
+    return DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  const defaults = DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY;
+  return {
+    enabled: booleanOr(obj.enabled, defaults.enabled, issues, "exitTtlByLiquidity.enabled"),
+    thinMs: clampedInt(
+      obj.thinMs,
+      defaults.thinMs,
+      BOUND_EXIT_TTL_MIN_MS,
+      BOUND_EXIT_TTL_MAX_MS,
+      issues,
+      "exitTtlByLiquidity.thinMs",
+    ),
+    mediumMs: clampedInt(
+      obj.mediumMs,
+      defaults.mediumMs,
+      BOUND_EXIT_TTL_MIN_MS,
+      BOUND_EXIT_TTL_MAX_MS,
+      issues,
+      "exitTtlByLiquidity.mediumMs",
     ),
   };
 }

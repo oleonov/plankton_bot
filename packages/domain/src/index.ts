@@ -27,6 +27,7 @@ export {
   DEFAULT_PRICING_POLICY,
   DEFAULT_TELEMETRY,
   DEFAULT_ORDER_LIFETIME_POLICY,
+  DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY,
   DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
   DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS,
   DEFAULT_R23_DIP_TRIGGER_POLICY,
@@ -71,6 +72,8 @@ export type {
   DynamicChainCapResolution,
   NextRepriceChainState,
 } from "./reprice-chain.js";
+export { resolveExitTtlByMarket } from "./exit-ttl.js";
+export type { ExitTtlLiquidityTier, ExitTtlResolution } from "./exit-ttl.js";
 export { evaluateMinMarketAge } from "./min-market-age.js";
 export type {
   MinMarketAgeArgs,

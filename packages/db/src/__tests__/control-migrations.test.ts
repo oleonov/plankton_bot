@@ -177,6 +177,11 @@ describe("control-db migration infrastructure", () => {
           sides: Array<"buy" | "sell">;
         };
         exitOrderTtlMs: number;
+        exitTtlByLiquidity: {
+          enabled: boolean;
+          thinMs: number;
+          mediumMs: number;
+        };
         sellReplaceMinPriceDeltaTicks: number;
         multiBuyLadder: {
           enabled: boolean;
@@ -207,7 +212,12 @@ describe("control-db migration infrastructure", () => {
         maxOpenOrdersTotal: 22,
       });
       expect(parsed.exitBidAnchorTicks).toBe(4);
-      expect(parsed.exitOrderTtlMs).toBe(1_800_000);
+      expect(parsed.exitOrderTtlMs).toBe(4 * 60 * 60_000);
+      expect(parsed.exitTtlByLiquidity).toEqual({
+        enabled: true,
+        thinMs: 24 * 60 * 60_000,
+        mediumMs: 6 * 60 * 60_000,
+      });
       expect(parsed.sellReplaceMinPriceDeltaTicks).toBe(2);
       expect(parsed.opportunisticTaker).toEqual({
         enabled: true,

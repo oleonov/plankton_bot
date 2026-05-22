@@ -24,12 +24,14 @@ import type {
   LegStateRepository,
   RepriceChainPolicyConfig,
   RiskEventRepository,
+  ExitTtlByLiquidityPolicyConfig,
 } from "@krabs/domain";
 import {
   createCommandId,
   ENTRY_REASONS,
   EXIT_REASONS,
   resolveDynamicChainCapDetails,
+  resolveExitTtlByMarket,
   shouldBlockRepriceChain,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -46,15 +48,20 @@ export const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h fallback
 export const PROBE_LIKE_INTRADAY_TTL_MS = 60_000; // 60s
 export const PROBE_LIKE_DAILY_TTL_MS = 5 * 60_000; // 5m
 export const PROBE_LIKE_AD_HOC_TTL_MS = 10 * 60_000; // 10m
-// ADR-013 bumped 60s to 300s; CHANGE C bumps 300s to 1800s (30m) based on R82:
-// Plankton mid-bucket SELL median time-from-BUY = 65min, p25 = 8min.
-export const EXIT_ORDER_TTL_MS = 1_800_000; // 30m
+// EXIT-FIX-2.5: Plankton ask visibility median is 4.1h, so flat SELL TTL
+// defaults to 4h; thin/medium markets can extend this via exitTtlByLiquidity.
+export const EXIT_ORDER_TTL_MS = 4 * 60 * 60_000; // 4h
 export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
 export const CANCEL_BACKOFF_MS = 60_000; // 1 min retry backoff
 const PRICE_EPSILON = 1e-9;
 const DOWNPRICE_RECOVERY_RESET_TICKS = 3;
 const DOWNPRICE_CANCEL_PENDING_RETRY_MS = 5 * 60_000;
 const STUCK_SELL_WARNING_INTERVAL_MS = 60 * 60_000;
+const FLAT_EXIT_TTL_BY_LIQUIDITY_DISABLED: ExitTtlByLiquidityPolicyConfig = {
+  enabled: false,
+  thinMs: EXIT_ORDER_TTL_MS,
+  mediumMs: EXIT_ORDER_TTL_MS,
+};
 
 export interface SellDownpriceRepriceState {
   repriceCount: number;
@@ -85,6 +92,10 @@ export interface StaleOrderCleanerDeps {
       flatTtlMs: number,
       nowMs: number,
     ) => ExitOrderLifetimeDecision;
+  };
+  exitTtlByLiquidity?: ExitTtlByLiquidityPolicyConfig;
+  metrics?: {
+    writeCounter?: (metricName: string, value?: number, labels?: string | null) => void;
   };
   entryRepriceOnOutbid?: {
     policy: () => RepriceOnOutbidPolicy;
@@ -355,10 +366,28 @@ export async function cleanStaleEntryOrders(
       sellDownpriceRepriceMap.set(repriceKey, repriceDecision.nextState);
     }
 
-    const lifetime = deps.exitOrderLifetime?.resolveExitOrder(order, market, exitTtlMs, now);
+    const resolvedExitTtl = resolveExitTtlByMarket(repriceMarket, {
+      exitOrderTtlMs: exitTtlMs,
+      exitTtlByLiquidity: deps.exitTtlByLiquidity ?? FLAT_EXIT_TTL_BY_LIQUIDITY_DISABLED,
+    });
+    deps.metrics?.writeCounter?.(
+      "exit_ttl_resolved_total",
+      1,
+      JSON.stringify({ tier: resolvedExitTtl.tier }),
+    );
+    const lifetime = deps.exitOrderLifetime?.resolveExitOrder(
+      order,
+      market,
+      resolvedExitTtl.ttlMs,
+      now,
+    );
     const enforceLifetime = lifetime?.enabled === true && lifetime.enforcement === "enforce";
-    const shouldCancel = enforceLifetime ? lifetime.wouldCancelUnderMode : ageMs > exitTtlMs;
-    const ttlMs = enforceLifetime ? (lifetime?.effectiveTtlMs ?? exitTtlMs) : exitTtlMs;
+    const shouldCancel = enforceLifetime
+      ? lifetime.wouldCancelUnderMode
+      : ageMs > resolvedExitTtl.ttlMs;
+    const ttlMs = enforceLifetime
+      ? (lifetime?.effectiveTtlMs ?? resolvedExitTtl.ttlMs)
+      : resolvedExitTtl.ttlMs;
     if (shouldCancel) {
       await publishCancel(bus, order, "stale_exit_ttl");
       backoffMap.set(ordKey, now);

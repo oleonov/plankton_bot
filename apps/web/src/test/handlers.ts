@@ -379,6 +379,7 @@ export const handlers = [
       exit_order_ttl_cancel_total: 3,
       exit_order_ttl_cancel_near_resolution_total: 1,
       exit_anchor_mode_total: { midpoint: 2, ask_undercut: 8, ask_fallback: 1 },
+      exit_ttl_resolved_total: { thin: 3, medium: 2, liquid: 4, default: 1, disabled: 0 },
       exit_reprice_suppressed_threshold_total: 5,
       exit_chain_cap_resolved_total: { "13": 4, "30": 2, "50": 3, unknown: 1 },
       http_errors_by_class_1h: { "gamma-pricing:timeout": 2 },

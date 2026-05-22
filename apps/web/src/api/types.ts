@@ -127,6 +127,11 @@ export interface ExecutionPolicyDTO {
   version: 1;
   entryPriceCeiling: number;
   exitOrderTtlMs: number;
+  exitTtlByLiquidity?: {
+    enabled: boolean;
+    thinMs: number;
+    mediumMs: number;
+  };
   sellReplaceMinPriceDeltaTicks?: number;
   exitRepriceThresholdPct?: number;
   exitRepriceThresholdTicks?: number;
@@ -447,6 +452,7 @@ export interface CoverageMetricsData {
   exit_order_ttl_cancel_total: number;
   exit_order_ttl_cancel_near_resolution_total: number;
   exit_anchor_mode_total: Record<string, number>;
+  exit_ttl_resolved_total: Record<string, number>;
   exit_reprice_suppressed_threshold_total: number;
   exit_chain_cap_resolved_total: Record<string, number>;
   http_errors_by_class_1h: Record<string, number>;

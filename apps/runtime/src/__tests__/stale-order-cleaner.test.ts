@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  DEFAULT_EXECUTION_POLICY,
   DEFAULT_REPRICE_CHAIN_POLICY,
   createTokenId,
   createOrderId,
@@ -163,8 +164,8 @@ describe("cleanStaleEntryOrders", () => {
     vi.useRealTimers();
   });
 
-  it("uses a 30 minute default exit order TTL", () => {
-    expect(EXIT_ORDER_TTL_MS).toBe(1_800_000);
+  it("uses a 4 hour default exit order TTL", () => {
+    expect(EXIT_ORDER_TTL_MS).toBe(4 * 60 * 60_000);
   });
 
   function run() {
@@ -757,7 +758,7 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
   });
 
-  it("does not cancel sell exit orders within the 30m TTL", async () => {
+  it("does not cancel sell exit orders within the 4h TTL", async () => {
     const twoMinutesAgo = new Date(Date.now() - 2 * 60_000).toISOString();
     const order = makeOrder({
       side: "sell",
@@ -776,6 +777,56 @@ describe("cleanStaleEntryOrders", () => {
 
     expect(result.staleExitTtlCancelled).toBe(0);
     expect(cancelled).toHaveLength(0);
+  });
+
+  it("uses the thin-market extended exit TTL before stale_exit_ttl cancellation", async () => {
+    const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60_000).toISOString();
+    const order = makeOrder({
+      side: "sell",
+      createdAt: fiveHoursAgo,
+      signalReason: "repricing-exit",
+    });
+    const metrics = { writeCounter: vi.fn() };
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(makeMarket());
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await cleanStaleEntryOrders(
+      {
+        orderRepo,
+        marketRepo,
+        bus,
+        log: silentLog,
+        exitOrderTtlMs: DEFAULT_EXECUTION_POLICY.exitOrderTtlMs,
+        exitTtlByLiquidity: DEFAULT_EXECUTION_POLICY.exitTtlByLiquidity,
+        metrics,
+        exitRepriceOnDownprice: {
+          policy: () => ({
+            enabled: false,
+            thresholdTicks: 5,
+            maxRepricesPerOrder: 3,
+            stuckWarningEnabled: false,
+            stuckWarningAgeMs: 4 * 60 * 60_000,
+            stuckWarningGapPct: 0.1,
+          }),
+          getMarket: () => makePricing({ bestBid: order.price, publicTradeCount24h: 4 }),
+        },
+      },
+      backoffMap,
+    );
+    await bus.drain();
+
+    expect(result.staleExitTtlCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "exit_ttl_resolved_total",
+      1,
+      JSON.stringify({ tier: "thin" }),
+    );
   });
 
   it("does not downprice-reprice a SELL when the best bid is only one tick lower", async () => {

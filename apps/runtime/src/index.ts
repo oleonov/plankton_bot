@@ -1179,6 +1179,7 @@ async function main(): Promise<void> {
     settlementLedgerRepo: repos.settlementLedger,
     driftRepo: repos.positionDrift,
     exitOrderTtlMs: () => currentExecutionPolicy().exitOrderTtlMs,
+    exitTtlByLiquidity: () => currentExecutionPolicy().exitTtlByLiquidity,
     exitOrderLifetime: orderLifetimeModule,
     entryRepriceOnOutbid: {
       policy: () => currentExecutionPolicy().repriceOnOutbid,

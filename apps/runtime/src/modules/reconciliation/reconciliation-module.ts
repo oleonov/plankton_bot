@@ -28,6 +28,7 @@ import type {
   PositionDriftRepository,
   RepriceOnOutbidPolicy,
   ExitRepriceOnDownpricePolicy,
+  ExitTtlByLiquidityPolicyConfig,
   LegStateRepository,
   RepriceChainPolicyConfig,
   RiskEventRepository,
@@ -152,6 +153,7 @@ export interface ReconciliationModuleDeps {
    * cleaner falls back to the ADR-013 constant.
    */
   exitOrderTtlMs?: () => number;
+  exitTtlByLiquidity?: () => ExitTtlByLiquidityPolicyConfig;
   exitOrderLifetime?: Pick<OrderLifetimeModule, "resolveExitOrder">;
   entryRepriceOnOutbid?: {
     policy: () => RepriceOnOutbidPolicy;
@@ -412,6 +414,10 @@ export class ReconciliationModule implements RuntimeModule {
           bus: this.deps.bus,
           log: this.log,
           ...(this.deps.exitOrderTtlMs ? { exitOrderTtlMs: this.deps.exitOrderTtlMs() } : {}),
+          ...(this.deps.exitTtlByLiquidity
+            ? { exitTtlByLiquidity: this.deps.exitTtlByLiquidity() }
+            : {}),
+          ...(this.deps.runtimeMetrics ? { metrics: this.deps.runtimeMetrics } : {}),
           ...(this.deps.exitOrderLifetime
             ? { exitOrderLifetime: this.deps.exitOrderLifetime }
             : {}),

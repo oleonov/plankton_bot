@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY,
   DEFAULT_EXECUTION_POLICY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
 } from "./execution-policy.js";
+import { resolveExitTtlByMarket } from "./exit-ttl.js";
 
 describe("parseExecutionPolicyJson (ADR-015)", () => {
   it("returns defaults for null/empty input without issues", () => {
@@ -36,6 +38,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       version: 1,
       entryPriceCeiling: 0.6,
       exitOrderTtlMs: 600_000,
+      exitTtlByLiquidity: { enabled: true, thinMs: 86_400_000, mediumMs: 21_600_000 },
       sellReplaceMinPriceDeltaTicks: 3,
       exitRepriceThresholdPct: 0.25,
       exitRepriceThresholdTicks: 8,
@@ -151,6 +154,12 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     const { policy, issues } = parseExecutionPolicyJson(JSON.stringify(input));
     expect(issues).toHaveLength(0);
     expect(policy.entryPriceCeiling).toBe(0.6);
+    expect(policy.exitOrderTtlMs).toBe(600_000);
+    expect(policy.exitTtlByLiquidity).toEqual({
+      enabled: true,
+      thinMs: 86_400_000,
+      mediumMs: 21_600_000,
+    });
     expect(policy.sellReplaceMinPriceDeltaTicks).toBe(3);
     expect(policy.exitRepriceThresholdPct).toBe(0.25);
     expect(policy.exitRepriceThresholdTicks).toBe(8);
@@ -240,8 +249,79 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("exitOrderTtlMs"))).toBe(true);
   });
 
-  it("defaults exitOrderTtlMs to 30 minutes", () => {
-    expect(DEFAULT_EXECUTION_POLICY.exitOrderTtlMs).toBe(1_800_000);
+  it("defaults exitOrderTtlMs to 4 hours with liquidity-tier extension enabled", () => {
+    expect(DEFAULT_EXECUTION_POLICY.exitOrderTtlMs).toBe(4 * 60 * 60_000);
+    expect(DEFAULT_EXECUTION_POLICY.exitTtlByLiquidity).toEqual({
+      enabled: true,
+      thinMs: 24 * 60 * 60_000,
+      mediumMs: 6 * 60 * 60_000,
+    });
+  });
+
+  it("accepts the 24h exit TTL parser bound", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        exitOrderTtlMs: 24 * 60 * 60_000,
+        exitTtlByLiquidity: {
+          enabled: true,
+          thinMs: 24 * 60 * 60_000,
+          mediumMs: 6 * 60 * 60_000,
+        },
+      }),
+    );
+
+    expect(issues).toHaveLength(0);
+    expect(policy.exitOrderTtlMs).toBe(24 * 60 * 60_000);
+    expect(policy.exitTtlByLiquidity.thinMs).toBe(24 * 60 * 60_000);
+  });
+
+  it("rejects exit TTLs above 24h", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        exitOrderTtlMs: 24 * 60 * 60_000 + 1,
+        exitTtlByLiquidity: {
+          thinMs: 24 * 60 * 60_000 + 1,
+          mediumMs: 24 * 60 * 60_000 + 1,
+        },
+      }),
+    );
+
+    expect(policy.exitOrderTtlMs).toBe(DEFAULT_EXECUTION_POLICY.exitOrderTtlMs);
+    expect(policy.exitTtlByLiquidity).toEqual(DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY);
+    expect(issues.some((i) => i.includes("exitOrderTtlMs"))).toBe(true);
+    expect(issues.some((i) => i.includes("exitTtlByLiquidity.thinMs"))).toBe(true);
+  });
+
+  it("resolves exit TTL by market activity tier", () => {
+    const policy = DEFAULT_EXECUTION_POLICY;
+
+    expect(resolveExitTtlByMarket({ publicTradeCount24h: 0 }, policy)).toMatchObject({
+      ttlMs: policy.exitTtlByLiquidity.thinMs,
+      tier: "thin",
+    });
+    expect(resolveExitTtlByMarket({ publicTradeCount24h: 10 }, policy).tier).toBe("thin");
+    expect(resolveExitTtlByMarket({ publicTradeCount24h: 11 }, policy)).toMatchObject({
+      ttlMs: policy.exitTtlByLiquidity.mediumMs,
+      tier: "medium",
+    });
+    expect(resolveExitTtlByMarket({ publicTradeCount24h: 49 }, policy).tier).toBe("medium");
+    expect(resolveExitTtlByMarket({ publicTradeCount24h: 50 }, policy)).toMatchObject({
+      ttlMs: policy.exitOrderTtlMs,
+      tier: "liquid",
+    });
+    expect(resolveExitTtlByMarket({ publicTradeCount24h: null }, policy)).toMatchObject({
+      ttlMs: policy.exitOrderTtlMs,
+      tier: "default",
+    });
+    expect(
+      resolveExitTtlByMarket(
+        { publicTradeCount24h: 2 },
+        { ...policy, exitTtlByLiquidity: { ...policy.exitTtlByLiquidity, enabled: false } },
+      ),
+    ).toMatchObject({
+      ttlMs: policy.exitOrderTtlMs,
+      tier: "disabled",
+    });
   });
 
   it("defaults SELL replacement tolerance to two ticks", () => {

@@ -830,6 +830,12 @@ export interface DynamicChainCapPolicyConfig {
   capUnknown: number;
 }
 
+export interface ExitTtlByLiquidityPolicyConfig {
+  enabled: boolean;
+  thinMs: number;
+  mediumMs: number;
+}
+
 export interface ExecutionPolicy {
   version: number;
   entryPriceCeiling: number;
@@ -842,6 +848,7 @@ export interface ExecutionPolicy {
    */
   entryMinMarketAgeSeconds: number;
   exitOrderTtlMs: number;
+  exitTtlByLiquidity: ExitTtlByLiquidityPolicyConfig;
   sellReplaceMinPriceDeltaTicks?: number;
   exitRepriceThresholdPct: number;
   exitRepriceThresholdTicks: number;

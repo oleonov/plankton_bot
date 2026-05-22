@@ -358,6 +358,14 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
         "exit_anchor_mode_total",
         "mode",
         exitMetricSinceIso,
+        ["midpoint", "ask_undercut", "ask_fallback"],
+      ),
+      exit_ttl_resolved_total: readCounterByLabel(
+        db,
+        "exit_ttl_resolved_total",
+        "tier",
+        exitMetricSinceIso,
+        ["thin", "medium", "liquid", "default", "disabled"],
       ),
       exit_reprice_suppressed_threshold_total: readCounterTotal(
         db,
@@ -567,6 +575,7 @@ function readCounterByLabel(
   metricName: string,
   labelKey: string,
   sinceIso: string,
+  knownLabels: readonly string[] = [],
 ): Record<string, number> {
   const rows = db
     .prepare(
@@ -577,6 +586,7 @@ function readCounterByLabel(
     )
     .all(metricName, sinceIso) as Array<{ value: number | null; labels: string | null }>;
   const out: Record<string, number> = {};
+  for (const label of knownLabels) out[label] = 0;
   for (const row of rows) {
     const labels = parseJsonObject(row.labels);
     const key = typeof labels?.[labelKey] === "string" ? labels[labelKey] : "unknown";
