@@ -2044,6 +2044,94 @@ describe("ExecutionModule", () => {
     await replaceMod.stop();
   });
 
+  it("records one fallback failure when the gateway rejects a fallback order", async () => {
+    const existingSell = openSellAt(0.3, { size: 20, sizeUsdc: 6 });
+    const orders: Order[] = [existingSell];
+    orderRepo.findOpen = vi
+      .fn()
+      .mockImplementation(() => orders.filter((order) => order.status === "open"));
+    orderRepo.findById = vi
+      .fn()
+      .mockImplementation((orderId) => orders.find((order) => order.orderId === orderId) ?? null);
+    orderRepo.findByTokenId = vi
+      .fn()
+      .mockImplementation((tokenId) => orders.filter((order) => order.tokenId === tokenId));
+    orderRepo.findByClientOrderId = vi
+      .fn()
+      .mockImplementation(
+        (clientOrderId) =>
+          orders.find(
+            (order) =>
+              order.clientOrderId === clientOrderId &&
+              (order.status === "pending" || order.status === "open"),
+          ) ?? null,
+      );
+    orderRepo.updateStatus = vi.fn().mockImplementation((orderId, status) => {
+      const order = orders.find((entry) => entry.orderId === orderId);
+      if (order) order.status = status;
+    });
+    orderRepo.save = vi.fn().mockImplementation((order: Order) => {
+      orders.push(order);
+    });
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: false,
+      errorCode: ExchangeErrorCode.InvalidPrice,
+      errorMessage: "maker would cross",
+    });
+    const legStateRepo = createMockLegStateRepo();
+    legStateRepo.get = vi.fn().mockReturnValue(cappedLegState());
+    const fallbackLog = createMockExitTakerFallbackLog();
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(
+        makePosition({ size: 20, avgEntryPrice: 0.01, costBasisUsdc: 0.2 }),
+      ),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+      executionPolicy: () => DEFAULT_TEST_EXECUTION_POLICY,
+      legStateRepo,
+      repriceChainPolicy: () => DEFAULT_TEST_EXECUTION_POLICY.repriceChain,
+      exitTakerFallbackLog: fallbackLog,
+    });
+
+    await replaceMod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: 0.15, bestAsk: 0.16 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-chain-capped-fallback-gateway-reject"),
+        clientOrderId: "plk_sell_chain_capped_gateway_reject" as ClientOrderId,
+        side: "sell",
+        price: 0.18,
+        size: 20,
+        postOnly: true,
+      }),
+      timestamp: Date.now(),
+    });
+
+    const failedRecords = fallbackLog.records.filter((record) => record.result === "failed");
+    expect(failedRecords).toHaveLength(1);
+    expect(failedRecords[0]).toMatchObject({
+      failureReason: "gateway:maker would cross",
+      positionId: "pos-1",
+      tokenId: "tok-yes",
+    });
+    expect(replaceMod.getDiagnostics()).toMatchObject({
+      exitTakerFallbackFiredTotal: 1,
+      exitTakerFallbackFailedTotal: 1,
+    });
+
+    await replaceMod.stop();
+  });
+
   it("records a failed fallback attempt when chain-capped profit lacks a best bid", async () => {
     orderRepo.findByTokenId = vi.fn().mockReturnValue([openSellAt(0.3)]);
     const legStateRepo = createMockLegStateRepo();

@@ -796,7 +796,6 @@ export class ExecutionModule implements RuntimeModule {
         exchangeErrorDetails,
         cmd.commandId,
       );
-      this.recordExitTakerFallbackFailure(cmd, now, "gateway:missing-order-id");
       const rejectedOrder = this.buildOrder(cmd, "rejected", null, {
         errorCode,
         errorMessage: result.errorMessage ?? reason,
@@ -1701,7 +1700,10 @@ export class ExecutionModule implements RuntimeModule {
     try {
       this.deps.exitTakerFallbackLog?.insert(record);
     } catch (err) {
-      this.log.warn({ err, positionId: record.positionId }, "failed to persist exit taker fallback");
+      this.log.warn(
+        { err, positionId: record.positionId },
+        "failed to persist exit taker fallback",
+      );
     }
   }
 
