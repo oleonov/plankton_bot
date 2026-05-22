@@ -13,12 +13,12 @@ services:
       - krabs-data:/app/apps/runtime/data
     restart: unless-stopped
     env_file: .env.production
-    mem_limit: 2g
+    mem_limit: 4g
     logging: *json-logging
     environment:
       # --heapsnapshot-signal=SIGUSR2 lets ops dump a heap snapshot on demand
       # (docker kill -s SIGUSR2 krabs-krabs-runtime-1) for leak triage.
-      - NODE_OPTIONS=--max-old-space-size=1536 --heapsnapshot-signal=SIGUSR2
+      - NODE_OPTIONS=--max-old-space-size=3072 --heapsnapshot-signal=SIGUSR2
       - MARKET_DATA_MAX_TRACKED_TOKENS=5000
       - MARKET_DATA_MAX_WS_SHARDS=10
       - WS_WORKER_COUNT=4
