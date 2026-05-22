@@ -77,6 +77,39 @@ export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, op
         .get() as { value: number } | undefined
     )?.value;
 
+    const openPositionsCount = readOpenPositionCount(db);
+    const stuckPositionsCount = readStuckPositionCount(db);
+    const wsTracked = readNumber(stream, "trackedTokenCount") ?? 0;
+    const wsTotal =
+      readNumber(stream, "universeTokenCount") ??
+      readNumber(stream, "totalTokenCount") ??
+      readNumber(stream, "universeSize") ??
+      wsTracked;
+    const lagP95 = readNumber(eventLoopLag, "p95Ms") ?? 0;
+    const restarts24h = readRuntimeEventCount(db, since24h, [
+      "runtime_restart",
+      "process_restart",
+      "container_restart",
+    ]);
+    const oom24h = readRuntimeEventCount(db, since24h, [
+      "oom_kill",
+      "container_oom_kill",
+      "runtime_oom_kill",
+    ]);
+    const mode = latestRun?.mode ?? config?.runtimeMode ?? "simulation";
+    const isPaused = paused === 1;
+
+    const stuckSeverity: HealthSeverity =
+      stuckPositionsCount >= 4 ? "crit" : stuckPositionsCount >= 1 ? "warn" : "ok";
+    const lagSeverity: HealthSeverity = lagP95 >= 1500 ? "crit" : lagP95 >= 200 ? "warn" : "ok";
+    const restartSeverity: HealthSeverity =
+      restarts24h >= 3 || oom24h >= 1 ? "crit" : restarts24h >= 1 ? "warn" : "ok";
+    const modeSeverity: HealthSeverity =
+      mode === "degraded" ? "crit" : isPaused || mode !== "live-lite" ? "warn" : "ok";
+    const healthSeverity = worseSeverity(stuckSeverity, lagSeverity, restartSeverity, modeSeverity);
+
+    const rate24h = openPositionsCount > 0 ? fills24h.totalFills / openPositionsCount : 0;
+
     return ok({
       winrate_7d: {
         value: percent(overall.wins, overall.total),
@@ -95,28 +128,67 @@ export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, op
         total: fills24h.totalFills,
         maker: fills24h.makerFills,
         taker: fills24h.takerFills,
+        unknown: fills24h.unknownFills,
         maker_ratio: fills24h.makerRatio == null ? 0 : fills24h.makerRatio * 100,
+        volume_usd: fills24h.volumeUsdc,
+        rate_per_position: rate24h,
       },
-      stuck_positions_count: readStuckPositionCount(db),
+      open_positions_count: openPositionsCount,
+      stuck_positions_count: stuckPositionsCount,
       health: {
-        ws_tracked: readNumber(stream, "trackedTokenCount") ?? 0,
-        lag_p95_ms: readNumber(eventLoopLag, "p95Ms") ?? 0,
-        restarts_24h: readRuntimeEventCount(db, since24h, [
-          "runtime_restart",
-          "process_restart",
-          "container_restart",
-        ]),
-        oom_24h: readRuntimeEventCount(db, since24h, [
-          "oom_kill",
-          "container_oom_kill",
-          "runtime_oom_kill",
-        ]),
-        mode: latestRun?.mode ?? config?.runtimeMode ?? "simulation",
-        paused: paused === 1,
+        severity: healthSeverity,
+        ws_tracked: wsTracked,
+        ws_total: wsTotal,
+        lag_p95_ms: lagP95,
+        restarts_24h: restarts24h,
+        oom_24h: oom24h,
+        mode,
+        paused: isPaused,
+        checks: [
+          {
+            key: "stuck",
+            severity: stuckSeverity,
+            label: "Stuck positions",
+            value: String(stuckPositionsCount),
+          },
+          {
+            key: "lag",
+            severity: lagSeverity,
+            label: "WS lag p95",
+            value: `${Math.round(lagP95)} ms`,
+          },
+          {
+            key: "restart",
+            severity: restartSeverity,
+            label: "Restarts · OOM (24h)",
+            value: `${restarts24h} · ${oom24h}`,
+          },
+          {
+            key: "mode",
+            severity: modeSeverity,
+            label: "Mode",
+            value: `${mode.toUpperCase()}${isPaused ? " · PAUSED" : ""}`,
+          },
+        ],
       },
     });
   });
 };
+
+type HealthSeverity = "ok" | "warn" | "crit";
+
+function worseSeverity(...severities: HealthSeverity[]): HealthSeverity {
+  if (severities.includes("crit")) return "crit";
+  if (severities.includes("warn")) return "warn";
+  return "ok";
+}
+
+function readOpenPositionCount(db: Database.Database): number {
+  const row = db.prepare("SELECT COUNT(*) AS cnt FROM positions WHERE status = 'open'").get() as {
+    cnt: number;
+  };
+  return row.cnt;
+}
 
 function readClosedWinrate(
   db: Database.Database,

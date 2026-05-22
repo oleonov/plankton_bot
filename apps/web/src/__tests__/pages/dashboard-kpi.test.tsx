@@ -38,74 +38,128 @@ function mockKpi(data: DashboardKpiData) {
 }
 
 describe("dashboard KPI cards", () => {
-  it("renders green KPI states above the financial row", async () => {
+  it("renders OK KPI states above the financial row", async () => {
     mockKpi(
       kpi({
         winrate_7d: { value: 84.5 },
         exit_multiple_7d: { median: 2.8 },
-        fills_24h: { total: 52, maker_ratio: 88.4 },
+        fills_24h: { total: 52, maker_ratio: 88.4, rate_per_position: 0.74 },
+        open_positions_count: 70,
         stuck_positions_count: 0,
-        health: { lag_p95_ms: 90, restarts_24h: 0, oom_24h: 0, paused: false, mode: "live-lite" },
+        health: {
+          severity: "ok",
+          lag_p95_ms: 90,
+          restarts_24h: 0,
+          oom_24h: 0,
+          paused: false,
+          mode: "live-lite",
+          checks: [
+            { key: "stuck", severity: "ok", label: "Stuck positions", value: "0" },
+            { key: "lag", severity: "ok", label: "WS lag p95", value: "90 ms" },
+            { key: "restart", severity: "ok", label: "Restarts · OOM (24h)", value: "0 · 0" },
+            { key: "mode", severity: "ok", label: "Mode", value: "LIVE-LITE" },
+          ],
+        },
       }),
     );
 
     renderWithProviders(<Overview />);
 
-    expect(await screen.findByText("WINRATE 7d")).toBeInTheDocument();
+    const winrateCard = await screen.findByTestId("kpi-winrate-card");
+    expect(within(winrateCard).getByText("Winrate")).toBeInTheDocument();
+    expect(within(winrateCard).getByText("7d")).toBeInTheDocument();
     expect(screen.getByTestId("kpi-winrate-status")).toHaveTextContent("OK");
     expect(screen.getByTestId("kpi-exit-multiple-status")).toHaveTextContent("OK");
     expect(screen.getByTestId("kpi-fills-status")).toHaveTextContent("OK");
     expect(screen.getByTestId("kpi-health-status")).toHaveTextContent("OK");
-    expect(screen.getByText("84.5%")).toBeInTheDocument();
-    expect(screen.getByText("2.8×")).toBeInTheDocument();
-    expect(screen.getByText("52 fills")).toBeInTheDocument();
+    expect(winrateCard).toHaveAttribute("data-state", "ok");
+    expect(within(winrateCard).getByText(/84\.5/)).toBeInTheDocument();
+    const exitCard = screen.getByTestId("kpi-exit-multiple-card");
+    expect(within(exitCard).getByText(/2\.8/)).toBeInTheDocument();
   });
 
-  it("renders yellow KPI states at warning thresholds", async () => {
+  it("renders Warn KPI states at warning thresholds", async () => {
     mockKpi(
       kpi({
         winrate_7d: { value: 70 },
         exit_multiple_7d: { median: 2 },
-        fills_24h: { total: 30, maker_ratio: 75 },
+        fills_24h: { total: 30, maker_ratio: 78, rate_per_position: 0.3 },
+        open_positions_count: 100,
         stuck_positions_count: 2,
-        health: { lag_p95_ms: 90, restarts_24h: 0, oom_24h: 0, paused: false, mode: "live-lite" },
+        health: {
+          severity: "warn",
+          lag_p95_ms: 300,
+          restarts_24h: 1,
+          oom_24h: 0,
+          paused: false,
+          mode: "live-lite",
+          checks: [
+            { key: "stuck", severity: "warn", label: "Stuck positions", value: "2" },
+            { key: "lag", severity: "warn", label: "WS lag p95", value: "300 ms" },
+            { key: "restart", severity: "warn", label: "Restarts · OOM (24h)", value: "1 · 0" },
+            { key: "mode", severity: "ok", label: "Mode", value: "LIVE-LITE" },
+          ],
+        },
       }),
     );
 
     renderWithProviders(<Overview />);
 
-    expect(await screen.findByTestId("kpi-winrate-status")).toHaveTextContent("WARN");
-    expect(screen.getByTestId("kpi-exit-multiple-status")).toHaveTextContent("WARN");
-    expect(screen.getByTestId("kpi-fills-status")).toHaveTextContent("WARN");
-    expect(screen.getByTestId("kpi-health-status")).toHaveTextContent("WARN");
+    expect(await screen.findByTestId("kpi-winrate-status")).toHaveTextContent("Warn");
+    expect(screen.getByTestId("kpi-exit-multiple-status")).toHaveTextContent("Warn");
+    expect(screen.getByTestId("kpi-fills-status")).toHaveTextContent("Warn");
+    expect(screen.getByTestId("kpi-health-status")).toHaveTextContent("Warn");
+    expect(screen.getByTestId("kpi-winrate-card")).toHaveAttribute("data-state", "warn");
   });
 
-  it("renders red KPI states below thresholds", async () => {
+  it("renders Crit KPI states below thresholds", async () => {
     mockKpi(
       kpi({
         winrate_7d: { value: 40 },
         exit_multiple_7d: { median: 1.2 },
-        fills_24h: { total: 5, maker_ratio: 60 },
+        fills_24h: { total: 5, maker_ratio: 60, rate_per_position: 0.1 },
+        open_positions_count: 50,
         stuck_positions_count: 5,
-        health: { lag_p95_ms: 900, restarts_24h: 1, oom_24h: 1, paused: false, mode: "live-lite" },
+        health: {
+          severity: "crit",
+          lag_p95_ms: 900,
+          restarts_24h: 1,
+          oom_24h: 1,
+          paused: false,
+          mode: "live-lite",
+          checks: [
+            { key: "stuck", severity: "crit", label: "Stuck positions", value: "5" },
+            { key: "lag", severity: "warn", label: "WS lag p95", value: "900 ms" },
+            { key: "restart", severity: "crit", label: "Restarts · OOM (24h)", value: "1 · 1" },
+            { key: "mode", severity: "ok", label: "Mode", value: "LIVE-LITE" },
+          ],
+        },
       }),
     );
 
     renderWithProviders(<Overview />);
 
-    expect(await screen.findByTestId("kpi-winrate-status")).toHaveTextContent("ALERT");
-    expect(screen.getByTestId("kpi-exit-multiple-status")).toHaveTextContent("ALERT");
-    expect(screen.getByTestId("kpi-fills-status")).toHaveTextContent("ALERT");
-    expect(screen.getByTestId("kpi-health-status")).toHaveTextContent("ALERT");
+    expect(await screen.findByTestId("kpi-winrate-status")).toHaveTextContent("Crit");
+    expect(screen.getByTestId("kpi-exit-multiple-status")).toHaveTextContent("Crit");
+    expect(screen.getByTestId("kpi-fills-status")).toHaveTextContent("Crit");
+    expect(screen.getByTestId("kpi-health-status")).toHaveTextContent("Crit");
+    expect(screen.getByTestId("kpi-winrate-card")).toHaveAttribute("data-state", "crit");
   });
 
-  it("renders maker ratio as a separate fills quality state", async () => {
-    mockKpi(kpi({ fills_24h: { total: 52, maker_ratio: 72 } }));
+  it("derives card severity from worst submetric on the fills card", async () => {
+    mockKpi(
+      kpi({
+        fills_24h: { total: 52, maker_ratio: 72, rate_per_position: 0.74 },
+        open_positions_count: 70,
+      }),
+    );
 
     renderWithProviders(<Overview />);
 
     const fillsCard = await screen.findByTestId("kpi-fills-card");
-    expect(within(fillsCard).getByText(/maker quality/i)).toHaveTextContent("WARN");
+    expect(fillsCard).toHaveAttribute("data-state", "crit");
+    expect(within(fillsCard).getByText("Maker ratio")).toBeInTheDocument();
+    expect(within(fillsCard).getByTestId("kpi-fills-maker-value")).toHaveTextContent("72.0%");
   });
 
   it("keeps full instrumentation on the debug page", async () => {

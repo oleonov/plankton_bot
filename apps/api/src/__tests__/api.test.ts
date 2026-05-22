@@ -944,7 +944,25 @@ describe("GET /status", () => {
     const nowIso = new Date().toISOString();
     const openedIso = new Date(Date.now() - 60 * 60_000).toISOString();
     const oldOpenedIso = new Date(Date.now() - 13 * 60 * 60_000).toISOString();
-    conn.db.exec(`
+    const cleanupKpiFixture = () => {
+      conn.db.exec(`
+        DELETE FROM runtime_metrics WHERE metric_name IN (
+          'market_data_stream_activity',
+          'runtime_diagnostics',
+          'runtime_paused',
+          'runtime_restart',
+          'oom_kill'
+        );
+        DELETE FROM settlement_ledger WHERE settlement_id LIKE 'settle-kpi-%';
+        DELETE FROM market_resolutions WHERE condition_id LIKE 'cond-kpi-%';
+        DELETE FROM leg_states WHERE token_id = 'tok-kpi-stuck';
+        DELETE FROM fills WHERE fill_id LIKE 'fill-kpi-%';
+        DELETE FROM orders WHERE order_id LIKE 'ord-kpi-%';
+        DELETE FROM positions WHERE position_id LIKE 'pos-kpi-%';
+      `);
+    };
+    try {
+      conn.db.exec(`
       INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price,
         cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, closed_at, updated_at)
       VALUES
@@ -998,59 +1016,59 @@ describe("GET /status", () => {
       );
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES
-        ('market_data_stream_activity', 1, '{"trackedTokenCount":4999}', '${nowIso}'),
+        ('market_data_stream_activity', 1, '{"trackedTokenCount":4999,"universeTokenCount":5000}', '${nowIso}'),
         ('runtime_diagnostics', 1, '{"eventLoopLagMs":{"p95Ms":321}}', '${nowIso}'),
         ('runtime_paused', 1, NULL, '${nowIso}'),
         ('runtime_restart', 2, NULL, '${nowIso}'),
         ('oom_kill', 1, NULL, '${nowIso}');
     `);
 
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/dashboard/kpi",
-      headers: authHeaders(),
-    });
-    const body = json(res);
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/dashboard/kpi",
+        headers: authHeaders(),
+      });
+      const body = json(res);
 
-    expect(body.ok).toBe(true);
-    expect(body.data.winrate_7d).toMatchObject({
-      wins: 4,
-      losses: 2,
-      total: 6,
-    });
-    expect(body.data.winrate_7d.value).toBeCloseTo(66.666, 2);
-    expect(body.data.winrate_7d.sell_closed_pct).toBeCloseTo(66.666, 2);
-    expect(body.data.winrate_7d.resolved_closed_pct).toBeCloseTo(66.666, 2);
-    expect(body.data.exit_multiple_7d.median).toBeCloseTo(3, 6);
-    expect(body.data.exit_multiple_7d.p90).toBeCloseTo(6, 6);
-    expect(body.data.exit_multiple_7d.count).toBe(3);
-    expect(body.data.fills_24h).toMatchObject({ total: 4, maker: 3, taker: 1 });
-    expect(body.data.fills_24h.maker_ratio).toBeCloseTo(75, 3);
-    expect(body.data.stuck_positions_count).toBe(1);
-    expect(body.data.health).toMatchObject({
-      ws_tracked: 4999,
-      lag_p95_ms: 321,
-      restarts_24h: 2,
-      oom_24h: 1,
-      mode: "simulation",
-      paused: true,
-    });
-
-    conn.db.exec(`
-      DELETE FROM runtime_metrics WHERE metric_name IN (
-        'market_data_stream_activity',
-        'runtime_diagnostics',
-        'runtime_paused',
-        'runtime_restart',
-        'oom_kill'
+      expect(body.ok).toBe(true);
+      expect(body.data.winrate_7d).toMatchObject({
+        wins: 4,
+        losses: 2,
+        total: 6,
+      });
+      expect(body.data.winrate_7d.value).toBeCloseTo(66.666, 2);
+      expect(body.data.winrate_7d.sell_closed_pct).toBeCloseTo(66.666, 2);
+      expect(body.data.winrate_7d.resolved_closed_pct).toBeCloseTo(66.666, 2);
+      expect(body.data.exit_multiple_7d.median).toBeCloseTo(3, 6);
+      expect(body.data.exit_multiple_7d.p90).toBeCloseTo(6, 6);
+      expect(body.data.exit_multiple_7d.count).toBe(3);
+      expect(body.data.fills_24h).toMatchObject({ total: 4, maker: 3, taker: 1, unknown: 0 });
+      expect(body.data.fills_24h.maker_ratio).toBeCloseTo(75, 3);
+      expect(body.data.fills_24h.volume_usd).toBeCloseTo(11.5, 5);
+      expect(body.data.open_positions_count).toBeGreaterThanOrEqual(1);
+      expect(body.data.fills_24h.rate_per_position).toBeCloseTo(
+        4 / body.data.open_positions_count,
+        5,
       );
-      DELETE FROM settlement_ledger WHERE settlement_id LIKE 'settle-kpi-%';
-      DELETE FROM market_resolutions WHERE condition_id LIKE 'cond-kpi-%';
-      DELETE FROM leg_states WHERE token_id = 'tok-kpi-stuck';
-      DELETE FROM fills WHERE fill_id LIKE 'fill-kpi-%';
-      DELETE FROM orders WHERE order_id LIKE 'ord-kpi-%';
-      DELETE FROM positions WHERE position_id LIKE 'pos-kpi-%';
-    `);
+      expect(body.data.stuck_positions_count).toBe(1);
+      expect(body.data.health).toMatchObject({
+        severity: "crit",
+        ws_tracked: 4999,
+        ws_total: 5000,
+        lag_p95_ms: 321,
+        restarts_24h: 2,
+        oom_24h: 1,
+        mode: "simulation",
+        paused: true,
+      });
+      expect(body.data.health.checks).toHaveLength(4);
+      expect(body.data.health.checks[0]).toMatchObject({ key: "stuck", severity: "warn" });
+      expect(body.data.health.checks[1]).toMatchObject({ key: "lag", severity: "warn" });
+      expect(body.data.health.checks[2]).toMatchObject({ key: "restart", severity: "crit" });
+      expect(body.data.health.checks[3]).toMatchObject({ key: "mode", severity: "warn" });
+    } finally {
+      cleanupKpiFixture();
+    }
   });
 });
 

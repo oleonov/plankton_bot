@@ -215,16 +215,33 @@ export const mockDashboardKpi = {
     total: 52,
     maker: 46,
     taker: 6,
+    unknown: 0,
     maker_ratio: 88.4,
+    volume_usd: 1240.5,
+    rate_per_position: 0.74,
   },
+  open_positions_count: 70,
   stuck_positions_count: 0,
   health: {
+    severity: "ok" as const,
     ws_tracked: 5000,
+    ws_total: 5000,
     lag_p95_ms: 90,
     restarts_24h: 0,
     oom_24h: 0,
     mode: "live-lite",
     paused: false,
+    checks: [
+      { key: "stuck" as const, severity: "ok" as const, label: "Stuck positions", value: "0" },
+      { key: "lag" as const, severity: "ok" as const, label: "WS lag p95", value: "90 ms" },
+      {
+        key: "restart" as const,
+        severity: "ok" as const,
+        label: "Restarts · OOM (24h)",
+        value: "0 · 0",
+      },
+      { key: "mode" as const, severity: "ok" as const, label: "Mode", value: "LIVE-LITE" },
+    ],
   },
 };
 

@@ -155,10 +155,10 @@ describe("Overview Balance Card", () => {
   it("shows KPI cards instead of debug coverage widgets on Overview", async () => {
     renderWithProviders(<Overview />);
 
-    expect(await screen.findByText("WINRATE 7d")).toBeInTheDocument();
-    expect(screen.getByText("EXIT MULTIPLE 7d")).toBeInTheDocument();
-    expect(screen.getByText("FILLS 24h")).toBeInTheDocument();
-    expect(screen.getByText("HEALTH")).toBeInTheDocument();
+    expect(await screen.findByTestId("kpi-winrate-card")).toBeInTheDocument();
+    expect(screen.getByTestId("kpi-exit-multiple-card")).toBeInTheDocument();
+    expect(screen.getByTestId("kpi-fills-card")).toBeInTheDocument();
+    expect(screen.getByTestId("kpi-health-card")).toBeInTheDocument();
     expect(screen.queryByText("Market Coverage")).not.toBeInTheDocument();
     expect(screen.queryByText("R23 Dip Trigger")).not.toBeInTheDocument();
   });
@@ -166,11 +166,8 @@ describe("Overview Balance Card", () => {
   it("links debug metrics from the Health KPI card", async () => {
     renderWithProviders(<Overview />);
 
-    const healthCard = (await screen.findByTestId("kpi-health-card")).closest(".card");
-    if (!(healthCard instanceof HTMLElement)) {
-      throw new Error("expected Health KPI card");
-    }
-    expect(within(healthCard).getByText("/debug ->")).toBeInTheDocument();
+    const healthCard = await screen.findByTestId("kpi-health-card");
+    expect(within(healthCard).getByText("/debug →")).toBeInTheDocument();
   });
 
   it("shows execution telemetry note in execution quality card when no fills", async () => {

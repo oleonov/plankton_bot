@@ -1,10 +1,19 @@
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useStatus, useMetrics, useFills, useOrders, useDashboardKpi } from "../api/hooks.ts";
 import { PortfolioChart } from "../components/PortfolioChart.tsx";
 import { TradingActivityPanel } from "../components/TradingActivityPanel.tsx";
-import { PLANKTON_BASELINES, KPI_THRESHOLDS } from "../config/plankton-baselines.ts";
+import {
+  PLANKTON_BASELINES,
+  KPI_THRESHOLDS,
+  SUB_METRIC_THRESHOLDS,
+} from "../config/plankton-baselines.ts";
 import { formatAgo, formatUsd } from "../utils/format.ts";
-import type { DashboardKpiData } from "../api/types.ts";
+import type {
+  DashboardKpiData,
+  DashboardHealthSeverity,
+  DashboardHealthCheck,
+} from "../api/types.ts";
 
 function tradingStateColor(state?: string): string {
   switch (state) {
@@ -130,183 +139,466 @@ function exitsOnlyMessage(status: import("../api/types.ts").StatusData): string 
   return "Only exit signals active — no new entries being opened";
 }
 
-type KpiTone = "green" | "orange" | "red";
+type KpiSeverity = DashboardHealthSeverity;
 
-function thresholdTone(value: number, threshold: { green: number; yellow: number }): KpiTone {
-  if (value >= threshold.green) return "green";
-  if (value >= threshold.yellow) return "orange";
-  return "red";
+function severityFromValue(
+  value: number,
+  threshold: { green: number; yellow: number },
+): KpiSeverity {
+  if (value >= threshold.green) return "ok";
+  if (value >= threshold.yellow) return "warn";
+  return "crit";
 }
 
-function healthTone(kpi: DashboardKpiData): KpiTone {
-  const health = kpi.health;
-  const warningCount = [
-    kpi.stuck_positions_count > 0,
-    health.lag_p95_ms >= 500,
-    health.restarts_24h > 0,
-    health.oom_24h > 0,
-    health.paused,
-    health.mode.toLowerCase() !== "live-lite",
-  ].filter(Boolean).length;
-  if (kpi.stuck_positions_count >= 4 || warningCount >= 2) return "red";
-  if (warningCount === 1) return "orange";
-  return "green";
+function worseOf(...states: KpiSeverity[]): KpiSeverity {
+  if (states.includes("crit")) return "crit";
+  if (states.includes("warn")) return "warn";
+  return "ok";
 }
 
-function toneAccent(tone: KpiTone): string {
-  return `card-accent-${tone}`;
+function statusLabel(severity: KpiSeverity): string {
+  if (severity === "ok") return "OK";
+  if (severity === "warn") return "Warn";
+  return "Crit";
 }
 
-function toneBadge(tone: KpiTone): string {
-  if (tone === "green") return "badge-green";
-  if (tone === "orange") return "badge-orange";
-  return "badge-red";
+function formatPercent(value: number, fractionDigits = 1): string {
+  return `${value.toFixed(fractionDigits)}%`;
 }
 
-function toneColor(tone: KpiTone): string {
-  if (tone === "green") return "var(--green)";
-  if (tone === "orange") return "var(--orange)";
-  return "var(--red)";
+function formatMultiple(value: number, fractionDigits = 1): string {
+  return `${value.toFixed(fractionDigits)}×`;
 }
 
-function toneLabel(tone: KpiTone): string {
-  if (tone === "green") return "OK";
-  if (tone === "orange") return "WARN";
-  return "ALERT";
+function formatDeltaPp(delta: number): string {
+  const sign = delta >= 0 ? "+" : "−";
+  return `${sign}${Math.abs(delta).toFixed(1)}pp`;
 }
 
-function formatKpiPercent(value: number): string {
-  return `${value.toFixed(1).replace(/\.0$/, "")}%`;
+function formatDeltaMultiple(delta: number): string {
+  const sign = delta >= 0 ? "+" : "−";
+  return `${sign}${Math.abs(delta).toFixed(1)}×`;
 }
 
-function formatKpiMultiple(value: number): string {
-  return `${value.toFixed(1).replace(/\.0$/, "")}×`;
+function formatThousands(value: number): string {
+  return value.toLocaleString("en-US");
 }
 
-function KpiBadge({ tone, testId }: { tone: KpiTone; testId: string }) {
+function deltaClass(delta: number): string {
+  if (delta > 0) return "kpi-delta--up";
+  if (delta < 0) return "kpi-delta--down";
+  return "kpi-delta--flat";
+}
+
+function deltaArrow(delta: number): string {
+  if (delta > 0) return "▲";
+  if (delta < 0) return "▼";
+  return "·";
+}
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 100) return 100;
+  return value;
+}
+
+function severityClass(severity: KpiSeverity, prefix: string): string {
+  return `${prefix}--${severity}`;
+}
+
+interface ThresholdBarProps {
+  segments: Array<{ flex: number; color: "red" | "amber" | "green" }>;
+  baselinePercent: number;
+  currentPercent: number;
+  legend: ReadonlyArray<{ label: string; baseline?: boolean }>;
+  testId?: string;
+}
+
+function ThresholdBar({
+  segments,
+  baselinePercent,
+  currentPercent,
+  legend,
+  testId,
+}: ThresholdBarProps) {
+  const bl = clampPercent(baselinePercent);
+  const cur = clampPercent(currentPercent);
   return (
-    <span className={`badge ${toneBadge(tone)}`} data-testid={testId}>
-      {toneLabel(tone)}
-    </span>
+    <>
+      <div className="threshold-bar" data-testid={testId}>
+        {segments.map((seg, i) => (
+          <span
+            key={i}
+            className={`threshold-bar__seg threshold-bar__seg--${seg.color}`}
+            style={{ flex: seg.flex }}
+          />
+        ))}
+        <span className="threshold-bar__baseline" style={{ left: `${bl}%` }} />
+        <span className="threshold-bar__current" style={{ left: `${cur}%` }} />
+      </div>
+      <div className="threshold-bar-legend">
+        {legend.map((tick, i) => (
+          <span key={i} className={tick.baseline ? "threshold-bar-legend__bl" : undefined}>
+            {tick.label}
+          </span>
+        ))}
+      </div>
+    </>
+  );
+}
+
+interface KpiCardShellProps {
+  title: string;
+  period: string;
+  severity: KpiSeverity;
+  testId: string;
+  statusTestId: string;
+  children: ReactNode;
+}
+
+function KpiCardShell({
+  title,
+  period,
+  severity,
+  testId,
+  statusTestId,
+  children,
+}: KpiCardShellProps) {
+  return (
+    <article className="kpi-card" data-state={severity} data-testid={testId}>
+      <header className="kpi-card__head">
+        <span className="kpi-card__title">{title}</span>
+        <span className="kpi-card__period">{period}</span>
+        <span
+          className={`kpi-status ${severityClass(severity, "kpi-status")}`}
+          data-testid={statusTestId}
+        >
+          <span className="kpi-status__dot" />
+          {statusLabel(severity)}
+        </span>
+      </header>
+      {children}
+    </article>
+  );
+}
+
+function WinrateCard({ kpi }: { kpi: DashboardKpiData["winrate_7d"] }) {
+  const severity = severityFromValue(kpi.value, KPI_THRESHOLDS.winrate);
+  const delta = kpi.value - PLANKTON_BASELINES.winrate;
+  const sellSeverity = severityFromValue(kpi.sell_closed_pct, SUB_METRIC_THRESHOLDS.sellClosed);
+  const resolvedSeverity = severityFromValue(
+    kpi.resolved_closed_pct,
+    SUB_METRIC_THRESHOLDS.resolvedClosed,
+  );
+  return (
+    <KpiCardShell
+      title="Winrate"
+      period="7d"
+      severity={severity}
+      testId="kpi-winrate-card"
+      statusTestId="kpi-winrate-status"
+    >
+      <div className="kpi-card__primary">
+        <span className="kpi-card__big">
+          {kpi.value.toFixed(1)}
+          <span className="unit">%</span>
+        </span>
+      </div>
+      <div className={`kpi-card__delta ${deltaClass(delta)}`}>
+        vs <b>{formatPercent(PLANKTON_BASELINES.winrate)} Plankton</b>{" "}
+        <span className="arrow">{deltaArrow(delta)}</span>
+        {formatDeltaPp(delta)}
+      </div>
+      <ThresholdBar
+        segments={[
+          { flex: 65, color: "red" },
+          { flex: 15, color: "amber" },
+          { flex: 20, color: "green" },
+        ]}
+        baselinePercent={PLANKTON_BASELINES.winrate}
+        currentPercent={kpi.value}
+        legend={[
+          { label: "0%" },
+          { label: "65" },
+          { label: "80" },
+          { label: "85 ┊ bl", baseline: true },
+          { label: "100%" },
+        ]}
+      />
+      <hr className="kpi-sep" />
+      <div className="kpi-kvrow">
+        <span className="kpi-kvrow__label">Closed</span>
+        <span className="kpi-kvrow__value">{formatThousands(kpi.total)}</span>
+        <span className="kpi-kvrow__bl">
+          {formatThousands(kpi.wins)}W · {formatThousands(kpi.losses)}L
+        </span>
+      </div>
+      <div className="kpi-kvrow kpi-kvrow--small">
+        <span className="kpi-kvrow__label">SELL-closed</span>
+        <span className={`kpi-kvrow__value ${severityClass(sellSeverity, "kpi-kvrow__value")}`}>
+          {formatPercent(kpi.sell_closed_pct)}
+        </span>
+        <span className="kpi-kvrow__bl">
+          / {Math.round(PLANKTON_BASELINES.winrateSellClosed)}% bl
+        </span>
+      </div>
+      <div className="kpi-kvrow kpi-kvrow--small">
+        <span className="kpi-kvrow__label">Resolved-closed</span>
+        <span className={`kpi-kvrow__value ${severityClass(resolvedSeverity, "kpi-kvrow__value")}`}>
+          {formatPercent(kpi.resolved_closed_pct)}
+        </span>
+        <span className="kpi-kvrow__bl">
+          / {Math.round(PLANKTON_BASELINES.winrateResolved)}% bl
+        </span>
+      </div>
+    </KpiCardShell>
+  );
+}
+
+function ExitMultipleCard({ kpi }: { kpi: DashboardKpiData["exit_multiple_7d"] }) {
+  const severity = severityFromValue(kpi.median, KPI_THRESHOLDS.exitMultiple);
+  const delta = kpi.median - PLANKTON_BASELINES.exitMultipleMedian;
+  const currentPercent = (kpi.median / 6) * 100;
+  return (
+    <KpiCardShell
+      title="Exit Multiple"
+      period="7d"
+      severity={severity}
+      testId="kpi-exit-multiple-card"
+      statusTestId="kpi-exit-multiple-status"
+    >
+      <div className="kpi-card__primary">
+        <span className="kpi-card__big">
+          {kpi.median.toFixed(1)}
+          <span className="unit">×</span>
+        </span>
+      </div>
+      <div className={`kpi-card__delta ${deltaClass(delta)}`}>
+        median · vs <b>{formatMultiple(PLANKTON_BASELINES.exitMultipleMedian)} Plankton</b>{" "}
+        <span className="arrow">{deltaArrow(delta)}</span>
+        {formatDeltaMultiple(delta)}
+      </div>
+      <ThresholdBar
+        segments={[
+          { flex: 25, color: "red" },
+          { flex: 17, color: "amber" },
+          { flex: 58, color: "green" },
+        ]}
+        baselinePercent={50}
+        currentPercent={currentPercent}
+        legend={[
+          { label: "0×" },
+          { label: "1.5" },
+          { label: "2.5" },
+          { label: "3.0 ┊ bl", baseline: true },
+          { label: "6×" },
+        ]}
+      />
+      <hr className="kpi-sep" />
+      <div className="kpi-kvrow">
+        <span className="kpi-kvrow__label">P90</span>
+        <span className="kpi-kvrow__value">{formatMultiple(kpi.p90)}</span>
+        <span className="kpi-kvrow__bl">
+          / {formatMultiple(PLANKTON_BASELINES.exitMultipleP90)} bl
+        </span>
+      </div>
+      <div className="kpi-kvrow kpi-kvrow--small">
+        <span className="kpi-kvrow__label">Sample (closed-via-sell)</span>
+        <span className="kpi-kvrow__value">n={kpi.count}</span>
+        <span className="kpi-kvrow__bl">filtered ≥2×</span>
+      </div>
+    </KpiCardShell>
+  );
+}
+
+function FillsCard({ kpi }: { kpi: DashboardKpiData["fills_24h"] }) {
+  const rateSeverity = severityFromValue(kpi.rate_per_position, KPI_THRESHOLDS.fillsRate);
+  const makerSeverity = severityFromValue(kpi.maker_ratio, KPI_THRESHOLDS.makerRatio);
+  const severity = worseOf(rateSeverity, makerSeverity);
+  const makerDelta = kpi.maker_ratio - PLANKTON_BASELINES.makerRatio;
+  const ratePercent = Math.min(100, (kpi.rate_per_position / 1.5) * 100);
+  return (
+    <KpiCardShell
+      title="Fills"
+      period="24h"
+      severity={severity}
+      testId="kpi-fills-card"
+      statusTestId="kpi-fills-status"
+    >
+      <div
+        className={`kpi-submetric kpi-submetric--first ${severityClass(rateSeverity, "kpi-submetric")}`}
+      >
+        <div>
+          <div className="kpi-submetric__label">Total · rate</div>
+          <div className="kpi-submetric__val" data-testid="kpi-fills-rate-value">
+            {formatThousands(kpi.total)} · {kpi.rate_per_position.toFixed(2)}
+            <span className="unit">/pos</span>
+          </div>
+        </div>
+        <span className="kpi-submetric__bl">
+          / {PLANKTON_BASELINES.fillsPerPositionPerDay.toFixed(2)} Plankton
+        </span>
+      </div>
+      <ThresholdBar
+        segments={[
+          { flex: 15, color: "red" },
+          { flex: 20, color: "amber" },
+          { flex: 65, color: "green" },
+        ]}
+        baselinePercent={50}
+        currentPercent={ratePercent}
+        legend={[
+          { label: "0" },
+          { label: "0.22" },
+          { label: "0.52" },
+          { label: "0.75 ┊ bl", baseline: true },
+          { label: "1.5+" },
+        ]}
+      />
+      <div className={`kpi-submetric ${severityClass(makerSeverity, "kpi-submetric")}`}>
+        <div>
+          <div className="kpi-submetric__label">Maker ratio</div>
+          <div className="kpi-submetric__val" data-testid="kpi-fills-maker-value">
+            {kpi.maker_ratio.toFixed(1)}
+            <span className="unit">%</span>
+          </div>
+        </div>
+        <span className="kpi-submetric__bl">
+          / {formatPercent(PLANKTON_BASELINES.makerRatio)} bl{" "}
+          <span className={deltaClass(makerDelta)}>
+            {deltaArrow(makerDelta)} {formatDeltaPp(makerDelta)}
+          </span>
+        </span>
+      </div>
+      <ThresholdBar
+        segments={[
+          { flex: 75, color: "red" },
+          { flex: 13, color: "amber" },
+          { flex: 12, color: "green" },
+        ]}
+        baselinePercent={PLANKTON_BASELINES.makerRatio}
+        currentPercent={kpi.maker_ratio}
+        legend={[
+          { label: "0%" },
+          { label: "75" },
+          { label: "88" },
+          { label: "91 ┊ bl", baseline: true },
+          { label: "100%" },
+        ]}
+      />
+      <div className="kpi-kvrow kpi-kvrow--small" style={{ marginTop: 6 }}>
+        <span className="kpi-kvrow__label">Maker / Taker / Unk</span>
+        <span className="kpi-kvrow__value">
+          {kpi.maker} · {kpi.taker} · {kpi.unknown}
+        </span>
+        <span className="kpi-kvrow__bl">
+          BUY {Math.round(PLANKTON_BASELINES.makerRatioBuy)}% · SELL{" "}
+          {Math.round(PLANKTON_BASELINES.makerRatioSell)}% bl
+        </span>
+      </div>
+    </KpiCardShell>
+  );
+}
+
+function healthHeadline(kpi: DashboardKpiData): string {
+  const severity = kpi.health.severity;
+  if (severity === "ok") return "All systems normal";
+  const parts: string[] = [];
+  if (kpi.stuck_positions_count > 0) {
+    parts.push(`${kpi.stuck_positions_count} stuck`);
+  }
+  if (kpi.health.mode.toLowerCase() === "degraded") {
+    parts.push("degraded");
+  } else if (kpi.health.paused) {
+    parts.push("paused");
+  } else if (kpi.health.oom_24h > 0) {
+    parts.push(`${kpi.health.oom_24h} OOM`);
+  } else if (kpi.health.restarts_24h > 0) {
+    parts.push(`${kpi.health.restarts_24h} restart${kpi.health.restarts_24h === 1 ? "" : "s"}`);
+  } else if (kpi.health.lag_p95_ms >= 200) {
+    parts.push("WS lag");
+  }
+  return parts.length > 0 ? parts.join(" · ") : "Needs attention";
+}
+
+function HealthCard({ kpi }: { kpi: DashboardKpiData }) {
+  const severity = kpi.health.severity;
+  const issueCount = kpi.health.checks.filter((check) => check.severity !== "ok").length;
+  const headline = healthHeadline(kpi);
+  return (
+    <KpiCardShell
+      title="Health"
+      period="live"
+      severity={severity}
+      testId="kpi-health-card"
+      statusTestId="kpi-health-status"
+    >
+      <div className="kpi-card__primary">
+        <span className="kpi-card__big kpi-card__big--sentence">{headline}</span>
+      </div>
+      <div className="kpi-card__delta">
+        {issueCount} {issueCount === 1 ? "issue" : "issues"}
+      </div>
+      <div className="kpi-checks" data-testid="kpi-health-checks">
+        {kpi.health.checks.map((check: DashboardHealthCheck) => (
+          <div
+            key={check.key}
+            className={`kpi-check ${severityClass(check.severity, "kpi-check")}`}
+            data-testid={`kpi-health-check-${check.key}`}
+          >
+            <span className="kpi-check__dot" />
+            <span className="kpi-check__label">{check.label}</span>
+            <span className="kpi-check__value">{check.value}</span>
+          </div>
+        ))}
+      </div>
+      <div className="kpi-card__footer">
+        <span>
+          WS tracked: {formatThousands(kpi.health.ws_tracked)}/
+          {formatThousands(kpi.health.ws_total)}
+        </span>
+        <Link to="/debug">/debug →</Link>
+      </div>
+    </KpiCardShell>
+  );
+}
+
+function DashboardKpiLoadingRow() {
+  const placeholders = [
+    { title: "Winrate", period: "7d" },
+    { title: "Exit Multiple", period: "7d" },
+    { title: "Fills", period: "24h" },
+    { title: "Health", period: "live" },
+  ];
+  return (
+    <div className="kpi-row">
+      {placeholders.map(({ title, period }) => (
+        <article className="kpi-card" key={title}>
+          <header className="kpi-card__head">
+            <span className="kpi-card__title">{title}</span>
+            <span className="kpi-card__period">{period}</span>
+          </header>
+          <div className="kpi-card__primary">
+            <span className="kpi-card__big">—</span>
+          </div>
+          <div className="kpi-card__delta">Loading KPI snapshot</div>
+        </article>
+      ))}
+    </div>
   );
 }
 
 function DashboardKpiRow({ kpi }: { kpi?: DashboardKpiData }) {
   if (!kpi) {
-    return (
-      <div className="grid-4" style={{ marginBottom: 16 }}>
-        {["WINRATE 7d", "EXIT MULTIPLE 7d", "FILLS 24h", "HEALTH"].map((label) => (
-          <div className="card" key={label}>
-            <div className="label">{label}</div>
-            <div className="value-lg">—</div>
-            <div className="value-sm">Loading KPI snapshot</div>
-          </div>
-        ))}
-      </div>
-    );
+    return <DashboardKpiLoadingRow />;
   }
-
-  const winrateTone = thresholdTone(kpi.winrate_7d.value, KPI_THRESHOLDS.winrate);
-  const exitTone = thresholdTone(kpi.exit_multiple_7d.median, KPI_THRESHOLDS.exitMultiple);
-  const fillsTone = thresholdTone(kpi.fills_24h.total, KPI_THRESHOLDS.fillsDaily);
-  const makerTone = thresholdTone(kpi.fills_24h.maker_ratio, KPI_THRESHOLDS.makerRatio);
-  const healthStatusTone = healthTone(kpi);
-
   return (
-    <div className="grid-4" style={{ marginBottom: 16 }}>
-      <div className={`card ${toneAccent(winrateTone)}`} data-testid="kpi-winrate-card">
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-          <div className="label">WINRATE 7d</div>
-          <KpiBadge tone={winrateTone} testId="kpi-winrate-status" />
-        </div>
-        <div className="value-lg" style={{ color: toneColor(winrateTone) }}>
-          {formatKpiPercent(kpi.winrate_7d.value)}
-        </div>
-        <div className="value-sm">/ {formatKpiPercent(PLANKTON_BASELINES.winrate)} Plankton</div>
-        <div className="value-sm">
-          {kpi.winrate_7d.wins} win · {kpi.winrate_7d.losses} loss · {kpi.winrate_7d.total} closed
-        </div>
-        <div
-          className="value-sm"
-          style={{ borderTop: "1px solid var(--border)", marginTop: 10, paddingTop: 10 }}
-        >
-          SELL: {formatKpiPercent(kpi.winrate_7d.sell_closed_pct)} · Resolved:{" "}
-          {formatKpiPercent(kpi.winrate_7d.resolved_closed_pct)}
-        </div>
-      </div>
-
-      <div className={`card ${toneAccent(exitTone)}`} data-testid="kpi-exit-multiple-card">
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-          <div className="label">EXIT MULTIPLE 7d</div>
-          <KpiBadge tone={exitTone} testId="kpi-exit-multiple-status" />
-        </div>
-        <div className="value-lg" style={{ color: toneColor(exitTone) }}>
-          {formatKpiMultiple(kpi.exit_multiple_7d.median)}
-        </div>
-        <div className="value-sm">
-          / {formatKpiMultiple(PLANKTON_BASELINES.exitMultipleMedian)} Plankton
-        </div>
-        <div className="value-sm">
-          P90: {formatKpiMultiple(kpi.exit_multiple_7d.p90)} /{" "}
-          {formatKpiMultiple(PLANKTON_BASELINES.exitMultipleP90)} · n=
-          {kpi.exit_multiple_7d.count}
-        </div>
-      </div>
-
-      <div className={`card ${toneAccent(fillsTone)}`} data-testid="kpi-fills-card">
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-          <div className="label">FILLS 24h</div>
-          <KpiBadge tone={fillsTone} testId="kpi-fills-status" />
-        </div>
-        <div className="value-lg" style={{ color: toneColor(fillsTone) }}>
-          {kpi.fills_24h.total} fills
-        </div>
-        <div className="value-sm">
-          Maker: {formatKpiPercent(kpi.fills_24h.maker_ratio)} /{" "}
-          {formatKpiPercent(PLANKTON_BASELINES.makerRatio)} Plankton
-        </div>
-        <div className="value-sm">
-          {kpi.fills_24h.maker} maker · {kpi.fills_24h.taker} taker
-        </div>
-        <div className="value-sm">
-          maker quality{" "}
-          <span
-            className={
-              makerTone === "green"
-                ? "text-green"
-                : makerTone === "orange"
-                  ? "text-orange"
-                  : "text-red"
-            }
-          >
-            {toneLabel(makerTone)}
-          </span>
-        </div>
-      </div>
-
-      <div className={`card ${toneAccent(healthStatusTone)}`} data-testid="kpi-health-card">
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-          <div className="label">HEALTH</div>
-          <KpiBadge tone={healthStatusTone} testId="kpi-health-status" />
-        </div>
-        <div className="value-lg" style={{ color: toneColor(healthStatusTone) }}>
-          {healthStatusTone === "green" ? "All systems normal" : "Needs attention"}
-        </div>
-        <div className="value-sm">{kpi.stuck_positions_count} stuck positions</div>
-        <div className="value-sm">
-          WS {kpi.health.ws_tracked} · lag p95 {kpi.health.lag_p95_ms.toFixed(0)}ms
-        </div>
-        <div className="value-sm">
-          Restarts {kpi.health.restarts_24h} · OOM {kpi.health.oom_24h}
-        </div>
-        <div className="value-sm">
-          Mode: {kpi.health.mode.toUpperCase()}
-          {kpi.health.paused ? " · PAUSED" : ""}
-        </div>
-        <div className="value-sm" style={{ marginTop: 12 }}>
-          <Link to="/debug">/debug -&gt;</Link>
-        </div>
-      </div>
+    <div className="kpi-row">
+      <WinrateCard kpi={kpi.winrate_7d} />
+      <ExitMultipleCard kpi={kpi.exit_multiple_7d} />
+      <FillsCard kpi={kpi.fills_24h} />
+      <HealthCard kpi={kpi} />
     </div>
   );
 }

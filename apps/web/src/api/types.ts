@@ -349,6 +349,15 @@ export interface MetricsData {
 }
 
 /** GET /dashboard/kpi */
+export type DashboardHealthSeverity = "ok" | "warn" | "crit";
+
+export interface DashboardHealthCheck {
+  key: "stuck" | "lag" | "restart" | "mode";
+  severity: DashboardHealthSeverity;
+  label: string;
+  value: string;
+}
+
 export interface DashboardKpiData {
   winrate_7d: {
     value: number;
@@ -367,16 +376,23 @@ export interface DashboardKpiData {
     total: number;
     maker: number;
     taker: number;
+    unknown: number;
     maker_ratio: number;
+    volume_usd: number;
+    rate_per_position: number;
   };
+  open_positions_count: number;
   stuck_positions_count: number;
   health: {
+    severity: DashboardHealthSeverity;
     ws_tracked: number;
+    ws_total: number;
     lag_p95_ms: number;
     restarts_24h: number;
     oom_24h: number;
     mode: string;
     paused: boolean;
+    checks: DashboardHealthCheck[];
   };
 }
 
