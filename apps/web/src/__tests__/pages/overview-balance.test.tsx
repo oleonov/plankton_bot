@@ -152,24 +152,25 @@ describe("Overview Balance Card", () => {
     expect(screen.getByText(/\$0\.480 fees.*2\.00% leakage/)).toBeInTheDocument();
   });
 
-  it("shows market coverage widget fed by coverage metrics endpoint", async () => {
+  it("shows KPI cards instead of debug coverage widgets on Overview", async () => {
     renderWithProviders(<Overview />);
 
-    expect(await screen.findByText("Market Coverage")).toBeInTheDocument();
-    expect(screen.getByText("23.4%")).toBeInTheDocument();
-    expect(screen.getByText("5000 / 21348 WS tracked")).toBeInTheDocument();
-    expect(screen.getByText("10 shards · 42.7 ev/s")).toBeInTheDocument();
-    expect(screen.getByText("2.7h rotation · 17 opened 24h")).toBeInTheDocument();
-    expect(screen.getByText("p95 420ms · R23 cache 73%")).toBeInTheDocument();
+    expect(await screen.findByText("WINRATE 7d")).toBeInTheDocument();
+    expect(screen.getByText("EXIT MULTIPLE 7d")).toBeInTheDocument();
+    expect(screen.getByText("FILLS 24h")).toBeInTheDocument();
+    expect(screen.getByText("HEALTH")).toBeInTheDocument();
+    expect(screen.queryByText("Market Coverage")).not.toBeInTheDocument();
+    expect(screen.queryByText("R23 Dip Trigger")).not.toBeInTheDocument();
   });
 
-  it("shows R23 monitoring widget fed by R23 metrics endpoint", async () => {
+  it("links debug metrics from the Health KPI card", async () => {
     renderWithProviders(<Overview />);
 
-    expect(await screen.findByText("R23 Dip Trigger")).toBeInTheDocument();
-    expect(screen.getByText("840 checked · 598 no dip")).toBeInTheDocument();
-    expect(screen.getByText("73% cache · 8 orders / 3 fills")).toBeInTheDocument();
-    expect(screen.getByText("p95 420ms · 230 no history")).toBeInTheDocument();
+    const healthCard = (await screen.findByTestId("kpi-health-card")).closest(".card");
+    if (!(healthCard instanceof HTMLElement)) {
+      throw new Error("expected Health KPI card");
+    }
+    expect(within(healthCard).getByText("/debug ->")).toBeInTheDocument();
   });
 
   it("shows execution telemetry note in execution quality card when no fills", async () => {

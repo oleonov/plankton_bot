@@ -939,6 +939,114 @@ describe("GET /status", () => {
       DELETE FROM orders WHERE order_id = 'ord-r23';
     `);
   });
+
+  it("GET /dashboard/kpi exposes operator KPI fields", async () => {
+    const nowIso = new Date().toISOString();
+    const openedIso = new Date(Date.now() - 60 * 60_000).toISOString();
+    const oldOpenedIso = new Date(Date.now() - 13 * 60 * 60_000).toISOString();
+    conn.db.exec(`
+      INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price,
+        cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, closed_at, updated_at)
+      VALUES
+        ('pos-kpi-sell-win-1', 'tok-kpi-sell-win-1', 'cond-kpi-sell-win-1', 'buy', 10, 0.10, 1, 3, 2, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
+        ('pos-kpi-sell-win-2', 'tok-kpi-sell-win-2', 'cond-kpi-sell-win-2', 'buy', 10, 0.10, 1, 6, 5, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
+        ('pos-kpi-sell-loss', 'tok-kpi-sell-loss', 'cond-kpi-sell-loss', 'buy', 10, 0.20, 2, 1, -1, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
+        ('pos-kpi-res-win', 'tok-kpi-res-win', 'cond-kpi-res-win', 'buy', 10, 0.40, 4, 10, 6, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
+        ('pos-kpi-res-loss', 'tok-kpi-res-loss', 'cond-kpi-res-loss', 'buy', 10, 0.40, 4, 0, -4, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
+        ('pos-kpi-stuck', 'tok-kpi-stuck', 'cond-kpi-stuck', 'buy', 10, 0.10, 1, 2, 0, 'open', '${oldOpenedIso}', NULL, '${nowIso}');
+
+      INSERT INTO orders (order_id, client_order_id, token_id, condition_id, side, order_type,
+        price, size, size_usdc, status, exchange_order_id, bot_run_id, created_at, updated_at)
+      VALUES
+        ('ord-kpi-sell-win-1', 'client-kpi-sell-win-1', 'tok-kpi-sell-win-1', 'cond-kpi-sell-win-1', 'sell', 'GTC', 0.30, 10, 3, 'filled', 'ex-kpi-sell-win-1', 'run-1', '${openedIso}', '${openedIso}'),
+        ('ord-kpi-sell-win-2', 'client-kpi-sell-win-2', 'tok-kpi-sell-win-2', 'cond-kpi-sell-win-2', 'sell', 'GTC', 0.60, 10, 6, 'filled', 'ex-kpi-sell-win-2', 'run-1', '${openedIso}', '${openedIso}'),
+        ('ord-kpi-sell-loss', 'client-kpi-sell-loss', 'tok-kpi-sell-loss', 'cond-kpi-sell-loss', 'sell', 'GTC', 0.10, 10, 1, 'filled', 'ex-kpi-sell-loss', 'run-1', '${openedIso}', '${openedIso}');
+
+      INSERT INTO fills (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc,
+        liquidity_role, fee, filled_at, reconciled)
+      VALUES
+        ('fill-kpi-sell-win-1', 'ord-kpi-sell-win-1', 'tok-kpi-sell-win-1', 'cond-kpi-sell-win-1', 'sell', 0.30, 10, 3, 'maker', 0, '${nowIso}', 1),
+        ('fill-kpi-sell-win-2', 'ord-kpi-sell-win-2', 'tok-kpi-sell-win-2', 'cond-kpi-sell-win-2', 'sell', 0.60, 10, 6, 'maker', 0, '${nowIso}', 1),
+        ('fill-kpi-sell-loss', 'ord-kpi-sell-loss', 'tok-kpi-sell-loss', 'cond-kpi-sell-loss', 'sell', 0.10, 10, 1, 'taker', 0, '${nowIso}', 1);
+
+      INSERT INTO market_resolutions (condition_id, resolution, resolved_at, detected_at, source, status)
+      VALUES
+        ('cond-kpi-res-win', 'YES', '${nowIso}', '${nowIso}', 'test', 'settled'),
+        ('cond-kpi-res-loss', 'NO', '${nowIso}', '${nowIso}', 'test', 'settled');
+
+      INSERT INTO settlement_ledger (settlement_id, condition_id, position_id, token_id, resolution,
+        settlement_price, size, delta, settled_at)
+      VALUES
+        ('settle-kpi-res-win', 'cond-kpi-res-win', 'pos-kpi-res-win', 'tok-kpi-res-win', 'YES', 1, 10, 6, '${nowIso}'),
+        ('settle-kpi-res-loss', 'cond-kpi-res-loss', 'pos-kpi-res-loss', 'tok-kpi-res-loss', 'NO', 0, 10, -4, '${nowIso}');
+
+      INSERT INTO leg_states (token_id, buy_count, sell_count, last_action, first_trade_price,
+        first_trade_at, last_trade_at, updated_at, reprice_chain_count_24h)
+      VALUES ('tok-kpi-stuck', 1, 0, 'buy', 0.10, '${oldOpenedIso}', '${oldOpenedIso}', '${nowIso}', 13);
+
+      DELETE FROM runtime_metrics WHERE metric_name IN (
+        'market_data_stream_activity',
+        'runtime_diagnostics',
+        'runtime_paused',
+        'runtime_restart',
+        'oom_kill'
+      );
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES
+        ('market_data_stream_activity', 1, '{"trackedTokenCount":4999}', '${nowIso}'),
+        ('runtime_diagnostics', 1, '{"eventLoopLagMs":{"p95Ms":321}}', '${nowIso}'),
+        ('runtime_paused', 1, NULL, '${nowIso}'),
+        ('runtime_restart', 2, NULL, '${nowIso}'),
+        ('oom_kill', 1, NULL, '${nowIso}');
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/dashboard/kpi",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+
+    expect(body.ok).toBe(true);
+    expect(body.data.winrate_7d).toMatchObject({
+      wins: 3,
+      losses: 2,
+      total: 5,
+    });
+    expect(body.data.winrate_7d.value).toBeCloseTo(60, 3);
+    expect(body.data.winrate_7d.sell_closed_pct).toBeCloseTo(66.666, 2);
+    expect(body.data.winrate_7d.resolved_closed_pct).toBeCloseTo(50, 3);
+    expect(body.data.exit_multiple_7d.median).toBeCloseTo(3, 6);
+    expect(body.data.exit_multiple_7d.p90).toBeCloseTo(6, 6);
+    expect(body.data.exit_multiple_7d.count).toBe(3);
+    expect(body.data.fills_24h).toMatchObject({ total: 3, maker: 2, taker: 1 });
+    expect(body.data.fills_24h.maker_ratio).toBeCloseTo(66.666, 2);
+    expect(body.data.stuck_positions_count).toBe(1);
+    expect(body.data.health).toMatchObject({
+      ws_tracked: 4999,
+      lag_p95_ms: 321,
+      restarts_24h: 2,
+      oom_24h: 1,
+      mode: "simulation",
+      paused: true,
+    });
+
+    conn.db.exec(`
+      DELETE FROM runtime_metrics WHERE metric_name IN (
+        'market_data_stream_activity',
+        'runtime_diagnostics',
+        'runtime_paused',
+        'runtime_restart',
+        'oom_kill'
+      );
+      DELETE FROM settlement_ledger WHERE settlement_id LIKE 'settle-kpi-%';
+      DELETE FROM market_resolutions WHERE condition_id LIKE 'cond-kpi-res-%';
+      DELETE FROM leg_states WHERE token_id = 'tok-kpi-stuck';
+      DELETE FROM fills WHERE fill_id LIKE 'fill-kpi-%';
+      DELETE FROM orders WHERE order_id LIKE 'ord-kpi-%';
+      DELETE FROM positions WHERE position_id LIKE 'pos-kpi-%';
+    `);
+  });
 });
 
 // ─── Positions with filters ─────────────────────────────────────────

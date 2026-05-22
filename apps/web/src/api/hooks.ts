@@ -3,6 +3,7 @@ import { apiFetch, apiPost, apiPut, apiPatch, apiDelete } from "./client.ts";
 import type {
   StatusData,
   MetricsData,
+  DashboardKpiData,
   CoverageMetricsData,
   PnlDataPoint,
   PortfolioSeriesResponse,
@@ -81,6 +82,14 @@ export function useCoverageMetrics() {
     queryKey: ["metrics", "coverage"],
     queryFn: () => apiFetch<CoverageMetricsData>("/api/v1/metrics/coverage"),
     refetchInterval: 10_000,
+  });
+}
+
+export function useDashboardKpi() {
+  return useQuery({
+    queryKey: ["dashboard", "kpi"],
+    queryFn: () => apiFetch<DashboardKpiData>("/api/v1/dashboard/kpi"),
+    refetchInterval: 30_000,
   });
 }
 

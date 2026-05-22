@@ -197,6 +197,37 @@ export const mockAudit = {
   nextCursor: null,
 };
 
+export const mockDashboardKpi = {
+  winrate_7d: {
+    value: 84.5,
+    wins: 1012,
+    losses: 186,
+    total: 1198,
+    sell_closed_pct: 97.5,
+    resolved_closed_pct: 48.7,
+  },
+  exit_multiple_7d: {
+    median: 2.8,
+    p90: 5.2,
+    count: 87,
+  },
+  fills_24h: {
+    total: 52,
+    maker: 46,
+    taker: 6,
+    maker_ratio: 88.4,
+  },
+  stuck_positions_count: 0,
+  health: {
+    ws_tracked: 5000,
+    lag_p95_ms: 90,
+    restarts_24h: 0,
+    oom_24h: 0,
+    mode: "live-lite",
+    paused: false,
+  },
+};
+
 // ─── Handlers ────────────────────────────────────────────────────────
 
 export const handlers = [
@@ -275,6 +306,7 @@ export const handlers = [
       totalRealizedPnl: 0,
     }),
   ),
+  http.get("/api/v1/dashboard/kpi", () => ok(mockDashboardKpi)),
   http.get("/api/v1/metrics/coverage", () =>
     ok({
       ws_tracked: 5000,

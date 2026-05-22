@@ -23,6 +23,7 @@ import { orderRoutes } from "./routes/orders.js";
 import { fillRoutes } from "./routes/fills.js";
 import { driftRoutes } from "./routes/drift.js";
 import { metricsRoutes } from "./routes/metrics.js";
+import { dashboardRoutes } from "./routes/dashboard.js";
 import { actionRoutes } from "./routes/actions.js";
 import { eventsRoutes } from "./routes/events.js";
 import { riskEventsRoutes } from "./routes/risk-events.js";
@@ -161,6 +162,13 @@ export async function buildServer(deps: ServerDeps) {
 
   // Mixed routes — pass both
   await app.register(metricsRoutes, {
+    prefix: "/api/v1",
+    ledgerDb: deps.ledgerDb,
+    controlDb: deps.controlDb,
+    ledgerPool: deps.ledgerPool,
+    config: deps.config,
+  });
+  await app.register(dashboardRoutes, {
     prefix: "/api/v1",
     ledgerDb: deps.ledgerDb,
     controlDb: deps.controlDb,

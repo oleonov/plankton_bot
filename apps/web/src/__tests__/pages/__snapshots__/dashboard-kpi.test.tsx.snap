@@ -1,0 +1,689 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`dashboard KPI cards > keeps full instrumentation on the debug page 1`] = `
+<div>
+  <div
+    class="page"
+  >
+    <div
+      style="display: flex; justify-content: space-between; align-items: baseline;"
+    >
+      <div>
+        <h1
+          style="font-size: 18px; margin-bottom: 4px;"
+        >
+          Debug Metrics
+        </h1>
+        <div
+          class="value-sm"
+        >
+          Runtime instrumentation moved off Overview.
+        </div>
+      </div>
+      <div
+        class="value-sm"
+      >
+        captured 2026-05-18T00:00:00Z
+      </div>
+    </div>
+    <div
+      style="margin-top: 16px;"
+    >
+      <div
+        class="grid-3"
+        style="margin-bottom: 16px;"
+      >
+        <div
+          class="card card-accent-blue"
+        >
+          <div
+            class="label"
+            style="margin-bottom: 10px;"
+          >
+            WS throughput
+          </div>
+          <table>
+            <tbody>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  tracked / universe
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  5000 / 21348
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  events/sec
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  42.7
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  raw / parsed / noop
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  200.0 / 150.0 / 50.0 per sec
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  emitted/sec
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  22.5
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  hub pass/check
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  150.0 / 4166.7 per sec
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div
+          class="card card-accent-orange"
+        >
+          <div
+            class="label"
+            style="margin-bottom: 10px;"
+          >
+            Loop / GC / timers
+          </div>
+          <table>
+            <tbody>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  event loop p95 / max
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  12ms / 37ms
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  GC max
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  4ms
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  ipc decode
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  1ms p95 · 1ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  worker batch
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  2ms p95 · 2ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  hub dispatch
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  3ms p95 · 3ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  coalescing flush
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  4ms p95 · 4ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  latency summary
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  5ms p95 · 5ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  diagnostics write
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  6ms p95 · 6ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  metrics flush
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  7ms p95 · 10ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  sqlite writes
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  5ms p95 · 8ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  snapshot serialize
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  1ms p95 · 2ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  risk approval
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  1ms p95 · 3ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  signal bridge
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  3ms p95 · 5ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  worker non-update
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  1ms p95 · 2ms max
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  discovery publish
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  4ms p95 · 7ms max
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div
+          class="card card-accent-purple"
+        >
+          <div
+            class="label"
+            style="margin-bottom: 10px;"
+          >
+            V4 admission
+          </div>
+          <table>
+            <tbody>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  admit rate
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  21%
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  admit / evaluated
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  420 / 2000
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  top categories
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  crypto-btc:180, geopolitics:90, weather:40
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  reject reasons
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  rejected_category_not_in_hot_cats:900, rejected_liquidity_below_100:480, rejected_volume_below_5:200
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div
+        class="grid-3"
+        style="margin-bottom: 16px;"
+      >
+        <div
+          class="card card-accent-green"
+        >
+          <div
+            class="label"
+            style="margin-bottom: 10px;"
+          >
+            Exit telemetry
+          </div>
+          <table>
+            <tbody>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  anchor modes
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  ask_undercut:8, midpoint:2, ask_fallback:1
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  TTL tiers
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  liquid:4, thin:3, medium:2, default:1
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  chain caps
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  13:4, 50:3, 30:2, unknown:1
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  threshold suppressed
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  5
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  TTL cancels
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  3 total · 1 near resolution
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div
+          class="card card-accent-purple"
+        >
+          <div
+            class="label"
+            style="margin-bottom: 10px;"
+          >
+            Cooldown diagnostics
+          </div>
+          <table>
+            <tbody>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  early suppressions
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  12
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  registry size
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  3
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  signal unique
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  12 total · 7 early · 5 late
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  price keys
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  10 total · 2 both
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  no price
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  0
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div
+          class="card card-accent-blue"
+        >
+          <div
+            class="label"
+            style="margin-bottom: 10px;"
+          >
+            WS heartbeat / memory
+          </div>
+          <table>
+            <tbody>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  heartbeat
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  20/20 pong/ping · 0 timeouts
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  worker lag
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  8ms
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  RSS
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  512.4 MiB
+                </td>
+              </tr>
+              <tr>
+                <td
+                  style="color: var(--text-muted);"
+                >
+                  heap used
+                </td>
+                <td
+                  style="text-align: right;"
+                >
+                  180.2 MiB
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div
+      class="grid-2"
+    >
+      <div
+        class="card card-accent-purple"
+      >
+        <div
+          class="label"
+          style="margin-bottom: 10px;"
+        >
+          R23 Dip Trigger
+        </div>
+        <table>
+          <tbody>
+            <tr>
+              <td
+                style="color: var(--text-muted);"
+              >
+                checked / fired
+              </td>
+              <td
+                style="text-align: right;"
+              >
+                840 / 12
+              </td>
+            </tr>
+            <tr>
+              <td
+                style="color: var(--text-muted);"
+              >
+                no history / no dip
+              </td>
+              <td
+                style="text-align: right;"
+              >
+                230 / 598
+              </td>
+            </tr>
+            <tr>
+              <td
+                style="color: var(--text-muted);"
+              >
+                cache hit rate
+              </td>
+              <td
+                style="text-align: right;"
+              >
+                73%
+              </td>
+            </tr>
+            <tr>
+              <td
+                style="color: var(--text-muted);"
+              >
+                orders / fills 24h
+              </td>
+              <td
+                style="text-align: right;"
+              >
+                8 / 3
+              </td>
+            </tr>
+            <tr>
+              <td
+                style="color: var(--text-muted);"
+              >
+                fill notional 24h
+              </td>
+              <td
+                style="text-align: right;"
+              >
+                $2.40
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div
+        class="card card-accent-red"
+      >
+        <div
+          class="label"
+          style="margin-bottom: 10px;"
+        >
+          HTTP errors
+        </div>
+        <table>
+          <tbody>
+            <tr>
+              <td
+                style="color: var(--text-muted);"
+              >
+                last hour
+              </td>
+              <td
+                style="text-align: right;"
+              >
+                gamma-pricing:timeout:2
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+`;

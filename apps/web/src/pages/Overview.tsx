@@ -1,16 +1,10 @@
 import { Link } from "react-router-dom";
-import {
-  useStatus,
-  useMetrics,
-  useFills,
-  useOrders,
-  useCoverageMetrics,
-  useR23Metrics,
-} from "../api/hooks.ts";
+import { useStatus, useMetrics, useFills, useOrders, useDashboardKpi } from "../api/hooks.ts";
 import { PortfolioChart } from "../components/PortfolioChart.tsx";
 import { TradingActivityPanel } from "../components/TradingActivityPanel.tsx";
+import { PLANKTON_BASELINES, KPI_THRESHOLDS } from "../config/plankton-baselines.ts";
 import { formatAgo, formatUsd } from "../utils/format.ts";
-import type { CoverageMetricsData, R23MetricsData } from "../api/types.ts";
+import type { DashboardKpiData } from "../api/types.ts";
 
 function tradingStateColor(state?: string): string {
   switch (state) {
@@ -136,185 +130,182 @@ function exitsOnlyMessage(status: import("../api/types.ts").StatusData): string 
   return "Only exit signals active — no new entries being opened";
 }
 
-function coverageColor(coveragePct?: number | null): string {
-  if (coveragePct == null) return "var(--text-muted)";
-  if (coveragePct < 10) return "var(--red)";
-  if (coveragePct < 30) return "var(--orange)";
-  return "var(--green)";
+type KpiTone = "green" | "orange" | "red";
+
+function thresholdTone(value: number, threshold: { green: number; yellow: number }): KpiTone {
+  if (value >= threshold.green) return "green";
+  if (value >= threshold.yellow) return "orange";
+  return "red";
 }
 
-function formatCoveragePct(coveragePct?: number | null): string {
-  return coveragePct == null ? "—" : `${coveragePct.toFixed(1)}%`;
+function healthTone(kpi: DashboardKpiData): KpiTone {
+  const health = kpi.health;
+  const warningCount = [
+    kpi.stuck_positions_count > 0,
+    health.lag_p95_ms >= 500,
+    health.restarts_24h > 0,
+    health.oom_24h > 0,
+    health.paused,
+    health.mode.toLowerCase() !== "live-lite",
+  ].filter(Boolean).length;
+  if (kpi.stuck_positions_count >= 4 || warningCount >= 2) return "red";
+  if (warningCount === 1) return "orange";
+  return "green";
 }
 
-function formatPct(value?: number | null): string {
-  return value == null ? "—" : `${(value * 100).toFixed(0)}%`;
+function toneAccent(tone: KpiTone): string {
+  return `card-accent-${tone}`;
 }
 
-function formatTopCounts(counts?: Record<string, number>, limit = 3): string {
-  const entries = Object.entries(counts ?? {})
-    .filter(([, count]) => count > 0)
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, limit);
-  if (entries.length === 0) return "none";
-  return entries.map(([key, count]) => `${key}:${count}`).join(", ");
+function toneBadge(tone: KpiTone): string {
+  if (tone === "green") return "badge-green";
+  if (tone === "orange") return "badge-orange";
+  return "badge-red";
 }
 
-function r23HealthColor(metrics?: R23MetricsData): string {
-  if (!metrics) return "var(--text-muted)";
-  if ((metrics.current.decision_tick_latency_p95_ms ?? 0) > 30_000) return "var(--red)";
-  if (metrics.current.checked === 0) return "var(--orange)";
-  if (metrics.current.no_history > metrics.current.fired + metrics.current.no_dip)
-    return "var(--orange)";
-  return "var(--green)";
+function toneColor(tone: KpiTone): string {
+  if (tone === "green") return "var(--green)";
+  if (tone === "orange") return "var(--orange)";
+  return "var(--red)";
 }
 
-function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
-  const color = coverageColor(coverage?.coverage_pct);
-  const heartbeat = coverage?.ws_heartbeat;
-  const workerMemory = coverage?.ws_worker_memory;
-  const title = coverage
-    ? [
-        `WS tracked: ${coverage.ws_tracked}`,
-        `Active/tradable universe: ${coverage.universe_active}`,
-        `Events/sec: ${coverage.events_per_sec.toFixed(1)}`,
-        `Discovery rotation: ${coverage.discovery_batch_size} tokens per ${
-          coverage.discovery_poll_interval_ms / 60_000
-        } min`,
-        `Decision p95: ${coverage.decision_tick_latency_p95_ms?.toFixed(0) ?? "—"}ms`,
-        `Event loop p95/max: ${coverage.event_loop_lag_p95_ms?.toFixed(0) ?? "—"}/${
-          coverage.event_loop_lag_max_ms?.toFixed(0) ?? "—"
-        }ms`,
-        `GC max: ${coverage.gc_pause_max_ms?.toFixed(0) ?? "—"}ms`,
-        `WS heartbeat: ping ${heartbeat?.pingSent ?? 0}, pong ${
-          heartbeat?.pongReceived ?? 0
-        }, timeout ${heartbeat?.timeoutFired ?? 0}, worker lag ${
-          heartbeat?.workerEventLoopLagMaxMs?.toFixed(0) ?? "—"
-        }ms`,
-        `WS worker memory: rss ${workerMemory?.rssMb?.toFixed(1) ?? "—"} MiB, max worker ${
-          workerMemory?.maxRssMb?.toFixed(1) ?? "—"
-        } MiB`,
-        `WS pipeline: raw ${coverage.raw_ws_records_per_sec.toFixed(
-          1,
-        )}/s, parsed ${coverage.parsed_updates_per_sec.toFixed(
-          1,
-        )}/s, noop ${coverage.noop_updates_per_sec.toFixed(1)}/s`,
-        `Hub filter: checked ${coverage.hub_filter_checked_per_sec.toFixed(
-          1,
-        )}/s, passed ${coverage.hub_filter_passed_per_sec.toFixed(1)}/s`,
-        `R23 cache hit rate: ${formatPct(coverage.r23_cache_hit_rate)}`,
-        `V4 admit rate: ${formatPct(coverage.v4_admit_rate)}`,
-        `V4 top categories: ${formatTopCounts(coverage.v4_admit_count_by_category, 5)}`,
-        `V4 reject reasons: ${formatTopCounts(coverage.v4_reject_count_by_reason, 5)}`,
-        `Plankton weekly reference: ${coverage.plankton_reference_weekly}`,
-      ].join("\n")
-    : "Coverage metrics unavailable";
+function toneLabel(tone: KpiTone): string {
+  if (tone === "green") return "OK";
+  if (tone === "orange") return "WARN";
+  return "ALERT";
+}
+
+function formatKpiPercent(value: number): string {
+  return `${value.toFixed(1).replace(/\.0$/, "")}%`;
+}
+
+function formatKpiMultiple(value: number): string {
+  return `${value.toFixed(1).replace(/\.0$/, "")}×`;
+}
+
+function KpiBadge({ tone, testId }: { tone: KpiTone; testId: string }) {
   return (
-    <div className="card card-accent-blue" title={title}>
-      <div className="label">Market Coverage</div>
-      <div className="value-lg" style={{ color }}>
-        {formatCoveragePct(coverage?.coverage_pct)}
-      </div>
-      <div className="value-sm">
-        {coverage ? `${coverage.ws_tracked} / ${coverage.universe_active} WS tracked` : "Loading"}
-      </div>
-      <div className="value-sm">
-        {coverage
-          ? `${coverage.shard_count} shards · ${coverage.events_per_sec.toFixed(1)} ev/s`
-          : "Stream metrics unavailable"}
-      </div>
-      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
-        {coverage
-          ? `${coverage.rotation_cycle_hours.toFixed(1)}h rotation · ${coverage.positions_opened_24h} opened 24h`
-          : "Awaiting runtime snapshot"}
-      </div>
-      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
-        {coverage
-          ? `p95 ${coverage.decision_tick_latency_p95_ms?.toFixed(0) ?? "—"}ms · R23 cache ${formatPct(
-              coverage.r23_cache_hit_rate,
-            )}`
-          : "Awaiting decision metrics"}
-      </div>
-      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
-        {coverage
-          ? `loop ${coverage.event_loop_lag_p95_ms?.toFixed(0) ?? "—"}/${
-              coverage.event_loop_lag_max_ms?.toFixed(0) ?? "—"
-            }ms · GC ${coverage.gc_pause_max_ms?.toFixed(0) ?? "—"}ms`
-          : "Awaiting runtime diagnostics"}
-      </div>
-      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
-        {coverage
-          ? `WS hb ${heartbeat?.pongReceived ?? 0}/${heartbeat?.pingSent ?? 0} · timeouts ${
-              heartbeat?.timeoutFired ?? 0
-            } · lag ${heartbeat?.workerEventLoopLagMaxMs?.toFixed(0) ?? "—"}ms`
-          : "Awaiting WS heartbeat telemetry"}
-      </div>
-      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
-        {coverage
-          ? `WS mem ${workerMemory?.rssMb?.toFixed(1) ?? "—"} MiB · max ${
-              workerMemory?.maxRssMb?.toFixed(1) ?? "—"
-            } MiB`
-          : "Awaiting WS worker memory"}
-      </div>
-      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
-        {coverage
-          ? `raw ${coverage.raw_ws_records_per_sec.toFixed(1)}/s · parsed ${coverage.parsed_updates_per_sec.toFixed(
-              1,
-            )}/s · noop ${coverage.noop_updates_per_sec.toFixed(1)}/s`
-          : "Awaiting WS pipeline telemetry"}
-      </div>
-      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
-        {coverage
-          ? `hub ${coverage.hub_filter_passed_per_sec.toFixed(
-              1,
-            )}/${coverage.hub_filter_checked_per_sec.toFixed(1)} pass/check/s`
-          : "Awaiting hub filter telemetry"}
-      </div>
-      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
-        {coverage
-          ? `V4 ${formatPct(coverage.v4_admit_rate)} · ${coverage.v4_admit_count_total}/${coverage.v4_evaluated_total} admit`
-          : "Awaiting V4 admission telemetry"}
-      </div>
-      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
-        {coverage
-          ? `rejects ${formatTopCounts(coverage.v4_reject_count_by_reason, 2)}`
-          : "Awaiting V4 reject telemetry"}
-      </div>
-    </div>
+    <span className={`badge ${toneBadge(tone)}`} data-testid={testId}>
+      {toneLabel(tone)}
+    </span>
   );
 }
 
-function R23Card({ metrics }: { metrics?: R23MetricsData }) {
-  const title = metrics
-    ? [
-        `Checked latest tick: ${metrics.current.checked}`,
-        `Fired latest tick: ${metrics.current.fired}`,
-        `No history latest tick: ${metrics.current.no_history}`,
-        `No dip latest tick: ${metrics.current.no_dip}`,
-        `Cache hits/misses: ${metrics.current.cache_hits}/${metrics.current.cache_misses}`,
-        `Orders/fills 24h: ${metrics.orders_24h}/${metrics.fills_24h}`,
-      ].join("\n")
-    : "R23 metrics unavailable";
+function DashboardKpiRow({ kpi }: { kpi?: DashboardKpiData }) {
+  if (!kpi) {
+    return (
+      <div className="grid-4" style={{ marginBottom: 16 }}>
+        {["WINRATE 7d", "EXIT MULTIPLE 7d", "FILLS 24h", "HEALTH"].map((label) => (
+          <div className="card" key={label}>
+            <div className="label">{label}</div>
+            <div className="value-lg">—</div>
+            <div className="value-sm">Loading KPI snapshot</div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  const winrateTone = thresholdTone(kpi.winrate_7d.value, KPI_THRESHOLDS.winrate);
+  const exitTone = thresholdTone(kpi.exit_multiple_7d.median, KPI_THRESHOLDS.exitMultiple);
+  const fillsTone = thresholdTone(kpi.fills_24h.total, KPI_THRESHOLDS.fillsDaily);
+  const makerTone = thresholdTone(kpi.fills_24h.maker_ratio, KPI_THRESHOLDS.makerRatio);
+  const healthStatusTone = healthTone(kpi);
+
   return (
-    <div className="card card-accent-purple" title={title}>
-      <div className="label">R23 Dip Trigger</div>
-      <div className="value-lg" style={{ color: r23HealthColor(metrics) }}>
-        {metrics ? metrics.current.fired : "—"}
+    <div className="grid-4" style={{ marginBottom: 16 }}>
+      <div className={`card ${toneAccent(winrateTone)}`} data-testid="kpi-winrate-card">
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <div className="label">WINRATE 7d</div>
+          <KpiBadge tone={winrateTone} testId="kpi-winrate-status" />
+        </div>
+        <div className="value-lg" style={{ color: toneColor(winrateTone) }}>
+          {formatKpiPercent(kpi.winrate_7d.value)}
+        </div>
+        <div className="value-sm">/ {formatKpiPercent(PLANKTON_BASELINES.winrate)} Plankton</div>
+        <div className="value-sm">
+          {kpi.winrate_7d.wins} win · {kpi.winrate_7d.losses} loss · {kpi.winrate_7d.total} closed
+        </div>
+        <div
+          className="value-sm"
+          style={{ borderTop: "1px solid var(--border)", marginTop: 10, paddingTop: 10 }}
+        >
+          SELL: {formatKpiPercent(kpi.winrate_7d.sell_closed_pct)} · Resolved:{" "}
+          {formatKpiPercent(kpi.winrate_7d.resolved_closed_pct)}
+        </div>
       </div>
-      <div className="value-sm">
-        {metrics
-          ? `${metrics.current.checked} checked · ${metrics.current.no_dip} no dip`
-          : "Loading"}
+
+      <div className={`card ${toneAccent(exitTone)}`} data-testid="kpi-exit-multiple-card">
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <div className="label">EXIT MULTIPLE 7d</div>
+          <KpiBadge tone={exitTone} testId="kpi-exit-multiple-status" />
+        </div>
+        <div className="value-lg" style={{ color: toneColor(exitTone) }}>
+          {formatKpiMultiple(kpi.exit_multiple_7d.median)}
+        </div>
+        <div className="value-sm">
+          / {formatKpiMultiple(PLANKTON_BASELINES.exitMultipleMedian)} Plankton
+        </div>
+        <div className="value-sm">
+          P90: {formatKpiMultiple(kpi.exit_multiple_7d.p90)} /{" "}
+          {formatKpiMultiple(PLANKTON_BASELINES.exitMultipleP90)} · n=
+          {kpi.exit_multiple_7d.count}
+        </div>
       </div>
-      <div className="value-sm">
-        {metrics
-          ? `${formatPct(metrics.current.cache_hit_rate)} cache · ${metrics.orders_24h} orders / ${metrics.fills_24h} fills`
-          : "Cache metrics unavailable"}
+
+      <div className={`card ${toneAccent(fillsTone)}`} data-testid="kpi-fills-card">
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <div className="label">FILLS 24h</div>
+          <KpiBadge tone={fillsTone} testId="kpi-fills-status" />
+        </div>
+        <div className="value-lg" style={{ color: toneColor(fillsTone) }}>
+          {kpi.fills_24h.total} fills
+        </div>
+        <div className="value-sm">
+          Maker: {formatKpiPercent(kpi.fills_24h.maker_ratio)} /{" "}
+          {formatKpiPercent(PLANKTON_BASELINES.makerRatio)} Plankton
+        </div>
+        <div className="value-sm">
+          {kpi.fills_24h.maker} maker · {kpi.fills_24h.taker} taker
+        </div>
+        <div className="value-sm">
+          maker quality{" "}
+          <span
+            className={
+              makerTone === "green"
+                ? "text-green"
+                : makerTone === "orange"
+                  ? "text-orange"
+                  : "text-red"
+            }
+          >
+            {toneLabel(makerTone)}
+          </span>
+        </div>
       </div>
-      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
-        {metrics
-          ? `p95 ${metrics.current.decision_tick_latency_p95_ms?.toFixed(0) ?? "—"}ms · ${metrics.current.no_history} no history`
-          : "Awaiting decision metrics"}
+
+      <div className={`card ${toneAccent(healthStatusTone)}`} data-testid="kpi-health-card">
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <div className="label">HEALTH</div>
+          <KpiBadge tone={healthStatusTone} testId="kpi-health-status" />
+        </div>
+        <div className="value-lg" style={{ color: toneColor(healthStatusTone) }}>
+          {healthStatusTone === "green" ? "All systems normal" : "Needs attention"}
+        </div>
+        <div className="value-sm">{kpi.stuck_positions_count} stuck positions</div>
+        <div className="value-sm">
+          WS {kpi.health.ws_tracked} · lag p95 {kpi.health.lag_p95_ms.toFixed(0)}ms
+        </div>
+        <div className="value-sm">
+          Restarts {kpi.health.restarts_24h} · OOM {kpi.health.oom_24h}
+        </div>
+        <div className="value-sm">
+          Mode: {kpi.health.mode.toUpperCase()}
+          {kpi.health.paused ? " · PAUSED" : ""}
+        </div>
+        <div className="value-sm" style={{ marginTop: 12 }}>
+          <Link to="/debug">/debug -&gt;</Link>
+        </div>
       </div>
     </div>
   );
@@ -403,8 +394,7 @@ function BalanceCard({ status }: { status: import("../api/types.ts").StatusData 
 export function Overview() {
   const { data: status } = useStatus();
   const { data: metrics } = useMetrics();
-  const { data: coverage } = useCoverageMetrics();
-  const { data: r23Metrics } = useR23Metrics();
+  const { data: dashboardKpi } = useDashboardKpi();
   const { data: recentFills } = useFills({ limit: 1 });
   const { data: recentOrders } = useOrders({ limit: 1 });
 
@@ -490,10 +480,10 @@ export function Overview() {
         </div>
       )}
 
+      <DashboardKpiRow kpi={dashboardKpi} />
+
       {/* Financial */}
-      <div className="grid-5" style={{ marginBottom: 16 }}>
-        <CoverageCard coverage={coverage} />
-        <R23Card metrics={r23Metrics} />
+      <div className="grid-3" style={{ marginBottom: 16 }}>
         <div className="card card-accent-orange">
           <div className="label">Current Value</div>
           <div className="value-lg text-orange">{formatUsd(status.totalCurrentValueUsdc)}</div>

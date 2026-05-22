@@ -348,6 +348,38 @@ export interface MetricsData {
   totalRealizedPnl: number;
 }
 
+/** GET /dashboard/kpi */
+export interface DashboardKpiData {
+  winrate_7d: {
+    value: number;
+    wins: number;
+    losses: number;
+    total: number;
+    sell_closed_pct: number;
+    resolved_closed_pct: number;
+  };
+  exit_multiple_7d: {
+    median: number;
+    p90: number;
+    count: number;
+  };
+  fills_24h: {
+    total: number;
+    maker: number;
+    taker: number;
+    maker_ratio: number;
+  };
+  stuck_positions_count: number;
+  health: {
+    ws_tracked: number;
+    lag_p95_ms: number;
+    restarts_24h: number;
+    oom_24h: number;
+    mode: string;
+    paused: boolean;
+  };
+}
+
 /** GET /metrics/coverage */
 export interface CoverageMetricsData {
   ws_tracked: number;
