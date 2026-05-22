@@ -1,0 +1,306 @@
+{
+  "node": "v24.14.1",
+  "tokensPerShard": 500,
+  "soakMs": 120000,
+  "measureMs": 60000,
+  "repeats": 2,
+  "aggregate": {
+    "stageA_median_MiB": 67.1640625,
+    "stageA_spread_pct": 15.563568686751191,
+    "stageB_median_MiB": 76.46875,
+    "stageB_spread_pct": 11.40171638741316,
+    "stageC_median_MiB": 80.5234375,
+    "stageC_spread_pct": 3.3181333074609487,
+    "firstSocketDelta_MiB": 9.3046875,
+    "secondSocketDelta_MiB": 4.0546875,
+    "socketCostAvg_MiB": 6.6796875
+  },
+  "runs": [
+    {
+      "repeatIdx": 1,
+      "stageA_rss_KB": 63424,
+      "stageA_samples": [62832, 62976, 63424, 63488, 63536],
+      "stageB": {
+        "label": "stageB",
+        "samples": [
+          {
+            "elapsedMs": 10008,
+            "rss_KB": 78656
+          },
+          {
+            "elapsedMs": 20016,
+            "rss_KB": 78832
+          },
+          {
+            "elapsedMs": 30026,
+            "rss_KB": 79040
+          },
+          {
+            "elapsedMs": 40035,
+            "rss_KB": 79360
+          },
+          {
+            "elapsedMs": 50044,
+            "rss_KB": 77184
+          },
+          {
+            "elapsedMs": 60055,
+            "rss_KB": 76752
+          },
+          {
+            "elapsedMs": 70061,
+            "rss_KB": 78368
+          },
+          {
+            "elapsedMs": 80070,
+            "rss_KB": 77200
+          },
+          {
+            "elapsedMs": 90077,
+            "rss_KB": 73440
+          },
+          {
+            "elapsedMs": 100084,
+            "rss_KB": 73440
+          },
+          {
+            "elapsedMs": 110098,
+            "rss_KB": 73440
+          },
+          {
+            "elapsedMs": 120110,
+            "rss_KB": 73520
+          },
+          {
+            "elapsedMs": 130001,
+            "rss_KB": 73616
+          },
+          {
+            "elapsedMs": 140012,
+            "rss_KB": 73744
+          },
+          {
+            "elapsedMs": 150024,
+            "rss_KB": 73840
+          },
+          {
+            "elapsedMs": 160035,
+            "rss_KB": 73856
+          },
+          {
+            "elapsedMs": 170048,
+            "rss_KB": 73856
+          },
+          {
+            "elapsedMs": 180058,
+            "rss_KB": 73856
+          }
+        ],
+        "steady": [73520, 73616, 73744, 73840, 73856, 73856, 73856],
+        "median_KB": 73840,
+        "variance_pct": 0.45503791982665226,
+        "extended": true
+      },
+      "stageC": {
+        "label": "stageC",
+        "samples": [
+          {
+            "elapsedMs": 10007,
+            "rss_KB": 75392
+          },
+          {
+            "elapsedMs": 20017,
+            "rss_KB": 75568
+          },
+          {
+            "elapsedMs": 30029,
+            "rss_KB": 76352
+          },
+          {
+            "elapsedMs": 40037,
+            "rss_KB": 76704
+          },
+          {
+            "elapsedMs": 50044,
+            "rss_KB": 77040
+          },
+          {
+            "elapsedMs": 60054,
+            "rss_KB": 77408
+          },
+          {
+            "elapsedMs": 70059,
+            "rss_KB": 77728
+          },
+          {
+            "elapsedMs": 80070,
+            "rss_KB": 78096
+          },
+          {
+            "elapsedMs": 90081,
+            "rss_KB": 81008
+          },
+          {
+            "elapsedMs": 100093,
+            "rss_KB": 81040
+          },
+          {
+            "elapsedMs": 110101,
+            "rss_KB": 81104
+          },
+          {
+            "elapsedMs": 120110,
+            "rss_KB": 81136
+          },
+          {
+            "elapsedMs": 130001,
+            "rss_KB": 80960
+          },
+          {
+            "elapsedMs": 140010,
+            "rss_KB": 80992
+          },
+          {
+            "elapsedMs": 150018,
+            "rss_KB": 81040
+          },
+          {
+            "elapsedMs": 160027,
+            "rss_KB": 81088
+          },
+          {
+            "elapsedMs": 170036,
+            "rss_KB": 81120
+          },
+          {
+            "elapsedMs": 180043,
+            "rss_KB": 81664
+          }
+        ],
+        "steady": [81136, 80960, 80992, 81040, 81088, 81120, 81664],
+        "median_KB": 81088,
+        "variance_pct": 0.8681925808997633,
+        "extended": true
+      }
+    },
+    {
+      "repeatIdx": 2,
+      "stageA_rss_KB": 74128,
+      "stageA_samples": [74064, 74096, 74128, 74176, 74208],
+      "stageB": {
+        "label": "stageB",
+        "samples": [
+          {
+            "elapsedMs": 10008,
+            "rss_KB": 80848
+          },
+          {
+            "elapsedMs": 20019,
+            "rss_KB": 81008
+          },
+          {
+            "elapsedMs": 30025,
+            "rss_KB": 81200
+          },
+          {
+            "elapsedMs": 40034,
+            "rss_KB": 81280
+          },
+          {
+            "elapsedMs": 50043,
+            "rss_KB": 81328
+          },
+          {
+            "elapsedMs": 60054,
+            "rss_KB": 81696
+          },
+          {
+            "elapsedMs": 70062,
+            "rss_KB": 82736
+          },
+          {
+            "elapsedMs": 80073,
+            "rss_KB": 82752
+          },
+          {
+            "elapsedMs": 90084,
+            "rss_KB": 82768
+          },
+          {
+            "elapsedMs": 100094,
+            "rss_KB": 82768
+          },
+          {
+            "elapsedMs": 110105,
+            "rss_KB": 82768
+          },
+          {
+            "elapsedMs": 120116,
+            "rss_KB": 82768
+          }
+        ],
+        "steady": [81696, 82736, 82752, 82768, 82768, 82768, 82768],
+        "median_KB": 82768,
+        "variance_pct": 1.2951865455248406,
+        "extended": false
+      },
+      "stageC": {
+        "label": "stageC",
+        "samples": [
+          {
+            "elapsedMs": 10009,
+            "rss_KB": 82880
+          },
+          {
+            "elapsedMs": 20020,
+            "rss_KB": 82880
+          },
+          {
+            "elapsedMs": 30028,
+            "rss_KB": 82992
+          },
+          {
+            "elapsedMs": 40037,
+            "rss_KB": 83280
+          },
+          {
+            "elapsedMs": 50048,
+            "rss_KB": 83584
+          },
+          {
+            "elapsedMs": 60057,
+            "rss_KB": 83888
+          },
+          {
+            "elapsedMs": 70062,
+            "rss_KB": 84208
+          },
+          {
+            "elapsedMs": 80077,
+            "rss_KB": 84496
+          },
+          {
+            "elapsedMs": 90090,
+            "rss_KB": 83344
+          },
+          {
+            "elapsedMs": 100098,
+            "rss_KB": 83824
+          },
+          {
+            "elapsedMs": 110107,
+            "rss_KB": 83824
+          },
+          {
+            "elapsedMs": 120121,
+            "rss_KB": 83408
+          }
+        ],
+        "steady": [83888, 84208, 84496, 83344, 83824, 83824, 83408],
+        "median_KB": 83824,
+        "variance_pct": 1.3743080740599352,
+        "extended": false
+      }
+    }
+  ]
+}

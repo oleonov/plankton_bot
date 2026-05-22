@@ -1,0 +1,13 @@
+[init] node=v24.14.1 pid=3236
+[main] starting repeat 1/2
+[r1] mock server pid=3238
+[r1] stageA (no sockets) rss=61.9 MiB spread=1.1%
+[r1] stageB (1 socket) median=72.1 MiB variance=0.46% extended=true
+[r1] stageC (2 sockets) median=79.2 MiB variance=0.87% extended=true
+[r1] per-socket delta1=10.2 MiB, delta2=7.1 MiB
+[main] starting repeat 2/2
+[r2] mock server pid=4508
+[r2] stageA (no sockets) rss=72.4 MiB spread=0.2%
+[r2] stageB (1 socket) median=80.8 MiB variance=1.30% extended=false
+[r2] stageC (2 sockets) median=81.9 MiB variance=1.37% extended=false
+[r2] per-socket delta1=8.4 MiB, delta2=1.0 MiB

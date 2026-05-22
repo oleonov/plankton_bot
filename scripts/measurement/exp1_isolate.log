@@ -1,0 +1,4 @@
+[init] node=v24.14.1 pid=1708 worker=~/Work/poly_plankton/packages/exchange/dist/live/market-pricing-shard-worker.js
+[run 1/3] starting
+[run 2/3] starting
+[run 3/3] starting

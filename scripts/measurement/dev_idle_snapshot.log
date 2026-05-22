@@ -1,0 +1,12 @@
+label=t0 ts=1779326125
+  free_pages=42175.
+  active_pages=890311.
+  inactive_pages=891139.
+  wired_pages=251961.
+  total_app_rss_MiB=30294.5
+label=t1 ts=1779326185
+  free_pages=32603.
+  active_pages=874075.
+  inactive_pages=877484.
+  wired_pages=293087.
+  total_app_rss_MiB=30159.8
