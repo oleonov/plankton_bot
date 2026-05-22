@@ -1,3 +1,4 @@
+import { line as d3Line, curveMonotoneX } from "d3-shape";
 import type { PnlDataPoint } from "../api/types.ts";
 
 const WIDTH = 700;
@@ -25,9 +26,11 @@ export function PnlChart({ data, tailCostUsdc }: { data: PnlDataPoint[]; tailCos
   const x = (i: number) => PAD.left + (i / Math.max(data.length - 1, 1)) * plotW;
   const y = (v: number) => PAD.top + plotH - ((v - minY) / rangeY) * plotH;
 
-  const linePath = data
-    .map((d, i) => `${i === 0 ? "M" : "L"}${x(i)},${y(d.realizedPnl)}`)
-    .join(" ");
+  const linePath =
+    d3Line<PnlDataPoint>()
+      .x((_, i) => x(i))
+      .y((d) => y(d.realizedPnl))
+      .curve(curveMonotoneX)(data) ?? "";
 
   // Tail cost annotation at right edge
   const lastPnl = values[values.length - 1]!;

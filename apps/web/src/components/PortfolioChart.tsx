@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { line as d3Line, curveMonotoneX } from "d3-shape";
 import { usePortfolioSeries, usePnlSeries } from "../api/hooks.ts";
 import type { PortfolioSeriesResponse, PnlDataPoint } from "../api/types.ts";
 
@@ -140,9 +141,11 @@ function AreaChart({ points, onHover, hoverLabel }: AreaChartProps) {
   const x = (i: number) => PAD.left + (i / Math.max(points.length - 1, 1)) * plotW;
   const y = (v: number) => PAD.top + plotH - ((v - minY) / rangeY) * plotH;
 
-  const linePath = points
-    .map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`)
-    .join(" ");
+  const linePath =
+    d3Line<ChartPoint>()
+      .x((_, i) => x(i))
+      .y((p) => y(p.value))
+      .curve(curveMonotoneX)(points) ?? "";
 
   // Close the area path along the bottom
   const lastX = x(points.length - 1).toFixed(1);
