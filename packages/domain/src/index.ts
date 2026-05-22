@@ -59,10 +59,18 @@ export {
 } from "./dust-abandonment.js";
 export {
   DEFAULT_REPRICE_CHAIN_POLICY,
+  DEFAULT_DYNAMIC_CHAIN_CAP_POLICY,
+  DEFAULT_REPRICE_CHAIN_MAX_COUNT,
   shouldBlockRepriceChain,
   nextRepriceChainState,
+  resolveDynamicChainCap,
+  resolveDynamicChainCapDetails,
 } from "./reprice-chain.js";
-export type { NextRepriceChainState } from "./reprice-chain.js";
+export type {
+  DynamicChainCapBucket,
+  DynamicChainCapResolution,
+  NextRepriceChainState,
+} from "./reprice-chain.js";
 export { evaluateMinMarketAge } from "./min-market-age.js";
 export type {
   MinMarketAgeArgs,

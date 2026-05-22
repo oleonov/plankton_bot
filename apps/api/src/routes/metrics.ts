@@ -137,6 +137,7 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const hubFilterPassed = readNumber(stream, "hubFilterPassed") ?? 0;
     const hubFilterPassedPerSec = readNumber(stream, "hubFilterPassedPerSec") ?? 0;
     const shardCount = readNumber(stream, "shardCount") ?? 0;
+    const exitMetricSinceIso = new Date(Date.now() - 60 * 60_000).toISOString();
     const universeActive = marketCounts.activeTradable;
     const coveragePct = universeActive > 0 ? (wsTracked / universeActive) * 100 : 0;
     const discoveryBatchSize = config?.marketDataDiscoveryBatchSize ?? 50;
@@ -328,6 +329,47 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       cooldown_price_dedupe_duplicate_late: readNumber(cooldownPriceDedupe, "duplicateLate") ?? 0,
       cooldown_price_dedupe_skipped_no_price:
         readNumber(cooldownPriceDedupe, "skippedNoPrice") ?? 0,
+      cooldown_signal_unique_signals_total: readNumber(cooldownSignalDedupe, "total") ?? 0,
+      cooldown_signal_early_only_total: readNumber(cooldownSignalDedupe, "earlyOnly") ?? 0,
+      cooldown_signal_late_only_total: readNumber(cooldownSignalDedupe, "lateOnly") ?? 0,
+      cooldown_signal_early_and_late_total: readNumber(cooldownSignalDedupe, "earlyAndLate") ?? 0,
+      cooldown_signal_duplicate_early_total:
+        readNumber(cooldownSignalDedupe, "duplicateEarly") ?? 0,
+      cooldown_signal_duplicate_late_total: readNumber(cooldownSignalDedupe, "duplicateLate") ?? 0,
+      cooldown_price_unique_price_keys_total: readNumber(cooldownPriceDedupe, "total") ?? 0,
+      cooldown_price_early_only_total: readNumber(cooldownPriceDedupe, "earlyOnly") ?? 0,
+      cooldown_price_late_only_total: readNumber(cooldownPriceDedupe, "lateOnly") ?? 0,
+      cooldown_price_early_and_late_total: readNumber(cooldownPriceDedupe, "earlyAndLate") ?? 0,
+      cooldown_price_duplicate_early_total: readNumber(cooldownPriceDedupe, "duplicateEarly") ?? 0,
+      cooldown_price_duplicate_late_total: readNumber(cooldownPriceDedupe, "duplicateLate") ?? 0,
+      cooldown_price_skipped_no_price_total: readNumber(cooldownPriceDedupe, "skippedNoPrice") ?? 0,
+      exit_order_ttl_cancel_total: readCounterTotal(
+        db,
+        "exit_order_ttl_cancel_total",
+        exitMetricSinceIso,
+      ),
+      exit_order_ttl_cancel_near_resolution_total: readCounterTotal(
+        db,
+        "exit_order_ttl_cancel_near_resolution_total",
+        exitMetricSinceIso,
+      ),
+      exit_anchor_mode_total: readCounterByLabel(
+        db,
+        "exit_anchor_mode_total",
+        "mode",
+        exitMetricSinceIso,
+      ),
+      exit_reprice_suppressed_threshold_total: readCounterTotal(
+        db,
+        "exit_reprice_suppressed_threshold_total",
+        exitMetricSinceIso,
+      ),
+      exit_chain_cap_resolved_total: readCounterByLabel(
+        db,
+        "exit_chain_cap_resolved_total",
+        "bucket",
+        exitMetricSinceIso,
+      ),
       http_errors_by_class_1h: aggregateHttpErrors(httpErrorRows),
       ws_heartbeat: wsHeartbeat,
       ws_worker_memory: wsWorkerMemory,
@@ -506,6 +548,41 @@ function readStageTimerValue(
   key: "maxMs" | "p95Ms",
 ): number | null {
   return readNumber(readObject(stageTimers, stageName), key);
+}
+
+function readCounterTotal(db: Database.Database, metricName: string, sinceIso: string): number {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(value), 0) AS total
+         FROM runtime_metrics
+        WHERE metric_name = ?
+          AND captured_at >= ?`,
+    )
+    .get(metricName, sinceIso) as { total: number | null } | undefined;
+  return row?.total ?? 0;
+}
+
+function readCounterByLabel(
+  db: Database.Database,
+  metricName: string,
+  labelKey: string,
+  sinceIso: string,
+): Record<string, number> {
+  const rows = db
+    .prepare(
+      `SELECT value, labels
+         FROM runtime_metrics
+        WHERE metric_name = ?
+          AND captured_at >= ?`,
+    )
+    .all(metricName, sinceIso) as Array<{ value: number | null; labels: string | null }>;
+  const out: Record<string, number> = {};
+  for (const row of rows) {
+    const labels = parseJsonObject(row.labels);
+    const key = typeof labels?.[labelKey] === "string" ? labels[labelKey] : "unknown";
+    out[key] = (out[key] ?? 0) + (row.value ?? 0);
+  }
+  return out;
 }
 
 function aggregateHttpErrors(

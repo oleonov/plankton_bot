@@ -29,28 +29,28 @@ const TOKEN_ID = createTokenId("tok-yes");
 const NOW = Date.parse("2026-04-11T10:00:00.000Z");
 
 describe("resolveMidpointAnchoredSellPrice", () => {
-  it("caps at bestAsk when midpoint plus anchor crosses a narrow spread", () => {
-    expect(resolveMidpointAnchoredSellPrice(0.1, 0.104, 0.001, 5)).toBeCloseTo(0.104);
+  it("uses bestAsk for a single-tick spread where undercut would cross bestBid", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.1, 0.101, 0.001, 5)).toBeCloseTo(0.101);
   });
 
-  it("returns midpoint plus anchor in a mid spread", () => {
-    expect(resolveMidpointAnchoredSellPrice(0.1, 0.12, 0.001, 5)).toBeCloseTo(0.115);
+  it("returns ask-under by one tick when the spread is wide enough", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.1, 0.12, 0.001, 5)).toBeCloseTo(0.119);
   });
 
-  it("returns midpoint plus anchor in a wide spread", () => {
-    expect(resolveMidpointAnchoredSellPrice(0.05, 0.17, 0.001, 5)).toBeCloseTo(0.115);
+  it("returns ask-under in a wide spread", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.05, 0.17, 0.001, 5)).toBeCloseTo(0.169);
   });
 
-  it("matches the ICEMAN-like midpoint plus five ticks smoke case", () => {
-    expect(resolveMidpointAnchoredSellPrice(0.05, 0.186, 0.001, 5)).toBeCloseTo(0.123);
+  it("matches the Plankton-aligned ask-under smoke case", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.05, 0.186, 0.001, 5)).toBeCloseTo(0.185);
   });
 
-  it("rounds fractional midpoint artifacts down to the nearest tick", () => {
-    expect(resolveMidpointAnchoredSellPrice(0.0505, 0.186, 0.001, 5)).toBeCloseTo(0.123);
+  it("rounds fractional ask-under artifacts down to the nearest tick", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.0505, 0.186, 0.001, 5)).toBeCloseTo(0.185);
   });
 
-  it("returns null when bestAsk is unavailable", () => {
-    expect(resolveMidpointAnchoredSellPrice(0.05, null, 0.001, 5)).toBeNull();
+  it("falls back to bestBid plus anchor when bestAsk is unavailable", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.05, null, 0.001, 5)).toBeCloseTo(0.055);
   });
 
   it("returns null when bestBid is null", () => {
@@ -63,8 +63,8 @@ describe("resolveMidpointAnchoredSellPrice", () => {
     ).toBeNull();
   });
 
-  it("handles crossed book defensively by capping at bestAsk", () => {
-    expect(resolveMidpointAnchoredSellPrice(0.5, 0.4, 0.001, 5)).toBeCloseTo(0.4);
+  it("handles crossed book defensively by falling back to midpoint plus anchor", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.5, 0.4, 0.001, 5)).toBeCloseTo(0.455);
   });
 });
 
@@ -1554,7 +1554,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.29);
+    expect(placed[0]!.command.price).toBe(0.31);
   });
 
   it("caps bid-anchored SELL inside the spread when the raw anchor is above bestAsk", async () => {
@@ -1573,7 +1573,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed[0]!.command.price).toBe(0.28);
   });
 
-  it("resolves ICEMAN-like SELL price to midpoint plus five ticks", async () => {
+  it("resolves wide-spread SELL price to best ask undercut", async () => {
     const { bus, placed } = makeBridgeWithPricing();
     const market = makeMarket({ bestBid: 0.05, bestAsk: 0.186, midPrice: 0.118, tickSize: 0.001 });
     await bus.publish("SignalApproved", {
@@ -1584,7 +1584,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.123);
+    expect(placed[0]!.command.price).toBe(0.185);
   });
 
   it("falls back to bestAsk when a one-tick spread has no inside SELL price", async () => {
@@ -1894,7 +1894,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.postOnly).toBeUndefined();
-    expect(placed[0]!.command.price).toBe(0.1);
+    expect(placed[0]!.command.price).toBe(0.14);
     expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_disabled_min_size_total",
       1,
@@ -1941,7 +1941,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.1);
+    expect(placed[0]!.command.price).toBe(0.14);
     expect(placed[0]!.command.postOnly).toBeUndefined();
   });
 
@@ -1963,7 +1963,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.11);
+    expect(placed[0]!.command.price).toBe(0.14);
     expect(placed[0]!.command.postOnly).toBeUndefined();
     expect(metrics.writeCounter).toHaveBeenCalledWith(
       "order_priced_mode_total",
@@ -3271,7 +3271,7 @@ describe("ADR-015 execution policy observations", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]!.skippedReason).toBe("sell-price-below-signal-floor");
-    expect(rows[0]!.selectedPrice).toBe(0.055);
+    expect(rows[0]!.selectedPrice).toBe(0.079);
     expect(rows[0]!.side).toBe("SELL");
   });
 });

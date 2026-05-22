@@ -37,6 +37,8 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       entryPriceCeiling: 0.6,
       exitOrderTtlMs: 600_000,
       sellReplaceMinPriceDeltaTicks: 3,
+      exitRepriceThresholdPct: 0.25,
+      exitRepriceThresholdTicks: 8,
       marketSelection: { maxMidPrice: 0.42, minLiquidity: 250 },
       buyCapacity: {
         enabled: true,
@@ -131,11 +133,27 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         },
       },
       telemetry: { deadSideCanary: false, pricingShadow: false },
+      repriceChain: {
+        enabled: true,
+        windowMs: 86_400_000,
+        maxChainCount: 13,
+        dynamicChainCap: {
+          enabled: true,
+          tradeCountThinThreshold: 12,
+          tradeCountLiquidThreshold: 55,
+          capThin: 45,
+          capMedium: 25,
+          capLiquid: 12,
+          capUnknown: 28,
+        },
+      },
     };
     const { policy, issues } = parseExecutionPolicyJson(JSON.stringify(input));
     expect(issues).toHaveLength(0);
     expect(policy.entryPriceCeiling).toBe(0.6);
     expect(policy.sellReplaceMinPriceDeltaTicks).toBe(3);
+    expect(policy.exitRepriceThresholdPct).toBe(0.25);
+    expect(policy.exitRepriceThresholdTicks).toBe(8);
     expect(policy.marketSelection).toEqual({ maxMidPrice: 0.42, minLiquidity: 250 });
     expect(policy.buyCapacity).toEqual({
       enabled: true,
@@ -187,6 +205,15 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.pricing.minExitPriceSignalRatio).toBe(0.6);
     expect(policy.pricing.wideSpreadPolicy).toBe("skip");
     expect(policy.orderLifetime.passive.highTtlMs).toBe(259_200_000);
+    expect(policy.repriceChain.dynamicChainCap).toEqual({
+      enabled: true,
+      tradeCountThinThreshold: 12,
+      tradeCountLiquidThreshold: 55,
+      capThin: 45,
+      capMedium: 25,
+      capLiquid: 12,
+      capUnknown: 28,
+    });
     expect(policy.telemetry.deadSideCanary).toBe(false);
   });
 
@@ -224,6 +251,51 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     );
     expect(issues).toHaveLength(0);
     expect(policy.sellReplaceMinPriceDeltaTicks).toBe(1);
+  });
+
+  it("defaults and parses EXIT-FIX-2 reprice thresholds", () => {
+    expect(DEFAULT_EXECUTION_POLICY.exitRepriceThresholdPct).toBe(0.3);
+    expect(DEFAULT_EXECUTION_POLICY.exitRepriceThresholdTicks).toBe(10);
+    expect(DEFAULT_EXECUTION_POLICY.repriceChain.dynamicChainCap).toEqual({
+      enabled: true,
+      tradeCountThinThreshold: 10,
+      tradeCountLiquidThreshold: 49,
+      capThin: 50,
+      capMedium: 30,
+      capLiquid: 13,
+      capUnknown: 30,
+    });
+
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        exitRepriceThresholdPct: 0.2,
+        exitRepriceThresholdTicks: 6,
+        repriceChain: {
+          dynamicChainCap: {
+            enabled: false,
+            tradeCountThinThreshold: 8,
+            tradeCountLiquidThreshold: 40,
+            capThin: 44,
+            capMedium: 24,
+            capLiquid: 11,
+            capUnknown: 20,
+          },
+        },
+      }),
+    );
+
+    expect(issues).toHaveLength(0);
+    expect(policy.exitRepriceThresholdPct).toBe(0.2);
+    expect(policy.exitRepriceThresholdTicks).toBe(6);
+    expect(policy.repriceChain.dynamicChainCap).toEqual({
+      enabled: false,
+      tradeCountThinThreshold: 8,
+      tradeCountLiquidThreshold: 40,
+      capThin: 44,
+      capMedium: 24,
+      capLiquid: 11,
+      capUnknown: 20,
+    });
   });
 
   it("defaults and parses the post-BUY fill SELL cooldown", () => {
@@ -326,6 +398,38 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       DEFAULT_EXECUTION_POLICY.sellReplaceMinPriceDeltaTicks,
     );
     expect(issues.some((i) => i.includes("sellReplaceMinPriceDeltaTicks"))).toBe(true);
+  });
+
+  it("rejects invalid EXIT-FIX-2 reprice threshold values with issues", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        exitRepriceThresholdPct: 0,
+        exitRepriceThresholdTicks: 0,
+        repriceChain: {
+          dynamicChainCap: {
+            tradeCountThinThreshold: -1,
+            tradeCountLiquidThreshold: -1,
+            capThin: 0,
+            capMedium: 0,
+            capLiquid: 0,
+            capUnknown: 0,
+          },
+        },
+      }),
+    );
+
+    expect(policy.exitRepriceThresholdPct).toBe(DEFAULT_EXECUTION_POLICY.exitRepriceThresholdPct);
+    expect(policy.exitRepriceThresholdTicks).toBe(
+      DEFAULT_EXECUTION_POLICY.exitRepriceThresholdTicks,
+    );
+    expect(policy.repriceChain.dynamicChainCap).toEqual(
+      DEFAULT_EXECUTION_POLICY.repriceChain.dynamicChainCap,
+    );
+    expect(issues.some((i) => i.includes("exitRepriceThresholdPct"))).toBe(true);
+    expect(issues.some((i) => i.includes("exitRepriceThresholdTicks"))).toBe(true);
+    expect(
+      issues.some((i) => i.includes("repriceChain.dynamicChainCap.tradeCountThinThreshold")),
+    ).toBe(true);
   });
 
   it("preserves partial pricing override and defaults the rest", () => {

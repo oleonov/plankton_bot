@@ -817,6 +817,17 @@ export interface RepriceChainPolicyConfig {
   enabled: boolean;
   windowMs: number;
   maxChainCount: number;
+  dynamicChainCap: DynamicChainCapPolicyConfig;
+}
+
+export interface DynamicChainCapPolicyConfig {
+  enabled: boolean;
+  tradeCountThinThreshold: number;
+  tradeCountLiquidThreshold: number;
+  capThin: number;
+  capMedium: number;
+  capLiquid: number;
+  capUnknown: number;
 }
 
 export interface ExecutionPolicy {
@@ -832,6 +843,8 @@ export interface ExecutionPolicy {
   entryMinMarketAgeSeconds: number;
   exitOrderTtlMs: number;
   sellReplaceMinPriceDeltaTicks?: number;
+  exitRepriceThresholdPct: number;
+  exitRepriceThresholdTicks: number;
   marketSelection: MarketSelectionPolicy;
   buyCapacity: BuyCapacityPolicy;
   sellCapacity: SellCapacityPolicy;

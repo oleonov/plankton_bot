@@ -1564,7 +1564,7 @@ describe("ExecutionModule", () => {
     },
   );
 
-  it("cancel-replaces a SELL when replacement price moves beyond tolerance", async () => {
+  it("cancel-replaces a SELL when replacement price moves beyond the threshold", async () => {
     orderRepo.findByTokenId = vi.fn().mockReturnValue([openSellAt(0.3)]);
     const replaceMod = new ExecutionModule({
       gateway,
@@ -1585,7 +1585,7 @@ describe("ExecutionModule", () => {
         commandId: createCommandId("sell-replace-three-ticks"),
         clientOrderId: "plk_sell_replace_three_ticks" as ClientOrderId,
         side: "sell",
-        price: 0.33,
+        price: 0.4,
         size: 5,
       }),
       timestamp: Date.now(),
@@ -1596,7 +1596,7 @@ describe("ExecutionModule", () => {
     await replaceMod.stop();
   });
 
-  it("uses configured SELL replacement tolerance", async () => {
+  it("uses configured SELL replacement threshold", async () => {
     orderRepo.findByTokenId = vi.fn().mockReturnValue([openSellAt(0.3)]);
     const replaceMod = new ExecutionModule({
       gateway,
@@ -1608,7 +1608,11 @@ describe("ExecutionModule", () => {
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
-      executionPolicy: () => ({ ...DEFAULT_EXECUTION_POLICY, sellReplaceMinPriceDeltaTicks: 1 }),
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        exitRepriceThresholdPct: 0.05,
+        exitRepriceThresholdTicks: 1,
+      }),
     });
     await replaceMod.start();
 
@@ -1624,6 +1628,45 @@ describe("ExecutionModule", () => {
     });
 
     expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "existing-sell" });
+    await replaceMod.stop();
+  });
+
+  it("keeps an existing SELL when replacement threshold cannot be resolved", async () => {
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([openSellAt(0.3)]);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+    await replaceMod.start();
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-replace-invalid-threshold"),
+        clientOrderId: "plk_sell_replace_invalid_threshold" as ClientOrderId,
+        side: "sell",
+        price: 0.4,
+        size: 5,
+        tickSize: 0,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("sell-replace-invalid-threshold");
     await replaceMod.stop();
   });
 
@@ -1698,7 +1741,7 @@ describe("ExecutionModule", () => {
         commandId: createCommandId("sell-replace-request"),
         clientOrderId: "plk_sell_replace" as ClientOrderId,
         side: "sell",
-        price: 0.5,
+        price: 0.44,
         size: 5,
       }),
       timestamp: Date.now(),
@@ -1709,7 +1752,7 @@ describe("ExecutionModule", () => {
     expect((gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
       clientOrderId: "plk_sell_replace",
       side: "sell",
-      price: 0.5,
+      price: 0.44,
     });
     expect(rejected.some((event) => event.reason === "sell-replace-pending")).toBe(true);
     expect(replaceMod.getDiagnostics().cancelReplacePendingCount).toBe(0);
@@ -1815,7 +1858,7 @@ describe("ExecutionModule", () => {
         commandId: createCommandId("sell-replace-two-open-request"),
         clientOrderId: "plk_sell_replace_two_open" as ClientOrderId,
         side: "sell",
-        price: 0.5,
+        price: 0.44,
         size: 5,
       }),
       timestamp: Date.now(),
@@ -1827,7 +1870,7 @@ describe("ExecutionModule", () => {
     expect((gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
       clientOrderId: "plk_sell_replace_two_open",
       side: "sell",
-      price: 0.5,
+      price: 0.44,
     });
     expect(orders.find((order) => order.orderId === createOrderId("existing-sell-2"))?.status).toBe(
       "open",
@@ -1887,7 +1930,7 @@ describe("ExecutionModule", () => {
         commandId: createCommandId("sell-replace-sub-min"),
         clientOrderId: "plk_sell_replace_sub_min" as ClientOrderId,
         side: "sell",
-        price: 0.5,
+        price: 0.44,
         size: 3.1,
         metadata: {
           marketData: {
@@ -1905,7 +1948,7 @@ describe("ExecutionModule", () => {
       clientOrderId: "plk_sell_replace_sub_min",
       side: "sell",
       size: 6,
-      price: 0.5,
+      price: 0.44,
     });
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toBe("sell-replace-pending");

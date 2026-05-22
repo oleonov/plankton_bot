@@ -699,7 +699,7 @@ describe("GET /status", () => {
         ('coverage-tok-1', 'coverage-cond-1', 'coverage-1', 'Coverage 1?', 'Yes', 1, 1, 0.01, 0, '2026-06-01T00:00:00Z', '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z'),
         ('coverage-tok-2', 'coverage-cond-2', 'coverage-2', 'Coverage 2?', 'Yes', 1, 1, 0.01, 0, '2026-06-01T00:00:00Z', '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z');
       DELETE FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity';
-      DELETE FROM runtime_metrics WHERE metric_name IN ('algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class', 'signal_path_activity');
+      DELETE FROM runtime_metrics WHERE metric_name IN ('algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class', 'signal_path_activity', 'exit_order_ttl_cancel_total', 'exit_order_ttl_cancel_near_resolution_total', 'exit_anchor_mode_total', 'exit_reprice_suppressed_threshold_total', 'exit_chain_cap_resolved_total');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES ('market_data_stream_activity', 1, '{"trackedTokenCount":2,"wsEventsReceivedPerSec":7.5,"rawWsRecords":120,"rawWsRecordsPerSec":2,"parsedUpdates":90,"parsedUpdatesPerSec":1.5,"emittedUpdates":15,"emittedUpdatesPerSec":0.25,"noopUpdates":30,"noopUpdatesPerSec":0.5,"suppressedTradingNoopCountTotal":75,"suppressedTradingNoopPerSec":1.25,"suppressedTradingNoopByReason":{"topOfBookOnly":70,"bookOnly":1,"lastTradeOnly":2,"tickSizeOnly":0,"mixedNonCritical":2},"hubFilterChecked":450,"hubFilterCheckedPerSec":7.5,"hubFilterPassed":90,"hubFilterPassedPerSec":1.5,"shardCount":2,"wsHeartbeat":{"pingSent":4,"pongReceived":3,"timeoutFired":1,"timeoutSuppressedByInbound":2,"workerEventLoopLagMaxMs":11,"byShard":{"0":{"pingSent":2,"pongReceived":2,"timeoutFired":0,"timeoutSuppressedByInbound":1,"lastPingSentAt":1779292800000,"lastPongAt":1779292800010,"lastInboundMessageAt":1779292800010,"workerEventLoopLagMaxMs":5}}},"v4AdmissionTelemetry":{"evaluatedTotal":10,"admitCountTotal":2,"rejectCountTotal":8,"admitRate":0.2,"admitCountByCategory":{"crypto-btc":2},"seenCountByCategory":{"crypto-btc":3},"admitRateByCategory":{"crypto-btc":0.6666666667},"rejectCountByReason":{"rejected_category_not_in_hot_cats":5,"rejected_liquidity_below_100":2,"rejected_volume_below_5":1,"rejected_no_orderbook_proxy":0}}}', '2026-05-18T00:00:00Z');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
@@ -710,6 +710,17 @@ describe("GET /status", () => {
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES ('signal_path_activity', 1, '{"cooldown":{"signalsSuppressedEarlyCooldownTotal":12,"signalsSuppressedEarlyCooldownByToken":{"tok-a":10,"tok-b":2},"cooldownRegistrySize":3},"cooldownSignalDedupe":{"total":9,"earlyOnly":5,"lateOnly":3,"earlyAndLate":1,"duplicateEarly":2,"duplicateLate":4},"cooldownPriceDedupe":{"total":8,"earlyOnly":2,"lateOnly":3,"earlyAndLate":3,"duplicateEarly":1,"duplicateLate":2,"skippedNoPrice":6}}', '2026-05-18T00:00:00Z');
     `);
+    const nowIso = new Date().toISOString();
+    const insertMetric = conn.db.prepare(
+      "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, ?, ?, ?)",
+    );
+    insertMetric.run("exit_order_ttl_cancel_total", 2, "{}", nowIso);
+    insertMetric.run("exit_order_ttl_cancel_near_resolution_total", 1, "{}", nowIso);
+    insertMetric.run("exit_anchor_mode_total", 3, '{"mode":"ask_undercut"}', nowIso);
+    insertMetric.run("exit_anchor_mode_total", 2, '{"mode":"midpoint"}', nowIso);
+    insertMetric.run("exit_reprice_suppressed_threshold_total", 4, "{}", nowIso);
+    insertMetric.run("exit_chain_cap_resolved_total", 5, '{"bucket":"50"}', nowIso);
+    insertMetric.run("exit_chain_cap_resolved_total", 1, '{"bucket":"13"}', nowIso);
     conn.db
       .prepare(
         "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, ?, ?, ?)",
@@ -792,6 +803,12 @@ describe("GET /status", () => {
     expect(body.data.cooldown_signal_dedupe_early_and_late).toBe(1);
     expect(body.data.cooldown_signal_dedupe_duplicate_early).toBe(2);
     expect(body.data.cooldown_signal_dedupe_duplicate_late).toBe(4);
+    expect(body.data.cooldown_signal_unique_signals_total).toBe(9);
+    expect(body.data.cooldown_signal_early_only_total).toBe(5);
+    expect(body.data.cooldown_signal_late_only_total).toBe(3);
+    expect(body.data.cooldown_signal_early_and_late_total).toBe(1);
+    expect(body.data.cooldown_signal_duplicate_early_total).toBe(2);
+    expect(body.data.cooldown_signal_duplicate_late_total).toBe(4);
     expect(body.data.cooldown_price_dedupe_total).toBe(8);
     expect(body.data.cooldown_price_dedupe_early_only).toBe(2);
     expect(body.data.cooldown_price_dedupe_late_only).toBe(3);
@@ -799,6 +816,18 @@ describe("GET /status", () => {
     expect(body.data.cooldown_price_dedupe_duplicate_early).toBe(1);
     expect(body.data.cooldown_price_dedupe_duplicate_late).toBe(2);
     expect(body.data.cooldown_price_dedupe_skipped_no_price).toBe(6);
+    expect(body.data.cooldown_price_unique_price_keys_total).toBe(8);
+    expect(body.data.cooldown_price_early_only_total).toBe(2);
+    expect(body.data.cooldown_price_late_only_total).toBe(3);
+    expect(body.data.cooldown_price_early_and_late_total).toBe(3);
+    expect(body.data.cooldown_price_duplicate_early_total).toBe(1);
+    expect(body.data.cooldown_price_duplicate_late_total).toBe(2);
+    expect(body.data.cooldown_price_skipped_no_price_total).toBe(6);
+    expect(body.data.exit_order_ttl_cancel_total).toBe(2);
+    expect(body.data.exit_order_ttl_cancel_near_resolution_total).toBe(1);
+    expect(body.data.exit_anchor_mode_total).toEqual({ ask_undercut: 3, midpoint: 2 });
+    expect(body.data.exit_reprice_suppressed_threshold_total).toBe(4);
+    expect(body.data.exit_chain_cap_resolved_total).toEqual({ "50": 5, "13": 1 });
     expect(body.data.http_errors_by_class_1h).toEqual({ "gamma-pricing:timeout": 2 });
     expect(body.data.ws_heartbeat.pingSent).toBe(4);
     expect(body.data.ws_heartbeat.workerEventLoopLagMaxMs).toBe(11);
@@ -817,7 +846,7 @@ describe("GET /status", () => {
     });
 
     conn.db.exec(
-      `DELETE FROM runtime_metrics WHERE metric_name IN ('market_data_stream_activity', 'algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class', 'signal_path_activity')`,
+      `DELETE FROM runtime_metrics WHERE metric_name IN ('market_data_stream_activity', 'algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class', 'signal_path_activity', 'exit_order_ttl_cancel_total', 'exit_order_ttl_cancel_near_resolution_total', 'exit_anchor_mode_total', 'exit_reprice_suppressed_threshold_total', 'exit_chain_cap_resolved_total')`,
     );
   });
 

@@ -127,8 +127,26 @@ export interface ExecutionPolicyDTO {
   version: 1;
   entryPriceCeiling: number;
   exitOrderTtlMs: number;
-  exitPricingMode?: "bid-anchored" | "edge";
+  sellReplaceMinPriceDeltaTicks?: number;
+  exitRepriceThresholdPct?: number;
+  exitRepriceThresholdTicks?: number;
+  exitPricingMode?: "bid-anchored" | "midpoint-anchored" | "edge";
   exitBidAnchorTicks?: number;
+  exitMidpointAnchorTicks?: number;
+  repriceChain?: {
+    enabled: boolean;
+    windowMs: number;
+    maxChainCount: number;
+    dynamicChainCap?: {
+      enabled: boolean;
+      tradeCountThinThreshold: number;
+      tradeCountLiquidThreshold: number;
+      capThin: number;
+      capMedium: number;
+      capLiquid: number;
+      capUnknown: number;
+    };
+  };
   /**
    * Step 0 §P3 — minimum market age (gamma createdAt → first BUY) in seconds.
    * `0` disables the gate (used by simulation). Canonical floor is 2,504 s
@@ -413,6 +431,24 @@ export interface CoverageMetricsData {
   cooldown_price_dedupe_duplicate_early: number;
   cooldown_price_dedupe_duplicate_late: number;
   cooldown_price_dedupe_skipped_no_price: number;
+  cooldown_signal_unique_signals_total: number;
+  cooldown_signal_early_only_total: number;
+  cooldown_signal_late_only_total: number;
+  cooldown_signal_early_and_late_total: number;
+  cooldown_signal_duplicate_early_total: number;
+  cooldown_signal_duplicate_late_total: number;
+  cooldown_price_unique_price_keys_total: number;
+  cooldown_price_early_only_total: number;
+  cooldown_price_late_only_total: number;
+  cooldown_price_early_and_late_total: number;
+  cooldown_price_duplicate_early_total: number;
+  cooldown_price_duplicate_late_total: number;
+  cooldown_price_skipped_no_price_total: number;
+  exit_order_ttl_cancel_total: number;
+  exit_order_ttl_cancel_near_resolution_total: number;
+  exit_anchor_mode_total: Record<string, number>;
+  exit_reprice_suppressed_threshold_total: number;
+  exit_chain_cap_resolved_total: Record<string, number>;
   http_errors_by_class_1h: Record<string, number>;
   ws_heartbeat: {
     pingSent: number;

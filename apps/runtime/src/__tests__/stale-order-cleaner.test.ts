@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createTokenId, createOrderId, createConditionId } from "@krabs/domain";
+import {
+  DEFAULT_REPRICE_CHAIN_POLICY,
+  createTokenId,
+  createOrderId,
+  createConditionId,
+} from "@krabs/domain";
 import type {
   OrderRepository,
   MarketRepository,
@@ -118,7 +123,12 @@ function makePricing(
   overrides?: Partial<
     Pick<
       NormalizedMarket,
-      "bestBid" | "bestAsk" | "bestAskSize" | "askDepthExcludingOurs" | "tickSize"
+      | "bestBid"
+      | "bestAsk"
+      | "bestAskSize"
+      | "askDepthExcludingOurs"
+      | "tickSize"
+      | "publicTradeCount24h"
     >
   >,
 ) {
@@ -128,6 +138,7 @@ function makePricing(
     bestAskSize: null,
     askDepthExcludingOurs: null,
     tickSize: 0.01,
+    publicTradeCount24h: null,
     ...overrides,
   };
 }
@@ -210,6 +221,9 @@ describe("cleanStaleEntryOrders", () => {
       askDepthExcludingOurs?: number | null;
       maxRepricesPerOrder?: number;
       extraOpenOrders?: Order[];
+      publicTradeCount24h?: number | null;
+      repriceChainEvents24h?: number;
+      metrics?: { writeCounter: ReturnType<typeof vi.fn> };
     } = {},
   ) {
     orderRepo.findOpen = vi.fn().mockReturnValue([order, ...(opts.extraOpenOrders ?? [])]);
@@ -236,8 +250,32 @@ describe("cleanStaleEntryOrders", () => {
               bestAskSize: opts.bestAskSize ?? null,
               askDepthExcludingOurs: opts.askDepthExcludingOurs ?? null,
               tickSize: 0.01,
+              publicTradeCount24h: opts.publicTradeCount24h ?? null,
             }),
         },
+        ...(opts.repriceChainEvents24h != null
+          ? {
+              repriceChainGate: {
+                policy: () => DEFAULT_REPRICE_CHAIN_POLICY,
+                legStateRepo: {
+                  get: () => {
+                    const now = Date.now();
+                    const timestamps = Array.from(
+                      { length: opts.repriceChainEvents24h ?? 0 },
+                      (_, index) => new Date(now - index * 60_000).toISOString(),
+                    );
+                    return {
+                      tokenId: TOK,
+                      repriceChainEvents24hJson: JSON.stringify(timestamps),
+                      repriceChainCount24h: timestamps.length,
+                      repriceChainWindowStartTs: timestamps.at(-1) ?? null,
+                    } as any;
+                  },
+                },
+                metrics: opts.metrics,
+              },
+            }
+          : {}),
       },
       backoffMap,
       stateMap,
@@ -800,6 +838,68 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.downpriceRepriceCancelled).toBe(1);
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].command.reason).toBe("downpriced_reprice");
+  });
+
+  it("uses the dynamic thin-market cap for downpriced reprice gating", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const metrics = { writeCounter: vi.fn() };
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      publicTradeCount24h: 4,
+      repriceChainEvents24h: 13,
+      metrics,
+    });
+    await bus.drain();
+
+    expect(result.repriceChainCapBlocked).toBe(0);
+    expect(result.downpriceRepriceCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "exit_chain_cap_resolved_total",
+      1,
+      JSON.stringify({ bucket: "50", source: "downpriced_reprice" }),
+    );
+  });
+
+  it("uses the dynamic liquid-market cap for downpriced reprice gating", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const metrics = { writeCounter: vi.fn() };
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      publicTradeCount24h: 100,
+      repriceChainEvents24h: 13,
+      metrics,
+    });
+    await bus.drain();
+
+    expect(result.repriceChainCapBlocked).toBe(1);
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "exit_chain_cap_resolved_total",
+      1,
+      JSON.stringify({ bucket: "13", source: "downpriced_reprice" }),
+    );
   });
 
   it("falls through to exit TTL after the third downprice reprice attempt", async () => {

@@ -1731,7 +1731,17 @@ async function main(): Promise<void> {
     conversionWindow.fillLatencySamplesMs.push(Math.max(0, timestamp - placedAtMs));
   });
 
-  bus.subscribe("OrderCancelled", async ({ orderId, signalReason }) => {
+  bus.subscribe("OrderCancelled", async ({ orderId, signalReason, tokenId, reason, timestamp }) => {
+    if (reason === "stale_exit_ttl") {
+      runtimeMetrics.writeCounter("exit_order_ttl_cancel_total");
+      const market = repos.market.findByTokenId(tokenId);
+      const endMs = market?.endDate ? Date.parse(market.endDate) : Number.NaN;
+      const aggressiveWindowMs =
+        currentExecutionPolicy().orderLifetime.resolutionAggressiveWindowMs;
+      if (Number.isFinite(endMs) && endMs - timestamp <= aggressiveWindowMs) {
+        runtimeMetrics.writeCounter("exit_order_ttl_cancel_near_resolution_total");
+      }
+    }
     if (!ENTRY_REASONS.has(signalReason ?? "")) return;
     entryOrderPlacedAtMsByOrderId.delete(String(orderId));
   });

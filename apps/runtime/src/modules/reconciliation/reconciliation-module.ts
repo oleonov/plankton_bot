@@ -32,7 +32,12 @@ import type {
   RepriceChainPolicyConfig,
   RiskEventRepository,
 } from "@krabs/domain";
-import { createTokenId, createConditionId, nextRepriceChainState } from "@krabs/domain";
+import {
+  createTokenId,
+  createConditionId,
+  nextRepriceChainState,
+  resolveDynamicChainCapDetails,
+} from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { reconcileOrders } from "./order-reconciler.js";
 import { reconcileFills } from "./fill-reconciler.js";
@@ -161,7 +166,12 @@ export interface ReconciliationModuleDeps {
       tokenId: import("@krabs/domain").TokenId,
     ) => Pick<
       import("@krabs/domain").NormalizedMarket,
-      "bestBid" | "bestAsk" | "bestAskSize" | "askDepthExcludingOurs" | "tickSize"
+      | "bestBid"
+      | "bestAsk"
+      | "bestAskSize"
+      | "askDepthExcludingOurs"
+      | "tickSize"
+      | "publicTradeCount24h"
     > | null;
   };
   runtimeMetrics?: {
@@ -171,6 +181,7 @@ export interface ReconciliationModuleDeps {
       labels?: string | null,
       capturedAt?: string,
     ) => void;
+    writeCounter?: (metricName: string, value?: number, labels?: string | null) => void;
   };
   /**
    * Live-lite wallet↔ledger sentinel. Detects impossible local state where
@@ -262,7 +273,12 @@ export class ReconciliationModule implements RuntimeModule {
             if (policy.enabled) {
               const legState = this.deps.legStateRepo.get(event.tokenId);
               const nowMs = Date.now();
-              const next = nextRepriceChainState(legState, nowMs, policy);
+              const market = this.deps.exitRepriceOnDownprice?.getMarket(event.tokenId) ?? null;
+              const cap = resolveDynamicChainCapDetails(market, policy);
+              const next = nextRepriceChainState(legState, nowMs, {
+                ...policy,
+                maxChainCount: cap.maxChainCount,
+              });
               this.deps.legStateRepo.applyRepriceChainEvent(
                 event.tokenId,
                 next.eventsJson,
@@ -385,6 +401,7 @@ export class ReconciliationModule implements RuntimeModule {
               policy: this.deps.repriceChainPolicy,
               legStateRepo: this.deps.legStateRepo,
               riskEventRepo: this.deps.riskEventRepo,
+              metrics: this.deps.runtimeMetrics,
             }
           : undefined;
       const stageStaleStart = Date.now();

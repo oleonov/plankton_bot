@@ -30,6 +30,7 @@ import type {
   RepriceOnOutbidPolicy,
   ExitRepriceOnDownpricePolicy,
   SellCapacityPolicy,
+  DynamicChainCapPolicyConfig,
 } from "./types.js";
 import type { AlgoState } from "./algo-engine.js";
 import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
@@ -223,6 +224,8 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   entryMinMarketAgeSeconds: DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS,
   exitOrderTtlMs: 1_800_000,
   sellReplaceMinPriceDeltaTicks: 2,
+  exitRepriceThresholdPct: 0.3,
+  exitRepriceThresholdTicks: 10,
   marketSelection: DEFAULT_MARKET_SELECTION_POLICY,
   buyCapacity: DEFAULT_BUY_CAPACITY_POLICY,
   sellCapacity: DEFAULT_SELL_CAPACITY_POLICY,
@@ -300,6 +303,10 @@ const BOUND_ORDER_LIFETIME_MAX_MS = 14 * 24 * 60 * 60_000;
 const BOUND_ORDER_LIFETIME_COUNT_MAX = 10_000;
 const BOUND_POST_BUY_FILL_SELL_COOLDOWN_MIN_MS = 0;
 const BOUND_POST_BUY_FILL_SELL_COOLDOWN_MAX_MS = 60_000;
+const BOUND_EXIT_REPRICE_THRESHOLD_PCT_MIN = 0.001;
+const BOUND_EXIT_REPRICE_THRESHOLD_PCT_MAX = 10;
+const BOUND_EXIT_REPRICE_THRESHOLD_TICKS_MIN = 1;
+const BOUND_EXIT_REPRICE_THRESHOLD_TICKS_MAX = 10_000;
 const BOUND_STUCK_WARNING_GAP_PCT_MIN = 0;
 const BOUND_STUCK_WARNING_GAP_PCT_MAX = 1;
 const BOUND_DROP_TRIGGER_THRESHOLD_MIN = -1;
@@ -371,6 +378,22 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
     issues,
     "sellReplaceMinPriceDeltaTicks",
   );
+  const exitRepriceThresholdPct = clampedNumber(
+    obj.exitRepriceThresholdPct,
+    DEFAULT_EXECUTION_POLICY.exitRepriceThresholdPct,
+    BOUND_EXIT_REPRICE_THRESHOLD_PCT_MIN,
+    BOUND_EXIT_REPRICE_THRESHOLD_PCT_MAX,
+    issues,
+    "exitRepriceThresholdPct",
+  );
+  const exitRepriceThresholdTicks = clampedInt(
+    obj.exitRepriceThresholdTicks,
+    DEFAULT_EXECUTION_POLICY.exitRepriceThresholdTicks,
+    BOUND_EXIT_REPRICE_THRESHOLD_TICKS_MIN,
+    BOUND_EXIT_REPRICE_THRESHOLD_TICKS_MAX,
+    issues,
+    "exitRepriceThresholdTicks",
+  );
   const entryMinMarketAgeSeconds = clampedInt(
     obj.entryMinMarketAgeSeconds,
     DEFAULT_EXECUTION_POLICY.entryMinMarketAgeSeconds,
@@ -440,6 +463,8 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       entryMinMarketAgeSeconds,
       exitOrderTtlMs,
       sellReplaceMinPriceDeltaTicks,
+      exitRepriceThresholdPct,
+      exitRepriceThresholdTicks,
       marketSelection,
       buyCapacity,
       sellCapacity,
@@ -553,6 +578,72 @@ function parseRepriceChain(raw: unknown, issues: string[]): RepriceChainPolicyCo
       BOUND_ORDER_LIFETIME_COUNT_MAX,
       issues,
       "repriceChain.maxChainCount",
+    ),
+    dynamicChainCap: parseDynamicChainCap(obj.dynamicChainCap, issues),
+  };
+}
+
+function parseDynamicChainCap(raw: unknown, issues: string[]): DynamicChainCapPolicyConfig {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("repriceChain.dynamicChainCap must be an object");
+    return DEFAULT_REPRICE_CHAIN_POLICY.dynamicChainCap;
+  }
+  const obj = raw as Record<string, unknown>;
+  const defaults = DEFAULT_REPRICE_CHAIN_POLICY.dynamicChainCap;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      defaults.enabled,
+      issues,
+      "repriceChain.dynamicChainCap.enabled",
+    ),
+    tradeCountThinThreshold: clampedInt(
+      obj.tradeCountThinThreshold,
+      defaults.tradeCountThinThreshold,
+      BOUND_PUBLIC_TRADE_COUNT_MIN,
+      BOUND_PUBLIC_TRADE_COUNT_MAX,
+      issues,
+      "repriceChain.dynamicChainCap.tradeCountThinThreshold",
+    ),
+    tradeCountLiquidThreshold: clampedInt(
+      obj.tradeCountLiquidThreshold,
+      defaults.tradeCountLiquidThreshold,
+      BOUND_PUBLIC_TRADE_COUNT_MIN,
+      BOUND_PUBLIC_TRADE_COUNT_MAX,
+      issues,
+      "repriceChain.dynamicChainCap.tradeCountLiquidThreshold",
+    ),
+    capThin: clampedInt(
+      obj.capThin,
+      defaults.capThin,
+      1,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "repriceChain.dynamicChainCap.capThin",
+    ),
+    capMedium: clampedInt(
+      obj.capMedium,
+      defaults.capMedium,
+      1,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "repriceChain.dynamicChainCap.capMedium",
+    ),
+    capLiquid: clampedInt(
+      obj.capLiquid,
+      defaults.capLiquid,
+      1,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "repriceChain.dynamicChainCap.capLiquid",
+    ),
+    capUnknown: clampedInt(
+      obj.capUnknown,
+      defaults.capUnknown,
+      1,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "repriceChain.dynamicChainCap.capUnknown",
     ),
   };
 }

@@ -29,6 +29,7 @@ import {
   createCommandId,
   ENTRY_REASONS,
   EXIT_REASONS,
+  resolveDynamicChainCapDetails,
   shouldBlockRepriceChain,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -96,7 +97,12 @@ export interface StaleOrderCleanerDeps {
       tokenId: TokenId,
     ) => Pick<
       NormalizedMarket,
-      "bestBid" | "bestAsk" | "bestAskSize" | "askDepthExcludingOurs" | "tickSize"
+      | "bestBid"
+      | "bestAsk"
+      | "bestAskSize"
+      | "askDepthExcludingOurs"
+      | "tickSize"
+      | "publicTradeCount24h"
     > | null;
   };
   /**
@@ -109,6 +115,11 @@ export interface StaleOrderCleanerDeps {
     policy: () => RepriceChainPolicyConfig;
     legStateRepo: Pick<LegStateRepository, "get">;
     riskEventRepo?: RiskEventRepository | undefined;
+    metrics?:
+      | {
+          writeCounter?: (metricName: string, value?: number, labels?: string | null) => void;
+        }
+      | undefined;
   };
 }
 
@@ -278,7 +289,14 @@ export async function cleanStaleEntryOrders(
       if (deps.repriceChainGate) {
         const legState = deps.repriceChainGate.legStateRepo.get(order.tokenId);
         const policy = deps.repriceChainGate.policy();
-        if (shouldBlockRepriceChain(legState, now, policy)) {
+        const cap = resolveDynamicChainCapDetails(repriceMarket, policy);
+        const effectivePolicy = { ...policy, maxChainCount: cap.maxChainCount };
+        deps.repriceChainGate.metrics?.writeCounter?.(
+          "exit_chain_cap_resolved_total",
+          1,
+          JSON.stringify({ bucket: cap.bucket, source: "downpriced_reprice" }),
+        );
+        if (shouldBlockRepriceChain(legState, now, effectivePolicy)) {
           repriceChainCapBlocked++;
           backoffMap.set(ordKey, now);
           try {
@@ -290,7 +308,9 @@ export async function cleanStaleEntryOrders(
                 reasonCode: "reprice-chain-cap",
                 source: "downpriced_reprice",
                 count24h: legState?.repriceChainCount24h ?? 0,
-                maxChainCount: policy.maxChainCount,
+                maxChainCount: effectivePolicy.maxChainCount,
+                dynamicCapBucket: cap.bucket,
+                publicTradeCount24h: cap.publicTradeCount24h,
                 signalTimestamp: new Date(now).toISOString(),
               },
             });
@@ -305,7 +325,8 @@ export async function cleanStaleEntryOrders(
               orderId: ordKey,
               tokenId: String(order.tokenId),
               count24h: legState?.repriceChainCount24h ?? 0,
-              maxChainCount: policy.maxChainCount,
+              maxChainCount: effectivePolicy.maxChainCount,
+              dynamicCapBucket: cap.bucket,
             },
             "downpriced reprice blocked — 24h chain cap reached",
           );

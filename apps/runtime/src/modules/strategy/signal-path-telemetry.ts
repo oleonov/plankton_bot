@@ -45,6 +45,7 @@ export class SignalPathTelemetry {
   private signalsSkippedEarlyCooldown = 0;
   private sampleSignalId: string | null = null;
   private readonly signalsRejectedByReason = new Map<string, number>();
+  // R76a-ext showed late-only and early-only are independent scan subsets, not duplicates.
   private readonly cooldownSignalPhases = new Map<string, number>();
   private readonly cooldownPriceKeyPhases = new Map<string, number>();
   private approvedDebugCounter = 0;
@@ -172,12 +173,25 @@ export class SignalPathTelemetry {
         signals_approved: snapshot.signalsApproved,
         signals_skipped_late_cooldown: snapshot.signalsSkippedLateCooldown,
         signals_skipped_early_cooldown: snapshot.signalsSkippedEarlyCooldown,
+        cooldown_signal_unique_signals_total: snapshot.cooldownSignalDedupe.total,
+        cooldown_signal_early_only_total: snapshot.cooldownSignalDedupe.earlyOnly,
+        cooldown_signal_late_only_total: snapshot.cooldownSignalDedupe.lateOnly,
+        cooldown_signal_early_and_late_total: snapshot.cooldownSignalDedupe.earlyAndLate,
+        cooldown_signal_duplicate_early_total: snapshot.cooldownSignalDedupe.duplicateEarly,
+        cooldown_signal_duplicate_late_total: snapshot.cooldownSignalDedupe.duplicateLate,
         cooldown_signal_dedupe_total: snapshot.cooldownSignalDedupe.total,
         cooldown_signal_dedupe_early_only: snapshot.cooldownSignalDedupe.earlyOnly,
         cooldown_signal_dedupe_late_only: snapshot.cooldownSignalDedupe.lateOnly,
         cooldown_signal_dedupe_early_and_late: snapshot.cooldownSignalDedupe.earlyAndLate,
         cooldown_signal_dedupe_duplicate_early: snapshot.cooldownSignalDedupe.duplicateEarly,
         cooldown_signal_dedupe_duplicate_late: snapshot.cooldownSignalDedupe.duplicateLate,
+        cooldown_price_unique_price_keys_total: snapshot.cooldownPriceDedupe.total,
+        cooldown_price_early_only_total: snapshot.cooldownPriceDedupe.earlyOnly,
+        cooldown_price_late_only_total: snapshot.cooldownPriceDedupe.lateOnly,
+        cooldown_price_early_and_late_total: snapshot.cooldownPriceDedupe.earlyAndLate,
+        cooldown_price_duplicate_early_total: snapshot.cooldownPriceDedupe.duplicateEarly,
+        cooldown_price_duplicate_late_total: snapshot.cooldownPriceDedupe.duplicateLate,
+        cooldown_price_skipped_no_price_total: snapshot.cooldownPriceDedupe.skippedNoPrice,
         cooldown_price_dedupe_total: snapshot.cooldownPriceDedupe.total,
         cooldown_price_dedupe_early_only: snapshot.cooldownPriceDedupe.earlyOnly,
         cooldown_price_dedupe_late_only: snapshot.cooldownPriceDedupe.lateOnly,

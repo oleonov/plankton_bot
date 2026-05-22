@@ -39,6 +39,7 @@ import {
   createCommandId,
   createOrderId,
   ExchangeErrorCode,
+  resolveDynamicChainCapDetails,
   shouldBlockRepriceChain,
 } from "@krabs/domain";
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
@@ -103,6 +104,34 @@ function resolvePriceFromCmd(cmd: PlaceOrderCommand): number {
   return cmd.price;
 }
 
+function resolveSellRepriceThreshold(
+  lastPlacedAnchor: number,
+  tickSize: number,
+  policy: ExecutionPolicy | undefined,
+): { thresholdAbs: number } | null {
+  if (
+    !Number.isFinite(lastPlacedAnchor) ||
+    !Number.isFinite(tickSize) ||
+    lastPlacedAnchor <= 0 ||
+    tickSize <= 0
+  ) {
+    return null;
+  }
+  const thresholdPct = policy?.exitRepriceThresholdPct ?? 0.3;
+  const thresholdTicks = policy?.exitRepriceThresholdTicks ?? 10;
+  if (
+    !Number.isFinite(thresholdPct) ||
+    !Number.isFinite(thresholdTicks) ||
+    thresholdPct <= 0 ||
+    thresholdTicks <= 0
+  ) {
+    return null;
+  }
+  return {
+    thresholdAbs: Math.min(lastPlacedAnchor * thresholdPct, tickSize * thresholdTicks),
+  };
+}
+
 export interface ExecutionModuleDeps {
   gateway: ExchangeGateway;
   bus: EventBus;
@@ -154,6 +183,7 @@ export interface ExecutionModuleDeps {
           labels?: string | null,
           capturedAt?: string,
         ) => void;
+        writeCounter?: (metricName: string, value?: number, labels?: string | null) => void;
       }
     | undefined;
   /**
@@ -1431,13 +1461,34 @@ export class ExecutionModule implements RuntimeModule {
       return false;
     }
 
+    const existingSell = existingSells[0]!;
     const policy = this.deps.executionPolicy?.();
-    const toleranceTicks = policy?.sellReplaceMinPriceDeltaTicks ?? 2;
-    const acceptablePriceWindow = toleranceTicks * cmd.tickSize + 1e-9;
-    const acceptablePriceSell = existingSells.find(
-      (order) => Math.abs(order.price - cmd.price) < acceptablePriceWindow,
-    );
-    if (acceptablePriceSell) {
+    const repriceThreshold = resolveSellRepriceThreshold(existingSell.price, cmd.tickSize, policy);
+    if (repriceThreshold === null) {
+      this.log.warn(
+        {
+          tokenId: String(cmd.tokenId),
+          existingOrderId: String(existingSell.orderId),
+          existingPrice: existingSell.price,
+          requestedPrice: cmd.price,
+          tickSize: cmd.tickSize,
+        },
+        "sell replacement suppressed — invalid reprice threshold inputs",
+      );
+      await this.rejectOrder(
+        cmd,
+        "sell-replace-invalid-threshold",
+        ExchangeErrorCode.LivePolicyBlocked,
+      );
+      return true;
+    }
+    const anchorDelta = Math.abs(existingSell.price - cmd.price);
+    if (anchorDelta <= repriceThreshold.thresholdAbs) {
+      this.deps.runtimeMetrics?.writeCounter?.(
+        "exit_reprice_suppressed_threshold_total",
+        1,
+        JSON.stringify({ source: "sell_replace" }),
+      );
       await this.rejectOrder(
         cmd,
         "sell-order-acceptable-price-already-open",
@@ -1447,8 +1498,6 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     if (this.isSellReplacementSubmit(cmd)) return false;
-
-    const existingSell = existingSells[0]!;
     const now = Date.now();
     const existingLock = this.sellReplaceLocks.get(key);
     if (
@@ -1464,8 +1513,15 @@ export class ExecutionModule implements RuntimeModule {
     // long-running lock cannot extend the chain past the ceiling.
     if (this.deps.legStateRepo && this.deps.repriceChainPolicy) {
       const policy = this.deps.repriceChainPolicy();
+      const market = this.marketCache.get(key) ?? null;
+      const cap = resolveDynamicChainCapDetails(market, policy);
+      const effectivePolicy = { ...policy, maxChainCount: cap.maxChainCount };
+      this.recordExitChainCapResolved(
+        cap.bucket,
+        existingLock ? "sell_replace_retry" : "sell_replace",
+      );
       const legState = this.deps.legStateRepo.get(cmd.tokenId);
-      if (shouldBlockRepriceChain(legState, now, policy)) {
+      if (shouldBlockRepriceChain(legState, now, effectivePolicy)) {
         try {
           this.deps.riskEventRepo?.insert({
             eventType: "signal_suppressed",
@@ -1475,7 +1531,9 @@ export class ExecutionModule implements RuntimeModule {
               reasonCode: "sell-replace-chain-cap",
               source: existingLock ? "sell_replace_retry" : "sell_replace_reprice",
               count24h: legState?.repriceChainCount24h ?? 0,
-              maxChainCount: policy.maxChainCount,
+              maxChainCount: effectivePolicy.maxChainCount,
+              dynamicCapBucket: cap.bucket,
+              publicTradeCount24h: cap.publicTradeCount24h,
               signalTimestamp: new Date(now).toISOString(),
             },
           });
@@ -1545,6 +1603,14 @@ export class ExecutionModule implements RuntimeModule {
       });
       return;
     }
+  }
+
+  private recordExitChainCapResolved(bucket: string, source: string): void {
+    this.deps.runtimeMetrics?.writeCounter?.(
+      "exit_chain_cap_resolved_total",
+      1,
+      JSON.stringify({ bucket, source }),
+    );
   }
 
   private async rejectOrder(

@@ -1105,9 +1105,14 @@ export class SignalToOrderBridge {
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
     policy: ExecutionPolicy,
-  ): { price: number; mode: OrderPricedMode; anchorTicksUsed?: number } | null {
+  ): {
+    price: number;
+    mode: OrderPricedMode;
+    anchorTicksUsed?: number;
+    exitAnchorMode?: ExitAnchorMode;
+  } | null {
     if (signal.side === "sell" && policy.exitPricingMode === "midpoint-anchored") {
-      const midpointPrice = resolveMidpointAnchoredSellPrice(
+      const midpointPrice = resolveMidpointAnchoredSellPriceWithMode(
         market.bestBid,
         market.bestAsk,
         market.tickSize,
@@ -1115,9 +1120,10 @@ export class SignalToOrderBridge {
       );
       if (midpointPrice != null) {
         return {
-          price: midpointPrice,
+          price: midpointPrice.price,
           mode: "midpoint-anchored",
           anchorTicksUsed: policy.exitMidpointAnchorTicks,
+          exitAnchorMode: midpointPrice.anchorMode,
         };
       }
     }
@@ -1341,6 +1347,13 @@ export class SignalToOrderBridge {
           }),
         );
       }
+      if (signal.side === "sell" && executionTerms.exitAnchorMode) {
+        this.deps.runtimeMetrics?.writeCounter(
+          "exit_anchor_mode_total",
+          1,
+          JSON.stringify({ mode: executionTerms.exitAnchorMode }),
+        );
+      }
     } catch (err) {
       this.log.debug(
         { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
@@ -1445,20 +1458,14 @@ function resolveBidAnchoredSellPrice(
 }
 
 /**
- * Resolves SELL price using Plankton-mirror midpoint+N-ticks anchor.
+ * Resolves SELL price using an ask-side midpoint anchor.
  *
- * Formula: result = floorToTick(min(midpoint + anchorTicks × tickSize, bestAsk), tickSize),
- * where midpoint = (bestBid + bestAsk) / 2.
+ * EXIT-FIX-2 keeps the midpoint+N tick floor but undercuts the visible ask when doing so
+ * stays passive and above that floor. This matches the 2026-05-22 Plankton evidence:
+ * low-entry high-multiple exits are predominantly maker-like and fill near best ask.
  *
- * Derived from analytical replays of Plankton SELL fills:
- * - R90 (plankton_sell_pricing_formula_R90_report.md): midpoint-only regression
- *   R²=0.974 on n=1,338 SELL fills.
- * - R93 Model A (plankton_sell_pricing_decomposition_R93_report.md): intercept
- *   0.004868 on n=1,256 fills → 5 × tick (0.001) above midpoint median placement.
- *
- * Returns null if bestBid, bestAsk, tickSize, or anchorTicks are unavailable or
- * non-positive (defensive guard for missing book state and exchange artifacts).
- * Crossed books (bestBid ≥ bestAsk) are handled via the bestAsk cap.
+ * Returns null if bestBid, tickSize, or anchorTicks are unavailable or non-positive.
+ * Missing bestAsk falls back to a one-sided bestBid+N tick anchor.
  */
 export function resolveMidpointAnchoredSellPrice(
   bestBid: number | null,
@@ -1466,23 +1473,45 @@ export function resolveMidpointAnchoredSellPrice(
   tickSize: number,
   anchorTicks: number,
 ): number | null {
+  return (
+    resolveMidpointAnchoredSellPriceWithMode(bestBid, bestAsk, tickSize, anchorTicks)?.price ?? null
+  );
+}
+
+type ExitAnchorMode = "midpoint" | "ask_undercut" | "ask_fallback";
+
+function resolveMidpointAnchoredSellPriceWithMode(
+  bestBid: number | null,
+  bestAsk: number | null,
+  tickSize: number,
+  anchorTicks: number,
+): { price: number; anchorMode: ExitAnchorMode } | null {
   if (
     bestBid == null ||
-    bestAsk == null ||
     !Number.isFinite(bestBid) ||
-    !Number.isFinite(bestAsk) ||
     !Number.isFinite(tickSize) ||
     !Number.isFinite(anchorTicks) ||
     bestBid <= 0 ||
-    bestAsk <= 0 ||
     tickSize <= 0
   ) {
     return null;
   }
 
-  const midpoint = (bestBid + bestAsk) / 2;
-  const rawPrice = midpoint + anchorTicks * tickSize;
-  return floorToTick(Math.min(rawPrice, bestAsk), tickSize);
+  const hasValidAsk = bestAsk != null && Number.isFinite(bestAsk) && bestAsk > 0;
+  const midpoint = hasValidAsk ? (bestBid + bestAsk) / 2 : bestBid;
+  const base = floorToTick(midpoint + anchorTicks * tickSize, tickSize);
+  if (!hasValidAsk || bestAsk <= midpoint) {
+    return { price: base, anchorMode: "midpoint" };
+  }
+
+  const askUnder = floorToTick(bestAsk - tickSize, tickSize);
+  if (askUnder <= bestBid) {
+    return { price: floorToTick(bestAsk, tickSize), anchorMode: "ask_fallback" };
+  }
+  if (askUnder >= base) {
+    return { price: askUnder, anchorMode: "ask_undercut" };
+  }
+  return { price: base, anchorMode: "midpoint" };
 }
 
 function resolveOrderSize(
@@ -1506,6 +1535,7 @@ type ExecutionTermsResolution =
       pricedMode: OrderPricedMode;
       spreadTicks?: number;
       anchorTicksUsed?: number;
+      exitAnchorMode?: ExitAnchorMode;
       pricingDiagnostics?: BoundedMidpointDiagnostics;
       pricingShadow?: BoundedMidpointDiagnostics;
     }

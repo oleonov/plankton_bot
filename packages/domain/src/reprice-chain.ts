@@ -1,4 +1,9 @@
-import type { LegState, RepriceChainPolicyConfig } from "./types.js";
+import type {
+  DynamicChainCapPolicyConfig,
+  LegState,
+  NormalizedMarket,
+  RepriceChainPolicyConfig,
+} from "./types.js";
 
 // CHANGE C — per-token rolling 24h reprice chain cap per R65 p90 = 13.
 // True sliding window: we persist a JSON array of ISO timestamps (one per
@@ -6,11 +11,88 @@ import type { LegState, RepriceChainPolicyConfig } from "./types.js";
 // policy.windowMs. This gives an exact 24h rolling cap rather than a
 // fixed-window approximation that resets at the 24h boundary.
 
+export const DEFAULT_REPRICE_CHAIN_MAX_COUNT = 13 as const;
+
+export const DEFAULT_DYNAMIC_CHAIN_CAP_POLICY: DynamicChainCapPolicyConfig = {
+  enabled: true,
+  tradeCountThinThreshold: 10,
+  tradeCountLiquidThreshold: 49,
+  capThin: 50,
+  capMedium: 30,
+  capLiquid: DEFAULT_REPRICE_CHAIN_MAX_COUNT,
+  capUnknown: 30,
+};
+
 export const DEFAULT_REPRICE_CHAIN_POLICY: RepriceChainPolicyConfig = {
   enabled: true,
   windowMs: 24 * 60 * 60 * 1000,
-  maxChainCount: 13,
+  maxChainCount: DEFAULT_REPRICE_CHAIN_MAX_COUNT,
+  dynamicChainCap: DEFAULT_DYNAMIC_CHAIN_CAP_POLICY,
 };
+
+export type DynamicChainCapBucket = "13" | "30" | "50" | "unknown";
+
+export interface DynamicChainCapResolution {
+  readonly maxChainCount: number;
+  readonly bucket: DynamicChainCapBucket;
+  readonly publicTradeCount24h: number | null;
+}
+
+export function resolveDynamicChainCap(
+  market: Pick<NormalizedMarket, "publicTradeCount24h"> | null | undefined,
+  policy: RepriceChainPolicyConfig = DEFAULT_REPRICE_CHAIN_POLICY,
+): number {
+  return resolveDynamicChainCapDetails(market, policy).maxChainCount;
+}
+
+export function resolveDynamicChainCapDetails(
+  market: Pick<NormalizedMarket, "publicTradeCount24h"> | null | undefined,
+  policy: RepriceChainPolicyConfig = DEFAULT_REPRICE_CHAIN_POLICY,
+): DynamicChainCapResolution {
+  const dynamic = policy.dynamicChainCap;
+  if (!dynamic.enabled) {
+    return {
+      maxChainCount: policy.maxChainCount,
+      bucket: bucketForCap(policy.maxChainCount),
+      publicTradeCount24h: null,
+    };
+  }
+
+  const tradeCount = market?.publicTradeCount24h;
+  if (tradeCount == null || !Number.isFinite(tradeCount)) {
+    return {
+      maxChainCount: dynamic.capUnknown,
+      bucket: "unknown",
+      publicTradeCount24h: null,
+    };
+  }
+  if (tradeCount <= dynamic.tradeCountThinThreshold) {
+    return {
+      maxChainCount: dynamic.capThin,
+      bucket: bucketForCap(dynamic.capThin),
+      publicTradeCount24h: tradeCount,
+    };
+  }
+  if (tradeCount <= dynamic.tradeCountLiquidThreshold) {
+    return {
+      maxChainCount: dynamic.capMedium,
+      bucket: bucketForCap(dynamic.capMedium),
+      publicTradeCount24h: tradeCount,
+    };
+  }
+  return {
+    maxChainCount: dynamic.capLiquid,
+    bucket: bucketForCap(dynamic.capLiquid),
+    publicTradeCount24h: tradeCount,
+  };
+}
+
+function bucketForCap(cap: number): DynamicChainCapBucket {
+  if (cap === 13) return "13";
+  if (cap === 30) return "30";
+  if (cap === 50) return "50";
+  return "unknown";
+}
 
 /**
  * Parse the JSON-serialized timestamp array from leg_state. Tolerates null,
