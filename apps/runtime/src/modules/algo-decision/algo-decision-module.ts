@@ -464,6 +464,16 @@ export interface AlgoDecisionModuleDeps {
   decisionWorkerCount?: number | undefined;
   decisionWorkerBatchSize?: number | undefined;
   deferMarketUpdateEvaluation?: boolean | undefined;
+  /**
+   * v063 — when true, also writes `risk_events.signal_emitted` mirror rows on
+   * every emit (the pre-v063 behaviour). Production defaults to false because
+   * the mirror was write-only telemetry (~16M rows/day at the prod rate) and
+   * directly contributed to the disk-full crash at v062. Tests pass true to
+   * keep verifying the F-telemetry payload fields (dropFromLastSeen,
+   * entryPriceBucket, r23DipRatio, …) that still live in the EmissionFacts
+   * computation path even though they no longer reach the ledger.
+   */
+  persistSignalEmittedTelemetry?: boolean | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -2370,6 +2380,18 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.currentTickRuleMix.set(ruleKey, (this.currentTickRuleMix.get(ruleKey) ?? 0) + 1);
 
     this.persistence.enqueueDecisionSignal(signal);
+
+    // v063 — `risk_events.signal_emitted` is a write-only JSON mirror of the
+    // structured `decision_signal_log` row plus emission-facts (firstTradePrice,
+    // r23DipRatio, dropFromLastSeen, …). At ~16M rows/day on prod it was a
+    // primary driver of the disk-full crash at v062. Production now opts out
+    // (`persistSignalEmittedTelemetry === false`), leaving the structured row
+    // as the sole persisted record. Tests opt in so the F-telemetry payload
+    // checks keep observing the emission-facts that still flow through the
+    // computation path.
+    if (this.deps.persistSignalEmittedTelemetry !== true) {
+      return;
+    }
     this.persistence.enqueueRiskEvent({
       eventType: "signal_emitted",
       payload: {

@@ -384,6 +384,11 @@ describe("AlgoDecisionModule", () => {
       selectedMarketCache,
       log,
       sweepIntervalMs: 60_000,
+      // Tests observe per-emission telemetry (dropFromLastSeen, entryPriceBucket,
+      // r23DipRatio, …) through the legacy `risk_events.signal_emitted` payload.
+      // Production opts out via the v063 dedup; tests opt back in unless the
+      // override explicitly turns it off.
+      persistSignalEmittedTelemetry: true,
       ...overrides,
     });
   }
@@ -4833,6 +4838,40 @@ describe("AlgoDecisionModule", () => {
         .mock.calls.find(([event]) => event.eventType === "signal_emitted");
       expect(emitted).toBeDefined();
       expect(emitted![0].payload.dropFromLastSeen).toBeNull();
+
+      await mod.stop();
+    });
+  });
+
+  // v063 — production dedup of the `risk_events.signal_emitted` JSON mirror.
+  // The structured `decision_signal_log` row keeps flowing; only the legacy
+  // telemetry payload is suppressed unless a caller opts back in.
+  describe("v063 signal_emitted dedup", () => {
+    it("does not write risk_events.signal_emitted when persistSignalEmittedTelemetry is false (prod default)", async () => {
+      const tokenId = "token-dedup-off";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+
+      const mod = buildModule({
+        riskEventRepo,
+        decisionSignalLogRepo,
+        persistSignalEmittedTelemetry: false,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.4)],
+        timestamp: Date.now(),
+      });
+
+      const emittedCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(([event]) => event.eventType === "signal_emitted");
+      expect(emittedCalls).toHaveLength(0);
+      // The structured row must still land — that's the surviving observation
+      // surface for downstream analytics.
+      expect(decisionSignalLogRepo.insert).toHaveBeenCalled();
 
       await mod.stop();
     });

@@ -66,18 +66,25 @@ const DAY_MS = 24 * HOUR_MS;
 const DEFAULT_CONFIG: Required<LedgerRetentionConfig> = {
   intervalMs: 5 * 60 * 1000,
   batchSize: 5_000,
-  maxDeletedRowsPerRun: 50_000,
+  // v063: bumped 10× to keep up with observed insertion rates (decision_signal_log
+  // alone runs ~800k rows/h). Previous 50k cap was too small to drain backlog
+  // after a TTL change and let the WAL accumulate.
+  maxDeletedRowsPerRun: 500_000,
   runtimeMetricsTtlMs: 30 * DAY_MS,
   marketSnapshotsTtlMs: 7 * DAY_MS,
-  executionPolicyObservationsTtlMs: 90 * DAY_MS,
-  decisionSignalLogTtlMs: 90 * DAY_MS,
+  // v063: 90d TTLs would have held ~17 GB/day each on a 100 GB disk — observed
+  // ledger growth filled `/dev/vda2` in ~12h after v062 deploy. 7d caps keep
+  // steady-state size to a workable footprint while preserving recent windows
+  // for analytics.
+  executionPolicyObservationsTtlMs: 7 * DAY_MS,
+  decisionSignalLogTtlMs: 7 * DAY_MS,
   tradingStateSnapshotsTtlMs: 14 * DAY_MS,
   portfolioSnapshotsTtlMs: 90 * DAY_MS,
-  // High-volume audit streams: signal_emitted/signal_suppressed (~17k/h) and
-  // order_rejected (~19k/h) dominate risk_events size. Cap their retention
-  // aggressively; debugging windows beyond a week are answered by logs, not by
-  // SQLite row scans on a multi-GB ledger. Critical events keep the 90-day TTL.
-  signalTelemetryRiskEventsTtlMs: 7 * DAY_MS,
+  // v063: signal_emitted is no longer written (recordDecisionSignal now writes
+  // structured rows to decision_signal_log only). The TTL rule is retained to
+  // sweep historical rows still present in the ledger; once they age out the
+  // bucket effectively only sees signal_suppressed (~8k/h). 1d cap is plenty.
+  signalTelemetryRiskEventsTtlMs: 1 * DAY_MS,
   orderRejectedRiskEventsTtlMs: 14 * DAY_MS,
   riskEventsTtlMs: 90 * DAY_MS,
   criticalRiskEventsTtlMs: 90 * DAY_MS,

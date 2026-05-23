@@ -178,7 +178,10 @@ describe("LedgerRetentionModule", () => {
     expect(rows).toEqual([{ event_type: "reconciliation_drift" }]);
   });
 
-  it("deletes signal telemetry risk events after 7 days", async () => {
+  it("deletes signal telemetry risk events past the 1-day TTL", async () => {
+    // v063: TTL tightened from 7d → 1d. Rows from 2026-04-01 are 24 days old
+    // at NOW (2026-04-25T00:00:00.000Z), well past both windows; the new test
+    // below at the 1d boundary pins the v063 cutoff explicitly.
     db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
       "signal_suppressed",
       "{}",
@@ -207,6 +210,80 @@ describe("LedgerRetentionModule", () => {
       event_type: string;
     }>;
     expect(rows).toEqual([{ event_type: "signal_rejected" }]);
+  });
+
+  it("v063: signal telemetry TTL boundary — keeps rows <1d old, deletes >1d", async () => {
+    // NOW is 2026-04-25T00:00:00Z. 23h old (kept) vs 25h old (deleted).
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "signal_emitted",
+      "{}",
+      "2026-04-23T23:00:00.000Z", // 25h old → past 1d TTL
+    );
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "signal_suppressed",
+      "{}",
+      "2026-04-24T01:00:00.000Z", // 23h old → within 1d TTL
+    );
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    const rows = db
+      .prepare("SELECT event_type, created_at FROM risk_events ORDER BY created_at")
+      .all() as Array<{ event_type: string; created_at: string }>;
+    expect(rows).toEqual([
+      { event_type: "signal_suppressed", created_at: "2026-04-24T01:00:00.000Z" },
+    ]);
+  });
+
+  it("v063: decision_signal_log TTL boundary — keeps rows <7d old, deletes >7d", async () => {
+    // NOW is 2026-04-25T00:00:00Z. 6d old (kept) vs 8d old (deleted).
+    db.prepare("INSERT INTO decision_signal_log (signal_timestamp) VALUES (?)").run(
+      "2026-04-17T00:00:00.000Z", // 8d old → past 7d TTL
+    );
+    db.prepare("INSERT INTO decision_signal_log (signal_timestamp) VALUES (?)").run(
+      "2026-04-19T00:00:00.000Z", // 6d old → within 7d TTL
+    );
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    const rows = db
+      .prepare("SELECT signal_timestamp FROM decision_signal_log ORDER BY signal_timestamp")
+      .all() as Array<{ signal_timestamp: string }>;
+    expect(rows).toEqual([{ signal_timestamp: "2026-04-19T00:00:00.000Z" }]);
+  });
+
+  it("v063: execution_policy_observations TTL boundary — keeps rows <7d old, deletes >7d", async () => {
+    db.prepare("INSERT INTO execution_policy_observations (created_at) VALUES (?)").run(
+      "2026-04-17T00:00:00.000Z", // 8d old → past 7d TTL
+    );
+    db.prepare("INSERT INTO execution_policy_observations (created_at) VALUES (?)").run(
+      "2026-04-19T00:00:00.000Z", // 6d old → within 7d TTL
+    );
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    const rows = db
+      .prepare("SELECT created_at FROM execution_policy_observations ORDER BY created_at")
+      .all() as Array<{ created_at: string }>;
+    expect(rows).toEqual([{ created_at: "2026-04-19T00:00:00.000Z" }]);
   });
 
   it("deletes order_rejected risk events after 14 days but keeps newer ones", async () => {
