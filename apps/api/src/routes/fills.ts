@@ -25,6 +25,8 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
     explicitFeeUsdc: row.fee,
     fee: row.fee,
     filledAt: row.filled_at,
+    decisionRuleId: (row.decision_rule_id as string | null | undefined) ?? null,
+    signalId: (row.signal_id as string | null | undefined) ?? null,
     slug: meta.slug,
     eventSlug: meta.eventSlug,
     question: meta.question,

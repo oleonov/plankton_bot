@@ -1258,6 +1258,33 @@ describe("fills", () => {
     });
     expect(json(res).data.items.length).toBe(0);
   });
+
+  it("GET /fills exposes decisionRuleId and signalId (null when unset)", async () => {
+    conn.db.exec(`
+      INSERT INTO fills (fill_id, order_id, token_id, side, price, size, size_usdc, fee,
+                        filled_at, reconciled, decision_rule_id, signal_id)
+      VALUES ('fill-attr', 'ord-1', 'tok-1', 'sell', 0.6, 10, 6, 0.01,
+              '2026-03-14T02:00:00Z', 0, 'D8_PROFIT_RATIO', 'sig-attr-1');
+    `);
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/fills",
+        headers: authHeaders(),
+      });
+      const items = json(res).data.items;
+      const attr = items.find((f: { fillId: string }) => f.fillId === "fill-attr");
+      expect(attr).toBeTruthy();
+      expect(attr.decisionRuleId).toBe("D8_PROFIT_RATIO");
+      expect(attr.signalId).toBe("sig-attr-1");
+      const baseline = items.find((f: { fillId: string }) => f.fillId === "fill-1");
+      expect(baseline).toBeTruthy();
+      expect(baseline.decisionRuleId).toBeNull();
+      expect(baseline.signalId).toBeNull();
+    } finally {
+      conn.db.exec(`DELETE FROM fills WHERE fill_id = 'fill-attr'`);
+    }
+  });
 });
 
 // ─── Market metadata enrichment ─────────────────────────────────────

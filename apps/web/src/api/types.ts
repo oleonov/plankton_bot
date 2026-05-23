@@ -686,6 +686,8 @@ export interface FillDTO {
   explicitFeeUsdc?: number;
   fee: number;
   filledAt: string;
+  decisionRuleId?: string | null;
+  signalId?: string | null;
   slug: string | null;
   eventSlug: string | null;
   question: string | null;
