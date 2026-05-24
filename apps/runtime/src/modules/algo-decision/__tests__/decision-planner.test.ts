@@ -201,7 +201,7 @@ describe("evaluateDecisionPlan", () => {
         selectedForEntry: false,
         legState: leg({ buyCount: 1, cumulativeBuySize: 100, cumulativeBuyNotional: 5 }),
         position: position({ avgEntryPrice: 0.05, size: 100 }),
-        market: market({ midPrice: 0.08 }),
+        market: market({ bestBid: 0.08, bestAsk: 0.09, midPrice: 0.085, spread: 0.01 }),
       }),
     );
 
@@ -209,6 +209,50 @@ describe("evaluateDecisionPlan", () => {
     if (result.type !== "signal") return;
     expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
     expect(result.signal.side).toBe("sell");
+  });
+
+  it("does not fire D8 from midpoint profit when executable bid is below entry", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({ buyCount: 1, cumulativeBuySize: 100, cumulativeBuyNotional: 1 }),
+        position: position({ avgEntryPrice: 0.01, size: 100 }),
+        market: market({ bestBid: 0.004, bestAsk: 0.006, midPrice: 0.5, spread: 0.002 }),
+      }),
+    );
+
+    expect(result.type).toBe("none");
+    expect(result.suppressions.map((item) => item.reasonCode)).toContain("continuation-stop");
+  });
+
+  it("fires D8 from executable bid when the bid is profitable", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({ buyCount: 1, cumulativeBuySize: 17.64, cumulativeBuyNotional: 4.41 }),
+        position: position({ avgEntryPrice: 0.25, costBasisUsdc: 4.41, size: 17.64 }),
+        market: market({ bestBid: 0.43, bestAsk: 0.45, midPrice: 0.44, spread: 0.02 }),
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
+    expect(result.signal.suggestedPrice).toBe(0.43);
+  });
+
+  it("suppresses SELL signals on wide spreads even when midpoint looks profitable", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({ buyCount: 1, cumulativeBuySize: 17.64, cumulativeBuyNotional: 4.41 }),
+        position: position({ avgEntryPrice: 0.25, costBasisUsdc: 4.41, size: 17.64 }),
+        market: market({ bestBid: 0.43, bestAsk: 0.9, midPrice: 0.665, spread: 0.47 }),
+      }),
+    );
+
+    expect(result.type).toBe("none");
+    expect(result.suppressions.map((item) => item.reasonCode)).toContain("sell-spread-too-wide");
   });
 
   it("uses full-close sizing for small profitable residual positions", () => {
@@ -223,7 +267,13 @@ describe("evaluateDecisionPlan", () => {
           cumulativeSellSize: 0,
         }),
         position: position({ avgEntryPrice: 0.25, costBasisUsdc: 4.41, size: 17.64 }),
-        market: market({ midPrice: 0.535, minOrderSize: 5 }),
+        market: market({
+          bestBid: 0.535,
+          bestAsk: 0.545,
+          midPrice: 0.54,
+          spread: 0.01,
+          minOrderSize: 5,
+        }),
       }),
     );
 
@@ -254,7 +304,7 @@ describe("evaluateDecisionPlan", () => {
         selectedForEntry: false,
         legState: leg({ buyCount: 1 }),
         position: position({ size: 3 }),
-        market: market({ midPrice: 0.2, minOrderSize: 5 }),
+        market: market({ bestBid: 0.2, bestAsk: 0.21, midPrice: 0.205, minOrderSize: 5 }),
       }),
     );
 

@@ -151,6 +151,7 @@ export class RiskInventoryModule implements RuntimeModule {
       deps.inventoryLotRepo,
       this.log,
       deps.db,
+      (tokenId) => this.getLatestMinOrderSize(tokenId),
     );
   }
 
@@ -223,7 +224,7 @@ export class RiskInventoryModule implements RuntimeModule {
       const valueChanged =
         (stored === null) !== (newValue === null) ||
         (newValue !== null && stored !== null && Math.abs(newValue - stored) >= 0.001);
-      const nextStatus =
+      const nextStatus: Position["status"] =
         pos.status === "closed"
           ? "closed"
           : newValue !== null
@@ -235,12 +236,14 @@ export class RiskInventoryModule implements RuntimeModule {
       const statusChanged = pos.status !== nextStatus;
       if (!valueChanged && !statusChanged && stored !== null) continue;
 
-      this.deps.positionRepo.save({
+      const updated: Position = {
         ...pos,
         currentValueUsdc: newValue,
         status: nextStatus,
         updatedAt: nowIso,
-      });
+      };
+      this.deps.positionRepo.save(updated);
+      await this.publishOpenToDustTransition(pos, updated);
       backfilled++;
     }
 
@@ -574,7 +577,7 @@ export class RiskInventoryModule implements RuntimeModule {
       if (!this.shouldApplyMarketDataMark(pos, nowMs)) continue;
 
       const newValue = pos.size * markPrice;
-      const nextStatus =
+      const nextStatus: Position["status"] =
         pos.status === "closed"
           ? "closed"
           : resolveOpenPositionStatus(newValue, {
@@ -590,12 +593,14 @@ export class RiskInventoryModule implements RuntimeModule {
         continue; // Skip if value hasn't meaningfully changed
       }
 
-      this.deps.positionRepo.save({
+      const updatedPosition: Position = {
         ...pos,
         currentValueUsdc: newValue,
         status: nextStatus,
         updatedAt: new Date(nowMs).toISOString(),
-      });
+      };
+      this.deps.positionRepo.save(updatedPosition);
+      await this.publishOpenToDustTransition(pos, updatedPosition);
       updated++;
     }
 
@@ -603,5 +608,10 @@ export class RiskInventoryModule implements RuntimeModule {
       this.mtmUpdates++;
       this.log.debug({ updated, total: openPositions.length }, "mark-to-market update");
     }
+  }
+
+  private async publishOpenToDustTransition(previous: Position, next: Position): Promise<void> {
+    if (previous.status !== "open" || next.status !== "dust") return;
+    await this.deps.bus.publish("PositionUpdated", { position: next });
   }
 }

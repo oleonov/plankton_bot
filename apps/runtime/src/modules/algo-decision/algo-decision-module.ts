@@ -502,6 +502,8 @@ const CONTINUATION_TRADE_COUNT_CAP = 6;
 const EVALUATE_YIELD_BATCH = 50;
 const DIRTY_EVALUATION_DELAY_MS = 250;
 const FULL_SWEEP_INTERVAL_MS = 60_000;
+const OPEN_POSITION_WORKING_SET_REFRESH_MS = 5 * 60_000;
+const OPEN_POSITION_STALE_EVALUATION_WARN_MS = 24 * 60 * 60_000;
 
 /**
  * Conversion-skip reasons that are pure functions of the cached
@@ -515,7 +517,8 @@ const FULL_SWEEP_INTERVAL_MS = 60_000;
  * busy-loop: see research_plankton/krabs_russia_ticker_rate_investigation_2026-05-24.md
  * — a single frozen-price dust leg drove a `same-price-cooldown` skip → 0 ms
  * re-flush cycle at ~220 Hz, writing 27 M decision_signal_log rows in 58 h.
- * Deferring these to the normal debounce collapses that to the ~4 Hz ceiling.
+ * The module now avoids self-triggering on these reasons; input-changing events
+ * or the 60 s full sweep will re-evaluate them.
  *
  * Reasons NOT listed here (budget / placement-rate / order-lifetime gates that
  * can clear on their own as time passes) keep the conservative immediate
@@ -525,6 +528,13 @@ const INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS: ReadonlySet<string> = new Set([
   SAME_PRICE_COOLDOWN_REASON,
   "sell-order-acceptable-price-already-open",
   "order-size-below-minimum",
+  "not_accepting_orders",
+  "no_bid",
+  "order_book_disabled",
+  "execution-price-unavailable",
+  "execution-price-invalid",
+  "spread-above-cap",
+  "one-sided-book",
   "dead-side-near-end",
   "price-above-entry-ceiling",
   "sell-price-below-signal-floor",
@@ -537,11 +547,12 @@ const INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS: ReadonlySet<string> = new Set([
  * lists keep the conservative immediate (0 ms) path.
  */
 export function conversionSkipReEvalDelayMs(reasons: readonly string[]): number {
-  if (reasons.length === 0) return 0;
-  const allInputsUnchanged = reasons.every((reason) =>
-    INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS.has(reason),
-  );
-  return allInputsUnchanged ? DIRTY_EVALUATION_DELAY_MS : 0;
+  return isInputsUnchangedConversionSkip(reasons) ? DIRTY_EVALUATION_DELAY_MS : 0;
+}
+
+export function isInputsUnchangedConversionSkip(reasons: readonly string[]): boolean {
+  if (reasons.length === 0) return false;
+  return reasons.every((reason) => INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS.has(reason));
 }
 const NOISY_SUPPRESSION_DEDUPE_MS = 10 * 60 * 1000;
 // The suppression cache holds the last NOISY_SUPPRESSION_DEDUPE_MS (10 min)
@@ -650,6 +661,10 @@ function computeBuyOrderSizeForFilter(
   return price > 0 ? suggestedSizeUsdc / price : 0;
 }
 
+function isOpenPosition(position: Position | null | undefined): position is Position {
+  return position?.status === "open" && position.size > 0;
+}
+
 export class AlgoDecisionModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly persistence: DecisionPersistenceBuffer;
@@ -665,6 +680,8 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly dirtyTokenIds = new Set<string>();
   private dirtyEvaluationTimer: ReturnType<typeof setTimeout> | null = null;
   private lastFullSweepAt = 0;
+  private lastOpenPositionWorkingSetRefreshAt = 0;
+  private readonly openPositionLastEvaluatedAt = new Map<string, number>();
 
   // ADR-022 §D-F — F-telemetry: previous midPrice per token, captured on each
   // NormalizedMarketUpdated BEFORE the cache is updated. Drives
@@ -750,6 +767,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.buySizeRules = this.deps.algoRulesRepo.getSizeRules("BUY");
     this.sellSizeRules = this.deps.algoRulesRepo.getSizeRules("SELL");
     this.hydrateDecisionStateCaches();
+    this.lastOpenPositionWorkingSetRefreshAt = Date.now();
+    this.refreshOpenPositionWorkingSet(this.lastOpenPositionWorkingSetRefreshAt, false);
 
     // Fail-closed at startup: without a FALLBACK decision rule, evaluateDecision
     // will throw on every sweep once an unmatched state appears. Refuse to
@@ -932,9 +951,17 @@ export class AlgoDecisionModule implements RuntimeModule {
       const tokenIdStr = String(tokenId);
       this.marketCache.delete(tokenIdStr);
       this.prevMidPrices.delete(tokenIdStr);
+      const openPosition = this.findOpenPositionByTokenId(tokenId);
+      if (openPosition) {
+        this.positionCache.set(tokenIdStr, openPosition);
+        this.legStateCache.delete(tokenIdStr);
+        this.markDirty(tokenId);
+        continue;
+      }
       this.dirtyTokenIds.delete(tokenIdStr);
       this.legStateCache.delete(tokenIdStr);
       this.positionCache.delete(tokenIdStr);
+      this.openPositionLastEvaluatedAt.delete(tokenIdStr);
     }
     for (const tokenId of payload.addedTokenIds) {
       this.markDirty(tokenId);
@@ -1056,6 +1083,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     payload: RuntimeEventMap["SignalConversionSkipped"],
   ): Promise<void> {
     this.clearPendingByTokenId(String(payload.signal.tokenId));
+    if (isInputsUnchangedConversionSkip(payload.reasons)) return;
     this.markDirty(payload.signal.tokenId);
     this.scheduleDirtyEvaluation(conversionSkipReEvalDelayMs(payload.reasons));
   }
@@ -1155,6 +1183,10 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.pruneExpiredPending();
 
     const now = Date.now();
+    if (now - this.lastOpenPositionWorkingSetRefreshAt >= OPEN_POSITION_WORKING_SET_REFRESH_MS) {
+      this.lastOpenPositionWorkingSetRefreshAt = now;
+      this.refreshOpenPositionWorkingSet(now, true);
+    }
     if (now - this.lastFullSweepAt >= FULL_SWEEP_INTERVAL_MS) {
       this.lastFullSweepAt = now;
       this.markFullSweepDirty();
@@ -1170,10 +1202,48 @@ export class AlgoDecisionModule implements RuntimeModule {
     );
     const eligibleTokenIds = this.deps.selectedMarketCache.getEligibleTokenIds();
     const eligibleSet = new Set(eligibleTokenIds.map(String));
+    const openPositionTokenIds = this.refreshOpenPositionWorkingSet(Date.now(), false);
 
-    for (const tokenId of new Set([...legStateTokenIds, ...eligibleSet])) {
+    for (const tokenId of new Set([...legStateTokenIds, ...eligibleSet, ...openPositionTokenIds])) {
       this.dirtyTokenIds.add(tokenId);
     }
+  }
+
+  private refreshOpenPositionWorkingSet(now: number, warnStale: boolean): string[] {
+    const positions = this.deps.positionRepo?.findOpen?.() ?? [];
+    const tokenIds: string[] = [];
+    for (const position of positions) {
+      if (!isOpenPosition(position)) continue;
+      const tokenId = String(position.tokenId);
+      tokenIds.push(tokenId);
+      this.positionCache.set(tokenId, position);
+      if (this.legStateCache.get(tokenId) === null) this.legStateCache.delete(tokenId);
+      this.dirtyTokenIds.add(tokenId);
+      if (warnStale) this.warnIfOpenPositionStale(position, now);
+    }
+    return tokenIds;
+  }
+
+  private warnIfOpenPositionStale(position: Position, now: number): void {
+    const tokenId = String(position.tokenId);
+    const lastEvaluatedAt = this.openPositionLastEvaluatedAt.get(tokenId);
+    const openedAtMs = Date.parse(position.openedAt);
+    const referenceMs =
+      lastEvaluatedAt ??
+      (Number.isFinite(openedAtMs) ? openedAtMs : Date.parse(position.updatedAt));
+    if (!Number.isFinite(referenceMs)) return;
+    if (now - referenceMs < OPEN_POSITION_STALE_EVALUATION_WARN_MS) return;
+    this.log.warn(
+      {
+        tokenId,
+        positionId: String(position.positionId),
+        lastEvaluatedAt:
+          lastEvaluatedAt !== undefined ? new Date(lastEvaluatedAt).toISOString() : null,
+        openedAt: position.openedAt,
+        ageMs: now - referenceMs,
+      },
+      "open position has not been evaluated recently",
+    );
   }
 
   private markDirty(tokenId: TokenId | string): void {
@@ -1309,12 +1379,15 @@ export class AlgoDecisionModule implements RuntimeModule {
     postBuyCooldown: { cooldownMs: number; ageMs: number; lastBuyFillAt: number } | null,
   ): Promise<DecisionPlanningInput | null> {
     const legState = this.getCachedLegState(tokenId);
+    const openPosition = this.findOpenPositionByTokenId(tokenId);
     const selectedForEntry = this.deps.selectedMarketCache.isEligible(tokenId);
-    if (!legState && !selectedForEntry) return null;
+    if (!legState && !selectedForEntry && !openPosition) return null;
 
     const market = this.marketCache.get(String(tokenId)) ?? null;
     const prevMidPrice = this.prevMidPrices.get(String(tokenId)) ?? null;
-    const position = legState ? this.getCachedPosition(tokenId) : null;
+    const position =
+      legState || openPosition ? (openPosition ?? this.getCachedPosition(tokenId)) : null;
+    if (openPosition) this.openPositionLastEvaluatedAt.set(String(tokenId), now);
     const continuationFacts =
       legState && market ? await this.resolveContinuationFactsForPlanner(market, legState) : null;
     const r23MaxMidpoint =
@@ -2086,6 +2159,11 @@ export class AlgoDecisionModule implements RuntimeModule {
     const key = String(tokenId);
     if (this.legStateCache.has(key)) return this.legStateCache.get(key) ?? null;
     if (this.legStateCacheHydrated) {
+      if (this.findOpenPositionByTokenId(tokenId)) {
+        const state = this.deps.legStateRepo.get(tokenId);
+        this.legStateCache.set(key, state);
+        return state;
+      }
       this.legStateCache.set(key, null);
       return null;
     }
@@ -2098,12 +2176,26 @@ export class AlgoDecisionModule implements RuntimeModule {
     const key = String(tokenId);
     if (this.positionCache.has(key)) return this.positionCache.get(key) ?? null;
     if (this.positionCacheHydrated) {
+      const openPosition = this.findOpenPositionByTokenId(tokenId);
+      if (openPosition) return openPosition;
       this.positionCache.set(key, null);
       return null;
     }
     const position = this.deps.positionRepo?.findByTokenId(tokenId) ?? null;
     this.positionCache.set(key, position);
     return position;
+  }
+
+  private findOpenPositionByTokenId(tokenId: TokenId): Position | null {
+    const key = String(tokenId);
+    const cached = this.positionCache.get(key);
+    if (isOpenPosition(cached)) return cached;
+    const position = this.deps.positionRepo?.findByTokenId(tokenId) ?? null;
+    if (isOpenPosition(position)) {
+      this.positionCache.set(key, position);
+      return position;
+    }
+    return null;
   }
 
   private invalidateDecisionState(tokenId: string): void {

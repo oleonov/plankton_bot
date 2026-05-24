@@ -1653,7 +1653,7 @@ describe("RiskInventoryModule", () => {
       await mod.stop();
     });
 
-    it("reclassifies low-value open positions to dust on mark-to-market", async () => {
+    it("reclassifies true below-min open positions to dust on mark-to-market", async () => {
       const pos: Position = {
         positionId: createPositionId("pos-dustify"),
         tokenId: TOK_ID,
@@ -1672,6 +1672,10 @@ describe("RiskInventoryModule", () => {
         updatedAt: STALE_MTM_UPDATED_AT,
       };
       positionRepo = createMockPositionRepo(pos);
+      const updates: Position[] = [];
+      bus.subscribe("PositionUpdated", async (payload) => {
+        updates.push(payload.position);
+      });
       mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
 
@@ -1699,6 +1703,7 @@ describe("RiskInventoryModule", () => {
             bestAsk: 0.21,
             midPrice: 0.2,
             spread: 0.02,
+            minOrderSize: 5,
             snapshotTs: Date.now(),
             eventMarketCount: 1,
           },
@@ -1712,6 +1717,7 @@ describe("RiskInventoryModule", () => {
       const savedPos = saveCalls[saveCalls.length - 1][0];
       expect(savedPos.currentValueUsdc).toBeCloseTo(0.2, 2);
       expect(savedPos.status).toBe("dust");
+      expect(updates).toEqual([expect.objectContaining({ status: "dust", size: 1 })]);
 
       await mod.stop();
     });

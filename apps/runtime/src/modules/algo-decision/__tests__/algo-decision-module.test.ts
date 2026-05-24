@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { AlgoDecisionModule, conversionSkipReEvalDelayMs } from "../algo-decision-module.js";
+import {
+  AlgoDecisionModule,
+  conversionSkipReEvalDelayMs,
+  isInputsUnchangedConversionSkip,
+} from "../algo-decision-module.js";
 import type { SelectedMarketCache } from "../algo-decision-module.js";
 import type {
   EventBus,
@@ -12,8 +16,9 @@ import type {
   RuntimeEventMap,
   DecisionSignalLogRepository,
   RiskEventRepository,
+  Position,
 } from "@krabs/domain";
-import { createTokenId, createCommandId, createOrderId } from "@krabs/domain";
+import { createTokenId, createCommandId, createOrderId, createPositionId } from "@krabs/domain";
 import type { ConditionId } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY } from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
@@ -333,6 +338,27 @@ function makeSellReadyLegState(tokenId: string, overrides: Partial<LegState> = {
   };
 }
 
+function makeOpenPosition(tokenId: string, overrides: Partial<Position> = {}): Position {
+  const nowIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+  return {
+    positionId: createPositionId(`pos-${tokenId}`),
+    tokenId: createTokenId(tokenId),
+    conditionId: "cond-1" as ConditionId,
+    side: "buy",
+    size: 10,
+    avgEntryPrice: 0.1,
+    costBasisUsdc: 1,
+    currentValueUsdc: 1,
+    realizedPnl: 0,
+    status: "open",
+    entryStyle: "probe",
+    openedAt: nowIso,
+    closedAt: null,
+    updatedAt: nowIso,
+    ...overrides,
+  };
+}
+
 function makeBuyFill(
   tokenId: string,
   timestamp: number,
@@ -399,6 +425,51 @@ describe("AlgoDecisionModule", () => {
     algoRulesRepo = createMockAlgoRulesRepo();
     selectedMarketCache = createMockSelectedMarketCache();
     log = createMockLogger();
+  });
+
+  it("hydrates open DB positions into the evaluation working set on startup", async () => {
+    const tokenId = "token-open-working-set";
+    const position = makeOpenPosition(tokenId);
+    const positionRepo = {
+      findOpen: vi.fn().mockReturnValue([position]),
+      findByTokenId: vi.fn().mockReturnValue(position),
+    };
+
+    const mod = buildModule({
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+    });
+    await mod.start();
+
+    expect((mod as any).dirtyTokenIds.has(tokenId)).toBe(true);
+    expect((mod as any).positionCache.get(tokenId)).toEqual(position);
+
+    await mod.stop();
+  });
+
+  it("logs stale open positions that are not evaluated within the guard window", async () => {
+    const tokenId = "token-stale-open";
+    const position = makeOpenPosition(tokenId, {
+      openedAt: "2026-05-22T00:00:00.000Z",
+      updatedAt: "2026-05-22T00:00:00.000Z",
+    });
+    const positionRepo = {
+      findOpen: vi.fn().mockReturnValue([position]),
+      findByTokenId: vi.fn().mockReturnValue(position),
+    };
+
+    const mod = buildModule({
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+    });
+    await mod.start();
+    (mod as any).openPositionLastEvaluatedAt.delete(tokenId);
+    (mod as any).refreshOpenPositionWorkingSet(Date.parse("2026-05-24T12:00:00.000Z"), true);
+
+    expect((mod as any).log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId, positionId: String(position.positionId) }),
+      "open position has not been evaluated recently",
+    );
+
+    await mod.stop();
   });
 
   it("emits SignalProduced for an eligible token with no position", async () => {
@@ -1145,7 +1216,15 @@ describe("AlgoDecisionModule", () => {
     await mod.start();
 
     await (bus as any).emit("NormalizedMarketUpdated", {
-      markets: [{ ...makeMarket(tokenId, null, 0.15, "cond-sell"), tradable: false }],
+      markets: [
+        {
+          ...makeMarket(tokenId, null, 0.15, "cond-sell"),
+          bestBid: 0.15,
+          bestAsk: 0.16,
+          spread: 0.01,
+          tradable: false,
+        },
+      ],
       timestamp: Date.now(),
     });
 
@@ -1267,7 +1346,15 @@ describe("AlgoDecisionModule", () => {
 
     // Non-tradable market + SELL price > D7-SELL-S1 threshold (0.10) → SELL fires.
     await (bus as any).emit("NormalizedMarketUpdated", {
-      markets: [{ ...makeMarket(tokenId, null, 0.15, "cond-exit"), tradable: false }],
+      markets: [
+        {
+          ...makeMarket(tokenId, null, 0.15, "cond-exit"),
+          bestBid: 0.15,
+          bestAsk: 0.16,
+          spread: 0.01,
+          tradable: false,
+        },
+      ],
       timestamp: Date.now(),
     });
 
@@ -1534,6 +1621,9 @@ describe("AlgoDecisionModule", () => {
       markets: [
         {
           ...makeMarket(tokenId, null, 0.15, "cond-dust-abandon"),
+          bestBid: 0.15,
+          bestAsk: 0.16,
+          spread: 0.01,
           tradable: false,
           minOrderSize: 5,
         },
@@ -1639,6 +1729,9 @@ describe("AlgoDecisionModule", () => {
       markets: [
         {
           ...makeMarket(tokenId, null, 0.16, "cond-dust-recovery"),
+          bestBid: 0.16,
+          bestAsk: 0.17,
+          spread: 0.01,
           tradable: false,
           minOrderSize: 5,
         },
@@ -1751,7 +1844,15 @@ describe("AlgoDecisionModule", () => {
 
     // SELL @ 0.15 with rolling basis 0.20 → exit_pnl_pct = (0.15-0.20)/0.20 = -0.25
     await (bus as any).emit("NormalizedMarketUpdated", {
-      markets: [{ ...makeMarket(tokenId, null, 0.15, "cond-fifo"), tradable: false }],
+      markets: [
+        {
+          ...makeMarket(tokenId, null, 0.15, "cond-fifo"),
+          bestBid: 0.15,
+          bestAsk: 0.16,
+          spread: 0.01,
+          tradable: false,
+        },
+      ],
       timestamp: Date.now(),
     });
 
@@ -1793,7 +1894,15 @@ describe("AlgoDecisionModule", () => {
     await mod.start();
 
     await (bus as any).emit("NormalizedMarketUpdated", {
-      markets: [{ ...makeMarket(tokenId, null, 0.12, "cond-fallback"), tradable: false }],
+      markets: [
+        {
+          ...makeMarket(tokenId, null, 0.12, "cond-fallback"),
+          bestBid: 0.12,
+          bestAsk: 0.13,
+          spread: 0.01,
+          tradable: false,
+        },
+      ],
       timestamp: Date.now(),
     });
 
@@ -4879,9 +4988,9 @@ describe("AlgoDecisionModule", () => {
 
   // Surgical fix for the russia-ticker busy-loop (see
   // research_plankton/krabs_russia_ticker_rate_investigation_2026-05-24.md):
-  // a frozen-price dust leg bounced a `same-price-cooldown` conversion skip
-  // back through `scheduleDirtyEvaluation(0)` at ~220 Hz. inputs-unchanged
-  // skips must defer to the 250 ms debounce; inputs-changeable skips keep the
+  // a frozen-price dust leg bounced inputs-unchanged conversion skips back
+  // through self-triggered dirty evaluation. Inputs-unchanged skips now wait
+  // for real input changes or the full sweep; inputs-changeable skips keep the
   // immediate re-eval.
   describe("SignalConversionSkipped re-trigger throttling", () => {
     function makeSkipSignal(tokenId: string): import("@krabs/domain").Signal {
@@ -4913,7 +5022,7 @@ describe("AlgoDecisionModule", () => {
       });
     }
 
-    it("schedules a debounced (250 ms) re-eval for a same-price-cooldown skip", async () => {
+    it("does not self-trigger re-evaluation for an inputs-unchanged skip", async () => {
       const tokenId = "token-cooldown-skip";
       const mod = buildModule();
       await mod.start();
@@ -4924,8 +5033,7 @@ describe("AlgoDecisionModule", () => {
 
       await emitSkip(tokenId, ["same-price-cooldown"]);
 
-      expect(spy).toHaveBeenCalledWith(250);
-      expect(spy).not.toHaveBeenCalledWith(0);
+      expect(spy).not.toHaveBeenCalled();
       await mod.stop();
     });
 
@@ -5005,6 +5113,8 @@ describe("conversionSkipReEvalDelayMs", () => {
     expect(conversionSkipReEvalDelayMs(["price-above-entry-ceiling"])).toBe(250);
     expect(conversionSkipReEvalDelayMs(["sell-price-below-signal-floor"])).toBe(250);
     expect(conversionSkipReEvalDelayMs(["sell-order-acceptable-price-already-open"])).toBe(250);
+    expect(conversionSkipReEvalDelayMs(["no_bid", "one-sided-book"])).toBe(250);
+    expect(isInputsUnchangedConversionSkip(["spread-above-cap"])).toBe(true);
   });
 
   it("keeps immediate re-eval for inputs-changeable reasons", () => {

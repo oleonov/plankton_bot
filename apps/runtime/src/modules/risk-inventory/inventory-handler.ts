@@ -47,6 +47,7 @@ export class InventoryHandler {
     private readonly lotRepo: InventoryLotRepository,
     private readonly log: Logger,
     private readonly db: Database.Database,
+    private readonly latestMinOrderSize?: (tokenId: TokenId) => number | null,
   ) {
     this.pnlLedgerInsert = db.prepare(resolvePnlLedgerInsertSql(db));
   }
@@ -249,7 +250,12 @@ export class InventoryHandler {
     );
     const newRealizedPnl = existing.realizedPnl + sellRealizedPnl;
     const status =
-      remainingSize <= 0 ? "closed" : resolveOpenPositionStatus(remainingSize * fill.price);
+      remainingSize <= 0
+        ? "closed"
+        : resolveOpenPositionStatus(remainingSize * fill.price, {
+            size: remainingSize,
+            minOrderSize: this.latestMinOrderSize?.(fill.tokenId) ?? null,
+          });
     const remainingAvgPrice = remainingSize > 0 ? remainingCostBasis / remainingSize : 0;
 
     const updated: Position = {

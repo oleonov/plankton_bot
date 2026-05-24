@@ -1,4 +1,5 @@
 import type {
+  EventBus,
   FillRepository,
   MarketRepository,
   Position,
@@ -95,6 +96,7 @@ export interface WalletPositionSentinelDeps {
   fillRepo?: FillRepository;
   marketRepo: MarketRepository;
   log: Logger;
+  bus?: Pick<EventBus, "publish"> | undefined;
   latestUsablePriceLookup?: Pick<LatestUsablePriceLookup, "findUsablePrice"> | undefined;
   latestMinOrderSize?: ((tokenId: TokenId) => number | null) | undefined;
 }
@@ -149,8 +151,10 @@ export async function runWalletPositionSentinel(
 
     const active = latestActivePosition(localPositions);
     if (active) {
-      if (applyRemoteMark(deps.positionRepo, active, remote, nowMs)) {
+      const updated = applyRemoteMark(deps, active, remote, nowMs);
+      if (updated) {
         markUpdateCount++;
+        await publishOpenToDustTransition(deps, active, updated);
       }
       if (Math.abs(active.size - remote.size) > SIZE_DRIFT_EPSILON) {
         if (isWithinRecentFillGrace(deps.fillRepo, active.tokenId, nowMs)) continue;
@@ -200,8 +204,10 @@ export async function runWalletPositionSentinel(
     // re-introducing the v138 false-positive class for tiny dust rows.
     if (active.size <= SIZE_DRIFT_EPSILON) continue;
 
-    if (applyMissingRemoteRevaluation(deps, active, nowMs)) {
+    const revalued = applyMissingRemoteRevaluation(deps, active, nowMs);
+    if (revalued) {
       missingRemoteRevaluedCount++;
+      await publishOpenToDustTransition(deps, active, revalued);
     }
 
     if (isMissingRemoteMicroDust(active)) continue;
@@ -244,14 +250,14 @@ function applyMissingRemoteRevaluation(
   deps: WalletPositionSentinelDeps,
   active: Position,
   nowMs: number,
-): boolean {
+): Position | null {
   const lookup = deps.latestUsablePriceLookup;
-  if (!lookup) return false;
+  if (!lookup) return null;
 
   const fallbackPrice = lookup.findUsablePrice(active.tokenId, nowMs);
   const newValue =
     fallbackPrice !== null && Number.isFinite(fallbackPrice) ? active.size * fallbackPrice : null;
-  const nextStatus =
+  const nextStatus: Position["status"] =
     active.status === "closed"
       ? "closed"
       : newValue !== null
@@ -266,24 +272,25 @@ function applyMissingRemoteRevaluation(
     (newValue !== null && stored !== null && Math.abs(newValue - stored) >= 0.001);
   const statusChanged = active.status !== nextStatus;
 
-  if (!valueChanged && !statusChanged) return false;
+  if (!valueChanged && !statusChanged) return null;
 
-  deps.positionRepo.save({
+  const updated: Position = {
     ...active,
     currentValueUsdc: newValue,
     status: nextStatus,
     updatedAt: new Date(nowMs).toISOString(),
-  });
-  return true;
+  };
+  deps.positionRepo.save(updated);
+  return updated;
 }
 
 function applyRemoteMark(
-  positionRepo: PositionRepository,
+  deps: WalletPositionSentinelDeps,
   position: Position,
   remote: PolymarketDataPosition,
   nowMs: number,
-): boolean {
-  if (!Number.isFinite(remote.currentValueUsdc)) return false;
+): Position | null {
+  if (!Number.isFinite(remote.currentValueUsdc)) return null;
   // Defence against upstream bug: Polymarket prices are bounded to [0,1].
   // Any remote.currentValueUsdc > position.size implies price > $1, which
   // is impossible. Drop the update; W4 fallback will recompute.
@@ -292,25 +299,43 @@ function applyRemoteMark(
     position.size > 0 &&
     remote.currentValueUsdc > position.size + 1e-9
   ) {
-    return false;
+    return null;
   }
 
-  const nextStatus = resolveOpenPositionStatus(remote.currentValueUsdc);
+  const nextStatus = resolveOpenPositionStatus(remote.currentValueUsdc, {
+    size: position.size,
+    minOrderSize: deps.latestMinOrderSize?.(position.tokenId) ?? null,
+  });
   if (
     position.currentValueUsdc !== null &&
     Math.abs(position.currentValueUsdc - remote.currentValueUsdc) < 0.001 &&
     position.status === nextStatus
   ) {
-    return false;
+    return null;
   }
 
-  positionRepo.save({
+  const updated: Position = {
     ...position,
     currentValueUsdc: remote.currentValueUsdc,
     status: nextStatus,
     updatedAt: new Date(nowMs).toISOString(),
-  });
-  return true;
+  };
+  deps.positionRepo.save(updated);
+  return updated;
+}
+
+async function publishOpenToDustTransition(
+  deps: WalletPositionSentinelDeps,
+  previous: Position,
+  next: Position,
+): Promise<void> {
+  if (!deps.bus) return;
+  if (previous.status !== "open" || next.status !== "dust") return;
+  try {
+    await deps.bus.publish("PositionUpdated", { position: next });
+  } catch (err) {
+    deps.log.warn({ err, positionId: next.positionId }, "failed to publish open-to-dust update");
+  }
 }
 
 function groupPositionsByToken(positions: readonly Position[]): Map<string, Position[]> {

@@ -1210,6 +1210,7 @@ async function main(): Promise<void> {
               fillRepo: repos.fill,
               marketRepo: repos.market,
               log,
+              bus,
               latestUsablePriceLookup,
               latestMinOrderSize: (tokenId: TokenId): number | null =>
                 riskInventoryModule.getLatestMinOrderSize(tokenId),

@@ -211,6 +211,69 @@ describe("runWalletPositionSentinel", () => {
     );
   });
 
+  it("does not revert sellable low-notional positions to dust", async () => {
+    const repo = positionRepo([
+      makePosition({
+        status: "open",
+        size: 23.94,
+        costBasisUsdc: 1,
+        currentValueUsdc: 1.2,
+        realizedPnl: 0,
+        closedAt: null,
+      }),
+    ]);
+
+    await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 23.94, currentValueUsdc: 0.34 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+        latestMinOrderSize: () => 5,
+      },
+      NOW,
+    );
+
+    expect(repo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentValueUsdc: 0.34,
+        status: "open",
+        size: 23.94,
+      }),
+    );
+  });
+
+  it("publishes PositionUpdated when a real below-min position transitions open to dust", async () => {
+    const repo = positionRepo([
+      makePosition({
+        status: "open",
+        size: 2,
+        costBasisUsdc: 0.5,
+        currentValueUsdc: 0.5,
+        realizedPnl: 0,
+        closedAt: null,
+      }),
+    ]);
+    const bus = { publish: vi.fn().mockResolvedValue(undefined) };
+
+    await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 2, currentValueUsdc: 0.2 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+        bus,
+        latestMinOrderSize: () => 5,
+      },
+      NOW,
+    );
+
+    expect(repo.save).toHaveBeenCalledWith(expect.objectContaining({ status: "dust", size: 2 }));
+    expect(bus.publish).toHaveBeenCalledWith("PositionUpdated", {
+      position: expect.objectContaining({ status: "dust", size: 2 }),
+    });
+  });
+
   it("does not rewrite active marks that already match Polymarket", async () => {
     const repo = positionRepo([
       makePosition({

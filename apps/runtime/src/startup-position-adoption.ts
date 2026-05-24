@@ -557,7 +557,7 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logge
   const activeRow = openRows.find((row) => row.position_id === activePositionId);
   const entryStyle = activeRow?.entry_style ?? null;
   const openedAt = activeRow?.opened_at ?? remainingLots[0]!.created_at;
-  const status = resolveOpenPositionStatus(totalCost);
+  const status = resolveOpenPositionStatus(totalCost, { size: totalSize, minOrderSize: null });
   const now = new Date().toISOString();
 
   db.prepare(

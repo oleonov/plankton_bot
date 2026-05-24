@@ -190,6 +190,12 @@ const DECISION_RULE_HOLD_REASON = "decision-rule-hold";
 const DUST_ABANDONED_REASON = "dust-abandoned";
 const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
 const POST_BUY_FILL_COOLDOWN_REASON = "post-buy-fill-cooldown";
+const SELL_SPREAD_MAX_RATIO = 0.5;
+
+type SellExecutablePriceResult = {
+  price: number | null;
+  reasonCode: "mid-price-unavailable" | "sell-best-bid-unavailable" | "sell-spread-too-wide" | null;
+};
 
 export function createDecisionMetricsDelta(): DecisionMetricsDelta {
   return {
@@ -217,6 +223,51 @@ export function classifyEntryPriceBucket(price: number): EntryPriceBucket {
   return ">0.20";
 }
 
+export function resolveSellExecutablePrice(market: NormalizedMarket): SellExecutablePriceResult {
+  if (
+    typeof market.bestBid !== "number" ||
+    !Number.isFinite(market.bestBid) ||
+    market.bestBid <= 0
+  ) {
+    return { price: null, reasonCode: "sell-best-bid-unavailable" };
+  }
+
+  const spread =
+    typeof market.spread === "number" && Number.isFinite(market.spread)
+      ? market.spread
+      : typeof market.bestAsk === "number" &&
+          Number.isFinite(market.bestAsk) &&
+          market.bestAsk > market.bestBid
+        ? market.bestAsk - market.bestBid
+        : null;
+  const midpoint =
+    typeof market.midPrice === "number" && Number.isFinite(market.midPrice)
+      ? market.midPrice
+      : null;
+
+  if (
+    spread !== null &&
+    midpoint !== null &&
+    midpoint > 0 &&
+    spread / midpoint > SELL_SPREAD_MAX_RATIO
+  ) {
+    return { price: null, reasonCode: "sell-spread-too-wide" };
+  }
+
+  return { price: market.bestBid, reasonCode: null };
+}
+
+function resolveActionPrice(
+  action: TradeDecisionAction,
+  market: NormalizedMarket,
+): SellExecutablePriceResult {
+  if (action === "SELL") return resolveSellExecutablePrice(market);
+  const price = market.midPrice;
+  return typeof price === "number" && Number.isFinite(price)
+    ? { price, reasonCode: null }
+    : { price: null, reasonCode: "mid-price-unavailable" };
+}
+
 export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlanResult {
   const metrics = createDecisionMetricsDelta();
   const suppressions: SuppressionPlan[] = [];
@@ -224,7 +275,7 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   const nowIso = new Date(input.now).toISOString();
   const legState = input.legState;
 
-  if (!legState && !input.selectedForEntry) {
+  if (!legState && !input.selectedForEntry && !input.position) {
     return none(metrics, suppressions, sideEffects);
   }
   metrics.evalTotal++;
@@ -252,8 +303,8 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   }
 
   const market = input.market;
-  const price = market.midPrice;
-  if (price === null || price === undefined) {
+  const midPrice = market.midPrice;
+  if (midPrice === null || midPrice === undefined) {
     suppressions.push({
       tokenId: input.tokenId,
       conditionId: market.conditionId,
@@ -267,6 +318,8 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
     });
     return none(metrics, suppressions, sideEffects);
   }
+  const sellPrice = resolveSellExecutablePrice(market);
+  const price = legState ? (sellPrice.price ?? midPrice) : midPrice;
 
   if (legState && isAbandoned(legState) && input.executionPolicy?.dustAbandonment.enabled) {
     const dustPolicy = input.executionPolicy.dustAbandonment;
@@ -626,12 +679,28 @@ function buildSignalOrSuppression(args: {
   nowIso: string;
 }): DecisionPlanResult {
   const { input, market, decision, buyCount, emissionFacts, triggerTelemetry } = args;
-  const price = market.midPrice;
-  if (price == null) return none(args.metrics, args.suppressions, args.sideEffects);
   const state = deriveState(input.legState);
   const timeSinceLastSeconds = input.legState
     ? (input.now - new Date(input.legState.lastTradeAt).getTime()) / 1000
     : null;
+  const actionPrice = resolveActionPrice(decision.action, market);
+  if (actionPrice.price == null) {
+    args.suppressions.push({
+      tokenId: market.tokenId,
+      conditionId: market.conditionId,
+      reasonCode: actionPrice.reasonCode ?? "signal-price-unavailable",
+      side: decision.action === "SELL" ? "SELL" : "BUY",
+      decisionRuleId: decision.ruleId,
+      state,
+      price: null,
+      buyCount,
+      timeSinceLastSeconds,
+      emissionFacts,
+      timestamp: args.nowIso,
+    });
+    return none(args.metrics, args.suppressions, args.sideEffects);
+  }
+  const price = actionPrice.price;
   const ctx = {
     state,
     price,
@@ -702,13 +771,14 @@ function buildSignalDraft(args: {
   nowIso: string;
 }): DecisionSignalDraft | null {
   const { input, market, decision, buyCount, emissionFacts, triggerTelemetry } = args;
-  const price = market.midPrice;
-  if (price == null) return null;
   const state = deriveState(input.legState);
   const timeSinceLastSeconds = input.legState
     ? (input.now - new Date(input.legState.lastTradeAt).getTime()) / 1000
     : null;
   const side = decision.action === "BUY" ? "buy" : ("sell" as const);
+  const actionPrice = resolveActionPrice(decision.action, market);
+  if (actionPrice.price == null) return null;
+  const price = actionPrice.price;
   const reason = resolveSignalReason(side, buyCount);
 
   if (side === "sell" && input.postBuyCooldown) {

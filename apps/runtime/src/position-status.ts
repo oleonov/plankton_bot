@@ -1,4 +1,3 @@
-export const DUST_THRESHOLD_USDC = 0.5;
 const MIN_ORDER_SIZE_EPSILON = 1e-9;
 
 interface PositionStatusInput {
@@ -7,7 +6,7 @@ interface PositionStatusInput {
 }
 
 export function resolveOpenPositionStatus(
-  currentValueUsdc: number,
+  _currentValueUsdc: number,
   input: PositionStatusInput = {},
 ): "open" | "dust" {
   if (
@@ -20,5 +19,5 @@ export function resolveOpenPositionStatus(
     return input.size + MIN_ORDER_SIZE_EPSILON >= input.minOrderSize ? "open" : "dust";
   }
 
-  return currentValueUsdc < DUST_THRESHOLD_USDC ? "dust" : "open";
+  return "open";
 }
