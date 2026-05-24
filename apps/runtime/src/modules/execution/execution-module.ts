@@ -39,6 +39,9 @@ import {
   createCommandId,
   createOrderId,
   ExchangeErrorCode,
+  isPositionDust,
+  isSellTimeoutReplacement,
+  normalizeSellSizeForMinOrder,
   resolveDynamicChainCapDetails,
   shouldBlockRepriceChain,
 } from "@krabs/domain";
@@ -66,10 +69,7 @@ import {
   WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
 } from "../../wallet-buy-budget.js";
 import { DEFAULT_FALLBACK_MIN_ORDER_SIZE } from "../../min-order-size.js";
-import {
-  RESERVED_TOKEN_LIMIT_REASON,
-  SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
-} from "../../internal-order-reasons.js";
+import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
   buildReservationSnapshot,
@@ -87,11 +87,6 @@ import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
 type OrderFillLookupGateway = ExchangeGateway & {
   getFillsForOrder?: (orderId: string) => Promise<ExchangeFill[]>;
 };
-
-const DUST_TRIGGERING_EXECUTION_REJECT_REASONS = new Set<string>([
-  RESERVED_TOKEN_LIMIT_REASON,
-  SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
-]);
 
 type PostOnlyCrossPreSubmitSkip = {
   bestBid: number;
@@ -1135,35 +1130,17 @@ export class ExecutionModule implements RuntimeModule {
     if (availableSize + ExecutionModule.SIZE_EPSILON_SHARES >= cmd.size) {
       if (cmd.side === "sell") {
         const minOrderSize = this.resolveCommandMinOrderSize(cmd);
-        if (
-          minOrderSize != null &&
-          Number.isFinite(minOrderSize) &&
-          minOrderSize > 0 &&
-          cmd.size + ExecutionModule.SIZE_EPSILON_SHARES < minOrderSize
-        ) {
-          if (availableSize + ExecutionModule.SIZE_EPSILON_SHARES >= minOrderSize) {
-            return {
-              kind: "clamp",
-              newSize: availableSize,
-              details: {
-                tokenId: cmd.tokenId,
-                positionSize: position.size,
-                upperBound,
-                reservedSell,
-                localReservedSell,
-                availableSize,
-                intentSize: cmd.size,
-                minOrderSize,
-                clampDirection: "up-to-available",
-                reason: "intent-below-min-residual-above-min",
-              },
-            };
-          }
+        const normalized = normalizeSellSizeForMinOrder({
+          availableSize,
+          desiredSize: cmd.size,
+          marketMinOrderSize: minOrderSize,
+        });
+        if (normalized.kind === "unsellable") {
           return {
             kind: "reject",
             reason: SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
             errorCode: ExchangeErrorCode.InvalidSize,
-            message: "sell order skipped — residual below exchange minimum (intent also below)",
+            message: "sell order skipped — residual below exchange minimum",
             details: {
               tokenId: cmd.tokenId,
               positionSize: position.size,
@@ -1173,6 +1150,28 @@ export class ExecutionModule implements RuntimeModule {
               availableSize,
               orderSize: cmd.size,
               minOrderSize,
+            },
+          };
+        }
+        if (normalized.kind === "clamp") {
+          const reason =
+            normalized.reason === "intent-below-min"
+              ? "intent-below-min-residual-above-min"
+              : "orphan-residual-below-min";
+          return {
+            kind: "clamp",
+            newSize: normalized.size,
+            details: {
+              tokenId: cmd.tokenId,
+              positionSize: position.size,
+              upperBound,
+              reservedSell,
+              localReservedSell,
+              availableSize,
+              intentSize: cmd.size,
+              minOrderSize,
+              clampDirection: "up-to-available",
+              reason,
             },
           };
         }
@@ -1463,6 +1462,7 @@ export class ExecutionModule implements RuntimeModule {
 
     const existingSell = existingSells[0]!;
     const policy = this.deps.executionPolicy?.();
+    const now = Date.now();
     const repriceThreshold = resolveSellRepriceThreshold(existingSell.price, cmd.tickSize, policy);
     if (repriceThreshold === null) {
       this.log.warn(
@@ -1483,7 +1483,13 @@ export class ExecutionModule implements RuntimeModule {
       return true;
     }
     const anchorDelta = Math.abs(existingSell.price - cmd.price);
-    if (anchorDelta <= repriceThreshold.thresholdAbs) {
+    const timeoutSizeReplacement = isSellTimeoutReplacement({
+      existingOrder: existingSell,
+      requestedSize: cmd.size,
+      nowMs: now,
+      sellTimeoutMs: policy?.sellTimeoutMs,
+    });
+    if (anchorDelta <= repriceThreshold.thresholdAbs && !timeoutSizeReplacement) {
       this.deps.runtimeMetrics?.writeCounter?.(
         "exit_reprice_suppressed_threshold_total",
         1,
@@ -1498,7 +1504,6 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     if (this.isSellReplacementSubmit(cmd)) return false;
-    const now = Date.now();
     const existingLock = this.sellReplaceLocks.get(key);
     if (
       existingLock &&
@@ -1518,7 +1523,11 @@ export class ExecutionModule implements RuntimeModule {
       const effectivePolicy = { ...policy, maxChainCount: cap.maxChainCount };
       this.recordExitChainCapResolved(
         cap.bucket,
-        existingLock ? "sell_replace_retry" : "sell_replace",
+        existingLock
+          ? "sell_replace_retry"
+          : timeoutSizeReplacement
+            ? "sell_timeout"
+            : "sell_replace",
       );
       const legState = this.deps.legStateRepo.get(cmd.tokenId);
       if (shouldBlockRepriceChain(legState, now, effectivePolicy)) {
@@ -1529,7 +1538,11 @@ export class ExecutionModule implements RuntimeModule {
               tokenId: String(cmd.tokenId),
               orderId: String(existingSell.orderId),
               reasonCode: "sell-replace-chain-cap",
-              source: existingLock ? "sell_replace_retry" : "sell_replace_reprice",
+              source: existingLock
+                ? "sell_replace_retry"
+                : timeoutSizeReplacement
+                  ? "sell_timeout_escalation"
+                  : "sell_replace_reprice",
               count24h: legState?.repriceChainCount24h ?? 0,
               maxChainCount: effectivePolicy.maxChainCount,
               dynamicCapBucket: cap.bucket,
@@ -1554,7 +1567,11 @@ export class ExecutionModule implements RuntimeModule {
         type: "CancelOrderCommand",
         commandId: createCommandId(`sell-replace-${String(existingSell.orderId)}-${now}`),
         orderId: existingSell.orderId,
-        reason: existingLock ? "sell_replace_retry" : "sell_replace_reprice",
+        reason: existingLock
+          ? "sell_replace_retry"
+          : timeoutSizeReplacement
+            ? "sell_timeout_escalation"
+            : "sell_replace_reprice",
       },
       timestamp: now,
     });
@@ -1627,7 +1644,10 @@ export class ExecutionModule implements RuntimeModule {
     reason: string,
   ): void {
     if (cmd.side !== "sell") return;
-    if (!DUST_TRIGGERING_EXECUTION_REJECT_REASONS.has(reason)) return;
+    if (reason !== SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON) return;
+    const position = this.deps.positionRepo?.findByTokenId(cmd.tokenId);
+    const minOrderSize = this.resolveCommandMinOrderSize(cmd);
+    if (!position || !isPositionDust(position.size, minOrderSize)) return;
     const legStateRepo = this.deps.legStateRepo;
     const executionPolicy = this.deps.executionPolicy;
     if (!legStateRepo || !executionPolicy) return;

@@ -6,6 +6,7 @@ import type {
   LegState,
   NormalizedMarket,
   Position,
+  SellOrderSizingContext,
   TokenId,
   TradeDecisionAction,
 } from "@krabs/domain";
@@ -18,6 +19,7 @@ import {
   evaluateMinMarketAge,
   evaluateR23DipTrigger,
   evaluateSize,
+  computeSellSizingPlan,
   H5_WIDE_COHORT_GUARD_REASON,
   isAbandoned,
   isAlive,
@@ -179,6 +181,7 @@ export type DecisionPlanningInput = {
   r23MaxMidpoint: number | null;
   dropReferencePrice: number | null;
   postBuyCooldown: { cooldownMs: number; ageMs: number; lastBuyFillAt: number } | null;
+  latestSellOrder: SellOrderSizingContext | null;
 };
 
 const SELL_ONLY: ReadonlySet<TradeDecisionAction> = new Set(["SELL"]);
@@ -750,8 +753,20 @@ function buildSignalDraft(args: {
   const sizeRules = decision.action === "BUY" ? input.buySizeRules : input.sellSizeRules;
   const nthBuy = buyCount + 1;
   const sizeResult = evaluateSize(decision.action, { state, price, nthBuy, buyCount }, sizeRules);
-  const suggestedSizeUsdc = sizeResult.sizeUsdc;
-  const suggestedSize = price > 0 ? suggestedSizeUsdc / price : 0;
+  const sellPlan =
+    side === "sell" && input.position
+      ? computeSellSizingPlan({
+          position: input.position,
+          sellCount: input.legState?.sellCount ?? 0,
+          price,
+          nowMs: input.now,
+          marketMinOrderSize: market.minOrderSize,
+          latestSellOrder: input.latestSellOrder,
+          sellTimeoutMs: input.executionPolicy?.sellTimeoutMs,
+        })
+      : null;
+  const suggestedSizeUsdc = sellPlan?.sizeUsdc ?? sizeResult.sizeUsdc;
+  const suggestedSize = sellPlan?.size ?? (price > 0 ? suggestedSizeUsdc / price : 0);
   const sizeForExecutability =
     side === "buy"
       ? computeBuyOrderSizeForFilter(suggestedSizeUsdc, market, price)

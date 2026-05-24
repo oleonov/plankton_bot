@@ -32,6 +32,7 @@ import {
   canPlaceBuyOrderForMarket,
   createCommandId,
   isAlive,
+  isSellTimeoutReplacement,
   recordStageDuration,
 } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
@@ -571,38 +572,59 @@ export class SignalToOrderBridge {
         policy,
       );
       if (duplicateSell) {
-        this.log.debug(
-          {
-            signalId: signal.signalId,
-            tokenId: signal.tokenId,
-            existingOrderId: duplicateSell.orderId,
-            existingPrice: duplicateSell.price,
-            executionPrice: executionTerms.price,
-            cacheStatus: pricing.cacheStatus,
-          },
-          "approved SELL skipped — acceptable-price sell order already open",
-        );
-        await this.publishConversionSkipped(
-          signal,
-          "execution-terms",
-          ["sell-order-acceptable-price-already-open"],
-          {
-            cacheStatus: pricing.cacheStatus,
-            existingOrderId: String(duplicateSell.orderId),
-            existingPrice: duplicateSell.price,
-            executionPrice: executionTerms.price,
-          },
-        );
-        this.writeObservation({
-          signal,
-          clientOrderId: null,
-          market,
-          policy,
-          executionTerms,
-          canary,
-          skippedReason: "sell-order-acceptable-price-already-open",
+        const timedOutSizeReplacement = isSellTimeoutReplacement({
+          existingOrder: duplicateSell,
+          requestedSize: orderSize,
+          nowMs,
+          sellTimeoutMs: policy.sellTimeoutMs,
         });
-        return;
+        if (timedOutSizeReplacement) {
+          this.log.info(
+            {
+              signalId: signal.signalId,
+              tokenId: signal.tokenId,
+              existingOrderId: duplicateSell.orderId,
+              existingSize: duplicateSell.size,
+              requestedSize: orderSize,
+              existingPrice: duplicateSell.price,
+              executionPrice: executionTerms.price,
+            },
+            "approved SELL continuing — timed-out sell size escalation",
+          );
+        } else {
+          this.log.debug(
+            {
+              signalId: signal.signalId,
+              tokenId: signal.tokenId,
+              existingOrderId: duplicateSell.orderId,
+              existingPrice: duplicateSell.price,
+              executionPrice: executionTerms.price,
+              cacheStatus: pricing.cacheStatus,
+            },
+            "approved SELL skipped — acceptable-price sell order already open",
+          );
+          await this.publishConversionSkipped(
+            signal,
+            "execution-terms",
+            ["sell-order-acceptable-price-already-open"],
+            {
+              cacheStatus: pricing.cacheStatus,
+              existingOrderId: String(duplicateSell.orderId),
+              existingPrice: duplicateSell.price,
+              executionPrice: executionTerms.price,
+            },
+          );
+          this.writeObservation({
+            signal,
+            clientOrderId: null,
+            market,
+            policy,
+            executionTerms,
+            canary,
+            skippedReason: "sell-order-acceptable-price-already-open",
+          });
+          return;
+        }
       }
 
       if (signal.side === "sell" && this.deps.orderLifetime) {

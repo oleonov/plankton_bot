@@ -115,6 +115,8 @@ function makeOpenSellOrder(overrides?: Partial<Order>): Order {
     size: 5,
     sizeUsdc: 0.5,
     signalReason: "repricing-exit",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     ...overrides,
   };
 }
@@ -2187,6 +2189,45 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       existingPrice: 0.1,
       executionPrice: 0.1,
     });
+  });
+
+  it("allows timed-out same-price SELL replacement when the split size changes", async () => {
+    const orderRepo = {
+      findByTokenId: vi.fn(() => [
+        makeOpenSellOrder({
+          price: 0.1,
+          size: 10,
+          createdAt: new Date(
+            Date.now() - DEFAULT_EXECUTION_POLICY.sellTimeoutMs - 1,
+          ).toISOString(),
+        }),
+      ]),
+    } as unknown as OrderRepository;
+    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, {
+      orderRepo,
+      policyOverrides: { exitPricingMode: "edge" },
+    });
+    const sellSignal: Signal = {
+      ...makeSignal(),
+      side: "sell",
+      suggestedPrice: 0.2,
+      suggestedSize: 5.73,
+      reason: "repricing-exit",
+    };
+    const market = makeMarket({ bestBid: 0.02, bestAsk: 0.1, midPrice: 0.06, tickSize: 0.001 });
+
+    await bus.publish("SignalApproved", {
+      signal: sellSignal,
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(
+      skipped.some((event) => event.reasons.includes("sell-order-acceptable-price-already-open")),
+    ).toBe(false);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.size).toBe(5.73);
   });
 
   it("allows a replacement SELL after the old same-price order is already cancelled", async () => {

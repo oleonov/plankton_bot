@@ -170,6 +170,7 @@ function input(overrides: Partial<DecisionPlanningInput> = {}): DecisionPlanning
     r23MaxMidpoint: 0.2,
     dropReferencePrice: null,
     postBuyCooldown: null,
+    latestSellOrder: null,
     ...overrides,
   };
 }
@@ -208,6 +209,29 @@ describe("evaluateDecisionPlan", () => {
     if (result.type !== "signal") return;
     expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
     expect(result.signal.side).toBe("sell");
+  });
+
+  it("uses full-close sizing for small profitable residual positions", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({
+          buyCount: 1,
+          sellCount: 3,
+          cumulativeBuySize: 17.64,
+          cumulativeBuyNotional: 4.41,
+          cumulativeSellSize: 0,
+        }),
+        position: position({ avgEntryPrice: 0.25, costBasisUsdc: 4.41, size: 17.64 }),
+        market: market({ midPrice: 0.535, minOrderSize: 5 }),
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.side).toBe("sell");
+    expect(result.signal.suggestedSize).toBeCloseTo(17.64, 8);
+    expect(result.signal.suggestedSizeUsdc).toBeCloseTo(9.4374, 8);
   });
 
   it("records H5 guard suppression for S2 long-horizon D9 cohort", () => {

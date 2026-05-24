@@ -849,6 +849,8 @@ export interface ExecutionPolicy {
   entryMinMarketAgeSeconds: number;
   exitOrderTtlMs: number;
   exitTtlByLiquidity: ExitTtlByLiquidityPolicyConfig;
+  /** v064a: age after which an unfilled SELL escalates from single close to split sizing. */
+  sellTimeoutMs: number;
   sellReplaceMinPriceDeltaTicks?: number;
   exitRepriceThresholdPct: number;
   exitRepriceThresholdTicks: number;

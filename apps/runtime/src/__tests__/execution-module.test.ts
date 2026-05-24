@@ -263,6 +263,14 @@ function getRejectOrderCaller(mod: ExecutionModule): {
   };
 }
 
+function getExecutePlaceCaller(mod: ExecutionModule): {
+  executePlace(cmd: PlaceOrderCommand): Promise<void>;
+} {
+  return mod as unknown as {
+    executePlace(cmd: PlaceOrderCommand): Promise<void>;
+  };
+}
+
 function looksLikeMinSizeError(message: string | null | undefined, details: unknown): boolean {
   return (
     ExecutionModule as unknown as {
@@ -1284,7 +1292,7 @@ describe("ExecutionModule", () => {
     await reserveMod.stop();
   });
 
-  it("increments dust counter for execution-level SELL reserved-token-limit rejects", async () => {
+  it("does NOT increment dust counter for reserved-token-limit rejects (v064a)", async () => {
     const legStateRepo = createMockLegStateRepo();
     const dustMod = new ExecutionModule({
       gateway,
@@ -1314,16 +1322,9 @@ describe("ExecutionModule", () => {
       );
     }
 
-    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledTimes(10);
-    expect(legStateRepo.incrementSellResidualReject).toHaveBeenLastCalledWith(
-      createTokenId("tok-yes"),
-      expect.any(String),
-      { threshold: DEFAULT_EXECUTION_POLICY.dustAbandonment.maxConsecutiveRejects, price: 0.17 },
-    );
-    expect(vi.mocked(legStateRepo.incrementSellResidualReject).mock.results[9]!.value).toEqual({
-      count: 10,
-      markedAbandoned: true,
-    });
+    // v064a narrowed dust counter to position.size < min, not counter pollution
+    // from unrelated rejects like reserved-token-limit.
+    expect(legStateRepo.incrementSellResidualReject).not.toHaveBeenCalled();
   });
 
   it("does not increment dust counter for non-dust reasons or BUY rejects", async () => {
@@ -1364,7 +1365,7 @@ describe("ExecutionModule", () => {
     expect(legStateRepo.incrementSellResidualReject).not.toHaveBeenCalled();
   });
 
-  it("increments dust counter for gateway-level SELL min-size rejects", async () => {
+  it("does NOT increment dust counter for gateway min-size reject if position size >= min", async () => {
     const legStateRepo = createMockLegStateRepo();
     (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: false,
@@ -1383,7 +1384,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      positionRepo: createMockPositionRepo(makePosition({ size: 17.64 })),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1404,17 +1405,13 @@ describe("ExecutionModule", () => {
         side: "sell",
         size: 3.66,
         price: 0.17,
+        metadata: { marketData: { minOrderSize: 5 } },
       }),
       timestamp: Date.now(),
     });
     await bus.drain();
 
-    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledTimes(1);
-    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledWith(
-      createTokenId("tok-yes"),
-      expect.any(String),
-      { threshold: DEFAULT_EXECUTION_POLICY.dustAbandonment.maxConsecutiveRejects, price: 0.17 },
-    );
+    expect(legStateRepo.incrementSellResidualReject).not.toHaveBeenCalled();
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toBe("exchange returned no order id");
     const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Order;
@@ -1422,6 +1419,55 @@ describe("ExecutionModule", () => {
     expect(savedOrder.exchangeRejectionReason).toBe("rejection_min_size");
 
     await dustMod.stop();
+  });
+
+  it("increments dust counter for gateway min-size reject if position size < min", async () => {
+    const legStateRepo = createMockLegStateRepo();
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: false,
+      errorCode: "UNKNOWN",
+      errorMessage: "exchange returned no order id",
+      errorDetails: {
+        responseBody: {
+          error: "order is invalid. Size (2) lower than the minimum: 5",
+          status: 400,
+        },
+      },
+    });
+    const dustMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 2 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      legStateRepo,
+    });
+    const executePlace = getExecutePlaceCaller(dustMod).executePlace.bind(dustMod);
+
+    await executePlace(
+      makePlaceCmd({
+        commandId: createCommandId("sell-gateway-true-dust-reject"),
+        clientOrderId: "plk_sell_gateway_true_dust_reject" as ClientOrderId,
+        side: "sell",
+        size: 2,
+        price: 0.17,
+        metadata: { marketData: { minOrderSize: 5 } },
+      }),
+    );
+
+    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledTimes(1);
+    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledWith(
+      createTokenId("tok-yes"),
+      expect.any(String),
+      { threshold: DEFAULT_EXECUTION_POLICY.dustAbandonment.maxConsecutiveRejects, price: 0.17 },
+    );
+    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Order;
+    expect(savedOrder.exchangeRejectionReason).toBe("rejection_min_size");
   });
 
   it("does not increment dust counter for non-min gateway rejects or BUY min-size rejects", async () => {

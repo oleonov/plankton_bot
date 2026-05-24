@@ -75,6 +75,7 @@ function input(token: string): DecisionPlanningInput {
     r23MaxMidpoint: null,
     dropReferencePrice: null,
     postBuyCooldown: null,
+    latestSellOrder: null,
   };
 }
 

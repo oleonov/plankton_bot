@@ -56,6 +56,12 @@ const envSchema = z
       .enum(["true", "false"])
       .default("true")
       .transform((v) => v === "true"),
+    SELL_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(24 * 60 * 60_000)
+      .optional(),
     POLY_API_KEY: z.string().optional(),
     POLY_API_SECRET: z.string().optional(),
     POLY_PASSPHRASE: z.string().optional(),
@@ -232,6 +238,7 @@ export interface AppConfig {
   executionSellBalanceRejectBlockEnabled: boolean;
   executionSellBalanceRejectBlockMs: number;
   executionSellExchangeReservedEnabled: boolean;
+  sellTimeoutMs?: number | undefined;
   polyApiKey: string | undefined;
   polyApiSecret: string | undefined;
   polyPassphrase: string | undefined;
@@ -343,6 +350,7 @@ export function loadEnv(envPath?: string): AppConfig {
     executionSellBalanceRejectBlockEnabled: env.EXECUTION_SELL_BALANCE_REJECT_BLOCK_ENABLED,
     executionSellBalanceRejectBlockMs: env.EXECUTION_SELL_BALANCE_REJECT_BLOCK_MS,
     executionSellExchangeReservedEnabled: env.EXECUTION_SELL_EXCHANGE_RESERVED_ENABLED,
+    sellTimeoutMs: env.SELL_TIMEOUT_MS,
     polyApiKey: env.POLY_API_KEY,
     polyApiSecret: env.POLY_API_SECRET,
     polyPassphrase: env.POLY_PASSPHRASE,

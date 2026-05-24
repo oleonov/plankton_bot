@@ -37,6 +37,8 @@ import type {
   TradeDecisionAction,
   LegState,
   Position,
+  OrderRepository,
+  SellOrderSizingContext,
 } from "@krabs/domain";
 import {
   deriveState,
@@ -56,6 +58,7 @@ import {
   R23_NO_HISTORY_REASON,
   isAbandoned,
   shouldRecoverFromPriceMove,
+  computeSellSizingPlan,
 } from "@krabs/domain";
 import { readContinuationMode, readContinuationModeVersion } from "@krabs/db";
 import type { EvalContext } from "@krabs/domain";
@@ -431,6 +434,7 @@ export interface AlgoDecisionModuleDeps {
    * Optional: omitted only by tests that don't exercise SELL telemetry.
    */
   positionRepo?: Pick<PositionRepository, "findByTokenId" | "findOpen"> | undefined;
+  orderRepo?: Pick<OrderRepository, "findByTokenId" | "findRecentByTokenId"> | undefined;
   decisionSignalLogRepo?: DecisionSignalLogRepository | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
   selectedMarketCache: SelectedMarketCache;
@@ -1353,6 +1357,26 @@ export class AlgoDecisionModule implements RuntimeModule {
       r23MaxMidpoint,
       dropReferencePrice,
       postBuyCooldown,
+      latestSellOrder: legState ? this.getLatestSellOrderForSizing(tokenId) : null,
+    };
+  }
+
+  private getLatestSellOrderForSizing(tokenId: TokenId): SellOrderSizingContext | null {
+    const repo = this.deps.orderRepo;
+    if (!repo) return null;
+    const orders =
+      repo.findRecentByTokenId?.(tokenId, 20) ??
+      repo
+        .findByTokenId(tokenId)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const latest = orders.find((order) => order.side === "sell");
+    if (!latest) return null;
+    return {
+      size: latest.size,
+      fillProgressShares: latest.fillProgressShares ?? null,
+      createdAt: latest.createdAt,
+      status: latest.status,
+      cancelReason: latest.cancelReason ?? null,
     };
   }
 
@@ -2285,8 +2309,21 @@ export class AlgoDecisionModule implements RuntimeModule {
     const seqKey = `${market.tokenId}|${side}`;
     const sequenceInTick = nextSeq(seqKey);
 
-    const suggestedSizeUsdc = sizeResult.sizeUsdc;
-    const suggestedSize = ctx.price > 0 ? suggestedSizeUsdc / ctx.price : 0;
+    const position = side === "sell" ? this.getCachedPosition(market.tokenId) : null;
+    const sellPlan =
+      side === "sell" && position
+        ? computeSellSizingPlan({
+            position,
+            sellCount: this.getCachedLegState(market.tokenId)?.sellCount ?? 0,
+            price: ctx.price,
+            nowMs: now,
+            marketMinOrderSize: market.minOrderSize,
+            latestSellOrder: this.getLatestSellOrderForSizing(market.tokenId),
+            sellTimeoutMs: this.deps.executionPolicy?.().sellTimeoutMs,
+          })
+        : null;
+    const suggestedSizeUsdc = sellPlan?.sizeUsdc ?? sizeResult.sizeUsdc;
+    const suggestedSize = sellPlan?.size ?? (ctx.price > 0 ? suggestedSizeUsdc / ctx.price : 0);
 
     // Pre-filter signals whose size CANNOT meet `market.minOrderSize` under
     // any realistic execution price. The downstream check in

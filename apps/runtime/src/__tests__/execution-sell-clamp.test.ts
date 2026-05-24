@@ -13,6 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
+  DEFAULT_EXECUTION_POLICY,
   createTokenId,
   createCommandId,
   createBotRunId,
@@ -171,6 +172,21 @@ function createMockPositionRepo(
     updateSize: vi.fn(),
     close: vi.fn(),
   } as unknown as PositionRepository;
+}
+
+function createMockLegStateRepo() {
+  return {
+    get: vi.fn().mockReturnValue(null),
+    upsert: vi.fn(),
+    delete: vi.fn(),
+    getAll: vi.fn().mockReturnValue([]),
+    incrementSellResidualReject: vi.fn().mockReturnValue({
+      count: 1,
+      markedAbandoned: false,
+    }),
+    markAbandoned: vi.fn(),
+    recoverAbandoned: vi.fn(),
+  };
 }
 
 function makeOpenSellOrder(overrides: Partial<Order> = {}): Order {
@@ -348,7 +364,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     });
   });
 
-  it("does not clamp up when SELL intent already meets min", () => {
+  it("clamps to full available size when a SELL would leave an orphan residual", () => {
     const mod = new ExecutionModule({
       gateway,
       bus,
@@ -368,7 +384,17 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
       }),
     );
 
-    expect(decision.kind).toBe("accept");
+    expect(decision).toMatchObject({
+      kind: "clamp",
+      newSize: 6.85,
+      details: {
+        availableSize: 6.85,
+        intentSize: 5,
+        minOrderSize: 5,
+        clampDirection: "up-to-available",
+        reason: "orphan-residual-below-min",
+      },
+    });
   });
 
   it("preserves DOWN clamp when SELL intent exceeds available residual", () => {
@@ -415,6 +441,117 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     });
 
     expect(reservationDecision(mod, makeSellCmd(3.67)).kind).toBe("accept");
+  });
+
+  it("increments dust counter only when the actual position is below min order size", async () => {
+    const legStateRepo = createMockLegStateRepo();
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(2),
+      legStateRepo: legStateRepo as any,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(3.67, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("sell-residual-below-min-order-size");
+    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledTimes(1);
+
+    await mod.stop();
+  });
+
+  it("does not increment dust counter for a below-min intent on a sellable position", async () => {
+    const legStateRepo = createMockLegStateRepo();
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(6.85),
+      legStateRepo: legStateRepo as any,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      allowSellSizeClamp: true,
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(3.67, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(gateway.placeOrder).mock.calls[0]![0].size).toBe(6.85);
+    expect(legStateRepo.incrementSellResidualReject).not.toHaveBeenCalled();
+
+    await mod.stop();
+  });
+
+  it("does not increment dust counter for acceptable-open-order rejects", async () => {
+    const legStateRepo = createMockLegStateRepo();
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([
+      makeOpenSellOrder({
+        price: 0.5,
+        size: 5,
+        createdAt: new Date().toISOString(),
+      }),
+    ]);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(10),
+      legStateRepo: legStateRepo as any,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(5, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("sell-order-acceptable-price-already-open");
+    expect(legStateRepo.incrementSellResidualReject).not.toHaveBeenCalled();
+
+    await mod.stop();
   });
 
   it("does not trigger clamp-up for invalid zero minOrderSize metadata", () => {
@@ -771,7 +908,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
   });
 
   it("allows SELL against a dust-labelled position that still has enough shares", async () => {
-    const positionRepo = createMockPositionRepo(10, "dust");
+    const positionRepo = createMockPositionRepo(12, "dust");
     const mod = new ExecutionModule({
       gateway,
       bus,

@@ -38,6 +38,25 @@ export {
 } from "./execution-policy.js";
 export type { ParseResult } from "./execution-policy.js";
 export {
+  DEFAULT_SELL_TIMEOUT_MS,
+  computeSellSize,
+  computeSellSizingPlan,
+  estimateTotalSells,
+  isPositionDust,
+  isSellOrderTimedOut,
+  isSellTimeoutReplacement,
+  normalizeSellSizeForMinOrder,
+  sellOrderAgeMs,
+} from "./sell-sizing.js";
+export type {
+  ExpectedTotalSells,
+  SellMinOrderClampReason,
+  SellMinOrderNormalization,
+  SellOrderSizingContext,
+  SellSizingPlan,
+  SellSizingPosition,
+} from "./sell-sizing.js";
+export {
   DEFAULT_PROFIT_TARGET_POLICY,
   D8_HOLD_SECONDS_MIN,
   D8_THRESHOLD_BUCKETS,

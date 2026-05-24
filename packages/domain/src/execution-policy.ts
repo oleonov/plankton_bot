@@ -38,6 +38,7 @@ import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
 import { DEFAULT_PROFIT_TARGET_POLICY } from "./d8-profit-target.js";
 import { DEFAULT_DUST_ABANDONMENT_POLICY } from "./dust-abandonment.js";
 import { DEFAULT_REPRICE_CHAIN_POLICY } from "./reprice-chain.js";
+import { DEFAULT_SELL_TIMEOUT_MS } from "./sell-sizing.js";
 import type { D9LossExitPolicy } from "./d9-loss-exit.js";
 
 export const DEFAULT_DEAD_SIDE_GUARD: DeadSideGuardPolicy = {
@@ -231,6 +232,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   entryMinMarketAgeSeconds: DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS,
   exitOrderTtlMs: 4 * 60 * 60_000,
   exitTtlByLiquidity: DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY,
+  sellTimeoutMs: DEFAULT_SELL_TIMEOUT_MS,
   sellReplaceMinPriceDeltaTicks: 2,
   exitRepriceThresholdPct: 0.3,
   exitRepriceThresholdTicks: 10,
@@ -292,6 +294,8 @@ const BOUND_ENTRY_CEILING_MIN = 0.05;
 const BOUND_ENTRY_CEILING_MAX = 0.99;
 const BOUND_EXIT_TTL_MIN_MS = 10_000;
 const BOUND_EXIT_TTL_MAX_MS = 24 * 60 * 60_000;
+const BOUND_SELL_TIMEOUT_MIN_MS = 60_000;
+const BOUND_SELL_TIMEOUT_MAX_MS = 24 * 60 * 60_000;
 const BOUND_SELL_REPLACE_MIN_PRICE_DELTA_TICKS_MIN = 1;
 const BOUND_SELL_REPLACE_MIN_PRICE_DELTA_TICKS_MAX = 20;
 const BOUND_ENTRY_MIN_AGE_MIN_S = 0;
@@ -379,6 +383,14 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
     "exitOrderTtlMs",
   );
   const exitTtlByLiquidity = parseExitTtlByLiquidity(obj.exitTtlByLiquidity, issues);
+  const sellTimeoutMs = clampedInt(
+    obj.sellTimeoutMs,
+    DEFAULT_EXECUTION_POLICY.sellTimeoutMs,
+    BOUND_SELL_TIMEOUT_MIN_MS,
+    BOUND_SELL_TIMEOUT_MAX_MS,
+    issues,
+    "sellTimeoutMs",
+  );
   const sellReplaceMinPriceDeltaTicks = clampedInt(
     obj.sellReplaceMinPriceDeltaTicks,
     DEFAULT_EXECUTION_POLICY.sellReplaceMinPriceDeltaTicks ?? 2,
@@ -472,6 +484,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       entryMinMarketAgeSeconds,
       exitOrderTtlMs,
       exitTtlByLiquidity,
+      sellTimeoutMs,
       sellReplaceMinPriceDeltaTicks,
       exitRepriceThresholdPct,
       exitRepriceThresholdTicks,

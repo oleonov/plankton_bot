@@ -691,7 +691,10 @@ async function main(): Promise<void> {
   });
   const currentExecutionPolicy = () => {
     executionPolicyProvider.refreshIfStale();
-    return executionPolicyProvider.snapshot();
+    const snapshot = executionPolicyProvider.snapshot();
+    return config.sellTimeoutMs == null
+      ? snapshot
+      : { ...snapshot, sellTimeoutMs: config.sellTimeoutMs };
   };
 
   // ADR-016 — market-wide trade-count provider for the post-entry continuation
@@ -993,6 +996,7 @@ async function main(): Promise<void> {
     legStateRepo: repos.legState,
     algoRulesRepo: repos.algoRules,
     positionRepo: repos.position,
+    orderRepo: repos.order,
     decisionSignalLogRepo: repos.decisionSignalLog,
     riskEventRepo: repos.riskEvent,
     decisionPersistenceMode: "worker",

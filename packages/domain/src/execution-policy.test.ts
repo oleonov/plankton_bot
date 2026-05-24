@@ -39,6 +39,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       entryPriceCeiling: 0.6,
       exitOrderTtlMs: 600_000,
       exitTtlByLiquidity: { enabled: true, thinMs: 86_400_000, mediumMs: 21_600_000 },
+      sellTimeoutMs: 21_600_000,
       sellReplaceMinPriceDeltaTicks: 3,
       exitRepriceThresholdPct: 0.25,
       exitRepriceThresholdTicks: 8,
@@ -160,6 +161,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       thinMs: 86_400_000,
       mediumMs: 21_600_000,
     });
+    expect(policy.sellTimeoutMs).toBe(21_600_000);
     expect(policy.sellReplaceMinPriceDeltaTicks).toBe(3);
     expect(policy.exitRepriceThresholdPct).toBe(0.25);
     expect(policy.exitRepriceThresholdTicks).toBe(8);
@@ -256,6 +258,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       thinMs: 24 * 60 * 60_000,
       mediumMs: 6 * 60 * 60_000,
     });
+    expect(DEFAULT_EXECUTION_POLICY.sellTimeoutMs).toBe(6 * 60 * 60_000);
   });
 
   it("accepts the 24h exit TTL parser bound", () => {
