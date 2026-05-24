@@ -36,4 +36,10 @@ export const MARKET_DATA_TEST_DEFAULTS = {
   marketDataFallbackPollRatePerSec: 5,
   marketDataStaleTokenAgeMs: 30_000,
   universeFunnelLogIntervalMs: 60_000,
+  // v063 — guard disabled in tests: in-memory test DBs are tiny and must never trip it.
+  dbSizeGuard: {
+    enabled: false,
+    thresholdBytes: 30_000_000_000,
+    checkIntervalMs: 60_000,
+  },
 };
