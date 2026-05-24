@@ -184,7 +184,7 @@ export function isSellTimeoutReplacement(args: {
   readonly existingOrder: SellOrderSizingContext;
   readonly requestedSize: number;
   readonly nowMs: number;
-  readonly sellTimeoutMs?: number | null;
+  readonly sellTimeoutMs: number | null | undefined;
 }): boolean {
   if (!isSellOrderTimedOut(args.existingOrder, args.nowMs, args.sellTimeoutMs)) return false;
   const existingRemainingSize = remainingOrderSize(args.existingOrder);

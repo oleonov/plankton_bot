@@ -163,6 +163,7 @@ describe("Plankton-aligned SELL sizing", () => {
         },
         requestedSize: 43.58,
         nowMs,
+        sellTimeoutMs: undefined,
       }),
     ).toBe(false);
   });
