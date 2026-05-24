@@ -160,6 +160,19 @@ const envSchema = z
       .min(5_000)
       .max(3_600_000)
       .default(60_000),
+    // v063 — ledger DB size guard. Safety net that pauses the bot if the ledger
+    // file outgrows the disk faster than retention can sweep it (see
+    // research_plankton/krabs_russia_ticker_rate_investigation_2026-05-24.md).
+    DB_SIZE_GUARD_ENABLED: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((v) => v === "true"),
+    DB_SIZE_GUARD_THRESHOLD_BYTES: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(30 * 1024 * 1024 * 1024),
+    DB_SIZE_GUARD_CHECK_INTERVAL_MS: z.coerce.number().int().min(1_000).default(60_000),
   })
   .superRefine((data, ctx) => {
     // When RUNTIME_MODE is undefined, mode comes from control.db — skip env validation
@@ -270,6 +283,12 @@ export interface AppConfig {
   algoDecisionWorkerBatchSize?: number;
   // ADR-018 (Step 1)
   universeFunnelLogIntervalMs: number;
+  // v063 — ledger DB size guard
+  dbSizeGuard: {
+    enabled: boolean;
+    thresholdBytes: number;
+    checkIntervalMs: number;
+  };
 }
 
 function findMonorepoRoot(): string {
@@ -369,5 +388,10 @@ export function loadEnv(envPath?: string): AppConfig {
     algoDecisionWorkerCount: env.ALGO_DECISION_WORKER_COUNT,
     algoDecisionWorkerBatchSize: env.ALGO_DECISION_WORKER_BATCH_SIZE,
     universeFunnelLogIntervalMs: env.UNIVERSE_FUNNEL_LOG_INTERVAL_MS,
+    dbSizeGuard: {
+      enabled: env.DB_SIZE_GUARD_ENABLED,
+      thresholdBytes: env.DB_SIZE_GUARD_THRESHOLD_BYTES,
+      checkIntervalMs: env.DB_SIZE_GUARD_CHECK_INTERVAL_MS,
+    },
   };
 }

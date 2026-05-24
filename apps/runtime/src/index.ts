@@ -134,6 +134,7 @@ import { UserOrderStreamModule } from "./modules/reconciliation/user-order-strea
 import { InventoryManagerModule } from "./modules/inventory-auto-merge/inventory-manager-module.js";
 import { FillPollerModule } from "./modules/fill-poller/fill-poller-module.js";
 import { LedgerRetentionModule } from "./modules/retention/ledger-retention-module.js";
+import { DbSizeGuardModule } from "./modules/db-size-guard/db-size-guard-module.js";
 import { ResolutionDetector } from "./modules/resolution/resolution-detector.js";
 import { PositionSettler } from "./modules/resolution/position-settler.js";
 import { MarketResolutionTracker } from "./modules/resolution/market-resolution-tracker.js";
@@ -1343,6 +1344,27 @@ async function main(): Promise<void> {
     log,
     runtimeControl,
   });
+  // v063 safety net: pause the bot through the normal operator-pause path
+  // (a system-initiated `pause` command, applied by the command-poller) if the
+  // ledger outgrows the disk faster than retention can sweep it. No auto-resume.
+  const dbSizeGuardModule = new DbSizeGuardModule({
+    dbPath: ledgerDbPath,
+    db: ledgerConn.db,
+    log,
+    config: config.dbSizeGuard,
+    runtimeControl,
+    recordTrigger: () => runtimeMetrics.writeCounter("db_size_guard_triggered_total"),
+    pause: (reason) => {
+      repos.operatorCommand.insert({
+        action: "pause",
+        targetId: null,
+        reason,
+        createdAt: new Date().toISOString(),
+        initiatorType: "system",
+        initiator: "db-size-guard",
+      });
+    },
+  });
 
   const modules: Array<[string, import("@krabs/domain").RuntimeModule]> = [
     ["command-poller", commandPoller],
@@ -1360,6 +1382,7 @@ async function main(): Promise<void> {
     ["risk-inventory", riskInventoryModule],
     ["profile-publisher", profilePublisher],
     ["ledger-retention", ledgerRetentionModule],
+    ["db-size-guard", dbSizeGuardModule],
     ["order-lifetime", orderLifetimeModule],
     ["same-price-cooldown", samePriceCooldownModule],
     ["reconciliation", reconciliationModule],
