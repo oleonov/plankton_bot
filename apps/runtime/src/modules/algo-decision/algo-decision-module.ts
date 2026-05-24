@@ -70,6 +70,7 @@ import {
   classifySoldBoughtRatioBucket,
 } from "../../executable-price.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
+import { SAME_PRICE_COOLDOWN_REASON } from "../same-price-cooldown/same-price-cooldown-module.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js";
 import { SlidingLatencyWindow, type LatencySnapshot } from "./decision-metrics.js";
@@ -497,6 +498,47 @@ const CONTINUATION_TRADE_COUNT_CAP = 6;
 const EVALUATE_YIELD_BATCH = 50;
 const DIRTY_EVALUATION_DELAY_MS = 250;
 const FULL_SWEEP_INTERVAL_MS = 60_000;
+
+/**
+ * Conversion-skip reasons that are pure functions of the cached
+ * market / price / liveness / open-order / leg state. A skip for any of these
+ * will deterministically reproduce the identical skip if we re-evaluate before
+ * the inputs change — and the inputs only change via events that already
+ * re-trigger evaluation (NormalizedMarketUpdated on a 250 ms debounce,
+ * LegStateUpdated, PositionUpdated, FillReceived) or the 60 s full sweep.
+ *
+ * Re-evaluating immediately (`scheduleDirtyEvaluation(0)`) on these reasons is a
+ * busy-loop: see research_plankton/krabs_russia_ticker_rate_investigation_2026-05-24.md
+ * — a single frozen-price dust leg drove a `same-price-cooldown` skip → 0 ms
+ * re-flush cycle at ~220 Hz, writing 27 M decision_signal_log rows in 58 h.
+ * Deferring these to the normal debounce collapses that to the ~4 Hz ceiling.
+ *
+ * Reasons NOT listed here (budget / placement-rate / order-lifetime gates that
+ * can clear on their own as time passes) keep the conservative immediate
+ * re-eval so a freed budget is acted on without waiting for the next event.
+ */
+const INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS: ReadonlySet<string> = new Set([
+  SAME_PRICE_COOLDOWN_REASON,
+  "sell-order-acceptable-price-already-open",
+  "order-size-below-minimum",
+  "dead-side-near-end",
+  "price-above-entry-ceiling",
+  "sell-price-below-signal-floor",
+]);
+
+/**
+ * Re-eval delay for a `SignalConversionSkipped`. Defers to the 250 ms debounce
+ * only when EVERY reason is inputs-unchanged (so the skip cannot resolve until
+ * an input-changing event re-triggers evaluation anyway). Empty/unknown reason
+ * lists keep the conservative immediate (0 ms) path.
+ */
+export function conversionSkipReEvalDelayMs(reasons: readonly string[]): number {
+  if (reasons.length === 0) return 0;
+  const allInputsUnchanged = reasons.every((reason) =>
+    INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS.has(reason),
+  );
+  return allInputsUnchanged ? DIRTY_EVALUATION_DELAY_MS : 0;
+}
 const NOISY_SUPPRESSION_DEDUPE_MS = 10 * 60 * 1000;
 // The suppression cache holds the last NOISY_SUPPRESSION_DEDUPE_MS (10 min)
 // of (tokenId, reason) pairs. At the worst observed signal-rate of ~15/sec ×
@@ -1011,7 +1053,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   ): Promise<void> {
     this.clearPendingByTokenId(String(payload.signal.tokenId));
     this.markDirty(payload.signal.tokenId);
-    this.scheduleDirtyEvaluation(0);
+    this.scheduleDirtyEvaluation(conversionSkipReEvalDelayMs(payload.reasons));
   }
 
   private async handleOrderCancelled(payload: RuntimeEventMap["OrderCancelled"]): Promise<void> {

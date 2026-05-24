@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { AlgoDecisionModule } from "../algo-decision-module.js";
+import { AlgoDecisionModule, conversionSkipReEvalDelayMs } from "../algo-decision-module.js";
 import type { SelectedMarketCache } from "../algo-decision-module.js";
 import type {
   EventBus,
@@ -4875,5 +4875,149 @@ describe("AlgoDecisionModule", () => {
 
       await mod.stop();
     });
+  });
+
+  // Surgical fix for the russia-ticker busy-loop (see
+  // research_plankton/krabs_russia_ticker_rate_investigation_2026-05-24.md):
+  // a frozen-price dust leg bounced a `same-price-cooldown` conversion skip
+  // back through `scheduleDirtyEvaluation(0)` at ~220 Hz. inputs-unchanged
+  // skips must defer to the 250 ms debounce; inputs-changeable skips keep the
+  // immediate re-eval.
+  describe("SignalConversionSkipped re-trigger throttling", () => {
+    function makeSkipSignal(tokenId: string): import("@krabs/domain").Signal {
+      return {
+        signalId: `sig-${tokenId}`,
+        tokenId: createTokenId(tokenId),
+        conditionId: "cond-1" as ConditionId,
+        side: "sell",
+        suggestedPrice: 0.32,
+        suggestedSize: 22,
+        suggestedSizeUsdc: 7,
+        reason: "reduce-only",
+        strategyTick: Date.now(),
+        sequenceInTick: 0,
+        decisionRuleId: "D5",
+        sizingRuleId: "FALLBACK-SELL",
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
+    function emitSkip(tokenId: string, reasons: string[]) {
+      return (bus as any).emit("SignalConversionSkipped", {
+        type: "SignalConversionSkipped",
+        signal: makeSkipSignal(tokenId),
+        stage: "execution-terms",
+        reasons,
+        diagnostics: {},
+        skippedAt: Date.now(),
+      });
+    }
+
+    it("schedules a debounced (250 ms) re-eval for a same-price-cooldown skip", async () => {
+      const tokenId = "token-cooldown-skip";
+      const mod = buildModule();
+      await mod.start();
+      const spy = vi.spyOn(
+        mod as unknown as { scheduleDirtyEvaluation: (n?: number) => void },
+        "scheduleDirtyEvaluation",
+      );
+
+      await emitSkip(tokenId, ["same-price-cooldown"]);
+
+      expect(spy).toHaveBeenCalledWith(250);
+      expect(spy).not.toHaveBeenCalledWith(0);
+      await mod.stop();
+    });
+
+    it("keeps the immediate (0 ms) re-eval for an inputs-changeable skip (budget-exhausted)", async () => {
+      const tokenId = "token-budget-skip";
+      const mod = buildModule();
+      await mod.start();
+      const spy = vi.spyOn(
+        mod as unknown as { scheduleDirtyEvaluation: (n?: number) => void },
+        "scheduleDirtyEvaluation",
+      );
+
+      await emitSkip(tokenId, ["budget-exhausted"]);
+
+      expect(spy).toHaveBeenCalledWith(0);
+      await mod.stop();
+    });
+
+    // Faithful closed-loop reproduction: every produced SELL bounces back as a
+    // same-price-cooldown skip (as RiskInventory does on a frozen tick). With
+    // the 250 ms debounce the loop is capped at ~4 re-evals/sec; the pre-fix
+    // 0 ms path emitted ~220/sec (and would blow vitest's timer-recursion cap).
+    it("caps a stuck same-price-cooldown leg to <10 re-evals per virtual second", async () => {
+      vi.useFakeTimers();
+      try {
+        const tokenId = "token-stuck-dust";
+        selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+        legStateRepo = createMockLegStateRepo([
+          makeSellReadyLegState(tokenId, { cumulativeBuySize: 22, cumulativeSellSize: 0 }),
+        ]);
+        const mod = buildModule();
+        await mod.start();
+
+        let emitted = 0;
+        (bus as any).subscribe(
+          "SignalProduced",
+          async (p: { signal: import("@krabs/domain").Signal }) => {
+            emitted += 1;
+            await (bus as any).emit("SignalConversionSkipped", {
+              type: "SignalConversionSkipped",
+              signal: p.signal,
+              stage: "execution-terms",
+              reasons: ["same-price-cooldown"],
+              diagnostics: {},
+              skippedAt: Date.now(),
+            });
+          },
+        );
+
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(tokenId, null, 0.65)],
+          timestamp: Date.now(),
+        });
+
+        await vi.advanceTimersByTimeAsync(1000);
+
+        expect(emitted).toBeGreaterThan(0);
+        expect(emitted).toBeLessThan(10);
+        await mod.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+});
+
+describe("conversionSkipReEvalDelayMs", () => {
+  it("defers a same-price-cooldown skip to the 250 ms debounce", () => {
+    expect(conversionSkipReEvalDelayMs(["same-price-cooldown"])).toBe(250);
+  });
+
+  it("defers when every reason is inputs-unchanged", () => {
+    expect(conversionSkipReEvalDelayMs(["same-price-cooldown", "order-size-below-minimum"])).toBe(
+      250,
+    );
+    expect(conversionSkipReEvalDelayMs(["dead-side-near-end"])).toBe(250);
+    expect(conversionSkipReEvalDelayMs(["price-above-entry-ceiling"])).toBe(250);
+    expect(conversionSkipReEvalDelayMs(["sell-price-below-signal-floor"])).toBe(250);
+    expect(conversionSkipReEvalDelayMs(["sell-order-acceptable-price-already-open"])).toBe(250);
+  });
+
+  it("keeps immediate re-eval for inputs-changeable reasons", () => {
+    expect(conversionSkipReEvalDelayMs(["budget-exhausted"])).toBe(0);
+    expect(conversionSkipReEvalDelayMs(["order-lifetime-placement-blocked"])).toBe(0);
+  });
+
+  it("keeps immediate re-eval when any reason is inputs-changeable", () => {
+    expect(conversionSkipReEvalDelayMs(["same-price-cooldown", "budget-exhausted"])).toBe(0);
+  });
+
+  it("keeps immediate re-eval for empty/unknown reason lists", () => {
+    expect(conversionSkipReEvalDelayMs([])).toBe(0);
+    expect(conversionSkipReEvalDelayMs(["totally-unknown-reason"])).toBe(0);
   });
 });
