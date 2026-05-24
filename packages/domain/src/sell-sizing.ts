@@ -174,10 +174,7 @@ export function normalizeSellSizeForMinOrder(args: {
   return { kind: "accept", size: desiredSize, reason: null };
 }
 
-export function isPositionDust(
-  positionSize: number,
-  marketMinOrderSize?: number | null | undefined,
-): boolean {
+export function isPositionDust(positionSize: number, marketMinOrderSize?: number | null): boolean {
   const minOrderSize = normalizeMinOrderSize(marketMinOrderSize);
   if (minOrderSize == null) return false;
   return normalizeSize(positionSize) + SIZE_EPSILON < minOrderSize;
@@ -187,7 +184,7 @@ export function isSellTimeoutReplacement(args: {
   readonly existingOrder: SellOrderSizingContext;
   readonly requestedSize: number;
   readonly nowMs: number;
-  readonly sellTimeoutMs?: number | null | undefined;
+  readonly sellTimeoutMs?: number | null;
 }): boolean {
   if (!isSellOrderTimedOut(args.existingOrder, args.nowMs, args.sellTimeoutMs)) return false;
   const existingRemainingSize = remainingOrderSize(args.existingOrder);
@@ -197,7 +194,7 @@ export function isSellTimeoutReplacement(args: {
 export function isSellOrderTimedOut(
   order: SellOrderSizingContext,
   nowMs: number,
-  sellTimeoutMs?: number | null | undefined,
+  sellTimeoutMs?: number | null,
 ): boolean {
   if (!canEscalateOrder(order)) return false;
   const ageMs = sellOrderAgeMs(order, nowMs);
@@ -337,7 +334,7 @@ function normalizeMinOrderSize(value?: number | null): number | null {
   return value;
 }
 
-function normalizeTimeoutMs(value?: number | null | undefined): number {
+function normalizeTimeoutMs(value?: number | null): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return DEFAULT_SELL_TIMEOUT_MS;
   }
