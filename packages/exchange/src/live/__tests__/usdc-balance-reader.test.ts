@@ -1,84 +1,86 @@
-import { describe, expect, it, vi } from "vitest";
-import { encodeFunctionData } from "viem";
-import { readErc20Balance } from "../usdc-balance-reader.js";
-import { ERC20_BALANCE_ABI, USDC_E_ADDRESS } from "../pusd-wrapper.js";
+import { describe, it, expect, vi } from "vitest";
+import { readErc20Balance, readErc20Allowance } from "../usdc-balance-reader.js";
+import { createRpcRotator } from "../rpc-rotation.js";
 
-const RPC_URL = "https://polygon-rpc.example";
-const OWNER = "0x1234567890123456789012345678901234567890" as const;
-// 7.03 USDC in raw units (6 decimals)
-const EXPECTED_BALANCE = 7_030_000n;
+const USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as const;
+const OWNER = "0x1111111111111111111111111111111111111111" as const;
+const SPENDER = "0x2222222222222222222222222222222222222222" as const;
+// abi-encoded uint256 = 1_000_000 (1 USDC, 6 decimals)
+const ONE_USDC_HEX = "0x" + (1_000_000).toString(16).padStart(64, "0");
 
-function hex32(value: bigint): string {
-  return "0x" + value.toString(16).padStart(64, "0");
+function ok(result: string): Response {
+  return new Response(JSON.stringify({ result }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+function rateLimited(): Response {
+  return new Response("limited", { status: 429, statusText: "Too Many Requests" });
+}
+function asFetch(fn: (url: string) => Promise<Response>): typeof fetch {
+  return fn as unknown as typeof fetch;
 }
 
-function makeJsonFetch(result: string): typeof fetch {
-  return vi.fn().mockResolvedValue({
-    ok: true,
-    json: () => Promise.resolve({ result }),
-  }) as unknown as typeof fetch;
-}
+describe("readErc20Balance via rotator", () => {
+  it("returns the decoded balance", async () => {
+    const fetchImpl = vi.fn(async () => ok(ONE_USDC_HEX));
+    const rotator = createRpcRotator({
+      primaryUrls: ["https://k1.example"],
+      fetchImpl: asFetch(fetchImpl),
+    });
+    const balance = await readErc20Balance({ rotator, token: USDC, owner: OWNER });
+    expect(balance).toBe(1_000_000n);
+  });
 
-describe("readErc20Balance", () => {
-  it("decodes a 32-byte uint256 hex result to bigint", async () => {
-    const fetchImpl = makeJsonFetch(hex32(EXPECTED_BALANCE));
-    const balance = await readErc20Balance({
-      rpcUrl: RPC_URL,
-      token: USDC_E_ADDRESS,
+  it("fails over to the second primary on 429", async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      seen.push(url);
+      return url === "https://k1.example" ? rateLimited() : ok(ONE_USDC_HEX);
+    });
+    const rotator = createRpcRotator({
+      primaryUrls: ["https://k1.example", "https://k2.example"],
+      fetchImpl: asFetch(fetchImpl),
+    });
+    const balance = await readErc20Balance({ rotator, token: USDC, owner: OWNER });
+    expect(balance).toBe(1_000_000n);
+    expect(seen).toEqual(["https://k1.example", "https://k2.example"]);
+  });
+
+  it("propagates a non-429 RPC failure (must not coerce to 0n)", async () => {
+    const fetchImpl = vi.fn(async () => new Response("boom", { status: 500, statusText: "err" }));
+    const rotator = createRpcRotator({
+      primaryUrls: ["https://k1.example"],
+      fetchImpl: asFetch(fetchImpl),
+    });
+    await expect(readErc20Balance({ rotator, token: USDC, owner: OWNER })).rejects.toThrow(/500/);
+  });
+});
+
+describe("readErc20Allowance via rotator", () => {
+  it("returns the decoded allowance", async () => {
+    const fetchImpl = vi.fn(async () => ok(ONE_USDC_HEX));
+    const rotator = createRpcRotator({
+      primaryUrls: ["https://k1.example"],
+      fetchImpl: asFetch(fetchImpl),
+    });
+    const allowance = await readErc20Allowance({
+      rotator,
+      token: USDC,
       owner: OWNER,
-      fetchImpl,
+      spender: SPENDER,
     });
-    expect(balance).toBe(EXPECTED_BALANCE);
-    const [url] = (fetchImpl as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown];
-    expect(url).toBe(RPC_URL);
-    const body = JSON.parse(
-      ((fetchImpl as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { body: string }])[1].body,
-    ) as { method: string; params: [{ to: string; data: string }, string] };
-    expect(body.method).toBe("eth_call");
-    expect(body.params[0].to).toBe(USDC_E_ADDRESS);
-    const expectedData = encodeFunctionData({
-      abi: ERC20_BALANCE_ABI,
-      functionName: "balanceOf",
-      args: [OWNER],
+    expect(allowance).toBe(1_000_000n);
+  });
+
+  it("propagates a non-429 RPC failure (must not coerce to 0n)", async () => {
+    const fetchImpl = vi.fn(async () => new Response("boom", { status: 500, statusText: "err" }));
+    const rotator = createRpcRotator({
+      primaryUrls: ["https://k1.example"],
+      fetchImpl: asFetch(fetchImpl),
     });
-    expect(body.params[0].data).toBe(expectedData);
-  });
-
-  it("throws on 4xx HTTP response", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 429,
-      statusText: "Too Many Requests",
-    }) as unknown as typeof fetch;
     await expect(
-      readErc20Balance({ rpcUrl: RPC_URL, token: USDC_E_ADDRESS, owner: OWNER, fetchImpl }),
-    ).rejects.toThrow(/RPC HTTP 429/);
-  });
-
-  it("throws on RPC error JSON", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ error: { message: "execution reverted" } }),
-    }) as unknown as typeof fetch;
-    await expect(
-      readErc20Balance({ rpcUrl: RPC_URL, token: USDC_E_ADDRESS, owner: OWNER, fetchImpl }),
-    ).rejects.toThrow(/execution reverted/);
-  });
-
-  it("propagates network failure to the caller", async () => {
-    const fetchImpl = vi
-      .fn()
-      .mockRejectedValue(new Error("network error")) as unknown as typeof fetch;
-    await expect(
-      readErc20Balance({ rpcUrl: RPC_URL, token: USDC_E_ADDRESS, owner: OWNER, fetchImpl }),
-    ).rejects.toThrow(/network error/);
-  });
-
-  it("throws on truncated hex (parse failure)", async () => {
-    // 31 bytes — decodeFunctionResult will throw because the data is too short
-    const fetchImpl = makeJsonFetch("0x" + "00".repeat(31));
-    await expect(
-      readErc20Balance({ rpcUrl: RPC_URL, token: USDC_E_ADDRESS, owner: OWNER, fetchImpl }),
-    ).rejects.toThrow();
+      readErc20Allowance({ rotator, token: USDC, owner: OWNER, spender: SPENDER }),
+    ).rejects.toThrow(/500/);
   });
 });

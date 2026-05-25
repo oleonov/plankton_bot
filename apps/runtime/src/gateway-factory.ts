@@ -9,8 +9,10 @@ import {
   LiveMarketDataGateway,
   LiveExchangeGateway,
   createCollateralResolver,
+  createRpcRotator,
   type UserEventStreamAuth,
 } from "@krabs/exchange";
+import { resolvePolygonRpcConfig } from "@krabs/config";
 
 const USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const PUSD_POLYGON = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
@@ -30,6 +32,10 @@ export interface CreateGatewaysInput {
   polygonRpcUrl?: string | undefined;
   /** Polygon RPC URLs in rotation order — retries the next endpoint when one is rate-limited. */
   polygonRpcUrls?: readonly string[] | undefined;
+  /** Additional Polygon RPC fallback endpoint appended after the primary rotation list. */
+  polygonRpcFallbackUrl?: string | undefined;
+  /** Alchemy Polygon API keys (not URLs). Mapped to primary RPC URLs in rotation order. */
+  alchemyPolygonKeys?: readonly string[] | undefined;
   onInfraAlert?:
     | ((alert: {
         code: string;
@@ -90,6 +96,8 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     initialBalanceUsdc,
     polygonRpcUrl,
     polygonRpcUrls,
+    polygonRpcFallbackUrl,
+    alchemyPolygonKeys,
     onInfraAlert,
     marketDataMaxTrackedTokens,
     marketDataMaxWsShards,
@@ -158,28 +166,28 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
   }
 
   // live-lite
-  const collateralRpcUrls =
-    polygonRpcUrls && polygonRpcUrls.length > 0
-      ? polygonRpcUrls
-      : polygonRpcUrl
-        ? [polygonRpcUrl]
-        : [];
-  const collateralResolver =
-    collateralRpcUrls.length > 0
-      ? createCollateralResolver({
-          rpcUrls: collateralRpcUrls,
-          conditionalTokensAddress: CONDITIONAL_TOKENS_POLYGON,
-          candidates: [USDC_POLYGON, PUSD_POLYGON],
-        })
-      : undefined;
+  const { primaryUrls, fallbackUrls } = resolvePolygonRpcConfig({
+    alchemyPolygonKeys,
+    polygonRpcUrls,
+    polygonRpcUrl,
+    polygonRpcFallbackUrl,
+  });
+  // ONE rotator per process: shared by the collateral resolver and the gateway's
+  // balance reader so the round-robin cursor is global, not per-consumer.
+  const rpcRotator = createRpcRotator({ primaryUrls, fallbackUrls });
+  const collateralResolver = createCollateralResolver({
+    rotator: rpcRotator,
+    conditionalTokensAddress: CONDITIONAL_TOKENS_POLYGON,
+    candidates: [USDC_POLYGON, PUSD_POLYGON],
+  });
   const liveExchangeConfig = {
     client: polyClient,
     settlementClient,
     ...(userWsAuth ? { userWsAuth } : {}),
     ...(traderAddress ? { traderAddress } : {}),
     ...(onInfraAlert ? { onInfraAlert } : {}),
-    ...(collateralResolver ? { collateralResolver } : {}),
-    ...(polygonRpcUrl ? { rpcUrl: polygonRpcUrl } : {}),
+    collateralResolver,
+    rpcRotator,
   };
   return {
     marketDataGateway: new LiveMarketDataGateway(liveMarketDataConfig),

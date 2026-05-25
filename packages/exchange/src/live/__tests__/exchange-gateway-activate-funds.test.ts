@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { LiveExchangeGateway } from "../exchange-gateway.js";
+import type { RpcRotator } from "../rpc-rotation.js";
+import { readErc20Balance, readErc20Allowance } from "../usdc-balance-reader.js";
 import { USDC_E_ADDRESS, USDC_NATIVE_ADDRESS, PUSD_WRAPPER_ADDRESS } from "../pusd-wrapper.js";
+
+/** Stub rotator — never actually called because __readErc20Balance/Allowance overrides are used. */
+const STUB_ROTATOR: RpcRotator = {
+  ethCall: vi.fn().mockRejectedValue(new Error("stub: should not be called")),
+};
 
 const TRADER = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 const MIN_WEI = 1_000_000n; // $1.00 at 6 decimals
@@ -18,8 +25,8 @@ function makeGateway(opts: {
 }): LiveExchangeGateway {
   const { balances = {}, allowances = {}, settlementExecute, onInfraAlert } = opts;
 
-  const readBalance = vi.fn(async (o: { token: string }) => balances[o.token] ?? 0n);
-  const readAllowance = vi.fn(async (o: { token: string }) => allowances[o.token] ?? 0n);
+  const readBalance = vi.fn<typeof readErc20Balance>(async (o) => balances[o.token] ?? 0n);
+  const readAllowance = vi.fn<typeof readErc20Allowance>(async (o) => allowances[o.token] ?? 0n);
 
   const settlementClient = settlementExecute ? { execute: settlementExecute } : undefined;
 
@@ -27,12 +34,10 @@ function makeGateway(opts: {
     client: { getOk: vi.fn() },
     settlementClient,
     traderAddress: TRADER,
-    rpcUrl: "https://polygon-rpc.example",
+    rpcRotator: STUB_ROTATOR,
     onInfraAlert,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    __readErc20Balance: readBalance as any,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    __readErc20Allowance: readAllowance as any,
+    __readErc20Balance: readBalance,
+    __readErc20Allowance: readAllowance,
   });
 }
 

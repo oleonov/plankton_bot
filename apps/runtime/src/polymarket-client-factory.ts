@@ -5,6 +5,7 @@ import {
   resolveRelayerSignatureType,
   type PolymarketRelayerConfig,
 } from "./relayer-config.js";
+import { resolvePolygonRpcConfig } from "@krabs/config";
 
 export interface PolymarketClientConfig {
   polyApiKey: string | undefined;
@@ -22,6 +23,7 @@ export interface PolymarketClientConfig {
   polygonRpcUrl: string;
   polygonRpcUrls?: readonly string[] | undefined;
   polygonRpcFallbackUrl?: string | undefined;
+  alchemyPolygonKeys?: readonly string[] | undefined;
 }
 
 export interface PolymarketClientFactoryInput {
@@ -58,6 +60,7 @@ export interface PolymarketClientFactoryDeps {
     rpcUrl: string;
     rpcUrls?: readonly string[] | undefined;
     rpcFallbackUrl?: string | undefined;
+    alchemyPolygonKeys?: readonly string[] | undefined;
     builderConfig?: unknown;
     walletType: "proxy" | "gnosis-safe";
   }) => Promise<SettlementClientLike> | SettlementClientLike;
@@ -214,6 +217,7 @@ export async function createPolymarketClient(
       rpcUrl: input.config.polygonRpcUrl,
       ...(input.config.polygonRpcUrls ? { rpcUrls: input.config.polygonRpcUrls } : {}),
       rpcFallbackUrl: input.config.polygonRpcFallbackUrl,
+      alchemyPolygonKeys: input.config.alchemyPolygonKeys,
       builderConfig: relayerBuilderConfig,
       walletType: relayerConfig.walletType,
     },
@@ -249,6 +253,7 @@ async function createSettlementClient(
     rpcUrl: string;
     rpcUrls?: readonly string[] | undefined;
     rpcFallbackUrl?: string | undefined;
+    alchemyPolygonKeys?: readonly string[] | undefined;
     builderConfig?: unknown;
     walletType: "proxy" | "gnosis-safe";
   },
@@ -270,10 +275,13 @@ async function createSettlementClient(
     import("viem/chains"),
   ]);
 
-  const rpcUrls = [
-    ...(config.rpcUrls && config.rpcUrls.length > 0 ? config.rpcUrls : [config.rpcUrl]),
-    ...(config.rpcFallbackUrl ? [config.rpcFallbackUrl] : []),
-  ].filter((url, index, urls) => urls.indexOf(url) === index);
+  const { primaryUrls, fallbackUrls } = resolvePolygonRpcConfig({
+    alchemyPolygonKeys: config.alchemyPolygonKeys,
+    polygonRpcUrls: config.rpcUrls,
+    polygonRpcUrl: config.rpcUrl,
+    polygonRpcFallbackUrl: config.rpcFallbackUrl,
+  });
+  const rpcUrls = [...primaryUrls, ...fallbackUrls];
   const transports = rpcUrls.map((url) => http(url));
   const transport = transports.length > 1 ? fallback(transports) : transports[0]!;
 

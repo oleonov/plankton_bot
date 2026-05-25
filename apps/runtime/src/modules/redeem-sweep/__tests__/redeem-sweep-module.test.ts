@@ -756,7 +756,7 @@ describe("RedeemSweepModule", () => {
     expect(h.redeemLogRows.some((row) => row.errorMsg === "missing_end_date")).toBe(false);
   });
 
-  it("hard-pauses all redeem sweeps for 5 minutes after Polygon RPC 429", async () => {
+  it("hard-pauses all redeem sweeps for the upstream reset window after Polygon RPC 429", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     const first = remotePosition({ tokenId: "tok-rate", conditionId: "cond-rate" });
@@ -765,7 +765,11 @@ describe("RedeemSweepModule", () => {
       positions: [first, later],
       redeemImpl: vi
         .fn()
-        .mockRejectedValueOnce(new Error("Polygon RPC 429 Too Many Requests"))
+        .mockRejectedValueOnce(
+          new Error(
+            '{"error":"request error","status":429,"data":{"error":"quota exceeded: 0 units remaining, resets in 5695 seconds"}}',
+          ),
+        )
         .mockResolvedValue({ status: "confirmed", conditionIds: ["cond-later"] }),
     });
     await h.module.start();
@@ -779,7 +783,11 @@ describe("RedeemSweepModule", () => {
     expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(5 * 60_000);
-    await runSweepForTest(h.module, "after-hard-pause");
+    await runSweepForTest(h.module, "default-hard-pause-expired");
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync((5_695 - 300) * 1_000 + 1);
+    await runSweepForTest(h.module, "after-upstream-reset");
     expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
     expect(h.gateway.redeemPositions).toHaveBeenLastCalledWith(["cond-later"], {
       redeemTokenIdsByCondition: { "cond-later": [createTokenId("tok-later")] },

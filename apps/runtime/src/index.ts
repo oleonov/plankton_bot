@@ -591,6 +591,7 @@ async function main(): Promise<void> {
         polygonRpcUrls: (config as typeof config & { polygonRpcUrls?: string[] }).polygonRpcUrls,
         polygonRpcFallbackUrl: (config as typeof config & { polygonRpcFallbackUrl?: string })
           .polygonRpcFallbackUrl,
+        alchemyPolygonKeys: config.alchemyPolygonKeys,
       };
       const builtClient = await createPolymarketClient({
         runtimeMode,
@@ -635,6 +636,8 @@ async function main(): Promise<void> {
           ? (config.polygonRpcUrl ?? "https://polygon-rpc.com")
           : undefined,
       polygonRpcUrls: runtimeMode === "live-lite" ? config.polygonRpcUrls : undefined,
+      polygonRpcFallbackUrl: runtimeMode === "live-lite" ? config.polygonRpcFallbackUrl : undefined,
+      alchemyPolygonKeys: runtimeMode === "live-lite" ? config.alchemyPolygonKeys : undefined,
       marketDataMaxTrackedTokens: config.marketDataMaxTrackedTokens,
       marketDataMaxWsShards: config.marketDataMaxWsShards,
       wsWorkerCount: config.wsWorkerCount,

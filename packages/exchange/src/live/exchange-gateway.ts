@@ -49,6 +49,7 @@ import {
   PUSD_WRAPPER_ADDRESS,
 } from "./pusd-wrapper.js";
 import { readErc20Balance, readErc20Allowance } from "./usdc-balance-reader.js";
+import type { RpcRotator } from "./rpc-rotation.js";
 
 export interface LiveExchangeConfig {
   /** ClobClient instance — typed as unknown to avoid SDK type leakage. */
@@ -79,8 +80,8 @@ export interface LiveExchangeConfig {
         details?: Record<string, unknown> | undefined;
       }) => void)
     | undefined;
-  /** Polygon RPC URL used for on-chain balance reads and the pUSD activation flow. */
-  rpcUrl?: string | null;
+  /** Shared read-path RPC rotator used for on-chain balance reads and the pUSD activation flow. */
+  rpcRotator?: RpcRotator | null;
   /** Override for balance reads — for testing without a live RPC. */
   __readErc20Balance?: typeof readErc20Balance;
   /** Override for allowance reads — for testing without a live RPC. */
@@ -274,7 +275,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       }) => void)
     | null;
   private readonly collateralResolver: CollateralResolver | null;
-  private readonly rpcUrl: string | null;
+  private readonly rpcRotator: RpcRotator | null;
   private readonly readErc20BalanceFn: typeof readErc20Balance;
   private readonly readErc20AllowanceFn: typeof readErc20Allowance;
   private readonly warnedCollateralFallback = new Set<string>();
@@ -300,7 +301,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
     this.createWebSocket = config.createWebSocket;
     this.onInfraAlert = config.onInfraAlert ?? null;
     this.collateralResolver = config.collateralResolver ?? null;
-    this.rpcUrl = config.rpcUrl ?? null;
+    this.rpcRotator = config.rpcRotator ?? null;
     this.readErc20BalanceFn = config.__readErc20Balance ?? readErc20Balance;
     this.readErc20AllowanceFn = config.__readErc20Allowance ?? readErc20Allowance;
   }
@@ -1136,7 +1137,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
   }): Promise<DepositActivationResult> {
     const settlementExecute = this.getSettlementExecuteMethod();
     const proxyAddress = this.traderAddress;
-    if (!settlementExecute || !proxyAddress || !this.rpcUrl) {
+    if (!settlementExecute || !proxyAddress || !this.rpcRotator) {
       return {
         status: "skipped_no_residue",
         perAsset: [],
@@ -1145,13 +1146,13 @@ export class LiveExchangeGateway implements ExchangeGateway {
       };
     }
 
-    const rpcUrl = this.rpcUrl;
+    const rotator = this.rpcRotator;
     const perAsset: Array<DepositActivationResult["perAsset"][number]> = [];
     const txs: SettlementTransaction[] = [];
 
     for (const asset of ACTIVATION_ASSETS) {
       const balance = await this.readErc20BalanceFn({
-        rpcUrl,
+        rotator,
         token: asset.address,
         owner: proxyAddress as `0x${string}`,
       });
@@ -1168,7 +1169,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       }
 
       const allowance = await this.readErc20AllowanceFn({
-        rpcUrl,
+        rotator,
         token: asset.address,
         owner: proxyAddress as `0x${string}`,
         spender: PUSD_WRAPPER_ADDRESS,

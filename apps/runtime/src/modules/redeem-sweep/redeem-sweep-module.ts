@@ -26,6 +26,7 @@ const STATE_FAILED_COOLDOWN_MS = 30 * 60_000;
 const STABILITY_SNAPSHOTS_REQUIRED = 2;
 const PAUSE_DEFER_RECHECK_MS = 30_000;
 const DEPOSIT_ACTIVATION_PERIODIC_COOLDOWN_MS = 60 * 60_000;
+const SECOND_MS = 1_000;
 
 interface RedeemSweepDeps {
   bus: EventBus;
@@ -620,7 +621,7 @@ export class RedeemSweepModule implements RuntimeModule {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const rateLimited = isRpcRateLimitError(err);
       const settlementFailed = isSettlementStateFailedError(err);
-      if (rateLimited) this.hardPauseSweep("POLYGON_RPC_RATE_LIMITED");
+      if (rateLimited) this.hardPauseSweep("POLYGON_RPC_RATE_LIMITED", err);
       for (const group of reservedGroups) {
         if (settlementFailed) {
           this.blockedUntilByCondition.set(
@@ -719,12 +720,17 @@ export class RedeemSweepModule implements RuntimeModule {
     return this.now() < this.sweepDisabledUntilMs;
   }
 
-  private hardPauseSweep(code: string): void {
-    const until = this.now() + RPC_RATE_LIMIT_HARD_PAUSE_MS;
+  private hardPauseSweep(code: string, error?: unknown): void {
+    const upstreamPauseMs = parseRpcRateLimitResetMs(error);
+    const pauseMs = Math.max(RPC_RATE_LIMIT_HARD_PAUSE_MS, upstreamPauseMs ?? 0);
+    const until = this.now() + pauseMs;
     if (until <= this.sweepDisabledUntilMs) return;
     this.sweepDisabledUntilMs = Math.max(this.sweepDisabledUntilMs, until);
-    this.deps.log.error({ code, until }, "redeem sweep hard-paused after settlement infra alert");
-    this.recordAlert("redeem_sweep_hard_paused", { code, until });
+    this.deps.log.error(
+      { code, until, pauseMs, upstreamPauseMs },
+      "redeem sweep hard-paused after settlement infra alert",
+    );
+    this.recordAlert("redeem_sweep_hard_paused", { code, until, pauseMs, upstreamPauseMs });
   }
 
   private handleRedeemResult(group: RedeemGroup, result: RedeemPositionsResult): void {
@@ -1049,9 +1055,18 @@ function parseExcludedTokenIds(detailsJson: string | null): string[] {
   }
 }
 
+function parseRpcRateLimitResetMs(error: unknown): number | null {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const match = /\bresets?\s+in\s+(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s)\b/i.exec(message);
+  if (!match) return null;
+  const seconds = Number(match[1]);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return Math.ceil(seconds * SECOND_MS);
+}
+
 function isRpcRateLimitError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err ?? "");
-  return /(?:\b429\b|rate.?limit|too many requests|throughput limit|exceeded its compute units)/i.test(
+  return /(?:\b429\b|rate.?limit|too many requests|throughput limit|quota exceeded|exceeded its compute units)/i.test(
     message,
   );
 }

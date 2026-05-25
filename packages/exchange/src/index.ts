@@ -33,6 +33,14 @@ export {
   type CollateralResolverInput,
   type CreateCollateralResolverOptions,
 } from "./live/collateral-resolver.js";
+export {
+  createRpcRotator,
+  isRateLimitError,
+  redactRpcUrl,
+  type RpcRotator,
+  type RpcRotatorOptions,
+  type EthCallContext,
+} from "./live/rpc-rotation.js";
 export { buildClobAxiosAgent, type ClobAxiosAgentOptions } from "./live/axios-agent.js";
 export { installClobErrorSanitizer, sanitizeAxiosError } from "./live/clob-error-sanitizer.js";
 export {

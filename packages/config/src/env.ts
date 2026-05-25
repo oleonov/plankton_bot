@@ -14,6 +14,17 @@ const commaSeparatedUrlsSchema = z.preprocess((value) => {
     .filter((part) => part.length > 0);
 }, z.array(z.string().url()).min(1).optional());
 
+const commaSeparatedKeysSchema = z.preprocess(
+  (value) => {
+    if (typeof value !== "string" || value.trim() === "") return undefined;
+    return value
+      .split(",")
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+  },
+  z.array(z.string().min(1)).min(1).optional(),
+);
+
 const envSchema = z
   .object({
     RUNTIME_MODE: runtimeModeSchema.optional(),
@@ -85,6 +96,7 @@ const envSchema = z
     POLYGON_RPC_URL: z.string().url().default("https://polygon-rpc.com"),
     POLYGON_RPC_URLS: commaSeparatedUrlsSchema,
     POLYGON_RPC_FALLBACK_URL: z.string().url().optional(),
+    ALCHEMY_POLYGON_KEYS: commaSeparatedKeysSchema,
     KRABS_API_KEY: z.string().optional(),
     KRABS_API_PORT: z.coerce.number().int().positive().default(3100),
     // LIVE_LITE_* env vars removed — envelope caps now come from profile_settings in control.db
@@ -251,6 +263,7 @@ export interface AppConfig {
   polygonRpcUrl?: string | undefined;
   polygonRpcUrls?: string[] | undefined;
   polygonRpcFallbackUrl?: string | undefined;
+  alchemyPolygonKeys?: string[] | undefined;
   krabsApiKey: string | undefined;
   krabsApiPort: number;
   krabsAuthUsername: string | undefined;
@@ -363,6 +376,9 @@ export function loadEnv(envPath?: string): AppConfig {
     polygonRpcUrl: env.POLYGON_RPC_URL,
     polygonRpcUrls: [...new Set(env.POLYGON_RPC_URLS ?? [env.POLYGON_RPC_URL])],
     polygonRpcFallbackUrl: env.POLYGON_RPC_FALLBACK_URL,
+    alchemyPolygonKeys: env.ALCHEMY_POLYGON_KEYS
+      ? [...new Set(env.ALCHEMY_POLYGON_KEYS)]
+      : undefined,
     krabsApiKey: env.KRABS_API_KEY,
     krabsApiPort: env.KRABS_API_PORT,
     krabsAuthUsername: env.KRABS_AUTH_USERNAME,

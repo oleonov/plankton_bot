@@ -31,6 +31,7 @@ const ALL_KEYS = [
   "POLYGON_RPC_URL",
   "POLYGON_RPC_URLS",
   "POLYGON_RPC_FALLBACK_URL",
+  "ALCHEMY_POLYGON_KEYS",
   "KRABS_AUTH_USERNAME",
   "KRABS_AUTH_PASSWORD",
   "KRABS_SESSION_SECRET",
@@ -231,6 +232,37 @@ describe("loadEnv", () => {
   });
 
   // LIVE_LITE_* envelope tests removed — envelope caps moved to profile_settings in control.db
+
+  describe("ALCHEMY_POLYGON_KEYS parsing", () => {
+    it("parses a comma-separated list of keys", () => {
+      setEnvVars({ ALCHEMY_POLYGON_KEYS: "k1,k2,k3" });
+      const config = loadEnv(emptyEnvPath);
+      expect(config.alchemyPolygonKeys).toEqual(["k1", "k2", "k3"]);
+    });
+
+    it("trims whitespace around keys", () => {
+      setEnvVars({ ALCHEMY_POLYGON_KEYS: " k1 , k2 " });
+      const config = loadEnv(emptyEnvPath);
+      expect(config.alchemyPolygonKeys).toEqual(["k1", "k2"]);
+    });
+
+    it("drops empty segments from the list", () => {
+      setEnvVars({ ALCHEMY_POLYGON_KEYS: "k1,,k2," });
+      const config = loadEnv(emptyEnvPath);
+      expect(config.alchemyPolygonKeys).toEqual(["k1", "k2"]);
+    });
+
+    it("is undefined when the var is unset", () => {
+      const config = loadEnv(emptyEnvPath);
+      expect(config.alchemyPolygonKeys).toBeUndefined();
+    });
+
+    it("is undefined when the var is an empty string", () => {
+      setEnvVars({ ALCHEMY_POLYGON_KEYS: "" });
+      const config = loadEnv(emptyEnvPath);
+      expect(config.alchemyPolygonKeys).toBeUndefined();
+    });
+  });
 
   it("parses TRUST_PROXY string to boolean", () => {
     setEnvVars({ TRUST_PROXY: "true" });

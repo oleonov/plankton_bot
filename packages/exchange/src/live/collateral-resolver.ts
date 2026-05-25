@@ -17,6 +17,7 @@
  */
 
 import { keccak256, concatHex, type Hex } from "viem";
+import type { RpcRotator } from "./rpc-rotation.js";
 
 const GET_COLLECTION_ID_SELECTOR = "0x856296f7"; // getCollectionId(bytes32,bytes32,uint256)
 const ZERO_PARENT = "0x" + "00".repeat(32);
@@ -30,8 +31,8 @@ export interface CollateralResolverInput {
 export type CollateralResolver = (input: CollateralResolverInput) => Promise<string | null>;
 
 export interface CreateCollateralResolverOptions {
-  rpcUrl?: string;
-  rpcUrls?: readonly string[];
+  /** Shared read-path RPC rotator (round-robin + 429 failover). */
+  rotator: RpcRotator;
   conditionalTokensAddress: string;
   /**
    * Candidate collateral addresses in priority order — typically [USDC, pUSD].
@@ -39,10 +40,6 @@ export interface CreateCollateralResolverOptions {
    * canonical CLOB tokenId.
    */
   candidates: readonly string[];
-  /** Optional fetch override for tests. Defaults to global fetch. */
-  fetchImpl?: typeof fetch;
-  /** Per-call RPC timeout in ms. Defaults to 8 000 ms. */
-  timeoutMs?: number;
   /**
    * Optional logger for diagnostics. Defaults to console.error / console.warn so
    * issues surface in docker log capture.
@@ -82,108 +79,9 @@ function encodeGetCollectionIdCall(conditionId: string, indexSet: bigint): strin
   );
 }
 
-function isRateLimitError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return /(?:\b429\b|too many requests|rate limit|quota exceeded)/i.test(message);
-}
-
-function redactRpcUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    const parts = parsed.pathname.split("/");
-    const last = parts.at(-1);
-    if (last && last.length > 8)
-      parts[parts.length - 1] = `${last.slice(0, 4)}...${last.slice(-4)}`;
-    parsed.pathname = parts.join("/");
-    parsed.search = "";
-    return parsed.toString();
-  } catch {
-    return "<invalid-rpc-url>";
-  }
-}
-
-function normalizeRpcUrls(
-  opts: Pick<CreateCollateralResolverOptions, "rpcUrl" | "rpcUrls">,
-): string[] {
-  const urls = [...(opts.rpcUrls ?? []), ...(opts.rpcUrl ? [opts.rpcUrl] : [])]
-    .map((url) => url.trim())
-    .filter((url) => url.length > 0);
-  return [...new Set(urls)];
-}
-
-async function ethCallOnce(
-  rpcUrl: string,
-  to: string,
-  data: string,
-  fetchImpl: typeof fetch,
-  timeoutMs: number,
-): Promise<string> {
-  const response = await fetchImpl(rpcUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "eth_call",
-      params: [{ to, data }, "latest"],
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`RPC HTTP ${response.status}: ${response.statusText}${body ? ` ${body}` : ""}`);
-  }
-  const json = (await response.json()) as { result?: string; error?: { message?: string } };
-  if (json.error) {
-    throw new Error(`RPC error: ${json.error.message ?? "unknown"}`);
-  }
-  if (typeof json.result !== "string" || !json.result.startsWith("0x")) {
-    throw new Error(`RPC returned unexpected result: ${JSON.stringify(json.result)}`);
-  }
-  return json.result;
-}
-
-async function ethCallWithRotation(
-  rpcUrls: readonly string[],
-  startIndex: number,
-  to: string,
-  data: string,
-  fetchImpl: typeof fetch,
-  timeoutMs: number,
-  logger: CreateCollateralResolverOptions["logger"],
-): Promise<{ result: string; rpcIndex: number }> {
-  let lastErr: unknown;
-  for (let offset = 0; offset < rpcUrls.length; offset += 1) {
-    const rpcIndex = (startIndex + offset) % rpcUrls.length;
-    const rpcUrl = rpcUrls[rpcIndex]!;
-    try {
-      const result = await ethCallOnce(rpcUrl, to, data, fetchImpl, timeoutMs);
-      return { result, rpcIndex };
-    } catch (err) {
-      lastErr = err;
-      if (offset < rpcUrls.length - 1 && isRateLimitError(err)) {
-        logger?.warn("collateral-resolver: rpc rate limited, trying next endpoint", {
-          rpcUrl: redactRpcUrl(rpcUrl),
-          nextRpcUrl: redactRpcUrl(rpcUrls[(rpcIndex + 1) % rpcUrls.length]!),
-          error: err instanceof Error ? err.message : String(err),
-        });
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
-}
-
 export function createCollateralResolver(
   opts: CreateCollateralResolverOptions,
 ): CollateralResolver {
-  const rpcUrls = normalizeRpcUrls(opts);
-  if (rpcUrls.length === 0) {
-    throw new Error("createCollateralResolver requires at least one Polygon RPC URL");
-  }
-  const fetchImpl = opts.fetchImpl ?? fetch;
-  const timeoutMs = opts.timeoutMs ?? 8_000;
   const logger = opts.logger ?? {
     // eslint-disable-next-line no-console
     warn: (m, meta) => console.warn(m, meta),
@@ -192,7 +90,6 @@ export function createCollateralResolver(
   };
   const collectionIdCache = new Map<string, Hex>();
   const collateralCache = new Map<string, string>(); // key: conditionId (lowercase)
-  let nextRpcIndex = 0;
 
   return async ({ conditionId, canonicalTokenId, indexSet }) => {
     const conditionKey = normalizeHex(conditionId);
@@ -204,20 +101,13 @@ export function createCollateralResolver(
     if (!collectionId) {
       try {
         const callData = encodeGetCollectionIdCall(conditionId, indexSet);
-        const { result, rpcIndex } = await ethCallWithRotation(
-          rpcUrls,
-          nextRpcIndex,
-          opts.conditionalTokensAddress,
-          callData,
-          fetchImpl,
-          timeoutMs,
-          logger,
-        );
-        nextRpcIndex = (rpcIndex + 1) % rpcUrls.length;
+        const result = await opts.rotator.ethCall(opts.conditionalTokensAddress, callData, {
+          source: "collateral-resolver",
+        });
         if (result.length !== 66) {
           throw new Error(`Expected 32-byte collectionId, got ${result}`);
         }
-        collectionId = result as Hex;
+        collectionId = result;
         collectionIdCache.set(collectionKey, collectionId);
       } catch (err) {
         logger.error("collateral-resolver: getCollectionId failed", {

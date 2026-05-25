@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { createCollateralResolver, __test } from "../live/collateral-resolver.js";
+import { createRpcRotator } from "../live/rpc-rotation.js";
 
 const USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const PUSD = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
@@ -15,6 +16,14 @@ function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: { "Content-Type": "application/json" },
+  });
+}
+
+function resolverWith(fetchImpl: typeof fetch) {
+  return createCollateralResolver({
+    rotator: createRpcRotator({ primaryUrls: ["http://rpc.local"], fetchImpl }),
+    conditionalTokensAddress: CTF,
+    candidates: [USDC, PUSD],
   });
 }
 
@@ -50,12 +59,7 @@ describe("encodeGetCollectionIdCall", () => {
 describe("createCollateralResolver", () => {
   it("picks USDC when canonical tokenId matches USDC positionId", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ result: COLLECTION_ID }));
-    const resolver = createCollateralResolver({
-      rpcUrl: "http://rpc.local",
-      conditionalTokensAddress: CTF,
-      candidates: [USDC, PUSD],
-      fetchImpl,
-    });
+    const resolver = resolverWith(fetchImpl as unknown as typeof fetch);
 
     const result = await resolver({
       conditionId: CONDITION_ID,
@@ -71,10 +75,9 @@ describe("createCollateralResolver", () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ result: COLLECTION_ID }));
     const warn = vi.fn();
     const resolver = createCollateralResolver({
-      rpcUrl: "http://rpc.local",
+      rotator: createRpcRotator({ primaryUrls: ["http://rpc.local"], fetchImpl }),
       conditionalTokensAddress: CTF,
       candidates: [PUSD],
-      fetchImpl,
       logger: { warn, error: vi.fn() },
     });
 
@@ -90,12 +93,7 @@ describe("createCollateralResolver", () => {
 
   it("caches resolution per conditionId across calls", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ result: COLLECTION_ID }));
-    const resolver = createCollateralResolver({
-      rpcUrl: "http://rpc.local",
-      conditionalTokensAddress: CTF,
-      candidates: [USDC, PUSD],
-      fetchImpl,
-    });
+    const resolver = resolverWith(fetchImpl as unknown as typeof fetch);
 
     const first = await resolver({
       conditionId: CONDITION_ID,
@@ -119,10 +117,9 @@ describe("createCollateralResolver", () => {
       .mockResolvedValue(new Response("oops", { status: 500, statusText: "Internal" }));
     const error = vi.fn();
     const resolver = createCollateralResolver({
-      rpcUrl: "http://rpc.local",
+      rotator: createRpcRotator({ primaryUrls: ["http://rpc.local"], fetchImpl }),
       conditionalTokensAddress: CTF,
       candidates: [USDC, PUSD],
-      fetchImpl,
       logger: { warn: vi.fn(), error },
     });
 
@@ -142,10 +139,9 @@ describe("createCollateralResolver", () => {
       .mockResolvedValue(jsonResponse({ error: { message: "execution reverted" } }));
     const error = vi.fn();
     const resolver = createCollateralResolver({
-      rpcUrl: "http://rpc.local",
+      rotator: createRpcRotator({ primaryUrls: ["http://rpc.local"], fetchImpl }),
       conditionalTokensAddress: CTF,
       candidates: [USDC, PUSD],
-      fetchImpl,
       logger: { warn: vi.fn(), error },
     });
 
@@ -159,107 +155,36 @@ describe("createCollateralResolver", () => {
     expect(error).toHaveBeenCalledOnce();
   });
 
-  it("propagates a 429 message so upstream rate-limit detection works", async () => {
+  it("propagates a 429 from the rotator so upstream rate-limit detection works", async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValue(new Response("limited", { status: 429, statusText: "Too Many Requests" }));
-    const resolver = createCollateralResolver({
-      rpcUrl: "http://rpc.local",
-      conditionalTokensAddress: CTF,
-      candidates: [USDC, PUSD],
-      fetchImpl,
-      logger: { warn: vi.fn(), error: vi.fn() },
-    });
+    const resolver = resolverWith(fetchImpl as unknown as typeof fetch);
 
     await expect(
-      resolver({
-        conditionId: CONDITION_ID,
-        canonicalTokenId: CANONICAL_USDC_YES,
-        indexSet: 1n,
-      }),
+      resolver({ conditionId: CONDITION_ID, canonicalTokenId: CANONICAL_USDC_YES, indexSet: 1n }),
     ).rejects.toThrow(/429/);
   });
 
-  it("retries the next RPC URL when the current endpoint is rate-limited", async () => {
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response("quota exceeded", { status: 429, statusText: "Too Many Requests" }),
-      )
-      .mockResolvedValueOnce(jsonResponse({ result: COLLECTION_ID }));
-    const warn = vi.fn();
-    const resolver = createCollateralResolver({
-      rpcUrls: ["https://rpc-one.local", "https://rpc-two.local"],
-      conditionalTokensAddress: CTF,
-      candidates: [USDC, PUSD],
-      fetchImpl,
-      logger: { warn, error: vi.fn() },
-    });
-
-    const result = await resolver({
-      conditionId: CONDITION_ID,
-      canonicalTokenId: CANONICAL_USDC_YES,
-      indexSet: 1n,
-    });
-
-    expect(result).toBe(USDC);
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(fetchImpl.mock.calls[0]![0]).toBe("https://rpc-one.local");
-    expect(fetchImpl.mock.calls[1]![0]).toBe("https://rpc-two.local");
-    expect(warn).toHaveBeenCalledOnce();
-  });
-
-  it("rotates the starting RPC URL between uncached calls", async () => {
+  it("resolves a different conditionId independently (no cross-cache pollution)", async () => {
     const fetchImpl = vi
       .fn()
       .mockImplementation(() => Promise.resolve(jsonResponse({ result: COLLECTION_ID })));
-    const resolver = createCollateralResolver({
-      rpcUrls: ["https://rpc-one.local", "https://rpc-two.local"],
-      conditionalTokensAddress: CTF,
-      candidates: [USDC, PUSD],
-      fetchImpl,
-    });
+    const resolver = resolverWith(fetchImpl as unknown as typeof fetch);
 
-    await resolver({
+    const first = await resolver({
       conditionId: CONDITION_ID,
       canonicalTokenId: CANONICAL_USDC_YES,
       indexSet: 1n,
     });
-    await resolver({
+    const second = await resolver({
       conditionId: CONDITION_ID_2,
       canonicalTokenId: CANONICAL_USDC_YES,
       indexSet: 1n,
     });
 
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(fetchImpl.mock.calls[0]![0]).toBe("https://rpc-one.local");
-    expect(fetchImpl.mock.calls[1]![0]).toBe("https://rpc-two.local");
-  });
-
-  it("throws the final rate-limit error when every RPC URL is exhausted", async () => {
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response("first", { status: 429, statusText: "Too Many Requests" }),
-      )
-      .mockResolvedValueOnce(
-        new Response("second", { status: 429, statusText: "Too Many Requests" }),
-      );
-    const resolver = createCollateralResolver({
-      rpcUrls: ["https://rpc-one.local", "https://rpc-two.local"],
-      conditionalTokensAddress: CTF,
-      candidates: [USDC, PUSD],
-      fetchImpl,
-      logger: { warn: vi.fn(), error: vi.fn() },
-    });
-
-    await expect(
-      resolver({
-        conditionId: CONDITION_ID,
-        canonicalTokenId: CANONICAL_USDC_YES,
-        indexSet: 1n,
-      }),
-    ).rejects.toThrow(/second/);
+    expect(first).toBe(USDC);
+    expect(second).toBe(USDC);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 });
