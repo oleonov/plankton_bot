@@ -28,6 +28,12 @@ CREATE TABLE IF NOT EXISTS markets (
       ('unknown','matched_include','matched_exclude','step2_fallback_include','fallback_exclude')),
   selection_winning_rule_id TEXT,
   gamma_created_at          TEXT,
+  -- Track B strike-aware rollout (migration 060): raw Gamma strike signals.
+  -- group_item_* collected/persisted for a future Track C; the Track B
+  -- classifier ignores them (F6, spec §3.6). tags_json is a JSON string array.
+  group_item_title          TEXT,
+  group_item_threshold      TEXT,
+  tags_json                 TEXT,
   -- Step 3 (audit doc §D3): soft-ranking score columns. NULL = "not yet
   -- scored" (never store 0 — it is a valid model output). Owned exclusively
   -- by SoftRankingScoreModule via MarketRepository.updateScoresBatch; the

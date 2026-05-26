@@ -1,4 +1,10 @@
-import type { EventBus, MarketSelectionPolicy, NormalizedMarket, TokenId } from "@krabs/domain";
+import type {
+  EventBus,
+  MarketSelectionPolicy,
+  NormalizedMarket,
+  RiskEventRepository,
+  TokenId,
+} from "@krabs/domain";
 import { evaluatePreEntry, type PreEntryRejectReason } from "@krabs/domain";
 import type { SelectedMarketCache } from "./algo-decision-module.js";
 import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
@@ -45,10 +51,16 @@ export class MarketSelectionCache implements SelectedMarketCache {
   private selectionRuleRejected = 0;
   private readonly selectionRejectReasons = new Map<string, number>();
 
+  // Track B §5.4 — durable strike-reject counter for T+7d monitoring. Dedup
+  // per token (in-memory; reset on restart) so a chatty NormalizedMarketUpdated
+  // stream writes at most one risk_events row per token per process lifetime.
+  private readonly persistedRejects = new Set<string>();
+
   constructor(
     private readonly bus: EventBus,
     private readonly selectionRuleEngine: RefreshableSelectionRuleEngine,
     private readonly marketSelectionPolicy?: () => MarketSelectionPolicy,
+    private readonly riskEventSink?: Pick<RiskEventRepository, "insert">,
   ) {}
 
   subscribe(): void {
@@ -65,6 +77,8 @@ export class MarketSelectionCache implements SelectedMarketCache {
     this.trackedUnsub = this.bus.subscribe("TrackedMarketsChanged", async (payload) => {
       for (const tokenId of payload.removedTokenIds) {
         this.eligible.delete(String(tokenId));
+        // Allow a token to be re-persisted if it re-enters the universe later.
+        this.persistedRejects.delete(String(tokenId));
       }
     });
   }
@@ -124,6 +138,9 @@ export class MarketSelectionCache implements SelectedMarketCache {
         midPrice: market.midPrice,
         liquidity: market.liquidity ?? null,
         endDate: market.endDate,
+        groupItemTitle: market.groupItemTitle ?? null,
+        groupItemThreshold: market.groupItemThreshold ?? null,
+        tags: market.tags ?? null,
       },
       policy,
     );
@@ -133,8 +150,36 @@ export class MarketSelectionCache implements SelectedMarketCache {
     } else {
       this.selectionRuleRejected++;
       this.incrementRejectReason(classifySelectionRejectReason(market, evalResult.rejectReason));
+      this.persistStrikeReject(tokenId, market, evalResult.rejectReason, evalResult.horizonHours);
       this.eligible.delete(tokenId);
     }
+  }
+
+  // Track B §5.4 — durable, per-token-deduped persistence of the two D1 strike
+  // rejects into risk_events for T+7d monitoring.
+  private persistStrikeReject(
+    tokenId: string,
+    market: NormalizedMarket,
+    rejectReason: PreEntryRejectReason | undefined,
+    horizonHours: number | undefined,
+  ): void {
+    if (rejectReason !== "strike_min_horizon" && rejectReason !== "strike_yes_tail_short_runway") {
+      return;
+    }
+    if (this.riskEventSink == null || this.persistedRejects.has(tokenId)) return;
+    this.riskEventSink.insert({
+      eventType: "selection_reject",
+      payload: {
+        reason: rejectReason,
+        tokenId,
+        slug: market.slug,
+        midPrice: market.midPrice,
+        horizonHours: horizonHours ?? null,
+        regime: "strike",
+        ts: Date.now(),
+      },
+    });
+    this.persistedRejects.add(tokenId);
   }
 
   private incrementRejectReason(reason: string): void {

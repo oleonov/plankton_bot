@@ -192,6 +192,50 @@ describe("SqliteMarketRepository", () => {
     );
   });
 
+  // Track B §4.1 / §9.1 — group-item + tags persistence round-trip.
+  describe("Track B strike-classifier fields", () => {
+    it("migration 060 creates the three columns", () => {
+      const cols = (db.prepare(`PRAGMA table_info(markets)`).all() as { name: string }[]).map(
+        (c) => c.name,
+      );
+      expect(cols).toContain("group_item_title");
+      expect(cols).toContain("group_item_threshold");
+      expect(cols).toContain("tags_json");
+    });
+
+    it("round-trips groupItemTitle, groupItemThreshold, and tags (JSON)", () => {
+      repo.save(
+        makeMarket({
+          tokenId: createTokenId("tb-1"),
+          groupItemTitle: "Spain",
+          groupItemThreshold: "21",
+          tags: ["sports", "soccer"],
+        }),
+      );
+
+      const found = repo.findByTokenId(createTokenId("tb-1"));
+      expect(found!.groupItemTitle).toBe("Spain");
+      expect(found!.groupItemThreshold).toBe("21");
+      expect(found!.tags).toEqual(["sports", "soccer"]);
+    });
+
+    it("defaults the three fields to null when omitted", () => {
+      repo.save(makeMarket({ tokenId: createTokenId("tb-2") }));
+
+      const found = repo.findByTokenId(createTokenId("tb-2"));
+      expect(found!.groupItemTitle).toBeNull();
+      expect(found!.groupItemThreshold).toBeNull();
+      expect(found!.tags).toBeNull();
+    });
+
+    it("round-trips an empty tags array as an empty array", () => {
+      repo.save(makeMarket({ tokenId: createTokenId("tb-3"), tags: [] }));
+
+      const found = repo.findByTokenId(createTokenId("tb-3"));
+      expect(found!.tags).toEqual([]);
+    });
+  });
+
   it("findEventMarketCountBySlug reads event_market_count for the slug", () => {
     // Insert directly to set event_market_count since Market interface doesn't expose it
     db.prepare(

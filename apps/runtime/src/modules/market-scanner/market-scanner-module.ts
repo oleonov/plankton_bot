@@ -423,6 +423,9 @@ export class MarketScannerModule implements RuntimeModule {
                 midPrice: token.midPrice ?? null,
                 liquidity: clobMarket.liquidity ?? null,
                 endDate: clobMarket.endDate ?? null,
+                groupItemTitle: clobMarket.groupItemTitle ?? null,
+                groupItemThreshold: clobMarket.groupItemThreshold ?? null,
+                tags: clobMarket.tags ?? null,
               },
               marketSelectionPolicy,
               nowMs,
@@ -450,12 +453,15 @@ export class MarketScannerModule implements RuntimeModule {
               break;
           }
 
-          // R64 — split short-horizon strike rejections by pattern + horizon
-          // bucket so dashboards can tell whether the 24h threshold is
-          // over-blocking. `strikePattern` is always set when the reject
-          // reason is `strike_short_horizon` (see evaluatePreEntry).
+          // Track B D1 — split strike rejections by pattern + horizon bucket so
+          // dashboards can tell whether the thresholds are over-blocking. Only
+          // crypto-form slugs carry a non-null `strikePattern` (see
+          // evaluatePreEntry); non-crypto strike rejects are counted in the
+          // total reject path via `selectionRejectReasons`. Counter names keep
+          // the `strikeShortHorizon*` prefix (internal) to minimize the diff.
           if (
-            marketEvalResult.rejectReason === "strike_short_horizon" &&
+            (marketEvalResult.rejectReason === "strike_min_horizon" ||
+              marketEvalResult.rejectReason === "strike_yes_tail_short_runway") &&
             marketEvalResult.strikePattern != null
           ) {
             pendingStep2Delta.strikeShortHorizonRejectedTotal++;
@@ -516,6 +522,9 @@ export class MarketScannerModule implements RuntimeModule {
               selectionStatus: tokenEval.selectionStatus,
               selectionWinningRuleId: tokenEval.winningRuleId,
               gammaCreatedAt: clobMarket.gammaCreatedAt,
+              groupItemTitle: clobMarket.groupItemTitle ?? null,
+              groupItemThreshold: clobMarket.groupItemThreshold ?? null,
+              tags: clobMarket.tags ?? null,
               createdAt: now,
               updatedAt: now,
             });
@@ -777,8 +786,21 @@ function classifyMarketWrite(next: Market, existing: Market | null): MarketWrite
     next.eventMarketCount === existing.eventMarketCount &&
     next.selectionStatus === existing.selectionStatus &&
     next.selectionWinningRuleId === existing.selectionWinningRuleId &&
-    effectiveNextGammaCreatedAt === existing.gammaCreatedAt;
+    effectiveNextGammaCreatedAt === existing.gammaCreatedAt &&
+    // Track B strike-signal fields (§4.2e) — group-item is stable over a
+    // market's life but included for correctness (cost is negligible).
+    (next.groupItemTitle ?? null) === (existing.groupItemTitle ?? null) &&
+    (next.groupItemThreshold ?? null) === (existing.groupItemThreshold ?? null) &&
+    tagsEqual(next.tags ?? null, existing.tags ?? null);
 
   if (!unchanged) return "changed";
   return coalesceNoop === null ? "unchanged" : "coalesce_noop";
+}
+
+// Order-sensitive equality for the persisted Gamma tag list (Track B §4.2e).
+function tagsEqual(a: readonly string[] | null, b: readonly string[] | null): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (a.length !== b.length) return false;
+  return a.every((tag, i) => tag === b[i]);
 }

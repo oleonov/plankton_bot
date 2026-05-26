@@ -1,4 +1,5 @@
 import type { SelectionRuleEngine } from "./selection-rule-engine.js";
+import { classifyMarketRegime, type StrikeClassifierInput } from "./strike-classifier.js";
 import type {
   HealthFailReason,
   HealthInput,
@@ -17,10 +18,18 @@ export interface PreEntryInput {
   readonly midPrice?: number | null;
   readonly liquidity?: number | null;
   /**
-   * ISO timestamp of market expiry. Required for the strike-pattern short-horizon
-   * filter (R64); null/absent disables that filter (no horizon ⇒ don't block).
+   * ISO timestamp of market expiry. Required for the strike entry filter (D1);
+   * null/absent disables it (no horizon ⇒ fail-open, don't block).
    */
   readonly endDate?: string | null;
+  /**
+   * Track B strike-signal fields (spec §4). Passed through to
+   * `classifyMarketRegime` for the D1 entry filter (§5). group-item is collected
+   * but ignored by the classifier (F6, §3.6); `tags` is the secondary signal.
+   */
+  readonly groupItemTitle?: string | null;
+  readonly groupItemThreshold?: string | null;
+  readonly tags?: readonly string[] | null;
 }
 
 export const DEFAULT_MARKET_SELECTION_POLICY: MarketSelectionPolicy = {
@@ -34,7 +43,7 @@ export const PRE_ENTRY_MIN_LIQUIDITY = DEFAULT_MARKET_SELECTION_POLICY.minLiquid
 // `will-be-between` is intentionally absent from this regex after R64. Plankton's
 // profit on the will-be-between strike family is concentrated in horizon=1-3d
 // markets that reach multi-buy ladder step >=11. Short-horizon `be-between`
-// markets are filtered by `isStrikeShortHorizonMarket` instead (see CHANGE B);
+// markets are filtered by `evaluateStrikeEntryFilter` instead (Track B D1);
 // `will-be-greater-than` / `will-be-less-than` / `<coin>-above-...` stay here
 // because R64 showed Plankton is net-negative on those forms.
 const ZERO_COVERAGE_CATEGORY_PATTERN =
@@ -69,32 +78,55 @@ export function matchesStrikePattern(slug: string): StrikePatternKind | null {
   return null;
 }
 
-export interface StrikeShortHorizonResult {
+/** D1 Yes-tail guard thresholds (spec §5.2). */
+export const STRIKE_YES_TAIL_MAX_PRICE = 0.05;
+export const STRIKE_YES_TAIL_MIN_RUNWAY_HOURS = 168; // 7 days
+// STRIKE_MIN_HORIZON_HOURS = 24 is declared above; reused as the D1 horizon floor.
+
+export type StrikeEntryRejectReason = "strike_min_horizon" | "strike_yes_tail_short_runway";
+
+export interface StrikeEntryFilterResult {
   readonly blocked: boolean;
-  readonly pattern: StrikePatternKind | null;
+  readonly reason: StrikeEntryRejectReason | null;
   readonly horizonHours: number | null;
 }
 
 /**
- * R64 selective filter: blocks strike-pattern markets whose remaining horizon
- * is below {@link STRIKE_MIN_HORIZON_HOURS}. Non-strike slugs short-circuit to
- * `{ blocked: false, pattern: null, horizonHours: null }`. Unknown/invalid
- * `endDate` is treated as "horizon unknown" and DOES NOT block — same fail-open
- * policy used elsewhere in the admission path.
+ * D1 strike entry filter (Track B, spec §5). Applies ONLY to strike markets:
+ *   pass = (ttc >= 24h) AND (entry_price > $0.05 OR ttc >= 7d)
+ * Fail-open: non-strike, or a missing/unparseable `endDate` ⇒ `blocked: false`.
+ *
+ * `entry_price` at admission is `midPrice` (proxy; spec §5.7 — there is no
+ * separate entry_price field on `PreEntryInput`, actual `avg_entry_price` is
+ * only known after the first BUY fill). If `midPrice` is null the Yes-tail guard
+ * is fail-open, but the 24h horizon floor still applies.
  */
-export function isStrikeShortHorizonMarket(
-  market: Pick<PreEntryInput, "slug" | "endDate">,
+export function evaluateStrikeEntryFilter(
+  market: StrikeClassifierInput & Pick<PreEntryInput, "endDate" | "midPrice">,
   nowMs: number,
-): StrikeShortHorizonResult {
-  const pattern = matchesStrikePattern(market.slug);
-  if (pattern == null) return { blocked: false, pattern: null, horizonHours: null };
-  if (market.endDate == null) return { blocked: false, pattern, horizonHours: null };
-  const endMs = Date.parse(market.endDate);
-  if (!Number.isFinite(endMs)) {
-    return { blocked: false, pattern, horizonHours: null };
+): StrikeEntryFilterResult {
+  if (classifyMarketRegime(market) !== "strike") {
+    return { blocked: false, reason: null, horizonHours: null };
   }
+  if (market.endDate == null) return { blocked: false, reason: null, horizonHours: null };
+  const endMs = Date.parse(market.endDate);
+  if (!Number.isFinite(endMs)) return { blocked: false, reason: null, horizonHours: null };
+
   const horizonHours = (endMs - nowMs) / 3_600_000;
-  return { blocked: horizonHours < STRIKE_MIN_HORIZON_HOURS, pattern, horizonHours };
+  if (horizonHours < STRIKE_MIN_HORIZON_HOURS) {
+    return { blocked: true, reason: "strike_min_horizon", horizonHours };
+  }
+
+  const mid = market.midPrice;
+  if (
+    typeof mid === "number" &&
+    Number.isFinite(mid) &&
+    mid <= STRIKE_YES_TAIL_MAX_PRICE &&
+    horizonHours < STRIKE_YES_TAIL_MIN_RUNWAY_HOURS
+  ) {
+    return { blocked: true, reason: "strike_yes_tail_short_runway", horizonHours };
+  }
+  return { blocked: false, reason: null, horizonHours };
 }
 
 function finiteNumber(value: number | null | undefined): value is number {
@@ -145,27 +177,24 @@ export function evaluatePreEntry(
     };
   }
 
-  // R64 selective filter: short-horizon strike markets are unprofitable
-  // regardless of liquidity/mid. Run BEFORE the hard filters so metric
-  // attribution lines up with the cause. An include_slug rule does NOT
-  // override this — Plankton has no signal that recovers a sub-24h strike
-  // entry — so `winningRuleId` is forced to null even if the engine
-  // produced an `include` match. `horizonHours` is always finite here:
-  // `isStrikeShortHorizonMarket` only sets `blocked=true` after parsing a
-  // finite `endMs`.
-  const strikeHorizon = isStrikeShortHorizonMarket(market, nowMs);
-  if (
-    strikeHorizon.blocked &&
-    strikeHorizon.pattern != null &&
-    strikeHorizon.horizonHours != null
-  ) {
+  // D1 strike entry filter (Track B): short-horizon and cheap-short-runway
+  // strike markets are unprofitable regardless of liquidity/mid. Run BEFORE the
+  // hard filters so metric attribution lines up with the cause. An include_slug
+  // rule does NOT override this — Plankton has no signal that recovers a blocked
+  // strike entry — so `winningRuleId` is forced to null even if the engine
+  // produced an `include` match. `strikePattern` is emitted only for crypto-form
+  // slugs (`matchesStrikePattern`) so the existing crypto observability counters
+  // keep working; non-crypto strike rejects carry `strikePattern: undefined`.
+  const strikeFilter = evaluateStrikeEntryFilter(market, nowMs);
+  if (strikeFilter.blocked) {
+    const strikePattern = matchesStrikePattern(market.slug);
     return {
       finalStatus: "EXCLUDE",
       selectionStatus: "fallback_exclude",
       winningRuleId: null,
-      rejectReason: "strike_short_horizon",
-      strikePattern: strikeHorizon.pattern,
-      horizonHours: strikeHorizon.horizonHours,
+      rejectReason: strikeFilter.reason!,
+      ...(strikePattern != null ? { strikePattern } : {}),
+      ...(strikeFilter.horizonHours != null ? { horizonHours: strikeFilter.horizonHours } : {}),
     };
   }
 

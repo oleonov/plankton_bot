@@ -3667,3 +3667,66 @@ describe("ADR-015 telemetry flags", () => {
     });
   });
 });
+
+// Track B §9.3 — execution must be regime-blind. Track B propagates the strike
+// classifier inputs (slug shape, tags, group-item) onto the market, but the
+// §4.4 strike-aware exit/pricing fork is deferred to Track C. This pins the
+// invariant that, given equal pricing inputs, a strike market and an otherwise
+// identical non-strike market produce byte-identical order terms.
+describe("execution is regime-blind (Track B §9.3)", () => {
+  async function placeFor(market: NormalizedMarket): Promise<{
+    price: number;
+    size: number;
+    postOnly: boolean | undefined;
+  }> {
+    const bus = new InProcessEventBus();
+    const candidateBookCache = {
+      getFreshEntry: vi.fn(() => null),
+      waitForFreshEntry: vi.fn(async () => null),
+      getFreshOrRefresh: vi.fn(async () => ({ status: "refreshed" as const, entry: null })),
+    } as unknown as CandidateBookCache;
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      candidateBookCache,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number; size: number; postOnly?: boolean } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    const { price, size, postOnly } = placed[0]!.command;
+    return { price, size, postOnly };
+  }
+
+  // Identical pricing inputs; the only difference is the strike-classifier
+  // surface (slug shape + tags + group-item).
+  const PRICING = { bestBid: 0.04, bestAsk: 0.05, midPrice: 0.045, spread: 0.01 } as const;
+
+  it("strike and non-strike markets yield identical price/postOnly/size", async () => {
+    const nonStrike = await placeFor(makeMarket({ ...PRICING, bookSource: "simulation" }));
+    const strike = await placeFor(
+      makeMarket({
+        ...PRICING,
+        bookSource: "simulation",
+        slug: "will-the-price-of-bitcoin-be-between-84000-85000-on-jan-1",
+        tags: ["price-range"],
+        groupItemTitle: "84000-85000",
+        groupItemThreshold: "3",
+      }),
+    );
+
+    expect(strike).toEqual(nonStrike);
+  });
+});

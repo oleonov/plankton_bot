@@ -19,6 +19,7 @@ import type {
 import {
   computePolymarketTakerFeeUsdc,
   createTokenId,
+  hasText,
   resolvePolymarketTakerFeeRate,
 } from "@krabs/domain";
 
@@ -346,10 +347,13 @@ export function parseStringOrArray(value: unknown): string[] {
  * @param eventContext.marketCount - Total number of markets in the parent Gamma event.
  *   Pass `event.markets.length` at the call site. **Required** for telemetry
  *   and future ranking features; callers must not silently default it.
+ * @param eventContext.tags - Event-level Gamma tags (Track B strike signal §4);
+ *   group-item fields are read from `raw`. group-item is collected but ignored
+ *   by the classifier (F6, §3.6).
  */
 export function mapGammaMarket(
   raw: Record<string, unknown>,
-  eventContext: { slug: string | null; marketCount: number },
+  eventContext: { slug: string | null; marketCount: number; tags?: readonly string[] | null },
 ): ClobMarket {
   const clobTokenIds = parseStringOrArray(raw.clobTokenIds);
   const outcomes = parseStringOrArray(raw.outcomes);
@@ -396,7 +400,21 @@ export function mapGammaMarket(
     // Gamma exposes ISO-8601 `createdAt` directly. We round-trip it through
     // Date.parse to validate; invalid/missing values become null.
     gammaCreatedAt: parseGammaCreatedAt(raw.createdAt),
+    // Track B strike-signal fields (spec §4). group-item is market-level (`raw`);
+    // tags are event-level (via eventContext). `groupItemThreshold` can arrive as
+    // a number from Gamma — coerce to string. Collected/persisted only; the
+    // classifier ignores group-item (F6, §3.6).
+    groupItemTitle: hasText(raw.groupItemTitle) ? String(raw.groupItemTitle) : null,
+    groupItemThreshold: coerceGroupItemThreshold(raw.groupItemThreshold),
+    tags: eventContext.tags ?? null,
   };
+}
+
+// Gamma `groupItemThreshold` is usually a numeric string ("0","21") but can
+// arrive as a raw number — coerce both to a non-empty string, else null.
+function coerceGroupItemThreshold(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return hasText(value) ? String(value) : null;
 }
 
 function parseGammaCreatedAt(value: unknown): string | null {

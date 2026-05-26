@@ -15,6 +15,18 @@ import {
 } from "@krabs/domain";
 import type { Regime } from "@krabs/domain";
 
+// Track B (§4.2d): tags persist as a JSON string array in `tags_json`. A
+// corrupt string must not fail a market read — fall back to null.
+function parseTagsJson(value: unknown): readonly string[] | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? (parsed as string[]) : null;
+  } catch {
+    return null;
+  }
+}
+
 // Rank for entry-candidate ordering: lower rank = higher priority.
 // Only these three statuses are ever WS-subscribed as entry-candidates.
 const SELECTION_STATUS_RANK: Record<string, number> = {
@@ -73,8 +85,9 @@ const UPSERT_MARKET_SQL = `INSERT INTO markets
          (token_id, condition_id, slug, event_slug, question, outcome, outcome_index,
           regime, horizon, end_date, active, tradable, tick_size, neg_risk,
           event_market_count, selection_status, selection_winning_rule_id,
-          gamma_created_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          gamma_created_at, group_item_title, group_item_threshold, tags_json,
+          created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(token_id) DO UPDATE SET
            condition_id = excluded.condition_id,
            slug = excluded.slug,
@@ -93,6 +106,9 @@ const UPSERT_MARKET_SQL = `INSERT INTO markets
            selection_status = excluded.selection_status,
            selection_winning_rule_id = excluded.selection_winning_rule_id,
            gamma_created_at = COALESCE(markets.gamma_created_at, excluded.gamma_created_at),
+           group_item_title = excluded.group_item_title,
+           group_item_threshold = excluded.group_item_threshold,
+           tags_json = excluded.tags_json,
            updated_at = excluded.updated_at`;
 
 export class SqliteMarketRepository implements MarketRepository {
@@ -136,6 +152,9 @@ export class SqliteMarketRepository implements MarketRepository {
       market.selectionStatus ?? "unknown",
       market.selectionWinningRuleId ?? null,
       market.gammaCreatedAt ?? null,
+      market.groupItemTitle ?? null,
+      market.groupItemThreshold ?? null,
+      market.tags != null ? JSON.stringify(market.tags) : null,
       market.createdAt,
       market.updatedAt,
     );
@@ -430,6 +449,9 @@ export class SqliteMarketRepository implements MarketRepository {
         (row.selection_status as import("@krabs/domain").SelectionStatus) ?? "unknown",
       selectionWinningRuleId: (row.selection_winning_rule_id as string) ?? null,
       gammaCreatedAt: (row.gamma_created_at as string | null) ?? null,
+      groupItemTitle: (row.group_item_title as string | null) ?? null,
+      groupItemThreshold: (row.group_item_threshold as string | null) ?? null,
+      tags: parseTagsJson(row.tags_json),
       score: (row.score as number | null) ?? null,
       scoreModelVersion: (row.score_model_version as string | null) ?? null,
       scoredAt: (row.scored_at as string | null) ?? null,

@@ -958,6 +958,7 @@ async function main(): Promise<void> {
     bus,
     selectionRuleEngine,
     () => currentExecutionPolicy().marketSelection,
+    repos.riskEvent, // Track B §5.4 — durable strike-reject persistence
   );
   selectedMarketCacheForEnrichment = selectedMarketCache;
   selectedMarketCache.subscribe();

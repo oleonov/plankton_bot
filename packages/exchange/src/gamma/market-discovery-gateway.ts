@@ -35,6 +35,28 @@ const DEFAULT_PAGE_SIZE = 100;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
 
+/**
+ * Extract event-level Gamma tags as slug strings (Track B §4.2b). The
+ * `/events/keyset` payload returns `tags` as an array of objects
+ * (`{ id, label, slug, ... }`, prod-verified); we prefer `slug`, fall back to
+ * `label`. Tolerates a plain string array defensively. Null when absent/empty.
+ */
+function extractEventTags(value: unknown): readonly string[] | null {
+  if (!Array.isArray(value)) return null;
+  const tags = value
+    .map((t): string | null => {
+      if (typeof t === "string") return t;
+      if (t != null && typeof t === "object") {
+        const obj = t as Record<string, unknown>;
+        if (typeof obj.slug === "string") return obj.slug;
+        if (typeof obj.label === "string") return obj.label;
+      }
+      return null;
+    })
+    .filter((t): t is string => t != null);
+  return tags.length > 0 ? tags : null;
+}
+
 interface GammaEventsPage {
   readonly events: Array<Record<string, unknown>>;
   readonly nextCursor: string | null;
@@ -86,6 +108,7 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
           ? (event.markets as Record<string, unknown>[])
           : [];
         const parentSlug = typeof event.slug === "string" ? event.slug : null;
+        const eventTags = extractEventTags(event.tags);
         const marketCount = nestedMarkets.length;
         // Zero-market events (malformed payload, settled/closed envelopes) are
         // excluded from eventStats entirely so the partition invariant
@@ -97,7 +120,7 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
         if (marketCount === 1) singleMarket++;
         else multiMarket++;
         for (const raw of nestedMarkets) {
-          pageMarkets.push(mapGammaMarket(raw, { slug: parentSlug, marketCount }));
+          pageMarkets.push(mapGammaMarket(raw, { slug: parentSlug, marketCount, tags: eventTags }));
         }
       }
 

@@ -49,6 +49,15 @@ export interface ClobMarket {
    * Source: spec §1.7 R14 (`age_at_entry` is derived from this).
    */
   readonly gammaCreatedAt: string | null;
+  /**
+   * Track B strike-signal fields collected from Gamma (spec §4). Persisted for a
+   * future Track C; the Track B classifier ignores group-item (F6, §3.6).
+   * `groupItemTitle` — bracket/sub-market label; `groupItemThreshold` — Gamma
+   * numeric (string as the API returns it); `tags` — event-level Gamma tags.
+   */
+  readonly groupItemTitle?: string | null;
+  readonly groupItemThreshold?: string | null;
+  readonly tags?: readonly string[] | null;
 }
 
 // ─── Exchange order param / result types ──────────────────────────────────

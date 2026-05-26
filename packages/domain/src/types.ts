@@ -83,6 +83,15 @@ export interface Market {
    */
   gammaCreatedAt: string | null;
   /**
+   * Track B strike-signal fields (spec §4). Persisted for a future Track C; the
+   * Track B classifier ignores group-item (F6, §3.6) and uses slug + tags.
+   * Optional like other persisted-but-optional fields (`selectionStatus?`,
+   * `score?`); the scanner write path sets them from `ClobMarket`.
+   */
+  groupItemTitle?: string | null;
+  groupItemThreshold?: string | null;
+  tags?: readonly string[] | null;
+  /**
    * Step 3 (audit doc §D3) soft-ranking score columns. NULL = "not yet
    * scored" — never store 0 (a valid model output). Owned exclusively by
    * `MarketRepository.updateScoresBatch`; the saveBatch upsert path must
@@ -485,6 +494,13 @@ export interface NormalizedMarket {
    * set it (Step 0 §P1 guard).
    */
   gammaCreatedAt: string | null;
+  /**
+   * Track B strike-signal fields (spec §4) propagated from `Market`. Used by
+   * `classifyMarketRegime` on the decision/exit paths (group-item ignored — F6).
+   */
+  groupItemTitle?: string | null;
+  groupItemThreshold?: string | null;
+  tags?: readonly string[] | null;
   /**
    * Step 3 (audit doc §D4 / §P3 step 0) — propagated verbatim from
    * `Market.selectionStatus` so downstream modules can filter on v5.11
@@ -1264,7 +1280,8 @@ export interface HealthResult {
  */
 export type PreEntryRejectReason =
   | "rule_exclude"
-  | "strike_short_horizon"
+  | "strike_min_horizon" // renamed from strike_short_horizon (Track B D1)
+  | "strike_yes_tail_short_runway" // new (Track B D1)
   | "mid_price_too_high"
   | "liquidity_too_low"
   | "zero_coverage_category";

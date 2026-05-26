@@ -607,6 +607,45 @@ describe("mapGammaMarket", () => {
     const market = mapGammaMarket({ createdAt: null }, SINGLE_MARKET_EVENT);
     expect(market.gammaCreatedAt).toBeNull();
   });
+
+  // Track B §4.2 — group-item + event tags collected/persisted for future Track C.
+  describe("Track B strike-classifier fields", () => {
+    it("maps groupItemTitle, numeric-string groupItemThreshold, and event tags", () => {
+      const market = mapGammaMarket(
+        {
+          slug: "will-spain-win-the-2026-fifa-world-cup-963",
+          groupItemTitle: "Spain",
+          groupItemThreshold: "21",
+        },
+        { slug: "fifa-world-cup-2026", marketCount: 32, tags: ["sports", "soccer"] },
+      );
+      expect(market.groupItemTitle).toBe("Spain");
+      expect(market.groupItemThreshold).toBe("21");
+      expect(market.tags).toEqual(["sports", "soccer"]);
+    });
+
+    it("coerces a numeric groupItemThreshold to string (§4.2 Gamma may send a number)", () => {
+      const market = mapGammaMarket({ groupItemThreshold: 0 }, SINGLE_MARKET_EVENT);
+      expect(market.groupItemThreshold).toBe("0");
+    });
+
+    it("treats empty/whitespace groupItemTitle as null", () => {
+      const market = mapGammaMarket({ groupItemTitle: "   " }, SINGLE_MARKET_EVENT);
+      expect(market.groupItemTitle).toBeNull();
+    });
+
+    it("defaults all three fields to null when absent", () => {
+      const market = mapGammaMarket({}, SINGLE_MARKET_EVENT);
+      expect(market.groupItemTitle).toBeNull();
+      expect(market.groupItemThreshold).toBeNull();
+      expect(market.tags).toBeNull();
+    });
+
+    it("tags default to null when eventContext omits them", () => {
+      const market = mapGammaMarket({ slug: "x" }, { slug: "evt", marketCount: 2 });
+      expect(market.tags).toBeNull();
+    });
+  });
 });
 
 describe("mapGammaPricing", () => {

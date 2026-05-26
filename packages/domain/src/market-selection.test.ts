@@ -3,10 +3,12 @@ import {
   canPlaceBuyOrder,
   evaluatePreEntry,
   evaluateContinuation,
+  evaluateStrikeEntryFilter,
   isAlive,
-  isStrikeShortHorizonMarket,
   matchesStrikePattern,
   STRIKE_MIN_HORIZON_HOURS,
+  STRIKE_YES_TAIL_MAX_PRICE,
+  STRIKE_YES_TAIL_MIN_RUNWAY_HOURS,
   type BuyPlacementInput,
 } from "./market-selection.js";
 import { SelectionRuleEngine } from "./selection-rule-engine.js";
@@ -230,166 +232,140 @@ describe("evaluatePreEntry", () => {
     });
   });
 
-  // R64 selective horizon filter. The blanket `will-be-between` blacklist was
-  // rolled back in favor of blocking only short-horizon strike markets where
-  // Plankton's multi-buy ladder cannot reach step >=11 profitably.
-  describe("strike short-horizon filter (R64)", () => {
+  // Track B D1 strike entry filter (spec §5). Supersedes the R64 crypto-only
+  // short-horizon filter: now applies to ALL strike-classified markets, plus a
+  // Yes-tail (cheap + short-runway) guard. The 14 cases mirror spec §5.6.
+  describe("strike entry filter (Track B D1)", () => {
     const NOW_MS = Date.parse("2026-05-12T12:00:00.000Z");
     const futureEndDate = (hoursFromNow: number) =>
       new Date(NOW_MS + hoursFromNow * 3_600_000).toISOString();
+    // Crypto strike → also matched by the narrow `matchesStrikePattern` regex.
+    const CRYPTO_STRIKE = "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13";
+    // Non-crypto strike → classified strike by slug shape, but no strikePattern.
+    const WEATHER_STRIKE = "highest-temperature-in-tokyo-on-may-18-2026-25c";
 
-    const SHORT_HORIZON_STRIKE_SLUGS = [
-      "will-the-price-of-ethereum-be-between-2500-2600-on-may-7",
-      "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13",
-      "will-the-price-of-xrp-be-between-1pt80-1pt90-on-february-28",
-    ] as const;
-
-    it.each(SHORT_HORIZON_STRIKE_SLUGS)("blocks %s when horizon < 24h", (slug) => {
-      const r = evaluatePreEntry(
+    const evalStrike = (overrides: Record<string, unknown>) =>
+      evaluatePreEntry(
         EMPTY_ENGINE,
-        {
-          ...VALID_PRE_ENTRY,
-          eventSlug: slug,
-          slug,
-          question: slug.replace(/-/g, " "),
-          endDate: futureEndDate(6),
-        },
+        { ...VALID_PRE_ENTRY, slug: CRYPTO_STRIKE, eventSlug: CRYPTO_STRIKE, ...overrides },
         undefined,
         NOW_MS,
       );
+
+    it("1: blocks strike at ttc 23h59m → strike_min_horizon", () => {
+      const r = evalStrike({ endDate: new Date(NOW_MS + (24 * 3600 - 60) * 1000).toISOString() });
       expect(r.finalStatus).toBe("EXCLUDE");
       expect(r.selectionStatus).toBe("fallback_exclude");
-      expect(r.rejectReason).toBe("strike_short_horizon");
-      expect(r.strikePattern).toBe("between");
-      expect(r.horizonHours).toBeCloseTo(6);
+      expect(r.rejectReason).toBe("strike_min_horizon");
     });
 
-    it.each(SHORT_HORIZON_STRIKE_SLUGS)("admits %s when horizon >= 24h", (slug) => {
+    it("2: admits strike at ttc 24h00m exactly (strict <)", () => {
+      const r = evalStrike({ endDate: new Date(NOW_MS + 24 * 3_600_000).toISOString() });
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("3: admits strike at ttc 24h01m", () => {
+      const r = evalStrike({ endDate: new Date(NOW_MS + (24 * 3600 + 60) * 1000).toISOString() });
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("4: blocks strike midPrice $0.04, ttc 5d → strike_yes_tail_short_runway", () => {
+      const r = evalStrike({ midPrice: 0.04, endDate: futureEndDate(120) });
+      expect(r.finalStatus).toBe("EXCLUDE");
+      expect(r.rejectReason).toBe("strike_yes_tail_short_runway");
+    });
+
+    it("5: admits strike midPrice $0.04, ttc 8d (>168h runway)", () => {
+      const r = evalStrike({ midPrice: 0.04, endDate: futureEndDate(192) });
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("6: blocks strike midPrice $0.20, ttc 20h → strike_min_horizon (floor first)", () => {
+      const r = evalStrike({ midPrice: 0.2, endDate: futureEndDate(20) });
+      expect(r.finalStatus).toBe("EXCLUDE");
+      expect(r.rejectReason).toBe("strike_min_horizon");
+    });
+
+    it("7: admits strike midPrice $0.20, ttc 2d", () => {
+      const r = evalStrike({ midPrice: 0.2, endDate: futureEndDate(48) });
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("8: blocks strike midPrice $0.05 exactly, ttc 5d (≤ boundary)", () => {
+      const r = evalStrike({ midPrice: 0.05, endDate: futureEndDate(120) });
+      expect(r.finalStatus).toBe("EXCLUDE");
+      expect(r.rejectReason).toBe("strike_yes_tail_short_runway");
+    });
+
+    it("9: admits strike midPrice null, ttc 5d (Yes-tail fail-open)", () => {
+      const r = evalStrike({ midPrice: null, endDate: futureEndDate(120) });
+      // midPrice null → hard filter would reject mid_price_too_high, but the
+      // point is the Yes-tail guard does NOT fire; assert it is not the reason.
+      expect(r.rejectReason).not.toBe("strike_yes_tail_short_runway");
+      expect(r.rejectReason).not.toBe("strike_min_horizon");
+    });
+
+    it("10: admits non-strike regardless of params", () => {
       const r = evaluatePreEntry(
         EMPTY_ENGINE,
-        {
-          ...VALID_PRE_ENTRY,
-          eventSlug: slug,
-          slug,
-          question: slug.replace(/-/g, " "),
-          endDate: futureEndDate(48),
-        },
+        { ...VALID_PRE_ENTRY, midPrice: 0.02, endDate: futureEndDate(1) },
         undefined,
         NOW_MS,
       );
       expect(r.finalStatus).toBe("INCLUDE");
     });
 
-    it("blocks at horizon = 23h59m (just below threshold)", () => {
-      const slug = "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13";
+    it("11: fails open when strike endDate is null", () => {
+      const r = evalStrike({ endDate: null });
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("12: fails open when strike endDate is unparseable", () => {
+      const r = evalStrike({ endDate: "not-an-iso-date" });
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("13: crypto strike, ttc 10h → blocked with strikePattern set", () => {
+      const r = evalStrike({ endDate: futureEndDate(10) });
+      expect(r.finalStatus).toBe("EXCLUDE");
+      expect(r.rejectReason).toBe("strike_min_horizon");
+      expect(r.strikePattern).toBe("between");
+      expect(r.horizonHours).toBeCloseTo(10);
+    });
+
+    it("14: non-crypto (weather) strike, ttc 10h → blocked, strikePattern undefined", () => {
       const r = evaluatePreEntry(
         EMPTY_ENGINE,
         {
           ...VALID_PRE_ENTRY,
-          eventSlug: slug,
-          slug,
-          question: slug.replace(/-/g, " "),
-          endDate: new Date(NOW_MS + (24 * 3600 - 60) * 1000).toISOString(),
+          slug: WEATHER_STRIKE,
+          eventSlug: WEATHER_STRIKE,
+          endDate: futureEndDate(10),
         },
         undefined,
         NOW_MS,
       );
       expect(r.finalStatus).toBe("EXCLUDE");
-      expect(r.rejectReason).toBe("strike_short_horizon");
+      expect(r.rejectReason).toBe("strike_min_horizon");
+      expect(r.strikePattern).toBeUndefined();
     });
 
-    it("admits at horizon = 24h00m exactly (threshold)", () => {
-      const slug = "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13";
-      const r = evaluatePreEntry(
-        EMPTY_ENGINE,
-        {
-          ...VALID_PRE_ENTRY,
-          eventSlug: slug,
-          slug,
-          question: slug.replace(/-/g, " "),
-          endDate: new Date(NOW_MS + 24 * 3_600_000).toISOString(),
-        },
-        undefined,
-        NOW_MS,
-      );
-      expect(r.finalStatus).toBe("INCLUDE");
-    });
-
-    it("admits at horizon = 24h01m (just above threshold)", () => {
-      const slug = "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13";
-      const r = evaluatePreEntry(
-        EMPTY_ENGINE,
-        {
-          ...VALID_PRE_ENTRY,
-          eventSlug: slug,
-          slug,
-          question: slug.replace(/-/g, " "),
-          endDate: new Date(NOW_MS + (24 * 3600 + 60) * 1000).toISOString(),
-        },
-        undefined,
-        NOW_MS,
-      );
-      expect(r.finalStatus).toBe("INCLUDE");
-    });
-
-    it("does not block non-strike markets regardless of horizon", () => {
-      const r = evaluatePreEntry(
-        EMPTY_ENGINE,
-        {
-          ...VALID_PRE_ENTRY,
-          eventSlug: "fed-rate-cut-in-2026",
-          slug: "fed-rate-cut-yes",
-          question: "Will the Fed cut rates in 2026?",
-          endDate: futureEndDate(1),
-        },
-        undefined,
-        NOW_MS,
-      );
-      expect(r.finalStatus).toBe("INCLUDE");
-    });
-
-    it("fails open when endDate is null on a strike slug (horizon unknown)", () => {
-      const slug = "will-the-price-of-ethereum-be-between-2500-2600-on-may-7";
-      const r = evaluatePreEntry(
-        EMPTY_ENGINE,
-        {
-          ...VALID_PRE_ENTRY,
-          eventSlug: slug,
-          slug,
-          question: slug.replace(/-/g, " "),
-          endDate: null,
-        },
-        undefined,
-        NOW_MS,
-      );
-      expect(r.finalStatus).toBe("INCLUDE");
-    });
-
-    it("fails open when endDate is unparseable", () => {
-      const slug = "will-the-price-of-ethereum-be-between-2500-2600-on-may-7";
-      const r = evaluatePreEntry(
-        EMPTY_ENGINE,
-        {
-          ...VALID_PRE_ENTRY,
-          eventSlug: slug,
-          slug,
-          question: slug.replace(/-/g, " "),
-          endDate: "not-an-iso-date",
-        },
-        undefined,
-        NOW_MS,
-      );
-      expect(r.finalStatus).toBe("INCLUDE");
-    });
-
-    it("exposes 24h threshold as STRIKE_MIN_HORIZON_HOURS for callers", () => {
+    it("exposes D1 thresholds as constants for callers", () => {
       expect(STRIKE_MIN_HORIZON_HOURS).toBe(24);
+      expect(STRIKE_YES_TAIL_MAX_PRICE).toBe(0.05);
+      expect(STRIKE_YES_TAIL_MIN_RUNWAY_HOURS).toBe(168);
     });
 
-    it("matchesStrikePattern detects all three slug shapes", () => {
-      expect(
-        matchesStrikePattern("will-the-price-of-bitcoin-be-between-84000-85000-on-may-13"),
-      ).toBe("between");
+    it("evaluateStrikeEntryFilter short-circuits to allow on non-strike slugs", () => {
+      const r = evaluateStrikeEntryFilter(
+        { slug: "fed-rate-cut-yes", endDate: futureEndDate(1), midPrice: 0.02 },
+        NOW_MS,
+      );
+      expect(r).toEqual({ blocked: false, reason: null, horizonHours: null });
+    });
+
+    it("matchesStrikePattern detects all three crypto slug shapes", () => {
+      expect(matchesStrikePattern(CRYPTO_STRIKE)).toBe("between");
       expect(
         matchesStrikePattern("will-the-price-of-bitcoin-be-greater-than-84000-on-may-13"),
       ).toBe("greater_or_less_than");
@@ -399,15 +375,7 @@ describe("evaluatePreEntry", () => {
       expect(matchesStrikePattern("ethereum-above-2295-on-april-27-2026-7am-et")).toBe("above");
       expect(matchesStrikePattern("bitcoin-above-66k-on-march-1")).toBe("above");
       expect(matchesStrikePattern("fed-rate-cut-yes")).toBeNull();
-      expect(matchesStrikePattern("trump-out-as-president-before-2027")).toBeNull();
-    });
-
-    it("isStrikeShortHorizonMarket short-circuits on non-strike slugs", () => {
-      const r = isStrikeShortHorizonMarket(
-        { slug: "fed-rate-cut-yes", endDate: futureEndDate(1) },
-        NOW_MS,
-      );
-      expect(r).toEqual({ blocked: false, pattern: null, horizonHours: null });
+      expect(matchesStrikePattern(WEATHER_STRIKE)).toBeNull();
     });
   });
 

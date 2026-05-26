@@ -10,6 +10,29 @@ import {
 
 const nowMs = Date.parse("2026-05-24T12:00:00.000Z");
 
+// Track B §6 — `estimateTotalSells` is regime-agnostic (no market/regime
+// argument), so D1's "keep full-close for both types" holds by construction.
+// These regressions pin that invariant: strike and non-strike basis values map
+// to identical sell counts because the same dollar basis is the only input.
+describe("Track B §6 — full-close <$20 is regime-agnostic", () => {
+  it("strike basis $5 → full-close in one SELL", () => {
+    expect(estimateTotalSells(5)).toBe(1);
+  });
+
+  it("non-strike basis $5 → identical one-SELL full-close", () => {
+    expect(estimateTotalSells(5)).toBe(1);
+  });
+
+  it("strike basis $25 → progressive two-SELL split (unchanged from non-strike)", () => {
+    expect(estimateTotalSells(25)).toBe(2);
+  });
+
+  it("the <$20 boundary is exclusive: $19.99 → 1, $20 → 2", () => {
+    expect(estimateTotalSells(19.99)).toBe(1);
+    expect(estimateTotalSells(20)).toBe(2);
+  });
+});
+
 describe("Plankton-aligned SELL sizing", () => {
   it("closes the Vance/Iran-sized residual in one SELL instead of fixed-dollar dust", () => {
     const plan = computeSellSizingPlan({

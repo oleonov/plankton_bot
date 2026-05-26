@@ -1716,6 +1716,11 @@ function syncTrackedMarket(
     eventMarketCount: tracked.eventMarketCount,
     // Persisted Gamma createdAt — null-preserving in DB, propagated as-is here.
     gammaCreatedAt: tracked.gammaCreatedAt ?? current?.gammaCreatedAt ?? null,
+    // Track B strike-signal fields (spec §4) — propagated from the persisted
+    // Market row so the decision/exit paths can call classifyMarketRegime.
+    groupItemTitle: tracked.groupItemTitle ?? null,
+    groupItemThreshold: tracked.groupItemThreshold ?? null,
+    tags: tracked.tags ?? null,
     // Step 3 (audit doc §P3 step 0) — propagate Step2 verdict so the
     // soft-ranking-score subscriber can filter without DB round-trip.
     selectionStatus: tracked.selectionStatus ?? null,

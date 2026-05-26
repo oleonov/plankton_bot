@@ -51,8 +51,14 @@ const SEEDED_ENGINE = makeEngine([
 /** Engine with no rules; v5.11 hard filters now own admission. */
 const EMPTY_ENGINE = makeEngine([]);
 
+// 48h, not 24h: the default fixture slug `bitcoin-above-100k` is a strike market
+// (`-above-\d`), so a 24h end date sits exactly on the Track B `strike_min_horizon`
+// boundary. Since `scan()` evaluates a few ms after the fixture is built, ttc
+// dips just under 24h and the market is (correctly) rejected. 48h clears that
+// boundary with timing margin while staying a near-future date; default midPrice
+// (0.32 > $0.05) keeps it past the Yes-tail guard.
 function nearEndDate(): string {
-  return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  return new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
 }
 
 type ClobMarketTestOverrides = Omit<Partial<ClobMarket>, "eventSlug"> & {
@@ -1448,6 +1454,34 @@ describe("MarketScannerModule", () => {
       // Short-horizon rejection still counts as `fallback_exclude` for the
       // overall funnel — the new metric is additive, not a replacement.
       expect(snap.marketsFinalExclude).toBe(1);
+    });
+
+    it("persists a short-horizon strike fallback_exclude (tradable=false) when a position is open (§9.2)", async () => {
+      const positionRepo = createMockPositionRepo();
+      (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        { tokenId: createTokenId("tok-strike-pos"), status: "open" },
+      ]);
+      const { mod, discoveryGateway, marketRepo } = buildModule({
+        positionRepo,
+        selectionRuleEngine: EMPTY_ENGINE,
+      });
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13",
+          eventSlug: "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13",
+          tokens: [{ tokenId: "tok-strike-pos", outcome: "Yes" }],
+          eventMarketCount: 1,
+          endDate: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(), // 3h < 24h
+        }),
+      ]);
+
+      await mod.scan();
+
+      expect(marketRepo.save).toHaveBeenCalledTimes(1);
+      const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
+      expect(saved.selectionStatus).toBe("fallback_exclude");
+      expect(saved.tradable).toBe(false);
+      expect(mod.getStep2BreakdownSnapshot().strikeShortHorizonRejectedTotal).toBe(1);
     });
 
     it("counts per-event single-market totals from gateway eventStats", async () => {

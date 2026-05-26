@@ -236,7 +236,7 @@ describe("MarketSelectionCache", () => {
       selectionRuleAdmitted: 0,
       selectionRuleRejected: 1,
       selectionRejectReasons: {
-        rejected_strike_short_horizon: 1,
+        rejected_strike_min_horizon: 1,
       },
     });
 
@@ -373,5 +373,119 @@ describe("MarketSelectionCache", () => {
     await updateMarket(bus, makeMarket({ tokenId: TOK_A }));
 
     expect(cache.isEligible(TOK_A)).toBe(false);
+  });
+
+  // Track B §5.4 / §9.2 — durable strike-reject persistence into risk_events.
+  describe("strike-reject persistence (Track B §5.4)", () => {
+    function makeSinkCache(): {
+      bus: InProcessEventBus;
+      cache: MarketSelectionCache;
+      insert: ReturnType<typeof vi.fn>;
+    } {
+      const bus = new InProcessEventBus();
+      const insert = vi.fn();
+      const cache = new MarketSelectionCache(bus, EMPTY_ENGINE, undefined, { insert });
+      cache.subscribe();
+      return { bus, cache, insert };
+    }
+
+    const STRIKE_SLUG = "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13";
+
+    it("persists a strike_min_horizon reject once and dedups repeats", async () => {
+      const { bus, cache, insert } = makeSinkCache();
+      const strikeMarket = makeMarket({
+        tokenId: TOK_A,
+        eventSlug: STRIKE_SLUG,
+        slug: STRIKE_SLUG,
+        question: "Will BTC be between $84k and $85k on May 13?",
+        endDate: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+      });
+
+      await updateMarket(bus, strikeMarket);
+
+      expect(cache.isEligible(TOK_A)).toBe(false);
+      expect(cache.getUniverseFilterSnapshot().selectionRejectReasons).toMatchObject({
+        rejected_strike_min_horizon: 1,
+      });
+      expect(insert).toHaveBeenCalledTimes(1);
+      expect(insert).toHaveBeenCalledWith({
+        eventType: "selection_reject",
+        payload: expect.objectContaining({
+          reason: "strike_min_horizon",
+          tokenId: "tok-a",
+          slug: STRIKE_SLUG,
+          regime: "strike",
+        }),
+      });
+
+      // A chatty re-emit of the same token must not write a second row.
+      await updateMarket(bus, strikeMarket);
+      expect(insert).toHaveBeenCalledTimes(1);
+
+      cache.dispose();
+    });
+
+    it("persists a strike_yes_tail_short_runway reject", async () => {
+      const { bus, cache, insert } = makeSinkCache();
+
+      await updateMarket(
+        bus,
+        makeMarket({
+          tokenId: TOK_A,
+          eventSlug: STRIKE_SLUG,
+          slug: STRIKE_SLUG,
+          question: "Will BTC be between $84k and $85k on May 13?",
+          // ttc in [24h, 168h) and YES tail price ≤ $0.05 → short-runway reject.
+          endDate: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
+          midPrice: 0.04,
+        }),
+      );
+
+      expect(cache.isEligible(TOK_A)).toBe(false);
+      expect(insert).toHaveBeenCalledTimes(1);
+      expect(insert.mock.calls[0]?.[0].payload).toMatchObject({
+        reason: "strike_yes_tail_short_runway",
+        regime: "strike",
+      });
+
+      cache.dispose();
+    });
+
+    it("does not persist non-strike rejects", async () => {
+      const { bus, cache, insert } = makeSinkCache();
+
+      await updateMarket(bus, makeMarket({ tokenId: TOK_A, midPrice: 0.6 }));
+
+      expect(cache.isEligible(TOK_A)).toBe(false);
+      expect(insert).not.toHaveBeenCalled();
+
+      cache.dispose();
+    });
+
+    it("re-persists after the token leaves and re-enters the tracked universe", async () => {
+      const { bus, cache, insert } = makeSinkCache();
+      const strikeMarket = makeMarket({
+        tokenId: TOK_A,
+        eventSlug: STRIKE_SLUG,
+        slug: STRIKE_SLUG,
+        question: "Will BTC be between $84k and $85k on May 13?",
+        endDate: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+      });
+
+      await updateMarket(bus, strikeMarket);
+      expect(insert).toHaveBeenCalledTimes(1);
+
+      await bus.publish("TrackedMarketsChanged", {
+        addedTokenIds: [],
+        removedTokenIds: [TOK_A],
+        activeTokenIds: [],
+        timestamp: Date.now(),
+      });
+
+      await updateMarket(bus, strikeMarket);
+      expect(insert).toHaveBeenCalledTimes(2);
+
+      cache.dispose();
+    });
   });
 });
