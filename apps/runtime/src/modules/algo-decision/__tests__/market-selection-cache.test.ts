@@ -217,6 +217,52 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
   });
 
+  it("excludes short-horizon crypto strike markets in the live cache path", async () => {
+    const { bus, cache } = makeCache();
+
+    await updateMarket(
+      bus,
+      makeMarket({
+        tokenId: TOK_A,
+        eventSlug: "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13",
+        slug: "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13",
+        question: "Will the price of Bitcoin be between $84,000 and $85,000 on May 13?",
+        endDate: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    expect(cache.isEligible(TOK_A)).toBe(false);
+    expect(cache.getUniverseFilterSnapshot()).toMatchObject({
+      selectionRuleAdmitted: 0,
+      selectionRuleRejected: 1,
+      selectionRejectReasons: {
+        rejected_strike_short_horizon: 1,
+      },
+    });
+
+    cache.dispose();
+  });
+
+  it("admits non-strike markets with a distant endDate in the live cache path", async () => {
+    const { bus, cache } = makeCache();
+
+    await updateMarket(
+      bus,
+      makeMarket({
+        tokenId: TOK_A,
+        endDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    expect(cache.isEligible(TOK_A)).toBe(true);
+    expect(cache.getUniverseFilterSnapshot()).toMatchObject({
+      selectionRuleAdmitted: 1,
+      selectionRuleRejected: 0,
+    });
+
+    cache.dispose();
+  });
+
   it("removes non-tradable tokens from the eligible set", async () => {
     const { bus, cache } = makeCache();
 

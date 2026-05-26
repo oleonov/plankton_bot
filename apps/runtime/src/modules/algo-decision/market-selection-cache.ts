@@ -123,6 +123,7 @@ export class MarketSelectionCache implements SelectedMarketCache {
         question: market.question,
         midPrice: market.midPrice,
         liquidity: market.liquidity ?? null,
+        endDate: market.endDate,
       },
       policy,
     );
