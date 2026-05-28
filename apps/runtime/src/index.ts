@@ -153,6 +153,7 @@ import {
   SqliteExecutionPolicyObservationRepository,
   SqliteDecisionSignalLogRepository,
   SqliteRedeemLogRepository,
+  SqliteRedeemQuarantineRepository,
 } from "@krabs/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { calculateTotalExposure } from "./exposure-calculator.js";
@@ -385,6 +386,7 @@ async function main(): Promise<void> {
     settlementLedger: new SqliteSettlementLedgerRepository(ledgerConn.db),
     positionDrift: new SqlitePositionDriftRepository(ledgerConn.db),
     redeemLog: new SqliteRedeemLogRepository(ledgerConn.db),
+    redeemQuarantine: new SqliteRedeemQuarantineRepository(ledgerConn.db),
     marketSnapshot: new SqliteMarketSnapshotRepository(ledgerConn.db),
     riskEvent: new SqliteRiskEventRepository(ledgerConn.db),
     decisionSignalLog: new SqliteDecisionSignalLogRepository(ledgerConn.db),
@@ -1291,6 +1293,7 @@ async function main(): Promise<void> {
           marketRepo: repos.market,
           orderRepo: repos.order,
           redeemLogRepo: repos.redeemLog,
+          redeemQuarantineRepo: repos.redeemQuarantine,
           policy: () => currentExecutionPolicy().redeemSweep,
           depositActivationPolicy: () => currentExecutionPolicy().depositActivation,
           riskEventRepo: repos.riskEvent,

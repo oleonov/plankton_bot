@@ -17,7 +17,11 @@ import { createTokenId } from "@krabs/domain";
 import type { PolymarketPositionReader } from "@krabs/exchange";
 import type { Logger } from "../../logger.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
-import type { RedeemLogEntry, SqliteRedeemLogRepository } from "@krabs/db";
+import type {
+  RedeemLogEntry,
+  SqliteRedeemLogRepository,
+  SqliteRedeemQuarantineRepository,
+} from "@krabs/db";
 
 const REDEEM_BATCH_SIZE = 9;
 const REDEEM_BATCH_PAUSE_MS = 5 * 60_000;
@@ -27,6 +31,9 @@ const STABILITY_SNAPSHOTS_REQUIRED = 2;
 const PAUSE_DEFER_RECHECK_MS = 30_000;
 const DEPOSIT_ACTIVATION_PERIODIC_COOLDOWN_MS = 60 * 60_000;
 const SECOND_MS = 1_000;
+const HOUR_MS = 60 * 60_000;
+const DEFAULT_STATE_FAILED_QUARANTINE_THRESHOLD = 5;
+const DEFAULT_STATE_FAILED_QUARANTINE_TTL_HOURS = 24;
 
 interface RedeemSweepDeps {
   bus: EventBus;
@@ -37,6 +44,7 @@ interface RedeemSweepDeps {
   marketRepo: MarketRepository;
   orderRepo?: OrderRepository | undefined;
   redeemLogRepo: SqliteRedeemLogRepository;
+  redeemQuarantineRepo: SqliteRedeemQuarantineRepository;
   policy: () => RedeemSweepPolicy;
   depositActivationPolicy: () => DepositActivationPolicy;
   log: Logger;
@@ -367,8 +375,14 @@ export class RedeemSweepModule implements RuntimeModule {
     const readyGroups: RedeemGroup[] = [];
     let unstableSkipped = 0;
     let activeOrdersSkipped = 0;
+    let quarantineSkipped = 0;
+    const policy = this.deps.policy();
     for (const [conditionId, rows] of byCondition) {
       const group = this.buildGroup(conditionId, rows, positions);
+      if (this.isRedeemQuarantineActive(group, source, this.now(), policy)) {
+        quarantineSkipped++;
+        continue;
+      }
       if (!this.isStableRedeemCandidate(group)) {
         unstableSkipped++;
         continue;
@@ -388,6 +402,7 @@ export class RedeemSweepModule implements RuntimeModule {
         readyGroups: readyGroups.length,
         unstableSkipped,
         activeOrdersSkipped,
+        quarantineSkipped,
         stabilityRequired: STABILITY_SNAPSHOTS_REQUIRED,
       },
       "redeem sweep processed positions",
@@ -497,19 +512,70 @@ export class RedeemSweepModule implements RuntimeModule {
     return true;
   }
 
-  private recordRedeemSkip(group: RedeemGroup, source: string, reason: string): void {
+  private recordRedeemSkip(
+    group: RedeemGroup,
+    source: string,
+    reason: string,
+    extraDetails: Record<string, unknown> = {},
+  ): void {
     this.deps.redeemLogRepo.insert({
       conditionId: group.conditionId,
       tokenIds: group.includedTokenIds,
       attemptTs: this.now(),
       status: "skipped",
       errorMsg: reason,
-      details: { source, reason, excludedTokenIds: group.excludedTokenIds },
+      details: { source, reason, excludedTokenIds: group.excludedTokenIds, ...extraDetails },
     });
     this.recordMetricLabels("redeem_sweep_skipped_total", {
       condition_id: group.conditionId,
       reason,
     });
+  }
+
+  private isRedeemQuarantineActive(
+    group: RedeemGroup,
+    source: string,
+    now: number,
+    policy: RedeemSweepPolicy,
+  ): boolean {
+    if (!isRedeemCircuitBreakerEnabled(policy)) return false;
+    const state = this.deps.redeemQuarantineRepo
+      .findByConditionIds([group.conditionId])
+      .get(group.conditionId);
+    const untilTs = state?.redeemQuarantineUntilTs ?? null;
+    if (untilTs === null) return false;
+    if (untilTs > now) {
+      this.recordRedeemSkip(group, source, "state_failed_quarantine", {
+        consecutiveStateFailedCount: state?.consecutiveStateFailedCount ?? 0,
+        quarantineUntilTs: untilTs,
+      });
+      this.recordMetricLabels("redeem_quarantine_skipped_total", {
+        condition_id: group.conditionId,
+        until_ts: untilTs,
+        remaining_ms: untilTs - now,
+      });
+      return true;
+    }
+
+    const reset = this.deps.redeemQuarantineRepo.clearExpired(group.conditionId);
+    if (reset.reset) {
+      this.recordMetricLabels("redeem_quarantine_expired_total", {
+        condition_id: group.conditionId,
+      });
+      this.recordMetricLabels("redeem_quarantine_counter_reset_total", {
+        condition_id: group.conditionId,
+        reason: "ttl_expired",
+      });
+      this.deps.riskEventRepo?.insert({
+        eventType: "redeem_quarantine_expired",
+        payload: {
+          condition_id: group.conditionId,
+          previous_unlock_ts: reset.previousRedeemQuarantineUntilTs,
+          source,
+        },
+      });
+    }
+    return false;
   }
 
   private isStateFailedCooldownActive(group: RedeemGroup, source: string, now: number): boolean {
@@ -556,6 +622,7 @@ export class RedeemSweepModule implements RuntimeModule {
     const reservedGroups: RedeemGroup[] = [];
     const keepInFlightConditions = new Set<string>();
     for (const group of groups) {
+      if (this.isRedeemQuarantineActive(group, source, now, policy)) continue;
       if (this.isStateFailedCooldownActive(group, source, now)) continue;
       if (
         !this.reserveCondition(
@@ -605,6 +672,9 @@ export class RedeemSweepModule implements RuntimeModule {
           },
         });
         this.handleRedeemResult(group, redeemResult);
+        if (redeemLogStatus === "success") {
+          this.clearStateFailedCounterAfterSuccess(group, policy);
+        }
         if (keepInFlight) {
           keepInFlightConditions.add(group.conditionId);
         } else {
@@ -628,6 +698,7 @@ export class RedeemSweepModule implements RuntimeModule {
             group.conditionId,
             this.now() + STATE_FAILED_COOLDOWN_MS,
           );
+          this.recordStateFailed(group, policy, source);
         }
         this.recordAttemptOutcome({
           conditionId: group.conditionId,
@@ -692,6 +763,55 @@ export class RedeemSweepModule implements RuntimeModule {
   private recordAttemptOutcome(entry: Omit<RedeemLogEntry, "attemptTs">): void {
     if (this.deps.redeemLogRepo.updateLatestActiveAttempt(entry)) return;
     this.deps.redeemLogRepo.insert({ ...entry, attemptTs: this.now() });
+  }
+
+  private recordStateFailed(group: RedeemGroup, policy: RedeemSweepPolicy, source: string): void {
+    if (!isRedeemCircuitBreakerEnabled(policy)) return;
+    const now = this.now();
+    const result = this.deps.redeemQuarantineRepo.recordStateFailed({
+      conditionId: group.conditionId,
+      nowTs: now,
+      threshold: policy.stateFailedQuarantineThreshold ?? DEFAULT_STATE_FAILED_QUARANTINE_THRESHOLD,
+      ttlMs:
+        (policy.stateFailedQuarantineTtlHours ?? DEFAULT_STATE_FAILED_QUARANTINE_TTL_HOURS) *
+        HOUR_MS,
+    });
+    if (result.positionRows === 0) {
+      this.deps.log.warn(
+        { conditionId: group.conditionId },
+        "redeem quarantine state failed counter had no local position rows",
+      );
+      this.recordMetricLabels("redeem_quarantine_missing_position_row_total", {
+        condition_id: group.conditionId,
+      });
+    }
+    if (!result.enteredQuarantine) return;
+    this.recordMetricLabels("redeem_quarantined_total", {
+      condition_id: group.conditionId,
+      consecutive_count: result.consecutiveStateFailedCount,
+      until_ts: result.redeemQuarantineUntilTs,
+    });
+    this.deps.riskEventRepo?.insert({
+      eventType: "redeem_quarantine_entered",
+      payload: {
+        condition_id: group.conditionId,
+        reason: "state_failed",
+        consecutive_count: result.consecutiveStateFailedCount,
+        expected_unlock_ts: result.redeemQuarantineUntilTs,
+        token_ids: group.includedTokenIds,
+        source,
+      },
+    });
+  }
+
+  private clearStateFailedCounterAfterSuccess(group: RedeemGroup, policy: RedeemSweepPolicy): void {
+    if (!isRedeemCircuitBreakerEnabled(policy)) return;
+    const result = this.deps.redeemQuarantineRepo.clearAfterSuccess(group.conditionId);
+    if (!result.reset) return;
+    this.recordMetricLabels("redeem_quarantine_counter_reset_total", {
+      condition_id: group.conditionId,
+      reason: "success",
+    });
   }
 
   private buildRedeemTokenMap(
@@ -890,6 +1010,7 @@ export class RedeemSweepModule implements RuntimeModule {
       this.inFlightByCondition.delete(group.conditionId);
       this.verificationAttemptsByCondition.delete(group.conditionId);
       this.recordMetric("redeem_sweep_verified_cleared_total", group);
+      this.clearStateFailedCounterAfterSuccess(group, this.deps.policy());
       return;
     }
     const verificationAttempt = this.nextVerificationAttempt(group);
@@ -1078,6 +1199,10 @@ function isSettlementStateFailedError(err: unknown): boolean {
     name === "SettlementTransactionFailedError" ||
     (typeof message === "string" && /STATE_FAILED|failed state|transaction.*failed/i.test(message))
   );
+}
+
+function isRedeemCircuitBreakerEnabled(policy: RedeemSweepPolicy): boolean {
+  return policy.circuitBreakerEnabled !== false;
 }
 
 function isRedeemLogUniqueInFlightViolation(err: unknown): boolean {

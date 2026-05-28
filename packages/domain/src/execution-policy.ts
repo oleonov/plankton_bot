@@ -142,6 +142,9 @@ export const DEFAULT_REDEEM_SWEEP_POLICY: RedeemSweepPolicy = {
   maxRetries: 3,
   retryBackoffMs: [60_000, 300_000, 1_800_000],
   postRedeemVerifyDelayMs: 5 * 60_000,
+  circuitBreakerEnabled: true,
+  stateFailedQuarantineThreshold: 5,
+  stateFailedQuarantineTtlHours: 24,
 };
 
 export const DEFAULT_RACE_PROTECTION_POLICY: RaceProtectionPolicy = {
@@ -335,6 +338,8 @@ const BOUND_TAKER_MIN_NOTIONAL_MAX = 1_000;
 const BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS = 30_000;
 const BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS = 24 * 60 * 60_000;
 const BOUND_REDEEM_SWEEP_RETRY_COUNT_MAX = 10;
+const BOUND_REDEEM_STATE_FAILED_QUARANTINE_THRESHOLD_MAX = 100;
+const BOUND_REDEEM_STATE_FAILED_QUARANTINE_TTL_HOURS_MAX = 24 * 30;
 const BOUND_PUBLIC_TRADE_COUNT_MIN = 0;
 const BOUND_PUBLIC_TRADE_COUNT_MAX = 1_000_000;
 const BOUND_H5_AVG_BUY_MIN = 0;
@@ -1076,6 +1081,28 @@ function parseRedeemSweep(raw: unknown, issues: string[]): RedeemSweepPolicy {
       BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS,
       issues,
       "redeemSweep.postRedeemVerifyDelayMs",
+    ),
+    circuitBreakerEnabled: booleanOr(
+      obj.circuitBreakerEnabled,
+      DEFAULT_REDEEM_SWEEP_POLICY.circuitBreakerEnabled,
+      issues,
+      "redeemSweep.circuitBreakerEnabled",
+    ),
+    stateFailedQuarantineThreshold: clampedInt(
+      obj.stateFailedQuarantineThreshold,
+      DEFAULT_REDEEM_SWEEP_POLICY.stateFailedQuarantineThreshold,
+      1,
+      BOUND_REDEEM_STATE_FAILED_QUARANTINE_THRESHOLD_MAX,
+      issues,
+      "redeemSweep.stateFailedQuarantineThreshold",
+    ),
+    stateFailedQuarantineTtlHours: clampedInt(
+      obj.stateFailedQuarantineTtlHours,
+      DEFAULT_REDEEM_SWEEP_POLICY.stateFailedQuarantineTtlHours,
+      1,
+      BOUND_REDEEM_STATE_FAILED_QUARANTINE_TTL_HOURS_MAX,
+      issues,
+      "redeemSweep.stateFailedQuarantineTtlHours",
     ),
   };
 }

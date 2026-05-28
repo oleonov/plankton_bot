@@ -54,6 +54,102 @@ function localPosition(tokenId = TOKEN): Position {
   };
 }
 
+function makeRedeemQuarantineRepo(
+  initial: Record<
+    string,
+    {
+      consecutiveStateFailedCount?: number;
+      redeemQuarantineUntilTs?: number | null;
+      lastStateFailedTs?: number | null;
+      positionRows?: number;
+      totalBasisUsdc?: number;
+    }
+  > = {},
+) {
+  const states = new Map(
+    Object.entries(initial).map(([conditionId, state]) => [
+      conditionId,
+      {
+        conditionId,
+        consecutiveStateFailedCount: state.consecutiveStateFailedCount ?? 0,
+        redeemQuarantineUntilTs: state.redeemQuarantineUntilTs ?? null,
+        lastStateFailedTs: state.lastStateFailedTs ?? null,
+        positionRows: state.positionRows ?? 1,
+        totalBasisUsdc: state.totalBasisUsdc ?? 1,
+      },
+    ]),
+  );
+  const reset = vi.fn((conditionId: string) => {
+    const previous = states.get(conditionId);
+    states.set(conditionId, {
+      conditionId,
+      consecutiveStateFailedCount: 0,
+      redeemQuarantineUntilTs: null,
+      lastStateFailedTs: previous?.lastStateFailedTs ?? null,
+      positionRows: previous?.positionRows ?? 1,
+      totalBasisUsdc: previous?.totalBasisUsdc ?? 1,
+    });
+    return {
+      conditionId,
+      changedRows: previous?.positionRows ?? 1,
+      previousConsecutiveStateFailedCount: previous?.consecutiveStateFailedCount ?? 0,
+      previousRedeemQuarantineUntilTs: previous?.redeemQuarantineUntilTs ?? null,
+      reset:
+        (previous?.consecutiveStateFailedCount ?? 0) > 0 ||
+        (previous?.redeemQuarantineUntilTs ?? null) !== null,
+    };
+  });
+  return {
+    states,
+    repo: {
+      findByConditionIds: vi.fn((conditionIds: readonly string[]) => {
+        const result = new Map();
+        for (const conditionId of conditionIds) {
+          const state = states.get(conditionId);
+          if (state) result.set(conditionId, state);
+        }
+        return result;
+      }),
+      recordStateFailed: vi.fn(
+        ({
+          conditionId,
+          nowTs,
+          threshold,
+          ttlMs,
+        }: {
+          conditionId: string;
+          nowTs: number;
+          threshold: number;
+          ttlMs: number;
+        }) => {
+          const previous = states.get(conditionId);
+          const previousUntil = previous?.redeemQuarantineUntilTs ?? null;
+          const nextCount = (previous?.consecutiveStateFailedCount ?? 0) + 1;
+          const nextUntil = nextCount >= threshold ? nowTs + ttlMs : previousUntil;
+          const state = {
+            conditionId,
+            consecutiveStateFailedCount: nextCount,
+            redeemQuarantineUntilTs: nextUntil,
+            lastStateFailedTs: nowTs,
+            positionRows: previous?.positionRows ?? 1,
+            totalBasisUsdc: previous?.totalBasisUsdc ?? 1,
+          };
+          states.set(conditionId, state);
+          return {
+            ...state,
+            enteredQuarantine:
+              nextUntil !== null &&
+              nextUntil > nowTs &&
+              (previousUntil === null || previousUntil <= nowTs),
+          };
+        },
+      ),
+      clearAfterSuccess: reset,
+      clearExpired: reset,
+    },
+  };
+}
+
 function makeHarness(
   opts: {
     positions?: any[];
@@ -65,6 +161,7 @@ function makeHarness(
     marketRows?: any[];
     openOrders?: any[];
     runtimeControl?: { isPaused: () => boolean };
+    quarantineStates?: Parameters<typeof makeRedeemQuarantineRepo>[0];
   } = {},
 ) {
   const bus = new InProcessEventBus();
@@ -93,6 +190,7 @@ function makeHarness(
   };
   const runtimeMetrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
   const orderRepo = { findOpen: vi.fn(() => opts.openOrders ?? []) };
+  const quarantine = makeRedeemQuarantineRepo(opts.quarantineStates);
   let uniqueViolationOnFirstAttemptingInsert = opts.uniqueViolationOnFirstAttemptingInsert ?? false;
   const module = new RedeemSweepModule({
     bus,
@@ -183,6 +281,7 @@ function makeHarness(
         }));
       }),
     } as any,
+    redeemQuarantineRepo: quarantine.repo as any,
     policy: () => ({
       ...DEFAULT_EXECUTION_POLICY.redeemSweep,
       enabled: true,
@@ -211,6 +310,8 @@ function makeHarness(
     orderRepo,
     log,
     runtimeMetrics,
+    redeemQuarantineRepo: quarantine.repo,
+    quarantineStates: quarantine.states,
   };
 }
 
@@ -867,6 +968,230 @@ describe("RedeemSweepModule", () => {
     await vi.advanceTimersByTimeAsync(1);
     await runSweepForTest(h.module, "unblocked");
     expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+  });
+
+  it("quarantines a condition after the configured STATE_FAILED threshold", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemImpl: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new Error("Settlement transaction reached failed state before balances cleared"),
+        )
+        .mockRejectedValueOnce(
+          new Error("Settlement transaction reached failed state before balances cleared"),
+        ),
+      policy: {
+        inFlightTtlMs: 0,
+        intervalMs: 60 * 60_000,
+        stateFailedQuarantineThreshold: 2,
+        stateFailedQuarantineTtlHours: 24,
+      },
+    });
+    await h.module.start();
+    await runSweepForTest(h.module, "state-failed-1");
+    expect(h.quarantineStates.get(CONDITION)).toMatchObject({
+      consecutiveStateFailedCount: 1,
+      redeemQuarantineUntilTs: null,
+    });
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    await runSweepForTest(h.module, "state-failed-2");
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+    expect(h.quarantineStates.get(CONDITION)).toMatchObject({
+      consecutiveStateFailedCount: 2,
+      redeemQuarantineUntilTs: NOW + 30 * 60_000 + 24 * 60 * 60_000,
+    });
+    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+      "redeem_quarantined_total",
+      1,
+      expect.stringContaining(CONDITION),
+      expect.any(String),
+    );
+  });
+
+  it("skips an active quarantine before calling the gateway", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      quarantineStates: {
+        [CONDITION]: {
+          consecutiveStateFailedCount: 5,
+          redeemQuarantineUntilTs: NOW + 60 * 60_000,
+          lastStateFailedTs: NOW - 60_000,
+        },
+      },
+    });
+
+    await h.module.start();
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+    expect(h.redeemLogRows.at(-1)).toMatchObject({
+      status: "skipped",
+      errorMsg: "state_failed_quarantine",
+      details: expect.objectContaining({
+        reason: "state_failed_quarantine",
+        consecutiveStateFailedCount: 5,
+      }),
+    });
+    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+      "redeem_quarantine_skipped_total",
+      1,
+      expect.stringContaining(CONDITION),
+      expect.any(String),
+    );
+  });
+
+  it("resets the STATE_FAILED counter on redeem success", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      quarantineStates: {
+        [CONDITION]: {
+          consecutiveStateFailedCount: 3,
+          lastStateFailedTs: NOW - 60_000,
+        },
+      },
+    });
+
+    await runStableStartup(h);
+
+    expect(h.quarantineStates.get(CONDITION)).toMatchObject({
+      consecutiveStateFailedCount: 0,
+      redeemQuarantineUntilTs: null,
+    });
+    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+      "redeem_quarantine_counter_reset_total",
+      1,
+      expect.stringContaining("success"),
+      expect.any(String),
+    );
+  });
+
+  it("does not reset the STATE_FAILED counter on non-STATE_FAILED failures", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemImpl: vi.fn().mockRejectedValueOnce(new Error("relayer down")),
+      quarantineStates: {
+        [CONDITION]: {
+          consecutiveStateFailedCount: 3,
+          lastStateFailedTs: NOW - 60_000,
+        },
+      },
+    });
+
+    await h.module.start();
+    await runSweepForTest(h.module, "transient-failure");
+
+    expect(h.redeemQuarantineRepo.recordStateFailed).not.toHaveBeenCalled();
+    expect(h.redeemQuarantineRepo.clearAfterSuccess).not.toHaveBeenCalled();
+    expect(h.quarantineStates.get(CONDITION)).toMatchObject({
+      consecutiveStateFailedCount: 3,
+    });
+  });
+
+  it("leaves the STATE_FAILED counter unchanged on RPC 429 hard-pause", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemImpl: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new Error("429 quota exceeded: 0 units remaining, resets in 60 seconds"),
+        ),
+      quarantineStates: {
+        [CONDITION]: {
+          consecutiveStateFailedCount: 2,
+          lastStateFailedTs: NOW - 60_000,
+        },
+      },
+    });
+
+    await h.module.start();
+    await runSweepForTest(h.module, "rate-limited");
+
+    expect(h.redeemQuarantineRepo.recordStateFailed).not.toHaveBeenCalled();
+    expect(h.quarantineStates.get(CONDITION)).toMatchObject({
+      consecutiveStateFailedCount: 2,
+    });
+  });
+
+  it("bypasses quarantine and counter updates when circuit breaker is disabled", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      policy: { circuitBreakerEnabled: false },
+      quarantineStates: {
+        [CONDITION]: {
+          consecutiveStateFailedCount: 5,
+          redeemQuarantineUntilTs: NOW + 60 * 60_000,
+        },
+      },
+    });
+
+    await runStableStartup(h);
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(h.redeemQuarantineRepo.recordStateFailed).not.toHaveBeenCalled();
+    expect(h.redeemQuarantineRepo.clearAfterSuccess).not.toHaveBeenCalled();
+  });
+
+  it("redeems healthy conditions in a mixed batch while skipping quarantined ones", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [
+        remotePosition({ tokenId: TOKEN, conditionId: CONDITION }),
+        remotePosition({ tokenId: "tok-ok", conditionId: "cond-ok" }),
+      ],
+      quarantineStates: {
+        [CONDITION]: {
+          consecutiveStateFailedCount: 5,
+          redeemQuarantineUntilTs: NOW + 60 * 60_000,
+        },
+      },
+    });
+
+    await runStableStartup(h);
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(h.gateway.redeemPositions).toHaveBeenCalledWith(["cond-ok"], {
+      redeemTokenIdsByCondition: { "cond-ok": [createTokenId("tok-ok")] },
+    });
+    expect(h.redeemLogRows.some((row) => row.errorMsg === "state_failed_quarantine")).toBe(true);
+  });
+
+  it("expires quarantine, resets the counter, and retries after a fresh stability snapshot", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      quarantineStates: {
+        [CONDITION]: {
+          consecutiveStateFailedCount: 5,
+          redeemQuarantineUntilTs: NOW - 1,
+          lastStateFailedTs: NOW - 24 * 60 * 60_000,
+        },
+      },
+    });
+
+    await h.module.start();
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+    expect(h.quarantineStates.get(CONDITION)).toMatchObject({
+      consecutiveStateFailedCount: 0,
+      redeemQuarantineUntilTs: null,
+    });
+    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+      "redeem_quarantine_expired_total",
+      1,
+      expect.stringContaining(CONDITION),
+      expect.any(String),
+    );
+
+    await runSweepForTest(h.module, "after-expiry-stable");
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
   });
 
   it("skips redeem when active orders exist on the same condition", async () => {

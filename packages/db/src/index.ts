@@ -44,6 +44,13 @@ export {
   type RedeemLogStatus,
   type RedeemLogSummary,
 } from "./repositories/redeem-log-repository.js";
+export {
+  SqliteRedeemQuarantineRepository,
+  type RedeemQuarantineResetResult,
+  type RedeemQuarantineState,
+  type RedeemQuarantineStateFailedResult,
+  type RedeemQuarantineSummary,
+} from "./repositories/redeem-quarantine-repository.js";
 export { SelectionRuleRepository } from "./repositories/selection-rule-repository.js";
 export type {
   SelectionRuleInsert,

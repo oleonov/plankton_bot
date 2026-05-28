@@ -797,6 +797,9 @@ export interface RedeemSweepPolicy {
   maxRetries: number;
   retryBackoffMs: number[];
   postRedeemVerifyDelayMs: number;
+  circuitBreakerEnabled: boolean;
+  stateFailedQuarantineThreshold: number;
+  stateFailedQuarantineTtlHours: number;
 }
 
 export interface RaceProtectionPolicy {

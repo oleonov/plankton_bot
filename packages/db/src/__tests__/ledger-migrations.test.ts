@@ -466,3 +466,30 @@ describe("migration 055 — redeem_log unique in-flight", () => {
     ).not.toThrow();
   });
 });
+
+describe("migration 061 — redeem quarantine fields", () => {
+  it("adds idempotent STATE_FAILED quarantine fields and indexes", () => {
+    const sql = readMigration("061_redeem_quarantine_fields.sql");
+    db.exec(applySafeAddColumnStatements(db, sql));
+    expect(() => db.exec(applySafeAddColumnStatements(db, sql))).not.toThrow();
+
+    const columns = db.prepare("PRAGMA table_info(positions)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "consecutive_state_failed_count",
+        "redeem_quarantine_until_ts",
+        "last_state_failed_ts",
+      ]),
+    );
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'positions'")
+      .all() as Array<{ name: string }>;
+    expect(indexes.map((index) => index.name)).toEqual(
+      expect.arrayContaining([
+        "idx_positions_redeem_quarantine_until",
+        "idx_positions_condition_redeem_quarantine",
+      ]),
+    );
+  });
+});

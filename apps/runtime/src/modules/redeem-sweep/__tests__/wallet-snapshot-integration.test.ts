@@ -50,6 +50,22 @@ function hasLaterRedeemLogRow(rows: readonly any[], row: any): boolean {
   );
 }
 
+function makeRedeemQuarantineRepo() {
+  const reset = vi.fn((conditionId: string) => ({
+    conditionId,
+    changedRows: 0,
+    previousConsecutiveStateFailedCount: 0,
+    previousRedeemQuarantineUntilTs: null,
+    reset: false,
+  }));
+  return {
+    findByConditionIds: vi.fn(() => new Map()),
+    recordStateFailed: vi.fn(),
+    clearAfterSuccess: reset,
+    clearExpired: reset,
+  };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -152,6 +168,7 @@ describe("redeem sweep wallet snapshot integration", () => {
         findLatestAttemptTs: vi.fn(() => null),
         markOrphanedActiveAttempts: vi.fn(() => []),
       } as any,
+      redeemQuarantineRepo: makeRedeemQuarantineRepo() as any,
       policy: () => ({
         ...DEFAULT_EXECUTION_POLICY.redeemSweep,
         enabled: true,

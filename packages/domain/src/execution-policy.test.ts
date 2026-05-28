@@ -740,13 +740,24 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
 
   it("parses redeem sweep policy and defaults missing fields", () => {
     const { policy, issues } = parseExecutionPolicyJson(
-      JSON.stringify({ redeemSweep: { enabled: false, intervalMs: 120_000 } }),
+      JSON.stringify({
+        redeemSweep: {
+          enabled: false,
+          intervalMs: 120_000,
+          circuitBreakerEnabled: false,
+          stateFailedQuarantineThreshold: 7,
+          stateFailedQuarantineTtlHours: 48,
+        },
+      }),
     );
     expect(issues).toHaveLength(0);
     expect(policy.redeemSweep).toEqual({
       ...DEFAULT_EXECUTION_POLICY.redeemSweep,
       enabled: false,
       intervalMs: 120_000,
+      circuitBreakerEnabled: false,
+      stateFailedQuarantineThreshold: 7,
+      stateFailedQuarantineTtlHours: 48,
     });
   });
 
@@ -758,6 +769,9 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(DEFAULT_EXECUTION_POLICY.redeemSweep).toMatchObject({
       enabled: true,
       intervalMs: 600_000,
+      circuitBreakerEnabled: true,
+      stateFailedQuarantineThreshold: 5,
+      stateFailedQuarantineTtlHours: 24,
     });
     expect(DEFAULT_EXECUTION_POLICY.redeemSweep).not.toHaveProperty("minAgeAfterResolutionSec");
   });
@@ -801,6 +815,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           maxSpreadTicks: -1,
           sides: ["buy", "hold"],
         },
+        redeemSweep: {
+          circuitBreakerEnabled: "yes",
+          stateFailedQuarantineThreshold: 0,
+          stateFailedQuarantineTtlHours: 0,
+        },
       }),
     );
     expect(policy.exitPricingMode).toBe(DEFAULT_EXECUTION_POLICY.exitPricingMode);
@@ -812,6 +831,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.r23DipTrigger).toEqual(DEFAULT_EXECUTION_POLICY.r23DipTrigger);
     expect(policy.multiBuyLadder).toEqual(DEFAULT_EXECUTION_POLICY.multiBuyLadder);
     expect(policy.opportunisticTaker).toEqual(DEFAULT_EXECUTION_POLICY.opportunisticTaker);
+    expect(policy.redeemSweep).toEqual(DEFAULT_EXECUTION_POLICY.redeemSweep);
     expect(issues.some((i) => i.includes("repriceOnOutbid.enabled"))).toBe(true);
     expect(issues.some((i) => i.includes("exitPricingMode"))).toBe(true);
     expect(issues.some((i) => i.includes("exitBidAnchorTicks"))).toBe(true);
@@ -839,6 +859,9 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("opportunisticTaker.enabled"))).toBe(true);
     expect(issues.some((i) => i.includes("opportunisticTaker.maxSpreadTicks"))).toBe(true);
     expect(issues.some((i) => i.includes("opportunisticTaker.sides"))).toBe(true);
+    expect(issues.some((i) => i.includes("redeemSweep.circuitBreakerEnabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("redeemSweep.stateFailedQuarantineThreshold"))).toBe(true);
+    expect(issues.some((i) => i.includes("redeemSweep.stateFailedQuarantineTtlHours"))).toBe(true);
   });
 
   it("rejects deadSideGuard as array or scalar with an issue", () => {

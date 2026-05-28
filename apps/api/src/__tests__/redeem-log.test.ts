@@ -43,6 +43,9 @@ let app: Awaited<ReturnType<typeof buildServer>>;
 
 beforeAll(async () => {
   conn = bootstrapDatabase(":memory:");
+  ensureColumn("positions", "consecutive_state_failed_count", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("positions", "redeem_quarantine_until_ts", "INTEGER");
+  ensureColumn("positions", "last_state_failed_ts", "INTEGER");
   const repo = new SqliteRedeemLogRepository(conn.db);
   repo.insert({
     conditionId: "cond-1",
@@ -65,6 +68,25 @@ beforeAll(async () => {
     attemptTs: Date.now(),
     status: "attempting",
   });
+  const quarantineUntil = Date.now() + 60 * 60_000;
+  const lastStateFailed = Date.now() - 30 * 60_000;
+  conn.db
+    .prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, status, opened_at, updated_at,
+          consecutive_state_failed_count, redeem_quarantine_until_ts, last_state_failed_ts)
+       VALUES
+         ('pos-quarantine', 'tok-quarantine', 'cond-quarantine', 'buy', 1, 0.5,
+          0.5, 0, 'open', datetime('now'), datetime('now'), 5, ?, ?)`,
+    )
+    .run(quarantineUntil, lastStateFailed);
+  conn.db
+    .prepare("INSERT INTO risk_events (event_type, payload) VALUES (?, ?)")
+    .run("redeem_quarantine_expired", "{}");
+  conn.db
+    .prepare("INSERT INTO risk_events (event_type, payload) VALUES (?, ?)")
+    .run("redeem_quarantine_manual_reset", "{}");
   app = await buildServer({
     config: testConfig(),
     controlDb: conn.db,
@@ -74,9 +96,15 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.close();
-  conn.close();
+  await app?.close();
+  conn?.close();
 });
+
+function ensureColumn(table: string, column: string, definition: string): void {
+  const columns = conn.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === column)) return;
+  conn.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
 
 function authHeaders() {
   return { authorization: `Bearer ${TEST_API_KEY}` };
@@ -152,5 +180,24 @@ describe("redeem log routes", () => {
       latest_attempt_ts: expect.any(Number),
     });
     expect(json.data.oldest_in_flight).toMatchObject({ condition_id: "cond-1" });
+  });
+
+  it("returns quarantine summary fields", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/redeem-log/quarantine-summary",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const json = body(res);
+    expect(json.data).toMatchObject({
+      quarantined_count: 1,
+      total_basis_usdc: 0.5,
+      oldest_quarantine_age_hours: expect.any(Number),
+      expired_24h: 1,
+      manual_resets_24h: 1,
+    });
+    expect(json.data.oldest_quarantine_age_hours).toBeGreaterThan(0);
   });
 });

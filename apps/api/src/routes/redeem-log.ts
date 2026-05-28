@@ -1,6 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { SqliteRedeemLogRepository, type RedeemLogStatus, type RedeemLogQuery } from "@krabs/db";
+import {
+  SqliteRedeemLogRepository,
+  SqliteRedeemQuarantineRepository,
+  type RedeemLogStatus,
+  type RedeemLogQuery,
+} from "@krabs/db";
 import { ok, ApiError } from "../errors.js";
 
 interface RedeemLogOpts {
@@ -30,6 +35,7 @@ const REDEEM_LOG_STATUSES = new Set<RedeemLogStatus>([
 
 export const redeemLogRoutes: FastifyPluginAsync<RedeemLogOpts> = async (app, opts) => {
   const repo = new SqliteRedeemLogRepository(opts.db);
+  const quarantineRepo = new SqliteRedeemQuarantineRepository(opts.db);
 
   app.get<{ Querystring: RedeemLogQuerystring }>("/redeem-log", async (request) => {
     const query = parseRedeemLogQuery(request.query);
@@ -73,6 +79,17 @@ export const redeemLogRoutes: FastifyPluginAsync<RedeemLogOpts> = async (app, op
             age_minutes: summary.oldestInFlight.ageMinutes,
           }
         : null,
+    });
+  });
+
+  app.get("/redeem-log/quarantine-summary", async () => {
+    const summary = quarantineRepo.summarizeQuarantine(Date.now());
+    return ok({
+      quarantined_count: summary.quarantinedCount,
+      total_basis_usdc: summary.totalBasisUsdc,
+      oldest_quarantine_age_hours: summary.oldestQuarantineAgeHours,
+      expired_24h: summary.expired24h,
+      manual_resets_24h: summary.manualResets24h,
     });
   });
 };

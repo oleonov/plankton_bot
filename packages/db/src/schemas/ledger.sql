@@ -217,11 +217,19 @@ CREATE TABLE IF NOT EXISTS positions (
   entry_style        TEXT,
   opened_at          TEXT NOT NULL DEFAULT (datetime('now')),
   closed_at          TEXT,
+  consecutive_state_failed_count INTEGER NOT NULL DEFAULT 0,
+  redeem_quarantine_until_ts     INTEGER,
+  last_state_failed_ts           INTEGER,
   updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_positions_token ON positions(token_id);
+CREATE INDEX IF NOT EXISTS idx_positions_redeem_quarantine_until
+  ON positions(redeem_quarantine_until_ts)
+  WHERE redeem_quarantine_until_ts IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_positions_condition_redeem_quarantine
+  ON positions(condition_id, redeem_quarantine_until_ts);
 -- idx_positions_unique_open_per_token (partial UNIQUE on token_id WHERE
 -- status='open') is created in bootstrapLedgerDb after an idempotent repair
 -- step so that upgrade installs with pre-existing duplicate-open rows don't
