@@ -41,7 +41,8 @@ import type {
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
-import { isExecutableOrderSize } from "../min-order-size.js";
+import { evaluateSellPreSubmitGuard, isExecutableOrderSize } from "../min-order-size.js";
+import { RiskEventWriter } from "../risk-event-writer.js";
 
 const BOT_RUN_ID = createBotRunId("test-sell-clamp-run");
 const SELL_TOKEN = createTokenId("tok-clamp-yes");
@@ -175,14 +176,21 @@ function createMockPositionRepo(
 }
 
 function createMockLegStateRepo() {
+  let count = 0;
+  let abandoned = false;
   return {
     get: vi.fn().mockReturnValue(null),
     upsert: vi.fn(),
     delete: vi.fn(),
     getAll: vi.fn().mockReturnValue([]),
-    incrementSellResidualReject: vi.fn().mockReturnValue({
-      count: 1,
-      markedAbandoned: false,
+    incrementSellResidualReject: vi.fn((_tokenId, _nowIso, abandon) => {
+      count += 1;
+      const markedAbandoned = abandon != null && count >= abandon.threshold && !abandoned;
+      if (markedAbandoned) abandoned = true;
+      return {
+        count,
+        markedAbandoned,
+      };
     }),
     markAbandoned: vi.fn(),
     recoverAbandoned: vi.fn(),
@@ -267,6 +275,74 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     expect(isExecutableOrderSize(0.5, null)).toBe(false);
     expect(isExecutableOrderSize(1, null)).toBe(true);
     expect(isExecutableOrderSize(2, null)).toBe(true);
+  });
+
+  it("pre-submit guard blocks SELL size below known min order size", () => {
+    expect(evaluateSellPreSubmitGuard(1.72, 5)).toEqual({
+      proceed: false,
+      reason: "sell-residual-below-min-order-size",
+      minOrderSize: 5,
+    });
+  });
+
+  it("pre-submit guard allows SELL size equal to min order size", () => {
+    expect(evaluateSellPreSubmitGuard(5, 5)).toEqual({ proceed: true, minOrderSize: 5 });
+  });
+
+  it("pre-submit guard allows SELL size above min order size", () => {
+    expect(evaluateSellPreSubmitGuard(5.1, 5)).toEqual({ proceed: true, minOrderSize: 5 });
+  });
+
+  it("pre-submit guard blocks SELL when min order size is unknown", () => {
+    expect(evaluateSellPreSubmitGuard(50, null)).toEqual({
+      proceed: false,
+      reason: "sell-residual-unknown-min",
+      minOrderSize: null,
+    });
+  });
+
+  it("pre-submit guard blocks SELL when min order size is invalid zero", () => {
+    expect(evaluateSellPreSubmitGuard(50, 0)).toEqual({
+      proceed: false,
+      reason: "sell-residual-unknown-min",
+      minOrderSize: null,
+    });
+  });
+
+  it("does not apply the strict SELL pre-submit guard to BUY orders with unknown min", async () => {
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(0),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(2, {
+        side: "buy",
+        metadata: { marketData: { minOrderSize: null } } as unknown as Record<string, unknown>,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(gateway.placeOrder).mock.calls[0]![0]).toMatchObject({
+      side: "buy",
+      size: 2,
+    });
+
+    await mod.stop();
   });
 
   it("clamps SELL up to available residual when intent is below min and residual can satisfy min", () => {
@@ -477,6 +553,137 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     await mod.stop();
   });
 
+  it("pre-submit guard writes order_rejected risk event with dust residual reason", async () => {
+    const riskEventRepo = { insert: vi.fn() };
+    const writer = new RiskEventWriter(riskEventRepo as any, {
+      rejectCooldownMs: 15 * 60_000,
+      exposureBreachCooldownMs: 15 * 60_000,
+    });
+    const legStateRepo = createMockLegStateRepo();
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(1.72),
+      legStateRepo: legStateRepo as any,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    bus.subscribe("OrderRejected", async (event) => writer.onOrderRejected(event as any));
+
+    await mod.start();
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(1.72, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(riskEventRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "order_rejected",
+        payload: expect.objectContaining({
+          reason: "sell-residual-below-min-order-size",
+          errorCode: "INVALID_SIZE",
+          exchangeRejectionReason: null,
+        }),
+      }),
+    );
+
+    await mod.stop();
+  });
+
+  it("pre-submit guard increments dust counter for below-min residual", async () => {
+    const legStateRepo = createMockLegStateRepo();
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(1.72),
+      legStateRepo: legStateRepo as any,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    await mod.start();
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(1.72, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledTimes(1);
+    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledWith(
+      SELL_TOKEN,
+      expect.any(String),
+      {
+        threshold: DEFAULT_EXECUTION_POLICY.dustAbandonment.maxConsecutiveRejects,
+        price: 0.5,
+      },
+    );
+
+    await mod.stop();
+  });
+
+  it("blocks repeated below-min residual SELL attempts before CLOB and advances dust counter", async () => {
+    const legStateRepo = createMockLegStateRepo();
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(1.72),
+      legStateRepo: legStateRepo as any,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    for (let idx = 0; idx < 10; idx++) {
+      await bus.publish("PlaceOrderRequested", {
+        command: makeSellCmd(1.72, {
+          commandId: createCommandId(`cmd-dust-storm-${idx}`),
+          clientOrderId: `plk_dust_storm_${idx}` as ClientOrderId,
+          metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+        }),
+        timestamp: Date.now(),
+      });
+    }
+    await bus.drain();
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(10);
+    expect(rejected.every((event) => event.reason === "sell-residual-below-min-order-size")).toBe(
+      true,
+    );
+    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledTimes(10);
+    expect(vi.mocked(legStateRepo.incrementSellResidualReject).mock.results.at(-1)?.value).toEqual({
+      count: 10,
+      markedAbandoned: true,
+    });
+
+    await mod.stop();
+  });
+
   it("does not increment dust counter for a below-min intent on a sellable position", async () => {
     const legStateRepo = createMockLegStateRepo();
     const mod = new ExecutionModule({
@@ -670,7 +877,9 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
 
     // intent=5.73 (R37 D5), available=2.0 → clamp to 2.0
     await bus.publish("PlaceOrderRequested", {
-      command: makeSellCmd(5.73),
+      command: makeSellCmd(5.73, {
+        metadata: { marketData: { minOrderSize: 1 } } as unknown as Record<string, unknown>,
+      }),
       timestamp: Date.now(),
     });
     await bus.drain();
@@ -806,7 +1015,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     await mod.stop();
   });
 
-  it("clamps live-lite SELL below the 1-share fallback up to available residual", async () => {
+  it("blocks live-lite SELL when market min order size is unavailable", async () => {
     const positionRepo = createMockPositionRepo(10);
     const mod = new ExecutionModule({
       gateway,
@@ -831,10 +1040,10 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     });
     await bus.drain();
 
-    expect(rejected).toHaveLength(0);
-    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(gateway.placeOrder).mock.calls[0]![0].size).toBe(10);
-    expect(mod.getDiagnostics().sellSizeClamps).toBe(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("sell-residual-unknown-min");
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(mod.getDiagnostics().sellSizeClamps).toBe(0);
 
     await mod.stop();
   });
@@ -894,7 +1103,9 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     const rejected = collectRejections(bus);
 
     await bus.publish("PlaceOrderRequested", {
-      command: makeSellCmd(5.73),
+      command: makeSellCmd(5.73, {
+        metadata: { marketData: { minOrderSize: 1 } } as unknown as Record<string, unknown>,
+      }),
       timestamp: Date.now(),
     });
     await bus.drain();

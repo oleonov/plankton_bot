@@ -1421,7 +1421,7 @@ describe("ExecutionModule", () => {
     await dustMod.stop();
   });
 
-  it("increments dust counter for gateway min-size reject if position size < min", async () => {
+  it("increments dust counter before gateway submit if position size < min", async () => {
     const legStateRepo = createMockLegStateRepo();
     (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: false,
@@ -1466,8 +1466,8 @@ describe("ExecutionModule", () => {
       expect.any(String),
       { threshold: DEFAULT_EXECUTION_POLICY.dustAbandonment.maxConsecutiveRejects, price: 0.17 },
     );
-    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Order;
-    expect(savedOrder.exchangeRejectionReason).toBe("rejection_min_size");
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
   });
 
   it("does not increment dust counter for non-min gateway rejects or BUY min-size rejects", async () => {
@@ -2133,7 +2133,7 @@ describe("ExecutionModule", () => {
     await mod2.stop();
   });
 
-  it("uses the live-lite fallback minimum when market minimum is unavailable", async () => {
+  it("blocks live-lite SELL when market minimum is unavailable", async () => {
     const mod2 = new ExecutionModule({
       gateway,
       bus,
@@ -2169,7 +2169,7 @@ describe("ExecutionModule", () => {
 
     expect(gateway.placeOrder).not.toHaveBeenCalled();
     expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toBe("sell-residual-below-min-order-size");
+    expect(rejected[0].reason).toBe("sell-residual-unknown-min");
 
     await mod2.stop();
   });

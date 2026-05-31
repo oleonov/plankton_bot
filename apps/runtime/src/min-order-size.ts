@@ -1,13 +1,25 @@
+import {
+  SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+  SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON,
+} from "./internal-order-reasons.js";
+
 const MIN_ORDER_SIZE_EPSILON = 1e-9;
 
-// R68/R69: Plankton SELL fills include 16.86% below 5 shares; p5 fill
-// size = 0.77 share. Real Polymarket CLOB minimum is below 5. This
-// fallback fires only when market.minOrderSize is unavailable (e.g. CLOB
-// metadata fetch failed); value=1 keeps us permissive enough to not
-// block Plankton-observed paths. If actual CLOB min is higher, CLOB
-// rejects the order and dust counter routes it into abandonment per
-// R67 spec 11.5. CLOB metadata fetch is the primary path
-// (packages/exchange/src/mappers.ts:284); fallback is safety net only.
+export type SellPreSubmitGuardResult =
+  | { proceed: true; minOrderSize: number }
+  | {
+      proceed: false;
+      reason:
+        | typeof SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON
+        | typeof SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON;
+      minOrderSize: number | null;
+    };
+
+// R68/R69: Plankton SELL fills include 16.86% below 5 shares; p5 fill size
+// was 0.77 share. Keep the generic helper permissive for non-final sizing and
+// BUY-side paths. Live-lite SELL submission must use `evaluateSellPreSubmitGuard`
+// with explicit CLOB metadata instead of this fallback, so unknown min-size can
+// block before CLOB rather than producing external reject storms.
 export const DEFAULT_FALLBACK_MIN_ORDER_SIZE = 1;
 
 export function resolveEffectiveMinOrderSize(
@@ -25,4 +37,27 @@ export function isExecutableOrderSize(
   fallback = DEFAULT_FALLBACK_MIN_ORDER_SIZE,
 ): boolean {
   return size + MIN_ORDER_SIZE_EPSILON >= resolveEffectiveMinOrderSize(minOrderSize, fallback);
+}
+
+export function evaluateSellPreSubmitGuard(
+  size: number,
+  minOrderSize: number | null | undefined,
+): SellPreSubmitGuardResult {
+  if (typeof minOrderSize !== "number" || !Number.isFinite(minOrderSize) || minOrderSize <= 0) {
+    return {
+      proceed: false,
+      reason: SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON,
+      minOrderSize: null,
+    };
+  }
+
+  if (size + MIN_ORDER_SIZE_EPSILON < minOrderSize) {
+    return {
+      proceed: false,
+      reason: SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+      minOrderSize,
+    };
+  }
+
+  return { proceed: true, minOrderSize };
 }

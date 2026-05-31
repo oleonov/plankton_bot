@@ -68,8 +68,14 @@ import {
   WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
   WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
 } from "../../wallet-buy-budget.js";
-import { DEFAULT_FALLBACK_MIN_ORDER_SIZE } from "../../min-order-size.js";
-import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
+import {
+  DEFAULT_FALLBACK_MIN_ORDER_SIZE,
+  evaluateSellPreSubmitGuard,
+} from "../../min-order-size.js";
+import {
+  SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+  SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON,
+} from "../../internal-order-reasons.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
   buildReservationSnapshot,
@@ -719,6 +725,28 @@ export class ExecutionModule implements RuntimeModule {
   // ─── Place execution (gateway call) ──────────────────────────────────
 
   private async executePlace(cmd: PlaceOrderCommand): Promise<void> {
+    const sellMinOrderBlock = this.getSellPreSubmitMinOrderBlock(cmd);
+    if (sellMinOrderBlock) {
+      this.recordInternalReservationReject();
+      this.recordExecutionCapacityReject(cmd, sellMinOrderBlock.reason);
+      this.log.warn(
+        {
+          commandId: cmd.commandId,
+          tokenId: cmd.tokenId,
+          conditionId: cmd.conditionId,
+          side: cmd.side,
+          size: cmd.size,
+          price: cmd.price,
+          minOrderSize: sellMinOrderBlock.minOrderSize,
+          reason: sellMinOrderBlock.reason,
+          phase: "pre-submit",
+        },
+        "sell order blocked before CLOB submit — residual below or missing exchange minimum",
+      );
+      await this.rejectOrder(cmd, sellMinOrderBlock.reason, ExchangeErrorCode.InvalidSize);
+      return;
+    }
+
     const postOnlyCross = this.getPostOnlyCrossPreSubmitSkip(cmd);
     if (postOnlyCross) {
       this.skipPostOnlyCrossPreSubmit(cmd, postOnlyCross);
@@ -1129,7 +1157,7 @@ export class ExecutionModule implements RuntimeModule {
     const availableSize = upperBound - reservedSell;
     if (availableSize + ExecutionModule.SIZE_EPSILON_SHARES >= cmd.size) {
       if (cmd.side === "sell") {
-        const minOrderSize = this.resolveCommandMinOrderSize(cmd);
+        const minOrderSize = this.resolveCommandExplicitMinOrderSize(cmd);
         const normalized = normalizeSellSizeForMinOrder({
           availableSize,
           desiredSize: cmd.size,
@@ -1181,7 +1209,7 @@ export class ExecutionModule implements RuntimeModule {
 
     const clampEnabled = this.deps.allowSellSizeClamp !== false;
     if (clampEnabled && availableSize > ExecutionModule.SIZE_EPSILON_SHARES) {
-      const minOrderSize = this.resolveCommandMinOrderSize(cmd);
+      const minOrderSize = this.resolveCommandExplicitMinOrderSize(cmd);
       if (
         minOrderSize != null &&
         Number.isFinite(minOrderSize) &&
@@ -1312,6 +1340,24 @@ export class ExecutionModule implements RuntimeModule {
     return { minOrderSize };
   }
 
+  private getSellPreSubmitMinOrderBlock(
+    cmd: PlaceOrderCommand,
+  ): { reason: string; minOrderSize: number | null } | null {
+    if (cmd.side !== "sell") return null;
+    const guard = evaluateSellPreSubmitGuard(
+      cmd.size,
+      this.resolveCommandExplicitMinOrderSize(cmd),
+    );
+    if (guard.proceed) return null;
+    if (
+      guard.reason === SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON &&
+      this.deps.runtimeMode !== "live-lite"
+    ) {
+      return null;
+    }
+    return { reason: guard.reason, minOrderSize: guard.minOrderSize };
+  }
+
   private getPostOnlyCrossPreSubmitSkip(cmd: PlaceOrderCommand): PostOnlyCrossPreSubmitSkip | null {
     if (cmd.side !== "sell") return null;
     if (cmd.postOnly !== true) return null;
@@ -1370,21 +1416,27 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   private resolveCommandMinOrderSize(cmd: PlaceOrderCommand): number | null {
+    const explicitMinOrderSize = this.resolveCommandExplicitMinOrderSize(cmd);
+    if (explicitMinOrderSize != null) return explicitMinOrderSize;
+
+    return this.deps.runtimeMode === "live-lite" ? DEFAULT_FALLBACK_MIN_ORDER_SIZE : null;
+  }
+
+  private resolveCommandExplicitMinOrderSize(cmd: PlaceOrderCommand): number | null {
     const cachedMinOrderSize = this.resolveCachedMinOrderSize(cmd.tokenId);
     if (cachedMinOrderSize != null) return cachedMinOrderSize;
 
     const metadata = cmd.metadata;
-    const fallback = this.deps.runtimeMode === "live-lite" ? DEFAULT_FALLBACK_MIN_ORDER_SIZE : null;
-    if (!metadata || typeof metadata !== "object") return fallback;
+    if (!metadata || typeof metadata !== "object") return null;
     const marketData = (metadata as Record<string, unknown>).marketData;
-    if (!marketData || typeof marketData !== "object") return fallback;
+    if (!marketData || typeof marketData !== "object") return null;
     const rawMarketData = marketData as Record<string, unknown>;
     for (const value of [rawMarketData.minOrderSize, rawMarketData.effectiveMinOrderSize]) {
       if (typeof value === "number" && Number.isFinite(value) && value > 0) {
         return value;
       }
     }
-    return fallback;
+    return null;
   }
 
   private resolveCachedMinOrderSize(tokenId: TokenId): number | null {
