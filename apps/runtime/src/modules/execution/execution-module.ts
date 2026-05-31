@@ -1431,10 +1431,9 @@ export class ExecutionModule implements RuntimeModule {
     const marketData = (metadata as Record<string, unknown>).marketData;
     if (!marketData || typeof marketData !== "object") return null;
     const rawMarketData = marketData as Record<string, unknown>;
-    for (const value of [rawMarketData.minOrderSize, rawMarketData.effectiveMinOrderSize]) {
-      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-        return value;
-      }
+    const value = rawMarketData.minOrderSize;
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return value;
     }
     return null;
   }

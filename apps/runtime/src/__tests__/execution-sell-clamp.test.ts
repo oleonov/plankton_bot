@@ -1048,6 +1048,70 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     await mod.stop();
   });
 
+  it("blocks live-lite SELL with effectiveMinOrderSize=1 fallback but no real exchange min", async () => {
+    const riskEventRepo = { insert: vi.fn() };
+    const writer = new RiskEventWriter(riskEventRepo as any, {
+      rejectCooldownMs: 15 * 60_000,
+      exposureBreachCooldownMs: 15 * 60_000,
+    });
+    const legStateRepo = createMockLegStateRepo();
+    const positionRepo = createMockPositionRepo(1.72413);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      legStateRepo: legStateRepo as any,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+      allowSellSizeClamp: true,
+    });
+
+    bus.subscribe("OrderRejected", async (event) => writer.onOrderRejected(event as any));
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(1.7241, {
+        signalReason: "repricing-exit",
+        decisionRuleId: "D9_LOSS_EXIT",
+        metadata: {
+          marketData: {
+            minOrderSize: null,
+            effectiveMinOrderSize: 1,
+          },
+        } as unknown as Record<string, unknown>,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!).toEqual({
+      reason: "sell-residual-unknown-min",
+      errorCode: "INVALID_SIZE",
+    });
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(riskEventRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "order_rejected",
+        payload: expect.objectContaining({
+          reason: "sell-residual-unknown-min",
+          errorCode: "INVALID_SIZE",
+        }),
+      }),
+    );
+    expect(legStateRepo.incrementSellResidualReject).not.toHaveBeenCalled();
+
+    await mod.stop();
+  });
+
   // ── Case 4: availableSize == 0 → plain reject (no clamp to zero) ──
 
   it("rejects SELL when position has zero available size (no clamp to zero)", async () => {
