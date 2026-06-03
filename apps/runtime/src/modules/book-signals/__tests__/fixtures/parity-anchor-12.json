@@ -1,0 +1,88 @@
+{
+  "anchor_index": 12,
+  "anchor_ts": 1778341412,
+  "asset_id": "96659529698915046397510131217817304843133409640735634955909069852581246126559",
+  "events": [
+    {
+      "best_ask": 0.06,
+      "best_bid": 0.052,
+      "bids": [
+        [0.052, 99.99],
+        [0.051, 9995.77],
+        [0.044, 23.0]
+      ],
+      "event_type": "book",
+      "id": 528587,
+      "ts_utc": 1778341228
+    },
+    {
+      "best_ask": 0.06,
+      "best_bid": 0.051,
+      "event_type": "price_change",
+      "id": 530001,
+      "ts_utc": 1778341232
+    },
+    {
+      "best_ask": 0.06,
+      "best_bid": 0.052,
+      "event_type": "price_change",
+      "id": 562905,
+      "ts_utc": 1778341353
+    },
+    {
+      "best_ask": 0.06,
+      "best_bid": 0.051,
+      "event_type": "price_change",
+      "id": 565759,
+      "ts_utc": 1778341363
+    },
+    {
+      "best_ask": 0.06,
+      "best_bid": 0.052,
+      "event_type": "price_change",
+      "id": 572986,
+      "ts_utc": 1778341391
+    },
+    {
+      "best_ask": 0.06,
+      "best_bid": 0.052,
+      "bids": [
+        [0.052, 20.0],
+        [0.051, 10015.77],
+        [0.04, 54.0]
+      ],
+      "event_type": "book",
+      "id": 575804,
+      "ts_utc": 1778341405
+    },
+    { "event_type": "last_trade_price", "id": 575821, "price": 0.06, "ts_utc": 1778341405 },
+    {
+      "best_ask": 0.075,
+      "best_bid": 0.052,
+      "event_type": "price_change",
+      "id": 576762,
+      "ts_utc": 1778341409
+    },
+    {
+      "best_ask": 0.075,
+      "best_bid": 0.052,
+      "bids": [
+        [0.052, 20.0],
+        [0.051, 10015.77],
+        [0.047, 22.0]
+      ],
+      "event_type": "book",
+      "id": 576767,
+      "ts_utc": 1778341409
+    },
+    { "event_type": "last_trade_price", "id": 576779, "price": 0.064, "ts_utc": 1778341409 }
+  ],
+  "signals": {
+    "bid_depth_top3": 10057.77,
+    "bid_movement_30m": 0.0010000000000000009,
+    "bid_persistence_s": 21,
+    "public_trade_count_1h": 2,
+    "spread_ratio": 0.3622047244094488
+  },
+  "slug": "will-bitcoin-dip-to-79k-on-may-9"
+}

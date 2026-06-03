@@ -1,0 +1,116 @@
+{
+  "anchor_index": 17,
+  "anchor_ts": 1778346309,
+  "asset_id": "57244347755330066262778309098316724853276779522999340631585067148308650441080",
+  "events": [
+    {
+      "best_ask": 0.05,
+      "best_bid": 0.042,
+      "bids": [
+        [0.042, 55.0],
+        [0.04, 20.0],
+        [0.03, 6386.64]
+      ],
+      "event_type": "book",
+      "id": 431865,
+      "ts_utc": 1778346207
+    },
+    {
+      "best_ask": 0.058,
+      "best_bid": 0.05,
+      "event_type": "price_change",
+      "id": 439273,
+      "ts_utc": 1778346229
+    },
+    {
+      "best_ask": 0.058,
+      "best_bid": 0.05,
+      "bids": [
+        [0.05, 66.74],
+        [0.042, 55.0],
+        [0.04, 20.0]
+      ],
+      "event_type": "book",
+      "id": 439278,
+      "ts_utc": 1778346229
+    },
+    { "event_type": "last_trade_price", "id": 439296, "price": 0.05, "ts_utc": 1778346229 },
+    {
+      "best_ask": 0.057,
+      "best_bid": 0.05,
+      "event_type": "price_change",
+      "id": 442613,
+      "ts_utc": 1778346236
+    },
+    {
+      "best_ask": 0.056,
+      "best_bid": 0.05,
+      "event_type": "price_change",
+      "id": 446764,
+      "ts_utc": 1778346246
+    },
+    {
+      "best_ask": 0.055,
+      "best_bid": 0.05,
+      "event_type": "price_change",
+      "id": 448144,
+      "ts_utc": 1778346249
+    },
+    {
+      "best_ask": 0.054,
+      "best_bid": 0.05,
+      "event_type": "price_change",
+      "id": 452313,
+      "ts_utc": 1778346258
+    },
+    {
+      "best_ask": 0.053,
+      "best_bid": 0.05,
+      "event_type": "price_change",
+      "id": 454222,
+      "ts_utc": 1778346262
+    },
+    {
+      "best_ask": 0.052,
+      "best_bid": 0.05,
+      "event_type": "price_change",
+      "id": 457889,
+      "ts_utc": 1778346269
+    },
+    {
+      "best_ask": 0.051,
+      "best_bid": 0.05,
+      "event_type": "price_change",
+      "id": 459265,
+      "ts_utc": 1778346273
+    },
+    {
+      "best_ask": 0.05,
+      "best_bid": 0.049,
+      "event_type": "price_change",
+      "id": 473691,
+      "ts_utc": 1778346306
+    },
+    {
+      "best_ask": 0.05,
+      "best_bid": 0.049,
+      "bids": [
+        [0.049, 50.0],
+        [0.048, 5.0],
+        [0.04, 45.0]
+      ],
+      "event_type": "book",
+      "id": 473694,
+      "ts_utc": 1778346306
+    },
+    { "event_type": "last_trade_price", "id": 473721, "price": 0.05, "ts_utc": 1778346306 }
+  ],
+  "signals": {
+    "bid_depth_top3": 100.0,
+    "bid_movement_30m": 0.008,
+    "bid_persistence_s": 3,
+    "public_trade_count_1h": 2,
+    "spread_ratio": 0.020202020202020218
+  },
+  "slug": "will-the-price-of-bitcoin-be-between-82000-84000-on-may-10"
+}

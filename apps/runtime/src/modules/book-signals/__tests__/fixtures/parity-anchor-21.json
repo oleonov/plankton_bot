@@ -1,0 +1,59 @@
+{
+  "anchor_index": 21,
+  "anchor_ts": 1779883200,
+  "asset_id": "58169374528519453009824195853449187401011516463374655352236726347432534281787",
+  "events": [
+    {
+      "best_ask": 0.019,
+      "best_bid": 0.01,
+      "event_type": "price_change",
+      "id": 63864,
+      "ts_utc": 1779882287
+    },
+    {
+      "best_ask": 0.019,
+      "best_bid": 0.01,
+      "bids": [
+        [0.01, 100.0],
+        [0.006, 339.93],
+        [0.005, 18.0]
+      ],
+      "event_type": "book",
+      "id": 63869,
+      "ts_utc": 1779882287
+    },
+    { "event_type": "last_trade_price", "id": 63893, "price": 0.01, "ts_utc": 1779882287 },
+    {
+      "best_ask": 0.019,
+      "best_bid": 0.01,
+      "bids": [
+        [0.01, 60.73],
+        [0.006, 339.93],
+        [0.005, 18.0]
+      ],
+      "event_type": "book",
+      "id": 369869,
+      "ts_utc": 1779882754
+    },
+    {
+      "best_ask": 0.019,
+      "best_bid": 0.01,
+      "bids": [
+        [0.01, 49.73],
+        [0.006, 339.93],
+        [0.005, 18.0]
+      ],
+      "event_type": "book",
+      "id": 434701,
+      "ts_utc": 1779882841
+    }
+  ],
+  "signals": {
+    "bid_depth_top3": 407.66,
+    "bid_movement_30m": 0.0,
+    "bid_persistence_s": 913,
+    "public_trade_count_1h": 1,
+    "spread_ratio": 0.6206896551724138
+  },
+  "slug": "highest-temperature-in-miami-on-may-27-2026-92-93f"
+}

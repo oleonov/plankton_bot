@@ -1,0 +1,353 @@
+{
+  "anchor_index": 1,
+  "anchor_ts": 1778325260,
+  "asset_id": "98852532698571996233109902242747350949971007391732026903045115356491075589775",
+  "events": [
+    { "event_type": "last_trade_price", "id": 124387, "price": 0.02, "ts_utc": 1778321769 },
+    { "event_type": "last_trade_price", "id": 221718, "price": 0.024, "ts_utc": 1778321931 },
+    { "event_type": "last_trade_price", "id": 382628, "price": 0.016, "ts_utc": 1778322184 },
+    { "event_type": "last_trade_price", "id": 503945, "price": 0.03, "ts_utc": 1778322424 },
+    { "event_type": "last_trade_price", "id": 577230, "price": 0.03, "ts_utc": 1778322668 },
+    { "event_type": "last_trade_price", "id": 630426, "price": 0.018, "ts_utc": 1778322868 },
+    { "event_type": "last_trade_price", "id": 12020, "price": 0.018, "ts_utc": 1778323107 },
+    {
+      "best_ask": 0.026,
+      "best_bid": 0.022,
+      "event_type": "price_change",
+      "id": 114895,
+      "ts_utc": 1778323477
+    },
+    {
+      "best_ask": 0.027,
+      "best_bid": 0.026,
+      "event_type": "price_change",
+      "id": 140853,
+      "ts_utc": 1778323565
+    },
+    {
+      "best_ask": 0.027,
+      "best_bid": 0.026,
+      "bids": [
+        [0.026, 1522.0],
+        [0.022, 9.8],
+        [0.021, 428.0]
+      ],
+      "event_type": "book",
+      "id": 140856,
+      "ts_utc": 1778323565
+    },
+    { "event_type": "last_trade_price", "id": 140859, "price": 0.026, "ts_utc": 1778323565 },
+    {
+      "best_ask": 0.028,
+      "best_bid": 0.026,
+      "event_type": "price_change",
+      "id": 141145,
+      "ts_utc": 1778323567
+    },
+    {
+      "best_ask": 0.029,
+      "best_bid": 0.026,
+      "event_type": "price_change",
+      "id": 144505,
+      "ts_utc": 1778323578
+    },
+    {
+      "best_ask": 0.027,
+      "best_bid": 0.026,
+      "event_type": "price_change",
+      "id": 160509,
+      "ts_utc": 1778323612
+    },
+    {
+      "best_ask": 0.027,
+      "best_bid": 0.023,
+      "event_type": "price_change",
+      "id": 205342,
+      "ts_utc": 1778323772
+    },
+    {
+      "best_ask": 0.027,
+      "best_bid": 0.018,
+      "event_type": "price_change",
+      "id": 205400,
+      "ts_utc": 1778323773
+    },
+    {
+      "best_ask": 0.028,
+      "best_bid": 0.018,
+      "event_type": "price_change",
+      "id": 208716,
+      "ts_utc": 1778323792
+    },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.018,
+      "event_type": "price_change",
+      "id": 208759,
+      "ts_utc": 1778323792
+    },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.019,
+      "event_type": "price_change",
+      "id": 225254,
+      "ts_utc": 1778323877
+    },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.02,
+      "event_type": "price_change",
+      "id": 256881,
+      "ts_utc": 1778324008
+    },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.019,
+      "event_type": "price_change",
+      "id": 314803,
+      "ts_utc": 1778324261
+    },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.019,
+      "bids": [
+        [0.019, 520.98],
+        [0.018, 2583.0],
+        [0.017, 100.0]
+      ],
+      "event_type": "book",
+      "id": 327900,
+      "ts_utc": 1778324325
+    },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.02,
+      "event_type": "price_change",
+      "id": 343882,
+      "ts_utc": 1778324378
+    },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.019,
+      "event_type": "price_change",
+      "id": 361029,
+      "ts_utc": 1778324473
+    },
+    {
+      "best_ask": 0.026,
+      "best_bid": 0.025,
+      "event_type": "price_change",
+      "id": 361179,
+      "ts_utc": 1778324474
+    },
+    {
+      "best_ask": 0.026,
+      "best_bid": 0.025,
+      "bids": [
+        [0.025, 1576.0],
+        [0.019, 473.0],
+        [0.018, 30.0]
+      ],
+      "event_type": "book",
+      "id": 361182,
+      "ts_utc": 1778324474
+    },
+    { "event_type": "last_trade_price", "id": 361187, "price": 0.025, "ts_utc": 1778324474 },
+    {
+      "best_ask": 0.029,
+      "best_bid": 0.025,
+      "event_type": "price_change",
+      "id": 361252,
+      "ts_utc": 1778324475
+    },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.023,
+      "event_type": "price_change",
+      "id": 410621,
+      "ts_utc": 1778324704
+    },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.023,
+      "bids": [
+        [0.023, 6.01],
+        [0.017, 628.0],
+        [0.016, 4685.0]
+      ],
+      "event_type": "book",
+      "id": 410624,
+      "ts_utc": 1778324704
+    },
+    { "event_type": "last_trade_price", "id": 410625, "price": 0.025, "ts_utc": 1778324704 },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.017,
+      "event_type": "price_change",
+      "id": 410727,
+      "ts_utc": 1778324704
+    },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.018,
+      "event_type": "price_change",
+      "id": 410788,
+      "ts_utc": 1778324705
+    },
+    {
+      "best_ask": 0.026,
+      "best_bid": 0.018,
+      "event_type": "price_change",
+      "id": 455650,
+      "ts_utc": 1778324943
+    },
+    {
+      "best_ask": 0.026,
+      "best_bid": 0.018,
+      "bids": [
+        [0.018, 1086.0],
+        [0.017, 100.0],
+        [0.016, 4685.0]
+      ],
+      "event_type": "book",
+      "id": 455898,
+      "ts_utc": 1778324944
+    },
+    { "event_type": "last_trade_price", "id": 455899, "price": 0.018, "ts_utc": 1778324944 },
+    {
+      "best_ask": 0.026,
+      "best_bid": 0.025,
+      "event_type": "price_change",
+      "id": 456015,
+      "ts_utc": 1778324945
+    },
+    {
+      "best_ask": 0.027,
+      "best_bid": 0.025,
+      "event_type": "price_change",
+      "id": 456539,
+      "ts_utc": 1778324948
+    },
+    {
+      "best_ask": 0.028,
+      "best_bid": 0.025,
+      "event_type": "price_change",
+      "id": 458064,
+      "ts_utc": 1778324958
+    },
+    {
+      "best_ask": 0.028,
+      "best_bid": 0.025,
+      "bids": [
+        [0.025, 1781.0],
+        [0.022, 5.5],
+        [0.018, 444.0]
+      ],
+      "event_type": "book",
+      "id": 460706,
+      "ts_utc": 1778324979
+    },
+    {
+      "best_ask": 0.028,
+      "best_bid": 0.025,
+      "bids": [
+        [0.025, 1452.0],
+        [0.022, 5.5],
+        [0.018, 444.0]
+      ],
+      "event_type": "book",
+      "id": 461366,
+      "ts_utc": 1778324982
+    },
+    { "event_type": "last_trade_price", "id": 461367, "price": 0.025, "ts_utc": 1778324982 },
+    {
+      "best_ask": 0.027,
+      "best_bid": 0.025,
+      "event_type": "price_change",
+      "id": 464434,
+      "ts_utc": 1778325005
+    },
+    {
+      "best_ask": 0.026,
+      "best_bid": 0.025,
+      "event_type": "price_change",
+      "id": 479632,
+      "ts_utc": 1778325094
+    },
+    {
+      "best_ask": 0.026,
+      "best_bid": 0.017,
+      "event_type": "price_change",
+      "id": 494785,
+      "ts_utc": 1778325183
+    },
+    {
+      "best_ask": 0.025,
+      "best_bid": 0.017,
+      "event_type": "price_change",
+      "id": 495034,
+      "ts_utc": 1778325184
+    },
+    {
+      "best_ask": 0.024,
+      "best_bid": 0.017,
+      "event_type": "price_change",
+      "id": 495172,
+      "ts_utc": 1778325185
+    },
+    {
+      "best_ask": 0.024,
+      "best_bid": 0.022,
+      "event_type": "price_change",
+      "id": 495180,
+      "ts_utc": 1778325185
+    },
+    {
+      "best_ask": 0.023,
+      "best_bid": 0.022,
+      "event_type": "price_change",
+      "id": 498099,
+      "ts_utc": 1778325204
+    },
+    {
+      "best_ask": 0.022,
+      "best_bid": 0.017,
+      "event_type": "price_change",
+      "id": 506612,
+      "ts_utc": 1778325257
+    },
+    {
+      "best_ask": 0.022,
+      "best_bid": 0.017,
+      "bids": [
+        [0.017, 3371.0],
+        [0.016, 4685.0],
+        [0.014, 21.0]
+      ],
+      "event_type": "book",
+      "id": 506668,
+      "ts_utc": 1778325257
+    },
+    { "event_type": "last_trade_price", "id": 506669, "price": 0.022, "ts_utc": 1778325257 },
+    {
+      "best_ask": 0.022,
+      "best_bid": 0.017,
+      "bids": [
+        [0.017, 3371.0],
+        [0.016, 4685.0],
+        [0.014, 21.0]
+      ],
+      "event_type": "book",
+      "id": 506867,
+      "ts_utc": 1778325258
+    }
+  ],
+  "signals": {
+    "bid_depth_top3": 8077.0,
+    "bid_movement_30m": 0.008999999999999998,
+    "bid_persistence_s": 3,
+    "public_trade_count_1h": 13,
+    "spread_ratio": 0.2564102564102563
+  },
+  "slug": "elon-musk-of-tweets-may-9-may-11-90-114"
+}

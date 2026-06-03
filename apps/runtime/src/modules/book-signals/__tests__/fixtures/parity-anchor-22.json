@@ -1,0 +1,41 @@
+{
+  "anchor_index": 22,
+  "anchor_ts": 1779883200,
+  "asset_id": "64316787162700124169179619714888470095664782485740424989691192256718121426114",
+  "events": [
+    {
+      "best_ask": 0.02,
+      "best_bid": 0.012,
+      "event_type": "price_change",
+      "id": 509252,
+      "ts_utc": 1779882970
+    },
+    {
+      "best_ask": 0.012,
+      "best_bid": 0.011,
+      "event_type": "price_change",
+      "id": 584596,
+      "ts_utc": 1779883132
+    },
+    {
+      "best_ask": 0.012,
+      "best_bid": 0.011,
+      "bids": [
+        [0.011, 60.8],
+        [0.01, 742.6],
+        [0.003, 329.98]
+      ],
+      "event_type": "book",
+      "id": 584601,
+      "ts_utc": 1779883132
+    }
+  ],
+  "signals": {
+    "bid_depth_top3": 1133.38,
+    "bid_movement_30m": 0.0010000000000000009,
+    "bid_persistence_s": 68,
+    "public_trade_count_1h": 0,
+    "spread_ratio": 0.08695652173913052
+  },
+  "slug": "highest-temperature-in-buenos-aires-on-may-27-2026-18c"
+}

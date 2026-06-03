@@ -1,0 +1,842 @@
+{
+  "anchor_index": 20,
+  "anchor_ts": 1778414400,
+  "asset_id": "111552998344431246408483375703385889969683057223643248768855773571164752979899",
+  "events": [
+    { "event_type": "last_trade_price", "id": 339587, "price": 0.37, "ts_utc": 1778410800 },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 175744,
+      "ts_utc": 1778413562
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 175811,
+      "ts_utc": 1778413562
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 175832,
+      "ts_utc": 1778413562
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 175886,
+      "ts_utc": 1778413562
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 175903,
+      "ts_utc": 1778413562
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 176007,
+      "ts_utc": 1778413562
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 176012,
+      "ts_utc": 1778413562
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 176052,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 176063,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 176107,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 176474,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 176483,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 176502,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 176514,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 176672,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 176675,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 176726,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 176758,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 176839,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 176846,
+      "ts_utc": 1778413563
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 178648,
+      "ts_utc": 1778413565
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 178716,
+      "ts_utc": 1778413565
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 178883,
+      "ts_utc": 1778413565
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 178888,
+      "ts_utc": 1778413565
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 178982,
+      "ts_utc": 1778413565
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 179008,
+      "ts_utc": 1778413565
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 179186,
+      "ts_utc": 1778413565
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 179189,
+      "ts_utc": 1778413565
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 179999,
+      "ts_utc": 1778413566
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 180055,
+      "ts_utc": 1778413566
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 180279,
+      "ts_utc": 1778413566
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 180306,
+      "ts_utc": 1778413566
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 180460,
+      "ts_utc": 1778413567
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 180494,
+      "ts_utc": 1778413567
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 181013,
+      "ts_utc": 1778413567
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 181077,
+      "ts_utc": 1778413567
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 181186,
+      "ts_utc": 1778413567
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 181218,
+      "ts_utc": 1778413567
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 181255,
+      "ts_utc": 1778413567
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 181309,
+      "ts_utc": 1778413567
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 181418,
+      "ts_utc": 1778413567
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 181457,
+      "ts_utc": 1778413567
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 181734,
+      "ts_utc": 1778413568
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 181759,
+      "ts_utc": 1778413568
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 181780,
+      "ts_utc": 1778413568
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 181813,
+      "ts_utc": 1778413568
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 181919,
+      "ts_utc": 1778413568
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 181936,
+      "ts_utc": 1778413568
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 188177,
+      "ts_utc": 1778413573
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 188224,
+      "ts_utc": 1778413574
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 188408,
+      "ts_utc": 1778413574
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 188448,
+      "ts_utc": 1778413574
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 188872,
+      "ts_utc": 1778413574
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 188895,
+      "ts_utc": 1778413574
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 189187,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 189222,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 189241,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 189256,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 189686,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 189699,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 189811,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 189816,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 189976,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 189979,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 190009,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 190062,
+      "ts_utc": 1778413575
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 190212,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 190221,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 190306,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 190323,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 190548,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 190592,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 190786,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 190855,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 191038,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 191065,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 191072,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 191083,
+      "ts_utc": 1778413576
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 191420,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 191443,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 191501,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 191528,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 191628,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 191656,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 191857,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 191871,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 191896,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 191946,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 191993,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 191996,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 192050,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 192069,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 192078,
+      "ts_utc": 1778413577
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 192813,
+      "ts_utc": 1778413578
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 192818,
+      "ts_utc": 1778413578
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 196272,
+      "ts_utc": 1778413581
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 245646,
+      "ts_utc": 1778413635
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 246940,
+      "ts_utc": 1778413636
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 316528,
+      "ts_utc": 1778413710
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 322075,
+      "ts_utc": 1778413717
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 422854,
+      "ts_utc": 1778413837
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 422857,
+      "ts_utc": 1778413837
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 423585,
+      "ts_utc": 1778413838
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 423637,
+      "ts_utc": 1778413838
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 425418,
+      "ts_utc": 1778413840
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 425439,
+      "ts_utc": 1778413840
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 425556,
+      "ts_utc": 1778413840
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 425563,
+      "ts_utc": 1778413840
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 425731,
+      "ts_utc": 1778413841
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 425780,
+      "ts_utc": 1778413841
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 425851,
+      "ts_utc": 1778413841
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 425894,
+      "ts_utc": 1778413841
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 425957,
+      "ts_utc": 1778413841
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 425968,
+      "ts_utc": 1778413841
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 426160,
+      "ts_utc": 1778413841
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 426227,
+      "ts_utc": 1778413841
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 426945,
+      "ts_utc": 1778413842
+    },
+    {
+      "best_ask": 0.39,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 527285,
+      "ts_utc": 1778413998
+    }
+  ],
+  "signals": {
+    "bid_depth_top3": null,
+    "bid_movement_30m": 0.010000000000000009,
+    "bid_persistence_s": 402,
+    "public_trade_count_1h": 1,
+    "spread_ratio": 0.08000000000000007
+  },
+  "slug": "highest-temperature-in-san-francisco-on-may-10-2026-62-63f"
+}

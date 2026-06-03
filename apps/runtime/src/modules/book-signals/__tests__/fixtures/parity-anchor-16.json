@@ -1,0 +1,75 @@
+{
+  "anchor_index": 16,
+  "anchor_ts": 1778345175,
+  "asset_id": "55688916387485142411950199862245249428126085713169780839007085957506637419017",
+  "events": [
+    {
+      "best_ask": 0.03,
+      "best_bid": 0.027,
+      "bids": [
+        [0.027, 864.0],
+        [0.026, 535.93],
+        [0.025, 105.0]
+      ],
+      "event_type": "book",
+      "id": 478673,
+      "ts_utc": 1778344650
+    },
+    {
+      "best_ask": 0.03,
+      "best_bid": 0.028,
+      "event_type": "price_change",
+      "id": 6755,
+      "ts_utc": 1778345146
+    },
+    {
+      "best_ask": 0.03,
+      "best_bid": 0.029,
+      "event_type": "price_change",
+      "id": 8511,
+      "ts_utc": 1778345149
+    },
+    {
+      "best_ask": 0.03,
+      "best_bid": 0.027,
+      "event_type": "price_change",
+      "id": 17711,
+      "ts_utc": 1778345166
+    },
+    {
+      "best_ask": 0.03,
+      "best_bid": 0.028,
+      "event_type": "price_change",
+      "id": 18651,
+      "ts_utc": 1778345167
+    },
+    {
+      "best_ask": 0.031,
+      "best_bid": 0.03,
+      "event_type": "price_change",
+      "id": 20717,
+      "ts_utc": 1778345172
+    },
+    {
+      "best_ask": 0.031,
+      "best_bid": 0.03,
+      "bids": [
+        [0.03, 622.8],
+        [0.028, 25.0],
+        [0.027, 943.88]
+      ],
+      "event_type": "book",
+      "id": 20720,
+      "ts_utc": 1778345172
+    },
+    { "event_type": "last_trade_price", "id": 20727, "price": 0.03, "ts_utc": 1778345172 }
+  ],
+  "signals": {
+    "bid_depth_top3": 1591.6799999999998,
+    "bid_movement_30m": 0.002999999999999999,
+    "bid_persistence_s": 3,
+    "public_trade_count_1h": 1,
+    "spread_ratio": 0.03278688524590167
+  },
+  "slug": "elon-musk-of-tweets-may-2026-600-619"
+}

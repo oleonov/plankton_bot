@@ -1,0 +1,28 @@
+{
+  "anchor_index": 6,
+  "anchor_ts": 1778330175,
+  "asset_id": "90801433612233303557890064442233185249382988493010311832178750954559978532325",
+  "events": [
+    {
+      "best_ask": 0.083,
+      "best_bid": 0.068,
+      "bids": [
+        [0.068, 23.5],
+        [0.067, 1000.0],
+        [0.065, 800.0]
+      ],
+      "event_type": "book",
+      "id": 133015,
+      "ts_utc": 1778330173
+    },
+    { "event_type": "last_trade_price", "id": 133016, "price": 0.083, "ts_utc": 1778330173 }
+  ],
+  "signals": {
+    "bid_depth_top3": 1823.5,
+    "bid_movement_30m": 0.0,
+    "bid_persistence_s": 2,
+    "public_trade_count_1h": 1,
+    "spread_ratio": 0.19867549668874168
+  },
+  "slug": "solstice-fdv-above-50m-one-day-after-launch"
+}

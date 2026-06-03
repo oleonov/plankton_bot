@@ -1,0 +1,32 @@
+{
+  "anchor_index": 25,
+  "anchor_ts": 1779883200,
+  "asset_id": "103564708948258616381240105804455144055788564060192864956100689542933317176642",
+  "events": [
+    { "event_type": "last_trade_price", "id": 381507, "price": 0.001, "ts_utc": 1779880737 },
+    { "event_type": "last_trade_price", "id": 381837, "price": 0.001, "ts_utc": 1779880737 },
+    { "event_type": "last_trade_price", "id": 631661, "price": 0.001, "ts_utc": 1779881178 },
+    {
+      "best_ask": 0.006,
+      "best_bid": 0.001,
+      "event_type": "price_change",
+      "id": 220250,
+      "ts_utc": 1779882516
+    },
+    {
+      "best_ask": 0.004,
+      "best_bid": 0.001,
+      "event_type": "price_change",
+      "id": 363687,
+      "ts_utc": 1779882743
+    }
+  ],
+  "signals": {
+    "bid_depth_top3": null,
+    "bid_movement_30m": 0.0,
+    "bid_persistence_s": 684,
+    "public_trade_count_1h": 3,
+    "spread_ratio": 1.2
+  },
+  "slug": "highest-temperature-in-milan-on-may-27-2026-37c"
+}

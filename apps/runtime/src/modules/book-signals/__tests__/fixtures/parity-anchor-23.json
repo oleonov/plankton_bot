@@ -1,0 +1,23 @@
+{
+  "anchor_index": 23,
+  "anchor_ts": 1779883200,
+  "asset_id": "50329762721592123959889804999307031168914867521942342373551569528510450479771",
+  "events": [
+    {
+      "best_ask": 0.007,
+      "best_bid": 0.001,
+      "bids": [[0.001, 1813.61]],
+      "event_type": "book",
+      "id": 595782,
+      "ts_utc": 1779883156
+    }
+  ],
+  "signals": {
+    "bid_depth_top3": 1813.61,
+    "bid_movement_30m": 0.0,
+    "bid_persistence_s": 44,
+    "public_trade_count_1h": 0,
+    "spread_ratio": 1.5
+  },
+  "slug": "highest-temperature-in-seattle-on-may-27-2026-64-65f"
+}

@@ -1,0 +1,161 @@
+{
+  "anchor_index": 24,
+  "anchor_ts": 1779883200,
+  "asset_id": "67540617045969717320544073565263503973228301762606138478577582899177870700285",
+  "events": [
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.001,
+      "event_type": "price_change",
+      "id": 119198,
+      "ts_utc": 1779881404
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.001,
+      "bids": [[0.001, 60.97]],
+      "event_type": "book",
+      "id": 119201,
+      "ts_utc": 1779881404
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.001,
+      "bids": [[0.001, 55.96]],
+      "event_type": "book",
+      "id": 120156,
+      "ts_utc": 1779881406
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.001,
+      "bids": [[0.001, 54.95]],
+      "event_type": "book",
+      "id": 120396,
+      "ts_utc": 1779881406
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.0,
+      "event_type": "price_change",
+      "id": 121255,
+      "ts_utc": 1779881408
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.001,
+      "event_type": "price_change",
+      "id": 127488,
+      "ts_utc": 1779881417
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.0,
+      "event_type": "price_change",
+      "id": 129490,
+      "ts_utc": 1779881420
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.001,
+      "event_type": "price_change",
+      "id": 606584,
+      "ts_utc": 1779882180
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.0,
+      "event_type": "price_change",
+      "id": 19122,
+      "ts_utc": 1779882215
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.001,
+      "event_type": "price_change",
+      "id": 69922,
+      "ts_utc": 1779882298
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.001,
+      "bids": [[0.001, 48.92]],
+      "event_type": "book",
+      "id": 109799,
+      "ts_utc": 1779882366
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.001,
+      "bids": [[0.001, 47.91]],
+      "event_type": "book",
+      "id": 110433,
+      "ts_utc": 1779882367
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.0,
+      "event_type": "price_change",
+      "id": 133576,
+      "ts_utc": 1779882399
+    },
+    {
+      "best_ask": 0.001,
+      "best_bid": 0.0,
+      "event_type": "price_change",
+      "id": 475001,
+      "ts_utc": 1779882902
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.0,
+      "event_type": "price_change",
+      "id": 477523,
+      "ts_utc": 1779882906
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.002,
+      "event_type": "price_change",
+      "id": 550476,
+      "ts_utc": 1779883059
+    },
+    {
+      "best_ask": 0.002,
+      "best_bid": 0.0,
+      "event_type": "price_change",
+      "id": 550493,
+      "ts_utc": 1779883059
+    },
+    {
+      "best_ask": 0.002,
+      "best_bid": null,
+      "bids": [],
+      "event_type": "book",
+      "id": 550496,
+      "ts_utc": 1779883059
+    },
+    {
+      "best_ask": 0.003,
+      "best_bid": 0.0,
+      "event_type": "price_change",
+      "id": 555019,
+      "ts_utc": 1779883070
+    },
+    {
+      "best_ask": 0.001,
+      "best_bid": 0.0,
+      "event_type": "price_change",
+      "id": 560154,
+      "ts_utc": 1779883081
+    }
+  ],
+  "signals": {
+    "bid_depth_top3": 47.91,
+    "bid_movement_30m": 0.002,
+    "bid_persistence_s": 141,
+    "public_trade_count_1h": 0,
+    "spread_ratio": 2.0
+  },
+  "slug": "highest-temperature-in-sao-paulo-on-may-27-2026-18c"
+}

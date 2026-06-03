@@ -1,0 +1,145 @@
+{
+  "anchor_index": 11,
+  "anchor_ts": 1778339865,
+  "asset_id": "104703082896806168568702397884081986646416623383329131684490309406976427335902",
+  "events": [
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.35,
+      "bids": [
+        [0.35, 40.0],
+        [0.34, 30.0],
+        [0.23, 102.5]
+      ],
+      "event_type": "book",
+      "id": 547089,
+      "ts_utc": 1778338793
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 579405,
+      "ts_utc": 1778338924
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.35,
+      "event_type": "price_change",
+      "id": 580384,
+      "ts_utc": 1778338928
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 580890,
+      "ts_utc": 1778338931
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.35,
+      "event_type": "price_change",
+      "id": 581064,
+      "ts_utc": 1778338932
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 581306,
+      "ts_utc": 1778338934
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.35,
+      "event_type": "price_change",
+      "id": 581602,
+      "ts_utc": 1778338936
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 585204,
+      "ts_utc": 1778338955
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.35,
+      "event_type": "price_change",
+      "id": 585348,
+      "ts_utc": 1778338956
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.35,
+      "event_type": "price_change",
+      "id": 587519,
+      "ts_utc": 1778338971
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 593939,
+      "ts_utc": 1778339003
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.35,
+      "event_type": "price_change",
+      "id": 594286,
+      "ts_utc": 1778339005
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 603732,
+      "ts_utc": 1778339046
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.35,
+      "event_type": "price_change",
+      "id": 603958,
+      "ts_utc": 1778339047
+    },
+    {
+      "best_ask": 0.41,
+      "best_bid": 0.37,
+      "event_type": "price_change",
+      "id": 165934,
+      "ts_utc": 1778339850
+    },
+    {
+      "best_ask": 0.55,
+      "best_bid": 0.36,
+      "event_type": "price_change",
+      "id": 168813,
+      "ts_utc": 1778339861
+    },
+    {
+      "best_ask": 0.55,
+      "best_bid": 0.36,
+      "bids": [
+        [0.36, 40.0],
+        [0.34, 30.0],
+        [0.31, 95.0]
+      ],
+      "event_type": "book",
+      "id": 168822,
+      "ts_utc": 1778339861
+    },
+    { "event_type": "last_trade_price", "id": 168845, "price": 0.43, "ts_utc": 1778339861 }
+  ],
+  "signals": {
+    "bid_depth_top3": 165.0,
+    "bid_movement_30m": 0.020000000000000018,
+    "bid_persistence_s": 4,
+    "public_trade_count_1h": 1,
+    "spread_ratio": 0.4175824175824177
+  },
+  "slug": "will-any-ai-model-reach-1510-overall-arena-score-by-june-30-2026"
+}

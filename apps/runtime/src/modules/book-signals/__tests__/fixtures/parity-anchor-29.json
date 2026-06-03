@@ -1,0 +1,48 @@
+{
+  "anchor_index": 29,
+  "anchor_ts": 1780056000,
+  "asset_id": "24172957772701050665707035595542726082426440021177813766845346234402021800507",
+  "events": [
+    { "event_type": "last_trade_price", "id": 116897, "price": 0.992, "ts_utc": 1780052974 },
+    { "event_type": "last_trade_price", "id": 118125, "price": 0.992, "ts_utc": 1780052975 },
+    {
+      "best_ask": 0.999,
+      "best_bid": 0.995,
+      "bids": [
+        [0.995, 308.0],
+        [0.992, 40.71],
+        [0.991, 100.0]
+      ],
+      "event_type": "book",
+      "id": 374072,
+      "ts_utc": 1780054778
+    },
+    {
+      "best_ask": 0.995,
+      "best_bid": 0.992,
+      "event_type": "price_change",
+      "id": 276011,
+      "ts_utc": 1780055797
+    },
+    {
+      "best_ask": 0.995,
+      "best_bid": 0.992,
+      "bids": [
+        [0.992, 40.71],
+        [0.991, 100.0],
+        [0.99, 30.05]
+      ],
+      "event_type": "book",
+      "id": 276016,
+      "ts_utc": 1780055797
+    }
+  ],
+  "signals": {
+    "bid_depth_top3": 170.76,
+    "bid_movement_30m": 0.0030000000000000027,
+    "bid_persistence_s": 203,
+    "public_trade_count_1h": 2,
+    "spread_ratio": 0.0030196275792652265
+  },
+  "slug": "highest-temperature-in-wuhan-on-may-29-2026-25c"
+}
