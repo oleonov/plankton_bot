@@ -92,6 +92,14 @@ export type {
   DynamicChainCapResolution,
   NextRepriceChainState,
 } from "./reprice-chain.js";
+export { isLiveBook } from "./book-liveness.js";
+export type { BookContext, LiveBookVerdict } from "./book-liveness.js";
+export { computeRepriceThreshold } from "./reprice-threshold.js";
+export type { RepriceContext, RepriceThresholdDecision } from "./reprice-threshold.js";
+export { isStaleSell } from "./stale-sell.js";
+export type { StaleSellContext, StaleVerdict } from "./stale-sell.js";
+export { decideExitAction, isFloorEligible } from "./exit-decision.js";
+export type { ExitActionDecision, ExitDecisionContext } from "./exit-decision.js";
 export { resolveExitTtlByMarket } from "./exit-ttl.js";
 export type { ExitTtlLiquidityTier, ExitTtlResolution } from "./exit-ttl.js";
 export { evaluateMinMarketAge } from "./min-market-age.js";

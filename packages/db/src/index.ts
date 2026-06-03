@@ -37,6 +37,20 @@ export { SqliteLegStateTransitionRepository } from "./repositories/leg-state-tra
 export { SqliteAlgoTokenModeStateRepository } from "./repositories/algo-token-mode-state-repository.js";
 export { SqliteOrderPriceCooldownRepository } from "./repositories/order-price-cooldown-repository.js";
 export {
+  SqliteHoldResolutionStateRepository,
+  type HoldResolutionInsertInput,
+  type HoldResolutionInsertResult,
+  type HoldResolutionState,
+  type HoldResolutionStatus,
+} from "./repositories/hold-resolution-states.js";
+export {
+  SqliteFloorIntentRepository,
+  type FloorIntent,
+  type FloorIntentInsertInput,
+  type FloorIntentInsertResult,
+  type FloorIntentStatus,
+} from "./repositories/floor-intents.js";
+export {
   SqliteRedeemLogRepository,
   type RedeemLogEntry,
   type RedeemLogQuery,
