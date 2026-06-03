@@ -58,6 +58,7 @@ describe("MarketDataModule — queue_overflow routing (Finding #2)", () => {
       fn: ((events: readonly MarketPricingLifecycleEvent[]) => Promise<void>) | null;
     } = { fn: null };
     const getMarketPricing = vi.fn().mockResolvedValue(new Map());
+    const invalidateTokenIds = vi.fn();
 
     // Tracked tokens both in the WS tier AND the ones we'll "drop" via overflow.
     const trackedMarkets = [makeMarket("tok-A"), makeMarket("tok-B")];
@@ -101,6 +102,14 @@ describe("MarketDataModule — queue_overflow routing (Finding #2)", () => {
       pollIntervalMs: 60_000,
       staleThresholdMs: 120_000,
       maxTrackedTokens: 100,
+      bookSignals: {
+        openPositionTokenIds: () => trackedMarkets.map((market) => market.tokenId),
+        setOpenPositionTokenIds: vi.fn(),
+        ingestTopOfBook: vi.fn(),
+        ingestLastTradePrice: vi.fn(),
+        ingestBook: vi.fn(),
+        invalidateTokenIds,
+      },
     });
 
     await module.start();
@@ -119,6 +128,7 @@ describe("MarketDataModule — queue_overflow routing (Finding #2)", () => {
       },
     ]);
     expect(fakeLogger.warn).toHaveBeenCalled();
+    expect(invalidateTokenIds).toHaveBeenCalledWith(["tok-A", "tok-B"]);
 
     // Next poll must include those tokens (pendingGapTokenIds makes the stale
     // predicate return true for them, even though their WS cache may be fresh).

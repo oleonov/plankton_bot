@@ -19,6 +19,7 @@ import type {
   MarketDataGateway,
   MarketPricingSnapshot,
   MarketPricingLifecycleEvent,
+  MarketPricingRawTradeObservation,
   MarketRepository,
   MarketPricingStream,
   MarketPricingStreamMetricsSnapshot,
@@ -77,6 +78,7 @@ const TRANSIENT_POLL_WARN_THROTTLE_MS = 15 * 60_000;
 const GAMMA_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 const PUBLIC_TRADE_COUNT_ENRICH_CONCURRENCY = 5;
 const DEFAULT_TIERED_PRICING_CACHE_TTL_MS = 60_000;
+const BOOK_SIGNAL_FULL_BOOK_CAP_WARN_THROTTLE_MS = 15 * 60_000;
 
 export interface MarketDataTrackedRoleCounts {
   executionCritical: number;
@@ -164,6 +166,10 @@ export interface MarketDataStreamActivitySnapshot {
   readonly cachedTrackedTokenCountAtPollStart: number;
   readonly pricingHitCountLastPoll: number;
   readonly fullBookTokenCount: number;
+  readonly bookSignalFullBookDemandCount: number;
+  readonly bookSignalFullBookSubscribedCount: number;
+  readonly bookSignalFullBookSkippedCount: number;
+  readonly bookSignalFullBookCapUtilizationPct: number | null;
   readonly bookEventsReceived: number;
   readonly narrowSubscribeCount: number;
   readonly narrowUnsubscribeCount: number;
@@ -241,6 +247,27 @@ export interface MarketDataModuleDeps {
    * scorer) stop dirtying the database while paused.
    */
   runtimeControl?: RuntimeControl;
+  bookSignals?: {
+    openPositionTokenIds: () => readonly import("@krabs/domain").TokenId[];
+    setOpenPositionTokenIds: (tokenIds: readonly import("@krabs/domain").TokenId[]) => void;
+    ingestTopOfBook: (observation: {
+      readonly tokenId: import("@krabs/domain").TokenId;
+      readonly ts: number;
+      readonly bestBid: number | null;
+      readonly bestAsk?: number | null;
+    }) => void;
+    ingestLastTradePrice: (observation: {
+      readonly tokenId: import("@krabs/domain").TokenId;
+      readonly ts: number;
+      readonly price: number | null;
+    }) => void;
+    ingestBook: (observation: {
+      readonly tokenId: import("@krabs/domain").TokenId;
+      readonly ts: number;
+      readonly bids: readonly import("@krabs/domain").PriceLevel[];
+    }) => void;
+    invalidateTokenIds?: (tokenIds: readonly string[]) => void;
+  };
 }
 
 export class MarketDataModule implements RuntimeModule {
@@ -296,6 +323,10 @@ export class MarketDataModule implements RuntimeModule {
   private lastDiscoveryBatchTokenIds: Set<string> = new Set();
   private readonly cachedPollDegradeWarn: WarnThrottleState = createWarnThrottleState();
   private readonly discoveryPollFailureWarn: WarnThrottleState = createWarnThrottleState();
+  private readonly bookSignalFullBookCapWarn: WarnThrottleState = createWarnThrottleState();
+  private lastBookSignalFullBookDemandCount = 0;
+  private lastBookSignalFullBookSubscribedCount = 0;
+  private lastBookSignalFullBookSkippedCount = 0;
   private pricingPollBackoffUntilMs = 0;
   private discoveryPollBackoffUntilMs = 0;
   private tieredPricingCache: {
@@ -325,6 +356,7 @@ export class MarketDataModule implements RuntimeModule {
     if (this.deps.gateway.createMarketPricingStream) {
       this.stream = this.deps.gateway.createMarketPricingStream({
         onUpdates: (updates) => this.handleStreamUpdates(updates),
+        onRawTradeObservations: (observations) => this.handleRawTradeObservations(observations),
         onLifecycleEvents: (events) => this.handleLifecycleEvents(events),
         onError: (error) => {
           this.log.warn({ err: error }, "market-data stream error");
@@ -336,6 +368,7 @@ export class MarketDataModule implements RuntimeModule {
           } else {
             this.addPendingGapTokenIds(normalizedTokenIds, Date.now());
           }
+          this.invalidateBookSignalsForGap(normalizedTokenIds);
           this.queueGapLog(reason, normalizedTokenIds.length);
         },
       });
@@ -486,6 +519,10 @@ export class MarketDataModule implements RuntimeModule {
       cachedTrackedTokenCountAtPollStart: this.lastCachedTrackedTokenCountAtPollStart,
       pricingHitCountLastPoll: this.lastPricingHitCount,
       fullBookTokenCount: streamMetrics?.fullBookTokenCount ?? 0,
+      bookSignalFullBookDemandCount: this.lastBookSignalFullBookDemandCount,
+      bookSignalFullBookSubscribedCount: this.lastBookSignalFullBookSubscribedCount,
+      bookSignalFullBookSkippedCount: this.lastBookSignalFullBookSkippedCount,
+      bookSignalFullBookCapUtilizationPct: this.resolveBookSignalFullBookCapUtilizationPct(),
       bookEventsReceived: streamMetrics?.bookEventsReceived ?? 0,
       narrowSubscribeCount: streamMetrics?.narrowSubscribeCount ?? 0,
       narrowUnsubscribeCount: streamMetrics?.narrowUnsubscribeCount ?? 0,
@@ -571,6 +608,7 @@ export class MarketDataModule implements RuntimeModule {
         this.lastCachedTrackedTokenCountAtPollStart = 0;
         this.lastPricingHitCount = 0;
         this.stream?.setTokenIds([]);
+        this.syncBookSignalSubscriptions();
         this.log.debug("no active tracked markets — skipping pricing, waiting for scanner");
         // Do NOT update lastSuccessfulDataMs — no tracked markets means
         // discovery hasn't run yet or found nothing. Stay STALE.
@@ -584,6 +622,7 @@ export class MarketDataModule implements RuntimeModule {
       const tokenIds = tracked.map((m) => String(m.tokenId));
       // Feed only WS-tier (executionCritical + entryCandidates) to the stream.
       this.stream?.setTokenIds(tokenIds);
+      this.syncBookSignalSubscriptions();
       const now = Date.now();
       const fallbackHardStaleMs = Math.max(
         STREAM_FALLBACK_MIN_STALE_MS,
@@ -1115,6 +1154,7 @@ export class MarketDataModule implements RuntimeModule {
 
   private async handleStreamUpdates(updates: readonly MarketPricingStreamUpdate[]): Promise<void> {
     if (updates.length === 0) return;
+    this.recordBookSignalStreamUpdates(updates, Date.now());
     for (const update of updates) {
       this.pendingStreamUpdatesByToken.set(String(update.tokenId), update);
     }
@@ -1125,6 +1165,110 @@ export class MarketDataModule implements RuntimeModule {
         this.log.error({ err }, "stream update flush failed");
       });
     }, STREAM_UPDATE_COALESCE_MS);
+  }
+
+  private async handleRawTradeObservations(
+    observations: readonly MarketPricingRawTradeObservation[],
+  ): Promise<void> {
+    if (!this.deps.bookSignals) return;
+    for (const observation of observations) {
+      this.deps.bookSignals.ingestLastTradePrice({
+        tokenId: createTokenId(observation.tokenId),
+        ts: observation.timestamp,
+        price: observation.price,
+      });
+    }
+  }
+
+  private syncBookSignalSubscriptions(): void {
+    const bookSignals = this.deps.bookSignals;
+    if (!bookSignals || !this.stream) return;
+    const openPositionTokenIds = bookSignals.openPositionTokenIds();
+    bookSignals.setOpenPositionTokenIds(openPositionTokenIds);
+    const fullBookTokenIds = this.resolveBookSignalFullBookTokenIds(openPositionTokenIds);
+    this.stream.setFullBookTokenIds?.("open-position", fullBookTokenIds);
+  }
+
+  private resolveBookSignalFullBookTokenIds(
+    tokenIds: readonly import("@krabs/domain").TokenId[],
+  ): string[] {
+    const requested = tokenIds.map(String);
+    const cap = this.deps.maxTrackedTokens ?? requested.length;
+    const subscribed = requested.slice(0, cap);
+    const skippedCount = Math.max(0, requested.length - subscribed.length);
+    this.lastBookSignalFullBookDemandCount = requested.length;
+    this.lastBookSignalFullBookSubscribedCount = subscribed.length;
+    this.lastBookSignalFullBookSkippedCount = skippedCount;
+
+    if (cap > 0 && requested.length > 0) {
+      const utilizationPct = (requested.length * 100) / cap;
+      if (utilizationPct > 80 || skippedCount > 0) {
+        const suppressedCount = consumeWarnThrottle(
+          this.bookSignalFullBookCapWarn,
+          Date.now(),
+          BOOK_SIGNAL_FULL_BOOK_CAP_WARN_THROTTLE_MS,
+        );
+        if (suppressedCount != null) {
+          this.log.warn(
+            {
+              demandCount: requested.length,
+              subscribedCount: subscribed.length,
+              skippedCount,
+              cap,
+              utilizationPct: Math.round(utilizationPct),
+              suppressedCount,
+            },
+            "Track G full-book subscription demand exceeds cap; depthTop3 degrades for skipped tokens",
+          );
+        }
+      } else {
+        resetWarnThrottle(this.bookSignalFullBookCapWarn);
+      }
+    }
+
+    // Track G depthTop3 is optional in Phase 1. When open-position full-book demand reaches
+    // the WS-tier cap, keep top-of-book/trade subscriptions intact and degrade only depthTop3
+    // for skipped tokens by omitting them from the full-book reason set.
+    return subscribed;
+  }
+
+  private resolveBookSignalFullBookCapUtilizationPct(): number | null {
+    const cap = this.deps.maxTrackedTokens;
+    if (cap == null || cap <= 0) return null;
+    return Math.round((this.lastBookSignalFullBookSubscribedCount * 100) / cap);
+  }
+
+  private invalidateBookSignalsForGap(tokenIds: readonly string[]): void {
+    const bookSignals = this.deps.bookSignals;
+    if (!bookSignals) return;
+    const affectedTokenIds =
+      tokenIds.length > 0 ? tokenIds : bookSignals.openPositionTokenIds().map(String);
+    if (affectedTokenIds.length === 0) return;
+    bookSignals.invalidateTokenIds?.(affectedTokenIds);
+  }
+
+  private recordBookSignalStreamUpdates(
+    updates: readonly MarketPricingStreamUpdate[],
+    observedAt: number,
+  ): void {
+    const bookSignals = this.deps.bookSignals;
+    if (!bookSignals) return;
+    for (const update of updates) {
+      const tokenId = createTokenId(String(update.tokenId));
+      bookSignals.ingestTopOfBook({
+        tokenId,
+        ts: update.book?.timestamp ?? observedAt,
+        bestBid: update.pricing.bestBid,
+        bestAsk: update.pricing.bestAsk,
+      });
+      if (update.book?.bids != null) {
+        bookSignals.ingestBook({
+          tokenId,
+          ts: update.book.timestamp,
+          bids: update.book.bids,
+        });
+      }
+    }
   }
 
   private async flushPendingStreamUpdates(): Promise<void> {
@@ -1200,6 +1344,7 @@ export class MarketDataModule implements RuntimeModule {
             "ws ingress queue overflow — routing tokens to poll-fallback",
           );
           this.addPendingGapTokenIds(event.tokenIds, event.timestamp);
+          this.invalidateBookSignalsForGap(event.tokenIds);
         }
         continue;
       }

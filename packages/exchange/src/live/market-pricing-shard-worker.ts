@@ -318,6 +318,7 @@ class WorkerMarketPricingShard {
       const parsed = collectStreamUpdates(item, this.pricingByToken, startMs);
       const envelope: WorkerUpdateEnvelope = {
         updates: parsed.updates,
+        rawTradeObservations: parsed.rawTradeObservations,
         lifecycleEvents: parsed.lifecycleEvents,
         metrics: {
           rawRecordCount: parsed.rawRecordCount,

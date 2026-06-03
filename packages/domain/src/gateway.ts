@@ -189,6 +189,13 @@ export interface MarketPricingStreamUpdate {
   readonly tickSize?: number | null;
 }
 
+export interface MarketPricingRawTradeObservation {
+  readonly tokenId: string;
+  readonly price: number | null;
+  readonly timestamp: number;
+  readonly observedAt: number;
+}
+
 export type MarketPricingFullBookReason =
   | "hot-set"
   | "open-order"
@@ -478,6 +485,9 @@ export interface MarketDataGateway {
   createMarketPricingStream?(
     handlers: Readonly<{
       onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
+      onRawTradeObservations?: (
+        observations: readonly MarketPricingRawTradeObservation[],
+      ) => Promise<void> | void;
       onLifecycleEvents?: (events: readonly MarketPricingLifecycleEvent[]) => Promise<void> | void;
       onError?: (error: unknown) => Promise<void> | void;
       onGapDetected?: (

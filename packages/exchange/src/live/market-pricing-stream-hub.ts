@@ -2,6 +2,7 @@ import {
   recordStageDuration,
   type MarketPricingFullBookReason,
   type MarketPricingLifecycleEvent,
+  type MarketPricingRawTradeObservation,
   type MarketPricingStream,
   type MarketPricingStreamMetricsSnapshot,
   type MarketPricingStreamUpdate,
@@ -14,6 +15,9 @@ const HUB_TELEMETRY_WINDOW_MS = 60_000;
 
 interface StreamHandlers {
   readonly onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
+  readonly onRawTradeObservations?: (
+    observations: readonly MarketPricingRawTradeObservation[],
+  ) => Promise<void> | void;
   readonly onLifecycleEvents?: (
     events: readonly MarketPricingLifecycleEvent[],
   ) => Promise<void> | void;
@@ -126,6 +130,9 @@ export class SharedMarketPricingStreamHub {
       handlers: {
         onUpdates: async (updates) => {
           await this.dispatchUpdates(updates);
+        },
+        onRawTradeObservations: async (observations) => {
+          await this.dispatchRawTradeObservations(observations);
         },
         onLifecycleEvents: async (events) => {
           await this.dispatchLifecycleEvents(events);
@@ -307,6 +314,20 @@ export class SharedMarketPricingStreamHub {
     for (const view of this.views.values()) {
       if (view.closed) continue;
       await view.handlers.onLifecycleEvents?.(events);
+    }
+  }
+
+  private async dispatchRawTradeObservations(
+    observations: readonly MarketPricingRawTradeObservation[],
+  ): Promise<void> {
+    if (observations.length === 0) return;
+    for (const view of this.views.values()) {
+      if (view.closed) continue;
+      const viewTokenIds = view.tokenIdSet ?? (view.tokenIdSet = new Set(view.tokenIds));
+      if (viewTokenIds.size === 0) continue;
+      const filtered = observations.filter((observation) => viewTokenIds.has(observation.tokenId));
+      if (filtered.length === 0) continue;
+      await view.handlers.onRawTradeObservations?.(filtered);
     }
   }
 

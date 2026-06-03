@@ -1,6 +1,7 @@
 import type { ParsedRecordMetrics } from "./market-pricing-ws-protocol.js";
 import type {
   MarketPricingLifecycleEvent,
+  MarketPricingRawTradeObservation,
   MarketPricingStreamUpdate,
   TradingNoopSuppressionCounts,
 } from "@krabs/domain";
@@ -48,6 +49,7 @@ export interface WorkerHeartbeatSnapshot {
 
 export interface WorkerUpdateEnvelope {
   readonly updates: readonly MarketPricingStreamUpdate[];
+  readonly rawTradeObservations: readonly MarketPricingRawTradeObservation[];
   readonly lifecycleEvents: readonly MarketPricingLifecycleEvent[];
   readonly metrics: ParsedRecordMetrics;
   readonly parsedUpdateCount: number;

@@ -63,6 +63,8 @@ function makeTiered(
 class FakePricingStream implements MarketPricingStream {
   tokenIds: string[] = [];
   setTokenIdsCalls: string[][] = [];
+  fullBookTokenIds: string[] = [];
+  setFullBookTokenIdsCalls: string[][] = [];
   metrics: MarketPricingStreamMetricsSnapshot = {
     windowStartMs: Date.now(),
     wsEventsReceived: 0,
@@ -94,6 +96,12 @@ class FakePricingStream implements MarketPricingStream {
     this.tokenIds = [...tokenIds];
     this.setTokenIdsCalls.push([...tokenIds]);
     this.metrics = { ...this.metrics, trackedTokenCount: this.tokenIds.length };
+  }
+
+  setFullBookTokenIds(_reason: string, tokenIds: readonly string[]): void {
+    this.fullBookTokenIds = [...tokenIds];
+    this.setFullBookTokenIdsCalls.push([...tokenIds]);
+    this.metrics = { ...this.metrics, fullBookTokenCount: this.fullBookTokenIds.length };
   }
 
   close(): void {
@@ -332,6 +340,64 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
     // WS tokens NOT in discovery batch
     expect(firstBatch).not.toContain("crit-1");
     expect(firstBatch).not.toContain("cand-1");
+
+    await mod.stop();
+  });
+
+  it("caps Track G full-book subscriptions and reports skipped depth subscriptions", async () => {
+    const tiered = makeTiered(["crit-1"], ["cand-1"], []);
+    const repo = createMockRepo(tiered);
+    const openPositionTokenIds = ["open-1", "open-2", "open-3", "open-4", "open-5"].map((id) =>
+      createTokenId(id),
+    );
+    const setOpenPositionTokenIds = vi.fn();
+
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 3,
+      bookSignals: {
+        openPositionTokenIds: () => openPositionTokenIds,
+        setOpenPositionTokenIds,
+        ingestTopOfBook: vi.fn(),
+        ingestLastTradePrice: vi.fn(),
+        ingestBook: vi.fn(),
+      },
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(stream).not.toBeNull();
+    });
+    await vi.waitFor(() => {
+      expect(stream!.setFullBookTokenIdsCalls.length).toBeGreaterThanOrEqual(1);
+    });
+
+    expect(stream!.fullBookTokenIds).toEqual(["open-1", "open-2", "open-3"]);
+    expect(setOpenPositionTokenIds).toHaveBeenCalledWith(openPositionTokenIds);
+    expect(mod.getMetricsSnapshot()).toMatchObject({
+      bookSignalFullBookDemandCount: 5,
+      bookSignalFullBookSubscribedCount: 3,
+      bookSignalFullBookSkippedCount: 2,
+    });
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        demandCount: 5,
+        subscribedCount: 3,
+        skippedCount: 2,
+        cap: 3,
+      }),
+      "Track G full-book subscription demand exceeds cap; depthTop3 degrades for skipped tokens",
+    );
 
     await mod.stop();
   });

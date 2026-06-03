@@ -1,6 +1,7 @@
 import {
   createTokenId,
   type MarketPricingLifecycleEvent,
+  type MarketPricingRawTradeObservation,
   type MarketPricingSnapshot,
   type MarketPricingStreamUpdate,
   type TradingNoopSuppressionCounts,
@@ -20,6 +21,7 @@ type MutableSuppressionCounts = {
 export interface CollectStreamUpdatesResult {
   readonly rawRecordCount: number;
   readonly updates: readonly MarketPricingStreamUpdate[];
+  readonly rawTradeObservations: readonly MarketPricingRawTradeObservation[];
   readonly lifecycleEvents: readonly MarketPricingLifecycleEvent[];
   readonly eventCount: number;
   readonly parsedUpdateCount: number;
@@ -39,6 +41,7 @@ export function collectStreamUpdates(
   nowMs: number,
 ): CollectStreamUpdatesResult {
   const updates: MarketPricingStreamUpdate[] = [];
+  const rawTradeObservations: MarketPricingRawTradeObservation[] = [];
   const lifecycleEvents: MarketPricingLifecycleEvent[] = [];
   const latencySamplesMs: number[] = [];
   let eventCount = 0;
@@ -179,6 +182,12 @@ export function collectStreamUpdates(
     }
 
     if (eventType === "last_trade_price") {
+      rawTradeObservations.push({
+        tokenId,
+        price: parseOptionalNumber(raw.price ?? raw.last_trade_price),
+        timestamp: parseEventTimestampMs(raw.timestamp, nowMs),
+        observedAt: nowMs,
+      });
       const next: MarketPricingSnapshot = {
         ...current,
         lastTradePrice: parseOptionalNumber(raw.price ?? raw.last_trade_price),
@@ -237,6 +246,7 @@ export function collectStreamUpdates(
   return {
     rawRecordCount: records.length,
     updates,
+    rawTradeObservations,
     lifecycleEvents,
     eventCount,
     parsedUpdateCount,
@@ -249,6 +259,13 @@ export function collectStreamUpdates(
     newMarketEventCount,
     latencySamplesMs,
   };
+}
+
+function parseEventTimestampMs(value: unknown, fallback: number): number {
+  const iso = parseOptionalIsoTimestamp(value);
+  if (iso == null) return fallback;
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function recordParsedUpdate(

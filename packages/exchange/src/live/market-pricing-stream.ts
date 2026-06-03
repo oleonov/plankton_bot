@@ -2,6 +2,7 @@ import {
   recordStageDuration,
   type MarketPricingLifecycleEvent,
   type MarketPricingFullBookReason,
+  type MarketPricingRawTradeObservation,
   type MarketPricingSnapshot,
   type MarketPricingStream,
   type MarketPricingStreamMetricsSnapshot,
@@ -138,6 +139,9 @@ interface LiveMarketPricingStreamDeps {
   createWebSocket: (url: string) => MarketDataWebSocketLike;
   handlers: Readonly<{
     onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
+    onRawTradeObservations?: (
+      observations: readonly MarketPricingRawTradeObservation[],
+    ) => Promise<void> | void;
     onLifecycleEvents?: (events: readonly MarketPricingLifecycleEvent[]) => Promise<void> | void;
     onError?: (error: unknown) => Promise<void> | void;
     onGapDetected?: (
@@ -208,6 +212,7 @@ interface ShardCallbacks {
   /** Worker shards can send fully parsed compact batches so the main thread avoids raw-record parsing. */
   onWorkerUpdateBatch?: (
     updates: readonly MarketPricingStreamUpdate[],
+    rawTradeObservations: readonly MarketPricingRawTradeObservation[],
     lifecycleEvents: readonly MarketPricingLifecycleEvent[],
     counts: WorkerUpdateBatchCounts,
   ) => Promise<void> | void;
@@ -551,8 +556,8 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       onWorkerEventCounts: (counts) => {
         this.recordWorkerEventCounts(counts);
       },
-      onWorkerUpdateBatch: async (updates, lifecycleEvents, counts) => {
-        await this.handleWorkerUpdateBatch(updates, lifecycleEvents, counts);
+      onWorkerUpdateBatch: async (updates, rawTradeObservations, lifecycleEvents, counts) => {
+        await this.handleWorkerUpdateBatch(updates, rawTradeObservations, lifecycleEvents, counts);
       },
       onHeartbeat: (sid, heartbeat) => {
         this.heartbeatByShard.set(sid, heartbeat);
@@ -741,6 +746,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     this.rotateWindow(nowMs);
     const {
       updates,
+      rawTradeObservations,
       lifecycleEvents,
       parsedUpdateCount,
       emittedUpdateCount,
@@ -765,6 +771,9 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     if (lifecycleEvents.length > 0) {
       await this.deps.handlers.onLifecycleEvents?.(lifecycleEvents);
     }
+    if (rawTradeObservations.length > 0) {
+      await this.deps.handlers.onRawTradeObservations?.(rawTradeObservations);
+    }
     this.rotateTelemetryWindow(nowMs);
     this.recordUpdateCounters({
       parsedUpdateCount,
@@ -780,6 +789,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
 
   private async handleWorkerUpdateBatch(
     updates: readonly MarketPricingStreamUpdate[],
+    rawTradeObservations: readonly MarketPricingRawTradeObservation[],
     lifecycleEvents: readonly MarketPricingLifecycleEvent[],
     counts: WorkerUpdateBatchCounts,
   ): Promise<void> {
@@ -792,6 +802,9 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       }
       if (lifecycleEvents.length > 0) {
         await this.deps.handlers.onLifecycleEvents?.(lifecycleEvents);
+      }
+      if (rawTradeObservations.length > 0) {
+        await this.deps.handlers.onRawTradeObservations?.(rawTradeObservations);
       }
       this.rotateTelemetryWindow(nowMs);
       this.recordUpdateCounters(counts);
@@ -1446,13 +1459,18 @@ class WorkerMarketPricingGroup {
           newMarketEventCount: envelope.newMarketEventCount,
         });
       }
-      void deps.onWorkerUpdateBatch?.(envelope.updates, envelope.lifecycleEvents, {
-        parsedUpdateCount: envelope.parsedUpdateCount,
-        emittedUpdateCount: envelope.emittedUpdateCount,
-        noopUpdateCount: envelope.noopUpdateCount,
-        suppressedTradingNoopCount: envelope.suppressedTradingNoopCount,
-        suppressedTradingNoopByReason: envelope.suppressedTradingNoopByReason,
-      });
+      void deps.onWorkerUpdateBatch?.(
+        envelope.updates,
+        envelope.rawTradeObservations,
+        envelope.lifecycleEvents,
+        {
+          parsedUpdateCount: envelope.parsedUpdateCount,
+          emittedUpdateCount: envelope.emittedUpdateCount,
+          noopUpdateCount: envelope.noopUpdateCount,
+          suppressedTradingNoopCount: envelope.suppressedTradingNoopCount,
+          suppressedTradingNoopByReason: envelope.suppressedTradingNoopByReason,
+        },
+      );
       return;
     }
     if (event.type === "records") {
