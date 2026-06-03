@@ -187,8 +187,7 @@ function mapFloorIntent(row: FloorIntentRow): FloorIntent {
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     consumedAt: row.consumed_at,
-    consumingOrderId:
-      row.consuming_order_id == null ? null : createOrderId(row.consuming_order_id),
+    consumingOrderId: row.consuming_order_id == null ? null : createOrderId(row.consuming_order_id),
     clearedAt: row.cleared_at,
     clearReason: row.clear_reason,
     metadata: parseMetadata(row.metadata_json),

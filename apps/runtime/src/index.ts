@@ -1236,7 +1236,8 @@ async function main(): Promise<void> {
       legStateRepo: repos.legState,
       holdResolutionRepo: repos.holdResolutionState,
       floorIntentRepo: repos.floorIntent,
-      getBookSignals: (tokenId, anchor) => trackCBookSignalsProvider.getBookSignals(tokenId, anchor),
+      getBookSignals: (tokenId, anchor) =>
+        trackCBookSignalsProvider.getBookSignals(tokenId, anchor),
       floorCloseRatioThreshold: () => null,
     },
     ...(runtimeMode === "live-lite" && traderAddress

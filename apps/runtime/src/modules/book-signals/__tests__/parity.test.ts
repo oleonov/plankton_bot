@@ -67,9 +67,7 @@ describe("Track G observer parity", () => {
       const signals = replayFixture(fixture);
       expect(signals.bidPersistenceS, fixture.slug).toBe(fixture.signals.bid_persistence_s);
       expect(signals.bidMovement30m, fixture.slug).toBe(fixture.signals.bid_movement_30m);
-      expect(signals.publicTradeCount1h, fixture.slug).toBe(
-        fixture.signals.public_trade_count_1h,
-      );
+      expect(signals.publicTradeCount1h, fixture.slug).toBe(fixture.signals.public_trade_count_1h);
       expect(signals.depthTop3, fixture.slug).toBe(fixture.signals.bid_depth_top3);
     }
   }, 60_000);

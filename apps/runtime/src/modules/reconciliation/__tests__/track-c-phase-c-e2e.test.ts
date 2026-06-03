@@ -199,7 +199,10 @@ describe("Track C Phase C counter-factual E2E fixtures", () => {
         bestBid: 0.05,
         tickSize: 0.001,
         bookSignals: { bidPersistenceS: 10, bidMovement30m: 0.002 },
-        legState: makeLegState({ tokenId: createTokenId(fixture.asset_id), repriceChainCount24h: 0 }),
+        legState: makeLegState({
+          tokenId: createTokenId(fixture.asset_id),
+          repriceChainCount24h: 0,
+        }),
       });
 
       const result = await env.run();
@@ -210,34 +213,34 @@ describe("Track C Phase C counter-factual E2E fixtures", () => {
     },
   );
 
-  it.each(point3Fixtures)(
-    "C.1.3 Pt3 fixture $slug stale=$expected_stale",
-    (fixture) => {
-      const tokenId = createTokenId(fixture.asset_id ?? `phase-c-${fixture.slug}`);
-      const ts = anchorMs(fixture.anchor_ts ?? NOW);
-      const staleVerdict = staleVerdictFromPoint3(fixture, tokenId, ts);
-      const expectedReason = expectedPoint3Reason(fixture);
-      const action = decideExitAction(
-        buildExitDecisionContext({
-          order: makeSellOrder({ tokenId, price: sellPrice(fixture) ?? 0.05 }),
-          market: makeMarket({ tokenId, slug: fixture.slug }),
-          position: makePosition({ tokenId, openedAt: new Date(ts - positionAgeMs(fixture)).toISOString() }),
-          livenessVerdict: "dead",
-          staleVerdict,
-          subtype: "strike",
-          floorCloseRatioThreshold: 1,
-          ts,
+  it.each(point3Fixtures)("C.1.3 Pt3 fixture $slug stale=$expected_stale", (fixture) => {
+    const tokenId = createTokenId(fixture.asset_id ?? `phase-c-${fixture.slug}`);
+    const ts = anchorMs(fixture.anchor_ts ?? NOW);
+    const staleVerdict = staleVerdictFromPoint3(fixture, tokenId, ts);
+    const expectedReason = expectedPoint3Reason(fixture);
+    const action = decideExitAction(
+      buildExitDecisionContext({
+        order: makeSellOrder({ tokenId, price: sellPrice(fixture) ?? 0.05 }),
+        market: makeMarket({ tokenId, slug: fixture.slug }),
+        position: makePosition({
+          tokenId,
+          openedAt: new Date(ts - positionAgeMs(fixture)).toISOString(),
         }),
-      );
+        livenessVerdict: "dead",
+        staleVerdict,
+        subtype: "strike",
+        floorCloseRatioThreshold: 1,
+        ts,
+      }),
+    );
 
-      expect(staleVerdict.stale).toBe(fixture.expected_stale);
-      expect(staleVerdict.reason).toBe(expectedReason);
-      if (staleVerdict.reason === "price_only") {
-        expect(action.action).toBe("continue_passive_sit");
-      }
-      expect(action.action).not.toBe("floor_close");
-    },
-  );
+    expect(staleVerdict.stale).toBe(fixture.expected_stale);
+    expect(staleVerdict.reason).toBe(expectedReason);
+    if (staleVerdict.reason === "price_only") {
+      expect(action.action).toBe("continue_passive_sit");
+    }
+    expect(action.action).not.toBe("floor_close");
+  });
 
   it.each(point3.fixtures.known_stuck_positions)(
     "C.1.4 five-stuck baseline writes hold_resolution for $slug",
@@ -328,7 +331,10 @@ describe("Track C Phase C repository persistence through cleaner", () => {
         bestAsk: 0.2,
         bookSignals: { bidPersistenceS: 10, bidMovement30m: 0 },
         legState: makeLegState({ tokenId, repriceChainCount24h: 13, sellCount: 0 }),
-        position: makePosition({ tokenId, openedAt: new Date(NOW - 13 * 60 * 60_000).toISOString() }),
+        position: makePosition({
+          tokenId,
+          openedAt: new Date(NOW - 13 * 60 * 60_000).toISOString(),
+        }),
         holdResolutionRepo: holdRepo,
         floorIntentRepo: floorRepo,
       });
@@ -371,7 +377,10 @@ describe("Track C Phase C repository persistence through cleaner", () => {
         bestAsk: 0.2,
         bookSignals: { bidPersistenceS: 10, bidMovement30m: 0 },
         legState: makeLegState({ tokenId, repriceChainCount24h: 13, sellCount: 0 }),
-        position: makePosition({ tokenId, openedAt: new Date(NOW - 13 * 60 * 60_000).toISOString() }),
+        position: makePosition({
+          tokenId,
+          openedAt: new Date(NOW - 13 * 60 * 60_000).toISOString(),
+        }),
         holdResolutionRepo: holdRepo,
         floorIntentRepo: floorRepo,
       });
@@ -577,9 +586,10 @@ function makeCleanerEnv(input: {
   readonly tickSize?: number;
   readonly omitTrackC?: boolean;
   readonly floorCloseRatioThreshold?: number | null;
-  readonly bookSignals?:
-    | { readonly bidPersistenceS?: number | null; readonly bidMovement30m?: number | null }
-    | null;
+  readonly bookSignals?: {
+    readonly bidPersistenceS?: number | null;
+    readonly bidMovement30m?: number | null;
+  } | null;
   readonly legState?: LegState | null;
   readonly position?: Position | null;
   readonly holdResolutionRepo?: {
@@ -617,7 +627,9 @@ function makeCleanerEnv(input: {
       cleanStaleEntryOrders(
         {
           orderRepo: makeOrderRepo([makeSellOrder({ tokenId, price: input.orderPrice })]),
-          marketRepo: makeMarketRepo(makeMarket({ tokenId, slug: input.slug ?? "weather-threshold-strike" })),
+          marketRepo: makeMarketRepo(
+            makeMarket({ tokenId, slug: input.slug ?? "weather-threshold-strike" }),
+          ),
           bus: bus as EventBus,
           log: silentLog,
           exitRepriceOnDownprice: {
@@ -819,7 +831,9 @@ function makeLegState(overrides: Partial<LegState> = {}): LegState {
 
 function readActiveHoldRows(conn: DbConnection, tokenId: TokenId): number {
   const row = conn.db
-    .prepare("SELECT COUNT(*) AS count FROM hold_resolution_states WHERE token_id = ? AND status = 'active'")
+    .prepare(
+      "SELECT COUNT(*) AS count FROM hold_resolution_states WHERE token_id = ? AND status = 'active'",
+    )
     .get(String(tokenId)) as { count: number };
   return row.count;
 }
@@ -835,7 +849,12 @@ function insertActiveHoldResolutionDirect(
          (id, token_id, status, marker_created_at, stale_reason, liveness_verdict)
        VALUES (?, ?, 'active', ?, ?, 'dead')`,
     )
-    .run(`direct-${String(tokenId)}`, String(tokenId), new Date(NOW - 1_000).toISOString(), staleReason);
+    .run(
+      `direct-${String(tokenId)}`,
+      String(tokenId),
+      new Date(NOW - 1_000).toISOString(),
+      staleReason,
+    );
 }
 
 function expectDuplicateActiveHoldInsertBlocked(conn: DbConnection, tokenId: TokenId): void {

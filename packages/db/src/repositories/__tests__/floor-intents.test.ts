@@ -50,7 +50,9 @@ describe("SqliteFloorIntentRepository", () => {
     });
 
     const activeRows = conn.db
-      .prepare("SELECT COUNT(*) AS count FROM floor_intents WHERE token_id = ? AND status = 'active'")
+      .prepare(
+        "SELECT COUNT(*) AS count FROM floor_intents WHERE token_id = ? AND status = 'active'",
+      )
       .get(String(TOKEN_ID)) as { count: number };
     expect(activeRows.count).toBe(1);
   });
@@ -74,22 +76,19 @@ describe("SqliteFloorIntentRepository", () => {
     expect(readStatus()).toBe("consumed");
   });
 
-  it.each(["superseded", "cancelled"] as const)(
-    "cleans up an active intent as %s",
-    (status) => {
-      repo.insertActive(baseInput());
+  it.each(["superseded", "cancelled"] as const)("cleans up an active intent as %s", (status) => {
+    repo.insertActive(baseInput());
 
-      expect(
-        repo.clearActive(TOKEN_ID, {
-          status,
-          clearedAt: "2026-06-03T01:00:00.000Z",
-          clearReason: "external_close",
-        }),
-      ).toBe(true);
-      expect(repo.findActiveByTokenId(TOKEN_ID)).toBeNull();
-      expect(readStatus()).toBe(status);
-    },
-  );
+    expect(
+      repo.clearActive(TOKEN_ID, {
+        status,
+        clearedAt: "2026-06-03T01:00:00.000Z",
+        clearReason: "external_close",
+      }),
+    ).toBe(true);
+    expect(repo.findActiveByTokenId(TOKEN_ID)).toBeNull();
+    expect(readStatus()).toBe(status);
+  });
 });
 
 function baseInput(): Parameters<SqliteFloorIntentRepository["insertActive"]>[0] {

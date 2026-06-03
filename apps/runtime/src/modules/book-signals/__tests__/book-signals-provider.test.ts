@@ -90,9 +90,7 @@ describe("TrackCBookSignalsProvider formulas", () => {
   it("matches observer compensated sum for depthTop3", () => {
     expect(
       computeDepthTop3(
-        [
-          { ts: 10_000_000, depthTop3: computeDepthValueForTest([40.71, 100, 30.05]) },
-        ],
+        [{ ts: 10_000_000, depthTop3: computeDepthValueForTest([40.71, 100, 30.05]) }],
         10_000_000,
       ),
     ).toBe(170.76);

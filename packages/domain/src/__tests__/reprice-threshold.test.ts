@@ -80,9 +80,7 @@ describe("computeRepriceThreshold", () => {
   });
 
   it("gates reprice when captured market data is stale", () => {
-    expect(
-      computeRepriceThreshold(ctx({ capturedAt: NOW_MS - 10 * 60_000 - 1 })),
-    ).toEqual({
+    expect(computeRepriceThreshold(ctx({ capturedAt: NOW_MS - 10 * 60_000 - 1 }))).toEqual({
       shouldReprice: false,
       tickThreshold: null,
       reason: "stale_market_data_fallback",

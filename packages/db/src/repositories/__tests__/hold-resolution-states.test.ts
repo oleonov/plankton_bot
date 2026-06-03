@@ -75,11 +75,14 @@ describe("SqliteHoldResolutionStateRepository", () => {
 
   it("enforces one active row per token via insert-if-absent", () => {
     expect(repo.insertActive(baseInput()).inserted).toBe(true);
-    expect(repo.insertActive({ ...baseInput(), sourceOrderId: createOrderId("other-order") }))
-      .toMatchObject({ inserted: false });
+    expect(
+      repo.insertActive({ ...baseInput(), sourceOrderId: createOrderId("other-order") }),
+    ).toMatchObject({ inserted: false });
 
     const activeRows = conn.db
-      .prepare("SELECT COUNT(*) AS count FROM hold_resolution_states WHERE token_id = ? AND status = 'active'")
+      .prepare(
+        "SELECT COUNT(*) AS count FROM hold_resolution_states WHERE token_id = ? AND status = 'active'",
+      )
       .get(String(TOKEN_ID)) as { count: number };
     expect(activeRows.count).toBe(1);
   });

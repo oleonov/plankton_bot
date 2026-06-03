@@ -87,7 +87,9 @@ describe("migration 063 - hold_resolution_states", () => {
     applyMigration();
 
     const table = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='hold_resolution_states'")
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='hold_resolution_states'",
+      )
       .get();
     expect(table).toBeTruthy();
 

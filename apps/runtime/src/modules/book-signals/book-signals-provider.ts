@@ -253,10 +253,7 @@ class TimeBoundedBuffer<T extends { readonly ts: number }> {
   }
 }
 
-export function computeBidPersistenceS(
-  states: readonly BidState[],
-  anchor: number,
-): number | null {
+export function computeBidPersistenceS(states: readonly BidState[], anchor: number): number | null {
   // Observer capture parses zero bids as values (observer.py lines 284-297, 313-316).
   // The analysis signal path skips only None rows before persistence
   // (pre_track_c_deep_dive_blocks_1_3_2026_05_28.py lines 311-345).
@@ -279,10 +276,7 @@ export function computeBidPersistenceS(
   return Math.min(1800, Math.max(0, (anchor - persistenceStart) / 1000));
 }
 
-export function computeBidMovement30m(
-  states: readonly BidState[],
-  anchor: number,
-): number | null {
+export function computeBidMovement30m(states: readonly BidState[], anchor: number): number | null {
   // Analyst formula lines 157-166 / script line 336: max-min over non-null bids.
   // Zero is a valid numeric bid for this signal.
   const bids = statesInWindow(states, anchor, WINDOW_30M_MS)
@@ -355,8 +349,7 @@ function compensatedFloatSum(values: readonly number[]): number {
   let compensation = 0;
   for (const value of values) {
     const next = sum + value;
-    compensation +=
-      Math.abs(sum) >= Math.abs(value) ? sum - next + value : value - next + sum;
+    compensation += Math.abs(sum) >= Math.abs(value) ? sum - next + value : value - next + sum;
     sum = next;
   }
   return sum + compensation;

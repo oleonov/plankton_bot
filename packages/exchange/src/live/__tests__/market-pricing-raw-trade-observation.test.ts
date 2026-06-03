@@ -44,4 +44,3 @@ describe("market pricing raw trade observations", () => {
     ]);
   });
 });
-

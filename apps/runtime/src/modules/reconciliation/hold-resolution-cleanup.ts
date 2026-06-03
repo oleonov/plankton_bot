@@ -1,9 +1,4 @@
-import type {
-  EventBus,
-  RuntimeEventMap,
-  RuntimeModule,
-  TokenId,
-} from "@krabs/domain";
+import type { EventBus, RuntimeEventMap, RuntimeModule, TokenId } from "@krabs/domain";
 import type { HoldResolutionStatus } from "@krabs/db";
 import type { Logger } from "../../logger.js";
 

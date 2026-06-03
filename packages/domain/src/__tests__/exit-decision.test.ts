@@ -91,16 +91,36 @@ describe("decideExitAction", () => {
   });
 
   it.each([
-    ["unknown + none", ctx({ livenessVerdict: "unknown", staleVerdict: stale("none") }), "continue_normal"],
-    ["unknown + chain", ctx({ livenessVerdict: "unknown", staleVerdict: stale("chain") }), "continue_normal"],
-    ["live + chain", ctx({ livenessVerdict: "live", staleVerdict: stale("chain") }), "continue_normal"],
+    [
+      "unknown + none",
+      ctx({ livenessVerdict: "unknown", staleVerdict: stale("none") }),
+      "continue_normal",
+    ],
+    [
+      "unknown + chain",
+      ctx({ livenessVerdict: "unknown", staleVerdict: stale("chain") }),
+      "continue_normal",
+    ],
+    [
+      "live + chain",
+      ctx({ livenessVerdict: "live", staleVerdict: stale("chain") }),
+      "continue_normal",
+    ],
     [
       "dead + price_only",
       ctx({ livenessVerdict: "dead", staleVerdict: stale("price_only") }),
       "continue_passive_sit",
     ],
-    ["dead + none", ctx({ livenessVerdict: "dead", staleVerdict: stale("none") }), "continue_passive_sit"],
-    ["dead + chain", ctx({ livenessVerdict: "dead", staleVerdict: stale("chain") }), "hold_resolution"],
+    [
+      "dead + none",
+      ctx({ livenessVerdict: "dead", staleVerdict: stale("none") }),
+      "continue_passive_sit",
+    ],
+    [
+      "dead + chain",
+      ctx({ livenessVerdict: "dead", staleVerdict: stale("chain") }),
+      "hold_resolution",
+    ],
     [
       "dead + chain+price",
       ctx({ livenessVerdict: "dead", staleVerdict: stale("chain+price") }),
@@ -192,15 +212,18 @@ describe("decideExitAction", () => {
   });
 
   it("maps the Pt4 v5 Section D matrix rows", () => {
-    expect(decideExitAction(ctx({ livenessVerdict: "live", staleVerdict: stale("chain") })).action)
-      .toBe("continue_normal");
-    expect(decideExitAction(ctx({ livenessVerdict: "dead", staleVerdict: stale("none") })).action)
-      .toBe("continue_passive_sit");
+    expect(
+      decideExitAction(ctx({ livenessVerdict: "live", staleVerdict: stale("chain") })).action,
+    ).toBe("continue_normal");
+    expect(
+      decideExitAction(ctx({ livenessVerdict: "dead", staleVerdict: stale("none") })).action,
+    ).toBe("continue_passive_sit");
     expect(
       decideExitAction(ctx({ livenessVerdict: "dead", staleVerdict: stale("price_only") })).action,
     ).toBe("continue_passive_sit");
-    expect(decideExitAction(ctx({ livenessVerdict: "dead", staleVerdict: stale("chain") })).action)
-      .toBe("hold_resolution");
+    expect(
+      decideExitAction(ctx({ livenessVerdict: "dead", staleVerdict: stale("chain") })).action,
+    ).toBe("hold_resolution");
     expect(
       decideExitAction(ctx({ livenessVerdict: "dead", staleVerdict: stale("chain+price") })).action,
     ).toBe("hold_resolution");

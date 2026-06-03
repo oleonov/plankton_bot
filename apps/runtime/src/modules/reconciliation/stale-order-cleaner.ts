@@ -553,10 +553,7 @@ function shouldRepriceOutbid(
 }
 
 function safeEvaluateTrackCExit(
-  order: Pick<
-    Order,
-    "orderId" | "tokenId" | "conditionId" | "price" | "createdAt" | "signalId"
-  >,
+  order: Pick<Order, "orderId" | "tokenId" | "conditionId" | "price" | "createdAt" | "signalId">,
   market: Market | null,
   pricing:
     | (Pick<
@@ -603,19 +600,12 @@ function safeEvaluateTrackCExit(
 }
 
 function evaluateTrackCExit(
-  order: Pick<
-    Order,
-    "orderId" | "tokenId" | "conditionId" | "price" | "createdAt" | "signalId"
-  >,
+  order: Pick<Order, "orderId" | "tokenId" | "conditionId" | "price" | "createdAt" | "signalId">,
   market: Market | null,
-  pricing: Pick<
-    NormalizedMarket,
-    | "bestBid"
-    | "bestAsk"
-    | "tickSize"
-    | "publicTradeCount24h"
-  > &
-    Partial<Pick<NormalizedMarket, "midPrice" | "spread" | "snapshotTs">> | null,
+  pricing:
+    | (Pick<NormalizedMarket, "bestBid" | "bestAsk" | "tickSize" | "publicTradeCount24h"> &
+        Partial<Pick<NormalizedMarket, "midPrice" | "spread" | "snapshotTs">>)
+    | null,
   deps: Pick<StaleOrderCleanerDeps, "trackCExit" | "log" | "repriceChainGate">,
   nowMs: number,
 ): {
@@ -648,8 +638,7 @@ function evaluateTrackCExit(
       ts: nowMs,
     }),
   );
-  const repriceThreshold =
-    liveness.verdict === "unknown" ? null : computedRepriceThreshold;
+  const repriceThreshold = liveness.verdict === "unknown" ? null : computedRepriceThreshold;
 
   const legState = trackC.legStateRepo.get(order.tokenId);
   const position = trackC.positionRepo.findByTokenId(order.tokenId);

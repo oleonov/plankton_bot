@@ -234,7 +234,7 @@ describe("Track C stale-order-cleaner integration", () => {
     expect(metrics.writeCounter).toHaveBeenCalledWith(
       "track_c_action_persist_failed_total",
       1,
-      expect.stringContaining("\"action\":\"hold_resolution\""),
+      expect.stringContaining('"action":"hold_resolution"'),
     );
   });
 
@@ -260,7 +260,7 @@ describe("Track C stale-order-cleaner integration", () => {
     expect(metrics.writeCounter).toHaveBeenCalledWith(
       "track_c_pipeline_failed_total",
       1,
-      expect.stringContaining("\"source\":\"stale_order_cleaner\""),
+      expect.stringContaining('"source":"stale_order_cleaner"'),
     );
   });
 
@@ -284,7 +284,7 @@ describe("Track C stale-order-cleaner integration", () => {
     expect(metrics.writeCounter).toHaveBeenCalledWith(
       "track_c_circuit_open_total",
       1,
-      expect.stringContaining("\"source\":\"stale_order_cleaner\""),
+      expect.stringContaining('"source":"stale_order_cleaner"'),
     );
   });
 });
@@ -295,9 +295,10 @@ function makeEnv(input: {
   readonly pricing: ReturnType<typeof makePricing>;
   readonly omitTrackC?: boolean;
   readonly floorCloseRatioThreshold?: number | null;
-  readonly bookSignals?:
-    | { readonly bidPersistenceS?: number | null; readonly bidMovement30m?: number | null }
-    | null;
+  readonly bookSignals?: {
+    readonly bidPersistenceS?: number | null;
+    readonly bidMovement30m?: number | null;
+  } | null;
   readonly legState?: LegState | null;
   readonly position?: Position | null;
   readonly metrics?: { writeCounter: ReturnType<typeof vi.fn> };
