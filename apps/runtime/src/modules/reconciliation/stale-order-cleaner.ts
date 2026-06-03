@@ -717,11 +717,13 @@ function emitTrackCDecisionMetrics(
   staleReason: string,
   action: string,
 ): void {
-  const writeCounter = deps.repriceChainGate?.metrics?.writeCounter;
-  if (!writeCounter) return;
-  writeCounter(`track_c.verdict.${livenessVerdict}`);
-  writeCounter(`track_c.stale_branch.${staleReason}`);
-  writeCounter(`track_c.action.${action}`);
+  const metrics = deps.repriceChainGate?.metrics;
+  if (!metrics?.writeCounter) return;
+  // RuntimeMetricWriter.writeCounter uses instance state; invoke through the owner
+  // object so `this.counterBuffer` remains bound in production.
+  metrics.writeCounter(`track_c.verdict.${livenessVerdict}`);
+  metrics.writeCounter(`track_c.stale_branch.${staleReason}`);
+  metrics.writeCounter(`track_c.action.${action}`);
 }
 
 function persistTrackCAction(

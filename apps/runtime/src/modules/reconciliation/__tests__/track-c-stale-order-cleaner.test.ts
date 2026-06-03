@@ -1,3 +1,4 @@
+import Database from "better-sqlite3";
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_EXECUTION_POLICY,
@@ -21,6 +22,7 @@ import {
 import { InProcessEventBus } from "@krabs/event-bus";
 import { cleanStaleEntryOrders } from "../stale-order-cleaner.js";
 import type { Logger } from "../../../logger.js";
+import { RuntimeMetricWriter } from "../../../runtime-metric-writer.js";
 
 const TOKEN = createTokenId("tok-track-c-cleaner");
 const CONDITION = createConditionId("cond-track-c-cleaner");
@@ -109,6 +111,39 @@ describe("Track C stale-order-cleaner integration", () => {
     expect(metrics.writeCounter).toHaveBeenCalledWith("track_c.verdict.dead");
     expect(metrics.writeCounter).toHaveBeenCalledWith("track_c.stale_branch.chain");
     expect(metrics.writeCounter).toHaveBeenCalledWith("track_c.action.hold_resolution");
+  });
+
+  it("emits Track C counters through RuntimeMetricWriter without losing method binding", async () => {
+    const db = makeRuntimeMetricsDb();
+    try {
+      const metrics = new RuntimeMetricWriter(db);
+      const env = makeEnv({
+        order: makeExitSellOrder({ price: 0.1 }),
+        pricing: makePricing({ bestBid: 0.05, bestAsk: 0.2 }),
+        bookSignals: { bidPersistenceS: 10, bidMovement30m: 0 },
+        legState: makeLegState({ repriceChainCount24h: 13, sellCount: 0 }),
+        position: makePosition({ openedAt: new Date(NOW - 13 * 60 * 60_000).toISOString() }),
+        metrics,
+      });
+
+      await expect(env.run()).resolves.toMatchObject({ downpriceRepriceCancelled: 0 });
+      metrics.flushCounters("2026-06-02T12:00:30.000Z");
+
+      const rows = db
+        .prepare("SELECT metric_name, value FROM runtime_metrics ORDER BY metric_name")
+        .all() as Array<{ metric_name: string; value: number }>;
+      expect(rows).toEqual([
+        { metric_name: "track_c.action.hold_resolution", value: 1 },
+        { metric_name: "track_c.stale_branch.chain", value: 1 },
+        { metric_name: "track_c.verdict.dead", value: 1 },
+      ]);
+      expect(silentLog.error).not.toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(TypeError) }),
+        "track_c_exit_evaluation_failed",
+      );
+    } finally {
+      db.close();
+    }
   });
 
   it("suppresses downprice reprice and writes hold_resolution for DEAD chain-stuck sell", async () => {
@@ -301,7 +336,9 @@ function makeEnv(input: {
   } | null;
   readonly legState?: LegState | null;
   readonly position?: Position | null;
-  readonly metrics?: { writeCounter: ReturnType<typeof vi.fn> };
+  readonly metrics?: {
+    writeCounter: (metricName: string, value?: number, labels?: string | null) => void;
+  };
   readonly getBookSignalsThrows?: boolean;
 }) {
   vi.useFakeTimers();
@@ -536,3 +573,19 @@ const silentLog = {
   fatal: vi.fn(),
   child: () => silentLog,
 } as unknown as Logger;
+
+function makeRuntimeMetricsDb(): Database.Database {
+  const db = new Database(":memory:");
+  db.exec(`
+    CREATE TABLE runtime_metrics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      metric_name TEXT NOT NULL,
+      value REAL NOT NULL,
+      labels TEXT,
+      captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX idx_runtime_metrics_name_ts
+      ON runtime_metrics(metric_name, captured_at DESC);
+  `);
+  return db;
+}
