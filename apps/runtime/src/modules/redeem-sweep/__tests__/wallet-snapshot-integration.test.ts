@@ -70,6 +70,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+async function flushMicrotasks(times = 5): Promise<void> {
+  for (let i = 0; i < times; i += 1) await Promise.resolve();
+}
+
 describe("redeem sweep wallet snapshot integration", () => {
   it("normalizes wallet positions and redeems only redeemable rows from wallet event", async () => {
     vi.useFakeTimers();
@@ -195,6 +199,7 @@ describe("redeem sweep wallet snapshot integration", () => {
     await bus.publish("PolymarketWalletUpdated", walletEvent);
     await bus.publish("PolymarketWalletUpdated", walletEvent);
     await bus.drain();
+    await flushMicrotasks();
 
     expect(positions).toHaveLength(5);
     expect(positions.filter((position) => position.redeemable)).toHaveLength(3);

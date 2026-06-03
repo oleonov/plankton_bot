@@ -27,6 +27,9 @@ import type { PolymarketPositionReader } from "@krabs/exchange";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
 import { reconcileOrders } from "../modules/reconciliation/order-reconciler.js";
+import { ExchangeStateStore } from "../modules/execution/exchange-state-store.js";
+import { RedeemSweepModule } from "../modules/redeem-sweep/redeem-sweep-module.js";
+import { DEFAULT_EXECUTION_POLICY } from "../execution-policy.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -176,6 +179,16 @@ function makeExchangeFill(overrides?: Partial<ExchangeFill>): ExchangeFill {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe("ReconciliationModule", () => {
@@ -281,6 +294,89 @@ describe("ReconciliationModule", () => {
       await mod.stop();
 
       expect(drifts).toHaveLength(0);
+    });
+
+    it("does not wait for async redeem-sweep work while publishing exchange state", async () => {
+      const pendingSweepRead = deferred<any[] | null>();
+      const walletPositions = [
+        {
+          tokenId: "tok-redeem",
+          conditionId: "cond-redeem",
+          size: 10,
+          currentValueUsdc: 1,
+          initialValueUsdc: 1,
+          redeemable: true,
+          slug: "redeem-market",
+          marketSlug: "redeem-market",
+          outcome: "Yes",
+          raw: {},
+        },
+      ];
+      const redeemReader = {
+        read: vi.fn().mockResolvedValueOnce([]).mockReturnValueOnce(pendingSweepRead.promise),
+      };
+      const redeemModule = new RedeemSweepModule({
+        bus,
+        gateway,
+        positionReader: redeemReader as any,
+        positionRepo: { findByTokenId: vi.fn(), save: vi.fn() } as any,
+        lotRepo: { settleAll: vi.fn() } as any,
+        marketRepo: { findByConditionId: vi.fn(() => []) } as any,
+        orderRepo: { findOpen: vi.fn(() => []) } as any,
+        redeemLogRepo: {
+          insert: vi.fn(),
+          updateLatestActiveAttempt: vi.fn(() => false),
+          findRecentActiveAttempts: vi.fn(() => []),
+          hasRecentActiveAttempt: vi.fn(() => false),
+          findLatestAttemptTs: vi.fn(() => null),
+          markOrphanedActiveAttempts: vi.fn(() => []),
+        } as any,
+        redeemQuarantineRepo: {
+          findByConditionIds: vi.fn(() => new Map()),
+          recordStateFailed: vi.fn(),
+          clearAfterSuccess: vi.fn(),
+          clearExpired: vi.fn(() => ({
+            conditionId: "cond-redeem",
+            changedRows: 0,
+            previousConsecutiveStateFailedCount: 0,
+            previousRedeemQuarantineUntilTs: null,
+            reset: false,
+          })),
+        } as any,
+        policy: () => ({
+          ...DEFAULT_EXECUTION_POLICY.redeemSweep,
+          enabled: true,
+          intervalMs: 60_000,
+        }),
+        depositActivationPolicy: () => ({ enabled: false, minAmountUsdcCents: 100 }),
+        log: silentLog,
+        runtimeMetrics: { writeEvent: vi.fn(), writeLatest: vi.fn() } as any,
+        now: () => Date.now(),
+      });
+      const publishMod = new ReconciliationModule({
+        gateway,
+        bus,
+        orderRepo,
+        fillRepo,
+        marketRepo,
+        log: silentLog,
+        reconcileIntervalMs: 60_000,
+        exchangeStateStore: new ExchangeStateStore(),
+        walletPositionReader: { read: vi.fn().mockResolvedValue(walletPositions) },
+      });
+
+      await redeemModule.start();
+      let resolved = false;
+      const resultPromise = publishMod.runReconciliation().then(() => {
+        resolved = true;
+      });
+      await vi.waitFor(() => expect(resolved).toBe(true), { timeout: 200 });
+
+      expect(redeemReader.read).toHaveBeenCalledTimes(2);
+
+      pendingSweepRead.resolve([]);
+      await resultPromise;
+      await redeemModule.stop();
     });
   });
 

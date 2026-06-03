@@ -354,6 +354,22 @@ function manyRedeemablePositions(count: number) {
   );
 }
 
+function walletUpdateEvent(tokenId = TOKEN, conditionId = CONDITION) {
+  return {
+    positions: [
+      {
+        tokenId: createTokenId(tokenId),
+        conditionId,
+        size: 10,
+        redeemable: true,
+        slug: "market",
+        outcome: "Yes",
+      },
+    ],
+    timestamp: Date.now(),
+  };
+}
+
 function runSweepForTest(module: RedeemSweepModule, reason = "periodic"): Promise<void> {
   return (
     module as unknown as {
@@ -414,22 +430,150 @@ describe("RedeemSweepModule", () => {
     vi.setSystemTime(NOW);
     const h = makeHarness();
     await runStableStartup(h);
-    await h.bus.publish("PolymarketWalletUpdated", {
-      positions: [
-        {
-          tokenId: createTokenId(TOKEN),
-          conditionId: CONDITION,
-          size: 10,
-          redeemable: true,
-          slug: "market",
-          outcome: "Yes",
-        },
-      ],
-      timestamp: Date.now(),
-    });
+    await h.bus.publish("PolymarketWalletUpdated", walletUpdateEvent());
     await h.bus.drain();
 
     expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+  });
+
+  it("queues wallet-event sweeps and returns to the event bus without waiting for IO", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({ positions: [] });
+    await h.module.start();
+    await h.bus.drain();
+    h.reader.read.mockClear();
+    const pendingRead = deferred<any[] | null>();
+    h.reader.read.mockReturnValueOnce(pendingRead.promise);
+
+    let publishResolved = false;
+    const publish = h.bus.publish("PolymarketWalletUpdated", walletUpdateEvent()).then(() => {
+      publishResolved = true;
+    });
+    await flushMicrotasks();
+
+    expect(publishResolved).toBe(true);
+    expect(h.reader.read).toHaveBeenCalledTimes(1);
+    expect(h.runtimeMetrics.writeLatest).toHaveBeenCalledWith(
+      "redeem_sweep_async_queue_depth",
+      expect.any(Number),
+      null,
+      expect.any(String),
+    );
+
+    pendingRead.resolve([]);
+    await publish;
+    await flushMicrotasks();
+  });
+
+  it("runs an enqueued wallet-event sweep asynchronously after publish returns", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({ positions: [] });
+    await h.module.start();
+    await primeCoalescingStability(h);
+    h.reader.read.mockResolvedValueOnce([coalescingPosition(1)]);
+
+    await h.bus.publish(
+      "PolymarketWalletUpdated",
+      walletUpdateEvent("tok-coalesce-1", "cond-coalesce-1"),
+    );
+    await flushMicrotasks();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(h.gateway.redeemPositions).toHaveBeenCalledWith(["cond-coalesce-1"], {
+      redeemTokenIdsByCondition: { "cond-coalesce-1": [createTokenId("tok-coalesce-1")] },
+    });
+  });
+
+  it("records async sweep failures without surfacing them through wallet-event publish", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({ positions: [] });
+    await h.module.start();
+    await h.bus.drain();
+    h.reader.read.mockRejectedValueOnce(new Error("wallet reader down"));
+
+    await h.bus.publish("PolymarketWalletUpdated", walletUpdateEvent());
+    await flushMicrotasks();
+
+    expect(h.log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), reason: "wallet-event" }),
+      "redeem sweep async worker failed",
+    );
+    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+      "redeem_sweep_async_failed_total",
+      1,
+      JSON.stringify({ reason: "wallet-event" }),
+      expect.any(String),
+    );
+  });
+
+  it("records overflow when wallet-event async queue is saturated", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({ positions: [] });
+    await h.module.start();
+    await h.bus.drain();
+    h.reader.read.mockClear();
+    const pendingRead = deferred<any[] | null>();
+    h.reader.read.mockReturnValueOnce(pendingRead.promise);
+
+    const publishes = Array.from({ length: 18 }, (_, index) =>
+      h.bus.publish(
+        "PolymarketWalletUpdated",
+        walletUpdateEvent(`tok-overflow-${index}`, CONDITION),
+      ),
+    );
+    await flushMicrotasks();
+
+    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+      "redeem_sweep_async_queue_overflow_total",
+      1,
+      JSON.stringify({ reason: "wallet-event", max_depth: 16 }),
+      expect.any(String),
+    );
+
+    pendingRead.resolve([]);
+    await Promise.all(publishes);
+    await flushMicrotasks();
+  });
+
+  it("keeps Track D quarantine gating on async wallet-event sweeps", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [],
+      quarantineStates: {
+        "cond-quarantined": {
+          consecutiveStateFailedCount: 5,
+          redeemQuarantineUntilTs: NOW + 60_000,
+        },
+      },
+    });
+    await h.module.start();
+    await h.bus.drain();
+    h.reader.read.mockResolvedValueOnce([
+      remotePosition({ tokenId: "tok-quarantined", conditionId: "cond-quarantined" }),
+    ]);
+
+    await h.bus.publish(
+      "PolymarketWalletUpdated",
+      walletUpdateEvent("tok-quarantined", "cond-quarantined"),
+    );
+    await flushMicrotasks();
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+      "redeem_quarantine_skipped_total",
+      1,
+      JSON.stringify({
+        condition_id: "cond-quarantined",
+        until_ts: NOW + 60_000,
+        remaining_ms: 60_000,
+      }),
+      new Date(NOW).toISOString(),
+    );
   });
 
   it("retries a failed redeem and records retry_count on success", async () => {
@@ -775,6 +919,7 @@ describe("RedeemSweepModule", () => {
     await h.bus.publish("PolymarketWalletUpdated", walletEvent);
     await h.bus.publish("PolymarketWalletUpdated", walletEvent);
     await h.bus.drain();
+    await flushMicrotasks();
 
     expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
   });

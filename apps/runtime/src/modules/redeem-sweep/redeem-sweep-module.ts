@@ -34,6 +34,7 @@ const SECOND_MS = 1_000;
 const HOUR_MS = 60 * 60_000;
 const DEFAULT_STATE_FAILED_QUARANTINE_THRESHOLD = 5;
 const DEFAULT_STATE_FAILED_QUARANTINE_TTL_HOURS = 24;
+const ASYNC_SWEEP_QUEUE_MAX_DEPTH = 16;
 
 interface RedeemSweepDeps {
   bus: EventBus;
@@ -80,6 +81,11 @@ interface RetryTask {
   retryCount: number;
 }
 
+interface AsyncSweepRequest {
+  reason: string;
+  enqueuedAt: number;
+}
+
 export class RedeemSweepModule implements RuntimeModule {
   private timer: ReturnType<typeof setInterval> | null = null;
   private unsubs: Array<() => void> = [];
@@ -99,6 +105,8 @@ export class RedeemSweepModule implements RuntimeModule {
   private started = false;
   private pendingOrphanMarking = false;
   private lastActivationAttemptAt = 0;
+  private readonly asyncSweepQueue: AsyncSweepRequest[] = [];
+  private asyncSweepWorkerRunning = false;
 
   constructor(private readonly deps: RedeemSweepDeps) {}
 
@@ -151,6 +159,8 @@ export class RedeemSweepModule implements RuntimeModule {
     this.batchPauseTimers.clear();
     this.startupLoadPromise = null;
     this.startupLoadComplete = false;
+    this.asyncSweepQueue.length = 0;
+    this.asyncSweepWorkerRunning = false;
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
   }
@@ -164,6 +174,8 @@ export class RedeemSweepModule implements RuntimeModule {
         verificationAttempts: this.verificationAttemptsByCondition.size,
         retryTimers: this.retryTimers.size,
         verifyTimers: this.verifyTimers.size,
+        asyncSweepQueueDepth: this.asyncSweepQueue.length,
+        asyncSweepWorkerRunning: this.asyncSweepWorkerRunning,
         sweepDisabledUntilMs: this.sweepDisabledUntilMs,
       }),
     };
@@ -200,7 +212,6 @@ export class RedeemSweepModule implements RuntimeModule {
     event: RuntimeEventMap["PolymarketWalletUpdated"],
   ): Promise<void> {
     if (!this.deps.policy().enabled) return;
-    await this.waitForStartupLoad();
     const redeemable = event.positions.filter((p) => p.redeemable).length;
     if (redeemable === 0) {
       this.deps.log.debug(
@@ -213,7 +224,85 @@ export class RedeemSweepModule implements RuntimeModule {
       { totalPositions: event.positions.length, redeemablePositions: redeemable },
       "redeem sweep wallet-event received",
     );
-    await this.runSweep("wallet-event");
+    this.enqueueAsyncSweep("wallet-event");
+  }
+
+  private enqueueAsyncSweep(reason: string): void {
+    if (this.asyncSweepQueue.length >= ASYNC_SWEEP_QUEUE_MAX_DEPTH) {
+      this.deps.log.warn(
+        { reason, depth: this.asyncSweepQueue.length, maxDepth: ASYNC_SWEEP_QUEUE_MAX_DEPTH },
+        "redeem sweep async queue overflow — trigger dropped",
+      );
+      this.recordMetricLabels("redeem_sweep_async_queue_overflow_total", {
+        reason,
+        max_depth: ASYNC_SWEEP_QUEUE_MAX_DEPTH,
+      });
+      return;
+    }
+
+    this.asyncSweepQueue.push({ reason, enqueuedAt: this.now() });
+    this.recordMetricLabels("redeem_sweep_async_enqueued_total", { reason });
+    this.recordAsyncQueueDepth();
+    this.ensureAsyncSweepWorker();
+  }
+
+  private ensureAsyncSweepWorker(): void {
+    if (this.asyncSweepWorkerRunning) return;
+    this.asyncSweepWorkerRunning = true;
+    void this.processAsyncSweepQueue()
+      .catch((err) => {
+        this.deps.log.error({ err }, "redeem sweep async worker crashed");
+        this.recordAlert("redeem_sweep_async_worker_crashed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        this.asyncSweepWorkerRunning = false;
+        this.recordAsyncQueueDepth();
+        if (this.asyncSweepQueue.length > 0 && this.started) {
+          this.ensureAsyncSweepWorker();
+        }
+      });
+  }
+
+  private async processAsyncSweepQueue(): Promise<void> {
+    while (this.started && this.asyncSweepQueue.length > 0) {
+      const request = this.asyncSweepQueue.shift();
+      if (!request) continue;
+      this.recordAsyncQueueDepth();
+      const startedAt = this.now();
+      try {
+        await this.runSweep(request.reason);
+        const completedAt = this.now();
+        this.recordMetricLabels("redeem_sweep_async_completed_total", {
+          reason: request.reason,
+        });
+        this.deps.runtimeMetrics?.writeEvent(
+          "redeem_sweep_async_latency_ms",
+          completedAt - request.enqueuedAt,
+          JSON.stringify({
+            reason: request.reason,
+            queued_ms: startedAt - request.enqueuedAt,
+            run_ms: completedAt - startedAt,
+          }),
+          new Date(completedAt).toISOString(),
+        );
+      } catch (err) {
+        this.deps.log.error(
+          { err, reason: request.reason, queuedMs: startedAt - request.enqueuedAt },
+          "redeem sweep async worker failed",
+        );
+        this.recordMetricLabels("redeem_sweep_async_failed_total", {
+          reason: request.reason,
+        });
+        this.recordAlert("redeem_sweep_async_failed", {
+          reason: request.reason,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        this.recordAsyncQueueDepth();
+      }
+    }
   }
 
   private async runSweep(reason: string): Promise<void> {
@@ -1140,6 +1229,15 @@ export class RedeemSweepModule implements RuntimeModule {
       metricName,
       1,
       JSON.stringify(labels),
+      new Date(this.now()).toISOString(),
+    );
+  }
+
+  private recordAsyncQueueDepth(): void {
+    this.deps.runtimeMetrics?.writeLatest(
+      "redeem_sweep_async_queue_depth",
+      this.asyncSweepQueue.length,
+      null,
       new Date(this.now()).toISOString(),
     );
   }
