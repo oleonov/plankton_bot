@@ -46,6 +46,7 @@ import {
   cleanStaleEntryOrders,
   recordSellDownpriceCancelSucceeded,
   type SellDownpriceRepriceStateMap,
+  type TrackCExitCleanerDeps,
 } from "./stale-order-cleaner.js";
 import type { OrderLifetimeModule } from "../order-lifetime/order-lifetime-module.js";
 import {
@@ -217,6 +218,7 @@ export interface ReconciliationModuleDeps {
   legStateRepo?: LegStateRepository;
   repriceChainPolicy?: () => RepriceChainPolicyConfig;
   riskEventRepo?: RiskEventRepository;
+  trackCExit?: TrackCExitCleanerDeps;
 }
 
 export class ReconciliationModule implements RuntimeModule {
@@ -428,6 +430,7 @@ export class ReconciliationModule implements RuntimeModule {
             ? { exitRepriceOnDownprice: this.deps.exitRepriceOnDownprice }
             : {}),
           ...(repriceChainGate ? { repriceChainGate } : {}),
+          ...(this.deps.trackCExit ? { trackCExit: this.deps.trackCExit } : {}),
         },
         this.staleBackoffMap,
         this.sellDownpriceRepriceMap,

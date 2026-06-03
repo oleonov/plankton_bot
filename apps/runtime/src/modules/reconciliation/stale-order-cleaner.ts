@@ -25,17 +25,33 @@ import type {
   RepriceChainPolicyConfig,
   RiskEventRepository,
   ExitTtlByLiquidityPolicyConfig,
+  PositionRepository,
+  RepriceThresholdDecision,
+  ExitActionDecision,
+  StaleVerdict,
 } from "@krabs/domain";
 import {
+  classifyMarketRegime,
+  computeRepriceThreshold,
   createCommandId,
+  decideExitAction,
   ENTRY_REASONS,
   EXIT_REASONS,
+  isLiveBook,
+  isStaleSell,
   resolveDynamicChainCapDetails,
   resolveExitTtlByMarket,
   shouldBlockRepriceChain,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import type { ExitOrderLifetimeDecision } from "../order-lifetime/order-lifetime-ttl.js";
+import {
+  buildBookContext,
+  buildExitDecisionContext,
+  buildRepriceContext,
+  buildStaleSellContext,
+  type TrackCSubtype,
+} from "./context-builders/track-c-context-builders.js";
 
 // Horizon-aware TTLs for conviction-style entry orders.
 export const HORIZON_TTL_MS: Record<string, number> = {
@@ -62,6 +78,55 @@ const FLAT_EXIT_TTL_BY_LIQUIDITY_DISABLED: ExitTtlByLiquidityPolicyConfig = {
   thinMs: EXIT_ORDER_TTL_MS,
   mediumMs: EXIT_ORDER_TTL_MS,
 };
+
+export interface TrackCBookSignals {
+  readonly bidPersistenceS?: number | null;
+  readonly bidMovement30m?: number | null;
+  readonly publicTradeCount1h?: number | null;
+  readonly depthTop3?: number | null;
+}
+
+export interface TrackCHoldResolutionWriter {
+  insertActive(input: {
+    readonly tokenId: TokenId;
+    readonly conditionId?: import("@krabs/domain").ConditionId | null;
+    readonly positionId?: import("@krabs/domain").PositionId | null;
+    readonly sourceOrderId?: import("@krabs/domain").OrderId | null;
+    readonly sourceSignalId?: string | null;
+    readonly markerCreatedAt: string;
+    readonly expectedResolutionAt?: string | null;
+    readonly attemptCountForRedeem?: number;
+    readonly exitPnlPct?: number | null;
+    readonly staleReason: string;
+    readonly livenessVerdict: string;
+    readonly metadata?: Record<string, unknown> | null;
+  }): unknown;
+  findActiveByTokenId?: (tokenId: TokenId) => { readonly status?: string } | null;
+}
+
+export interface TrackCFloorIntentWriter {
+  insertActive(input: {
+    readonly tokenId: TokenId;
+    readonly conditionId?: import("@krabs/domain").ConditionId | null;
+    readonly positionId?: import("@krabs/domain").PositionId | null;
+    readonly sourceOrderId?: import("@krabs/domain").OrderId | null;
+    readonly sourceSignalId?: string | null;
+    readonly targetPrice: number;
+    readonly attemptCount?: number;
+    readonly createdAt: string;
+    readonly metadata?: Record<string, unknown> | null;
+  }): unknown;
+  findActiveByTokenId?: (tokenId: TokenId) => { readonly attemptCount?: number } | null;
+}
+
+export interface TrackCExitCleanerDeps {
+  positionRepo: Pick<PositionRepository, "findByTokenId">;
+  legStateRepo: Pick<LegStateRepository, "get">;
+  holdResolutionRepo: TrackCHoldResolutionWriter;
+  floorIntentRepo?: TrackCFloorIntentWriter | undefined;
+  getBookSignals?: (tokenId: TokenId, anchor: number) => TrackCBookSignals | null;
+  floorCloseRatioThreshold?: () => number | null;
+}
 
 export interface SellDownpriceRepriceState {
   repriceCount: number;
@@ -132,6 +197,7 @@ export interface StaleOrderCleanerDeps {
         }
       | undefined;
   };
+  trackCExit?: TrackCExitCleanerDeps;
 }
 
 export interface StaleCleanResult {
@@ -246,6 +312,8 @@ export async function cleanStaleEntryOrders(
     }
   }
 
+  let trackCConsecutiveFailures = 0;
+  let trackCCircuitOpen = false;
   for (const order of exitSells) {
     const ordKey = String(order.orderId);
     const lastAttempt = backoffMap.get(ordKey);
@@ -258,6 +326,27 @@ export async function cleanStaleEntryOrders(
       order.tokenId,
       openSells,
     );
+    const trackCOutcome = trackCCircuitOpen
+      ? { trackC: null, failed: false }
+      : safeEvaluateTrackCExit(order, market, repriceMarket, deps, now, trackCConsecutiveFailures);
+    const trackC = trackCOutcome.trackC;
+    if (trackCOutcome.failed) {
+      trackCConsecutiveFailures++;
+      if (trackCConsecutiveFailures >= 3 && !trackCCircuitOpen) {
+        trackCCircuitOpen = true;
+        deps.repriceChainGate?.metrics?.writeCounter?.(
+          "track_c_circuit_open_total",
+          1,
+          JSON.stringify({ source: "stale_order_cleaner" }),
+        );
+        log.error(
+          { consecutiveFailures: trackCConsecutiveFailures },
+          "track_c_exit_circuit_opened",
+        );
+      }
+    } else {
+      trackCConsecutiveFailures = 0;
+    }
 
     const repriceKey = String(order.tokenId);
     const stuckSell = shouldWarnStuckSell(
@@ -291,6 +380,7 @@ export async function cleanStaleEntryOrders(
       deps.exitRepriceOnDownprice,
       sellDownpriceRepriceMap,
       now,
+      trackC?.repriceThreshold ?? null,
     );
     if (repriceDecision.shouldReprice) {
       // CHANGE C — R65 p90 = 13 reprice events per token per 24h cap. Block
@@ -462,6 +552,248 @@ function shouldRepriceOutbid(
   };
 }
 
+function safeEvaluateTrackCExit(
+  order: Pick<
+    Order,
+    "orderId" | "tokenId" | "conditionId" | "price" | "createdAt" | "signalId"
+  >,
+  market: Market | null,
+  pricing:
+    | (Pick<
+        NormalizedMarket,
+        | "bestBid"
+        | "bestAsk"
+        | "bestAskSize"
+        | "askDepthExcludingOurs"
+        | "tickSize"
+        | "publicTradeCount24h"
+      > &
+        Partial<Pick<NormalizedMarket, "midPrice" | "spread" | "snapshotTs">>)
+    | null,
+  deps: Pick<StaleOrderCleanerDeps, "trackCExit" | "log" | "repriceChainGate">,
+  nowMs: number,
+  consecutiveFailures: number,
+): {
+  readonly trackC: {
+    readonly repriceThreshold: RepriceThresholdDecision | null;
+    readonly exitDecision: ExitActionDecision | null;
+    readonly staleVerdict: StaleVerdict | null;
+  } | null;
+  readonly failed: boolean;
+} {
+  try {
+    return { trackC: evaluateTrackCExit(order, market, pricing, deps, nowMs), failed: false };
+  } catch (err) {
+    deps.log.error(
+      {
+        err,
+        tokenId: String(order.tokenId),
+        orderId: String(order.orderId),
+        consecutiveFailures: consecutiveFailures + 1,
+      },
+      "track_c_exit_evaluation_failed",
+    );
+    deps.repriceChainGate?.metrics?.writeCounter?.(
+      "track_c_pipeline_failed_total",
+      1,
+      JSON.stringify({ source: "stale_order_cleaner" }),
+    );
+    return { trackC: null, failed: true };
+  }
+}
+
+function evaluateTrackCExit(
+  order: Pick<
+    Order,
+    "orderId" | "tokenId" | "conditionId" | "price" | "createdAt" | "signalId"
+  >,
+  market: Market | null,
+  pricing: Pick<
+    NormalizedMarket,
+    | "bestBid"
+    | "bestAsk"
+    | "tickSize"
+    | "publicTradeCount24h"
+  > &
+    Partial<Pick<NormalizedMarket, "midPrice" | "spread" | "snapshotTs">> | null,
+  deps: Pick<StaleOrderCleanerDeps, "trackCExit" | "log" | "repriceChainGate">,
+  nowMs: number,
+): {
+  readonly repriceThreshold: RepriceThresholdDecision | null;
+  readonly exitDecision: ExitActionDecision | null;
+  readonly staleVerdict: StaleVerdict | null;
+} | null {
+  const trackC = deps.trackCExit;
+  if (!trackC) return null;
+
+  const subtype = resolveTrackCSubtype(market);
+  if (subtype !== "strike") return null;
+
+  const signals = trackC.getBookSignals?.(order.tokenId, nowMs) ?? null;
+  const bookContext = buildBookContext({
+    tokenId: order.tokenId,
+    market: pricing,
+    bidPersistenceS: signals?.bidPersistenceS ?? null,
+    bidMovement30m: signals?.bidMovement30m ?? null,
+    publicTradeCount1h: signals?.publicTradeCount1h ?? null,
+    ts: nowMs,
+  });
+  const liveness = isLiveBook(bookContext);
+  const computedRepriceThreshold = computeRepriceThreshold(
+    buildRepriceContext({
+      tokenId: order.tokenId,
+      subtype,
+      market: pricing,
+      livenessVerdict: liveness.verdict,
+      ts: nowMs,
+    }),
+  );
+  const repriceThreshold =
+    liveness.verdict === "unknown" ? null : computedRepriceThreshold;
+
+  const legState = trackC.legStateRepo.get(order.tokenId);
+  const position = trackC.positionRepo.findByTokenId(order.tokenId);
+  const staleVerdict = isStaleSell(
+    buildStaleSellContext({
+      order,
+      market: pricing,
+      legState,
+      position,
+      livenessVerdict: liveness.verdict,
+      ts: nowMs,
+    }),
+  );
+  const holdState = trackC.holdResolutionRepo.findActiveByTokenId?.(order.tokenId) ?? null;
+  const floorIntent = trackC.floorIntentRepo?.findActiveByTokenId?.(order.tokenId) ?? null;
+  const exitDecision = decideExitAction(
+    buildExitDecisionContext({
+      order,
+      market,
+      position,
+      livenessVerdict: liveness.verdict,
+      staleVerdict,
+      subtype,
+      floorCloseRatioThreshold: trackC.floorCloseRatioThreshold?.() ?? null,
+      holdResolutionState: holdState ? { active: true } : undefined,
+      floorIntentState: floorIntent
+        ? { active: true, attemptCount: floorIntent.attemptCount ?? 0 }
+        : undefined,
+      ts: nowMs,
+    }),
+  );
+
+  emitTrackCDecisionMetrics(deps, liveness.verdict, staleVerdict.reason, exitDecision.action);
+
+  try {
+    persistTrackCAction(order, market, trackC, exitDecision, staleVerdict, liveness.verdict, nowMs);
+  } catch (err) {
+    deps.log.error(
+      {
+        err,
+        tokenId: String(order.tokenId),
+        orderId: String(order.orderId),
+        action: exitDecision.action,
+        reason: exitDecision.reason,
+      },
+      "track_c_action_persist_failed",
+    );
+    deps.repriceChainGate?.metrics?.writeCounter?.(
+      "track_c_action_persist_failed_total",
+      1,
+      JSON.stringify({ action: exitDecision.action, reason: exitDecision.reason }),
+    );
+  }
+
+  deps.log.debug(
+    {
+      tokenId: String(order.tokenId),
+      slug: market?.slug ?? null,
+      livenessVerdict: liveness.verdict,
+      livenessReason: liveness.reason,
+      staleReason: staleVerdict.reason,
+      exitAction: exitDecision.action,
+      exitReason: exitDecision.reason,
+      repriceReason: repriceThreshold?.reason ?? "unknown_pass_through",
+      repriceTickThreshold: repriceThreshold?.tickThreshold ?? null,
+    },
+    "track_c_exit_evaluated",
+  );
+
+  return { repriceThreshold, exitDecision, staleVerdict };
+}
+
+function emitTrackCDecisionMetrics(
+  deps: Pick<StaleOrderCleanerDeps, "repriceChainGate">,
+  livenessVerdict: string,
+  staleReason: string,
+  action: string,
+): void {
+  const writeCounter = deps.repriceChainGate?.metrics?.writeCounter;
+  if (!writeCounter) return;
+  writeCounter(`track_c.verdict.${livenessVerdict}`);
+  writeCounter(`track_c.stale_branch.${staleReason}`);
+  writeCounter(`track_c.action.${action}`);
+}
+
+function persistTrackCAction(
+  order: Pick<Order, "orderId" | "tokenId" | "conditionId" | "signalId">,
+  market: Market | null,
+  trackC: NonNullable<StaleOrderCleanerDeps["trackCExit"]>,
+  decision: ExitActionDecision,
+  staleVerdict: StaleVerdict,
+  livenessVerdict: string,
+  nowMs: number,
+): void {
+  const nowIso = new Date(nowMs).toISOString();
+  if (decision.action === "hold_resolution") {
+    if (decision.reason === "hold_resolution_active") return;
+    trackC.holdResolutionRepo.insertActive({
+      tokenId: order.tokenId,
+      conditionId: order.conditionId,
+      sourceOrderId: order.orderId,
+      sourceSignalId: order.signalId ?? null,
+      markerCreatedAt: nowIso,
+      expectedResolutionAt:
+        decision.holdResolutionRequest?.expectedResolutionAt == null
+          ? null
+          : new Date(decision.holdResolutionRequest.expectedResolutionAt).toISOString(),
+      exitPnlPct: numberEvidence(decision.evidence.exitPnlPct),
+      staleReason: staleVerdict.reason,
+      livenessVerdict,
+      metadata: {
+        exitActionReason: decision.reason,
+        slug: market?.slug ?? null,
+      },
+    });
+    return;
+  }
+
+  if (decision.action !== "floor_close" || decision.executionParams?.targetPrice == null) return;
+  trackC.floorIntentRepo?.insertActive({
+    tokenId: order.tokenId,
+    conditionId: order.conditionId,
+    sourceOrderId: order.orderId,
+    sourceSignalId: order.signalId ?? null,
+    targetPrice: decision.executionParams.targetPrice,
+    createdAt: nowIso,
+    metadata: {
+      exitActionReason: decision.reason,
+      slug: market?.slug ?? null,
+    },
+  });
+}
+
+function resolveTrackCSubtype(market: Market | null): TrackCSubtype {
+  if (!market) return "non-strike";
+  return classifyMarketRegime({ slug: market.slug, tags: market.tags ?? null }) === "strike"
+    ? "strike"
+    : "non-strike";
+}
+
+function numberEvidence(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function shouldRepriceDownprice(
   order: Pick<Order, "orderId" | "tokenId" | "price" | "size" | "fillProgressShares">,
   market: Pick<
@@ -475,6 +807,7 @@ function shouldRepriceDownprice(
     | undefined,
   stateMap: SellDownpriceRepriceStateMap,
   nowMs: number,
+  trackCThreshold: RepriceThresholdDecision | null = null,
 ): {
   shouldReprice: boolean;
   gapTicks: number | null;
@@ -500,6 +833,15 @@ function shouldRepriceDownprice(
   }
 
   const policy = reprice.policy();
+  if (trackCThreshold && !trackCThreshold.shouldReprice) {
+    return {
+      shouldReprice: false,
+      gapTicks: null,
+      maxRepricesPerOrder: policy.maxRepricesPerOrder,
+      nextState: existing,
+      stateChanged: false,
+    };
+  }
   const bestBid = market.bestBid;
   const tickSize = market.tickSize;
   if (
@@ -545,7 +887,8 @@ function shouldRepriceDownprice(
       stateChanged,
     };
   }
-  if (gapTicks < policy.thresholdTicks - PRICE_EPSILON) {
+  const thresholdTicks = trackCThreshold?.tickThreshold ?? policy.thresholdTicks;
+  if (gapTicks < thresholdTicks - PRICE_EPSILON) {
     return {
       shouldReprice: false,
       gapTicks,

@@ -71,6 +71,8 @@ import {
   SelectionRuleRepository,
   SqliteRiskEventRepository,
   SqliteStateTransitionRepository,
+  SqliteFloorIntentRepository,
+  SqliteHoldResolutionStateRepository,
 } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
 import {
@@ -108,6 +110,7 @@ import { buildTradeCountObserver } from "./trade-count-observer.js";
 import { Supervisor } from "./supervisor/supervisor.js";
 import { CommandPoller } from "./supervisor/command-poller.js";
 import { MarketDataModule } from "./modules/market-data/market-data-module.js";
+import { TrackCBookSignalsProvider } from "./modules/book-signals/book-signals-provider.js";
 import { MarketScannerModule } from "./modules/market-scanner/index.js";
 import { NormalizationModule } from "./modules/normalization/normalization-module.js";
 import { SoftRankingScoreModule } from "./modules/soft-ranking/soft-ranking-score-module.js";
@@ -128,6 +131,7 @@ import { MarketSnapshotPriceHistoryProvider } from "./modules/algo-decision/mark
 import { MarketSelectionCache } from "./modules/algo-decision/market-selection-cache.js";
 import { EntryLifecycleModule } from "./modules/entry-lifecycle/entry-lifecycle-module.js";
 import { LegStateTrackerModule } from "./modules/leg-state/leg-state-tracker-module.js";
+import { HoldResolutionCleanupModule } from "./modules/reconciliation/hold-resolution-cleanup.js";
 import { ReconciliationModule } from "./modules/reconciliation/reconciliation-module.js";
 import { ResolutionModule } from "./modules/resolution/resolution-module.js";
 import { UserOrderStreamModule } from "./modules/reconciliation/user-order-stream-module.js";
@@ -390,6 +394,8 @@ async function main(): Promise<void> {
     marketSnapshot: new SqliteMarketSnapshotRepository(ledgerConn.db),
     riskEvent: new SqliteRiskEventRepository(ledgerConn.db),
     decisionSignalLog: new SqliteDecisionSignalLogRepository(ledgerConn.db),
+    floorIntent: new SqliteFloorIntentRepository(ledgerConn.db),
+    holdResolutionState: new SqliteHoldResolutionStateRepository(ledgerConn.db),
     // Control-side
     operatorCommand: new SqliteOperatorCommandRepository(controlConn.db),
     operatorAction: new SqliteOperatorActionRepository(controlConn.db),
@@ -708,6 +714,7 @@ async function main(): Promise<void> {
   const tradeCountProvider = new DataApiTradeCountProvider({
     observer: buildTradeCountObserver({ log: tradeCountLog, metrics: runtimeMetrics }),
   });
+  const trackCBookSignalsProvider = new TrackCBookSignalsProvider();
 
   const marketScannerModule = new MarketScannerModule({
     discoveryGateway,
@@ -747,6 +754,24 @@ async function main(): Promise<void> {
       selectedMarketCacheForEnrichment?.isEligible(tokenId as TokenId) === true,
     httpErrorMetricsSink: ({ source, errorClass }) => {
       runtimeMetrics.writeCounter("http_error_class", 1, JSON.stringify({ source, errorClass }));
+    },
+    bookSignals: {
+      openPositionTokenIds: () => repos.position.findOpen().map((position) => position.tokenId),
+      setOpenPositionTokenIds: (tokenIds) => {
+        trackCBookSignalsProvider.setOpenPositionTokenIds(tokenIds);
+      },
+      ingestTopOfBook: (observation) => {
+        trackCBookSignalsProvider.ingestTopOfBook(observation);
+      },
+      ingestLastTradePrice: (observation) => {
+        trackCBookSignalsProvider.ingestLastTradePrice(observation);
+      },
+      ingestBook: (observation) => {
+        trackCBookSignalsProvider.ingestBook(observation);
+      },
+      invalidateTokenIds: (tokenIds) => {
+        trackCBookSignalsProvider.invalidateTokenIds(tokenIds);
+      },
     },
     runtimeControl,
   });
@@ -1206,6 +1231,14 @@ async function main(): Promise<void> {
     legStateRepo: repos.legState,
     repriceChainPolicy: () => currentExecutionPolicy().repriceChain,
     riskEventRepo: repos.riskEvent,
+    trackCExit: {
+      positionRepo: repos.position,
+      legStateRepo: repos.legState,
+      holdResolutionRepo: repos.holdResolutionState,
+      floorIntentRepo: repos.floorIntent,
+      getBookSignals: (tokenId, anchor) => trackCBookSignalsProvider.getBookSignals(tokenId, anchor),
+      floorCloseRatioThreshold: () => null,
+    },
     ...(runtimeMode === "live-lite" && traderAddress
       ? (() => {
           const reader = new PolymarketDataPositionReader(traderAddress);
@@ -1377,6 +1410,11 @@ async function main(): Promise<void> {
       });
     },
   });
+  const holdResolutionCleanupModule = new HoldResolutionCleanupModule({
+    bus,
+    holdResolutionRepo: repos.holdResolutionState,
+    log,
+  });
 
   const modules: Array<[string, import("@krabs/domain").RuntimeModule]> = [
     ["command-poller", commandPoller],
@@ -1390,6 +1428,7 @@ async function main(): Promise<void> {
     // those events are lost and any leg row whose closing PositionUpdated
     // came from a replay stays orphaned, driving D7 SELL spam against a
     // closed position.
+    ["hold-resolution-cleanup", holdResolutionCleanupModule],
     ["leg-state-tracker", legStateTrackerModule],
     ["risk-inventory", riskInventoryModule],
     ["profile-publisher", profilePublisher],

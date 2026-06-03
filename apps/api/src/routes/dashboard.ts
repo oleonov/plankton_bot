@@ -23,7 +23,35 @@ interface ExitMultipleRow {
   multiple: number;
 }
 
+interface HoldResolutionRow {
+  id: string;
+  token_id: string;
+  condition_id: string | null;
+  position_id: string | null;
+  source_order_id: string | null;
+  source_signal_id: string | null;
+  status: string;
+  marker_created_at: string;
+  expected_resolution_at: string | null;
+  attempt_count_for_redeem: number;
+  exit_pnl_pct: number | null;
+  stale_reason: string;
+  liveness_verdict: string;
+  redeem_quarantine_observed_at: string | null;
+  alert_emitted_at: string | null;
+  cleared_at: string | null;
+  clear_reason: string | null;
+  metadata_json: string | null;
+}
+
 const DAY_MS = 24 * 60 * 60_000;
+const HOLD_RESOLUTION_STATUSES = new Set([
+  "active",
+  "resolved_zero_loss",
+  "recovered",
+  "cancelled",
+  "superseded",
+]);
 
 export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, opts) => {
   const { ledgerDb, controlDb, ledgerPool, config } = opts;
@@ -79,6 +107,7 @@ export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, op
 
     const openPositionsCount = readOpenPositionCount(db);
     const stuckPositionsCount = readStuckPositionCount(db);
+    const activeHoldResolutionCount = readActiveHoldResolutionCount(db);
     const wsTracked = readNumber(stream, "trackedTokenCount") ?? 0;
     const wsTotal =
       readNumber(stream, "universeTokenCount") ??
@@ -106,7 +135,14 @@ export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, op
       restarts24h >= 3 || oom24h >= 1 ? "crit" : restarts24h >= 1 ? "warn" : "ok";
     const modeSeverity: HealthSeverity =
       mode === "degraded" ? "crit" : isPaused || mode !== "live-lite" ? "warn" : "ok";
-    const healthSeverity = worseSeverity(stuckSeverity, lagSeverity, restartSeverity, modeSeverity);
+    const holdResolutionSeverity: HealthSeverity = activeHoldResolutionCount > 0 ? "warn" : "ok";
+    const healthSeverity = worseSeverity(
+      stuckSeverity,
+      lagSeverity,
+      restartSeverity,
+      modeSeverity,
+      holdResolutionSeverity,
+    );
 
     const rate24h = openPositionsCount > 0 ? fills24h.totalFills / openPositionsCount : 0;
 
@@ -135,6 +171,7 @@ export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, op
       },
       open_positions_count: openPositionsCount,
       stuck_positions_count: stuckPositionsCount,
+      hold_resolution_active_count: activeHoldResolutionCount,
       health: {
         severity: healthSeverity,
         ws_tracked: wsTracked,
@@ -169,8 +206,59 @@ export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, op
             label: "Mode",
             value: `${mode.toUpperCase()}${isPaused ? " · PAUSED" : ""}`,
           },
+          {
+            key: "hold_resolution",
+            severity: holdResolutionSeverity,
+            label: "Hold resolution",
+            value: String(activeHoldResolutionCount),
+          },
         ],
       },
+    });
+  });
+
+  app.get("/hold-resolution", async (request) => {
+    const { db } = resolveActiveLedger(ledgerDb, controlDb, ledgerPool);
+    const query = request.query as {
+      status?: string;
+      tokenId?: string;
+      limit?: string | number;
+    };
+    const status = normalizeHoldStatus(query.status);
+    const limit = clampLimit(query.limit, 100, 500);
+    const predicates: string[] = [];
+    const params: Array<string | number> = [];
+
+    if (status) {
+      predicates.push("status = ?");
+      params.push(status);
+    }
+    if (query.tokenId) {
+      predicates.push("token_id = ?");
+      params.push(query.tokenId);
+    }
+
+    const where = predicates.length > 0 ? `WHERE ${predicates.join(" AND ")}` : "";
+    const rows = db
+      .prepare(
+        `SELECT id, token_id, condition_id, position_id, source_order_id, source_signal_id,
+                status, marker_created_at, expected_resolution_at, attempt_count_for_redeem,
+                exit_pnl_pct, stale_reason, liveness_verdict, redeem_quarantine_observed_at,
+                alert_emitted_at, cleared_at, clear_reason, metadata_json
+           FROM hold_resolution_states
+          ${where}
+          ORDER BY marker_created_at DESC, id DESC
+          LIMIT ?`,
+      )
+      .all(...params, limit) as HoldResolutionRow[];
+
+    return ok({
+      rows: rows.map((row) => ({
+        ...row,
+        metadata: parseJsonObject(row.metadata_json),
+      })),
+      count: rows.length,
+      status: status ?? "all",
     });
   });
 };
@@ -234,15 +322,31 @@ function readExitMultiples(db: Database.Database, sinceIso: string): number[] {
 function readStuckPositionCount(db: Database.Database): number {
   const row = db
     .prepare(
-      `SELECT COUNT(*) AS cnt
-         FROM positions p
-         JOIN leg_states ls ON ls.token_id = p.token_id
-        WHERE p.status = 'open'
-          AND COALESCE(ls.sell_count, 0) = 0
-          AND COALESCE(ls.reprice_chain_count_24h, 0) >= ?
-          AND julianday('now') - julianday(p.opened_at) > 0.5`,
+      `WITH stuck AS (
+         SELECT p.token_id
+           FROM positions p
+           JOIN leg_states ls ON ls.token_id = p.token_id
+          WHERE p.status = 'open'
+            AND COALESCE(ls.sell_count, 0) = 0
+            AND COALESCE(ls.reprice_chain_count_24h, 0) >= ?
+            AND julianday('now') - julianday(p.opened_at) > 0.5
+         UNION
+         SELECT hrs.token_id
+           FROM hold_resolution_states hrs
+           JOIN positions p ON p.token_id = hrs.token_id
+          WHERE hrs.status = 'active'
+            AND p.status = 'open'
+       )
+       SELECT COUNT(*) AS cnt FROM stuck`,
     )
     .get(DEFAULT_REPRICE_CHAIN_MAX_COUNT) as { cnt: number };
+  return row.cnt;
+}
+
+function readActiveHoldResolutionCount(db: Database.Database): number {
+  const row = db
+    .prepare("SELECT COUNT(*) AS cnt FROM hold_resolution_states WHERE status = 'active'")
+    .get() as { cnt: number };
   return row.cnt;
 }
 
@@ -300,6 +404,18 @@ function readObject(
 function readNumber(obj: Record<string, unknown> | null, key: string): number | null {
   const value = obj?.[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function normalizeHoldStatus(raw: string | undefined): string | null {
+  if (!raw) return "active";
+  if (raw === "all") return null;
+  return HOLD_RESOLUTION_STATUSES.has(raw) ? raw : "active";
+}
+
+function clampLimit(raw: string | number | undefined, defaultValue: number, max: number): number {
+  const value = typeof raw === "number" ? raw : raw == null ? defaultValue : Number(raw);
+  if (!Number.isFinite(value)) return defaultValue;
+  return Math.max(1, Math.min(max, Math.floor(value)));
 }
 
 function percent(wins: number, total: number): number {

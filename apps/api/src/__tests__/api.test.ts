@@ -956,6 +956,7 @@ describe("GET /status", () => {
         DELETE FROM settlement_ledger WHERE settlement_id LIKE 'settle-kpi-%';
         DELETE FROM market_resolutions WHERE condition_id LIKE 'cond-kpi-%';
         DELETE FROM leg_states WHERE token_id = 'tok-kpi-stuck';
+        DELETE FROM hold_resolution_states WHERE token_id LIKE 'tok-kpi-%';
         DELETE FROM fills WHERE fill_id LIKE 'fill-kpi-%';
         DELETE FROM orders WHERE order_id LIKE 'ord-kpi-%';
         DELETE FROM positions WHERE position_id LIKE 'pos-kpi-%';
@@ -972,7 +973,8 @@ describe("GET /status", () => {
         ('pos-kpi-res-win', 'tok-kpi-res-win', 'cond-kpi-res-win', 'buy', 10, 0.40, 4, 10, 6, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
         ('pos-kpi-res-loss', 'tok-kpi-res-loss', 'cond-kpi-res-loss', 'buy', 10, 0.40, 4, 0, -4, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
         ('pos-kpi-hybrid', 'tok-kpi-hybrid', 'cond-kpi-hybrid', 'buy', 10, 0.10, 1, 5, 3, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
-        ('pos-kpi-stuck', 'tok-kpi-stuck', 'cond-kpi-stuck', 'buy', 10, 0.10, 1, 2, 0, 'open', '${oldOpenedIso}', NULL, '${nowIso}');
+        ('pos-kpi-stuck', 'tok-kpi-stuck', 'cond-kpi-stuck', 'buy', 10, 0.10, 1, 2, 0, 'open', '${oldOpenedIso}', NULL, '${nowIso}'),
+        ('pos-kpi-held', 'tok-kpi-held', 'cond-kpi-held', 'buy', 10, 0.10, 1, 1, 0, 'open', '${oldOpenedIso}', NULL, '${nowIso}');
 
       INSERT INTO orders (order_id, client_order_id, token_id, condition_id, side, order_type,
         price, size, size_usdc, status, exchange_order_id, bot_run_id, created_at, updated_at)
@@ -1006,6 +1008,12 @@ describe("GET /status", () => {
       INSERT INTO leg_states (token_id, buy_count, sell_count, last_action, first_trade_price,
         first_trade_at, last_trade_at, updated_at, reprice_chain_count_24h)
       VALUES ('tok-kpi-stuck', 1, 0, 'buy', 0.10, '${oldOpenedIso}', '${oldOpenedIso}', '${nowIso}', 13);
+
+      INSERT INTO hold_resolution_states (id, token_id, condition_id, position_id, status,
+        marker_created_at, expected_resolution_at, attempt_count_for_redeem, exit_pnl_pct,
+        stale_reason, liveness_verdict, metadata_json)
+      VALUES ('hold-kpi-active', 'tok-kpi-held', 'cond-kpi-held', 'pos-kpi-held', 'active',
+        '${oldOpenedIso}', NULL, 0, -0.25, 'chain', 'dead', '{"source":"test"}');
 
       DELETE FROM runtime_metrics WHERE metric_name IN (
         'market_data_stream_activity',
@@ -1050,7 +1058,8 @@ describe("GET /status", () => {
         4 / body.data.open_positions_count,
         5,
       );
-      expect(body.data.stuck_positions_count).toBe(1);
+      expect(body.data.stuck_positions_count).toBe(2);
+      expect(body.data.hold_resolution_active_count).toBe(1);
       expect(body.data.health).toMatchObject({
         severity: "crit",
         ws_tracked: 4999,
@@ -1061,13 +1070,54 @@ describe("GET /status", () => {
         mode: "simulation",
         paused: true,
       });
-      expect(body.data.health.checks).toHaveLength(4);
+      expect(body.data.health.checks).toHaveLength(5);
       expect(body.data.health.checks[0]).toMatchObject({ key: "stuck", severity: "warn" });
       expect(body.data.health.checks[1]).toMatchObject({ key: "lag", severity: "warn" });
       expect(body.data.health.checks[2]).toMatchObject({ key: "restart", severity: "crit" });
       expect(body.data.health.checks[3]).toMatchObject({ key: "mode", severity: "warn" });
+      expect(body.data.health.checks[4]).toMatchObject({
+        key: "hold_resolution",
+        severity: "warn",
+      });
     } finally {
       cleanupKpiFixture();
+    }
+  });
+
+  it("GET /hold-resolution returns active hold markers with filtering", async () => {
+    const nowIso = new Date().toISOString();
+    conn.db.exec(`
+      DELETE FROM hold_resolution_states WHERE token_id LIKE 'tok-hold-api-%';
+      INSERT INTO hold_resolution_states (id, token_id, condition_id, position_id, status,
+        marker_created_at, expected_resolution_at, attempt_count_for_redeem, exit_pnl_pct,
+        stale_reason, liveness_verdict, metadata_json)
+      VALUES
+        ('hold-api-active', 'tok-hold-api-active', 'cond-hold-api-active', 'pos-hold-api-active',
+         'active', '${nowIso}', NULL, 0, -0.2, 'chain', 'dead', '{"note":"active"}'),
+        ('hold-api-cancelled', 'tok-hold-api-cancelled', 'cond-hold-api-cancelled',
+         'pos-hold-api-cancelled', 'cancelled', '${nowIso}', NULL, 0, -0.1, 'chain', 'dead',
+         '{"note":"cancelled"}');
+    `);
+
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/hold-resolution?status=active",
+        headers: authHeaders(),
+      });
+      const body = json(res);
+
+      expect(body.ok).toBe(true);
+      expect(body.data.rows).toHaveLength(1);
+      expect(body.data.rows[0]).toMatchObject({
+        token_id: "tok-hold-api-active",
+        status: "active",
+        stale_reason: "chain",
+        liveness_verdict: "dead",
+        metadata: { note: "active" },
+      });
+    } finally {
+      conn.db.exec("DELETE FROM hold_resolution_states WHERE token_id LIKE 'tok-hold-api-%'");
     }
   });
 });
