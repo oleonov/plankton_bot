@@ -35,6 +35,7 @@ import {
   computeRepriceThreshold,
   createCommandId,
   decideExitAction,
+  DEFAULT_EXECUTION_POLICY,
   ENTRY_REASONS,
   EXIT_REASONS,
   isLiveBook,
@@ -44,6 +45,7 @@ import {
   shouldBlockRepriceChain,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import { resolveMidpointAnchoredSellPrice } from "../strategy/signal-to-order.js";
 import type { ExitOrderLifetimeDecision } from "../order-lifetime/order-lifetime-ttl.js";
 import {
   buildBookContext,
@@ -383,6 +385,27 @@ export async function cleanStaleEntryOrders(
       trackC?.repriceThreshold ?? null,
     );
     if (repriceDecision.shouldReprice) {
+      const noOpGuard = evaluateTrackLNoopDownpriceGuard(order, repriceMarket);
+      if (noOpGuard.blocked) {
+        deps.metrics?.writeCounter?.(
+          "track_l_noop_guard_total",
+          1,
+          JSON.stringify({ mode: noOpGuard.mode }),
+        );
+        log.info(
+          {
+            token_id: String(order.tokenId),
+            current_price: order.price,
+            predicted_price: noOpGuard.predictedPrice,
+            bid: repriceMarket?.bestBid ?? null,
+            ask: repriceMarket?.bestAsk ?? null,
+            midpoint: noOpGuard.midpoint,
+            tickSize: repriceMarket?.tickSize ?? null,
+          },
+          "Track L no-op downprice reprice blocked",
+        );
+        continue;
+      }
       // CHANGE C — R65 p90 = 13 reprice events per token per 24h cap. Block
       // before publishing the cancel so a runaway loop cannot exceed the
       // historical ceiling. Cap applies across BOTH sources (downpriced and
@@ -924,6 +947,59 @@ function shouldRepriceDownprice(
       pendingSinceMs: nowMs,
     },
     stateChanged: true,
+  };
+}
+
+function evaluateTrackLNoopDownpriceGuard(
+  order: Pick<Order, "tokenId" | "price">,
+  market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "tickSize"> | null,
+): {
+  blocked: boolean;
+  mode: "midpoint-anchored";
+  predictedPrice: number | null;
+  midpoint: number | null;
+} {
+  const mode = "midpoint-anchored" as const;
+  if (!market || !Number.isFinite(market.tickSize) || market.tickSize <= 0) {
+    return { blocked: false, mode, predictedPrice: null, midpoint: null };
+  }
+
+  const predictedPrice = resolveMidpointAnchoredSellPrice(
+    market.bestBid,
+    market.bestAsk,
+    market.tickSize,
+    DEFAULT_EXECUTION_POLICY.exitMidpointAnchorTicks,
+  );
+  const midpoint =
+    market.bestBid != null &&
+    market.bestAsk != null &&
+    Number.isFinite(market.bestBid) &&
+    Number.isFinite(market.bestAsk)
+      ? (market.bestBid + market.bestAsk) / 2
+      : null;
+  if (predictedPrice == null || !Number.isFinite(predictedPrice)) {
+    return { blocked: false, mode, predictedPrice, midpoint };
+  }
+
+  // TODO(2026-06-04): T+3d hypothesis check on 2026-06-07.
+  // Guard prevents no-op cancel+repost at same price.
+  //
+  // Hypothesis to verify:
+  // - If guarded orders eventually fill -> guard correct, passive sit was right strategy
+  // - If guarded orders resolve outcome 0 -> guard too conservative, need conditional
+  //   downprice toward bid (Plankton-style -- see
+  //   plankton_reprice_behavior_investigation_2026-06-04.md, 29.5% of Plankton
+  //   wide-spread positions downprice)
+  // - Decision deferred to data-driven analysis on T+3d
+  //
+  // Track L Stage 1 (this commit): block no-op churn
+  // Track L Stage 2 (potential, 2026-06-07+): conditional downprice logic if data warrants
+  const expectedImprovement = order.price - predictedPrice;
+  return {
+    blocked: expectedImprovement < market.tickSize - PRICE_EPSILON,
+    mode,
+    predictedPrice,
+    midpoint,
   };
 }
 

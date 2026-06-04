@@ -224,6 +224,7 @@ describe("cleanStaleEntryOrders", () => {
       extraOpenOrders?: Order[];
       publicTradeCount24h?: number | null;
       repriceChainEvents24h?: number;
+      tickSize?: number;
       metrics?: { writeCounter: ReturnType<typeof vi.fn> };
     } = {},
   ) {
@@ -235,6 +236,7 @@ describe("cleanStaleEntryOrders", () => {
         marketRepo,
         bus,
         log: silentLog,
+        ...(opts.metrics ? { metrics: opts.metrics } : {}),
         exitRepriceOnDownprice: {
           policy: () => ({
             enabled: true,
@@ -250,7 +252,7 @@ describe("cleanStaleEntryOrders", () => {
               bestAsk: opts.bestAsk ?? null,
               bestAskSize: opts.bestAskSize ?? null,
               askDepthExcludingOurs: opts.askDepthExcludingOurs ?? null,
-              tickSize: 0.01,
+              tickSize: opts.tickSize ?? 0.01,
               publicTradeCount24h: opts.publicTradeCount24h ?? null,
             }),
         },
@@ -849,7 +851,7 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled).toHaveLength(0);
   });
 
-  it("downprice-reprices a SELL when the best bid is five ticks lower", async () => {
+  it("downprice-reprices a SELL when the predicted replacement improves by one tick", async () => {
     const order = makeOrder({
       side: "sell",
       price: 0.29,
@@ -862,7 +864,7 @@ describe("cleanStaleEntryOrders", () => {
       cancelled.push(p);
     });
 
-    const result = await runWithDownprice(order, 0.24);
+    const result = await runWithDownprice(order, 0.23);
     await bus.drain();
 
     expect(result.downpriceRepriceCancelled).toBe(1);
@@ -889,6 +891,46 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.downpriceRepriceCancelled).toBe(1);
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].command.reason).toBe("downpriced_reprice");
+  });
+
+  it("blocks no-op downprice reprice when midpoint-anchored replacement equals current price", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.022,
+      size: 67.621,
+      sizeUsdc: 1.487662,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const metrics = { writeCounter: vi.fn() };
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.015, new Map(), {
+      bestAsk: 0.019,
+      tickSize: 0.001,
+      publicTradeCount24h: 7,
+      repriceChainEvents24h: 0,
+      metrics,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(result.repriceChainCapBlocked).toBe(0);
+    expect(cancelled).toHaveLength(0);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_l_noop_guard_total",
+      1,
+      JSON.stringify({ mode: "midpoint-anchored" }),
+    );
+    expect(metrics.writeCounter).not.toHaveBeenCalledWith(
+      "exit_chain_cap_resolved_total",
+      expect.any(Number),
+      expect.any(String),
+    );
   });
 
   it("uses the dynamic thin-market cap for downpriced reprice gating", async () => {
@@ -1087,7 +1129,7 @@ describe("cleanStaleEntryOrders", () => {
       cancelled.push(p);
     });
 
-    const result = await runWithDownprice(order, 0.23, new Map(), {
+    const result = await runWithDownprice(order, 0.15, new Map(), {
       bestAsk: 0.29,
       bestAskSize: 20.47,
     });
@@ -1144,7 +1186,7 @@ describe("cleanStaleEntryOrders", () => {
       cancelled.push(p);
     });
 
-    const result = await runWithDownprice(order, 0.23, new Map(), {
+    const result = await runWithDownprice(order, 0.17, new Map(), {
       bestAsk: 0.29,
       askDepthExcludingOurs: 5,
     });

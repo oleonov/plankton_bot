@@ -42,6 +42,7 @@ import {
   buildExitDecisionContext,
   buildStaleSellContext,
 } from "../context-builders/track-c-context-builders.js";
+import { resolveMidpointAnchoredSellPrice } from "../../strategy/signal-to-order.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../../../../../..");
 const NOW = Date.parse("2026-06-02T12:00:00.000Z");
@@ -193,9 +194,17 @@ describe("Track C Phase C counter-factual E2E fixtures", () => {
     "C.1.2 Pt2 runtime fixed_3 fixture $asset_id expects reprice=$expected_reprice_decision",
     async (fixture) => {
       const gapTicks = fixture.metrics.ask_movement_ticks_30m;
+      const orderPrice = 0.05 + gapTicks * 0.001;
+      const expectedCancel = expectDownpriceCancelAfterTrackLGuard({
+        expectedRepriceDecision: fixture.expected_reprice_decision,
+        orderPrice,
+        bestBid: 0.05,
+        bestAsk: 0.06,
+        tickSize: 0.001,
+      });
       const env = makeCleanerEnv({
         tokenId: createTokenId(fixture.asset_id),
-        orderPrice: 0.05 + gapTicks * 0.001,
+        orderPrice,
         bestBid: 0.05,
         tickSize: 0.001,
         bookSignals: { bidPersistenceS: 10, bidMovement30m: 0.002 },
@@ -208,7 +217,7 @@ describe("Track C Phase C counter-factual E2E fixtures", () => {
       const result = await env.run();
       await env.bus.drain();
 
-      expect(result.downpriceRepriceCancelled > 0).toBe(fixture.expected_reprice_decision);
+      expect(result.downpriceRepriceCancelled > 0).toBe(expectedCancel);
       expect(env.holdResolutionRepo.insertActive).not.toHaveBeenCalled();
     },
   );
@@ -281,7 +290,13 @@ describe("Track C Phase C backward compatibility", () => {
   const scenarios = Array.from({ length: 20 }, (_, index) => ({
     label: `legacy-gap-${index}`,
     gapTicks: index,
-    expectedCancel: index >= 5,
+    expectedCancel: expectDownpriceCancelAfterTrackLGuard({
+      expectedRepriceDecision: index >= 5,
+      orderPrice: 0.05 + index * 0.001,
+      bestBid: 0.05,
+      bestAsk: 0.06,
+      tickSize: 0.001,
+    }),
   }));
 
   it.each(scenarios)(
@@ -575,6 +590,24 @@ function positionAgeMs(fixture: Point3Fixture): number {
 
 function anchorMs(anchor: number | string): number {
   return typeof anchor === "number" ? anchor * 1000 : Date.parse(anchor);
+}
+
+function expectDownpriceCancelAfterTrackLGuard(input: {
+  readonly expectedRepriceDecision: boolean;
+  readonly orderPrice: number;
+  readonly bestBid: number | null;
+  readonly bestAsk: number | null;
+  readonly tickSize: number;
+}): boolean {
+  if (!input.expectedRepriceDecision) return false;
+  const predictedPrice = resolveMidpointAnchoredSellPrice(
+    input.bestBid,
+    input.bestAsk,
+    input.tickSize,
+    DEFAULT_EXECUTION_POLICY.exitMidpointAnchorTicks,
+  );
+  if (predictedPrice == null) return true;
+  return input.orderPrice - predictedPrice >= input.tickSize - 1e-9;
 }
 
 function makeCleanerEnv(input: {
