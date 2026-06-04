@@ -126,6 +126,53 @@ describe("PortfolioChart", () => {
     expect(storageMock.setItem).toHaveBeenCalledWith("portfolio-interval", "1w");
   });
 
+  it("shows the API window P/L for 1w instead of cumulative all-time P/L", async () => {
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", ({ request }) => {
+        const interval = new URL(request.url).searchParams.get("interval") ?? "1d";
+        if (interval === "1w") {
+          return ok({
+            items: [
+              {
+                equityUsdc: -258.87585,
+                realizedPnlUsdc: 0,
+                positionValueUsdc: 0,
+                openValueUsdc: 0,
+                capturedAt: "2026-05-28T12:00:00.000Z",
+              },
+              {
+                equityUsdc: -257.3589,
+                realizedPnlUsdc: 0,
+                positionValueUsdc: 0,
+                openValueUsdc: 0,
+                capturedAt: "2026-06-04T09:00:00.000Z",
+              },
+            ],
+            baseline: -258.87585,
+            currentEquity: -257.3589,
+            portfolioPnl: 1.51695,
+            interval: "1w",
+            historyStart: "2026-05-28T12:00:00.000Z",
+            coverageComplete: true,
+          });
+        }
+        return ok(mockPortfolioSeries);
+      }),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    renderWithProviders(<PortfolioChart />);
+
+    await screen.findByTestId("pnl-value");
+    fireEvent.click(screen.getByTestId("interval-1w"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$1.52");
+      expect(screen.getByTestId("pnl-value")).not.toHaveTextContent("-$257.36");
+      expect(screen.getByTestId("chart-subtitle")).toHaveTextContent("Past Week");
+    });
+  });
+
   it("mode toggle switches between Portfolio and Realized", async () => {
     server.use(
       http.get("/api/v1/metrics/portfolio-series", () => ok(mockPortfolioSeries)),

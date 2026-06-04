@@ -442,7 +442,7 @@ describe("GET /metrics/portfolio-series", () => {
     }
   });
 
-  it("uses the first external 1d point as baseline when the profile is older than one day", async () => {
+  it("uses the first external 1d point as baseline when the API series covers the window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-07T01:29:00Z"));
 
@@ -479,7 +479,7 @@ describe("GET /metrics/portfolio-series", () => {
       vi.fn().mockResolvedValue({
         ok: true,
         json: async () => [
-          { t: Date.parse("2026-04-06T03:00:00Z") / 1000, p: -30.735004 },
+          { t: Date.parse("2026-04-06T02:00:00Z") / 1000, p: -30.735004 },
           { t: Date.parse("2026-04-06T21:00:00Z") / 1000, p: -47.98143 },
         ],
       } as Response),
@@ -588,14 +588,92 @@ describe("GET /metrics/portfolio-series", () => {
     }
   });
 
-  it("uses zero baseline for external 1M interval even when profile covers the window", async () => {
+  it.each([["1w"], ["1m"]] as const)(
+    "uses the first external point as baseline for %s when the API series covers the window",
+    async (interval) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-04-07T02:00:00Z"));
+
+      conn.db
+        .prepare(
+          `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('live-lite', 'Live-Lite', '2026-02-06T02:00:00.000Z')`,
+        )
+        .run();
+      conn.db
+        .prepare(
+          `CREATE TABLE IF NOT EXISTS runtime_control_state (
+           id INTEGER PRIMARY KEY,
+           current_profile TEXT,
+           desired_profile TEXT
+         )`,
+        )
+        .run();
+      conn.db
+        .prepare(
+          `INSERT OR REPLACE INTO runtime_control_state (id, current_profile, desired_profile)
+         VALUES (1, 'live-lite', 'live-lite')`,
+        )
+        .run();
+      conn.db
+        .prepare(
+          `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc, relayer_json)
+         VALUES ('live-lite', NULL, ?)`,
+        )
+        .run('{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
+
+      // The first API point is within one fidelity bucket of the window start,
+      // so coverage is complete for the rolling window.
+      // Polymarket's UI headline for 1W/1M is a window delta, while ALL remains
+      // raw cumulative all-time P/L.
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => [
+            { t: Date.parse("2026-03-08T00:00:00Z") / 1000, p: -1 },
+            { t: Date.parse("2026-04-07T00:00:00Z") / 1000, p: -48.15537 },
+          ],
+        } as Response),
+      );
+
+      const liveLiteApp = await buildServer({
+        config: testConfig(),
+        controlDb: conn.db,
+        ledgerDb: conn.db,
+        ledgerPool: stubLedgerPool(),
+        defaultInitialBalanceUsdc: 100,
+      });
+
+      try {
+        const res = await liveLiteApp.inject({
+          method: "GET",
+          url: `/api/v1/metrics/portfolio-series?interval=${interval}`,
+          headers: auth(),
+        });
+        const body = res.json();
+
+        expect(body.ok).toBe(true);
+        expect(body.data.baseline).toBeCloseTo(-1, 6);
+        expect(body.data.currentEquity).toBeCloseTo(-48.15537, 6);
+        expect(body.data.portfolioPnl).toBeCloseTo(-47.15537, 6);
+        expect(body.data.coverageComplete).toBe(true);
+        expect(body.data.interval).toBe(interval);
+      } finally {
+        vi.useRealTimers();
+        await liveLiteApp.close();
+      }
+    },
+  );
+
+  it("uses the external first point for coverage even when the Krabs profile is newer than the window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-07T02:00:00Z"));
 
     conn.db
       .prepare(
         `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
-         VALUES ('live-lite', 'Live-Lite', '2026-02-06T02:00:00.000Z')`,
+         VALUES ('live-lite', 'Live-Lite', '2026-04-06T02:00:00.000Z')`,
       )
       .run();
     conn.db
@@ -620,16 +698,13 @@ describe("GET /metrics/portfolio-series", () => {
       )
       .run('{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
 
-    // Profile is 60 days old — coverage WOULD be "complete" for 1M, but we
-    // still want to show raw cumulative all-time P/L for 1W/1M/ALL headline.
-    // Only 1D uses a rolling baseline.
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
         ok: true,
         json: async () => [
-          { t: Date.parse("2026-03-08T00:00:00Z") / 1000, p: -1 },
-          { t: Date.parse("2026-04-07T00:00:00Z") / 1000, p: -48.15537 },
+          { t: Date.parse("2026-03-08T12:00:00Z") / 1000, p: -164.39581 },
+          { t: Date.parse("2026-04-07T00:00:00Z") / 1000, p: -257.3589 },
         ],
       } as Response),
     );
@@ -651,9 +726,10 @@ describe("GET /metrics/portfolio-series", () => {
       const body = res.json();
 
       expect(body.ok).toBe(true);
-      expect(body.data.baseline).toBe(0);
-      expect(body.data.portfolioPnl).toBeCloseTo(-48.15537, 6);
-      expect(body.data.coverageComplete).toBe(false);
+      expect(body.data.baseline).toBeCloseTo(-164.39581, 6);
+      expect(body.data.currentEquity).toBeCloseTo(-257.3589, 6);
+      expect(body.data.portfolioPnl).toBeCloseTo(-92.96309, 6);
+      expect(body.data.coverageComplete).toBe(true);
     } finally {
       vi.useRealTimers();
       await liveLiteApp.close();

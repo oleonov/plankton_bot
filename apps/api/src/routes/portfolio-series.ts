@@ -49,7 +49,6 @@ function resolveProfileStart(
 async function fetchExternalPortfolioSeries(
   funderAddress: string,
   interval: "1d" | "1w" | "1m" | "all",
-  profileStart: string | null,
 ): Promise<{
   items: Array<{
     equityUsdc: number;
@@ -92,14 +91,14 @@ async function fetchExternalPortfolioSeries(
     const fidelityMs = EXTERNAL_FIDELITY_MS[fidelity] ?? 0;
     const windowStartMs =
       intervalWindowMs != null ? Date.now() - intervalWindowMs : Number.NEGATIVE_INFINITY;
-    const profileStartMs = profileStart ? Date.parse(profileStart) : NaN;
-    // Only 1D uses a rolling baseline (delta over the last 24h).
-    // 1W/1M/ALL always show raw cumulative all-time PnL from Polymarket,
-    // matching how the endpoint itself represents `p` as cumulative.
+    const firstPointMs = firstPoint ? Date.parse(firstPoint.capturedAt) : NaN;
+    // Polymarket's `p` is cumulative P/L. Windowed tabs display the delta
+    // over that window when the API series itself covers it; ALL remains cumulative.
     const useRollingBaseline =
-      interval === "1d" &&
-      Number.isFinite(profileStartMs) &&
-      profileStartMs - windowStartMs <= fidelityMs;
+      interval !== "all" &&
+      intervalWindowMs != null &&
+      Number.isFinite(firstPointMs) &&
+      firstPointMs - windowStartMs <= fidelityMs;
     const coverageComplete = interval === "all" || useRollingBaseline;
     const baseline = useRollingBaseline ? (firstPoint?.equityUsdc ?? 0) : 0;
 
@@ -145,9 +144,8 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
 
     if (effectiveProfile === "live-lite") {
       const funderAddress = resolveLiveLiteFunderAddress(controlDb, effectiveProfile);
-      const profileStart = resolveProfileStart(controlDb, effectiveProfile);
       if (funderAddress) {
-        const external = await fetchExternalPortfolioSeries(funderAddress, interval, profileStart);
+        const external = await fetchExternalPortfolioSeries(funderAddress, interval);
         if (external) {
           return ok({
             ...external,
