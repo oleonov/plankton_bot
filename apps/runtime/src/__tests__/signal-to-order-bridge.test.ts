@@ -277,6 +277,47 @@ describe("SignalToOrderBridge", () => {
     );
   });
 
+  it("does not block order publication on execution-policy observation writes", async () => {
+    const bus = new InProcessEventBus();
+    const observations: ExecutionPolicyObservationRepository = {
+      insert: vi.fn(() => {
+        const until = Date.now() + 40;
+        while (Date.now() < until) {
+          // Intentional busy wait: this models the sync SQLite insert we are
+          // keeping off the SignalApproved publisher path.
+        }
+      }),
+    };
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+      observations,
+      profileId: "default" as ProfileId,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: unknown[] = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    const startedAt = Date.now();
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({ bestBid: 0.09, bestAsk: 0.09, midPrice: 0.09 }),
+      approvedAt: NOW,
+    });
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(elapsedMs).toBeLessThan(30);
+    expect(placed).toHaveLength(1);
+    await vi.waitFor(() => expect(observations.insert).toHaveBeenCalledTimes(1));
+  });
+
   it("uses the shared candidate-book cache so approved signals convert against the same book as scanner", async () => {
     const bus = new InProcessEventBus();
     const clobBook = {
@@ -434,6 +475,11 @@ describe("SignalToOrderBridge", () => {
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.05);
     expect(candidateBookCache.waitForFreshEntry as any).toHaveBeenCalledTimes(1);
+    expect(candidateBookCache.waitForFreshEntry as any).toHaveBeenCalledWith(
+      String(TOKEN_ID),
+      25,
+      expect.any(Number),
+    );
     expect(candidateBookCache.getFreshOrRefresh as any).not.toHaveBeenCalled();
   });
 
@@ -2894,7 +2940,7 @@ describe("ADR-015 execution policy observations", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     const row = rows[0]!;
     expect(row.profileId).toBe(String(PROFILE_ID));
     expect(row.signalId).toBe("sig-1");
@@ -2943,7 +2989,7 @@ describe("ADR-015 execution policy observations", () => {
     });
     await bus.drain();
 
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     expect(rows[0]!.sizingRuleId).toBe("B1");
     expect(rows[0]!.notionalBucket).toBe("$5-$10");
   });
@@ -2974,7 +3020,7 @@ describe("ADR-015 execution policy observations", () => {
     });
     await bus.drain();
 
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     expect(rows[0]!.skippedReason).toBe("execution-price-unavailable");
     expect(rows[0]!.sizingRuleId).toBe("FALLBACK");
     expect(rows[0]!.notionalBucket).toBe("$2-$5");
@@ -3017,7 +3063,7 @@ describe("ADR-015 execution policy observations", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(0);
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     const row = rows[0]!;
     expect(row.clientOrderId).toBeNull();
     expect(row.skippedReason).toBe("dead-side-near-end");
@@ -3126,7 +3172,7 @@ describe("ADR-015 execution policy observations", () => {
     });
     await bus.drain();
 
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     expect(rows[0]!.skippedReason).toBe("execution-price-unavailable");
     expect(rows[0]!.boundedOutcome).toBe("not-computed");
     expect(rows[0]!.selectedPrice).toBeNull();
@@ -3167,7 +3213,7 @@ describe("ADR-015 execution policy observations", () => {
     });
     await bus.drain();
 
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     expect(rows[0]!.skippedReason).toBe("spread-above-cap");
     expect(rows[0]!.boundedOutcome).toBe("skip");
     expect(rows[0]!.selectedPrice).toBeNull();
@@ -3207,7 +3253,7 @@ describe("ADR-015 execution policy observations", () => {
     });
     await bus.drain();
 
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     expect(rows[0]!.skippedReason).toBe("one-sided-book");
     expect(rows[0]!.boundedOutcome).toBe("skip");
     expect(rows[0]!.selectedPrice).toBeNull();
@@ -3240,7 +3286,7 @@ describe("ADR-015 execution policy observations", () => {
     });
     await bus.drain();
 
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     expect(rows[0]!.skippedReason).toBe("execution-price-invalid");
     expect(rows[0]!.boundedOutcome).toBe("invalid");
     expect(rows[0]!.selectedPrice).toBe(0.4005);
@@ -3277,7 +3323,7 @@ describe("ADR-015 execution policy observations", () => {
     });
     await bus.drain();
 
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     expect(rows[0]!.skippedReason).toBe("price-above-entry-ceiling");
     // In edge mode the chosen bestBid is recorded as the would-have-been price.
     expect(rows[0]!.selectedPrice).toBe(0.5);
@@ -3315,7 +3361,7 @@ describe("ADR-015 execution policy observations", () => {
     });
     await bus.drain();
 
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     expect(rows[0]!.skippedReason).toBe("sell-price-below-signal-floor");
     expect(rows[0]!.selectedPrice).toBe(0.079);
     expect(rows[0]!.side).toBe("SELL");
@@ -3371,6 +3417,10 @@ function makeCapturingRepo(): {
   };
 }
 
+async function waitForRows(rows: ExecutionPolicyObservation[], length: number): Promise<void> {
+  await vi.waitFor(() => expect(rows).toHaveLength(length));
+}
+
 describe("ADR-015 telemetry flags", () => {
   const PROFILE_ID = "test-profile" as ProfileId;
 
@@ -3404,7 +3454,7 @@ describe("ADR-015 telemetry flags", () => {
     });
     await bus.drain();
 
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     expect(rows[0]!.edgePrice).toBeNull();
     expect(rows[0]!.boundedPrice).toBeNull();
     expect(rows[0]!.boundedOutcome).toBe("not-computed");
@@ -3433,7 +3483,7 @@ describe("ADR-015 telemetry flags", () => {
     });
     await bus.drain();
 
-    expect(rows).toHaveLength(1);
+    await waitForRows(rows, 1);
     // The bounded-midpoint shadow fills edgePrice (= bestBid for BUY).
     expect(rows[0]!.edgePrice).toBe(0.3);
   });

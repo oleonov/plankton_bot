@@ -570,7 +570,7 @@ export class RiskInventoryModule implements RuntimeModule {
     // Revalue all non-closed wallet inventory; dust can become open again.
     const openPositions = findActivePositions(this.deps.positionRepo);
     const nowMs = this.now();
-    let updated = 0;
+    const updates: Array<{ previous: Position; next: Position }> = [];
     for (const pos of openPositions) {
       const markPrice = markPriceByToken.get(String(pos.tokenId));
       if (markPrice === undefined) continue;
@@ -599,11 +599,25 @@ export class RiskInventoryModule implements RuntimeModule {
         status: nextStatus,
         updatedAt: new Date(nowMs).toISOString(),
       };
-      this.deps.positionRepo.save(updatedPosition);
-      await this.publishOpenToDustTransition(pos, updatedPosition);
-      updated++;
+      updates.push({ previous: pos, next: updatedPosition });
     }
 
+    if (updates.length === 0) return;
+
+    const saveBatch = this.deps.db.transaction(
+      (rows: Array<{ previous: Position; next: Position }>) => {
+        for (const row of rows) {
+          this.deps.positionRepo.save(row.next);
+        }
+      },
+    );
+    saveBatch(updates);
+
+    for (const row of updates) {
+      await this.publishOpenToDustTransition(row.previous, row.next);
+    }
+
+    const updated = updates.length;
     if (updated > 0) {
       this.mtmUpdates++;
       this.log.debug({ updated, total: openPositions.length }, "mark-to-market update");

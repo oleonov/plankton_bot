@@ -62,7 +62,7 @@ import {
 import { isExecutableOrderSize, resolveEffectiveMinOrderSize } from "../../min-order-size.js";
 import type { SignalPathTelemetry } from "./signal-path-telemetry.js";
 
-const BRIDGE_WS_BOOK_WAIT_MS = 100;
+const BRIDGE_WS_BOOK_WAIT_MS = 25;
 const MIN_SIZE_EPSILON = 1e-9;
 const MIN_NOTIONAL_EPSILON = 1e-9;
 // Policy epsilon: suppress only truly identical SELL prices. The tiny margin
@@ -144,6 +144,8 @@ export class SignalToOrderBridge {
   private marketCache = new Map<string, NormalizedMarket>();
   private unsubs: Array<() => void> = [];
   private lastTakerInfoLogDay: string | null = null;
+  private readonly observationQueue: ExecutionPolicyObservation[] = [];
+  private observationFlushScheduled = false;
 
   constructor(private readonly deps: SignalToOrderBridgeDeps) {
     this.log = deps.log.child({ component: "signal-to-order" });
@@ -185,6 +187,7 @@ export class SignalToOrderBridge {
   unsubscribe(): void {
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
+    this.flushObservationQueue();
   }
 
   private async handleMarketUpdate(
@@ -846,12 +849,52 @@ export class SignalToOrderBridge {
         pricingDeltaTicks,
         roundLevelHit,
       };
-      observations.insert(row);
+      this.enqueueObservation(row, signal);
     } catch (err) {
       this.log.error(
         { err, signalId: signal.signalId, tokenId: signal.tokenId },
         "failed to write execution policy observation",
       );
+    }
+  }
+
+  private enqueueObservation(
+    row: ExecutionPolicyObservation,
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+  ): void {
+    this.observationQueue.push(row);
+    if (this.observationFlushScheduled) return;
+    this.observationFlushScheduled = true;
+    setImmediate(() => {
+      try {
+        this.flushObservationQueue();
+      } catch (err) {
+        this.log.error(
+          { err, signalId: signal.signalId, tokenId: signal.tokenId },
+          "failed to flush execution policy observation queue",
+        );
+      }
+    }).unref?.();
+  }
+
+  private flushObservationQueue(): void {
+    const { observations } = this.deps;
+    if (!observations) return;
+    this.observationFlushScheduled = false;
+    const rows = this.observationQueue.splice(0, this.observationQueue.length);
+    for (const row of rows) {
+      try {
+        observations.insert(row);
+      } catch (err) {
+        this.log.error(
+          { err, signalId: row.signalId, tokenId: row.tokenId },
+          "failed to write execution policy observation",
+        );
+      }
+    }
+    if (this.observationQueue.length > 0) {
+      this.observationFlushScheduled = true;
+      setImmediate(() => this.flushObservationQueue()).unref?.();
     }
   }
 

@@ -12,6 +12,7 @@ import {
 
 const BUDGET_EPSILON_USDC = 1e-9;
 const CAPACITY_EPSILON_USDC = 1e-9;
+const WALLET_BALANCE_READ_CACHE_TTL_MS = 100;
 export const DEFAULT_WALLET_BUFFER_RATIO = 0.03;
 export const DEFAULT_MIN_WALLET_BUFFER_USDC = 0.25;
 export const WALLET_BUY_CAPACITY_EXHAUSTED_REASON = "wallet_buy_capacity_exhausted";
@@ -24,6 +25,11 @@ const ADD_BUY_SIGNAL_REASONS: ReadonlySet<string> = new Set([
   SignalReason.ScaleIn,
   SignalReason.HeavyScale,
 ]);
+
+const walletBalanceReadCache = new WeakMap<
+  WalletBudgetControlDb,
+  Map<string, { readonly readAtMs: number; readonly value: number | null }>
+>();
 
 export interface WalletBudgetControlDb {
   prepare(sql: string): { get(...args: unknown[]): unknown };
@@ -100,10 +106,22 @@ export function readWalletBalanceUsdc(
   activeProfile: ProfileId | undefined,
 ): number | null {
   if (!controlDb || !activeProfile) return null;
+  const profileId = String(activeProfile);
+  const nowMs = Date.now();
+  const dbCache = walletBalanceReadCache.get(controlDb);
+  const cached = dbCache?.get(profileId);
+  if (cached && nowMs - cached.readAtMs <= WALLET_BALANCE_READ_CACHE_TTL_MS) {
+    return cached.value;
+  }
   const walletRow = controlDb
     .prepare("SELECT wallet_balance_usdc FROM profile_summaries WHERE profile_id = ?")
     .get(activeProfile) as { wallet_balance_usdc: number | null } | undefined;
-  return walletRow?.wallet_balance_usdc ?? null;
+  const value = walletRow?.wallet_balance_usdc ?? null;
+  const nextDbCache =
+    dbCache ?? new Map<string, { readonly readAtMs: number; readonly value: number | null }>();
+  nextDbCache.set(profileId, { readAtMs: nowMs, value });
+  if (!dbCache) walletBalanceReadCache.set(controlDb, nextDbCache);
+  return value;
 }
 
 export function getWalletBufferUsdc(

@@ -1,10 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   evaluateTotalOrdersCapacity,
   evaluateWalletBuyCapacity,
   evaluateWalletSellCapacity,
+  readWalletBalanceUsdc,
 } from "../wallet-buy-budget.js";
-import type { BuyCapacityPolicy, OrderCapacityPolicy, SellCapacityPolicy } from "@krabs/domain";
+import type {
+  BuyCapacityPolicy,
+  OrderCapacityPolicy,
+  ProfileId,
+  SellCapacityPolicy,
+} from "@krabs/domain";
 
 const buyPolicy: BuyCapacityPolicy = {
   enabled: true,
@@ -66,5 +72,19 @@ describe("order capacity policy evaluators", () => {
     });
 
     expect(decision.allowed).toBe(allowed);
+  });
+
+  it("caches wallet balance control-DB reads briefly for a BUY burst", () => {
+    const get = vi.fn().mockReturnValue({ wallet_balance_usdc: 12.34 });
+    const controlDb = {
+      prepare: vi.fn().mockReturnValue({ get }),
+    };
+    const profile = "paper" as ProfileId;
+
+    expect(readWalletBalanceUsdc(controlDb, profile)).toBe(12.34);
+    expect(readWalletBalanceUsdc(controlDb, profile)).toBe(12.34);
+
+    expect(controlDb.prepare).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(1);
   });
 });

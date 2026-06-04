@@ -1511,6 +1511,40 @@ describe("RiskInventoryModule", () => {
       await mod.stop();
     });
 
+    it("batches multiple mark-to-market saves into one transaction per market update", async () => {
+      const tokA = createTokenId("tok-mtm-a");
+      const tokB = createTokenId("tok-mtm-b");
+      positionRepo = createMockPositionRepo([
+        makeMtmPosition({
+          positionId: createPositionId("pos-mtm-a"),
+          tokenId: tokA,
+          currentValueUsdc: 5,
+        }),
+        makeMtmPosition({
+          positionId: createPositionId("pos-mtm-b"),
+          tokenId: tokB,
+          currentValueUsdc: 5,
+        }),
+      ]);
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
+      await mod.start();
+      vi.mocked(mockDb.transaction).mockClear();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          makeMarket({ tokenId: tokA, midPrice: 0.08 }),
+          makeMarket({ tokenId: tokB, midPrice: 0.09 }),
+        ],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+      expect(positionRepo.save).toHaveBeenCalledTimes(2);
+
+      await mod.stop();
+    });
+
     it("uses market-data mark-to-market as a staleness-gated fallback for live wallet marks", async () => {
       positionRepo = createMockPositionRepo(
         makeMtmPosition({
