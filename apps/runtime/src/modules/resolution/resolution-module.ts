@@ -13,6 +13,7 @@ import type {
   EventBus,
   ExchangeGateway,
   RuntimeControl,
+  RuntimeEventMap,
   RuntimeModule,
   FillRepository,
   MarketRepository,
@@ -63,6 +64,7 @@ const REDEEM_BACKOFF_MS_BY_COUNT: readonly number[] = [
 const REDEEM_CIRCUIT_OPEN_COOLDOWN_MS = 60 * 60_000;
 const REDEEM_CIRCUIT_OPEN_THRESHOLD = 3;
 const RESOLUTION_REDEEM_RETRY_COOLDOWN_MS = 60 * 60_000;
+const ASYNC_RESOLUTION_QUEUE_MAX_DEPTH = 32;
 
 interface RedeemFailureEntry {
   readonly failedAt: number;
@@ -70,6 +72,34 @@ interface RedeemFailureEntry {
 }
 
 type AlgoRedeemDeferralReason = "before_end_date" | "gamma_unresolved" | "gamma_lookup_failed";
+
+type AsyncResolutionJob =
+  | {
+      readonly kind: "market-resolved-hint";
+      readonly hint: RuntimeEventMap["MarketResolvedHint"];
+      readonly enqueuedAt: number;
+    }
+  | {
+      readonly kind: "redeem-requested";
+      readonly conditionIds: readonly string[];
+      readonly enqueuedAt: number;
+    };
+
+interface ResolutionRuntimeMetrics {
+  writeEvent: (
+    metricName: string,
+    value?: number,
+    labels?: string | null,
+    capturedAt?: string,
+  ) => void;
+  writeCounter?: (metricName: string, value?: number, labels?: string | null) => void;
+  writeLatest?: (
+    metricName: string,
+    value?: number,
+    labels?: string | null,
+    capturedAt?: string,
+  ) => void;
+}
 
 export interface ResolutionModuleDeps {
   detector: ResolutionDetector;
@@ -99,6 +129,7 @@ export interface ResolutionModuleDeps {
    * write settlements, deactivate markets, cancel orders, or submit redeems.
    */
   runtimeControl?: RuntimeControl;
+  runtimeMetrics?: ResolutionRuntimeMetrics;
 }
 
 export class ResolutionModule implements RuntimeModule {
@@ -110,18 +141,28 @@ export class ResolutionModule implements RuntimeModule {
   private running = false;
   private wsHintConsumed = 0;
   private recoveryPending = true;
+  private readonly asyncResolutionQueue: AsyncResolutionJob[] = [];
+  private asyncResolutionWorkerRunning = false;
 
   constructor(private readonly deps: ResolutionModuleDeps) {}
 
   async start(): Promise<void> {
     this.unsubs.push(
       this.deps.bus.subscribe("MarketResolvedHint", async (hint) => {
-        await this.handleMarketResolvedHint(hint);
+        this.enqueueAsyncResolutionJob({
+          kind: "market-resolved-hint",
+          hint,
+          enqueuedAt: Date.now(),
+        });
       }),
     );
     this.unsubs.push(
       this.deps.bus.subscribe("RedeemRequested", async (payload) => {
-        await this.handleAlgoRedeem(payload.conditionIds);
+        this.enqueueAsyncResolutionJob({
+          kind: "redeem-requested",
+          conditionIds: [...payload.conditionIds],
+          enqueuedAt: Date.now(),
+        });
       }),
     );
     // Run once at startup (non-blocking)
@@ -155,6 +196,112 @@ export class ResolutionModule implements RuntimeModule {
       unsub();
     }
     this.unsubs = [];
+    this.asyncResolutionQueue.length = 0;
+  }
+
+  private enqueueAsyncResolutionJob(job: AsyncResolutionJob): void {
+    if (this.asyncResolutionQueue.length >= ASYNC_RESOLUTION_QUEUE_MAX_DEPTH) {
+      this.deps.log.error(
+        {
+          kind: job.kind,
+          queueDepth: this.asyncResolutionQueue.length,
+          maxDepth: ASYNC_RESOLUTION_QUEUE_MAX_DEPTH,
+        },
+        "resolution async queue overflow — dropping trigger",
+      );
+      this.writeResolutionCounter("resolution_async_queue_overflow_total", 1, job.kind);
+      return;
+    }
+
+    this.asyncResolutionQueue.push(job);
+    this.writeResolutionCounter("resolution_async_enqueued_total", 1, job.kind);
+    this.writeResolutionLatest("resolution_async_queue_depth", this.asyncResolutionQueue.length);
+    this.ensureAsyncResolutionWorker();
+  }
+
+  private ensureAsyncResolutionWorker(): void {
+    if (this.asyncResolutionWorkerRunning) return;
+    this.asyncResolutionWorkerRunning = true;
+    void this.processAsyncResolutionQueue()
+      .catch((err) => {
+        this.deps.log.error({ err }, "resolution async worker crashed");
+        this.writeResolutionCounter("resolution_async_worker_crashed_total");
+      })
+      .finally(() => {
+        this.asyncResolutionWorkerRunning = false;
+        this.writeResolutionLatest(
+          "resolution_async_queue_depth",
+          this.asyncResolutionQueue.length,
+        );
+        if (this.asyncResolutionQueue.length > 0) {
+          this.ensureAsyncResolutionWorker();
+        }
+      });
+  }
+
+  private async processAsyncResolutionQueue(): Promise<void> {
+    while (this.asyncResolutionQueue.length > 0) {
+      const job = this.asyncResolutionQueue.shift()!;
+      const startedAt = Date.now();
+      try {
+        if (job.kind === "market-resolved-hint") {
+          await this.handleMarketResolvedHint(job.hint);
+        } else {
+          await this.handleAlgoRedeem(job.conditionIds);
+        }
+        this.writeResolutionCounter("resolution_async_completed_total", 1, job.kind);
+        this.writeResolutionEvent(
+          "resolution_async_latency_ms",
+          Date.now() - job.enqueuedAt,
+          job.kind,
+        );
+      } catch (err) {
+        this.deps.log.error(
+          { err, kind: job.kind, runtimeMs: Date.now() - startedAt },
+          "resolution async job failed",
+        );
+        this.writeResolutionCounter("resolution_async_failed_total", 1, job.kind);
+      } finally {
+        this.writeResolutionLatest(
+          "resolution_async_queue_depth",
+          this.asyncResolutionQueue.length,
+        );
+      }
+    }
+  }
+
+  private writeResolutionCounter(metricName: string, value = 1, kind?: string): void {
+    const labels = kind ? JSON.stringify({ kind }) : null;
+    try {
+      if (this.deps.runtimeMetrics?.writeCounter) {
+        this.deps.runtimeMetrics.writeCounter(metricName, value, labels);
+      } else {
+        this.deps.runtimeMetrics?.writeEvent(metricName, value, labels);
+      }
+    } catch (err) {
+      this.deps.log.debug({ err, metricName }, "resolution async metric write failed");
+    }
+  }
+
+  private writeResolutionEvent(metricName: string, value: number, kind?: string): void {
+    const labels = kind ? JSON.stringify({ kind }) : null;
+    try {
+      this.deps.runtimeMetrics?.writeEvent(metricName, value, labels);
+    } catch (err) {
+      this.deps.log.debug({ err, metricName }, "resolution async metric write failed");
+    }
+  }
+
+  private writeResolutionLatest(metricName: string, value: number): void {
+    try {
+      if (this.deps.runtimeMetrics?.writeLatest) {
+        this.deps.runtimeMetrics.writeLatest(metricName, value);
+      } else {
+        this.deps.runtimeMetrics?.writeEvent(metricName, value);
+      }
+    } catch (err) {
+      this.deps.log.debug({ err, metricName }, "resolution async metric write failed");
+    }
   }
 
   private async handleAlgoRedeem(conditionIds: readonly string[]): Promise<void> {
@@ -1159,7 +1306,7 @@ export class ResolutionModule implements RuntimeModule {
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
     return {
       ok: true,
-      detail: `interval=${this.deps.checkIntervalMs}ms grace=${this.deps.graceMinutes}min`,
+      detail: `interval=${this.deps.checkIntervalMs}ms grace=${this.deps.graceMinutes}min asyncQueueDepth=${this.asyncResolutionQueue.length}`,
     };
   }
 }

@@ -208,6 +208,24 @@ const log = {
   child: vi.fn().mockReturnThis(),
 };
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function deferred<T = void>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+  readonly reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe("ResolutionModule", () => {
@@ -553,6 +571,43 @@ describe("ResolutionModule", () => {
     expect(mod.getHintMetricsSnapshot()).toEqual({
       resolutionWsHintsConsumed: 1,
     });
+  });
+
+  it("does not block MarketResolvedHint publishers on cancel/verify work", async () => {
+    const releaseCancel = deferred();
+    const resolution = makeDetectedResolution();
+    (detector.detectCondition as any).mockResolvedValue(resolution);
+    (orderRepo.findByTokenId as any).mockReturnValue([
+      { orderId: "ord-1", status: "open", exchangeOrderId: "exch-1" },
+    ]);
+    bus.subscribe("CancelOrderRequested", async () => {
+      await releaseCancel.promise;
+    });
+
+    await mod.start();
+    await delay(0);
+
+    const publish = bus
+      .publish("MarketResolvedHint", {
+        conditionId: CONDITION,
+        marketId: "market-1",
+        slug: "will-x-happen",
+        tokenIds: [TOK_YES],
+        winningTokenId: TOK_YES,
+        timestamp: Date.now(),
+      })
+      .then(() => "published" as const);
+
+    await expect(Promise.race([publish, delay(25).then(() => "blocked" as const)])).resolves.toBe(
+      "published",
+    );
+
+    releaseCancel.resolve();
+    await publish;
+    await delay(25);
+    await mod.stop();
+
+    expect(detector.detectCondition as any).toHaveBeenCalledWith(CONDITION);
   });
 
   it("full cancel chain: MarketResolved triggers CancelOrderRequested with correct command shape", async () => {
@@ -1471,6 +1526,42 @@ describe("ResolutionModule", () => {
       await mod.stop();
 
       expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
+    });
+
+    it("does not block RedeemRequested publishers on on-chain redeem work", async () => {
+      const releaseBalanceCheck = deferred<bigint>();
+      const gateway = createMockGateway();
+      (gateway.getOutcomeTokenBalance as any).mockImplementation(async () => {
+        return releaseBalanceCheck.promise;
+      });
+      mod = createModule({ gateway });
+      (marketRepo.findByConditionId as any).mockReturnValue([
+        {
+          tokenId: TOK_YES,
+          conditionId: CONDITION,
+          slug: "resolved-market",
+          outcome: "YES",
+          endDate: "2026-01-14T00:00:00Z",
+        },
+      ]);
+
+      await mod.start();
+      await delay(0);
+
+      const publish = bus
+        .publish("RedeemRequested", { conditionIds: [CONDITION], timestamp: Date.now() })
+        .then(() => "published" as const);
+
+      await expect(Promise.race([publish, delay(25).then(() => "blocked" as const)])).resolves.toBe(
+        "published",
+      );
+
+      releaseBalanceCheck.resolve(1n);
+      await publish;
+      await delay(25);
+      await mod.stop();
+
+      expect(gateway.getOutcomeTokenBalance as any).toHaveBeenCalledWith(TOK_YES);
     });
 
     it("settles local positions and publishes PositionSettled in all modes", async () => {
