@@ -104,6 +104,7 @@ export interface WalletPositionSentinelDeps {
 export async function runWalletPositionSentinel(
   deps: WalletPositionSentinelDeps,
   nowMs = Date.now(),
+  preloadedRemotePositions?: readonly PolymarketDataPosition[] | null,
 ): Promise<WalletPositionSentinelResult> {
   const empty: WalletPositionSentinelResult = {
     driftCount: 0,
@@ -116,12 +117,16 @@ export async function runWalletPositionSentinel(
     autoClosedMissingRemotePositions: [],
   };
 
-  let remotePositions: PolymarketDataPosition[] | null;
-  try {
-    remotePositions = await deps.reader.read();
-  } catch (err) {
-    deps.log.warn({ err }, "wallet position sentinel read failed");
-    return empty;
+  let remotePositions: readonly PolymarketDataPosition[] | null;
+  if (preloadedRemotePositions !== undefined) {
+    remotePositions = preloadedRemotePositions;
+  } else {
+    try {
+      remotePositions = await deps.reader.read();
+    } catch (err) {
+      deps.log.warn({ err }, "wallet position sentinel read failed");
+      return empty;
+    }
   }
   if (!remotePositions) return empty;
 

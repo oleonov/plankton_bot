@@ -68,6 +68,9 @@ const DRIFT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_DRIFT_INTERVAL_MS = 5 * 60 * 1000;
 const WALLET_SENTINEL_FATAL_AFTER_CONSECUTIVE = 3;
 const WALLET_SENTINEL_BALANCE_EPSILON = 1e-3;
+const DEFAULT_WALLET_POSITION_READ_TIMEOUT_MS = 2_000;
+const WALLET_POSITION_SLOW_WARN_MS = 2_000;
+const WALLET_POSITION_READ_TIMEOUT = Symbol("wallet-position-read-timeout");
 
 function computePercentile(samples: readonly number[], percentile: number): number {
   if (samples.length === 0) return 0;
@@ -209,6 +212,8 @@ export interface ReconciliationModuleDeps {
   walletPositionReader?: {
     read: () => Promise<readonly PolymarketDataPosition[] | null>;
   };
+  /** Soft cap for the pass-scoped wallet data-api read. Defaults to 2s. */
+  walletPositionReadTimeoutMs?: number;
   /**
    * CHANGE C — leg-state repo + reprice-chain policy. When all three are
    * provided, the stale-order-cleaner gates `downpriced_reprice` cancels and
@@ -467,10 +472,12 @@ export class ReconciliationModule implements RuntimeModule {
         );
       }
 
+      const walletPositions = await this.readWalletPositionsForPass(ranAt);
+
       // 4. Wallet↔ledger sentinel
       const stageSentinelStart = Date.now();
       const rawWalletResult = this.deps.walletPositionSentinel
-        ? await runWalletPositionSentinel(this.deps.walletPositionSentinel, ranAt)
+        ? await runWalletPositionSentinel(this.deps.walletPositionSentinel, ranAt, walletPositions)
         : {
             driftCount: 0,
             details: [],
@@ -514,7 +521,7 @@ export class ReconciliationModule implements RuntimeModule {
       // 4b. Push exchange snapshot + wallet snapshot into ExchangeStateStore.
       // Best-effort: a sentinel failure must not abort the reconciliation pass.
       const stagePublishStart = Date.now();
-      await this.publishExchangeState(orderResult, ranAt);
+      await this.publishExchangeState(orderResult, ranAt, walletPositions);
       stageTimingsMs.publishExchangeState = Date.now() - stagePublishStart;
 
       // 5. Build result
@@ -765,39 +772,43 @@ export class ReconciliationModule implements RuntimeModule {
   private async filterConfirmedClosedLiveDrifts(
     drifts: readonly ClosedLivePositionDrift[],
   ): Promise<ClosedLivePositionDrift[]> {
-    const confirmed: ClosedLivePositionDrift[] = [];
-    for (const drift of drifts) {
-      const balance = await this.readWalletSentinelCrossCheckBalance(drift.tokenId);
-      if (balance === null) continue;
-      if (balance > WALLET_SENTINEL_BALANCE_EPSILON) confirmed.push(drift);
-    }
-    return confirmed;
+    const confirmed = await Promise.all(
+      drifts.map(async (drift): Promise<ClosedLivePositionDrift | null> => {
+        const balance = await this.readWalletSentinelCrossCheckBalance(drift.tokenId);
+        if (balance === null) return null;
+        return balance > WALLET_SENTINEL_BALANCE_EPSILON ? drift : null;
+      }),
+    );
+    return confirmed.filter((drift): drift is ClosedLivePositionDrift => drift !== null);
   }
 
   private async filterConfirmedActiveDrifts(
     drifts: readonly ActivePositionSizeDrift[],
   ): Promise<ActivePositionSizeDrift[]> {
-    const confirmed: ActivePositionSizeDrift[] = [];
-    for (const drift of drifts) {
-      const balance = await this.readWalletSentinelCrossCheckBalance(drift.tokenId);
-      if (balance === null) continue;
-      if (Math.abs(drift.localSize - balance) > WALLET_SENTINEL_BALANCE_EPSILON) {
-        confirmed.push({ ...drift, remoteSize: balance });
-      }
-    }
-    return confirmed;
+    const confirmed = await Promise.all(
+      drifts.map(async (drift): Promise<ActivePositionSizeDrift | null> => {
+        const balance = await this.readWalletSentinelCrossCheckBalance(drift.tokenId);
+        if (balance === null) return null;
+        if (Math.abs(drift.localSize - balance) > WALLET_SENTINEL_BALANCE_EPSILON) {
+          return { ...drift, remoteSize: balance };
+        }
+        return null;
+      }),
+    );
+    return confirmed.filter((drift): drift is ActivePositionSizeDrift => drift !== null);
   }
 
   private async filterConfirmedMissingRemoteDrifts(
     drifts: readonly MissingRemotePositionDrift[],
   ): Promise<MissingRemotePositionDrift[]> {
-    const confirmed: MissingRemotePositionDrift[] = [];
-    for (const drift of drifts) {
-      const balance = await this.readWalletSentinelCrossCheckBalance(drift.tokenId);
-      if (balance === null) continue;
-      if (balance <= WALLET_SENTINEL_BALANCE_EPSILON) confirmed.push(drift);
-    }
-    return confirmed;
+    const confirmed = await Promise.all(
+      drifts.map(async (drift): Promise<MissingRemotePositionDrift | null> => {
+        const balance = await this.readWalletSentinelCrossCheckBalance(drift.tokenId);
+        if (balance === null) return null;
+        return balance <= WALLET_SENTINEL_BALANCE_EPSILON ? drift : null;
+      }),
+    );
+    return confirmed.filter((drift): drift is MissingRemotePositionDrift => drift !== null);
   }
 
   private async readWalletSentinelCrossCheckBalance(
@@ -808,6 +819,57 @@ export class ReconciliationModule implements RuntimeModule {
     } catch (err) {
       this.log.warn({ err, tokenId: String(tokenId) }, "wallet sentinel cross-check failed");
       return null;
+    }
+  }
+
+  private async readWalletPositionsForPass(
+    ranAt: number,
+  ): Promise<readonly PolymarketDataPosition[] | null | undefined> {
+    const reader = this.deps.walletPositionSentinel?.reader ?? this.deps.walletPositionReader;
+    if (!reader) return undefined;
+
+    const timeoutMs = Math.max(
+      1,
+      this.deps.walletPositionReadTimeoutMs ?? DEFAULT_WALLET_POSITION_READ_TIMEOUT_MS,
+    );
+    const readStart = Date.now();
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+    try {
+      const timeout = new Promise<typeof WALLET_POSITION_READ_TIMEOUT>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve(WALLET_POSITION_READ_TIMEOUT), timeoutMs);
+        timeoutHandle.unref?.();
+      });
+      const result = await Promise.race([reader.read(), timeout]);
+      if (result === WALLET_POSITION_READ_TIMEOUT) {
+        this.log.warn(
+          { timeoutMs },
+          "walletPositionReader.read() timed out — skipping wallet snapshot for this pass",
+        );
+        this.deps.runtimeMetrics?.writeEvent(
+          "wallet_position_reader_timeout_total",
+          1,
+          JSON.stringify({ source: "reconciliation" }),
+          new Date(ranAt).toISOString(),
+        );
+        return null;
+      }
+
+      const readMs = Date.now() - readStart;
+      if (readMs >= WALLET_POSITION_SLOW_WARN_MS) {
+        this.log.warn(
+          { readMs, positionCount: result?.length ?? null },
+          "walletPositionReader.read() slow",
+        );
+      }
+      return result;
+    } catch (err) {
+      this.log.debug({ err }, "wallet position reader threw — wallet snapshot skipped");
+      return null;
+    } finally {
+      if (timeoutHandle !== null) {
+        clearTimeout(timeoutHandle);
+      }
     }
   }
 
@@ -834,6 +896,7 @@ export class ReconciliationModule implements RuntimeModule {
       "exchangeOpenOrders" | "capturedAtMs"
     >,
     ranAt: number,
+    walletPositions: readonly PolymarketDataPosition[] | null | undefined,
   ): Promise<void> {
     const store = this.deps.exchangeStateStore;
     if (!store) return;
@@ -847,55 +910,44 @@ export class ReconciliationModule implements RuntimeModule {
       }));
     store.updateExchangeSellOrders(sellRows, orderResult.capturedAtMs);
 
-    if (this.deps.walletPositionReader) {
+    if (walletPositions) {
       try {
-        const readStart = Date.now();
-        const positions = await this.deps.walletPositionReader.read();
-        const readMs = Date.now() - readStart;
-        if (readMs >= 2_000) {
-          this.log.warn(
-            { readMs, positionCount: positions?.length ?? null },
-            "walletPositionReader.read() slow",
-          );
-        }
-        if (positions) {
-          const redeemable = positions.filter((p) => p.redeemable).length;
-          this.log.debug(
-            { readMs, positionCount: positions.length, redeemablePositions: redeemable },
-            "walletPositionReader.read() ok — publishing PolymarketWalletUpdated",
-          );
-          store.updateWalletPositionsBatch(
-            positions.map((p) => ({ tokenId: p.tokenId, size: p.size })),
-            ranAt,
-          );
-          await this.deps.bus.publish("PolymarketWalletUpdated", {
-            positions: positions.map((p) => ({
-              tokenId: p.tokenId as import("@krabs/domain").TokenId,
-              conditionId: p.conditionId,
-              size: p.size,
-              redeemable: p.redeemable,
-              slug: p.slug ?? p.marketSlug,
-              outcome: p.outcome,
-            })),
-            timestamp: ranAt,
-          });
-          // Local active tokens absent from the wallet response are the precise
-          // desync case: local DB believes we hold shares the wallet does not
-          // report. Publish an explicit zero so the SELL clamp sees the truth
-          // instead of falling back to local-only.
-          const remoteTokens = new Set(positions.map((p) => String(p.tokenId)));
-          const localRepo = this.deps.walletPositionSentinel?.positionRepo;
-          if (localRepo) {
-            for (const local of localRepo.findAll()) {
-              if (local.status === "closed") continue;
-              if (local.size <= 0) continue;
-              if (remoteTokens.has(String(local.tokenId))) continue;
-              store.updateWalletPosition(local.tokenId, 0, ranAt);
-            }
+        const redeemable = walletPositions.filter((p) => p.redeemable).length;
+        this.log.debug(
+          { positionCount: walletPositions.length, redeemablePositions: redeemable },
+          "wallet snapshot ok — publishing PolymarketWalletUpdated",
+        );
+        store.updateWalletPositionsBatch(
+          walletPositions.map((p) => ({ tokenId: p.tokenId, size: p.size })),
+          ranAt,
+        );
+        await this.deps.bus.publish("PolymarketWalletUpdated", {
+          positions: walletPositions.map((p) => ({
+            tokenId: p.tokenId as import("@krabs/domain").TokenId,
+            conditionId: p.conditionId,
+            size: p.size,
+            redeemable: p.redeemable,
+            slug: p.slug ?? p.marketSlug,
+            outcome: p.outcome,
+          })),
+          timestamp: ranAt,
+        });
+        // Local active tokens absent from the wallet response are the precise
+        // desync case: local DB believes we hold shares the wallet does not
+        // report. Publish an explicit zero so the SELL clamp sees the truth
+        // instead of falling back to local-only.
+        const remoteTokens = new Set(walletPositions.map((p) => String(p.tokenId)));
+        const localRepo = this.deps.walletPositionSentinel?.positionRepo;
+        if (localRepo) {
+          for (const local of localRepo.findAll()) {
+            if (local.status === "closed") continue;
+            if (local.size <= 0) continue;
+            if (remoteTokens.has(String(local.tokenId))) continue;
+            store.updateWalletPosition(local.tokenId, 0, ranAt);
           }
         }
       } catch (err) {
-        this.log.debug({ err }, "wallet position reader threw — exchange store not refreshed");
+        this.log.debug({ err }, "wallet snapshot publish failed — exchange store not refreshed");
       }
     }
 

@@ -189,6 +189,10 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe("ReconciliationModule", () => {
@@ -377,6 +381,80 @@ describe("ReconciliationModule", () => {
       pendingSweepRead.resolve([]);
       await resultPromise;
       await redeemModule.stop();
+    });
+
+    it("shares one wallet data-api read between sentinel and exchange-state publication", async () => {
+      const walletPositions = [
+        {
+          tokenId: String(TOK),
+          conditionId: "cond-1",
+          size: 10,
+          currentValueUsdc: 2,
+          initialValueUsdc: 2,
+          redeemable: false,
+          slug: "market-1",
+          marketSlug: "market-1",
+          outcome: "Yes",
+          raw: {},
+        },
+      ];
+      const reader = { read: vi.fn().mockResolvedValue(walletPositions) };
+      const store = new ExchangeStateStore();
+      const sharedReadMod = new ReconciliationModule({
+        gateway,
+        bus,
+        orderRepo,
+        fillRepo,
+        marketRepo,
+        log: silentLog,
+        reconcileIntervalMs: 60_000,
+        exchangeStateStore: store,
+        walletPositionReader: reader,
+        walletPositionSentinel: {
+          reader: reader as PolymarketPositionReader,
+          positionRepo: {
+            findAll: vi.fn().mockReturnValue([]),
+            save: vi.fn(),
+          } as any,
+          fillRepo,
+          marketRepo,
+          log: silentLog,
+          bus,
+        },
+      });
+
+      await sharedReadMod.runReconciliation();
+
+      expect(reader.read).toHaveBeenCalledTimes(1);
+    });
+
+    it("uses a soft timeout so wallet data-api read cannot block reconciliation", async () => {
+      const pendingRead = deferred<readonly any[] | null>();
+      const timedMod = new ReconciliationModule({
+        gateway,
+        bus,
+        orderRepo,
+        fillRepo,
+        marketRepo,
+        log: silentLog,
+        reconcileIntervalMs: 60_000,
+        exchangeStateStore: new ExchangeStateStore(),
+        walletPositionReader: { read: vi.fn(() => pendingRead.promise) },
+        walletPositionReadTimeoutMs: 5,
+      } as any);
+
+      const run = timedMod.runReconciliation().then(() => "completed" as const);
+
+      await expect(Promise.race([run, delay(50).then(() => "blocked" as const)])).resolves.toBe(
+        "completed",
+      );
+
+      pendingRead.resolve([]);
+      await run;
+      expect(silentLog.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ timeoutMs: 5 }),
+        "walletPositionReader.read() timed out — skipping wallet snapshot for this pass",
+      );
     });
   });
 
@@ -1051,6 +1129,92 @@ describe("ReconciliationModule", () => {
         }),
         "wallet position sentinel detected drift",
       );
+    });
+
+    it("confirms wallet sentinel balance drifts in parallel instead of K serial RPCs", async () => {
+      const tokenIds = [
+        createTokenId("tok-drift-1"),
+        createTokenId("tok-drift-2"),
+        createTokenId("tok-drift-3"),
+      ];
+      const futureEndDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const closedPositions: Position[] = tokenIds.map((tokenId, idx) => ({
+        positionId: createPositionId(`pos-wallet-drift-${idx + 1}`),
+        tokenId,
+        conditionId: createConditionId(`cond-${idx + 1}`),
+        side: "buy",
+        size: 0,
+        avgEntryPrice: 0.1,
+        costBasisUsdc: 0,
+        currentValueUsdc: 0,
+        realizedPnl: -1,
+        status: "closed",
+        entryStyle: "probe",
+        openedAt: new Date(Date.now() - 60_000).toISOString(),
+        closedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }));
+      const walletReader: PolymarketPositionReader = {
+        read: vi.fn().mockResolvedValue(
+          tokenIds.map((tokenId, idx) => ({
+            tokenId: String(tokenId),
+            size: 10 + idx,
+            currentValueUsdc: 2,
+            initialValueUsdc: 1,
+            slug: `wallet-drift-${idx + 1}`,
+            marketSlug: `wallet-drift-${idx + 1}`,
+            outcome: "Yes",
+            raw: {},
+          })),
+        ),
+      };
+      marketRepo.findByTokenId = vi.fn(
+        (tokenId: TokenId) =>
+          ({
+            tokenId,
+            conditionId: `cond-${String(tokenId).slice(-1)}`,
+            slug: `wallet-drift-${String(tokenId).slice(-1)}`,
+            endDate: futureEndDate,
+          }) as any,
+      );
+      const balanceReads = new Map<string, ReturnType<typeof deferred<number>>>();
+      const started: string[] = [];
+      for (const tokenId of tokenIds) {
+        balanceReads.set(String(tokenId), deferred<number>());
+      }
+      gateway.getPositionBalance = vi.fn((tokenId: TokenId) => {
+        started.push(String(tokenId));
+        return balanceReads.get(String(tokenId))!.promise;
+      });
+      const driftMod = new ReconciliationModule({
+        gateway,
+        bus,
+        orderRepo,
+        fillRepo,
+        marketRepo,
+        log: silentLog,
+        reconcileIntervalMs: 60_000,
+        walletPositionSentinel: {
+          reader: walletReader,
+          positionRepo: {
+            findAll: vi.fn().mockReturnValue(closedPositions),
+          } as unknown as import("@krabs/domain").PositionRepository,
+          marketRepo,
+          log: silentLog,
+        },
+      });
+
+      const run = driftMod.runReconciliation();
+      await delay(25);
+
+      expect(started).toEqual(tokenIds.map(String));
+
+      for (const tokenId of tokenIds) {
+        balanceReads.get(String(tokenId))!.resolve(10);
+      }
+      const result = await run;
+
+      expect(result.positionDriftCount).toBe(3);
     });
   });
 
