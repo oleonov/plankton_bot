@@ -942,7 +942,8 @@ describe("GET /status", () => {
 
   it("GET /dashboard/kpi exposes operator KPI fields", async () => {
     const nowIso = new Date().toISOString();
-    const openedIso = new Date(Date.now() - 60 * 60_000).toISOString();
+    const preV072OpenedIso = "2026-06-03T10:54:56.000Z";
+    const postV072OpenedIso = "2026-06-03T12:54:56.000Z";
     const oldOpenedIso = new Date(Date.now() - 13 * 60 * 60_000).toISOString();
     const cleanupKpiFixture = () => {
       conn.db.exec(`
@@ -967,22 +968,22 @@ describe("GET /status", () => {
       INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price,
         cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, closed_at, updated_at)
       VALUES
-        ('pos-kpi-sell-win-1', 'tok-kpi-sell-win-1', 'cond-kpi-sell-win-1', 'buy', 10, 0.10, 1, 3, 2, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
-        ('pos-kpi-sell-win-2', 'tok-kpi-sell-win-2', 'cond-kpi-sell-win-2', 'buy', 10, 0.10, 1, 6, 5, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
-        ('pos-kpi-sell-loss', 'tok-kpi-sell-loss', 'cond-kpi-sell-loss', 'buy', 10, 0.20, 2, 1, -1, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
-        ('pos-kpi-res-win', 'tok-kpi-res-win', 'cond-kpi-res-win', 'buy', 10, 0.40, 4, 10, 6, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
-        ('pos-kpi-res-loss', 'tok-kpi-res-loss', 'cond-kpi-res-loss', 'buy', 10, 0.40, 4, 0, -4, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
-        ('pos-kpi-hybrid', 'tok-kpi-hybrid', 'cond-kpi-hybrid', 'buy', 10, 0.10, 1, 5, 3, 'closed', '${openedIso}', '${nowIso}', '${nowIso}'),
+        ('pos-kpi-sell-win-1', 'tok-kpi-sell-win-1', 'cond-kpi-sell-win-1', 'buy', 10, 0.10, 1, 3, 2, 'closed', '${preV072OpenedIso}', '${nowIso}', '${nowIso}'),
+        ('pos-kpi-sell-win-2', 'tok-kpi-sell-win-2', 'cond-kpi-sell-win-2', 'buy', 10, 0.10, 1, 6, 5, 'closed', '${postV072OpenedIso}', '${nowIso}', '${nowIso}'),
+        ('pos-kpi-sell-loss', 'tok-kpi-sell-loss', 'cond-kpi-sell-loss', 'buy', 10, 0.20, 2, 1, -1, 'closed', '${preV072OpenedIso}', '${nowIso}', '${nowIso}'),
+        ('pos-kpi-res-win', 'tok-kpi-res-win', 'cond-kpi-res-win', 'buy', 10, 0.40, 4, 10, 6, 'closed', '${postV072OpenedIso}', '${nowIso}', '${nowIso}'),
+        ('pos-kpi-res-loss', 'tok-kpi-res-loss', 'cond-kpi-res-loss', 'buy', 10, 0.40, 4, 0, -4, 'closed', '${preV072OpenedIso}', '${nowIso}', '${nowIso}'),
+        ('pos-kpi-hybrid', 'tok-kpi-hybrid', 'cond-kpi-hybrid', 'buy', 10, 0.10, 1, 5, 3, 'closed', '${postV072OpenedIso}', '${nowIso}', '${nowIso}'),
         ('pos-kpi-stuck', 'tok-kpi-stuck', 'cond-kpi-stuck', 'buy', 10, 0.10, 1, 2, 0, 'open', '${oldOpenedIso}', NULL, '${nowIso}'),
         ('pos-kpi-held', 'tok-kpi-held', 'cond-kpi-held', 'buy', 10, 0.10, 1, 1, 0, 'open', '${oldOpenedIso}', NULL, '${nowIso}');
 
       INSERT INTO orders (order_id, client_order_id, token_id, condition_id, side, order_type,
         price, size, size_usdc, status, exchange_order_id, bot_run_id, created_at, updated_at)
       VALUES
-        ('ord-kpi-sell-win-1', 'client-kpi-sell-win-1', 'tok-kpi-sell-win-1', 'cond-kpi-sell-win-1', 'sell', 'GTC', 0.30, 10, 3, 'filled', 'ex-kpi-sell-win-1', 'run-1', '${openedIso}', '${openedIso}'),
-        ('ord-kpi-sell-win-2', 'client-kpi-sell-win-2', 'tok-kpi-sell-win-2', 'cond-kpi-sell-win-2', 'sell', 'GTC', 0.60, 10, 6, 'filled', 'ex-kpi-sell-win-2', 'run-1', '${openedIso}', '${openedIso}'),
-        ('ord-kpi-sell-loss', 'client-kpi-sell-loss', 'tok-kpi-sell-loss', 'cond-kpi-sell-loss', 'sell', 'GTC', 0.10, 10, 1, 'filled', 'ex-kpi-sell-loss', 'run-1', '${openedIso}', '${openedIso}'),
-        ('ord-kpi-hybrid', 'client-kpi-hybrid', 'tok-kpi-hybrid', 'cond-kpi-hybrid', 'sell', 'GTC', 0.30, 5, 1.5, 'filled', 'ex-kpi-hybrid', 'run-1', '${openedIso}', '${openedIso}');
+        ('ord-kpi-sell-win-1', 'client-kpi-sell-win-1', 'tok-kpi-sell-win-1', 'cond-kpi-sell-win-1', 'sell', 'GTC', 0.30, 10, 3, 'filled', 'ex-kpi-sell-win-1', 'run-1', '${preV072OpenedIso}', '${preV072OpenedIso}'),
+        ('ord-kpi-sell-win-2', 'client-kpi-sell-win-2', 'tok-kpi-sell-win-2', 'cond-kpi-sell-win-2', 'sell', 'GTC', 0.60, 10, 6, 'filled', 'ex-kpi-sell-win-2', 'run-1', '${postV072OpenedIso}', '${postV072OpenedIso}'),
+        ('ord-kpi-sell-loss', 'client-kpi-sell-loss', 'tok-kpi-sell-loss', 'cond-kpi-sell-loss', 'sell', 'GTC', 0.10, 10, 1, 'filled', 'ex-kpi-sell-loss', 'run-1', '${preV072OpenedIso}', '${preV072OpenedIso}'),
+        ('ord-kpi-hybrid', 'client-kpi-hybrid', 'tok-kpi-hybrid', 'cond-kpi-hybrid', 'sell', 'GTC', 0.30, 5, 1.5, 'filled', 'ex-kpi-hybrid', 'run-1', '${postV072OpenedIso}', '${postV072OpenedIso}');
 
       INSERT INTO fills (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc,
         liquidity_role, fee, filled_at, reconciled)
@@ -1047,6 +1048,28 @@ describe("GET /status", () => {
       expect(body.data.winrate_7d.value).toBeCloseTo(66.666, 2);
       expect(body.data.winrate_7d.sell_closed_pct).toBeCloseTo(66.666, 2);
       expect(body.data.winrate_7d.resolved_closed_pct).toBeCloseTo(66.666, 2);
+      expect(body.data.winrate_7d.cohort_cutoff).toBe("2026-06-03T11:54:56Z");
+      expect(body.data.winrate_7d.cohorts.pre_v072).toMatchObject({
+        label: "Pre-v072",
+        wins: 1,
+        losses: 2,
+        total: 3,
+      });
+      expect(body.data.winrate_7d.cohorts.pre_v072.value).toBeCloseTo(33.333, 2);
+      expect(body.data.winrate_7d.cohorts.pre_v072.sell_closed_pct).toBeCloseTo(50, 3);
+      expect(body.data.winrate_7d.cohorts.pre_v072.resolved_closed_pct).toBeCloseTo(0, 3);
+      expect(body.data.winrate_7d.cohorts.post_v072).toMatchObject({
+        label: "Post-v072",
+        wins: 3,
+        losses: 0,
+        total: 3,
+      });
+      expect(body.data.winrate_7d.cohorts.post_v072.value).toBeCloseTo(100, 3);
+      expect(body.data.winrate_7d.cohorts.post_v072.sell_closed_pct).toBeCloseTo(100, 3);
+      expect(body.data.winrate_7d.cohorts.post_v072.resolved_closed_pct).toBeCloseTo(100, 3);
+      expect(
+        body.data.winrate_7d.cohorts.pre_v072.total + body.data.winrate_7d.cohorts.post_v072.total,
+      ).toBe(body.data.winrate_7d.total);
       expect(body.data.exit_multiple_7d.median).toBeCloseTo(3, 6);
       expect(body.data.exit_multiple_7d.p90).toBeCloseTo(6, 6);
       expect(body.data.exit_multiple_7d.count).toBe(3);

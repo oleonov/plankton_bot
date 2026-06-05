@@ -205,6 +205,27 @@ export const mockDashboardKpi = {
     total: 1198,
     sell_closed_pct: 97.5,
     resolved_closed_pct: 48.7,
+    cohort_cutoff: "2026-06-03T11:54:56Z",
+    cohorts: {
+      pre_v072: {
+        label: "Pre-v072",
+        value: 82.4,
+        wins: 700,
+        losses: 150,
+        total: 850,
+        sell_closed_pct: 96.8,
+        resolved_closed_pct: 48.1,
+      },
+      post_v072: {
+        label: "Post-v072",
+        value: 89.7,
+        wins: 312,
+        losses: 36,
+        total: 348,
+        sell_closed_pct: 98.9,
+        resolved_closed_pct: 50.2,
+      },
+    },
   },
   exit_multiple_7d: {
     median: 2.8,

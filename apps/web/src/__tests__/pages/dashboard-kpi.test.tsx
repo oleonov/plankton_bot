@@ -146,6 +146,63 @@ describe("dashboard KPI cards", () => {
     expect(screen.getByTestId("kpi-winrate-card")).toHaveAttribute("data-state", "crit");
   });
 
+  it("renders pre-v072 and post-v072 winrate cohorts inside the winrate card", async () => {
+    mockKpi(
+      kpi({
+        winrate_7d: {
+          value: 21.1,
+          wins: 4,
+          losses: 15,
+          total: 19,
+          cohort_cutoff: "2026-06-03T11:54:56Z",
+          cohorts: {
+            pre_v072: {
+              label: "Pre-v072",
+              value: 23.529,
+              wins: 4,
+              losses: 13,
+              total: 17,
+              sell_closed_pct: 20,
+              resolved_closed_pct: 25,
+            },
+            post_v072: {
+              label: "Post-v072",
+              value: 0,
+              wins: 0,
+              losses: 2,
+              total: 2,
+              sell_closed_pct: 0,
+              resolved_closed_pct: 0,
+            },
+          },
+        },
+      }),
+    );
+
+    renderWithProviders(<Overview />);
+
+    const winrateCard = await screen.findByTestId("kpi-winrate-card");
+    const preCohort = within(winrateCard).getByTestId("kpi-winrate-cohort-pre_v072");
+    const postCohort = within(winrateCard).getByTestId("kpi-winrate-cohort-post_v072");
+
+    expect(preCohort).toHaveAttribute("title", "v072 deploy cutoff: 2026-06-03T11:54:56Z");
+    expect(within(preCohort).getByText("Pre-v072")).toBeInTheDocument();
+    expect(within(preCohort).getByTestId("kpi-winrate-cohort-pre_v072-value")).toHaveTextContent(
+      "23.5%",
+    );
+    expect(within(preCohort).getByText("17 closed")).toBeInTheDocument();
+    expect(within(preCohort).getByText("4W · 13L")).toBeInTheDocument();
+    expect(within(preCohort).getByText("SELL 20.0%")).toBeInTheDocument();
+    expect(within(preCohort).getByText("Resolved 25.0%")).toBeInTheDocument();
+    expect(within(preCohort).getByText("Plankton 84.9%")).toBeInTheDocument();
+
+    expect(within(postCohort).getByText("Post-v072")).toBeInTheDocument();
+    expect(within(postCohort).getByTestId("kpi-winrate-cohort-post_v072-value")).toHaveTextContent(
+      "0.0%",
+    );
+    expect(within(postCohort).getByText("2 closed")).toBeInTheDocument();
+  });
+
   it("derives card severity from worst submetric on the fills card", async () => {
     mockKpi(
       kpi({

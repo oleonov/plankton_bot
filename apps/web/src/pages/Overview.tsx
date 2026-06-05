@@ -13,6 +13,7 @@ import type {
   DashboardKpiData,
   DashboardHealthSeverity,
   DashboardHealthCheck,
+  DashboardWinrateCohort,
 } from "../api/types.ts";
 
 function tradingStateColor(state?: string): string {
@@ -283,6 +284,49 @@ function KpiCardShell({
   );
 }
 
+function WinrateCohortBlock({
+  cohort,
+  cutoff,
+  testId,
+}: {
+  cohort: DashboardWinrateCohort;
+  cutoff: string;
+  testId: "pre_v072" | "post_v072";
+}) {
+  const severity = severityFromValue(cohort.value, KPI_THRESHOLDS.winrate);
+  return (
+    <div
+      className="kpi-cohort"
+      data-state={severity}
+      data-testid={`kpi-winrate-cohort-${testId}`}
+      title={`v072 deploy cutoff: ${cutoff}`}
+    >
+      <div className="kpi-cohort__head">
+        <span className="kpi-cohort__label">{cohort.label}</span>
+        <span
+          className={`kpi-cohort__value ${severityClass(severity, "kpi-cohort__value")}`}
+          data-testid={`kpi-winrate-cohort-${testId}-value`}
+        >
+          {formatPercent(cohort.value)}
+        </span>
+      </div>
+      <div className="kpi-cohort__line">
+        <span>{formatThousands(cohort.total)} closed</span>
+        <span>
+          {formatThousands(cohort.wins)}W · {formatThousands(cohort.losses)}L
+        </span>
+      </div>
+      <div className="kpi-cohort__line">
+        <span>SELL {formatPercent(cohort.sell_closed_pct)}</span>
+        <span>Resolved {formatPercent(cohort.resolved_closed_pct)}</span>
+      </div>
+      <div className="kpi-cohort__baseline">
+        Plankton {formatPercent(PLANKTON_BASELINES.winrate)}
+      </div>
+    </div>
+  );
+}
+
 function WinrateCard({ kpi }: { kpi: DashboardKpiData["winrate_7d"] }) {
   const severity = severityFromValue(kpi.value, KPI_THRESHOLDS.winrate);
   const delta = kpi.value - PLANKTON_BASELINES.winrate;
@@ -351,6 +395,19 @@ function WinrateCard({ kpi }: { kpi: DashboardKpiData["winrate_7d"] }) {
         <span className="kpi-kvrow__bl">
           / {Math.round(PLANKTON_BASELINES.winrateResolved)}% bl
         </span>
+      </div>
+      <hr className="kpi-sep" />
+      <div className="kpi-cohort-grid" aria-label="Winrate by v072 deployment cohort">
+        <WinrateCohortBlock
+          cohort={kpi.cohorts.pre_v072}
+          cutoff={kpi.cohort_cutoff}
+          testId="pre_v072"
+        />
+        <WinrateCohortBlock
+          cohort={kpi.cohorts.post_v072}
+          cutoff={kpi.cohort_cutoff}
+          testId="post_v072"
+        />
       </div>
     </KpiCardShell>
   );

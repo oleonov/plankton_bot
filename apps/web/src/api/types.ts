@@ -352,20 +352,32 @@ export interface MetricsData {
 export type DashboardHealthSeverity = "ok" | "warn" | "crit";
 
 export interface DashboardHealthCheck {
-  key: "stuck" | "lag" | "restart" | "mode";
+  key: "stuck" | "lag" | "restart" | "mode" | "hold_resolution";
   severity: DashboardHealthSeverity;
   label: string;
   value: string;
 }
 
+export interface DashboardWinrateBreakdown {
+  value: number;
+  wins: number;
+  losses: number;
+  total: number;
+  sell_closed_pct: number;
+  resolved_closed_pct: number;
+}
+
+export interface DashboardWinrateCohort extends DashboardWinrateBreakdown {
+  label: string;
+}
+
 export interface DashboardKpiData {
-  winrate_7d: {
-    value: number;
-    wins: number;
-    losses: number;
-    total: number;
-    sell_closed_pct: number;
-    resolved_closed_pct: number;
+  winrate_7d: DashboardWinrateBreakdown & {
+    cohort_cutoff: string;
+    cohorts: {
+      pre_v072: DashboardWinrateCohort;
+      post_v072: DashboardWinrateCohort;
+    };
   };
   exit_multiple_7d: {
     median: number;

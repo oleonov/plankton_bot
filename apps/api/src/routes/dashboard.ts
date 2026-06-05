@@ -19,6 +19,15 @@ interface ClosedPositionRow {
   wins: number;
 }
 
+interface WinrateBreakdown {
+  value: number;
+  wins: number;
+  losses: number;
+  total: number;
+  sell_closed_pct: number;
+  resolved_closed_pct: number;
+}
+
 interface ExitMultipleRow {
   multiple: number;
 }
@@ -45,6 +54,7 @@ interface HoldResolutionRow {
 }
 
 const DAY_MS = 24 * 60 * 60_000;
+const V072_DEPLOY_CUTOFF_ISO = "2026-06-03T11:54:56Z";
 const HOLD_RESOLUTION_STATUSES = new Set([
   "active",
   "resolved_zero_loss",
@@ -52,6 +62,24 @@ const HOLD_RESOLUTION_STATUSES = new Set([
   "cancelled",
   "superseded",
 ]);
+const SELL_CLOSED_WINRATE_PREDICATE = `AND EXISTS (
+   SELECT 1
+     FROM fills f
+    WHERE f.token_id = positions.token_id
+      AND LOWER(f.side) = 'sell'
+      AND f.filled_at >= positions.opened_at
+      AND f.filled_at <= COALESCE(positions.closed_at, datetime('now'))
+ )
+ AND NOT EXISTS (
+   SELECT 1
+     FROM settlement_ledger sl
+    WHERE sl.position_id = positions.position_id
+ )`;
+const RESOLVED_CLOSED_WINRATE_PREDICATE = `AND EXISTS (
+   SELECT 1
+     FROM settlement_ledger sl
+    WHERE sl.position_id = positions.position_id
+ )`;
 
 export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, opts) => {
   const { ledgerDb, controlDb, ledgerPool, config } = opts;
@@ -61,33 +89,13 @@ export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, op
     const since7d = new Date(Date.now() - 7 * DAY_MS).toISOString();
     const since24h = new Date(Date.now() - DAY_MS).toISOString();
 
-    const overall = readClosedWinrate(db, since7d, "");
-    const sellClosed = readClosedWinrate(
-      db,
-      since7d,
-      `AND EXISTS (
-         SELECT 1
-           FROM fills f
-          WHERE f.token_id = positions.token_id
-            AND LOWER(f.side) = 'sell'
-            AND f.filled_at >= positions.opened_at
-            AND f.filled_at <= COALESCE(positions.closed_at, datetime('now'))
-       )
-       AND NOT EXISTS (
-         SELECT 1
-           FROM settlement_ledger sl
-          WHERE sl.position_id = positions.position_id
-       )`,
-    );
-    const resolvedClosed = readClosedWinrate(
-      db,
-      since7d,
-      `AND EXISTS (
-         SELECT 1
-           FROM settlement_ledger sl
-          WHERE sl.position_id = positions.position_id
-       )`,
-    );
+    const winrate7d = readWinrateBreakdown(db, since7d);
+    const preV072Winrate = readWinrateBreakdown(db, since7d, "AND positions.opened_at < ?", [
+      V072_DEPLOY_CUTOFF_ISO,
+    ]);
+    const postV072Winrate = readWinrateBreakdown(db, since7d, "AND positions.opened_at >= ?", [
+      V072_DEPLOY_CUTOFF_ISO,
+    ]);
 
     const exitMultiples = readExitMultiples(db, since7d);
     const fills24h = computeExecutionTelemetry(db, { sinceIso: since24h });
@@ -148,12 +156,18 @@ export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, op
 
     return ok({
       winrate_7d: {
-        value: percent(overall.wins, overall.total),
-        wins: overall.wins,
-        losses: Math.max(0, overall.total - overall.wins),
-        total: overall.total,
-        sell_closed_pct: percent(sellClosed.wins, sellClosed.total),
-        resolved_closed_pct: percent(resolvedClosed.wins, resolvedClosed.total),
+        ...winrate7d,
+        cohort_cutoff: V072_DEPLOY_CUTOFF_ISO,
+        cohorts: {
+          pre_v072: {
+            label: "Pre-v072",
+            ...preV072Winrate,
+          },
+          post_v072: {
+            label: "Post-v072",
+            ...postV072Winrate,
+          },
+        },
       },
       exit_multiple_7d: {
         median: percentile(exitMultiples, 0.5),
@@ -282,6 +296,7 @@ function readClosedWinrate(
   db: Database.Database,
   sinceIso: string,
   extraPredicate: string,
+  extraParams: readonly string[] = [],
 ): ClosedPositionRow {
   return db
     .prepare(
@@ -293,7 +308,39 @@ function readClosedWinrate(
           AND closed_at >= ?
           ${extraPredicate}`,
     )
-    .get(sinceIso) as ClosedPositionRow;
+    .get(sinceIso, ...extraParams) as ClosedPositionRow;
+}
+
+function readWinrateBreakdown(
+  db: Database.Database,
+  sinceIso: string,
+  extraPredicate = "",
+  extraParams: readonly string[] = [],
+): WinrateBreakdown {
+  const overall = readClosedWinrate(db, sinceIso, extraPredicate, extraParams);
+  const sellClosed = readClosedWinrate(
+    db,
+    sinceIso,
+    `${extraPredicate}
+     ${SELL_CLOSED_WINRATE_PREDICATE}`,
+    extraParams,
+  );
+  const resolvedClosed = readClosedWinrate(
+    db,
+    sinceIso,
+    `${extraPredicate}
+     ${RESOLVED_CLOSED_WINRATE_PREDICATE}`,
+    extraParams,
+  );
+
+  return {
+    value: percent(overall.wins, overall.total),
+    wins: overall.wins,
+    losses: Math.max(0, overall.total - overall.wins),
+    total: overall.total,
+    sell_closed_pct: percent(sellClosed.wins, sellClosed.total),
+    resolved_closed_pct: percent(resolvedClosed.wins, resolvedClosed.total),
+  };
 }
 
 function readExitMultiples(db: Database.Database, sinceIso: string): number[] {

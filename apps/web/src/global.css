@@ -843,6 +843,71 @@ button {
   color: var(--red);
 }
 
+.kpi-cohort-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.kpi-cohort {
+  min-width: 0;
+  border-left: 1px solid var(--border-soft);
+  padding-left: 10px;
+  font-family: var(--font-mono);
+}
+
+.kpi-cohort:first-child {
+  border-left: 0;
+  padding-left: 0;
+}
+
+.kpi-cohort__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.kpi-cohort__label {
+  color: var(--fg-mute);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.kpi-cohort__value {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.kpi-cohort__value--ok {
+  color: var(--green);
+}
+
+.kpi-cohort__value--warn {
+  color: var(--amber);
+}
+
+.kpi-cohort__value--crit {
+  color: var(--red);
+}
+
+.kpi-cohort__line {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--fg-dim);
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
+.kpi-cohort__baseline {
+  color: var(--fg-dim);
+  font-size: 9.5px;
+  margin-top: 3px;
+}
+
 .kpi-submetric {
   display: flex;
   align-items: baseline;
