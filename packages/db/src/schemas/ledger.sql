@@ -382,6 +382,16 @@ CREATE TABLE IF NOT EXISTS execution_policy_observations (
   round_level_hit          TEXT,
   sizing_rule_id           TEXT,
   notional_bucket          TEXT,
+  sell_shadow_avg_entry    REAL,
+  sell_shadow_avg_entry_source TEXT,
+  sell_shadow_signal_price REAL,
+  sell_shadow_execution_price REAL,
+  sell_shadow_execution_vs_signal_ratio REAL,
+  sell_shadow_execution_vs_avg_entry_ratio REAL,
+  sell_shadow_cap5_violation INTEGER,
+  sell_shadow_cap10_violation INTEGER,
+  sell_shadow_exit_pricing_mode TEXT,
+  sell_shadow_exit_anchor_mode TEXT,
   created_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

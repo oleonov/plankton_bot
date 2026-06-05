@@ -8,12 +8,14 @@ import {
   type NormalizedMarket,
   type Order,
   type OrderRepository,
+  type PositionRepository,
   type ProfileId,
   type Signal,
 } from "@krabs/domain";
 import {
   resolveMidpointAnchoredSellPrice,
   SignalToOrderBridge,
+  type SignalToOrderBridgeDeps,
 } from "../modules/strategy/signal-to-order.js";
 import { CandidateBookCache } from "../modules/strategy/candidate-book-cache.js";
 import { DEFAULT_EXECUTION_POLICY } from "../execution-policy.js";
@@ -2908,6 +2910,48 @@ describe("ADR-015 execution policy observations", () => {
     };
   }
 
+  async function placeSellForShadow(positionRepo?: PositionRepository): Promise<{
+    placed: Array<{ command: { price: number } }>;
+    rows: ExecutionPolicyObservation[];
+  }> {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const { repo, rows } = makeCapturingRepo();
+    const deps: SignalToOrderBridgeDeps = {
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => DEFAULT_EXECUTION_POLICY,
+      observations: repo,
+      profileId: PROFILE_ID,
+    };
+    if (positionRepo) deps.positionRepo = positionRepo;
+    const bridge = new SignalToOrderBridge(deps);
+    bridge.subscribe();
+    const placed: Array<{ command: { price: number } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (p) => {
+      placed.push(p as never);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.05,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 5,
+        reason: "repricing-exit",
+      },
+      market: makeMarket({ bestBid: 0.05, bestAsk: 0.08, midPrice: 0.065, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+    await waitForRows(rows, 1);
+
+    return { placed, rows };
+  }
+
   it("writes one observation per successful placement with pricing diagnostics", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
@@ -3365,6 +3409,196 @@ describe("ADR-015 execution policy observations", () => {
     expect(rows[0]!.skippedReason).toBe("sell-price-below-signal-floor");
     expect(rows[0]!.selectedPrice).toBe(0.079);
     expect(rows[0]!.side).toBe("SELL");
+    expect(rows[0]!.sellShadowExecutionPrice).toBe(0.079);
+    expect(rows[0]!.sellShadowSignalPrice).toBe(0.2);
+  });
+
+  it("records observe-only SELL shadow cap violations without changing placement price", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const { repo, rows } = makeCapturingRepo();
+    const policy: ExecutionPolicy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      exitPricingMode: "midpoint-anchored",
+      exitMidpointAnchorTicks: 5,
+      opportunisticTaker: { ...DEFAULT_EXECUTION_POLICY.opportunisticTaker, enabled: false },
+    };
+    const positionRepo = {
+      findByTokenId: vi.fn(() => ({ avgEntryPrice: 0.01 })),
+    } as unknown as PositionRepository;
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => policy,
+      observations: repo,
+      profileId: PROFILE_ID,
+      positionRepo,
+    });
+    bridge.subscribe();
+    const placed: Array<{ command: { price: number; clientOrderId: string } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (p) => {
+      placed.push(p as never);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.01,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 1,
+        reason: "repricing-exit",
+      },
+      market: makeMarket({ bestBid: 0.01, bestAsk: 0.49, midPrice: 0.25, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.489);
+    await waitForRows(rows, 1);
+    expect(rows[0]!.selectedPrice).toBe(placed[0]!.command.price);
+    expect(rows[0]!.sellShadowAvgEntry).toBe(0.01);
+    expect(rows[0]!.sellShadowAvgEntrySource).toBe("position_repo");
+    expect(rows[0]!.sellShadowSignalPrice).toBe(0.01);
+    expect(rows[0]!.sellShadowExecutionPrice).toBe(0.489);
+    expect(rows[0]!.sellShadowExecutionVsSignalRatio).toBeCloseTo(48.9);
+    expect(rows[0]!.sellShadowExecutionVsAvgEntryRatio).toBeCloseTo(48.9);
+    expect(rows[0]!.sellShadowCap5Violation).toBe(true);
+    expect(rows[0]!.sellShadowCap10Violation).toBe(true);
+    expect(rows[0]!.sellShadowExitPricingMode).toBe("midpoint-anchored");
+    expect(rows[0]!.sellShadowExitAnchorMode).toBe("ask_undercut");
+  });
+
+  it("leaves BUY observation shadow fields null", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const { repo, rows } = makeCapturingRepo();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => makerOnlyPolicy(),
+      observations: repo,
+      profileId: PROFILE_ID,
+    });
+    bridge.subscribe();
+    bus.subscribe("PlaceOrderRequested", async () => {});
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({ bestBid: 0.4, bestAsk: 0.42 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    await waitForRows(rows, 1);
+    expect(rows[0]!.side).toBe("BUY");
+    expect(rows[0]!.sellShadowAvgEntry).toBeNull();
+    expect(rows[0]!.sellShadowAvgEntrySource).toBeNull();
+    expect(rows[0]!.sellShadowSignalPrice).toBeNull();
+    expect(rows[0]!.sellShadowExecutionPrice).toBeNull();
+    expect(rows[0]!.sellShadowExecutionVsSignalRatio).toBeNull();
+    expect(rows[0]!.sellShadowExecutionVsAvgEntryRatio).toBeNull();
+    expect(rows[0]!.sellShadowCap5Violation).toBeNull();
+    expect(rows[0]!.sellShadowCap10Violation).toBeNull();
+    expect(rows[0]!.sellShadowExitPricingMode).toBeNull();
+    expect(rows[0]!.sellShadowExitAnchorMode).toBeNull();
+  });
+
+  it("records missing avg-entry source without throwing or changing SELL placement", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const { repo, rows } = makeCapturingRepo();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => DEFAULT_EXECUTION_POLICY,
+      observations: repo,
+      profileId: PROFILE_ID,
+      positionRepo: {
+        findByTokenId: vi.fn(() => null),
+      } as unknown as PositionRepository,
+    });
+    bridge.subscribe();
+    const placed: Array<{ command: { price: number } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (p) => {
+      placed.push(p as never);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.05,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 5,
+        reason: "repricing-exit",
+      },
+      market: makeMarket({ bestBid: 0.05, bestAsk: 0.08, midPrice: 0.065, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.079);
+    await waitForRows(rows, 1);
+    expect(rows[0]!.sellShadowAvgEntry).toBeNull();
+    expect(rows[0]!.sellShadowAvgEntrySource).toBe("missing_position");
+    expect(rows[0]!.sellShadowExecutionVsAvgEntryRatio).toBeNull();
+    expect(rows[0]!.sellShadowCap5Violation).toBeNull();
+    expect(rows[0]!.sellShadowCap10Violation).toBeNull();
+  });
+
+  it("records missing positionRepo source without throwing or changing SELL placement", async () => {
+    const { placed, rows } = await placeSellForShadow();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.079);
+    expect(rows[0]!.sellShadowAvgEntry).toBeNull();
+    expect(rows[0]!.sellShadowAvgEntrySource).toBe("missing_position_repo");
+    expect(rows[0]!.sellShadowExecutionVsAvgEntryRatio).toBeNull();
+    expect(rows[0]!.sellShadowCap5Violation).toBeNull();
+    expect(rows[0]!.sellShadowCap10Violation).toBeNull();
+  });
+
+  it("records positionRepo error source without throwing or changing SELL placement", async () => {
+    const positionRepo = {
+      findByTokenId: vi.fn(() => {
+        throw new Error("position db unavailable");
+      }),
+    } as unknown as PositionRepository;
+
+    const { placed, rows } = await placeSellForShadow(positionRepo);
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.079);
+    expect(rows[0]!.sellShadowAvgEntry).toBeNull();
+    expect(rows[0]!.sellShadowAvgEntrySource).toBe("error");
+    expect(rows[0]!.sellShadowExecutionVsAvgEntryRatio).toBeNull();
+    expect(rows[0]!.sellShadowCap5Violation).toBeNull();
+    expect(rows[0]!.sellShadowCap10Violation).toBeNull();
+  });
+
+  it("records invalid avg-entry source without throwing or changing SELL placement", async () => {
+    const positionRepo = {
+      findByTokenId: vi.fn(() => ({ avgEntryPrice: 0 })),
+    } as unknown as PositionRepository;
+
+    const { placed, rows } = await placeSellForShadow(positionRepo);
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.079);
+    expect(rows[0]!.sellShadowAvgEntry).toBeNull();
+    expect(rows[0]!.sellShadowAvgEntrySource).toBe("invalid_avg_entry");
+    expect(rows[0]!.sellShadowExecutionVsAvgEntryRatio).toBeNull();
+    expect(rows[0]!.sellShadowCap5Violation).toBeNull();
+    expect(rows[0]!.sellShadowCap10Violation).toBeNull();
   });
 });
 

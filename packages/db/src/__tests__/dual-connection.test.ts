@@ -191,7 +191,12 @@ describe("dual-connection infrastructure", () => {
       .prepare("PRAGMA table_info(execution_policy_observations)")
       .all() as Array<{ name: string }>;
     expect(observationColumns.map((c) => c.name)).toEqual(
-      expect.arrayContaining(["decision_rule_id"]),
+      expect.arrayContaining([
+        "decision_rule_id",
+        "sell_shadow_avg_entry",
+        "sell_shadow_execution_price",
+        "sell_shadow_cap5_violation",
+      ]),
     );
   });
 });

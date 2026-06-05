@@ -17,8 +17,13 @@ export class SqliteExecutionPolicyObservationRepository implements ExecutionPoli
             bounded_price, bounded_outcome, spread_ticks, improvement_ticks,
             dead_side_observed, dead_side_bucket, dead_side_enforce_hit,
             dead_side_x60, dead_side_x120, dead_side_x300, dead_side_x900,
-            time_to_end_ms, skipped_reason, pricing_delta_ticks, round_level_hit)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            time_to_end_ms, skipped_reason, pricing_delta_ticks, round_level_hit,
+            sell_shadow_avg_entry, sell_shadow_avg_entry_source,
+            sell_shadow_signal_price, sell_shadow_execution_price,
+            sell_shadow_execution_vs_signal_ratio, sell_shadow_execution_vs_avg_entry_ratio,
+            sell_shadow_cap5_violation, sell_shadow_cap10_violation,
+            sell_shadow_exit_pricing_mode, sell_shadow_exit_anchor_mode)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         obs.profileId,
@@ -49,6 +54,16 @@ export class SqliteExecutionPolicyObservationRepository implements ExecutionPoli
         obs.skippedReason,
         obs.pricingDeltaTicks,
         obs.roundLevelHit,
+        obs.sellShadowAvgEntry,
+        obs.sellShadowAvgEntrySource,
+        obs.sellShadowSignalPrice,
+        obs.sellShadowExecutionPrice,
+        obs.sellShadowExecutionVsSignalRatio,
+        obs.sellShadowExecutionVsAvgEntryRatio,
+        obs.sellShadowCap5Violation == null ? null : obs.sellShadowCap5Violation ? 1 : 0,
+        obs.sellShadowCap10Violation == null ? null : obs.sellShadowCap10Violation ? 1 : 0,
+        obs.sellShadowExitPricingMode,
+        obs.sellShadowExitAnchorMode,
       );
   }
 }

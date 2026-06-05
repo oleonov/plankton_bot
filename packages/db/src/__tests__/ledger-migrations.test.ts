@@ -403,6 +403,42 @@ describe("migration 058 — market snapshot public trade count", () => {
   });
 });
 
+describe("migration 064 — SELL shadow execution policy observations", () => {
+  it("adds nullable observe-only SELL pricing columns idempotently", () => {
+    db.exec(`
+      CREATE TABLE execution_policy_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    const sql = readMigration("064_sell_shadow_execution_policy_observations.sql");
+    db.exec(applySafeAddColumnStatements(db, sql));
+    expect(() => db.exec(applySafeAddColumnStatements(db, sql))).not.toThrow();
+
+    const columns = db.prepare("PRAGMA table_info(execution_policy_observations)").all() as Array<{
+      name: string;
+      notnull: number;
+    }>;
+    expect(columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "sell_shadow_avg_entry",
+        "sell_shadow_avg_entry_source",
+        "sell_shadow_signal_price",
+        "sell_shadow_execution_price",
+        "sell_shadow_execution_vs_signal_ratio",
+        "sell_shadow_execution_vs_avg_entry_ratio",
+        "sell_shadow_cap5_violation",
+        "sell_shadow_cap10_violation",
+        "sell_shadow_exit_pricing_mode",
+        "sell_shadow_exit_anchor_mode",
+      ]),
+    );
+    for (const column of columns.filter((c) => c.name.startsWith("sell_shadow_"))) {
+      expect(column.notnull).toBe(0);
+    }
+  });
+});
+
 describe("migration 051 — algo token mode state", () => {
   it("creates additive mode-state storage and indexes", () => {
     db.exec(readMigration("051_algo_token_mode_state.sql"));

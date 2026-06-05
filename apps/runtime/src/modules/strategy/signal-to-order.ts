@@ -22,11 +22,13 @@ import type {
   ExecutionPolicyObservationRepository,
   NormalizedMarket,
   OrderRepository,
+  PositionRepository,
   ProfileId,
   RuntimeEventMap,
   PlaceOrderCommand,
   TokenId,
   Order,
+  SellShadowAvgEntrySource,
 } from "@krabs/domain";
 import {
   canPlaceBuyOrderForMarket,
@@ -83,6 +85,7 @@ export interface SignalToOrderBridgeDeps {
   bus: EventBus;
   log: Logger;
   orderRepo?: OrderRepository | undefined;
+  positionRepo?: PositionRepository | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
   candidateBookCache?: CandidateBookCache | undefined;
   /**
@@ -310,6 +313,7 @@ export class SignalToOrderBridge {
 
       const executionTerms = this.resolveExecutionTerms(signal, market, policy);
       const canary = this.buildDeadSideCanary(signal, market, policy);
+      const sellPricingShadow = this.computeSellPricingShadow(signal, executionTerms, policy);
 
       if (executionTerms.kind === "unavailable") {
         this.log.warn(
@@ -336,6 +340,7 @@ export class SignalToOrderBridge {
           policy,
           executionTerms,
           canary,
+          sellPricingShadow,
           skippedReason: "execution-price-unavailable",
         });
         return;
@@ -373,6 +378,7 @@ export class SignalToOrderBridge {
           policy,
           executionTerms,
           canary,
+          sellPricingShadow,
           skippedReason: "execution-price-invalid",
         });
         return;
@@ -403,6 +409,7 @@ export class SignalToOrderBridge {
           policy,
           executionTerms,
           canary,
+          sellPricingShadow,
           skippedReason: reason,
         });
         return;
@@ -436,6 +443,7 @@ export class SignalToOrderBridge {
           policy,
           executionTerms,
           canary,
+          sellPricingShadow,
           skippedReason: "price-above-entry-ceiling",
         });
         return;
@@ -484,6 +492,7 @@ export class SignalToOrderBridge {
           policy,
           executionTerms,
           canary,
+          sellPricingShadow,
           skippedReason: "sell-price-below-signal-floor",
         });
         return;
@@ -513,6 +522,7 @@ export class SignalToOrderBridge {
             policy,
             executionTerms,
             canary,
+            sellPricingShadow,
             skippedReason: "dead-side-near-end",
           });
           return;
@@ -562,6 +572,7 @@ export class SignalToOrderBridge {
           policy,
           executionTerms,
           canary,
+          sellPricingShadow,
           skippedReason: "order-size-below-minimum",
         });
         return;
@@ -624,6 +635,7 @@ export class SignalToOrderBridge {
             policy,
             executionTerms,
             canary,
+            sellPricingShadow,
             skippedReason: "sell-order-acceptable-price-already-open",
           });
           return;
@@ -657,6 +669,7 @@ export class SignalToOrderBridge {
             policy,
             executionTerms,
             canary,
+            sellPricingShadow,
             skippedReason: reason,
           });
           return;
@@ -707,6 +720,7 @@ export class SignalToOrderBridge {
             policy,
             executionTerms,
             canary,
+            sellPricingShadow,
             skippedReason: reason,
           });
           return;
@@ -774,6 +788,7 @@ export class SignalToOrderBridge {
         policy,
         executionTerms,
         canary,
+        sellPricingShadow,
         skippedReason: null,
       });
 
@@ -801,11 +816,21 @@ export class SignalToOrderBridge {
     policy: ExecutionPolicy;
     executionTerms: ExecutionTermsResolution;
     canary: DeadSideCanary | null;
+    sellPricingShadow: SellPricingShadow | null;
     skippedReason: string | null;
   }): void {
     const { observations, profileId } = this.deps;
     if (!observations || !profileId) return;
-    const { signal, clientOrderId, market, policy, executionTerms, canary, skippedReason } = params;
+    const {
+      signal,
+      clientOrderId,
+      market,
+      policy,
+      executionTerms,
+      canary,
+      sellPricingShadow,
+      skippedReason,
+    } = params;
     try {
       const { selectedPrice, diagnostics, boundedOutcome } = summarizeExecutionTerms(
         executionTerms,
@@ -848,6 +873,16 @@ export class SignalToOrderBridge {
         skippedReason,
         pricingDeltaTicks,
         roundLevelHit,
+        sellShadowAvgEntry: sellPricingShadow?.avgEntry ?? null,
+        sellShadowAvgEntrySource: sellPricingShadow?.avgEntrySource ?? null,
+        sellShadowSignalPrice: sellPricingShadow?.signalPrice ?? null,
+        sellShadowExecutionPrice: sellPricingShadow?.executionPrice ?? null,
+        sellShadowExecutionVsSignalRatio: sellPricingShadow?.executionVsSignalRatio ?? null,
+        sellShadowExecutionVsAvgEntryRatio: sellPricingShadow?.executionVsAvgEntryRatio ?? null,
+        sellShadowCap5Violation: sellPricingShadow?.cap5Violation ?? null,
+        sellShadowCap10Violation: sellPricingShadow?.cap10Violation ?? null,
+        sellShadowExitPricingMode: sellPricingShadow?.exitPricingMode ?? null,
+        sellShadowExitAnchorMode: sellPricingShadow?.exitAnchorMode ?? null,
       };
       this.enqueueObservation(row, signal);
     } catch (err) {
@@ -1020,6 +1055,53 @@ export class SignalToOrderBridge {
       diagnostics,
       skippedAt: Date.now(),
     });
+  }
+
+  private computeSellPricingShadow(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    executionTerms: ExecutionTermsResolution,
+    policy: ExecutionPolicy,
+  ): SellPricingShadow | null {
+    if (signal.side !== "sell") return null;
+    const executionPrice = resolveShadowExecutionPrice(executionTerms);
+    const signalPrice = finitePositiveOrNull(signal.suggestedPrice);
+    const avgEntry = this.resolveSellShadowAvgEntry(signal);
+    const executionVsSignalRatio = computePositiveRatio(executionPrice, signalPrice);
+    const executionVsAvgEntryRatio = computePositiveRatio(executionPrice, avgEntry.value);
+
+    return {
+      avgEntry: avgEntry.value,
+      avgEntrySource: avgEntry.source,
+      signalPrice,
+      executionPrice,
+      executionVsSignalRatio,
+      executionVsAvgEntryRatio,
+      cap5Violation: executionVsAvgEntryRatio == null ? null : executionVsAvgEntryRatio > 5,
+      cap10Violation: executionVsAvgEntryRatio == null ? null : executionVsAvgEntryRatio > 10,
+      exitPricingMode: policy.exitPricingMode,
+      exitAnchorMode: resolveShadowExitAnchorMode(executionTerms),
+    };
+  }
+
+  private resolveSellShadowAvgEntry(signal: RuntimeEventMap["SignalApproved"]["signal"]): {
+    value: number | null;
+    source: SellShadowAvgEntrySource;
+  } {
+    const repo = this.deps.positionRepo;
+    if (!repo) return { value: null, source: "missing_position_repo" };
+    try {
+      const position = repo.findByTokenId(signal.tokenId);
+      if (!position) return { value: null, source: "missing_position" };
+      const avgEntry = finitePositiveOrNull(position.avgEntryPrice);
+      if (avgEntry == null) return { value: null, source: "invalid_avg_entry" };
+      return { value: avgEntry, source: "position_repo" };
+    } catch (err) {
+      this.log.warn(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
+        "SELL shadow telemetry could not read avg entry",
+      );
+      return { value: null, source: "error" };
+    }
   }
 
   /**
@@ -1591,8 +1673,42 @@ function resolveOrderSize(
   return signal.suggestedSizeUsdc / executionPrice;
 }
 
+function resolveShadowExecutionPrice(executionTerms: ExecutionTermsResolution): number | null {
+  if (executionTerms.kind === "ok" || executionTerms.kind === "invalid") {
+    return finitePositiveOrNull(executionTerms.price);
+  }
+  return null;
+}
+
+function resolveShadowExitAnchorMode(executionTerms: ExecutionTermsResolution): string | null {
+  if (executionTerms.kind !== "ok") return null;
+  return executionTerms.exitAnchorMode ?? executionTerms.pricedMode;
+}
+
+function finitePositiveOrNull(value: number | null | undefined): number | null {
+  return value != null && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function computePositiveRatio(numerator: number | null, denominator: number | null): number | null {
+  if (numerator == null || denominator == null) return null;
+  return numerator / denominator;
+}
+
 function isOpenOrderStatus(status: Order["status"]): boolean {
   return status === "pending" || status === "open" || status === "partially-filled";
+}
+
+interface SellPricingShadow {
+  avgEntry: number | null;
+  avgEntrySource: SellShadowAvgEntrySource;
+  signalPrice: number | null;
+  executionPrice: number | null;
+  executionVsSignalRatio: number | null;
+  executionVsAvgEntryRatio: number | null;
+  cap5Violation: boolean | null;
+  cap10Violation: boolean | null;
+  exitPricingMode: ExecutionPolicy["exitPricingMode"];
+  exitAnchorMode: string | null;
 }
 
 type ExecutionTermsResolution =

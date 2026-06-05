@@ -1191,6 +1191,7 @@ async function main(): Promise<void> {
     bus,
     log,
     orderRepo: repos.order,
+    positionRepo: repos.position,
     liveLiteGuard,
     candidateBookCache,
     policy: currentExecutionPolicy,

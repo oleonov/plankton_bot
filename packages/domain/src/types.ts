@@ -1068,8 +1068,25 @@ export interface ExecutionPolicyObservation {
   roundLevelHit: PricingRoundLevel | null;
   sizingRuleId: string | null;
   notionalBucket: NotionalBucket | null;
+  sellShadowAvgEntry: number | null;
+  sellShadowAvgEntrySource: SellShadowAvgEntrySource | null;
+  sellShadowSignalPrice: number | null;
+  sellShadowExecutionPrice: number | null;
+  sellShadowExecutionVsSignalRatio: number | null;
+  sellShadowExecutionVsAvgEntryRatio: number | null;
+  sellShadowCap5Violation: boolean | null;
+  sellShadowCap10Violation: boolean | null;
+  sellShadowExitPricingMode: ExitPricingMode | null;
+  sellShadowExitAnchorMode: string | null;
   createdAt?: string;
 }
+
+export type SellShadowAvgEntrySource =
+  | "position_repo"
+  | "missing_position_repo"
+  | "missing_position"
+  | "invalid_avg_entry"
+  | "error";
 
 /**
  * ADR-023 D-F pricing telemetry — round-level taxonomy from R29 evidence

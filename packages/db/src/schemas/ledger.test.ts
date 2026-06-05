@@ -88,6 +88,20 @@ describe("ledger.db schema", () => {
     const observationColumns = db
       .prepare("PRAGMA table_info(execution_policy_observations)")
       .all() as Array<{ name: string }>;
-    expect(observationColumns.map((c) => c.name)).toContain("decision_rule_id");
+    expect(observationColumns.map((c) => c.name)).toEqual(
+      expect.arrayContaining([
+        "decision_rule_id",
+        "sell_shadow_avg_entry",
+        "sell_shadow_avg_entry_source",
+        "sell_shadow_signal_price",
+        "sell_shadow_execution_price",
+        "sell_shadow_execution_vs_signal_ratio",
+        "sell_shadow_execution_vs_avg_entry_ratio",
+        "sell_shadow_cap5_violation",
+        "sell_shadow_cap10_violation",
+        "sell_shadow_exit_pricing_mode",
+        "sell_shadow_exit_anchor_mode",
+      ]),
+    );
   });
 });
