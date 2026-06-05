@@ -203,6 +203,44 @@ describe("dashboard KPI cards", () => {
     expect(within(postCohort).getByText("2 closed")).toBeInTheDocument();
   });
 
+  it("keeps the winrate card usable when cohort data is absent during API/web skew", async () => {
+    const completeKpi = kpi({
+      winrate_7d: {
+        value: 42.1,
+        wins: 8,
+        losses: 11,
+        total: 19,
+        sell_closed_pct: 20,
+        resolved_closed_pct: 25,
+      },
+    });
+    const legacyKpi = {
+      ...completeKpi,
+      winrate_7d: {
+        value: completeKpi.winrate_7d.value,
+        wins: completeKpi.winrate_7d.wins,
+        losses: completeKpi.winrate_7d.losses,
+        total: completeKpi.winrate_7d.total,
+        sell_closed_pct: completeKpi.winrate_7d.sell_closed_pct,
+        resolved_closed_pct: completeKpi.winrate_7d.resolved_closed_pct,
+      },
+    } as unknown as DashboardKpiData;
+    mockKpi(legacyKpi);
+
+    renderWithProviders(<Overview />);
+
+    const winrateCard = await screen.findByTestId("kpi-winrate-card");
+    expect(within(winrateCard).getByText("Winrate")).toBeInTheDocument();
+    expect(within(winrateCard).getByText(/42\.1/)).toBeInTheDocument();
+    expect(within(winrateCard).getByText("19")).toBeInTheDocument();
+    expect(
+      within(winrateCard).queryByTestId("kpi-winrate-cohort-pre_v072"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(winrateCard).queryByTestId("kpi-winrate-cohort-post_v072"),
+    ).not.toBeInTheDocument();
+  });
+
   it("derives card severity from worst submetric on the fills card", async () => {
     mockKpi(
       kpi({

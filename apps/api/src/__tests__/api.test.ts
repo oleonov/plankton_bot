@@ -1107,6 +1107,103 @@ describe("GET /status", () => {
     }
   });
 
+  it("GET /dashboard/kpi returns zeroed math for an empty v072 cohort", async () => {
+    const nowIso = new Date().toISOString();
+    const postV072OpenedIso = "2026-06-03T12:54:56.000Z";
+    const cleanup = () => {
+      conn.db.exec(`
+        DELETE FROM positions WHERE position_id LIKE 'pos-kpi-empty-%';
+      `);
+    };
+
+    try {
+      cleanup();
+      conn.db.exec(`
+        INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, closed_at, updated_at)
+        VALUES
+          ('pos-kpi-empty-post', 'tok-kpi-empty-post', 'cond-kpi-empty-post', 'buy', 10, 0.10,
+           1, 2, 1, 'closed', '${postV072OpenedIso}', '${nowIso}', '${nowIso}');
+      `);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/dashboard/kpi",
+        headers: authHeaders(),
+      });
+      const body = json(res);
+
+      expect(body.ok).toBe(true);
+      expect(body.data.winrate_7d.cohorts.pre_v072).toMatchObject({
+        wins: 0,
+        losses: 0,
+        total: 0,
+        value: 0,
+        sell_closed_pct: 0,
+        resolved_closed_pct: 0,
+      });
+      expect(body.data.winrate_7d.cohorts.post_v072).toMatchObject({
+        wins: 1,
+        losses: 0,
+        total: 1,
+      });
+      expect(
+        body.data.winrate_7d.cohorts.pre_v072.total + body.data.winrate_7d.cohorts.post_v072.total,
+      ).toBe(body.data.winrate_7d.total);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("GET /dashboard/kpi classifies positions opened exactly at v072 cutoff as post-v072", async () => {
+    const nowIso = new Date().toISOString();
+    const cutoffIso = "2026-06-03T11:54:56Z";
+    const justBeforeCutoffIso = "2026-06-03T11:54:55.999Z";
+    const cleanup = () => {
+      conn.db.exec(`
+        DELETE FROM positions WHERE position_id LIKE 'pos-kpi-boundary-%';
+      `);
+    };
+
+    try {
+      cleanup();
+      conn.db.exec(`
+        INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, closed_at, updated_at)
+        VALUES
+          ('pos-kpi-boundary-pre', 'tok-kpi-boundary-pre', 'cond-kpi-boundary-pre', 'buy', 10,
+           0.10, 1, 0, -1, 'closed', '${justBeforeCutoffIso}', '${nowIso}', '${nowIso}'),
+          ('pos-kpi-boundary-post', 'tok-kpi-boundary-post', 'cond-kpi-boundary-post', 'buy', 10,
+           0.10, 1, 2, 1, 'closed', '${cutoffIso}', '${nowIso}', '${nowIso}');
+      `);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/dashboard/kpi",
+        headers: authHeaders(),
+      });
+      const body = json(res);
+
+      expect(body.ok).toBe(true);
+      expect(body.data.winrate_7d.cohort_cutoff).toBe(cutoffIso);
+      expect(body.data.winrate_7d.cohorts.pre_v072).toMatchObject({
+        wins: 0,
+        losses: 1,
+        total: 1,
+      });
+      expect(body.data.winrate_7d.cohorts.post_v072).toMatchObject({
+        wins: 1,
+        losses: 0,
+        total: 1,
+      });
+      expect(
+        body.data.winrate_7d.cohorts.pre_v072.total + body.data.winrate_7d.cohorts.post_v072.total,
+      ).toBe(body.data.winrate_7d.total);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("GET /hold-resolution returns active hold markers with filtering", async () => {
     const nowIso = new Date().toISOString();
     conn.db.exec(`

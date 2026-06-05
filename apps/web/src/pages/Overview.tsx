@@ -335,6 +335,12 @@ function WinrateCard({ kpi }: { kpi: DashboardKpiData["winrate_7d"] }) {
     kpi.resolved_closed_pct,
     SUB_METRIC_THRESHOLDS.resolvedClosed,
   );
+  const preV072Cohort = kpi.cohorts?.pre_v072;
+  const postV072Cohort = kpi.cohorts?.post_v072;
+  const cohortCutoff = kpi.cohort_cutoff;
+  const hasCohortSplit =
+    preV072Cohort != null && postV072Cohort != null && typeof cohortCutoff === "string";
+
   return (
     <KpiCardShell
       title="Winrate"
@@ -397,18 +403,12 @@ function WinrateCard({ kpi }: { kpi: DashboardKpiData["winrate_7d"] }) {
         </span>
       </div>
       <hr className="kpi-sep" />
-      <div className="kpi-cohort-grid" aria-label="Winrate by v072 deployment cohort">
-        <WinrateCohortBlock
-          cohort={kpi.cohorts.pre_v072}
-          cutoff={kpi.cohort_cutoff}
-          testId="pre_v072"
-        />
-        <WinrateCohortBlock
-          cohort={kpi.cohorts.post_v072}
-          cutoff={kpi.cohort_cutoff}
-          testId="post_v072"
-        />
-      </div>
+      {hasCohortSplit ? (
+        <div className="kpi-cohort-grid" aria-label="Winrate by v072 deployment cohort">
+          <WinrateCohortBlock cohort={preV072Cohort} cutoff={cohortCutoff} testId="pre_v072" />
+          <WinrateCohortBlock cohort={postV072Cohort} cutoff={cohortCutoff} testId="post_v072" />
+        </div>
+      ) : null}
     </KpiCardShell>
   );
 }
