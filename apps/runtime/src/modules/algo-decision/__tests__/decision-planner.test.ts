@@ -298,6 +298,180 @@ describe("evaluateDecisionPlan", () => {
     expect(result.suppressions.map((item) => item.reasonCode)).toContain("h5-wide-cohort-guard");
   });
 
+  it("suppresses D9 loss exit when executable exit price is below avg entry", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({
+          buyCount: 1,
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 12,
+        }),
+        position: position({ avgEntryPrice: 0.12, size: 100 }),
+        market: market({
+          bestBid: 0.07,
+          bestAsk: 0.08,
+          midPrice: 0.075,
+          spread: 0.01,
+          publicTradeCount24h: 100,
+        }),
+      }),
+    );
+
+    expect(result.type).toBe("none");
+    expect(result.suppressions).toContainEqual(
+      expect.objectContaining({
+        reasonCode: "d9_loss_exit_below_avg_entry_guard",
+        side: "SELL",
+        decisionRuleId: "D9_LOSS_EXIT",
+        price: 0.07,
+      }),
+    );
+    expect(result.suppressions[0]).toEqual(
+      expect.objectContaining({
+        extra: expect.objectContaining({
+          avgEntryPrice: 0.12,
+          proposedExitPrice: 0.07,
+          exitToAvgEntryRatio: expect.closeTo(0.5833333333, 8),
+          originalD9Reason: "d9-loss-exit-fired",
+          suppressionReason: "d9_loss_exit_below_avg_entry_guard",
+        }),
+      }),
+    );
+  });
+
+  it("allows D9 loss exit when position avg entry is unavailable", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({
+          buyCount: 1,
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 12,
+        }),
+        position: null,
+        market: market({
+          bestBid: 0.07,
+          bestAsk: 0.08,
+          midPrice: 0.075,
+          spread: 0.01,
+          publicTradeCount24h: 100,
+        }),
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D9_LOSS_EXIT");
+    expect(result.signal.suggestedPrice).toBe(0.07);
+  });
+
+  it("allows D9 loss exit when position avg entry is invalid and records fail-open telemetry", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({
+          buyCount: 1,
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 12,
+        }),
+        position: position({ avgEntryPrice: 0, size: 100 }),
+        market: market({
+          bestBid: 0.07,
+          bestAsk: 0.08,
+          midPrice: 0.075,
+          spread: 0.01,
+          publicTradeCount24h: 100,
+        }),
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    expect(result.suppressions).toContainEqual(
+      expect.objectContaining({
+        reasonCode: "d9_loss_exit_avg_entry_unavailable_guard_bypass",
+        side: "SELL",
+        decisionRuleId: "D9_LOSS_EXIT",
+        extra: expect.objectContaining({
+          avgEntrySource: "invalid_avg_entry",
+          guardMode: "fail_open",
+          proposedExitPrice: 0.07,
+          originalD9Reason: "d9-loss-exit-fired",
+        }),
+      }),
+    );
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D9_LOSS_EXIT");
+    expect(result.signal.suggestedPrice).toBe(0.07);
+  });
+
+  it("allows D9 loss exit when executable exit price is at or above position avg entry", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({
+          buyCount: 1,
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 12,
+        }),
+        position: position({ avgEntryPrice: 0.06, size: 100 }),
+        market: market({
+          bestBid: 0.07,
+          bestAsk: 0.08,
+          midPrice: 0.075,
+          spread: 0.01,
+          publicTradeCount24h: 100,
+        }),
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D9_LOSS_EXIT");
+    expect(result.signal.suggestedPrice).toBe(0.07);
+  });
+
+  it("leaves static D-rules able to emit below avg entry", () => {
+    const staticSellRules: AlgoDecisionRule[] = [
+      {
+        id: 10,
+        priority: 1,
+        ruleId: "D7_STATIC_EXIT",
+        stateCondition: "S1",
+        priceOperator: ">=",
+        priceValue: 0.05,
+        timeSinceLastOperator: null,
+        timeSinceLastSeconds: null,
+        buyCountMin: null,
+        buyCountMax: null,
+        holdDurationOperator: null,
+        holdDurationSeconds: null,
+        action: "SELL",
+      },
+      rules[1]!,
+    ];
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        decisionRules: staticSellRules,
+        executionPolicy: {
+          ...DEFAULT_EXECUTION_POLICY,
+          entryMinMarketAgeSeconds: 0,
+          lossExit: { ...DEFAULT_EXECUTION_POLICY.lossExit, enabled: false },
+          r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: false },
+        },
+        legState: leg({ buyCount: 1, cumulativeBuySize: 100, cumulativeBuyNotional: 12 }),
+        position: position({ avgEntryPrice: 0.12, size: 100 }),
+        market: market({ bestBid: 0.07, bestAsk: 0.08, midPrice: 0.075, spread: 0.01 }),
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D7_STATIC_EXIT");
+    expect(result.signal.suggestedPrice).toBe(0.07);
+  });
+
   it("returns a side-effect request instead of mutating dust counters in the planner", () => {
     const result = evaluateDecisionPlan(
       input({

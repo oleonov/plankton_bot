@@ -3125,6 +3125,78 @@ describe("AlgoDecisionModule", () => {
       expect(signalCalls[0]![1].signal.side).toBe("sell");
     });
 
+    it("suppresses D9 loss exit below position avg entry and records guard telemetry", async () => {
+      const tokenId = "token-d9-below-avg-guard";
+      algoRulesRepo = withR37Rules();
+      legStateRepo = createMockLegStateRepo([
+        {
+          ...makeR37LegState(tokenId, { buyCount: 1 }),
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 10,
+        },
+      ]);
+      const position = makeOpenPosition(tokenId, {
+        avgEntryPrice: 0.1,
+        costBasisUsdc: 10,
+        size: 100,
+      });
+      const positionRepo = {
+        findOpen: vi.fn().mockReturnValue([position]),
+        findByTokenId: vi.fn().mockReturnValue(position),
+      };
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        riskEventRepo,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          lossExit: {
+            ...DEFAULT_EXECUTION_POLICY.lossExit,
+            enabled: true,
+            states: ["S1", "S2"],
+            minPublicTradeCount24h: 41,
+          },
+        }),
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [
+          {
+            ...makeMarket(tokenId, "r37", 0.07, `cond-${tokenId}`),
+            bestBid: 0.06,
+            bestAsk: 0.08,
+            publicTradeCount24h: 100,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+      await mod.stop();
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls).toHaveLength(0);
+      expect(riskEventRepo.insert).toHaveBeenCalledWith({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          tokenId,
+          reasonCode: "d9_loss_exit_below_avg_entry_guard",
+          decisionRuleId: "D9_LOSS_EXIT",
+          side: "SELL",
+          price: 0.06,
+          avgEntryPrice: 0.1,
+          proposedExitPrice: 0.06,
+          exitToAvgEntryRatio: expect.closeTo(0.6, 8),
+          originalD9Reason: "d9-loss-exit-fired",
+          suppressionReason: "d9_loss_exit_below_avg_entry_guard",
+          d9ProfitRatio: expect.closeTo(0.6, 8),
+          d9AvgBuyPrice: 0.1,
+          d9PublicTradeCount24h: 100,
+        }),
+      });
+    });
+
     it("D9 loss exit falls through to D6 HOLD when public market is illiquid", async () => {
       const tokenId = "token-d9-illiquid-loss";
       algoRulesRepo = withR37Rules();

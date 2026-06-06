@@ -97,6 +97,7 @@ export type SuppressionPlan = {
   timestamp: string;
   tradeCount?: number | null;
   tradeCountSource?: TradeCountSource | null;
+  extra?: Record<string, unknown>;
 };
 
 export type DecisionPlanSideEffect =
@@ -189,6 +190,9 @@ const D6_SUPPRESSED_REASON = "d6-suppressed";
 const DECISION_RULE_HOLD_REASON = "decision-rule-hold";
 const DUST_ABANDONED_REASON = "dust-abandoned";
 const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
+export const D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON = "d9_loss_exit_below_avg_entry_guard";
+export const D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON =
+  "d9_loss_exit_avg_entry_unavailable_guard_bypass";
 const POST_BUY_FILL_COOLDOWN_REASON = "post-buy-fill-cooldown";
 const SELL_SPREAD_MAX_RATIO = 0.5;
 
@@ -481,6 +485,59 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
       });
     }
     if (d9.fire) {
+      const positionAvgEntryPrice = finitePositiveOrNull(input.position?.avgEntryPrice ?? null);
+      if (sellPrice.price != null && positionAvgEntryPrice == null) {
+        suppressions.push({
+          tokenId: market.tokenId,
+          conditionId: market.conditionId,
+          reasonCode: D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON,
+          side: "SELL",
+          decisionRuleId: "D9_LOSS_EXIT",
+          state,
+          price: sellPrice.price,
+          buyCount,
+          timeSinceLastSeconds,
+          emissionFacts: d9EmissionFacts,
+          timestamp: nowIso,
+          extra: {
+            proposedExitPrice: sellPrice.price,
+            originalD9Reason: d9.reason,
+            suppressionReason: D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON,
+            guardMode: "fail_open",
+            avgEntrySource: input.position == null ? "missing_position" : "invalid_avg_entry",
+          },
+        });
+      }
+      if (sellPrice.price != null && positionAvgEntryPrice != null) {
+        const exitToAvgEntryRatio = sellPrice.price / positionAvgEntryPrice;
+        if (sellPrice.price < positionAvgEntryPrice) {
+          suppressions.push({
+            tokenId: market.tokenId,
+            conditionId: market.conditionId,
+            reasonCode: D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON,
+            side: "SELL",
+            decisionRuleId: "D9_LOSS_EXIT",
+            state,
+            price: sellPrice.price,
+            buyCount,
+            timeSinceLastSeconds,
+            emissionFacts: d9EmissionFacts,
+            timestamp: nowIso,
+            extra: {
+              avgEntryPrice: positionAvgEntryPrice,
+              proposedExitPrice: sellPrice.price,
+              exitToAvgEntryRatio,
+              originalD9Reason: d9.reason,
+              suppressionReason: D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON,
+              d9ProfitRatio: d9.profitRatio,
+              d9AvgBuyPrice: d9.avgBuyPrice,
+              d9PublicTradeCount24h: d9.publicTradeCount24h,
+              d9DaysToResolve: d9.daysToResolve,
+            },
+          });
+          return none(metrics, suppressions, sideEffects);
+        }
+      }
       return buildSignalOrSuppression({
         input,
         market,
@@ -1000,6 +1057,10 @@ function shouldSuppressSellResidualBelowMinSize(
     Number.isFinite(positionSize) &&
     positionSize + 1e-9 < minOrderSize
   );
+}
+
+function finitePositiveOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function computeBuyOrderSizeForFilter(

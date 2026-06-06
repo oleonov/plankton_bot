@@ -80,6 +80,10 @@ import { SlidingLatencyWindow, type LatencySnapshot } from "./decision-metrics.j
 import { DecisionPersistenceBuffer } from "./async-decision-persistence.js";
 import { DecisionWorkerPool } from "./decision-worker-pool.js";
 import { ContinuationTradeCountCache } from "./continuation-trade-count-cache.js";
+import {
+  D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON,
+  D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON,
+} from "./decision-planner.js";
 import type {
   DecisionMetricsDelta,
   DecisionPlanningInput,
@@ -376,6 +380,11 @@ type SuppressionFacts = {
    *   so exchange balance settlement can catch up before SELL placement.
    * - `h5-wide-cohort-guard` — ADR-031 D9 guard for S2 mid-entry
    *   long-horizon loss positions.
+   * - `d9_loss_exit_below_avg_entry_guard` — Track D9-forced-low-exit
+   *   guard: D9 fired, but the executable SELL was below the current
+   *   position avg-entry.
+   * - `d9_loss_exit_avg_entry_unavailable_guard_bypass` — same guard could
+   *   not read a valid position avg-entry, so D9 stayed fail-open.
    * - `r23-no-history` / `r23-no-dip` — ADR-033 R23 entry dip trigger did
    *   not have a 24h max-midpoint reference or the current price did not meet
    *   the calibrated dip ratio.
@@ -397,6 +406,7 @@ type SuppressionFacts = {
   timestamp: string;
   tradeCount?: number | null;
   tradeCountSource?: TradeCountSource | null;
+  extra?: Record<string, unknown>;
 };
 
 interface ControlDbReader {
@@ -618,6 +628,8 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   // SELL-capable legs from writing several identical rows during a 5s window.
   POST_BUY_FILL_COOLDOWN_REASON,
   H5_WIDE_COHORT_GUARD_REASON,
+  D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON,
+  D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON,
   R23_NO_HISTORY_REASON,
   R23_NO_DIP_REASON,
 ]);
@@ -2649,6 +2661,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         tradeCount: facts.tradeCount ?? null,
         tradeCountSource: facts.tradeCountSource ?? null,
         continuationMode: this.continuationMode,
+        ...(facts.extra ?? {}),
         signalTimestamp: facts.timestamp,
       },
     });
