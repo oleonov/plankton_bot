@@ -41,6 +41,9 @@ function makeSignal(signalId = "sig-1"): DecisionSignalLog {
     exitPnlBucket: null,
     soldBoughtRatio: null,
     soldBoughtRatioBucket: null,
+    entryFreshEdgeKind: "first_entry",
+    entryFreshEdgeShadowClass: "RANGE_DATA_UNAVAILABLE",
+    entryFreshEdgePayloadJson: JSON.stringify({ shadowClassification: "RANGE_DATA_UNAVAILABLE" }),
   };
 }
 
@@ -106,13 +109,27 @@ describe("DecisionPersistenceBuffer", () => {
     const verifyConn = bootstrapLedgerDb(dbPath);
     try {
       const signalRow = verifyConn.db
-        .prepare("SELECT decision_rule_id FROM decision_signal_log WHERE signal_id = ?")
-        .get("sig-worker") as { decision_rule_id: string } | undefined;
+        .prepare(
+          "SELECT decision_rule_id, entry_fresh_edge_kind, entry_fresh_edge_shadow_class, entry_fresh_edge_payload_json FROM decision_signal_log WHERE signal_id = ?",
+        )
+        .get("sig-worker") as
+        | {
+            decision_rule_id: string;
+            entry_fresh_edge_kind: string | null;
+            entry_fresh_edge_shadow_class: string | null;
+            entry_fresh_edge_payload_json: string | null;
+          }
+        | undefined;
       const riskRow = verifyConn.db
         .prepare("SELECT payload FROM risk_events WHERE event_type = ?")
         .get("signal_emitted") as { payload: string } | undefined;
 
       expect(signalRow?.decision_rule_id).toBe("R23_DIP_TRIGGER");
+      expect(signalRow?.entry_fresh_edge_kind).toBe("first_entry");
+      expect(signalRow?.entry_fresh_edge_shadow_class).toBe("RANGE_DATA_UNAVAILABLE");
+      expect(JSON.parse(signalRow?.entry_fresh_edge_payload_json ?? "{}")).toMatchObject({
+        shadowClassification: "RANGE_DATA_UNAVAILABLE",
+      });
       expect(JSON.parse(riskRow?.payload ?? "{}")).toMatchObject({ tokenId: "tok-worker" });
       expect(buffer.getStats().workerFailedWrites).toBe(0);
       expect(buffer.getStats().workerPersistedWrites).toBe(2);

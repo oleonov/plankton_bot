@@ -145,6 +145,9 @@ CREATE TABLE IF NOT EXISTS decision_signal_log (
   exit_pnl_bucket          TEXT,
   sold_bought_ratio        REAL,
   sold_bought_ratio_bucket TEXT,
+  entry_fresh_edge_kind    TEXT,
+  entry_fresh_edge_shadow_class TEXT,
+  entry_fresh_edge_payload_json TEXT,
   created_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

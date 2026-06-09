@@ -192,6 +192,15 @@ export interface DecisionSignalLog {
   exitPnlBucket: ExitPnlBucket | null;
   soldBoughtRatio: number | null;
   soldBoughtRatioBucket: SoldBoughtRatioBucket | null;
+  entryFreshEdgeKind?: "first_entry" | "ladder_or_scale_in" | null;
+  entryFreshEdgeShadowClass?:
+    | "FRESH_EDGE_UNKNOWN"
+    | "PLAUSIBLE_DIP"
+    | "AFTER_PUMP_EXPENSIVE"
+    | "FALLING_WITHOUT_RECOVERY"
+    | "RANGE_DATA_UNAVAILABLE"
+    | null;
+  entryFreshEdgePayloadJson?: string | null;
 }
 
 /**

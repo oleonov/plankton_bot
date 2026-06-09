@@ -12,8 +12,9 @@ export class SqliteDecisionSignalLogRepository implements DecisionSignalLogRepos
         is_add, add_age_ms, add_age_bucket, add_price_change_pct, add_price_change_bucket,
         nth_buy_at_emit,
         is_exit, is_first_sell, holding_time_ms, holding_time_bucket,
-        exit_pnl_pct, exit_pnl_bucket, sold_bought_ratio, sold_bought_ratio_bucket)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        exit_pnl_pct, exit_pnl_bucket, sold_bought_ratio, sold_bought_ratio_bucket,
+        entry_fresh_edge_kind, entry_fresh_edge_shadow_class, entry_fresh_edge_payload_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
@@ -45,6 +46,9 @@ export class SqliteDecisionSignalLogRepository implements DecisionSignalLogRepos
       signal.exitPnlBucket,
       signal.soldBoughtRatio,
       signal.soldBoughtRatioBucket,
+      signal.entryFreshEdgeKind ?? null,
+      signal.entryFreshEdgeShadowClass ?? null,
+      signal.entryFreshEdgePayloadJson ?? null,
     );
   }
 }

@@ -4,8 +4,23 @@ import type { NormalizedMarket, TokenId } from "@krabs/domain";
 export interface PriceHistoryProvider {
   findReferencePrice(tokenId: TokenId, targetMs: number, maxAgeMs: number): number | null;
   maxMidpointInWindow?(tokenId: TokenId, windowMs: number, nowMs?: number): number | null;
+  midpointStatsInWindow?(
+    tokenId: TokenId,
+    windowMs: number,
+    nowMs?: number,
+  ): MidpointWindowStats | null;
   observeMarket?(market: NormalizedMarket, observedAtMs?: number): void;
   getWindowMaxCacheMetrics?(): WindowMaxCacheMetrics;
+}
+
+export interface MidpointWindowStats {
+  minMidpoint: number;
+  maxMidpoint: number;
+  minAtMs: number;
+  maxAtMs: number;
+  firstMidpoint: number;
+  lastMidpoint: number;
+  sampleCount: number;
 }
 
 export interface WindowMaxCacheMetrics {
@@ -32,6 +47,7 @@ export interface MarketSnapshotPriceHistoryProviderOptions {
 export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider {
   private readonly findReference;
   private readonly findWindowMax;
+  private readonly findWindowRows;
   private readonly syncMissLookup: boolean;
   private readonly memorySampleMaxAgeMs: number;
   private readonly memorySampleMaxPerToken: number;
@@ -72,6 +88,21 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
        WHERE token_id = ?
          AND captured_at >= ?
          AND captured_at <= ?`,
+    );
+    this.findWindowRows = db.prepare(
+      `SELECT captured_at,
+              CASE
+                WHEN best_bid > 0 AND best_ask > 0 THEN (best_bid + best_ask) / 2.0
+                WHEN last_price > 0 THEN last_price
+                WHEN best_bid > 0 THEN best_bid
+                WHEN best_ask > 0 THEN best_ask
+                ELSE NULL
+              END AS midpoint
+       FROM market_snapshots
+       WHERE token_id = ?
+         AND captured_at >= ?
+         AND captured_at <= ?
+       ORDER BY captured_at ASC`,
     );
   }
 
@@ -114,6 +145,33 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
     const max = finitePositive(row?.max_price ?? null);
     this.rememberWindowMax(cacheKey, nowMs, max);
     return max;
+  }
+
+  midpointStatsInWindow(
+    tokenId: TokenId,
+    windowMs: number,
+    nowMs = Date.now(),
+  ): MidpointWindowStats | null {
+    if (!Number.isFinite(windowMs) || windowMs <= 0) return null;
+    const memoryStats = this.midpointStatsInMemory(tokenId, windowMs, nowMs);
+    if (memoryStats && (!this.syncMissLookup || memoryStats.sampleCount >= 2)) return memoryStats;
+    if (!this.syncMissLookup) return memoryStats;
+
+    const sinceIso = new Date(nowMs - windowMs).toISOString();
+    const untilIso = new Date(nowMs).toISOString();
+    const rows = this.findWindowRows.all(tokenId, sinceIso, untilIso) as Array<{
+      captured_at: string;
+      midpoint: number | null;
+    }>;
+    const stats = midpointStatsFromSamples(
+      rows
+        .map((row) => ({ ts: Date.parse(row.captured_at), price: finitePositive(row.midpoint) }))
+        .filter(
+          (row): row is { ts: number; price: number } =>
+            row.price != null && Number.isFinite(row.ts),
+        ),
+    );
+    return stats ?? memoryStats;
   }
 
   observeMarket(market: NormalizedMarket, observedAtMs = market.snapshotTs): void {
@@ -186,6 +244,19 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
     return max;
   }
 
+  private midpointStatsInMemory(
+    tokenId: TokenId,
+    windowMs: number,
+    nowMs: number,
+  ): MidpointWindowStats | null {
+    const samples = this.memorySamplesByToken.get(String(tokenId));
+    if (!samples) return null;
+    const sinceMs = nowMs - windowMs;
+    return midpointStatsFromSamples(
+      samples.filter((sample) => sample.ts >= sinceMs && sample.ts <= nowMs),
+    );
+  }
+
   private pruneSamples(samples: Array<{ ts: number; price: number }>, nowMs: number): void {
     const oldestMs = nowMs - this.memorySampleMaxAgeMs;
     let deleteCount = 0;
@@ -203,6 +274,35 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
       if (key.startsWith(prefix)) this.windowMaxCache.delete(key);
     }
   }
+}
+
+function midpointStatsFromSamples(
+  samples: Array<{ ts: number; price: number }>,
+): MidpointWindowStats | null {
+  if (samples.length === 0) return null;
+  let minMidpoint = samples[0]!.price;
+  let maxMidpoint = samples[0]!.price;
+  let minAtMs = samples[0]!.ts;
+  let maxAtMs = samples[0]!.ts;
+  for (const sample of samples) {
+    if (sample.price < minMidpoint) {
+      minMidpoint = sample.price;
+      minAtMs = sample.ts;
+    }
+    if (sample.price > maxMidpoint) {
+      maxMidpoint = sample.price;
+      maxAtMs = sample.ts;
+    }
+  }
+  return {
+    minMidpoint,
+    maxMidpoint,
+    minAtMs,
+    maxAtMs,
+    firstMidpoint: samples[0]!.price,
+    lastMidpoint: samples[samples.length - 1]!.price,
+    sampleCount: samples.length,
+  };
 }
 
 export function normalizedSnapshotPrice(row: {

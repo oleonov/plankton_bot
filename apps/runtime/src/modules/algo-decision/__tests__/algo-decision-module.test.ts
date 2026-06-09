@@ -508,6 +508,76 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("records first-entry fresh-edge diagnostics without changing the BUY signal", async () => {
+    const tokenId = "token-entry-fresh-edge";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const now = Date.now();
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      midpointStatsInWindow: vi.fn(() => ({
+        minMidpoint: 0.2,
+        maxMidpoint: 0.6,
+        minAtMs: now - 15 * 60_000,
+        maxAtMs: now - 50 * 60_000,
+        firstMidpoint: 0.25,
+        lastMidpoint: 0.45,
+        sampleCount: 5,
+      })),
+    };
+    const mod = buildModule({
+      decisionSignalLogRepo,
+      priceHistoryProvider,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 2504,
+      }),
+    });
+    await mod.start();
+
+    const market = {
+      ...makeMarket(tokenId, null, 0.45),
+      gammaCreatedAt: new Date(now - 3_600_000).toISOString(),
+    };
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: now,
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    const signal = signalCalls[0]![1].signal as import("@krabs/domain").Signal;
+    expect(signal.side).toBe("buy");
+    expect(signal.suggestedPrice).toBe(0.45);
+    expect(signal.suggestedSizeUsdc).toBeCloseTo(0.99, 5);
+
+    const logged = vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]?.[0];
+    expect(logged).toMatchObject({
+      side: "BUY",
+      decisionRuleId: "FALLBACK",
+      price: 0.45,
+      entryFreshEdgeKind: "first_entry",
+      entryFreshEdgeShadowClass: expect.any(String),
+    });
+    const payload = JSON.parse(logged?.entryFreshEdgePayloadJson ?? "{}");
+    expect(payload).toMatchObject({
+      tokenId,
+      decisionRuleId: "FALLBACK",
+      signalReason: "probe-entry",
+      entryKind: "first_entry",
+      marketAge: {
+        thresholdSeconds: 2504,
+        gatePassed: true,
+      },
+    });
+    expect(payload.current.mid).toBe(0.45);
+    expect(payload.windows["1h"].midpointPercentile).toBeCloseTo(0.625, 8);
+
+    await mod.stop();
+  });
+
   it("emits R23_DIP_TRIGGER BUY before FALLBACK HOLD when the 24h dip threshold is met", async () => {
     const tokenId = "token-r23-dip";
     selectedMarketCache = createMockSelectedMarketCache([tokenId]);
