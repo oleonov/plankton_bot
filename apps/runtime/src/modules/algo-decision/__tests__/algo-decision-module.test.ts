@@ -5,6 +5,7 @@ import {
   isInputsUnchangedConversionSkip,
 } from "../algo-decision-module.js";
 import type { SelectedMarketCache } from "../algo-decision-module.js";
+import type { DecisionPlanSideEffect, TrackQShadowProjection } from "../decision-planner.js";
 import type {
   EventBus,
   LegStateRepository,
@@ -5238,6 +5239,123 @@ describe("AlgoDecisionModule", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  // ─── Track Q shadow telemetry ────────────────────────────────────────────
+  // Observe-only: the planner emits a `track_q_shadow` side effect for
+  // SELL-eligible legs on wide books (the population the live
+  // `sell-spread-too-wide` guard suppresses, which the execution-layer EPO
+  // shard can never see). The module must surface it as a deduped,
+  // structured risk event + cumulative healthCheck counters WITHOUT changing
+  // the suppressed SELL. See research_plankton/track_q_shadow_design_2026-06-11.md.
+  describe("Track Q shadow telemetry", () => {
+    it("emits a structured track_q_shadow risk event on a wide SELL book without changing the suppressed SELL", async () => {
+      const tokenId = "token-trackq-wide";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      // S1 leg (buyCount=1, sellCount=0, lastAction=BUY) so D7-SELL-S1 fires at price >= 0.1.
+      legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const positionRepo = {
+        findByTokenId: vi.fn().mockReturnValue(makeOpenPosition(tokenId, { avgEntryPrice: 0.1 })),
+      };
+
+      const mod = buildModule({
+        riskEventRepo,
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      });
+      await mod.start();
+
+      // Wide book: spread/mid = 0.2/0.15 = 1.33 > 0.5 → SELL guard suppresses the
+      // executable price. mid 0.15 >= 0.1 keeps D7-SELL-S1 attempting the SELL.
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [
+          {
+            ...makeMarket(tokenId, null, 0.15, "cond-trackq-wide"),
+            tickSize: 0.01,
+            bestBid: 0.05,
+            bestAsk: 0.25,
+            spread: 0.2,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+
+      // Production behavior unchanged: the SELL stays suppressed (no signal placed).
+      const sellSignals = (bus.publish as ReturnType<typeof vi.fn>).mock.calls
+        .filter(([ev]) => ev === "SignalProduced")
+        .filter(([, p]) => (p as { signal: { side: string } }).signal.side === "sell");
+      expect(sellSignals).toHaveLength(0);
+
+      const insertCalls = vi.mocked(riskEventRepo.insert).mock.calls;
+      // The live sell-spread-too-wide suppression is recorded exactly as before.
+      expect(insertCalls.some(([e]) => e.payload.reasonCode === "sell-spread-too-wide")).toBe(true);
+
+      // New: a structured, queryable track_q_shadow telemetry row.
+      const shadow = insertCalls.find(([e]) => e.eventType === "track_q_shadow");
+      expect(shadow).toBeDefined();
+      const payload = shadow![0].payload;
+      expect(payload.tokenId).toBe(tokenId);
+      expect(payload.conditionId).toBe("cond-trackq-wide");
+      expect(payload.reason).toBe("tier_floor_applied");
+      expect(payload.p3WouldActivate).toBe(true);
+      expect(payload.currentGuardWouldSuppress).toBe(true);
+      expect(payload.bidAnchoredPrice).toBeCloseTo(0.09, 9);
+      expect(payload.p3CandidatePrice).toBeCloseTo(0.14, 9);
+      expect(payload.tierTarget).toBeCloseTo(0.136, 9);
+
+      await mod.stop();
+    });
+
+    it("dedupes repeated shadow events per (token, reason) yet counts every eval in healthCheck", async () => {
+      const tokenId = "token-trackq-dedupe";
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      const projection: TrackQShadowProjection = {
+        p3WouldActivate: true,
+        reason: "tier_floor_applied",
+        spreadMidRatio: 1.6,
+        bidAskRatio: 0.1,
+        bidAnchoredPrice: 0.09,
+        tierMarkup: 1.36,
+        tierTarget: 0.136,
+        insideAsk: 0.24,
+        p3CandidatePrice: 0.14,
+        avgEntry: 0.1,
+        currentGuardWouldSuppress: true,
+        proposedGuardWouldSuppress: true,
+        d8FireAtCurrentPrice: false,
+        d8FireAtP3Candidate: true,
+        d8FireWouldChange: true,
+      };
+      const sideEffect: DecisionPlanSideEffect = {
+        kind: "track_q_shadow",
+        tokenId: createTokenId(tokenId),
+        conditionId: "cond-trackq-dedupe",
+        timestamp: "2026-06-11T00:00:00.000Z",
+        evalPrice: 0.15,
+        projection,
+      };
+
+      // Two identical evals within the dedupe window.
+      (mod as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      (mod as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+
+      // Rate-controlled persistence: only one row hits the DB.
+      const shadowInserts = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(([e]) => e.eventType === "track_q_shadow");
+      expect(shadowInserts).toHaveLength(1);
+
+      // Cumulative counters are NOT deduped — every eval is counted.
+      const health = await mod.healthCheck();
+      expect(health.detail).toContain("trackQShadow evals=2 tokens=1");
+      expect(health.detail).toContain("wouldActivate=2");
+
+      await mod.stop();
     });
   });
 });

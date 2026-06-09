@@ -37,6 +37,12 @@ import {
   classifyHoldingTimeBucket,
   classifyNotionalBucket,
   classifySoldBoughtRatioBucket,
+  floorToTick,
+  planktonAlignedMarkupCap,
+  resolveBidAnchoredSellPrice,
+  resolveSellCeiling,
+  roundToTick,
+  SELL_PRICE_CEILING,
 } from "../../executable-price.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
@@ -116,7 +122,48 @@ export type DecisionPlanSideEffect =
       price: number;
       threshold: number;
       timestamp: string;
+    }
+  | {
+      kind: "track_q_shadow";
+      tokenId: TokenId;
+      conditionId: string;
+      timestamp: string;
+      evalPrice: number;
+      projection: TrackQShadowProjection;
     };
+
+export type TrackQShadowReason =
+  | "book_not_wide"
+  | "avg_entry_unavailable"
+  | "cheap_tail_excluded"
+  | "f1_already_above_tier"
+  | "tier_capped_at_inside_ask"
+  | "tier_floor_applied";
+
+/**
+ * Track Q shadow projection — observe-only. Records what the unproven P3
+ * tier-anchored SELL floor WOULD place on a wide book that the live
+ * `sell-spread-too-wide` guard suppresses, without changing any production
+ * price, D8/D9 behavior, or the spread threshold. See
+ * research_plankton/track_q_shadow_design_2026-06-11.md.
+ */
+export type TrackQShadowProjection = {
+  p3WouldActivate: boolean;
+  reason: TrackQShadowReason;
+  spreadMidRatio: number | null;
+  bidAskRatio: number | null;
+  bidAnchoredPrice: number;
+  tierMarkup: number | null;
+  tierTarget: number | null;
+  insideAsk: number | null;
+  p3CandidatePrice: number;
+  avgEntry: number | null;
+  currentGuardWouldSuppress: boolean;
+  proposedGuardWouldSuppress: boolean;
+  d8FireAtCurrentPrice: boolean;
+  d8FireAtP3Candidate: boolean;
+  d8FireWouldChange: boolean;
+};
 
 export type DecisionMetricsDelta = {
   evalTotal: number;
@@ -195,6 +242,12 @@ export const D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON =
   "d9_loss_exit_avg_entry_unavailable_guard_bypass";
 const POST_BUY_FILL_COOLDOWN_REASON = "post-buy-fill-cooldown";
 const SELL_SPREAD_MAX_RATIO = 0.5;
+// Track Q shadow: the design-intent threshold (bid/ask < 0.10 ⟺ spread/mid > 1.636).
+// Telemetry-only — the live guard above still uses SELL_SPREAD_MAX_RATIO.
+const PROPOSED_SELL_SPREAD_MAX_RATIO = 1.636;
+const TRACK_Q_CHEAP_TAIL_MAX_ENTRY = 0.02;
+const TRACK_Q_PRICE_EPSILON = 1e-9;
+const DEFAULT_EXIT_BID_ANCHOR_TICKS = 4;
 
 type SellExecutablePriceResult = {
   price: number | null;
@@ -227,6 +280,21 @@ export function classifyEntryPriceBucket(price: number): EntryPriceBucket {
   return ">0.20";
 }
 
+function computeMarketSpread(market: NormalizedMarket): number | null {
+  if (typeof market.spread === "number" && Number.isFinite(market.spread)) return market.spread;
+  const { bestBid, bestAsk } = market;
+  if (
+    typeof bestBid === "number" &&
+    Number.isFinite(bestBid) &&
+    typeof bestAsk === "number" &&
+    Number.isFinite(bestAsk) &&
+    bestAsk > bestBid
+  ) {
+    return bestAsk - bestBid;
+  }
+  return null;
+}
+
 export function resolveSellExecutablePrice(market: NormalizedMarket): SellExecutablePriceResult {
   if (
     typeof market.bestBid !== "number" ||
@@ -236,14 +304,7 @@ export function resolveSellExecutablePrice(market: NormalizedMarket): SellExecut
     return { price: null, reasonCode: "sell-best-bid-unavailable" };
   }
 
-  const spread =
-    typeof market.spread === "number" && Number.isFinite(market.spread)
-      ? market.spread
-      : typeof market.bestAsk === "number" &&
-          Number.isFinite(market.bestAsk) &&
-          market.bestAsk > market.bestBid
-        ? market.bestAsk - market.bestBid
-        : null;
+  const spread = computeMarketSpread(market);
   const midpoint =
     typeof market.midPrice === "number" && Number.isFinite(market.midPrice)
       ? market.midPrice
@@ -270,6 +331,179 @@ function resolveActionPrice(
   return typeof price === "number" && Number.isFinite(price)
     ? { price, reasonCode: null }
     : { price: null, reasonCode: "mid-price-unavailable" };
+}
+
+type TrackQBook = {
+  tickSize: number;
+  spreadMidRatio: number | null;
+  bidAskRatio: number | null;
+  currentGuardWouldSuppress: boolean;
+  proposedGuardWouldSuppress: boolean;
+  insideAsk: number | null;
+  bidAnchoredPrice: number;
+};
+
+function resolveTrackQBook(market: NormalizedMarket, anchorTicks: number): TrackQBook | null {
+  const bestBid = finitePositiveOrNull(market.bestBid);
+  const tickSize = finitePositiveOrNull(market.tickSize);
+  if (bestBid === null || tickSize === null) return null;
+
+  const bestAsk =
+    typeof market.bestAsk === "number" && Number.isFinite(market.bestAsk) && market.bestAsk > 0
+      ? market.bestAsk
+      : null;
+  const spread = computeMarketSpread(market);
+  const midPrice = finitePositiveOrNull(market.midPrice);
+  const spreadMidRatio = spread !== null && midPrice !== null ? spread / midPrice : null;
+  const ceiling = floorToTick(SELL_PRICE_CEILING, tickSize);
+  const bidAnchoredPrice = Math.min(
+    resolveBidAnchoredSellPrice(bestBid, bestAsk, tickSize, anchorTicks),
+    ceiling,
+  );
+  return {
+    tickSize,
+    spreadMidRatio,
+    bidAskRatio: bestAsk !== null ? bestBid / bestAsk : null,
+    currentGuardWouldSuppress: spreadMidRatio !== null && spreadMidRatio > SELL_SPREAD_MAX_RATIO,
+    proposedGuardWouldSuppress:
+      spreadMidRatio !== null && spreadMidRatio > PROPOSED_SELL_SPREAD_MAX_RATIO,
+    insideAsk: resolveSellCeiling(bestBid, bestAsk, tickSize),
+    bidAnchoredPrice,
+  };
+}
+
+function decideTrackQActivation(
+  book: TrackQBook,
+  avgEntry: number | null,
+  tierTarget: number | null,
+): { activate: boolean; reason: TrackQShadowReason; p3CandidatePrice: number } {
+  const f1 = book.bidAnchoredPrice;
+  if (!book.currentGuardWouldSuppress)
+    return { activate: false, reason: "book_not_wide", p3CandidatePrice: f1 };
+  if (avgEntry === null || tierTarget === null)
+    return { activate: false, reason: "avg_entry_unavailable", p3CandidatePrice: f1 };
+  if (avgEntry < TRACK_Q_CHEAP_TAIL_MAX_ENTRY)
+    return { activate: false, reason: "cheap_tail_excluded", p3CandidatePrice: f1 };
+
+  const targetCapped = book.insideAsk !== null ? Math.min(tierTarget, book.insideAsk) : tierTarget;
+  const p3 = roundToTick(Math.max(f1, targetCapped), book.tickSize);
+  if (p3 <= f1 + TRACK_Q_PRICE_EPSILON)
+    return { activate: false, reason: "f1_already_above_tier", p3CandidatePrice: f1 };
+
+  const reason: TrackQShadowReason =
+    book.insideAsk !== null && tierTarget > book.insideAsk
+      ? "tier_capped_at_inside_ask"
+      : "tier_floor_applied";
+  return { activate: true, reason, p3CandidatePrice: p3 };
+}
+
+function projectTrackQD8(
+  legState: LegState,
+  executionPolicy: ExecutionPolicy | null,
+  now: number,
+  evalPrice: number,
+  p3CandidatePrice: number,
+): { atCurrent: boolean; atP3: boolean } {
+  const profitTarget = executionPolicy?.profitTarget;
+  if (!profitTarget) return { atCurrent: false, atP3: false };
+  const base = {
+    state: deriveState(legState),
+    sellCount: legState.sellCount ?? 0,
+    cumulativeBuySize: legState.cumulativeBuySize ?? 0,
+    cumulativeBuyNotional: legState.cumulativeBuyNotional ?? 0,
+    holdDurationSeconds: (now - new Date(legState.firstTradeAt).getTime()) / 1000,
+  };
+  return {
+    atCurrent: evaluateD8ProfitRatio({ ...base, currentPrice: evalPrice }, profitTarget).fire,
+    atP3: evaluateD8ProfitRatio({ ...base, currentPrice: p3CandidatePrice }, profitTarget).fire,
+  };
+}
+
+/**
+ * Pure Track Q shadow projection (observe-only). Never throws — any unexpected
+ * input collapses to `null` so the live SELL path is never affected (risk R5).
+ * The caller decides whether to emit a side effect (wide books only).
+ */
+export function projectTrackQShadow(args: {
+  market: NormalizedMarket;
+  legState: LegState;
+  position: Position | null;
+  executionPolicy: ExecutionPolicy | null;
+  evalPrice: number;
+  now: number;
+}): TrackQShadowProjection | null {
+  try {
+    const anchorTicks = args.executionPolicy?.exitBidAnchorTicks ?? DEFAULT_EXIT_BID_ANCHOR_TICKS;
+    const book = resolveTrackQBook(args.market, anchorTicks);
+    if (book === null) return null;
+
+    const avgEntry = finitePositiveOrNull(args.position?.avgEntryPrice);
+    const tierMarkup = avgEntry !== null ? planktonAlignedMarkupCap(avgEntry) : null;
+    const tierTarget =
+      avgEntry !== null ? Math.min(avgEntry * tierMarkup!, SELL_PRICE_CEILING) : null;
+
+    const decision = decideTrackQActivation(book, avgEntry, tierTarget);
+    const d8 = projectTrackQD8(
+      args.legState,
+      args.executionPolicy,
+      args.now,
+      args.evalPrice,
+      decision.p3CandidatePrice,
+    );
+
+    return {
+      p3WouldActivate: decision.activate,
+      reason: decision.reason,
+      spreadMidRatio: book.spreadMidRatio,
+      bidAskRatio: book.bidAskRatio,
+      bidAnchoredPrice: book.bidAnchoredPrice,
+      tierMarkup,
+      tierTarget,
+      insideAsk: book.insideAsk,
+      p3CandidatePrice: decision.p3CandidatePrice,
+      avgEntry,
+      currentGuardWouldSuppress: book.currentGuardWouldSuppress,
+      proposedGuardWouldSuppress: book.proposedGuardWouldSuppress,
+      d8FireAtCurrentPrice: d8.atCurrent,
+      d8FireAtP3Candidate: d8.atP3,
+      d8FireWouldChange: d8.atCurrent !== d8.atP3,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Emit a Track Q shadow side effect for SELL-eligible legs on wide books only
+ * (the population the live `sell-spread-too-wide` guard suppresses, which the
+ * execution-layer EPO shard can never observe). Observe-only: pushes a side
+ * effect and never alters price, suppressions, or the signal.
+ */
+function recordTrackQShadow(
+  input: DecisionPlanningInput,
+  market: NormalizedMarket,
+  evalPrice: number,
+  nowIso: string,
+  sideEffects: DecisionPlanSideEffect[],
+): void {
+  if (!input.legState) return;
+  const projection = projectTrackQShadow({
+    market,
+    legState: input.legState,
+    position: input.position,
+    executionPolicy: input.executionPolicy,
+    evalPrice,
+    now: input.now,
+  });
+  if (projection === null || !projection.currentGuardWouldSuppress) return;
+  sideEffects.push({
+    kind: "track_q_shadow",
+    tokenId: input.tokenId,
+    conditionId: market.conditionId,
+    timestamp: nowIso,
+    evalPrice,
+    projection,
+  });
 }
 
 export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlanResult {
@@ -324,6 +558,7 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   }
   const sellPrice = resolveSellExecutablePrice(market);
   const price = legState ? (sellPrice.price ?? midPrice) : midPrice;
+  recordTrackQShadow(input, market, price, nowIso, sideEffects);
 
   if (legState && isAbandoned(legState) && input.executionPolicy?.dustAbandonment.enabled) {
     const dustPolicy = input.executionPolicy.dustAbandonment;

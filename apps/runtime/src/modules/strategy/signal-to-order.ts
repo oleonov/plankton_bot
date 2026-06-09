@@ -50,12 +50,19 @@ import {
   classifyRoundLevel,
   computePricingDeltaTicks,
   floorToTick,
+  planktonAlignedMarkupCap,
+  resolveBidAnchoredSellPrice,
   resolveBoundedMidpointPrice,
-  roundToTick,
+  SELL_PRICE_CEILING,
   validateExecutablePrice,
   type BoundedMidpointDiagnostics,
   type ExecutablePriceValidationFailureReason,
 } from "../../executable-price.js";
+
+// Track P F2 tier helpers live in executable-price.ts (shared with the
+// algo-decision Track Q shadow). Re-exported here so existing strategy-layer
+// imports/tests resolve unchanged.
+export { planktonAlignedMarkupCap, SELL_PRICE_CEILING };
 import {
   applyOrderBookToMarket,
   type CandidateBookCache,
@@ -67,9 +74,6 @@ import type { SignalPathTelemetry } from "./signal-path-telemetry.js";
 const BRIDGE_WS_BOOK_WAIT_MS = 25;
 const MIN_SIZE_EPSILON = 1e-9;
 const MIN_NOTIONAL_EPSILON = 1e-9;
-// Policy epsilon: suppress only truly identical SELL prices. The tiny margin
-// absorbs JS decimal representation drift while staying far below CLOB tick size.
-const SELL_DEDUP_PRICE_EPSILON = 1.000001e-9;
 
 // ADR-013 defaults exposed for callers that don't thread the policy provider
 // (tests, scenario runner). Runtime always reads the live policy via
@@ -1612,22 +1616,6 @@ function takerFractionBucket(
   return "0.95-1.0";
 }
 
-function resolveBidAnchoredSellPrice(
-  bestBid: number,
-  bestAsk: number | null,
-  tickSize: number,
-  anchorTicks: number,
-): number {
-  const rawPrice = roundToTick(bestBid + anchorTicks * tickSize, tickSize);
-  if (bestAsk == null || !Number.isFinite(bestAsk)) return rawPrice;
-
-  const insideAsk = roundToTick(bestAsk - tickSize, tickSize);
-  if (insideAsk > bestBid + SELL_DEDUP_PRICE_EPSILON) {
-    return Math.min(rawPrice, insideAsk);
-  }
-  return Math.min(rawPrice, roundToTick(bestAsk, tickSize));
-}
-
 /**
  * Resolves SELL price using an ask-side midpoint anchor.
  *
@@ -1683,29 +1671,6 @@ function resolveMidpointAnchoredSellPriceWithMode(
     return { price: askUnder, anchorMode: "ask_undercut" };
   }
   return { price: base, anchorMode: "midpoint" };
-}
-
-/**
- * Track P F2 — hard ceiling on any SELL exit target.
- * A Polymarket price is a probability in [0, 1]; resting a SELL above ~0.97
- * can never fill. This alone removes the bulk of the 97.8% cancel rate.
- */
-export const SELL_PRICE_CEILING = 0.97;
-
-/**
- * Track P F2 — Plankton-aligned SELL markup ceiling by entry tier
- * (research_plankton/plankton_sell_pricing_playbook_2026-06-04.md).
- *
- * Markup is mechanically bounded by entry price: only the cheap (<0.02) tail
- * can fill at large multiples (median 2.5x). Above ~0.10 entry a constant 10x
- * target exceeds 1.0 and never fills. The tiers reproduce the analyst's
- * entry-binned first-markup medians (0.02-0.05 and 0.05-0.15 both 1.36x).
- */
-export function planktonAlignedMarkupCap(avgEntry: number): number {
-  if (avgEntry < 0.02) return 2.5;
-  if (avgEntry < 0.15) return 1.36;
-  if (avgEntry < 0.35) return 1.17;
-  return 1.1;
 }
 
 /**

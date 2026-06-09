@@ -686,3 +686,76 @@ export function deriveExecutableTopOfBook(
     spread,
   };
 }
+
+// Policy epsilon: suppress only truly identical SELL prices. The tiny margin
+// absorbs JS decimal representation drift while staying far below CLOB tick size.
+const SELL_DEDUP_PRICE_EPSILON = 1.000001e-9;
+
+/**
+ * Track P F1 — bid-anchored SELL price.
+ *
+ * Places a SELL at `bestBid + anchorTicks` (rounded to tick), capped at the
+ * inside ask so it never crosses the book. Missing/invalid bestAsk falls back
+ * to the one-sided `bestBid + anchorTicks` anchor.
+ *
+ * Relocated from `modules/strategy/signal-to-order.ts` so both the strategy
+ * layer (live pricing) and the algo-decision worker (Track Q shadow projection)
+ * can reuse the single source of truth without pulling the strategy module's
+ * transitive graph into the decision worker bundle.
+ */
+/**
+ * Effective non-crossing SELL ceiling for a resting order.
+ *
+ * One tick inside the ask (`bestAsk - tick`) when the book has room, the rounded
+ * best ask itself for a locked/one-tick book, or `null` for a one-sided book
+ * (missing/non-finite ask → no ceiling). Shared by the live bid-anchored pricer
+ * and the Track Q shadow projection so both clamp SELLs to the identical bound.
+ */
+export function resolveSellCeiling(
+  bestBid: number,
+  bestAsk: number | null,
+  tickSize: number,
+): number | null {
+  if (bestAsk == null || !Number.isFinite(bestAsk)) return null;
+  const insideAsk = roundToTick(bestAsk - tickSize, tickSize);
+  if (insideAsk > bestBid + SELL_DEDUP_PRICE_EPSILON) return insideAsk;
+  return roundToTick(bestAsk, tickSize);
+}
+
+export function resolveBidAnchoredSellPrice(
+  bestBid: number,
+  bestAsk: number | null,
+  tickSize: number,
+  anchorTicks: number,
+): number {
+  const rawPrice = roundToTick(bestBid + anchorTicks * tickSize, tickSize);
+  const ceiling = resolveSellCeiling(bestBid, bestAsk, tickSize);
+  return ceiling == null ? rawPrice : Math.min(rawPrice, ceiling);
+}
+
+/**
+ * Track P F2 — hard ceiling on any SELL exit target.
+ * A Polymarket price is a probability in [0, 1]; resting a SELL above ~0.97
+ * can never fill. This alone removes the bulk of the 97.8% cancel rate.
+ *
+ * Relocated from `modules/strategy/signal-to-order.ts` (re-exported there for
+ * backward-compatible imports) so the algo-decision worker can reuse the tier
+ * table without importing the strategy module.
+ */
+export const SELL_PRICE_CEILING = 0.97;
+
+/**
+ * Track P F2 — Plankton-aligned SELL markup ceiling by entry tier
+ * (research_plankton/plankton_sell_pricing_playbook_2026-06-04.md).
+ *
+ * Markup is mechanically bounded by entry price: only the cheap (<0.02) tail
+ * can fill at large multiples (median 2.5x). Above ~0.10 entry a constant 10x
+ * target exceeds 1.0 and never fills. The tiers reproduce the analyst's
+ * entry-binned first-markup medians (0.02-0.05 and 0.05-0.15 both 1.36x).
+ */
+export function planktonAlignedMarkupCap(avgEntry: number): number {
+  if (avgEntry < 0.02) return 2.5;
+  if (avgEntry < 0.15) return 1.36;
+  if (avgEntry < 0.35) return 1.17;
+  return 1.1;
+}

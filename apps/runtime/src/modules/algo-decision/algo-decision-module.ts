@@ -729,6 +729,21 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly clientOrderToToken = new Map<string, string>(); // clientOrderId → tokenId
   private readonly orderIdToToken = new Map<string, string>(); // orderId → tokenId
   private readonly suppressionDedupe = new Map<string, number>();
+  // Track Q shadow telemetry (observe-only). `trackQShadowDedupe` rate-controls
+  // the per-(token, reason) risk_event rows exactly like `suppressionDedupe`;
+  // `trackQShadow` holds NON-deduped cumulative counters surfaced via
+  // healthCheck so the full eval volume is queryable without log-line spam.
+  // See research_plankton/track_q_shadow_design_2026-06-11.md.
+  private readonly trackQShadowDedupe = new Map<string, number>();
+  private readonly trackQShadow = {
+    evals: 0,
+    wouldActivate: 0,
+    suppressionWouldClear: 0,
+    proposedStillSuppressed: 0,
+    d8FireWouldChange: 0,
+    byReason: new Map<string, number>(),
+    tokens: new Set<string>(),
+  };
   private readonly lastBuyFillByWallet = new Map<string, number>();
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
@@ -879,7 +894,28 @@ export class AlgoDecisionModule implements RuntimeModule {
     // that case to keep the line tidy. Sorted by ruleId for stable output.
     const ruleMix = this.formatTriggerMix(this.lastTickRuleMix);
     const evalMetrics = this.formatEvalMetrics(this.lastEvalMetrics);
-    return { ok: true, detail: `${base}${funnel}${ruleMix}${evalMetrics}` };
+    const trackQShadow = this.formatTrackQShadow();
+    return { ok: true, detail: `${base}${funnel}${ruleMix}${evalMetrics}${trackQShadow}` };
+  }
+
+  // Track Q shadow telemetry rollup. Omitted entirely until the first wide-book
+  // shadow eval so the healthcheck line stays tidy. Counters are cumulative
+  // since module start (never deduped) — the queryable per-event detail lives
+  // in the deduped `track_q_shadow` risk_event rows.
+  private formatTrackQShadow(): string {
+    const c = this.trackQShadow;
+    if (c.evals === 0) return "";
+    const reasons = [...c.byReason.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([reason, count]) => `${reason}=${count}`)
+      .join(" ");
+    return (
+      ` trackQShadow evals=${c.evals} tokens=${c.tokens.size}` +
+      ` wouldActivate=${c.wouldActivate} suppressionWouldClear=${c.suppressionWouldClear}` +
+      ` proposedStillSuppressed=${c.proposedStillSuppressed}` +
+      ` d8FireWouldChange=${c.d8FireWouldChange}` +
+      (reasons ? ` trackQReasons ${reasons}` : "")
+    );
   }
 
   private formatTriggerMix(mix: ReadonlyMap<string, number>): string {
@@ -1556,8 +1592,67 @@ export class AlgoDecisionModule implements RuntimeModule {
             },
           });
         }
+        continue;
+      }
+      if (sideEffect.kind === "track_q_shadow") {
+        this.recordTrackQShadowSideEffect(sideEffect);
       }
     }
+  }
+
+  /**
+   * Track Q shadow telemetry sink (observe-only). Updates the non-deduped
+   * cumulative counters surfaced via healthCheck, then persists a deduped,
+   * structured `track_q_shadow` risk event so the unproven P3 tier floor can
+   * be analysed offline against live wide-book SELLs. Never touches the order
+   * price, the SELL suppression, D8, the spread threshold, or D9.
+   */
+  private recordTrackQShadowSideEffect(
+    sideEffect: Extract<DecisionPlanSideEffect, { kind: "track_q_shadow" }>,
+  ): void {
+    const { projection } = sideEffect;
+    const counters = this.trackQShadow;
+    counters.evals += 1;
+    counters.tokens.add(String(sideEffect.tokenId));
+    counters.byReason.set(projection.reason, (counters.byReason.get(projection.reason) ?? 0) + 1);
+    if (projection.p3WouldActivate) counters.wouldActivate += 1;
+    if (projection.proposedGuardWouldSuppress) counters.proposedStillSuppressed += 1;
+    // Emitted shadow events are gated on currentGuardWouldSuppress in the
+    // planner, so "would clear" = the proposed 1.636 threshold no longer fires.
+    if (projection.currentGuardWouldSuppress && !projection.proposedGuardWouldSuppress) {
+      counters.suppressionWouldClear += 1;
+    }
+    if (projection.d8FireWouldChange) counters.d8FireWouldChange += 1;
+
+    const eventAt = Date.parse(sideEffect.timestamp);
+    const now = Number.isFinite(eventAt) ? eventAt : Date.now();
+    const key = `track_q_shadow|${String(sideEffect.tokenId)}|${projection.reason}`;
+    if (!this.dedupeAllows(this.trackQShadowDedupe, key, now)) return;
+
+    this.persistence.enqueueRiskEvent({
+      eventType: "track_q_shadow",
+      payload: {
+        tokenId: String(sideEffect.tokenId),
+        conditionId: sideEffect.conditionId,
+        evalPrice: sideEffect.evalPrice,
+        p3WouldActivate: projection.p3WouldActivate,
+        reason: projection.reason,
+        spreadMidRatio: projection.spreadMidRatio,
+        bidAskRatio: projection.bidAskRatio,
+        bidAnchoredPrice: projection.bidAnchoredPrice,
+        tierMarkup: projection.tierMarkup,
+        tierTarget: projection.tierTarget,
+        insideAsk: projection.insideAsk,
+        p3CandidatePrice: projection.p3CandidatePrice,
+        avgEntry: projection.avgEntry,
+        currentGuardWouldSuppress: projection.currentGuardWouldSuppress,
+        proposedGuardWouldSuppress: projection.proposedGuardWouldSuppress,
+        d8FireAtCurrentPrice: projection.d8FireAtCurrentPrice,
+        d8FireAtP3Candidate: projection.d8FireAtP3Candidate,
+        d8FireWouldChange: projection.d8FireWouldChange,
+        signalTimestamp: sideEffect.timestamp,
+      },
+    });
   }
 
   private materializeSignalDraft(
@@ -2751,14 +2846,20 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     const eventAt = Date.parse(facts.timestamp);
     const now = Number.isFinite(eventAt) ? eventAt : Date.now();
-    const key = this.suppressionDedupeKey(facts);
-    const lastAt = this.suppressionDedupe.get(key);
-    if (lastAt != null && now - lastAt < NOISY_SUPPRESSION_DEDUPE_MS) return false;
+    return this.dedupeAllows(this.suppressionDedupe, this.suppressionDedupeKey(facts), now);
+  }
 
-    this.suppressionDedupe.set(key, now);
-    if (this.suppressionDedupe.size > MAX_SUPPRESSION_DEDUPE_KEYS) {
-      this.pruneSuppressionDedupe(now);
-    }
+  /**
+   * Sliding-window dedupe shared by suppression telemetry and Track Q shadow
+   * telemetry. Returns true the first time `key` is seen within
+   * NOISY_SUPPRESSION_DEDUPE_MS (recording `now`), false while the window is
+   * still open. Evicts via `pruneDedupe` when the cache exceeds the key cap.
+   */
+  private dedupeAllows(cache: Map<string, number>, key: string, now: number): boolean {
+    const lastAt = cache.get(key);
+    if (lastAt != null && now - lastAt < NOISY_SUPPRESSION_DEDUPE_MS) return false;
+    cache.set(key, now);
+    if (cache.size > MAX_SUPPRESSION_DEDUPE_KEYS) this.pruneDedupe(cache, now);
     return true;
   }
 
@@ -2792,16 +2893,16 @@ export class AlgoDecisionModule implements RuntimeModule {
     );
   }
 
-  private pruneSuppressionDedupe(now: number): void {
-    for (const [key, lastAt] of this.suppressionDedupe) {
+  private pruneDedupe(cache: Map<string, number>, now: number): void {
+    for (const [key, lastAt] of cache) {
       if (now - lastAt >= NOISY_SUPPRESSION_DEDUPE_MS) {
-        this.suppressionDedupe.delete(key);
+        cache.delete(key);
       }
     }
-    while (this.suppressionDedupe.size > MAX_SUPPRESSION_DEDUPE_KEYS) {
-      const oldestKey = this.suppressionDedupe.keys().next().value;
+    while (cache.size > MAX_SUPPRESSION_DEDUPE_KEYS) {
+      const oldestKey = cache.keys().next().value;
       if (oldestKey === undefined) break;
-      this.suppressionDedupe.delete(oldestKey);
+      cache.delete(oldestKey);
     }
   }
 

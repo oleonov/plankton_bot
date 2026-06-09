@@ -498,4 +498,47 @@ describe("evaluateDecisionPlan", () => {
     expect(result.metrics.evalTotal).toBe(0);
     expect(result.suppressions).toHaveLength(0);
   });
+
+  // Track Q shadow (observe-only): emits a side effect on wide books the
+  // spread guard suppresses, without altering price/suppressions/D8/D9.
+  it("emits a Track Q shadow side effect on a wide book without changing the SELL suppression", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({ buyCount: 1, cumulativeBuySize: 17.64, cumulativeBuyNotional: 4.41 }),
+        position: position({ avgEntryPrice: 0.25, costBasisUsdc: 4.41, size: 17.64 }),
+        market: market({ bestBid: 0.43, bestAsk: 0.9, midPrice: 0.665, spread: 0.47 }),
+      }),
+    );
+
+    // Live behavior is byte-for-byte unchanged: still suppressed sell-spread-too-wide.
+    expect(result.type).toBe("none");
+    expect(result.suppressions.map((item) => item.reasonCode)).toContain("sell-spread-too-wide");
+
+    const shadow = result.sideEffects.find((s) => s.kind === "track_q_shadow");
+    expect(shadow).toBeDefined();
+    if (shadow?.kind !== "track_q_shadow") return;
+    expect(shadow.projection.currentGuardWouldSuppress).toBe(true);
+    expect(shadow.projection.bidAnchoredPrice).toBeCloseTo(0.47, 9);
+    // avgEntry 0.25 → tier 0.2925 < F1 0.47 → no activation.
+    expect(shadow.projection.p3WouldActivate).toBe(false);
+    expect(shadow.projection.reason).toBe("f1_already_above_tier");
+  });
+
+  it("does not emit a Track Q shadow side effect on a narrow book and leaves the SELL price unchanged", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({ buyCount: 1, cumulativeBuySize: 17.64, cumulativeBuyNotional: 4.41 }),
+        position: position({ avgEntryPrice: 0.25, costBasisUsdc: 4.41, size: 17.64 }),
+        market: market({ bestBid: 0.43, bestAsk: 0.45, midPrice: 0.44, spread: 0.02 }),
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
+    expect(result.signal.suggestedPrice).toBe(0.43);
+    expect(result.sideEffects.some((s) => s.kind === "track_q_shadow")).toBe(false);
+  });
 });
