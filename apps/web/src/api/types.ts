@@ -697,6 +697,8 @@ export interface FillDTO {
   liquidityRole?: "maker" | "taker" | "unknown";
   explicitFeeUsdc?: number;
   fee: number;
+  pnlUsd?: number | null;
+  pnlPct?: number | null;
   filledAt: string;
   decisionRuleId?: string | null;
   signalId?: string | null;

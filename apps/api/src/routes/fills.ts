@@ -12,7 +12,44 @@ interface FillOpts {
   ledgerPool?: LedgerPool;
 }
 
-export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
+/**
+ * Realized P&L for a fill. Reuses the bot's authoritative `pnl_ledger.delta`
+ * (FIFO realized USD per SELL fill) rather than recomputing from a possibly
+ * stale `positions.avg_entry_price`. `costBasis = sizeUsdc − delta = avgEntry × size`,
+ * so the percent never needs avg-entry recovered separately. BUY fills (no ledger
+ * row) and entries without a delta carry no P&L.
+ */
+export function realizedPnl(
+  side: unknown,
+  sizeUsdc: unknown,
+  delta: number | undefined,
+): { pnlUsd: number | null; pnlPct: number | null } {
+  if (side !== "sell" || delta === undefined) return { pnlUsd: null, pnlPct: null };
+  const costBasis = (sizeUsdc as number) - delta;
+  const pnlPct = costBasis > 0 ? (delta / costBasis) * 100 : null;
+  return { pnlUsd: delta, pnlPct };
+}
+
+/** Batched `fill_id → realized delta` lookup for the SELL fills on a page (no N+1). */
+export function buildPnlMap(
+  db: Database.Database,
+  rows: Record<string, unknown>[],
+): Map<string, number> {
+  const sellIds = rows.filter((r) => r.side === "sell").map((r) => r.fill_id as string);
+  if (sellIds.length === 0) return new Map();
+  const placeholders = sellIds.map(() => "?").join(",");
+  const ledgerRows = db
+    .prepare(`SELECT fill_id, delta FROM pnl_ledger WHERE fill_id IN (${placeholders})`)
+    .all(...sellIds) as Array<{ fill_id: string; delta: number }>;
+  return new Map(ledgerRows.map((r) => [r.fill_id, r.delta]));
+}
+
+export function toDto(
+  row: Record<string, unknown>,
+  meta: MarketMeta,
+  pnlByFillId?: Map<string, number>,
+) {
+  const pnl = realizedPnl(row.side, row.size_usdc, pnlByFillId?.get(row.fill_id as string));
   return {
     fillId: row.fill_id,
     orderId: row.order_id,
@@ -24,6 +61,8 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
     liquidityRole: row.liquidity_role,
     explicitFeeUsdc: row.fee,
     fee: row.fee,
+    pnlUsd: pnl.pnlUsd,
+    pnlPct: pnl.pnlPct,
     filledAt: row.filled_at,
     decisionRuleId: (row.decision_rule_id as string | null | undefined) ?? null,
     signalId: (row.signal_id as string | null | undefined) ?? null,
@@ -91,9 +130,10 @@ export const fillRoutes: FastifyPluginAsync<FillOpts> = async (app, opts) => {
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(db, tokenIds);
+    const pnlMap = buildPnlMap(db, rows);
 
     return ok({
-      items: rows.map((r) => toDto(r, getMetaOrEmpty(metaMap, r.token_id as string))),
+      items: rows.map((r) => toDto(r, getMetaOrEmpty(metaMap, r.token_id as string), pnlMap)),
       nextCursor,
       totalCount,
       page: pageRequested ? page : undefined,

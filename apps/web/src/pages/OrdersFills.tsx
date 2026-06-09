@@ -6,8 +6,43 @@ import { Pagination } from "../components/Pagination.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
 import { SortTh } from "../components/SortTh.tsx";
 import { formatTimeLeft, formatTimestamp, formatUsd } from "../utils/format.ts";
+import { fmtMoney, fmtPct } from "./positions/lib.ts";
 import { useSort, sortItems } from "../utils/useSort.ts";
 import type { OrderDTO, FillDTO } from "../api/types.ts";
+
+type PnlSign = "pos" | "neg" | "flat" | "none";
+
+const PNL_COLOR: Record<PnlSign, string> = {
+  pos: "var(--green)",
+  neg: "var(--red)",
+  flat: "var(--text-dim)",
+  none: "var(--text-dim)",
+};
+
+/** Sign bucket for a realized P&L value; "none" when the fill has no P&L (BUY). */
+function pnlSign(pnlUsd: number | null | undefined): PnlSign {
+  if (pnlUsd == null) return "none";
+  return pnlUsd > 0 ? "pos" : pnlUsd < 0 ? "neg" : "flat";
+}
+
+/** P&L cell: signed USD (+ percent) for SELL fills, em-dash for entries. */
+function PnlCell({ fill }: { fill: FillDTO }) {
+  const sign = pnlSign(fill.pnlUsd);
+  return (
+    <td data-pnl-sign={sign} style={{ color: PNL_COLOR[sign], fontWeight: 600 }}>
+      {fill.pnlUsd == null ? (
+        "—"
+      ) : (
+        <>
+          <span>{fmtMoney(fill.pnlUsd, { showSign: true })}</span>
+          {fill.pnlPct != null ? (
+            <span style={{ marginLeft: 6, fontSize: 11 }}>{fmtPct(fill.pnlPct, 100)}</span>
+          ) : null}
+        </>
+      )}
+    </td>
+  );
+}
 
 const orderAccessors: Record<string, (o: OrderDTO) => string | number | null> = {
   orderId: (o) => o.orderId,
@@ -82,6 +117,7 @@ export function OrdersFills() {
   const pageEnd = pageStart + ((activeData?.items.length ?? 0) - 1);
   const pageInfo = totalCount > 0 ? `${pageStart}\u2013${pageEnd} of ${totalCount}` : undefined;
   const totalPages = activeData?.totalPages ?? Math.max(1, Math.ceil(totalCount / 50));
+  const showPnl = (fills.data?.items ?? []).some((f) => f.pnlUsd != null);
 
   return (
     <div className="page">
@@ -320,6 +356,7 @@ export function OrdersFills() {
                   sort={fillSort.sort}
                   onToggle={fillSort.toggle}
                 />
+                {showPnl ? <th>P&L</th> : null}
                 <th>Exec</th>
                 <SortTh
                   label="Filled At"
@@ -352,6 +389,7 @@ export function OrdersFills() {
                   <td>${f.price.toFixed(4)}</td>
                   <td>{f.size.toFixed(2)}</td>
                   <td>${f.sizeUsdc.toFixed(2)}</td>
+                  {showPnl ? <PnlCell fill={f} /> : null}
                   <td>
                     <div
                       style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}

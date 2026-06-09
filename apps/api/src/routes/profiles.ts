@@ -5,7 +5,7 @@ import { buildMarketMetaMap, getMetaOrEmpty, buildResolutionMap } from "../enric
 import { buildLegStateMap, getLegStateOrEmpty } from "../enrich-leg-state.js";
 import { toDto as orderToDto } from "./orders.js";
 import { toDto as positionToDto } from "./positions.js";
-import { toDto as fillToDto } from "./fills.js";
+import { toDto as fillToDto, buildPnlMap } from "./fills.js";
 import type { LedgerPool } from "../ledger-pool.js";
 import { getActor } from "../auth.js";
 import { diffFields, recordHistory, type HistoryRow } from "../profile-settings-history.js";
@@ -303,9 +303,10 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(ledger, tokenIds);
+    const pnlMap = buildPnlMap(ledger, rows);
 
     return ok({
-      items: rows.map((r) => fillToDto(r, getMetaOrEmpty(metaMap, r.token_id as string))),
+      items: rows.map((r) => fillToDto(r, getMetaOrEmpty(metaMap, r.token_id as string), pnlMap)),
       nextCursor,
       totalCount,
       page: pageRequested ? page : undefined,
