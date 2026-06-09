@@ -13,7 +13,10 @@ import {
   type Signal,
 } from "@krabs/domain";
 import {
+  capSellPriceToPlanktonTier,
+  planktonAlignedMarkupCap,
   resolveMidpointAnchoredSellPrice,
+  SELL_PRICE_CEILING,
   SignalToOrderBridge,
   type SignalToOrderBridgeDeps,
 } from "../modules/strategy/signal-to-order.js";
@@ -67,6 +70,59 @@ describe("resolveMidpointAnchoredSellPrice", () => {
 
   it("handles crossed book defensively by falling back to midpoint plus anchor", () => {
     expect(resolveMidpointAnchoredSellPrice(0.5, 0.4, 0.001, 5)).toBeCloseTo(0.455);
+  });
+});
+
+describe("planktonAlignedMarkupCap (Track P F2)", () => {
+  it("returns 2.50x for the cheap (<0.02) crypto tail", () => {
+    expect(planktonAlignedMarkupCap(0.001)).toBe(2.5);
+    expect(planktonAlignedMarkupCap(0.019)).toBe(2.5);
+  });
+
+  it("returns 1.36x for the 0.02-0.15 tier (boundary inclusive at 0.02)", () => {
+    expect(planktonAlignedMarkupCap(0.02)).toBe(1.36);
+    expect(planktonAlignedMarkupCap(0.05)).toBe(1.36);
+    expect(planktonAlignedMarkupCap(0.149)).toBe(1.36);
+  });
+
+  it("returns 1.17x for the 0.15-0.35 tier (boundary inclusive at 0.15)", () => {
+    expect(planktonAlignedMarkupCap(0.15)).toBe(1.17);
+    expect(planktonAlignedMarkupCap(0.34)).toBe(1.17);
+  });
+
+  it("returns 1.10x for the >=0.35 tier", () => {
+    expect(planktonAlignedMarkupCap(0.35)).toBe(1.1);
+    expect(planktonAlignedMarkupCap(0.5)).toBe(1.1);
+  });
+});
+
+describe("capSellPriceToPlanktonTier (Track P F2)", () => {
+  it("caps a phantom 50x SELL down to the cheap-tier 2.5x target", () => {
+    // avg 0.01 -> markup 2.5 -> cap 0.025; phantom-ask price 0.5 (50x) is capped.
+    expect(capSellPriceToPlanktonTier(0.5, 0.01, 0.001)).toBeCloseTo(0.025);
+  });
+
+  it("never exceeds avg_entry * tier markup", () => {
+    expect(capSellPriceToPlanktonTier(0.9, 0.2, 0.001)).toBeCloseTo(0.234); // 0.2 * 1.17
+    expect(capSellPriceToPlanktonTier(0.95, 0.4, 0.001)).toBeCloseTo(0.44); // 0.4 * 1.10
+  });
+
+  it("never exceeds the 0.97 ceiling even when the tier target is above it", () => {
+    // avg 0.9 -> 1.10x -> 0.99 target, but the hard ceiling clamps to 0.97.
+    expect(capSellPriceToPlanktonTier(0.999, 0.9, 0.001)).toBe(SELL_PRICE_CEILING);
+    // avg unknown -> only the ceiling applies.
+    expect(capSellPriceToPlanktonTier(0.999, null, 0.001)).toBe(SELL_PRICE_CEILING);
+  });
+
+  it("preserves the computed price unchanged when it is already at/below the cap", () => {
+    expect(capSellPriceToPlanktonTier(0.015, 0.01, 0.001)).toBe(0.015); // < 0.025 cap
+    expect(capSellPriceToPlanktonTier(0.3, 0.5, 0.001)).toBe(0.3); // < 0.55 cap
+    expect(capSellPriceToPlanktonTier(0.4, null, 0.001)).toBe(0.4); // < 0.97 ceiling
+  });
+
+  it("floors the capped price down to a valid tick", () => {
+    // avg 0.07 -> 1.36x -> 0.0952 cap -> floor to 0.001 tick = 0.095.
+    expect(capSellPriceToPlanktonTier(0.5, 0.07, 0.001)).toBeCloseTo(0.095);
   });
 });
 
@@ -3413,7 +3469,7 @@ describe("ADR-015 execution policy observations", () => {
     expect(rows[0]!.sellShadowSignalPrice).toBe(0.2);
   });
 
-  it("records observe-only SELL shadow cap violations without changing placement price", async () => {
+  it("records the raw SELL shadow cap violation while F2 caps the placement price", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
     const bus = new InProcessEventBus();
@@ -3457,7 +3513,9 @@ describe("ADR-015 execution policy observations", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.489);
+    // F2 caps placement at the <0.02 tier (0.01 * 2.5 = 0.025); the observe-only
+    // shadow below still records the raw 0.489 anchor and its cap violations.
+    expect(placed[0]!.command.price).toBe(0.025);
     await waitForRows(rows, 1);
     expect(rows[0]!.selectedPrice).toBe(placed[0]!.command.price);
     expect(rows[0]!.sellShadowAvgEntry).toBe(0.01);
@@ -3470,6 +3528,61 @@ describe("ADR-015 execution policy observations", () => {
     expect(rows[0]!.sellShadowCap10Violation).toBe(true);
     expect(rows[0]!.sellShadowExitPricingMode).toBe("midpoint-anchored");
     expect(rows[0]!.sellShadowExitAnchorMode).toBe("ask_undercut");
+  });
+
+  it("Track P F2 — enforces the Plankton tier cap on the placed SELL price", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const { repo, rows } = makeCapturingRepo();
+    const policy: ExecutionPolicy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      exitPricingMode: "midpoint-anchored",
+      exitMidpointAnchorTicks: 5,
+      opportunisticTaker: { ...DEFAULT_EXECUTION_POLICY.opportunisticTaker, enabled: false },
+    };
+    const positionRepo = {
+      findByTokenId: vi.fn(() => ({ avgEntryPrice: 0.01 })),
+    } as unknown as PositionRepository;
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => policy,
+      observations: repo,
+      profileId: PROFILE_ID,
+      positionRepo,
+    });
+    bridge.subscribe();
+    const placed: Array<{ command: { price: number } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (p) => {
+      placed.push(p as never);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.01,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 1,
+        reason: "repricing-exit",
+      },
+      market: makeMarket({ bestBid: 0.01, bestAsk: 0.49, midPrice: 0.25, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    // Raw midpoint-anchored rests at 0.489 (ask undercut). avgEntry 0.01 is in the
+    // <0.02 tier (2.5x markup), so F2 caps the placement at 0.01 * 2.5 = 0.025.
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.025);
+    await waitForRows(rows, 1);
+    expect(rows[0]!.selectedPrice).toBe(0.025);
+    // The observe-only shadow still records the raw (pre-cap) violation so the
+    // A/B telemetry retains its diagnostic value.
+    expect(rows[0]!.sellShadowExecutionPrice).toBe(0.489);
+    expect(rows[0]!.sellShadowCap5Violation).toBe(true);
   });
 
   it("leaves BUY observation shadow fields null", async () => {

@@ -311,9 +311,12 @@ export class SignalToOrderBridge {
       const pricing = await this.resolvePricingMarket(signal, baseMarket);
       const market = pricing.market;
 
-      const executionTerms = this.resolveExecutionTerms(signal, market, policy);
+      const rawExecutionTerms = this.resolveExecutionTerms(signal, market, policy);
       const canary = this.buildDeadSideCanary(signal, market, policy);
-      const sellPricingShadow = this.computeSellPricingShadow(signal, executionTerms, policy);
+      // F2: shadow telemetry measures the raw (pre-cap) anchor; the cap only
+      // governs the price that is actually placed.
+      const sellPricingShadow = this.computeSellPricingShadow(signal, rawExecutionTerms, policy);
+      const executionTerms = this.applySellPriceCap(rawExecutionTerms, signal, market);
 
       if (executionTerms.kind === "unavailable") {
         this.log.warn(
@@ -1105,6 +1108,24 @@ export class SignalToOrderBridge {
   }
 
   /**
+   * Track P F2 — clamp a resolved SELL execution price to the Plankton tier cap
+   * (avgEntry * markup, ceiling 0.97). Applied after the SELL pricing shadow is
+   * computed so the observe-only telemetry keeps measuring the raw (pre-cap)
+   * anchor. BUY orders and non-`ok` resolutions pass through untouched.
+   */
+  private applySellPriceCap(
+    resolution: ExecutionTermsResolution,
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+  ): ExecutionTermsResolution {
+    if (signal.side !== "sell" || resolution.kind !== "ok") return resolution;
+    const avgEntry = this.resolveSellShadowAvgEntry(signal).value;
+    const capped = capSellPriceToPlanktonTier(resolution.price, avgEntry, market.tickSize);
+    if (capped === resolution.price) return resolution;
+    return { ...resolution, price: capped };
+  }
+
+  /**
    * ADR-006 D1 (edge mode): BUY = bestBid, SELL = bestAsk.
    * R93 sell-exit guard: default SELL exits are midpoint-anchored while
    * bid-anchored remains available for config rollback.
@@ -1662,6 +1683,54 @@ function resolveMidpointAnchoredSellPriceWithMode(
     return { price: askUnder, anchorMode: "ask_undercut" };
   }
   return { price: base, anchorMode: "midpoint" };
+}
+
+/**
+ * Track P F2 — hard ceiling on any SELL exit target.
+ * A Polymarket price is a probability in [0, 1]; resting a SELL above ~0.97
+ * can never fill. This alone removes the bulk of the 97.8% cancel rate.
+ */
+export const SELL_PRICE_CEILING = 0.97;
+
+/**
+ * Track P F2 — Plankton-aligned SELL markup ceiling by entry tier
+ * (research_plankton/plankton_sell_pricing_playbook_2026-06-04.md).
+ *
+ * Markup is mechanically bounded by entry price: only the cheap (<0.02) tail
+ * can fill at large multiples (median 2.5x). Above ~0.10 entry a constant 10x
+ * target exceeds 1.0 and never fills. The tiers reproduce the analyst's
+ * entry-binned first-markup medians (0.02-0.05 and 0.05-0.15 both 1.36x).
+ */
+export function planktonAlignedMarkupCap(avgEntry: number): number {
+  if (avgEntry < 0.02) return 2.5;
+  if (avgEntry < 0.15) return 1.36;
+  if (avgEntry < 0.35) return 1.17;
+  return 1.1;
+}
+
+/**
+ * Track P F2 — caps a computed SELL price to the lower of the Plankton tier
+ * target (avgEntry * markup) and the 0.97 ceiling, floored to a valid tick.
+ *
+ * When the computed price is already at/below the cap the original price is
+ * returned unchanged (existing anchored pricing preserved). When avgEntry is
+ * unknown only the ceiling applies. A cap that would floor below one tick is
+ * ignored so the function can never produce a non-executable price.
+ */
+export function capSellPriceToPlanktonTier(
+  price: number,
+  avgEntry: number | null,
+  tickSize: number,
+): number {
+  let cap = SELL_PRICE_CEILING;
+  if (avgEntry != null && Number.isFinite(avgEntry) && avgEntry > 0) {
+    cap = Math.min(cap, avgEntry * planktonAlignedMarkupCap(avgEntry));
+  }
+  if (!Number.isFinite(price) || price <= cap) return price;
+  if (!Number.isFinite(tickSize) || tickSize <= 0) return price;
+  const cappedTick = floorToTick(cap, tickSize);
+  if (cappedTick < tickSize) return price;
+  return cappedTick;
 }
 
 function resolveOrderSize(

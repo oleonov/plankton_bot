@@ -1027,4 +1027,87 @@ describe("control-db migration infrastructure", () => {
       .get() as { version: number };
     expect(after.version).toBeGreaterThan(before.version);
   });
+
+  it("migration 061 re-asserts bid-anchored SELL pricing for live-lite only", () => {
+    const dbPath = path.join(tmpDir, "control-live-lite-bid-anchored.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    // Production live-lite drifted back to midpoint-anchored after migration 048
+    // (operator edit), so re-assertion (same pattern as migration 060) is required.
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.exitPricingMode',
+              'midpoint-anchored'
+            )
+          WHERE profile_id IN ('live-lite', 'paper')`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("061_live_lite_exit_pricing_bid_anchored.sql");
+    const before = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare(
+        `SELECT profile_id AS id, execution_policy_json AS json
+           FROM profile_settings
+          WHERE profile_id IN ('live-lite', 'paper')`,
+      )
+      .all() as Array<{ id: string; json: string }>;
+    const modeByProfile = new Map(
+      rows.map((row) => [row.id, JSON.parse(row.json).exitPricingMode as string]),
+    );
+    const after = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+
+    expect(modeByProfile.get("live-lite")).toBe("bid-anchored");
+    // Other profiles are left exactly as they were — migration 061 targets live-lite only.
+    expect(modeByProfile.get("paper")).toBe("midpoint-anchored");
+    expect(after.version).toBeGreaterThan(before.version);
+  });
+
+  it("migration 061 is a no-op when live-lite is already bid-anchored", () => {
+    const dbPath = path.join(tmpDir, "control-live-lite-bid-anchored-noop.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.exitPricingMode',
+              'bid-anchored'
+            )
+          WHERE profile_id = 'live-lite'`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("061_live_lite_exit_pricing_bid_anchored.sql");
+    const before = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const after = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+
+    expect(JSON.parse(raw.json).exitPricingMode).toBe("bid-anchored");
+    expect(after.version).toBe(before.version);
+  });
 });
