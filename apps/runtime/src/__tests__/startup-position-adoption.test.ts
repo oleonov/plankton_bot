@@ -19,7 +19,10 @@ import {
   type ClientOrderId,
   type ExchangeFill,
 } from "@krabs/domain";
-import { runStartupPositionAdoption } from "../startup-position-adoption.js";
+import {
+  cleanupPriorStartupAdoptionArtifacts,
+  runStartupPositionAdoption,
+} from "../startup-position-adoption.js";
 
 const TOKEN_ID = createTokenId("tok-btc-yes");
 
@@ -817,5 +820,171 @@ describe("runStartupPositionAdoption", () => {
       expect(result.seededLegStates).toBe(1);
       expect(legStateRepo.get(TOKEN_ID)?.buyCount).toBe(1);
     });
+  });
+});
+
+describe("cleanupPriorStartupAdoptionArtifacts — orphan-loop guard", () => {
+  const connections: Array<ReturnType<typeof bootstrapLedgerDb>> = [];
+
+  afterEach(() => {
+    while (connections.length > 0) {
+      connections.pop()!.close();
+    }
+  });
+
+  type LedgerDb = ReturnType<typeof bootstrapLedgerDb>["db"];
+
+  function makeDeps(db: LedgerDb): Parameters<typeof cleanupPriorStartupAdoptionArtifacts>[0] {
+    return { db, log: silentLog } as unknown as Parameters<
+      typeof cleanupPriorStartupAdoptionArtifacts
+    >[0];
+  }
+
+  function rowExists(db: LedgerDb, table: string, column: string, value: string): boolean {
+    return db.prepare(`SELECT 1 FROM ${table} WHERE ${column} = ?`).get(value) !== undefined;
+  }
+
+  function insertSyntheticOrder(db: LedgerDb, token: string, orderId: string): void {
+    db.prepare(
+      `INSERT INTO orders
+         (order_id, client_order_id, token_id, condition_id, side, order_type,
+          price, size, size_usdc, status, signal_reason, bot_run_id, created_at, updated_at)
+       VALUES (?, ?, ?, 'cond-1', 'sell', 'GTC', 0.023, 7.43, 0.17089, 'filled',
+               'startup-adoption', 'run-1', '2026-06-05T03:48:51Z', '2026-06-05T03:48:51Z')`,
+    ).run(orderId, `coid-${orderId}`, token);
+  }
+
+  function seedSyntheticArtifact(
+    db: LedgerDb,
+    opts: {
+      token: string;
+      orderId: string;
+      fillId: string;
+      positionId: string;
+      lotId: string;
+      reconciled: 0 | 1;
+      withLegStateTransition: boolean;
+    },
+  ): void {
+    insertSyntheticOrder(db, opts.token, opts.orderId);
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, status, opened_at, updated_at)
+       VALUES (?, ?, 'cond-1', 'buy', 7.43, 0.006, 0.04458, 'open',
+               '2026-06-05T03:48:51Z', '2026-06-05T03:48:51Z')`,
+    ).run(opts.positionId, opts.token);
+    db.prepare(
+      `INSERT INTO fills
+         (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc,
+          liquidity_role, reconciled, filled_at)
+       VALUES (?, ?, ?, 'cond-1', 'sell', 0.023, 7.43, 0.17089, 'maker', ?,
+               '2026-06-05T03:48:51Z')`,
+    ).run(opts.fillId, opts.orderId, opts.token, opts.reconciled);
+    db.prepare(
+      `INSERT INTO inventory_lots
+         (lot_id, position_id, token_id, side, size, remaining_size, entry_price, cost_usdc, fill_id, created_at)
+       VALUES (?, ?, ?, 'buy', 7.43, 7.43, 0.006, 0.04458, ?, '2026-06-05T03:48:51Z')`,
+    ).run(opts.lotId, opts.positionId, opts.token, opts.fillId);
+    if (opts.withLegStateTransition) {
+      db.prepare(
+        `INSERT INTO leg_state_transitions
+           (token_id, position_id, fill_id, order_id, from_phase, to_phase, action,
+            from_buy_count, from_sell_count, to_buy_count, to_sell_count, reason, occurred_at)
+         VALUES (?, ?, ?, ?, 'S2', 'S2', 'SELL', 1, 3, 1, 4, 'orphan-reconciled', '2026-06-05T03:48:51Z')`,
+      ).run(opts.token, opts.positionId, opts.fillId, opts.orderId);
+    }
+  }
+
+  it("preserves a reconciled orphan adoption order already reflected in leg state (loop fix → NOT re-adopted)", () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    seedSyntheticArtifact(conn.db, {
+      token: "tok-loop",
+      orderId: "ord-loop",
+      fillId: "fill-loop",
+      positionId: "pos-loop",
+      lotId: "lot-loop",
+      reconciled: 1,
+      withLegStateTransition: true,
+    });
+
+    const result = cleanupPriorStartupAdoptionArtifacts(makeDeps(conn.db));
+
+    expect(result.orderIds).toEqual([]);
+    expect(rowExists(conn.db, "orders", "order_id", "ord-loop")).toBe(true);
+    expect(rowExists(conn.db, "fills", "fill_id", "fill-loop")).toBe(true);
+    expect(rowExists(conn.db, "inventory_lots", "lot_id", "lot-loop")).toBe(true);
+    expect(rowExists(conn.db, "positions", "position_id", "pos-loop")).toBe(true);
+  });
+
+  it("removes an unreconciled orphan adoption order, and one with no fill (backward compat → existing behavior)", () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    // (a) reconciled = 0 even though it has a leg-state transition → still removed.
+    seedSyntheticArtifact(conn.db, {
+      token: "tok-bw",
+      orderId: "ord-bw",
+      fillId: "fill-bw",
+      positionId: "pos-bw",
+      lotId: "lot-bw",
+      reconciled: 0,
+      withLegStateTransition: true,
+    });
+    // (b) a synthetic order with no fill at all → guard sees a null fill id and
+    //     stays out of the way; existing behavior removes it.
+    insertSyntheticOrder(conn.db, "tok-nofill", "ord-nofill");
+
+    const result = cleanupPriorStartupAdoptionArtifacts(makeDeps(conn.db));
+
+    expect(result.orderIds.sort()).toEqual(["ord-bw", "ord-nofill"]);
+    expect(rowExists(conn.db, "orders", "order_id", "ord-bw")).toBe(false);
+    expect(rowExists(conn.db, "fills", "fill_id", "fill-bw")).toBe(false);
+    expect(rowExists(conn.db, "inventory_lots", "lot_id", "lot-bw")).toBe(false);
+    expect(rowExists(conn.db, "orders", "order_id", "ord-nofill")).toBe(false);
+  });
+
+  it("removes a reconciled orphan adoption order that is not reflected in leg state (missing leg-state entry → removal)", () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    seedSyntheticArtifact(conn.db, {
+      token: "tok-noleg",
+      orderId: "ord-noleg",
+      fillId: "fill-noleg",
+      positionId: "pos-noleg",
+      lotId: "lot-noleg",
+      reconciled: 1,
+      withLegStateTransition: false,
+    });
+
+    const result = cleanupPriorStartupAdoptionArtifacts(makeDeps(conn.db));
+
+    expect(result.orderIds).toEqual(["ord-noleg"]);
+    expect(rowExists(conn.db, "orders", "order_id", "ord-noleg")).toBe(false);
+    expect(rowExists(conn.db, "fills", "fill_id", "fill-noleg")).toBe(false);
+    expect(rowExists(conn.db, "inventory_lots", "lot_id", "lot-noleg")).toBe(false);
+  });
+
+  it("is safe and removes nothing when there are no startup-adoption artifacts (fill not found)", () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    // A non-synthetic order — outside the cleanup's signal_reason scope.
+    conn.db
+      .prepare(
+        `INSERT INTO orders
+           (order_id, client_order_id, token_id, condition_id, side, order_type,
+            price, size, size_usdc, status, signal_reason, bot_run_id, created_at, updated_at)
+         VALUES ('ord-real', 'coid-real', 'tok-real', 'cond-1', 'buy', 'GTC', 0.4, 10, 4, 'filled',
+                 'first_entry', 'run-1', '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z')`,
+      )
+      .run();
+
+    let result: ReturnType<typeof cleanupPriorStartupAdoptionArtifacts> | undefined;
+    expect(() => {
+      result = cleanupPriorStartupAdoptionArtifacts(makeDeps(conn.db));
+    }).not.toThrow();
+
+    expect(result?.orderIds).toEqual([]);
+    expect(rowExists(conn.db, "orders", "order_id", "ord-real")).toBe(true);
   });
 });

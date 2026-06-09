@@ -176,9 +176,12 @@ describe("ledger schema — score columns (audit §F3)", () => {
         order_id TEXT PRIMARY KEY,
         client_order_id TEXT,
         token_id TEXT,
+        side TEXT,
         status TEXT,
+        signal_reason TEXT,
         exchange_order_id TEXT,
-        bot_run_id TEXT
+        bot_run_id TEXT,
+        updated_at TEXT
       );
 
       CREATE TABLE fills (
@@ -196,6 +199,8 @@ describe("ledger schema — score columns (audit §F3)", () => {
 
       CREATE TABLE leg_states (
         token_id TEXT PRIMARY KEY,
+        sell_count INTEGER NOT NULL DEFAULT 0,
+        cumulative_sell_size REAL NOT NULL DEFAULT 0,
         first_trade_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -206,7 +211,9 @@ describe("ledger schema — score columns (audit §F3)", () => {
         status TEXT NOT NULL,
         size REAL NOT NULL DEFAULT 0,
         cost_basis_usdc REAL NOT NULL DEFAULT 0,
+        current_value_usdc REAL,
         avg_entry_price REAL,
+        realized_pnl REAL NOT NULL DEFAULT 0,
         opened_at TEXT NOT NULL DEFAULT (datetime('now')),
         closed_at TEXT,
         updated_at TEXT NOT NULL

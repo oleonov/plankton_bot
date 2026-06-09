@@ -433,7 +433,33 @@ function rebuildLegStatesFromLedger(
   }
 }
 
-function cleanupPriorStartupAdoptionArtifacts(
+/**
+ * Durable orphan-loop guard (Option B1). A fill that is already `reconciled = 1`
+ * AND recorded in `leg_state_transitions` is terminal: it has been fully
+ * processed and must never be re-adopted. Removing its synthetic adoption order
+ * here would make `rebuildTokenPosition` + re-adoption replay the fill via
+ * `consumeFifo`, over-consuming lots and re-triggering the self-perpetuating
+ * "Insufficient inventory" loop (see
+ * research_plankton/inventory_drift_investigation_2026-06-10.md §6-8).
+ *
+ * Fail-safe by design: returns `true` (preserve) ONLY on positive confirmation
+ * of both conditions. A missing fill id, an absent fill row, an unreconciled
+ * fill, or a fill not yet in leg state all return `false`, so the existing
+ * removal behavior is preserved for every non-pathological case.
+ */
+export function isTerminalReconciledOrphan(db: Database.Database, fillId: string | null): boolean {
+  if (!fillId) return false;
+  const fill = db.prepare("SELECT reconciled FROM fills WHERE fill_id = ?").get(fillId) as
+    | { reconciled: number }
+    | undefined;
+  if (!fill || fill.reconciled !== 1) return false;
+  const legState = db
+    .prepare("SELECT 1 AS present FROM leg_state_transitions WHERE fill_id = ? LIMIT 1")
+    .get(fillId) as { present: number } | undefined;
+  return legState !== undefined;
+}
+
+export function cleanupPriorStartupAdoptionArtifacts(
   deps: StartupPositionAdoptionDeps,
 ): StartupAdoptionCleanupResult {
   const rows = deps.db
@@ -452,9 +478,28 @@ function cleanupPriorStartupAdoptionArtifacts(
     token_id: string | null;
   }>;
 
-  const orderIds = [...new Set(rows.map((row) => row.order_id))];
-  const fillIds = [...new Set(rows.map((row) => row.fill_id).filter(Boolean))] as string[];
-  const tokenIds = [...new Set(rows.map((row) => row.token_id).filter(Boolean))] as string[];
+  // Never remove artifacts whose fill is a terminal reconciled orphan — doing so
+  // restarts the over-consumption loop. Preserve the whole order if any of its
+  // fills is terminal (conservative: errs toward not re-adopting).
+  const skipOrderIds = new Set(
+    rows
+      .filter((row) => isTerminalReconciledOrphan(deps.db, row.fill_id))
+      .map((row) => row.order_id),
+  );
+  const removableRows = rows.filter((row) => !skipOrderIds.has(row.order_id));
+
+  const orderIds = [...new Set(removableRows.map((row) => row.order_id))];
+  const fillIds = [...new Set(removableRows.map((row) => row.fill_id).filter(Boolean))] as string[];
+  const tokenIds = [
+    ...new Set(removableRows.map((row) => row.token_id).filter(Boolean)),
+  ] as string[];
+
+  if (skipOrderIds.size > 0) {
+    deps.log.info(
+      { preservedReconciledOrphanOrders: skipOrderIds.size },
+      "preserved reconciled orphan adoption artifacts (orphan-loop guard)",
+    );
+  }
 
   if (orderIds.length === 0) {
     return { orderIds, fillIds, tokenIds };

@@ -529,3 +529,270 @@ describe("migration 061 — redeem quarantine fields", () => {
     );
   });
 });
+
+describe("migration 066 — orphan fill correction (token 34928863…)", () => {
+  const TOKEN = "34928863542604747577136069195537517831839938618288352858238947625130728675067";
+  const POSITION_ID = `pos-${TOKEN}-1779091115233`;
+  const ORPHAN_FILL = "212af2ee-9b5f-430d-be71-bfa9b99bc3a8#maker:0";
+  const LOT_NEWEST = "lot-3f38410b-a321-45d3-be92-cc0badf86292#maker:0";
+  const LOT_MID = "lot-1ff2d9ae-2563-494b-90b8-69c66ccd9bc1#maker:0";
+  const LOT_PARTIAL = "lot-c6bd9df0-55cb-4556-9e9d-f84b8631470f#maker:0";
+  const LOT_OLD = "lot-00000000-0000-0000-0000-fullyconsumed#maker:0";
+  const SYNTH_ORDER = "synthetic-orphan-adoption-order";
+
+  beforeEach(() => {
+    db.exec(`
+      CREATE TABLE fills (
+        fill_id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        price REAL NOT NULL,
+        size REAL NOT NULL,
+        size_usdc REAL NOT NULL,
+        liquidity_role TEXT NOT NULL DEFAULT 'unknown',
+        reconciled INTEGER NOT NULL DEFAULT 0,
+        filled_at TEXT NOT NULL
+      );
+      CREATE TABLE inventory_lots (
+        lot_id TEXT PRIMARY KEY,
+        position_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        size REAL NOT NULL,
+        remaining_size REAL NOT NULL,
+        entry_price REAL NOT NULL,
+        cost_usdc REAL NOT NULL,
+        fill_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE leg_states (
+        token_id TEXT PRIMARY KEY,
+        buy_count INTEGER NOT NULL DEFAULT 0,
+        sell_count INTEGER NOT NULL DEFAULT 0,
+        last_action TEXT NOT NULL,
+        first_trade_price REAL NOT NULL,
+        first_trade_at TEXT NOT NULL,
+        last_trade_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        cumulative_buy_size REAL NOT NULL DEFAULT 0,
+        cumulative_buy_notional REAL NOT NULL DEFAULT 0,
+        cumulative_sell_size REAL NOT NULL DEFAULT 0
+      );
+      CREATE TABLE orders (
+        order_id TEXT PRIMARY KEY,
+        client_order_id TEXT,
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        signal_reason TEXT,
+        created_at TEXT,
+        updated_at TEXT
+      );
+    `);
+  });
+
+  function insertLot(lotId: string, size: number, remaining: number, createdAt: string): void {
+    db.prepare(
+      `INSERT INTO inventory_lots
+         (lot_id, position_id, token_id, side, size, remaining_size, entry_price, cost_usdc, fill_id, created_at)
+       VALUES (?, ?, ?, 'buy', ?, ?, 0.006, ?, ?, ?)`,
+    ).run(lotId, POSITION_ID, TOKEN, size, remaining, size * 0.006, `f-${lotId}`, createdAt);
+  }
+
+  function seedBrokenState(): void {
+    // Over-consumed open position (lots drained to sub-epsilon dust by the loop).
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, updated_at)
+       VALUES (?, ?, 'cond-1', 'buy', 0.0009999, 0.006, 0.0000059994, 0.0000061,
+               0.778664, 'open', '2026-05-01T00:00:00Z', '2026-06-05T00:00:00Z')`,
+    ).run(POSITION_ID, TOKEN);
+    // Orphan repricing-exit SELL fill that filled on-chain after local cancel — unreconciled.
+    db.prepare(
+      `INSERT INTO fills
+         (fill_id, order_id, token_id, side, price, size, size_usdc, liquidity_role, reconciled, filled_at)
+       VALUES (?, ?, ?, 'sell', 0.023, 7.43, 0.17089, 'maker', 0, '2026-06-05T03:48:51Z')`,
+    ).run(ORPHAN_FILL, SYNTH_ORDER, TOKEN);
+    // Synthetic startup-adoption order created during re-adoption of the orphan.
+    db.prepare(
+      `INSERT INTO orders (order_id, client_order_id, token_id, side, signal_reason, created_at, updated_at)
+       VALUES (?, 'coid-orphan', ?, 'sell', 'startup-adoption', '2026-06-05T03:48:51Z', '2026-06-05T03:48:51Z')`,
+    ).run(SYNTH_ORDER, TOKEN);
+    // 8 buy lots in reality; the 3 newest carry the surviving net, the rest stay 0.
+    insertLot(LOT_OLD, 82.681, 0, "2026-05-01T00:00:00Z");
+    insertLot(LOT_PARTIAL, 13, 0, "2026-05-20T00:00:00Z");
+    insertLot(LOT_MID, 7, 0, "2026-05-25T00:00:00Z");
+    insertLot(LOT_NEWEST, 13, 0.0009999, "2026-05-30T00:00:00Z");
+    // Leg state with the orphan sell NOT yet counted (5 of 6; 93.251 = the 5 reconciled sells).
+    db.prepare(
+      `INSERT INTO leg_states
+         (token_id, buy_count, sell_count, last_action, first_trade_price, first_trade_at,
+          last_trade_at, updated_at, cumulative_buy_size, cumulative_buy_notional, cumulative_sell_size)
+       VALUES (?, 8, 5, 'SELL', 0.006, '2026-05-01T00:00:00Z', '2026-06-07T00:00:00Z',
+               '2026-06-07T00:00:00Z', 122.972, 0.737832, 93.251)`,
+    ).run(TOKEN);
+  }
+
+  it("reconciles the orphan sell-fill and restores inventory, position, and leg state to the wallet-confirmed net", () => {
+    seedBrokenState();
+
+    // Pre-state assertion — confirm the broken shape the migration is correcting.
+    expect(
+      (
+        db
+          .prepare("SELECT size, realized_pnl FROM positions WHERE position_id = ?")
+          .get(POSITION_ID) as {
+          size: number;
+          realized_pnl: number;
+        }
+      ).size,
+    ).toBeCloseTo(0.0009999, 7);
+    expect(
+      (
+        db.prepare("SELECT reconciled FROM fills WHERE fill_id = ?").get(ORPHAN_FILL) as {
+          reconciled: number;
+        }
+      ).reconciled,
+    ).toBe(0);
+    expect(
+      (
+        db
+          .prepare("SELECT sell_count, cumulative_sell_size FROM leg_states WHERE token_id = ?")
+          .get(TOKEN) as {
+          sell_count: number;
+          cumulative_sell_size: number;
+        }
+      ).sell_count,
+    ).toBe(5);
+    expect(
+      (
+        db.prepare("SELECT signal_reason FROM orders WHERE order_id = ?").get(SYNTH_ORDER) as {
+          signal_reason: string;
+        }
+      ).signal_reason,
+    ).toBe("startup-adoption");
+
+    db.exec(readMigration("066_orphan_fill_correction_token_34928863.sql"));
+
+    // Inventory restored to net 22.291 across the 3 newest lots; older lot untouched.
+    const lots = db.prepare("SELECT lot_id, remaining_size FROM inventory_lots").all() as Array<{
+      lot_id: string;
+      remaining_size: number;
+    }>;
+    const remaining = new Map(lots.map((l) => [l.lot_id, l.remaining_size]));
+    expect(remaining.get(LOT_NEWEST)).toBeCloseTo(13.0, 6);
+    expect(remaining.get(LOT_MID)).toBeCloseTo(7.0, 6);
+    expect(remaining.get(LOT_PARTIAL)).toBeCloseTo(2.291, 6);
+    expect(remaining.get(LOT_OLD)).toBeCloseTo(0, 9);
+    const totalRemaining = lots.reduce((sum, l) => sum + l.remaining_size, 0);
+    expect(totalRemaining).toBeCloseTo(22.291, 6);
+
+    const position = db
+      .prepare(
+        "SELECT size, avg_entry_price, cost_basis_usdc, current_value_usdc, realized_pnl, status FROM positions WHERE position_id = ?",
+      )
+      .get(POSITION_ID) as {
+      size: number;
+      avg_entry_price: number;
+      cost_basis_usdc: number;
+      current_value_usdc: number;
+      realized_pnl: number;
+      status: string;
+    };
+    expect(position.size).toBeCloseTo(22.291, 6);
+    expect(position.avg_entry_price).toBeCloseTo(0.006, 9);
+    expect(position.cost_basis_usdc).toBeCloseTo(0.133746, 6);
+    expect(position.current_value_usdc).toBeCloseTo(0.4123, 6);
+    expect(position.realized_pnl).toBeCloseTo(0.904974, 6);
+    expect(position.status).toBe("open");
+
+    expect(
+      (
+        db.prepare("SELECT reconciled FROM fills WHERE fill_id = ?").get(ORPHAN_FILL) as {
+          reconciled: number;
+        }
+      ).reconciled,
+    ).toBe(1);
+
+    const legState = db
+      .prepare("SELECT sell_count, cumulative_sell_size FROM leg_states WHERE token_id = ?")
+      .get(TOKEN) as { sell_count: number; cumulative_sell_size: number };
+    expect(legState.sell_count).toBe(6);
+    expect(legState.cumulative_sell_size).toBeCloseTo(100.681, 6);
+
+    expect(
+      (
+        db.prepare("SELECT signal_reason FROM orders WHERE order_id = ?").get(SYNTH_ORDER) as {
+          signal_reason: string;
+        }
+      ).signal_reason,
+    ).toBe("orphan-reconciled-20260610");
+  });
+
+  it("is idempotent — replaying the migration writes nothing and does not corrupt the corrected state", () => {
+    seedBrokenState();
+    db.exec(readMigration("066_orphan_fill_correction_token_34928863.sql"));
+
+    const beforeReplay = db.prepare("SELECT total_changes() AS count").get() as { count: number };
+    db.exec(readMigration("066_orphan_fill_correction_token_34928863.sql"));
+    const afterReplay = db.prepare("SELECT total_changes() AS count").get() as { count: number };
+    expect(afterReplay.count - beforeReplay.count).toBe(0);
+
+    // Corrected values survive the replay unchanged (no double-write).
+    const position = db
+      .prepare("SELECT size, realized_pnl FROM positions WHERE position_id = ?")
+      .get(POSITION_ID) as { size: number; realized_pnl: number };
+    expect(position.size).toBeCloseTo(22.291, 6);
+    expect(position.realized_pnl).toBeCloseTo(0.904974, 6);
+    const legState = db
+      .prepare("SELECT cumulative_sell_size FROM leg_states WHERE token_id = ?")
+      .get(TOKEN) as { cumulative_sell_size: number };
+    expect(legState.cumulative_sell_size).toBeCloseTo(100.681, 6);
+    expect(
+      (
+        db
+          .prepare("SELECT remaining_size FROM inventory_lots WHERE lot_id = ?")
+          .get(LOT_NEWEST) as {
+          remaining_size: number;
+        }
+      ).remaining_size,
+    ).toBeCloseTo(13.0, 6);
+  });
+
+  it("is a no-op on ledgers without the orphan fill (sim/paper safety)", () => {
+    // An unrelated open position + an unrelated startup-adoption order for a different
+    // token, and no orphan fill at all — mirrors a sim/paper ledger.
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, status, opened_at, updated_at)
+       VALUES ('pos-other', 'tok-other', 'cond-x', 'buy', 50, 'open',
+               '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO orders (order_id, client_order_id, token_id, side, signal_reason, created_at, updated_at)
+       VALUES ('ord-other', 'coid-other', 'tok-other', 'sell', 'startup-adoption',
+               '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z')`,
+    ).run();
+
+    const before = db.prepare("SELECT total_changes() AS count").get() as { count: number };
+    db.exec(readMigration("066_orphan_fill_correction_token_34928863.sql"));
+    const after = db.prepare("SELECT total_changes() AS count").get() as { count: number };
+    expect(after.count - before.count).toBe(0);
+
+    expect(
+      (
+        db.prepare("SELECT size FROM positions WHERE position_id = 'pos-other'").get() as {
+          size: number;
+        }
+      ).size,
+    ).toBe(50);
+    expect(
+      (
+        db.prepare("SELECT signal_reason FROM orders WHERE order_id = 'ord-other'").get() as {
+          signal_reason: string;
+        }
+      ).signal_reason,
+    ).toBe("startup-adoption");
+  });
+});
