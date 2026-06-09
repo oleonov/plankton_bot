@@ -96,6 +96,30 @@ describe("MarketSnapshotPriceHistoryProvider", () => {
     expect(provider.maxMidpointInWindow(createTokenId("missing"), 60 * 60_000, now)).toBeNull();
   });
 
+  it("computes midpoint range stats for entry fresh-edge telemetry", () => {
+    const conn = setupDb();
+    const now = Date.parse("2026-05-18T12:00:00.000Z");
+    const insert = conn.prepare(
+      "INSERT INTO market_snapshots (token_id, best_bid, best_ask, last_price, captured_at) VALUES (?, ?, ?, ?, ?)",
+    );
+    insert.run("tok", 0.09, 0.11, null, "2026-05-18T11:10:00.000Z");
+    insert.run("tok", 0.29, 0.31, null, "2026-05-18T11:30:00.000Z");
+    insert.run("tok", null, null, 0.2, "2026-05-18T11:50:00.000Z");
+    insert.run("tok", 0.79, 0.81, null, "2026-05-18T10:59:59.000Z");
+
+    const provider = new MarketSnapshotPriceHistoryProvider(conn);
+
+    expect(provider.midpointStatsInWindow(createTokenId("tok"), 60 * 60_000, now)).toMatchObject({
+      minMidpoint: 0.1,
+      maxMidpoint: 0.3,
+      minAtMs: Date.parse("2026-05-18T11:10:00.000Z"),
+      maxAtMs: Date.parse("2026-05-18T11:30:00.000Z"),
+      firstMidpoint: 0.1,
+      lastMidpoint: 0.2,
+      sampleCount: 3,
+    });
+  });
+
   it("caches window max results briefly to avoid per-tick full DB rescans", () => {
     const conn = setupDb();
     const now = Date.parse("2026-05-18T12:00:00.000Z");

@@ -137,4 +137,52 @@ describe("SqliteDecisionSignalLogRepository", () => {
       sold_bought_ratio_bucket: null,
     });
   });
+
+  it("persists observe-only entry fresh-edge telemetry payloads", () => {
+    const payload = {
+      tokenId: "tok-3",
+      shadowClassification: "AFTER_PUMP_EXPENSIVE",
+      windows: { "1h": { midpointPercentile: 0.94 } },
+    };
+    repo.insert({
+      signalId: "sig-3",
+      tokenId: createTokenId("tok-3"),
+      conditionId: createConditionId("cond-3"),
+      side: "BUY",
+      decisionRuleId: "FALLBACK",
+      sizingRuleId: "B5",
+      notionalBucket: "$1-$2",
+      state: "OTHER",
+      price: 0.42,
+      buyCount: 0,
+      timeSinceLastSeconds: null,
+      signalTimestamp: "2026-06-06T00:00:00.000Z",
+      isAdd: 0,
+      addAgeMs: null,
+      addAgeBucket: null,
+      addPriceChangePct: null,
+      addPriceChangeBucket: null,
+      nthBuyAtEmit: 1,
+      isExit: 0,
+      isFirstSell: null,
+      holdingTimeMs: null,
+      holdingTimeBucket: null,
+      exitPnlPct: null,
+      exitPnlBucket: null,
+      soldBoughtRatio: null,
+      soldBoughtRatioBucket: null,
+      entryFreshEdgeKind: "first_entry",
+      entryFreshEdgeShadowClass: "AFTER_PUMP_EXPENSIVE",
+      entryFreshEdgePayloadJson: JSON.stringify(payload),
+    });
+
+    const row = conn.db
+      .prepare("SELECT * FROM decision_signal_log WHERE signal_id = ?")
+      .get("sig-3") as Record<string, unknown> | undefined;
+    expect(row).toMatchObject({
+      entry_fresh_edge_kind: "first_entry",
+      entry_fresh_edge_shadow_class: "AFTER_PUMP_EXPENSIVE",
+      entry_fresh_edge_payload_json: JSON.stringify(payload),
+    });
+  });
 });

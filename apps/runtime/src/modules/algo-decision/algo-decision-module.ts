@@ -92,6 +92,11 @@ import type {
 } from "./decision-planner.js";
 import type { PriceHistoryProvider } from "./market-snapshot-price-history.js";
 import type { WindowMaxCacheMetrics } from "./market-snapshot-price-history.js";
+import {
+  ENTRY_FRESH_EDGE_WINDOW_MS,
+  computeEntryFreshEdgeSignalFields,
+  type EntryFreshEdgeSignalFields,
+} from "./entry-fresh-edge.js";
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
 
@@ -1577,6 +1582,10 @@ export class AlgoDecisionModule implements RuntimeModule {
       sizingRuleId: draft.sizingRuleId,
       generatedAt,
     };
+    const entryFreshEdgeTelemetry =
+      signal.side === "buy"
+        ? this.computeEntryFreshEdgeTelemetry(draft.market, now, signal, draft.logDraft.buyCount)
+        : null;
     return {
       type: "signal",
       signal,
@@ -1589,6 +1598,9 @@ export class AlgoDecisionModule implements RuntimeModule {
             tokenId: signal.tokenId,
             conditionId: signal.conditionId,
             signalTimestamp: generatedAt,
+            entryFreshEdgeKind: entryFreshEdgeTelemetry?.entryFreshEdgeKind ?? null,
+            entryFreshEdgeShadowClass: entryFreshEdgeTelemetry?.entryFreshEdgeShadowClass ?? null,
+            entryFreshEdgePayloadJson: entryFreshEdgeTelemetry?.entryFreshEdgePayloadJson ?? null,
           },
           draft.emissionFacts,
           draft.triggerTelemetry,
@@ -2516,6 +2528,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     // Mirrors the §D-B BUY-side adds-telemetry pattern: BUY/REDEEM rows carry
     // nulls so decision_signal_log stays one-row-per-emission.
     const exitTelemetry = computeExitTelemetry(side, ctx.price, now, emissionFacts);
+    const entryFreshEdgeTelemetry =
+      side === "buy" ? this.computeEntryFreshEdgeTelemetry(market, now, signal, buyCount) : null;
 
     const commitLog = (): void => {
       this.recordDecisionSignal(
@@ -2539,6 +2553,9 @@ export class AlgoDecisionModule implements RuntimeModule {
           addPriceChangeBucket: classifyAddPriceChangeBucket(addPriceChangePct),
           nthBuyAtEmit,
           ...exitTelemetry,
+          entryFreshEdgeKind: entryFreshEdgeTelemetry?.entryFreshEdgeKind ?? null,
+          entryFreshEdgeShadowClass: entryFreshEdgeTelemetry?.entryFreshEdgeShadowClass ?? null,
+          entryFreshEdgePayloadJson: entryFreshEdgeTelemetry?.entryFreshEdgePayloadJson ?? null,
         },
         emissionFacts,
         triggerTelemetry,
@@ -2546,6 +2563,68 @@ export class AlgoDecisionModule implements RuntimeModule {
     };
 
     return { type: "signal", signal, market, commitLog };
+  }
+
+  private computeEntryFreshEdgeTelemetry(
+    market: NormalizedMarket,
+    now: number,
+    signal: import("@krabs/domain").Signal,
+    buyCount: number,
+  ): EntryFreshEdgeSignalFields | null {
+    try {
+      const policy = this.deps.executionPolicy?.();
+      const marketAgeThresholdSeconds =
+        buyCount === 0 && policy ? policy.entryMinMarketAgeSeconds : null;
+      const marketAgeSeconds = computeMarketAgeSeconds(market.gammaCreatedAt, now);
+      const marketAgeGatePassed =
+        marketAgeThresholdSeconds != null
+          ? evaluateMinMarketAge({
+              gammaCreatedAt: market.gammaCreatedAt ?? null,
+              thresholdSeconds: marketAgeThresholdSeconds,
+              nowMs: now,
+            }).ok
+          : null;
+      const provider = this.deps.priceHistoryProvider;
+      return computeEntryFreshEdgeSignalFields({
+        market,
+        nowMs: now,
+        decisionRuleId: signal.decisionRuleId,
+        signalReason: signal.reason,
+        buyCount,
+        marketAgeSeconds,
+        marketAgeThresholdSeconds,
+        marketAgeGatePassed,
+        windowStats: {
+          "1h":
+            provider?.midpointStatsInWindow?.(
+              market.tokenId,
+              ENTRY_FRESH_EDGE_WINDOW_MS["1h"],
+              now,
+            ) ?? null,
+          "6h":
+            provider?.midpointStatsInWindow?.(
+              market.tokenId,
+              ENTRY_FRESH_EDGE_WINDOW_MS["6h"],
+              now,
+            ) ?? null,
+          "24h":
+            provider?.midpointStatsInWindow?.(
+              market.tokenId,
+              ENTRY_FRESH_EDGE_WINDOW_MS["24h"],
+              now,
+            ) ?? null,
+        },
+      });
+    } catch (err) {
+      this.log.warn(
+        {
+          tokenId: String(market.tokenId),
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "entry fresh-edge telemetry failed",
+      );
+      return null;
+    }
   }
 
   private recordDecisionSignal(
@@ -2912,4 +2991,12 @@ function resolveDaysToResolve(endDate: string | null, nowMs: number): number | n
   if (!Number.isFinite(endMs)) return null;
   const daysToResolve = (endMs - nowMs) / 86_400_000;
   return Number.isFinite(daysToResolve) ? daysToResolve : null;
+}
+
+function computeMarketAgeSeconds(gammaCreatedAt: string | null, nowMs: number): number | null {
+  if (gammaCreatedAt == null || gammaCreatedAt.trim() === "") return null;
+  const createdMs = Date.parse(gammaCreatedAt);
+  if (!Number.isFinite(createdMs)) return null;
+  const ageSeconds = (nowMs - createdMs) / 1000;
+  return Number.isFinite(ageSeconds) && ageSeconds >= 0 ? ageSeconds : null;
 }
