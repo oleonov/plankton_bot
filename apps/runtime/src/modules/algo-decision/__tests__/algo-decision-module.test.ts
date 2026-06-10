@@ -1,9 +1,11 @@
+import Database from "better-sqlite3";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   AlgoDecisionModule,
   conversionSkipReEvalDelayMs,
   isInputsUnchangedConversionSkip,
 } from "../algo-decision-module.js";
+import { RuntimeMetricWriter } from "../../../runtime-metric-writer.js";
 import type { SelectedMarketCache } from "../algo-decision-module.js";
 import type { DecisionPlanSideEffect, TrackQShadowProjection } from "../decision-planner.js";
 import type {
@@ -5356,6 +5358,103 @@ describe("AlgoDecisionModule", () => {
       expect(health.detail).toContain("wouldActivate=2");
 
       await mod.stop();
+    });
+
+    it("persists shadow eval counters to runtime_metrics and recovers them by SUM across a restart", async () => {
+      const db = new Database(":memory:");
+      db.exec(`
+        CREATE TABLE runtime_metrics (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          metric_name TEXT NOT NULL,
+          value REAL NOT NULL,
+          labels TEXT,
+          captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      const sumOf = (metricName: string): number =>
+        (
+          db
+            .prepare(
+              "SELECT COALESCE(SUM(value), 0) AS s FROM runtime_metrics WHERE metric_name = ?",
+            )
+            .get(metricName) as { s: number }
+        ).s;
+
+      const projection: TrackQShadowProjection = {
+        p3WouldActivate: true,
+        reason: "tier_floor_applied",
+        spreadMidRatio: 1.6,
+        bidAskRatio: 0.1,
+        bidAnchoredPrice: 0.09,
+        tierMarkup: 1.36,
+        tierTarget: 0.136,
+        insideAsk: 0.24,
+        p3CandidatePrice: 0.14,
+        avgEntry: 0.1,
+        currentGuardWouldSuppress: true,
+        proposedGuardWouldSuppress: false,
+        d8FireAtCurrentPrice: false,
+        d8FireAtP3Candidate: false,
+        d8FireWouldChange: true,
+      };
+      const sideEffect: DecisionPlanSideEffect = {
+        kind: "track_q_shadow",
+        tokenId: createTokenId("token-trackq-persist"),
+        conditionId: "cond-trackq-persist",
+        timestamp: "2026-06-12T00:00:00.000Z",
+        evalPrice: 0.15,
+        projection,
+      };
+
+      // ── Process #1: two evals, then flush the central writer. ──
+      const writer1 = new RuntimeMetricWriter(db);
+      const mod1 = buildModule({
+        runtimeMetrics: writer1,
+        riskEventRepo: { insert: vi.fn(), countSince: vi.fn() },
+      });
+      await mod1.start();
+      (mod1 as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      (mod1 as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      writer1.flushCounters();
+      await mod1.stop();
+
+      expect(sumOf("track_q_shadow_evals_total")).toBe(2);
+
+      // ── Process #2: restart on the SAME db — in-memory counters reset, the
+      // persisted deltas survive and accumulate via SUM. ──
+      const writer2 = new RuntimeMetricWriter(db);
+      const mod2 = buildModule({
+        runtimeMetrics: writer2,
+        riskEventRepo: { insert: vi.fn(), countSince: vi.fn() },
+      });
+      await mod2.start();
+      expect((mod2 as any).trackQShadow.evals).toBe(0); // fresh process, in-memory reset
+      (mod2 as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      writer2.flushCounters();
+      await mod2.stop();
+
+      // Cumulative across the restart is recovered by summing the delta rows.
+      expect(sumOf("track_q_shadow_evals_total")).toBe(3);
+      expect(sumOf("track_q_shadow_d8_fire_would_change_total")).toBe(3);
+      expect(sumOf("track_q_shadow_would_activate_total")).toBe(3);
+      // The non-summable distinct-token count is NOT persisted via writeCounter.
+      expect(sumOf("track_q_shadow_tokens_total")).toBe(0);
+
+      const byReason = (
+        db
+          .prepare(
+            "SELECT COALESCE(SUM(value), 0) AS s FROM runtime_metrics WHERE metric_name = ? AND labels = ?",
+          )
+          .get(
+            "track_q_shadow_by_reason_total",
+            JSON.stringify({ reason: "tier_floor_applied" }),
+          ) as {
+          s: number;
+        }
+      ).s;
+      expect(byReason).toBe(3);
+
+      db.close();
     });
   });
 });

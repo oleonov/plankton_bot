@@ -237,6 +237,10 @@ const D6_SUPPRESSED_REASON = "d6-suppressed";
 const DECISION_RULE_HOLD_REASON = "decision-rule-hold";
 const DUST_ABANDONED_REASON = "dust-abandoned";
 const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
+// Sub-Track Q.A: D8's profit-take trigger is decoupled from the executable sell
+// price (it now reads midPrice). This guard mirrors the D9 below-entry guard so
+// the decouple never *places* a SELL at an executable bid below avg entry.
+export const D8_PROFIT_BELOW_AVG_ENTRY_GUARD_REASON = "d8_profit_below_avg_entry_guard";
 export const D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON = "d9_loss_exit_below_avg_entry_guard";
 export const D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON =
   "d9_loss_exit_avg_entry_unavailable_guard_bypass";
@@ -402,7 +406,6 @@ function projectTrackQD8(
   executionPolicy: ExecutionPolicy | null,
   now: number,
   evalPrice: number,
-  p3CandidatePrice: number,
 ): { atCurrent: boolean; atP3: boolean } {
   const profitTarget = executionPolicy?.profitTarget;
   if (!profitTarget) return { atCurrent: false, atP3: false };
@@ -413,10 +416,12 @@ function projectTrackQD8(
     cumulativeBuyNotional: legState.cumulativeBuyNotional ?? 0,
     holdDurationSeconds: (now - new Date(legState.firstTradeAt).getTime()) / 1000,
   };
-  return {
-    atCurrent: evaluateD8ProfitRatio({ ...base, currentPrice: evalPrice }, profitTarget).fire,
-    atP3: evaluateD8ProfitRatio({ ...base, currentPrice: p3CandidatePrice }, profitTarget).fire,
-  };
+  // Sub-Track Q.A: the D8 trigger is decoupled from the P3 candidate price.
+  // Both branches evaluate at the live eval price, so `d8FireWouldChange` is 0
+  // by construction — the shadow no longer reports a divergence that the live
+  // path (which has always used midPrice on wide books) would never produce.
+  const fire = evaluateD8ProfitRatio({ ...base, currentPrice: evalPrice }, profitTarget).fire;
+  return { atCurrent: fire, atP3: fire };
 }
 
 /**
@@ -443,13 +448,7 @@ export function projectTrackQShadow(args: {
       avgEntry !== null ? Math.min(avgEntry * tierMarkup!, SELL_PRICE_CEILING) : null;
 
     const decision = decideTrackQActivation(book, avgEntry, tierTarget);
-    const d8 = projectTrackQD8(
-      args.legState,
-      args.executionPolicy,
-      args.now,
-      args.evalPrice,
-      decision.p3CandidatePrice,
-    );
+    const d8 = projectTrackQD8(args.legState, args.executionPolicy, args.now, args.evalPrice);
 
     return {
       p3WouldActivate: decision.activate,
@@ -558,6 +557,12 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   }
   const sellPrice = resolveSellExecutablePrice(market);
   const price = legState ? (sellPrice.price ?? midPrice) : midPrice;
+  // Sub-Track Q.A: the D8 profit-take *trigger* reads midPrice directly,
+  // decoupled from the executable sell price (`price`, which still feeds D9,
+  // dust recovery, telemetry, and pricing). `midPrice` is a guaranteed-present
+  // number here (the null/undefined short-circuit above), though not >0 — a 0
+  // mid is inert for D8 (ratio 0 < threshold).
+  const d8EvalPrice = midPrice;
   recordTrackQShadow(input, market, price, nowIso, sideEffects);
 
   if (legState && isAbandoned(legState) && input.executionPolicy?.dustAbandonment.enabled) {
@@ -656,7 +661,7 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
       {
         state,
         sellCount: legState.sellCount ?? 0,
-        currentPrice: price,
+        currentPrice: d8EvalPrice,
         cumulativeBuySize: legState.cumulativeBuySize ?? 0,
         cumulativeBuyNotional: legState.cumulativeBuyNotional ?? 0,
         holdDurationSeconds,
@@ -664,17 +669,46 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
       input.executionPolicy.profitTarget,
     );
     if (d8.fire) {
+      const d8EmissionFacts: EmissionFacts = {
+        ...emissionFacts,
+        d8ProfitRatio: d8.profitRatio,
+        d8Threshold: d8.threshold,
+        d8AvgBuyPrice: d8.avgBuyPrice,
+      };
+      // Sub-Track Q.A below-entry guard (mirrors the D9 guard below): D8 may
+      // fire on the decoupled mid, but never place a SELL at an executable bid
+      // that sits below avg entry. Wide books (sellPrice.price == null) skip
+      // this and are suppressed downstream by `sell-spread-too-wide`.
+      const d8AvgEntryPrice = finitePositiveOrNull(input.position?.avgEntryPrice ?? null);
+      if (sellPrice.price != null && d8AvgEntryPrice != null && sellPrice.price < d8AvgEntryPrice) {
+        suppressions.push({
+          tokenId: market.tokenId,
+          conditionId: market.conditionId,
+          reasonCode: D8_PROFIT_BELOW_AVG_ENTRY_GUARD_REASON,
+          side: "SELL",
+          decisionRuleId: D8_PROFIT_RATIO_RULE_ID,
+          state,
+          price: sellPrice.price,
+          buyCount,
+          timeSinceLastSeconds,
+          emissionFacts: d8EmissionFacts,
+          timestamp: nowIso,
+          extra: {
+            avgEntryPrice: d8AvgEntryPrice,
+            proposedExitPrice: sellPrice.price,
+            exitToAvgEntryRatio: sellPrice.price / d8AvgEntryPrice,
+            d8EvalPrice,
+            suppressionReason: D8_PROFIT_BELOW_AVG_ENTRY_GUARD_REASON,
+          },
+        });
+        return none(metrics, suppressions, sideEffects);
+      }
       return buildSignalOrSuppression({
         input,
         market,
         decision: { action: "SELL", ruleId: D8_PROFIT_RATIO_RULE_ID },
         buyCount,
-        emissionFacts: {
-          ...emissionFacts,
-          d8ProfitRatio: d8.profitRatio,
-          d8Threshold: d8.threshold,
-          d8AvgBuyPrice: d8.avgBuyPrice,
-        },
+        emissionFacts: d8EmissionFacts,
         triggerTelemetry,
         suppressions,
         sideEffects,

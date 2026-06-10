@@ -211,7 +211,11 @@ describe("evaluateDecisionPlan", () => {
     expect(result.signal.side).toBe("sell");
   });
 
-  it("does not fire D8 from midpoint profit when executable bid is below entry", () => {
+  it("suppresses the D8 SELL via the below-entry guard when the executable bid is below entry", () => {
+    // Sub-Track Q.A (Option B): D8 now triggers on the decoupled midPrice (0.5
+    // → ratio 50 ≫ 2.0) regardless of the executable bid, but the new
+    // below-entry guard refuses to place a SELL at the executable bid (0.004)
+    // when it sits below avg entry (0.01) — mirroring the D9 below-entry guard.
     const result = evaluateDecisionPlan(
       input({
         selectedForEntry: false,
@@ -222,7 +226,48 @@ describe("evaluateDecisionPlan", () => {
     );
 
     expect(result.type).toBe("none");
-    expect(result.suppressions.map((item) => item.reasonCode)).toContain("continuation-stop");
+    expect(result.suppressions.map((item) => item.reasonCode)).toContain(
+      "d8_profit_below_avg_entry_guard",
+    );
+  });
+
+  it("fires D8 from the decoupled midpoint on a narrow book even when the executable bid alone would not, provided the bid is above entry", () => {
+    // Sub-Track Q.A: D8 trigger is decoupled to midPrice. Narrow book — bid
+    // 0.06 alone (ratio 1.2 < 1.228) would not fire, but mid 0.075 (ratio 1.5)
+    // does. Executable bid 0.06 ≥ avg entry 0.05, so the below-entry guard
+    // passes and the SELL signal is emitted.
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({ buyCount: 1, cumulativeBuySize: 100, cumulativeBuyNotional: 5 }),
+        position: position({ avgEntryPrice: 0.05, costBasisUsdc: 5, size: 100 }),
+        market: market({ bestBid: 0.06, bestAsk: 0.09, midPrice: 0.075, spread: 0.03 }),
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
+    expect(result.signal.side).toBe("sell");
+  });
+
+  it("does not fire D8 when midPrice is zero even if the executable bid is profitable", () => {
+    // Sub-Track Q.A edge case: midPrice 0 passes the null/undefined guard but is
+    // inert for D8 (ratio 0 < threshold). Pre-decouple the bid (0.01, ratio 2.5)
+    // fired D8; the decouple makes the zero mid the trigger price, so D8 stays
+    // silent.
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({ buyCount: 1, cumulativeBuySize: 100, cumulativeBuyNotional: 0.4 }),
+        position: position({ avgEntryPrice: 0.004, costBasisUsdc: 0.4, size: 100 }),
+        market: market({ bestBid: 0.01, bestAsk: 0.02, midPrice: 0, spread: 0.01 }),
+      }),
+    );
+
+    if (result.type === "signal") {
+      expect(result.signal.decisionRuleId).not.toBe("D8_PROFIT_RATIO");
+    }
   });
 
   it("fires D8 from executable bid when the bid is profitable", () => {

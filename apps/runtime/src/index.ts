@@ -1030,6 +1030,7 @@ async function main(): Promise<void> {
     orderRepo: repos.order,
     decisionSignalLogRepo: repos.decisionSignalLog,
     riskEventRepo: repos.riskEvent,
+    runtimeMetrics,
     decisionPersistenceMode: "worker",
     decisionPersistenceWorkerDbPath: ledgerDbPath,
     decisionWorkerCount: config.algoDecisionWorkerCount,

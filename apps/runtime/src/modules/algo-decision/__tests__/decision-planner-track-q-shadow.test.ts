@@ -230,13 +230,16 @@ describe("projectTrackQShadow", () => {
     expect(p.bidAskRatio).toBeCloseTo(0.002 / 0.05, 9);
   });
 
-  it("flags a D8 fire/no-fire divergence between the eval price and the P3 candidate", () => {
+  it("never flags a D8 divergence — the D8 trigger is decoupled from the P3 candidate (Sub-Track Q.A)", () => {
     // avgBuyPrice = notional/size = 1/100 = 0.01 → D8 threshold ratio 2.0 (price < 0.02 bucket).
-    // evalPrice 0.015 → ratio 1.5 (no fire). P3 candidate 0.027 → ratio 2.7 (fire). Divergence.
+    // evalPrice 0.015 → ratio 1.5 (no fire). The P3 candidate 0.027 (ratio 2.7) WOULD clear the
+    // threshold, but D8 no longer evaluates at the P3 price — both branches use the eval price, so
+    // the shadow divergence is 0 by construction.
     const p = project({ evalPrice: 0.015 })!;
+    expect(p.p3CandidatePrice).toBeGreaterThan(0.015); // the candidate genuinely differs…
     expect(p.d8FireAtCurrentPrice).toBe(false);
-    expect(p.d8FireAtP3Candidate).toBe(true);
-    expect(p.d8FireWouldChange).toBe(true);
+    expect(p.d8FireAtP3Candidate).toBe(false); // …yet D8 is evaluated at the eval price, not P3
+    expect(p.d8FireWouldChange).toBe(false);
   });
 
   it("reports no D8 divergence when both prices clear the threshold", () => {

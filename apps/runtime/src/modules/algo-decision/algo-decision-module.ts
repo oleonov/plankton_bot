@@ -81,6 +81,7 @@ import { DecisionPersistenceBuffer } from "./async-decision-persistence.js";
 import { DecisionWorkerPool } from "./decision-worker-pool.js";
 import { ContinuationTradeCountCache } from "./continuation-trade-count-cache.js";
 import {
+  D8_PROFIT_BELOW_AVG_ENTRY_GUARD_REASON,
   D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON,
   D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON,
 } from "./decision-planner.js";
@@ -97,6 +98,7 @@ import {
   computeEntryFreshEdgeSignalFields,
   type EntryFreshEdgeSignalFields,
 } from "./entry-fresh-edge.js";
+import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
 
@@ -494,6 +496,13 @@ export interface AlgoDecisionModuleDeps {
    * computation path even though they no longer reach the ledger.
    */
   persistSignalEmittedTelemetry?: boolean | undefined;
+  /**
+   * Sub-Track Q.A — durable sink for the non-deduped Track Q shadow eval
+   * counters. Optional: when omitted (tests/sim) the counters stay in-memory
+   * only, exactly as before. Reuses the shared `runtime_metrics` writer; the
+   * cumulative value is recovered offline via `SUM(value)` over the delta rows.
+   */
+  runtimeMetrics?: RuntimeMetricWriter | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -633,6 +642,10 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   // SELL-capable legs from writing several identical rows during a 5s window.
   POST_BUY_FILL_COOLDOWN_REASON,
   H5_WIDE_COHORT_GUARD_REASON,
+  // Sub-Track Q.A: sticky like the D9 below-entry guard — a leg whose decoupled
+  // mid keeps D8 firing while the executable bid stays below entry re-suppresses
+  // on every sweep tick until the book recovers. Dedupe to keep the log readable.
+  D8_PROFIT_BELOW_AVG_ENTRY_GUARD_REASON,
   D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON,
   D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON,
   R23_NO_HISTORY_REASON,
@@ -1623,6 +1636,32 @@ export class AlgoDecisionModule implements RuntimeModule {
       counters.suppressionWouldClear += 1;
     }
     if (projection.d8FireWouldChange) counters.d8FireWouldChange += 1;
+
+    // Sub-Track Q.A — durably persist the non-deduped eval counters as summable
+    // deltas (recovered offline via SUM), so the per-eval denominator survives a
+    // restart. The shared writer batches these and flushes centrally (index.ts).
+    // `tokens` is intentionally NOT persisted here: a distinct-set is not
+    // summable across flushes — recover it from the deduped risk_events instead.
+    const metrics = this.deps.runtimeMetrics;
+    if (metrics) {
+      metrics.writeCounter("track_q_shadow_evals_total", 1);
+      metrics.writeCounter(
+        "track_q_shadow_by_reason_total",
+        1,
+        JSON.stringify({ reason: projection.reason }),
+      );
+      if (projection.p3WouldActivate)
+        metrics.writeCounter("track_q_shadow_would_activate_total", 1);
+      if (projection.proposedGuardWouldSuppress) {
+        metrics.writeCounter("track_q_shadow_proposed_still_suppressed_total", 1);
+      }
+      if (projection.currentGuardWouldSuppress && !projection.proposedGuardWouldSuppress) {
+        metrics.writeCounter("track_q_shadow_suppression_would_clear_total", 1);
+      }
+      if (projection.d8FireWouldChange) {
+        metrics.writeCounter("track_q_shadow_d8_fire_would_change_total", 1);
+      }
+    }
 
     const eventAt = Date.parse(sideEffect.timestamp);
     const now = Number.isFinite(eventAt) ? eventAt : Date.now();
