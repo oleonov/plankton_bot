@@ -473,6 +473,54 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(invalidState.issues.some((i) => i.includes("lossExit.cohortGuard.state"))).toBe(true);
   });
 
+  it("defaults Q.D pre-resolution exit enabled in shadow with salvage off", () => {
+    expect(DEFAULT_EXECUTION_POLICY.preResolutionExit).toEqual({
+      enabled: true,
+      ttcThresholdMs: 2 * 60 * 60_000,
+      tierCeiling: 0.05,
+      bidFloorAbs: 0.01,
+      salvageEnabled: false,
+      salvageTtcMs: 30 * 60_000,
+      salvageFloorRatio: 0.5,
+    });
+  });
+
+  it("parses Q.D pre-resolution exit policy and rejects out-of-range values", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        preResolutionExit: {
+          enabled: false,
+          ttcThresholdMs: 3 * 60 * 60_000,
+          tierCeiling: 0.15,
+          bidFloorAbs: 0.02,
+          salvageEnabled: true,
+          salvageTtcMs: 15 * 60_000,
+          salvageFloorRatio: 0.6,
+        },
+      }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.preResolutionExit).toEqual({
+      enabled: false,
+      ttcThresholdMs: 3 * 60 * 60_000,
+      tierCeiling: 0.15,
+      bidFloorAbs: 0.02,
+      salvageEnabled: true,
+      salvageTtcMs: 15 * 60_000,
+      salvageFloorRatio: 0.6,
+    });
+
+    const invalid = parseExecutionPolicyJson(
+      JSON.stringify({ preResolutionExit: { salvageFloorRatio: 5 } }),
+    );
+    expect(invalid.policy.preResolutionExit.salvageFloorRatio).toBe(
+      DEFAULT_EXECUTION_POLICY.preResolutionExit.salvageFloorRatio,
+    );
+    expect(invalid.issues.some((i) => i.includes("preResolutionExit.salvageFloorRatio"))).toBe(
+      true,
+    );
+  });
+
   it("rejects invalid SELL replacement tolerance values with an issue", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({ sellReplaceMinPriceDeltaTicks: 0 }),

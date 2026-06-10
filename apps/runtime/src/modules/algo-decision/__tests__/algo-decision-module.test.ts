@@ -7,7 +7,11 @@ import {
 } from "../algo-decision-module.js";
 import { RuntimeMetricWriter } from "../../../runtime-metric-writer.js";
 import type { SelectedMarketCache } from "../algo-decision-module.js";
-import type { DecisionPlanSideEffect, TrackQShadowProjection } from "../decision-planner.js";
+import type {
+  DecisionPlanSideEffect,
+  QdShadowProjection,
+  TrackQShadowProjection,
+} from "../decision-planner.js";
 import type {
   EventBus,
   LegStateRepository,
@@ -5449,6 +5453,146 @@ describe("AlgoDecisionModule", () => {
             "track_q_shadow_by_reason_total",
             JSON.stringify({ reason: "tier_floor_applied" }),
           ) as {
+          s: number;
+        }
+      ).s;
+      expect(byReason).toBe(3);
+
+      db.close();
+    });
+  });
+
+  // Sub-Track Q.D shadow (observe-only): the planner emits a `track_q_d` side
+  // effect for cheap-longshot legs inside the pre-resolution TTC window. The
+  // module surfaces it as a deduped, structured risk event + cumulative
+  // healthCheck counters, persisting summable eval deltas to runtime_metrics,
+  // WITHOUT changing any placed order. See
+  // research_plankton/track_q_d_spec_2026-06-12.md.
+  describe("Sub-Track Q.D shadow telemetry", () => {
+    function qdProjection(overrides: Partial<QdShadowProjection> = {}): QdShadowProjection {
+      return {
+        qdWouldActivate: true,
+        reason: "would_fire",
+        activationMode: "mode_a",
+        avgEntry: 0.03,
+        ttcMs: 3_600_000,
+        shortMarket: false,
+        withinTtc: true,
+        imminentTtc: false,
+        qualifyingBid: true,
+        bidVsAvgEntry: 1.0,
+        modeAApplies: true,
+        modeBApplies: false,
+        d8Fired: false,
+        d9Fired: false,
+        bestBid: 0.03,
+        anchorTicks: 4,
+        bidAnchoredPrice: 0.034,
+        f2Cap: 0.0408,
+        candidatePrice: 0.034,
+        ...overrides,
+      };
+    }
+
+    function qdSideEffect(
+      overrides: Partial<QdShadowProjection> = {},
+      token = "token-qd",
+    ): DecisionPlanSideEffect {
+      return {
+        kind: "track_q_d",
+        tokenId: createTokenId(token),
+        conditionId: "cond-qd",
+        timestamp: "2026-06-11T00:00:00.000Z",
+        projection: qdProjection(overrides),
+      };
+    }
+
+    it("emits a structured, deduped track_q_d risk event yet counts every eval in healthCheck", async () => {
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      const sideEffect = qdSideEffect();
+      (mod as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      (mod as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+
+      const qdInserts = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(([e]) => e.eventType === "track_q_d");
+      expect(qdInserts).toHaveLength(1);
+      const payload = qdInserts[0]![0].payload;
+      expect(payload.tokenId).toBe("token-qd");
+      expect(payload.conditionId).toBe("cond-qd");
+      expect(payload.reason).toBe("would_fire");
+      expect(payload.activationMode).toBe("mode_a");
+      expect(payload.qdWouldActivate).toBe(true);
+      expect(payload.candidatePrice).toBeCloseTo(0.034, 9);
+      expect(payload.anchorTicks).toBe(4);
+
+      const health = await mod.healthCheck();
+      expect(health.detail).toContain("trackQdShadow evals=2 tokens=1");
+      expect(health.detail).toContain("wouldActivate=2");
+      expect(health.detail).toContain("modeA=2");
+
+      await mod.stop();
+    });
+
+    it("persists Q.D eval counters to runtime_metrics and recovers them by SUM across a restart", async () => {
+      const db = new Database(":memory:");
+      db.exec(`
+        CREATE TABLE runtime_metrics (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          metric_name TEXT NOT NULL,
+          value REAL NOT NULL,
+          labels TEXT,
+          captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      const sumOf = (metricName: string): number =>
+        (
+          db
+            .prepare(
+              "SELECT COALESCE(SUM(value), 0) AS s FROM runtime_metrics WHERE metric_name = ?",
+            )
+            .get(metricName) as { s: number }
+        ).s;
+
+      const sideEffect = qdSideEffect({}, "token-qd-persist");
+
+      const writer1 = new RuntimeMetricWriter(db);
+      const mod1 = buildModule({
+        runtimeMetrics: writer1,
+        riskEventRepo: { insert: vi.fn(), countSince: vi.fn() },
+      });
+      await mod1.start();
+      (mod1 as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      (mod1 as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      writer1.flushCounters();
+      await mod1.stop();
+
+      expect(sumOf("track_q_d_shadow_evals_total")).toBe(2);
+
+      const writer2 = new RuntimeMetricWriter(db);
+      const mod2 = buildModule({
+        runtimeMetrics: writer2,
+        riskEventRepo: { insert: vi.fn(), countSince: vi.fn() },
+      });
+      await mod2.start();
+      expect((mod2 as any).trackQdShadow.evals).toBe(0); // fresh process, in-memory reset
+      (mod2 as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      writer2.flushCounters();
+      await mod2.stop();
+
+      expect(sumOf("track_q_d_shadow_evals_total")).toBe(3);
+      expect(sumOf("track_q_d_shadow_would_activate_total")).toBe(3);
+      expect(sumOf("track_q_d_shadow_mode_a_total")).toBe(3);
+
+      const byReason = (
+        db
+          .prepare(
+            "SELECT COALESCE(SUM(value), 0) AS s FROM runtime_metrics WHERE metric_name = ? AND labels = ?",
+          )
+          .get("track_q_d_shadow_by_reason_total", JSON.stringify({ reason: "would_fire" })) as {
           s: number;
         }
       ).s;

@@ -864,6 +864,33 @@ export interface ExitTtlByLiquidityPolicyConfig {
   mediumMs: number;
 }
 
+/**
+ * Sub-Track Q.D — pre-resolution forced exit on cheap longshots.
+ * Safety-net SELL trigger that fires near resolution on a qualifying bid before
+ * `sell-spread-too-wide` silently lets a cheap position settle at zero. See
+ * research_plankton/track_q_d_spec_2026-06-12.md §1 + §3.3.
+ *
+ * Shipped as observe-only shadow first (`enabled:true` only records a
+ * `track_q_d` side effect; no order is placed or repriced). `salvageEnabled`
+ * gates Mode B (the flagged below-entry salvage deviation), default OFF.
+ */
+export interface QdPreResolutionExitPolicy {
+  /** Master flag. Shadow phase records would-fire telemetry only. */
+  enabled: boolean;
+  /** T2: time-to-close window before resolution within which Q.D may fire. */
+  ttcThresholdMs: number;
+  /** T1: only cheap longshots (`avg_entry < tierCeiling`) are in cohort. */
+  tierCeiling: number;
+  /** T5: minimum absolute best bid that counts as a qualifying (non-lottery) bid. */
+  bidFloorAbs: number;
+  /** Mode B gate. When OFF, Q.D is Plankton-strict (Mode A: bid ≥ avg_entry). */
+  salvageEnabled: boolean;
+  /** Mode B only applies at imminent TTC (`TTC < salvageTtcMs`). */
+  salvageTtcMs: number;
+  /** Mode B salvage floor: fire when `bestBid ≥ salvageFloorRatio × avg_entry`. */
+  salvageFloorRatio: number;
+}
+
 export interface ExecutionPolicy {
   version: number;
   entryPriceCeiling: number;
@@ -917,6 +944,8 @@ export interface ExecutionPolicy {
   repriceChain: RepriceChainPolicyConfig;
   /** D9_LOSS_EXIT — R96 liquidity-aware loss exit trigger. Disabled by default. */
   lossExit: D9LossExitPolicy;
+  /** Sub-Track Q.D — pre-resolution forced exit on cheap longshots (shadow). */
+  preResolutionExit: QdPreResolutionExitPolicy;
   depositActivation: DepositActivationPolicy;
 }
 

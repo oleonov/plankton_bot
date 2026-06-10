@@ -757,6 +757,20 @@ export class AlgoDecisionModule implements RuntimeModule {
     byReason: new Map<string, number>(),
     tokens: new Set<string>(),
   };
+  // Sub-Track Q.D shadow telemetry (observe-only). Same dedupe/counter split as
+  // Track Q: `trackQdShadowDedupe` rate-controls per-(token, reason) risk_event
+  // rows; `trackQdShadow` holds NON-deduped cumulative counters surfaced via
+  // healthCheck. See research_plankton/track_q_d_spec_2026-06-12.md.
+  private readonly trackQdShadowDedupe = new Map<string, number>();
+  private readonly trackQdShadow = {
+    evals: 0,
+    wouldActivate: 0,
+    modeA: 0,
+    modeB: 0,
+    d8OrD9Collision: 0,
+    byReason: new Map<string, number>(),
+    tokens: new Set<string>(),
+  };
   private readonly lastBuyFillByWallet = new Map<string, number>();
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
@@ -908,7 +922,11 @@ export class AlgoDecisionModule implements RuntimeModule {
     const ruleMix = this.formatTriggerMix(this.lastTickRuleMix);
     const evalMetrics = this.formatEvalMetrics(this.lastEvalMetrics);
     const trackQShadow = this.formatTrackQShadow();
-    return { ok: true, detail: `${base}${funnel}${ruleMix}${evalMetrics}${trackQShadow}` };
+    const trackQdShadow = this.formatQdShadow();
+    return {
+      ok: true,
+      detail: `${base}${funnel}${ruleMix}${evalMetrics}${trackQShadow}${trackQdShadow}`,
+    };
   }
 
   // Track Q shadow telemetry rollup. Omitted entirely until the first wide-book
@@ -928,6 +946,25 @@ export class AlgoDecisionModule implements RuntimeModule {
       ` proposedStillSuppressed=${c.proposedStillSuppressed}` +
       ` d8FireWouldChange=${c.d8FireWouldChange}` +
       (reasons ? ` trackQReasons ${reasons}` : "")
+    );
+  }
+
+  // Sub-Track Q.D shadow rollup. Omitted entirely until the first in-cohort
+  // shadow eval so the healthcheck line stays tidy. Counters are cumulative
+  // since module start (never deduped) — the queryable per-event detail lives
+  // in the deduped `track_q_d` risk_event rows.
+  private formatQdShadow(): string {
+    const c = this.trackQdShadow;
+    if (c.evals === 0) return "";
+    const reasons = [...c.byReason.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([reason, count]) => `${reason}=${count}`)
+      .join(" ");
+    return (
+      ` trackQdShadow evals=${c.evals} tokens=${c.tokens.size}` +
+      ` wouldActivate=${c.wouldActivate} modeA=${c.modeA} modeB=${c.modeB}` +
+      ` d8OrD9Collision=${c.d8OrD9Collision}` +
+      (reasons ? ` trackQdReasons ${reasons}` : "")
     );
   }
 
@@ -1610,6 +1647,9 @@ export class AlgoDecisionModule implements RuntimeModule {
       if (sideEffect.kind === "track_q_shadow") {
         this.recordTrackQShadowSideEffect(sideEffect);
       }
+      if (sideEffect.kind === "track_q_d") {
+        this.recordQdShadowSideEffect(sideEffect);
+      }
     }
   }
 
@@ -1689,6 +1729,86 @@ export class AlgoDecisionModule implements RuntimeModule {
         d8FireAtCurrentPrice: projection.d8FireAtCurrentPrice,
         d8FireAtP3Candidate: projection.d8FireAtP3Candidate,
         d8FireWouldChange: projection.d8FireWouldChange,
+        signalTimestamp: sideEffect.timestamp,
+      },
+    });
+  }
+
+  /**
+   * Sub-Track Q.D shadow telemetry sink (observe-only). Updates the non-deduped
+   * cumulative counters surfaced via healthCheck, persists summable eval deltas
+   * to runtime_metrics, then enqueues a deduped, structured `track_q_d` risk
+   * event so the would-fire rate, Mode A/B distribution, bid quality, and
+   * D8/D9 collision rate can be sized offline before any enforcement. Never
+   * touches the order price, suppressions, the signal, D8, or D9.
+   */
+  private recordQdShadowSideEffect(
+    sideEffect: Extract<DecisionPlanSideEffect, { kind: "track_q_d" }>,
+  ): void {
+    const { projection } = sideEffect;
+    const counters = this.trackQdShadow;
+    counters.evals += 1;
+    counters.tokens.add(String(sideEffect.tokenId));
+    counters.byReason.set(projection.reason, (counters.byReason.get(projection.reason) ?? 0) + 1);
+    if (projection.qdWouldActivate) counters.wouldActivate += 1;
+    if (projection.activationMode === "mode_a") counters.modeA += 1;
+    if (projection.activationMode === "mode_b_salvage") counters.modeB += 1;
+    if (projection.d8Fired || projection.d9Fired) counters.d8OrD9Collision += 1;
+
+    // Durably persist non-deduped eval counters as summable deltas (recovered
+    // offline via SUM), so the per-eval denominator survives a restart. Distinct
+    // token/applicability sets are not summable across flushes — recover those
+    // from the deduped risk_events instead.
+    const metrics = this.deps.runtimeMetrics;
+    if (metrics) {
+      metrics.writeCounter("track_q_d_shadow_evals_total", 1);
+      metrics.writeCounter(
+        "track_q_d_shadow_by_reason_total",
+        1,
+        JSON.stringify({ reason: projection.reason }),
+      );
+      if (projection.qdWouldActivate)
+        metrics.writeCounter("track_q_d_shadow_would_activate_total", 1);
+      if (projection.activationMode === "mode_a")
+        metrics.writeCounter("track_q_d_shadow_mode_a_total", 1);
+      if (projection.activationMode === "mode_b_salvage")
+        metrics.writeCounter("track_q_d_shadow_mode_b_total", 1);
+      if (projection.modeAApplies) metrics.writeCounter("track_q_d_shadow_mode_a_applies_total", 1);
+      if (projection.modeBApplies) metrics.writeCounter("track_q_d_shadow_mode_b_applies_total", 1);
+      if (projection.d8Fired || projection.d9Fired) {
+        metrics.writeCounter("track_q_d_shadow_d8_or_d9_collision_total", 1);
+      }
+    }
+
+    const eventAt = Date.parse(sideEffect.timestamp);
+    const now = Number.isFinite(eventAt) ? eventAt : Date.now();
+    const key = `track_q_d|${String(sideEffect.tokenId)}|${projection.reason}`;
+    if (!this.dedupeAllows(this.trackQdShadowDedupe, key, now)) return;
+
+    this.persistence.enqueueRiskEvent({
+      eventType: "track_q_d",
+      payload: {
+        tokenId: String(sideEffect.tokenId),
+        conditionId: sideEffect.conditionId,
+        qdWouldActivate: projection.qdWouldActivate,
+        reason: projection.reason,
+        activationMode: projection.activationMode,
+        avgEntry: projection.avgEntry,
+        ttcMs: projection.ttcMs,
+        shortMarket: projection.shortMarket,
+        withinTtc: projection.withinTtc,
+        imminentTtc: projection.imminentTtc,
+        qualifyingBid: projection.qualifyingBid,
+        bidVsAvgEntry: projection.bidVsAvgEntry,
+        modeAApplies: projection.modeAApplies,
+        modeBApplies: projection.modeBApplies,
+        d8Fired: projection.d8Fired,
+        d9Fired: projection.d9Fired,
+        bestBid: projection.bestBid,
+        anchorTicks: projection.anchorTicks,
+        bidAnchoredPrice: projection.bidAnchoredPrice,
+        f2Cap: projection.f2Cap,
+        candidatePrice: projection.candidatePrice,
         signalTimestamp: sideEffect.timestamp,
       },
     });

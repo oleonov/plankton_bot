@@ -24,6 +24,7 @@ import type {
   MultiBuyLadderPolicy,
   OpportunisticTakerPolicy,
   ProfitTargetPolicyConfig,
+  QdPreResolutionExitPolicy,
   RaceProtectionPolicy,
   R23DipTriggerPolicy,
   RedeemSweepPolicy,
@@ -176,6 +177,19 @@ export const DEFAULT_LOSS_EXIT_POLICY: D9LossExitPolicy = {
   },
 };
 
+// Sub-Track Q.D ships observe-only: enabled:true records would-fire telemetry
+// (no order placed); salvageEnabled:false keeps Q.D Plankton-strict (Mode A).
+// Defaults justified in research_plankton/track_q_d_spec_2026-06-12.md §1/§3.3.
+export const DEFAULT_PRE_RESOLUTION_EXIT_POLICY: QdPreResolutionExitPolicy = {
+  enabled: true,
+  ttcThresholdMs: 2 * 60 * 60_000,
+  tierCeiling: 0.05,
+  bidFloorAbs: 0.01,
+  salvageEnabled: false,
+  salvageTtcMs: 30 * 60_000,
+  salvageFloorRatio: 0.5,
+};
+
 export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
   enabled: true,
   enforcement: "enforce",
@@ -271,6 +285,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   dustAbandonment: DEFAULT_DUST_ABANDONMENT_POLICY,
   repriceChain: DEFAULT_REPRICE_CHAIN_POLICY,
   lossExit: DEFAULT_LOSS_EXIT_POLICY,
+  preResolutionExit: DEFAULT_PRE_RESOLUTION_EXIT_POLICY,
   depositActivation: DEFAULT_DEPOSIT_ACTIVATION_POLICY,
 };
 
@@ -345,6 +360,15 @@ const BOUND_PUBLIC_TRADE_COUNT_MAX = 1_000_000;
 const BOUND_H5_AVG_BUY_MIN = 0;
 const BOUND_H5_AVG_BUY_MAX = 1;
 const BOUND_H5_DAYS_TO_RESOLVE_MAX = 3650;
+// Sub-Track Q.D pre-resolution exit bounds.
+const BOUND_QD_TTC_MIN_MS = 60_000;
+const BOUND_QD_TTC_MAX_MS = 30 * 24 * 60 * 60_000;
+const BOUND_QD_TIER_CEILING_MIN = 0.001;
+const BOUND_QD_TIER_CEILING_MAX = 0.5;
+const BOUND_QD_BID_FLOOR_MIN = 0;
+const BOUND_QD_BID_FLOOR_MAX = 0.5;
+const BOUND_QD_SALVAGE_FLOOR_RATIO_MIN = 0;
+const BOUND_QD_SALVAGE_FLOOR_RATIO_MAX = 1;
 
 export interface ParseResult {
   policy: ExecutionPolicy;
@@ -480,6 +504,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const dustAbandonment = parseDustAbandonment(obj.dustAbandonment, issues);
   const repriceChain = parseRepriceChain(obj.repriceChain, issues);
   const lossExit = parseLossExit(obj.lossExit, issues);
+  const preResolutionExit = parsePreResolutionExit(obj.preResolutionExit, issues);
   const depositActivation = parseDepositActivation(obj.depositActivation, issues);
 
   return {
@@ -517,6 +542,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       dustAbandonment,
       repriceChain,
       lossExit,
+      preResolutionExit,
       depositActivation,
     },
     issues,
@@ -774,6 +800,68 @@ function parseLossExitCohortGuard(raw: unknown, issues: string[]): D9LossExitPol
       BOUND_H5_DAYS_TO_RESOLVE_MAX,
       issues,
       "lossExit.cohortGuard.minDaysToResolve",
+    ),
+  };
+}
+
+function parsePreResolutionExit(raw: unknown, issues: string[]): QdPreResolutionExitPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("preResolutionExit must be an object");
+    return DEFAULT_PRE_RESOLUTION_EXIT_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_PRE_RESOLUTION_EXIT_POLICY.enabled,
+      issues,
+      "preResolutionExit.enabled",
+    ),
+    ttcThresholdMs: clampedInt(
+      obj.ttcThresholdMs,
+      DEFAULT_PRE_RESOLUTION_EXIT_POLICY.ttcThresholdMs,
+      BOUND_QD_TTC_MIN_MS,
+      BOUND_QD_TTC_MAX_MS,
+      issues,
+      "preResolutionExit.ttcThresholdMs",
+    ),
+    tierCeiling: clampedNumber(
+      obj.tierCeiling,
+      DEFAULT_PRE_RESOLUTION_EXIT_POLICY.tierCeiling,
+      BOUND_QD_TIER_CEILING_MIN,
+      BOUND_QD_TIER_CEILING_MAX,
+      issues,
+      "preResolutionExit.tierCeiling",
+    ),
+    bidFloorAbs: clampedNumber(
+      obj.bidFloorAbs,
+      DEFAULT_PRE_RESOLUTION_EXIT_POLICY.bidFloorAbs,
+      BOUND_QD_BID_FLOOR_MIN,
+      BOUND_QD_BID_FLOOR_MAX,
+      issues,
+      "preResolutionExit.bidFloorAbs",
+    ),
+    salvageEnabled: booleanOr(
+      obj.salvageEnabled,
+      DEFAULT_PRE_RESOLUTION_EXIT_POLICY.salvageEnabled,
+      issues,
+      "preResolutionExit.salvageEnabled",
+    ),
+    salvageTtcMs: clampedInt(
+      obj.salvageTtcMs,
+      DEFAULT_PRE_RESOLUTION_EXIT_POLICY.salvageTtcMs,
+      BOUND_QD_TTC_MIN_MS,
+      BOUND_QD_TTC_MAX_MS,
+      issues,
+      "preResolutionExit.salvageTtcMs",
+    ),
+    salvageFloorRatio: clampedNumber(
+      obj.salvageFloorRatio,
+      DEFAULT_PRE_RESOLUTION_EXIT_POLICY.salvageFloorRatio,
+      BOUND_QD_SALVAGE_FLOOR_RATIO_MIN,
+      BOUND_QD_SALVAGE_FLOOR_RATIO_MAX,
+      issues,
+      "preResolutionExit.salvageFloorRatio",
     ),
   };
 }

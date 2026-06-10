@@ -46,6 +46,13 @@ import {
 } from "../../executable-price.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
+import {
+  evaluateQdPreResolutionExit,
+  type QdShadowProjection,
+  type QdShadowReason,
+} from "./qd-pre-resolution-exit.js";
+
+export type { QdShadowProjection, QdShadowReason } from "./qd-pre-resolution-exit.js";
 
 export type TradeCountSource = "market_wide" | "leg_local_fallback" | "leg_local";
 
@@ -130,6 +137,13 @@ export type DecisionPlanSideEffect =
       timestamp: string;
       evalPrice: number;
       projection: TrackQShadowProjection;
+    }
+  | {
+      kind: "track_q_d";
+      tokenId: TokenId;
+      conditionId: string;
+      timestamp: string;
+      projection: QdShadowProjection;
     };
 
 export type TrackQShadowReason =
@@ -505,6 +519,62 @@ function recordTrackQShadow(
   });
 }
 
+// Sub-Track Q.D shadow: only legs that clear the structural pre-filters (cheap
+// tier + inside the TTC window) are the population of interest. Pre-cohort
+// reasons are dropped so the deduped telemetry stays scoped to near-resolution
+// cheap longshots rather than every leg on every cycle.
+const QD_PRE_COHORT_REASONS: ReadonlySet<QdShadowReason> = new Set([
+  "disabled",
+  "no_position",
+  "wrong_tier",
+  "ttc_unavailable",
+  "ttc_too_far",
+]);
+
+function hasWorkingSellOrder(order: SellOrderSizingContext | null): boolean {
+  if (!order) return false;
+  const status = order.status ?? null;
+  return status !== "filled" && status !== "rejected" && status !== "cancelled";
+}
+
+/**
+ * Emit a Q.D pre-resolution-exit shadow side effect (observe-only) for cheap
+ * longshots inside the TTC window — the cohort the `sell-spread-too-wide` guard
+ * silently lets die. Mirrors `recordTrackQShadow`: pushes a side effect and
+ * never alters price, suppressions, D8/D9, or the signal. `d8EvalPrice`
+ * (midPrice, per Sub-Track Q.A) and `d9EvalPrice` (executable bid) match the
+ * live D8/D9 trigger prices so the shadow reports the real D8/D9 → Q.D
+ * precedence (T4). See research_plankton/track_q_d_spec_2026-06-12.md.
+ */
+function recordQdShadow(
+  input: DecisionPlanningInput,
+  market: NormalizedMarket,
+  d8EvalPrice: number,
+  d9EvalPrice: number,
+  nowIso: string,
+  sideEffects: DecisionPlanSideEffect[],
+): void {
+  if (!input.legState) return;
+  const projection = evaluateQdPreResolutionExit({
+    market,
+    legState: input.legState,
+    position: input.position,
+    executionPolicy: input.executionPolicy,
+    now: input.now,
+    d8EvalPrice,
+    d9EvalPrice,
+    hasActiveSell: hasWorkingSellOrder(input.latestSellOrder),
+  });
+  if (projection === null || QD_PRE_COHORT_REASONS.has(projection.reason)) return;
+  sideEffects.push({
+    kind: "track_q_d",
+    tokenId: input.tokenId,
+    conditionId: market.conditionId,
+    timestamp: nowIso,
+    projection,
+  });
+}
+
 export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlanResult {
   const metrics = createDecisionMetricsDelta();
   const suppressions: SuppressionPlan[] = [];
@@ -564,6 +634,7 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   // mid is inert for D8 (ratio 0 < threshold).
   const d8EvalPrice = midPrice;
   recordTrackQShadow(input, market, price, nowIso, sideEffects);
+  recordQdShadow(input, market, d8EvalPrice, price, nowIso, sideEffects);
 
   if (legState && isAbandoned(legState) && input.executionPolicy?.dustAbandonment.enabled) {
     const dustPolicy = input.executionPolicy.dustAbandonment;
