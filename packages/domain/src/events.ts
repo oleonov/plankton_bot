@@ -32,6 +32,14 @@ export interface MarketSnapshotReceived {
   readonly timestamp: number;
 }
 
+export interface MarketSnapshotHeartbeat {
+  readonly type: "MarketSnapshotHeartbeat";
+  readonly markets: readonly NormalizedMarket[];
+  readonly timestamp: number;
+  readonly reason: "full_lifetime_active_position";
+  readonly source: "market-data";
+}
+
 export interface NormalizedMarketUpdated {
   readonly type: "NormalizedMarketUpdated";
   readonly markets: readonly NormalizedMarket[];
@@ -234,6 +242,30 @@ export interface OrderRejected {
   readonly timestamp: number;
 }
 
+/**
+ * Pre-submit local skip — the execution module declined to send a command to
+ * the gateway (e.g. post-only SELL that would cross the bid). Published before
+ * any working order exists so the loop guard can count no-op outcomes live,
+ * without polling deduplicated `risk_events`.
+ */
+export interface OrderSkipped {
+  readonly type: "OrderSkipped";
+  readonly commandId: CommandId;
+  readonly clientOrderId: ClientOrderId;
+  readonly tokenId: TokenId;
+  readonly conditionId: ConditionId;
+  readonly reasonCode: string;
+  readonly side: OrderSide;
+  readonly price: number;
+  readonly size: number;
+  readonly signalReason: string | null;
+  readonly signalId: string | null;
+  readonly decisionRuleId: string | null;
+  readonly signalTimestamp: string | null;
+  readonly details: Readonly<Record<string, unknown>>;
+  readonly timestamp: number;
+}
+
 // ─── Fill ─────────────────────────────────────────────────────────────────
 
 export interface FillReceived {
@@ -336,6 +368,7 @@ export interface OperatorCommandApplied {
 
 export type DomainEvent =
   | MarketSnapshotReceived
+  | MarketSnapshotHeartbeat
   | NormalizedMarketUpdated
   | TrackedMarketsChanged
   | HotQuoteUpdated
@@ -353,6 +386,7 @@ export type DomainEvent =
   | OrderFilled
   | OrderCancelled
   | OrderRejected
+  | OrderSkipped
   | FillReceived
   | PositionUpdated
   | LegStateUpdated

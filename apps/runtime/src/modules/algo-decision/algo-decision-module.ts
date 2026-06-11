@@ -93,6 +93,7 @@ import type {
   DecisionSignalDraft,
 } from "./decision-planner.js";
 import type { PriceHistoryProvider } from "./market-snapshot-price-history.js";
+import type { SellLoopGuardReader } from "../sell-loop-guard/sell-loop-guard-module.js";
 import type { WindowMaxCacheMetrics } from "./market-snapshot-price-history.js";
 import {
   ENTRY_FRESH_EDGE_WINDOW_MS,
@@ -504,6 +505,12 @@ export interface AlgoDecisionModuleDeps {
    * cumulative value is recovered offline via `SUM(value)` over the delta rows.
    */
   runtimeMetrics?: RuntimeMetricWriter | undefined;
+  /**
+   * Track Q loop guard read surface. When provided, the planner suppresses SELL
+   * signal generation for tokens the guard reports as blocked. Optional: omitted
+   * by tests/sim that don't exercise the breaker.
+   */
+  sellLoopGuard?: SellLoopGuardReader | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -1536,6 +1543,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       postBuyCooldown,
       latestSellOrder: legState ? this.getLatestSellOrderForSizing(tokenId) : null,
       hasActiveSellOrderForQd: legState ? this.hasActiveSellOrderForQd(tokenId) : false,
+      sellLoopGuard: this.deps.sellLoopGuard?.getSnapshot(tokenId, now) ?? null,
     };
   }
 
@@ -1664,6 +1672,13 @@ export class AlgoDecisionModule implements RuntimeModule {
       }
       if (sideEffect.kind === "track_q_d") {
         this.recordQdShadowSideEffect(sideEffect);
+      }
+      if (sideEffect.kind === "sell_loop_guard_suppressed") {
+        this.deps.runtimeMetrics?.writeCounter(
+          "track_q_loop_guard_suppressed_total",
+          1,
+          JSON.stringify({ decisionRuleId: sideEffect.decisionRuleId }),
+        );
       }
     }
   }

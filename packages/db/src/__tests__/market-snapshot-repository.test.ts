@@ -99,6 +99,26 @@ describe("SqliteMarketSnapshotRepository", () => {
     expect(remaining[0]!.token_id).toBe("tok-2");
   });
 
+  it("prune preserves explicit active tokens even when older than cutoff", () => {
+    repo.saveBatch([
+      makeSnapshot({ capturedAt: "2026-03-10T00:00:00.000Z" }),
+      makeSnapshot({
+        tokenId: createTokenId("tok-2"),
+        capturedAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const deleted = repo.prune("2026-03-15T00:00:00.000Z", {
+      preserveTokenIds: [createTokenId("tok-1")],
+    });
+    expect(deleted).toBe(1);
+
+    const remaining = conn.db.prepare("SELECT token_id FROM market_snapshots").all() as {
+      token_id: string;
+    }[];
+    expect(remaining).toEqual([{ token_id: "tok-1" }]);
+  });
+
   it("prune returns 0 when nothing to delete", () => {
     repo.saveBatch([makeSnapshot()]);
     const deleted = repo.prune("2026-01-01T00:00:00.000Z");

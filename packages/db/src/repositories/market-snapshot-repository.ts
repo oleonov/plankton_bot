@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { MarketSnapshotRepository, MarketSnapshot } from "@krabs/domain";
+import type { MarketSnapshotRepository, MarketSnapshot, TokenId } from "@krabs/domain";
 
 export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository {
   constructor(private readonly db: Database.Database) {}
@@ -31,10 +31,25 @@ export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository 
     run(snapshots);
   }
 
-  prune(olderThanIso: string): number {
+  prune(
+    olderThanIso: string,
+    options?: { readonly preserveTokenIds?: readonly TokenId[] },
+  ): number {
+    const preserveTokenIds = [...new Set(options?.preserveTokenIds?.map(String) ?? [])];
+    if (preserveTokenIds.length === 0) {
+      const result = this.db
+        .prepare("DELETE FROM market_snapshots WHERE captured_at < ?")
+        .run(olderThanIso);
+      return result.changes;
+    }
+    const placeholders = preserveTokenIds.map(() => "?").join(", ");
     const result = this.db
-      .prepare("DELETE FROM market_snapshots WHERE captured_at < ?")
-      .run(olderThanIso);
+      .prepare(
+        `DELETE FROM market_snapshots
+         WHERE captured_at < ?
+           AND token_id NOT IN (${placeholders})`,
+      )
+      .run(olderThanIso, ...preserveTokenIds);
     return result.changes;
   }
 }

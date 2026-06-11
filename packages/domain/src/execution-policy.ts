@@ -32,6 +32,7 @@ import type {
   RepriceOnOutbidPolicy,
   ExitRepriceOnDownpricePolicy,
   SellCapacityPolicy,
+  SellLoopGuardPolicy,
   DynamicChainCapPolicyConfig,
 } from "./types.js";
 import type { AlgoState } from "./algo-engine.js";
@@ -39,6 +40,7 @@ import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
 import { DEFAULT_PROFIT_TARGET_POLICY } from "./d8-profit-target.js";
 import { DEFAULT_DUST_ABANDONMENT_POLICY } from "./dust-abandonment.js";
 import { DEFAULT_REPRICE_CHAIN_POLICY } from "./reprice-chain.js";
+import { DEFAULT_SELL_LOOP_GUARD_POLICY } from "./sell-loop-guard.js";
 import { DEFAULT_SELL_TIMEOUT_MS } from "./sell-sizing.js";
 import type { D9LossExitPolicy } from "./d9-loss-exit.js";
 
@@ -284,6 +286,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   profitTarget: DEFAULT_PROFIT_TARGET_POLICY,
   dustAbandonment: DEFAULT_DUST_ABANDONMENT_POLICY,
   repriceChain: DEFAULT_REPRICE_CHAIN_POLICY,
+  sellLoopGuard: DEFAULT_SELL_LOOP_GUARD_POLICY,
   lossExit: DEFAULT_LOSS_EXIT_POLICY,
   preResolutionExit: DEFAULT_PRE_RESOLUTION_EXIT_POLICY,
   depositActivation: DEFAULT_DEPOSIT_ACTIVATION_POLICY,
@@ -369,6 +372,9 @@ const BOUND_QD_BID_FLOOR_MIN = 0;
 const BOUND_QD_BID_FLOOR_MAX = 0.5;
 const BOUND_QD_SALVAGE_FLOOR_RATIO_MIN = 0;
 const BOUND_QD_SALVAGE_FLOOR_RATIO_MAX = 1;
+// Loop guard bounds — window/cooldown 1 minute .. 24 hours, threshold 1 .. 10,000.
+const BOUND_SELL_LOOP_GUARD_WINDOW_MIN_MS = 60_000;
+const BOUND_SELL_LOOP_GUARD_WINDOW_MAX_MS = 24 * 60 * 60_000;
 
 export interface ParseResult {
   policy: ExecutionPolicy;
@@ -503,6 +509,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const profitTarget = parseProfitTarget(obj.profitTarget, issues);
   const dustAbandonment = parseDustAbandonment(obj.dustAbandonment, issues);
   const repriceChain = parseRepriceChain(obj.repriceChain, issues);
+  const sellLoopGuard = parseSellLoopGuard(obj.sellLoopGuard, issues);
   const lossExit = parseLossExit(obj.lossExit, issues);
   const preResolutionExit = parsePreResolutionExit(obj.preResolutionExit, issues);
   const depositActivation = parseDepositActivation(obj.depositActivation, issues);
@@ -541,6 +548,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       profitTarget,
       dustAbandonment,
       repriceChain,
+      sellLoopGuard,
       lossExit,
       preResolutionExit,
       depositActivation,
@@ -634,6 +642,58 @@ function parseRepriceChain(raw: unknown, issues: string[]): RepriceChainPolicyCo
       "repriceChain.maxChainCount",
     ),
     dynamicChainCap: parseDynamicChainCap(obj.dynamicChainCap, issues),
+  };
+}
+
+function parseSellLoopGuard(raw: unknown, issues: string[]): SellLoopGuardPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("sellLoopGuard must be an object");
+    return DEFAULT_SELL_LOOP_GUARD_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_SELL_LOOP_GUARD_POLICY.enabled,
+      issues,
+      "sellLoopGuard.enabled",
+    ),
+    windowMs: clampedInt(
+      obj.windowMs,
+      DEFAULT_SELL_LOOP_GUARD_POLICY.windowMs,
+      BOUND_SELL_LOOP_GUARD_WINDOW_MIN_MS,
+      BOUND_SELL_LOOP_GUARD_WINDOW_MAX_MS,
+      issues,
+      "sellLoopGuard.windowMs",
+    ),
+    threshold: clampedInt(
+      obj.threshold,
+      DEFAULT_SELL_LOOP_GUARD_POLICY.threshold,
+      1,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "sellLoopGuard.threshold",
+    ),
+    cooldownMs: clampedInt(
+      obj.cooldownMs,
+      DEFAULT_SELL_LOOP_GUARD_POLICY.cooldownMs,
+      BOUND_SELL_LOOP_GUARD_WINDOW_MIN_MS,
+      BOUND_SELL_LOOP_GUARD_WINDOW_MAX_MS,
+      issues,
+      "sellLoopGuard.cooldownMs",
+    ),
+    countPostOnlyCrossPreSubmit: booleanOr(
+      obj.countPostOnlyCrossPreSubmit,
+      DEFAULT_SELL_LOOP_GUARD_POLICY.countPostOnlyCrossPreSubmit,
+      issues,
+      "sellLoopGuard.countPostOnlyCrossPreSubmit",
+    ),
+    countExchangeNoOrderId: booleanOr(
+      obj.countExchangeNoOrderId,
+      DEFAULT_SELL_LOOP_GUARD_POLICY.countExchangeNoOrderId,
+      issues,
+      "sellLoopGuard.countExchangeNoOrderId",
+    ),
   };
 }
 

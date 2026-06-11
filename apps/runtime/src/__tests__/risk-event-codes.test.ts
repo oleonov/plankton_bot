@@ -62,6 +62,12 @@ describe("normalizeReasonCode", () => {
     expect(normalizeReasonCode("market_not_alive")).toBe("market_not_alive");
   });
 
+  it("maps Track Q loop guard reason codes", () => {
+    expect(normalizeReasonCode("sell_loop_guard")).toBe("sell_loop_guard");
+    expect(normalizeReasonCode("sell-loop-guard")).toBe("sell_loop_guard");
+    expect(normalizeReasonCode("post-only-cross-pre-submit")).toBe("post_only_cross_pre_submit");
+  });
+
   it("returns unknown_rejection for unrecognized strings", () => {
     expect(normalizeReasonCode("some future rejection reason")).toBe("unknown_rejection");
   });

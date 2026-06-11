@@ -929,4 +929,62 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     const reparsed = parseExecutionPolicyJson(serializeExecutionPolicy(policy)).policy;
     expect(reparsed).toEqual(policy);
   });
+
+  it("defaults sellLoopGuard to enforcement with 10 / 6h / 6h", () => {
+    expect(DEFAULT_EXECUTION_POLICY.sellLoopGuard).toEqual({
+      enabled: true,
+      windowMs: 21_600_000,
+      threshold: 10,
+      cooldownMs: 21_600_000,
+      countPostOnlyCrossPreSubmit: true,
+      countExchangeNoOrderId: true,
+    });
+    const { policy, issues } = parseExecutionPolicyJson(JSON.stringify({ entryPriceCeiling: 0.4 }));
+    expect(issues).toHaveLength(0);
+    expect(policy.sellLoopGuard).toEqual(DEFAULT_EXECUTION_POLICY.sellLoopGuard);
+  });
+
+  it("parses custom sellLoopGuard values", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        sellLoopGuard: {
+          enabled: false,
+          windowMs: 3_600_000,
+          threshold: 5,
+          cooldownMs: 7_200_000,
+          countPostOnlyCrossPreSubmit: false,
+          countExchangeNoOrderId: false,
+        },
+      }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.sellLoopGuard).toEqual({
+      enabled: false,
+      windowMs: 3_600_000,
+      threshold: 5,
+      cooldownMs: 7_200_000,
+      countPostOnlyCrossPreSubmit: false,
+      countExchangeNoOrderId: false,
+    });
+  });
+
+  it("rejects out-of-bound sellLoopGuard numeric fields and falls back to defaults", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        sellLoopGuard: { windowMs: 100, threshold: 0, cooldownMs: 999 * 60 * 60_000 },
+      }),
+    );
+    expect(policy.sellLoopGuard.windowMs).toBe(DEFAULT_EXECUTION_POLICY.sellLoopGuard.windowMs);
+    expect(policy.sellLoopGuard.threshold).toBe(DEFAULT_EXECUTION_POLICY.sellLoopGuard.threshold);
+    expect(policy.sellLoopGuard.cooldownMs).toBe(DEFAULT_EXECUTION_POLICY.sellLoopGuard.cooldownMs);
+    expect(issues.some((i) => i.includes("sellLoopGuard.windowMs"))).toBe(true);
+    expect(issues.some((i) => i.includes("sellLoopGuard.threshold"))).toBe(true);
+    expect(issues.some((i) => i.includes("sellLoopGuard.cooldownMs"))).toBe(true);
+  });
+
+  it("rejects sellLoopGuard as array or scalar with an issue and falls back", () => {
+    const { policy, issues } = parseExecutionPolicyJson(JSON.stringify({ sellLoopGuard: [1, 2] }));
+    expect(issues.some((i) => i.includes("sellLoopGuard must be an object"))).toBe(true);
+    expect(policy.sellLoopGuard).toEqual(DEFAULT_EXECUTION_POLICY.sellLoopGuard);
+  });
 });

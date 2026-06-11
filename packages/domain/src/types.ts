@@ -848,6 +848,23 @@ export interface RepriceChainPolicyConfig {
   dynamicChainCap: DynamicChainCapPolicyConfig;
 }
 
+/**
+ * Loop guard — token-level SELL circuit breaker for repeated no-op outcomes.
+ * Counts realized no-op SELL outcomes (local post-only-cross skips and
+ * exchange/gateway no-order-id rejections) per token in a sliding window and,
+ * after `threshold`, suppresses SELL signal generation for that token during a
+ * cooldown. Distinct from R65 (`repriceChain`), which caps reprice loops on
+ * already-open orders. See packages/domain/src/sell-loop-guard.ts.
+ */
+export interface SellLoopGuardPolicy {
+  enabled: boolean;
+  windowMs: number;
+  threshold: number;
+  cooldownMs: number;
+  countPostOnlyCrossPreSubmit: boolean;
+  countExchangeNoOrderId: boolean;
+}
+
 export interface DynamicChainCapPolicyConfig {
   enabled: boolean;
   tradeCountThinThreshold: number;
@@ -943,6 +960,8 @@ export interface ExecutionPolicy {
   dustAbandonment: DustAbandonmentPolicyConfig;
   /** CHANGE C — per-token 24h reprice chain cap config. */
   repriceChain: RepriceChainPolicyConfig;
+  /** Loop guard — token-level SELL circuit breaker for repeated no-op outcomes. */
+  sellLoopGuard: SellLoopGuardPolicy;
   /** D9_LOSS_EXIT — R96 liquidity-aware loss exit trigger. Disabled by default. */
   lossExit: D9LossExitPolicy;
   /** Sub-Track Q.D — pre-resolution forced exit on cheap longshots (shadow). */

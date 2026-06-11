@@ -539,6 +539,116 @@ describe("ExecutionModule", () => {
     await guarded.stop();
   });
 
+  it("publishes exactly one OrderSkipped (and the risk event) on post-only cross", async () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const guarded = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      riskEventRepo,
+    });
+    await guarded.start();
+
+    const skipped: any[] = [];
+    bus.subscribe("OrderSkipped", async (p) => {
+      skipped.push(p);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: 0.12, bestAsk: 0.14 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ side: "sell", price: 0.1, size: 5, postOnly: true }),
+      timestamp: Date.now(),
+    });
+
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toMatchObject({
+      reasonCode: "post-only-cross-pre-submit",
+      side: "sell",
+      price: 0.1,
+      size: 5,
+      tokenId: "tok-yes",
+      conditionId: "cond-1",
+    });
+    expect(riskEventRepo.insert).toHaveBeenCalledTimes(1);
+
+    await guarded.stop();
+  });
+
+  it("post-only cross publishes no OrderRejected and does not submit or save an order", async () => {
+    const guarded = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    await guarded.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: 0.12, bestAsk: 0.14 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ side: "sell", price: 0.1, size: 5, postOnly: true }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(0);
+
+    await guarded.stop();
+  });
+
+  it("executePlace path also publishes OrderSkipped on post-only cross", async () => {
+    const guarded = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    await guarded.start();
+
+    const skipped: any[] = [];
+    bus.subscribe("OrderSkipped", async (p) => {
+      skipped.push(p);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: 0.12, bestAsk: 0.14 })],
+      timestamp: Date.now(),
+    });
+    await getExecutePlaceCaller(guarded).executePlace(
+      makePlaceCmd({ side: "sell", price: 0.1, size: 5, postOnly: true }),
+    );
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0].reasonCode).toBe("post-only-cross-pre-submit");
+
+    await guarded.stop();
+  });
+
   it("does not apply post-only pre-submit guard when refreshed bid is unavailable", async () => {
     await mod.start();
 

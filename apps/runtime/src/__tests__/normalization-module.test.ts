@@ -3,6 +3,7 @@ import { createTokenId } from "@krabs/domain";
 import type { NormalizedMarket } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { NormalizationModule } from "../modules/normalization/normalization-module.js";
+import { SnapshotWriter } from "../snapshot-writer.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
 
@@ -98,6 +99,57 @@ describe("NormalizationModule", () => {
     expect(received).toHaveLength(1);
     expect(received[0]![0]!.regime).toBeNull();
     expect(received[0]![0]!.horizon).toBeNull();
+
+    await mod.stop();
+  });
+
+  it("keeps MarketSnapshotHeartbeat isolated from normalization and decision cascade", async () => {
+    const repo = { saveBatch: vi.fn(), prune: vi.fn() };
+    const snapshotWriter = new SnapshotWriter(repo, {
+      intervalMs: 5 * 60 * 1000,
+      pruneIntervalMs: 60 * 60 * 1000,
+      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+    });
+    const normalized: NormalizedMarket[][] = [];
+    const observeMarket = vi.fn();
+    let reevaluations = 0;
+    let signalCount = 0;
+    let placeOrderCount = 0;
+    let cancelOrderCount = 0;
+
+    bus.subscribe("MarketSnapshotHeartbeat", async ({ markets, timestamp }) => {
+      snapshotWriter.onHeartbeat(markets, timestamp);
+    });
+    bus.subscribe("NormalizedMarketUpdated", async (p) => {
+      normalized.push([...p.markets]);
+      for (const market of p.markets) observeMarket(market);
+      reevaluations += 1;
+    });
+    bus.subscribe("SignalProduced", async () => {
+      signalCount += 1;
+    });
+    bus.subscribe("PlaceOrderRequested", async () => {
+      placeOrderCount += 1;
+    });
+    bus.subscribe("CancelOrderRequested", async () => {
+      cancelOrderCount += 1;
+    });
+    await mod.start();
+
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [makeNormalizedMarket({ slug: "quiet-active-token" })],
+      timestamp: Date.now(),
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(repo.saveBatch).toHaveBeenCalledTimes(1);
+    expect(normalized).toHaveLength(0);
+    expect(observeMarket).not.toHaveBeenCalled();
+    expect(reevaluations).toBe(0);
+    expect(signalCount).toBe(0);
+    expect(placeOrderCount).toBe(0);
+    expect(cancelOrderCount).toBe(0);
 
     await mod.stop();
   });

@@ -93,6 +93,22 @@ export type {
   DynamicChainCapResolution,
   NextRepriceChainState,
 } from "./reprice-chain.js";
+export {
+  DEFAULT_SELL_LOOP_GUARD_POLICY,
+  classifySellLoopGuardReject,
+  classifySellLoopGuardSkip,
+  createSellLoopGuardBucket,
+  getSellLoopGuardSnapshot,
+  recordSellLoopGuardOutcome,
+  resetSellLoopGuardBucket,
+  shouldCountSellLoopGuardOutcome,
+} from "./sell-loop-guard.js";
+export type {
+  LoopGuardOutcomeKind,
+  RecordOutcomeResult,
+  SellLoopGuardSnapshot,
+  TokenLoopBucket,
+} from "./sell-loop-guard.js";
 export { isLiveBook } from "./book-liveness.js";
 export type { BookContext, LiveBookVerdict } from "./book-liveness.js";
 export { computeRepriceThreshold } from "./reprice-threshold.js";

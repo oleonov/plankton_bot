@@ -174,6 +174,7 @@ function input(overrides: Partial<DecisionPlanningInput> = {}): DecisionPlanning
     postBuyCooldown: null,
     latestSellOrder: null,
     hasActiveSellOrderForQd: false,
+    sellLoopGuard: null,
     ...overrides,
   };
 }

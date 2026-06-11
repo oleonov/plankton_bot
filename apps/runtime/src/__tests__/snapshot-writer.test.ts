@@ -57,6 +57,16 @@ describe("SnapshotWriter", () => {
     expect(repo.saveBatch.mock.calls[0]![0]).toHaveLength(2);
   });
 
+  it("writes heartbeat snapshots through a separate observe-only path", () => {
+    const markets = [makeMarket("tok-heartbeat")];
+    writer.onHeartbeat(markets, Date.now());
+
+    expect(repo.saveBatch).toHaveBeenCalledTimes(1);
+    expect(repo.saveBatch.mock.calls[0]![0]).toMatchObject([
+      { tokenId: "tok-heartbeat", bestBid: 0.45, bestAsk: 0.55 },
+    ]);
+  });
+
   it("skips tokens written less than intervalMs ago", () => {
     const now = Date.now();
     const markets = [makeMarket("tok-1")];
@@ -75,6 +85,27 @@ describe("SnapshotWriter", () => {
     writer.onSnapshot(markets, now + 5 * 60 * 1000 + 1); // just past 5 min
 
     expect(repo.saveBatch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let heartbeat writes suppress the next real changed snapshot", () => {
+    const now = Date.now();
+    const markets = [makeMarket("tok-1")];
+
+    writer.onHeartbeat(markets, now);
+    writer.onSnapshot([makeMarket("tok-1", 0.46, 0.56)], now + 1);
+
+    expect(repo.saveBatch).toHaveBeenCalledTimes(2);
+    expect(repo.saveBatch.mock.calls[1]![0]).toMatchObject([{ bestBid: 0.46, bestAsk: 0.56 }]);
+  });
+
+  it("skips heartbeat when a real snapshot was written recently", () => {
+    const now = Date.now();
+    const markets = [makeMarket("tok-1")];
+
+    writer.onSnapshot(markets, now);
+    writer.onHeartbeat(markets, now + 60_000);
+
+    expect(repo.saveBatch).toHaveBeenCalledTimes(1);
   });
 
   it("does not update dedupe state when saveBatch throws", () => {
@@ -118,6 +149,22 @@ describe("SnapshotWriter", () => {
 
     writer.onSnapshot([makeMarket("tok-1")], now + 60 * 60 * 1000 + 1);
     expect(repo.prune).toHaveBeenCalledTimes(1);
+  });
+
+  it("prunes from heartbeat-only writes and preserves configured active tokens", () => {
+    writer = new SnapshotWriter(repo, {
+      intervalMs: 5 * 60 * 1000,
+      pruneIntervalMs: 60 * 60 * 1000,
+      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+      preserveTokenIds: () => [createTokenId("tok-active")],
+    });
+    const now = Date.now();
+
+    writer.onHeartbeat([makeMarket("tok-active")], now + 60 * 60 * 1000 + 1);
+
+    expect(repo.prune).toHaveBeenCalledWith(expect.any(String), {
+      preserveTokenIds: [createTokenId("tok-active")],
+    });
   });
 
   it("propagates lastPrice, volume24h, liquidity, and public trade count", () => {

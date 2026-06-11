@@ -5505,6 +5505,55 @@ describe("AlgoDecisionModule", () => {
     });
   });
 
+  describe("sell loop guard suppression telemetry", () => {
+    it("writes track_q_loop_guard_suppressed_total when applying the suppression side effect", async () => {
+      const db = new Database(":memory:");
+      db.exec(`
+        CREATE TABLE runtime_metrics (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          metric_name TEXT NOT NULL,
+          value REAL NOT NULL,
+          labels TEXT,
+          captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      const sumByLabel = (metricName: string, labels: string): number =>
+        (
+          db
+            .prepare(
+              "SELECT COALESCE(SUM(value), 0) AS s FROM runtime_metrics WHERE metric_name = ? AND labels = ?",
+            )
+            .get(metricName, labels) as { s: number }
+        ).s;
+
+      const writer = new RuntimeMetricWriter(db);
+      const mod = buildModule({ runtimeMetrics: writer });
+      await mod.start();
+
+      const sideEffect: DecisionPlanSideEffect = {
+        kind: "sell_loop_guard_suppressed",
+        tokenId: createTokenId("token-loop-guard"),
+        conditionId: "cond-loop-guard",
+        decisionRuleId: "D8_PROFIT_RATIO",
+        activeCount: 12,
+        threshold: 10,
+        timestamp: "2026-06-12T00:00:00.000Z",
+      };
+      (mod as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      writer.flushCounters();
+      await mod.stop();
+
+      expect(
+        sumByLabel(
+          "track_q_loop_guard_suppressed_total",
+          JSON.stringify({ decisionRuleId: "D8_PROFIT_RATIO" }),
+        ),
+      ).toBe(1);
+
+      db.close();
+    });
+  });
+
   // Sub-Track Q.D shadow (observe-only): the planner emits a `track_q_d` side
   // effect for cheap-longshot legs inside the pre-resolution TTC window. The
   // module surfaces it as a deduped, structured risk event + cumulative

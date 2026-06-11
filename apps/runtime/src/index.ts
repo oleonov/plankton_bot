@@ -127,6 +127,7 @@ import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
 import { SignalToOrderBridge } from "./modules/strategy/signal-to-order.js";
 import { ExecutionPolicyProvider } from "./execution-policy-provider.js";
 import { AlgoDecisionModule } from "./modules/algo-decision/algo-decision-module.js";
+import { SellLoopGuardModule } from "./modules/sell-loop-guard/sell-loop-guard-module.js";
 import { MarketSnapshotPriceHistoryProvider } from "./modules/algo-decision/market-snapshot-price-history.js";
 import { MarketSelectionCache } from "./modules/algo-decision/market-selection-cache.js";
 import { EntryLifecycleModule } from "./modules/entry-lifecycle/entry-lifecycle-module.js";
@@ -160,6 +161,7 @@ import {
   SqliteRedeemQuarantineRepository,
 } from "@krabs/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
+import { findActivePositions } from "./active-positions.js";
 import { calculateTotalExposure } from "./exposure-calculator.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
 import { resolveActiveProfile } from "./profile-boot.js";
@@ -755,6 +757,16 @@ async function main(): Promise<void> {
     httpErrorMetricsSink: ({ source, errorClass }) => {
       runtimeMetrics.writeCounter("http_error_class", 1, JSON.stringify({ source, errorClass }));
     },
+    fullLifetimeSnapshots: {
+      enabled: true,
+      heartbeatMs: 5 * 60 * 1000,
+      postCloseGraceMs: 0,
+      activePositionTokenIds: () =>
+        findActivePositions(repos.position).map((position) => position.tokenId),
+      recordMissingMarket: (tokenId) => {
+        runtimeMetrics.writeCounter("full_lifetime_missing_market", 1, JSON.stringify({ tokenId }));
+      },
+    },
     bookSignals: {
       openPositionTokenIds: () => repos.position.findOpen().map((position) => position.tokenId),
       setOpenPositionTokenIds: (tokenIds) => {
@@ -1022,6 +1034,15 @@ async function main(): Promise<void> {
     DECISION_TICK_LATENCY_ALERT_COOLDOWN_MS,
   );
 
+  const sellLoopGuardModule = new SellLoopGuardModule({
+    bus,
+    policy: () => currentExecutionPolicy().sellLoopGuard,
+    riskEventRepo: repos.riskEvent,
+    runtimeMetrics,
+    db: ledgerConn.db,
+    log,
+  });
+
   const algoDecisionModule = new AlgoDecisionModule({
     bus,
     legStateRepo: repos.legState,
@@ -1031,6 +1052,7 @@ async function main(): Promise<void> {
     decisionSignalLogRepo: repos.decisionSignalLog,
     riskEventRepo: repos.riskEvent,
     runtimeMetrics,
+    sellLoopGuard: sellLoopGuardModule,
     decisionPersistenceMode: "worker",
     decisionPersistenceWorkerDbPath: ledgerDbPath,
     decisionWorkerCount: config.algoDecisionWorkerCount,
@@ -1451,6 +1473,7 @@ async function main(): Promise<void> {
     ...(redeemSweepModule
       ? [["redeem-sweep", redeemSweepModule] as [string, import("@krabs/domain").RuntimeModule]]
       : []),
+    ["sell-loop-guard", sellLoopGuardModule],
     ["algo-decision", algoDecisionModule],
     ["resolution", resolutionModule],
     ...(inventoryManagerModule
@@ -1504,10 +1527,15 @@ async function main(): Promise<void> {
     pruneIntervalMs: 60 * 60 * 1000,
     pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
     enabled: () => !runtimeControl.isPaused(),
+    preserveTokenIds: () => marketDataModule.getFullLifetimeSnapshotPreserveTokenIds(),
   });
 
   bus.subscribe("MarketSnapshotReceived", async ({ markets, timestamp }) => {
     snapshotWriter.onSnapshot(markets, timestamp);
+  });
+
+  bus.subscribe("MarketSnapshotHeartbeat", async ({ markets, timestamp }) => {
+    snapshotWriter.onHeartbeat(markets, timestamp);
   });
 
   // 7o. Persist risk events — deduplicated signal rejections, drift, exposure breach.

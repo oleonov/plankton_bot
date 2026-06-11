@@ -10,10 +10,12 @@ export interface SnapshotWriterConfig {
   pruneIntervalMs: number;
   pruneTtlMs: number;
   enabled?: () => boolean;
+  preserveTokenIds?: () => readonly TokenId[];
 }
 
 export class SnapshotWriter {
-  private readonly lastWrittenAt = new Map<TokenId, number>();
+  private readonly lastRealWrittenAt = new Map<TokenId, number>();
+  private readonly lastHeartbeatWrittenAt = new Map<TokenId, number>();
   private lastPruneAt = Date.now();
 
   constructor(
@@ -24,10 +26,34 @@ export class SnapshotWriter {
   onSnapshot(markets: readonly NormalizedMarket[], timestamp: number): void {
     if (this.config.enabled && !this.config.enabled()) return;
 
+    const batch = this.buildBatch(markets, timestamp, (tokenId) =>
+      this.lastRealWrittenAt.get(tokenId),
+    );
+    this.writeBatch(batch, timestamp, this.lastRealWrittenAt);
+    this.maybePrune(timestamp);
+  }
+
+  onHeartbeat(markets: readonly NormalizedMarket[], timestamp: number): void {
+    if (this.config.enabled && !this.config.enabled()) return;
+
+    const batch = this.buildBatch(markets, timestamp, (tokenId) => {
+      const lastReal = this.lastRealWrittenAt.get(tokenId) ?? 0;
+      const lastHeartbeat = this.lastHeartbeatWrittenAt.get(tokenId) ?? 0;
+      return Math.max(lastReal, lastHeartbeat);
+    });
+    this.writeBatch(batch, timestamp, this.lastHeartbeatWrittenAt);
+    this.maybePrune(timestamp);
+  }
+
+  private buildBatch(
+    markets: readonly NormalizedMarket[],
+    timestamp: number,
+    lastWrittenAt: (tokenId: TokenId) => number | undefined,
+  ): MarketSnapshot[] {
     const batch: MarketSnapshot[] = [];
 
     for (const m of markets) {
-      const lastAt = this.lastWrittenAt.get(m.tokenId);
+      const lastAt = lastWrittenAt(m.tokenId);
       if (lastAt !== undefined && timestamp - lastAt < this.config.intervalMs) continue;
       batch.push({
         tokenId: m.tokenId,
@@ -41,22 +67,42 @@ export class SnapshotWriter {
       });
     }
 
-    if (batch.length > 0) {
-      this.repo.saveBatch(batch);
-      for (const s of batch) this.lastWrittenAt.set(s.tokenId, timestamp);
-    }
+    return batch;
+  }
 
+  private writeBatch(
+    batch: readonly MarketSnapshot[],
+    timestamp: number,
+    writeState: Map<TokenId, number>,
+  ): void {
+    if (batch.length === 0) return;
+    this.repo.saveBatch([...batch]);
+    for (const s of batch) writeState.set(s.tokenId, timestamp);
+  }
+
+  private maybePrune(timestamp: number): void {
     if (timestamp - this.lastPruneAt > this.config.pruneIntervalMs) {
       const cutoff = new Date(timestamp - this.config.pruneTtlMs).toISOString();
-      this.repo.prune(cutoff);
+      const preserveTokenIds = this.config.preserveTokenIds?.() ?? [];
+      this.repo.prune(cutoff, { preserveTokenIds });
       // Mirror the DB prune in memory: drop tokens we haven't written beyond
       // the TTL. Without this, lastWrittenAt grew unbounded across tracked-
       // universe churn even though the DB rows were gone.
       const cutoffMs = timestamp - this.config.pruneTtlMs;
-      for (const [tokenId, writtenAt] of this.lastWrittenAt) {
-        if (writtenAt < cutoffMs) this.lastWrittenAt.delete(tokenId);
-      }
+      this.pruneMemory(this.lastRealWrittenAt, cutoffMs, preserveTokenIds);
+      this.pruneMemory(this.lastHeartbeatWrittenAt, cutoffMs, preserveTokenIds);
       this.lastPruneAt = timestamp;
+    }
+  }
+
+  private pruneMemory(
+    writeState: Map<TokenId, number>,
+    cutoffMs: number,
+    preserveTokenIds: readonly TokenId[],
+  ): void {
+    const preserve = new Set(preserveTokenIds.map(String));
+    for (const [tokenId, writtenAt] of writeState) {
+      if (writtenAt < cutoffMs && !preserve.has(String(tokenId))) writeState.delete(tokenId);
     }
   }
 }

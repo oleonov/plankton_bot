@@ -600,7 +600,7 @@ export class ExecutionModule implements RuntimeModule {
 
     const postOnlyCross = this.getPostOnlyCrossPreSubmitSkip(cmd);
     if (postOnlyCross) {
-      this.skipPostOnlyCrossPreSubmit(cmd, postOnlyCross);
+      await this.skipPostOnlyCrossPreSubmit(cmd, postOnlyCross);
       return;
     }
 
@@ -749,7 +749,7 @@ export class ExecutionModule implements RuntimeModule {
 
     const postOnlyCross = this.getPostOnlyCrossPreSubmitSkip(cmd);
     if (postOnlyCross) {
-      this.skipPostOnlyCrossPreSubmit(cmd, postOnlyCross);
+      await this.skipPostOnlyCrossPreSubmit(cmd, postOnlyCross);
       return;
     }
 
@@ -1374,10 +1374,10 @@ export class ExecutionModule implements RuntimeModule {
     };
   }
 
-  private skipPostOnlyCrossPreSubmit(
+  private async skipPostOnlyCrossPreSubmit(
     cmd: PlaceOrderCommand,
     postOnlyCross: PostOnlyCrossPreSubmitSkip,
-  ): void {
+  ): Promise<void> {
     this.log.warn(
       {
         commandId: cmd.commandId,
@@ -1390,12 +1390,31 @@ export class ExecutionModule implements RuntimeModule {
       },
       "sell order skipped — post-only price would cross current bid",
     );
-    this.recordOrderSkipped(cmd, "post-only-cross-pre-submit", {
+    const details = {
       price: cmd.price,
       currentBestBid: postOnlyCross.bestBid,
       currentBestAsk: postOnlyCross.bestAsk,
       bookSource: postOnlyCross.bookSource,
       snapshotTs: postOnlyCross.snapshotTs,
+    };
+    this.recordOrderSkipped(cmd, "post-only-cross-pre-submit", details);
+    // Live no-op signal for the loop guard — published before any working order
+    // exists, so it counts independently of deduplicated risk_events.
+    await this.deps.bus.publish("OrderSkipped", {
+      commandId: cmd.commandId,
+      clientOrderId: cmd.clientOrderId,
+      tokenId: cmd.tokenId,
+      conditionId: cmd.conditionId,
+      reasonCode: "post-only-cross-pre-submit",
+      side: cmd.side,
+      price: cmd.price,
+      size: cmd.size,
+      signalReason: cmd.signalReason ?? null,
+      signalId: cmd.signalId ?? null,
+      decisionRuleId: cmd.decisionRuleId ?? null,
+      signalTimestamp: cmd.signalTimestamp ?? null,
+      details,
+      timestamp: Date.now(),
     });
   }
 

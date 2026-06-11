@@ -6,6 +6,7 @@ import type {
   LegState,
   NormalizedMarket,
   Position,
+  SellLoopGuardSnapshot,
   SellOrderSizingContext,
   TokenId,
   TradeDecisionAction,
@@ -144,6 +145,15 @@ export type DecisionPlanSideEffect =
       conditionId: string;
       timestamp: string;
       projection: QdShadowProjection;
+    }
+  | {
+      kind: "sell_loop_guard_suppressed";
+      tokenId: TokenId;
+      conditionId: string;
+      decisionRuleId: string | null;
+      activeCount: number;
+      threshold: number;
+      timestamp: string;
     };
 
 export type TrackQShadowReason =
@@ -245,6 +255,7 @@ export type DecisionPlanningInput = {
   postBuyCooldown: { cooldownMs: number; ageMs: number; lastBuyFillAt: number } | null;
   latestSellOrder: SellOrderSizingContext | null;
   hasActiveSellOrderForQd: boolean;
+  sellLoopGuard: SellLoopGuardSnapshot | null;
 };
 
 const SELL_ONLY: ReadonlySet<TradeDecisionAction> = new Set(["SELL"]);
@@ -260,6 +271,11 @@ export const D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON = "d9_loss_exit_below_avg
 export const D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON =
   "d9_loss_exit_avg_entry_unavailable_guard_bypass";
 const POST_BUY_FILL_COOLDOWN_REASON = "post-buy-fill-cooldown";
+// Track Q loop guard: token-level SELL circuit breaker. When the guard reports a
+// blocked token (>= threshold no-op SELL outcomes in the rolling window) the
+// planner suppresses SELL signal generation for the cooldown. See
+// research_plankton/loop_guard_spec_2026-06-11.md §4.5.
+export const SELL_LOOP_GUARD_REASON = "sell_loop_guard";
 const SELL_SPREAD_MAX_RATIO = 0.5;
 // Track Q shadow: the design-intent threshold (bid/ask < 0.10 ⟺ spread/mid > 1.636).
 // Telemetry-only — the live guard above still uses SELL_SPREAD_MAX_RATIO.
@@ -1136,6 +1152,43 @@ function buildSignalOrSuppression(args: {
       ? (input.now - new Date(input.legState.firstTradeAt).getTime()) / 1000
       : null,
   };
+
+  // Track Q loop guard: a blocked token suppresses SELL signal generation for the
+  // cooldown, regardless of which rule produced the SELL. BUY is never gated here.
+  if (decision.action === "SELL" && input.sellLoopGuard?.blocked) {
+    const guard = input.sellLoopGuard;
+    args.sideEffects.push({
+      kind: "sell_loop_guard_suppressed",
+      tokenId: market.tokenId,
+      conditionId: market.conditionId,
+      decisionRuleId: decision.ruleId,
+      activeCount: guard.activeCount,
+      threshold: guard.threshold,
+      timestamp: args.nowIso,
+    });
+    args.suppressions.push({
+      tokenId: market.tokenId,
+      conditionId: market.conditionId,
+      reasonCode: SELL_LOOP_GUARD_REASON,
+      side: "SELL",
+      decisionRuleId: decision.ruleId,
+      state: ctx.state,
+      price: ctx.price,
+      buyCount,
+      timeSinceLastSeconds: ctx.timeSinceLastSeconds,
+      emissionFacts,
+      timestamp: args.nowIso,
+      extra: {
+        activeCount: guard.activeCount,
+        threshold: guard.threshold,
+        windowMs: guard.windowMs,
+        blockedUntil:
+          guard.blockedUntilMs != null ? new Date(guard.blockedUntilMs).toISOString() : null,
+        lastOutcome: guard.lastOutcome,
+      },
+    });
+    return none(args.metrics, args.suppressions, args.sideEffects);
+  }
 
   if (shouldSuppressSellResidualBelowMinSize(decision, market, input.position)) {
     if (input.executionPolicy?.dustAbandonment.enabled) {

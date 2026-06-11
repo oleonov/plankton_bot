@@ -25,12 +25,19 @@ import type {
   MarketPricingStreamMetricsSnapshot,
   MarketPricingStreamUpdate,
   Market,
+  Position,
   TrackedForPricing,
   NormalizedMarket,
+  TokenId,
   MarketTradeCountProvider,
   V4AdmissionTelemetrySnapshot,
 } from "@krabs/domain";
-import { createConditionId, createTokenId, recordStageDuration } from "@krabs/domain";
+import {
+  PositionStatus,
+  createConditionId,
+  createTokenId,
+  recordStageDuration,
+} from "@krabs/domain";
 import { performance } from "node:perf_hooks";
 import type { Logger } from "../../logger.js";
 import {
@@ -238,6 +245,13 @@ export interface MarketDataModuleDeps {
   httpErrorMetricsSink?: (
     event: Readonly<{ source: string; errorClass: HttpErrorClass; message: string }>,
   ) => void;
+  fullLifetimeSnapshots?: {
+    enabled: boolean;
+    heartbeatMs: number;
+    postCloseGraceMs: number;
+    activePositionTokenIds: () => readonly TokenId[];
+    recordMissingMarket?: (tokenId: string) => void;
+  };
   /**
    * Optional pause gate. When the runtime is paused, periodic poll and
    * discovery batch cycles are skipped so the bot stops issuing new external
@@ -334,6 +348,12 @@ export class MarketDataModule implements RuntimeModule {
     capturedAtMs: number;
     value: TrackedForPricing;
   } | null = null;
+  private readonly fullLifetimeActiveTokenIds = new Set<string>();
+  private readonly fullLifetimePostCloseUntilByToken = new Map<string, number>();
+  private readonly fullLifetimeLastHeartbeatAtByToken = new Map<string, number>();
+  private readonly fullLifetimeMissingMarketLoggedAtByToken = new Map<string, number>();
+  private fullLifetimePollTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly unsubscribers: Array<() => void> = [];
   /**
    * True when the stream-level circuit breaker is open — the module degrades to
    * poll-only mode, polling the full WS-tier each cycle. Readable by Task 5.
@@ -373,6 +393,17 @@ export class MarketDataModule implements RuntimeModule {
         },
       });
     }
+    this.hydrateFullLifetimeActiveTokens();
+    if (this.fullLifetimeEnabled()) {
+      this.unsubscribers.push(
+        this.deps.bus.subscribe("PositionUpdated", async ({ position }) => {
+          this.handleFullLifetimePositionUpdated(position);
+        }),
+        this.deps.bus.subscribe("PositionSettled", async ({ tokenId }) => {
+          this.handleFullLifetimePositionSettled(tokenId);
+        }),
+      );
+    }
     // Fire first poll without blocking startup — interval handles retries
     this.poll().catch((err) => this.log.error({ err }, "initial poll failed"));
     this.timer = setInterval(() => {
@@ -405,6 +436,13 @@ export class MarketDataModule implements RuntimeModule {
       clearTimeout(this.gapLogTimer);
       this.gapLogTimer = null;
       this.flushGapLog();
+    }
+    if (this.fullLifetimePollTimer) {
+      clearTimeout(this.fullLifetimePollTimer);
+      this.fullLifetimePollTimer = null;
+    }
+    while (this.unsubscribers.length > 0) {
+      this.unsubscribers.pop()?.();
     }
     await this.flushPendingStreamUpdates();
     // Evict any tokens from the final discovery batch so downstream caches
@@ -616,6 +654,7 @@ export class MarketDataModule implements RuntimeModule {
           markets: [],
           timestamp: Date.now(),
         });
+        await this.publishFullLifetimeHeartbeat(Date.now(), new Set());
         return;
       }
 
@@ -898,6 +937,10 @@ export class MarketDataModule implements RuntimeModule {
       );
 
       await this.publishMarketSnapshotDelta(changedMarkets, now);
+      await this.publishFullLifetimeHeartbeat(
+        now,
+        new Set(changedMarkets.map((market) => String(market.tokenId))),
+      );
     } catch (err) {
       this.recordHttpError("gamma-pricing", err);
       if (isRateLimitError(err)) {
@@ -1294,26 +1337,37 @@ export class MarketDataModule implements RuntimeModule {
         }
       }
 
-      if (changedMarkets.length === 0) return;
-      this.lastSuccessfulDataMs = nowMs;
+      if (changedMarkets.length > 0) {
+        this.lastSuccessfulDataMs = nowMs;
+      }
       if (this.deps.runtimeControl?.isPaused()) {
         this.log.debug(
           { coalescedUpdates: updates.length, changedMarkets: changedMarkets.length },
           "stream snapshot suppressed while runtime is paused",
         );
+        await this.publishFullLifetimeHeartbeat(
+          nowMs,
+          new Set(changedMarkets.map((market) => String(market.tokenId))),
+        );
         return;
       }
-      this.log.debug(
-        {
-          coalescedUpdates: updates.length,
-          changedMarkets: changedMarkets.length,
-        },
-        "publishing coalesced stream market snapshot",
+      if (changedMarkets.length > 0) {
+        this.log.debug(
+          {
+            coalescedUpdates: updates.length,
+            changedMarkets: changedMarkets.length,
+          },
+          "publishing coalesced stream market snapshot",
+        );
+        await this.deps.bus.publish("MarketSnapshotReceived", {
+          markets: changedMarkets,
+          timestamp: nowMs,
+        });
+      }
+      await this.publishFullLifetimeHeartbeat(
+        nowMs,
+        new Set(changedMarkets.map((market) => String(market.tokenId))),
       );
-      await this.deps.bus.publish("MarketSnapshotReceived", {
-        markets: changedMarkets,
-        timestamp: nowMs,
-      });
     } finally {
       recordStageDuration("coalescing_flush", performance.now() - startMs);
     }
@@ -1549,6 +1603,143 @@ export class MarketDataModule implements RuntimeModule {
     }
   }
 
+  getFullLifetimeSnapshotPreserveTokenIds(nowMs = Date.now()): TokenId[] {
+    if (!this.fullLifetimeEnabled()) return [];
+    const preserve = new Set<string>(this.fullLifetimeActiveTokenIds);
+    for (const [tokenId, untilMs] of this.fullLifetimePostCloseUntilByToken) {
+      if (nowMs <= untilMs) preserve.add(tokenId);
+    }
+    return [...preserve].map((tokenId) => createTokenId(tokenId));
+  }
+
+  private fullLifetimeEnabled(): boolean {
+    return this.deps.fullLifetimeSnapshots?.enabled === true;
+  }
+
+  private hydrateFullLifetimeActiveTokens(): void {
+    if (!this.fullLifetimeEnabled()) return;
+    try {
+      for (const tokenId of this.deps.fullLifetimeSnapshots?.activePositionTokenIds() ?? []) {
+        this.fullLifetimeActiveTokenIds.add(String(tokenId));
+      }
+    } catch (err) {
+      this.log.warn({ err }, "full-lifetime active position hydration failed");
+    }
+  }
+
+  private handleFullLifetimePositionUpdated(position: Position): void {
+    if (!this.fullLifetimeEnabled()) return;
+    const tokenId = String(position.tokenId);
+    const wasActive = this.fullLifetimeActiveTokenIds.has(tokenId);
+    const isActive = isFullLifetimeActivePosition(position);
+    if (isActive) {
+      this.fullLifetimePostCloseUntilByToken.delete(tokenId);
+      if (wasActive) return;
+      this.fullLifetimeActiveTokenIds.add(tokenId);
+      this.invalidateTieredPricingCache("full-lifetime-active-position");
+      this.queueFullLifetimePoll();
+      return;
+    }
+    if (!wasActive) return;
+    this.fullLifetimeActiveTokenIds.delete(tokenId);
+    this.fullLifetimeLastHeartbeatAtByToken.delete(tokenId);
+    const postCloseGraceMs = this.deps.fullLifetimeSnapshots?.postCloseGraceMs ?? 0;
+    if (postCloseGraceMs > 0) {
+      this.fullLifetimePostCloseUntilByToken.set(tokenId, Date.now() + postCloseGraceMs);
+    } else {
+      this.fullLifetimePostCloseUntilByToken.delete(tokenId);
+    }
+    this.invalidateTieredPricingCache("full-lifetime-inactive-position");
+    this.queueFullLifetimePoll();
+  }
+
+  private handleFullLifetimePositionSettled(tokenId: TokenId): void {
+    if (!this.fullLifetimeEnabled()) return;
+    const tokenKey = String(tokenId);
+    const hadState =
+      this.fullLifetimeActiveTokenIds.delete(tokenKey) ||
+      this.fullLifetimePostCloseUntilByToken.delete(tokenKey);
+    this.fullLifetimeLastHeartbeatAtByToken.delete(tokenKey);
+    this.fullLifetimeMissingMarketLoggedAtByToken.delete(tokenKey);
+    if (hadState) {
+      this.invalidateTieredPricingCache("full-lifetime-position-settled");
+    }
+  }
+
+  private invalidateTieredPricingCache(reason: string): void {
+    if (!this.tieredPricingCache) return;
+    this.tieredPricingCache = null;
+    this.log.debug({ reason }, "tiered pricing cache invalidated");
+  }
+
+  private queueFullLifetimePoll(): void {
+    if (this.fullLifetimePollTimer) return;
+    this.forceFullPoll = true;
+    this.fullLifetimePollTimer = setTimeout(() => {
+      this.fullLifetimePollTimer = null;
+      this.poll().catch((err) => this.log.error({ err }, "full-lifetime poll failed"));
+    }, 0);
+  }
+
+  private async publishFullLifetimeHeartbeat(
+    timestamp: number,
+    realChangedTokenIds: ReadonlySet<string>,
+  ): Promise<void> {
+    if (!this.fullLifetimeEnabled()) return;
+    const tokenIds = this.resolveFullLifetimeHeartbeatTokenIds(timestamp);
+    if (tokenIds.length === 0) return;
+
+    const markets: NormalizedMarket[] = [];
+    for (const tokenId of tokenIds) {
+      if (realChangedTokenIds.has(tokenId)) continue;
+      const market = this.marketCache.get(tokenId);
+      if (market == null) {
+        this.recordFullLifetimeMissingMarket(tokenId, timestamp);
+        continue;
+      }
+      const lastHeartbeatAt = this.fullLifetimeLastHeartbeatAtByToken.get(tokenId);
+      if (
+        lastHeartbeatAt !== undefined &&
+        timestamp - lastHeartbeatAt < (this.deps.fullLifetimeSnapshots?.heartbeatMs ?? 0)
+      ) {
+        continue;
+      }
+      markets.push(market);
+    }
+    if (markets.length === 0) return;
+
+    await this.deps.bus.publish("MarketSnapshotHeartbeat", {
+      markets,
+      timestamp,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    for (const market of markets) {
+      this.fullLifetimeLastHeartbeatAtByToken.set(String(market.tokenId), timestamp);
+    }
+  }
+
+  private resolveFullLifetimeHeartbeatTokenIds(nowMs: number): string[] {
+    const tokenIds = new Set<string>(this.fullLifetimeActiveTokenIds);
+    for (const [tokenId, untilMs] of [...this.fullLifetimePostCloseUntilByToken]) {
+      if (nowMs <= untilMs) {
+        tokenIds.add(tokenId);
+      } else {
+        this.fullLifetimePostCloseUntilByToken.delete(tokenId);
+      }
+    }
+    return [...tokenIds];
+  }
+
+  private recordFullLifetimeMissingMarket(tokenId: string, nowMs: number): void {
+    const lastLoggedAt = this.fullLifetimeMissingMarketLoggedAtByToken.get(tokenId);
+    const throttleMs = Math.max(this.deps.fullLifetimeSnapshots?.heartbeatMs ?? 0, 60_000);
+    if (lastLoggedAt !== undefined && nowMs - lastLoggedAt < throttleMs) return;
+    this.fullLifetimeMissingMarketLoggedAtByToken.set(tokenId, nowMs);
+    this.deps.fullLifetimeSnapshots?.recordMissingMarket?.(tokenId);
+    this.log.warn({ tokenId }, "full-lifetime snapshot active position token missing market cache");
+  }
+
   private async publishCachedMarkets(tracked: readonly Market[], nowMs: number): Promise<void> {
     if (this.deps.runtimeControl?.isPaused()) {
       this.log.debug(
@@ -1570,6 +1761,7 @@ export class MarketDataModule implements RuntimeModule {
       { trackedCount: tracked.length },
       "cached market state retained without downstream snapshot fanout",
     );
+    await this.publishFullLifetimeHeartbeat(nowMs, new Set());
   }
 
   private async publishMarketSnapshotDelta(
@@ -1689,6 +1881,14 @@ function normalizeGapTokenIds(tokenIds: readonly string[] | undefined): string[]
   return [
     ...new Set(tokenIds.map((tokenId) => tokenId.trim()).filter((tokenId) => tokenId.length > 0)),
   ];
+}
+
+function isFullLifetimeActivePosition(position: Position): boolean {
+  return (
+    position.closedAt == null &&
+    position.size > 0 &&
+    (position.status === PositionStatus.Open || position.status === PositionStatus.Dust)
+  );
 }
 
 function zeroTrackedRoleCounts(): MarketDataTrackedRoleCounts {

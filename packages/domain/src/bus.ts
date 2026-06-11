@@ -63,6 +63,13 @@ export interface RuntimeEventMap {
     readonly timestamp: number;
   };
 
+  MarketSnapshotHeartbeat: {
+    readonly markets: readonly NormalizedMarket[];
+    readonly timestamp: number;
+    readonly reason: "full_lifetime_active_position";
+    readonly source: "market-data";
+  };
+
   NormalizedMarketUpdated: {
     readonly markets: readonly NormalizedMarket[];
     readonly timestamp: number;
@@ -193,6 +200,23 @@ export interface RuntimeEventMap {
     readonly signalTimestamp?: string | null;
     readonly exchangeErrorMessage?: string | null;
     readonly exchangeErrorDetails?: Readonly<Record<string, unknown>> | null;
+    readonly timestamp: number;
+  };
+
+  OrderSkipped: {
+    readonly commandId: CommandId;
+    readonly clientOrderId: ClientOrderId;
+    readonly tokenId: TokenId;
+    readonly conditionId: ConditionId;
+    readonly reasonCode: string;
+    readonly side: OrderSide;
+    readonly price: number;
+    readonly size: number;
+    readonly signalReason: string | null;
+    readonly signalId: string | null;
+    readonly decisionRuleId: string | null;
+    readonly signalTimestamp: string | null;
+    readonly details: Readonly<Record<string, unknown>>;
     readonly timestamp: number;
   };
 

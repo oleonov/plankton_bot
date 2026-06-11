@@ -7,10 +7,12 @@ import {
   type LegState,
   type NormalizedMarket,
   type Position,
+  type SellLoopGuardSnapshot,
 } from "@krabs/domain";
 import {
   evaluateDecisionPlan,
   resolveSellExecutablePrice,
+  SELL_LOOP_GUARD_REASON,
   type DecisionPlanningInput,
 } from "../decision-planner.js";
 
@@ -176,6 +178,7 @@ function input(overrides: Partial<DecisionPlanningInput> = {}): DecisionPlanning
     postBuyCooldown: null,
     latestSellOrder: null,
     hasActiveSellOrderForQd: false,
+    sellLoopGuard: null,
     ...overrides,
   };
 }
@@ -645,6 +648,118 @@ describe("evaluateDecisionPlan", () => {
     expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
     expect(result.signal.suggestedPrice).toBe(0.43);
     expect(result.sideEffects.some((s) => s.kind === "track_q_shadow")).toBe(false);
+  });
+});
+
+describe("sell loop guard suppression", () => {
+  const WINDOW_MS = 6 * 60 * 60_000;
+
+  function guardSnapshot(overrides: Partial<SellLoopGuardSnapshot> = {}): SellLoopGuardSnapshot {
+    return {
+      blocked: true,
+      reasonCode: "sell_loop_guard",
+      activeCount: 12,
+      threshold: 10,
+      windowMs: WINDOW_MS,
+      blockedUntilMs: now + WINDOW_MS,
+      lastOutcome: "post_only_cross_pre_submit",
+      firstEventAtMs: now - 300_000,
+      lastEventAtMs: now - 1_000,
+      ...overrides,
+    };
+  }
+
+  function d8SellInput(sellLoopGuard: SellLoopGuardSnapshot | null): DecisionPlanningInput {
+    return input({
+      selectedForEntry: false,
+      legState: leg({ buyCount: 1, cumulativeBuySize: 100, cumulativeBuyNotional: 5 }),
+      position: position({ avgEntryPrice: 0.05, size: 100 }),
+      market: market({ bestBid: 0.08, bestAsk: 0.09, midPrice: 0.085, spread: 0.01 }),
+      sellLoopGuard,
+    });
+  }
+
+  function staticSellInput(sellLoopGuard: SellLoopGuardSnapshot | null): DecisionPlanningInput {
+    return input({
+      selectedForEntry: false,
+      legState: leg({
+        buyCount: 1,
+        lastAction: "BUY",
+        sellCount: 0,
+        cumulativeBuySize: 100,
+        cumulativeBuyNotional: 5,
+      }),
+      position: position({ avgEntryPrice: 0.05, costBasisUsdc: 5, size: 100 }),
+      market: market({ bestBid: 0.11, bestAsk: 0.13, midPrice: 0.12, spread: 0.02 }),
+      continuationFacts: { tradeCount: 1, tradeCountSource: "leg_local", stop: true },
+      executionPolicy: {
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        profitTarget: { ...DEFAULT_EXECUTION_POLICY.profitTarget, enabled: false },
+        lossExit: { ...DEFAULT_EXECUTION_POLICY.lossExit, enabled: false },
+      },
+      sellLoopGuard,
+    });
+  }
+
+  it("suppresses a blocked-token D8 SELL with the sell_loop_guard reason", () => {
+    const result = evaluateDecisionPlan(d8SellInput(guardSnapshot()));
+
+    expect(result.type).toBe("none");
+    expect(
+      result.suppressions.find((item) => item.reasonCode === SELL_LOOP_GUARD_REASON),
+    ).toMatchObject({
+      reasonCode: SELL_LOOP_GUARD_REASON,
+      side: "SELL",
+      decisionRuleId: "D8_PROFIT_RATIO",
+    });
+  });
+
+  it("emits a sell_loop_guard_suppressed side effect carrying count and threshold", () => {
+    const result = evaluateDecisionPlan(d8SellInput(guardSnapshot()));
+
+    expect(result.sideEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "sell_loop_guard_suppressed",
+        decisionRuleId: "D8_PROFIT_RATIO",
+        activeCount: 12,
+        threshold: 10,
+      }),
+    );
+  });
+
+  it("suppresses a blocked-token static SELL rule regardless of decision rule", () => {
+    const baseline = evaluateDecisionPlan(staticSellInput(null));
+    expect(baseline.type).toBe("signal");
+    if (baseline.type !== "signal") return;
+    expect(baseline.signal.side).toBe("sell");
+    expect(baseline.signal.decisionRuleId).toBe("D8-FALLBACK-SELL");
+
+    const blocked = evaluateDecisionPlan(staticSellInput(guardSnapshot()));
+    expect(blocked.type).toBe("none");
+    expect(
+      blocked.suppressions.find((item) => item.reasonCode === SELL_LOOP_GUARD_REASON),
+    ).toMatchObject({ reasonCode: SELL_LOOP_GUARD_REASON, decisionRuleId: "D8-FALLBACK-SELL" });
+  });
+
+  it("leaves the BUY path unaffected when the token is blocked", () => {
+    const result = evaluateDecisionPlan(
+      input({ market: market({ midPrice: 0.1 }), sellLoopGuard: guardSnapshot() }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.side).toBe("buy");
+    expect(result.signal.decisionRuleId).toBe("R23_DIP_TRIGGER");
+  });
+
+  it("does not suppress when the guard snapshot is present but not blocked", () => {
+    const result = evaluateDecisionPlan(d8SellInput(guardSnapshot({ blocked: false })));
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.side).toBe("sell");
+    expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
   });
 });
 

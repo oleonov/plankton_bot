@@ -77,6 +77,7 @@ function input(token: string): DecisionPlanningInput {
     postBuyCooldown: null,
     latestSellOrder: null,
     hasActiveSellOrderForQd: false,
+    sellLoopGuard: null,
   };
 }
 

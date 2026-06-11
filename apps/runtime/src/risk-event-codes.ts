@@ -48,6 +48,12 @@ const STATIC_CODES: Record<string, string> = {
   // R65 reprice-chain cap codes (per-token 24h sliding window).
   "reprice-chain-cap": "reprice_chain_cap",
   "sell-replace-chain-cap": "sell_replace_chain_cap",
+  // Track Q loop guard codes (token-level SELL circuit breaker on no-op outcomes).
+  // Distinct from R65 reprice-chain cap — these count NO-order outcomes, not
+  // open-order reprice chains.
+  sell_loop_guard: "sell_loop_guard",
+  "sell-loop-guard": "sell_loop_guard",
+  "post-only-cross-pre-submit": "post_only_cross_pre_submit",
 };
 
 const PREFIX_CODES: [string, string][] = [

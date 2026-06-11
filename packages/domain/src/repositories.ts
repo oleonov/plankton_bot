@@ -388,7 +388,7 @@ export interface MarketSnapshotRepository {
   saveBatch(snapshots: MarketSnapshot[]): void;
 
   /** Delete snapshots older than the given ISO timestamp. Returns rows deleted. */
-  prune(olderThanIso: string): number;
+  prune(olderThanIso: string, options?: { readonly preserveTokenIds?: readonly TokenId[] }): number;
 }
 
 // ─── RiskEventRepository ────────────────────────────────────────────────

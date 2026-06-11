@@ -8,15 +8,17 @@
  * 4. Module stop() clears the discovery timer.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createTokenId } from "@krabs/domain";
+import { createConditionId, createPositionId, createTokenId, PositionStatus } from "@krabs/domain";
 import type {
   MarketDataGateway,
   MarketPricingLifecycleEvent,
+  MarketPricingSnapshot,
   MarketPricingStream,
   MarketPricingStreamMetricsSnapshot,
   MarketPricingStreamUpdate,
   MarketRepository,
   Market,
+  Position,
   TrackedForPricing,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
@@ -44,6 +46,43 @@ function makeMarket(tokenId: string, overrides: Partial<Market> = {}): Market {
     gammaCreatedAt: null,
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function makePricing(overrides: Partial<MarketPricingSnapshot> = {}): MarketPricingSnapshot {
+  return {
+    bestBid: 0.4,
+    bestAsk: 0.5,
+    acceptingOrders: true,
+    enableOrderBook: true,
+    lastTradePrice: 0.45,
+    volume24h: null,
+    volume24hr: null,
+    publicTradeCount24h: null,
+    liquidity: null,
+    minOrderSize: null,
+    bookSource: "gamma-fallback",
+    ...overrides,
+  };
+}
+
+function makePosition(overrides: Partial<Position> = {}): Position {
+  return {
+    positionId: createPositionId("pos-full-lifetime"),
+    tokenId: createTokenId("crit-1"),
+    conditionId: createConditionId("cond-crit-1"),
+    side: "buy",
+    size: 10,
+    avgEntryPrice: 0.1,
+    costBasisUsdc: 1,
+    currentValueUsdc: null,
+    realizedPnl: 0,
+    status: PositionStatus.Open,
+    entryStyle: null,
+    openedAt: "2026-06-11T00:00:00.000Z",
+    closedAt: null,
+    updatedAt: "2026-06-11T00:00:00.000Z",
     ...overrides,
   };
 }
@@ -271,6 +310,108 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
     await mod.poll();
 
     expect(repo.findTrackedForPricingTiered).toHaveBeenCalledTimes(1);
+  });
+
+  it("publishes MarketSnapshotHeartbeat for quiet full-lifetime active tokens", async () => {
+    const tiered = makeTiered(["crit-1"], [], []);
+    const repo = createMockRepo(tiered);
+    const pricing = new Map<string, MarketPricingSnapshot>([["crit-1", makePricing()]]);
+    gateway.getMarketPricing = vi.fn().mockResolvedValue(pricing);
+    const heartbeats: Array<{ markets: readonly unknown[]; reason: string; source: string }> = [];
+    const realSnapshots: Array<{ markets: readonly unknown[] }> = [];
+    bus.subscribe("MarketSnapshotHeartbeat", async (payload) => {
+      heartbeats.push(payload);
+    });
+    bus.subscribe("MarketSnapshotReceived", async (payload) => {
+      realSnapshots.push(payload);
+    });
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      fullLifetimeSnapshots: {
+        enabled: true,
+        heartbeatMs: 5 * 60 * 1000,
+        postCloseGraceMs: 0,
+        activePositionTokenIds: () => [createTokenId("crit-1")],
+      },
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(realSnapshots.length).toBeGreaterThanOrEqual(1);
+    });
+    realSnapshots.length = 0;
+
+    await mod.poll();
+
+    expect(realSnapshots).toHaveLength(0);
+    expect(heartbeats).toHaveLength(1);
+    expect(heartbeats[0]).toMatchObject({
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    expect(heartbeats[0]!.markets).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("invalidates tiered pricing cache only on full-lifetime active-state transitions", async () => {
+    const tiered = makeTiered(["crit-1"], [], []);
+    const repo = createMockRepo(tiered);
+    gateway.getMarketPricing = vi.fn().mockResolvedValue(new Map());
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      tieredPricingCacheTtlMs: 60_000,
+      fullLifetimeSnapshots: {
+        enabled: true,
+        heartbeatMs: 5 * 60 * 1000,
+        postCloseGraceMs: 0,
+        activePositionTokenIds: () => [],
+      },
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(repo.findTrackedForPricingTiered).toHaveBeenCalledTimes(1);
+    });
+    await mod.poll();
+    expect(repo.findTrackedForPricingTiered).toHaveBeenCalledTimes(1);
+
+    await bus.publish("PositionUpdated", { position: makePosition() });
+    await vi.waitFor(() => {
+      expect(repo.findTrackedForPricingTiered).toHaveBeenCalledTimes(2);
+    });
+
+    await bus.publish("PositionUpdated", {
+      position: makePosition({ size: 12, updatedAt: "2026-06-11T00:01:00.000Z" }),
+    });
+    await mod.poll();
+    expect(repo.findTrackedForPricingTiered).toHaveBeenCalledTimes(2);
+
+    await bus.publish("PositionUpdated", {
+      position: makePosition({
+        status: PositionStatus.Closed,
+        size: 0,
+        closedAt: "2026-06-11T00:02:00.000Z",
+      }),
+    });
+    await vi.waitFor(() => {
+      expect(repo.findTrackedForPricingTiered).toHaveBeenCalledTimes(3);
+    });
+
+    await mod.stop();
   });
 
   it("legacy flat path used when maxTrackedTokens is undefined", async () => {
