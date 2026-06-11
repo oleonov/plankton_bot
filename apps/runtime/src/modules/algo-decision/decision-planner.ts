@@ -244,6 +244,7 @@ export type DecisionPlanningInput = {
   dropReferencePrice: number | null;
   postBuyCooldown: { cooldownMs: number; ageMs: number; lastBuyFillAt: number } | null;
   latestSellOrder: SellOrderSizingContext | null;
+  hasActiveSellOrderForQd: boolean;
 };
 
 const SELL_ONLY: ReadonlySet<TradeDecisionAction> = new Set(["SELL"]);
@@ -269,7 +270,17 @@ const DEFAULT_EXIT_BID_ANCHOR_TICKS = 4;
 
 type SellExecutablePriceResult = {
   price: number | null;
-  reasonCode: "mid-price-unavailable" | "sell-best-bid-unavailable" | "sell-spread-too-wide" | null;
+  reasonCode:
+    | "mid-price-unavailable"
+    | "sell-best-bid-unavailable"
+    | "sell-spread-too-wide"
+    | "sell-spread-too-wide-below-avg-entry"
+    | "sell-spread-too-wide-avg-entry-unavailable"
+    | null;
+};
+
+type SellExecutablePriceContext = {
+  avgEntryPrice?: number | null;
 };
 
 export function createDecisionMetricsDelta(): DecisionMetricsDelta {
@@ -313,12 +324,12 @@ function computeMarketSpread(market: NormalizedMarket): number | null {
   return null;
 }
 
-export function resolveSellExecutablePrice(market: NormalizedMarket): SellExecutablePriceResult {
-  if (
-    typeof market.bestBid !== "number" ||
-    !Number.isFinite(market.bestBid) ||
-    market.bestBid <= 0
-  ) {
+export function resolveSellExecutablePrice(
+  market: NormalizedMarket,
+  context: SellExecutablePriceContext = {},
+): SellExecutablePriceResult {
+  const bestBid = finitePositiveOrNull(market.bestBid);
+  if (bestBid === null) {
     return { price: null, reasonCode: "sell-best-bid-unavailable" };
   }
 
@@ -334,17 +345,28 @@ export function resolveSellExecutablePrice(market: NormalizedMarket): SellExecut
     midpoint > 0 &&
     spread / midpoint > SELL_SPREAD_MAX_RATIO
   ) {
-    return { price: null, reasonCode: "sell-spread-too-wide" };
+    const avgEntryPrice = finitePositiveOrNull(context.avgEntryPrice);
+    if (avgEntryPrice !== null && bestBid >= avgEntryPrice) {
+      return { price: bestBid, reasonCode: null };
+    }
+    return {
+      price: null,
+      reasonCode:
+        avgEntryPrice === null
+          ? "sell-spread-too-wide-avg-entry-unavailable"
+          : "sell-spread-too-wide-below-avg-entry",
+    };
   }
 
-  return { price: market.bestBid, reasonCode: null };
+  return { price: bestBid, reasonCode: null };
 }
 
 function resolveActionPrice(
   action: TradeDecisionAction,
   market: NormalizedMarket,
+  context: SellExecutablePriceContext = {},
 ): SellExecutablePriceResult {
-  if (action === "SELL") return resolveSellExecutablePrice(market);
+  if (action === "SELL") return resolveSellExecutablePrice(market, context);
   const price = market.midPrice;
   return typeof price === "number" && Number.isFinite(price)
     ? { price, reasonCode: null }
@@ -531,10 +553,15 @@ const QD_PRE_COHORT_REASONS: ReadonlySet<QdShadowReason> = new Set([
   "ttc_too_far",
 ]);
 
+export function isWorkingSellOrderStatus(
+  status: SellOrderSizingContext["status"] | null | undefined,
+): boolean {
+  return status !== "filled" && status !== "rejected" && status !== "cancelled";
+}
+
 function hasWorkingSellOrder(order: SellOrderSizingContext | null): boolean {
   if (!order) return false;
-  const status = order.status ?? null;
-  return status !== "filled" && status !== "rejected" && status !== "cancelled";
+  return isWorkingSellOrderStatus(order.status ?? null);
 }
 
 /**
@@ -563,7 +590,7 @@ function recordQdShadow(
     now: input.now,
     d8EvalPrice,
     d9EvalPrice,
-    hasActiveSell: hasWorkingSellOrder(input.latestSellOrder),
+    hasActiveSell: input.hasActiveSellOrderForQd || hasWorkingSellOrder(input.latestSellOrder),
   });
   if (projection === null || QD_PRE_COHORT_REASONS.has(projection.reason)) return;
   sideEffects.push({
@@ -625,7 +652,8 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
     });
     return none(metrics, suppressions, sideEffects);
   }
-  const sellPrice = resolveSellExecutablePrice(market);
+  const sellPriceContext = { avgEntryPrice: input.position?.avgEntryPrice ?? null };
+  const sellPrice = resolveSellExecutablePrice(market, sellPriceContext);
   const price = legState ? (sellPrice.price ?? midPrice) : midPrice;
   // Sub-Track Q.A: the D8 profit-take *trigger* reads midPrice directly,
   // decoupled from the executable sell price (`price`, which still feeds D9,
@@ -1080,7 +1108,9 @@ function buildSignalOrSuppression(args: {
   const timeSinceLastSeconds = input.legState
     ? (input.now - new Date(input.legState.lastTradeAt).getTime()) / 1000
     : null;
-  const actionPrice = resolveActionPrice(decision.action, market);
+  const actionPrice = resolveActionPrice(decision.action, market, {
+    avgEntryPrice: input.position?.avgEntryPrice ?? null,
+  });
   if (actionPrice.price == null) {
     args.suppressions.push({
       tokenId: market.tokenId,
@@ -1173,7 +1203,9 @@ function buildSignalDraft(args: {
     ? (input.now - new Date(input.legState.lastTradeAt).getTime()) / 1000
     : null;
   const side = decision.action === "BUY" ? "buy" : ("sell" as const);
-  const actionPrice = resolveActionPrice(decision.action, market);
+  const actionPrice = resolveActionPrice(decision.action, market, {
+    avgEntryPrice: input.position?.avgEntryPrice ?? null,
+  });
   if (actionPrice.price == null) return null;
   const price = actionPrice.price;
   const reason = resolveSignalReason(side, buyCount);

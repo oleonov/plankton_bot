@@ -76,6 +76,7 @@ function input(token: string): DecisionPlanningInput {
     dropReferencePrice: null,
     postBuyCooldown: null,
     latestSellOrder: null,
+    hasActiveSellOrderForQd: false,
   };
 }
 

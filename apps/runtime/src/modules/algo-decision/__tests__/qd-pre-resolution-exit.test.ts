@@ -336,18 +336,20 @@ describe("evaluateQdPreResolutionExit — Mode B (salvage, opt-in)", () => {
 });
 
 describe("evaluateQdPreResolutionExit — D8/D9 precedence (T4)", () => {
-  it("defers to D8 when the decoupled profit-take would fire", () => {
+  it("keeps D8 predicate telemetry but does not yield without an active SELL", () => {
     const p = evaluate({
       market: market({ bestBid: 0.03, bestAsk: 0.05, midPrice: 0.04 }),
       position: position({ avgEntryPrice: 0.03 }),
       d8EvalPrice: 0.03, // ratio 3.0 ≥ threshold 2.0 → D8 fires
     })!;
     expect(p.d8Fired).toBe(true);
-    expect(p.reason).toBe("d8_or_d9_fired");
-    expect(p.qdWouldActivate).toBe(false);
+    expect(p.d9Fired).toBe(false);
+    expect(p.reason).toBe("would_fire");
+    expect(p.activationMode).toBe("mode_a");
+    expect(p.qdWouldActivate).toBe(true);
   });
 
-  it("defers to D9 when the liquidity-gated loss exit would fire", () => {
+  it("keeps D9 predicate telemetry but does not yield without an active SELL", () => {
     const p = evaluate({
       executionPolicy: policyWith(
         {},
@@ -366,8 +368,10 @@ describe("evaluateQdPreResolutionExit — D8/D9 precedence (T4)", () => {
       d9EvalPrice: 0.005, // ratio 0.5 < 1.0 → in loss → D9 fires
     })!;
     expect(p.d9Fired).toBe(true);
-    expect(p.reason).toBe("d8_or_d9_fired");
-    expect(p.qdWouldActivate).toBe(false);
+    expect(p.d8Fired).toBe(false);
+    expect(p.reason).toBe("would_fire");
+    expect(p.activationMode).toBe("mode_a");
+    expect(p.qdWouldActivate).toBe(true);
   });
 });
 

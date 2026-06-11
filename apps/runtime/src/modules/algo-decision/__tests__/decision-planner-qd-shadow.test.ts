@@ -173,6 +173,7 @@ function input(overrides: Partial<DecisionPlanningInput> = {}): DecisionPlanning
     dropReferencePrice: null,
     postBuyCooldown: null,
     latestSellOrder: null,
+    hasActiveSellOrderForQd: false,
     ...overrides,
   };
 }
@@ -229,7 +230,7 @@ describe("evaluateDecisionPlan — Sub-Track Q.D shadow", () => {
     expect(projection!.anchorTicks).toBe(0); // imminent TTC → taker at bestBid
   });
 
-  it("records the D8 collision (reason d8_or_d9_fired) while D8 still places its SELL", () => {
+  it("keeps D8 predicate telemetry without yielding to predicate truth alone", () => {
     // mid 0.045 / avg buy 0.03 → ratio 1.5 ≥ 1.2412 → D8 fires; bid 0.04 ≥ entry.
     const result = evaluateDecisionPlan(
       input({
@@ -247,9 +248,9 @@ describe("evaluateDecisionPlan — Sub-Track Q.D shadow", () => {
     const projection = qdSideEffect(result);
     expect(projection).not.toBeNull();
     expect(projection!.d8Fired).toBe(true);
-    expect(projection!.reason).toBe("d8_or_d9_fired");
-    expect(projection!.qdWouldActivate).toBe(false);
-    expect(projection!.activationMode).toBe("not_activated");
+    expect(projection!.reason).toBe("would_fire");
+    expect(projection!.qdWouldActivate).toBe(true);
+    expect(projection!.activationMode).toBe("mode_a");
   });
 
   it("CRITICAL: placed order is byte-identical whether Q.D is enabled or disabled (observe-only)", () => {

@@ -8,7 +8,11 @@ import {
   type NormalizedMarket,
   type Position,
 } from "@krabs/domain";
-import { evaluateDecisionPlan, type DecisionPlanningInput } from "../decision-planner.js";
+import {
+  evaluateDecisionPlan,
+  resolveSellExecutablePrice,
+  type DecisionPlanningInput,
+} from "../decision-planner.js";
 
 const tokenId = createTokenId("planner-token");
 const now = Date.parse("2026-05-20T00:00:00.000Z");
@@ -171,6 +175,7 @@ function input(overrides: Partial<DecisionPlanningInput> = {}): DecisionPlanning
     dropReferencePrice: null,
     postBuyCooldown: null,
     latestSellOrder: null,
+    hasActiveSellOrderForQd: false,
     ...overrides,
   };
 }
@@ -286,7 +291,7 @@ describe("evaluateDecisionPlan", () => {
     expect(result.signal.suggestedPrice).toBe(0.43);
   });
 
-  it("suppresses SELL signals on wide spreads even when midpoint looks profitable", () => {
+  it("allows a profitable wide-spread SELL at exact bestBid", () => {
     const result = evaluateDecisionPlan(
       input({
         selectedForEntry: false,
@@ -296,8 +301,63 @@ describe("evaluateDecisionPlan", () => {
       }),
     );
 
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
+    expect(result.signal.side).toBe("sell");
+    // Regression for both resolveActionPrice call sites: the final
+    // buildSignalDraft path must emit the exact bid, not silently recompute null.
+    expect(result.signal.suggestedPrice).toBe(0.43);
+  });
+
+  it("suppresses a below-entry wide-spread SELL with the classified spread reason", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({ buyCount: 1, cumulativeBuySize: 100, cumulativeBuyNotional: 25 }),
+        position: position({ avgEntryPrice: 0.25, costBasisUsdc: 25, size: 100 }),
+        market: market({ bestBid: 0.1, bestAsk: 0.9, midPrice: 0.5, spread: 0.8 }),
+        executionPolicy: {
+          ...DEFAULT_EXECUTION_POLICY,
+          entryMinMarketAgeSeconds: 0,
+          profitTarget: { ...DEFAULT_EXECUTION_POLICY.profitTarget, enabled: false },
+          lossExit: { ...DEFAULT_EXECUTION_POLICY.lossExit, enabled: false },
+        },
+      }),
+    );
+
     expect(result.type).toBe("none");
-    expect(result.suppressions.map((item) => item.reasonCode)).toContain("sell-spread-too-wide");
+    expect(result.suppressions.map((item) => item.reasonCode)).toContain(
+      "sell-spread-too-wide-below-avg-entry",
+    );
+  });
+
+  it("keeps below-entry D9 SELL blocked on a wide spread", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({ buyCount: 1, cumulativeBuySize: 100, cumulativeBuyNotional: 25 }),
+        position: position({ avgEntryPrice: 0.25, costBasisUsdc: 25, size: 100 }),
+        market: market({
+          bestBid: 0.1,
+          bestAsk: 0.9,
+          midPrice: 0.12,
+          spread: 0.8,
+          publicTradeCount24h: 50,
+        }),
+        executionPolicy: {
+          ...DEFAULT_EXECUTION_POLICY,
+          entryMinMarketAgeSeconds: 0,
+          profitTarget: { ...DEFAULT_EXECUTION_POLICY.profitTarget, enabled: false },
+          lossExit: { ...DEFAULT_EXECUTION_POLICY.lossExit, enabled: true },
+        },
+      }),
+    );
+
+    expect(result.type).toBe("none");
+    expect(result.suppressions.map((item) => item.reasonCode)).toContain(
+      "sell-spread-too-wide-below-avg-entry",
+    );
   });
 
   it("uses full-close sizing for small profitable residual positions", () => {
@@ -556,9 +616,9 @@ describe("evaluateDecisionPlan", () => {
       }),
     );
 
-    // Live behavior is byte-for-byte unchanged: still suppressed sell-spread-too-wide.
-    expect(result.type).toBe("none");
-    expect(result.suppressions.map((item) => item.reasonCode)).toContain("sell-spread-too-wide");
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedPrice).toBe(0.43);
 
     const shadow = result.sideEffects.find((s) => s.kind === "track_q_shadow");
     expect(shadow).toBeDefined();
@@ -585,5 +645,64 @@ describe("evaluateDecisionPlan", () => {
     expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
     expect(result.signal.suggestedPrice).toBe(0.43);
     expect(result.sideEffects.some((s) => s.kind === "track_q_shadow")).toBe(false);
+  });
+});
+
+describe("resolveSellExecutablePrice", () => {
+  const wideMarket = market({ bestBid: 0.2, bestAsk: 0.8, midPrice: 0.5, spread: 0.6 });
+
+  it("blocks wide-spread SELL when bestBid is below avg entry", () => {
+    expect(resolveSellExecutablePrice(wideMarket, { avgEntryPrice: 0.21 })).toMatchObject({
+      price: null,
+      reasonCode: "sell-spread-too-wide-below-avg-entry",
+    });
+  });
+
+  it("allows wide-spread SELL at bestBid when bestBid equals avg entry", () => {
+    expect(resolveSellExecutablePrice(wideMarket, { avgEntryPrice: 0.2 })).toMatchObject({
+      price: 0.2,
+      reasonCode: null,
+    });
+  });
+
+  it("allows wide-spread SELL at bestBid when bestBid is above avg entry", () => {
+    expect(resolveSellExecutablePrice(wideMarket, { avgEntryPrice: 0.19 })).toMatchObject({
+      price: 0.2,
+      reasonCode: null,
+    });
+  });
+
+  it("fails safe on missing or invalid avg entry", () => {
+    for (const avgEntryPrice of [null, 0, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(resolveSellExecutablePrice(wideMarket, { avgEntryPrice })).toMatchObject({
+        price: null,
+        reasonCode: "sell-spread-too-wide-avg-entry-unavailable",
+      });
+    }
+  });
+
+  it("keeps bestBid availability guard unchanged", () => {
+    for (const bestBid of [null, 0]) {
+      expect(
+        resolveSellExecutablePrice(market({ bestBid, bestAsk: 0.8, midPrice: 0.5, spread: 0.6 }), {
+          avgEntryPrice: 0.1,
+        }),
+      ).toMatchObject({
+        price: null,
+        reasonCode: "sell-best-bid-unavailable",
+      });
+    }
+  });
+
+  it("keeps narrow-spread behavior unchanged", () => {
+    expect(
+      resolveSellExecutablePrice(
+        market({ bestBid: 0.2, bestAsk: 0.24, midPrice: 0.22, spread: 0.04 }),
+        { avgEntryPrice: 0.4 },
+      ),
+    ).toMatchObject({
+      price: 0.2,
+      reasonCode: null,
+    });
   });
 });

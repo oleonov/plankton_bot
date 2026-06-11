@@ -163,8 +163,6 @@ function resolveActivation(
     return { reason: "ttc_unavailable", qdWouldActivate: false, activationMode: "not_activated" };
   if (!gate.withinTtc)
     return { reason: "ttc_too_far", qdWouldActivate: false, activationMode: "not_activated" };
-  if (gate.d8Fired || gate.d9Fired)
-    return { reason: "d8_or_d9_fired", qdWouldActivate: false, activationMode: "not_activated" };
   if (gate.hasActiveSell)
     return { reason: "has_active_sell", qdWouldActivate: false, activationMode: "not_activated" };
   if (!gate.qualifyingBid)

@@ -84,6 +84,7 @@ import {
   D8_PROFIT_BELOW_AVG_ENTRY_GUARD_REASON,
   D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON,
   D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON,
+  isWorkingSellOrderStatus,
 } from "./decision-planner.js";
 import type {
   DecisionMetricsDelta,
@@ -1534,6 +1535,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       dropReferencePrice,
       postBuyCooldown,
       latestSellOrder: legState ? this.getLatestSellOrderForSizing(tokenId) : null,
+      hasActiveSellOrderForQd: legState ? this.hasActiveSellOrderForQd(tokenId) : false,
     };
   }
 
@@ -1554,6 +1556,19 @@ export class AlgoDecisionModule implements RuntimeModule {
       status: latest.status,
       cancelReason: latest.cancelReason ?? null,
     };
+  }
+
+  private hasActiveSellOrderForQd(tokenId: TokenId): boolean {
+    const repo = this.deps.orderRepo;
+    if (!repo) return false;
+    const orders =
+      repo.findRecentByTokenId?.(tokenId, 20) ??
+      repo
+        .findByTokenId(tokenId)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return orders.some(
+      (order) => order.side === "sell" && isWorkingSellOrderStatus(order.status ?? null),
+    );
   }
 
   private async resolveContinuationFactsForPlanner(

@@ -24,6 +24,8 @@ import type {
   DecisionSignalLogRepository,
   RiskEventRepository,
   Position,
+  Order,
+  OrderRepository,
 } from "@krabs/domain";
 import { createTokenId, createCommandId, createOrderId, createPositionId } from "@krabs/domain";
 import type { ConditionId } from "@krabs/domain";
@@ -387,6 +389,44 @@ function makeBuyFill(
     feeRateBps: 0,
     signalReason: "scale-in",
     timestamp,
+    ...overrides,
+  };
+}
+
+function makeOrder(tokenId: string, overrides: Partial<Order> = {}): Order {
+  const nowIso = new Date(Date.now()).toISOString();
+  const status = overrides.status ?? "open";
+  const side = overrides.side ?? "sell";
+  const idSuffix = `${status}-${side}-${overrides.createdAt ?? nowIso}`;
+  return {
+    orderId: createOrderId(`order-${tokenId}-${idSuffix}`),
+    clientOrderId: `client-${tokenId}-${idSuffix}` as Order["clientOrderId"],
+    tokenId: createTokenId(tokenId),
+    conditionId: "cond-1" as ConditionId,
+    side,
+    orderType: "GTC",
+    postOnly: true,
+    price: 0.03,
+    size: 10,
+    sizeUsdc: 0.3,
+    status,
+    cancelReason: null,
+    cancelAgeMs: null,
+    cancelAgeBucket: null,
+    fillProgressShares: null,
+    marketHorizon: null,
+    exchangeOrderId: null,
+    signalId: null,
+    signalReason: null,
+    decisionRuleId: null,
+    signalTimestamp: null,
+    exchangeErrorCode: null,
+    exchangeErrorMessage: null,
+    exchangeErrorPayload: null,
+    exchangeRejectionReason: null,
+    botRunId: "bot-test" as Order["botRunId"],
+    createdAt: nowIso,
+    updatedAt: nowIso,
     ...overrides,
   };
 }
@@ -5295,8 +5335,11 @@ describe("AlgoDecisionModule", () => {
       expect(sellSignals).toHaveLength(0);
 
       const insertCalls = vi.mocked(riskEventRepo.insert).mock.calls;
-      // The live sell-spread-too-wide suppression is recorded exactly as before.
-      expect(insertCalls.some(([e]) => e.payload.reasonCode === "sell-spread-too-wide")).toBe(true);
+      // The live sell-spread-too-wide suppression is preserved, now classified
+      // by the non-loss guard.
+      expect(
+        insertCalls.some(([e]) => e.payload.reasonCode === "sell-spread-too-wide-below-avg-entry"),
+      ).toBe(true);
 
       // New: a structured, queryable track_q_shadow telemetry row.
       const shadow = insertCalls.find(([e]) => e.eventType === "track_q_shadow");
@@ -5506,6 +5549,171 @@ describe("AlgoDecisionModule", () => {
         projection: qdProjection(overrides),
       };
     }
+
+    it.each(["pending", "open", "partially-filled"] as const)(
+      "marks %s SELL orders as active for Q.D yielding",
+      async (status) => {
+        const tokenId = `token-qd-active-${status}`;
+        selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+        legStateRepo = createMockLegStateRepo([
+          makeSellReadyLegState(tokenId, {
+            cumulativeBuySize: 100,
+            cumulativeBuyNotional: 3,
+          }),
+        ]);
+        const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+        const positionRepo = {
+          findByTokenId: vi
+            .fn()
+            .mockReturnValue(makeOpenPosition(tokenId, { avgEntryPrice: 0.03 })),
+        };
+        const orderRepo: Partial<OrderRepository> = {
+          findRecentByTokenId: vi.fn().mockReturnValue([makeOrder(tokenId, { status })]),
+          findByTokenId: vi.fn().mockReturnValue([]),
+        };
+
+        const mod = buildModule({
+          riskEventRepo,
+          positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+          orderRepo: orderRepo as OrderRepository,
+          executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        });
+        await mod.start();
+
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [
+            {
+              ...makeMarket(tokenId, null, 0.03, "cond-qd-active"),
+              endDate: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+              bestBid: 0.03,
+              bestAsk: 0.05,
+              spread: 0.02,
+              publicTradeCount24h: 5,
+            },
+          ],
+          timestamp: Date.now(),
+        });
+
+        const qdInsert = vi
+          .mocked(riskEventRepo.insert)
+          .mock.calls.find(([event]) => event.eventType === "track_q_d");
+        expect(qdInsert).toBeDefined();
+        expect(qdInsert![0].payload.reason).toBe("has_active_sell");
+        expect(qdInsert![0].payload.qdWouldActivate).toBe(false);
+
+        await mod.stop();
+      },
+    );
+
+    it.each(["filled", "cancelled", "rejected"] as const)(
+      "does not mark %s SELL orders as active for Q.D yielding",
+      async (status) => {
+        const tokenId = `token-qd-terminal-${status}`;
+        selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+        legStateRepo = createMockLegStateRepo([
+          makeSellReadyLegState(tokenId, {
+            cumulativeBuySize: 100,
+            cumulativeBuyNotional: 3,
+          }),
+        ]);
+        const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+        const positionRepo = {
+          findByTokenId: vi
+            .fn()
+            .mockReturnValue(makeOpenPosition(tokenId, { avgEntryPrice: 0.03 })),
+        };
+        const orderRepo: Partial<OrderRepository> = {
+          findRecentByTokenId: vi.fn().mockReturnValue([makeOrder(tokenId, { status })]),
+          findByTokenId: vi.fn().mockReturnValue([]),
+        };
+
+        const mod = buildModule({
+          riskEventRepo,
+          positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+          orderRepo: orderRepo as OrderRepository,
+          executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        });
+        await mod.start();
+
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [
+            {
+              ...makeMarket(tokenId, null, 0.03, "cond-qd-terminal"),
+              endDate: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+              bestBid: 0.03,
+              bestAsk: 0.05,
+              spread: 0.02,
+              publicTradeCount24h: 5,
+            },
+          ],
+          timestamp: Date.now(),
+        });
+
+        const qdInsert = vi
+          .mocked(riskEventRepo.insert)
+          .mock.calls.find(([event]) => event.eventType === "track_q_d");
+        expect(qdInsert).toBeDefined();
+        expect(qdInsert![0].payload.reason).toBe("would_fire");
+        expect(qdInsert![0].payload.qdWouldActivate).toBe(true);
+
+        await mod.stop();
+      },
+    );
+
+    it("detects an older active SELL even when the latest SELL row is cancelled", async () => {
+      const tokenId = "token-qd-latest-cancelled-old-open";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      legStateRepo = createMockLegStateRepo([
+        makeSellReadyLegState(tokenId, {
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 3,
+        }),
+      ]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const positionRepo = {
+        findByTokenId: vi.fn().mockReturnValue(makeOpenPosition(tokenId, { avgEntryPrice: 0.03 })),
+      };
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi
+          .fn()
+          .mockReturnValue([
+            makeOrder(tokenId, { status: "cancelled", createdAt: "2026-06-11T00:02:00.000Z" }),
+            makeOrder(tokenId, { status: "open", createdAt: "2026-06-11T00:01:00.000Z" }),
+          ]),
+        findByTokenId: vi.fn().mockReturnValue([]),
+      };
+
+      const mod = buildModule({
+        riskEventRepo,
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [
+          {
+            ...makeMarket(tokenId, null, 0.03, "cond-qd-old-open"),
+            endDate: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+            bestBid: 0.03,
+            bestAsk: 0.05,
+            spread: 0.02,
+            publicTradeCount24h: 5,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+
+      const qdInsert = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.find(([event]) => event.eventType === "track_q_d");
+      expect(qdInsert).toBeDefined();
+      expect(qdInsert![0].payload.reason).toBe("has_active_sell");
+      expect(qdInsert![0].payload.qdWouldActivate).toBe(false);
+
+      await mod.stop();
+    });
 
     it("emits a structured, deduped track_q_d risk event yet counts every eval in healthCheck", async () => {
       const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
