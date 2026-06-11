@@ -5290,9 +5290,9 @@ describe("AlgoDecisionModule", () => {
 
   // ─── Track Q shadow telemetry ────────────────────────────────────────────
   // Observe-only: the planner emits a `track_q_shadow` side effect for
-  // SELL-eligible legs on wide books (the population the live
-  // `sell-spread-too-wide` guard suppresses, which the execution-layer EPO
-  // shard can never see). The module must surface it as a deduped,
+  // SELL-eligible legs on wide books (the population classified live
+  // spread suppression can block before the execution-layer EPO shard sees it).
+  // The module must surface it as a deduped,
   // structured risk event + cumulative healthCheck counters WITHOUT changing
   // the suppressed SELL. See research_plankton/track_q_shadow_design_2026-06-11.md.
   describe("Track Q shadow telemetry", () => {
@@ -5335,8 +5335,8 @@ describe("AlgoDecisionModule", () => {
       expect(sellSignals).toHaveLength(0);
 
       const insertCalls = vi.mocked(riskEventRepo.insert).mock.calls;
-      // The live sell-spread-too-wide suppression is preserved, now classified
-      // by the non-loss guard.
+      // The live wide-spread suppression is preserved and classified by the
+      // non-loss guard.
       expect(
         insertCalls.some(([e]) => e.payload.reasonCode === "sell-spread-too-wide-below-avg-entry"),
       ).toBe(true);

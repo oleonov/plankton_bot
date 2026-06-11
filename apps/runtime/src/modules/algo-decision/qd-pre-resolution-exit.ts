@@ -35,7 +35,6 @@ export type QdShadowReason =
   | "wrong_tier"
   | "ttc_unavailable"
   | "ttc_too_far"
-  | "d8_or_d9_fired"
   | "has_active_sell"
   | "no_qualifying_bid"
   | "below_entry_hold"

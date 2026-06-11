@@ -17,7 +17,7 @@ import {
 
 // Sub-Track Q.D shadow (observe-only): the planner emits a `track_q_d` side
 // effect for cheap-longshot legs inside the pre-resolution TTC window — the
-// cohort the `sell-spread-too-wide` guard silently lets die — WITHOUT changing
+// cohort classified spread suppression can leave unresolved — WITHOUT changing
 // the placed order, the suppression, D8/D9, or the signal. See
 // research_plankton/track_q_d_spec_2026-06-12.md.
 

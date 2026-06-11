@@ -156,9 +156,9 @@ export type TrackQShadowReason =
 
 /**
  * Track Q shadow projection — observe-only. Records what the unproven P3
- * tier-anchored SELL floor WOULD place on a wide book that the live
- * `sell-spread-too-wide` guard suppresses, without changing any production
- * price, D8/D9 behavior, or the spread threshold. See
+ * tier-anchored SELL floor WOULD place on wide books, including books that the
+ * classified live spread guard suppresses as below-entry or missing avg-entry,
+ * without changing any production price, D8/D9 behavior, or the spread threshold. See
  * research_plankton/track_q_shadow_design_2026-06-11.md.
  */
 export type TrackQShadowProjection = {
@@ -273,7 +273,6 @@ type SellExecutablePriceResult = {
   reasonCode:
     | "mid-price-unavailable"
     | "sell-best-bid-unavailable"
-    | "sell-spread-too-wide"
     | "sell-spread-too-wide-below-avg-entry"
     | "sell-spread-too-wide-avg-entry-unavailable"
     | null;
@@ -510,9 +509,9 @@ export function projectTrackQShadow(args: {
 
 /**
  * Emit a Track Q shadow side effect for SELL-eligible legs on wide books only
- * (the population the live `sell-spread-too-wide` guard suppresses, which the
- * execution-layer EPO shard can never observe). Observe-only: pushes a side
- * effect and never alters price, suppressions, or the signal.
+ * (the spread-threshold population that can be suppressed before the
+ * execution-layer EPO shard can observe it). Observe-only: pushes a side effect
+ * and never alters price, suppressions, or the signal.
  */
 function recordTrackQShadow(
   input: DecisionPlanningInput,
@@ -559,16 +558,12 @@ export function isWorkingSellOrderStatus(
   return status !== "filled" && status !== "rejected" && status !== "cancelled";
 }
 
-function hasWorkingSellOrder(order: SellOrderSizingContext | null): boolean {
-  if (!order) return false;
-  return isWorkingSellOrderStatus(order.status ?? null);
-}
-
 /**
  * Emit a Q.D pre-resolution-exit shadow side effect (observe-only) for cheap
- * longshots inside the TTC window — the cohort the `sell-spread-too-wide` guard
- * silently lets die. Mirrors `recordTrackQShadow`: pushes a side effect and
- * never alters price, suppressions, D8/D9, or the signal. `d8EvalPrice`
+ * longshots inside the TTC window — the cohort that can still be held when the
+ * classified spread guard blocks below-entry exits or no qualifying sell is
+ * working. Mirrors `recordTrackQShadow`: pushes a side effect and never alters
+ * price, suppressions, D8/D9, or the signal. `d8EvalPrice`
  * (midPrice, per Sub-Track Q.A) and `d9EvalPrice` (executable bid) match the
  * live D8/D9 trigger prices so the shadow reports the real D8/D9 → Q.D
  * precedence (T4). See research_plankton/track_q_d_spec_2026-06-12.md.
@@ -590,7 +585,7 @@ function recordQdShadow(
     now: input.now,
     d8EvalPrice,
     d9EvalPrice,
-    hasActiveSell: input.hasActiveSellOrderForQd || hasWorkingSellOrder(input.latestSellOrder),
+    hasActiveSell: input.hasActiveSellOrderForQd,
   });
   if (projection === null || QD_PRE_COHORT_REASONS.has(projection.reason)) return;
   sideEffects.push({
@@ -655,6 +650,9 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   const sellPriceContext = { avgEntryPrice: input.position?.avgEntryPrice ?? null };
   const sellPrice = resolveSellExecutablePrice(market, sellPriceContext);
   const price = legState ? (sellPrice.price ?? midPrice) : midPrice;
+  // Sub-Track Q.F: on wide non-loss books, sellPrice.price is bestBid instead
+  // of the prior midPrice fallback; D9, dust recovery, telemetry, and pricing
+  // intentionally see that executable bid-aligned price.
   // Sub-Track Q.A: the D8 profit-take *trigger* reads midPrice directly,
   // decoupled from the executable sell price (`price`, which still feeds D9,
   // dust recovery, telemetry, and pricing). `midPrice` is a guaranteed-present
@@ -776,8 +774,9 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
       };
       // Sub-Track Q.A below-entry guard (mirrors the D9 guard below): D8 may
       // fire on the decoupled mid, but never place a SELL at an executable bid
-      // that sits below avg entry. Wide books (sellPrice.price == null) skip
-      // this and are suppressed downstream by `sell-spread-too-wide`.
+      // that sits below avg entry. Wide books without a profitable executable
+      // bid, or without avg entry, are suppressed downstream with classified
+      // spread reason codes.
       const d8AvgEntryPrice = finitePositiveOrNull(input.position?.avgEntryPrice ?? null);
       if (sellPrice.price != null && d8AvgEntryPrice != null && sellPrice.price < d8AvgEntryPrice) {
         suppressions.push({

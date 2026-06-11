@@ -867,7 +867,8 @@ export interface ExitTtlByLiquidityPolicyConfig {
 /**
  * Sub-Track Q.D — pre-resolution forced exit on cheap longshots.
  * Safety-net SELL trigger that fires near resolution on a qualifying bid before
- * `sell-spread-too-wide` silently lets a cheap position settle at zero. See
+ * classified wide-spread suppression or missing working SELLs let a cheap
+ * position settle at zero. See
  * research_plankton/track_q_d_spec_2026-06-12.md §1 + §3.3.
  *
  * Shipped as observe-only shadow first (`enabled:true` only records a
