@@ -699,11 +699,20 @@ export interface OrderPriceCooldown {
   lastEventTsUtc: number;
 }
 
+export interface BuyGuardShortLifetimePolicy {
+  /** Guard B: block new BUY admission on ultra-short crypto up/down markets when enabled. */
+  enabled: boolean;
+  /** Remaining time-to-close threshold, in hours. */
+  thresholdHours: number;
+}
+
 export interface MarketSelectionPolicy {
   /** v5.11 hard admission: BUY candidates must have mid price below this ceiling. */
   maxMidPrice: number;
   /** v5.11 hard admission: BUY candidates must have normalized liquidity at/above this floor. */
   minLiquidity: number;
+  /** Optional BUY regression guard; omitted legacy policy JSON falls back to defaults. */
+  shortLifetime?: BuyGuardShortLifetimePolicy;
 }
 
 export interface BuyCapacityPolicy {
@@ -1375,7 +1384,8 @@ export type PreEntryRejectReason =
   | "strike_yes_tail_short_runway" // new (Track B D1)
   | "mid_price_too_high"
   | "liquidity_too_low"
-  | "zero_coverage_category";
+  | "zero_coverage_category"
+  | "buy_guard_short_lifetime";
 
 export interface PreEntryEvaluation {
   readonly finalStatus: "INCLUDE" | "EXCLUDE";

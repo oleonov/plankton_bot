@@ -1,12 +1,14 @@
 import type { SelectionRuleEngine } from "./selection-rule-engine.js";
 import { classifyMarketRegime, type StrikeClassifierInput } from "./strike-classifier.js";
 import type {
+  BuyGuardShortLifetimePolicy,
   HealthFailReason,
   HealthInput,
   HealthResult,
   MarketSelectionPolicy,
   NormalizedMarket,
   PreEntryEvaluation,
+  PreEntryRejectReason,
 } from "./types.js";
 
 export interface PreEntryInput {
@@ -32,9 +34,15 @@ export interface PreEntryInput {
   readonly tags?: readonly string[] | null;
 }
 
+export const DEFAULT_BUY_GUARD_SHORT_LIFETIME_POLICY: BuyGuardShortLifetimePolicy = {
+  enabled: false,
+  thresholdHours: 1,
+};
+
 export const DEFAULT_MARKET_SELECTION_POLICY: MarketSelectionPolicy = {
   maxMidPrice: 0.5,
   minLiquidity: 100,
+  shortLifetime: DEFAULT_BUY_GUARD_SHORT_LIFETIME_POLICY,
 };
 
 export const PRE_ENTRY_MAX_MID_PRICE = DEFAULT_MARKET_SELECTION_POLICY.maxMidPrice;
@@ -50,6 +58,8 @@ const ZERO_COVERAGE_CATEGORY_PATTERN =
   /\bo\/u\b|over-under|exact[- ]score|both[- ]teams|match[- ]winner|quadra|penta|inhibitor|baron|dragon|\b(?:eth|btc|sol|bnb|xrp|hype|doge)-up-or-down-5m\b|\b(?:bitcoin|btc|ethereum|eth|solana|sol|bnb|xrp|hype|doge)-up-or-down-[a-z0-9-]+-(?:1[0-2]|[1-9])(?:am|pm)-et\b|\bmap[- ]?[0-9]+\b|\bgame[- ]?[0-9]+\b|total kills|\bwill-the-price-of-(?:bitcoin|btc|ethereum|eth|solana|sol|bnb|xrp|hype|doge|ada|matic|avax|link|ltc)-be-(?:greater|less)-than-\d+(?:pt\d+)?[kmbt]?-on-[a-z]+-\d+\b|\b(?:ethereum|bitcoin|solana|xrp|hype|doge|bnb|ada|matic|avax|link|ltc)-above-\d+(?:pt\d+)?[kmbt]?-on-[a-z]+-\d+(?:-\d{4}-\d{1,2}(?:am|pm)-et)?\b/i;
 const SOCCER_DRAW_PATTERN =
   /\b(?:soccer|football|match|game|teams?|score|winner)\b.{0,80}\bdraw\b|\bdraw\b.{0,80}\b(?:soccer|football|match|game|teams?|score|winner)\b/i;
+const CRYPTO_UPDOWN_GUARD_PATTERN =
+  /\b(?:btc|bitcoin|eth|ethereum|sol|solana|bnb|xrp|hype|doge|ada|matic|avax|link|ltc)-(?:updown|up-or-down)(?:-[a-z0-9]+)*\b/i;
 
 // Strike-market slug shape detectors. Independent of the zero-coverage regex —
 // these are used by the horizon filter below and by observability counters.
@@ -140,6 +150,37 @@ export function isZeroCoverageCategoryMarket(
   return ZERO_COVERAGE_CATEGORY_PATTERN.test(haystack) || SOCCER_DRAW_PATTERN.test(haystack);
 }
 
+export function isCryptoUpDownGuardMarket(
+  market: Pick<PreEntryInput, "eventSlug" | "slug" | "question">,
+): boolean {
+  const haystack = `${market.eventSlug ?? ""} ${market.slug} ${market.question ?? ""}`;
+  return CRYPTO_UPDOWN_GUARD_PATTERN.test(haystack);
+}
+
+interface ShortLifetimeGuardResult {
+  readonly blocked: boolean;
+  readonly reason: PreEntryRejectReason | null;
+  readonly horizonHours: number | null;
+}
+
+export function evaluateShortLifetimeGuard(
+  market: PreEntryInput,
+  policy: BuyGuardShortLifetimePolicy = DEFAULT_BUY_GUARD_SHORT_LIFETIME_POLICY,
+  nowMs: number = Date.now(),
+): ShortLifetimeGuardResult {
+  if (!policy.enabled) return { blocked: false, reason: null, horizonHours: null };
+  if (!isCryptoUpDownGuardMarket(market))
+    return { blocked: false, reason: null, horizonHours: null };
+  if (market.endDate == null) return { blocked: false, reason: null, horizonHours: null };
+  const endMs = Date.parse(market.endDate);
+  if (!Number.isFinite(endMs)) return { blocked: false, reason: null, horizonHours: null };
+  const horizonHours = (endMs - nowMs) / 3_600_000;
+  if (horizonHours < policy.thresholdHours) {
+    return { blocked: true, reason: "buy_guard_short_lifetime", horizonHours };
+  }
+  return { blocked: false, reason: null, horizonHours };
+}
+
 type HardFilterFailure =
   | { ok: true }
   | { ok: false; reason: "mid_price_too_high" | "liquidity_too_low" | "zero_coverage_category" };
@@ -205,6 +246,21 @@ export function evaluatePreEntry(
       selectionStatus: "fallback_exclude",
       winningRuleId: decision.status === "include" ? decision.winningRuleId : null,
       rejectReason: hardCheck.reason,
+    };
+  }
+
+  const shortLifetime = evaluateShortLifetimeGuard(
+    market,
+    policy.shortLifetime ?? DEFAULT_BUY_GUARD_SHORT_LIFETIME_POLICY,
+    nowMs,
+  );
+  if (shortLifetime.blocked) {
+    return {
+      finalStatus: "EXCLUDE",
+      selectionStatus: "fallback_exclude",
+      winningRuleId: decision.status === "include" ? decision.winningRuleId : null,
+      rejectReason: shortLifetime.reason!,
+      ...(shortLifetime.horizonHours != null ? { horizonHours: shortLifetime.horizonHours } : {}),
     };
   }
 

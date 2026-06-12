@@ -45,6 +45,14 @@ const LEGACY_PREFIX_ENGINE = makeEngine([
 const TOK_A = createTokenId("tok-a");
 const TOK_B = createTokenId("tok-b");
 
+function shortLifetimePolicy() {
+  return {
+    maxMidPrice: 0.5,
+    minLiquidity: 100,
+    shortLifetime: { enabled: true, thresholdHours: 1 },
+  };
+}
+
 function makeMarket(overrides: Partial<NormalizedMarket> & { tokenId: TokenId }): NormalizedMarket {
   return {
     conditionId: "cond-1",
@@ -237,6 +245,34 @@ describe("MarketSelectionCache", () => {
       selectionRuleRejected: 1,
       selectionRejectReasons: {
         rejected_strike_min_horizon: 1,
+      },
+    });
+
+    cache.dispose();
+  });
+
+  it("records rejected_buy_guard_short_lifetime for compact crypto_updown markets", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, EMPTY_ENGINE, shortLifetimePolicy);
+    cache.subscribe();
+
+    await updateMarket(
+      bus,
+      makeMarket({
+        tokenId: TOK_A,
+        eventSlug: "eth-updown-15m-1776889800",
+        slug: "eth-updown-15m-1776889800",
+        question: "ETH Up or Down - 15m",
+        endDate: new Date(Date.now() + 30 * 60_000).toISOString(),
+      }),
+    );
+
+    expect(cache.isEligible(TOK_A)).toBe(false);
+    expect(cache.getUniverseFilterSnapshot()).toMatchObject({
+      selectionRuleAdmitted: 0,
+      selectionRuleRejected: 1,
+      selectionRejectReasons: {
+        rejected_buy_guard_short_lifetime: 1,
       },
     });
 

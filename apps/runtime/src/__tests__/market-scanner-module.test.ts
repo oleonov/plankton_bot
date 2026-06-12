@@ -9,6 +9,7 @@ import type {
   EventBus,
   PositionRepository,
   OrderRepository,
+  MarketSelectionPolicy,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { MarketScannerModule } from "../modules/market-scanner/market-scanner-module.js";
@@ -225,6 +226,8 @@ function buildModule(
     positionRepo?: PositionRepository;
     orderRepo?: OrderRepository;
     selectionRuleEngine?: RefreshableSelectionRuleEngine;
+    marketSelectionPolicy?: () => MarketSelectionPolicy;
+    runtimeMetrics?: { writeCounter: ReturnType<typeof vi.fn> };
     runtimeControl?: { isPaused(): boolean };
     hintScanMinIntervalMs?: number;
   } = {},
@@ -243,7 +246,7 @@ function buildModule(
   const orderRepo = opts.orderRepo ?? createMockOrderRepo();
   const selectionRuleEngine = opts.selectionRuleEngine ?? SEEDED_ENGINE;
 
-  const mod = new MarketScannerModule({
+  const deps = {
     discoveryGateway,
     marketRepo,
     bus,
@@ -252,9 +255,15 @@ function buildModule(
     selectionRuleEngine,
     positionRepo,
     orderRepo,
-    runtimeControl: opts.runtimeControl,
-    hintScanMinIntervalMs: opts.hintScanMinIntervalMs,
-  });
+    ...(opts.marketSelectionPolicy ? { marketSelectionPolicy: opts.marketSelectionPolicy } : {}),
+    ...(opts.runtimeMetrics ? { runtimeMetrics: opts.runtimeMetrics } : {}),
+    ...(opts.runtimeControl ? { runtimeControl: opts.runtimeControl } : {}),
+    ...(opts.hintScanMinIntervalMs != null
+      ? { hintScanMinIntervalMs: opts.hintScanMinIntervalMs }
+      : {}),
+  };
+
+  const mod = new MarketScannerModule(deps);
   return { mod, discoveryGateway, marketRepo, bus, positionRepo, orderRepo };
 }
 
@@ -299,6 +308,36 @@ describe("MarketScannerModule", () => {
     expect(marketRepo.save).not.toHaveBeenCalled();
     const [discovered] = (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect((discovered as Set<string>).has("tok-rain-yes")).toBe(false);
+  });
+
+  it("emits a runtime counter for Guard B short-lifetime crypto_updown rejects", async () => {
+    const metrics = { writeCounter: vi.fn() };
+    const { mod, discoveryGateway, marketRepo } = buildModule({
+      marketSelectionPolicy: () => ({
+        maxMidPrice: 0.5,
+        minLiquidity: 100,
+        shortLifetime: { enabled: true, thresholdHours: 1 },
+      }),
+      runtimeMetrics: metrics,
+    });
+    const updown = makeClobMarket({
+      slug: "eth-updown-15m-1776889800",
+      eventSlug: "eth-updown-15m-1776889800",
+      question: "ETH Up or Down - 15m",
+      endDate: new Date(Date.now() + 30 * 60_000).toISOString(),
+      tokens: [{ tokenId: "tok-eth-updown", outcome: "Up" }],
+      eventMarketCount: 1,
+    });
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([updown]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).not.toHaveBeenCalled();
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "buy_guard_short_lifetime_rejected_total",
+      1,
+      JSON.stringify({ source: "scanner" }),
+    );
   });
 
   it("persists fallback_exclude rows when the token has an open position", async () => {

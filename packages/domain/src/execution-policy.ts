@@ -10,6 +10,7 @@
  */
 import type {
   BuyCapacityPolicy,
+  BuyGuardShortLifetimePolicy,
   DeadSideGuardPolicy,
   DepositActivationPolicy,
   ExecutionPolicy,
@@ -339,6 +340,8 @@ const BOUND_MARKET_SELECTION_MAX_MID_MIN = 0.001;
 const BOUND_MARKET_SELECTION_MAX_MID_MAX = 0.99;
 const BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MIN = 0;
 const BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MAX = 1_000_000;
+const BOUND_BUY_GUARD_SHORT_LIFETIME_MIN_HOURS = 1 / 60;
+const BOUND_BUY_GUARD_SHORT_LIFETIME_MAX_HOURS = 24;
 const BOUND_BUY_CAPACITY_HEADROOM_MIN_USDC = 0;
 const BOUND_BUY_CAPACITY_HEADROOM_MAX_USDC = 10_000;
 const BOUND_CAPACITY_OPEN_ORDERS_MIN = 0;
@@ -1465,6 +1468,32 @@ function parseMarketSelection(raw: unknown, issues: string[]): MarketSelectionPo
       BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MAX,
       issues,
       "marketSelection.minLiquidity",
+    ),
+    shortLifetime: parseBuyGuardShortLifetime(obj.shortLifetime, issues),
+  };
+}
+
+function parseBuyGuardShortLifetime(raw: unknown, issues: string[]): BuyGuardShortLifetimePolicy {
+  const defaults = DEFAULT_MARKET_SELECTION_POLICY.shortLifetime!;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("marketSelection.shortLifetime must be an object");
+    return defaults;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      defaults.enabled,
+      issues,
+      "marketSelection.shortLifetime.enabled",
+    ),
+    thresholdHours: clampedNumber(
+      obj.thresholdHours,
+      defaults.thresholdHours,
+      BOUND_BUY_GUARD_SHORT_LIFETIME_MIN_HOURS,
+      BOUND_BUY_GUARD_SHORT_LIFETIME_MAX_HOURS,
+      issues,
+      "marketSelection.shortLifetime.thresholdHours",
     ),
   };
 }

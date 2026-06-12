@@ -77,6 +77,9 @@ export interface MarketScannerModuleDeps {
   positionRepo?: PositionRepository;
   /** When provided, tokens with open orders are preserved from deactivation. */
   orderRepo?: OrderRepository;
+  runtimeMetrics?: {
+    writeCounter?: (metricName: string, value?: number, labels?: string | null) => void;
+  };
   runtimeControl?: RuntimeControl | undefined;
   /** Minimum age of a successful scan before a WS new-market hint may trigger a full rescan. */
   hintScanMinIntervalMs?: number | undefined;
@@ -480,6 +483,7 @@ export class MarketScannerModule implements RuntimeModule {
 
           for (const [index, token] of clobMarket.tokens.entries()) {
             const tokenEval = tokenEvalResults[index]!;
+            this.recordBuyGuardReject(tokenEval.rejectReason);
             const tokenId = createTokenId(token.tokenId);
             const tokenIdStr = String(tokenId);
             const isExecutionCriticalLeg = activeTokenIds.has(tokenIdStr);
@@ -652,6 +656,15 @@ export class MarketScannerModule implements RuntimeModule {
     } finally {
       this.scanning = false;
     }
+  }
+
+  private recordBuyGuardReject(reason: string | undefined): void {
+    if (reason !== "buy_guard_short_lifetime") return;
+    this.deps.runtimeMetrics?.writeCounter?.(
+      "buy_guard_short_lifetime_rejected_total",
+      1,
+      JSON.stringify({ source: "scanner" }),
+    );
   }
 
   private scheduleHintScan(): void {

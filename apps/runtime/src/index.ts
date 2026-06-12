@@ -727,6 +727,7 @@ async function main(): Promise<void> {
     hintScanMinIntervalMs: config.marketScanHintMinIntervalMs,
     selectionRuleEngine,
     marketSelectionPolicy: () => currentExecutionPolicy().marketSelection,
+    runtimeMetrics,
     positionRepo: repos.position,
     orderRepo: repos.order,
     runtimeControl,

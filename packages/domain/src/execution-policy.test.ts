@@ -165,7 +165,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.sellReplaceMinPriceDeltaTicks).toBe(3);
     expect(policy.exitRepriceThresholdPct).toBe(0.25);
     expect(policy.exitRepriceThresholdTicks).toBe(8);
-    expect(policy.marketSelection).toEqual({ maxMidPrice: 0.42, minLiquidity: 250 });
+    expect(policy.marketSelection).toEqual({
+      maxMidPrice: 0.42,
+      minLiquidity: 250,
+      shortLifetime: DEFAULT_EXECUTION_POLICY.marketSelection.shortLifetime,
+    });
     expect(policy.buyCapacity).toEqual({
       enabled: true,
       minNewEntryWalletHeadroomUsdc: 7,
@@ -679,6 +683,25 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       DEFAULT_EXECUTION_POLICY.marketSelection.maxMidPrice,
     );
     expect(policy.marketSelection.minLiquidity).toBe(500);
+    expect(policy.marketSelection.shortLifetime).toEqual(
+      DEFAULT_EXECUTION_POLICY.marketSelection.shortLifetime,
+    );
+  });
+
+  it("parses Guard B short-lifetime market-selection override", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        marketSelection: {
+          shortLifetime: { enabled: true, thresholdHours: 0.5 },
+        },
+      }),
+    );
+
+    expect(issues).toHaveLength(0);
+    expect(policy.marketSelection.shortLifetime).toEqual({
+      enabled: true,
+      thresholdHours: 0.5,
+    });
   });
 
   it("preserves partial order-lifetime override and defaults nested mode policies", () => {
@@ -789,11 +812,21 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
 
   it("rejects invalid market-selection values with issues", () => {
     const { policy, issues } = parseExecutionPolicyJson(
-      JSON.stringify({ marketSelection: { maxMidPrice: 2, minLiquidity: -1 } }),
+      JSON.stringify({
+        marketSelection: {
+          maxMidPrice: 2,
+          minLiquidity: -1,
+          shortLifetime: { enabled: "yes", thresholdHours: 0 },
+        },
+      }),
     );
     expect(policy.marketSelection).toEqual(DEFAULT_EXECUTION_POLICY.marketSelection);
     expect(issues.some((i) => i.includes("marketSelection.maxMidPrice"))).toBe(true);
     expect(issues.some((i) => i.includes("marketSelection.minLiquidity"))).toBe(true);
+    expect(issues.some((i) => i.includes("marketSelection.shortLifetime.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("marketSelection.shortLifetime.thresholdHours"))).toBe(
+      true,
+    );
   });
 
   it("preserves partial fill-rate feature overrides and defaults the rest", () => {

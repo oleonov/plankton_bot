@@ -194,7 +194,11 @@ describe("control-db migration infrastructure", () => {
         deadSideGuard: { mode: string };
       };
       expect(parsed.entryPriceCeiling).toBe(0.45);
-      expect(parsed.marketSelection).toEqual({ maxMidPrice: 0.5, minLiquidity: 100 });
+      expect(parsed.marketSelection).toEqual({
+        maxMidPrice: 0.5,
+        minLiquidity: 100,
+        shortLifetime: { enabled: false, thresholdHours: 1 },
+      });
       expect(parsed.buyCapacity).toEqual({
         enabled: true,
         minNewEntryWalletHeadroomUsdc: 7,

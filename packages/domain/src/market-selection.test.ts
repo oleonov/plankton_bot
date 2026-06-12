@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  DEFAULT_MARKET_SELECTION_POLICY,
   canPlaceBuyOrder,
   evaluatePreEntry,
   evaluateContinuation,
@@ -12,9 +13,15 @@ import {
   type BuyPlacementInput,
 } from "./market-selection.js";
 import { SelectionRuleEngine } from "./selection-rule-engine.js";
-import type { SelectionRule, HealthInput, HealthFailReason } from "./types.js";
+import type {
+  MarketSelectionPolicy,
+  SelectionRule,
+  HealthInput,
+  HealthFailReason,
+} from "./types.js";
 
 const EMPTY_ENGINE = new SelectionRuleEngine([]);
+const NOW_MS = Date.parse("2026-06-12T12:00:00.000Z");
 const VALID_PRE_ENTRY = {
   eventSlug: "fed-rate-cut-in-2026",
   slug: "fed-rate-cut-yes",
@@ -37,6 +44,21 @@ function engineWith(
       ...r,
     })),
   );
+}
+
+function shortLifetimePolicy(overrides: Partial<MarketSelectionPolicy["shortLifetime"]> = {}) {
+  return {
+    ...DEFAULT_MARKET_SELECTION_POLICY,
+    shortLifetime: {
+      enabled: true,
+      thresholdHours: 1,
+      ...overrides,
+    },
+  } satisfies MarketSelectionPolicy;
+}
+
+function fromNow(hours: number): string {
+  return new Date(NOW_MS + hours * 3_600_000).toISOString();
 }
 
 describe("evaluatePreEntry", () => {
@@ -229,6 +251,184 @@ describe("evaluatePreEntry", () => {
         question: slug.replace(/-/g, " "),
       });
       expect(r.finalStatus).toBe("INCLUDE");
+    });
+  });
+
+  describe("Guard B short-lifetime crypto updown", () => {
+    const COMPACT_UPDOWN = "eth-updown-15m-1776889800";
+
+    it("blocks compact crypto_updown markets with less than 1h remaining when enabled", () => {
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          eventSlug: COMPACT_UPDOWN,
+          slug: COMPACT_UPDOWN,
+          question: "ETH Up or Down - 15m",
+          endDate: fromNow(0.5),
+        },
+        shortLifetimePolicy(),
+        NOW_MS,
+      );
+
+      expect(r.finalStatus).toBe("EXCLUDE");
+      expect(r.rejectReason).toBe("buy_guard_short_lifetime");
+      expect(r.horizonHours).toBeCloseTo(0.5);
+    });
+
+    it("admits compact crypto_updown markets above the configured threshold", () => {
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          eventSlug: COMPACT_UPDOWN,
+          slug: COMPACT_UPDOWN,
+          question: "ETH Up or Down - 15m",
+          endDate: fromNow(1.01),
+        },
+        shortLifetimePolicy(),
+        NOW_MS,
+      );
+
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("does not block non-crypto_updown markets with less than 1h remaining", () => {
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          slug: "fed-rate-cut-in-june-yes",
+          eventSlug: "fed-rate-cut-in-june",
+          question: "Will the Fed cut rates in June?",
+          endDate: fromNow(0.5),
+        },
+        shortLifetimePolicy(),
+        NOW_MS,
+      );
+
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("preserves default disabled behavior", () => {
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          eventSlug: COMPACT_UPDOWN,
+          slug: COMPACT_UPDOWN,
+          question: "ETH Up or Down - 15m",
+          endDate: fromNow(0.5),
+        },
+        DEFAULT_MARKET_SELECTION_POLICY,
+        NOW_MS,
+      );
+
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("honors configurable thresholdHours", () => {
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          eventSlug: COMPACT_UPDOWN,
+          slug: COMPACT_UPDOWN,
+          question: "ETH Up or Down - 15m",
+          endDate: fromNow(0.75),
+        },
+        shortLifetimePolicy({ thresholdHours: 0.5 }),
+        NOW_MS,
+      );
+
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("fails open on missing or unparseable endDate", () => {
+      for (const endDate of [null, "not-a-date"]) {
+        const r = evaluatePreEntry(
+          EMPTY_ENGINE,
+          {
+            ...VALID_PRE_ENTRY,
+            eventSlug: COMPACT_UPDOWN,
+            slug: COMPACT_UPDOWN,
+            question: "ETH Up or Down - 15m",
+            endDate,
+          },
+          shortLifetimePolicy(),
+          NOW_MS,
+        );
+
+        expect(r.finalStatus).toBe("INCLUDE");
+      }
+    });
+
+    it("blocks compact crypto_updown markets with endDate in the past", () => {
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          eventSlug: COMPACT_UPDOWN,
+          slug: COMPACT_UPDOWN,
+          question: "ETH Up or Down - 15m",
+          endDate: fromNow(-0.1),
+        },
+        shortLifetimePolicy(),
+        NOW_MS,
+      );
+
+      expect(r.finalStatus).toBe("EXCLUDE");
+      expect(r.rejectReason).toBe("buy_guard_short_lifetime");
+    });
+
+    it("preserves maxMidPrice, zero-coverage, and strike reject ordering", () => {
+      const policy = shortLifetimePolicy();
+
+      expect(
+        evaluatePreEntry(
+          EMPTY_ENGINE,
+          {
+            ...VALID_PRE_ENTRY,
+            eventSlug: COMPACT_UPDOWN,
+            slug: COMPACT_UPDOWN,
+            question: "ETH Up or Down - 15m",
+            midPrice: 0.5,
+            endDate: fromNow(0.5),
+          },
+          policy,
+          NOW_MS,
+        ).rejectReason,
+      ).toBe("mid_price_too_high");
+
+      expect(
+        evaluatePreEntry(
+          EMPTY_ENGINE,
+          {
+            ...VALID_PRE_ENTRY,
+            eventSlug: "btc-up-or-down-5m",
+            slug: "btc-up-or-down-5m",
+            question: "Bitcoin up or down in the next 5m?",
+            endDate: fromNow(0.5),
+          },
+          policy,
+          NOW_MS,
+        ).rejectReason,
+      ).toBe("zero_coverage_category");
+
+      expect(
+        evaluatePreEntry(
+          EMPTY_ENGINE,
+          {
+            ...VALID_PRE_ENTRY,
+            eventSlug: "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13",
+            slug: "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13",
+            question: "Will BTC be between $84k and $85k on May 13?",
+            endDate: fromNow(0.5),
+          },
+          policy,
+          NOW_MS,
+        ).rejectReason,
+      ).toBe("strike_min_horizon");
     });
   });
 
