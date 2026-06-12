@@ -11,6 +11,7 @@ export const DEFAULT_TRACK_S1_WALKING_LADDER_POLICY: TrackS1WalkingLadderPolicy 
   markupCeilings: { cheapMax: 6, midRange: 2.25 },
   handoffTimeToResolutionSeconds: 3600,
   handoffTimeoutSeconds: 300,
+  phantomOwnershipReleaseSeconds: 300,
   maxOpenLadderTokens: 20,
   s1MaxOrdersPerToken: 4,
   maxLadderReplacementsPerHour: 6,
@@ -60,9 +61,10 @@ export type S1LadderBuildResult =
 
 export function buildLadder(input: BuildLadderInput): S1LadderBuildResult {
   const tick = normalizePositive(input.tickSize, 0.001);
-  const minOrderSize = normalizePositive(input.minOrderSize, 1);
+  const minOrderSize = finitePositive(input.minOrderSize);
   const bestBid = finitePositive(input.bestBid);
   const bestAsk = finitePositive(input.bestAsk);
+  if (minOrderSize == null) return { ok: false, reason: "invalid_input" };
   if (bestBid == null || bestAsk == null || bestBid < input.policy.minBestBid || bestAsk > 0.97) {
     return { ok: false, reason: "dead_market" };
   }

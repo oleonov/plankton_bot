@@ -30,6 +30,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       markupCeilings: { cheapMax: 6, midRange: 2.25 },
       handoffTimeToResolutionSeconds: 3600,
       handoffTimeoutSeconds: 300,
+      phantomOwnershipReleaseSeconds: 300,
       maxOpenLadderTokens: 20,
       s1MaxOrdersPerToken: 4,
       maxLadderReplacementsPerHour: 6,
@@ -50,6 +51,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           volumeDistribution: [1, 2, 3],
           s1MaxOrdersPerToken: 3,
           maxLadderReplacementsPerHour: 4,
+          phantomOwnershipReleaseSeconds: 120,
         },
       }),
     );
@@ -60,6 +62,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.trackS1.volumeDistribution).toEqual([1 / 6, 2 / 6, 3 / 6]);
     expect(policy.trackS1.s1MaxOrdersPerToken).toBe(3);
     expect(policy.trackS1.maxLadderReplacementsPerHour).toBe(4);
+    expect(policy.trackS1.phantomOwnershipReleaseSeconds).toBe(120);
   });
 
   it("falls back to defaults on malformed JSON with one issue", () => {

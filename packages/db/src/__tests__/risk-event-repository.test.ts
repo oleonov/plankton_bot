@@ -63,4 +63,84 @@ describe("SqliteRiskEventRepository", () => {
     expect(repo.countSince("2026-04-11T00:00:00.000Z")).toBe(1);
     expect(repo.countSince("2026-04-09T00:00:00.000Z")).toBe(2);
   });
+
+  it("finds unreleased S1 ownerships by tokenId inside payload JSON", () => {
+    repo.insert({
+      eventType: "s1_ownership_assumed",
+      payload: {
+        tokenId: "token-a",
+        conditionId: "condition-a",
+        ladderId: "ladder-a",
+        signalTimestamp: "2026-06-12T10:00:00.000Z",
+      },
+    });
+    repo.insert({
+      eventType: "s1_ownership_assumed",
+      payload: {
+        tokenId: "token-b",
+        conditionId: "condition-b",
+        ladderId: "ladder-b",
+        signalTimestamp: "2026-06-12T10:01:00.000Z",
+      },
+    });
+    repo.insert({
+      eventType: "s1_ownership_released",
+      payload: {
+        tokenId: "token-b",
+        conditionId: "condition-b",
+        ladderId: "ladder-b",
+        reason: "fill",
+        signalTimestamp: "2026-06-12T10:02:00.000Z",
+      },
+    });
+
+    expect(repo.findOrphanS1Ownerships()).toEqual([
+      {
+        tokenId: "token-a",
+        conditionId: "condition-a",
+        ladderId: "ladder-a",
+        assumedAtIso: "2026-06-12T10:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("uses the latest unreleased assumption per token after a release pair", () => {
+    repo.insert({
+      eventType: "s1_ownership_assumed",
+      payload: {
+        tokenId: "token-a",
+        conditionId: "condition-a",
+        ladderId: "ladder-old",
+        signalTimestamp: "2026-06-12T09:00:00.000Z",
+      },
+    });
+    repo.insert({
+      eventType: "s1_ownership_released",
+      payload: {
+        tokenId: "token-a",
+        conditionId: "condition-a",
+        ladderId: "ladder-old",
+        reason: "operator",
+        signalTimestamp: "2026-06-12T09:10:00.000Z",
+      },
+    });
+    repo.insert({
+      eventType: "s1_ownership_assumed",
+      payload: {
+        tokenId: "token-a",
+        conditionId: "condition-a",
+        ladderId: "ladder-new",
+        signalTimestamp: "2026-06-12T10:00:00.000Z",
+      },
+    });
+
+    expect(repo.findOrphanS1Ownerships()).toEqual([
+      {
+        tokenId: "token-a",
+        conditionId: "condition-a",
+        ladderId: "ladder-new",
+        assumedAtIso: "2026-06-12T10:00:00.000Z",
+      },
+    ]);
+  });
 });

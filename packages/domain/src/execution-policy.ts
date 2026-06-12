@@ -1193,6 +1193,14 @@ function parseTrackS1(raw: unknown, issues: string[]): TrackS1WalkingLadderPolic
       issues,
       "trackS1.handoffTimeoutSeconds",
     ),
+    phantomOwnershipReleaseSeconds: clampedInt(
+      obj.phantomOwnershipReleaseSeconds,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.phantomOwnershipReleaseSeconds,
+      BOUND_TRACK_S1_SECONDS_MIN,
+      BOUND_TRACK_S1_SECONDS_MAX,
+      issues,
+      "trackS1.phantomOwnershipReleaseSeconds",
+    ),
     maxOpenLadderTokens: clampedInt(
       obj.maxOpenLadderTokens,
       DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.maxOpenLadderTokens,

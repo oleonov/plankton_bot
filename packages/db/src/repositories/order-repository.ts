@@ -189,6 +189,34 @@ export class SqliteOrderRepository implements OrderRepository {
       .run(...params);
   }
 
+  updateMetadata(id: OrderId, metadata: Readonly<Record<string, unknown>>): Order {
+    this.runMetadataUpdate(id, metadata);
+    const updated = this.findById(id);
+    if (!updated) {
+      throw new Error(`Order not found after metadata update: ${String(id)}`);
+    }
+    return updated;
+  }
+
+  updateMetadataBulk(
+    updates: readonly { orderId: OrderId; metadata: Readonly<Record<string, unknown>> }[],
+  ): Order[] {
+    if (updates.length === 0) return [];
+    const apply = this.db.transaction(() => {
+      for (const update of updates) {
+        this.runMetadataUpdate(update.orderId, update.metadata);
+      }
+      return updates.map((update) => {
+        const updated = this.findById(update.orderId);
+        if (!updated) {
+          throw new Error(`Order not found after metadata update: ${String(update.orderId)}`);
+        }
+        return updated;
+      });
+    });
+    return apply();
+  }
+
   sumOpenBuyNotional(): number {
     const row = this.db
       .prepare(
@@ -196,6 +224,19 @@ export class SqliteOrderRepository implements OrderRepository {
       )
       .get() as { total: number };
     return row.total;
+  }
+
+  private runMetadataUpdate(id: OrderId, metadata: Readonly<Record<string, unknown>>): void {
+    const result = this.db
+      .prepare(
+        `UPDATE orders
+         SET metadata_json = ?, updated_at = datetime('now')
+         WHERE order_id = ?`,
+      )
+      .run(JSON.stringify(metadata), id);
+    if (result.changes !== 1) {
+      throw new Error(`Order metadata update expected one row for order_id=${String(id)}`);
+    }
   }
 
   private rowToOrder(row: Record<string, unknown>): Order {

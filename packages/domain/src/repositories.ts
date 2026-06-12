@@ -229,6 +229,14 @@ export interface OrderRepository {
     limit: number,
   ): Order[];
 
+  /** Replace metadata_json for a single order identified by local order_id. */
+  updateMetadata?(id: OrderId, metadata: Readonly<Record<string, unknown>>): Order;
+
+  /** Atomically replace metadata_json for multiple local order_id values. */
+  updateMetadataBulk?(
+    updates: readonly { orderId: OrderId; metadata: Readonly<Record<string, unknown>> }[],
+  ): Order[];
+
   /**
    * Update the status, exchange_order_id, and cancellation reason of an
    * existing order. ADR-025 §D-B: when transitioning to `cancelled`,
@@ -417,6 +425,16 @@ export interface RiskEventRepository {
 
   /** Count risk events since the given ISO timestamp. */
   countSince(createdAtIso: string): number;
+
+  /** Return S1 ownership assumptions that have no later release event for the same token. */
+  findOrphanS1Ownerships?(): S1OrphanOwnership[];
+}
+
+export interface S1OrphanOwnership {
+  tokenId: string;
+  conditionId: string;
+  ladderId: string;
+  assumedAtIso: string;
 }
 
 // ─── StateTransition ────────────────────────────────────────────────────

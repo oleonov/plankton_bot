@@ -111,6 +111,47 @@ describe("isS1Eligible", () => {
     expect(result).toMatchObject({ eligible: false, reason: "below_min_tier_size" });
   });
 
+  it("rejects live books without a known positive min order size", () => {
+    for (const minOrderSize of [null, 0, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const result = isS1Eligible({
+        position: position(),
+        book: book({ minOrderSize }),
+        marketEndDate: endDate,
+        nowMs,
+        hasActiveS1Ladder: false,
+        policy: enabledPolicy,
+      });
+
+      expect(result).toMatchObject({ eligible: false, reason: "unknown_min_order_size" });
+    }
+  });
+
+  it("keeps strict min order size ahead of smallest-tier sizing", () => {
+    const result = isS1Eligible({
+      position: position({ size: 1_000 }),
+      book: book({ minOrderSize: null }),
+      marketEndDate: endDate,
+      nowMs,
+      hasActiveS1Ladder: false,
+      policy: enabledPolicy,
+    });
+
+    expect(result).toMatchObject({ eligible: false, reason: "unknown_min_order_size" });
+  });
+
+  it("accepts valid positive min order size after the strict guard", () => {
+    const result = isS1Eligible({
+      position: position(),
+      book: book({ minOrderSize: 10 }),
+      marketEndDate: endDate,
+      nowMs,
+      hasActiveS1Ladder: false,
+      policy: enabledPolicy,
+    });
+
+    expect(result).toMatchObject({ eligible: true, thinReason: "exhausted" });
+  });
+
   it("does not create a second ladder when one is already active", () => {
     const result = isS1Eligible({
       position: position(),

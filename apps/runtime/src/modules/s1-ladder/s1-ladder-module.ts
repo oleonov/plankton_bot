@@ -20,6 +20,7 @@ import {
   S1_LADDER_RULE_ID,
   buildS1SignalId,
   createCommandId,
+  createTokenId,
   PositionStatus,
 } from "@krabs/domain";
 import { buildClientOrderId } from "@krabs/domain/node";
@@ -31,7 +32,9 @@ export { S1_LADDER_RULE_ID };
 export interface S1LadderModuleDeps {
   bus: EventBus;
   positionRepo: Pick<PositionRepository, "findOpen" | "findByTokenId">;
-  orderRepo: Pick<OrderRepository, "findOpen" | "findByTokenId">;
+  orderRepo: Pick<OrderRepository, "findOpen" | "findByTokenId"> & {
+    updateMetadataBulk: NonNullable<OrderRepository["updateMetadataBulk"]>;
+  };
   policy: () => TrackS1WalkingLadderPolicy;
   runtimeMetrics?: Pick<RuntimeMetricWriter, "writeCounter"> | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
@@ -69,6 +72,7 @@ export class S1LadderModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.recoverActiveLadders();
+    this.recoverPhantomOwnerships();
     this.unsubs.push(
       this.deps.bus.subscribe("MarketSnapshotHeartbeat", (payload) => this.onHeartbeat(payload)),
       this.deps.bus.subscribe("OrderCancelled", async (payload) => {
@@ -136,6 +140,12 @@ export class S1LadderModule implements RuntimeModule {
       if (active) {
         if (this.isHandoffTimedOut(market.tokenId, payload.timestamp, policy)) {
           this.releaseOwnership(market.tokenId, payload.timestamp, "handoff_timeout");
+        } else if (
+          active.reason !== "handoff" &&
+          !this.hasActivePlacement(market.tokenId, payload.timestamp) &&
+          payload.timestamp - active.assumedAtMs > policy.phantomOwnershipReleaseSeconds * 1000
+        ) {
+          this.releaseOwnership(market.tokenId, payload.timestamp, "phantom_release");
         }
         continue;
       }
@@ -173,7 +183,7 @@ export class S1LadderModule implements RuntimeModule {
         bestBid: book.bestBid,
         bestAsk: book.bestAsk,
         tickSize: market.tickSize,
-        minOrderSize: market.minOrderSize ?? book.minOrderSize ?? 0,
+        minOrderSize: book.minOrderSize ?? 0,
         policy,
       });
       if (!plan.ok) {
@@ -234,21 +244,61 @@ export class S1LadderModule implements RuntimeModule {
   }
 
   private recoverActiveLadders(): void {
+    const ordersByToken = new Map<string, Order[]>();
     for (const order of this.deps.orderRepo.findOpen()) {
       if (order.side !== "sell" || order.decisionRuleId !== S1_LADDER_RULE_ID) continue;
-      const position = this.findOpenPosition(order.tokenId);
-      if (!position) continue;
-      const handoffStartedAtMs = this.resolveHandoffStartedAt(order);
       const key = String(order.tokenId);
-      this.activeLadders.set(String(order.tokenId), {
-        tokenId: order.tokenId,
-        conditionId: String(order.conditionId),
-        ladderId: this.resolveLadderId(order),
-        assumedAtMs: Date.parse(order.createdAt),
+      ordersByToken.set(key, [...(ordersByToken.get(key) ?? []), order]);
+    }
+    for (const [key, orders] of ordersByToken) {
+      const sorted = [...orders].sort((a, b) => String(a.orderId).localeCompare(String(b.orderId)));
+      const first = sorted[0];
+      if (!first) continue;
+      const position = this.findOpenPosition(first.tokenId);
+      if (!position) continue;
+      const handoffStartedAtMs = this.resolveCanonicalHandoffStartedAt(sorted);
+      this.activeLadders.set(key, {
+        tokenId: first.tokenId,
+        conditionId: String(first.conditionId),
+        ladderId: this.resolveLadderId(first),
+        assumedAtMs: Date.parse(first.createdAt),
         reason: handoffStartedAtMs == null ? "active_ladder" : "handoff",
         handoffStartedAtMs,
       });
       if (handoffStartedAtMs != null) this.handoffStartedTokens.add(key);
+    }
+  }
+
+  private recoverPhantomOwnerships(): void {
+    const orphans = this.deps.riskEventRepo?.findOrphanS1Ownerships?.() ?? [];
+    for (const orphan of orphans) {
+      const tokenId = createTokenId(orphan.tokenId);
+      const key = String(tokenId);
+      if (this.activeLadders.has(key) || this.hasActivePlacement(tokenId, this.now())) continue;
+      const activeOrders = this.findActiveS1Orders(tokenId);
+      if (activeOrders.length > 0) {
+        const position = this.findOpenPosition(tokenId);
+        const firstOrder = activeOrders
+          .slice()
+          .sort((a, b) => String(a.orderId).localeCompare(String(b.orderId)))[0];
+        if (!position || !firstOrder) continue;
+        this.activeLadders.set(key, {
+          tokenId,
+          conditionId: orphan.conditionId || String(position.conditionId),
+          ladderId: orphan.ladderId || this.resolveLadderId(firstOrder),
+          assumedAtMs: parseTimestamp(orphan.assumedAtIso, this.now()),
+          reason: "active_ladder",
+          handoffStartedAtMs: null,
+        });
+        continue;
+      }
+      this.insertOwnershipRelease(tokenId, {
+        conditionId: orphan.conditionId,
+        ladderId: orphan.ladderId,
+        reason: "phantom_release_recovery",
+        timestamp: this.now(),
+      });
+      this.countPhantomRelease();
     }
   }
 
@@ -335,6 +385,21 @@ export class S1LadderModule implements RuntimeModule {
   ): Promise<void> {
     const key = String(market.tokenId);
     if (this.handoffStartedTokens.has(key)) return;
+    const handoffStartedAt = new Date(timestamp).toISOString();
+    try {
+      this.deps.orderRepo.updateMetadataBulk(
+        activeOrders.map((order) => ({
+          orderId: order.orderId,
+          metadata: withS1HandoffStartedAt(order.metadata ?? null, handoffStartedAt),
+        })),
+      );
+    } catch (error) {
+      this.deps.log.error(
+        { err: error, tokenId: String(market.tokenId), orderCount: activeOrders.length },
+        "Failed to persist S1 handoff metadata",
+      );
+      return;
+    }
     this.handoffStartedTokens.add(key);
     const active = this.activeLadders.get(key);
     if (active) {
@@ -474,16 +539,35 @@ export class S1LadderModule implements RuntimeModule {
     if (reason === "fill") {
       this.deps.runtimeMetrics?.writeCounter("track_s1_ladder_completed", 1);
     }
+    if (reason === "phantom_release" || reason === "phantom_release_recovery") {
+      this.countPhantomRelease();
+    }
+    this.insertOwnershipRelease(tokenId, {
+      conditionId: active.conditionId,
+      ladderId: active.ladderId,
+      reason,
+      timestamp,
+    });
+  }
+
+  private insertOwnershipRelease(
+    tokenId: TokenId,
+    input: { conditionId: string; ladderId: string; reason: string; timestamp: number },
+  ): void {
     this.deps.riskEventRepo?.insert({
       eventType: "s1_ownership_released",
       payload: {
-        tokenId: key,
-        conditionId: active.conditionId,
-        ladderId: active.ladderId,
-        reason,
-        signalTimestamp: new Date(timestamp).toISOString(),
+        tokenId: String(tokenId),
+        conditionId: input.conditionId,
+        ladderId: input.ladderId,
+        reason: input.reason,
+        signalTimestamp: new Date(input.timestamp).toISOString(),
       },
     });
+  }
+
+  private countPhantomRelease(): void {
+    this.deps.runtimeMetrics?.writeCounter("track_s1_ownership_released_phantom", 1);
   }
 
   private acquirePlacement(tokenId: TokenId, nowMs: number): boolean {
@@ -558,10 +642,10 @@ export class S1LadderModule implements RuntimeModule {
 
   private countEligibilitySkip(reason: string): void {
     if (reason === "dead_market") {
-      this.deps.runtimeMetrics?.writeCounter("track_s1_skipped_dead_market", 1);
+      this.deps.runtimeMetrics?.writeCounter("track_s1_skipped_dead_market", 1, reason);
       return;
     }
-    this.deps.runtimeMetrics?.writeCounter("track_s1_skipped_below_threshold", 1);
+    this.deps.runtimeMetrics?.writeCounter("track_s1_skipped_below_threshold", 1, reason);
   }
 
   private resolveLadderIdFromOrders(orders: readonly Order[]): string {
@@ -578,6 +662,22 @@ export class S1LadderModule implements RuntimeModule {
     return `recovered_${String(order?.tokenId ?? "unknown")}`;
   }
 
+  private resolveCanonicalHandoffStartedAt(orders: readonly Order[]): number | null {
+    const sorted = [...orders].sort((a, b) => String(a.orderId).localeCompare(String(b.orderId)));
+    const values = sorted
+      .map((order) => this.resolveHandoffStartedAt(order))
+      .filter((value): value is number => value != null);
+    if (values.length === 0) return null;
+    const unique = new Set(values);
+    if (unique.size > 1) {
+      this.deps.log.warn(
+        { tokenId: String(sorted[0]?.tokenId ?? "unknown"), orderCount: sorted.length },
+        "Conflicting S1 handoffStartedAt metadata recovered",
+      );
+    }
+    return values[0] ?? null;
+  }
+
   private resolveHandoffStartedAt(order: Order): number | null {
     const metadata = order.metadata;
     const s1 = metadata && typeof metadata === "object" ? metadata.s1 : null;
@@ -591,4 +691,25 @@ export class S1LadderModule implements RuntimeModule {
   private now(): number {
     return this.deps.now ? this.deps.now() : Date.now();
   }
+}
+
+function withS1HandoffStartedAt(
+  metadata: Readonly<Record<string, unknown>> | null,
+  handoffStartedAt: string,
+): Readonly<Record<string, unknown>> {
+  const base = metadata && typeof metadata === "object" ? { ...metadata } : {};
+  const s1 =
+    base.s1 && typeof base.s1 === "object" ? { ...(base.s1 as Record<string, unknown>) } : {};
+  return {
+    ...base,
+    s1: {
+      ...s1,
+      handoffStartedAt,
+    },
+  };
+}
+
+function parseTimestamp(value: string, fallbackMs: number): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : fallbackMs;
 }

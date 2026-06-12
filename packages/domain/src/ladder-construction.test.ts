@@ -69,6 +69,24 @@ describe("buildLadder", () => {
     expect(buildLadder({ ...base, positionSize: 100 }).ok).toBe(true);
   });
 
+  it("rejects unknown or invalid min order size instead of substituting a fallback", () => {
+    for (const minOrderSize of [0, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const result = buildLadder({
+        tokenId,
+        openedAt: "2026-06-12T10:00:00.000Z",
+        avgEntryPrice: 0.014,
+        positionSize: 100,
+        bestBid: 0.02,
+        bestAsk: 0.12,
+        tickSize: 0.001,
+        minOrderSize,
+        policy: DEFAULT_TRACK_S1_WALKING_LADDER_POLICY,
+      });
+
+      expect(result).toEqual({ ok: false, reason: "invalid_input" });
+    }
+  });
+
   it("allows a two-tier custom distribution at 2x min order size", () => {
     const result = buildLadder({
       tokenId,

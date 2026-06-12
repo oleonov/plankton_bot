@@ -11,6 +11,7 @@ export type S1EligibilityReason =
   | "handoff_window"
   | "active_ladder_exists"
   | "dead_market"
+  | "unknown_min_order_size"
   | "below_min_tier_size"
   | "not_thin";
 
@@ -54,7 +55,14 @@ export function isS1Eligible(input: S1EligibilityInput): S1EligibilityResult {
   if (!book || !isLiveEnoughForS1(book, input.policy)) {
     return { eligible: false, reason: "dead_market" };
   }
-  const minOrderSize = book.minOrderSize && book.minOrderSize > 0 ? book.minOrderSize : 1;
+  if (
+    typeof book.minOrderSize !== "number" ||
+    !Number.isFinite(book.minOrderSize) ||
+    book.minOrderSize <= 0
+  ) {
+    return { eligible: false, reason: "unknown_min_order_size" };
+  }
+  const minOrderSize = book.minOrderSize;
   const distribution = normalizeDistribution(
     input.policy.volumeDistribution,
     input.policy.numTiers,

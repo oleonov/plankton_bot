@@ -142,7 +142,9 @@ function makePositionRepo(positions: Position[]): PositionRepository {
   };
 }
 
-function makeOrderRepo(orders: Order[]): OrderRepository {
+function makeOrderRepo(
+  orders: Order[],
+): OrderRepository & { updateMetadataBulk: NonNullable<OrderRepository["updateMetadataBulk"]> } {
   return {
     save: vi.fn(),
     findById: vi.fn((id) => orders.find((o) => o.orderId === id) ?? null),
@@ -153,11 +155,47 @@ function makeOrderRepo(orders: Order[]): OrderRepository {
     ),
     findByTokenId: vi.fn((id) => orders.filter((o) => o.tokenId === id)),
     updateStatus: vi.fn(),
+    updateMetadata: vi.fn((id, metadata) => {
+      const index = orders.findIndex((o) => o.orderId === id);
+      if (index < 0) throw new Error(`Order not found for metadata update: ${String(id)}`);
+      orders[index] = { ...orders[index]!, metadata, updatedAt: new Date(NOW).toISOString() };
+      return orders[index];
+    }),
+    updateMetadataBulk: vi.fn(
+      (
+        updates: readonly {
+          orderId: Order["orderId"];
+          metadata: Readonly<Record<string, unknown>>;
+        }[],
+      ) => {
+        for (const update of updates) {
+          if (!orders.some((o) => o.orderId === update.orderId)) {
+            throw new Error(`Order not found for metadata update: ${String(update.orderId)}`);
+          }
+        }
+        return updates.map((update) => {
+          const index = orders.findIndex((o) => o.orderId === update.orderId);
+          orders[index] = {
+            ...orders[index]!,
+            metadata: update.metadata,
+            updatedAt: new Date(NOW).toISOString(),
+          };
+          return orders[index];
+        });
+      },
+    ),
     sumOpenBuyNotional: vi.fn(() => 0),
   };
 }
 
-function makeRiskEvents(): RiskEventRepository & {
+function makeRiskEvents(
+  orphans: Array<{
+    tokenId: string;
+    conditionId: string;
+    ladderId: string;
+    assumedAtIso: string;
+  }> = [],
+): RiskEventRepository & {
   inserts: Array<{ eventType: string; payload: Record<string, unknown> }>;
 } {
   const inserts: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
@@ -165,6 +203,7 @@ function makeRiskEvents(): RiskEventRepository & {
     inserts,
     insert: (event) => inserts.push(event),
     countSince: () => 0,
+    findOrphanS1Ownerships: () => orphans,
   };
 }
 
@@ -242,6 +281,15 @@ function readMetricValue(db: Database.Database, metricName: string): number {
   return row?.value ?? 0;
 }
 
+function readMetricValueByLabel(db: Database.Database, metricName: string, labels: string): number {
+  const row = db
+    .prepare(
+      "SELECT COALESCE(SUM(value), 0) AS value FROM runtime_metrics WHERE metric_name = ? AND labels = ?",
+    )
+    .get(metricName, labels) as { value: number } | undefined;
+  return row?.value ?? 0;
+}
+
 describe("S1LadderModule", () => {
   let metricsDb: Database.Database;
 
@@ -305,6 +353,51 @@ describe("S1LadderModule", () => {
     expect(new Set(placed.map((p) => p.command.clientOrderId)).size).toBe(4);
     expect(placed.every((p) => p.command.decisionRuleId === S1_LADDER_RULE_ID)).toBe(true);
     expect(riskEvents.inserts.some((e) => e.eventType === "s1_ownership_assumed")).toBe(true);
+    await module.stop();
+  });
+
+  it("records S1 eligibility skip counters with reason labels", async () => {
+    const bus = new InProcessEventBus();
+    const metrics = new RuntimeMetricWriter(metricsDb, () => new Date(NOW));
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo: makeOrderRepo([]),
+      policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+      runtimeMetrics: metrics,
+      riskEventRepo: makeRiskEvents(),
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market()],
+      booksByToken: new Map([[String(tokenId), book({ minOrderSize: null })]]),
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market()],
+      booksByToken: new Map([[String(tokenId), book({ bestBid: null, bids: [] })]]),
+      timestamp: NOW + 1,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+    metrics.flushCounters(new Date(NOW).toISOString());
+
+    expect(
+      readMetricValueByLabel(
+        metricsDb,
+        "track_s1_skipped_below_threshold",
+        "unknown_min_order_size",
+      ),
+    ).toBe(1);
+    expect(readMetricValueByLabel(metricsDb, "track_s1_skipped_dead_market", "dead_market")).toBe(
+      1,
+    );
     await module.stop();
   });
 
@@ -480,6 +573,87 @@ describe("S1LadderModule", () => {
     await module.stop();
   });
 
+  it("persists handoffStartedAt to every active S1 order before publishing cancels", async () => {
+    const bus = new InProcessEventBus();
+    const cancels: Array<{ command: { orderId: string; reason: string } }> = [];
+    bus.subscribe("CancelOrderRequested", async (event) => {
+      cancels.push(event);
+    });
+    const orders = [
+      order({ orderId: createOrderId("s1-persist-a") }),
+      order({ orderId: createOrderId("s1-persist-b") }),
+    ];
+    const orderRepo = makeOrderRepo(orders);
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo,
+      policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+      runtimeMetrics: new RuntimeMetricWriter(metricsDb, () => new Date(NOW)),
+      riskEventRepo: makeRiskEvents(),
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ endDate: "2026-06-12T10:30:00.000Z" })],
+      booksByToken: new Map([[String(tokenId), book()]]),
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+
+    expect(orderRepo.updateMetadataBulk).toHaveBeenCalledTimes(1);
+    expect(
+      orders.map((o) => (o.metadata?.s1 as { handoffStartedAt?: string }).handoffStartedAt),
+    ).toEqual(["2026-06-12T10:00:00.000Z", "2026-06-12T10:00:00.000Z"]);
+    expect(cancels).toHaveLength(2);
+    await module.stop();
+  });
+
+  it("does not enter handoff in memory when handoff metadata bulk update fails", async () => {
+    const bus = new InProcessEventBus();
+    const cancels: Array<unknown> = [];
+    bus.subscribe("CancelOrderRequested", async (event) => {
+      cancels.push(event);
+    });
+    const orders = [order({ orderId: createOrderId("s1-handoff-fail") })];
+    const orderRepo = {
+      ...makeOrderRepo(orders),
+      updateMetadataBulk: vi.fn(() => {
+        throw new Error("metadata write failed");
+      }),
+    };
+    const riskEvents = makeRiskEvents();
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo,
+      policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+      runtimeMetrics: new RuntimeMetricWriter(metricsDb, () => new Date(NOW)),
+      riskEventRepo: riskEvents,
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ endDate: "2026-06-12T10:30:00.000Z" })],
+      booksByToken: new Map([[String(tokenId), book()]]),
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+
+    expect(cancels).toHaveLength(0);
+    expect(riskEvents.inserts.some((e) => e.eventType === "s1_handoff_to_qd")).toBe(false);
+    expect(module.getSnapshot(tokenId)?.reason).toBe("active_ladder");
+    await module.stop();
+  });
+
   it("releases ownership after terminal S1 order cancellation", async () => {
     const bus = new InProcessEventBus();
     const riskEvents = makeRiskEvents();
@@ -564,6 +738,208 @@ describe("S1LadderModule", () => {
 
     expect(module.isS1OwnedToken(tokenId)).toBe(false);
     expect(readMetricValue(metricsDb, "track_s1_ladder_completed")).toBe(1);
+    await module.stop();
+  });
+
+  it("releases every orphan S1 ownership on startup when no live ladder orders exist", async () => {
+    const bus = new InProcessEventBus();
+    const metrics = new RuntimeMetricWriter(metricsDb, () => new Date(NOW));
+    const riskEvents = makeRiskEvents(
+      Array.from({ length: 7 }, (_, index) => ({
+        tokenId: `phantom-token-${index}`,
+        conditionId: `phantom-condition-${index}`,
+        ladderId: `phantom-ladder-${index}`,
+        assumedAtIso: new Date(NOW - 600_000 - index).toISOString(),
+      })),
+    );
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([]),
+      orderRepo: makeOrderRepo([]),
+      policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+      runtimeMetrics: metrics,
+      riskEventRepo: riskEvents,
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+    metrics.flushCounters(new Date(NOW).toISOString());
+
+    expect(
+      riskEvents.inserts.filter(
+        (event) =>
+          event.eventType === "s1_ownership_released" &&
+          event.payload.reason === "phantom_release_recovery",
+      ),
+    ).toHaveLength(7);
+    expect(readMetricValue(metricsDb, "track_s1_ownership_released_phantom")).toBe(7);
+    await module.stop();
+  });
+
+  it("restores orphan ownership instead of releasing when live S1 orders still exist", async () => {
+    const bus = new InProcessEventBus();
+    const riskEvents = makeRiskEvents([
+      {
+        tokenId: String(tokenId),
+        conditionId: String(conditionId),
+        ladderId: "ladder-live-orphan",
+        assumedAtIso: new Date(NOW - 600_000).toISOString(),
+      },
+    ]);
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo: makeOrderRepo([
+        order({
+          orderId: createOrderId("s1-live-orphan"),
+          metadata: { s1: { ladderId: "ladder-live-orphan", tierIndex: 0 } },
+        }),
+      ]),
+      policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+      runtimeMetrics: new RuntimeMetricWriter(metricsDb, () => new Date(NOW)),
+      riskEventRepo: riskEvents,
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+
+    expect(module.isS1OwnedToken(tokenId)).toBe(true);
+    expect(
+      riskEvents.inserts.some((event) => event.payload.reason === "phantom_release_recovery"),
+    ).toBe(false);
+    await module.stop();
+  });
+
+  it("does not release a recovered phantom while placement is in flight", async () => {
+    const bus = new InProcessEventBus();
+    const riskEvents = makeRiskEvents([
+      {
+        tokenId: String(tokenId),
+        conditionId: String(conditionId),
+        ladderId: "ladder-in-flight",
+        assumedAtIso: new Date(NOW - 600_000).toISOString(),
+      },
+    ]);
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([]),
+      orderRepo: makeOrderRepo([]),
+      policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+      runtimeMetrics: new RuntimeMetricWriter(metricsDb, () => new Date(NOW)),
+      riskEventRepo: riskEvents,
+      log: silentLog,
+      now: () => NOW,
+    });
+    (
+      module as unknown as { activePlacements: Map<string, { expiresAtMs: number }> }
+    ).activePlacements.set(String(tokenId), { expiresAtMs: NOW + 60_000 });
+
+    await module.start();
+
+    expect(
+      riskEvents.inserts.some((event) => event.payload.reason === "phantom_release_recovery"),
+    ).toBe(false);
+    await module.stop();
+  });
+
+  it("runtime detector keeps recent phantom ownership before timeout and releases it after timeout", async () => {
+    const bus = new InProcessEventBus();
+    const orders = [order({ orderId: createOrderId("s1-runtime-phantom") })];
+    const metrics = new RuntimeMetricWriter(metricsDb, () => new Date(NOW));
+    const riskEvents = makeRiskEvents();
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo: makeOrderRepo(orders),
+      policy: () => ({
+        ...DEFAULT_EXECUTION_POLICY.trackS1,
+        enabled: true,
+        phantomOwnershipReleaseSeconds: 300,
+      }),
+      runtimeMetrics: metrics,
+      riskEventRepo: riskEvents,
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+    orders[0] = { ...orders[0]!, status: "cancelled" };
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market()],
+      booksByToken: new Map([[String(tokenId), book()]]),
+      timestamp: NOW + 200_000,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+    expect(module.isS1OwnedToken(tokenId)).toBe(true);
+
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market()],
+      booksByToken: new Map([[String(tokenId), book()]]),
+      timestamp: NOW + 400_000,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+    metrics.flushCounters(new Date(NOW).toISOString());
+
+    expect(module.isS1OwnedToken(tokenId)).toBe(false);
+    expect(riskEvents.inserts.some((event) => event.payload.reason === "phantom_release")).toBe(
+      true,
+    );
+    expect(readMetricValue(metricsDb, "track_s1_ownership_released_phantom")).toBe(1);
+    await module.stop();
+  });
+
+  it("runtime detector does not release handoff or active-placement ownership as phantom", async () => {
+    const bus = new InProcessEventBus();
+    const handoffOrders = [
+      order({
+        orderId: createOrderId("s1-runtime-handoff"),
+        metadata: {
+          s1: {
+            ladderId: "ladder-handoff",
+            tierIndex: 0,
+            handoffStartedAt: new Date(NOW - 60_000).toISOString(),
+          },
+        },
+      }),
+    ];
+    const riskEvents = makeRiskEvents();
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo: makeOrderRepo(handoffOrders),
+      policy: () => ({
+        ...DEFAULT_EXECUTION_POLICY.trackS1,
+        enabled: true,
+        handoffTimeoutSeconds: 1_000,
+        phantomOwnershipReleaseSeconds: 300,
+      }),
+      runtimeMetrics: new RuntimeMetricWriter(metricsDb, () => new Date(NOW)),
+      riskEventRepo: riskEvents,
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+    handoffOrders[0] = { ...handoffOrders[0]!, status: "cancelled" };
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market()],
+      booksByToken: new Map([[String(tokenId), book()]]),
+      timestamp: NOW + 400_000,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+
+    expect(module.isS1OwnedToken(tokenId)).toBe(true);
+    expect(riskEvents.inserts.some((event) => event.payload.reason === "phantom_release")).toBe(
+      false,
+    );
     await module.stop();
   });
 
@@ -652,6 +1028,108 @@ describe("S1LadderModule", () => {
 
     expect(cancels).toHaveLength(0);
     expect(module.isS1OwnedToken(tokenId)).toBe(true);
+    await module.stop();
+  });
+
+  it("recovers canonical handoffStartedAt by ascending order id, not findOpen order", async () => {
+    const bus = new InProcessEventBus();
+    const cancels: Array<unknown> = [];
+    bus.subscribe("CancelOrderRequested", async (event) => {
+      cancels.push(event);
+    });
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo: makeOrderRepo([
+        order({
+          orderId: createOrderId("s1-recover-z"),
+          metadata: {
+            s1: {
+              ladderId: "ladder-recover",
+              tierIndex: 1,
+              handoffStartedAt: new Date(NOW - 301_000).toISOString(),
+            },
+          },
+        }),
+        order({
+          orderId: createOrderId("s1-recover-a"),
+          metadata: {
+            s1: {
+              ladderId: "ladder-recover",
+              tierIndex: 0,
+              handoffStartedAt: new Date(NOW - 60_000).toISOString(),
+            },
+          },
+        }),
+      ]),
+      policy: () => ({
+        ...DEFAULT_EXECUTION_POLICY.trackS1,
+        enabled: true,
+        handoffTimeoutSeconds: 300,
+      }),
+      runtimeMetrics: new RuntimeMetricWriter(metricsDb, () => new Date(NOW)),
+      riskEventRepo: makeRiskEvents(),
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ endDate: "2026-06-12T10:30:00.000Z" })],
+      booksByToken: new Map([[String(tokenId), book()]]),
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+
+    expect(cancels).toHaveLength(0);
+    expect(module.getSnapshot(tokenId)?.reason).toBe("handoff");
+    await module.stop();
+  });
+
+  it("warns when recovered S1 orders disagree on handoffStartedAt", async () => {
+    const bus = new InProcessEventBus();
+    const warn = vi.fn();
+    const log = { ...silentLog, warn, child: () => ({ ...silentLog, warn }) } as unknown as Logger;
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo: makeOrderRepo([
+        order({
+          orderId: createOrderId("s1-conflict-a"),
+          metadata: {
+            s1: {
+              ladderId: "ladder-conflict",
+              tierIndex: 0,
+              handoffStartedAt: new Date(NOW - 60_000).toISOString(),
+            },
+          },
+        }),
+        order({
+          orderId: createOrderId("s1-conflict-b"),
+          metadata: {
+            s1: {
+              ladderId: "ladder-conflict",
+              tierIndex: 1,
+              handoffStartedAt: new Date(NOW - 120_000).toISOString(),
+            },
+          },
+        }),
+      ]),
+      policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+      runtimeMetrics: new RuntimeMetricWriter(metricsDb, () => new Date(NOW)),
+      riskEventRepo: makeRiskEvents(),
+      log,
+      now: () => NOW,
+    });
+
+    await module.start();
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: String(tokenId), orderCount: 2 }),
+      "Conflicting S1 handoffStartedAt metadata recovered",
+    );
     await module.stop();
   });
 

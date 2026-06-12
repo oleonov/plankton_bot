@@ -817,6 +817,7 @@ export interface TrackS1WalkingLadderPolicy {
   markupCeilings: TrackS1MarkupCeilingsPolicy;
   handoffTimeToResolutionSeconds: number;
   handoffTimeoutSeconds: number;
+  phantomOwnershipReleaseSeconds: number;
   maxOpenLadderTokens: number;
   s1MaxOrdersPerToken: number;
   maxLadderReplacementsPerHour: number;

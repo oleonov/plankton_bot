@@ -127,6 +127,107 @@ describe("SqliteOrderRepository", () => {
     });
   });
 
+  it("updates metadata by order_id and returns the persisted order", () => {
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("s1-meta-order"),
+        clientOrderId: "s1-meta-client" as ClientOrderId,
+        status: "open",
+        metadata: { s1: { ladderId: "ladder-1", handoffStartedAt: null } },
+      }),
+    );
+
+    const updated = repo.updateMetadata(createOrderId("s1-meta-order"), {
+      s1: {
+        ladderId: "ladder-1",
+        handoffStartedAt: "2026-06-12T10:30:00.000Z",
+      },
+    });
+
+    expect(updated.orderId).toBe("s1-meta-order");
+    expect(repo.findById(createOrderId("s1-meta-order"))?.metadata).toEqual({
+      s1: {
+        ladderId: "ladder-1",
+        handoffStartedAt: "2026-06-12T10:30:00.000Z",
+      },
+    });
+  });
+
+  it("throws when updateMetadata targets an unknown order_id", () => {
+    expect(() => repo.updateMetadata(createOrderId("missing-order"), { s1: {} })).toThrow(
+      /missing-order/,
+    );
+  });
+
+  it("updates metadata in one atomic bulk transaction", () => {
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("s1-bulk-a"),
+        clientOrderId: "s1-bulk-a-client" as ClientOrderId,
+        status: "open",
+        metadata: { s1: { ladderId: "ladder-1", tierIndex: 0, handoffStartedAt: null } },
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("s1-bulk-b"),
+        clientOrderId: "s1-bulk-b-client" as ClientOrderId,
+        status: "open",
+        metadata: { s1: { ladderId: "ladder-1", tierIndex: 1, handoffStartedAt: null } },
+      }),
+    );
+
+    repo.updateMetadataBulk([
+      {
+        orderId: createOrderId("s1-bulk-a"),
+        metadata: {
+          s1: { ladderId: "ladder-1", tierIndex: 0, handoffStartedAt: "2026-06-12T10:00:00Z" },
+        },
+      },
+      {
+        orderId: createOrderId("s1-bulk-b"),
+        metadata: {
+          s1: { ladderId: "ladder-1", tierIndex: 1, handoffStartedAt: "2026-06-12T10:00:00Z" },
+        },
+      },
+    ]);
+
+    expect(repo.findById(createOrderId("s1-bulk-a"))?.metadata).toMatchObject({
+      s1: { handoffStartedAt: "2026-06-12T10:00:00Z" },
+    });
+    expect(repo.findById(createOrderId("s1-bulk-b"))?.metadata).toMatchObject({
+      s1: { handoffStartedAt: "2026-06-12T10:00:00Z" },
+    });
+  });
+
+  it("rolls back bulk metadata updates when any order_id is missing", () => {
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("s1-bulk-kept"),
+        clientOrderId: "s1-bulk-kept-client" as ClientOrderId,
+        status: "open",
+        metadata: { s1: { ladderId: "ladder-1", handoffStartedAt: null } },
+      }),
+    );
+
+    expect(() =>
+      repo.updateMetadataBulk([
+        {
+          orderId: createOrderId("s1-bulk-kept"),
+          metadata: { s1: { ladderId: "ladder-1", handoffStartedAt: "bad-partial" } },
+        },
+        {
+          orderId: createOrderId("s1-bulk-missing"),
+          metadata: { s1: { ladderId: "ladder-1", handoffStartedAt: "bad-partial" } },
+        },
+      ]),
+    ).toThrow(/s1-bulk-missing/);
+
+    expect(repo.findById(createOrderId("s1-bulk-kept"))?.metadata).toEqual({
+      s1: { ladderId: "ladder-1", handoffStartedAt: null },
+    });
+  });
+
   it("findByClientOrderId works", () => {
     repo.save(makeOrder());
 
