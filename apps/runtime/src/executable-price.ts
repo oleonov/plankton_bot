@@ -134,7 +134,7 @@ function sanitizeExecutableQuote(price: number | null, tickSize: number): number
  * The `clampExecutablePrice` helper composes side-aware snap + bound clamp into
  * a single call so callers don't have to remember both parts.
  */
-function normalizeTickSize(tickSize: number): number {
+export function normalizeTickSize(tickSize: number): number {
   return Number.isFinite(tickSize) && tickSize > 0 && tickSize < 1 ? tickSize : DEFAULT_TICK_SIZE;
 }
 

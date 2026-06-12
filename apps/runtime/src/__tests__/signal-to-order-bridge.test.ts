@@ -1584,6 +1584,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     pricingOverrides?: Partial<ExecutionPricingPolicy>,
     opts: {
       orderRepo?: OrderRepository;
+      positionRepo?: PositionRepository;
       orderLifetime?: ConstructorParameters<typeof SignalToOrderBridge>[0]["orderLifetime"];
       runtimeMetrics?: ConstructorParameters<typeof SignalToOrderBridge>[0]["runtimeMetrics"];
       liveLiteGuard?: ConstructorParameters<typeof SignalToOrderBridge>[0]["liveLiteGuard"];
@@ -1607,6 +1608,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       liveLiteGuard: opts.liveLiteGuard ?? ({ getWalletMode: () => "eoa" } as never),
       policy: () => policy,
       ...(opts.orderRepo ? { orderRepo: opts.orderRepo } : {}),
+      ...(opts.positionRepo ? { positionRepo: opts.positionRepo } : {}),
       ...(opts.orderLifetime ? { orderLifetime: opts.orderLifetime } : {}),
       ...(opts.runtimeMetrics ? { runtimeMetrics: opts.runtimeMetrics } : {}),
     });
@@ -1617,7 +1619,13 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       diagnostics: Record<string, unknown>;
     }> = [];
     const placed: Array<{
-      command: { price: number; size: number; side: "buy" | "sell"; postOnly?: boolean };
+      command: {
+        price: number;
+        size: number;
+        side: "buy" | "sell";
+        tickSize: number;
+        postOnly?: boolean;
+      };
     }> = [];
     bus.subscribe("SignalConversionSkipped", async (p) => {
       skipped.push(p);
@@ -1691,6 +1699,206 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.185);
+  });
+
+  it("floors D4 SELL commands to the 0.01 effective tick and snaps with SELL ceil", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      runtimeMetrics: metrics as never,
+    });
+    const market = makeMarket({
+      bestBid: 0.2,
+      bestAsk: 0.218,
+      midPrice: 0.209,
+      spread: 0.018,
+      tickSize: 0.001,
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.217,
+        reason: "repricing-exit",
+        decisionRuleId: "D4",
+      },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.22);
+    expect(placed[0]!.command.tickSize).toBe(0.01);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "d4_effective_tick_floor_applied_total",
+      1,
+      JSON.stringify({ side: "sell", from_tick_size: 0.001, to_tick_size: 0.01 }),
+    );
+  });
+
+  it("keeps Track P cap on the same D4 effective tick grid", async () => {
+    const positionRepo: PositionRepository = {
+      findByTokenId: vi.fn(() => ({ avgEntryPrice: 0.07 }) as never),
+    } as never;
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, { positionRepo });
+    const market = makeMarket({
+      bestBid: 0.2,
+      bestAsk: 0.5,
+      midPrice: 0.35,
+      spread: 0.3,
+      tickSize: 0.001,
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.09,
+        reason: "repricing-exit",
+        decisionRuleId: "D4",
+      },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.09);
+    expect(placed[0]!.command.tickSize).toBe(0.01);
+  });
+
+  it.each(["D5", "D7", "D8_PROFIT_RATIO", "D9_LOSS_EXIT"])(
+    "does not floor non-D4 %s SELL commands on 0.001 markets",
+    async (decisionRuleId) => {
+      const { bus, placed, skipped } = makeBridgeWithPricing();
+      const market = makeMarket({
+        bestBid: 0.2,
+        bestAsk: 0.218,
+        midPrice: 0.209,
+        spread: 0.018,
+        tickSize: 0.001,
+      });
+
+      await bus.publish("SignalApproved", {
+        signal: {
+          ...makeSignal(),
+          side: "sell",
+          suggestedPrice: 0.217,
+          reason: "repricing-exit",
+          decisionRuleId,
+        },
+        market,
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+
+      expect(skipped).toHaveLength(0);
+      expect(placed).toHaveLength(1);
+      expect(placed[0]!.command.price).toBe(0.217);
+      expect(placed[0]!.command.tickSize).toBe(0.001);
+    },
+  );
+
+  it.each([
+    ["null", null as unknown as number],
+    ["zero", 0],
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+  ])(
+    "uses the 0.01 D4 effective tick fallback when market tickSize is %s",
+    async (_label, tickSize) => {
+      const { bus, placed, skipped } = makeBridgeWithPricing();
+      const market = makeMarket({
+        bestBid: 0.2,
+        bestAsk: 0.218,
+        midPrice: 0.209,
+        spread: 0.018,
+        tickSize,
+      });
+
+      await bus.publish("SignalApproved", {
+        signal: {
+          ...makeSignal(),
+          side: "sell",
+          suggestedPrice: 0.217,
+          reason: "repricing-exit",
+          decisionRuleId: "D4",
+        },
+        market,
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+
+      expect(skipped).toHaveLength(0);
+      expect(placed).toHaveLength(1);
+      expect(placed[0]!.command.price).toBe(0.21);
+      expect(placed[0]!.command.tickSize).toBe(0.01);
+    },
+  );
+
+  it("preserves D4 prices already on the 0.01 boundary", async () => {
+    const { bus, placed, skipped } = makeBridgeWithPricing();
+    const market = makeMarket({
+      bestBid: 0.2,
+      bestAsk: 0.21,
+      midPrice: 0.205,
+      spread: 0.01,
+      tickSize: 0.001,
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.21,
+        reason: "repricing-exit",
+        decisionRuleId: "D4",
+      },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.21);
+    expect(placed[0]!.command.tickSize).toBe(0.01);
+  });
+
+  it("fails closed when D4 taker SELL would need to ceil above bestBid", async () => {
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+      },
+    });
+    const market = makeMarket({
+      bestBid: 0.214,
+      bestAsk: 0.215,
+      midPrice: 0.2145,
+      spread: 0.001,
+      tickSize: 0.001,
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.214,
+        reason: "repricing-exit",
+        decisionRuleId: "D4",
+      },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toContain("execution-price-invalid");
+    expect(skipped[0]!.diagnostics["validationReason"]).toBe("price-off-tick-grid");
   });
 
   it("falls back to bestAsk when a one-tick spread has no inside SELL price", async () => {

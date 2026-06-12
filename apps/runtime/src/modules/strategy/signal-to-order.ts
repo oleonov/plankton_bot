@@ -49,7 +49,9 @@ import {
   classifyNotionalBucket,
   classifyRoundLevel,
   computePricingDeltaTicks,
+  clampExecutablePrice,
   floorToTick,
+  normalizeTickSize,
   planktonAlignedMarkupCap,
   resolveBidAnchoredSellPrice,
   resolveBoundedMidpointPrice,
@@ -74,6 +76,8 @@ import type { SignalPathTelemetry } from "./signal-path-telemetry.js";
 const BRIDGE_WS_BOOK_WAIT_MS = 25;
 const MIN_SIZE_EPSILON = 1e-9;
 const MIN_NOTIONAL_EPSILON = 1e-9;
+const D4_RULE_ID = "D4";
+const D4_MIN_EFFECTIVE_TICK_SIZE = 0.01;
 
 // ADR-013 defaults exposed for callers that don't thread the policy provider
 // (tests, scenario runner). Runtime always reads the live policy via
@@ -320,7 +324,7 @@ export class SignalToOrderBridge {
       // F2: shadow telemetry measures the raw (pre-cap) anchor; the cap only
       // governs the price that is actually placed.
       const sellPricingShadow = this.computeSellPricingShadow(signal, rawExecutionTerms, policy);
-      const executionTerms = this.applySellPriceCap(rawExecutionTerms, signal, market);
+      const executionTerms = this.applySellPriceCap(rawExecutionTerms, signal);
 
       if (executionTerms.kind === "unavailable") {
         this.log.warn(
@@ -752,7 +756,7 @@ export class SignalToOrderBridge {
         price: executionTerms.price,
         ...(executionTerms.postOnly !== undefined ? { postOnly: executionTerms.postOnly } : {}),
         orderType: "GTC",
-        tickSize: market.tickSize,
+        tickSize: executionTerms.tickSize,
         negRisk: market.negRisk,
         sequenceInTick: signal.sequenceInTick,
         signalReason: signal.reason,
@@ -1120,11 +1124,10 @@ export class SignalToOrderBridge {
   private applySellPriceCap(
     resolution: ExecutionTermsResolution,
     signal: RuntimeEventMap["SignalApproved"]["signal"],
-    market: NormalizedMarket,
   ): ExecutionTermsResolution {
     if (signal.side !== "sell" || resolution.kind !== "ok") return resolution;
     const avgEntry = this.resolveSellShadowAvgEntry(signal).value;
-    const capped = capSellPriceToPlanktonTier(resolution.price, avgEntry, market.tickSize);
+    const capped = capSellPriceToPlanktonTier(resolution.price, avgEntry, resolution.tickSize);
     if (capped === resolution.price) return resolution;
     return { ...resolution, price: capped };
   }
@@ -1144,6 +1147,8 @@ export class SignalToOrderBridge {
   ): ExecutionTermsResolution {
     const isRelayer = this.deps.liveLiteGuard?.getWalletMode() === "relayer";
     const pricing = policy.pricing;
+    const effectiveTick = resolveEffectiveOrderTickSize(signal, market);
+    const pricingTickSize = resolvePricingTickSize(signal, market, effectiveTick.tickSize);
     const ladderTargetPrice =
       signal.side === "buy" && signal.ladderTargetPrice != null ? signal.ladderTargetPrice : null;
 
@@ -1158,18 +1163,18 @@ export class SignalToOrderBridge {
       if (
         !Number.isFinite(ladderTargetPrice) ||
         ladderTargetPrice <= 0 ||
-        !Number.isFinite(market.tickSize)
+        !Number.isFinite(pricingTickSize)
       ) {
         return { kind: "unavailable" };
       }
-      const validation = validateExecutablePrice(ladderTargetPrice, market.tickSize);
+      const validation = validateExecutablePrice(ladderTargetPrice, pricingTickSize);
       if (!validation.ok) {
         this.log.warn(
           {
             signalId: signal.signalId,
             tokenId: String(signal.tokenId),
             ladderTargetPrice,
-            tickSize: market.tickSize,
+            tickSize: pricingTickSize,
             validationReason: validation.reason,
           },
           "ladder target price failed executable-price validation",
@@ -1183,15 +1188,27 @@ export class SignalToOrderBridge {
           validationReason: validation.reason,
         };
       }
-      return isRelayer
-        ? { kind: "ok", price: ladderTargetPrice, postOnly: true, pricedMode: "ladder" }
-        : { kind: "ok", price: ladderTargetPrice, pricedMode: "ladder" };
+      const ok: ExecutionTermsResolution = isRelayer
+        ? {
+            kind: "ok",
+            price: ladderTargetPrice,
+            tickSize: effectiveTick.tickSize,
+            postOnly: true,
+            pricedMode: "ladder",
+          }
+        : {
+            kind: "ok",
+            price: ladderTargetPrice,
+            tickSize: effectiveTick.tickSize,
+            pricedMode: "ladder",
+          };
+      return normalizeExecutionTerms(ok, signal, effectiveTick);
     }
 
     // Tight-spread taker mode intentionally wins over bounded-midpoint: both
     // price at/near the opposite top of book, but this path explicitly disables
     // postOnly to copy R51's observed taker fills.
-    const takerTerms = this.resolveOpportunisticTakerTerms(signal, market, policy);
+    const takerTerms = this.resolveOpportunisticTakerTerms(signal, market, policy, pricingTickSize);
     if (takerTerms) return takerTerms;
 
     if (pricing.mode === "bounded-midpoint") {
@@ -1200,7 +1217,7 @@ export class SignalToOrderBridge {
       const outcome = resolveBoundedMidpointPrice({
         bestBid: market.bestBid,
         bestAsk: market.bestAsk,
-        tickSize: market.tickSize,
+        tickSize: pricingTickSize,
         side: signal.side,
         maxSpreadTicks,
         maxImprovementTicks: pricing.maxImprovementTicks,
@@ -1213,7 +1230,7 @@ export class SignalToOrderBridge {
           : { kind: "skip-one-sided", diagnostics: outcome.diagnostics };
       }
       if (outcome.kind === "invalid") {
-        const validation = validateExecutablePrice(outcome.price, market.tickSize);
+        const validation = validateExecutablePrice(outcome.price, pricingTickSize);
         return {
           kind: "invalid",
           price: outcome.price,
@@ -1223,10 +1240,11 @@ export class SignalToOrderBridge {
           validationReason: outcome.reason,
         };
       }
-      return isRelayer
+      const ok: ExecutionTermsResolution = isRelayer
         ? {
             kind: "ok",
             price: outcome.price,
+            tickSize: effectiveTick.tickSize,
             postOnly: true,
             pricedMode: "bounded-midpoint",
             pricingDiagnostics: outcome.diagnostics,
@@ -1234,15 +1252,17 @@ export class SignalToOrderBridge {
         : {
             kind: "ok",
             price: outcome.price,
+            tickSize: effectiveTick.tickSize,
             pricedMode: "bounded-midpoint",
             pricingDiagnostics: outcome.diagnostics,
           };
+      return normalizeExecutionTerms(ok, signal, effectiveTick);
     }
 
-    const priced = this.resolveEdgeExecutionPrice(signal, market, policy);
+    const priced = this.resolveEdgeExecutionPrice(signal, market, policy, pricingTickSize);
     const price = priced?.price ?? null;
     if (price == null || !Number.isFinite(price) || price <= 0) return { kind: "unavailable" };
-    const validation = validateExecutablePrice(price, market.tickSize);
+    const validation = validateExecutablePrice(price, pricingTickSize);
     if (!validation.ok) {
       return {
         kind: "invalid",
@@ -1262,8 +1282,14 @@ export class SignalToOrderBridge {
       ? this.computePricingShadow(signal, market, policy)
       : undefined;
     const ok: ExecutionTermsResolution = isRelayer
-      ? { kind: "ok", price, postOnly: true, pricedMode: priced?.mode ?? "edge" }
-      : { kind: "ok", price, pricedMode: priced?.mode ?? "edge" };
+      ? {
+          kind: "ok",
+          price,
+          tickSize: effectiveTick.tickSize,
+          postOnly: true,
+          pricedMode: priced?.mode ?? "edge",
+        }
+      : { kind: "ok", price, tickSize: effectiveTick.tickSize, pricedMode: priced?.mode ?? "edge" };
     if (priced?.anchorTicksUsed !== undefined) {
       ok.anchorTicksUsed = priced.anchorTicksUsed;
     }
@@ -1273,13 +1299,14 @@ export class SignalToOrderBridge {
     if (pricingShadow && ok.kind === "ok") {
       ok.pricingShadow = pricingShadow;
     }
-    return ok;
+    return normalizeExecutionTerms(ok, signal, effectiveTick);
   }
 
   private resolveEdgeExecutionPrice(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
     policy: ExecutionPolicy,
+    pricingTickSize: number,
   ): {
     price: number;
     mode: OrderPricedMode;
@@ -1290,7 +1317,7 @@ export class SignalToOrderBridge {
       const midpointPrice = resolveMidpointAnchoredSellPriceWithMode(
         market.bestBid,
         market.bestAsk,
-        market.tickSize,
+        pricingTickSize,
         policy.exitMidpointAnchorTicks,
       );
       if (midpointPrice != null) {
@@ -1307,8 +1334,8 @@ export class SignalToOrderBridge {
       if (
         market.bestBid == null ||
         !Number.isFinite(market.bestBid) ||
-        !Number.isFinite(market.tickSize) ||
-        market.tickSize <= 0
+        !Number.isFinite(pricingTickSize) ||
+        pricingTickSize <= 0
       ) {
         return null;
       }
@@ -1316,7 +1343,7 @@ export class SignalToOrderBridge {
         price: resolveBidAnchoredSellPrice(
           market.bestBid,
           market.bestAsk,
-          market.tickSize,
+          pricingTickSize,
           policy.exitBidAnchorTicks,
         ),
         mode: "bid-anchored",
@@ -1331,6 +1358,7 @@ export class SignalToOrderBridge {
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
     policy: ExecutionPolicy,
+    pricingTickSize: number,
   ): ExecutionTermsResolution | null {
     const taker = policy.opportunisticTaker;
     if (!taker) return null;
@@ -1340,14 +1368,14 @@ export class SignalToOrderBridge {
       market.bestAsk == null ||
       !Number.isFinite(market.bestBid) ||
       !Number.isFinite(market.bestAsk) ||
-      !Number.isFinite(market.tickSize) ||
-      market.tickSize <= 0
+      !Number.isFinite(pricingTickSize) ||
+      pricingTickSize <= 0
     ) {
       return null;
     }
     const spread = market.bestAsk - market.bestBid;
     if (!Number.isFinite(spread) || spread < 0) return null;
-    const spreadTicks = Math.round(spread / market.tickSize);
+    const spreadTicks = Math.round(spread / pricingTickSize);
     if (spreadTicks > taker.maxSpreadTicks) return null;
 
     const price = signal.side === "buy" ? market.bestAsk : market.bestBid;
@@ -1357,7 +1385,7 @@ export class SignalToOrderBridge {
       return null;
     }
 
-    const validation = validateExecutablePrice(price, market.tickSize);
+    const validation = validateExecutablePrice(price, pricingTickSize);
     if (!validation.ok) {
       return {
         kind: "invalid",
@@ -1368,7 +1396,19 @@ export class SignalToOrderBridge {
         validationReason: validation.reason,
       };
     }
-    return { kind: "ok", price, postOnly: false, pricedMode: "taker", spreadTicks };
+    const effectiveTick = resolveEffectiveOrderTickSize(signal, market);
+    return normalizeExecutionTerms(
+      {
+        kind: "ok",
+        price,
+        tickSize: effectiveTick.tickSize,
+        postOnly: false,
+        pricedMode: "taker",
+        spreadTicks,
+      },
+      signal,
+      effectiveTick,
+    );
   }
 
   private resolveTakerMinSizeBlock(
@@ -1519,6 +1559,17 @@ export class SignalToOrderBridge {
           JSON.stringify({
             side: signal.side,
             anchor_ticks_used: executionTerms.anchorTicksUsed ?? null,
+          }),
+        );
+      }
+      if (executionTerms.d4EffectiveTickFloor != null) {
+        this.deps.runtimeMetrics?.writeCounter(
+          "d4_effective_tick_floor_applied_total",
+          1,
+          JSON.stringify({
+            side: signal.side,
+            from_tick_size: executionTerms.d4EffectiveTickFloor.fromTickSize,
+            to_tick_size: executionTerms.d4EffectiveTickFloor.toTickSize,
           }),
         );
       }
@@ -1698,6 +1749,94 @@ export function capSellPriceToPlanktonTier(
   return cappedTick;
 }
 
+interface EffectiveOrderTickSize {
+  readonly tickSize: number;
+  readonly fromTickSize: number;
+  readonly floorApplied: boolean;
+}
+
+function resolveEffectiveOrderTickSize(
+  signal: RuntimeEventMap["SignalApproved"]["signal"],
+  market: NormalizedMarket,
+): EffectiveOrderTickSize {
+  const rawTickSize = market.tickSize;
+  if (signal.decisionRuleId !== D4_RULE_ID) {
+    return { tickSize: rawTickSize, fromTickSize: rawTickSize, floorApplied: false };
+  }
+
+  const normalizedTickSize = normalizeTickSize(rawTickSize);
+  const tickSize = Math.max(normalizedTickSize, D4_MIN_EFFECTIVE_TICK_SIZE);
+  return {
+    tickSize,
+    fromTickSize: rawTickSize,
+    floorApplied: tickSize !== rawTickSize,
+  };
+}
+
+function resolvePricingTickSize(
+  signal: RuntimeEventMap["SignalApproved"]["signal"],
+  market: NormalizedMarket,
+  effectiveTickSize: number,
+): number {
+  if (
+    signal.decisionRuleId === D4_RULE_ID &&
+    (!Number.isFinite(market.tickSize) || market.tickSize <= 0 || market.tickSize >= 1)
+  ) {
+    return effectiveTickSize;
+  }
+  return market.tickSize;
+}
+
+function normalizeExecutionTerms(
+  resolution: ExecutionTermsResolution,
+  signal: RuntimeEventMap["SignalApproved"]["signal"],
+  effectiveTick: EffectiveOrderTickSize,
+): ExecutionTermsResolution {
+  if (resolution.kind !== "ok") return resolution;
+  if (signal.decisionRuleId !== D4_RULE_ID) {
+    return { ...resolution, tickSize: effectiveTick.tickSize };
+  }
+
+  const originalValidation = validateExecutablePrice(resolution.price, effectiveTick.tickSize);
+  if (resolution.pricedMode === "taker" && !originalValidation.ok) {
+    return {
+      kind: "invalid",
+      price: resolution.price,
+      tickSize: originalValidation.tickSize,
+      minPrice: originalValidation.minPrice,
+      maxPrice: originalValidation.maxPrice,
+      validationReason: originalValidation.reason,
+    };
+  }
+
+  const price = clampExecutablePrice(resolution.price, effectiveTick.tickSize, signal.side);
+  const validation = validateExecutablePrice(price, effectiveTick.tickSize);
+  if (!validation.ok) {
+    return {
+      kind: "invalid",
+      price,
+      tickSize: validation.tickSize,
+      minPrice: validation.minPrice,
+      maxPrice: validation.maxPrice,
+      validationReason: validation.reason,
+    };
+  }
+
+  return {
+    ...resolution,
+    price,
+    tickSize: effectiveTick.tickSize,
+    ...(effectiveTick.floorApplied
+      ? {
+          d4EffectiveTickFloor: {
+            fromTickSize: effectiveTick.fromTickSize,
+            toTickSize: effectiveTick.tickSize,
+          },
+        }
+      : {}),
+  };
+}
+
 function resolveOrderSize(
   signal: RuntimeEventMap["SignalApproved"]["signal"],
   executionPrice: number,
@@ -1749,6 +1888,7 @@ type ExecutionTermsResolution =
   | {
       kind: "ok";
       price: number;
+      tickSize: number;
       postOnly?: boolean;
       pricedMode: OrderPricedMode;
       spreadTicks?: number;
@@ -1756,6 +1896,7 @@ type ExecutionTermsResolution =
       exitAnchorMode?: ExitAnchorMode;
       pricingDiagnostics?: BoundedMidpointDiagnostics;
       pricingShadow?: BoundedMidpointDiagnostics;
+      d4EffectiveTickFloor?: { fromTickSize: number; toTickSize: number };
     }
   | { kind: "unavailable" }
   | {
