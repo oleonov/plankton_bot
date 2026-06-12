@@ -10,6 +10,7 @@ import {
   type OrderRepository,
   type PositionRepository,
   type ProfileId,
+  type RiskEventRepository,
   type Signal,
 } from "@krabs/domain";
 import {
@@ -1588,6 +1589,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       orderLifetime?: ConstructorParameters<typeof SignalToOrderBridge>[0]["orderLifetime"];
       runtimeMetrics?: ConstructorParameters<typeof SignalToOrderBridge>[0]["runtimeMetrics"];
       liveLiteGuard?: ConstructorParameters<typeof SignalToOrderBridge>[0]["liveLiteGuard"];
+      riskEventRepo?: ConstructorParameters<typeof SignalToOrderBridge>[0]["riskEventRepo"];
       policyOverrides?: Partial<ExecutionPolicy>;
     } = {},
   ) {
@@ -1611,6 +1613,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       ...(opts.positionRepo ? { positionRepo: opts.positionRepo } : {}),
       ...(opts.orderLifetime ? { orderLifetime: opts.orderLifetime } : {}),
       ...(opts.runtimeMetrics ? { runtimeMetrics: opts.runtimeMetrics } : {}),
+      ...(opts.riskEventRepo ? { riskEventRepo: opts.riskEventRepo } : {}),
     });
     bridge.subscribe();
     const skipped: Array<{
@@ -1641,6 +1644,21 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       ...DEFAULT_EXECUTION_POLICY.opportunisticTaker,
       sides: ["buy", "sell"] as Array<"buy" | "sell">,
     };
+  }
+
+  function profitTakerPolicy(overrides?: Partial<ExecutionPolicy["takerAtProfit"]>) {
+    return {
+      ...DEFAULT_EXECUTION_POLICY.takerAtProfit,
+      enabled: true,
+      maxSpreadTicks: 6,
+      ...overrides,
+    };
+  }
+
+  function avgEntryRepo(avgEntryPrice: number | null): PositionRepository {
+    return {
+      findByTokenId: vi.fn(() => (avgEntryPrice == null ? null : ({ avgEntryPrice } as never))),
+    } as never;
   }
 
   it("default edge branch posts BUY at bestBid — ADR-006 D1 preserved", async () => {
@@ -2236,6 +2254,314 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.1);
+    expect(placed[0]!.command.postOnly).toBe(false);
+  });
+
+  it("uses taker at profit for a profitable SELL on a four-tick spread", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: avgEntryRepo(0.1),
+      runtimeMetrics: metrics as never,
+      riskEventRepo,
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+      },
+    });
+    const market = makeMarket({ bestBid: 0.103, bestAsk: 0.107, tickSize: 0.001 });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.12,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.103);
+    expect(placed[0]!.command.postOnly).toBe(false);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "taker_at_profit_activated_total",
+      1,
+      expect.stringContaining('"rule":"D8"'),
+    );
+    expect(riskEventRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "taker_at_profit_activated",
+        payload: expect.objectContaining({
+          tokenId: "tok-yes",
+          decisionRuleId: "D8",
+          avgEntryPrice: 0.1,
+          bestBid: 0.103,
+          minGrossExitRatio: 1.03,
+        }),
+      }),
+    );
+  });
+
+  it("requires the configured 1.03 gross margin boundary for taker-at-profit", async () => {
+    const cases = [
+      { bestBid: 0.102, bestAsk: 0.106, expectedTaker: false },
+      { bestBid: 0.103, bestAsk: 0.107, expectedTaker: true },
+      { bestBid: 0.106, bestAsk: 0.11, expectedTaker: true },
+    ];
+
+    for (const testCase of cases) {
+      const { bus, placed } = makeBridgeWithPricing(undefined, {
+        positionRepo: avgEntryRepo(0.1),
+        policyOverrides: {
+          opportunisticTaker: allowSellTakerPolicy(),
+          takerAtProfit: profitTakerPolicy(),
+        },
+      });
+
+      await bus.publish("SignalApproved", {
+        signal: {
+          ...makeSignal(),
+          side: "sell",
+          suggestedPrice: 0.12,
+          reason: "repricing-exit",
+          decisionRuleId: "D8",
+        },
+        market: makeMarket({
+          bestBid: testCase.bestBid,
+          bestAsk: testCase.bestAsk,
+          tickSize: 0.001,
+        }),
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+
+      expect(placed).toHaveLength(1);
+      expect(placed[0]!.command.postOnly === false).toBe(testCase.expectedTaker);
+    }
+  });
+
+  it("keeps old behavior when taker-at-profit is disabled by default", async () => {
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: avgEntryRepo(0.1),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.12,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.106, bestAsk: 0.11, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.postOnly).not.toBe(false);
+  });
+
+  it("uses the existing taker min-size guard for taker-at-profit", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: avgEntryRepo(0.1),
+      runtimeMetrics: metrics as never,
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.12,
+        suggestedSize: 4.9,
+        suggestedSizeUsdc: 0.5,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({
+        bestBid: 0.106,
+        bestAsk: 0.11,
+        tickSize: 0.001,
+        minOrderSize: 5,
+      }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "taker_disabled_min_size_total",
+      1,
+      expect.stringContaining('"side":"sell"'),
+    );
+  });
+
+  it("suppresses any taker SELL below margin when taker-at-profit is enabled", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: avgEntryRepo(0.1),
+      runtimeMetrics: metrics as never,
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.102,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.102, bestAsk: 0.103, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toContain("taker-below-margin");
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "taker_at_profit_blocked_total",
+      1,
+      expect.stringContaining('"reason":"taker-below-margin"'),
+    );
+  });
+
+  it("suppresses taker-at-profit when Track P cap would lower final price below margin", async () => {
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: avgEntryRepo(0.96),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.99,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.99, bestAsk: 0.995, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toContain("taker-below-margin");
+  });
+
+  it.each([null, 0, NaN])(
+    "falls back safely when avg entry is invalid for taker-at-profit: %s",
+    async (avgEntry) => {
+      const { bus, placed } = makeBridgeWithPricing(undefined, {
+        positionRepo: avgEntryRepo(avgEntry),
+        policyOverrides: {
+          opportunisticTaker: allowSellTakerPolicy(),
+          takerAtProfit: profitTakerPolicy(),
+        },
+      });
+
+      await bus.publish("SignalApproved", {
+        signal: {
+          ...makeSignal(),
+          side: "sell",
+          suggestedPrice: 0.12,
+          reason: "repricing-exit",
+          decisionRuleId: "D8",
+        },
+        market: makeMarket({ bestBid: 0.106, bestAsk: 0.11, tickSize: 0.001 }),
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+
+      expect(placed).toHaveLength(1);
+      expect(placed[0]!.command.postOnly).not.toBe(false);
+    },
+  );
+
+  it("excludes dust/redeem-like SELL rules from the all-sell taker-at-profit scope", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: avgEntryRepo(0.1),
+      runtimeMetrics: metrics as never,
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.12,
+        reason: "repricing-exit",
+        decisionRuleId: "DUST_SWEEP",
+      },
+      market: makeMarket({ bestBid: 0.106, bestAsk: 0.11, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.postOnly).not.toBe(false);
+    expect(metrics.writeCounter).not.toHaveBeenCalledWith(
+      "taker_at_profit_activated_total",
+      expect.any(Number),
+      expect.any(String),
+    );
+  });
+
+  it("preserves D4 effective tick safety for taker-at-profit", async () => {
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: avgEntryRepo(0.2),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.21,
+        reason: "repricing-exit",
+        decisionRuleId: "D4",
+      },
+      market: makeMarket({
+        bestBid: 0.21,
+        bestAsk: 0.214,
+        tickSize: 0.001,
+      }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.21);
+    expect(placed[0]!.command.tickSize).toBe(0.01);
     expect(placed[0]!.command.postOnly).toBe(false);
   });
 

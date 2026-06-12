@@ -28,6 +28,7 @@ import type {
   PlaceOrderCommand,
   TokenId,
   Order,
+  RiskEventRepository,
   SellShadowAvgEntrySource,
 } from "@krabs/domain";
 import {
@@ -78,6 +79,7 @@ const MIN_SIZE_EPSILON = 1e-9;
 const MIN_NOTIONAL_EPSILON = 1e-9;
 const D4_RULE_ID = "D4";
 const D4_MIN_EFFECTIVE_TICK_SIZE = 0.01;
+const TAKER_BELOW_MARGIN_REASON = "taker-below-margin";
 
 // ADR-013 defaults exposed for callers that don't thread the policy provider
 // (tests, scenario runner). Runtime always reads the live policy via
@@ -113,6 +115,8 @@ export interface SignalToOrderBridgeDeps {
   profileId?: ProfileId;
   /** Runtime observability for pricing-mode and opportunistic-taker decisions. */
   runtimeMetrics?: RuntimeMetricWriter | undefined;
+  /** Per-event forensic audit for successful taker-at-profit activations. */
+  riskEventRepo?: RiskEventRepository | undefined;
   signalPathTelemetry?: SignalPathTelemetry | undefined;
   /**
    * Defense-in-depth BUY-side guard. Mirrors the check that
@@ -164,6 +168,10 @@ export class SignalToOrderBridge {
 
   private getPolicy(): ExecutionPolicy {
     return this.deps.policy ? this.deps.policy() : DEFAULT_EXECUTION_POLICY;
+  }
+
+  private getTakerAtProfitPolicy(policy: ExecutionPolicy): ExecutionPolicy["takerAtProfit"] {
+    return policy.takerAtProfit ?? DEFAULT_EXECUTION_POLICY.takerAtProfit;
   }
 
   private now(): number {
@@ -422,6 +430,54 @@ export class SignalToOrderBridge {
           canary,
           sellPricingShadow,
           skippedReason: reason,
+        });
+        return;
+      }
+
+      const takerMarginBlock = this.resolveTakerBelowMarginBlock(signal, executionTerms, policy);
+      if (takerMarginBlock) {
+        this.log.info(
+          {
+            signalId: signal.signalId,
+            tokenId: signal.tokenId,
+            price: executionTerms.price,
+            avgEntry: takerMarginBlock.avgEntry,
+            minExit: takerMarginBlock.minExit,
+            minGrossExitRatio: takerMarginBlock.minGrossExitRatio,
+            blockReason: takerMarginBlock.reason,
+            cacheStatus: pricing.cacheStatus,
+          },
+          "approved SELL skipped — taker price below configured profit margin",
+        );
+        this.recordTakerAtProfitMetric(signal, "blocked", TAKER_BELOW_MARGIN_REASON, {
+          avgEntry: takerMarginBlock.avgEntry,
+          price: executionTerms.price,
+          minExit: takerMarginBlock.minExit,
+          minGrossExitRatio: takerMarginBlock.minGrossExitRatio,
+          reason_detail: takerMarginBlock.reason,
+        });
+        await this.publishConversionSkipped(
+          signal,
+          "execution-terms",
+          [TAKER_BELOW_MARGIN_REASON],
+          {
+            cacheStatus: pricing.cacheStatus,
+            price: executionTerms.price,
+            avgEntry: takerMarginBlock.avgEntry,
+            minExit: takerMarginBlock.minExit,
+            minGrossExitRatio: takerMarginBlock.minGrossExitRatio,
+            reason: takerMarginBlock.reason,
+          },
+        );
+        this.writeObservation({
+          signal,
+          clientOrderId: null,
+          market,
+          policy,
+          executionTerms,
+          canary,
+          sellPricingShadow,
+          skippedReason: TAKER_BELOW_MARGIN_REASON,
         });
         return;
       }
@@ -791,6 +847,7 @@ export class SignalToOrderBridge {
         "signal converted to order command",
       );
       this.recordPricingMetrics(signal, executionTerms);
+      this.recordTakerAtProfitActivation(signal, market, executionTerms, policy);
 
       this.writeObservation({
         signal,
@@ -1205,6 +1262,15 @@ export class SignalToOrderBridge {
       return normalizeExecutionTerms(ok, signal, effectiveTick);
     }
 
+    const takerAtProfitTerms = this.resolveTakerAtProfitTerms(
+      signal,
+      market,
+      policy,
+      pricingTickSize,
+      effectiveTick,
+    );
+    if (takerAtProfitTerms) return takerAtProfitTerms;
+
     // Tight-spread taker mode intentionally wins over bounded-midpoint: both
     // price at/near the opposite top of book, but this path explicitly disables
     // postOnly to copy R51's observed taker fills.
@@ -1354,6 +1420,111 @@ export class SignalToOrderBridge {
     return price == null ? null : { price, mode: "edge" };
   }
 
+  private resolveTakerAtProfitTerms(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    policy: ExecutionPolicy,
+    pricingTickSize: number,
+    effectiveTick: EffectiveOrderTickSize,
+  ): ExecutionTermsResolution | null {
+    const cfg = this.getTakerAtProfitPolicy(policy);
+    if (!cfg.enabled || signal.side !== "sell") return null;
+    this.recordTakerAtProfitMetric(signal, "evaluated", null);
+
+    if (cfg.requireOpportunisticSellSide && !policy.opportunisticTaker.sides.includes("sell")) {
+      this.recordTakerAtProfitMetric(signal, "blocked", "sell_side_disabled");
+      return null;
+    }
+    if (!isTakerAtProfitRuleAllowed(signal, cfg.rules)) {
+      this.recordTakerAtProfitMetric(signal, "blocked", "rule_excluded");
+      return null;
+    }
+
+    const bestBid = finitePositiveOrNull(market.bestBid);
+    const bestAsk = finitePositiveOrNull(market.bestAsk);
+    const avgEntry = this.resolveSellShadowAvgEntry(signal).value;
+    if (bestBid == null || bestAsk == null || avgEntry == null) {
+      this.recordTakerAtProfitMetric(signal, "blocked", "missing_data", {
+        hasBestBid: bestBid != null,
+        hasBestAsk: bestAsk != null,
+        hasAvgEntry: avgEntry != null,
+      });
+      return null;
+    }
+    if (
+      !Number.isFinite(pricingTickSize) ||
+      pricingTickSize <= 0 ||
+      !Number.isFinite(bestAsk - bestBid) ||
+      bestAsk < bestBid
+    ) {
+      this.recordTakerAtProfitMetric(signal, "blocked", "invalid_book");
+      return null;
+    }
+
+    const spreadTicks = Math.round((bestAsk - bestBid) / pricingTickSize);
+    if (cfg.maxSpreadTicks !== null && spreadTicks > cfg.maxSpreadTicks) {
+      this.recordTakerAtProfitMetric(signal, "blocked", "spread_too_wide", {
+        spreadTicks,
+        maxSpreadTicks: cfg.maxSpreadTicks,
+      });
+      return null;
+    }
+
+    const minExit = avgEntry * cfg.minGrossExitRatio;
+    if (bestBid + 1e-9 < minExit) {
+      this.recordTakerAtProfitMetric(signal, "blocked", "below_profit_margin", {
+        avgEntry,
+        bestBid,
+        minExit,
+        minGrossExitRatio: cfg.minGrossExitRatio,
+      });
+      return null;
+    }
+
+    const minSizeBlock = this.resolveTakerMinSizeBlock(
+      signal,
+      market,
+      bestBid,
+      policy.opportunisticTaker,
+    );
+    if (minSizeBlock) {
+      this.recordTakerMinSizeDisabledMetric(signal, minSizeBlock);
+      this.recordTakerAtProfitMetric(signal, "blocked", "min_size");
+      return null;
+    }
+
+    const validation = validateExecutablePrice(bestBid, pricingTickSize);
+    if (!validation.ok) {
+      return {
+        kind: "invalid",
+        price: bestBid,
+        tickSize: validation.tickSize,
+        minPrice: validation.minPrice,
+        maxPrice: validation.maxPrice,
+        validationReason: validation.reason,
+      };
+    }
+
+    return normalizeExecutionTerms(
+      {
+        kind: "ok",
+        price: bestBid,
+        tickSize: effectiveTick.tickSize,
+        postOnly: false,
+        pricedMode: "taker",
+        spreadTicks,
+        takerAtProfit: {
+          avgEntry,
+          bestBid,
+          minGrossExitRatio: cfg.minGrossExitRatio,
+          spreadTicks,
+        },
+      },
+      signal,
+      effectiveTick,
+    );
+  }
+
   private resolveOpportunisticTakerTerms(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
@@ -1494,6 +1665,44 @@ export class SignalToOrderBridge {
     return outcome.diagnostics;
   }
 
+  private resolveTakerBelowMarginBlock(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    executionTerms: Extract<ExecutionTermsResolution, { kind: "ok" }>,
+    policy: ExecutionPolicy,
+  ): {
+    avgEntry: number | null;
+    minExit: number | null;
+    minGrossExitRatio: number;
+    reason: "avg_entry_unavailable" | "below_margin";
+  } | null {
+    const cfg = this.getTakerAtProfitPolicy(policy);
+    if (!cfg.enabled || signal.side !== "sell") return null;
+    if (executionTerms.pricedMode !== "taker") return null;
+
+    // Taker-at-profit owns its own safety gate. Q.F only blocks below-entry
+    // wide books in the planner; tight-book taker SELLs can still arrive here.
+    // Therefore this invariant intentionally covers every taker SELL while the
+    // feature flag is enabled, not only the new taker-at-profit resolver.
+    const avgEntry = this.resolveSellShadowAvgEntry(signal).value;
+    if (avgEntry == null) {
+      return {
+        avgEntry: null,
+        minExit: null,
+        minGrossExitRatio: cfg.minGrossExitRatio,
+        reason: "avg_entry_unavailable",
+      };
+    }
+
+    const minExit = avgEntry * cfg.minGrossExitRatio;
+    if (executionTerms.price + 1e-9 >= minExit) return null;
+    return {
+      avgEntry,
+      minExit,
+      minGrossExitRatio: cfg.minGrossExitRatio,
+      reason: "below_margin",
+    };
+  }
+
   private findSamePriceOpenSellOrder(
     tokenId: TokenId,
     side: "buy" | "sell",
@@ -1584,6 +1793,79 @@ export class SignalToOrderBridge {
       this.log.debug(
         { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
         "failed to record pricing metrics",
+      );
+    }
+  }
+
+  private recordTakerAtProfitMetric(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    mode: "evaluated" | "activated" | "blocked",
+    reason: string | null,
+    details: Record<string, unknown> = {},
+  ): void {
+    try {
+      const metricName =
+        mode === "evaluated"
+          ? "taker_at_profit_evaluated_total"
+          : mode === "activated"
+            ? "taker_at_profit_activated_total"
+            : "taker_at_profit_blocked_total";
+      this.deps.runtimeMetrics?.writeCounter(
+        metricName,
+        1,
+        JSON.stringify({
+          side: signal.side,
+          rule: signal.decisionRuleId ?? null,
+          reason,
+          ...details,
+        }),
+      );
+    } catch (err) {
+      this.log.debug(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
+        "failed to record taker-at-profit metric",
+      );
+    }
+  }
+
+  private recordTakerAtProfitActivation(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    executionTerms: Extract<ExecutionTermsResolution, { kind: "ok" }>,
+    policy: ExecutionPolicy,
+  ): void {
+    if (signal.side !== "sell" || executionTerms.takerAtProfit == null) return;
+    const cfg = this.getTakerAtProfitPolicy(policy);
+    const payload = {
+      tokenId: String(signal.tokenId),
+      conditionId: String(signal.conditionId),
+      slug: market.slug,
+      question: market.question,
+      decisionRuleId: signal.decisionRuleId ?? null,
+      signalReason: signal.reason,
+      price: executionTerms.price,
+      postOnly: executionTerms.postOnly ?? null,
+      avgEntryPrice: executionTerms.takerAtProfit.avgEntry,
+      bestBid: executionTerms.takerAtProfit.bestBid,
+      bestAsk: market.bestAsk ?? null,
+      spreadTicks: executionTerms.takerAtProfit.spreadTicks,
+      minGrossExitRatio: executionTerms.takerAtProfit.minGrossExitRatio,
+      maxSpreadTicks: cfg.maxSpreadTicks,
+      timestamp: new Date(this.now()).toISOString(),
+    };
+    this.recordTakerAtProfitMetric(signal, "activated", null, {
+      spread_ticks: executionTerms.takerAtProfit.spreadTicks,
+      min_gross_exit_ratio: executionTerms.takerAtProfit.minGrossExitRatio,
+    });
+    try {
+      this.deps.riskEventRepo?.insert({
+        eventType: "taker_at_profit_activated",
+        payload,
+      });
+    } catch (err) {
+      this.log.debug(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
+        "failed to write taker-at-profit risk event",
       );
     }
   }
@@ -1867,8 +2149,31 @@ function computePositiveRatio(numerator: number | null, denominator: number | nu
   return numerator / denominator;
 }
 
+function isTakerAtProfitRuleAllowed(
+  signal: RuntimeEventMap["SignalApproved"]["signal"],
+  rules: ExecutionPolicy["takerAtProfit"]["rules"],
+): boolean {
+  const reason = String(signal.reason);
+  const rule = signal.decisionRuleId ?? "";
+  if (isDustOrRedeemLike(reason) || isDustOrRedeemLike(rule)) return false;
+  if (rules === "all-sell") return true;
+  return rule.length > 0 && rules.includes(rule);
+}
+
+function isDustOrRedeemLike(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return normalized.includes("dust") || normalized.includes("redeem");
+}
+
 function isOpenOrderStatus(status: Order["status"]): boolean {
   return status === "pending" || status === "open" || status === "partially-filled";
+}
+
+interface TakerAtProfitExecution {
+  avgEntry: number;
+  bestBid: number;
+  minGrossExitRatio: number;
+  spreadTicks: number;
 }
 
 interface SellPricingShadow {
@@ -1897,6 +2202,7 @@ type ExecutionTermsResolution =
       pricingDiagnostics?: BoundedMidpointDiagnostics;
       pricingShadow?: BoundedMidpointDiagnostics;
       d4EffectiveTickFloor?: { fromTickSize: number; toTickSize: number };
+      takerAtProfit?: TakerAtProfitExecution;
     }
   | { kind: "unavailable" }
   | {

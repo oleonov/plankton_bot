@@ -33,6 +33,7 @@ import type {
   ExitRepriceOnDownpricePolicy,
   SellCapacityPolicy,
   SellLoopGuardPolicy,
+  TakerAtProfitPolicy,
   DynamicChainCapPolicyConfig,
 } from "./types.js";
 import type { AlgoState } from "./algo-engine.js";
@@ -130,6 +131,16 @@ export const DEFAULT_OPPORTUNISTIC_TAKER_POLICY: OpportunisticTakerPolicy = {
   safetyBuffer: 1.05,
   fallbackMinNotionalUsdc: 1,
   marketableBuyMinNotionalUsdc: 1,
+};
+
+export const DEFAULT_TAKER_AT_PROFIT_POLICY: TakerAtProfitPolicy = {
+  enabled: false,
+  minGrossExitRatio: 1.03,
+  // Starts above the current 2-tick generic taker cap to cover observed 3-4 tick
+  // profitable exits, while still rejecting extremely wide/stale books in v1.
+  maxSpreadTicks: 6,
+  rules: "all-sell",
+  requireOpportunisticSellSide: true,
 };
 
 export const DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY: ExitTtlByLiquidityPolicyConfig = {
@@ -270,6 +281,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   // Analytical derivation — not an engineering tuning value.
   exitMidpointAnchorTicks: 5,
   opportunisticTaker: DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
+  takerAtProfit: DEFAULT_TAKER_AT_PROFIT_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   // Defensive infrastructure timing parameter. Exchange balance settlement
   // typically lands in <2s; 5000ms provides a safe margin. Not R-derived —
@@ -353,6 +365,8 @@ const BOUND_LADDER_USDC_CAP_MAX = 10_000;
 const BOUND_TAKER_SAFETY_BUFFER_MIN = 1;
 const BOUND_TAKER_SAFETY_BUFFER_MAX = 10;
 const BOUND_TAKER_MIN_NOTIONAL_MAX = 1_000;
+const BOUND_TAKER_AT_PROFIT_RATIO_MIN = 1;
+const BOUND_TAKER_AT_PROFIT_RATIO_MAX = 10;
 const BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS = 30_000;
 const BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS = 24 * 60 * 60_000;
 const BOUND_REDEEM_SWEEP_RETRY_COUNT_MAX = 10;
@@ -485,6 +499,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
     "exitMidpointAnchorTicks",
   );
   const opportunisticTaker = parseOpportunisticTaker(obj.opportunisticTaker, issues);
+  const takerAtProfit = parseTakerAtProfit(obj.takerAtProfit, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
   const buyCapacity = parseBuyCapacity(obj.buyCapacity, issues);
@@ -535,6 +550,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       exitBidAnchorTicks,
       exitMidpointAnchorTicks,
       opportunisticTaker,
+      takerAtProfit,
       orderLifetime,
       postBuyFillSellCooldownMs,
       repriceOnOutbid,
@@ -971,6 +987,50 @@ function parseOpportunisticTaker(raw: unknown, issues: string[]): OpportunisticT
       BOUND_TAKER_MIN_NOTIONAL_MAX,
       issues,
       "opportunisticTaker.marketableBuyMinNotionalUsdc",
+    ),
+  };
+}
+
+function parseTakerAtProfit(raw: unknown, issues: string[]): TakerAtProfitPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("takerAtProfit must be an object");
+    return DEFAULT_TAKER_AT_PROFIT_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_TAKER_AT_PROFIT_POLICY.enabled,
+      issues,
+      "takerAtProfit.enabled",
+    ),
+    minGrossExitRatio: clampedNumber(
+      obj.minGrossExitRatio,
+      DEFAULT_TAKER_AT_PROFIT_POLICY.minGrossExitRatio,
+      BOUND_TAKER_AT_PROFIT_RATIO_MIN,
+      BOUND_TAKER_AT_PROFIT_RATIO_MAX,
+      issues,
+      "takerAtProfit.minGrossExitRatio",
+    ),
+    maxSpreadTicks: nullableClampedInt(
+      obj.maxSpreadTicks,
+      DEFAULT_TAKER_AT_PROFIT_POLICY.maxSpreadTicks,
+      BOUND_SPREAD_TICKS_MIN,
+      BOUND_SPREAD_TICKS_MAX,
+      issues,
+      "takerAtProfit.maxSpreadTicks",
+    ),
+    rules: takerAtProfitRulesOr(
+      obj.rules,
+      DEFAULT_TAKER_AT_PROFIT_POLICY.rules,
+      issues,
+      "takerAtProfit.rules",
+    ),
+    requireOpportunisticSellSide: booleanOr(
+      obj.requireOpportunisticSellSide,
+      DEFAULT_TAKER_AT_PROFIT_POLICY.requireOpportunisticSellSide,
+      issues,
+      "takerAtProfit.requireOpportunisticSellSide",
     ),
   };
 }
@@ -1800,6 +1860,19 @@ function clampedInt(
   return raw;
 }
 
+function nullableClampedInt(
+  raw: unknown,
+  fallback: number | null,
+  min: number,
+  max: number,
+  issues: string[],
+  name: string,
+): number | null {
+  if (raw === undefined) return fallback;
+  if (raw === null) return null;
+  return clampedInt(raw, fallback ?? min, min, max, issues, name);
+}
+
 function enumOr<T extends string>(
   raw: unknown,
   allowed: readonly T[],
@@ -1847,6 +1920,30 @@ function sideListOr(
     return fallback;
   }
   return sides;
+}
+
+function takerAtProfitRulesOr(
+  raw: unknown,
+  fallback: TakerAtProfitPolicy["rules"],
+  issues: string[],
+  name: string,
+): TakerAtProfitPolicy["rules"] {
+  if (raw === undefined) return fallback;
+  if (raw === "all-sell") return "all-sell";
+  if (!Array.isArray(raw) || raw.length === 0) {
+    issues.push(`${name} must be "all-sell" or a non-empty string array`);
+    return fallback;
+  }
+  const rules: string[] = [];
+  for (const rule of raw) {
+    if (typeof rule !== "string" || rule.trim().length === 0) {
+      issues.push(`${name} must contain only non-empty strings`);
+      return fallback;
+    }
+    const trimmed = rule.trim();
+    if (!rules.includes(trimmed)) rules.push(trimmed);
+  }
+  return rules;
 }
 
 function algoStateListOr(

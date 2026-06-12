@@ -770,6 +770,18 @@ export interface OpportunisticTakerPolicy {
   marketableBuyMinNotionalUsdc: number;
 }
 
+export interface TakerAtProfitPolicy {
+  enabled: boolean;
+  /** Gross exit multiple required before a SELL may cross as taker. */
+  minGrossExitRatio: number;
+  /** Maximum top-of-book spread, in CLOB ticks; null disables the spread cap. */
+  maxSpreadTicks: number | null;
+  /** Rules allowed to use the path. `all-sell` still excludes dust/redeem-like signals. */
+  rules: "all-sell" | string[];
+  /** Keep the operator's existing opportunisticTaker SELL-side switch as an outer gate. */
+  requireOpportunisticSellSide: boolean;
+}
+
 export interface DropTriggerPolicy {
   enabled: boolean;
   /** When true, missing 1h history allows the BUY and emits `no_drop_data` telemetry. */
@@ -940,6 +952,7 @@ export interface ExecutionPolicy {
   /** Number of CLOB ticks to place a midpoint-anchored SELL above current midpoint. */
   exitMidpointAnchorTicks: number;
   opportunisticTaker: OpportunisticTakerPolicy;
+  takerAtProfit: TakerAtProfitPolicy;
   orderLifetime: OrderLifetimePolicy;
   /**
    * Cooldown after any BUY fill before emitting SELL exits from the same wallet.

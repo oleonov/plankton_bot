@@ -1221,6 +1221,7 @@ async function main(): Promise<void> {
     observations: executionPolicyObservationRepo,
     profileId: activeProfile as import("@krabs/domain").ProfileId,
     runtimeMetrics,
+    riskEventRepo: repos.riskEvent,
     signalPathTelemetry,
     resolutionTracker: marketResolutionTracker,
     orderLifetime: orderLifetimeModule,

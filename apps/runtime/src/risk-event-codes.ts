@@ -54,6 +54,7 @@ const STATIC_CODES: Record<string, string> = {
   sell_loop_guard: "sell_loop_guard",
   "sell-loop-guard": "sell_loop_guard",
   "post-only-cross-pre-submit": "post_only_cross_pre_submit",
+  "taker-below-margin": "taker_below_margin",
 };
 
 const PREFIX_CODES: [string, string][] = [

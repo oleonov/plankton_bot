@@ -68,6 +68,10 @@ describe("normalizeReasonCode", () => {
     expect(normalizeReasonCode("post-only-cross-pre-submit")).toBe("post_only_cross_pre_submit");
   });
 
+  it("maps taker-at-profit below-margin suppression", () => {
+    expect(normalizeReasonCode("taker-below-margin")).toBe("taker_below_margin");
+  });
+
   it("returns unknown_rejection for unrecognized strings", () => {
     expect(normalizeReasonCode("some future rejection reason")).toBe("unknown_rejection");
   });

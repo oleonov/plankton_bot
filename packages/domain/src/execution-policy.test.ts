@@ -618,6 +618,58 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(invalid.issues.some((i) => i.includes("opportunisticTaker.sides"))).toBe(true);
   });
 
+  it("defaults taker-at-profit off with a fee-aware margin", () => {
+    expect(DEFAULT_EXECUTION_POLICY.takerAtProfit).toEqual({
+      enabled: false,
+      minGrossExitRatio: 1.03,
+      maxSpreadTicks: 6,
+      rules: "all-sell",
+      requireOpportunisticSellSide: true,
+    });
+  });
+
+  it("parses taker-at-profit settings and rejects invalid values", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        takerAtProfit: {
+          enabled: true,
+          minGrossExitRatio: 1.05,
+          maxSpreadTicks: 4,
+          rules: ["D5", "D8"],
+          requireOpportunisticSellSide: false,
+        },
+      }),
+    );
+    expect(parsed.issues).toHaveLength(0);
+    expect(parsed.policy.takerAtProfit).toEqual({
+      enabled: true,
+      minGrossExitRatio: 1.05,
+      maxSpreadTicks: 4,
+      rules: ["D5", "D8"],
+      requireOpportunisticSellSide: false,
+    });
+
+    const invalid = parseExecutionPolicyJson(
+      JSON.stringify({
+        takerAtProfit: {
+          enabled: "yes",
+          minGrossExitRatio: 0.99,
+          maxSpreadTicks: "wide",
+          rules: ["D8", 8],
+          requireOpportunisticSellSide: "no",
+        },
+      }),
+    );
+    expect(invalid.policy.takerAtProfit).toEqual(DEFAULT_EXECUTION_POLICY.takerAtProfit);
+    expect(invalid.issues.some((i) => i.includes("takerAtProfit.enabled"))).toBe(true);
+    expect(invalid.issues.some((i) => i.includes("takerAtProfit.minGrossExitRatio"))).toBe(true);
+    expect(invalid.issues.some((i) => i.includes("takerAtProfit.maxSpreadTicks"))).toBe(true);
+    expect(invalid.issues.some((i) => i.includes("takerAtProfit.rules"))).toBe(true);
+    expect(
+      invalid.issues.some((i) => i.includes("takerAtProfit.requireOpportunisticSellSide")),
+    ).toBe(true);
+  });
+
   it("preserves partial market-selection override and defaults the rest", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({ marketSelection: { minLiquidity: 500 } }),
