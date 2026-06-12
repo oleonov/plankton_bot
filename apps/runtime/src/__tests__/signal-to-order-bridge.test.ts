@@ -7,11 +7,13 @@ import {
   type ConditionId,
   type NormalizedMarket,
   type Order,
+  type OrderBookSnapshot,
   type OrderRepository,
   type PositionRepository,
   type ProfileId,
   type RiskEventRepository,
   type Signal,
+  type TrackRTakerFeeProvider,
 } from "@krabs/domain";
 import {
   capSellPriceToPlanktonTier,
@@ -1590,6 +1592,8 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       runtimeMetrics?: ConstructorParameters<typeof SignalToOrderBridge>[0]["runtimeMetrics"];
       liveLiteGuard?: ConstructorParameters<typeof SignalToOrderBridge>[0]["liveLiteGuard"];
       riskEventRepo?: ConstructorParameters<typeof SignalToOrderBridge>[0]["riskEventRepo"];
+      candidateBookCache?: CandidateBookCache;
+      trackRFeeProvider?: TrackRTakerFeeProvider;
       policyOverrides?: Partial<ExecutionPolicy>;
     } = {},
   ) {
@@ -1614,6 +1618,8 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       ...(opts.orderLifetime ? { orderLifetime: opts.orderLifetime } : {}),
       ...(opts.runtimeMetrics ? { runtimeMetrics: opts.runtimeMetrics } : {}),
       ...(opts.riskEventRepo ? { riskEventRepo: opts.riskEventRepo } : {}),
+      ...(opts.candidateBookCache ? { candidateBookCache: opts.candidateBookCache } : {}),
+      ...(opts.trackRFeeProvider ? { trackRFeeProvider: opts.trackRFeeProvider } : {}),
     });
     bridge.subscribe();
     const skipped: Array<{
@@ -1659,6 +1665,64 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     return {
       findByTokenId: vi.fn(() => (avgEntryPrice == null ? null : ({ avgEntryPrice } as never))),
     } as never;
+  }
+
+  function positionRepo(avgEntryPrice: number | null, size: number): PositionRepository {
+    return {
+      findByTokenId: vi.fn(() =>
+        avgEntryPrice == null
+          ? null
+          : ({
+              avgEntryPrice,
+              size,
+            } as never),
+      ),
+    } as never;
+  }
+
+  function makeCachedBook(overrides: Partial<OrderBookSnapshot>): CandidateBookCache {
+    const cache = new CandidateBookCache({
+      gateway: { getOrderBooks: vi.fn(async () => new Map()) },
+      log: makeLogger(),
+    });
+    cache.upsertBooks(
+      new Map([
+        [
+          String(TOKEN_ID),
+          {
+            tokenId: TOKEN_ID,
+            bids: [],
+            asks: [],
+            bestBid: null,
+            bestAsk: null,
+            midPrice: null,
+            spread: null,
+            timestamp: Date.now(),
+            ...overrides,
+          },
+        ],
+      ]),
+    );
+    return cache;
+  }
+
+  function trackRPolicy(overrides?: Partial<ExecutionPolicy["trackR"]>): ExecutionPolicy["trackR"] {
+    return {
+      ...DEFAULT_EXECUTION_POLICY.trackR,
+      enabled: true,
+      safetyMargin: 0.005,
+      ...overrides,
+    };
+  }
+
+  function liveFeeProvider(rate = 0.07): TrackRTakerFeeProvider {
+    return {
+      resolveFeeQuote: vi.fn(async () => ({
+        rate,
+        exponent: 1,
+        source: "live" as const,
+      })),
+    };
   }
 
   it("default edge branch posts BUY at bestBid — ADR-006 D1 preserved", async () => {
@@ -2307,6 +2371,168 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     );
   });
 
+  it("Track R uses effective fill price and dynamic fee threshold for thick profitable books", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.04, 290),
+      runtimeMetrics: metrics as never,
+      riskEventRepo,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.046,
+        bestAsk: 0.05,
+        bids: [{ price: 0.046, size: 500 }],
+        asks: [{ price: 0.05, size: 500 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.07,
+        suggestedSize: 290,
+        suggestedSizeUsdc: 13.34,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.046, bestAsk: 0.05, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.046);
+    expect(placed[0]!.command.postOnly).toBe(false);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_effective_fill_used",
+      1,
+      expect.stringContaining('"side":"sell"'),
+    );
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_fee_rate_source_live",
+      1,
+      expect.stringContaining('"rule":"D8"'),
+    );
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_taker_at_profit_passed",
+      1,
+      expect.stringContaining('"fee_source":"live"'),
+    );
+    expect(riskEventRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "track_r_margin_threshold_sampled",
+        payload: expect.objectContaining({
+          effectiveFillPrice: 0.046,
+          feeRate: 0.07,
+          feeSource: "live",
+          minGrossExitRatio: expect.closeTo(1.0766, 4),
+        }),
+      }),
+    );
+  });
+
+  it("Track R blocks taker-at-profit when a thin book cannot liquidate above dynamic margin", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.04, 290),
+      runtimeMetrics: metrics as never,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.046,
+        bestAsk: 0.05,
+        bids: [
+          { price: 0.046, size: 5 },
+          { price: 0.01, size: 285 },
+        ],
+        asks: [{ price: 0.05, size: 500 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.07,
+        suggestedSize: 290,
+        suggestedSizeUsdc: 13.34,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.046, bestAsk: 0.05, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.postOnly).not.toBe(false);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_effective_fill_thin_book",
+      1,
+      expect.stringContaining('"side":"sell"'),
+    );
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_taker_at_profit_blocked_margin",
+      1,
+      expect.stringContaining('"fee_source":"live"'),
+    );
+  });
+
+  it("Track R blocks taker-at-profit when depth is exhausted before full close", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.04, 290),
+      runtimeMetrics: metrics as never,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.046,
+        bestAsk: 0.05,
+        bids: [{ price: 0.046, size: 5 }],
+        asks: [{ price: 0.05, size: 500 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.07,
+        suggestedSize: 290,
+        suggestedSizeUsdc: 13.34,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.046, bestAsk: 0.05, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.postOnly).not.toBe(false);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_taker_at_profit_blocked_depth",
+      1,
+      expect.stringContaining('"liquidity_available":5'),
+    );
+  });
+
   it("requires the configured 1.03 gross margin boundary for taker-at-profit", async () => {
     const cases = [
       { bestBid: 0.102, bestAsk: 0.106, expectedTaker: false },
@@ -2468,6 +2694,42 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed).toHaveLength(0);
     expect(skipped).toHaveLength(1);
     expect(skipped[0]!.reasons).toContain("taker-below-margin");
+  });
+
+  it("Track R invariant uses dynamic threshold for generic taker SELL after final price resolution", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: avgEntryRepo(0.92),
+      runtimeMetrics: metrics as never,
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.925,
+        reason: "repricing-exit",
+        decisionRuleId: "DUST_SWEEP",
+      },
+      market: makeMarket({ bestBid: 0.925, bestAsk: 0.926, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toContain("taker-below-margin");
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_taker_at_profit_blocked_margin",
+      1,
+      expect.stringContaining('"mode":"invariant"'),
+    );
   });
 
   it.each([null, 0, NaN])(

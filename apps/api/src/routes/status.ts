@@ -464,6 +464,14 @@ export function buildStatusSnapshot(
       )
       .get() as { total: number }
   ).total;
+  const totalLiquidationValueUsdc = (
+    db
+      .prepare(
+        `SELECT COALESCE(SUM(COALESCE(liquidation_value_usdc, current_value_usdc)), 0) as total
+           FROM positions WHERE status IN ('open','dust')`,
+      )
+      .get() as { total: number }
+  ).total;
 
   const executionTelemetry24h = {
     windowHours: 24,
@@ -563,6 +571,7 @@ export function buildStatusSnapshot(
     balanceUsdc,
     walletBalanceUsdc,
     totalCurrentValueUsdc,
+    totalLiquidationValueUsdc,
     totalRealizedPnl,
     polymarketPortfolio: null,
     marketDataSource: mdSource

@@ -189,6 +189,83 @@ describe("migration 032 — unique open position per token", () => {
   });
 });
 
+describe("migration 067 — Track R liquidation reporting columns", () => {
+  beforeEach(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile TEXT NOT NULL,
+        equity_usdc REAL NOT NULL,
+        wallet_usdc REAL,
+        position_value_usdc REAL NOT NULL,
+        realized_pnl_usdc REAL NOT NULL,
+        open_value_usdc REAL NOT NULL,
+        captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+  });
+
+  it("adds nullable liquidation fields without backfilling existing rows", () => {
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, updated_at)
+       VALUES ('pos-r7', 'tok-r7', 'cond-r7', 'buy', 100, 0.1, 10, 50, 0, 'open',
+               '2026-06-12T00:00:00.000Z', '2026-06-12T00:00:00.000Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO portfolio_snapshots
+         (profile, equity_usdc, wallet_usdc, position_value_usdc,
+          realized_pnl_usdc, open_value_usdc, captured_at)
+       VALUES ('live-lite', 100, 50, 50, 0, 10, '2026-06-12T00:00:00.000Z')`,
+    ).run();
+
+    db.exec(applySafeAddColumnStatements(db, readMigration("067_track_r_liquidation_values.sql")));
+
+    const position = db
+      .prepare(
+        `SELECT liquidation_value_usdc, liquidation_price, liquidation_depth_exhausted,
+                liquidation_value_updated_at
+         FROM positions WHERE position_id = 'pos-r7'`,
+      )
+      .get() as Record<string, unknown>;
+    expect(position).toEqual({
+      liquidation_value_usdc: null,
+      liquidation_price: null,
+      liquidation_depth_exhausted: 0,
+      liquidation_value_updated_at: null,
+    });
+
+    const snapshot = db
+      .prepare(
+        `SELECT liquidation_value_usdc, unrealized_pnl_mid_usdc,
+                unrealized_pnl_liquidation_usdc, total_equity_liquidation_usdc
+         FROM portfolio_snapshots WHERE profile = 'live-lite'`,
+      )
+      .get() as Record<string, unknown>;
+    expect(snapshot).toEqual({
+      liquidation_value_usdc: null,
+      unrealized_pnl_mid_usdc: null,
+      unrealized_pnl_liquidation_usdc: null,
+      total_equity_liquidation_usdc: null,
+    });
+  });
+
+  it("is idempotent under safe_add_column replay", () => {
+    const sql = readMigration("067_track_r_liquidation_values.sql");
+
+    db.exec(applySafeAddColumnStatements(db, sql));
+    db.exec(applySafeAddColumnStatements(db, sql));
+
+    const positionColumns = db.prepare("PRAGMA table_info(positions)").all() as Array<{
+      name: string;
+    }>;
+    expect(
+      positionColumns.filter((column) => column.name === "liquidation_value_usdc"),
+    ).toHaveLength(1);
+  });
+});
+
 describe("migration 053 — taker BUY gross fill sizes", () => {
   beforeEach(() => {
     db.exec(`

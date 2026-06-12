@@ -202,13 +202,19 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
     const itemQuery =
       rawCount <= maxRawPoints
         ? db.prepare(
-            `SELECT equity_usdc, realized_pnl_usdc, position_value_usdc, open_value_usdc, captured_at
+            `SELECT equity_usdc, realized_pnl_usdc, position_value_usdc,
+                    liquidation_value_usdc, unrealized_pnl_mid_usdc,
+                    unrealized_pnl_liquidation_usdc, total_equity_liquidation_usdc,
+                    open_value_usdc, captured_at
              FROM portfolio_snapshots
              WHERE profile = ? AND captured_at >= datetime('now', ?)
              ORDER BY captured_at ASC`,
           )
         : db.prepare(
-            `SELECT ps.equity_usdc, ps.realized_pnl_usdc, ps.position_value_usdc, ps.open_value_usdc, ps.captured_at
+            `SELECT ps.equity_usdc, ps.realized_pnl_usdc, ps.position_value_usdc,
+                    ps.liquidation_value_usdc, ps.unrealized_pnl_mid_usdc,
+                    ps.unrealized_pnl_liquidation_usdc, ps.total_equity_liquidation_usdc,
+                    ps.open_value_usdc, ps.captured_at
              FROM portfolio_snapshots ps
              INNER JOIN (
                SELECT MAX(id) as max_id
@@ -227,6 +233,10 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
             equity_usdc: number;
             realized_pnl_usdc: number;
             position_value_usdc: number;
+            liquidation_value_usdc: number | null;
+            unrealized_pnl_mid_usdc: number | null;
+            unrealized_pnl_liquidation_usdc: number | null;
+            total_equity_liquidation_usdc: number | null;
             open_value_usdc: number;
             captured_at: string;
           }>)
@@ -234,6 +244,10 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
             equity_usdc: number;
             realized_pnl_usdc: number;
             position_value_usdc: number;
+            liquidation_value_usdc: number | null;
+            unrealized_pnl_mid_usdc: number | null;
+            unrealized_pnl_liquidation_usdc: number | null;
+            total_equity_liquidation_usdc: number | null;
             open_value_usdc: number;
             captured_at: string;
           }>);
@@ -274,6 +288,10 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
         equityUsdc: p.equity_usdc,
         realizedPnlUsdc: p.realized_pnl_usdc,
         positionValueUsdc: p.position_value_usdc,
+        liquidationValueUsdc: p.liquidation_value_usdc ?? null,
+        unrealizedPnlMidUsdc: p.unrealized_pnl_mid_usdc ?? null,
+        unrealizedPnlLiquidationUsdc: p.unrealized_pnl_liquidation_usdc ?? null,
+        totalEquityLiquidationUsdc: p.total_equity_liquidation_usdc ?? null,
         openValueUsdc: p.open_value_usdc,
         capturedAt: p.captured_at,
       })),

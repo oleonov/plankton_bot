@@ -92,6 +92,11 @@ export class SqlitePositionRepository implements PositionRepository {
       avgEntryPrice: row.avg_entry_price as number,
       costBasisUsdc: row.cost_basis_usdc as number,
       currentValueUsdc: (row.current_value_usdc as number) ?? null,
+      liquidationValueUsdc: (row.liquidation_value_usdc as number) ?? null,
+      liquidationPrice: (row.liquidation_price as number) ?? null,
+      liquidationDepthExhausted:
+        row.liquidation_depth_exhausted == null ? null : row.liquidation_depth_exhausted === 1,
+      liquidationValueUpdatedAt: (row.liquidation_value_updated_at as string) ?? null,
       realizedPnl: row.realized_pnl as number,
       status: row.status as PositionStatus,
       entryStyle: (row.entry_style as "probe") ?? null,

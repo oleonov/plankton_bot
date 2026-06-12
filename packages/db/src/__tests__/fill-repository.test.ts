@@ -252,4 +252,103 @@ describe("SqliteFillRepository", () => {
 
     expect(repo.findUnreconciled()).toHaveLength(1);
   });
+
+  it("findRecentTakerFeeRate returns null for empty or insufficient recent taker fills", () => {
+    insertOrder(conn.db, { order_id: "ord-A", client_order_id: "c-A" });
+    insertOrder(conn.db, { order_id: "ord-B", client_order_id: "c-B" });
+
+    repo.save(
+      makeFill({
+        fillId: createFillId("f1"),
+        orderId: createOrderId("ord-A"),
+        liquidityRole: "taker",
+        feeRateBps: 400,
+        filledAt: new Date().toISOString(),
+      }),
+    );
+    repo.save(
+      makeFill({
+        fillId: createFillId("f2"),
+        orderId: createOrderId("ord-B"),
+        liquidityRole: "taker",
+        feeRateBps: 400,
+        filledAt: new Date().toISOString(),
+      }),
+    );
+
+    expect(repo.findRecentTakerFeeRate(createConditionId("cond-1"), 24)).toBeNull();
+    expect(repo.findRecentTakerFeeRate(createConditionId("cond-other"), 24)).toBeNull();
+  });
+
+  it("findRecentTakerFeeRate returns median rate from recent taker fills only", () => {
+    for (const id of ["A", "B", "C", "D", "E"]) {
+      insertOrder(conn.db, { order_id: `ord-${id}`, client_order_id: `c-${id}` });
+    }
+    const now = Date.now();
+
+    repo.save(
+      makeFill({
+        fillId: createFillId("f-maker"),
+        orderId: createOrderId("ord-A"),
+        liquidityRole: "maker",
+        feeRateBps: 900,
+        filledAt: new Date(now).toISOString(),
+      }),
+    );
+    repo.save(
+      makeFill({
+        fillId: createFillId("f-old"),
+        orderId: createOrderId("ord-B"),
+        liquidityRole: "taker",
+        feeRateBps: 900,
+        filledAt: new Date(now - 25 * 60 * 60_000).toISOString(),
+      }),
+    );
+    repo.save(
+      makeFill({
+        fillId: createFillId("f-low"),
+        orderId: createOrderId("ord-C"),
+        liquidityRole: "taker",
+        feeRateBps: 300,
+        filledAt: new Date(now).toISOString(),
+      }),
+    );
+    repo.save(
+      makeFill({
+        fillId: createFillId("f-mid"),
+        orderId: createOrderId("ord-D"),
+        liquidityRole: "taker",
+        feeRateBps: 400,
+        filledAt: new Date(now).toISOString(),
+      }),
+    );
+    repo.save(
+      makeFill({
+        fillId: createFillId("f-high"),
+        orderId: createOrderId("ord-E"),
+        liquidityRole: "taker",
+        feeRateBps: 700,
+        filledAt: new Date(now).toISOString(),
+      }),
+    );
+
+    expect(repo.findRecentTakerFeeRate(createConditionId("cond-1"), 24)).toBe(0.04);
+  });
+
+  it("findRecentTakerFeeRate maps crypto sentinel 1000 bps to current crypto fee", () => {
+    for (const id of ["A", "B", "C"]) {
+      insertOrder(conn.db, { order_id: `ord-crypto-${id}`, client_order_id: `c-crypto-${id}` });
+      repo.save(
+        makeFill({
+          fillId: createFillId(`f-crypto-${id}`),
+          orderId: createOrderId(`ord-crypto-${id}`),
+          liquidityRole: "taker",
+          feeRateBps: 1000,
+          filledAt: new Date().toISOString(),
+        }),
+      );
+    }
+
+    expect(repo.findRecentTakerFeeRate(createConditionId("cond-1"), 24)).toBe(0.07);
+  });
 });

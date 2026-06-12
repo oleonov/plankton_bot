@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId } from "@krabs/domain";
-import type { NormalizedMarket } from "@krabs/domain";
+import { createConditionId, createPositionId, createTokenId } from "@krabs/domain";
+import type { NormalizedMarket, OrderBookSnapshot, Position } from "@krabs/domain";
 import { SnapshotWriter } from "../snapshot-writer.js";
 
 function makeMarket(
@@ -37,17 +37,59 @@ function makeMarket(
 }
 
 describe("SnapshotWriter", () => {
-  let repo: { saveBatch: ReturnType<typeof vi.fn>; prune: ReturnType<typeof vi.fn> };
+  let repo: {
+    saveBatch: ReturnType<typeof vi.fn>;
+    saveBatchWithPositionValuations: ReturnType<typeof vi.fn>;
+    prune: ReturnType<typeof vi.fn>;
+  };
   let writer: SnapshotWriter;
 
   beforeEach(() => {
-    repo = { saveBatch: vi.fn(), prune: vi.fn() };
+    repo = { saveBatch: vi.fn(), saveBatchWithPositionValuations: vi.fn(), prune: vi.fn() };
     writer = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
       pruneIntervalMs: 60 * 60 * 1000,
       pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
     });
   });
+
+  function makePosition(tokenId: string, size = 100): Position {
+    return {
+      positionId: createPositionId(`pos-${tokenId}`),
+      tokenId: createTokenId(tokenId),
+      conditionId: createConditionId(`cond-${tokenId}`),
+      side: "buy",
+      size,
+      avgEntryPrice: 0.1,
+      costBasisUsdc: size * 0.1,
+      currentValueUsdc: null,
+      realizedPnl: 0,
+      status: "open",
+      entryStyle: null,
+      openedAt: "2026-06-12T00:00:00.000Z",
+      closedAt: null,
+      updatedAt: "2026-06-12T00:00:00.000Z",
+    };
+  }
+
+  function makeBook(
+    tokenId: string,
+    bids: OrderBookSnapshot["bids"],
+    asks: OrderBookSnapshot["asks"] = [{ price: 0.52, size: 100 }],
+  ): OrderBookSnapshot {
+    const bestBid = bids[0]?.price ?? null;
+    const bestAsk = asks[0]?.price ?? null;
+    return {
+      tokenId: createTokenId(tokenId),
+      bids: [...bids],
+      asks: [...asks],
+      bestBid,
+      bestAsk,
+      midPrice: bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null,
+      spread: bestBid != null && bestAsk != null ? bestAsk - bestBid : null,
+      timestamp: Date.now(),
+    };
+  }
 
   it("writes snapshots on first call", () => {
     const markets = [makeMarket("tok-1"), makeMarket("tok-2")];
@@ -65,6 +107,143 @@ describe("SnapshotWriter", () => {
     expect(repo.saveBatch.mock.calls[0]![0]).toMatchObject([
       { tokenId: "tok-heartbeat", bestBid: 0.45, bestAsk: 0.55 },
     ]);
+  });
+
+  it("writes current and liquidation valuation atomically on heartbeat", () => {
+    const now = Date.parse("2026-06-12T12:00:00.000Z");
+    const metrics = { writeCounter: vi.fn(), writeEvent: vi.fn() };
+    writer = new SnapshotWriter(repo, {
+      intervalMs: 5 * 60 * 1000,
+      pruneIntervalMs: 60 * 60 * 1000,
+      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+      positionValuation: {
+        activePositions: () => [makePosition("tok-1", 100)],
+        runtimeMetrics: metrics,
+      },
+    });
+
+    writer.onHeartbeat(
+      [makeMarket("tok-1", 0.48, 0.52)],
+      now,
+      new Map([["tok-1", makeBook("tok-1", [{ price: 0.48, size: 100 }])]]),
+    );
+
+    expect(repo.saveBatch).not.toHaveBeenCalled();
+    expect(repo.saveBatchWithPositionValuations).toHaveBeenCalledTimes(1);
+    expect(repo.saveBatchWithPositionValuations.mock.calls[0]![1]).toMatchObject([
+      {
+        tokenId: "tok-1",
+        currentValueUsdc: 50,
+        liquidationValueUsdc: 48,
+        liquidationPrice: 0.48,
+        liquidationDepthExhausted: false,
+        updatedAt: "2026-06-12T12:00:00.000Z",
+      },
+    ]);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_liquidation_computed_total",
+      1,
+      JSON.stringify({ outcome: "computed" }),
+    );
+  });
+
+  it("liquidates thin books below mid and samples the liquidation-to-mid ratio", () => {
+    const metrics = { writeCounter: vi.fn(), writeEvent: vi.fn() };
+    writer = new SnapshotWriter(repo, {
+      intervalMs: 5 * 60 * 1000,
+      pruneIntervalMs: 60 * 60 * 1000,
+      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+      positionValuation: {
+        activePositions: () => [makePosition("tok-thin", 100)],
+        runtimeMetrics: metrics,
+      },
+    });
+
+    writer.onHeartbeat(
+      [makeMarket("tok-thin", 0.48, 0.52)],
+      Date.parse("2026-06-12T12:05:00.000Z"),
+      new Map([
+        [
+          "tok-thin",
+          makeBook("tok-thin", [
+            { price: 0.48, size: 5 },
+            { price: 0.2, size: 95 },
+          ]),
+        ],
+      ]),
+    );
+
+    const valuations = repo.saveBatchWithPositionValuations.mock.calls[0]![1] as Array<{
+      liquidationValueUsdc: number;
+      currentValueUsdc: number;
+    }>;
+    expect(valuations[0]!.liquidationValueUsdc).toBeCloseTo(21.4, 6);
+    expect(valuations[0]!.liquidationValueUsdc).toBeLessThan(valuations[0]!.currentValueUsdc);
+    expect(metrics.writeEvent).toHaveBeenCalledWith(
+      "track_r_liquidation_value_vs_mid_ratio",
+      expect.closeTo(21.4 / 50, 6),
+      expect.any(String),
+      "2026-06-12T12:05:00.000Z",
+    );
+  });
+
+  it("uses available bid value when visible depth is exhausted", () => {
+    writer = new SnapshotWriter(repo, {
+      intervalMs: 5 * 60 * 1000,
+      pruneIntervalMs: 60 * 60 * 1000,
+      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+      positionValuation: {
+        activePositions: () => [makePosition("tok-exhausted", 100)],
+      },
+    });
+
+    writer.onHeartbeat(
+      [makeMarket("tok-exhausted", 0.48, 0.52)],
+      Date.parse("2026-06-12T12:10:00.000Z"),
+      new Map([["tok-exhausted", makeBook("tok-exhausted", [{ price: 0.48, size: 5 }])]]),
+    );
+
+    expect(repo.saveBatchWithPositionValuations.mock.calls[0]![1]).toMatchObject([
+      {
+        tokenId: "tok-exhausted",
+        liquidationValueUsdc: 2.4,
+        liquidationPrice: 0.48,
+        liquidationDepthExhausted: true,
+      },
+    ]);
+  });
+
+  it("writes zero liquidation and a skip counter when no book is available", () => {
+    const metrics = { writeCounter: vi.fn(), writeEvent: vi.fn() };
+    writer = new SnapshotWriter(repo, {
+      intervalMs: 5 * 60 * 1000,
+      pruneIntervalMs: 60 * 60 * 1000,
+      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+      positionValuation: {
+        activePositions: () => [makePosition("tok-no-book", 100)],
+        runtimeMetrics: metrics,
+      },
+    });
+
+    writer.onHeartbeat(
+      [makeMarket("tok-no-book", 0.48, 0.52)],
+      Date.parse("2026-06-12T12:15:00.000Z"),
+    );
+
+    expect(repo.saveBatchWithPositionValuations.mock.calls[0]![1]).toMatchObject([
+      {
+        tokenId: "tok-no-book",
+        currentValueUsdc: 50,
+        liquidationValueUsdc: 0,
+        liquidationPrice: 0,
+        liquidationDepthExhausted: true,
+      },
+    ]);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_liquidation_compute_skipped_no_book",
+      1,
+      JSON.stringify({ reason: "missing_book" }),
+    );
   });
 
   it("skips tokens written less than intervalMs ago", () => {

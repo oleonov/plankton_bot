@@ -24,6 +24,7 @@ import type {
   MarketPricingStream,
   MarketPricingStreamMetricsSnapshot,
   MarketPricingStreamUpdate,
+  OrderBookSnapshot,
   Market,
   Position,
   TrackedForPricing,
@@ -291,6 +292,7 @@ export class MarketDataModule implements RuntimeModule {
   private polling = false;
   private lastSuccessfulDataMs = 0;
   private readonly marketCache = new Map<string, NormalizedMarket>();
+  private readonly latestOrderBookByToken = new Map<string, OrderBookSnapshot>();
   private readonly lastPublishedMarketByToken = new Map<string, NormalizedMarket>();
   private readonly trackedMarketsByToken = new Map<string, Market>();
   private readonly lastPricingUpdateAtByToken = new Map<string, number>();
@@ -1327,6 +1329,7 @@ export class MarketDataModule implements RuntimeModule {
         const tokenKey = String(update.tokenId);
         const tracked = this.trackedMarketsByToken.get(tokenKey);
         if (!tracked) continue;
+        if (update.book) this.latestOrderBookByToken.set(tokenKey, update.book);
         const current = syncTrackedMarket(this.marketCache.get(tokenKey) ?? null, tracked, nowMs);
         const nextMarket = applyStreamUpdate(current, update, nowMs);
         this.lastPricingUpdateAtByToken.set(tokenKey, nowMs);
@@ -1478,6 +1481,7 @@ export class MarketDataModule implements RuntimeModule {
       if (nextTokenIds.has(tokenId)) continue;
       this.trackedMarketsByToken.delete(tokenId);
       this.marketCache.delete(tokenId);
+      this.latestOrderBookByToken.delete(tokenId);
       this.lastPublishedMarketByToken.delete(tokenId);
       this.lastPricingUpdateAtByToken.delete(tokenId);
       removed.push(tokenId);
@@ -1488,6 +1492,9 @@ export class MarketDataModule implements RuntimeModule {
     // published on the fly and must not leave residue here.
     for (const tokenId of [...this.marketCache.keys()]) {
       if (!nextTokenIds.has(tokenId)) this.marketCache.delete(tokenId);
+    }
+    for (const tokenId of [...this.latestOrderBookByToken.keys()]) {
+      if (!nextTokenIds.has(tokenId)) this.latestOrderBookByToken.delete(tokenId);
     }
     for (const tokenId of [...this.lastPublishedMarketByToken.keys()]) {
       if (!nextTokenIds.has(tokenId)) this.lastPublishedMarketByToken.delete(tokenId);
@@ -1690,6 +1697,7 @@ export class MarketDataModule implements RuntimeModule {
     if (tokenIds.length === 0) return;
 
     const markets: NormalizedMarket[] = [];
+    const booksByToken = new Map<string, OrderBookSnapshot>();
     for (const tokenId of tokenIds) {
       if (realChangedTokenIds.has(tokenId)) continue;
       const market = this.marketCache.get(tokenId);
@@ -1705,11 +1713,14 @@ export class MarketDataModule implements RuntimeModule {
         continue;
       }
       markets.push(market);
+      const book = this.latestOrderBookByToken.get(tokenId);
+      if (book) booksByToken.set(tokenId, book);
     }
     if (markets.length === 0) return;
 
     await this.deps.bus.publish("MarketSnapshotHeartbeat", {
       markets,
+      booksByToken,
       timestamp,
       reason: "full_lifetime_active_position",
       source: "market-data",

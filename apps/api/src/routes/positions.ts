@@ -32,6 +32,11 @@ export function toDto(
     avgEntryPrice: row.avg_entry_price,
     costBasisUsdc: row.cost_basis_usdc,
     currentValueUsdc: row.current_value_usdc,
+    liquidationValueUsdc: row.liquidation_value_usdc ?? null,
+    liquidationPrice: row.liquidation_price ?? null,
+    liquidationDepthExhausted:
+      row.liquidation_depth_exhausted == null ? null : row.liquidation_depth_exhausted === 1,
+    liquidationValueUpdatedAt: row.liquidation_value_updated_at ?? null,
     realizedPnl: row.realized_pnl,
     cumulativeBuyNotional: cumulativeBuyNotional ?? null,
     status: row.status,

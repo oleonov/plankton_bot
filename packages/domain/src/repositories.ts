@@ -277,6 +277,9 @@ export interface FillRepository {
   /** Return the most recent fills across all tokens. */
   findRecent(limit: number): Fill[];
 
+  /** Return median taker fee rate for a condition over a recent window, or null if insufficient. */
+  findRecentTakerFeeRate?(conditionId: ConditionId, windowHours?: number): number | null;
+
   /** Return fills that have not yet been applied to a position or inventory lot. */
   findUnreconciled(): Fill[];
 
@@ -387,8 +390,23 @@ export interface MarketSnapshotRepository {
   /** Persist a batch of market snapshots. */
   saveBatch(snapshots: MarketSnapshot[]): void;
 
+  /** Persist snapshots and same-heartbeat position valuations atomically when supported. */
+  saveBatchWithPositionValuations?(
+    snapshots: MarketSnapshot[],
+    valuations: MarketSnapshotPositionValuation[],
+  ): void;
+
   /** Delete snapshots older than the given ISO timestamp. Returns rows deleted. */
   prune(olderThanIso: string, options?: { readonly preserveTokenIds?: readonly TokenId[] }): number;
+}
+
+export interface MarketSnapshotPositionValuation {
+  tokenId: TokenId;
+  currentValueUsdc: number | null;
+  liquidationValueUsdc: number;
+  liquidationPrice: number;
+  liquidationDepthExhausted: boolean;
+  updatedAt: string;
 }
 
 // ─── RiskEventRepository ────────────────────────────────────────────────

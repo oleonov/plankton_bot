@@ -492,10 +492,11 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const rows = db
       .prepare(
         `SELECT m.event_slug AS eventSlug,
-                SUM(p.realized_pnl) AS realizedPnl,
-                SUM(p.current_value_usdc - p.cost_basis_usdc) AS unrealizedPnl,
-                SUM(p.cost_basis_usdc) AS volumeUsdc,
-                COUNT(*) AS positionCount
+	                SUM(p.realized_pnl) AS realizedPnl,
+	                SUM(p.current_value_usdc - p.cost_basis_usdc) AS unrealizedPnl,
+	                SUM(COALESCE(p.liquidation_value_usdc, p.current_value_usdc) - p.cost_basis_usdc) AS unrealizedPnlLiquidation,
+	                SUM(p.cost_basis_usdc) AS volumeUsdc,
+	                COUNT(*) AS positionCount
          FROM positions p
          JOIN markets m ON m.token_id = p.token_id
          WHERE m.event_slug IS NOT NULL

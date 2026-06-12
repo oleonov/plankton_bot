@@ -394,6 +394,10 @@ export interface Position {
   avgEntryPrice: number;
   costBasisUsdc: number; // total USDC paid to acquire current size
   currentValueUsdc: number | null;
+  liquidationValueUsdc?: number | null;
+  liquidationPrice?: number | null;
+  liquidationDepthExhausted?: boolean | null;
+  liquidationValueUpdatedAt?: string | null;
   realizedPnl: number;
   status: PositionStatus;
   entryStyle: "probe" | null;
@@ -791,6 +795,33 @@ export interface TakerAtProfitPolicy {
   requireOpportunisticSellSide: boolean;
 }
 
+export interface TrackRHonestPricingPolicy {
+  enabled: boolean;
+  safetyMargin: number;
+  requireFullDepth: boolean;
+  universalFallbackRate: number;
+  maxSaneThreshold: number;
+}
+
+export type TrackRFeeRateSource = "live" | "fill" | "fallback_category" | "fallback_universal";
+
+export interface TrackRFeeQuote {
+  rate: number;
+  exponent: number;
+  source: TrackRFeeRateSource;
+  category?: string | null;
+}
+
+export interface TrackRTakerFeeProvider {
+  resolveFeeQuote: (input: {
+    conditionId: ConditionId;
+    tokenId: TokenId;
+    category?: string | null;
+    policy: TrackRHonestPricingPolicy;
+    nowMs: number;
+  }) => Promise<TrackRFeeQuote | null>;
+}
+
 export interface DropTriggerPolicy {
   enabled: boolean;
   /** When true, missing 1h history allows the BUY and emits `no_drop_data` telemetry. */
@@ -962,6 +993,7 @@ export interface ExecutionPolicy {
   exitMidpointAnchorTicks: number;
   opportunisticTaker: OpportunisticTakerPolicy;
   takerAtProfit: TakerAtProfitPolicy;
+  trackR: TrackRHonestPricingPolicy;
   orderLifetime: OrderLifetimePolicy;
   /**
    * Cooldown after any BUY fill before emitting SELL exits from the same wallet.

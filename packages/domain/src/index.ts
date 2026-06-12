@@ -16,6 +16,7 @@ export * from "./algo-engine.js";
 export * from "./market-selection.js";
 export * from "./strike-classifier.js";
 export * from "./polymarket-fees.js";
+export * from "./orderbook.js";
 export { SelectionRuleEngine, normalizeSelectionPattern } from "./selection-rule-engine.js";
 export type { PreEntryInput } from "./market-selection.js";
 export {
@@ -25,6 +26,7 @@ export {
   DEFAULT_ORDER_CAPACITY_POLICY,
   DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
   DEFAULT_TAKER_AT_PROFIT_POLICY,
+  DEFAULT_TRACK_R_HONEST_PRICING_POLICY,
   DEFAULT_DEAD_SIDE_GUARD,
   DEFAULT_PRICING_POLICY,
   DEFAULT_TELEMETRY,

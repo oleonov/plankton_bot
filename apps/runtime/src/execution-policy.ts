@@ -19,6 +19,7 @@ export {
   DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
   DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
   DEFAULT_TAKER_AT_PROFIT_POLICY,
+  DEFAULT_TRACK_R_HONEST_PRICING_POLICY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
 } from "@krabs/domain";

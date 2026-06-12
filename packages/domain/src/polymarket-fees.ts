@@ -1,12 +1,16 @@
-export const POLYMARKET_CRYPTO_TAKER_FEE_RATE = 0.072;
+export const POLYMARKET_CRYPTO_TAKER_FEE_RATE = 0.07;
 
-export const POLYMARKET_TAKER_FEE_RATES_BY_CATEGORY: Readonly<Record<string, number>> = {
+export const CATEGORICAL_FALLBACK_RATES: Readonly<Record<string, number>> = {
   crypto: POLYMARKET_CRYPTO_TAKER_FEE_RATE,
-  sports: 0.03,
   finance: 0.04,
-  politics: 0.04,
+  sports: 0.03,
+  culture: 0.05,
   geopolitics: 0,
 };
+
+export const UNIVERSAL_FALLBACK_RATE = 0.05;
+
+export const POLYMARKET_TAKER_FEE_RATES_BY_CATEGORY = CATEGORICAL_FALLBACK_RATES;
 
 /**
  * V2 fee resolution priority:
@@ -68,6 +72,38 @@ export function computePolymarketPlatformFeeRate(input: {
   const base = input.price * (1 - input.price);
   if (base <= 0) return 0;
   return input.rate * Math.pow(base, exponent);
+}
+
+export function computePolymarketSellFeeFractionOfRevenue(input: {
+  price: number;
+  rate: number;
+  exponent: number;
+}): number {
+  if (!Number.isFinite(input.price) || input.price <= 0) return 0;
+  const perShareFee = computePolymarketPlatformFeeRate(input);
+  return perShareFee / input.price;
+}
+
+export function computeTrackRMinGrossExitRatio(input: {
+  effectiveFillPrice: number;
+  rate: number;
+  exponent: number;
+  safetyMargin: number;
+}): number {
+  if (!Number.isFinite(input.effectiveFillPrice) || input.effectiveFillPrice <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const feeFraction = computePolymarketSellFeeFractionOfRevenue({
+    price: input.effectiveFillPrice,
+    rate: input.rate,
+    exponent: input.exponent,
+  });
+  if (!Number.isFinite(feeFraction) || feeFraction < 0 || feeFraction >= 1) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const safetyMargin =
+    Number.isFinite(input.safetyMargin) && input.safetyMargin > 0 ? input.safetyMargin : 0;
+  return 1 / (1 - feeFraction) + safetyMargin;
 }
 
 export function computePolymarketBuyShareFee(input: {

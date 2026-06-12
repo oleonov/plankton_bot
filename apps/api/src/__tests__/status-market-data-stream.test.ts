@@ -27,6 +27,8 @@ function createFakeDb(
           if (sql.includes("COUNT(*) as cnt FROM positions WHERE status = 'open'"))
             return { cnt: 0 };
           if (sql.includes("FROM positions WHERE opened_at >=")) return { cnt: 0 };
+          if (sql.includes("SUM(COALESCE(liquidation_value_usdc, current_value_usdc))"))
+            return { total: 0 };
           if (sql.includes("SUM(current_value_usdc)")) return { total: 0 };
           if (sql.includes("FROM bot_runs ORDER BY started_at DESC LIMIT 1")) {
             return { run_id: "run-1", mode: "simulation" };

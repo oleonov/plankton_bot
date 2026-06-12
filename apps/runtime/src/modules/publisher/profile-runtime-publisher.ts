@@ -131,6 +131,21 @@ export class ProfileRuntimePublisher implements RuntimeModule {
         )
         .get() as { total: number }
     ).total;
+    const liquidationValue = (
+      this.deps.ledgerDb
+        .prepare(
+          `SELECT COALESCE(SUM(COALESCE(liquidation_value_usdc, current_value_usdc)), 0) as total
+             FROM positions WHERE status IN ('open','dust')`,
+        )
+        .get() as { total: number }
+    ).total;
+    const costBasis = (
+      this.deps.ledgerDb
+        .prepare(
+          "SELECT COALESCE(SUM(cost_basis_usdc), 0) as total FROM positions WHERE status IN ('open','dust')",
+        )
+        .get() as { total: number }
+    ).total;
 
     const isLiveLite = this.deps.profile === "live-lite";
 
@@ -144,6 +159,9 @@ export class ProfileRuntimePublisher implements RuntimeModule {
     }
 
     const equity = isLiveLite ? walletBalanceUsdc! + positionValue : balanceUsdc! + positionValue;
+    const liquidationEquity = isLiveLite
+      ? walletBalanceUsdc! + liquidationValue
+      : balanceUsdc! + liquidationValue;
 
     const realizedPnl = this.reader.readRealizedPnl();
 
@@ -151,14 +169,20 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       .prepare(
         `INSERT INTO portfolio_snapshots
           (profile, equity_usdc, wallet_usdc, position_value_usdc,
+           liquidation_value_usdc, unrealized_pnl_mid_usdc,
+           unrealized_pnl_liquidation_usdc, total_equity_liquidation_usdc,
            realized_pnl_usdc, open_value_usdc, captured_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         this.deps.profile,
         equity,
         walletBalanceUsdc ?? null,
         positionValue,
+        liquidationValue,
+        positionValue - costBasis,
+        liquidationValue - costBasis,
+        liquidationEquity,
         realizedPnl,
         profileMetrics.totalExposureUsdc,
         new Date().toISOString(),

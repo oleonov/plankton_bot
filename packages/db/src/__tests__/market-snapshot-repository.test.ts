@@ -79,6 +79,55 @@ describe("SqliteMarketSnapshotRepository", () => {
     expect(count.c).toBe(0);
   });
 
+  it("saveBatchWithPositionValuations writes snapshots and liquidation values together", () => {
+    conn.db
+      .prepare(
+        `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, updated_at)
+       VALUES ('pos-1', 'tok-1', 'cond-1', 'buy', 100, 0.1, 10, 50, 0, 'open',
+               '2026-06-12T00:00:00.000Z', '2026-06-12T00:00:00.000Z')`,
+      )
+      .run();
+
+    repo.saveBatchWithPositionValuations?.(
+      [makeSnapshot()],
+      [
+        {
+          tokenId: createTokenId("tok-1"),
+          currentValueUsdc: 50,
+          liquidationValueUsdc: 21.4,
+          liquidationPrice: 0.214,
+          liquidationDepthExhausted: false,
+          updatedAt: "2026-06-12T12:00:00.000Z",
+        },
+      ],
+    );
+
+    const snapshotCount = conn.db
+      .prepare("SELECT COUNT(*) AS count FROM market_snapshots")
+      .get() as {
+      count: number;
+    };
+    expect(snapshotCount.count).toBe(1);
+
+    const position = conn.db
+      .prepare(
+        `SELECT current_value_usdc, liquidation_value_usdc, liquidation_price,
+                liquidation_depth_exhausted, liquidation_value_updated_at, updated_at
+         FROM positions WHERE token_id = 'tok-1'`,
+      )
+      .get() as Record<string, unknown>;
+    expect(position).toEqual({
+      current_value_usdc: 50,
+      liquidation_value_usdc: 21.4,
+      liquidation_price: 0.214,
+      liquidation_depth_exhausted: 0,
+      liquidation_value_updated_at: "2026-06-12T12:00:00.000Z",
+      updated_at: "2026-06-12T12:00:00.000Z",
+    });
+  });
+
   it("prune deletes rows older than cutoff", () => {
     repo.saveBatch([
       makeSnapshot({ capturedAt: "2026-03-10T00:00:00.000Z" }),

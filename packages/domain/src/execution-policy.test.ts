@@ -1072,4 +1072,73 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("sellLoopGuard must be an object"))).toBe(true);
     expect(policy.sellLoopGuard).toEqual(DEFAULT_EXECUTION_POLICY.sellLoopGuard);
   });
+
+  it("defaults Track R honest pricing off with non-zero conservative fallbacks", () => {
+    expect(DEFAULT_EXECUTION_POLICY.trackR).toEqual({
+      enabled: false,
+      safetyMargin: 0.005,
+      requireFullDepth: true,
+      universalFallbackRate: 0.05,
+      maxSaneThreshold: 1.5,
+    });
+
+    const { policy, issues } = parseExecutionPolicyJson(JSON.stringify({ entryPriceCeiling: 0.4 }));
+    expect(issues).toHaveLength(0);
+    expect(policy.trackR).toEqual(DEFAULT_EXECUTION_POLICY.trackR);
+  });
+
+  it("parses custom Track R honest pricing values", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        trackR: {
+          enabled: true,
+          safetyMargin: 0.01,
+          requireFullDepth: false,
+          universalFallbackRate: 0.06,
+          maxSaneThreshold: 1.25,
+        },
+      }),
+    );
+
+    expect(issues).toHaveLength(0);
+    expect(policy.trackR).toEqual({
+      enabled: true,
+      safetyMargin: 0.01,
+      requireFullDepth: false,
+      universalFallbackRate: 0.06,
+      maxSaneThreshold: 1.25,
+    });
+  });
+
+  it("ignores removed Track R shadowOnly config instead of weakening the static floor", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        trackR: {
+          enabled: false,
+          shadowOnly: true,
+        },
+      }),
+    );
+
+    expect(issues).toHaveLength(0);
+    expect(policy.trackR).toEqual(DEFAULT_EXECUTION_POLICY.trackR);
+    expect("shadowOnly" in policy.trackR).toBe(false);
+  });
+
+  it("rejects unsafe Track R numeric values and falls back", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        trackR: {
+          safetyMargin: -1,
+          universalFallbackRate: 0,
+          maxSaneThreshold: 100,
+        },
+      }),
+    );
+
+    expect(policy.trackR).toEqual(DEFAULT_EXECUTION_POLICY.trackR);
+    expect(issues.some((i) => i.includes("trackR.safetyMargin"))).toBe(true);
+    expect(issues.some((i) => i.includes("trackR.universalFallbackRate"))).toBe(true);
+    expect(issues.some((i) => i.includes("trackR.maxSaneThreshold"))).toBe(true);
+  });
 });

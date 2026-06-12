@@ -35,6 +35,7 @@ import type {
   SellCapacityPolicy,
   SellLoopGuardPolicy,
   TakerAtProfitPolicy,
+  TrackRHonestPricingPolicy,
   DynamicChainCapPolicyConfig,
 } from "./types.js";
 import type { AlgoState } from "./algo-engine.js";
@@ -142,6 +143,14 @@ export const DEFAULT_TAKER_AT_PROFIT_POLICY: TakerAtProfitPolicy = {
   maxSpreadTicks: 6,
   rules: "all-sell",
   requireOpportunisticSellSide: true,
+};
+
+export const DEFAULT_TRACK_R_HONEST_PRICING_POLICY: TrackRHonestPricingPolicy = {
+  enabled: false,
+  safetyMargin: 0.005,
+  requireFullDepth: true,
+  universalFallbackRate: 0.05,
+  maxSaneThreshold: 1.5,
 };
 
 export const DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY: ExitTtlByLiquidityPolicyConfig = {
@@ -283,6 +292,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   exitMidpointAnchorTicks: 5,
   opportunisticTaker: DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
   takerAtProfit: DEFAULT_TAKER_AT_PROFIT_POLICY,
+  trackR: DEFAULT_TRACK_R_HONEST_PRICING_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   // Defensive infrastructure timing parameter. Exchange balance settlement
   // typically lands in <2s; 5000ms provides a safe margin. Not R-derived —
@@ -370,6 +380,12 @@ const BOUND_TAKER_SAFETY_BUFFER_MAX = 10;
 const BOUND_TAKER_MIN_NOTIONAL_MAX = 1_000;
 const BOUND_TAKER_AT_PROFIT_RATIO_MIN = 1;
 const BOUND_TAKER_AT_PROFIT_RATIO_MAX = 10;
+const BOUND_TRACK_R_SAFETY_MARGIN_MIN = 0;
+const BOUND_TRACK_R_SAFETY_MARGIN_MAX = 0.1;
+const BOUND_TRACK_R_UNIVERSAL_FALLBACK_MIN = 0.0001;
+const BOUND_TRACK_R_UNIVERSAL_FALLBACK_MAX = 0.2;
+const BOUND_TRACK_R_MAX_SANE_THRESHOLD_MIN = 1;
+const BOUND_TRACK_R_MAX_SANE_THRESHOLD_MAX = 2;
 const BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS = 30_000;
 const BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS = 24 * 60 * 60_000;
 const BOUND_REDEEM_SWEEP_RETRY_COUNT_MAX = 10;
@@ -503,6 +519,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   );
   const opportunisticTaker = parseOpportunisticTaker(obj.opportunisticTaker, issues);
   const takerAtProfit = parseTakerAtProfit(obj.takerAtProfit, issues);
+  const trackR = parseTrackR(obj.trackR, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
   const buyCapacity = parseBuyCapacity(obj.buyCapacity, issues);
@@ -554,6 +571,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       exitMidpointAnchorTicks,
       opportunisticTaker,
       takerAtProfit,
+      trackR,
       orderLifetime,
       postBuyFillSellCooldownMs,
       repriceOnOutbid,
@@ -1034,6 +1052,52 @@ function parseTakerAtProfit(raw: unknown, issues: string[]): TakerAtProfitPolicy
       DEFAULT_TAKER_AT_PROFIT_POLICY.requireOpportunisticSellSide,
       issues,
       "takerAtProfit.requireOpportunisticSellSide",
+    ),
+  };
+}
+
+function parseTrackR(raw: unknown, issues: string[]): TrackRHonestPricingPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("trackR must be an object");
+    return DEFAULT_TRACK_R_HONEST_PRICING_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.enabled,
+      issues,
+      "trackR.enabled",
+    ),
+    safetyMargin: clampedNumber(
+      obj.safetyMargin,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.safetyMargin,
+      BOUND_TRACK_R_SAFETY_MARGIN_MIN,
+      BOUND_TRACK_R_SAFETY_MARGIN_MAX,
+      issues,
+      "trackR.safetyMargin",
+    ),
+    requireFullDepth: booleanOr(
+      obj.requireFullDepth,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.requireFullDepth,
+      issues,
+      "trackR.requireFullDepth",
+    ),
+    universalFallbackRate: clampedNumber(
+      obj.universalFallbackRate,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.universalFallbackRate,
+      BOUND_TRACK_R_UNIVERSAL_FALLBACK_MIN,
+      BOUND_TRACK_R_UNIVERSAL_FALLBACK_MAX,
+      issues,
+      "trackR.universalFallbackRate",
+    ),
+    maxSaneThreshold: clampedNumber(
+      obj.maxSaneThreshold,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.maxSaneThreshold,
+      BOUND_TRACK_R_MAX_SANE_THRESHOLD_MIN,
+      BOUND_TRACK_R_MAX_SANE_THRESHOLD_MAX,
+      issues,
+      "trackR.maxSaneThreshold",
     ),
   };
 }

@@ -22,6 +22,7 @@ import type {
   ExecutionPolicyObservationRepository,
   NormalizedMarket,
   OrderRepository,
+  OrderBookSnapshot,
   PositionRepository,
   ProfileId,
   RuntimeEventMap,
@@ -30,9 +31,15 @@ import type {
   Order,
   RiskEventRepository,
   SellShadowAvgEntrySource,
+  TrackRFeeQuote,
+  TrackRFeeRateSource,
+  TrackRHonestPricingPolicy,
+  TrackRTakerFeeProvider,
 } from "@krabs/domain";
 import {
   canPlaceBuyOrderForMarket,
+  computeEffectiveFillPrice,
+  computeTrackRMinGrossExitRatio,
   createCommandId,
   isAlive,
   isSellTimeoutReplacement,
@@ -80,6 +87,13 @@ const MIN_NOTIONAL_EPSILON = 1e-9;
 const D4_RULE_ID = "D4";
 const D4_MIN_EFFECTIVE_TICK_SIZE = 0.01;
 const TAKER_BELOW_MARGIN_REASON = "taker-below-margin";
+const DEFAULT_TRACK_R_RUNTIME_POLICY: TrackRHonestPricingPolicy = {
+  enabled: false,
+  safetyMargin: 0.005,
+  requireFullDepth: true,
+  universalFallbackRate: 0.05,
+  maxSaneThreshold: 1.5,
+};
 
 // ADR-013 defaults exposed for callers that don't thread the policy provider
 // (tests, scenario runner). Runtime always reads the live policy via
@@ -117,6 +131,8 @@ export interface SignalToOrderBridgeDeps {
   runtimeMetrics?: RuntimeMetricWriter | undefined;
   /** Per-event forensic audit for successful taker-at-profit activations. */
   riskEventRepo?: RiskEventRepository | undefined;
+  /** Track R honest pricing fee source. Optional so disabled/default deployments keep old behavior. */
+  trackRFeeProvider?: TrackRTakerFeeProvider | undefined;
   signalPathTelemetry?: SignalPathTelemetry | undefined;
   /**
    * Defense-in-depth BUY-side guard. Mirrors the check that
@@ -172,6 +188,15 @@ export class SignalToOrderBridge {
 
   private getTakerAtProfitPolicy(policy: ExecutionPolicy): ExecutionPolicy["takerAtProfit"] {
     return policy.takerAtProfit ?? DEFAULT_EXECUTION_POLICY.takerAtProfit;
+  }
+
+  private getTrackRPolicy(policy: ExecutionPolicy): TrackRHonestPricingPolicy {
+    return policy.trackR ?? DEFAULT_EXECUTION_POLICY.trackR ?? DEFAULT_TRACK_R_RUNTIME_POLICY;
+  }
+
+  private isTrackRActive(policy: ExecutionPolicy): boolean {
+    const cfg = this.getTrackRPolicy(policy);
+    return cfg.enabled;
   }
 
   private now(): number {
@@ -326,8 +351,15 @@ export class SignalToOrderBridge {
       // embedded snapshot's bestBid/bestAsk.
       const pricing = await this.resolvePricingMarket(signal, baseMarket);
       const market = pricing.market;
+      const trackRFeeQuote = await this.resolveTrackRFeeQuote(signal, market, policy);
 
-      const rawExecutionTerms = this.resolveExecutionTerms(signal, market, policy);
+      const rawExecutionTerms = this.resolveExecutionTerms(
+        signal,
+        market,
+        policy,
+        pricing.book ?? null,
+        trackRFeeQuote,
+      );
       const canary = this.buildDeadSideCanary(signal, market, policy);
       // F2: shadow telemetry measures the raw (pre-cap) anchor; the cap only
       // governs the price that is actually placed.
@@ -434,7 +466,12 @@ export class SignalToOrderBridge {
         return;
       }
 
-      const takerMarginBlock = this.resolveTakerBelowMarginBlock(signal, executionTerms, policy);
+      const takerMarginBlock = this.resolveTakerBelowMarginBlock(
+        signal,
+        executionTerms,
+        policy,
+        trackRFeeQuote,
+      );
       if (takerMarginBlock) {
         this.log.info(
           {
@@ -1014,6 +1051,7 @@ export class SignalToOrderBridge {
     baseMarket: NormalizedMarket,
   ): Promise<{
     market: NormalizedMarket;
+    book?: OrderBookSnapshot | null;
     cacheStatus: CandidateBookResolution["status"] | "disabled" | "base-market" | "embedded";
   }> {
     if (!this.deps.candidateBookCache) {
@@ -1025,6 +1063,7 @@ export class SignalToOrderBridge {
     if (freshEntry) {
       return {
         market: applyOrderBookToMarket(baseMarket, freshEntry),
+        book: freshEntry.book,
         cacheStatus: "fresh-cache",
       };
     }
@@ -1041,6 +1080,7 @@ export class SignalToOrderBridge {
     if (wsEntry) {
       return {
         market: applyOrderBookToMarket(baseMarket, wsEntry),
+        book: wsEntry.book,
         cacheStatus: "fresh-cache",
       };
     }
@@ -1052,11 +1092,50 @@ export class SignalToOrderBridge {
     if (resolution.entry) {
       return {
         market: applyOrderBookToMarket(baseMarket, resolution.entry),
+        book: resolution.entry.book,
         cacheStatus: resolution.status,
       };
     }
 
     return { market: baseMarket, cacheStatus: resolution.status };
+  }
+
+  private async resolveTrackRFeeQuote(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    policy: ExecutionPolicy,
+  ): Promise<TrackRFeeQuote | null> {
+    const cfg = this.getTrackRPolicy(policy);
+    if (!this.isTrackRActive(policy)) return null;
+    if (signal.side !== "sell" || !this.getTakerAtProfitPolicy(policy).enabled) return null;
+
+    const fallbackQuote: TrackRFeeQuote = {
+      rate: cfg.universalFallbackRate,
+      exponent: 1,
+      source: "fallback_universal",
+    };
+
+    try {
+      const quote = await this.deps.trackRFeeProvider?.resolveFeeQuote({
+        conditionId: signal.conditionId,
+        tokenId: signal.tokenId,
+        category: market.regime,
+        policy: cfg,
+        nowMs: this.now(),
+      });
+      if (quote && Number.isFinite(quote.rate) && quote.rate >= 0) {
+        this.recordTrackRFeeSourceMetric(signal, quote.source);
+        return quote;
+      }
+    } catch (err) {
+      this.log.warn(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
+        "Track R fee provider failed; using universal fallback",
+      );
+    }
+
+    this.recordTrackRFeeSourceMetric(signal, fallbackQuote.source);
+    return fallbackQuote;
   }
 
   /**
@@ -1172,6 +1251,23 @@ export class SignalToOrderBridge {
     }
   }
 
+  private resolveSellPositionSize(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+  ): number | null {
+    const repo = this.deps.positionRepo;
+    if (!repo) return null;
+    try {
+      const position = repo.findByTokenId(signal.tokenId);
+      return finitePositiveOrNull(position?.size ?? null);
+    } catch (err) {
+      this.log.warn(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
+        "Track R could not read position size",
+      );
+      return null;
+    }
+  }
+
   /**
    * Track P F2 — clamp a resolved SELL execution price to the Plankton tier cap
    * (avgEntry * markup, ceiling 0.97). Applied after the SELL pricing shadow is
@@ -1201,6 +1297,8 @@ export class SignalToOrderBridge {
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
     policy: ExecutionPolicy,
+    book: OrderBookSnapshot | null,
+    trackRFeeQuote: TrackRFeeQuote | null,
   ): ExecutionTermsResolution {
     const isRelayer = this.deps.liveLiteGuard?.getWalletMode() === "relayer";
     const pricing = policy.pricing;
@@ -1268,6 +1366,8 @@ export class SignalToOrderBridge {
       policy,
       pricingTickSize,
       effectiveTick,
+      book,
+      trackRFeeQuote,
     );
     if (takerAtProfitTerms) return takerAtProfitTerms;
 
@@ -1426,6 +1526,8 @@ export class SignalToOrderBridge {
     policy: ExecutionPolicy,
     pricingTickSize: number,
     effectiveTick: EffectiveOrderTickSize,
+    book: OrderBookSnapshot | null,
+    trackRFeeQuote: TrackRFeeQuote | null,
   ): ExecutionTermsResolution | null {
     const cfg = this.getTakerAtProfitPolicy(policy);
     if (!cfg.enabled || signal.side !== "sell") return null;
@@ -1470,15 +1572,117 @@ export class SignalToOrderBridge {
       return null;
     }
 
-    const minExit = avgEntry * cfg.minGrossExitRatio;
-    if (bestBid + 1e-9 < minExit) {
-      this.recordTakerAtProfitMetric(signal, "blocked", "below_profit_margin", {
-        avgEntry,
-        bestBid,
-        minExit,
-        minGrossExitRatio: cfg.minGrossExitRatio,
-      });
-      return null;
+    let minGrossExitRatio = cfg.minGrossExitRatio;
+    let effectiveFillPrice: number | null = null;
+    let worstFillPrice: number | null = null;
+    let liquidityAvailable: number | null = null;
+    let targetSize: number | null = null;
+    let depthExhausted: boolean | null = null;
+    let feeRate: number | null = null;
+    let feeExponent: number | null = null;
+    let feeSource: TrackRFeeRateSource | null = null;
+    const trackR = this.getTrackRPolicy(policy);
+
+    if (this.isTrackRActive(policy)) {
+      const positionSize = this.resolveSellPositionSize(signal);
+      targetSize = positionSize ?? null;
+      if (!book || positionSize == null) {
+        this.recordTrackRBlockedDepth(signal, {
+          reason: !book ? "missing_book" : "missing_position_size",
+          liquidity_available: null,
+          target_size: targetSize,
+        });
+        if (trackR.enabled) return null;
+      } else {
+        const fill = computeEffectiveFillPrice(book, positionSize, "sell");
+        effectiveFillPrice = fill.effectiveFillPrice;
+        worstFillPrice = fill.worstFillPrice;
+        liquidityAvailable = fill.liquidityAvailable;
+        targetSize = fill.targetSize;
+        depthExhausted = fill.exhausted;
+        this.recordTrackRMetric(signal, "track_r_effective_fill_used", {
+          effective_fill_price: effectiveFillPrice,
+          best_bid: bestBid,
+          target_size: targetSize,
+          liquidity_available: liquidityAvailable,
+          exhausted: depthExhausted,
+        });
+        if (
+          effectiveFillPrice != null &&
+          bestBid > 0 &&
+          (bestBid - effectiveFillPrice) / bestBid > 0.05
+        ) {
+          this.recordTrackRMetric(signal, "track_r_effective_fill_thin_book", {
+            effective_fill_price: effectiveFillPrice,
+            best_bid: bestBid,
+            slippage_pct: (bestBid - effectiveFillPrice) / bestBid,
+          });
+        }
+        if (fill.exhausted && trackR.requireFullDepth) {
+          this.recordTrackRBlockedDepth(signal, {
+            reason: "insufficient_full_depth",
+            liquidity_available: fill.liquidityAvailable,
+            target_size: fill.targetSize,
+          });
+          return null;
+        }
+        const feeQuote = trackRFeeQuote ?? {
+          rate: trackR.universalFallbackRate,
+          exponent: 1,
+          source: "fallback_universal" as const,
+        };
+        feeRate = feeQuote.rate;
+        feeExponent = feeQuote.exponent;
+        feeSource = feeQuote.source;
+        if (effectiveFillPrice != null) {
+          minGrossExitRatio = computeTrackRMinGrossExitRatio({
+            effectiveFillPrice,
+            rate: feeQuote.rate,
+            exponent: feeQuote.exponent,
+            safetyMargin: trackR.safetyMargin,
+          });
+          this.recordTrackRThresholdSample(signal, {
+            effectiveFillPrice,
+            avgEntry,
+            minGrossExitRatio,
+            feeQuote,
+            mode: "gate",
+          });
+        }
+        const invalidThreshold =
+          !Number.isFinite(minGrossExitRatio) || minGrossExitRatio > trackR.maxSaneThreshold;
+        const minExit = avgEntry * minGrossExitRatio;
+        if (invalidThreshold || effectiveFillPrice == null || effectiveFillPrice + 1e-9 < minExit) {
+          this.recordTrackRBlockedMargin(signal, {
+            mode: "gate",
+            avg_entry: avgEntry,
+            effective_fill_price: effectiveFillPrice,
+            min_exit: minExit,
+            min_gross_exit_ratio: minGrossExitRatio,
+            fee_source: feeQuote.source,
+            fee_rate: feeQuote.rate,
+          });
+          if (trackR.enabled) return null;
+        } else {
+          this.recordTrackRMetric(signal, "track_r_taker_at_profit_passed", {
+            effective_fill_price: effectiveFillPrice,
+            min_exit: minExit,
+            min_gross_exit_ratio: minGrossExitRatio,
+            fee_source: feeQuote.source,
+          });
+        }
+      }
+    } else {
+      const minExit = avgEntry * cfg.minGrossExitRatio;
+      if (bestBid + 1e-9 < minExit) {
+        this.recordTakerAtProfitMetric(signal, "blocked", "below_profit_margin", {
+          avgEntry,
+          bestBid,
+          minExit,
+          minGrossExitRatio: cfg.minGrossExitRatio,
+        });
+        return null;
+      }
     }
 
     const minSizeBlock = this.resolveTakerMinSizeBlock(
@@ -1516,8 +1720,16 @@ export class SignalToOrderBridge {
         takerAtProfit: {
           avgEntry,
           bestBid,
-          minGrossExitRatio: cfg.minGrossExitRatio,
+          minGrossExitRatio,
           spreadTicks,
+          effectiveFillPrice,
+          worstFillPrice,
+          liquidityAvailable,
+          targetSize,
+          depthExhausted,
+          feeRate,
+          feeExponent,
+          feeSource,
         },
       },
       signal,
@@ -1669,6 +1881,7 @@ export class SignalToOrderBridge {
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     executionTerms: Extract<ExecutionTermsResolution, { kind: "ok" }>,
     policy: ExecutionPolicy,
+    trackRFeeQuote: TrackRFeeQuote | null,
   ): {
     avgEntry: number | null;
     minExit: number | null;
@@ -1693,12 +1906,69 @@ export class SignalToOrderBridge {
       };
     }
 
-    const minExit = avgEntry * cfg.minGrossExitRatio;
+    let minGrossExitRatio = cfg.minGrossExitRatio;
+    if (this.isTrackRActive(policy)) {
+      const trackR = this.getTrackRPolicy(policy);
+      const feeQuote = trackRFeeQuote ?? {
+        rate: trackR.universalFallbackRate,
+        exponent: 1,
+        source: "fallback_universal" as const,
+      };
+      minGrossExitRatio = computeTrackRMinGrossExitRatio({
+        effectiveFillPrice: executionTerms.price,
+        rate: feeQuote.rate,
+        exponent: feeQuote.exponent,
+        safetyMargin: trackR.safetyMargin,
+      });
+      this.recordTrackRThresholdSample(signal, {
+        effectiveFillPrice: executionTerms.price,
+        avgEntry,
+        minGrossExitRatio,
+        feeQuote,
+        mode: "invariant",
+      });
+      if (!Number.isFinite(minGrossExitRatio) || minGrossExitRatio > trackR.maxSaneThreshold) {
+        this.recordTrackRBlockedMargin(signal, {
+          mode: "invariant",
+          avg_entry: avgEntry,
+          effective_fill_price: executionTerms.price,
+          min_exit: null,
+          min_gross_exit_ratio: minGrossExitRatio,
+          fee_source: feeQuote.source,
+          fee_rate: feeQuote.rate,
+        });
+        return {
+          avgEntry,
+          minExit: null,
+          minGrossExitRatio,
+          reason: "below_margin",
+        };
+      }
+    }
+
+    const minExit = avgEntry * minGrossExitRatio;
     if (executionTerms.price + 1e-9 >= minExit) return null;
+    if (this.isTrackRActive(policy)) {
+      const trackR = this.getTrackRPolicy(policy);
+      const feeQuote = trackRFeeQuote ?? {
+        rate: trackR.universalFallbackRate,
+        exponent: 1,
+        source: "fallback_universal" as const,
+      };
+      this.recordTrackRBlockedMargin(signal, {
+        mode: "invariant",
+        avg_entry: avgEntry,
+        effective_fill_price: executionTerms.price,
+        min_exit: minExit,
+        min_gross_exit_ratio: minGrossExitRatio,
+        fee_source: feeQuote.source,
+        fee_rate: feeQuote.rate,
+      });
+    }
     return {
       avgEntry,
       minExit,
-      minGrossExitRatio: cfg.minGrossExitRatio,
+      minGrossExitRatio,
       reason: "below_margin",
     };
   }
@@ -1828,6 +2098,91 @@ export class SignalToOrderBridge {
     }
   }
 
+  private recordTrackRFeeSourceMetric(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    source: TrackRFeeRateSource,
+  ): void {
+    const suffix =
+      source === "fallback_universal"
+        ? "fallback_universal"
+        : source === "fallback_category"
+          ? "fallback_category"
+          : source;
+    this.recordTrackRMetric(signal, `track_r_fee_rate_source_${suffix}`, {});
+  }
+
+  private recordTrackRMetric(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    name: string,
+    details: Record<string, unknown>,
+  ): void {
+    try {
+      this.deps.runtimeMetrics?.writeCounter(
+        name,
+        1,
+        JSON.stringify({
+          side: signal.side,
+          rule: signal.decisionRuleId ?? null,
+          ...details,
+        }),
+      );
+    } catch (err) {
+      this.log.debug(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId), metric: name },
+        "failed to record Track R metric",
+      );
+    }
+  }
+
+  private recordTrackRBlockedDepth(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    details: Record<string, unknown>,
+  ): void {
+    this.recordTrackRMetric(signal, "track_r_taker_at_profit_blocked_depth", details);
+  }
+
+  private recordTrackRBlockedMargin(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    details: Record<string, unknown>,
+  ): void {
+    this.recordTrackRMetric(signal, "track_r_taker_at_profit_blocked_margin", details);
+  }
+
+  private recordTrackRThresholdSample(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    input: {
+      effectiveFillPrice: number;
+      avgEntry: number;
+      minGrossExitRatio: number;
+      feeQuote: TrackRFeeQuote;
+      mode: "gate" | "invariant";
+    },
+  ): void {
+    try {
+      this.deps.riskEventRepo?.insert({
+        eventType: "track_r_margin_threshold_sampled",
+        payload: {
+          tokenId: String(signal.tokenId),
+          conditionId: String(signal.conditionId),
+          decisionRuleId: signal.decisionRuleId ?? null,
+          mode: input.mode,
+          effectiveFillPrice: input.effectiveFillPrice,
+          avgEntryPrice: input.avgEntry,
+          minGrossExitRatio: input.minGrossExitRatio,
+          feeRate: input.feeQuote.rate,
+          feeExponent: input.feeQuote.exponent,
+          feeSource: input.feeQuote.source,
+          timestamp: new Date(this.now()).toISOString(),
+        },
+      });
+    } catch (err) {
+      this.log.debug(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
+        "failed to write Track R threshold sample",
+      );
+    }
+  }
+
   private recordTakerAtProfitActivation(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
@@ -1850,12 +2205,22 @@ export class SignalToOrderBridge {
       bestAsk: market.bestAsk ?? null,
       spreadTicks: executionTerms.takerAtProfit.spreadTicks,
       minGrossExitRatio: executionTerms.takerAtProfit.minGrossExitRatio,
+      effectiveFillPrice: executionTerms.takerAtProfit.effectiveFillPrice,
+      worstFillPrice: executionTerms.takerAtProfit.worstFillPrice,
+      liquidityAvailable: executionTerms.takerAtProfit.liquidityAvailable,
+      targetSize: executionTerms.takerAtProfit.targetSize,
+      depthExhausted: executionTerms.takerAtProfit.depthExhausted,
+      feeRate: executionTerms.takerAtProfit.feeRate,
+      feeExponent: executionTerms.takerAtProfit.feeExponent,
+      feeSource: executionTerms.takerAtProfit.feeSource,
       maxSpreadTicks: cfg.maxSpreadTicks,
       timestamp: new Date(this.now()).toISOString(),
     };
     this.recordTakerAtProfitMetric(signal, "activated", null, {
       spread_ticks: executionTerms.takerAtProfit.spreadTicks,
       min_gross_exit_ratio: executionTerms.takerAtProfit.minGrossExitRatio,
+      effective_fill_price: executionTerms.takerAtProfit.effectiveFillPrice,
+      fee_source: executionTerms.takerAtProfit.feeSource,
     });
     try {
       this.deps.riskEventRepo?.insert({
@@ -2174,6 +2539,14 @@ interface TakerAtProfitExecution {
   bestBid: number;
   minGrossExitRatio: number;
   spreadTicks: number;
+  effectiveFillPrice?: number | null;
+  worstFillPrice?: number | null;
+  liquidityAvailable?: number | null;
+  targetSize?: number | null;
+  depthExhausted?: boolean | null;
+  feeRate?: number | null;
+  feeExponent?: number | null;
+  feeSource?: TrackRFeeRateSource | null;
 }
 
 interface SellPricingShadow {

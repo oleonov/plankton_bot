@@ -35,6 +35,7 @@ import type {
   Position,
   LegState,
   NormalizedMarket,
+  OrderBookSnapshot,
   ReconciliationResult,
   RiskDecision,
 } from "./types.js";
@@ -65,6 +66,7 @@ export interface RuntimeEventMap {
 
   MarketSnapshotHeartbeat: {
     readonly markets: readonly NormalizedMarket[];
+    readonly booksByToken?: ReadonlyMap<string, OrderBookSnapshot>;
     readonly timestamp: number;
     readonly reason: "full_lifetime_active_position";
     readonly source: "market-data";

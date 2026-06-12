@@ -1,7 +1,20 @@
 import type Database from "better-sqlite3";
 import type { FillRepository, Fill } from "@krabs/domain";
-import type { OrderId, TokenId, FillId, OrderSide, LiquidityRole } from "@krabs/domain";
-import { createFillId, createOrderId, createTokenId, createConditionId } from "@krabs/domain";
+import type {
+  OrderId,
+  TokenId,
+  FillId,
+  OrderSide,
+  LiquidityRole,
+  ConditionId,
+} from "@krabs/domain";
+import {
+  createFillId,
+  createOrderId,
+  createTokenId,
+  createConditionId,
+  resolvePolymarketTakerFeeRate,
+} from "@krabs/domain";
 
 export class SqliteFillRepository implements FillRepository {
   private static readonly FIND_BY_ORDER_IDS_CHUNK_SIZE = 500;
@@ -92,6 +105,36 @@ export class SqliteFillRepository implements FillRepository {
       .prepare("SELECT * FROM fills ORDER BY filled_at DESC LIMIT ?")
       .all(limit) as Record<string, unknown>[];
     return rows.map((r) => this.rowToFill(r));
+  }
+
+  findRecentTakerFeeRate(conditionId: ConditionId, windowHours: number = 24): number | null {
+    const normalizedWindowHours =
+      Number.isFinite(windowHours) && windowHours > 0 ? windowHours : 24;
+    const since = new Date(Date.now() - normalizedWindowHours * 60 * 60_000).toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT fee_rate_bps
+         FROM fills
+         WHERE condition_id = ?
+           AND liquidity_role = 'taker'
+           AND fee_rate_bps IS NOT NULL
+           AND filled_at >= ?
+         ORDER BY fee_rate_bps ASC`,
+      )
+      .all(conditionId, since) as Array<{ fee_rate_bps: number | null }>;
+
+    if (rows.length < 3) return null;
+    const rates = rows
+      .map(
+        (row) =>
+          resolvePolymarketTakerFeeRate({
+            feeRateBps: Number(row.fee_rate_bps ?? 0),
+          }).rate,
+      )
+      .filter((rate) => Number.isFinite(rate) && rate >= 0)
+      .sort((a, b) => a - b);
+    if (rates.length < 3) return null;
+    return rates[Math.floor(rates.length / 2)] ?? null;
   }
 
   findUnreconciled(): Fill[] {

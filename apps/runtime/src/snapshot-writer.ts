@@ -1,9 +1,13 @@
 import type {
   MarketSnapshotRepository,
+  MarketSnapshotPositionValuation,
   MarketSnapshot,
   NormalizedMarket,
+  OrderBookSnapshot,
+  Position,
   TokenId,
 } from "@krabs/domain";
+import { computeEffectiveFillPrice } from "@krabs/domain";
 
 export interface SnapshotWriterConfig {
   intervalMs: number;
@@ -11,6 +15,23 @@ export interface SnapshotWriterConfig {
   pruneTtlMs: number;
   enabled?: () => boolean;
   preserveTokenIds?: () => readonly TokenId[];
+  positionValuation?: SnapshotPositionValuationConfig;
+}
+
+export interface SnapshotPositionValuationConfig {
+  activePositions: () => readonly Position[];
+  runtimeMetrics?: {
+    writeCounter?: (metricName: string, value?: number, labels?: string | null) => void;
+    writeEvent?: (
+      metricName: string,
+      value?: number,
+      labels?: string | null,
+      capturedAt?: string,
+    ) => void;
+  };
+  log?: {
+    warn?: (obj: Record<string, unknown>, msg: string) => void;
+  };
 }
 
 export class SnapshotWriter {
@@ -33,7 +54,11 @@ export class SnapshotWriter {
     this.maybePrune(timestamp);
   }
 
-  onHeartbeat(markets: readonly NormalizedMarket[], timestamp: number): void {
+  onHeartbeat(
+    markets: readonly NormalizedMarket[],
+    timestamp: number,
+    booksByToken?: ReadonlyMap<string, OrderBookSnapshot>,
+  ): void {
     if (this.config.enabled && !this.config.enabled()) return;
 
     const batch = this.buildBatch(markets, timestamp, (tokenId) => {
@@ -41,7 +66,8 @@ export class SnapshotWriter {
       const lastHeartbeat = this.lastHeartbeatWrittenAt.get(tokenId) ?? 0;
       return Math.max(lastReal, lastHeartbeat);
     });
-    this.writeBatch(batch, timestamp, this.lastHeartbeatWrittenAt);
+    const valuations = this.buildPositionValuations(batch, markets, timestamp, booksByToken);
+    this.writeBatch(batch, timestamp, this.lastHeartbeatWrittenAt, valuations);
     this.maybePrune(timestamp);
   }
 
@@ -74,10 +100,131 @@ export class SnapshotWriter {
     batch: readonly MarketSnapshot[],
     timestamp: number,
     writeState: Map<TokenId, number>,
+    valuations: readonly MarketSnapshotPositionValuation[] = [],
   ): void {
     if (batch.length === 0) return;
-    this.repo.saveBatch([...batch]);
+    if (valuations.length > 0 && this.repo.saveBatchWithPositionValuations) {
+      this.repo.saveBatchWithPositionValuations([...batch], [...valuations]);
+    } else {
+      this.repo.saveBatch([...batch]);
+    }
     for (const s of batch) writeState.set(s.tokenId, timestamp);
+  }
+
+  private buildPositionValuations(
+    batch: readonly MarketSnapshot[],
+    markets: readonly NormalizedMarket[],
+    timestamp: number,
+    booksByToken?: ReadonlyMap<string, OrderBookSnapshot>,
+  ): MarketSnapshotPositionValuation[] {
+    const valuation = this.config.positionValuation;
+    if (!valuation || batch.length === 0) return [];
+
+    const batchTokenIds = new Set(batch.map((snapshot) => String(snapshot.tokenId)));
+    const marketByToken = new Map(markets.map((market) => [String(market.tokenId), market]));
+    const positionByToken = new Map(
+      valuation.activePositions().map((position) => [String(position.tokenId), position]),
+    );
+    const updatedAt = new Date(timestamp).toISOString();
+    const rows: MarketSnapshotPositionValuation[] = [];
+
+    for (const tokenId of batchTokenIds) {
+      const position = positionByToken.get(tokenId);
+      const market = marketByToken.get(tokenId);
+      if (!position || !market) continue;
+
+      const currentValueUsdc =
+        typeof market.midPrice === "number" && Number.isFinite(market.midPrice)
+          ? position.size * market.midPrice
+          : null;
+      const book = booksByToken?.get(tokenId) ?? null;
+      const liquidation = this.computeLiquidation(position, book);
+      rows.push({
+        tokenId: position.tokenId,
+        currentValueUsdc,
+        liquidationValueUsdc: liquidation.valueUsdc,
+        liquidationPrice: liquidation.price,
+        liquidationDepthExhausted: liquidation.depthExhausted,
+        updatedAt,
+      });
+      this.recordLiquidationMetrics({
+        tokenId,
+        currentValueUsdc,
+        liquidationValueUsdc: liquidation.valueUsdc,
+        skippedReason: liquidation.skippedReason,
+        updatedAt,
+      });
+    }
+
+    return rows;
+  }
+
+  private computeLiquidation(
+    position: Position,
+    book: OrderBookSnapshot | null,
+  ): {
+    valueUsdc: number;
+    price: number;
+    depthExhausted: boolean;
+    skippedReason: "missing_book" | null;
+  } {
+    if (!book || book.bids.length === 0 || position.size <= 0) {
+      return { valueUsdc: 0, price: 0, depthExhausted: true, skippedReason: "missing_book" };
+    }
+    const fill = computeEffectiveFillPrice(book, position.size, "sell");
+    if (fill.effectiveFillPrice == null) {
+      return { valueUsdc: 0, price: 0, depthExhausted: true, skippedReason: "missing_book" };
+    }
+    const valueUsdc = fill.effectiveFillPrice * fill.liquidityAvailable;
+    return {
+      valueUsdc,
+      price: fill.effectiveFillPrice,
+      depthExhausted: fill.exhausted,
+      skippedReason: null,
+    };
+  }
+
+  private recordLiquidationMetrics(args: {
+    tokenId: string;
+    currentValueUsdc: number | null;
+    liquidationValueUsdc: number;
+    skippedReason: "missing_book" | null;
+    updatedAt: string;
+  }): void {
+    const metrics = this.config.positionValuation?.runtimeMetrics;
+    if (args.skippedReason) {
+      metrics?.writeCounter?.(
+        "track_r_liquidation_compute_skipped_no_book",
+        1,
+        JSON.stringify({ reason: args.skippedReason }),
+      );
+    } else {
+      metrics?.writeCounter?.(
+        "track_r_liquidation_computed_total",
+        1,
+        JSON.stringify({ outcome: "computed" }),
+      );
+    }
+    if (typeof args.currentValueUsdc === "number" && args.currentValueUsdc > 0) {
+      const ratio = args.liquidationValueUsdc / args.currentValueUsdc;
+      metrics?.writeEvent?.(
+        "track_r_liquidation_value_vs_mid_ratio",
+        ratio,
+        JSON.stringify({ tokenId: args.tokenId }),
+        args.updatedAt,
+      );
+      if (ratio > 1.01) {
+        this.config.positionValuation?.log?.warn?.(
+          {
+            tokenId: args.tokenId,
+            currentValueUsdc: args.currentValueUsdc,
+            liquidationValueUsdc: args.liquidationValueUsdc,
+            ratio,
+          },
+          "Track R liquidation value exceeds current mid value",
+        );
+      }
+    }
   }
 
   private maybePrune(timestamp: number): void {
