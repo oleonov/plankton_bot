@@ -872,6 +872,41 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled[0].command.reason).toBe("downpriced_reprice");
   });
 
+  it("excludes S1_LADDER SELL orders at scan level while processing non-S1 exits normally", async () => {
+    const s1Order = makeOrder({
+      orderId: createOrderId("ord-s1"),
+      clientOrderId: "s1-client" as ClientOrderId,
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+      decisionRuleId: "S1_LADDER",
+    });
+    const normalOrder = makeOrder({
+      orderId: createOrderId("ord-normal"),
+      clientOrderId: "normal-client" as ClientOrderId,
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+      decisionRuleId: "D8_PROFIT_RATIO",
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(s1Order, 0.23, new Map(), {
+      extraOpenOrders: [normalOrder],
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.orderId).toBe(normalOrder.orderId);
+  });
+
   it("downprice-reprices a SELL when the best bid is six ticks lower", async () => {
     const order = makeOrder({
       side: "sell",

@@ -1,4 +1,5 @@
 import type { SellLoopGuardPolicy } from "./types.js";
+import { S1_LADDER_RULE_ID } from "./ladder-construction.js";
 
 // Loop guard — token-level SELL circuit breaker. Counts realized no-op SELL
 // outcomes (local post-only-cross skips and exchange/gateway no-order-id
@@ -130,7 +131,9 @@ export function resetSellLoopGuardBucket(bucket: TokenLoopBucket): void {
 export function classifySellLoopGuardSkip(args: {
   side: string;
   reasonCode: string;
+  decisionRuleId?: string | null;
 }): LoopGuardOutcomeKind | null {
+  if (args.decisionRuleId === S1_LADDER_RULE_ID) return null;
   if (args.side !== "sell") return null;
   if (args.reasonCode === "post-only-cross-pre-submit") return "post_only_cross_pre_submit";
   return null;
@@ -141,7 +144,9 @@ export function classifySellLoopGuardReject(args: {
   side: string;
   reason?: string | null;
   exchangeErrorMessage?: string | null;
+  decisionRuleId?: string | null;
 }): LoopGuardOutcomeKind | null {
+  if (args.decisionRuleId === S1_LADDER_RULE_ID) return null;
   if (args.side !== "sell") return null;
   const message = [args.reason, args.exchangeErrorMessage].filter(Boolean).join(" | ");
   if (EXCHANGE_NO_ID_MESSAGES.some((m) => message.includes(m))) return "exchange_no_order_id";

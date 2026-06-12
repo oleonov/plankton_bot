@@ -44,6 +44,7 @@ import {
   normalizeSellSizeForMinOrder,
   resolveDynamicChainCapDetails,
   shouldBlockRepriceChain,
+  S1_LADDER_RULE_ID,
 } from "@krabs/domain";
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
@@ -983,6 +984,10 @@ export class ExecutionModule implements RuntimeModule {
     return this.deps.executionPolicy?.().sellCapacity;
   }
 
+  private currentTrackS1Policy(): ExecutionPolicy["trackS1"] | undefined {
+    return this.deps.executionPolicy?.().trackS1;
+  }
+
   private currentOrderCapacityPolicy(): ExecutionPolicy["orderCapacity"] | undefined {
     return this.deps.executionPolicy?.().orderCapacity;
   }
@@ -1110,7 +1115,7 @@ export class ExecutionModule implements RuntimeModule {
 
     const perTokenSell = evaluatePerTokenOrderCapacity({
       side: "sell",
-      maxOpenOrdersPerToken: sellPolicy.maxOpenSellOrdersPerToken,
+      maxOpenOrdersPerToken: this.resolveMaxOpenSellOrdersPerToken(cmd, sellPolicy),
       openOrdersForToken: getOpenOrderCountForToken(reservations, cmd.tokenId, "sell"),
       enabled: sellPolicy.enabled,
     });
@@ -1262,6 +1267,18 @@ export class ExecutionModule implements RuntimeModule {
         orderSize: cmd.size,
       },
     };
+  }
+
+  private resolveMaxOpenSellOrdersPerToken(
+    cmd: PlaceOrderCommand,
+    sellPolicy: ReturnType<typeof normalizeSellCapacityPolicy>,
+  ): number {
+    if (cmd.decisionRuleId === S1_LADDER_RULE_ID) {
+      return (
+        this.currentTrackS1Policy()?.s1MaxOrdersPerToken ?? sellPolicy.maxOpenSellOrdersPerToken
+      );
+    }
+    return sellPolicy.maxOpenSellOrdersPerToken;
   }
 
   /** CHANGE B — wallet/local upper-bound for SELL clamp. */
@@ -1902,6 +1919,7 @@ export class ExecutionModule implements RuntimeModule {
       exchangeErrorMessage: exchangeError?.errorMessage ?? null,
       exchangeErrorPayload: stringifyExchangeErrorPayload(exchangeError?.errorDetails ?? null),
       exchangeRejectionReason: exchangeError?.rejectionReason ?? null,
+      metadata: cmd.metadata ?? null,
       botRunId: this.deps.botRunId,
       createdAt: now,
       updatedAt: now,

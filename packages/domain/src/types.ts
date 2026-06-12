@@ -356,6 +356,7 @@ export interface Order {
   exchangeErrorMessage?: string | null;
   exchangeErrorPayload?: string | null;
   exchangeRejectionReason?: string | null;
+  metadata?: Readonly<Record<string, unknown>> | null;
   botRunId: BotRunId;
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp
@@ -803,6 +804,36 @@ export interface TrackRHonestPricingPolicy {
   maxSaneThreshold: number;
 }
 
+export interface TrackS1MarkupCeilingsPolicy {
+  cheapMax: number;
+  midRange: number;
+}
+
+export interface TrackS1WalkingLadderPolicy {
+  enabled: boolean;
+  numTiers: number;
+  bottomTierMarkup: number;
+  volumeDistribution: readonly number[];
+  markupCeilings: TrackS1MarkupCeilingsPolicy;
+  handoffTimeToResolutionSeconds: number;
+  handoffTimeoutSeconds: number;
+  maxOpenLadderTokens: number;
+  s1MaxOrdersPerToken: number;
+  maxLadderReplacementsPerHour: number;
+  cheapLongshotMaxAvgEntry: number;
+  thinSpreadTicks: number;
+  bestBidDepthRatio: number;
+  bottomRepriceBidMovePct: number;
+  minBestBid: number;
+}
+
+export interface S1OwnershipSnapshot {
+  owned: boolean;
+  ladderId: string;
+  assumedAtMs: number;
+  reason: "eligible" | "active_ladder" | "handoff";
+}
+
 export type TrackRFeeRateSource = "live" | "fill" | "fallback_category" | "fallback_universal";
 
 export interface TrackRFeeQuote {
@@ -994,6 +1025,7 @@ export interface ExecutionPolicy {
   opportunisticTaker: OpportunisticTakerPolicy;
   takerAtProfit: TakerAtProfitPolicy;
   trackR: TrackRHonestPricingPolicy;
+  trackS1: TrackS1WalkingLadderPolicy;
   orderLifetime: OrderLifetimePolicy;
   /**
    * Cooldown after any BUY fill before emitting SELL exits from the same wallet.

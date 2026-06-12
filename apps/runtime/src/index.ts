@@ -128,6 +128,7 @@ import { SignalToOrderBridge } from "./modules/strategy/signal-to-order.js";
 import { ExecutionPolicyProvider } from "./execution-policy-provider.js";
 import { AlgoDecisionModule } from "./modules/algo-decision/algo-decision-module.js";
 import { SellLoopGuardModule } from "./modules/sell-loop-guard/sell-loop-guard-module.js";
+import { S1LadderModule } from "./modules/s1-ladder/s1-ladder-module.js";
 import { MarketSnapshotPriceHistoryProvider } from "./modules/algo-decision/market-snapshot-price-history.js";
 import { MarketSelectionCache } from "./modules/algo-decision/market-selection-cache.js";
 import { EntryLifecycleModule } from "./modules/entry-lifecycle/entry-lifecycle-module.js";
@@ -1049,6 +1050,15 @@ async function main(): Promise<void> {
     db: ledgerConn.db,
     log,
   });
+  const s1LadderModule = new S1LadderModule({
+    bus,
+    positionRepo: repos.position,
+    orderRepo: repos.order,
+    policy: () => currentExecutionPolicy().trackS1,
+    runtimeMetrics,
+    riskEventRepo: repos.riskEvent,
+    log: log.child({ module: "s1-ladder" }),
+  });
 
   const algoDecisionModule = new AlgoDecisionModule({
     bus,
@@ -1060,6 +1070,7 @@ async function main(): Promise<void> {
     riskEventRepo: repos.riskEvent,
     runtimeMetrics,
     sellLoopGuard: sellLoopGuardModule,
+    s1Ownership: s1LadderModule,
     decisionPersistenceMode: "worker",
     decisionPersistenceWorkerDbPath: ledgerDbPath,
     decisionWorkerCount: config.algoDecisionWorkerCount,
@@ -1483,6 +1494,7 @@ async function main(): Promise<void> {
       ? [["redeem-sweep", redeemSweepModule] as [string, import("@krabs/domain").RuntimeModule]]
       : []),
     ["sell-loop-guard", sellLoopGuardModule],
+    ["s1-ladder", s1LadderModule],
     ["algo-decision", algoDecisionModule],
     ["resolution", resolutionModule],
     ...(inventoryManagerModule

@@ -38,6 +38,7 @@ import type {
   LegState,
   Position,
   OrderRepository,
+  S1OwnershipSnapshot,
   SellOrderSizingContext,
 } from "@krabs/domain";
 import {
@@ -59,6 +60,7 @@ import {
   isAbandoned,
   shouldRecoverFromPriceMove,
   computeSellSizingPlan,
+  S1_LADDER_RULE_ID,
 } from "@krabs/domain";
 import { readContinuationMode, readContinuationModeVersion } from "@krabs/db";
 import type { EvalContext } from "@krabs/domain";
@@ -101,6 +103,10 @@ import {
   type EntryFreshEdgeSignalFields,
 } from "./entry-fresh-edge.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
+
+export interface S1OwnershipReader {
+  getSnapshot(tokenId: TokenId): S1OwnershipSnapshot | null;
+}
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
 
@@ -511,6 +517,12 @@ export interface AlgoDecisionModuleDeps {
    * by tests/sim that don't exercise the breaker.
    */
   sellLoopGuard?: SellLoopGuardReader | undefined;
+  /**
+   * Track S1 read surface. When S1 has exclusive ownership of a token's SELL
+   * flow, the planner suppresses ordinary SELL rules while leaving BUY paths
+   * unchanged.
+   */
+  s1Ownership?: S1OwnershipReader | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -1544,6 +1556,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       latestSellOrder: legState ? this.getLatestSellOrderForSizing(tokenId) : null,
       hasActiveSellOrderForQd: legState ? this.hasActiveSellOrderForQd(tokenId) : false,
       sellLoopGuard: this.deps.sellLoopGuard?.getSnapshot(tokenId, now) ?? null,
+      s1Ownership: this.deps.s1Ownership?.getSnapshot(tokenId) ?? null,
     };
   }
 
@@ -1575,7 +1588,10 @@ export class AlgoDecisionModule implements RuntimeModule {
         .findByTokenId(tokenId)
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     return orders.some(
-      (order) => order.side === "sell" && isWorkingSellOrderStatus(order.status ?? null),
+      (order) =>
+        order.side === "sell" &&
+        order.decisionRuleId !== S1_LADDER_RULE_ID &&
+        isWorkingSellOrderStatus(order.status ?? null),
     );
   }
 
@@ -1678,6 +1694,16 @@ export class AlgoDecisionModule implements RuntimeModule {
           "track_q_loop_guard_suppressed_total",
           1,
           JSON.stringify({ decisionRuleId: sideEffect.decisionRuleId }),
+        );
+      }
+      if (sideEffect.kind === "s1_ownership_blocked_sell") {
+        this.deps.runtimeMetrics?.writeCounter(
+          "track_s1_ownership_blocked_planner_sell",
+          1,
+          JSON.stringify({
+            decisionRuleId: sideEffect.decisionRuleId,
+            ownershipReason: sideEffect.ownershipReason,
+          }),
         );
       }
     }

@@ -38,6 +38,7 @@ import {
   DEFAULT_EXECUTION_POLICY,
   ENTRY_REASONS,
   EXIT_REASONS,
+  S1_LADDER_RULE_ID,
   isLiveBook,
   isStaleSell,
   resolveDynamicChainCapDetails,
@@ -232,7 +233,11 @@ export async function cleanStaleEntryOrders(
   );
   const openSells = openOrders.filter((o) => o.side === "sell");
   const exitSells = openSells.filter(
-    (o) => o.side === "sell" && o.signalReason != null && EXIT_REASONS.has(o.signalReason),
+    (o) =>
+      o.side === "sell" &&
+      o.decisionRuleId !== S1_LADDER_RULE_ID &&
+      o.signalReason != null &&
+      EXIT_REASONS.has(o.signalReason),
   );
 
   // Evict backoff entries for orders no longer open

@@ -103,7 +103,14 @@ export class SellLoopGuardModule implements RuntimeModule, SellLoopGuardReader {
   }
 
   private async onOrderSkipped(e: RuntimeEventMap["OrderSkipped"]): Promise<void> {
-    const outcome = classifySellLoopGuardSkip({ side: e.side, reasonCode: e.reasonCode });
+    const outcome = classifySellLoopGuardSkip({
+      side: e.side,
+      reasonCode: e.reasonCode,
+      decisionRuleId: e.decisionRuleId,
+    });
+    if (!outcome && e.decisionRuleId === "S1_LADDER") {
+      this.deps.runtimeMetrics?.writeCounter("track_s1_loop_guard_exempted_total", 1);
+    }
     if (!outcome) return;
     this.record(e.tokenId, outcome, {
       conditionId: String(e.conditionId),
@@ -120,7 +127,11 @@ export class SellLoopGuardModule implements RuntimeModule, SellLoopGuardReader {
       side: e.side ?? "",
       reason: e.reason,
       exchangeErrorMessage: e.exchangeErrorMessage ?? null,
+      decisionRuleId: e.decisionRuleId ?? null,
     });
+    if (!outcome && e.decisionRuleId === "S1_LADDER") {
+      this.deps.runtimeMetrics?.writeCounter("track_s1_loop_guard_exempted_total", 1);
+    }
     if (!outcome) return;
     this.record(e.tokenId, outcome, {
       conditionId: String(e.conditionId),

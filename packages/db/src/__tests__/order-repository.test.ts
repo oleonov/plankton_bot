@@ -98,6 +98,35 @@ describe("SqliteOrderRepository", () => {
     });
   });
 
+  it("round-trips order metadata_json for S1 ladder tier recovery", () => {
+    repo.save(
+      makeOrder({
+        status: "open",
+        side: "sell",
+        decisionRuleId: "S1_LADDER",
+        metadata: {
+          s1: {
+            ladderId: "ladder-1",
+            tierIndex: 2,
+            tierCount: 4,
+            targetPrice: 0.075,
+          },
+        },
+      }),
+    );
+
+    const found = repo.findById(createOrderId("ord-1"));
+
+    expect(found?.metadata).toEqual({
+      s1: {
+        ladderId: "ladder-1",
+        tierIndex: 2,
+        tierCount: 4,
+        targetPrice: 0.075,
+      },
+    });
+  });
+
   it("findByClientOrderId works", () => {
     repo.save(makeOrder());
 

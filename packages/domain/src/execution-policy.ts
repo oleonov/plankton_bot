@@ -36,6 +36,7 @@ import type {
   SellLoopGuardPolicy,
   TakerAtProfitPolicy,
   TrackRHonestPricingPolicy,
+  TrackS1WalkingLadderPolicy,
   DynamicChainCapPolicyConfig,
 } from "./types.js";
 import type { AlgoState } from "./algo-engine.js";
@@ -46,6 +47,7 @@ import { DEFAULT_REPRICE_CHAIN_POLICY } from "./reprice-chain.js";
 import { DEFAULT_SELL_LOOP_GUARD_POLICY } from "./sell-loop-guard.js";
 import { DEFAULT_SELL_TIMEOUT_MS } from "./sell-sizing.js";
 import type { D9LossExitPolicy } from "./d9-loss-exit.js";
+import { DEFAULT_TRACK_S1_WALKING_LADDER_POLICY } from "./ladder-construction.js";
 
 export const DEFAULT_DEAD_SIDE_GUARD: DeadSideGuardPolicy = {
   mode: "observe",
@@ -293,6 +295,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   opportunisticTaker: DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
   takerAtProfit: DEFAULT_TAKER_AT_PROFIT_POLICY,
   trackR: DEFAULT_TRACK_R_HONEST_PRICING_POLICY,
+  trackS1: DEFAULT_TRACK_S1_WALKING_LADDER_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   // Defensive infrastructure timing parameter. Exchange balance settlement
   // typically lands in <2s; 5000ms provides a safe margin. Not R-derived —
@@ -386,6 +389,17 @@ const BOUND_TRACK_R_UNIVERSAL_FALLBACK_MIN = 0.0001;
 const BOUND_TRACK_R_UNIVERSAL_FALLBACK_MAX = 0.2;
 const BOUND_TRACK_R_MAX_SANE_THRESHOLD_MIN = 1;
 const BOUND_TRACK_R_MAX_SANE_THRESHOLD_MAX = 2;
+const BOUND_TRACK_S1_NUM_TIERS_MIN = 2;
+const BOUND_TRACK_S1_NUM_TIERS_MAX = 8;
+const BOUND_TRACK_S1_MARKUP_MIN = 1;
+const BOUND_TRACK_S1_MARKUP_MAX = 20;
+const BOUND_TRACK_S1_SECONDS_MIN = 60;
+const BOUND_TRACK_S1_SECONDS_MAX = 7 * 24 * 60 * 60;
+const BOUND_TRACK_S1_OPEN_TOKENS_MAX = 1_000;
+const BOUND_TRACK_S1_REPLACEMENTS_MAX = 1_000;
+const BOUND_TRACK_S1_ENTRY_MAX = 0.5;
+const BOUND_TRACK_S1_RATIO_MIN = 0;
+const BOUND_TRACK_S1_RATIO_MAX = 1;
 const BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS = 30_000;
 const BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS = 24 * 60 * 60_000;
 const BOUND_REDEEM_SWEEP_RETRY_COUNT_MAX = 10;
@@ -520,6 +534,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const opportunisticTaker = parseOpportunisticTaker(obj.opportunisticTaker, issues);
   const takerAtProfit = parseTakerAtProfit(obj.takerAtProfit, issues);
   const trackR = parseTrackR(obj.trackR, issues);
+  const trackS1 = parseTrackS1(obj.trackS1, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
   const buyCapacity = parseBuyCapacity(obj.buyCapacity, issues);
@@ -572,6 +587,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       opportunisticTaker,
       takerAtProfit,
       trackR,
+      trackS1,
       orderLifetime,
       postBuyFillSellCooldownMs,
       repriceOnOutbid,
@@ -1098,6 +1114,148 @@ function parseTrackR(raw: unknown, issues: string[]): TrackRHonestPricingPolicy 
       BOUND_TRACK_R_MAX_SANE_THRESHOLD_MAX,
       issues,
       "trackR.maxSaneThreshold",
+    ),
+  };
+}
+
+function parseTrackS1(raw: unknown, issues: string[]): TrackS1WalkingLadderPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("trackS1 must be an object");
+    return DEFAULT_TRACK_S1_WALKING_LADDER_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  const markupRaw =
+    obj.markupCeilings != null &&
+    typeof obj.markupCeilings === "object" &&
+    !Array.isArray(obj.markupCeilings)
+      ? (obj.markupCeilings as Record<string, unknown>)
+      : {};
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.enabled,
+      issues,
+      "trackS1.enabled",
+    ),
+    numTiers: clampedInt(
+      obj.numTiers,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.numTiers,
+      BOUND_TRACK_S1_NUM_TIERS_MIN,
+      BOUND_TRACK_S1_NUM_TIERS_MAX,
+      issues,
+      "trackS1.numTiers",
+    ),
+    bottomTierMarkup: clampedNumber(
+      obj.bottomTierMarkup,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.bottomTierMarkup,
+      BOUND_TRACK_S1_MARKUP_MIN,
+      BOUND_TRACK_S1_MARKUP_MAX,
+      issues,
+      "trackS1.bottomTierMarkup",
+    ),
+    volumeDistribution: normalizedNumberListOr(
+      obj.volumeDistribution,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.volumeDistribution,
+      issues,
+      "trackS1.volumeDistribution",
+    ),
+    markupCeilings: {
+      cheapMax: clampedNumber(
+        markupRaw.cheapMax,
+        DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.markupCeilings.cheapMax,
+        BOUND_TRACK_S1_MARKUP_MIN,
+        BOUND_TRACK_S1_MARKUP_MAX,
+        issues,
+        "trackS1.markupCeilings.cheapMax",
+      ),
+      midRange: clampedNumber(
+        markupRaw.midRange,
+        DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.markupCeilings.midRange,
+        BOUND_TRACK_S1_MARKUP_MIN,
+        BOUND_TRACK_S1_MARKUP_MAX,
+        issues,
+        "trackS1.markupCeilings.midRange",
+      ),
+    },
+    handoffTimeToResolutionSeconds: clampedInt(
+      obj.handoffTimeToResolutionSeconds,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.handoffTimeToResolutionSeconds,
+      BOUND_TRACK_S1_SECONDS_MIN,
+      BOUND_TRACK_S1_SECONDS_MAX,
+      issues,
+      "trackS1.handoffTimeToResolutionSeconds",
+    ),
+    handoffTimeoutSeconds: clampedInt(
+      obj.handoffTimeoutSeconds,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.handoffTimeoutSeconds,
+      BOUND_TRACK_S1_SECONDS_MIN,
+      BOUND_TRACK_S1_SECONDS_MAX,
+      issues,
+      "trackS1.handoffTimeoutSeconds",
+    ),
+    maxOpenLadderTokens: clampedInt(
+      obj.maxOpenLadderTokens,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.maxOpenLadderTokens,
+      0,
+      BOUND_TRACK_S1_OPEN_TOKENS_MAX,
+      issues,
+      "trackS1.maxOpenLadderTokens",
+    ),
+    s1MaxOrdersPerToken: clampedInt(
+      obj.s1MaxOrdersPerToken,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.s1MaxOrdersPerToken,
+      1,
+      BOUND_CAPACITY_OPEN_ORDERS_MAX,
+      issues,
+      "trackS1.s1MaxOrdersPerToken",
+    ),
+    maxLadderReplacementsPerHour: clampedInt(
+      obj.maxLadderReplacementsPerHour,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.maxLadderReplacementsPerHour,
+      1,
+      BOUND_TRACK_S1_REPLACEMENTS_MAX,
+      issues,
+      "trackS1.maxLadderReplacementsPerHour",
+    ),
+    cheapLongshotMaxAvgEntry: clampedNumber(
+      obj.cheapLongshotMaxAvgEntry,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.cheapLongshotMaxAvgEntry,
+      0.001,
+      BOUND_TRACK_S1_ENTRY_MAX,
+      issues,
+      "trackS1.cheapLongshotMaxAvgEntry",
+    ),
+    thinSpreadTicks: clampedInt(
+      obj.thinSpreadTicks,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.thinSpreadTicks,
+      BOUND_SPREAD_TICKS_MIN,
+      BOUND_SPREAD_TICKS_MAX,
+      issues,
+      "trackS1.thinSpreadTicks",
+    ),
+    bestBidDepthRatio: clampedNumber(
+      obj.bestBidDepthRatio,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.bestBidDepthRatio,
+      BOUND_TRACK_S1_RATIO_MIN,
+      BOUND_TRACK_S1_RATIO_MAX,
+      issues,
+      "trackS1.bestBidDepthRatio",
+    ),
+    bottomRepriceBidMovePct: clampedNumber(
+      obj.bottomRepriceBidMovePct,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.bottomRepriceBidMovePct,
+      BOUND_TRACK_S1_RATIO_MIN,
+      BOUND_TRACK_S1_RATIO_MAX,
+      issues,
+      "trackS1.bottomRepriceBidMovePct",
+    ),
+    minBestBid: clampedNumber(
+      obj.minBestBid,
+      DEFAULT_TRACK_S1_WALKING_LADDER_POLICY.minBestBid,
+      0,
+      0.1,
+      issues,
+      "trackS1.minBestBid",
     ),
   };
 }
@@ -2087,6 +2245,29 @@ function intListOr(
     parsed.push(value);
   }
   return parsed;
+}
+
+function normalizedNumberListOr(
+  raw: unknown,
+  fallback: readonly number[],
+  issues: string[],
+  name: string,
+): number[] {
+  if (raw === undefined) return [...fallback];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    issues.push(`${name} must be a non-empty number array`);
+    return [...fallback];
+  }
+  const values: number[] = [];
+  for (const value of raw) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      issues.push(`${name} must contain only positive finite numbers`);
+      return [...fallback];
+    }
+    values.push(value);
+  }
+  const sum = values.reduce((acc, value) => acc + value, 0);
+  return values.map((value) => value / sum);
 }
 
 function parseDepositActivation(raw: unknown, issues: string[]): DepositActivationPolicy {

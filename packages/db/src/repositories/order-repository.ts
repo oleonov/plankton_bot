@@ -23,8 +23,8 @@ export class SqliteOrderRepository implements OrderRepository {
           fill_progress_shares, market_horizon,
           decision_rule_id, signal_timestamp, exchange_error_code,
           exchange_error_message, exchange_error_payload, exchange_rejection_reason,
-          bot_run_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          metadata_json, bot_run_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(order_id) DO UPDATE SET
            status = excluded.status,
            exchange_order_id = excluded.exchange_order_id,
@@ -44,6 +44,7 @@ export class SqliteOrderRepository implements OrderRepository {
            exchange_error_message = excluded.exchange_error_message,
            exchange_error_payload = excluded.exchange_error_payload,
            exchange_rejection_reason = excluded.exchange_rejection_reason,
+           metadata_json = excluded.metadata_json,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -72,6 +73,7 @@ export class SqliteOrderRepository implements OrderRepository {
         order.exchangeErrorMessage ?? null,
         order.exchangeErrorPayload ?? null,
         order.exchangeRejectionReason ?? null,
+        order.metadata ? JSON.stringify(order.metadata) : null,
         order.botRunId,
         order.createdAt,
         order.updatedAt,
@@ -223,9 +225,22 @@ export class SqliteOrderRepository implements OrderRepository {
       exchangeErrorMessage: (row.exchange_error_message as string) ?? null,
       exchangeErrorPayload: (row.exchange_error_payload as string) ?? null,
       exchangeRejectionReason: (row.exchange_rejection_reason as string) ?? null,
+      metadata: parseMetadata(row.metadata_json),
       botRunId: createBotRunId(row.bot_run_id as string),
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
     };
+  }
+}
+
+function parseMetadata(raw: unknown): Readonly<Record<string, unknown>> | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Readonly<Record<string, unknown>>)
+      : null;
+  } catch {
+    return null;
   }
 }

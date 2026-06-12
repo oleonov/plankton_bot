@@ -6,6 +6,7 @@ import type {
   LegState,
   NormalizedMarket,
   Position,
+  S1OwnershipSnapshot,
   SellLoopGuardSnapshot,
   SellOrderSizingContext,
   TokenId,
@@ -154,6 +155,15 @@ export type DecisionPlanSideEffect =
       activeCount: number;
       threshold: number;
       timestamp: string;
+    }
+  | {
+      kind: "s1_ownership_blocked_sell";
+      tokenId: TokenId;
+      conditionId: string;
+      decisionRuleId: string | null;
+      ladderId: string;
+      ownershipReason: S1OwnershipSnapshot["reason"];
+      timestamp: string;
     };
 
 export type TrackQShadowReason =
@@ -256,6 +266,7 @@ export type DecisionPlanningInput = {
   latestSellOrder: SellOrderSizingContext | null;
   hasActiveSellOrderForQd: boolean;
   sellLoopGuard: SellLoopGuardSnapshot | null;
+  s1Ownership?: S1OwnershipSnapshot | null;
 };
 
 const SELL_ONLY: ReadonlySet<TradeDecisionAction> = new Set(["SELL"]);
@@ -1152,6 +1163,38 @@ function buildSignalOrSuppression(args: {
       ? (input.now - new Date(input.legState.firstTradeAt).getTime()) / 1000
       : null,
   };
+
+  if (decision.action === "SELL" && input.s1Ownership?.owned) {
+    const ownership = input.s1Ownership;
+    args.sideEffects.push({
+      kind: "s1_ownership_blocked_sell",
+      tokenId: market.tokenId,
+      conditionId: market.conditionId,
+      decisionRuleId: decision.ruleId,
+      ladderId: ownership.ladderId,
+      ownershipReason: ownership.reason,
+      timestamp: args.nowIso,
+    });
+    args.suppressions.push({
+      tokenId: market.tokenId,
+      conditionId: market.conditionId,
+      reasonCode: "s1_owned_token",
+      side: "SELL",
+      decisionRuleId: decision.ruleId,
+      state: ctx.state,
+      price: ctx.price,
+      buyCount,
+      timeSinceLastSeconds: ctx.timeSinceLastSeconds,
+      emissionFacts,
+      timestamp: args.nowIso,
+      extra: {
+        ladderId: ownership.ladderId,
+        assumedAt: new Date(ownership.assumedAtMs).toISOString(),
+        ownershipReason: ownership.reason,
+      },
+    });
+    return none(args.metrics, args.suppressions, args.sideEffects);
+  }
 
   // Track Q loop guard: a blocked token suppresses SELL signal generation for the
   // cooldown, regardless of which rule produced the SELL. BUY is never gated here.

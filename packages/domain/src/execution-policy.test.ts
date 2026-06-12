@@ -18,6 +18,50 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(r2.issues).toHaveLength(0);
   });
 
+  it("defaults Track S1 disabled with conservative ladder parameters", () => {
+    const { policy, issues } = parseExecutionPolicyJson(null);
+
+    expect(issues).toHaveLength(0);
+    expect(policy.trackS1).toEqual({
+      enabled: false,
+      numTiers: 4,
+      bottomTierMarkup: 1.05,
+      volumeDistribution: [0.1, 0.2, 0.3, 0.4],
+      markupCeilings: { cheapMax: 6, midRange: 2.25 },
+      handoffTimeToResolutionSeconds: 3600,
+      handoffTimeoutSeconds: 300,
+      maxOpenLadderTokens: 20,
+      s1MaxOrdersPerToken: 4,
+      maxLadderReplacementsPerHour: 6,
+      cheapLongshotMaxAvgEntry: 0.05,
+      thinSpreadTicks: 10,
+      bestBidDepthRatio: 0.1,
+      bottomRepriceBidMovePct: 0.05,
+      minBestBid: 0.001,
+    });
+  });
+
+  it("parses Track S1 policy field-by-field and normalizes volume distribution", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        trackS1: {
+          enabled: true,
+          numTiers: 3,
+          volumeDistribution: [1, 2, 3],
+          s1MaxOrdersPerToken: 3,
+          maxLadderReplacementsPerHour: 4,
+        },
+      }),
+    );
+
+    expect(issues).toHaveLength(0);
+    expect(policy.trackS1.enabled).toBe(true);
+    expect(policy.trackS1.numTiers).toBe(3);
+    expect(policy.trackS1.volumeDistribution).toEqual([1 / 6, 2 / 6, 3 / 6]);
+    expect(policy.trackS1.s1MaxOrdersPerToken).toBe(3);
+    expect(policy.trackS1.maxLadderReplacementsPerHour).toBe(4);
+  });
+
   it("falls back to defaults on malformed JSON with one issue", () => {
     const { policy, issues } = parseExecutionPolicyJson("{not-json");
     expect(policy).toBe(DEFAULT_EXECUTION_POLICY);

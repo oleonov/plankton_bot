@@ -1,0 +1,588 @@
+import type {
+  EventBus,
+  RuntimeEventMap,
+  RuntimeModule,
+  NormalizedMarket,
+  Order,
+  OrderBookSnapshot,
+  OrderRepository,
+  Position,
+  PositionRepository,
+  RiskEventRepository,
+  S1OwnershipSnapshot,
+  TokenId,
+  TrackS1WalkingLadderPolicy,
+} from "@krabs/domain";
+import {
+  buildLadder,
+  DEFAULT_TRACK_S1_WALKING_LADDER_POLICY,
+  isS1Eligible,
+  S1_LADDER_RULE_ID,
+  buildS1SignalId,
+  createCommandId,
+  PositionStatus,
+} from "@krabs/domain";
+import { buildClientOrderId } from "@krabs/domain/node";
+import type { Logger } from "../../logger.js";
+import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
+
+export { S1_LADDER_RULE_ID };
+
+export interface S1LadderModuleDeps {
+  bus: EventBus;
+  positionRepo: Pick<PositionRepository, "findOpen" | "findByTokenId">;
+  orderRepo: Pick<OrderRepository, "findOpen" | "findByTokenId">;
+  policy: () => TrackS1WalkingLadderPolicy;
+  runtimeMetrics?: Pick<RuntimeMetricWriter, "writeCounter"> | undefined;
+  riskEventRepo?: RiskEventRepository | undefined;
+  log: Logger;
+  now?: () => number;
+}
+
+interface ActivePlacement {
+  expiresAtMs: number;
+}
+
+interface ActiveLadder {
+  tokenId: TokenId;
+  conditionId: string;
+  ladderId: string;
+  assumedAtMs: number;
+  reason: S1OwnershipSnapshot["reason"];
+  handoffStartedAtMs: number | null;
+}
+
+const ACTIVE_PLACEMENT_TTL_MS = 60_000;
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const WORKING_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
+
+export class S1LadderModule implements RuntimeModule {
+  readonly name = "s1-ladder";
+
+  private readonly activePlacements = new Map<string, ActivePlacement>();
+  private readonly activeLadders = new Map<string, ActiveLadder>();
+  private readonly placementHistoryByToken = new Map<string, number[]>();
+  private readonly handoffStartedTokens = new Set<string>();
+  private unsubs: Array<() => void> = [];
+
+  constructor(private readonly deps: S1LadderModuleDeps) {}
+
+  async start(): Promise<void> {
+    this.recoverActiveLadders();
+    this.unsubs.push(
+      this.deps.bus.subscribe("MarketSnapshotHeartbeat", (payload) => this.onHeartbeat(payload)),
+      this.deps.bus.subscribe("OrderCancelled", async (payload) => {
+        this.releaseIfTerminal(payload.tokenId, payload.timestamp, "order_cancelled");
+      }),
+      this.deps.bus.subscribe("FillReceived", async (payload) => {
+        this.onFill(payload);
+      }),
+      this.deps.bus.subscribe("PositionUpdated", async (payload) => {
+        this.onPositionUpdated(payload.position);
+      }),
+    );
+  }
+
+  async stop(): Promise<void> {
+    for (const unsub of this.unsubs) unsub();
+    this.unsubs = [];
+    this.activePlacements.clear();
+  }
+
+  async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
+    return { ok: true, detail: `activeLadders=${this.activeLadders.size}` };
+  }
+
+  isS1OwnedToken(tokenId: TokenId): boolean {
+    return this.getSnapshot(tokenId)?.owned === true;
+  }
+
+  getSnapshot(tokenId: TokenId): S1OwnershipSnapshot | null {
+    const active = this.activeLadders.get(String(tokenId));
+    if (!active) return null;
+    return {
+      owned: true,
+      ladderId: active.ladderId,
+      assumedAtMs: active.assumedAtMs,
+      reason: active.reason,
+    };
+  }
+
+  private async onHeartbeat(payload: RuntimeEventMap["MarketSnapshotHeartbeat"]): Promise<void> {
+    const policy = this.policy();
+    this.pruneExpiredPlacements();
+    for (const market of payload.markets) {
+      const position = this.findOpenPosition(market.tokenId);
+      if (!position) continue;
+      const activeOrders = this.findActiveS1Orders(market.tokenId);
+      if (activeOrders.length > 0) {
+        const existing = this.activeLadders.get(String(market.tokenId));
+        if (!existing || existing.reason !== "handoff") {
+          this.assumeOwnership(position, market, this.resolveLadderIdFromOrders(activeOrders), {
+            reason: "active_ladder",
+            riskEvent: false,
+          });
+        }
+        if (this.isHandoffTimedOut(market.tokenId, payload.timestamp, policy)) {
+          await this.forceHandoffTimeout(position, market, activeOrders, payload.timestamp);
+          continue;
+        }
+        if (this.shouldHandoff(market, payload.timestamp, policy)) {
+          await this.initiateHandoff(position, market, activeOrders, payload.timestamp, policy);
+        }
+        continue;
+      }
+      const active = this.activeLadders.get(String(market.tokenId));
+      if (active) {
+        if (this.isHandoffTimedOut(market.tokenId, payload.timestamp, policy)) {
+          this.releaseOwnership(market.tokenId, payload.timestamp, "handoff_timeout");
+        }
+        continue;
+      }
+      if (!policy.enabled) continue;
+      if (this.activeLadders.size >= policy.maxOpenLadderTokens) {
+        this.deps.runtimeMetrics?.writeCounter("track_s1_skipped_capacity_total", 1);
+        continue;
+      }
+      if (this.isFrequencyLimited(market.tokenId, payload.timestamp, policy)) {
+        this.deps.runtimeMetrics?.writeCounter("track_s1_frequency_limit_blocked", 1);
+        continue;
+      }
+      if (this.hasActivePlacement(market.tokenId, payload.timestamp)) {
+        this.deps.runtimeMetrics?.writeCounter("track_s1_frequency_limit_blocked", 1);
+        continue;
+      }
+      const book = this.resolveBook(payload.booksByToken, market);
+      const eligibility = isS1Eligible({
+        position,
+        book,
+        marketEndDate: market.endDate,
+        nowMs: payload.timestamp,
+        policy,
+        hasActiveS1Ladder: false,
+      });
+      if (!eligibility.eligible) {
+        this.countEligibilitySkip(eligibility.reason);
+        continue;
+      }
+      const plan = buildLadder({
+        tokenId: market.tokenId,
+        openedAt: position.openedAt,
+        avgEntryPrice: position.avgEntryPrice,
+        positionSize: position.size,
+        bestBid: book.bestBid,
+        bestAsk: book.bestAsk,
+        tickSize: market.tickSize,
+        minOrderSize: market.minOrderSize ?? book.minOrderSize ?? 0,
+        policy,
+      });
+      if (!plan.ok) {
+        this.countEligibilitySkip(plan.reason);
+        continue;
+      }
+      await this.placeLadder(position, market, plan, payload.timestamp);
+    }
+  }
+
+  private policy(): TrackS1WalkingLadderPolicy {
+    return { ...DEFAULT_TRACK_S1_WALKING_LADDER_POLICY, ...this.deps.policy() };
+  }
+
+  private findOpenPosition(tokenId: TokenId): Position | null {
+    const direct = this.deps.positionRepo.findByTokenId(tokenId);
+    if (direct?.status === PositionStatus.Open && direct.size > 0) return direct;
+    return (
+      this.deps.positionRepo
+        .findOpen()
+        .find((position) => position.tokenId === tokenId && position.size > 0) ?? null
+    );
+  }
+
+  private findActiveS1Orders(tokenId: TokenId): Order[] {
+    return this.deps.orderRepo
+      .findByTokenId(tokenId)
+      .filter(
+        (order) =>
+          order.side === "sell" &&
+          order.decisionRuleId === S1_LADDER_RULE_ID &&
+          WORKING_ORDER_STATUSES.has(order.status),
+      );
+  }
+
+  private onFill(payload: RuntimeEventMap["FillReceived"]): void {
+    if (payload.side !== "sell" || payload.decisionRuleId !== S1_LADDER_RULE_ID) return;
+    this.deps.runtimeMetrics?.writeCounter("track_s1_tiers_filled", 1);
+    this.deps.riskEventRepo?.insert({
+      eventType: "s1_ladder_filled",
+      payload: {
+        tokenId: String(payload.tokenId),
+        conditionId: String(payload.conditionId),
+        orderId: String(payload.orderId),
+        price: payload.price,
+        size: payload.size,
+        liquidityRole: payload.liquidityRole,
+        signalTimestamp: new Date(payload.timestamp).toISOString(),
+      },
+    });
+    this.releaseIfTerminal(payload.tokenId, payload.timestamp, "fill");
+  }
+
+  private onPositionUpdated(position: Position): void {
+    if (position.status !== PositionStatus.Open || position.size <= 0) {
+      this.releaseOwnership(position.tokenId, this.now(), "position_closed");
+    }
+  }
+
+  private recoverActiveLadders(): void {
+    for (const order of this.deps.orderRepo.findOpen()) {
+      if (order.side !== "sell" || order.decisionRuleId !== S1_LADDER_RULE_ID) continue;
+      const position = this.findOpenPosition(order.tokenId);
+      if (!position) continue;
+      this.activeLadders.set(String(order.tokenId), {
+        tokenId: order.tokenId,
+        conditionId: String(order.conditionId),
+        ladderId: this.resolveLadderId(order),
+        assumedAtMs: Date.parse(order.createdAt),
+        reason: "active_ladder",
+        handoffStartedAtMs: this.resolveHandoffStartedAt(order),
+      });
+    }
+  }
+
+  private async placeLadder(
+    position: Position,
+    market: NormalizedMarket,
+    plan: Extract<ReturnType<typeof buildLadder>, { ok: true }>,
+    timestamp: number,
+  ): Promise<void> {
+    if (!this.acquirePlacement(market.tokenId, timestamp)) return;
+    this.assumeOwnership(position, market, plan.ladderId, {
+      reason: "eligible",
+      riskEvent: true,
+    });
+    this.deps.runtimeMetrics?.writeCounter("track_s1_ladder_placed", 1);
+    this.deps.runtimeMetrics?.writeCounter("track_s1_tiers_placed", plan.tiers.length);
+    this.deps.runtimeMetrics?.writeCounter("track_s1_orders_placed", plan.tiers.length);
+
+    for (const tier of plan.tiers) {
+      const signalId = buildS1SignalId(market.tokenId, plan.ladderId, tier.tierIndex);
+      await this.deps.bus.publish("PlaceOrderRequested", {
+        command: {
+          type: "PlaceOrderCommand",
+          commandId: createCommandId(
+            `s1_${String(market.tokenId)}_${plan.ladderId}_${tier.tierIndex}`,
+          ),
+          clientOrderId: buildClientOrderId({
+            signalId,
+            tokenId: market.tokenId,
+            side: "sell",
+          }),
+          source: "strategy",
+          tokenId: market.tokenId,
+          conditionId: position.conditionId,
+          side: "sell",
+          size: tier.size,
+          price: tier.price,
+          postOnly: true,
+          orderType: "GTC",
+          tickSize: market.tickSize,
+          negRisk: market.negRisk,
+          sequenceInTick: tier.tierIndex,
+          signalReason: "repricing-exit",
+          signalId,
+          decisionRuleId: S1_LADDER_RULE_ID,
+          signalTimestamp: new Date(timestamp).toISOString(),
+          metadata: {
+            s1: {
+              ladderId: plan.ladderId,
+              tierIndex: tier.tierIndex,
+              targetPrice: tier.price,
+              positionSizeTotal: position.size,
+              handoffStartedAt: null,
+            },
+          },
+        },
+        timestamp,
+      });
+    }
+
+    this.deps.riskEventRepo?.insert({
+      eventType: "s1_ladder_placed",
+      payload: {
+        tokenId: String(market.tokenId),
+        conditionId: String(position.conditionId),
+        ladderId: plan.ladderId,
+        tiers: plan.tiers.map((tier) => ({
+          tierIndex: tier.tierIndex,
+          price: tier.price,
+          size: tier.size,
+          fraction: plan.volumeDistribution[tier.tierIndex] ?? null,
+        })),
+        signalTimestamp: new Date(timestamp).toISOString(),
+      },
+    });
+  }
+
+  private async initiateHandoff(
+    position: Position,
+    market: NormalizedMarket,
+    activeOrders: readonly Order[],
+    timestamp: number,
+    policy: TrackS1WalkingLadderPolicy,
+  ): Promise<void> {
+    const key = String(market.tokenId);
+    if (this.handoffStartedTokens.has(key)) return;
+    this.handoffStartedTokens.add(key);
+    const active = this.activeLadders.get(key);
+    if (active) {
+      active.reason = "handoff";
+      active.handoffStartedAtMs = timestamp;
+    }
+    this.deps.runtimeMetrics?.writeCounter("track_s1_handed_off_to_qd", 1);
+    this.deps.riskEventRepo?.insert({
+      eventType: "s1_handoff_to_qd",
+      payload: {
+        tokenId: String(market.tokenId),
+        conditionId: String(position.conditionId),
+        orderCount: activeOrders.length,
+        timeoutSeconds: policy.handoffTimeoutSeconds,
+        signalTimestamp: new Date(timestamp).toISOString(),
+      },
+    });
+    for (const order of activeOrders) {
+      await this.deps.bus.publish("CancelOrderRequested", {
+        command: {
+          type: "CancelOrderCommand",
+          commandId: createCommandId(`s1_handoff_${String(order.orderId)}_${timestamp}`),
+          orderId: order.orderId,
+          reason: "s1_handoff_to_qd",
+        },
+        timestamp,
+      });
+    }
+  }
+
+  private async forceHandoffTimeout(
+    position: Position,
+    market: NormalizedMarket,
+    activeOrders: readonly Order[],
+    timestamp: number,
+  ): Promise<void> {
+    this.deps.runtimeMetrics?.writeCounter("track_s1_handoff_timeout_force_cancel", 1);
+    for (const order of activeOrders) {
+      await this.deps.bus.publish("CancelOrderRequested", {
+        command: {
+          type: "CancelOrderCommand",
+          commandId: createCommandId(`s1_handoff_timeout_${String(order.orderId)}_${timestamp}`),
+          orderId: order.orderId,
+          reason: "s1_handoff_to_qd",
+        },
+        timestamp,
+      });
+    }
+    this.deps.riskEventRepo?.insert({
+      eventType: "s1_ladder_cancelled",
+      payload: {
+        tokenId: String(market.tokenId),
+        conditionId: String(position.conditionId),
+        orderCount: activeOrders.length,
+        reason: "handoff_timeout_force_cancel",
+        signalTimestamp: new Date(timestamp).toISOString(),
+      },
+    });
+    this.releaseOwnership(market.tokenId, timestamp, "handoff_timeout_force_cancel");
+  }
+
+  private shouldHandoff(
+    market: Pick<NormalizedMarket, "endDate">,
+    nowMs: number,
+    policy: TrackS1WalkingLadderPolicy,
+  ): boolean {
+    if (!market.endDate) return false;
+    const endMs = Date.parse(market.endDate);
+    if (!Number.isFinite(endMs)) return false;
+    return (endMs - nowMs) / 1000 <= policy.handoffTimeToResolutionSeconds;
+  }
+
+  private isHandoffTimedOut(
+    tokenId: TokenId,
+    nowMs: number,
+    policy: TrackS1WalkingLadderPolicy,
+  ): boolean {
+    const active = this.activeLadders.get(String(tokenId));
+    if (!active?.handoffStartedAtMs) return false;
+    return nowMs - active.handoffStartedAtMs >= policy.handoffTimeoutSeconds * 1000;
+  }
+
+  private assumeOwnership(
+    position: Position,
+    market: NormalizedMarket,
+    ladderId: string,
+    opts: { reason: S1OwnershipSnapshot["reason"]; riskEvent: boolean },
+  ): void {
+    const key = String(market.tokenId);
+    if (!this.activeLadders.has(key)) {
+      this.activeLadders.set(key, {
+        tokenId: market.tokenId,
+        conditionId: String(position.conditionId),
+        ladderId,
+        assumedAtMs: this.now(),
+        reason: opts.reason,
+        handoffStartedAtMs: null,
+      });
+      if (opts.riskEvent) {
+        this.deps.riskEventRepo?.insert({
+          eventType: "s1_ownership_assumed",
+          payload: {
+            tokenId: String(market.tokenId),
+            conditionId: String(position.conditionId),
+            ladderId,
+            reason: opts.reason,
+            signalTimestamp: new Date(this.now()).toISOString(),
+          },
+        });
+      }
+      return;
+    }
+    const active = this.activeLadders.get(key);
+    if (active) {
+      active.reason = opts.reason;
+      if (opts.reason !== "handoff") active.handoffStartedAtMs = null;
+    }
+  }
+
+  private releaseIfTerminal(
+    tokenId: TokenId,
+    timestamp: number,
+    reason: "fill" | "order_cancelled",
+  ): void {
+    if (!this.activeLadders.has(String(tokenId))) return;
+    const activeOrders = this.findActiveS1Orders(tokenId);
+    if (activeOrders.length > 0) return;
+    this.releaseOwnership(tokenId, timestamp, reason);
+  }
+
+  private releaseOwnership(tokenId: TokenId, timestamp: number, reason: string): void {
+    const key = String(tokenId);
+    const active = this.activeLadders.get(key);
+    if (!active) return;
+    this.activeLadders.delete(key);
+    this.handoffStartedTokens.delete(key);
+    this.deps.riskEventRepo?.insert({
+      eventType: "s1_ownership_released",
+      payload: {
+        tokenId: key,
+        conditionId: active.conditionId,
+        ladderId: active.ladderId,
+        reason,
+        signalTimestamp: new Date(timestamp).toISOString(),
+      },
+    });
+  }
+
+  private acquirePlacement(tokenId: TokenId, nowMs: number): boolean {
+    const key = String(tokenId);
+    if (this.hasActivePlacement(tokenId, nowMs)) return false;
+    this.activePlacements.set(key, { expiresAtMs: nowMs + ACTIVE_PLACEMENT_TTL_MS });
+    this.recordPlacement(tokenId, nowMs);
+    return true;
+  }
+
+  private hasActivePlacement(tokenId: TokenId, nowMs: number): boolean {
+    const placement = this.activePlacements.get(String(tokenId));
+    return placement != null && placement.expiresAtMs > nowMs;
+  }
+
+  private pruneExpiredPlacements(): void {
+    const now = this.now();
+    for (const [tokenId, placement] of this.activePlacements) {
+      if (placement.expiresAtMs <= now) this.activePlacements.delete(tokenId);
+    }
+    for (const [tokenId, timestamps] of this.placementHistoryByToken) {
+      const recent = timestamps.filter((timestamp) => now - timestamp < ONE_HOUR_MS);
+      if (recent.length === 0) {
+        this.placementHistoryByToken.delete(tokenId);
+      } else {
+        this.placementHistoryByToken.set(tokenId, recent);
+      }
+    }
+  }
+
+  private isFrequencyLimited(
+    tokenId: TokenId,
+    nowMs: number,
+    policy: TrackS1WalkingLadderPolicy,
+  ): boolean {
+    const history = this.placementHistoryByToken.get(String(tokenId)) ?? [];
+    return (
+      history.filter((timestamp) => nowMs - timestamp < ONE_HOUR_MS).length >=
+      policy.maxLadderReplacementsPerHour
+    );
+  }
+
+  private recordPlacement(tokenId: TokenId, nowMs: number): void {
+    const key = String(tokenId);
+    const recent = (this.placementHistoryByToken.get(key) ?? []).filter(
+      (timestamp) => nowMs - timestamp < ONE_HOUR_MS,
+    );
+    recent.push(nowMs);
+    this.placementHistoryByToken.set(key, recent);
+  }
+
+  private resolveBook(
+    booksByToken: ReadonlyMap<string, OrderBookSnapshot> | undefined,
+    market: NormalizedMarket,
+  ): OrderBookSnapshot {
+    return (
+      booksByToken?.get(String(market.tokenId)) ?? {
+        tokenId: market.tokenId,
+        bids:
+          market.bestBid != null ? [{ price: market.bestBid, size: market.bestBidSize ?? 0 }] : [],
+        asks:
+          market.bestAsk != null ? [{ price: market.bestAsk, size: market.bestAskSize ?? 0 }] : [],
+        bestBid: market.bestBid,
+        bestAsk: market.bestAsk,
+        midPrice: market.midPrice,
+        spread: market.spread,
+        minOrderSize: market.minOrderSize ?? null,
+        timestamp: market.snapshotTs,
+      }
+    );
+  }
+
+  private countEligibilitySkip(reason: string): void {
+    if (reason === "dead_market") {
+      this.deps.runtimeMetrics?.writeCounter("track_s1_skipped_dead_market", 1);
+      return;
+    }
+    this.deps.runtimeMetrics?.writeCounter("track_s1_skipped_below_threshold", 1);
+  }
+
+  private resolveLadderIdFromOrders(orders: readonly Order[]): string {
+    return this.resolveLadderId(orders[0]);
+  }
+
+  private resolveLadderId(order: Order | undefined): string {
+    const metadata = order?.metadata;
+    const s1 = metadata && typeof metadata === "object" ? metadata.s1 : null;
+    if (s1 && typeof s1 === "object" && "ladderId" in s1) {
+      const ladderId = (s1 as { ladderId?: unknown }).ladderId;
+      if (typeof ladderId === "string" && ladderId.length > 0) return ladderId;
+    }
+    return `recovered_${String(order?.tokenId ?? "unknown")}`;
+  }
+
+  private resolveHandoffStartedAt(order: Order): number | null {
+    const metadata = order.metadata;
+    const s1 = metadata && typeof metadata === "object" ? metadata.s1 : null;
+    if (!s1 || typeof s1 !== "object") return null;
+    const raw = (s1 as { handoffStartedAt?: unknown }).handoffStartedAt;
+    if (typeof raw !== "string") return null;
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private now(): number {
+    return this.deps.now ? this.deps.now() : Date.now();
+  }
+}

@@ -76,6 +76,7 @@ export type CancelOrderReason =
   | "sell_replace_reprice"
   | "sell_replace_retry"
   | "sell_timeout_escalation"
+  | "s1_handoff_to_qd"
   | "operator"
   | "phantom_missing_on_exchange";
 

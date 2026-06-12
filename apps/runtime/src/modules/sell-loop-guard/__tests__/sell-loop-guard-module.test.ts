@@ -275,6 +275,40 @@ describe("SellLoopGuardModule", () => {
     expect(snap === null || snap.activeCount === 0).toBe(true);
   });
 
+  it("exempts S1_LADDER local skips and exchange no-id rejects from loop counting", async () => {
+    active = makeHarness();
+    await active.start();
+
+    for (let i = 0; i < 10; i++) {
+      await active.bus.publish(
+        "OrderSkipped",
+        skipPayload({
+          commandId: createCommandId(`cmd-s1-skip-${i}`),
+          decisionRuleId: "S1_LADDER",
+        }),
+      );
+      await active.bus.publish(
+        "OrderRejected",
+        rejectPayload({
+          commandId: createCommandId(`cmd-s1-reject-${i}`),
+          decisionRuleId: "S1_LADDER",
+        }),
+      );
+    }
+    await active.bus.drain();
+
+    const snap = active.module.getSnapshot(TOKEN, NOW);
+    expect(snap === null || snap.activeCount === 0).toBe(true);
+    active.metrics.flushCounters("2026-06-11T12:00:00.000Z");
+    const rows = active.metricsDb
+      .prepare("SELECT metric_name, value FROM runtime_metrics")
+      .all() as Array<{ metric_name: string; value: number }>;
+    expect(rows.find((r) => r.metric_name === "track_q_loop_guard_counter")).toBeUndefined();
+    expect(rows.find((r) => r.metric_name === "track_s1_loop_guard_exempted_total")?.value).toBe(
+      20,
+    );
+  });
+
   it("resets the bucket on a SELL OrderPlaced", async () => {
     active = makeHarness();
     await active.start();

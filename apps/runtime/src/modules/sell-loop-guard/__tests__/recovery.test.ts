@@ -26,6 +26,7 @@ function createSchema(d: Database.Database): void {
       status TEXT NOT NULL DEFAULT 'pending',
       exchange_error_message TEXT,
       exchange_rejection_reason TEXT,
+      decision_rule_id TEXT,
       bot_run_id TEXT NOT NULL DEFAULT 'run',
       created_at TEXT NOT NULL
     );
@@ -45,12 +46,13 @@ interface RejectedOrderRow {
   createdAtMs: number;
   side?: string;
   status?: string;
+  decisionRuleId?: string | null;
 }
 
 function insertRejectedOrder(d: Database.Database, row: RejectedOrderRow): void {
   d.prepare(
-    `INSERT INTO orders (order_id, client_order_id, token_id, side, status, exchange_error_message, bot_run_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'run', ?)`,
+    `INSERT INTO orders (order_id, client_order_id, token_id, side, status, exchange_error_message, decision_rule_id, bot_run_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'run', ?)`,
   ).run(
     row.id,
     row.id,
@@ -58,6 +60,7 @@ function insertRejectedOrder(d: Database.Database, row: RejectedOrderRow): void 
     row.side ?? "sell",
     row.status ?? "rejected",
     row.message,
+    row.decisionRuleId ?? null,
     new Date(row.createdAtMs).toISOString(),
   );
 }
@@ -68,6 +71,7 @@ interface RiskEventRow {
   side?: string;
   createdAtMs: number;
   eventType?: string;
+  decisionRuleId?: string | null;
 }
 
 function insertRiskEvent(d: Database.Database, row: RiskEventRow): void {
@@ -75,6 +79,7 @@ function insertRiskEvent(d: Database.Database, row: RiskEventRow): void {
     tokenId: row.token ?? TOKEN,
     side: row.side ?? "sell",
     reasonCode: row.reasonCode ?? "post-only-cross-pre-submit",
+    decisionRuleId: row.decisionRuleId ?? null,
   });
   // risk_events.created_at uses SQLite datetime('now') space format (UTC, second precision).
   const createdAt = new Date(row.createdAtMs).toISOString().slice(0, 19).replace("T", " ");
@@ -178,6 +183,20 @@ describe("recoverSellLoopGuardEvents", () => {
       createdAtMs: NOW - 60_000,
     });
     insertRiskEvent(db, { side: "buy", createdAtMs: NOW - 30_000 });
+
+    const events = recoverSellLoopGuardEvents(db, WINDOW_START);
+
+    expect(events).toHaveLength(0);
+  });
+
+  it("excludes historical S1_LADDER rows from recovery", () => {
+    insertRejectedOrder(db, {
+      id: "s1-no-id",
+      message: NO_ID_MESSAGE,
+      decisionRuleId: "S1_LADDER",
+      createdAtMs: NOW - 60_000,
+    });
+    insertRiskEvent(db, { decisionRuleId: "S1_LADDER", createdAtMs: NOW - 30_000 });
 
     const events = recoverSellLoopGuardEvents(db, WINDOW_START);
 

@@ -17,6 +17,8 @@ export * from "./market-selection.js";
 export * from "./strike-classifier.js";
 export * from "./polymarket-fees.js";
 export * from "./orderbook.js";
+export * from "./ladder-construction.js";
+export * from "./s1-eligibility.js";
 export { SelectionRuleEngine, normalizeSelectionPattern } from "./selection-rule-engine.js";
 export type { PreEntryInput } from "./market-selection.js";
 export {

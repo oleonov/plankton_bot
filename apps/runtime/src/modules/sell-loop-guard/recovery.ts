@@ -28,6 +28,7 @@ interface OrderRow {
   side: string;
   exchange_error_message: string | null;
   exchange_rejection_reason: string | null;
+  decision_rule_id: string | null;
   created_at: string;
 }
 
@@ -53,10 +54,13 @@ export function recoverSellLoopGuardEvents(
   const isoBound = new Date(windowStartMs).toISOString();
   const spaceBound = isoBound.slice(0, 19).replace("T", " ");
   const recovered: RecoveredLoopGuardEvent[] = [];
+  const hasDecisionRuleId = hasColumn(db, "orders", "decision_rule_id");
 
   const orderRows = db
     .prepare(
-      `SELECT token_id, side, exchange_error_message, exchange_rejection_reason, created_at
+      `SELECT token_id, side, exchange_error_message, exchange_rejection_reason,
+              ${hasDecisionRuleId ? "decision_rule_id" : "NULL AS decision_rule_id"},
+              created_at
        FROM orders
        WHERE side = 'sell' AND created_at >= ?`,
     )
@@ -66,6 +70,7 @@ export function recoverSellLoopGuardEvents(
       side: row.side,
       reason: row.exchange_rejection_reason,
       exchangeErrorMessage: row.exchange_error_message,
+      decisionRuleId: row.decision_rule_id,
     });
     pushIfInWindow(recovered, row.token_id, outcome, row.created_at, windowStartMs);
   }
@@ -80,7 +85,11 @@ export function recoverSellLoopGuardEvents(
   for (const row of skipRows) {
     const parsed = parsePayload(row.payload);
     if (!parsed) continue;
-    const outcome = classifySellLoopGuardSkip({ side: parsed.side, reasonCode: parsed.reasonCode });
+    const outcome = classifySellLoopGuardSkip({
+      side: parsed.side,
+      reasonCode: parsed.reasonCode,
+      decisionRuleId: parsed.decisionRuleId,
+    });
     pushIfInWindow(recovered, parsed.tokenId, outcome, row.created_at, windowStartMs);
   }
 
@@ -88,17 +97,25 @@ export function recoverSellLoopGuardEvents(
   return recovered;
 }
 
-function parsePayload(raw: string): { tokenId: string; side: string; reasonCode: string } | null {
+function parsePayload(
+  raw: string,
+): { tokenId: string; side: string; reasonCode: string; decisionRuleId: string | null } | null {
   try {
     const obj = JSON.parse(raw) as Record<string, unknown>;
     const tokenId = typeof obj.tokenId === "string" ? obj.tokenId : null;
     const side = typeof obj.side === "string" ? obj.side : "";
     const reasonCode = typeof obj.reasonCode === "string" ? obj.reasonCode : "";
+    const decisionRuleId = typeof obj.decisionRuleId === "string" ? obj.decisionRuleId : null;
     if (!tokenId) return null;
-    return { tokenId, side, reasonCode };
+    return { tokenId, side, reasonCode, decisionRuleId };
   } catch {
     return null;
   }
+}
+
+function hasColumn(db: Database.Database, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.some((row) => row.name === column);
 }
 
 function pushIfInWindow(

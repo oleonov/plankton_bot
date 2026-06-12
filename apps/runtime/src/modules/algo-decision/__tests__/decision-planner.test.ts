@@ -715,6 +715,52 @@ describe("sell loop guard suppression", () => {
     });
   });
 
+  it("suppresses D8 SELL generation when S1 owns the token", () => {
+    const result = evaluateDecisionPlan({
+      ...d8SellInput(null),
+      s1Ownership: {
+        owned: true,
+        ladderId: "ladder-align",
+        assumedAtMs: now,
+        reason: "eligible",
+      },
+    });
+
+    expect(result.type).toBe("none");
+    expect(result.suppressions).toContainEqual(
+      expect.objectContaining({
+        reasonCode: "s1_owned_token",
+        side: "SELL",
+        decisionRuleId: "D8_PROFIT_RATIO",
+      }),
+    );
+    expect(result.sideEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "s1_ownership_blocked_sell",
+        decisionRuleId: "D8_PROFIT_RATIO",
+      }),
+    );
+  });
+
+  it("leaves BUY generation unaffected when S1 owns the token", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        market: market({ midPrice: 0.1 }),
+        s1Ownership: {
+          owned: true,
+          ladderId: "ladder-buy",
+          assumedAtMs: now,
+          reason: "eligible",
+        },
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.side).toBe("buy");
+    expect(result.signal.decisionRuleId).toBe("R23_DIP_TRIGGER");
+  });
+
   it("emits a sell_loop_guard_suppressed side effect carrying count and threshold", () => {
     const result = evaluateDecisionPlan(d8SellInput(guardSnapshot()));
 
