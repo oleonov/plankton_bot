@@ -123,4 +123,45 @@ describe("isS1Eligible", () => {
 
     expect(result).toMatchObject({ eligible: false, reason: "active_ladder_exists" });
   });
+
+  it("accepts wide-spread books even when full position depth exists", () => {
+    const result = isS1Eligible({
+      position: position(),
+      book: book({
+        bids: [{ price: 0.02, size: 100 }],
+        asks: [{ price: 0.04, size: 100 }],
+        bestBid: 0.02,
+        bestAsk: 0.04,
+        spread: 0.02,
+      }),
+      marketEndDate: endDate,
+      nowMs,
+      hasActiveS1Ladder: false,
+      policy: enabledPolicy,
+    });
+
+    expect(result).toMatchObject({ eligible: true, thinReason: "wide_spread" });
+  });
+
+  it("accepts thin best-bid depth when lower bid levels cover the full position", () => {
+    const result = isS1Eligible({
+      position: position(),
+      book: book({
+        bids: [
+          { price: 0.02, size: 5 },
+          { price: 0.019, size: 95 },
+        ],
+        asks: [{ price: 0.025, size: 100 }],
+        bestBid: 0.02,
+        bestAsk: 0.025,
+        spread: 0.005,
+      }),
+      marketEndDate: endDate,
+      nowMs,
+      hasActiveS1Ladder: false,
+      policy: enabledPolicy,
+    });
+
+    expect(result).toMatchObject({ eligible: true, thinReason: "thin_best_bid" });
+  });
 });

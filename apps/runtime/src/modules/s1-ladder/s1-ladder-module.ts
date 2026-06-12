@@ -238,14 +238,17 @@ export class S1LadderModule implements RuntimeModule {
       if (order.side !== "sell" || order.decisionRuleId !== S1_LADDER_RULE_ID) continue;
       const position = this.findOpenPosition(order.tokenId);
       if (!position) continue;
+      const handoffStartedAtMs = this.resolveHandoffStartedAt(order);
+      const key = String(order.tokenId);
       this.activeLadders.set(String(order.tokenId), {
         tokenId: order.tokenId,
         conditionId: String(order.conditionId),
         ladderId: this.resolveLadderId(order),
         assumedAtMs: Date.parse(order.createdAt),
-        reason: "active_ladder",
-        handoffStartedAtMs: this.resolveHandoffStartedAt(order),
+        reason: handoffStartedAtMs == null ? "active_ladder" : "handoff",
+        handoffStartedAtMs,
       });
+      if (handoffStartedAtMs != null) this.handoffStartedTokens.add(key);
     }
   }
 
@@ -468,6 +471,9 @@ export class S1LadderModule implements RuntimeModule {
     if (!active) return;
     this.activeLadders.delete(key);
     this.handoffStartedTokens.delete(key);
+    if (reason === "fill") {
+      this.deps.runtimeMetrics?.writeCounter("track_s1_ladder_completed", 1);
+    }
     this.deps.riskEventRepo?.insert({
       eventType: "s1_ownership_released",
       payload: {

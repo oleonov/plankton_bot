@@ -1,13 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_EXECUTION_POLICY,
+  DEFAULT_SELL_LOOP_GUARD_POLICY,
   OrderType,
   PositionStatus,
+  createCommandId,
   createConditionId,
+  createFillId,
   createOrderId,
   createPositionId,
   createTokenId,
+  type AlgoDecisionRule,
+  type AlgoSizeRule,
   type ClientOrderId,
+  type LegState,
   type NormalizedMarket,
   type Order,
   type OrderBookSnapshot,
@@ -19,6 +25,8 @@ import {
 import { InProcessEventBus } from "@krabs/event-bus";
 import { RuntimeMetricWriter } from "../../../runtime-metric-writer.js";
 import type { Logger } from "../../../logger.js";
+import { evaluateDecisionPlan } from "../../algo-decision/decision-planner.js";
+import { SellLoopGuardModule } from "../../sell-loop-guard/sell-loop-guard-module.js";
 import { S1_LADDER_RULE_ID, S1LadderModule } from "../s1-ladder-module.js";
 import type Database from "better-sqlite3";
 
@@ -160,6 +168,80 @@ function makeRiskEvents(): RiskEventRepository & {
   };
 }
 
+const decisionRules: AlgoDecisionRule[] = [
+  {
+    id: 1,
+    priority: 999,
+    ruleId: "FALLBACK",
+    stateCondition: "ANY",
+    priceOperator: null,
+    priceValue: null,
+    timeSinceLastOperator: null,
+    timeSinceLastSeconds: null,
+    buyCountMin: null,
+    buyCountMax: null,
+    holdDurationOperator: null,
+    holdDurationSeconds: null,
+    action: "HOLD",
+  },
+];
+
+const buySizeRules: AlgoSizeRule[] = [
+  {
+    id: 1,
+    actionType: "BUY",
+    priority: 1,
+    ruleId: "BUY-SIZE",
+    stateCondition: "ANY",
+    priceOperator: null,
+    priceValue: null,
+    nthBuy: null,
+    buyCountMin: null,
+    buyCountMax: null,
+    sizeUsdc: 1,
+  },
+];
+
+const sellSizeRules: AlgoSizeRule[] = [
+  {
+    id: 2,
+    actionType: "SELL",
+    priority: 1,
+    ruleId: "SELL-SIZE",
+    stateCondition: "ANY",
+    priceOperator: null,
+    priceValue: null,
+    nthBuy: null,
+    buyCountMin: null,
+    buyCountMax: null,
+    sizeUsdc: 1,
+  },
+];
+
+function legState(overrides: Partial<LegState> = {}): LegState {
+  return {
+    tokenId,
+    buyCount: 1,
+    sellCount: 0,
+    lastAction: "BUY",
+    firstTradePrice: 0.014,
+    firstTradeAt: "2026-06-12T09:00:00.000Z",
+    lastTradeAt: "2026-06-12T09:00:00.000Z",
+    updatedAt: "2026-06-12T09:00:00.000Z",
+    cumulativeBuySize: 100,
+    cumulativeBuyNotional: 1.4,
+    cumulativeSellSize: 0,
+    ...overrides,
+  };
+}
+
+function readMetricValue(db: Database.Database, metricName: string): number {
+  const row = db
+    .prepare("SELECT COALESCE(SUM(value), 0) AS value FROM runtime_metrics WHERE metric_name = ?")
+    .get(metricName) as { value: number } | undefined;
+  return row?.value ?? 0;
+}
+
 describe("S1LadderModule", () => {
   let metricsDb: Database.Database;
 
@@ -223,6 +305,139 @@ describe("S1LadderModule", () => {
     expect(new Set(placed.map((p) => p.command.clientOrderId)).size).toBe(4);
     expect(placed.every((p) => p.command.decisionRuleId === S1_LADDER_RULE_ID)).toBe(true);
     expect(riskEvents.inserts.some((e) => e.eventType === "s1_ownership_assumed")).toBe(true);
+    await module.stop();
+  });
+
+  it("runs the ALIGN chain: ownership, deterministic ladder, D8 suppression, loop guard exemption, and BUY continuity", async () => {
+    const bus = new InProcessEventBus();
+    const placed: Array<{
+      command: { clientOrderId: ClientOrderId; decisionRuleId?: string | null };
+    }> = [];
+    bus.subscribe("PlaceOrderRequested", async (event) => {
+      placed.push(event);
+    });
+    const metrics = new RuntimeMetricWriter(metricsDb, () => new Date(NOW));
+    const riskEvents = makeRiskEvents();
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo: makeOrderRepo([]),
+      policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+      runtimeMetrics: metrics,
+      riskEventRepo: riskEvents,
+      log: silentLog,
+      now: () => NOW,
+    });
+    const loopGuard = new SellLoopGuardModule({
+      bus,
+      policy: () => DEFAULT_SELL_LOOP_GUARD_POLICY,
+      runtimeMetrics: metrics,
+      riskEventRepo: riskEvents,
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+    await loopGuard.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market()],
+      booksByToken: new Map([[String(tokenId), book()]]),
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+
+    const s1Ownership = module.getSnapshot(tokenId);
+    expect(s1Ownership?.owned).toBe(true);
+    expect(placed).toHaveLength(4);
+    expect(new Set(placed.map((p) => p.command.clientOrderId)).size).toBe(4);
+
+    const d8Result = evaluateDecisionPlan({
+      tokenId,
+      now: NOW,
+      selectedForEntry: false,
+      hasPendingBuyOrder: false,
+      legState: legState(),
+      position: position(),
+      market: market(),
+      prevMidPrice: null,
+      decisionRules,
+      buySizeRules,
+      sellSizeRules,
+      executionPolicy: {
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        profitTarget: { ...DEFAULT_EXECUTION_POLICY.profitTarget, holdSecondsMin: 0 },
+        lossExit: { ...DEFAULT_EXECUTION_POLICY.lossExit, enabled: false },
+      },
+      continuationFacts: { tradeCount: 1, tradeCountSource: "leg_local", stop: false },
+      continuationMode: "leg_local",
+      r23MaxMidpoint: null,
+      dropReferencePrice: null,
+      postBuyCooldown: null,
+      latestSellOrder: null,
+      hasActiveSellOrderForQd: false,
+      sellLoopGuard: null,
+      s1Ownership,
+    });
+    expect(d8Result.type).toBe("none");
+    expect(d8Result.suppressions).toContainEqual(
+      expect.objectContaining({ reasonCode: "s1_owned_token", decisionRuleId: "D8_PROFIT_RATIO" }),
+    );
+
+    for (let index = 0; index < 10; index++) {
+      await bus.publish("OrderSkipped", {
+        commandId: createCommandId(`s1-align-skip-${index}`),
+        clientOrderId: `s1-align-client-${index}` as ClientOrderId,
+        tokenId,
+        conditionId,
+        reasonCode: "post-only-cross-pre-submit",
+        side: "sell",
+        price: 0.046,
+        size: 10,
+        signalReason: "repricing-exit",
+        signalId: `s1-align-signal-${index}`,
+        decisionRuleId: S1_LADDER_RULE_ID,
+        signalTimestamp: null,
+        details: {},
+        timestamp: NOW + index,
+      });
+    }
+    await bus.drain();
+    expect(loopGuard.getSnapshot(tokenId, NOW + 10)?.activeCount ?? 0).toBe(0);
+
+    const buyResult = evaluateDecisionPlan({
+      tokenId,
+      now: NOW,
+      selectedForEntry: true,
+      hasPendingBuyOrder: false,
+      legState: null,
+      position: null,
+      market: market({ midPrice: 0.1, bestBid: 0.09, bestAsk: 0.11, spread: 0.02 }),
+      prevMidPrice: null,
+      decisionRules,
+      buySizeRules,
+      sellSizeRules,
+      executionPolicy: {
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { enabled: true, dropThresholdRatio: 0.683, windowMs: 86_400_000 },
+      },
+      continuationFacts: null,
+      continuationMode: "leg_local",
+      r23MaxMidpoint: 0.2,
+      dropReferencePrice: null,
+      postBuyCooldown: null,
+      latestSellOrder: null,
+      hasActiveSellOrderForQd: false,
+      sellLoopGuard: null,
+      s1Ownership,
+    });
+    expect(buyResult.type).toBe("signal");
+    if (buyResult.type === "signal") expect(buyResult.signal.side).toBe("buy");
+
+    await loopGuard.stop();
     await module.stop();
   });
 
@@ -299,6 +514,59 @@ describe("S1LadderModule", () => {
     await module.stop();
   });
 
+  it("releases ownership after all S1 ladder tiers fill", async () => {
+    const bus = new InProcessEventBus();
+    const orders = Array.from({ length: 4 }, (_, index) =>
+      order({
+        orderId: createOrderId(`s1-fill-order-${index}`),
+        clientOrderId: `s1-fill-client-${index}` as ClientOrderId,
+        metadata: { s1: { ladderId: "ladder-fill", tierIndex: index, handoffStartedAt: null } },
+      }),
+    );
+    const metrics = new RuntimeMetricWriter(metricsDb, () => new Date(NOW));
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo: makeOrderRepo(orders),
+      policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+      runtimeMetrics: metrics,
+      riskEventRepo: makeRiskEvents(),
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+    expect(module.isS1OwnedToken(tokenId)).toBe(true);
+    for (let index = 0; index < orders.length; index++) {
+      orders[index] = { ...orders[index]!, status: "filled" };
+      await bus.publish("FillReceived", {
+        fillId: createFillId(`s1-fill-${index}`),
+        orderId: orders[index]!.orderId,
+        clientOrderId: orders[index]!.clientOrderId,
+        tokenId,
+        conditionId,
+        side: "sell",
+        price: orders[index]!.price,
+        size: orders[index]!.size,
+        sizeUsdc: orders[index]!.price * orders[index]!.size,
+        liquidityRole: "maker",
+        fee: 0,
+        feeRateBps: 0,
+        signalReason: "repricing-exit",
+        signalId: orders[index]!.signalId,
+        decisionRuleId: S1_LADDER_RULE_ID,
+        signalTimestamp: null,
+        timestamp: NOW + index,
+      });
+    }
+    await bus.drain();
+    metrics.flushCounters(new Date(NOW).toISOString());
+
+    expect(module.isS1OwnedToken(tokenId)).toBe(false);
+    expect(readMetricValue(metricsDb, "track_s1_ladder_completed")).toBe(1);
+    await module.stop();
+  });
+
   it("force-releases ownership when handoff timeout expires", async () => {
     const bus = new InProcessEventBus();
     const cancels: Array<{ command: { orderId: string; reason: string } }> = [];
@@ -336,6 +604,100 @@ describe("S1LadderModule", () => {
     await bus.drain();
 
     expect(cancels).toHaveLength(2);
+    expect(module.isS1OwnedToken(tokenId)).toBe(false);
+    await module.stop();
+  });
+
+  it("restores handoffStartedAt on restart and keeps waiting before timeout", async () => {
+    const bus = new InProcessEventBus();
+    const cancels: Array<unknown> = [];
+    bus.subscribe("CancelOrderRequested", async (event) => {
+      cancels.push(event);
+    });
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo: makeOrderRepo([
+        order({
+          orderId: createOrderId("s1-restart-wait"),
+          metadata: {
+            s1: {
+              ladderId: "ladder-restart",
+              tierIndex: 0,
+              handoffStartedAt: new Date(NOW - 60_000).toISOString(),
+            },
+          },
+        }),
+      ]),
+      policy: () => ({
+        ...DEFAULT_EXECUTION_POLICY.trackS1,
+        enabled: true,
+        handoffTimeoutSeconds: 300,
+      }),
+      runtimeMetrics: new RuntimeMetricWriter(metricsDb, () => new Date(NOW)),
+      riskEventRepo: makeRiskEvents(),
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ endDate: "2026-06-12T10:30:00.000Z" })],
+      booksByToken: new Map([[String(tokenId), book()]]),
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+
+    expect(cancels).toHaveLength(0);
+    expect(module.isS1OwnedToken(tokenId)).toBe(true);
+    await module.stop();
+  });
+
+  it("restores handoffStartedAt on restart and force-cancels after timeout", async () => {
+    const bus = new InProcessEventBus();
+    const cancels: Array<unknown> = [];
+    bus.subscribe("CancelOrderRequested", async (event) => {
+      cancels.push(event);
+    });
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo([position()]),
+      orderRepo: makeOrderRepo([
+        order({
+          orderId: createOrderId("s1-restart-timeout"),
+          metadata: {
+            s1: {
+              ladderId: "ladder-restart",
+              tierIndex: 0,
+              handoffStartedAt: new Date(NOW - 301_000).toISOString(),
+            },
+          },
+        }),
+      ]),
+      policy: () => ({
+        ...DEFAULT_EXECUTION_POLICY.trackS1,
+        enabled: true,
+        handoffTimeoutSeconds: 300,
+      }),
+      runtimeMetrics: new RuntimeMetricWriter(metricsDb, () => new Date(NOW)),
+      riskEventRepo: makeRiskEvents(),
+      log: silentLog,
+      now: () => NOW,
+    });
+
+    await module.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ endDate: "2026-06-12T10:30:00.000Z" })],
+      booksByToken: new Map([[String(tokenId), book()]]),
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+
+    expect(cancels).toHaveLength(1);
     expect(module.isS1OwnedToken(tokenId)).toBe(false);
     await module.stop();
   });

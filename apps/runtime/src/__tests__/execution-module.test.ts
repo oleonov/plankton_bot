@@ -8,6 +8,7 @@ import {
   createConditionId,
   DEFAULT_EXECUTION_POLICY,
   ExchangeErrorCode,
+  S1_LADDER_RULE_ID,
 } from "@krabs/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -1400,6 +1401,136 @@ describe("ExecutionModule", () => {
 
     resolvePlace!();
     await reserveMod.stop();
+  });
+
+  it("uses the S1 per-token SELL budget independently from the normal SELL budget", async () => {
+    const s1Token = createTokenId("s1-budget-token");
+    const normalToken = createTokenId("normal-budget-token");
+    const now = new Date().toISOString();
+    const makeOpenSell = (tokenId: TokenId, index: number, decisionRuleId: string): Order => ({
+      orderId: createOrderId(`${String(tokenId)}-open-${index}`),
+      clientOrderId: `plk_${String(tokenId)}_${index}` as ClientOrderId,
+      tokenId,
+      conditionId: createConditionId("cond-1"),
+      side: "sell",
+      orderType: "GTC",
+      postOnly: true,
+      price: 0.3 + index * 0.01,
+      size: 1,
+      sizeUsdc: 0.3 + index * 0.01,
+      status: "open",
+      exchangeOrderId: `exchange-${String(tokenId)}-${index}`,
+      signalId: null,
+      signalReason: "repricing-exit",
+      decisionRuleId,
+      botRunId: BOT_RUN_ID,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const orders: Order[] = [
+      makeOpenSell(s1Token, 0, S1_LADDER_RULE_ID),
+      makeOpenSell(s1Token, 1, S1_LADDER_RULE_ID),
+      makeOpenSell(s1Token, 2, S1_LADDER_RULE_ID),
+      makeOpenSell(normalToken, 0, "D8_PROFIT_RATIO"),
+    ];
+    orderRepo.findOpen = vi.fn(() => orders.filter((order) => order.status === "open"));
+    orderRepo.findByTokenId = vi.fn((id) => orders.filter((order) => order.tokenId === id));
+    orderRepo.findByClientOrderId = vi.fn(
+      (clientOrderId) =>
+        orders.find(
+          (order) =>
+            order.clientOrderId === clientOrderId &&
+            (order.status === "open" || order.status === "pending"),
+        ) ?? null,
+    );
+    orderRepo.save = vi.fn((order: Order) => {
+      orders.push(order);
+    });
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (payload) => {
+      rejected.push(payload);
+    });
+    const budgetMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        sellCapacity: {
+          ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+          enabled: true,
+          maxOpenSellOrders: 10,
+          maxOpenSellOrdersPerToken: 2,
+        },
+        trackS1: {
+          ...DEFAULT_EXECUTION_POLICY.trackS1,
+          s1MaxOrdersPerToken: 4,
+        },
+      }),
+    });
+
+    await budgetMod.start();
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("s1-fourth"),
+        clientOrderId: "plk_s1_fourth" as ClientOrderId,
+        tokenId: s1Token,
+        side: "sell",
+        size: 1,
+        decisionRuleId: S1_LADDER_RULE_ID,
+        metadata: { sellReplacementCancelledOrderId: "already-cancelled-s1" },
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("s1-fifth"),
+        clientOrderId: "plk_s1_fifth" as ClientOrderId,
+        tokenId: s1Token,
+        side: "sell",
+        size: 1,
+        decisionRuleId: S1_LADDER_RULE_ID,
+        metadata: { sellReplacementCancelledOrderId: "already-cancelled-s1" },
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("normal-second"),
+        clientOrderId: "plk_normal_second" as ClientOrderId,
+        tokenId: normalToken,
+        side: "sell",
+        size: 1,
+        decisionRuleId: "D8_PROFIT_RATIO",
+        metadata: { sellReplacementCancelledOrderId: "already-cancelled-normal" },
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("normal-third"),
+        clientOrderId: "plk_normal_third" as ClientOrderId,
+        tokenId: normalToken,
+        side: "sell",
+        size: 1,
+        decisionRuleId: "D8_PROFIT_RATIO",
+        metadata: { sellReplacementCancelledOrderId: "already-cancelled-normal" },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
+    expect(rejected.map((event) => event.reason)).toEqual([
+      "per_token_sell_limit",
+      "per_token_sell_limit",
+    ]);
+
+    await budgetMod.stop();
   });
 
   it("does NOT increment dust counter for reserved-token-limit rejects (v064a)", async () => {

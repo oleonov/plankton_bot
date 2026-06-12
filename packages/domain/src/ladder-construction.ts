@@ -25,6 +25,7 @@ export type S1LadderSkipReason =
   | "below_min_tier_size"
   | "bottom_above_top"
   | "dead_market"
+  | "insufficient_price_band"
   | "invalid_input";
 
 export interface S1Tier {
@@ -85,6 +86,9 @@ export function buildLadder(input: BuildLadderInput): S1LadderBuildResult {
     tick,
   );
   if (!(top > bottom)) return { ok: false, reason: "bottom_above_top" };
+  if (top - bottom + 1e-12 < (fractions.length - 1) * tick) {
+    return { ok: false, reason: "insufficient_price_band" };
+  }
 
   const prices = buildPrices(bottom, top, fractions.length, tick);
   const tiers: S1Tier[] = prices.map((price, index) => ({
@@ -178,8 +182,8 @@ function normalizePrice(value: number): number {
 }
 
 function roundSize(value: number, minOrderSize: number): number {
-  const rounded = Number(value.toFixed(6));
-  return rounded < minOrderSize ? 0 : rounded;
+  const truncated = Number((Math.floor((value + 1e-12) * 1_000_000) / 1_000_000).toFixed(6));
+  return truncated < minOrderSize ? 0 : truncated;
 }
 
 function normalizePositive(value: number | null | undefined, fallback: number): number {

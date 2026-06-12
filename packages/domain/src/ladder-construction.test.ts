@@ -91,6 +91,63 @@ describe("buildLadder", () => {
     expect(result.tiers.map((t) => t.size)).toEqual([10, 10]);
   });
 
+  it("rejects four-tier ladders when the price band cannot fit monotonic tick steps", () => {
+    const result = buildLadder({
+      tokenId,
+      openedAt: "2026-06-12T10:00:00.000Z",
+      avgEntryPrice: 0.014,
+      positionSize: 100,
+      bestBid: 0.02,
+      bestAsk: 0.024,
+      tickSize: 0.001,
+      minOrderSize: 10,
+      policy: DEFAULT_TRACK_S1_WALKING_LADDER_POLICY,
+    });
+
+    expect(result).toEqual({ ok: false, reason: "insufficient_price_band" });
+  });
+
+  it("still builds a two-tier ladder in the same narrow band when one tick interval fits", () => {
+    const result = buildLadder({
+      tokenId,
+      openedAt: "2026-06-12T10:00:00.000Z",
+      avgEntryPrice: 0.014,
+      positionSize: 100,
+      bestBid: 0.02,
+      bestAsk: 0.024,
+      tickSize: 0.001,
+      minOrderSize: 10,
+      policy: {
+        ...DEFAULT_TRACK_S1_WALKING_LADDER_POLICY,
+        numTiers: 2,
+        volumeDistribution: [0.5, 0.5],
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.tiers.map((tier) => tier.price)).toEqual([0.021, 0.023]);
+  });
+
+  it("never rounds tier sizes above the source position size", () => {
+    const result = buildLadder({
+      tokenId,
+      openedAt: "2026-06-12T10:00:00.000Z",
+      avgEntryPrice: 0.014,
+      positionSize: 99.999999,
+      bestBid: 0.02,
+      bestAsk: 0.12,
+      tickSize: 0.001,
+      minOrderSize: 1,
+      policy: DEFAULT_TRACK_S1_WALKING_LADDER_POLICY,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const sizeSum = result.tiers.reduce((sum, tier) => sum + tier.size, 0);
+    expect(sizeSum).toBeLessThanOrEqual(99.999999);
+  });
+
   it("returns deterministic ladder and tier signal ids across restarts", () => {
     const a = buildS1LadderId({
       tokenId,
