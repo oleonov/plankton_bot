@@ -18,6 +18,7 @@ export * from "./strike-classifier.js";
 export * from "./polymarket-fees.js";
 export * from "./orderbook.js";
 export * from "./track-s3-cap.js";
+export * from "./track-p-cap-skip.js";
 export * from "./ladder-construction.js";
 export * from "./s1-eligibility.js";
 export { SelectionRuleEngine, normalizeSelectionPattern } from "./selection-rule-engine.js";

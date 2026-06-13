@@ -156,6 +156,14 @@ export const DEFAULT_TRACK_R_HONEST_PRICING_POLICY: TrackRHonestPricingPolicy = 
   requireFullDepth: true,
   universalFallbackRate: 0.05,
   maxSaneThreshold: 1.5,
+  exitBookFallback: false,
+  exitBookStalenessMs: 30000,
+  exitBookFetchTtlMs: 20000,
+  takerCapSkip: false,
+  allowPartialExit: false,
+  partialExitMinFraction: 0.2,
+  partialExitMinShares: 1,
+  partialExitMaxPerHour: 3,
 };
 
 export const DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY: TrackS3MarginAwareSpreadPolicy = {
@@ -399,6 +407,16 @@ const BOUND_TRACK_R_UNIVERSAL_FALLBACK_MIN = 0.0001;
 const BOUND_TRACK_R_UNIVERSAL_FALLBACK_MAX = 0.2;
 const BOUND_TRACK_R_MAX_SANE_THRESHOLD_MIN = 1;
 const BOUND_TRACK_R_MAX_SANE_THRESHOLD_MAX = 2;
+const BOUND_TRACK_R_EXIT_BOOK_STALENESS_MS_MIN = 1_000;
+const BOUND_TRACK_R_EXIT_BOOK_STALENESS_MS_MAX = 300_000;
+const BOUND_TRACK_R_EXIT_BOOK_FETCH_TTL_MS_MIN = 1_000;
+const BOUND_TRACK_R_EXIT_BOOK_FETCH_TTL_MS_MAX = 60_000;
+const BOUND_TRACK_R_PARTIAL_MIN_FRACTION_MIN = 0.01;
+const BOUND_TRACK_R_PARTIAL_MIN_FRACTION_MAX = 1;
+const BOUND_TRACK_R_PARTIAL_MIN_SHARES_MIN = 0;
+const BOUND_TRACK_R_PARTIAL_MIN_SHARES_MAX = 100_000;
+const BOUND_TRACK_R_PARTIAL_MAX_PER_HOUR_MIN = 1;
+const BOUND_TRACK_R_PARTIAL_MAX_PER_HOUR_MAX = 100;
 const BOUND_TRACK_S3_MARGIN_MIN = 1;
 const BOUND_TRACK_S3_MARGIN_MAX = 20;
 const BOUND_TRACK_S3_TIER_COUNT_MAX = 10;
@@ -1129,6 +1147,64 @@ function parseTrackR(raw: unknown, issues: string[]): TrackRHonestPricingPolicy 
       BOUND_TRACK_R_MAX_SANE_THRESHOLD_MAX,
       issues,
       "trackR.maxSaneThreshold",
+    ),
+    exitBookFallback: booleanOr(
+      obj.exitBookFallback,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.exitBookFallback,
+      issues,
+      "trackR.exitBookFallback",
+    ),
+    exitBookStalenessMs: clampedInt(
+      obj.exitBookStalenessMs,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.exitBookStalenessMs,
+      BOUND_TRACK_R_EXIT_BOOK_STALENESS_MS_MIN,
+      BOUND_TRACK_R_EXIT_BOOK_STALENESS_MS_MAX,
+      issues,
+      "trackR.exitBookStalenessMs",
+    ),
+    exitBookFetchTtlMs: clampedInt(
+      obj.exitBookFetchTtlMs,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.exitBookFetchTtlMs,
+      BOUND_TRACK_R_EXIT_BOOK_FETCH_TTL_MS_MIN,
+      BOUND_TRACK_R_EXIT_BOOK_FETCH_TTL_MS_MAX,
+      issues,
+      "trackR.exitBookFetchTtlMs",
+    ),
+    takerCapSkip: booleanOr(
+      obj.takerCapSkip,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.takerCapSkip,
+      issues,
+      "trackR.takerCapSkip",
+    ),
+    allowPartialExit: booleanOr(
+      obj.allowPartialExit,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.allowPartialExit,
+      issues,
+      "trackR.allowPartialExit",
+    ),
+    partialExitMinFraction: clampedNumber(
+      obj.partialExitMinFraction,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.partialExitMinFraction,
+      BOUND_TRACK_R_PARTIAL_MIN_FRACTION_MIN,
+      BOUND_TRACK_R_PARTIAL_MIN_FRACTION_MAX,
+      issues,
+      "trackR.partialExitMinFraction",
+    ),
+    partialExitMinShares: clampedNumber(
+      obj.partialExitMinShares,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.partialExitMinShares,
+      BOUND_TRACK_R_PARTIAL_MIN_SHARES_MIN,
+      BOUND_TRACK_R_PARTIAL_MIN_SHARES_MAX,
+      issues,
+      "trackR.partialExitMinShares",
+    ),
+    partialExitMaxPerHour: clampedInt(
+      obj.partialExitMaxPerHour,
+      DEFAULT_TRACK_R_HONEST_PRICING_POLICY.partialExitMaxPerHour,
+      BOUND_TRACK_R_PARTIAL_MAX_PER_HOUR_MIN,
+      BOUND_TRACK_R_PARTIAL_MAX_PER_HOUR_MAX,
+      issues,
+      "trackR.partialExitMaxPerHour",
     ),
   };
 }

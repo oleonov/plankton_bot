@@ -30,6 +30,7 @@ import type {
   TokenId,
   Order,
   RiskEventRepository,
+  S1OwnershipReader,
   SellShadowAvgEntrySource,
   TrackRFeeQuote,
   TrackRFeeRateSource,
@@ -46,9 +47,10 @@ import {
   isSellTimeoutReplacement,
   recordStageDuration,
   resolveTrackS3SpreadCap,
+  shouldSkipSellPriceCap,
 } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
-import { buildClientOrderId } from "@krabs/domain/node";
+import { buildClientOrderId, buildPartialExitClientOrderId } from "@krabs/domain/node";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { Logger } from "../../logger.js";
@@ -78,9 +80,19 @@ export { planktonAlignedMarkupCap, SELL_PRICE_CEILING };
 import {
   applyOrderBookToMarket,
   type CandidateBookCache,
+  type CandidateBookCacheEntry,
   type CandidateBookResolution,
 } from "./candidate-book-cache.js";
-import { isExecutableOrderSize, resolveEffectiveMinOrderSize } from "../../min-order-size.js";
+import {
+  ExitBookFallbackCache,
+  type ExitBookFetcher,
+  type ExitBookSource,
+} from "./exit-book-fallback-cache.js";
+import {
+  floorToMinOrderStep,
+  isExecutableOrderSize,
+  resolveEffectiveMinOrderSize,
+} from "../../min-order-size.js";
 import type { SignalPathTelemetry } from "./signal-path-telemetry.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 25;
@@ -89,12 +101,21 @@ const MIN_NOTIONAL_EPSILON = 1e-9;
 const D4_RULE_ID = "D4";
 const D4_MIN_EFFECTIVE_TICK_SIZE = 0.01;
 const TAKER_BELOW_MARGIN_REASON = "taker-below-margin";
+const PARTIAL_EXIT_WINDOW_MS = 60 * 60_000;
 const DEFAULT_TRACK_R_RUNTIME_POLICY: TrackRHonestPricingPolicy = {
   enabled: false,
   safetyMargin: 0.005,
   requireFullDepth: true,
   universalFallbackRate: 0.05,
   maxSaneThreshold: 1.5,
+  exitBookFallback: false,
+  exitBookStalenessMs: 30_000,
+  exitBookFetchTtlMs: 20_000,
+  takerCapSkip: false,
+  allowPartialExit: false,
+  partialExitMinFraction: 0.2,
+  partialExitMinShares: 1,
+  partialExitMaxPerHour: 3,
 };
 
 // ADR-013 defaults exposed for callers that don't thread the policy provider
@@ -107,6 +128,17 @@ export const DEAD_SIDE_NEAR_END_MS = 120_000;
 /** Re-export for legacy callers (tests). ADR-015 moved this into `ExecutionPolicy`. */
 export type DeadSideGuardMode = DomainDeadSideGuardMode;
 
+type PricingMarketResult = {
+  market: NormalizedMarket;
+  book?: OrderBookSnapshot | null;
+  cacheStatus:
+    | CandidateBookResolution["status"]
+    | "disabled"
+    | "base-market"
+    | "embedded"
+    | "exit-book-fallback";
+};
+
 export interface SignalToOrderBridgeDeps {
   bus: EventBus;
   log: Logger;
@@ -114,6 +146,12 @@ export interface SignalToOrderBridgeDeps {
   positionRepo?: PositionRepository | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
   candidateBookCache?: CandidateBookCache | undefined;
+  /**
+   * Track S5 P0a — secondary order-book source for the exit path. When a held-position SELL misses the
+   * candidate cache and the primary heartbeat book is cold/stale, the bridge fetches the book directly
+   * through this gateway. Optional: when unset the fallback runs primary-only (heartbeat).
+   */
+  exitBookFetcher?: ExitBookFetcher | undefined;
   /**
    * ADR-015 — live execution policy lookup. The bridge calls `policy()` on
    * every signal conversion so operator SQL edits take effect without
@@ -135,6 +173,13 @@ export interface SignalToOrderBridgeDeps {
   riskEventRepo?: RiskEventRepository | undefined;
   /** Track R honest pricing fee source. Optional so disabled/default deployments keep old behavior. */
   trackRFeeProvider?: TrackRTakerFeeProvider | undefined;
+  /**
+   * Track S5 belt-and-suspenders ownership guard. Read-only view of the S1 ladder ownership map.
+   * The decision planner already suppresses SELLs on S1-owned tokens upstream; this lets the bridge
+   * independently neutralize the S5 exit extensions (P0a/P0b/P1) if that suppression ever regresses.
+   * Optional: when unset the guard is inert and the bridge behaves exactly as before.
+   */
+  s1Ownership?: S1OwnershipReader | undefined;
   signalPathTelemetry?: SignalPathTelemetry | undefined;
   /**
    * Defense-in-depth BUY-side guard. Mirrors the check that
@@ -179,9 +224,23 @@ export class SignalToOrderBridge {
   private lastTakerInfoLogDay: string | null = null;
   private readonly observationQueue: ExecutionPolicyObservation[] = [];
   private observationFlushScheduled = false;
+  private readonly exitBookCache: ExitBookFallbackCache;
+  // Track S5 P1 — per-token partial-exit placement timestamps for the hourly
+  // frequency cap. In-memory only: NOT durable across a runtime restart, which
+  // is acceptable for a taker partial (a restart re-opens the budget — bounded
+  // by the same cap thereafter, never amplified within a window).
+  private readonly partialHistoryByToken = new Map<string, number[]>();
 
   constructor(private readonly deps: SignalToOrderBridgeDeps) {
     this.log = deps.log.child({ component: "signal-to-order" });
+    // Track S5 P0a — heartbeat books are cached passively (always warmed so a live SQL flip of
+    // exitBookFallback finds the cache ready); freshness/TTL read the live policy each call.
+    this.exitBookCache = new ExitBookFallbackCache({
+      log: this.log,
+      fetcher: deps.exitBookFetcher,
+      stalenessMs: () => this.getTrackRPolicy(this.getPolicy()).exitBookStalenessMs,
+      fetchTtlMs: () => this.getTrackRPolicy(this.getPolicy()).exitBookFetchTtlMs,
+    });
   }
 
   private getPolicy(): ExecutionPolicy {
@@ -203,6 +262,43 @@ export class SignalToOrderBridge {
   private isTrackRActive(policy: ExecutionPolicy): boolean {
     const cfg = this.getTrackRPolicy(policy);
     return cfg.enabled;
+  }
+
+  /**
+   * Track S5 belt-and-suspenders ownership guard. The decision planner already
+   * suppresses SELLs on S1-owned tokens upstream, so the bridge should never see
+   * one — but if that suppression regresses, the S5 exit extensions (P0a book
+   * fallback, P0b cap skip, P1 partial exit) must NOT fire on a token the ladder
+   * owns. When an S1-owned SELL arrives with any S5 flag live, force those three
+   * flags off for this conversion (reverting to the base Track R exit path) and
+   * emit a single attribution counter. Non-SELL signals, an absent reader, an
+   * unowned token, or an all-flags-off S5 config pass the policy through untouched.
+   */
+  private applyS5OwnershipGuard(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    policy: ExecutionPolicy,
+  ): ExecutionPolicy {
+    if (signal.side !== "sell") return policy;
+    const reader = this.deps.s1Ownership;
+    if (!reader) return policy;
+    const trackR = this.getTrackRPolicy(policy);
+    const anyS5Flag = trackR.exitBookFallback || trackR.takerCapSkip || trackR.allowPartialExit;
+    if (!anyS5Flag) return policy;
+    if (!reader.getSnapshot(signal.tokenId)?.owned) return policy;
+    this.recordTrackRMetric(signal, "track_r_s5_skipped_s1_owned", {
+      exit_book_fallback: trackR.exitBookFallback,
+      taker_cap_skip: trackR.takerCapSkip,
+      allow_partial_exit: trackR.allowPartialExit,
+    });
+    return {
+      ...policy,
+      trackR: {
+        ...trackR,
+        exitBookFallback: false,
+        takerCapSkip: false,
+        allowPartialExit: false,
+      },
+    };
   }
 
   private now(): number {
@@ -231,6 +327,10 @@ export class SignalToOrderBridge {
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
       this.deps.bus.subscribe("SignalApproved", (p) => this.handleApproved(p)),
+      // Track S5 P0a — PASSIVE cache writer only. The bridge never produces signals/orders or a
+      // re-evaluation from a heartbeat; it just records the open-position books for the exit fallback.
+      // The heartbeat-isolation invariant (normalization-module.test.ts:106) must stay intact.
+      this.deps.bus.subscribe("MarketSnapshotHeartbeat", (p) => this.handleHeartbeat(p)),
     );
   }
 
@@ -256,13 +356,28 @@ export class SignalToOrderBridge {
     }
   }
 
+  /**
+   * Track S5 P0a — passive heartbeat cache write. Records the open-position books carried on the
+   * heartbeat for the exit-path fallback. Deliberately does NOT touch `marketCache`, emit signals, or
+   * trigger any re-evaluation: the heartbeat stays isolated from the decision cascade.
+   */
+  private async handleHeartbeat(
+    payload: RuntimeEventMap["MarketSnapshotHeartbeat"],
+  ): Promise<void> {
+    if (payload.booksByToken && payload.booksByToken.size > 0) {
+      this.exitBookCache.writeHeartbeatBooks(payload.booksByToken);
+    }
+  }
+
   private async handleApproved(payload: RuntimeEventMap["SignalApproved"]): Promise<void> {
     const bridgeStartMs = performance.now();
     try {
       const { signal, market: embeddedMarket } = payload;
       // Snapshot the policy once so the full approval flow uses a consistent view,
-      // even if the provider hot-reloads mid-decision.
-      const policy = this.getPolicy();
+      // even if the provider hot-reloads mid-decision. The S5 ownership guard may
+      // return a policy with the Track S5 exit extensions forced off for an
+      // S1-owned SELL (belt-and-suspenders for a planner-suppression regression).
+      const policy = this.applyS5OwnershipGuard(signal, this.getPolicy());
 
       // Primary source: the NormalizedMarket snapshot captured at signal-generation
       // time in algo-decision-module. This is the same snapshot the pre-entry
@@ -355,7 +470,7 @@ export class SignalToOrderBridge {
       // embedded base so the order price reflects the newest observed top of
       // book. If the fresh book is unavailable or disabled, fall back to the
       // embedded snapshot's bestBid/bestAsk.
-      const pricing = await this.resolvePricingMarket(signal, baseMarket);
+      const pricing = await this.resolvePricingMarket(signal, baseMarket, policy);
       const market = pricing.market;
       const trackRFeeQuote = await this.resolveTrackRFeeQuote(signal, market, policy);
 
@@ -370,7 +485,7 @@ export class SignalToOrderBridge {
       // F2: shadow telemetry measures the raw (pre-cap) anchor; the cap only
       // governs the price that is actually placed.
       const sellPricingShadow = this.computeSellPricingShadow(signal, rawExecutionTerms, policy);
-      const executionTerms = this.applySellPriceCap(rawExecutionTerms, signal);
+      const executionTerms = this.applySellPriceCap(rawExecutionTerms, signal, policy);
 
       if (executionTerms.kind === "unavailable") {
         this.log.warn(
@@ -649,7 +764,10 @@ export class SignalToOrderBridge {
         }
       }
 
-      const orderSize = resolveOrderSize(signal, executionTerms.price);
+      const orderSize =
+        executionTerms.kind === "ok" && executionTerms.size != null
+          ? executionTerms.size
+          : resolveOrderSize(signal, executionTerms.price);
       const effectiveMinOrderSize = resolveEffectiveMinOrderSize(market.minOrderSize);
       if (!isExecutableOrderSize(orderSize, market.minOrderSize)) {
         this.log.info(
@@ -837,11 +955,17 @@ export class SignalToOrderBridge {
         }
       }
 
-      const clientOrderId = buildClientOrderId({
-        signalId: signal.signalId,
-        tokenId: signal.tokenId,
-        side: signal.side,
-      });
+      // Track S5 P1 — a partial exit (size override present) uses a slot-bucketed
+      // clientOrderId so two partials inside one 5-minute slot dedupe at the CLOB
+      // while a fresh slot mints a new id; full exits keep the signal-derived id.
+      const clientOrderId =
+        executionTerms.kind === "ok" && executionTerms.size != null
+          ? buildPartialExitClientOrderId({ tokenId: signal.tokenId, nowMs: this.now() })
+          : buildClientOrderId({
+              signalId: signal.signalId,
+              tokenId: signal.tokenId,
+              side: signal.side,
+            });
 
       const cmd: PlaceOrderCommand = {
         type: "PlaceOrderCommand",
@@ -903,6 +1027,7 @@ export class SignalToOrderBridge {
         skippedReason: null,
       });
 
+      this.recordPartialPlacementOnSend(signal, executionTerms, nowMs);
       await this.deps.bus.publish("PlaceOrderRequested", {
         command: cmd,
         timestamp: Date.now(),
@@ -1055,27 +1180,28 @@ export class SignalToOrderBridge {
   private async resolvePricingMarket(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     baseMarket: NormalizedMarket,
-  ): Promise<{
-    market: NormalizedMarket;
-    book?: OrderBookSnapshot | null;
-    cacheStatus: CandidateBookResolution["status"] | "disabled" | "base-market" | "embedded";
-  }> {
+    policy: ExecutionPolicy,
+  ): Promise<PricingMarketResult> {
     if (!this.deps.candidateBookCache) {
-      return { market: baseMarket, cacheStatus: "disabled" };
+      return this.withExitBookFallback(signal, baseMarket, policy, {
+        market: baseMarket,
+        cacheStatus: "disabled",
+      });
     }
 
     const nowMs = Date.now();
     const freshEntry = this.deps.candidateBookCache.getFreshEntry(String(signal.tokenId), nowMs);
     if (freshEntry) {
-      return {
-        market: applyOrderBookToMarket(baseMarket, freshEntry),
-        book: freshEntry.book,
-        cacheStatus: "fresh-cache",
-      };
+      return this.candidateHit(signal, baseMarket, freshEntry, "fresh-cache");
     }
 
+    // A usable base market carries only top-of-book (no depth ladder); a Track R SELL still needs
+    // the full book, so route through the exit-book fallback before settling for base-market pricing.
     if (canUseBaseMarketForPricing(baseMarket)) {
-      return { market: baseMarket, cacheStatus: "base-market" };
+      return this.withExitBookFallback(signal, baseMarket, policy, {
+        market: baseMarket,
+        cacheStatus: "base-market",
+      });
     }
 
     const wsEntry = await this.deps.candidateBookCache.waitForFreshEntry(
@@ -1084,11 +1210,7 @@ export class SignalToOrderBridge {
       nowMs,
     );
     if (wsEntry) {
-      return {
-        market: applyOrderBookToMarket(baseMarket, wsEntry),
-        book: wsEntry.book,
-        cacheStatus: "fresh-cache",
-      };
+      return this.candidateHit(signal, baseMarket, wsEntry, "fresh-cache");
     }
 
     const resolution = await this.deps.candidateBookCache.getFreshOrRefresh(
@@ -1096,14 +1218,75 @@ export class SignalToOrderBridge {
       nowMs,
     );
     if (resolution.entry) {
-      return {
-        market: applyOrderBookToMarket(baseMarket, resolution.entry),
-        book: resolution.entry.book,
-        cacheStatus: resolution.status,
-      };
+      return this.candidateHit(signal, baseMarket, resolution.entry, resolution.status);
     }
 
-    return { market: baseMarket, cacheStatus: resolution.status };
+    return this.withExitBookFallback(signal, baseMarket, policy, {
+      market: baseMarket,
+      cacheStatus: resolution.status,
+    });
+  }
+
+  private candidateHit(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    baseMarket: NormalizedMarket,
+    entry: CandidateBookCacheEntry,
+    cacheStatus: PricingMarketResult["cacheStatus"],
+  ): PricingMarketResult {
+    if (signal.side === "sell") {
+      this.recordTrackRMetric(signal, "track_r_exit_book_cache_hit", {});
+    }
+    return { market: applyOrderBookToMarket(baseMarket, entry), book: entry.book, cacheStatus };
+  }
+
+  /**
+   * Track S5 P0a — on a candidate-book miss for a held-position SELL with `exitBookFallback` on, fall
+   * back to the open-position book source: passive heartbeat primary, then secondary direct fetch.
+   * Returns the bookless `fallthrough` for BUYs, when the flag is off, or when no book is available
+   * (downstream then records `missing_book` as today).
+   */
+  private async withExitBookFallback(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    baseMarket: NormalizedMarket,
+    policy: ExecutionPolicy,
+    fallthrough: { market: NormalizedMarket; cacheStatus: PricingMarketResult["cacheStatus"] },
+  ): Promise<PricingMarketResult> {
+    if (signal.side !== "sell") return fallthrough;
+    if (!this.getTrackRPolicy(policy).exitBookFallback) return fallthrough;
+
+    this.recordTrackRMetric(signal, "track_r_exit_book_cache_miss", {});
+    const nowMs = Date.now();
+    const resolved = await this.exitBookCache.resolve(signal.tokenId, nowMs);
+    if (!resolved) {
+      this.recordTrackRMetric(signal, "track_r_exit_book_fetch_failed", {});
+      return fallthrough;
+    }
+    this.recordTrackRMetric(signal, "track_r_exit_book_fetch_fallback", {
+      source: resolved.source,
+    });
+    const entry = this.toExitBookEntry(signal, resolved.book, resolved.source, nowMs);
+    return {
+      market: applyOrderBookToMarket(baseMarket, entry),
+      book: resolved.book,
+      cacheStatus: "exit-book-fallback",
+    };
+  }
+
+  private toExitBookEntry(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    book: OrderBookSnapshot,
+    source: ExitBookSource,
+    nowMs: number,
+  ): CandidateBookCacheEntry {
+    return {
+      tokenId: String(signal.tokenId),
+      snapshotTs: book.timestamp,
+      cachedAtMs: nowMs,
+      sourcePolledAtMs: book.timestamp,
+      bookSource: "clob",
+      sourceKind: source === "heartbeat" ? "ws" : "rest",
+      book,
+    };
   }
 
   private async resolveTrackRFeeQuote(
@@ -1283,20 +1466,38 @@ export class SignalToOrderBridge {
   private applySellPriceCap(
     resolution: ExecutionTermsResolution,
     signal: RuntimeEventMap["SignalApproved"]["signal"],
+    policy: ExecutionPolicy,
   ): ExecutionTermsResolution {
     if (signal.side !== "sell" || resolution.kind !== "ok") return resolution;
+    const avgEntry = this.resolveSellShadowAvgEntry(signal).value;
+    const trackR = this.getTrackRPolicy(policy);
+    const tier = planktonMarkupTierLabel(avgEntry);
+    // The Plankton cap is a maker-oriented entry-aligned markup ceiling. For a
+    // taker the live bid already prices the exit; capping down can falsely drop
+    // it below the fee-aware margin floor. The skip is taker-only; the post-cap
+    // Track R invariant (resolveTakerBelowMarginBlock) remains the loss-guard.
     if (
-      resolution.pricedMode === "taker" &&
-      resolution.takerAtProfit?.trackS3BehaviorChanged === true
+      shouldSkipSellPriceCap({
+        pricedMode: resolution.pricedMode,
+        bestBid: resolution.price,
+        cap: resolvePlanktonSellCap(avgEntry),
+        context: {
+          trackS3BehaviorChanged: resolution.takerAtProfit?.trackS3BehaviorChanged === true,
+          takerCapSkip: trackR.takerCapSkip,
+          safetyMargin: trackR.safetyMargin,
+        },
+      })
     ) {
-      // S3 already proved the marketable wide-spread exit against Track R's
-      // full-depth margin. Re-applying the maker-oriented Track P cap here
-      // would turn the approved taker exit back into a below-margin skip.
+      this.recordTrackRMetric(signal, "track_r_taker_cap_skipped", { tier });
       return resolution;
     }
-    const avgEntry = this.resolveSellShadowAvgEntry(signal).value;
     const capped = capSellPriceToPlanktonTier(resolution.price, avgEntry, resolution.tickSize);
     if (capped === resolution.price) return resolution;
+    // track_r_taker_cap_applied is taker-only forensics for the P0b skip carve-out.
+    // A maker SELL is still clipped here, but it must not inflate the taker counter.
+    if (resolution.pricedMode === "taker") {
+      this.recordTrackRMetric(signal, "track_r_taker_cap_applied", { tier });
+    }
     return { ...resolution, price: capped };
   }
 
@@ -1603,6 +1804,12 @@ export class SignalToOrderBridge {
     let trackS3Tier: string | null = null;
     let trackS3DynamicCapUsed: boolean | null = null;
     let trackS3BehaviorChanged: boolean | null = null;
+    // Track S5 P1 — partial-exit state, set only when an exhausted book is sold
+    // down to the available top-of-book liquidity. `partialSizeCap` overrides the
+    // order size and switches the command to a slot-bucketed clientOrderId.
+    let partialSizeCap: number | null = null;
+    let isPartial = false;
+    let partialNowMs = 0;
     const trackR = this.getTrackRPolicy(policy);
 
     if (this.isTrackRActive(policy)) {
@@ -1640,13 +1847,55 @@ export class SignalToOrderBridge {
             slippage_pct: (bestBid - effectiveFillPrice) / bestBid,
           });
         }
-        if (fill.exhausted && trackR.requireFullDepth) {
-          this.recordTrackRBlockedDepth(signal, {
-            reason: "insufficient_full_depth",
-            liquidity_available: fill.liquidityAvailable,
-            target_size: fill.targetSize,
-          });
-          return null;
+        if (fill.exhausted) {
+          // Track S5 P1 (Option A): allowPartialExit takes priority over
+          // requireFullDepth — sell only the available top-of-book liquidity.
+          if (trackR.allowPartialExit) {
+            const effectiveMin = resolveEffectiveMinOrderSize(
+              market.minOrderSize,
+              trackR.partialExitMinShares,
+            );
+            const partialFloor = Math.max(
+              effectiveMin,
+              trackR.partialExitMinFraction * positionSize,
+            );
+            partialNowMs = this.now();
+            if (
+              this.isPartialFrequencyLimited(
+                signal.tokenId,
+                partialNowMs,
+                trackR.partialExitMaxPerHour,
+              )
+            ) {
+              this.recordTrackRMetric(signal, "track_r_partial_exit_frequency_limited", {
+                liquidity_available: fill.liquidityAvailable,
+                max_per_hour: trackR.partialExitMaxPerHour,
+              });
+              return null;
+            }
+            if (fill.liquidityAvailable + 1e-9 < partialFloor) {
+              this.recordTrackRMetric(signal, "track_r_partial_exit_too_small", {
+                liquidity_available: fill.liquidityAvailable,
+                partial_floor: partialFloor,
+              });
+              return null;
+            }
+            partialSizeCap = floorToMinOrderStep(
+              fill.liquidityAvailable,
+              market.minOrderSize,
+              trackR.partialExitMinShares,
+            );
+            isPartial = true;
+          } else if (trackR.requireFullDepth) {
+            this.recordTrackRBlockedDepth(signal, {
+              reason: "insufficient_full_depth",
+              liquidity_available: fill.liquidityAvailable,
+              target_size: fill.targetSize,
+            });
+            return null;
+          }
+          // else: requireFullDepth=false, allowPartialExit=false → legacy
+          // proceed-on-full behavior; fall through with the full target size.
         }
         const feeQuote = trackRFeeQuote ?? {
           rate: trackR.universalFallbackRate,
@@ -1675,15 +1924,28 @@ export class SignalToOrderBridge {
           !Number.isFinite(minGrossExitRatio) || minGrossExitRatio > trackR.maxSaneThreshold;
         const minExit = avgEntry * minGrossExitRatio;
         if (invalidThreshold || effectiveFillPrice == null || effectiveFillPrice + 1e-9 < minExit) {
-          this.recordTrackRBlockedMargin(signal, {
-            mode: "gate",
-            avg_entry: avgEntry,
-            effective_fill_price: effectiveFillPrice,
-            min_exit: minExit,
-            min_gross_exit_ratio: minGrossExitRatio,
-            fee_source: feeQuote.source,
-            fee_rate: feeQuote.rate,
-          });
+          // Track S5 P1 — a partial that fails the fee-aware floor gets its own
+          // dedicated counter (the partial VWAP is already `effectiveFillPrice`).
+          if (isPartial) {
+            this.recordTrackRMetric(signal, "track_r_partial_exit_blocked_margin", {
+              avg_entry: avgEntry,
+              effective_fill_price: effectiveFillPrice,
+              min_exit: minExit,
+              min_gross_exit_ratio: minGrossExitRatio,
+              fee_source: feeQuote.source,
+              fee_rate: feeQuote.rate,
+            });
+          } else {
+            this.recordTrackRBlockedMargin(signal, {
+              mode: "gate",
+              avg_entry: avgEntry,
+              effective_fill_price: effectiveFillPrice,
+              min_exit: minExit,
+              min_gross_exit_ratio: minGrossExitRatio,
+              fee_source: feeQuote.source,
+              fee_rate: feeQuote.rate,
+            });
+          }
           if (trackR.enabled) return null;
         } else {
           this.recordTrackRMetric(signal, "track_r_taker_at_profit_passed", {
@@ -1757,6 +2019,7 @@ export class SignalToOrderBridge {
       market,
       bestBid,
       policy.opportunisticTaker,
+      partialSizeCap ?? undefined,
     );
     if (minSizeBlock) {
       this.recordTakerMinSizeDisabledMetric(signal, minSizeBlock);
@@ -1784,6 +2047,7 @@ export class SignalToOrderBridge {
         postOnly: false,
         pricedMode: "taker",
         spreadTicks,
+        ...(isPartial && partialSizeCap != null ? { size: partialSizeCap } : {}),
         takerAtProfit: {
           avgEntry,
           bestBid,
@@ -1911,13 +2175,10 @@ export class SignalToOrderBridge {
     market: NormalizedMarket,
     price: number,
     taker: ExecutionPolicy["opportunisticTaker"],
-  ): {
-    reason: "share_min_size" | "notional_min_size";
-    marketMinOrderSize: number | null;
-    minNotionalUsdc: number | null;
-    notionalUsdc: number;
-    safetyBuffer: number;
-  } | null {
+    // Track S5 P1 — when a partial exit caps the size below the full position,
+    // the min-size gate must score the capped size/notional, not the signal's.
+    sizeOverride?: number,
+  ): TakerMinSizeBlock | null {
     const marketMinOrderSize =
       typeof market.minOrderSize === "number" &&
       Number.isFinite(market.minOrderSize) &&
@@ -1925,23 +2186,27 @@ export class SignalToOrderBridge {
         ? market.minOrderSize
         : null;
 
+    const shareSize = sizeOverride ?? signal.suggestedSize;
     if (
       marketMinOrderSize !== null &&
-      signal.suggestedSize + MIN_SIZE_EPSILON < marketMinOrderSize * taker.safetyBuffer
+      shareSize + MIN_SIZE_EPSILON < marketMinOrderSize * taker.safetyBuffer
     ) {
       return {
         reason: "share_min_size",
         marketMinOrderSize,
         minNotionalUsdc: null,
-        notionalUsdc: signal.suggestedSizeUsdc,
+        notionalUsdc: sizeOverride != null ? sizeOverride * price : signal.suggestedSizeUsdc,
         safetyBuffer: taker.safetyBuffer,
+        requestedSizeShares: shareSize,
       };
     }
 
     const notionalUsdc =
-      Number.isFinite(signal.suggestedSizeUsdc) && signal.suggestedSizeUsdc > 0
-        ? signal.suggestedSizeUsdc
-        : signal.suggestedSize * price;
+      sizeOverride != null
+        ? sizeOverride * price
+        : Number.isFinite(signal.suggestedSizeUsdc) && signal.suggestedSizeUsdc > 0
+          ? signal.suggestedSizeUsdc
+          : signal.suggestedSize * price;
     const configuredBuyMinNotional =
       signal.side === "buy"
         ? this.deps.liveLiteGuard?.getMinEntryNotionalUsdc?.(taker.marketableBuyMinNotionalUsdc)
@@ -1962,6 +2227,7 @@ export class SignalToOrderBridge {
         minNotionalUsdc,
         notionalUsdc,
         safetyBuffer: taker.safetyBuffer,
+        requestedSizeShares: shareSize,
       };
     }
 
@@ -2260,6 +2526,51 @@ export class SignalToOrderBridge {
     this.recordTrackRMetric(signal, "track_r_taker_at_profit_blocked_margin", details);
   }
 
+  // Track S5 P1 — hourly partial-exit cap. Counts placements within the trailing
+  // window and blocks once the per-token budget is reached.
+  private isPartialFrequencyLimited(tokenId: TokenId, nowMs: number, maxPerHour: number): boolean {
+    const history = this.partialHistoryByToken.get(String(tokenId));
+    if (!history) return false;
+    const recent = history.filter((t) => nowMs - t < PARTIAL_EXIT_WINDOW_MS).length;
+    return recent >= maxPerHour;
+  }
+
+  private recordPartialPlacement(tokenId: TokenId, nowMs: number): void {
+    const key = String(tokenId);
+    const recent = (this.partialHistoryByToken.get(key) ?? []).filter(
+      (t) => nowMs - t < PARTIAL_EXIT_WINDOW_MS,
+    );
+    recent.push(nowMs);
+    this.partialHistoryByToken.set(key, recent);
+  }
+
+  // Track S5 P1 (BLOCKER 2) — charge the hourly frequency budget and emit the
+  // `track_r_partial_exit_taken` outcome counter only when a partial exit has
+  // cleared every late gate (order size, duplicate open sell, order-lifetime,
+  // same-price cooldown) and is about to be published. Accounting at resolve
+  // time over-counts partials that a late gate later cancels, starving the
+  // budget on orders that never reach the exchange.
+  private recordPartialPlacementOnSend(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    executionTerms: ExecutionTermsResolution,
+    nowMs: number,
+  ): void {
+    if (executionTerms.kind !== "ok" || executionTerms.size == null) return;
+    const taker = executionTerms.takerAtProfit;
+    const effectiveFillPrice = taker?.effectiveFillPrice ?? null;
+    const avgEntry = taker?.avgEntry ?? null;
+    this.recordPartialPlacement(signal.tokenId, nowMs);
+    this.recordTrackRMetric(signal, "track_r_partial_exit_taken", {
+      tier: partialExitMarginTierLabel(
+        effectiveFillPrice != null && avgEntry != null && avgEntry > 0
+          ? effectiveFillPrice / avgEntry
+          : null,
+      ),
+      size: executionTerms.size,
+      liquidity_available: taker?.liquidityAvailable ?? null,
+    });
+  }
+
   private recordTrackRThresholdSample(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     input: {
@@ -2438,13 +2749,7 @@ export class SignalToOrderBridge {
 
   private recordTakerMinSizeDisabledMetric(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
-    block: {
-      reason: "share_min_size" | "notional_min_size";
-      marketMinOrderSize: number | null;
-      minNotionalUsdc: number | null;
-      notionalUsdc: number;
-      safetyBuffer: number;
-    },
+    block: TakerMinSizeBlock,
   ): void {
     try {
       const labels = {
@@ -2453,7 +2758,7 @@ export class SignalToOrderBridge {
         reason: block.reason,
         market_min_order_size: block.marketMinOrderSize,
         min_notional_usdc: block.minNotionalUsdc,
-        requested_size_shares: signal.suggestedSize,
+        requested_size_shares: block.requestedSizeShares,
         requested_size_usdc: block.notionalUsdc,
         required_size_shares:
           block.marketMinOrderSize === null ? null : block.marketMinOrderSize * block.safetyBuffer,
@@ -2474,7 +2779,7 @@ export class SignalToOrderBridge {
       this.deps.runtimeMetrics?.writeCounter(
         "taker_disabled_fraction_over_threshold",
         1,
-        JSON.stringify({ side: signal.side, bucket: takerFractionBucket(signal, block) }),
+        JSON.stringify({ side: signal.side, bucket: takerFractionBucket(block) }),
       );
     } catch (err) {
       this.log.debug(
@@ -2490,14 +2795,7 @@ function canUseBaseMarketForPricing(market: NormalizedMarket): boolean {
 }
 
 function takerFractionBucket(
-  signal: RuntimeEventMap["SignalApproved"]["signal"],
-  block: {
-    reason: "share_min_size" | "notional_min_size";
-    marketMinOrderSize: number | null;
-    minNotionalUsdc: number | null;
-    notionalUsdc: number;
-    safetyBuffer: number;
-  },
+  block: TakerMinSizeBlock,
 ): "0-0.5" | "0.5-0.8" | "0.8-0.95" | "0.95-1.0" {
   const requiredShares =
     block.marketMinOrderSize === null ? null : block.marketMinOrderSize * block.safetyBuffer;
@@ -2505,7 +2803,7 @@ function takerFractionBucket(
     block.minNotionalUsdc === null ? null : block.minNotionalUsdc * block.safetyBuffer;
   const fraction =
     block.reason === "share_min_size" && requiredShares !== null && requiredShares > 0
-      ? signal.suggestedSize / requiredShares
+      ? block.requestedSizeShares / requiredShares
       : block.reason === "notional_min_size" && requiredNotional !== null && requiredNotional > 0
         ? block.notionalUsdc / requiredNotional
         : 0;
@@ -2581,15 +2879,27 @@ function resolveMidpointAnchoredSellPriceWithMode(
  * unknown only the ceiling applies. A cap that would floor below one tick is
  * ignored so the function can never produce a non-executable price.
  */
+/** Raw Plankton sell-price cap (pre tick-flooring): min(ceiling, avgEntry × markupCap). */
+export function resolvePlanktonSellCap(avgEntry: number | null): number {
+  let cap = SELL_PRICE_CEILING;
+  if (avgEntry != null && Number.isFinite(avgEntry) && avgEntry > 0) {
+    cap = Math.min(cap, avgEntry * planktonAlignedMarkupCap(avgEntry));
+  }
+  return cap;
+}
+
+/** Bounded-cardinality tier label for Track S5 P0b cap-skip telemetry. */
+function planktonMarkupTierLabel(avgEntry: number | null): string {
+  if (avgEntry == null || !Number.isFinite(avgEntry) || avgEntry <= 0) return "ceiling";
+  return `markup_${planktonAlignedMarkupCap(avgEntry)}`;
+}
+
 export function capSellPriceToPlanktonTier(
   price: number,
   avgEntry: number | null,
   tickSize: number,
 ): number {
-  let cap = SELL_PRICE_CEILING;
-  if (avgEntry != null && Number.isFinite(avgEntry) && avgEntry > 0) {
-    cap = Math.min(cap, avgEntry * planktonAlignedMarkupCap(avgEntry));
-  }
+  const cap = resolvePlanktonSellCap(avgEntry);
   if (!Number.isFinite(price) || price <= cap) return price;
   if (!Number.isFinite(tickSize) || tickSize <= 0) return price;
   const cappedTick = floorToTick(cap, tickSize);
@@ -2710,6 +3020,17 @@ function finitePositiveOrNull(value: number | null | undefined): number | null {
   return value != null && Number.isFinite(value) && value > 0 ? value : null;
 }
 
+// Track S5 P1 — bounded-cardinality label for the partial fill VWAP relative to
+// the average entry. Telemetry only (segments `track_r_partial_exit_taken`); no
+// behavior depends on it, so the exact boundaries are observational.
+function partialExitMarginTierLabel(ratio: number | null): string {
+  if (ratio == null || !Number.isFinite(ratio)) return "unknown";
+  if (ratio < 1.0) return "below_entry";
+  if (ratio < 1.05) return "flat";
+  if (ratio < 1.2) return "profit";
+  return "high_profit";
+}
+
 function computePositiveRatio(numerator: number | null, denominator: number | null): number | null {
   if (numerator == null || denominator == null) return null;
   return numerator / denominator;
@@ -2733,6 +3054,18 @@ function isDustOrRedeemLike(value: string): boolean {
 
 function isOpenOrderStatus(status: Order["status"]): boolean {
   return status === "pending" || status === "open" || status === "partially-filled";
+}
+
+interface TakerMinSizeBlock {
+  reason: "share_min_size" | "notional_min_size";
+  marketMinOrderSize: number | null;
+  minNotionalUsdc: number | null;
+  notionalUsdc: number;
+  safetyBuffer: number;
+  // Track S5 P1 (LOW 1) — the share size the gate actually scored: the partial
+  // override when present, else the signal's full suggested size. Forensics and
+  // the fraction bucket must reflect this, not always `signal.suggestedSize`.
+  requestedSizeShares: number;
 }
 
 interface TakerAtProfitExecution {
@@ -2800,6 +3133,10 @@ type ExecutionTermsResolution =
       tickSize: number;
       postOnly?: boolean;
       pricedMode: OrderPricedMode;
+      // Track S5 P1 — partial-exit size override. When set, the order fills only
+      // the available top-of-book liquidity instead of the full position size,
+      // and the command is keyed with a slot-bucketed partial clientOrderId.
+      size?: number;
       spreadTicks?: number;
       anchorTicksUsed?: number;
       exitAnchorMode?: ExitAnchorMode;

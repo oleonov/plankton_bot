@@ -1235,6 +1235,9 @@ async function main(): Promise<void> {
     positionRepo: repos.position,
     liveLiteGuard,
     candidateBookCache,
+    // Track S5 P0a — secondary exit-book source: direct CLOB fetch for cold-miss / stale-primary /
+    // overflow held positions. Gated at call time by trackR.exitBookFallback (default off).
+    exitBookFetcher: { getOrderBook: marketDataGateway.getOrderBook.bind(marketDataGateway) },
     trackRFeeProvider,
     policy: currentExecutionPolicy,
     observations: executionPolicyObservationRepo,
@@ -1245,6 +1248,9 @@ async function main(): Promise<void> {
     resolutionTracker: marketResolutionTracker,
     orderLifetime: orderLifetimeModule,
     samePriceCooldown: samePriceCooldownModule,
+    // Track S5 belt-and-suspenders — neutralizes S5 exit extensions on a token the
+    // S1 ladder owns if the planner's upstream SELL suppression ever regresses.
+    s1Ownership: s1LadderModule,
   });
 
   // 7i. Reconciliation module

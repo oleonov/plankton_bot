@@ -1180,6 +1180,14 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       requireFullDepth: true,
       universalFallbackRate: 0.05,
       maxSaneThreshold: 1.5,
+      exitBookFallback: false,
+      exitBookStalenessMs: 30000,
+      exitBookFetchTtlMs: 20000,
+      takerCapSkip: false,
+      allowPartialExit: false,
+      partialExitMinFraction: 0.2,
+      partialExitMinShares: 1,
+      partialExitMaxPerHour: 3,
     });
 
     const { policy, issues } = parseExecutionPolicyJson(JSON.stringify({ entryPriceCeiling: 0.4 }));
@@ -1207,6 +1215,14 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       requireFullDepth: false,
       universalFallbackRate: 0.06,
       maxSaneThreshold: 1.25,
+      exitBookFallback: false,
+      exitBookStalenessMs: 30000,
+      exitBookFetchTtlMs: 20000,
+      takerCapSkip: false,
+      allowPartialExit: false,
+      partialExitMinFraction: 0.2,
+      partialExitMinShares: 1,
+      partialExitMaxPerHour: 3,
     });
   });
 
@@ -1240,5 +1256,83 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("trackR.safetyMargin"))).toBe(true);
     expect(issues.some((i) => i.includes("trackR.universalFallbackRate"))).toBe(true);
     expect(issues.some((i) => i.includes("trackR.maxSaneThreshold"))).toBe(true);
+  });
+
+  it("defaults the Track S5 exit-path extension flags off with conservative bounds", () => {
+    expect(DEFAULT_EXECUTION_POLICY.trackR).toMatchObject({
+      exitBookFallback: false,
+      exitBookStalenessMs: 30000,
+      exitBookFetchTtlMs: 20000,
+      takerCapSkip: false,
+      allowPartialExit: false,
+      partialExitMinFraction: 0.2,
+      partialExitMinShares: 1,
+      partialExitMaxPerHour: 3,
+    });
+
+    const { policy, issues } = parseExecutionPolicyJson(JSON.stringify({ entryPriceCeiling: 0.4 }));
+    expect(issues).toHaveLength(0);
+    expect(policy.trackR.exitBookFallback).toBe(false);
+    expect(policy.trackR.takerCapSkip).toBe(false);
+    expect(policy.trackR.allowPartialExit).toBe(false);
+  });
+
+  it("parses custom Track S5 exit-path extension flags", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        trackR: {
+          exitBookFallback: true,
+          exitBookStalenessMs: 45000,
+          exitBookFetchTtlMs: 25000,
+          takerCapSkip: true,
+          allowPartialExit: true,
+          partialExitMinFraction: 0.35,
+          partialExitMinShares: 5,
+          partialExitMaxPerHour: 6,
+        },
+      }),
+    );
+
+    expect(issues).toHaveLength(0);
+    expect(policy.trackR).toMatchObject({
+      exitBookFallback: true,
+      exitBookStalenessMs: 45000,
+      exitBookFetchTtlMs: 25000,
+      takerCapSkip: true,
+      allowPartialExit: true,
+      partialExitMinFraction: 0.35,
+      partialExitMinShares: 5,
+      partialExitMaxPerHour: 6,
+    });
+  });
+
+  it("rejects out-of-range Track S5 exit-path values and falls back to defaults", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        trackR: {
+          exitBookStalenessMs: 0,
+          exitBookFetchTtlMs: 10 ** 9,
+          partialExitMinFraction: 5,
+          partialExitMaxPerHour: 0,
+        },
+      }),
+    );
+
+    expect(policy.trackR.exitBookStalenessMs).toBe(
+      DEFAULT_EXECUTION_POLICY.trackR.exitBookStalenessMs,
+    );
+    expect(policy.trackR.exitBookFetchTtlMs).toBe(
+      DEFAULT_EXECUTION_POLICY.trackR.exitBookFetchTtlMs,
+    );
+    expect(policy.trackR.partialExitMinFraction).toBe(
+      DEFAULT_EXECUTION_POLICY.trackR.partialExitMinFraction,
+    );
+    expect(policy.trackR.partialExitMaxPerHour).toBe(
+      DEFAULT_EXECUTION_POLICY.trackR.partialExitMaxPerHour,
+    );
+    expect(issues.some((i) => i.includes("trackR.exitBookStalenessMs"))).toBe(true);
+    expect(issues.some((i) => i.includes("trackR.exitBookFetchTtlMs"))).toBe(true);
+    expect(issues.some((i) => i.includes("trackR.partialExitMinFraction"))).toBe(true);
+    expect(issues.some((i) => i.includes("trackR.partialExitMaxPerHour"))).toBe(true);
   });
 });

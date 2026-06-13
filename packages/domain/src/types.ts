@@ -802,6 +802,22 @@ export interface TrackRHonestPricingPolicy {
   requireFullDepth: boolean;
   universalFallbackRate: number;
   maxSaneThreshold: number;
+  /** Track S5 P0a: on candidate-book miss for a held-position SELL, fall back to the open-position book. */
+  exitBookFallback: boolean;
+  /** Track S5 P0a: max age of the primary heartbeat book before it is treated as stale (ms). */
+  exitBookStalenessMs: number;
+  /** Track S5 P0a: TTL of the secondary direct-fetch book cache (ms). */
+  exitBookFetchTtlMs: number;
+  /** Track S5 P0b: allow a taker SELL to skip the Plankton sell-price cap when the live bid covers it. */
+  takerCapSkip: boolean;
+  /** Track S5 P1: allow a depth-exhausted taker SELL to place a partial (available-size) exit. */
+  allowPartialExit: boolean;
+  /** Track S5 P1: minimum partial size as a fraction of the position size. */
+  partialExitMinFraction: number;
+  /** Track S5 P1: minOrderSize fallback (shares) used when CLOB metadata lacks one. */
+  partialExitMinShares: number;
+  /** Track S5 P1: hard cap on partial exits per hour per token (in-memory, non-durable). */
+  partialExitMaxPerHour: number;
 }
 
 export interface TrackS3SpreadTierPolicy {
@@ -845,6 +861,15 @@ export interface S1OwnershipSnapshot {
   ladderId: string;
   assumedAtMs: number;
   reason: "eligible" | "active_ladder" | "handoff";
+}
+
+/**
+ * Read-only view of the S1 ladder ownership map. Shared contract: the ladder
+ * module implements it; the algo-decision planner and the signal-to-order
+ * bridge consume it (the bridge for the Track S5 belt-and-suspenders guard).
+ */
+export interface S1OwnershipReader {
+  getSnapshot(tokenId: TokenId): S1OwnershipSnapshot | null;
 }
 
 export type TrackRFeeRateSource = "live" | "fill" | "fallback_category" | "fallback_universal";

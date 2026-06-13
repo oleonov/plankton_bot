@@ -12,7 +12,9 @@ import {
   type PositionRepository,
   type ProfileId,
   type RiskEventRepository,
+  type S1OwnershipSnapshot,
   type Signal,
+  type TokenId,
   type TrackRTakerFeeProvider,
 } from "@krabs/domain";
 import {
@@ -1593,8 +1595,11 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       liveLiteGuard?: ConstructorParameters<typeof SignalToOrderBridge>[0]["liveLiteGuard"];
       riskEventRepo?: ConstructorParameters<typeof SignalToOrderBridge>[0]["riskEventRepo"];
       candidateBookCache?: CandidateBookCache;
+      exitBookFetcher?: ConstructorParameters<typeof SignalToOrderBridge>[0]["exitBookFetcher"];
       trackRFeeProvider?: TrackRTakerFeeProvider;
+      s1Ownership?: { getSnapshot: (tokenId: TokenId) => S1OwnershipSnapshot | null };
       policyOverrides?: Partial<ExecutionPolicy>;
+      now?: () => number;
     } = {},
   ) {
     const bus = new InProcessEventBus();
@@ -1619,7 +1624,10 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       ...(opts.runtimeMetrics ? { runtimeMetrics: opts.runtimeMetrics } : {}),
       ...(opts.riskEventRepo ? { riskEventRepo: opts.riskEventRepo } : {}),
       ...(opts.candidateBookCache ? { candidateBookCache: opts.candidateBookCache } : {}),
+      ...(opts.exitBookFetcher ? { exitBookFetcher: opts.exitBookFetcher } : {}),
       ...(opts.trackRFeeProvider ? { trackRFeeProvider: opts.trackRFeeProvider } : {}),
+      ...(opts.s1Ownership ? { s1Ownership: opts.s1Ownership } : {}),
+      ...(opts.now ? { now: opts.now } : {}),
     });
     bridge.subscribe();
     const skipped: Array<{
@@ -1634,6 +1642,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
         side: "buy" | "sell";
         tickSize: number;
         postOnly?: boolean;
+        clientOrderId: string;
       };
     }> = [];
     bus.subscribe("SignalConversionSkipped", async (p) => {
@@ -2219,6 +2228,57 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     });
   });
 
+  it("LOW 1 — min-size forensic reports the partial override size, not the full signal size", async () => {
+    // A partial exit caps the order to the available top-of-book liquidity. When
+    // that capped size still trips the min-size gate, the forensic must report the
+    // capped (override) shares — reporting the full signal size mis-attributes the
+    // rejection (requested_size_shares 290 instead of the 5 it actually tried).
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.04, 290),
+      runtimeMetrics: metrics as never,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.046,
+        bestAsk: 0.05,
+        bids: [{ price: 0.046, size: 5 }],
+        asks: [{ price: 0.05, size: 500 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy({
+          allowPartialExit: true,
+          takerCapSkip: true,
+          partialExitMinFraction: 0.001, // keep the partial floor at the 5-share market min
+        }),
+      },
+    });
+    const market = makeMarket({ bestBid: 0.046, bestAsk: 0.05, tickSize: 0.001, minOrderSize: 5 });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.07,
+        suggestedSize: 290,
+        suggestedSizeUsdc: 13.34,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    const minSizeCalls = metrics.writeCounter.mock.calls.filter(
+      (call) => call[0] === "taker_disabled_min_size_total",
+    );
+    expect(minSizeCalls).toHaveLength(1);
+    // partialSizeCap floors 5 available shares to the 5-share step → 5, below 5 × 1.05.
+    expect(JSON.parse(minSizeCalls[0]![2] as string).requested_size_shares).toBe(5);
+  });
+
   it("buckets near-threshold taker min-size blocks", async () => {
     const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus } = makeBridgeWithPricing(undefined, {
@@ -2762,6 +2822,742 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
         behaviorChanged: true,
       }),
     );
+  });
+
+  it("P0b skips the Plankton cap for a narrow-spread taker SELL the live bid covers", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.3, 100),
+      runtimeMetrics: metrics as never,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.55,
+        bestAsk: 0.553,
+        bids: [{ price: 0.55, size: 100 }],
+        asks: [{ price: 0.553, size: 100 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0.55),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy({ takerCapSkip: true }),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.553,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 55,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.55, bestAsk: 0.553, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    // Without the skip the cap clips 0.55 → 0.351 (below the fee-aware minExit) and blocks.
+    expect(capSellPriceToPlanktonTier(0.55, 0.3, 0.001)).toBeCloseTo(0.351);
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.postOnly).toBe(false);
+    expect(placed[0]!.command.price).toBeCloseTo(0.55, 3);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_taker_cap_skipped",
+      1,
+      JSON.stringify({ side: "sell", rule: "D8", tier: "markup_1.17" }),
+    );
+  });
+
+  it("P0b leaves the Plankton cap in force when the flag is off (regression)", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.3, 100),
+      runtimeMetrics: metrics as never,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.55,
+        bestAsk: 0.553,
+        bids: [{ price: 0.55, size: 100 }],
+        asks: [{ price: 0.553, size: 100 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0.55),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy({ takerCapSkip: false }),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.553,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 55,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.55, bestAsk: 0.553, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_taker_cap_applied",
+      1,
+      JSON.stringify({ side: "sell", rule: "D8", tier: "markup_1.17" }),
+    );
+  });
+
+  it("MEDIUM 2 — does not emit track_r_taker_cap_applied when the cap clips a maker SELL", async () => {
+    // track_r_taker_cap_applied is taker-only forensics (it measures how often the
+    // P0b skip would have engaged). A maker SELL that the Plankton cap clips down
+    // must still be capped, but must NOT inflate the taker counter.
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      policyOverrides: { exitPricingMode: "bid-anchored" },
+    });
+    const market = makeMarket({ bestBid: 0.27, bestAsk: 0.29, tickSize: 0.01 });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.2,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    // bid-anchored resolves 0.28; the Plankton cap (0.1 × 1.36 = 0.136) clips it to 0.13.
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBeCloseTo(0.13, 3); // cap is still applied
+    const cappedCalls = metrics.writeCounter.mock.calls.filter(
+      (c: unknown[]) => c[0] === "track_r_taker_cap_applied",
+    );
+    expect(cappedCalls).toHaveLength(0);
+  });
+
+  // ── Track S5 P0a — missing-book exit fallback ──────────────────────────────
+  function exitFullBook(timestamp: number): OrderBookSnapshot {
+    return {
+      tokenId: TOKEN_ID,
+      bids: [{ price: 0.5, size: 200 }],
+      asks: [{ price: 0.51, size: 200 }],
+      bestBid: 0.5,
+      bestAsk: 0.51,
+      midPrice: 0.505,
+      spread: 0.01,
+      timestamp,
+    };
+  }
+
+  function exitSellSignal(): Signal {
+    return {
+      ...makeSignal(),
+      side: "sell",
+      suggestedPrice: 0.5,
+      suggestedSize: 100,
+      suggestedSizeUsdc: 50,
+      reason: "repricing-exit",
+      decisionRuleId: "D8",
+    };
+  }
+
+  function exitSellPolicy(trackROverrides: Partial<ExecutionPolicy["trackR"]>) {
+    return {
+      opportunisticTaker: allowSellTakerPolicy(),
+      takerAtProfit: profitTakerPolicy(),
+      trackR: trackRPolicy(trackROverrides),
+    };
+  }
+
+  function counterCall(metrics: { writeCounter: ReturnType<typeof vi.fn> }, name: string) {
+    return metrics.writeCounter.mock.calls.find(([metricName]) => metricName === name);
+  }
+
+  async function publishExitSell(bus: InProcessEventBus): Promise<void> {
+    await bus.publish("SignalApproved", {
+      signal: exitSellSignal(),
+      market: makeMarket({ bestBid: 0.5, bestAsk: 0.51, tickSize: 0.01 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+  }
+
+  it("P0a serves a candidate hit without consulting the exit-book fallback (1)", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const getOrderBook = vi.fn(async () => exitFullBook(Date.now()));
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.5,
+        bestAsk: 0.51,
+        bids: [{ price: 0.5, size: 200 }],
+        asks: [{ price: 0.51, size: 200 }],
+      }),
+      exitBookFetcher: { getOrderBook },
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: exitSellPolicy({ exitBookFallback: true, takerCapSkip: true }),
+    });
+
+    await publishExitSell(bus);
+
+    expect(placed).toHaveLength(1);
+    expect(counterCall(metrics, "track_r_exit_book_cache_hit")).toBeDefined();
+    expect(counterCall(metrics, "track_r_taker_at_profit_passed")).toBeDefined();
+    expect(counterCall(metrics, "track_r_exit_book_fetch_fallback")).toBeUndefined();
+    expect(getOrderBook).not.toHaveBeenCalled();
+  });
+
+  it("P0a blocks the honest taker with missing_book when the flag is off (regression) (2)", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      // No candidate cache → guaranteed candidate miss.
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: exitSellPolicy({ exitBookFallback: false }),
+    });
+
+    await publishExitSell(bus);
+
+    const blocked = counterCall(metrics, "track_r_taker_at_profit_blocked_depth");
+    expect(blocked).toBeDefined();
+    expect(JSON.parse(blocked![2] as string).reason).toBe("missing_book");
+    // Flag off → the fallback is never entered and the honest taker never executes.
+    expect(counterCall(metrics, "track_r_exit_book_cache_miss")).toBeUndefined();
+    expect(counterCall(metrics, "track_r_exit_book_fetch_fallback")).toBeUndefined();
+    expect(counterCall(metrics, "track_r_taker_at_profit_passed")).toBeUndefined();
+  });
+
+  it("P0a serves a fresh heartbeat book without a secondary fetch (3)", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const getOrderBook = vi.fn(async () => exitFullBook(Date.now()));
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      exitBookFetcher: { getOrderBook },
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: exitSellPolicy({ exitBookFallback: true, takerCapSkip: true }),
+    });
+    // Passive heartbeat write — fresh book for the held token.
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [],
+      booksByToken: new Map([[String(TOKEN_ID), exitFullBook(Date.now())]]),
+      timestamp: Date.now(),
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+
+    await publishExitSell(bus);
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBeCloseTo(0.5, 3);
+    expect(counterCall(metrics, "track_r_taker_at_profit_passed")).toBeDefined();
+    const fallback = counterCall(metrics, "track_r_exit_book_fetch_fallback");
+    expect(fallback).toBeDefined();
+    expect(JSON.parse(fallback![2] as string).source).toBe("heartbeat");
+    expect(counterCall(metrics, "track_r_exit_book_cache_miss")).toBeDefined();
+    expect(getOrderBook).not.toHaveBeenCalled();
+  });
+
+  it("P0a falls back to a secondary fetch when the heartbeat book is stale (4)", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const getOrderBook = vi.fn(async () => exitFullBook(Date.now()));
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      exitBookFetcher: { getOrderBook },
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: exitSellPolicy({ exitBookFallback: true, takerCapSkip: true }),
+    });
+    // Heartbeat book 40s old → stale (> 30s default) → secondary fetch.
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [],
+      booksByToken: new Map([[String(TOKEN_ID), exitFullBook(Date.now() - 40_000)]]),
+      timestamp: Date.now(),
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+
+    await publishExitSell(bus);
+
+    expect(placed).toHaveLength(1);
+    expect(getOrderBook).toHaveBeenCalledTimes(1);
+    expect(counterCall(metrics, "track_r_taker_at_profit_passed")).toBeDefined();
+    const fallback = counterCall(metrics, "track_r_exit_book_fetch_fallback");
+    expect(JSON.parse(fallback![2] as string).source).toBe("fetch");
+  });
+
+  it("P0a records fetch_failed + missing_book when the secondary fetch fails (5)", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const getOrderBook = vi.fn(async () => {
+      throw new Error("clob down");
+    });
+    const { bus } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      exitBookFetcher: { getOrderBook },
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: exitSellPolicy({ exitBookFallback: true, takerCapSkip: true }),
+    });
+
+    await publishExitSell(bus);
+
+    expect(getOrderBook).toHaveBeenCalledTimes(1);
+    expect(counterCall(metrics, "track_r_exit_book_fetch_failed")).toBeDefined();
+    const blocked = counterCall(metrics, "track_r_taker_at_profit_blocked_depth");
+    expect(blocked).toBeDefined();
+    expect(JSON.parse(blocked![2] as string).reason).toBe("missing_book");
+    // Fetch failed → no fallback book → the honest taker never executes.
+    expect(counterCall(metrics, "track_r_taker_at_profit_passed")).toBeUndefined();
+  });
+
+  it("P0a dedupes the secondary fetch across two exits within the TTL (6)", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const getOrderBook = vi.fn(async () => exitFullBook(Date.now()));
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      exitBookFetcher: { getOrderBook },
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: exitSellPolicy({ exitBookFallback: true, takerCapSkip: true }),
+    });
+
+    await publishExitSell(bus);
+    await publishExitSell(bus);
+
+    expect(placed).toHaveLength(2);
+    expect(getOrderBook).toHaveBeenCalledTimes(1);
+  });
+
+  it("P0a covers an overflow token with no heartbeat via a direct fetch (7)", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const getOrderBook = vi.fn(async () => exitFullBook(Date.now()));
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      // No heartbeat ever written for this token → cold primary miss → secondary fetch.
+      exitBookFetcher: { getOrderBook },
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: exitSellPolicy({ exitBookFallback: true, takerCapSkip: true }),
+    });
+
+    await publishExitSell(bus);
+
+    expect(placed).toHaveLength(1);
+    expect(getOrderBook).toHaveBeenCalledTimes(1);
+    expect(counterCall(metrics, "track_r_taker_at_profit_passed")).toBeDefined();
+    const fallback = counterCall(metrics, "track_r_exit_book_fetch_fallback");
+    expect(JSON.parse(fallback![2] as string).source).toBe("fetch");
+  });
+
+  it("P0a keeps the heartbeat isolated from the decision cascade (8)", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const getOrderBook = vi.fn(async () => exitFullBook(Date.now()));
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      exitBookFetcher: { getOrderBook },
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: exitSellPolicy({ exitBookFallback: true, takerCapSkip: true }),
+    });
+
+    // A heartbeat alone must never produce an order, a skip, or a fetch — it is a passive cache write.
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [makeMarket({ bestBid: 0.5, bestAsk: 0.51 })],
+      booksByToken: new Map([[String(TOKEN_ID), exitFullBook(Date.now())]]),
+      timestamp: Date.now(),
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(0);
+    expect(getOrderBook).not.toHaveBeenCalled();
+  });
+
+  // ── Track S5 P1 — partial exit (Option A) ──────────────────────────────────
+  // avgEntry 0.04, positionSize 290 → partialFloor = max(1, 0.20 × 290) = 58.
+  function partialBridge(
+    bids: Array<{ price: number; size: number }>,
+    trackROverrides: Partial<ExecutionPolicy["trackR"]>,
+    extra: {
+      metrics?: {
+        writeEvent: ReturnType<typeof vi.fn>;
+        writeLatest: ReturnType<typeof vi.fn>;
+        writeCounter: ReturnType<typeof vi.fn>;
+      };
+      now?: () => number;
+      bestBid?: number;
+      bestAsk?: number;
+      feeRate?: number;
+      s1Ownership?: { getSnapshot: (tokenId: TokenId) => S1OwnershipSnapshot | null };
+      orderLifetime?: ConstructorParameters<typeof SignalToOrderBridge>[0]["orderLifetime"];
+    } = {},
+  ) {
+    const metrics = extra.metrics ?? {
+      writeEvent: vi.fn(),
+      writeLatest: vi.fn(),
+      writeCounter: vi.fn(),
+    };
+    const bestBid = extra.bestBid ?? 0.046;
+    const bestAsk = extra.bestAsk ?? 0.05;
+    const harness = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.04, 290),
+      runtimeMetrics: metrics as never,
+      candidateBookCache: makeCachedBook({
+        bestBid,
+        bestAsk,
+        bids,
+        asks: [{ price: bestAsk, size: 500 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(extra.feeRate ?? 0.07),
+      ...(extra.now ? { now: extra.now } : {}),
+      ...(extra.s1Ownership ? { s1Ownership: extra.s1Ownership } : {}),
+      ...(extra.orderLifetime ? { orderLifetime: extra.orderLifetime } : {}),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy({ takerCapSkip: true, ...trackROverrides }),
+      },
+    });
+    return { ...harness, metrics, bestBid, bestAsk };
+  }
+
+  function ownedS1Reader(): { getSnapshot: (tokenId: TokenId) => S1OwnershipSnapshot | null } {
+    return {
+      getSnapshot: () => ({
+        owned: true,
+        ladderId: "L1",
+        assumedAtMs: 0,
+        reason: "active_ladder",
+      }),
+    };
+  }
+
+  function unownedS1Reader(): { getSnapshot: (tokenId: TokenId) => S1OwnershipSnapshot | null } {
+    return { getSnapshot: () => null };
+  }
+
+  async function publishPartialSell(
+    bus: InProcessEventBus,
+    bestBid: number,
+    bestAsk: number,
+  ): Promise<void> {
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.07,
+        suggestedSize: 290,
+        suggestedSizeUsdc: 13.34,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid, bestAsk, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+  }
+
+  function partialTakenCount(metrics: { writeCounter: ReturnType<typeof vi.fn> }): number {
+    return metrics.writeCounter.mock.calls.filter(([name]) => name === "track_r_partial_exit_taken")
+      .length;
+  }
+
+  it("P1 blocks an exhausted book when partial exit is off (regression) (1)", async () => {
+    const { bus, metrics, bestBid, bestAsk } = partialBridge([{ price: 0.046, size: 5 }], {
+      allowPartialExit: false,
+    });
+
+    await publishPartialSell(bus, bestBid, bestAsk);
+
+    expect(counterCall(metrics, "track_r_taker_at_profit_blocked_depth")).toBeDefined();
+    expect(counterCall(metrics, "track_r_partial_exit_taken")).toBeUndefined();
+  });
+
+  it("P1 takes a partial taker exit when depth is exhausted but above the floor (2)", async () => {
+    const { bus, placed, metrics, bestBid, bestAsk } = partialBridge(
+      [{ price: 0.046, size: 100 }],
+      { allowPartialExit: true },
+    );
+
+    await publishPartialSell(bus, bestBid, bestAsk);
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.postOnly).toBe(false);
+    expect(placed[0]!.command.price).toBeCloseTo(0.046, 3);
+    expect(placed[0]!.command.size).toBe(100);
+    expect(placed[0]!.command.clientOrderId).toMatch(/^tk:s5:p1:/);
+    const taken = counterCall(metrics, "track_r_partial_exit_taken");
+    expect(taken).toBeDefined();
+    expect(counterCall(metrics, "track_r_taker_at_profit_passed")).toBeDefined();
+  });
+
+  it("P1 blocks a partial that fails the partial-VWAP margin gate (3)", async () => {
+    const { bus, metrics } = partialBridge(
+      [{ price: 0.041, size: 100 }],
+      { allowPartialExit: true },
+      { bestBid: 0.041, bestAsk: 0.045 },
+    );
+
+    await publishPartialSell(bus, 0.041, 0.045);
+
+    const blocked = counterCall(metrics, "track_r_partial_exit_blocked_margin");
+    expect(blocked).toBeDefined();
+    expect(JSON.parse(blocked![2] as string).fee_source).toBe("live");
+    expect(counterCall(metrics, "track_r_partial_exit_taken")).toBeUndefined();
+    expect(counterCall(metrics, "track_r_taker_at_profit_passed")).toBeUndefined();
+  });
+
+  it("P1 blocks a partial whose available depth is below the floor (4)", async () => {
+    const { bus, metrics, bestBid, bestAsk } = partialBridge([{ price: 0.046, size: 30 }], {
+      allowPartialExit: true,
+    });
+
+    await publishPartialSell(bus, bestBid, bestAsk);
+
+    const tooSmall = counterCall(metrics, "track_r_partial_exit_too_small");
+    expect(tooSmall).toBeDefined();
+    expect(JSON.parse(tooSmall![2] as string).partial_floor).toBeCloseTo(58, 6);
+    expect(counterCall(metrics, "track_r_partial_exit_taken")).toBeUndefined();
+  });
+
+  it("P1 leaves a full (non-exhausted) exit untouched (5)", async () => {
+    const { bus, placed, metrics, bestBid, bestAsk } = partialBridge(
+      [{ price: 0.046, size: 500 }],
+      { allowPartialExit: true },
+    );
+
+    await publishPartialSell(bus, bestBid, bestAsk);
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.size).toBe(290);
+    expect(placed[0]!.command.clientOrderId).toMatch(/^krb_/);
+    expect(counterCall(metrics, "track_r_partial_exit_taken")).toBeUndefined();
+    expect(counterCall(metrics, "track_r_taker_at_profit_passed")).toBeDefined();
+  });
+
+  it("P1 caps the partial size down to a whole step of available liquidity (6)", async () => {
+    const { bus, placed } = partialBridge([{ price: 0.046, size: 100.7 }], {
+      allowPartialExit: true,
+    });
+
+    await publishPartialSell(bus, 0.046, 0.05);
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.size).toBe(100);
+  });
+
+  it("P1 frequency-limits the 4th partial on a token within the hour (11)", async () => {
+    const now = () => 1_700_000_000_000;
+    const { bus, metrics, bestBid, bestAsk } = partialBridge(
+      [{ price: 0.046, size: 100 }],
+      { allowPartialExit: true, partialExitMaxPerHour: 3 },
+      { now },
+    );
+
+    for (let i = 0; i < 4; i++) {
+      await publishPartialSell(bus, bestBid, bestAsk);
+    }
+
+    expect(partialTakenCount(metrics)).toBe(3);
+    expect(counterCall(metrics, "track_r_partial_exit_frequency_limited")).toBeDefined();
+  });
+
+  it("P1 reopens the frequency window after an hour passes (12)", async () => {
+    let nowValue = 1_700_000_000_000;
+    const { bus, metrics, bestBid, bestAsk } = partialBridge(
+      [{ price: 0.046, size: 100 }],
+      { allowPartialExit: true, partialExitMaxPerHour: 3 },
+      { now: () => nowValue },
+    );
+
+    for (let i = 0; i < 3; i++) {
+      await publishPartialSell(bus, bestBid, bestAsk);
+    }
+    nowValue += 3_600_001;
+    await publishPartialSell(bus, bestBid, bestAsk);
+
+    expect(partialTakenCount(metrics)).toBe(4);
+    expect(counterCall(metrics, "track_r_partial_exit_frequency_limited")).toBeUndefined();
+  });
+
+  it("P1 shares a deterministic clientOrderId within a 5-minute slot, diverging across slots (13)", async () => {
+    let nowValue = 1_700_000_000_000;
+    const { bus, placed, bestBid, bestAsk } = partialBridge(
+      [{ price: 0.046, size: 100 }],
+      { allowPartialExit: true, partialExitMaxPerHour: 10 },
+      { now: () => nowValue },
+    );
+
+    await publishPartialSell(bus, bestBid, bestAsk);
+    nowValue += 60_000; // same 5-minute slot
+    await publishPartialSell(bus, bestBid, bestAsk);
+    nowValue += 300_000; // next 5-minute slot
+    await publishPartialSell(bus, bestBid, bestAsk);
+
+    expect(placed).toHaveLength(3);
+    expect(placed[0]!.command.clientOrderId).toBe(placed[1]!.command.clientOrderId);
+    expect(placed[2]!.command.clientOrderId).not.toBe(placed[0]!.command.clientOrderId);
+    expect(placed[0]!.command.clientOrderId).toMatch(/^tk:s5:p1:/);
+  });
+
+  // ── BLOCKER 2 — partial-exit accounting lives past the late gates ──────────
+  type LifetimeGate = NonNullable<
+    ConstructorParameters<typeof SignalToOrderBridge>[0]["orderLifetime"]
+  >;
+
+  function blockingOrderLifetime(): LifetimeGate {
+    return {
+      canPlaceExitOrder: () => ({
+        allowed: false,
+        reason: "order-lifetime-test-block",
+        mode: null,
+        budgetPerMinute: null,
+        remainingBudget: null,
+      }),
+    };
+  }
+
+  function gatedOrderLifetime(allowedCalls: number[]): LifetimeGate {
+    let calls = 0;
+    return {
+      canPlaceExitOrder: () => {
+        calls += 1;
+        const allowed = allowedCalls.includes(calls);
+        return {
+          allowed,
+          reason: allowed ? null : "order-lifetime-test-block",
+          mode: null,
+          budgetPerMinute: null,
+          remainingBudget: null,
+        };
+      },
+    };
+  }
+
+  it("B2(a) does NOT count a partial that clears margin but is cancelled by a late gate", async () => {
+    const { bus, placed, skipped, metrics, bestBid, bestAsk } = partialBridge(
+      [{ price: 0.046, size: 100 }],
+      { allowPartialExit: true },
+      { orderLifetime: blockingOrderLifetime() },
+    );
+
+    await publishPartialSell(bus, bestBid, bestAsk);
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toContain("order-lifetime-test-block");
+    // The partial resolved successfully (cleared the fee-aware margin gate) ...
+    expect(counterCall(metrics, "track_r_taker_at_profit_passed")).toBeDefined();
+    // ... but the frequency budget must NOT be charged for an order that never went out.
+    expect(counterCall(metrics, "track_r_partial_exit_taken")).toBeUndefined();
+  });
+
+  it("B2(b) counts a partial exactly once when it clears every gate and publishes", async () => {
+    const { bus, placed, metrics, bestBid, bestAsk } = partialBridge(
+      [{ price: 0.046, size: 100 }],
+      { allowPartialExit: true },
+      { orderLifetime: gatedOrderLifetime([1]) },
+    );
+
+    await publishPartialSell(bus, bestBid, bestAsk);
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.size).toBe(100);
+    expect(partialTakenCount(metrics)).toBe(1);
+    const taken = counterCall(metrics, "track_r_partial_exit_taken");
+    expect(JSON.parse(taken![2] as string).size).toBe(100);
+  });
+
+  it("B2(d) frees the budget for late-gate-cancelled partials: 4th still goes out", async () => {
+    const now = () => 1_700_000_000_000;
+    // Allow placement #1 and #4; cancel #2 and #3 at the order-lifetime gate.
+    const { bus, placed, metrics, bestBid, bestAsk } = partialBridge(
+      [{ price: 0.046, size: 100 }],
+      { allowPartialExit: true, partialExitMaxPerHour: 3 },
+      { now, orderLifetime: gatedOrderLifetime([1, 4]) },
+    );
+
+    for (let i = 0; i < 4; i++) {
+      await publishPartialSell(bus, bestBid, bestAsk);
+    }
+
+    // Only the 2 real placements charge the budget — the 2 cancelled attempts do not,
+    // so the 4th attempt is NOT frequency-limited (old behavior would block it).
+    expect(placed).toHaveLength(2);
+    expect(partialTakenCount(metrics)).toBe(2);
+    expect(counterCall(metrics, "track_r_partial_exit_frequency_limited")).toBeUndefined();
+  });
+
+  // ── BLOCKER 1 — S1 ownership bridge guard (belt-and-suspenders) ────────────
+  it("S5 guard skips P1 partial logic on an S1-owned SELL and emits the counter", async () => {
+    const { bus, metrics, bestBid, bestAsk } = partialBridge(
+      [{ price: 0.046, size: 100 }],
+      { allowPartialExit: true },
+      { s1Ownership: ownedS1Reader() },
+    );
+
+    await publishPartialSell(bus, bestBid, bestAsk);
+
+    // The ladder owns this token → S5 P1 must not fire; the base requireFullDepth
+    // path takes over (exhausted book → insufficient_full_depth block).
+    expect(counterCall(metrics, "track_r_s5_skipped_s1_owned")).toBeDefined();
+    expect(counterCall(metrics, "track_r_partial_exit_taken")).toBeUndefined();
+    const blocked = counterCall(metrics, "track_r_taker_at_profit_blocked_depth");
+    expect(blocked).toBeDefined();
+    expect(JSON.parse(blocked![2] as string).reason).toBe("insufficient_full_depth");
+  });
+
+  it("S5 logic applies on a non-S1-owned SELL (guard inert, no counter)", async () => {
+    const { bus, placed, metrics, bestBid, bestAsk } = partialBridge(
+      [{ price: 0.046, size: 100 }],
+      { allowPartialExit: true },
+      { s1Ownership: unownedS1Reader() },
+    );
+
+    await publishPartialSell(bus, bestBid, bestAsk);
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.size).toBe(100);
+    expect(counterCall(metrics, "track_r_partial_exit_taken")).toBeDefined();
+    expect(counterCall(metrics, "track_r_s5_skipped_s1_owned")).toBeUndefined();
+  });
+
+  it("S5 guard catches a planner-suppression regression: all 3 flags forced off on owned SELL", async () => {
+    const { bus, metrics, bestBid, bestAsk } = partialBridge(
+      [{ price: 0.046, size: 100 }],
+      { allowPartialExit: true, exitBookFallback: true, takerCapSkip: true },
+      { s1Ownership: ownedS1Reader() },
+    );
+
+    await publishPartialSell(bus, bestBid, bestAsk);
+
+    const skipped = counterCall(metrics, "track_r_s5_skipped_s1_owned");
+    expect(skipped).toBeDefined();
+    const payload = JSON.parse(skipped![2] as string);
+    expect(payload.exit_book_fallback).toBe(true);
+    expect(payload.taker_cap_skip).toBe(true);
+    expect(payload.allow_partial_exit).toBe(true);
+    expect(counterCall(metrics, "track_r_partial_exit_taken")).toBeUndefined();
   });
 
   it("Track S3 still blocks a spread above the conservative 3x tier cap", async () => {

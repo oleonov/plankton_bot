@@ -38,7 +38,7 @@ import type {
   LegState,
   Position,
   OrderRepository,
-  S1OwnershipSnapshot,
+  S1OwnershipReader,
   SellOrderSizingContext,
 } from "@krabs/domain";
 import {
@@ -104,9 +104,8 @@ import {
 } from "./entry-fresh-edge.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 
-export interface S1OwnershipReader {
-  getSnapshot(tokenId: TokenId): S1OwnershipSnapshot | null;
-}
+// Re-exported for existing consumers; the canonical contract now lives in @krabs/domain.
+export type { S1OwnershipReader };
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
 

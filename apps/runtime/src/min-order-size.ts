@@ -39,6 +39,22 @@ export function isExecutableOrderSize(
   return size + MIN_ORDER_SIZE_EPSILON >= resolveEffectiveMinOrderSize(minOrderSize, fallback);
 }
 
+// Track S5 P1 — truncate an available-liquidity size DOWN to a whole multiple of
+// the order-size step so a partial exit never overstates the size it can fill.
+// The step is the effective market min order size (fallback when unknown). The
+// epsilon absorbs float undershoot (e.g. 99.9999999999) so an exact multiple is
+// not dropped a full step; over-truncation past available liquidity stays
+// conservative. "float-precision OK" per spec — the result rides into the order.
+export function floorToMinOrderStep(
+  size: number,
+  minOrderSize: number | null | undefined,
+  fallback = DEFAULT_FALLBACK_MIN_ORDER_SIZE,
+): number {
+  if (!Number.isFinite(size) || size <= 0) return 0;
+  const step = resolveEffectiveMinOrderSize(minOrderSize, fallback);
+  return Math.floor((size + MIN_ORDER_SIZE_EPSILON) / step) * step;
+}
+
 export function evaluateSellPreSubmitGuard(
   size: number,
   minOrderSize: number | null | undefined,

@@ -26,3 +26,23 @@ export function buildClientOrderId(parts: ClientOrderIdParts): ClientOrderId {
   const hash = createHash("sha256").update(raw).digest("hex").slice(0, 16);
   return `krb_${hash}` as ClientOrderId;
 }
+
+// ─── Track S5 P1 partial-exit client order id ──────────────────────────────────
+//
+// A partial exit is NOT keyed on signalId — the same signal may reprice across
+// ticks, and a partial fired twice inside one slot must dedupe at the CLOB. The
+// id is namespaced and bucketed into 5-minute epoch slots: two partials in one
+// slot share an id (race-safe dedupe); the next slot mints a fresh id so the
+// next partial is allowed through.
+
+const PARTIAL_EXIT_SLOT_MS = 300_000;
+
+export interface PartialExitClientOrderIdParts {
+  tokenId: TokenId;
+  nowMs: number;
+}
+
+export function buildPartialExitClientOrderId(parts: PartialExitClientOrderIdParts): ClientOrderId {
+  const epochSlot = Math.floor(parts.nowMs / PARTIAL_EXIT_SLOT_MS);
+  return `tk:s5:p1:${parts.tokenId}:${epochSlot}` as ClientOrderId;
+}
