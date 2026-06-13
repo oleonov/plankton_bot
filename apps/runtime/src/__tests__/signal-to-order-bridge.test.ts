@@ -4380,15 +4380,18 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
         makeOpenSellOrder({
           price: 0.1,
           size: 10,
-          createdAt: new Date(
-            Date.now() - DEFAULT_EXECUTION_POLICY.sellTimeoutMs - 1,
-          ).toISOString(),
+          // Stamp createdAt against the pinned NOW — not a live Date.now() evaluated
+          // when the bridge calls this mock (which runs after the bridge already
+          // captured its own nowMs). The old form left only a 1ms margin past the
+          // timeout, so slower CI scheduling read the order as not-yet-timed-out.
+          createdAt: new Date(NOW - DEFAULT_EXECUTION_POLICY.sellTimeoutMs - 1).toISOString(),
         }),
       ]),
     } as unknown as OrderRepository;
     const { bus, skipped, placed } = makeBridgeWithPricing(undefined, {
       orderRepo,
       policyOverrides: { exitPricingMode: "edge" },
+      now: () => NOW,
     });
     const sellSignal: Signal = {
       ...makeSignal(),
