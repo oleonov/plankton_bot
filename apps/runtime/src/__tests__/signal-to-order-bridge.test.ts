@@ -1715,6 +1715,16 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     };
   }
 
+  function trackS3Policy(
+    overrides?: Partial<ExecutionPolicy["trackS3"]>,
+  ): ExecutionPolicy["trackS3"] {
+    return {
+      ...DEFAULT_EXECUTION_POLICY.trackS3,
+      enabled: true,
+      ...overrides,
+    };
+  }
+
   function liveFeeProvider(rate = 0.07): TrackRTakerFeeProvider {
     return {
       resolveFeeQuote: vi.fn(async () => ({
@@ -1723,6 +1733,13 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
         source: "live" as const,
       })),
     };
+  }
+
+  function riskEventCalls(repo: RiskEventRepository, eventType: string) {
+    return vi
+      .mocked(repo.insert)
+      .mock.calls.map(([event]) => event)
+      .filter((event) => event.eventType === eventType);
   }
 
   it("default edge branch posts BUY at bestBid — ADR-006 D1 preserved", async () => {
@@ -2531,6 +2548,476 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       1,
       expect.stringContaining('"liquidity_available":5'),
     );
+  });
+
+  it("preserves early spread_too_wide when Track S3 is disabled and Track R would also block margin", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.11,
+        bestAsk: 0.16,
+        bids: [{ price: 0.11, size: 100 }],
+        asks: [{ price: 0.16, size: 100 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0.07),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.2,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 11,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.11, bestAsk: 0.16, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "taker_at_profit_blocked_total",
+      1,
+      expect.stringContaining('"reason":"spread_too_wide"'),
+    );
+    expect(metrics.writeCounter).not.toHaveBeenCalledWith(
+      "track_r_taker_at_profit_blocked_margin",
+      expect.any(Number),
+      expect.any(String),
+    );
+  });
+
+  it("preserves early spread_too_wide when Track S3 is disabled and Track R depth would fail", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.04, 290),
+      runtimeMetrics: metrics as never,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.2,
+        bestAsk: 0.25,
+        bids: [{ price: 0.2, size: 5 }],
+        asks: [{ price: 0.25, size: 100 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.25,
+        suggestedSize: 290,
+        suggestedSizeUsdc: 58,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.2, bestAsk: 0.25, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "taker_at_profit_blocked_total",
+      1,
+      expect.stringContaining('"reason":"spread_too_wide"'),
+    );
+    expect(metrics.writeCounter).not.toHaveBeenCalledWith(
+      "track_r_taker_at_profit_blocked_depth",
+      expect.any(Number),
+      expect.any(String),
+    );
+  });
+
+  it("Track S3 allows a wide taker-at-profit spread when honest margin reaches the 3x tier", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      riskEventRepo,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.55,
+        bestAsk: 0.6,
+        bids: [{ price: 0.55, size: 100 }],
+        asks: [{ price: 0.6, size: 100 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy(),
+        trackS3: trackS3Policy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.6,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 55,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.55, bestAsk: 0.6, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.postOnly).toBe(false);
+    expect(placed[0]!.command.price).toBeCloseTo(0.55, 3);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_s3_dynamic_cap_used",
+      1,
+      JSON.stringify({ side: "sell", rule: "D8", tier: "tier_3x" }),
+    );
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_s3_taker_at_profit_allowed_wide_spread",
+      1,
+      JSON.stringify({ side: "sell", rule: "D8", tier: "tier_3x" }),
+    );
+    const event = riskEventCalls(riskEventRepo, "s3_dynamic_cap_applied")[0]!;
+    expect(event.payload).toEqual(
+      expect.objectContaining({
+        spreadTicks: 50,
+        baseCap: 6,
+        allowedCap: 60,
+        tier: "tier_3x",
+        behaviorChanged: true,
+      }),
+    );
+    expect(Number(event.payload.margin)).toBeCloseTo(5.5);
+  });
+
+  it("Track P cap fix prevents S3 taker exit from being clipped", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.3, 100),
+      runtimeMetrics: metrics as never,
+      riskEventRepo,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.55,
+        bestAsk: 0.56,
+        bids: [{ price: 0.55, size: 100 }],
+        asks: [{ price: 0.56, size: 100 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0.55),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy(),
+        trackS3: trackS3Policy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.56,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 55,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.55, bestAsk: 0.56, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(capSellPriceToPlanktonTier(0.55, 0.3, 0.001)).toBeCloseTo(0.351);
+    expect(placed).toHaveLength(1);
+    expect(skipped).toHaveLength(0);
+    expect(placed[0]!.command.postOnly).toBe(false);
+    expect(placed[0]!.command.price).toBeCloseTo(0.55, 3);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_s3_taker_at_profit_allowed_wide_spread",
+      1,
+      JSON.stringify({ side: "sell", rule: "D8", tier: "tier_1.5x" }),
+    );
+    const event = riskEventCalls(riskEventRepo, "s3_dynamic_cap_applied")[0]!;
+    expect(event.payload).toEqual(
+      expect.objectContaining({
+        spreadTicks: 10,
+        baseCap: 6,
+        allowedCap: 12,
+        tier: "tier_1.5x",
+        behaviorChanged: true,
+      }),
+    );
+  });
+
+  it("Track S3 still blocks a spread above the conservative 3x tier cap", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: metrics as never,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.35,
+        bestAsk: 0.43,
+        bids: [{ price: 0.35, size: 100 }],
+        asks: [{ price: 0.43, size: 100 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy(),
+        trackS3: trackS3Policy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.43,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 35,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.35, bestAsk: 0.43, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_s3_taker_at_profit_still_blocked_spread",
+      1,
+      JSON.stringify({ side: "sell", rule: "D8", tier: "tier_3x" }),
+    );
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "taker_at_profit_blocked_total",
+      1,
+      expect.stringContaining('"reason":"spread_too_wide"'),
+    );
+  });
+
+  it("Track S3 falls back from null maxSpreadTicks to base cap 6 only when enabled", async () => {
+    const disabled = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.12,
+        bestAsk: 0.13,
+        bids: [{ price: 0.12, size: 100 }],
+        asks: [{ price: 0.13, size: 100 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy({ maxSpreadTicks: null }),
+        trackR: trackRPolicy(),
+      },
+    });
+    await disabled.bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.13,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 12,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.12, bestAsk: 0.13, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await disabled.bus.drain();
+    expect(disabled.placed).toHaveLength(1);
+    expect(disabled.placed[0]!.command.postOnly).toBe(false);
+
+    const enabledMetrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const enabled = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.1, 100),
+      runtimeMetrics: enabledMetrics as never,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.12,
+        bestAsk: 0.13,
+        bids: [{ price: 0.12, size: 100 }],
+        asks: [{ price: 0.13, size: 100 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy({ maxSpreadTicks: null }),
+        trackR: trackRPolicy(),
+        trackS3: trackS3Policy(),
+      },
+    });
+    await enabled.bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.13,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 12,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.12, bestAsk: 0.13, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await enabled.bus.drain();
+    expect(enabled.placed).toHaveLength(1);
+    expect(enabled.placed[0]!.command.postOnly).not.toBe(false);
+    expect(enabledMetrics.writeCounter).toHaveBeenCalledWith(
+      "track_s3_taker_at_profit_still_blocked_spread",
+      1,
+      JSON.stringify({ side: "sell", rule: "D8", tier: "base" }),
+    );
+    expect(enabledMetrics.writeCounter).toHaveBeenCalledWith(
+      "taker_at_profit_blocked_total",
+      1,
+      expect.stringContaining('"reason":"spread_too_wide"'),
+    );
+  });
+
+  it("Track S3 emits risk events at the 1.5 margin boundary with cardinality-safe labels", async () => {
+    const cases = [
+      { bestBid: 0.149, bestAsk: 0.154, expectedEvents: 0, tier: null, behaviorChanged: false },
+      {
+        bestBid: 0.15,
+        bestAsk: 0.155,
+        expectedEvents: 1,
+        tier: "tier_1.5x",
+        behaviorChanged: false,
+      },
+      { bestBid: 0.35, bestAsk: 0.36, expectedEvents: 1, tier: "tier_3x", behaviorChanged: true },
+    ];
+
+    for (const testCase of cases) {
+      const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const { bus } = makeBridgeWithPricing(undefined, {
+        positionRepo: positionRepo(0.1, 100),
+        runtimeMetrics: metrics as never,
+        riskEventRepo,
+        candidateBookCache: makeCachedBook({
+          bestBid: testCase.bestBid,
+          bestAsk: testCase.bestAsk,
+          bids: [{ price: testCase.bestBid, size: 100 }],
+          asks: [{ price: testCase.bestAsk, size: 100 }],
+        }),
+        trackRFeeProvider: liveFeeProvider(0),
+        policyOverrides: {
+          opportunisticTaker: allowSellTakerPolicy(),
+          takerAtProfit: profitTakerPolicy(),
+          trackR: trackRPolicy(),
+          trackS3: trackS3Policy(),
+        },
+      });
+
+      await bus.publish("SignalApproved", {
+        signal: {
+          ...makeSignal(),
+          side: "sell",
+          suggestedPrice: testCase.bestAsk,
+          suggestedSize: 100,
+          suggestedSizeUsdc: testCase.bestBid * 100,
+          reason: "repricing-exit",
+          decisionRuleId: "D8",
+        },
+        market: makeMarket({
+          bestBid: testCase.bestBid,
+          bestAsk: testCase.bestAsk,
+          tickSize: 0.001,
+        }),
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+
+      const events = riskEventCalls(riskEventRepo, "s3_dynamic_cap_applied");
+      expect(events).toHaveLength(testCase.expectedEvents);
+      if (testCase.tier) {
+        expect(events[0]!.payload).toEqual(
+          expect.objectContaining({
+            spreadTicks: Math.round((testCase.bestAsk - testCase.bestBid) / 0.001),
+            tier: testCase.tier,
+            behaviorChanged: testCase.behaviorChanged,
+          }),
+        );
+        expect(Number(events[0]!.payload.margin)).toBeCloseTo(testCase.bestBid / 0.1);
+        const s3CounterCalls = metrics.writeCounter.mock.calls.filter(([name]) =>
+          String(name).startsWith("track_s3_"),
+        );
+        expect(s3CounterCalls.length).toBeGreaterThan(0);
+        for (const [, , labels] of s3CounterCalls) {
+          expect(labels).toContain(`"tier":"${testCase.tier}"`);
+          expect(labels).not.toContain("margin");
+          expect(labels).not.toContain("spread");
+        }
+      }
+    }
+  });
+
+  it("Track S3 does not apply to cheap longshots", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      positionRepo: positionRepo(0.04, 100),
+      runtimeMetrics: metrics as never,
+      riskEventRepo,
+      candidateBookCache: makeCachedBook({
+        bestBid: 0.16,
+        bestAsk: 0.21,
+        bids: [{ price: 0.16, size: 100 }],
+        asks: [{ price: 0.21, size: 100 }],
+      }),
+      trackRFeeProvider: liveFeeProvider(0),
+      policyOverrides: {
+        opportunisticTaker: allowSellTakerPolicy(),
+        takerAtProfit: profitTakerPolicy(),
+        trackR: trackRPolicy(),
+        trackS3: trackS3Policy(),
+      },
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.21,
+        suggestedSize: 100,
+        suggestedSizeUsdc: 16,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market: makeMarket({ bestBid: 0.16, bestAsk: 0.21, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "taker_at_profit_blocked_total",
+      1,
+      expect.stringContaining('"reason":"spread_too_wide"'),
+    );
+    expect(metrics.writeCounter).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^track_s3_/),
+      expect.any(Number),
+      expect.any(String),
+    );
+    expect(riskEventCalls(riskEventRepo, "s3_dynamic_cap_applied")).toHaveLength(0);
   });
 
   it("requires the configured 1.03 gross margin boundary for taker-at-profit", async () => {

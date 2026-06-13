@@ -721,6 +721,59 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     ).toBe(true);
   });
 
+  it("defaults Track S3 disabled with conservative margin-aware spread tiers", () => {
+    expect(DEFAULT_EXECUTION_POLICY.trackS3).toEqual({
+      enabled: false,
+      baseCap: 6,
+      tiers: [
+        { minMargin: 3.0, maxSpreadTicks: 60, label: "tier_3x" },
+        { minMargin: 2.0, maxSpreadTicks: 20, label: "tier_2x" },
+        { minMargin: 1.5, maxSpreadTicks: 12, label: "tier_1.5x" },
+      ],
+    });
+  });
+
+  it("parses Track S3 settings and rejects invalid values", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        trackS3: {
+          enabled: true,
+          baseCap: 8,
+          tiers: [
+            { minMargin: 2.5, maxSpreadTicks: 40, label: "tier_custom" },
+            { minMargin: 1.5, maxSpreadTicks: 12, label: "tier_1.5x" },
+          ],
+        },
+      }),
+    );
+    expect(parsed.issues).toHaveLength(0);
+    expect(parsed.policy.trackS3).toEqual({
+      enabled: true,
+      baseCap: 8,
+      tiers: [
+        { minMargin: 2.5, maxSpreadTicks: 40, label: "tier_custom" },
+        { minMargin: 1.5, maxSpreadTicks: 12, label: "tier_1.5x" },
+      ],
+    });
+
+    const invalid = parseExecutionPolicyJson(
+      JSON.stringify({
+        trackS3: {
+          enabled: "yes",
+          baseCap: null,
+          tiers: [
+            { minMargin: 0.5, maxSpreadTicks: 40, label: "too_low" },
+            { minMargin: 2.0, maxSpreadTicks: 0, label: "" },
+          ],
+        },
+      }),
+    );
+    expect(invalid.policy.trackS3).toEqual(DEFAULT_EXECUTION_POLICY.trackS3);
+    expect(invalid.issues.some((i) => i.includes("trackS3.enabled"))).toBe(true);
+    expect(invalid.issues.some((i) => i.includes("trackS3.baseCap"))).toBe(true);
+    expect(invalid.issues.some((i) => i.includes("trackS3.tiers"))).toBe(true);
+  });
+
   it("preserves partial market-selection override and defaults the rest", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({ marketSelection: { minLiquidity: 500 } }),

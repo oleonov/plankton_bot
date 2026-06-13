@@ -17,6 +17,7 @@ export * from "./market-selection.js";
 export * from "./strike-classifier.js";
 export * from "./polymarket-fees.js";
 export * from "./orderbook.js";
+export * from "./track-s3-cap.js";
 export * from "./ladder-construction.js";
 export * from "./s1-eligibility.js";
 export { SelectionRuleEngine, normalizeSelectionPattern } from "./selection-rule-engine.js";
@@ -29,6 +30,7 @@ export {
   DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
   DEFAULT_TAKER_AT_PROFIT_POLICY,
   DEFAULT_TRACK_R_HONEST_PRICING_POLICY,
+  DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY,
   DEFAULT_DEAD_SIDE_GUARD,
   DEFAULT_PRICING_POLICY,
   DEFAULT_TELEMETRY,

@@ -804,6 +804,18 @@ export interface TrackRHonestPricingPolicy {
   maxSaneThreshold: number;
 }
 
+export interface TrackS3SpreadTierPolicy {
+  minMargin: number;
+  maxSpreadTicks: number;
+  label: string;
+}
+
+export interface TrackS3MarginAwareSpreadPolicy {
+  enabled: boolean;
+  baseCap: number;
+  tiers: readonly TrackS3SpreadTierPolicy[];
+}
+
 export interface TrackS1MarkupCeilingsPolicy {
   cheapMax: number;
   midRange: number;
@@ -1026,6 +1038,7 @@ export interface ExecutionPolicy {
   opportunisticTaker: OpportunisticTakerPolicy;
   takerAtProfit: TakerAtProfitPolicy;
   trackR: TrackRHonestPricingPolicy;
+  trackS3: TrackS3MarginAwareSpreadPolicy;
   trackS1: TrackS1WalkingLadderPolicy;
   orderLifetime: OrderLifetimePolicy;
   /**

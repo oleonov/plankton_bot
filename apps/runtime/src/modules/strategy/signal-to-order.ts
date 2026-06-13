@@ -35,6 +35,7 @@ import type {
   TrackRFeeRateSource,
   TrackRHonestPricingPolicy,
   TrackRTakerFeeProvider,
+  TrackS3MarginAwareSpreadPolicy,
 } from "@krabs/domain";
 import {
   canPlaceBuyOrderForMarket,
@@ -44,6 +45,7 @@ import {
   isAlive,
   isSellTimeoutReplacement,
   recordStageDuration,
+  resolveTrackS3SpreadCap,
 } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
 import { buildClientOrderId } from "@krabs/domain/node";
@@ -192,6 +194,10 @@ export class SignalToOrderBridge {
 
   private getTrackRPolicy(policy: ExecutionPolicy): TrackRHonestPricingPolicy {
     return policy.trackR ?? DEFAULT_EXECUTION_POLICY.trackR ?? DEFAULT_TRACK_R_RUNTIME_POLICY;
+  }
+
+  private getTrackS3Policy(policy: ExecutionPolicy): TrackS3MarginAwareSpreadPolicy {
+    return policy.trackS3 ?? DEFAULT_EXECUTION_POLICY.trackS3;
   }
 
   private isTrackRActive(policy: ExecutionPolicy): boolean {
@@ -1279,6 +1285,15 @@ export class SignalToOrderBridge {
     signal: RuntimeEventMap["SignalApproved"]["signal"],
   ): ExecutionTermsResolution {
     if (signal.side !== "sell" || resolution.kind !== "ok") return resolution;
+    if (
+      resolution.pricedMode === "taker" &&
+      resolution.takerAtProfit?.trackS3BehaviorChanged === true
+    ) {
+      // S3 already proved the marketable wide-spread exit against Track R's
+      // full-depth margin. Re-applying the maker-oriented Track P cap here
+      // would turn the approved taker exit back into a below-margin skip.
+      return resolution;
+    }
     const avgEntry = this.resolveSellShadowAvgEntry(signal).value;
     const capped = capSellPriceToPlanktonTier(resolution.price, avgEntry, resolution.tickSize);
     if (capped === resolution.price) return resolution;
@@ -1564,7 +1579,8 @@ export class SignalToOrderBridge {
     }
 
     const spreadTicks = Math.round((bestAsk - bestBid) / pricingTickSize);
-    if (cfg.maxSpreadTicks !== null && spreadTicks > cfg.maxSpreadTicks) {
+    const trackS3 = this.getTrackS3Policy(policy);
+    if (!trackS3.enabled && cfg.maxSpreadTicks !== null && spreadTicks > cfg.maxSpreadTicks) {
       this.recordTakerAtProfitMetric(signal, "blocked", "spread_too_wide", {
         spreadTicks,
         maxSpreadTicks: cfg.maxSpreadTicks,
@@ -1581,6 +1597,12 @@ export class SignalToOrderBridge {
     let feeRate: number | null = null;
     let feeExponent: number | null = null;
     let feeSource: TrackRFeeRateSource | null = null;
+    let trackS3Margin: number | null = null;
+    let trackS3BaseSpreadTicks: number | null = null;
+    let trackS3AllowedSpreadTicks: number | null = null;
+    let trackS3Tier: string | null = null;
+    let trackS3DynamicCapUsed: boolean | null = null;
+    let trackS3BehaviorChanged: boolean | null = null;
     const trackR = this.getTrackRPolicy(policy);
 
     if (this.isTrackRActive(policy)) {
@@ -1685,6 +1707,51 @@ export class SignalToOrderBridge {
       }
     }
 
+    const trackS3Decision = this.resolveTrackS3SpreadDecision({
+      policy,
+      cfg,
+      avgEntry,
+      effectiveFillPrice,
+      spreadTicks,
+    });
+    if (trackS3Decision.applies) {
+      trackS3Margin = trackS3Decision.margin;
+      trackS3BaseSpreadTicks = trackS3Decision.baseCap;
+      trackS3AllowedSpreadTicks = trackS3Decision.allowedCap;
+      trackS3Tier = trackS3Decision.tier;
+      trackS3DynamicCapUsed = trackS3Decision.dynamicCapUsed;
+      trackS3BehaviorChanged = trackS3Decision.behaviorChanged;
+      this.recordTrackS3Evaluation(signal, trackS3Decision);
+      this.recordTrackS3DynamicCapApplied(signal, market, {
+        avgEntry,
+        bestBid,
+        bestAsk,
+        spreadTicks,
+        effectiveFillPrice: effectiveFillPrice!,
+        decision: trackS3Decision,
+      });
+      if (spreadTicks > trackS3Decision.allowedCap) {
+        this.recordTrackS3StillBlocked(signal, trackS3Decision);
+        this.recordTakerAtProfitMetric(signal, "blocked", "spread_too_wide", {
+          trackS3: {
+            enabled: true,
+            tier: trackS3Decision.tier,
+            dynamic_cap_used: trackS3Decision.dynamicCapUsed,
+          },
+        });
+        return null;
+      }
+    } else if (
+      trackS3Decision.staticMaxSpreadTicks !== null &&
+      spreadTicks > trackS3Decision.staticMaxSpreadTicks
+    ) {
+      this.recordTakerAtProfitMetric(signal, "blocked", "spread_too_wide", {
+        spreadTicks,
+        maxSpreadTicks: trackS3Decision.staticMaxSpreadTicks,
+      });
+      return null;
+    }
+
     const minSizeBlock = this.resolveTakerMinSizeBlock(
       signal,
       market,
@@ -1730,11 +1797,56 @@ export class SignalToOrderBridge {
           feeRate,
           feeExponent,
           feeSource,
+          trackS3Margin,
+          trackS3BaseSpreadTicks,
+          trackS3AllowedSpreadTicks,
+          trackS3Tier,
+          trackS3DynamicCapUsed,
+          trackS3BehaviorChanged,
         },
       },
       signal,
       effectiveTick,
     );
+  }
+
+  private resolveTrackS3SpreadDecision(input: {
+    policy: ExecutionPolicy;
+    cfg: ExecutionPolicy["takerAtProfit"];
+    avgEntry: number;
+    effectiveFillPrice: number | null;
+    spreadTicks: number;
+  }): TrackS3SpreadDecision {
+    const policy = this.getTrackS3Policy(input.policy);
+    if (!policy.enabled) {
+      return { applies: false, staticMaxSpreadTicks: null };
+    }
+    if (!this.isTrackRActive(input.policy) || input.effectiveFillPrice == null) {
+      return { applies: false, staticMaxSpreadTicks: input.cfg.maxSpreadTicks };
+    }
+    const cheapLongshotMaxAvgEntry =
+      input.policy.trackS1?.cheapLongshotMaxAvgEntry ??
+      DEFAULT_EXECUTION_POLICY.trackS1.cheapLongshotMaxAvgEntry;
+    if (input.avgEntry < cheapLongshotMaxAvgEntry) {
+      return { applies: false, staticMaxSpreadTicks: input.cfg.maxSpreadTicks };
+    }
+    const margin = input.effectiveFillPrice / input.avgEntry;
+    if (!Number.isFinite(margin) || margin <= 0) {
+      return { applies: false, staticMaxSpreadTicks: input.cfg.maxSpreadTicks };
+    }
+
+    const baseCap = input.cfg.maxSpreadTicks ?? policy.baseCap;
+    const cap = resolveTrackS3SpreadCap({ margin, baseCap, tiers: policy.tiers });
+    return {
+      applies: true,
+      staticMaxSpreadTicks: null,
+      margin,
+      baseCap,
+      allowedCap: cap.allowedSpreadTicks,
+      tier: cap.tier,
+      dynamicCapUsed: cap.dynamicCapUsed,
+      behaviorChanged: input.spreadTicks > baseCap && input.spreadTicks <= cap.allowedSpreadTicks,
+    };
   }
 
   private resolveOpportunisticTakerTerms(
@@ -2183,6 +2295,89 @@ export class SignalToOrderBridge {
     }
   }
 
+  private recordTrackS3Evaluation(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    decision: AppliedTrackS3SpreadDecision,
+  ): void {
+    this.recordTrackS3Metric(signal, "track_s3_tier_breakdown", decision.tier);
+    if (decision.dynamicCapUsed) {
+      this.recordTrackS3Metric(signal, "track_s3_dynamic_cap_used", decision.tier);
+    }
+    if (decision.behaviorChanged) {
+      this.recordTrackS3Metric(
+        signal,
+        "track_s3_taker_at_profit_allowed_wide_spread",
+        decision.tier,
+      );
+    }
+  }
+
+  private recordTrackS3StillBlocked(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    decision: AppliedTrackS3SpreadDecision,
+  ): void {
+    this.recordTrackS3Metric(
+      signal,
+      "track_s3_taker_at_profit_still_blocked_spread",
+      decision.tier,
+    );
+  }
+
+  private recordTrackS3Metric(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    name: string,
+    tier: string,
+  ): void {
+    try {
+      this.deps.runtimeMetrics?.writeCounter(
+        name,
+        1,
+        JSON.stringify({ side: signal.side, rule: signal.decisionRuleId ?? null, tier }),
+      );
+    } catch (err) {
+      this.log.debug(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId), metric: name },
+        "failed to record Track S3 metric",
+      );
+    }
+  }
+
+  private recordTrackS3DynamicCapApplied(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    input: TrackS3RiskEventInput,
+  ): void {
+    if (input.decision.margin + 1e-12 < 1.5) return;
+    try {
+      this.deps.riskEventRepo?.insert({
+        eventType: "s3_dynamic_cap_applied",
+        payload: {
+          tokenId: String(signal.tokenId),
+          conditionId: String(signal.conditionId),
+          slug: market.slug,
+          question: market.question,
+          decisionRuleId: signal.decisionRuleId ?? null,
+          avgEntryPrice: input.avgEntry,
+          effectiveFillPrice: input.effectiveFillPrice,
+          margin: input.decision.margin,
+          bestBid: input.bestBid,
+          bestAsk: input.bestAsk,
+          spreadTicks: input.spreadTicks,
+          baseCap: input.decision.baseCap,
+          allowedCap: input.decision.allowedCap,
+          tier: input.decision.tier,
+          behaviorChanged: input.decision.behaviorChanged,
+          timestamp: new Date(this.now()).toISOString(),
+        },
+      });
+    } catch (err) {
+      this.log.debug(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
+        "failed to write Track S3 dynamic cap event",
+      );
+    }
+  }
+
   private recordTakerAtProfitActivation(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
@@ -2213,6 +2408,12 @@ export class SignalToOrderBridge {
       feeRate: executionTerms.takerAtProfit.feeRate,
       feeExponent: executionTerms.takerAtProfit.feeExponent,
       feeSource: executionTerms.takerAtProfit.feeSource,
+      trackS3Margin: executionTerms.takerAtProfit.trackS3Margin,
+      trackS3BaseSpreadTicks: executionTerms.takerAtProfit.trackS3BaseSpreadTicks,
+      trackS3AllowedSpreadTicks: executionTerms.takerAtProfit.trackS3AllowedSpreadTicks,
+      trackS3Tier: executionTerms.takerAtProfit.trackS3Tier,
+      trackS3DynamicCapUsed: executionTerms.takerAtProfit.trackS3DynamicCapUsed,
+      trackS3BehaviorChanged: executionTerms.takerAtProfit.trackS3BehaviorChanged,
       maxSpreadTicks: cfg.maxSpreadTicks,
       timestamp: new Date(this.now()).toISOString(),
     };
@@ -2547,6 +2748,36 @@ interface TakerAtProfitExecution {
   feeRate?: number | null;
   feeExponent?: number | null;
   feeSource?: TrackRFeeRateSource | null;
+  trackS3Margin?: number | null;
+  trackS3BaseSpreadTicks?: number | null;
+  trackS3AllowedSpreadTicks?: number | null;
+  trackS3Tier?: string | null;
+  trackS3DynamicCapUsed?: boolean | null;
+  trackS3BehaviorChanged?: boolean | null;
+}
+
+type TrackS3SpreadDecision =
+  | { applies: false; staticMaxSpreadTicks: number | null }
+  | {
+      applies: true;
+      staticMaxSpreadTicks: null;
+      margin: number;
+      baseCap: number;
+      allowedCap: number;
+      tier: string;
+      dynamicCapUsed: boolean;
+      behaviorChanged: boolean;
+    };
+
+type AppliedTrackS3SpreadDecision = Extract<TrackS3SpreadDecision, { applies: true }>;
+
+interface TrackS3RiskEventInput {
+  avgEntry: number;
+  bestBid: number;
+  bestAsk: number;
+  spreadTicks: number;
+  effectiveFillPrice: number;
+  decision: AppliedTrackS3SpreadDecision;
 }
 
 interface SellPricingShadow {

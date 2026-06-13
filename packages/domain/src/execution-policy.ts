@@ -36,6 +36,8 @@ import type {
   SellLoopGuardPolicy,
   TakerAtProfitPolicy,
   TrackRHonestPricingPolicy,
+  TrackS3MarginAwareSpreadPolicy,
+  TrackS3SpreadTierPolicy,
   TrackS1WalkingLadderPolicy,
   DynamicChainCapPolicyConfig,
 } from "./types.js";
@@ -48,6 +50,7 @@ import { DEFAULT_SELL_LOOP_GUARD_POLICY } from "./sell-loop-guard.js";
 import { DEFAULT_SELL_TIMEOUT_MS } from "./sell-sizing.js";
 import type { D9LossExitPolicy } from "./d9-loss-exit.js";
 import { DEFAULT_TRACK_S1_WALKING_LADDER_POLICY } from "./ladder-construction.js";
+import { DEFAULT_TRACK_S3_BASE_CAP, DEFAULT_TRACK_S3_TIERS } from "./track-s3-cap.js";
 
 export const DEFAULT_DEAD_SIDE_GUARD: DeadSideGuardPolicy = {
   mode: "observe",
@@ -153,6 +156,12 @@ export const DEFAULT_TRACK_R_HONEST_PRICING_POLICY: TrackRHonestPricingPolicy = 
   requireFullDepth: true,
   universalFallbackRate: 0.05,
   maxSaneThreshold: 1.5,
+};
+
+export const DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY: TrackS3MarginAwareSpreadPolicy = {
+  enabled: false,
+  baseCap: DEFAULT_TRACK_S3_BASE_CAP,
+  tiers: DEFAULT_TRACK_S3_TIERS,
 };
 
 export const DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY: ExitTtlByLiquidityPolicyConfig = {
@@ -295,6 +304,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   opportunisticTaker: DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
   takerAtProfit: DEFAULT_TAKER_AT_PROFIT_POLICY,
   trackR: DEFAULT_TRACK_R_HONEST_PRICING_POLICY,
+  trackS3: DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY,
   trackS1: DEFAULT_TRACK_S1_WALKING_LADDER_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   // Defensive infrastructure timing parameter. Exchange balance settlement
@@ -389,6 +399,9 @@ const BOUND_TRACK_R_UNIVERSAL_FALLBACK_MIN = 0.0001;
 const BOUND_TRACK_R_UNIVERSAL_FALLBACK_MAX = 0.2;
 const BOUND_TRACK_R_MAX_SANE_THRESHOLD_MIN = 1;
 const BOUND_TRACK_R_MAX_SANE_THRESHOLD_MAX = 2;
+const BOUND_TRACK_S3_MARGIN_MIN = 1;
+const BOUND_TRACK_S3_MARGIN_MAX = 20;
+const BOUND_TRACK_S3_TIER_COUNT_MAX = 10;
 const BOUND_TRACK_S1_NUM_TIERS_MIN = 2;
 const BOUND_TRACK_S1_NUM_TIERS_MAX = 8;
 const BOUND_TRACK_S1_MARKUP_MIN = 1;
@@ -534,6 +547,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const opportunisticTaker = parseOpportunisticTaker(obj.opportunisticTaker, issues);
   const takerAtProfit = parseTakerAtProfit(obj.takerAtProfit, issues);
   const trackR = parseTrackR(obj.trackR, issues);
+  const trackS3 = parseTrackS3(obj.trackS3, issues);
   const trackS1 = parseTrackS1(obj.trackS1, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
@@ -587,6 +601,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       opportunisticTaker,
       takerAtProfit,
       trackR,
+      trackS3,
       trackS1,
       orderLifetime,
       postBuyFillSellCooldownMs,
@@ -1116,6 +1131,90 @@ function parseTrackR(raw: unknown, issues: string[]): TrackRHonestPricingPolicy 
       "trackR.maxSaneThreshold",
     ),
   };
+}
+
+function parseTrackS3(raw: unknown, issues: string[]): TrackS3MarginAwareSpreadPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("trackS3 must be an object");
+    return DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY.enabled,
+      issues,
+      "trackS3.enabled",
+    ),
+    baseCap: clampedInt(
+      obj.baseCap,
+      DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY.baseCap,
+      BOUND_SPREAD_TICKS_MIN,
+      BOUND_SPREAD_TICKS_MAX,
+      issues,
+      "trackS3.baseCap",
+    ),
+    tiers: parseTrackS3Tiers(obj.tiers, issues),
+  };
+}
+
+function parseTrackS3Tiers(raw: unknown, issues: string[]): readonly TrackS3SpreadTierPolicy[] {
+  if (raw === undefined) return DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY.tiers;
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > BOUND_TRACK_S3_TIER_COUNT_MAX) {
+    issues.push(
+      `trackS3.tiers must be a non-empty array with <= ${BOUND_TRACK_S3_TIER_COUNT_MAX} items`,
+    );
+    return DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY.tiers;
+  }
+
+  const parsed: TrackS3SpreadTierPolicy[] = [];
+  let valid = true;
+  raw.forEach((entry, index) => {
+    if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
+      issues.push(`trackS3.tiers[${index}] must be an object`);
+      valid = false;
+      return;
+    }
+    const obj = entry as Record<string, unknown>;
+    const minMargin = obj.minMargin;
+    const maxSpreadTicks = obj.maxSpreadTicks;
+    const label = obj.label;
+    if (
+      typeof minMargin !== "number" ||
+      !Number.isFinite(minMargin) ||
+      minMargin < BOUND_TRACK_S3_MARGIN_MIN ||
+      minMargin > BOUND_TRACK_S3_MARGIN_MAX
+    ) {
+      issues.push(
+        `trackS3.tiers[${index}].minMargin must be in [${BOUND_TRACK_S3_MARGIN_MIN}, ${BOUND_TRACK_S3_MARGIN_MAX}]`,
+      );
+      valid = false;
+    }
+    if (
+      typeof maxSpreadTicks !== "number" ||
+      !Number.isInteger(maxSpreadTicks) ||
+      maxSpreadTicks < BOUND_SPREAD_TICKS_MIN ||
+      maxSpreadTicks > BOUND_SPREAD_TICKS_MAX
+    ) {
+      issues.push(
+        `trackS3.tiers[${index}].maxSpreadTicks must be an integer in [${BOUND_SPREAD_TICKS_MIN}, ${BOUND_SPREAD_TICKS_MAX}]`,
+      );
+      valid = false;
+    }
+    if (typeof label !== "string" || label.trim().length === 0) {
+      issues.push(`trackS3.tiers[${index}].label must be a non-empty string`);
+      valid = false;
+    }
+    if (valid) {
+      parsed.push({
+        minMargin: minMargin as number,
+        maxSpreadTicks: maxSpreadTicks as number,
+        label: (label as string).trim(),
+      });
+    }
+  });
+
+  return valid ? parsed : DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY.tiers;
 }
 
 function parseTrackS1(raw: unknown, issues: string[]): TrackS1WalkingLadderPolicy {
