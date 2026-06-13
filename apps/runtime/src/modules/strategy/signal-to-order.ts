@@ -1749,10 +1749,6 @@ export class SignalToOrderBridge {
     if (!cfg.enabled || signal.side !== "sell") return null;
     this.recordTakerAtProfitMetric(signal, "evaluated", null);
 
-    if (cfg.requireOpportunisticSellSide && !policy.opportunisticTaker.sides.includes("sell")) {
-      this.recordTakerAtProfitMetric(signal, "blocked", "sell_side_disabled");
-      return null;
-    }
     if (!isTakerAtProfitRuleAllowed(signal, cfg.rules)) {
       this.recordTakerAtProfitMetric(signal, "blocked", "rule_excluded");
       return null;
@@ -2121,7 +2117,7 @@ export class SignalToOrderBridge {
   ): ExecutionTermsResolution | null {
     const taker = policy.opportunisticTaker;
     if (!taker) return null;
-    if (!taker.enabled || !taker.sides.includes(signal.side)) return null;
+    if (!taker.enabled) return null;
     if (
       market.bestBid == null ||
       market.bestAsk == null ||

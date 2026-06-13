@@ -775,7 +775,6 @@ export interface OpportunisticTakerPolicy {
   enabled: boolean;
   /** Maximum top-of-book spread, in CLOB ticks, where placement may cross as taker. */
   maxSpreadTicks: number;
-  sides: Array<"buy" | "sell">;
   /** Multiplier applied to market/order minimums before a taker placement is allowed. */
   safetyBuffer: number;
   /** Fallback USDC notional floor when CLOB market metadata lacks minOrderSize. */
@@ -792,8 +791,6 @@ export interface TakerAtProfitPolicy {
   maxSpreadTicks: number | null;
   /** Rules allowed to use the path. `all-sell` still excludes dust/redeem-like signals. */
   rules: "all-sell" | string[];
-  /** Keep the operator's existing opportunisticTaker SELL-side switch as an outer gate. */
-  requireOpportunisticSellSide: boolean;
 }
 
 export interface TrackRHonestPricingPolicy {

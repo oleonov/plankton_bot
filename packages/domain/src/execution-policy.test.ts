@@ -257,7 +257,6 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.opportunisticTaker).toEqual({
       enabled: true,
       maxSpreadTicks: 2,
-      sides: ["buy", "sell"],
       safetyBuffer: 1.05,
       fallbackMinNotionalUsdc: 1,
       marketableBuyMinNotionalUsdc: 1,
@@ -639,7 +638,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("pricing.minExitPriceSignalRatio"))).toBe(true);
   });
 
-  it("parses opportunistic taker settings and rejects invalid sides", () => {
+  it("parses opportunistic taker settings and ignores legacy sides", () => {
     const parsed = parseExecutionPolicyJson(
       JSON.stringify({
         opportunisticTaker: {
@@ -656,17 +655,17 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(parsed.policy.opportunisticTaker).toEqual({
       enabled: false,
       maxSpreadTicks: 4,
-      sides: ["buy"],
       safetyBuffer: 2,
       fallbackMinNotionalUsdc: 0.5,
       marketableBuyMinNotionalUsdc: 0.75,
     });
 
     const invalid = parseExecutionPolicyJson(
-      JSON.stringify({ opportunisticTaker: { enabled: true, maxSpreadTicks: 2, sides: ["hold"] } }),
+      JSON.stringify({ opportunisticTaker: { enabled: "yes", maxSpreadTicks: -1 } }),
     );
     expect(invalid.policy.opportunisticTaker).toEqual(DEFAULT_EXECUTION_POLICY.opportunisticTaker);
-    expect(invalid.issues.some((i) => i.includes("opportunisticTaker.sides"))).toBe(true);
+    expect(invalid.issues.some((i) => i.includes("opportunisticTaker.enabled"))).toBe(true);
+    expect(invalid.issues.some((i) => i.includes("opportunisticTaker.maxSpreadTicks"))).toBe(true);
   });
 
   it("defaults taker-at-profit off with a fee-aware margin", () => {
@@ -675,7 +674,6 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       minGrossExitRatio: 1.03,
       maxSpreadTicks: 6,
       rules: "all-sell",
-      requireOpportunisticSellSide: true,
     });
   });
 
@@ -687,7 +685,6 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           minGrossExitRatio: 1.05,
           maxSpreadTicks: 4,
           rules: ["D5", "D8"],
-          requireOpportunisticSellSide: false,
         },
       }),
     );
@@ -697,7 +694,6 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       minGrossExitRatio: 1.05,
       maxSpreadTicks: 4,
       rules: ["D5", "D8"],
-      requireOpportunisticSellSide: false,
     });
 
     const invalid = parseExecutionPolicyJson(
@@ -707,7 +703,6 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           minGrossExitRatio: 0.99,
           maxSpreadTicks: "wide",
           rules: ["D8", 8],
-          requireOpportunisticSellSide: "no",
         },
       }),
     );
@@ -716,9 +711,45 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(invalid.issues.some((i) => i.includes("takerAtProfit.minGrossExitRatio"))).toBe(true);
     expect(invalid.issues.some((i) => i.includes("takerAtProfit.maxSpreadTicks"))).toBe(true);
     expect(invalid.issues.some((i) => i.includes("takerAtProfit.rules"))).toBe(true);
+  });
+
+  it("ignores legacy opportunisticTaker.sides and takerAtProfit.requireOpportunisticSellSide", () => {
+    // Backward compat: prod control DB (policy v47) still carries these removed
+    // fields. They must parse without issues and must not surface in the output.
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        opportunisticTaker: {
+          enabled: true,
+          maxSpreadTicks: 2,
+          sides: ["buy", "sell"],
+          safetyBuffer: 1.05,
+          fallbackMinNotionalUsdc: 1,
+          marketableBuyMinNotionalUsdc: 1,
+        },
+        takerAtProfit: {
+          enabled: true,
+          minGrossExitRatio: 1.03,
+          maxSpreadTicks: 6,
+          rules: "all-sell",
+          requireOpportunisticSellSide: false,
+        },
+      }),
+    );
+    expect(issues).toHaveLength(0);
+    expect("sides" in policy.opportunisticTaker).toBe(false);
+    expect("requireOpportunisticSellSide" in policy.takerAtProfit).toBe(false);
+
+    // Even malformed legacy values are silently ignored, never validated.
+    const garbage = parseExecutionPolicyJson(
+      JSON.stringify({
+        opportunisticTaker: { sides: ["hold"] },
+        takerAtProfit: { requireOpportunisticSellSide: "no" },
+      }),
+    );
+    expect(garbage.issues.some((i) => i.includes("opportunisticTaker.sides"))).toBe(false);
     expect(
-      invalid.issues.some((i) => i.includes("takerAtProfit.requireOpportunisticSellSide")),
-    ).toBe(true);
+      garbage.issues.some((i) => i.includes("takerAtProfit.requireOpportunisticSellSide")),
+    ).toBe(false);
   });
 
   it("defaults Track S3 disabled with conservative margin-aware spread tiers", () => {
@@ -967,7 +998,6 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.opportunisticTaker).toEqual({
       ...DEFAULT_EXECUTION_POLICY.opportunisticTaker,
       maxSpreadTicks: 4,
-      sides: ["sell"],
     });
   });
 
@@ -1091,7 +1121,6 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("multiBuyLadder.minStepFillRate"))).toBe(true);
     expect(issues.some((i) => i.includes("opportunisticTaker.enabled"))).toBe(true);
     expect(issues.some((i) => i.includes("opportunisticTaker.maxSpreadTicks"))).toBe(true);
-    expect(issues.some((i) => i.includes("opportunisticTaker.sides"))).toBe(true);
     expect(issues.some((i) => i.includes("redeemSweep.circuitBreakerEnabled"))).toBe(true);
     expect(issues.some((i) => i.includes("redeemSweep.stateFailedQuarantineThreshold"))).toBe(true);
     expect(issues.some((i) => i.includes("redeemSweep.stateFailedQuarantineTtlHours"))).toBe(true);

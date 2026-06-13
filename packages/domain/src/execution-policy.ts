@@ -134,7 +134,6 @@ export const DEFAULT_MULTI_BUY_LADDER_POLICY: MultiBuyLadderPolicy = {
 export const DEFAULT_OPPORTUNISTIC_TAKER_POLICY: OpportunisticTakerPolicy = {
   enabled: true,
   maxSpreadTicks: 2,
-  sides: ["buy"],
   safetyBuffer: 1.05,
   fallbackMinNotionalUsdc: 1,
   marketableBuyMinNotionalUsdc: 1,
@@ -147,7 +146,6 @@ export const DEFAULT_TAKER_AT_PROFIT_POLICY: TakerAtProfitPolicy = {
   // profitable exits, while still rejecting extremely wide/stale books in v1.
   maxSpreadTicks: 6,
   rules: "all-sell",
-  requireOpportunisticSellSide: true,
 };
 
 export const DEFAULT_TRACK_R_HONEST_PRICING_POLICY: TrackRHonestPricingPolicy = {
@@ -341,7 +339,6 @@ const ORDER_LIFETIME_ENFORCEMENT_MODES = ["observe", "enforce"] as const;
 const PRICING_MODES = ["edge", "bounded-midpoint"] as const;
 const BINARY_PRICING_POLICIES = ["edge", "skip"] as const;
 const EXIT_PRICING_MODES = ["bid-anchored", "midpoint-anchored", "edge"] as const;
-const ORDER_SIDES = ["buy", "sell"] as const;
 const ALGO_STATES = ["OTHER", "S1", "S2", "S3"] as const;
 
 // Bounds chosen to match the Zod schema that previously lived in
@@ -1033,7 +1030,6 @@ function parseOpportunisticTaker(raw: unknown, issues: string[]): OpportunisticT
       issues,
       "opportunisticTaker.maxSpreadTicks",
     ),
-    sides: sideListOr(obj.sides, DEFAULT_OPPORTUNISTIC_TAKER_POLICY.sides, issues),
     safetyBuffer: clampedNumber(
       obj.safetyBuffer,
       DEFAULT_OPPORTUNISTIC_TAKER_POLICY.safetyBuffer,
@@ -1095,12 +1091,6 @@ function parseTakerAtProfit(raw: unknown, issues: string[]): TakerAtProfitPolicy
       DEFAULT_TAKER_AT_PROFIT_POLICY.rules,
       issues,
       "takerAtProfit.rules",
-    ),
-    requireOpportunisticSellSide: booleanOr(
-      obj.requireOpportunisticSellSide,
-      DEFAULT_TAKER_AT_PROFIT_POLICY.requireOpportunisticSellSide,
-      issues,
-      "takerAtProfit.requireOpportunisticSellSide",
     ),
   };
 }
@@ -2329,31 +2319,6 @@ function booleanOr(raw: unknown, fallback: boolean, issues: string[], name: stri
     return fallback;
   }
   return raw;
-}
-
-function sideListOr(
-  raw: unknown,
-  fallback: OpportunisticTakerPolicy["sides"],
-  issues: string[],
-): OpportunisticTakerPolicy["sides"] {
-  if (raw === undefined) return fallback;
-  if (!Array.isArray(raw)) {
-    issues.push("opportunisticTaker.sides must be an array");
-    return fallback;
-  }
-  const sides: OpportunisticTakerPolicy["sides"] = [];
-  for (const side of raw) {
-    if (typeof side !== "string" || !(ORDER_SIDES as readonly string[]).includes(side)) {
-      issues.push(`opportunisticTaker.sides contains invalid side ${String(side)}`);
-      return fallback;
-    }
-    if (!sides.includes(side as "buy" | "sell")) sides.push(side as "buy" | "sell");
-  }
-  if (sides.length === 0) {
-    issues.push("opportunisticTaker.sides must include at least one side");
-    return fallback;
-  }
-  return sides;
 }
 
 function takerAtProfitRulesOr(

@@ -174,7 +174,6 @@ describe("control-db migration infrastructure", () => {
         opportunisticTaker: {
           enabled: boolean;
           maxSpreadTicks: number;
-          sides: Array<"buy" | "sell">;
         };
         exitOrderTtlMs: number;
         exitTtlByLiquidity: {
@@ -226,7 +225,6 @@ describe("control-db migration infrastructure", () => {
       expect(parsed.opportunisticTaker).toEqual({
         enabled: true,
         maxSpreadTicks: 2,
-        sides: ["buy"],
         safetyBuffer: 1.05,
         fallbackMinNotionalUsdc: 1,
         marketableBuyMinNotionalUsdc: 1,

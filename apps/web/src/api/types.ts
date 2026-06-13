@@ -102,7 +102,6 @@ export interface OrderCapacityPolicy {
 export interface OpportunisticTakerPolicy {
   enabled: boolean;
   maxSpreadTicks: number;
-  sides: Array<"buy" | "sell">;
   safetyBuffer: number;
   fallbackMinNotionalUsdc: number;
   marketableBuyMinNotionalUsdc: number;

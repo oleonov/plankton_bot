@@ -1657,7 +1657,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   function allowSellTakerPolicy() {
     return {
       ...DEFAULT_EXECUTION_POLICY.opportunisticTaker,
-      sides: ["buy", "sell"] as Array<"buy" | "sell">,
+      enabled: true,
     };
   }
 
@@ -2446,6 +2446,37 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
         }),
       }),
     );
+  });
+
+  it("places taker-at-profit on a profitable SELL without an opportunistic sell-side switch", async () => {
+    // Post-cleanup: the legacy opportunisticTaker.sides / requireOpportunisticSellSide
+    // gate is gone. Taker-at-profit decides SELL taker eligibility on its own
+    // (rules + Track R), independent of the opportunistic taker policy.
+    const { bus, placed, skipped } = makeBridgeWithPricing(undefined, {
+      positionRepo: avgEntryRepo(0.1),
+      policyOverrides: {
+        takerAtProfit: profitTakerPolicy(),
+      },
+    });
+    const market = makeMarket({ bestBid: 0.103, bestAsk: 0.107, tickSize: 0.001 });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.12,
+        reason: "repricing-exit",
+        decisionRuleId: "D8",
+      },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.103);
+    expect(placed[0]!.command.postOnly).toBe(false);
   });
 
   it("Track R uses effective fill price and dynamic fee threshold for thick profitable books", async () => {
@@ -4110,26 +4141,6 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed[0]!.command.postOnly).toBe(false);
   });
 
-  it("keeps SELL maker pricing with default buy-only taker when spread is two ticks", async () => {
-    const { bus, placed } = makeBridgeWithPricing(undefined, {
-      policyOverrides: {
-        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
-      },
-    });
-    const market = makeMarket({ bestBid: 0.08, bestAsk: 0.1, tickSize: 0.01 });
-
-    await bus.publish("SignalApproved", {
-      signal: { ...makeSignal(), side: "sell", suggestedPrice: 0.1, reason: "repricing-exit" },
-      market,
-      approvedAt: Date.now(),
-    });
-    await bus.drain();
-
-    expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.14);
-    expect(placed[0]!.command.postOnly).toBeUndefined();
-  });
-
   it("keeps maker pricing when opportunistic taker spread is above threshold", async () => {
     const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus, placed } = makeBridgeWithPricing(undefined, {
@@ -4181,13 +4192,12 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed[0]!.command.price).toBe(0.09);
   });
 
-  it("keeps SELL maker pricing when opportunistic taker is buy-only", async () => {
+  it("allows the generic tight-spread taker on SELL with the default policy", async () => {
+    // Post-cleanup: opportunisticTaker has no side switch, so an enabled tight-spread
+    // SELL crosses as taker at bestBid, mirroring BUY behaviour.
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       policyOverrides: {
-        opportunisticTaker: {
-          ...DEFAULT_EXECUTION_POLICY.opportunisticTaker,
-          sides: ["buy"],
-        },
+        opportunisticTaker: { ...DEFAULT_EXECUTION_POLICY.opportunisticTaker, enabled: true },
       },
     });
     const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01 });
@@ -4200,8 +4210,8 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.1);
-    expect(placed[0]!.command.postOnly).toBeUndefined();
+    expect(placed[0]!.command.price).toBe(0.09);
+    expect(placed[0]!.command.postOnly).toBe(false);
   });
 
   it("can roll SELL edge branch back to bestAsk pricing", async () => {
