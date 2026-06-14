@@ -56,6 +56,18 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       },
       maxTokensPerCycle: 100,
       qdHandoffThresholdMs: 3_600_000,
+      costCaps: { enabled: false },
+      profiles: {
+        cheap: {
+          costCaps: { normalCapUsd: 11, aggressiveCapUsd: 23, hardCapAtAggressive: false },
+        },
+        medium: {
+          costCaps: { normalCapUsd: 30, aggressiveCapUsd: 70, hardCapAtAggressive: false },
+        },
+        expensive: {
+          costCaps: { normalCapUsd: 18, aggressiveCapUsd: 33, hardCapAtAggressive: false },
+        },
+      },
       sellLadder: { enabled: false },
       adoptExistingPositions: { enabled: false },
       adoptExistingS1Ladders: { enabled: false },
@@ -75,6 +87,30 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           },
           maxTokensPerCycle: 25,
           qdHandoffThresholdMs: 600_000,
+          costCaps: { enabled: true },
+          profiles: {
+            cheap: {
+              costCaps: {
+                normalCapUsd: 12,
+                aggressiveCapUsd: 24,
+                hardCapAtAggressive: true,
+              },
+            },
+            medium: {
+              costCaps: {
+                normalCapUsd: 31,
+                aggressiveCapUsd: 71,
+                hardCapAtAggressive: false,
+              },
+            },
+            expensive: {
+              costCaps: {
+                normalCapUsd: 19,
+                aggressiveCapUsd: 34,
+                hardCapAtAggressive: true,
+              },
+            },
+          },
           sellLadder: { enabled: true },
           adoptExistingPositions: { enabled: true },
           adoptExistingS1Ladders: { enabled: true },
@@ -93,6 +129,18 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       },
       maxTokensPerCycle: 25,
       qdHandoffThresholdMs: 600_000,
+      costCaps: { enabled: true },
+      profiles: {
+        cheap: {
+          costCaps: { normalCapUsd: 12, aggressiveCapUsd: 24, hardCapAtAggressive: true },
+        },
+        medium: {
+          costCaps: { normalCapUsd: 31, aggressiveCapUsd: 71, hardCapAtAggressive: false },
+        },
+        expensive: {
+          costCaps: { normalCapUsd: 19, aggressiveCapUsd: 34, hardCapAtAggressive: true },
+        },
+      },
       sellLadder: { enabled: true },
       adoptExistingPositions: { enabled: true },
       adoptExistingS1Ladders: { enabled: true },
@@ -122,6 +170,63 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     ).toBe(true);
     expect(
       invalid.issues.some((issue) => issue.includes("executionProfile.qdHandoffThresholdMs")),
+    ).toBe(true);
+  });
+
+  it("falls back malformed Execution Profile cost caps per profile", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          costCaps: { enabled: true, ignored: "ok" },
+          profiles: {
+            cheap: {
+              costCaps: {
+                normalCapUsd: -1,
+                aggressiveCapUsd: 22,
+                hardCapAtAggressive: true,
+              },
+            },
+            medium: {
+              costCaps: {
+                normalCapUsd: 31,
+                aggressiveCapUsd: 71,
+                hardCapAtAggressive: true,
+                unknown: "ignored",
+              },
+            },
+            expensive: {
+              costCaps: {
+                normalCapUsd: 40,
+                aggressiveCapUsd: 39,
+                hardCapAtAggressive: true,
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.policy.executionProfile.costCaps).toEqual({ enabled: true });
+    expect(parsed.policy.executionProfile.profiles.cheap.costCaps).toEqual(
+      DEFAULT_EXECUTION_POLICY.executionProfile.profiles.cheap.costCaps,
+    );
+    expect(parsed.policy.executionProfile.profiles.medium.costCaps).toEqual({
+      normalCapUsd: 31,
+      aggressiveCapUsd: 71,
+      hardCapAtAggressive: true,
+    });
+    expect(parsed.policy.executionProfile.profiles.expensive.costCaps).toEqual(
+      DEFAULT_EXECUTION_POLICY.executionProfile.profiles.expensive.costCaps,
+    );
+    expect(
+      parsed.issues.some((issue) =>
+        issue.includes("executionProfile.profiles.cheap.costCaps.normalCapUsd"),
+      ),
+    ).toBe(true);
+    expect(
+      parsed.issues.some((issue) =>
+        issue.includes("executionProfile.profiles.expensive.costCaps"),
+      ),
     ).toBe(true);
   });
 

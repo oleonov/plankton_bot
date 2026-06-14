@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_EXECUTION_PROFILE_POLICY,
   OrderType,
   PositionStatus,
   createBotRunId,
@@ -24,13 +25,11 @@ const tokenId = createTokenId("manager-token");
 const conditionId = createConditionId("manager-condition");
 const NOW = Date.parse("2026-06-14T00:00:00.000Z");
 const DEFAULT_POLICY: ExecutionProfilePolicy = {
+  ...DEFAULT_EXECUTION_PROFILE_POLICY,
   enabled: false,
   maxTokensPerCycle: 100,
   qdHandoffThresholdMs: 3_600_000,
   profileHysteresis: DEFAULT_PROFILE_HYSTERESIS,
-  sellLadder: { enabled: false },
-  adoptExistingPositions: { enabled: false },
-  adoptExistingS1Ladders: { enabled: false },
 };
 
 function policy(overrides: Partial<ExecutionProfilePolicy> = {}): ExecutionProfilePolicy {
@@ -44,6 +43,14 @@ function policy(overrides: Partial<ExecutionProfilePolicy> = {}): ExecutionProfi
     sellLadder: {
       ...DEFAULT_POLICY.sellLadder,
       ...(overrides.sellLadder ?? {}),
+    },
+    costCaps: {
+      ...DEFAULT_POLICY.costCaps,
+      ...(overrides.costCaps ?? {}),
+    },
+    profiles: {
+      ...DEFAULT_POLICY.profiles,
+      ...(overrides.profiles ?? {}),
     },
     adoptExistingPositions: {
       ...DEFAULT_POLICY.adoptExistingPositions,

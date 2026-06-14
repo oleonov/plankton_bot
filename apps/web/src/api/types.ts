@@ -132,9 +132,21 @@ export interface ExecutionProfilePolicy {
     mediumExpensiveLow: number;
     mediumExpensiveHigh: number;
   };
+  costCaps: { enabled: boolean };
+  profiles: {
+    cheap: { costCaps: ExecutionProfileCostCapProfilePolicy };
+    medium: { costCaps: ExecutionProfileCostCapProfilePolicy };
+    expensive: { costCaps: ExecutionProfileCostCapProfilePolicy };
+  };
   sellLadder: { enabled: boolean };
   adoptExistingPositions: { enabled: boolean };
   adoptExistingS1Ladders: { enabled: boolean };
+}
+
+export interface ExecutionProfileCostCapProfilePolicy {
+  normalCapUsd: number;
+  aggressiveCapUsd: number;
+  hardCapAtAggressive: boolean;
 }
 
 export interface ExecutionPolicyDTO {

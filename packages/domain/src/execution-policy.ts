@@ -14,8 +14,10 @@ import type {
   DeadSideGuardPolicy,
   DepositActivationPolicy,
   ExecutionPolicy,
+  ExecutionProfileCostCapProfilePolicy,
   ExecutionProfileHysteresisBounds,
   ExecutionProfilePolicy,
+  ExecutionProfileProfilesPolicy,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
   ExitTtlByLiquidityPolicyConfig,
@@ -181,6 +183,18 @@ export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
     cheapMediumHigh: 0.055,
     mediumExpensiveLow: 0.325,
     mediumExpensiveHigh: 0.375,
+  },
+  costCaps: { enabled: false },
+  profiles: {
+    cheap: {
+      costCaps: { normalCapUsd: 11, aggressiveCapUsd: 23, hardCapAtAggressive: false },
+    },
+    medium: {
+      costCaps: { normalCapUsd: 30, aggressiveCapUsd: 70, hardCapAtAggressive: false },
+    },
+    expensive: {
+      costCaps: { normalCapUsd: 18, aggressiveCapUsd: 33, hardCapAtAggressive: false },
+    },
   },
   sellLadder: { enabled: false },
   adoptExistingPositions: { enabled: false },
@@ -1339,6 +1353,13 @@ function parseExecutionProfile(raw: unknown, issues: string[]): ExecutionProfile
       "executionProfile.qdHandoffThresholdMs",
     ),
     profileHysteresis: parseExecutionProfileHysteresis(obj.profileHysteresis, issues),
+    costCaps: parseExecutionProfileToggle(
+      obj.costCaps,
+      DEFAULT_EXECUTION_PROFILE_POLICY.costCaps,
+      issues,
+      "executionProfile.costCaps",
+    ),
+    profiles: parseExecutionProfileProfiles(obj.profiles, issues),
     sellLadder: parseExecutionProfileToggle(
       obj.sellLadder,
       DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder,
@@ -1373,6 +1394,99 @@ function parseExecutionProfileToggle(
   const obj = raw as Record<string, unknown>;
   return {
     enabled: booleanOr(obj.enabled, fallback.enabled, issues, `${name}.enabled`),
+  };
+}
+
+function parseExecutionProfileProfiles(
+  raw: unknown,
+  issues: string[],
+): ExecutionProfileProfilesPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.profiles must be an object");
+    return DEFAULT_EXECUTION_PROFILE_POLICY.profiles;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    cheap: parseExecutionProfileProfile(
+      obj.cheap,
+      DEFAULT_EXECUTION_PROFILE_POLICY.profiles.cheap,
+      issues,
+      "executionProfile.profiles.cheap",
+    ),
+    medium: parseExecutionProfileProfile(
+      obj.medium,
+      DEFAULT_EXECUTION_PROFILE_POLICY.profiles.medium,
+      issues,
+      "executionProfile.profiles.medium",
+    ),
+    expensive: parseExecutionProfileProfile(
+      obj.expensive,
+      DEFAULT_EXECUTION_PROFILE_POLICY.profiles.expensive,
+      issues,
+      "executionProfile.profiles.expensive",
+    ),
+  };
+}
+
+function parseExecutionProfileProfile(
+  raw: unknown,
+  fallback: ExecutionProfileProfilesPolicy["cheap"],
+  issues: string[],
+  name: string,
+): ExecutionProfileProfilesPolicy["cheap"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push(`${name} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    costCaps: parseExecutionProfileCostCapProfile(
+      obj.costCaps,
+      fallback.costCaps,
+      issues,
+      `${name}.costCaps`,
+    ),
+  };
+}
+
+function parseExecutionProfileCostCapProfile(
+  raw: unknown,
+  fallback: ExecutionProfileCostCapProfilePolicy,
+  issues: string[],
+  name: string,
+): ExecutionProfileCostCapProfilePolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push(`${name} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  const normal = positiveNumberOr(
+    obj.normalCapUsd,
+    fallback.normalCapUsd,
+    issues,
+    `${name}.normalCapUsd`,
+  );
+  const aggressive = positiveNumberOr(
+    obj.aggressiveCapUsd,
+    fallback.aggressiveCapUsd,
+    issues,
+    `${name}.aggressiveCapUsd`,
+  );
+  if (!normal.valid || !aggressive.valid || aggressive.value <= normal.value) {
+    if (normal.valid && aggressive.valid) {
+      issues.push(`${name}.aggressiveCapUsd must be greater than ${name}.normalCapUsd`);
+    }
+    return fallback;
+  }
+  return {
+    normalCapUsd: normal.value,
+    aggressiveCapUsd: aggressive.value,
+    hardCapAtAggressive: booleanOr(
+      obj.hardCapAtAggressive,
+      fallback.hardCapAtAggressive,
+      issues,
+      `${name}.hardCapAtAggressive`,
+    ),
   };
 }
 
@@ -2390,6 +2504,24 @@ function numberOr(raw: unknown, fallback: number, issues: string[], name: string
     return fallback;
   }
   return raw;
+}
+
+function positiveNumberOr(
+  raw: unknown,
+  fallback: number,
+  issues: string[],
+  name: string,
+): { value: number; valid: boolean } {
+  if (raw === undefined) return { value: fallback, valid: true };
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    issues.push(`${name} must be a finite number`);
+    return { value: fallback, valid: false };
+  }
+  if (raw <= 0) {
+    issues.push(`${name} must be > 0`);
+    return { value: fallback, valid: false };
+  }
+  return { value: raw, valid: true };
 }
 
 function clampedNumber(

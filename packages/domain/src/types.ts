@@ -882,11 +882,94 @@ export interface ExecutionProfileFeatureToggle {
   enabled: boolean;
 }
 
+export type CostCapSeverity = "under_p75" | "between" | "over_p90";
+
+export type CostCapCrossedBand = "none" | "normal" | "aggressive";
+
+export type CostCapRequiredSignal = "none" | "confirmation" | "strong";
+
+export type CostCapDecisionReason =
+  | "cost_caps_disabled"
+  | "under_normal_cap"
+  | "between_requires_confirmation"
+  | "between_confirmation_present"
+  | "over_aggressive_requires_strong_signal"
+  | "over_aggressive_strong_signal_present"
+  | "hard_cap_at_aggressive";
+
+export type CostCapSignalReason =
+  | "recovery60_ge_5pct"
+  | "recovery60_ge_10pct"
+  | "volume_activity_confirmed"
+  | "manual_operator_override"
+  | "unknown";
+
+export interface CostCapSignalContext {
+  hasConfirmationSignal: boolean;
+  hasStrongOverrideSignal: boolean;
+  signalReasons: readonly CostCapSignalReason[];
+}
+
+export interface CostCapAction {
+  side: "buy";
+  kind: "scale_in";
+  proposedNotionalUsd: number;
+  proposedSizeShares?: number;
+}
+
+export interface CostCapInput {
+  profile: ExecutionProfileName;
+  currentCostUsd: number;
+  action: CostCapAction;
+  signals: CostCapSignalContext;
+}
+
+export interface ExecutionProfileCostCapsPolicy {
+  enabled: boolean;
+}
+
+export interface ExecutionProfileCostCapProfilePolicy {
+  normalCapUsd: number;
+  aggressiveCapUsd: number;
+  hardCapAtAggressive: boolean;
+}
+
+export interface ExecutionProfileProfilesPolicy {
+  cheap: { costCaps: ExecutionProfileCostCapProfilePolicy };
+  medium: { costCaps: ExecutionProfileCostCapProfilePolicy };
+  expensive: { costCaps: ExecutionProfileCostCapProfilePolicy };
+}
+
+export interface ExecutionProfileCostCapDecisionConfig {
+  enabled: boolean;
+  profiles: ExecutionProfileProfilesPolicy;
+}
+
+export interface CapDecision {
+  allow: boolean;
+  severity: CostCapSeverity;
+  crossedBand: CostCapCrossedBand;
+  reason: CostCapDecisionReason;
+  requiredSignal: CostCapRequiredSignal;
+  profile: ExecutionProfileName;
+  currentCostUsd: number;
+  roundedCurrentCostUsd: number;
+  proposedNotionalUsd: number;
+  projectedCostUsd: number;
+  roundedProjectedCostUsd: number;
+  normalCapUsd: number;
+  aggressiveCapUsd: number;
+  hardCapAtAggressive: boolean;
+  signalReasons: readonly CostCapSignalReason[];
+}
+
 export interface ExecutionProfilePolicy {
   enabled: boolean;
   maxTokensPerCycle: number;
   qdHandoffThresholdMs: number;
   profileHysteresis: ExecutionProfileHysteresisBounds;
+  costCaps: ExecutionProfileCostCapsPolicy;
+  profiles: ExecutionProfileProfilesPolicy;
   sellLadder: ExecutionProfileFeatureToggle;
   adoptExistingPositions: ExecutionProfileFeatureToggle;
   adoptExistingS1Ladders: ExecutionProfileFeatureToggle;
