@@ -74,6 +74,21 @@ export {
   type GammaMarketInfo,
 } from "./gamma/index.js";
 
+// Reliable read-path primitives (reconciliation hardening, #36)
+export { type FetchReason, type FetchResult, FetchParseError } from "./fetch-result.js";
+export { classifyFetchError, isRetryableReason } from "./clob-error-classifier.js";
+export {
+  executeWithRetry,
+  type ExecuteWithRetryConfig,
+  type RetryDiagnosticLogger,
+} from "./retry-helper.js";
+export {
+  isTransientNetworkError,
+  isRateLimitError as isTransientRateLimitError,
+  TRANSIENT_NETWORK_ERROR_PATTERN,
+  RATE_LIMIT_ERROR_PATTERN,
+} from "./network-errors.js";
+
 // Shared utilities
 export { classifyError } from "./errors.js";
 export {

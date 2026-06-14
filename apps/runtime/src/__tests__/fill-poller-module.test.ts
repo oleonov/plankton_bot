@@ -224,4 +224,60 @@ describe("FillPollerModule", () => {
     const h = await mod.healthCheck();
     expect(h.ok).toBe(true);
   });
+
+  // ─── Fill-completion tolerance propagation (#36) ───────────────────────
+
+  function nearCompleteFill(): ExchangeFill {
+    return {
+      fillId: "fill-near-complete",
+      orderId: "ord-1",
+      clientOrderId: "co-1",
+      tokenId: createTokenId("tok-1"),
+      side: "buy",
+      price: 0.5,
+      size: 9.97,
+      liquidityRole: "unknown",
+      fee: 0,
+      feeRateBps: 0,
+      timestamp: Date.now(),
+    };
+  }
+
+  // 9.97 of 10 shares is 0.3% short — inside the default 0.5% band (→ filled)
+  // but outside the 1e-9 floor that env=0 collapses to (→ partially-filled).
+  it("forwards fillCompletionTolerance=0 → near-complete fill stays partially-filled", async () => {
+    mod = new FillPollerModule({
+      gateway,
+      fillRepo,
+      orderRepo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 5000,
+      overlapMs: 5000,
+      fillCompletionTolerance: 0,
+    });
+    (gateway.getFills as any).mockResolvedValue([nearCompleteFill()]);
+    (orderRepo.findById as any).mockReturnValue({ orderId: createOrderId("ord-1"), size: 10 });
+    (fillRepo.findByOrderId as any).mockReturnValue([
+      { side: "buy", price: 0.5, size: 9.97, liquidityRole: "unknown" },
+    ]);
+
+    await mod.start();
+    await mod.poll();
+
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("ord-1"), "partially-filled");
+  });
+
+  it("defaults to 0.5% tolerance when none supplied → near-complete fill is filled", async () => {
+    (gateway.getFills as any).mockResolvedValue([nearCompleteFill()]);
+    (orderRepo.findById as any).mockReturnValue({ orderId: createOrderId("ord-1"), size: 10 });
+    (fillRepo.findByOrderId as any).mockReturnValue([
+      { side: "buy", price: 0.5, size: 9.97, liquidityRole: "unknown" },
+    ]);
+
+    await mod.start();
+    await mod.poll();
+
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("ord-1"), "filled");
+  });
 });

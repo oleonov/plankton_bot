@@ -541,6 +541,23 @@ export interface MarketDiscoveryGateway {
 }
 
 /**
+ * Why a reliable read call failed. `client` and `parse` are permanent (do not
+ * retry); the rest are transient. See `@krabs/exchange` `classifyFetchError`.
+ */
+export type FetchReason = "timeout" | "rate_limit" | "server" | "parse" | "client" | "unknown";
+
+/**
+ * Discriminated result for read calls that must distinguish a genuine empty
+ * response (`ok: true, data: []`) from a transport/parse failure (`ok: false`).
+ * Reconciliation skips its pass on `ok: false` rather than treating a failed
+ * fetch as an authoritative empty snapshot — the root cause of phantom
+ * cancellations (#36).
+ */
+export type FetchResult<T> =
+  | { readonly ok: true; readonly data: T }
+  | { readonly ok: false; readonly reason: FetchReason; readonly attempts: number };
+
+/**
  * Order lifecycle — place, cancel, query orders, fetch fills and balances.
  *
  * Consumed exclusively by the execution engine and reconciliation module.
@@ -560,11 +577,22 @@ export interface ExchangeGateway {
   /** Fetch all currently open orders across all tokens. */
   getOpenOrders(): Promise<ExchangeOrder[]>;
 
+  /**
+   * Reliable variant of {@link getOpenOrders}: retries transient failures and
+   * returns a {@link FetchResult} so reconciliation can distinguish a genuine
+   * empty snapshot from a fetch failure (#36). Optional — gateways without it
+   * fall back to the legacy `catch → []` path.
+   */
+  getOpenOrdersResult?(): Promise<FetchResult<ExchangeOrder[]>>;
+
   /** Fetch open orders for a specific token. */
   getOpenOrdersForToken(tokenId: TokenId): Promise<ExchangeOrder[]>;
 
   /** Fetch fills since a given Unix millisecond timestamp. */
   getFills(sinceMs: number): Promise<ExchangeFill[]>;
+
+  /** Reliable variant of {@link getFills} — see {@link getOpenOrdersResult}. */
+  getFillsResult?(sinceMs: number): Promise<FetchResult<ExchangeFill[]>>;
 
   /**
    * Optional fast path for gateways that can fetch fills for one order directly.

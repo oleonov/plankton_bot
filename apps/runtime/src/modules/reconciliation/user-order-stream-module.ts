@@ -61,6 +61,8 @@ export interface UserOrderStreamModuleDeps {
   log: Logger;
   fillCatchupOverlapMs?: number;
   orphanTtlMs?: number;
+  /** Relative fill-completion tolerance forwarded to fill imports (#36). */
+  fillCompletionTolerance?: number | undefined;
   now?: () => number;
 }
 
@@ -260,6 +262,7 @@ export class UserOrderStreamModule implements RuntimeModule {
       bus: this.deps.bus,
       log: this.log,
       gateway: this.deps.gateway,
+      fillCompletionTolerance: this.deps.fillCompletionTolerance,
     });
     this.window.wsFills += result.imported;
     if (result.skipped > 0) {
@@ -360,6 +363,7 @@ export class UserOrderStreamModule implements RuntimeModule {
           orderRepo: this.deps.orderRepo,
           bus: this.deps.bus,
           log: this.log,
+          fillCompletionTolerance: this.deps.fillCompletionTolerance,
         },
         Math.max(0, latestFillTimestamp - this.fillCatchupOverlapMs),
       );

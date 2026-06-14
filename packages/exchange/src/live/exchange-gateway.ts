@@ -26,6 +26,9 @@ import type {
 } from "@krabs/domain";
 import { encodeFunctionData, parseAbi, zeroHash } from "viem";
 import { classifyError } from "../errors.js";
+import { executeWithRetry, type RetryDiagnosticLogger } from "../retry-helper.js";
+import { classifyFetchError } from "../clob-error-classifier.js";
+import { FetchParseError, type FetchResult } from "../fetch-result.js";
 import { redactSensitive, sanitizeLogArg } from "../redaction.js";
 import {
   mapOpenOrder,
@@ -86,6 +89,18 @@ export interface LiveExchangeConfig {
   __readErc20Balance?: typeof readErc20Balance;
   /** Override for allowance reads — for testing without a live RPC. */
   __readErc20Allowance?: typeof readErc20Allowance;
+  /**
+   * Retry policy for the reliable read paths (`getOpenOrdersResult`/`getFillsResult`).
+   * Only those Result-returning methods retry; the legacy `getOpenOrders`/`getFills`
+   * keep their single-shot `catch → []` behavior. `sleep` is injectable for tests.
+   */
+  fetchRetry?: {
+    retries?: number;
+    backoffMs?: number[];
+    sleep?: (ms: number) => Promise<void>;
+    /** Diagnostic sink for `unknown`-classified fetch errors (#36 LOW 2). */
+    log?: RetryDiagnosticLogger | undefined;
+  };
 }
 
 const CTF_REDEEM_ABI = parseAbi([
@@ -278,6 +293,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
   private readonly rpcRotator: RpcRotator | null;
   private readonly readErc20BalanceFn: typeof readErc20Balance;
   private readonly readErc20AllowanceFn: typeof readErc20Allowance;
+  private readonly fetchRetries: number;
+  private readonly fetchBackoffMs: number[];
+  private readonly fetchSleep: (ms: number) => Promise<void>;
+  private readonly fetchRetryLog: RetryDiagnosticLogger | undefined;
   private readonly warnedCollateralFallback = new Set<string>();
   private warnedRedeemUnsupported = false;
   private warnedMergeUnsupported = false;
@@ -304,6 +323,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
     this.rpcRotator = config.rpcRotator ?? null;
     this.readErc20BalanceFn = config.__readErc20Balance ?? readErc20Balance;
     this.readErc20AllowanceFn = config.__readErc20Allowance ?? readErc20Allowance;
+    this.fetchRetries = config.fetchRetry?.retries ?? 3;
+    this.fetchBackoffMs = config.fetchRetry?.backoffMs ?? [100, 500, 2000];
+    this.fetchSleep = config.fetchRetry?.sleep ?? sleep;
+    this.fetchRetryLog = config.fetchRetry?.log;
   }
 
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
@@ -371,13 +394,49 @@ export class LiveExchangeGateway implements ExchangeGateway {
     }
   }
 
+  /**
+   * Throws on transport/parse failure (returned `{ error, status }` shape or a
+   * non-array payload), otherwise returns the mapped open orders. The retry
+   * policy lives in {@link getOpenOrdersResult}; this body is intentionally
+   * single-shot so the legacy {@link getOpenOrders} keeps its old semantics.
+   */
+  private async fetchOpenOrders(): Promise<ExchangeOrder[]> {
+    const raw = await this.client.getOpenOrders();
+    throwIfReturnedError(raw);
+    return extractArrayOrThrow(raw).map((o: Record<string, unknown>) => mapOpenOrder(o));
+  }
+
+  private async fetchFills(sinceMs: number): Promise<ExchangeFill[]> {
+    const raw = await this.client.getTrades({
+      after: Math.floor(sinceMs / 1000).toString(),
+    });
+    throwIfReturnedError(raw);
+    return extractArrayOrThrow(raw).flatMap((trade: Record<string, unknown>) =>
+      this.traderAddress ? mapTradeToPersonalFills(trade, this.traderAddress) : [mapTrade(trade)],
+    );
+  }
+
   async getOpenOrders(): Promise<ExchangeOrder[]> {
     try {
-      const raw = await this.client.getOpenOrders();
-      return extractArray(raw).map((o: Record<string, unknown>) => mapOpenOrder(o));
+      return await this.fetchOpenOrders();
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Reliable variant of {@link getOpenOrders}: retries transient failures and
+   * returns a discriminated {@link FetchResult} so reconciliation can tell a
+   * genuine empty snapshot from a fetch failure (#36).
+   */
+  async getOpenOrdersResult(): Promise<FetchResult<ExchangeOrder[]>> {
+    return executeWithRetry(() => this.fetchOpenOrders(), classifyFetchError, {
+      retries: this.fetchRetries,
+      backoffMs: this.fetchBackoffMs,
+      sleep: this.fetchSleep,
+      source: "open_orders",
+      log: this.fetchRetryLog,
+    });
   }
 
   async getOpenOrdersForToken(tokenId: TokenId): Promise<ExchangeOrder[]> {
@@ -393,15 +452,21 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   async getFills(sinceMs: number): Promise<ExchangeFill[]> {
     try {
-      const raw = await this.client.getTrades({
-        after: Math.floor(sinceMs / 1000).toString(),
-      });
-      return extractArray(raw).flatMap((trade: Record<string, unknown>) =>
-        this.traderAddress ? mapTradeToPersonalFills(trade, this.traderAddress) : [mapTrade(trade)],
-      );
+      return await this.fetchFills(sinceMs);
     } catch {
       return [];
     }
+  }
+
+  /** Reliable variant of {@link getFills} — see {@link getOpenOrdersResult}. */
+  async getFillsResult(sinceMs: number): Promise<FetchResult<ExchangeFill[]>> {
+    return executeWithRetry(() => this.fetchFills(sinceMs), classifyFetchError, {
+      retries: this.fetchRetries,
+      backoffMs: this.fetchBackoffMs,
+      sleep: this.fetchSleep,
+      source: "fills",
+      log: this.fetchRetryLog,
+    });
   }
 
   createUserEventStream(
@@ -1323,6 +1388,38 @@ export class LiveExchangeGateway implements ExchangeGateway {
 function extractArray(raw: any): Array<Record<string, unknown>> {
   if (Array.isArray(raw)) return raw;
   return raw?.data ?? raw?.orders ?? raw?.trades ?? [];
+}
+
+/**
+ * With `throwOnError=false` the CLOB client resolves to `{ error, status }`
+ * instead of throwing. Re-throw it as an `Error` carrying the status so the
+ * fetch classifier sees the same shape it would for a thrown ApiError.
+ */
+function throwIfReturnedError(raw: unknown): void {
+  if (
+    typeof raw === "object" &&
+    raw !== null &&
+    !Array.isArray(raw) &&
+    typeof (raw as Record<string, unknown>).error === "string"
+  ) {
+    const r = raw as Record<string, unknown>;
+    const err = new Error(r.error as string);
+    if (typeof r.status === "number") Object.assign(err, { status: r.status });
+    throw err;
+  }
+}
+
+/**
+ * Strict variant of {@link extractArray}: an unrecognized (non-array, no
+ * `data`/`orders`/`trades`) payload is a parse failure — NOT an empty snapshot.
+ * Treating it as empty is exactly what caused phantom cancellations (#36).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractArrayOrThrow(raw: any): Array<Record<string, unknown>> {
+  if (Array.isArray(raw)) return raw;
+  const nested = raw?.data ?? raw?.orders ?? raw?.trades;
+  if (Array.isArray(nested)) return nested;
+  throw new FetchParseError(`expected array-shaped payload, got ${typeof raw}`);
 }
 
 function extractOrderId(raw: unknown): string | null {

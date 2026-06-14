@@ -151,6 +151,8 @@ export interface ExecutionModuleDeps {
     prepare(sql: string): { get(...args: unknown[]): unknown };
   };
   activeProfile?: ProfileId | undefined;
+  /** Relative fill-completion tolerance forwarded to importExchangeFills (#36). */
+  fillCompletionTolerance?: number | undefined;
   walletBufferPct?: number | undefined;
   walletBufferMinUsdc?: number | undefined;
   executionPolicy?: (() => ExecutionPolicy) | undefined;
@@ -948,6 +950,7 @@ export class ExecutionModule implements RuntimeModule {
       bus: this.deps.bus,
       log: this.log,
       gateway: this.deps.gateway,
+      fillCompletionTolerance: this.deps.fillCompletionTolerance,
     });
   }
 

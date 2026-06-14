@@ -665,6 +665,9 @@ async function main(): Promise<void> {
       marketDataCircuitOpenShardFloor: config.marketDataCircuitOpenShardFloor,
       marketDataCircuitOpenMs: config.marketDataCircuitOpenMs,
       marketDataStreamStableMs: config.marketDataStreamStableMs,
+      reconciliationFetchRetries: config.reconciliationFetchRetries,
+      reconciliationFetchBackoffMs: config.reconciliationFetchBackoffMs,
+      fetchRetryLog: log.child({ component: "fetch-retry" }),
     });
   log.info({ mode: modeLabel }, "gateways created");
   if (runtimeMode === "live-lite") {
@@ -929,6 +932,7 @@ async function main(): Promise<void> {
     liveLiteGuard,
     runtimeMode,
     maxConcurrency: config.executionMaxConcurrency,
+    fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
     walletBufferPct: config.executionWalletBufferPct,
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     executionPolicy: currentExecutionPolicy,
@@ -1262,6 +1266,9 @@ async function main(): Promise<void> {
     marketRepo: repos.market,
     log,
     reconcileIntervalMs: config.reconciliationIntervalMs,
+    suspiciousEmptyThreshold: config.reconciliationSuspiciousEmptyThreshold,
+    consecutiveMissThreshold: config.reconciliationConsecutiveMissThreshold,
+    fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
     settlementLedgerRepo: repos.settlementLedger,
     driftRepo: repos.positionDrift,
     exitOrderTtlMs: () => currentExecutionPolicy().exitOrderTtlMs,
@@ -1321,6 +1328,7 @@ async function main(): Promise<void> {
           orderRepo: repos.order,
           fillRepo: repos.fill,
           log,
+          fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
         })
       : null;
 
@@ -1419,6 +1427,7 @@ async function main(): Promise<void> {
           log,
           pollIntervalMs: config.fillPollIntervalMs,
           overlapMs: 5_000,
+          fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
           onImportObserved: userOrderStreamModule
             ? ({ imported }) => userOrderStreamModule.recordPollingFills(imported)
             : undefined,
@@ -2316,6 +2325,7 @@ async function main(): Promise<void> {
     log,
     db: ledgerConn.db,
     botRunId,
+    fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
   });
   log.info(startupAdoption, "startup position adoption complete");
   ledgerConn.db

@@ -124,6 +124,64 @@ describe("runStartupPositionAdoption", () => {
     expect(position?.costBasisUsdc).toBe(4);
   });
 
+  it("forwards fillCompletionTolerance=0 → near-complete fill leaves local order partially-filled (#36)", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+
+    const marketRepo = new SqliteMarketRepository(conn.db);
+    const orderRepo = new SqliteOrderRepository(conn.db);
+    const fillRepo = new SqliteFillRepository(conn.db);
+    const positionRepo = new SqlitePositionRepository(conn.db);
+    const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+    const legStateRepo = new SqliteLegStateRepository(conn.db);
+    seedMarket(marketRepo);
+
+    const orderId = createOrderId("ord-known");
+    orderRepo.save({
+      orderId,
+      clientOrderId: "plk_known" as ClientOrderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
+      side: "buy",
+      orderType: "GTC",
+      price: 0.4,
+      size: 10, // fill below is 9.97 → 0.3% short
+      sizeUsdc: 4,
+      status: "open",
+      exchangeOrderId: "ex-known",
+      signalId: null,
+      signalReason: "probe-entry",
+      botRunId: createBotRunId("run-1"),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    await runStartupPositionAdoption({
+      gateway: {
+        getFills: vi.fn().mockResolvedValue([
+          makeExchangeFill({
+            fillId: "fill-known",
+            orderId: "ex-known",
+            clientOrderId: "plk_known",
+            size: 9.97,
+          }),
+        ]),
+      },
+      marketRepo,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo,
+      legStateRepo,
+      log: silentLog,
+      db: conn.db,
+      botRunId: createBotRunId("run-1"),
+      fillCompletionTolerance: 0,
+    });
+
+    expect(orderRepo.findById(orderId)?.status).toBe("partially-filled");
+  });
+
   it("rebuilds the same startup-adopted state across repeated startups", async () => {
     const conn = bootstrapLedgerDb(":memory:");
     connections.push(conn);

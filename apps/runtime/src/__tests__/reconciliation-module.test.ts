@@ -220,6 +220,22 @@ describe("ReconciliationModule", () => {
     });
   });
 
+  // Builds a module sharing the per-test deps, with optional dependency overrides.
+  function buildModule(
+    overrides: Partial<ConstructorParameters<typeof ReconciliationModule>[0]> = {},
+  ): ReconciliationModule {
+    return new ReconciliationModule({
+      gateway,
+      bus,
+      orderRepo,
+      fillRepo,
+      marketRepo,
+      log: silentLog,
+      reconcileIntervalMs: 60_000,
+      ...overrides,
+    });
+  }
+
   // ─── Lifecycle ──────────────────────────────────────────────────────
 
   describe("lifecycle", () => {
@@ -472,6 +488,8 @@ describe("ReconciliationModule", () => {
       // exchange returns empty — order is gone
       gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
 
+      // threshold=1 → a single confirmed miss cancels (isolates the cancel mechanism).
+      mod = buildModule({ consecutiveMissThreshold: 1 });
       const result = await mod.runReconciliation();
 
       expect(result.phantomOrders).toBe(1);
@@ -725,6 +743,8 @@ describe("ReconciliationModule", () => {
       orderRepo.findOpen = vi.fn().mockReturnValue([local]);
       gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
 
+      // threshold=1 → grace is the only gate under test here.
+      mod = buildModule({ consecutiveMissThreshold: 1 });
       const result = await mod.runReconciliation();
 
       expect(result.phantomOrders).toBe(1);
@@ -988,6 +1008,223 @@ describe("ReconciliationModule", () => {
     });
   });
 
+  // ─── Reconciliation hardening (#36) ─────────────────────────────────
+
+  describe("reconciliation hardening (#36)", () => {
+    const rateLimitSkip = { ok: false as const, reason: "rate_limit" as const, attempts: 3 };
+
+    // 5 min old → beyond the module grace (2×60s + 30s = 150s).
+    function oldMissingOrder(exchangeOrderId: string): Order {
+      const old = new Date(Date.now() - 300_000).toISOString();
+      return makeLocalOrder({ exchangeOrderId, createdAt: old, updatedAt: old });
+    }
+
+    // ─── Fix 3: consecutive-miss gate (default 3) ───────────────────
+
+    describe("Fix 3 — consecutive-miss gate (default 3)", () => {
+      it("does not cancel a genuinely-missing order until the 3rd consecutive miss", async () => {
+        const order = oldMissingOrder("ex-disappeared");
+        orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+        gateway.getOpenOrders = vi.fn().mockResolvedValue([]); // reliably empty across passes
+
+        // Shared `mod` keeps the consecutive-miss Map across passes; default threshold = 3.
+        const r1 = await mod.runReconciliation();
+        const r2 = await mod.runReconciliation();
+        expect(r1.phantomOrders).toBe(0);
+        expect(r2.phantomOrders).toBe(0);
+        expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+
+        const r3 = await mod.runReconciliation();
+        expect(r3.phantomOrders).toBe(1);
+        expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+          order.orderId,
+          "cancelled",
+          undefined,
+          "phantom_missing_on_exchange",
+          expect.any(Object),
+        );
+      });
+
+      it("resets the miss streak when the order reappears before the threshold", async () => {
+        const order = oldMissingOrder("ex-flapping");
+        orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+        // miss, miss, reappear (reset), miss, miss → max 2 consecutive < 3 → never cancelled.
+        gateway.getOpenOrders = vi
+          .fn()
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([makeExchangeOrder({ orderId: "ex-flapping" })])
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([]);
+
+        for (let i = 0; i < 5; i++) await mod.runReconciliation();
+
+        expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+      });
+    });
+
+    // ─── Fix 1: unreliable open-orders snapshot ─────────────────────
+
+    describe("Fix 1 — unreliable open-orders snapshot", () => {
+      it("skips the order pass and cancels nothing on ok:false (even at threshold=1)", async () => {
+        const order = oldMissingOrder("ex-skip");
+        orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+        gateway.getOpenOrdersResult = vi.fn().mockResolvedValue(rateLimitSkip);
+
+        mod = buildModule({ consecutiveMissThreshold: 1 });
+        const result = await mod.runReconciliation();
+
+        expect(result.phantomOrders).toBe(0);
+        expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+      });
+
+      it("never cancels across repeated unreliable snapshots, then resumes after recovery", async () => {
+        const order = oldMissingOrder("ex-massdc");
+        orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+        gateway.getOpenOrdersResult = vi
+          .fn()
+          .mockResolvedValueOnce(rateLimitSkip)
+          .mockResolvedValueOnce(rateLimitSkip)
+          .mockResolvedValueOnce(rateLimitSkip)
+          .mockResolvedValue({ ok: true, data: [] }); // recovery: order genuinely gone
+
+        mod = buildModule({ consecutiveMissThreshold: 1 });
+        const r1 = await mod.runReconciliation();
+        const r2 = await mod.runReconciliation();
+        const r3 = await mod.runReconciliation();
+        expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+        expect([r1, r2, r3].every((r) => r.phantomOrders === 0)).toBe(true);
+
+        // First reliable snapshot post-recovery: threshold=1 → first confirmed miss cancels.
+        const r4 = await mod.runReconciliation();
+        expect(r4.phantomOrders).toBe(1);
+      });
+    });
+
+    // ─── Fix 2: suspicious empty snapshot ───────────────────────────
+
+    describe("Fix 2 — suspicious empty snapshot", () => {
+      it("skips when >= 3 local orders vanish from the exchange at once", async () => {
+        orderRepo.findOpen = vi
+          .fn()
+          .mockReturnValue([
+            oldMissingOrder("ex-a"),
+            oldMissingOrder("ex-b"),
+            oldMissingOrder("ex-c"),
+          ]);
+        gateway.getOpenOrders = vi.fn().mockResolvedValue([]); // reliable but suspicious
+
+        // threshold=1 would cancel immediately — the suspicious-empty guard fires first.
+        mod = buildModule({ consecutiveMissThreshold: 1 });
+        const result = await mod.runReconciliation();
+
+        expect(result.phantomOrders).toBe(0);
+        expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+      });
+    });
+
+    // ─── Fix 1.5: unreliable fills snapshot ─────────────────────────
+
+    describe("Fix 1.5 — unreliable fills snapshot", () => {
+      it("skips fill import and publishes no FillReceived on ok:false", async () => {
+        gateway.getFillsResult = vi
+          .fn()
+          .mockResolvedValue({ ok: false, reason: "timeout", attempts: 3 });
+        const fills: unknown[] = [];
+        bus.subscribe("FillReceived", async (p) => {
+          fills.push(p);
+        });
+
+        const result = await mod.runReconciliation();
+        await bus.drain();
+
+        expect(result.missingFills).toBe(0);
+        expect(fills).toHaveLength(0);
+        expect(fillRepo.save).not.toHaveBeenCalled();
+      });
+    });
+
+    // ─── Counters ───────────────────────────────────────────────────
+
+    describe("counters", () => {
+      it("emits fetch-failed + skipped-unreliable + retried on an unreliable open-orders snapshot", async () => {
+        gateway.getOpenOrdersResult = vi.fn().mockResolvedValue(rateLimitSkip);
+        const writeEvent = vi.fn();
+        mod = buildModule({ runtimeMetrics: { writeEvent } });
+
+        await mod.runReconciliation();
+
+        const names = writeEvent.mock.calls.map((c) => c[0]);
+        expect(names).toContain("reconciliation_fetch_failed");
+        expect(names).toContain("reconciliation_skipped_unreliable");
+        expect(names).toContain("reconciliation_fetch_retried");
+
+        const failed = writeEvent.mock.calls.find((c) => c[0] === "reconciliation_fetch_failed")!;
+        expect(JSON.parse(failed[2])).toMatchObject({
+          reason: "rate_limit",
+          source: "open_orders",
+        });
+        const retried = writeEvent.mock.calls.find((c) => c[0] === "reconciliation_fetch_retried")!;
+        expect(retried[1]).toBe(2); // attempts(3) - 1
+      });
+
+      it("emits consecutive-miss-tracked while a real disappearance is below threshold", async () => {
+        orderRepo.findOpen = vi.fn().mockReturnValue([oldMissingOrder("ex-tracked")]);
+        gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
+        const writeEvent = vi.fn();
+        mod = buildModule({ runtimeMetrics: { writeEvent } }); // default threshold 3
+
+        await mod.runReconciliation(); // miss 1 — tracked, not cancelled
+
+        const tracked = writeEvent.mock.calls.find(
+          (c) => c[0] === "reconciliation_consecutive_miss_tracked",
+        );
+        expect(tracked).toBeDefined();
+        expect(tracked![1]).toBe(1);
+        // Zero-valued counters are suppressed.
+        const skipped = writeEvent.mock.calls.find(
+          (c) => c[0] === "reconciliation_skipped_unreliable",
+        );
+        expect(skipped).toBeUndefined();
+      });
+
+      it("emits fills-skipped-unreliable on an unreliable fills snapshot", async () => {
+        gateway.getFillsResult = vi
+          .fn()
+          .mockResolvedValue({ ok: false, reason: "server", attempts: 1 });
+        const writeEvent = vi.fn();
+        mod = buildModule({ runtimeMetrics: { writeEvent } });
+
+        await mod.runReconciliation();
+
+        const names = writeEvent.mock.calls.map((c) => c[0]);
+        expect(names).toContain("reconciliation_fills_skipped_unreliable");
+        const fillsFailed = writeEvent.mock.calls.find(
+          (c) => c[0] === "reconciliation_fetch_failed" && JSON.parse(c[2]).source === "fills",
+        );
+        expect(fillsFailed).toBeDefined();
+      });
+    });
+
+    // ─── Stage independence ─────────────────────────────────────────
+
+    describe("stage independence", () => {
+      it("imports fills even when the order snapshot is unreliable", async () => {
+        gateway.getOpenOrdersResult = vi.fn().mockResolvedValue(rateLimitSkip);
+        const exFill = makeExchangeFill({ fillId: "fill-during-skip" });
+        gateway.getFills = vi.fn().mockResolvedValue([exFill]);
+        fillRepo.exists = vi.fn().mockReturnValue(false);
+        orderRepo.findByClientOrderId = vi.fn().mockReturnValue(makeLocalOrder());
+
+        const result = await mod.runReconciliation();
+
+        expect(result.phantomOrders).toBe(0); // order stage skipped
+        expect(result.missingFills).toBe(1); // fill stage still ran
+        expect(fillRepo.save).toHaveBeenCalledTimes(1);
+      });
+    });
+  });
+
   // ─── Events ───────────────────────────────────────────────────────
 
   describe("events", () => {
@@ -1024,6 +1261,8 @@ describe("ReconciliationModule", () => {
         drifts.push({ severity: p.severity });
       });
 
+      // threshold=1 → single confirmed miss produces the warn-level phantom drift.
+      mod = buildModule({ consecutiveMissThreshold: 1 });
       await mod.runReconciliation();
       await bus.drain();
 

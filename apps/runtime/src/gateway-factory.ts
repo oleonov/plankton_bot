@@ -11,6 +11,7 @@ import {
   createCollateralResolver,
   createRpcRotator,
   type UserEventStreamAuth,
+  type RetryDiagnosticLogger,
 } from "@krabs/exchange";
 import { resolvePolygonRpcConfig } from "@krabs/config";
 
@@ -75,6 +76,12 @@ export interface CreateGatewaysInput {
   marketDataCircuitOpenMs?: number | undefined;
   /** Stable uptime ms before a breaker closes. */
   marketDataStreamStableMs?: number | undefined;
+  /** Retry count for reliable reconciliation fetches (open orders / fills). #36 */
+  reconciliationFetchRetries?: number | undefined;
+  /** Per-retry backoff ladder (ms) for reconciliation fetches. #36 */
+  reconciliationFetchBackoffMs?: readonly number[] | undefined;
+  /** Diagnostic sink for `unknown`-classified live fetch errors. #36 LOW 2 */
+  fetchRetryLog?: RetryDiagnosticLogger | undefined;
 }
 
 export interface CreateGatewaysResult {
@@ -114,6 +121,9 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     marketDataCircuitOpenShardFloor,
     marketDataCircuitOpenMs,
     marketDataStreamStableMs,
+    reconciliationFetchRetries,
+    reconciliationFetchBackoffMs,
+    fetchRetryLog,
   } = input;
 
   if (runtimeMode === "simulation") {
@@ -188,6 +198,13 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     ...(onInfraAlert ? { onInfraAlert } : {}),
     collateralResolver,
     rpcRotator,
+    fetchRetry: {
+      ...(reconciliationFetchRetries !== undefined ? { retries: reconciliationFetchRetries } : {}),
+      ...(reconciliationFetchBackoffMs !== undefined
+        ? { backoffMs: [...reconciliationFetchBackoffMs] }
+        : {}),
+      ...(fetchRetryLog ? { log: fetchRetryLog } : {}),
+    },
   };
   return {
     marketDataGateway: new LiveMarketDataGateway(liveMarketDataConfig),

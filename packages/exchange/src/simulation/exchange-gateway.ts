@@ -7,6 +7,7 @@ import type {
   ExchangeOrder,
   ExchangeFill,
   ExchangeBalance,
+  FetchResult,
   RedeemPositionsOptions,
   TokenId,
 } from "@krabs/domain";
@@ -173,12 +174,22 @@ export class SimulationExchangeGateway implements ExchangeGateway {
     );
   }
 
+  // In-memory simulation never has a transport fault, so the reliable variant
+  // always resolves `ok: true` — keeping reconciliation on its hardened path.
+  async getOpenOrdersResult(): Promise<FetchResult<ExchangeOrder[]>> {
+    return { ok: true, data: await this.getOpenOrders() };
+  }
+
   async getOpenOrdersForToken(tokenId: TokenId): Promise<ExchangeOrder[]> {
     return (await this.getOpenOrders()).filter((o) => o.tokenId === tokenId);
   }
 
   async getFills(sinceMs: number): Promise<ExchangeFill[]> {
     return this.fills.filter((f) => f.timestamp >= sinceMs);
+  }
+
+  async getFillsResult(sinceMs: number): Promise<FetchResult<ExchangeFill[]>> {
+    return { ok: true, data: await this.getFills(sinceMs) };
   }
 
   async getFillsForOrder(orderId: string): Promise<ExchangeFill[]> {

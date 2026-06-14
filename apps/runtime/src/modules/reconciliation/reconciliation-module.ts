@@ -40,8 +40,12 @@ import {
   resolveDynamicChainCapDetails,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
-import { reconcileOrders } from "./order-reconciler.js";
-import { reconcileFills } from "./fill-reconciler.js";
+import { reconcileOrders, type OrderReconcileResult } from "./order-reconciler.js";
+import {
+  DEFAULT_FILL_COMPLETION_TOLERANCE,
+  reconcileFills,
+  type FillReconcileResult,
+} from "./fill-reconciler.js";
 import {
   cleanStaleEntryOrders,
   recordSellDownpriceCancelSucceeded,
@@ -142,6 +146,15 @@ export interface ReconciliationModuleDeps {
   log: Logger;
   reconcileIntervalMs: number;
   /**
+   * Reconciliation hardening (#36). Defaults applied here so legacy test
+   * constructions keep working: suspicious-empty skip at >=3 local open orders,
+   * phantom-cancel only after 3 consecutive misses, 0.5% fill-completion
+   * tolerance. Set `consecutiveMissThreshold: 1` to restore single-pass marking.
+   */
+  suspiciousEmptyThreshold?: number;
+  consecutiveMissThreshold?: number;
+  fillCompletionTolerance?: number;
+  /**
    * Optional settlement ledger + drift repo + gateway balance accessor.
    * When all three are provided, a periodic drift check compares algo-redeem
    * settlements in the last 24h against on-chain outcome-token balances.
@@ -238,6 +251,12 @@ export class ReconciliationModule implements RuntimeModule {
   private lastRunAt: number | null = null;
   private lastResult: ReconciliationResult | null = null;
   private readonly walletSentinelConsecutiveCounts = new Map<string, number>();
+  /**
+   * Persistent per-exchangeOrderId consecutive-miss counter for phantom
+   * detection (Fix 3). Owned by the module so the count survives across passes;
+   * reset on restart is an accepted risk (covered by age-grace + Fix 1/2).
+   */
+  private readonly consecutiveMissCounts = new Map<string, number>();
   private readonly staleBackoffMap = new Map<string, number>();
   private readonly sellDownpriceRepriceMap: SellDownpriceRepriceStateMap = new Map();
   /**
@@ -372,8 +391,12 @@ export class ReconciliationModule implements RuntimeModule {
       const stageTimingsMs: Record<string, number> = {};
 
       // 1. Order reconciliation
-      // Grace = 2 intervals + 30s buffer. Covers worst case: order placed right after
-      // pass N, still absent on pass N+1 (60s) and N+2 (120s), only phantom-cancel on N+3.
+      // Phantom detection requires ALL of:
+      //  1. Order age >= graceMs (2 intervals + 30s buffer, ~60s at the 15s interval)
+      //  2. Order missing in `consecutiveMissThreshold` (default 3) consecutive
+      //     successful snapshots (Fix 3)
+      //  3. Snapshot considered reliable: FetchResult.ok === true (Fix 1) and not a
+      //     suspicious-empty skip (Fix 2)
       const graceMs = this.deps.reconcileIntervalMs * 2 + 30_000;
       const stageOrdersStart = Date.now();
       const orderResult = await reconcileOrders({
@@ -383,6 +406,9 @@ export class ReconciliationModule implements RuntimeModule {
         marketRepo: this.deps.marketRepo,
         log: this.log,
         phantomGraceMs: graceMs,
+        suspiciousEmptyThreshold: this.deps.suspiciousEmptyThreshold ?? 3,
+        consecutiveMissThreshold: this.deps.consecutiveMissThreshold ?? 3,
+        consecutiveMissCounts: this.consecutiveMissCounts,
       });
       stageTimingsMs.orders = Date.now() - stageOrdersStart;
       allDetails.push(...orderResult.details);
@@ -397,11 +423,15 @@ export class ReconciliationModule implements RuntimeModule {
           orderRepo: this.deps.orderRepo,
           bus: this.deps.bus,
           log: this.log,
+          fillCompletionTolerance:
+            this.deps.fillCompletionTolerance ?? DEFAULT_FILL_COMPLETION_TOLERANCE,
         },
         sinceMs,
       );
       stageTimingsMs.fills = Date.now() - stageFillsStart;
       allDetails.push(...fillResult.details);
+
+      this.emitReconciliationMetrics(orderResult, fillResult, ranAt);
 
       // 3. Stale entry order cleanup
       const repriceChainGate =
@@ -890,10 +920,69 @@ export class ReconciliationModule implements RuntimeModule {
     return maxConsecutive >= WALLET_SENTINEL_FATAL_AFTER_CONSECUTIVE ? "critical" : "warn";
   }
 
+  /**
+   * Reconciliation-hardening counters (#36). All values are pass-scoped deltas;
+   * zero values are suppressed to keep the metric stream sparse. Fetch-level
+   * counters are derivable only from a *skipped* (ok:false) snapshot, since
+   * `FetchResult.attempts` is present only on failure.
+   */
+  private emitReconciliationMetrics(
+    orderResult: OrderReconcileResult,
+    fillResult: FillReconcileResult,
+    ranAt: number,
+  ): void {
+    const metrics = this.deps.runtimeMetrics;
+    if (!metrics) return;
+    const at = new Date(ranAt).toISOString();
+    const emit = (name: string, value: number, labels?: Record<string, string>): void => {
+      if (value <= 0) return;
+      metrics.writeEvent(name, value, labels ? JSON.stringify(labels) : null, at);
+    };
+
+    const orderFetchReason =
+      orderResult.skipReason === "unreliable_snapshot" ? orderResult.fetchReason : undefined;
+    this.emitFetchMetrics(orderFetchReason, orderResult.fetchAttempts, "open_orders", emit);
+    this.emitFetchMetrics(fillResult.fetchReason, fillResult.fetchAttempts, "fills", emit);
+
+    emit(
+      "reconciliation_skipped_unreliable",
+      orderResult.skipReason === "unreliable_snapshot" ? 1 : 0,
+    );
+    emit(
+      "reconciliation_skipped_suspicious_empty",
+      orderResult.skipReason === "suspicious_empty" ? 1 : 0,
+    );
+    emit(
+      "reconciliation_fills_skipped_unreliable",
+      fillResult.skipReason === "unreliable_fills" ? 1 : 0,
+    );
+
+    emit("reconciliation_consecutive_miss_tracked", orderResult.consecutiveMissTracked ?? 0);
+    emit("reconciliation_cascade_branch_evaluated", orderResult.cascadeEvaluated ?? 0);
+    emit("reconciliation_cascade_cancel_executed", orderResult.cascadeCancelled ?? 0);
+    emit("reconciliation_cascade_skipped_unreliable", orderResult.cascadeSkipped ?? 0);
+  }
+
+  private emitFetchMetrics(
+    reason: string | undefined,
+    attempts: number | undefined,
+    source: "open_orders" | "fills",
+    emit: (name: string, value: number, labels?: Record<string, string>) => void,
+  ): void {
+    if (!reason) return;
+    emit("reconciliation_fetch_failed", 1, { reason, source });
+    if (typeof attempts === "number" && attempts > 1) {
+      emit("reconciliation_fetch_retried", attempts - 1, { reason, source });
+    }
+    if (reason === "unknown") {
+      emit("reconciliation_fetch_unknown_error", 1, { source });
+    }
+  }
+
   private async publishExchangeState(
     orderResult: Pick<
       Awaited<ReturnType<typeof reconcileOrders>>,
-      "exchangeOpenOrders" | "capturedAtMs"
+      "exchangeOpenOrders" | "capturedAtMs" | "skipReason"
     >,
     ranAt: number,
     walletPositions: readonly PolymarketDataPosition[] | null | undefined,
@@ -901,14 +990,26 @@ export class ReconciliationModule implements RuntimeModule {
     const store = this.deps.exchangeStateStore;
     if (!store) return;
 
-    const sellRows = orderResult.exchangeOpenOrders
-      .filter((order) => order.side === "sell")
-      .map((order) => ({
-        orderId: order.orderId,
-        tokenId: order.tokenId,
-        sizeRemaining: order.sizeRemaining,
-      }));
-    store.updateExchangeSellOrders(sellRows, orderResult.capturedAtMs);
+    // On a skipped pass (unreliable/suspicious-empty snapshot) the order result
+    // carries an empty `exchangeOpenOrders` that is NOT authoritative. Writing it
+    // would wipe the store's reserved-SELL rows and "lose" share reservations
+    // until the next clean pass — the exact failure #36 guards against. Leave the
+    // SELL snapshot untouched; the wallet snapshot below is an independent source.
+    if (orderResult.skipReason === undefined) {
+      const sellRows = orderResult.exchangeOpenOrders
+        .filter((order) => order.side === "sell")
+        .map((order) => ({
+          orderId: order.orderId,
+          tokenId: order.tokenId,
+          sizeRemaining: order.sizeRemaining,
+        }));
+      store.updateExchangeSellOrders(sellRows, orderResult.capturedAtMs);
+    } else {
+      this.log.debug(
+        { skipReason: orderResult.skipReason },
+        "exchange SELL snapshot not refreshed — pass skipped on unreliable snapshot",
+      );
+    }
 
     if (walletPositions) {
       try {

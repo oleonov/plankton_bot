@@ -17,6 +17,8 @@ import type {
   FillId,
   ConditionId,
   ExchangeFill,
+  FetchReason,
+  FetchResult,
   MarketFeeInfo,
   OrderId,
   ClientOrderId,
@@ -70,6 +72,13 @@ export interface ImportFillsDeps {
    * exchange has no fee metadata.
    */
   gateway?: Pick<ExchangeGateway, "getMarketFeeInfo">;
+  /**
+   * Relative completion tolerance for `filled` vs `partially-filled`. Default
+   * {@link DEFAULT_FILL_COMPLETION_TOLERANCE}. `number | undefined` so hot-path
+   * callers can forward their (possibly absent) operator config directly under
+   * `exactOptionalPropertyTypes` without a conditional spread.
+   */
+  fillCompletionTolerance?: number | undefined;
 }
 
 export interface ImportFillsResult {
@@ -172,6 +181,13 @@ export function buildLocalFillFromExchangeFill(
 const FILL_GROSS_EPSILON = 1e-9;
 
 /**
+ * Default relative fill-completion tolerance (0.5% of order size). Single source
+ * of truth shared by every hot path that imports fills (#36). `0` collapses the
+ * effective tolerance to {@link FILL_GROSS_EPSILON} — the full pre-#36 rollback.
+ */
+export const DEFAULT_FILL_COMPLETION_TOLERANCE = 0.005;
+
+/**
  * Recover gross shares from legacy taker-BUY fill rows that were persisted
  * before 2026-05-11 with the fee deducted from `fill.size`. New rows store
  * exchange/wallet shares directly, so this path becomes a harmless no-op.
@@ -204,13 +220,23 @@ export function updateOrderStatusFromPersistedFills(
   orderRepo: Pick<OrderRepository, "findById" | "updateStatus">,
   fillRepo: Pick<FillRepository, "findByOrderId">,
   orderId: OrderId,
+  completionTolerance = DEFAULT_FILL_COMPLETION_TOLERANCE,
 ): void {
   const allFills = fillRepo.findByOrderId(orderId);
   const cumulativeFilled = allFills.reduce((sum, fill) => sum + grossFillSize(fill), 0);
   const localOrder = orderRepo.findById(orderId);
   if (!localOrder) return;
 
-  if (cumulativeFilled + FILL_GROSS_EPSILON >= localOrder.size) {
+  // `order.size` is the local target (notional/price, non-integer); the exchange
+  // fills in tick-rounded shares, so a fully-executed order routinely lands a few
+  // hundredths short. A flat 1e-9 epsilon never closed that gap, leaving the order
+  // `partially-filled` forever (#36, 57% of phantom candidates). Treat it filled
+  // when the shortfall is within the relative tolerance (default 0.5%), still far
+  // below any genuine partial. `completionTolerance = 0` falls back to 1e-9.
+  const shortfall = localOrder.size - cumulativeFilled;
+  const tolerance = Math.max(localOrder.size * completionTolerance, FILL_GROSS_EPSILON);
+
+  if (cumulativeFilled > 0 && shortfall <= tolerance) {
     orderRepo.updateStatus(orderId, "filled");
   } else if (cumulativeFilled > 0) {
     orderRepo.updateStatus(orderId, "partially-filled");
@@ -319,7 +345,12 @@ export async function importExchangeFills(
 
   // Phase 2: Update order statuses (before publishing events so handlers see terminal status)
   for (const oid of ordersWithNewFills) {
-    updateOrderStatusFromPersistedFills(orderRepo, fillRepo, createOrderId(oid));
+    updateOrderStatusFromPersistedFills(
+      orderRepo,
+      fillRepo,
+      createOrderId(oid),
+      deps.fillCompletionTolerance,
+    );
   }
 
   // Phase 3: Publish FillReceived events (handlers now see correct order status)
@@ -360,12 +391,34 @@ export interface FillReconcilerDeps {
   orderRepo: OrderRepository;
   bus: EventBus;
   log: Logger;
+  /** Relative completion tolerance forwarded to the import (Fix 4). Default {@link DEFAULT_FILL_COMPLETION_TOLERANCE}. */
+  fillCompletionTolerance?: number | undefined;
 }
 
 export interface FillReconcileResult {
   exchangeFillCount: number;
   missingFillsImported: number;
   details: string[];
+  /** Set when the pass bailed out before importing any fill. */
+  skipReason?: "unreliable_fills";
+  /** Fetch classification when {@link skipReason} is set. */
+  fetchReason?: FetchReason;
+  /** Retry attempts the gateway made before the fills snapshot failed. */
+  fetchAttempts?: number;
+}
+
+/**
+ * Prefer the reliable {@link ExchangeGateway.getFillsResult}; fall back to the
+ * legacy array method (wrapped as `ok: true`) for gateways/mocks without it.
+ */
+async function resolveFillsSnapshot(
+  gateway: ExchangeGateway,
+  sinceMs: number,
+): Promise<FetchResult<ExchangeFill[]>> {
+  if (gateway.getFillsResult) {
+    return gateway.getFillsResult(sinceMs);
+  }
+  return { ok: true, data: await gateway.getFills(sinceMs) };
 }
 
 export async function reconcileFills(
@@ -374,7 +427,25 @@ export async function reconcileFills(
 ): Promise<FillReconcileResult> {
   const { gateway, fillRepo, orderRepo, bus, log } = deps;
 
-  const exchangeFills = await gateway.getFills(sinceMs);
+  const snapshot = await resolveFillsSnapshot(gateway, sinceMs);
+  if (!snapshot.ok) {
+    // A failed fills fetch is NOT "no executions" — skip the import so we never
+    // leave orders in a stale status from incomplete data (#36, Fix 1.5).
+    log.warn(
+      { reason: snapshot.reason, attempts: snapshot.attempts },
+      "fill reconcile skipped — unreliable fills snapshot",
+    );
+    return {
+      exchangeFillCount: 0,
+      missingFillsImported: 0,
+      details: [],
+      skipReason: "unreliable_fills",
+      fetchReason: snapshot.reason,
+      fetchAttempts: snapshot.attempts,
+    };
+  }
+
+  const exchangeFills = snapshot.data;
   if (exchangeFills.length === 0) {
     return { exchangeFillCount: 0, missingFillsImported: 0, details: [] };
   }
@@ -385,6 +456,7 @@ export async function reconcileFills(
     bus,
     log,
     gateway,
+    fillCompletionTolerance: deps.fillCompletionTolerance,
   });
 
   return {

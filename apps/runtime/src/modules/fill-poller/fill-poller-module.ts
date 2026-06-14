@@ -27,6 +27,8 @@ export interface FillPollerModuleDeps {
   log: Logger;
   pollIntervalMs: number;
   overlapMs: number;
+  /** Relative fill-completion tolerance forwarded to importExchangeFills (#36). */
+  fillCompletionTolerance?: number | undefined;
   onImportObserved?:
     | ((summary: { imported: number; skipped: number; timestamp: number }) => void)
     | undefined;
@@ -93,6 +95,7 @@ export class FillPollerModule implements RuntimeModule {
           bus: this.deps.bus,
           log: this.log,
           gateway: this.deps.gateway,
+          fillCompletionTolerance: this.deps.fillCompletionTolerance,
         });
 
         // Advance watermark to latest fill timestamp

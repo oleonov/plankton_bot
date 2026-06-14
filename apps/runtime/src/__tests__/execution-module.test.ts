@@ -1165,6 +1165,74 @@ describe("ExecutionModule", () => {
     await mod.stop();
   });
 
+  it("forwards fillCompletionTolerance=0 → near-complete fill stays partially-filled (#36)", async () => {
+    const nearComplete: ExchangeFill = {
+      fillId: "sim-fill-1",
+      orderId: "sim-ord-1",
+      clientOrderId: "plk_abc123",
+      tokenId: createTokenId("tok-yes"),
+      side: "buy",
+      price: 0.5,
+      size: 9.97, // 0.3% short of the 10-share order
+      liquidityRole: "unknown",
+      fee: 0,
+      feeRateBps: 0,
+      timestamp: Date.now(),
+    };
+    (gateway.getFills as ReturnType<typeof vi.fn>).mockResolvedValue([nearComplete]);
+
+    const savedOrder: Order = {
+      orderId: createOrderId("sim-ord-1"),
+      clientOrderId: "plk_abc123" as ClientOrderId,
+      tokenId: createTokenId("tok-yes"),
+      conditionId: createConditionId("cond-1"),
+      side: "buy",
+      orderType: "GTC",
+      price: 0.5,
+      size: 10,
+      sizeUsdc: 5,
+      status: "open",
+      exchangeOrderId: "sim-ord-1",
+      signalId: null,
+      signalReason: null,
+      botRunId: BOT_RUN_ID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    (orderRepo.findByClientOrderId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(null)
+      .mockReturnValue(savedOrder);
+    (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue(savedOrder);
+    (fillRepo.findByOrderId as ReturnType<typeof vi.fn>).mockReturnValue([
+      { fillId: "sim-fill-1", size: 9.97 },
+    ]);
+
+    const tolerant = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      fillCompletionTolerance: 0,
+    });
+
+    await tolerant.start();
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(), // size=10
+      timestamp: Date.now(),
+    });
+
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+      createOrderId("sim-ord-1"),
+      "partially-filled",
+    );
+
+    await tolerant.stop();
+  });
+
   it("sets filled status when cumulative fill size >= order size", async () => {
     const fill1: ExchangeFill = {
       fillId: "sim-fill-1",

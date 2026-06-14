@@ -255,6 +255,87 @@ describe("UserOrderStreamModule", () => {
     expect(mod.getMetricsSnapshot().wsFills).toBe(1);
   });
 
+  // ─── Fill-completion tolerance propagation (#36) ───────────────────────
+
+  it("forwards fillCompletionTolerance=0 through the ws import path → partially-filled", async () => {
+    mod = new UserOrderStreamModule({
+      gateway,
+      fillRepo,
+      marketRepo,
+      orderRepo,
+      bus,
+      log: silentLog,
+      now: () => 1_700_000_000_000,
+      fillCompletionTolerance: 0,
+    });
+    (orderRepo.findById as any).mockReturnValue({ ...order, size: 10 });
+    (fillRepo.findByOrderId as any).mockReturnValue([
+      { side: "buy", price: 0.5, size: 9.97, liquidityRole: "unknown" },
+    ]);
+
+    await mod.start();
+    await stream.emitTrade({
+      type: "trade",
+      tradeId: "trade-near-complete",
+      status: "MATCHED",
+      timestamp: 1_699_999_999_500,
+      fills: [
+        {
+          fillId: "fill-near-complete",
+          orderId: "ord-exch-1",
+          clientOrderId: order.clientOrderId,
+          tokenId: order.tokenId,
+          side: "buy",
+          price: 0.5,
+          size: 9.97,
+          liquidityRole: "unknown",
+          fee: 0,
+          feeRateBps: 0,
+          timestamp: 1_699_999_999_500,
+        },
+      ],
+    });
+
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(order.orderId, "partially-filled");
+  });
+
+  it("forwards fillCompletionTolerance=0 through the catch-up reconcileFills path → partially-filled", async () => {
+    mod = new UserOrderStreamModule({
+      gateway,
+      fillRepo,
+      marketRepo,
+      orderRepo,
+      bus,
+      log: silentLog,
+      now: () => 1_700_000_000_000,
+      fillCompletionTolerance: 0,
+    });
+    (gateway.getFills as any).mockResolvedValue([
+      {
+        fillId: "fill-catchup",
+        orderId: "ord-exch-1",
+        clientOrderId: order.clientOrderId,
+        tokenId: order.tokenId,
+        side: "buy",
+        price: 0.5,
+        size: 9.97,
+        liquidityRole: "unknown",
+        fee: 0,
+        feeRateBps: 0,
+        timestamp: 1_699_999_999_000,
+      },
+    ]);
+    (orderRepo.findById as any).mockReturnValue({ ...order, size: 10 });
+    (fillRepo.findByOrderId as any).mockReturnValue([
+      { side: "buy", price: 0.5, size: 9.97, liquidityRole: "unknown" },
+    ]);
+
+    // start() runs runCatchupSync("startup") → reconcileFills(...) → importExchangeFills
+    await mod.start();
+
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(order.orderId, "partially-filled");
+  });
+
   it("buffers orphan websocket trades and flushes them after local order placement", async () => {
     (orderRepo.findByClientOrderId as any).mockReturnValue(null);
     (orderRepo.findByExchangeOrderId as any).mockReturnValue(null);

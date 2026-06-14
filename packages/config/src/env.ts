@@ -25,6 +25,16 @@ const commaSeparatedKeysSchema = z.preprocess(
   z.array(z.string().min(1)).min(1).optional(),
 );
 
+// Per-retry backoff schedule for reconciliation fetches (#36). CSV of ms, e.g.
+// "100,500,2000". Absent/blank falls back to the conservative default ladder.
+const reconciliationBackoffSchema = z.preprocess((value) => {
+  if (typeof value !== "string" || value.trim() === "") return [100, 500, 2000];
+  return value
+    .split(",")
+    .map((part) => Number(part.trim()))
+    .filter((n) => Number.isFinite(n) && n >= 0);
+}, z.array(z.number().nonnegative()).min(1));
+
 const envSchema = z
   .object({
     RUNTIME_MODE: runtimeModeSchema.optional(),
@@ -43,6 +53,11 @@ const envSchema = z
       .positive()
       .default(15 * 60 * 1000),
     RECONCILIATION_INTERVAL_MS: z.coerce.number().int().positive().default(15_000),
+    RECONCILIATION_FETCH_RETRIES: z.coerce.number().int().nonnegative().default(3),
+    RECONCILIATION_FETCH_BACKOFF_MS: reconciliationBackoffSchema,
+    RECONCILIATION_SUSPICIOUS_EMPTY_THRESHOLD: z.coerce.number().int().nonnegative().default(3),
+    RECONCILIATION_CONSECUTIVE_MISS_THRESHOLD: z.coerce.number().int().positive().default(3),
+    RECONCILIATION_FILL_COMPLETION_TOLERANCE: z.coerce.number().nonnegative().max(1).default(0.005),
     GAMMA_TAG_ID: z.coerce.number().int().positive().optional(),
     STRATEGY_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(12_000),
     FILL_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
@@ -238,6 +253,11 @@ export interface AppConfig {
   marketScanIntervalMs: number;
   marketScanHintMinIntervalMs: number;
   reconciliationIntervalMs: number;
+  reconciliationFetchRetries: number;
+  reconciliationFetchBackoffMs: number[];
+  reconciliationSuspiciousEmptyThreshold: number;
+  reconciliationConsecutiveMissThreshold: number;
+  reconciliationFillCompletionTolerance: number;
   gammaTagId?: number | undefined;
   strategyScanIntervalMs: number;
   fillPollIntervalMs: number;
@@ -351,6 +371,11 @@ export function loadEnv(envPath?: string): AppConfig {
     marketScanIntervalMs: env.MARKET_SCAN_INTERVAL_MS,
     marketScanHintMinIntervalMs: env.MARKET_SCAN_HINT_MIN_INTERVAL_MS,
     reconciliationIntervalMs: env.RECONCILIATION_INTERVAL_MS,
+    reconciliationFetchRetries: env.RECONCILIATION_FETCH_RETRIES,
+    reconciliationFetchBackoffMs: env.RECONCILIATION_FETCH_BACKOFF_MS,
+    reconciliationSuspiciousEmptyThreshold: env.RECONCILIATION_SUSPICIOUS_EMPTY_THRESHOLD,
+    reconciliationConsecutiveMissThreshold: env.RECONCILIATION_CONSECUTIVE_MISS_THRESHOLD,
+    reconciliationFillCompletionTolerance: env.RECONCILIATION_FILL_COMPLETION_TOLERANCE,
     gammaTagId: env.GAMMA_TAG_ID,
     strategyScanIntervalMs: env.STRATEGY_SCAN_INTERVAL_MS,
     fillPollIntervalMs: env.FILL_POLL_INTERVAL_MS,

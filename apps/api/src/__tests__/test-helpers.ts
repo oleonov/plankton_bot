@@ -11,6 +11,12 @@ export function stubLedgerPool(): LedgerPool {
 export const MARKET_DATA_TEST_DEFAULTS = {
   marketScanHintMinIntervalMs: 900_000,
   reconciliationIntervalMs: 15_000,
+  // Reconciliation hardening (#36) — reliable-fetch + phantom-gate defaults.
+  reconciliationFetchRetries: 3,
+  reconciliationFetchBackoffMs: [100, 500, 2000],
+  reconciliationSuspiciousEmptyThreshold: 3,
+  reconciliationConsecutiveMissThreshold: 3,
+  reconciliationFillCompletionTolerance: 0.005,
   marketDataMaxTrackedTokens: 1_000,
   marketDataMaxWsShards: 2,
   wsWorkerCount: 0,

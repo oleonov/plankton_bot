@@ -36,6 +36,8 @@ export interface StartupPositionAdoptionDeps {
   log: Logger;
   db: Database.Database;
   botRunId: BotRunId;
+  /** Relative fill-completion tolerance forwarded to importExchangeFills (#36). */
+  fillCompletionTolerance?: number | undefined;
 }
 
 export interface StartupPositionAdoptionResult {
@@ -220,6 +222,7 @@ export async function runStartupPositionAdoption(
         bus,
         log,
         gateway: deps.gateway,
+        fillCompletionTolerance: deps.fillCompletionTolerance,
       });
 
       if (importResult.imported === 0) {
