@@ -42,6 +42,89 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     });
   });
 
+  it("defaults Execution Profile dark with explicit hysteresis bounds", () => {
+    const { policy, issues } = parseExecutionPolicyJson(null);
+
+    expect(issues).toHaveLength(0);
+    expect(policy.executionProfile).toEqual({
+      enabled: false,
+      profileHysteresis: {
+        cheapMediumLow: 0.045,
+        cheapMediumHigh: 0.055,
+        mediumExpensiveLow: 0.325,
+        mediumExpensiveHigh: 0.375,
+      },
+      maxTokensPerCycle: 100,
+      qdHandoffThresholdMs: 3_600_000,
+      sellLadder: { enabled: false },
+      adoptExistingPositions: { enabled: false },
+      adoptExistingS1Ladders: { enabled: false },
+    });
+  });
+
+  it("parses Execution Profile settings and rejects invalid hysteresis ordering", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          enabled: true,
+          profileHysteresis: {
+            cheapMediumLow: 0.04,
+            cheapMediumHigh: 0.06,
+            mediumExpensiveLow: 0.3,
+            mediumExpensiveHigh: 0.4,
+          },
+          maxTokensPerCycle: 25,
+          qdHandoffThresholdMs: 600_000,
+          sellLadder: { enabled: true },
+          adoptExistingPositions: { enabled: true },
+          adoptExistingS1Ladders: { enabled: true },
+        },
+      }),
+    );
+
+    expect(parsed.issues).toHaveLength(0);
+    expect(parsed.policy.executionProfile).toMatchObject({
+      enabled: true,
+      profileHysteresis: {
+        cheapMediumLow: 0.04,
+        cheapMediumHigh: 0.06,
+        mediumExpensiveLow: 0.3,
+        mediumExpensiveHigh: 0.4,
+      },
+      maxTokensPerCycle: 25,
+      qdHandoffThresholdMs: 600_000,
+      sellLadder: { enabled: true },
+      adoptExistingPositions: { enabled: true },
+      adoptExistingS1Ladders: { enabled: true },
+    });
+
+    const invalid = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          profileHysteresis: {
+            cheapMediumLow: 0.06,
+            cheapMediumHigh: 0.05,
+            mediumExpensiveLow: 0.4,
+            mediumExpensiveHigh: 0.3,
+          },
+          maxTokensPerCycle: 0,
+          qdHandoffThresholdMs: -1,
+        },
+      }),
+    );
+
+    expect(invalid.policy.executionProfile).toEqual(DEFAULT_EXECUTION_POLICY.executionProfile);
+    expect(
+      invalid.issues.some((issue) => issue.includes("executionProfile.profileHysteresis")),
+    ).toBe(true);
+    expect(
+      invalid.issues.some((issue) => issue.includes("executionProfile.maxTokensPerCycle")),
+    ).toBe(true);
+    expect(
+      invalid.issues.some((issue) => issue.includes("executionProfile.qdHandoffThresholdMs")),
+    ).toBe(true);
+  });
+
   it("parses Track S1 policy field-by-field and normalizes volume distribution", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({

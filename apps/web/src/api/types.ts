@@ -122,6 +122,21 @@ export interface RaceProtectionPolicy {
   };
 }
 
+export interface ExecutionProfilePolicy {
+  enabled: boolean;
+  maxTokensPerCycle: number;
+  qdHandoffThresholdMs: number;
+  profileHysteresis: {
+    cheapMediumLow: number;
+    cheapMediumHigh: number;
+    mediumExpensiveLow: number;
+    mediumExpensiveHigh: number;
+  };
+  sellLadder: { enabled: boolean };
+  adoptExistingPositions: { enabled: boolean };
+  adoptExistingS1Ladders: { enabled: boolean };
+}
+
 export interface ExecutionPolicyDTO {
   version: 1;
   entryPriceCeiling: number;
@@ -166,6 +181,7 @@ export interface ExecutionPolicyDTO {
   opportunisticTaker?: OpportunisticTakerPolicy;
   redeemSweep?: RedeemSweepPolicy;
   raceProtection?: RaceProtectionPolicy;
+  executionProfile?: ExecutionProfilePolicy;
   telemetry: ExecutionTelemetryPolicy;
 }
 

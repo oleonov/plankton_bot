@@ -869,6 +869,29 @@ export interface S1OwnershipReader {
   getSnapshot(tokenId: TokenId): S1OwnershipSnapshot | null;
 }
 
+export type ExecutionProfileName = "cheap" | "medium" | "expensive";
+
+export interface ExecutionProfileHysteresisBounds {
+  cheapMediumLow: number;
+  cheapMediumHigh: number;
+  mediumExpensiveLow: number;
+  mediumExpensiveHigh: number;
+}
+
+export interface ExecutionProfileFeatureToggle {
+  enabled: boolean;
+}
+
+export interface ExecutionProfilePolicy {
+  enabled: boolean;
+  maxTokensPerCycle: number;
+  qdHandoffThresholdMs: number;
+  profileHysteresis: ExecutionProfileHysteresisBounds;
+  sellLadder: ExecutionProfileFeatureToggle;
+  adoptExistingPositions: ExecutionProfileFeatureToggle;
+  adoptExistingS1Ladders: ExecutionProfileFeatureToggle;
+}
+
 export type TrackRFeeRateSource = "live" | "fill" | "fallback_category" | "fallback_universal";
 
 export interface TrackRFeeQuote {
@@ -1062,6 +1085,7 @@ export interface ExecutionPolicy {
   trackR: TrackRHonestPricingPolicy;
   trackS3: TrackS3MarginAwareSpreadPolicy;
   trackS1: TrackS1WalkingLadderPolicy;
+  executionProfile: ExecutionProfilePolicy;
   orderLifetime: OrderLifetimePolicy;
   /**
    * Cooldown after any BUY fill before emitting SELL exits from the same wallet.

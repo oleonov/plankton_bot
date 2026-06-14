@@ -14,6 +14,8 @@ import type {
   DeadSideGuardPolicy,
   DepositActivationPolicy,
   ExecutionPolicy,
+  ExecutionProfileHysteresisBounds,
+  ExecutionProfilePolicy,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
   ExitTtlByLiquidityPolicyConfig,
@@ -170,6 +172,21 @@ export const DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY: TrackS3MarginAwareSpre
   tiers: DEFAULT_TRACK_S3_TIERS,
 };
 
+export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
+  enabled: false,
+  maxTokensPerCycle: 100,
+  qdHandoffThresholdMs: 3_600_000,
+  profileHysteresis: {
+    cheapMediumLow: 0.045,
+    cheapMediumHigh: 0.055,
+    mediumExpensiveLow: 0.325,
+    mediumExpensiveHigh: 0.375,
+  },
+  sellLadder: { enabled: false },
+  adoptExistingPositions: { enabled: false },
+  adoptExistingS1Ladders: { enabled: false },
+};
+
 export const DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY: ExitTtlByLiquidityPolicyConfig = {
   enabled: true,
   thinMs: 24 * 60 * 60_000,
@@ -312,6 +329,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   trackR: DEFAULT_TRACK_R_HONEST_PRICING_POLICY,
   trackS3: DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY,
   trackS1: DEFAULT_TRACK_S1_WALKING_LADDER_POLICY,
+  executionProfile: DEFAULT_EXECUTION_PROFILE_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   // Defensive infrastructure timing parameter. Exchange balance settlement
   // typically lands in <2s; 5000ms provides a safe margin. Not R-derived —
@@ -428,6 +446,12 @@ const BOUND_TRACK_S1_REPLACEMENTS_MAX = 1_000;
 const BOUND_TRACK_S1_ENTRY_MAX = 0.5;
 const BOUND_TRACK_S1_RATIO_MIN = 0;
 const BOUND_TRACK_S1_RATIO_MAX = 1;
+const BOUND_EXECUTION_PROFILE_TOKENS_MIN = 1;
+const BOUND_EXECUTION_PROFILE_TOKENS_MAX = 10_000;
+const BOUND_EXECUTION_PROFILE_HANDOFF_MIN_MS = 60_000;
+const BOUND_EXECUTION_PROFILE_HANDOFF_MAX_MS = 24 * 60 * 60_000;
+const BOUND_EXECUTION_PROFILE_PRICE_MIN = 0;
+const BOUND_EXECUTION_PROFILE_PRICE_MAX = 1;
 const BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS = 30_000;
 const BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS = 24 * 60 * 60_000;
 const BOUND_REDEEM_SWEEP_RETRY_COUNT_MAX = 10;
@@ -564,6 +588,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const trackR = parseTrackR(obj.trackR, issues);
   const trackS3 = parseTrackS3(obj.trackS3, issues);
   const trackS1 = parseTrackS1(obj.trackS1, issues);
+  const executionProfile = parseExecutionProfile(obj.executionProfile, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
   const buyCapacity = parseBuyCapacity(obj.buyCapacity, issues);
@@ -618,6 +643,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       trackR,
       trackS3,
       trackS1,
+      executionProfile,
       orderLifetime,
       postBuyFillSellCooldownMs,
       repriceOnOutbid,
@@ -1281,6 +1307,128 @@ function parseTrackS3Tiers(raw: unknown, issues: string[]): readonly TrackS3Spre
   });
 
   return valid ? parsed : DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY.tiers;
+}
+
+function parseExecutionProfile(raw: unknown, issues: string[]): ExecutionProfilePolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile must be an object");
+    return DEFAULT_EXECUTION_PROFILE_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_EXECUTION_PROFILE_POLICY.enabled,
+      issues,
+      "executionProfile.enabled",
+    ),
+    maxTokensPerCycle: clampedInt(
+      obj.maxTokensPerCycle,
+      DEFAULT_EXECUTION_PROFILE_POLICY.maxTokensPerCycle,
+      BOUND_EXECUTION_PROFILE_TOKENS_MIN,
+      BOUND_EXECUTION_PROFILE_TOKENS_MAX,
+      issues,
+      "executionProfile.maxTokensPerCycle",
+    ),
+    qdHandoffThresholdMs: clampedInt(
+      obj.qdHandoffThresholdMs,
+      DEFAULT_EXECUTION_PROFILE_POLICY.qdHandoffThresholdMs,
+      BOUND_EXECUTION_PROFILE_HANDOFF_MIN_MS,
+      BOUND_EXECUTION_PROFILE_HANDOFF_MAX_MS,
+      issues,
+      "executionProfile.qdHandoffThresholdMs",
+    ),
+    profileHysteresis: parseExecutionProfileHysteresis(obj.profileHysteresis, issues),
+    sellLadder: parseExecutionProfileToggle(
+      obj.sellLadder,
+      DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder,
+      issues,
+      "executionProfile.sellLadder",
+    ),
+    adoptExistingPositions: parseExecutionProfileToggle(
+      obj.adoptExistingPositions,
+      DEFAULT_EXECUTION_PROFILE_POLICY.adoptExistingPositions,
+      issues,
+      "executionProfile.adoptExistingPositions",
+    ),
+    adoptExistingS1Ladders: parseExecutionProfileToggle(
+      obj.adoptExistingS1Ladders,
+      DEFAULT_EXECUTION_PROFILE_POLICY.adoptExistingS1Ladders,
+      issues,
+      "executionProfile.adoptExistingS1Ladders",
+    ),
+  };
+}
+
+function parseExecutionProfileToggle(
+  raw: unknown,
+  fallback: ExecutionProfilePolicy["sellLadder"],
+  issues: string[],
+  name: string,
+): ExecutionProfilePolicy["sellLadder"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push(`${name} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(obj.enabled, fallback.enabled, issues, `${name}.enabled`),
+  };
+}
+
+function parseExecutionProfileHysteresis(
+  raw: unknown,
+  issues: string[],
+): ExecutionProfileHysteresisBounds {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.profileHysteresis must be an object");
+    return DEFAULT_EXECUTION_PROFILE_POLICY.profileHysteresis;
+  }
+  const obj = raw as Record<string, unknown>;
+  const parsed = {
+    cheapMediumLow: clampedNumber(
+      obj.cheapMediumLow,
+      DEFAULT_EXECUTION_PROFILE_POLICY.profileHysteresis.cheapMediumLow,
+      BOUND_EXECUTION_PROFILE_PRICE_MIN,
+      BOUND_EXECUTION_PROFILE_PRICE_MAX,
+      issues,
+      "executionProfile.profileHysteresis.cheapMediumLow",
+    ),
+    cheapMediumHigh: clampedNumber(
+      obj.cheapMediumHigh,
+      DEFAULT_EXECUTION_PROFILE_POLICY.profileHysteresis.cheapMediumHigh,
+      BOUND_EXECUTION_PROFILE_PRICE_MIN,
+      BOUND_EXECUTION_PROFILE_PRICE_MAX,
+      issues,
+      "executionProfile.profileHysteresis.cheapMediumHigh",
+    ),
+    mediumExpensiveLow: clampedNumber(
+      obj.mediumExpensiveLow,
+      DEFAULT_EXECUTION_PROFILE_POLICY.profileHysteresis.mediumExpensiveLow,
+      BOUND_EXECUTION_PROFILE_PRICE_MIN,
+      BOUND_EXECUTION_PROFILE_PRICE_MAX,
+      issues,
+      "executionProfile.profileHysteresis.mediumExpensiveLow",
+    ),
+    mediumExpensiveHigh: clampedNumber(
+      obj.mediumExpensiveHigh,
+      DEFAULT_EXECUTION_PROFILE_POLICY.profileHysteresis.mediumExpensiveHigh,
+      BOUND_EXECUTION_PROFILE_PRICE_MIN,
+      BOUND_EXECUTION_PROFILE_PRICE_MAX,
+      issues,
+      "executionProfile.profileHysteresis.mediumExpensiveHigh",
+    ),
+  };
+
+  if (
+    parsed.cheapMediumLow >= parsed.cheapMediumHigh ||
+    parsed.mediumExpensiveLow >= parsed.mediumExpensiveHigh ||
+    parsed.cheapMediumHigh >= parsed.mediumExpensiveLow
+  ) {
+    issues.push("executionProfile.profileHysteresis bounds must be ordered");
+    return DEFAULT_EXECUTION_PROFILE_POLICY.profileHysteresis;
+  }
+  return parsed;
 }
 
 function parseTrackS1(raw: unknown, issues: string[]): TrackS1WalkingLadderPolicy {

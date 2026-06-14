@@ -128,6 +128,8 @@ import { SignalToOrderBridge } from "./modules/strategy/signal-to-order.js";
 import { ExecutionPolicyProvider } from "./execution-policy-provider.js";
 import { AlgoDecisionModule } from "./modules/algo-decision/algo-decision-module.js";
 import { SellLoopGuardModule } from "./modules/sell-loop-guard/sell-loop-guard-module.js";
+import { ExecutionProfileManager } from "./modules/execution-profile/execution-profile-manager.js";
+import { SqliteExecutionProfileStateRepository } from "./modules/execution-profile/state-repository.js";
 import { S1LadderModule } from "./modules/s1-ladder/s1-ladder-module.js";
 import { MarketSnapshotPriceHistoryProvider } from "./modules/algo-decision/market-snapshot-price-history.js";
 import { MarketSelectionCache } from "./modules/algo-decision/market-selection-cache.js";
@@ -1054,6 +1056,13 @@ async function main(): Promise<void> {
     db: ledgerConn.db,
     log,
   });
+  const executionProfileManager = new ExecutionProfileManager({
+    bus,
+    stateRepo: new SqliteExecutionProfileStateRepository(ledgerConn.db),
+    positionRepo: repos.position,
+    orderRepo: repos.order,
+    policy: () => currentExecutionPolicy().executionProfile,
+  });
   const s1LadderModule = new S1LadderModule({
     bus,
     positionRepo: repos.position,
@@ -1510,6 +1519,7 @@ async function main(): Promise<void> {
       ? [["redeem-sweep", redeemSweepModule] as [string, import("@krabs/domain").RuntimeModule]]
       : []),
     ["sell-loop-guard", sellLoopGuardModule],
+    ["execution-profile", executionProfileManager],
     ["s1-ladder", s1LadderModule],
     ["algo-decision", algoDecisionModule],
     ["resolution", resolutionModule],
