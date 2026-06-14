@@ -17,6 +17,7 @@ export const MARKET_DATA_TEST_DEFAULTS = {
   reconciliationSuspiciousEmptyThreshold: 3,
   reconciliationConsecutiveMissThreshold: 3,
   reconciliationFillCompletionTolerance: 0.005,
+  plannerSuppressionRollupWindowMs: 300_000,
   marketDataMaxTrackedTokens: 1_000,
   marketDataMaxWsShards: 2,
   wsWorkerCount: 0,

@@ -393,6 +393,51 @@ function makeBuyFill(
   };
 }
 
+function makeOrderPlaced(
+  tokenId: string,
+  side: "buy" | "sell",
+  timestamp = Date.now(),
+): RuntimeEventMap["OrderPlaced"] {
+  return {
+    commandId: createCommandId(`cmd-${side}-${tokenId}-${timestamp}`),
+    clientOrderId:
+      `client-${side}-${tokenId}-${timestamp}` as RuntimeEventMap["OrderPlaced"]["clientOrderId"],
+    orderId: createOrderId(`order-${side}-${tokenId}-${timestamp}`),
+    tokenId: createTokenId(tokenId),
+    conditionId: "cond-1" as ConditionId,
+    side,
+    price: 0.1,
+    size: 10,
+    orderType: "GTC",
+    signalReason: "test",
+    timestamp,
+  };
+}
+
+function makeSuppressionFacts(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const tokenId = String(overrides.tokenId ?? "token-rollup");
+  return {
+    tokenId: createTokenId(tokenId),
+    conditionId: "cond-1",
+    reasonCode: "sell-spread-too-wide-below-avg-entry",
+    reasons: ["sell-spread-too-wide-below-avg-entry"],
+    side: "SELL",
+    decisionRuleId: "D8_PROFIT_RATIO",
+    state: "S1",
+    price: 0.04,
+    buyCount: 1,
+    timeSinceLastSeconds: 300,
+    emissionFacts: {
+      firstTradePrice: 0.02,
+      firstTradeAt: "2026-06-14T00:00:00.000Z",
+      legTradeCount: 1,
+    },
+    timestamp: "2026-06-14T00:00:00.000Z",
+    extra: { spreadTicks: 40 },
+    ...overrides,
+  };
+}
+
 function makeOrder(tokenId: string, overrides: Partial<Order> = {}): Order {
   const nowIso = new Date(Date.now()).toISOString();
   const status = overrides.status ?? "open";
@@ -514,6 +559,137 @@ describe("AlgoDecisionModule", () => {
     expect((mod as any).log.warn).toHaveBeenCalledWith(
       expect.objectContaining({ tokenId, positionId: String(position.positionId) }),
       "open position has not been evaluated recently",
+    );
+
+    await mod.stop();
+  });
+
+  it("rolls up sell-spread suppression rows at the recordDecisionSuppressed chokepoint", () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const runtimeMetrics = {
+      writeCounter: vi.fn(),
+      writeLatest: vi.fn(),
+    } as unknown as RuntimeMetricWriter;
+    const mod = buildModule({
+      riskEventRepo,
+      runtimeMetrics,
+      plannerSuppressionRollupWindowMs: 300_000,
+    });
+
+    (mod as any).recordDecisionSuppressed(makeSuppressionFacts({ price: 0.04 }));
+    (mod as any).recordDecisionSuppressed(
+      makeSuppressionFacts({
+        price: 0.05,
+        timestamp: "2026-06-14T00:01:00.000Z",
+        extra: { spreadTicks: 35 },
+      }),
+    );
+
+    expect(riskEventRepo.insert).not.toHaveBeenCalled();
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "track_planner_suppressed_total",
+      1,
+      JSON.stringify({ reason: "sell-spread-too-wide-below-avg-entry" }),
+    );
+
+    expect((mod as any).plannerRollup.flushAll("periodic")).toBe(1);
+
+    expect(riskEventRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "planner_suppressed_rollup",
+        payload: expect.objectContaining({
+          tokenId: "token-rollup",
+          reasonCode: "sell-spread-too-wide-below-avg-entry",
+          decisionRuleId: "D8_PROFIT_RATIO",
+          side: "SELL",
+          count: 2,
+          windowMs: 300_000,
+          firstPayloadSample: expect.objectContaining({ price: 0.04, spreadTicks: 40 }),
+          lastPayloadSample: expect.objectContaining({ price: 0.05, spreadTicks: 35 }),
+          flushReason: "periodic",
+          schemaVersion: 1,
+        }),
+      }),
+    );
+  });
+
+  it("keeps legacy suppression writes when rollup is disabled", () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const runtimeMetrics = {
+      writeCounter: vi.fn(),
+      writeLatest: vi.fn(),
+    } as unknown as RuntimeMetricWriter;
+    const mod = buildModule({
+      riskEventRepo,
+      runtimeMetrics,
+      plannerSuppressionRollupWindowMs: 0,
+    });
+
+    (mod as any).recordDecisionSuppressed(makeSuppressionFacts());
+
+    expect(riskEventRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          tokenId: "token-rollup",
+          reasonCode: "sell-spread-too-wide-below-avg-entry",
+        }),
+      }),
+    );
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "track_planner_suppressed_total",
+      1,
+      JSON.stringify({ reason: "sell-spread-too-wide-below-avg-entry" }),
+    );
+  });
+
+  it("flushes planner suppression rollups on SELL state transitions before early returns", async () => {
+    const mod = buildModule({ plannerSuppressionRollupWindowMs: 300_000 });
+    const fakeRollup = {
+      record: vi.fn(() => false),
+      flushToken: vi.fn(() => 0),
+      flushAll: vi.fn(() => 0),
+      start: vi.fn(),
+      stop: vi.fn(),
+    };
+    (mod as any).plannerRollup = fakeRollup;
+    await mod.start();
+
+    await (bus as any).emit("OrderPlaced", makeOrderPlaced("token-transition", "sell"));
+    await (bus as any).emit("OrderPlaced", makeOrderPlaced("token-transition", "buy"));
+    await (bus as any).emit(
+      "FillReceived",
+      makeBuyFill("token-transition", Date.now(), { side: "sell" }),
+    );
+    await (bus as any).emit("LegStateCleared", {
+      type: "LegStateCleared",
+      tokenId: createTokenId("token-transition"),
+      reason: "position-closed",
+      timestamp: Date.now(),
+    });
+    await (bus as any).emit("PositionSettled", {
+      positionId: createPositionId("pos-token-transition"),
+      tokenId: createTokenId("token-transition"),
+      resolution: "YES",
+      settlementPrice: 1,
+      realizedPnl: 0,
+      size: 10,
+      avgEntryPrice: 0.1,
+      timestamp: Date.now(),
+    });
+
+    expect(fakeRollup.flushToken).toHaveBeenCalledTimes(4);
+    expect(fakeRollup.flushToken).toHaveBeenNthCalledWith(1, "token-transition", "order_placed");
+    expect(fakeRollup.flushToken).toHaveBeenNthCalledWith(2, "token-transition", "fill_received");
+    expect(fakeRollup.flushToken).toHaveBeenNthCalledWith(
+      3,
+      "token-transition",
+      "leg_state_cleared",
+    );
+    expect(fakeRollup.flushToken).toHaveBeenNthCalledWith(
+      4,
+      "token-transition",
+      "position_settled",
     );
 
     await mod.stop();
@@ -5334,11 +5510,18 @@ describe("AlgoDecisionModule", () => {
         .filter(([, p]) => (p as { signal: { side: string } }).signal.side === "sell");
       expect(sellSignals).toHaveLength(0);
 
+      expect((mod as any).plannerRollup.flushAll("periodic")).toBe(1);
+
       const insertCalls = vi.mocked(riskEventRepo.insert).mock.calls;
       // The live wide-spread suppression is preserved and classified by the
-      // non-loss guard.
+      // non-loss guard, but v1 stores the spammy sell-spread subset as rollups.
       expect(
-        insertCalls.some(([e]) => e.payload.reasonCode === "sell-spread-too-wide-below-avg-entry"),
+        insertCalls.some(
+          ([e]) =>
+            e.eventType === "planner_suppressed_rollup" &&
+            e.payload.reasonCode === "sell-spread-too-wide-below-avg-entry" &&
+            e.payload.count === 1,
+        ),
       ).toBe(true);
 
       // New: a structured, queryable track_q_shadow telemetry row.

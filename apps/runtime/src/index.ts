@@ -1194,6 +1194,7 @@ async function main(): Promise<void> {
     },
     log,
     sweepIntervalMs: config.strategyScanIntervalMs,
+    plannerSuppressionRollupWindowMs: config.plannerSuppressionRollupWindowMs,
   });
 
   const orderLifetimeModule = new OrderLifetimeModule({

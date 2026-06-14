@@ -212,6 +212,32 @@ describe("LedgerRetentionModule", () => {
     expect(rows).toEqual([{ event_type: "signal_rejected" }]);
   });
 
+  it("deletes planner suppression rollups with the signal telemetry TTL", async () => {
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "planner_suppressed_rollup",
+      '{"reasonCode":"sell-spread-too-wide-below-avg-entry","count":42}',
+      "2026-04-01T00:00:00.000Z",
+    );
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "signal_rejected",
+      "{}",
+      "2026-04-01T00:00:00.000Z",
+    );
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    const rows = db.prepare("SELECT event_type FROM risk_events").all() as Array<{
+      event_type: string;
+    }>;
+    expect(rows).toEqual([{ event_type: "signal_rejected" }]);
+  });
+
   it("v063: signal telemetry TTL boundary — keeps rows <1d old, deletes >1d", async () => {
     // NOW is 2026-04-25T00:00:00Z. 23h old (kept) vs 25h old (deleted).
     db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(

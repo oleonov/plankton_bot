@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { RuntimeControl, RuntimeModule } from "@krabs/domain";
+import { SIGNAL_TELEMETRY_RISK_EVENT_TYPES } from "../../risk-event-volume.js";
 import type { Logger } from "../../logger.js";
 
 export const LATEST_ONLY_RUNTIME_METRICS = [
@@ -262,7 +263,8 @@ export class LedgerRetentionModule implements RuntimeModule {
         "risk_events",
         "created_at",
         nowMs - this.config.signalTelemetryRiskEventsTtlMs,
-        "event_type IN ('signal_suppressed', 'signal_emitted')",
+        `event_type IN (${SIGNAL_TELEMETRY_RISK_EVENT_TYPES.map(() => "?").join(", ")})`,
+        [...SIGNAL_TELEMETRY_RISK_EVENT_TYPES],
       ),
       this.deleteOlderThanTask(
         "risk_events.order_rejected",
@@ -277,7 +279,10 @@ export class LedgerRetentionModule implements RuntimeModule {
         "created_at",
         nowMs - this.config.riskEventsTtlMs,
         "NOT (event_type = 'reconciliation_drift' AND payload LIKE '%\"severity\":\"critical\"%')" +
-          " AND event_type NOT IN ('signal_suppressed', 'signal_emitted', 'order_rejected')",
+          ` AND event_type NOT IN (${[...SIGNAL_TELEMETRY_RISK_EVENT_TYPES, "order_rejected"]
+            .map(() => "?")
+            .join(", ")})`,
+        [...SIGNAL_TELEMETRY_RISK_EVENT_TYPES, "order_rejected"],
       ),
       this.deleteOlderThanTask(
         "risk_events.critical",

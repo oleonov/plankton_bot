@@ -1,7 +1,11 @@
 // These high-volume event types are strategy signal telemetry, not operational
 // failures. `index.ts` builds the SQL exclusion list from this constant; add any
 // future signal-only audit event here before enabling it in risk_events.
-export const SIGNAL_TELEMETRY_RISK_EVENT_TYPES = ["signal_emitted", "signal_suppressed"] as const;
+export const SIGNAL_TELEMETRY_RISK_EVENT_TYPES = [
+  "signal_emitted",
+  "signal_suppressed",
+  "planner_suppressed_rollup",
+] as const;
 
 export interface RiskEventVolumeSnapshotInput {
   last1h: number;

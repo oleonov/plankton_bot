@@ -102,6 +102,10 @@ import {
   computeEntryFreshEdgeSignalFields,
   type EntryFreshEdgeSignalFields,
 } from "./entry-fresh-edge.js";
+import {
+  DEFAULT_PLANNER_SUPPRESSION_ROLLUP_WINDOW_MS,
+  PlannerSuppressionRollup,
+} from "./planner-suppression-rollup.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 
 // Re-exported for existing consumers; the canonical contract now lives in @krabs/domain.
@@ -510,6 +514,7 @@ export interface AlgoDecisionModuleDeps {
    * cumulative value is recovered offline via `SUM(value)` over the delta rows.
    */
   runtimeMetrics?: RuntimeMetricWriter | undefined;
+  plannerSuppressionRollupWindowMs?: number | undefined;
   /**
    * Track Q loop guard read surface. When provided, the planner suppresses SELL
    * signal generation for tokens the guard reports as blocked. Optional: omitted
@@ -621,7 +626,7 @@ const DUST_RECOVERED_REASON = "dust-recovered";
 // CHANGE A — D8 profit-ratio SELL trigger (R66 spec 14.Y).
 const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
 const POST_BUY_FILL_COOLDOWN_REASON = "post-buy-fill-cooldown";
-const DEDUPED_SUPPRESSION_REASONS = new Set([
+export const DEDUPED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
   "mid-price-unavailable",
   "pending-buy-order",
@@ -798,6 +803,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private tickCounter = 0;
   private unsubs: Array<() => void> = [];
   private sweepHandle: ReturnType<typeof setInterval> | null = null;
+  private readonly plannerRollup: PlannerSuppressionRollup;
   private started = false;
   // Skip-on-overlap guard for evaluateTokens. The same pass can be triggered
   // from `setInterval(sweep)` and from `handleMarketUpdate`/`handleNormalizedMarketUpdated`
@@ -825,6 +831,15 @@ export class AlgoDecisionModule implements RuntimeModule {
         workerDbPath: deps.decisionPersistenceWorkerDbPath,
       },
     );
+    this.plannerRollup = new PlannerSuppressionRollup({
+      windowMs:
+        deps.plannerSuppressionRollupWindowMs ?? DEFAULT_PLANNER_SUPPRESSION_ROLLUP_WINDOW_MS,
+      emit: (event) => this.persistence.enqueueRiskEvent(event),
+      writeCounter: (metricName, value, labels) =>
+        this.deps.runtimeMetrics?.writeCounter(metricName, value, labels),
+      writeLatest: (metricName, value, labels) =>
+        this.deps.runtimeMetrics?.writeLatest(metricName, value, labels),
+    });
     this.decisionWorkerPool = new DecisionWorkerPool({
       workerCount: deps.decisionWorkerCount ?? 0,
       batchSize: deps.decisionWorkerBatchSize ?? 100,
@@ -896,6 +911,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.sweepHandle = setInterval(() => {
       this.sweep().catch((err) => this.log.error({ err }, "algo-decision sweep error"));
     }, this.deps.sweepIntervalMs);
+    this.plannerRollup.start();
 
     this.started = true;
     this.log.info({ sweepIntervalMs: this.deps.sweepIntervalMs }, "algo-decision module started");
@@ -912,6 +928,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
+    await this.plannerRollup.stop();
     await this.persistence.stop();
     await this.decisionWorkerPool.stop();
     this.started = false;
@@ -1091,6 +1108,9 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async handleOrderPlaced(payload: RuntimeEventMap["OrderPlaced"]): Promise<void> {
+    if (payload.side === "sell") {
+      this.plannerRollup.flushToken(String(payload.tokenId), "order_placed");
+    }
     if (payload.side !== "buy") return;
     const tokenId = String(payload.tokenId);
     const existing = this.pendingEntries.get(tokenId);
@@ -1113,6 +1133,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async handleFillReceived(payload: RuntimeEventMap["FillReceived"]): Promise<void> {
+    this.plannerRollup.flushToken(String(payload.tokenId), "fill_received");
     const tokenId = String(payload.tokenId);
     this.clearPendingByTokenId(tokenId);
     this.markDirty(payload.tokenId);
@@ -1130,6 +1151,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   private async handleLegStateCleared(payload: RuntimeEventMap["LegStateCleared"]): Promise<void> {
     const tokenId = String(payload.tokenId);
+    this.plannerRollup.flushToken(tokenId, "leg_state_cleared");
     this.legStateCache.delete(tokenId);
     this.positionCache.delete(tokenId);
     this.dirtyTokenIds.delete(tokenId);
@@ -1150,6 +1172,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   private async handlePositionSettled(payload: RuntimeEventMap["PositionSettled"]): Promise<void> {
     const tokenId = String(payload.tokenId);
+    this.plannerRollup.flushToken(tokenId, "position_settled");
     this.legStateCache.delete(tokenId);
     this.positionCache.delete(tokenId);
     this.dirtyTokenIds.delete(tokenId);
@@ -3022,37 +3045,59 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private recordDecisionSuppressed(facts: SuppressionFacts): void {
+    const payload = this.buildSuppressionPayload(facts);
+    this.deps.runtimeMetrics?.writeCounter(
+      "track_planner_suppressed_total",
+      1,
+      JSON.stringify({ reason: facts.reasonCode }),
+    );
+    if (
+      this.plannerRollup.record({
+        tokenId: String(facts.tokenId),
+        conditionId: facts.conditionId,
+        reasonCode: facts.reasonCode,
+        decisionRuleId: facts.decisionRuleId ?? null,
+        side: facts.side ?? null,
+        sample: payload,
+      })
+    ) {
+      return;
+    }
     if (!this.shouldPersistSuppressionEvent(facts)) return;
 
     this.persistence.enqueueRiskEvent({
       eventType: "signal_suppressed",
-      payload: {
-        tokenId: String(facts.tokenId),
-        conditionId: facts.conditionId,
-        reasonCode: facts.reasonCode,
-        reasons: facts.reasons ?? null,
-        side: facts.side ?? null,
-        decisionRuleId: facts.decisionRuleId ?? null,
-        state: facts.state,
-        price: facts.price,
-        buyCount: facts.buyCount,
-        timeSinceLastSeconds: facts.timeSinceLastSeconds,
-        firstTradePrice: facts.emissionFacts.firstTradePrice,
-        legTradeCount: facts.emissionFacts.legTradeCount,
-        d9ProfitRatio: facts.emissionFacts.d9ProfitRatio ?? null,
-        d9AvgBuyPrice: facts.emissionFacts.d9AvgBuyPrice ?? null,
-        d9DaysToResolve: facts.emissionFacts.d9DaysToResolve ?? null,
-        d9PublicTradeCount24h: facts.emissionFacts.d9PublicTradeCount24h ?? null,
-        r23DipRatio: facts.emissionFacts.r23DipRatio ?? null,
-        r23MaxMidpoint: facts.emissionFacts.r23MaxMidpoint ?? null,
-        r23WindowMs: facts.emissionFacts.r23WindowMs ?? null,
-        tradeCount: facts.tradeCount ?? null,
-        tradeCountSource: facts.tradeCountSource ?? null,
-        continuationMode: this.continuationMode,
-        ...(facts.extra ?? {}),
-        signalTimestamp: facts.timestamp,
-      },
+      payload,
     });
+  }
+
+  private buildSuppressionPayload(facts: SuppressionFacts): Record<string, unknown> {
+    return {
+      tokenId: String(facts.tokenId),
+      conditionId: facts.conditionId,
+      reasonCode: facts.reasonCode,
+      reasons: facts.reasons ?? null,
+      side: facts.side ?? null,
+      decisionRuleId: facts.decisionRuleId ?? null,
+      state: facts.state,
+      price: facts.price,
+      buyCount: facts.buyCount,
+      timeSinceLastSeconds: facts.timeSinceLastSeconds,
+      firstTradePrice: facts.emissionFacts.firstTradePrice,
+      legTradeCount: facts.emissionFacts.legTradeCount,
+      d9ProfitRatio: facts.emissionFacts.d9ProfitRatio ?? null,
+      d9AvgBuyPrice: facts.emissionFacts.d9AvgBuyPrice ?? null,
+      d9DaysToResolve: facts.emissionFacts.d9DaysToResolve ?? null,
+      d9PublicTradeCount24h: facts.emissionFacts.d9PublicTradeCount24h ?? null,
+      r23DipRatio: facts.emissionFacts.r23DipRatio ?? null,
+      r23MaxMidpoint: facts.emissionFacts.r23MaxMidpoint ?? null,
+      r23WindowMs: facts.emissionFacts.r23WindowMs ?? null,
+      tradeCount: facts.tradeCount ?? null,
+      tradeCountSource: facts.tradeCountSource ?? null,
+      continuationMode: this.continuationMode,
+      ...(facts.extra ?? {}),
+      signalTimestamp: facts.timestamp,
+    };
   }
 
   private shouldPersistSuppressionEvent(facts: SuppressionFacts): boolean {

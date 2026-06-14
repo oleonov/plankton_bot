@@ -60,6 +60,7 @@ const envSchema = z
     RECONCILIATION_FILL_COMPLETION_TOLERANCE: z.coerce.number().nonnegative().max(1).default(0.005),
     GAMMA_TAG_ID: z.coerce.number().int().positive().optional(),
     STRATEGY_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(12_000),
+    PLANNER_SUPPRESSION_ROLLUP_WINDOW_MS: z.coerce.number().int().nonnegative().default(300_000),
     FILL_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     INVENTORY_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
     ENABLE_INVENTORY_AUTO_MERGE: z
@@ -260,6 +261,7 @@ export interface AppConfig {
   reconciliationFillCompletionTolerance: number;
   gammaTagId?: number | undefined;
   strategyScanIntervalMs: number;
+  plannerSuppressionRollupWindowMs: number;
   fillPollIntervalMs: number;
   inventorySweepIntervalMs?: number;
   enableInventoryAutoMerge: boolean;
@@ -378,6 +380,7 @@ export function loadEnv(envPath?: string): AppConfig {
     reconciliationFillCompletionTolerance: env.RECONCILIATION_FILL_COMPLETION_TOLERANCE,
     gammaTagId: env.GAMMA_TAG_ID,
     strategyScanIntervalMs: env.STRATEGY_SCAN_INTERVAL_MS,
+    plannerSuppressionRollupWindowMs: env.PLANNER_SUPPRESSION_ROLLUP_WINDOW_MS,
     fillPollIntervalMs: env.FILL_POLL_INTERVAL_MS,
     inventorySweepIntervalMs: env.INVENTORY_SWEEP_INTERVAL_MS,
     enableInventoryAutoMerge: env.ENABLE_INVENTORY_AUTO_MERGE,
