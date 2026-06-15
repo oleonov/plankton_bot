@@ -108,6 +108,8 @@ function buildCostCapContext(
   config: ExecutionProfileScaleInProfilePolicy,
 ): CostCapSignalContext {
   const hasRecovery = input.marketSignals.recovery60 >= config.triggers.recovery.threshold;
+  const hasStrongActivityRecovery =
+    input.marketSignals.recovery60 >= config.triggers.recovery.strongActivityRecoveryFloor;
   const hasStrongRecovery =
     input.marketSignals.recovery60 >= config.triggers.recovery.strongThreshold;
   const hasActivity =
@@ -115,14 +117,14 @@ function buildCostCapContext(
   const hasRange = input.marketSignals.range60 >= config.triggers.volatility.range60Threshold;
   const hasStd = input.marketSignals.std60 >= config.triggers.volatility.std60Threshold;
   const signalReasons: CostCapSignalReason[] = [];
-  if (hasRecovery) signalReasons.push("recovery60_ge_5pct");
+  if (hasRecovery) signalReasons.push("recovery60_ge_moderate");
   if (hasStrongRecovery) signalReasons.push("recovery60_ge_10pct");
   if (hasActivity) signalReasons.push("volume_activity_confirmed");
   return {
     hasConfirmationSignal: hasRecovery || hasActivity || hasRange || hasStd,
     hasStrongOverrideSignal:
       hasStrongRecovery ||
-      (hasRecovery &&
+      (hasStrongActivityRecovery &&
         input.marketSignals.tradeCount3h >= config.triggers.strongActivity.tradeCount3hThreshold),
     signalReasons,
   };

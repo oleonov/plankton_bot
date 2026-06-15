@@ -110,7 +110,7 @@ describe("decideScaleIn", () => {
       decideScaleIn(
         input({
           currentMarkPrice: 0.094,
-          marketSignals: { ...input().marketSignals, recovery60: 0.049 },
+          marketSignals: { ...input().marketSignals, recovery60: 0.079 },
         }),
         baseConfig,
       ),
@@ -119,7 +119,7 @@ describe("decideScaleIn", () => {
       decideScaleIn(
         input({
           currentMarkPrice: 0.094,
-          marketSignals: { ...input().marketSignals, recovery60: 0.05 },
+          marketSignals: { ...input().marketSignals, recovery60: 0.08 },
         }),
         baseConfig,
       ),
@@ -158,7 +158,7 @@ describe("decideScaleIn", () => {
       baseConfig,
     );
     const std = decideScaleIn(
-      input({ marketSignals: { ...input().marketSignals, std60: 0.03 } }),
+      input({ marketSignals: { ...input().marketSignals, std60: 0.02 } }),
       baseConfig,
     );
 
@@ -188,7 +188,7 @@ describe("decideScaleIn", () => {
     ).toBe(true);
     expect(
       decideScaleIn(
-        input({ marketSignals: { ...input().marketSignals, recovery60: 0.05, tradeCount3h: 80 } }),
+        input({ marketSignals: { ...input().marketSignals, recovery60: 0.06, tradeCount3h: 80 } }),
         baseConfig,
       ).costCapContext.hasStrongOverrideSignal,
     ).toBe(true);

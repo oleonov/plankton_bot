@@ -965,7 +965,7 @@ export type CostCapDecisionReason =
   | "hard_cap_at_aggressive";
 
 export type CostCapSignalReason =
-  | "recovery60_ge_5pct"
+  | "recovery60_ge_moderate"
   | "recovery60_ge_10pct"
   | "volume_activity_confirmed"
   | "manual_operator_override"

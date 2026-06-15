@@ -18,7 +18,7 @@ const NO_SIGNALS: CostCapSignalContext = {
 const CONFIRMATION_SIGNAL: CostCapSignalContext = {
   hasConfirmationSignal: true,
   hasStrongOverrideSignal: false,
-  signalReasons: ["recovery60_ge_5pct"],
+  signalReasons: ["recovery60_ge_moderate"],
 };
 
 const STRONG_SIGNAL: CostCapSignalContext = {
