@@ -883,7 +883,7 @@ export interface ExecutionProfileFeatureToggle {
 }
 
 export interface ExecutionProfileScaleInFeatureToggle extends ExecutionProfileFeatureToggle {
-  useRealFeed?: boolean;
+  useRealFeed: boolean;
 }
 
 export interface HotSample {
@@ -1078,7 +1078,7 @@ export interface ExecutionProfileScaleInAvgDownPolicy {
 
 export interface ExecutionProfileScaleInTriggersPolicy {
   activity: { tradeCount3hThreshold: number };
-  recovery: { threshold: number; strongThreshold: number; strongActivityRecoveryFloor?: number };
+  recovery: { threshold: number; strongThreshold: number; strongActivityRecoveryFloor: number };
   volatility: { range60Threshold: number; std60Threshold: number };
   strongActivity: { tradeCount3hThreshold: number };
 }
@@ -1159,7 +1159,7 @@ export interface ExecutionProfilePolicy {
   profileHysteresis: ExecutionProfileHysteresisBounds;
   costCaps: ExecutionProfileCostCapsPolicy;
   scaleIn: ExecutionProfileScaleInFeatureToggle;
-  signalFeed?: ExecutionProfileSignalFeedConfig;
+  signalFeed: ExecutionProfileSignalFeedConfig;
   profiles: ExecutionProfileProfilesPolicy;
   sellLadder: ExecutionProfileFeatureToggle;
   adoptExistingPositions: ExecutionProfileFeatureToggle;

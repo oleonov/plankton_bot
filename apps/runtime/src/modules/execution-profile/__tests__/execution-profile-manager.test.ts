@@ -432,7 +432,7 @@ describe("ExecutionProfileManager", () => {
       signalSnapshot: zeroSignals(),
       profilePolicy: policy({
         enabled: true,
-        scaleIn: { enabled: true },
+        scaleIn: { enabled: true, useRealFeed: false },
         costCaps: { enabled: false },
       }),
       positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
@@ -472,7 +472,7 @@ describe("ExecutionProfileManager", () => {
       signalSnapshot: zeroSignals(),
       profilePolicy: policy({
         enabled: true,
-        scaleIn: { enabled: true },
+        scaleIn: { enabled: true, useRealFeed: false },
         costCaps: { enabled: true },
       }),
       positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 30 })],
@@ -526,7 +526,7 @@ describe("ExecutionProfileManager", () => {
       signalSnapshot: zeroSignals(),
       profilePolicy: policy({
         enabled: true,
-        scaleIn: { enabled: true },
+        scaleIn: { enabled: true, useRealFeed: false },
         costCaps: { enabled: false },
       }),
       positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],

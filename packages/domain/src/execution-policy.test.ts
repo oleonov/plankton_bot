@@ -57,7 +57,22 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       maxTokensPerCycle: 100,
       qdHandoffThresholdMs: 3_600_000,
       costCaps: { enabled: false },
-      scaleIn: { enabled: false },
+      scaleIn: { enabled: false, useRealFeed: false },
+      signalFeed: {
+        enabled: false,
+        windowShortMs: 3_600_000,
+        windowLongMs: 10_800_000,
+        hotSampleTargetIntervalMs: 10_000,
+        warmBucketMs: 60_000,
+        coldArchiveBucketMs: 3_600_000,
+        retentionDays: 120,
+        minSamplesForSnapshot: 30,
+        minSamplesForRecovery60: 60,
+        minWarmBucketsForTradeCount: 90,
+        flushHotToWarmIntervalMs: 60_000,
+        flushWarmToColdIntervalMs: 60_000,
+        maintenanceIntervalMs: 3_600_000,
+      },
       profiles: {
         cheap: {
           costCaps: { normalCapUsd: 11, aggressiveCapUsd: 23, hardCapAtAggressive: false },
@@ -78,8 +93,12 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
             },
             triggers: {
               activity: { tradeCount3hThreshold: 40 },
-              recovery: { threshold: 0.05, strongThreshold: 0.1 },
-              volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+              recovery: {
+                threshold: 0.08,
+                strongThreshold: 0.1,
+                strongActivityRecoveryFloor: 0.05,
+              },
+              volatility: { range60Threshold: 0.1, std60Threshold: 0.02 },
               strongActivity: { tradeCount3hThreshold: 80 },
             },
           },
@@ -103,8 +122,12 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
             },
             triggers: {
               activity: { tradeCount3hThreshold: 40 },
-              recovery: { threshold: 0.05, strongThreshold: 0.1 },
-              volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+              recovery: {
+                threshold: 0.08,
+                strongThreshold: 0.1,
+                strongActivityRecoveryFloor: 0.05,
+              },
+              volatility: { range60Threshold: 0.1, std60Threshold: 0.02 },
               strongActivity: { tradeCount3hThreshold: 80 },
             },
           },
@@ -128,8 +151,12 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
             },
             triggers: {
               activity: { tradeCount3hThreshold: 40 },
-              recovery: { threshold: 0.05, strongThreshold: 0.1 },
-              volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+              recovery: {
+                threshold: 0.08,
+                strongThreshold: 0.1,
+                strongActivityRecoveryFloor: 0.05,
+              },
+              volatility: { range60Threshold: 0.1, std60Threshold: 0.02 },
               strongActivity: { tradeCount3hThreshold: 80 },
             },
           },
@@ -188,7 +215,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
                 },
                 triggers: {
                   activity: { tradeCount3hThreshold: 41 },
-                  recovery: { threshold: 0.05, strongThreshold: 0.1 },
+                  recovery: {
+                    threshold: 0.05,
+                    strongThreshold: 0.1,
+                    strongActivityRecoveryFloor: 0.05,
+                  },
                   volatility: { range60Threshold: 0.11, std60Threshold: 0.04 },
                   strongActivity: { tradeCount3hThreshold: 81 },
                 },
@@ -236,7 +267,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       maxTokensPerCycle: 25,
       qdHandoffThresholdMs: 600_000,
       costCaps: { enabled: true },
-      scaleIn: { enabled: true },
+      scaleIn: { enabled: true, useRealFeed: false },
       profiles: {
         cheap: {
           costCaps: { normalCapUsd: 12, aggressiveCapUsd: 24, hardCapAtAggressive: true },
@@ -257,7 +288,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
             },
             triggers: {
               activity: { tradeCount3hThreshold: 41 },
-              recovery: { threshold: 0.05, strongThreshold: 0.1 },
+              recovery: {
+                threshold: 0.05,
+                strongThreshold: 0.1,
+                strongActivityRecoveryFloor: 0.05,
+              },
               volatility: { range60Threshold: 0.11, std60Threshold: 0.04 },
               strongActivity: { tradeCount3hThreshold: 81 },
             },
@@ -433,7 +468,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
                 },
                 triggers: {
                   activity: { tradeCount3hThreshold: 55 },
-                  recovery: { threshold: 0.07, strongThreshold: 0.12 },
+                  recovery: {
+                    threshold: 0.07,
+                    strongThreshold: 0.12,
+                    strongActivityRecoveryFloor: 0.05,
+                  },
                   volatility: { range60Threshold: 0.13, std60Threshold: 0.05 },
                   strongActivity: { tradeCount3hThreshold: 90 },
                 },
@@ -450,7 +489,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       }),
     );
 
-    expect(parsed.policy.executionProfile.scaleIn).toEqual({ enabled: true });
+    expect(parsed.policy.executionProfile.scaleIn).toEqual({ enabled: true, useRealFeed: false });
     expect(parsed.policy.executionProfile.profiles.cheap.scaleIn).toEqual(
       DEFAULT_EXECUTION_POLICY.executionProfile.profiles.cheap.scaleIn,
     );
@@ -469,7 +508,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       },
       triggers: {
         activity: { tradeCount3hThreshold: 55 },
-        recovery: { threshold: 0.07, strongThreshold: 0.12 },
+        recovery: {
+          threshold: 0.07,
+          strongThreshold: 0.12,
+          strongActivityRecoveryFloor: 0.05,
+        },
         volatility: { range60Threshold: 0.13, std60Threshold: 0.05 },
         strongActivity: { tradeCount3hThreshold: 90 },
       },

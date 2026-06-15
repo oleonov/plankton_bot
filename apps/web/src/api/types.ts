@@ -133,8 +133,8 @@ export interface ExecutionProfilePolicy {
     mediumExpensiveHigh: number;
   };
   costCaps: { enabled: boolean };
-  scaleIn: { enabled: boolean; useRealFeed?: boolean };
-  signalFeed?: {
+  scaleIn: { enabled: boolean; useRealFeed: boolean };
+  signalFeed: {
     enabled: boolean;
     windowShortMs: number;
     windowLongMs: number;
@@ -198,7 +198,7 @@ export interface ExecutionProfileScaleInProfilePolicy {
   };
   triggers: {
     activity: { tradeCount3hThreshold: number };
-    recovery: { threshold: number; strongThreshold: number; strongActivityRecoveryFloor?: number };
+    recovery: { threshold: number; strongThreshold: number; strongActivityRecoveryFloor: number };
     volatility: { range60Threshold: number; std60Threshold: number };
     strongActivity: { tradeCount3hThreshold: number };
   };

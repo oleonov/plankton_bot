@@ -20,6 +20,8 @@ import type {
   ExecutionProfilePolicy,
   ExecutionProfileProfilesPolicy,
   ExecutionProfileScaleInProfilePolicy,
+  ExecutionProfileScaleInFeatureToggle,
+  ExecutionProfileSignalFeedConfig,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
   ExitTtlByLiquidityPolicyConfig,
@@ -187,7 +189,22 @@ export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
     mediumExpensiveHigh: 0.375,
   },
   costCaps: { enabled: false },
-  scaleIn: { enabled: false },
+  scaleIn: { enabled: false, useRealFeed: false },
+  signalFeed: {
+    enabled: false,
+    windowShortMs: 60 * 60_000,
+    windowLongMs: 3 * 60 * 60_000,
+    hotSampleTargetIntervalMs: 10_000,
+    warmBucketMs: 60_000,
+    coldArchiveBucketMs: 60 * 60_000,
+    retentionDays: 120,
+    minSamplesForSnapshot: 30,
+    minSamplesForRecovery60: 60,
+    minWarmBucketsForTradeCount: 90,
+    flushHotToWarmIntervalMs: 60_000,
+    flushWarmToColdIntervalMs: 60_000,
+    maintenanceIntervalMs: 60 * 60_000,
+  },
   profiles: {
     cheap: {
       costCaps: { normalCapUsd: 11, aggressiveCapUsd: 23, hardCapAtAggressive: false },
@@ -208,8 +225,8 @@ export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
         },
         triggers: {
           activity: { tradeCount3hThreshold: 40 },
-          recovery: { threshold: 0.05, strongThreshold: 0.1 },
-          volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+          recovery: { threshold: 0.08, strongThreshold: 0.1, strongActivityRecoveryFloor: 0.05 },
+          volatility: { range60Threshold: 0.1, std60Threshold: 0.02 },
           strongActivity: { tradeCount3hThreshold: 80 },
         },
       },
@@ -233,8 +250,8 @@ export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
         },
         triggers: {
           activity: { tradeCount3hThreshold: 40 },
-          recovery: { threshold: 0.05, strongThreshold: 0.1 },
-          volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+          recovery: { threshold: 0.08, strongThreshold: 0.1, strongActivityRecoveryFloor: 0.05 },
+          volatility: { range60Threshold: 0.1, std60Threshold: 0.02 },
           strongActivity: { tradeCount3hThreshold: 80 },
         },
       },
@@ -258,8 +275,8 @@ export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
         },
         triggers: {
           activity: { tradeCount3hThreshold: 40 },
-          recovery: { threshold: 0.05, strongThreshold: 0.1 },
-          volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+          recovery: { threshold: 0.08, strongThreshold: 0.1, strongActivityRecoveryFloor: 0.05 },
+          volatility: { range60Threshold: 0.1, std60Threshold: 0.02 },
           strongActivity: { tradeCount3hThreshold: 80 },
         },
       },
@@ -1443,12 +1460,13 @@ function parseExecutionProfile(raw: unknown, issues: string[]): ExecutionProfile
       issues,
       "executionProfile.costCaps",
     ),
-    scaleIn: parseExecutionProfileToggle(
+    scaleIn: parseExecutionProfileScaleInToggle(
       obj.scaleIn,
       DEFAULT_EXECUTION_PROFILE_POLICY.scaleIn,
       issues,
       "executionProfile.scaleIn",
     ),
+    signalFeed: parseExecutionProfileSignalFeed(obj.signalFeed, issues),
     profiles: parseExecutionProfileProfiles(obj.profiles, issues),
     sellLadder: parseExecutionProfileToggle(
       obj.sellLadder,
@@ -1556,6 +1574,115 @@ function parseExecutionProfileToggle(
   const obj = raw as Record<string, unknown>;
   return {
     enabled: booleanOr(obj.enabled, fallback.enabled, issues, `${name}.enabled`),
+  };
+}
+
+function parseExecutionProfileScaleInToggle(
+  raw: unknown,
+  fallback: ExecutionProfileScaleInFeatureToggle,
+  issues: string[],
+  name: string,
+): ExecutionProfileScaleInFeatureToggle {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push(`${name} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(obj.enabled, fallback.enabled, issues, `${name}.enabled`),
+    useRealFeed: booleanOr(obj.useRealFeed, fallback.useRealFeed, issues, `${name}.useRealFeed`),
+  };
+}
+
+function parseExecutionProfileSignalFeed(
+  raw: unknown,
+  issues: string[],
+): ExecutionProfileSignalFeedConfig {
+  const fallback = DEFAULT_EXECUTION_PROFILE_POLICY.signalFeed;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.signalFeed must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      fallback.enabled,
+      issues,
+      "executionProfile.signalFeed.enabled",
+    ),
+    windowShortMs: positiveNumberOr(
+      obj.windowShortMs,
+      fallback.windowShortMs,
+      issues,
+      "executionProfile.signalFeed.windowShortMs",
+    ).value,
+    windowLongMs: positiveNumberOr(
+      obj.windowLongMs,
+      fallback.windowLongMs,
+      issues,
+      "executionProfile.signalFeed.windowLongMs",
+    ).value,
+    hotSampleTargetIntervalMs: positiveNumberOr(
+      obj.hotSampleTargetIntervalMs,
+      fallback.hotSampleTargetIntervalMs,
+      issues,
+      "executionProfile.signalFeed.hotSampleTargetIntervalMs",
+    ).value,
+    warmBucketMs: positiveNumberOr(
+      obj.warmBucketMs,
+      fallback.warmBucketMs,
+      issues,
+      "executionProfile.signalFeed.warmBucketMs",
+    ).value,
+    coldArchiveBucketMs: positiveNumberOr(
+      obj.coldArchiveBucketMs,
+      fallback.coldArchiveBucketMs,
+      issues,
+      "executionProfile.signalFeed.coldArchiveBucketMs",
+    ).value,
+    retentionDays: positiveNumberOr(
+      obj.retentionDays,
+      fallback.retentionDays,
+      issues,
+      "executionProfile.signalFeed.retentionDays",
+    ).value,
+    minSamplesForSnapshot: positiveNumberOr(
+      obj.minSamplesForSnapshot,
+      fallback.minSamplesForSnapshot,
+      issues,
+      "executionProfile.signalFeed.minSamplesForSnapshot",
+    ).value,
+    minSamplesForRecovery60: positiveNumberOr(
+      obj.minSamplesForRecovery60,
+      fallback.minSamplesForRecovery60,
+      issues,
+      "executionProfile.signalFeed.minSamplesForRecovery60",
+    ).value,
+    minWarmBucketsForTradeCount: positiveNumberOr(
+      obj.minWarmBucketsForTradeCount,
+      fallback.minWarmBucketsForTradeCount,
+      issues,
+      "executionProfile.signalFeed.minWarmBucketsForTradeCount",
+    ).value,
+    flushHotToWarmIntervalMs: positiveNumberOr(
+      obj.flushHotToWarmIntervalMs,
+      fallback.flushHotToWarmIntervalMs,
+      issues,
+      "executionProfile.signalFeed.flushHotToWarmIntervalMs",
+    ).value,
+    flushWarmToColdIntervalMs: positiveNumberOr(
+      obj.flushWarmToColdIntervalMs,
+      fallback.flushWarmToColdIntervalMs,
+      issues,
+      "executionProfile.signalFeed.flushWarmToColdIntervalMs",
+    ).value,
+    maintenanceIntervalMs: positiveNumberOr(
+      obj.maintenanceIntervalMs,
+      fallback.maintenanceIntervalMs,
+      issues,
+      "executionProfile.signalFeed.maintenanceIntervalMs",
+    ).value,
   };
 }
 
@@ -1769,6 +1896,12 @@ function parseScaleInTriggers(
         fallback.recovery.strongThreshold,
         issues,
         `${name}.recovery.strongThreshold`,
+      ).value,
+      strongActivityRecoveryFloor: positiveNumberOr(
+        recovery?.strongActivityRecoveryFloor,
+        fallback.recovery.strongActivityRecoveryFloor,
+        issues,
+        `${name}.recovery.strongActivityRecoveryFloor`,
       ).value,
     },
     volatility: {
