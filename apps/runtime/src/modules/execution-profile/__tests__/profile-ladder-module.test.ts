@@ -326,6 +326,79 @@ describe("ProfileLadderModule", () => {
     expect(ctx.cancels).toEqual(["profile-ladder-order"]);
   });
 
+  it("places a ladder from PositionUpdated when the band is active and market is cached", async () => {
+    const ctx = setup();
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market()],
+      timestamp: NOW,
+    });
+    await ctx.bus.publish("PositionUpdated", {
+      position: position(),
+    });
+
+    expect(ctx.orders).toHaveLength(4);
+    expect(ctx.repo.getLadder(tokenId)?.band).toBe("medium_low");
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_placed",
+      value: 1,
+      labels: '{"band":"medium_low"}',
+    });
+  });
+
+  it("rebuilds after a scale-in BUY fill when PositionUpdated carries the new basis", async () => {
+    const ctx = setup();
+    ctx.repo.upsertLadder(ladderState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market()],
+      timestamp: NOW,
+    });
+    await ctx.bus.publish("FillReceived", fill({ side: "buy", price: 0.12, size: 50 }));
+    await ctx.bus.publish("PositionUpdated", {
+      position: position({
+        avgEntryPrice: 0.104,
+        costBasisUsdc: 31,
+        size: 300,
+      }),
+    });
+
+    expect(ctx.orders).toHaveLength(4);
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+      lastAvgEntry: 0.104,
+      lastCostBasisUsdc: 31,
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_rebuilt",
+      value: 1,
+      labels: '{"band":"medium_low","reason":"scale_in"}',
+    });
+  });
+
+  it("rebuilds on BBO move and respects the 30-minute cooldown", async () => {
+    const ctx = setup();
+    ctx.repo.upsertLadder(ladderState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.08, bestAsk: 0.1, midPrice: 0.09 })],
+      timestamp: NOW,
+    });
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.07, bestAsk: 0.09, midPrice: 0.08 })],
+      timestamp: NOW + 1_000,
+    });
+
+    expect(ctx.orders).toHaveLength(4);
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_rebuilt",
+      value: 1,
+      labels: '{"band":"medium_low","reason":"bbo_strong"}',
+    });
+  });
+
   it("places ladder orders with calibrated rung count and metadata", async () => {
     const ctx = setup();
 

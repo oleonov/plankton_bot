@@ -9,7 +9,7 @@ import type {
   RuntimeModule,
   TokenId,
 } from "@krabs/domain";
-import { PositionStatus, createCommandId } from "@krabs/domain";
+import { PositionStatus, createCommandId, createPositionId } from "@krabs/domain";
 import { buildClientOrderId } from "@krabs/domain/node";
 
 import { computeProfileLadder } from "./profile-ladder-builder.js";
@@ -36,6 +36,8 @@ export interface ProfileLadderModuleDeps {
 export class ProfileLadderModule implements RuntimeModule {
   private readonly unsubscribers: Array<() => void> = [];
   private readonly bboCooldownUntilByToken = new Map<string, number>();
+  private readonly marketByToken = new Map<string, NormalizedMarket>();
+  private readonly scaleInBuyPendingByToken = new Set<string>();
   private started = false;
 
   constructor(private readonly deps: ProfileLadderModuleDeps) {}
@@ -45,10 +47,11 @@ export class ProfileLadderModule implements RuntimeModule {
     this.started = true;
     if (!this.policy().enabled) return;
     this.unsubscribers.push(
+      this.deps.bus.subscribe("NormalizedMarketUpdated", async (event) => {
+        await this.handleMarketUpdate(event);
+      }),
       this.deps.bus.subscribe("PositionUpdated", async ({ position }) => {
-        if (position.status === PositionStatus.Closed || position.size <= 0) {
-          await this.cancelLadder(position.tokenId, "position_closed");
-        }
+        await this.handlePositionUpdated(position);
       }),
       this.deps.bus.subscribe("FillReceived", async (event) => {
         this.handleFillReceived(event);
@@ -134,6 +137,45 @@ export class ProfileLadderModule implements RuntimeModule {
       reason,
       ladderId: state.ladderId,
     });
+  }
+
+  private async handleMarketUpdate(
+    event: RuntimeEventMap["NormalizedMarketUpdated"],
+  ): Promise<void> {
+    for (const market of event.markets) {
+      this.marketByToken.set(String(market.tokenId), market);
+      const state = this.deps.repository.getLadder(market.tokenId);
+      if (state == null) continue;
+
+      const reason = resolveBboRebuildReason(state, market, this.policy());
+      if (reason == null) continue;
+      await this.rebuildLadder(positionFromLadderState(state), market, reason);
+    }
+  }
+
+  private async handlePositionUpdated(position: Position): Promise<void> {
+    if (position.status === PositionStatus.Closed || position.size <= 0) {
+      this.scaleInBuyPendingByToken.delete(String(position.tokenId));
+      await this.cancelLadder(position.tokenId, "position_closed");
+      return;
+    }
+
+    const market = this.marketByToken.get(String(position.tokenId));
+    if (market == null) return;
+
+    const state = this.deps.repository.getLadder(position.tokenId);
+    if (state == null) {
+      await this.placeLadder(position, market);
+      return;
+    }
+
+    if (
+      this.scaleInBuyPendingByToken.has(String(position.tokenId)) ||
+      hasPositionBasisChanged(state, position)
+    ) {
+      this.scaleInBuyPendingByToken.delete(String(position.tokenId));
+      await this.rebuildLadder(position, market, "scale_in");
+    }
   }
 
   private async buildAndPlace(
@@ -237,6 +279,10 @@ export class ProfileLadderModule implements RuntimeModule {
   }
 
   private handleFillReceived(event: RuntimeEventMap["FillReceived"]): void {
+    if (event.side === "buy") {
+      this.scaleInBuyPendingByToken.add(String(event.tokenId));
+      return;
+    }
     if (event.side !== "sell") return;
     const state = this.deps.repository.getLadder(event.tokenId);
     if (state == null) return;
@@ -297,6 +343,80 @@ export class ProfileLadderModule implements RuntimeModule {
 
 function isBboReason(reason: string): boolean {
   return reason === "bbo_major" || reason === "bbo_strong";
+}
+
+function resolveBboRebuildReason(
+  state: LadderState,
+  market: NormalizedMarket,
+  policy: ExecutionProfilePolicy["sellLadder"],
+): "bbo_major" | "bbo_strong" | null {
+  const reference = parseBboReference(state.lastBboReferenceJson);
+  if (
+    reference == null ||
+    !isPositiveFinite(reference.bestBid) ||
+    !isPositiveFinite(reference.bestAsk) ||
+    !isPositiveFinite(market.bestBid) ||
+    !isPositiveFinite(market.bestAsk)
+  ) {
+    return null;
+  }
+
+  const bidMove = Math.abs(market.bestBid - reference.bestBid) / reference.bestBid;
+  const askMove = Math.abs(market.bestAsk - reference.bestAsk) / reference.bestAsk;
+  const move = Math.max(bidMove, askMove);
+  if (move >= policy.reprice.strongBboMovePct) return "bbo_strong";
+  if (move >= policy.reprice.majorBboMovePct) return "bbo_major";
+  return null;
+}
+
+function parseBboReference(
+  raw: string | null,
+): { bestBid: number | null; bestAsk: number | null } | null {
+  if (raw == null) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<{ bestBid: unknown; bestAsk: unknown }>;
+    return {
+      bestBid: typeof parsed.bestBid === "number" ? parsed.bestBid : null,
+      bestAsk: typeof parsed.bestAsk === "number" ? parsed.bestAsk : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function positionFromLadderState(state: LadderState): Position {
+  const size =
+    isPositiveFinite(state.lastAvgEntry) && isPositiveFinite(state.lastCostBasisUsdc)
+      ? state.lastCostBasisUsdc / state.lastAvgEntry
+      : 0;
+  const openedAt = new Date(state.createdAtMs).toISOString();
+  return {
+    positionId: createPositionId(`profile-ladder-rebuild-${String(state.tokenId)}`),
+    tokenId: state.tokenId,
+    conditionId: state.conditionId,
+    side: "buy",
+    size,
+    avgEntryPrice: state.lastAvgEntry,
+    costBasisUsdc: state.lastCostBasisUsdc,
+    currentValueUsdc: state.lastCostBasisUsdc,
+    realizedPnl: 0,
+    status: PositionStatus.Open,
+    entryStyle: "probe",
+    openedAt,
+    closedAt: null,
+    updatedAt: new Date(state.updatedAtMs).toISOString(),
+  };
+}
+
+function hasPositionBasisChanged(state: LadderState, position: Position): boolean {
+  return (
+    Math.abs(state.lastAvgEntry - position.avgEntryPrice) > 1e-9 ||
+    Math.abs(state.lastCostBasisUsdc - position.costBasisUsdc) > 1e-6
+  );
+}
+
+function isPositiveFinite(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 function roundQuantity(value: number): number {
