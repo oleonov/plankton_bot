@@ -240,6 +240,59 @@ describe("migration 071 — signal feed buckets", () => {
   });
 });
 
+describe("migration 072 — ladder state", () => {
+  it("creates ladder_state with primary key, lifecycle columns, and lookup indexes", () => {
+    db.exec(readMigration("072_ladder_state.sql"));
+
+    const table = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ladder_state'")
+      .get();
+    expect(table).toBeDefined();
+
+    const columns = db.prepare("PRAGMA table_info(ladder_state)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: 0 | 1;
+      pk: number;
+    }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "token_id",
+      "condition_id",
+      "ladder_id",
+      "band",
+      "phase",
+      "status",
+      "active_rungs_json",
+      "filled_rungs_json",
+      "last_avg_entry",
+      "last_cost_basis_usdc",
+      "last_mode",
+      "last_bbo_reference_json",
+      "last_rebuild_at_ms",
+      "last_fill_at_ms",
+      "stale_checked_at_ms",
+      "qd_handoff_at_ms",
+      "created_at_ms",
+      "updated_at_ms",
+      "metadata_json",
+    ]);
+    expect(columns.find((column) => column.name === "token_id")?.pk).toBe(1);
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?")
+      .all("ladder_state") as Array<{ name: string }>;
+    expect(indexes.map((index) => index.name)).toEqual(
+      expect.arrayContaining([
+        "idx_ladder_state_status",
+        "idx_ladder_state_band_status",
+        "idx_ladder_state_updated",
+      ]),
+    );
+
+    expect(() => db.exec(readMigration("072_ladder_state.sql"))).not.toThrow();
+  });
+});
+
 describe("migration 067 — Track R liquidation reporting columns", () => {
   beforeEach(() => {
     db.exec(`
