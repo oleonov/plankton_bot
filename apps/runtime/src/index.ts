@@ -136,6 +136,8 @@ import { SignalFeedManager } from "./modules/execution-profile/signal-feed-manag
 import { SignalFeedReader } from "./modules/execution-profile/signal-feed-reader.js";
 import { SqliteSignalFeedRepository } from "./modules/execution-profile/signal-feed-repository.js";
 import { SqliteExecutionProfileStateRepository } from "./modules/execution-profile/state-repository.js";
+import { ProfileLadderModule } from "./modules/execution-profile/profile-ladder-module.js";
+import { SqliteProfileLadderRepository } from "./modules/execution-profile/profile-ladder-repository.js";
 import { S1LadderModule } from "./modules/s1-ladder/s1-ladder-module.js";
 import { MarketSnapshotPriceHistoryProvider } from "./modules/algo-decision/market-snapshot-price-history.js";
 import { MarketSelectionCache } from "./modules/algo-decision/market-selection-cache.js";
@@ -1114,6 +1116,13 @@ async function main(): Promise<void> {
     signalFeedReader,
   });
   executionProfileManagerRef.current = executionProfileManager;
+  const profileLadderModule = new ProfileLadderModule({
+    bus,
+    repository: new SqliteProfileLadderRepository(ledgerConn.db),
+    policy: () => currentExecutionPolicy().executionProfile,
+    runtimeMetrics,
+    riskEvents: repos.riskEvent,
+  });
   const s1LadderModule = new S1LadderModule({
     bus,
     positionRepo: repos.position,
@@ -1572,6 +1581,7 @@ async function main(): Promise<void> {
     ["sell-loop-guard", sellLoopGuardModule],
     ["execution-profile-signal-feed", signalFeedManager],
     ["execution-profile", executionProfileManager],
+    ["profile-ladder", profileLadderModule],
     ["s1-ladder", s1LadderModule],
     ["algo-decision", algoDecisionModule],
     ["resolution", resolutionModule],
