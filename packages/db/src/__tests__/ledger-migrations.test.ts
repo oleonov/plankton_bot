@@ -189,6 +189,57 @@ describe("migration 032 — unique open position per token", () => {
   });
 });
 
+describe("migration 071 — signal feed buckets", () => {
+  it("creates the signal_feed_buckets table, primary key, and lookup indexes", () => {
+    db.exec(readMigration("071_signal_feed_buckets.sql"));
+
+    const table = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'signal_feed_buckets'",
+      )
+      .get();
+    expect(table).toBeDefined();
+
+    const columns = db.prepare("PRAGMA table_info(signal_feed_buckets)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: 0 | 1;
+      pk: number;
+    }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "token_id",
+      "bucket_start_ms",
+      "bucket_granularity_ms",
+      "open_mid",
+      "high_mid",
+      "low_mid",
+      "close_mid",
+      "sample_count",
+      "trade_count",
+      "notional_sum",
+      "created_at_ms",
+    ]);
+    expect(
+      columns
+        .filter((column) => column.pk > 0)
+        .sort((a, b) => a.pk - b.pk)
+        .map((column) => column.name),
+    ).toEqual(["token_id", "bucket_granularity_ms", "bucket_start_ms"]);
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?")
+      .all("signal_feed_buckets") as Array<{ name: string }>;
+    expect(indexes.map((index) => index.name)).toEqual(
+      expect.arrayContaining([
+        "idx_signal_feed_buckets_token_time",
+        "idx_signal_feed_buckets_granularity_time",
+      ]),
+    );
+
+    db.exec(readMigration("071_signal_feed_buckets.sql"));
+  });
+});
+
 describe("migration 067 — Track R liquidation reporting columns", () => {
   beforeEach(() => {
     db.exec(`
