@@ -1068,12 +1068,15 @@ async function main(): Promise<void> {
     bus,
     repository: signalFeedRepo,
     config: currentExecutionPolicy().executionProfile.signalFeed,
+    metrics: runtimeMetrics,
+    riskEvents: repos.riskEvent,
   });
   const signalFeedReader = new SignalFeedReader({
     hotBuffer: signalFeedManager.getHotBuffer(),
     warmTier: signalFeedManager.getWarmTier(),
     bookSignals: trackCBookSignalsProvider,
     config: currentExecutionPolicy().executionProfile.signalFeed,
+    metrics: runtimeMetrics,
   });
   const executionProfileManagerRef: { current?: ExecutionProfileManager } = {};
   const executionProfileRollup = new ExecutionProfileRollup({

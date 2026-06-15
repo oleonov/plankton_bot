@@ -13,6 +13,43 @@ import type { SignalFeedBucketRepository } from "./signal-feed-repository.js";
 const DEFAULT_WARM_BUCKET_CAP = 24 * 60;
 const DEFAULT_COLD_BUCKET_MS = 60 * 60_000;
 const DEFAULT_RETENTION_DAYS = 120;
+const STALE_TOKEN_THRESHOLD_MS = 5 * 60_000;
+const STALE_TOKEN_EVENT_WINDOW_MS = 5 * 60_000;
+const EMPTY_LABELS = "{}";
+
+export const SIGNAL_FEED_METRICS = {
+  samplesReceivedHeartbeat: "signal_feed_samples_received_heartbeat",
+  samplesReceivedChanged: "signal_feed_samples_received_changed",
+  bucketsFlushedWarm: "signal_feed_buckets_flushed_warm",
+  bucketsFlushedCold: "signal_feed_buckets_flushed_cold",
+  maintenanceRuns: "signal_feed_maintenance_runs",
+  maintenanceFailures: "signal_feed_maintenance_failures",
+  snapshotsReturned: "signal_feed_snapshots_returned",
+  snapshotsNull: "signal_feed_snapshots_null",
+  snapshotsInsufficient: "signal_feed_snapshots_insufficient",
+  hotBufferSize: "signal_feed_hot_buffer_size",
+  warmBucketCount: "signal_feed_warm_bucket_count",
+  activeTokens: "signal_feed_active_tokens",
+  recovery60Value: "signal_feed_recovery60_value",
+  range60Value: "signal_feed_range60_value",
+  tradeCount3hValue: "signal_feed_tradeCount3h_value",
+} as const;
+
+export const SIGNAL_FEED_RISK_EVENTS = {
+  initialized: "signal_feed_initialized",
+  maintenanceCompleted: "signal_feed_maintenance_completed",
+  maintenanceFailed: "signal_feed_maintenance_failed",
+  staleToken: "signal_feed_stale_token",
+} as const;
+
+export interface SignalFeedMetricWriter {
+  writeCounter(name: string, value?: number, labels?: string | null): void;
+  writeEvent(metricName: string, value: number, labels: string | null, capturedAt: string): void;
+}
+
+export interface SignalFeedRiskEventWriter {
+  insert(event: { eventType: string; payload: Record<string, unknown> }): void;
+}
 
 type SignalFeedManagerConfig = Pick<
   ExecutionProfileSignalFeedConfig,
@@ -24,6 +61,8 @@ export interface SignalFeedManagerDeps {
   bus: EventBus;
   repository: SignalFeedBucketRepository;
   config: SignalFeedManagerConfig;
+  metrics?: SignalFeedMetricWriter;
+  riskEvents?: SignalFeedRiskEventWriter;
 }
 
 export class SignalFeedManager implements RuntimeModule {
@@ -31,6 +70,7 @@ export class SignalFeedManager implements RuntimeModule {
   private readonly warm: SignalFeedWarmTier;
   private readonly tokenIds = new Set<string>();
   private readonly lastHotFlushTsByToken = new Map<string, number>();
+  private readonly staleTokenEventTsByToken = new Map<string, number>();
   private readonly unsubscribers: Array<() => void> = [];
   private readonly timers: Array<ReturnType<typeof setInterval>> = [];
   private started = false;
@@ -45,21 +85,35 @@ export class SignalFeedManager implements RuntimeModule {
     this.started = true;
     this.unsubscribers.push(
       this.deps.bus.subscribe("MarketSnapshotHeartbeat", async (event) => {
-        this.ingestMarkets(event.markets, event.timestamp);
+        this.ingestMarkets(
+          event.markets,
+          event.timestamp,
+          SIGNAL_FEED_METRICS.samplesReceivedHeartbeat,
+        );
       }),
       this.deps.bus.subscribe("NormalizedMarketUpdated", async (event) => {
-        this.ingestMarkets(event.markets, event.timestamp);
+        this.ingestMarkets(
+          event.markets,
+          event.timestamp,
+          SIGNAL_FEED_METRICS.samplesReceivedChanged,
+        );
       }),
     );
+    this.recordRiskEvent(SIGNAL_FEED_RISK_EVENTS.initialized, {
+      enabled: true,
+      tokenCountResumed: this.tokenIds.size,
+      warmBucketsResumed: this.warm.totalBuckets(),
+    });
     this.startTimer(this.deps.config.flushHotToWarmIntervalMs, () =>
       this.flushHotToWarm(Date.now()),
     );
     this.startTimer(this.deps.config.flushWarmToColdIntervalMs, () =>
       this.flushWarmToCold(Date.now()),
     );
-    this.startTimer(this.deps.config.maintenanceIntervalMs, () =>
-      this.maintenancePrune(Date.now()),
+    this.startTimer(this.deps.config.flushHotToWarmIntervalMs, () =>
+      this.writeGaugeSnapshot(Date.now()),
     );
+    this.startTimer(this.deps.config.maintenanceIntervalMs, () => this.runMaintenanceTimer());
   }
 
   async stop(): Promise<void> {
@@ -88,6 +142,29 @@ export class SignalFeedManager implements RuntimeModule {
     return this.warm;
   }
 
+  writeGaugeSnapshot(_nowMs: number): void {
+    if (!this.deps.config.enabled) return;
+    const capturedAt = new Date(_nowMs).toISOString();
+    this.deps.metrics?.writeEvent(
+      SIGNAL_FEED_METRICS.hotBufferSize,
+      this.hot.totalSamples(),
+      EMPTY_LABELS,
+      capturedAt,
+    );
+    this.deps.metrics?.writeEvent(
+      SIGNAL_FEED_METRICS.warmBucketCount,
+      this.warm.totalBuckets(),
+      EMPTY_LABELS,
+      capturedAt,
+    );
+    this.deps.metrics?.writeEvent(
+      SIGNAL_FEED_METRICS.activeTokens,
+      this.hot.size(),
+      EMPTY_LABELS,
+      capturedAt,
+    );
+  }
+
   flushHotToWarm(nowMs: number): void {
     if (!this.deps.config.enabled) return;
     for (const tokenKey of this.tokenIds) {
@@ -97,7 +174,8 @@ export class SignalFeedManager implements RuntimeModule {
         .samplesBetween(tokenId, afterTs + 1, nowMs)
         .filter((sample) => Number.isFinite(sample.midPrice) && sample.midPrice > 0);
       if (samples.length === 0) continue;
-      this.warm.ingestSamples(tokenId, samples);
+      const buckets = this.warm.ingestSamples(tokenId, samples);
+      this.recordCounter(SIGNAL_FEED_METRICS.bucketsFlushedWarm, buckets.length);
       this.lastHotFlushTsByToken.set(tokenKey, samples[samples.length - 1]!.tsMs);
     }
   }
@@ -109,28 +187,78 @@ export class SignalFeedManager implements RuntimeModule {
       const unpersisted = this.warm.takeUnpersisted(tokenId);
       if (unpersisted.length === 0) continue;
       this.deps.repository.upsertBuckets(unpersisted, nowMs);
+      this.recordCounter(SIGNAL_FEED_METRICS.bucketsFlushedCold, unpersisted.length);
       for (const bucket of unpersisted) this.warm.markPersisted(tokenId, bucket.bucketStartMs);
     }
   }
 
   maintenancePrune(nowMs: number): void {
     if (!this.deps.config.enabled) return;
-    const coldBucketMs = this.deps.config.coldArchiveBucketMs ?? DEFAULT_COLD_BUCKET_MS;
-    const retentionDays = this.deps.config.retentionDays ?? DEFAULT_RETENTION_DAYS;
-    this.deps.repository.deleteBucketsBefore(
-      coldBucketMs,
-      nowMs - retentionDays * 24 * 60 * 60_000,
-    );
+    this.recordCounter(SIGNAL_FEED_METRICS.maintenanceRuns);
+    const startedAt = Date.now();
+    try {
+      const coldBucketMs = this.deps.config.coldArchiveBucketMs ?? DEFAULT_COLD_BUCKET_MS;
+      const retentionDays = this.deps.config.retentionDays ?? DEFAULT_RETENTION_DAYS;
+      const bucketsPurged = this.deps.repository.deleteBucketsBefore(
+        coldBucketMs,
+        nowMs - retentionDays * 24 * 60 * 60_000,
+      );
+      this.detectStaleTokens(nowMs);
+      this.recordRiskEvent(SIGNAL_FEED_RISK_EVENTS.maintenanceCompleted, {
+        bucketsCompacted: 0,
+        bucketsPurged,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      });
+    } catch (error) {
+      this.recordCounter(SIGNAL_FEED_METRICS.maintenanceFailures);
+      this.recordRiskEvent(SIGNAL_FEED_RISK_EVENTS.maintenanceFailed, {
+        errorClass: error instanceof Error ? error.constructor.name : "UnknownError",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 
-  private ingestMarkets(markets: readonly NormalizedMarket[], timestamp: number): void {
+  private ingestMarkets(
+    markets: readonly NormalizedMarket[],
+    timestamp: number,
+    metricName: string,
+  ): void {
     for (const market of markets) {
       if (market.midPrice == null || !Number.isFinite(market.midPrice) || market.midPrice <= 0)
         continue;
       if (this.hot.push(market.tokenId, { tsMs: timestamp, midPrice: market.midPrice })) {
         this.tokenIds.add(String(market.tokenId));
+        this.recordCounter(metricName);
       }
     }
+  }
+
+  private detectStaleTokens(nowMs: number): void {
+    for (const tokenKey of this.hot.keys()) {
+      const lastSampleTsMs = this.hot.lastSampleTsMs(tokenKey as TokenId);
+      if (lastSampleTsMs == null) continue;
+      const lastSampleAgeMs = nowMs - lastSampleTsMs;
+      if (lastSampleAgeMs <= STALE_TOKEN_THRESHOLD_MS) {
+        this.staleTokenEventTsByToken.delete(tokenKey);
+        continue;
+      }
+      const lastEmittedAt = this.staleTokenEventTsByToken.get(tokenKey);
+      if (lastEmittedAt != null && nowMs - lastEmittedAt < STALE_TOKEN_EVENT_WINDOW_MS) continue;
+      this.staleTokenEventTsByToken.set(tokenKey, nowMs);
+      this.recordRiskEvent(SIGNAL_FEED_RISK_EVENTS.staleToken, {
+        tokenId: tokenKey,
+        lastSampleAgeMs,
+      });
+    }
+  }
+
+  private recordCounter(name: string, value = 1): void {
+    this.deps.metrics?.writeCounter(name, value, null);
+  }
+
+  private recordRiskEvent(eventType: string, payload: Record<string, unknown>): void {
+    this.deps.riskEvents?.insert({ eventType, payload });
   }
 
   private startTimer(intervalMs: number | undefined, fn: () => void): void {
@@ -138,6 +266,15 @@ export class SignalFeedManager implements RuntimeModule {
     const timer = setInterval(fn, intervalMs);
     timer.unref?.();
     this.timers.push(timer);
+  }
+
+  private runMaintenanceTimer(): void {
+    try {
+      this.maintenancePrune(Date.now());
+    } catch {
+      // Manual maintenance calls surface errors to tests/callers. Periodic
+      // telemetry maintenance records failures but must not crash runtime.
+    }
   }
 }
 
@@ -161,6 +298,22 @@ export class SignalFeedHotBuffer {
 
   getSamples(tokenId: TokenId): HotSample[] {
     return [...(this.samplesByToken.get(String(tokenId)) ?? [])];
+  }
+
+  keys(): string[] {
+    return [...this.samplesByToken.keys()];
+  }
+
+  size(): number {
+    return this.samplesByToken.size;
+  }
+
+  totalSamples(): number {
+    return [...this.samplesByToken.values()].reduce((sum, samples) => sum + samples.length, 0);
+  }
+
+  lastSampleTsMs(tokenId: TokenId): number | null {
+    return this.lastSampleTsByToken.get(String(tokenId)) ?? null;
   }
 
   samplesBetween(tokenId: TokenId, startMs: number, endMs: number): HotSample[] {
@@ -193,21 +346,25 @@ export class SignalFeedWarmTier {
   ) {}
 
   ingestSamples(tokenId: TokenId, samples: readonly HotSample[]): OhlcBucket[] {
-    const created: OhlcBucket[] = [];
+    const touchedByStart = new Map<number, OhlcBucket>();
     for (const sample of [...samples].sort((left, right) => left.tsMs - right.tsMs)) {
       const bucket = this.getOrCreateBucket(
         tokenId,
         bucketStart(sample.tsMs, this.bucketGranularityMs),
       );
-      if (bucket.sampleCount === 0) created.push(bucket);
       updateBucket(bucket, sample.midPrice);
+      touchedByStart.set(bucket.bucketStartMs, bucket);
     }
     this.trim(tokenId);
-    return created;
+    return [...touchedByStart.values()].map(cloneBucket);
   }
 
   getBuckets(tokenId: TokenId): OhlcBucket[] {
     return (this.bucketsByToken.get(String(tokenId)) ?? []).map(cloneBucket);
+  }
+
+  totalBuckets(): number {
+    return [...this.bucketsByToken.values()].reduce((sum, buckets) => sum + buckets.length, 0);
   }
 
   markPersisted(tokenId: TokenId, bucketStartMs: number): void {

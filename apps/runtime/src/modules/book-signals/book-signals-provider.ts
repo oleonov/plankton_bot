@@ -154,21 +154,21 @@ export class TrackCBookSignalsProvider {
     };
   }
 
-  getTradeStats3h(tokenId: TokenId, anchor = Date.now()): BookSignalsTradeStats | null {
+  getTradeStats3h(tokenId: TokenId, nowMs = Date.now()): BookSignalsTradeStats | null {
     if (!this.shouldTrack(tokenId)) return null;
     const state = this.stateByToken.get(String(tokenId));
     if (!state) return null;
-    const windowStartMs = anchor - WINDOW_3H_MS;
+    const windowStartMs = nowMs - WINDOW_3H_MS;
     const timestamps = uniqueSortedTimestamps(
       state.tradeTimestamps
         .values()
         .map((timestamp) => timestamp.ts)
-        .filter((ts) => ts >= windowStartMs && ts <= anchor),
+        .filter((ts) => ts >= windowStartMs && ts <= nowMs),
     );
     if (timestamps.length === 0) return null;
     const latestTs = timestamps[timestamps.length - 1]!;
     const status =
-      anchor - latestTs > TRADE_STATS_STALE_AFTER_MS
+      nowMs - latestTs > TRADE_STATS_STALE_AFTER_MS
         ? "stale"
         : timestamps.length < TRADE_STATS_MIN_OK_SAMPLES
           ? "unknown"

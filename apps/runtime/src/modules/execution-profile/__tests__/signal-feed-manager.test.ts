@@ -5,6 +5,8 @@ import type { HotSample, NormalizedMarket, OhlcBucket, TokenId } from "@krabs/do
 import { createTokenId } from "@krabs/domain";
 
 import {
+  SIGNAL_FEED_METRICS,
+  SIGNAL_FEED_RISK_EVENTS,
   SignalFeedHotBuffer,
   SignalFeedManager,
   SignalFeedWarmTier,
@@ -48,6 +50,8 @@ function market(tokenId: TokenId = TOKEN, midPrice: number | null = 0.12): Norma
 class RecordingSignalFeedRepository implements SignalFeedBucketRepository {
   readonly upserts: OhlcBucket[] = [];
   deleteArgs: Array<{ granularity: number; beforeMs: number }> = [];
+  deleteResult = 0;
+  deleteError: Error | null = null;
 
   upsertBucket(bucket: OhlcBucket): void {
     this.upserts.push({ ...bucket });
@@ -62,9 +66,40 @@ class RecordingSignalFeedRepository implements SignalFeedBucketRepository {
   }
 
   deleteBucketsBefore(bucketGranularityMs: number, beforeMs: number): number {
+    if (this.deleteError) throw this.deleteError;
     this.deleteArgs.push({ granularity: bucketGranularityMs, beforeMs });
-    return 0;
+    return this.deleteResult;
   }
+}
+
+function makeMetrics() {
+  return {
+    counters: [] as Array<{ name: string; value: number | undefined; labels: string | null }>,
+    events: [] as Array<{ name: string; value: number; labels: string | null; capturedAt: string }>,
+    latest: [] as Array<{
+      name: string;
+      value: number | undefined;
+      labels: string | null | undefined;
+    }>,
+    writeCounter(name: string, value?: number, labels: string | null = null): void {
+      this.counters.push({ name, value, labels });
+    },
+    writeEvent(name: string, value: number, labels: string | null, capturedAt: string): void {
+      this.events.push({ name, value, labels, capturedAt });
+    },
+    writeLatest(name: string, value?: number, labels?: string | null): void {
+      this.latest.push({ name, value, labels });
+    },
+  };
+}
+
+function makeRiskEvents() {
+  return {
+    inserts: [] as Array<{ eventType: string; payload: Record<string, unknown> }>,
+    insert(event: { eventType: string; payload: Record<string, unknown> }): void {
+      this.inserts.push(event);
+    },
+  };
 }
 
 describe("SignalFeedHotBuffer", () => {
@@ -165,10 +200,14 @@ describe("SignalFeedManager", () => {
   it("does not subscribe or write when disabled", async () => {
     const bus = new InProcessEventBus();
     const repo = new RecordingSignalFeedRepository();
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
     const manager = new SignalFeedManager({
       bus,
       repository: repo,
       config: { enabled: false, windowShortMs: 60_000, warmBucketMs: 60_000 },
+      metrics,
+      riskEvents,
     });
 
     await manager.start();
@@ -180,9 +219,223 @@ describe("SignalFeedManager", () => {
     });
     manager.flushHotToWarm(61_000);
     manager.flushWarmToCold(61_000);
+    manager.maintenancePrune(61_000);
+    manager.writeGaugeSnapshot(61_000);
 
     expect(manager.getHotSamples(TOKEN)).toEqual([]);
     expect(repo.upserts).toEqual([]);
+    expect(metrics.counters).toEqual([]);
+    expect(metrics.events).toEqual([]);
+    expect(metrics.latest).toEqual([]);
+    expect(riskEvents.inserts).toEqual([]);
+  });
+
+  it("publishes signal_feed_initialized on start", async () => {
+    const riskEvents = makeRiskEvents();
+    const manager = new SignalFeedManager({
+      bus: new InProcessEventBus(),
+      repository: new RecordingSignalFeedRepository(),
+      config: { enabled: true, windowShortMs: 60_000, warmBucketMs: 60_000 },
+      riskEvents,
+    });
+
+    await manager.start();
+
+    expect(riskEvents.inserts).toContainEqual({
+      eventType: SIGNAL_FEED_RISK_EVENTS.initialized,
+      payload: { enabled: true, tokenCountResumed: 0, warmBucketsResumed: 0 },
+    });
+  });
+
+  it("increments signal_feed_samples_received_heartbeat per heartbeat sample", async () => {
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const manager = new SignalFeedManager({
+      bus,
+      repository: new RecordingSignalFeedRepository(),
+      config: { enabled: true, windowShortMs: 60_000, warmBucketMs: 60_000 },
+      metrics,
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market(TOKEN, 0.1)],
+      timestamp: 1_000,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(metrics.counters).toContainEqual({
+      name: SIGNAL_FEED_METRICS.samplesReceivedHeartbeat,
+      value: 1,
+      labels: null,
+    });
+  });
+
+  it("increments signal_feed_samples_received_changed per changed-market sample", async () => {
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const manager = new SignalFeedManager({
+      bus,
+      repository: new RecordingSignalFeedRepository(),
+      config: { enabled: true, windowShortMs: 60_000, warmBucketMs: 60_000 },
+      metrics,
+    });
+
+    await manager.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [market(TOKEN, 0.2)],
+      timestamp: 1_000,
+    });
+
+    expect(metrics.counters).toContainEqual({
+      name: SIGNAL_FEED_METRICS.samplesReceivedChanged,
+      value: 1,
+      labels: null,
+    });
+  });
+
+  it("increments warm and cold flush counters per bucket", async () => {
+    const bus = new InProcessEventBus();
+    const repo = new RecordingSignalFeedRepository();
+    const metrics = makeMetrics();
+    const manager = new SignalFeedManager({
+      bus,
+      repository: repo,
+      config: { enabled: true, windowShortMs: 60_000, warmBucketMs: 60_000 },
+      metrics,
+    });
+
+    await manager.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [market(TOKEN, 0.2)],
+      timestamp: 1_000,
+    });
+    manager.flushHotToWarm(61_000);
+    manager.flushWarmToCold(61_000);
+
+    expect(metrics.counters).toContainEqual({
+      name: SIGNAL_FEED_METRICS.bucketsFlushedWarm,
+      value: 1,
+      labels: null,
+    });
+    expect(metrics.counters).toContainEqual({
+      name: SIGNAL_FEED_METRICS.bucketsFlushedCold,
+      value: 1,
+      labels: null,
+    });
+  });
+
+  it("increments maintenance runs and publishes completion events", () => {
+    const repo = new RecordingSignalFeedRepository();
+    repo.deleteResult = 7;
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
+    const manager = new SignalFeedManager({
+      bus: new InProcessEventBus(),
+      repository: repo,
+      config: {
+        enabled: true,
+        windowShortMs: 60_000,
+        warmBucketMs: 60_000,
+        coldArchiveBucketMs: 3_600_000,
+        retentionDays: 1,
+      },
+      metrics,
+      riskEvents,
+    });
+
+    manager.maintenancePrune(2 * 24 * 60 * 60_000);
+
+    expect(metrics.counters).toContainEqual({
+      name: SIGNAL_FEED_METRICS.maintenanceRuns,
+      value: 1,
+      labels: null,
+    });
+    expect(riskEvents.inserts).toContainEqual({
+      eventType: SIGNAL_FEED_RISK_EVENTS.maintenanceCompleted,
+      payload: expect.objectContaining({ bucketsPurged: 7 }),
+    });
+  });
+
+  it("increments maintenance failures and publishes failure events on DB error", () => {
+    const repo = new RecordingSignalFeedRepository();
+    repo.deleteError = new Error("delete failed");
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
+    const manager = new SignalFeedManager({
+      bus: new InProcessEventBus(),
+      repository: repo,
+      config: { enabled: true, windowShortMs: 60_000, warmBucketMs: 60_000 },
+      metrics,
+      riskEvents,
+    });
+
+    expect(() => manager.maintenancePrune(61_000)).toThrow("delete failed");
+    expect(metrics.counters).toContainEqual({
+      name: SIGNAL_FEED_METRICS.maintenanceFailures,
+      value: 1,
+      labels: null,
+    });
+    expect(riskEvents.inserts).toContainEqual({
+      eventType: SIGNAL_FEED_RISK_EVENTS.maintenanceFailed,
+      payload: expect.objectContaining({ errorClass: "Error", message: "delete failed" }),
+    });
+  });
+
+  it("writes buffer gauges via writeEvent and never writeLatest", async () => {
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const manager = new SignalFeedManager({
+      bus,
+      repository: new RecordingSignalFeedRepository(),
+      config: { enabled: true, windowShortMs: 60_000, warmBucketMs: 60_000 },
+      metrics,
+    });
+
+    await manager.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [market(TOKEN, 0.2)],
+      timestamp: 1_000,
+    });
+    manager.flushHotToWarm(61_000);
+    manager.writeGaugeSnapshot(61_000);
+
+    expect(metrics.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: SIGNAL_FEED_METRICS.hotBufferSize, value: 1 }),
+        expect.objectContaining({ name: SIGNAL_FEED_METRICS.warmBucketCount, value: 1 }),
+        expect.objectContaining({ name: SIGNAL_FEED_METRICS.activeTokens, value: 1 }),
+      ]),
+    );
+    expect(metrics.latest).toEqual([]);
+  });
+
+  it("publishes stale-token risk events at most once per 5-minute window", async () => {
+    const bus = new InProcessEventBus();
+    const riskEvents = makeRiskEvents();
+    const manager = new SignalFeedManager({
+      bus,
+      repository: new RecordingSignalFeedRepository(),
+      config: { enabled: true, windowShortMs: 10 * 60_000, warmBucketMs: 60_000 },
+      riskEvents,
+    });
+
+    await manager.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [market(TOKEN, 0.2)],
+      timestamp: 1_000,
+    });
+    manager.maintenancePrune(6 * 60_000 + 1_000);
+    manager.maintenancePrune(7 * 60_000 + 1_000);
+
+    expect(
+      riskEvents.inserts.filter((event) => event.eventType === SIGNAL_FEED_RISK_EVENTS.staleToken),
+    ).toHaveLength(1);
+    expect(riskEvents.inserts).toContainEqual({
+      eventType: SIGNAL_FEED_RISK_EVENTS.staleToken,
+      payload: { tokenId: String(TOKEN), lastSampleAgeMs: 6 * 60_000 },
+    });
   });
 
   it("samples heartbeat and changed-market updates, dedupes by timestamp, and flushes buckets", async () => {
