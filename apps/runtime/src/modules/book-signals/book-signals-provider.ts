@@ -1,9 +1,12 @@
-import type { PriceLevel, TokenId } from "@krabs/domain";
+import type { BookSignalsTradeStats, PriceLevel, TokenId } from "@krabs/domain";
 
 const WINDOW_30M_MS = 30 * 60_000;
 const WINDOW_1H_MS = 60 * 60_000;
+const WINDOW_3H_MS = 3 * 60 * 60_000;
+const TRADE_STATS_STALE_AFTER_MS = 60_000;
+const TRADE_STATS_MIN_OK_SAMPLES = 90;
 const SAME_BID_TOLERANCE = 1e-12;
-const DEFAULT_MAX_ENTRIES_PER_BUFFER = 1_000;
+export const DEFAULT_MAX_ENTRIES_PER_BUFFER = 5_000;
 const DEFAULT_PRUNE_INTERVAL_MS = 60_000;
 
 export interface BidState {
@@ -151,6 +154,33 @@ export class TrackCBookSignalsProvider {
     };
   }
 
+  getTradeStats3h(tokenId: TokenId, anchor = Date.now()): BookSignalsTradeStats | null {
+    if (!this.shouldTrack(tokenId)) return null;
+    const state = this.stateByToken.get(String(tokenId));
+    if (!state) return null;
+    const windowStartMs = anchor - WINDOW_3H_MS;
+    const timestamps = uniqueSortedTimestamps(
+      state.tradeTimestamps
+        .values()
+        .map((timestamp) => timestamp.ts)
+        .filter((ts) => ts >= windowStartMs && ts <= anchor),
+    );
+    if (timestamps.length === 0) return null;
+    const latestTs = timestamps[timestamps.length - 1]!;
+    const status =
+      anchor - latestTs > TRADE_STATS_STALE_AFTER_MS
+        ? "stale"
+        : timestamps.length < TRADE_STATS_MIN_OK_SAMPLES
+          ? "unknown"
+          : "ok";
+    return {
+      publicTradeCount3h: timestamps.length,
+      publicNotional3h: null,
+      status,
+      windowStartMs,
+    };
+  }
+
   getDebugSnapshot(tokenId?: TokenId): TrackCBookSignalsDebugSnapshot {
     const states =
       tokenId == null ? [...this.stateByToken.values()] : [this.stateByToken.get(String(tokenId))];
@@ -189,7 +219,7 @@ export class TrackCBookSignalsProvider {
         pruneIntervalMs: this.pruneIntervalMs,
       }),
       tradeTimestamps: new TimeBoundedBuffer<TimestampState>({
-        windowMs: WINDOW_1H_MS,
+        windowMs: WINDOW_3H_MS,
         maxEntries: this.maxEntriesPerBuffer,
         pruneIntervalMs: this.pruneIntervalMs,
       }),
@@ -338,6 +368,10 @@ function statesInWindow<T extends { readonly ts: number }>(
 
 function finiteOrNull(value: number | null | undefined): number | null {
   return value != null && Number.isFinite(value) ? value : null;
+}
+
+function uniqueSortedTimestamps(timestamps: readonly number[]): number[] {
+  return [...new Set(timestamps)].sort((left, right) => left - right);
 }
 
 function resolvePositiveInt(value: number | null | undefined, fallback: number): number {

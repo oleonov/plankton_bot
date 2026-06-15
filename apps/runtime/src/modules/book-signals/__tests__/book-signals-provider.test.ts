@@ -6,6 +6,7 @@ import {
   computeBidPersistenceS,
   computeDepthTop3,
   computePublicTradeCount1h,
+  DEFAULT_MAX_ENTRIES_PER_BUFFER,
   TrackCBookSignalsProvider,
 } from "../book-signals-provider.js";
 
@@ -150,6 +151,56 @@ describe("TrackCBookSignalsProvider formulas", () => {
       depthStateCount: 1_000,
       activeTokenCount: 1,
     });
+  });
+
+  it("uses a 5000-entry default buffer cap for 3h trade-count coverage", () => {
+    expect(DEFAULT_MAX_ENTRIES_PER_BUFFER).toBe(5_000);
+  });
+
+  it("exposes 3h trade stats from the existing last-trade buffer", () => {
+    const provider = new TrackCBookSignalsProvider();
+    const anchor = 10_000_000;
+    provider.setOpenPositionTokenIds([tokenId]);
+
+    for (let index = 0; index < 90; index++) {
+      provider.ingestLastTradePrice({
+        tokenId,
+        ts: anchor - 89_000 + index * 1_000,
+        price: 0.41,
+      });
+    }
+    provider.ingestLastTradePrice({ tokenId, ts: anchor - 3 * 60 * 60_000, price: 0.41 });
+    provider.ingestLastTradePrice({ tokenId, ts: anchor, price: 0.41 });
+
+    expect(provider.getTradeStats3h(tokenId, anchor)).toEqual({
+      publicTradeCount3h: 91,
+      publicNotional3h: null,
+      status: "ok",
+      windowStartMs: anchor - 3 * 60 * 60_000,
+    });
+  });
+
+  it("marks 3h trade stats unknown before 90 samples and stale after 60 seconds", () => {
+    const provider = new TrackCBookSignalsProvider();
+    const anchor = 10_000_000;
+    provider.setOpenPositionTokenIds([tokenId]);
+    provider.ingestLastTradePrice({ tokenId, ts: anchor - 30_000, price: 0.41 });
+
+    expect(provider.getTradeStats3h(tokenId, anchor)).toMatchObject({
+      publicTradeCount3h: 1,
+      status: "unknown",
+    });
+    expect(provider.getTradeStats3h(tokenId, anchor + 61_000)).toMatchObject({
+      publicTradeCount3h: 1,
+      status: "stale",
+    });
+  });
+
+  it("returns null 3h trade stats only when a tracked token has never been observed", () => {
+    const provider = new TrackCBookSignalsProvider();
+    provider.setOpenPositionTokenIds([tokenId]);
+
+    expect(provider.getTradeStats3h(tokenId, 10_000_000)).toBeNull();
   });
 
   it("reports bounded buffer metrics for high-rate ingest diagnostics", () => {
