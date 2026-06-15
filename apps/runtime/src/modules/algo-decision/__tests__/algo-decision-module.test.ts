@@ -6057,6 +6057,62 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
+    it("does not mark active profile-ladder SELL orders as active for Q.D handoff", async () => {
+      const tokenId = "token-qd-active-profile-ladder";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      legStateRepo = createMockLegStateRepo([
+        makeSellReadyLegState(tokenId, {
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 3,
+        }),
+      ]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const positionRepo = {
+        findByTokenId: vi.fn().mockReturnValue(makeOpenPosition(tokenId, { avgEntryPrice: 0.03 })),
+      };
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi.fn().mockReturnValue([
+          makeOrder(tokenId, {
+            status: "open",
+            decisionRuleId: "PROFILE_LADDER",
+            metadata: { source: "profile_ladder" },
+          }),
+        ]),
+        findByTokenId: vi.fn().mockReturnValue([]),
+      };
+
+      const mod = buildModule({
+        riskEventRepo,
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [
+          {
+            ...makeMarket(tokenId, null, 0.03, "cond-qd-active-profile"),
+            endDate: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+            bestBid: 0.03,
+            bestAsk: 0.05,
+            spread: 0.02,
+            publicTradeCount24h: 5,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+
+      const qdInsert = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.find(([event]) => event.eventType === "track_q_d");
+      expect(qdInsert).toBeDefined();
+      expect(qdInsert![0].payload.reason).toBe("would_fire");
+      expect(qdInsert![0].payload.qdWouldActivate).toBe(true);
+
+      await mod.stop();
+    });
+
     it("detects an older active SELL even when the latest SELL row is cancelled", async () => {
       const tokenId = "token-qd-latest-cancelled-old-open";
       selectedMarketCache = createMockSelectedMarketCache([tokenId]);

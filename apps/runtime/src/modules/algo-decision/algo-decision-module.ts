@@ -37,6 +37,7 @@ import type {
   TradeDecisionAction,
   LegState,
   Position,
+  Order,
   OrderRepository,
   S1OwnershipReader,
   SellOrderSizingContext,
@@ -625,6 +626,8 @@ const DUST_ABANDONED_REASON = "dust-abandoned";
 const DUST_RECOVERED_REASON = "dust-recovered";
 // CHANGE A — D8 profit-ratio SELL trigger (R66 spec 14.Y).
 const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
+const PROFILE_LADDER_RULE_ID = "PROFILE_LADDER";
+const PROFILE_LADDER_ORDER_SOURCE = "profile_ladder";
 const POST_BUY_FILL_COOLDOWN_REASON = "post-buy-fill-cooldown";
 export const DEDUPED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
@@ -1613,6 +1616,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       (order) =>
         order.side === "sell" &&
         order.decisionRuleId !== S1_LADDER_RULE_ID &&
+        !isProfileLadderOrderForQd(order) &&
         isWorkingSellOrderStatus(order.status ?? null),
     );
   }
@@ -3389,6 +3393,13 @@ function resolveDaysToResolve(endDate: string | null, nowMs: number): number | n
   if (!Number.isFinite(endMs)) return null;
   const daysToResolve = (endMs - nowMs) / 86_400_000;
   return Number.isFinite(daysToResolve) ? daysToResolve : null;
+}
+
+function isProfileLadderOrderForQd(order: Order): boolean {
+  return (
+    order.decisionRuleId === PROFILE_LADDER_RULE_ID ||
+    order.metadata?.source === PROFILE_LADDER_ORDER_SOURCE
+  );
 }
 
 function computeMarketAgeSeconds(gammaCreatedAt: string | null, nowMs: number): number | null {
