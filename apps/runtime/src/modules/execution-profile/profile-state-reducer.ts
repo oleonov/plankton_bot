@@ -66,6 +66,14 @@ function nextState(
   eventType: ReducerEvent["type"],
 ): ProfileState | null {
   if (
+    current === "ABANDONED_DORMANT" &&
+    eventType !== "qd_handoff_started" &&
+    eventType !== "position_closed" &&
+    eventType !== "position_settled"
+  ) {
+    return null;
+  }
+  if (
     current != null &&
     TERMINAL_STATES.has(current) &&
     eventType !== "position_closed" &&
@@ -84,11 +92,14 @@ function nextState(
     case "sell_lifecycle_activated":
       return current === "PROBING" || current === "ACCUMULATING" ? "EXITING" : null;
     case "qd_handoff_started":
-      return current === "PROBING" || current === "ACCUMULATING" || current === "EXITING"
+      return current === "PROBING" ||
+        current === "ACCUMULATING" ||
+        current === "EXITING" ||
+        current === "ABANDONED_DORMANT"
         ? "QD_HANDOFF"
         : null;
     case "abandonment_triggered":
-      return current == null ? null : "ABANDONED";
+      return current === "PROBING" || current === "ACCUMULATING" ? "ABANDONED_DORMANT" : null;
     case "position_closed":
     case "position_settled":
       return current === "CLOSED" ? "CLOSED" : "CLOSED";

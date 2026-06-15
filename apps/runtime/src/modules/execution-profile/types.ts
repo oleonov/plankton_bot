@@ -17,6 +17,7 @@ export const PROFILE_STATES = [
   "EXITING",
   "QD_HANDOFF",
   "ABANDONED",
+  "ABANDONED_DORMANT",
   "CLOSED",
 ] as const;
 
