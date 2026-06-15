@@ -240,16 +240,18 @@ describe("migration 071 — signal feed buckets", () => {
   });
 });
 
-describe("migration 072 — ladder state", () => {
-  it("creates ladder_state with primary key, lifecycle columns, and lookup indexes", () => {
-    db.exec(readMigration("072_ladder_state.sql"));
+describe("migration 072 — profile ladder state", () => {
+  it("creates profile_ladder_state with primary key, lifecycle columns, and lookup indexes", () => {
+    db.exec(readMigration("072_profile_ladder_state.sql"));
 
     const table = db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ladder_state'")
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'profile_ladder_state'",
+      )
       .get();
     expect(table).toBeDefined();
 
-    const columns = db.prepare("PRAGMA table_info(ladder_state)").all() as Array<{
+    const columns = db.prepare("PRAGMA table_info(profile_ladder_state)").all() as Array<{
       name: string;
       type: string;
       notnull: 0 | 1;
@@ -280,16 +282,16 @@ describe("migration 072 — ladder state", () => {
 
     const indexes = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?")
-      .all("ladder_state") as Array<{ name: string }>;
+      .all("profile_ladder_state") as Array<{ name: string }>;
     expect(indexes.map((index) => index.name)).toEqual(
       expect.arrayContaining([
-        "idx_ladder_state_status",
-        "idx_ladder_state_band_status",
-        "idx_ladder_state_updated",
+        "idx_profile_ladder_state_status",
+        "idx_profile_ladder_state_band_status",
+        "idx_profile_ladder_state_updated",
       ]),
     );
 
-    expect(() => db.exec(readMigration("072_ladder_state.sql"))).not.toThrow();
+    expect(() => db.exec(readMigration("072_profile_ladder_state.sql"))).not.toThrow();
   });
 });
 

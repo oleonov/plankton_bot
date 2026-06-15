@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS ladder_state (
+CREATE TABLE IF NOT EXISTS profile_ladder_state (
   token_id TEXT NOT NULL PRIMARY KEY,
   condition_id TEXT NOT NULL,
   ladder_id TEXT NOT NULL,
@@ -22,11 +22,11 @@ CREATE TABLE IF NOT EXISTS ladder_state (
   metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 
-CREATE INDEX IF NOT EXISTS idx_ladder_state_status
-  ON ladder_state(status);
+CREATE INDEX IF NOT EXISTS idx_profile_ladder_state_status
+  ON profile_ladder_state(status);
 
-CREATE INDEX IF NOT EXISTS idx_ladder_state_band_status
-  ON ladder_state(band, status);
+CREATE INDEX IF NOT EXISTS idx_profile_ladder_state_band_status
+  ON profile_ladder_state(band, status);
 
-CREATE INDEX IF NOT EXISTS idx_ladder_state_updated
-  ON ladder_state(updated_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_profile_ladder_state_updated
+  ON profile_ladder_state(updated_at_ms DESC);

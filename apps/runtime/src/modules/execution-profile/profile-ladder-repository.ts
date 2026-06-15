@@ -24,7 +24,7 @@ export class SqliteProfileLadderRepository implements ProfileLadderRepository {
   upsertLadder(state: LadderState): void {
     this.db
       .prepare(
-        `INSERT INTO ladder_state
+        `INSERT INTO profile_ladder_state
          (token_id, condition_id, ladder_id, band, phase, status, active_rungs_json,
           filled_rungs_json, last_avg_entry, last_cost_basis_usdc, last_mode,
           last_bbo_reference_json, last_rebuild_at_ms, last_fill_at_ms,
@@ -73,16 +73,16 @@ export class SqliteProfileLadderRepository implements ProfileLadderRepository {
   }
 
   getLadder(tokenId: TokenId): LadderState | null {
-    const row = this.db.prepare(`SELECT * FROM ladder_state WHERE token_id = ?`).get(tokenId) as
-      | LadderStateRow
-      | undefined;
+    const row = this.db
+      .prepare(`SELECT * FROM profile_ladder_state WHERE token_id = ?`)
+      .get(tokenId) as LadderStateRow | undefined;
     return row == null ? null : toLadderState(row);
   }
 
   findActive(): LadderState[] {
     const rows = this.db
       .prepare(
-        `SELECT * FROM ladder_state
+        `SELECT * FROM profile_ladder_state
          WHERE status NOT IN ('closed', 'cancelled')
          ORDER BY updated_at_ms DESC`,
       )
@@ -91,7 +91,7 @@ export class SqliteProfileLadderRepository implements ProfileLadderRepository {
   }
 
   deleteLadder(tokenId: TokenId): void {
-    this.db.prepare(`DELETE FROM ladder_state WHERE token_id = ?`).run(tokenId);
+    this.db.prepare(`DELETE FROM profile_ladder_state WHERE token_id = ?`).run(tokenId);
   }
 
   runInTransaction<T>(fn: () => T): T {

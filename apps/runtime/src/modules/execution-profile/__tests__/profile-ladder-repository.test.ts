@@ -60,7 +60,7 @@ beforeEach(() => {
   const migration = readFileSync(
     path.resolve(
       import.meta.dirname,
-      "../../../../../../packages/db/src/migrations/072_ladder_state.sql",
+      "../../../../../../packages/db/src/migrations/072_profile_ladder_state.sql",
     ),
     "utf8",
   );
@@ -122,7 +122,7 @@ describe("SqliteProfileLadderRepository", () => {
     expect(() =>
       repo.runInTransaction(() => {
         repo.upsertLadder(state({ tokenId: createTokenId("tx-ladder") }));
-        db.prepare("INSERT INTO ladder_state (token_id) VALUES (?)").run("broken");
+        db.prepare("INSERT INTO profile_ladder_state (token_id) VALUES (?)").run("broken");
       }),
     ).toThrow();
 
