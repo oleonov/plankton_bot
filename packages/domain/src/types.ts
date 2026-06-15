@@ -882,6 +882,73 @@ export interface ExecutionProfileFeatureToggle {
   enabled: boolean;
 }
 
+export interface ExecutionProfileScaleInFeatureToggle extends ExecutionProfileFeatureToggle {
+  useRealFeed?: boolean;
+}
+
+export interface HotSample {
+  tsMs: number;
+  midPrice: number;
+}
+
+export interface OhlcBucket {
+  tokenId: TokenId;
+  bucketStartMs: number;
+  bucketGranularityMs: number;
+  openMid: number;
+  highMid: number;
+  lowMid: number;
+  closeMid: number;
+  sampleCount: number;
+  tradeCount: number;
+  notionalSum: number;
+  persisted: boolean;
+}
+
+export interface BookSignalsTradeStats {
+  publicTradeCount3h: number;
+  publicNotional3h: number | null;
+  status: "unknown" | "stale" | "ok";
+  windowStartMs: number;
+}
+
+export interface SignalSnapshot {
+  tokenId: TokenId;
+  computedAtMs: number;
+  windowStartMs: number;
+  hotSampleCount: number;
+  warmBucketCount3h: number;
+  recovery60: number;
+  range60: number;
+  std60: number;
+  tradeCount3h: number;
+  notional3h: number | null;
+  midNow: number;
+  midMin60m: number;
+  midMax60m: number;
+  midMean60m: number;
+  insufficientForRecovery: boolean;
+  insufficientForRange: boolean;
+  insufficientForStd: boolean;
+  insufficientForTradeCount: boolean;
+}
+
+export interface ExecutionProfileSignalFeedConfig {
+  enabled: boolean;
+  windowShortMs: number;
+  windowLongMs: number;
+  hotSampleTargetIntervalMs: number;
+  warmBucketMs: number;
+  coldArchiveBucketMs: number;
+  retentionDays: number;
+  minSamplesForSnapshot: number;
+  minSamplesForRecovery60: number;
+  minWarmBucketsForTradeCount: number;
+  flushHotToWarmIntervalMs: number;
+  flushWarmToColdIntervalMs: number;
+  maintenanceIntervalMs: number;
+}
+
 export type CostCapSeverity = "under_p75" | "between" | "over_p90";
 
 export type CostCapCrossedBand = "none" | "normal" | "aggressive";
@@ -1011,7 +1078,7 @@ export interface ExecutionProfileScaleInAvgDownPolicy {
 
 export interface ExecutionProfileScaleInTriggersPolicy {
   activity: { tradeCount3hThreshold: number };
-  recovery: { threshold: number; strongThreshold: number };
+  recovery: { threshold: number; strongThreshold: number; strongActivityRecoveryFloor?: number };
   volatility: { range60Threshold: number; std60Threshold: number };
   strongActivity: { tradeCount3hThreshold: number };
 }
@@ -1091,7 +1158,8 @@ export interface ExecutionProfilePolicy {
   qdHandoffThresholdMs: number;
   profileHysteresis: ExecutionProfileHysteresisBounds;
   costCaps: ExecutionProfileCostCapsPolicy;
-  scaleIn: ExecutionProfileFeatureToggle;
+  scaleIn: ExecutionProfileScaleInFeatureToggle;
+  signalFeed?: ExecutionProfileSignalFeedConfig;
   profiles: ExecutionProfileProfilesPolicy;
   sellLadder: ExecutionProfileFeatureToggle;
   adoptExistingPositions: ExecutionProfileFeatureToggle;
