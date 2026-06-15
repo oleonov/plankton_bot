@@ -459,6 +459,75 @@ describe("ProfileLadderModule", () => {
     });
   });
 
+  it("backfills rung orderId from OrderPlaced for profile-ladder commands", async () => {
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+    await ctx.module.start();
+    await ctx.module.placeLadder(position(), market());
+
+    await ctx.bus.publish("OrderPlaced", {
+      commandId: ctx.orders[0]!.commandId,
+      clientOrderId: ctx.orders[0]!.clientOrderId,
+      orderId: createOrderId("profile-ladder-backfilled-order"),
+      tokenId,
+      conditionId,
+      side: "sell",
+      price: ctx.orders[0]!.price,
+      size: ctx.orders[0]!.size,
+      orderType: "GTC",
+      signalReason: "profile-ladder-exit",
+      timestamp: NOW + 1_000,
+    });
+
+    expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]?.orderId).toBe(
+      "profile-ladder-backfilled-order",
+    );
+  });
+
+  it("updates rung fill state after OrderPlaced backfills the exchange orderId", async () => {
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+    const orderId = createOrderId("profile-ladder-filled-order");
+    await ctx.module.start();
+    await ctx.module.placeLadder(position(), market());
+    await ctx.bus.publish("OrderPlaced", {
+      commandId: ctx.orders[0]!.commandId,
+      clientOrderId: ctx.orders[0]!.clientOrderId,
+      orderId,
+      tokenId,
+      conditionId,
+      side: "sell",
+      price: ctx.orders[0]!.price,
+      size: ctx.orders[0]!.size,
+      orderType: "GTC",
+      signalReason: "profile-ladder-exit",
+      timestamp: NOW + 1_000,
+    });
+
+    await ctx.bus.publish("FillReceived", fill({ orderId, size: 25 }));
+
+    expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+      orderId: "profile-ladder-filled-order",
+      filledSizeShares: 25,
+      lifecycle: "partially_filled",
+    });
+  });
+
+  it("ignores FillReceived for non-ladder orders", async () => {
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+    await ctx.module.start();
+    await ctx.module.placeLadder(position(), market());
+
+    await ctx.bus.publish(
+      "FillReceived",
+      fill({ orderId: createOrderId("not-profile-ladder-order"), size: 25 }),
+    );
+
+    expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+      orderId: null,
+      filledSizeShares: 0,
+      lifecycle: "planned",
+    });
+  });
+
   it("rebuilds unconditionally for scale-in and cooldown-gates BBO rebuilds", async () => {
     const ctx = setup();
 

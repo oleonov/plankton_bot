@@ -44,6 +44,10 @@ export class ProfileLadderModule implements RuntimeModule {
   private readonly bboCooldownUntilByToken = new Map<string, number>();
   private readonly marketByToken = new Map<string, NormalizedMarket>();
   private readonly scaleInBuyPendingByToken = new Set<string>();
+  private readonly pendingRungByClientOrderId = new Map<
+    string,
+    { tokenId: TokenId; rungIndex: number }
+  >();
   private started = false;
 
   constructor(private readonly deps: ProfileLadderModuleDeps) {}
@@ -61,6 +65,9 @@ export class ProfileLadderModule implements RuntimeModule {
       }),
       this.deps.bus.subscribe("FillReceived", async (event) => {
         this.handleFillReceived(event);
+      }),
+      this.deps.bus.subscribe("OrderPlaced", async (event) => {
+        this.handleOrderPlaced(event);
       }),
     );
   }
@@ -257,15 +264,20 @@ export class ProfileLadderModule implements RuntimeModule {
     timestamp: number,
   ): Promise<void> {
     const signalId = `profile_ladder_${String(position.tokenId)}_${ladderId}_${rung.rungIndex}`;
+    const clientOrderId = buildClientOrderId({
+      signalId,
+      tokenId: position.tokenId,
+      side: "sell",
+    });
+    this.pendingRungByClientOrderId.set(String(clientOrderId), {
+      tokenId: position.tokenId,
+      rungIndex: rung.rungIndex,
+    });
     await this.deps.bus.publish("PlaceOrderRequested", {
       command: {
         type: "PlaceOrderCommand",
         commandId: createCommandId(signalId),
-        clientOrderId: buildClientOrderId({
-          signalId,
-          tokenId: position.tokenId,
-          side: "sell",
-        }),
+        clientOrderId,
         source: "strategy",
         tokenId: position.tokenId,
         conditionId: position.conditionId,
@@ -295,6 +307,32 @@ export class ProfileLadderModule implements RuntimeModule {
     });
   }
 
+  private handleOrderPlaced(event: RuntimeEventMap["OrderPlaced"]): void {
+    const pending = this.pendingRungByClientOrderId.get(String(event.clientOrderId));
+    if (pending == null) return;
+
+    const state = this.deps.repository.getLadder(pending.tokenId);
+    this.pendingRungByClientOrderId.delete(String(event.clientOrderId));
+    if (state == null) return;
+
+    let matched = false;
+    const activeRungs = state.activeRungs.map((rung) => {
+      if (rung.rungIndex !== pending.rungIndex) return rung;
+      matched = true;
+      return {
+        ...rung,
+        orderId: String(event.orderId),
+        lifecycle: rung.lifecycle === "planned" ? ("placed" as const) : rung.lifecycle,
+      };
+    });
+    if (!matched) return;
+    this.deps.repository.upsertLadder({
+      ...state,
+      activeRungs,
+      updatedAtMs: event.timestamp,
+    });
+  }
+
   private handleFillReceived(event: RuntimeEventMap["FillReceived"]): void {
     if (event.side === "buy") {
       this.scaleInBuyPendingByToken.add(String(event.tokenId));
@@ -303,8 +341,10 @@ export class ProfileLadderModule implements RuntimeModule {
     if (event.side !== "sell") return;
     const state = this.deps.repository.getLadder(event.tokenId);
     if (state == null) return;
+    let matched = false;
     const activeRungs = state.activeRungs.map((rung) => {
       if (rung.orderId !== String(event.orderId)) return rung;
+      matched = true;
       const filledSizeShares = roundQuantity(rung.filledSizeShares + event.size);
       return {
         ...rung,
@@ -315,7 +355,7 @@ export class ProfileLadderModule implements RuntimeModule {
             : ("partially_filled" as const),
       };
     });
-    if (activeRungs === state.activeRungs) return;
+    if (!matched) return;
 
     const updated = {
       ...state,
