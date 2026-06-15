@@ -490,6 +490,45 @@ describe("ExecutionProfileManager", () => {
     });
   });
 
+  it("skips scale-in for ABANDONED_DORMANT state with a diagnostic counter", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    const metrics = makeMetrics();
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ state: "ABANDONED_DORMANT", lastBuyAtMs: NOW - 2_000_000 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      signalSnapshot: zeroSignals(),
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true, useRealFeed: false },
+        costCaps: { enabled: false },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.106, midPrice: 0.1, lastTradePrice: 0.1 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(signals).toHaveLength(0);
+    expect(metrics.counters).toContainEqual({
+      name: "scale_in_skipped_dormant",
+      value: 1,
+      labels: "{}",
+    });
+  });
+
   it("records cost-cap counters and risk event when Spec 2 blocks scale-in", async () => {
     const bus = new InProcessEventBus();
     const metrics = makeMetrics();

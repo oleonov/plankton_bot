@@ -298,6 +298,10 @@ export class ExecutionProfileManager implements RuntimeModule {
       const tokenId = market.tokenId;
       const state = this.deps.stateRepo.getState(tokenId);
       if (state == null) continue;
+      if (state.state === "ABANDONED_DORMANT") {
+        this.recordCounter("scale_in_skipped_dormant", {});
+        continue;
+      }
       if (!SCALE_IN_STATES.has(state.state)) {
         this.recordManagerScaleInSkip(tokenId, state.profile, "not_active_state");
         continue;

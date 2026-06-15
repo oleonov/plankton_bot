@@ -219,6 +219,7 @@ function setup(
   profilePolicy = policy(),
   overrides: {
     modeReader?: { getMode: (token: TokenId) => "up" | "flat" | "avg_down" | null };
+    isDormant?: (token: TokenId) => boolean;
   } = {},
 ) {
   const bus = new InProcessEventBus();
@@ -411,6 +412,31 @@ describe("ProfileLadderModule", () => {
       name: "profile_ladder_rebuilt",
       value: 1,
       labels: '{"band":"medium_low","reason":"scale_in"}',
+    });
+  });
+
+  it("skips dormant position rebuilds without cancelling existing ladder", async () => {
+    const ctx = setup(policy(), { isDormant: () => true });
+    ctx.repo.upsertLadder(ladderState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market()],
+      timestamp: NOW,
+    });
+    await ctx.bus.publish("PositionUpdated", {
+      position: position({ costBasisUsdc: 35 }),
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.cancels).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+      status: "active",
+      lastCostBasisUsdc: 25,
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "ladder_rebuild_skipped_dormant",
+      value: 1,
     });
   });
 

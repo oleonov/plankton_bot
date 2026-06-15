@@ -8,6 +8,7 @@ const OWNED_STATES = new Set<ProfileState>([
   "EXITING",
   "QD_HANDOFF",
   "ABANDONED",
+  "ABANDONED_DORMANT",
 ]);
 
 export interface ProfileOwnershipReader {

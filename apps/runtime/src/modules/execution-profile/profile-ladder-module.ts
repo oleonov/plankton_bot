@@ -34,6 +34,7 @@ export interface ProfileLadderModuleDeps {
   repository: ProfileLadderRepository;
   policy: () => ExecutionProfilePolicy;
   modeReader?: ProfileLadderModeReader;
+  isDormant?: ((tokenId: TokenId) => boolean) | undefined;
   runtimeMetrics?: ProfileLadderMetricWriter;
   riskEvents?: ProfileLadderRiskEventWriter;
   now?: () => number;
@@ -159,6 +160,10 @@ export class ProfileLadderModule implements RuntimeModule {
       this.marketByToken.set(String(market.tokenId), market);
       const state = this.deps.repository.getLadder(market.tokenId);
       if (state == null) continue;
+      if (this.isDormant(market.tokenId)) {
+        this.writeCounter("ladder_rebuild_skipped_dormant", 1);
+        continue;
+      }
 
       const reason = resolveBboRebuildReason(state, market, this.policy());
       if (reason == null) continue;
@@ -170,6 +175,10 @@ export class ProfileLadderModule implements RuntimeModule {
     if (position.status === PositionStatus.Closed || position.size <= 0) {
       this.scaleInBuyPendingByToken.delete(String(position.tokenId));
       await this.cancelLadder(position.tokenId, "position_closed");
+      return;
+    }
+    if (this.isDormant(position.tokenId)) {
+      this.writeCounter("ladder_rebuild_skipped_dormant", 1);
       return;
     }
 
@@ -376,6 +385,10 @@ export class ProfileLadderModule implements RuntimeModule {
 
   private isBboCooldownActive(tokenId: TokenId): boolean {
     return (this.bboCooldownUntilByToken.get(String(tokenId)) ?? 0) > this.now();
+  }
+
+  private isDormant(tokenId: TokenId): boolean {
+    return this.deps.isDormant?.(tokenId) === true;
   }
 
   private writeCounter(

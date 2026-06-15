@@ -33,6 +33,7 @@ describe("ProfileOwnershipReader", () => {
       "EXITING",
       "QD_HANDOFF",
       "ABANDONED",
+      "ABANDONED_DORMANT",
     ] as const) {
       reader.setSnapshot(snapshot(state));
       expect(reader.isProfileOwned(tokenId)).toBe(true);
