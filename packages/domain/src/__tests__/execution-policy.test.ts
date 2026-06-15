@@ -114,3 +114,65 @@ describe("execution profile signal feed policy", () => {
     });
   });
 });
+
+describe("execution profile sell ladder policy", () => {
+  it("defaults all profile ladder bands to dark with calibrated Spec 4 values", () => {
+    const policy = parseExecutionPolicyJson(null).policy.executionProfile.sellLadder;
+
+    expect(policy).toMatchObject({
+      enabled: false,
+      phase: 0,
+      decisionRuleId: "PROFILE_LADDER",
+      orderTag: "profile_ladder",
+      modeAdjustments: { up: 0.95, flat: 1, avg_down: 1.5 },
+      reprice: { majorBboMovePct: 0.05, strongBboMovePct: 0.1, cooldownMs: 1_800_000 },
+      staleReview: { enabled: true, staleAfterMs: 86_400_000 },
+    });
+    expect(policy.bands.medium_low).toEqual({
+      enabled: false,
+      minAvgEntry: 0.05,
+      maxAvgEntry: 0.15,
+      multipliers: [1.1, 1.3, 1.55, 1.65, 1.85],
+      sizingVector: [0.38, 0.24, 0.2, 0.18],
+      costCapUsd: 55,
+      allowFourthRung: true,
+      fourthRungMinCostUsd: 15,
+    });
+    expect(Object.values(policy.bands).every((band) => band.enabled === false)).toBe(true);
+  });
+
+  it("parses per-band sell ladder config with isolated fallback", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            enabled: true,
+            phase: 1,
+            bands: {
+              medium_low: {
+                enabled: true,
+                multipliers: [1.11, 1.31, 1.56, 1.66, 1.86],
+              },
+              expensive: {
+                costCapUsd: -1,
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.policy.executionProfile.sellLadder.enabled).toBe(true);
+    expect(parsed.policy.executionProfile.sellLadder.phase).toBe(1);
+    expect(parsed.policy.executionProfile.sellLadder.bands.medium_low).toMatchObject({
+      enabled: true,
+      multipliers: [1.11, 1.31, 1.56, 1.66, 1.86],
+    });
+    expect(parsed.policy.executionProfile.sellLadder.bands.expensive).toEqual(
+      DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.expensive,
+    );
+    expect(parsed.issues).toContain(
+      "executionProfile.sellLadder.bands.expensive.costCapUsd must be > 0",
+    );
+  });
+});

@@ -1282,7 +1282,7 @@ export interface ExecutionProfilePolicy {
   scaleIn: ExecutionProfileScaleInFeatureToggle;
   signalFeed: ExecutionProfileSignalFeedConfig;
   profiles: ExecutionProfileProfilesPolicy;
-  sellLadder: ExecutionProfileFeatureToggle;
+  sellLadder: ExecutionProfileSellLadderConfig;
   adoptExistingPositions: ExecutionProfileFeatureToggle;
   adoptExistingS1Ladders: ExecutionProfileFeatureToggle;
   monitoring: ExecutionProfileMonitoringConfig;

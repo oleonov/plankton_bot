@@ -162,7 +162,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           },
         },
       },
-      sellLadder: { enabled: false },
+      sellLadder: DEFAULT_EXECUTION_POLICY.executionProfile.sellLadder,
       adoptExistingPositions: { enabled: false },
       adoptExistingS1Ladders: { enabled: false },
       monitoring: {
@@ -240,7 +240,16 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
               },
             },
           },
-          sellLadder: { enabled: true },
+          sellLadder: {
+            enabled: true,
+            phase: 1,
+            bands: {
+              medium_low: {
+                enabled: true,
+                multipliers: [1.11, 1.31, 1.56, 1.66, 1.86],
+              },
+            },
+          },
           adoptExistingPositions: { enabled: true },
           adoptExistingS1Ladders: { enabled: true },
           monitoring: {
@@ -305,7 +314,19 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           costCaps: { normalCapUsd: 19, aggressiveCapUsd: 34, hardCapAtAggressive: true },
         },
       },
-      sellLadder: { enabled: true },
+      sellLadder: {
+        ...DEFAULT_EXECUTION_POLICY.executionProfile.sellLadder,
+        enabled: true,
+        phase: 1,
+        bands: {
+          ...DEFAULT_EXECUTION_POLICY.executionProfile.sellLadder.bands,
+          medium_low: {
+            ...DEFAULT_EXECUTION_POLICY.executionProfile.sellLadder.bands.medium_low,
+            enabled: true,
+            multipliers: [1.11, 1.31, 1.56, 1.66, 1.86],
+          },
+        },
+      },
       adoptExistingPositions: { enabled: true },
       adoptExistingS1Ladders: { enabled: true },
       monitoring: {

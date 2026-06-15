@@ -15,12 +15,14 @@ import type {
   DepositActivationPolicy,
   ExecutionPolicy,
   ExecutionProfileCostCapProfilePolicy,
+  ExecutionProfileFeatureToggle,
   ExecutionProfileHysteresisBounds,
   ExecutionProfileMonitoringConfig,
   ExecutionProfilePolicy,
   ExecutionProfileProfilesPolicy,
   ExecutionProfileScaleInProfilePolicy,
   ExecutionProfileScaleInFeatureToggle,
+  ExecutionProfileSellLadderConfig,
   ExecutionProfileSignalFeedConfig,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
@@ -48,6 +50,8 @@ import type {
   TrackS3SpreadTierPolicy,
   TrackS1WalkingLadderPolicy,
   DynamicChainCapPolicyConfig,
+  ProfileLadderBand,
+  ProfileLadderBandConfig,
 } from "./types.js";
 import type { AlgoState } from "./algo-engine.js";
 import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
@@ -178,6 +182,69 @@ export const DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY: TrackS3MarginAwareSpre
   tiers: DEFAULT_TRACK_S3_TIERS,
 };
 
+export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderConfig = {
+  enabled: false,
+  phase: 0,
+  decisionRuleId: "PROFILE_LADDER",
+  orderTag: "profile_ladder",
+  bands: {
+    cheap: {
+      enabled: false,
+      minAvgEntry: null,
+      maxAvgEntry: 0.05,
+      multipliers: [1.1, 1.25, 1.5, 1.75, 2.35],
+      sizingVector: [0.37, 0.26, 0.21, 0.16],
+      costCapUsd: 35,
+      allowFourthRung: true,
+      fourthRungMinCostUsd: 15,
+    },
+    medium_low: {
+      enabled: false,
+      minAvgEntry: 0.05,
+      maxAvgEntry: 0.15,
+      multipliers: [1.1, 1.3, 1.55, 1.65, 1.85],
+      sizingVector: [0.38, 0.24, 0.2, 0.18],
+      costCapUsd: 55,
+      allowFourthRung: true,
+      fourthRungMinCostUsd: 15,
+    },
+    medium_high: {
+      enabled: false,
+      minAvgEntry: 0.15,
+      maxAvgEntry: 0.35,
+      multipliers: [1, 1.1, 1.25, 1.4, 1.5],
+      sizingVector: [0.31, 0.25, 0.23, 0.21],
+      costCapUsd: 55,
+      allowFourthRung: false,
+      fourthRungMinCostUsd: 15,
+    },
+    expensive: {
+      enabled: false,
+      minAvgEntry: 0.35,
+      maxAvgEntry: null,
+      multipliers: [1, 1.05, 1.12, 1.18, 1.25],
+      sizingVector: [0.28, 0.26, 0.24, 0.22],
+      costCapUsd: 33,
+      allowFourthRung: false,
+      fourthRungMinCostUsd: 15,
+    },
+  },
+  modeAdjustments: {
+    up: 0.95,
+    flat: 1,
+    avg_down: 1.5,
+  },
+  reprice: {
+    majorBboMovePct: 0.05,
+    strongBboMovePct: 0.1,
+    cooldownMs: 30 * 60_000,
+  },
+  staleReview: {
+    enabled: true,
+    staleAfterMs: 24 * 60 * 60_000,
+  },
+};
+
 export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
   enabled: false,
   maxTokensPerCycle: 100,
@@ -282,7 +349,7 @@ export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
       },
     },
   },
-  sellLadder: { enabled: false },
+  sellLadder: DEFAULT_EXECUTION_PROFILE_SELL_LADDER,
   adoptExistingPositions: { enabled: false },
   adoptExistingS1Ladders: { enabled: false },
   monitoring: {
@@ -1468,12 +1535,7 @@ function parseExecutionProfile(raw: unknown, issues: string[]): ExecutionProfile
     ),
     signalFeed: parseExecutionProfileSignalFeed(obj.signalFeed, issues),
     profiles: parseExecutionProfileProfiles(obj.profiles, issues),
-    sellLadder: parseExecutionProfileToggle(
-      obj.sellLadder,
-      DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder,
-      issues,
-      "executionProfile.sellLadder",
-    ),
+    sellLadder: parseExecutionProfileSellLadder(obj.sellLadder, issues),
     adoptExistingPositions: parseExecutionProfileToggle(
       obj.adoptExistingPositions,
       DEFAULT_EXECUTION_PROFILE_POLICY.adoptExistingPositions,
@@ -1563,10 +1625,10 @@ function parseExecutionProfileMonitoring(
 
 function parseExecutionProfileToggle(
   raw: unknown,
-  fallback: ExecutionProfilePolicy["sellLadder"],
+  fallback: ExecutionProfileFeatureToggle,
   issues: string[],
   name: string,
-): ExecutionProfilePolicy["sellLadder"] {
+): ExecutionProfileFeatureToggle {
   if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
     if (raw !== undefined) issues.push(`${name} must be an object`);
     return fallback;
@@ -1574,6 +1636,233 @@ function parseExecutionProfileToggle(
   const obj = raw as Record<string, unknown>;
   return {
     enabled: booleanOr(obj.enabled, fallback.enabled, issues, `${name}.enabled`),
+  };
+}
+
+function parseExecutionProfileSellLadder(
+  raw: unknown,
+  issues: string[],
+): ExecutionProfileSellLadderConfig {
+  const fallback = DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.sellLadder must be an object");
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      fallback.enabled,
+      issues,
+      "executionProfile.sellLadder.enabled",
+    ),
+    phase: clampedInt(obj.phase, fallback.phase, 0, 5, issues, "executionProfile.sellLadder.phase"),
+    decisionRuleId: nonEmptyStringOr(
+      obj.decisionRuleId,
+      fallback.decisionRuleId,
+      issues,
+      "executionProfile.sellLadder.decisionRuleId",
+    ),
+    orderTag: nonEmptyStringOr(
+      obj.orderTag,
+      fallback.orderTag,
+      issues,
+      "executionProfile.sellLadder.orderTag",
+    ),
+    bands: parseExecutionProfileSellLadderBands(obj.bands, fallback.bands, issues),
+    modeAdjustments: parseProfileLadderModeAdjustments(
+      obj.modeAdjustments,
+      fallback.modeAdjustments,
+      issues,
+    ),
+    reprice: parseProfileLadderReprice(obj.reprice, fallback.reprice, issues),
+    staleReview: parseProfileLadderStaleReview(obj.staleReview, fallback.staleReview, issues),
+  };
+}
+
+function parseExecutionProfileSellLadderBands(
+  raw: unknown,
+  fallback: ExecutionProfileSellLadderConfig["bands"],
+  issues: string[],
+): ExecutionProfileSellLadderConfig["bands"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.sellLadder.bands must be an object");
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  return {
+    cheap: parseProfileLadderBand(obj.cheap, fallback.cheap, issues, "cheap"),
+    medium_low: parseProfileLadderBand(obj.medium_low, fallback.medium_low, issues, "medium_low"),
+    medium_high: parseProfileLadderBand(
+      obj.medium_high,
+      fallback.medium_high,
+      issues,
+      "medium_high",
+    ),
+    expensive: parseProfileLadderBand(obj.expensive, fallback.expensive, issues, "expensive"),
+  };
+}
+
+function parseProfileLadderBand(
+  raw: unknown,
+  fallback: ProfileLadderBandConfig,
+  issues: string[],
+  band: ProfileLadderBand,
+): ProfileLadderBandConfig {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined)
+      issues.push(`executionProfile.sellLadder.bands.${band} must be an object`);
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const name = `executionProfile.sellLadder.bands.${band}`;
+  const previousIssueCount = issues.length;
+  const multipliers = positiveNumberArrayOr(
+    obj.multipliers,
+    fallback.multipliers,
+    issues,
+    `${name}.multipliers`,
+  );
+  const sizingVector = positiveNumberArrayOr(
+    obj.sizingVector,
+    fallback.sizingVector,
+    issues,
+    `${name}.sizingVector`,
+  );
+  const parsed: ProfileLadderBandConfig = {
+    enabled: booleanOr(obj.enabled, fallback.enabled, issues, `${name}.enabled`),
+    minAvgEntry: nullableNonNegativeNumberOr(
+      obj.minAvgEntry,
+      fallback.minAvgEntry,
+      issues,
+      `${name}.minAvgEntry`,
+    ).value,
+    maxAvgEntry: nullableNonNegativeNumberOr(
+      obj.maxAvgEntry,
+      fallback.maxAvgEntry,
+      issues,
+      `${name}.maxAvgEntry`,
+    ).value,
+    multipliers: multipliers.value,
+    sizingVector: sizingVector.value,
+    costCapUsd: positiveNumberOr(obj.costCapUsd, fallback.costCapUsd, issues, `${name}.costCapUsd`)
+      .value,
+    allowFourthRung: booleanOr(
+      obj.allowFourthRung,
+      fallback.allowFourthRung,
+      issues,
+      `${name}.allowFourthRung`,
+    ),
+    fourthRungMinCostUsd: positiveNumberOr(
+      obj.fourthRungMinCostUsd,
+      fallback.fourthRungMinCostUsd,
+      issues,
+      `${name}.fourthRungMinCostUsd`,
+    ).value,
+  };
+
+  return issues.length === previousIssueCount ? parsed : fallback;
+}
+
+function parseProfileLadderModeAdjustments(
+  raw: unknown,
+  fallback: ExecutionProfileSellLadderConfig["modeAdjustments"],
+  issues: string[],
+): ExecutionProfileSellLadderConfig["modeAdjustments"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined)
+      issues.push("executionProfile.sellLadder.modeAdjustments must be an object");
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  return {
+    up: positiveNumberOr(
+      obj.up,
+      fallback.up,
+      issues,
+      "executionProfile.sellLadder.modeAdjustments.up",
+    ).value,
+    flat: positiveNumberOr(
+      obj.flat,
+      fallback.flat,
+      issues,
+      "executionProfile.sellLadder.modeAdjustments.flat",
+    ).value,
+    avg_down: positiveNumberOr(
+      obj.avg_down,
+      fallback.avg_down,
+      issues,
+      "executionProfile.sellLadder.modeAdjustments.avg_down",
+    ).value,
+  };
+}
+
+function parseProfileLadderReprice(
+  raw: unknown,
+  fallback: ExecutionProfileSellLadderConfig["reprice"],
+  issues: string[],
+): ExecutionProfileSellLadderConfig["reprice"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.sellLadder.reprice must be an object");
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const parsed = {
+    majorBboMovePct: positiveNumberOr(
+      obj.majorBboMovePct,
+      fallback.majorBboMovePct,
+      issues,
+      "executionProfile.sellLadder.reprice.majorBboMovePct",
+    ).value,
+    strongBboMovePct: positiveNumberOr(
+      obj.strongBboMovePct,
+      fallback.strongBboMovePct,
+      issues,
+      "executionProfile.sellLadder.reprice.strongBboMovePct",
+    ).value,
+    cooldownMs: nonNegativeNumberOr(
+      obj.cooldownMs,
+      fallback.cooldownMs,
+      issues,
+      "executionProfile.sellLadder.reprice.cooldownMs",
+    ).value,
+  };
+  if (parsed.strongBboMovePct < parsed.majorBboMovePct) {
+    issues.push("executionProfile.sellLadder.reprice.strongBboMovePct must be >= majorBboMovePct");
+    return fallback;
+  }
+  return parsed;
+}
+
+function parseProfileLadderStaleReview(
+  raw: unknown,
+  fallback: ExecutionProfileSellLadderConfig["staleReview"],
+  issues: string[],
+): ExecutionProfileSellLadderConfig["staleReview"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.sellLadder.staleReview must be an object");
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      fallback.enabled,
+      issues,
+      "executionProfile.sellLadder.staleReview.enabled",
+    ),
+    staleAfterMs: positiveNumberOr(
+      obj.staleAfterMs,
+      fallback.staleAfterMs,
+      issues,
+      "executionProfile.sellLadder.staleReview.staleAfterMs",
+    ).value,
   };
 }
 
@@ -2986,6 +3275,15 @@ function numberOr(raw: unknown, fallback: number, issues: string[], name: string
   return raw;
 }
 
+function nonEmptyStringOr(raw: unknown, fallback: string, issues: string[], name: string): string {
+  if (raw === undefined) return fallback;
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    issues.push(`${name} must be a non-empty string`);
+    return fallback;
+  }
+  return raw;
+}
+
 function positiveNumberOr(
   raw: unknown,
   fallback: number,
@@ -3020,6 +3318,43 @@ function nonNegativeNumberOr(
     return { value: fallback, valid: false };
   }
   return { value: raw, valid: true };
+}
+
+function nullableNonNegativeNumberOr(
+  raw: unknown,
+  fallback: number | null,
+  issues: string[],
+  name: string,
+): { value: number | null; valid: boolean } {
+  if (raw === undefined) return { value: fallback, valid: true };
+  if (raw === null) return { value: null, valid: true };
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    issues.push(`${name} must be null or a finite number`);
+    return { value: fallback, valid: false };
+  }
+  if (raw < 0) {
+    issues.push(`${name} must be >= 0`);
+    return { value: fallback, valid: false };
+  }
+  return { value: raw, valid: true };
+}
+
+function positiveNumberArrayOr(
+  raw: unknown,
+  fallback: readonly number[],
+  issues: string[],
+  name: string,
+): { value: readonly number[]; valid: boolean } {
+  if (raw === undefined) return { value: fallback, valid: true };
+  if (
+    !Array.isArray(raw) ||
+    raw.length === 0 ||
+    raw.some((value) => typeof value !== "number" || !Number.isFinite(value) || value <= 0)
+  ) {
+    issues.push(`${name} must be a non-empty array of positive finite numbers`);
+    return { value: fallback, valid: false };
+  }
+  return { value: [...raw], valid: true };
 }
 
 function scaleInSizingDecayOr(
