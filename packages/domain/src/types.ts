@@ -930,6 +930,12 @@ export interface ExecutionProfileCostCapsPolicy {
 
 export type ScaleInMode = "up" | "flat" | "avg_down";
 
+export type ManagerScaleInReason =
+  | "add_in_flight"
+  | "missing_position"
+  | "not_active_state"
+  | "missing_mark_price";
+
 export type ScaleInReason =
   | "scale_in_disabled"
   | "invalid_inputs"
@@ -940,7 +946,14 @@ export type ScaleInReason =
   | "flat_no_trigger"
   | "below_min_add"
   | "cost_cap_blocked"
-  | "allowed";
+  | "allowed"
+  | ManagerScaleInReason;
+
+export type ExecutionProfileHealthStatus = "ok" | "warn";
+
+export type FreshnessStatus = "ok" | "warn" | "disabled" | "stale" | "unknown" | "stub_active";
+
+export type ExecutionProfileDecision = "allow" | "block" | "skip" | "disabled";
 
 export interface ScaleInMarketSignals {
   recovery60: number;
@@ -1042,6 +1055,18 @@ export interface ExecutionProfileCostCapDecisionConfig {
   profiles: ExecutionProfileProfilesPolicy;
 }
 
+export interface ExecutionProfileMonitoringConfig {
+  healthCheckIntervalMs: number;
+  rollupWindowMs: number;
+  maxRollupBuckets: number;
+  pendingScaleInWarnAfterMs: number;
+  healthRiskEventEveryMs: number;
+  anomalyDetection: {
+    enabled: boolean;
+    cooldownMs: number;
+  };
+}
+
 export interface CapDecision {
   allow: boolean;
   severity: CostCapSeverity;
@@ -1071,6 +1096,7 @@ export interface ExecutionProfilePolicy {
   sellLadder: ExecutionProfileFeatureToggle;
   adoptExistingPositions: ExecutionProfileFeatureToggle;
   adoptExistingS1Ladders: ExecutionProfileFeatureToggle;
+  monitoring: ExecutionProfileMonitoringConfig;
 }
 
 export type TrackRFeeRateSource = "live" | "fill" | "fallback_category" | "fallback_universal";

@@ -129,6 +129,9 @@ import { ExecutionPolicyProvider } from "./execution-policy-provider.js";
 import { AlgoDecisionModule } from "./modules/algo-decision/algo-decision-module.js";
 import { SellLoopGuardModule } from "./modules/sell-loop-guard/sell-loop-guard-module.js";
 import { ExecutionProfileManager } from "./modules/execution-profile/execution-profile-manager.js";
+import { ExecutionProfileAnomalyDetector } from "./modules/execution-profile/execution-profile-anomaly-detector.js";
+import { ExecutionProfileHealthChecker } from "./modules/execution-profile/execution-profile-health-checker.js";
+import { ExecutionProfileRollup } from "./modules/execution-profile/execution-profile-rollup.js";
 import { SqliteExecutionProfileStateRepository } from "./modules/execution-profile/state-repository.js";
 import { S1LadderModule } from "./modules/s1-ladder/s1-ladder-module.js";
 import { MarketSnapshotPriceHistoryProvider } from "./modules/algo-decision/market-snapshot-price-history.js";
@@ -1056,14 +1059,42 @@ async function main(): Promise<void> {
     db: ledgerConn.db,
     log,
   });
+  const executionProfileStateRepo = new SqliteExecutionProfileStateRepository(ledgerConn.db);
+  const executionProfileManagerRef: { current?: ExecutionProfileManager } = {};
+  const executionProfileRollup = new ExecutionProfileRollup({
+    windowMs: currentExecutionPolicy().executionProfile.monitoring.rollupWindowMs,
+    maxBuckets: currentExecutionPolicy().executionProfile.monitoring.maxRollupBuckets,
+    emit: (event) => repos.riskEvent.insert(event),
+    writeCounter: (name, value, labels) => runtimeMetrics.writeCounter(name, value, labels),
+    writeEvent: (name, value, labels, capturedAt) =>
+      runtimeMetrics.writeEvent(name, value, labels, capturedAt),
+  });
+  const executionProfileHealthChecker = new ExecutionProfileHealthChecker({
+    stateRepo: executionProfileStateRepo,
+    riskEvents: repos.riskEvent,
+    metrics: runtimeMetrics,
+    policy: () => currentExecutionPolicy().executionProfile.monitoring,
+    signalFreshness: () => ({ status: "stub_active", reason: "stub_feed" }),
+    pendingScaleIns: () => executionProfileManagerRef.current?.getPendingScaleIns() ?? [],
+  });
+  const executionProfileAnomalyDetector = new ExecutionProfileAnomalyDetector({
+    riskEvents: repos.riskEvent,
+    metrics: runtimeMetrics,
+    policy: () => currentExecutionPolicy().executionProfile.monitoring.anomalyDetection,
+  });
   const executionProfileManager = new ExecutionProfileManager({
     bus,
-    stateRepo: new SqliteExecutionProfileStateRepository(ledgerConn.db),
+    stateRepo: executionProfileStateRepo,
     positionRepo: repos.position,
     orderRepo: repos.order,
     policy: () => currentExecutionPolicy().executionProfile,
     runtimeMetrics,
+    riskEvents: repos.riskEvent,
+    rollup: executionProfileRollup,
+    healthChecker: executionProfileHealthChecker,
+    anomalyDetector: executionProfileAnomalyDetector,
   });
+  executionProfileManagerRef.current = executionProfileManager;
   const s1LadderModule = new S1LadderModule({
     bus,
     positionRepo: repos.position,

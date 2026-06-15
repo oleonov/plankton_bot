@@ -138,6 +138,14 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       sellLadder: { enabled: false },
       adoptExistingPositions: { enabled: false },
       adoptExistingS1Ladders: { enabled: false },
+      monitoring: {
+        healthCheckIntervalMs: 300_000,
+        rollupWindowMs: 300_000,
+        maxRollupBuckets: 10_000,
+        pendingScaleInWarnAfterMs: 600_000,
+        healthRiskEventEveryMs: 1_800_000,
+        anomalyDetection: { enabled: false, cooldownMs: 3_600_000 },
+      },
     });
   });
 
@@ -204,6 +212,14 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           sellLadder: { enabled: true },
           adoptExistingPositions: { enabled: true },
           adoptExistingS1Ladders: { enabled: true },
+          monitoring: {
+            healthCheckIntervalMs: 60_000,
+            rollupWindowMs: 120_000,
+            maxRollupBuckets: 500,
+            pendingScaleInWarnAfterMs: 300_000,
+            healthRiskEventEveryMs: 900_000,
+            anomalyDetection: { enabled: true, cooldownMs: 600_000 },
+          },
         },
       }),
     );
@@ -257,6 +273,14 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       sellLadder: { enabled: true },
       adoptExistingPositions: { enabled: true },
       adoptExistingS1Ladders: { enabled: true },
+      monitoring: {
+        healthCheckIntervalMs: 60_000,
+        rollupWindowMs: 120_000,
+        maxRollupBuckets: 500,
+        pendingScaleInWarnAfterMs: 300_000,
+        healthRiskEventEveryMs: 900_000,
+        anomalyDetection: { enabled: true, cooldownMs: 600_000 },
+      },
     });
 
     const invalid = parseExecutionPolicyJson(
@@ -283,6 +307,44 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     ).toBe(true);
     expect(
       invalid.issues.some((issue) => issue.includes("executionProfile.qdHandoffThresholdMs")),
+    ).toBe(true);
+  });
+
+  it("parses Execution Profile monitoring and falls back field-by-field", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          monitoring: {
+            healthCheckIntervalMs: 60_000,
+            rollupWindowMs: -1,
+            maxRollupBuckets: 20_000,
+            pendingScaleInWarnAfterMs: 120_000,
+            healthRiskEventEveryMs: 600_000,
+            anomalyDetection: { enabled: true, cooldownMs: -5 },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.policy.executionProfile.monitoring).toEqual({
+      healthCheckIntervalMs: 60_000,
+      rollupWindowMs: DEFAULT_EXECUTION_POLICY.executionProfile.monitoring.rollupWindowMs,
+      maxRollupBuckets: 20_000,
+      pendingScaleInWarnAfterMs: 120_000,
+      healthRiskEventEveryMs: 600_000,
+      anomalyDetection: {
+        enabled: true,
+        cooldownMs:
+          DEFAULT_EXECUTION_POLICY.executionProfile.monitoring.anomalyDetection.cooldownMs,
+      },
+    });
+    expect(
+      parsed.issues.some((issue) => issue.includes("executionProfile.monitoring.rollupWindowMs")),
+    ).toBe(true);
+    expect(
+      parsed.issues.some((issue) =>
+        issue.includes("executionProfile.monitoring.anomalyDetection.cooldownMs"),
+      ),
     ).toBe(true);
   });
 

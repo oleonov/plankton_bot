@@ -142,6 +142,17 @@ export interface ExecutionProfilePolicy {
   sellLadder: { enabled: boolean };
   adoptExistingPositions: { enabled: boolean };
   adoptExistingS1Ladders: { enabled: boolean };
+  monitoring: {
+    healthCheckIntervalMs: number;
+    rollupWindowMs: number;
+    maxRollupBuckets: number;
+    pendingScaleInWarnAfterMs: number;
+    healthRiskEventEveryMs: number;
+    anomalyDetection: {
+      enabled: boolean;
+      cooldownMs: number;
+    };
+  };
 }
 
 export interface ExecutionProfileCostCapProfilePolicy {

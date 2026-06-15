@@ -1,5 +1,6 @@
 import {
   OrderStatus,
+  type CapDecision,
   S1_LADDER_RULE_ID,
   SignalReason,
   type EventBus,
@@ -8,13 +9,25 @@ import {
   type OrderRepository,
   type Position,
   type PositionRepository,
+  type RiskEventRepository,
   type RuntimeEventMap,
   type RuntimeModule,
+  type ScaleInDecision,
   type ScaleInConfig,
+  type ScaleInReason,
   type TokenId,
 } from "@krabs/domain";
 
 import { decideCostCap } from "./cost-cap-enforcer.js";
+import type { ExecutionProfileAnomalyDetector } from "./execution-profile-anomaly-detector.js";
+import type { ExecutionProfileHealthChecker } from "./execution-profile-health-checker.js";
+import {
+  EXECUTION_PROFILE_METRICS,
+  EXECUTION_PROFILE_RISK_EVENTS,
+  writeExecutionProfileCounter,
+  type ExecutionProfileLabels,
+} from "./execution-profile-metrics.js";
+import type { ExecutionProfileRollup } from "./execution-profile-rollup.js";
 import { InMemoryProfileOwnershipReader } from "./profile-ownership-reader.js";
 import { resolveProfile } from "./profile-resolver.js";
 import { reduceProfileState } from "./profile-state-reducer.js";
@@ -38,6 +51,7 @@ const SCALE_IN_STATES = new Set(["PROBING", "ACCUMULATING"]);
 
 export interface ExecutionProfileMetricWriter {
   writeCounter(name: string, value?: number, labels?: string): void;
+  writeEvent?(metricName: string, value: number, labels: string, capturedAt: string): void;
 }
 
 export interface ExecutionProfileManagerDeps {
@@ -48,13 +62,17 @@ export interface ExecutionProfileManagerDeps {
   policy: () => ExecutionProfilePolicy;
   scaleInSignalSource?: ScaleInSignalSource;
   runtimeMetrics?: ExecutionProfileMetricWriter;
+  riskEvents?: Pick<RiskEventRepository, "insert">;
+  rollup?: ExecutionProfileRollup;
+  healthChecker?: ExecutionProfileHealthChecker;
+  anomalyDetector?: ExecutionProfileAnomalyDetector;
   now?: () => number;
 }
 
 export class ExecutionProfileManager implements RuntimeModule {
   private readonly ownership = new InMemoryProfileOwnershipReader();
   private readonly scaleInSignalSource: ScaleInSignalSource;
-  private readonly pendingScaleIn = new Set<string>();
+  private readonly pendingScaleIn = new Map<string, { profile: Profile; createdAtMs: number }>();
   private readonly unsubscribers: Array<() => void> = [];
   private started = false;
 
@@ -69,6 +87,8 @@ export class ExecutionProfileManager implements RuntimeModule {
     this.adoptExistingS1Ladders();
     this.adoptExistingPositions();
     this.subscribe();
+    this.deps.rollup?.start();
+    this.deps.healthChecker?.start();
   }
 
   async stop(): Promise<void> {
@@ -76,6 +96,8 @@ export class ExecutionProfileManager implements RuntimeModule {
       const unsub = this.unsubscribers.pop();
       unsub?.();
     }
+    await this.deps.healthChecker?.stop();
+    await this.deps.rollup?.stop();
     this.started = false;
   }
 
@@ -119,6 +141,13 @@ export class ExecutionProfileManager implements RuntimeModule {
   private recoverState(): void {
     const active = this.deps.stateRepo.findAllActive();
     this.ownership.hydrate(active.map(toSnapshot));
+    const openTokenIds = this.deps.positionRepo.findOpen().map((position) => position.tokenId);
+    for (const orphan of this.deps.stateRepo.findOrphans(openTokenIds)) {
+      this.recordCounter(EXECUTION_PROFILE_METRICS.recoveryOrphan, {
+        profile: orphan.profile,
+        state: orphan.state,
+      });
+    }
   }
 
   private adoptExistingS1Ladders(): void {
@@ -173,6 +202,16 @@ export class ExecutionProfileManager implements RuntimeModule {
       this.deps.stateRepo.upsertState(state);
       this.ownership.setSnapshot(toSnapshot(state));
     });
+    this.recordCounter(EXECUTION_PROFILE_METRICS.assigned, { profile: state.profile });
+    this.recordRiskEvent(EXECUTION_PROFILE_RISK_EVENTS.assigned, {
+      tokenId: String(state.tokenId),
+      conditionId: String(state.conditionId),
+      profile: state.profile,
+      state: state.state,
+      activeLadderId: state.activeLadderId,
+      adoptedFrom: order == null ? "position" : "s1_ladder",
+      assignedAt: state.assumedAt,
+    });
   }
 
   private reclassifyFromPosition(tokenId: TokenId): void {
@@ -196,6 +235,17 @@ export class ExecutionProfileManager implements RuntimeModule {
     this.deps.stateRepo.runInTransaction(() => {
       this.deps.stateRepo.upsertState(next);
       this.ownership.setSnapshot(toSnapshot(next));
+    });
+    this.recordCounter(EXECUTION_PROFILE_METRICS.reclassified, {
+      fromProfile: current.profile,
+      toProfile: next.profile,
+    });
+    this.recordRiskEvent(EXECUTION_PROFILE_RISK_EVENTS.reclassified, {
+      tokenId: String(next.tokenId),
+      fromProfile: current.profile,
+      toProfile: next.profile,
+      avgEntry: position.avgEntryPrice,
+      reclassifiedAt: nowIso,
     });
   }
 
@@ -240,14 +290,19 @@ export class ExecutionProfileManager implements RuntimeModule {
     for (const market of markets.slice(0, policy.maxTokensPerCycle)) {
       const tokenId = market.tokenId;
       const state = this.deps.stateRepo.getState(tokenId);
-      if (state == null || !SCALE_IN_STATES.has(state.state)) continue;
+      if (state == null) continue;
+      if (!SCALE_IN_STATES.has(state.state)) {
+        this.recordManagerScaleInSkip(tokenId, state.profile, "not_active_state");
+        continue;
+      }
       const position = this.deps.positionRepo.findByTokenId(tokenId);
-      if (position == null || position.status !== "open" || position.size <= 0) continue;
+      if (position == null || position.status !== "open" || position.size <= 0) {
+        this.recordManagerScaleInSkip(tokenId, state.profile, "missing_position");
+        continue;
+      }
       const currentMarkPrice = resolveBuyMarkPrice(market);
       if (currentMarkPrice == null) {
-        this.recordCounter("track_execution_profile_scale_in_skipped", {
-          reason: "invalid_inputs",
-        });
+        this.recordManagerScaleInSkip(tokenId, state.profile, "missing_mark_price");
         continue;
       }
 
@@ -268,13 +323,13 @@ export class ExecutionProfileManager implements RuntimeModule {
         toScaleInConfig(policy),
       );
 
-      this.recordCounter("track_execution_profile_scale_in_decided", {
+      this.recordCounter(EXECUTION_PROFILE_METRICS.scaleInDecided, {
         profile: state.profile,
-        action: decision.action,
+        outcome: decision.action === "add" ? "allow" : "skip",
         mode: decision.mode ?? "none",
       });
       if (decision.action === "skip") {
-        this.recordCounter("track_execution_profile_scale_in_skipped", { reason: decision.reason });
+        this.recordScaleInSkip(state.profile, decision);
         continue;
       }
 
@@ -291,19 +346,28 @@ export class ExecutionProfileManager implements RuntimeModule {
         },
         { enabled: policy.costCaps.enabled, profiles: policy.profiles },
       );
+      this.recordCostCapTelemetry(tokenId, state.profile, cap);
       if (!cap.allow) {
-        this.recordCounter("track_execution_profile_scale_in_cost_cap_blocked", {
+        this.recordCounter(EXECUTION_PROFILE_METRICS.scaleInCostCapBlocked, {
           profile: state.profile,
           severity: cap.severity,
+        });
+        this.recordRollup({
+          kind: "cost_cap",
+          profile: state.profile,
+          outcome: "block",
+          mode: decision.mode ?? "none",
+          reason: "cost_cap_blocked",
+          sample: { tokenId: String(tokenId), severity: cap.severity, decisionReason: cap.reason },
         });
         continue;
       }
 
       if (this.hasOpenBuyOrder(tokenId) || this.pendingScaleIn.has(String(tokenId))) {
-        this.recordCounter("track_execution_profile_scale_in_skipped", { reason: "add_in_flight" });
+        this.recordManagerScaleInSkip(tokenId, state.profile, "add_in_flight", decision.mode);
         continue;
       }
-      this.pendingScaleIn.add(String(tokenId));
+      this.pendingScaleIn.set(String(tokenId), { profile: state.profile, createdAtMs: timestamp });
       await this.deps.bus.publish("SignalProduced", {
         market,
         signal: {
@@ -322,7 +386,19 @@ export class ExecutionProfileManager implements RuntimeModule {
           generatedAt: new Date(timestamp).toISOString(),
         },
       });
-      this.recordCounter("track_execution_profile_scale_in_emitted", { profile: state.profile });
+      this.recordCounter(EXECUTION_PROFILE_METRICS.scaleInEmitted, { profile: state.profile });
+      this.recordRollup({
+        kind: "scale_in",
+        profile: state.profile,
+        outcome: "allow",
+        mode: decision.mode ?? "none",
+        reason: "allowed",
+        sample: {
+          tokenId: String(tokenId),
+          proposedAddSizeUsd: decision.proposedAddSizeUsd,
+          markPrice: currentMarkPrice,
+        },
+      });
     }
   }
 
@@ -350,6 +426,7 @@ export class ExecutionProfileManager implements RuntimeModule {
       if (next.state === "CLOSED") this.ownership.deleteSnapshot(fill.tokenId);
       else this.ownership.setSnapshot(toSnapshot(next));
     });
+    this.consumeReducerEffects(reduction.effects, fill.timestamp);
   }
 
   private withBuyAccounting(
@@ -373,7 +450,109 @@ export class ExecutionProfileManager implements RuntimeModule {
   }
 
   private recordCounter(name: string, labels: Record<string, unknown>): void {
-    this.deps.runtimeMetrics?.writeCounter(name, 1, JSON.stringify(labels));
+    writeExecutionProfileCounter(this.deps.runtimeMetrics, name, labels as ExecutionProfileLabels);
+  }
+
+  private recordRiskEvent(eventType: string, payload: Record<string, unknown>): void {
+    this.deps.riskEvents?.insert({
+      eventType,
+      payload,
+    });
+  }
+
+  private recordManagerScaleInSkip(
+    tokenId: TokenId,
+    profile: Profile,
+    reason: ScaleInReason,
+    mode: ScaleInDecision["mode"] | "none" = "none",
+  ): void {
+    this.recordCounter(EXECUTION_PROFILE_METRICS.scaleInSkipped, { reason });
+    this.recordRollup({
+      kind: "scale_in",
+      profile,
+      outcome: "skip",
+      mode: mode ?? "none",
+      reason,
+      sample: { tokenId: String(tokenId) },
+    });
+  }
+
+  private recordScaleInSkip(profile: Profile, decision: ScaleInDecision): void {
+    this.recordCounter(EXECUTION_PROFILE_METRICS.scaleInSkipped, { reason: decision.reason });
+    this.recordRollup({
+      kind: "scale_in",
+      profile,
+      outcome: decision.reason === "scale_in_disabled" ? "disabled" : "skip",
+      mode: decision.mode ?? "none",
+      reason: decision.reason,
+      sample: {
+        proposedAddSizeUsd: decision.proposedAddSizeUsd,
+        triggerSignals: decision.triggerSignals,
+      },
+    });
+  }
+
+  private recordCostCapTelemetry(tokenId: TokenId, profile: Profile, cap: CapDecision): void {
+    const decision = cap.allow
+      ? "allow"
+      : cap.reason === "cost_caps_disabled"
+        ? "disabled"
+        : "block";
+    this.recordCounter(EXECUTION_PROFILE_METRICS.costCapEnforced, {
+      profile,
+      severity: cap.severity,
+      decision,
+    });
+    this.recordCounter(costCapSeverityMetric(cap.severity), { profile });
+    if (cap.crossedBand !== "none") {
+      this.recordCounter(EXECUTION_PROFILE_METRICS.costCapCrossed, { band: cap.crossedBand });
+    }
+    this.recordRiskEvent(EXECUTION_PROFILE_RISK_EVENTS.costCapDecided, {
+      tokenId: String(tokenId),
+      profile,
+      allow: cap.allow,
+      severity: cap.severity,
+      crossedBand: cap.crossedBand,
+      reason: cap.reason,
+      requiredSignal: cap.requiredSignal,
+      currentCostUsd: cap.currentCostUsd,
+      roundedCurrentCostUsd: cap.roundedCurrentCostUsd,
+      projectedCostUsd: cap.projectedCostUsd,
+      roundedProjectedCostUsd: cap.roundedProjectedCostUsd,
+      normalCapUsd: cap.normalCapUsd,
+      aggressiveCapUsd: cap.aggressiveCapUsd,
+      hardCapAtAggressive: cap.hardCapAtAggressive,
+      signalReasons: cap.signalReasons,
+    });
+  }
+
+  private consumeReducerEffects(
+    effects: readonly { type: string; name: string; payload?: Readonly<Record<string, unknown>> }[],
+    occurredAtMs: number,
+  ): void {
+    for (const effect of effects) {
+      if (effect.type === "increment_counter") {
+        this.recordCounter(effect.name, (effect.payload ?? {}) as Record<string, unknown>);
+      }
+      if (effect.type === "publish_event") {
+        this.recordRiskEvent(effect.name, {
+          ...(effect.payload ?? {}),
+          occurredAt: new Date(occurredAtMs).toISOString(),
+        });
+      }
+    }
+  }
+
+  private recordRollup(input: Parameters<ExecutionProfileRollup["record"]>[0]): void {
+    this.deps.rollup?.record(input);
+  }
+
+  getPendingScaleIns(): Array<{ tokenId: string; profile: Profile; createdAtMs: number }> {
+    return [...this.pendingScaleIn.entries()].map(([tokenId, pending]) => ({
+      tokenId,
+      profile: pending.profile,
+      createdAtMs: pending.createdAtMs,
+    }));
   }
 }
 
@@ -420,4 +599,10 @@ function readS1LadderId(order: Order): string | null {
   return s1 != null && typeof s1 === "object" && "ladderId" in s1 && typeof s1.ladderId === "string"
     ? s1.ladderId
     : null;
+}
+
+function costCapSeverityMetric(severity: CapDecision["severity"]): string {
+  if (severity === "under_p75") return EXECUTION_PROFILE_METRICS.costCapUnder;
+  if (severity === "between") return EXECUTION_PROFILE_METRICS.costCapBetween;
+  return EXECUTION_PROFILE_METRICS.costCapOver;
 }

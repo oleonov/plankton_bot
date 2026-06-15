@@ -5,6 +5,7 @@ export const SIGNAL_TELEMETRY_RISK_EVENT_TYPES = [
   "signal_emitted",
   "signal_suppressed",
   "planner_suppressed_rollup",
+  "execution_profile_decision_chain_rollup",
 ] as const;
 
 export interface RiskEventVolumeSnapshotInput {

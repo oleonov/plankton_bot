@@ -16,6 +16,7 @@ import type {
   ExecutionPolicy,
   ExecutionProfileCostCapProfilePolicy,
   ExecutionProfileHysteresisBounds,
+  ExecutionProfileMonitoringConfig,
   ExecutionProfilePolicy,
   ExecutionProfileProfilesPolicy,
   ExecutionProfileScaleInProfilePolicy,
@@ -267,6 +268,17 @@ export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
   sellLadder: { enabled: false },
   adoptExistingPositions: { enabled: false },
   adoptExistingS1Ladders: { enabled: false },
+  monitoring: {
+    healthCheckIntervalMs: 300_000,
+    rollupWindowMs: 300_000,
+    maxRollupBuckets: 10_000,
+    pendingScaleInWarnAfterMs: 600_000,
+    healthRiskEventEveryMs: 1_800_000,
+    anomalyDetection: {
+      enabled: false,
+      cooldownMs: 3_600_000,
+    },
+  },
 };
 
 export const DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY: ExitTtlByLiquidityPolicyConfig = {
@@ -534,6 +546,10 @@ const BOUND_EXECUTION_PROFILE_HANDOFF_MIN_MS = 60_000;
 const BOUND_EXECUTION_PROFILE_HANDOFF_MAX_MS = 24 * 60 * 60_000;
 const BOUND_EXECUTION_PROFILE_PRICE_MIN = 0;
 const BOUND_EXECUTION_PROFILE_PRICE_MAX = 1;
+const BOUND_EXECUTION_PROFILE_MONITORING_MIN_MS = 1_000;
+const BOUND_EXECUTION_PROFILE_MONITORING_MAX_MS = 24 * 60 * 60_000;
+const BOUND_EXECUTION_PROFILE_ROLLUP_BUCKETS_MIN = 1;
+const BOUND_EXECUTION_PROFILE_ROLLUP_BUCKETS_MAX = 1_000_000;
 const BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS = 30_000;
 const BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS = 24 * 60 * 60_000;
 const BOUND_REDEEM_SWEEP_RETRY_COUNT_MAX = 10;
@@ -1452,6 +1468,78 @@ function parseExecutionProfile(raw: unknown, issues: string[]): ExecutionProfile
       issues,
       "executionProfile.adoptExistingS1Ladders",
     ),
+    monitoring: parseExecutionProfileMonitoring(obj.monitoring, issues),
+  };
+}
+
+function parseExecutionProfileMonitoring(
+  raw: unknown,
+  issues: string[],
+): ExecutionProfileMonitoringConfig {
+  const fallback = DEFAULT_EXECUTION_PROFILE_POLICY.monitoring;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.monitoring must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  const anomalyDetection = objectOr(obj.anomalyDetection);
+  return {
+    healthCheckIntervalMs: clampedInt(
+      obj.healthCheckIntervalMs,
+      fallback.healthCheckIntervalMs,
+      BOUND_EXECUTION_PROFILE_MONITORING_MIN_MS,
+      BOUND_EXECUTION_PROFILE_MONITORING_MAX_MS,
+      issues,
+      "executionProfile.monitoring.healthCheckIntervalMs",
+    ),
+    rollupWindowMs: clampedInt(
+      obj.rollupWindowMs,
+      fallback.rollupWindowMs,
+      BOUND_EXECUTION_PROFILE_MONITORING_MIN_MS,
+      BOUND_EXECUTION_PROFILE_MONITORING_MAX_MS,
+      issues,
+      "executionProfile.monitoring.rollupWindowMs",
+    ),
+    maxRollupBuckets: clampedInt(
+      obj.maxRollupBuckets,
+      fallback.maxRollupBuckets,
+      BOUND_EXECUTION_PROFILE_ROLLUP_BUCKETS_MIN,
+      BOUND_EXECUTION_PROFILE_ROLLUP_BUCKETS_MAX,
+      issues,
+      "executionProfile.monitoring.maxRollupBuckets",
+    ),
+    pendingScaleInWarnAfterMs: clampedInt(
+      obj.pendingScaleInWarnAfterMs,
+      fallback.pendingScaleInWarnAfterMs,
+      BOUND_EXECUTION_PROFILE_MONITORING_MIN_MS,
+      BOUND_EXECUTION_PROFILE_MONITORING_MAX_MS,
+      issues,
+      "executionProfile.monitoring.pendingScaleInWarnAfterMs",
+    ),
+    healthRiskEventEveryMs: clampedInt(
+      obj.healthRiskEventEveryMs,
+      fallback.healthRiskEventEveryMs,
+      BOUND_EXECUTION_PROFILE_MONITORING_MIN_MS,
+      BOUND_EXECUTION_PROFILE_MONITORING_MAX_MS,
+      issues,
+      "executionProfile.monitoring.healthRiskEventEveryMs",
+    ),
+    anomalyDetection: {
+      enabled: booleanOr(
+        anomalyDetection?.enabled,
+        fallback.anomalyDetection.enabled,
+        issues,
+        "executionProfile.monitoring.anomalyDetection.enabled",
+      ),
+      cooldownMs: clampedInt(
+        anomalyDetection?.cooldownMs,
+        fallback.anomalyDetection.cooldownMs,
+        BOUND_EXECUTION_PROFILE_MONITORING_MIN_MS,
+        BOUND_EXECUTION_PROFILE_MONITORING_MAX_MS,
+        issues,
+        "executionProfile.monitoring.anomalyDetection.cooldownMs",
+      ),
+    },
   };
 }
 

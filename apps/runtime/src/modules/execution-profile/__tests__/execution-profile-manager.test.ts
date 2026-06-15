@@ -22,7 +22,12 @@ import {
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { S1_LADDER_RULE_ID } from "@krabs/domain";
-import { ExecutionProfileManager } from "../execution-profile-manager.js";
+import {
+  ExecutionProfileManager,
+  type ExecutionProfileManagerDeps,
+} from "../execution-profile-manager.js";
+import { EXECUTION_PROFILE_RISK_EVENTS } from "../execution-profile-metrics.js";
+import { ExecutionProfileRollup } from "../execution-profile-rollup.js";
 import { DEFAULT_PROFILE_HYSTERESIS } from "../profile-resolver.js";
 import { InMemoryExecutionProfileStateRepository } from "../state-repository.js";
 import type { ExecutionProfilePolicy, ExecutionProfileStateRecord } from "../types.js";
@@ -36,6 +41,14 @@ const DEFAULT_POLICY: ExecutionProfilePolicy = {
   maxTokensPerCycle: 100,
   qdHandoffThresholdMs: 3_600_000,
   profileHysteresis: DEFAULT_PROFILE_HYSTERESIS,
+  monitoring: {
+    healthCheckIntervalMs: 300_000,
+    rollupWindowMs: 300_000,
+    maxRollupBuckets: 10_000,
+    pendingScaleInWarnAfterMs: 600_000,
+    healthRiskEventEveryMs: 1_800_000,
+    anomalyDetection: { enabled: false, cooldownMs: 3_600_000 },
+  },
 };
 
 function policy(overrides: Partial<ExecutionProfilePolicy> = {}): ExecutionProfilePolicy {
@@ -69,6 +82,14 @@ function policy(overrides: Partial<ExecutionProfilePolicy> = {}): ExecutionProfi
     adoptExistingS1Ladders: {
       ...DEFAULT_POLICY.adoptExistingS1Ladders,
       ...(overrides.adoptExistingS1Ladders ?? {}),
+    },
+    monitoring: {
+      ...DEFAULT_POLICY.monitoring,
+      ...(overrides.monitoring ?? {}),
+      anomalyDetection: {
+        ...DEFAULT_POLICY.monitoring.anomalyDetection,
+        ...(overrides.monitoring?.anomalyDetection ?? {}),
+      },
     },
   };
 }
@@ -237,8 +258,11 @@ function makeManager(args: {
   repo?: InMemoryExecutionProfileStateRepository;
   bus?: InProcessEventBus;
   signalSnapshot?: ScaleInMarketSignals;
+  runtimeMetrics?: ReturnType<typeof makeMetrics>;
+  riskEvents?: ReturnType<typeof makeRiskEvents>;
+  rollup?: ExecutionProfileRollup;
 }): ExecutionProfileManager {
-  const deps = {
+  const deps: ExecutionProfileManagerDeps = {
     bus: args.bus ?? new InProcessEventBus(),
     stateRepo: args.repo ?? new InMemoryExecutionProfileStateRepository(),
     positionRepo: makePositionRepo(args.positions ?? []),
@@ -246,12 +270,52 @@ function makeManager(args: {
     policy: () => args.profilePolicy,
     now: () => NOW,
   };
+  if (args.runtimeMetrics != null) deps.runtimeMetrics = args.runtimeMetrics;
+  if (args.riskEvents != null) deps.riskEvents = args.riskEvents;
+  if (args.rollup != null) deps.rollup = args.rollup;
   if (args.signalSnapshot == null) return new ExecutionProfileManager(deps);
   return new ExecutionProfileManager({
     ...deps,
     scaleInSignalSource: {
       getSignalSnapshot: vi.fn(() => args.signalSnapshot as ScaleInMarketSignals),
     },
+  });
+}
+
+function makeMetrics() {
+  return {
+    counters: [] as Array<{ name: string; value: number | undefined; labels: string | undefined }>,
+    events: [] as Array<{ name: string; value: number; labels: string; capturedAt: string }>,
+    writeCounter(name: string, value?: number, labels?: string): void {
+      this.counters.push({ name, value, labels });
+    },
+    writeEvent(name: string, value: number, labels: string, capturedAt: string): void {
+      this.events.push({ name, value, labels, capturedAt });
+    },
+  };
+}
+
+function makeRiskEvents() {
+  return {
+    inserts: [] as Array<{ eventType: string; payload: Record<string, unknown> }>,
+    insert(event: { eventType: string; payload: Record<string, unknown> }): void {
+      this.inserts.push(event);
+    },
+  };
+}
+
+function makeRollup(
+  riskEvents = makeRiskEvents(),
+  metrics = makeMetrics(),
+): ExecutionProfileRollup {
+  return new ExecutionProfileRollup({
+    windowMs: 300_000,
+    maxBuckets: 10_000,
+    now: () => NOW,
+    emit: (event) => riskEvents.insert(event),
+    writeCounter: (name, value, labels) => metrics.writeCounter(name, value, labels),
+    writeEvent: (name, value, labels, capturedAt) =>
+      metrics.writeEvent(name, value, labels, capturedAt),
   });
 }
 
@@ -303,6 +367,8 @@ describe("ExecutionProfileManager", () => {
   });
 
   it("adopts generic open positions only when sellLadder and adoption are both enabled", async () => {
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
     const manager = makeManager({
       profilePolicy: policy({
         enabled: true,
@@ -310,12 +376,23 @@ describe("ExecutionProfileManager", () => {
         adoptExistingPositions: { enabled: true },
       }),
       positions: [position()],
+      runtimeMetrics: metrics,
+      riskEvents,
     });
 
     await manager.start();
 
     expect(manager.getSnapshot(tokenId)).toMatchObject({ profile: "medium", state: "EXITING" });
     expect(manager.shouldSuppressLegacySell(tokenId)).toBe(true);
+    expect(metrics.counters).toContainEqual({
+      name: "track_execution_profile_assigned",
+      value: 1,
+      labels: '{"profile":"medium"}',
+    });
+    expect(riskEvents.inserts).toContainEqual({
+      eventType: EXECUTION_PROFILE_RISK_EVENTS.assigned,
+      payload: expect.objectContaining({ profile: "medium", state: "EXITING" }),
+    });
   });
 
   it("adopts active S1_LADDER orders without enabling suppression while sellLadder is disabled", async () => {
@@ -378,6 +455,64 @@ describe("ExecutionProfileManager", () => {
     });
   });
 
+  it("records cost-cap counters and risk event when Spec 2 blocks scale-in", async () => {
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
+    const rollup = makeRollup(riskEvents, metrics);
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ lastBuyAtMs: NOW - 2_000_000, addCount: 1, initialProbeSizeUsd: 7.15 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      riskEvents,
+      rollup,
+      signalSnapshot: zeroSignals(),
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true },
+        costCaps: { enabled: true },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 30 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.106 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    rollup.flushAll("test");
+
+    expect(metrics.counters).toContainEqual({
+      name: "track_execution_profile_cost_cap_enforced",
+      value: 1,
+      labels: '{"decision":"block","profile":"medium","severity":"between"}',
+    });
+    expect(metrics.counters).toContainEqual({
+      name: "track_execution_profile_cost_cap_between",
+      value: 1,
+      labels: '{"profile":"medium"}',
+    });
+    expect(riskEvents.inserts).toContainEqual({
+      eventType: EXECUTION_PROFILE_RISK_EVENTS.costCapDecided,
+      payload: expect.objectContaining({
+        tokenId: String(tokenId),
+        profile: "medium",
+        allow: false,
+        severity: "between",
+      }),
+    });
+    expect(
+      riskEvents.inserts.some(
+        (event) => event.eventType === EXECUTION_PROFILE_RISK_EVENTS.decisionChainRollup,
+      ),
+    ).toBe(true);
+  });
+
   it("uses lastBuyAtMs null as zero elapsed time and blocks adopted positions", async () => {
     const bus = new InProcessEventBus();
     const signals: Signal[] = [];
@@ -408,12 +543,49 @@ describe("ExecutionProfileManager", () => {
     expect(signals).toHaveLength(0);
   });
 
-  it("updates addCount directly on repeated BUY fills while reducer state no-ops", async () => {
+  it("records profile reclassification counter and risk event on BUY fill avg-entry update", async () => {
     const repo = new InMemoryExecutionProfileStateRepository([state({ state: "PROBING" })]);
     const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
     const manager = makeManager({
       bus,
       repo,
+      runtimeMetrics: metrics,
+      riskEvents,
+      profilePolicy: policy({ enabled: true }),
+      positions: [position({ avgEntryPrice: 0.02 })],
+    });
+
+    await manager.start();
+    await bus.publish("FillReceived", fill({ timestamp: NOW + 1_000, sizeUsdc: 1 }));
+
+    expect(repo.getState(tokenId)).toMatchObject({ profile: "cheap" });
+    expect(metrics.counters).toContainEqual({
+      name: "track_execution_profile_reclassified",
+      value: 1,
+      labels: '{"fromProfile":"medium","toProfile":"cheap"}',
+    });
+    expect(riskEvents.inserts).toContainEqual({
+      eventType: EXECUTION_PROFILE_RISK_EVENTS.reclassified,
+      payload: expect.objectContaining({
+        tokenId: String(tokenId),
+        fromProfile: "medium",
+        toProfile: "cheap",
+      }),
+    });
+  });
+
+  it("updates addCount directly on repeated BUY fills while reducer state no-ops", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository([state({ state: "PROBING" })]);
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      riskEvents,
       profilePolicy: policy({ enabled: true }),
       positions: [position()],
     });
@@ -425,6 +597,15 @@ describe("ExecutionProfileManager", () => {
       addCount: 1,
       lastBuyAtMs: NOW + 1_000,
       initialProbeSizeUsd: 7.15,
+    });
+    expect(metrics.counters).toContainEqual({
+      name: "track_execution_profile_state_transition",
+      value: 1,
+      labels: '{"from":"PROBING","to":"ACCUMULATING"}',
+    });
+    expect(riskEvents.inserts).toContainEqual({
+      eventType: EXECUTION_PROFILE_RISK_EVENTS.stateChanged,
+      payload: expect.objectContaining({ from: "PROBING", to: "ACCUMULATING" }),
     });
 
     await bus.publish("FillReceived", fill({ timestamp: NOW + 2_000, sizeUsdc: 5 }));
