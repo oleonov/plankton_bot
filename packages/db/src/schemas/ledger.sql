@@ -556,7 +556,16 @@ CREATE TABLE IF NOT EXISTS execution_profile_state (
   condition_id TEXT NOT NULL,
   profile TEXT NOT NULL CHECK (profile IN ('cheap', 'medium', 'expensive')),
   state TEXT NOT NULL CHECK (
-    state IN ('SCANNING', 'PROBING', 'ACCUMULATING', 'EXITING', 'QD_HANDOFF', 'ABANDONED', 'CLOSED')
+    state IN (
+      'SCANNING',
+      'PROBING',
+      'ACCUMULATING',
+      'EXITING',
+      'QD_HANDOFF',
+      'ABANDONED',
+      'ABANDONED_DORMANT',
+      'CLOSED'
+    )
   ),
   assumed_at TEXT NOT NULL,
   last_avg_entry REAL NOT NULL,

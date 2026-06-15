@@ -296,6 +296,43 @@ describe("migration 072 — profile ladder state", () => {
   });
 });
 
+describe("migration 073 — execution profile abandoned dormant state", () => {
+  it("widens execution_profile_state state CHECK to accept ABANDONED_DORMANT", () => {
+    db.exec(readMigration("069_execution_profile_state.sql"));
+    db.exec(applySafeAddColumnStatements(db, readMigration("070_execution_profile_scale_in_columns.sql")));
+
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO execution_profile_state
+             (token_id, condition_id, profile, state, assumed_at, last_avg_entry,
+              last_transition_at, created_at, updated_at)
+           VALUES ('tok-before', 'cond-before', 'cheap', 'ABANDONED_DORMANT',
+                   '2026-06-15T00:00:00.000Z', 0.04,
+                   '2026-06-15T00:00:00.000Z', '2026-06-15T00:00:00.000Z',
+                   '2026-06-15T00:00:00.000Z')`,
+        )
+        .run(),
+    ).toThrow(/CHECK constraint failed/i);
+
+    db.exec(readMigration("073_abandoned_dormant_state.sql"));
+
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO execution_profile_state
+             (token_id, condition_id, profile, state, assumed_at, last_avg_entry,
+              last_transition_at, created_at, updated_at)
+           VALUES ('tok-after', 'cond-after', 'cheap', 'ABANDONED_DORMANT',
+                   '2026-06-15T00:00:00.000Z', 0.04,
+                   '2026-06-15T00:00:00.000Z', '2026-06-15T00:00:00.000Z',
+                   '2026-06-15T00:00:00.000Z')`,
+        )
+        .run(),
+    ).not.toThrow();
+  });
+});
+
 describe("migration 067 — Track R liquidation reporting columns", () => {
   beforeEach(() => {
     db.exec(`
