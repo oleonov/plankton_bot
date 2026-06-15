@@ -1,10 +1,12 @@
 import type {
+  AbandonmentReason,
   CostCapCrossedBand,
   CostCapSeverity,
   ExecutionProfileDecision,
   ExecutionProfileHealthStatus,
   ExecutionProfileName,
   FreshnessStatus,
+  ProfileLadderBand,
   ScaleInMode,
   ScaleInReason,
 } from "@krabs/domain";
@@ -32,6 +34,10 @@ export const EXECUTION_PROFILE_METRICS = {
   signalFreshnessGauge: "track_execution_profile_signal_freshness_gauge",
   rollupBucketGauge: "track_execution_profile_rollup_bucket_count_gauge",
   rollupOverflow: "track_execution_profile_rollup_overflow_count",
+  positionAbandonedDormantPerBand: "position_abandoned_dormant_per_band",
+  positionAbandonedEvaluation: "position_abandoned_evaluation",
+  scaleInSkippedDormant: "scale_in_skipped_dormant",
+  ladderRebuildSkippedDormant: "ladder_rebuild_skipped_dormant",
 } as const;
 
 export const EXECUTION_PROFILE_RISK_EVENTS = {
@@ -43,6 +49,7 @@ export const EXECUTION_PROFILE_RISK_EVENTS = {
   decisionChainRollup: "execution_profile_decision_chain_rollup",
   healthCheck: "profile_health_check",
   anomalyDetected: "profile_anomaly_detected",
+  positionAbandonedDormant: "position_abandoned_dormant",
 } as const;
 
 export interface ExecutionProfileCounterWriter {
@@ -64,8 +71,12 @@ export type ExecutionProfileLabelValue =
   | ExecutionProfileDecision
   | ExecutionProfileHealthStatus
   | FreshnessStatus
+  | ProfileLadderBand
+  | AbandonmentReason
   | "null"
   | "none"
+  | "abandoned"
+  | "kept"
   | "scale_in"
   | "cost_cap"
   | "health"
@@ -82,6 +93,12 @@ export type ExecutionProfileLabelValue =
 export type ExecutionProfileLabels = Readonly<Record<string, ExecutionProfileLabelValue>>;
 
 const PROFILES = new Set<ExecutionProfileName>(["cheap", "medium", "expensive"]);
+const PROFILE_LADDER_BANDS = new Set<ProfileLadderBand>([
+  "cheap",
+  "medium_low",
+  "medium_high",
+  "expensive",
+]);
 const STATES = new Set<ProfileState>(PROFILE_STATES);
 const MODES = new Set<ScaleInMode>(["up", "flat", "avg_down"]);
 const SEVERITIES = new Set<CostCapSeverity>(["under_p75", "between", "over_p90"]);
@@ -119,6 +136,21 @@ const REASONS = new Set<ScaleInReason>([
   "missing_position",
   "not_active_state",
   "missing_mark_price",
+]);
+const ABANDONMENT_REASONS = new Set<AbandonmentReason>([
+  "qualified",
+  "abandonment_disabled",
+  "band_disabled",
+  "invalid_input",
+  "state_not_eligible",
+  "cost_above_probe_max",
+  "buy_count_above_probe_max",
+  "prior_sell",
+  "first_buy_missing",
+  "timer_not_elapsed",
+  "pending_scale_in",
+  "active_profile_ladder",
+  "active_sell_order",
 ]);
 
 export function serializeExecutionProfileLabels(labels: ExecutionProfileLabels): string {
@@ -177,7 +209,12 @@ function isAllowedLabel(key: string, value: string): boolean {
     return value === "null" || STATES.has(value as ProfileState);
   if (key === "mode") return value === "none" || MODES.has(value as ScaleInMode);
   if (key === "severity") return SEVERITIES.has(value as CostCapSeverity);
-  if (key === "band") return CROSSED_BANDS.has(value as CostCapCrossedBand);
+  if (key === "band")
+    return (
+      CROSSED_BANDS.has(value as CostCapCrossedBand) ||
+      PROFILE_LADDER_BANDS.has(value as ProfileLadderBand)
+    );
+  if (key === "result") return value === "abandoned" || value === "kept";
   if (key === "outcome" || key === "decision")
     return OUTCOMES.has(value as ExecutionProfileDecision);
   if (key === "status")
@@ -187,7 +224,12 @@ function isAllowedLabel(key: string, value: string): boolean {
     );
   if (key === "freshness") return FRESHNESS_STATUSES.has(value as FreshnessStatus);
   if (key === "kind" || key === "component") return CHAIN_KINDS.has(value);
-  if (key === "reason") return REASONS.has(value as ScaleInReason) || value === "none";
+  if (key === "reason")
+    return (
+      REASONS.has(value as ScaleInReason) ||
+      ABANDONMENT_REASONS.has(value as AbandonmentReason) ||
+      value === "none"
+    );
   if (key === "source") return value === "stub" || value === "runtime";
   return false;
 }

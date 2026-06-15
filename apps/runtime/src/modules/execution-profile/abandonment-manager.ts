@@ -1,4 +1,5 @@
 import type {
+  AbandonmentReason,
   AbandonmentEvaluatorInput,
   ExecutionProfilePolicy,
   Order,
@@ -10,7 +11,12 @@ import type {
 } from "@krabs/domain";
 
 import { decideAbandonment } from "./abandonment-evaluator.js";
-import type { ExecutionProfileCounterWriter } from "./execution-profile-metrics.js";
+import {
+  EXECUTION_PROFILE_METRICS,
+  EXECUTION_PROFILE_RISK_EVENTS,
+  writeExecutionProfileCounter,
+  type ExecutionProfileCounterWriter,
+} from "./execution-profile-metrics.js";
 import { reduceProfileState } from "./profile-state-reducer.js";
 import type {
   ExecutionProfileStateRecord,
@@ -58,6 +64,7 @@ export class AbandonmentManager {
       const input = this.inputForState(state, nowMs);
       if (input == null) continue;
       const decision = decideAbandonment(input, config);
+      this.recordEvaluation(input.band, decision.result, decision.reason);
       if (!decision.shouldAbandon) continue;
 
       const reduction = reduceProfileState(state, {
@@ -76,10 +83,40 @@ export class AbandonmentManager {
       this.deps.stateRepo.runInTransaction(() => {
         this.deps.stateRepo.upsertState(next);
       });
+      writeExecutionProfileCounter(
+        this.deps.metrics,
+        EXECUTION_PROFILE_METRICS.positionAbandonedDormantPerBand,
+        { band: input.band },
+      );
+      this.deps.riskEvents?.insert({
+        eventType: EXECUTION_PROFILE_RISK_EVENTS.positionAbandonedDormant,
+        payload: {
+          tokenId: String(state.tokenId),
+          conditionId: String(state.conditionId),
+          band: input.band,
+          costBasisUsdc: input.costBasisUsdc,
+          buyCount: input.buyCount,
+          sellCount: input.sellCount,
+          ageMs: decision.timeSinceFirstBuyMs,
+          reason: decision.reason,
+        },
+      });
       this.deps.onStateChanged?.(next);
       transitioned += 1;
     }
     return transitioned;
+  }
+
+  private recordEvaluation(
+    band: AbandonmentEvaluatorInput["band"],
+    result: "abandoned" | "kept",
+    reason: AbandonmentReason,
+  ): void {
+    writeExecutionProfileCounter(
+      this.deps.metrics,
+      EXECUTION_PROFILE_METRICS.positionAbandonedEvaluation,
+      { band, result, reason },
+    );
   }
 
   private candidates(maxTokensPerCycle: number): ExecutionProfileStateRecord[] {
