@@ -1071,6 +1071,67 @@ export interface ExecutionProfileSignalFeedConfig {
   maintenanceIntervalMs: number;
 }
 
+export type ExecutionProfileStateName =
+  | "SCANNING"
+  | "PROBING"
+  | "ACCUMULATING"
+  | "EXITING"
+  | "QD_HANDOFF"
+  | "ABANDONED"
+  | "ABANDONED_DORMANT"
+  | "CLOSED";
+
+export interface ExecutionProfileAbandonmentBandConfig {
+  enabled: boolean;
+  probeSizeMaxUsdc: number;
+  maxProbeBuyCount: number;
+  scaleInRequiredWithinMs: number;
+}
+
+export interface ExecutionProfileAbandonmentConfig {
+  enabled: boolean;
+  evaluationIntervalMs: number;
+  maxTokensPerCycle: number;
+  hardStaleFallbackMs: number;
+  bands: Record<ProfileLadderBand, ExecutionProfileAbandonmentBandConfig>;
+}
+
+export type AbandonmentReason =
+  | "qualified"
+  | "abandonment_disabled"
+  | "band_disabled"
+  | "invalid_input"
+  | "state_not_eligible"
+  | "cost_above_probe_max"
+  | "buy_count_above_probe_max"
+  | "prior_sell"
+  | "first_buy_missing"
+  | "timer_not_elapsed"
+  | "pending_scale_in"
+  | "active_profile_ladder"
+  | "active_sell_order";
+
+export interface AbandonmentEvaluatorInput {
+  band: ProfileLadderBand;
+  state: "PROBING" | "ACCUMULATING";
+  costBasisUsdc: number;
+  buyCount: number;
+  sellCount: number;
+  firstBuyAtMs: number | null;
+  nowMs: number;
+  pendingScaleIn: boolean;
+  activeProfileLadder: boolean;
+  activeSellOrder: boolean;
+}
+
+export interface AbandonmentEvaluatorOutput {
+  shouldAbandon: boolean;
+  result: "abandoned" | "kept";
+  reason: AbandonmentReason;
+  band: ProfileLadderBand;
+  timeSinceFirstBuyMs: number | null;
+}
+
 export type CostCapSeverity = "under_p75" | "between" | "over_p90";
 
 export type CostCapCrossedBand = "none" | "normal" | "aggressive";
@@ -1282,6 +1343,7 @@ export interface ExecutionProfilePolicy {
   costCaps: ExecutionProfileCostCapsPolicy;
   scaleIn: ExecutionProfileScaleInFeatureToggle;
   signalFeed: ExecutionProfileSignalFeedConfig;
+  abandonment: ExecutionProfileAbandonmentConfig;
   profiles: ExecutionProfileProfilesPolicy;
   sellLadder: ExecutionProfileSellLadderConfig;
   adoptExistingPositions: ExecutionProfileFeatureToggle;
