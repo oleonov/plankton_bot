@@ -34,7 +34,7 @@ export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOu
   const activeRungCount = resolveActiveRungCount(input, band);
   const sizing = normalizeActiveSizing(bandConfig.sizingVector, activeRungCount);
   const modeAdjustment = input.config.modeAdjustments[input.mode];
-  const rungs = sizing.map((sizingFraction, index): LadderRung => {
+  const initialRungs = sizing.map((sizingFraction, index): LadderRung => {
     const multiplier = bandConfig.multipliers[index]!;
     const price = ceilToTick(input.avgEntryPrice * multiplier * modeAdjustment, input.tickSize);
     const sizeShares = roundQuantity(input.positionSizeShares * sizingFraction);
@@ -51,7 +51,8 @@ export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOu
     };
   });
 
-  if (rungs.some((rung) => rung.sizeShares + 1e-9 < input.minOrderSize)) {
+  const rungs = fitRungsToMinNotional(initialRungs, input.positionSizeShares, input.minOrderSize);
+  if (rungs.length === 0) {
     return { ok: false, reason: "below_min_order_size", band };
   }
 
@@ -59,7 +60,7 @@ export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOu
     ok: true,
     ladderId: buildProfileLadderId(input, band),
     band,
-    activeRungCount,
+    activeRungCount: rungs.length,
     rungs,
   };
 }
@@ -99,6 +100,46 @@ function normalizeActiveSizing(raw: readonly number[], count: number): number[] 
   const active = raw.slice(0, Math.min(4, Math.max(1, count)));
   const sum = active.reduce((acc, value) => acc + value, 0);
   return active.map((value) => roundRatio(value / sum));
+}
+
+function fitRungsToMinNotional(
+  rawRungs: readonly LadderRung[],
+  positionSizeShares: number,
+  minOrderNotionalUsd: number,
+): LadderRung[] {
+  let rungs = [...rawRungs];
+  while (rungs.some((rung) => rung.notionalUsd + 1e-9 < minOrderNotionalUsd)) {
+    if (rungs.length <= 1) return [];
+
+    const violatingIndex = rungs.findIndex((rung) => rung.notionalUsd + 1e-9 < minOrderNotionalUsd);
+    const neighborIndex = chooseLargestNeighborIndex(rungs, violatingIndex);
+    const violating = rungs[violatingIndex]!;
+    const neighbor = rungs[neighborIndex]!;
+    const merged: LadderRung = {
+      ...neighbor,
+      sizeShares: roundQuantity(neighbor.sizeShares + violating.sizeShares),
+    };
+    merged.notionalUsd = roundCents(merged.price * merged.sizeShares);
+    rungs = rungs
+      .map((rung, index) => (index === neighborIndex ? merged : rung))
+      .filter((_rung, index) => index !== violatingIndex);
+  }
+
+  return rungs.map((rung, index) => ({
+    ...rung,
+    rungIndex: index,
+    sizingFraction: roundRatio(rung.sizeShares / positionSizeShares),
+    notionalUsd: roundCents(rung.price * rung.sizeShares),
+  }));
+}
+
+function chooseLargestNeighborIndex(rungs: readonly LadderRung[], index: number): number {
+  const left = index > 0 ? index - 1 : null;
+  const right = index < rungs.length - 1 ? index + 1 : null;
+  if (left == null && right == null) return index;
+  if (left == null) return right!;
+  if (right == null) return left;
+  return rungs[left]!.notionalUsd >= rungs[right]!.notionalUsd ? left : right;
 }
 
 function isValidBbo(bestBid: number | null, bestAsk: number | null): boolean {

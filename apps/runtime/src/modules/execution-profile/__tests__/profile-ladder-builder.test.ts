@@ -163,6 +163,43 @@ describe("computeProfileLadder", () => {
     ).toMatchObject({ ok: false, reason: "below_min_order_size", band: "medium_low" });
   });
 
+  it("skips placement when even one merged rung cannot satisfy min order notional", () => {
+    expect(
+      computeProfileLadder(
+        input({ avgEntryPrice: 0.1, costBasisUsd: 1.5, positionSizeShares: 15, minOrderSize: 2 }),
+      ),
+    ).toMatchObject({ ok: false, reason: "below_min_order_size", band: "medium_low" });
+  });
+
+  it("merges undersized rungs into the largest neighbor before reducing rung count", () => {
+    const result = computeProfileLadder(
+      input({ avgEntryPrice: 0.1, costBasisUsd: 5, positionSizeShares: 50, minOrderSize: 4 }),
+    );
+
+    expect(result).toMatchObject({ ok: true, band: "medium_low", activeRungCount: 1 });
+    if (!result.ok) throw new Error("expected merged ladder");
+    expect(result.rungs).toHaveLength(1);
+    expect(result.rungs[0]).toMatchObject({
+      rungIndex: 0,
+      multiplier: 1.3,
+      price: 0.13,
+      sizeShares: 50,
+      sizingFraction: 1,
+      notionalUsd: 6.5,
+    });
+  });
+
+  it("keeps four rungs when every rung satisfies min order notional", () => {
+    const result = computeProfileLadder(
+      input({ avgEntryPrice: 0.1, costBasisUsd: 50, positionSizeShares: 500, minOrderSize: 1 }),
+    );
+
+    expect(result).toMatchObject({ ok: true, activeRungCount: 4 });
+    if (!result.ok) throw new Error("expected ladder");
+    expect(result.rungs).toHaveLength(4);
+    expect(result.rungs.every((rung) => rung.notionalUsd >= 1)).toBe(true);
+  });
+
   it("fails closed on invalid BBO or tick size", () => {
     expect(computeProfileLadder(input({ bestBid: null }))).toMatchObject({
       ok: false,
