@@ -133,10 +133,11 @@ export interface ExecutionProfilePolicy {
     mediumExpensiveHigh: number;
   };
   costCaps: { enabled: boolean };
+  scaleIn: { enabled: boolean };
   profiles: {
-    cheap: { costCaps: ExecutionProfileCostCapProfilePolicy };
-    medium: { costCaps: ExecutionProfileCostCapProfilePolicy };
-    expensive: { costCaps: ExecutionProfileCostCapProfilePolicy };
+    cheap: ExecutionProfileProfilePolicy;
+    medium: ExecutionProfileProfilePolicy;
+    expensive: ExecutionProfileProfilePolicy;
   };
   sellLadder: { enabled: boolean };
   adoptExistingPositions: { enabled: boolean };
@@ -147,6 +148,34 @@ export interface ExecutionProfileCostCapProfilePolicy {
   normalCapUsd: number;
   aggressiveCapUsd: number;
   hardCapAtAggressive: boolean;
+}
+
+export interface ExecutionProfileProfilePolicy {
+  costCaps: ExecutionProfileCostCapProfilePolicy;
+  scaleIn: ExecutionProfileScaleInProfilePolicy;
+}
+
+export interface ExecutionProfileScaleInProfilePolicy {
+  initialProbeSizeUsd: number;
+  sizingDecay: readonly number[];
+  minTimeBetweenAddsMs: number;
+  minAddNotionalUsd: number;
+  modes: {
+    up: { thresholdPct: number };
+    flat: { thresholdPct: number };
+    avgDown: {
+      enabled: boolean;
+      thresholdPct: number;
+      requireRecovery: boolean;
+      recoveryThreshold: number;
+    };
+  };
+  triggers: {
+    activity: { tradeCount3hThreshold: number };
+    recovery: { threshold: number; strongThreshold: number };
+    volatility: { range60Threshold: number; std60Threshold: number };
+    strongActivity: { tradeCount3hThreshold: number };
+  };
 }
 
 export interface ExecutionPolicyDTO {

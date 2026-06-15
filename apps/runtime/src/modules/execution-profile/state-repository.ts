@@ -18,6 +18,9 @@ interface ExecutionProfileStateRow {
   last_transition_at: string;
   active_ladder_id: string | null;
   handoff_started_at: string | null;
+  add_count: number;
+  last_buy_at_ms: number | null;
+  initial_probe_size_usd: number | null;
   metadata_json: string | null;
   created_at: string;
   updated_at: string;
@@ -31,9 +34,9 @@ export class SqliteExecutionProfileStateRepository implements ExecutionProfileSt
       .prepare(
         `INSERT INTO execution_profile_state
          (token_id, condition_id, profile, state, assumed_at, last_avg_entry,
-          last_transition_at, active_ladder_id, handoff_started_at, metadata_json,
-          created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_transition_at, active_ladder_id, handoff_started_at, add_count,
+          last_buy_at_ms, initial_probe_size_usd, metadata_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(token_id) DO UPDATE SET
            condition_id = excluded.condition_id,
            profile = excluded.profile,
@@ -43,6 +46,9 @@ export class SqliteExecutionProfileStateRepository implements ExecutionProfileSt
            last_transition_at = excluded.last_transition_at,
            active_ladder_id = excluded.active_ladder_id,
            handoff_started_at = excluded.handoff_started_at,
+           add_count = excluded.add_count,
+           last_buy_at_ms = excluded.last_buy_at_ms,
+           initial_probe_size_usd = excluded.initial_probe_size_usd,
            metadata_json = excluded.metadata_json,
            updated_at = excluded.updated_at`,
       )
@@ -56,6 +62,9 @@ export class SqliteExecutionProfileStateRepository implements ExecutionProfileSt
         state.lastTransitionAt,
         state.activeLadderId,
         state.handoffStartedAt,
+        state.addCount,
+        state.lastBuyAtMs,
+        state.initialProbeSizeUsd,
         state.metadata == null ? null : JSON.stringify(state.metadata),
         state.createdAt,
         state.updatedAt,
@@ -155,6 +164,9 @@ function toRecord(row: ExecutionProfileStateRow): ExecutionProfileStateRecord {
     lastTransitionAt: row.last_transition_at,
     activeLadderId: row.active_ladder_id,
     handoffStartedAt: row.handoff_started_at,
+    addCount: row.add_count,
+    lastBuyAtMs: row.last_buy_at_ms,
+    initialProbeSizeUsd: row.initial_probe_size_usd,
     metadata: parseMetadata(row.metadata_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,

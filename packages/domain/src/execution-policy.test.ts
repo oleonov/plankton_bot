@@ -57,15 +57,82 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       maxTokensPerCycle: 100,
       qdHandoffThresholdMs: 3_600_000,
       costCaps: { enabled: false },
+      scaleIn: { enabled: false },
       profiles: {
         cheap: {
           costCaps: { normalCapUsd: 11, aggressiveCapUsd: 23, hardCapAtAggressive: false },
+          scaleIn: {
+            initialProbeSizeUsd: 0.6,
+            sizingDecay: [1, 0.7, 0.6, 0.5, 0.35],
+            minTimeBetweenAddsMs: 48_000,
+            minAddNotionalUsd: 0.2,
+            modes: {
+              up: { thresholdPct: 0.05 },
+              flat: { thresholdPct: 0.05 },
+              avgDown: {
+                enabled: true,
+                thresholdPct: 0.05,
+                requireRecovery: true,
+                recoveryThreshold: 0.05,
+              },
+            },
+            triggers: {
+              activity: { tradeCount3hThreshold: 40 },
+              recovery: { threshold: 0.05, strongThreshold: 0.1 },
+              volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+              strongActivity: { tradeCount3hThreshold: 80 },
+            },
+          },
         },
         medium: {
           costCaps: { normalCapUsd: 30, aggressiveCapUsd: 70, hardCapAtAggressive: false },
+          scaleIn: {
+            initialProbeSizeUsd: 7.15,
+            sizingDecay: [1, 0.7, 0.6, 0.5, 0.35],
+            minTimeBetweenAddsMs: 1_656_000,
+            minAddNotionalUsd: 0.2,
+            modes: {
+              up: { thresholdPct: 0.05 },
+              flat: { thresholdPct: 0.05 },
+              avgDown: {
+                enabled: true,
+                thresholdPct: 0.05,
+                requireRecovery: true,
+                recoveryThreshold: 0.05,
+              },
+            },
+            triggers: {
+              activity: { tradeCount3hThreshold: 40 },
+              recovery: { threshold: 0.05, strongThreshold: 0.1 },
+              volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+              strongActivity: { tradeCount3hThreshold: 80 },
+            },
+          },
         },
         expensive: {
           costCaps: { normalCapUsd: 18, aggressiveCapUsd: 33, hardCapAtAggressive: false },
+          scaleIn: {
+            initialProbeSizeUsd: 8.45,
+            sizingDecay: [1, 0.7, 0.6, 0.5, 0.35],
+            minTimeBetweenAddsMs: 2_550_000,
+            minAddNotionalUsd: 0.2,
+            modes: {
+              up: { thresholdPct: 0.05 },
+              flat: { thresholdPct: 0.05 },
+              avgDown: {
+                enabled: true,
+                thresholdPct: 0.05,
+                requireRecovery: true,
+                recoveryThreshold: 0.05,
+              },
+            },
+            triggers: {
+              activity: { tradeCount3hThreshold: 40 },
+              recovery: { threshold: 0.05, strongThreshold: 0.1 },
+              volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+              strongActivity: { tradeCount3hThreshold: 80 },
+            },
+          },
         },
       },
       sellLadder: { enabled: false },
@@ -88,12 +155,35 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           maxTokensPerCycle: 25,
           qdHandoffThresholdMs: 600_000,
           costCaps: { enabled: true },
+          scaleIn: { enabled: true },
           profiles: {
             cheap: {
               costCaps: {
                 normalCapUsd: 12,
                 aggressiveCapUsd: 24,
                 hardCapAtAggressive: true,
+              },
+              scaleIn: {
+                initialProbeSizeUsd: 0.7,
+                sizingDecay: [1, 0.5],
+                minTimeBetweenAddsMs: 0,
+                minAddNotionalUsd: 0.25,
+                modes: {
+                  up: { thresholdPct: 0.04 },
+                  flat: { thresholdPct: 0.03 },
+                  avgDown: {
+                    enabled: true,
+                    thresholdPct: 0.06,
+                    requireRecovery: true,
+                    recoveryThreshold: 0.05,
+                  },
+                },
+                triggers: {
+                  activity: { tradeCount3hThreshold: 41 },
+                  recovery: { threshold: 0.05, strongThreshold: 0.1 },
+                  volatility: { range60Threshold: 0.11, std60Threshold: 0.04 },
+                  strongActivity: { tradeCount3hThreshold: 81 },
+                },
               },
             },
             medium: {
@@ -130,9 +220,32 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       maxTokensPerCycle: 25,
       qdHandoffThresholdMs: 600_000,
       costCaps: { enabled: true },
+      scaleIn: { enabled: true },
       profiles: {
         cheap: {
           costCaps: { normalCapUsd: 12, aggressiveCapUsd: 24, hardCapAtAggressive: true },
+          scaleIn: {
+            initialProbeSizeUsd: 0.7,
+            sizingDecay: [1, 0.5],
+            minTimeBetweenAddsMs: 0,
+            minAddNotionalUsd: 0.25,
+            modes: {
+              up: { thresholdPct: 0.04 },
+              flat: { thresholdPct: 0.03 },
+              avgDown: {
+                enabled: true,
+                thresholdPct: 0.06,
+                requireRecovery: true,
+                recoveryThreshold: 0.05,
+              },
+            },
+            triggers: {
+              activity: { tradeCount3hThreshold: 41 },
+              recovery: { threshold: 0.05, strongThreshold: 0.1 },
+              volatility: { range60Threshold: 0.11, std60Threshold: 0.04 },
+              strongActivity: { tradeCount3hThreshold: 81 },
+            },
+          },
         },
         medium: {
           costCaps: { normalCapUsd: 31, aggressiveCapUsd: 71, hardCapAtAggressive: false },
@@ -224,8 +337,92 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       ),
     ).toBe(true);
     expect(
+      parsed.issues.some((issue) => issue.includes("executionProfile.profiles.expensive.costCaps")),
+    ).toBe(true);
+  });
+
+  it("falls back malformed Execution Profile scale-in per profile", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          scaleIn: { enabled: true },
+          profiles: {
+            cheap: {
+              scaleIn: {
+                sizingDecay: [],
+                initialProbeSizeUsd: 0.9,
+              },
+            },
+            medium: {
+              scaleIn: {
+                initialProbeSizeUsd: 8,
+                sizingDecay: [1, 0.8],
+                minTimeBetweenAddsMs: 0,
+                minAddNotionalUsd: 0.4,
+                modes: {
+                  up: { thresholdPct: 0.04 },
+                  flat: { thresholdPct: 0.04 },
+                  avgDown: {
+                    enabled: false,
+                    thresholdPct: 0.06,
+                    requireRecovery: false,
+                    recoveryThreshold: 0.07,
+                  },
+                },
+                triggers: {
+                  activity: { tradeCount3hThreshold: 55 },
+                  recovery: { threshold: 0.07, strongThreshold: 0.12 },
+                  volatility: { range60Threshold: 0.13, std60Threshold: 0.05 },
+                  strongActivity: { tradeCount3hThreshold: 90 },
+                },
+                ignored: true,
+              },
+            },
+            expensive: {
+              scaleIn: {
+                minTimeBetweenAddsMs: -1,
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.policy.executionProfile.scaleIn).toEqual({ enabled: true });
+    expect(parsed.policy.executionProfile.profiles.cheap.scaleIn).toEqual(
+      DEFAULT_EXECUTION_POLICY.executionProfile.profiles.cheap.scaleIn,
+    );
+    expect(parsed.policy.executionProfile.profiles.medium.scaleIn).toMatchObject({
+      initialProbeSizeUsd: 8,
+      sizingDecay: [1, 0.8],
+      minTimeBetweenAddsMs: 0,
+      minAddNotionalUsd: 0.4,
+      modes: {
+        avgDown: {
+          enabled: false,
+          thresholdPct: 0.06,
+          requireRecovery: false,
+          recoveryThreshold: 0.07,
+        },
+      },
+      triggers: {
+        activity: { tradeCount3hThreshold: 55 },
+        recovery: { threshold: 0.07, strongThreshold: 0.12 },
+        volatility: { range60Threshold: 0.13, std60Threshold: 0.05 },
+        strongActivity: { tradeCount3hThreshold: 90 },
+      },
+    });
+    expect(parsed.policy.executionProfile.profiles.expensive.scaleIn).toEqual(
+      DEFAULT_EXECUTION_POLICY.executionProfile.profiles.expensive.scaleIn,
+    );
+    expect(
       parsed.issues.some((issue) =>
-        issue.includes("executionProfile.profiles.expensive.costCaps"),
+        issue.includes("executionProfile.profiles.cheap.scaleIn.sizingDecay"),
+      ),
+    ).toBe(true);
+    expect(
+      parsed.issues.some((issue) =>
+        issue.includes("executionProfile.profiles.expensive.scaleIn.minTimeBetweenAddsMs"),
       ),
     ).toBe(true);
   });

@@ -1062,6 +1062,7 @@ async function main(): Promise<void> {
     positionRepo: repos.position,
     orderRepo: repos.order,
     policy: () => currentExecutionPolicy().executionProfile,
+    runtimeMetrics,
   });
   const s1LadderModule = new S1LadderModule({
     bus,

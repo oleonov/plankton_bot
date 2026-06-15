@@ -928,6 +928,94 @@ export interface ExecutionProfileCostCapsPolicy {
   enabled: boolean;
 }
 
+export type ScaleInMode = "up" | "flat" | "avg_down";
+
+export type ScaleInReason =
+  | "scale_in_disabled"
+  | "invalid_inputs"
+  | "time_gate_blocked"
+  | "mode_no_signal"
+  | "avg_down_no_recovery"
+  | "avg_down_disabled"
+  | "flat_no_trigger"
+  | "below_min_add"
+  | "cost_cap_blocked"
+  | "allowed";
+
+export interface ScaleInMarketSignals {
+  recovery60: number;
+  range60: number;
+  std60: number;
+  tradeCount3h: number;
+  notional3h: number;
+}
+
+export interface ScaleInTriggerSignals {
+  activity: boolean;
+  recovery: boolean;
+  volatility: boolean;
+  range60Above: boolean;
+  std60Above: boolean;
+  notional3h: number;
+}
+
+export interface ScaleInInput {
+  profile: ExecutionProfileName;
+  currentCostUsd: number;
+  avgEntryPrice: number;
+  currentMarkPrice: number;
+  timeSinceLastBuyMs: number;
+  marketSignals: ScaleInMarketSignals;
+  previousAddCount: number;
+  initialProbeSizeUsd: number;
+}
+
+export interface ScaleInDecision {
+  action: "add" | "skip";
+  reason: ScaleInReason;
+  mode?: ScaleInMode;
+  proposedAddSizeUsd: number;
+  sizingMultiplier: number;
+  triggerSignals: ScaleInTriggerSignals;
+  costCapContext: CostCapSignalContext;
+}
+
+export interface ScaleInConfig {
+  enabled: boolean;
+  profiles: ExecutionProfileProfilesPolicy;
+}
+
+export interface ExecutionProfileScaleInModePolicy {
+  thresholdPct: number;
+}
+
+export interface ExecutionProfileScaleInAvgDownPolicy {
+  enabled: boolean;
+  thresholdPct: number;
+  requireRecovery: boolean;
+  recoveryThreshold: number;
+}
+
+export interface ExecutionProfileScaleInTriggersPolicy {
+  activity: { tradeCount3hThreshold: number };
+  recovery: { threshold: number; strongThreshold: number };
+  volatility: { range60Threshold: number; std60Threshold: number };
+  strongActivity: { tradeCount3hThreshold: number };
+}
+
+export interface ExecutionProfileScaleInProfilePolicy {
+  initialProbeSizeUsd: number;
+  sizingDecay: readonly number[];
+  minTimeBetweenAddsMs: number;
+  minAddNotionalUsd: number;
+  modes: {
+    up: ExecutionProfileScaleInModePolicy;
+    flat: ExecutionProfileScaleInModePolicy;
+    avgDown: ExecutionProfileScaleInAvgDownPolicy;
+  };
+  triggers: ExecutionProfileScaleInTriggersPolicy;
+}
+
 export interface ExecutionProfileCostCapProfilePolicy {
   normalCapUsd: number;
   aggressiveCapUsd: number;
@@ -935,9 +1023,18 @@ export interface ExecutionProfileCostCapProfilePolicy {
 }
 
 export interface ExecutionProfileProfilesPolicy {
-  cheap: { costCaps: ExecutionProfileCostCapProfilePolicy };
-  medium: { costCaps: ExecutionProfileCostCapProfilePolicy };
-  expensive: { costCaps: ExecutionProfileCostCapProfilePolicy };
+  cheap: {
+    costCaps: ExecutionProfileCostCapProfilePolicy;
+    scaleIn: ExecutionProfileScaleInProfilePolicy;
+  };
+  medium: {
+    costCaps: ExecutionProfileCostCapProfilePolicy;
+    scaleIn: ExecutionProfileScaleInProfilePolicy;
+  };
+  expensive: {
+    costCaps: ExecutionProfileCostCapProfilePolicy;
+    scaleIn: ExecutionProfileScaleInProfilePolicy;
+  };
 }
 
 export interface ExecutionProfileCostCapDecisionConfig {
@@ -969,6 +1066,7 @@ export interface ExecutionProfilePolicy {
   qdHandoffThresholdMs: number;
   profileHysteresis: ExecutionProfileHysteresisBounds;
   costCaps: ExecutionProfileCostCapsPolicy;
+  scaleIn: ExecutionProfileFeatureToggle;
   profiles: ExecutionProfileProfilesPolicy;
   sellLadder: ExecutionProfileFeatureToggle;
   adoptExistingPositions: ExecutionProfileFeatureToggle;

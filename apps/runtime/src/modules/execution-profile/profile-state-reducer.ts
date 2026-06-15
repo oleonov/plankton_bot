@@ -111,6 +111,9 @@ function createInitialState(
     lastTransitionAt: occurredAt,
     activeLadderId: stringPayload(payload.activeLadderId, null),
     handoffStartedAt: state === "QD_HANDOFF" ? occurredAt : null,
+    addCount: numberPayload(payload.addCount, 0),
+    lastBuyAtMs: numberOrNullPayload(payload.lastBuyAtMs),
+    initialProbeSizeUsd: numberOrNullPayload(payload.initialProbeSizeUsd),
     metadata: objectPayload(payload.metadata),
     createdAt: occurredAt,
     updatedAt: occurredAt,
@@ -140,6 +143,10 @@ function stringPayload(value: unknown, fallback: string | null): string | null {
 
 function numberPayload(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function numberOrNullPayload(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function profilePayload(value: unknown, fallback: Profile): Profile {

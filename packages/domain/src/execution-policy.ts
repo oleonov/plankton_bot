@@ -18,6 +18,7 @@ import type {
   ExecutionProfileHysteresisBounds,
   ExecutionProfilePolicy,
   ExecutionProfileProfilesPolicy,
+  ExecutionProfileScaleInProfilePolicy,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
   ExitTtlByLiquidityPolicyConfig,
@@ -185,15 +186,82 @@ export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
     mediumExpensiveHigh: 0.375,
   },
   costCaps: { enabled: false },
+  scaleIn: { enabled: false },
   profiles: {
     cheap: {
       costCaps: { normalCapUsd: 11, aggressiveCapUsd: 23, hardCapAtAggressive: false },
+      scaleIn: {
+        initialProbeSizeUsd: 0.6,
+        sizingDecay: [1, 0.7, 0.6, 0.5, 0.35],
+        minTimeBetweenAddsMs: 48_000,
+        minAddNotionalUsd: 0.2,
+        modes: {
+          up: { thresholdPct: 0.05 },
+          flat: { thresholdPct: 0.05 },
+          avgDown: {
+            enabled: true,
+            thresholdPct: 0.05,
+            requireRecovery: true,
+            recoveryThreshold: 0.05,
+          },
+        },
+        triggers: {
+          activity: { tradeCount3hThreshold: 40 },
+          recovery: { threshold: 0.05, strongThreshold: 0.1 },
+          volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+          strongActivity: { tradeCount3hThreshold: 80 },
+        },
+      },
     },
     medium: {
       costCaps: { normalCapUsd: 30, aggressiveCapUsd: 70, hardCapAtAggressive: false },
+      scaleIn: {
+        initialProbeSizeUsd: 7.15,
+        sizingDecay: [1, 0.7, 0.6, 0.5, 0.35],
+        minTimeBetweenAddsMs: 1_656_000,
+        minAddNotionalUsd: 0.2,
+        modes: {
+          up: { thresholdPct: 0.05 },
+          flat: { thresholdPct: 0.05 },
+          avgDown: {
+            enabled: true,
+            thresholdPct: 0.05,
+            requireRecovery: true,
+            recoveryThreshold: 0.05,
+          },
+        },
+        triggers: {
+          activity: { tradeCount3hThreshold: 40 },
+          recovery: { threshold: 0.05, strongThreshold: 0.1 },
+          volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+          strongActivity: { tradeCount3hThreshold: 80 },
+        },
+      },
     },
     expensive: {
       costCaps: { normalCapUsd: 18, aggressiveCapUsd: 33, hardCapAtAggressive: false },
+      scaleIn: {
+        initialProbeSizeUsd: 8.45,
+        sizingDecay: [1, 0.7, 0.6, 0.5, 0.35],
+        minTimeBetweenAddsMs: 2_550_000,
+        minAddNotionalUsd: 0.2,
+        modes: {
+          up: { thresholdPct: 0.05 },
+          flat: { thresholdPct: 0.05 },
+          avgDown: {
+            enabled: true,
+            thresholdPct: 0.05,
+            requireRecovery: true,
+            recoveryThreshold: 0.05,
+          },
+        },
+        triggers: {
+          activity: { tradeCount3hThreshold: 40 },
+          recovery: { threshold: 0.05, strongThreshold: 0.1 },
+          volatility: { range60Threshold: 0.1, std60Threshold: 0.03 },
+          strongActivity: { tradeCount3hThreshold: 80 },
+        },
+      },
     },
   },
   sellLadder: { enabled: false },
@@ -1359,6 +1427,12 @@ function parseExecutionProfile(raw: unknown, issues: string[]): ExecutionProfile
       issues,
       "executionProfile.costCaps",
     ),
+    scaleIn: parseExecutionProfileToggle(
+      obj.scaleIn,
+      DEFAULT_EXECUTION_PROFILE_POLICY.scaleIn,
+      issues,
+      "executionProfile.scaleIn",
+    ),
     profiles: parseExecutionProfileProfiles(obj.profiles, issues),
     sellLadder: parseExecutionProfileToggle(
       obj.sellLadder,
@@ -1446,6 +1520,191 @@ function parseExecutionProfileProfile(
       issues,
       `${name}.costCaps`,
     ),
+    scaleIn: parseExecutionProfileScaleInProfile(
+      obj.scaleIn,
+      fallback.scaleIn,
+      issues,
+      `${name}.scaleIn`,
+    ),
+  };
+}
+
+function parseExecutionProfileScaleInProfile(
+  raw: unknown,
+  fallback: ExecutionProfileScaleInProfilePolicy,
+  issues: string[],
+  name: string,
+): ExecutionProfileScaleInProfilePolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push(`${name} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  const sizingDecay = scaleInSizingDecayOr(
+    obj.sizingDecay,
+    fallback.sizingDecay,
+    issues,
+    `${name}.sizingDecay`,
+  );
+  if (!sizingDecay.valid) return fallback;
+  return {
+    initialProbeSizeUsd: positiveNumberOr(
+      obj.initialProbeSizeUsd,
+      fallback.initialProbeSizeUsd,
+      issues,
+      `${name}.initialProbeSizeUsd`,
+    ).value,
+    sizingDecay: sizingDecay.value,
+    minTimeBetweenAddsMs: nonNegativeNumberOr(
+      obj.minTimeBetweenAddsMs,
+      fallback.minTimeBetweenAddsMs,
+      issues,
+      `${name}.minTimeBetweenAddsMs`,
+    ).value,
+    minAddNotionalUsd: positiveNumberOr(
+      obj.minAddNotionalUsd,
+      fallback.minAddNotionalUsd,
+      issues,
+      `${name}.minAddNotionalUsd`,
+    ).value,
+    modes: parseScaleInModes(obj.modes, fallback.modes, issues, `${name}.modes`),
+    triggers: parseScaleInTriggers(obj.triggers, fallback.triggers, issues, `${name}.triggers`),
+  };
+}
+
+function parseScaleInModes(
+  raw: unknown,
+  fallback: ExecutionProfileScaleInProfilePolicy["modes"],
+  issues: string[],
+  name: string,
+): ExecutionProfileScaleInProfilePolicy["modes"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push(`${name} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    up: parseScaleInMode(obj.up, fallback.up, issues, `${name}.up`),
+    flat: parseScaleInMode(obj.flat, fallback.flat, issues, `${name}.flat`),
+    avgDown: parseScaleInAvgDownMode(obj.avgDown, fallback.avgDown, issues, `${name}.avgDown`),
+  };
+}
+
+function parseScaleInMode(
+  raw: unknown,
+  fallback: ExecutionProfileScaleInProfilePolicy["modes"]["up"],
+  issues: string[],
+  name: string,
+): ExecutionProfileScaleInProfilePolicy["modes"]["up"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push(`${name} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    thresholdPct: nonNegativeNumberOr(
+      obj.thresholdPct,
+      fallback.thresholdPct,
+      issues,
+      `${name}.thresholdPct`,
+    ).value,
+  };
+}
+
+function parseScaleInAvgDownMode(
+  raw: unknown,
+  fallback: ExecutionProfileScaleInProfilePolicy["modes"]["avgDown"],
+  issues: string[],
+  name: string,
+): ExecutionProfileScaleInProfilePolicy["modes"]["avgDown"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push(`${name} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(obj.enabled, fallback.enabled, issues, `${name}.enabled`),
+    thresholdPct: nonNegativeNumberOr(
+      obj.thresholdPct,
+      fallback.thresholdPct,
+      issues,
+      `${name}.thresholdPct`,
+    ).value,
+    requireRecovery: booleanOr(
+      obj.requireRecovery,
+      fallback.requireRecovery,
+      issues,
+      `${name}.requireRecovery`,
+    ),
+    recoveryThreshold: nonNegativeNumberOr(
+      obj.recoveryThreshold,
+      fallback.recoveryThreshold,
+      issues,
+      `${name}.recoveryThreshold`,
+    ).value,
+  };
+}
+
+function parseScaleInTriggers(
+  raw: unknown,
+  fallback: ExecutionProfileScaleInProfilePolicy["triggers"],
+  issues: string[],
+  name: string,
+): ExecutionProfileScaleInProfilePolicy["triggers"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push(`${name} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  const activity = objectOr(obj.activity);
+  const recovery = objectOr(obj.recovery);
+  const volatility = objectOr(obj.volatility);
+  const strongActivity = objectOr(obj.strongActivity);
+  return {
+    activity: {
+      tradeCount3hThreshold: nonNegativeNumberOr(
+        activity?.tradeCount3hThreshold,
+        fallback.activity.tradeCount3hThreshold,
+        issues,
+        `${name}.activity.tradeCount3hThreshold`,
+      ).value,
+    },
+    recovery: {
+      threshold: nonNegativeNumberOr(
+        recovery?.threshold,
+        fallback.recovery.threshold,
+        issues,
+        `${name}.recovery.threshold`,
+      ).value,
+      strongThreshold: nonNegativeNumberOr(
+        recovery?.strongThreshold,
+        fallback.recovery.strongThreshold,
+        issues,
+        `${name}.recovery.strongThreshold`,
+      ).value,
+    },
+    volatility: {
+      range60Threshold: nonNegativeNumberOr(
+        volatility?.range60Threshold,
+        fallback.volatility.range60Threshold,
+        issues,
+        `${name}.volatility.range60Threshold`,
+      ).value,
+      std60Threshold: nonNegativeNumberOr(
+        volatility?.std60Threshold,
+        fallback.volatility.std60Threshold,
+        issues,
+        `${name}.volatility.std60Threshold`,
+      ).value,
+    },
+    strongActivity: {
+      tradeCount3hThreshold: nonNegativeNumberOr(
+        strongActivity?.tradeCount3hThreshold,
+        fallback.strongActivity.tradeCount3hThreshold,
+        issues,
+        `${name}.strongActivity.tradeCount3hThreshold`,
+      ).value,
+    },
   };
 }
 
@@ -2522,6 +2781,48 @@ function positiveNumberOr(
     return { value: fallback, valid: false };
   }
   return { value: raw, valid: true };
+}
+
+function nonNegativeNumberOr(
+  raw: unknown,
+  fallback: number,
+  issues: string[],
+  name: string,
+): { value: number; valid: boolean } {
+  if (raw === undefined) return { value: fallback, valid: true };
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    issues.push(`${name} must be a finite number`);
+    return { value: fallback, valid: false };
+  }
+  if (raw < 0) {
+    issues.push(`${name} must be >= 0`);
+    return { value: fallback, valid: false };
+  }
+  return { value: raw, valid: true };
+}
+
+function scaleInSizingDecayOr(
+  raw: unknown,
+  fallback: readonly number[],
+  issues: string[],
+  name: string,
+): { value: readonly number[]; valid: boolean } {
+  if (raw === undefined) return { value: fallback, valid: true };
+  if (
+    !Array.isArray(raw) ||
+    raw.length === 0 ||
+    raw.some((value) => typeof value !== "number" || !Number.isFinite(value) || value <= 0)
+  ) {
+    issues.push(`${name} must be a non-empty array of positive finite numbers`);
+    return { value: fallback, valid: false };
+  }
+  return { value: [...raw], valid: true };
+}
+
+function objectOr(raw: unknown): Record<string, unknown> | null {
+  return raw != null && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : null;
 }
 
 function clampedNumber(

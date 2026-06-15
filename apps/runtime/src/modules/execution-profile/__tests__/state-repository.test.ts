@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { createConditionId, createTokenId } from "@krabs/domain";
+import { applySafeAddColumnStatements } from "../../../../../../packages/db/src/migrations/runner.js";
 import { SqliteExecutionProfileStateRepository } from "../state-repository.js";
 import type { ExecutionProfileStateRecord } from "../types.js";
 
@@ -14,13 +15,13 @@ let repo: SqliteExecutionProfileStateRepository;
 const tokenId = createTokenId("repo-token");
 const conditionId = createConditionId("repo-condition");
 
-function migrationSql(): string {
-  return readFileSync(
-    path.resolve(
-      import.meta.dirname,
-      "../../../../../../packages/db/src/migrations/069_execution_profile_state.sql",
-    ),
-    "utf8",
+function migrationSqlFiles(): string[] {
+  return ["069_execution_profile_state.sql", "070_execution_profile_scale_in_columns.sql"].map(
+    (file) =>
+      readFileSync(
+        path.resolve(import.meta.dirname, "../../../../../../packages/db/src/migrations", file),
+        "utf8",
+      ),
   );
 }
 
@@ -36,6 +37,9 @@ function state(overrides: Partial<ExecutionProfileStateRecord> = {}): ExecutionP
     activeLadderId: null,
     handoffStartedAt: null,
     metadata: null,
+    addCount: 0,
+    lastBuyAtMs: null,
+    initialProbeSizeUsd: null,
     createdAt: "2026-06-14T00:00:00.000Z",
     updatedAt: "2026-06-14T00:05:00.000Z",
     ...overrides,
@@ -45,7 +49,9 @@ function state(overrides: Partial<ExecutionProfileStateRecord> = {}): ExecutionP
 beforeEach(() => {
   tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-profile-state-"));
   db = new Database(path.join(tmpDir, "ledger.db"));
-  db.exec(migrationSql());
+  for (const sql of migrationSqlFiles()) {
+    db.exec(applySafeAddColumnStatements(db, sql));
+  }
   repo = new SqliteExecutionProfileStateRepository(db);
 });
 
@@ -64,13 +70,28 @@ describe("SqliteExecutionProfileStateRepository", () => {
       profile: "medium",
       state: "ACCUMULATING",
       metadata: { reason: "test" },
+      addCount: 0,
+      lastBuyAtMs: null,
+      initialProbeSizeUsd: null,
     });
 
-    repo.upsertState(state({ profile: "cheap", state: "EXITING", activeLadderId: "ladder-1" }));
+    repo.upsertState(
+      state({
+        profile: "cheap",
+        state: "EXITING",
+        activeLadderId: "ladder-1",
+        addCount: 2,
+        lastBuyAtMs: 1_797_376_500_000,
+        initialProbeSizeUsd: 0.6,
+      }),
+    );
     expect(repo.getState(tokenId)).toMatchObject({
       profile: "cheap",
       state: "EXITING",
       activeLadderId: "ladder-1",
+      addCount: 2,
+      lastBuyAtMs: 1_797_376_500_000,
+      initialProbeSizeUsd: 0.6,
     });
   });
 

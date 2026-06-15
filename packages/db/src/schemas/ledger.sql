@@ -563,6 +563,9 @@ CREATE TABLE IF NOT EXISTS execution_profile_state (
   last_transition_at TEXT NOT NULL,
   active_ladder_id TEXT NULL,
   handoff_started_at TEXT NULL,
+  add_count INTEGER NOT NULL DEFAULT 0,
+  last_buy_at_ms INTEGER NULL,
+  initial_probe_size_usd REAL NULL,
   metadata_json TEXT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

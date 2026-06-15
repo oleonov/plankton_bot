@@ -125,15 +125,15 @@ describe("decideCostCap", () => {
   });
 
   it("short-circuits disabled config before validation", () => {
-    expect(
-      decideCostCap(input("cheap", Number.NaN, -1), config({ enabled: false })),
-    ).toMatchObject({
-      allow: true,
-      severity: "under_p75",
-      crossedBand: "none",
-      reason: "cost_caps_disabled",
-      requiredSignal: "none",
-    });
+    expect(decideCostCap(input("cheap", Number.NaN, -1), config({ enabled: false }))).toMatchObject(
+      {
+        allow: true,
+        severity: "under_p75",
+        crossedBand: "none",
+        reason: "cost_caps_disabled",
+        requiredSignal: "none",
+      },
+    );
   });
 
   it.each([
@@ -203,6 +203,7 @@ function hardCapProfiles(): ExecutionProfileCostCapDecisionConfig["profiles"] {
   return {
     ...DEFAULT_EXECUTION_PROFILE_POLICY.profiles,
     cheap: {
+      scaleIn: DEFAULT_EXECUTION_PROFILE_POLICY.profiles.cheap.scaleIn,
       costCaps: {
         ...DEFAULT_EXECUTION_PROFILE_POLICY.profiles.cheap.costCaps,
         hardCapAtAggressive: true,

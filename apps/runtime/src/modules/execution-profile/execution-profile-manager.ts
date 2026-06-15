@@ -1,17 +1,25 @@
 import {
   OrderStatus,
   S1_LADDER_RULE_ID,
+  SignalReason,
   type EventBus,
+  type NormalizedMarket,
   type Order,
   type OrderRepository,
   type Position,
   type PositionRepository,
+  type RuntimeEventMap,
   type RuntimeModule,
+  type ScaleInConfig,
   type TokenId,
 } from "@krabs/domain";
 
+import { decideCostCap } from "./cost-cap-enforcer.js";
 import { InMemoryProfileOwnershipReader } from "./profile-ownership-reader.js";
 import { resolveProfile } from "./profile-resolver.js";
+import { reduceProfileState } from "./profile-state-reducer.js";
+import { createStubScaleInSignalSource, type ScaleInSignalSource } from "./signal-feed-stub.js";
+import { decideScaleIn, EXECUTION_PROFILE_SCALE_IN_RULE_ID } from "./scale-in-decider.js";
 import type {
   ExecutionProfilePolicy,
   ExecutionProfileStateRecord,
@@ -26,21 +34,33 @@ const OPEN_ORDER_STATUSES: readonly OrderStatus[] = [
   OrderStatus.PartiallyFilled,
 ];
 
+const SCALE_IN_STATES = new Set(["PROBING", "ACCUMULATING"]);
+
+export interface ExecutionProfileMetricWriter {
+  writeCounter(name: string, value?: number, labels?: string): void;
+}
+
 export interface ExecutionProfileManagerDeps {
   bus: EventBus;
   stateRepo: ExecutionProfileStateRepository;
   positionRepo: PositionRepository;
   orderRepo: OrderRepository;
   policy: () => ExecutionProfilePolicy;
+  scaleInSignalSource?: ScaleInSignalSource;
+  runtimeMetrics?: ExecutionProfileMetricWriter;
   now?: () => number;
 }
 
 export class ExecutionProfileManager implements RuntimeModule {
   private readonly ownership = new InMemoryProfileOwnershipReader();
+  private readonly scaleInSignalSource: ScaleInSignalSource;
+  private readonly pendingScaleIn = new Set<string>();
   private readonly unsubscribers: Array<() => void> = [];
   private started = false;
 
-  constructor(private readonly deps: ExecutionProfileManagerDeps) {}
+  constructor(private readonly deps: ExecutionProfileManagerDeps) {
+    this.scaleInSignalSource = deps.scaleInSignalSource ?? createStubScaleInSignalSource();
+  }
 
   async start(): Promise<void> {
     if (this.started) return;
@@ -87,8 +107,11 @@ export class ExecutionProfileManager implements RuntimeModule {
       this.deps.bus.subscribe("PositionSettled", async ({ tokenId }) => {
         this.closeToken(tokenId);
       }),
-      this.deps.bus.subscribe("FillReceived", async ({ tokenId }) => {
-        this.reclassifyFromPosition(tokenId);
+      this.deps.bus.subscribe("FillReceived", async (fill) => {
+        this.handleFillReceived(fill);
+      }),
+      this.deps.bus.subscribe("MarketSnapshotHeartbeat", async ({ markets, timestamp }) => {
+        await this.evaluateScaleIn(markets, timestamp);
       }),
     );
   }
@@ -139,6 +162,9 @@ export class ExecutionProfileManager implements RuntimeModule {
       lastTransitionAt: nowIso,
       activeLadderId: order == null ? null : readS1LadderId(order),
       handoffStartedAt: null,
+      addCount: 0,
+      lastBuyAtMs: null,
+      initialProbeSizeUsd: null,
       metadata: order == null ? { adopted: "position" } : { adopted: "s1_ladder" },
       createdAt: nowIso,
       updatedAt: nowIso,
@@ -204,6 +230,170 @@ export class ExecutionProfileManager implements RuntimeModule {
   private now(): number {
     return this.deps.now?.() ?? Date.now();
   }
+
+  private async evaluateScaleIn(
+    markets: readonly NormalizedMarket[],
+    timestamp: number,
+  ): Promise<void> {
+    const policy = this.policy();
+    if (!policy.enabled || !policy.scaleIn.enabled) return;
+    for (const market of markets.slice(0, policy.maxTokensPerCycle)) {
+      const tokenId = market.tokenId;
+      const state = this.deps.stateRepo.getState(tokenId);
+      if (state == null || !SCALE_IN_STATES.has(state.state)) continue;
+      const position = this.deps.positionRepo.findByTokenId(tokenId);
+      if (position == null || position.status !== "open" || position.size <= 0) continue;
+      const currentMarkPrice = resolveBuyMarkPrice(market);
+      if (currentMarkPrice == null) {
+        this.recordCounter("track_execution_profile_scale_in_skipped", {
+          reason: "invalid_inputs",
+        });
+        continue;
+      }
+
+      const signals = this.scaleInSignalSource.getSignalSnapshot(tokenId);
+      const decision = decideScaleIn(
+        {
+          profile: state.profile,
+          currentCostUsd: position.costBasisUsdc,
+          avgEntryPrice: position.avgEntryPrice,
+          currentMarkPrice,
+          timeSinceLastBuyMs:
+            state.lastBuyAtMs == null ? 0 : Math.max(0, timestamp - state.lastBuyAtMs),
+          marketSignals: signals,
+          previousAddCount: state.addCount,
+          initialProbeSizeUsd:
+            state.initialProbeSizeUsd ?? policy.profiles[state.profile].scaleIn.initialProbeSizeUsd,
+        },
+        toScaleInConfig(policy),
+      );
+
+      this.recordCounter("track_execution_profile_scale_in_decided", {
+        profile: state.profile,
+        action: decision.action,
+        mode: decision.mode ?? "none",
+      });
+      if (decision.action === "skip") {
+        this.recordCounter("track_execution_profile_scale_in_skipped", { reason: decision.reason });
+        continue;
+      }
+
+      const cap = decideCostCap(
+        {
+          profile: state.profile,
+          currentCostUsd: position.costBasisUsdc,
+          action: {
+            side: "buy",
+            kind: "scale_in",
+            proposedNotionalUsd: decision.proposedAddSizeUsd,
+          },
+          signals: decision.costCapContext,
+        },
+        { enabled: policy.costCaps.enabled, profiles: policy.profiles },
+      );
+      if (!cap.allow) {
+        this.recordCounter("track_execution_profile_scale_in_cost_cap_blocked", {
+          profile: state.profile,
+          severity: cap.severity,
+        });
+        continue;
+      }
+
+      if (this.hasOpenBuyOrder(tokenId) || this.pendingScaleIn.has(String(tokenId))) {
+        this.recordCounter("track_execution_profile_scale_in_skipped", { reason: "add_in_flight" });
+        continue;
+      }
+      this.pendingScaleIn.add(String(tokenId));
+      await this.deps.bus.publish("SignalProduced", {
+        market,
+        signal: {
+          signalId: `execution-profile:${String(tokenId)}:${timestamp}:${state.addCount + 1}`,
+          tokenId,
+          conditionId: position.conditionId,
+          side: "buy",
+          suggestedPrice: currentMarkPrice,
+          suggestedSize: decision.proposedAddSizeUsd / currentMarkPrice,
+          suggestedSizeUsdc: decision.proposedAddSizeUsd,
+          reason: SignalReason.ScaleIn,
+          strategyTick: timestamp,
+          sequenceInTick: state.addCount,
+          decisionRuleId: EXECUTION_PROFILE_SCALE_IN_RULE_ID,
+          sizingRuleId: `profile:${state.profile}:add:${state.addCount + 1}`,
+          generatedAt: new Date(timestamp).toISOString(),
+        },
+      });
+      this.recordCounter("track_execution_profile_scale_in_emitted", { profile: state.profile });
+    }
+  }
+
+  private handleFillReceived(fill: RuntimeEventMap["FillReceived"]): void {
+    this.pendingScaleIn.delete(String(fill.tokenId));
+    this.reclassifyFromPosition(fill.tokenId);
+    if (fill.side !== "buy") return;
+    const current = this.deps.stateRepo.getState(fill.tokenId);
+    const position = this.deps.positionRepo.findByTokenId(fill.tokenId);
+    if (current == null || position == null) return;
+    const updated = this.withBuyAccounting(current, fill);
+    const reduction = reduceProfileState(updated, {
+      type: "buy_fill_received",
+      tokenId: fill.tokenId,
+      occurredAtMs: fill.timestamp,
+      payload: {
+        conditionId: fill.conditionId,
+        profile: updated.profile,
+        avgEntry: position.avgEntryPrice,
+      },
+    });
+    const next = reduction.next ?? updated;
+    this.deps.stateRepo.runInTransaction(() => {
+      this.deps.stateRepo.upsertState(next);
+      if (next.state === "CLOSED") this.ownership.deleteSnapshot(fill.tokenId);
+      else this.ownership.setSnapshot(toSnapshot(next));
+    });
+  }
+
+  private withBuyAccounting(
+    state: ExecutionProfileStateRecord,
+    fill: RuntimeEventMap["FillReceived"],
+  ): ExecutionProfileStateRecord {
+    const updatedAt = new Date(fill.timestamp).toISOString();
+    return {
+      ...state,
+      addCount: state.addCount + 1,
+      lastBuyAtMs: fill.timestamp,
+      initialProbeSizeUsd: state.initialProbeSizeUsd ?? fill.sizeUsdc,
+      updatedAt,
+    };
+  }
+
+  private hasOpenBuyOrder(tokenId: TokenId): boolean {
+    return this.deps.orderRepo
+      .findOpen()
+      .some((order) => order.tokenId === tokenId && order.side === "buy");
+  }
+
+  private recordCounter(name: string, labels: Record<string, unknown>): void {
+    this.deps.runtimeMetrics?.writeCounter(name, 1, JSON.stringify(labels));
+  }
+}
+
+function toScaleInConfig(policy: ExecutionProfilePolicy): ScaleInConfig {
+  return {
+    enabled: policy.scaleIn.enabled,
+    profiles: policy.profiles,
+  };
+}
+
+function resolveBuyMarkPrice(market: NormalizedMarket): number | null {
+  return (
+    finitePositiveOrNull(market.bestAsk) ??
+    finitePositiveOrNull(market.midPrice) ??
+    finitePositiveOrNull(market.lastTradePrice ?? null)
+  );
+}
+
+function finitePositiveOrNull(value: number | null): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function toSnapshot(state: ExecutionProfileStateRecord): ProfileSnapshot {

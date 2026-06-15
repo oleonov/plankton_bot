@@ -1,25 +1,31 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_EXECUTION_PROFILE_POLICY,
+  LiquidityRole,
   OrderType,
   PositionStatus,
   createBotRunId,
   createConditionId,
+  createFillId,
   createOrderId,
   createPositionId,
   createTokenId,
   type ClientOrderId,
+  type FillReceived,
+  type NormalizedMarket,
   type Order,
   type OrderRepository,
   type Position,
   type PositionRepository,
+  type ScaleInMarketSignals,
+  type Signal,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { S1_LADDER_RULE_ID } from "@krabs/domain";
 import { ExecutionProfileManager } from "../execution-profile-manager.js";
 import { DEFAULT_PROFILE_HYSTERESIS } from "../profile-resolver.js";
 import { InMemoryExecutionProfileStateRepository } from "../state-repository.js";
-import type { ExecutionProfilePolicy } from "../types.js";
+import type { ExecutionProfilePolicy, ExecutionProfileStateRecord } from "../types.js";
 
 const tokenId = createTokenId("manager-token");
 const conditionId = createConditionId("manager-condition");
@@ -47,6 +53,10 @@ function policy(overrides: Partial<ExecutionProfilePolicy> = {}): ExecutionProfi
     costCaps: {
       ...DEFAULT_POLICY.costCaps,
       ...(overrides.costCaps ?? {}),
+    },
+    scaleIn: {
+      ...DEFAULT_POLICY.scaleIn,
+      ...(overrides.scaleIn ?? {}),
     },
     profiles: {
       ...DEFAULT_POLICY.profiles,
@@ -136,19 +146,112 @@ function makeOrderRepo(rows: Order[]): OrderRepository {
   } as unknown as OrderRepository;
 }
 
+function state(overrides: Partial<ExecutionProfileStateRecord> = {}): ExecutionProfileStateRecord {
+  return {
+    tokenId,
+    conditionId,
+    profile: "medium",
+    state: "PROBING",
+    assumedAt: "2026-06-14T00:00:00.000Z",
+    lastAvgEntry: 0.12,
+    lastTransitionAt: "2026-06-14T00:00:00.000Z",
+    activeLadderId: null,
+    handoffStartedAt: null,
+    metadata: null,
+    createdAt: "2026-06-14T00:00:00.000Z",
+    updatedAt: "2026-06-14T00:00:00.000Z",
+    addCount: 0,
+    lastBuyAtMs: NOW - 60_000,
+    initialProbeSizeUsd: 7.15,
+    ...overrides,
+  };
+}
+
+function market(overrides: Partial<NormalizedMarket> = {}): NormalizedMarket {
+  return {
+    tokenId,
+    conditionId: String(conditionId),
+    slug: "manager-market",
+    eventSlug: null,
+    eventMarketCount: 2,
+    question: "Manager market?",
+    outcome: "Yes",
+    regime: null,
+    horizon: null,
+    endDate: null,
+    active: true,
+    tradable: true,
+    tickSize: 0.001,
+    negRisk: false,
+    acceptingOrders: true,
+    enableOrderBook: true,
+    bestBid: 0.104,
+    bestAsk: 0.106,
+    midPrice: 0.105,
+    spread: 0.002,
+    lastTradePrice: 0.104,
+    liquidity: 100,
+    minOrderSize: 1,
+    gammaCreatedAt: null,
+    snapshotTs: NOW,
+    ...overrides,
+  };
+}
+
+function zeroSignals(overrides: Partial<ScaleInMarketSignals> = {}): ScaleInMarketSignals {
+  return {
+    recovery60: 0,
+    range60: 0,
+    std60: 0,
+    tradeCount3h: 0,
+    notional3h: 0,
+    ...overrides,
+  };
+}
+
+function fill(overrides: Partial<FillReceived> = {}): FillReceived {
+  return {
+    fillId: createFillId(`fill-${overrides.timestamp ?? NOW}`),
+    orderId: createOrderId("fill-order"),
+    clientOrderId: "fill-client" as ClientOrderId,
+    tokenId,
+    conditionId,
+    side: "buy",
+    price: 0.12,
+    size: 50,
+    sizeUsdc: 6,
+    liquidityRole: LiquidityRole.Taker,
+    fee: 0,
+    feeRateBps: 0,
+    signalReason: "scale-in",
+    timestamp: NOW,
+    ...overrides,
+    type: "FillReceived",
+  };
+}
+
 function makeManager(args: {
   profilePolicy: ExecutionProfilePolicy;
   positions?: Position[];
   orders?: Order[];
   repo?: InMemoryExecutionProfileStateRepository;
+  bus?: InProcessEventBus;
+  signalSnapshot?: ScaleInMarketSignals;
 }): ExecutionProfileManager {
-  return new ExecutionProfileManager({
-    bus: new InProcessEventBus(),
+  const deps = {
+    bus: args.bus ?? new InProcessEventBus(),
     stateRepo: args.repo ?? new InMemoryExecutionProfileStateRepository(),
     positionRepo: makePositionRepo(args.positions ?? []),
     orderRepo: makeOrderRepo(args.orders ?? []),
     policy: () => args.profilePolicy,
     now: () => NOW,
+  };
+  if (args.signalSnapshot == null) return new ExecutionProfileManager(deps);
+  return new ExecutionProfileManager({
+    ...deps,
+    scaleInSignalSource: {
+      getSignalSnapshot: vi.fn(() => args.signalSnapshot as ScaleInMarketSignals),
+    },
   });
 }
 
@@ -168,6 +271,9 @@ describe("ExecutionProfileManager", () => {
       metadata: null,
       createdAt: "2026-06-14T00:00:00.000Z",
       updatedAt: "2026-06-14T00:00:00.000Z",
+      addCount: 0,
+      lastBuyAtMs: NOW - 60_000,
+      initialProbeSizeUsd: 7.15,
     });
     const manager = makeManager({ profilePolicy: policy(), repo });
 
@@ -232,5 +338,109 @@ describe("ExecutionProfileManager", () => {
     });
     expect(manager.isProfileOwned(tokenId)).toBe(true);
     expect(manager.shouldSuppressLegacySell(tokenId)).toBe(false);
+  });
+
+  it("emits an UP scale-in BUY signal with stub signals when enabled and caps are disabled", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ lastBuyAtMs: NOW - 2_000_000 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      signalSnapshot: zeroSignals(),
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true },
+        costCaps: { enabled: false },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.106, midPrice: 0.1, lastTradePrice: 0.1 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      side: "buy",
+      reason: "scale-in",
+      decisionRuleId: "EXECUTION_PROFILE_SCALE_IN",
+      suggestedPrice: 0.106,
+    });
+  });
+
+  it("uses lastBuyAtMs null as zero elapsed time and blocks adopted positions", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([state({ lastBuyAtMs: null })]);
+    const manager = makeManager({
+      bus,
+      repo,
+      signalSnapshot: zeroSignals(),
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true },
+        costCaps: { enabled: false },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.106 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(signals).toHaveLength(0);
+  });
+
+  it("updates addCount directly on repeated BUY fills while reducer state no-ops", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository([state({ state: "PROBING" })]);
+    const bus = new InProcessEventBus();
+    const manager = makeManager({
+      bus,
+      repo,
+      profilePolicy: policy({ enabled: true }),
+      positions: [position()],
+    });
+
+    await manager.start();
+    await bus.publish("FillReceived", fill({ timestamp: NOW + 1_000, sizeUsdc: 6 }));
+    expect(repo.getState(tokenId)).toMatchObject({
+      state: "ACCUMULATING",
+      addCount: 1,
+      lastBuyAtMs: NOW + 1_000,
+      initialProbeSizeUsd: 7.15,
+    });
+
+    await bus.publish("FillReceived", fill({ timestamp: NOW + 2_000, sizeUsdc: 5 }));
+    expect(repo.getState(tokenId)).toMatchObject({
+      state: "ACCUMULATING",
+      addCount: 2,
+      lastBuyAtMs: NOW + 2_000,
+      initialProbeSizeUsd: 7.15,
+    });
+
+    await bus.publish("FillReceived", fill({ timestamp: NOW + 3_000, sizeUsdc: 4 }));
+    expect(repo.getState(tokenId)).toMatchObject({
+      state: "ACCUMULATING",
+      addCount: 3,
+      lastBuyAtMs: NOW + 3_000,
+      initialProbeSizeUsd: 7.15,
+    });
   });
 });

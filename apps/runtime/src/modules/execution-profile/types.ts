@@ -35,6 +35,9 @@ export interface ExecutionProfileStateRecord extends ProfileSnapshot {
   conditionId: ConditionId;
   lastAvgEntry: number;
   handoffStartedAt: string | null;
+  addCount: number;
+  lastBuyAtMs: number | null;
+  initialProbeSizeUsd: number | null;
   metadata: Readonly<Record<string, unknown>> | null;
   createdAt: string;
   updatedAt: string;
