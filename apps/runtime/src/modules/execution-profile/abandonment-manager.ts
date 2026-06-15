@@ -42,8 +42,9 @@ export class AbandonmentManager {
   constructor(private readonly deps: AbandonmentManagerDeps) {}
 
   start(): void {
-    const config = this.deps.policy().abandonment;
-    if (!config.enabled || this.timer != null) return;
+    const policy = this.deps.policy();
+    const config = policy.abandonment;
+    if (!policy.enabled || !config.enabled || this.timer != null) return;
     this.timer = setInterval(() => {
       this.runOnce();
     }, config.evaluationIntervalMs);
@@ -56,8 +57,9 @@ export class AbandonmentManager {
   }
 
   runOnce(nowMs = this.deps.now?.() ?? Date.now()): number {
-    const config = this.deps.policy().abandonment;
-    if (!config.enabled) return 0;
+    const policy = this.deps.policy();
+    const config = policy.abandonment;
+    if (!policy.enabled || !config.enabled) return 0;
 
     let transitioned = 0;
     for (const state of this.candidates(config.maxTokensPerCycle)) {

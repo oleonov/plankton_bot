@@ -763,6 +763,88 @@ describe("ExecutionProfileManager", () => {
     });
   });
 
+  it("captures firstBuyAtMs metadata on the first BUY fill", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ addCount: 0, metadata: null }),
+    ]);
+    const bus = new InProcessEventBus();
+    const manager = makeManager({
+      bus,
+      repo,
+      profilePolicy: policy({ enabled: true }),
+      positions: [position({ avgEntryPrice: 0.12 })],
+    });
+
+    await manager.start();
+    await bus.publish("FillReceived", fill({ timestamp: NOW }));
+
+    expect(repo.getState(tokenId)?.metadata).toMatchObject({ firstBuyAtMs: NOW });
+  });
+
+  it("runs the abandonment scanner on interval when root and band are enabled", async () => {
+    vi.useFakeTimers();
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({
+        addCount: 3,
+        lastBuyAtMs: NOW - 2_700_000,
+        metadata: { firstBuyAtMs: NOW - 2_700_000 },
+      }),
+    ]);
+    const manager = makeManager({
+      repo,
+      profilePolicy: policy({
+        enabled: true,
+        abandonment: {
+          ...DEFAULT_POLICY.abandonment,
+          enabled: true,
+          evaluationIntervalMs: 60_000,
+          bands: {
+            ...DEFAULT_POLICY.abandonment.bands,
+            medium_low: { ...DEFAULT_POLICY.abandonment.bands.medium_low, enabled: true },
+          },
+        },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 13.45 })],
+    });
+
+    await manager.start();
+    vi.advanceTimersByTime(60_000);
+
+    expect(repo.getState(tokenId)?.state).toBe("ABANDONED_DORMANT");
+    await manager.stop();
+    vi.useRealTimers();
+  });
+
+  it("keeps abandonment dark when root is enabled but all bands remain disabled", async () => {
+    vi.useFakeTimers();
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({
+        addCount: 3,
+        lastBuyAtMs: NOW - 2_700_000,
+        metadata: { firstBuyAtMs: NOW - 2_700_000 },
+      }),
+    ]);
+    const manager = makeManager({
+      repo,
+      profilePolicy: policy({
+        enabled: true,
+        abandonment: {
+          ...DEFAULT_POLICY.abandonment,
+          enabled: true,
+          evaluationIntervalMs: 60_000,
+        },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 13.45 })],
+    });
+
+    await manager.start();
+    vi.advanceTimersByTime(60_000);
+
+    expect(repo.getState(tokenId)?.state).toBe("PROBING");
+    await manager.stop();
+    vi.useRealTimers();
+  });
+
   it("updates addCount directly on repeated BUY fills while reducer state no-ops", async () => {
     const repo = new InMemoryExecutionProfileStateRepository([state({ state: "PROBING" })]);
     const bus = new InProcessEventBus();

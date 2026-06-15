@@ -20,6 +20,7 @@ import {
   type TokenId,
 } from "@krabs/domain";
 
+import { AbandonmentManager } from "./abandonment-manager.js";
 import { decideCostCap } from "./cost-cap-enforcer.js";
 import type { ExecutionProfileAnomalyDetector } from "./execution-profile-anomaly-detector.js";
 import type { ExecutionProfileHealthChecker } from "./execution-profile-health-checker.js";
@@ -79,12 +80,26 @@ export interface ExecutionProfileManagerDeps {
 export class ExecutionProfileManager implements RuntimeModule {
   private readonly ownership = new InMemoryProfileOwnershipReader();
   private readonly scaleInSignalSource: ScaleInSignalSource;
+  private readonly abandonmentManager: AbandonmentManager;
   private readonly pendingScaleIn = new Map<string, { profile: Profile; createdAtMs: number }>();
   private readonly unsubscribers: Array<() => void> = [];
   private started = false;
 
   constructor(private readonly deps: ExecutionProfileManagerDeps) {
     this.scaleInSignalSource = deps.scaleInSignalSource ?? createStubScaleInSignalSource();
+    this.abandonmentManager = new AbandonmentManager({
+      stateRepo: deps.stateRepo,
+      positionRepo: deps.positionRepo,
+      orderRepo: deps.orderRepo,
+      policy: deps.policy,
+      metrics: deps.runtimeMetrics,
+      riskEvents: deps.riskEvents,
+      hasPendingScaleIn: (tokenId) => this.pendingScaleIn.has(String(tokenId)),
+      onStateChanged: (state) => {
+        this.ownership.setSnapshot(toSnapshot(state));
+      },
+      now: deps.now,
+    });
   }
 
   async start(): Promise<void> {
@@ -96,9 +111,11 @@ export class ExecutionProfileManager implements RuntimeModule {
     this.subscribe();
     this.deps.rollup?.start();
     this.deps.healthChecker?.start();
+    this.abandonmentManager.start();
   }
 
   async stop(): Promise<void> {
+    this.abandonmentManager.stop();
     while (this.unsubscribers.length > 0) {
       const unsub = this.unsubscribers.pop();
       unsub?.();
@@ -445,11 +462,17 @@ export class ExecutionProfileManager implements RuntimeModule {
     fill: RuntimeEventMap["FillReceived"],
   ): ExecutionProfileStateRecord {
     const updatedAt = new Date(fill.timestamp).toISOString();
+    const metadata = state.metadata ?? {};
+    const firstBuyAtMs =
+      typeof metadata.firstBuyAtMs === "number" && Number.isFinite(metadata.firstBuyAtMs)
+        ? metadata.firstBuyAtMs
+        : fill.timestamp;
     return {
       ...state,
       addCount: state.addCount + 1,
       lastBuyAtMs: fill.timestamp,
       initialProbeSizeUsd: state.initialProbeSizeUsd ?? fill.sizeUsdc,
+      metadata: { ...metadata, firstBuyAtMs },
       updatedAt,
     };
   }

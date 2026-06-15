@@ -193,6 +193,7 @@ function policy(options: {
   const abandonment = DEFAULT_EXECUTION_PROFILE_POLICY.abandonment;
   return {
     ...DEFAULT_EXECUTION_PROFILE_POLICY,
+    enabled: options.enabled,
     abandonment: {
       ...abandonment,
       enabled: options.enabled,
