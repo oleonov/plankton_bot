@@ -81,9 +81,10 @@ describe("decideAbandonment", () => {
   });
 
   it("short-circuits disabled root and disabled band", () => {
-    expect(
-      decideAbandonment(input(), { ...config(), enabled: false }),
-    ).toMatchObject({ shouldAbandon: false, reason: "abandonment_disabled" });
+    expect(decideAbandonment(input(), { ...config(), enabled: false })).toMatchObject({
+      shouldAbandon: false,
+      reason: "abandonment_disabled",
+    });
     expect(
       decideAbandonment(input(), {
         ...config(),

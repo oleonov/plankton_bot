@@ -299,7 +299,9 @@ describe("migration 072 — profile ladder state", () => {
 describe("migration 073 — execution profile abandoned dormant state", () => {
   it("widens execution_profile_state state CHECK to accept ABANDONED_DORMANT", () => {
     db.exec(readMigration("069_execution_profile_state.sql"));
-    db.exec(applySafeAddColumnStatements(db, readMigration("070_execution_profile_scale_in_columns.sql")));
+    db.exec(
+      applySafeAddColumnStatements(db, readMigration("070_execution_profile_scale_in_columns.sql")),
+    );
 
     expect(() =>
       db

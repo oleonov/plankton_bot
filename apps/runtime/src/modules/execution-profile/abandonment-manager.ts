@@ -179,9 +179,7 @@ function bandForAvgEntry(avgEntryPrice: number): ProfileLadderBand | null {
 
 function isActiveOrder(order: Order): boolean {
   return (
-    order.status === "pending" ||
-    order.status === "open" ||
-    order.status === "partially-filled"
+    order.status === "pending" || order.status === "open" || order.status === "partially-filled"
   );
 }
 

@@ -92,9 +92,9 @@ describe("reduceProfileState", () => {
     expect(
       reduceProfileState(record("ABANDONED_DORMANT"), event("qd_handoff_started")).next?.state,
     ).toBe("QD_HANDOFF");
-    expect(reduceProfileState(record("ABANDONED_DORMANT"), event("buy_fill_received"))).toMatchObject(
-      { rejected: true, rejectionReason: "invalid_transition" },
-    );
+    expect(
+      reduceProfileState(record("ABANDONED_DORMANT"), event("buy_fill_received")),
+    ).toMatchObject({ rejected: true, rejectionReason: "invalid_transition" });
     expect(
       reduceProfileState(record("ABANDONED_DORMANT"), event("sell_lifecycle_activated")),
     ).toMatchObject({ rejected: true, rejectionReason: "invalid_transition" });
@@ -115,9 +115,9 @@ describe("reduceProfileState", () => {
   it("rejects invalid terminal transitions", () => {
     expect(reduceProfileState(record("CLOSED"), event("buy_fill_received")).rejected).toBe(true);
     expect(reduceProfileState(record("ABANDONED"), event("buy_fill_received")).rejected).toBe(true);
-    expect(reduceProfileState(record("ABANDONED_DORMANT"), event("buy_fill_received")).rejected).toBe(
-      true,
-    );
+    expect(
+      reduceProfileState(record("ABANDONED_DORMANT"), event("buy_fill_received")).rejected,
+    ).toBe(true);
     expect(reduceProfileState(record("QD_HANDOFF"), event("buy_fill_received")).rejected).toBe(
       true,
     );

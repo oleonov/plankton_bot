@@ -1671,7 +1671,12 @@ function parseExecutionProfileAbandonment(
   }
   const obj = raw as Record<string, unknown>;
   return {
-    enabled: booleanOr(obj.enabled, fallback.enabled, issues, "executionProfile.abandonment.enabled"),
+    enabled: booleanOr(
+      obj.enabled,
+      fallback.enabled,
+      issues,
+      "executionProfile.abandonment.enabled",
+    ),
     evaluationIntervalMs: clampedInt(
       obj.evaluationIntervalMs,
       fallback.evaluationIntervalMs,
