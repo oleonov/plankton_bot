@@ -164,6 +164,17 @@ export type DecisionPlanSideEffect =
       ladderId: string;
       ownershipReason: S1OwnershipSnapshot["reason"];
       timestamp: string;
+    }
+  | {
+      kind: "d9_suppressed_on_profile_owned";
+      tokenId: TokenId;
+      conditionId: string | null;
+      decisionRuleId: "D9_LOSS_EXIT";
+      price: number | null;
+      state: DecisionSignalLog["state"];
+      emissionFacts: EmissionFacts;
+      d9Reason: string | null;
+      timestamp: string;
     };
 
 export type TrackQShadowReason =
@@ -267,6 +278,7 @@ export type DecisionPlanningInput = {
   hasActiveSellOrderForQd: boolean;
   sellLoopGuard: SellLoopGuardSnapshot | null;
   s1Ownership?: S1OwnershipSnapshot | null;
+  profileLadderOwned?: boolean;
 };
 
 const SELL_ONLY: ReadonlySet<TradeDecisionAction> = new Set(["SELL"]);
@@ -879,6 +891,20 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
       });
     }
     if (d9.fire) {
+      if (input.profileLadderOwned) {
+        sideEffects.push({
+          kind: "d9_suppressed_on_profile_owned",
+          tokenId: market.tokenId,
+          conditionId: market.conditionId,
+          decisionRuleId: "D9_LOSS_EXIT",
+          price: sellPrice.price,
+          state,
+          emissionFacts: d9EmissionFacts,
+          d9Reason: d9.reason,
+          timestamp: nowIso,
+        });
+        return none(metrics, suppressions, sideEffects);
+      }
       const positionAvgEntryPrice = finitePositiveOrNull(input.position?.avgEntryPrice ?? null);
       if (sellPrice.price != null && positionAvgEntryPrice == null) {
         suppressions.push({

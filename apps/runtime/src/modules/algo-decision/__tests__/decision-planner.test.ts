@@ -448,6 +448,76 @@ describe("evaluateDecisionPlan", () => {
     );
   });
 
+  it("suppresses D9 loss exit side effect for profile-ladder-owned tokens", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({
+          buyCount: 1,
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 12,
+        }),
+        position: position({ avgEntryPrice: 0.12, size: 100 }),
+        market: market({
+          bestBid: 0.07,
+          bestAsk: 0.08,
+          midPrice: 0.075,
+          spread: 0.01,
+          publicTradeCount24h: 100,
+        }),
+        profileLadderOwned: true,
+      } as Partial<DecisionPlanningInput> & { profileLadderOwned: boolean }),
+    );
+
+    expect(result.type).toBe("none");
+    expect(result.suppressions).toHaveLength(0);
+    expect(result.sideEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "d9_suppressed_on_profile_owned",
+        tokenId,
+        conditionId: "condition",
+        decisionRuleId: "D9_LOSS_EXIT",
+        price: 0.07,
+      }),
+    );
+  });
+
+  it("resumes normal D9 behavior after profile-ladder ownership is released", () => {
+    const base = {
+      selectedForEntry: false,
+      legState: leg({
+        buyCount: 1,
+        cumulativeBuySize: 100,
+        cumulativeBuyNotional: 12,
+      }),
+      position: position({ avgEntryPrice: 0.06, size: 100 }),
+      market: market({
+        bestBid: 0.07,
+        bestAsk: 0.08,
+        midPrice: 0.075,
+        spread: 0.01,
+        publicTradeCount24h: 100,
+      }),
+    } satisfies Partial<DecisionPlanningInput>;
+
+    const owned = evaluateDecisionPlan(
+      input({
+        ...base,
+        profileLadderOwned: true,
+      } as Partial<DecisionPlanningInput> & { profileLadderOwned: boolean }),
+    );
+    expect(owned.type).toBe("none");
+    expect(owned.sideEffects.map((effect) => effect.kind)).toContain(
+      "d9_suppressed_on_profile_owned",
+    );
+
+    const released = evaluateDecisionPlan(input(base));
+    expect(released.type).toBe("signal");
+    if (released.type !== "signal") return;
+    expect(released.signal.decisionRuleId).toBe("D9_LOSS_EXIT");
+    expect(released.signal.suggestedPrice).toBe(0.07);
+  });
+
   it("allows D9 loss exit when position avg entry is unavailable", () => {
     const result = evaluateDecisionPlan(
       input({

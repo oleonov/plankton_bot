@@ -1728,6 +1728,23 @@ export class AlgoDecisionModule implements RuntimeModule {
           }),
         );
       }
+      if (sideEffect.kind === "d9_suppressed_on_profile_owned") {
+        this.deps.runtimeMetrics?.writeCounter("d9_suppressed_on_profile_owned", 1);
+        this.deps.runtimeMetrics?.writeCounter("d9_would_have_fired_on_profile_owned", 1);
+        this.persistence.enqueueRiskEvent({
+          eventType: "d9_suppressed_on_profile_owned",
+          payload: {
+            tokenId: String(sideEffect.tokenId),
+            conditionId: sideEffect.conditionId,
+            decisionRuleId: sideEffect.decisionRuleId,
+            price: sideEffect.price,
+            state: sideEffect.state,
+            d9Reason: sideEffect.d9Reason,
+            emissionFacts: sideEffect.emissionFacts,
+            signalTimestamp: sideEffect.timestamp,
+          },
+        });
+      }
     }
   }
 
