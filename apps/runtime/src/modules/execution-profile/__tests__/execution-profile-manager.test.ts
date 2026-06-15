@@ -52,7 +52,11 @@ const DEFAULT_POLICY: ExecutionProfilePolicy = {
   },
 };
 
-function policy(overrides: Partial<ExecutionProfilePolicy> = {}): ExecutionProfilePolicy {
+type PolicyOverrides = Omit<Partial<ExecutionProfilePolicy>, "sellLadder"> & {
+  sellLadder?: Partial<ExecutionProfilePolicy["sellLadder"]>;
+};
+
+function policy(overrides: PolicyOverrides = {}): ExecutionProfilePolicy {
   return {
     ...DEFAULT_POLICY,
     ...overrides,

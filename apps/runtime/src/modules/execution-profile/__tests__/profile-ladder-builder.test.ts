@@ -1,0 +1,176 @@
+import {
+  DEFAULT_EXECUTION_PROFILE_POLICY,
+  createConditionId,
+  createTokenId,
+  type LadderBuilderInput,
+  type ProfileLadderBand,
+  type ProfileLadderMode,
+} from "@krabs/domain";
+import { describe, expect, it, vi } from "vitest";
+
+import { computeProfileLadder } from "../profile-ladder-builder.js";
+
+const config = {
+  ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder,
+  enabled: true,
+  bands: {
+    ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands,
+    cheap: { ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.cheap, enabled: true },
+    medium_low: {
+      ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.medium_low,
+      enabled: true,
+    },
+    medium_high: {
+      ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.medium_high,
+      enabled: true,
+    },
+    expensive: {
+      ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.expensive,
+      enabled: true,
+    },
+  },
+};
+
+function input(overrides: Partial<LadderBuilderInput> = {}): LadderBuilderInput {
+  return {
+    tokenId: createTokenId("token-ladder"),
+    conditionId: createConditionId("condition-ladder"),
+    openedAt: "2026-06-15T00:00:00.000Z",
+    avgEntryPrice: 0.1,
+    costBasisUsd: 25,
+    positionSizeShares: 250,
+    mode: "flat",
+    bestBid: 0.09,
+    bestAsk: 0.11,
+    tickSize: 0.001,
+    minOrderSize: 1,
+    config,
+    previousBand: null,
+    ...overrides,
+  };
+}
+
+function expectBand(avgEntryPrice: number, band: ProfileLadderBand): void {
+  const result = computeProfileLadder(input({ avgEntryPrice }));
+
+  expect(result).toMatchObject({ ok: true, band });
+}
+
+describe("computeProfileLadder", () => {
+  it("is pure and does not call the clock", () => {
+    const now = vi.spyOn(Date, "now");
+
+    computeProfileLadder(input());
+
+    expect(now).not.toHaveBeenCalled();
+    now.mockRestore();
+  });
+
+  it("resolves all four calibrated profile bands", () => {
+    expectBand(0.04, "cheap");
+    expectBand(0.05, "medium_low");
+    expectBand(0.149, "medium_low");
+    expectBand(0.15, "medium_high");
+    expectBand(0.349, "medium_high");
+    expectBand(0.35, "expensive");
+  });
+
+  it("uses Round 5 medium_low multipliers and normalized sizing", () => {
+    const result = computeProfileLadder(input({ avgEntryPrice: 0.1, costBasisUsd: 25 }));
+
+    expect(result).toMatchObject({ ok: true, band: "medium_low", activeRungCount: 4 });
+    if (!result.ok) throw new Error("expected ladder");
+    expect(result.rungs.map((rung) => rung.multiplier)).toEqual([1.1, 1.3, 1.55, 1.65]);
+    expect(result.rungs.map((rung) => rung.sizingFraction)).toEqual([0.38, 0.24, 0.2, 0.18]);
+    expect(result.rungs.map((rung) => rung.price)).toEqual([0.11, 0.13, 0.155, 0.165]);
+    expect(result.rungs.map((rung) => rung.sizeShares)).toEqual([95, 60, 50, 45]);
+  });
+
+  it.each([
+    ["up", 0.95, [0.105, 0.124, 0.148, 0.157]],
+    ["flat", 1, [0.11, 0.13, 0.155, 0.165]],
+    ["avg_down", 1.5, [0.165, 0.195, 0.233, 0.248]],
+  ] as const)(
+    "applies %s mode adjustment to ladder prices",
+    (mode: ProfileLadderMode, _adjustment, prices) => {
+      const result = computeProfileLadder(input({ mode, avgEntryPrice: 0.1, costBasisUsd: 25 }));
+
+      if (!result.ok) throw new Error("expected ladder");
+      expect(result.rungs.map((rung) => rung.price)).toEqual(prices);
+    },
+  );
+
+  it.each([
+    [4.99, 1],
+    [5, 2],
+    [14.99, 2],
+    [15, 4],
+    [49.99, 4],
+    [50, 4],
+  ])("uses position-size rung count rule for cost basis %s", (costBasisUsd, expectedCount) => {
+    const result = computeProfileLadder(input({ costBasisUsd, avgEntryPrice: 0.1 }));
+
+    expect(result).toMatchObject({ ok: true, activeRungCount: expectedCount });
+  });
+
+  it("caps active rungs at four and reserves the fifth multiplier", () => {
+    const result = computeProfileLadder(input({ avgEntryPrice: 0.1, costBasisUsd: 100 }));
+
+    if (!result.ok) throw new Error("expected ladder");
+    expect(result.rungs).toHaveLength(4);
+    expect(result.rungs.map((rung) => rung.multiplier)).not.toContain(1.85);
+  });
+
+  it("uses only three active rungs for medium_high and expensive at $15-$50", () => {
+    expect(computeProfileLadder(input({ avgEntryPrice: 0.2, costBasisUsd: 25 }))).toMatchObject({
+      ok: true,
+      band: "medium_high",
+      activeRungCount: 3,
+    });
+    expect(computeProfileLadder(input({ avgEntryPrice: 0.4, costBasisUsd: 25 }))).toMatchObject({
+      ok: true,
+      band: "expensive",
+      activeRungCount: 3,
+    });
+  });
+
+  it("rejects disabled master or band gates without side effects", () => {
+    expect(computeProfileLadder(input({ config: { ...config, enabled: false } }))).toMatchObject({
+      ok: false,
+      reason: "sell_ladder_disabled",
+      band: null,
+    });
+    expect(
+      computeProfileLadder(
+        input({
+          config: {
+            ...config,
+            bands: {
+              ...config.bands,
+              medium_low: { ...config.bands.medium_low, enabled: false },
+            },
+          },
+        }),
+      ),
+    ).toMatchObject({ ok: false, reason: "band_disabled", band: "medium_low" });
+  });
+
+  it("skips rungs that cannot satisfy Polymarket min order size", () => {
+    expect(
+      computeProfileLadder(
+        input({ avgEntryPrice: 0.1, costBasisUsd: 25, positionSizeShares: 10, minOrderSize: 5 }),
+      ),
+    ).toMatchObject({ ok: false, reason: "below_min_order_size", band: "medium_low" });
+  });
+
+  it("fails closed on invalid BBO or tick size", () => {
+    expect(computeProfileLadder(input({ bestBid: null }))).toMatchObject({
+      ok: false,
+      reason: "invalid_bbo",
+    });
+    expect(computeProfileLadder(input({ tickSize: 0 }))).toMatchObject({
+      ok: false,
+      reason: "invalid_tick_size",
+    });
+  });
+});
