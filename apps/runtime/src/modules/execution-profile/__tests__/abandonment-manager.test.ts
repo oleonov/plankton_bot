@@ -1,6 +1,7 @@
 import {
   DEFAULT_EXECUTION_PROFILE_POLICY,
   OrderStatus,
+  OrderType,
   type ClientOrderId,
   createBotRunId,
   createConditionId,
@@ -30,7 +31,12 @@ describe("AbandonmentManager", () => {
     const stateRepo = new InMemoryExecutionProfileStateRepository([
       state({ metadata: { firstBuyAtMs: NOW - 2_700_000 } }),
     ]);
-    const manager = managerWith({ stateRepo, metrics, riskEvents, policy: policy({ enabled: true }) });
+    const manager = managerWith({
+      stateRepo,
+      metrics,
+      riskEvents,
+      policy: policy({ enabled: true }),
+    });
 
     expect(manager.runOnce(NOW)).toBe(1);
     expect(stateRepo.getState(TOKEN)?.state).toBe("ABANDONED_DORMANT");
@@ -64,7 +70,12 @@ describe("AbandonmentManager", () => {
     const stateRepo = new InMemoryExecutionProfileStateRepository([
       state({ metadata: { firstBuyAtMs: NOW - 2_700_000 } }),
     ]);
-    const manager = managerWith({ stateRepo, metrics, riskEvents, policy: DEFAULT_EXECUTION_PROFILE_POLICY });
+    const manager = managerWith({
+      stateRepo,
+      metrics,
+      riskEvents,
+      policy: DEFAULT_EXECUTION_PROFILE_POLICY,
+    });
 
     manager.start();
 
@@ -209,9 +220,7 @@ function policy(options: {
   };
 }
 
-function state(
-  overrides: Partial<ExecutionProfileStateRecord> = {},
-): ExecutionProfileStateRecord {
+function state(overrides: Partial<ExecutionProfileStateRecord> = {}): ExecutionProfileStateRecord {
   return {
     tokenId: TOKEN,
     conditionId: CONDITION,
@@ -259,7 +268,7 @@ function order(overrides: Partial<Order> = {}): Order {
     tokenId: TOKEN,
     conditionId: CONDITION,
     side: "sell",
-    orderType: "limit",
+    orderType: OrderType.Gtc,
     price: 0.12,
     size: 10,
     sizeUsdc: 1.2,
