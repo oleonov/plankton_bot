@@ -132,6 +132,9 @@ import { ExecutionProfileManager } from "./modules/execution-profile/execution-p
 import { ExecutionProfileAnomalyDetector } from "./modules/execution-profile/execution-profile-anomaly-detector.js";
 import { ExecutionProfileHealthChecker } from "./modules/execution-profile/execution-profile-health-checker.js";
 import { ExecutionProfileRollup } from "./modules/execution-profile/execution-profile-rollup.js";
+import { SignalFeedManager } from "./modules/execution-profile/signal-feed-manager.js";
+import { SignalFeedReader } from "./modules/execution-profile/signal-feed-reader.js";
+import { SqliteSignalFeedRepository } from "./modules/execution-profile/signal-feed-repository.js";
 import { SqliteExecutionProfileStateRepository } from "./modules/execution-profile/state-repository.js";
 import { S1LadderModule } from "./modules/s1-ladder/s1-ladder-module.js";
 import { MarketSnapshotPriceHistoryProvider } from "./modules/algo-decision/market-snapshot-price-history.js";
@@ -1060,6 +1063,18 @@ async function main(): Promise<void> {
     log,
   });
   const executionProfileStateRepo = new SqliteExecutionProfileStateRepository(ledgerConn.db);
+  const signalFeedRepo = new SqliteSignalFeedRepository(ledgerConn.db);
+  const signalFeedManager = new SignalFeedManager({
+    bus,
+    repository: signalFeedRepo,
+    config: currentExecutionPolicy().executionProfile.signalFeed,
+  });
+  const signalFeedReader = new SignalFeedReader({
+    hotBuffer: signalFeedManager.getHotBuffer(),
+    warmTier: signalFeedManager.getWarmTier(),
+    bookSignals: trackCBookSignalsProvider,
+    config: currentExecutionPolicy().executionProfile.signalFeed,
+  });
   const executionProfileManagerRef: { current?: ExecutionProfileManager } = {};
   const executionProfileRollup = new ExecutionProfileRollup({
     windowMs: currentExecutionPolicy().executionProfile.monitoring.rollupWindowMs,
@@ -1093,6 +1108,7 @@ async function main(): Promise<void> {
     rollup: executionProfileRollup,
     healthChecker: executionProfileHealthChecker,
     anomalyDetector: executionProfileAnomalyDetector,
+    signalFeedReader,
   });
   executionProfileManagerRef.current = executionProfileManager;
   const s1LadderModule = new S1LadderModule({
@@ -1551,6 +1567,7 @@ async function main(): Promise<void> {
       ? [["redeem-sweep", redeemSweepModule] as [string, import("@krabs/domain").RuntimeModule]]
       : []),
     ["sell-loop-guard", sellLoopGuardModule],
+    ["execution-profile-signal-feed", signalFeedManager],
     ["execution-profile", executionProfileManager],
     ["s1-ladder", s1LadderModule],
     ["algo-decision", algoDecisionModule],

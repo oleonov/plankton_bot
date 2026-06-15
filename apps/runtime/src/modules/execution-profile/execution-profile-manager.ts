@@ -14,7 +14,9 @@ import {
   type RuntimeModule,
   type ScaleInDecision,
   type ScaleInConfig,
+  type ScaleInMarketSignals,
   type ScaleInReason,
+  type SignalSnapshot,
   type TokenId,
 } from "@krabs/domain";
 
@@ -54,6 +56,10 @@ export interface ExecutionProfileMetricWriter {
   writeEvent?(metricName: string, value: number, labels: string, capturedAt: string): void;
 }
 
+export interface ExecutionProfileSignalFeedReader {
+  getSnapshot(tokenId: TokenId, nowMs?: number): SignalSnapshot | null;
+}
+
 export interface ExecutionProfileManagerDeps {
   bus: EventBus;
   stateRepo: ExecutionProfileStateRepository;
@@ -61,6 +67,7 @@ export interface ExecutionProfileManagerDeps {
   orderRepo: OrderRepository;
   policy: () => ExecutionProfilePolicy;
   scaleInSignalSource?: ScaleInSignalSource;
+  signalFeedReader?: ExecutionProfileSignalFeedReader;
   runtimeMetrics?: ExecutionProfileMetricWriter;
   riskEvents?: Pick<RiskEventRepository, "insert">;
   rollup?: ExecutionProfileRollup;
@@ -306,7 +313,7 @@ export class ExecutionProfileManager implements RuntimeModule {
         continue;
       }
 
-      const signals = this.scaleInSignalSource.getSignalSnapshot(tokenId);
+      const signals = this.buildMarketSignals(tokenId, timestamp);
       const decision = decideScaleIn(
         {
           profile: state.profile,
@@ -447,6 +454,15 @@ export class ExecutionProfileManager implements RuntimeModule {
     return this.deps.orderRepo
       .findOpen()
       .some((order) => order.tokenId === tokenId && order.side === "buy");
+  }
+
+  private buildMarketSignals(tokenId: TokenId, timestamp: number): ScaleInMarketSignals {
+    const policy = this.policy();
+    if (policy.signalFeed.enabled && policy.scaleIn.useRealFeed && this.deps.signalFeedReader) {
+      const snapshot = this.deps.signalFeedReader.getSnapshot(tokenId, timestamp);
+      if (snapshot != null) return signalsFromSnapshot(snapshot);
+    }
+    return this.scaleInSignalSource.getSignalSnapshot(tokenId);
   }
 
   private recordCounter(name: string, labels: Record<string, unknown>): void {
@@ -605,4 +621,14 @@ function costCapSeverityMetric(severity: CapDecision["severity"]): string {
   if (severity === "under_p75") return EXECUTION_PROFILE_METRICS.costCapUnder;
   if (severity === "between") return EXECUTION_PROFILE_METRICS.costCapBetween;
   return EXECUTION_PROFILE_METRICS.costCapOver;
+}
+
+function signalsFromSnapshot(snapshot: SignalSnapshot): ScaleInMarketSignals {
+  return {
+    recovery60: snapshot.recovery60,
+    range60: snapshot.range60,
+    std60: snapshot.std60,
+    tradeCount3h: snapshot.tradeCount3h,
+    notional3h: snapshot.notional3h ?? 0,
+  };
 }

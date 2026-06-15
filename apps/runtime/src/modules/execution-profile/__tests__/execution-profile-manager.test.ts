@@ -18,6 +18,7 @@ import {
   type Position,
   type PositionRepository,
   type ScaleInMarketSignals,
+  type SignalSnapshot,
   type Signal,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
@@ -230,6 +231,30 @@ function zeroSignals(overrides: Partial<ScaleInMarketSignals> = {}): ScaleInMark
   };
 }
 
+function signalSnapshot(overrides: Partial<SignalSnapshot> = {}): SignalSnapshot {
+  return {
+    tokenId,
+    computedAtMs: NOW,
+    windowStartMs: NOW - 3_600_000,
+    hotSampleCount: 90,
+    warmBucketCount3h: 180,
+    recovery60: 0,
+    range60: 0,
+    std60: 0,
+    tradeCount3h: 0,
+    notional3h: null,
+    midNow: 0.102,
+    midMin60m: 0.1,
+    midMax60m: 0.102,
+    midMean60m: 0.101,
+    insufficientForRecovery: false,
+    insufficientForRange: false,
+    insufficientForStd: false,
+    insufficientForTradeCount: false,
+    ...overrides,
+  };
+}
+
 function fill(overrides: Partial<FillReceived> = {}): FillReceived {
   return {
     fillId: createFillId(`fill-${overrides.timestamp ?? NOW}`),
@@ -258,6 +283,8 @@ function makeManager(args: {
   repo?: InMemoryExecutionProfileStateRepository;
   bus?: InProcessEventBus;
   signalSnapshot?: ScaleInMarketSignals;
+  signalFeedSnapshot?: SignalSnapshot | null;
+  signalFeedSpy?: ReturnType<typeof vi.fn>;
   runtimeMetrics?: ReturnType<typeof makeMetrics>;
   riskEvents?: ReturnType<typeof makeRiskEvents>;
   rollup?: ExecutionProfileRollup;
@@ -273,6 +300,10 @@ function makeManager(args: {
   if (args.runtimeMetrics != null) deps.runtimeMetrics = args.runtimeMetrics;
   if (args.riskEvents != null) deps.riskEvents = args.riskEvents;
   if (args.rollup != null) deps.rollup = args.rollup;
+  if ("signalFeedSnapshot" in args) {
+    const getSnapshot = args.signalFeedSpy ?? vi.fn(() => args.signalFeedSnapshot ?? null);
+    deps.signalFeedReader = { getSnapshot };
+  }
   if (args.signalSnapshot == null) return new ExecutionProfileManager(deps);
   return new ExecutionProfileManager({
     ...deps,
@@ -541,6 +572,119 @@ describe("ExecutionProfileManager", () => {
     });
 
     expect(signals).toHaveLength(0);
+  });
+
+  it("keeps using stub signals when signalFeed is disabled even if useRealFeed is true", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    const realFeed = vi.fn(() => signalSnapshot({ tradeCount3h: 80 }));
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ lastBuyAtMs: NOW - 2_000_000 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      signalFeedSnapshot: signalSnapshot({ tradeCount3h: 80 }),
+      signalFeedSpy: realFeed,
+      profilePolicy: policy({
+        enabled: true,
+        signalFeed: { ...DEFAULT_POLICY.signalFeed, enabled: false },
+        scaleIn: { enabled: true, useRealFeed: true },
+        costCaps: { enabled: false },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.102, midPrice: 0.101, lastTradePrice: 0.101 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(realFeed).not.toHaveBeenCalled();
+    expect(signals).toHaveLength(0);
+  });
+
+  it("keeps using stub signals when useRealFeed is disabled while signalFeed buffers run", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    const realFeed = vi.fn(() => signalSnapshot({ tradeCount3h: 80 }));
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ lastBuyAtMs: NOW - 2_000_000 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      signalFeedSnapshot: signalSnapshot({ tradeCount3h: 80 }),
+      signalFeedSpy: realFeed,
+      profilePolicy: policy({
+        enabled: true,
+        signalFeed: { ...DEFAULT_POLICY.signalFeed, enabled: true },
+        scaleIn: { enabled: true, useRealFeed: false },
+        costCaps: { enabled: false },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.102, midPrice: 0.101, lastTradePrice: 0.101 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(realFeed).not.toHaveBeenCalled();
+    expect(signals).toHaveLength(0);
+  });
+
+  it("uses real signal snapshots only when signalFeed and useRealFeed are both enabled", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    const realFeed = vi.fn(() => signalSnapshot({ tradeCount3h: 80 }));
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ lastBuyAtMs: NOW - 2_000_000 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      signalFeedSnapshot: signalSnapshot({ tradeCount3h: 80 }),
+      signalFeedSpy: realFeed,
+      profilePolicy: policy({
+        enabled: true,
+        signalFeed: { ...DEFAULT_POLICY.signalFeed, enabled: true },
+        scaleIn: { enabled: true, useRealFeed: true },
+        costCaps: { enabled: false },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.102, midPrice: 0.101, lastTradePrice: 0.101 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(realFeed).toHaveBeenCalledWith(tokenId, NOW);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      side: "buy",
+      reason: "scale-in",
+      suggestedPrice: 0.102,
+    });
   });
 
   it("records profile reclassification counter and risk event on BUY fill avg-entry update", async () => {

@@ -80,6 +80,14 @@ export class SignalFeedManager implements RuntimeModule {
     return this.hot.getSamples(tokenId);
   }
 
+  getHotBuffer(): SignalFeedHotBuffer {
+    return this.hot;
+  }
+
+  getWarmTier(): SignalFeedWarmTier {
+    return this.warm;
+  }
+
   flushHotToWarm(nowMs: number): void {
     if (!this.deps.config.enabled) return;
     for (const tokenKey of this.tokenIds) {
