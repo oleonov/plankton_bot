@@ -5792,6 +5792,62 @@ describe("AlgoDecisionModule", () => {
     });
   });
 
+  describe("profile ladder legacy guard observability", () => {
+    it("writes legacy_guard_fired_on_profile_owned counter and risk event", async () => {
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const runtimeMetrics = {
+        writeCounter: vi.fn(),
+        writeLatest: vi.fn(),
+      } as unknown as RuntimeMetricWriter;
+      const mod = buildModule({ runtimeMetrics, riskEventRepo });
+      await mod.start();
+
+      const sideEffect = {
+        kind: "legacy_guard_fired_on_profile_owned",
+        guard: "d8",
+        tokenId: createTokenId("token-profile-d8"),
+        conditionId: "cond-profile-d8",
+        decisionRuleId: "D8_PROFIT_RATIO",
+        proposedPrice: 0.08,
+        avgEntryPrice: 0.05,
+        state: "S1",
+        timestamp: "2026-06-15T00:05:00.000Z",
+        emissionFacts: {
+          firstTradePrice: 0.05,
+          firstTradeAt: "2026-06-14T00:00:00.000Z",
+          legTradeCount: 1,
+          d8ProfitRatio: 1.7,
+          d8Threshold: 1.2412,
+          d8AvgBuyPrice: 0.05,
+        },
+      } as unknown as DecisionPlanSideEffect;
+
+      (mod as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      await mod.stop();
+
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "legacy_guard_fired_on_profile_owned",
+        1,
+        JSON.stringify({ guard: "d8" }),
+      );
+      expect(riskEventRepo.insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "legacy_guard_fired_on_profile_owned",
+          payload: expect.objectContaining({
+            guard: "d8",
+            tokenId: "token-profile-d8",
+            conditionId: "cond-profile-d8",
+            decisionRuleId: "D8_PROFIT_RATIO",
+            proposedPrice: 0.08,
+            avgEntryPrice: 0.05,
+            state: "S1",
+            signalTimestamp: "2026-06-15T00:05:00.000Z",
+          }),
+        }),
+      );
+    });
+  });
+
   // Sub-Track Q.D shadow (observe-only): the planner emits a `track_q_d` side
   // effect for cheap-longshot legs inside the pre-resolution TTC window. The
   // module surfaces it as a deduped, structured risk event + cumulative

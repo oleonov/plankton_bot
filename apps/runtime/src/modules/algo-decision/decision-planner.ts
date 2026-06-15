@@ -59,6 +59,7 @@ export type { QdShadowProjection, QdShadowReason } from "./qd-pre-resolution-exi
 export type TradeCountSource = "market_wide" | "leg_local_fallback" | "leg_local";
 
 export type EntryPriceBucket = "<=0.005" | "0.005-0.05" | "0.05-0.20" | ">0.20";
+export type ProfileOwnedLegacyGuard = "d4" | "d8";
 
 export type EmissionFacts = {
   firstTradePrice: number | null;
@@ -174,6 +175,18 @@ export type DecisionPlanSideEffect =
       state: DecisionSignalLog["state"];
       emissionFacts: EmissionFacts;
       d9Reason: string | null;
+      timestamp: string;
+    }
+  | {
+      kind: "legacy_guard_fired_on_profile_owned";
+      guard: ProfileOwnedLegacyGuard;
+      tokenId: TokenId;
+      conditionId: string | null;
+      decisionRuleId: string;
+      proposedPrice: number | null;
+      avgEntryPrice: number | null;
+      state: DecisionSignalLog["state"];
+      emissionFacts: EmissionFacts;
       timestamp: string;
     };
 
@@ -818,6 +831,17 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
       // spread reason codes.
       const d8AvgEntryPrice = finitePositiveOrNull(input.position?.avgEntryPrice ?? null);
       if (sellPrice.price != null && d8AvgEntryPrice != null && sellPrice.price < d8AvgEntryPrice) {
+        pushLegacyGuardFiredOnProfileOwned({
+          input,
+          market,
+          decisionRuleId: D8_PROFIT_RATIO_RULE_ID,
+          proposedPrice: sellPrice.price,
+          avgEntryPrice: d8AvgEntryPrice,
+          state,
+          emissionFacts: d8EmissionFacts,
+          sideEffects,
+          timestamp: nowIso,
+        });
         suppressions.push({
           tokenId: market.tokenId,
           conditionId: market.conditionId,
@@ -1190,6 +1214,18 @@ function buildSignalOrSuppression(args: {
       : null,
   };
 
+  pushLegacyGuardFiredOnProfileOwned({
+    input,
+    market,
+    decisionRuleId: decision.ruleId,
+    proposedPrice: price,
+    avgEntryPrice: finitePositiveOrNull(input.position?.avgEntryPrice ?? null),
+    state: ctx.state,
+    emissionFacts,
+    sideEffects: args.sideEffects,
+    timestamp: args.nowIso,
+  });
+
   if (decision.action === "SELL" && input.s1Ownership?.owned) {
     const ownership = input.s1Ownership;
     args.sideEffects.push({
@@ -1305,6 +1341,40 @@ function buildSignalOrSuppression(args: {
     sideEffects: args.sideEffects,
     signal: signalDraft,
   };
+}
+
+function pushLegacyGuardFiredOnProfileOwned(args: {
+  input: DecisionPlanningInput;
+  market: NormalizedMarket;
+  decisionRuleId: string;
+  proposedPrice: number | null;
+  avgEntryPrice: number | null;
+  state: DecisionSignalLog["state"];
+  emissionFacts: EmissionFacts;
+  sideEffects: DecisionPlanSideEffect[];
+  timestamp: string;
+}): void {
+  if (!args.input.profileLadderOwned) return;
+  const guard = legacyGuardForDecisionRule(args.decisionRuleId);
+  if (guard == null) return;
+  args.sideEffects.push({
+    kind: "legacy_guard_fired_on_profile_owned",
+    guard,
+    tokenId: args.market.tokenId,
+    conditionId: args.market.conditionId,
+    decisionRuleId: args.decisionRuleId,
+    proposedPrice: args.proposedPrice,
+    avgEntryPrice: args.avgEntryPrice,
+    state: args.state,
+    emissionFacts: args.emissionFacts,
+    timestamp: args.timestamp,
+  });
+}
+
+function legacyGuardForDecisionRule(ruleId: string): ProfileOwnedLegacyGuard | null {
+  if (ruleId === "D4") return "d4";
+  if (ruleId === D8_PROFIT_RATIO_RULE_ID) return "d8";
+  return null;
 }
 
 function buildSignalDraft(args: {

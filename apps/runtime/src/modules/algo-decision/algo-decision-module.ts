@@ -1745,6 +1745,27 @@ export class AlgoDecisionModule implements RuntimeModule {
           },
         });
       }
+      if (sideEffect.kind === "legacy_guard_fired_on_profile_owned") {
+        this.deps.runtimeMetrics?.writeCounter(
+          "legacy_guard_fired_on_profile_owned",
+          1,
+          JSON.stringify({ guard: sideEffect.guard }),
+        );
+        this.persistence.enqueueRiskEvent({
+          eventType: "legacy_guard_fired_on_profile_owned",
+          payload: {
+            guard: sideEffect.guard,
+            tokenId: String(sideEffect.tokenId),
+            conditionId: sideEffect.conditionId,
+            decisionRuleId: sideEffect.decisionRuleId,
+            proposedPrice: sideEffect.proposedPrice,
+            avgEntryPrice: sideEffect.avgEntryPrice,
+            state: sideEffect.state,
+            emissionFacts: sideEffect.emissionFacts,
+            signalTimestamp: sideEffect.timestamp,
+          },
+        });
+      }
     }
   }
 

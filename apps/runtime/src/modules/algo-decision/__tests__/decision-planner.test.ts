@@ -219,6 +219,31 @@ describe("evaluateDecisionPlan", () => {
     expect(result.signal.side).toBe("sell");
   });
 
+  it("emits D8 legacy-guard observability for profile-ladder-owned tokens", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        legState: leg({ buyCount: 1, cumulativeBuySize: 100, cumulativeBuyNotional: 5 }),
+        position: position({ avgEntryPrice: 0.05, size: 100 }),
+        market: market({ bestBid: 0.08, bestAsk: 0.09, midPrice: 0.085, spread: 0.01 }),
+        profileLadderOwned: true,
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
+    expect(result.sideEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "legacy_guard_fired_on_profile_owned",
+        guard: "d8",
+        decisionRuleId: "D8_PROFIT_RATIO",
+        proposedPrice: 0.08,
+        avgEntryPrice: 0.05,
+      }),
+    );
+  });
+
   it("suppresses the D8 SELL via the below-entry guard when the executable bid is below entry", () => {
     // Sub-Track Q.A (Option B): D8 now triggers on the decoupled midPrice (0.5
     // → ratio 50 ≫ 2.0) regardless of the executable bid, but the new
@@ -648,6 +673,97 @@ describe("evaluateDecisionPlan", () => {
     if (result.type !== "signal") return;
     expect(result.signal.decisionRuleId).toBe("D7_STATIC_EXIT");
     expect(result.signal.suggestedPrice).toBe(0.07);
+  });
+
+  it("emits D4 legacy-guard observability for profile-ladder-owned tokens", () => {
+    const d4Rules: AlgoDecisionRule[] = [
+      {
+        id: 10,
+        priority: 1,
+        ruleId: "D4",
+        stateCondition: "S1",
+        priceOperator: ">=",
+        priceValue: 0.05,
+        timeSinceLastOperator: null,
+        timeSinceLastSeconds: null,
+        buyCountMin: null,
+        buyCountMax: null,
+        holdDurationOperator: null,
+        holdDurationSeconds: null,
+        action: "SELL",
+      },
+      rules[1]!,
+    ];
+
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        decisionRules: d4Rules,
+        legState: leg({
+          buyCount: 1,
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 12,
+        }),
+        position: position({ avgEntryPrice: 0.06, size: 100 }),
+        market: market({
+          bestBid: 0.07,
+          bestAsk: 0.08,
+          midPrice: 0.075,
+          spread: 0.01,
+          publicTradeCount24h: 5,
+        }),
+        executionPolicy: {
+          ...DEFAULT_EXECUTION_POLICY,
+          entryMinMarketAgeSeconds: 0,
+          profitTarget: { ...DEFAULT_EXECUTION_POLICY.profitTarget, enabled: false },
+          lossExit: { ...DEFAULT_EXECUTION_POLICY.lossExit, enabled: false },
+        },
+        profileLadderOwned: true,
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D4");
+    expect(result.sideEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "legacy_guard_fired_on_profile_owned",
+        guard: "d4",
+        decisionRuleId: "D4",
+        proposedPrice: 0.07,
+        avgEntryPrice: 0.06,
+      }),
+    );
+
+    const nonOwned = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        decisionRules: d4Rules,
+        legState: leg({
+          buyCount: 1,
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 12,
+        }),
+        position: position({ avgEntryPrice: 0.06, size: 100 }),
+        market: market({
+          bestBid: 0.07,
+          bestAsk: 0.08,
+          midPrice: 0.075,
+          spread: 0.01,
+          publicTradeCount24h: 5,
+        }),
+        executionPolicy: {
+          ...DEFAULT_EXECUTION_POLICY,
+          entryMinMarketAgeSeconds: 0,
+          profitTarget: { ...DEFAULT_EXECUTION_POLICY.profitTarget, enabled: false },
+          lossExit: { ...DEFAULT_EXECUTION_POLICY.lossExit, enabled: false },
+        },
+      }),
+    );
+
+    expect(nonOwned.sideEffects).not.toContainEqual(
+      expect.objectContaining({ kind: "legacy_guard_fired_on_profile_owned" }),
+    );
   });
 
   it("returns a side-effect request instead of mutating dust counters in the planner", () => {
