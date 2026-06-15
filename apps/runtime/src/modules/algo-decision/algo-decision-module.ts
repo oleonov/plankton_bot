@@ -450,6 +450,10 @@ export interface BuySignalBudgetCircuitBreaker {
   ): BuySignalBudgetCircuitBreakerResult;
 }
 
+export interface ProfileLadderOwnershipReader {
+  isProfileLadderOwned(tokenId: TokenId): boolean;
+}
+
 // ─── Deps ────────────────────────────────────────────────────────────────────
 
 export interface AlgoDecisionModuleDeps {
@@ -528,6 +532,7 @@ export interface AlgoDecisionModuleDeps {
    * unchanged.
    */
   s1Ownership?: S1OwnershipReader | undefined;
+  profileLadderOwnership?: ProfileLadderOwnershipReader | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -1582,6 +1587,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       hasActiveSellOrderForQd: legState ? this.hasActiveSellOrderForQd(tokenId) : false,
       sellLoopGuard: this.deps.sellLoopGuard?.getSnapshot(tokenId, now) ?? null,
       s1Ownership: this.deps.s1Ownership?.getSnapshot(tokenId) ?? null,
+      profileLadderOwned: this.deps.profileLadderOwnership?.isProfileLadderOwned(tokenId) ?? false,
     };
   }
 

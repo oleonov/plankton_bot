@@ -110,6 +110,15 @@ describe("SqliteProfileLadderRepository", () => {
     ).toEqual(["active-1", "rebuild-1"]);
   });
 
+  it("reports profile-ladder ownership only for non-terminal ladders", () => {
+    repo.upsertLadder(state({ tokenId: createTokenId("owned-active"), status: "active" }));
+    repo.upsertLadder(state({ tokenId: createTokenId("owned-closed"), status: "closed" }));
+
+    expect((repo as any).isProfileLadderOwned(createTokenId("owned-active"))).toBe(true);
+    expect((repo as any).isProfileLadderOwned(createTokenId("owned-closed"))).toBe(false);
+    expect((repo as any).isProfileLadderOwned(createTokenId("owned-missing"))).toBe(false);
+  });
+
   it("deletes ladder rows by token", () => {
     repo.upsertLadder(state());
 

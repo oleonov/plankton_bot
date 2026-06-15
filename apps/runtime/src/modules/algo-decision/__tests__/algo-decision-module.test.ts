@@ -3418,6 +3418,67 @@ describe("AlgoDecisionModule", () => {
       expect(signalCalls[0]![1].signal.side).toBe("sell");
     });
 
+    it("wires runtime profile-ladder ownership into D9 suppression", async () => {
+      const tokenId = "token-d9-runtime-profile-owned";
+      algoRulesRepo = withR37Rules();
+      legStateRepo = createMockLegStateRepo([
+        {
+          ...makeR37LegState(tokenId),
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 10,
+        },
+      ]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const runtimeMetrics = {
+        writeCounter: vi.fn(),
+        writeLatest: vi.fn(),
+      } as unknown as RuntimeMetricWriter;
+      const profileLadderOwnership = {
+        isProfileLadderOwned: vi.fn().mockReturnValue(true),
+      };
+      const mod = buildModule({
+        riskEventRepo,
+        runtimeMetrics,
+        profileLadderOwnership,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          lossExit: {
+            ...DEFAULT_EXECUTION_POLICY.lossExit,
+            enabled: true,
+            states: ["S1", "S2"],
+            minPublicTradeCount24h: 41,
+          },
+        }),
+      } as any);
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [
+          {
+            ...makeMarket(tokenId, "r37", 0.07, `cond-${tokenId}`),
+            publicTradeCount24h: 100,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+      await mod.stop();
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls).toHaveLength(0);
+      expect(profileLadderOwnership.isProfileLadderOwned).toHaveBeenCalledWith(
+        createTokenId(tokenId),
+      );
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith("d9_suppressed_on_profile_owned", 1);
+      expect(riskEventRepo.insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "d9_suppressed_on_profile_owned",
+          payload: expect.objectContaining({ tokenId }),
+        }),
+      );
+    });
+
     it("suppresses D9 loss exit below position avg entry and records guard telemetry", async () => {
       const tokenId = "token-d9-below-avg-guard";
       algoRulesRepo = withR37Rules();
@@ -5793,6 +5854,79 @@ describe("AlgoDecisionModule", () => {
   });
 
   describe("profile ladder legacy guard observability", () => {
+    it("wires runtime profile-ladder ownership into D4 observability", async () => {
+      const tokenId = "token-d4-runtime-profile-owned";
+      legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+      algoRulesRepo = {
+        getDecisionRules: vi.fn(() => [
+          ...SEED_DECISION_RULES.filter((rule) => rule.ruleId === "FALLBACK"),
+          {
+            id: 404,
+            priority: 1,
+            ruleId: "D4",
+            stateCondition: "S1",
+            priceOperator: ">=",
+            priceValue: 0.1,
+            timeSinceLastOperator: null,
+            timeSinceLastSeconds: null,
+            buyCountMin: null,
+            buyCountMax: null,
+            holdDurationOperator: null,
+            holdDurationSeconds: null,
+            action: "SELL",
+          },
+        ]),
+        getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+          actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+        ),
+      };
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const runtimeMetrics = {
+        writeCounter: vi.fn(),
+        writeLatest: vi.fn(),
+      } as unknown as RuntimeMetricWriter;
+      const position = makeOpenPosition(tokenId, { avgEntryPrice: 0.1 });
+      const positionRepo = {
+        findOpen: vi.fn().mockReturnValue([position]),
+        findByTokenId: vi.fn().mockReturnValue(position),
+      };
+      const profileLadderOwnership = {
+        isProfileLadderOwned: vi.fn().mockReturnValue(true),
+      };
+      const mod = buildModule({
+        riskEventRepo,
+        runtimeMetrics,
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        profileLadderOwnership,
+      } as any);
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.15, `cond-${tokenId}`)],
+        timestamp: Date.now(),
+      });
+      await mod.stop();
+
+      expect(profileLadderOwnership.isProfileLadderOwned).toHaveBeenCalledWith(
+        createTokenId(tokenId),
+      );
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "legacy_guard_fired_on_profile_owned",
+        1,
+        JSON.stringify({ guard: "d4" }),
+      );
+      expect(riskEventRepo.insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "legacy_guard_fired_on_profile_owned",
+          payload: expect.objectContaining({
+            guard: "d4",
+            tokenId,
+            decisionRuleId: "D4",
+          }),
+        }),
+      );
+    });
+
     it("writes legacy_guard_fired_on_profile_owned counter and risk event", async () => {
       const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
       const runtimeMetrics = {

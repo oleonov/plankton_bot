@@ -14,6 +14,7 @@ export interface ProfileLadderRepository {
   upsertLadder(state: LadderState): void;
   getLadder(tokenId: TokenId): LadderState | null;
   findActive(): LadderState[];
+  isProfileLadderOwned(tokenId: TokenId): boolean;
   deleteLadder(tokenId: TokenId): void;
   runInTransaction<T>(fn: () => T): T;
 }
@@ -88,6 +89,19 @@ export class SqliteProfileLadderRepository implements ProfileLadderRepository {
       )
       .all() as LadderStateRow[];
     return rows.map(toLadderState);
+  }
+
+  isProfileLadderOwned(tokenId: TokenId): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1
+         FROM profile_ladder_state
+         WHERE token_id = ?
+           AND status NOT IN ('closed', 'cancelled')
+         LIMIT 1`,
+      )
+      .get(tokenId);
+    return row != null;
   }
 
   deleteLadder(tokenId: TokenId): void {

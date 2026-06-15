@@ -43,6 +43,11 @@ class InMemoryProfileLadderRepository implements ProfileLadderRepository {
     );
   }
 
+  isProfileLadderOwned(token: TokenId): boolean {
+    const state = this.states.get(String(token));
+    return state != null && state.status !== "closed" && state.status !== "cancelled";
+  }
+
   deleteLadder(token: TokenId): void {
     this.states.delete(String(token));
   }

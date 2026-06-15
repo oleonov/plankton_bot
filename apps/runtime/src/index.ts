@@ -1116,9 +1116,10 @@ async function main(): Promise<void> {
     signalFeedReader,
   });
   executionProfileManagerRef.current = executionProfileManager;
+  const profileLadderRepo = new SqliteProfileLadderRepository(ledgerConn.db);
   const profileLadderModule = new ProfileLadderModule({
     bus,
-    repository: new SqliteProfileLadderRepository(ledgerConn.db),
+    repository: profileLadderRepo,
     policy: () => currentExecutionPolicy().executionProfile,
     runtimeMetrics,
     riskEvents: repos.riskEvent,
@@ -1144,6 +1145,11 @@ async function main(): Promise<void> {
     runtimeMetrics,
     sellLoopGuard: sellLoopGuardModule,
     s1Ownership: s1LadderModule,
+    profileLadderOwnership: {
+      isProfileLadderOwned: (tokenId) =>
+        currentExecutionPolicy().executionProfile.sellLadder.enabled &&
+        profileLadderRepo.isProfileLadderOwned(tokenId),
+    },
     decisionPersistenceMode: "worker",
     decisionPersistenceWorkerDbPath: ledgerDbPath,
     decisionWorkerCount: config.algoDecisionWorkerCount,
