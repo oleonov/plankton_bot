@@ -274,6 +274,7 @@ describe("migration 072 — profile ladder state", () => {
       "last_fill_at_ms",
       "stale_checked_at_ms",
       "qd_handoff_at_ms",
+      "closed_at_ms",
       "created_at_ms",
       "updated_at_ms",
       "metadata_json",

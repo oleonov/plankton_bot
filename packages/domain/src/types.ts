@@ -924,6 +924,7 @@ export interface LadderState {
   lastFillAtMs: number | null;
   staleCheckedAtMs: number | null;
   qdHandoffAtMs: number | null;
+  closedAtMs: number | null;
   createdAtMs: number;
   updatedAtMs: number;
   metadataJson: string;

@@ -43,13 +43,40 @@ class InMemoryProfileLadderRepository implements ProfileLadderRepository {
     );
   }
 
+  findByBand(band: LadderState["band"]): LadderState[] {
+    return this.findActive().filter((state) => state.band === band);
+  }
+
   isProfileLadderOwned(token: TokenId): boolean {
     const state = this.states.get(String(token));
     return state != null && state.status !== "closed" && state.status !== "cancelled";
   }
 
+  markClosed(token: TokenId, reason: string, closedAtMs = NOW): void {
+    const state = this.states.get(String(token));
+    if (state == null) return;
+    this.states.set(String(token), {
+      ...state,
+      status: "closed",
+      closedAtMs,
+      updatedAtMs: closedAtMs,
+      metadataJson: JSON.stringify({ ...JSON.parse(state.metadataJson), closeReason: reason }),
+    });
+  }
+
   deleteLadder(token: TokenId): void {
-    this.states.delete(String(token));
+    const state = this.states.get(String(token));
+    if (state == null) return;
+    this.states.set(String(token), {
+      ...state,
+      status: "cancelled",
+      closedAtMs: NOW,
+      updatedAtMs: NOW,
+      metadataJson: JSON.stringify({
+        ...JSON.parse(state.metadataJson),
+        closeReason: "delete_ladder",
+      }),
+    });
   }
 
   runInTransaction<T>(fn: () => T): T {
@@ -158,6 +185,7 @@ function ladderState(overrides: Partial<LadderState> = {}): LadderState {
     lastFillAtMs: null,
     staleCheckedAtMs: null,
     qdHandoffAtMs: null,
+    closedAtMs: null,
     createdAtMs: NOW,
     updatedAtMs: NOW,
     metadataJson: "{}",
@@ -328,7 +356,10 @@ describe("ProfileLadderModule", () => {
       position: position({ status: PositionStatus.Closed }),
     });
 
-    expect(ctx.repo.getLadder(tokenId)).toBeNull();
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+      status: "cancelled",
+      closedAtMs: NOW,
+    });
     expect(ctx.cancels).toEqual(["profile-ladder-order"]);
   });
 

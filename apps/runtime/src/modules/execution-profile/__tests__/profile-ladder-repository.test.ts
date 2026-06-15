@@ -47,6 +47,7 @@ function state(overrides: Partial<LadderState> = {}): LadderState {
     lastFillAtMs: null,
     staleCheckedAtMs: null,
     qdHandoffAtMs: null,
+    closedAtMs: null,
     createdAtMs: 1_797_376_400_000,
     updatedAtMs: 1_797_376_400_000,
     metadataJson: "{}",
@@ -119,12 +120,52 @@ describe("SqliteProfileLadderRepository", () => {
     expect((repo as any).isProfileLadderOwned(createTokenId("owned-missing"))).toBe(false);
   });
 
-  it("deletes ladder rows by token", () => {
+  it("retains audit rows when deleting ladders by token", () => {
     repo.upsertLadder(state());
 
     repo.deleteLadder(tokenId);
 
-    expect(repo.getLadder(tokenId)).toBeNull();
+    expect(repo.getLadder(tokenId)).toMatchObject({
+      status: "cancelled",
+      closedAtMs: expect.any(Number),
+    });
+    expect(repo.findActive()).toHaveLength(0);
+  });
+
+  it("marks ladders closed without deleting audit rows", () => {
+    repo.upsertLadder(state());
+
+    (repo as any).markClosed(tokenId, "position_closed", 1_797_376_600_000);
+
+    expect(repo.getLadder(tokenId)).toMatchObject({
+      status: "closed",
+      closedAtMs: 1_797_376_600_000,
+    });
+    expect(repo.findActive()).toHaveLength(0);
+  });
+
+  it("finds open ladders by band and excludes terminal rows", () => {
+    repo.upsertLadder(state({ tokenId: createTokenId("medium-open"), band: "medium_low" }));
+    repo.upsertLadder(
+      state({ tokenId: createTokenId("medium-closed"), band: "medium_low", status: "closed" }),
+    );
+    repo.upsertLadder(state({ tokenId: createTokenId("cheap-open"), band: "cheap" }));
+
+    expect(
+      (repo as any).findByBand("medium_low").map((row: LadderState) => String(row.tokenId)),
+    ).toEqual(["medium-open"]);
+  });
+
+  it("soft-cancels through deleteLadder compatibility wrapper", () => {
+    repo.upsertLadder(state());
+
+    repo.deleteLadder(tokenId);
+
+    expect(repo.getLadder(tokenId)).toMatchObject({
+      status: "cancelled",
+      closedAtMs: expect.any(Number),
+    });
+    expect(repo.isProfileLadderOwned(tokenId)).toBe(false);
   });
 
   it("rolls back transaction failures", () => {

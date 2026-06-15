@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS profile_ladder_state (
   last_fill_at_ms BIGINT,
   stale_checked_at_ms BIGINT,
   qd_handoff_at_ms BIGINT,
+  closed_at_ms BIGINT,
   created_at_ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL,
   metadata_json TEXT NOT NULL DEFAULT '{}'

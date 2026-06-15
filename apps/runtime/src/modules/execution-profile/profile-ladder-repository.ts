@@ -14,7 +14,9 @@ export interface ProfileLadderRepository {
   upsertLadder(state: LadderState): void;
   getLadder(tokenId: TokenId): LadderState | null;
   findActive(): LadderState[];
+  findByBand(band: ProfileLadderBand): LadderState[];
   isProfileLadderOwned(tokenId: TokenId): boolean;
+  markClosed(tokenId: TokenId, reason: string, closedAtMs?: number): void;
   deleteLadder(tokenId: TokenId): void;
   runInTransaction<T>(fn: () => T): T;
 }
@@ -29,8 +31,9 @@ export class SqliteProfileLadderRepository implements ProfileLadderRepository {
          (token_id, condition_id, ladder_id, band, phase, status, active_rungs_json,
           filled_rungs_json, last_avg_entry, last_cost_basis_usdc, last_mode,
           last_bbo_reference_json, last_rebuild_at_ms, last_fill_at_ms,
-          stale_checked_at_ms, qd_handoff_at_ms, created_at_ms, updated_at_ms, metadata_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          stale_checked_at_ms, qd_handoff_at_ms, closed_at_ms, created_at_ms,
+          updated_at_ms, metadata_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(token_id) DO UPDATE SET
            condition_id = excluded.condition_id,
            ladder_id = excluded.ladder_id,
@@ -47,6 +50,7 @@ export class SqliteProfileLadderRepository implements ProfileLadderRepository {
            last_fill_at_ms = excluded.last_fill_at_ms,
            stale_checked_at_ms = excluded.stale_checked_at_ms,
            qd_handoff_at_ms = excluded.qd_handoff_at_ms,
+           closed_at_ms = excluded.closed_at_ms,
            updated_at_ms = excluded.updated_at_ms,
            metadata_json = excluded.metadata_json`,
       )
@@ -67,6 +71,7 @@ export class SqliteProfileLadderRepository implements ProfileLadderRepository {
         state.lastFillAtMs,
         state.staleCheckedAtMs,
         state.qdHandoffAtMs,
+        state.closedAtMs,
         state.createdAtMs,
         state.updatedAtMs,
         state.metadataJson,
@@ -91,6 +96,18 @@ export class SqliteProfileLadderRepository implements ProfileLadderRepository {
     return rows.map(toLadderState);
   }
 
+  findByBand(band: ProfileLadderBand): LadderState[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM profile_ladder_state
+         WHERE band = ?
+           AND status NOT IN ('closed', 'cancelled')
+         ORDER BY updated_at_ms DESC`,
+      )
+      .all(band) as LadderStateRow[];
+    return rows.map(toLadderState);
+  }
+
   isProfileLadderOwned(tokenId: TokenId): boolean {
     const row = this.db
       .prepare(
@@ -104,12 +121,42 @@ export class SqliteProfileLadderRepository implements ProfileLadderRepository {
     return row != null;
   }
 
+  markClosed(tokenId: TokenId, reason: string, closedAtMs = Date.now()): void {
+    this.closeLadder(tokenId, "closed", reason, closedAtMs);
+  }
+
   deleteLadder(tokenId: TokenId): void {
-    this.db.prepare(`DELETE FROM profile_ladder_state WHERE token_id = ?`).run(tokenId);
+    this.closeLadder(tokenId, "cancelled", "delete_ladder", Date.now());
   }
 
   runInTransaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+
+  private closeLadder(
+    tokenId: TokenId,
+    status: Extract<ProfileLadderStatus, "closed" | "cancelled">,
+    reason: string,
+    closedAtMs: number,
+  ): void {
+    const current = this.getLadder(tokenId);
+    if (current == null) return;
+    this.db
+      .prepare(
+        `UPDATE profile_ladder_state
+         SET status = ?,
+             closed_at_ms = ?,
+             updated_at_ms = ?,
+             metadata_json = ?
+         WHERE token_id = ?`,
+      )
+      .run(
+        status,
+        closedAtMs,
+        closedAtMs,
+        mergeCloseMetadata(current.metadataJson, reason),
+        tokenId,
+      );
   }
 }
 
@@ -130,6 +177,7 @@ interface LadderStateRow {
   last_fill_at_ms: number | null;
   stale_checked_at_ms: number | null;
   qd_handoff_at_ms: number | null;
+  closed_at_ms: number | null;
   created_at_ms: number;
   updated_at_ms: number;
   metadata_json: string;
@@ -153,6 +201,7 @@ function toLadderState(row: LadderStateRow): LadderState {
     lastFillAtMs: row.last_fill_at_ms,
     staleCheckedAtMs: row.stale_checked_at_ms,
     qdHandoffAtMs: row.qd_handoff_at_ms,
+    closedAtMs: row.closed_at_ms,
     createdAtMs: row.created_at_ms,
     updatedAtMs: row.updated_at_ms,
     metadataJson: row.metadata_json,
@@ -166,4 +215,16 @@ function parseRungs(raw: string): LadderRung[] {
   } catch {
     return [];
   }
+}
+
+function mergeCloseMetadata(raw: string, reason: string): string {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed != null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return JSON.stringify({ ...parsed, closeReason: reason });
+    }
+  } catch {
+    // Keep the close reason even if legacy metadata was malformed.
+  }
+  return JSON.stringify({ closeReason: reason });
 }

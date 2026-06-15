@@ -234,6 +234,7 @@ export class ProfileLadderModule implements RuntimeModule {
       lastFillAtMs: null,
       staleCheckedAtMs: null,
       qdHandoffAtMs: null,
+      closedAtMs: null,
       createdAtMs: this.deps.repository.getLadder(position.tokenId)?.createdAtMs ?? now,
       updatedAtMs: now,
       metadataJson: JSON.stringify({ eventType }),
