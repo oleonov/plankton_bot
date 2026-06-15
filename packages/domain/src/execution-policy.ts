@@ -15,6 +15,8 @@ import type {
   DepositActivationPolicy,
   ExecutionPolicy,
   ExecutionProfileCostCapProfilePolicy,
+  ExecutionProfileAbandonmentBandConfig,
+  ExecutionProfileAbandonmentConfig,
   ExecutionProfileFeatureToggle,
   ExecutionProfileHysteresisBounds,
   ExecutionProfileMonitoringConfig,
@@ -245,6 +247,39 @@ export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderCo
   },
 };
 
+export const DEFAULT_EXECUTION_PROFILE_ABANDONMENT: ExecutionProfileAbandonmentConfig = {
+  enabled: false,
+  evaluationIntervalMs: 60_000,
+  maxTokensPerCycle: 100,
+  hardStaleFallbackMs: 24 * 60 * 60_000,
+  bands: {
+    cheap: {
+      enabled: false,
+      probeSizeMaxUsdc: 9,
+      maxProbeBuyCount: 4,
+      scaleInRequiredWithinMs: 60 * 60_000,
+    },
+    medium_low: {
+      enabled: false,
+      probeSizeMaxUsdc: 13.45,
+      maxProbeBuyCount: 3,
+      scaleInRequiredWithinMs: 45 * 60_000,
+    },
+    medium_high: {
+      enabled: false,
+      probeSizeMaxUsdc: 12.83,
+      maxProbeBuyCount: 2,
+      scaleInRequiredWithinMs: 15 * 60_000,
+    },
+    expensive: {
+      enabled: false,
+      probeSizeMaxUsdc: 11.84,
+      maxProbeBuyCount: 2,
+      scaleInRequiredWithinMs: 10 * 60_000,
+    },
+  },
+};
+
 export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
   enabled: false,
   maxTokensPerCycle: 100,
@@ -272,6 +307,7 @@ export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
     flushWarmToColdIntervalMs: 60_000,
     maintenanceIntervalMs: 60 * 60_000,
   },
+  abandonment: DEFAULT_EXECUTION_PROFILE_ABANDONMENT,
   profiles: {
     cheap: {
       costCaps: { normalCapUsd: 11, aggressiveCapUsd: 23, hardCapAtAggressive: false },
@@ -1534,6 +1570,7 @@ function parseExecutionProfile(raw: unknown, issues: string[]): ExecutionProfile
       "executionProfile.scaleIn",
     ),
     signalFeed: parseExecutionProfileSignalFeed(obj.signalFeed, issues),
+    abandonment: parseExecutionProfileAbandonment(obj.abandonment, issues),
     profiles: parseExecutionProfileProfiles(obj.profiles, issues),
     sellLadder: parseExecutionProfileSellLadder(obj.sellLadder, issues),
     adoptExistingPositions: parseExecutionProfileToggle(
@@ -1621,6 +1658,121 @@ function parseExecutionProfileMonitoring(
       ),
     },
   };
+}
+
+function parseExecutionProfileAbandonment(
+  raw: unknown,
+  issues: string[],
+): ExecutionProfileAbandonmentConfig {
+  const fallback = DEFAULT_EXECUTION_PROFILE_POLICY.abandonment;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.abandonment must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(obj.enabled, fallback.enabled, issues, "executionProfile.abandonment.enabled"),
+    evaluationIntervalMs: clampedInt(
+      obj.evaluationIntervalMs,
+      fallback.evaluationIntervalMs,
+      BOUND_EXECUTION_PROFILE_MONITORING_MIN_MS,
+      BOUND_EXECUTION_PROFILE_MONITORING_MAX_MS,
+      issues,
+      "executionProfile.abandonment.evaluationIntervalMs",
+    ),
+    maxTokensPerCycle: clampedInt(
+      obj.maxTokensPerCycle,
+      fallback.maxTokensPerCycle,
+      BOUND_EXECUTION_PROFILE_TOKENS_MIN,
+      BOUND_EXECUTION_PROFILE_TOKENS_MAX,
+      issues,
+      "executionProfile.abandonment.maxTokensPerCycle",
+    ),
+    hardStaleFallbackMs: clampedInt(
+      obj.hardStaleFallbackMs,
+      fallback.hardStaleFallbackMs,
+      BOUND_EXECUTION_PROFILE_MONITORING_MIN_MS,
+      BOUND_EXECUTION_PROFILE_MONITORING_MAX_MS,
+      issues,
+      "executionProfile.abandonment.hardStaleFallbackMs",
+    ),
+    bands: parseExecutionProfileAbandonmentBands(obj.bands, fallback.bands, issues),
+  };
+}
+
+function parseExecutionProfileAbandonmentBands(
+  raw: unknown,
+  fallback: ExecutionProfileAbandonmentConfig["bands"],
+  issues: string[],
+): ExecutionProfileAbandonmentConfig["bands"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.abandonment.bands must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    cheap: parseExecutionProfileAbandonmentBand(obj.cheap, fallback.cheap, issues, "cheap"),
+    medium_low: parseExecutionProfileAbandonmentBand(
+      obj.medium_low,
+      fallback.medium_low,
+      issues,
+      "medium_low",
+    ),
+    medium_high: parseExecutionProfileAbandonmentBand(
+      obj.medium_high,
+      fallback.medium_high,
+      issues,
+      "medium_high",
+    ),
+    expensive: parseExecutionProfileAbandonmentBand(
+      obj.expensive,
+      fallback.expensive,
+      issues,
+      "expensive",
+    ),
+  };
+}
+
+function parseExecutionProfileAbandonmentBand(
+  raw: unknown,
+  fallback: ExecutionProfileAbandonmentBandConfig,
+  issues: string[],
+  band: ProfileLadderBand,
+): ExecutionProfileAbandonmentBandConfig {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined)
+      issues.push(`executionProfile.abandonment.bands.${band} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  const name = `executionProfile.abandonment.bands.${band}`;
+  const previousIssueCount = issues.length;
+  const parsed: ExecutionProfileAbandonmentBandConfig = {
+    enabled: booleanOr(obj.enabled, fallback.enabled, issues, `${name}.enabled`),
+    probeSizeMaxUsdc: positiveNumberOr(
+      obj.probeSizeMaxUsdc,
+      fallback.probeSizeMaxUsdc,
+      issues,
+      `${name}.probeSizeMaxUsdc`,
+    ).value,
+    maxProbeBuyCount: clampedInt(
+      obj.maxProbeBuyCount,
+      fallback.maxProbeBuyCount,
+      1,
+      100,
+      issues,
+      `${name}.maxProbeBuyCount`,
+    ),
+    scaleInRequiredWithinMs: clampedInt(
+      obj.scaleInRequiredWithinMs,
+      fallback.scaleInRequiredWithinMs,
+      BOUND_EXECUTION_PROFILE_MONITORING_MIN_MS,
+      BOUND_EXECUTION_PROFILE_MONITORING_MAX_MS,
+      issues,
+      `${name}.scaleInRequiredWithinMs`,
+    ),
+  };
+  return issues.length === previousIssueCount ? parsed : fallback;
 }
 
 function parseExecutionProfileToggle(

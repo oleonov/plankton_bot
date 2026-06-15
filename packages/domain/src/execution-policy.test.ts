@@ -73,6 +73,38 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         flushWarmToColdIntervalMs: 60_000,
         maintenanceIntervalMs: 3_600_000,
       },
+      abandonment: {
+        enabled: false,
+        evaluationIntervalMs: 60_000,
+        maxTokensPerCycle: 100,
+        hardStaleFallbackMs: 86_400_000,
+        bands: {
+          cheap: {
+            enabled: false,
+            probeSizeMaxUsdc: 9,
+            maxProbeBuyCount: 4,
+            scaleInRequiredWithinMs: 3_600_000,
+          },
+          medium_low: {
+            enabled: false,
+            probeSizeMaxUsdc: 13.45,
+            maxProbeBuyCount: 3,
+            scaleInRequiredWithinMs: 2_700_000,
+          },
+          medium_high: {
+            enabled: false,
+            probeSizeMaxUsdc: 12.83,
+            maxProbeBuyCount: 2,
+            scaleInRequiredWithinMs: 900_000,
+          },
+          expensive: {
+            enabled: false,
+            probeSizeMaxUsdc: 11.84,
+            maxProbeBuyCount: 2,
+            scaleInRequiredWithinMs: 600_000,
+          },
+        },
+      },
       profiles: {
         cheap: {
           costCaps: { normalCapUsd: 11, aggressiveCapUsd: 23, hardCapAtAggressive: false },

@@ -176,3 +176,81 @@ describe("execution profile sell ladder policy", () => {
     );
   });
 });
+
+describe("execution profile abandonment policy", () => {
+  it("defaults all abandonment bands to dark with calibrated Spec 5 values", () => {
+    const policy = parseExecutionPolicyJson(null).policy.executionProfile.abandonment;
+
+    expect(policy).toEqual({
+      enabled: false,
+      evaluationIntervalMs: 60_000,
+      maxTokensPerCycle: 100,
+      hardStaleFallbackMs: 86_400_000,
+      bands: {
+        cheap: {
+          enabled: false,
+          probeSizeMaxUsdc: 9,
+          maxProbeBuyCount: 4,
+          scaleInRequiredWithinMs: 3_600_000,
+        },
+        medium_low: {
+          enabled: false,
+          probeSizeMaxUsdc: 13.45,
+          maxProbeBuyCount: 3,
+          scaleInRequiredWithinMs: 2_700_000,
+        },
+        medium_high: {
+          enabled: false,
+          probeSizeMaxUsdc: 12.83,
+          maxProbeBuyCount: 2,
+          scaleInRequiredWithinMs: 900_000,
+        },
+        expensive: {
+          enabled: false,
+          probeSizeMaxUsdc: 11.84,
+          maxProbeBuyCount: 2,
+          scaleInRequiredWithinMs: 600_000,
+        },
+      },
+    });
+  });
+
+  it("parses abandonment config with isolated per-band fallback", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          abandonment: {
+            enabled: true,
+            maxTokensPerCycle: 25,
+            bands: {
+              medium_low: {
+                enabled: true,
+                probeSizeMaxUsdc: 14,
+                maxProbeBuyCount: 4,
+                scaleInRequiredWithinMs: 3_000_000,
+              },
+              expensive: {
+                probeSizeMaxUsdc: -1,
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.policy.executionProfile.abandonment.enabled).toBe(true);
+    expect(parsed.policy.executionProfile.abandonment.maxTokensPerCycle).toBe(25);
+    expect(parsed.policy.executionProfile.abandonment.bands.medium_low).toEqual({
+      enabled: true,
+      probeSizeMaxUsdc: 14,
+      maxProbeBuyCount: 4,
+      scaleInRequiredWithinMs: 3_000_000,
+    });
+    expect(parsed.policy.executionProfile.abandonment.bands.expensive).toEqual(
+      DEFAULT_EXECUTION_PROFILE_POLICY.abandonment.bands.expensive,
+    );
+    expect(parsed.issues).toContain(
+      "executionProfile.abandonment.bands.expensive.probeSizeMaxUsdc must be > 0",
+    );
+  });
+});
