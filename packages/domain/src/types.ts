@@ -871,6 +871,127 @@ export interface S1OwnershipReader {
 
 export type ExecutionProfileName = "cheap" | "medium" | "expensive";
 
+export type ProfileLadderBand = "cheap" | "medium_low" | "medium_high" | "expensive";
+
+export type ProfileLadderMode = "up" | "flat" | "avg_down";
+
+export type ProfileLadderStatus =
+  | "active"
+  | "rebuilding"
+  | "handoff_to_qd"
+  | "closed"
+  | "cancelled"
+  | "orphan_recovered";
+
+export type RungLifecycle = "planned" | "placed" | "partially_filled" | "filled" | "cancelled";
+
+export type ProfileLadderSkipReason =
+  | "sell_ladder_disabled"
+  | "band_disabled"
+  | "invalid_input"
+  | "no_open_position"
+  | "duplicate_ownership"
+  | "below_min_order_size"
+  | "invalid_bbo"
+  | "invalid_tick_size";
+
+export interface LadderRung {
+  rungIndex: number;
+  price: number;
+  sizeShares: number;
+  notionalUsd: number;
+  multiplier: number;
+  sizingFraction: number;
+  lifecycle: RungLifecycle;
+  orderId: string | null;
+  filledSizeShares: number;
+}
+
+export interface LadderState {
+  tokenId: TokenId;
+  conditionId: ConditionId;
+  ladderId: string;
+  band: ProfileLadderBand;
+  phase: number;
+  status: ProfileLadderStatus;
+  activeRungs: readonly LadderRung[];
+  filledRungs: readonly LadderRung[];
+  lastAvgEntry: number;
+  lastCostBasisUsdc: number;
+  lastMode: ProfileLadderMode;
+  lastBboReferenceJson: string | null;
+  lastRebuildAtMs: number | null;
+  lastFillAtMs: number | null;
+  staleCheckedAtMs: number | null;
+  qdHandoffAtMs: number | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  metadataJson: string;
+}
+
+export interface ProfileLadderBandConfig {
+  enabled: boolean;
+  minAvgEntry: number | null;
+  maxAvgEntry: number | null;
+  multipliers: readonly number[];
+  sizingVector: readonly number[];
+  costCapUsd: number;
+  allowFourthRung: boolean;
+  fourthRungMinCostUsd: number;
+}
+
+export interface ProfileLadderRepriceConfig {
+  majorBboMovePct: number;
+  strongBboMovePct: number;
+  cooldownMs: number;
+}
+
+export interface ProfileLadderStaleReviewConfig {
+  enabled: boolean;
+  staleAfterMs: number;
+}
+
+export interface ExecutionProfileSellLadderConfig {
+  enabled: boolean;
+  phase: number;
+  decisionRuleId: string;
+  orderTag: string;
+  bands: Record<ProfileLadderBand, ProfileLadderBandConfig>;
+  modeAdjustments: Record<ProfileLadderMode, number>;
+  reprice: ProfileLadderRepriceConfig;
+  staleReview: ProfileLadderStaleReviewConfig;
+}
+
+export interface LadderBuilderInput {
+  tokenId: TokenId;
+  conditionId: ConditionId;
+  openedAt: string;
+  avgEntryPrice: number;
+  costBasisUsd: number;
+  positionSizeShares: number;
+  mode: ProfileLadderMode;
+  bestBid: number | null;
+  bestAsk: number | null;
+  tickSize: number;
+  minOrderSize: number;
+  config: ExecutionProfileSellLadderConfig;
+  previousBand: ProfileLadderBand | null;
+}
+
+export type LadderBuilderOutput =
+  | {
+      ok: true;
+      ladderId: string;
+      band: ProfileLadderBand;
+      activeRungCount: number;
+      rungs: readonly LadderRung[];
+    }
+  | {
+      ok: false;
+      reason: ProfileLadderSkipReason;
+      band: ProfileLadderBand | null;
+    };
+
 export interface ExecutionProfileHysteresisBounds {
   cheapMediumLow: number;
   cheapMediumHigh: number;
