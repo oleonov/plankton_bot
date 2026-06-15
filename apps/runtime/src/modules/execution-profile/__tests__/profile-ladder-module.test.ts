@@ -187,7 +187,12 @@ function fill(
   };
 }
 
-function setup(profilePolicy = policy()) {
+function setup(
+  profilePolicy = policy(),
+  overrides: {
+    modeReader?: { getMode: (token: TokenId) => "up" | "flat" | "avg_down" | null };
+  } = {},
+) {
   const bus = new InProcessEventBus();
   const repo = new InMemoryProfileLadderRepository();
   const counters: Array<{ name: string; value?: number; labels?: string }> = [];
@@ -204,6 +209,7 @@ function setup(profilePolicy = policy()) {
     bus,
     repository: repo,
     policy: () => profilePolicy,
+    ...overrides,
     runtimeMetrics: {
       writeCounter: (name, value, labels) => {
         counters.push({
@@ -400,7 +406,7 @@ describe("ProfileLadderModule", () => {
   });
 
   it("places ladder orders with calibrated rung count and metadata", async () => {
-    const ctx = setup();
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
 
     await ctx.module.placeLadder(position(), market());
 
@@ -419,6 +425,37 @@ describe("ProfileLadderModule", () => {
       band: "medium_low",
       status: "active",
       activeRungs: expect.arrayContaining([expect.objectContaining({ lifecycle: "planned" })]),
+    });
+  });
+
+  it("passes UP mode from the mode reader into LadderBuilder", async () => {
+    const ctx = setup(policy(), { modeReader: { getMode: () => "up" } });
+
+    await ctx.module.placeLadder(position(), market());
+
+    expect(ctx.orders.map((order) => order.price)).toEqual([0.105, 0.124, 0.148, 0.157]);
+    expect(ctx.repo.getLadder(tokenId)?.lastMode).toBe("up");
+  });
+
+  it("passes AVG_DOWN mode from the mode reader into LadderBuilder", async () => {
+    const ctx = setup(policy(), { modeReader: { getMode: () => "avg_down" } });
+
+    await ctx.module.placeLadder(position(), market());
+
+    expect(ctx.orders.map((order) => order.price)).toEqual([0.165, 0.195, 0.233, 0.248]);
+    expect(ctx.repo.getLadder(tokenId)?.lastMode).toBe("avg_down");
+  });
+
+  it("falls back to flat and counts missing mode when the mode reader has no state", async () => {
+    const ctx = setup(policy(), { modeReader: { getMode: () => null } });
+
+    await ctx.module.placeLadder(position(), market());
+
+    expect(ctx.orders.map((order) => order.price)).toEqual([0.11, 0.13, 0.155, 0.165]);
+    expect(ctx.repo.getLadder(tokenId)?.lastMode).toBe("flat");
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_mode_missing",
+      value: 1,
     });
   });
 

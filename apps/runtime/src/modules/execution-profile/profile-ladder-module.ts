@@ -5,6 +5,7 @@ import type {
   NormalizedMarket,
   OrderId,
   Position,
+  ProfileLadderMode,
   RuntimeEventMap,
   RuntimeModule,
   TokenId,
@@ -24,10 +25,15 @@ export interface ProfileLadderRiskEventWriter {
   insert(event: { eventType: string; payload: Readonly<Record<string, unknown>> }): void;
 }
 
+export interface ProfileLadderModeReader {
+  getMode(tokenId: TokenId): ProfileLadderMode | null;
+}
+
 export interface ProfileLadderModuleDeps {
   bus: EventBus;
   repository: ProfileLadderRepository;
   policy: () => ExecutionProfilePolicy;
+  modeReader?: ProfileLadderModeReader;
   runtimeMetrics?: ProfileLadderMetricWriter;
   riskEvents?: ProfileLadderRiskEventWriter;
   now?: () => number;
@@ -185,6 +191,7 @@ export class ProfileLadderModule implements RuntimeModule {
   ): Promise<LadderState | null> {
     const policy = this.policy();
     if (!policy.enabled) return null;
+    const mode = this.resolveMode(position, market);
     const plan = computeProfileLadder({
       tokenId: position.tokenId,
       conditionId: position.conditionId,
@@ -192,7 +199,7 @@ export class ProfileLadderModule implements RuntimeModule {
       avgEntryPrice: position.avgEntryPrice,
       costBasisUsd: position.costBasisUsdc,
       positionSizeShares: position.size,
-      mode: "flat",
+      mode,
       bestBid: market.bestBid,
       bestAsk: market.bestAsk,
       tickSize: market.tickSize,
@@ -214,7 +221,7 @@ export class ProfileLadderModule implements RuntimeModule {
       filledRungs: [],
       lastAvgEntry: position.avgEntryPrice,
       lastCostBasisUsdc: position.costBasisUsdc,
-      lastMode: "flat",
+      lastMode: mode,
       lastBboReferenceJson: JSON.stringify({ bestBid: market.bestBid, bestAsk: market.bestAsk }),
       lastRebuildAtMs: now,
       lastFillAtMs: null,
@@ -230,6 +237,16 @@ export class ProfileLadderModule implements RuntimeModule {
       await this.publishPlaceOrder(position, market, plan.ladderId, rung, now);
     }
     return state;
+  }
+
+  private resolveMode(position: Position, market: NormalizedMarket): ProfileLadderMode {
+    if (this.deps.modeReader != null) {
+      const mode = this.deps.modeReader.getMode(position.tokenId);
+      if (mode != null) return mode;
+      this.writeCounter("profile_ladder_mode_missing", 1);
+      return "flat";
+    }
+    return resolveSignalBasedMode(position, market, this.deps.policy());
   }
 
   private async publishPlaceOrder(
@@ -413,6 +430,30 @@ function hasPositionBasisChanged(state: LadderState, position: Position): boolea
     Math.abs(state.lastAvgEntry - position.avgEntryPrice) > 1e-9 ||
     Math.abs(state.lastCostBasisUsdc - position.costBasisUsdc) > 1e-6
   );
+}
+
+function resolveSignalBasedMode(
+  position: Position,
+  market: NormalizedMarket,
+  policy: ExecutionProfilePolicy,
+): ProfileLadderMode {
+  const mark = firstPositiveFinite(market.bestAsk, market.midPrice, market.lastTradePrice);
+  if (mark == null) return "flat";
+
+  const profile =
+    position.avgEntryPrice < 0.05
+      ? "cheap"
+      : position.avgEntryPrice < 0.35
+        ? "medium"
+        : "expensive";
+  const config = policy.profiles[profile].scaleIn;
+  if (mark > position.avgEntryPrice * (1 + config.modes.up.thresholdPct)) return "up";
+  if (mark < position.avgEntryPrice * (1 - config.modes.avgDown.thresholdPct)) return "avg_down";
+  return "flat";
+}
+
+function firstPositiveFinite(...values: ReadonlyArray<number | null | undefined>): number | null {
+  return values.find((value): value is number => isPositiveFinite(value)) ?? null;
 }
 
 function isPositiveFinite(value: number | null | undefined): value is number {
