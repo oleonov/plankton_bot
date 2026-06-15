@@ -230,6 +230,84 @@ describe("ProfileLadderModule", () => {
     expect(ctx.counters).toHaveLength(0);
   });
 
+  it("does not place or persist ladders when all bands are disabled", async () => {
+    const ctx = setup(
+      policy({
+        enabled: true,
+        bands: DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands,
+      }),
+    );
+
+    await ctx.module.placeLadder(position({ avgEntryPrice: 0.1 }), market());
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.states.size).toBe(0);
+    expect(ctx.counters).toHaveLength(0);
+    expect(ctx.riskEvents).toHaveLength(0);
+  });
+
+  it("places ladders only for the activated medium_low band", async () => {
+    const ctx = setup();
+    const mediumLowToken = createTokenId("profile-ladder-medium-low");
+    const mediumHighToken = createTokenId("profile-ladder-medium-high");
+
+    await ctx.module.placeLadder(
+      position({ tokenId: mediumLowToken, avgEntryPrice: 0.1 }),
+      market({ tokenId: mediumLowToken }),
+    );
+    await ctx.module.placeLadder(
+      position({ tokenId: mediumHighToken, avgEntryPrice: 0.2 }),
+      market({ tokenId: mediumHighToken }),
+    );
+
+    expect(ctx.orders).toHaveLength(4);
+    expect(ctx.repo.getLadder(mediumLowToken)?.band).toBe("medium_low");
+    expect(ctx.repo.getLadder(mediumHighToken)).toBeNull();
+    expect(ctx.orders.every((order) => order.metadata?.source === "profile_ladder")).toBe(true);
+  });
+
+  it("respects multiple activated bands while keeping inactive bands dark", async () => {
+    const ctx = setup(
+      policy({
+        bands: {
+          ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands,
+          medium_low: {
+            ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.medium_low,
+            enabled: true,
+          },
+          medium_high: {
+            ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.medium_high,
+            enabled: true,
+          },
+        },
+      }),
+    );
+    const mediumLowToken = createTokenId("profile-ladder-medium-low-multi");
+    const mediumHighToken = createTokenId("profile-ladder-medium-high-multi");
+    const cheapToken = createTokenId("profile-ladder-cheap-disabled");
+
+    await ctx.module.placeLadder(
+      position({ tokenId: mediumLowToken, avgEntryPrice: 0.1 }),
+      market({ tokenId: mediumLowToken }),
+    );
+    await ctx.module.placeLadder(
+      position({ tokenId: mediumHighToken, avgEntryPrice: 0.2 }),
+      market({ tokenId: mediumHighToken }),
+    );
+    await ctx.module.placeLadder(
+      position({ tokenId: cheapToken, avgEntryPrice: 0.04 }),
+      market({ tokenId: cheapToken }),
+    );
+
+    expect(ctx.repo.getLadder(mediumLowToken)?.band).toBe("medium_low");
+    expect(ctx.repo.getLadder(mediumHighToken)?.band).toBe("medium_high");
+    expect(ctx.repo.getLadder(cheapToken)).toBeNull();
+    expect(ctx.orders).toHaveLength(7);
+    expect(ctx.counters.filter((counter) => counter.name === "profile_ladder_placed")).toHaveLength(
+      2,
+    );
+  });
+
   it("subscribes to lifecycle events when enabled and cancels on close", async () => {
     const ctx = setup();
     ctx.repo.upsertLadder(ladderState());
