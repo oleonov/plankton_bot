@@ -44,11 +44,14 @@ export interface DustAutoCloseRiskEventWriter {
   insert(event: { eventType: string; payload: Readonly<Record<string, unknown>> }): void;
 }
 
+export type DustAutoClosePolicyReloadSubscriber = (handler: () => void) => () => void;
+
 export interface DustAutoCloseModuleDeps {
   bus: EventBus;
   repository: DustAutoCloseRepository;
   policy: () => TrackS4DustAutoCloseConfig;
   candidateProvider: DustAutoCloseCandidateProvider;
+  onPolicyReload?: DustAutoClosePolicyReloadSubscriber | undefined;
   redeemInFlightGuard?: ((conditionId: ConditionId) => boolean) | undefined;
   isProfileOwned?: ((tokenId: TokenId) => boolean) | undefined;
   runtimeMetrics?: DustAutoCloseMetricWriter | undefined;
@@ -69,16 +72,66 @@ interface PendingDustAutoCloseAttempt {
 export class DustAutoCloseModule implements RuntimeModule {
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly unsubscribers: Array<() => void> = [];
+  private policyReloadUnsubscribe: (() => void) | null = null;
   private readonly pendingAttempts = new Map<string, PendingDustAutoCloseAttempt>();
   private started = false;
 
   constructor(private readonly deps: DustAutoCloseModuleDeps) {}
 
   async start(): Promise<void> {
-    if (this.started) return;
-    this.started = true;
+    this.ensurePolicyReloadSubscription();
+    this.applyPolicy();
+  }
+
+  async stop(): Promise<void> {
+    this.stopActive();
+    this.policyReloadUnsubscribe?.();
+    this.policyReloadUnsubscribe = null;
+  }
+
+  async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
+    const policy = this.policy();
+    return { ok: true, detail: policy.enabled ? "enabled" : "disabled" };
+  }
+
+  async runOnce(): Promise<void> {
     const policy = this.policy();
     if (!policy.enabled) return;
+    const now = this.now();
+    const candidates = await this.deps.candidateProvider.listCandidates(
+      policy.maxCandidatesPerCycle,
+    );
+    for (const candidate of candidates) {
+      await this.processCandidate(candidate, policy, now);
+    }
+  }
+
+  recordSuccessfulClose(tokenId: TokenId): void {
+    if (this.deps.repository.getState(tokenId) == null) return;
+    this.deps.repository.markSuccessful(tokenId);
+    this.writeCounter("dust_auto_close_succeeded", 1);
+  }
+
+  private ensurePolicyReloadSubscription(): void {
+    if (this.policyReloadUnsubscribe != null || this.deps.onPolicyReload == null) return;
+    this.policyReloadUnsubscribe = this.deps.onPolicyReload(() => {
+      this.applyPolicy();
+    });
+  }
+
+  private applyPolicy(): void {
+    const policy = this.policy();
+    if (!policy.enabled) {
+      this.stopActive();
+      return;
+    }
+    this.startActive(policy);
+  }
+
+  private startActive(policy: TrackS4DustAutoCloseConfig): void {
+    if (this.started) return;
+    if (!policy.enabled) return;
+    this.started = true;
 
     this.unsubscribers.push(
       this.deps.bus.subscribe("PositionUpdated", async ({ position }) => {
@@ -109,36 +162,13 @@ export class DustAutoCloseModule implements RuntimeModule {
     this.timer.unref?.();
   }
 
-  async stop(): Promise<void> {
+  private stopActive(): void {
     if (this.timer != null) {
       clearInterval(this.timer);
       this.timer = null;
     }
     while (this.unsubscribers.length > 0) this.unsubscribers.pop()?.();
     this.started = false;
-  }
-
-  async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
-    const policy = this.policy();
-    return { ok: true, detail: policy.enabled ? "enabled" : "disabled" };
-  }
-
-  async runOnce(): Promise<void> {
-    const policy = this.policy();
-    if (!policy.enabled) return;
-    const now = this.now();
-    const candidates = await this.deps.candidateProvider.listCandidates(
-      policy.maxCandidatesPerCycle,
-    );
-    for (const candidate of candidates) {
-      await this.processCandidate(candidate, policy, now);
-    }
-  }
-
-  recordSuccessfulClose(tokenId: TokenId): void {
-    if (this.deps.repository.getState(tokenId) == null) return;
-    this.deps.repository.markSuccessful(tokenId);
-    this.writeCounter("dust_auto_close_succeeded", 1);
   }
 
   private async processCandidate(

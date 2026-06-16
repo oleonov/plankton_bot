@@ -1132,6 +1132,10 @@ async function main(): Promise<void> {
     bus,
     repository: dustAutoCloseRepo,
     policy: () => currentExecutionPolicy().trackS4,
+    onPolicyReload: (handler) =>
+      executionPolicyProvider.onReload(() => {
+        handler();
+      }),
     candidateProvider: new RepositoryDustAutoCloseCandidateProvider({
       positionRepo: repos.position,
       marketRepo: repos.market,

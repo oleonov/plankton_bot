@@ -22,6 +22,8 @@ import { readExecutionPolicyVersion } from "@krabs/db";
 import type { ProfileSettingsRepository } from "@krabs/domain";
 import type { Logger } from "./logger.js";
 
+export type ExecutionPolicyReloadListener = (policy: ExecutionPolicy) => void;
+
 export interface ExecutionPolicyProviderDeps {
   controlDb: Database.Database;
   profileSettingsRepo: ProfileSettingsRepository;
@@ -34,6 +36,7 @@ export class ExecutionPolicyProvider {
   private currentPolicy: ExecutionPolicy;
   private currentVersion: number;
   private lastParsedJson: string | null;
+  private readonly reloadListeners = new Set<ExecutionPolicyReloadListener>();
 
   constructor(private readonly deps: ExecutionPolicyProviderDeps) {
     this.log = deps.log.child({ component: "execution-policy-provider" });
@@ -66,6 +69,13 @@ export class ExecutionPolicyProvider {
     return this.currentVersion;
   }
 
+  onReload(listener: ExecutionPolicyReloadListener): () => void {
+    this.reloadListeners.add(listener);
+    return () => {
+      this.reloadListeners.delete(listener);
+    };
+  }
+
   /**
    * Reload the policy if the DB version advanced. Safe to call frequently —
    * the hot path is a single integer read.
@@ -92,6 +102,7 @@ export class ExecutionPolicyProvider {
     this.currentPolicy = loaded.policy;
     this.lastParsedJson = loaded.sourceJson;
     this.currentVersion = nextVersion;
+    this.notifyReloadListeners(loaded.policy);
     return true;
   }
 
@@ -140,6 +151,19 @@ export class ExecutionPolicyProvider {
         "failed to read profile settings for execution policy",
       );
       return null;
+    }
+  }
+
+  private notifyReloadListeners(policy: ExecutionPolicy): void {
+    for (const listener of this.reloadListeners) {
+      try {
+        listener(policy);
+      } catch (err) {
+        this.log.error(
+          { err, profileId: String(this.deps.profileId) },
+          "policy reload listener failed",
+        );
+      }
     }
   }
 }

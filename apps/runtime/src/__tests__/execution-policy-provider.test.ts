@@ -151,6 +151,42 @@ describe("ExecutionPolicyProvider (ADR-015)", () => {
     expect(sink.some((e) => e.msg === "execution policy reloaded")).toBe(true);
   });
 
+  it("notifies reload listeners after a valid version bump", () => {
+    const provider = makeProvider();
+    const observed: number[] = [];
+    const unsubscribe = provider.onReload((policy) => {
+      observed.push(policy.entryPriceCeiling);
+    });
+
+    repo.save({
+      profileId: PROFILE,
+      initialBalanceUsdc: 1000,
+      envelopeJson: null,
+      riskCapsJson: null,
+      walletMode: null,
+      minOrderUsdc: null,
+      relayerJson: null,
+      executionPolicyJson: JSON.stringify({ entryPriceCeiling: 0.42 }),
+      updatedAt: NOW,
+    });
+    expect(provider.refreshIfStale()).toBe(true);
+    unsubscribe();
+    repo.save({
+      profileId: PROFILE,
+      initialBalanceUsdc: 1000,
+      envelopeJson: null,
+      riskCapsJson: null,
+      walletMode: null,
+      minOrderUsdc: null,
+      relayerJson: null,
+      executionPolicyJson: JSON.stringify({ entryPriceCeiling: 0.43 }),
+      updatedAt: NOW,
+    });
+    expect(provider.refreshIfStale()).toBe(true);
+
+    expect(observed).toEqual([0.42]);
+  });
+
   it("keeps last-good snapshot when stored JSON is invalid, advances version", () => {
     const provider = makeProvider();
     const goodJson = JSON.stringify({ entryPriceCeiling: 0.5 });

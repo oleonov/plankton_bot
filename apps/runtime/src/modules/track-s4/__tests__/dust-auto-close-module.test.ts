@@ -116,6 +116,7 @@ function setup(
   const signals: Signal[] = [];
   const counters: Array<{ name: string; value?: number; labels?: string }> = [];
   const riskEvents: Array<{ eventType: string; payload: Readonly<Record<string, unknown>> }> = [];
+  const policyReloadHandlers: Array<() => void> = [];
   const listCandidates =
     options.candidateError == null
       ? vi.fn().mockResolvedValue(options.candidates ?? [candidate()])
@@ -132,6 +133,13 @@ function setup(
     repository: repo,
     policy: () => options.policy ?? policy(),
     candidateProvider: { listCandidates },
+    onPolicyReload: (handler) => {
+      policyReloadHandlers.push(handler);
+      return () => {
+        const index = policyReloadHandlers.indexOf(handler);
+        if (index >= 0) policyReloadHandlers.splice(index, 1);
+      };
+    },
     redeemInFlightGuard: () => options.redeemInFlight ?? false,
     isProfileOwned: () => options.profileOwned ?? false,
     runtimeMetrics: {
@@ -147,7 +155,20 @@ function setup(
     },
     now: () => NOW,
   });
-  return { module, repo, orders, signals, counters, riskEvents, listCandidates, bus };
+  return {
+    module,
+    repo,
+    orders,
+    signals,
+    counters,
+    riskEvents,
+    listCandidates,
+    bus,
+    emitPolicyReload: () => {
+      for (const handler of [...policyReloadHandlers]) handler();
+    },
+    policyReloadHandlers,
+  };
 }
 
 function labelOf(counter: { labels?: string }): Record<string, unknown> | null {
@@ -164,6 +185,81 @@ describe("DustAutoCloseModule", () => {
     expect(ctx.listCandidates).not.toHaveBeenCalled();
     expect(ctx.orders).toHaveLength(0);
     expect(ctx.counters).toHaveLength(0);
+  });
+
+  it("starts after a disabled cold boot when policy flips enabled", async () => {
+    vi.useFakeTimers();
+    const mutablePolicy = policy({ enabled: false, scanIntervalMs: 10 });
+    const ctx = setup({ policy: mutablePolicy });
+
+    try {
+      await ctx.module.start();
+      mutablePolicy.enabled = true;
+      await ctx.module.start();
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(ctx.listCandidates).toHaveBeenCalledTimes(1);
+    } finally {
+      await ctx.module.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("hot-enables from policy reload after disabled cold boot", async () => {
+    vi.useFakeTimers();
+    const mutablePolicy = policy({ enabled: false, scanIntervalMs: 10 });
+    const ctx = setup({ policy: mutablePolicy });
+
+    try {
+      await ctx.module.start();
+      expect(ctx.policyReloadHandlers).toHaveLength(1);
+      mutablePolicy.enabled = true;
+      ctx.emitPolicyReload();
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(ctx.listCandidates).toHaveBeenCalledTimes(1);
+    } finally {
+      await ctx.module.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("hot-disables from policy reload and stops scanning", async () => {
+    vi.useFakeTimers();
+    const mutablePolicy = policy({ enabled: true, scanIntervalMs: 10 });
+    const ctx = setup({ policy: mutablePolicy });
+
+    try {
+      await ctx.module.start();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(ctx.listCandidates).toHaveBeenCalledTimes(1);
+
+      mutablePolicy.enabled = false;
+      ctx.emitPolicyReload();
+      await vi.advanceTimersByTimeAsync(30);
+
+      expect(ctx.listCandidates).toHaveBeenCalledTimes(1);
+    } finally {
+      await ctx.module.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("double start is idempotent", async () => {
+    vi.useFakeTimers();
+    const ctx = setup({ policy: policy({ scanIntervalMs: 10 }) });
+
+    try {
+      await ctx.module.start();
+      await ctx.module.start();
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(ctx.listCandidates).toHaveBeenCalledTimes(1);
+      expect(ctx.policyReloadHandlers).toHaveLength(1);
+    } finally {
+      await ctx.module.stop();
+      vi.useRealTimers();
+    }
   });
 
   it("skips redeem-in-flight candidates before placement", async () => {
