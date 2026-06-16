@@ -98,9 +98,11 @@ export class DustAutoCloseModule implements RuntimeModule {
     );
     this.timer = setInterval(() => {
       void this.runOnce().catch((err: unknown) => {
-        this.writeCounter("dust_auto_close_skipped", 1, {
+        this.writeCounter("dust_auto_close_skipped", 1, { reason: "scan_error" });
+        this.insertRiskEvent("dust_auto_close_scan_error", {
           reason: "scan_error",
           errorClass: errorClass(err),
+          message: errorMessage(err),
         });
       });
     }, policy.scanIntervalMs);
@@ -230,10 +232,14 @@ export class DustAutoCloseModule implements RuntimeModule {
     });
   }
 
-  private handlePlaceOrderRequested(command: RuntimeEventMap["PlaceOrderRequested"]["command"]): void {
-    const pending = this.pendingAttempts.get(command.signalId);
+  private handlePlaceOrderRequested(
+    command: RuntimeEventMap["PlaceOrderRequested"]["command"],
+  ): void {
+    const signalId = command.signalId;
+    if (signalId == null) return;
+    const pending = this.pendingAttempts.get(signalId);
     if (pending == null) return;
-    this.pendingAttempts.delete(command.signalId);
+    this.pendingAttempts.delete(signalId);
     const now = this.now();
     this.deps.repository.markAttempted(
       pending.tokenId,
@@ -312,4 +318,8 @@ function buildDustMarketSnapshot(
 
 function errorClass(err: unknown): string {
   return err instanceof Error ? err.constructor.name : typeof err;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

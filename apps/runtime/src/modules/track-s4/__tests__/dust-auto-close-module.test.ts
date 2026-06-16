@@ -104,6 +104,7 @@ function setup(
   options: {
     policy?: TrackS4DustAutoCloseConfig;
     candidates?: readonly DustAutoCloseCandidate[];
+    candidateError?: Error;
     redeemInFlight?: boolean;
     profileOwned?: boolean;
     repo?: FakeDustAutoCloseRepository;
@@ -115,7 +116,10 @@ function setup(
   const signals: Signal[] = [];
   const counters: Array<{ name: string; value?: number; labels?: string }> = [];
   const riskEvents: Array<{ eventType: string; payload: Readonly<Record<string, unknown>> }> = [];
-  const listCandidates = vi.fn().mockResolvedValue(options.candidates ?? [candidate()]);
+  const listCandidates =
+    options.candidateError == null
+      ? vi.fn().mockResolvedValue(options.candidates ?? [candidate()])
+      : vi.fn().mockRejectedValue(options.candidateError);
 
   bus.subscribe("SignalProduced", async ({ signal }) => {
     signals.push(signal);
@@ -379,5 +383,32 @@ describe("DustAutoCloseModule", () => {
 
     expect(ctx.repo.getState(tokenId)).toBeNull();
     await ctx.module.stop();
+  });
+
+  it("records scan errors without errorClass metric labels", async () => {
+    vi.useFakeTimers();
+    const ctx = setup({
+      policy: policy({ scanIntervalMs: 10 }),
+      candidateError: new TypeError("scan failed"),
+    });
+
+    try {
+      await ctx.module.start();
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(ctx.counters).toContainEqual({
+        name: "dust_auto_close_skipped",
+        value: 1,
+        labels: JSON.stringify({ reason: "scan_error" }),
+      });
+      expect(ctx.counters.some((counter) => counter.labels?.includes("errorClass"))).toBe(false);
+      expect(ctx.riskEvents).toContainEqual({
+        eventType: "dust_auto_close_scan_error",
+        payload: { reason: "scan_error", errorClass: "TypeError", message: "scan failed" },
+      });
+    } finally {
+      await ctx.module.stop();
+      vi.useRealTimers();
+    }
   });
 });
