@@ -138,6 +138,9 @@ import { SqliteSignalFeedRepository } from "./modules/execution-profile/signal-f
 import { SqliteExecutionProfileStateRepository } from "./modules/execution-profile/state-repository.js";
 import { ProfileLadderModule } from "./modules/execution-profile/profile-ladder-module.js";
 import { SqliteProfileLadderRepository } from "./modules/execution-profile/profile-ladder-repository.js";
+import { RepositoryDustAutoCloseCandidateProvider } from "./modules/track-s4/dust-auto-close-candidates.js";
+import { DustAutoCloseModule } from "./modules/track-s4/dust-auto-close-module.js";
+import { SqliteDustAutoCloseRepository } from "./modules/track-s4/dust-auto-close-repository.js";
 import { S1LadderModule } from "./modules/s1-ladder/s1-ladder-module.js";
 import { MarketSnapshotPriceHistoryProvider } from "./modules/algo-decision/market-snapshot-price-history.js";
 import { MarketSelectionCache } from "./modules/algo-decision/market-selection-cache.js";
@@ -1124,6 +1127,27 @@ async function main(): Promise<void> {
     runtimeMetrics,
     riskEvents: repos.riskEvent,
   });
+  const dustAutoCloseRepo = new SqliteDustAutoCloseRepository(ledgerConn.db);
+  const dustAutoCloseModule = new DustAutoCloseModule({
+    bus,
+    repository: dustAutoCloseRepo,
+    policy: () => currentExecutionPolicy().trackS4,
+    candidateProvider: new RepositoryDustAutoCloseCandidateProvider({
+      positionRepo: repos.position,
+      marketRepo: repos.market,
+      fillRepo: repos.fill,
+      bookCache: candidateBookCache,
+      now: () => Date.now(),
+    }),
+    redeemInFlightGuard: (conditionId) =>
+      redeemSweepModule?.isConditionInRedeemFlight(conditionId) ?? false,
+    isProfileOwned: (tokenId) =>
+      currentExecutionPolicy().executionProfile.sellLadder.enabled &&
+      profileLadderRepo.isProfileLadderOwned(tokenId),
+    runtimeMetrics,
+    riskEvents: repos.riskEvent,
+    now: () => Date.now(),
+  });
   const s1LadderModule = new S1LadderModule({
     bus,
     positionRepo: repos.position,
@@ -1588,6 +1612,7 @@ async function main(): Promise<void> {
     ["execution-profile-signal-feed", signalFeedManager],
     ["execution-profile", executionProfileManager],
     ["profile-ladder", profileLadderModule],
+    ["track-s4-dust-auto-close", dustAutoCloseModule],
     ["s1-ladder", s1LadderModule],
     ["algo-decision", algoDecisionModule],
     ["resolution", resolutionModule],
