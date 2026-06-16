@@ -240,6 +240,56 @@ describe("migration 071 — signal feed buckets", () => {
   });
 });
 
+describe("migration 074 — dust auto close state", () => {
+  it("creates the dust_auto_close_state table, retry index, and status check", () => {
+    db.exec(readMigration("074_dust_auto_close_state.sql"));
+
+    const table = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'dust_auto_close_state'",
+      )
+      .get();
+    expect(table).toBeDefined();
+
+    const columns = db.prepare("PRAGMA table_info(dust_auto_close_state)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: 0 | 1;
+      pk: number;
+      dflt_value: string | null;
+    }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "token_id",
+      "status",
+      "last_attempt_at_ms",
+      "last_attempt_reason",
+      "next_retry_at_ms",
+      "consecutive_attempts",
+      "created_at_ms",
+      "updated_at_ms",
+    ]);
+    expect(columns.find((column) => column.name === "token_id")?.pk).toBe(1);
+    expect(columns.find((column) => column.name === "consecutive_attempts")?.dflt_value).toBe("0");
+
+    const retryIndex = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_dust_auto_close_state_next_retry'",
+      )
+      .get();
+    expect(retryIndex).toBeDefined();
+
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO dust_auto_close_state
+             (token_id, status, last_attempt_at_ms, next_retry_at_ms, created_at_ms, updated_at_ms)
+           VALUES ('tok', 'invalid', 1, 2, 1, 1)`,
+        )
+        .run(),
+    ).toThrow(/CHECK constraint failed/i);
+  });
+});
+
 describe("migration 072 — profile ladder state", () => {
   it("creates profile_ladder_state with primary key, lifecycle columns, and lookup indexes", () => {
     db.exec(readMigration("072_profile_ladder_state.sql"));
