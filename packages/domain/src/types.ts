@@ -1475,7 +1475,8 @@ export type DustAutoCloseNonCloseableReason =
   | "below_min_order_size"
   | "market_not_tradable"
   | "missing_best_bid"
-  | "invalid_price";
+  | "invalid_price"
+  | "risk_gate_suppressed";
 
 export type DustAutoCloseAction = "skip" | "close" | "mark_non_closeable";
 

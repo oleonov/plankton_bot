@@ -2,9 +2,11 @@ import {
   DEFAULT_EXECUTION_POLICY,
   PositionStatus,
   createConditionId,
+  createCommandId,
   createPositionId,
   createTokenId,
   type PlaceOrderCommand,
+  type Signal,
   type TokenId,
   type TrackS4DustAutoCloseConfig,
 } from "@krabs/domain";
@@ -110,10 +112,14 @@ function setup(
   const bus = new InProcessEventBus();
   const repo = options.repo ?? new FakeDustAutoCloseRepository();
   const orders: PlaceOrderCommand[] = [];
+  const signals: Signal[] = [];
   const counters: Array<{ name: string; value?: number; labels?: string }> = [];
   const riskEvents: Array<{ eventType: string; payload: Readonly<Record<string, unknown>> }> = [];
   const listCandidates = vi.fn().mockResolvedValue(options.candidates ?? [candidate()]);
 
+  bus.subscribe("SignalProduced", async ({ signal }) => {
+    signals.push(signal);
+  });
   bus.subscribe("PlaceOrderRequested", async ({ command }) => {
     orders.push(command);
   });
@@ -137,7 +143,7 @@ function setup(
     },
     now: () => NOW,
   });
-  return { module, repo, orders, counters, riskEvents, listCandidates, bus };
+  return { module, repo, orders, signals, counters, riskEvents, listCandidates, bus };
 }
 
 function labelOf(counter: { labels?: string }): Record<string, unknown> | null {
@@ -211,27 +217,58 @@ describe("DustAutoCloseModule", () => {
     });
   });
 
-  it("publishes a tagged SELL order and records an attempt for closeable candidates", async () => {
+  it("publishes SignalProduced instead of PlaceOrderRequested for closeable candidates", async () => {
     const ctx = setup();
 
     await ctx.module.runOnce();
 
-    expect(ctx.orders).toHaveLength(1);
-    expect(ctx.orders[0]).toMatchObject({
-      type: "PlaceOrderCommand",
-      source: "strategy",
+    expect(ctx.signals).toHaveLength(1);
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.signals[0]).toMatchObject({
       tokenId,
       conditionId,
       side: "sell",
-      size: 12,
-      price: 0.023,
-      postOnly: false,
-      orderType: "GTC",
-      tickSize: 0.001,
-      negRisk: false,
-      signalReason: "dust-auto-close",
-      metadata: { source: "track_s4_dust_auto_close" },
+      suggestedSize: 12,
+      suggestedPrice: 0.023,
+      suggestedSizeUsdc: 0.276,
+      reason: "dust-auto-close",
+      decisionRuleId: "TRACK_S4_DUST_AUTO_CLOSE",
+      sizingRuleId: "dust_cleanup",
     });
+    expect(ctx.repo.attempted).toHaveLength(0);
+    expect(ctx.riskEvents).toHaveLength(0);
+  });
+
+  it("records an attempt after signal-to-order emits PlaceOrderRequested for the S4 signal", async () => {
+    const ctx = setup();
+
+    await ctx.module.start();
+    await ctx.module.runOnce();
+    await ctx.bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("s4-command"),
+        clientOrderId: "s4-client-order" as never,
+        source: "strategy",
+        tokenId,
+        conditionId,
+        side: "sell",
+        size: 12,
+        price: 0.023,
+        postOnly: false,
+        orderType: "GTC",
+        tickSize: 0.001,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "dust-auto-close",
+        signalId: ctx.signals[0]!.signalId,
+        decisionRuleId: "TRACK_S4_DUST_AUTO_CLOSE",
+        signalTimestamp: new Date(NOW).toISOString(),
+        metadata: { source: "track_s4_dust_auto_close" },
+      },
+      timestamp: NOW,
+    });
+
     expect(ctx.repo.attempted).toEqual([
       {
         tokenId,
@@ -240,11 +277,63 @@ describe("DustAutoCloseModule", () => {
         nextRetryAtMs: NOW + 24 * 60 * 60_000,
       },
     ]);
-    expect(ctx.riskEvents).toHaveLength(1);
     expect(ctx.riskEvents[0]).toMatchObject({
       eventType: "dust_position_auto_closed",
       payload: { tokenId: String(tokenId), conditionId: String(conditionId), price: 0.023 },
     });
+    await ctx.module.stop();
+  });
+
+  it("marks RiskGate-rejected S4 signals non-closeable with retry backoff", async () => {
+    const ctx = setup();
+
+    await ctx.module.start();
+    await ctx.module.runOnce();
+    await ctx.bus.publish("SignalRejected", {
+      signal: ctx.signals[0]!,
+      market: {} as never,
+      reason: "order size 1 below min 5",
+      rejectedAt: NOW,
+    });
+
+    expect(ctx.repo.nonCloseable).toEqual([
+      {
+        tokenId,
+        reason: "risk_gate_suppressed",
+        nowMs: NOW,
+        nextRetryAtMs: NOW + 24 * 60 * 60_000,
+      },
+    ]);
+    expect(ctx.counters).toContainEqual({
+      name: "dust_auto_close_non_closeable",
+      value: 1,
+      labels: JSON.stringify({ reason: "risk_gate_suppressed" }),
+    });
+    await ctx.module.stop();
+  });
+
+  it("marks signal-to-order min-notional skips non-closeable with retry backoff", async () => {
+    const ctx = setup();
+
+    await ctx.module.start();
+    await ctx.module.runOnce();
+    await ctx.bus.publish("SignalConversionSkipped", {
+      signal: ctx.signals[0]!,
+      stage: "execution-terms",
+      reasons: ["notional_min_size"],
+      diagnostics: { notionalUsdc: 0.5 },
+      skippedAt: NOW,
+    });
+
+    expect(ctx.repo.nonCloseable).toEqual([
+      {
+        tokenId,
+        reason: "risk_gate_suppressed",
+        nowMs: NOW,
+        nextRetryAtMs: NOW + 24 * 60 * 60_000,
+      },
+    ]);
+    await ctx.module.stop();
   });
 
   it("deletes retry state when a tracked position closes", async () => {

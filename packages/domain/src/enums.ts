@@ -158,6 +158,7 @@ export const SignalReason = {
   MediumHoldExit: "medium-hold-exit",
   TailPrune: "tail-prune",
   ReduceOnly: "reduce-only",
+  DustAutoClose: "dust-auto-close",
   Operator: "operator",
 } as const;
 export type SignalReason = (typeof SignalReason)[keyof typeof SignalReason];
@@ -176,6 +177,7 @@ export const EXIT_REASONS: ReadonlySet<string> = new Set([
   SignalReason.MediumHoldExit,
   SignalReason.TailPrune,
   SignalReason.ReduceOnly,
+  SignalReason.DustAutoClose,
 ]);
 
 // ─── Operator ─────────────────────────────────────────────────────────────────
