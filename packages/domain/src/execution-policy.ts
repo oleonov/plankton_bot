@@ -51,6 +51,7 @@ import type {
   TrackS3MarginAwareSpreadPolicy,
   TrackS3SpreadTierPolicy,
   TrackS1WalkingLadderPolicy,
+  TrackS4DustAutoCloseConfig,
   DynamicChainCapPolicyConfig,
   ProfileLadderBand,
   ProfileLadderBandConfig,
@@ -514,6 +515,22 @@ export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
  */
 export const DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS = 2_504;
 
+export const DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY: TrackS4DustAutoCloseConfig = {
+  enabled: false,
+  scanIntervalMs: 300_000,
+  maxCandidatesPerCycle: 25,
+  retryBackoffMs: 24 * 60 * 60_000,
+  thresholds: {
+    liquidationValueMaxUsdc: 0.5,
+    costBasisMaxUsdc: 5,
+    lastSellMinAgeMs: 7 * 24 * 60 * 60_000,
+  },
+  execution: {
+    priceOffsetTicks: 1,
+    cancelStaleSellOrders: true,
+  },
+};
+
 export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   version: 1,
   entryPriceCeiling: 0.45,
@@ -543,6 +560,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   trackR: DEFAULT_TRACK_R_HONEST_PRICING_POLICY,
   trackS3: DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY,
   trackS1: DEFAULT_TRACK_S1_WALKING_LADDER_POLICY,
+  trackS4: DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY,
   executionProfile: DEFAULT_EXECUTION_PROFILE_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   // Defensive infrastructure timing parameter. Exchange balance settlement
@@ -660,6 +678,18 @@ const BOUND_TRACK_S1_REPLACEMENTS_MAX = 1_000;
 const BOUND_TRACK_S1_ENTRY_MAX = 0.5;
 const BOUND_TRACK_S1_RATIO_MIN = 0;
 const BOUND_TRACK_S1_RATIO_MAX = 1;
+const BOUND_TRACK_S4_SCAN_MIN_MS = 60_000;
+const BOUND_TRACK_S4_SCAN_MAX_MS = 3_600_000;
+const BOUND_TRACK_S4_CANDIDATES_MIN = 1;
+const BOUND_TRACK_S4_CANDIDATES_MAX = 100;
+const BOUND_TRACK_S4_RETRY_MIN_MS = 3_600_000;
+const BOUND_TRACK_S4_RETRY_MAX_MS = 7 * 24 * 60 * 60_000;
+const BOUND_TRACK_S4_THRESHOLD_MIN = 0.000_001;
+const BOUND_TRACK_S4_THRESHOLD_MAX = 100_000;
+const BOUND_TRACK_S4_LAST_SELL_MIN_MS = 60_000;
+const BOUND_TRACK_S4_LAST_SELL_MAX_MS = 30 * 24 * 60 * 60_000;
+const BOUND_TRACK_S4_PRICE_OFFSET_TICKS_MIN = 0;
+const BOUND_TRACK_S4_PRICE_OFFSET_TICKS_MAX = 10;
 const BOUND_EXECUTION_PROFILE_TOKENS_MIN = 1;
 const BOUND_EXECUTION_PROFILE_TOKENS_MAX = 10_000;
 const BOUND_EXECUTION_PROFILE_HANDOFF_MIN_MS = 60_000;
@@ -806,6 +836,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const trackR = parseTrackR(obj.trackR, issues);
   const trackS3 = parseTrackS3(obj.trackS3, issues);
   const trackS1 = parseTrackS1(obj.trackS1, issues);
+  const trackS4 = parseTrackS4(obj.trackS4, issues);
   const executionProfile = parseExecutionProfile(obj.executionProfile, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
@@ -861,6 +892,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       trackR,
       trackS3,
       trackS1,
+      trackS4,
       executionProfile,
       orderLifetime,
       postBuyFillSellCooldownMs,
@@ -938,6 +970,98 @@ function parseDustAbandonment(raw: unknown, issues: string[]): DustAbandonmentPo
       issues,
       "dustAbandonment.priceRecoveryRatio",
     ),
+  };
+}
+
+function parseTrackS4(raw: unknown, issues: string[]): TrackS4DustAutoCloseConfig {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("trackS4 must be an object");
+    return DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  const thresholds = objectOr(obj.thresholds);
+  const execution = objectOr(obj.execution);
+
+  if (obj.thresholds !== undefined && thresholds == null) {
+    issues.push("trackS4.thresholds must be an object");
+  }
+  if (obj.execution !== undefined && execution == null) {
+    issues.push("trackS4.execution must be an object");
+  }
+
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY.enabled,
+      issues,
+      "trackS4.enabled",
+    ),
+    scanIntervalMs: clampedInt(
+      obj.scanIntervalMs,
+      DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY.scanIntervalMs,
+      BOUND_TRACK_S4_SCAN_MIN_MS,
+      BOUND_TRACK_S4_SCAN_MAX_MS,
+      issues,
+      "trackS4.scanIntervalMs",
+    ),
+    maxCandidatesPerCycle: clampedInt(
+      obj.maxCandidatesPerCycle,
+      DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY.maxCandidatesPerCycle,
+      BOUND_TRACK_S4_CANDIDATES_MIN,
+      BOUND_TRACK_S4_CANDIDATES_MAX,
+      issues,
+      "trackS4.maxCandidatesPerCycle",
+    ),
+    retryBackoffMs: clampedInt(
+      obj.retryBackoffMs,
+      DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY.retryBackoffMs,
+      BOUND_TRACK_S4_RETRY_MIN_MS,
+      BOUND_TRACK_S4_RETRY_MAX_MS,
+      issues,
+      "trackS4.retryBackoffMs",
+    ),
+    thresholds: {
+      liquidationValueMaxUsdc: clampedNumber(
+        thresholds?.liquidationValueMaxUsdc,
+        DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY.thresholds.liquidationValueMaxUsdc,
+        BOUND_TRACK_S4_THRESHOLD_MIN,
+        BOUND_TRACK_S4_THRESHOLD_MAX,
+        issues,
+        "trackS4.thresholds.liquidationValueMaxUsdc",
+      ),
+      costBasisMaxUsdc: clampedNumber(
+        thresholds?.costBasisMaxUsdc,
+        DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY.thresholds.costBasisMaxUsdc,
+        BOUND_TRACK_S4_THRESHOLD_MIN,
+        BOUND_TRACK_S4_THRESHOLD_MAX,
+        issues,
+        "trackS4.thresholds.costBasisMaxUsdc",
+      ),
+      lastSellMinAgeMs: clampedInt(
+        thresholds?.lastSellMinAgeMs,
+        DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY.thresholds.lastSellMinAgeMs,
+        BOUND_TRACK_S4_LAST_SELL_MIN_MS,
+        BOUND_TRACK_S4_LAST_SELL_MAX_MS,
+        issues,
+        "trackS4.thresholds.lastSellMinAgeMs",
+      ),
+    },
+    execution: {
+      priceOffsetTicks: clampedInt(
+        execution?.priceOffsetTicks,
+        DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY.execution.priceOffsetTicks,
+        BOUND_TRACK_S4_PRICE_OFFSET_TICKS_MIN,
+        BOUND_TRACK_S4_PRICE_OFFSET_TICKS_MAX,
+        issues,
+        "trackS4.execution.priceOffsetTicks",
+      ),
+      cancelStaleSellOrders: booleanOr(
+        execution?.cancelStaleSellOrders,
+        DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY.execution.cancelStaleSellOrders,
+        issues,
+        "trackS4.execution.cancelStaleSellOrders",
+      ),
+    },
   };
 }
 

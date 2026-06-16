@@ -1611,6 +1611,7 @@ export interface ExecutionPolicy {
   trackR: TrackRHonestPricingPolicy;
   trackS3: TrackS3MarginAwareSpreadPolicy;
   trackS1: TrackS1WalkingLadderPolicy;
+  trackS4: TrackS4DustAutoCloseConfig;
   executionProfile: ExecutionProfilePolicy;
   orderLifetime: OrderLifetimePolicy;
   /**

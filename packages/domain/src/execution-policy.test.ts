@@ -1745,6 +1745,100 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.sellLoopGuard).toEqual(DEFAULT_EXECUTION_POLICY.sellLoopGuard);
   });
 
+  it("defaults Track S4 dust auto-close off with calibrated thresholds", () => {
+    expect((DEFAULT_EXECUTION_POLICY as any).trackS4).toEqual({
+      enabled: false,
+      scanIntervalMs: 300_000,
+      maxCandidatesPerCycle: 25,
+      retryBackoffMs: 24 * 60 * 60_000,
+      thresholds: {
+        liquidationValueMaxUsdc: 0.5,
+        costBasisMaxUsdc: 5,
+        lastSellMinAgeMs: 7 * 24 * 60 * 60_000,
+      },
+      execution: {
+        priceOffsetTicks: 1,
+        cancelStaleSellOrders: true,
+      },
+    });
+
+    const { policy, issues } = parseExecutionPolicyJson(JSON.stringify({ entryPriceCeiling: 0.4 }));
+    expect(issues).toHaveLength(0);
+    expect((policy as any).trackS4).toEqual((DEFAULT_EXECUTION_POLICY as any).trackS4);
+  });
+
+  it("parses custom Track S4 dust auto-close values", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        trackS4: {
+          enabled: true,
+          scanIntervalMs: 300_000,
+          maxCandidatesPerCycle: 25,
+          retryBackoffMs: 2 * 24 * 60 * 60_000,
+          thresholds: {
+            liquidationValueMaxUsdc: 0.4,
+            costBasisMaxUsdc: 4.5,
+            lastSellMinAgeMs: 8 * 24 * 60 * 60_000,
+          },
+          execution: {
+            priceOffsetTicks: 2,
+            cancelStaleSellOrders: false,
+          },
+        },
+      }),
+    );
+
+    expect(issues).toHaveLength(0);
+    expect((policy as any).trackS4).toEqual({
+      enabled: true,
+      scanIntervalMs: 300_000,
+      maxCandidatesPerCycle: 25,
+      retryBackoffMs: 2 * 24 * 60 * 60_000,
+      thresholds: {
+        liquidationValueMaxUsdc: 0.4,
+        costBasisMaxUsdc: 4.5,
+        lastSellMinAgeMs: 8 * 24 * 60 * 60_000,
+      },
+      execution: {
+        priceOffsetTicks: 2,
+        cancelStaleSellOrders: false,
+      },
+    });
+  });
+
+  it("rejects unsafe Track S4 numeric values and falls back", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        trackS4: {
+          scanIntervalMs: 100,
+          maxCandidatesPerCycle: 0,
+          retryBackoffMs: 100,
+          thresholds: {
+            liquidationValueMaxUsdc: 0,
+            costBasisMaxUsdc: -1,
+            lastSellMinAgeMs: 1_000,
+          },
+          execution: {
+            priceOffsetTicks: -1,
+            cancelStaleSellOrders: "yes",
+          },
+        },
+      }),
+    );
+
+    expect((policy as any).trackS4).toEqual((DEFAULT_EXECUTION_POLICY as any).trackS4);
+    expect(issues.some((i) => i.includes("trackS4.scanIntervalMs"))).toBe(true);
+    expect(issues.some((i) => i.includes("trackS4.maxCandidatesPerCycle"))).toBe(true);
+    expect(issues.some((i) => i.includes("trackS4.retryBackoffMs"))).toBe(true);
+    expect(issues.some((i) => i.includes("trackS4.thresholds.liquidationValueMaxUsdc"))).toBe(
+      true,
+    );
+    expect(issues.some((i) => i.includes("trackS4.thresholds.costBasisMaxUsdc"))).toBe(true);
+    expect(issues.some((i) => i.includes("trackS4.thresholds.lastSellMinAgeMs"))).toBe(true);
+    expect(issues.some((i) => i.includes("trackS4.execution.priceOffsetTicks"))).toBe(true);
+    expect(issues.some((i) => i.includes("trackS4.execution.cancelStaleSellOrders"))).toBe(true);
+  });
+
   it("defaults Track R honest pricing off with non-zero conservative fallbacks", () => {
     expect(DEFAULT_EXECUTION_POLICY.trackR).toEqual({
       enabled: false,
