@@ -251,6 +251,7 @@ export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderCo
     enabled: true,
     staleAfterMs: 24 * 60 * 60_000,
   },
+  adoptExisting: { enabled: false },
 };
 
 export const DEFAULT_EXECUTION_PROFILE_ABANDONMENT: ExecutionProfileAbandonmentConfig = {
@@ -2147,6 +2148,12 @@ function parseExecutionProfileSellLadder(
     ),
     reprice: parseProfileLadderReprice(obj.reprice, fallback.reprice, issues),
     staleReview: parseProfileLadderStaleReview(obj.staleReview, fallback.staleReview, issues),
+    adoptExisting: parseExecutionProfileToggle(
+      obj.adoptExisting,
+      fallback.adoptExisting,
+      issues,
+      "executionProfile.sellLadder.adoptExisting",
+    ),
   };
 }
 

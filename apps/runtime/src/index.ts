@@ -1130,6 +1130,13 @@ async function main(): Promise<void> {
     bus,
     repository: profileLadderRepo,
     policy: () => currentExecutionPolicy().executionProfile,
+    positionRepo: repos.position,
+    orderRepo: repos.order,
+    isProfileOwned: (tokenId) => executionProfileManager.isProfileOwned(tokenId),
+    onPolicyReload: (handler) =>
+      executionPolicyProvider.onReload(() => {
+        handler();
+      }),
     runtimeMetrics,
     riskEvents: repos.riskEvent,
   });

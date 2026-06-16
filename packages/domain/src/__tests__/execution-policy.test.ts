@@ -175,6 +175,28 @@ describe("execution profile sell ladder policy", () => {
       "executionProfile.sellLadder.bands.expensive.costCapUsd must be > 0",
     );
   });
+
+  it("defaults sellLadder.adoptExisting to disabled", () => {
+    const policy = parseExecutionPolicyJson(null).policy.executionProfile.sellLadder;
+
+    expect(policy.adoptExisting).toEqual({ enabled: false });
+    expect(DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.adoptExisting).toEqual({ enabled: false });
+  });
+
+  it("parses a non-default sellLadder.adoptExisting enabled flag", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            adoptExisting: { enabled: true },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.policy.executionProfile.sellLadder.adoptExisting).toEqual({ enabled: true });
+    expect(parsed.issues).toEqual([]);
+  });
 });
 
 describe("execution profile abandonment policy", () => {

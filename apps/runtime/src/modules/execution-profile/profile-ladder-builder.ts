@@ -3,6 +3,7 @@ import type {
   LadderBuilderOutput,
   LadderRung,
   ProfileLadderBand,
+  ProfileLadderBandConfig,
 } from "@krabs/domain";
 
 export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOutput {
@@ -74,14 +75,24 @@ function hasValidCoreInputs(input: LadderBuilderInput): boolean {
 }
 
 function resolveBand(input: LadderBuilderInput): ProfileLadderBand | null {
-  const avgEntry = input.avgEntryPrice;
+  return resolveLadderBand(input.avgEntryPrice, input.config.bands);
+}
+
+export function resolveLadderBand(
+  avgEntryPrice: number,
+  bands: Record<ProfileLadderBand, ProfileLadderBandConfig>,
+): ProfileLadderBand | null {
   for (const band of ["cheap", "medium_low", "medium_high", "expensive"] as const) {
-    const config = input.config.bands[band];
-    const aboveLow = config.minAvgEntry == null || avgEntry >= config.minAvgEntry;
-    const belowHigh = config.maxAvgEntry == null || avgEntry < config.maxAvgEntry;
+    const config = bands[band];
+    const aboveLow = config.minAvgEntry == null || avgEntryPrice >= config.minAvgEntry;
+    const belowHigh = config.maxAvgEntry == null || avgEntryPrice < config.maxAvgEntry;
     if (aboveLow && belowHigh) return band;
   }
   return null;
+}
+
+export function isValidLadderBbo(bestBid: number | null, bestAsk: number | null): boolean {
+  return isValidBbo(bestBid, bestAsk);
 }
 
 function resolveActiveRungCount(input: LadderBuilderInput, band: ProfileLadderBand): number {

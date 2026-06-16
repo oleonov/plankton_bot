@@ -1,7 +1,9 @@
 import {
   DEFAULT_EXECUTION_PROFILE_POLICY,
   LiquidityRole,
+  OrderStatus,
   PositionStatus,
+  createBotRunId,
   createConditionId,
   createFillId,
   createPositionId,
@@ -10,15 +12,20 @@ import {
   type ClientOrderId,
   type LadderState,
   type NormalizedMarket,
+  type Order,
   type PlaceOrderCommand,
   type Position,
   type RuntimeEventMap,
   type TokenId,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { ProfileLadderModule } from "../profile-ladder-module.js";
+import {
+  ADOPTION_RETRY_MS,
+  MAX_ADOPTION_ATTEMPTS,
+  ProfileLadderModule,
+} from "../profile-ladder-module.js";
 import type { ProfileLadderRepository } from "../profile-ladder-repository.js";
 import type { ExecutionProfilePolicy } from "../types.js";
 
@@ -215,11 +222,37 @@ function fill(
   };
 }
 
+function openSellOrder(overrides: Partial<Order> = {}): Order {
+  return {
+    orderId: createOrderId("legacy-sell-order"),
+    clientOrderId: "legacy-sell-client" as ClientOrderId,
+    tokenId,
+    conditionId,
+    side: "sell",
+    orderType: "GTC",
+    price: 0.2,
+    size: 50,
+    sizeUsdc: 10,
+    status: OrderStatus.Open,
+    exchangeOrderId: null,
+    signalId: null,
+    signalReason: "track-s1-ladder",
+    botRunId: createBotRunId("test-run"),
+    createdAt: "2026-06-15T00:00:00.000Z",
+    updatedAt: "2026-06-15T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 function setup(
   profilePolicy = policy(),
   overrides: {
     modeReader?: { getMode: (token: TokenId) => "up" | "flat" | "avg_down" | null };
     isDormant?: (token: TokenId) => boolean;
+    positionRepo?: { findOpen: () => Position[] };
+    orderRepo?: { findByTokenId: (token: TokenId) => Order[] };
+    isProfileOwned?: (token: TokenId) => boolean;
+    onPolicyReload?: (handler: () => void) => () => void;
   } = {},
 ) {
   const bus = new InProcessEventBus();
@@ -228,6 +261,9 @@ function setup(
   const riskEvents: Array<{ eventType: string; payload: Readonly<Record<string, unknown>> }> = [];
   const orders: PlaceOrderCommand[] = [];
   const cancels: string[] = [];
+  // Policy is read through a mutable holder so tests can simulate a live policy
+  // reload (e.g. adoptExisting hot-enabled) between calls.
+  const policyRef = { current: profilePolicy };
   bus.subscribe("PlaceOrderRequested", async ({ command }) => {
     orders.push(command);
   });
@@ -237,7 +273,7 @@ function setup(
   const module = new ProfileLadderModule({
     bus,
     repository: repo,
-    policy: () => profilePolicy,
+    policy: () => policyRef.current,
     ...overrides,
     runtimeMetrics: {
       writeCounter: (name, value, labels) => {
@@ -253,7 +289,24 @@ function setup(
     },
     now: () => NOW,
   });
-  return { bus, repo, counters, riskEvents, orders, cancels, module };
+  const setPolicy = (next: ExecutionProfilePolicy) => {
+    policyRef.current = next;
+  };
+  return { bus, repo, counters, riskEvents, orders, cancels, module, setPolicy };
+}
+
+// Captures the policy-reload handler the module registers so a test can fire a
+// simulated reload on demand, mirroring ExecutionPolicyProvider.onReload.
+function makeReloadHarness() {
+  let handler: (() => void) | null = null;
+  const onPolicyReload = (next: () => void) => {
+    handler = next;
+    return () => {
+      handler = null;
+    };
+  };
+  const fireReload = () => handler?.();
+  return { onPolicyReload, fireReload };
 }
 
 describe("ProfileLadderModule", () => {
@@ -600,6 +653,36 @@ describe("ProfileLadderModule", () => {
     });
   });
 
+  it("subscribes after a hot-enable even when it started while disabled", async () => {
+    const mutablePolicy = {
+      ...policy(),
+      sellLadder: { ...policy().sellLadder, enabled: false },
+    };
+    const ctx = setup(mutablePolicy);
+
+    await ctx.module.start();
+    (mutablePolicy.sellLadder as { enabled: boolean }).enabled = true;
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+    await ctx.bus.publish("PositionUpdated", { position: position() });
+
+    expect(ctx.orders).toHaveLength(4);
+    expect(ctx.repo.getLadder(tokenId)?.band).toBe("medium_low");
+  });
+
+  it("does not double-subscribe when start is called repeatedly while enabled", async () => {
+    const ctx = setup();
+
+    await ctx.module.start();
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+    await ctx.bus.publish("PositionUpdated", { position: position() });
+
+    expect(ctx.orders).toHaveLength(4);
+  });
+
   it("holds residual partial fills without rebuilding", async () => {
     const ctx = setup();
     ctx.repo.upsertLadder(ladderState());
@@ -616,6 +699,363 @@ describe("ProfileLadderModule", () => {
       name: "profile_ladder_partial_fill_held",
       value: 1,
       labels: '{"band":"medium_low"}',
+    });
+  });
+});
+
+describe("ProfileLadderModule.adoptExistingLadders", () => {
+  function adoptionPolicy(overrides: Partial<ExecutionProfilePolicy["sellLadder"]> = {}) {
+    return policy({ adoptExisting: { enabled: true }, ...overrides });
+  }
+
+  async function warmAndAdopt(ctx: ReturnType<typeof setup>): Promise<void> {
+    await ctx.module.start();
+    await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+    await ctx.module.adoptExistingLadders();
+  }
+
+  function summaryOf(ctx: ReturnType<typeof setup>): Record<string, unknown> | undefined {
+    return ctx.riskEvents.find((event) => event.eventType === "ladder_adoption_summary")?.payload as
+      | Record<string, unknown>
+      | undefined;
+  }
+
+  it("does not adopt when the sell ladder is disabled", async () => {
+    const ctx = setup(
+      {
+        ...policy(),
+        sellLadder: { ...policy().sellLadder, enabled: false, adoptExisting: { enabled: true } },
+      },
+      { positionRepo: { findOpen: () => [position()] }, isProfileOwned: () => true },
+    );
+
+    await ctx.module.adoptExistingLadders();
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.states.size).toBe(0);
+    expect(summaryOf(ctx)).toBeUndefined();
+  });
+
+  it("does not adopt when adoptExisting is disabled", async () => {
+    const ctx = setup(policy(), {
+      positionRepo: { findOpen: () => [position()] },
+      isProfileOwned: () => true,
+    });
+
+    await warmAndAdopt(ctx);
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.states.size).toBe(0);
+    expect(summaryOf(ctx)).toBeUndefined();
+  });
+
+  it("skips adoption for positions that are not profile-owned", async () => {
+    const ctx = setup(adoptionPolicy(), {
+      positionRepo: { findOpen: () => [position()] },
+      isProfileOwned: () => false,
+    });
+
+    await warmAndAdopt(ctx);
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(summaryOf(ctx)).toMatchObject({
+      eligible_count: 0,
+      adopted_count: 0,
+      skipped_not_profile_owned: 1,
+    });
+  });
+
+  it("skips adoption when no market snapshot is cached", async () => {
+    const ctx = setup(adoptionPolicy(), {
+      positionRepo: { findOpen: () => [position()] },
+      isProfileOwned: () => true,
+    });
+
+    await ctx.module.start();
+    await ctx.module.adoptExistingLadders();
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(summaryOf(ctx)).toMatchObject({
+      eligible_count: 0,
+      adopted_count: 0,
+      skipped_missing_market: 1,
+    });
+  });
+
+  it("skips adoption when a ladder already exists for the token", async () => {
+    const ctx = setup(adoptionPolicy(), {
+      positionRepo: { findOpen: () => [position()] },
+      isProfileOwned: () => true,
+    });
+    ctx.repo.upsertLadder(ladderState());
+
+    await warmAndAdopt(ctx);
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(summaryOf(ctx)).toMatchObject({
+      eligible_count: 0,
+      adopted_count: 0,
+      skipped_existing_ladder: 1,
+    });
+  });
+
+  it("skips adoption when an open SELL order already exists", async () => {
+    const ctx = setup(adoptionPolicy(), {
+      positionRepo: { findOpen: () => [position()] },
+      orderRepo: { findByTokenId: () => [openSellOrder()] },
+      isProfileOwned: () => true,
+    });
+
+    await warmAndAdopt(ctx);
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.states.size).toBe(0);
+    expect(summaryOf(ctx)).toMatchObject({
+      eligible_count: 0,
+      adopted_count: 0,
+      skipped_existing_sell_order: 1,
+    });
+  });
+
+  it("does not treat a filled or cancelled SELL order as a blocking open order", async () => {
+    const ctx = setup(adoptionPolicy(), {
+      positionRepo: { findOpen: () => [position()] },
+      orderRepo: { findByTokenId: () => [openSellOrder({ status: OrderStatus.Cancelled })] },
+      isProfileOwned: () => true,
+    });
+
+    await warmAndAdopt(ctx);
+
+    expect(ctx.orders).toHaveLength(4);
+    expect(summaryOf(ctx)).toMatchObject({ adopted_count: 1, skipped_existing_sell_order: 0 });
+  });
+
+  it("skips adoption when the resolved band is disabled", async () => {
+    const ctx = setup(adoptionPolicy(), {
+      positionRepo: { findOpen: () => [position({ avgEntryPrice: 0.2 })] },
+      isProfileOwned: () => true,
+    });
+
+    await warmAndAdopt(ctx);
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(summaryOf(ctx)).toMatchObject({
+      eligible_count: 0,
+      adopted_count: 0,
+      skipped_band_disabled: 1,
+    });
+  });
+
+  it("adopts an eligible profile-owned position using flat mode", async () => {
+    const ctx = setup(adoptionPolicy(), {
+      positionRepo: { findOpen: () => [position()] },
+      orderRepo: { findByTokenId: () => [] },
+      isProfileOwned: () => true,
+    });
+
+    await warmAndAdopt(ctx);
+
+    expect(ctx.orders).toHaveLength(4);
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({ band: "medium_low", lastMode: "flat" });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_adopted",
+      value: 1,
+      labels: '{"band":"medium_low"}',
+    });
+    expect(summaryOf(ctx)).toMatchObject({
+      eligible_count: 1,
+      adopted_count: 1,
+      estimated_order_count: 4,
+      skipped_existing_ladder: 0,
+      skipped_missing_market: 0,
+      skipped_not_profile_owned: 0,
+      skipped_band_disabled: 0,
+      skipped_existing_sell_order: 0,
+    });
+    const adopted = ctx.riskEvents.find((event) => event.eventType === "ladder_adopted");
+    expect(adopted?.payload).toMatchObject({ band: "medium_low", source: "adopted" });
+  });
+
+  it("is idempotent across repeated adoption runs", async () => {
+    const ctx = setup(adoptionPolicy(), {
+      positionRepo: { findOpen: () => [position()] },
+      isProfileOwned: () => true,
+    });
+
+    await warmAndAdopt(ctx);
+    await ctx.module.adoptExistingLadders();
+
+    expect(ctx.orders).toHaveLength(4);
+    expect(
+      ctx.riskEvents.filter((event) => event.eventType === "ladder_adoption_summary"),
+    ).toHaveLength(1);
+    expect(ctx.counters.filter((counter) => counter.name === "profile_ladder_adopted")).toHaveLength(
+      1,
+    );
+  });
+
+  it("counts and skips dormant positions during adoption", async () => {
+    const ctx = setup(adoptionPolicy(), {
+      positionRepo: { findOpen: () => [position()] },
+      isProfileOwned: () => true,
+      isDormant: () => true,
+    });
+
+    await warmAndAdopt(ctx);
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)).toBeNull();
+    expect(summaryOf(ctx)).toMatchObject({
+      eligible_count: 0,
+      adopted_count: 0,
+      skipped_dormant: 1,
+    });
+  });
+
+  describe("hot-enable via policy reload", () => {
+    it("runs adoption when adoptExisting is hot-enabled after start", async () => {
+      vi.useFakeTimers();
+      try {
+        const reload = makeReloadHarness();
+        const ctx = setup(policy(), {
+          positionRepo: { findOpen: () => [position()] },
+          isProfileOwned: () => true,
+          onPolicyReload: reload.onPolicyReload,
+        });
+
+        await ctx.module.start();
+        await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+
+        // adoptExisting was off at start, so no adoption is scheduled yet.
+        await vi.advanceTimersByTimeAsync(ADOPTION_RETRY_MS + 1);
+        expect(summaryOf(ctx)).toBeUndefined();
+
+        // Operator flips adoptExisting on; the live reload must schedule a pass.
+        ctx.setPolicy(adoptionPolicy());
+        reload.fireReload();
+        await vi.advanceTimersByTimeAsync(ADOPTION_RETRY_MS + 1);
+
+        expect(ctx.repo.getLadder(tokenId)).toMatchObject({ band: "medium_low", lastMode: "flat" });
+        expect(ctx.orders).toHaveLength(4);
+        expect(summaryOf(ctx)).toMatchObject({ adopted_count: 1, eligible_count: 1 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not schedule a duplicate adoption on an unrelated policy reload", async () => {
+      vi.useFakeTimers();
+      try {
+        const reload = makeReloadHarness();
+        const ctx = setup(adoptionPolicy(), {
+          positionRepo: { findOpen: () => [position()] },
+          isProfileOwned: () => true,
+          onPolicyReload: reload.onPolicyReload,
+        });
+
+        await ctx.module.start();
+        await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+
+        // A reload that leaves adoptExisting unchanged must not queue a second pass.
+        reload.fireReload();
+        await vi.advanceTimersByTimeAsync(ADOPTION_RETRY_MS + 1);
+
+        expect(ctx.orders).toHaveLength(4);
+        expect(
+          ctx.riskEvents.filter((event) => event.eventType === "ladder_adoption_summary"),
+        ).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe("bounded retry on missing market/BBO", () => {
+    it("does not adopt or latch done when the market is missing, and retries", async () => {
+      vi.useFakeTimers();
+      try {
+        const ctx = setup(adoptionPolicy(), {
+          positionRepo: { findOpen: () => [position()] },
+          isProfileOwned: () => true,
+        });
+
+        await ctx.module.start();
+        await ctx.module.adoptExistingLadders();
+
+        expect(ctx.repo.getLadder(tokenId)).toBeNull();
+        expect(summaryOf(ctx)).toMatchObject({
+          attempt: 1,
+          skipped_missing_market: 1,
+          retryable_skip_count: 1,
+          adopted_count: 0,
+        });
+
+        // No market provided: the retry runs but still finds nothing.
+        await vi.advanceTimersByTimeAsync(ADOPTION_RETRY_MS + 1);
+        const summaries = ctx.riskEvents.filter(
+          (event) => event.eventType === "ladder_adoption_summary",
+        );
+        expect(summaries).toHaveLength(2);
+        expect(summaries[1]?.payload).toMatchObject({ attempt: 2, skipped_missing_market: 1 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("adopts on retry once the market becomes available", async () => {
+      vi.useFakeTimers();
+      try {
+        const ctx = setup(adoptionPolicy(), {
+          positionRepo: { findOpen: () => [position()] },
+          isProfileOwned: () => true,
+        });
+
+        await ctx.module.start();
+        await ctx.module.adoptExistingLadders();
+        expect(ctx.repo.getLadder(tokenId)).toBeNull();
+
+        await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+        await vi.advanceTimersByTimeAsync(ADOPTION_RETRY_MS + 1);
+
+        expect(ctx.repo.getLadder(tokenId)).toMatchObject({ band: "medium_low" });
+        expect(ctx.orders).toHaveLength(4);
+        const summaries = ctx.riskEvents.filter(
+          (event) => event.eventType === "ladder_adoption_summary",
+        );
+        expect(summaries.at(-1)?.payload).toMatchObject({ attempt: 2, adopted_count: 1 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("stops retrying after the maximum number of attempts and latches done", async () => {
+      vi.useFakeTimers();
+      try {
+        const ctx = setup(adoptionPolicy(), {
+          positionRepo: { findOpen: () => [position()] },
+          isProfileOwned: () => true,
+        });
+
+        await ctx.module.start();
+        await ctx.module.adoptExistingLadders();
+        for (let i = 0; i < MAX_ADOPTION_ATTEMPTS + 2; i++) {
+          await vi.advanceTimersByTimeAsync(ADOPTION_RETRY_MS + 1);
+        }
+
+        const summaries = ctx.riskEvents.filter(
+          (event) => event.eventType === "ladder_adoption_summary",
+        );
+        expect(summaries).toHaveLength(MAX_ADOPTION_ATTEMPTS);
+        expect(summaries.at(-1)?.payload).toMatchObject({ attempt: MAX_ADOPTION_ATTEMPTS });
+
+        // Latched done: a further explicit call is a no-op.
+        await ctx.module.adoptExistingLadders();
+        expect(
+          ctx.riskEvents.filter((event) => event.eventType === "ladder_adoption_summary"),
+        ).toHaveLength(MAX_ADOPTION_ATTEMPTS);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

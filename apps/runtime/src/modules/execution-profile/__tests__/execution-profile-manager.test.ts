@@ -845,6 +845,128 @@ describe("ExecutionProfileManager", () => {
     vi.useRealTimers();
   });
 
+  it("initializes a PROBING profile state on the first BUY fill when no prior state exists", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository();
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      riskEvents,
+      profilePolicy: policy({ enabled: true }),
+      positions: [position({ avgEntryPrice: 0.12 })],
+    });
+
+    await manager.start();
+    await bus.publish("FillReceived", fill({ timestamp: NOW, sizeUsdc: 6 }));
+
+    expect(repo.getState(tokenId)).toMatchObject({
+      state: "PROBING",
+      profile: "medium",
+      addCount: 1,
+      lastBuyAtMs: NOW,
+      initialProbeSizeUsd: 6,
+    });
+    expect(manager.isProfileOwned(tokenId)).toBe(true);
+    expect(
+      metrics.counters.filter((counter) => counter.name === "track_execution_profile_assigned"),
+    ).toEqual([{ name: "track_execution_profile_assigned", value: 1, labels: '{"profile":"medium"}' }]);
+    expect(
+      riskEvents.inserts.filter(
+        (event) => event.eventType === EXECUTION_PROFILE_RISK_EVENTS.assigned,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not duplicate the assignment when the second BUY fill follows initialization", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository();
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      riskEvents,
+      profilePolicy: policy({ enabled: true }),
+      positions: [position({ avgEntryPrice: 0.12 })],
+    });
+
+    await manager.start();
+    await bus.publish("FillReceived", fill({ timestamp: NOW, sizeUsdc: 6 }));
+    await bus.publish("FillReceived", fill({ timestamp: NOW + 1_000, sizeUsdc: 5 }));
+
+    expect(repo.getState(tokenId)).toMatchObject({ state: "ACCUMULATING", addCount: 2 });
+    expect(
+      metrics.counters.filter((counter) => counter.name === "track_execution_profile_assigned"),
+    ).toHaveLength(1);
+    expect(
+      riskEvents.inserts.filter(
+        (event) => event.eventType === EXECUTION_PROFILE_RISK_EVENTS.assigned,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not create profile state for a SELL fill when no prior state exists", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository();
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      profilePolicy: policy({ enabled: true }),
+      positions: [position({ avgEntryPrice: 0.12 })],
+    });
+
+    await manager.start();
+    await bus.publish("FillReceived", fill({ side: "sell", timestamp: NOW }));
+
+    expect(repo.getState(tokenId)).toBeNull();
+    expect(
+      metrics.counters.filter((counter) => counter.name === "track_execution_profile_assigned"),
+    ).toHaveLength(0);
+  });
+
+  it("does not create profile state on a BUY fill when no open position exists", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository();
+    const bus = new InProcessEventBus();
+    const manager = makeManager({
+      bus,
+      repo,
+      profilePolicy: policy({ enabled: true }),
+      positions: [],
+    });
+
+    await manager.start();
+    await bus.publish("FillReceived", fill({ timestamp: NOW }));
+
+    expect(repo.getState(tokenId)).toBeNull();
+  });
+
+  it("remains inert on a first BUY fill when the feature is disabled", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository();
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      profilePolicy: policy({ enabled: false }),
+      positions: [position({ avgEntryPrice: 0.12 })],
+    });
+
+    await manager.start();
+    await bus.publish("FillReceived", fill({ timestamp: NOW }));
+
+    expect(repo.getState(tokenId)).toBeNull();
+    expect(
+      metrics.counters.filter((counter) => counter.name === "track_execution_profile_assigned"),
+    ).toHaveLength(0);
+  });
+
   it("updates addCount directly on repeated BUY fills while reducer state no-ops", async () => {
     const repo = new InMemoryExecutionProfileStateRepository([state({ state: "PROBING" })]);
     const bus = new InProcessEventBus();

@@ -411,7 +411,112 @@ describe("SignalFeedManager", () => {
     expect(metrics.latest).toEqual([]);
   });
 
-  it("publishes stale-token risk events at most once per 5-minute window", async () => {
+  it("emits one aggregated stale-token event per scan regardless of token count", async () => {
+    const bus = new InProcessEventBus();
+    const riskEvents = makeRiskEvents();
+    const metrics = makeMetrics();
+    const manager = new SignalFeedManager({
+      bus,
+      repository: new RecordingSignalFeedRepository(),
+      config: { enabled: true, windowShortMs: 10 * 60_000, warmBucketMs: 60_000 },
+      metrics,
+      riskEvents,
+    });
+
+    await manager.start();
+    const markets = Array.from({ length: 50 }, (_, index) =>
+      market(createTokenId(`stale-token-${index}`), 0.2),
+    );
+    await bus.publish("NormalizedMarketUpdated", { markets, timestamp: 1_000 });
+
+    manager.maintenancePrune(6 * 60_000 + 1_000);
+
+    const staleEvents = riskEvents.inserts.filter(
+      (event) => event.eventType === SIGNAL_FEED_RISK_EVENTS.staleToken,
+    );
+    expect(staleEvents).toHaveLength(1);
+    expect(staleEvents[0]!.payload).toMatchObject({
+      staleTokenCount: 50,
+      totalTokens: 50,
+      evictedTokenCount: 0,
+      ageMaxMs: 6 * 60_000,
+    });
+    expect((staleEvents[0]!.payload.sampleTokenIds as string[]).length).toBeLessThanOrEqual(10);
+    expect(metrics.counters).toContainEqual({
+      name: SIGNAL_FEED_METRICS.staleTokens,
+      value: 50,
+      labels: null,
+    });
+  });
+
+  it("evicts hot tokens silent past the fixed 1h eviction horizon", async () => {
+    const bus = new InProcessEventBus();
+    const riskEvents = makeRiskEvents();
+    const metrics = makeMetrics();
+    const manager = new SignalFeedManager({
+      bus,
+      repository: new RecordingSignalFeedRepository(),
+      config: { enabled: true, windowShortMs: 10 * 60_000, warmBucketMs: 60_000 },
+      metrics,
+      riskEvents,
+    });
+
+    await manager.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [market(TOKEN, 0.2)],
+      timestamp: 1_000,
+    });
+
+    // Just past the fixed v1 1h horizon (age > 60m): the token is evicted.
+    manager.maintenancePrune(60 * 60_000 + 1_000 + 1);
+
+    expect(manager.getHotSamples(TOKEN)).toEqual([]);
+    const staleEvents = riskEvents.inserts.filter(
+      (event) => event.eventType === SIGNAL_FEED_RISK_EVENTS.staleToken,
+    );
+    expect(staleEvents).toHaveLength(1);
+    expect(staleEvents[0]!.payload).toMatchObject({ staleTokenCount: 1, evictedTokenCount: 1 });
+    expect(metrics.counters).toContainEqual({
+      name: SIGNAL_FEED_METRICS.staleTokensEvicted,
+      value: 1,
+      labels: null,
+    });
+  });
+
+  it("reports stale but does not evict before the fixed 1h horizon", async () => {
+    const bus = new InProcessEventBus();
+    const riskEvents = makeRiskEvents();
+    const metrics = makeMetrics();
+    const manager = new SignalFeedManager({
+      bus,
+      repository: new RecordingSignalFeedRepository(),
+      config: { enabled: true, windowShortMs: 10 * 60_000, warmBucketMs: 60_000 },
+      metrics,
+      riskEvents,
+    });
+
+    await manager.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [market(TOKEN, 0.2)],
+      timestamp: 1_000,
+    });
+
+    // Age 30m: well past the 5m stale-report threshold, well short of the fixed
+    // 1h eviction horizon. The token is reported stale but its samples survive.
+    manager.maintenancePrune(30 * 60_000 + 1_000);
+
+    expect(manager.getHotSamples(TOKEN)).toHaveLength(1);
+    const staleEvents = riskEvents.inserts.filter(
+      (event) => event.eventType === SIGNAL_FEED_RISK_EVENTS.staleToken,
+    );
+    expect(staleEvents).toHaveLength(1);
+    expect(staleEvents[0]!.payload).toMatchObject({ staleTokenCount: 1, evictedTokenCount: 0 });
+    expect(metrics.counters).not.toContainEqual(
+      expect.objectContaining({ name: SIGNAL_FEED_METRICS.staleTokensEvicted }),
+    );
+  });
+
+  it("does not report fresh tokens as stale", async () => {
     const bus = new InProcessEventBus();
     const riskEvents = makeRiskEvents();
     const manager = new SignalFeedManager({
@@ -426,16 +531,13 @@ describe("SignalFeedManager", () => {
       markets: [market(TOKEN, 0.2)],
       timestamp: 1_000,
     });
-    manager.maintenancePrune(6 * 60_000 + 1_000);
-    manager.maintenancePrune(7 * 60_000 + 1_000);
+
+    manager.maintenancePrune(61_000);
 
     expect(
       riskEvents.inserts.filter((event) => event.eventType === SIGNAL_FEED_RISK_EVENTS.staleToken),
-    ).toHaveLength(1);
-    expect(riskEvents.inserts).toContainEqual({
-      eventType: SIGNAL_FEED_RISK_EVENTS.staleToken,
-      payload: { tokenId: String(TOKEN), lastSampleAgeMs: 6 * 60_000 },
-    });
+    ).toHaveLength(0);
+    expect(manager.getHotSamples(TOKEN)).toHaveLength(1);
   });
 
   it("samples heartbeat and changed-market updates, dedupes by timestamp, and flushes buckets", async () => {

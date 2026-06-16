@@ -961,6 +961,7 @@ export interface ExecutionProfileSellLadderConfig {
   modeAdjustments: Record<ProfileLadderMode, number>;
   reprice: ProfileLadderRepriceConfig;
   staleReview: ProfileLadderStaleReviewConfig;
+  adoptExisting: ExecutionProfileFeatureToggle;
 }
 
 export interface LadderBuilderInput {

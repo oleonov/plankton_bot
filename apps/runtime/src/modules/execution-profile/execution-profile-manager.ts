@@ -226,6 +226,13 @@ export class ExecutionProfileManager implements RuntimeModule {
       this.deps.stateRepo.upsertState(state);
       this.ownership.setSnapshot(toSnapshot(state));
     });
+    this.recordAssignment(state, order == null ? "position" : "s1_ladder");
+  }
+
+  private recordAssignment(
+    state: ExecutionProfileStateRecord,
+    adoptedFrom: "position" | "s1_ladder" | "buy_fill",
+  ): void {
     this.recordCounter(EXECUTION_PROFILE_METRICS.assigned, { profile: state.profile });
     this.recordRiskEvent(EXECUTION_PROFILE_RISK_EVENTS.assigned, {
       tokenId: String(state.tokenId),
@@ -233,7 +240,7 @@ export class ExecutionProfileManager implements RuntimeModule {
       profile: state.profile,
       state: state.state,
       activeLadderId: state.activeLadderId,
-      adoptedFrom: order == null ? "position" : "s1_ladder",
+      adoptedFrom,
       assignedAt: state.assumedAt,
     });
   }
@@ -434,27 +441,44 @@ export class ExecutionProfileManager implements RuntimeModule {
     this.pendingScaleIn.delete(String(fill.tokenId));
     this.reclassifyFromPosition(fill.tokenId);
     if (fill.side !== "buy") return;
-    const current = this.deps.stateRepo.getState(fill.tokenId);
     const position = this.deps.positionRepo.findByTokenId(fill.tokenId);
-    if (current == null || position == null) return;
-    const updated = this.withBuyAccounting(current, fill);
-    const reduction = reduceProfileState(updated, {
+    if (position == null) return;
+    const current = this.deps.stateRepo.getState(fill.tokenId);
+    // First BUY initialization only happens when the feature is enabled; existing
+    // states keep updating regardless so in-flight positions never silently stall.
+    if (current == null && !this.policy().enabled) return;
+    const profile = current?.profile ?? this.resolveInitialProfile(position);
+    if (profile == null) return;
+    const reduction = reduceProfileState(current, {
       type: "buy_fill_received",
       tokenId: fill.tokenId,
       occurredAtMs: fill.timestamp,
       payload: {
         conditionId: fill.conditionId,
-        profile: updated.profile,
+        profile,
         avgEntry: position.avgEntryPrice,
       },
     });
-    const next = reduction.next ?? updated;
+    const base = reduction.next ?? current;
+    if (base == null) return;
+    const next = this.withBuyAccounting(base, fill);
     this.deps.stateRepo.runInTransaction(() => {
       this.deps.stateRepo.upsertState(next);
       if (next.state === "CLOSED") this.ownership.deleteSnapshot(fill.tokenId);
       else this.ownership.setSnapshot(toSnapshot(next));
     });
     this.consumeReducerEffects(reduction.effects, fill.timestamp);
+    if (current == null && reduction.transition != null) {
+      this.recordAssignment(next, "buy_fill");
+    }
+  }
+
+  private resolveInitialProfile(position: Position): Profile | null {
+    return resolveProfile({
+      currentProfile: null,
+      avgEntry: position.avgEntryPrice,
+      config: this.policy().profileHysteresis,
+    }).profile;
   }
 
   private withBuyAccounting(

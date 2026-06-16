@@ -3,6 +3,7 @@ import type {
   LadderRung,
   LadderState,
   NormalizedMarket,
+  Order,
   OrderId,
   Position,
   ProfileLadderMode,
@@ -10,10 +11,14 @@ import type {
   RuntimeModule,
   TokenId,
 } from "@krabs/domain";
-import { PositionStatus, createCommandId, createPositionId } from "@krabs/domain";
+import { OrderStatus, PositionStatus, createCommandId, createPositionId } from "@krabs/domain";
 import { buildClientOrderId } from "@krabs/domain/node";
 
-import { computeProfileLadder } from "./profile-ladder-builder.js";
+import {
+  computeProfileLadder,
+  isValidLadderBbo,
+  resolveLadderBand,
+} from "./profile-ladder-builder.js";
 import type { ProfileLadderRepository } from "./profile-ladder-repository.js";
 import type { ExecutionProfilePolicy } from "./types.js";
 
@@ -29,15 +34,64 @@ export interface ProfileLadderModeReader {
   getMode(tokenId: TokenId): ProfileLadderMode | null;
 }
 
+export interface ProfileLadderPositionReader {
+  findOpen(): Position[];
+}
+
+export interface ProfileLadderOrderReader {
+  findByTokenId(tokenId: TokenId): Order[];
+}
+
 export interface ProfileLadderModuleDeps {
   bus: EventBus;
   repository: ProfileLadderRepository;
   policy: () => ExecutionProfilePolicy;
   modeReader?: ProfileLadderModeReader;
   isDormant?: ((tokenId: TokenId) => boolean) | undefined;
+  // Adoption (Track #44) dependencies — only consulted when sellLadder.adoptExisting is enabled.
+  positionRepo?: ProfileLadderPositionReader;
+  orderRepo?: ProfileLadderOrderReader;
+  isProfileOwned?: (tokenId: TokenId) => boolean;
+  // Lets the module react to a sellLadder.adoptExisting false -> true hot-enable
+  // while already started; returns an unsubscribe handle. Mirrors DustAutoCloseModule.
+  onPolicyReload?: (handler: () => void) => () => void;
   runtimeMetrics?: ProfileLadderMetricWriter;
   riskEvents?: ProfileLadderRiskEventWriter;
   now?: () => number;
+}
+
+// Open SELL orders on the same token block adoption so an adopted ladder never
+// stacks on legacy S1/D8/D9/repricing exits.
+const OPEN_ORDER_STATUSES = new Set<OrderStatus>([
+  OrderStatus.Pending,
+  OrderStatus.Open,
+  OrderStatus.PartiallyFilled,
+]);
+
+// Existing positions never replay PositionUpdated at startup, so adoption is the
+// only path that places ladders for them. Defer one pass until the market cache
+// warms from the scanner; positions still lacking BBO are reported, not adopted.
+const ADOPTION_WARMUP_MS = 60_000;
+
+// Tokens skipped only because their market/BBO had not warmed yet are retried on a
+// bounded schedule; every other skip (not owned, band disabled, existing ladder or
+// open SELL, dormant) is final. The attempt cap stops a permanently missing market
+// from looping forever — after MAX_ADOPTION_ATTEMPTS the pass latches done.
+export const ADOPTION_RETRY_MS = 60_000;
+export const MAX_ADOPTION_ATTEMPTS = 5;
+
+interface LadderAdoptionSummary {
+  attempt: number;
+  eligible_count: number;
+  adopted_count: number;
+  skipped_existing_ladder: number;
+  skipped_missing_market: number;
+  skipped_not_profile_owned: number;
+  skipped_band_disabled: number;
+  skipped_existing_sell_order: number;
+  skipped_dormant: number;
+  estimated_order_count: number;
+  retryable_skip_count: number;
 }
 
 export class ProfileLadderModule implements RuntimeModule {
@@ -50,12 +104,18 @@ export class ProfileLadderModule implements RuntimeModule {
     { tokenId: TokenId; rungIndex: number }
   >();
   private started = false;
+  private adoptionDone = false;
+  private adoptionTimer: ReturnType<typeof setTimeout> | undefined;
+  private adoptionAttemptCount = 0;
+  private adoptExistingEnabled = false;
+  private policyReloadUnsubscribe: (() => void) | undefined;
 
   constructor(private readonly deps: ProfileLadderModuleDeps) {}
 
   async start(): Promise<void> {
     if (this.started) return;
-    this.started = true;
+    // Stay inert (without latching started) while disabled so a later hot-enable
+    // can subscribe on a subsequent start() instead of being permanently poisoned.
     if (!this.policy().enabled) return;
     this.unsubscribers.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", async (event) => {
@@ -71,10 +131,23 @@ export class ProfileLadderModule implements RuntimeModule {
         this.handleOrderPlaced(event);
       }),
     );
+    this.started = true;
+    this.adoptExistingEnabled = this.policy().adoptExisting.enabled;
+    this.ensurePolicyReloadSubscription();
+    this.scheduleAdoption();
   }
 
   async stop(): Promise<void> {
     while (this.unsubscribers.length > 0) this.unsubscribers.pop()?.();
+    this.policyReloadUnsubscribe?.();
+    this.policyReloadUnsubscribe = undefined;
+    if (this.adoptionTimer != null) {
+      clearTimeout(this.adoptionTimer);
+      this.adoptionTimer = undefined;
+    }
+    this.adoptionDone = false;
+    this.adoptionAttemptCount = 0;
+    this.adoptExistingEnabled = false;
     this.started = false;
   }
 
@@ -98,6 +171,148 @@ export class ProfileLadderModule implements RuntimeModule {
       rungCount: state.activeRungs.length,
       ladderId: state.ladderId,
     });
+  }
+
+  /**
+   * Track #44 startup adoption: place ladders for already-open, profile-owned
+   * positions that predate the sell ladder feature. Gated by both
+   * sellLadder.enabled and sellLadder.adoptExisting.enabled. Conservative by
+   * design — any pre-existing ladder or open SELL order skips the position.
+   *
+   * Idempotent: it latches `adoptionDone` once a pass finishes with no retryable
+   * skips, so repeated calls (or a stale reload) never re-place ladders. Tokens
+   * skipped only because their market/BBO had not warmed yet are retried on a
+   * bounded schedule (ADOPTION_RETRY_MS, capped at MAX_ADOPTION_ATTEMPTS).
+   */
+  async adoptExistingLadders(): Promise<void> {
+    const sellLadder = this.policy();
+    if (!sellLadder.enabled || !sellLadder.adoptExisting.enabled) return;
+    if (this.adoptionDone) return;
+    // A pass is starting now: drop any pending warmup/retry timer so the
+    // post-pass scheduler can install the next one without tripping its guard.
+    if (this.adoptionTimer != null) {
+      clearTimeout(this.adoptionTimer);
+      this.adoptionTimer = undefined;
+    }
+    this.adoptionAttemptCount += 1;
+
+    const summary: LadderAdoptionSummary = {
+      attempt: this.adoptionAttemptCount,
+      eligible_count: 0,
+      adopted_count: 0,
+      skipped_existing_ladder: 0,
+      skipped_missing_market: 0,
+      skipped_not_profile_owned: 0,
+      skipped_band_disabled: 0,
+      skipped_existing_sell_order: 0,
+      skipped_dormant: 0,
+      estimated_order_count: 0,
+      retryable_skip_count: 0,
+    };
+
+    const maxPositions = this.deps.policy().maxTokensPerCycle;
+    for (const position of (this.deps.positionRepo?.findOpen() ?? []).slice(0, maxPositions)) {
+      await this.adoptPosition(position, sellLadder, summary);
+    }
+
+    summary.retryable_skip_count = summary.skipped_missing_market;
+    const shouldRetry =
+      summary.skipped_missing_market > 0 && this.adoptionAttemptCount < MAX_ADOPTION_ATTEMPTS;
+    if (shouldRetry) {
+      this.scheduleAdoption(ADOPTION_RETRY_MS);
+    } else {
+      this.adoptionDone = true;
+    }
+    this.insertRiskEvent("ladder_adoption_summary", { ...summary });
+  }
+
+  private async adoptPosition(
+    position: Position,
+    sellLadder: ExecutionProfilePolicy["sellLadder"],
+    summary: LadderAdoptionSummary,
+  ): Promise<void> {
+    const tokenId = position.tokenId;
+    if (!(this.deps.isProfileOwned?.(tokenId) ?? false)) {
+      summary.skipped_not_profile_owned += 1;
+      return;
+    }
+    if (this.deps.repository.getLadder(tokenId) != null) {
+      summary.skipped_existing_ladder += 1;
+      return;
+    }
+    if (this.isDormant(tokenId)) {
+      summary.skipped_dormant += 1;
+      return;
+    }
+    const market = this.marketByToken.get(String(tokenId));
+    if (market == null || !isValidLadderBbo(market.bestBid, market.bestAsk)) {
+      summary.skipped_missing_market += 1;
+      return;
+    }
+    const band = resolveLadderBand(position.avgEntryPrice, sellLadder.bands);
+    if (band == null || !sellLadder.bands[band].enabled) {
+      summary.skipped_band_disabled += 1;
+      return;
+    }
+    if (this.hasOpenSellOrder(tokenId)) {
+      summary.skipped_existing_sell_order += 1;
+      return;
+    }
+
+    summary.eligible_count += 1;
+    const state = await this.buildAndPlace(position, market, "ladder_adopted", "flat");
+    if (state == null) return;
+    summary.adopted_count += 1;
+    summary.estimated_order_count += state.activeRungs.length;
+    this.writeCounter("profile_ladder_adopted", 1, { band: state.band });
+    this.insertRiskEvent("ladder_adopted", {
+      tokenId: String(state.tokenId),
+      conditionId: String(state.conditionId),
+      band: state.band,
+      rungCount: state.activeRungs.length,
+      ladderId: state.ladderId,
+      source: "adopted",
+    });
+  }
+
+  private hasOpenSellOrder(tokenId: TokenId): boolean {
+    const orders = this.deps.orderRepo?.findByTokenId(tokenId) ?? [];
+    return orders.some((order) => order.side === "sell" && OPEN_ORDER_STATUSES.has(order.status));
+  }
+
+  private scheduleAdoption(delayMs: number = ADOPTION_WARMUP_MS): void {
+    if (!this.started) return;
+    const sellLadder = this.policy();
+    if (!sellLadder.enabled || !sellLadder.adoptExisting.enabled) return;
+    if (this.adoptionDone) return;
+    // One timer at a time — no warmup/retry/reload spam stacking passes.
+    if (this.adoptionTimer != null) return;
+    this.adoptionTimer = setTimeout(() => {
+      this.adoptionTimer = undefined;
+      void this.adoptExistingLadders();
+    }, delayMs);
+    this.adoptionTimer.unref?.();
+  }
+
+  private ensurePolicyReloadSubscription(): void {
+    if (this.policyReloadUnsubscribe != null) return;
+    if (this.deps.onPolicyReload == null) return;
+    this.policyReloadUnsubscribe = this.deps.onPolicyReload(() => {
+      this.handlePolicyReload();
+    });
+  }
+
+  // Hot-enable: when a live policy reload flips sellLadder.adoptExisting from
+  // false to true while the module is already started, schedule a deferred
+  // adoption pass. Other reloads (no transition, or a true->false flip) are
+  // inert. Already-completed adoption (adoptionDone) is never rerun.
+  private handlePolicyReload(): void {
+    const enabledNow = this.policy().adoptExisting.enabled;
+    const wasEnabled = this.adoptExistingEnabled;
+    this.adoptExistingEnabled = enabledNow;
+    if (wasEnabled || !enabledNow) return;
+    if (!this.started || !this.policy().enabled || this.adoptionDone) return;
+    this.scheduleAdoption();
   }
 
   async rebuildLadder(
@@ -203,11 +418,12 @@ export class ProfileLadderModule implements RuntimeModule {
   private async buildAndPlace(
     position: Position,
     market: NormalizedMarket,
-    eventType: "ladder_placed" | "ladder_rebuilt",
+    eventType: "ladder_placed" | "ladder_rebuilt" | "ladder_adopted",
+    modeOverride?: ProfileLadderMode,
   ): Promise<LadderState | null> {
     const policy = this.policy();
     if (!policy.enabled) return null;
-    const mode = this.resolveMode(position, market);
+    const mode = this.resolveMode(position, market, modeOverride);
     const plan = computeProfileLadder({
       tokenId: position.tokenId,
       conditionId: position.conditionId,
@@ -256,7 +472,12 @@ export class ProfileLadderModule implements RuntimeModule {
     return state;
   }
 
-  private resolveMode(position: Position, market: NormalizedMarket): ProfileLadderMode {
+  private resolveMode(
+    position: Position,
+    market: NormalizedMarket,
+    modeOverride?: ProfileLadderMode,
+  ): ProfileLadderMode {
+    if (modeOverride != null) return modeOverride;
     if (this.deps.modeReader != null) {
       const mode = this.deps.modeReader.getMode(position.tokenId);
       if (mode != null) return mode;

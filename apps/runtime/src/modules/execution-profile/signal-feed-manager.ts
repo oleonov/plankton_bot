@@ -14,7 +14,13 @@ const DEFAULT_WARM_BUCKET_CAP = 24 * 60;
 const DEFAULT_COLD_BUCKET_MS = 60 * 60_000;
 const DEFAULT_RETENTION_DAYS = 120;
 const STALE_TOKEN_THRESHOLD_MS = 5 * 60_000;
-const STALE_TOKEN_EVENT_WINDOW_MS = 5 * 60_000;
+// Fixed v1 eviction horizon (1h) — intentionally NOT operator-configurable.
+// Hot tokens silent past this point are dropped from the buffer so silent
+// markets cannot accumulate unbounded. Sits well beyond STALE_TOKEN_THRESHOLD_MS
+// (5m), so a token is reported stale for ~55m before it is ever evicted. Revisit
+// only if a real workload needs a different window; do not wire it to config yet.
+const STALE_TOKEN_EVICTION_MS = 60 * 60_000;
+const STALE_TOKEN_SAMPLE_CAP = 10;
 const EMPTY_LABELS = "{}";
 
 export const SIGNAL_FEED_METRICS = {
@@ -33,6 +39,8 @@ export const SIGNAL_FEED_METRICS = {
   recovery60Value: "signal_feed_recovery60_value",
   range60Value: "signal_feed_range60_value",
   tradeCount3hValue: "signal_feed_tradeCount3h_value",
+  staleTokens: "signal_feed_stale_tokens",
+  staleTokensEvicted: "signal_feed_stale_tokens_evicted",
 } as const;
 
 export const SIGNAL_FEED_RISK_EVENTS = {
@@ -70,7 +78,6 @@ export class SignalFeedManager implements RuntimeModule {
   private readonly warm: SignalFeedWarmTier;
   private readonly tokenIds = new Set<string>();
   private readonly lastHotFlushTsByToken = new Map<string, number>();
-  private readonly staleTokenEventTsByToken = new Map<string, number>();
   private readonly unsubscribers: Array<() => void> = [];
   private readonly timers: Array<ReturnType<typeof setInterval>> = [];
   private started = false;
@@ -235,22 +242,42 @@ export class SignalFeedManager implements RuntimeModule {
   }
 
   private detectStaleTokens(nowMs: number): void {
-    for (const tokenKey of this.hot.keys()) {
+    const tokenKeys = this.hot.keys();
+    const staleAges: number[] = [];
+    const sampleTokenIds: string[] = [];
+    const evictKeys: string[] = [];
+    for (const tokenKey of tokenKeys) {
       const lastSampleTsMs = this.hot.lastSampleTsMs(tokenKey as TokenId);
       if (lastSampleTsMs == null) continue;
       const lastSampleAgeMs = nowMs - lastSampleTsMs;
-      if (lastSampleAgeMs <= STALE_TOKEN_THRESHOLD_MS) {
-        this.staleTokenEventTsByToken.delete(tokenKey);
-        continue;
-      }
-      const lastEmittedAt = this.staleTokenEventTsByToken.get(tokenKey);
-      if (lastEmittedAt != null && nowMs - lastEmittedAt < STALE_TOKEN_EVENT_WINDOW_MS) continue;
-      this.staleTokenEventTsByToken.set(tokenKey, nowMs);
-      this.recordRiskEvent(SIGNAL_FEED_RISK_EVENTS.staleToken, {
-        tokenId: tokenKey,
-        lastSampleAgeMs,
-      });
+      if (lastSampleAgeMs <= STALE_TOKEN_THRESHOLD_MS) continue;
+      staleAges.push(lastSampleAgeMs);
+      if (sampleTokenIds.length < STALE_TOKEN_SAMPLE_CAP) sampleTokenIds.push(tokenKey);
+      if (lastSampleAgeMs >= STALE_TOKEN_EVICTION_MS) evictKeys.push(tokenKey);
     }
+    for (const tokenKey of evictKeys) this.dropToken(tokenKey);
+    if (staleAges.length === 0) return;
+    staleAges.sort((left, right) => left - right);
+    const evictedTokenCount = evictKeys.length;
+    this.recordCounter(SIGNAL_FEED_METRICS.staleTokens, staleAges.length);
+    if (evictedTokenCount > 0) {
+      this.recordCounter(SIGNAL_FEED_METRICS.staleTokensEvicted, evictedTokenCount);
+    }
+    this.recordRiskEvent(SIGNAL_FEED_RISK_EVENTS.staleToken, {
+      staleTokenCount: staleAges.length,
+      totalTokens: tokenKeys.length,
+      evictedTokenCount,
+      sampleTokenIds,
+      ageP50Ms: percentile(staleAges, 0.5),
+      ageP90Ms: percentile(staleAges, 0.9),
+      ageMaxMs: staleAges[staleAges.length - 1]!,
+    });
+  }
+
+  private dropToken(tokenKey: string): void {
+    this.hot.dropToken(tokenKey as TokenId);
+    this.tokenIds.delete(tokenKey);
+    this.lastHotFlushTsByToken.delete(tokenKey);
   }
 
   private recordCounter(name: string, value = 1): void {
@@ -314,6 +341,12 @@ export class SignalFeedHotBuffer {
 
   lastSampleTsMs(tokenId: TokenId): number | null {
     return this.lastSampleTsByToken.get(String(tokenId)) ?? null;
+  }
+
+  dropToken(tokenId: TokenId): void {
+    const key = String(tokenId);
+    this.samplesByToken.delete(key);
+    this.lastSampleTsByToken.delete(key);
   }
 
   samplesBetween(tokenId: TokenId, startMs: number, endMs: number): HotSample[] {
@@ -420,6 +453,12 @@ export class SignalFeedWarmTier {
 
 export function bucketStart(tsMs: number, bucketGranularityMs: number): number {
   return Math.floor(tsMs / bucketGranularityMs) * bucketGranularityMs;
+}
+
+function percentile(sortedAsc: readonly number[], fraction: number): number {
+  if (sortedAsc.length === 0) return 0;
+  const index = Math.min(sortedAsc.length - 1, Math.floor(fraction * sortedAsc.length));
+  return sortedAsc[index]!;
 }
 
 function updateBucket(bucket: OhlcBucket, midPrice: number): void {
