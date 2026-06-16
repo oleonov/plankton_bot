@@ -127,6 +127,7 @@ describe("execution profile sell ladder policy", () => {
       modeAdjustments: { up: 0.95, flat: 1, avg_down: 1.5 },
       reprice: { majorBboMovePct: 0.05, strongBboMovePct: 0.1, cooldownMs: 1_800_000 },
       staleReview: { enabled: true, staleAfterMs: 86_400_000 },
+      postFill: { reevalCooldownMs: 900_000 },
     });
     expect(policy.bands.medium_low).toEqual({
       enabled: false,
@@ -137,8 +138,92 @@ describe("execution profile sell ladder policy", () => {
       costCapUsd: 55,
       allowFourthRung: true,
       fourthRungMinCostUsd: 15,
+      maxConcurrentRungs: 1,
     });
     expect(Object.values(policy.bands).every((band) => band.enabled === false)).toBe(true);
+  });
+
+  it("defaults every band's maxConcurrentRungs to 1 (Plankton conservative cap)", () => {
+    const policy = parseExecutionPolicyJson(null).policy.executionProfile.sellLadder;
+
+    expect(policy.bands.cheap.maxConcurrentRungs).toBe(1);
+    expect(policy.bands.medium_low.maxConcurrentRungs).toBe(1);
+    expect(policy.bands.medium_high.maxConcurrentRungs).toBe(1);
+    expect(policy.bands.expensive.maxConcurrentRungs).toBe(1);
+  });
+
+  it("allows maxConcurrentRungs up to 2 for cheap and medium_low bands", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            bands: {
+              cheap: { maxConcurrentRungs: 2 },
+              medium_low: { maxConcurrentRungs: 2 },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.policy.executionProfile.sellLadder.bands.cheap.maxConcurrentRungs).toBe(2);
+    expect(parsed.policy.executionProfile.sellLadder.bands.medium_low.maxConcurrentRungs).toBe(2);
+    expect(parsed.issues).toEqual([]);
+  });
+
+  it("rejects maxConcurrentRungs above the per-band ceiling and falls the band back to its safe default", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            bands: {
+              cheap: { maxConcurrentRungs: 3 },
+              medium_high: { maxConcurrentRungs: 2 },
+              expensive: { maxConcurrentRungs: 2 },
+            },
+          },
+        },
+      }),
+    );
+    const ladder = parsed.policy.executionProfile.sellLadder;
+
+    expect(ladder.bands.cheap.maxConcurrentRungs).toBe(1);
+    expect(ladder.bands.medium_high.maxConcurrentRungs).toBe(1);
+    expect(ladder.bands.expensive.maxConcurrentRungs).toBe(1);
+    expect(parsed.issues.some((issue) => issue.includes("maxConcurrentRungs"))).toBe(true);
+  });
+
+  it("defaults sellLadder.postFill.reevalCooldownMs to 15 minutes (Plankton rest cooldown)", () => {
+    const policy = parseExecutionPolicyJson(null).policy.executionProfile.sellLadder;
+
+    expect(policy.postFill).toEqual({ reevalCooldownMs: 900_000 });
+    expect(DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.postFill).toEqual({
+      reevalCooldownMs: 900_000,
+    });
+  });
+
+  it("parses a non-default sellLadder.postFill.reevalCooldownMs", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: { sellLadder: { postFill: { reevalCooldownMs: 1_200_000 } } },
+      }),
+    );
+
+    expect(parsed.policy.executionProfile.sellLadder.postFill.reevalCooldownMs).toBe(1_200_000);
+    expect(parsed.issues).toEqual([]);
+  });
+
+  it("falls back an invalid postFill.reevalCooldownMs to the safe default", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: { sellLadder: { postFill: { reevalCooldownMs: -1 } } },
+      }),
+    );
+
+    expect(parsed.policy.executionProfile.sellLadder.postFill.reevalCooldownMs).toBe(900_000);
+    expect(parsed.issues).toContain(
+      "executionProfile.sellLadder.postFill.reevalCooldownMs must be >= 0",
+    );
   });
 
   it("parses per-band sell ladder config with isolated fallback", () => {

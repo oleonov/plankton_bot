@@ -939,6 +939,11 @@ export interface ProfileLadderBandConfig {
   costCapUsd: number;
   allowFourthRung: boolean;
   fourthRungMinCostUsd: number;
+  // Plankton-aligned conservative activation: the builder still computes the full
+  // ladder vector, but only this many live SELL rungs are placed concurrently per
+  // token. Default 1 (sequential reprice / recompute-after-fill). Parser ceiling is
+  // 2 for cheap/medium_low and 1 for medium_high/expensive — no 4-5 concurrent stack.
+  maxConcurrentRungs: number;
 }
 
 export interface ProfileLadderRepriceConfig {
@@ -952,6 +957,15 @@ export interface ProfileLadderStaleReviewConfig {
   staleAfterMs: number;
 }
 
+// Plankton post-fill hypothesis matrix: modal behavior after a profile_ladder
+// SELL fill is REST (~72-81%), not an immediate next-rung cascade. After a fill
+// the ladder rests, then reevaluates once this cooldown elapses (median observed
+// next-level delay ~15min). Reevaluation places at most the next planned rung,
+// still bounded by the per-band live-rung cap.
+export interface ProfileLadderPostFillConfig {
+  reevalCooldownMs: number;
+}
+
 export interface ExecutionProfileSellLadderConfig {
   enabled: boolean;
   phase: number;
@@ -961,6 +975,7 @@ export interface ExecutionProfileSellLadderConfig {
   modeAdjustments: Record<ProfileLadderMode, number>;
   reprice: ProfileLadderRepriceConfig;
   staleReview: ProfileLadderStaleReviewConfig;
+  postFill: ProfileLadderPostFillConfig;
   adoptExisting: ExecutionProfileFeatureToggle;
 }
 

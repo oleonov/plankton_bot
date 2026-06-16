@@ -205,6 +205,7 @@ export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderCo
       costCapUsd: 35,
       allowFourthRung: true,
       fourthRungMinCostUsd: 15,
+      maxConcurrentRungs: 1,
     },
     medium_low: {
       enabled: false,
@@ -215,6 +216,7 @@ export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderCo
       costCapUsd: 55,
       allowFourthRung: true,
       fourthRungMinCostUsd: 15,
+      maxConcurrentRungs: 1,
     },
     medium_high: {
       enabled: false,
@@ -225,6 +227,7 @@ export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderCo
       costCapUsd: 55,
       allowFourthRung: false,
       fourthRungMinCostUsd: 15,
+      maxConcurrentRungs: 1,
     },
     expensive: {
       enabled: false,
@@ -235,6 +238,7 @@ export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderCo
       costCapUsd: 33,
       allowFourthRung: false,
       fourthRungMinCostUsd: 15,
+      maxConcurrentRungs: 1,
     },
   },
   modeAdjustments: {
@@ -250,6 +254,9 @@ export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderCo
   staleReview: {
     enabled: true,
     staleAfterMs: 24 * 60 * 60_000,
+  },
+  postFill: {
+    reevalCooldownMs: 15 * 60_000,
   },
   adoptExisting: { enabled: false },
 };
@@ -2148,6 +2155,7 @@ function parseExecutionProfileSellLadder(
     ),
     reprice: parseProfileLadderReprice(obj.reprice, fallback.reprice, issues),
     staleReview: parseProfileLadderStaleReview(obj.staleReview, fallback.staleReview, issues),
+    postFill: parseProfileLadderPostFill(obj.postFill, fallback.postFill, issues),
     adoptExisting: parseExecutionProfileToggle(
       obj.adoptExisting,
       fallback.adoptExisting,
@@ -2180,6 +2188,17 @@ function parseExecutionProfileSellLadderBands(
     expensive: parseProfileLadderBand(obj.expensive, fallback.expensive, issues, "expensive"),
   };
 }
+
+// Hard per-band live-rung ceilings (Plankton falsification pass): cheap/medium_low
+// show more laddering over time and may run up to 2 concurrent live rungs after
+// telemetry; medium_high/expensive stay strictly sequential. Defaults are 1
+// everywhere — these are the *maximum* an operator may configure, not the default.
+const BAND_MAX_CONCURRENT_RUNG_CEILING: Record<ProfileLadderBand, number> = {
+  cheap: 2,
+  medium_low: 2,
+  medium_high: 1,
+  expensive: 1,
+};
 
 function parseProfileLadderBand(
   raw: unknown,
@@ -2238,6 +2257,14 @@ function parseProfileLadderBand(
       issues,
       `${name}.fourthRungMinCostUsd`,
     ).value,
+    maxConcurrentRungs: clampedInt(
+      obj.maxConcurrentRungs,
+      fallback.maxConcurrentRungs,
+      1,
+      BAND_MAX_CONCURRENT_RUNG_CEILING[band],
+      issues,
+      `${name}.maxConcurrentRungs`,
+    ),
   };
 
   return issues.length === previousIssueCount ? parsed : fallback;
@@ -2313,6 +2340,27 @@ function parseProfileLadderReprice(
     return fallback;
   }
   return parsed;
+}
+
+function parseProfileLadderPostFill(
+  raw: unknown,
+  fallback: ExecutionProfileSellLadderConfig["postFill"],
+  issues: string[],
+): ExecutionProfileSellLadderConfig["postFill"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.sellLadder.postFill must be an object");
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  return {
+    reevalCooldownMs: nonNegativeNumberOr(
+      obj.reevalCooldownMs,
+      fallback.reevalCooldownMs,
+      issues,
+      "executionProfile.sellLadder.postFill.reevalCooldownMs",
+    ).value,
+  };
 }
 
 function parseProfileLadderStaleReview(
