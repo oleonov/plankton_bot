@@ -1141,9 +1141,7 @@ async function main(): Promise<void> {
     }),
     redeemInFlightGuard: (conditionId) =>
       redeemSweepModule?.isConditionInRedeemFlight(conditionId) ?? false,
-    isProfileOwned: (tokenId) =>
-      currentExecutionPolicy().executionProfile.sellLadder.enabled &&
-      profileLadderRepo.isProfileLadderOwned(tokenId),
+    isProfileOwned: (tokenId) => executionProfileManager.isProfileOwned(tokenId),
     runtimeMetrics,
     riskEvents: repos.riskEvent,
     now: () => Date.now(),
