@@ -29,7 +29,9 @@ export interface DustAutoCloseCandidate {
 }
 
 export interface DustAutoCloseCandidateProvider {
-  listCandidates(limit: number): readonly DustAutoCloseCandidate[] | Promise<readonly DustAutoCloseCandidate[]>;
+  listCandidates(
+    limit: number,
+  ): readonly DustAutoCloseCandidate[] | Promise<readonly DustAutoCloseCandidate[]>;
 }
 
 export interface DustAutoCloseMetricWriter {
@@ -101,7 +103,9 @@ export class DustAutoCloseModule implements RuntimeModule {
     const policy = this.policy();
     if (!policy.enabled) return;
     const now = this.now();
-    const candidates = await this.deps.candidateProvider.listCandidates(policy.maxCandidatesPerCycle);
+    const candidates = await this.deps.candidateProvider.listCandidates(
+      policy.maxCandidatesPerCycle,
+    );
     for (const candidate of candidates) {
       await this.processCandidate(candidate, policy, now);
     }
@@ -216,7 +220,11 @@ export class DustAutoCloseModule implements RuntimeModule {
   }
 
   private writeCounter(name: string, value: number, labels?: Record<string, unknown>): void {
-    this.deps.runtimeMetrics?.writeCounter(name, value, labels == null ? undefined : stableLabels(labels));
+    this.deps.runtimeMetrics?.writeCounter(
+      name,
+      value,
+      labels == null ? undefined : stableLabels(labels),
+    );
   }
 
   private insertRiskEvent(eventType: string, payload: Readonly<Record<string, unknown>>): void {

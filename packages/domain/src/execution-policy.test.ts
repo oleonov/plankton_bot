@@ -1830,9 +1830,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("trackS4.scanIntervalMs"))).toBe(true);
     expect(issues.some((i) => i.includes("trackS4.maxCandidatesPerCycle"))).toBe(true);
     expect(issues.some((i) => i.includes("trackS4.retryBackoffMs"))).toBe(true);
-    expect(issues.some((i) => i.includes("trackS4.thresholds.liquidationValueMaxUsdc"))).toBe(
-      true,
-    );
+    expect(issues.some((i) => i.includes("trackS4.thresholds.liquidationValueMaxUsdc"))).toBe(true);
     expect(issues.some((i) => i.includes("trackS4.thresholds.costBasisMaxUsdc"))).toBe(true);
     expect(issues.some((i) => i.includes("trackS4.thresholds.lastSellMinAgeMs"))).toBe(true);
     expect(issues.some((i) => i.includes("trackS4.execution.priceOffsetTicks"))).toBe(true);

@@ -77,8 +77,7 @@ describe("DustAutoCloseModule dark behavior", () => {
     const repo = new SqliteDustAutoCloseRepository(db);
     const orders: PlaceOrderCommand[] = [];
     const counters: Array<{ name: string; labels?: string }> = [];
-    const riskEvents: Array<{ eventType: string; payload: Readonly<Record<string, unknown>> }> =
-      [];
+    const riskEvents: Array<{ eventType: string; payload: Readonly<Record<string, unknown>> }> = [];
     const listCandidates = vi.fn().mockResolvedValue([candidate(tokenA), candidate(tokenB)]);
 
     bus.subscribe("PlaceOrderRequested", async ({ command }) => {

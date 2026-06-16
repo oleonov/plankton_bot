@@ -46,12 +46,7 @@ export class SqliteDustAutoCloseRepository implements DustAutoCloseRepository {
     this.upsertState(tokenId, "attempted", reason, nowMs, nextRetryAtMs);
   }
 
-  markNonCloseable(
-    tokenId: TokenId,
-    reason: string,
-    nowMs: number,
-    nextRetryAtMs: number,
-  ): void {
+  markNonCloseable(tokenId: TokenId, reason: string, nowMs: number, nextRetryAtMs: number): void {
     this.upsertState(tokenId, "non_closeable", reason, nowMs, nextRetryAtMs);
   }
 

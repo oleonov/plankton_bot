@@ -9,9 +9,7 @@ import { computeDustCleanup } from "../dust-cleanup-decider.js";
 
 const DAY_MS = 24 * 60 * 60_000;
 
-function config(
-  overrides: Partial<TrackS4DustAutoCloseConfig> = {},
-): TrackS4DustAutoCloseConfig {
+function config(overrides: Partial<TrackS4DustAutoCloseConfig> = {}): TrackS4DustAutoCloseConfig {
   return {
     ...DEFAULT_EXECUTION_POLICY.trackS4,
     enabled: true,

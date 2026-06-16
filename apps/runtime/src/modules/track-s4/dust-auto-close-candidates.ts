@@ -1,14 +1,12 @@
-import type {
-  FillRepository,
-  MarketRepository,
-  Position,
-  PositionRepository,
-} from "@krabs/domain";
+import type { FillRepository, MarketRepository, Position, PositionRepository } from "@krabs/domain";
 import { PositionStatus } from "@krabs/domain";
 
 import { resolveOpenPositionStatus } from "../../position-status.js";
 import type { CandidateBookCache } from "../strategy/candidate-book-cache.js";
-import type { DustAutoCloseCandidate, DustAutoCloseCandidateProvider } from "./dust-auto-close-module.js";
+import type {
+  DustAutoCloseCandidate,
+  DustAutoCloseCandidateProvider,
+} from "./dust-auto-close-module.js";
 
 export interface RepositoryDustAutoCloseCandidateProviderDeps {
   positionRepo: PositionRepository;

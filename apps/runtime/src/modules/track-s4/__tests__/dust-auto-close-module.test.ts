@@ -12,10 +12,7 @@ import { InProcessEventBus } from "@krabs/event-bus";
 import { describe, expect, it, vi } from "vitest";
 
 import type { DustAutoCloseRepository, DustAutoCloseState } from "../dust-auto-close-repository.js";
-import {
-  DustAutoCloseModule,
-  type DustAutoCloseCandidate,
-} from "../dust-auto-close-module.js";
+import { DustAutoCloseModule, type DustAutoCloseCandidate } from "../dust-auto-close-module.js";
 
 const NOW = 1_800_000_000_000;
 const tokenId = createTokenId("s4-module-token");
@@ -47,7 +44,10 @@ class FakeDustAutoCloseRepository implements DustAutoCloseRepository {
 
   markNonCloseable(token: TokenId, reason: string, nowMs: number, nextRetryAtMs: number): void {
     this.nonCloseable.push({ tokenId: token, reason, nowMs, nextRetryAtMs });
-    this.states.set(String(token), state({ tokenId: token, status: "non_closeable", nextRetryAtMs }));
+    this.states.set(
+      String(token),
+      state({ tokenId: token, status: "non_closeable", nextRetryAtMs }),
+    );
   }
 
   markSuccessful(token: TokenId): void {
@@ -90,9 +90,7 @@ function candidate(overrides: Partial<DustAutoCloseCandidate> = {}): DustAutoClo
   };
 }
 
-function policy(
-  overrides: Partial<TrackS4DustAutoCloseConfig> = {},
-): TrackS4DustAutoCloseConfig {
+function policy(overrides: Partial<TrackS4DustAutoCloseConfig> = {}): TrackS4DustAutoCloseConfig {
   return {
     ...DEFAULT_EXECUTION_POLICY.trackS4,
     enabled: true,
@@ -100,13 +98,15 @@ function policy(
   };
 }
 
-function setup(options: {
-  policy?: TrackS4DustAutoCloseConfig;
-  candidates?: readonly DustAutoCloseCandidate[];
-  redeemInFlight?: boolean;
-  profileOwned?: boolean;
-  repo?: FakeDustAutoCloseRepository;
-} = {}) {
+function setup(
+  options: {
+    policy?: TrackS4DustAutoCloseConfig;
+    candidates?: readonly DustAutoCloseCandidate[];
+    redeemInFlight?: boolean;
+    profileOwned?: boolean;
+    repo?: FakeDustAutoCloseRepository;
+  } = {},
+) {
   const bus = new InProcessEventBus();
   const repo = options.repo ?? new FakeDustAutoCloseRepository();
   const orders: PlaceOrderCommand[] = [];
