@@ -1437,6 +1437,73 @@ export interface DustAbandonmentPolicyConfig {
   priceRecoveryRatio: number;
 }
 
+export interface TrackS4DustAutoCloseThresholds {
+  liquidationValueMaxUsdc: number;
+  costBasisMaxUsdc: number;
+  lastSellMinAgeMs: number;
+}
+
+export interface TrackS4DustAutoCloseExecutionConfig {
+  priceOffsetTicks: number;
+  cancelStaleSellOrders: boolean;
+}
+
+export interface TrackS4DustAutoCloseConfig {
+  enabled: boolean;
+  scanIntervalMs: number;
+  maxCandidatesPerCycle: number;
+  retryBackoffMs: number;
+  thresholds: TrackS4DustAutoCloseThresholds;
+  execution: TrackS4DustAutoCloseExecutionConfig;
+}
+
+export type DustAutoClosePositionStatus = "open" | "dust";
+
+export type DustAutoCloseSkipReason =
+  | "disabled"
+  | "liquidation_above_threshold"
+  | "cost_above_threshold"
+  | "no_prior_sell"
+  | "recent_sell"
+  | "retry_backoff"
+  | "profile_owned"
+  | "redeem_in_flight";
+
+export type DustAutoCloseNonCloseableReason =
+  | "status_dust"
+  | "unknown_min_order_size"
+  | "below_min_order_size"
+  | "market_not_tradable"
+  | "missing_best_bid"
+  | "invalid_price";
+
+export type DustAutoCloseAction = "skip" | "close" | "mark_non_closeable";
+
+export interface DustCleanupDecisionInput {
+  status: DustAutoClosePositionStatus;
+  liquidationValueUsdc: number;
+  costBasisUsdc: number;
+  sellCountTotal: number;
+  lastSellAgeMs: number | null;
+  size: number;
+  minOrderSize: number | null;
+  marketTradable: boolean;
+  bestBid: number | null;
+  tickSize: number;
+  minValidPrice: number;
+  retryEligible: boolean;
+  profileOwned: boolean;
+  redeemInFlight: boolean;
+}
+
+export interface DustCleanupDecisionOutput {
+  action: DustAutoCloseAction;
+  reason: DustAutoCloseSkipReason | DustAutoCloseNonCloseableReason | "qualified";
+  limitPrice: number | null;
+  sellSize: number | null;
+  nextRetryDelayMs: number | null;
+}
+
 /**
  * CHANGE C — per-token rolling 24h reprice chain cap (R65 p90 = 13).
  * See packages/domain/src/reprice-chain.ts for evaluation semantics.
