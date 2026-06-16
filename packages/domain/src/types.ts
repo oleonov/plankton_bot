@@ -1351,6 +1351,69 @@ export interface ExecutionProfilePolicy {
   monitoring: ExecutionProfileMonitoringConfig;
 }
 
+export type FeeScheduleSide = "buy" | "sell";
+export type FeeScheduleLiquidityRole = "maker" | "taker" | "unknown";
+export type FeeScheduleSource = "api" | "schedule" | "fallback" | "mixed";
+export type FeeScheduleConfidence = "high" | "medium" | "low";
+
+export type FeeScheduleScope =
+  | { scope: "all" }
+  | { scope: "category"; value: string }
+  | { scope: "condition"; value: string }
+  | { scope: "token"; value: string };
+
+export interface FeeSchedulePeriodConfig {
+  periodId: string;
+  startsAtUtc: string;
+  endsAtUtc: string | null;
+  makerRebateFraction: number;
+  baseRate?: number | null;
+  exponent?: number | null;
+  takerOnly?: boolean | null;
+  appliesTo: FeeScheduleScope;
+  sourceNote: string;
+}
+
+export interface FeeScheduleConfig {
+  enabled: boolean;
+  apiPrimaryEnabled: boolean;
+  scheduleFallbackEnabled: boolean;
+  apiTtlMs: number;
+  apiMissTtlMs: number;
+  degradedEventCooldownMs: number;
+  periods: readonly FeeSchedulePeriodConfig[];
+}
+
+export interface FeeScheduleRequest {
+  asOfMs: number;
+  conditionId?: string | null;
+  tokenId?: string | null;
+  category?: string | null;
+  regime?: string | null;
+  side?: FeeScheduleSide;
+  intendedLiquidityRole?: FeeScheduleLiquidityRole;
+  walletAddress?: string | null;
+  config?: FeeScheduleConfig;
+}
+
+export interface FeeScheduleQuote {
+  baseRate: number;
+  exponent: number;
+  takerOnly: boolean;
+  makerRebateFraction: number;
+  source: FeeScheduleSource;
+  periodId: string;
+  effectiveAtMs: number;
+  validUntilMs: number | null;
+  ttlMs: number | null;
+  confidence: FeeScheduleConfidence;
+  warnings: readonly string[];
+}
+
+export interface FeeScheduleProvider {
+  resolve(request: FeeScheduleRequest): Promise<FeeScheduleQuote>;
+}
+
 export type TrackRFeeRateSource = "live" | "fill" | "fallback_category" | "fallback_universal";
 
 export interface TrackRFeeQuote {
@@ -1365,6 +1428,7 @@ export interface TrackRTakerFeeProvider {
     conditionId: ConditionId;
     tokenId: TokenId;
     category?: string | null;
+    feeSchedule?: FeeScheduleConfig;
     policy: TrackRHonestPricingPolicy;
     nowMs: number;
   }) => Promise<TrackRFeeQuote | null>;
@@ -1613,6 +1677,7 @@ export interface ExecutionPolicy {
   trackS3: TrackS3MarginAwareSpreadPolicy;
   trackS1: TrackS1WalkingLadderPolicy;
   trackS4: TrackS4DustAutoCloseConfig;
+  feeSchedule: FeeScheduleConfig;
   executionProfile: ExecutionProfilePolicy;
   orderLifetime: OrderLifetimePolicy;
   /**

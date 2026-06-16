@@ -1859,6 +1859,92 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.trackR).toEqual(DEFAULT_EXECUTION_POLICY.trackR);
   });
 
+  it("defaults FeeScheduleProvider disabled with conservative empty schedule", () => {
+    expect((DEFAULT_EXECUTION_POLICY as any).feeSchedule).toEqual({
+      enabled: false,
+      apiPrimaryEnabled: true,
+      scheduleFallbackEnabled: true,
+      apiTtlMs: 300_000,
+      apiMissTtlMs: 30_000,
+      degradedEventCooldownMs: 300_000,
+      periods: [],
+    });
+
+    const { policy, issues } = parseExecutionPolicyJson(JSON.stringify({ entryPriceCeiling: 0.4 }));
+    expect(issues).toHaveLength(0);
+    expect((policy as any).feeSchedule).toEqual((DEFAULT_EXECUTION_POLICY as any).feeSchedule);
+  });
+
+  it("parses FeeScheduleProvider periods and preserves them in round-trip serialization", () => {
+    const raw = {
+      feeSchedule: {
+        enabled: true,
+        apiPrimaryEnabled: true,
+        scheduleFallbackEnabled: true,
+        apiTtlMs: 120_000,
+        apiMissTtlMs: 15_000,
+        degradedEventCooldownMs: 600_000,
+        periods: [
+          {
+            periodId: "promo",
+            startsAtUtc: "2026-06-01T00:00:00Z",
+            endsAtUtc: "2026-07-01T00:00:00Z",
+            makerRebateFraction: 0.002,
+            appliesTo: { scope: "all" },
+            sourceNote: "operator test fixture",
+          },
+          {
+            periodId: "post_promo",
+            startsAtUtc: "2026-07-01T00:00:00Z",
+            endsAtUtc: null,
+            makerRebateFraction: 0,
+            appliesTo: { scope: "all" },
+            sourceNote: "operator test fixture",
+          },
+        ],
+      },
+    };
+    const { policy, issues } = parseExecutionPolicyJson(JSON.stringify(raw));
+
+    expect(issues).toHaveLength(0);
+    expect((policy as any).feeSchedule).toEqual(raw.feeSchedule);
+    expect(
+      (parseExecutionPolicyJson(serializeExecutionPolicy(policy)).policy as any).feeSchedule,
+    ).toEqual(raw.feeSchedule);
+  });
+
+  it("rejects overlapping FeeScheduleProvider periods and unsafe rebate fractions", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        feeSchedule: {
+          enabled: true,
+          periods: [
+            {
+              periodId: "a",
+              startsAtUtc: "2026-06-01T00:00:00Z",
+              endsAtUtc: "2026-07-01T00:00:00Z",
+              makerRebateFraction: 0.002,
+              appliesTo: { scope: "all" },
+              sourceNote: "test",
+            },
+            {
+              periodId: "b",
+              startsAtUtc: "2026-06-15T00:00:00Z",
+              endsAtUtc: "2026-07-15T00:00:00Z",
+              makerRebateFraction: 2,
+              appliesTo: { scope: "all" },
+              sourceNote: "test",
+            },
+          ],
+        },
+      }),
+    );
+
+    expect((policy as any).feeSchedule).toEqual((DEFAULT_EXECUTION_POLICY as any).feeSchedule);
+    expect(issues.some((i) => i.includes("feeSchedule.periods overlap"))).toBe(true);
+    expect(issues.some((i) => i.includes("feeSchedule.periods[1].makerRebateFraction"))).toBe(true);
+  });
+
   it("parses custom Track R honest pricing values", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({

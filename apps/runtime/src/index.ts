@@ -176,6 +176,7 @@ import {
 } from "@krabs/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { createTrackRFeeProvider } from "./track-r-fee-provider.js";
+import { createHybridFeeScheduleProvider } from "./fee-schedule-provider.js";
 import { findActivePositions } from "./active-positions.js";
 import { calculateTotalExposure } from "./exposure-calculator.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
@@ -1000,9 +1001,14 @@ async function main(): Promise<void> {
         log: log.child({ module: "candidate-book-cache" }),
       })
     : undefined;
+  const feeScheduleProvider = createHybridFeeScheduleProvider({
+    feeGateway: exchangeGateway,
+    runtimeMetrics,
+  });
   const trackRFeeProvider = createTrackRFeeProvider({
     feeGateway: exchangeGateway,
     fillRepo: repos.fill,
+    feeScheduleProvider,
     runtimeMetrics,
   });
   // 7h1. Leg state tracker — maintains leg_states from fills/positions/settlements.

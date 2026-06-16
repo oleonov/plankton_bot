@@ -16,6 +16,7 @@ export * from "./algo-engine.js";
 export * from "./market-selection.js";
 export * from "./strike-classifier.js";
 export * from "./polymarket-fees.js";
+export * from "./fee-schedule.js";
 export * from "./orderbook.js";
 export * from "./track-s3-cap.js";
 export * from "./track-p-cap-skip.js";
@@ -44,6 +45,7 @@ export {
   DEFAULT_LOSS_EXIT_POLICY,
   DEFAULT_PRE_RESOLUTION_EXIT_POLICY,
   DEFAULT_DEPOSIT_ACTIVATION_POLICY,
+  DEFAULT_FEE_SCHEDULE_CONFIG,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
 } from "./execution-policy.js";

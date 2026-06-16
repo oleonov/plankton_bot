@@ -28,6 +28,9 @@ import type {
   ExecutionProfileSignalFeedConfig,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
+  FeeScheduleConfig,
+  FeeSchedulePeriodConfig,
+  FeeScheduleScope,
   ExitTtlByLiquidityPolicyConfig,
   DropTriggerPolicy,
   DustAbandonmentPolicyConfig,
@@ -66,6 +69,8 @@ import { DEFAULT_SELL_TIMEOUT_MS } from "./sell-sizing.js";
 import type { D9LossExitPolicy } from "./d9-loss-exit.js";
 import { DEFAULT_TRACK_S1_WALKING_LADDER_POLICY } from "./ladder-construction.js";
 import { DEFAULT_TRACK_S3_BASE_CAP, DEFAULT_TRACK_S3_TIERS } from "./track-s3-cap.js";
+import { DEFAULT_FEE_SCHEDULE_CONFIG, validateFeeSchedulePeriods } from "./fee-schedule.js";
+export { DEFAULT_FEE_SCHEDULE_CONFIG } from "./fee-schedule.js";
 
 export const DEFAULT_DEAD_SIDE_GUARD: DeadSideGuardPolicy = {
   mode: "observe",
@@ -561,6 +566,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   trackS3: DEFAULT_TRACK_S3_MARGIN_AWARE_SPREAD_POLICY,
   trackS1: DEFAULT_TRACK_S1_WALKING_LADDER_POLICY,
   trackS4: DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY,
+  feeSchedule: DEFAULT_FEE_SCHEDULE_CONFIG,
   executionProfile: DEFAULT_EXECUTION_PROFILE_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   // Defensive infrastructure timing parameter. Exchange balance settlement
@@ -690,6 +696,11 @@ const BOUND_TRACK_S4_LAST_SELL_MIN_MS = 60_000;
 const BOUND_TRACK_S4_LAST_SELL_MAX_MS = 30 * 24 * 60 * 60_000;
 const BOUND_TRACK_S4_PRICE_OFFSET_TICKS_MIN = 0;
 const BOUND_TRACK_S4_PRICE_OFFSET_TICKS_MAX = 10;
+const BOUND_FEE_SCHEDULE_TTL_MIN_MS = 1_000;
+const BOUND_FEE_SCHEDULE_TTL_MAX_MS = 24 * 60 * 60_000;
+const BOUND_FEE_SCHEDULE_REBATE_MIN = 0;
+const BOUND_FEE_SCHEDULE_REBATE_MAX = 1;
+const BOUND_FEE_SCHEDULE_PERIODS_MAX = 100;
 const BOUND_EXECUTION_PROFILE_TOKENS_MIN = 1;
 const BOUND_EXECUTION_PROFILE_TOKENS_MAX = 10_000;
 const BOUND_EXECUTION_PROFILE_HANDOFF_MIN_MS = 60_000;
@@ -837,6 +848,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const trackS3 = parseTrackS3(obj.trackS3, issues);
   const trackS1 = parseTrackS1(obj.trackS1, issues);
   const trackS4 = parseTrackS4(obj.trackS4, issues);
+  const feeSchedule = parseFeeSchedule(obj.feeSchedule, issues);
   const executionProfile = parseExecutionProfile(obj.executionProfile, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
@@ -893,6 +905,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       trackS3,
       trackS1,
       trackS4,
+      feeSchedule,
       executionProfile,
       orderLifetime,
       postBuyFillSellCooldownMs,
@@ -1565,6 +1578,181 @@ function parseTrackR(raw: unknown, issues: string[]): TrackRHonestPricingPolicy 
       "trackR.partialExitMaxPerHour",
     ),
   };
+}
+
+function parseFeeSchedule(raw: unknown, issues: string[]): FeeScheduleConfig {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("feeSchedule must be an object");
+    return DEFAULT_FEE_SCHEDULE_CONFIG;
+  }
+  const obj = raw as Record<string, unknown>;
+  const localIssues: string[] = [];
+  const periods = parseFeeSchedulePeriods(obj.periods, localIssues);
+  const parsed: FeeScheduleConfig = {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_FEE_SCHEDULE_CONFIG.enabled,
+      localIssues,
+      "feeSchedule.enabled",
+    ),
+    apiPrimaryEnabled: booleanOr(
+      obj.apiPrimaryEnabled,
+      DEFAULT_FEE_SCHEDULE_CONFIG.apiPrimaryEnabled,
+      localIssues,
+      "feeSchedule.apiPrimaryEnabled",
+    ),
+    scheduleFallbackEnabled: booleanOr(
+      obj.scheduleFallbackEnabled,
+      DEFAULT_FEE_SCHEDULE_CONFIG.scheduleFallbackEnabled,
+      localIssues,
+      "feeSchedule.scheduleFallbackEnabled",
+    ),
+    apiTtlMs: clampedInt(
+      obj.apiTtlMs,
+      DEFAULT_FEE_SCHEDULE_CONFIG.apiTtlMs,
+      BOUND_FEE_SCHEDULE_TTL_MIN_MS,
+      BOUND_FEE_SCHEDULE_TTL_MAX_MS,
+      localIssues,
+      "feeSchedule.apiTtlMs",
+    ),
+    apiMissTtlMs: clampedInt(
+      obj.apiMissTtlMs,
+      DEFAULT_FEE_SCHEDULE_CONFIG.apiMissTtlMs,
+      BOUND_FEE_SCHEDULE_TTL_MIN_MS,
+      BOUND_FEE_SCHEDULE_TTL_MAX_MS,
+      localIssues,
+      "feeSchedule.apiMissTtlMs",
+    ),
+    degradedEventCooldownMs: clampedInt(
+      obj.degradedEventCooldownMs,
+      DEFAULT_FEE_SCHEDULE_CONFIG.degradedEventCooldownMs,
+      BOUND_FEE_SCHEDULE_TTL_MIN_MS,
+      BOUND_FEE_SCHEDULE_TTL_MAX_MS,
+      localIssues,
+      "feeSchedule.degradedEventCooldownMs",
+    ),
+    periods,
+  };
+
+  localIssues.push(...validateFeeSchedulePeriods(parsed.periods));
+  if (localIssues.length > 0) {
+    issues.push(...localIssues);
+    return DEFAULT_FEE_SCHEDULE_CONFIG;
+  }
+  return parsed;
+}
+
+function parseFeeSchedulePeriods(raw: unknown, issues: string[]): FeeSchedulePeriodConfig[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    issues.push("feeSchedule.periods must be an array");
+    return [];
+  }
+  if (raw.length > BOUND_FEE_SCHEDULE_PERIODS_MAX) {
+    issues.push(`feeSchedule.periods length out of range [0, ${BOUND_FEE_SCHEDULE_PERIODS_MAX}]`);
+    return [];
+  }
+  return raw
+    .map((period, index) => parseFeeSchedulePeriod(period, index, issues))
+    .filter((period): period is FeeSchedulePeriodConfig => period !== null);
+}
+
+function parseFeeSchedulePeriod(
+  raw: unknown,
+  index: number,
+  issues: string[],
+): FeeSchedulePeriodConfig | null {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    issues.push(`feeSchedule.periods[${index}] must be an object`);
+    return null;
+  }
+  const obj = raw as Record<string, unknown>;
+  const periodId = requiredNonEmptyString(
+    obj.periodId,
+    issues,
+    `feeSchedule.periods[${index}].periodId`,
+  );
+  const startsAtUtc = requiredNonEmptyString(
+    obj.startsAtUtc,
+    issues,
+    `feeSchedule.periods[${index}].startsAtUtc`,
+  );
+  const endsAtUtc = nullableStringOr(
+    obj.endsAtUtc,
+    issues,
+    `feeSchedule.periods[${index}].endsAtUtc`,
+  );
+  const sourceNote = requiredNonEmptyString(
+    obj.sourceNote,
+    issues,
+    `feeSchedule.periods[${index}].sourceNote`,
+  );
+  const appliesTo = parseFeeScheduleScope(obj.appliesTo, index, issues);
+  const makerRebateFraction = clampedNumber(
+    obj.makerRebateFraction,
+    Number.NaN,
+    BOUND_FEE_SCHEDULE_REBATE_MIN,
+    BOUND_FEE_SCHEDULE_REBATE_MAX,
+    issues,
+    `feeSchedule.periods[${index}].makerRebateFraction`,
+  );
+  const baseRate = nullableClampedNumber(
+    obj.baseRate,
+    null,
+    0,
+    BOUND_TRACK_R_UNIVERSAL_FALLBACK_MAX,
+    issues,
+    `feeSchedule.periods[${index}].baseRate`,
+  );
+  const exponent = nullableClampedNumber(
+    obj.exponent,
+    null,
+    0,
+    10,
+    issues,
+    `feeSchedule.periods[${index}].exponent`,
+  );
+  const takerOnly =
+    obj.takerOnly === undefined
+      ? null
+      : booleanOr(obj.takerOnly, false, issues, `feeSchedule.periods[${index}].takerOnly`);
+  if (periodId == null || startsAtUtc == null || sourceNote == null || appliesTo == null)
+    return null;
+  return {
+    periodId,
+    startsAtUtc,
+    endsAtUtc,
+    makerRebateFraction,
+    ...(baseRate !== null ? { baseRate } : {}),
+    ...(exponent !== null ? { exponent } : {}),
+    ...(takerOnly !== null ? { takerOnly } : {}),
+    appliesTo,
+    sourceNote,
+  };
+}
+
+function parseFeeScheduleScope(
+  raw: unknown,
+  index: number,
+  issues: string[],
+): FeeScheduleScope | null {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    issues.push(`feeSchedule.periods[${index}].appliesTo must be an object`);
+    return null;
+  }
+  const obj = raw as Record<string, unknown>;
+  const scope = obj.scope;
+  if (scope === "all") return { scope: "all" };
+  if (scope !== "category" && scope !== "condition" && scope !== "token") {
+    issues.push(`feeSchedule.periods[${index}].appliesTo.scope invalid`);
+    return null;
+  }
+  const value = requiredNonEmptyString(
+    obj.value,
+    issues,
+    `feeSchedule.periods[${index}].appliesTo.value`,
+  );
+  return value == null ? null : { scope, value };
 }
 
 function parseTrackS3(raw: unknown, issues: string[]): TrackS3MarginAwareSpreadPolicy {
@@ -3565,6 +3753,23 @@ function nonEmptyStringOr(raw: unknown, fallback: string, issues: string[], name
   return raw;
 }
 
+function requiredNonEmptyString(raw: unknown, issues: string[], name: string): string | null {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    issues.push(`${name} must be a non-empty string`);
+    return null;
+  }
+  return raw;
+}
+
+function nullableStringOr(raw: unknown, issues: string[], name: string): string | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    issues.push(`${name} must be null or a non-empty string`);
+    return null;
+  }
+  return raw;
+}
+
 function positiveNumberOr(
   raw: unknown,
   fallback: number,
@@ -3680,6 +3885,19 @@ function clampedNumber(
     return fallback;
   }
   return raw;
+}
+
+function nullableClampedNumber(
+  raw: unknown,
+  fallback: number | null,
+  min: number,
+  max: number,
+  issues: string[],
+  name: string,
+): number | null {
+  if (raw === undefined) return fallback;
+  if (raw === null) return null;
+  return clampedNumber(raw, fallback ?? min, min, max, issues, name);
 }
 
 function clampedInt(

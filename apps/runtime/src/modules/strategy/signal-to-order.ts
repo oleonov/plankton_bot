@@ -1309,6 +1309,7 @@ export class SignalToOrderBridge {
         conditionId: signal.conditionId,
         tokenId: signal.tokenId,
         category: market.regime,
+        feeSchedule: policy.feeSchedule,
         policy: cfg,
         nowMs: this.now(),
       });
