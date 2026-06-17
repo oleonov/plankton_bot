@@ -872,7 +872,9 @@ describe("ExecutionProfileManager", () => {
     expect(manager.isProfileOwned(tokenId)).toBe(true);
     expect(
       metrics.counters.filter((counter) => counter.name === "track_execution_profile_assigned"),
-    ).toEqual([{ name: "track_execution_profile_assigned", value: 1, labels: '{"profile":"medium"}' }]);
+    ).toEqual([
+      { name: "track_execution_profile_assigned", value: 1, labels: '{"profile":"medium"}' },
+    ]);
     expect(
       riskEvents.inserts.filter(
         (event) => event.eventType === EXECUTION_PROFILE_RISK_EVENTS.assigned,

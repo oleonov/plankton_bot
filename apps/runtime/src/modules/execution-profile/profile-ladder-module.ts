@@ -73,6 +73,7 @@ const OPEN_ORDER_STATUSES = new Set<OrderStatus>([
 // only path that places ladders for them. Defer one pass until the market cache
 // warms from the scanner; positions still lacking BBO are reported, not adopted.
 const ADOPTION_WARMUP_MS = 60_000;
+export const PLANNED_RUNG_RETRY_MS = 60_000;
 
 // Tokens skipped only because their market/BBO had not warmed yet are retried on a
 // bounded schedule; every other skip (not owned, band disabled, existing ladder or
@@ -87,16 +88,32 @@ interface LadderAdoptionSummary {
   adopted_count: number;
   skipped_existing_ladder: number;
   skipped_missing_market: number;
+  skipped_unknown_min_order_size: number;
   skipped_not_profile_owned: number;
   skipped_band_disabled: number;
   skipped_existing_sell_order: number;
   skipped_dormant: number;
   // planned_rung_count is the full target ladder size across adopted positions;
-  // estimated_order_count is how many of those rungs actually went live under
-  // the conservative cap. The gap is the deferred (planned, not yet live) tail.
+  // estimated_order_count is retained for existing operator dashboards and now
+  // intentionally mirrors placed_live_rung_count under the conservative cap.
   planned_rung_count: number;
   estimated_order_count: number;
+  placed_live_rung_count: number;
+  planned_only_ladder_count: number;
   retryable_skip_count: number;
+}
+
+interface LiveRungAdvanceResult {
+  placed: number;
+  skippedUnknownMinOrderSize: number;
+  attempted: boolean;
+}
+
+interface ProfileLadderOrderMarketData {
+  bookSource: NonNullable<NormalizedMarket["bookSource"]>;
+  minOrderSize: number;
+  effectiveMinOrderSize: number;
+  tickSize: number;
 }
 
 export class ProfileLadderModule implements RuntimeModule {
@@ -108,6 +125,7 @@ export class ProfileLadderModule implements RuntimeModule {
     string,
     { tokenId: TokenId; ladderId: string; rungIndex: number }
   >();
+  private readonly plannedRungRetryCooldownUntilByToken = new Map<string, number>();
   // Plankton post-fill REST: one bounded reevaluation timer per token. A SELL
   // fill never places the next rung inline; it schedules a delayed reevaluation.
   private readonly postFillTimerByToken = new Map<string, ReturnType<typeof setTimeout>>();
@@ -161,6 +179,7 @@ export class ProfileLadderModule implements RuntimeModule {
     }
     for (const timer of this.postFillTimerByToken.values()) clearTimeout(timer);
     this.postFillTimerByToken.clear();
+    this.plannedRungRetryCooldownUntilByToken.clear();
     this.adoptionDone = false;
     this.adoptionAttemptCount = 0;
     this.adoptExistingEnabled = false;
@@ -219,12 +238,15 @@ export class ProfileLadderModule implements RuntimeModule {
       adopted_count: 0,
       skipped_existing_ladder: 0,
       skipped_missing_market: 0,
+      skipped_unknown_min_order_size: 0,
       skipped_not_profile_owned: 0,
       skipped_band_disabled: 0,
       skipped_existing_sell_order: 0,
       skipped_dormant: 0,
       planned_rung_count: 0,
       estimated_order_count: 0,
+      placed_live_rung_count: 0,
+      planned_only_ladder_count: 0,
       retryable_skip_count: 0,
     };
 
@@ -284,6 +306,11 @@ export class ProfileLadderModule implements RuntimeModule {
     summary.adopted_count += 1;
     summary.planned_rung_count += state.activeRungs.length;
     summary.estimated_order_count += placedLiveRungs;
+    summary.placed_live_rung_count += placedLiveRungs;
+    summary.skipped_unknown_min_order_size += result.skippedUnknownMinOrderSize;
+    if (placedLiveRungs === 0 && state.activeRungs.some((rung) => rung.lifecycle === "planned")) {
+      summary.planned_only_ladder_count += 1;
+    }
     this.writeCounter("profile_ladder_adopted", 1, { band: state.band });
     this.insertRiskEvent("ladder_adopted", {
       tokenId: String(state.tokenId),
@@ -409,6 +436,9 @@ export class ProfileLadderModule implements RuntimeModule {
         continue;
       }
 
+      const plannedRetry = await this.retryPlannedLiveRungsIfReady(state, market);
+      if (plannedRetry) continue;
+
       const reason = resolveBboRebuildReason(state, market, this.policy());
       if (reason == null) continue;
       await this.rebuildLadder(positionFromLadderState(state), market, reason);
@@ -449,7 +479,11 @@ export class ProfileLadderModule implements RuntimeModule {
     market: NormalizedMarket,
     eventType: "ladder_placed" | "ladder_rebuilt" | "ladder_adopted",
     modeOverride?: ProfileLadderMode,
-  ): Promise<{ state: LadderState; placedLiveRungs: number } | null> {
+  ): Promise<{
+    state: LadderState;
+    placedLiveRungs: number;
+    skippedUnknownMinOrderSize: number;
+  } | null> {
     const policy = this.policy();
     if (!policy.enabled) return null;
     const previous = this.deps.repository.getLadder(position.tokenId);
@@ -497,9 +531,16 @@ export class ProfileLadderModule implements RuntimeModule {
     this.deps.repository.upsertLadder(state);
 
     this.writeCounter("profile_ladder_planned_rungs", plan.rungs.length, { band: plan.band });
-    const placedLiveRungs = await this.advanceLiveRungs(state, market, now);
-    this.writeCounter("profile_ladder_placed_live_rungs", placedLiveRungs, { band: plan.band });
-    return { state, placedLiveRungs };
+    const liveRungs = await this.advanceLiveRungs(state, market, now);
+    this.writeCounter("profile_ladder_placed_live_rungs", liveRungs.placed, { band: plan.band });
+    if (liveRungs.placed === 0 && state.activeRungs.some((rung) => rung.lifecycle === "planned")) {
+      this.writeCounter("profile_ladder_planned_only_ladder_count", 1, { band: plan.band });
+    }
+    return {
+      state,
+      placedLiveRungs: liveRungs.placed,
+      skippedUnknownMinOrderSize: liveRungs.skippedUnknownMinOrderSize,
+    };
   }
 
   // Plankton conservative cap: the builder produces the full price ladder, but
@@ -511,7 +552,7 @@ export class ProfileLadderModule implements RuntimeModule {
     state: LadderState,
     market: NormalizedMarket,
     now: number,
-  ): Promise<number> {
+  ): Promise<LiveRungAdvanceResult> {
     const cap = this.resolveLiveRungCap(state.band);
     const pendingRungsForToken = this.pendingRungsForToken(state.tokenId);
     const pendingRungIndexes = this.pendingRungIndexesFor(state);
@@ -521,6 +562,8 @@ export class ProfileLadderModule implements RuntimeModule {
       ).length + pendingRungsForToken.length;
     const position = positionFromLadderState(state);
     let placed = 0;
+    let skippedUnknownMinOrderSize = 0;
+    let attempted = false;
     for (const rung of state.activeRungs) {
       if (occupied >= cap) break;
       const submittable =
@@ -528,6 +571,7 @@ export class ProfileLadderModule implements RuntimeModule {
         rung.orderId == null &&
         !pendingRungIndexes.has(rung.rungIndex);
       if (!submittable) continue;
+      attempted = true;
       // Plankton no-taker-sell: a post-only SELL at/below the best bid would
       // cross and execute as a taker. Skip it (it never goes live) and let the
       // loop rest the slot on the next non-crossing planned rung, if any.
@@ -535,11 +579,55 @@ export class ProfileLadderModule implements RuntimeModule {
         this.writeCounter("profile_ladder_skipped_crossing_post_only", 1, { band: state.band });
         continue;
       }
-      await this.publishPlaceOrder(position, market, state.ladderId, rung, now);
+      const marketData = this.resolveOrderMarketData(market);
+      if (marketData == null) {
+        this.writeCounter("profile_ladder_skipped_unknown_min_order_size", 1, {
+          band: state.band,
+        });
+        this.armPlannedRungRetryCooldown(state.tokenId, now);
+        skippedUnknownMinOrderSize += 1;
+        break;
+      }
+      await this.publishPlaceOrder(position, market, marketData, state.ladderId, rung, now);
       occupied += 1;
       placed += 1;
     }
-    return placed;
+    return { placed, skippedUnknownMinOrderSize, attempted };
+  }
+
+  private async retryPlannedLiveRungsIfReady(
+    state: LadderState,
+    market: NormalizedMarket,
+  ): Promise<boolean> {
+    if (!this.canRetryPlannedLiveRungs(state, market)) return false;
+    const result = await this.advanceLiveRungs(state, market, this.now());
+    if (result.attempted) {
+      this.armPlannedRungRetryCooldown(state.tokenId, this.now());
+      return true;
+    }
+    return false;
+  }
+
+  private canRetryPlannedLiveRungs(state: LadderState, market: NormalizedMarket): boolean {
+    if (state.status !== "active") return false;
+    if (this.isPlannedRungRetryCooldownActive(state.tokenId)) return false;
+    if (this.resolveOrderMarketData(market) == null) return false;
+    if (!state.activeRungs.some((rung) => rung.lifecycle === "planned" && rung.orderId == null)) {
+      return false;
+    }
+    const occupied =
+      state.activeRungs.filter(
+        (rung) => rung.lifecycle === "placed" || rung.lifecycle === "partially_filled",
+      ).length + this.pendingRungsForToken(state.tokenId).length;
+    return occupied < this.resolveLiveRungCap(state.band);
+  }
+
+  private isPlannedRungRetryCooldownActive(tokenId: TokenId): boolean {
+    return (this.plannedRungRetryCooldownUntilByToken.get(String(tokenId)) ?? 0) > this.now();
+  }
+
+  private armPlannedRungRetryCooldown(tokenId: TokenId, now: number): void {
+    this.plannedRungRetryCooldownUntilByToken.set(String(tokenId), now + PLANNED_RUNG_RETRY_MS);
   }
 
   private resolveLiveRungCap(band: ProfileLadderBand): number {
@@ -587,6 +675,7 @@ export class ProfileLadderModule implements RuntimeModule {
   private async publishPlaceOrder(
     position: Position,
     market: NormalizedMarket,
+    marketData: ProfileLadderOrderMarketData,
     ladderId: string,
     rung: LadderRung,
     timestamp: number,
@@ -624,6 +713,7 @@ export class ProfileLadderModule implements RuntimeModule {
         signalTimestamp: new Date(timestamp).toISOString(),
         metadata: {
           source: this.policy().orderTag,
+          marketData,
           profileLadder: {
             ladderId,
             rungIndex: rung.rungIndex,
@@ -634,6 +724,19 @@ export class ProfileLadderModule implements RuntimeModule {
       },
       timestamp,
     });
+  }
+
+  private resolveOrderMarketData(market: NormalizedMarket): ProfileLadderOrderMarketData | null {
+    const minOrderSize = market.minOrderSize;
+    if (typeof minOrderSize !== "number" || !Number.isFinite(minOrderSize) || minOrderSize <= 0) {
+      return null;
+    }
+    return {
+      bookSource: market.bookSource ?? "unknown",
+      minOrderSize,
+      effectiveMinOrderSize: minOrderSize,
+      tickSize: market.tickSize,
+    };
   }
 
   private handleOrderPlaced(event: RuntimeEventMap["OrderPlaced"]): void {
@@ -758,7 +861,7 @@ export class ProfileLadderModule implements RuntimeModule {
     if (market == null) return;
     const placed = await this.advanceLiveRungs(state, market, this.now());
     this.writeCounter("profile_ladder_post_fill_action", 1, {
-      action: placed > 0 ? "place_next" : "rest",
+      action: placed.placed > 0 ? "place_next" : "rest",
       band: state.band,
     });
   }

@@ -36,10 +36,12 @@ const tokenId = createTokenId("restart-adopt-token");
 const conditionId = createConditionId("restart-adopt-condition");
 const NOW = Date.parse("2026-06-15T00:00:00.000Z");
 
-function policy(overrides: {
-  adoptExistingPositions?: boolean;
-  adoptExistingLadders?: boolean;
-} = {}): ExecutionProfilePolicy {
+function policy(
+  overrides: {
+    adoptExistingPositions?: boolean;
+    adoptExistingLadders?: boolean;
+  } = {},
+): ExecutionProfilePolicy {
   const base = DEFAULT_EXECUTION_PROFILE_POLICY;
   return {
     ...base,
@@ -168,7 +170,10 @@ class InMemoryProfileLadderRepository implements ProfileLadderRepository {
   }
 }
 
-function makeManager(profilePolicy: ExecutionProfilePolicy, deps: Partial<ExecutionProfileManagerDeps>) {
+function makeManager(
+  profilePolicy: ExecutionProfilePolicy,
+  deps: Partial<ExecutionProfileManagerDeps>,
+) {
   const base: ExecutionProfileManagerDeps = {
     bus: deps.bus ?? new InProcessEventBus(),
     stateRepo: deps.stateRepo ?? new InMemoryExecutionProfileStateRepository(),
@@ -265,9 +270,8 @@ describe("ProfileLadderModule restart adoption linked to ExecutionProfileManager
     await ladder.module.adoptExistingLadders();
 
     expect(ladder.repo.getLadder(tokenId)).toBeNull();
-    const summary = ladder.riskEvents.find(
-      (event) => event.eventType === "ladder_adoption_summary",
-    )?.payload as Record<string, unknown> | undefined;
+    const summary = ladder.riskEvents.find((event) => event.eventType === "ladder_adoption_summary")
+      ?.payload as Record<string, unknown> | undefined;
     expect(summary).toMatchObject({ adopted_count: 0, skipped_not_profile_owned: 1 });
   });
 });

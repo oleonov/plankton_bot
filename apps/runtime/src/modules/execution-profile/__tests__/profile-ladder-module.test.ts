@@ -28,6 +28,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ADOPTION_RETRY_MS,
   MAX_ADOPTION_ATTEMPTS,
+  PLANNED_RUNG_RETRY_MS,
   ProfileLadderModule,
 } from "../profile-ladder-module.js";
 import type { ProfileLadderRepository } from "../profile-ladder-repository.js";
@@ -160,6 +161,7 @@ function market(overrides: Partial<NormalizedMarket> = {}): NormalizedMarket {
     midPrice: 0.1,
     spread: 0.02,
     minOrderSize: 1,
+    bookSource: "clob",
     gammaCreatedAt: null,
     snapshotTs: NOW,
     ...overrides,
@@ -351,6 +353,7 @@ function setup(
     orderRepo?: { findByTokenId: (token: TokenId) => Order[] };
     isProfileOwned?: (token: TokenId) => boolean;
     onPolicyReload?: (handler: () => void) => () => void;
+    now?: () => number;
   } = {},
 ) {
   const bus = new InProcessEventBus();
@@ -385,7 +388,7 @@ function setup(
     riskEvents: {
       insert: (event) => riskEvents.push(event),
     },
-    now: () => NOW,
+    now: overrides.now ?? (() => NOW),
   });
   const setPolicy = (next: ExecutionProfilePolicy) => {
     policyRef.current = next;
@@ -626,9 +629,9 @@ describe("ProfileLadderModule", () => {
       lifecycle: "placed",
     });
     // Exactly one rebuild fires; the second BBO move is cooldown-gated.
-    expect(ctx.counters.filter((counter) => counter.name === "profile_ladder_rebuilt")).toHaveLength(
-      1,
-    );
+    expect(
+      ctx.counters.filter((counter) => counter.name === "profile_ladder_rebuilt"),
+    ).toHaveLength(1);
     expect(ctx.counters).toContainEqual({
       name: "profile_ladder_rebuilt",
       value: 1,
@@ -651,7 +654,15 @@ describe("ProfileLadderModule", () => {
       orderType: "GTC",
       postOnly: true,
       decisionRuleId: "PROFILE_LADDER",
-      metadata: { source: "profile_ladder" },
+      metadata: {
+        source: "profile_ladder",
+        marketData: {
+          bookSource: "clob",
+          minOrderSize: 1,
+          effectiveMinOrderSize: 1,
+          tickSize: 0.001,
+        },
+      },
     });
     // ...while the full calibrated vector is persisted for later recompute.
     const state = ctx.repo.getLadder(tokenId);
@@ -659,6 +670,181 @@ describe("ProfileLadderModule", () => {
     expect(state?.activeRungs.map((rung) => rung.price)).toEqual([0.11, 0.13, 0.155, 0.165]);
     expect(state?.activeRungs.map((rung) => rung.sizeShares)).toEqual([95, 60, 50, 45]);
     expect(state?.activeRungs.every((rung) => rung.lifecycle === "planned")).toBe(true);
+  });
+
+  it("does not publish a live rung when market min order size is unknown", async () => {
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+
+    await ctx.module.placeLadder(position(), market({ minOrderSize: null }));
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+      lifecycle: "planned",
+      orderId: null,
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_skipped_unknown_min_order_size",
+      value: 1,
+      labels: '{"band":"medium_low"}',
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_placed_live_rungs",
+      value: 0,
+      labels: '{"band":"medium_low"}',
+    });
+  });
+
+  it("recovers an existing planned-only ladder when a later market update has min order size", async () => {
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: null })],
+      timestamp: NOW,
+    });
+    await ctx.bus.publish("PositionUpdated", { position: position() });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+      lifecycle: "planned",
+      orderId: null,
+    });
+
+    // Simulates a deploy/restart after prod already persisted planned-only
+    // ladders: retry cooldown is in-memory only, but ladder state is durable.
+    await ctx.module.stop();
+    await ctx.module.start();
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: 5 })],
+      timestamp: NOW + 1_000,
+    });
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.metadata).toMatchObject({
+      marketData: {
+        bookSource: "clob",
+        minOrderSize: 5,
+        effectiveMinOrderSize: 5,
+        tickSize: 0.001,
+      },
+    });
+  });
+
+  it("rate-limits unknown-min planned rung retries without restart", async () => {
+    let nowMs = NOW;
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      now: () => nowMs,
+    });
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: null })],
+      timestamp: nowMs,
+    });
+    await ctx.bus.publish("PositionUpdated", { position: position() });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(
+      ctx.counters.filter(
+        (counter) => counter.name === "profile_ladder_skipped_unknown_min_order_size",
+      ),
+    ).toHaveLength(1);
+
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS - 1;
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: 5 })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: 5 })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.metadata).toMatchObject({
+      marketData: {
+        minOrderSize: 5,
+        effectiveMinOrderSize: 5,
+      },
+    });
+  });
+
+  it("rate-limits crossing-only planned rung retries", async () => {
+    let nowMs = NOW;
+    const ctx = setup(policy(), { now: () => nowMs });
+    ctx.repo.upsertLadder(
+      ladderState({
+        activeRungs: [rung({ price: 0.09, sizeShares: 60 })],
+      }),
+    );
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.09, bestAsk: 0.11, minOrderSize: 5 })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(
+      ctx.counters.filter(
+        (counter) => counter.name === "profile_ladder_skipped_crossing_post_only",
+      ),
+    ).toHaveLength(1);
+
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS - 1;
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.09, bestAsk: 0.11, minOrderSize: 5 })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(
+      ctx.counters.filter(
+        (counter) => counter.name === "profile_ladder_skipped_crossing_post_only",
+      ),
+    ).toHaveLength(1);
+
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.09, bestAsk: 0.11, minOrderSize: 5 })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(
+      ctx.counters.filter(
+        (counter) => counter.name === "profile_ladder_skipped_crossing_post_only",
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("does not retry a planned rung while cap is occupied by a live rung", async () => {
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+    ctx.repo.upsertLadder(
+      ladderState({
+        activeRungs: [
+          rung({
+            rungIndex: 0,
+            lifecycle: "placed",
+            orderId: String(createOrderId("profile-ladder-live-rung")),
+          }),
+          rung({ rungIndex: 1, price: 0.13, sizeShares: 60 }),
+        ],
+      }),
+    );
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: 5 })],
+      timestamp: NOW,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
   });
 
   it("passes UP mode from the mode reader into LadderBuilder", async () => {
@@ -949,7 +1135,11 @@ describe("ProfileLadderModule", () => {
       await placePendingRung(ctx);
 
       await ctx.module.rebuildLadder(position({ avgEntryPrice: 0.12 }), market(), "scale_in");
-      await ctx.module.rebuildLadder(position({ avgEntryPrice: 0.13 }), market(), "profile_reclass");
+      await ctx.module.rebuildLadder(
+        position({ avgEntryPrice: 0.13 }),
+        market(),
+        "profile_reclass",
+      );
 
       expect(ctx.orders).toHaveLength(1);
       expect(
@@ -1225,9 +1415,30 @@ describe("ProfileLadderModule", () => {
         ctx.repo.upsertLadder(
           ladderState({
             activeRungs: [
-              rung({ rungIndex: 0, price: 0.11, sizeShares: 95, lifecycle: "filled", orderId: "r0", filledSizeShares: 95 }),
-              rung({ rungIndex: 1, price: 0.13, sizeShares: 60, lifecycle: "filled", orderId: "r1", filledSizeShares: 60 }),
-              rung({ rungIndex: 2, price: 0.155, sizeShares: 50, lifecycle: "filled", orderId: "r2", filledSizeShares: 50 }),
+              rung({
+                rungIndex: 0,
+                price: 0.11,
+                sizeShares: 95,
+                lifecycle: "filled",
+                orderId: "r0",
+                filledSizeShares: 95,
+              }),
+              rung({
+                rungIndex: 1,
+                price: 0.13,
+                sizeShares: 60,
+                lifecycle: "filled",
+                orderId: "r1",
+                filledSizeShares: 60,
+              }),
+              rung({
+                rungIndex: 2,
+                price: 0.155,
+                sizeShares: 50,
+                lifecycle: "filled",
+                orderId: "r2",
+                filledSizeShares: 50,
+              }),
               rung({
                 rungIndex: 3,
                 price: 0.165,
@@ -1392,9 +1603,8 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
   }
 
   function summaryOf(ctx: ReturnType<typeof setup>): Record<string, unknown> | undefined {
-    return ctx.riskEvents.find((event) => event.eventType === "ladder_adoption_summary")?.payload as
-      | Record<string, unknown>
-      | undefined;
+    return ctx.riskEvents.find((event) => event.eventType === "ladder_adoption_summary")
+      ?.payload as Record<string, unknown> | undefined;
   }
 
   it("does not adopt when the sell ladder is disabled", async () => {
@@ -1570,6 +1780,38 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
     });
   });
 
+  it("records unknown min order size skips in the adoption summary", async () => {
+    const ctx = setup(adoptionPolicy(), {
+      positionRepo: { findOpen: () => [position()] },
+      isProfileOwned: () => true,
+    });
+
+    await ctx.module.start();
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: null })],
+      timestamp: NOW,
+    });
+    await ctx.module.adoptExistingLadders();
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+      lifecycle: "planned",
+      orderId: null,
+    });
+    expect(summaryOf(ctx)).toMatchObject({
+      adopted_count: 1,
+      planned_rung_count: 4,
+      estimated_order_count: 0,
+      placed_live_rung_count: 0,
+      skipped_unknown_min_order_size: 1,
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_skipped_unknown_min_order_size",
+      value: 1,
+      labels: '{"band":"medium_low"}',
+    });
+  });
+
   it("is idempotent across repeated adoption runs", async () => {
     const ctx = setup(adoptionPolicy(), {
       positionRepo: { findOpen: () => [position()] },
@@ -1583,9 +1825,9 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
     expect(
       ctx.riskEvents.filter((event) => event.eventType === "ladder_adoption_summary"),
     ).toHaveLength(1);
-    expect(ctx.counters.filter((counter) => counter.name === "profile_ladder_adopted")).toHaveLength(
-      1,
-    );
+    expect(
+      ctx.counters.filter((counter) => counter.name === "profile_ladder_adopted"),
+    ).toHaveLength(1);
   });
 
   it("counts and skips dormant positions during adoption", async () => {
