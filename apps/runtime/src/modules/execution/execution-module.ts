@@ -57,6 +57,7 @@ import {
   evaluatePerTokenOrderCapacity,
   evaluateTotalOrdersCapacity,
   evaluateWalletSellCapacity,
+  classifySellCapacitySource,
   hasWalletBuyBudget,
   normalizeBuyCapacityPolicy,
   normalizeOrderCapacityPolicy,
@@ -65,6 +66,7 @@ import {
   PER_TOKEN_SELL_LIMIT_REASON,
   TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
   type OrderCapacityMetricsSample,
+  type WalletSellCapacityDecision,
   resolveWalletBuyBudget,
   WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
   WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
@@ -83,6 +85,7 @@ import {
   getOpenOrderCountForToken,
   getReservedSellSize,
   type PendingReservation,
+  type ReservationSnapshot,
 } from "./reservation-utils.js";
 import {
   computeSellUpperBound,
@@ -158,6 +161,7 @@ export interface ExecutionModuleDeps {
   executionPolicy?: (() => ExecutionPolicy) | undefined;
   allowSellSizeClamp?: boolean | undefined;
   capacityMetricsSink?: ((sample: OrderCapacityMetricsSample) => void) | undefined;
+  profileOwnedOpenPositionCount?: (() => number) | undefined;
   /**
    * Shared store of exchange-side SELL state (open orders + wallet balance)
    * updated by the reconciliation module. When provided, the SELL clamp
@@ -315,9 +319,18 @@ export class ExecutionModule implements RuntimeModule {
     };
     sellCapacity?: {
       enabled: boolean;
+      mode: ExecutionPolicy["sellCapacity"]["mode"];
       maxOpenSellOrders: number;
       maxOpenSellOrdersPerToken: number;
       openSellOrderCount: number;
+      openProfileLadderSellOrderCount: number;
+      openNonProfileLadderSellOrderCount: number;
+      profileOwnedOpenPositionCount: number | null;
+      profileLadderCapRaw: number | null;
+      effectiveProfileLadderCap: number | null;
+      nonLadderReserve: number | null;
+      dynamicGlobalCap: number | null;
+      hardMaxOpenSellOrders: number | null;
       blocked: boolean;
     };
     orderCapacity?: {
@@ -346,6 +359,15 @@ export class ExecutionModule implements RuntimeModule {
     const buyCapacity = normalizeBuyCapacityPolicy(this.currentBuyCapacityPolicy());
     const sellCapacity = normalizeSellCapacityPolicy(this.currentSellCapacityPolicy());
     const orderCapacity = normalizeOrderCapacityPolicy(this.currentOrderCapacityPolicy());
+    const profileOwnedOpenPositionCount = this.currentProfileOwnedOpenPositionCount();
+    const sellCapacityDiagnostic = evaluateWalletSellCapacity({
+      policy: sellCapacity,
+      source: "other",
+      openSellOrderCount: reservations.openSellOrderCount,
+      openProfileLadderSellOrderCount: reservations.openProfileLadderSellOrderCount,
+      openNonProfileLadderSellOrderCount: reservations.openNonProfileLadderSellOrderCount,
+      profileOwnedOpenPositionCount,
+    });
     const newEntryDecision = evaluateWalletBuyCapacity({
       policy: buyCapacity,
       snapshot: walletBudget,
@@ -408,13 +430,22 @@ export class ExecutionModule implements RuntimeModule {
       },
       sellCapacity: {
         enabled: sellCapacity.enabled,
-        maxOpenSellOrders: sellCapacity.maxOpenSellOrders,
+        mode: sellCapacity.mode,
+        maxOpenSellOrders: sellCapacityDiagnostic.maxOpenSellOrders,
         maxOpenSellOrdersPerToken: sellCapacity.maxOpenSellOrdersPerToken,
         openSellOrderCount: reservations.openSellOrderCount,
-        blocked:
-          sellCapacity.enabled &&
-          sellCapacity.maxOpenSellOrders > 0 &&
-          reservations.openSellOrderCount >= sellCapacity.maxOpenSellOrders,
+        openProfileLadderSellOrderCount: reservations.openProfileLadderSellOrderCount,
+        openNonProfileLadderSellOrderCount: reservations.openNonProfileLadderSellOrderCount,
+        profileOwnedOpenPositionCount:
+          sellCapacityDiagnostic.dynamic?.profileOwnedOpenPositionCount ?? null,
+        profileLadderCapRaw: sellCapacityDiagnostic.dynamic?.profileLadderCapRaw ?? null,
+        effectiveProfileLadderCap:
+          sellCapacityDiagnostic.dynamic?.effectiveProfileLadderCap ?? null,
+        nonLadderReserve: sellCapacityDiagnostic.dynamic?.nonLadderReserve ?? null,
+        dynamicGlobalCap: sellCapacityDiagnostic.dynamic?.dynamicGlobalCap ?? null,
+        hardMaxOpenSellOrders:
+          sellCapacity.mode === "source_aware_dynamic" ? sellCapacity.hardMaxOpenSellOrders : null,
+        blocked: !sellCapacityDiagnostic.allowed,
       },
       orderCapacity: {
         enabled: orderCapacity.enabled,
@@ -614,7 +645,9 @@ export class ExecutionModule implements RuntimeModule {
     const decision = this.getReservationDecision(cmd, notional);
     if (decision.kind === "reject") {
       this.recordInternalReservationReject();
-      this.recordExecutionCapacityReject(cmd, decision.reason);
+      if (!decision.capacitySampleRecorded) {
+        this.recordExecutionCapacityReject(cmd, decision.reason);
+      }
       this.log.debug(decision.details, decision.message);
       await this.rejectOrder(
         cmd,
@@ -661,6 +694,9 @@ export class ExecutionModule implements RuntimeModule {
       side: effectiveCmd.side,
       size: effectiveCmd.size,
       price: effectiveCmd.price,
+      decisionRuleId: effectiveCmd.decisionRuleId,
+      signalReason: effectiveCmd.signalReason,
+      metadata: effectiveCmd.metadata,
     });
     this.acceptedCommandAt.set(String(effectiveCmd.commandId), Date.now());
 
@@ -971,12 +1007,50 @@ export class ExecutionModule implements RuntimeModule {
       side: cmd.side,
       approved: false,
       rejectionReason: reason,
+      sellCapacitySource: cmd.side === "sell" ? classifySellCapacitySource(cmd) : undefined,
       openBuyOrderCount: reservations.openBuyOrderCount,
       openSellOrderCount: reservations.openSellOrderCount,
+      openProfileLadderSellOrderCount: reservations.openProfileLadderSellOrderCount,
+      openNonProfileLadderSellOrderCount: reservations.openNonProfileLadderSellOrderCount,
       openOrdersTotal: reservations.openOrdersTotal,
       perTokenOpenBuyOrderCount: getOpenOrderCountForToken(reservations, cmd.tokenId, "buy"),
       perTokenOpenSellOrderCount: getOpenOrderCountForToken(reservations, cmd.tokenId, "sell"),
     });
+  }
+
+  private recordExecutionSellCapacitySample(
+    cmd: PlaceOrderCommand,
+    approved: boolean,
+    rejectionReason: string | null,
+    sellCapacity: WalletSellCapacityDecision,
+    reservations: ReservationSnapshot,
+  ): void {
+    this.deps.capacityMetricsSink?.({
+      source: "execution",
+      side: "sell",
+      approved,
+      rejectionReason,
+      sellCapacitySource: sellCapacity.source,
+      sellCapacityRejectReason: sellCapacity.rejectionDetail,
+      sellCapacityMode: sellCapacity.mode,
+      profileOwnedOpenPositionCount: sellCapacity.dynamic?.profileOwnedOpenPositionCount,
+      profileLadderCapRaw: sellCapacity.dynamic?.profileLadderCapRaw,
+      effectiveProfileLadderCap: sellCapacity.dynamic?.effectiveProfileLadderCap,
+      nonLadderReserve: sellCapacity.dynamic?.nonLadderReserve,
+      dynamicGlobalCap: sellCapacity.dynamic?.dynamicGlobalCap,
+      openBuyOrderCount: reservations.openBuyOrderCount,
+      openSellOrderCount: reservations.openSellOrderCount,
+      openProfileLadderSellOrderCount: reservations.openProfileLadderSellOrderCount,
+      openNonProfileLadderSellOrderCount: reservations.openNonProfileLadderSellOrderCount,
+      openOrdersTotal: reservations.openOrdersTotal,
+      perTokenOpenBuyOrderCount: getOpenOrderCountForToken(reservations, cmd.tokenId, "buy"),
+      perTokenOpenSellOrderCount: getOpenOrderCountForToken(reservations, cmd.tokenId, "sell"),
+    });
+  }
+
+  private currentProfileOwnedOpenPositionCount(): number {
+    const count = this.deps.profileOwnedOpenPositionCount?.() ?? 0;
+    return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
   }
 
   private currentBuyCapacityPolicy(): ExecutionPolicy["buyCapacity"] | undefined {
@@ -1006,6 +1080,7 @@ export class ExecutionModule implements RuntimeModule {
         errorCode?: ExchangeErrorCode;
         message: string;
         details: Record<string, unknown>;
+        capacitySampleRecorded?: boolean;
       }
     | {
         kind: "clamp";
@@ -1100,22 +1175,40 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     const sellPolicy = normalizeSellCapacityPolicy(this.currentSellCapacityPolicy());
+    const sellCapacitySource = classifySellCapacitySource(cmd);
     const sellCapacity = evaluateWalletSellCapacity({
       policy: sellPolicy,
+      source: sellCapacitySource,
       openSellOrderCount: reservations.openSellOrderCount,
+      openProfileLadderSellOrderCount: reservations.openProfileLadderSellOrderCount,
+      openNonProfileLadderSellOrderCount: reservations.openNonProfileLadderSellOrderCount,
+      profileOwnedOpenPositionCount: this.currentProfileOwnedOpenPositionCount(),
     });
     if (!sellCapacity.allowed) {
+      this.recordExecutionSellCapacitySample(
+        cmd,
+        false,
+        WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
+        sellCapacity,
+        reservations,
+      );
       return {
         kind: "reject",
         reason: WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
         message: "order skipped — wallet sell capacity exhausted",
+        capacitySampleRecorded: true,
         details: {
           openSellOrders: sellCapacity.openSellOrderCount,
+          openProfileLadderSellOrders: sellCapacity.openProfileLadderSellOrderCount,
+          openNonProfileLadderSellOrders: sellCapacity.openNonProfileLadderSellOrderCount,
           maxOpenSellOrders: sellCapacity.maxOpenSellOrders,
+          sellCapacitySource: sellCapacity.source,
+          sellCapacityMode: sellCapacity.mode,
+          sellCapacityRejectReason: sellCapacity.rejectionDetail,
+          dynamic: sellCapacity.dynamic,
         },
       };
     }
-
     const perTokenSell = evaluatePerTokenOrderCapacity({
       side: "sell",
       maxOpenOrdersPerToken: this.resolveMaxOpenSellOrdersPerToken(cmd, sellPolicy),
@@ -1147,7 +1240,10 @@ export class ExecutionModule implements RuntimeModule {
       };
     }
 
-    if (!this.deps.positionRepo) return { kind: "accept" };
+    if (!this.deps.positionRepo) {
+      this.recordExecutionSellCapacitySample(cmd, true, null, sellCapacity, reservations);
+      return { kind: "accept" };
+    }
 
     const position = this.deps.positionRepo.findByTokenId(cmd.tokenId);
     if (!position || position.status === "closed") {
@@ -1194,6 +1290,7 @@ export class ExecutionModule implements RuntimeModule {
             normalized.reason === "intent-below-min"
               ? "intent-below-min-residual-above-min"
               : "orphan-residual-below-min";
+          this.recordExecutionSellCapacitySample(cmd, true, null, sellCapacity, reservations);
           return {
             kind: "clamp",
             newSize: normalized.size,
@@ -1212,6 +1309,7 @@ export class ExecutionModule implements RuntimeModule {
           };
         }
       }
+      this.recordExecutionSellCapacitySample(cmd, true, null, sellCapacity, reservations);
       return { kind: "accept" };
     }
 
@@ -1241,6 +1339,7 @@ export class ExecutionModule implements RuntimeModule {
           },
         };
       }
+      this.recordExecutionSellCapacitySample(cmd, true, null, sellCapacity, reservations);
       return {
         kind: "clamp",
         newSize: availableSize,

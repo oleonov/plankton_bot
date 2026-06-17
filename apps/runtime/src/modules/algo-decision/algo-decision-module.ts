@@ -803,6 +803,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     byReason: new Map<string, number>(),
     tokens: new Set<string>(),
   };
+  private readonly legacyProfileOwnedGuardDedupe = new Map<string, number>();
   private readonly lastBuyFillByWallet = new Map<string, number>();
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
@@ -1761,6 +1762,7 @@ export class AlgoDecisionModule implements RuntimeModule {
           1,
           JSON.stringify({ guard: sideEffect.guard }),
         );
+        if (!this.shouldPersistLegacyProfileOwnedGuardEvent(sideEffect)) continue;
         this.persistence.enqueueRiskEvent({
           eventType: "legacy_guard_fired_on_profile_owned",
           payload: {
@@ -1777,6 +1779,21 @@ export class AlgoDecisionModule implements RuntimeModule {
         });
       }
     }
+  }
+
+  private shouldPersistLegacyProfileOwnedGuardEvent(
+    sideEffect: Extract<DecisionPlanSideEffect, { kind: "legacy_guard_fired_on_profile_owned" }>,
+  ): boolean {
+    const eventAt = Date.parse(sideEffect.timestamp);
+    const now = Number.isFinite(eventAt) ? eventAt : Date.now();
+    const key = [
+      "legacy_guard_fired_on_profile_owned",
+      sideEffect.guard,
+      String(sideEffect.tokenId),
+      sideEffect.decisionRuleId,
+      sideEffect.state,
+    ].join("|");
+    return this.dedupeAllows(this.legacyProfileOwnedGuardDedupe, key, now);
   }
 
   /**

@@ -643,8 +643,13 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       },
       sellCapacity: {
         enabled: true,
+        mode: "source_aware_dynamic",
         maxOpenSellOrders: 10,
         maxOpenSellOrdersPerToken: 2,
+        profileLadderLiveRungsPerPosition: 2,
+        minNonLadderReserve: 10,
+        nonLadderReserveRatio: 0.25,
+        hardMaxOpenSellOrders: 200,
       },
       orderCapacity: {
         enabled: true,
@@ -769,8 +774,13 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     });
     expect(policy.sellCapacity).toEqual({
       enabled: true,
+      mode: "source_aware_dynamic",
       maxOpenSellOrders: 10,
       maxOpenSellOrdersPerToken: 2,
+      profileLadderLiveRungsPerPosition: 2,
+      minNonLadderReserve: 10,
+      nonLadderReserveRatio: 0.25,
+      hardMaxOpenSellOrders: 200,
     });
     expect(policy.orderCapacity).toEqual({
       enabled: true,
@@ -1461,13 +1471,44 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     });
   });
 
+  it("parses dynamic source-aware sell capacity formula parameters", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        sellCapacity: {
+          enabled: true,
+          mode: "source_aware_dynamic",
+          profileLadderLiveRungsPerPosition: 2,
+          minNonLadderReserve: 10,
+          nonLadderReserveRatio: 0.25,
+          hardMaxOpenSellOrders: 200,
+        },
+      }),
+    );
+
+    expect(issues).toHaveLength(0);
+    expect(policy.sellCapacity).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+      enabled: true,
+      mode: "source_aware_dynamic",
+      profileLadderLiveRungsPerPosition: 2,
+      minNonLadderReserve: 10,
+      nonLadderReserveRatio: 0.25,
+      hardMaxOpenSellOrders: 200,
+    });
+  });
+
   it("rejects invalid sell/order-capacity values with issues", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({
         sellCapacity: {
           enabled: "yes",
+          mode: "dynamic",
           maxOpenSellOrders: 1.5,
           maxOpenSellOrdersPerToken: -1,
+          profileLadderLiveRungsPerPosition: 0,
+          minNonLadderReserve: -1,
+          nonLadderReserveRatio: -0.1,
+          hardMaxOpenSellOrders: 0,
         },
         orderCapacity: {
           enabled: "yes",
@@ -1478,8 +1519,15 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.sellCapacity).toEqual(DEFAULT_EXECUTION_POLICY.sellCapacity);
     expect(policy.orderCapacity).toEqual(DEFAULT_EXECUTION_POLICY.orderCapacity);
     expect(issues.some((i) => i.includes("sellCapacity.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("sellCapacity.mode"))).toBe(true);
     expect(issues.some((i) => i.includes("sellCapacity.maxOpenSellOrders"))).toBe(true);
     expect(issues.some((i) => i.includes("sellCapacity.maxOpenSellOrdersPerToken"))).toBe(true);
+    expect(issues.some((i) => i.includes("sellCapacity.profileLadderLiveRungsPerPosition"))).toBe(
+      true,
+    );
+    expect(issues.some((i) => i.includes("sellCapacity.minNonLadderReserve"))).toBe(true);
+    expect(issues.some((i) => i.includes("sellCapacity.nonLadderReserveRatio"))).toBe(true);
+    expect(issues.some((i) => i.includes("sellCapacity.hardMaxOpenSellOrders"))).toBe(true);
     expect(issues.some((i) => i.includes("orderCapacity.enabled"))).toBe(true);
     expect(issues.some((i) => i.includes("orderCapacity.maxOpenOrdersTotal"))).toBe(true);
   });

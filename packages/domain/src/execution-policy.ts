@@ -103,8 +103,13 @@ export const DEFAULT_BUY_CAPACITY_POLICY: BuyCapacityPolicy = {
 
 export const DEFAULT_SELL_CAPACITY_POLICY: SellCapacityPolicy = {
   enabled: true,
+  mode: "legacy_global",
   maxOpenSellOrders: 10,
   maxOpenSellOrdersPerToken: 2,
+  profileLadderLiveRungsPerPosition: 2,
+  minNonLadderReserve: 10,
+  nonLadderReserveRatio: 0.25,
+  hardMaxOpenSellOrders: 200,
 };
 
 export const DEFAULT_ORDER_CAPACITY_POLICY: OrderCapacityPolicy = {
@@ -638,6 +643,9 @@ const BOUND_BUY_CAPACITY_HEADROOM_MIN_USDC = 0;
 const BOUND_BUY_CAPACITY_HEADROOM_MAX_USDC = 10_000;
 const BOUND_CAPACITY_OPEN_ORDERS_MIN = 0;
 const BOUND_CAPACITY_OPEN_ORDERS_MAX = 1_000;
+const BOUND_CAPACITY_DYNAMIC_HARD_MAX_MIN = 1;
+const BOUND_CAPACITY_RESERVE_RATIO_MIN = 0;
+const BOUND_CAPACITY_RESERVE_RATIO_MAX = 1;
 const BOUND_ORDER_LIFETIME_MIN_MS = 1_000;
 const BOUND_ORDER_LIFETIME_MAX_MS = 14 * 24 * 60 * 60_000;
 const BOUND_ORDER_LIFETIME_COUNT_MAX = 10_000;
@@ -3353,6 +3361,13 @@ function parseSellCapacity(raw: unknown, issues: string[]): SellCapacityPolicy {
       issues,
       "sellCapacity.enabled",
     ),
+    mode: enumOr(
+      obj.mode,
+      ["legacy_global", "source_aware_dynamic"],
+      DEFAULT_SELL_CAPACITY_POLICY.mode,
+      issues,
+      "sellCapacity.mode",
+    ),
     maxOpenSellOrders: clampedInt(
       obj.maxOpenSellOrders,
       DEFAULT_SELL_CAPACITY_POLICY.maxOpenSellOrders,
@@ -3368,6 +3383,38 @@ function parseSellCapacity(raw: unknown, issues: string[]): SellCapacityPolicy {
       BOUND_CAPACITY_OPEN_ORDERS_MAX,
       issues,
       "sellCapacity.maxOpenSellOrdersPerToken",
+    ),
+    profileLadderLiveRungsPerPosition: clampedInt(
+      obj.profileLadderLiveRungsPerPosition,
+      DEFAULT_SELL_CAPACITY_POLICY.profileLadderLiveRungsPerPosition,
+      BOUND_CAPACITY_DYNAMIC_HARD_MAX_MIN,
+      BOUND_CAPACITY_OPEN_ORDERS_MAX,
+      issues,
+      "sellCapacity.profileLadderLiveRungsPerPosition",
+    ),
+    minNonLadderReserve: clampedInt(
+      obj.minNonLadderReserve,
+      DEFAULT_SELL_CAPACITY_POLICY.minNonLadderReserve,
+      BOUND_CAPACITY_OPEN_ORDERS_MIN,
+      BOUND_CAPACITY_OPEN_ORDERS_MAX,
+      issues,
+      "sellCapacity.minNonLadderReserve",
+    ),
+    nonLadderReserveRatio: clampedNumber(
+      obj.nonLadderReserveRatio,
+      DEFAULT_SELL_CAPACITY_POLICY.nonLadderReserveRatio,
+      BOUND_CAPACITY_RESERVE_RATIO_MIN,
+      BOUND_CAPACITY_RESERVE_RATIO_MAX,
+      issues,
+      "sellCapacity.nonLadderReserveRatio",
+    ),
+    hardMaxOpenSellOrders: clampedInt(
+      obj.hardMaxOpenSellOrders,
+      DEFAULT_SELL_CAPACITY_POLICY.hardMaxOpenSellOrders,
+      BOUND_CAPACITY_DYNAMIC_HARD_MAX_MIN,
+      BOUND_CAPACITY_OPEN_ORDERS_MAX,
+      issues,
+      "sellCapacity.hardMaxOpenSellOrders",
     ),
   };
 }

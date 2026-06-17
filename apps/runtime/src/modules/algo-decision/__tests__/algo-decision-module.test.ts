@@ -5980,6 +5980,93 @@ describe("AlgoDecisionModule", () => {
         }),
       );
     });
+
+    it("rate-limits repeated legacy_guard_fired_on_profile_owned risk events per token/rule/state key", async () => {
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const runtimeMetrics = {
+        writeCounter: vi.fn(),
+        writeLatest: vi.fn(),
+      } as unknown as RuntimeMetricWriter;
+      const mod = buildModule({ runtimeMetrics, riskEventRepo });
+      await mod.start();
+
+      const sideEffect = {
+        kind: "legacy_guard_fired_on_profile_owned",
+        guard: "d8",
+        tokenId: createTokenId("token-profile-dedupe"),
+        conditionId: "cond-profile-dedupe",
+        decisionRuleId: "D8_PROFIT_RATIO",
+        proposedPrice: 0.08,
+        avgEntryPrice: 0.05,
+        state: "S1",
+        timestamp: "2026-06-15T00:05:00.000Z",
+        emissionFacts: {
+          firstTradePrice: 0.05,
+          firstTradeAt: "2026-06-14T00:00:00.000Z",
+          legTradeCount: 1,
+        },
+      } as unknown as DecisionPlanSideEffect;
+
+      (mod as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      (mod as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+      await mod.stop();
+
+      const riskEvents = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(([event]) => event.eventType === "legacy_guard_fired_on_profile_owned");
+      expect(riskEvents).toHaveLength(1);
+
+      const counters = vi
+        .mocked(runtimeMetrics.writeCounter)
+        .mock.calls.filter(([metricName]) => metricName === "legacy_guard_fired_on_profile_owned");
+      expect(counters).toHaveLength(2);
+    });
+
+    it("lets distinct legacy guard dedupe keys and expired windows emit risk events", async () => {
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      const baseSideEffect = {
+        kind: "legacy_guard_fired_on_profile_owned",
+        guard: "d8",
+        tokenId: createTokenId("token-profile-window"),
+        conditionId: "cond-profile-window",
+        decisionRuleId: "D8_PROFIT_RATIO",
+        proposedPrice: 0.08,
+        avgEntryPrice: 0.05,
+        state: "S1",
+        timestamp: "2026-06-15T00:05:00.000Z",
+        emissionFacts: {
+          firstTradePrice: 0.05,
+          firstTradeAt: "2026-06-14T00:00:00.000Z",
+          legTradeCount: 1,
+        },
+      } as unknown as DecisionPlanSideEffect;
+      const differentToken = {
+        ...baseSideEffect,
+        tokenId: createTokenId("token-profile-window-other"),
+      } as unknown as DecisionPlanSideEffect;
+      const afterWindow = {
+        ...baseSideEffect,
+        timestamp: "2026-06-15T00:15:00.000Z",
+      } as unknown as DecisionPlanSideEffect;
+
+      (mod as any).applyDecisionPlanSideEffects([baseSideEffect], DEFAULT_EXECUTION_POLICY);
+      (mod as any).applyDecisionPlanSideEffects([differentToken], DEFAULT_EXECUTION_POLICY);
+      (mod as any).applyDecisionPlanSideEffects([afterWindow], DEFAULT_EXECUTION_POLICY);
+      await mod.stop();
+
+      const riskEvents = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(([event]) => event.eventType === "legacy_guard_fired_on_profile_owned");
+      expect(riskEvents).toHaveLength(3);
+      expect(riskEvents.map(([event]) => event.payload.tokenId)).toEqual([
+        "token-profile-window",
+        "token-profile-window-other",
+        "token-profile-window",
+      ]);
+    });
   });
 
   // Sub-Track Q.D shadow (observe-only): the planner emits a `track_q_d` side

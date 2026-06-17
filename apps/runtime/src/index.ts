@@ -220,6 +220,8 @@ interface OrderCapacityWindow {
   placeCalls: number;
   sourceBuckets: Map<string, number>;
   rejectedByReason: Map<string, number>;
+  sellCapacityUsedBySource: Map<string, number>;
+  sellCapacityRejectedBySource: Map<string, number>;
   openBuyOrderCountBuckets: Map<string, number>;
   openSellOrderCountBuckets: Map<string, number>;
   openOrdersTotalBuckets: Map<string, number>;
@@ -265,6 +267,8 @@ function createOrderCapacityWindow(now = Date.now()): OrderCapacityWindow {
     placeCalls: 0,
     sourceBuckets: new Map(),
     rejectedByReason: new Map(),
+    sellCapacityUsedBySource: new Map(),
+    sellCapacityRejectedBySource: new Map(),
     openBuyOrderCountBuckets: new Map(),
     openSellOrderCountBuckets: new Map(),
     openOrdersTotalBuckets: new Map(),
@@ -286,6 +290,8 @@ function resetOrderCapacityWindow(window: OrderCapacityWindow, now = Date.now())
   window.placeCalls = 0;
   window.sourceBuckets.clear();
   window.rejectedByReason.clear();
+  window.sellCapacityUsedBySource.clear();
+  window.sellCapacityRejectedBySource.clear();
   window.openBuyOrderCountBuckets.clear();
   window.openSellOrderCountBuckets.clear();
   window.openOrdersTotalBuckets.clear();
@@ -299,6 +305,8 @@ function serializeOrderCapacityWindow(window: OrderCapacityWindow): Record<strin
     placeCalls: window.placeCalls,
     sourceBuckets: Object.fromEntries(window.sourceBuckets),
     rejectedByReason: Object.fromEntries(window.rejectedByReason),
+    sellCapacityUsedBySource: Object.fromEntries(window.sellCapacityUsedBySource),
+    sellCapacityRejectedBySource: Object.fromEntries(window.sellCapacityRejectedBySource),
     openBuyOrderCountBuckets: Object.fromEntries(window.openBuyOrderCountBuckets),
     openSellOrderCountBuckets: Object.fromEntries(window.openSellOrderCountBuckets),
     openOrdersTotalBuckets: Object.fromEntries(window.openOrdersTotalBuckets),
@@ -901,6 +909,58 @@ async function main(): Promise<void> {
   const recordOrderCapacitySample = (sample: OrderCapacityMetricsSample): void => {
     orderCapacityWindow.placeCalls += 1;
     incrementBucket(orderCapacityWindow.sourceBuckets, sample.source);
+    if (sample.side === "sell" && sample.sellCapacitySource) {
+      if (sample.approved) {
+        incrementBucket(orderCapacityWindow.sellCapacityUsedBySource, sample.sellCapacitySource);
+        runtimeMetrics.writeCounter(
+          "sell_capacity_used_by_source",
+          1,
+          JSON.stringify({ source: sample.sellCapacitySource }),
+        );
+      } else if (sample.sellCapacityRejectReason) {
+        const rejectionBucket = `${sample.sellCapacitySource}:${sample.sellCapacityRejectReason}`;
+        incrementBucket(orderCapacityWindow.sellCapacityRejectedBySource, rejectionBucket);
+        runtimeMetrics.writeCounter(
+          "sell_capacity_rejected_by_source",
+          1,
+          JSON.stringify({
+            source: sample.sellCapacitySource,
+            reason: sample.sellCapacityRejectReason,
+          }),
+        );
+      }
+    }
+    if (sample.profileOwnedOpenPositionCount != null) {
+      runtimeMetrics.writeLatest(
+        "sell_capacity_dynamic_profile_owned_positions",
+        sample.profileOwnedOpenPositionCount,
+      );
+    }
+    if (sample.profileLadderCapRaw != null) {
+      runtimeMetrics.writeLatest(
+        "sell_capacity_dynamic_profile_ladder_cap",
+        sample.profileLadderCapRaw,
+      );
+      runtimeMetrics.writeLatest(
+        "sell_capacity_dynamic_profile_ladder_cap_raw",
+        sample.profileLadderCapRaw,
+      );
+    }
+    if (sample.effectiveProfileLadderCap != null) {
+      runtimeMetrics.writeLatest(
+        "sell_capacity_dynamic_profile_ladder_cap_effective",
+        sample.effectiveProfileLadderCap,
+      );
+    }
+    if (sample.nonLadderReserve != null) {
+      runtimeMetrics.writeLatest(
+        "sell_capacity_dynamic_non_ladder_reserve",
+        sample.nonLadderReserve,
+      );
+    }
+    if (sample.dynamicGlobalCap != null) {
+      runtimeMetrics.writeLatest("sell_capacity_dynamic_global_cap", sample.dynamicGlobalCap);
+    }
     if (!sample.approved && sample.rejectionReason) {
       orderCapacityWindow.rejectedByReason.set(
         sample.rejectionReason,
@@ -933,6 +993,13 @@ async function main(): Promise<void> {
     balanceRejectBlockMs: config.executionSellBalanceRejectBlockMs,
   });
   const reconcileTrigger: { fn: (() => void) | undefined } = { fn: undefined };
+  const executionProfileManagerRef: { current?: ExecutionProfileManager } = {};
+  const countProfileOwnedOpenPositions = (): number =>
+    repos.position
+      .findOpen()
+      .filter(
+        (position) => executionProfileManagerRef.current?.isProfileOwned(position.tokenId) ?? false,
+      ).length;
   const executionModule = new ExecutionModule({
     gateway: exchangeGateway,
     bus,
@@ -952,6 +1019,7 @@ async function main(): Promise<void> {
     executionPolicy: currentExecutionPolicy,
     allowSellSizeClamp: config.allowSellSizeClamp,
     capacityMetricsSink: recordOrderCapacitySample,
+    profileOwnedOpenPositionCount: countProfileOwnedOpenPositions,
     controlDb: controlConn.db,
     activeProfile: activeProfile as import("@krabs/domain").ProfileId,
     exchangeStateStore,
@@ -984,6 +1052,7 @@ async function main(): Promise<void> {
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     executionPolicy: currentExecutionPolicy,
     capacityMetricsSink: recordOrderCapacitySample,
+    profileOwnedOpenPositionCount: countProfileOwnedOpenPositions,
     redeemInFlightGuard: (conditionId) =>
       redeemSweepModule?.isConditionInRedeemFlight(conditionId) ?? false,
     runtimeMetrics,
@@ -1089,7 +1158,6 @@ async function main(): Promise<void> {
     config: currentExecutionPolicy().executionProfile.signalFeed,
     metrics: runtimeMetrics,
   });
-  const executionProfileManagerRef: { current?: ExecutionProfileManager } = {};
   const executionProfileRollup = new ExecutionProfileRollup({
     windowMs: currentExecutionPolicy().executionProfile.monitoring.rollupWindowMs,
     maxBuckets: currentExecutionPolicy().executionProfile.monitoring.maxRollupBuckets,

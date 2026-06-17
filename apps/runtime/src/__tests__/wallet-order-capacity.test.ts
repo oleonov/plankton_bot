@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  computeDynamicSellCapacityLimits,
   evaluateTotalOrdersCapacity,
   evaluateWalletBuyCapacity,
   evaluateWalletSellCapacity,
@@ -22,8 +23,13 @@ const buyPolicy: BuyCapacityPolicy = {
 
 const sellPolicy: SellCapacityPolicy = {
   enabled: true,
+  mode: "legacy_global",
   maxOpenSellOrders: 10,
   maxOpenSellOrdersPerToken: 2,
+  profileLadderLiveRungsPerPosition: 2,
+  minNonLadderReserve: 10,
+  nonLadderReserveRatio: 0.25,
+  hardMaxOpenSellOrders: 200,
 };
 
 const orderPolicy: OrderCapacityPolicy = {
@@ -86,5 +92,201 @@ describe("order capacity policy evaluators", () => {
 
     expect(controlDb.prepare).toHaveBeenCalledTimes(1);
     expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it("computes dynamic profile-ladder capacity from profile-owned open positions", () => {
+    const dynamicPolicy: SellCapacityPolicy = {
+      ...sellPolicy,
+      mode: "source_aware_dynamic",
+      profileLadderLiveRungsPerPosition: 2,
+      minNonLadderReserve: 10,
+      nonLadderReserveRatio: 0.25,
+      hardMaxOpenSellOrders: 200,
+    };
+
+    expect(
+      computeDynamicSellCapacityLimits({
+        policy: dynamicPolicy,
+        profileOwnedOpenPositionCount: 67,
+      }),
+    ).toMatchObject({
+      profileOwnedOpenPositionCount: 67,
+      profileLadderCapRaw: 134,
+      nonLadderReserve: 34,
+      dynamicGlobalCap: 168,
+      effectiveProfileLadderCap: 134,
+    });
+
+    expect(
+      computeDynamicSellCapacityLimits({
+        policy: dynamicPolicy,
+        profileOwnedOpenPositionCount: 11,
+      }).profileLadderCapRaw,
+    ).toBe(22);
+
+    expect(
+      computeDynamicSellCapacityLimits({
+        policy: dynamicPolicy,
+        profileOwnedOpenPositionCount: 9,
+      }).profileLadderCapRaw,
+    ).toBe(18);
+  });
+
+  it("protects the non-ladder reserve when hardMax truncates dynamic capacity", () => {
+    const dynamicPolicy: SellCapacityPolicy = {
+      ...sellPolicy,
+      mode: "source_aware_dynamic",
+      profileLadderLiveRungsPerPosition: 2,
+      minNonLadderReserve: 10,
+      nonLadderReserveRatio: 0.25,
+      hardMaxOpenSellOrders: 200,
+    };
+
+    const limits = computeDynamicSellCapacityLimits({
+      policy: dynamicPolicy,
+      profileOwnedOpenPositionCount: 100,
+    });
+    expect(limits).toMatchObject({
+      profileOwnedOpenPositionCount: 100,
+      profileLadderCapRaw: 200,
+      nonLadderReserve: 50,
+      dynamicGlobalCap: 200,
+      effectiveProfileLadderCap: 150,
+    });
+
+    const ladderDecision = evaluateWalletSellCapacity({
+      policy: dynamicPolicy,
+      source: "profile_ladder",
+      openSellOrderCount: 150,
+      openProfileLadderSellOrderCount: 150,
+      openNonProfileLadderSellOrderCount: 0,
+      profileOwnedOpenPositionCount: 100,
+    });
+    expect(ladderDecision.allowed).toBe(false);
+    expect(ladderDecision.rejectionDetail).toBe("profile_ladder_cap");
+    expect(ladderDecision.dynamic?.effectiveProfileLadderCap).toBe(150);
+
+    const d8Decision = evaluateWalletSellCapacity({
+      policy: dynamicPolicy,
+      source: "D8",
+      openSellOrderCount: 150,
+      openProfileLadderSellOrderCount: 150,
+      openNonProfileLadderSellOrderCount: 0,
+      profileOwnedOpenPositionCount: 100,
+    });
+    expect(d8Decision.allowed).toBe(true);
+  });
+
+  it("blocks profile_ladder at the dynamic cap while preserving non-ladder reserve", () => {
+    const dynamicPolicy: SellCapacityPolicy = {
+      ...sellPolicy,
+      mode: "source_aware_dynamic",
+      profileLadderLiveRungsPerPosition: 2,
+      minNonLadderReserve: 10,
+      nonLadderReserveRatio: 0.25,
+      hardMaxOpenSellOrders: 200,
+    };
+
+    const ladderDecision = evaluateWalletSellCapacity({
+      policy: dynamicPolicy,
+      source: "profile_ladder",
+      openSellOrderCount: 20,
+      openProfileLadderSellOrderCount: 20,
+      openNonProfileLadderSellOrderCount: 0,
+      profileOwnedOpenPositionCount: 10,
+    });
+    expect(ladderDecision.allowed).toBe(false);
+    expect(ladderDecision.dynamic?.profileLadderCapRaw).toBe(20);
+    expect(ladderDecision.dynamic?.effectiveProfileLadderCap).toBe(20);
+
+    const d8Decision = evaluateWalletSellCapacity({
+      policy: dynamicPolicy,
+      source: "D8",
+      openSellOrderCount: 20,
+      openProfileLadderSellOrderCount: 20,
+      openNonProfileLadderSellOrderCount: 0,
+      profileOwnedOpenPositionCount: 10,
+    });
+    expect(d8Decision.allowed).toBe(true);
+  });
+
+  it("keeps hardMaxOpenSellOrders as the final dynamic safety rail", () => {
+    const dynamicPolicy: SellCapacityPolicy = {
+      ...sellPolicy,
+      mode: "source_aware_dynamic",
+      profileLadderLiveRungsPerPosition: 2,
+      minNonLadderReserve: 10,
+      nonLadderReserveRatio: 0.25,
+      hardMaxOpenSellOrders: 21,
+    };
+
+    const decision = evaluateWalletSellCapacity({
+      policy: dynamicPolicy,
+      source: "D8",
+      openSellOrderCount: 21,
+      openProfileLadderSellOrderCount: 20,
+      openNonProfileLadderSellOrderCount: 1,
+      profileOwnedOpenPositionCount: 10,
+    });
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.dynamic?.dynamicGlobalCap).toBe(21);
+  });
+
+  it("clamps profile ladder capacity to zero when hardMax is below the reserve", () => {
+    const dynamicPolicy: SellCapacityPolicy = {
+      ...sellPolicy,
+      mode: "source_aware_dynamic",
+      profileLadderLiveRungsPerPosition: 2,
+      minNonLadderReserve: 10,
+      nonLadderReserveRatio: 0.25,
+      hardMaxOpenSellOrders: 8,
+    };
+
+    const limits = computeDynamicSellCapacityLimits({
+      policy: dynamicPolicy,
+      profileOwnedOpenPositionCount: 10,
+    });
+    expect(limits).toMatchObject({
+      profileLadderCapRaw: 20,
+      nonLadderReserve: 10,
+      dynamicGlobalCap: 8,
+      effectiveProfileLadderCap: 0,
+    });
+
+    const decision = evaluateWalletSellCapacity({
+      policy: dynamicPolicy,
+      source: "profile_ladder",
+      openSellOrderCount: 0,
+      openProfileLadderSellOrderCount: 0,
+      openNonProfileLadderSellOrderCount: 0,
+      profileOwnedOpenPositionCount: 10,
+    });
+    expect(decision.allowed).toBe(false);
+    expect(decision.rejectionDetail).toBe("profile_ladder_cap");
+  });
+
+  it("preserves legacy_global source-blind behavior", () => {
+    const legacyPolicy: SellCapacityPolicy = {
+      ...sellPolicy,
+      mode: "legacy_global",
+      profileLadderLiveRungsPerPosition: 2,
+      minNonLadderReserve: 10,
+      nonLadderReserveRatio: 0.25,
+      hardMaxOpenSellOrders: 200,
+    };
+
+    const decision = evaluateWalletSellCapacity({
+      policy: legacyPolicy,
+      source: "D8",
+      openSellOrderCount: 10,
+      openProfileLadderSellOrderCount: 10,
+      openNonProfileLadderSellOrderCount: 0,
+      profileOwnedOpenPositionCount: 10,
+    });
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.maxOpenSellOrders).toBe(10);
+    expect(decision.dynamic).toBeNull();
   });
 });

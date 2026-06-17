@@ -598,6 +598,122 @@ describe("ExecutionModule — wallet reservation rejection", () => {
     await mod.stop();
   });
 
+  it("uses source-aware capacity for direct profile_ladder PlaceOrderRequested", async () => {
+    orderRepo.findOpen = vi.fn().mockReturnValue(
+      Array.from({ length: 150 }, (_, index) =>
+        openOrderFromCommand(
+          makeSellCmd({
+            commandId: createCommandId(`existing-profile-ladder-${index}`),
+            clientOrderId: `plk_existing_profile_ladder_${index}` as ClientOrderId,
+            tokenId: createTokenId(`profile-ladder-token-${index}`),
+            decisionRuleId: "PROFILE_LADDER",
+            metadata: { source: "profile_ladder" },
+          }),
+          `ord-existing-profile-ladder-${index}`,
+        ),
+      ),
+    );
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () =>
+        executionPolicy({
+          sellCapacity: {
+            ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+            mode: "source_aware_dynamic",
+            profileLadderLiveRungsPerPosition: 2,
+            minNonLadderReserve: 10,
+            nonLadderReserveRatio: 0.25,
+            hardMaxOpenSellOrders: 200,
+          },
+        }),
+      profileOwnedOpenPositionCount: () => 100,
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd({
+        commandId: createCommandId("cmd-profile-ladder-dynamic-cap"),
+        clientOrderId: "plk_profile_ladder_dynamic_cap" as ClientOrderId,
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: { source: "profile_ladder" },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("wallet_sell_capacity_exhausted");
+
+    await mod.stop();
+  });
+
+  it("allows direct D8 PlaceOrderRequested when profile_ladder is at cap and reserve remains", async () => {
+    orderRepo.findOpen = vi.fn().mockReturnValue(
+      Array.from({ length: 150 }, (_, index) =>
+        openOrderFromCommand(
+          makeSellCmd({
+            commandId: createCommandId(`existing-profile-ladder-reserve-${index}`),
+            clientOrderId: `plk_existing_profile_ladder_reserve_${index}` as ClientOrderId,
+            tokenId: createTokenId(`profile-ladder-reserve-token-${index}`),
+            decisionRuleId: "PROFILE_LADDER",
+            metadata: { source: "profile_ladder" },
+          }),
+          `ord-existing-profile-ladder-reserve-${index}`,
+        ),
+      ),
+    );
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () =>
+        executionPolicy({
+          sellCapacity: {
+            ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+            mode: "source_aware_dynamic",
+            profileLadderLiveRungsPerPosition: 2,
+            minNonLadderReserve: 10,
+            nonLadderReserveRatio: 0.25,
+            hardMaxOpenSellOrders: 200,
+          },
+          orderCapacity: {
+            ...DEFAULT_EXECUTION_POLICY.orderCapacity,
+            maxOpenOrdersTotal: 250,
+          },
+        }),
+      profileOwnedOpenPositionCount: () => 100,
+    });
+
+    await mod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd({
+        commandId: createCommandId("cmd-d8-dynamic-reserve"),
+        clientOrderId: "plk_d8_dynamic_reserve" as ClientOrderId,
+        decisionRuleId: "D8_PROFIT_RATIO",
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    await mod.stop();
+  });
+
   it("enforces maxOpenOrdersTotal before placing BUY or SELL", async () => {
     orderRepo.findOpen = vi.fn().mockReturnValue([
       ...Array.from({ length: 12 }, (_, index) =>

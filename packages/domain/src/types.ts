@@ -733,13 +733,25 @@ export interface BuyCapacityPolicy {
   maxOpenBuyOrdersPerToken: number;
 }
 
+export type SellCapacityMode = "legacy_global" | "source_aware_dynamic";
+
 export interface SellCapacityPolicy {
   /** SELL-only open-order guard. BUY wallet reserves are configured separately. */
   enabled: boolean;
+  /** legacy_global preserves the original source-blind SELL cap; source_aware_dynamic splits ladder vs exits. */
+  mode: SellCapacityMode;
   /** Maximum pending/open SELL orders across the profile wallet. */
   maxOpenSellOrders: number;
   /** Maximum pending/open SELL orders for one token. */
   maxOpenSellOrdersPerToken: number;
+  /** Dynamic profile-ladder formula parameter: live rungs allowed per profile-owned open position. */
+  profileLadderLiveRungsPerPosition: number;
+  /** Minimum open SELL slots reserved for non-ladder exits when using source-aware dynamic mode. */
+  minNonLadderReserve: number;
+  /** Additional non-ladder reserve as a ratio of the computed profile-ladder cap. */
+  nonLadderReserveRatio: number;
+  /** Final source-aware dynamic SELL rail after formula expansion. */
+  hardMaxOpenSellOrders: number;
 }
 
 export interface OrderCapacityPolicy {

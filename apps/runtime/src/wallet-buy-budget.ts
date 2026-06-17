@@ -2,6 +2,7 @@ import {
   DEFAULT_BUY_CAPACITY_POLICY,
   DEFAULT_ORDER_CAPACITY_POLICY,
   DEFAULT_SELL_CAPACITY_POLICY,
+  S1_LADDER_RULE_ID,
   SignalReason,
   type BuyCapacityPolicy,
   type OrderCapacityPolicy,
@@ -25,6 +26,18 @@ const ADD_BUY_SIGNAL_REASONS: ReadonlySet<string> = new Set([
   SignalReason.ScaleIn,
   SignalReason.HeavyScale,
 ]);
+const RUNTIME_DEFAULT_SELL_CAPACITY_POLICY: SellCapacityPolicy = {
+  ...DEFAULT_SELL_CAPACITY_POLICY,
+  enabled: DEFAULT_SELL_CAPACITY_POLICY.enabled ?? true,
+  mode: DEFAULT_SELL_CAPACITY_POLICY.mode ?? "legacy_global",
+  maxOpenSellOrders: DEFAULT_SELL_CAPACITY_POLICY.maxOpenSellOrders ?? 10,
+  maxOpenSellOrdersPerToken: DEFAULT_SELL_CAPACITY_POLICY.maxOpenSellOrdersPerToken ?? 2,
+  profileLadderLiveRungsPerPosition:
+    DEFAULT_SELL_CAPACITY_POLICY.profileLadderLiveRungsPerPosition ?? 2,
+  minNonLadderReserve: DEFAULT_SELL_CAPACITY_POLICY.minNonLadderReserve ?? 10,
+  nonLadderReserveRatio: DEFAULT_SELL_CAPACITY_POLICY.nonLadderReserveRatio ?? 0.25,
+  hardMaxOpenSellOrders: DEFAULT_SELL_CAPACITY_POLICY.hardMaxOpenSellOrders ?? 200,
+};
 
 const walletBalanceReadCache = new WeakMap<
   WalletBudgetControlDb,
@@ -66,10 +79,16 @@ export interface WalletBuyCapacityDecision {
 export interface WalletSellCapacityDecision {
   allowed: boolean;
   reason: typeof WALLET_SELL_CAPACITY_EXHAUSTED_REASON | null;
+  rejectionDetail: SellCapacityRejectReason | null;
   openSellOrderCount: number;
+  openProfileLadderSellOrderCount: number;
+  openNonProfileLadderSellOrderCount: number;
   maxOpenSellOrders: number;
   maxOpenSellOrdersPerToken: number;
   capacityEnabled: boolean;
+  source: SellCapacitySource;
+  mode: SellCapacityPolicy["mode"];
+  dynamic: DynamicSellCapacityLimits | null;
 }
 
 export interface TotalOrdersCapacityDecision {
@@ -94,11 +113,36 @@ export interface OrderCapacityMetricsSample {
   side: OrderSide;
   approved: boolean;
   rejectionReason: string | null;
+  sellCapacitySource?: SellCapacitySource | undefined;
+  sellCapacityRejectReason?: SellCapacityRejectReason | null | undefined;
+  sellCapacityMode?: SellCapacityPolicy["mode"] | undefined;
+  profileOwnedOpenPositionCount?: number | undefined;
+  profileLadderCapRaw?: number | undefined;
+  effectiveProfileLadderCap?: number | undefined;
+  nonLadderReserve?: number | undefined;
+  dynamicGlobalCap?: number | undefined;
+  openProfileLadderSellOrderCount?: number | undefined;
+  openNonProfileLadderSellOrderCount?: number | undefined;
   openBuyOrderCount: number;
   openSellOrderCount: number;
   openOrdersTotal: number;
   perTokenOpenBuyOrderCount: number;
   perTokenOpenSellOrderCount: number;
+}
+
+export type SellCapacitySource = "profile_ladder" | "D8" | "D7" | "D9" | "S1" | "legacy" | "other";
+
+export type SellCapacityRejectReason =
+  | "legacy_global_cap"
+  | "profile_ladder_cap"
+  | "dynamic_global_cap";
+
+export interface DynamicSellCapacityLimits {
+  profileOwnedOpenPositionCount: number;
+  profileLadderCapRaw: number;
+  nonLadderReserve: number;
+  dynamicGlobalCap: number;
+  effectiveProfileLadderCap: number;
 }
 
 export function readWalletBalanceUsdc(
@@ -231,23 +275,120 @@ export function normalizeBuyCapacityPolicy(
 export function evaluateWalletSellCapacity(args: {
   policy: SellCapacityPolicy | null | undefined;
   openSellOrderCount: number;
+  source?: SellCapacitySource | undefined;
+  openProfileLadderSellOrderCount?: number | undefined;
+  openNonProfileLadderSellOrderCount?: number | undefined;
+  profileOwnedOpenPositionCount?: number | undefined;
 }): WalletSellCapacityDecision {
   const policy = normalizeSellCapacityPolicy(args.policy);
+  const source = args.source ?? "other";
+  const dynamic =
+    policy.mode === "source_aware_dynamic"
+      ? computeDynamicSellCapacityLimits({
+          policy,
+          profileOwnedOpenPositionCount: args.profileOwnedOpenPositionCount ?? 0,
+        })
+      : null;
+  const maxOpenSellOrders = dynamic?.dynamicGlobalCap ?? policy.maxOpenSellOrders;
   const base = {
     openSellOrderCount: args.openSellOrderCount,
-    maxOpenSellOrders: policy.maxOpenSellOrders,
+    openProfileLadderSellOrderCount: args.openProfileLadderSellOrderCount ?? 0,
+    openNonProfileLadderSellOrderCount: args.openNonProfileLadderSellOrderCount ?? 0,
+    maxOpenSellOrders,
     maxOpenSellOrdersPerToken: policy.maxOpenSellOrdersPerToken,
     capacityEnabled: policy.enabled,
+    source,
+    mode: policy.mode,
+    dynamic,
   };
 
-  if (
-    policy.enabled &&
-    policy.maxOpenSellOrders > 0 &&
-    args.openSellOrderCount >= policy.maxOpenSellOrders
-  ) {
-    return { ...base, allowed: false, reason: WALLET_SELL_CAPACITY_EXHAUSTED_REASON };
+  if (!policy.enabled) {
+    return { ...base, allowed: true, reason: null, rejectionDetail: null };
   }
-  return { ...base, allowed: true, reason: null };
+
+  if (policy.mode === "legacy_global") {
+    if (policy.maxOpenSellOrders > 0 && args.openSellOrderCount >= policy.maxOpenSellOrders) {
+      return {
+        ...base,
+        allowed: false,
+        reason: WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
+        rejectionDetail: "legacy_global_cap",
+      };
+    }
+    return { ...base, allowed: true, reason: null, rejectionDetail: null };
+  }
+
+  if (dynamic && args.openSellOrderCount >= dynamic.dynamicGlobalCap) {
+    return {
+      ...base,
+      allowed: false,
+      reason: WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
+      rejectionDetail: "dynamic_global_cap",
+    };
+  }
+
+  if (
+    source === "profile_ladder" &&
+    dynamic &&
+    (args.openProfileLadderSellOrderCount ?? 0) >= dynamic.effectiveProfileLadderCap
+  ) {
+    return {
+      ...base,
+      allowed: false,
+      reason: WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
+      rejectionDetail: "profile_ladder_cap",
+    };
+  }
+
+  return { ...base, allowed: true, reason: null, rejectionDetail: null };
+}
+
+export function computeDynamicSellCapacityLimits(args: {
+  policy: SellCapacityPolicy;
+  profileOwnedOpenPositionCount: number;
+}): DynamicSellCapacityLimits {
+  const profileOwnedOpenPositionCount = nonNegativeInt(args.profileOwnedOpenPositionCount);
+  const profileLadderCapRaw =
+    profileOwnedOpenPositionCount * nonNegativeInt(args.policy.profileLadderLiveRungsPerPosition);
+  const nonLadderReserve = Math.max(
+    nonNegativeInt(args.policy.minNonLadderReserve),
+    Math.ceil(profileLadderCapRaw * nonNegativeNumber(args.policy.nonLadderReserveRatio)),
+  );
+  const dynamicGlobalCap = Math.min(
+    profileLadderCapRaw + nonLadderReserve,
+    Math.max(1, nonNegativeInt(args.policy.hardMaxOpenSellOrders)),
+  );
+  const effectiveProfileLadderCap = Math.min(
+    profileLadderCapRaw,
+    Math.max(0, dynamicGlobalCap - nonLadderReserve),
+  );
+  return {
+    profileOwnedOpenPositionCount,
+    profileLadderCapRaw,
+    nonLadderReserve,
+    dynamicGlobalCap,
+    effectiveProfileLadderCap,
+  };
+}
+
+export function classifySellCapacitySource(input: {
+  decisionRuleId?: string | null | undefined;
+  signalReason?: string | null | undefined;
+  metadata?: Readonly<Record<string, unknown>> | null | undefined;
+}): SellCapacitySource {
+  const metadataSource =
+    typeof input.metadata?.source === "string" ? input.metadata.source.toLowerCase() : null;
+  const decisionRuleId = input.decisionRuleId ?? "";
+  const upperRule = decisionRuleId.toUpperCase();
+  if (decisionRuleId === "PROFILE_LADDER" || metadataSource === "profile_ladder") {
+    return "profile_ladder";
+  }
+  if (upperRule.includes("D8")) return "D8";
+  if (upperRule.includes("D7")) return "D7";
+  if (upperRule.includes("D9")) return "D9";
+  if (decisionRuleId === S1_LADDER_RULE_ID || metadataSource === "track_s1") return "S1";
+  if (metadataSource === "legacy") return "legacy";
+  return "other";
 }
 
 export function evaluateTotalOrdersCapacity(args: {
@@ -300,12 +441,30 @@ export function normalizeSellCapacityPolicy(
   policy: SellCapacityPolicy | null | undefined,
 ): SellCapacityPolicy {
   if (policy == null) {
-    return { ...DEFAULT_SELL_CAPACITY_POLICY, enabled: false };
+    return { ...RUNTIME_DEFAULT_SELL_CAPACITY_POLICY, enabled: false };
   }
   return {
-    ...DEFAULT_SELL_CAPACITY_POLICY,
+    ...RUNTIME_DEFAULT_SELL_CAPACITY_POLICY,
     ...policy,
+    mode: policy.mode ?? RUNTIME_DEFAULT_SELL_CAPACITY_POLICY.mode,
+    profileLadderLiveRungsPerPosition:
+      policy.profileLadderLiveRungsPerPosition ??
+      RUNTIME_DEFAULT_SELL_CAPACITY_POLICY.profileLadderLiveRungsPerPosition,
+    minNonLadderReserve:
+      policy.minNonLadderReserve ?? RUNTIME_DEFAULT_SELL_CAPACITY_POLICY.minNonLadderReserve,
+    nonLadderReserveRatio:
+      policy.nonLadderReserveRatio ?? RUNTIME_DEFAULT_SELL_CAPACITY_POLICY.nonLadderReserveRatio,
+    hardMaxOpenSellOrders:
+      policy.hardMaxOpenSellOrders ?? RUNTIME_DEFAULT_SELL_CAPACITY_POLICY.hardMaxOpenSellOrders,
   };
+}
+
+function nonNegativeInt(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+}
+
+function nonNegativeNumber(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
 export function normalizeOrderCapacityPolicy(

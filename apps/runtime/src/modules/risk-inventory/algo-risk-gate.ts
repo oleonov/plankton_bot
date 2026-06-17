@@ -20,6 +20,7 @@ import {
   evaluatePerTokenOrderCapacity,
   evaluateTotalOrdersCapacity,
   evaluateWalletSellCapacity,
+  classifySellCapacitySource,
   normalizeBuyCapacityPolicy,
   normalizeOrderCapacityPolicy,
   normalizeSellCapacityPolicy,
@@ -30,6 +31,7 @@ import {
   WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
   WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
   type OrderCapacityMetricsSample,
+  type SellCapacitySource,
   type WalletBuyBudgetConfig,
 } from "../../wallet-buy-budget.js";
 
@@ -40,13 +42,19 @@ export const CONDITION_REDEEM_IN_FLIGHT_REASON = "condition_redeem_in_flight";
 interface OpenOrderCounts {
   openBuyOrderCount: number;
   openSellOrderCount: number;
+  openProfileLadderSellOrderCount: number;
+  openNonProfileLadderSellOrderCount: number;
   openOrdersTotal: number;
   perTokenOpenBuyOrderCount: number;
   perTokenOpenSellOrderCount: number;
+  perTokenProfileLadderSellOrderCount: number;
+  perTokenNonProfileLadderSellOrderCount: number;
 }
 
 interface SellCapacityCounts {
   openSellOrderCount: number;
+  openProfileLadderSellOrderCount: number;
+  openNonProfileLadderSellOrderCount: number;
   openOrdersTotal: number;
   perTokenOpenSellOrderCount: number;
 }
@@ -65,6 +73,10 @@ function getOpenOrderCounts(orderRepo: OrderRepository, tokenId: TokenId): OpenO
   let openSellOrderCount = 0;
   let perTokenOpenBuyOrderCount = 0;
   let perTokenOpenSellOrderCount = 0;
+  let openProfileLadderSellOrderCount = 0;
+  let openNonProfileLadderSellOrderCount = 0;
+  let perTokenProfileLadderSellOrderCount = 0;
+  let perTokenNonProfileLadderSellOrderCount = 0;
 
   for (const order of openOrders) {
     if (order.side === "buy") {
@@ -72,6 +84,13 @@ function getOpenOrderCounts(orderRepo: OrderRepository, tokenId: TokenId): OpenO
       if (order.tokenId === tokenId) perTokenOpenBuyOrderCount += 1;
     } else {
       openSellOrderCount += 1;
+      if (classifySellCapacitySource(order) === "profile_ladder") {
+        openProfileLadderSellOrderCount += 1;
+        if (order.tokenId === tokenId) perTokenProfileLadderSellOrderCount += 1;
+      } else {
+        openNonProfileLadderSellOrderCount += 1;
+        if (order.tokenId === tokenId) perTokenNonProfileLadderSellOrderCount += 1;
+      }
       if (order.tokenId === tokenId) perTokenOpenSellOrderCount += 1;
     }
   }
@@ -79,20 +98,38 @@ function getOpenOrderCounts(orderRepo: OrderRepository, tokenId: TokenId): OpenO
   return {
     openBuyOrderCount,
     openSellOrderCount,
+    openProfileLadderSellOrderCount,
+    openNonProfileLadderSellOrderCount,
     openOrdersTotal: openOrders.length,
     perTokenOpenBuyOrderCount,
     perTokenOpenSellOrderCount,
+    perTokenProfileLadderSellOrderCount,
+    perTokenNonProfileLadderSellOrderCount,
   };
 }
 
 // SELL repricing is net-neutral: execution cancels the existing token SELL
 // before submitting the replacement, but risk-gate runs before that flow.
-function getReplacementAwareSellCounts(counts: OpenOrderCounts): SellCapacityCounts {
+function getReplacementAwareSellCounts(
+  counts: OpenOrderCounts,
+  source: SellCapacitySource,
+): SellCapacityCounts {
   if (counts.perTokenOpenSellOrderCount <= 0) {
     return counts;
   }
+  const profileReplacement =
+    source === "profile_ladder" && counts.perTokenProfileLadderSellOrderCount > 0;
+  const nonProfileReplacement =
+    source !== "profile_ladder" && counts.perTokenNonProfileLadderSellOrderCount > 0;
+  if (!profileReplacement && !nonProfileReplacement) return counts;
   return {
     openSellOrderCount: Math.max(0, counts.openSellOrderCount - 1),
+    openProfileLadderSellOrderCount: profileReplacement
+      ? Math.max(0, counts.openProfileLadderSellOrderCount - 1)
+      : counts.openProfileLadderSellOrderCount,
+    openNonProfileLadderSellOrderCount: nonProfileReplacement
+      ? Math.max(0, counts.openNonProfileLadderSellOrderCount - 1)
+      : counts.openNonProfileLadderSellOrderCount,
     openOrdersTotal: Math.max(0, counts.openOrdersTotal - 1),
     perTokenOpenSellOrderCount: Math.max(0, counts.perTokenOpenSellOrderCount - 1),
   };
@@ -113,6 +150,7 @@ export class AlgoRiskGateImpl implements RiskGate {
     private readonly redeemInFlightMetricsSink?:
       | ((sample: { side: "buy" | "sell"; conditionId: string }) => void)
       | undefined,
+    private readonly profileOwnedOpenPositionCount?: (() => number) | undefined,
   ) {}
 
   async evaluate(signal: Signal): Promise<RiskDecision> {
@@ -124,13 +162,26 @@ export class AlgoRiskGateImpl implements RiskGate {
     const buyPolicy = normalizeBuyCapacityPolicy(this.buyCapacityPolicy?.() ?? policy?.buyCapacity);
     const sellPolicy = normalizeSellCapacityPolicy(policy?.sellCapacity);
     const orderPolicy = normalizeOrderCapacityPolicy(policy?.orderCapacity);
+    const sellCapacitySource = classifySellCapacitySource(signal);
 
-    const finish = (approved: boolean, reason: string | null = null): RiskDecision => {
+    const finish = (
+      approved: boolean,
+      reason: string | null = null,
+      sellCapacity?: ReturnType<typeof evaluateWalletSellCapacity>,
+    ): RiskDecision => {
       this.capacityMetricsSink?.({
         source: "risk_gate",
         side: signal.side,
         approved,
         rejectionReason: reason,
+        sellCapacitySource: signal.side === "sell" ? sellCapacitySource : undefined,
+        sellCapacityRejectReason: sellCapacity?.rejectionDetail ?? null,
+        sellCapacityMode: sellCapacity?.mode,
+        profileOwnedOpenPositionCount: sellCapacity?.dynamic?.profileOwnedOpenPositionCount,
+        profileLadderCapRaw: sellCapacity?.dynamic?.profileLadderCapRaw,
+        effectiveProfileLadderCap: sellCapacity?.dynamic?.effectiveProfileLadderCap,
+        nonLadderReserve: sellCapacity?.dynamic?.nonLadderReserve,
+        dynamicGlobalCap: sellCapacity?.dynamic?.dynamicGlobalCap,
         ...counts,
       });
       return this.decision(signal, approved, rejected, passed);
@@ -149,14 +200,18 @@ export class AlgoRiskGateImpl implements RiskGate {
 
     // Sell signals bypass BUY entry checks, but still respect SELL/total caps.
     if (!isBuy) {
-      const sellCounts = getReplacementAwareSellCounts(counts);
+      const sellCounts = getReplacementAwareSellCounts(counts, sellCapacitySource);
       const sellCapacity = evaluateWalletSellCapacity({
         policy: sellPolicy,
+        source: sellCapacitySource,
         openSellOrderCount: sellCounts.openSellOrderCount,
+        openProfileLadderSellOrderCount: sellCounts.openProfileLadderSellOrderCount,
+        openNonProfileLadderSellOrderCount: sellCounts.openNonProfileLadderSellOrderCount,
+        profileOwnedOpenPositionCount: this.profileOwnedOpenPositionCount?.() ?? 0,
       });
       if (!sellCapacity.allowed) {
         rejected.push(WALLET_SELL_CAPACITY_EXHAUSTED_REASON);
-        return finish(false, WALLET_SELL_CAPACITY_EXHAUSTED_REASON);
+        return finish(false, WALLET_SELL_CAPACITY_EXHAUSTED_REASON, sellCapacity);
       }
       passed.push("wallet_sell_capacity_ok");
 
@@ -168,13 +223,13 @@ export class AlgoRiskGateImpl implements RiskGate {
       });
       if (!perTokenSell.allowed) {
         rejected.push(PER_TOKEN_SELL_LIMIT_REASON);
-        return finish(false, PER_TOKEN_SELL_LIMIT_REASON);
+        return finish(false, PER_TOKEN_SELL_LIMIT_REASON, sellCapacity);
       }
       passed.push("per_token_sell_capacity_ok");
 
       if (this.isSellResidualBelowMinSize(signal)) {
         rejected.push(SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON);
-        return finish(false, SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON);
+        return finish(false, SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON, sellCapacity);
       }
       passed.push("sell_residual_min_size_ok");
 
@@ -184,11 +239,11 @@ export class AlgoRiskGateImpl implements RiskGate {
       });
       if (!totalCapacity.allowed) {
         rejected.push(TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON);
-        return finish(false, TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON);
+        return finish(false, TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON, sellCapacity);
       }
       passed.push("total_order_capacity_ok");
       passed.push("sell_signal_bypass");
-      return finish(true);
+      return finish(true, null, sellCapacity);
     }
 
     // 1. Token-level open-order cap for BUY.

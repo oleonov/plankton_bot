@@ -1,4 +1,5 @@
 import type { FillRepository, Order, TokenId } from "@krabs/domain";
+import { classifySellCapacitySource } from "../../wallet-buy-budget.js";
 
 const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
 type ReservationFillLookup = Pick<FillRepository, "findByOrderId" | "findByOrderIds">;
@@ -8,12 +9,17 @@ export interface PendingReservation {
   side: "buy" | "sell";
   size: number;
   price: number;
+  decisionRuleId?: string | null | undefined;
+  signalReason?: string | null | undefined;
+  metadata?: Readonly<Record<string, unknown>> | null | undefined;
 }
 
 export interface ReservationSnapshot {
   reservedBuyUsdc: number;
   openBuyOrderCount: number;
   openSellOrderCount: number;
+  openProfileLadderSellOrderCount: number;
+  openNonProfileLadderSellOrderCount: number;
   openOrdersTotal: number;
   openBuyOrdersByToken: Map<string, number>;
   openSellOrdersByToken: Map<string, number>;
@@ -29,6 +35,8 @@ export function buildReservationSnapshot(
     reservedBuyUsdc: 0,
     openBuyOrderCount: 0,
     openSellOrderCount: 0,
+    openProfileLadderSellOrderCount: 0,
+    openNonProfileLadderSellOrderCount: 0,
     openOrdersTotal: 0,
     openBuyOrdersByToken: new Map(),
     openSellOrdersByToken: new Map(),
@@ -43,6 +51,9 @@ export function buildReservationSnapshot(
       side: order.side,
       size: getRemainingOrderSize(order, filledSizeByOrderId),
       price: order.price,
+      decisionRuleId: order.decisionRuleId,
+      signalReason: order.signalReason,
+      metadata: order.metadata,
     });
   }
 
@@ -98,6 +109,12 @@ function addReservation(snapshot: ReservationSnapshot, reservation: PendingReser
     return;
   }
   snapshot.openSellOrderCount += 1;
+  const source = classifySellCapacitySource(reservation);
+  if (source === "profile_ladder") {
+    snapshot.openProfileLadderSellOrderCount += 1;
+  } else {
+    snapshot.openNonProfileLadderSellOrderCount += 1;
+  }
   increment(snapshot.openSellOrdersByToken, reservation.tokenId);
   const key = String(reservation.tokenId);
   snapshot.reservedSellByToken.set(

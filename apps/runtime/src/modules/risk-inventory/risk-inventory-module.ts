@@ -66,6 +66,7 @@ export interface RiskInventoryModuleDeps {
   walletBufferMinUsdc?: number | undefined;
   executionPolicy?: (() => ExecutionPolicy) | undefined;
   capacityMetricsSink?: ((sample: OrderCapacityMetricsSample) => void) | undefined;
+  profileOwnedOpenPositionCount?: (() => number) | undefined;
   redeemInFlightGuard?: ((conditionId: string) => boolean) | undefined;
   runtimeMetrics?: RuntimeMetricWriter | undefined;
   runtimeControl?: RuntimeControl | undefined;
@@ -145,6 +146,7 @@ export class RiskInventoryModule implements RuntimeModule {
           JSON.stringify({ side: sample.side, condition_id: sample.conditionId }),
           new Date(deps.now?.() ?? Date.now()).toISOString(),
         ),
+      deps.profileOwnedOpenPositionCount,
     );
     this.inventory = new InventoryHandler(
       deps.positionRepo,

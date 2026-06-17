@@ -207,8 +207,13 @@ describe("control-db migration infrastructure", () => {
       });
       expect(parsed.sellCapacity).toEqual({
         enabled: true,
+        mode: "legacy_global",
         maxOpenSellOrders: 10,
         maxOpenSellOrdersPerToken: 2,
+        profileLadderLiveRungsPerPosition: 2,
+        minNonLadderReserve: 10,
+        nonLadderReserveRatio: 0.25,
+        hardMaxOpenSellOrders: 200,
       });
       expect(parsed.orderCapacity).toEqual({
         enabled: true,

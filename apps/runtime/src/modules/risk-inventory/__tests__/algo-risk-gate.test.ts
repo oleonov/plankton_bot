@@ -630,6 +630,95 @@ describe("AlgoRiskGateImpl", () => {
     expect(decision.approved).toBe(true);
   });
 
+  it("blocks profile_ladder SELLs after the dynamic profile-ladder cap", async () => {
+    const orders = Array.from({ length: 150 }, (_, index) =>
+      makeOpenSellOrder({
+        orderId: `profile-ladder-cap-${index}` as any,
+        clientOrderId: `profile-ladder-cap-cl-${index}` as any,
+        tokenId: createTokenId(`profile-ladder-cap-token-${index}`),
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: { source: "profile_ladder" },
+      }),
+    );
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(makeOpenPosition()),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () =>
+        makeExecutionPolicy({
+          sellCapacity: {
+            ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+            mode: "source_aware_dynamic",
+            profileLadderLiveRungsPerPosition: 2,
+            minNonLadderReserve: 10,
+            nonLadderReserveRatio: 0.25,
+            hardMaxOpenSellOrders: 200,
+          },
+        }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => 100,
+    );
+
+    const decision = await gate.evaluate(
+      makeSignal({ side: "sell", reason: "repricing-exit", decisionRuleId: "PROFILE_LADDER" }),
+    );
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("wallet_sell_capacity_exhausted");
+  });
+
+  it("allows D8 when profile_ladder is at its dynamic cap but reserve remains", async () => {
+    const orders = Array.from({ length: 150 }, (_, index) =>
+      makeOpenSellOrder({
+        orderId: `profile-ladder-reserve-${index}` as any,
+        clientOrderId: `profile-ladder-reserve-cl-${index}` as any,
+        tokenId: createTokenId(`profile-ladder-reserve-token-${index}`),
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: { source: "profile_ladder" },
+      }),
+    );
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(makeOpenPosition()),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () =>
+        makeExecutionPolicy({
+          sellCapacity: {
+            ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+            mode: "source_aware_dynamic",
+            profileLadderLiveRungsPerPosition: 2,
+            minNonLadderReserve: 10,
+            nonLadderReserveRatio: 0.25,
+            hardMaxOpenSellOrders: 200,
+          },
+          orderCapacity: {
+            ...DEFAULT_EXECUTION_POLICY.orderCapacity,
+            maxOpenOrdersTotal: 250,
+          },
+        }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => 100,
+    );
+
+    const decision = await gate.evaluate(
+      makeSignal({ side: "sell", reason: "repricing-exit", decisionRuleId: "D8_PROFIT_RATIO" }),
+    );
+
+    expect(decision.approved).toBe(true);
+  });
+
   it("allows SELL when BUY capacity is exhausted", async () => {
     const gate = new AlgoRiskGateImpl(
       makeOrderRepo([makeOpenBuyOrder(), { ...makeOpenBuyOrder(), orderId: "ord-2" as any }]),
