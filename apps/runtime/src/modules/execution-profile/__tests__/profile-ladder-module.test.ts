@@ -864,6 +864,119 @@ describe("ProfileLadderModule", () => {
     });
   });
 
+  it("periodically retries a planned-only ladder after an unknown-min miss without a new market update", async () => {
+    vi.useFakeTimers();
+    try {
+      let nowMs = NOW;
+      const bookCache = {
+        getFreshOrRefresh: vi
+          .fn()
+          .mockResolvedValueOnce({
+            entry: null,
+            status: "cache-miss" as const,
+          })
+          .mockResolvedValue({
+            entry: {
+              tokenId: String(tokenId),
+              snapshotTs: nowMs,
+              cachedAtMs: nowMs,
+              sourcePolledAtMs: nowMs,
+              bookSource: "clob" as const,
+              sourceKind: "rest" as const,
+              book: orderBook({ minOrderSize: 5, timestamp: nowMs }),
+            },
+            status: "refreshed" as const,
+          }),
+      };
+      const ctx = setup(policy(), {
+        modeReader: { getMode: () => "flat" },
+        bookCache,
+        now: () => nowMs,
+      });
+      ctx.repo.upsertLadder(
+        ladderState({
+          activeRungs: [rung({ lifecycle: "planned", orderId: null })],
+        }),
+      );
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ minOrderSize: null })],
+        timestamp: nowMs,
+      });
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(bookCache.getFreshOrRefresh).toHaveBeenCalledTimes(1);
+
+      nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+      await vi.advanceTimersByTimeAsync(PLANNED_RUNG_RETRY_MS + 1);
+
+      expect(bookCache.getFreshOrRefresh).toHaveBeenCalledTimes(2);
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.orders[0]?.metadata).toMatchObject({
+        cacheStatus: "refreshed",
+        marketData: {
+          minOrderSize: 5,
+          effectiveMinOrderSize: 5,
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the planned-rung recovery timer on stop", async () => {
+    vi.useFakeTimers();
+    try {
+      let nowMs = NOW;
+      const bookCache = {
+        getFreshOrRefresh: vi
+          .fn()
+          .mockResolvedValueOnce({
+            entry: null,
+            status: "cache-miss" as const,
+          })
+          .mockResolvedValue({
+            entry: {
+              tokenId: String(tokenId),
+              snapshotTs: nowMs,
+              cachedAtMs: nowMs,
+              sourcePolledAtMs: nowMs,
+              bookSource: "clob" as const,
+              sourceKind: "rest" as const,
+              book: orderBook({ minOrderSize: 5, timestamp: nowMs }),
+            },
+            status: "refreshed" as const,
+          }),
+      };
+      const ctx = setup(policy(), {
+        modeReader: { getMode: () => "flat" },
+        bookCache,
+        now: () => nowMs,
+      });
+      ctx.repo.upsertLadder(
+        ladderState({
+          activeRungs: [rung({ lifecycle: "planned", orderId: null })],
+        }),
+      );
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ minOrderSize: null })],
+        timestamp: nowMs,
+      });
+      await ctx.module.stop();
+
+      nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+      await vi.advanceTimersByTimeAsync(PLANNED_RUNG_RETRY_MS + 1);
+
+      expect(bookCache.getFreshOrRefresh).toHaveBeenCalledTimes(1);
+      expect(ctx.orders).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rate-limits unknown-min planned rung retries without restart", async () => {
     let nowMs = NOW;
     const ctx = setup(policy(), {
@@ -1312,8 +1425,9 @@ describe("ProfileLadderModule", () => {
       });
     });
 
-    it("keeps cap=1 while the pending rung exists across repeated rebuild attempts", async () => {
-      const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+    it("keeps cap=1 and rate-limits telemetry while the pending rung blocks rebuilds", async () => {
+      let nowMs = NOW;
+      const ctx = setup(policy(), { modeReader: { getMode: () => "flat" }, now: () => nowMs });
       await placePendingRung(ctx);
 
       await ctx.module.rebuildLadder(position({ avgEntryPrice: 0.12 }), market(), "scale_in");
@@ -1322,6 +1436,16 @@ describe("ProfileLadderModule", () => {
         market(),
         "profile_reclass",
       );
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(
+        ctx.counters.filter(
+          (counter) => counter.name === "profile_ladder_rebuild_deferred_due_pending_order",
+        ),
+      ).toHaveLength(1);
+
+      nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+      await ctx.module.rebuildLadder(position({ avgEntryPrice: 0.14 }), market(), "scale_in");
 
       expect(ctx.orders).toHaveLength(1);
       expect(
@@ -1849,6 +1973,116 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
       adopted_count: 0,
       skipped_missing_market: 1,
     });
+  });
+
+  it("recovers a profile-owned position skipped for missing market on a later market update", async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = setup(adoptionPolicy(), {
+        positionRepo: { findOpen: () => [position()] },
+        orderRepo: { findByTokenId: () => [] },
+        isProfileOwned: () => true,
+      });
+
+      await ctx.module.start();
+      await ctx.module.adoptExistingLadders();
+      for (let i = 1; i < MAX_ADOPTION_ATTEMPTS; i += 1) {
+        await vi.advanceTimersByTimeAsync(ADOPTION_RETRY_MS + 1);
+      }
+
+      expect(ctx.repo.getLadder(tokenId)).toBeNull();
+      expect(ctx.orders).toHaveLength(0);
+      expect(
+        ctx.riskEvents.filter((event) => event.eventType === "ladder_adoption_summary"),
+      ).toHaveLength(MAX_ADOPTION_ATTEMPTS);
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market()],
+        timestamp: NOW + 1_000,
+      });
+
+      expect(ctx.repo.getLadder(tokenId)).toMatchObject({ band: "medium_low", lastMode: "flat" });
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.counters).toContainEqual({
+        name: "profile_ladder_adopted",
+        value: 1,
+        labels: '{"band":"medium_low"}',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not recover a missing ladder while an existing non-profile SELL order is open", async () => {
+    vi.useFakeTimers();
+    try {
+      let hasBlockingSell = true;
+      const ctx = setup(adoptionPolicy(), {
+        positionRepo: { findOpen: () => [position()] },
+        orderRepo: { findByTokenId: () => (hasBlockingSell ? [openSellOrder()] : []) },
+        isProfileOwned: () => true,
+      });
+
+      await ctx.module.start();
+      await ctx.module.adoptExistingLadders();
+      for (let i = 1; i < MAX_ADOPTION_ATTEMPTS; i += 1) {
+        await vi.advanceTimersByTimeAsync(ADOPTION_RETRY_MS + 1);
+      }
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market()],
+        timestamp: NOW + 1_000,
+      });
+
+      expect(ctx.repo.getLadder(tokenId)).toBeNull();
+      expect(ctx.orders).toHaveLength(0);
+
+      hasBlockingSell = false;
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market()],
+        timestamp: NOW + 2_000,
+      });
+
+      expect(ctx.repo.getLadder(tokenId)).toBeNull();
+      expect(ctx.orders).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not recover a missing ladder from an invalid BBO and cooldown-gates immediate retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = setup(adoptionPolicy(), {
+        positionRepo: { findOpen: () => [position()] },
+        orderRepo: { findByTokenId: () => [] },
+        isProfileOwned: () => true,
+      });
+
+      await ctx.module.start();
+      await ctx.module.adoptExistingLadders();
+      for (let i = 1; i < MAX_ADOPTION_ATTEMPTS; i += 1) {
+        await vi.advanceTimersByTimeAsync(ADOPTION_RETRY_MS + 1);
+      }
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ bestBid: 0.12, bestAsk: 0.11 })],
+        timestamp: NOW + 1_000,
+      });
+
+      expect(ctx.repo.getLadder(tokenId)).toBeNull();
+      expect(ctx.orders).toHaveLength(0);
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market()],
+        timestamp: NOW + 2_000,
+      });
+
+      expect(ctx.repo.getLadder(tokenId)).toBeNull();
+      expect(ctx.orders).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("skips adoption when a ladder already exists for the token", async () => {

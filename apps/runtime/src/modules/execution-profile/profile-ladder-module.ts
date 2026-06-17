@@ -151,12 +151,15 @@ export class ProfileLadderModule implements RuntimeModule {
     { tokenId: TokenId; ladderId: string; rungIndex: number }
   >();
   private readonly plannedRungRetryCooldownUntilByToken = new Map<string, number>();
+  private readonly missingLadderRecoveryCooldownUntilByToken = new Map<string, number>();
+  private readonly pendingRebuildDeferCooldownUntilByToken = new Map<string, number>();
   // Plankton post-fill REST: one bounded reevaluation timer per token. A SELL
   // fill never places the next rung inline; it schedules a delayed reevaluation.
   private readonly postFillTimerByToken = new Map<string, ReturnType<typeof setTimeout>>();
   private started = false;
   private adoptionDone = false;
   private adoptionTimer: ReturnType<typeof setTimeout> | undefined;
+  private plannedRungRecoveryTimer: ReturnType<typeof setInterval> | undefined;
   private adoptionAttemptCount = 0;
   private adoptExistingEnabled = false;
   private policyReloadUnsubscribe: (() => void) | undefined;
@@ -191,6 +194,7 @@ export class ProfileLadderModule implements RuntimeModule {
     this.started = true;
     this.adoptExistingEnabled = this.policy().adoptExisting.enabled;
     this.ensurePolicyReloadSubscription();
+    this.startPlannedRungRecoveryTimer();
     this.scheduleAdoption();
   }
 
@@ -202,9 +206,15 @@ export class ProfileLadderModule implements RuntimeModule {
       clearTimeout(this.adoptionTimer);
       this.adoptionTimer = undefined;
     }
+    if (this.plannedRungRecoveryTimer != null) {
+      clearInterval(this.plannedRungRecoveryTimer);
+      this.plannedRungRecoveryTimer = undefined;
+    }
     for (const timer of this.postFillTimerByToken.values()) clearTimeout(timer);
     this.postFillTimerByToken.clear();
     this.plannedRungRetryCooldownUntilByToken.clear();
+    this.missingLadderRecoveryCooldownUntilByToken.clear();
+    this.pendingRebuildDeferCooldownUntilByToken.clear();
     this.adoptionDone = false;
     this.adoptionAttemptCount = 0;
     this.adoptExistingEnabled = false;
@@ -397,7 +407,7 @@ export class ProfileLadderModule implements RuntimeModule {
     if (this.hasPendingRungForToken(position.tokenId)) {
       const band = existing?.band ?? resolveLadderBand(position.avgEntryPrice, this.policy().bands);
       if (band != null) {
-        this.writeCounter("profile_ladder_rebuild_deferred_due_pending_order", 1, { band });
+        this.writePendingRebuildDeferredCounter(position.tokenId, band);
       }
       return;
     }
@@ -455,7 +465,10 @@ export class ProfileLadderModule implements RuntimeModule {
     for (const market of event.markets) {
       this.marketByToken.set(String(market.tokenId), market);
       const state = this.deps.repository.getLadder(market.tokenId);
-      if (state == null) continue;
+      if (state == null) {
+        await this.recoverMissingAdoptedLadderIfReady(market);
+        continue;
+      }
       if (this.isDormant(market.tokenId)) {
         this.writeCounter("ladder_rebuild_skipped_dormant", 1);
         continue;
@@ -620,6 +633,24 @@ export class ProfileLadderModule implements RuntimeModule {
     return { placed, skippedUnknownMinOrderSize, attempted };
   }
 
+  private startPlannedRungRecoveryTimer(): void {
+    if (this.plannedRungRecoveryTimer != null) return;
+    this.plannedRungRecoveryTimer = setInterval(() => {
+      void this.retryPlannedLiveRungsForCachedMarkets();
+    }, PLANNED_RUNG_RETRY_MS);
+    this.plannedRungRecoveryTimer.unref?.();
+  }
+
+  private async retryPlannedLiveRungsForCachedMarkets(): Promise<void> {
+    for (const state of this.deps.repository.findActive()) {
+      if (this.isDormant(state.tokenId)) continue;
+      if (this.postFillTimerByToken.has(String(state.tokenId))) continue;
+      const market = this.marketByToken.get(String(state.tokenId));
+      if (market == null) continue;
+      await this.retryPlannedLiveRungsIfReady(state, market);
+    }
+  }
+
   private async retryPlannedLiveRungsIfReady(
     state: LadderState,
     market: NormalizedMarket,
@@ -635,6 +666,7 @@ export class ProfileLadderModule implements RuntimeModule {
 
   private canRetryPlannedLiveRungs(state: LadderState): boolean {
     if (state.status !== "active") return false;
+    if (this.postFillTimerByToken.has(String(state.tokenId))) return false;
     if (this.isPlannedRungRetryCooldownActive(state.tokenId)) return false;
     if (!state.activeRungs.some((rung) => rung.lifecycle === "planned" && rung.orderId == null)) {
       return false;
@@ -652,6 +684,72 @@ export class ProfileLadderModule implements RuntimeModule {
 
   private armPlannedRungRetryCooldown(tokenId: TokenId, now: number): void {
     this.plannedRungRetryCooldownUntilByToken.set(String(tokenId), now + PLANNED_RUNG_RETRY_MS);
+  }
+
+  private async recoverMissingAdoptedLadderIfReady(market: NormalizedMarket): Promise<void> {
+    const sellLadder = this.policy();
+    if (!sellLadder.enabled || !sellLadder.adoptExisting.enabled) return;
+    if (!this.adoptionDone) return;
+    if (this.deps.positionRepo == null || this.deps.isProfileOwned == null) return;
+    const tokenKey = String(market.tokenId);
+    if ((this.missingLadderRecoveryCooldownUntilByToken.get(tokenKey) ?? 0) > this.now()) return;
+    if (this.isDormant(market.tokenId)) return;
+    if (!this.deps.isProfileOwned(market.tokenId)) return;
+    if (!isValidLadderBbo(market.bestBid, market.bestAsk)) {
+      this.armMissingLadderRecoveryCooldown(market.tokenId);
+      return;
+    }
+    if (this.hasOpenSellOrder(market.tokenId)) {
+      this.armMissingLadderRecoveryCooldown(market.tokenId);
+      return;
+    }
+
+    const position = this.findOpenPosition(market.tokenId);
+    if (position == null) return;
+    const band = resolveLadderBand(position.avgEntryPrice, sellLadder.bands);
+    if (band == null || !sellLadder.bands[band].enabled) {
+      this.armMissingLadderRecoveryCooldown(market.tokenId);
+      return;
+    }
+
+    const result = await this.buildAndPlace(position, market, "ladder_adopted", "flat");
+    if (result == null) {
+      this.armMissingLadderRecoveryCooldown(market.tokenId);
+      return;
+    }
+    const { state } = result;
+    this.writeCounter("profile_ladder_adopted", 1, { band: state.band });
+    this.insertRiskEvent("ladder_adopted", {
+      tokenId: String(state.tokenId),
+      conditionId: String(state.conditionId),
+      band: state.band,
+      rungCount: state.activeRungs.length,
+      ladderId: state.ladderId,
+      source: "adopted_recovery",
+    });
+  }
+
+  private findOpenPosition(tokenId: TokenId): Position | null {
+    const tokenKey = String(tokenId);
+    return (
+      this.deps.positionRepo
+        ?.findOpen()
+        .find((position) => String(position.tokenId) === tokenKey && position.size > 0) ?? null
+    );
+  }
+
+  private armMissingLadderRecoveryCooldown(tokenId: TokenId): void {
+    this.missingLadderRecoveryCooldownUntilByToken.set(
+      String(tokenId),
+      this.now() + PLANNED_RUNG_RETRY_MS,
+    );
+  }
+
+  private writePendingRebuildDeferredCounter(tokenId: TokenId, band: ProfileLadderBand): void {
+    const tokenKey = String(tokenId);
+    if ((this.pendingRebuildDeferCooldownUntilByToken.get(tokenKey) ?? 0) > this.now()) return;
+    this.pendingRebuildDeferCooldownUntilByToken.set(tokenKey, this.now() + PLANNED_RUNG_RETRY_MS);
+    this.writeCounter("profile_ladder_rebuild_deferred_due_pending_order", 1, { band });
   }
 
   private resolveLiveRungCap(band: ProfileLadderBand): number {
