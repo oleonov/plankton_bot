@@ -16,6 +16,7 @@ import {
   type LadderState,
   type NormalizedMarket,
   type Order,
+  type OrderBookSnapshot,
   type PlaceOrderCommand,
   type Position,
   type RuntimeEventMap,
@@ -30,6 +31,7 @@ import {
   MAX_ADOPTION_ATTEMPTS,
   PLANNED_RUNG_RETRY_MS,
   ProfileLadderModule,
+  type ProfileLadderBookCache,
 } from "../profile-ladder-module.js";
 import type { ProfileLadderRepository } from "../profile-ladder-repository.js";
 import type { ExecutionProfilePolicy } from "../types.js";
@@ -164,6 +166,21 @@ function market(overrides: Partial<NormalizedMarket> = {}): NormalizedMarket {
     bookSource: "clob",
     gammaCreatedAt: null,
     snapshotTs: NOW,
+    ...overrides,
+  };
+}
+
+function orderBook(overrides: Partial<OrderBookSnapshot> = {}): OrderBookSnapshot {
+  return {
+    tokenId,
+    bids: [{ price: 0.09, size: 100 }],
+    asks: [{ price: 0.11, size: 100 }],
+    bestBid: 0.09,
+    bestAsk: 0.11,
+    midPrice: 0.1,
+    spread: 0.02,
+    minOrderSize: 5,
+    timestamp: NOW,
     ...overrides,
   };
 }
@@ -353,6 +370,7 @@ function setup(
     orderRepo?: { findByTokenId: (token: TokenId) => Order[] };
     isProfileOwned?: (token: TokenId) => boolean;
     onPolicyReload?: (handler: () => void) => () => void;
+    bookCache?: ProfileLadderBookCache;
     now?: () => number;
   } = {},
 ) {
@@ -640,10 +658,14 @@ describe("ProfileLadderModule", () => {
   });
 
   it("places ladder orders with calibrated rung count and metadata", async () => {
-    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+    const bookCache = {
+      getFreshOrRefresh: vi.fn(),
+    };
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" }, bookCache });
 
     await ctx.module.placeLadder(position(), market());
 
+    expect(bookCache.getFreshOrRefresh).not.toHaveBeenCalled();
     // Cap=1: only the lowest-price rung is submitted live...
     expect(ctx.orders).toHaveLength(1);
     expect(ctx.orders[0]).toMatchObject({
@@ -661,7 +683,9 @@ describe("ProfileLadderModule", () => {
           minOrderSize: 1,
           effectiveMinOrderSize: 1,
           tickSize: 0.001,
+          cacheStatus: "base-market",
         },
+        cacheStatus: "base-market",
       },
     });
     // ...while the full calibrated vector is persisted for later recompute.
@@ -690,6 +714,72 @@ describe("ProfileLadderModule", () => {
     expect(ctx.counters).toContainEqual({
       name: "profile_ladder_placed_live_rungs",
       value: 0,
+      labels: '{"band":"medium_low"}',
+    });
+  });
+
+  it("hydrates missing min order size from the shared candidate book cache", async () => {
+    const bookCache = {
+      getFreshOrRefresh: vi.fn(async () => ({
+        entry: {
+          tokenId: String(tokenId),
+          snapshotTs: NOW,
+          cachedAtMs: NOW,
+          sourcePolledAtMs: NOW,
+          bookSource: "clob" as const,
+          sourceKind: "rest" as const,
+          book: orderBook({ minOrderSize: 5 }),
+        },
+        status: "refreshed" as const,
+      })),
+    };
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" }, bookCache });
+
+    await ctx.module.placeLadder(position(), market({ minOrderSize: null }));
+
+    expect(bookCache.getFreshOrRefresh).toHaveBeenCalledWith(String(tokenId), NOW);
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.metadata).toMatchObject({
+      cacheStatus: "refreshed",
+      marketData: {
+        bookSource: "clob",
+        minOrderSize: 5,
+        effectiveMinOrderSize: 5,
+        tickSize: 0.001,
+        cacheStatus: "refreshed",
+      },
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_min_order_size_hydrated_from_book_cache",
+      value: 1,
+      labels: '{"band":"medium_low","source":"refreshed"}',
+    });
+  });
+
+  it("keeps rung planned when candidate book cache misses min order size", async () => {
+    const bookCache = {
+      getFreshOrRefresh: vi.fn(async () => ({
+        entry: null,
+        status: "cache-miss" as const,
+      })),
+    };
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" }, bookCache });
+
+    await ctx.module.placeLadder(position(), market({ minOrderSize: null }));
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+      lifecycle: "planned",
+      orderId: null,
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_min_order_size_hydration_miss",
+      value: 1,
+      labels: '{"band":"medium_low"}',
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_skipped_unknown_min_order_size",
+      value: 1,
       labels: '{"band":"medium_low"}',
     });
   });
@@ -726,6 +816,50 @@ describe("ProfileLadderModule", () => {
         minOrderSize: 5,
         effectiveMinOrderSize: 5,
         tickSize: 0.001,
+      },
+    });
+  });
+
+  it("recovers an existing planned-only ladder from candidate book cache min order size", async () => {
+    let nowMs = NOW;
+    const bookCache = {
+      getFreshOrRefresh: vi.fn(async () => ({
+        entry: {
+          tokenId: String(tokenId),
+          snapshotTs: nowMs,
+          cachedAtMs: nowMs,
+          sourcePolledAtMs: nowMs,
+          bookSource: "clob" as const,
+          sourceKind: "rest" as const,
+          book: orderBook({ minOrderSize: 5, timestamp: nowMs }),
+        },
+        status: "refreshed" as const,
+      })),
+    };
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      bookCache,
+      now: () => nowMs,
+    });
+    await ctx.module.start();
+
+    ctx.repo.upsertLadder(
+      ladderState({
+        activeRungs: [rung({ lifecycle: "planned", orderId: null })],
+      }),
+    );
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: null })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.metadata).toMatchObject({
+      cacheStatus: "refreshed",
+      marketData: {
+        minOrderSize: 5,
+        effectiveMinOrderSize: 5,
       },
     });
   });
@@ -772,6 +906,39 @@ describe("ProfileLadderModule", () => {
         effectiveMinOrderSize: 5,
       },
     });
+  });
+
+  it("does not call the book cache again inside the unknown-min retry cooldown", async () => {
+    let nowMs = NOW;
+    const bookCache = {
+      getFreshOrRefresh: vi.fn(async () => ({
+        entry: null,
+        status: "cache-miss" as const,
+      })),
+    };
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      bookCache,
+      now: () => nowMs,
+    });
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: null })],
+      timestamp: nowMs,
+    });
+    await ctx.bus.publish("PositionUpdated", { position: position() });
+
+    expect(bookCache.getFreshOrRefresh).toHaveBeenCalledTimes(1);
+
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS - 1;
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: null })],
+      timestamp: nowMs,
+    });
+
+    expect(bookCache.getFreshOrRefresh).toHaveBeenCalledTimes(1);
+    expect(ctx.orders).toHaveLength(0);
   });
 
   it("rate-limits crossing-only planned rung retries", async () => {
@@ -824,7 +991,21 @@ describe("ProfileLadderModule", () => {
   });
 
   it("does not retry a planned rung while cap is occupied by a live rung", async () => {
-    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+    const bookCache = {
+      getFreshOrRefresh: vi.fn(async () => ({
+        entry: {
+          tokenId: String(tokenId),
+          snapshotTs: NOW,
+          cachedAtMs: NOW,
+          sourcePolledAtMs: NOW,
+          bookSource: "clob" as const,
+          sourceKind: "rest" as const,
+          book: orderBook({ minOrderSize: 5 }),
+        },
+        status: "refreshed" as const,
+      })),
+    };
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" }, bookCache });
     ctx.repo.upsertLadder(
       ladderState({
         activeRungs: [
@@ -845,6 +1026,7 @@ describe("ProfileLadderModule", () => {
     });
 
     expect(ctx.orders).toHaveLength(0);
+    expect(bookCache.getFreshOrRefresh).not.toHaveBeenCalled();
   });
 
   it("passes UP mode from the mode reader into LadderBuilder", async () => {

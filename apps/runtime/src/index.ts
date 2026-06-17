@@ -1133,6 +1133,7 @@ async function main(): Promise<void> {
     positionRepo: repos.position,
     orderRepo: repos.order,
     isProfileOwned: (tokenId) => executionProfileManager.isProfileOwned(tokenId),
+    bookCache: candidateBookCache,
     onPolicyReload: (handler) =>
       executionPolicyProvider.onReload(() => {
         handler();

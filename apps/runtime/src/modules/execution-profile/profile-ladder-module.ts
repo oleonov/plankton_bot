@@ -4,6 +4,7 @@ import type {
   LadderState,
   NormalizedMarket,
   Order,
+  OrderBookSnapshot,
   OrderId,
   Position,
   ProfileLadderBand,
@@ -43,6 +44,28 @@ export interface ProfileLadderOrderReader {
   findByTokenId(tokenId: TokenId): Order[];
 }
 
+type ProfileLadderBookCacheStatus =
+  | "fresh-cache"
+  | "refreshed"
+  | "cache-miss"
+  | "cache-stale"
+  | "refresh-budget-exhausted"
+  | "refresh-failed";
+
+export interface ProfileLadderBookCache {
+  getFreshOrRefresh(
+    tokenId: string,
+    nowMs?: number,
+  ): Promise<{
+    entry: {
+      bookSource: "clob";
+      sourceKind: "ws" | "rest";
+      book: OrderBookSnapshot;
+    } | null;
+    status: ProfileLadderBookCacheStatus;
+  }>;
+}
+
 export interface ProfileLadderModuleDeps {
   bus: EventBus;
   repository: ProfileLadderRepository;
@@ -53,6 +76,7 @@ export interface ProfileLadderModuleDeps {
   positionRepo?: ProfileLadderPositionReader;
   orderRepo?: ProfileLadderOrderReader;
   isProfileOwned?: (tokenId: TokenId) => boolean;
+  bookCache?: ProfileLadderBookCache | undefined;
   // Lets the module react to a sellLadder.adoptExisting false -> true hot-enable
   // while already started; returns an unsubscribe handle. Mirrors DustAutoCloseModule.
   onPolicyReload?: (handler: () => void) => () => void;
@@ -114,6 +138,7 @@ interface ProfileLadderOrderMarketData {
   minOrderSize: number;
   effectiveMinOrderSize: number;
   tickSize: number;
+  cacheStatus?: "base-market" | ProfileLadderBookCacheStatus;
 }
 
 export class ProfileLadderModule implements RuntimeModule {
@@ -579,7 +604,7 @@ export class ProfileLadderModule implements RuntimeModule {
         this.writeCounter("profile_ladder_skipped_crossing_post_only", 1, { band: state.band });
         continue;
       }
-      const marketData = this.resolveOrderMarketData(market);
+      const marketData = await this.resolveOrderMarketData(state.band, market, now);
       if (marketData == null) {
         this.writeCounter("profile_ladder_skipped_unknown_min_order_size", 1, {
           band: state.band,
@@ -599,7 +624,7 @@ export class ProfileLadderModule implements RuntimeModule {
     state: LadderState,
     market: NormalizedMarket,
   ): Promise<boolean> {
-    if (!this.canRetryPlannedLiveRungs(state, market)) return false;
+    if (!this.canRetryPlannedLiveRungs(state)) return false;
     const result = await this.advanceLiveRungs(state, market, this.now());
     if (result.attempted) {
       this.armPlannedRungRetryCooldown(state.tokenId, this.now());
@@ -608,10 +633,9 @@ export class ProfileLadderModule implements RuntimeModule {
     return false;
   }
 
-  private canRetryPlannedLiveRungs(state: LadderState, market: NormalizedMarket): boolean {
+  private canRetryPlannedLiveRungs(state: LadderState): boolean {
     if (state.status !== "active") return false;
     if (this.isPlannedRungRetryCooldownActive(state.tokenId)) return false;
-    if (this.resolveOrderMarketData(market) == null) return false;
     if (!state.activeRungs.some((rung) => rung.lifecycle === "planned" && rung.orderId == null)) {
       return false;
     }
@@ -713,6 +737,7 @@ export class ProfileLadderModule implements RuntimeModule {
         signalTimestamp: new Date(timestamp).toISOString(),
         metadata: {
           source: this.policy().orderTag,
+          ...(marketData.cacheStatus == null ? {} : { cacheStatus: marketData.cacheStatus }),
           marketData,
           profileLadder: {
             ladderId,
@@ -726,7 +751,40 @@ export class ProfileLadderModule implements RuntimeModule {
     });
   }
 
-  private resolveOrderMarketData(market: NormalizedMarket): ProfileLadderOrderMarketData | null {
+  private async resolveOrderMarketData(
+    band: ProfileLadderBand,
+    market: NormalizedMarket,
+    now: number,
+  ): Promise<ProfileLadderOrderMarketData | null> {
+    const marketData = this.resolveOrderMarketDataFromMarket(market);
+    if (marketData != null) return marketData;
+
+    const resolution = await this.deps.bookCache?.getFreshOrRefresh(String(market.tokenId), now);
+    const book = resolution?.entry?.book;
+    const minOrderSize = book?.minOrderSize;
+    if (typeof minOrderSize !== "number" || !Number.isFinite(minOrderSize) || minOrderSize <= 0) {
+      if (resolution != null) {
+        this.writeCounter("profile_ladder_min_order_size_hydration_miss", 1, { band });
+      }
+      return null;
+    }
+    const cacheStatus = resolution?.status ?? "refreshed";
+    this.writeCounter("profile_ladder_min_order_size_hydrated_from_book_cache", 1, {
+      band,
+      source: cacheStatus,
+    });
+    return {
+      bookSource: resolution?.entry?.bookSource ?? "clob",
+      minOrderSize,
+      effectiveMinOrderSize: minOrderSize,
+      tickSize: market.tickSize,
+      cacheStatus,
+    };
+  }
+
+  private resolveOrderMarketDataFromMarket(
+    market: NormalizedMarket,
+  ): ProfileLadderOrderMarketData | null {
     const minOrderSize = market.minOrderSize;
     if (typeof minOrderSize !== "number" || !Number.isFinite(minOrderSize) || minOrderSize <= 0) {
       return null;
@@ -736,6 +794,7 @@ export class ProfileLadderModule implements RuntimeModule {
       minOrderSize,
       effectiveMinOrderSize: minOrderSize,
       tickSize: market.tickSize,
+      cacheStatus: "base-market",
     };
   }
 
