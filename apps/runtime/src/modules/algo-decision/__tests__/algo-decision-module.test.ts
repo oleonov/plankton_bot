@@ -643,6 +643,136 @@ describe("AlgoDecisionModule", () => {
     );
   });
 
+  it("bounds R23 no-dip raw suppression rows while preserving per-occurrence counters", () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const runtimeMetrics = {
+      writeCounter: vi.fn(),
+      writeLatest: vi.fn(),
+    } as unknown as RuntimeMetricWriter;
+    const mod = buildModule({
+      riskEventRepo,
+      runtimeMetrics,
+      plannerSuppressionRollupWindowMs: 0,
+    });
+
+    for (const tokenId of ["token-r23-a", "token-r23-b", "token-r23-c"]) {
+      (mod as any).recordDecisionSuppressed(
+        makeSuppressionFacts({
+          tokenId,
+          reasonCode: "r23-no-dip",
+          reasons: ["r23-no-dip"],
+          side: "BUY",
+          decisionRuleId: "R23_DIP_TRIGGER",
+          state: "S0",
+          buyCount: 0,
+          emissionFacts: {
+            firstTradePrice: null,
+            legTradeCount: 0,
+            r23DipRatio: 0.97,
+            r23MaxMidpoint: 0.45,
+            r23WindowMs: 86_400_000,
+          },
+          timestamp: "2026-06-14T00:00:00.000Z",
+        }),
+      );
+    }
+
+    const r23NoDipEvents = (riskEventRepo.insert as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([event]) =>
+        event.eventType === "signal_suppressed" &&
+        event.payload?.reasonCode === "r23-no-dip" &&
+        event.payload?.decisionRuleId === "R23_DIP_TRIGGER",
+    );
+    const r23CounterCalls = (
+      runtimeMetrics.writeCounter as ReturnType<typeof vi.fn>
+    ).mock.calls.filter(
+      ([name, , labels]) =>
+        name === "track_planner_suppressed_total" &&
+        labels === JSON.stringify({ reason: "r23-no-dip" }),
+    );
+
+    expect(r23NoDipEvents).toHaveLength(1);
+    expect(r23CounterCalls).toHaveLength(3);
+  });
+
+  it("allows another R23 no-dip raw suppression row after the bounded window expires", () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      riskEventRepo,
+      plannerSuppressionRollupWindowMs: 0,
+    });
+
+    for (const timestamp of [
+      "2026-06-14T00:00:00.000Z",
+      "2026-06-14T00:09:59.000Z",
+      "2026-06-14T00:10:01.000Z",
+    ]) {
+      (mod as any).recordDecisionSuppressed(
+        makeSuppressionFacts({
+          tokenId: `token-${timestamp}`,
+          reasonCode: "r23-no-dip",
+          reasons: ["r23-no-dip"],
+          side: "BUY",
+          decisionRuleId: "R23_DIP_TRIGGER",
+          state: "S0",
+          buyCount: 0,
+          emissionFacts: {
+            firstTradePrice: null,
+            legTradeCount: 0,
+            r23DipRatio: 0.97,
+            r23MaxMidpoint: 0.45,
+            r23WindowMs: 86_400_000,
+          },
+          timestamp,
+        }),
+      );
+    }
+
+    const r23NoDipEvents = (riskEventRepo.insert as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([event]) =>
+        event.eventType === "signal_suppressed" &&
+        event.payload?.reasonCode === "r23-no-dip" &&
+        event.payload?.decisionRuleId === "R23_DIP_TRIGGER",
+    );
+
+    expect(r23NoDipEvents).toHaveLength(2);
+  });
+
+  it("keeps non-R23 suppression rows unaffected by the R23 no-dip bound", () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      riskEventRepo,
+      plannerSuppressionRollupWindowMs: 0,
+    });
+
+    (mod as any).recordDecisionSuppressed(
+      makeSuppressionFacts({
+        tokenId: "token-custom-a",
+        reasonCode: "custom-suppression",
+        reasons: ["custom-suppression"],
+        decisionRuleId: "CUSTOM_RULE",
+        timestamp: "2026-06-14T00:00:00.000Z",
+      }),
+    );
+    (mod as any).recordDecisionSuppressed(
+      makeSuppressionFacts({
+        tokenId: "token-custom-b",
+        reasonCode: "custom-suppression",
+        reasons: ["custom-suppression"],
+        decisionRuleId: "CUSTOM_RULE",
+        timestamp: "2026-06-14T00:00:01.000Z",
+      }),
+    );
+
+    const customEvents = (riskEventRepo.insert as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([event]) =>
+        event.eventType === "signal_suppressed" &&
+        event.payload?.reasonCode === "custom-suppression",
+    );
+
+    expect(customEvents).toHaveLength(2);
+  });
+
   it("flushes planner suppression rollups on SELL state transitions before early returns", async () => {
     const mod = buildModule({ plannerSuppressionRollupWindowMs: 300_000 });
     const fakeRollup = {

@@ -3188,6 +3188,16 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private suppressionDedupeKey(facts: SuppressionFacts): string {
+    if (this.isR23NoDipSuppression(facts)) {
+      return [
+        "r23-no-dip",
+        facts.reasonCode,
+        facts.side ?? "",
+        facts.decisionRuleId ?? "",
+        this.continuationMode,
+      ].join("|");
+    }
+
     if (this.shouldAggregateEntrySuppression(facts)) {
       return [
         "entry-sweep",
@@ -3214,6 +3224,12 @@ export class AlgoDecisionModule implements RuntimeModule {
       ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS.has(facts.reasonCode) &&
       facts.buyCount === 0 &&
       facts.emissionFacts.legTradeCount === 0
+    );
+  }
+
+  private isR23NoDipSuppression(facts: SuppressionFacts): boolean {
+    return (
+      facts.reasonCode === R23_NO_DIP_REASON && facts.decisionRuleId === R23_DIP_TRIGGER_RULE_ID
     );
   }
 
