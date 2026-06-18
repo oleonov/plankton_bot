@@ -5,6 +5,7 @@ import {
   DEFAULT_EXECUTION_POLICY,
   type FeeScheduleConfig,
 } from "@krabs/domain";
+import { createHybridFeeScheduleProvider } from "../fee-schedule-provider.js";
 import { createTrackRFeeProvider } from "../track-r-fee-provider.js";
 
 const conditionId = createConditionId("cond-track-r");
@@ -18,7 +19,7 @@ const feeSchedule: FeeScheduleConfig = {
       periodId: "promo",
       startsAtUtc: "2026-06-01T00:00:00Z",
       endsAtUtc: "2026-07-01T00:00:00Z",
-      makerRebateFraction: 0.002,
+      makerRebateFraction: 0,
       appliesTo: { scope: "all" },
       sourceNote: "test",
     },
@@ -95,7 +96,7 @@ describe("createTrackRFeeProvider", () => {
           baseRate: 0.07,
           exponent: 1,
           takerOnly: true,
-          makerRebateFraction: 0.002,
+          makerRebateFraction: 0,
           source: "mixed",
           periodId: "promo",
           effectiveAtMs: 0,
@@ -121,6 +122,41 @@ describe("createTrackRFeeProvider", () => {
     expect(fillRepo.findRecentTakerFeeRate).not.toHaveBeenCalled();
   });
 
+  it("matches legacy Track R live fd output through the real hybrid provider", async () => {
+    const fd = { rate: 0.07, exponent: 1, takerOnly: true };
+    const directProvider = createTrackRFeeProvider({
+      feeGateway: { getMarketFeeInfo: vi.fn().mockResolvedValue(fd) },
+      fillRepo: { findRecentTakerFeeRate: vi.fn().mockReturnValue(0.04) },
+    });
+    const hybridProvider = createTrackRFeeProvider({
+      feeGateway: { getMarketFeeInfo: vi.fn().mockResolvedValue({ rate: 0.03, exponent: 1 }) },
+      feeScheduleProvider: createHybridFeeScheduleProvider({
+        feeGateway: { getMarketFeeInfo: vi.fn().mockResolvedValue(fd) },
+        nowMs: () => Date.parse("2026-06-16T00:00:00Z"),
+      }),
+      fillRepo: { findRecentTakerFeeRate: vi.fn().mockReturnValue(0.04) },
+    });
+
+    const input = {
+      conditionId,
+      tokenId,
+      category: "crypto",
+      policy,
+      nowMs: Date.parse("2026-06-16T00:00:00Z"),
+    };
+    const direct = await directProvider.resolveFeeQuote(input);
+    const hybrid = await hybridProvider.resolveFeeQuote({
+      ...input,
+      feeSchedule: {
+        ...feeSchedule,
+        periods: [{ ...feeSchedule.periods[0]!, makerRebateFraction: 0.25 }],
+      },
+    });
+
+    expect(hybrid).toEqual(direct);
+    expect(hybrid).toEqual({ rate: 0.07, exponent: 1, source: "live" });
+  });
+
   it("preserves invalid exponent fallback when provider fd exponent is zero", async () => {
     const metrics = { writeCounter: vi.fn() };
     const provider = createTrackRFeeProvider({
@@ -130,7 +166,7 @@ describe("createTrackRFeeProvider", () => {
           baseRate: 0.07,
           exponent: 0,
           takerOnly: true,
-          makerRebateFraction: 0.002,
+          makerRebateFraction: 0,
           source: "mixed",
           periodId: "promo",
           effectiveAtMs: 0,

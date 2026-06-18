@@ -35,7 +35,9 @@ export function applicableMakerRebateFraction(input: {
 }): number {
   if (input.intendedLiquidityRole !== "maker") return 0;
   if (input.postOnly !== true) return 0;
-  return positiveFiniteOrZero(input.makerRebateFraction);
+  // Non-zero maker rebate EV is disabled until a fee-equivalent/rebate-pool model
+  // replaces the older filled-notional fraction assumption.
+  return 0;
 }
 
 export function validateFeeSchedulePeriods(periods: readonly FeeSchedulePeriodConfig[]): string[] {
@@ -63,6 +65,12 @@ export function validateFeeSchedulePeriods(periods: readonly FeeSchedulePeriodCo
       period.makerRebateFraction > 1
     ) {
       issues.push(`feeSchedule.periods[${index}].makerRebateFraction out of range [0, 1]`);
+    } else if (period.makerRebateFraction !== 0) {
+      issues.push(
+        `feeSchedule.periods[${index}].makerRebateFraction non-zero disabled in v1; ` +
+          "Polymarket rebate percentages are fee-equivalent/rebate-pool parameters, " +
+          "not filled-notional fractions",
+      );
     }
   }
   issues.push(...findOverlaps(periods));
@@ -156,8 +164,4 @@ function isValidUtcTimestamp(value: string): boolean {
   if (typeof value !== "string" || !value.endsWith("Z")) return false;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed);
-}
-
-function positiveFiniteOrZero(value: number): number {
-  return Number.isFinite(value) && value > 0 ? value : 0;
 }

@@ -15,7 +15,7 @@ const config: FeeScheduleConfig = {
       periodId: "promo",
       startsAtUtc: "2026-06-01T00:00:00Z",
       endsAtUtc: "2026-07-01T00:00:00Z",
-      makerRebateFraction: 0.002,
+      makerRebateFraction: 0,
       appliesTo: { scope: "all" },
       sourceNote: "test",
     },
@@ -45,7 +45,7 @@ describe("fee schedule helpers", () => {
     });
 
     expect(period?.periodId).toBe("promo");
-    expect(period?.makerRebateFraction).toBe(0.002);
+    expect(period?.makerRebateFraction).toBe(0);
   });
 
   it("selects the post-promo period at the half-open boundary", () => {
@@ -70,30 +70,75 @@ describe("fee schedule helpers", () => {
     expect(issues.some((issue) => issue.includes("overlap"))).toBe(true);
   });
 
-  it("applies maker rebate only for intended maker/post-only semantics", () => {
+  it("rejects non-zero maker rebate fractions in v1", () => {
+    const issues = validateFeeSchedulePeriods([
+      {
+        ...config.periods[0]!,
+        makerRebateFraction: 0.2,
+        sourceNote: "Polymarket docs category percentage is not a notional fraction",
+      },
+      {
+        ...config.periods[1]!,
+        periodId: "post_promo",
+        makerRebateFraction: 0,
+      },
+    ]);
+
+    expect(issues.some((issue) => issue.includes("makerRebateFraction non-zero disabled"))).toBe(
+      true,
+    );
+  });
+
+  it("rejects Polymarket category percentages as notional rebate fractions", () => {
+    const issues = validateFeeSchedulePeriods([
+      {
+        ...config.periods[0]!,
+        makerRebateFraction: 0.25,
+        sourceNote: "Polymarket docs category percentage is not a notional fraction",
+      },
+    ]);
+
+    expect(
+      issues.some(
+        (issue) =>
+          issue.includes("makerRebateFraction non-zero disabled") &&
+          issue.includes("fee-equivalent/rebate-pool"),
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects periods missing makerRebateFraction instead of defaulting to zero", () => {
+    const { makerRebateFraction: _makerRebateFraction, ...periodWithoutRebate } =
+      config.periods[0]!;
+    const issues = validateFeeSchedulePeriods([periodWithoutRebate as any]);
+
+    expect(issues).toContain("feeSchedule.periods[0].makerRebateFraction out of range [0, 1]");
+  });
+
+  it("does not expose maker rebate EV until a fee-equivalent model exists", () => {
     expect(
       applicableMakerRebateFraction({
-        makerRebateFraction: 0.002,
+        makerRebateFraction: 0.25,
         intendedLiquidityRole: "maker",
         postOnly: true,
       }),
-    ).toBe(0.002);
+    ).toBe(0);
     expect(
       applicableMakerRebateFraction({
-        makerRebateFraction: 0.002,
+        makerRebateFraction: 0.25,
         intendedLiquidityRole: "taker",
         postOnly: false,
       }),
     ).toBe(0);
     expect(
       applicableMakerRebateFraction({
-        makerRebateFraction: 0.002,
+        makerRebateFraction: 0.25,
         intendedLiquidityRole: "unknown",
       }),
     ).toBe(0);
     expect(
       applicableMakerRebateFraction({
-        makerRebateFraction: 0.002,
+        makerRebateFraction: 0.25,
         intendedLiquidityRole: "maker",
       }),
     ).toBe(0);

@@ -39,10 +39,8 @@ export function createHybridFeeScheduleProvider(
       const config = request.config ?? DEFAULT_FEE_SCHEDULE_CONFIG;
       const period = config.enabled ? selectFeeSchedulePeriod(config, request) : null;
       const asOfMs = Number.isFinite(request.asOfMs) ? request.asOfMs : nowMs();
+      const makerRebateFraction = 0;
       if (period) {
-        if (request.intendedLiquidityRole === "unknown" && period.makerRebateFraction > 0) {
-          deps.runtimeMetrics?.writeCounter?.("fee_schedule_unknown_role_conservative", 1);
-        }
         deps.runtimeMetrics?.writeEvent?.(
           "fee_schedule_active_period",
           1,
@@ -65,7 +63,7 @@ export function createHybridFeeScheduleProvider(
               baseRate: info.rate,
               exponent: info.exponent,
               takerOnly: info.takerOnly,
-              makerRebateFraction: period?.makerRebateFraction ?? 0,
+              makerRebateFraction,
               source: period ? "mixed" : "api",
               periodId: period?.periodId ?? "api_fd_no_schedule",
               effectiveAtMs: period ? Date.parse(period.startsAtUtc) : asOfMs,
@@ -93,7 +91,7 @@ export function createHybridFeeScheduleProvider(
           baseRate: period.baseRate ?? 0,
           exponent: period.exponent ?? 1,
           takerOnly: period.takerOnly ?? false,
-          makerRebateFraction: period.makerRebateFraction,
+          makerRebateFraction,
           source: "schedule",
           periodId: period.periodId,
           effectiveAtMs: Date.parse(period.startsAtUtc),

@@ -1937,7 +1937,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
             periodId: "promo",
             startsAtUtc: "2026-06-01T00:00:00Z",
             endsAtUtc: "2026-07-01T00:00:00Z",
-            makerRebateFraction: 0.002,
+            makerRebateFraction: 0,
             appliesTo: { scope: "all" },
             sourceNote: "operator test fixture",
           },
@@ -1961,6 +1961,88 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     ).toEqual(raw.feeSchedule);
   });
 
+  it("rejects non-zero FeeScheduleProvider maker rebate fractions in v1", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        feeSchedule: {
+          enabled: true,
+          periods: [
+            {
+              periodId: "crypto_rebate_docs_percentage",
+              startsAtUtc: "2026-06-01T00:00:00Z",
+              endsAtUtc: "2026-07-01T00:00:00Z",
+              makerRebateFraction: 0.2,
+              appliesTo: { scope: "category", value: "crypto" },
+              sourceNote:
+                "Polymarket docs category rebate percentage is fee-equivalent based, not notional",
+            },
+          ],
+        },
+      }),
+    );
+
+    expect((policy as any).feeSchedule).toEqual((DEFAULT_EXECUTION_POLICY as any).feeSchedule);
+    expect(
+      issues.some((i) => i.includes("feeSchedule.periods[0].makerRebateFraction non-zero")),
+    ).toBe(true);
+  });
+
+  it("rejects Polymarket 0.25 category rebate percentage as a notional fraction", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        feeSchedule: {
+          enabled: true,
+          periods: [
+            {
+              periodId: "sports_rebate_docs_percentage",
+              startsAtUtc: "2026-06-01T00:00:00Z",
+              endsAtUtc: "2026-07-01T00:00:00Z",
+              makerRebateFraction: 0.25,
+              appliesTo: { scope: "category", value: "sports" },
+              sourceNote:
+                "Polymarket docs category rebate percentage is fee-equivalent based, not notional",
+            },
+          ],
+        },
+      }),
+    );
+
+    expect((policy as any).feeSchedule).toEqual((DEFAULT_EXECUTION_POLICY as any).feeSchedule);
+    expect(
+      issues.some(
+        (i) =>
+          i.includes("feeSchedule.periods[0].makerRebateFraction non-zero") &&
+          i.includes("fee-equivalent/rebate-pool"),
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects FeeScheduleProvider periods missing makerRebateFraction", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        feeSchedule: {
+          enabled: true,
+          periods: [
+            {
+              periodId: "missing_rebate_fraction",
+              startsAtUtc: "2026-06-01T00:00:00Z",
+              endsAtUtc: "2026-07-01T00:00:00Z",
+              appliesTo: { scope: "all" },
+              sourceNote: "operator fixture missing required zero-only v1 field",
+            },
+          ],
+        },
+      }),
+    );
+
+    expect((policy as any).feeSchedule).toEqual((DEFAULT_EXECUTION_POLICY as any).feeSchedule);
+    expect(
+      issues.some((i) =>
+        i.includes("feeSchedule.periods[0].makerRebateFraction out of range [0, 1]"),
+      ),
+    ).toBe(true);
+  });
+
   it("rejects overlapping FeeScheduleProvider periods and unsafe rebate fractions", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({
@@ -1971,7 +2053,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
               periodId: "a",
               startsAtUtc: "2026-06-01T00:00:00Z",
               endsAtUtc: "2026-07-01T00:00:00Z",
-              makerRebateFraction: 0.002,
+              makerRebateFraction: 0,
               appliesTo: { scope: "all" },
               sourceNote: "test",
             },
