@@ -15,6 +15,10 @@ import type { Logger } from "../../logger.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import {
+  BUY_DUPLICATE_DEDUPED_REASON,
+  findNearDuplicateOpenBuy,
+} from "../../buy-order-lifecycle.js";
+import {
   hasWalletBuyBudget,
   evaluateWalletBuyCapacity,
   evaluatePerTokenOrderCapacity,
@@ -244,6 +248,32 @@ export class AlgoRiskGateImpl implements RiskGate {
       passed.push("total_order_capacity_ok");
       passed.push("sell_signal_bypass");
       return finish(true, null, sellCapacity);
+    }
+
+    const duplicateBuy = findNearDuplicateOpenBuy(
+      this.orderRepo.findOpen(),
+      {
+        tokenId: signal.tokenId,
+        price: signal.suggestedPrice,
+        reason: signal.reason,
+        decisionRuleId: signal.decisionRuleId,
+      },
+      this.marketRepo?.findByTokenId(signal.tokenId)?.tickSize ?? null,
+    );
+    if (duplicateBuy) {
+      this.log.debug(
+        {
+          tokenId: String(signal.tokenId),
+          signalReason: signal.reason,
+          decisionRuleId: signal.decisionRuleId,
+          existingOrderId: String(duplicateBuy.orderId),
+          existingPrice: duplicateBuy.price,
+          requestedPrice: signal.suggestedPrice,
+        },
+        "buy signal rejected — duplicate open BUY already resting",
+      );
+      rejected.push(BUY_DUPLICATE_DEDUPED_REASON);
+      return finish(false, BUY_DUPLICATE_DEDUPED_REASON);
     }
 
     // 1. Token-level open-order cap for BUY.

@@ -18,9 +18,12 @@ import { InProcessEventBus } from "@krabs/event-bus";
 import {
   cleanStaleEntryOrders,
   CANCEL_BACKOFF_MS,
+  CONFIRM_SCALE_TTL_MS,
   EXIT_ORDER_TTL_MS,
+  PROBE_LIKE_AD_HOC_TTL_MS,
   PROBE_LIKE_DAILY_TTL_MS,
   PROBE_LIKE_INTRADAY_TTL_MS,
+  SCALE_IN_DEFAULT_TTL_MS,
   recordSellDownpriceCancelSucceeded,
   type SellDownpriceRepriceStateMap,
 } from "../modules/reconciliation/stale-order-cleaner.js";
@@ -592,6 +595,96 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.staleTtlCancelled).toBe(1);
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].command.reason).toBe("stale_entry_ttl");
+  });
+
+  it("uses an explicit 10 minute cap for probe-entry orders without a market horizon", async () => {
+    const order = makeOrder({
+      createdAt: new Date(Date.now() - PROBE_LIKE_AD_HOC_TTL_MS - 1_000).toISOString(),
+      signalReason: "probe-entry",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(null);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await run();
+    await bus.drain();
+
+    expect(result.staleTtlCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_entry_ttl");
+  });
+
+  it("keeps probe-entry orders before the explicit 10 minute cap", async () => {
+    const order = makeOrder({
+      createdAt: new Date(Date.now() - PROBE_LIKE_AD_HOC_TTL_MS + 1_000).toISOString(),
+      signalReason: "probe-entry",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(null);
+
+    const result = await run();
+
+    expect(result.staleTtlCancelled).toBe(0);
+  });
+
+  it("caps confirm-scale BUY TTL at three hours", async () => {
+    const order = makeOrder({
+      createdAt: new Date(Date.now() - CONFIRM_SCALE_TTL_MS - 1_000).toISOString(),
+      signalReason: "confirm-scale",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await run();
+    await bus.drain();
+
+    expect(result.staleTtlCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_entry_ttl");
+  });
+
+  it("keeps confirm-scale BUY orders before the three hour cap", async () => {
+    const order = makeOrder({
+      createdAt: new Date(Date.now() - CONFIRM_SCALE_TTL_MS + 1_000).toISOString(),
+      signalReason: "confirm-scale",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const result = await run();
+
+    expect(result.staleTtlCancelled).toBe(0);
+  });
+
+  it("uses the conservative three hour cap for scale-in BUY orders", async () => {
+    const order = makeOrder({
+      createdAt: new Date(Date.now() - SCALE_IN_DEFAULT_TTL_MS - 1_000).toISOString(),
+      signalReason: "scale-in",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const result = await run();
+
+    expect(result.staleTtlCancelled).toBe(1);
+  });
+
+  it("keeps scale-in BUY orders before the conservative three hour cap", async () => {
+    const order = makeOrder({
+      createdAt: new Date(Date.now() - SCALE_IN_DEFAULT_TTL_MS + 1_000).toISOString(),
+      signalReason: "scale-in",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const result = await run();
+
+    expect(result.staleTtlCancelled).toBe(0);
   });
 
   it("uses horizon TTL for conviction entries on intraday markets", async () => {

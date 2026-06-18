@@ -46,6 +46,7 @@ import {
   shouldBlockRepriceChain,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import { resolveEntryBuyOrderTtlMs } from "../../buy-order-lifecycle.js";
 import { resolveMidpointAnchoredSellPrice } from "../strategy/signal-to-order.js";
 import type { ExitOrderLifetimeDecision } from "../order-lifetime/order-lifetime-ttl.js";
 import {
@@ -56,17 +57,15 @@ import {
   type TrackCSubtype,
 } from "./context-builders/track-c-context-builders.js";
 
-// Horizon-aware TTLs for conviction-style entry orders.
-export const HORIZON_TTL_MS: Record<string, number> = {
-  "intraday-4h": 45 * 60_000,
-  daily: 6 * 60 * 60_000,
-  deadline: 24 * 60 * 60_000,
-  "ad-hoc": 8 * 60 * 60_000,
-};
-export const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h fallback
-export const PROBE_LIKE_INTRADAY_TTL_MS = 60_000; // 60s
-export const PROBE_LIKE_DAILY_TTL_MS = 5 * 60_000; // 5m
-export const PROBE_LIKE_AD_HOC_TTL_MS = 10 * 60_000; // 10m
+export {
+  CONFIRM_SCALE_TTL_MS,
+  DEFAULT_TTL_MS,
+  HORIZON_TTL_MS,
+  PROBE_LIKE_AD_HOC_TTL_MS,
+  PROBE_LIKE_DAILY_TTL_MS,
+  PROBE_LIKE_INTRADAY_TTL_MS,
+  SCALE_IN_DEFAULT_TTL_MS,
+} from "../../buy-order-lifecycle.js";
 // EXIT-FIX-2.5: Plankton ask visibility median is 4.1h, so flat SELL TTL
 // defaults to 4h; thin/medium markets can extend this via exitTtlByLiquidity.
 export const EXIT_ORDER_TTL_MS = 4 * 60 * 60_000; // 4h
@@ -1106,18 +1105,7 @@ function resolveOrderTtlMs(
   order: Pick<Order, "signalReason">,
   market: Pick<Market, "horizon"> | null,
 ): number {
-  const horizon = market?.horizon ?? null;
-  const horizonTtlMs =
-    horizon != null ? (HORIZON_TTL_MS[horizon] ?? DEFAULT_TTL_MS) : DEFAULT_TTL_MS;
-
-  if (order.signalReason === "probe-entry") {
-    if (horizon === "intraday-4h") return Math.min(horizonTtlMs, PROBE_LIKE_INTRADAY_TTL_MS);
-    if (horizon === "daily") return Math.min(horizonTtlMs, PROBE_LIKE_DAILY_TTL_MS);
-    if (horizon === "ad-hoc") return Math.min(horizonTtlMs, PROBE_LIKE_AD_HOC_TTL_MS);
-    return Math.min(horizonTtlMs, 10 * 60_000);
-  }
-
-  return horizonTtlMs;
+  return resolveEntryBuyOrderTtlMs(order, market);
 }
 
 async function publishCancel(

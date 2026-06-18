@@ -517,6 +517,78 @@ describe("AlgoRiskGateImpl", () => {
     if (!approved) expect(decision.rejectionReasons).toContain("per_token_buy_limit");
   });
 
+  it("dedupes same-token near-price BUY before per-token capacity rejection", async () => {
+    const existing = makeOpenBuyOrder({
+      signalReason: "probe-entry",
+      decisionRuleId: "R23_DIP_TRIGGER",
+      price: 0.5,
+      metadata: { source: "strategy" },
+    });
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo([existing]),
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(100),
+        activeProfile: "paper" as any,
+      },
+      () => makeBuyCapacityPolicy({ maxOpenBuyOrdersPerToken: 1 }),
+      () => makeExecutionPolicy(),
+      undefined,
+      {
+        findByTokenId: vi.fn(() => ({ tokenId: TOK_ID, conditionId: COND_ID, tickSize: 0.01 })),
+      } as unknown as Pick<MarketRepository, "findByTokenId">,
+    );
+
+    const decision = await gate.evaluate(
+      makeSignal({
+        suggestedPrice: 0.51,
+        reason: "probe-entry",
+        decisionRuleId: "R23_DIP_TRIGGER",
+      }),
+    );
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("buy_duplicate_deduped");
+    expect(decision.rejectionReasons).not.toContain("per_token_buy_limit");
+  });
+
+  it("allows same-token BUY at materially different price up to the per-token cap", async () => {
+    const existing = makeOpenBuyOrder({
+      signalReason: "scale-in",
+      decisionRuleId: "D3",
+      price: 0.5,
+    });
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo([existing]),
+      makePositionRepo(makeOpenPosition()),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(100),
+        activeProfile: "paper" as any,
+      },
+      () => makeBuyCapacityPolicy({ maxOpenBuyOrdersPerToken: 2 }),
+      () => makeExecutionPolicy(),
+      undefined,
+      {
+        findByTokenId: vi.fn(() => ({ tokenId: TOK_ID, conditionId: COND_ID, tickSize: 0.01 })),
+      } as unknown as Pick<MarketRepository, "findByTokenId">,
+    );
+
+    const decision = await gate.evaluate(
+      makeSignal({
+        suggestedPrice: 0.53,
+        reason: "scale-in",
+        decisionRuleId: "D3",
+      }),
+    );
+
+    expect(decision.approved).toBe(true);
+    expect(decision.rejectionReasons).toHaveLength(0);
+  });
+
   it.each([
     [1, true],
     [2, true],

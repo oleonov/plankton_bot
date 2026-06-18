@@ -202,7 +202,7 @@ describe("control-db migration infrastructure", () => {
         enabled: true,
         minNewEntryWalletHeadroomUsdc: 7,
         minAddWalletHeadroomUsdc: 5,
-        maxOpenBuyOrders: 15,
+        maxOpenBuyOrders: 25,
         maxOpenBuyOrdersPerToken: 2,
       });
       expect(parsed.sellCapacity).toEqual({
@@ -468,7 +468,7 @@ describe("control-db migration infrastructure", () => {
     });
   });
 
-  it("migration 045 widens live-lite order caps without overwriting custom profile caps", () => {
+  it("migration 045 applies historical live-lite order caps without overwriting custom profile caps", () => {
     const dbPath = path.join(tmpDir, "control-order-capacity.db");
     conn = bootstrapControlDb(dbPath);
     conn.db
@@ -548,6 +548,53 @@ describe("control-db migration infrastructure", () => {
       enabled: true,
       maxOpenOrdersTotal: 22,
     });
+  });
+
+  it("migration 062 raises old default BUY cap from 15 to 25 without overwriting custom caps", () => {
+    const dbPath = path.join(tmpDir, "control-buy-capacity-25.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.buyCapacity.maxOpenBuyOrders',
+              ?
+            )
+          WHERE profile_id = ?`,
+      )
+      .run(15, "live-lite");
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.buyCapacity.maxOpenBuyOrders',
+              ?
+            )
+          WHERE profile_id = ?`,
+      )
+      .run(9, "paper");
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("062_buy_capacity_raise_25.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare(
+        `SELECT profile_id, execution_policy_json AS json
+           FROM profile_settings
+          WHERE profile_id IN ('live-lite', 'paper')`,
+      )
+      .all() as Array<{ profile_id: string; json: string }>;
+    const byProfile = new Map(rows.map((row) => [row.profile_id, JSON.parse(row.json)]));
+
+    expect(byProfile.get("live-lite").buyCapacity.maxOpenBuyOrders).toBe(25);
+    expect(byProfile.get("live-lite").buyCapacity.maxOpenBuyOrdersPerToken).toBe(2);
+    expect(byProfile.get("paper").buyCapacity.maxOpenBuyOrders).toBe(9);
+    expect(byProfile.get("paper").buyCapacity.maxOpenBuyOrdersPerToken).toBe(2);
   });
 
   it("migration 043 removes non-exclusion selection rules from existing control DBs", () => {

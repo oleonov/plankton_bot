@@ -98,7 +98,7 @@ export const DEFAULT_BUY_CAPACITY_POLICY: BuyCapacityPolicy = {
   enabled: true,
   minNewEntryWalletHeadroomUsdc: 7,
   minAddWalletHeadroomUsdc: 5,
-  maxOpenBuyOrders: 15,
+  maxOpenBuyOrders: 25,
   maxOpenBuyOrdersPerToken: 2,
 };
 

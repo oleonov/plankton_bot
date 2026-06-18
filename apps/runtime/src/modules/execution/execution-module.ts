@@ -79,6 +79,13 @@ import {
   SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
   SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON,
 } from "../../internal-order-reasons.js";
+import {
+  BUY_CAP_FULL_TARGETED_REPLACEMENT_REASON,
+  BUY_DUPLICATE_DEDUPED_REASON,
+  findDuplicateOpenBuyPair,
+  findNearDuplicateOpenBuy,
+  findOldestStaleOpenBuy,
+} from "../../buy-order-lifecycle.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
   buildReservationSnapshot,
@@ -107,6 +114,11 @@ type PostOnlyCrossPreSubmitSkip = {
 
 function resolvePriceFromCmd(cmd: PlaceOrderCommand): number {
   return cmd.price;
+}
+
+function boundedMetricLabel(value: string | null | undefined): string {
+  if (value == null || value.trim().length === 0) return "unknown";
+  return value.length <= 64 ? value : "other";
 }
 
 function resolveSellRepriceThreshold(
@@ -635,6 +647,14 @@ export class ExecutionModule implements RuntimeModule {
     const postOnlyCross = this.getPostOnlyCrossPreSubmitSkip(cmd);
     if (postOnlyCross) {
       await this.skipPostOnlyCrossPreSubmit(cmd, postOnlyCross);
+      return;
+    }
+
+    if (await this.skipDuplicateBuyPreSubmitIfNeeded(cmd)) {
+      return;
+    }
+
+    if (await this.deferBuyForTargetedCapacityReplacementIfNeeded(cmd)) {
       return;
     }
 
@@ -1493,6 +1513,88 @@ export class ExecutionModule implements RuntimeModule {
     };
   }
 
+  private async skipDuplicateBuyPreSubmitIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
+    if (cmd.side !== "buy") return false;
+    const duplicate = findNearDuplicateOpenBuy(this.deps.orderRepo.findOpen(), cmd, cmd.tickSize);
+    if (!duplicate) return false;
+
+    const details = {
+      existingOrderId: String(duplicate.orderId),
+      existingPrice: duplicate.price,
+      requestedPrice: cmd.price,
+      tickSize: cmd.tickSize,
+      signalReason: cmd.signalReason ?? null,
+      decisionRuleId: cmd.decisionRuleId ?? null,
+    };
+    this.log.debug(
+      { commandId: cmd.commandId, tokenId: String(cmd.tokenId), ...details },
+      "buy order skipped — duplicate open BUY already resting",
+    );
+    this.recordBuyCounter("buy_duplicate_deduped", cmd);
+    await this.publishOrderSkipped(cmd, BUY_DUPLICATE_DEDUPED_REASON, details);
+    return true;
+  }
+
+  private async deferBuyForTargetedCapacityReplacementIfNeeded(
+    cmd: PlaceOrderCommand,
+  ): Promise<boolean> {
+    if (cmd.side !== "buy") return false;
+    const buyPolicy = normalizeBuyCapacityPolicy(this.currentBuyCapacityPolicy());
+    if (!buyPolicy.enabled || buyPolicy.maxOpenBuyOrders <= 0) return false;
+
+    const openOrders = this.deps.orderRepo.findOpen();
+    const openBuyCount = openOrders.filter(
+      (order) =>
+        order.side === "buy" &&
+        (order.status === "pending" ||
+          order.status === "open" ||
+          order.status === "partially-filled"),
+    ).length;
+    if (openBuyCount < buyPolicy.maxOpenBuyOrders) return false;
+
+    const duplicatePair = findDuplicateOpenBuyPair(openOrders);
+    const now = Date.now();
+    const blocker =
+      duplicatePair?.cancel ??
+      findOldestStaleOpenBuy(
+        openOrders,
+        (order) => this.deps.marketRepo.findByTokenId(order.tokenId),
+        now,
+      );
+    if (!blocker) return false;
+
+    const replacementKind = duplicatePair?.cancel === blocker ? "duplicate" : "stale";
+    const cancelReason =
+      replacementKind === "duplicate" ? "buy_duplicate_replacement" : "stale_entry_ttl";
+    await this.deps.bus.publish("CancelOrderRequested", {
+      command: {
+        type: "CancelOrderCommand",
+        commandId: createCommandId(
+          `buy-cap-replace-${String(blocker.orderId)}-${String(cmd.commandId)}-${now}`,
+        ),
+        orderId: blocker.orderId,
+        reason: cancelReason,
+      },
+      timestamp: now,
+    });
+
+    const details = {
+      replacementKind,
+      cancelledOrderId: String(blocker.orderId),
+      cancelReason,
+      openBuyOrders: openBuyCount,
+      maxOpenBuyOrders: buyPolicy.maxOpenBuyOrders,
+      signalReason: cmd.signalReason ?? null,
+      decisionRuleId: cmd.decisionRuleId ?? null,
+    };
+    this.recordBuyCounter("buy_cap_full_targeted_replacement", cmd, {
+      replacementKind,
+      cancelReason,
+    });
+    await this.publishOrderSkipped(cmd, BUY_CAP_FULL_TARGETED_REPLACEMENT_REASON, details);
+    return true;
+  }
+
   private async skipPostOnlyCrossPreSubmit(
     cmd: PlaceOrderCommand,
     postOnlyCross: PostOnlyCrossPreSubmitSkip,
@@ -1525,6 +1627,30 @@ export class ExecutionModule implements RuntimeModule {
       tokenId: cmd.tokenId,
       conditionId: cmd.conditionId,
       reasonCode: "post-only-cross-pre-submit",
+      side: cmd.side,
+      price: cmd.price,
+      size: cmd.size,
+      signalReason: cmd.signalReason ?? null,
+      signalId: cmd.signalId ?? null,
+      decisionRuleId: cmd.decisionRuleId ?? null,
+      signalTimestamp: cmd.signalTimestamp ?? null,
+      details,
+      timestamp: Date.now(),
+    });
+  }
+
+  private async publishOrderSkipped(
+    cmd: PlaceOrderCommand,
+    reasonCode: string,
+    details: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    this.recordOrderSkipped(cmd, reasonCode, details);
+    await this.deps.bus.publish("OrderSkipped", {
+      commandId: cmd.commandId,
+      clientOrderId: cmd.clientOrderId,
+      tokenId: cmd.tokenId,
+      conditionId: cmd.conditionId,
+      reasonCode,
       side: cmd.side,
       price: cmd.price,
       size: cmd.size,
@@ -1612,6 +1738,22 @@ export class ExecutionModule implements RuntimeModule {
         "failed to persist order_skipped risk event",
       );
     }
+  }
+
+  private recordBuyCounter(
+    metricName: "buy_duplicate_deduped" | "buy_cap_full_targeted_replacement",
+    cmd: PlaceOrderCommand,
+    extraLabels: Readonly<Record<string, string>> = {},
+  ): void {
+    this.deps.runtimeMetrics?.writeCounter?.(
+      metricName,
+      1,
+      JSON.stringify({
+        signalReason: boundedMetricLabel(cmd.signalReason),
+        decisionRuleId: boundedMetricLabel(cmd.decisionRuleId),
+        ...extraLabels,
+      }),
+    );
   }
 
   private static looksLikeMinSizeError(

@@ -17,7 +17,7 @@ const buyPolicy: BuyCapacityPolicy = {
   enabled: true,
   minNewEntryWalletHeadroomUsdc: 7,
   minAddWalletHeadroomUsdc: 5,
-  maxOpenBuyOrders: 15,
+  maxOpenBuyOrders: 25,
   maxOpenBuyOrdersPerToken: 2,
 };
 
@@ -39,9 +39,9 @@ const orderPolicy: OrderCapacityPolicy = {
 
 describe("order capacity policy evaluators", () => {
   it.each([
-    [14, true],
-    [15, false],
-    [16, false],
+    [24, true],
+    [25, false],
+    [26, false],
   ])("evaluates BUY global cap at open count %i", (openBuyOrderCount, allowed) => {
     const decision = evaluateWalletBuyCapacity({
       policy: buyPolicy,

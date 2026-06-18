@@ -73,6 +73,7 @@ export type CancelOrderReason =
   | "stale_entry_enddate"
   | "stale_exit_ttl"
   | "downpriced_reprice"
+  | "buy_duplicate_replacement"
   | "sell_replace_reprice"
   | "sell_replace_retry"
   | "sell_timeout_escalation"

@@ -240,6 +240,22 @@ describe("ExecutionModule — wallet reservation rejection", () => {
     return rejected;
   }
 
+  function collectSkipped(b: InProcessEventBus): Array<{ reasonCode: string }> {
+    const skipped: Array<{ reasonCode: string }> = [];
+    b.subscribe("OrderSkipped", async (p) => {
+      skipped.push({ reasonCode: p.reasonCode });
+    });
+    return skipped;
+  }
+
+  function collectCancels(b: InProcessEventBus): Array<{ orderId: string; reason: string }> {
+    const cancels: Array<{ orderId: string; reason: string }> = [];
+    b.subscribe("CancelOrderRequested", async (p) => {
+      cancels.push({ orderId: String(p.command.orderId), reason: p.command.reason });
+    });
+    return cancels;
+  }
+
   // ── Case 1: 3% buffer ($0.30) > floor ($0.25); notional $9.80 → reject ──
 
   it("rejects BUY when notional exceeds available balance after 3% buffer", async () => {
@@ -273,6 +289,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
       }),
       timestamp: Date.now(),
     });
+    await bus.drain();
 
     expect(gateway.placeOrder).not.toHaveBeenCalled();
     expect(rejected).toHaveLength(1);
@@ -315,6 +332,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
       }),
       timestamp: Date.now(),
     });
+    await bus.drain();
 
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
     expect(rejected).toHaveLength(0);
@@ -355,6 +373,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
       }),
       timestamp: Date.now(),
     });
+    await bus.drain();
 
     expect(gateway.placeOrder).not.toHaveBeenCalled();
     expect(rejected).toHaveLength(1);
@@ -397,6 +416,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
       }),
       timestamp: Date.now(),
     });
+    await bus.drain();
 
     expect(gateway.placeOrder).not.toHaveBeenCalled();
     expect(rejected).toHaveLength(1);
@@ -549,6 +569,223 @@ describe("ExecutionModule — wallet reservation rejection", () => {
     });
 
     expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("wallet_buy_capacity_exhausted");
+
+    await mod.stop();
+  });
+
+  it("dedupes same-token near-price BUY before exchange placement", async () => {
+    const controlDb = createMockControlDb(100);
+    const existing = makeBuyCmd({
+      commandId: createCommandId("existing-duplicate-buy"),
+      clientOrderId: "plk_existing_duplicate_buy" as ClientOrderId,
+      tokenId: createTokenId("dup-buy-token"),
+      signalReason: "probe-entry",
+      decisionRuleId: "R23_DIP_TRIGGER",
+      price: 0.5,
+      tickSize: 0.01,
+      metadata: { source: "strategy" },
+    });
+    orderRepo.findOpen = vi
+      .fn()
+      .mockReturnValue([openOrderFromCommand(existing, "ord-existing-duplicate-buy")]);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy({ maxOpenBuyOrdersPerToken: 2 }),
+    });
+
+    await mod.start();
+    const skipped = collectSkipped(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("cmd-duplicate-buy"),
+        clientOrderId: "plk_duplicate_buy" as ClientOrderId,
+        tokenId: createTokenId("dup-buy-token"),
+        signalReason: "probe-entry",
+        decisionRuleId: "R23_DIP_TRIGGER",
+        price: 0.51,
+        tickSize: 0.01,
+        metadata: { source: "strategy" },
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(skipped).toEqual([{ reasonCode: "buy_duplicate_deduped" }]);
+
+    await mod.stop();
+  });
+
+  it("allows same-token BUY at materially different price under the per-token cap", async () => {
+    const controlDb = createMockControlDb(100);
+    const existing = makeBuyCmd({
+      commandId: createCommandId("existing-different-price-buy"),
+      clientOrderId: "plk_existing_different_price_buy" as ClientOrderId,
+      tokenId: createTokenId("different-price-token"),
+      signalReason: "scale-in",
+      decisionRuleId: "D3",
+      price: 0.5,
+      tickSize: 0.01,
+    });
+    orderRepo.findOpen = vi
+      .fn()
+      .mockReturnValue([openOrderFromCommand(existing, "ord-existing-different-price-buy")]);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy({ maxOpenBuyOrdersPerToken: 2 }),
+    });
+
+    await mod.start();
+    const skipped = collectSkipped(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("cmd-different-price-buy"),
+        clientOrderId: "plk_different_price_buy" as ClientOrderId,
+        tokenId: createTokenId("different-price-token"),
+        signalReason: "scale-in",
+        decisionRuleId: "D3",
+        price: 0.53,
+        tickSize: 0.01,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(skipped).toHaveLength(0);
+
+    await mod.stop();
+  });
+
+  it("clears one stale BUY blocker when global BUY cap is full without placing immediately", async () => {
+    const controlDb = createMockControlDb(100);
+    const stale = makeBuyCmd({
+      commandId: createCommandId("existing-stale-buy"),
+      clientOrderId: "plk_existing_stale_buy" as ClientOrderId,
+      tokenId: createTokenId("stale-buy-token"),
+      signalReason: "confirm-scale",
+    });
+    const fresh = makeBuyCmd({
+      commandId: createCommandId("existing-fresh-buy"),
+      clientOrderId: "plk_existing_fresh_buy" as ClientOrderId,
+      tokenId: createTokenId("fresh-buy-token"),
+      signalReason: "probe-entry",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([
+      {
+        ...openOrderFromCommand(stale, "ord-existing-stale-buy"),
+        createdAt: new Date(Date.now() - 3 * 60 * 60_000 - 60_000).toISOString(),
+      },
+      openOrderFromCommand(fresh, "ord-existing-fresh-buy"),
+    ]);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy({ maxOpenBuyOrders: 2 }),
+    });
+
+    await mod.start();
+    const skipped = collectSkipped(bus);
+    const cancels = collectCancels(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("cmd-cap-full-stale-clear"),
+        clientOrderId: "plk_cap_full_stale_clear" as ClientOrderId,
+        tokenId: createTokenId("new-buy-after-stale"),
+        signalReason: "probe-entry",
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(cancels).toEqual([{ orderId: "ord-existing-stale-buy", reason: "stale_entry_ttl" }]);
+    expect(skipped).toEqual([{ reasonCode: "buy_cap_full_targeted_replacement" }]);
+
+    await mod.stop();
+  });
+
+  it("keeps blocking when global BUY cap is full and no targeted replacement exists", async () => {
+    const controlDb = createMockControlDb(100);
+    orderRepo.findOpen = vi.fn().mockReturnValue([
+      openOrderFromCommand(
+        makeBuyCmd({
+          commandId: createCommandId("fresh-cap-buy-1"),
+          clientOrderId: "plk_fresh_cap_buy_1" as ClientOrderId,
+          tokenId: createTokenId("fresh-cap-token-1"),
+          signalReason: "probe-entry",
+        }),
+        "ord-fresh-cap-buy-1",
+      ),
+      openOrderFromCommand(
+        makeBuyCmd({
+          commandId: createCommandId("fresh-cap-buy-2"),
+          clientOrderId: "plk_fresh_cap_buy_2" as ClientOrderId,
+          tokenId: createTokenId("fresh-cap-token-2"),
+          signalReason: "probe-entry",
+        }),
+        "ord-fresh-cap-buy-2",
+      ),
+    ]);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy({ maxOpenBuyOrders: 2 }),
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+    const cancels = collectCancels(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("cmd-cap-full-no-target"),
+        clientOrderId: "plk_cap_full_no_target" as ClientOrderId,
+        tokenId: createTokenId("new-buy-no-target"),
+        signalReason: "probe-entry",
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(cancels).toHaveLength(0);
     expect(rejected).toHaveLength(1);
     expect(rejected[0]!.reason).toBe("wallet_buy_capacity_exhausted");
 
