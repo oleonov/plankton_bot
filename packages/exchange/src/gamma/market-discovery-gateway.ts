@@ -34,6 +34,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_PAGE_SIZE = 100;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
+const CURSOR_PREVIEW_MAX_LENGTH = 32;
 
 /**
  * Extract event-level Gamma tags as slug strings (Track B §4.2b). The
@@ -55,6 +56,32 @@ function extractEventTags(value: unknown): readonly string[] | null {
     })
     .filter((t): t is string => t != null);
   return tags.length > 0 ? tags : null;
+}
+
+function previewCursor(afterCursor: string | null): string | null {
+  if (!afterCursor) return null;
+  if (afterCursor.length <= CURSOR_PREVIEW_MAX_LENGTH) return afterCursor;
+  return `${afterCursor.slice(0, CURSOR_PREVIEW_MAX_LENGTH)}...`;
+}
+
+function gammaApiResponseError(args: {
+  response: Response;
+  url: URL;
+  afterCursor: string | null;
+  attempt: number;
+  maxAttempts: number;
+}): Error {
+  const err = new Error(
+    `Gamma API responded with ${args.response.status}: ${args.response.statusText}`,
+  );
+  return Object.assign(err, {
+    operation: "gamma.events.keyset",
+    statusCode: args.response.status,
+    attempt: args.attempt,
+    maxAttempts: args.maxAttempts,
+    endpointPath: args.url.pathname,
+    cursorPreview: previewCursor(args.afterCursor),
+  });
 }
 
 interface GammaEventsPage {
@@ -166,7 +193,13 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
 
         if (!response.ok) {
           await drainResponseBody(response);
-          throw new Error(`Gamma API responded with ${response.status}: ${response.statusText}`);
+          throw gammaApiResponseError({
+            response,
+            url,
+            afterCursor,
+            attempt,
+            maxAttempts: this.maxRetries,
+          });
         }
 
         return this.parseEventsPage(await response.json());

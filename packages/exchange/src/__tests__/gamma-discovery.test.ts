@@ -265,16 +265,70 @@ describe("GammaMarketDiscoveryGateway", () => {
     expect(m.tickSize).toBe(0.001);
   });
 
-  it("discoverMarkets() throws on HTTP error", async () => {
+  it("discoverMarkets() retries transient Gamma 5xx before succeeding", async () => {
     const gateway = new GammaMarketDiscoveryGateway({
       baseUrl: "https://test.gamma.api",
       pageSize: 10,
+      maxRetries: 3,
+      retryDelayMs: 0,
     });
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
-    fetchMock.mockResolvedValueOnce(mockFetchResponse(null, false, 500));
+    fetchMock
+      .mockResolvedValueOnce(mockFetchResponse(null, false, 500))
+      .mockResolvedValueOnce(
+        mockFetchResponse(makeEventsPage([makeEvent("ok", [makeGammaMarket("ok")])])),
+      );
 
-    await expect(gateway.discoverMarkets()).rejects.toThrow("Gamma API responded with 500");
+    const markets = await gateway.discoverMarkets();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(markets).toHaveLength(1);
+    expect(markets[0]!.conditionId).toBe("cond-ok");
+  });
+
+  it("discoverMarkets() does not retry permanent Gamma 4xx", async () => {
+    const gateway = new GammaMarketDiscoveryGateway({
+      baseUrl: "https://test.gamma.api",
+      pageSize: 10,
+      maxRetries: 3,
+      retryDelayMs: 0,
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(mockFetchResponse(null, false, 400));
+
+    await expect(gateway.discoverMarkets()).rejects.toThrow("Gamma API responded with 400");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("forEachMarketPage() attaches bounded request context to exhausted Gamma 5xx", async () => {
+    const gateway = new GammaMarketDiscoveryGateway({
+      baseUrl: "https://test.gamma.api",
+      pageSize: 10,
+      maxRetries: 2,
+      retryDelayMs: 0,
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock
+      .mockResolvedValueOnce(
+        mockFetchResponse(
+          makeEventsPage([makeEvent("a", [makeGammaMarket("a")])], "cursor-page-2"),
+        ),
+      )
+      .mockResolvedValueOnce(mockFetchResponse(null, false, 503))
+      .mockResolvedValueOnce(mockFetchResponse(null, false, 503));
+
+    await expect(gateway.forEachMarketPage(() => {})).rejects.toMatchObject({
+      message: "Gamma API responded with 503: Internal Server Error",
+      statusCode: 503,
+      attempt: 2,
+      maxAttempts: 2,
+      endpointPath: "/events/keyset",
+      cursorPreview: "cursor-page-2",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("healthCheck() returns ok:true when Gamma is reachable", async () => {

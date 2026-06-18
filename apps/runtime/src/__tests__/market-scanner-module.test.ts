@@ -1263,6 +1263,61 @@ describe("MarketScannerModule", () => {
     }
   });
 
+  it("downgrades transient Gamma discovery 5xx after a prior successful scan", async () => {
+    silentLog.warn.mockClear();
+    silentLog.error.mockClear();
+    const { mod, discoveryGateway } = buildModule();
+    const gamma500 = Object.assign(
+      new Error("Gamma API responded with 500: Internal Server Error"),
+      {
+        statusCode: 500,
+        attempt: 3,
+        maxAttempts: 3,
+        endpointPath: "/events/keyset",
+      },
+    );
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(async (cb: ForEachMarketPageCallback) => {
+        const page = [makeClobMarket({ tokens: [{ tokenId: "tok-ok", outcome: "Yes" }] })];
+        cb(page, eventStatsFromMarkets(page));
+        return { totalMarkets: page.length };
+      })
+      .mockRejectedValue(gamma500);
+
+    await mod.scan();
+    await mod.scan();
+
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: gamma500, suppressedCount: 0 }),
+      "scan cycle degraded — keeping existing catalog",
+    );
+    expect(silentLog.error).not.toHaveBeenCalledWith(expect.anything(), "scan cycle failed");
+  });
+
+  it("keeps first-scan Gamma discovery 5xx at error level", async () => {
+    silentLog.warn.mockClear();
+    silentLog.error.mockClear();
+    const { mod, discoveryGateway } = buildModule();
+    const gamma500 = Object.assign(
+      new Error("Gamma API responded with 500: Internal Server Error"),
+      {
+        statusCode: 500,
+        attempt: 3,
+        maxAttempts: 3,
+        endpointPath: "/events/keyset",
+      },
+    );
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockRejectedValue(gamma500);
+
+    await mod.scan();
+
+    expect(silentLog.error).toHaveBeenCalledWith({ err: gamma500 }, "scan cycle failed");
+    expect(silentLog.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "scan cycle degraded — keeping existing catalog",
+    );
+  });
+
   it("skips duplicate initial scan on start when a fresh startup scan already ran", async () => {
     const realBus = new InProcessEventBus();
     const discoveryGateway = createMockDiscoveryGateway();

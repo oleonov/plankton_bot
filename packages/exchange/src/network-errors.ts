@@ -11,13 +11,20 @@ export const TRANSIENT_NETWORK_ERROR_PATTERN =
 // 429/408 carry an HTTP response, so the CLOB client's built-in
 // `isTransientAxiosError` misses them. We treat them as transient explicitly.
 export const RATE_LIMIT_ERROR_PATTERN = /(?:\b429\b|too many requests|rate.?limit)/i;
+const RETRYABLE_HTTP_RESPONSE_ERROR_PATTERN =
+  /(?:Gamma API responded with|Gamma pricing request failed:)\s+5\d\d/i;
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
 export function isTransientNetworkError(err: unknown): boolean {
-  return TRANSIENT_NETWORK_ERROR_PATTERN.test(messageOf(err));
+  const message = messageOf(err);
+  return (
+    TRANSIENT_NETWORK_ERROR_PATTERN.test(message) ||
+    RATE_LIMIT_ERROR_PATTERN.test(message) ||
+    RETRYABLE_HTTP_RESPONSE_ERROR_PATTERN.test(message)
+  );
 }
 
 export function isRateLimitError(err: unknown): boolean {
