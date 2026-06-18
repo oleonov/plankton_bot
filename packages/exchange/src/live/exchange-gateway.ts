@@ -16,6 +16,8 @@ import type {
   ExchangeFill,
   ExchangeBalance,
   MarketFeeInfo,
+  MarketFeeInfoDiagnostic,
+  MarketFeeInfoResult,
   RedeemPositionsResult,
   RedeemPositionsOptions,
   TokenId,
@@ -307,7 +309,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
   // `info: null` is a valid hit (`fd` block legitimately absent).
   private readonly marketFeeInfoCache = new Map<
     string,
-    { info: MarketFeeInfo | null; expiresAt: number }
+    { result: MarketFeeInfoResult; expiresAt: number }
   >();
   private static readonly FEE_INFO_TTL_HIT_MS = 5 * 60_000;
   private static readonly FEE_INFO_TTL_MISS_MS = 30_000;
@@ -502,40 +504,49 @@ export class LiveExchangeGateway implements ExchangeGateway {
   }
 
   async getMarketFeeInfo(conditionId: string): Promise<MarketFeeInfo | null> {
+    const result = await this.getMarketFeeInfoResult(conditionId);
+    return result.info;
+  }
+
+  async getMarketFeeInfoResult(conditionId: string): Promise<MarketFeeInfoResult> {
     const now = Date.now();
     const cached = this.marketFeeInfoCache.get(conditionId);
     if (cached && cached.expiresAt > now) {
-      return cached.info;
+      return cached.result;
     }
     try {
       const raw = (await this.client.getClobMarketInfo(conditionId)) as {
         fd?: { r?: number; e?: number; to?: boolean };
+        mbf?: unknown;
+        tbf?: unknown;
+        maker_base_fee?: unknown;
+        taker_base_fee?: unknown;
       } | null;
-      const fd = raw?.fd;
-      // Mirror @polymarket/clob-client-v2@1.0.2 behavior: when fd.e is absent
-      // or non-finite, the SDK caches `result.fd?.e ?? 0`. We do the same so
-      // our local fee math agrees with the SDK's view of the market.
-      const info: MarketFeeInfo | null =
-        fd && Number.isFinite(fd.r)
-          ? {
-              rate: Number(fd.r ?? 0),
-              exponent: Number.isFinite(fd.e) ? Number(fd.e) : 0,
-              takerOnly: !!fd.to,
-            }
-          : null;
+      const result = parseMarketFeeInfoResult(raw);
       this.marketFeeInfoCache.set(conditionId, {
-        info,
+        result,
         expiresAt: now + LiveExchangeGateway.FEE_INFO_TTL_HIT_MS,
       });
-      return info;
+      return result;
     } catch {
       // Short negative TTL: a transient CLOB failure must not permanently
       // disable V2 fee metadata for this condition.
-      this.marketFeeInfoCache.set(conditionId, {
+      const result: MarketFeeInfoResult = {
+        status: "api_error",
         info: null,
+        diagnostic: {
+          fieldShape: "unknown",
+          fdPresent: false,
+          takerBaseFeePresent: false,
+          makerBaseFeePresent: false,
+          message: "getClobMarketInfo threw",
+        },
+      };
+      this.marketFeeInfoCache.set(conditionId, {
+        result,
         expiresAt: now + LiveExchangeGateway.FEE_INFO_TTL_MISS_MS,
       });
-      return null;
+      return result;
     }
   }
 
@@ -1379,6 +1390,84 @@ export class LiveExchangeGateway implements ExchangeGateway {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
+
+function parseMarketFeeInfoResult(
+  raw: {
+    fd?: { r?: number; e?: number; to?: boolean };
+    mbf?: unknown;
+    tbf?: unknown;
+    maker_base_fee?: unknown;
+    taker_base_fee?: unknown;
+  } | null,
+): MarketFeeInfoResult {
+  const diagnostic = marketFeeDiagnostic(raw);
+  const fd = raw?.fd;
+  if (fd) {
+    if (!Number.isFinite(fd.r)) {
+      return {
+        status: "api_invalid_fee_info",
+        info: null,
+        diagnostic: { ...diagnostic, fieldShape: "fd_invalid", message: "fd.r is missing" },
+      };
+    }
+    // Mirror @polymarket/clob-client-v2@1.0.2 behavior: when fd.e is absent
+    // or non-finite, the SDK caches `result.fd?.e ?? 0`. We do the same so
+    // our local fee math agrees with the SDK's view of the market.
+    return {
+      status: "ok",
+      info: {
+        rate: Number(fd.r ?? 0),
+        exponent: Number.isFinite(fd.e) ? Number(fd.e) : 0,
+        takerOnly: !!fd.to,
+      },
+      diagnostic,
+    };
+  }
+  if (diagnostic.takerBaseFeePresent || diagnostic.makerBaseFeePresent) {
+    return {
+      status: "api_unsupported_fee_info",
+      info: null,
+      diagnostic: {
+        ...diagnostic,
+        fieldShape: "base_fee_only",
+        message: "base fee fields are present without fd rate/exponent",
+      },
+    };
+  }
+  return {
+    status: "api_no_fee_info",
+    info: null,
+    diagnostic: {
+      ...diagnostic,
+      fieldShape: "no_fee_fields",
+      message: "no fd or base fee fields present",
+    },
+  };
+}
+
+function marketFeeDiagnostic(
+  raw: {
+    fd?: unknown;
+    mbf?: unknown;
+    tbf?: unknown;
+    maker_base_fee?: unknown;
+    taker_base_fee?: unknown;
+  } | null,
+): MarketFeeInfoDiagnostic {
+  const fdPresent = raw?.fd != null;
+  const takerBaseFeePresent = raw?.tbf != null || raw?.taker_base_fee != null;
+  const makerBaseFeePresent = raw?.mbf != null || raw?.maker_base_fee != null;
+  return {
+    fieldShape: fdPresent
+      ? "fd"
+      : takerBaseFeePresent || makerBaseFeePresent
+        ? "base_fee_only"
+        : "no_fee_fields",
+    fdPresent,
+    takerBaseFeePresent,
+    makerBaseFeePresent,
+  };
+}
 
 /**
  * SDK responses vary between raw arrays and paginated wrappers.

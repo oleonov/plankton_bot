@@ -1005,6 +1005,61 @@ describe("LiveExchangeGateway", () => {
       expect(info).toBeNull();
     });
 
+    it("returns diagnostic no-fee-info when fd and base fee fields are absent", async () => {
+      client.getClobMarketInfo.mockResolvedValueOnce({});
+      const result = await gw.getMarketFeeInfoResult(conditionId);
+      expect(result).toMatchObject({
+        status: "api_no_fee_info",
+        info: null,
+        diagnostic: {
+          fieldShape: "no_fee_fields",
+          fdPresent: false,
+          takerBaseFeePresent: false,
+          makerBaseFeePresent: false,
+        },
+      });
+    });
+
+    it("returns diagnostic unsupported when only base fee fields are present", async () => {
+      client.getClobMarketInfo.mockResolvedValueOnce({ tbf: 1000, mbf: 1000 });
+      const result = await gw.getMarketFeeInfoResult(conditionId);
+      expect(result).toMatchObject({
+        status: "api_unsupported_fee_info",
+        info: null,
+        diagnostic: {
+          fieldShape: "base_fee_only",
+          fdPresent: false,
+          takerBaseFeePresent: true,
+          makerBaseFeePresent: true,
+        },
+      });
+    });
+
+    it("returns diagnostic invalid when fd is present without a finite rate", async () => {
+      client.getClobMarketInfo.mockResolvedValueOnce({ fd: { e: 1, to: true } });
+      const result = await gw.getMarketFeeInfoResult(conditionId);
+      expect(result).toMatchObject({
+        status: "api_invalid_fee_info",
+        info: null,
+        diagnostic: {
+          fieldShape: "fd_invalid",
+          fdPresent: true,
+        },
+      });
+    });
+
+    it("returns diagnostic api_error when the CLOB market info call throws", async () => {
+      client.getClobMarketInfo.mockRejectedValueOnce(new Error("CLOB down"));
+      const result = await gw.getMarketFeeInfoResult(conditionId);
+      expect(result).toMatchObject({
+        status: "api_error",
+        info: null,
+        diagnostic: {
+          fieldShape: "unknown",
+        },
+      });
+    });
+
     it("defaults exponent to 0 when fd.e is absent (matches SDK `fd?.e ?? 0`)", async () => {
       client.getClobMarketInfo.mockResolvedValueOnce({ fd: { r: 0.04, to: true } });
       const info = await gw.getMarketFeeInfo(conditionId);

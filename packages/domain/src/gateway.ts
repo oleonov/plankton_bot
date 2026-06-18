@@ -669,6 +669,16 @@ export interface ExchangeGateway {
   getMarketFeeInfo?(conditionId: string): Promise<MarketFeeInfo | null>;
 
   /**
+   * Diagnostic variant of `getMarketFeeInfo`.
+   *
+   * The legacy nullable method intentionally collapses exchange exceptions,
+   * valid no-fee markets, and unsupported response shapes. FeeScheduleProvider
+   * uses this richer form when available so production telemetry can distinguish
+   * those cases without changing Track R's fallback behavior.
+   */
+  getMarketFeeInfoResult?(conditionId: string): Promise<MarketFeeInfoResult>;
+
+  /**
    * Convert residual USDC.e / native USDC on the proxy wallet to V2 pUSD so the
    * balance is visible to the Polymarket Exchange. Live-lite only; optional on
    * all other implementations.
@@ -690,4 +700,32 @@ export interface MarketFeeInfo {
   readonly rate: number;
   readonly exponent: number;
   readonly takerOnly: boolean;
+}
+
+export type MarketFeeInfoStatus =
+  | "ok"
+  | "api_error"
+  | "api_no_fee_info"
+  | "api_invalid_fee_info"
+  | "api_unsupported_fee_info";
+
+export type MarketFeeInfoFieldShape =
+  | "fd"
+  | "fd_invalid"
+  | "base_fee_only"
+  | "no_fee_fields"
+  | "unknown";
+
+export interface MarketFeeInfoDiagnostic {
+  readonly fieldShape: MarketFeeInfoFieldShape;
+  readonly fdPresent: boolean;
+  readonly takerBaseFeePresent: boolean;
+  readonly makerBaseFeePresent: boolean;
+  readonly message?: string;
+}
+
+export interface MarketFeeInfoResult {
+  readonly status: MarketFeeInfoStatus;
+  readonly info: MarketFeeInfo | null;
+  readonly diagnostic: MarketFeeInfoDiagnostic;
 }

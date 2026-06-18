@@ -6,10 +6,14 @@ import {
   type FeeScheduleQuote,
   type FeeScheduleRequest,
   type MarketFeeInfo,
+  type MarketFeeInfoDiagnostic,
+  type MarketFeeInfoResult,
+  type MarketFeeInfoStatus,
 } from "@krabs/domain";
 
 type FeeGateway = {
   getMarketFeeInfo?: (conditionId: string) => Promise<MarketFeeInfo | null>;
+  getMarketFeeInfoResult?: (conditionId: string) => Promise<MarketFeeInfoResult>;
 };
 
 type RuntimeMetrics = {
@@ -49,9 +53,14 @@ export function createHybridFeeScheduleProvider(
         );
       }
 
-      if (config.apiPrimaryEnabled && request.conditionId && deps.feeGateway.getMarketFeeInfo) {
+      if (
+        config.apiPrimaryEnabled &&
+        request.conditionId &&
+        (deps.feeGateway.getMarketFeeInfoResult || deps.feeGateway.getMarketFeeInfo)
+      ) {
         try {
-          const info = await deps.feeGateway.getMarketFeeInfo(request.conditionId);
+          const result = await resolveMarketFeeInfo(deps.feeGateway, request.conditionId);
+          const info = result.info;
           if (info && Number.isFinite(info.rate) && Number.isFinite(info.exponent)) {
             deps.runtimeMetrics?.writeCounter?.("fee_schedule_provider_api_success", 1);
             deps.runtimeMetrics?.writeCounter?.(
@@ -74,7 +83,9 @@ export function createHybridFeeScheduleProvider(
               warnings: period ? [] : ["no_active_fee_schedule_period"],
             };
           }
-          recordDegraded("api_missing_fee_info", config);
+          recordDegraded(result.status === "ok" ? "api_invalid_fee_info" : result.status, config, {
+            diagnostic: result.diagnostic,
+          });
         } catch {
           recordDegraded("api_error", config);
         }
@@ -125,12 +136,39 @@ export function createHybridFeeScheduleProvider(
     },
   };
 
-  function recordDegraded(reason: string, config: FeeScheduleConfig): void {
-    deps.runtimeMetrics?.writeCounter?.(
-      "fee_schedule_provider_api_failure",
-      1,
-      JSON.stringify({ reason }),
-    );
+  async function resolveMarketFeeInfo(
+    feeGateway: FeeGateway,
+    conditionId: string,
+  ): Promise<MarketFeeInfoResult> {
+    if (feeGateway.getMarketFeeInfoResult) {
+      return feeGateway.getMarketFeeInfoResult(conditionId);
+    }
+    const info = await feeGateway.getMarketFeeInfo?.(conditionId);
+    return {
+      status: info ? "ok" : "api_no_fee_info",
+      info: info ?? null,
+      diagnostic: {
+        fieldShape: info ? "fd" : "unknown",
+        fdPresent: !!info,
+        takerBaseFeePresent: false,
+        makerBaseFeePresent: false,
+        message: info
+          ? "legacy getMarketFeeInfo returned info"
+          : "legacy getMarketFeeInfo returned null",
+      },
+    };
+  }
+
+  function recordDegraded(
+    reason: MarketFeeInfoStatus,
+    config: FeeScheduleConfig,
+    opts: { diagnostic?: MarketFeeInfoDiagnostic | undefined } = {},
+  ): void {
+    const labels = JSON.stringify({
+      reason,
+      ...(opts.diagnostic ? { fieldShape: opts.diagnostic.fieldShape } : {}),
+    });
+    deps.runtimeMetrics?.writeCounter?.("fee_schedule_provider_api_failure", 1, labels);
     const capturedAt = nowMs();
     const cooldownMs = config.degradedEventCooldownMs;
     if (capturedAt - lastDegradedEventAtMs < cooldownMs) return;
@@ -138,7 +176,7 @@ export function createHybridFeeScheduleProvider(
     deps.runtimeMetrics?.writeEvent?.(
       "fee_schedule_provider_degraded",
       1,
-      JSON.stringify({ reason }),
+      labels,
       new Date(capturedAt).toISOString(),
     );
   }

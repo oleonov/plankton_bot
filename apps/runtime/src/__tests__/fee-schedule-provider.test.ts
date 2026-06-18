@@ -130,7 +130,18 @@ describe("createHybridFeeScheduleProvider", () => {
     const metrics = { writeCounter: vi.fn(), writeEvent: vi.fn() };
     let now = Date.parse("2026-06-16T00:00:00Z");
     const provider = createHybridFeeScheduleProvider({
-      feeGateway: { getMarketFeeInfo: vi.fn().mockResolvedValue(null) },
+      feeGateway: {
+        getMarketFeeInfoResult: vi.fn().mockResolvedValue({
+          status: "api_no_fee_info",
+          info: null,
+          diagnostic: {
+            fieldShape: "no_fee_fields",
+            fdPresent: false,
+            takerBaseFeePresent: false,
+            makerBaseFeePresent: false,
+          },
+        }),
+      },
       runtimeMetrics: metrics,
       nowMs: () => now,
     });
@@ -152,13 +163,72 @@ describe("createHybridFeeScheduleProvider", () => {
     expect(metrics.writeCounter).toHaveBeenCalledWith(
       "fee_schedule_provider_api_failure",
       1,
-      JSON.stringify({ reason: "api_missing_fee_info" }),
+      JSON.stringify({ reason: "api_no_fee_info", fieldShape: "no_fee_fields" }),
     );
     expect(metrics.writeCounter).toHaveBeenCalledWith("fee_schedule_provider_schedule_fallback", 1);
     const degradedEvents = metrics.writeEvent.mock.calls.filter(
       (call) => call[0] === "fee_schedule_provider_degraded",
     );
     expect(degradedEvents).toHaveLength(1);
+  });
+
+  it("emits distinct diagnostics for unsupported base-fee-only market info", async () => {
+    const metrics = { writeCounter: vi.fn(), writeEvent: vi.fn() };
+    const now = Date.parse("2026-06-16T00:00:00Z");
+    const provider = createHybridFeeScheduleProvider({
+      feeGateway: {
+        getMarketFeeInfoResult: vi.fn().mockResolvedValue({
+          status: "api_unsupported_fee_info",
+          info: null,
+          diagnostic: {
+            fieldShape: "base_fee_only",
+            fdPresent: false,
+            takerBaseFeePresent: true,
+            makerBaseFeePresent: true,
+          },
+        }),
+      },
+      runtimeMetrics: metrics,
+      nowMs: () => now,
+    });
+
+    await provider.resolve({
+      asOfMs: now,
+      conditionId: "condition",
+      tokenId: "token",
+      config,
+    });
+
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "fee_schedule_provider_api_failure",
+      1,
+      JSON.stringify({ reason: "api_unsupported_fee_info", fieldShape: "base_fee_only" }),
+    );
+    expect(metrics.writeCounter).toHaveBeenCalledWith("fee_schedule_provider_schedule_fallback", 1);
+  });
+
+  it("emits api_error diagnostics when the fee info call throws", async () => {
+    const metrics = { writeCounter: vi.fn(), writeEvent: vi.fn() };
+    const now = Date.parse("2026-06-16T00:00:00Z");
+    const provider = createHybridFeeScheduleProvider({
+      feeGateway: { getMarketFeeInfo: vi.fn().mockRejectedValue(new Error("CLOB down")) },
+      runtimeMetrics: metrics,
+      nowMs: () => now,
+    });
+
+    await provider.resolve({
+      asOfMs: now,
+      conditionId: "condition",
+      tokenId: "token",
+      config,
+    });
+
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "fee_schedule_provider_api_failure",
+      1,
+      JSON.stringify({ reason: "api_error" }),
+    );
+    expect(metrics.writeCounter).toHaveBeenCalledWith("fee_schedule_provider_schedule_fallback", 1);
   });
 
   it("does not use schedule fallback when scheduleFallbackEnabled is false", async () => {
