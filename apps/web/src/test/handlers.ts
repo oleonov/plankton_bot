@@ -129,6 +129,12 @@ export const mockStatus = {
   marketDataLastUpdateAt: "2026-03-31T00:00:00Z",
   openConditionCount: 12,
   openOrderCount: 2,
+  openOrderBreakdown: {
+    total: 2,
+    buy: { open: 1, cap: 25 },
+    sell: { open: 1, cap: 10 },
+    profileLadderSell: { open: 0 },
+  },
   openPositionCount: 10,
   ordersPlacedLastMin: 0,
   positionsOpenedLastMin: 0,

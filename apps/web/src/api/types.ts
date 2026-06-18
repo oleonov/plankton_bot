@@ -300,6 +300,20 @@ export interface StatusData {
   marketDataLastUpdateAt: string | null;
   openConditionCount: number;
   openOrderCount: number;
+  openOrderBreakdown?: {
+    total: number;
+    buy: {
+      open: number;
+      cap: number | null;
+    };
+    sell: {
+      open: number;
+      cap: number | null;
+    };
+    profileLadderSell: {
+      open: number;
+    };
+  };
   openPositionCount: number;
   ordersPlacedLastMin: number;
   positionsOpenedLastMin: number;

@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { resolveTradingState } from "@krabs/domain";
+import { parseExecutionPolicyJson, resolveTradingState } from "@krabs/domain";
 import type { LedgerPool } from "../ledger-pool.js";
 import { resolveActiveLedger } from "../active-ledger.js";
 import { computeExecutionTelemetry } from "../execution-telemetry.js";
@@ -47,6 +47,138 @@ type StatusSnapshot = Record<string, unknown> & {
 };
 
 const INFRA_ALERT_LOOKBACK_MS = 60 * 60 * 1000;
+const ACTIVE_ORDER_STATUS_SQL = "('pending','open','partially-filled')";
+
+interface OpenOrderBreakdown {
+  total: number;
+  buy: {
+    open: number;
+    cap: number | null;
+  };
+  sell: {
+    open: number;
+    cap: number | null;
+  };
+  profileLadderSell: {
+    open: number;
+  };
+}
+
+function readExecutionPolicyJson(
+  controlDb: Database.Database | undefined,
+  profileId: string,
+): string | null {
+  if (!controlDb) return null;
+  try {
+    const row = controlDb
+      .prepare("SELECT execution_policy_json FROM profile_settings WHERE profile_id = ?")
+      .get(profileId) as { execution_policy_json: string | null } | undefined;
+    return row?.execution_policy_json ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function readProfileOwnedOpenPositionCount(db: Database.Database): number {
+  try {
+    const row = db
+      .prepare(
+        `SELECT COUNT(DISTINCT p.token_id) AS cnt
+           FROM positions p
+           INNER JOIN execution_profile_state eps ON eps.token_id = p.token_id
+          WHERE p.status = 'open'
+            AND eps.state != 'CLOSED'`,
+      )
+      .get() as { cnt: number };
+    return row.cnt;
+  } catch {
+    return 0;
+  }
+}
+
+function nonNegativeInt(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+}
+
+function nonNegativeNumber(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function computeStatusDynamicGlobalSellCap(args: {
+  profileOwnedOpenPositionCount: number;
+  profileLadderLiveRungsPerPosition: number;
+  minNonLadderReserve: number;
+  nonLadderReserveRatio: number;
+  hardMaxOpenSellOrders: number;
+}): number {
+  const profileLadderCapRaw =
+    nonNegativeInt(args.profileOwnedOpenPositionCount) *
+    nonNegativeInt(args.profileLadderLiveRungsPerPosition);
+  const nonLadderReserve = Math.max(
+    nonNegativeInt(args.minNonLadderReserve),
+    Math.ceil(profileLadderCapRaw * nonNegativeNumber(args.nonLadderReserveRatio)),
+  );
+  return Math.min(
+    profileLadderCapRaw + nonLadderReserve,
+    Math.max(1, nonNegativeInt(args.hardMaxOpenSellOrders)),
+  );
+}
+
+function buildOpenOrderBreakdown(
+  db: Database.Database,
+  controlDb: Database.Database | undefined,
+  runtimeMode: string,
+): OpenOrderBreakdown {
+  const counts = db
+    .prepare(
+      `SELECT
+         COALESCE(SUM(CASE WHEN side = 'buy' THEN 1 ELSE 0 END), 0) AS buy_open,
+         COALESCE(SUM(CASE WHEN side = 'sell' THEN 1 ELSE 0 END), 0) AS sell_open,
+         COALESCE(SUM(CASE
+           WHEN side = 'sell'
+            AND (
+              decision_rule_id = 'PROFILE_LADDER'
+              OR signal_reason = 'profile-ladder-exit'
+            )
+           THEN 1 ELSE 0 END), 0) AS profile_ladder_sell_open
+       FROM orders
+       WHERE status IN ${ACTIVE_ORDER_STATUS_SQL}`,
+    )
+    .get() as {
+    buy_open: number;
+    sell_open: number;
+    profile_ladder_sell_open: number;
+  };
+  const policy = parseExecutionPolicyJson(readExecutionPolicyJson(controlDb, runtimeMode)).policy;
+  const sellPolicy = policy.sellCapacity;
+  const sellCap =
+    sellPolicy.mode === "source_aware_dynamic"
+      ? computeStatusDynamicGlobalSellCap({
+          profileOwnedOpenPositionCount: readProfileOwnedOpenPositionCount(db),
+          profileLadderLiveRungsPerPosition: sellPolicy.profileLadderLiveRungsPerPosition,
+          minNonLadderReserve: sellPolicy.minNonLadderReserve,
+          nonLadderReserveRatio: sellPolicy.nonLadderReserveRatio,
+          hardMaxOpenSellOrders: sellPolicy.hardMaxOpenSellOrders,
+        })
+      : nonNegativeInt(sellPolicy.maxOpenSellOrders);
+  const buyOpen = counts.buy_open;
+  const sellOpen = counts.sell_open;
+
+  return {
+    total: buyOpen + sellOpen,
+    buy: {
+      open: buyOpen,
+      cap: nonNegativeInt(policy.buyCapacity.maxOpenBuyOrders),
+    },
+    sell: {
+      open: sellOpen,
+      cap: sellCap,
+    },
+    profileLadderSell: {
+      open: counts.profile_ladder_sell_open,
+    },
+  };
+}
 
 function computeTradingState(
   db: Database.Database,
@@ -298,12 +430,6 @@ export function buildStatusSnapshot(
 ): Record<string, unknown> {
   const oneMinuteAgoIso = new Date(Date.now() - 60_000).toISOString();
 
-  const openOrders = db
-    .prepare(
-      "SELECT COUNT(*) as cnt FROM orders WHERE status IN ('pending','open','partially-filled')",
-    )
-    .get() as { cnt: number };
-
   const openPositions = db
     .prepare("SELECT COUNT(*) as cnt FROM positions WHERE status = 'open'")
     .get() as { cnt: number };
@@ -374,6 +500,7 @@ export function buildStatusSnapshot(
     : true; // no data yet = stale
 
   const runtimeMode = profileOverride ?? botRun?.mode ?? "simulation";
+  const openOrderBreakdown = buildOpenOrderBreakdown(db, controlDb, runtimeMode);
 
   // Live-lite envelope — only show when current run is live-lite
   const envelopeRow =
@@ -561,7 +688,8 @@ export function buildStatusSnapshot(
     marketDataStale,
     marketDataLastUpdateAt,
     openConditionCount: openConditions.cnt,
-    openOrderCount: openOrders.cnt,
+    openOrderCount: openOrderBreakdown.total,
+    openOrderBreakdown,
     openPositionCount: openPositions.cnt,
     ordersPlacedLastMin: recentOrderCount.cnt,
     positionsOpenedLastMin: recentPositionCount.cnt,

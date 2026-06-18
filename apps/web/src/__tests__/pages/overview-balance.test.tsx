@@ -251,12 +251,18 @@ describe("Overview Balance Card", () => {
     expect(within(row!).queryByText("1m ago")).not.toBeInTheDocument();
   });
 
-  it("shows open counts as the primary value and keeps per-minute throughput in the footer", async () => {
+  it("shows open order capacity breakdown instead of per-minute throughput", async () => {
     server.use(
       http.get("/api/v1/status", () =>
         ok({
           ...mockStatus,
-          openOrderCount: 88,
+          openOrderCount: 51,
+          openOrderBreakdown: {
+            total: 51,
+            buy: { open: 15, cap: 25 },
+            sell: { open: 36, cap: 168 },
+            profileLadderSell: { open: 28 },
+          },
           openPositionCount: 99,
           ordersPlacedLastMin: 7,
           positionsOpenedLastMin: 3,
@@ -273,14 +279,40 @@ describe("Overview Balance Card", () => {
     expect(ordersCard).toBeInstanceOf(HTMLElement);
 
     expect(positionsCard).toHaveTextContent("99");
-    expect(ordersCard).toHaveTextContent("88");
+    expect(ordersCard).toHaveTextContent("51");
+    expect(ordersCard).toHaveTextContent("B 15/25");
+    expect(ordersCard).toHaveTextContent("S 36/168");
+    expect(ordersCard).toHaveTextContent("PL 28");
     expect(positionsCard).toHaveTextContent(
       /0 dust|1 dust|2 dust|3 dust|4 dust|5 dust|6 dust|7 dust|8 dust|9 dust/,
     );
     expect(positionsCard).toHaveTextContent("3 in last min");
-    expect(ordersCard).toHaveTextContent("7 in last min");
+    expect(ordersCard).not.toHaveTextContent("7 in last min");
     expect(screen.queryByText("Positions / Min")).not.toBeInTheDocument();
     expect(screen.queryByText("Orders / Min")).not.toBeInTheDocument();
+  });
+
+  it("keeps the Open Orders card stable when breakdown is missing", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          openOrderBreakdown: undefined,
+          openOrderCount: 35,
+          ordersPlacedLastMin: 0,
+        }),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    const ordersCard = (await screen.findByText("Open Orders")).closest(".card");
+    expect(ordersCard).toBeInstanceOf(HTMLElement);
+    expect(ordersCard).toHaveTextContent("35");
+    expect(ordersCard).toHaveTextContent("B ?/?");
+    expect(ordersCard).toHaveTextContent("S ?/?");
+    expect(ordersCard).toHaveTextContent("PL ?");
+    expect(ordersCard).not.toHaveTextContent("0 in last min");
   });
 
   it("keeps Last Events focused on timestamped events only", async () => {

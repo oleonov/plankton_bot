@@ -110,6 +110,103 @@ function authHeaders() {
   return { authorization: `Bearer ${TEST_API_KEY}` };
 }
 
+async function withRollback<T>(fn: () => Promise<T>): Promise<T> {
+  conn.db.exec("BEGIN");
+  try {
+    return await fn();
+  } finally {
+    conn.db.exec("ROLLBACK");
+  }
+}
+
+function seedExecutionPolicy(policy: Record<string, unknown>): void {
+  conn.db.exec(`
+    CREATE TABLE IF NOT EXISTS profile_settings (
+      profile_id TEXT PRIMARY KEY,
+      execution_policy_json TEXT,
+      updated_at TEXT
+    );
+  `);
+  conn.db
+    .prepare(
+      `INSERT INTO profile_settings (profile_id, execution_policy_json, updated_at)
+       VALUES (?, ?, datetime('now'))
+       ON CONFLICT(profile_id) DO UPDATE SET
+         execution_policy_json = excluded.execution_policy_json,
+         updated_at = excluded.updated_at`,
+    )
+    .run("simulation", JSON.stringify(policy));
+}
+
+function seedProfileOwnedPosition(suffix: string | number, status: "open" | "dust"): void {
+  const now = "2026-03-14T00:00:00Z";
+  const insertPosition = conn.db.prepare(
+    `INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price,
+      cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, updated_at)
+     VALUES (?, ?, ?, 'buy', 10, 0.4, 4, 4, 0, ?, ?, ?)`,
+  );
+  const insertProfileState = conn.db.prepare(
+    `INSERT INTO execution_profile_state (token_id, condition_id, profile, state, assumed_at,
+      last_avg_entry, last_transition_at, created_at, updated_at)
+     VALUES (?, ?, 'cheap', 'EXITING', ?, 0.4, ?, ?, ?)`,
+  );
+
+  const tokenId = `status-token-${suffix}`;
+  const conditionId = `status-condition-${suffix}`;
+  insertPosition.run(`status-position-${suffix}`, tokenId, conditionId, status, now, now);
+  insertProfileState.run(tokenId, conditionId, now, now, now, now);
+}
+
+function seedProfileOwnedOpenPositions(count: number): void {
+  for (let i = 0; i < count; i += 1) {
+    seedProfileOwnedPosition(i, "open");
+  }
+}
+
+function seedOpenOrders(args: { buy: number; sell: number; profileLadderSell: number }): void {
+  const now = "2026-03-14T00:00:00Z";
+  const statuses = ["open", "pending", "partially-filled"];
+  const insertOrder = conn.db.prepare(
+    `INSERT INTO orders (order_id, client_order_id, token_id, condition_id, side, order_type,
+      price, size, size_usdc, status, exchange_order_id, bot_run_id, created_at, updated_at,
+      decision_rule_id, signal_reason)
+     VALUES (?, ?, ?, ?, ?, 'GTC', 0.5, 10, 5, ?, ?, 'run-1', ?, ?, ?, ?)`,
+  );
+
+  for (let i = 0; i < args.buy; i += 1) {
+    insertOrder.run(
+      `status-buy-${i}`,
+      `status_buy_${i}`,
+      `status-buy-token-${i}`,
+      `status-buy-condition-${i}`,
+      "buy",
+      statuses[i % statuses.length],
+      `status-buy-ex-${i}`,
+      now,
+      now,
+      "R23_DIP_TRIGGER",
+      "probe-entry",
+    );
+  }
+
+  for (let i = 0; i < args.sell; i += 1) {
+    const isProfileLadder = i < args.profileLadderSell;
+    insertOrder.run(
+      `status-sell-${i}`,
+      `status_sell_${i}`,
+      `status-sell-token-${i}`,
+      `status-sell-condition-${i}`,
+      "sell",
+      statuses[i % statuses.length],
+      `status-sell-ex-${i}`,
+      now,
+      now,
+      isProfileLadder ? "PROFILE_LADDER" : "D8_EXIT",
+      isProfileLadder ? "profile-ladder-exit" : "legacy-exit",
+    );
+  }
+}
+
 // ─── Auth tests ─────────────────────────────────────────────────────
 
 describe("auth", () => {
@@ -197,6 +294,12 @@ describe("GET /status", () => {
     expect(typeof body.data.paused).toBe("boolean");
     expect(typeof body.data.openConditionCount).toBe("number");
     expect(typeof body.data.openOrderCount).toBe("number");
+    expect(typeof body.data.openOrderBreakdown.total).toBe("number");
+    expect(typeof body.data.openOrderBreakdown.buy.open).toBe("number");
+    expect(typeof body.data.openOrderBreakdown.buy.cap).toBe("number");
+    expect(typeof body.data.openOrderBreakdown.sell.open).toBe("number");
+    expect(typeof body.data.openOrderBreakdown.sell.cap).toBe("number");
+    expect(typeof body.data.openOrderBreakdown.profileLadderSell.open).toBe("number");
     expect(typeof body.data.openPositionCount).toBe("number");
     expect(typeof body.data.totalOpenValueUsdc).toBe("number");
     expect(typeof body.data.totalTailCostUsdc).toBe("number");
@@ -205,6 +308,127 @@ describe("GET /status", () => {
     expect(body.data).toHaveProperty("marketDataLastUpdateAt");
     expect(body.data.marketDataSource).toBe("simulation");
     expect(body.data.executionMode).toBe("simulation");
+  });
+
+  it("returns open order breakdown with dynamic buy and sell capacity context", async () => {
+    await withRollback(async () => {
+      conn.db.exec(`
+        DELETE FROM fills;
+        DELETE FROM orders;
+        DELETE FROM positions;
+        DELETE FROM execution_profile_state;
+      `);
+      seedExecutionPolicy({
+        buyCapacity: {
+          enabled: true,
+          maxOpenBuyOrders: 25,
+          maxOpenBuyOrdersPerToken: 2,
+        },
+        sellCapacity: {
+          enabled: true,
+          mode: "source_aware_dynamic",
+          maxOpenSellOrders: 10,
+          maxOpenSellOrdersPerToken: 2,
+          profileLadderLiveRungsPerPosition: 2,
+          minNonLadderReserve: 10,
+          nonLadderReserveRatio: 0.25,
+          hardMaxOpenSellOrders: 200,
+        },
+      });
+      seedProfileOwnedOpenPositions(67);
+      seedOpenOrders({ buy: 15, sell: 36, profileLadderSell: 28 });
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/status",
+        headers: authHeaders(),
+      });
+      const data = json(res).data;
+
+      expect(data.openOrderCount).toBe(51);
+      expect(data.openOrderBreakdown).toEqual({
+        total: 51,
+        buy: { open: 15, cap: 25 },
+        sell: { open: 36, cap: 168 },
+        profileLadderSell: { open: 28 },
+      });
+      expect(data.openOrderBreakdown.buy.open + data.openOrderBreakdown.sell.open).toBe(
+        data.openOrderBreakdown.total,
+      );
+      expect(data.openOrderBreakdown.profileLadderSell.open).toBeLessThanOrEqual(
+        data.openOrderBreakdown.sell.open,
+      );
+    });
+  });
+
+  it("does not count profile-owned dust positions toward dynamic SELL capacity", async () => {
+    await withRollback(async () => {
+      conn.db.exec(`
+        DELETE FROM fills;
+        DELETE FROM orders;
+        DELETE FROM positions;
+        DELETE FROM execution_profile_state;
+      `);
+      seedExecutionPolicy({
+        sellCapacity: {
+          enabled: true,
+          mode: "source_aware_dynamic",
+          maxOpenSellOrders: 10,
+          maxOpenSellOrdersPerToken: 2,
+          profileLadderLiveRungsPerPosition: 2,
+          minNonLadderReserve: 10,
+          nonLadderReserveRatio: 0.25,
+          hardMaxOpenSellOrders: 200,
+        },
+      });
+      seedProfileOwnedOpenPositions(67);
+      seedProfileOwnedPosition("dust", "dust");
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/status",
+        headers: authHeaders(),
+      });
+      const data = json(res).data;
+
+      expect(data.openOrderBreakdown.sell.cap).toBe(168);
+    });
+  });
+
+  it("uses the legacy global SELL cap in legacy capacity mode", async () => {
+    await withRollback(async () => {
+      conn.db.exec(`
+        DELETE FROM fills;
+        DELETE FROM orders;
+        DELETE FROM positions;
+        DELETE FROM execution_profile_state;
+      `);
+      seedExecutionPolicy({
+        buyCapacity: {
+          enabled: true,
+          maxOpenBuyOrders: 25,
+          maxOpenBuyOrdersPerToken: 2,
+        },
+        sellCapacity: {
+          enabled: true,
+          mode: "legacy_global",
+          maxOpenSellOrders: 12,
+          maxOpenSellOrdersPerToken: 2,
+        },
+      });
+      seedOpenOrders({ buy: 1, sell: 2, profileLadderSell: 1 });
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/status",
+        headers: authHeaders(),
+      });
+      const data = json(res).data;
+
+      expect(data.openOrderBreakdown.total).toBe(3);
+      expect(data.openOrderBreakdown.sell).toEqual({ open: 2, cap: 12 });
+      expect(data.openOrderBreakdown.profileLadderSell.open).toBe(1);
+    });
   });
 
   it("status includes order and position throughput for the last minute", async () => {

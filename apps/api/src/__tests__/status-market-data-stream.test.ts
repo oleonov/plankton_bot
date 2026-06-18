@@ -21,6 +21,9 @@ function createFakeDb(
     prepare(sql: string): FakeStatement {
       return {
         get: () => {
+          if (sql.includes("buy_open") && sql.includes("profile_ladder_sell_open")) {
+            return { buy_open: 0, sell_open: 0, profile_ladder_sell_open: 0 };
+          }
           if (sql.includes("FROM orders WHERE status IN")) return { cnt: 0 };
           if (sql.includes("FROM orders WHERE created_at >=")) return { cnt: 0 };
           if (sql.includes("COUNT(DISTINCT condition_id)")) return { cnt: 0 };

@@ -14,6 +14,7 @@ import type {
   DashboardHealthSeverity,
   DashboardHealthCheck,
   DashboardWinrateCohort,
+  StatusData,
 } from "../api/types.ts";
 
 function tradingStateColor(state?: string): string {
@@ -103,7 +104,38 @@ function formatOrderCapacity(
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
-function exitsOnlyMessage(status: import("../api/types.ts").StatusData): string {
+function formatOrderBreakdownValue(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "?";
+}
+
+function OpenOrdersCard({ status }: { status: StatusData }) {
+  const breakdown = status.openOrderBreakdown;
+  const buyOpen = breakdown?.buy.open ?? status.executionQueue?.buyCapacity?.openBuyOrderCount;
+  const buyCap = breakdown?.buy.cap ?? status.executionQueue?.buyCapacity?.maxOpenBuyOrders;
+  const sellOpen = breakdown?.sell.open ?? status.executionQueue?.sellCapacity?.openSellOrderCount;
+  const sellCap = breakdown?.sell.cap ?? status.executionQueue?.sellCapacity?.maxOpenSellOrders;
+  const profileLadderSellOpen = breakdown?.profileLadderSell.open;
+
+  return (
+    <div
+      className="card card-accent-blue"
+      style={{ cursor: "pointer", display: "flex", flexDirection: "column" }}
+    >
+      <div className="label">Open Orders</div>
+      <div className="value-lg text-blue">{breakdown?.total ?? status.openOrderCount}</div>
+      <div
+        className="value-sm"
+        style={{ marginTop: "auto", overflowWrap: "anywhere", lineHeight: 1.35 }}
+      >
+        B {formatOrderBreakdownValue(buyOpen)}/{formatOrderBreakdownValue(buyCap)} · S{" "}
+        {formatOrderBreakdownValue(sellOpen)}/{formatOrderBreakdownValue(sellCap)} · PL{" "}
+        {formatOrderBreakdownValue(profileLadderSellOpen)}
+      </div>
+    </div>
+  );
+}
+
+function exitsOnlyMessage(status: StatusData): string {
   const capacity = status.executionQueue?.buyCapacity;
   if (capacity?.entriesBlocked) {
     if (capacity.maxOpenBuyOrders > 0 && capacity.openBuyOrderCount >= capacity.maxOpenBuyOrders) {
@@ -779,16 +811,7 @@ export function Overview() {
           </div>
         </Link>
         <Link to="/orders" style={{ textDecoration: "none" }}>
-          <div
-            className="card card-accent-blue"
-            style={{ cursor: "pointer", display: "flex", flexDirection: "column" }}
-          >
-            <div className="label">Open Orders</div>
-            <div className="value-lg text-blue">{status.openOrderCount}</div>
-            <div style={{ marginTop: "auto" }}>
-              <div className="value-sm">{status.ordersPlacedLastMin} in last min</div>
-            </div>
-          </div>
+          <OpenOrdersCard status={status} />
         </Link>
         <Link to="/selection-rules" style={{ textDecoration: "none" }}>
           <div className="card card-accent-purple" style={{ cursor: "pointer" }}>
