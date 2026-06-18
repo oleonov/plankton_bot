@@ -978,6 +978,18 @@ export interface ProfileLadderPostFillConfig {
   reevalCooldownMs: number;
 }
 
+export type ProfileLadderModeReaderSource = "algo_token_mode_state";
+export type ProfileLadderModeReaderMappedMode = "up" | "flat";
+export type ProfileLadderModeReaderMissingBehavior = "local";
+
+export interface ProfileLadderModeReaderConfig {
+  enabled: boolean;
+  darkCompareOnly: boolean;
+  source: ProfileLadderModeReaderSource;
+  mapping: Record<TokenOrderLifetimeMode, ProfileLadderModeReaderMappedMode>;
+  missingBehavior: ProfileLadderModeReaderMissingBehavior;
+}
+
 export interface ExecutionProfileSellLadderConfig {
   enabled: boolean;
   phase: number;
@@ -988,6 +1000,7 @@ export interface ExecutionProfileSellLadderConfig {
   reprice: ProfileLadderRepriceConfig;
   staleReview: ProfileLadderStaleReviewConfig;
   postFill: ProfileLadderPostFillConfig;
+  modeReader: ProfileLadderModeReaderConfig;
   adoptExisting: ExecutionProfileFeatureToggle;
 }
 

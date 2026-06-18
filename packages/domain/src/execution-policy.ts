@@ -25,6 +25,7 @@ import type {
   ExecutionProfileScaleInProfilePolicy,
   ExecutionProfileScaleInFeatureToggle,
   ExecutionProfileSellLadderConfig,
+  ProfileLadderModeReaderConfig,
   ExecutionProfileSignalFeedConfig,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
@@ -262,6 +263,17 @@ export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderCo
   },
   postFill: {
     reevalCooldownMs: 15 * 60_000,
+  },
+  modeReader: {
+    enabled: false,
+    darkCompareOnly: true,
+    source: "algo_token_mode_state",
+    mapping: {
+      PASSIVE: "flat",
+      MIDDLE: "flat",
+      BURST: "up",
+    },
+    missingBehavior: "local",
   },
   adoptExisting: { enabled: false },
 };
@@ -2164,6 +2176,7 @@ function parseExecutionProfileSellLadder(
     reprice: parseProfileLadderReprice(obj.reprice, fallback.reprice, issues),
     staleReview: parseProfileLadderStaleReview(obj.staleReview, fallback.staleReview, issues),
     postFill: parseProfileLadderPostFill(obj.postFill, fallback.postFill, issues),
+    modeReader: parseProfileLadderModeReader(obj.modeReader, fallback.modeReader, issues),
     adoptExisting: parseExecutionProfileToggle(
       obj.adoptExisting,
       fallback.adoptExisting,
@@ -2171,6 +2184,111 @@ function parseExecutionProfileSellLadder(
       "executionProfile.sellLadder.adoptExisting",
     ),
   };
+}
+
+function parseProfileLadderModeReader(
+  raw: unknown,
+  fallback: ProfileLadderModeReaderConfig,
+  issues: string[],
+): ProfileLadderModeReaderConfig {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("executionProfile.sellLadder.modeReader must be an object");
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const enabled = booleanOr(
+    obj.enabled,
+    fallback.enabled,
+    issues,
+    "executionProfile.sellLadder.modeReader.enabled",
+  );
+  const darkCompareOnly = booleanOr(
+    obj.darkCompareOnly,
+    fallback.darkCompareOnly,
+    issues,
+    "executionProfile.sellLadder.modeReader.darkCompareOnly",
+  );
+  if (!darkCompareOnly) {
+    issues.push(
+      "executionProfile.sellLadder.modeReader.darkCompareOnly=false is unsupported in PR1",
+    );
+    return fallback;
+  }
+
+  if (obj.source !== undefined && obj.source !== "algo_token_mode_state") {
+    issues.push("executionProfile.sellLadder.modeReader.source must be algo_token_mode_state");
+    return fallback;
+  }
+  if (obj.missingBehavior !== undefined && obj.missingBehavior !== "local") {
+    issues.push("executionProfile.sellLadder.modeReader.missingBehavior must be local");
+    return fallback;
+  }
+
+  const mapping = parseProfileLadderModeReaderMapping(obj.mapping, fallback.mapping, issues);
+  if (mapping == null) return fallback;
+
+  return {
+    enabled,
+    darkCompareOnly,
+    source: "algo_token_mode_state",
+    mapping,
+    missingBehavior: "local",
+  };
+}
+
+function parseProfileLadderModeReaderMapping(
+  raw: unknown,
+  fallback: ProfileLadderModeReaderConfig["mapping"],
+  issues: string[],
+): ProfileLadderModeReaderConfig["mapping"] | null {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined)
+      issues.push("executionProfile.sellLadder.modeReader.mapping must be an object");
+    return raw === undefined ? fallback : null;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const allowedKeys = new Set(["PASSIVE", "MIDDLE", "BURST"]);
+  const unsupportedKey = Object.keys(obj).find((key) => !allowedKeys.has(key));
+  if (unsupportedKey != null) {
+    issues.push(
+      `executionProfile.sellLadder.modeReader.mapping has unsupported key ${unsupportedKey}`,
+    );
+    return null;
+  }
+
+  const passive = parseProfileLadderModeReaderMappedMode(
+    obj.PASSIVE,
+    "executionProfile.sellLadder.modeReader.mapping.PASSIVE",
+    issues,
+  );
+  const middle = parseProfileLadderModeReaderMappedMode(
+    obj.MIDDLE,
+    "executionProfile.sellLadder.modeReader.mapping.MIDDLE",
+    issues,
+  );
+  const burst = parseProfileLadderModeReaderMappedMode(
+    obj.BURST,
+    "executionProfile.sellLadder.modeReader.mapping.BURST",
+    issues,
+  );
+  if (passive == null || middle == null || burst == null) return null;
+  return { PASSIVE: passive, MIDDLE: middle, BURST: burst };
+}
+
+function parseProfileLadderModeReaderMappedMode(
+  raw: unknown,
+  path: string,
+  issues: string[],
+): ProfileLadderModeReaderConfig["mapping"][keyof ProfileLadderModeReaderConfig["mapping"]] | null {
+  if (raw === "up" || raw === "flat") return raw;
+  if (raw === "avg_down") {
+    issues.push(`${path} must be up or flat; avg_down is unsupported in PR1`);
+    return null;
+  }
+  issues.push(`${path} must be up or flat`);
+  return null;
 }
 
 function parseExecutionProfileSellLadderBands(

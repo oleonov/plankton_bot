@@ -32,6 +32,8 @@ import {
   PLANNED_RUNG_RETRY_MS,
   ProfileLadderModule,
   type ProfileLadderBookCache,
+  type ProfileLadderModeCandidate,
+  type ProfileLadderModeReaderConfig,
 } from "../profile-ladder-module.js";
 import type { ProfileLadderRepository } from "../profile-ladder-repository.js";
 import type { ExecutionProfilePolicy } from "../types.js";
@@ -365,6 +367,12 @@ function setup(
   profilePolicy = policy(),
   overrides: {
     modeReader?: { getMode: (token: TokenId) => "up" | "flat" | "avg_down" | null };
+    modeCandidateReader?: {
+      getCandidate: (
+        token: TokenId,
+        config: ProfileLadderModeReaderConfig,
+      ) => ProfileLadderModeCandidate | null;
+    };
     isDormant?: (token: TokenId) => boolean;
     positionRepo?: { findOpen: () => Position[] };
     orderRepo?: { findByTokenId: (token: TokenId) => Order[] };
@@ -426,6 +434,53 @@ function makeReloadHarness() {
   };
   const fireReload = () => handler?.();
   return { onPolicyReload, fireReload };
+}
+
+function darkModeReaderConfig(
+  overrides: Partial<ProfileLadderModeReaderConfig> = {},
+): ProfileLadderModeReaderConfig {
+  return {
+    enabled: true,
+    darkCompareOnly: true,
+    source: "algo_token_mode_state",
+    mapping: {
+      PASSIVE: "flat",
+      MIDDLE: "flat",
+      BURST: "up",
+    },
+    missingBehavior: "local",
+    ...overrides,
+  };
+}
+
+function darkComparePolicy(
+  overrides: Partial<ProfileLadderModeReaderConfig> = {},
+): ExecutionProfilePolicy {
+  return policy({
+    modeReader: darkModeReaderConfig(overrides),
+  } as Partial<ExecutionProfilePolicy["sellLadder"]>);
+}
+
+function modeCandidate(
+  overrides: Partial<ProfileLadderModeCandidate> = {},
+): ProfileLadderModeCandidate {
+  return {
+    source: "algo_token_mode_state",
+    sourceMode: "PASSIVE",
+    mappedMode: "flat",
+    modeStatus: "confirmed",
+    modeConfidence: "low",
+    ...overrides,
+  };
+}
+
+function counterLabels(
+  counters: Array<{ name: string; value?: number; labels?: string }>,
+  name: string,
+): Array<Record<string, string>> {
+  return counters
+    .filter((counter) => counter.name === name)
+    .map((counter) => JSON.parse(counter.labels ?? "{}") as Record<string, string>);
 }
 
 describe("ProfileLadderModule", () => {
@@ -1140,6 +1195,175 @@ describe("ProfileLadderModule", () => {
 
     expect(ctx.orders).toHaveLength(0);
     expect(bookCache.getFreshOrRefresh).not.toHaveBeenCalled();
+  });
+
+  it("does not emit modeReader dark-compare telemetry when disabled", async () => {
+    const ctx = setup(policy(), {
+      modeCandidateReader: { getCandidate: () => modeCandidate({ mappedMode: "up" }) },
+    });
+
+    await ctx.module.placeLadder(position(), market());
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.price).toBe(0.105);
+    expect(ctx.repo.getLadder(tokenId)?.lastMode).toBe("up");
+    expect(
+      ctx.counters.some((counter) => counter.name.startsWith("profile_ladder_mode_reader_")),
+    ).toBe(false);
+  });
+
+  it("emits modeReader dark-compare telemetry without changing local UP placement", async () => {
+    const ctx = setup(darkComparePolicy(), {
+      modeCandidateReader: {
+        getCandidate: () => modeCandidate({ sourceMode: "PASSIVE", mappedMode: "flat" }),
+      },
+    });
+
+    await ctx.module.placeLadder(
+      position(),
+      market({ bestBid: 0.09, bestAsk: 0.2, midPrice: 0.145 }),
+    );
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.price).toBe(0.105);
+    expect(ctx.repo.getLadder(tokenId)?.lastMode).toBe("up");
+    expect(counterLabels(ctx.counters, "profile_ladder_mode_reader_delta")).toContainEqual({
+      source: "algo_token_mode_state",
+      sourceMode: "PASSIVE",
+      mappedCandidate: "flat",
+      localMode: "up",
+      modeStatus: "confirmed",
+      modeConfidence: "low",
+    });
+    expect(
+      counterLabels(ctx.counters, "profile_ladder_mode_reader_price_delta_bucket")[0],
+    ).toMatchObject({
+      band: "medium_low",
+      localMode: "up",
+      mappedCandidate: "flat",
+    });
+  });
+
+  it("keeps local UP placement when the modeReader candidate is missing", async () => {
+    const ctx = setup(darkComparePolicy(), {
+      modeCandidateReader: { getCandidate: () => null },
+    });
+
+    await ctx.module.placeLadder(
+      position(),
+      market({ bestBid: 0.09, bestAsk: 0.2, midPrice: 0.145 }),
+    );
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.price).toBe(0.105);
+    expect(ctx.repo.getLadder(tokenId)?.lastMode).toBe("up");
+    expect(counterLabels(ctx.counters, "profile_ladder_mode_reader_coverage")).toContainEqual({
+      source: "algo_token_mode_state",
+      result: "missing",
+      sourceMode: "null",
+      modeStatus: "missing",
+      modeConfidence: "missing",
+    });
+  });
+
+  it("keeps placement unchanged when modeReader dark compare throws", async () => {
+    const ctx = setup(darkComparePolicy(), {
+      modeCandidateReader: {
+        getCandidate: () => {
+          throw new Error("candidate reader unavailable");
+        },
+      },
+    });
+
+    await ctx.module.placeLadder(position(), market());
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.price).toBe(0.105);
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({ band: "medium_low", lastMode: "up" });
+    expect(counterLabels(ctx.counters, "profile_ladder_mode_reader_error")).toContainEqual({
+      reason: "exception",
+    });
+  });
+
+  it("keeps local AVG_DOWN placement when the modeReader candidate is missing", async () => {
+    const ctx = setup(darkComparePolicy(), {
+      modeCandidateReader: { getCandidate: () => null },
+    });
+
+    await ctx.module.placeLadder(
+      position(),
+      market({ bestBid: 0.04, bestAsk: 0.05, midPrice: 0.045 }),
+    );
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.price).toBe(0.165);
+    expect(ctx.repo.getLadder(tokenId)?.lastMode).toBe("avg_down");
+    expect(counterLabels(ctx.counters, "profile_ladder_mode_reader_missing")).toContainEqual({
+      source: "algo_token_mode_state",
+      reason: "not_found",
+      modeStatus: "missing",
+      modeConfidence: "missing",
+    });
+  });
+
+  it("emits bounded modeReader labels for MIDDLE and BURST candidates", async () => {
+    const ctx = setup(darkComparePolicy(), {
+      modeCandidateReader: {
+        getCandidate: () =>
+          modeCandidate({
+            sourceMode: "BURST",
+            mappedMode: "up",
+            modeStatus: "candidate",
+            modeConfidence: "high",
+          }),
+      },
+    });
+
+    await ctx.module.placeLadder(position(), market());
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.price).toBe(0.105);
+    expect(ctx.repo.getLadder(tokenId)?.lastMode).toBe("up");
+    expect(counterLabels(ctx.counters, "profile_ladder_mode_reader_coverage")).toContainEqual({
+      source: "algo_token_mode_state",
+      result: "mapped",
+      sourceMode: "BURST",
+      modeStatus: "candidate",
+      modeConfidence: "high",
+    });
+    expect(counterLabels(ctx.counters, "profile_ladder_mode_reader_status")).toContainEqual({
+      modeStatus: "candidate",
+    });
+    expect(counterLabels(ctx.counters, "profile_ladder_mode_reader_confidence")).toContainEqual({
+      modeConfidence: "high",
+    });
+    expect(JSON.stringify(ctx.counters)).not.toContain(String(tokenId));
+    expect(JSON.stringify(ctx.counters)).not.toContain(String(conditionId));
+  });
+
+  it("maps MIDDLE modeReader candidates to flat telemetry without behavior changes", async () => {
+    const ctx = setup(darkComparePolicy(), {
+      modeCandidateReader: {
+        getCandidate: () => modeCandidate({ sourceMode: "MIDDLE", mappedMode: "flat" }),
+      },
+    });
+
+    await ctx.module.placeLadder(
+      position(),
+      market({ bestBid: 0.09, bestAsk: 0.2, midPrice: 0.145 }),
+    );
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.price).toBe(0.105);
+    expect(ctx.repo.getLadder(tokenId)?.lastMode).toBe("up");
+    expect(counterLabels(ctx.counters, "profile_ladder_mode_reader_delta")).toContainEqual({
+      source: "algo_token_mode_state",
+      sourceMode: "MIDDLE",
+      mappedCandidate: "flat",
+      localMode: "up",
+      modeStatus: "confirmed",
+      modeConfidence: "low",
+    });
   });
 
   it("passes UP mode from the mode reader into LadderBuilder", async () => {
@@ -1972,6 +2196,42 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
       eligible_count: 0,
       adopted_count: 0,
       skipped_missing_market: 1,
+    });
+  });
+
+  it("keeps adoption flat when modeReader dark compare maps BURST to up", async () => {
+    const ctx = setup(
+      adoptionPolicy({
+        modeReader: darkModeReaderConfig(),
+      } as Partial<ExecutionProfilePolicy["sellLadder"]>),
+      {
+        positionRepo: { findOpen: () => [position()] },
+        orderRepo: { findByTokenId: () => [] },
+        isProfileOwned: () => true,
+        modeCandidateReader: {
+          getCandidate: () =>
+            modeCandidate({
+              sourceMode: "BURST",
+              mappedMode: "up",
+              modeStatus: "confirmed",
+              modeConfidence: "high",
+            }),
+        },
+      },
+    );
+
+    await warmAndAdopt(ctx);
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.price).toBe(0.11);
+    expect(ctx.repo.getLadder(tokenId)?.lastMode).toBe("flat");
+    expect(counterLabels(ctx.counters, "profile_ladder_mode_reader_delta")).toContainEqual({
+      source: "algo_token_mode_state",
+      sourceMode: "BURST",
+      mappedCandidate: "up",
+      localMode: "flat",
+      modeStatus: "confirmed",
+      modeConfidence: "high",
     });
   });
 

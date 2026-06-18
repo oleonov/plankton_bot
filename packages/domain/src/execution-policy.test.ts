@@ -398,6 +398,125 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     ).toBe(true);
   });
 
+  it("defaults ProfileLadder modeReader dark compare disabled", () => {
+    const { policy, issues } = parseExecutionPolicyJson(null);
+
+    expect(issues).toHaveLength(0);
+    expect(policy.executionProfile.sellLadder.modeReader).toEqual({
+      enabled: false,
+      darkCompareOnly: true,
+      source: "algo_token_mode_state",
+      mapping: {
+        PASSIVE: "flat",
+        MIDDLE: "flat",
+        BURST: "up",
+      },
+      missingBehavior: "local",
+    });
+  });
+
+  it("parses ProfileLadder modeReader dark compare config", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            modeReader: {
+              enabled: true,
+              darkCompareOnly: true,
+              source: "algo_token_mode_state",
+              mapping: {
+                PASSIVE: "flat",
+                MIDDLE: "flat",
+                BURST: "up",
+              },
+              missingBehavior: "local",
+            },
+          },
+        },
+      }),
+    );
+
+    expect(issues).toHaveLength(0);
+    expect(policy.executionProfile.sellLadder.modeReader).toEqual({
+      enabled: true,
+      darkCompareOnly: true,
+      source: "algo_token_mode_state",
+      mapping: {
+        PASSIVE: "flat",
+        MIDDLE: "flat",
+        BURST: "up",
+      },
+      missingBehavior: "local",
+    });
+  });
+
+  it("rejects ProfileLadder modeReader avg_down mapping in PR1", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            modeReader: {
+              enabled: true,
+              mapping: {
+                PASSIVE: "avg_down",
+                MIDDLE: "flat",
+                BURST: "up",
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(issues).toContain(
+      "executionProfile.sellLadder.modeReader.mapping.PASSIVE must be up or flat; avg_down is unsupported in PR1",
+    );
+    expect(policy.executionProfile.sellLadder.modeReader.enabled).toBe(false);
+  });
+
+  it("rejects ProfileLadder modeReader unknown mapping keys", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            modeReader: {
+              enabled: true,
+              mapping: {
+                PASSIVE: "flat",
+                UNKNOWN: "up",
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(issues).toContain(
+      "executionProfile.sellLadder.modeReader.mapping has unsupported key UNKNOWN",
+    );
+    expect(policy.executionProfile.sellLadder.modeReader.enabled).toBe(false);
+  });
+
+  it("rejects ProfileLadder modeReader behavior activation in PR1", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            modeReader: {
+              enabled: true,
+              darkCompareOnly: false,
+            },
+          },
+        },
+      }),
+    );
+
+    expect(issues).toContain(
+      "executionProfile.sellLadder.modeReader.darkCompareOnly=false is unsupported in PR1",
+    );
+    expect(policy.executionProfile.sellLadder.modeReader.enabled).toBe(false);
+  });
+
   it("parses Execution Profile monitoring and falls back field-by-field", () => {
     const parsed = parseExecutionPolicyJson(
       JSON.stringify({

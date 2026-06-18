@@ -1,5 +1,6 @@
 import type {
   EventBus,
+  LadderBuilderOutput,
   LadderRung,
   LadderState,
   NormalizedMarket,
@@ -10,6 +11,7 @@ import type {
   ProfileLadderBand,
   ProfileLadderMode,
   RuntimeEventMap,
+  TokenOrderLifetimeMode,
   RuntimeModule,
   TokenId,
 } from "@krabs/domain";
@@ -34,6 +36,31 @@ export interface ProfileLadderRiskEventWriter {
 
 export interface ProfileLadderModeReader {
   getMode(tokenId: TokenId): ProfileLadderMode | null;
+}
+
+export type ProfileLadderModeReaderMappedMode = "up" | "flat";
+
+export interface ProfileLadderModeReaderConfig {
+  enabled: boolean;
+  darkCompareOnly: boolean;
+  source: "algo_token_mode_state";
+  mapping: Record<TokenOrderLifetimeMode, ProfileLadderModeReaderMappedMode>;
+  missingBehavior: "local";
+}
+
+export interface ProfileLadderModeCandidate {
+  source: "algo_token_mode_state";
+  sourceMode: TokenOrderLifetimeMode;
+  mappedMode: ProfileLadderModeReaderConfig["mapping"][TokenOrderLifetimeMode];
+  modeStatus: "candidate" | "confirmed";
+  modeConfidence: "low" | "medium" | "high";
+}
+
+export interface ProfileLadderModeCandidateReader {
+  getCandidate(
+    tokenId: TokenId,
+    config: ProfileLadderModeReaderConfig,
+  ): ProfileLadderModeCandidate | null;
 }
 
 export interface ProfileLadderPositionReader {
@@ -71,6 +98,7 @@ export interface ProfileLadderModuleDeps {
   repository: ProfileLadderRepository;
   policy: () => ExecutionProfilePolicy;
   modeReader?: ProfileLadderModeReader;
+  modeCandidateReader?: ProfileLadderModeCandidateReader;
   isDormant?: ((tokenId: TokenId) => boolean) | undefined;
   // Adoption (Track #44) dependencies — only consulted when sellLadder.adoptExisting is enabled.
   positionRepo?: ProfileLadderPositionReader;
@@ -542,6 +570,7 @@ export class ProfileLadderModule implements RuntimeModule {
       previousBand: previous?.band ?? null,
     });
     if (!plan.ok) return null;
+    this.emitModeReaderDarkCompare(position, market, policy, previous, mode, plan);
 
     const now = this.now();
     const state: LadderState = {
@@ -792,6 +821,105 @@ export class ProfileLadderModule implements RuntimeModule {
       return "flat";
     }
     return resolveSignalBasedMode(position, market, this.deps.policy());
+  }
+
+  private emitModeReaderDarkCompare(
+    position: Position,
+    market: NormalizedMarket,
+    policy: ExecutionProfilePolicy["sellLadder"],
+    previous: LadderState | null,
+    localMode: ProfileLadderMode,
+    localPlan: Extract<LadderBuilderOutput, { ok: true }>,
+  ): void {
+    try {
+      const config = (
+        policy as ExecutionProfilePolicy["sellLadder"] & {
+          modeReader?: ProfileLadderModeReaderConfig;
+        }
+      ).modeReader;
+      if (config == null) return;
+      if (!config.enabled || !config.darkCompareOnly) return;
+
+      const candidate =
+        this.deps.modeCandidateReader?.getCandidate(position.tokenId, config) ?? null;
+      if (candidate == null) {
+        this.writeCounter("profile_ladder_mode_reader_coverage", 1, {
+          source: config.source,
+          result: "missing",
+          sourceMode: "null",
+          modeStatus: "missing",
+          modeConfidence: "missing",
+        });
+        this.writeCounter("profile_ladder_mode_reader_missing", 1, {
+          source: config.source,
+          reason: this.deps.modeCandidateReader == null ? "reader_unavailable" : "not_found",
+          modeStatus: "missing",
+          modeConfidence: "missing",
+        });
+        return;
+      }
+
+      const labels = {
+        source: candidate.source,
+        sourceMode: candidate.sourceMode,
+        mappedCandidate: candidate.mappedMode,
+        localMode,
+        modeStatus: candidate.modeStatus,
+        modeConfidence: candidate.modeConfidence,
+      };
+
+      this.writeCounter("profile_ladder_mode_reader_coverage", 1, {
+        source: labels.source,
+        result: "mapped",
+        sourceMode: labels.sourceMode,
+        modeStatus: labels.modeStatus,
+        modeConfidence: labels.modeConfidence,
+      });
+      this.writeCounter("profile_ladder_mode_reader_status", 1, {
+        modeStatus: labels.modeStatus,
+      });
+      this.writeCounter("profile_ladder_mode_reader_confidence", 1, {
+        modeConfidence: labels.modeConfidence,
+      });
+      this.writeCounter("profile_ladder_mode_reader_delta", 1, labels);
+
+      const candidatePlan = computeProfileLadder({
+        tokenId: position.tokenId,
+        conditionId: position.conditionId,
+        openedAt: position.openedAt,
+        avgEntryPrice: position.avgEntryPrice,
+        costBasisUsd: position.costBasisUsdc,
+        positionSizeShares: position.size,
+        mode: candidate.mappedMode,
+        bestBid: market.bestBid,
+        bestAsk: market.bestAsk,
+        tickSize: market.tickSize,
+        minOrderSize: market.minOrderSize ?? 1,
+        config: policy,
+        previousBand: previous?.band ?? null,
+      });
+
+      this.writeCounter("profile_ladder_mode_reader_price_delta_bucket", 1, {
+        band: localPlan.band,
+        deltaBucket: candidatePlan.ok
+          ? priceDeltaBucket(localPlan.rungs, candidatePlan.rungs)
+          : "not_comparable",
+        localMode,
+        mappedCandidate: candidate.mappedMode,
+        modeStatus: candidate.modeStatus,
+        modeConfidence: candidate.modeConfidence,
+      });
+    } catch {
+      this.writeModeReaderErrorCounter();
+    }
+  }
+
+  private writeModeReaderErrorCounter(): void {
+    try {
+      this.writeCounter("profile_ladder_mode_reader_error", 1, { reason: "exception" });
+    } catch {
+      // Dark-compare telemetry must never affect ladder behavior.
+    }
   }
 
   private async publishPlaceOrder(
@@ -1152,6 +1280,32 @@ function resolveSignalBasedMode(
 
 function firstPositiveFinite(...values: ReadonlyArray<number | null | undefined>): number | null {
   return values.find((value): value is number => isPositiveFinite(value)) ?? null;
+}
+
+function priceDeltaBucket(
+  localRungs: readonly LadderRung[],
+  candidateRungs: readonly LadderRung[],
+): string {
+  const count = Math.min(localRungs.length, candidateRungs.length);
+  if (count <= 0) return "not_comparable";
+  let selectedDelta: number | null = null;
+  for (let i = 0; i < count; i += 1) {
+    const localPrice = localRungs[i]?.price;
+    const candidatePrice = candidateRungs[i]?.price;
+    if (!isPositiveFinite(localPrice) || !isPositiveFinite(candidatePrice)) continue;
+    const delta = (candidatePrice - localPrice) / localPrice;
+    if (selectedDelta == null || Math.abs(delta) > Math.abs(selectedDelta)) {
+      selectedDelta = delta;
+    }
+  }
+  if (selectedDelta == null) return "not_comparable";
+  if (selectedDelta < -0.25) return "lt_minus_25pct";
+  if (selectedDelta < -0.1) return "minus_25_to_minus_10pct";
+  if (selectedDelta < -0.02) return "minus_10_to_minus_2pct";
+  if (selectedDelta <= 0.02) return "minus_2_to_plus_2pct";
+  if (selectedDelta <= 0.1) return "plus_2_to_plus_10pct";
+  if (selectedDelta <= 0.25) return "plus_10_to_plus_25pct";
+  return "gt_plus_25pct";
 }
 
 function isPositiveFinite(value: number | null | undefined): value is number {

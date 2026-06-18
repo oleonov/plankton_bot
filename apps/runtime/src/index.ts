@@ -136,7 +136,10 @@ import { SignalFeedManager } from "./modules/execution-profile/signal-feed-manag
 import { SignalFeedReader } from "./modules/execution-profile/signal-feed-reader.js";
 import { SqliteSignalFeedRepository } from "./modules/execution-profile/signal-feed-repository.js";
 import { SqliteExecutionProfileStateRepository } from "./modules/execution-profile/state-repository.js";
-import { ProfileLadderModule } from "./modules/execution-profile/profile-ladder-module.js";
+import {
+  ProfileLadderModule,
+  type ProfileLadderModeCandidateReader,
+} from "./modules/execution-profile/profile-ladder-module.js";
 import { SqliteProfileLadderRepository } from "./modules/execution-profile/profile-ladder-repository.js";
 import { RepositoryDustAutoCloseCandidateProvider } from "./modules/track-s4/dust-auto-close-candidates.js";
 import { DustAutoCloseModule } from "./modules/track-s4/dust-auto-close-module.js";
@@ -1194,10 +1197,26 @@ async function main(): Promise<void> {
   });
   executionProfileManagerRef.current = executionProfileManager;
   const profileLadderRepo = new SqliteProfileLadderRepository(ledgerConn.db);
+  const profileLadderModeCandidateReader: ProfileLadderModeCandidateReader = {
+    getCandidate: (tokenId, config) => {
+      const state = repos.tokenModeState.get(tokenId);
+      if (state == null) return null;
+      const mappedMode = config.mapping[state.mode];
+      if (mappedMode !== "up" && mappedMode !== "flat") return null;
+      return {
+        source: "algo_token_mode_state",
+        sourceMode: state.mode,
+        mappedMode,
+        modeStatus: state.modeStatus,
+        modeConfidence: state.modeConfidence,
+      };
+    },
+  };
   const profileLadderModule = new ProfileLadderModule({
     bus,
     repository: profileLadderRepo,
     policy: () => currentExecutionPolicy().executionProfile,
+    modeCandidateReader: profileLadderModeCandidateReader,
     positionRepo: repos.position,
     orderRepo: repos.order,
     isProfileOwned: (tokenId) => executionProfileManager.isProfileOwned(tokenId),
