@@ -12,8 +12,8 @@ import {
 import { SwitchDriver } from "../switch-driver.js";
 import { MockContainerControl } from "../container-control.js";
 
-const FROM_PROFILE = "simulation" as ProfileId;
-const TO_PROFILE = "paper" as ProfileId;
+const FROM_PROFILE = "paper" as ProfileId;
+const TO_PROFILE = "live-lite" as ProfileId;
 const NOW = "2026-03-30T12:00:00.000Z";
 
 // Relative path from this test to the DB package schemas
@@ -42,8 +42,9 @@ function seedProfiles(db: Database.Database): void {
   const stmt = db.prepare(
     "INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)",
   );
-  stmt.run(FROM_PROFILE, "Simulation", NOW);
-  stmt.run(TO_PROFILE, "Paper", NOW);
+  stmt.run("simulation", "Simulation", NOW);
+  stmt.run(FROM_PROFILE, "Paper", NOW);
+  stmt.run(TO_PROFILE, "Live Lite", NOW);
 }
 
 function seedRuntimeState(db: Database.Database): void {
@@ -54,12 +55,16 @@ function seedRuntimeState(db: Database.Database): void {
   ).run(FROM_PROFILE, FROM_PROFILE, NOW);
 }
 
-function insertSwitchRequest(db: Database.Database, switchId: SwitchId): void {
+function insertSwitchRequest(
+  db: Database.Database,
+  switchId: SwitchId,
+  toProfile: ProfileId = TO_PROFILE,
+): void {
   db.prepare(
     `INSERT INTO profile_switch_requests
      (switch_id, from_profile, to_profile, state, requested_at)
      VALUES (?, ?, ?, 'requested', ?)`,
-  ).run(switchId, FROM_PROFILE, TO_PROFILE, NOW);
+  ).run(switchId, FROM_PROFILE, toProfile, NOW);
 }
 
 const nullLog = {
@@ -96,6 +101,24 @@ describe("SwitchDriver", () => {
     await driver.tick();
     // No error, no state changes
     expect(transitionRepo.findRecent(10)).toHaveLength(0);
+  });
+
+  it("fails unsupported target at requested state before pausing or mutating desired profile", async () => {
+    insertSwitchRequest(db, switchId, "simulation" as ProfileId);
+
+    await driver.tick();
+
+    const req = switchRepo.findById(switchId);
+    expect(req?.state).toBe(SwitchState.Failed);
+    expect(req?.errorMessage).toMatch(/UNSUPPORTED_RUNTIME_PROFILE/);
+    expect(
+      db.prepare("SELECT COUNT(*) AS c FROM operator_commands WHERE action = 'pause'").get(),
+    ).toMatchObject({ c: 0 });
+    expect(
+      db.prepare("SELECT desired_profile FROM runtime_control_state WHERE id = 1").get(),
+    ).toMatchObject({ desired_profile: FROM_PROFILE });
+    expect(container.stopCalls).toEqual([]);
+    expect(container.startCalls).toBe(0);
   });
 
   it("drives full happy-path from requested to completed", async () => {

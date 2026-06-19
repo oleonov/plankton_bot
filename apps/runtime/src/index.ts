@@ -370,10 +370,9 @@ async function main(): Promise<void> {
   }
 
   // 2b. Resolve active profile from control.db (falls back to RUNTIME_MODE env)
-  type RuntimeMode = "simulation" | "paper" | "live-lite";
   const resolvedProfile = resolveActiveProfile(controlConn.db, config.runtimeMode);
   const activeProfile = resolvedProfile.profile;
-  const runtimeMode = resolvedProfile.runtimeMode as RuntimeMode;
+  const runtimeMode = resolvedProfile.runtimeMode;
   const { desiredProfile, currentProfile } = resolvedProfile;
   log.info(
     {
@@ -602,56 +601,54 @@ async function main(): Promise<void> {
         passphrase: string;
       }
     | undefined;
-  if (runtimeMode === "paper" || runtimeMode === "live-lite") {
-    try {
-      const configWithBuilder = config as typeof config & {
-        polyBuilderApiKey?: string;
-        polyBuilderSecret?: string;
-        polyBuilderPassphrase?: string;
-        polyBuilderCode?: string;
-      };
-      const polymarketClientConfig = {
-        polyApiKey: config.polyApiKey,
-        polyApiSecret: config.polyApiSecret,
-        polyPassphrase: config.polyPassphrase,
-        polyBuilderApiKey: configWithBuilder.polyBuilderApiKey,
-        polyBuilderSecret: configWithBuilder.polyBuilderSecret,
-        polyBuilderPassphrase: configWithBuilder.polyBuilderPassphrase,
-        polyBuilderCode: configWithBuilder.polyBuilderCode,
-        polyPrivateKey: config.polyPrivateKey,
-        polymarketRelayerUrl:
-          (config as typeof config & { polymarketRelayerUrl?: string }).polymarketRelayerUrl ??
-          "https://relayer-v2.polymarket.com",
-        polygonRpcUrl:
-          (config as typeof config & { polygonRpcUrl?: string }).polygonRpcUrl ??
-          "https://polygon-rpc.com",
-        polygonRpcUrls: (config as typeof config & { polygonRpcUrls?: string[] }).polygonRpcUrls,
-        polygonRpcFallbackUrl: (config as typeof config & { polygonRpcFallbackUrl?: string })
-          .polygonRpcFallbackUrl,
-        alchemyPolygonKeys: config.alchemyPolygonKeys,
-      };
-      const builtClient = await createPolymarketClient({
-        runtimeMode,
-        config: polymarketClientConfig,
-        walletMode: liveLiteGuard.getWalletMode(),
-        relayerJson: settingsRow?.relayer_json ?? null,
-      });
-      polyClient = builtClient.client;
-      settlementClient = builtClient.settlementClient;
-      traderAddress = builtClient.traderAddress ?? undefined;
-      userWsAuth = builtClient.userWsAuth ?? undefined;
-      relayerConfig = builtClient.relayerConfig
-        ? {
-            walletType: builtClient.relayerConfig.walletType,
-            funderAddress: builtClient.relayerConfig.funderAddress,
-          }
-        : null;
-    } catch (err) {
-      log.fatal({ err }, "Polymarket client initialization failed");
-      controlConn.close();
-      ledgerConn.close();
-      process.exit(1);
-    }
+  try {
+    const configWithBuilder = config as typeof config & {
+      polyBuilderApiKey?: string;
+      polyBuilderSecret?: string;
+      polyBuilderPassphrase?: string;
+      polyBuilderCode?: string;
+    };
+    const polymarketClientConfig = {
+      polyApiKey: config.polyApiKey,
+      polyApiSecret: config.polyApiSecret,
+      polyPassphrase: config.polyPassphrase,
+      polyBuilderApiKey: configWithBuilder.polyBuilderApiKey,
+      polyBuilderSecret: configWithBuilder.polyBuilderSecret,
+      polyBuilderPassphrase: configWithBuilder.polyBuilderPassphrase,
+      polyBuilderCode: configWithBuilder.polyBuilderCode,
+      polyPrivateKey: config.polyPrivateKey,
+      polymarketRelayerUrl:
+        (config as typeof config & { polymarketRelayerUrl?: string }).polymarketRelayerUrl ??
+        "https://relayer-v2.polymarket.com",
+      polygonRpcUrl:
+        (config as typeof config & { polygonRpcUrl?: string }).polygonRpcUrl ??
+        "https://polygon-rpc.com",
+      polygonRpcUrls: (config as typeof config & { polygonRpcUrls?: string[] }).polygonRpcUrls,
+      polygonRpcFallbackUrl: (config as typeof config & { polygonRpcFallbackUrl?: string })
+        .polygonRpcFallbackUrl,
+      alchemyPolygonKeys: config.alchemyPolygonKeys,
+    };
+    const builtClient = await createPolymarketClient({
+      runtimeMode,
+      config: polymarketClientConfig,
+      walletMode: liveLiteGuard.getWalletMode(),
+      relayerJson: settingsRow?.relayer_json ?? null,
+    });
+    polyClient = builtClient.client;
+    settlementClient = builtClient.settlementClient;
+    traderAddress = builtClient.traderAddress ?? undefined;
+    userWsAuth = builtClient.userWsAuth ?? undefined;
+    relayerConfig = builtClient.relayerConfig
+      ? {
+          walletType: builtClient.relayerConfig.walletType,
+          funderAddress: builtClient.relayerConfig.funderAddress,
+        }
+      : null;
+  } catch (err) {
+    log.fatal({ err }, "Polymarket client initialization failed");
+    controlConn.close();
+    ledgerConn.close();
+    process.exit(1);
   }
 
   // Phase 6: family slug patterns removed; selection rules gate market discovery.
@@ -1618,24 +1615,20 @@ async function main(): Promise<void> {
       })
     : null;
 
-  // 7l. Fill poller module — fast-interval fill detection (paper/live-lite only;
-  // simulation mode uses inline checkForFills after each placement)
-  const fillPollerModule =
-    runtimeMode !== "simulation"
-      ? new FillPollerModule({
-          gateway: exchangeGateway,
-          fillRepo: repos.fill,
-          orderRepo: repos.order,
-          bus,
-          log,
-          pollIntervalMs: config.fillPollIntervalMs,
-          overlapMs: 5_000,
-          fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
-          onImportObserved: userOrderStreamModule
-            ? ({ imported }) => userOrderStreamModule.recordPollingFills(imported)
-            : undefined,
-        })
-      : null;
+  // 7l. Fill poller module — live-lite uses fast-interval fill detection.
+  const fillPollerModule = new FillPollerModule({
+    gateway: exchangeGateway,
+    fillRepo: repos.fill,
+    orderRepo: repos.order,
+    bus,
+    log,
+    pollIntervalMs: config.fillPollIntervalMs,
+    overlapMs: 5_000,
+    fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
+    onImportObserved: userOrderStreamModule
+      ? ({ imported }) => userOrderStreamModule.recordPollingFills(imported)
+      : undefined,
+  });
 
   // 7l3. Profile runtime publisher — periodic upsert of profile_summaries + equity snapshots
   const profilePublisher = new ProfileRuntimePublisher({

@@ -1,8 +1,8 @@
-import { beforeEach, describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createGateways } from "../gateway-factory.js";
 import {
-  SimulationMarketDataGateway,
   SimulationExchangeGateway,
+  SimulationMarketDataGateway,
   createCollateralResolver,
 } from "@krabs/exchange";
 
@@ -19,40 +19,13 @@ describe("createGateways", () => {
     vi.mocked(createCollateralResolver).mockClear();
   });
 
-  it("simulation mode returns both simulation gateways", () => {
-    const result = createGateways({ runtimeMode: "simulation" });
-    expect(result.marketDataGateway).toBeInstanceOf(SimulationMarketDataGateway);
-    expect(result.exchangeGateway).toBeInstanceOf(SimulationExchangeGateway);
-    expect(result.modeLabel).toBe("simulation");
-    expect(result.marketDataSource).toBe("simulation");
-    expect(result.executionMode).toBe("simulation");
-  });
-
-  it("paper mode returns live market-data + simulation exchange", () => {
-    const mockClient = { getOk: async () => "OK" };
-    const result = createGateways({
-      runtimeMode: "paper",
-      polyClient: mockClient,
-    });
-    expect(result.marketDataGateway).not.toBeInstanceOf(SimulationMarketDataGateway);
-    expect(result.exchangeGateway).toBeInstanceOf(SimulationExchangeGateway);
-    expect(result.modeLabel).toBe("paper");
-    expect(result.marketDataSource).toBe("live");
-    expect(result.executionMode).toBe("simulation");
-  });
-
-  it("paper mode without polyClient throws", () => {
-    expect(() => createGateways({ runtimeMode: "paper" })).toThrow(
-      "polyClient is required for paper mode",
-    );
-  });
-
-  it("live-lite mode returns live market-data + live exchange", () => {
+  it("live-lite mode returns live market-data and live exchange gateways", () => {
     const mockClient = { getOk: async () => "OK" };
     const result = createGateways({
       runtimeMode: "live-lite",
       polyClient: mockClient,
     });
+
     expect(result.marketDataGateway).not.toBeInstanceOf(SimulationMarketDataGateway);
     expect(result.exchangeGateway).not.toBeInstanceOf(SimulationExchangeGateway);
     expect(result.modeLabel).toBe("live-lite");
@@ -79,25 +52,6 @@ describe("createGateways", () => {
     expect(() => createGateways({ runtimeMode: "live-lite" })).toThrow(
       "polyClient is required for live-lite mode",
     );
-  });
-
-  it("simulation mode passes initialBalanceUsdc to exchange gateway", async () => {
-    const result = createGateways({ runtimeMode: "simulation", initialBalanceUsdc: 250 });
-    expect(result.exchangeGateway).toBeInstanceOf(SimulationExchangeGateway);
-    const balances = await result.exchangeGateway.getBalances();
-    expect(balances[0]!.available).toBe(250);
-  });
-
-  it("paper mode passes initialBalanceUsdc to exchange gateway", async () => {
-    const mockClient = { getOk: async () => "OK" };
-    const result = createGateways({
-      runtimeMode: "paper",
-      polyClient: mockClient,
-      initialBalanceUsdc: 100,
-    });
-    expect(result.exchangeGateway).toBeInstanceOf(SimulationExchangeGateway);
-    const balances = await result.exchangeGateway.getBalances();
-    expect(balances[0]!.available).toBe(100);
   });
 
   it("includes polygonRpcFallbackUrl in collateral resolver rotation", () => {
@@ -147,5 +101,29 @@ describe("createGateways", () => {
       polygonRpcUrls: ["https://a.example/1", "https://b.example/2"],
     });
     expect(result.modeLabel).toBe("live-lite");
+  });
+
+  it.each(["paper", "simulation", "unknown"])("rejects unsupported mode %s", (runtimeMode) => {
+    expect(() =>
+      createGateways({
+        runtimeMode: runtimeMode as "live-lite",
+        polyClient: { getOk: async () => "OK" },
+      }),
+    ).toThrow(/UNSUPPORTED_RUNTIME_PROFILE|unsupported runtimeMode/);
+  });
+
+  it("does not fall through to live gateways for unknown modes", () => {
+    expect(() =>
+      createGateways({
+        runtimeMode: "unknown" as "live-lite",
+        polyClient: { getOk: async () => "OK" },
+      }),
+    ).toThrow();
+    expect(createCollateralResolver).not.toHaveBeenCalled();
+  });
+
+  it("still supports simulation gateway classes as direct test doubles", () => {
+    expect(new SimulationMarketDataGateway()).toBeInstanceOf(SimulationMarketDataGateway);
+    expect(new SimulationExchangeGateway()).toBeInstanceOf(SimulationExchangeGateway);
   });
 });

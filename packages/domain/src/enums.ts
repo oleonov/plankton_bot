@@ -242,6 +242,23 @@ export const ProfileId = {
 } as const;
 export type ProfileId = (typeof ProfileId)[keyof typeof ProfileId];
 
+export const SUPPORTED_RUNTIME_PROFILE = ProfileId.LiveLite;
+
+export function isSupportedRuntimeProfile(profile: unknown): profile is typeof ProfileId.LiveLite {
+  return profile === SUPPORTED_RUNTIME_PROFILE;
+}
+
+export function assertSupportedRuntimeProfile(
+  profile: string | null | undefined,
+): asserts profile is typeof ProfileId.LiveLite {
+  if (isSupportedRuntimeProfile(profile)) return;
+  throw new Error(
+    `UNSUPPORTED_RUNTIME_PROFILE: "${profile ?? "(none)"}". ` +
+      `Only "${SUPPORTED_RUNTIME_PROFILE}" can run as a runtime/operator profile. ` +
+      "paper/simulation are historical or test-only profiles.",
+  );
+}
+
 export const DeploymentStage = {
   PaperOnly: "paper-only",
   LiveProbe: "live-probe",

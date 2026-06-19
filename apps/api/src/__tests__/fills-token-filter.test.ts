@@ -8,7 +8,7 @@ const TEST_API_KEY = "test-key-fills-tokenid";
 
 function testConfig(): AppConfig {
   return {
-    runtimeMode: "simulation",
+    runtimeMode: undefined,
     logLevel: "error",
     dbPath: "",
     marketDataPollIntervalMs: 30_000,

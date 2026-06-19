@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { isSupportedRuntimeProfile } from "@krabs/domain";
 import { WizardPanel } from "../WizardPanel.tsx";
 import { useProfiles, useSwitchProfile } from "../../api/hooks.ts";
 
@@ -39,7 +40,10 @@ export function SwitchProfileWizard({ onClose }: { onClose: () => void }) {
   const [confirmText, setConfirmText] = useState("");
 
   const current = data?.runtimeState?.current_profile;
-  const profiles = data?.profiles.filter((p) => p.profile_id !== current) ?? [];
+  const profiles =
+    data?.profiles.filter(
+      (p) => p.profile_id !== current && isSupportedRuntimeProfile(p.profile_id),
+    ) ?? [];
   const targetProfile = data?.profiles.find((p) => p.profile_id === target);
 
   const needsTypedConfirm = resetPolicy === "archive-reset";

@@ -50,11 +50,10 @@
 
 ## Recovery Steps
 
-1. Stop the live-lite runtime
-2. Switch to `RUNTIME_MODE=simulation` for analysis
-3. Review DB state: positions, orders, fills
-4. Determine root cause of abort
-5. Document findings
+1. Stop or keep paused per incident severity
+2. Review DB state: positions, orders, fills
+3. Determine root cause of abort
+4. Document findings
 
 ## Post-Run Review
 

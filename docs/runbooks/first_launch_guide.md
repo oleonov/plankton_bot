@@ -4,15 +4,15 @@ This guide is the practical next step after Phase 15.
 
 There are no new large implementation phases left in the current v1 plan. The next work is operational:
 
-1. local smoke run in `simulation`
-2. `paper` sign-off
-3. `live-lite` preflight
-4. first narrow `live-lite` session
-5. post-run review and small fixes if needed
+1. local boot check (runtime starts **paused** — no real orders are placed)
+2. `live-lite` preflight
+3. first narrow `live-lite` session
+4. post-run review and small fixes if needed
 
-Use this file as the "start here" guide. For the detailed procedures after paper sign-off, also use:
+> **Runtime modes:** `live-lite` is the only supported runtime/operator profile. `simulation` and `paper` are retired as runnable modes. Historical `simulation`/`paper` rows may remain in the DB and the simulation gateway classes remain as test doubles, but the runtime, API, and operator switch paths only accept `live-lite`.
 
-- `docs/runbooks/paper_signoff.md`
+Use this file as the "start here" guide. For the detailed live-lite procedures, also use:
+
 - `docs/runbooks/live_lite_preflight.md`
 - `docs/runbooks/live_lite_rollout.md`
 
@@ -30,33 +30,26 @@ Use a long random string.
 
 ### Polymarket CLOB credentials
 
-You need real Polymarket credentials for `paper` and `live-lite`:
+You need real Polymarket credentials to run `live-lite`:
 
 - `POLY_API_KEY`
 - `POLY_API_SECRET`
 - `POLY_PASSPHRASE`
+- `POLY_PRIVATE_KEY`
 
-You do not need them for the initial `simulation` smoke run.
+The runtime always starts **paused**, so the first boot places no orders, but the live-lite client is still constructed at startup and needs these credentials.
 
-### Separate SQLite files per mode
+### SQLite files
 
-Do not reuse the same DB file across all modes. Keep them separate:
+DB files live under `./apps/runtime/data/`. The active live-lite ledger is:
 
-- `./apps/runtime/data/krabs-sim.db`
-- `./apps/runtime/data/krabs-paper.db`
-- `./apps/runtime/data/krabs-live-lite.db`
+- `./apps/runtime/data/ledger-live-lite.db`
+
+Historical `krabs-sim.db` / `krabs-paper.db` files may still exist from earlier runs; they are not used by the live-lite runtime.
 
 ### One important note about `.env.example`
 
-The current `.env.example` still mentions:
-
-- `simulation | paper | live`
-
-The code now expects:
-
-- `simulation | paper | live-lite`
-
-Do not use `live`. Use `live-lite`.
+`RUNTIME_MODE` is optional — the profile is read from `control.db`. Only `live-lite` is supported as a runtime/operator profile. Do not set `simulation` or `paper`; they are rejected at startup.
 
 ### Trading rules at startup
 
@@ -67,67 +60,31 @@ There is no YAML config for trading rules. Two DB-backed rule sets cover everyth
 
 Both rule sets are editable via the web UI (`/selection-rules`) or REST API; runtime hot-reloads on every mutation. See `docs/runbooks/selection_rules_operations.md` for details.
 
-To set a custom simulation/paper starting balance, use the `INITIAL_BALANCE_USDC` env var (default `10000`). This field is ignored in live-lite mode (real Polymarket balance is used).
+`INITIAL_BALANCE_USDC` is ignored in live-lite mode (the real Polymarket balance is used).
 
 ## Recommended Files To Create
 
-Create three local env files in the repo root:
+Create the local env file in the repo root:
 
-- `.env.simulation`
-- `.env.paper`
 - `.env.live-lite`
 
-All `.env*` files (except `.env.example` and `.env.simulation.example`) are gitignored.
-Before each run, copy the one you want into `.env`.
+All `.env*` files (except `.env.example`) are gitignored.
+Before each run, copy it into `.env`.
 
 Example:
 
 ```bash
-cp .env.simulation .env
+cp .env.live-lite .env
 ```
-
-> First time? Create `.env.simulation` from the template: `cp .env.simulation.example .env.simulation`
 
 Both `@krabs/runtime` and `@krabs/api` read the same `.env`.
 
-## Env Template: Simulation
-
-Use this for the first smoke run.
-
-```env
-RUNTIME_MODE=simulation
-LOG_LEVEL=info
-DB_PATH=./apps/runtime/data/krabs-sim.db
-INITIAL_BALANCE_USDC=10000
-KRABS_API_KEY=replace-with-a-long-random-string
-KRABS_API_PORT=3100
-```
-
-## Env Template: Paper
-
-Use this only after the first smoke run is understood.
-
-```env
-RUNTIME_MODE=paper
-LOG_LEVEL=info
-DB_PATH=./apps/runtime/data/krabs-paper.db
-INITIAL_BALANCE_USDC=10000
-KRABS_API_KEY=replace-with-a-long-random-string
-KRABS_API_PORT=3100
-
-POLY_API_KEY=replace
-POLY_API_SECRET=replace
-POLY_PASSPHRASE=replace
-```
-
 ## Env Template: Live-Lite
-
-Use this only after paper sign-off is clean.
 
 ```env
 RUNTIME_MODE=live-lite
 LOG_LEVEL=info
-DB_PATH=./apps/runtime/data/krabs-live-lite.db
+DB_PATH=./apps/runtime/data/krabs.db
 KRABS_API_KEY=replace-with-a-long-random-string
 KRABS_API_PORT=3100
 
@@ -141,17 +98,9 @@ LIVE_LITE_MAX_ORDER_USDC=10
 LIVE_LITE_MAX_ACTIVE_MARKETS=2
 ```
 
-### Budget for simulation / paper mode
+> `DB_PATH` is the base path; the filename is replaced with `control.db`, and the ledger is derived as `ledger-live-lite.db` in the same directory.
 
-The simulated starting balance is set via `INITIAL_BALANCE_USDC` in `.env`:
-
-```env
-INITIAL_BALANCE_USDC=100
-```
-
-When the balance runs out, new buy orders are rejected with `INSUFFICIENT_BALANCE`. Sells return funds to the balance, so the bot can recycle capital. The balance resets on every restart. This field is ignored in live-lite mode (real Polymarket balance is used).
-
-## Step 1: First Local Smoke Run In Simulation
+## Step 1: First Local Boot Check
 
 ### Goal
 
@@ -166,11 +115,7 @@ It is only to confirm that:
 - SSE works
 - pause/resume is visible and behaves correctly
 
-### Important limitation
-
-`simulation` mode uses simulated market data and simulated execution.
-
-Out of the box, this is not the best mode to see meaningful trading behavior. It is a smoke run for platform sanity, not a true trading validation run.
+The runtime always starts **paused**, so this boot check places no orders even though it runs `live-lite`.
 
 ### Commands
 
@@ -183,7 +128,7 @@ mkdir -p apps/runtime/data logs snapshots
 Select the env:
 
 ```bash
-cp .env.simulation .env
+cp .env.live-lite .env
 ```
 
 Build once:
@@ -195,13 +140,13 @@ pnpm build
 Start runtime in terminal 1:
 
 ```bash
-pnpm --filter @krabs/runtime start 2>&1 | tee logs/runtime-sim-$(date +%Y%m%d-%H%M%S).log
+pnpm --filter @krabs/runtime start 2>&1 | tee logs/runtime-$(date +%Y%m%d-%H%M%S).log
 ```
 
 Start API in terminal 2:
 
 ```bash
-pnpm --filter @krabs/api start 2>&1 | tee logs/api-sim-$(date +%Y%m%d-%H%M%S).log
+pnpm --filter @krabs/api start 2>&1 | tee logs/api-$(date +%Y%m%d-%H%M%S).log
 ```
 
 Open the UI:
@@ -219,8 +164,8 @@ location.reload();
 
 On `Overview`:
 
-- `runtimeMode = simulation`
-- market-data / execution mode show simulation, not live
+- `runtimeMode = live-lite`
+- the runtime is **paused**
 - SSE is connected
 - the page updates without auth errors
 
@@ -231,11 +176,9 @@ Also check:
 - `Pause` changes visible state
 - `Resume` restores visible state
 
-### What is acceptable during this smoke run
+> Keep the runtime **paused** during this boot check. Do not resume until live-lite preflight is clean — resuming places real orders.
 
-It is acceptable if you do not see meaningful signals, orders, or fills yet. This run is mainly about understanding the UI and confirming the platform boots cleanly.
-
-### What to save after the smoke run
+### What to save after the boot check
 
 Set a local shell variable for snapshots:
 
@@ -248,7 +191,7 @@ Save a status snapshot:
 ```bash
 curl -s -H "Authorization: Bearer $API_KEY" \
   http://localhost:3100/api/v1/status \
-  > snapshots/status-sim.json
+  > snapshots/status-boot.json
 ```
 
 Also save:
@@ -258,9 +201,9 @@ Also save:
 - screenshot of `Overview`
 - screenshot of `Risk`
 
-### Stop conditions for the smoke run
+### Stop conditions for the boot check
 
-Stop and fix before going to `paper` if any of these happen:
+Stop and fix before continuing if any of these happen:
 
 - runtime crashes
 - API crashes
@@ -268,190 +211,9 @@ Stop and fix before going to `paper` if any of these happen:
 - SSE never connects
 - pause/resume does not change visible state
 
-## Step 2: Get Polymarket CLOB Credentials
+## Step 2: Live-Lite Preflight
 
-Before `paper` or `live-lite`, obtain:
-
-- `POLY_API_KEY`
-- `POLY_API_SECRET`
-- `POLY_PASSPHRASE`
-
-Without these, the runtime cannot run in `paper` or `live-lite`.
-
-## Step 3: Paper Sign-Off
-
-### Goal
-
-This is the first meaningful validation run.
-
-`paper` means:
-
-- market data is live
-- strategy/risk/reconciliation are real
-- execution is simulated
-- no real orders are placed on the exchange
-
-### Before you start
-
-Copy the paper env:
-
-```bash
-cp .env.paper .env
-```
-
-Build if needed:
-
-```bash
-pnpm build
-```
-
-Start runtime:
-
-```bash
-pnpm --filter @krabs/runtime start 2>&1 | tee logs/runtime-paper-$(date +%Y%m%d-%H%M%S).log
-```
-
-Start API:
-
-```bash
-pnpm --filter @krabs/api start 2>&1 | tee logs/api-paper-$(date +%Y%m%d-%H%M%S).log
-```
-
-Set the API key in browser `localStorage` if needed.
-
-### Expected top-level UI state
-
-On `Overview`, you should expect:
-
-- `runtimeMode = paper`
-- market data source is live
-- execution mode is simulation
-- SSE connected
-- no active reconciliation drift
-- market data stays fresh
-
-### How long to run
-
-Run for at least 2 hours.
-
-### What to look at during the run
-
-Main pages:
-
-- `Overview`
-- `Selection Rules`
-- `Risk`
-- `Orders/Fills`
-
-Main questions:
-
-- are signals being produced?
-- are signals approved/rejected as expected?
-- are simulated orders created?
-- are simulated fills processed?
-- are positions updating coherently?
-- is reconciliation clean?
-- are there any unexpected ERROR-level logs?
-
-### Checkpoint schedule
-
-Use these checkpoints:
-
-- `T+0`
-- `T+15m`
-- `T+30m`
-- `T+60m`
-- `T+120m`
-
-At each checkpoint:
-
-1. save `Overview` screenshot
-2. save `Risk` screenshot
-3. save API snapshots
-
-Use:
-
-```bash
-API_KEY='replace-with-the-same-KRABS_API_KEY'
-SESSION='paper'
-TS=$(date +%Y%m%d-%H%M%S)
-
-curl -s -H "Authorization: Bearer $API_KEY" \
-  http://localhost:3100/api/v1/status \
-  > snapshots/${SESSION}-status-${TS}.json
-
-curl -s -H "Authorization: Bearer $API_KEY" \
-  http://localhost:3100/api/v1/metrics \
-  > snapshots/${SESSION}-metrics-${TS}.json
-
-curl -s -H "Authorization: Bearer $API_KEY" \
-  "http://localhost:3100/api/v1/selection-rules?profileId=paper" \
-  > snapshots/${SESSION}-selection-rules-${TS}.json
-
-curl -s -H "Authorization: Bearer $API_KEY" \
-  "http://localhost:3100/api/v1/orders?limit=50" \
-  > snapshots/${SESSION}-orders-${TS}.json
-
-curl -s -H "Authorization: Bearer $API_KEY" \
-  "http://localhost:3100/api/v1/fills?limit=100" \
-  > snapshots/${SESSION}-fills-${TS}.json
-
-curl -s -H "Authorization: Bearer $API_KEY" \
-  http://localhost:3100/api/v1/risk-events \
-  > snapshots/${SESSION}-risk-events-${TS}.json
-```
-
-### What counts as failure in paper mode
-
-Do not move to `live-lite` if any of these happen:
-
-- runtime crash or unhandled exception
-- API crash
-- market data remains stale for more than 5 minutes
-- active reconciliation drift
-- no signals after 30 minutes
-- obviously impossible positions or selection-status drift
-- repeated unexpected ERROR-level log entries
-
-### What counts as success in paper mode
-
-Paper sign-off is good enough to move forward when:
-
-- signals are flowing
-- simulated orders/fills are appearing
-- positions update coherently
-- selection rules admit/exclude markets as configured
-- reconciliation stays clean
-- no unresolved stale-data or drift problems persist
-
-## Step 4: What To Bring Back After Paper Sign-Off
-
-After the 2-hour paper run, bring back:
-
-- runtime log file
-- API log file
-- latest `/api/v1/status`
-- latest `/api/v1/metrics`
-- latest `/api/v1/selection-rules?profileId=paper`
-- latest `/api/v1/orders?limit=50`
-- latest `/api/v1/fills?limit=100`
-- latest `/api/v1/risk-events`
-- screenshots of `Overview` at start and end
-- screenshots of `Risk` or `Families` at start and end
-
-Also write a short summary:
-
-- were there signals?
-- were there fills?
-- was there any reconciliation drift?
-- was there any stale-data period?
-- were there unexpected rejects or errors?
-
-This is the package to review before first `live-lite`.
-
-## Step 5: Live-Lite Preflight
-
-Do not do this until paper sign-off is clean.
+Do not resume the runtime until preflight is clean.
 
 Use:
 
@@ -474,7 +236,7 @@ Use the narrow session-1 envelope:
 - `LIVE_LITE_MAX_ORDER_USDC=10`
 - `LIVE_LITE_MAX_ACTIVE_MARKETS=2`
 
-## Step 6: First Live-Lite Session
+## Step 3: First Live-Lite Session
 
 Do not treat the first live-lite session as a profit attempt.
 
@@ -538,7 +300,7 @@ Do not widen the envelope on the same day as the first live-lite session unless 
 
 ## Minimal Artifact Checklist For Any Serious Run
 
-For paper or live-lite, always save:
+For any live-lite run, always save:
 
 - `bot_run_id`
 - start and end timestamps
@@ -557,13 +319,10 @@ For paper or live-lite, always save:
 
 If you want the shortest possible sequence:
 
-1. create `.env.simulation`
-2. run one local smoke test
-3. get Polymarket credentials
-4. create `.env.paper`
-5. run `paper` for 2 hours
+1. create `.env.live-lite`
+2. run one local boot check (stays paused)
+3. confirm credentials and caps
+4. run live-lite preflight
+5. run one narrow live-lite session
 6. collect logs and snapshots
 7. review the run
-8. only then prepare `.env.live-lite`
-9. run live-lite preflight
-10. run one narrow live-lite session

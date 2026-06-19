@@ -1,9 +1,35 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { loadEnv } from "../env.js";
 
 describe("speedup config vars", () => {
+  const testEnvKeys = [
+    "RUNTIME_MODE",
+    "POLY_API_KEY",
+    "POLY_API_SECRET",
+    "POLY_PASSPHRASE",
+    "POLY_PRIVATE_KEY",
+    "STRATEGY_SCAN_INTERVAL_MS",
+    "MARKET_SCAN_INTERVAL_MS",
+    "MARKET_SCAN_HINT_MIN_INTERVAL_MS",
+    "RECONCILIATION_INTERVAL_MS",
+    "PLANNER_SUPPRESSION_ROLLUP_WINDOW_MS",
+    "MARKET_DATA_DISCOVERY_POLL_INTERVAL_MS",
+    "MARKET_DATA_DISCOVERY_BATCH_SIZE",
+    "FILL_POLL_INTERVAL_MS",
+    "EXECUTION_MAX_CONCURRENCY",
+  ];
+  const savedEnv: Record<string, string | undefined> = {};
+
   beforeEach(() => {
-    process.env.RUNTIME_MODE = "simulation";
+    for (const key of testEnvKeys) {
+      savedEnv[key] = process.env[key];
+    }
+    process.env.RUNTIME_MODE = "live-lite";
+    process.env.POLY_API_KEY = "key";
+    process.env.POLY_API_SECRET = "secret";
+    process.env.POLY_PASSPHRASE = "pass";
+    process.env.POLY_PRIVATE_KEY =
+      "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     delete process.env.STRATEGY_SCAN_INTERVAL_MS;
     delete process.env.MARKET_SCAN_INTERVAL_MS;
     delete process.env.MARKET_SCAN_HINT_MIN_INTERVAL_MS;
@@ -13,6 +39,17 @@ describe("speedup config vars", () => {
     delete process.env.MARKET_DATA_DISCOVERY_BATCH_SIZE;
     delete process.env.FILL_POLL_INTERVAL_MS;
     delete process.env.EXECUTION_MAX_CONCURRENCY;
+  });
+
+  afterEach(() => {
+    for (const key of testEnvKeys) {
+      const value = savedEnv[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
   });
 
   it("defaults STRATEGY_SCAN_INTERVAL_MS to 12000", () => {

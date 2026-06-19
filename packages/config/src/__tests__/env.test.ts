@@ -87,12 +87,13 @@ describe("loadEnv", () => {
 
   it("reads env vars correctly", () => {
     setEnvVars({
-      RUNTIME_MODE: "paper",
+      RUNTIME_MODE: "live-lite",
       LOG_LEVEL: "debug",
       DB_PATH: "/tmp/test.db",
       POLY_API_KEY: "key123",
       POLY_API_SECRET: "secret456",
       POLY_PASSPHRASE: "pass789",
+      POLY_PRIVATE_KEY: "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       POLY_BUILDER_API_KEY: "builder-key",
       POLY_BUILDER_SECRET: "builder-secret",
       POLY_BUILDER_PASSPHRASE: "builder-pass",
@@ -103,8 +104,8 @@ describe("loadEnv", () => {
       POLYGON_RPC_FALLBACK_URL: "https://polygon.drpc.org",
     });
 
-    const config = loadEnv();
-    expect(config.runtimeMode).toBe("paper");
+    const config = loadEnv(emptyEnvPath);
+    expect(config.runtimeMode).toBe("live-lite");
     expect(config.logLevel).toBe("debug");
     expect(config.dbPath).toBe("/tmp/test.db");
     expect(config.polyApiKey).toBe("key123");
@@ -127,19 +128,19 @@ describe("loadEnv", () => {
       POLYGON_RPC_URL: "https://polygon-mainnet.g.alchemy.com/v2/primary",
     });
 
-    const config = loadEnv();
+    const config = loadEnv(emptyEnvPath);
     expect(config.polygonRpcUrls).toEqual(["https://polygon-mainnet.g.alchemy.com/v2/primary"]);
   });
 
   it("accepts live-lite mode without LIVE_LITE_* envelope vars", () => {
     setEnvVars(BASE_LIVE_LITE_VARS);
-    const config = loadEnv();
+    const config = loadEnv(emptyEnvPath);
     expect(config.runtimeMode).toBe("live-lite");
   });
 
   it("resolves relative DB_PATH to absolute", () => {
     setEnvVars({ DB_PATH: "./data/test.db" });
-    const config = loadEnv();
+    const config = loadEnv(emptyEnvPath);
     expect(config.dbPath).toMatch(/^\//);
     expect(config.dbPath).toContain("data/test.db");
   });
@@ -147,15 +148,6 @@ describe("loadEnv", () => {
   it("requires POLY_API_KEY in live-lite mode", () => {
     setEnvVars({ RUNTIME_MODE: "live-lite" });
     expect(() => loadEnv(emptyEnvPath)).toThrow("POLY_API_KEY");
-  });
-
-  it("requires POLY_API_SECRET in paper mode", () => {
-    setEnvVars({
-      RUNTIME_MODE: "paper",
-      POLY_API_KEY: "key",
-      POLY_PASSPHRASE: "pass",
-    });
-    expect(() => loadEnv(emptyEnvPath)).toThrow("POLY_API_SECRET");
   });
 
   it("requires POLY_PASSPHRASE in live-lite mode", () => {
@@ -167,10 +159,14 @@ describe("loadEnv", () => {
     expect(() => loadEnv(emptyEnvPath)).toThrow("POLY_PASSPHRASE");
   });
 
-  it("does not require POLY_* in simulation mode", () => {
+  it("rejects simulation runtime mode", () => {
     setEnvVars({ RUNTIME_MODE: "simulation" });
-    const config = loadEnv();
-    expect(config.runtimeMode).toBe("simulation");
+    expect(() => loadEnv(emptyEnvPath)).toThrow("Invalid environment configuration");
+  });
+
+  it("rejects paper runtime mode", () => {
+    setEnvVars({ RUNTIME_MODE: "paper" });
+    expect(() => loadEnv(emptyEnvPath)).toThrow("Invalid environment configuration");
   });
 
   it("rejects invalid RUNTIME_MODE", () => {

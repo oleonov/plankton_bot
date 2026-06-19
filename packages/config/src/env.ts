@@ -4,7 +4,7 @@ import { cpus } from "node:os";
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
 
-const runtimeModeSchema = z.enum(["simulation", "paper", "live-lite"]);
+const runtimeModeSchema = z.enum(["live-lite"]);
 const logLevelSchema = z.enum(["debug", "info", "warn", "error"]);
 const commaSeparatedUrlsSchema = z.preprocess((value) => {
   if (typeof value !== "string" || value.trim() === "") return undefined;
@@ -212,7 +212,7 @@ const envSchema = z
     // When RUNTIME_MODE is undefined, mode comes from control.db — skip env validation
     if (!data.RUNTIME_MODE) return;
 
-    if (data.RUNTIME_MODE === "live-lite" || data.RUNTIME_MODE === "paper") {
+    if (data.RUNTIME_MODE === "live-lite") {
       for (const field of ["POLY_API_KEY", "POLY_API_SECRET", "POLY_PASSPHRASE"] as const) {
         if (!data[field]) {
           ctx.addIssue({
@@ -246,7 +246,7 @@ const envSchema = z
   });
 
 export interface AppConfig {
-  runtimeMode: "simulation" | "paper" | "live-lite" | undefined;
+  runtimeMode: "live-lite" | undefined;
   logLevel: "debug" | "info" | "warn" | "error";
   dbPath: string;
   marketDataPollIntervalMs: number;

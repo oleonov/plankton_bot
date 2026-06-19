@@ -22,7 +22,7 @@ const TEST_SESSION_SECRET = "a".repeat(64);
 
 function testConfig(overrides?: Partial<AppConfig>): AppConfig {
   return {
-    runtimeMode: "simulation",
+    runtimeMode: undefined,
     logLevel: "error",
     dbPath: "",
     marketDataPollIntervalMs: 30_000,

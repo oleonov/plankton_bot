@@ -10,7 +10,7 @@ const TEST_API_KEY = "test-key-abandoned-dust";
 
 function testConfig(): AppConfig {
   return {
-    runtimeMode: "simulation",
+    runtimeMode: undefined,
     logLevel: "error",
     dbPath: "",
     marketDataPollIntervalMs: 30_000,

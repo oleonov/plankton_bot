@@ -4,7 +4,7 @@ import type {
   RuntimeControlStateRepository,
   StateTransitionRepository,
 } from "@krabs/domain";
-import { SwitchState } from "@krabs/domain";
+import { isSupportedRuntimeProfile, SwitchState } from "@krabs/domain";
 import type Database from "better-sqlite3";
 import type { ContainerControl } from "./container-control.js";
 
@@ -120,6 +120,17 @@ export class SwitchDriver {
   // ── State handlers (each idempotent) ──────────────────────────────────
 
   private toPausing(req: SwitchRequest): void {
+    if (!isSupportedRuntimeProfile(req.toProfile)) {
+      const error = `UNSUPPORTED_RUNTIME_PROFILE: "${req.toProfile}"`;
+      this.log.warn(
+        { switchId: req.switchId, toProfile: req.toProfile },
+        "rejected unsupported switch target",
+      );
+      this.transitionTo(req.switchId, req.state, SwitchState.Failed);
+      this.switchRepo.updateState(req.switchId, SwitchState.Failed, error);
+      return;
+    }
+
     this.db
       .prepare(
         `INSERT INTO operator_commands (action, reason, scope, initiator_type, initiator, status, created_at)

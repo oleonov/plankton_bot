@@ -2,10 +2,12 @@
  * Gateway factory — maps runtime mode to the correct MarketDataGateway + ExchangeGateway pair.
  */
 
-import type { MarketDataGateway, ExchangeGateway } from "@krabs/domain";
 import {
-  SimulationMarketDataGateway,
-  SimulationExchangeGateway,
+  assertSupportedRuntimeProfile,
+  type ExchangeGateway,
+  type MarketDataGateway,
+} from "@krabs/domain";
+import {
   LiveMarketDataGateway,
   LiveExchangeGateway,
   createCollateralResolver,
@@ -20,7 +22,7 @@ const PUSD_POLYGON = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
 const CONDITIONAL_TOKENS_POLYGON = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 
 export interface CreateGatewaysInput {
-  runtimeMode: "simulation" | "paper" | "live-lite";
+  runtimeMode: string;
   polyClient?: unknown;
   settlementClient?: unknown;
   traderAddress?: string | undefined;
@@ -100,7 +102,6 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     traderAddress,
     userWsAuth,
     slugFilter,
-    initialBalanceUsdc,
     polygonRpcUrl,
     polygonRpcUrls,
     polygonRpcFallbackUrl,
@@ -126,17 +127,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     fetchRetryLog,
   } = input;
 
-  if (runtimeMode === "simulation") {
-    return {
-      marketDataGateway: new SimulationMarketDataGateway(),
-      exchangeGateway: new SimulationExchangeGateway(
-        initialBalanceUsdc !== undefined ? { initialBalanceUsdc } : undefined,
-      ),
-      modeLabel: "simulation",
-      marketDataSource: "simulation",
-      executionMode: "simulation",
-    };
-  }
+  assertSupportedRuntimeProfile(runtimeMode);
 
   if (!polyClient) {
     throw new Error(`polyClient is required for ${runtimeMode} mode`);
@@ -163,19 +154,6 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     streamStableMs: marketDataStreamStableMs,
   };
 
-  if (runtimeMode === "paper") {
-    return {
-      marketDataGateway: new LiveMarketDataGateway(liveMarketDataConfig),
-      exchangeGateway: new SimulationExchangeGateway(
-        initialBalanceUsdc !== undefined ? { initialBalanceUsdc } : undefined,
-      ),
-      modeLabel: "paper",
-      marketDataSource: "live",
-      executionMode: "simulation",
-    };
-  }
-
-  // live-lite
   const { primaryUrls, fallbackUrls } = resolvePolygonRpcConfig({
     alchemyPolygonKeys,
     polygonRpcUrls,

@@ -19,7 +19,7 @@ const TEST_API_KEY = "test-key-score-distribution";
 
 function testConfig(): AppConfig {
   return {
-    runtimeMode: "simulation",
+    runtimeMode: undefined,
     logLevel: "error",
     dbPath: "",
     marketDataPollIntervalMs: 30_000,

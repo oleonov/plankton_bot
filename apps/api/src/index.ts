@@ -13,6 +13,7 @@ import { loadEnv } from "@krabs/config";
 import { bootstrapControlDb, bootstrapLedgerDb } from "@krabs/db";
 import { buildServer } from "./server.js";
 import { LedgerPool } from "./ledger-pool.js";
+import { resolveStartupLedgerProfile } from "./startup-profile.js";
 
 async function main(): Promise<void> {
   const config = loadEnv();
@@ -48,11 +49,11 @@ async function main(): Promise<void> {
   const profileRow = controlConn.db
     .prepare("SELECT desired_profile, current_profile FROM runtime_control_state WHERE id = 1")
     .get() as { desired_profile: string | null; current_profile: string | null } | undefined;
-  const startupLedgerProfile =
-    profileRow?.current_profile ??
-    profileRow?.desired_profile ??
-    config.runtimeMode ??
-    "simulation";
+  const startupLedgerProfile = resolveStartupLedgerProfile({
+    currentProfile: profileRow?.current_profile ?? null,
+    desiredProfile: profileRow?.desired_profile ?? null,
+    envMode: config.runtimeMode ?? null,
+  });
   const ledgerDbPath = controlDbPath.replace("control.db", `ledger-${startupLedgerProfile}.db`);
   const ledgerConn = bootstrapLedgerDb(ledgerDbPath);
 

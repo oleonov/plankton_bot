@@ -18,7 +18,7 @@ const TEST_API_KEY = "test-split-key";
 
 function testConfig(): AppConfig {
   return {
-    runtimeMode: "simulation",
+    runtimeMode: undefined,
     logLevel: "error",
     dbPath: "",
     marketDataPollIntervalMs: 30_000,

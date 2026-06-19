@@ -13,7 +13,7 @@ const TEST_API_KEY = "test-key-trading-activity";
 
 function testConfig(overrides?: Partial<AppConfig>): AppConfig {
   return {
-    runtimeMode: "simulation",
+    runtimeMode: undefined,
     logLevel: "error",
     dbPath: "",
     marketDataPollIntervalMs: 30_000,

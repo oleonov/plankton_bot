@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import { isSupportedRuntimeProfile, SUPPORTED_RUNTIME_PROFILE } from "@krabs/domain";
 import type { LedgerPool } from "../ledger-pool.js";
 import { ok, ApiError } from "../errors.js";
 import { getActor } from "../auth.js";
@@ -58,6 +59,13 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
       const { toProfile, ledgerResetPolicy } = body;
 
       if (!toProfile) throw new ApiError(400, "toProfile is required", "MISSING_FIELD");
+      if (!isSupportedRuntimeProfile(toProfile)) {
+        throw new ApiError(
+          409,
+          `cannot switch to '${toProfile}': only '${SUPPORTED_RUNTIME_PROFILE}' is a supported runtime profile`,
+          "UNSUPPORTED_RUNTIME_PROFILE",
+        );
+      }
 
       const db = controlDb;
 

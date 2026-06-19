@@ -1,17 +1,15 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { bootstrapDatabase } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
 import type { AppConfig } from "@krabs/config";
 import { buildServer } from "../server.js";
 import { stubLedgerPool, MARKET_DATA_TEST_DEFAULTS } from "./test-helpers.js";
 
-// ─── Test setup ─────────────────────────────────────────────────────
-
 const TEST_API_KEY = "test-key-switch";
 
 function testConfig(): AppConfig {
   return {
-    runtimeMode: "simulation",
+    runtimeMode: undefined,
     logLevel: "error",
     dbPath: "",
     marketDataPollIntervalMs: 30_000,
@@ -33,11 +31,8 @@ function testConfig(): AppConfig {
     krabsAuthPassword: undefined,
     krabsSessionSecret: undefined,
     allowSellSizeClamp: true,
-
     executionSellBalanceRejectBlockEnabled: true,
-
     executionSellBalanceRejectBlockMs: 60000,
-
     executionSellExchangeReservedEnabled: true,
     trustProxy: false,
     ...MARKET_DATA_TEST_DEFAULTS,
@@ -52,14 +47,7 @@ function json(res: { json: () => unknown }): any {
   return res.json();
 }
 
-let conn: DbConnection;
-let app: Awaited<ReturnType<typeof buildServer>>;
-
-beforeAll(async () => {
-  conn = bootstrapDatabase(":memory:");
-  const db = conn.db;
-
-  // Phase 1 control tables needed for switch-profile
+function seedControl(db: DbConnection["db"], currentProfile = "live-lite"): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS profiles (
       profile_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, description TEXT,
@@ -88,24 +76,45 @@ beforeAll(async () => {
     INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('simulation', 'Sim');
     INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
     INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('live-lite', 'Live');
-    INSERT INTO runtime_control_state (id, current_profile, desired_profile, runtime_status, paused, schema_version, updated_at)
-    VALUES (1, 'simulation', 'simulation', 'running', 0, 1, datetime('now'));
   `);
+  db.prepare(
+    `INSERT INTO runtime_control_state
+       (id, current_profile, desired_profile, runtime_status, paused, schema_version, updated_at)
+     VALUES (1, ?, ?, 'running', 0, 1, datetime('now'))`,
+  ).run(currentProfile, currentProfile);
+}
 
+let conn: DbConnection;
+let app: Awaited<ReturnType<typeof buildServer>>;
+
+async function buildApp(): Promise<void> {
   app = await buildServer({
     config: testConfig(),
-    controlDb: db,
-    ledgerDb: db,
+    controlDb: conn.db,
+    ledgerDb: conn.db,
     ledgerPool: stubLedgerPool(),
   });
+}
+
+// Rebuild the server against a fresh control DB seeded with a given current profile.
+async function rebuildWith(currentProfile: string): Promise<void> {
+  await app.close();
+  conn.close();
+  conn = bootstrapDatabase(":memory:");
+  seedControl(conn.db, currentProfile);
+  await buildApp();
+}
+
+beforeEach(async () => {
+  conn = bootstrapDatabase(":memory:");
+  seedControl(conn.db);
+  await buildApp();
 });
 
-afterAll(async () => {
+afterEach(async () => {
   await app.close();
   conn.close();
 });
-
-// ─── Switch-profile tests ───────────────────────────────────────────
 
 describe("POST /actions/switch-profile", () => {
   it("returns 400 when toProfile is missing", async () => {
@@ -116,73 +125,85 @@ describe("POST /actions/switch-profile", () => {
       payload: {},
     });
     expect(res.statusCode).toBe(400);
-    const body = json(res);
-    expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("MISSING_FIELD");
+    expect(json(res).error.code).toBe("MISSING_FIELD");
   });
 
-  it("returns 404 for nonexistent profile", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/v1/actions/switch-profile",
-      headers: authHeaders(),
-      payload: { toProfile: "nonexistent" },
-    });
-    expect(res.statusCode).toBe(404);
-    const body = json(res);
-    expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("PROFILE_NOT_FOUND");
-  });
+  it.each(["paper", "simulation", "nonexistent"])(
+    "rejects unsupported target %s before inserting a switch request",
+    async (toProfile) => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/actions/switch-profile",
+        headers: authHeaders(),
+        payload: { toProfile },
+      });
 
-  it("returns 409 when switching to the current profile", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/v1/actions/switch-profile",
-      headers: authHeaders(),
-      payload: { toProfile: "simulation" },
-    });
-    expect(res.statusCode).toBe(409);
-    const body = json(res);
-    expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("SAME_PROFILE");
-  });
+      expect(res.statusCode).toBe(409);
+      expect(json(res).error.code).toBe("UNSUPPORTED_RUNTIME_PROFILE");
+      const row = conn.db.prepare("SELECT COUNT(*) AS c FROM profile_switch_requests").get() as {
+        c: number;
+      };
+      expect(row.c).toBe(0);
+    },
+  );
 
-  it("creates a switch request for a valid target profile", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/v1/actions/switch-profile",
-      headers: authHeaders(),
-      payload: { toProfile: "paper" },
-    });
-    expect(res.statusCode).toBe(200);
-    const body = json(res);
-    expect(body.ok).toBe(true);
-    expect(body.data.status).toBe("requested");
-    expect(typeof body.data.switchId).toBe("string");
-
-    // Verify row in DB
-    const row = conn.db
-      .prepare("SELECT * FROM profile_switch_requests WHERE switch_id = ?")
-      .get(body.data.switchId) as Record<string, unknown>;
-    expect(row.from_profile).toBe("simulation");
-    expect(row.to_profile).toBe("paper");
-    expect(row.ledger_reset_policy).toBe("preserve");
-    expect(row.state).toBe("requested");
-    // Bearer API key auth → actor is "api_key"
-    expect(row.requested_by).toBe("api_key");
-  });
-
-  it("returns 409 when a switch is already in progress", async () => {
-    // Previous test left a 'requested' row in profile_switch_requests
+  it("returns 409 when switching to the current live-lite profile", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/v1/actions/switch-profile",
       headers: authHeaders(),
       payload: { toProfile: "live-lite" },
     });
+
     expect(res.statusCode).toBe(409);
+    expect(json(res).error.code).toBe("SAME_PROFILE");
+  });
+
+  it("creates a live-lite switch request from a historical non-runtime current profile", async () => {
+    await rebuildWith("paper");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/actions/switch-profile",
+      headers: authHeaders(),
+      payload: { toProfile: "live-lite" },
+    });
+
+    expect(res.statusCode).toBe(200);
     const body = json(res);
-    expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("SWITCH_IN_PROGRESS");
+    expect(body.ok).toBe(true);
+    expect(body.data.status).toBe("requested");
+
+    const row = conn.db
+      .prepare("SELECT * FROM profile_switch_requests WHERE switch_id = ?")
+      .get(body.data.switchId) as Record<string, unknown>;
+    expect(row.from_profile).toBe("paper");
+    expect(row.to_profile).toBe("live-lite");
+    expect(row.ledger_reset_policy).toBe("preserve");
+    expect(row.state).toBe("requested");
+  });
+
+  it("returns 409 SWITCH_IN_PROGRESS for a supported live-lite request when a switch is already active", async () => {
+    // Current profile is historical (paper) so the supported live-lite target passes the
+    // unsupported-profile precheck and reaches the in-progress precheck instead of being masked.
+    await rebuildWith("paper");
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/v1/actions/switch-profile",
+      headers: authHeaders(),
+      payload: { toProfile: "live-lite" },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/v1/actions/switch-profile",
+      headers: authHeaders(),
+      payload: { toProfile: "live-lite" },
+    });
+
+    expect(second.statusCode).toBe(409);
+    expect(json(second).error.code).toBe("SWITCH_IN_PROGRESS");
   });
 });
