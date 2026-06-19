@@ -570,6 +570,17 @@ export class ProfileLadderModule implements RuntimeModule {
       previousBand: previous?.band ?? null,
     });
     if (!plan.ok) return null;
+    // GAP-2: surface every rung whose raw price was clamped up to the avg-entry
+    // floor. Bounded labels only (no token labels) — band/mode/rungIndex.
+    for (const rung of plan.rungs) {
+      if (rung.floored) {
+        this.writeCounter("profile_ladder_rung_price_floored", 1, {
+          band: plan.band,
+          mode,
+          rungIndex: String(rung.rungIndex),
+        });
+      }
+    }
     this.emitModeReaderDarkCompare(position, market, policy, previous, mode, plan);
 
     const now = this.now();

@@ -804,6 +804,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     tokens: new Set<string>(),
   };
   private readonly legacyProfileOwnedGuardDedupe = new Map<string, number>();
+  private readonly staticRuleSellBelowAvgEntryDedupe = new Map<string, number>();
   private readonly lastBuyFillByWallet = new Map<string, number>();
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
@@ -1778,6 +1779,29 @@ export class AlgoDecisionModule implements RuntimeModule {
           },
         });
       }
+      if (sideEffect.kind === "static_rule_sell_below_avg_entry_suppressed") {
+        this.deps.runtimeMetrics?.writeCounter(
+          "static_rule_sell_below_avg_entry_suppressed",
+          1,
+          JSON.stringify({ decisionRuleId: sideEffect.decisionRuleId }),
+        );
+        if (!this.shouldPersistStaticRuleSellBelowAvgEntryEvent(sideEffect)) continue;
+        this.persistence.enqueueRiskEvent({
+          eventType: "static_rule_sell_below_avg_entry_suppressed",
+          payload: {
+            decisionRuleId: sideEffect.decisionRuleId,
+            tokenId: String(sideEffect.tokenId),
+            conditionId: sideEffect.conditionId,
+            avgEntryPrice: sideEffect.avgEntryPrice,
+            proposedPrice: sideEffect.proposedPrice,
+            floor: sideEffect.floor,
+            profileLadderOwned: true,
+            state: sideEffect.state,
+            emissionFacts: sideEffect.emissionFacts,
+            signalTimestamp: sideEffect.timestamp,
+          },
+        });
+      }
     }
   }
 
@@ -1794,6 +1818,23 @@ export class AlgoDecisionModule implements RuntimeModule {
       sideEffect.state,
     ].join("|");
     return this.dedupeAllows(this.legacyProfileOwnedGuardDedupe, key, now);
+  }
+
+  private shouldPersistStaticRuleSellBelowAvgEntryEvent(
+    sideEffect: Extract<
+      DecisionPlanSideEffect,
+      { kind: "static_rule_sell_below_avg_entry_suppressed" }
+    >,
+  ): boolean {
+    const eventAt = Date.parse(sideEffect.timestamp);
+    const now = Number.isFinite(eventAt) ? eventAt : Date.now();
+    const key = [
+      "static_rule_sell_below_avg_entry_suppressed",
+      String(sideEffect.tokenId),
+      sideEffect.decisionRuleId,
+      sideEffect.state,
+    ].join("|");
+    return this.dedupeAllows(this.staticRuleSellBelowAvgEntryDedupe, key, now);
   }
 
   /**

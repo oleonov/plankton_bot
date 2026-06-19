@@ -6199,6 +6199,102 @@ describe("AlgoDecisionModule", () => {
     });
   });
 
+  describe("static-rule below-entry SELL guard telemetry", () => {
+    function staticGuardSideEffect(
+      overrides: Record<string, unknown> = {},
+    ): DecisionPlanSideEffect {
+      return {
+        kind: "static_rule_sell_below_avg_entry_suppressed",
+        tokenId: createTokenId("token-static-guard"),
+        conditionId: "cond-static-guard",
+        decisionRuleId: "D7",
+        proposedPrice: 0.19,
+        floor: 0.2,
+        avgEntryPrice: 0.2,
+        state: "S2",
+        timestamp: "2026-06-15T00:10:00.000Z",
+        emissionFacts: {
+          firstTradePrice: 0.2,
+          firstTradeAt: "2026-06-14T00:00:00.000Z",
+          legTradeCount: 2,
+        },
+        ...overrides,
+      } as unknown as DecisionPlanSideEffect;
+    }
+
+    it("writes static_rule_sell_below_avg_entry_suppressed counter and risk event", async () => {
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const runtimeMetrics = {
+        writeCounter: vi.fn(),
+        writeLatest: vi.fn(),
+      } as unknown as RuntimeMetricWriter;
+      const mod = buildModule({ runtimeMetrics, riskEventRepo });
+      await mod.start();
+
+      (mod as any).applyDecisionPlanSideEffects(
+        [staticGuardSideEffect()],
+        DEFAULT_EXECUTION_POLICY,
+      );
+      await mod.stop();
+
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "static_rule_sell_below_avg_entry_suppressed",
+        1,
+        JSON.stringify({ decisionRuleId: "D7" }),
+      );
+      expect(riskEventRepo.insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "static_rule_sell_below_avg_entry_suppressed",
+          payload: expect.objectContaining({
+            decisionRuleId: "D7",
+            tokenId: "token-static-guard",
+            conditionId: "cond-static-guard",
+            avgEntryPrice: 0.2,
+            proposedPrice: 0.19,
+            floor: 0.2,
+            profileLadderOwned: true,
+            state: "S2",
+            signalTimestamp: "2026-06-15T00:10:00.000Z",
+          }),
+        }),
+      );
+    });
+
+    it("rate-limits repeated static guard risk events per token/rule/state key", async () => {
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const runtimeMetrics = {
+        writeCounter: vi.fn(),
+        writeLatest: vi.fn(),
+      } as unknown as RuntimeMetricWriter;
+      const mod = buildModule({ runtimeMetrics, riskEventRepo });
+      await mod.start();
+
+      (mod as any).applyDecisionPlanSideEffects(
+        [staticGuardSideEffect()],
+        DEFAULT_EXECUTION_POLICY,
+      );
+      (mod as any).applyDecisionPlanSideEffects(
+        [staticGuardSideEffect()],
+        DEFAULT_EXECUTION_POLICY,
+      );
+      await mod.stop();
+
+      const riskEvents = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(
+          ([event]) => event.eventType === "static_rule_sell_below_avg_entry_suppressed",
+        );
+      expect(riskEvents).toHaveLength(1);
+
+      const counters = vi
+        .mocked(runtimeMetrics.writeCounter)
+        .mock.calls.filter(
+          ([metricName]) => metricName === "static_rule_sell_below_avg_entry_suppressed",
+        );
+      expect(counters).toHaveLength(2);
+    });
+  });
+
   // Sub-Track Q.D shadow (observe-only): the planner emits a `track_q_d` side
   // effect for cheap-longshot legs inside the pre-resolution TTC window. The
   // module surfaces it as a deduped, structured risk event + cumulative

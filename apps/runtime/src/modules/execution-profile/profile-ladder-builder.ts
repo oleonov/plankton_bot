@@ -37,7 +37,12 @@ export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOu
   const modeAdjustment = input.config.modeAdjustments[input.mode];
   const initialRungs = sizing.map((sizingFraction, index): LadderRung => {
     const multiplier = bandConfig.multipliers[index]!;
-    const price = ceilToTick(input.avgEntryPrice * multiplier * modeAdjustment, input.tickSize);
+    // GAP-2: medium_high/expensive rung0 multiplier is 1.0; mode "up" applies a
+    // 0.95 adjustment, so the raw price falls below avg entry — a SELL below cost.
+    // Clamp every rung price up to the avg-entry tick floor.
+    const rawPrice = ceilToTick(input.avgEntryPrice * multiplier * modeAdjustment, input.tickSize);
+    const entryFloor = ceilToTick(input.avgEntryPrice, input.tickSize);
+    const price = Math.max(rawPrice, entryFloor);
     const sizeShares = roundQuantity(input.positionSizeShares * sizingFraction);
     return {
       rungIndex: index,
@@ -49,6 +54,7 @@ export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOu
       lifecycle: "planned",
       orderId: null,
       filledSizeShares: 0,
+      ...(rawPrice < entryFloor ? { floored: true as const } : {}),
     };
   });
 

@@ -33,6 +33,7 @@ import {
   shouldRecoverFromPriceMove,
 } from "@krabs/domain";
 import {
+  ceilToTick,
   classifyAddAgeBucket,
   classifyAddPriceChangeBucket,
   classifyExitPnlBucket,
@@ -188,6 +189,18 @@ export type DecisionPlanSideEffect =
       state: DecisionSignalLog["state"];
       emissionFacts: EmissionFacts;
       timestamp: string;
+    }
+  | {
+      kind: "static_rule_sell_below_avg_entry_suppressed";
+      tokenId: TokenId;
+      conditionId: string | null;
+      decisionRuleId: string;
+      proposedPrice: number;
+      floor: number;
+      avgEntryPrice: number;
+      state: DecisionSignalLog["state"];
+      emissionFacts: EmissionFacts;
+      timestamp: string;
     };
 
 export type TrackQShadowReason =
@@ -306,6 +319,11 @@ export const D8_PROFIT_BELOW_AVG_ENTRY_GUARD_REASON = "d8_profit_below_avg_entry
 export const D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON = "d9_loss_exit_below_avg_entry_guard";
 export const D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON =
   "d9_loss_exit_avg_entry_unavailable_guard_bypass";
+// GAP-1: legacy static SELL rules (D5/D7) have no below-entry guard. On
+// profile-owned positions they could place a SELL below avg entry (D9 is
+// already suppressed there). This floor blocks such SELLs at the avg-entry tick.
+export const STATIC_RULE_SELL_BELOW_AVG_ENTRY_GUARD_REASON =
+  "static_rule_sell_below_avg_entry_guard";
 const POST_BUY_FILL_COOLDOWN_REASON = "post-buy-fill-cooldown";
 // Track Q loop guard: token-level SELL circuit breaker. When the guard reports a
 // blocked token (>= threshold no-op SELL outcomes in the rolling window) the
@@ -1225,6 +1243,58 @@ function buildSignalOrSuppression(args: {
     sideEffects: args.sideEffects,
     timestamp: args.nowIso,
   });
+
+  // GAP-1: floor static SELL rules (D5/D7) at the avg-entry tick on profile-owned
+  // positions. D8/D9 already enforce their own below-entry guards earlier and
+  // return `none` before reaching here; excluding them is defense-in-depth.
+  // Fail-open: missing/non-positive avg entry or tick size never suppresses.
+  if (
+    decision.action === "SELL" &&
+    input.profileLadderOwned === true &&
+    decision.ruleId !== D8_PROFIT_RATIO_RULE_ID &&
+    decision.ruleId !== "D9_LOSS_EXIT"
+  ) {
+    const posAvg = finitePositiveOrNull(input.position?.avgEntryPrice ?? null);
+    const tick = finitePositiveOrNull(market.tickSize);
+    if (posAvg !== null && tick !== null) {
+      const floor = ceilToTick(posAvg, tick);
+      if (price < floor) {
+        args.sideEffects.push({
+          kind: "static_rule_sell_below_avg_entry_suppressed",
+          tokenId: market.tokenId,
+          conditionId: market.conditionId,
+          decisionRuleId: decision.ruleId,
+          proposedPrice: price,
+          floor,
+          avgEntryPrice: posAvg,
+          state: ctx.state,
+          emissionFacts,
+          timestamp: args.nowIso,
+        });
+        args.suppressions.push({
+          tokenId: market.tokenId,
+          conditionId: market.conditionId,
+          reasonCode: STATIC_RULE_SELL_BELOW_AVG_ENTRY_GUARD_REASON,
+          side: "SELL",
+          decisionRuleId: decision.ruleId,
+          state: ctx.state,
+          price,
+          buyCount,
+          timeSinceLastSeconds: ctx.timeSinceLastSeconds,
+          emissionFacts,
+          timestamp: args.nowIso,
+          extra: {
+            avgEntryPrice: posAvg,
+            proposedExitPrice: price,
+            floor,
+            exitToAvgEntryRatio: price / posAvg,
+            suppressionReason: STATIC_RULE_SELL_BELOW_AVG_ENTRY_GUARD_REASON,
+          },
+        });
+        return none(args.metrics, args.suppressions, args.sideEffects);
+      }
+    }
+  }
 
   if (decision.action === "SELL" && input.s1Ownership?.owned) {
     const ownership = input.s1Ownership;

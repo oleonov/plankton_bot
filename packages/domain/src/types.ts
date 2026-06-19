@@ -917,6 +917,9 @@ export interface LadderRung {
   lifecycle: RungLifecycle;
   orderId: string | null;
   filledSizeShares: number;
+  // GAP-2: set when the raw ladder price fell below the avg-entry tick floor and
+  // was clamped up to it. Observability only; absent when no clamp occurred.
+  floored?: true;
 }
 
 export interface LadderState {

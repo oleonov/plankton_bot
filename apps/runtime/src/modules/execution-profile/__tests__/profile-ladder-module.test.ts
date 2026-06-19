@@ -2710,4 +2710,44 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
       }
     });
   });
+
+  describe("avg-entry floor telemetry (GAP-2)", () => {
+    function mediumHighPolicy(): ExecutionProfilePolicy {
+      return policy({
+        bands: {
+          ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands,
+          medium_high: {
+            ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.medium_high,
+            enabled: true,
+          },
+        },
+      });
+    }
+
+    it("emits profile_ladder_rung_price_floored when the floor changes a rung price", async () => {
+      const ctx = setup(mediumHighPolicy(), { modeReader: { getMode: () => "up" } });
+
+      await ctx.module.placeLadder(
+        position({ avgEntryPrice: 0.2, costBasisUsdc: 25, size: 250 }),
+        market({ tickSize: 0.01 }),
+      );
+
+      expect(counterLabels(ctx.counters, "profile_ladder_rung_price_floored")).toContainEqual({
+        band: "medium_high",
+        mode: "up",
+        rungIndex: "0",
+      });
+    });
+
+    it("does not emit profile_ladder_rung_price_floored when no rung is below the floor", async () => {
+      const ctx = setup(mediumHighPolicy(), { modeReader: { getMode: () => "flat" } });
+
+      await ctx.module.placeLadder(
+        position({ avgEntryPrice: 0.2, costBasisUsdc: 25, size: 250 }),
+        market({ tickSize: 0.01 }),
+      );
+
+      expect(counterLabels(ctx.counters, "profile_ladder_rung_price_floored")).toHaveLength(0);
+    });
+  });
 });
