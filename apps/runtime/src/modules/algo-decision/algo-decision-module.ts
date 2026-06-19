@@ -87,6 +87,7 @@ import {
   D8_PROFIT_BELOW_AVG_ENTRY_GUARD_REASON,
   D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON,
   D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON,
+  STATIC_RULE_SELL_BELOW_AVG_ENTRY_GUARD_REASON,
   isWorkingSellOrderStatus,
 } from "./decision-planner.js";
 import type {
@@ -680,6 +681,7 @@ export const DEDUPED_SUPPRESSION_REASONS = new Set([
   D8_PROFIT_BELOW_AVG_ENTRY_GUARD_REASON,
   D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON,
   D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON,
+  STATIC_RULE_SELL_BELOW_AVG_ENTRY_GUARD_REASON,
   R23_NO_HISTORY_REASON,
   R23_NO_DIP_REASON,
 ]);
@@ -701,6 +703,10 @@ function findBuyBudgetCooldownReason(reason: string): string | null {
     if (BUY_BUDGET_COOLDOWN_REASONS.has(exactReason)) return exactReason;
   }
   return null;
+}
+
+function formatSuppressionDedupeNumber(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(9) : "";
 }
 
 // Returns the largest plausible BUY order size for the
@@ -3249,6 +3255,21 @@ export class AlgoDecisionModule implements RuntimeModule {
         facts.decisionRuleId ?? "",
         facts.state,
         [...(facts.reasons ?? [])].sort().join(","),
+        this.continuationMode,
+      ].join("|");
+    }
+
+    if (facts.reasonCode === STATIC_RULE_SELL_BELOW_AVG_ENTRY_GUARD_REASON) {
+      return [
+        "static-rule-below-positive-floor",
+        facts.reasonCode,
+        String(facts.tokenId),
+        facts.conditionId ?? "",
+        facts.side ?? "",
+        facts.decisionRuleId ?? "",
+        facts.state,
+        formatSuppressionDedupeNumber(facts.extra?.proposedExitPrice ?? facts.price),
+        formatSuppressionDedupeNumber(facts.extra?.positiveFloorPrice ?? facts.extra?.floor),
         this.continuationMode,
       ].join("|");
     }

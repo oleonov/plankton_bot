@@ -122,6 +122,18 @@ function policy(
   };
 }
 
+function mediumHighPolicy(): ExecutionProfilePolicy {
+  return policy({
+    bands: {
+      ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands,
+      medium_high: {
+        ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.medium_high,
+        enabled: true,
+      },
+    },
+  });
+}
+
 function position(overrides: Partial<Position> = {}): Position {
   return {
     positionId: createPositionId("profile-ladder-position"),
@@ -361,6 +373,47 @@ function openSellOrder(overrides: Partial<Order> = {}): Order {
     updatedAt: "2026-06-15T00:00:00.000Z",
     ...overrides,
   };
+}
+
+function stalePlannedNoLivePosition(overrides: Partial<Position> = {}): Position {
+  return position({
+    avgEntryPrice: 0.259945,
+    costBasisUsdc: 1.541004,
+    size: 5.9282,
+    ...overrides,
+  });
+}
+
+function stalePlannedNoLiveMarket(overrides: Partial<NormalizedMarket> = {}): NormalizedMarket {
+  return market({
+    tickSize: 0.01,
+    bestBid: 0.24,
+    bestAsk: 0.26,
+    midPrice: 0.25,
+    minOrderSize: 1,
+    ...overrides,
+  });
+}
+
+function stalePlannedNoLiveState(overrides: Partial<LadderState> = {}): LadderState {
+  return ladderState({
+    band: "medium_high",
+    activeRungs: [
+      rung({
+        rungIndex: 0,
+        price: 0.26,
+        sizeShares: 5.9282,
+        notionalUsd: 1.54,
+        lifecycle: "planned",
+        orderId: null,
+      }),
+    ],
+    lastAvgEntry: 0.259945,
+    lastCostBasisUsdc: 1.541004,
+    lastMode: "flat",
+    lastBboReferenceJson: JSON.stringify({ bestBid: 0.24, bestAsk: 0.26 }),
+    ...overrides,
+  });
 }
 
 function setup(
@@ -978,6 +1031,228 @@ describe("ProfileLadderModule", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("rebuilds a stale planned-only ladder with no live profile-ladder order", async () => {
+    const openPosition = position({
+      avgEntryPrice: 0.259945,
+      costBasisUsdc: 1.541004,
+      size: 5.9282,
+    });
+    const ctx = setup(mediumHighPolicy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [openPosition] },
+      orderRepo: { findByTokenId: () => [] },
+    });
+    const staleState = ladderState({
+      band: "medium_high",
+      activeRungs: [
+        rung({
+          rungIndex: 0,
+          price: 0.26,
+          sizeShares: 5.9282,
+          notionalUsd: 1.54,
+          lifecycle: "planned",
+          orderId: null,
+        }),
+        rung({
+          rungIndex: 1,
+          price: 0.23,
+          sizeShares: 10.7,
+          notionalUsd: 2.46,
+          lifecycle: "partially_filled",
+          orderId: String(createOrderId("stale-partial-profile-ladder-order")),
+          filledSizeShares: 10.7,
+        }),
+      ],
+      lastAvgEntry: 0.259945,
+      lastCostBasisUsdc: 1.541004,
+      lastMode: "flat",
+    });
+    ctx.repo.upsertLadder(staleState);
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        market({
+          tickSize: 0.01,
+          bestBid: 0.24,
+          bestAsk: 0.26,
+          midPrice: 0.25,
+          minOrderSize: 1,
+        }),
+      ],
+      timestamp: NOW,
+    });
+
+    expect(ctx.orders).toHaveLength(1);
+    const staleClientOrderId = buildClientOrderId({
+      signalId: `profile_ladder_${String(tokenId)}_${staleState.ladderId}_0`,
+      tokenId,
+      side: "sell",
+    });
+    expect(ctx.orders[0]?.clientOrderId).not.toBe(staleClientOrderId);
+    expect(ctx.orders[0]).toMatchObject({
+      price: 0.27,
+      size: 5.9282,
+      decisionRuleId: "PROFILE_LADDER",
+      signalReason: "profile-ladder-exit",
+    });
+    expect(ctx.repo.getLadder(tokenId)?.ladderId).toContain("planned_no_live_recovery");
+    expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+      price: 0.27,
+      lifecycle: "planned",
+      orderId: null,
+      floored: true,
+    });
+    expect(ctx.repo.getLadder(tokenId)?.activeRungs).toHaveLength(1);
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_planned_no_live_recovered",
+      value: 1,
+      labels: '{"band":"medium_high"}',
+    });
+  });
+
+  it("does not rebuild a planned ladder while a profile-ladder SELL is still open", async () => {
+    const openPosition = stalePlannedNoLivePosition();
+    const openProfileOrder = openSellOrder({
+      decisionRuleId: "PROFILE_LADDER",
+      signalReason: "profile-ladder-exit",
+      metadata: { source: "profile_ladder" },
+      status: OrderStatus.Open,
+    });
+    const ctx = setup(mediumHighPolicy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [openPosition] },
+      orderRepo: { findByTokenId: () => [openProfileOrder] },
+    });
+    ctx.repo.upsertLadder(stalePlannedNoLiveState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [stalePlannedNoLiveMarket()],
+      timestamp: NOW,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+      price: 0.26,
+      lifecycle: "planned",
+    });
+  });
+
+  it("does not recover a planned-only ladder while a non-profile SELL is open", async () => {
+    const ctx = setup(mediumHighPolicy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [stalePlannedNoLivePosition()] },
+      orderRepo: { findByTokenId: () => [openSellOrder({ signalReason: "repricing-exit" })] },
+    });
+    ctx.repo.upsertLadder(stalePlannedNoLiveState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [stalePlannedNoLiveMarket()],
+      timestamp: NOW,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+      ladderId: "profile_ladder_existing",
+      activeRungs: [{ price: 0.26, lifecycle: "planned" }],
+    });
+    expect(
+      ctx.counters.some((counter) => counter.name === "profile_ladder_planned_no_live_recovered"),
+    ).toBe(false);
+  });
+
+  it("does not recover a planned-only ladder from an invalid BBO", async () => {
+    const ctx = setup(mediumHighPolicy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [stalePlannedNoLivePosition()] },
+      orderRepo: { findByTokenId: () => [] },
+    });
+    ctx.repo.upsertLadder(stalePlannedNoLiveState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [stalePlannedNoLiveMarket({ bestBid: 0.26, bestAsk: 0.24 })],
+      timestamp: NOW,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+      ladderId: "profile_ladder_existing",
+      activeRungs: [{ price: 0.26, lifecycle: "planned" }],
+    });
+    expect(
+      ctx.counters.some((counter) => counter.name === "profile_ladder_planned_no_live_recovered"),
+    ).toBe(false);
+  });
+
+  it("does not recover a planned-only ladder when rebuild cannot satisfy min order size", async () => {
+    const ctx = setup(mediumHighPolicy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [stalePlannedNoLivePosition()] },
+      orderRepo: { findByTokenId: () => [] },
+    });
+    ctx.repo.upsertLadder(stalePlannedNoLiveState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [stalePlannedNoLiveMarket({ minOrderSize: 10 })],
+      timestamp: NOW,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+      ladderId: "profile_ladder_existing",
+      activeRungs: [{ price: 0.26, lifecycle: "planned" }],
+    });
+    expect(
+      ctx.counters.some((counter) => counter.name === "profile_ladder_planned_no_live_recovered"),
+    ).toBe(false);
+  });
+
+  it("cooldown-gates planned-only recovery after a safe skip", async () => {
+    let nowMs = NOW;
+    const ctx = setup(mediumHighPolicy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [stalePlannedNoLivePosition()] },
+      orderRepo: { findByTokenId: () => [] },
+      now: () => nowMs,
+    });
+    ctx.repo.upsertLadder(
+      stalePlannedNoLiveState({
+        lastBboReferenceJson: JSON.stringify({ bestBid: 0.1, bestAsk: 0.12 }),
+      }),
+    );
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [stalePlannedNoLiveMarket({ bestBid: 0.26, bestAsk: 0.24 })],
+      timestamp: nowMs,
+    });
+    expect(ctx.orders).toHaveLength(0);
+
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS - 1;
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [stalePlannedNoLiveMarket()],
+      timestamp: nowMs,
+    });
+    expect(ctx.orders).toHaveLength(0);
+
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [stalePlannedNoLiveMarket()],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]).toMatchObject({
+      price: 0.27,
+      decisionRuleId: "PROFILE_LADDER",
+      signalReason: "profile-ladder-exit",
+    });
   });
 
   it("clears the planned-rung recovery timer on stop", async () => {
@@ -2712,18 +2987,6 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
   });
 
   describe("positive floor telemetry (GAP-2)", () => {
-    function mediumHighPolicy(): ExecutionProfilePolicy {
-      return policy({
-        bands: {
-          ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands,
-          medium_high: {
-            ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.medium_high,
-            enabled: true,
-          },
-        },
-      });
-    }
-
     it("emits profile_ladder_rung_price_floored when the floor changes a rung price", async () => {
       const ctx = setup(mediumHighPolicy(), { modeReader: { getMode: () => "up" } });
 

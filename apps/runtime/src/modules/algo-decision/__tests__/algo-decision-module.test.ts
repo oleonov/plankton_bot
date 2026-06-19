@@ -695,6 +695,146 @@ describe("AlgoDecisionModule", () => {
     expect(r23CounterCalls).toHaveLength(3);
   });
 
+  it("bounds static below-floor raw suppression rows while preserving per-occurrence counters", () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const runtimeMetrics = {
+      writeCounter: vi.fn(),
+      writeLatest: vi.fn(),
+    } as unknown as RuntimeMetricWriter;
+    const mod = buildModule({
+      riskEventRepo,
+      runtimeMetrics,
+      plannerSuppressionRollupWindowMs: 0,
+    });
+
+    for (const timestamp of [
+      "2026-06-14T00:00:00.000Z",
+      "2026-06-14T00:00:30.000Z",
+      "2026-06-14T00:01:00.000Z",
+    ]) {
+      (mod as any).recordDecisionSuppressed(
+        makeSuppressionFacts({
+          tokenId: "token-static-floor",
+          reasonCode: "static_rule_sell_below_avg_entry_guard",
+          reasons: ["static_rule_sell_below_avg_entry_guard"],
+          side: "SELL",
+          decisionRuleId: "D7",
+          state: "S3",
+          price: 0.19,
+          timestamp,
+          extra: {
+            proposedExitPrice: 0.19,
+            entryFloorPrice: 0.2,
+            positiveFloorPrice: 0.21,
+            floor: 0.21,
+          },
+        }),
+      );
+    }
+
+    const rawEvents = (riskEventRepo.insert as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([event]) =>
+        event.eventType === "signal_suppressed" &&
+        event.payload?.reasonCode === "static_rule_sell_below_avg_entry_guard",
+    );
+    const counterCalls = (
+      runtimeMetrics.writeCounter as ReturnType<typeof vi.fn>
+    ).mock.calls.filter(
+      ([name, , labels]) =>
+        name === "track_planner_suppressed_total" &&
+        labels === JSON.stringify({ reason: "static_rule_sell_below_avg_entry_guard" }),
+    );
+
+    expect(rawEvents).toHaveLength(1);
+    expect(counterCalls).toHaveLength(3);
+  });
+
+  it("keeps static below-floor dedupe keyed by token, rule, state, proposed price, and floor", () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      riskEventRepo,
+      plannerSuppressionRollupWindowMs: 0,
+    });
+
+    for (const overrides of [
+      { tokenId: "token-static-floor-a" },
+      { tokenId: "token-static-floor-b" },
+      { decisionRuleId: "D4" },
+      { state: "S2" },
+      { price: 0.18, extra: { proposedExitPrice: 0.18, positiveFloorPrice: 0.21 } },
+      { price: 0.19, extra: { proposedExitPrice: 0.19, positiveFloorPrice: 0.22 } },
+    ]) {
+      (mod as any).recordDecisionSuppressed(
+        makeSuppressionFacts({
+          tokenId: "token-static-floor-a",
+          reasonCode: "static_rule_sell_below_avg_entry_guard",
+          reasons: ["static_rule_sell_below_avg_entry_guard"],
+          side: "SELL",
+          decisionRuleId: "D7",
+          state: "S3",
+          price: 0.19,
+          timestamp: "2026-06-14T00:00:00.000Z",
+          extra: {
+            proposedExitPrice: 0.19,
+            entryFloorPrice: 0.2,
+            positiveFloorPrice: 0.21,
+            floor: 0.21,
+          },
+          ...overrides,
+        }),
+      );
+    }
+
+    const rawEvents = (riskEventRepo.insert as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([event]) =>
+        event.eventType === "signal_suppressed" &&
+        event.payload?.reasonCode === "static_rule_sell_below_avg_entry_guard",
+    );
+
+    expect(rawEvents).toHaveLength(6);
+  });
+
+  it("allows another static below-floor raw suppression row after the bounded window expires", () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      riskEventRepo,
+      plannerSuppressionRollupWindowMs: 0,
+    });
+
+    for (const timestamp of [
+      "2026-06-14T00:00:00.000Z",
+      "2026-06-14T00:09:59.000Z",
+      "2026-06-14T00:10:01.000Z",
+    ]) {
+      (mod as any).recordDecisionSuppressed(
+        makeSuppressionFacts({
+          tokenId: "token-static-floor",
+          reasonCode: "static_rule_sell_below_avg_entry_guard",
+          reasons: ["static_rule_sell_below_avg_entry_guard"],
+          side: "SELL",
+          decisionRuleId: "D7",
+          state: "S3",
+          price: 0.19,
+          timestamp,
+          extra: {
+            proposedExitPrice: 0.19,
+            entryFloorPrice: 0.2,
+            positiveFloorPrice: 0.21,
+            floor: 0.21,
+          },
+        }),
+      );
+    }
+
+    const rawEvents = (riskEventRepo.insert as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([event]) =>
+        event.eventType === "signal_suppressed" &&
+        event.payload?.reasonCode === "static_rule_sell_below_avg_entry_guard",
+    );
+
+    expect(rawEvents).toHaveLength(2);
+  });
+
   it("allows another R23 no-dip raw suppression row after the bounded window expires", () => {
     const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
     const mod = buildModule({

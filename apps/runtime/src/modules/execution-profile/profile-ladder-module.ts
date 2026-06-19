@@ -161,6 +161,11 @@ interface LiveRungAdvanceResult {
   attempted: boolean;
 }
 
+interface BuildAndPlaceOptions {
+  preservePreviousLiveRungs?: boolean;
+  ladderIdSuffix?: string;
+}
+
 interface ProfileLadderOrderMarketData {
   bookSource: NonNullable<NormalizedMarket["bookSource"]>;
   minOrderSize: number;
@@ -386,8 +391,13 @@ export class ProfileLadderModule implements RuntimeModule {
   }
 
   private hasOpenSellOrder(tokenId: TokenId): boolean {
-    const orders = this.deps.orderRepo?.findByTokenId(tokenId) ?? [];
-    return orders.some((order) => order.side === "sell" && OPEN_ORDER_STATUSES.has(order.status));
+    return this.findOpenSellOrders(tokenId).length > 0;
+  }
+
+  private findOpenSellOrders(tokenId: TokenId): Order[] {
+    return (this.deps.orderRepo?.findByTokenId(tokenId) ?? []).filter(
+      (order) => order.side === "sell" && OPEN_ORDER_STATUSES.has(order.status),
+    );
   }
 
   private scheduleAdoption(delayMs: number = ADOPTION_WARMUP_MS): void {
@@ -502,6 +512,9 @@ export class ProfileLadderModule implements RuntimeModule {
         continue;
       }
 
+      const stalePlannedRecovery = await this.recoverPlannedNoLiveLadderIfReady(state, market);
+      if (stalePlannedRecovery) continue;
+
       const plannedRetry = await this.retryPlannedLiveRungsIfReady(state, market);
       if (plannedRetry) continue;
 
@@ -545,6 +558,7 @@ export class ProfileLadderModule implements RuntimeModule {
     market: NormalizedMarket,
     eventType: "ladder_placed" | "ladder_rebuilt" | "ladder_adopted",
     modeOverride?: ProfileLadderMode,
+    options: BuildAndPlaceOptions = {},
   ): Promise<{
     state: LadderState;
     placedLiveRungs: number;
@@ -570,8 +584,10 @@ export class ProfileLadderModule implements RuntimeModule {
       previousBand: previous?.band ?? null,
     });
     if (!plan.ok) return null;
-    // GAP-2: surface every rung whose raw price was clamped up to the avg-entry
-    // floor. Bounded labels only (no token labels) — band/mode/rungIndex.
+    const ladderId =
+      options.ladderIdSuffix == null ? plan.ladderId : `${plan.ladderId}_${options.ladderIdSuffix}`;
+    // GAP-2: surface every rung whose raw price was clamped up to the positive
+    // sell floor. Bounded labels only (no token labels) — band/mode/rungIndex.
     for (const rung of plan.rungs) {
       if (rung.floored) {
         this.writeCounter("profile_ladder_rung_price_floored", 1, {
@@ -587,11 +603,14 @@ export class ProfileLadderModule implements RuntimeModule {
     const state: LadderState = {
       tokenId: position.tokenId,
       conditionId: position.conditionId,
-      ladderId: plan.ladderId,
+      ladderId,
       band: plan.band,
       phase: policy.phase,
       status: "active",
-      activeRungs: mergeLiveRungs(plan.rungs, previous),
+      activeRungs:
+        options.preservePreviousLiveRungs === false
+          ? plan.rungs.map((rung) => ({ ...rung }))
+          : mergeLiveRungs(plan.rungs, previous),
       filledRungs: [],
       lastAvgEntry: position.avgEntryPrice,
       lastCostBasisUsdc: position.costBasisUsdc,
@@ -687,6 +706,7 @@ export class ProfileLadderModule implements RuntimeModule {
       if (this.postFillTimerByToken.has(String(state.tokenId))) continue;
       const market = this.marketByToken.get(String(state.tokenId));
       if (market == null) continue;
+      if (await this.recoverPlannedNoLiveLadderIfReady(state, market)) continue;
       await this.retryPlannedLiveRungsIfReady(state, market);
     }
   }
@@ -702,6 +722,59 @@ export class ProfileLadderModule implements RuntimeModule {
       return true;
     }
     return false;
+  }
+
+  private async recoverPlannedNoLiveLadderIfReady(
+    state: LadderState,
+    market: NormalizedMarket,
+  ): Promise<boolean> {
+    if (state.status !== "active") return false;
+    if (this.deps.positionRepo == null || this.deps.orderRepo == null) return false;
+    if (this.postFillTimerByToken.has(String(state.tokenId))) return false;
+    if (!state.activeRungs.some((rung) => rung.lifecycle === "planned" && rung.orderId == null)) {
+      return false;
+    }
+    if (this.isPlannedRungRetryCooldownActive(state.tokenId)) return true;
+    if (this.hasPendingRungForToken(state.tokenId)) return false;
+
+    const openSellOrders = this.findOpenSellOrders(state.tokenId);
+    const openProfileLadderOrders = openSellOrders.filter(isProfileLadderOrder);
+    if (openProfileLadderOrders.length > 0) {
+      if (!stateTracksAnyOrder(state, openProfileLadderOrders)) {
+        this.armPlannedRungRetryCooldown(state.tokenId, this.now());
+        return true;
+      }
+      return false;
+    }
+    if (openSellOrders.length > 0) {
+      this.armPlannedRungRetryCooldown(state.tokenId, this.now());
+      return true;
+    }
+    if (!isValidLadderBbo(market.bestBid, market.bestAsk)) {
+      this.armPlannedRungRetryCooldown(state.tokenId, this.now());
+      return true;
+    }
+
+    const position = this.findOpenPosition(state.tokenId);
+    if (position == null) return false;
+    const result = await this.buildAndPlace(position, market, "ladder_rebuilt", undefined, {
+      preservePreviousLiveRungs: false,
+      ladderIdSuffix: "planned_no_live_recovery",
+    });
+    this.armPlannedRungRetryCooldown(state.tokenId, this.now());
+    if (result == null) return true;
+
+    this.writeCounter("profile_ladder_planned_no_live_recovered", 1, { band: result.state.band });
+    this.insertRiskEvent("ladder_rebuilt", {
+      tokenId: String(result.state.tokenId),
+      conditionId: String(result.state.conditionId),
+      band: result.state.band,
+      reason: "planned_no_live_recovery",
+      rungCount: result.state.activeRungs.length,
+      placedLiveRungs: result.placedLiveRungs,
+      ladderId: result.state.ladderId,
+    });
+    return true;
   }
 
   private canRetryPlannedLiveRungs(state: LadderState): boolean {
@@ -1328,6 +1401,28 @@ function isPositiveFinite(value: number | null | undefined): value is number {
 // a taker fill. An unknown bid cannot be evaluated, so it is treated as safe.
 function wouldCrossPostOnly(price: number, bestBid: number | null): boolean {
   return isPositiveFinite(bestBid) && price <= bestBid;
+}
+
+function isProfileLadderOrder(order: Order): boolean {
+  const metadataSource = order.metadata?.source;
+  return (
+    order.decisionRuleId === "PROFILE_LADDER" ||
+    order.signalReason === "profile-ladder-exit" ||
+    metadataSource === "profile_ladder"
+  );
+}
+
+function stateTracksAnyOrder(state: LadderState, orders: readonly Order[]): boolean {
+  const trackedOrderIds = new Set(
+    state.activeRungs
+      .map((rung) => rung.orderId)
+      .filter((orderId): orderId is string => typeof orderId === "string" && orderId.length > 0),
+  );
+  return orders.some(
+    (order) =>
+      trackedOrderIds.has(String(order.orderId)) ||
+      (order.exchangeOrderId != null && trackedOrderIds.has(String(order.exchangeOrderId))),
+  );
 }
 
 function roundQuantity(value: number): number {
