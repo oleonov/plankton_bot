@@ -1795,6 +1795,8 @@ export class AlgoDecisionModule implements RuntimeModule {
             avgEntryPrice: sideEffect.avgEntryPrice,
             proposedPrice: sideEffect.proposedPrice,
             floor: sideEffect.floor,
+            entryFloorPrice: sideEffect.entryFloorPrice,
+            positiveFloorPrice: sideEffect.positiveFloorPrice,
             profileLadderOwned: true,
             state: sideEffect.state,
             emissionFacts: sideEffect.emissionFacts,

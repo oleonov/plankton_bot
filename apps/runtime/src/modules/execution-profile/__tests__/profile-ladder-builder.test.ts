@@ -212,24 +212,26 @@ describe("computeProfileLadder", () => {
   });
 });
 
-describe("computeProfileLadder avg-entry floor (GAP-2)", () => {
+describe("computeProfileLadder positive floor (GAP-2)", () => {
   // GAP-2: medium_high/expensive rung0 multiplier is 1.0; mode "up" applies a
   // 0.95 adjustment, so rung0 = avg * 1.0 * 0.95 < avg entry — a SELL below cost.
-  // The floor clamps every rung price up to ceilToTick(avgEntry, tick).
+  // The floor clamps normal ladder exits at least one tick above ceilToTick(avgEntry).
   const ceilToTick = (value: number, tick: number): number =>
     Number((Math.ceil((value - 1e-12) / tick) * tick).toFixed(6));
+  const positiveFloor = (avgEntryPrice: number, tick: number): number =>
+    ceilToTick(ceilToTick(avgEntryPrice, tick) + tick, tick);
 
   const MODES = ["up", "flat", "avg_down"] as const;
   const AVG_ENTRIES = [0.04, 0.1, 0.2, 0.4];
 
-  it("(8) never prices any rung below the avg-entry tick floor across bands and modes", () => {
+  it("(8) never prices any rung below the positive tick floor across bands and modes", () => {
     for (const avgEntryPrice of AVG_ENTRIES) {
       for (const mode of MODES) {
         const result = computeProfileLadder(
           input({ avgEntryPrice, mode, tickSize: 0.01, costBasisUsd: 25, positionSizeShares: 250 }),
         );
         if (!result.ok) throw new Error(`expected ladder for ${avgEntryPrice}/${mode}`);
-        const floor = ceilToTick(avgEntryPrice, 0.01);
+        const floor = positiveFloor(avgEntryPrice, 0.01);
         for (const rung of result.rungs) {
           expect(rung.price).toBeGreaterThanOrEqual(floor - 1e-9);
         }
@@ -237,7 +239,7 @@ describe("computeProfileLadder avg-entry floor (GAP-2)", () => {
     }
   });
 
-  it("(9) clamps the MrBeast medium_high/up/rung0 case to the avg-entry floor", () => {
+  it("(9) clamps the medium_high/up/rung0 case to the positive floor", () => {
     const result = computeProfileLadder(
       input({
         avgEntryPrice: 0.2,
@@ -250,11 +252,11 @@ describe("computeProfileLadder avg-entry floor (GAP-2)", () => {
 
     expect(result).toMatchObject({ ok: true, band: "medium_high" });
     if (!result.ok) throw new Error("expected ladder");
-    expect(result.rungs[0]!.price).toBe(0.2);
+    expect(result.rungs[0]!.price).toBe(0.21);
     expect(result.rungs[0]!.floored).toBe(true);
   });
 
-  it("(10) keeps the floor tick-upward-safe for non-tick-aligned avg entries", () => {
+  it("(10) keeps the positive floor tick-upward-safe for non-tick-aligned avg entries", () => {
     const result = computeProfileLadder(
       input({
         avgEntryPrice: 0.197,
@@ -267,20 +269,22 @@ describe("computeProfileLadder avg-entry floor (GAP-2)", () => {
 
     expect(result).toMatchObject({ ok: true, band: "medium_high" });
     if (!result.ok) throw new Error("expected ladder");
-    const floor = ceilToTick(0.197, 0.01); // 0.2
-    expect(floor).toBe(0.2);
+    const entryFloor = ceilToTick(0.197, 0.01); // 0.2
+    const floor = positiveFloor(0.197, 0.01); // 0.21
+    expect(entryFloor).toBe(0.2);
+    expect(floor).toBe(0.21);
     for (const rung of result.rungs) {
       expect(rung.price).toBeGreaterThanOrEqual(floor - 1e-9);
     }
-    expect(result.rungs[0]!.price).toBe(0.2);
+    expect(result.rungs[0]!.price).toBe(0.21);
     expect(result.rungs[0]!.floored).toBe(true);
   });
 
-  it("(11) leaves rungs at or above the floor unchanged (no floored flag)", () => {
+  it("(11) leaves rungs above the positive floor unchanged (no floored flag)", () => {
     const result = computeProfileLadder(
       input({
         avgEntryPrice: 0.2,
-        mode: "flat",
+        mode: "avg_down",
         tickSize: 0.01,
         costBasisUsd: 25,
         positionSizeShares: 250,
@@ -289,7 +293,7 @@ describe("computeProfileLadder avg-entry floor (GAP-2)", () => {
 
     expect(result).toMatchObject({ ok: true, band: "medium_high" });
     if (!result.ok) throw new Error("expected ladder");
-    expect(result.rungs.map((rung) => rung.price)).toEqual([0.2, 0.22, 0.25]);
+    expect(result.rungs.map((rung) => rung.price)).toEqual([0.3, 0.33, 0.38]);
     expect(result.rungs.every((rung) => rung.floored !== true)).toBe(true);
   });
 });

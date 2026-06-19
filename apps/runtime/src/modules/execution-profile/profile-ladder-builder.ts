@@ -5,6 +5,7 @@ import type {
   ProfileLadderBand,
   ProfileLadderBandConfig,
 } from "@krabs/domain";
+import { ceilToTick, resolvePositiveSellFloor } from "../../executable-price.js";
 
 export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOutput {
   if (!input.config.enabled) {
@@ -37,12 +38,9 @@ export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOu
   const modeAdjustment = input.config.modeAdjustments[input.mode];
   const initialRungs = sizing.map((sizingFraction, index): LadderRung => {
     const multiplier = bandConfig.multipliers[index]!;
-    // GAP-2: medium_high/expensive rung0 multiplier is 1.0; mode "up" applies a
-    // 0.95 adjustment, so the raw price falls below avg entry — a SELL below cost.
-    // Clamp every rung price up to the avg-entry tick floor.
     const rawPrice = ceilToTick(input.avgEntryPrice * multiplier * modeAdjustment, input.tickSize);
-    const entryFloor = ceilToTick(input.avgEntryPrice, input.tickSize);
-    const price = Math.max(rawPrice, entryFloor);
+    const { positiveFloorPrice } = resolvePositiveSellFloor(input.avgEntryPrice, input.tickSize);
+    const price = Math.max(rawPrice, positiveFloorPrice);
     const sizeShares = roundQuantity(input.positionSizeShares * sizingFraction);
     return {
       rungIndex: index,
@@ -54,7 +52,7 @@ export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOu
       lifecycle: "planned",
       orderId: null,
       filledSizeShares: 0,
-      ...(rawPrice < entryFloor ? { floored: true as const } : {}),
+      ...(rawPrice < positiveFloorPrice ? { floored: true as const } : {}),
     };
   });
 
@@ -165,14 +163,6 @@ function isValidBbo(bestBid: number | null, bestAsk: number | null): boolean {
 
 function isPositiveFinite(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
-}
-
-function ceilToTick(value: number, tick: number): number {
-  return normalizePrice(Math.ceil((value - 1e-12) / tick) * tick);
-}
-
-function normalizePrice(value: number): number {
-  return Number(value.toFixed(6));
 }
 
 function roundQuantity(value: number): number {

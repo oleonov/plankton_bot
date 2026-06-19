@@ -1057,8 +1057,8 @@ describe("resolveSellExecutablePrice", () => {
 describe("evaluateDecisionPlan static-rule below-entry SELL guard", () => {
   // Static repricing-exit rules (D4/D5/D7/custom) reach buildSignalOrSuppression
   // with no below-entry guard of their own. GAP-1: on profile-ladder-owned
-  // positions they could place a SELL below avg entry. The guard suppresses that
-  // (profile-owned only, D8/D9 excluded, fail-open on missing avg/tick, strict <).
+  // positions they could place a SELL at or below avg entry. The guard suppresses that
+  // (profile-owned only, D8/D9 excluded, fail-open on missing avg/tick).
   const guardPolicy = {
     ...DEFAULT_EXECUTION_POLICY,
     entryMinMarketAgeSeconds: 0,
@@ -1127,7 +1127,7 @@ describe("evaluateDecisionPlan static-rule below-entry SELL guard", () => {
     } as Partial<DecisionPlanningInput> & { profileLadderOwned: boolean });
   }
 
-  it("(1) blocks a D7 SELL below avg entry on a profile-owned position", () => {
+  it("(1) blocks a D7 SELL below the positive floor on a profile-owned position", () => {
     const result = evaluateDecisionPlan(
       staticSellInput({
         ruleId: "D7",
@@ -1154,53 +1154,49 @@ describe("evaluateDecisionPlan static-rule below-entry SELL guard", () => {
         kind: "static_rule_sell_below_avg_entry_suppressed",
         decisionRuleId: "D7",
         proposedPrice: 0.19,
-        floor: 0.2,
+        entryFloorPrice: 0.2,
+        positiveFloorPrice: 0.21,
+        floor: 0.21,
         avgEntryPrice: 0.2,
       }),
     );
   });
 
-  it("(2) blocks a D5 SELL below avg entry on a profile-owned position", () => {
+  it("(2) blocks a D7 SELL exactly at avg entry on a profile-owned position", () => {
     const result = evaluateDecisionPlan(
       staticSellInput({
-        ruleId: "D5",
-        avgEntryPrice: 0.35,
-        bestBid: 0.33,
-        bestAsk: 0.35,
-        midPrice: 0.34,
+        ruleId: "D7",
+        avgEntryPrice: 0.2,
+        bestBid: 0.2,
+        bestAsk: 0.22,
+        midPrice: 0.21,
         spread: 0.02,
         profileLadderOwned: true,
       }),
     );
 
     expect(result.type).toBe("none");
-    expect(result.suppressions).toContainEqual(
-      expect.objectContaining({
-        reasonCode: "static_rule_sell_below_avg_entry_guard",
-        side: "SELL",
-        decisionRuleId: "D5",
-        price: 0.33,
-      }),
-    );
     expect(result.sideEffects).toContainEqual(
       expect.objectContaining({
         kind: "static_rule_sell_below_avg_entry_suppressed",
-        decisionRuleId: "D5",
-        proposedPrice: 0.33,
-        floor: 0.35,
-        avgEntryPrice: 0.35,
+        decisionRuleId: "D7",
+        proposedPrice: 0.2,
+        entryFloorPrice: 0.2,
+        positiveFloorPrice: 0.21,
+        floor: 0.21,
+        avgEntryPrice: 0.2,
       }),
     );
   });
 
-  it("(3) allows a D7 SELL above avg entry on a profile-owned position", () => {
+  it("(3) allows a D7 SELL at the positive floor on a profile-owned position", () => {
     const result = evaluateDecisionPlan(
       staticSellInput({
         ruleId: "D7",
-        avgEntryPrice: 0.19,
-        bestBid: 0.2,
-        bestAsk: 0.22,
-        midPrice: 0.21,
+        avgEntryPrice: 0.2,
+        bestBid: 0.21,
+        bestAsk: 0.23,
+        midPrice: 0.22,
         spread: 0.02,
         profileLadderOwned: true,
       }),
@@ -1212,7 +1208,7 @@ describe("evaluateDecisionPlan static-rule below-entry SELL guard", () => {
     expect(result.signal.decisionRuleId).toBe("D7");
   });
 
-  it("(4) allows a D5 SELL exactly at the avg-entry tick floor on a profile-owned position", () => {
+  it("(4) blocks a D5 SELL exactly at avg entry on a profile-owned position", () => {
     const result = evaluateDecisionPlan(
       staticSellInput({
         ruleId: "D5",
@@ -1225,13 +1221,70 @@ describe("evaluateDecisionPlan static-rule below-entry SELL guard", () => {
       }),
     );
 
+    expect(result.type).toBe("none");
+    expect(result.suppressions).toContainEqual(
+      expect.objectContaining({
+        reasonCode: "static_rule_sell_below_avg_entry_guard",
+        side: "SELL",
+        decisionRuleId: "D5",
+        price: 0.2,
+      }),
+    );
+    expect(result.sideEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "static_rule_sell_below_avg_entry_suppressed",
+        decisionRuleId: "D5",
+        proposedPrice: 0.2,
+        entryFloorPrice: 0.2,
+        positiveFloorPrice: 0.21,
+        floor: 0.21,
+        avgEntryPrice: 0.2,
+      }),
+    );
+  });
+
+  it("(5) allows a D5 SELL at the positive floor on a profile-owned position", () => {
+    const result = evaluateDecisionPlan(
+      staticSellInput({
+        ruleId: "D5",
+        avgEntryPrice: 0.2,
+        bestBid: 0.21,
+        bestAsk: 0.23,
+        midPrice: 0.22,
+        spread: 0.02,
+        profileLadderOwned: true,
+      }),
+    );
+
     expect(result.type).toBe("signal");
     if (result.type !== "signal") return;
     expect(result.signal.side).toBe("sell");
     expect(result.signal.decisionRuleId).toBe("D5");
   });
 
-  it("(5) leaves a non-profile-owned D7 SELL below avg entry unchanged (allowed)", () => {
+  it("(6) leaves a non-profile-owned D7 SELL at avg entry unchanged (allowed)", () => {
+    const result = evaluateDecisionPlan(
+      staticSellInput({
+        ruleId: "D7",
+        avgEntryPrice: 0.2,
+        bestBid: 0.2,
+        bestAsk: 0.22,
+        midPrice: 0.21,
+        spread: 0.02,
+        profileLadderOwned: false,
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.side).toBe("sell");
+    expect(result.signal.decisionRuleId).toBe("D7");
+    expect(result.suppressions.map((item) => item.reasonCode)).not.toContain(
+      "static_rule_sell_below_avg_entry_guard",
+    );
+  });
+
+  it("(7) leaves a non-profile-owned D7 SELL below avg entry unchanged (allowed)", () => {
     const result = evaluateDecisionPlan(
       staticSellInput({
         ruleId: "D7",
@@ -1253,7 +1306,7 @@ describe("evaluateDecisionPlan static-rule below-entry SELL guard", () => {
     );
   });
 
-  it("(6) fails open when avg entry is unavailable on a profile-owned position", () => {
+  it("(8) fails open when avg entry is unavailable on a profile-owned position", () => {
     const result = evaluateDecisionPlan(
       staticSellInput({
         ruleId: "D7",
@@ -1274,7 +1327,7 @@ describe("evaluateDecisionPlan static-rule below-entry SELL guard", () => {
     );
   });
 
-  it("(7) does not suppress a D8 SELL above avg entry on a profile-owned position", () => {
+  it("(9) does not suppress a D8 SELL above avg entry on a profile-owned position", () => {
     const result = evaluateDecisionPlan(
       input({
         selectedForEntry: false,

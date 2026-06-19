@@ -160,6 +160,21 @@ export function ceilToTick(price: number, tickSize: number): number {
   return quantize(price, ts, Math.ceil);
 }
 
+export interface PositiveSellFloor {
+  readonly entryFloorPrice: number;
+  readonly positiveFloorPrice: number;
+}
+
+export function resolvePositiveSellFloor(
+  avgEntryPrice: number,
+  tickSize: number,
+): PositiveSellFloor {
+  const ts = normalizeTickSize(tickSize);
+  const entryFloorPrice = ceilToTick(avgEntryPrice, ts);
+  const positiveFloorPrice = ceilToTick(entryFloorPrice + ts, ts);
+  return { entryFloorPrice, positiveFloorPrice };
+}
+
 export function roundToTick(price: number, tickSize: number): number {
   if (!Number.isFinite(price)) return price;
   const ts = normalizeTickSize(tickSize);

@@ -2711,7 +2711,7 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
     });
   });
 
-  describe("avg-entry floor telemetry (GAP-2)", () => {
+  describe("positive floor telemetry (GAP-2)", () => {
     function mediumHighPolicy(): ExecutionProfilePolicy {
       return policy({
         bands: {
@@ -2740,7 +2740,7 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
     });
 
     it("does not emit profile_ladder_rung_price_floored when no rung is below the floor", async () => {
-      const ctx = setup(mediumHighPolicy(), { modeReader: { getMode: () => "flat" } });
+      const ctx = setup(mediumHighPolicy(), { modeReader: { getMode: () => "avg_down" } });
 
       await ctx.module.placeLadder(
         position({ avgEntryPrice: 0.2, costBasisUsdc: 25, size: 250 }),

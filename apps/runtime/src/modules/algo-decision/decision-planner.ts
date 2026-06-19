@@ -33,7 +33,6 @@ import {
   shouldRecoverFromPriceMove,
 } from "@krabs/domain";
 import {
-  ceilToTick,
   classifyAddAgeBucket,
   classifyAddPriceChangeBucket,
   classifyExitPnlBucket,
@@ -43,6 +42,7 @@ import {
   floorToTick,
   planktonAlignedMarkupCap,
   resolveBidAnchoredSellPrice,
+  resolvePositiveSellFloor,
   resolveSellCeiling,
   roundToTick,
   SELL_PRICE_CEILING,
@@ -197,6 +197,8 @@ export type DecisionPlanSideEffect =
       decisionRuleId: string;
       proposedPrice: number;
       floor: number;
+      entryFloorPrice: number;
+      positiveFloorPrice: number;
       avgEntryPrice: number;
       state: DecisionSignalLog["state"];
       emissionFacts: EmissionFacts;
@@ -321,7 +323,7 @@ export const D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON =
   "d9_loss_exit_avg_entry_unavailable_guard_bypass";
 // GAP-1: legacy static SELL rules (D5/D7) have no below-entry guard. On
 // profile-owned positions they could place a SELL below avg entry (D9 is
-// already suppressed there). This floor blocks such SELLs at the avg-entry tick.
+// already suppressed there). This floor requires one tick above avg entry.
 export const STATIC_RULE_SELL_BELOW_AVG_ENTRY_GUARD_REASON =
   "static_rule_sell_below_avg_entry_guard";
 const POST_BUY_FILL_COOLDOWN_REASON = "post-buy-fill-cooldown";
@@ -1244,9 +1246,9 @@ function buildSignalOrSuppression(args: {
     timestamp: args.nowIso,
   });
 
-  // GAP-1: floor static SELL rules (D5/D7) at the avg-entry tick on profile-owned
-  // positions. D8/D9 already enforce their own below-entry guards earlier and
-  // return `none` before reaching here; excluding them is defense-in-depth.
+  // GAP-1: normal profile-owned static exits require at least one tick above
+  // avg entry; gross break-even can still be fee-negative. D8/D9 already enforce
+  // their own guards earlier; excluding them is defense-in-depth.
   // Fail-open: missing/non-positive avg entry or tick size never suppresses.
   if (
     decision.action === "SELL" &&
@@ -1257,7 +1259,8 @@ function buildSignalOrSuppression(args: {
     const posAvg = finitePositiveOrNull(input.position?.avgEntryPrice ?? null);
     const tick = finitePositiveOrNull(market.tickSize);
     if (posAvg !== null && tick !== null) {
-      const floor = ceilToTick(posAvg, tick);
+      const { entryFloorPrice, positiveFloorPrice } = resolvePositiveSellFloor(posAvg, tick);
+      const floor = positiveFloorPrice;
       if (price < floor) {
         args.sideEffects.push({
           kind: "static_rule_sell_below_avg_entry_suppressed",
@@ -1266,6 +1269,8 @@ function buildSignalOrSuppression(args: {
           decisionRuleId: decision.ruleId,
           proposedPrice: price,
           floor,
+          entryFloorPrice,
+          positiveFloorPrice,
           avgEntryPrice: posAvg,
           state: ctx.state,
           emissionFacts,
@@ -1285,6 +1290,8 @@ function buildSignalOrSuppression(args: {
           timestamp: args.nowIso,
           extra: {
             avgEntryPrice: posAvg,
+            entryFloorPrice,
+            positiveFloorPrice,
             proposedExitPrice: price,
             floor,
             exitToAvgEntryRatio: price / posAvg,
