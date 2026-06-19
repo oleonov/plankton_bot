@@ -1158,6 +1158,46 @@ describe("ProfileLadderModule", () => {
     ).toHaveLength(2);
   });
 
+  it("cooldown-gates planned rung retry after duplicate clientOrderId skip", async () => {
+    let nowMs = NOW;
+    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" }, now: () => nowMs });
+    ctx.repo.upsertLadder(
+      ladderState({
+        activeRungs: [rung({ price: 0.12, sizeShares: 60 })],
+      }),
+    );
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.09, bestAsk: 0.11, minOrderSize: 5 })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(1);
+    const first = ctx.orders[0]!;
+    await ctx.bus.publish("OrderSkipped", {
+      ...orderSkipped(first),
+      reasonCode: "duplicate_client_order_id_pre_submit",
+    });
+
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS - 1;
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.09, bestAsk: 0.11, minOrderSize: 5 })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(1);
+
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.09, bestAsk: 0.11, minOrderSize: 5 })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(2);
+    expect(ctx.orders[1]?.clientOrderId).toBe(first.clientOrderId);
+  });
+
   it("does not retry a planned rung while cap is occupied by a live rung", async () => {
     const bookCache = {
       getFreshOrRefresh: vi.fn(async () => ({

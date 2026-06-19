@@ -940,12 +940,28 @@ describe("ExecutionModule", () => {
   });
 
   it("skips duplicate clientOrderId when existing order is open", async () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const duplicateMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      riskEventRepo,
+    });
     (orderRepo.findByClientOrderId as ReturnType<typeof vi.fn>).mockReturnValue({
       orderId: "existing",
       status: "open",
     });
+    const skipped: any[] = [];
+    bus.subscribe("OrderSkipped", async (p) => {
+      skipped.push(p);
+    });
 
-    await mod.start();
+    await duplicateMod.start();
 
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd({ commandId: createCommandId("cmd-new") }),
@@ -953,8 +969,22 @@ describe("ExecutionModule", () => {
     });
 
     expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toMatchObject({
+      reasonCode: "duplicate_client_order_id_pre_submit",
+      clientOrderId: "plk_abc123",
+    });
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "order_skipped",
+      payload: expect.objectContaining({
+        reasonCode: "duplicate_client_order_id_pre_submit",
+        existingOrderId: "existing",
+        existingStatus: "open",
+      }),
+    });
 
-    await mod.stop();
+    await duplicateMod.stop();
   });
 
   it("skips duplicate clientOrderId when existing order is pending", async () => {
@@ -975,7 +1005,7 @@ describe("ExecutionModule", () => {
     await mod.stop();
   });
 
-  it("allows re-entry when prior clientOrderId order is filled", async () => {
+  it("skips duplicate clientOrderId when prior order is filled", async () => {
     (orderRepo.findByClientOrderId as ReturnType<typeof vi.fn>).mockReturnValue({
       orderId: "old-filled",
       status: "filled",
@@ -988,12 +1018,13 @@ describe("ExecutionModule", () => {
       timestamp: Date.now(),
     });
 
-    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
 
     await mod.stop();
   });
 
-  it("allows re-entry when prior clientOrderId order is cancelled", async () => {
+  it("skips duplicate clientOrderId when prior order is cancelled", async () => {
     (orderRepo.findByClientOrderId as ReturnType<typeof vi.fn>).mockReturnValue({
       orderId: "old-cancelled",
       status: "cancelled",
@@ -1006,27 +1037,136 @@ describe("ExecutionModule", () => {
       timestamp: Date.now(),
     });
 
-    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
 
     await mod.stop();
   });
 
-  it("allows re-entry when prior clientOrderId order is rejected", async () => {
+  it("skips duplicate clientOrderId when prior order is rejected", async () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const duplicateMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      riskEventRepo,
+    });
     (orderRepo.findByClientOrderId as ReturnType<typeof vi.fn>).mockReturnValue({
       orderId: "old-rejected",
       status: "rejected",
     });
 
-    await mod.start();
+    await duplicateMod.start();
 
     await bus.publish("PlaceOrderRequested", {
-      command: makePlaceCmd({ commandId: createCommandId("cmd-retry2") }),
+      command: makePlaceCmd({
+        commandId: createCommandId("cmd-retry2"),
+        side: "sell",
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+      }),
       timestamp: Date.now(),
     });
 
-    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "order_skipped",
+      payload: expect.objectContaining({
+        reasonCode: "duplicate_client_order_id_pre_submit",
+        existingOrderId: "old-rejected",
+        existingStatus: "rejected",
+      }),
+    });
+
+    await duplicateMod.stop();
+  });
+
+  it("fails closed for non-ProfileLadder duplicate clientOrderId before exchange submit", async () => {
+    (orderRepo.findByClientOrderId as ReturnType<typeof vi.fn>).mockReturnValue({
+      orderId: "legacy-duplicate",
+      status: "filled",
+    });
+    await mod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("cmd-non-profile-duplicate"),
+        source: "strategy",
+        signalReason: "probe-entry",
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
 
     await mod.stop();
+  });
+
+  it("emits critical orphan-risk telemetry when persistence fails after exchange accept", async () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const orphanRiskMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      riskEventRepo,
+    });
+    const persistError = new Error("UNIQUE constraint failed: orders.client_order_id");
+    (orderRepo.save as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw persistError;
+    });
+
+    await expect(
+      getExecutePlaceCaller(orphanRiskMod).executePlace(
+        makePlaceCmd({
+          side: "sell",
+          size: 13.56,
+          price: 0.081,
+          signalReason: "profile-ladder-exit",
+          decisionRuleId: "PROFILE_LADDER",
+        }),
+      ),
+    ).rejects.toThrow("UNIQUE constraint failed");
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(silentLog.fatal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        exchangeOrderId: "sim-ord-1",
+        clientOrderId: "plk_abc123",
+        tokenId: "tok-yes",
+        side: "sell",
+        price: 0.081,
+        size: 13.56,
+        decisionRuleId: "PROFILE_LADDER",
+        signalReason: "profile-ladder-exit",
+        persistenceError: expect.stringContaining("UNIQUE constraint failed"),
+      }),
+      "order persistence failed after exchange accept — exchange-live orphan risk",
+    );
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "order_persist_failed_after_exchange_accept",
+      payload: expect.objectContaining({
+        exchangeOrderId: "sim-ord-1",
+        clientOrderId: "plk_abc123",
+        tokenId: "tok-yes",
+        side: "sell",
+        price: 0.081,
+        size: 13.56,
+        decisionRuleId: "PROFILE_LADDER",
+        signalReason: "profile-ladder-exit",
+      }),
+    });
   });
 
   // ─── Fill detection ───────────────────────────────────────────────

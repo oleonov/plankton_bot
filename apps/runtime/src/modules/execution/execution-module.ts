@@ -618,13 +618,11 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
-    // Semantic dedup: skip only if an open/pending order exists for this clientOrderId
+    // Deterministic clientOrderId reuse is unsafe even after terminal local rows:
+    // CLOB may accept the resend while SQLite rejects the duplicate client ID.
     const existing = this.deps.orderRepo.findByClientOrderId(cmd.clientOrderId);
-    if (existing && (existing.status === "open" || existing.status === "pending")) {
-      this.log.debug(
-        { clientOrderId: cmd.clientOrderId, status: existing.status },
-        "open order with same clientOrderId — skipping",
-      );
+    if (existing) {
+      await this.skipDuplicateClientOrderIdPreSubmit(cmd, existing);
       this.processedCommandIds.add(cmd.commandId);
       return;
     }
@@ -910,7 +908,7 @@ export class ExecutionModule implements RuntimeModule {
     // Order accepted
     const orderId = createOrderId(result.orderId);
     const order = this.buildOrder(cmd, "open", result.orderId);
-    this.deps.orderRepo.save(order);
+    this.persistAcceptedOrderOrThrow(cmd, order, result.orderId);
 
     this.log.info({ commandId: cmd.commandId, orderId: result.orderId }, "order placed");
 
@@ -1639,6 +1637,42 @@ export class ExecutionModule implements RuntimeModule {
     });
   }
 
+  private async skipDuplicateClientOrderIdPreSubmit(
+    cmd: PlaceOrderCommand,
+    existing: Order,
+  ): Promise<void> {
+    const details = {
+      existingOrderId: String(existing.orderId),
+      existingStatus: existing.status,
+      existingExchangeOrderId: existing.exchangeOrderId ?? null,
+      source: boundedMetricLabel(cmd.source),
+    };
+    this.log.warn(
+      {
+        commandId: cmd.commandId,
+        clientOrderId: cmd.clientOrderId,
+        tokenId: cmd.tokenId,
+        side: cmd.side,
+        existingOrderId: details.existingOrderId,
+        existingStatus: details.existingStatus,
+        existingExchangeOrderId: details.existingExchangeOrderId,
+      },
+      "order skipped before exchange submit — duplicate clientOrderId exists locally",
+    );
+    this.deps.runtimeMetrics?.writeCounter?.(
+      "order_duplicate_client_order_id_pre_submit",
+      1,
+      JSON.stringify({
+        side: cmd.side,
+        source: boundedMetricLabel(cmd.source),
+        signalReason: boundedMetricLabel(cmd.signalReason),
+        decisionRuleId: boundedMetricLabel(cmd.decisionRuleId),
+        existingStatus: boundedMetricLabel(existing.status),
+      }),
+    );
+    await this.publishOrderSkipped(cmd, "duplicate_client_order_id_pre_submit", details);
+  }
+
   private async publishOrderSkipped(
     cmd: PlaceOrderCommand,
     reasonCode: string,
@@ -1661,6 +1695,55 @@ export class ExecutionModule implements RuntimeModule {
       details,
       timestamp: Date.now(),
     });
+  }
+
+  private persistAcceptedOrderOrThrow(
+    cmd: PlaceOrderCommand,
+    order: Order,
+    exchangeOrderId: string,
+  ): void {
+    try {
+      this.deps.orderRepo.save(order);
+    } catch (err) {
+      const persistenceError = errorToLogMessage(err);
+      const payload = {
+        commandId: String(cmd.commandId),
+        exchangeOrderId,
+        clientOrderId: String(cmd.clientOrderId),
+        tokenId: String(cmd.tokenId),
+        conditionId: String(cmd.conditionId),
+        side: cmd.side,
+        price: cmd.price,
+        size: cmd.size,
+        signalReason: cmd.signalReason ?? null,
+        signalId: cmd.signalId ?? null,
+        decisionRuleId: cmd.decisionRuleId ?? null,
+        signalTimestamp: cmd.signalTimestamp ?? null,
+        persistenceError,
+        occurredAt: new Date().toISOString(),
+      };
+      this.log.fatal(
+        payload,
+        "order persistence failed after exchange accept — exchange-live orphan risk",
+      );
+      try {
+        this.deps.riskEventRepo?.insert({
+          eventType: "order_persist_failed_after_exchange_accept",
+          payload,
+        });
+      } catch (riskErr) {
+        this.log.error(
+          {
+            err: riskErr,
+            commandId: cmd.commandId,
+            exchangeOrderId,
+            clientOrderId: cmd.clientOrderId,
+          },
+          "failed to persist order_persist_failed_after_exchange_accept risk event",
+        );
+      }
+      throw err;
+    }
   }
 
   private getInvalidPriceRejection(cmd: PlaceOrderCommand): {
@@ -2193,5 +2276,15 @@ function stringifyExchangeErrorPayload(
     return JSON.stringify(payload);
   } catch {
     return JSON.stringify({ unserializable: true });
+  }
+}
+
+function errorToLogMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return "unknown persistence error";
   }
 }
