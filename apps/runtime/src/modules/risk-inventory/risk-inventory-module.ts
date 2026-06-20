@@ -49,6 +49,7 @@ import {
 } from "../same-price-cooldown/same-price-cooldown-module.js";
 import type { CooldownRegistry } from "../same-price-cooldown/cooldown-registry.js";
 import type { SignalPathTelemetry } from "../strategy/signal-path-telemetry.js";
+import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
 
 export interface RiskInventoryModuleDeps {
   bus: EventBus;
@@ -80,6 +81,7 @@ export interface RiskInventoryModuleDeps {
    * tests, scenario harness).
    */
   resolutionTracker?: MarketResolutionTracker | undefined;
+  effectiveResolution?: Pick<EffectiveResolutionGate, "toBuyPlacementFields"> | undefined;
   /** Override for tests; defaults to Date.now. */
   now?: () => number;
   /** Optional kill switch; live-lite market-data marks are gated per position. */
@@ -379,7 +381,11 @@ export class RiskInventoryModule implements RuntimeModule {
       if (!tracker.healthy()) return "resolution_tracker_unavailable";
       if (tracker.isResolved(market.conditionId)) return "market_resolved";
     }
-    const placement = canPlaceBuyOrderForMarket(market, this.now());
+    const placement = canPlaceBuyOrderForMarket(
+      market,
+      this.now(),
+      this.deps.effectiveResolution?.toBuyPlacementFields(market),
+    );
     if (!placement.allowed) return placement.reasons[0] ?? "market_not_alive";
     return null;
   }

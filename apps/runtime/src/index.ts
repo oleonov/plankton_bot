@@ -73,6 +73,7 @@ import {
   SqliteStateTransitionRepository,
   SqliteFloorIntentRepository,
   SqliteHoldResolutionStateRepository,
+  SqliteTradingCalendarRepository,
 } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
 import {
@@ -188,6 +189,7 @@ import { runStartupPositionAdoption } from "./startup-position-adoption.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { RuntimeMetricWriter } from "./runtime-metric-writer.js";
+import { RuntimeEffectiveResolutionService } from "./effective-resolution-service.js";
 import {
   SlidingLatencyWindow,
   SustainedThresholdAlert,
@@ -424,6 +426,7 @@ async function main(): Promise<void> {
     decisionSignalLog: new SqliteDecisionSignalLogRepository(ledgerConn.db),
     floorIntent: new SqliteFloorIntentRepository(ledgerConn.db),
     holdResolutionState: new SqliteHoldResolutionStateRepository(ledgerConn.db),
+    tradingCalendar: new SqliteTradingCalendarRepository(ledgerConn.db),
     // Control-side
     operatorCommand: new SqliteOperatorCommandRepository(controlConn.db),
     operatorAction: new SqliteOperatorActionRepository(controlConn.db),
@@ -499,6 +502,25 @@ async function main(): Promise<void> {
     redeemSweepModule?.notifySettlementInfraAlert(alert.code);
     log.warn({ alert }, "runtime infra alert recorded");
   };
+
+  const effectiveResolution = new RuntimeEffectiveResolutionService(
+    repos.tradingCalendar,
+    runtimeMetrics,
+    recordInfraAlert,
+  );
+  const calendarCoverageNow = new Date().toISOString();
+  effectiveResolution.emitCoverageMetric(calendarCoverageNow);
+  const calendarCoverage = effectiveResolution.coverageStatus(calendarCoverageNow);
+  if (calendarCoverage.warn) {
+    recordInfraAlert({
+      code: "TRADING_CALENDAR_VERIFIED_COVERAGE_LOW",
+      severity: "warning",
+      source: "effective-resolution",
+      message:
+        "US equity trading-calendar verified coverage expires within 18 months; verify and patch calendar exceptions.",
+      details: calendarCoverage,
+    });
+  }
 
   // 6b. MarketResolutionTracker — early service. Seeded from the resolutions
   // table and subscribed to the bus BEFORE any publisher of
@@ -754,6 +776,7 @@ async function main(): Promise<void> {
     hintScanMinIntervalMs: config.marketScanHintMinIntervalMs,
     selectionRuleEngine,
     marketSelectionPolicy: () => currentExecutionPolicy().marketSelection,
+    effectiveResolution,
     runtimeMetrics,
     positionRepo: repos.position,
     orderRepo: repos.order,
@@ -1059,6 +1082,7 @@ async function main(): Promise<void> {
     cooldownRegistry,
     signalPathTelemetry,
     resolutionTracker: marketResolutionTracker,
+    effectiveResolution,
     markToMarketEnabled: true,
     latestUsablePriceForToken,
   });
@@ -1098,6 +1122,7 @@ async function main(): Promise<void> {
     selectionRuleEngine,
     () => currentExecutionPolicy().marketSelection,
     repos.riskEvent, // Track B §5.4 — durable strike-reject persistence
+    effectiveResolution,
   );
   selectedMarketCacheForEnrichment = selectedMarketCache;
   selectedMarketCache.subscribe();
@@ -1450,6 +1475,7 @@ async function main(): Promise<void> {
     riskEventRepo: repos.riskEvent,
     signalPathTelemetry,
     resolutionTracker: marketResolutionTracker,
+    effectiveResolution,
     orderLifetime: orderLifetimeModule,
     samePriceCooldown: samePriceCooldownModule,
     // Track S5 belt-and-suspenders — neutralizes S5 exit extensions on a token the

@@ -6006,6 +6006,7 @@ describe("ADR-015 telemetry flags", () => {
     async function runApproved(opts: {
       tracker?: ReturnType<typeof makeStubTracker>;
       market?: Partial<NormalizedMarket>;
+      effectiveResolution?: SignalToOrderBridgeDeps["effectiveResolution"];
       now?: number;
       side?: "buy" | "sell";
     }) {
@@ -6015,6 +6016,7 @@ describe("ADR-015 telemetry flags", () => {
         log: makeLogger(),
         liveLiteGuard: { getWalletMode: () => "relayer" } as never,
         ...(opts.tracker ? { resolutionTracker: opts.tracker as any } : {}),
+        ...(opts.effectiveResolution ? { effectiveResolution: opts.effectiveResolution } : {}),
         ...(opts.now != null ? { now: () => opts.now! } : {}),
       });
       bridge.subscribe();
@@ -6053,6 +6055,45 @@ describe("ADR-015 telemetry flags", () => {
       expect(skipped).toHaveLength(1);
       expect(skipped[0]!.stage).toBe("marketability");
       expect(skipped[0]!.reasons).toEqual(["market_ended"]);
+    });
+
+    it("skips BUY when effective US equity runway is below 24h", async () => {
+      const now = Date.parse("2026-06-18T10:00:00.000Z");
+      const { placed, skipped } = await runApproved({
+        now,
+        market: {
+          endDate: "2026-06-19T20:00:00.000Z",
+          slug: "will-meta-close-between-560-and-570-week-june-19-2026",
+          question: "Will Meta (META) close at $560-$570 on June 19?",
+          tags: ["stocks", "price-range"],
+        },
+        effectiveResolution: {
+          toBuyPlacementFields: () => ({
+            effectiveResolutionAt: "2026-06-18T20:00:00.000Z",
+            calendarMissing: false,
+            appliesToBuy: true,
+            minRunwayHours: 24,
+          }),
+        },
+      });
+      expect(placed).toHaveLength(0);
+      expect(skipped[0]!.stage).toBe("marketability");
+      expect(skipped[0]!.reasons).toEqual(["effective_resolution_short_runway"]);
+    });
+
+    it("skips BUY when effective resolution calendar coverage is missing", async () => {
+      const { placed, skipped } = await runApproved({
+        effectiveResolution: {
+          toBuyPlacementFields: () => ({
+            effectiveResolutionAt: null,
+            calendarMissing: true,
+            appliesToBuy: true,
+            minRunwayHours: 24,
+          }),
+        },
+      });
+      expect(placed).toHaveLength(0);
+      expect(skipped[0]!.reasons).toEqual(["effective_resolution_calendar_missing"]);
     });
 
     it("skips BUY with market_inactive when active=false", async () => {

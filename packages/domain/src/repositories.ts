@@ -39,6 +39,10 @@ import type {
   OrderPriceCooldown,
   SettlementRecord,
 } from "./types.js";
+import type {
+  TradingCalendarException,
+  TradingCalendarMetadata,
+} from "./effective-resolution.js";
 
 /**
  * ADR-025 §D-B telemetry payload, persisted on transition into
@@ -180,6 +184,14 @@ export interface MarketRepository {
    * (UPDATE ... WHERE token_id = ?).
    */
   updateScoresBatch(updates: Iterable<MarketScoreUpdate>): void;
+}
+
+// ─── Trading Calendar ─────────────────────────────────────────────────────
+
+export interface TradingCalendarRepository {
+  findException(calendarId: string, date: string): TradingCalendarException | null;
+  getMetadata(calendarId: string): TradingCalendarMetadata | null;
+  listExceptions(calendarId: string): TradingCalendarException[];
 }
 
 /**

@@ -32,6 +32,7 @@ import {
   type WarnThrottleState,
 } from "../../warn-throttle.js";
 import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
+import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
 
 const HINT_SCAN_DEBOUNCE_MS = 250;
 const DEFAULT_HINT_SCAN_MIN_INTERVAL_MS = 15 * 60 * 1000;
@@ -80,6 +81,7 @@ export interface MarketScannerModuleDeps {
   runtimeMetrics?: {
     writeCounter?: (metricName: string, value?: number, labels?: string | null) => void;
   };
+  effectiveResolution?: Pick<EffectiveResolutionGate, "toPreEntryFields">;
   runtimeControl?: RuntimeControl | undefined;
   /** Minimum age of a successful scan before a WS new-market hint may trigger a full rescan. */
   hintScanMinIntervalMs?: number | undefined;
@@ -429,6 +431,14 @@ export class MarketScannerModule implements RuntimeModule {
                 groupItemTitle: clobMarket.groupItemTitle ?? null,
                 groupItemThreshold: clobMarket.groupItemThreshold ?? null,
                 tags: clobMarket.tags ?? null,
+                ...this.deps.effectiveResolution?.toPreEntryFields({
+                  slug: clobMarket.slug,
+                  eventSlug: clobMarket.eventSlug ?? null,
+                  question: clobMarket.question,
+                  endDate: clobMarket.endDate ?? null,
+                  groupItemTitle: clobMarket.groupItemTitle ?? null,
+                  tags: clobMarket.tags ?? null,
+                }),
               },
               marketSelectionPolicy,
               nowMs,

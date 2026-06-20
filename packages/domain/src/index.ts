@@ -15,6 +15,7 @@ export * from "./trading-state.js";
 export * from "./algo-engine.js";
 export * from "./market-selection.js";
 export * from "./strike-classifier.js";
+export * from "./effective-resolution.js";
 export * from "./polymarket-fees.js";
 export * from "./fee-schedule.js";
 export * from "./orderbook.js";

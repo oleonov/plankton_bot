@@ -36,6 +36,7 @@ export { SqliteLegStateRepository } from "./repositories/leg-state-repository.js
 export { SqliteLegStateTransitionRepository } from "./repositories/leg-state-transition-repository.js";
 export { SqliteAlgoTokenModeStateRepository } from "./repositories/algo-token-mode-state-repository.js";
 export { SqliteOrderPriceCooldownRepository } from "./repositories/order-price-cooldown-repository.js";
+export { SqliteTradingCalendarRepository } from "./repositories/trading-calendar-repository.js";
 export {
   SqliteHoldResolutionStateRepository,
   type HoldResolutionInsertInput,

@@ -556,10 +556,12 @@ describe("RiskInventoryModule", () => {
     market?: Partial<NormalizedMarket>;
     signal?: Partial<Signal>;
     tracker?: ReturnType<typeof makeStubTracker>;
+    effectiveResolution?: ConstructorParameters<typeof RiskInventoryModule>[0]["effectiveResolution"];
     now?: number;
   }) {
     mod = createModule(undefined, {
       ...(opts.tracker ? { resolutionTracker: opts.tracker as any } : {}),
+      ...(opts.effectiveResolution ? { effectiveResolution: opts.effectiveResolution } : {}),
       ...(opts.now != null ? { now: () => opts.now! } : {}),
     });
     await mod.start();
@@ -591,6 +593,44 @@ describe("RiskInventoryModule", () => {
     expect(approved).toHaveLength(0);
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toBe("market_ended");
+  });
+
+  it("rejects BUY when effective US equity runway is below 24h", async () => {
+    const now = Date.parse("2026-06-18T10:00:00.000Z");
+    const { approved, rejected } = await runBuyAdmission({
+      now,
+      market: {
+        endDate: "2026-06-19T20:00:00.000Z",
+        slug: "will-meta-close-between-560-and-570-week-june-19-2026",
+        question: "Will Meta (META) close at $560-$570 on June 19?",
+        tags: ["stocks", "price-range"],
+      },
+      effectiveResolution: {
+        toBuyPlacementFields: () => ({
+          effectiveResolutionAt: "2026-06-18T20:00:00.000Z",
+          calendarMissing: false,
+          appliesToBuy: true,
+          minRunwayHours: 24,
+        }),
+      },
+    });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toBe("effective_resolution_short_runway");
+  });
+
+  it("rejects BUY when effective resolution calendar coverage is missing", async () => {
+    const { approved, rejected } = await runBuyAdmission({
+      effectiveResolution: {
+        toBuyPlacementFields: () => ({
+          effectiveResolutionAt: null,
+          calendarMissing: true,
+          appliesToBuy: true,
+          minRunwayHours: 24,
+        }),
+      },
+    });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toBe("effective_resolution_calendar_missing");
   });
 
   it("rejects BUY with reason market_inactive when active=false", async () => {

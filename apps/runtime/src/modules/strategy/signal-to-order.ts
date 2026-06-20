@@ -94,6 +94,7 @@ import {
   resolveEffectiveMinOrderSize,
 } from "../../min-order-size.js";
 import type { SignalPathTelemetry } from "./signal-path-telemetry.js";
+import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 25;
 const MIN_SIZE_EPSILON = 1e-9;
@@ -188,6 +189,7 @@ export interface SignalToOrderBridgeDeps {
    * a placement onto a no-longer-eligible market. Optional for tests.
    */
   resolutionTracker?: MarketResolutionTracker;
+  effectiveResolution?: Pick<EffectiveResolutionGate, "toBuyPlacementFields"> | undefined;
   orderLifetime?: {
     canPlaceExitOrder: (
       tokenId: TokenId,
@@ -317,7 +319,11 @@ export class SignalToOrderBridge {
       if (!tracker.healthy()) return "resolution_tracker_unavailable";
       if (tracker.isResolved(market.conditionId)) return "market_resolved";
     }
-    const placement = canPlaceBuyOrderForMarket(market, this.now());
+    const placement = canPlaceBuyOrderForMarket(
+      market,
+      this.now(),
+      this.deps.effectiveResolution?.toBuyPlacementFields(market),
+    );
     if (!placement.allowed) return placement.reasons[0] ?? "market_not_alive";
     return null;
   }

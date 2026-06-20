@@ -2143,6 +2143,7 @@ export type PreEntryRejectReason =
   | "rule_exclude"
   | "strike_min_horizon" // renamed from strike_short_horizon (Track B D1)
   | "strike_yes_tail_short_runway" // new (Track B D1)
+  | "effective_resolution_calendar_missing"
   | "mid_price_too_high"
   | "liquidity_too_low"
   | "zero_coverage_category"

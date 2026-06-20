@@ -8,6 +8,7 @@ import type {
 import { evaluatePreEntry, type PreEntryRejectReason } from "@krabs/domain";
 import type { SelectedMarketCache } from "./algo-decision-module.js";
 import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
+import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
 
 // v5.11 §1 — Live Pre-Entry Filter, driven by hard price/liquidity/category gates.
 //
@@ -61,6 +62,7 @@ export class MarketSelectionCache implements SelectedMarketCache {
     private readonly selectionRuleEngine: RefreshableSelectionRuleEngine,
     private readonly marketSelectionPolicy?: () => MarketSelectionPolicy,
     private readonly riskEventSink?: Pick<RiskEventRepository, "insert">,
+    private readonly effectiveResolution?: Pick<EffectiveResolutionGate, "toPreEntryFields">,
   ) {}
 
   subscribe(): void {
@@ -141,6 +143,7 @@ export class MarketSelectionCache implements SelectedMarketCache {
         groupItemTitle: market.groupItemTitle ?? null,
         groupItemThreshold: market.groupItemThreshold ?? null,
         tags: market.tags ?? null,
+        ...this.effectiveResolution?.toPreEntryFields(market),
       },
       policy,
     );

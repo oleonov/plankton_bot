@@ -525,6 +525,25 @@ describe("evaluatePreEntry", () => {
       expect(r.finalStatus).toBe("INCLUDE");
     });
 
+    it("uses effective resolution for strike runway instead of nominal endDate", () => {
+      const r = evalStrike({
+        endDate: futureEndDate(48),
+        effectiveResolutionAt: futureEndDate(10),
+      });
+      expect(r.finalStatus).toBe("EXCLUDE");
+      expect(r.rejectReason).toBe("strike_min_horizon");
+      expect(r.horizonHours).toBeCloseTo(10);
+    });
+
+    it("fails closed when a strike market needs effective resolution but calendar is missing", () => {
+      const r = evalStrike({
+        endDate: futureEndDate(48),
+        effectiveResolutionCalendarMissing: true,
+      });
+      expect(r.finalStatus).toBe("EXCLUDE");
+      expect(r.rejectReason).toBe("effective_resolution_calendar_missing");
+    });
+
     it("13: crypto strike, ttc 10h → blocked with strikePattern set", () => {
       const r = evalStrike({ endDate: futureEndDate(10) });
       expect(r.finalStatus).toBe("EXCLUDE");
@@ -699,6 +718,55 @@ describe("canPlaceBuyOrder", () => {
   it("blocks BUY exactly at endDate (boundary inclusive)", () => {
     const r = canPlaceBuyOrder({ ...HEALTHY_LIVE, endDate: "2026-04-25T12:00:00Z" }, NOW);
     expect(r.reasons).toContain("market_ended");
+  });
+
+  it("uses effective resolution when checking whether market has ended", () => {
+    const r = canPlaceBuyOrder(
+      {
+        ...HEALTHY_LIVE,
+        endDate: "2026-04-26T12:00:00Z",
+        effectiveResolutionAt: "2026-04-25T11:00:00Z",
+      },
+      NOW,
+    );
+    expect(r.reasons).toContain("market_ended");
+  });
+
+  it("blocks US equity BUY when effective runway is below the configured floor", () => {
+    const r = canPlaceBuyOrder(
+      {
+        ...HEALTHY_LIVE,
+        effectiveResolutionAt: "2026-04-26T11:00:00Z",
+        effectiveResolutionAppliesToBuy: true,
+        effectiveResolutionMinRunwayHours: 24,
+      },
+      NOW,
+    );
+    expect(r.reasons).toContain("effective_resolution_short_runway");
+  });
+
+  it("does not apply the effective runway floor to nominal/non-equity markets", () => {
+    const r = canPlaceBuyOrder(
+      {
+        ...HEALTHY_LIVE,
+        effectiveResolutionAt: "2026-04-26T11:00:00Z",
+        effectiveResolutionAppliesToBuy: false,
+        effectiveResolutionMinRunwayHours: 24,
+      },
+      NOW,
+    );
+    expect(r.allowed).toBe(true);
+  });
+
+  it("fails closed when US equity calendar coverage is missing", () => {
+    const r = canPlaceBuyOrder(
+      {
+        ...HEALTHY_LIVE,
+        effectiveResolutionCalendarMissing: true,
+      },
+      NOW,
+    );
+    expect(r.reasons).toContain("effective_resolution_calendar_missing");
   });
 
   it("blocks BUY when active=false", () => {

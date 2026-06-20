@@ -73,6 +73,46 @@ CREATE INDEX IF NOT EXISTS idx_market_snapshots_token_ts
 CREATE INDEX IF NOT EXISTS idx_market_snapshots_captured_at
   ON market_snapshots(captured_at);
 
+-- ═══════════ TRADING CALENDAR ═══════════
+-- From 075_trading_calendar_exceptions.sql
+
+CREATE TABLE IF NOT EXISTS trading_calendar_exceptions (
+  id TEXT PRIMARY KEY,
+  calendar_id TEXT NOT NULL,
+  date TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('closed', 'early_close')),
+  timezone TEXT NOT NULL,
+  open_time_local TEXT,
+  close_time_local TEXT,
+  reason TEXT NOT NULL,
+  source TEXT NOT NULL,
+  source_url TEXT,
+  verification_status TEXT NOT NULL CHECK (
+    verification_status IN ('verified_official', 'provisional')
+  ),
+  verified_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_by TEXT,
+  notes TEXT,
+  UNIQUE(calendar_id, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trading_calendar_exceptions_calendar_date
+  ON trading_calendar_exceptions(calendar_id, date);
+
+CREATE TABLE IF NOT EXISTS trading_calendar_metadata (
+  calendar_id TEXT PRIMARY KEY,
+  timezone TEXT NOT NULL,
+  regular_open_time_local TEXT NOT NULL,
+  regular_close_time_local TEXT NOT NULL,
+  verified_through_date TEXT NOT NULL,
+  provisional_through_date TEXT,
+  source TEXT NOT NULL,
+  source_url TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ═══════════ ORDERS ═══════════
 -- From 001_initial.sql + 007 (signal_reason)
 

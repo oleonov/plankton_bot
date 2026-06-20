@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { InProcessEventBus } from "@krabs/event-bus";
 import {
   SelectionRuleEngine,
@@ -98,6 +98,10 @@ async function updateMarket(bus: InProcessEventBus, market: NormalizedMarket): P
     timestamp: Date.now(),
   });
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("MarketSelectionCache", () => {
   it("starts empty", () => {
@@ -204,6 +208,40 @@ describe("MarketSelectionCache", () => {
 
     expect(cache.isEligible(TOK_A)).toBe(false);
 
+    cache.dispose();
+  });
+
+  it("uses effective US equity resolution when selecting strike markets", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-18T10:00:00.000Z"));
+    const bus = new InProcessEventBus();
+    const effectiveResolution = {
+      toPreEntryFields: vi.fn(() => ({
+        effectiveResolutionAt: "2026-06-18T20:00:00.000Z",
+        effectiveResolutionCalendarMissing: false,
+      })),
+    };
+    const cache = new MarketSelectionCache(bus, EMPTY_ENGINE, undefined, undefined, effectiveResolution);
+    cache.subscribe();
+
+    await updateMarket(
+      bus,
+      makeMarket({
+        tokenId: TOK_A,
+        eventSlug: "meta-weekly-close",
+        slug: "will-meta-close-between-560-and-570-week-june-19-2026",
+        question: "Will Meta (META) close at $560-$570 on June 19?",
+        tags: ["stocks", "price-range"],
+        endDate: "2026-06-19T20:00:00.000Z",
+        midPrice: 0.2,
+      }),
+    );
+
+    expect(effectiveResolution.toPreEntryFields).toHaveBeenCalledTimes(1);
+    expect(cache.isEligible(TOK_A)).toBe(false);
+    expect(cache.getUniverseFilterSnapshot().selectionRejectReasons).toMatchObject({
+      rejected_strike_min_horizon: 1,
+    });
     cache.dispose();
   });
 

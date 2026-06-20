@@ -25,6 +25,12 @@ export interface PreEntryInput {
    */
   readonly endDate?: string | null;
   /**
+   * Optional effective resolution timestamp. For US equity close markets this is
+   * the final exchange session close, which can precede Polymarket's nominal endDate.
+   */
+  readonly effectiveResolutionAt?: string | null;
+  readonly effectiveResolutionCalendarMissing?: boolean | null;
+  /**
    * Track B strike-signal fields (spec §4). Passed through to
    * `classifyMarketRegime` for the D1 entry filter (§5). group-item is collected
    * but ignored by the classifier (F6, §3.6); `tags` is the secondary signal.
@@ -93,7 +99,10 @@ export const STRIKE_YES_TAIL_MAX_PRICE = 0.05;
 export const STRIKE_YES_TAIL_MIN_RUNWAY_HOURS = 168; // 7 days
 // STRIKE_MIN_HORIZON_HOURS = 24 is declared above; reused as the D1 horizon floor.
 
-export type StrikeEntryRejectReason = "strike_min_horizon" | "strike_yes_tail_short_runway";
+export type StrikeEntryRejectReason =
+  | "strike_min_horizon"
+  | "strike_yes_tail_short_runway"
+  | "effective_resolution_calendar_missing";
 
 export interface StrikeEntryFilterResult {
   readonly blocked: boolean;
@@ -112,14 +121,26 @@ export interface StrikeEntryFilterResult {
  * is fail-open, but the 24h horizon floor still applies.
  */
 export function evaluateStrikeEntryFilter(
-  market: StrikeClassifierInput & Pick<PreEntryInput, "endDate" | "midPrice">,
+  market: StrikeClassifierInput &
+    Pick<
+      PreEntryInput,
+      "endDate" | "midPrice" | "effectiveResolutionAt" | "effectiveResolutionCalendarMissing"
+    >,
   nowMs: number,
 ): StrikeEntryFilterResult {
   if (classifyMarketRegime(market) !== "strike") {
     return { blocked: false, reason: null, horizonHours: null };
   }
-  if (market.endDate == null) return { blocked: false, reason: null, horizonHours: null };
-  const endMs = Date.parse(market.endDate);
+  if (market.effectiveResolutionCalendarMissing === true) {
+    return {
+      blocked: true,
+      reason: "effective_resolution_calendar_missing",
+      horizonHours: null,
+    };
+  }
+  const resolutionAt = market.effectiveResolutionAt ?? market.endDate;
+  if (resolutionAt == null) return { blocked: false, reason: null, horizonHours: null };
+  const endMs = Date.parse(resolutionAt);
   if (!Number.isFinite(endMs)) return { blocked: false, reason: null, horizonHours: null };
 
   const horizonHours = (endMs - nowMs) / 3_600_000;
@@ -303,7 +324,9 @@ export type BuyPlacementBlockReason =
   | "market_inactive"
   | "market_not_tradable"
   | "market_ended"
-  | "market_not_alive";
+  | "market_not_alive"
+  | "effective_resolution_calendar_missing"
+  | "effective_resolution_short_runway";
 
 export interface BuyPlacementInput {
   readonly active: boolean;
@@ -313,6 +336,10 @@ export interface BuyPlacementInput {
   readonly enableOrderBook?: boolean | null;
   readonly bestBid?: number | null;
   readonly bestAsk?: number | null;
+  readonly effectiveResolutionAt?: string | null;
+  readonly effectiveResolutionCalendarMissing?: boolean | null;
+  readonly effectiveResolutionAppliesToBuy?: boolean | null;
+  readonly effectiveResolutionMinRunwayHours?: number | null;
 }
 
 export interface BuyPlacementResult {
@@ -334,9 +361,23 @@ export function canPlaceBuyOrder(market: BuyPlacementInput, nowMs: number): BuyP
   const reasons: BuyPlacementBlockReason[] = [];
   if (market.active !== true) reasons.push("market_inactive");
   if (market.tradable !== true) reasons.push("market_not_tradable");
-  if (market.endDate != null) {
-    const endMs = Date.parse(market.endDate);
+  const lifecycleEndDate = market.effectiveResolutionAt ?? market.endDate;
+  if (lifecycleEndDate != null) {
+    const endMs = Date.parse(lifecycleEndDate);
     if (Number.isFinite(endMs) && endMs <= nowMs) reasons.push("market_ended");
+  }
+  if (market.effectiveResolutionCalendarMissing === true) {
+    reasons.push("effective_resolution_calendar_missing");
+  } else if (
+    market.effectiveResolutionAppliesToBuy === true &&
+    market.effectiveResolutionAt != null &&
+    typeof market.effectiveResolutionMinRunwayHours === "number"
+  ) {
+    const endMs = Date.parse(market.effectiveResolutionAt);
+    const minRunwayMs = market.effectiveResolutionMinRunwayHours * 3_600_000;
+    if (Number.isFinite(endMs) && endMs - nowMs < minRunwayMs) {
+      reasons.push("effective_resolution_short_runway");
+    }
   }
   const liveness = isAlive(market);
   if (!liveness.healthy) reasons.push("market_not_alive");
@@ -348,6 +389,12 @@ export function canPlaceBuyOrder(market: BuyPlacementInput, nowMs: number): BuyP
 export function canPlaceBuyOrderForMarket(
   market: NormalizedMarket,
   nowMs: number,
+  effectiveResolution?: {
+    effectiveResolutionAt?: string | null;
+    calendarMissing?: boolean | null;
+    appliesToBuy?: boolean | null;
+    minRunwayHours?: number | null;
+  },
 ): BuyPlacementResult {
   return canPlaceBuyOrder(
     {
@@ -358,6 +405,10 @@ export function canPlaceBuyOrderForMarket(
       enableOrderBook: market.enableOrderBook,
       bestBid: market.bestBid,
       bestAsk: market.bestAsk,
+      effectiveResolutionAt: effectiveResolution?.effectiveResolutionAt ?? null,
+      effectiveResolutionCalendarMissing: effectiveResolution?.calendarMissing ?? false,
+      effectiveResolutionAppliesToBuy: effectiveResolution?.appliesToBuy ?? false,
+      effectiveResolutionMinRunwayHours: effectiveResolution?.minRunwayHours ?? null,
     },
     nowMs,
   );
