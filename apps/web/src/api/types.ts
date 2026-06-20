@@ -806,6 +806,101 @@ export interface FillDTO {
   endDate: string | null;
 }
 
+export type PositionCycleStatus =
+  | "CLOSED_PROFIT"
+  | "CLOSED_LOSS"
+  | "OPEN_PROFIT"
+  | "OPEN_LOSS"
+  | "DUST_OPEN"
+  | "HELD_TO_LOSING_RESOLUTION"
+  | "UNKNOWN_ACCT";
+
+export type AccountingConfidence = "HIGH" | "MED" | "LOW";
+
+export interface PositionCycleOperationDTO {
+  time: string;
+  type: "BUY" | "SCALE" | "SELL" | "SETTLE";
+  fillId?: string;
+  orderId?: string | null;
+  price: number | null;
+  shares: number;
+  usd: number;
+  source: string;
+  stepPnlUsd: number | null;
+}
+
+export interface PositionCycleSourceContributionDTO {
+  source: string;
+  returnedUsd: number;
+  pnlUsd: number | null;
+  count: number;
+}
+
+export interface PositionCycleDTO {
+  id: string;
+  positionId: string;
+  tokenId: string;
+  conditionId: string | null;
+  slug: string | null;
+  marketTitle: string | null;
+  outcome: string | null;
+  status: PositionCycleStatus;
+  openedAt: string;
+  closedAt: string | null;
+  lastActionAt: string;
+  heldDurationMs: number;
+  shares: number;
+  buyCount: number;
+  sellCount: number;
+  entrySources: string[];
+  exitSources: string[];
+  exitSummary: string;
+  flags: string[];
+  band: string | null;
+  investedUsd: number;
+  returnedUsd: number;
+  sellReturnedUsd: number;
+  settlementReturnedUsd: number;
+  remainingMarkUsd: number;
+  remainingLiquidationUsd: number;
+  realizedPnlUsd: number | null;
+  unrealizedPnlUsd: number;
+  netPnlUsd: number | null;
+  netPnlPct: number | null;
+  accountingConfidence: AccountingConfidence;
+  accountingReasons: string[];
+  sourceBreakdown: {
+    entries: PositionCycleSourceContributionDTO[];
+    exits: PositionCycleSourceContributionDTO[];
+  };
+  operations: PositionCycleOperationDTO[];
+}
+
+export interface PositionCyclesSummaryDTO {
+  closedRealizedPnlUsd: number;
+  closedCycleCount: number;
+  openNetPnlUsd: number;
+  openMarkUsd: number;
+  openLiquidationUsd: number;
+  winners: number;
+  losers: number;
+  dustCount: number;
+  dustLiquidationUsd: number;
+  accountingWarningCount: number;
+}
+
+export interface PositionCyclesResponseDTO {
+  summary: PositionCyclesSummaryDTO;
+  accountingWarnings: PositionCycleDTO[];
+  cycles: PositionCycleDTO[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalCount: number;
+    totalPages: number;
+  };
+}
+
 export interface FamilyListMeta {
   scope: "profile" | "all";
   profile: string | null;

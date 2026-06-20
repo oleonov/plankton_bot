@@ -6,6 +6,7 @@ import { Layout } from "./components/Layout.tsx";
 import { Overview } from "./pages/Overview.tsx";
 import { Positions } from "./pages/Positions.tsx";
 import { OrdersFills } from "./pages/OrdersFills.tsx";
+import { PositionCycles } from "./pages/PositionCycles.tsx";
 import { SelectionRules } from "./pages/SelectionRules.tsx";
 import { RiskEvents } from "./pages/RiskEvents.tsx";
 import { ControlCenter } from "./pages/ControlCenter.tsx";
@@ -36,6 +37,7 @@ export function App() {
                 <Route path="/overview" element={<Overview />} />
                 <Route path="/positions" element={<Positions />} />
                 <Route path="/orders" element={<OrdersFills />} />
+                <Route path="/pnl" element={<PositionCycles />} />
                 <Route path="/families" element={<Navigate to="/selection-rules" replace />} />
                 <Route path="/selection-rules" element={<SelectionRules />} />
                 <Route path="/risk" element={<RiskEvents />} />

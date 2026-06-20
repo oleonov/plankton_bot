@@ -81,6 +81,9 @@ export function Layout() {
         <NavLink className="nav-link" to="/orders">
           Orders/Fills
         </NavLink>
+        <NavLink className="nav-link" to="/pnl">
+          P&amp;L
+        </NavLink>
         <NavLink className="nav-link" to="/selection-rules">
           Exclusions
         </NavLink>

@@ -27,6 +27,7 @@ import type {
   ExecutionPolicyDTO,
   ExecutionPolicyResponse,
   R23MetricsData,
+  PositionCyclesResponseDTO,
 } from "./types.ts";
 
 function withParams(
@@ -117,6 +118,37 @@ export function usePortfolioSeries(interval: string) {
         withParams("/api/v1/metrics/portfolio-series", { interval }),
       ),
     refetchInterval: 60_000,
+    placeholderData: (previousData) => previousData,
+  });
+}
+
+export interface PositionCycleFilters {
+  period?: string;
+  status?: string;
+  pnl?: string;
+  source?: string;
+  band?: string;
+  sort?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export function usePositionCycles(filters: PositionCycleFilters = {}) {
+  return useQuery({
+    queryKey: ["position-cycles", filters],
+    queryFn: () =>
+      apiFetch<PositionCyclesResponseDTO>(
+        withParams("/api/v1/pnl/position-cycles", {
+          period: filters.period,
+          status: filters.status,
+          pnl: filters.pnl,
+          source: filters.source,
+          band: filters.band,
+          sort: filters.sort,
+          page: filters.page,
+          pageSize: filters.pageSize,
+        }),
+      ),
     placeholderData: (previousData) => previousData,
   });
 }

@@ -28,6 +28,7 @@ import { actionRoutes } from "./routes/actions.js";
 import { eventsRoutes } from "./routes/events.js";
 import { riskEventsRoutes } from "./routes/risk-events.js";
 import { pnlSeriesRoutes } from "./routes/pnl-series.js";
+import { positionCycleRoutes } from "./routes/position-cycles.js";
 import { portfolioSeriesRoutes } from "./routes/portfolio-series.js";
 import { tradingActivityRoutes } from "./routes/trading-activity.js";
 import { profileRoutes } from "./routes/profiles.js";
@@ -145,6 +146,12 @@ export async function buildServer(deps: ServerDeps) {
   });
   await app.register(riskEventsRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
   await app.register(pnlSeriesRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
+  await app.register(positionCycleRoutes, {
+    prefix: "/api/v1",
+    db: deps.ledgerDb,
+    controlDb: deps.controlDb,
+    ledgerPool: deps.ledgerPool,
+  });
   await app.register(portfolioSeriesRoutes, {
     prefix: "/api/v1",
     db: deps.ledgerDb,
