@@ -171,12 +171,12 @@ describe("effective resolution", () => {
   });
 
   it("converts New York local session close independent of process timezone", () => {
-    expect(
-      zonedLocalDateTimeToUtc("2026-06-18", "16:00", "America/New_York").toISOString(),
-    ).toBe("2026-06-18T20:00:00.000Z");
-    expect(
-      zonedLocalDateTimeToUtc("2026-11-27", "13:00", "America/New_York").toISOString(),
-    ).toBe("2026-11-27T18:00:00.000Z");
+    expect(zonedLocalDateTimeToUtc("2026-06-18", "16:00", "America/New_York").toISOString()).toBe(
+      "2026-06-18T20:00:00.000Z",
+    );
+    expect(zonedLocalDateTimeToUtc("2026-11-27", "13:00", "America/New_York").toISOString()).toBe(
+      "2026-11-27T18:00:00.000Z",
+    );
   });
 
   it("computes verified coverage days in exchange timezone", () => {

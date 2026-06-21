@@ -88,8 +88,7 @@ const EQUITY_TAGS = new Set([
   "sp500",
   "finance",
 ]);
-const CRYPTO_TEXT =
-  /\b(?:btc|bitcoin|eth|ethereum|solana|sol|xrp|doge|crypto|cryptocurrency)\b/i;
+const CRYPTO_TEXT = /\b(?:btc|bitcoin|eth|ethereum|solana|sol|xrp|doge|crypto|cryptocurrency)\b/i;
 
 export function classifyEffectiveResolutionMarket(
   market: Omit<EffectiveResolutionMarketInput, "endDate">,
@@ -98,8 +97,7 @@ export function classifyEffectiveResolutionMarket(
     market.groupItemTitle ?? ""
   }`;
   if (CRYPTO_TEXT.test(text)) return "OTHER";
-  const tagSignal =
-    market.tags?.some((tag) => EQUITY_TAGS.has(tag.trim().toLowerCase())) ?? false;
+  const tagSignal = market.tags?.some((tag) => EQUITY_TAGS.has(tag.trim().toLowerCase())) ?? false;
   const closeSignal =
     HIGH_CONFIDENCE_CLOSE_SLUG.test(market.slug) ||
     HIGH_CONFIDENCE_CLOSE_QUESTION.test(market.question ?? "");
@@ -215,7 +213,10 @@ export function tradingCalendarCoverageDaysRemaining(
   metadata: TradingCalendarMetadata,
   now: Date | number | string,
 ): number {
-  const nowDate = dateInTimeZone(parseRequiredDate(now, "calendar coverage now"), metadata.timezone);
+  const nowDate = dateInTimeZone(
+    parseRequiredDate(now, "calendar coverage now"),
+    metadata.timezone,
+  );
   const nowUtc = localDateToUtcDayMs(nowDate);
   const verifiedUtc = localDateToUtcDayMs(metadata.verifiedThroughDate);
   return Math.floor((verifiedUtc - nowUtc) / 86_400_000);
@@ -252,7 +253,11 @@ function findLastOpenSession(args: {
       return { date, closeTimeLocal: exception.closeTimeLocal, reason: exception.reason };
     }
     if (!isWeekend(date) && exception?.status !== "closed") {
-      return { date, closeTimeLocal: args.metadata.regularCloseTimeLocal, reason: "regular_session" };
+      return {
+        date,
+        closeTimeLocal: args.metadata.regularCloseTimeLocal,
+        reason: "regular_session",
+      };
     }
     date = addLocalDays(date, -1);
   }

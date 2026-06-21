@@ -39,10 +39,7 @@ import type {
   OrderPriceCooldown,
   SettlementRecord,
 } from "./types.js";
-import type {
-  TradingCalendarException,
-  TradingCalendarMetadata,
-} from "./effective-resolution.js";
+import type { TradingCalendarException, TradingCalendarMetadata } from "./effective-resolution.js";
 
 /**
  * ADR-025 §D-B telemetry payload, persisted on transition into

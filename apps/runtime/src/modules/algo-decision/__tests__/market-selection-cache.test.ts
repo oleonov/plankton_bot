@@ -221,7 +221,13 @@ describe("MarketSelectionCache", () => {
         effectiveResolutionCalendarMissing: false,
       })),
     };
-    const cache = new MarketSelectionCache(bus, EMPTY_ENGINE, undefined, undefined, effectiveResolution);
+    const cache = new MarketSelectionCache(
+      bus,
+      EMPTY_ENGINE,
+      undefined,
+      undefined,
+      effectiveResolution,
+    );
     cache.subscribe();
 
     await updateMarket(
