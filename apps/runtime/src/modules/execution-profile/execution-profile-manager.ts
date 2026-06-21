@@ -1,6 +1,10 @@
 import {
   OrderStatus,
+  applyStockCloseTailSizeDamp,
+  DEFAULT_BUY_GUARDS_POLICY,
+  evaluateD3NearDeathGuard,
   type CapDecision,
+  type BuyGuardsPolicy,
   S1_LADDER_RULE_ID,
   SignalReason,
   type EventBus,
@@ -22,6 +26,7 @@ import {
 
 import { AbandonmentManager } from "./abandonment-manager.js";
 import { decideCostCap } from "./cost-cap-enforcer.js";
+import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
 import type { ExecutionProfileAnomalyDetector } from "./execution-profile-anomaly-detector.js";
 import type { ExecutionProfileHealthChecker } from "./execution-profile-health-checker.js";
 import {
@@ -36,6 +41,7 @@ import { resolveProfile } from "./profile-resolver.js";
 import { reduceProfileState } from "./profile-state-reducer.js";
 import { createStubScaleInSignalSource, type ScaleInSignalSource } from "./signal-feed-stub.js";
 import { decideScaleIn, EXECUTION_PROFILE_SCALE_IN_RULE_ID } from "./scale-in-decider.js";
+import { isExecutableOrderSize } from "../../min-order-size.js";
 import type {
   ExecutionProfilePolicy,
   ExecutionProfileStateRecord,
@@ -67,6 +73,8 @@ export interface ExecutionProfileManagerDeps {
   positionRepo: PositionRepository;
   orderRepo: OrderRepository;
   policy: () => ExecutionProfilePolicy;
+  buyGuardsPolicy?: () => BuyGuardsPolicy;
+  effectiveResolution?: Pick<EffectiveResolutionGate, "toBuyRunwayFields">;
   scaleInSignalSource?: ScaleInSignalSource;
   signalFeedReader?: ExecutionProfileSignalFeedReader;
   runtimeMetrics?: ExecutionProfileMetricWriter;
@@ -368,6 +376,130 @@ export class ExecutionProfileManager implements RuntimeModule {
         continue;
       }
 
+      const buyGuardsPolicy = this.deps.buyGuardsPolicy?.() ?? DEFAULT_BUY_GUARDS_POLICY;
+      const runway = this.deps.effectiveResolution?.toBuyRunwayFields(market, timestamp) ?? null;
+      const nearDeathGuard = evaluateD3NearDeathGuard({
+        policy: buyGuardsPolicy.d3NearDeathGuard,
+        addPrice: currentMarkPrice,
+        avgEntryPrice: position.avgEntryPrice,
+        runway,
+      });
+      if (nearDeathGuard.action === "block") {
+        this.recordBuyGuardCounter("d3_near_death_scale_in_suppressed_total", {
+          reason: nearDeathGuard.reason,
+          marketClass: nearDeathGuard.marketClass,
+          confidence: nearDeathGuard.confidence,
+          thresholdBucket: nearDeathGuard.thresholdBucket,
+          action: "block",
+        });
+        this.recordRiskEvent("d3_near_death_scale_in_suppressed", {
+          tokenId: String(tokenId),
+          conditionId: String(position.conditionId),
+          reason: nearDeathGuard.reason,
+          addPrice: currentMarkPrice,
+          avgEntryPrice: position.avgEntryPrice,
+          dropVsRunningAvg: nearDeathGuard.dropVsRunningAvg,
+          effectiveRunwayHours: runway?.effectiveRunwayHours ?? null,
+          marketClass: nearDeathGuard.marketClass,
+          confidence: nearDeathGuard.confidence,
+          signalTimestamp: new Date(timestamp).toISOString(),
+        });
+        this.recordRollup({
+          kind: "scale_in",
+          profile: state.profile,
+          outcome: "skip",
+          mode: decision.mode ?? "none",
+          reason: nearDeathGuard.reason as ScaleInReason,
+          sample: { tokenId: String(tokenId), markPrice: currentMarkPrice },
+        });
+        continue;
+      }
+
+      const damp = applyStockCloseTailSizeDamp({
+        policy: buyGuardsPolicy.stockCloseTailSizeDamp,
+        market,
+        baseSizeUsdc: decision.proposedAddSizeUsd,
+        target: "scale_in",
+      });
+      if (damp.action === "telemetry") {
+        this.recordBuyGuardCounter("stock_close_yes_tail_size_damp_telemetry_total", {
+          reason: damp.reason,
+          marketClass: damp.marketClass,
+          confidence: damp.confidence,
+          thresholdBucket: damp.thresholdBucket,
+          action: "telemetry",
+        });
+      }
+      let proposedAddSizeUsd = decision.proposedAddSizeUsd;
+      const profileScaleInConfig = policy.profiles[state.profile].scaleIn;
+      if (damp.action === "apply") {
+        const postDampShares = currentMarkPrice > 0 ? damp.dampedSizeUsdc / currentMarkPrice : 0;
+        const belowMinOrder =
+          damp.dampedSizeUsdc < profileScaleInConfig.minAddNotionalUsd ||
+          !isExecutableOrderSize(postDampShares, market.minOrderSize);
+        if (belowMinOrder && buyGuardsPolicy.stockCloseTailSizeDamp.skipBelowMinOrder) {
+          this.recordBuyGuardCounter("stock_close_yes_tail_size_damp_skipped_total", {
+            reason: "stock_close_tail_damp_below_min_order",
+            marketClass: damp.marketClass,
+            confidence: damp.confidence,
+            thresholdBucket: damp.thresholdBucket,
+            action: "skip",
+          });
+          this.recordRiskEvent("stock_close_yes_tail_size_damp_skip", {
+            tokenId: String(tokenId),
+            conditionId: String(position.conditionId),
+            reason: "stock_close_tail_damp_below_min_order",
+            baseSizeUsdc: damp.baseSizeUsdc,
+            dampedSizeUsdc: damp.dampedSizeUsdc,
+            minAddNotionalUsd: profileScaleInConfig.minAddNotionalUsd,
+            minOrderSize: market.minOrderSize ?? null,
+            postDampShares,
+            rangePct: damp.rangePct,
+            marketClass: damp.marketClass,
+            confidence: damp.confidence,
+            signalTimestamp: new Date(timestamp).toISOString(),
+          });
+          this.recordRollup({
+            kind: "scale_in",
+            profile: state.profile,
+            outcome: "skip",
+            mode: decision.mode ?? "none",
+            reason: "stock_close_tail_damp_below_min_order",
+            sample: { tokenId: String(tokenId), proposedAddSizeUsd: damp.dampedSizeUsdc },
+          });
+          continue;
+        }
+        if (belowMinOrder) {
+          this.recordBuyGuardCounter("stock_close_yes_tail_size_damp_telemetry_total", {
+            reason: "stock_close_tail_damp_below_min_order",
+            marketClass: damp.marketClass,
+            confidence: damp.confidence,
+            thresholdBucket: damp.thresholdBucket,
+            action: "telemetry",
+          });
+        } else {
+          proposedAddSizeUsd = damp.dampedSizeUsdc;
+          this.recordBuyGuardCounter("stock_close_yes_tail_size_damp_applied_total", {
+            reason: damp.reason,
+            marketClass: damp.marketClass,
+            confidence: damp.confidence,
+            thresholdBucket: damp.thresholdBucket,
+            action: "apply",
+          });
+          this.recordRiskEvent("stock_close_yes_tail_size_damp_apply", {
+            tokenId: String(tokenId),
+            conditionId: String(position.conditionId),
+            reason: damp.reason,
+            baseSizeUsdc: damp.baseSizeUsdc,
+            dampedSizeUsdc: damp.dampedSizeUsdc,
+            rangePct: damp.rangePct,
+            marketClass: damp.marketClass,
+            confidence: damp.confidence,
+            signalTimestamp: new Date(timestamp).toISOString(),
+          });
+        }
+      }
+
       const cap = decideCostCap(
         {
           profile: state.profile,
@@ -375,7 +507,7 @@ export class ExecutionProfileManager implements RuntimeModule {
           action: {
             side: "buy",
             kind: "scale_in",
-            proposedNotionalUsd: decision.proposedAddSizeUsd,
+            proposedNotionalUsd: proposedAddSizeUsd,
           },
           signals: decision.costCapContext,
         },
@@ -411,8 +543,8 @@ export class ExecutionProfileManager implements RuntimeModule {
           conditionId: position.conditionId,
           side: "buy",
           suggestedPrice: currentMarkPrice,
-          suggestedSize: decision.proposedAddSizeUsd / currentMarkPrice,
-          suggestedSizeUsdc: decision.proposedAddSizeUsd,
+          suggestedSize: proposedAddSizeUsd / currentMarkPrice,
+          suggestedSizeUsdc: proposedAddSizeUsd,
           reason: SignalReason.ScaleIn,
           strategyTick: timestamp,
           sequenceInTick: state.addCount,
@@ -430,7 +562,7 @@ export class ExecutionProfileManager implements RuntimeModule {
         reason: "allowed",
         sample: {
           tokenId: String(tokenId),
-          proposedAddSizeUsd: decision.proposedAddSizeUsd,
+          proposedAddSizeUsd,
           markPrice: currentMarkPrice,
         },
       });
@@ -518,6 +650,10 @@ export class ExecutionProfileManager implements RuntimeModule {
 
   private recordCounter(name: string, labels: Record<string, unknown>): void {
     writeExecutionProfileCounter(this.deps.runtimeMetrics, name, labels as ExecutionProfileLabels);
+  }
+
+  private recordBuyGuardCounter(name: string, labels: Record<string, string>): void {
+    this.deps.runtimeMetrics?.writeCounter(name, 1, JSON.stringify(labels));
   }
 
   private recordRiskEvent(eventType: string, payload: Record<string, unknown>): void {

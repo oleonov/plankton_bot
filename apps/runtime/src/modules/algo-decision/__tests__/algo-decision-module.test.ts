@@ -1001,6 +1001,59 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("applies stock-close YES-tail damp on the live evaluateTokens worker path", async () => {
+    const tokenId = "token-stock-tail";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+
+    const mod = buildModule({
+      runtimeMetrics,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+      }),
+    });
+    await mod.start();
+
+    const market = {
+      ...makeMarket(tokenId, "fam-1", 0.45),
+      slug: "will-meta-meta-close-at-560-570-on-june-19",
+      question: "Will Meta (META) close at $560-$570 on June 19?",
+      outcome: "Yes",
+      tags: ["stocks"],
+    };
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    const signal = signalCalls[0]![1].signal as import("@krabs/domain").Signal;
+    expect(signal.reason).toBe("probe-entry");
+    expect(signal.suggestedSizeUsdc).toBeCloseTo(0.495, 6);
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "stock_close_yes_tail_size_damp_applied_total",
+      1,
+      expect.stringContaining('"action":"apply"'),
+    );
+    const rawLabels = vi.mocked(runtimeMetrics.writeCounter).mock.calls[0]?.[2];
+    expect(typeof rawLabels).toBe("string");
+    const metricLabels = JSON.parse(rawLabels as string);
+    expect(Object.keys(metricLabels).sort()).toEqual([
+      "action",
+      "confidence",
+      "marketClass",
+      "reason",
+      "thresholdBucket",
+    ]);
+
+    await mod.stop();
+  });
+
   it("records first-entry fresh-edge diagnostics without changing the BUY signal", async () => {
     const tokenId = "token-entry-fresh-edge";
     selectedMarketCache = createMockSelectedMarketCache([tokenId]);

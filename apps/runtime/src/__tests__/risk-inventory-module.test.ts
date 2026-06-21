@@ -400,6 +400,86 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
+  it("does not apply the D3 near-death guard to initial probe-entry BUY signals", () => {
+    positionRepo = createMockPositionRepo(makeMtmPosition({ avgEntryPrice: 0.08 }));
+    const runtimeMetrics = { writeCounter: vi.fn() };
+    const localModule = createModule(undefined, {
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      runtimeMetrics: runtimeMetrics as any,
+      effectiveResolution: {
+        toBuyPlacementFields: () => ({
+          effectiveResolutionAt: new Date(MTM_NOW_MS + 6 * 3_600_000).toISOString(),
+          calendarMissing: false,
+          appliesToBuy: false,
+          minRunwayHours: 24,
+        }),
+        toBuyRunwayFields: () => ({
+          effectiveResolutionAt: new Date(MTM_NOW_MS + 6 * 3_600_000).toISOString(),
+          effectiveRunwayHours: 6,
+          calendarMissing: false,
+          appliesToBuy: false,
+          marketClass: "OTHER",
+          confidence: "high",
+        }),
+      },
+    });
+
+    const reason = (localModule as any).evaluateD3BuyGuard(
+      makeSignal({
+        reason: "probe-entry",
+        suggestedPrice: 0.03,
+        suggestedSize: 10,
+        suggestedSizeUsdc: 0.3,
+      }),
+      makeMarket({ bestAsk: 0.03, midPrice: 0.03 }),
+    );
+
+    expect(reason).toBeNull();
+    expect(runtimeMetrics.writeCounter).not.toHaveBeenCalled();
+  });
+
+  it("blocks post-entry scale-in BUY signals with the D3 near-death guard", () => {
+    positionRepo = createMockPositionRepo(makeMtmPosition({ avgEntryPrice: 0.08 }));
+    const runtimeMetrics = { writeCounter: vi.fn() };
+    const localModule = createModule(undefined, {
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      runtimeMetrics: runtimeMetrics as any,
+      effectiveResolution: {
+        toBuyPlacementFields: () => ({
+          effectiveResolutionAt: new Date(MTM_NOW_MS + 6 * 3_600_000).toISOString(),
+          calendarMissing: false,
+          appliesToBuy: false,
+          minRunwayHours: 24,
+        }),
+        toBuyRunwayFields: () => ({
+          effectiveResolutionAt: new Date(MTM_NOW_MS + 6 * 3_600_000).toISOString(),
+          effectiveRunwayHours: 6,
+          calendarMissing: false,
+          appliesToBuy: false,
+          marketClass: "OTHER",
+          confidence: "high",
+        }),
+      },
+    });
+
+    const reason = (localModule as any).evaluateD3BuyGuard(
+      makeSignal({
+        reason: "scale-in",
+        suggestedPrice: 0.03,
+        suggestedSize: 10,
+        suggestedSizeUsdc: 0.3,
+      }),
+      makeMarket({ bestAsk: 0.03, midPrice: 0.03 }),
+    );
+
+    expect(reason).toBe("near_death_add");
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "d3_near_death_scale_in_suppressed_total",
+      1,
+      expect.stringContaining('"reason":"near_death_add"'),
+    );
+  });
+
   it("emits the configured redeem-in-flight rejection counter for BUY and SELL", async () => {
     const fixedNow = Date.parse("2026-05-11T00:00:00.000Z");
     const runtimeMetrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
@@ -556,7 +636,9 @@ describe("RiskInventoryModule", () => {
     market?: Partial<NormalizedMarket>;
     signal?: Partial<Signal>;
     tracker?: ReturnType<typeof makeStubTracker>;
-    effectiveResolution?: ConstructorParameters<typeof RiskInventoryModule>[0]["effectiveResolution"];
+    effectiveResolution?: ConstructorParameters<
+      typeof RiskInventoryModule
+    >[0]["effectiveResolution"];
     now?: number;
   }) {
     mod = createModule(undefined, {

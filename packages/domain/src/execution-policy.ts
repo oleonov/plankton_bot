@@ -10,6 +10,7 @@
  */
 import type {
   BuyCapacityPolicy,
+  BuyGuardsPolicy,
   BuyGuardShortLifetimePolicy,
   DeadSideGuardPolicy,
   DepositActivationPolicy,
@@ -561,6 +562,25 @@ export const DEFAULT_TRACK_S4_DUST_AUTO_CLOSE_POLICY: TrackS4DustAutoCloseConfig
   },
 };
 
+export const DEFAULT_BUY_GUARDS_POLICY: BuyGuardsPolicy = {
+  d3NearDeathGuard: {
+    enabled: true,
+    maxRunwayHours: 72,
+    maxAddPrice: 0.03,
+    maxDropVsAvgPct: -0.5,
+    stockClosePennyMaxAddPrice: 0.01,
+  },
+  stockCloseTailSizeDamp: {
+    enabled: true,
+    maxRangePct: 0.03,
+    factor: 0.5,
+    applyToProbe: true,
+    applyToScaleIn: true,
+    mediumConfidenceMode: "telemetry_only",
+    skipBelowMinOrder: true,
+  },
+};
+
 export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   version: 1,
   entryPriceCeiling: 0.45,
@@ -572,6 +592,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   exitRepriceThresholdPct: 0.3,
   exitRepriceThresholdTicks: 10,
   marketSelection: DEFAULT_MARKET_SELECTION_POLICY,
+  buyGuards: DEFAULT_BUY_GUARDS_POLICY,
   buyCapacity: DEFAULT_BUY_CAPACITY_POLICY,
   sellCapacity: DEFAULT_SELL_CAPACITY_POLICY,
   orderCapacity: DEFAULT_ORDER_CAPACITY_POLICY,
@@ -880,6 +901,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const executionProfile = parseExecutionProfile(obj.executionProfile, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
+  const buyGuards = parseBuyGuards(obj.buyGuards, issues);
   const buyCapacity = parseBuyCapacity(obj.buyCapacity, issues);
   const sellCapacity = parseSellCapacity(obj.sellCapacity, issues);
   const orderCapacity = parseOrderCapacity(obj.orderCapacity, issues);
@@ -919,6 +941,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       exitRepriceThresholdPct,
       exitRepriceThresholdTicks,
       marketSelection,
+      buyGuards,
       buyCapacity,
       sellCapacity,
       orderCapacity,
@@ -3466,6 +3489,124 @@ function parseBuyCapacity(raw: unknown, issues: string[]): BuyCapacityPolicy {
   };
 }
 
+function parseBuyGuards(raw: unknown, issues: string[]): BuyGuardsPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("buyGuards must be an object");
+    return DEFAULT_BUY_GUARDS_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    d3NearDeathGuard: parseD3NearDeathGuard(obj.d3NearDeathGuard, issues),
+    stockCloseTailSizeDamp: parseStockCloseTailSizeDamp(obj.stockCloseTailSizeDamp, issues),
+  };
+}
+
+function parseD3NearDeathGuard(
+  raw: unknown,
+  issues: string[],
+): BuyGuardsPolicy["d3NearDeathGuard"] {
+  const fallback = DEFAULT_BUY_GUARDS_POLICY.d3NearDeathGuard;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("buyGuards.d3NearDeathGuard must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(obj.enabled, fallback.enabled, issues, "buyGuards.d3NearDeathGuard.enabled"),
+    maxRunwayHours: clampedNumber(
+      obj.maxRunwayHours,
+      fallback.maxRunwayHours,
+      0,
+      720,
+      issues,
+      "buyGuards.d3NearDeathGuard.maxRunwayHours",
+    ),
+    maxAddPrice: clampedNumber(
+      obj.maxAddPrice,
+      fallback.maxAddPrice,
+      0,
+      1,
+      issues,
+      "buyGuards.d3NearDeathGuard.maxAddPrice",
+    ),
+    maxDropVsAvgPct: clampedNumber(
+      obj.maxDropVsAvgPct,
+      fallback.maxDropVsAvgPct,
+      -1,
+      0,
+      issues,
+      "buyGuards.d3NearDeathGuard.maxDropVsAvgPct",
+    ),
+    stockClosePennyMaxAddPrice: clampedNumber(
+      obj.stockClosePennyMaxAddPrice,
+      fallback.stockClosePennyMaxAddPrice,
+      0,
+      1,
+      issues,
+      "buyGuards.d3NearDeathGuard.stockClosePennyMaxAddPrice",
+    ),
+  };
+}
+
+function parseStockCloseTailSizeDamp(
+  raw: unknown,
+  issues: string[],
+): BuyGuardsPolicy["stockCloseTailSizeDamp"] {
+  const fallback = DEFAULT_BUY_GUARDS_POLICY.stockCloseTailSizeDamp;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("buyGuards.stockCloseTailSizeDamp must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      fallback.enabled,
+      issues,
+      "buyGuards.stockCloseTailSizeDamp.enabled",
+    ),
+    maxRangePct: positiveClampedNumber(
+      obj.maxRangePct,
+      fallback.maxRangePct,
+      1,
+      issues,
+      "buyGuards.stockCloseTailSizeDamp.maxRangePct",
+    ),
+    factor: positiveClampedNumber(
+      obj.factor,
+      fallback.factor,
+      1,
+      issues,
+      "buyGuards.stockCloseTailSizeDamp.factor",
+    ),
+    applyToProbe: booleanOr(
+      obj.applyToProbe,
+      fallback.applyToProbe,
+      issues,
+      "buyGuards.stockCloseTailSizeDamp.applyToProbe",
+    ),
+    applyToScaleIn: booleanOr(
+      obj.applyToScaleIn,
+      fallback.applyToScaleIn,
+      issues,
+      "buyGuards.stockCloseTailSizeDamp.applyToScaleIn",
+    ),
+    mediumConfidenceMode: enumOr(
+      obj.mediumConfidenceMode,
+      ["telemetry_only"],
+      fallback.mediumConfidenceMode,
+      issues,
+      "buyGuards.stockCloseTailSizeDamp.mediumConfidenceMode",
+    ),
+    skipBelowMinOrder: booleanOr(
+      obj.skipBelowMinOrder,
+      fallback.skipBelowMinOrder,
+      issues,
+      "buyGuards.stockCloseTailSizeDamp.skipBelowMinOrder",
+    ),
+  };
+}
+
 function parseSellCapacity(raw: unknown, issues: string[]): SellCapacityPolicy {
   if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
     if (raw !== undefined) issues.push("sellCapacity must be an object");
@@ -4102,6 +4243,25 @@ function clampedNumber(
   }
   if (raw < min || raw > max) {
     issues.push(`${name}=${raw} out of range [${min}, ${max}]`);
+    return fallback;
+  }
+  return raw;
+}
+
+function positiveClampedNumber(
+  raw: unknown,
+  fallback: number,
+  max: number,
+  issues: string[],
+  name: string,
+): number {
+  if (raw === undefined) return fallback;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    issues.push(`${name} must be a finite number`);
+    return fallback;
+  }
+  if (raw <= 0 || raw > max) {
+    issues.push(`${name}=${raw} out of range (0, ${max}]`);
     return fallback;
   }
   return raw;

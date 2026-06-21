@@ -23,6 +23,17 @@ export interface EffectiveResolutionGate {
     appliesToBuy: boolean;
     minRunwayHours: number;
   };
+  toBuyRunwayFields(
+    market: EffectiveResolutionMarketInput,
+    now: Date | number | string,
+  ): {
+    effectiveResolutionAt: string | null;
+    effectiveRunwayHours: number | null;
+    calendarMissing: boolean;
+    appliesToBuy: boolean;
+    marketClass: EffectiveResolutionResult["marketClass"];
+    confidence: EffectiveResolutionResult["confidence"];
+  };
   coverageStatus(now: Date | number | string): {
     daysRemaining: number | null;
     warn: boolean;
@@ -77,6 +88,32 @@ export class RuntimeEffectiveResolutionService implements EffectiveResolutionGat
       calendarMissing: result.calendarCoverageMissing,
       appliesToBuy: result.marketClass === "US_EQUITY_CLOSE",
       minRunwayHours: STRIKE_MIN_HORIZON_HOURS,
+    };
+  }
+
+  toBuyRunwayFields(
+    market: EffectiveResolutionMarketInput,
+    now: Date | number | string,
+  ): {
+    effectiveResolutionAt: string | null;
+    effectiveRunwayHours: number | null;
+    calendarMissing: boolean;
+    appliesToBuy: boolean;
+    marketClass: EffectiveResolutionResult["marketClass"];
+    confidence: EffectiveResolutionResult["confidence"];
+  } {
+    const result = this.resolve(market);
+    const nowDate = parseNow(now);
+    return {
+      effectiveResolutionAt: result.effectiveResolutionAt?.toISOString() ?? null,
+      effectiveRunwayHours:
+        result.effectiveResolutionAt == null
+          ? null
+          : (result.effectiveResolutionAt.getTime() - nowDate.getTime()) / 3_600_000,
+      calendarMissing: result.calendarCoverageMissing,
+      appliesToBuy: result.marketClass === "US_EQUITY_CLOSE",
+      marketClass: result.marketClass,
+      confidence: result.confidence,
     };
   }
 
@@ -153,6 +190,12 @@ export class RuntimeEffectiveResolutionService implements EffectiveResolutionGat
       );
     }
   }
+}
+
+function parseNow(now: Date | number | string): Date {
+  const parsed = now instanceof Date ? now : new Date(now);
+  if (!Number.isFinite(parsed.getTime())) return new Date();
+  return parsed;
 }
 
 function bucketDeltaHours(deltaHours: number): string {

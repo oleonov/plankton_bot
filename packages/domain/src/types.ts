@@ -733,6 +733,41 @@ export interface BuyCapacityPolicy {
   maxOpenBuyOrdersPerToken: number;
 }
 
+export type BuyGuardMediumConfidenceMode = "telemetry_only";
+
+export interface D3NearDeathGuardPolicy {
+  enabled: boolean;
+  /** Maximum effective runway where late near-death D3/scale-in adds are blocked. */
+  maxRunwayHours: number;
+  /** Add price at or below this value participates in the near-death guard. */
+  maxAddPrice: number;
+  /** Fractional drop from position avg entry, e.g. -0.5 means down 50%. */
+  maxDropVsAvgPct: number;
+  /** Stricter price cutoff for high-confidence US equity close markets. */
+  stockClosePennyMaxAddPrice: number;
+}
+
+export interface StockCloseTailSizeDampPolicy {
+  enabled: boolean;
+  /** Maximum parsed range width / midpoint for a narrow stock-close YES tail. */
+  maxRangePct: number;
+  /** BUY notional multiplier for high-confidence narrow stock-close YES tails. */
+  factor: number;
+  /** Apply size damp to first-entry/probe BUY signals. */
+  applyToProbe: boolean;
+  /** Apply size damp to post-entry scale-in/add BUY signals. */
+  applyToScaleIn: boolean;
+  /** Medium-confidence/uncertain-outcome handling; v1 observes only. */
+  mediumConfidenceMode: BuyGuardMediumConfidenceMode;
+  /** Skip instead of emitting a below-min-order damped BUY. */
+  skipBelowMinOrder: boolean;
+}
+
+export interface BuyGuardsPolicy {
+  d3NearDeathGuard: D3NearDeathGuardPolicy;
+  stockCloseTailSizeDamp: StockCloseTailSizeDampPolicy;
+}
+
 export type SellCapacityMode = "legacy_global" | "source_aware_dynamic";
 
 export interface SellCapacityPolicy {
@@ -1239,6 +1274,10 @@ export type ScaleInReason =
   | "avg_down_disabled"
   | "flat_no_trigger"
   | "below_min_add"
+  | "near_death_add"
+  | "stock_close_penny_add"
+  | "calendar_missing"
+  | "stock_close_tail_damp_below_min_order"
   | "cost_cap_blocked"
   | "allowed"
   | ManagerScaleInReason;
@@ -1704,6 +1743,7 @@ export interface ExecutionPolicy {
   exitRepriceThresholdPct: number;
   exitRepriceThresholdTicks: number;
   marketSelection: MarketSelectionPolicy;
+  buyGuards: BuyGuardsPolicy;
   buyCapacity: BuyCapacityPolicy;
   sellCapacity: SellCapacityPolicy;
   orderCapacity: OrderCapacityPolicy;

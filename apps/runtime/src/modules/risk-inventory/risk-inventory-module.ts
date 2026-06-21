@@ -32,7 +32,13 @@ import type {
   Position,
   TokenId,
 } from "@krabs/domain";
-import { canPlaceBuyOrderForMarket, recordStageDuration, roundToTick } from "@krabs/domain";
+import {
+  SignalReason,
+  canPlaceBuyOrderForMarket,
+  evaluateD3NearDeathGuard,
+  recordStageDuration,
+  roundToTick,
+} from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { findActivePositions } from "../../active-positions.js";
@@ -81,7 +87,10 @@ export interface RiskInventoryModuleDeps {
    * tests, scenario harness).
    */
   resolutionTracker?: MarketResolutionTracker | undefined;
-  effectiveResolution?: Pick<EffectiveResolutionGate, "toBuyPlacementFields"> | undefined;
+  effectiveResolution?:
+    | (Pick<EffectiveResolutionGate, "toBuyPlacementFields"> &
+        Partial<Pick<EffectiveResolutionGate, "toBuyRunwayFields">>)
+    | undefined;
   /** Override for tests; defaults to Date.now. */
   now?: () => number;
   /** Optional kill switch; live-lite market-data marks are gated per position. */
@@ -390,6 +399,37 @@ export class RiskInventoryModule implements RuntimeModule {
     return null;
   }
 
+  private evaluateD3BuyGuard(
+    signal: RuntimeEventMap["SignalProduced"]["signal"],
+    market: RuntimeEventMap["SignalProduced"]["market"],
+  ): string | null {
+    if (signal.side !== "buy") return null;
+    if (!isPostEntryAddReason(signal.reason)) return null;
+    const buyGuards = this.deps.executionPolicy?.().buyGuards;
+    if (buyGuards == null) return null;
+    const position = this.deps.positionRepo.findByTokenId(signal.tokenId);
+    const runway = this.deps.effectiveResolution?.toBuyRunwayFields?.(market, this.now()) ?? null;
+    const decision = evaluateD3NearDeathGuard({
+      policy: buyGuards.d3NearDeathGuard,
+      addPrice: signal.suggestedPrice,
+      avgEntryPrice: position?.avgEntryPrice ?? null,
+      runway,
+    });
+    if (decision.action !== "block") return null;
+    this.deps.runtimeMetrics?.writeCounter(
+      "d3_near_death_scale_in_suppressed_total",
+      1,
+      JSON.stringify({
+        reason: decision.reason,
+        marketClass: decision.marketClass,
+        confidence: decision.confidence,
+        thresholdBucket: decision.thresholdBucket,
+        action: "block",
+      }),
+    );
+    return decision.reason;
+  }
+
   // ─── Signal evaluation ────────────────────────────────────────────
 
   private async handleSignal(payload: RuntimeEventMap["SignalProduced"]): Promise<void> {
@@ -445,6 +485,27 @@ export class RiskInventoryModule implements RuntimeModule {
           signal,
           market,
           reason: buyBlock,
+          rejectedAt: this.now(),
+        });
+        return;
+      }
+
+      const d3BuyGuardBlock = this.evaluateD3BuyGuard(signal, market);
+      if (d3BuyGuardBlock) {
+        this.signalsRejectedCount++;
+        this.deps.signalPathTelemetry?.recordRejected(signal.signalId, d3BuyGuardBlock);
+        this.logRejectedSignal(
+          {
+            signalId: signal.signalId,
+            tokenId: String(signal.tokenId),
+            reasons: [d3BuyGuardBlock],
+          },
+          "BUY signal rejected — D3 near-death guard",
+        );
+        await this.deps.bus.publish("SignalRejected", {
+          signal,
+          market,
+          reason: d3BuyGuardBlock,
           rejectedAt: this.now(),
         });
         return;
@@ -636,4 +697,12 @@ export class RiskInventoryModule implements RuntimeModule {
     if (previous.status !== "open" || next.status !== "dust") return;
     await this.deps.bus.publish("PositionUpdated", { position: next });
   }
+}
+
+function isPostEntryAddReason(reason: string): boolean {
+  return (
+    reason === SignalReason.ConfirmScale ||
+    reason === SignalReason.ScaleIn ||
+    reason === SignalReason.HeavyScale
+  );
 }

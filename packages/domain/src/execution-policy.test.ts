@@ -2334,4 +2334,114 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("trackR.partialExitMinFraction"))).toBe(true);
     expect(issues.some((i) => i.includes("trackR.partialExitMaxPerHour"))).toBe(true);
   });
+
+  it("defaults BUY guards enabled with approved thresholds", () => {
+    const { policy, issues } = parseExecutionPolicyJson("{}");
+
+    expect(issues).toEqual([]);
+    expect(policy.buyGuards).toEqual(DEFAULT_EXECUTION_POLICY.buyGuards);
+    expect(policy.buyGuards.d3NearDeathGuard).toMatchObject({
+      enabled: true,
+      maxRunwayHours: 72,
+      maxAddPrice: 0.03,
+      maxDropVsAvgPct: -0.5,
+      stockClosePennyMaxAddPrice: 0.01,
+    });
+    expect(policy.buyGuards.stockCloseTailSizeDamp).toMatchObject({
+      enabled: true,
+      maxRangePct: 0.03,
+      factor: 0.5,
+      applyToProbe: true,
+      applyToScaleIn: true,
+      mediumConfidenceMode: "telemetry_only",
+      skipBelowMinOrder: true,
+    });
+  });
+
+  it("parses documented BUY guard tuning keys", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        buyGuards: {
+          d3NearDeathGuard: {
+            enabled: true,
+            maxAddPrice: 0.025,
+            maxDropVsAvgPct: -0.6,
+            maxRunwayHours: 48,
+            stockClosePennyMaxAddPrice: 0.005,
+          },
+          stockCloseTailSizeDamp: {
+            enabled: true,
+            factor: 0.4,
+            maxRangePct: 0.02,
+            applyToProbe: false,
+            applyToScaleIn: false,
+            mediumConfidenceMode: "telemetry_only",
+            skipBelowMinOrder: false,
+          },
+        },
+      }),
+    );
+
+    expect(issues).toEqual([]);
+    expect(policy.buyGuards.d3NearDeathGuard).toMatchObject({
+      enabled: true,
+      maxAddPrice: 0.025,
+      maxDropVsAvgPct: -0.6,
+      maxRunwayHours: 48,
+      stockClosePennyMaxAddPrice: 0.005,
+    });
+    expect(policy.buyGuards.stockCloseTailSizeDamp).toMatchObject({
+      enabled: true,
+      factor: 0.4,
+      maxRangePct: 0.02,
+      applyToProbe: false,
+      applyToScaleIn: false,
+      mediumConfidenceMode: "telemetry_only",
+      skipBelowMinOrder: false,
+    });
+  });
+
+  it("parses BUY guard kill switches", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        buyGuards: {
+          d3NearDeathGuard: { enabled: false },
+          stockCloseTailSizeDamp: { enabled: false },
+        },
+      }),
+    );
+
+    expect(issues).toEqual([]);
+    expect(policy.buyGuards.d3NearDeathGuard.enabled).toBe(false);
+    expect(policy.buyGuards.stockCloseTailSizeDamp.enabled).toBe(false);
+  });
+
+  it("falls back to defaults with issues for invalid BUY guard values", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        buyGuards: {
+          d3NearDeathGuard: {
+            maxRunwayHours: -1,
+            maxDropVsAvgPct: 0.5,
+          },
+          stockCloseTailSizeDamp: {
+            factor: 0,
+            maxRangePct: 0,
+            mediumConfidenceMode: "block",
+          },
+        },
+      }),
+    );
+
+    expect(issues).toEqual(
+      expect.arrayContaining([
+        "buyGuards.d3NearDeathGuard.maxRunwayHours=-1 out of range [0, 720]",
+        "buyGuards.d3NearDeathGuard.maxDropVsAvgPct=0.5 out of range [-1, 0]",
+        "buyGuards.stockCloseTailSizeDamp.factor=0 out of range (0, 1]",
+        "buyGuards.stockCloseTailSizeDamp.maxRangePct=0 out of range (0, 1]",
+        "buyGuards.stockCloseTailSizeDamp.mediumConfidenceMode=block not in [telemetry_only]",
+      ]),
+    );
+    expect(policy.buyGuards).toEqual(DEFAULT_EXECUTION_POLICY.buyGuards);
+  });
 });

@@ -1810,6 +1810,41 @@ export class AlgoDecisionModule implements RuntimeModule {
           },
         });
       }
+      if (sideEffect.kind === "stock_close_tail_size_damp") {
+        const metricName =
+          sideEffect.action === "skip"
+            ? "stock_close_yes_tail_size_damp_skipped_total"
+            : sideEffect.action === "telemetry"
+              ? "stock_close_yes_tail_size_damp_telemetry_total"
+              : "stock_close_yes_tail_size_damp_applied_total";
+        this.deps.runtimeMetrics?.writeCounter(
+          metricName,
+          1,
+          JSON.stringify({
+            reason: sideEffect.reason,
+            marketClass: sideEffect.marketClass,
+            confidence: sideEffect.confidence,
+            thresholdBucket: sideEffect.thresholdBucket,
+            action: sideEffect.action,
+          }),
+        );
+        this.persistence.enqueueRiskEvent({
+          eventType: `stock_close_yes_tail_size_damp_${sideEffect.action}`,
+          payload: {
+            tokenId: String(sideEffect.tokenId),
+            conditionId: sideEffect.conditionId,
+            decisionRuleId: sideEffect.decisionRuleId,
+            reason: sideEffect.reason,
+            baseSizeUsdc: sideEffect.baseSizeUsdc,
+            dampedSizeUsdc: sideEffect.dampedSizeUsdc,
+            rangePct: sideEffect.rangePct,
+            marketClass: sideEffect.marketClass,
+            confidence: sideEffect.confidence,
+            thresholdBucket: sideEffect.thresholdBucket,
+            signalTimestamp: sideEffect.timestamp,
+          },
+        });
+      }
     }
   }
 

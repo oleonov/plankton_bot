@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_BUY_GUARDS_POLICY,
   DEFAULT_EXECUTION_PROFILE_POLICY,
   LiquidityRole,
   OrderType,
@@ -32,6 +33,7 @@ import { ExecutionProfileRollup } from "../execution-profile-rollup.js";
 import { DEFAULT_PROFILE_HYSTERESIS } from "../profile-resolver.js";
 import { InMemoryExecutionProfileStateRepository } from "../state-repository.js";
 import type { ExecutionProfilePolicy, ExecutionProfileStateRecord } from "../types.js";
+import type { EffectiveResolutionGate } from "../../../effective-resolution-service.js";
 
 const tokenId = createTokenId("manager-token");
 const conditionId = createConditionId("manager-condition");
@@ -292,6 +294,8 @@ function makeManager(args: {
   runtimeMetrics?: ReturnType<typeof makeMetrics>;
   riskEvents?: ReturnType<typeof makeRiskEvents>;
   rollup?: ExecutionProfileRollup;
+  buyGuardsPolicy?: typeof DEFAULT_BUY_GUARDS_POLICY;
+  effectiveResolution?: Pick<EffectiveResolutionGate, "toBuyRunwayFields">;
 }): ExecutionProfileManager {
   const deps: ExecutionProfileManagerDeps = {
     bus: args.bus ?? new InProcessEventBus(),
@@ -301,6 +305,8 @@ function makeManager(args: {
     policy: () => args.profilePolicy,
     now: () => NOW,
   };
+  if (args.buyGuardsPolicy != null) deps.buyGuardsPolicy = () => args.buyGuardsPolicy!;
+  if (args.effectiveResolution != null) deps.effectiveResolution = args.effectiveResolution;
   if (args.runtimeMetrics != null) deps.runtimeMetrics = args.runtimeMetrics;
   if (args.riskEvents != null) deps.riskEvents = args.riskEvents;
   if (args.rollup != null) deps.rollup = args.rollup;
@@ -488,6 +494,398 @@ describe("ExecutionProfileManager", () => {
       decisionRuleId: "EXECUTION_PROFILE_SCALE_IN",
       suggestedPrice: 0.106,
     });
+  });
+
+  it("applies stock-close YES-tail size damp to profile scale-in", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    const metrics = makeMetrics();
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ lastBuyAtMs: NOW - 2_000_000, initialProbeSizeUsd: 10 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      signalSnapshot: zeroSignals(),
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true, useRealFeed: false },
+        costCaps: { enabled: false },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [
+        market({
+          slug: "will-meta-meta-close-at-560-570-on-june-19",
+          question: "Will Meta (META) close at $560-$570 on June 19?",
+          outcome: "Yes",
+          tags: ["stocks"],
+          bestAsk: 0.106,
+          midPrice: 0.1,
+          lastTradePrice: 0.1,
+        }),
+      ],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      side: "buy",
+      reason: "scale-in",
+      suggestedSizeUsdc: 5,
+    });
+    expect(metrics.counters).toContainEqual(
+      expect.objectContaining({
+        name: "stock_close_yes_tail_size_damp_applied_total",
+        labels: expect.stringContaining('"action":"apply"'),
+      }),
+    );
+  });
+
+  it("does not damp profile scale-in when applyToScaleIn is disabled", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    const metrics = makeMetrics();
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ lastBuyAtMs: NOW - 2_000_000, initialProbeSizeUsd: 10 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      signalSnapshot: zeroSignals(),
+      buyGuardsPolicy: {
+        ...DEFAULT_BUY_GUARDS_POLICY,
+        stockCloseTailSizeDamp: {
+          ...DEFAULT_BUY_GUARDS_POLICY.stockCloseTailSizeDamp,
+          applyToScaleIn: false,
+        },
+      },
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true, useRealFeed: false },
+        costCaps: { enabled: false },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [
+        market({
+          slug: "will-meta-meta-close-at-560-570-on-june-19",
+          question: "Will Meta (META) close at $560-$570 on June 19?",
+          outcome: "Yes",
+          tags: ["stocks"],
+          bestAsk: 0.106,
+          midPrice: 0.1,
+          lastTradePrice: 0.1,
+        }),
+      ],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      side: "buy",
+      reason: "scale-in",
+      suggestedSizeUsdc: 10,
+    });
+    expect(metrics.counters).not.toContainEqual(
+      expect.objectContaining({ name: "stock_close_yes_tail_size_damp_applied_total" }),
+    );
+  });
+
+  it("skips profile scale-in when post-damp size falls below min add notional", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ lastBuyAtMs: NOW - 2_000_000, initialProbeSizeUsd: 10 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      riskEvents,
+      signalSnapshot: zeroSignals(),
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true, useRealFeed: false },
+        costCaps: { enabled: true },
+        profiles: {
+          ...DEFAULT_POLICY.profiles,
+          medium: {
+            ...DEFAULT_POLICY.profiles.medium,
+            scaleIn: {
+              ...DEFAULT_POLICY.profiles.medium.scaleIn,
+              minAddNotionalUsd: 6,
+            },
+          },
+        },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [
+        market({
+          slug: "will-meta-meta-close-at-560-570-on-june-19",
+          question: "Will Meta (META) close at $560-$570 on June 19?",
+          outcome: "Yes",
+          tags: ["stocks"],
+          bestAsk: 0.106,
+          midPrice: 0.1,
+          lastTradePrice: 0.1,
+        }),
+      ],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(signals).toHaveLength(0);
+    expect(manager.getPendingScaleIns()).toEqual([]);
+    expect(metrics.counters).toContainEqual(
+      expect.objectContaining({
+        name: "stock_close_yes_tail_size_damp_skipped_total",
+        labels: expect.stringContaining("stock_close_tail_damp_below_min_order"),
+      }),
+    );
+    expect(riskEvents.inserts).toContainEqual(
+      expect.objectContaining({ eventType: "stock_close_yes_tail_size_damp_skip" }),
+    );
+  });
+
+  it("keeps base profile scale-in size when damped size is below min and skipBelowMinOrder is false", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    const metrics = makeMetrics();
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ lastBuyAtMs: NOW - 2_000_000, initialProbeSizeUsd: 10 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      signalSnapshot: zeroSignals(),
+      buyGuardsPolicy: {
+        ...DEFAULT_BUY_GUARDS_POLICY,
+        stockCloseTailSizeDamp: {
+          ...DEFAULT_BUY_GUARDS_POLICY.stockCloseTailSizeDamp,
+          skipBelowMinOrder: false,
+        },
+      },
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true, useRealFeed: false },
+        costCaps: { enabled: false },
+        profiles: {
+          ...DEFAULT_POLICY.profiles,
+          medium: {
+            ...DEFAULT_POLICY.profiles.medium,
+            scaleIn: {
+              ...DEFAULT_POLICY.profiles.medium.scaleIn,
+              minAddNotionalUsd: 6,
+            },
+          },
+        },
+      }),
+      positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [
+        market({
+          slug: "will-meta-meta-close-at-560-570-on-june-19",
+          question: "Will Meta (META) close at $560-$570 on June 19?",
+          outcome: "Yes",
+          tags: ["stocks"],
+          bestAsk: 0.106,
+          midPrice: 0.1,
+          lastTradePrice: 0.1,
+        }),
+      ],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      side: "buy",
+      reason: "scale-in",
+      suggestedSizeUsdc: 10,
+    });
+    expect(metrics.counters).toContainEqual(
+      expect.objectContaining({
+        name: "stock_close_yes_tail_size_damp_telemetry_total",
+        labels: expect.stringContaining("stock_close_tail_damp_below_min_order"),
+      }),
+    );
+    expect(manager.getPendingScaleIns()).toHaveLength(1);
+  });
+
+  it("blocks profile D3 near-death scale-in inside effective runway", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    const metrics = makeMetrics();
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ lastBuyAtMs: NOW - 2_000_000, initialProbeSizeUsd: 10 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      signalSnapshot: zeroSignals({ recovery60: 1 }),
+      effectiveResolution: {
+        toBuyRunwayFields: vi.fn(() => ({
+          effectiveResolutionAt: new Date(NOW + 6 * 3_600_000).toISOString(),
+          effectiveRunwayHours: 6,
+          calendarMissing: false,
+          appliesToBuy: false,
+          marketClass: "OTHER" as const,
+          confidence: "high" as const,
+        })),
+      },
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true, useRealFeed: false },
+        costCaps: { enabled: false },
+        profiles: {
+          ...DEFAULT_POLICY.profiles,
+          medium: {
+            ...DEFAULT_POLICY.profiles.medium,
+            scaleIn: {
+              ...DEFAULT_POLICY.profiles.medium.scaleIn,
+              modes: {
+                ...DEFAULT_POLICY.profiles.medium.scaleIn.modes,
+                avgDown: {
+                  ...DEFAULT_POLICY.profiles.medium.scaleIn.modes.avgDown,
+                  enabled: true,
+                  requireRecovery: false,
+                },
+              },
+            },
+          },
+        },
+      }),
+      positions: [position({ avgEntryPrice: 0.08, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.03, midPrice: 0.03, lastTradePrice: 0.03 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(signals).toHaveLength(0);
+    expect(manager.getPendingScaleIns()).toEqual([]);
+    expect(metrics.counters).toContainEqual(
+      expect.objectContaining({
+        name: "d3_near_death_scale_in_suppressed_total",
+        labels: expect.stringContaining("near_death_add"),
+      }),
+    );
+  });
+
+  it("does not block medium-confidence stock-close penny scale-in without severe drop", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ lastBuyAtMs: NOW - 2_000_000, initialProbeSizeUsd: 10 }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      signalSnapshot: zeroSignals({ recovery60: 1 }),
+      effectiveResolution: {
+        toBuyRunwayFields: vi.fn(() => ({
+          effectiveResolutionAt: new Date(NOW + 6 * 3_600_000).toISOString(),
+          effectiveRunwayHours: 6,
+          calendarMissing: false,
+          appliesToBuy: true,
+          marketClass: "US_EQUITY_CLOSE" as const,
+          confidence: "medium" as const,
+        })),
+      },
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true, useRealFeed: false },
+        costCaps: { enabled: false },
+        profiles: {
+          ...DEFAULT_POLICY.profiles,
+          medium: {
+            ...DEFAULT_POLICY.profiles.medium,
+            scaleIn: {
+              ...DEFAULT_POLICY.profiles.medium.scaleIn,
+              modes: {
+                ...DEFAULT_POLICY.profiles.medium.scaleIn.modes,
+                avgDown: {
+                  ...DEFAULT_POLICY.profiles.medium.scaleIn.modes.avgDown,
+                  enabled: true,
+                  requireRecovery: false,
+                },
+              },
+            },
+          },
+        },
+      }),
+      positions: [position({ avgEntryPrice: 0.012, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [
+        market({
+          slug: "will-meta-meta-close-at-560-570-on-june-19",
+          question: "Will Meta (META) close at $560-$570 on June 19?",
+          outcome: "Yes",
+          tags: ["stocks"],
+          bestAsk: 0.01,
+          midPrice: 0.01,
+          lastTradePrice: 0.01,
+          minOrderSize: 1,
+        }),
+      ],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.suggestedPrice).toBe(0.01);
   });
 
   it("skips scale-in for ABANDONED_DORMANT state with a diagnostic counter", async () => {

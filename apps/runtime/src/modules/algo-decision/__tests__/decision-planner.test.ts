@@ -195,6 +195,149 @@ describe("evaluateDecisionPlan", () => {
     expect(result.metrics.r23DipFired).toBe(1);
   });
 
+  it("damps stock-close narrow YES-tail first-entry BUY size before emission", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        market: market({
+          slug: "will-meta-meta-close-at-560-570-on-june-19",
+          question: "Will Meta (META) close at $560-$570 on June 19?",
+          outcome: "Yes",
+          midPrice: 0.1,
+          bestBid: 0.09,
+          bestAsk: 0.11,
+          minOrderSize: 1,
+          tags: ["stocks"],
+        }),
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.side).toBe("buy");
+    expect(result.signal.suggestedSizeUsdc).toBe(0.5);
+    expect(result.sideEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "stock_close_tail_size_damp",
+        action: "apply",
+        baseSizeUsdc: 1,
+        dampedSizeUsdc: 0.5,
+        confidence: "high",
+      }),
+    );
+  });
+
+  it("skips stock-close narrow YES-tail BUY when post-damp size is below min order", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        market: market({
+          slug: "will-meta-meta-close-at-560-570-on-june-19",
+          question: "Will Meta (META) close at $560-$570 on June 19?",
+          outcome: "Yes",
+          midPrice: 0.1,
+          bestBid: 0.09,
+          bestAsk: 0.11,
+          minOrderSize: 6,
+          tags: ["stocks"],
+        }),
+      }),
+    );
+
+    expect(result.type).toBe("none");
+    expect(result.suppressions).toContainEqual(
+      expect.objectContaining({
+        reasonCode: "stock_close_tail_damp_below_min_order",
+        side: "BUY",
+      }),
+    );
+    expect(result.sideEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "stock_close_tail_size_damp",
+        action: "skip",
+        reason: "stock_close_tail_damp_below_min_order",
+      }),
+    );
+  });
+
+  it("does not damp first-entry BUY size when applyToProbe is disabled", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        executionPolicy: {
+          ...DEFAULT_EXECUTION_POLICY,
+          entryMinMarketAgeSeconds: 0,
+          r23DipTrigger: { enabled: true, dropThresholdRatio: 0.683, windowMs: 86_400_000 },
+          lossExit: { ...DEFAULT_EXECUTION_POLICY.lossExit, enabled: true },
+          profitTarget: { ...DEFAULT_EXECUTION_POLICY.profitTarget, holdSecondsMin: 0 },
+          buyGuards: {
+            ...DEFAULT_EXECUTION_POLICY.buyGuards,
+            stockCloseTailSizeDamp: {
+              ...DEFAULT_EXECUTION_POLICY.buyGuards.stockCloseTailSizeDamp,
+              applyToProbe: false,
+            },
+          },
+        },
+        market: market({
+          slug: "will-meta-meta-close-at-560-570-on-june-19",
+          question: "Will Meta (META) close at $560-$570 on June 19?",
+          outcome: "Yes",
+          midPrice: 0.1,
+          bestBid: 0.09,
+          bestAsk: 0.11,
+          minOrderSize: 1,
+          tags: ["stocks"],
+        }),
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedSizeUsdc).toBe(1);
+    expect(result.sideEffects).not.toContainEqual(
+      expect.objectContaining({ kind: "stock_close_tail_size_damp", action: "apply" }),
+    );
+  });
+
+  it("keeps base first-entry BUY size when damped size is below min and skipBelowMinOrder is false", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        executionPolicy: {
+          ...DEFAULT_EXECUTION_POLICY,
+          entryMinMarketAgeSeconds: 0,
+          r23DipTrigger: { enabled: true, dropThresholdRatio: 0.683, windowMs: 86_400_000 },
+          lossExit: { ...DEFAULT_EXECUTION_POLICY.lossExit, enabled: true },
+          profitTarget: { ...DEFAULT_EXECUTION_POLICY.profitTarget, holdSecondsMin: 0 },
+          buyGuards: {
+            ...DEFAULT_EXECUTION_POLICY.buyGuards,
+            stockCloseTailSizeDamp: {
+              ...DEFAULT_EXECUTION_POLICY.buyGuards.stockCloseTailSizeDamp,
+              skipBelowMinOrder: false,
+            },
+          },
+        },
+        market: market({
+          slug: "will-meta-meta-close-at-560-570-on-june-19",
+          question: "Will Meta (META) close at $560-$570 on June 19?",
+          outcome: "Yes",
+          midPrice: 0.1,
+          bestBid: 0.09,
+          bestAsk: 0.11,
+          minOrderSize: 6,
+          tags: ["stocks"],
+        }),
+      }),
+    );
+
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedSizeUsdc).toBe(1);
+    expect(result.sideEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "stock_close_tail_size_damp",
+        action: "telemetry",
+        reason: "stock_close_tail_damp_below_min_order",
+      }),
+    );
+  });
+
   it("suppresses R23 when history is unavailable without producing a signal", () => {
     const result = evaluateDecisionPlan(input({ r23MaxMidpoint: null }));
 

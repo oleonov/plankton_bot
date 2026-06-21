@@ -29,6 +29,7 @@ import {
   R23_DIP_TRIGGER_RULE_ID,
   R23_NO_DIP_REASON,
   R23_NO_HISTORY_REASON,
+  applyStockCloseTailSizeDamp,
   resolveSignalReason,
   shouldRecoverFromPriceMove,
 } from "@krabs/domain";
@@ -202,6 +203,21 @@ export type DecisionPlanSideEffect =
       avgEntryPrice: number;
       state: DecisionSignalLog["state"];
       emissionFacts: EmissionFacts;
+      timestamp: string;
+    }
+  | {
+      kind: "stock_close_tail_size_damp";
+      tokenId: TokenId;
+      conditionId: string | null;
+      action: "apply" | "telemetry" | "skip";
+      reason: string;
+      decisionRuleId: string;
+      baseSizeUsdc: number;
+      dampedSizeUsdc: number;
+      rangePct: number | null;
+      marketClass: string;
+      confidence: string;
+      thresholdBucket: string;
       timestamp: string;
     };
 
@@ -1408,6 +1424,7 @@ function buildSignalOrSuppression(args: {
     triggerTelemetry,
     metrics: args.metrics,
     suppressions: args.suppressions,
+    sideEffects: args.sideEffects,
     nowIso: args.nowIso,
   });
   if (!signalDraft) return none(args.metrics, args.suppressions, args.sideEffects);
@@ -1463,6 +1480,7 @@ function buildSignalDraft(args: {
   triggerTelemetry: TriggerTelemetry;
   metrics: DecisionMetricsDelta;
   suppressions: SuppressionPlan[];
+  sideEffects: DecisionPlanSideEffect[];
   nowIso: string;
 }): DecisionSignalDraft | null {
   const { input, market, decision, buyCount, emissionFacts, triggerTelemetry } = args;
@@ -1532,9 +1550,36 @@ function buildSignalDraft(args: {
           sellTimeoutMs: input.executionPolicy?.sellTimeoutMs,
         })
       : null;
-  const suggestedSizeUsdc = sellPlan?.sizeUsdc ?? sizeResult.sizeUsdc;
-  const suggestedSize = sellPlan?.size ?? (price > 0 ? suggestedSizeUsdc / price : 0);
-  const sizeForExecutability =
+  const baseSuggestedSizeUsdc = sellPlan?.sizeUsdc ?? sizeResult.sizeUsdc;
+  const sizeDamp =
+    side === "buy" && input.executionPolicy != null
+      ? applyStockCloseTailSizeDamp({
+          policy: input.executionPolicy.buyGuards.stockCloseTailSizeDamp,
+          market,
+          baseSizeUsdc: baseSuggestedSizeUsdc,
+          target: buyCount >= 1 ? "scale_in" : "probe",
+        })
+      : null;
+  let suggestedSizeUsdc = sizeDamp?.dampedSizeUsdc ?? baseSuggestedSizeUsdc;
+  if (sizeDamp?.action === "telemetry") {
+    args.sideEffects.push({
+      kind: "stock_close_tail_size_damp",
+      tokenId: market.tokenId,
+      conditionId: market.conditionId,
+      action: "telemetry",
+      reason: sizeDamp.reason,
+      decisionRuleId: decision.ruleId,
+      baseSizeUsdc: sizeDamp.baseSizeUsdc,
+      dampedSizeUsdc: sizeDamp.dampedSizeUsdc,
+      rangePct: sizeDamp.rangePct,
+      marketClass: sizeDamp.marketClass,
+      confidence: sizeDamp.confidence,
+      thresholdBucket: sizeDamp.thresholdBucket,
+      timestamp: args.nowIso,
+    });
+  }
+  let suggestedSize = sellPlan?.size ?? (price > 0 ? suggestedSizeUsdc / price : 0);
+  let sizeForExecutability =
     side === "buy"
       ? computeBuyOrderSizeForFilter(suggestedSizeUsdc, market, price)
       : Math.max(
@@ -1545,10 +1590,62 @@ function buildSignalDraft(args: {
           ),
         );
   if (!isExecutableOrderSize(sizeForExecutability, market.minOrderSize)) {
+    if (
+      sizeDamp?.action === "apply" &&
+      input.executionPolicy?.buyGuards.stockCloseTailSizeDamp.skipBelowMinOrder === false
+    ) {
+      const baseSizeForExecutability = computeBuyOrderSizeForFilter(
+        baseSuggestedSizeUsdc,
+        market,
+        price,
+      );
+      if (isExecutableOrderSize(baseSizeForExecutability, market.minOrderSize)) {
+        suggestedSizeUsdc = baseSuggestedSizeUsdc;
+        suggestedSize = price > 0 ? suggestedSizeUsdc / price : 0;
+        sizeForExecutability = baseSizeForExecutability;
+        args.sideEffects.push({
+          kind: "stock_close_tail_size_damp",
+          tokenId: market.tokenId,
+          conditionId: market.conditionId,
+          action: "telemetry",
+          reason: "stock_close_tail_damp_below_min_order",
+          decisionRuleId: decision.ruleId,
+          baseSizeUsdc: sizeDamp.baseSizeUsdc,
+          dampedSizeUsdc: sizeDamp.dampedSizeUsdc,
+          rangePct: sizeDamp.rangePct,
+          marketClass: sizeDamp.marketClass,
+          confidence: sizeDamp.confidence,
+          thresholdBucket: sizeDamp.thresholdBucket,
+          timestamp: args.nowIso,
+        });
+      }
+    }
+  }
+  if (!isExecutableOrderSize(sizeForExecutability, market.minOrderSize)) {
+    if (sizeDamp?.action === "apply") {
+      args.sideEffects.push({
+        kind: "stock_close_tail_size_damp",
+        tokenId: market.tokenId,
+        conditionId: market.conditionId,
+        action: "skip",
+        reason: "stock_close_tail_damp_below_min_order",
+        decisionRuleId: decision.ruleId,
+        baseSizeUsdc: sizeDamp.baseSizeUsdc,
+        dampedSizeUsdc: sizeDamp.dampedSizeUsdc,
+        rangePct: sizeDamp.rangePct,
+        marketClass: sizeDamp.marketClass,
+        confidence: sizeDamp.confidence,
+        thresholdBucket: sizeDamp.thresholdBucket,
+        timestamp: args.nowIso,
+      });
+    }
     args.suppressions.push({
       tokenId: market.tokenId,
       conditionId: market.conditionId,
-      reasonCode: "order-size-below-minimum",
+      reasonCode:
+        sizeDamp?.action === "apply"
+          ? "stock_close_tail_damp_below_min_order"
+          : "order-size-below-minimum",
       side: side === "buy" ? "BUY" : "SELL",
       decisionRuleId: decision.ruleId,
       state,
@@ -1559,6 +1656,23 @@ function buildSignalDraft(args: {
       timestamp: args.nowIso,
     });
     return null;
+  }
+  if (sizeDamp?.action === "apply" && suggestedSizeUsdc === sizeDamp.dampedSizeUsdc) {
+    args.sideEffects.push({
+      kind: "stock_close_tail_size_damp",
+      tokenId: market.tokenId,
+      conditionId: market.conditionId,
+      action: "apply",
+      reason: sizeDamp.reason,
+      decisionRuleId: decision.ruleId,
+      baseSizeUsdc: sizeDamp.baseSizeUsdc,
+      dampedSizeUsdc: sizeDamp.dampedSizeUsdc,
+      rangePct: sizeDamp.rangePct,
+      marketClass: sizeDamp.marketClass,
+      confidence: sizeDamp.confidence,
+      thresholdBucket: sizeDamp.thresholdBucket,
+      timestamp: args.nowIso,
+    });
   }
 
   const isAdd: 0 | 1 = side === "buy" && buyCount >= 1 ? 1 : 0;

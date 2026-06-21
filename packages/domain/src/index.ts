@@ -16,6 +16,7 @@ export * from "./algo-engine.js";
 export * from "./market-selection.js";
 export * from "./strike-classifier.js";
 export * from "./effective-resolution.js";
+export * from "./buy-guards.js";
 export * from "./polymarket-fees.js";
 export * from "./fee-schedule.js";
 export * from "./orderbook.js";
@@ -28,6 +29,7 @@ export type { PreEntryInput } from "./market-selection.js";
 export {
   DEFAULT_EXECUTION_POLICY,
   DEFAULT_BUY_CAPACITY_POLICY,
+  DEFAULT_BUY_GUARDS_POLICY,
   DEFAULT_SELL_CAPACITY_POLICY,
   DEFAULT_ORDER_CAPACITY_POLICY,
   DEFAULT_OPPORTUNISTIC_TAKER_POLICY,

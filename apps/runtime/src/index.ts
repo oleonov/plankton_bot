@@ -1210,6 +1210,8 @@ async function main(): Promise<void> {
     positionRepo: repos.position,
     orderRepo: repos.order,
     policy: () => currentExecutionPolicy().executionProfile,
+    buyGuardsPolicy: () => currentExecutionPolicy().buyGuards,
+    effectiveResolution,
     runtimeMetrics,
     riskEvents: repos.riskEvent,
     rollup: executionProfileRollup,
