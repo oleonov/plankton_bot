@@ -1295,6 +1295,7 @@ async function main(): Promise<void> {
     decisionSignalLogRepo: repos.decisionSignalLog,
     riskEventRepo: repos.riskEvent,
     runtimeMetrics,
+    liveLiteGuard,
     sellLoopGuard: sellLoopGuardModule,
     s1Ownership: s1LadderModule,
     profileLadderOwnership: {

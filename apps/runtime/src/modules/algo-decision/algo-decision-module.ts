@@ -109,6 +109,7 @@ import {
   PlannerSuppressionRollup,
 } from "./planner-suppression-rollup.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
+import type { LiveLiteGuard } from "../../live-lite-guard.js";
 
 // Re-exported for existing consumers; the canonical contract now lives in @krabs/domain.
 export type { S1OwnershipReader };
@@ -374,6 +375,11 @@ type ContinuationFacts = {
   stop: boolean;
 };
 
+type ActiveMarketCapBackpressureSnapshot = {
+  activeTokenIds: ReadonlySet<string>;
+  capFull: boolean;
+};
+
 type SuppressionFacts = {
   tokenId: TokenId;
   conditionId: string | null;
@@ -482,6 +488,11 @@ export interface AlgoDecisionModuleDeps {
   buySignalBudgetCircuitBreaker?: BuySignalBudgetCircuitBreaker | undefined;
   buySignalBudgetCooldownMs?: number | undefined;
   /**
+   * Live-lite active-market cap backpressure. This is an upstream optimization
+   * only; RiskInventory and Execution keep the authoritative admission guards.
+   */
+  liveLiteGuard?: LiveLiteGuard | undefined;
+  /**
    * ADR-016 dependency. When provided AND the runtime_control_state policy is
    * `market_wide`, the post-entry continuation gate consults this provider
    * instead of the per-leg `buyCount + sellCount`. `null` returns from the
@@ -558,6 +569,8 @@ const EVALUATE_YIELD_BATCH = 50;
 const DIRTY_EVALUATION_DELAY_MS = 250;
 const FULL_SWEEP_INTERVAL_MS = 60_000;
 const OPEN_POSITION_WORKING_SET_REFRESH_MS = 5 * 60_000;
+const LIVE_LITE_ACTIVE_MARKETS_CAP_FULL_REASON = "live_lite_active_markets_cap_full";
+const R23_PROBE_CAP_FULL_SKIP_METRIC = "r23_probe_skipped_active_market_cap_full_total";
 const OPEN_POSITION_STALE_EVALUATION_WARN_MS = 24 * 60 * 60_000;
 
 /**
@@ -1476,6 +1489,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     // ~75ms × N latency on the sweep; one parallel prefetch collapses it.
     const executionPolicy = this.deps.executionPolicy?.() ?? null;
     const postBuyCooldown = this.getPostBuyFillSellCooldown(now, executionPolicy);
+    const activeMarketCapBackpressure = this.getActiveMarketCapBackpressureSnapshot();
     this.scheduleContinuationTradeCounts(tokenIds);
     await Promise.resolve();
     if (this.isPaused()) return;
@@ -1494,6 +1508,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         now,
         executionPolicy,
         postBuyCooldown,
+        activeMarketCapBackpressure,
       );
       if (input) inputs.push(input);
     }
@@ -1538,11 +1553,24 @@ export class AlgoDecisionModule implements RuntimeModule {
     now: number,
     executionPolicy: ExecutionPolicy | null,
     postBuyCooldown: { cooldownMs: number; ageMs: number; lastBuyFillAt: number } | null,
+    activeMarketCapBackpressure: ActiveMarketCapBackpressureSnapshot | null,
   ): Promise<DecisionPlanningInput | null> {
     const legState = this.getCachedLegState(tokenId);
     const openPosition = this.findOpenPositionByTokenId(tokenId);
     const selectedForEntry = this.deps.selectedMarketCache.isEligible(tokenId);
     if (!legState && !selectedForEntry && !openPosition) return null;
+    if (
+      this.shouldSkipFlatProbeForActiveMarketCap(
+        tokenId,
+        legState,
+        openPosition,
+        selectedForEntry,
+        activeMarketCapBackpressure,
+      )
+    ) {
+      this.recordR23ProbeSkippedActiveMarketCapFull();
+      return null;
+    }
 
     const market = this.marketCache.get(String(tokenId)) ?? null;
     const prevMidPrice = this.prevMidPrices.get(String(tokenId)) ?? null;
@@ -1597,6 +1625,47 @@ export class AlgoDecisionModule implements RuntimeModule {
       s1Ownership: this.deps.s1Ownership?.getSnapshot(tokenId) ?? null,
       profileLadderOwned: this.deps.profileLadderOwnership?.isProfileLadderOwned(tokenId) ?? false,
     };
+  }
+
+  private getActiveMarketCapBackpressureSnapshot(): ActiveMarketCapBackpressureSnapshot | null {
+    const guard = this.deps.liveLiteGuard;
+    if (!guard?.isActive) return null;
+
+    const activeTokenIds = new Set<string>();
+    for (const [tokenId, position] of this.positionCache.entries()) {
+      if (isOpenPosition(position)) activeTokenIds.add(tokenId);
+    }
+    return {
+      activeTokenIds,
+      capFull: guard.wouldExceedActiveMarketsCap(activeTokenIds.size, 1),
+    };
+  }
+
+  private shouldSkipFlatProbeForActiveMarketCap(
+    tokenId: TokenId,
+    legState: LegState | null,
+    openPosition: Position | null,
+    selectedForEntry: boolean,
+    snapshot: ActiveMarketCapBackpressureSnapshot | null,
+  ): boolean {
+    if (!snapshot?.capFull) return false;
+    if (!selectedForEntry) return false;
+    if (legState || openPosition) return false;
+    return !snapshot.activeTokenIds.has(String(tokenId));
+  }
+
+  private recordR23ProbeSkippedActiveMarketCapFull(): void {
+    this.deps.runtimeMetrics?.writeCounter(
+      R23_PROBE_CAP_FULL_SKIP_METRIC,
+      1,
+      JSON.stringify({
+        reason: LIVE_LITE_ACTIVE_MARKETS_CAP_FULL_REASON,
+        rule: R23_DIP_TRIGGER_RULE_ID,
+        source: "probe-entry",
+        mode: "live-lite",
+        action: "skip",
+      }),
+    );
   }
 
   private getLatestSellOrderForSizing(tokenId: TokenId): SellOrderSizingContext | null {

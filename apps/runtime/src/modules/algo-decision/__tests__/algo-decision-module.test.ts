@@ -31,6 +31,7 @@ import { createTokenId, createCommandId, createOrderId, createPositionId } from 
 import type { ConditionId } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY, S1_LADDER_RULE_ID } from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
+import { LiveLiteGuard } from "../../../live-lite-guard.js";
 
 // ─── Seed rules ───────────────────────────────────────────────────────────────
 
@@ -365,6 +366,17 @@ function makeOpenPosition(tokenId: string, overrides: Partial<Position> = {}): P
     closedAt: null,
     updatedAt: nowIso,
     ...overrides,
+  };
+}
+
+function createPositionRepoForOpenPositions(positions: Position[]) {
+  const map = new Map(positions.map((position) => [String(position.tokenId), position]));
+  return {
+    findOpen: vi.fn(() => [...map.values()].filter((position) => position.status === "open")),
+    findByTokenId: vi.fn((tokenId) => map.get(String(tokenId)) ?? null),
+    remove(tokenId: string) {
+      map.delete(tokenId);
+    },
   };
 }
 
@@ -1186,6 +1198,303 @@ describe("AlgoDecisionModule", () => {
         }),
       }),
     );
+
+    await mod.stop();
+  });
+
+  it("skips flat R23 probe candidates upstream when live-lite active market cap is full", async () => {
+    const tokenId = "token-r23-cap-full";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      maxMidpointInWindow: vi.fn(() => 0.6),
+    };
+    const positionRepo = createPositionRepoForOpenPositions([makeOpenPosition("token-open")]);
+    const mod = buildModule({
+      runtimeMetrics,
+      priceHistoryProvider,
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+      liveLiteGuard: new LiveLiteGuard({
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 25,
+        maxActiveMarkets: 1,
+      }),
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.3)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(0);
+    expect(priceHistoryProvider.maxMidpointInWindow).not.toHaveBeenCalled();
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "r23_probe_skipped_active_market_cap_full_total",
+      1,
+      expect.not.stringContaining("token"),
+    );
+    const labels = JSON.parse(
+      (runtimeMetrics.writeCounter as ReturnType<typeof vi.fn>).mock.calls[0]?.[2] as string,
+    );
+    expect(Object.keys(labels).sort()).toEqual(["action", "mode", "reason", "rule", "source"]);
+    expect(labels).toMatchObject({
+      action: "skip",
+      reason: "live_lite_active_markets_cap_full",
+      rule: "R23_DIP_TRIGGER",
+      source: "probe-entry",
+    });
+
+    await mod.stop();
+  });
+
+  it("allows flat R23 probe candidates below the live-lite active market cap", async () => {
+    const tokenId = "token-r23-cap-room";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      maxMidpointInWindow: vi.fn(() => 0.6),
+    };
+    const positionRepo = createPositionRepoForOpenPositions([]);
+    const mod = buildModule({
+      runtimeMetrics,
+      priceHistoryProvider,
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+      liveLiteGuard: new LiveLiteGuard({
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 25,
+        maxActiveMarkets: 1,
+      }),
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.3)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    expect(signalCalls[0]![1].signal.decisionRuleId).toBe("R23_DIP_TRIGGER");
+    expect(priceHistoryProvider.maxMidpointInWindow).toHaveBeenCalled();
+    expect(runtimeMetrics.writeCounter).not.toHaveBeenCalledWith(
+      "r23_probe_skipped_active_market_cap_full_total",
+      expect.any(Number),
+      expect.any(String),
+    );
+
+    await mod.stop();
+  });
+
+  it("resumes flat R23 probe generation after an active market slot is freed", async () => {
+    const tokenId = "token-r23-resume";
+    const activeTokenId = "token-active-before-close";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+    const positionRepo = createPositionRepoForOpenPositions([makeOpenPosition(activeTokenId)]);
+    const mod = buildModule({
+      runtimeMetrics,
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+      liveLiteGuard: new LiveLiteGuard({
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 25,
+        maxActiveMarkets: 1,
+      }),
+      priceHistoryProvider: {
+        findReferencePrice: vi.fn(() => null),
+        maxMidpointInWindow: vi.fn(() => 0.6),
+      },
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.3)],
+      timestamp: Date.now(),
+    });
+    expect(
+      (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      ),
+    ).toHaveLength(0);
+
+    positionRepo.remove(activeTokenId);
+    await (bus as any).emit("PositionSettled", {
+      positionId: createPositionId(`pos-${activeTokenId}`),
+      tokenId: createTokenId(activeTokenId),
+      resolution: "YES",
+      settlementPrice: 1,
+      realizedPnl: 0,
+      size: 10,
+      avgEntryPrice: 0.1,
+      timestamp: Date.now(),
+    });
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.3)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    expect(signalCalls[0]![1].signal.decisionRuleId).toBe("R23_DIP_TRIGGER");
+
+    await mod.stop();
+  });
+
+  it("does not block same-market scale-in candidates when live-lite active market cap is full", async () => {
+    const tokenId = "token-existing-scale-in";
+    selectedMarketCache = createMockSelectedMarketCache([]);
+    const legState = makeSellReadyLegState(tokenId, {
+      firstTradePrice: 0.2,
+      buyCount: 6,
+      sellCount: 0,
+    });
+    legStateRepo = createMockLegStateRepo([legState]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() => [
+        {
+          id: 20,
+          priority: 20,
+          ruleId: "D3",
+          stateCondition: "ANY",
+          priceOperator: "<=",
+          priceValue: 0.12,
+          timeSinceLastOperator: null,
+          timeSinceLastSeconds: null,
+          buyCountMin: null,
+          buyCountMax: null,
+          holdDurationOperator: null,
+          holdDurationSeconds: null,
+          action: "BUY",
+        },
+        {
+          id: 99,
+          priority: 99,
+          ruleId: "FALLBACK",
+          stateCondition: "ANY",
+          priceOperator: null,
+          priceValue: null,
+          timeSinceLastOperator: null,
+          timeSinceLastSeconds: null,
+          buyCountMin: null,
+          buyCountMax: null,
+          holdDurationOperator: null,
+          holdDurationSeconds: null,
+          action: "HOLD",
+        },
+      ]),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const positionRepo = createPositionRepoForOpenPositions([makeOpenPosition(tokenId)]);
+    const mod = buildModule({
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+      liveLiteGuard: new LiveLiteGuard({
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 25,
+        maxActiveMarkets: 1,
+      }),
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.1)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    expect(signalCalls[0]![1].signal.side).toBe("buy");
+    expect(signalCalls[0]![1].signal.decisionRuleId).toBe("D3");
+
+    await mod.stop();
+  });
+
+  it("does not block SELL candidates when live-lite active market cap is full", async () => {
+    const tokenId = "token-existing-sell";
+    selectedMarketCache = createMockSelectedMarketCache([]);
+    legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+    const positionRepo = createPositionRepoForOpenPositions([makeOpenPosition(tokenId)]);
+    const mod = buildModule({
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+      liveLiteGuard: new LiveLiteGuard({
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 25,
+        maxActiveMarkets: 1,
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.45)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    expect(signalCalls[0]![1].signal.side).toBe("sell");
 
     await mod.stop();
   });
