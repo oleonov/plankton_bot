@@ -50,6 +50,7 @@ import { InventoryHandler } from "./inventory-handler.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
 import type { OrderCapacityMetricsSample, WalletBudgetControlDb } from "../../wallet-buy-budget.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
+import { countActiveOpenMarkets } from "../../exposure-calculator.js";
 import {
   priceToX10000,
   SAME_PRICE_COOLDOWN_REASON,
@@ -60,6 +61,7 @@ import type { EffectiveResolutionGate } from "../../effective-resolution-service
 import type { ExecutionProfileStateRecord } from "../execution-profile/types.js";
 
 const EXECUTION_PROFILE_SCALE_IN_RULE_ID = "EXECUTION_PROFILE_SCALE_IN";
+const LIVE_LITE_ACTIVE_MARKETS_CAP_FULL_REASON = "live_lite_active_markets_cap_full";
 
 export interface RiskInventoryModuleDeps {
   bus: EventBus;
@@ -473,6 +475,32 @@ export class RiskInventoryModule implements RuntimeModule {
     return decision.reason;
   }
 
+  private evaluateActiveMarketCapBuyGuard(
+    signal: RuntimeEventMap["SignalProduced"]["signal"],
+  ): string | null {
+    if (signal.side !== "buy") return null;
+    const guard = this.deps.liveLiteGuard;
+    if (!guard?.isActive) return null;
+
+    const activeMarkets = countActiveOpenMarkets(this.deps.positionRepo);
+    if (activeMarkets.has(String(signal.tokenId))) return null;
+    if (!guard.wouldExceedActiveMarketsCap(activeMarkets.size, 1)) return null;
+
+    this.deps.runtimeMetrics?.writeCounter(
+      "probe_entry_active_market_cap_suppressed_total",
+      1,
+      JSON.stringify({
+        reason: LIVE_LITE_ACTIVE_MARKETS_CAP_FULL_REASON,
+        rule: signal.decisionRuleId ?? "unknown",
+        source: signal.reason,
+        profile: this.deps.activeProfile ?? "unknown",
+        mode: "live-lite",
+        action: "suppress",
+      }),
+    );
+    return LIVE_LITE_ACTIVE_MARKETS_CAP_FULL_REASON;
+  }
+
   // ─── Signal evaluation ────────────────────────────────────────────
 
   private async handleSignal(payload: RuntimeEventMap["SignalProduced"]): Promise<void> {
@@ -528,6 +556,27 @@ export class RiskInventoryModule implements RuntimeModule {
           signal,
           market,
           reason: buyBlock,
+          rejectedAt: this.now(),
+        });
+        return;
+      }
+
+      const activeMarketCapBlock = this.evaluateActiveMarketCapBuyGuard(signal);
+      if (activeMarketCapBlock) {
+        this.signalsRejectedCount++;
+        this.deps.signalPathTelemetry?.recordRejected(signal.signalId, activeMarketCapBlock);
+        this.logRejectedSignal(
+          {
+            signalId: signal.signalId,
+            tokenId: String(signal.tokenId),
+            reasons: [activeMarketCapBlock],
+          },
+          "BUY signal rejected — live-lite active market cap full",
+        );
+        await this.deps.bus.publish("SignalRejected", {
+          signal,
+          market,
+          reason: activeMarketCapBlock,
           rejectedAt: this.now(),
         });
         return;

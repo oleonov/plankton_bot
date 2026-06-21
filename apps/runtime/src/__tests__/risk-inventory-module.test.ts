@@ -41,6 +41,7 @@ const COND_ID = createConditionId("cond-btc");
 const MTM_NOW_MS = Date.parse("2026-05-14T12:00:00.000Z");
 const FRESH_MTM_UPDATED_AT = new Date(MTM_NOW_MS - 30_000).toISOString();
 const STALE_MTM_UPDATED_AT = new Date(MTM_NOW_MS - W4_STALENESS_FALLBACK_MS - 1).toISOString();
+const LIVE_LITE_CAP = 100;
 
 function makeSignal(overrides?: Partial<Signal>): Signal {
   return {
@@ -107,6 +108,21 @@ function makeMtmPosition(overrides: Partial<Position> = {}): Position {
     updatedAt: STALE_MTM_UPDATED_AT,
     ...overrides,
   };
+}
+
+function makeActivePositions(
+  count: number,
+  includeTokenId?: ReturnType<typeof createTokenId>,
+): Position[] {
+  return Array.from({ length: count }, (_, index) =>
+    makeMtmPosition({
+      positionId: createPositionId(`pos-active-${index}`),
+      tokenId:
+        includeTokenId && index === 0 ? includeTokenId : createTokenId(`tok-active-${index}`),
+      conditionId: createConditionId(`cond-active-${index}`),
+      status: "open",
+    }),
+  );
 }
 
 function createMockPositionRepo(position?: Position | Position[] | null): PositionRepository {
@@ -396,6 +412,114 @@ describe("RiskInventoryModule", () => {
 
     expect(rejected).toHaveLength(1);
     expect(rejected[0].market).toBe(embedded);
+
+    await mod.stop();
+  });
+
+  it("suppresses R23 probe-entry before approval when live-lite active market cap is full", async () => {
+    positionRepo = createMockPositionRepo(makeActivePositions(LIVE_LITE_CAP));
+    const runtimeMetrics = { writeCounter: vi.fn() };
+    mod = createModule(
+      new LiveLiteGuard({
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 25,
+        maxActiveMarkets: LIVE_LITE_CAP,
+      }),
+      {
+        runtimeMetrics: runtimeMetrics as any,
+        activeProfile: "live-lite" as any,
+      },
+    );
+    await mod.start();
+
+    const approved: any[] = [];
+    const rejected: any[] = [];
+    bus.subscribe("SignalApproved", async (payload) => {
+      approved.push(payload);
+    });
+    bus.subscribe("SignalRejected", async (payload) => {
+      rejected.push(payload);
+    });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({
+        decisionRuleId: "R23_DIP_TRIGGER",
+        reason: "probe-entry",
+      }),
+      market: makeMarket(),
+    });
+
+    expect(approved).toHaveLength(0);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("live_lite_active_markets_cap_full");
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "probe_entry_active_market_cap_suppressed_total",
+      1,
+      expect.not.stringContaining("token"),
+    );
+
+    await mod.stop();
+  });
+
+  it("allows R23 probe-entry when live-lite active market cap has room", async () => {
+    positionRepo = createMockPositionRepo(makeActivePositions(LIVE_LITE_CAP - 1));
+    mod = createModule(
+      new LiveLiteGuard({
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 25,
+        maxActiveMarkets: LIVE_LITE_CAP,
+      }),
+    );
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (payload) => {
+      approved.push(payload);
+    });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({
+        decisionRuleId: "R23_DIP_TRIGGER",
+        reason: "probe-entry",
+      }),
+      market: makeMarket(),
+    });
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("does not block same-market scale-in when active market cap is full", async () => {
+    positionRepo = createMockPositionRepo(makeActivePositions(LIVE_LITE_CAP, TOK_ID));
+    mod = createModule(
+      new LiveLiteGuard({
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 25,
+        maxActiveMarkets: LIVE_LITE_CAP,
+      }),
+    );
+    await mod.start();
+
+    const approved: any[] = [];
+    const rejected: any[] = [];
+    bus.subscribe("SignalApproved", async (payload) => {
+      approved.push(payload);
+    });
+    bus.subscribe("SignalRejected", async (payload) => {
+      rejected.push(payload);
+    });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({
+        reason: "scale-in",
+        decisionRuleId: "EXECUTION_PROFILE_SCALE_IN",
+      }),
+      market: makeMarket(),
+    });
+
+    expect(rejected).toHaveLength(0);
+    expect(approved).toHaveLength(1);
 
     await mod.stop();
   });

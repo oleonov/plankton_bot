@@ -9,6 +9,7 @@
 const STATIC_CODES: Record<string, string> = {
   "live-lite-open-value-cap-exceeded": "live_lite_open_value_cap",
   "live-lite-active-markets-cap-exceeded": "live_lite_active_markets_cap",
+  live_lite_active_markets_cap_full: "live_lite_active_markets_cap_full",
   "live-lite-allowlist-rejected": "live_lite_allowlist",
   "live-post-only-required": "live_post_only_required",
   "live-min-order-usdc-rejected": "live_min_order_usdc",

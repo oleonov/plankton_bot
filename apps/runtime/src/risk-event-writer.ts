@@ -11,6 +11,7 @@ export interface RiskEventWriterConfig {
 }
 
 const DEFAULT_EXCHANGE_ERROR_REJECT_COOLDOWN_MS = 5 * 60 * 1000;
+const GLOBAL_SIGNAL_REJECT_REASON_CODES = new Set(["live_lite_active_markets_cap_full"]);
 
 export class RiskEventWriter {
   private readonly cooldown = new Map<string, number>();
@@ -36,7 +37,7 @@ export class RiskEventWriter {
     rejectedAt: number,
   ): void {
     const reasonCode = normalizeReasonCode(reason);
-    const key = `${signal.tokenId}:${reasonCode}`;
+    const key = this.signalRejectedCooldownKey(signal, reasonCode);
     const lastAt = this.cooldown.get(key);
 
     if (lastAt !== undefined && rejectedAt - lastAt < this.config.rejectCooldownMs) return;
@@ -55,6 +56,20 @@ export class RiskEventWriter {
     });
     this.cooldown.set(key, rejectedAt);
     this.pruneCooldownsPeriodically(rejectedAt);
+  }
+
+  private signalRejectedCooldownKey(
+    signal: {
+      tokenId: string;
+      side?: string | null;
+      decisionRuleId?: string | null;
+    },
+    reasonCode: string,
+  ): string {
+    if (GLOBAL_SIGNAL_REJECT_REASON_CODES.has(reasonCode)) {
+      return ["global", reasonCode, signal.side ?? "", signal.decisionRuleId ?? ""].join(":");
+    }
+    return `${signal.tokenId}:${reasonCode}`;
   }
 
   onOrderRejected(event: {

@@ -66,6 +66,29 @@ describe("RiskEventWriter", () => {
       expect(repo.insert).toHaveBeenCalledTimes(2);
     });
 
+    it("globally deduplicates active-market-cap-full signal rejections", () => {
+      const sigA = {
+        signalId: "sig-a",
+        tokenId: createTokenId("tok-a"),
+        side: "buy",
+        decisionRuleId: "R23_DIP_TRIGGER",
+      };
+      const sigB = {
+        signalId: "sig-b",
+        tokenId: createTokenId("tok-b"),
+        side: "buy",
+        decisionRuleId: "R23_DIP_TRIGGER",
+      };
+
+      writer.onSignalRejected(sigA, "live_lite_active_markets_cap_full", 1000);
+      writer.onSignalRejected(sigB, "live_lite_active_markets_cap_full", 1001);
+
+      expect(repo.insert).toHaveBeenCalledTimes(1);
+      expect(repo.insert.mock.calls[0]![0].payload.reasonCode).toBe(
+        "live_lite_active_markets_cap_full",
+      );
+    });
+
     it("does not update cooldown when insert throws", () => {
       repo.insert.mockImplementationOnce(() => {
         throw new Error("db error");
@@ -133,6 +156,35 @@ describe("RiskEventWriter", () => {
         side: "sell",
         signalId: "sig-1",
         decisionRuleId: "D5",
+        signalTimestamp: "2026-04-26T00:00:00.000Z",
+        exchangeErrorMessage: null,
+        exchangeErrorDetails: null,
+        timestamp: 1000,
+      };
+
+      writer.onOrderRejected(event);
+      writer.onOrderRejected({
+        ...event,
+        commandId: "cmd-2",
+        clientOrderId: "cloid-2",
+        timestamp: 2000,
+      });
+
+      expect(repo.insert).toHaveBeenCalledTimes(1);
+    });
+
+    it("deduplicates final-defense active-market-cap order rejects", () => {
+      const event = {
+        commandId: "cmd-1",
+        clientOrderId: "cloid-1",
+        tokenId: "tok-1",
+        conditionId: "cond-1",
+        reason: "live-lite-active-markets-cap-exceeded",
+        errorCode: "LIVE_POLICY_BLOCKED",
+        signalReason: "probe-entry",
+        side: "buy",
+        signalId: "sig-1",
+        decisionRuleId: "R23_DIP_TRIGGER",
         signalTimestamp: "2026-04-26T00:00:00.000Z",
         exchangeErrorMessage: null,
         exchangeErrorDetails: null,

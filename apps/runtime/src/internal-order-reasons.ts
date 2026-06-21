@@ -12,6 +12,7 @@ export const RESERVED_TOKEN_LIMIT_REASON = "reserved-token-limit";
 export const PENDING_WALLET_SYNC_REASON = "pending-wallet-sync";
 export const SELL_REPLACE_PENDING_REASON = "sell-replace-pending";
 export const SELL_REPLACE_LOCK_ACTIVE_REASON = "sell-replace-lock-active";
+export const LIVE_LITE_ACTIVE_MARKETS_CAP_EXCEEDED_REASON = "live-lite-active-markets-cap-exceeded";
 
 export const DEDUPED_INTERNAL_ORDER_REJECTION_REASONS: ReadonlySet<string> = new Set([
   SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
@@ -33,4 +34,5 @@ export const DEDUPED_INTERNAL_ORDER_REJECTION_REASONS: ReadonlySet<string> = new
   PENDING_WALLET_SYNC_REASON,
   SELL_REPLACE_PENDING_REASON,
   SELL_REPLACE_LOCK_ACTIVE_REASON,
+  LIVE_LITE_ACTIVE_MARKETS_CAP_EXCEEDED_REASON,
 ]);
