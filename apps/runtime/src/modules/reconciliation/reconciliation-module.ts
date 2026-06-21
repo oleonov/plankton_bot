@@ -75,6 +75,7 @@ const WALLET_SENTINEL_BALANCE_EPSILON = 1e-3;
 const DEFAULT_WALLET_POSITION_READ_TIMEOUT_MS = 2_000;
 const WALLET_POSITION_SLOW_WARN_MS = 2_000;
 const WALLET_POSITION_READ_TIMEOUT = Symbol("wallet-position-read-timeout");
+const WALLET_ACTIONABLE_DRIFT_WARN_COOLDOWN_MS = 5 * 60 * 1000;
 
 function computePercentile(samples: readonly number[], percentile: number): number {
   if (samples.length === 0) return 0;
@@ -251,6 +252,7 @@ export class ReconciliationModule implements RuntimeModule {
   private lastRunAt: number | null = null;
   private lastResult: ReconciliationResult | null = null;
   private readonly walletSentinelConsecutiveCounts = new Map<string, number>();
+  private lastWalletActionableDriftWarn: { key: string; atMs: number } | null = null;
   /**
    * Persistent per-exchangeOrderId consecutive-miss counter for phantom
    * detection (Fix 3). Owned by the module so the count survives across passes;
@@ -551,7 +553,12 @@ export class ReconciliationModule implements RuntimeModule {
       // 4b. Push exchange snapshot + wallet snapshot into ExchangeStateStore.
       // Best-effort: a sentinel failure must not abort the reconciliation pass.
       const stagePublishStart = Date.now();
-      await this.publishExchangeState(orderResult, ranAt, walletPositions);
+      await this.publishExchangeState(
+        orderResult,
+        ranAt,
+        walletPositions,
+        walletResult.driftCount > 0,
+      );
       stageTimingsMs.publishExchangeState = Date.now() - stagePublishStart;
 
       // 5. Build result
@@ -986,6 +993,7 @@ export class ReconciliationModule implements RuntimeModule {
     >,
     ranAt: number,
     walletPositions: readonly PolymarketDataPosition[] | null | undefined,
+    warnOnWalletActionableDrift: boolean,
   ): Promise<void> {
     const store = this.deps.exchangeStateStore;
     if (!store) return;
@@ -1018,8 +1026,12 @@ export class ReconciliationModule implements RuntimeModule {
           { positionCount: walletPositions.length, redeemablePositions: redeemable },
           "wallet snapshot ok — publishing PolymarketWalletUpdated",
         );
-        store.updateWalletPositionsBatch(
-          walletPositions.map((p) => ({ tokenId: p.tokenId, size: p.size })),
+        store.replaceWalletPositionsBatch(
+          walletPositions.map((p) => ({
+            tokenId: p.tokenId,
+            size: p.size,
+            redeemable: p.redeemable,
+          })),
           ranAt,
         );
         await this.deps.bus.publish("PolymarketWalletUpdated", {
@@ -1060,6 +1072,18 @@ export class ReconciliationModule implements RuntimeModule {
       new Date(ranAt).toISOString(),
     );
     this.deps.runtimeMetrics?.writeEvent(
+      "wallet_position_actionable_drift_abs",
+      metrics.walletPositionActionableDriftAbs,
+      JSON.stringify({ source: "reconciliation" }),
+      new Date(ranAt).toISOString(),
+    );
+    this.deps.runtimeMetrics?.writeEvent(
+      "wallet_position_remote_only_redeemable_abs",
+      metrics.walletPositionRemoteOnlyRedeemableAbs,
+      JSON.stringify({ source: "reconciliation" }),
+      new Date(ranAt).toISOString(),
+    );
+    this.deps.runtimeMetrics?.writeEvent(
       "reserved_sell_drift_abs",
       metrics.reservedSellDriftAbs,
       JSON.stringify({ source: "reconciliation" }),
@@ -1072,12 +1096,26 @@ export class ReconciliationModule implements RuntimeModule {
         "reservedSell drift threshold exceeded (>=1 share)",
       );
     }
-    if (metrics.walletPositionDriftAbs >= 5) {
+    if (
+      warnOnWalletActionableDrift &&
+      metrics.walletPositionActionableDriftAbs >= 5 &&
+      this.shouldLogWalletActionableDriftWarn(metrics.walletPositionActionableDriftAbs, ranAt)
+    ) {
       this.log.warn(
-        { walletPositionDriftAbs: metrics.walletPositionDriftAbs },
-        "wallet position drift threshold exceeded (>=5 shares)",
+        { walletPositionActionableDriftAbs: metrics.walletPositionActionableDriftAbs },
+        "wallet actionable position drift threshold exceeded (>=5 shares)",
       );
     }
+  }
+
+  private shouldLogWalletActionableDriftWarn(value: number, ranAt: number): boolean {
+    const key = value.toFixed(6);
+    const previous = this.lastWalletActionableDriftWarn;
+    if (previous?.key === key && ranAt - previous.atMs < WALLET_ACTIONABLE_DRIFT_WARN_COOLDOWN_MS) {
+      return false;
+    }
+    this.lastWalletActionableDriftWarn = { key, atMs: ranAt };
+    return true;
   }
 
   private computeStoreMetrics(store: NonNullable<ReconciliationModuleDeps["exchangeStateStore"]>) {

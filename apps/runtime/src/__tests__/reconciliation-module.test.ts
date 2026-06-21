@@ -1147,6 +1147,143 @@ describe("ReconciliationModule", () => {
     // ─── Counters ───────────────────────────────────────────────────
 
     describe("counters", () => {
+      it("does not warn on clean reconciliation with only remote-only redeemable wallet drift", async () => {
+        const writeEvent = vi.fn();
+        const localLog = { ...silentLog, warn: vi.fn(), child: () => localLog };
+        const store = new ExchangeStateStore();
+        mod = new ReconciliationModule({
+          gateway,
+          bus,
+          orderRepo,
+          fillRepo,
+          marketRepo,
+          log: localLog,
+          reconcileIntervalMs: 60_000,
+          exchangeStateStore: store,
+          walletPositionReader: {
+            read: vi.fn().mockResolvedValue([
+              {
+                tokenId: "tok-redeemable",
+                conditionId: "cond-redeemable",
+                size: 10,
+                currentValueUsdc: 0,
+                initialValueUsdc: 1,
+                redeemable: true,
+                slug: "resolved-market",
+                marketSlug: "resolved-market",
+                outcome: "Yes",
+                raw: {},
+              },
+            ]),
+          },
+          runtimeMetrics: { writeEvent },
+        });
+
+        const result = await mod.runReconciliation();
+
+        expect(result.clean).toBe(true);
+        expect(writeEvent).toHaveBeenCalledWith(
+          "wallet_position_drift_abs",
+          10,
+          JSON.stringify({ source: "reconciliation" }),
+          expect.any(String),
+        );
+        expect(writeEvent).toHaveBeenCalledWith(
+          "wallet_position_actionable_drift_abs",
+          0,
+          JSON.stringify({ source: "reconciliation" }),
+          expect.any(String),
+        );
+        expect(writeEvent).toHaveBeenCalledWith(
+          "wallet_position_remote_only_redeemable_abs",
+          10,
+          JSON.stringify({ source: "reconciliation" }),
+          expect.any(String),
+        );
+        expect(localLog.warn).not.toHaveBeenCalledWith(
+          expect.anything(),
+          "wallet actionable position drift threshold exceeded (>=5 shares)",
+        );
+        expect(localLog.warn).not.toHaveBeenCalledWith(
+          expect.anything(),
+          "wallet position drift threshold exceeded (>=5 shares)",
+        );
+      });
+
+      it("does not clear the wallet store when the wallet reader skips a snapshot", async () => {
+        const store = new ExchangeStateStore();
+        store.replaceWalletPositionsBatch([{ tokenId: "tok-existing", size: 7 }], Date.now());
+        mod = buildModule({
+          exchangeStateStore: store,
+          walletPositionReader: { read: vi.fn().mockResolvedValue(null) },
+        });
+
+        await mod.runReconciliation();
+
+        expect(store.getWalletPositionSize("tok-existing")).toBe(7);
+      });
+
+      it("emits actionable wallet drift warning once for repeated identical confirmed drift", async () => {
+        const tokenId = createTokenId("tok-local-active");
+        const oldIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+        const position: Position = {
+          positionId: createPositionId("pos-local-active"),
+          tokenId,
+          conditionId: createConditionId("cond-local-active"),
+          side: "buy",
+          size: 12,
+          avgEntryPrice: 0.1,
+          costBasisUsdc: 1.2,
+          currentValueUsdc: 1,
+          realizedPnl: 0,
+          status: "open",
+          entryStyle: "probe",
+          openedAt: oldIso,
+          closedAt: null,
+          updatedAt: oldIso,
+        };
+        const localLog = { ...silentLog, warn: vi.fn(), child: () => localLog };
+        const positionRepo = {
+          findAll: vi.fn().mockReturnValue([position]),
+          save: vi.fn(),
+        };
+        marketRepo.findByTokenId = vi.fn().mockReturnValue({
+          tokenId,
+          conditionId: "cond-local-active",
+          slug: "active-missing-remote",
+          endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        });
+        gateway.getPositionBalance = vi.fn().mockResolvedValue(0);
+        mod = new ReconciliationModule({
+          gateway,
+          bus,
+          orderRepo,
+          fillRepo,
+          marketRepo,
+          log: localLog,
+          reconcileIntervalMs: 60_000,
+          exchangeStateStore: new ExchangeStateStore(),
+          walletPositionSentinel: {
+            reader: { read: vi.fn().mockResolvedValue([]) },
+            positionRepo: positionRepo as any,
+            fillRepo,
+            marketRepo,
+            log: localLog,
+          },
+          runtimeMetrics: { writeEvent: vi.fn() },
+        });
+
+        await mod.runReconciliation();
+        await mod.runReconciliation();
+
+        const actionableWarns = localLog.warn.mock.calls.filter(
+          (call: unknown[]) =>
+            call[1] === "wallet actionable position drift threshold exceeded (>=5 shares)",
+        );
+        expect(actionableWarns).toHaveLength(1);
+        expect(actionableWarns[0]![0]).toMatchObject({ walletPositionActionableDriftAbs: 12 });
+      });
+
       it("emits fetch-failed + skipped-unreliable + retried on an unreliable open-orders snapshot", async () => {
         gateway.getOpenOrdersResult = vi.fn().mockResolvedValue(rateLimitSkip);
         const writeEvent = vi.fn();

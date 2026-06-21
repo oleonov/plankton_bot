@@ -6,6 +6,14 @@ import {
 } from "../polymarket-data-api.js";
 
 describe("polymarket-data-api", () => {
+  const positionRows = (count: number, start = 0) =>
+    Array.from({ length: count }, (_, idx) => ({
+      asset: `tok-${start + idx}`,
+      size: "1",
+      currentValue: "0.5",
+      initialValue: "0.4",
+    }));
+
   it("normalizes Data API position fields", () => {
     const position = normalizePolymarketPosition({
       asset: "tok-1",
@@ -83,5 +91,91 @@ describe("polymarket-data-api", () => {
     const url = fetchImpl.mock.calls[0]![0] as URL;
     expect(url.hostname).toBe("data-api.polymarket.com");
     expect(url.searchParams.get("sizeThreshold")).toBe("0");
+    expect(url.searchParams.get("limit")).toBe("500");
+    expect(url.searchParams.has("offset")).toBe(false);
+  });
+
+  it("fetches more than the Data API default 100 rows in one page", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => positionRows(103),
+    } as Response);
+
+    const positions = await fetchPolymarketPositions("0xf00df00df00df00df00df00df00df00df00df00d", {
+      fetchImpl,
+    });
+
+    expect(positions).toHaveLength(103);
+    expect(positions?.at(-1)?.tokenId).toBe("tok-102");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("paginates until a short page and returns rows beyond the first page", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => positionRows(500),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => positionRows(3, 500),
+      } as Response);
+
+    const positions = await fetchPolymarketPositions("0xf00df00df00df00df00df00df00df00df00df00d", {
+      fetchImpl,
+    });
+
+    expect(positions).toHaveLength(503);
+    const secondUrl = fetchImpl.mock.calls[1]![0] as URL;
+    expect(secondUrl.searchParams.get("limit")).toBe("500");
+    expect(secondUrl.searchParams.get("offset")).toBe("500");
+    expect(positions?.at(-1)?.tokenId).toBe("tok-502");
+  });
+
+  it("continues pagination using raw page length when a full page has malformed rows", async () => {
+    const malformedFullPage = [...positionRows(499), { size: "1", currentValue: "0.5" }];
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => malformedFullPage,
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => positionRows(2, 500),
+      } as Response);
+
+    const positions = await fetchPolymarketPositions("0xf00df00df00df00df00df00df00df00df00df00d", {
+      fetchImpl,
+    });
+
+    expect(positions).toHaveLength(501);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const secondUrl = fetchImpl.mock.calls[1]![0] as URL;
+    expect(secondUrl.searchParams.get("offset")).toBe("500");
+    expect(positions?.some((position) => position.tokenId === "tok-500")).toBe(true);
+    expect(positions?.at(-1)?.tokenId).toBe("tok-501");
+  });
+
+  it("returns null instead of a partial authoritative snapshot when a later page fails", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => positionRows(500),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: false,
+        body: { cancel },
+      } as unknown as Response);
+
+    const positions = await fetchPolymarketPositions("0xf00df00df00df00df00df00df00df00df00df00d", {
+      fetchImpl,
+    });
+
+    expect(positions).toBeNull();
+    expect(cancel).toHaveBeenCalledOnce();
   });
 });

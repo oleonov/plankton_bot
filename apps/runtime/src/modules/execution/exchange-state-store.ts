@@ -29,6 +29,7 @@ export interface ExchangeOpenSellSummary {
 
 export interface WalletPositionSnapshot {
   readonly size: number;
+  readonly redeemable: boolean;
   readonly capturedAtMs: number;
 }
 
@@ -41,8 +42,12 @@ export interface BalanceRejectBlock {
 export interface ExchangeStateStoreMetrics {
   /** Sum |localOpenSellSize - exchangeOpenSellSize| across tokens with snapshots. */
   readonly reservedSellDriftAbs: number;
-  /** Sum |localPositionSize - walletSize| across tokens with snapshots. */
+  /** Broad debug sum across local positions and all wallet snapshots, including remote-only rows. */
   readonly walletPositionDriftAbs: number;
+  /** Actionable sum for local active/dust/open positions compared with current wallet snapshot. */
+  readonly walletPositionActionableDriftAbs: number;
+  /** Remote-only redeemable share size. Informational only; should not page or warn. */
+  readonly walletPositionRemoteOnlyRedeemableAbs: number;
   /** Total `balance is not enough` rejects observed since process start. */
   readonly balanceRejectCountTotal: number;
   /** Most recent captured-at across exchange-orders snapshots (epoch ms) or null. */
@@ -127,9 +132,14 @@ export class ExchangeStateStore {
     tokenId: TokenId | string,
     size: number,
     capturedAtMs: number = this.now(),
+    meta?: { readonly redeemable?: boolean },
   ): void {
     if (!Number.isFinite(size) || size < 0) return;
-    this.walletByToken.set(String(tokenId), { size, capturedAtMs });
+    this.walletByToken.set(String(tokenId), {
+      size,
+      redeemable: meta?.redeemable ?? false,
+      capturedAtMs,
+    });
     this.lastWalletCaptureMs = capturedAtMs;
   }
 
@@ -140,12 +150,38 @@ export class ExchangeStateStore {
    * pass produced no row for it.
    */
   updateWalletPositionsBatch(
-    rows: Iterable<{ readonly tokenId: TokenId | string; readonly size: number }>,
+    rows: Iterable<{
+      readonly tokenId: TokenId | string;
+      readonly size: number;
+      readonly redeemable?: boolean;
+    }>,
     capturedAtMs: number = this.now(),
   ): void {
     for (const row of rows) {
-      this.updateWalletPosition(row.tokenId, row.size, capturedAtMs);
+      this.updateWalletPosition(
+        row.tokenId,
+        row.size,
+        capturedAtMs,
+        row.redeemable === undefined ? undefined : { redeemable: row.redeemable },
+      );
     }
+  }
+
+  /**
+   * Replace the wallet snapshot with a complete authoritative view. Tokens absent
+   * from the input are cleared; use the partial updater for non-authoritative rows.
+   */
+  replaceWalletPositionsBatch(
+    rows: Iterable<{
+      readonly tokenId: TokenId | string;
+      readonly size: number;
+      readonly redeemable?: boolean;
+    }>,
+    capturedAtMs: number = this.now(),
+  ): void {
+    this.walletByToken.clear();
+    this.updateWalletPositionsBatch(rows, capturedAtMs);
+    this.lastWalletCaptureMs = capturedAtMs;
   }
 
   /**
@@ -266,17 +302,29 @@ export class ExchangeStateStore {
       reservedSellDriftAbs += Math.abs(local);
     }
     let walletPositionDriftAbs = 0;
+    let walletPositionRemoteOnlyRedeemableAbs = 0;
     for (const [tokenKey, entry] of this.walletByToken) {
       const local = input.localPositionSizeByToken.get(tokenKey) ?? 0;
       walletPositionDriftAbs += Math.abs(local - entry.size);
+      if (!input.localPositionSizeByToken.has(tokenKey) && entry.redeemable) {
+        walletPositionRemoteOnlyRedeemableAbs += entry.size;
+      }
     }
+    let walletPositionActionableDriftAbs = 0;
     for (const [tokenKey, local] of input.localPositionSizeByToken) {
       if (this.walletByToken.has(tokenKey)) continue;
       walletPositionDriftAbs += Math.abs(local);
     }
+    for (const [tokenKey, local] of input.localPositionSizeByToken) {
+      if (local <= 0) continue;
+      const wallet = this.walletByToken.get(tokenKey);
+      walletPositionActionableDriftAbs += Math.abs(local - (wallet?.size ?? 0));
+    }
     return {
       reservedSellDriftAbs,
       walletPositionDriftAbs,
+      walletPositionActionableDriftAbs,
+      walletPositionRemoteOnlyRedeemableAbs,
       balanceRejectCountTotal: this.balanceRejectCountTotal,
       latestExchangeOrdersCaptureMs: this.lastExchangeOrdersCaptureMs,
       latestWalletCaptureMs: this.lastWalletCaptureMs,

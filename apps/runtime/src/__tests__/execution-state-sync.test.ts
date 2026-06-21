@@ -309,6 +309,8 @@ describe("ExchangeStateStore — drift metrics", () => {
     });
     expect(metrics.reservedSellDriftAbs).toBeCloseTo(Math.abs(6 - 8) + Math.abs(0 - 2) + 4, 6);
     expect(metrics.walletPositionDriftAbs).toBeCloseTo(Math.abs(10 - 12) + Math.abs(0 - 4), 6);
+    expect(metrics.walletPositionActionableDriftAbs).toBeCloseTo(Math.abs(10 - 12), 6);
+    expect(metrics.walletPositionRemoteOnlyRedeemableAbs).toBe(0);
     expect(metrics.latestExchangeOrdersCaptureMs).toBe(1_000_000);
     expect(metrics.latestWalletCaptureMs).toBe(1_000_000);
   });
@@ -328,6 +330,74 @@ describe("ExchangeStateStore — drift metrics", () => {
       ]),
     });
     expect(metrics.walletPositionDriftAbs).toBeCloseTo(7, 6);
+    expect(metrics.walletPositionActionableDriftAbs).toBeCloseTo(7, 6);
+  });
+
+  it("replaces authoritative wallet snapshots and clears disappeared tokens", () => {
+    const store = new ExchangeStateStore({ now: () => 1_000_000 });
+    store.replaceWalletPositionsBatch(
+      [
+        { tokenId: "tok-a", size: 5 },
+        { tokenId: "tok-stale", size: 4, redeemable: true },
+      ],
+      1_000_000,
+    );
+
+    store.replaceWalletPositionsBatch([{ tokenId: "tok-a", size: 5 }], 1_001_000);
+
+    expect(store.getWalletPositionSize("tok-stale")).toBeNull();
+    const metrics = store.computeMetrics({
+      localOpenSellSizeByToken: new Map(),
+      localPositionSizeByToken: new Map([["tok-a", 5]]),
+    });
+    expect(metrics.walletPositionDriftAbs).toBe(0);
+    expect(metrics.walletPositionActionableDriftAbs).toBe(0);
+    expect(metrics.walletPositionRemoteOnlyRedeemableAbs).toBe(0);
+  });
+
+  it("keeps absent tokens on partial wallet updates", () => {
+    const store = new ExchangeStateStore({ now: () => 1_000_000 });
+    store.replaceWalletPositionsBatch(
+      [
+        { tokenId: "tok-a", size: 5 },
+        { tokenId: "tok-b", size: 4, redeemable: true },
+      ],
+      1_000_000,
+    );
+
+    store.updateWalletPositionsBatch([{ tokenId: "tok-a", size: 6 }], 1_001_000);
+
+    expect(store.getWalletPositionSize("tok-b")).toBe(4);
+    const metrics = store.computeMetrics({
+      localOpenSellSizeByToken: new Map(),
+      localPositionSizeByToken: new Map([["tok-a", 6]]),
+    });
+    expect(metrics.walletPositionDriftAbs).toBe(4);
+    expect(metrics.walletPositionActionableDriftAbs).toBe(0);
+    expect(metrics.walletPositionRemoteOnlyRedeemableAbs).toBe(4);
+  });
+
+  it("classifies local active drift separately from remote-only redeemable drift", () => {
+    const store = new ExchangeStateStore({ now: () => 1_000_000 });
+    store.replaceWalletPositionsBatch(
+      [
+        { tokenId: "tok-active", size: 7 },
+        { tokenId: "tok-redeemable", size: 11, redeemable: true },
+      ],
+      1_000_000,
+    );
+
+    const metrics = store.computeMetrics({
+      localOpenSellSizeByToken: new Map(),
+      localPositionSizeByToken: new Map([
+        ["tok-active", 10],
+        ["tok-local-only", 5],
+      ]),
+    });
+
+    expect(metrics.walletPositionDriftAbs).toBeCloseTo(3 + 11 + 5, 6);
+    expect(metrics.walletPositionActionableDriftAbs).toBeCloseTo(3 + 5, 6);
+    expect(metrics.walletPositionRemoteOnlyRedeemableAbs).toBe(11);
   });
 
   it("expires snapshots after the configured max age", () => {

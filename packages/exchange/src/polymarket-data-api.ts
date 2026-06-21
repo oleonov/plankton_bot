@@ -1,4 +1,6 @@
 const POLYMARKET_POSITIONS_URL = "https://data-api.polymarket.com/positions";
+const POSITIONS_PAGE_SIZE = 500;
+const MAX_POSITIONS_PAGES = 20;
 
 export interface PolymarketDataPosition {
   tokenId: string;
@@ -30,6 +32,11 @@ export interface FetchPolymarketPositionsOptions {
 
 export interface PolymarketPositionReader {
   read(): Promise<PolymarketDataPosition[] | null>;
+}
+
+interface PolymarketPositionsPage {
+  rawCount: number;
+  positions: PolymarketDataPosition[];
 }
 
 function numericField(raw: Record<string, unknown>, field: string): number {
@@ -95,9 +102,29 @@ export async function fetchPolymarketPositions(
   options: FetchPolymarketPositionsOptions = {},
 ): Promise<PolymarketDataPosition[] | null> {
   const fetchImpl = options.fetchImpl ?? fetch;
+  const positions: PolymarketDataPosition[] = [];
+
+  for (let pageIndex = 0; pageIndex < MAX_POSITIONS_PAGES; pageIndex += 1) {
+    const offset = pageIndex * POSITIONS_PAGE_SIZE;
+    const page = await fetchPolymarketPositionsPage(funderAddress, offset, fetchImpl, options);
+    if (page === null) return null;
+    positions.push(...page.positions);
+    if (page.rawCount < POSITIONS_PAGE_SIZE) return positions;
+  }
+  return null;
+}
+
+async function fetchPolymarketPositionsPage(
+  funderAddress: string,
+  offset: number,
+  fetchImpl: FetchLike,
+  options: FetchPolymarketPositionsOptions,
+): Promise<PolymarketPositionsPage | null> {
   const url = new URL(POLYMARKET_POSITIONS_URL);
   url.searchParams.set("user", funderAddress);
   url.searchParams.set("sizeThreshold", "0");
+  url.searchParams.set("limit", String(POSITIONS_PAGE_SIZE));
+  if (offset > 0) url.searchParams.set("offset", String(offset));
 
   try {
     const res = await fetchImpl(url, {
@@ -114,10 +141,11 @@ export async function fetchPolymarketPositions(
 
     const data = (await res.json()) as unknown;
     if (!Array.isArray(data)) return null;
-    return data
+    const positions = data
       .filter((item): item is Record<string, unknown> => item !== null && typeof item === "object")
       .map((item) => normalizePolymarketPosition(item))
       .filter((item): item is PolymarketDataPosition => item !== null);
+    return { rawCount: data.length, positions };
   } catch {
     return null;
   }
