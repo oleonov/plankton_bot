@@ -44,7 +44,22 @@ class RecordingSignalFeedRepository implements SignalFeedBucketRepository {
   }
 }
 
-function policy(overrides: Partial<ExecutionProfilePolicy> = {}): ExecutionProfilePolicy {
+type HarvestingGuardOverrides = Omit<
+  Partial<ExecutionProfilePolicy["scaleIn"]["harvestingGuard"]>,
+  "override"
+> & {
+  override?: Partial<ExecutionProfilePolicy["scaleIn"]["harvestingGuard"]["override"]>;
+};
+
+type ScaleInOverrides = Omit<Partial<ExecutionProfilePolicy["scaleIn"]>, "harvestingGuard"> & {
+  harvestingGuard?: HarvestingGuardOverrides;
+};
+
+type PolicyOverrides = Omit<Partial<ExecutionProfilePolicy>, "scaleIn"> & {
+  scaleIn?: ScaleInOverrides;
+};
+
+function policy(overrides: PolicyOverrides = {}): ExecutionProfilePolicy {
   return {
     ...DEFAULT_EXECUTION_PROFILE_POLICY,
     ...overrides,
@@ -55,6 +70,14 @@ function policy(overrides: Partial<ExecutionProfilePolicy> = {}): ExecutionProfi
     scaleIn: {
       ...DEFAULT_EXECUTION_PROFILE_POLICY.scaleIn,
       ...(overrides.scaleIn ?? {}),
+      harvestingGuard: {
+        ...DEFAULT_EXECUTION_PROFILE_POLICY.scaleIn.harvestingGuard,
+        ...(overrides.scaleIn?.harvestingGuard ?? {}),
+        override: {
+          ...DEFAULT_EXECUTION_PROFILE_POLICY.scaleIn.harvestingGuard.override,
+          ...(overrides.scaleIn?.harvestingGuard?.override ?? {}),
+        },
+      },
     },
     costCaps: {
       ...DEFAULT_EXECUTION_PROFILE_POLICY.costCaps,

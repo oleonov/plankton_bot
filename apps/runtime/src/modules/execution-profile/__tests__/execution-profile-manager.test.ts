@@ -54,7 +54,19 @@ const DEFAULT_POLICY: ExecutionProfilePolicy = {
   },
 };
 
-type PolicyOverrides = Omit<Partial<ExecutionProfilePolicy>, "sellLadder"> & {
+type HarvestingGuardOverrides = Omit<
+  Partial<ExecutionProfilePolicy["scaleIn"]["harvestingGuard"]>,
+  "override"
+> & {
+  override?: Partial<ExecutionProfilePolicy["scaleIn"]["harvestingGuard"]["override"]>;
+};
+
+type ScaleInOverrides = Omit<Partial<ExecutionProfilePolicy["scaleIn"]>, "harvestingGuard"> & {
+  harvestingGuard?: HarvestingGuardOverrides;
+};
+
+type PolicyOverrides = Omit<Partial<ExecutionProfilePolicy>, "scaleIn" | "sellLadder"> & {
+  scaleIn?: ScaleInOverrides;
   sellLadder?: Partial<ExecutionProfilePolicy["sellLadder"]>;
 };
 
@@ -77,6 +89,14 @@ function policy(overrides: PolicyOverrides = {}): ExecutionProfilePolicy {
     scaleIn: {
       ...DEFAULT_POLICY.scaleIn,
       ...(overrides.scaleIn ?? {}),
+      harvestingGuard: {
+        ...DEFAULT_POLICY.scaleIn.harvestingGuard,
+        ...(overrides.scaleIn?.harvestingGuard ?? {}),
+        override: {
+          ...DEFAULT_POLICY.scaleIn.harvestingGuard.override,
+          ...(overrides.scaleIn?.harvestingGuard?.override ?? {}),
+        },
+      },
     },
     profiles: {
       ...DEFAULT_POLICY.profiles,
@@ -283,7 +303,8 @@ function fill(overrides: Partial<FillReceived> = {}): FillReceived {
 }
 
 function makeManager(args: {
-  profilePolicy: ExecutionProfilePolicy;
+  profilePolicy?: ExecutionProfilePolicy;
+  profilePolicyReader?: () => ExecutionProfilePolicy;
   positions?: Position[];
   orders?: Order[];
   repo?: InMemoryExecutionProfileStateRepository;
@@ -302,7 +323,7 @@ function makeManager(args: {
     stateRepo: args.repo ?? new InMemoryExecutionProfileStateRepository(),
     positionRepo: makePositionRepo(args.positions ?? []),
     orderRepo: makeOrderRepo(args.orders ?? []),
-    policy: () => args.profilePolicy,
+    policy: args.profilePolicyReader ?? (() => args.profilePolicy ?? DEFAULT_POLICY),
     now: () => NOW,
   };
   if (args.buyGuardsPolicy != null) deps.buyGuardsPolicy = () => args.buyGuardsPolicy!;
@@ -1328,6 +1349,431 @@ describe("ExecutionProfileManager", () => {
     expect(
       metrics.counters.filter((counter) => counter.name === "track_execution_profile_assigned"),
     ).toHaveLength(0);
+  });
+
+  it("transitions profile-owned profitable SELL fills into HARVESTING with last-sell metadata", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ state: "ACCUMULATING", lastAvgEntry: 0.2, metadata: null }),
+    ]);
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      riskEvents,
+      profilePolicy: policy({ enabled: true }),
+      positions: [position({ avgEntryPrice: 0.2 })],
+    });
+
+    await manager.start();
+    await bus.publish("FillReceived", fill({ side: "sell", price: 0.265, timestamp: NOW }));
+
+    expect(repo.getState(tokenId)).toMatchObject({
+      state: "HARVESTING",
+      metadata: {
+        lastSellPrice: 0.265,
+        lastSellAtMs: NOW,
+        firstProfitableSellAtMs: NOW,
+        harvestSellCount: 1,
+      },
+    });
+    expect(metrics.counters).toContainEqual(
+      expect.objectContaining({
+        name: "harvesting_state_entered_total",
+        labels: expect.stringContaining("first_profitable_sell"),
+      }),
+    );
+    expect(riskEvents.inserts).toContainEqual(
+      expect.objectContaining({ eventType: "harvest_lifecycle_activated" }),
+    );
+  });
+
+  it("does not transition unprofitable SELL fills or when transition kill switch is off", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ state: "ACCUMULATING", lastAvgEntry: 0.2 }),
+    ]);
+    const bus = new InProcessEventBus();
+    const manager = makeManager({
+      bus,
+      repo,
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: {
+          ...DEFAULT_POLICY.scaleIn,
+          harvestingGuard: {
+            ...DEFAULT_POLICY.scaleIn.harvestingGuard,
+            transitionEnabled: false,
+          },
+        },
+      }),
+      positions: [position({ avgEntryPrice: 0.2 })],
+    });
+
+    await manager.start();
+    await bus.publish("FillReceived", fill({ side: "sell", price: 0.19, timestamp: NOW }));
+    expect(repo.getState(tokenId)?.state).toBe("ACCUMULATING");
+
+    await bus.publish("FillReceived", fill({ side: "sell", price: 0.265, timestamp: NOW + 1 }));
+    expect(repo.getState(tokenId)?.state).toBe("ACCUMULATING");
+  });
+
+  it("does not transition S4 dust auto-close SELL fills into HARVESTING", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ state: "ACCUMULATING", lastAvgEntry: 0.2 }),
+    ]);
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      riskEvents,
+      profilePolicy: policy({ enabled: true }),
+      positions: [position({ avgEntryPrice: 0.2 })],
+    });
+
+    await manager.start();
+    await bus.publish(
+      "FillReceived",
+      fill({
+        side: "sell",
+        price: 0.265,
+        timestamp: NOW,
+        decisionRuleId: "S4_DUST_AUTO_CLOSE",
+      }),
+    );
+
+    expect(repo.getState(tokenId)?.state).toBe("ACCUMULATING");
+    expect(metrics.counters).not.toContainEqual(
+      expect.objectContaining({ name: "harvesting_state_entered_total" }),
+    );
+    expect(riskEvents.inserts).not.toContainEqual(
+      expect.objectContaining({ eventType: "harvest_lifecycle_activated" }),
+    );
+  });
+
+  it("honors hot-reloaded harvesting guard suppression kill switch", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const metrics = makeMetrics();
+    let activePolicy = policy({
+      enabled: true,
+      scaleIn: { enabled: true, useRealFeed: false },
+      costCaps: { enabled: false },
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({
+        state: "HARVESTING",
+        lastBuyAtMs: NOW - 2_000_000,
+        initialProbeSizeUsd: 10,
+        metadata: { lastSellPrice: 0.265, lastSellAtMs: NOW - 4 * 60_000 },
+      }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      signalSnapshot: zeroSignals(),
+      profilePolicyReader: () => activePolicy,
+      positions: [position({ avgEntryPrice: 0.2, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.309, midPrice: 0.3, lastTradePrice: 0.3 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    expect(signals).toHaveLength(0);
+    expect(metrics.counters).toContainEqual(
+      expect.objectContaining({ name: "harvesting_buy_above_last_sell_suppressed_total" }),
+    );
+
+    activePolicy = policy({
+      enabled: true,
+      scaleIn: {
+        enabled: true,
+        useRealFeed: false,
+        harvestingGuard: { enabled: false },
+      },
+      costCaps: { enabled: false },
+    });
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.309, midPrice: 0.3, lastTradePrice: 0.3 })],
+      timestamp: NOW + 1,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(repo.getState(tokenId)?.state).toBe("HARVESTING");
+    expect(signals).toHaveLength(1);
+  });
+
+  it("honors hot-reloaded harvesting transition kill switch", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ state: "ACCUMULATING", lastAvgEntry: 0.2 }),
+    ]);
+    const bus = new InProcessEventBus();
+    let activePolicy = policy({ enabled: true });
+    const manager = makeManager({
+      bus,
+      repo,
+      profilePolicyReader: () => activePolicy,
+      positions: [position({ avgEntryPrice: 0.2 })],
+    });
+
+    await manager.start();
+    activePolicy = policy({
+      enabled: true,
+      scaleIn: {
+        harvestingGuard: { transitionEnabled: false },
+      },
+    });
+    await bus.publish("FillReceived", fill({ side: "sell", price: 0.265, timestamp: NOW }));
+
+    expect(repo.getState(tokenId)?.state).toBe("ACCUMULATING");
+  });
+
+  it("honors both harvesting kill switches as a no-op hot reload", async () => {
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({ state: "ACCUMULATING", lastAvgEntry: 0.2 }),
+    ]);
+    const bus = new InProcessEventBus();
+    let activePolicy = policy({ enabled: true });
+    const manager = makeManager({
+      bus,
+      repo,
+      profilePolicyReader: () => activePolicy,
+      positions: [position({ avgEntryPrice: 0.2 })],
+    });
+
+    await manager.start();
+    activePolicy = policy({
+      enabled: true,
+      scaleIn: {
+        harvestingGuard: {
+          enabled: false,
+          transitionEnabled: false,
+        },
+      },
+    });
+    await bus.publish("FillReceived", fill({ side: "sell", price: 0.265, timestamp: NOW }));
+
+    expect(repo.getState(tokenId)?.state).toBe("ACCUMULATING");
+  });
+
+  it("suppresses the Rai post-sell buyback in HARVESTING before publishing scale-in", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    const metrics = makeMetrics();
+    const riskEvents = makeRiskEvents();
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({
+        state: "HARVESTING",
+        lastBuyAtMs: NOW - 2_000_000,
+        initialProbeSizeUsd: 10,
+        metadata: { lastSellPrice: 0.265, lastSellAtMs: NOW - 4 * 60_000 },
+      }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      riskEvents,
+      signalSnapshot: zeroSignals(),
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true, useRealFeed: false },
+        costCaps: { enabled: false },
+      }),
+      positions: [position({ avgEntryPrice: 0.2, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.309, midPrice: 0.3, lastTradePrice: 0.3 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(signals).toHaveLength(0);
+    expect(manager.getPendingScaleIns()).toEqual([]);
+    expect(metrics.counters).toContainEqual(
+      expect.objectContaining({
+        name: "harvesting_buy_above_last_sell_suppressed_total",
+        labels: expect.stringContaining('"overrideStatus":"failed_closed"'),
+      }),
+    );
+    expect(metrics.counters).not.toContainEqual(
+      expect.objectContaining({
+        name: "harvesting_buy_allowed_total",
+      }),
+    );
+    expect(riskEvents.inserts).toContainEqual(
+      expect.objectContaining({ eventType: "harvesting_buy_above_last_sell_suppressed" }),
+    );
+  });
+
+  it("records allowed harvesting buy telemetry with the real scale-in mode", async () => {
+    const bus = new InProcessEventBus();
+    const metrics = makeMetrics();
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({
+        state: "HARVESTING",
+        lastBuyAtMs: NOW - 2_000_000,
+        initialProbeSizeUsd: 10,
+        metadata: { lastSellPrice: 0.265, lastSellAtMs: NOW - 4 * 60_000 },
+      }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      runtimeMetrics: metrics,
+      signalSnapshot: zeroSignals(),
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: { enabled: true, useRealFeed: false },
+        costCaps: { enabled: false },
+      }),
+      positions: [position({ avgEntryPrice: 0.2, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.25, midPrice: 0.25, lastTradePrice: 0.25 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(metrics.counters).toContainEqual(
+      expect.objectContaining({
+        name: "harvesting_buy_allowed_total",
+        labels: expect.stringContaining('"mode":"up"'),
+      }),
+    );
+    expect(metrics.counters).toContainEqual(
+      expect.objectContaining({
+        name: "harvesting_buy_allowed_total",
+        labels: expect.stringContaining('"reason":"below_last_sell"'),
+      }),
+    );
+  });
+
+  it("allows HARVESTING buybacks below last sell, outside the window, or with strong override", async () => {
+    const run = async (args: {
+      bestAsk: number;
+      lastSellAtMs: number;
+      signalFeedSnapshot?: SignalSnapshot | null;
+      scaleIn?: ScaleInOverrides;
+    }): Promise<Signal[]> => {
+      const bus = new InProcessEventBus();
+      const signals: Signal[] = [];
+      bus.subscribe("SignalProduced", async ({ signal }) => {
+        signals.push(signal);
+      });
+      const repo = new InMemoryExecutionProfileStateRepository([
+        state({
+          state: "HARVESTING",
+          lastBuyAtMs: NOW - 2_000_000,
+          initialProbeSizeUsd: 10,
+          metadata: { lastSellPrice: 0.265, lastSellAtMs: args.lastSellAtMs },
+        }),
+      ]);
+      const managerArgs: Parameters<typeof makeManager>[0] = {
+        bus,
+        repo,
+        signalSnapshot: zeroSignals(),
+        profilePolicy: policy({
+          enabled: true,
+          signalFeed: { ...DEFAULT_POLICY.signalFeed, enabled: args.signalFeedSnapshot != null },
+          scaleIn: args.scaleIn ?? { enabled: true, useRealFeed: false },
+          costCaps: { enabled: false },
+        }),
+        positions: [position({ avgEntryPrice: 0.2, costBasisUsdc: 8 })],
+      };
+      if (args.signalFeedSnapshot !== undefined) {
+        managerArgs.signalFeedSnapshot = args.signalFeedSnapshot;
+      }
+      const manager = makeManager(managerArgs);
+      await manager.start();
+      await bus.publish("MarketSnapshotHeartbeat", {
+        markets: [
+          market({ bestAsk: args.bestAsk, midPrice: args.bestAsk, lastTradePrice: args.bestAsk }),
+        ],
+        timestamp: NOW,
+        reason: "full_lifetime_active_position",
+        source: "market-data",
+      });
+      return signals;
+    };
+
+    await expect(run({ bestAsk: 0.25, lastSellAtMs: NOW - 4 * 60_000 })).resolves.toHaveLength(1);
+    await expect(run({ bestAsk: 0.309, lastSellAtMs: NOW - 61 * 60_000 })).resolves.toHaveLength(1);
+    await expect(
+      run({
+        bestAsk: 0.309,
+        lastSellAtMs: NOW - 4 * 60_000,
+        signalFeedSnapshot: signalSnapshot({ recovery60: 0.1 }),
+        scaleIn: { ...DEFAULT_POLICY.scaleIn, enabled: true, useRealFeed: true },
+      }),
+    ).resolves.toHaveLength(1);
+  });
+
+  it("honors the harvesting guard enabled kill switch without disabling HARVESTING state", async () => {
+    const bus = new InProcessEventBus();
+    const signals: Signal[] = [];
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const repo = new InMemoryExecutionProfileStateRepository([
+      state({
+        state: "HARVESTING",
+        lastBuyAtMs: NOW - 2_000_000,
+        initialProbeSizeUsd: 10,
+        metadata: { lastSellPrice: 0.265, lastSellAtMs: NOW - 4 * 60_000 },
+      }),
+    ]);
+    const manager = makeManager({
+      bus,
+      repo,
+      signalSnapshot: zeroSignals(),
+      profilePolicy: policy({
+        enabled: true,
+        scaleIn: {
+          ...DEFAULT_POLICY.scaleIn,
+          enabled: true,
+          harvestingGuard: {
+            ...DEFAULT_POLICY.scaleIn.harvestingGuard,
+            enabled: false,
+          },
+        },
+        costCaps: { enabled: false },
+      }),
+      positions: [position({ avgEntryPrice: 0.2, costBasisUsdc: 8 })],
+    });
+
+    await manager.start();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market({ bestAsk: 0.309, midPrice: 0.3, lastTradePrice: 0.3 })],
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(repo.getState(tokenId)?.state).toBe("HARVESTING");
+    expect(signals).toHaveLength(1);
   });
 
   it("does not create profile state on a BUY fill when no open position exists", async () => {

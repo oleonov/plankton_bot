@@ -385,6 +385,86 @@ describe("migration 073 — execution profile abandoned dormant state", () => {
   });
 });
 
+describe("migration 076 — execution profile harvesting state", () => {
+  it("widens execution_profile_state state CHECK to accept HARVESTING and preserves rows/indexes", () => {
+    db.exec(readMigration("069_execution_profile_state.sql"));
+    db.exec(
+      applySafeAddColumnStatements(db, readMigration("070_execution_profile_scale_in_columns.sql")),
+    );
+    db.exec(readMigration("073_abandoned_dormant_state.sql"));
+
+    db.prepare(
+      `INSERT INTO execution_profile_state
+         (token_id, condition_id, profile, state, assumed_at, last_avg_entry,
+          last_transition_at, metadata_json, created_at, updated_at)
+       VALUES ('tok-existing', 'cond-existing', 'cheap', 'ACCUMULATING',
+               '2026-06-21T00:00:00.000Z', 0.04,
+               '2026-06-21T00:00:00.000Z', '{"kept":true}',
+               '2026-06-21T00:00:00.000Z', '2026-06-21T00:00:00.000Z')`,
+    ).run();
+
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO execution_profile_state
+             (token_id, condition_id, profile, state, assumed_at, last_avg_entry,
+              last_transition_at, created_at, updated_at)
+           VALUES ('tok-before', 'cond-before', 'cheap', 'HARVESTING',
+                   '2026-06-21T00:00:00.000Z', 0.04,
+                   '2026-06-21T00:00:00.000Z', '2026-06-21T00:00:00.000Z',
+                   '2026-06-21T00:00:00.000Z')`,
+        )
+        .run(),
+    ).toThrow(/CHECK constraint failed/i);
+
+    db.exec(readMigration("076_harvesting_state.sql"));
+
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO execution_profile_state
+             (token_id, condition_id, profile, state, assumed_at, last_avg_entry,
+              last_transition_at, created_at, updated_at)
+           VALUES ('tok-after', 'cond-after', 'cheap', 'HARVESTING',
+                   '2026-06-21T00:00:00.000Z', 0.04,
+                   '2026-06-21T00:00:00.000Z', '2026-06-21T00:00:00.000Z',
+                   '2026-06-21T00:00:00.000Z')`,
+        )
+        .run(),
+    ).not.toThrow();
+
+    const existing = db
+      .prepare("SELECT state, metadata_json FROM execution_profile_state WHERE token_id = ?")
+      .get("tok-existing") as { state: string; metadata_json: string };
+    expect(existing).toEqual({ state: "ACCUMULATING", metadata_json: '{"kept":true}' });
+
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO execution_profile_state
+             (token_id, condition_id, profile, state, assumed_at, last_avg_entry,
+              last_transition_at, created_at, updated_at)
+           VALUES ('tok-bad', 'cond-bad', 'cheap', 'NOT_A_STATE',
+                   '2026-06-21T00:00:00.000Z', 0.04,
+                   '2026-06-21T00:00:00.000Z', '2026-06-21T00:00:00.000Z',
+                   '2026-06-21T00:00:00.000Z')`,
+        )
+        .run(),
+    ).toThrow(/CHECK constraint failed/i);
+
+    const indexes = db.prepare("PRAGMA index_list('execution_profile_state')").all() as Array<{
+      name: string;
+    }>;
+    expect(indexes.map((row) => row.name).sort()).toEqual(
+      expect.arrayContaining([
+        "idx_execution_profile_state_ladder",
+        "idx_execution_profile_state_profile",
+        "idx_execution_profile_state_state",
+      ]),
+    );
+  });
+});
+
 describe("migration 067 — Track R liquidation reporting columns", () => {
   beforeEach(() => {
     db.exec(`

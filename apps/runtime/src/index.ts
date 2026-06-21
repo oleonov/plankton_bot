@@ -1016,6 +1016,7 @@ async function main(): Promise<void> {
     balanceRejectBlockMs: config.executionSellBalanceRejectBlockMs,
   });
   const reconcileTrigger: { fn: (() => void) | undefined } = { fn: undefined };
+  const executionProfileStateRepo = new SqliteExecutionProfileStateRepository(ledgerConn.db);
   const executionProfileManagerRef: { current?: ExecutionProfileManager } = {};
   const countProfileOwnedOpenPositions = (): number =>
     repos.position
@@ -1076,6 +1077,7 @@ async function main(): Promise<void> {
     executionPolicy: currentExecutionPolicy,
     capacityMetricsSink: recordOrderCapacitySample,
     profileOwnedOpenPositionCount: countProfileOwnedOpenPositions,
+    profileStateReader: executionProfileStateRepo,
     redeemInFlightGuard: (conditionId) =>
       redeemSweepModule?.isConditionInRedeemFlight(conditionId) ?? false,
     runtimeMetrics,
@@ -1167,7 +1169,6 @@ async function main(): Promise<void> {
     db: ledgerConn.db,
     log,
   });
-  const executionProfileStateRepo = new SqliteExecutionProfileStateRepository(ledgerConn.db);
   const signalFeedRepo = new SqliteSignalFeedRepository(ledgerConn.db);
   const signalFeedManager = new SignalFeedManager({
     bus,

@@ -88,18 +88,29 @@ function nextState(
       if (current == null || current === "SCANNING") return "PROBING";
       if (current === "PROBING") return "ACCUMULATING";
       if (current === "ACCUMULATING") return "ACCUMULATING";
+      if (current === "HARVESTING") return "HARVESTING";
+      return null;
+    case "harvest_lifecycle_activated":
+      if (current === "PROBING" || current === "ACCUMULATING" || current === "HARVESTING") {
+        return "HARVESTING";
+      }
       return null;
     case "sell_lifecycle_activated":
-      return current === "PROBING" || current === "ACCUMULATING" ? "EXITING" : null;
+      return current === "PROBING" || current === "ACCUMULATING" || current === "HARVESTING"
+        ? "EXITING"
+        : null;
     case "qd_handoff_started":
       return current === "PROBING" ||
         current === "ACCUMULATING" ||
+        current === "HARVESTING" ||
         current === "EXITING" ||
         current === "ABANDONED_DORMANT"
         ? "QD_HANDOFF"
         : null;
     case "abandonment_triggered":
-      return current === "PROBING" || current === "ACCUMULATING" ? "ABANDONED_DORMANT" : null;
+      return current === "PROBING" || current === "ACCUMULATING" || current === "HARVESTING"
+        ? "ABANDONED_DORMANT"
+        : null;
     case "position_closed":
     case "position_settled":
       return current === "CLOSED" ? "CLOSED" : "CLOSED";

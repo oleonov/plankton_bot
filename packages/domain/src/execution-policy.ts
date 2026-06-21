@@ -25,6 +25,7 @@ import type {
   ExecutionProfileProfilesPolicy,
   ExecutionProfileScaleInProfilePolicy,
   ExecutionProfileScaleInFeatureToggle,
+  HarvestingGuardPolicy,
   ExecutionProfileSellLadderConfig,
   ProfileLadderModeReaderConfig,
   ExecutionProfileSignalFeedConfig,
@@ -323,7 +324,21 @@ export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
     mediumExpensiveHigh: 0.375,
   },
   costCaps: { enabled: false },
-  scaleIn: { enabled: false, useRealFeed: false },
+  scaleIn: {
+    enabled: false,
+    useRealFeed: false,
+    harvestingGuard: {
+      enabled: true,
+      transitionEnabled: true,
+      maxBuyVsLastSellRatio: 1.03,
+      windowMs: 3_600_000,
+      override: {
+        recovery60Min: 0.1,
+        range60Min: 0.2,
+        std60Min: 0.03,
+      },
+    },
+  },
   signalFeed: {
     enabled: false,
     windowShortMs: 60 * 60_000,
@@ -2553,6 +2568,85 @@ function parseExecutionProfileScaleInToggle(
   return {
     enabled: booleanOr(obj.enabled, fallback.enabled, issues, `${name}.enabled`),
     useRealFeed: booleanOr(obj.useRealFeed, fallback.useRealFeed, issues, `${name}.useRealFeed`),
+    harvestingGuard: parseHarvestingGuard(
+      obj.harvestingGuard,
+      fallback.harvestingGuard,
+      issues,
+      `${name}.harvestingGuard`,
+    ),
+  };
+}
+
+function parseHarvestingGuard(
+  raw: unknown,
+  fallback: HarvestingGuardPolicy,
+  issues: string[],
+  name: string,
+): HarvestingGuardPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push(`${name} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(obj.enabled, fallback.enabled, issues, `${name}.enabled`),
+    transitionEnabled: booleanOr(
+      obj.transitionEnabled,
+      fallback.transitionEnabled,
+      issues,
+      `${name}.transitionEnabled`,
+    ),
+    maxBuyVsLastSellRatio: clampedNumber(
+      obj.maxBuyVsLastSellRatio,
+      fallback.maxBuyVsLastSellRatio,
+      1,
+      2,
+      issues,
+      `${name}.maxBuyVsLastSellRatio`,
+    ),
+    windowMs: clampedInt(
+      obj.windowMs,
+      fallback.windowMs,
+      60_000,
+      24 * 60 * 60_000,
+      issues,
+      `${name}.windowMs`,
+    ),
+    override: parseHarvestingGuardOverride(
+      obj.override,
+      fallback.override,
+      issues,
+      `${name}.override`,
+    ),
+  };
+}
+
+function parseHarvestingGuardOverride(
+  raw: unknown,
+  fallback: HarvestingGuardPolicy["override"],
+  issues: string[],
+  name: string,
+): HarvestingGuardPolicy["override"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push(`${name} must be an object`);
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    recovery60Min: nonNegativeNumberOr(
+      obj.recovery60Min,
+      fallback.recovery60Min,
+      issues,
+      `${name}.recovery60Min`,
+    ).value,
+    range60Min: nonNegativeNumberOr(
+      obj.range60Min,
+      fallback.range60Min,
+      issues,
+      `${name}.range60Min`,
+    ).value,
+    std60Min: nonNegativeNumberOr(obj.std60Min, fallback.std60Min, issues, `${name}.std60Min`)
+      .value,
   };
 }
 

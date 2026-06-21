@@ -14,6 +14,7 @@ export const PROFILE_STATES = [
   "SCANNING",
   "PROBING",
   "ACCUMULATING",
+  "HARVESTING",
   "EXITING",
   "QD_HANDOFF",
   "ABANDONED",
@@ -47,6 +48,7 @@ export interface ExecutionProfileStateRecord extends ProfileSnapshot {
 export type ReducerEventType =
   | "position_adopted"
   | "buy_fill_received"
+  | "harvest_lifecycle_activated"
   | "sell_lifecycle_activated"
   | "qd_handoff_started"
   | "abandonment_triggered"

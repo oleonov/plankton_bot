@@ -57,7 +57,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       maxTokensPerCycle: 100,
       qdHandoffThresholdMs: 3_600_000,
       costCaps: { enabled: false },
-      scaleIn: { enabled: false, useRealFeed: false },
+      scaleIn: {
+        enabled: false,
+        useRealFeed: false,
+        harvestingGuard: DEFAULT_EXECUTION_POLICY.executionProfile.scaleIn.harvestingGuard,
+      },
       signalFeed: {
         enabled: false,
         windowShortMs: 3_600_000,
@@ -661,7 +665,10 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       }),
     );
 
-    expect(parsed.policy.executionProfile.scaleIn).toEqual({ enabled: true, useRealFeed: false });
+    expect(parsed.policy.executionProfile.scaleIn).toMatchObject({
+      enabled: true,
+      useRealFeed: false,
+    });
     expect(parsed.policy.executionProfile.profiles.cheap.scaleIn).toEqual(
       DEFAULT_EXECUTION_POLICY.executionProfile.profiles.cheap.scaleIn,
     );
@@ -702,6 +709,101 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         issue.includes("executionProfile.profiles.expensive.scaleIn.minTimeBetweenAddsMs"),
       ),
     ).toBe(true);
+  });
+
+  it("defaults and parses harvesting guard under executionProfile.scaleIn", () => {
+    const defaults = parseExecutionPolicyJson("{}");
+
+    expect(defaults.policy.executionProfile.scaleIn.harvestingGuard).toEqual(
+      DEFAULT_EXECUTION_POLICY.executionProfile.scaleIn.harvestingGuard,
+    );
+    expect(defaults.policy.executionProfile.scaleIn.harvestingGuard).toMatchObject({
+      enabled: true,
+      transitionEnabled: true,
+      maxBuyVsLastSellRatio: 1.03,
+      windowMs: 3_600_000,
+      override: {
+        recovery60Min: 0.1,
+        range60Min: 0.2,
+        std60Min: 0.03,
+      },
+    });
+
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          scaleIn: {
+            enabled: true,
+            useRealFeed: true,
+            harvestingGuard: {
+              enabled: false,
+              transitionEnabled: false,
+              maxBuyVsLastSellRatio: 1.05,
+              windowMs: 30 * 60_000,
+              override: {
+                recovery60Min: 0.12,
+                range60Min: 0.25,
+                std60Min: 0.04,
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.issues).toEqual([]);
+    expect(parsed.policy.executionProfile.scaleIn).toMatchObject({
+      enabled: true,
+      useRealFeed: true,
+      harvestingGuard: {
+        enabled: false,
+        transitionEnabled: false,
+        maxBuyVsLastSellRatio: 1.05,
+        windowMs: 1_800_000,
+        override: {
+          recovery60Min: 0.12,
+          range60Min: 0.25,
+          std60Min: 0.04,
+        },
+      },
+    });
+  });
+
+  it("falls back malformed harvesting guard values with parser issues", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          scaleIn: {
+            harvestingGuard: {
+              enabled: "yes",
+              transitionEnabled: "no",
+              maxBuyVsLastSellRatio: 0.5,
+              windowMs: 1,
+              override: {
+                recovery60Min: -0.1,
+                range60Min: -0.2,
+                std60Min: -0.03,
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.policy.executionProfile.scaleIn.harvestingGuard).toEqual(
+      DEFAULT_EXECUTION_POLICY.executionProfile.scaleIn.harvestingGuard,
+    );
+    expect(parsed.issues).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("executionProfile.scaleIn.harvestingGuard.enabled"),
+        expect.stringContaining("executionProfile.scaleIn.harvestingGuard.transitionEnabled"),
+        expect.stringContaining("executionProfile.scaleIn.harvestingGuard.maxBuyVsLastSellRatio"),
+        expect.stringContaining("executionProfile.scaleIn.harvestingGuard.windowMs"),
+        expect.stringContaining("executionProfile.scaleIn.harvestingGuard.override.recovery60Min"),
+        expect.stringContaining("executionProfile.scaleIn.harvestingGuard.override.range60Min"),
+        expect.stringContaining("executionProfile.scaleIn.harvestingGuard.override.std60Min"),
+      ]),
+    );
   });
 
   it("parses Track S1 policy field-by-field and normalizes volume distribution", () => {

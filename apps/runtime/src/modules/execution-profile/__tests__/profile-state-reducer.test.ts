@@ -53,6 +53,18 @@ describe("reduceProfileState", () => {
     expect(
       reduceProfileState(record("ACCUMULATING"), event("sell_lifecycle_activated")).next?.state,
     ).toBe("EXITING");
+    expect(
+      reduceProfileState(record("PROBING"), event("harvest_lifecycle_activated")).next?.state,
+    ).toBe("HARVESTING");
+    expect(
+      reduceProfileState(record("ACCUMULATING"), event("harvest_lifecycle_activated")).next?.state,
+    ).toBe("HARVESTING");
+    expect(reduceProfileState(record("HARVESTING"), event("buy_fill_received")).next?.state).toBe(
+      "HARVESTING",
+    );
+    expect(
+      reduceProfileState(record("HARVESTING"), event("harvest_lifecycle_activated")).next?.state,
+    ).toBe("HARVESTING");
     expect(reduceProfileState(record("PROBING"), event("qd_handoff_started")).next?.state).toBe(
       "QD_HANDOFF",
     );
@@ -72,6 +84,7 @@ describe("reduceProfileState", () => {
       "SCANNING",
       "PROBING",
       "ACCUMULATING",
+      "HARVESTING",
       "EXITING",
       "QD_HANDOFF",
       "ABANDONED",
@@ -81,7 +94,7 @@ describe("reduceProfileState", () => {
         "CLOSED",
       );
     }
-    for (const state of ["PROBING", "ACCUMULATING"] as const) {
+    for (const state of ["PROBING", "ACCUMULATING", "HARVESTING"] as const) {
       expect(reduceProfileState(record(state), event("abandonment_triggered")).next?.state).toBe(
         "ABANDONED_DORMANT",
       );

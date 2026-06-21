@@ -3,8 +3,10 @@ import {
   applyStockCloseTailSizeDamp,
   DEFAULT_BUY_GUARDS_POLICY,
   evaluateD3NearDeathGuard,
+  evaluatePostSellBuybackGuard,
   type CapDecision,
   type BuyGuardsPolicy,
+  type PostSellBuybackGuardSignals,
   S1_LADDER_RULE_ID,
   SignalReason,
   type EventBus,
@@ -19,6 +21,7 @@ import {
   type ScaleInDecision,
   type ScaleInConfig,
   type ScaleInMarketSignals,
+  type ScaleInMode,
   type ScaleInReason,
   type SignalSnapshot,
   type TokenId,
@@ -56,7 +59,7 @@ const OPEN_ORDER_STATUSES: readonly OrderStatus[] = [
   OrderStatus.PartiallyFilled,
 ];
 
-const SCALE_IN_STATES = new Set(["PROBING", "ACCUMULATING"]);
+const SCALE_IN_STATES = new Set(["PROBING", "ACCUMULATING", "HARVESTING"]);
 
 export interface ExecutionProfileMetricWriter {
   writeCounter(name: string, value?: number, labels?: string): void;
@@ -500,6 +503,18 @@ export class ExecutionProfileManager implements RuntimeModule {
         }
       }
 
+      const harvestingDecision = this.evaluateHarvestingBuyGuard({
+        state,
+        position,
+        tokenId,
+        buyPrice: currentMarkPrice,
+        mode: decision.mode ?? "none",
+        timestamp,
+      });
+      if (harvestingDecision === "block") {
+        continue;
+      }
+
       const cap = decideCostCap(
         {
           profile: state.profile,
@@ -569,9 +584,105 @@ export class ExecutionProfileManager implements RuntimeModule {
     }
   }
 
+  private evaluateHarvestingBuyGuard(args: {
+    state: ExecutionProfileStateRecord;
+    position: Position;
+    tokenId: TokenId;
+    buyPrice: number;
+    mode: ScaleInMode | "none";
+    timestamp: number;
+  }): "allow" | "block" {
+    if (args.state.state !== "HARVESTING") return "allow";
+    const policy = this.policy().scaleIn.harvestingGuard;
+    if (!policy.enabled) return "allow";
+    const decision = evaluatePostSellBuybackGuard(
+      {
+        buyPrice: args.buyPrice,
+        lastSellPrice: numericMetadata(args.state.metadata, "lastSellPrice"),
+        lastSellAtMs: numericMetadata(args.state.metadata, "lastSellAtMs"),
+        nowMs: args.timestamp,
+        signals: this.harvestingGuardSignals(args.tokenId, args.timestamp),
+      },
+      policy,
+    );
+    if (decision.action !== "block") {
+      this.recordHarvestingGuardAllowed(
+        args.state,
+        args.position,
+        args.buyPrice,
+        args.mode ?? "none",
+        decision.reason,
+      );
+      if (decision.reason === "strong_override") {
+        this.recordBuyGuardCounter("harvesting_buy_above_last_sell_override_total", {
+          band: args.state.profile,
+          mode: args.mode ?? "none",
+          overrideReason: decision.overrideReason ?? "unknown",
+        });
+      }
+      return "allow";
+    }
+
+    this.recordBuyGuardCounter("harvesting_buy_above_last_sell_suppressed_total", {
+      band: args.state.profile,
+      mode: args.mode ?? "none",
+      thresholdBucket: bucketHarvestingRatio(decision.ratio),
+      overrideStatus: decision.overrideStatus,
+    });
+    this.recordRiskEvent("harvesting_buy_above_last_sell_suppressed", {
+      tokenId: String(args.tokenId),
+      conditionId: String(args.position.conditionId),
+      buyPrice: args.buyPrice,
+      lastSellPrice: numericMetadata(args.state.metadata, "lastSellPrice"),
+      lastSellAtMs: numericMetadata(args.state.metadata, "lastSellAtMs"),
+      ratio: decision.ratio,
+      overrideStatus: decision.overrideStatus,
+      state: args.state.state,
+      decisionRuleId: EXECUTION_PROFILE_SCALE_IN_RULE_ID,
+      signalReason: SignalReason.ScaleIn,
+      signalTimestamp: new Date(args.timestamp).toISOString(),
+    });
+    this.recordRollup({
+      kind: "scale_in",
+      profile: args.state.profile,
+      outcome: "skip",
+      mode: args.mode ?? "none",
+      reason: "harvesting_buy_above_last_sell_suppressed",
+      sample: { tokenId: String(args.tokenId), markPrice: args.buyPrice },
+    });
+    return "block";
+  }
+
+  private recordHarvestingGuardAllowed(
+    state: ExecutionProfileStateRecord,
+    position: Position,
+    buyPrice: number,
+    mode: ScaleInMode | "none",
+    reason: string,
+  ): void {
+    if (state.state !== "HARVESTING") return;
+    this.recordBuyGuardCounter("harvesting_buy_allowed_total", {
+      band: state.profile,
+      mode,
+      reason,
+    });
+    if (reason === "missing_last_sell_context") {
+      this.recordRiskEvent("harvesting_buy_missing_last_sell_context", {
+        tokenId: String(state.tokenId),
+        conditionId: String(position.conditionId),
+        buyPrice,
+        state: state.state,
+      });
+    }
+  }
+
   private handleFillReceived(fill: RuntimeEventMap["FillReceived"]): void {
     this.pendingScaleIn.delete(String(fill.tokenId));
     this.reclassifyFromPosition(fill.tokenId);
+    if (fill.side === "sell") {
+      this.handleSellFillReceived(fill);
+      return;
+    }
     if (fill.side !== "buy") return;
     const position = this.deps.positionRepo.findByTokenId(fill.tokenId);
     if (position == null) return;
@@ -603,6 +714,71 @@ export class ExecutionProfileManager implements RuntimeModule {
     if (current == null && reduction.transition != null) {
       this.recordAssignment(next, "buy_fill");
     }
+  }
+
+  private handleSellFillReceived(fill: RuntimeEventMap["FillReceived"]): void {
+    const current = this.deps.stateRepo.getState(fill.tokenId);
+    if (current == null || !isHarvestTriggerState(current.state)) return;
+    if (isDustAutoCloseFill(fill) || fill.price <= current.lastAvgEntry) return;
+    const guard = this.policy().scaleIn.harvestingGuard;
+    if (!guard.transitionEnabled) return;
+
+    const reduction = reduceProfileState(current, {
+      type: "harvest_lifecycle_activated",
+      tokenId: fill.tokenId,
+      occurredAtMs: fill.timestamp,
+      payload: {},
+    });
+    const base = reduction.next ?? current;
+    const next = this.withSellHarvestingMetadata(base, fill);
+    this.deps.stateRepo.runInTransaction(() => {
+      this.deps.stateRepo.upsertState(next);
+      this.ownership.setSnapshot(toSnapshot(next));
+    });
+    this.consumeReducerEffects(reduction.effects, fill.timestamp);
+    if (reduction.transition?.to === "HARVESTING") {
+      this.recordBuyGuardCounter("harvesting_state_entered_total", {
+        band: next.profile,
+        reason: "first_profitable_sell",
+      });
+      this.recordRiskEvent("harvest_lifecycle_activated", {
+        tokenId: String(next.tokenId),
+        conditionId: String(next.conditionId),
+        from: reduction.transition.from,
+        to: reduction.transition.to,
+        fillPrice: fill.price,
+        lastAvgEntry: current.lastAvgEntry,
+        occurredAt: new Date(fill.timestamp).toISOString(),
+      });
+    }
+  }
+
+  private withSellHarvestingMetadata(
+    state: ExecutionProfileStateRecord,
+    fill: RuntimeEventMap["FillReceived"],
+  ): ExecutionProfileStateRecord {
+    const metadata = state.metadata ?? {};
+    const firstProfitableSellAtMs =
+      typeof metadata.firstProfitableSellAtMs === "number" &&
+      Number.isFinite(metadata.firstProfitableSellAtMs)
+        ? metadata.firstProfitableSellAtMs
+        : fill.timestamp;
+    const harvestSellCount =
+      typeof metadata.harvestSellCount === "number" && Number.isFinite(metadata.harvestSellCount)
+        ? metadata.harvestSellCount + 1
+        : 1;
+    return {
+      ...state,
+      metadata: {
+        ...metadata,
+        lastSellPrice: fill.price,
+        lastSellAtMs: fill.timestamp,
+        firstProfitableSellAtMs,
+        lastProfitableSellPrice: fill.price,
+        harvestSellCount,
+      },
+      updatedAt: new Date(fill.timestamp).toISOString(),
+    };
   }
 
   private resolveInitialProfile(position: Position): Profile | null {
@@ -646,6 +822,25 @@ export class ExecutionProfileManager implements RuntimeModule {
       if (snapshot != null) return signalsFromSnapshot(snapshot);
     }
     return this.scaleInSignalSource.getSignalSnapshot(tokenId);
+  }
+
+  private harvestingGuardSignals(tokenId: TokenId, timestamp: number): PostSellBuybackGuardSignals {
+    const policy = this.policy();
+    if (!policy.signalFeed.enabled || !policy.scaleIn.useRealFeed || !this.deps.signalFeedReader) {
+      return unavailableGuardSignals();
+    }
+    const snapshot = this.deps.signalFeedReader.getSnapshot(tokenId, timestamp);
+    if (snapshot == null) return unavailableGuardSignals();
+    const usable =
+      !snapshot.insufficientForRecovery &&
+      !snapshot.insufficientForRange &&
+      !snapshot.insufficientForStd;
+    return {
+      recovery60: snapshot.recovery60,
+      range60: snapshot.range60,
+      std60: snapshot.std60,
+      usable,
+    };
   }
 
   private recordCounter(name: string, labels: Record<string, unknown>): void {
@@ -818,4 +1013,31 @@ function signalsFromSnapshot(snapshot: SignalSnapshot): ScaleInMarketSignals {
     tradeCount3h: snapshot.tradeCount3h,
     notional3h: snapshot.notional3h ?? 0,
   };
+}
+
+function unavailableGuardSignals(): PostSellBuybackGuardSignals {
+  return { recovery60: null, range60: null, std60: null, usable: false };
+}
+
+function numericMetadata(
+  metadata: Readonly<Record<string, unknown>> | null,
+  key: string,
+): number | null {
+  const value = metadata?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function bucketHarvestingRatio(ratio: number | null): string {
+  if (ratio == null || !Number.isFinite(ratio)) return "unknown";
+  if (ratio > 1.05) return "gt_1_05";
+  if (ratio > 1.03) return "gt_1_03";
+  return "lte_1_03";
+}
+
+function isHarvestTriggerState(state: ExecutionProfileStateRecord["state"]): boolean {
+  return state === "PROBING" || state === "ACCUMULATING" || state === "HARVESTING";
+}
+
+function isDustAutoCloseFill(fill: RuntimeEventMap["FillReceived"]): boolean {
+  return fill.signalReason === "dust-auto-close" || fill.decisionRuleId === "S4_DUST_AUTO_CLOSE";
 }

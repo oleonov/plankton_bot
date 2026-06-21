@@ -5,6 +5,7 @@ import type { ProfileSnapshot, ProfileState } from "./types.js";
 const OWNED_STATES = new Set<ProfileState>([
   "PROBING",
   "ACCUMULATING",
+  "HARVESTING",
   "EXITING",
   "QD_HANDOFF",
   "ABANDONED",

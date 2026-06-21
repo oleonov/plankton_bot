@@ -17,6 +17,7 @@ export * from "./market-selection.js";
 export * from "./strike-classifier.js";
 export * from "./effective-resolution.js";
 export * from "./buy-guards.js";
+export * from "./post-sell-buyback-guard.js";
 export * from "./polymarket-fees.js";
 export * from "./fee-schedule.js";
 export * from "./orderbook.js";

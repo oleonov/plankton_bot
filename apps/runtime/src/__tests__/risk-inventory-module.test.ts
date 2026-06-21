@@ -480,6 +480,96 @@ describe("RiskInventoryModule", () => {
     );
   });
 
+  it("rejects legacy profile-owned HARVESTING BUY adds above recent last sell", async () => {
+    const runtimeMetrics = { writeCounter: vi.fn() };
+    mod = createModule(undefined, {
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      runtimeMetrics: runtimeMetrics as any,
+      profileStateReader: {
+        getState: () =>
+          ({
+            tokenId: TOK_ID,
+            conditionId: COND_ID,
+            profile: "medium",
+            state: "HARVESTING",
+            metadata: {
+              lastSellPrice: 0.265,
+              lastSellAtMs: MTM_NOW_MS - 4 * 60_000,
+            },
+          }) as any,
+      },
+      now: () => MTM_NOW_MS,
+    });
+    await mod.start();
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (payload) => {
+      rejected.push(payload);
+    });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({
+        reason: "confirm-scale",
+        decisionRuleId: "D3",
+        suggestedPrice: 0.309,
+        suggestedSize: 10,
+        suggestedSizeUsdc: 3.09,
+      }),
+      market: makeMarket(),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("above_last_sell_suppressed");
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "harvesting_buy_above_last_sell_suppressed_total",
+      1,
+      expect.not.stringContaining("token"),
+    );
+  });
+
+  it("does not double-guard EXECUTION_PROFILE_SCALE_IN or block flat probe entries", async () => {
+    positionRepo = createMockPositionRepo(makeMtmPosition());
+    mod = createModule(undefined, {
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      profileStateReader: {
+        getState: () =>
+          ({
+            tokenId: TOK_ID,
+            conditionId: COND_ID,
+            profile: "medium",
+            state: "HARVESTING",
+            metadata: {
+              lastSellPrice: 0.265,
+              lastSellAtMs: MTM_NOW_MS - 4 * 60_000,
+            },
+          }) as any,
+      },
+      now: () => MTM_NOW_MS,
+    });
+
+    const evaluate = (mod as any).evaluateHarvestingBuyGuard.bind(mod);
+
+    expect(
+      evaluate(
+        makeSignal({
+          signalId: "sig-scale-in",
+          reason: "scale-in",
+          decisionRuleId: "EXECUTION_PROFILE_SCALE_IN",
+          suggestedPrice: 0.309,
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      evaluate(
+        makeSignal({
+          signalId: "sig-probe",
+          reason: "probe-entry",
+          decisionRuleId: "R23",
+          suggestedPrice: 0.309,
+        }),
+      ),
+    ).toBeNull();
+  });
+
   it("emits the configured redeem-in-flight rejection counter for BUY and SELL", async () => {
     const fixedNow = Date.parse("2026-05-11T00:00:00.000Z");
     const runtimeMetrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };

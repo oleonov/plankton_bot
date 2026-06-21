@@ -600,6 +600,7 @@ CREATE TABLE IF NOT EXISTS execution_profile_state (
       'SCANNING',
       'PROBING',
       'ACCUMULATING',
+      'HARVESTING',
       'EXITING',
       'QD_HANDOFF',
       'ABANDONED',

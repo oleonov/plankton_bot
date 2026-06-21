@@ -30,6 +30,7 @@ describe("ProfileOwnershipReader", () => {
     for (const state of [
       "PROBING",
       "ACCUMULATING",
+      "HARVESTING",
       "EXITING",
       "QD_HANDOFF",
       "ABANDONED",

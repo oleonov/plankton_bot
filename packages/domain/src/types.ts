@@ -747,6 +747,20 @@ export interface D3NearDeathGuardPolicy {
   stockClosePennyMaxAddPrice: number;
 }
 
+export interface HarvestingGuardOverridePolicy {
+  recovery60Min: number;
+  range60Min: number;
+  std60Min: number;
+}
+
+export interface HarvestingGuardPolicy {
+  enabled: boolean;
+  transitionEnabled: boolean;
+  maxBuyVsLastSellRatio: number;
+  windowMs: number;
+  override: HarvestingGuardOverridePolicy;
+}
+
 export interface StockCloseTailSizeDampPolicy {
   enabled: boolean;
   /** Maximum parsed range width / midpoint for a narrow stock-close YES tail. */
@@ -1085,6 +1099,7 @@ export interface ExecutionProfileFeatureToggle {
 
 export interface ExecutionProfileScaleInFeatureToggle extends ExecutionProfileFeatureToggle {
   useRealFeed: boolean;
+  harvestingGuard: HarvestingGuardPolicy;
 }
 
 export interface HotSample {
@@ -1154,6 +1169,7 @@ export type ExecutionProfileStateName =
   | "SCANNING"
   | "PROBING"
   | "ACCUMULATING"
+  | "HARVESTING"
   | "EXITING"
   | "QD_HANDOFF"
   | "ABANDONED"
@@ -1278,6 +1294,7 @@ export type ScaleInReason =
   | "stock_close_penny_add"
   | "calendar_missing"
   | "stock_close_tail_damp_below_min_order"
+  | "harvesting_buy_above_last_sell_suppressed"
   | "cost_cap_blocked"
   | "allowed"
   | ManagerScaleInReason;

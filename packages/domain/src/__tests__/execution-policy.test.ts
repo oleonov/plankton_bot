@@ -71,7 +71,10 @@ describe("execution profile signal feed policy", () => {
     );
 
     expect(parsed.issues).toEqual([]);
-    expect(parsed.policy.executionProfile.scaleIn).toEqual({ enabled: true, useRealFeed: true });
+    expect(parsed.policy.executionProfile.scaleIn).toMatchObject({
+      enabled: true,
+      useRealFeed: true,
+    });
     expect(parsed.policy.executionProfile.signalFeed).toMatchObject({
       enabled: true,
       windowShortMs: 123,

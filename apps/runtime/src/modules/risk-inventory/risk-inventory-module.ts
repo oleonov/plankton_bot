@@ -36,6 +36,7 @@ import {
   SignalReason,
   canPlaceBuyOrderForMarket,
   evaluateD3NearDeathGuard,
+  evaluatePostSellBuybackGuard,
   recordStageDuration,
   roundToTick,
 } from "@krabs/domain";
@@ -56,6 +57,9 @@ import {
 import type { CooldownRegistry } from "../same-price-cooldown/cooldown-registry.js";
 import type { SignalPathTelemetry } from "../strategy/signal-path-telemetry.js";
 import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
+import type { ExecutionProfileStateRecord } from "../execution-profile/types.js";
+
+const EXECUTION_PROFILE_SCALE_IN_RULE_ID = "EXECUTION_PROFILE_SCALE_IN";
 
 export interface RiskInventoryModuleDeps {
   bus: EventBus;
@@ -74,6 +78,10 @@ export interface RiskInventoryModuleDeps {
   executionPolicy?: (() => ExecutionPolicy) | undefined;
   capacityMetricsSink?: ((sample: OrderCapacityMetricsSample) => void) | undefined;
   profileOwnedOpenPositionCount?: (() => number) | undefined;
+  profileStateReader?: Pick<
+    import("../execution-profile/types.js").ExecutionProfileStateRepository,
+    "getState"
+  >;
   redeemInFlightGuard?: ((conditionId: string) => boolean) | undefined;
   runtimeMetrics?: RuntimeMetricWriter | undefined;
   runtimeControl?: RuntimeControl | undefined;
@@ -430,6 +438,41 @@ export class RiskInventoryModule implements RuntimeModule {
     return decision.reason;
   }
 
+  private evaluateHarvestingBuyGuard(
+    signal: RuntimeEventMap["SignalProduced"]["signal"],
+  ): string | null {
+    if (signal.side !== "buy") return null;
+    if (signal.decisionRuleId === EXECUTION_PROFILE_SCALE_IN_RULE_ID) return null;
+    if (!isPostEntryAddReason(signal.reason)) return null;
+    const policy = this.deps.executionPolicy?.().executionProfile.scaleIn.harvestingGuard;
+    if (policy == null || !policy.enabled) return null;
+    const state = this.deps.profileStateReader?.getState(signal.tokenId);
+    if (!isHarvestingState(state)) return null;
+
+    const decision = evaluatePostSellBuybackGuard(
+      {
+        buyPrice: signal.suggestedPrice,
+        lastSellPrice: numericMetadata(state.metadata, "lastSellPrice"),
+        lastSellAtMs: numericMetadata(state.metadata, "lastSellAtMs"),
+        nowMs: this.now(),
+        signals: { recovery60: null, range60: null, std60: null, usable: false },
+      },
+      policy,
+    );
+    if (decision.action !== "block") return null;
+    this.deps.runtimeMetrics?.writeCounter(
+      "harvesting_buy_above_last_sell_suppressed_total",
+      1,
+      JSON.stringify({
+        band: state.profile,
+        mode: "legacy",
+        thresholdBucket: bucketHarvestingRatio(decision.ratio),
+        overrideStatus: decision.overrideStatus,
+      }),
+    );
+    return decision.reason;
+  }
+
   // ─── Signal evaluation ────────────────────────────────────────────
 
   private async handleSignal(payload: RuntimeEventMap["SignalProduced"]): Promise<void> {
@@ -506,6 +549,27 @@ export class RiskInventoryModule implements RuntimeModule {
           signal,
           market,
           reason: d3BuyGuardBlock,
+          rejectedAt: this.now(),
+        });
+        return;
+      }
+
+      const harvestingBuyGuardBlock = this.evaluateHarvestingBuyGuard(signal);
+      if (harvestingBuyGuardBlock) {
+        this.signalsRejectedCount++;
+        this.deps.signalPathTelemetry?.recordRejected(signal.signalId, harvestingBuyGuardBlock);
+        this.logRejectedSignal(
+          {
+            signalId: signal.signalId,
+            tokenId: String(signal.tokenId),
+            reasons: [harvestingBuyGuardBlock],
+          },
+          "BUY signal rejected — harvesting buyback guard",
+        );
+        await this.deps.bus.publish("SignalRejected", {
+          signal,
+          market,
+          reason: harvestingBuyGuardBlock,
           rejectedAt: this.now(),
         });
         return;
@@ -705,4 +769,25 @@ function isPostEntryAddReason(reason: string): boolean {
     reason === SignalReason.ScaleIn ||
     reason === SignalReason.HeavyScale
   );
+}
+
+function isHarvestingState(
+  state: ExecutionProfileStateRecord | null | undefined,
+): state is ExecutionProfileStateRecord {
+  return state?.state === "HARVESTING";
+}
+
+function numericMetadata(
+  metadata: Readonly<Record<string, unknown>> | null,
+  key: string,
+): number | null {
+  const value = metadata?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function bucketHarvestingRatio(ratio: number | null): string {
+  if (ratio == null || !Number.isFinite(ratio)) return "unknown";
+  if (ratio > 1.05) return "gt_1_05";
+  if (ratio > 1.03) return "gt_1_03";
+  return "lte_1_03";
 }
