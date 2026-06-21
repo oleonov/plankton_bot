@@ -39,6 +39,7 @@ import { ExecutionModule } from "../modules/execution/execution-module.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
 
+const PHASE_ONE_ACTIVE_MARKET_CAP = 250;
 const BOT_RUN_ID = createBotRunId("test-run-1");
 
 function makePlaceCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand {
@@ -165,6 +166,16 @@ function makePosition(overrides?: Partial<Position>): Position {
     updatedAt: new Date().toISOString(),
     ...overrides,
   };
+}
+
+function makeOpenPositions(count: number): Position[] {
+  return Array.from({ length: count }, (_, index) =>
+    makePosition({
+      positionId: createPositionId(`pos-active-${index}`),
+      tokenId: createTokenId(`tok-active-${index}`),
+      costBasisUsdc: 1,
+    }),
+  );
 }
 
 function makeNormalizedMarket(overrides: Partial<NormalizedMarket> = {}): NormalizedMarket {
@@ -2778,19 +2789,14 @@ describe("ExecutionModule", () => {
 
   it("rejects BUY on new market when active-markets cap reached (ADR-009)", async () => {
     const guard = new LiveLiteGuard({
-      maxOpenValueUsdc: 1000,
-      maxOrderUsdc: 100,
-      maxActiveMarkets: 2,
+      maxOpenValueUsdc: 500,
+      maxOrderUsdc: 25,
+      maxActiveMarkets: PHASE_ONE_ACTIVE_MARKET_CAP,
     });
     const positionRepo = {
       save: vi.fn(),
       findByTokenId: vi.fn().mockReturnValue(null),
-      findOpen: vi
-        .fn()
-        .mockReturnValue([
-          makePosition({ tokenId: createTokenId("tok-a"), costBasisUsdc: 1 }),
-          makePosition({ tokenId: createTokenId("tok-b"), costBasisUsdc: 1 }),
-        ]),
+      findOpen: vi.fn().mockReturnValue(makeOpenPositions(PHASE_ONE_ACTIVE_MARKET_CAP)),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
       findOpenByEntryStyle: vi.fn().mockReturnValue([]),
@@ -2815,7 +2821,7 @@ describe("ExecutionModule", () => {
       rejected.push(p);
     });
 
-    // BUY on tok-c (new market) with 2 already open → 3 > 2 → reject
+    // BUY on tok-c (new market) with 250 already open → 251 > 250 → reject
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd({ tokenId: createTokenId("tok-c"), price: 0.5, size: 2 }),
       timestamp: Date.now(),
@@ -2824,6 +2830,51 @@ describe("ExecutionModule", () => {
     expect(gateway.placeOrder).not.toHaveBeenCalled();
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toBe("live-lite-active-markets-cap-exceeded");
+
+    await guardedMod.stop();
+  });
+
+  it("allows BUY on new market with active-markets cap room at 249 of 250", async () => {
+    const guard = new LiveLiteGuard({
+      maxOpenValueUsdc: 500,
+      maxOrderUsdc: 25,
+      maxActiveMarkets: PHASE_ONE_ACTIVE_MARKET_CAP,
+    });
+    const positionRepo = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(null),
+      findOpen: vi.fn().mockReturnValue(makeOpenPositions(PHASE_ONE_ACTIVE_MARKET_CAP - 1)),
+      findDust: vi.fn().mockReturnValue([]),
+      findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    } as PositionRepository;
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ tokenId: createTokenId("tok-c"), price: 0.5, size: 2 }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(rejected).toHaveLength(0);
 
     await guardedMod.stop();
   });

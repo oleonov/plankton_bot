@@ -847,6 +847,11 @@ export function Overview() {
             <span>
               Caps: ${status.liveLite.maxOpenValueUsdc} total / ${status.liveLite.maxOrderUsdc} per
               order / {status.liveLite.maxActiveMarkets} markets
+              {status.liveLite.activeMarketCount != null
+                ? ` (${status.liveLite.activeMarketCount}/${status.liveLite.maxActiveMarkets}, ${(
+                    status.liveLite.activeMarketCapUtilizationPct ?? 0
+                  ).toFixed(0)}%)`
+                : ""}
             </span>
           </div>
         </div>

@@ -5,6 +5,12 @@ const DEFAULT_FALLBACK_MIN_ORDER_USDC_RELAYER = 1;
 const DEFAULT_FALLBACK_MIN_ORDER_USDC_EOA = 3;
 const DEFAULT_MARKETABLE_BUY_MIN_USDC = 1;
 
+export const DEFAULT_LIVE_LITE_CONFIG = {
+  maxOpenValueUsdc: 500,
+  maxOrderUsdc: 25,
+  maxActiveMarkets: 250,
+} as const;
+
 export interface LiveLiteConfig {
   maxOpenValueUsdc: number;
   maxOrderUsdc: number;

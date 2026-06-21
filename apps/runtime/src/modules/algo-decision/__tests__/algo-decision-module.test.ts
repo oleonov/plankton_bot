@@ -33,6 +33,8 @@ import { DEFAULT_EXECUTION_POLICY, S1_LADDER_RULE_ID } from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
 import { LiveLiteGuard } from "../../../live-lite-guard.js";
 
+const PHASE_ONE_ACTIVE_MARKET_CAP = 250;
+
 // ─── Seed rules ───────────────────────────────────────────────────────────────
 
 /** Minimal decision rules. REDEEM rows are present to prove runtime ignores algo-REDEEM. */
@@ -378,6 +380,10 @@ function createPositionRepoForOpenPositions(positions: Position[]) {
       map.delete(tokenId);
     },
   };
+}
+
+function makeOpenPositions(count: number, prefix = "token-open"): Position[] {
+  return Array.from({ length: count }, (_, index) => makeOpenPosition(`${prefix}-${index}`));
 }
 
 function makeBuyFill(
@@ -1220,7 +1226,9 @@ describe("AlgoDecisionModule", () => {
       findReferencePrice: vi.fn(() => null),
       maxMidpointInWindow: vi.fn(() => 0.6),
     };
-    const positionRepo = createPositionRepoForOpenPositions([makeOpenPosition("token-open")]);
+    const positionRepo = createPositionRepoForOpenPositions(
+      makeOpenPositions(PHASE_ONE_ACTIVE_MARKET_CAP),
+    );
     const mod = buildModule({
       runtimeMetrics,
       priceHistoryProvider,
@@ -1228,7 +1236,7 @@ describe("AlgoDecisionModule", () => {
       liveLiteGuard: new LiveLiteGuard({
         maxOpenValueUsdc: 500,
         maxOrderUsdc: 25,
-        maxActiveMarkets: 1,
+        maxActiveMarkets: PHASE_ONE_ACTIVE_MARKET_CAP,
       }),
       executionPolicy: () => ({
         ...DEFAULT_EXECUTION_POLICY,
@@ -1285,7 +1293,9 @@ describe("AlgoDecisionModule", () => {
       findReferencePrice: vi.fn(() => null),
       maxMidpointInWindow: vi.fn(() => 0.6),
     };
-    const positionRepo = createPositionRepoForOpenPositions([]);
+    const positionRepo = createPositionRepoForOpenPositions(
+      makeOpenPositions(PHASE_ONE_ACTIVE_MARKET_CAP - 1),
+    );
     const mod = buildModule({
       runtimeMetrics,
       priceHistoryProvider,
@@ -1293,7 +1303,7 @@ describe("AlgoDecisionModule", () => {
       liveLiteGuard: new LiveLiteGuard({
         maxOpenValueUsdc: 500,
         maxOrderUsdc: 25,
-        maxActiveMarkets: 1,
+        maxActiveMarkets: PHASE_ONE_ACTIVE_MARKET_CAP,
       }),
       executionPolicy: () => ({
         ...DEFAULT_EXECUTION_POLICY,

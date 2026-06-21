@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { LiveLiteGuard } from "../live-lite-guard.js";
+import { DEFAULT_LIVE_LITE_CONFIG, LiveLiteGuard } from "../live-lite-guard.js";
 
 const LIVE_LITE_CONFIG = {
   maxOpenValueUsdc: 50,
@@ -62,6 +62,15 @@ describe("LiveLiteGuard", () => {
 
     it("allows active markets within cap", () => {
       expect(guard.wouldExceedActiveMarketsCap(1, 1)).toBe(false); // 1+1=2, at cap
+    });
+
+    it("uses the phase-1 250 active-market cap boundary", () => {
+      const phaseOneGuard = new LiveLiteGuard({
+        ...DEFAULT_LIVE_LITE_CONFIG,
+      });
+
+      expect(phaseOneGuard.wouldExceedActiveMarketsCap(249, 1)).toBe(false);
+      expect(phaseOneGuard.wouldExceedActiveMarketsCap(250, 1)).toBe(true);
     });
 
     it("defaults wallet mode to EOA with a $3 minimum order", () => {

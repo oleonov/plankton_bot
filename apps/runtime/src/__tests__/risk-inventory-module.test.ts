@@ -41,7 +41,7 @@ const COND_ID = createConditionId("cond-btc");
 const MTM_NOW_MS = Date.parse("2026-05-14T12:00:00.000Z");
 const FRESH_MTM_UPDATED_AT = new Date(MTM_NOW_MS - 30_000).toISOString();
 const STALE_MTM_UPDATED_AT = new Date(MTM_NOW_MS - W4_STALENESS_FALLBACK_MS - 1).toISOString();
-const LIVE_LITE_CAP = 100;
+const LIVE_LITE_CAP = 250;
 
 function makeSignal(overrides?: Partial<Signal>): Signal {
   return {

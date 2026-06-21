@@ -27,6 +27,8 @@ interface LiveLiteStatus {
   maxOpenValueUsdc: number;
   maxOrderUsdc: number;
   maxActiveMarkets: number;
+  activeMarketCount?: number;
+  activeMarketCapUtilizationPct?: number;
   walletMode: string;
   minOrderUsdc?: number;
 }
@@ -48,6 +50,11 @@ type StatusSnapshot = Record<string, unknown> & {
 
 const INFRA_ALERT_LOOKBACK_MS = 60 * 60 * 1000;
 const ACTIVE_ORDER_STATUS_SQL = "('pending','open','partially-filled')";
+const DEFAULT_LIVE_LITE_STATUS_ENVELOPE = {
+  maxOpenValueUsdc: 500,
+  maxOrderUsdc: 25,
+  maxActiveMarkets: 250,
+} as const;
 
 interface OpenOrderBreakdown {
   total: number;
@@ -372,12 +379,31 @@ function readOpenDriftCount(db: Database.Database): number | null {
   }
 }
 
+function readActiveMarketCount(db: Database.Database): number {
+  try {
+    const row = db
+      .prepare("SELECT COUNT(DISTINCT token_id) AS cnt FROM positions WHERE status = 'open'")
+      .get() as { cnt: number } | undefined;
+    return row?.cnt ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 function buildLiveLiteStatus(
   runtimeMode: string,
+  db: Database.Database,
   controlDb?: Database.Database,
   envelopeLabels?: string,
 ): LiveLiteStatus | undefined {
   if (runtimeMode !== "live-lite") return undefined;
+  const activeMarketCount = readActiveMarketCount(db);
+  const withActiveMarketUtilization = (status: LiveLiteStatus): LiveLiteStatus => ({
+    ...status,
+    activeMarketCount,
+    activeMarketCapUtilizationPct:
+      status.maxActiveMarkets > 0 ? (activeMarketCount / status.maxActiveMarkets) * 100 : 0,
+  });
 
   if (controlDb) {
     try {
@@ -394,9 +420,15 @@ function buildLiveLiteStatus(
         | undefined;
       const envelope = parseEnvelopeJson(settingsRow?.envelope_json);
       const liveLiteStatus: LiveLiteStatus = {
-        maxOpenValueUsdc: Number(envelope.maxOpenValueUsdc ?? 500),
-        maxOrderUsdc: Number(envelope.maxOrderUsdc ?? 25),
-        maxActiveMarkets: Number(envelope.maxActiveMarkets ?? 10),
+        maxOpenValueUsdc: Number(
+          envelope.maxOpenValueUsdc ?? DEFAULT_LIVE_LITE_STATUS_ENVELOPE.maxOpenValueUsdc,
+        ),
+        maxOrderUsdc: Number(
+          envelope.maxOrderUsdc ?? DEFAULT_LIVE_LITE_STATUS_ENVELOPE.maxOrderUsdc,
+        ),
+        maxActiveMarkets: Number(
+          envelope.maxActiveMarkets ?? DEFAULT_LIVE_LITE_STATUS_ENVELOPE.maxActiveMarkets,
+        ),
         walletMode: settingsRow?.wallet_mode ?? "eoa",
       };
       if (
@@ -405,7 +437,7 @@ function buildLiveLiteStatus(
       ) {
         liveLiteStatus.minOrderUsdc = settingsRow.min_order_usdc;
       }
-      return liveLiteStatus;
+      return withActiveMarketUtilization(liveLiteStatus);
     } catch {
       // Fall through to runtime metric snapshot for legacy/test setups.
     }
@@ -413,7 +445,7 @@ function buildLiveLiteStatus(
 
   if (!envelopeLabels) return undefined;
   try {
-    return JSON.parse(envelopeLabels) as LiveLiteStatus;
+    return withActiveMarketUtilization(JSON.parse(envelopeLabels) as LiveLiteStatus);
   } catch {
     return undefined;
   }
@@ -708,7 +740,7 @@ export function buildStatusSnapshot(
     executionMode: execMode
       ? ((JSON.parse(execMode.labels) as { value?: string }).value ?? "simulation")
       : "simulation",
-    liveLite: buildLiveLiteStatus(runtimeMode, controlDb, envelopeRow?.labels),
+    liveLite: buildLiveLiteStatus(runtimeMode, db, controlDb, envelopeRow?.labels),
     reconciliationDriftDetected,
     tradingState,
     signalActivity,

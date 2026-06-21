@@ -90,7 +90,7 @@ import {
   PolymarketDataPositionReader,
 } from "@krabs/exchange";
 import { createGateways } from "./gateway-factory.js";
-import { LiveLiteGuard } from "./live-lite-guard.js";
+import { DEFAULT_LIVE_LITE_CONFIG, LiveLiteGuard } from "./live-lite-guard.js";
 import { runProfilePreflight, writePreflightReport } from "./profile-preflight.js";
 import {
   evaluatePerTokenOrderCapacity,
@@ -598,9 +598,13 @@ async function main(): Promise<void> {
     }
     const minOrderUsdc = settingsRow?.min_order_usdc;
     return {
-      maxOpenValueUsdc: Number(envelope.maxOpenValueUsdc ?? 500),
-      maxOrderUsdc: Number(envelope.maxOrderUsdc ?? 25),
-      maxActiveMarkets: Number(envelope.maxActiveMarkets ?? 10),
+      maxOpenValueUsdc: Number(
+        envelope.maxOpenValueUsdc ?? DEFAULT_LIVE_LITE_CONFIG.maxOpenValueUsdc,
+      ),
+      maxOrderUsdc: Number(envelope.maxOrderUsdc ?? DEFAULT_LIVE_LITE_CONFIG.maxOrderUsdc),
+      maxActiveMarkets: Number(
+        envelope.maxActiveMarkets ?? DEFAULT_LIVE_LITE_CONFIG.maxActiveMarkets,
+      ),
       walletMode: settingsRow?.wallet_mode ?? "eoa",
       fallbackMinOrderUsdcRelayer: settingsRow?.fallback_min_order_usdc_relayer ?? null,
       fallbackMinOrderUsdcEoa: settingsRow?.fallback_min_order_usdc_eoa ?? null,

@@ -331,6 +331,8 @@ export interface StatusData {
     maxOpenValueUsdc: number;
     maxOrderUsdc: number;
     maxActiveMarkets: number;
+    activeMarketCount?: number;
+    activeMarketCapUtilizationPct?: number;
     walletMode?: "eoa" | "relayer";
     minOrderUsdc?: number | null;
   };

@@ -162,6 +162,8 @@ describe("API against real split schemas", () => {
         maxOpenValueUsdc: 500,
         maxOrderUsdc: 25,
         maxActiveMarkets: 10,
+        activeMarketCount: 1,
+        activeMarketCapUtilizationPct: 10,
         walletMode: "relayer",
         minOrderUsdc: 1,
       });

@@ -597,6 +597,82 @@ describe("control-db migration infrastructure", () => {
     expect(byProfile.get("paper").buyCapacity.maxOpenBuyOrdersPerToken).toBe(2);
   });
 
+  it("migration 063 lifts only legacy live-lite active market cap to 250", () => {
+    const dbPath = path.join(tmpDir, "control-active-market-cap-250.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET envelope_json = ?
+          WHERE profile_id = ?`,
+      )
+      .run(
+        JSON.stringify({
+          maxFamilies: 100,
+          maxOpenValueUsdc: 500,
+          maxOrderUsdc: 25,
+          maxActiveMarkets: 100,
+        }),
+        "live-lite",
+      );
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET envelope_json = ?
+          WHERE profile_id = ?`,
+      )
+      .run(JSON.stringify({ maxActiveMarkets: 300 }), "paper");
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("063_live_lite_active_market_cap_250.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare(
+        `SELECT profile_id, envelope_json
+           FROM profile_settings
+          WHERE profile_id IN ('live-lite', 'paper')`,
+      )
+      .all() as Array<{ profile_id: string; envelope_json: string | null }>;
+    const byProfile = new Map(
+      rows.map((row) => [row.profile_id, JSON.parse(row.envelope_json ?? "{}")]),
+    );
+
+    expect(byProfile.get("live-lite")).toMatchObject({
+      maxFamilies: 100,
+      maxOpenValueUsdc: 500,
+      maxOrderUsdc: 25,
+      maxActiveMarkets: 250,
+    });
+    expect(byProfile.get("paper")).toEqual({ maxActiveMarkets: 300 });
+  });
+
+  it("migration 063 preserves operator-edited live-lite active market caps", () => {
+    const dbPath = path.join(tmpDir, "control-active-market-cap-operator.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET envelope_json = ?
+          WHERE profile_id = ?`,
+      )
+      .run(JSON.stringify({ maxActiveMarkets: 300 }), "live-lite");
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("063_live_lite_active_market_cap_250.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const row = conn.db
+      .prepare("SELECT envelope_json FROM profile_settings WHERE profile_id = 'live-lite'")
+      .get() as { envelope_json: string };
+
+    expect(JSON.parse(row.envelope_json)).toEqual({ maxActiveMarkets: 300 });
+  });
+
   it("migration 043 removes non-exclusion selection rules from existing control DBs", () => {
     const dbPath = path.join(tmpDir, "control-exclusions-only.db");
     conn = bootstrapControlDb(dbPath);
