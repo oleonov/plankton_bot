@@ -31,6 +31,7 @@ import {
   MAX_ADOPTION_ATTEMPTS,
   PLANNED_RUNG_RETRY_MS,
   ProfileLadderModule,
+  evaluatePostRefillLiveRung,
   type ProfileLadderBookCache,
   type ProfileLadderModeCandidate,
   type ProfileLadderModeReaderConfig,
@@ -2383,6 +2384,100 @@ describe("ProfileLadderModule", () => {
       });
       expect(ctx.cancels).toHaveLength(0);
       expect(ctx.orders).toHaveLength(0);
+    });
+
+    it("does not accept a replacement candidate below the positive sell floor", () => {
+      const evaluation = evaluatePostRefillLiveRung({
+        state: staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.15,
+              sizeShares: 40,
+              notionalUsd: 6,
+              lifecycle: "planned",
+              orderId: null,
+            }),
+            rung({
+              rungIndex: 1,
+              price: 0.3,
+              sizeShares: 40,
+              notionalUsd: 12,
+              lifecycle: "placed",
+              orderId: String(createOrderId("sub-floor-live")),
+            }),
+          ],
+        }),
+        position: position({ avgEntryPrice: 0.149, costBasisUsdc: 37.25, size: 250 }),
+        market: market({ bestBid: 0.05, bestAsk: 0.2, midPrice: 0.125, tickSize: 0.01 }),
+        config: postRefillPolicy().sellLadder.postRefillFollowThrough,
+      });
+
+      expect(evaluation?.decision).toBeNull();
+    });
+
+    it("accepts a replacement candidate at or above the positive sell floor", () => {
+      const evaluation = evaluatePostRefillLiveRung({
+        state: staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.16,
+              sizeShares: 40,
+              notionalUsd: 6.4,
+              lifecycle: "planned",
+              orderId: null,
+            }),
+            rung({
+              rungIndex: 1,
+              price: 0.3,
+              sizeShares: 40,
+              notionalUsd: 12,
+              lifecycle: "placed",
+              orderId: String(createOrderId("valid-floor-live")),
+            }),
+          ],
+        }),
+        position: position({ avgEntryPrice: 0.149, costBasisUsdc: 37.25, size: 250 }),
+        market: market({ bestBid: 0.05, bestAsk: 0.2, midPrice: 0.125, tickSize: 0.01 }),
+        config: postRefillPolicy().sellLadder.postRefillFollowThrough,
+      });
+
+      expect(evaluation?.decision).toMatchObject({
+        positiveFloorPrice: 0.16,
+        liveRung: expect.objectContaining({ price: 0.3 }),
+        intendedRung: expect.objectContaining({ price: 0.16 }),
+      });
+    });
+
+    it("uses tick-rounded positive floor at the replacement decision point", () => {
+      const evaluation = evaluatePostRefillLiveRung({
+        state: staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.2,
+              sizeShares: 40,
+              notionalUsd: 8,
+              lifecycle: "planned",
+              orderId: null,
+            }),
+            rung({
+              rungIndex: 1,
+              price: 0.3,
+              sizeShares: 40,
+              notionalUsd: 12,
+              lifecycle: "placed",
+              orderId: String(createOrderId("tick-rounded-floor-live")),
+            }),
+          ],
+        }),
+        position: position({ avgEntryPrice: 0.197, costBasisUsdc: 49.25, size: 250 }),
+        market: market({ bestBid: 0.05, bestAsk: 0.22, midPrice: 0.135, tickSize: 0.01 }),
+        config: postRefillPolicy().sellLadder.postRefillFollowThrough,
+      });
+
+      expect(evaluation?.decision).toBeNull();
     });
 
     it("does not detect when live coverage is healthy", async () => {

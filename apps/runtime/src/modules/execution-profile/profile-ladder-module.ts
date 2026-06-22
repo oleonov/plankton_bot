@@ -23,6 +23,7 @@ import {
   isValidLadderBbo,
   resolveLadderBand,
 } from "./profile-ladder-builder.js";
+import { resolvePositiveSellFloor } from "../../executable-price.js";
 import type { ProfileLadderRepository } from "./profile-ladder-repository.js";
 import type { ExecutionProfilePolicy, ProfileState } from "./types.js";
 
@@ -185,17 +186,18 @@ interface BuildAndPlaceOptions {
   ladderIdSuffix?: string;
 }
 
-interface PostRefillStaleLiveRungDecision {
+export interface PostRefillStaleLiveRungDecision {
   liveCoverageRatio: number;
   liveProfileLadderSellShares: number;
   liveRung: LadderRung;
   intendedRung: LadderRung;
+  positiveFloorPrice: number;
   priceDistanceImprovementPct: number;
   coverageBucket: string;
   priceDistanceBucket: string;
 }
 
-interface PostRefillLiveRungEvaluation {
+export interface PostRefillLiveRungEvaluation {
   liveCoverageRatio: number;
   liveProfileLadderSellShares: number;
   coverageBucket: string;
@@ -1348,6 +1350,7 @@ export class ProfileLadderModule implements RuntimeModule {
       oldLiveRemainingShares: remainingRungShares(decision.liveRung),
       selectedPlannedPrice: decision.intendedRung.price,
       selectedPlannedShares: decision.intendedRung.sizeShares,
+      positiveFloorPrice: decision.positiveFloorPrice,
       avgEntryPrice: position.avgEntryPrice,
       bestBid: market.bestBid,
       bestAsk: market.bestAsk,
@@ -1451,7 +1454,7 @@ function resolveBboRebuildReason(
   return null;
 }
 
-function evaluatePostRefillLiveRung(input: {
+export function evaluatePostRefillLiveRung(input: {
   state: LadderState;
   position: Position;
   market: NormalizedMarket;
@@ -1489,6 +1492,10 @@ function evaluatePostRefillLiveRung(input: {
   if (!isMaterialReplacementPriceImprovement(staleLiveRung.price, intendedRung.price, config)) {
     return evaluation;
   }
+  const positiveFloorPrice = resolveReplacementPositiveFloorPrice(position, market);
+  if (positiveFloorPrice == null || intendedRung.price + 1e-12 < positiveFloorPrice) {
+    return evaluation;
+  }
 
   const priceDistanceImprovementPct = priceDistanceImprovement(
     staleLiveRung.price,
@@ -1502,6 +1509,7 @@ function evaluatePostRefillLiveRung(input: {
     liveProfileLadderSellShares,
     liveRung: staleLiveRung,
     intendedRung,
+    positiveFloorPrice,
     priceDistanceImprovementPct,
     coverageBucket: coverageBucket(liveCoverageRatio),
     priceDistanceBucket: priceDistanceBucket(priceDistanceImprovementPct),
@@ -1535,6 +1543,16 @@ function isMaterialReplacementPriceImprovement(
   if (!isPositiveFinite(oldLiveSellPrice) || !isPositiveFinite(selectedPlannedPrice)) return false;
   const maxReplacementPrice = oldLiveSellPrice * (1 - config.minReplacementPriceImprovementRatio);
   return selectedPlannedPrice <= maxReplacementPrice + 1e-12;
+}
+
+function resolveReplacementPositiveFloorPrice(
+  position: Position,
+  market: NormalizedMarket,
+): number | null {
+  if (!isPositiveFinite(position.avgEntryPrice)) return null;
+  if (!isPositiveFinite(market.tickSize) || market.tickSize >= 1) return null;
+  const { positiveFloorPrice } = resolvePositiveSellFloor(position.avgEntryPrice, market.tickSize);
+  return isPositiveFinite(positiveFloorPrice) ? positiveFloorPrice : null;
 }
 
 function priceDistanceImprovement(
