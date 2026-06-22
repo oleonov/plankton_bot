@@ -1030,6 +1030,17 @@ export interface ProfileLadderPostFillConfig {
   reevalCooldownMs: number;
 }
 
+export interface ProfileLadderPostRefillFollowThroughConfig {
+  enabled: boolean;
+  dryRun: boolean;
+  replacementEnabled: boolean;
+  minCoverageRatio: number;
+  priceDistanceImprovementPct: number;
+  minMaterialPositionSizeShares: number;
+  replacementCooldownMs: number;
+  cancelAckTimeoutMs: number;
+}
+
 export type ProfileLadderModeReaderSource = "algo_token_mode_state";
 export type ProfileLadderModeReaderMappedMode = "up" | "flat";
 export type ProfileLadderModeReaderMissingBehavior = "local";
@@ -1052,6 +1063,7 @@ export interface ExecutionProfileSellLadderConfig {
   reprice: ProfileLadderRepriceConfig;
   staleReview: ProfileLadderStaleReviewConfig;
   postFill: ProfileLadderPostFillConfig;
+  postRefillFollowThrough: ProfileLadderPostRefillFollowThroughConfig;
   modeReader: ProfileLadderModeReaderConfig;
   adoptExisting: ExecutionProfileFeatureToggle;
 }

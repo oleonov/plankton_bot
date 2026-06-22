@@ -24,7 +24,7 @@ import {
   resolveLadderBand,
 } from "./profile-ladder-builder.js";
 import type { ProfileLadderRepository } from "./profile-ladder-repository.js";
-import type { ExecutionProfilePolicy } from "./types.js";
+import type { ExecutionProfilePolicy, ProfileState } from "./types.js";
 
 export interface ProfileLadderMetricWriter {
   writeCounter(name: string, value?: number, labels?: string): void;
@@ -63,6 +63,10 @@ export interface ProfileLadderModeCandidateReader {
   ): ProfileLadderModeCandidate | null;
 }
 
+export interface ProfileLadderProfileStateReader {
+  getProfileState(tokenId: TokenId): ProfileState | null;
+}
+
 export interface ProfileLadderPositionReader {
   findOpen(): Position[];
 }
@@ -99,6 +103,7 @@ export interface ProfileLadderModuleDeps {
   policy: () => ExecutionProfilePolicy;
   modeReader?: ProfileLadderModeReader;
   modeCandidateReader?: ProfileLadderModeCandidateReader;
+  profileStateReader?: ProfileLadderProfileStateReader;
   isDormant?: ((tokenId: TokenId) => boolean) | undefined;
   // Adoption (Track #44) dependencies — only consulted when sellLadder.adoptExisting is enabled.
   positionRepo?: ProfileLadderPositionReader;
@@ -134,6 +139,19 @@ export const PLANNED_RUNG_RETRY_MS = 60_000;
 export const ADOPTION_RETRY_MS = 60_000;
 export const MAX_ADOPTION_ATTEMPTS = 5;
 
+const DEFAULT_POST_REFILL_FOLLOW_THROUGH = {
+  enabled: true,
+  dryRun: true,
+  replacementEnabled: false,
+  minCoverageRatio: 0.5,
+  priceDistanceImprovementPct: 0.1,
+  minMaterialPositionSizeShares: 1,
+  replacementCooldownMs: 120_000,
+  cancelAckTimeoutMs: 60_000,
+} satisfies ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"];
+
+const STALE_LIVE_RUNG_RISK_EVENT_DEDUPE_MS = 5 * 60_000;
+
 interface LadderAdoptionSummary {
   attempt: number;
   eligible_count: number;
@@ -166,6 +184,25 @@ interface BuildAndPlaceOptions {
   ladderIdSuffix?: string;
 }
 
+interface PostRefillStaleLiveRungDecision {
+  liveCoverageRatio: number;
+  liveProfileLadderSellShares: number;
+  liveRung: LadderRung;
+  intendedRung: LadderRung;
+  priceDistanceImprovementPct: number;
+  coverageBucket: string;
+  priceDistanceBucket: string;
+}
+
+interface PostRefillLiveRungEvaluation {
+  liveCoverageRatio: number;
+  liveProfileLadderSellShares: number;
+  coverageBucket: string;
+  decision: PostRefillStaleLiveRungDecision | null;
+}
+
+type ProfileLadderTelemetryState = ProfileState | "unknown";
+
 interface ProfileLadderOrderMarketData {
   bookSource: NonNullable<NormalizedMarket["bookSource"]>;
   minOrderSize: number;
@@ -186,6 +223,7 @@ export class ProfileLadderModule implements RuntimeModule {
   private readonly plannedRungRetryCooldownUntilByToken = new Map<string, number>();
   private readonly missingLadderRecoveryCooldownUntilByToken = new Map<string, number>();
   private readonly pendingRebuildDeferCooldownUntilByToken = new Map<string, number>();
+  private readonly staleLiveRungRiskEventDedupeUntilByKey = new Map<string, number>();
   // Plankton post-fill REST: one bounded reevaluation timer per token. A SELL
   // fill never places the next rung inline; it schedules a delayed reevaluation.
   private readonly postFillTimerByToken = new Map<string, ReturnType<typeof setTimeout>>();
@@ -468,6 +506,7 @@ export class ProfileLadderModule implements RuntimeModule {
       rungCount: state.activeRungs.length,
       ladderId: state.ladderId,
     });
+    this.recordPostRefillFollowThroughDryRun(position, market, state);
   }
 
   async cancelLadder(tokenId: TokenId, reason: "position_closed" | "operator"): Promise<void> {
@@ -1247,6 +1286,112 @@ export class ProfileLadderModule implements RuntimeModule {
     return this.deps.isDormant?.(tokenId) === true;
   }
 
+  private recordPostRefillFollowThroughDryRun(
+    position: Position,
+    market: NormalizedMarket,
+    state: LadderState,
+  ): void {
+    const config = resolvePostRefillFollowThroughConfig(this.policy());
+    if (!config.enabled) return;
+    if (this.deps.isProfileOwned != null && !this.deps.isProfileOwned(position.tokenId)) return;
+
+    const evaluation = evaluatePostRefillLiveRung({
+      state,
+      position,
+      market,
+      config,
+    });
+    if (evaluation == null) return;
+
+    const profileState = this.resolveProfileState(position.tokenId);
+    const decision = evaluation.decision;
+
+    const labels = {
+      action: decision == null ? "observe" : "dry_run",
+      band: state.band,
+      coverageBucket: evaluation.coverageBucket,
+      mode: state.lastMode,
+      priceDistanceBucket: decision?.priceDistanceBucket ?? "none",
+      reason: decision == null ? "evaluated" : "intended_active_blocked",
+      state: profileState,
+    };
+    this.writeCounter("profile_ladder_post_refill_live_coverage_bucket", 1, labels);
+    if (decision == null) return;
+
+    this.writeCounter("profile_ladder_stale_live_rung_detected_total", 1, labels);
+    if (
+      !this.shouldWriteStaleLiveRungRiskEvent({
+        tokenId: state.tokenId,
+        oldOrderId: decision.liveRung.orderId,
+        selectedPlannedPrice: decision.intendedRung.price,
+        reason: "intended_active_blocked",
+      })
+    ) {
+      return;
+    }
+    this.insertRiskEvent("profile_ladder_stale_live_rung_detected", {
+      action: "dry_run",
+      tokenId: String(state.tokenId),
+      conditionId: String(state.conditionId),
+      band: state.band,
+      mode: state.lastMode,
+      profileState,
+      reason: "intended_active_blocked",
+      liveCoverageRatio: decision.liveCoverageRatio,
+      liveProfileLadderSellShares: decision.liveProfileLadderSellShares,
+      positionSizeShares: position.size,
+      liveRungIndex: decision.liveRung.rungIndex,
+      intendedRungIndex: decision.intendedRung.rungIndex,
+      oldOrderId: decision.liveRung.orderId,
+      oldLivePrice: decision.liveRung.price,
+      oldLiveRemainingShares: remainingRungShares(decision.liveRung),
+      selectedPlannedPrice: decision.intendedRung.price,
+      selectedPlannedShares: decision.intendedRung.sizeShares,
+      avgEntryPrice: position.avgEntryPrice,
+      bestBid: market.bestBid,
+      bestAsk: market.bestAsk,
+      minCoverageRatio: config.minCoverageRatio,
+      priceDistanceImprovementPct: decision.priceDistanceImprovementPct,
+      dryRun: true,
+      replacementEnabledIgnoredInPr1: config.replacementEnabled,
+    });
+  }
+
+  private resolveProfileState(tokenId: TokenId): ProfileLadderTelemetryState {
+    try {
+      return this.deps.profileStateReader?.getProfileState(tokenId) ?? "unknown";
+    } catch {
+      return "unknown";
+    }
+  }
+
+  private shouldWriteStaleLiveRungRiskEvent(input: {
+    tokenId: TokenId;
+    oldOrderId: string | null;
+    selectedPlannedPrice: number;
+    reason: string;
+  }): boolean {
+    const now = this.now();
+    if (this.staleLiveRungRiskEventDedupeUntilByKey.size > 1_000) {
+      for (const [key, untilMs] of this.staleLiveRungRiskEventDedupeUntilByKey) {
+        if (untilMs <= now) this.staleLiveRungRiskEventDedupeUntilByKey.delete(key);
+      }
+    }
+    const key = [
+      String(input.tokenId),
+      input.oldOrderId ?? "unknown",
+      input.selectedPlannedPrice.toFixed(6),
+      input.reason,
+    ].join("|");
+    const dedupeUntilMs = this.staleLiveRungRiskEventDedupeUntilByKey.get(key) ?? 0;
+    if (dedupeUntilMs > now) return false;
+    this.staleLiveRungRiskEventDedupeUntilByKey.set(
+      key,
+      now + STALE_LIVE_RUNG_RISK_EVENT_DEDUPE_MS,
+    );
+    return true;
+  }
+
   private writeCounter(
     name: string,
     value: number,
@@ -1272,6 +1417,15 @@ function isBboReason(reason: string): boolean {
   return reason === "bbo_major" || reason === "bbo_strong";
 }
 
+function resolvePostRefillFollowThroughConfig(
+  policy: ExecutionProfilePolicy["sellLadder"],
+): ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"] {
+  return {
+    ...DEFAULT_POST_REFILL_FOLLOW_THROUGH,
+    ...(policy.postRefillFollowThrough ?? {}),
+  };
+}
+
 function resolveBboRebuildReason(
   state: LadderState,
   market: NormalizedMarket,
@@ -1294,6 +1448,105 @@ function resolveBboRebuildReason(
   if (move >= policy.reprice.strongBboMovePct) return "bbo_strong";
   if (move >= policy.reprice.majorBboMovePct) return "bbo_major";
   return null;
+}
+
+function evaluatePostRefillLiveRung(input: {
+  state: LadderState;
+  position: Position;
+  market: NormalizedMarket;
+  config: ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"];
+}): PostRefillLiveRungEvaluation | null {
+  const { config, market, position, state } = input;
+  if (position.status !== PositionStatus.Open) return null;
+  if (position.size < config.minMaterialPositionSizeShares) return null;
+
+  const liveRungs = state.activeRungs.filter(isPlacedOrPartiallyFilledRung);
+  if (liveRungs.length === 0) return null;
+
+  const liveProfileLadderSellShares = liveRungs.reduce(
+    (sum, liveRung) => sum + remainingRungShares(liveRung),
+    0,
+  );
+  const liveCoverageRatio = liveProfileLadderSellShares / Math.max(position.size, 1e-9);
+  const evaluation: PostRefillLiveRungEvaluation = {
+    liveCoverageRatio,
+    liveProfileLadderSellShares,
+    coverageBucket: coverageBucket(liveCoverageRatio),
+    decision: null,
+  };
+  if (liveCoverageRatio >= config.minCoverageRatio) return evaluation;
+
+  const intendedRung = state.activeRungs.find((rung) =>
+    isSubmittablePostRefillPlannedRung(rung, market),
+  );
+  if (intendedRung == null) return evaluation;
+
+  const staleLiveRung = [...liveRungs]
+    .filter((liveRung) => liveRung.rungIndex > intendedRung.rungIndex)
+    .sort((a, b) => b.rungIndex - a.rungIndex)[0];
+  if (staleLiveRung == null) return evaluation;
+
+  const priceDistanceImprovementPct = priceDistanceImprovement(
+    staleLiveRung.price,
+    intendedRung.price,
+    intendedRung.price,
+  );
+  if (priceDistanceImprovementPct < config.priceDistanceImprovementPct) return evaluation;
+
+  evaluation.decision = {
+    liveCoverageRatio,
+    liveProfileLadderSellShares,
+    liveRung: staleLiveRung,
+    intendedRung,
+    priceDistanceImprovementPct,
+    coverageBucket: coverageBucket(liveCoverageRatio),
+    priceDistanceBucket: priceDistanceBucket(priceDistanceImprovementPct),
+  };
+  return evaluation;
+}
+
+function isPlacedOrPartiallyFilledRung(rung: LadderRung): boolean {
+  return rung.lifecycle === "placed" || rung.lifecycle === "partially_filled";
+}
+
+function remainingRungShares(rung: LadderRung): number {
+  return Math.max(0, rung.sizeShares - rung.filledSizeShares);
+}
+
+function isSubmittablePostRefillPlannedRung(rung: LadderRung, market: NormalizedMarket): boolean {
+  const minOrderSize = market.minOrderSize ?? 1;
+  return (
+    rung.lifecycle === "planned" &&
+    rung.orderId == null &&
+    rung.sizeShares >= minOrderSize &&
+    !wouldCrossPostOnly(rung.price, market.bestBid)
+  );
+}
+
+function priceDistanceImprovement(
+  livePrice: number,
+  plannedPrice: number,
+  intendedAnchorPrice: number,
+): number {
+  const liveDistance = Math.abs(livePrice - intendedAnchorPrice);
+  if (liveDistance <= 0) return 0;
+  const plannedDistance = Math.abs(plannedPrice - intendedAnchorPrice);
+  return (liveDistance - plannedDistance) / liveDistance;
+}
+
+function coverageBucket(ratio: number): string {
+  if (ratio <= 0) return "0";
+  if (ratio < 0.25) return "lt25";
+  if (ratio < 0.5) return "25_50";
+  if (ratio < 0.75) return "50_75";
+  return "ge75";
+}
+
+function priceDistanceBucket(improvementPct: number): string {
+  if (improvementPct <= 0) return "same";
+  if (improvementPct < 0.1) return "lt10pct";
+  if (improvementPct < 0.25) return "10_25pct";
+  return "ge25pct";
 }
 
 function parseBboReference(

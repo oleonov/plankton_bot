@@ -36,7 +36,7 @@ import {
   type ProfileLadderModeReaderConfig,
 } from "../profile-ladder-module.js";
 import type { ProfileLadderRepository } from "../profile-ladder-repository.js";
-import type { ExecutionProfilePolicy } from "../types.js";
+import type { ExecutionProfilePolicy, ProfileState } from "../types.js";
 
 const tokenId = createTokenId("profile-ladder-token");
 const conditionId = createConditionId("profile-ladder-condition");
@@ -430,6 +430,7 @@ function setup(
     positionRepo?: { findOpen: () => Position[] };
     orderRepo?: { findByTokenId: (token: TokenId) => Order[] };
     isProfileOwned?: (token: TokenId) => boolean;
+    profileStateReader?: { getProfileState: (token: TokenId) => ProfileState | null };
     onPolicyReload?: (handler: () => void) => () => void;
     bookCache?: ProfileLadderBookCache;
     now?: () => number;
@@ -534,6 +535,17 @@ function counterLabels(
   return counters
     .filter((counter) => counter.name === name)
     .map((counter) => JSON.parse(counter.labels ?? "{}") as Record<string, string>);
+}
+
+function postRefillPolicy(
+  overrides: Partial<ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"]> = {},
+): ExecutionProfilePolicy {
+  return policy({
+    postRefillFollowThrough: {
+      ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.postRefillFollowThrough,
+      ...overrides,
+    },
+  });
 }
 
 describe("ProfileLadderModule", () => {
@@ -1921,6 +1933,419 @@ describe("ProfileLadderModule", () => {
         ?.activeRungs.find((r) => r.orderId === preservedOrderId);
       expect(survivor).toMatchObject({ price: 0.11, lifecycle: "placed" });
       // The old live order still occupies the single slot: no new rung goes live.
+      expect(ctx.orders).toHaveLength(0);
+    });
+  });
+
+  describe("post-refill stale live rung dry-run follow-through", () => {
+    function staleLowerPriorityState(overrides: Partial<LadderState> = {}): LadderState {
+      return ladderState({
+        activeRungs: [
+          rung({
+            rungIndex: 0,
+            price: 0.104,
+            sizeShares: 40,
+            notionalUsd: 4.16,
+            multiplier: 1.3,
+            sizingFraction: 0.24,
+            lifecycle: "placed",
+            orderId: String(createOrderId("stale-lower-priority-live")),
+          }),
+        ],
+        lastAvgEntry: 0.1,
+        lastCostBasisUsdc: 25,
+        ...overrides,
+      });
+    }
+
+    async function rebuildWithPostRefillContext(
+      ctx: ReturnType<typeof setup>,
+      overrides: Partial<Position> = {},
+    ): Promise<void> {
+      await ctx.module.rebuildLadder(
+        position({
+          avgEntryPrice: 0.08,
+          costBasisUsdc: 20,
+          size: 250,
+          ...overrides,
+        }),
+        market({
+          bestBid: 0.07,
+          bestAsk: 0.09,
+          midPrice: 0.08,
+          minOrderSize: 1,
+        }),
+        "scale_in",
+      );
+    }
+
+    it("detects lower-priority price match without cancel/place side effects", async () => {
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(staleLowerPriorityState());
+
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+      expect(counterLabels(ctx.counters, "profile_ladder_stale_live_rung_detected_total")).toEqual([
+        {
+          action: "dry_run",
+          band: "medium_low",
+          coverageBucket: "lt25",
+          mode: "flat",
+          priceDistanceBucket: "ge25pct",
+          reason: "intended_active_blocked",
+          state: "unknown",
+        },
+      ]);
+      expect(ctx.riskEvents).toContainEqual(
+        expect.objectContaining({
+          eventType: "profile_ladder_stale_live_rung_detected",
+          payload: expect.objectContaining({
+            action: "dry_run",
+            liveCoverageRatio: 0.16,
+            liveRungIndex: 1,
+            intendedRungIndex: 0,
+            oldLivePrice: 0.104,
+            selectedPlannedPrice: 0.088,
+          }),
+        }),
+      );
+      const state = ctx.repo.getLadder(tokenId)!;
+      expect(state.activeRungs.some((activeRung) => activeRung.price === 0.104)).toBe(true);
+      expect(state.activeRungs.some((activeRung) => activeRung.price === 0.088)).toBe(true);
+    });
+
+    it.each(["ACCUMULATING", "HARVESTING"] as const)(
+      "emits the real profile state in stale-rung telemetry for %s",
+      async (profileState) => {
+        const ctx = setup(postRefillPolicy(), {
+          modeReader: { getMode: () => "flat" },
+          isProfileOwned: () => true,
+          profileStateReader: { getProfileState: () => profileState },
+        });
+        ctx.repo.upsertLadder(staleLowerPriorityState());
+
+        await rebuildWithPostRefillContext(ctx);
+
+        expect(
+          counterLabels(ctx.counters, "profile_ladder_stale_live_rung_detected_total"),
+        ).toEqual([
+          expect.objectContaining({
+            state: profileState,
+          }),
+        ]);
+        expect(
+          ctx.riskEvents.find(
+            (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+          )?.payload,
+        ).toMatchObject({
+          profileState,
+        });
+      },
+    );
+
+    it("falls back to unknown profile state when the reader fails without side effects", async () => {
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+        profileStateReader: {
+          getProfileState: () => {
+            throw new Error("profile state unavailable");
+          },
+        },
+      });
+      ctx.repo.upsertLadder(staleLowerPriorityState());
+
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(counterLabels(ctx.counters, "profile_ladder_stale_live_rung_detected_total")).toEqual([
+        expect.objectContaining({
+          state: "unknown",
+        }),
+      ]);
+      expect(
+        ctx.riskEvents.find(
+          (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+        )?.payload,
+      ).toMatchObject({
+        profileState: "unknown",
+      });
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+    });
+
+    it("dedupes stale-rung detection risk events while counting every occurrence", async () => {
+      let now = NOW;
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+        now: () => now,
+      });
+      ctx.repo.upsertLadder(staleLowerPriorityState());
+
+      await rebuildWithPostRefillContext(ctx);
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(
+        counterLabels(ctx.counters, "profile_ladder_stale_live_rung_detected_total"),
+      ).toHaveLength(2);
+      expect(
+        ctx.riskEvents.filter(
+          (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+        ),
+      ).toHaveLength(1);
+
+      now += 5 * 60_000 + 1;
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(
+        counterLabels(ctx.counters, "profile_ladder_stale_live_rung_detected_total"),
+      ).toHaveLength(3);
+      expect(
+        ctx.riskEvents.filter(
+          (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+        ),
+      ).toHaveLength(2);
+    });
+
+    it("does not dedupe detections with a different live order or selected price", async () => {
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(staleLowerPriorityState());
+
+      await rebuildWithPostRefillContext(ctx);
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.2,
+              sizeShares: 40,
+              notionalUsd: 8,
+              lifecycle: "placed",
+              orderId: String(createOrderId("different-stale-live")),
+            }),
+          ],
+        }),
+      );
+      await rebuildWithPostRefillContext(ctx, {
+        avgEntryPrice: 0.09,
+        costBasisUsdc: 22.5,
+        size: 250,
+      });
+
+      expect(
+        ctx.riskEvents.filter(
+          (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+        ),
+      ).toHaveLength(2);
+    });
+
+    it("detects an appended stale live rung when the old price is no longer in the plan", async () => {
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.2,
+              sizeShares: 40,
+              notionalUsd: 8,
+              lifecycle: "placed",
+              orderId: String(createOrderId("stale-appended-live")),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(ctx);
+
+      const detected = ctx.riskEvents.find(
+        (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+      );
+      expect(detected?.payload).toMatchObject({
+        liveRungIndex: 4,
+        intendedRungIndex: 0,
+        oldLivePrice: 0.2,
+        selectedPlannedPrice: 0.088,
+      });
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+    });
+
+    it("does not detect when live coverage is healthy", async () => {
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.104,
+              sizeShares: 175,
+              notionalUsd: 18.2,
+              lifecycle: "placed",
+              orderId: String(createOrderId("healthy-coverage-live")),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(
+        counterLabels(ctx.counters, "profile_ladder_post_refill_live_coverage_bucket"),
+      ).toEqual([
+        expect.objectContaining({
+          action: "observe",
+          coverageBucket: "50_75",
+          reason: "evaluated",
+        }),
+      ]);
+      expect(ctx.counters.some((counter) => counter.name.includes("stale_live_rung"))).toBe(false);
+      expect(ctx.riskEvents.some((event) => event.eventType.includes("stale_live_rung"))).toBe(
+        false,
+      );
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+    });
+
+    it("does not detect when the live rung is already the intended active rung", async () => {
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.088,
+              sizeShares: 40,
+              notionalUsd: 3.52,
+              lifecycle: "placed",
+              orderId: String(createOrderId("intended-active-live")),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(ctx.counters.some((counter) => counter.name.includes("stale_live_rung"))).toBe(false);
+      expect(ctx.riskEvents.some((event) => event.eventType.includes("stale_live_rung"))).toBe(
+        false,
+      );
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+    });
+
+    it("does not detect when post-refill follow-through is disabled", async () => {
+      const ctx = setup(postRefillPolicy({ enabled: false }), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(staleLowerPriorityState());
+
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(ctx.counters.some((counter) => counter.name.includes("stale_live_rung"))).toBe(false);
+      expect(ctx.riskEvents.some((event) => event.eventType.includes("stale_live_rung"))).toBe(
+        false,
+      );
+    });
+
+    it("keeps PR1 side-effect-free even when replacementEnabled is configured true", async () => {
+      const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(staleLowerPriorityState());
+
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(
+        counterLabels(ctx.counters, "profile_ladder_post_refill_live_coverage_bucket"),
+      ).toEqual([
+        expect.objectContaining({
+          action: "dry_run",
+          coverageBucket: "lt25",
+          reason: "intended_active_blocked",
+        }),
+      ]);
+      expect(
+        counterLabels(ctx.counters, "profile_ladder_stale_live_rung_detected_total"),
+      ).toHaveLength(1);
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+    });
+
+    it("does not detect for non-profile-owned positions", async () => {
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => false,
+      });
+      ctx.repo.upsertLadder(staleLowerPriorityState());
+
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(ctx.counters.some((counter) => counter.name.includes("stale_live_rung"))).toBe(false);
+      expect(ctx.riskEvents.some((event) => event.eventType.includes("stale_live_rung"))).toBe(
+        false,
+      );
+    });
+
+    it("chooses the highest-index stale live rung deterministically in dry-run", async () => {
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.104,
+              sizeShares: 20,
+              notionalUsd: 2.08,
+              lifecycle: "placed",
+              orderId: String(createOrderId("stale-index-one-live")),
+            }),
+            rung({
+              rungIndex: 1,
+              price: 0.124,
+              sizeShares: 20,
+              notionalUsd: 2.48,
+              lifecycle: "placed",
+              orderId: String(createOrderId("stale-index-two-live")),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(
+        ctx.riskEvents.find(
+          (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+        )?.payload,
+      ).toMatchObject({
+        liveRungIndex: 2,
+        oldLivePrice: 0.124,
+        selectedPlannedPrice: 0.088,
+      });
+      expect(ctx.cancels).toHaveLength(0);
       expect(ctx.orders).toHaveLength(0);
     });
   });

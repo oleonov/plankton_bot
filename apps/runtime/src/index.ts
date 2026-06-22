@@ -1246,6 +1246,9 @@ async function main(): Promise<void> {
     repository: profileLadderRepo,
     policy: () => currentExecutionPolicy().executionProfile,
     modeCandidateReader: profileLadderModeCandidateReader,
+    profileStateReader: {
+      getProfileState: (tokenId) => executionProfileStateRepo.getState(tokenId)?.state ?? null,
+    },
     positionRepo: repos.position,
     orderRepo: repos.order,
     isProfileOwned: (tokenId) => executionProfileManager.isProfileOwned(tokenId),

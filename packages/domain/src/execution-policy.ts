@@ -266,6 +266,16 @@ export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderCo
   postFill: {
     reevalCooldownMs: 15 * 60_000,
   },
+  postRefillFollowThrough: {
+    enabled: true,
+    dryRun: true,
+    replacementEnabled: false,
+    minCoverageRatio: 0.5,
+    priceDistanceImprovementPct: 0.1,
+    minMaterialPositionSizeShares: 1,
+    replacementCooldownMs: 120_000,
+    cancelAckTimeoutMs: 60_000,
+  },
   modeReader: {
     enabled: false,
     darkCompareOnly: true,
@@ -2214,6 +2224,11 @@ function parseExecutionProfileSellLadder(
     reprice: parseProfileLadderReprice(obj.reprice, fallback.reprice, issues),
     staleReview: parseProfileLadderStaleReview(obj.staleReview, fallback.staleReview, issues),
     postFill: parseProfileLadderPostFill(obj.postFill, fallback.postFill, issues),
+    postRefillFollowThrough: parseProfileLadderPostRefillFollowThrough(
+      obj.postRefillFollowThrough,
+      fallback.postRefillFollowThrough,
+      issues,
+    ),
     modeReader: parseProfileLadderModeReader(obj.modeReader, fallback.modeReader, issues),
     adoptExisting: parseExecutionProfileToggle(
       obj.adoptExisting,
@@ -2525,6 +2540,84 @@ function parseProfileLadderPostFill(
       "executionProfile.sellLadder.postFill.reevalCooldownMs",
     ).value,
   };
+}
+
+function parseProfileLadderPostRefillFollowThrough(
+  raw: unknown,
+  fallback: ExecutionProfileSellLadderConfig["postRefillFollowThrough"],
+  issues: string[],
+): ExecutionProfileSellLadderConfig["postRefillFollowThrough"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined)
+      issues.push("executionProfile.sellLadder.postRefillFollowThrough must be an object");
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const parsed: ExecutionProfileSellLadderConfig["postRefillFollowThrough"] = {
+    enabled: booleanOr(
+      obj.enabled,
+      fallback.enabled,
+      issues,
+      "executionProfile.sellLadder.postRefillFollowThrough.enabled",
+    ),
+    dryRun: booleanOr(
+      obj.dryRun,
+      fallback.dryRun,
+      issues,
+      "executionProfile.sellLadder.postRefillFollowThrough.dryRun",
+    ),
+    replacementEnabled: booleanOr(
+      obj.replacementEnabled,
+      fallback.replacementEnabled,
+      issues,
+      "executionProfile.sellLadder.postRefillFollowThrough.replacementEnabled",
+    ),
+    minCoverageRatio: positiveNumberOr(
+      obj.minCoverageRatio,
+      fallback.minCoverageRatio,
+      issues,
+      "executionProfile.sellLadder.postRefillFollowThrough.minCoverageRatio",
+    ).value,
+    priceDistanceImprovementPct: nonNegativeNumberOr(
+      obj.priceDistanceImprovementPct,
+      fallback.priceDistanceImprovementPct,
+      issues,
+      "executionProfile.sellLadder.postRefillFollowThrough.priceDistanceImprovementPct",
+    ).value,
+    minMaterialPositionSizeShares: positiveNumberOr(
+      obj.minMaterialPositionSizeShares,
+      fallback.minMaterialPositionSizeShares,
+      issues,
+      "executionProfile.sellLadder.postRefillFollowThrough.minMaterialPositionSizeShares",
+    ).value,
+    replacementCooldownMs: positiveNumberOr(
+      obj.replacementCooldownMs,
+      fallback.replacementCooldownMs,
+      issues,
+      "executionProfile.sellLadder.postRefillFollowThrough.replacementCooldownMs",
+    ).value,
+    cancelAckTimeoutMs: positiveNumberOr(
+      obj.cancelAckTimeoutMs,
+      fallback.cancelAckTimeoutMs,
+      issues,
+      "executionProfile.sellLadder.postRefillFollowThrough.cancelAckTimeoutMs",
+    ).value,
+  };
+
+  if (parsed.minCoverageRatio > 1) {
+    issues.push(
+      "executionProfile.sellLadder.postRefillFollowThrough.minCoverageRatio must be <= 1",
+    );
+    return fallback;
+  }
+  if (parsed.replacementCooldownMs < parsed.cancelAckTimeoutMs) {
+    issues.push(
+      "executionProfile.sellLadder.postRefillFollowThrough.replacementCooldownMs must be >= cancelAckTimeoutMs",
+    );
+    return fallback;
+  }
+  return parsed;
 }
 
 function parseProfileLadderStaleReview(

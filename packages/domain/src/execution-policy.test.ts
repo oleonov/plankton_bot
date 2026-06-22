@@ -521,6 +521,98 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.executionProfile.sellLadder.modeReader.enabled).toBe(false);
   });
 
+  it("defaults ProfileLadder post-refill follow-through to dry-run only", () => {
+    const { policy, issues } = parseExecutionPolicyJson(null);
+
+    expect(issues).toHaveLength(0);
+    expect(policy.executionProfile.sellLadder.postRefillFollowThrough).toEqual({
+      enabled: true,
+      dryRun: true,
+      replacementEnabled: false,
+      minCoverageRatio: 0.5,
+      priceDistanceImprovementPct: 0.1,
+      minMaterialPositionSizeShares: 1,
+      replacementCooldownMs: 120_000,
+      cancelAckTimeoutMs: 60_000,
+    });
+  });
+
+  it("parses ProfileLadder post-refill follow-through config", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            postRefillFollowThrough: {
+              enabled: false,
+              dryRun: true,
+              replacementEnabled: true,
+              minCoverageRatio: 0.35,
+              priceDistanceImprovementPct: 0.2,
+              minMaterialPositionSizeShares: 2,
+              replacementCooldownMs: 180_000,
+              cancelAckTimeoutMs: 60_000,
+            },
+          },
+        },
+      }),
+    );
+
+    expect(issues).toHaveLength(0);
+    expect(policy.executionProfile.sellLadder.postRefillFollowThrough).toEqual({
+      enabled: false,
+      dryRun: true,
+      replacementEnabled: true,
+      minCoverageRatio: 0.35,
+      priceDistanceImprovementPct: 0.2,
+      minMaterialPositionSizeShares: 2,
+      replacementCooldownMs: 180_000,
+      cancelAckTimeoutMs: 60_000,
+    });
+  });
+
+  it("rejects invalid ProfileLadder post-refill follow-through timing", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            postRefillFollowThrough: {
+              replacementCooldownMs: 30_000,
+              cancelAckTimeoutMs: 60_000,
+            },
+          },
+        },
+      }),
+    );
+
+    expect(issues).toContain(
+      "executionProfile.sellLadder.postRefillFollowThrough.replacementCooldownMs must be >= cancelAckTimeoutMs",
+    );
+    expect(policy.executionProfile.sellLadder.postRefillFollowThrough).toEqual(
+      DEFAULT_EXECUTION_POLICY.executionProfile.sellLadder.postRefillFollowThrough,
+    );
+  });
+
+  it("rejects ProfileLadder post-refill follow-through coverage ratios above 1", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            postRefillFollowThrough: {
+              minCoverageRatio: 1.01,
+            },
+          },
+        },
+      }),
+    );
+
+    expect(issues).toContain(
+      "executionProfile.sellLadder.postRefillFollowThrough.minCoverageRatio must be <= 1",
+    );
+    expect(policy.executionProfile.sellLadder.postRefillFollowThrough).toEqual(
+      DEFAULT_EXECUTION_POLICY.executionProfile.sellLadder.postRefillFollowThrough,
+    );
+  });
+
   it("parses Execution Profile monitoring and falls back field-by-field", () => {
     const parsed = parseExecutionPolicyJson(
       JSON.stringify({
