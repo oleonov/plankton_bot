@@ -539,11 +539,31 @@ function counterLabels(
 
 function postRefillPolicy(
   overrides: Partial<ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"]> = {},
+  sellLadderOverrides: Partial<ExecutionProfilePolicy["sellLadder"]> = {},
 ): ExecutionProfilePolicy {
   return policy({
+    ...sellLadderOverrides,
     postRefillFollowThrough: {
       ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.postRefillFollowThrough,
       ...overrides,
+    },
+  });
+}
+
+function cheapPostRefillPolicy(
+  overrides: Partial<ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"]> = {},
+): ExecutionProfilePolicy {
+  return postRefillPolicy(overrides, {
+    bands: {
+      ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands,
+      cheap: {
+        ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.cheap,
+        enabled: true,
+      },
+      medium_low: {
+        ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.medium_low,
+        enabled: true,
+      },
     },
   });
 }
@@ -1961,6 +1981,7 @@ describe("ProfileLadderModule", () => {
     async function rebuildWithPostRefillContext(
       ctx: ReturnType<typeof setup>,
       overrides: Partial<Position> = {},
+      marketOverrides: Partial<NormalizedMarket> = {},
     ): Promise<void> {
       await ctx.module.rebuildLadder(
         position({
@@ -1974,6 +1995,7 @@ describe("ProfileLadderModule", () => {
           bestAsk: 0.09,
           midPrice: 0.08,
           minOrderSize: 1,
+          ...marketOverrides,
         }),
         "scale_in",
       );
@@ -2177,6 +2199,187 @@ describe("ProfileLadderModule", () => {
         intendedRungIndex: 0,
         oldLivePrice: 0.2,
         selectedPlannedPrice: 0.088,
+      });
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+    });
+
+    it.each([
+      {
+        name: "Iran 0.111 to 0.077",
+        livePrice: 0.111,
+        avgEntryPrice: 0.07,
+        expectedPlannedPrice: 0.077,
+        bestBid: 0.04,
+        bestAsk: 0.05,
+      },
+      {
+        name: "Iran deeper 0.111 to 0.052",
+        livePrice: 0.111,
+        avgEntryPrice: 0.047,
+        costBasisUsdc: 20,
+        enableCheap: true,
+        expectedPlannedPrice: 0.052,
+        bestBid: 0.04,
+        bestAsk: 0.05,
+      },
+      {
+        name: "Netherlands 0.101 to 0.034",
+        livePrice: 0.101,
+        avgEntryPrice: 0.0304,
+        costBasisUsdc: 20,
+        enableCheap: true,
+        expectedPlannedPrice: 0.034,
+        bestBid: 0.006,
+        bestAsk: 0.029,
+      },
+    ])("detects Plankton-calibrated replacement candidate: $name", async (fixture) => {
+      const ctx = setup(fixture.enableCheap ? cheapPostRefillPolicy() : postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: fixture.livePrice,
+              sizeShares: 40,
+              notionalUsd: fixture.livePrice * 40,
+              lifecycle: "placed",
+              orderId: String(createOrderId(`plankton-gate-${fixture.name}`)),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(
+        ctx,
+        {
+          avgEntryPrice: fixture.avgEntryPrice,
+          costBasisUsdc: fixture.costBasisUsdc ?? fixture.avgEntryPrice * 250,
+          size: 250,
+        },
+        {
+          bestBid: fixture.bestBid,
+          bestAsk: fixture.bestAsk,
+          midPrice: (fixture.bestBid + fixture.bestAsk) / 2,
+        },
+      );
+
+      expect(
+        ctx.riskEvents.find(
+          (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+        )?.payload,
+      ).toMatchObject({
+        oldLivePrice: fixture.livePrice,
+        selectedPlannedPrice: fixture.expectedPlannedPrice,
+      });
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+    });
+
+    it("filters Alan-style replacement that would move the live sell higher", async () => {
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "avg_down" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.14,
+              sizeShares: 7.5,
+              notionalUsd: 1.05,
+              lifecycle: "placed",
+              orderId: String(createOrderId("alan-live")),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(
+        ctx,
+        { avgEntryPrice: 0.12, costBasisUsdc: 3.7224, size: 31.02 },
+        { bestBid: 0.003, bestAsk: 0.028, midPrice: 0.0155 },
+      );
+
+      expect(ctx.counters.some((counter) => counter.name.includes("stale_live_rung"))).toBe(false);
+      expect(ctx.riskEvents.some((event) => event.eventType.includes("stale_live_rung"))).toBe(
+        false,
+      );
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+    });
+
+    it("filters micro-reprice improvements below the configured 5 percent gate", async () => {
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.1,
+              sizeShares: 40,
+              notionalUsd: 4,
+              lifecycle: "placed",
+              orderId: String(createOrderId("micro-reprice-live")),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(
+        ctx,
+        { avgEntryPrice: 0.087, costBasisUsdc: 21.75, size: 250 },
+        { bestBid: 0.05, bestAsk: 0.09, midPrice: 0.07 },
+      );
+
+      expect(ctx.counters.some((counter) => counter.name.includes("stale_live_rung"))).toBe(false);
+      expect(ctx.riskEvents.some((event) => event.eventType.includes("stale_live_rung"))).toBe(
+        false,
+      );
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+    });
+
+    it("detects at the exact 5 percent replacement price improvement boundary", async () => {
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.1,
+              sizeShares: 40,
+              notionalUsd: 4,
+              lifecycle: "placed",
+              orderId: String(createOrderId("boundary-live")),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(
+        ctx,
+        { avgEntryPrice: 0.086, costBasisUsdc: 21.5, size: 250 },
+        { bestBid: 0.05, bestAsk: 0.09, midPrice: 0.07 },
+      );
+
+      expect(
+        ctx.riskEvents.find(
+          (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+        )?.payload,
+      ).toMatchObject({
+        oldLivePrice: 0.1,
+        selectedPlannedPrice: 0.095,
       });
       expect(ctx.cancels).toHaveLength(0);
       expect(ctx.orders).toHaveLength(0);

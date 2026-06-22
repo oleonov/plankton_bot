@@ -145,6 +145,7 @@ const DEFAULT_POST_REFILL_FOLLOW_THROUGH = {
   replacementEnabled: false,
   minCoverageRatio: 0.5,
   priceDistanceImprovementPct: 0.1,
+  minReplacementPriceImprovementRatio: 0.05,
   minMaterialPositionSizeShares: 1,
   replacementCooldownMs: 120_000,
   cancelAckTimeoutMs: 60_000,
@@ -1485,6 +1486,9 @@ function evaluatePostRefillLiveRung(input: {
     .filter((liveRung) => liveRung.rungIndex > intendedRung.rungIndex)
     .sort((a, b) => b.rungIndex - a.rungIndex)[0];
   if (staleLiveRung == null) return evaluation;
+  if (!isMaterialReplacementPriceImprovement(staleLiveRung.price, intendedRung.price, config)) {
+    return evaluation;
+  }
 
   const priceDistanceImprovementPct = priceDistanceImprovement(
     staleLiveRung.price,
@@ -1521,6 +1525,16 @@ function isSubmittablePostRefillPlannedRung(rung: LadderRung, market: Normalized
     rung.sizeShares >= minOrderSize &&
     !wouldCrossPostOnly(rung.price, market.bestBid)
   );
+}
+
+function isMaterialReplacementPriceImprovement(
+  oldLiveSellPrice: number,
+  selectedPlannedPrice: number,
+  config: ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"],
+): boolean {
+  if (!isPositiveFinite(oldLiveSellPrice) || !isPositiveFinite(selectedPlannedPrice)) return false;
+  const maxReplacementPrice = oldLiveSellPrice * (1 - config.minReplacementPriceImprovementRatio);
+  return selectedPlannedPrice <= maxReplacementPrice + 1e-12;
 }
 
 function priceDistanceImprovement(

@@ -531,6 +531,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       replacementEnabled: false,
       minCoverageRatio: 0.5,
       priceDistanceImprovementPct: 0.1,
+      minReplacementPriceImprovementRatio: 0.05,
       minMaterialPositionSizeShares: 1,
       replacementCooldownMs: 120_000,
       cancelAckTimeoutMs: 60_000,
@@ -548,6 +549,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
               replacementEnabled: true,
               minCoverageRatio: 0.35,
               priceDistanceImprovementPct: 0.2,
+              minReplacementPriceImprovementRatio: 0.08,
               minMaterialPositionSizeShares: 2,
               replacementCooldownMs: 180_000,
               cancelAckTimeoutMs: 60_000,
@@ -564,6 +566,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       replacementEnabled: true,
       minCoverageRatio: 0.35,
       priceDistanceImprovementPct: 0.2,
+      minReplacementPriceImprovementRatio: 0.08,
       minMaterialPositionSizeShares: 2,
       replacementCooldownMs: 180_000,
       cancelAckTimeoutMs: 60_000,
@@ -611,6 +614,31 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.executionProfile.sellLadder.postRefillFollowThrough).toEqual(
       DEFAULT_EXECUTION_POLICY.executionProfile.sellLadder.postRefillFollowThrough,
     );
+  });
+
+  it("rejects invalid ProfileLadder post-refill replacement price improvement ratios", () => {
+    for (const value of [0, 1.01]) {
+      const { policy, issues } = parseExecutionPolicyJson(
+        JSON.stringify({
+          executionProfile: {
+            sellLadder: {
+              postRefillFollowThrough: {
+                minReplacementPriceImprovementRatio: value,
+              },
+            },
+          },
+        }),
+      );
+
+      expect(issues).toContain(
+        value === 0
+          ? "executionProfile.sellLadder.postRefillFollowThrough.minReplacementPriceImprovementRatio must be > 0"
+          : "executionProfile.sellLadder.postRefillFollowThrough.minReplacementPriceImprovementRatio must be <= 1",
+      );
+      expect(policy.executionProfile.sellLadder.postRefillFollowThrough).toEqual(
+        DEFAULT_EXECUTION_POLICY.executionProfile.sellLadder.postRefillFollowThrough,
+      );
+    }
   });
 
   it("parses Execution Profile monitoring and falls back field-by-field", () => {

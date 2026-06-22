@@ -1036,6 +1036,7 @@ export interface ProfileLadderPostRefillFollowThroughConfig {
   replacementEnabled: boolean;
   minCoverageRatio: number;
   priceDistanceImprovementPct: number;
+  minReplacementPriceImprovementRatio: number;
   minMaterialPositionSizeShares: number;
   replacementCooldownMs: number;
   cancelAckTimeoutMs: number;

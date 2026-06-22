@@ -272,6 +272,7 @@ export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderCo
     replacementEnabled: false,
     minCoverageRatio: 0.5,
     priceDistanceImprovementPct: 0.1,
+    minReplacementPriceImprovementRatio: 0.05,
     minMaterialPositionSizeShares: 1,
     replacementCooldownMs: 120_000,
     cancelAckTimeoutMs: 60_000,
@@ -2585,6 +2586,12 @@ function parseProfileLadderPostRefillFollowThrough(
       issues,
       "executionProfile.sellLadder.postRefillFollowThrough.priceDistanceImprovementPct",
     ).value,
+    minReplacementPriceImprovementRatio: positiveNumberOr(
+      obj.minReplacementPriceImprovementRatio,
+      fallback.minReplacementPriceImprovementRatio,
+      issues,
+      "executionProfile.sellLadder.postRefillFollowThrough.minReplacementPriceImprovementRatio",
+    ).value,
     minMaterialPositionSizeShares: positiveNumberOr(
       obj.minMaterialPositionSizeShares,
       fallback.minMaterialPositionSizeShares,
@@ -2608,6 +2615,12 @@ function parseProfileLadderPostRefillFollowThrough(
   if (parsed.minCoverageRatio > 1) {
     issues.push(
       "executionProfile.sellLadder.postRefillFollowThrough.minCoverageRatio must be <= 1",
+    );
+    return fallback;
+  }
+  if (parsed.minReplacementPriceImprovementRatio > 1) {
+    issues.push(
+      "executionProfile.sellLadder.postRefillFollowThrough.minReplacementPriceImprovementRatio must be <= 1",
     );
     return fallback;
   }
