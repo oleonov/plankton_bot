@@ -48,6 +48,54 @@ describe("createHybridFeeScheduleProvider", () => {
     expect(metrics.writeCounter).toHaveBeenCalledWith("fee_schedule_provider_api_success", 1);
   });
 
+  it("records active fee schedule period only when the period changes", async () => {
+    const metrics = { writeCounter: vi.fn(), writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const provider = createHybridFeeScheduleProvider({
+      feeGateway: {
+        getMarketFeeInfo: vi.fn().mockResolvedValue({ rate: 0.04, exponent: 1, takerOnly: true }),
+      },
+      runtimeMetrics: metrics,
+      nowMs: () => Date.parse("2026-06-16T00:00:00Z"),
+    });
+
+    const request = {
+      asOfMs: Date.parse("2026-06-16T00:00:00Z"),
+      conditionId: "condition",
+      tokenId: "token",
+      intendedLiquidityRole: "maker" as const,
+      config,
+    };
+    await provider.resolve(request);
+    await provider.resolve(request);
+    await provider.resolve({
+      ...request,
+      asOfMs: Date.parse("2026-07-16T00:00:00Z"),
+      config: {
+        ...config,
+        periods: [
+          config.periods[0]!,
+          {
+            ...config.periods[0]!,
+            periodId: "post-promo",
+            startsAtUtc: "2026-07-01T00:00:00Z",
+            endsAtUtc: "2026-08-01T00:00:00Z",
+          },
+        ],
+      },
+    });
+
+    const activePeriodWrites = metrics.writeLatest.mock.calls.filter(
+      (call) => call[0] === "fee_schedule_active_period",
+    );
+    expect(activePeriodWrites).toHaveLength(2);
+    expect(metrics.writeEvent).not.toHaveBeenCalledWith(
+      "fee_schedule_active_period",
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it("does not emit unknown-role rebate telemetry while maker rebate EV is disabled", async () => {
     const metrics = { writeCounter: vi.fn(), writeEvent: vi.fn() };
     const provider = createHybridFeeScheduleProvider({

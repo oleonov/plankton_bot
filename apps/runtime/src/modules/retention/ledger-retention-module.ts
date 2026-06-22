@@ -39,7 +39,9 @@ export interface LedgerRetentionConfig {
   decisionSignalLogTtlMs?: number;
   tradingStateSnapshotsTtlMs?: number;
   portfolioSnapshotsTtlMs?: number;
+  highVolumeRuntimeMetricsTtlMs?: number;
   signalTelemetryRiskEventsTtlMs?: number;
+  highVolumeRiskEventsTtlMs?: number;
   orderRejectedRiskEventsTtlMs?: number;
   riskEventsTtlMs?: number;
   criticalRiskEventsTtlMs?: number;
@@ -72,20 +74,23 @@ const DEFAULT_CONFIG: Required<LedgerRetentionConfig> = {
   // after a TTL change and let the WAL accumulate.
   maxDeletedRowsPerRun: 500_000,
   runtimeMetricsTtlMs: 30 * DAY_MS,
-  marketSnapshotsTtlMs: 7 * DAY_MS,
+  marketSnapshotsTtlMs: 3 * DAY_MS,
   // v063: 90d TTLs would have held ~17 GB/day each on a 100 GB disk — observed
   // ledger growth filled `/dev/vda2` in ~12h after v062 deploy. 7d caps keep
   // steady-state size to a workable footprint while preserving recent windows
-  // for analytics.
-  executionPolicyObservationsTtlMs: 7 * DAY_MS,
-  decisionSignalLogTtlMs: 7 * DAY_MS,
+  // for analytics. v135 tightens the hottest debug tables to 72h after the
+  // db-size guard exposed that 7d still leaves too little operational headroom.
+  executionPolicyObservationsTtlMs: 3 * DAY_MS,
+  decisionSignalLogTtlMs: 3 * DAY_MS,
   tradingStateSnapshotsTtlMs: 14 * DAY_MS,
   portfolioSnapshotsTtlMs: 90 * DAY_MS,
+  highVolumeRuntimeMetricsTtlMs: DAY_MS,
   // v063: signal_emitted is no longer written (recordDecisionSignal now writes
   // structured rows to decision_signal_log only). The TTL rule is retained to
   // sweep historical rows still present in the ledger; once they age out the
   // bucket effectively only sees signal_suppressed (~8k/h). 1d cap is plenty.
   signalTelemetryRiskEventsTtlMs: 1 * DAY_MS,
+  highVolumeRiskEventsTtlMs: DAY_MS,
   orderRejectedRiskEventsTtlMs: 14 * DAY_MS,
   riskEventsTtlMs: 90 * DAY_MS,
   criticalRiskEventsTtlMs: 90 * DAY_MS,
@@ -97,6 +102,17 @@ const DEFAULT_CONFIG: Required<LedgerRetentionConfig> = {
   checkpointMinDeletedRows: 50_000,
   runOnStart: true,
 };
+
+const HIGH_VOLUME_RUNTIME_METRICS = [
+  "fee_schedule_active_period",
+  "redeem_sweep_skipped_total",
+  "redeem_quarantine_skipped_total",
+] as const;
+
+const HIGH_VOLUME_RISK_EVENTS = [
+  "track_r_margin_threshold_sampled",
+  "d9_suppressed_on_profile_owned",
+] as const;
 
 type DeleteTask = {
   key: string;
@@ -148,9 +164,9 @@ export class LedgerRetentionModule implements RuntimeModule {
     if (this.running) {
       return { ranAt: new Date(nowMs).toISOString(), deleted: {}, checkpointed: false };
     }
-    if (this.deps.runtimeControl?.isPaused()) {
-      this.log.debug("ledger retention skipped while runtime is paused");
-      return { ranAt: new Date(nowMs).toISOString(), deleted: {}, checkpointed: false };
+    const paused = this.deps.runtimeControl?.isPaused() ?? false;
+    if (paused) {
+      this.log.debug("ledger retention telemetry cleanup running while runtime is paused");
     }
     this.running = true;
     try {
@@ -221,6 +237,14 @@ export class LedgerRetentionModule implements RuntimeModule {
     return [
       ...latestMetricTasks,
       this.deleteOlderThanTask(
+        "runtime_metrics.high_volume_debug",
+        "runtime_metrics",
+        "captured_at",
+        nowMs - this.config.highVolumeRuntimeMetricsTtlMs,
+        `metric_name IN (${HIGH_VOLUME_RUNTIME_METRICS.map(() => "?").join(",")})`,
+        [...HIGH_VOLUME_RUNTIME_METRICS],
+      ),
+      this.deleteOlderThanTask(
         "runtime_metrics.history",
         "runtime_metrics",
         "captured_at",
@@ -257,6 +281,14 @@ export class LedgerRetentionModule implements RuntimeModule {
         "portfolio_snapshots",
         "captured_at",
         nowMs - this.config.portfolioSnapshotsTtlMs,
+      ),
+      this.deleteOlderThanTask(
+        "risk_events.high_volume_debug",
+        "risk_events",
+        "created_at",
+        nowMs - this.config.highVolumeRiskEventsTtlMs,
+        `event_type IN (${HIGH_VOLUME_RISK_EVENTS.map(() => "?").join(", ")})`,
+        [...HIGH_VOLUME_RISK_EVENTS],
       ),
       this.deleteOlderThanTask(
         "risk_events.signal_telemetry",

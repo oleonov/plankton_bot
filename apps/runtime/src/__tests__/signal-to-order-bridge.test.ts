@@ -2534,17 +2534,16 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       1,
       expect.stringContaining('"fee_source":"live"'),
     );
-    expect(riskEventRepo.insert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        eventType: "track_r_margin_threshold_sampled",
-        payload: expect.objectContaining({
-          effectiveFillPrice: 0.046,
-          feeRate: 0.07,
-          feeSource: "live",
-          minGrossExitRatio: expect.closeTo(1.0766, 4),
-        }),
-      }),
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "track_r_margin_threshold_sampled_total",
+      1,
+      expect.stringContaining('"fee_source":"live"'),
     );
+    expect(
+      vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.some(([event]) => event.eventType === "track_r_margin_threshold_sampled"),
+    ).toBe(false);
   });
 
   it("Track R blocks taker-at-profit when a thin book cannot liquidate above dynamic margin", async () => {

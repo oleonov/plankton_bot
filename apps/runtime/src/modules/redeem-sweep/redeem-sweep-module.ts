@@ -615,10 +615,7 @@ export class RedeemSweepModule implements RuntimeModule {
       errorMsg: reason,
       details: { source, reason, excludedTokenIds: group.excludedTokenIds, ...extraDetails },
     });
-    this.recordMetricLabels("redeem_sweep_skipped_total", {
-      condition_id: group.conditionId,
-      reason,
-    });
+    this.recordBoundedMetricCounter("redeem_sweep_skipped_total", { reason });
   }
 
   private isRedeemQuarantineActive(
@@ -638,10 +635,8 @@ export class RedeemSweepModule implements RuntimeModule {
         consecutiveStateFailedCount: state?.consecutiveStateFailedCount ?? 0,
         quarantineUntilTs: untilTs,
       });
-      this.recordMetricLabels("redeem_quarantine_skipped_total", {
-        condition_id: group.conditionId,
-        until_ts: untilTs,
-        remaining_ms: untilTs - now,
+      this.recordBoundedMetricCounter("redeem_quarantine_skipped_total", {
+        reason: "state_failed_quarantine",
       });
       return true;
     }
@@ -1231,6 +1226,10 @@ export class RedeemSweepModule implements RuntimeModule {
       JSON.stringify(labels),
       new Date(this.now()).toISOString(),
     );
+  }
+
+  private recordBoundedMetricCounter(metricName: string, labels: Record<string, unknown>): void {
+    this.deps.runtimeMetrics?.writeCounter?.(metricName, 1, JSON.stringify(labels));
   }
 
   private recordAsyncQueueDepth(): void {

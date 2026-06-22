@@ -24,6 +24,12 @@ type RuntimeMetrics = {
     labels?: string | null,
     capturedAt?: string,
   ) => void;
+  writeLatest?: (
+    metricName: string,
+    value?: number,
+    labels?: string | null,
+    capturedAt?: string,
+  ) => void;
 };
 
 export interface HybridFeeScheduleProviderDeps {
@@ -36,6 +42,7 @@ export function createHybridFeeScheduleProvider(
   deps: HybridFeeScheduleProviderDeps,
 ): FeeScheduleProvider {
   let lastDegradedEventAtMs = Number.NEGATIVE_INFINITY;
+  let lastActivePeriodMetricKey: string | null = null;
   const nowMs = () => deps.nowMs?.() ?? Date.now();
 
   return {
@@ -45,12 +52,21 @@ export function createHybridFeeScheduleProvider(
       const asOfMs = Number.isFinite(request.asOfMs) ? request.asOfMs : nowMs();
       const makerRebateFraction = 0;
       if (period) {
-        deps.runtimeMetrics?.writeEvent?.(
-          "fee_schedule_active_period",
-          1,
-          JSON.stringify({ periodId: period.periodId }),
-          new Date(asOfMs).toISOString(),
-        );
+        const labels = JSON.stringify({ periodId: period.periodId });
+        const metricKey = `${period.periodId}|${period.startsAtUtc}|${period.endsAtUtc ?? ""}`;
+        if (metricKey !== lastActivePeriodMetricKey) {
+          lastActivePeriodMetricKey = metricKey;
+          if (deps.runtimeMetrics?.writeLatest) {
+            deps.runtimeMetrics.writeLatest(
+              "fee_schedule_active_period",
+              1,
+              labels,
+              new Date(asOfMs).toISOString(),
+            );
+          } else {
+            deps.runtimeMetrics?.writeCounter?.("fee_schedule_active_period_total", 1, labels);
+          }
+        }
       }
 
       if (

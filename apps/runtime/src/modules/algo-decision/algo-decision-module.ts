@@ -623,6 +623,7 @@ export function isInputsUnchangedConversionSkip(reasons: readonly string[]): boo
   return reasons.every((reason) => INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS.has(reason));
 }
 const NOISY_SUPPRESSION_DEDUPE_MS = 10 * 60 * 1000;
+const D9_PROFILE_OWNED_RISK_EVENT_DEDUPE_MS = 5 * 60 * 1000;
 // The suppression cache holds the last NOISY_SUPPRESSION_DEDUPE_MS (10 min)
 // of (tokenId, reason) pairs. At the worst observed signal-rate of ~15/sec ×
 // 600 s = 9 000 unique keys/window. Cap MUST stay above 9 000: when the map
@@ -824,6 +825,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   };
   private readonly legacyProfileOwnedGuardDedupe = new Map<string, number>();
   private readonly staticRuleSellBelowAvgEntryDedupe = new Map<string, number>();
+  private readonly d9ProfileOwnedSuppressionDedupe = new Map<string, number>();
   private readonly lastBuyFillByWallet = new Map<string, number>();
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
@@ -1818,6 +1820,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       if (sideEffect.kind === "d9_suppressed_on_profile_owned") {
         this.deps.runtimeMetrics?.writeCounter("d9_suppressed_on_profile_owned", 1);
         this.deps.runtimeMetrics?.writeCounter("d9_would_have_fired_on_profile_owned", 1);
+        if (!this.shouldPersistD9ProfileOwnedSuppressionEvent(sideEffect)) continue;
         this.persistence.enqueueRiskEvent({
           eventType: "d9_suppressed_on_profile_owned",
           payload: {
@@ -1947,6 +1950,27 @@ export class AlgoDecisionModule implements RuntimeModule {
       sideEffect.state,
     ].join("|");
     return this.dedupeAllows(this.staticRuleSellBelowAvgEntryDedupe, key, now);
+  }
+
+  private shouldPersistD9ProfileOwnedSuppressionEvent(
+    sideEffect: Extract<DecisionPlanSideEffect, { kind: "d9_suppressed_on_profile_owned" }>,
+  ): boolean {
+    const eventAt = Date.parse(sideEffect.timestamp);
+    const now = Number.isFinite(eventAt) ? eventAt : Date.now();
+    const key = [
+      "d9_suppressed_on_profile_owned",
+      String(sideEffect.tokenId),
+      sideEffect.decisionRuleId,
+      sideEffect.state,
+      sideEffect.d9Reason,
+      this.d9PriceBucket(sideEffect.price),
+    ].join("|");
+    return this.dedupeAllows(
+      this.d9ProfileOwnedSuppressionDedupe,
+      key,
+      now,
+      D9_PROFILE_OWNED_RISK_EVENT_DEDUPE_MS,
+    );
   }
 
   /**
@@ -3332,12 +3356,21 @@ export class AlgoDecisionModule implements RuntimeModule {
    * NOISY_SUPPRESSION_DEDUPE_MS (recording `now`), false while the window is
    * still open. Evicts via `pruneDedupe` when the cache exceeds the key cap.
    */
-  private dedupeAllows(cache: Map<string, number>, key: string, now: number): boolean {
+  private dedupeAllows(
+    cache: Map<string, number>,
+    key: string,
+    now: number,
+    windowMs = NOISY_SUPPRESSION_DEDUPE_MS,
+  ): boolean {
     const lastAt = cache.get(key);
-    if (lastAt != null && now - lastAt < NOISY_SUPPRESSION_DEDUPE_MS) return false;
+    if (lastAt != null && now - lastAt < windowMs) return false;
     cache.set(key, now);
     if (cache.size > MAX_SUPPRESSION_DEDUPE_KEYS) this.pruneDedupe(cache, now);
     return true;
+  }
+
+  private d9PriceBucket(price: number | null | undefined): string {
+    return typeof price === "number" && Number.isFinite(price) ? price.toFixed(2) : "unknown";
   }
 
   private suppressionDedupeKey(facts: SuppressionFacts): string {

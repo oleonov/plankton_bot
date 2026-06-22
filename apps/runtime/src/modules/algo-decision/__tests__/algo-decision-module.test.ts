@@ -6441,16 +6441,12 @@ describe("AlgoDecisionModule", () => {
   });
 
   describe("profile ladder D9 suppression telemetry", () => {
-    it("writes d9_suppressed_on_profile_owned counter and risk event", async () => {
-      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
-      const runtimeMetrics = {
-        writeCounter: vi.fn(),
-        writeLatest: vi.fn(),
-      } as unknown as RuntimeMetricWriter;
-      const mod = buildModule({ runtimeMetrics, riskEventRepo });
-      await mod.start();
-
-      const sideEffect = {
+    function makeD9ProfileOwnedSideEffect(
+      overrides: Partial<
+        Extract<DecisionPlanSideEffect, { kind: "d9_suppressed_on_profile_owned" }>
+      > = {},
+    ): DecisionPlanSideEffect {
+      return {
         kind: "d9_suppressed_on_profile_owned",
         tokenId: createTokenId("token-profile-d9"),
         conditionId: "cond-profile-d9",
@@ -6468,16 +6464,38 @@ describe("AlgoDecisionModule", () => {
           d9PublicTradeCount24h: 100,
         },
         d9Reason: "d9-loss-exit-fired",
-      } as unknown as DecisionPlanSideEffect;
+        ...overrides,
+      };
+    }
 
-      (mod as any).applyDecisionPlanSideEffects([sideEffect], DEFAULT_EXECUTION_POLICY);
+    it("writes d9_suppressed_on_profile_owned counters on every occurrence", async () => {
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const runtimeMetrics = {
+        writeCounter: vi.fn(),
+        writeLatest: vi.fn(),
+      } as unknown as RuntimeMetricWriter;
+      const mod = buildModule({ runtimeMetrics, riskEventRepo });
+      await mod.start();
+
+      const sideEffect = makeD9ProfileOwnedSideEffect();
+      (mod as any).applyDecisionPlanSideEffects(
+        [sideEffect, sideEffect, sideEffect],
+        DEFAULT_EXECUTION_POLICY,
+      );
       await mod.stop();
 
-      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith("d9_suppressed_on_profile_owned", 1);
-      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
-        "d9_would_have_fired_on_profile_owned",
-        1,
-      );
+      const metricCalls = vi.mocked(runtimeMetrics.writeCounter).mock.calls;
+      expect(
+        metricCalls.filter(([name]) => name === "d9_suppressed_on_profile_owned"),
+      ).toHaveLength(3);
+      expect(
+        metricCalls.filter(([name]) => name === "d9_would_have_fired_on_profile_owned"),
+      ).toHaveLength(3);
+      expect(
+        metricCalls
+          .filter(([name]) => name === "d9_suppressed_on_profile_owned")
+          .every((call) => call.length === 2),
+      ).toBe(true);
       expect(riskEventRepo.insert).toHaveBeenCalledWith(
         expect.objectContaining({
           eventType: "d9_suppressed_on_profile_owned",
@@ -6492,6 +6510,62 @@ describe("AlgoDecisionModule", () => {
           }),
         }),
       );
+    });
+
+    it("dedupes repeated identical d9_suppressed_on_profile_owned raw risk events", async () => {
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const runtimeMetrics = {
+        writeCounter: vi.fn(),
+        writeLatest: vi.fn(),
+      } as unknown as RuntimeMetricWriter;
+      const mod = buildModule({ runtimeMetrics, riskEventRepo });
+      await mod.start();
+
+      const first = makeD9ProfileOwnedSideEffect();
+      const withinWindow = makeD9ProfileOwnedSideEffect({
+        timestamp: "2026-06-15T00:04:59.000Z",
+      });
+      const afterWindow = makeD9ProfileOwnedSideEffect({
+        timestamp: "2026-06-15T00:05:01.000Z",
+      });
+      (mod as any).applyDecisionPlanSideEffects(
+        [first, withinWindow, afterWindow],
+        DEFAULT_EXECUTION_POLICY,
+      );
+      await mod.stop();
+
+      expect(
+        vi
+          .mocked(runtimeMetrics.writeCounter)
+          .mock.calls.filter(([name]) => name === "d9_suppressed_on_profile_owned"),
+      ).toHaveLength(3);
+      expect(vi.mocked(riskEventRepo.insert).mock.calls).toHaveLength(2);
+    });
+
+    it("persists materially different d9_suppressed_on_profile_owned raw risk events separately", async () => {
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const runtimeMetrics = {
+        writeCounter: vi.fn(),
+        writeLatest: vi.fn(),
+      } as unknown as RuntimeMetricWriter;
+      const mod = buildModule({ runtimeMetrics, riskEventRepo });
+      await mod.start();
+
+      (mod as any).applyDecisionPlanSideEffects(
+        [
+          makeD9ProfileOwnedSideEffect(),
+          makeD9ProfileOwnedSideEffect({
+            tokenId: createTokenId("token-profile-d9-other"),
+            conditionId: "cond-profile-d9-other",
+          }),
+          makeD9ProfileOwnedSideEffect({ state: "S2" }),
+          makeD9ProfileOwnedSideEffect({ d9Reason: "d9-loss-exit-fallback" }),
+        ],
+        DEFAULT_EXECUTION_POLICY,
+      );
+      await mod.stop();
+
+      expect(vi.mocked(riskEventRepo.insert).mock.calls).toHaveLength(4);
     });
   });
 

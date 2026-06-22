@@ -2584,29 +2584,10 @@ export class SignalToOrderBridge {
       mode: "gate" | "invariant";
     },
   ): void {
-    try {
-      this.deps.riskEventRepo?.insert({
-        eventType: "track_r_margin_threshold_sampled",
-        payload: {
-          tokenId: String(signal.tokenId),
-          conditionId: String(signal.conditionId),
-          decisionRuleId: signal.decisionRuleId ?? null,
-          mode: input.mode,
-          effectiveFillPrice: input.effectiveFillPrice,
-          avgEntryPrice: input.avgEntry,
-          minGrossExitRatio: input.minGrossExitRatio,
-          feeRate: input.feeQuote.rate,
-          feeExponent: input.feeQuote.exponent,
-          feeSource: input.feeQuote.source,
-          timestamp: new Date(this.now()).toISOString(),
-        },
-      });
-    } catch (err) {
-      this.log.debug(
-        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
-        "failed to write Track R threshold sample",
-      );
-    }
+    this.recordTrackRMetric(signal, "track_r_margin_threshold_sampled_total", {
+      mode: input.mode,
+      fee_source: input.feeQuote.source,
+    });
   }
 
   private recordTrackS3Evaluation(

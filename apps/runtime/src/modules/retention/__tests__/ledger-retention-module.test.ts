@@ -293,13 +293,13 @@ describe("LedgerRetentionModule", () => {
     ]);
   });
 
-  it("v063: decision_signal_log TTL boundary — keeps rows <7d old, deletes >7d", async () => {
-    // NOW is 2026-04-25T00:00:00Z. 6d old (kept) vs 8d old (deleted).
+  it("keeps decision_signal_log rows <72h old and deletes older rows", async () => {
+    // NOW is 2026-04-25T00:00:00Z. 71h old (kept) vs 73h old (deleted).
     db.prepare("INSERT INTO decision_signal_log (signal_timestamp) VALUES (?)").run(
-      "2026-04-17T00:00:00.000Z", // 8d old → past 7d TTL
+      "2026-04-21T23:00:00.000Z", // 73h old → past 72h TTL
     );
     db.prepare("INSERT INTO decision_signal_log (signal_timestamp) VALUES (?)").run(
-      "2026-04-19T00:00:00.000Z", // 6d old → within 7d TTL
+      "2026-04-22T01:00:00.000Z", // 71h old → within 72h TTL
     );
 
     const mod = new LedgerRetentionModule({
@@ -313,15 +313,15 @@ describe("LedgerRetentionModule", () => {
     const rows = db
       .prepare("SELECT signal_timestamp FROM decision_signal_log ORDER BY signal_timestamp")
       .all() as Array<{ signal_timestamp: string }>;
-    expect(rows).toEqual([{ signal_timestamp: "2026-04-19T00:00:00.000Z" }]);
+    expect(rows).toEqual([{ signal_timestamp: "2026-04-22T01:00:00.000Z" }]);
   });
 
-  it("v063: execution_policy_observations TTL boundary — keeps rows <7d old, deletes >7d", async () => {
+  it("keeps execution_policy_observations rows <72h old and deletes older rows", async () => {
     db.prepare("INSERT INTO execution_policy_observations (created_at) VALUES (?)").run(
-      "2026-04-17T00:00:00.000Z", // 8d old → past 7d TTL
+      "2026-04-21T23:00:00.000Z", // 73h old → past 72h TTL
     );
     db.prepare("INSERT INTO execution_policy_observations (created_at) VALUES (?)").run(
-      "2026-04-19T00:00:00.000Z", // 6d old → within 7d TTL
+      "2026-04-22T01:00:00.000Z", // 71h old → within 72h TTL
     );
 
     const mod = new LedgerRetentionModule({
@@ -335,7 +335,92 @@ describe("LedgerRetentionModule", () => {
     const rows = db
       .prepare("SELECT created_at FROM execution_policy_observations ORDER BY created_at")
       .all() as Array<{ created_at: string }>;
-    expect(rows).toEqual([{ created_at: "2026-04-19T00:00:00.000Z" }]);
+    expect(rows).toEqual([{ created_at: "2026-04-22T01:00:00.000Z" }]);
+  });
+
+  it("deletes high-volume runtime metrics past the 1-day TTL", async () => {
+    insertMetric("fee_schedule_active_period", "2026-04-23T23:00:00.000Z");
+    insertMetric("fee_schedule_active_period", "2026-04-24T01:00:00.000Z");
+    insertMetric("redeem_sweep_skipped_total", "2026-04-23T23:00:00.000Z");
+    insertMetric("redeem_quarantine_skipped_total", "2026-04-24T01:00:00.000Z");
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    const rows = db
+      .prepare(
+        "SELECT metric_name, captured_at FROM runtime_metrics ORDER BY metric_name, captured_at",
+      )
+      .all() as Array<{ metric_name: string; captured_at: string }>;
+    expect(rows).toEqual([
+      {
+        metric_name: "fee_schedule_active_period",
+        captured_at: "2026-04-24T01:00:00.000Z",
+      },
+      {
+        metric_name: "redeem_quarantine_skipped_total",
+        captured_at: "2026-04-24T01:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("deletes high-volume risk events past the 1-day TTL", async () => {
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "track_r_margin_threshold_sampled",
+      "{}",
+      "2026-04-23T23:00:00.000Z",
+    );
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "track_r_margin_threshold_sampled",
+      "{}",
+      "2026-04-24T01:00:00.000Z",
+    );
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "d9_suppressed_on_profile_owned",
+      "{}",
+      "2026-04-23T23:00:00.000Z",
+    );
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "d9_suppressed_on_profile_owned",
+      "{}",
+      "2026-04-24T01:00:00.000Z",
+    );
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "signal_rejected",
+      "{}",
+      "2026-04-23T23:00:00.000Z",
+    );
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    const rows = db
+      .prepare("SELECT event_type, created_at FROM risk_events ORDER BY event_type, created_at")
+      .all() as Array<{ event_type: string; created_at: string }>;
+    expect(rows).toEqual([
+      {
+        event_type: "d9_suppressed_on_profile_owned",
+        created_at: "2026-04-24T01:00:00.000Z",
+      },
+      {
+        event_type: "signal_rejected",
+        created_at: "2026-04-23T23:00:00.000Z",
+      },
+      {
+        event_type: "track_r_margin_threshold_sampled",
+        created_at: "2026-04-24T01:00:00.000Z",
+      },
+    ]);
   });
 
   it("deletes order_rejected risk events after 14 days but keeps newer ones", async () => {
@@ -383,24 +468,43 @@ describe("LedgerRetentionModule", () => {
     await mod.stop();
   });
 
-  it("skips deletion sweeps while the runtime is paused", async () => {
+  it("runs telemetry retention while paused and keeps financial rows", async () => {
     insertMetric("market_data_last_update", "2026-04-24T00:00:00.000Z");
     insertMetric("market_data_last_update", "2026-04-24T01:00:00.000Z");
-    const before = count("runtime_metrics");
+    db.prepare("INSERT INTO decision_signal_log (signal_timestamp) VALUES (?)").run(
+      "2026-04-21T23:00:00.000Z",
+    );
+    db.prepare("INSERT INTO orders (order_id, created_at) VALUES ('ord-paused', ?)").run(
+      "2025-01-01T00:00:00.000Z",
+    );
+    db.prepare("INSERT INTO positions (position_id, opened_at) VALUES ('pos-paused', ?)").run(
+      "2025-01-01T00:00:00.000Z",
+    );
+    db.prepare("INSERT INTO fills (fill_id, filled_at) VALUES ('fill-paused', ?)").run(
+      "2025-01-01T00:00:00.000Z",
+    );
 
     const isPaused = vi.fn(() => true);
     const mod = new LedgerRetentionModule({
       db,
       log,
-      config: { runOnStart: false },
+      config: {
+        runOnStart: false,
+        checkpointIntervalMs: Number.MAX_SAFE_INTEGER,
+        checkpointMinDeletedRows: 99,
+      },
       runtimeControl: { isPaused },
     });
 
     const result = await mod.runOnce(NOW);
 
     expect(isPaused).toHaveBeenCalledTimes(1);
-    expect(result.deleted).toEqual({});
+    expect(result.deleted["runtime_metrics.latest.market_data_last_update"]).toBe(1);
+    expect(result.deleted["decision_signal_log"]).toBe(1);
     expect(result.checkpointed).toBe(false);
-    expect(count("runtime_metrics")).toBe(before);
+    expect(count("runtime_metrics")).toBe(1);
+    expect(count("orders")).toBe(1);
+    expect(count("positions")).toBe(1);
+    expect(count("fills")).toBe(1);
   });
 });

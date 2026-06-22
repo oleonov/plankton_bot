@@ -12,7 +12,7 @@ describe("execution profile signal feed policy", () => {
       windowLongMs: 10_800_000,
       warmBucketMs: 60_000,
       coldArchiveBucketMs: 3_600_000,
-      retentionDays: 120,
+      retentionDays: 7,
       minSamplesForSnapshot: 30,
       minSamplesForRecovery60: 60,
       minWarmBucketsForTradeCount: 90,

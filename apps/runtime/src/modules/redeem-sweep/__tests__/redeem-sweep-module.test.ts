@@ -188,7 +188,7 @@ function makeHarness(
   const reader = {
     read: vi.fn(opts.readImpl ?? (() => Promise.resolve(opts.positions ?? [remotePosition()]))),
   };
-  const runtimeMetrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+  const runtimeMetrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
   const orderRepo = { findOpen: vi.fn(() => opts.openOrders ?? []) };
   const quarantine = makeRedeemQuarantineRepo(opts.quarantineStates);
   let uniqueViolationOnFirstAttemptingInsert = opts.uniqueViolationOnFirstAttemptingInsert ?? false;
@@ -564,15 +564,10 @@ describe("RedeemSweepModule", () => {
     await flushMicrotasks();
 
     expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
-    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+    expect(h.runtimeMetrics.writeCounter).toHaveBeenCalledWith(
       "redeem_quarantine_skipped_total",
       1,
-      JSON.stringify({
-        condition_id: "cond-quarantined",
-        until_ts: NOW + 60_000,
-        remaining_ms: 60_000,
-      }),
-      new Date(NOW).toISOString(),
+      JSON.stringify({ reason: "state_failed_quarantine" }),
     );
   });
 
@@ -1181,11 +1176,10 @@ describe("RedeemSweepModule", () => {
         consecutiveStateFailedCount: 5,
       }),
     });
-    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+    expect(h.runtimeMetrics.writeCounter).toHaveBeenCalledWith(
       "redeem_quarantine_skipped_total",
       1,
-      expect.stringContaining(CONDITION),
-      expect.any(String),
+      JSON.stringify({ reason: "state_failed_quarantine" }),
     );
   });
 
@@ -1352,6 +1346,19 @@ describe("RedeemSweepModule", () => {
       status: "skipped",
       errorMsg: "active_orders_exist",
     });
+    expect(h.runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "redeem_sweep_skipped_total",
+      1,
+      JSON.stringify({ reason: "active_orders_exist" }),
+    );
+    expect(
+      vi
+        .mocked(h.runtimeMetrics.writeCounter)
+        .mock.calls.some(
+          ([name, , labels]) =>
+            name === "redeem_sweep_skipped_total" && String(labels).includes(CONDITION),
+        ),
+    ).toBe(false);
   });
 
   it("requires two consecutive redeemable wallet snapshots before redeem", async () => {
