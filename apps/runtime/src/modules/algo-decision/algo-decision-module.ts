@@ -606,6 +606,7 @@ const INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS: ReadonlySet<string> = new Set([
   "dead-side-near-end",
   "price-above-entry-ceiling",
   "sell-price-below-signal-floor",
+  "taker-below-margin",
 ]);
 
 /**

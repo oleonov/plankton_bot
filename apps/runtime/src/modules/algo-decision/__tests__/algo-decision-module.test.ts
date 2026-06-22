@@ -6105,6 +6105,21 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
+    it("does not self-trigger re-evaluation for a sticky taker margin skip", async () => {
+      const tokenId = "token-taker-margin-skip";
+      const mod = buildModule();
+      await mod.start();
+      const spy = vi.spyOn(
+        mod as unknown as { scheduleDirtyEvaluation: (n?: number) => void },
+        "scheduleDirtyEvaluation",
+      );
+
+      await emitSkip(tokenId, ["taker-below-margin"]);
+
+      expect(spy).not.toHaveBeenCalled();
+      await mod.stop();
+    });
+
     it("keeps the immediate (0 ms) re-eval for an inputs-changeable skip (budget-exhausted)", async () => {
       const tokenId = "token-budget-skip";
       const mod = buildModule();
@@ -7313,6 +7328,7 @@ describe("conversionSkipReEvalDelayMs", () => {
     expect(conversionSkipReEvalDelayMs(["dead-side-near-end"])).toBe(250);
     expect(conversionSkipReEvalDelayMs(["price-above-entry-ceiling"])).toBe(250);
     expect(conversionSkipReEvalDelayMs(["sell-price-below-signal-floor"])).toBe(250);
+    expect(conversionSkipReEvalDelayMs(["taker-below-margin"])).toBe(250);
     expect(conversionSkipReEvalDelayMs(["sell-order-acceptable-price-already-open"])).toBe(250);
     expect(conversionSkipReEvalDelayMs(["no_bid", "one-sided-book"])).toBe(250);
     expect(isInputsUnchangedConversionSkip(["spread-above-cap"])).toBe(true);
