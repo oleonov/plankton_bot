@@ -100,6 +100,10 @@ import {
   isExchangeBalanceRejection,
 } from "./exchange-state-store.js";
 import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
+import {
+  orderMatchesOrderId,
+  validateProfileLadderReplacementSellTarget,
+} from "../profile-ladder-order-helpers.js";
 
 type OrderFillLookupGateway = ExchangeGateway & {
   getFillsForOrder?: (orderId: string) => Promise<ExchangeFill[]>;
@@ -983,9 +987,8 @@ export class ExecutionModule implements RuntimeModule {
         signalReason: orderForTelemetry.signalReason,
         timestamp: now,
       });
+      await this.releasePendingSellReplacement(cmd.orderId);
     }
-
-    await this.releasePendingSellReplacement(cmd.orderId);
   }
 
   // ─── Fill detection ───────────────────────────────────────────────────
@@ -1863,18 +1866,33 @@ export class ExecutionModule implements RuntimeModule {
 
   private async deferSellReplacementIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
     if (cmd.side !== "sell") return false;
+    if (this.isSellReplacementSubmit(cmd)) return false;
 
     // Normal exit management keeps one live price per token and replaces it
     // when strategy moves. The per-token SELL cap is a race/legacy-state
     // ceiling, not permission to stack multiple independent exit prices.
     const existingSells = this.findOpenSellOrdersForToken(cmd.tokenId);
     const key = String(cmd.tokenId);
+    const profileLadderOldOrderId = this.getProfileLadderReplacementOldOrderId(cmd);
+    if (profileLadderOldOrderId != null) {
+      const validation = this.validateProfileLadderReplacementTarget(
+        profileLadderOldOrderId,
+        existingSells,
+      );
+      if (!validation.ok) {
+        await this.rejectOrder(cmd, validation.reason, ExchangeErrorCode.LivePolicyBlocked);
+        return true;
+      }
+    }
     if (existingSells.length === 0) {
       this.sellReplaceLocks.delete(key);
       return false;
     }
 
-    const existingSell = existingSells[0]!;
+    const existingSell =
+      profileLadderOldOrderId == null
+        ? existingSells[0]!
+        : existingSells.find((order) => orderMatchesOrderId(order, profileLadderOldOrderId))!;
     const policy = this.deps.executionPolicy?.();
     const now = Date.now();
     const repriceThreshold = resolveSellRepriceThreshold(existingSell.price, cmd.tickSize, policy);
@@ -1917,7 +1935,6 @@ export class ExecutionModule implements RuntimeModule {
       return true;
     }
 
-    if (this.isSellReplacementSubmit(cmd)) return false;
     const existingLock = this.sellReplaceLocks.get(key);
     if (
       existingLock &&
@@ -2014,6 +2031,22 @@ export class ExecutionModule implements RuntimeModule {
       cmd.side === "sell" &&
       typeof cmd.metadata?.[ExecutionModule.SELL_REPLACEMENT_CANCELLED_ORDER_ID] === "string"
     );
+  }
+
+  private getProfileLadderReplacementOldOrderId(cmd: PlaceOrderCommand): string | null {
+    const metadata = cmd.metadata;
+    if (metadata == null || typeof metadata !== "object") return null;
+    const replacement = metadata.profileLadderReplacement;
+    if (replacement == null || typeof replacement !== "object") return null;
+    const oldOrderId = (replacement as Readonly<Record<string, unknown>>).oldOrderId;
+    return typeof oldOrderId === "string" && oldOrderId.length > 0 ? oldOrderId : null;
+  }
+
+  private validateProfileLadderReplacementTarget(
+    oldOrderId: string,
+    existingSells: readonly Order[],
+  ): { ok: true } | { ok: false; reason: string } {
+    return validateProfileLadderReplacementSellTarget(oldOrderId, existingSells);
   }
 
   private async releasePendingSellReplacement(cancelledOrderId: OrderId): Promise<void> {

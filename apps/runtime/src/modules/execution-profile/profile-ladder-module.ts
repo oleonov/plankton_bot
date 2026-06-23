@@ -23,6 +23,11 @@ import {
   isValidLadderBbo,
   resolveLadderBand,
 } from "./profile-ladder-builder.js";
+import {
+  isProfileLadderOrder,
+  orderMatchesOrderId,
+  validateProfileLadderReplacementSellTarget,
+} from "../profile-ladder-order-helpers.js";
 import { resolvePositiveSellFloor } from "../../executable-price.js";
 import type { ProfileLadderRepository } from "./profile-ladder-repository.js";
 import type { ExecutionProfilePolicy, ProfileState } from "./types.js";
@@ -186,6 +191,19 @@ interface BuildAndPlaceOptions {
   ladderIdSuffix?: string;
 }
 
+type PendingProfileLadderRung = {
+  tokenId: TokenId;
+  ladderId: string;
+  rungIndex: number;
+  kind: "standard" | "post_refill_replacement";
+  oldOrderId?: string;
+  createdAtMs?: number;
+  deadlineAtMs?: number;
+  band?: ProfileLadderBand;
+  mode?: ProfileLadderMode;
+  profileState?: ProfileLadderTelemetryState;
+};
+
 export interface PostRefillStaleLiveRungDecision {
   liveCoverageRatio: number;
   liveProfileLadderSellShares: number;
@@ -219,14 +237,12 @@ export class ProfileLadderModule implements RuntimeModule {
   private readonly bboCooldownUntilByToken = new Map<string, number>();
   private readonly marketByToken = new Map<string, NormalizedMarket>();
   private readonly scaleInBuyPendingByToken = new Set<string>();
-  private readonly pendingRungByClientOrderId = new Map<
-    string,
-    { tokenId: TokenId; ladderId: string; rungIndex: number }
-  >();
+  private readonly pendingRungByClientOrderId = new Map<string, PendingProfileLadderRung>();
   private readonly plannedRungRetryCooldownUntilByToken = new Map<string, number>();
   private readonly missingLadderRecoveryCooldownUntilByToken = new Map<string, number>();
   private readonly pendingRebuildDeferCooldownUntilByToken = new Map<string, number>();
   private readonly staleLiveRungRiskEventDedupeUntilByKey = new Map<string, number>();
+  private readonly replacementCooldownUntilByToken = new Map<string, number>();
   // Plankton post-fill REST: one bounded reevaluation timer per token. A SELL
   // fill never places the next rung inline; it schedules a delayed reevaluation.
   private readonly postFillTimerByToken = new Map<string, ReturnType<typeof setTimeout>>();
@@ -259,10 +275,10 @@ export class ProfileLadderModule implements RuntimeModule {
         this.handleOrderPlaced(event);
       }),
       this.deps.bus.subscribe("OrderRejected", async (event) => {
-        this.handlePendingOrderResolved(event.clientOrderId);
+        this.handlePendingOrderResolved(event);
       }),
       this.deps.bus.subscribe("OrderSkipped", async (event) => {
-        this.handlePendingOrderResolved(event.clientOrderId);
+        this.handlePendingOrderResolved(event);
       }),
     );
     this.started = true;
@@ -289,6 +305,8 @@ export class ProfileLadderModule implements RuntimeModule {
     this.plannedRungRetryCooldownUntilByToken.clear();
     this.missingLadderRecoveryCooldownUntilByToken.clear();
     this.pendingRebuildDeferCooldownUntilByToken.clear();
+    this.pendingRungByClientOrderId.clear();
+    this.replacementCooldownUntilByToken.clear();
     this.adoptionDone = false;
     this.adoptionAttemptCount = 0;
     this.adoptExistingEnabled = false;
@@ -509,7 +527,7 @@ export class ProfileLadderModule implements RuntimeModule {
       rungCount: state.activeRungs.length,
       ladderId: state.ladderId,
     });
-    this.recordPostRefillFollowThroughDryRun(position, market, state);
+    await this.recordPostRefillFollowThrough(position, market, state);
   }
 
   async cancelLadder(tokenId: TokenId, reason: "position_closed" | "operator"): Promise<void> {
@@ -743,6 +761,7 @@ export class ProfileLadderModule implements RuntimeModule {
   }
 
   private async retryPlannedLiveRungsForCachedMarkets(): Promise<void> {
+    this.sweepExpiredPendingReplacements(this.now());
     for (const state of this.deps.repository.findActive()) {
       if (this.isDormant(state.tokenId)) continue;
       if (this.postFillTimerByToken.has(String(state.tokenId))) continue;
@@ -1055,6 +1074,21 @@ export class ProfileLadderModule implements RuntimeModule {
     ladderId: string,
     rung: LadderRung,
     timestamp: number,
+    options: {
+      replacement?: {
+        oldOrderId: string;
+        oldLiveSellPrice: number;
+        selectedPlannedPrice: number;
+        selectedPlannedRungIndex: number;
+        positiveFloorPrice: number;
+        liveCoverageRatio: number;
+        minReplacementPriceImprovementRatio: number;
+        oldLiveRemainingShares: number;
+        profileState: ProfileLadderTelemetryState;
+        band: ProfileLadderBand;
+        mode: ProfileLadderMode;
+      };
+    } = {},
   ): Promise<void> {
     const signalId = `profile_ladder_${String(position.tokenId)}_${ladderId}_${rung.rungIndex}`;
     const clientOrderId = buildClientOrderId({
@@ -1062,15 +1096,33 @@ export class ProfileLadderModule implements RuntimeModule {
       tokenId: position.tokenId,
       side: "sell",
     });
+    const commandId =
+      options.replacement == null
+        ? createCommandId(signalId)
+        : createCommandId(
+            `${signalId}_post_refill_replace_${options.replacement.oldOrderId}_${timestamp}`,
+          );
     this.pendingRungByClientOrderId.set(String(clientOrderId), {
       tokenId: position.tokenId,
       ladderId,
       rungIndex: rung.rungIndex,
+      kind: options.replacement == null ? "standard" : "post_refill_replacement",
+      ...(options.replacement == null
+        ? {}
+        : {
+            oldOrderId: options.replacement.oldOrderId,
+            createdAtMs: timestamp,
+            deadlineAtMs:
+              timestamp + resolvePostRefillFollowThroughConfig(this.policy()).cancelAckTimeoutMs,
+            band: options.replacement.band,
+            mode: options.replacement.mode,
+            profileState: options.replacement.profileState,
+          }),
     });
     await this.deps.bus.publish("PlaceOrderRequested", {
       command: {
         type: "PlaceOrderCommand",
-        commandId: createCommandId(signalId),
+        commandId,
         clientOrderId,
         source: "strategy",
         tokenId: position.tokenId,
@@ -1097,6 +1149,22 @@ export class ProfileLadderModule implements RuntimeModule {
             multiplier: rung.multiplier,
             sizingFraction: rung.sizingFraction,
           },
+          ...(options.replacement == null
+            ? {}
+            : {
+                profileLadderReplacement: {
+                  kind: "post_refill_follow_through",
+                  oldOrderId: options.replacement.oldOrderId,
+                  oldLiveSellPrice: options.replacement.oldLiveSellPrice,
+                  selectedPlannedPrice: options.replacement.selectedPlannedPrice,
+                  selectedPlannedRungIndex: options.replacement.selectedPlannedRungIndex,
+                  positiveFloorPrice: options.replacement.positiveFloorPrice,
+                  liveCoverageRatio: options.replacement.liveCoverageRatio,
+                  minReplacementPriceImprovementRatio:
+                    options.replacement.minReplacementPriceImprovementRatio,
+                  oldLiveRemainingShares: options.replacement.oldLiveRemainingShares,
+                },
+              }),
         },
       },
       timestamp,
@@ -1156,6 +1224,22 @@ export class ProfileLadderModule implements RuntimeModule {
 
     const state = this.deps.repository.getLadder(pending.tokenId);
     this.pendingRungByClientOrderId.delete(String(event.clientOrderId));
+    if (pending.kind === "post_refill_replacement") {
+      this.armReplacementCooldown(pending.tokenId, event.timestamp);
+      this.writeReplacementCounter("profile_ladder_replacement_completed_total", pending, {
+        action: "complete",
+        reason: "order_placed",
+      });
+      this.insertRiskEvent("profile_ladder_replacement_completed", {
+        tokenId: String(pending.tokenId),
+        ladderId: pending.ladderId,
+        rungIndex: pending.rungIndex,
+        oldOrderId: pending.oldOrderId ?? null,
+        clientOrderId: String(event.clientOrderId),
+        orderId: String(event.orderId),
+        completedAtMs: event.timestamp,
+      });
+    }
     if (state == null) return;
     // A stale backfill for a superseded ladder (e.g. rebuilt under a new
     // ladderId) must not mutate the current ladder's rungs.
@@ -1163,6 +1247,14 @@ export class ProfileLadderModule implements RuntimeModule {
 
     let matched = false;
     const activeRungs = state.activeRungs.map((rung) => {
+      if (
+        pending.kind === "post_refill_replacement" &&
+        pending.oldOrderId != null &&
+        rung.orderId === pending.oldOrderId &&
+        rung.rungIndex !== pending.rungIndex
+      ) {
+        return { ...rung, lifecycle: "cancelled" as const, orderId: null };
+      }
       if (rung.rungIndex !== pending.rungIndex) return rung;
       matched = true;
       return {
@@ -1180,9 +1272,35 @@ export class ProfileLadderModule implements RuntimeModule {
   }
 
   private handlePendingOrderResolved(
-    clientOrderId: RuntimeEventMap["OrderRejected"]["clientOrderId"],
+    event: RuntimeEventMap["OrderRejected"] | RuntimeEventMap["OrderSkipped"],
   ): void {
-    this.pendingRungByClientOrderId.delete(String(clientOrderId));
+    const pending = this.pendingRungByClientOrderId.get(String(event.clientOrderId));
+    if (pending == null) return;
+    const reason = "reason" in event ? event.reason : event.reasonCode;
+    if (
+      pending.kind === "post_refill_replacement" &&
+      (reason === "sell-replace-pending" || reason === "sell-replace-lock-retry")
+    ) {
+      return;
+    }
+
+    this.pendingRungByClientOrderId.delete(String(event.clientOrderId));
+    if (pending.kind === "post_refill_replacement") {
+      this.armReplacementCooldown(pending.tokenId, event.timestamp);
+      this.writeReplacementCounter("profile_ladder_replacement_failed_total", pending, {
+        action: "fail",
+        reason: boundedReplacementReason(reason),
+      });
+      this.insertRiskEvent("profile_ladder_replacement_failed", {
+        tokenId: String(pending.tokenId),
+        ladderId: pending.ladderId,
+        rungIndex: pending.rungIndex,
+        oldOrderId: pending.oldOrderId ?? null,
+        clientOrderId: String(event.clientOrderId),
+        reason,
+        failedAtMs: event.timestamp,
+      });
+    }
   }
 
   private handleFillReceived(event: RuntimeEventMap["FillReceived"]): void {
@@ -1193,6 +1311,7 @@ export class ProfileLadderModule implements RuntimeModule {
     if (event.side !== "sell") return;
     const state = this.deps.repository.getLadder(event.tokenId);
     if (state == null) return;
+    this.abortPendingReplacementForOldOrder(event);
     let matchedIndex = -1;
     const activeRungs = state.activeRungs.map((rung) => {
       if (rung.orderId !== String(event.orderId)) return rung;
@@ -1289,11 +1408,11 @@ export class ProfileLadderModule implements RuntimeModule {
     return this.deps.isDormant?.(tokenId) === true;
   }
 
-  private recordPostRefillFollowThroughDryRun(
+  private async recordPostRefillFollowThrough(
     position: Position,
     market: NormalizedMarket,
     state: LadderState,
-  ): void {
+  ): Promise<void> {
     const config = resolvePostRefillFollowThroughConfig(this.policy());
     if (!config.enabled) return;
     if (this.deps.isProfileOwned != null && !this.deps.isProfileOwned(position.tokenId)) return;
@@ -1310,7 +1429,7 @@ export class ProfileLadderModule implements RuntimeModule {
     const decision = evaluation.decision;
 
     const labels = {
-      action: decision == null ? "observe" : "dry_run",
+      action: decision == null ? "observe" : resolvePostRefillAction(config),
       band: state.band,
       coverageBucket: evaluation.coverageBucket,
       mode: state.lastMode,
@@ -1322,42 +1441,227 @@ export class ProfileLadderModule implements RuntimeModule {
     if (decision == null) return;
 
     this.writeCounter("profile_ladder_stale_live_rung_detected_total", 1, labels);
+    this.writeCounter("profile_ladder_replacement_candidate_total", 1, {
+      action: labels.action,
+      band: labels.band,
+      mode: labels.mode,
+      reason: labels.reason,
+      state: labels.state,
+    });
     if (
-      !this.shouldWriteStaleLiveRungRiskEvent({
+      this.shouldWriteStaleLiveRungRiskEvent({
         tokenId: state.tokenId,
         oldOrderId: decision.liveRung.orderId,
         selectedPlannedPrice: decision.intendedRung.price,
         reason: "intended_active_blocked",
       })
     ) {
+      this.insertRiskEvent("profile_ladder_stale_live_rung_detected", {
+        action: labels.action,
+        tokenId: String(state.tokenId),
+        conditionId: String(state.conditionId),
+        band: state.band,
+        mode: state.lastMode,
+        profileState,
+        reason: "intended_active_blocked",
+        liveCoverageRatio: decision.liveCoverageRatio,
+        liveProfileLadderSellShares: decision.liveProfileLadderSellShares,
+        positionSizeShares: position.size,
+        liveRungIndex: decision.liveRung.rungIndex,
+        intendedRungIndex: decision.intendedRung.rungIndex,
+        oldOrderId: decision.liveRung.orderId,
+        oldLivePrice: decision.liveRung.price,
+        oldLiveRemainingShares: remainingRungShares(decision.liveRung),
+        selectedPlannedPrice: decision.intendedRung.price,
+        selectedPlannedShares: decision.intendedRung.sizeShares,
+        positiveFloorPrice: decision.positiveFloorPrice,
+        avgEntryPrice: position.avgEntryPrice,
+        bestBid: market.bestBid,
+        bestAsk: market.bestAsk,
+        minCoverageRatio: config.minCoverageRatio,
+        priceDistanceImprovementPct: decision.priceDistanceImprovementPct,
+        dryRun: config.dryRun,
+        replacementEnabled: config.replacementEnabled,
+      });
+    }
+    if (config.dryRun || !config.replacementEnabled) return;
+    await this.requestPostRefillReplacement({
+      position,
+      market,
+      state,
+      decision,
+      config,
+      profileState,
+    });
+  }
+
+  private async requestPostRefillReplacement(input: {
+    position: Position;
+    market: NormalizedMarket;
+    state: LadderState;
+    decision: PostRefillStaleLiveRungDecision;
+    config: ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"];
+    profileState: ProfileLadderTelemetryState;
+  }): Promise<void> {
+    const { config, decision, market, position, profileState, state } = input;
+    const skipReason = this.getPostRefillReplacementSkipReason(state, decision, config);
+    if (skipReason != null) {
+      this.writeCounter("profile_ladder_replacement_place_skipped_total", 1, {
+        action: "skip",
+        band: state.band,
+        mode: state.lastMode,
+        reason: skipReason,
+        state: profileState,
+      });
       return;
     }
-    this.insertRiskEvent("profile_ladder_stale_live_rung_detected", {
-      action: "dry_run",
-      tokenId: String(state.tokenId),
-      conditionId: String(state.conditionId),
+
+    const marketData = await this.resolveOrderMarketData(state.band, market, this.now());
+    if (marketData == null) {
+      this.writeCounter("profile_ladder_replacement_place_skipped_total", 1, {
+        action: "skip",
+        band: state.band,
+        mode: state.lastMode,
+        reason: "unknown_min_order",
+        state: profileState,
+      });
+      return;
+    }
+
+    const oldOrderId = decision.liveRung.orderId;
+    if (oldOrderId == null) return;
+    await this.publishPlaceOrder(
+      position,
+      market,
+      marketData,
+      state.ladderId,
+      decision.intendedRung,
+      this.now(),
+      {
+        replacement: {
+          oldOrderId,
+          oldLiveSellPrice: decision.liveRung.price,
+          selectedPlannedPrice: decision.intendedRung.price,
+          selectedPlannedRungIndex: decision.intendedRung.rungIndex,
+          positiveFloorPrice: decision.positiveFloorPrice,
+          liveCoverageRatio: decision.liveCoverageRatio,
+          minReplacementPriceImprovementRatio: config.minReplacementPriceImprovementRatio,
+          oldLiveRemainingShares: remainingRungShares(decision.liveRung),
+          profileState,
+          band: state.band,
+          mode: state.lastMode,
+        },
+      },
+    );
+    this.writeCounter("profile_ladder_replacement_place_requested_total", 1, {
+      action: "request",
       band: state.band,
       mode: state.lastMode,
-      profileState,
       reason: "intended_active_blocked",
-      liveCoverageRatio: decision.liveCoverageRatio,
-      liveProfileLadderSellShares: decision.liveProfileLadderSellShares,
-      positionSizeShares: position.size,
-      liveRungIndex: decision.liveRung.rungIndex,
-      intendedRungIndex: decision.intendedRung.rungIndex,
-      oldOrderId: decision.liveRung.orderId,
+      state: profileState,
+    });
+    this.insertRiskEvent("profile_ladder_replacement_requested", {
+      tokenId: String(state.tokenId),
+      conditionId: String(state.conditionId),
+      ladderId: state.ladderId,
+      oldOrderId,
       oldLivePrice: decision.liveRung.price,
-      oldLiveRemainingShares: remainingRungShares(decision.liveRung),
       selectedPlannedPrice: decision.intendedRung.price,
       selectedPlannedShares: decision.intendedRung.sizeShares,
       positiveFloorPrice: decision.positiveFloorPrice,
-      avgEntryPrice: position.avgEntryPrice,
-      bestBid: market.bestBid,
-      bestAsk: market.bestAsk,
-      minCoverageRatio: config.minCoverageRatio,
-      priceDistanceImprovementPct: decision.priceDistanceImprovementPct,
-      dryRun: true,
-      replacementEnabledIgnoredInPr1: config.replacementEnabled,
+      liveCoverageRatio: decision.liveCoverageRatio,
+      band: state.band,
+      mode: state.lastMode,
+      profileState,
+    });
+  }
+
+  private getPostRefillReplacementSkipReason(
+    state: LadderState,
+    decision: PostRefillStaleLiveRungDecision,
+    config: ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"],
+  ): string | null {
+    if (this.resolveLiveRungCap(state.band) !== 1) return "unsupported_concurrent_rungs";
+    if (this.isReplacementCooldownActive(state.tokenId)) return "replacement_cooldown";
+    if (this.hasPendingRungForToken(state.tokenId)) return "pending_rung";
+    if (decision.liveRung.orderId == null) return "missing_old_order_id";
+    if (config.cancelAckTimeoutMs <= 0) return "invalid_cancel_timeout";
+    const validation = this.validateReplacementTarget(state, decision.liveRung.orderId);
+    if (!validation.ok) {
+      return validation.reason;
+    }
+    return null;
+  }
+
+  private validateReplacementTarget(
+    state: LadderState,
+    oldOrderId: string,
+  ): ReturnType<typeof validateProfileLadderReplacementSellTarget> {
+    return validateProfileLadderReplacementSellTarget(
+      oldOrderId,
+      this.findOpenSellOrders(state.tokenId),
+    );
+  }
+
+  private sweepExpiredPendingReplacements(now: number): void {
+    for (const [clientOrderId, pending] of this.pendingRungByClientOrderId) {
+      if (pending.kind !== "post_refill_replacement") continue;
+      if (pending.deadlineAtMs == null || pending.deadlineAtMs > now) continue;
+      this.pendingRungByClientOrderId.delete(clientOrderId);
+      this.armReplacementCooldown(pending.tokenId, now);
+      this.writeReplacementCounter("profile_ladder_replacement_failed_total", pending, {
+        action: "fail",
+        reason: "cancel_ack_timeout",
+      });
+      this.insertRiskEvent("profile_ladder_replacement_failed", {
+        tokenId: String(pending.tokenId),
+        ladderId: pending.ladderId,
+        rungIndex: pending.rungIndex,
+        oldOrderId: pending.oldOrderId ?? null,
+        clientOrderId,
+        reason: "cancel_ack_timeout",
+        failedAtMs: now,
+      });
+    }
+  }
+
+  private abortPendingReplacementForOldOrder(event: RuntimeEventMap["FillReceived"]): void {
+    for (const [clientOrderId, pending] of this.pendingRungByClientOrderId) {
+      if (pending.kind !== "post_refill_replacement") continue;
+      if (String(event.tokenId) !== String(pending.tokenId)) continue;
+      if (String(event.orderId) !== pending.oldOrderId) continue;
+      this.pendingRungByClientOrderId.delete(clientOrderId);
+      this.armReplacementCooldown(pending.tokenId, event.timestamp);
+      this.writeReplacementCounter("profile_ladder_replacement_failed_total", pending, {
+        action: "fail",
+        reason: "old_order_filled",
+      });
+      return;
+    }
+  }
+
+  private isReplacementCooldownActive(tokenId: TokenId): boolean {
+    return (this.replacementCooldownUntilByToken.get(String(tokenId)) ?? 0) > this.now();
+  }
+
+  private armReplacementCooldown(tokenId: TokenId, now: number): void {
+    this.replacementCooldownUntilByToken.set(
+      String(tokenId),
+      now + resolvePostRefillFollowThroughConfig(this.policy()).replacementCooldownMs,
+    );
+  }
+
+  private writeReplacementCounter(
+    name: string,
+    pending: PendingProfileLadderRung,
+    labels: { action: string; reason: string },
+  ): void {
+    this.writeCounter(name, 1, {
+      action: labels.action,
+      band: pending.band ?? "unknown",
+      mode: pending.mode ?? "unknown",
+      reason: labels.reason,
+      state: pending.profileState ?? "unknown",
     });
   }
 
@@ -1688,30 +1992,46 @@ function wouldCrossPostOnly(price: number, bestBid: number | null): boolean {
   return isPositiveFinite(bestBid) && price <= bestBid;
 }
 
-function isProfileLadderOrder(order: Order): boolean {
-  const metadataSource = order.metadata?.source;
-  return (
-    order.decisionRuleId === "PROFILE_LADDER" ||
-    order.signalReason === "profile-ladder-exit" ||
-    metadataSource === "profile_ladder"
-  );
-}
-
 function stateTracksAnyOrder(state: LadderState, orders: readonly Order[]): boolean {
   const trackedOrderIds = new Set(
     state.activeRungs
       .map((rung) => rung.orderId)
       .filter((orderId): orderId is string => typeof orderId === "string" && orderId.length > 0),
   );
-  return orders.some(
-    (order) =>
-      trackedOrderIds.has(String(order.orderId)) ||
-      (order.exchangeOrderId != null && trackedOrderIds.has(String(order.exchangeOrderId))),
-  );
+  return orders.some((order) => {
+    for (const orderId of trackedOrderIds) {
+      if (orderMatchesOrderId(order, orderId)) return true;
+    }
+    return false;
+  });
 }
 
 function roundQuantity(value: number): number {
   return Number(value.toFixed(6));
+}
+
+function resolvePostRefillAction(
+  config: ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"],
+): string {
+  if (config.dryRun) return "dry_run";
+  return config.replacementEnabled ? "request" : "telemetry";
+}
+
+function boundedReplacementReason(reason: string): string {
+  switch (reason) {
+    case "sell-replace-chain-cap":
+    case "sell-replace-lock-active":
+    case "sell-replace-invalid-threshold":
+    case "sell-order-acceptable-price-already-open":
+    case "sell-replace-required-order-missing":
+    case "sell-replace-duplicate-live-sell":
+    case "post-only-cross-pre-submit":
+    case "cancel_ack_timeout":
+    case "old_order_filled":
+      return reason;
+    default:
+      return "other";
+  }
 }
 
 // A rung owns a real resting order once OrderPlaced has backfilled its exchange

@@ -2565,7 +2565,7 @@ describe("ProfileLadderModule", () => {
     });
 
     it("keeps PR1 side-effect-free even when replacementEnabled is configured true", async () => {
-      const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+      const ctx = setup(postRefillPolicy({ dryRun: true, replacementEnabled: true }), {
         modeReader: { getMode: () => "flat" },
         isProfileOwned: () => true,
       });
@@ -2587,6 +2587,491 @@ describe("ProfileLadderModule", () => {
       ).toHaveLength(1);
       expect(ctx.cancels).toHaveLength(0);
       expect(ctx.orders).toHaveLength(0);
+    });
+
+    it("publishes a ProfileLadder replacement request with old-order metadata when live PR2 is enabled", async () => {
+      const oldOrderId = createOrderId("stale-lower-priority-live");
+      const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+        profileStateReader: { getProfileState: () => "HARVESTING" },
+        orderRepo: {
+          findByTokenId: () => [
+            openSellOrder({
+              orderId: oldOrderId,
+              exchangeOrderId: String(oldOrderId),
+              signalReason: "profile-ladder-exit",
+              decisionRuleId: "PROFILE_LADDER",
+              metadata: { source: "profile_ladder" },
+              price: 0.104,
+              size: 40,
+              sizeUsdc: 4.16,
+              status: OrderStatus.Open,
+            }),
+          ],
+        },
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.104,
+              sizeShares: 40,
+              notionalUsd: 4.16,
+              lifecycle: "placed",
+              orderId: String(oldOrderId),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.orders[0]).toMatchObject({
+        side: "sell",
+        price: 0.088,
+        signalReason: "profile-ladder-exit",
+        metadata: {
+          profileLadderReplacement: {
+            kind: "post_refill_follow_through",
+            oldOrderId: String(oldOrderId),
+            oldLiveSellPrice: 0.104,
+            selectedPlannedPrice: 0.088,
+            selectedPlannedRungIndex: 0,
+            positiveFloorPrice: 0.081,
+            liveCoverageRatio: 0.16,
+            minReplacementPriceImprovementRatio: 0.05,
+          },
+        },
+      });
+      const pending = [
+        ...(
+          ctx.module as unknown as {
+            pendingRungByClientOrderId: Map<string, Record<string, unknown>>;
+          }
+        ).pendingRungByClientOrderId.values(),
+      ][0]!;
+      expect(pending).toMatchObject({
+        kind: "post_refill_replacement",
+        oldOrderId: String(oldOrderId),
+        createdAtMs: NOW,
+        deadlineAtMs: NOW + 60_000,
+      });
+      expect(
+        counterLabels(ctx.counters, "profile_ladder_replacement_place_requested_total"),
+      ).toEqual([
+        expect.objectContaining({
+          action: "request",
+          band: "medium_low",
+          mode: "flat",
+          reason: "intended_active_blocked",
+          state: "HARVESTING",
+        }),
+      ]);
+    });
+
+    it("fails closed before publish when a non-ProfileLadder live SELL creates ambiguity", async () => {
+      const oldOrderId = createOrderId("stale-live-with-legacy-sell");
+      const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+        orderRepo: {
+          findByTokenId: () => [
+            openSellOrder({
+              orderId: oldOrderId,
+              exchangeOrderId: String(oldOrderId),
+              signalReason: "profile-ladder-exit",
+              decisionRuleId: "PROFILE_LADDER",
+              metadata: { source: "profile_ladder" },
+              price: 0.104,
+              status: OrderStatus.Open,
+            }),
+            openSellOrder({
+              orderId: createOrderId("legacy-live-sell"),
+              exchangeOrderId: "legacy-live-sell",
+              signalReason: "track-s1-ladder",
+              decisionRuleId: "LEGACY_SELL",
+              metadata: { source: "s1" },
+              price: 0.15,
+              status: OrderStatus.Open,
+            }),
+          ],
+        },
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.104,
+              sizeShares: 40,
+              notionalUsd: 4.16,
+              lifecycle: "placed",
+              orderId: String(oldOrderId),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+      expect(counterLabels(ctx.counters, "profile_ladder_replacement_place_skipped_total")).toEqual([
+        expect.objectContaining({
+          action: "skip",
+          reason: "sell-replace-duplicate-live-sell",
+        }),
+      ]);
+    });
+
+    it.each(["sell-replace-pending", "sell-replace-lock-retry"])(
+      "keeps pending replacement on nonterminal %s deferral",
+      async (reason) => {
+        const oldOrderId = createOrderId("deferred-replacement-live");
+        const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+          modeReader: { getMode: () => "flat" },
+          isProfileOwned: () => true,
+          orderRepo: {
+            findByTokenId: () => [
+              openSellOrder({
+                orderId: oldOrderId,
+                exchangeOrderId: String(oldOrderId),
+                signalReason: "profile-ladder-exit",
+                decisionRuleId: "PROFILE_LADDER",
+                metadata: { source: "profile_ladder" },
+                price: 0.104,
+                status: OrderStatus.Open,
+              }),
+            ],
+          },
+        });
+        ctx.repo.upsertLadder(
+          staleLowerPriorityState({
+            activeRungs: [
+              rung({
+                rungIndex: 0,
+                price: 0.104,
+                sizeShares: 40,
+                notionalUsd: 4.16,
+                lifecycle: "placed",
+                orderId: String(oldOrderId),
+              }),
+            ],
+          }),
+        );
+        await rebuildWithPostRefillContext(ctx);
+        const command = ctx.orders[0]!;
+
+        await ctx.bus.publish("OrderRejected", {
+          ...orderRejected(command),
+          reason,
+        });
+
+        expect(
+          (
+            ctx.module as unknown as {
+              pendingRungByClientOrderId: Map<string, unknown>;
+            }
+          ).pendingRungByClientOrderId.size,
+        ).toBe(1);
+        await rebuildWithPostRefillContext(ctx);
+        expect(ctx.orders).toHaveLength(1);
+      },
+    );
+
+    it("clears pending replacement on terminal rejection and starts cooldown", async () => {
+      const oldOrderId = createOrderId("terminal-replacement-live");
+      const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+        orderRepo: {
+          findByTokenId: () => [
+            openSellOrder({
+              orderId: oldOrderId,
+              exchangeOrderId: String(oldOrderId),
+              signalReason: "profile-ladder-exit",
+              decisionRuleId: "PROFILE_LADDER",
+              metadata: { source: "profile_ladder" },
+              price: 0.104,
+              status: OrderStatus.Open,
+            }),
+          ],
+        },
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.104,
+              sizeShares: 40,
+              notionalUsd: 4.16,
+              lifecycle: "placed",
+              orderId: String(oldOrderId),
+            }),
+          ],
+        }),
+      );
+      await ctx.module.start();
+      await rebuildWithPostRefillContext(ctx);
+      const command = ctx.orders[0]!;
+
+      await ctx.bus.publish("OrderRejected", {
+        ...orderRejected(command),
+        reason: "sell-replace-chain-cap",
+      });
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(
+        (
+          ctx.module as unknown as {
+            pendingRungByClientOrderId: Map<string, unknown>;
+          }
+        ).pendingRungByClientOrderId.size,
+      ).toBe(0);
+      expect(ctx.orders).toHaveLength(1);
+      expect(counterLabels(ctx.counters, "profile_ladder_replacement_failed_total")).toEqual([
+        expect.objectContaining({ action: "fail", reason: "sell-replace-chain-cap" }),
+      ]);
+    });
+
+    it("marks replacement rung placed and clears old live rung on final OrderPlaced", async () => {
+      const oldOrderId = createOrderId("final-replacement-live");
+      const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+        orderRepo: {
+          findByTokenId: () => [
+            openSellOrder({
+              orderId: oldOrderId,
+              exchangeOrderId: String(oldOrderId),
+              signalReason: "profile-ladder-exit",
+              decisionRuleId: "PROFILE_LADDER",
+              metadata: { source: "profile_ladder" },
+              price: 0.104,
+              status: OrderStatus.Open,
+            }),
+          ],
+        },
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.104,
+              sizeShares: 40,
+              notionalUsd: 4.16,
+              lifecycle: "placed",
+              orderId: String(oldOrderId),
+            }),
+          ],
+        }),
+      );
+      await ctx.module.start();
+      await rebuildWithPostRefillContext(ctx);
+      const command = ctx.orders[0]!;
+
+      await ctx.bus.publish("OrderPlaced", orderPlaced(command, createOrderId("replacement-new")));
+
+      const state = ctx.repo.getLadder(tokenId)!;
+      expect(state.activeRungs.find((entry) => entry.orderId === String(oldOrderId))).toBeFalsy();
+      expect(state.activeRungs.find((entry) => entry.orderId === "replacement-new")).toMatchObject({
+        rungIndex: 0,
+        lifecycle: "placed",
+      });
+      expect(
+        (
+          ctx.module as unknown as {
+            pendingRungByClientOrderId: Map<string, unknown>;
+          }
+        ).pendingRungByClientOrderId.size,
+      ).toBe(0);
+    });
+
+    it("times out orphaned pending replacement without placing another order", async () => {
+      vi.useFakeTimers();
+      try {
+        let nowMs = NOW;
+        const oldOrderId = createOrderId("timeout-replacement-live");
+        const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+          modeReader: { getMode: () => "flat" },
+          isProfileOwned: () => true,
+          now: () => nowMs,
+          orderRepo: {
+            findByTokenId: () => [
+              openSellOrder({
+                orderId: oldOrderId,
+                exchangeOrderId: String(oldOrderId),
+                signalReason: "profile-ladder-exit",
+                decisionRuleId: "PROFILE_LADDER",
+                metadata: { source: "profile_ladder" },
+                price: 0.104,
+                status: OrderStatus.Open,
+              }),
+            ],
+          },
+        });
+        ctx.repo.upsertLadder(
+          staleLowerPriorityState({
+            activeRungs: [
+              rung({
+                rungIndex: 0,
+                price: 0.104,
+                sizeShares: 40,
+                notionalUsd: 4.16,
+                lifecycle: "placed",
+                orderId: String(oldOrderId),
+              }),
+            ],
+          }),
+        );
+        await ctx.module.start();
+        await rebuildWithPostRefillContext(ctx);
+        expect(ctx.orders).toHaveLength(1);
+
+        nowMs = NOW + 60_001;
+        await vi.advanceTimersByTimeAsync(PLANNED_RUNG_RETRY_MS + 1);
+
+        expect(
+          (
+            ctx.module as unknown as {
+              pendingRungByClientOrderId: Map<string, unknown>;
+            }
+          ).pendingRungByClientOrderId.size,
+        ).toBe(0);
+        expect(ctx.orders).toHaveLength(1);
+        expect(counterLabels(ctx.counters, "profile_ladder_replacement_failed_total")).toEqual([
+          expect.objectContaining({ action: "fail", reason: "cancel_ack_timeout" }),
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("ignores late OrderPlaced after pending replacement timeout", async () => {
+      vi.useFakeTimers();
+      try {
+        let nowMs = NOW;
+        const oldOrderId = createOrderId("late-after-timeout-live");
+        const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+          modeReader: { getMode: () => "flat" },
+          isProfileOwned: () => true,
+          now: () => nowMs,
+          orderRepo: {
+            findByTokenId: () => [
+              openSellOrder({
+                orderId: oldOrderId,
+                exchangeOrderId: String(oldOrderId),
+                signalReason: "profile-ladder-exit",
+                decisionRuleId: "PROFILE_LADDER",
+                metadata: { source: "profile_ladder" },
+                price: 0.104,
+                status: OrderStatus.Open,
+              }),
+            ],
+          },
+        });
+        ctx.repo.upsertLadder(
+          staleLowerPriorityState({
+            activeRungs: [
+              rung({
+                rungIndex: 0,
+                price: 0.104,
+                sizeShares: 40,
+                notionalUsd: 4.16,
+                lifecycle: "placed",
+                orderId: String(oldOrderId),
+              }),
+            ],
+          }),
+        );
+        await ctx.module.start();
+        await rebuildWithPostRefillContext(ctx);
+        const command = ctx.orders[0]!;
+
+        nowMs = NOW + 60_001;
+        await vi.advanceTimersByTimeAsync(PLANNED_RUNG_RETRY_MS + 1);
+        await ctx.bus.publish("OrderPlaced", orderPlaced(command, createOrderId("late-new-order")));
+
+        const state = ctx.repo.getLadder(tokenId)!;
+        expect(state.activeRungs.find((entry) => entry.orderId === String(oldOrderId)))
+          .toMatchObject({
+            lifecycle: "placed",
+          });
+        expect(state.activeRungs.find((entry) => entry.orderId === "late-new-order")).toBeFalsy();
+        expect(ctx.orders).toHaveLength(1);
+        expect(
+          (
+            ctx.module as unknown as {
+              pendingRungByClientOrderId: Map<string, unknown>;
+            }
+          ).pendingRungByClientOrderId.size,
+        ).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("aborts pending replacement when the old live order fills before final outcome", async () => {
+      const oldOrderId = createOrderId("fill-abort-replacement-live");
+      const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+        orderRepo: {
+          findByTokenId: () => [
+            openSellOrder({
+              orderId: oldOrderId,
+              exchangeOrderId: String(oldOrderId),
+              signalReason: "profile-ladder-exit",
+              decisionRuleId: "PROFILE_LADDER",
+              metadata: { source: "profile_ladder" },
+              price: 0.104,
+              status: OrderStatus.Open,
+            }),
+          ],
+        },
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.104,
+              sizeShares: 40,
+              notionalUsd: 4.16,
+              lifecycle: "placed",
+              orderId: String(oldOrderId),
+            }),
+          ],
+        }),
+      );
+      await ctx.module.start();
+      await rebuildWithPostRefillContext(ctx);
+
+      await ctx.bus.publish("FillReceived", fill({ orderId: oldOrderId, size: 10 }));
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(
+        (
+          ctx.module as unknown as {
+            pendingRungByClientOrderId: Map<string, unknown>;
+          }
+        ).pendingRungByClientOrderId.size,
+      ).toBe(0);
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs.find((entry) => entry.orderId === oldOrderId))
+        .toMatchObject({
+          lifecycle: "partially_filled",
+          filledSizeShares: 10,
+        });
+      expect(counterLabels(ctx.counters, "profile_ladder_replacement_failed_total")).toEqual([
+        expect.objectContaining({ action: "fail", reason: "old_order_filled" }),
+      ]);
     });
 
     it("does not detect for non-profile-owned positions", async () => {

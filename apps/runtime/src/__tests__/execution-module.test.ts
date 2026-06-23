@@ -2071,7 +2071,9 @@ describe("ExecutionModule", () => {
   );
 
   it("cancel-replaces a SELL when replacement price moves beyond the threshold", async () => {
-    orderRepo.findByTokenId = vi.fn().mockReturnValue([openSellAt(0.3)]);
+    const existingSell = openSellAt(0.3);
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+    orderRepo.findById = vi.fn().mockReturnValue(existingSell);
     const replaceMod = new ExecutionModule({
       gateway,
       bus,
@@ -2218,6 +2220,7 @@ describe("ExecutionModule", () => {
       updatedAt: new Date().toISOString(),
     };
     orderRepo.findByTokenId = vi.fn().mockImplementation(() => (cancelled ? [] : [existingSell]));
+    orderRepo.findById = vi.fn().mockReturnValue(existingSell);
     orderRepo.updateStatus = vi.fn().mockImplementation(() => {
       cancelled = true;
     });
@@ -2263,6 +2266,484 @@ describe("ExecutionModule", () => {
     expect(rejected.some((event) => event.reason === "sell-replace-pending")).toBe(true);
     expect(replaceMod.getDiagnostics().cancelReplacePendingCount).toBe(0);
 
+    await replaceMod.stop();
+  });
+
+  it("routes ProfileLadder replacement metadata through the existing sell-replace flow", async () => {
+    const existingSell = openSellAt(0.111, {
+      signalReason: "profile-ladder-exit",
+      decisionRuleId: "PROFILE_LADDER",
+      metadata: { source: "profile_ladder" },
+    });
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+    orderRepo.findById = vi.fn().mockReturnValue(existingSell);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+    await replaceMod.start();
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("profile-ladder-replace-request"),
+        clientOrderId: "plk_profile_ladder_replace" as ClientOrderId,
+        side: "sell",
+        price: 0.077,
+        tickSize: 0.001,
+        size: 5,
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: {
+          source: "profile_ladder",
+          profileLadderReplacement: { oldOrderId: String(existingSell.orderId) },
+        },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: String(existingSell.orderId) });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(rejected.some((event) => event.reason === "sell-replace-pending")).toBe(true);
+    await replaceMod.stop();
+  });
+
+  it("fails closed when ProfileLadder replacement oldOrderId is absent and no live SELL exists", async () => {
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([]);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    await replaceMod.start();
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("profile-ladder-target-absent"),
+        clientOrderId: "plk_profile_ladder_target_absent" as ClientOrderId,
+        side: "sell",
+        price: 0.077,
+        tickSize: 0.001,
+        size: 5,
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: {
+          source: "profile_ladder",
+          profileLadderReplacement: { oldOrderId: "missing-old-order" },
+        },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("sell-replace-required-order-missing");
+    await replaceMod.stop();
+  });
+
+  it("fails closed when ProfileLadder replacement target is absent but another live SELL exists", async () => {
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([
+      openSellAt(0.111, {
+        orderId: createOrderId("other-live-sell"),
+        exchangeOrderId: "other-live-sell",
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: { source: "profile_ladder" },
+      }),
+    ]);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    await replaceMod.start();
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("profile-ladder-target-mismatch"),
+        clientOrderId: "plk_profile_ladder_target_mismatch" as ClientOrderId,
+        side: "sell",
+        price: 0.077,
+        tickSize: 0.001,
+        size: 5,
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: {
+          source: "profile_ladder",
+          profileLadderReplacement: { oldOrderId: "missing-old-order" },
+        },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected[0].reason).toBe("sell-replace-required-order-missing");
+    await replaceMod.stop();
+  });
+
+  it("fails closed with an incompatible reason when oldOrderId targets a non-ProfileLadder SELL", async () => {
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([
+      openSellAt(0.111, {
+        orderId: createOrderId("legacy-live-sell-target"),
+        exchangeOrderId: "legacy-live-sell-target",
+        signalReason: "track-s1-ladder",
+        decisionRuleId: "LEGACY_SELL",
+        metadata: { source: "s1" },
+      }),
+    ]);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    await replaceMod.start();
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("profile-ladder-target-incompatible"),
+        clientOrderId: "plk_profile_ladder_target_incompatible" as ClientOrderId,
+        side: "sell",
+        price: 0.077,
+        tickSize: 0.001,
+        size: 5,
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: {
+          source: "profile_ladder",
+          profileLadderReplacement: { oldOrderId: "legacy-live-sell-target" },
+        },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected[0].reason).toBe("sell-replace-required-order-incompatible");
+    await replaceMod.stop();
+  });
+
+  it("fails closed on duplicate live SELL ambiguity for ProfileLadder replacement", async () => {
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([
+      openSellAt(0.111, {
+        orderId: createOrderId("profile-live-one"),
+        exchangeOrderId: "profile-live-one",
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: { source: "profile_ladder" },
+      }),
+      openSellAt(0.12, {
+        orderId: createOrderId("profile-live-two"),
+        exchangeOrderId: "profile-live-two",
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: { source: "profile_ladder" },
+      }),
+    ]);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    await replaceMod.start();
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("profile-ladder-duplicate-live-sell"),
+        clientOrderId: "plk_profile_ladder_duplicate_live_sell" as ClientOrderId,
+        side: "sell",
+        price: 0.077,
+        tickSize: 0.001,
+        size: 5,
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: {
+          source: "profile_ladder",
+          profileLadderReplacement: { oldOrderId: "profile-live-one" },
+        },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected[0].reason).toBe("sell-replace-duplicate-live-sell");
+    await replaceMod.stop();
+  });
+
+  it("respects the existing sell-replace lock for ProfileLadder replacement commands", async () => {
+    const existingSell = openSellAt(0.111, {
+      signalReason: "profile-ladder-exit",
+      decisionRuleId: "PROFILE_LADDER",
+      metadata: { source: "profile_ladder" },
+    });
+    (gateway.cancelOrder as ReturnType<typeof vi.fn>).mockResolvedValue({ success: false });
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+    await replaceMod.start();
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+    const replacementMetadata = {
+      source: "profile_ladder",
+      profileLadderReplacement: { oldOrderId: String(existingSell.orderId) },
+    };
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("profile-ladder-lock-first"),
+        clientOrderId: "plk_profile_ladder_lock_first" as ClientOrderId,
+        side: "sell",
+        price: 0.077,
+        tickSize: 0.001,
+        size: 5,
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: replacementMetadata,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("profile-ladder-lock-second"),
+        clientOrderId: "plk_profile_ladder_lock_second" as ClientOrderId,
+        side: "sell",
+        price: 0.077,
+        tickSize: 0.001,
+        size: 5,
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: replacementMetadata,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+    expect(rejected.some((event) => event.reason === "sell-replace-lock-active")).toBe(true);
+    await replaceMod.stop();
+  });
+
+  it("respects reprice-chain cap for ProfileLadder replacement commands", async () => {
+    const existingSell = openSellAt(0.111, {
+      signalReason: "profile-ladder-exit",
+      decisionRuleId: "PROFILE_LADDER",
+      metadata: { source: "profile_ladder" },
+    });
+    const nowIso = new Date().toISOString();
+    const legStateRepo = createMockLegStateRepo();
+    legStateRepo.get = vi.fn().mockReturnValue({
+      tokenId: createTokenId("tok-yes"),
+      buyCount: 1,
+      sellCount: 1,
+      lastAction: "SELL",
+      firstTradePrice: 0.3,
+      firstTradeAt: nowIso,
+      lastTradeAt: nowIso,
+      updatedAt: nowIso,
+      repriceChainEvents24hJson: JSON.stringify([nowIso]),
+      repriceChainCount24h: 1,
+    });
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      legStateRepo,
+      repriceChainPolicy: () => ({
+        enabled: true,
+        windowMs: 24 * 60 * 60 * 1000,
+        maxChainCount: 1,
+        dynamicChainCap: {
+          enabled: false,
+          tradeCountThinThreshold: 10,
+          tradeCountLiquidThreshold: 49,
+          capThin: 50,
+          capMedium: 30,
+          capLiquid: 13,
+          capUnknown: 30,
+        },
+      }),
+    });
+    await replaceMod.start();
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("profile-ladder-chain-cap"),
+        clientOrderId: "plk_profile_ladder_chain_cap" as ClientOrderId,
+        side: "sell",
+        price: 0.077,
+        tickSize: 0.001,
+        size: 5,
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: {
+          source: "profile_ladder",
+          profileLadderReplacement: { oldOrderId: String(existingSell.orderId) },
+        },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected[0].reason).toBe("sell-replace-chain-cap");
+    await replaceMod.stop();
+  });
+
+  it("does not re-enter sell replacement for resubmit commands carrying the cancelled oldOrderId", async () => {
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([
+      openSellAt(0.111, {
+        orderId: createOrderId("still-open-other-sell"),
+        exchangeOrderId: "still-open-other-sell",
+      }),
+    ]);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    await replaceMod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("profile-ladder-resubmit"),
+        clientOrderId: "plk_profile_ladder_resubmit" as ClientOrderId,
+        side: "sell",
+        price: 0.077,
+        tickSize: 0.001,
+        size: 5,
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: {
+          source: "profile_ladder",
+          profileLadderReplacement: { oldOrderId: "cancelled-old-order" },
+          sellReplacementCancelledOrderId: "cancelled-old-order",
+        },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    await replaceMod.stop();
+  });
+
+  it("does not resubmit a sell replacement when cancel succeeds but local order is missing", async () => {
+    const existingSell = openSellAt(0.55);
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+    orderRepo.findById = vi.fn().mockReturnValue(null);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    await replaceMod.start();
+    const cancelled: any[] = [];
+    bus.subscribe("OrderCancelled", async (p) => {
+      cancelled.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-replace-local-not-found"),
+        clientOrderId: "plk_sell_replace_local_not_found" as ClientOrderId,
+        side: "sell",
+        price: 0.44,
+        size: 5,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "existing-sell" });
+    expect(cancelled).toHaveLength(0);
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
     await replaceMod.stop();
   });
 
@@ -2406,6 +2887,7 @@ describe("ExecutionModule", () => {
       updatedAt: new Date().toISOString(),
     };
     orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+    orderRepo.findById = vi.fn().mockReturnValue(existingSell);
 
     const replaceMod = new ExecutionModule({
       gateway,
