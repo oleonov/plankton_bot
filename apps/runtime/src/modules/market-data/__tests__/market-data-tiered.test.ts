@@ -18,6 +18,7 @@ import type {
   MarketPricingStreamUpdate,
   MarketRepository,
   Market,
+  NormalizedMarket,
   Position,
   TrackedForPricing,
 } from "@krabs/domain";
@@ -357,6 +358,207 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
       source: "market-data",
     });
     expect(heartbeats[0]!.markets).toHaveLength(1);
+    expect(heartbeats[0]!.markets[0]).toMatchObject({
+      tokenId: createTokenId("crit-1"),
+      bestBid: 0.4,
+      bestAsk: 0.5,
+    });
+
+    await mod.stop();
+  });
+
+  it("hydrates active full-lifetime metadata without emitting a null-BBO heartbeat", async () => {
+    const tiered = makeTiered([], [], []);
+    const repo = createMockRepo(tiered);
+    repo.findByTokenId = vi.fn().mockReturnValue(makeMarket("orphan-active"));
+    const heartbeats: Array<{ markets: readonly NormalizedMarket[]; reason: string }> = [];
+    const missingReasons: string[] = [];
+    const hydratedReasons: string[] = [];
+    const skippedReasons: string[] = [];
+    bus.subscribe("MarketSnapshotHeartbeat", async (payload) => {
+      heartbeats.push(payload);
+    });
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      fullLifetimeSnapshots: {
+        enabled: true,
+        heartbeatMs: 5 * 60 * 1000,
+        postCloseGraceMs: 0,
+        activePositionTokenIds: () => [createTokenId("orphan-active")],
+        recordMissingMarket: (reason) => missingReasons.push(reason),
+        recordMarketCacheHydrated: (reason) => hydratedReasons.push(reason),
+        recordSkippedSnapshot: (reason) => skippedReasons.push(reason),
+      },
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(skippedReasons).toEqual(["metadata_only_no_book"]);
+    });
+
+    expect(repo.findByTokenId).toHaveBeenCalledWith(createTokenId("orphan-active"));
+    expect(heartbeats).toHaveLength(0);
+    expect(missingReasons).toEqual([]);
+    expect(hydratedReasons).toEqual(["cache_miss_hydrated"]);
+    expect(skippedReasons).toEqual(["metadata_only_no_book"]);
+    expect(silentLog.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining("full-lifetime snapshot"),
+    );
+
+    await mod.stop();
+  });
+
+  it("continues full-lifetime heartbeat when one market lookup throws", async () => {
+    const tiered = makeTiered(["cache-ok"], [], []);
+    const repo = createMockRepo(tiered);
+    const pricing = new Map<string, MarketPricingSnapshot>([["cache-ok", makePricing()]]);
+    gateway.getMarketPricing = vi.fn().mockResolvedValue(pricing);
+    repo.findByTokenId = vi.fn((tokenId) => {
+      if (String(tokenId) === "lookup-throws") {
+        throw new Error("sqlite interrupted");
+      }
+      return makeMarket(String(tokenId));
+    });
+    const heartbeats: Array<{ markets: readonly NormalizedMarket[]; reason: string }> = [];
+    const missingReasons: string[] = [];
+    bus.subscribe("MarketSnapshotHeartbeat", async (payload) => {
+      heartbeats.push(payload);
+    });
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      fullLifetimeSnapshots: {
+        enabled: true,
+        heartbeatMs: 5 * 60 * 1000,
+        postCloseGraceMs: 0,
+        activePositionTokenIds: () => [createTokenId("lookup-throws"), createTokenId("cache-ok")],
+        recordMissingMarket: (reason) => missingReasons.push(reason),
+      },
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(missingReasons).toEqual(["market_lookup_error"]);
+    });
+    await mod.poll();
+    await vi.waitFor(() => {
+      expect(heartbeats).toHaveLength(1);
+    });
+
+    expect(heartbeats[0]!.markets).toHaveLength(1);
+    expect(heartbeats[0]!.markets[0]!.tokenId).toBe(createTokenId("cache-ok"));
+    expect(missingReasons).toEqual(["market_lookup_error"]);
+    expect(silentLog.warn).toHaveBeenCalledTimes(1);
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: "market_lookup_error",
+      }),
+      "full-lifetime snapshot active position token missing market cache",
+    );
+
+    await mod.stop();
+  });
+
+  it("does not warn-storm inactive full-lifetime tokens missing from the cache", async () => {
+    const tiered = makeTiered([], [], []);
+    const repo = createMockRepo(tiered);
+    repo.findByTokenId = vi
+      .fn()
+      .mockReturnValue(makeMarket("inactive-token", { active: false, tradable: false }));
+    const heartbeats: Array<{ markets: readonly NormalizedMarket[] }> = [];
+    const missingReasons: string[] = [];
+    const skippedReasons: string[] = [];
+    bus.subscribe("MarketSnapshotHeartbeat", async (payload) => {
+      heartbeats.push(payload);
+    });
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      fullLifetimeSnapshots: {
+        enabled: true,
+        heartbeatMs: 5 * 60 * 1000,
+        postCloseGraceMs: 0,
+        activePositionTokenIds: () => [createTokenId("inactive-token")],
+        recordMissingMarket: (reason) => missingReasons.push(reason),
+        recordSkippedSnapshot: (reason) => skippedReasons.push(reason),
+      },
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(skippedReasons).toEqual(["inactive_or_untradable"]);
+    });
+    await mod.poll();
+
+    expect(heartbeats).toHaveLength(0);
+    expect(missingReasons).toEqual([]);
+    expect(skippedReasons).toEqual(["inactive_or_untradable"]);
+    expect(silentLog.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining("full-lifetime snapshot"),
+    );
+
+    await mod.stop();
+  });
+
+  it("keeps missing market rows bounded and warning-rate-limited", async () => {
+    const tiered = makeTiered([], [], []);
+    const repo = createMockRepo(tiered);
+    repo.findByTokenId = vi.fn().mockReturnValue(null);
+    const missingReasons: string[] = [];
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      fullLifetimeSnapshots: {
+        enabled: true,
+        heartbeatMs: 5 * 60 * 1000,
+        postCloseGraceMs: 0,
+        activePositionTokenIds: () => [createTokenId("missing-market-row")],
+        recordMissingMarket: (reason) => missingReasons.push(reason),
+      },
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(missingReasons).toEqual(["market_row_missing"]);
+    });
+    await mod.poll();
+
+    expect(missingReasons).toEqual(["market_row_missing"]);
+    expect(silentLog.warn).toHaveBeenCalledTimes(1);
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokenId: "missing-market-row",
+        reason: "market_row_missing",
+      }),
+      "full-lifetime snapshot active position token missing market cache",
+    );
 
     await mod.stop();
   });

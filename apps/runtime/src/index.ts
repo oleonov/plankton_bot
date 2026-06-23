@@ -822,9 +822,23 @@ async function main(): Promise<void> {
       heartbeatMs: 5 * 60 * 1000,
       postCloseGraceMs: 0,
       activePositionTokenIds: () =>
-        findActivePositions(repos.position).map((position) => position.tokenId),
-      recordMissingMarket: (tokenId) => {
-        runtimeMetrics.writeCounter("full_lifetime_missing_market", 1, JSON.stringify({ tokenId }));
+        repos.position.findOpen().map((position) => position.tokenId),
+      recordMissingMarket: (reason) => {
+        runtimeMetrics.writeCounter("full_lifetime_missing_market", 1, JSON.stringify({ reason }));
+      },
+      recordMarketCacheHydrated: (reason) => {
+        runtimeMetrics.writeCounter(
+          "full_lifetime_market_cache_hydrated_total",
+          1,
+          JSON.stringify({ reason }),
+        );
+      },
+      recordSkippedSnapshot: (reason) => {
+        runtimeMetrics.writeCounter(
+          "full_lifetime_snapshot_skipped_total",
+          1,
+          JSON.stringify({ reason }),
+        );
       },
     },
     bookSignals: {

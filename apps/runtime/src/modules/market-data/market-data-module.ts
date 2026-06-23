@@ -251,7 +251,9 @@ export interface MarketDataModuleDeps {
     heartbeatMs: number;
     postCloseGraceMs: number;
     activePositionTokenIds: () => readonly TokenId[];
-    recordMissingMarket?: (tokenId: string) => void;
+    recordMissingMarket?: (reason: FullLifetimeMarketCacheMissReason) => void;
+    recordMarketCacheHydrated?: (reason: FullLifetimeMarketCacheHydratedReason) => void;
+    recordSkippedSnapshot?: (reason: FullLifetimeSnapshotSkipReason) => void;
   };
   /**
    * Optional pause gate. When the runtime is paused, periodic poll and
@@ -284,6 +286,14 @@ export interface MarketDataModuleDeps {
     invalidateTokenIds?: (tokenIds: readonly string[]) => void;
   };
 }
+
+type FullLifetimeMarketCacheMissReason =
+  | "market_lookup_error"
+  | "market_row_missing";
+
+type FullLifetimeMarketCacheHydratedReason = "cache_miss_hydrated";
+
+type FullLifetimeSnapshotSkipReason = "inactive_or_untradable" | "metadata_only_no_book";
 
 export class MarketDataModule implements RuntimeModule {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -354,6 +364,9 @@ export class MarketDataModule implements RuntimeModule {
   private readonly fullLifetimePostCloseUntilByToken = new Map<string, number>();
   private readonly fullLifetimeLastHeartbeatAtByToken = new Map<string, number>();
   private readonly fullLifetimeMissingMarketLoggedAtByToken = new Map<string, number>();
+  private readonly fullLifetimeMarketCacheHydratedLoggedAtByToken = new Map<string, number>();
+  private readonly fullLifetimeSkippedSnapshotLoggedAtByToken = new Map<string, number>();
+  private readonly fullLifetimeMetadataOnlyTokenIds = new Set<string>();
   private fullLifetimePollTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly unsubscribers: Array<() => void> = [];
   /**
@@ -911,6 +924,7 @@ export class MarketDataModule implements RuntimeModule {
         const nextMarket = applyPricingSnapshot(baseMarket, pricing, now);
         this.lastPricingUpdateAtByToken.set(tokenKey, now);
         this.marketCache.set(tokenKey, nextMarket);
+        this.fullLifetimeMetadataOnlyTokenIds.delete(tokenKey);
         const lastPublished = this.lastPublishedMarketByToken.get(tokenKey) ?? null;
         if (lastPublished == null || didMarketPricingChange(lastPublished, nextMarket)) {
           changedMarkets.push(nextMarket);
@@ -1334,6 +1348,7 @@ export class MarketDataModule implements RuntimeModule {
         const nextMarket = applyStreamUpdate(current, update, nowMs);
         this.lastPricingUpdateAtByToken.set(tokenKey, nowMs);
         this.marketCache.set(tokenKey, nextMarket);
+        this.fullLifetimeMetadataOnlyTokenIds.delete(tokenKey);
         const lastPublished = this.lastPublishedMarketByToken.get(tokenKey) ?? null;
         if (lastPublished == null || didMarketPricingChange(lastPublished, nextMarket)) {
           changedMarkets.push(nextMarket);
@@ -1481,6 +1496,9 @@ export class MarketDataModule implements RuntimeModule {
       if (nextTokenIds.has(tokenId)) continue;
       this.trackedMarketsByToken.delete(tokenId);
       this.marketCache.delete(tokenId);
+      this.fullLifetimeMetadataOnlyTokenIds.delete(tokenId);
+      this.fullLifetimeMarketCacheHydratedLoggedAtByToken.delete(tokenId);
+      this.fullLifetimeSkippedSnapshotLoggedAtByToken.delete(tokenId);
       this.latestOrderBookByToken.delete(tokenId);
       this.lastPublishedMarketByToken.delete(tokenId);
       this.lastPricingUpdateAtByToken.delete(tokenId);
@@ -1491,7 +1509,12 @@ export class MarketDataModule implements RuntimeModule {
     // Keep these maps bounded to the WS tier — discovery snapshots are
     // published on the fly and must not leave residue here.
     for (const tokenId of [...this.marketCache.keys()]) {
-      if (!nextTokenIds.has(tokenId)) this.marketCache.delete(tokenId);
+      if (!nextTokenIds.has(tokenId)) {
+        this.marketCache.delete(tokenId);
+        this.fullLifetimeMetadataOnlyTokenIds.delete(tokenId);
+        this.fullLifetimeMarketCacheHydratedLoggedAtByToken.delete(tokenId);
+        this.fullLifetimeSkippedSnapshotLoggedAtByToken.delete(tokenId);
+      }
     }
     for (const tokenId of [...this.latestOrderBookByToken.keys()]) {
       if (!nextTokenIds.has(tokenId)) this.latestOrderBookByToken.delete(tokenId);
@@ -1650,6 +1673,9 @@ export class MarketDataModule implements RuntimeModule {
     if (!wasActive) return;
     this.fullLifetimeActiveTokenIds.delete(tokenId);
     this.fullLifetimeLastHeartbeatAtByToken.delete(tokenId);
+    this.fullLifetimeMarketCacheHydratedLoggedAtByToken.delete(tokenId);
+    this.fullLifetimeSkippedSnapshotLoggedAtByToken.delete(tokenId);
+    this.fullLifetimeMetadataOnlyTokenIds.delete(tokenId);
     const postCloseGraceMs = this.deps.fullLifetimeSnapshots?.postCloseGraceMs ?? 0;
     if (postCloseGraceMs > 0) {
       this.fullLifetimePostCloseUntilByToken.set(tokenId, Date.now() + postCloseGraceMs);
@@ -1668,6 +1694,9 @@ export class MarketDataModule implements RuntimeModule {
       this.fullLifetimePostCloseUntilByToken.delete(tokenKey);
     this.fullLifetimeLastHeartbeatAtByToken.delete(tokenKey);
     this.fullLifetimeMissingMarketLoggedAtByToken.delete(tokenKey);
+    this.fullLifetimeMarketCacheHydratedLoggedAtByToken.delete(tokenKey);
+    this.fullLifetimeSkippedSnapshotLoggedAtByToken.delete(tokenKey);
+    this.fullLifetimeMetadataOnlyTokenIds.delete(tokenKey);
     if (hadState) {
       this.invalidateTieredPricingCache("full-lifetime-position-settled");
     }
@@ -1700,9 +1729,8 @@ export class MarketDataModule implements RuntimeModule {
     const booksByToken = new Map<string, OrderBookSnapshot>();
     for (const tokenId of tokenIds) {
       if (realChangedTokenIds.has(tokenId)) continue;
-      const market = this.marketCache.get(tokenId);
+      const market = this.resolveFullLifetimeHeartbeatMarket(tokenId, timestamp);
       if (market == null) {
-        this.recordFullLifetimeMissingMarket(tokenId, timestamp);
         continue;
       }
       const lastHeartbeatAt = this.fullLifetimeLastHeartbeatAtByToken.get(tokenId);
@@ -1742,13 +1770,90 @@ export class MarketDataModule implements RuntimeModule {
     return [...tokenIds];
   }
 
-  private recordFullLifetimeMissingMarket(tokenId: string, nowMs: number): void {
+  private resolveFullLifetimeHeartbeatMarket(
+    tokenId: string,
+    nowMs: number,
+  ): NormalizedMarket | null {
+    const cached = this.marketCache.get(tokenId);
+    if (cached != null) {
+      if (this.fullLifetimeMetadataOnlyTokenIds.has(tokenId) && !hasLivePricing(cached)) {
+        this.recordFullLifetimeSkippedSnapshot(tokenId, nowMs, "metadata_only_no_book");
+        return null;
+      }
+      return cached;
+    }
+
+    let persisted: Market | null;
+    try {
+      persisted = this.deps.marketRepo.findByTokenId(createTokenId(tokenId));
+    } catch (err) {
+      this.recordFullLifetimeMissingMarket(tokenId, nowMs, "market_lookup_error", err);
+      return null;
+    }
+    if (persisted == null) {
+      this.recordFullLifetimeMissingMarket(tokenId, nowMs, "market_row_missing");
+      return null;
+    }
+    if (!persisted.active || !persisted.tradable) {
+      this.recordFullLifetimeSkippedSnapshot(tokenId, nowMs, "inactive_or_untradable");
+      return null;
+    }
+
+    const hydrated = syncTrackedMarket(null, persisted, nowMs);
+    this.marketCache.set(tokenId, hydrated);
+    this.fullLifetimeMetadataOnlyTokenIds.add(tokenId);
+    this.recordFullLifetimeMarketCacheHydrated(tokenId, nowMs, "cache_miss_hydrated");
+    this.recordFullLifetimeSkippedSnapshot(tokenId, nowMs, "metadata_only_no_book");
+    return null;
+  }
+
+  private recordFullLifetimeMissingMarket(
+    tokenId: string,
+    nowMs: number,
+    reason: FullLifetimeMarketCacheMissReason,
+    err?: unknown,
+  ): void {
     const lastLoggedAt = this.fullLifetimeMissingMarketLoggedAtByToken.get(tokenId);
     const throttleMs = Math.max(this.deps.fullLifetimeSnapshots?.heartbeatMs ?? 0, 60_000);
     if (lastLoggedAt !== undefined && nowMs - lastLoggedAt < throttleMs) return;
     this.fullLifetimeMissingMarketLoggedAtByToken.set(tokenId, nowMs);
-    this.deps.fullLifetimeSnapshots?.recordMissingMarket?.(tokenId);
-    this.log.warn({ tokenId }, "full-lifetime snapshot active position token missing market cache");
+    this.deps.fullLifetimeSnapshots?.recordMissingMarket?.(reason);
+    this.log.warn(
+      { tokenId, reason, err },
+      "full-lifetime snapshot active position token missing market cache",
+    );
+  }
+
+  private recordFullLifetimeMarketCacheHydrated(
+    tokenId: string,
+    nowMs: number,
+    reason: FullLifetimeMarketCacheHydratedReason,
+  ): void {
+    const lastLoggedAt = this.fullLifetimeMarketCacheHydratedLoggedAtByToken.get(tokenId);
+    const throttleMs = Math.max(this.deps.fullLifetimeSnapshots?.heartbeatMs ?? 0, 60_000);
+    if (lastLoggedAt !== undefined && nowMs - lastLoggedAt < throttleMs) return;
+    this.fullLifetimeMarketCacheHydratedLoggedAtByToken.set(tokenId, nowMs);
+    this.deps.fullLifetimeSnapshots?.recordMarketCacheHydrated?.(reason);
+    this.log.debug(
+      { tokenId, reason },
+      "full-lifetime snapshot active position token market cache hydrated",
+    );
+  }
+
+  private recordFullLifetimeSkippedSnapshot(
+    tokenId: string,
+    nowMs: number,
+    reason: FullLifetimeSnapshotSkipReason,
+  ): void {
+    const lastLoggedAt = this.fullLifetimeSkippedSnapshotLoggedAtByToken.get(tokenId);
+    const throttleMs = Math.max(this.deps.fullLifetimeSnapshots?.heartbeatMs ?? 0, 60_000);
+    if (lastLoggedAt !== undefined && nowMs - lastLoggedAt < throttleMs) return;
+    this.fullLifetimeSkippedSnapshotLoggedAtByToken.set(tokenId, nowMs);
+    this.deps.fullLifetimeSnapshots?.recordSkippedSnapshot?.(reason);
+    this.log.debug(
+      { tokenId, reason },
+      "full-lifetime snapshot active position token skipped metadata-only heartbeat",
+    );
   }
 
   private async publishCachedMarkets(tracked: readonly Market[], nowMs: number): Promise<void> {
@@ -2081,4 +2186,8 @@ function syncTrackedMarket(
     // soft-ranking-score subscriber can filter without DB round-trip.
     selectionStatus: tracked.selectionStatus ?? null,
   };
+}
+
+function hasLivePricing(market: NormalizedMarket): boolean {
+  return market.bestBid != null || market.bestAsk != null;
 }
