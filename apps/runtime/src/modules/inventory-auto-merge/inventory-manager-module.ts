@@ -11,6 +11,9 @@ import type {
 } from "@krabs/domain";
 import type Database from "better-sqlite3";
 import type { Logger } from "../../logger.js";
+import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
+import type { SettlementInfraBreaker } from "../settlement-infra-breaker.js";
+import { isSettlementInfraRateLimitError } from "../settlement-infra-breaker.js";
 import { MergeCandidateService } from "./merge-candidate-service.js";
 import { MergeSettler } from "./merge-settler.js";
 
@@ -25,6 +28,8 @@ export interface InventoryManagerDeps {
   mergeLedgerRepo: MergeLedgerRepository;
   db: Database.Database;
   log: Logger;
+  runtimeMetrics?: RuntimeMetricWriter | undefined;
+  settlementInfraBreaker?: SettlementInfraBreaker | undefined;
   sweepIntervalMs?: number | null | undefined;
   /**
    * Optional pause gate. When the runtime is paused, periodic and
@@ -116,6 +121,18 @@ export class InventoryManagerModule implements RuntimeModule {
       // so the ledger MUST follow to stay consistent with on-chain state —
       // skipping the ledger application after pause would leak inventory and
       // cause permanent drift. We pause-check before the on-chain write.
+      const infraPause = this.deps.settlementInfraBreaker?.current();
+      if (infraPause) {
+        this.deps.log.warn(
+          { code: infraPause.code, until: infraPause.until },
+          "inventory manager merge skipped by settlement infra breaker",
+        );
+        this.recordBoundedMetricCounter("inventory_merge_suppressed_settlement_breaker_total", {
+          code: infraPause.code,
+        });
+        return;
+      }
+
       await this.deps.gateway.mergePositions(
         candidates.map((c) => ({
           conditionId: c.conditionId,
@@ -149,9 +166,24 @@ export class InventoryManagerModule implements RuntimeModule {
         }
       }
     } catch (e) {
+      if (isSettlementInfraRateLimitError(e)) {
+        this.deps.settlementInfraBreaker?.pause("POLYGON_RPC_RATE_LIMITED", e);
+        this.recordBoundedMetricCounter("inventory_merge_settlement_rate_limited_total", {
+          code: "POLYGON_RPC_RATE_LIMITED",
+        });
+      }
       this.deps.log.error({ err: String(e) }, "inventory manager sweep failed");
     } finally {
       this.isSweeping = false;
     }
+  }
+
+  private recordBoundedMetricCounter(metricName: string, labels: Record<string, unknown>): void {
+    const serializedLabels = JSON.stringify(labels);
+    if (this.deps.runtimeMetrics?.writeCounter) {
+      this.deps.runtimeMetrics.writeCounter(metricName, 1, serializedLabels);
+      return;
+    }
+    this.deps.runtimeMetrics?.writeEvent(metricName, 1, serializedLabels);
   }
 }

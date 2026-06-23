@@ -34,6 +34,7 @@ import { inferResolution, parseTokenIds } from "./resolution-detector.js";
 import type { PositionSettler } from "./position-settler.js";
 import type { Logger } from "../../logger.js";
 import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
+import type { SettlementInfraBreaker } from "../settlement-infra-breaker.js";
 
 function normalizeOutcomeLabel(value: string): string {
   return value.trim().toLowerCase();
@@ -130,6 +131,7 @@ export interface ResolutionModuleDeps {
    */
   runtimeControl?: RuntimeControl;
   runtimeMetrics?: ResolutionRuntimeMetrics;
+  settlementInfraBreaker?: SettlementInfraBreaker | undefined;
 }
 
 export class ResolutionModule implements RuntimeModule {
@@ -1013,6 +1015,15 @@ export class ResolutionModule implements RuntimeModule {
       return "deferred";
     }
 
+    const infraPause = this.deps.settlementInfraBreaker?.current();
+    if (infraPause) {
+      this.deps.log.warn(
+        { conditionId, code: infraPause.code, until: infraPause.until },
+        "resolution on-chain redeem suppressed by settlement infra breaker",
+      );
+      return "deferred";
+    }
+
     const result = await this.submitRedeemAttempt(conditionId, redeemTokenIds);
     if (!result.ok) {
       const err = summarizeError(result.err);
@@ -1038,6 +1049,17 @@ export class ResolutionModule implements RuntimeModule {
     conditionId: string,
     redeemTokenIds?: readonly TokenId[],
   ): Promise<{ readonly ok: true } | { readonly ok: false; readonly err: unknown }> {
+    const infraPause = this.deps.settlementInfraBreaker?.current();
+    if (infraPause) {
+      this.deps.log.warn(
+        { conditionId, code: infraPause.code, until: infraPause.until },
+        "resolution on-chain redeem suppressed by settlement infra breaker",
+      );
+      return {
+        ok: false,
+        err: new Error(`settlement infra breaker open: ${infraPause.code}`),
+      };
+    }
     try {
       const options = redeemTokenIds
         ? { redeemTokenIdsByCondition: { [conditionId]: redeemTokenIds } }

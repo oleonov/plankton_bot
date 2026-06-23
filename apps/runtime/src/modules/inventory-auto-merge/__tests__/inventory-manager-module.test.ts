@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { InventoryManagerModule } from "../inventory-manager-module.js";
+import { SettlementInfraBreaker } from "../../settlement-infra-breaker.js";
 import type {
   EventBus,
   ExchangeGateway,
@@ -22,6 +23,7 @@ describe("InventoryManagerModule", () => {
   let mergeLedgerRepo: MergeLedgerRepository;
   let db: any;
   let log: Logger;
+  let runtimeMetrics: any;
   let mod: InventoryManagerModule;
 
   beforeEach(() => {
@@ -41,7 +43,8 @@ describe("InventoryManagerModule", () => {
       prepare: vi.fn().mockReturnValue({ run: vi.fn() }),
       transaction: vi.fn((cb) => cb),
     } as any;
-    log = { info: vi.fn(), error: vi.fn(), debug: vi.fn() } as any;
+    log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as any;
+    runtimeMetrics = { writeCounter: vi.fn(), writeEvent: vi.fn() };
 
     mod = new InventoryManagerModule({
       bus,
@@ -54,10 +57,11 @@ describe("InventoryManagerModule", () => {
       mergeLedgerRepo,
       db,
       log,
+      runtimeMetrics,
     });
   });
 
-  it("finds and executes merges during sweep", async () => {
+  function makeMergeableInventory(): { condId: string } {
     const yesToken = "tok-yes";
     const noToken = "tok-no";
     const condId = "cond-1";
@@ -99,10 +103,113 @@ describe("InventoryManagerModule", () => {
     });
     (lotRepo.consumeFifo as any).mockReturnValue([{ lot: { entryPrice: 0.5 }, consumed: 100 }]);
 
+    return { condId };
+  }
+
+  it("finds and executes merges during sweep", async () => {
+    const { condId } = makeMergeableInventory();
+
     await mod.sweep();
 
     expect(gateway.mergePositions).toHaveBeenCalledWith([{ conditionId: condId, amount: 100 }]);
     expect(bus.publish).toHaveBeenCalledWith("PositionUpdated", expect.anything());
+  });
+
+  it("does not call mergePositions while the shared settlement breaker is open", async () => {
+    makeMergeableInventory();
+    const breaker = new SettlementInfraBreaker({ now: () => 1_000 });
+    breaker.pause("POLYGON_RPC_RATE_LIMITED", new Error("quota exceeded, resets in 600 seconds"));
+    const guarded = new InventoryManagerModule({
+      bus,
+      gateway,
+      positionRepo,
+      orderRepo,
+      marketRepo,
+      fillRepo,
+      lotRepo,
+      mergeLedgerRepo,
+      db,
+      log,
+      runtimeMetrics,
+      settlementInfraBreaker: breaker,
+    });
+
+    await guarded.sweep();
+
+    expect(gateway.mergePositions).not.toHaveBeenCalled();
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "inventory_merge_suppressed_settlement_breaker_total",
+      1,
+      JSON.stringify({ code: "POLYGON_RPC_RATE_LIMITED" }),
+    );
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "POLYGON_RPC_RATE_LIMITED" }),
+      "inventory manager merge skipped by settlement infra breaker",
+    );
+  });
+
+  it("resumes merge attempts after the shared settlement breaker closes", async () => {
+    const { condId } = makeMergeableInventory();
+    let now = 1_000;
+    const breaker = new SettlementInfraBreaker({ now: () => now });
+    breaker.pause("POLYGON_RPC_RATE_LIMITED", new Error("quota exceeded, resets in 600 seconds"));
+    now = 601_001;
+    const guarded = new InventoryManagerModule({
+      bus,
+      gateway,
+      positionRepo,
+      orderRepo,
+      marketRepo,
+      fillRepo,
+      lotRepo,
+      mergeLedgerRepo,
+      db,
+      log,
+      runtimeMetrics,
+      settlementInfraBreaker: breaker,
+    });
+
+    await guarded.sweep();
+
+    expect(gateway.mergePositions).toHaveBeenCalledWith([{ conditionId: condId, amount: 100 }]);
+  });
+
+  it("opens the shared settlement breaker when mergePositions throws a rate-limit error", async () => {
+    makeMergeableInventory();
+    let now = 1_000;
+    const breaker = new SettlementInfraBreaker({ now: () => now });
+    (gateway.mergePositions as any).mockRejectedValueOnce(
+      new Error(
+        '{"error":"request error","status":429,"data":{"error":"quota exceeded: 0 units remaining, resets in 600 seconds"}}',
+      ),
+    );
+    const guarded = new InventoryManagerModule({
+      bus,
+      gateway,
+      positionRepo,
+      orderRepo,
+      marketRepo,
+      fillRepo,
+      lotRepo,
+      mergeLedgerRepo,
+      db,
+      log,
+      runtimeMetrics,
+      settlementInfraBreaker: breaker,
+    });
+
+    await guarded.sweep();
+
+    expect(gateway.mergePositions).toHaveBeenCalledTimes(1);
+    expect(breaker.isOpen()).toBe(true);
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "inventory_merge_settlement_rate_limited_total",
+      1,
+      JSON.stringify({ code: "POLYGON_RPC_RATE_LIMITED" }),
+    );
+
+    now = 601_001;
+    expect(breaker.isOpen()).toBe(false);
   });
 
   it("skips sweep while the runtime is paused", async () => {

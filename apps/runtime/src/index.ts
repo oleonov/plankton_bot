@@ -205,6 +205,7 @@ import { SamePriceCooldownModule } from "./modules/same-price-cooldown/same-pric
 import { CooldownRegistry } from "./modules/same-price-cooldown/cooldown-registry.js";
 import { SignalPathTelemetry } from "./modules/strategy/signal-path-telemetry.js";
 import { RedeemSweepModule } from "./modules/redeem-sweep/redeem-sweep-module.js";
+import { SettlementInfraBreaker } from "./modules/settlement-infra-breaker.js";
 import { buildRuntimeDiagnosticsSnapshot } from "./runtime-diagnostics.js";
 import { isGatewayOrderReject } from "./order-rejection-classification.js";
 import {
@@ -486,6 +487,7 @@ async function main(): Promise<void> {
   // so the BUY-admission fail-closed path can report through the standard
   // `infra_alert` channel (surfaced in /status and the web banner).
   const runtimeMetrics = new RuntimeMetricWriter(ledgerConn.db);
+  const settlementInfraBreaker = new SettlementInfraBreaker();
   // Aggregated counter flush — high-frequency `*_total` metrics buffer in
   // memory and persist as one row per (name, labels) pair every 30s. Keeps
   // total runtime_metrics write rate from dominating SQLite disk I/O.
@@ -498,6 +500,9 @@ async function main(): Promise<void> {
     details?: Record<string, unknown> | undefined;
   }): void => {
     const now = new Date().toISOString();
+    if (alert.code === "POLYGON_RPC_RATE_LIMITED") {
+      settlementInfraBreaker.pause(alert.code, alert.details?.rawMessage);
+    }
     runtimeMetrics.writeEvent("infra_alert", 1, JSON.stringify(alert), now);
     redeemSweepModule?.notifySettlementInfraAlert(alert.code);
     log.warn({ alert }, "runtime infra alert recorded");
@@ -1605,6 +1610,7 @@ async function main(): Promise<void> {
     checkIntervalMs: 5 * 60_000, // 5 minutes
     graceMinutes: 30,
     runtimeControl,
+    settlementInfraBreaker,
     // In live-lite mode, provide the exchange gateway so the resolution module
     // verifies on-chain token balance is 0 before settling in the ledger.
     // In simulation/paper modes, no gateway is needed (no on-chain state).
@@ -1629,6 +1635,7 @@ async function main(): Promise<void> {
           log,
           runtimeMetrics,
           runtimeControl,
+          settlementInfraBreaker,
         })
       : null;
 
@@ -1647,6 +1654,8 @@ async function main(): Promise<void> {
         mergeLedgerRepo: repos.mergeLedger,
         db: ledgerConn.db,
         log,
+        runtimeMetrics,
+        settlementInfraBreaker,
         sweepIntervalMs: config.inventorySweepIntervalMs,
         runtimeControl,
       })

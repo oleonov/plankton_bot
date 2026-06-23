@@ -3,6 +3,7 @@ import { InProcessEventBus } from "@krabs/event-bus";
 import { createConditionId, createPositionId, createTokenId, type Position } from "@krabs/domain";
 import { RedeemSweepModule } from "../redeem-sweep-module.js";
 import { DEFAULT_EXECUTION_POLICY } from "../../../execution-policy.js";
+import { SettlementInfraBreaker } from "../../settlement-infra-breaker.js";
 
 const NOW = Date.parse("2026-05-11T00:00:00.000Z");
 const TOKEN = "tok-1";
@@ -162,6 +163,7 @@ function makeHarness(
     openOrders?: any[];
     runtimeControl?: { isPaused: () => boolean };
     quarantineStates?: Parameters<typeof makeRedeemQuarantineRepo>[0];
+    settlementInfraBreaker?: SettlementInfraBreaker;
   } = {},
 ) {
   const bus = new InProcessEventBus();
@@ -297,6 +299,7 @@ function makeHarness(
     log,
     runtimeMetrics: runtimeMetrics as any,
     now: () => Date.now(),
+    ...(opts.settlementInfraBreaker ? { settlementInfraBreaker: opts.settlementInfraBreaker } : {}),
     ...(opts.runtimeControl ? { runtimeControl: opts.runtimeControl } : {}),
   });
   return {
@@ -1048,6 +1051,38 @@ describe("RedeemSweepModule", () => {
     await vi.advanceTimersByTimeAsync(5 * 60_000);
     await runSweepForTest(h.module, "after-infra-alert");
     expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+  });
+
+  it("coalesces wallet-event sweeps while the shared settlement breaker is open", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const breaker = new SettlementInfraBreaker({ now: () => Date.now() });
+    const h = makeHarness({ settlementInfraBreaker: breaker });
+    await h.module.start();
+    vi.mocked(h.gateway.redeemPositions).mockClear();
+    vi.mocked(h.runtimeMetrics.writeEvent).mockClear();
+
+    breaker.pause(
+      "POLYGON_RPC_RATE_LIMITED",
+      new Error(
+        '{"error":"request error","status":429,"data":{"error":"quota exceeded: 0 units remaining, resets in 600 seconds"}}',
+      ),
+    );
+    await h.bus.publish("PolymarketWalletUpdated", walletUpdateEvent());
+    await h.bus.publish("PolymarketWalletUpdated", walletUpdateEvent());
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+    const suppressed = vi
+      .mocked(h.runtimeMetrics.writeEvent)
+      .mock.calls.filter((call) => call[0] === "redeem_sweep_async_suppressed_hard_pause_total");
+    expect(suppressed).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await h.bus.publish("PolymarketWalletUpdated", walletUpdateEvent());
+    const afterWindow = vi
+      .mocked(h.runtimeMetrics.writeEvent)
+      .mock.calls.filter((call) => call[0] === "redeem_sweep_async_suppressed_hard_pause_total");
+    expect(afterWindow).toHaveLength(2);
   });
 
   it("treats null verification reads as transient and empty reads as verified zero", async () => {

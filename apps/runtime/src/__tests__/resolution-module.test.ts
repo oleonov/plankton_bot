@@ -19,6 +19,7 @@ import type {
   ResolutionCandidate,
 } from "../modules/resolution/resolution-detector.js";
 import type { PositionSettler, SettledPosition } from "../modules/resolution/position-settler.js";
+import { SettlementInfraBreaker } from "../modules/settlement-infra-breaker.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -242,7 +243,10 @@ describe("ResolutionModule", () => {
   let mockDb: ReturnType<typeof createMockDb>;
   let mod: ResolutionModule;
 
-  function createModule(overrides?: { gateway?: ExchangeGateway }) {
+  function createModule(overrides?: {
+    gateway?: ExchangeGateway;
+    settlementInfraBreaker?: SettlementInfraBreaker;
+  }) {
     return new ResolutionModule({
       detector: detector as unknown as ResolutionDetector,
       settler: settler as unknown as PositionSettler,
@@ -259,6 +263,9 @@ describe("ResolutionModule", () => {
       checkIntervalMs: 60_000,
       graceMinutes: 30,
       ...(overrides?.gateway ? { gateway: overrides.gateway } : {}),
+      ...(overrides?.settlementInfraBreaker
+        ? { settlementInfraBreaker: overrides.settlementInfraBreaker }
+        : {}),
     });
   }
 
@@ -1605,6 +1612,36 @@ describe("ResolutionModule", () => {
 
       expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION]);
       expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([CONDITION]);
+    });
+
+    it("does not call gateway while the shared settlement infra breaker is open", async () => {
+      const gateway = createMockGateway();
+      const breaker = new SettlementInfraBreaker({ now: () => Date.now() });
+      breaker.pause(
+        "POLYGON_RPC_RATE_LIMITED",
+        new Error(
+          '{"error":"request error","status":429,"data":{"error":"quota exceeded: 0 units remaining, resets in 600 seconds"}}',
+        ),
+      );
+      mod = createModule({ gateway, settlementInfraBreaker: breaker });
+
+      const settled = [makeSettledPosition({ resolution: "algo-redeem", settlementPrice: 0 })];
+      (settler.settleAlgoRedeem as any).mockReturnValue(settled);
+
+      await mod.start();
+      await bus.publish("RedeemRequested", {
+        conditionIds: [CONDITION],
+        timestamp: Date.now(),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await mod.stop();
+
+      expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
+      expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
+      expect(log.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ conditionId: CONDITION, code: "POLYGON_RPC_RATE_LIMITED" }),
+        "resolution on-chain redeem suppressed by settlement infra breaker",
+      );
     });
 
     it("does not settle locally when on-chain redeem throws", async () => {

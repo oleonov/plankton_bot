@@ -22,6 +22,11 @@ import type {
   SqliteRedeemLogRepository,
   SqliteRedeemQuarantineRepository,
 } from "@krabs/db";
+import type { SettlementInfraBreaker } from "../settlement-infra-breaker.js";
+import {
+  isSettlementInfraRateLimitError,
+  parseRpcRateLimitResetMs,
+} from "../settlement-infra-breaker.js";
 
 const REDEEM_BATCH_SIZE = 9;
 const REDEEM_BATCH_PAUSE_MS = 5 * 60_000;
@@ -30,11 +35,11 @@ const STATE_FAILED_COOLDOWN_MS = 30 * 60_000;
 const STABILITY_SNAPSHOTS_REQUIRED = 2;
 const PAUSE_DEFER_RECHECK_MS = 30_000;
 const DEPOSIT_ACTIVATION_PERIODIC_COOLDOWN_MS = 60 * 60_000;
-const SECOND_MS = 1_000;
 const HOUR_MS = 60 * 60_000;
 const DEFAULT_STATE_FAILED_QUARANTINE_THRESHOLD = 5;
 const DEFAULT_STATE_FAILED_QUARANTINE_TTL_HOURS = 24;
 const ASYNC_SWEEP_QUEUE_MAX_DEPTH = 16;
+const HARD_PAUSE_WALLET_EVENT_COALESCE_MS = 60_000;
 
 interface RedeemSweepDeps {
   bus: EventBus;
@@ -51,6 +56,7 @@ interface RedeemSweepDeps {
   log: Logger;
   runtimeMetrics?: RuntimeMetricWriter | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
+  settlementInfraBreaker?: SettlementInfraBreaker | undefined;
   now?: () => number;
   /**
    * Optional pause gate. When the runtime is paused, periodic and
@@ -105,6 +111,7 @@ export class RedeemSweepModule implements RuntimeModule {
   private started = false;
   private pendingOrphanMarking = false;
   private lastActivationAttemptAt = 0;
+  private lastHardPausedWalletEventAt = 0;
   private readonly asyncSweepQueue: AsyncSweepRequest[] = [];
   private asyncSweepWorkerRunning = false;
 
@@ -228,6 +235,10 @@ export class RedeemSweepModule implements RuntimeModule {
   }
 
   private enqueueAsyncSweep(reason: string): void {
+    if (this.isSweepHardPaused()) {
+      this.recordHardPausedAsyncTrigger(reason);
+      return;
+    }
     if (this.asyncSweepQueue.length >= ASYNC_SWEEP_QUEUE_MAX_DEPTH) {
       this.deps.log.warn(
         { reason, depth: this.asyncSweepQueue.length, maxDepth: ASYNC_SWEEP_QUEUE_MAX_DEPTH },
@@ -303,6 +314,18 @@ export class RedeemSweepModule implements RuntimeModule {
         this.recordAsyncQueueDepth();
       }
     }
+  }
+
+  private recordHardPausedAsyncTrigger(reason: string): void {
+    if (reason !== "wallet-event") {
+      this.recordMetricLabels("redeem_sweep_async_suppressed_hard_pause_total", { reason });
+      return;
+    }
+    const now = this.now();
+    if (now - this.lastHardPausedWalletEventAt < HARD_PAUSE_WALLET_EVENT_COALESCE_MS) return;
+    this.lastHardPausedWalletEventAt = now;
+    this.deps.log.info({ reason }, "redeem sweep wallet-event trigger coalesced — hard-paused");
+    this.recordMetricLabels("redeem_sweep_async_suppressed_hard_pause_total", { reason });
   }
 
   private async runSweep(reason: string): Promise<void> {
@@ -773,7 +796,7 @@ export class RedeemSweepModule implements RuntimeModule {
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      const rateLimited = isRpcRateLimitError(err);
+      const rateLimited = isSettlementInfraRateLimitError(err);
       const settlementFailed = isSettlementStateFailedError(err);
       if (rateLimited) this.hardPauseSweep("POLYGON_RPC_RATE_LIMITED", err);
       for (const group of reservedGroups) {
@@ -921,13 +944,15 @@ export class RedeemSweepModule implements RuntimeModule {
   }
 
   private isSweepHardPaused(): boolean {
+    if (this.deps.settlementInfraBreaker?.isOpen()) return true;
     return this.now() < this.sweepDisabledUntilMs;
   }
 
   private hardPauseSweep(code: string, error?: unknown): void {
-    const upstreamPauseMs = parseRpcRateLimitResetMs(error);
-    const pauseMs = Math.max(RPC_RATE_LIMIT_HARD_PAUSE_MS, upstreamPauseMs ?? 0);
-    const until = this.now() + pauseMs;
+    const pause = this.deps.settlementInfraBreaker?.pause(code, error);
+    const upstreamPauseMs = pause?.upstreamPauseMs ?? parseRpcRateLimitResetMs(error);
+    const pauseMs = pause?.pauseMs ?? Math.max(RPC_RATE_LIMIT_HARD_PAUSE_MS, upstreamPauseMs ?? 0);
+    const until = pause?.until ?? this.now() + pauseMs;
     if (until <= this.sweepDisabledUntilMs) return;
     this.sweepDisabledUntilMs = Math.max(this.sweepDisabledUntilMs, until);
     this.deps.log.error(
@@ -1271,22 +1296,6 @@ function parseExcludedTokenIds(detailsJson: string | null): string[] {
   } catch {
     return [];
   }
-}
-
-function parseRpcRateLimitResetMs(error: unknown): number | null {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  const match = /\bresets?\s+in\s+(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s)\b/i.exec(message);
-  if (!match) return null;
-  const seconds = Number(match[1]);
-  if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  return Math.ceil(seconds * SECOND_MS);
-}
-
-function isRpcRateLimitError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err ?? "");
-  return /(?:\b429\b|rate.?limit|too many requests|throughput limit|quota exceeded|exceeded its compute units)/i.test(
-    message,
-  );
 }
 
 function isSettlementStateFailedError(err: unknown): boolean {
