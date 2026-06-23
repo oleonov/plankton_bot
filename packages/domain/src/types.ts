@@ -733,6 +733,24 @@ export interface BuyCapacityPolicy {
   maxOpenBuyOrdersPerToken: number;
 }
 
+export interface PositionConcentrationPolicy {
+  /** BUY-only condition/token concentration guard. SELL/exits bypass this policy. */
+  enabled: boolean;
+  minGrossCapUsd: number;
+  grossPct: number;
+  minExceptionalGrossCapUsd: number;
+  exceptionalGrossPct: number;
+  minRemainingCapUsd: number;
+  remainingPct: number;
+  minPostHarvestRefillCapUsd: number;
+  postHarvestRefillPct: number;
+  clampBeforeSkip: boolean;
+  conditionKeyFallbackToToken: boolean;
+  portfolioSnapshotMaxAgeMs: number;
+  profileSummaryMaxAgeMs: number;
+  startupGraceMs: number;
+}
+
 export type BuyGuardMediumConfidenceMode = "telemetry_only";
 
 export interface D3NearDeathGuardPolicy {
@@ -1775,6 +1793,7 @@ export interface ExecutionPolicy {
   marketSelection: MarketSelectionPolicy;
   buyGuards: BuyGuardsPolicy;
   buyCapacity: BuyCapacityPolicy;
+  positionConcentration: PositionConcentrationPolicy;
   sellCapacity: SellCapacityPolicy;
   orderCapacity: OrderCapacityPolicy;
   deadSideGuard: DeadSideGuardPolicy;

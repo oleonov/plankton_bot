@@ -241,6 +241,22 @@ export interface ExecutionPolicyDTO {
   entryMinMarketAgeSeconds: number;
   marketSelection: MarketSelectionPolicy;
   buyCapacity: BuyCapacityPolicy;
+  positionConcentration?: {
+    enabled: boolean;
+    minGrossCapUsd: number;
+    grossPct: number;
+    minExceptionalGrossCapUsd: number;
+    exceptionalGrossPct: number;
+    minRemainingCapUsd: number;
+    remainingPct: number;
+    minPostHarvestRefillCapUsd: number;
+    postHarvestRefillPct: number;
+    clampBeforeSkip: boolean;
+    conditionKeyFallbackToToken: boolean;
+    portfolioSnapshotMaxAgeMs: number;
+    profileSummaryMaxAgeMs: number;
+    startupGraceMs: number;
+  };
   sellCapacity: SellCapacityPolicy;
   orderCapacity: OrderCapacityPolicy;
   deadSideGuard: DeadSideGuardPolicy;

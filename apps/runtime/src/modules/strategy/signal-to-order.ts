@@ -95,6 +95,7 @@ import {
 } from "../../min-order-size.js";
 import type { SignalPathTelemetry } from "./signal-path-telemetry.js";
 import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
+import type { PositionConcentrationService } from "../../position-concentration-service.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 25;
 const MIN_SIZE_EPSILON = 1e-9;
@@ -190,6 +191,7 @@ export interface SignalToOrderBridgeDeps {
    */
   resolutionTracker?: MarketResolutionTracker;
   effectiveResolution?: Pick<EffectiveResolutionGate, "toBuyPlacementFields"> | undefined;
+  positionConcentration?: Pick<PositionConcentrationService, "evaluateBuy"> | undefined;
   orderLifetime?: {
     canPlaceExitOrder: (
       tokenId: TokenId,
@@ -770,11 +772,74 @@ export class SignalToOrderBridge {
         }
       }
 
-      const orderSize =
+      let orderSize =
         executionTerms.kind === "ok" && executionTerms.size != null
           ? executionTerms.size
           : resolveOrderSize(signal, executionTerms.price);
       const effectiveMinOrderSize = resolveEffectiveMinOrderSize(market.minOrderSize);
+      let positionConcentrationMetadata: Record<string, unknown> | null = null;
+      if (signal.side === "buy" && this.deps.positionConcentration) {
+        const concentrationDecision = this.deps.positionConcentration.evaluateBuy({
+          tokenId: signal.tokenId,
+          conditionId: signal.conditionId,
+          candidateNotionalUsdc: orderSize * executionTerms.price,
+          minExecutableNotionalUsdc: effectiveMinOrderSize * executionTerms.price,
+          policy: policy.positionConcentration,
+          stage: "signal_to_order",
+          signalReason: signal.reason,
+          decisionRuleId: signal.decisionRuleId,
+        });
+        if (concentrationDecision.action === "skip") {
+          this.log.info(
+            {
+              signalId: signal.signalId,
+              tokenId: signal.tokenId,
+              reason: concentrationDecision.reason,
+              concentrationKey: concentrationDecision.concentrationKey,
+              keyType: concentrationDecision.keyType,
+              requestedNotionalUsdc: orderSize * executionTerms.price,
+              minExecutableNotionalUsdc: effectiveMinOrderSize * executionTerms.price,
+            },
+            "approved BUY skipped — position concentration cap",
+          );
+          await this.publishConversionSkipped(
+            signal,
+            "execution-terms",
+            [`position-concentration-${concentrationDecision.reason}`],
+            {
+              cacheStatus: pricing.cacheStatus,
+              reason: concentrationDecision.reason,
+              keyType: concentrationDecision.keyType,
+              requestedNotionalUsdc: orderSize * executionTerms.price,
+              minExecutableNotionalUsdc: effectiveMinOrderSize * executionTerms.price,
+              metrics: concentrationDecision.metrics,
+            },
+          );
+          this.writeObservation({
+            signal,
+            clientOrderId: null,
+            market,
+            policy,
+            executionTerms,
+            canary,
+            sellPricingShadow,
+            skippedReason: `position-concentration-${concentrationDecision.reason}`,
+          });
+          return;
+        }
+        if (concentrationDecision.action === "clamp") {
+          orderSize = concentrationDecision.effectiveNotionalUsdc / executionTerms.price;
+        }
+        positionConcentrationMetadata = {
+          action: concentrationDecision.action,
+          reason: concentrationDecision.reason,
+          keyType: concentrationDecision.keyType,
+          fallbackReason: concentrationDecision.fallbackReason,
+          requestedNotionalUsdc: signal.suggestedSizeUsdc,
+          effectiveNotionalUsdc: concentrationDecision.effectiveNotionalUsdc,
+          metrics: concentrationDecision.metrics,
+        };
+      }
       if (!isExecutableOrderSize(orderSize, market.minOrderSize)) {
         this.log.info(
           {
@@ -999,6 +1064,9 @@ export class SignalToOrderBridge {
             minOrderSize: market.minOrderSize ?? null,
             effectiveMinOrderSize,
           },
+          ...(positionConcentrationMetadata
+            ? { positionConcentration: positionConcentrationMetadata }
+            : {}),
         },
       };
 

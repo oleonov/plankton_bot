@@ -40,6 +40,7 @@ import type {
   MarketSelectionPolicy,
   OrderCapacityPolicy,
   OrderLifetimePolicy,
+  PositionConcentrationPolicy,
   MultiBuyLadderPolicy,
   OpportunisticTakerPolicy,
   ProfitTargetPolicyConfig,
@@ -102,6 +103,23 @@ export const DEFAULT_BUY_CAPACITY_POLICY: BuyCapacityPolicy = {
   minAddWalletHeadroomUsdc: 5,
   maxOpenBuyOrders: 25,
   maxOpenBuyOrdersPerToken: 2,
+};
+
+export const DEFAULT_POSITION_CONCENTRATION_POLICY: PositionConcentrationPolicy = {
+  enabled: true,
+  minGrossCapUsd: 5,
+  grossPct: 0.02,
+  minExceptionalGrossCapUsd: 8,
+  exceptionalGrossPct: 0.03,
+  minRemainingCapUsd: 5,
+  remainingPct: 0.01,
+  minPostHarvestRefillCapUsd: 5,
+  postHarvestRefillPct: 0.01,
+  clampBeforeSkip: true,
+  conditionKeyFallbackToToken: true,
+  portfolioSnapshotMaxAgeMs: 600_000,
+  profileSummaryMaxAgeMs: 120_000,
+  startupGraceMs: 300_000,
 };
 
 export const DEFAULT_SELL_CAPACITY_POLICY: SellCapacityPolicy = {
@@ -620,6 +638,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   marketSelection: DEFAULT_MARKET_SELECTION_POLICY,
   buyGuards: DEFAULT_BUY_GUARDS_POLICY,
   buyCapacity: DEFAULT_BUY_CAPACITY_POLICY,
+  positionConcentration: DEFAULT_POSITION_CONCENTRATION_POLICY,
   sellCapacity: DEFAULT_SELL_CAPACITY_POLICY,
   orderCapacity: DEFAULT_ORDER_CAPACITY_POLICY,
   deadSideGuard: DEFAULT_DEAD_SIDE_GUARD,
@@ -700,6 +719,13 @@ const BOUND_BUY_GUARD_SHORT_LIFETIME_MIN_HOURS = 1 / 60;
 const BOUND_BUY_GUARD_SHORT_LIFETIME_MAX_HOURS = 24;
 const BOUND_BUY_CAPACITY_HEADROOM_MIN_USDC = 0;
 const BOUND_BUY_CAPACITY_HEADROOM_MAX_USDC = 10_000;
+const BOUND_POSITION_CONCENTRATION_MIN_USDC = 0;
+const BOUND_POSITION_CONCENTRATION_MAX_USDC = 100_000;
+const BOUND_POSITION_CONCENTRATION_PCT_MAX = 0.25;
+const BOUND_POSITION_CONCENTRATION_MAX_AGE_MIN_MS = 1_000;
+const BOUND_POSITION_CONCENTRATION_MAX_AGE_MAX_MS = 24 * 60 * 60_000;
+const BOUND_POSITION_CONCENTRATION_STARTUP_GRACE_MIN_MS = 0;
+const BOUND_POSITION_CONCENTRATION_STARTUP_GRACE_MAX_MS = 60 * 60_000;
 const BOUND_CAPACITY_OPEN_ORDERS_MIN = 0;
 const BOUND_CAPACITY_OPEN_ORDERS_MAX = 1_000;
 const BOUND_CAPACITY_DYNAMIC_HARD_MAX_MIN = 1;
@@ -929,6 +955,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
   const buyGuards = parseBuyGuards(obj.buyGuards, issues);
   const buyCapacity = parseBuyCapacity(obj.buyCapacity, issues);
+  const positionConcentration = parsePositionConcentration(obj.positionConcentration, issues);
   const sellCapacity = parseSellCapacity(obj.sellCapacity, issues);
   const orderCapacity = parseOrderCapacity(obj.orderCapacity, issues);
   const orderLifetime = parseOrderLifetime(obj.orderLifetime, issues);
@@ -969,6 +996,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       marketSelection,
       buyGuards,
       buyCapacity,
+      positionConcentration,
       sellCapacity,
       orderCapacity,
       deadSideGuard,
@@ -3685,6 +3713,117 @@ function parseBuyCapacity(raw: unknown, issues: string[]): BuyCapacityPolicy {
       BOUND_CAPACITY_OPEN_ORDERS_MAX,
       issues,
       "buyCapacity.maxOpenBuyOrdersPerToken",
+    ),
+  };
+}
+
+function parsePositionConcentration(
+  raw: unknown,
+  issues: string[],
+): PositionConcentrationPolicy {
+  const fallback = DEFAULT_POSITION_CONCENTRATION_POLICY;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("positionConcentration must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(obj.enabled, fallback.enabled, issues, "positionConcentration.enabled"),
+    minGrossCapUsd: clampedNumber(
+      obj.minGrossCapUsd,
+      fallback.minGrossCapUsd,
+      BOUND_POSITION_CONCENTRATION_MIN_USDC,
+      BOUND_POSITION_CONCENTRATION_MAX_USDC,
+      issues,
+      "positionConcentration.minGrossCapUsd",
+    ),
+    grossPct: positiveClampedNumber(
+      obj.grossPct,
+      fallback.grossPct,
+      BOUND_POSITION_CONCENTRATION_PCT_MAX,
+      issues,
+      "positionConcentration.grossPct",
+    ),
+    minExceptionalGrossCapUsd: clampedNumber(
+      obj.minExceptionalGrossCapUsd,
+      fallback.minExceptionalGrossCapUsd,
+      BOUND_POSITION_CONCENTRATION_MIN_USDC,
+      BOUND_POSITION_CONCENTRATION_MAX_USDC,
+      issues,
+      "positionConcentration.minExceptionalGrossCapUsd",
+    ),
+    exceptionalGrossPct: positiveClampedNumber(
+      obj.exceptionalGrossPct,
+      fallback.exceptionalGrossPct,
+      BOUND_POSITION_CONCENTRATION_PCT_MAX,
+      issues,
+      "positionConcentration.exceptionalGrossPct",
+    ),
+    minRemainingCapUsd: clampedNumber(
+      obj.minRemainingCapUsd,
+      fallback.minRemainingCapUsd,
+      BOUND_POSITION_CONCENTRATION_MIN_USDC,
+      BOUND_POSITION_CONCENTRATION_MAX_USDC,
+      issues,
+      "positionConcentration.minRemainingCapUsd",
+    ),
+    remainingPct: positiveClampedNumber(
+      obj.remainingPct,
+      fallback.remainingPct,
+      BOUND_POSITION_CONCENTRATION_PCT_MAX,
+      issues,
+      "positionConcentration.remainingPct",
+    ),
+    minPostHarvestRefillCapUsd: clampedNumber(
+      obj.minPostHarvestRefillCapUsd,
+      fallback.minPostHarvestRefillCapUsd,
+      BOUND_POSITION_CONCENTRATION_MIN_USDC,
+      BOUND_POSITION_CONCENTRATION_MAX_USDC,
+      issues,
+      "positionConcentration.minPostHarvestRefillCapUsd",
+    ),
+    postHarvestRefillPct: positiveClampedNumber(
+      obj.postHarvestRefillPct,
+      fallback.postHarvestRefillPct,
+      BOUND_POSITION_CONCENTRATION_PCT_MAX,
+      issues,
+      "positionConcentration.postHarvestRefillPct",
+    ),
+    clampBeforeSkip: booleanOr(
+      obj.clampBeforeSkip,
+      fallback.clampBeforeSkip,
+      issues,
+      "positionConcentration.clampBeforeSkip",
+    ),
+    conditionKeyFallbackToToken: booleanOr(
+      obj.conditionKeyFallbackToToken,
+      fallback.conditionKeyFallbackToToken,
+      issues,
+      "positionConcentration.conditionKeyFallbackToToken",
+    ),
+    portfolioSnapshotMaxAgeMs: clampedInt(
+      obj.portfolioSnapshotMaxAgeMs,
+      fallback.portfolioSnapshotMaxAgeMs,
+      BOUND_POSITION_CONCENTRATION_MAX_AGE_MIN_MS,
+      BOUND_POSITION_CONCENTRATION_MAX_AGE_MAX_MS,
+      issues,
+      "positionConcentration.portfolioSnapshotMaxAgeMs",
+    ),
+    profileSummaryMaxAgeMs: clampedInt(
+      obj.profileSummaryMaxAgeMs,
+      fallback.profileSummaryMaxAgeMs,
+      BOUND_POSITION_CONCENTRATION_MAX_AGE_MIN_MS,
+      BOUND_POSITION_CONCENTRATION_MAX_AGE_MAX_MS,
+      issues,
+      "positionConcentration.profileSummaryMaxAgeMs",
+    ),
+    startupGraceMs: clampedInt(
+      obj.startupGraceMs,
+      fallback.startupGraceMs,
+      BOUND_POSITION_CONCENTRATION_STARTUP_GRACE_MIN_MS,
+      BOUND_POSITION_CONCENTRATION_STARTUP_GRACE_MAX_MS,
+      issues,
+      "positionConcentration.startupGraceMs",
     ),
   };
 }

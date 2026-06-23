@@ -340,6 +340,105 @@ describe("SignalToOrderBridge", () => {
     );
   });
 
+  it("clamps BUY notional through position concentration before publishing order", async () => {
+    const bus = new InProcessEventBus();
+    const evaluateBuy = vi.fn(() => ({
+      action: "clamp",
+      reason: "gross_cap",
+      concentrationKey: "condition:cond-1",
+      keyType: "condition",
+      fallbackReason: null,
+      effectiveNotionalUsdc: 2,
+      metrics: null,
+    }));
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => DEFAULT_EXECUTION_POLICY,
+      positionConcentration: { evaluateBuy } as never,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{
+      command: { size: number; price: number; metadata?: Record<string, unknown> };
+    }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload as never);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({ bestBid: 0.04, bestAsk: 0.04, midPrice: 0.04 }),
+      approvedAt: NOW,
+    });
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.04);
+    expect(placed[0]!.command.size).toBeCloseTo(50);
+    expect(placed[0]!.command.metadata?.positionConcentration).toEqual(
+      expect.objectContaining({
+        action: "clamp",
+        reason: "gross_cap",
+        keyType: "condition",
+        effectiveNotionalUsdc: 2,
+      }),
+    );
+    expect(evaluateBuy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokenId: TOKEN_ID,
+        conditionId: "cond-1",
+        candidateNotionalUsdc: 4,
+        stage: "signal_to_order",
+        signalReason: "probe-entry",
+      }),
+    );
+  });
+
+  it("skips BUY conversion when position concentration headroom is below executable minimum", async () => {
+    const bus = new InProcessEventBus();
+    const evaluateBuy = vi.fn(() => ({
+      action: "skip",
+      reason: "below_min_after_clamp",
+      concentrationKey: "condition:cond-1",
+      keyType: "condition",
+      fallbackReason: null,
+      effectiveNotionalUsdc: 0.25,
+      metrics: null,
+    }));
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => DEFAULT_EXECUTION_POLICY,
+      positionConcentration: { evaluateBuy } as never,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: unknown[] = [];
+    const skipped: Array<{ reasons: readonly string[] }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+    bus.subscribe("SignalConversionSkipped", async (payload) => {
+      skipped.push(payload);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({ bestBid: 0.04, bestAsk: 0.04, midPrice: 0.04 }),
+      approvedAt: NOW,
+    });
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toEqual([
+      "position-concentration-below_min_after_clamp",
+    ]);
+  });
+
   it("does not block order publication on execution-policy observation writes", async () => {
     const bus = new InProcessEventBus();
     const observations: ExecutionPolicyObservationRepository = {

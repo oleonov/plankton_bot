@@ -188,6 +188,7 @@ import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
+import { PositionConcentrationService } from "./position-concentration-service.js";
 import { RuntimeMetricWriter } from "./runtime-metric-writer.js";
 import { RuntimeEffectiveResolutionService } from "./effective-resolution-service.js";
 import {
@@ -497,6 +498,13 @@ async function main(): Promise<void> {
   // so the BUY-admission fail-closed path can report through the standard
   // `infra_alert` channel (surfaced in /status and the web banner).
   const runtimeMetrics = new RuntimeMetricWriter(ledgerConn.db);
+  const positionConcentration = new PositionConcentrationService({
+    ledgerDb: ledgerConn.db,
+    controlDb: controlConn.db,
+    profileId: activeProfile as import("@krabs/domain").ProfileId,
+    log,
+    runtimeMetrics,
+  });
   const settlementInfraBreaker = new SettlementInfraBreaker();
   // Aggregated counter flush — high-frequency `*_total` metrics buffer in
   // memory and persist as one row per (name, labels) pair every 30s. Keeps
@@ -1087,6 +1095,7 @@ async function main(): Promise<void> {
     legStateRepo: repos.legState,
     repriceChainPolicy: () => currentExecutionPolicy().repriceChain,
     riskEventRepo: repos.riskEvent,
+    positionConcentration,
   });
 
   // 7g. Risk + Inventory module
@@ -1120,6 +1129,7 @@ async function main(): Promise<void> {
     effectiveResolution,
     markToMarketEnabled: true,
     latestUsablePriceForToken,
+    positionConcentration,
   });
 
   // 7h. Strategy module
@@ -1518,6 +1528,7 @@ async function main(): Promise<void> {
     effectiveResolution,
     orderLifetime: orderLifetimeModule,
     samePriceCooldown: samePriceCooldownModule,
+    positionConcentration,
     // Track S5 belt-and-suspenders — neutralizes S5 exit extensions on a token the
     // S1 ladder owns if the planner's upstream SELL suppression ever regresses.
     s1Ownership: s1LadderModule,

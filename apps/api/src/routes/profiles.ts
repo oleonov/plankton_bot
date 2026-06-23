@@ -498,6 +498,12 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
         ...current.buyCapacity,
         ...((patch.buyCapacity as Partial<ExecutionPolicy["buyCapacity"]> | undefined) ?? {}),
       },
+      positionConcentration: {
+        ...current.positionConcentration,
+        ...((patch.positionConcentration as
+          | Partial<ExecutionPolicy["positionConcentration"]>
+          | undefined) ?? {}),
+      },
       sellCapacity: {
         ...current.sellCapacity,
         ...((patch.sellCapacity as Partial<ExecutionPolicy["sellCapacity"]> | undefined) ?? {}),

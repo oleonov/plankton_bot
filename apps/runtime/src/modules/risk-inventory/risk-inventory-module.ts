@@ -33,6 +33,7 @@ import type {
   TokenId,
 } from "@krabs/domain";
 import {
+  DEFAULT_EXECUTION_POLICY,
   SignalReason,
   canPlaceBuyOrderForMarket,
   evaluateD3NearDeathGuard,
@@ -59,6 +60,7 @@ import type { CooldownRegistry } from "../same-price-cooldown/cooldown-registry.
 import type { SignalPathTelemetry } from "../strategy/signal-path-telemetry.js";
 import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
 import type { ExecutionProfileStateRecord } from "../execution-profile/types.js";
+import type { PositionConcentrationService } from "../../position-concentration-service.js";
 
 const EXECUTION_PROFILE_SCALE_IN_RULE_ID = "EXECUTION_PROFILE_SCALE_IN";
 const LIVE_LITE_ACTIVE_MARKETS_CAP_FULL_REASON = "live_lite_active_markets_cap_full";
@@ -106,6 +108,7 @@ export interface RiskInventoryModuleDeps {
   /** Optional kill switch; live-lite market-data marks are gated per position. */
   markToMarketEnabled?: boolean | undefined;
   latestUsablePriceForToken?: ((tokenId: TokenId) => number | null) | undefined;
+  positionConcentration?: Pick<PositionConcentrationService, "recordFill"> | undefined;
 }
 
 /** Full diagnostics snapshot returned by getDiagnostics(). */
@@ -703,6 +706,7 @@ export class RiskInventoryModule implements RuntimeModule {
 
     try {
       const position = withImmediate(this.deps.db, () => {
+        const positionBefore = this.deps.positionRepo.findByTokenId(payload.tokenId);
         const applied = this.inventory.applyFill({
           fillId: payload.fillId,
           tokenId: payload.tokenId,
@@ -714,6 +718,22 @@ export class RiskInventoryModule implements RuntimeModule {
           fee: payload.fee,
           signalReason: payload.signalReason,
           timestamp: payload.timestamp,
+        });
+        this.deps.positionConcentration?.recordFill({
+          fill: {
+            tokenId: payload.tokenId,
+            conditionId: payload.conditionId,
+            side: payload.side,
+            price: payload.price,
+            sizeUsdc: payload.sizeUsdc,
+            filledAt: new Date(payload.timestamp).toISOString(),
+            orderId: payload.orderId,
+          },
+          policy:
+            this.deps.executionPolicy?.().positionConcentration ??
+            DEFAULT_EXECUTION_POLICY.positionConcentration,
+          positionBefore,
+          positionAfter: applied,
         });
         this.deps.fillRepo.markReconciled([payload.fillId]);
         return applied;

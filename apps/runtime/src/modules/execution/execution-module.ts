@@ -38,6 +38,7 @@ import type {
 import {
   createCommandId,
   createOrderId,
+  DEFAULT_EXECUTION_POLICY,
   ExchangeErrorCode,
   isPositionDust,
   isSellTimeoutReplacement,
@@ -104,6 +105,7 @@ import {
   orderMatchesOrderId,
   validateProfileLadderReplacementSellTarget,
 } from "../profile-ladder-order-helpers.js";
+import type { PositionConcentrationService } from "../../position-concentration-service.js";
 
 type OrderFillLookupGateway = ExchangeGateway & {
   getFillsForOrder?: (orderId: string) => Promise<ExchangeFill[]>;
@@ -224,6 +226,7 @@ export interface ExecutionModuleDeps {
   legStateRepo?: LegStateRepository | undefined;
   repriceChainPolicy?: (() => RepriceChainPolicyConfig) | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
+  positionConcentration?: Pick<PositionConcentrationService, "evaluateBuy"> | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -531,6 +534,40 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     const notional = cmd.price * cmd.size;
+
+    if (cmd.side === "buy" && this.deps.positionConcentration) {
+      const executionPolicy = this.deps.executionPolicy?.() ?? DEFAULT_EXECUTION_POLICY;
+      const concentrationDecision = this.deps.positionConcentration.evaluateBuy({
+        tokenId: cmd.tokenId,
+        conditionId: cmd.conditionId,
+        candidateNotionalUsdc: notional,
+        minExecutableNotionalUsdc: (this.resolveCommandMinOrderSize(cmd) ?? 0) * cmd.price,
+        policy: executionPolicy.positionConcentration,
+        stage: "execution",
+        signalReason: cmd.signalReason,
+        decisionRuleId: cmd.decisionRuleId ?? null,
+      });
+      if (concentrationDecision.action !== "allow") {
+        this.log.warn(
+          {
+            commandId: cmd.commandId,
+            tokenId: cmd.tokenId,
+            reason: concentrationDecision.reason,
+            action: concentrationDecision.action,
+            notional,
+            effectiveNotionalUsdc: concentrationDecision.effectiveNotionalUsdc,
+            keyType: concentrationDecision.keyType,
+          },
+          "order rejected — position concentration cap exceeded",
+        );
+        await this.rejectOrder(
+          cmd,
+          `position-concentration-${concentrationDecision.reason}`,
+          ExchangeErrorCode.LivePolicyBlocked,
+        );
+        return;
+      }
+    }
 
     // Live-lite order cap check (Layer 4)
     if (this.deps.liveLiteGuard?.isActive) {

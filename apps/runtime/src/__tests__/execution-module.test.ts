@@ -4252,4 +4252,46 @@ describe("ExecutionModule", () => {
 
     await balanceMod.stop();
   });
+
+  it("rejects BUY at execution backstop when position concentration cap is exhausted", async () => {
+    const concentrationMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      positionConcentration: {
+        evaluateBuy: vi.fn(() => ({
+          action: "skip",
+          reason: "gross_cap",
+          concentrationKey: "condition:cond-1",
+          keyType: "condition",
+          fallbackReason: null,
+          effectiveNotionalUsdc: 0,
+          metrics: null,
+        })),
+      } as never,
+    });
+    await concentrationMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ price: 0.5, size: 20 }),
+      timestamp: Date.now(),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("position-concentration-gross_cap");
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
+
+    await concentrationMod.stop();
+  });
 });

@@ -2666,4 +2666,94 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     );
     expect(policy.buyGuards).toEqual(DEFAULT_EXECUTION_POLICY.buyGuards);
   });
+
+  it("defaults bankroll-aware position concentration caps enabled", () => {
+    const { policy, issues } = parseExecutionPolicyJson(null);
+
+    expect(issues).toEqual([]);
+    expect(policy.positionConcentration).toEqual({
+      enabled: true,
+      minGrossCapUsd: 5,
+      grossPct: 0.02,
+      minExceptionalGrossCapUsd: 8,
+      exceptionalGrossPct: 0.03,
+      minRemainingCapUsd: 5,
+      remainingPct: 0.01,
+      minPostHarvestRefillCapUsd: 5,
+      postHarvestRefillPct: 0.01,
+      clampBeforeSkip: true,
+      conditionKeyFallbackToToken: true,
+      portfolioSnapshotMaxAgeMs: 600_000,
+      profileSummaryMaxAgeMs: 120_000,
+      startupGraceMs: 300_000,
+    });
+  });
+
+  it("parses position concentration overrides", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        positionConcentration: {
+          enabled: false,
+          minGrossCapUsd: 6,
+          grossPct: 0.03,
+          minExceptionalGrossCapUsd: 10,
+          exceptionalGrossPct: 0.04,
+          minRemainingCapUsd: 7,
+          remainingPct: 0.02,
+          minPostHarvestRefillCapUsd: 6,
+          postHarvestRefillPct: 0.015,
+          clampBeforeSkip: false,
+          conditionKeyFallbackToToken: false,
+          portfolioSnapshotMaxAgeMs: 300_000,
+          profileSummaryMaxAgeMs: 60_000,
+          startupGraceMs: 120_000,
+        },
+      }),
+    );
+
+    expect(issues).toEqual([]);
+    expect(policy.positionConcentration).toMatchObject({
+      enabled: false,
+      minGrossCapUsd: 6,
+      grossPct: 0.03,
+      minExceptionalGrossCapUsd: 10,
+      exceptionalGrossPct: 0.04,
+      minRemainingCapUsd: 7,
+      remainingPct: 0.02,
+      minPostHarvestRefillCapUsd: 6,
+      postHarvestRefillPct: 0.015,
+      clampBeforeSkip: false,
+      conditionKeyFallbackToToken: false,
+      portfolioSnapshotMaxAgeMs: 300_000,
+      profileSummaryMaxAgeMs: 60_000,
+      startupGraceMs: 120_000,
+    });
+  });
+
+  it("falls back safely for invalid position concentration config", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        positionConcentration: {
+          grossPct: 0,
+          exceptionalGrossPct: 0.5,
+          remainingPct: -0.01,
+          postHarvestRefillPct: Number.NaN,
+          portfolioSnapshotMaxAgeMs: 0,
+          startupGraceMs: 9_999_999,
+        },
+      }),
+    );
+
+    expect(issues).toEqual(
+      expect.arrayContaining([
+        "positionConcentration.grossPct=0 out of range (0, 0.25]",
+        "positionConcentration.exceptionalGrossPct=0.5 out of range (0, 0.25]",
+        "positionConcentration.remainingPct=-0.01 out of range (0, 0.25]",
+        "positionConcentration.postHarvestRefillPct must be a finite number",
+        "positionConcentration.portfolioSnapshotMaxAgeMs=0 out of range [1000, 86400000]",
+        "positionConcentration.startupGraceMs=9999999 out of range [0, 3600000]",
+      ]),
+    );
+    expect(policy.positionConcentration).toEqual(DEFAULT_EXECUTION_POLICY.positionConcentration);
+  });
 });
