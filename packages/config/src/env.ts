@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { cpus } from "node:os";
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
+import { resolvePolygonRpcConfig, type PolygonRpcConfigIssue } from "./polygon-rpc.js";
 
 const runtimeModeSchema = z.enum(["live-lite"]);
 const logLevelSchema = z.enum(["debug", "info", "warn", "error"]);
@@ -286,6 +287,7 @@ export interface AppConfig {
   polygonRpcUrls?: string[] | undefined;
   polygonRpcFallbackUrl?: string | undefined;
   alchemyPolygonKeys?: string[] | undefined;
+  polygonRpcConfigIssues?: PolygonRpcConfigIssue[] | undefined;
   krabsApiKey: string | undefined;
   krabsApiPort: number;
   krabsAuthUsername: string | undefined;
@@ -363,6 +365,21 @@ export function loadEnv(envPath?: string): AppConfig {
   }
 
   const env = result.data;
+  const alchemyPolygonKeys = env.ALCHEMY_POLYGON_KEYS
+    ? [...new Set(env.ALCHEMY_POLYGON_KEYS)]
+    : undefined;
+  const polygonRpc = resolvePolygonRpcConfig({
+    alchemyPolygonKeys,
+    polygonRpcUrls: env.POLYGON_RPC_URLS,
+    polygonRpcUrlsConfigured:
+      typeof process.env["POLYGON_RPC_URLS"] === "string" &&
+      process.env["POLYGON_RPC_URLS"].trim().length > 0,
+    polygonRpcUrl: env.POLYGON_RPC_URL,
+    polygonRpcUrlConfigured:
+      typeof process.env["POLYGON_RPC_URL"] === "string" &&
+      process.env["POLYGON_RPC_URL"].trim().length > 0,
+    polygonRpcFallbackUrl: env.POLYGON_RPC_FALLBACK_URL,
+  });
 
   return {
     runtimeMode: env.RUNTIME_MODE,
@@ -401,12 +418,11 @@ export function loadEnv(envPath?: string): AppConfig {
     polyBuilderCode: env.POLY_BUILDER_CODE,
     polyPrivateKey: env.POLY_PRIVATE_KEY,
     polymarketRelayerUrl: env.POLYMARKET_RELAYER_URL,
-    polygonRpcUrl: env.POLYGON_RPC_URL,
-    polygonRpcUrls: [...new Set(env.POLYGON_RPC_URLS ?? [env.POLYGON_RPC_URL])],
+    polygonRpcUrl: polygonRpc.primaryUrls[0],
+    polygonRpcUrls: polygonRpc.primaryUrls,
     polygonRpcFallbackUrl: env.POLYGON_RPC_FALLBACK_URL,
-    alchemyPolygonKeys: env.ALCHEMY_POLYGON_KEYS
-      ? [...new Set(env.ALCHEMY_POLYGON_KEYS)]
-      : undefined,
+    alchemyPolygonKeys,
+    polygonRpcConfigIssues: polygonRpc.issues,
     krabsApiKey: env.KRABS_API_KEY,
     krabsApiPort: env.KRABS_API_PORT,
     krabsAuthUsername: env.KRABS_AUTH_USERNAME,

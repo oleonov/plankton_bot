@@ -121,6 +121,7 @@ describe("loadEnv", () => {
       "https://polygon-mainnet.g.alchemy.com/v2/test2",
     ]);
     expect(config.polygonRpcFallbackUrl).toBe("https://polygon.drpc.org");
+    expect(config.polygonRpcConfigIssues).toEqual([]);
   });
 
   it("falls back to POLYGON_RPC_URL when POLYGON_RPC_URLS is omitted", () => {
@@ -130,6 +131,11 @@ describe("loadEnv", () => {
 
     const config = loadEnv(emptyEnvPath);
     expect(config.polygonRpcUrls).toEqual(["https://polygon-mainnet.g.alchemy.com/v2/primary"]);
+  });
+
+  it("rejects malformed legacy Polygon RPC URLs", () => {
+    setEnvVars({ POLYGON_RPC_URLS: "https://valid.example,not-a-url" });
+    expect(() => loadEnv(emptyEnvPath)).toThrow(/POLYGON_RPC_URLS/);
   });
 
   it("accepts live-lite mode without LIVE_LITE_* envelope vars", () => {
@@ -234,6 +240,13 @@ describe("loadEnv", () => {
       setEnvVars({ ALCHEMY_POLYGON_KEYS: "k1,k2,k3" });
       const config = loadEnv(emptyEnvPath);
       expect(config.alchemyPolygonKeys).toEqual(["k1", "k2", "k3"]);
+      expect(config.polygonRpcUrls).toEqual([
+        "https://polygon-mainnet.g.alchemy.com/v2/k1",
+        "https://polygon-mainnet.g.alchemy.com/v2/k2",
+        "https://polygon-mainnet.g.alchemy.com/v2/k3",
+      ]);
+      expect(config.polygonRpcUrl).toBe("https://polygon-mainnet.g.alchemy.com/v2/k1");
+      expect(config.polygonRpcConfigIssues).toEqual([]);
     });
 
     it("trims whitespace around keys", () => {
@@ -257,6 +270,33 @@ describe("loadEnv", () => {
       setEnvVars({ ALCHEMY_POLYGON_KEYS: "" });
       const config = loadEnv(emptyEnvPath);
       expect(config.alchemyPolygonKeys).toBeUndefined();
+    });
+
+    it("uses keys over legacy URL vars and reports a bounded deprecation issue", () => {
+      setEnvVars({
+        ALCHEMY_POLYGON_KEYS: "k1,k2,k3",
+        POLYGON_RPC_URL: "https://polygon-mainnet.g.alchemy.com/v2/k1",
+        POLYGON_RPC_URLS:
+          "https://polygon-mainnet.g.alchemy.com/v2/k1,https://polygon-mainnet.g.alchemy.com/v2/OLD_RAW_KEY",
+        POLYGON_RPC_FALLBACK_URL: "https://polygon.drpc.org",
+      });
+      const config = loadEnv(emptyEnvPath);
+
+      expect(config.polygonRpcUrls).toEqual([
+        "https://polygon-mainnet.g.alchemy.com/v2/k1",
+        "https://polygon-mainnet.g.alchemy.com/v2/k2",
+        "https://polygon-mainnet.g.alchemy.com/v2/k3",
+      ]);
+      expect(config.polygonRpcFallbackUrl).toBe("https://polygon.drpc.org");
+      expect(config.polygonRpcConfigIssues).toEqual([
+        expect.objectContaining({
+          code: "legacy_polygon_rpc_urls_ignored",
+          sourceOfTruth: "ALCHEMY_POLYGON_KEYS",
+          ignoredSources: ["POLYGON_RPC_URL", "POLYGON_RPC_URLS"],
+        }),
+      ]);
+      expect(JSON.stringify(config.polygonRpcConfigIssues)).not.toContain("k1");
+      expect(JSON.stringify(config.polygonRpcConfigIssues)).not.toContain("OLD_RAW_KEY");
     });
   });
 

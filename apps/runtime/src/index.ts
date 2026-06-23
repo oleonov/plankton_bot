@@ -350,6 +350,16 @@ async function main(): Promise<void> {
   const config = loadEnv();
   const log = createLogger(config.logLevel, config.runtimeMode);
   log.info({ mode: config.runtimeMode }, "krabs runtime starting (env mode)");
+  for (const issue of config.polygonRpcConfigIssues ?? []) {
+    log.warn(
+      {
+        code: issue.code,
+        sourceOfTruth: issue.sourceOfTruth,
+        ignoredSources: issue.ignoredSources,
+      },
+      issue.message,
+    );
+  }
 
   // Install bounded https.Agent on the global axios singleton (covers all CLOB SDK calls).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

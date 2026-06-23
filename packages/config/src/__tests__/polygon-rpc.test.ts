@@ -18,12 +18,65 @@ describe("resolvePolygonRpcConfig", () => {
     });
     expect(r.primaryUrls).toEqual([`${ALCHEMY}/KEY1`, `${ALCHEMY}/KEY2`, `${ALCHEMY}/KEY3`]);
     expect(r.fallbackUrls).toEqual([DRPC]);
+    expect(r.issues).toEqual([]);
   });
 
   it("dedups keys and preserves order", () => {
     const r = resolvePolygonRpcConfig({ alchemyPolygonKeys: ["KEY1", "KEY1", "KEY2"] });
     expect(r.primaryUrls).toEqual([`${ALCHEMY}/KEY1`, `${ALCHEMY}/KEY2`]);
     expect(r.fallbackUrls).toEqual([]);
+  });
+
+  it("uses Alchemy keys as source of truth and reports ignored legacy URLs without keys", () => {
+    const r = resolvePolygonRpcConfig({
+      alchemyPolygonKeys: ["SECRET_KEY_1", "SECRET_KEY_2"],
+      polygonRpcUrl: `${ALCHEMY}/SECRET_KEY_1`,
+      polygonRpcUrls: [`${ALCHEMY}/SECRET_KEY_1`, `${ALCHEMY}/LEGACY_KEY`],
+      polygonRpcFallbackUrl: DRPC,
+    });
+    expect(r.primaryUrls).toEqual([`${ALCHEMY}/SECRET_KEY_1`, `${ALCHEMY}/SECRET_KEY_2`]);
+    expect(r.fallbackUrls).toEqual([DRPC]);
+    expect(r.issues).toEqual([
+      expect.objectContaining({
+        code: "legacy_polygon_rpc_urls_ignored",
+        sourceOfTruth: "ALCHEMY_POLYGON_KEYS",
+        ignoredSources: ["POLYGON_RPC_URL", "POLYGON_RPC_URLS"],
+      }),
+    ]);
+    expect(JSON.stringify(r.issues)).not.toContain("SECRET_KEY");
+    expect(JSON.stringify(r.issues)).not.toContain("LEGACY_KEY");
+  });
+
+  it("reports only POLYGON_RPC_URL ignored when keys are mixed with the legacy single URL", () => {
+    const r = resolvePolygonRpcConfig({
+      alchemyPolygonKeys: ["SECRET_KEY_1", "SECRET_KEY_2"],
+      polygonRpcUrl: `${ALCHEMY}/LEGACY_SINGLE_KEY`,
+    });
+    expect(r.primaryUrls).toEqual([`${ALCHEMY}/SECRET_KEY_1`, `${ALCHEMY}/SECRET_KEY_2`]);
+    expect(r.issues).toEqual([
+      expect.objectContaining({
+        code: "legacy_polygon_rpc_urls_ignored",
+        ignoredSources: ["POLYGON_RPC_URL"],
+      }),
+    ]);
+    expect(JSON.stringify(r.issues)).not.toContain("SECRET_KEY");
+    expect(JSON.stringify(r.issues)).not.toContain("LEGACY_SINGLE_KEY");
+  });
+
+  it("reports only POLYGON_RPC_URLS ignored when keys are mixed with the legacy URL list", () => {
+    const r = resolvePolygonRpcConfig({
+      alchemyPolygonKeys: ["SECRET_KEY_1", "SECRET_KEY_2"],
+      polygonRpcUrls: [`${ALCHEMY}/LEGACY_LIST_KEY_1`, `${ALCHEMY}/LEGACY_LIST_KEY_2`],
+    });
+    expect(r.primaryUrls).toEqual([`${ALCHEMY}/SECRET_KEY_1`, `${ALCHEMY}/SECRET_KEY_2`]);
+    expect(r.issues).toEqual([
+      expect.objectContaining({
+        code: "legacy_polygon_rpc_urls_ignored",
+        ignoredSources: ["POLYGON_RPC_URLS"],
+      }),
+    ]);
+    expect(JSON.stringify(r.issues)).not.toContain("SECRET_KEY");
+    expect(JSON.stringify(r.issues)).not.toContain("LEGACY_LIST_KEY");
   });
 
   it("backward-compat: legacy POLYGON_RPC_URLS populate primary, fallback stays separate", () => {
@@ -60,6 +113,15 @@ describe("resolvePolygonRpcConfig", () => {
       polygonRpcFallbackUrl: DRPC,
     });
     expect(r.primaryUrls).toEqual([DRPC]);
+    expect(r.fallbackUrls).toEqual([]);
+  });
+
+  it("drops fallback when it duplicates a generated Alchemy URL", () => {
+    const r = resolvePolygonRpcConfig({
+      alchemyPolygonKeys: ["KEY1"],
+      polygonRpcFallbackUrl: `${ALCHEMY}/KEY1`,
+    });
+    expect(r.primaryUrls).toEqual([`${ALCHEMY}/KEY1`]);
     expect(r.fallbackUrls).toEqual([]);
   });
 });
