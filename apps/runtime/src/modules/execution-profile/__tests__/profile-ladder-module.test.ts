@@ -765,7 +765,10 @@ describe("ProfileLadderModule", () => {
   });
 
   it("rebuilds on BBO move and respects the 30-minute cooldown", async () => {
-    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [position()] },
+    });
     const seeded = ladderState();
     const preservedOrderId = seeded.activeRungs[0]!.orderId;
     ctx.repo.upsertLadder(seeded);
@@ -796,6 +799,78 @@ describe("ProfileLadderModule", () => {
       value: 1,
       labels: '{"band":"medium_low","reason":"bbo_strong"}',
     });
+  });
+
+  it("closes a stale active live-rung ladder without a position before a BBO rebuild", async () => {
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [] },
+      orderRepo: { findByTokenId: () => [] },
+    });
+    ctx.repo.upsertLadder(ladderState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.07, bestAsk: 0.09, midPrice: 0.08 })],
+      timestamp: NOW,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.cancels).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+      status: "closed",
+      closedAtMs: NOW,
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_stale_no_position_closed",
+      value: 1,
+      labels: '{"band":"medium_low","source":"bbo_rebuild","reason":"no_open_sell"}',
+    });
+  });
+
+  it("fails closed when a no-position BBO rebuild sees an open SELL", async () => {
+    let nowMs = NOW;
+    const openProfileOrder = openSellOrder({
+      orderId: createOrderId("profile-ladder-order"),
+      decisionRuleId: "PROFILE_LADDER",
+      signalReason: "profile-ladder-exit",
+      metadata: { source: "profile_ladder" },
+      status: OrderStatus.Open,
+    });
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [] },
+      orderRepo: { findByTokenId: () => [openProfileOrder] },
+      now: () => nowMs,
+    });
+    ctx.repo.upsertLadder(ladderState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.07, bestAsk: 0.09, midPrice: 0.08 })],
+      timestamp: nowMs,
+    });
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS - 1;
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.06, bestAsk: 0.08, midPrice: 0.07 })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.cancels).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+      status: "active",
+      activeRungs: [{ orderId: "profile-ladder-order", lifecycle: "placed" }],
+    });
+    expect(
+      ctx.counters.filter((counter) => counter.name === "profile_ladder_stale_no_position_skipped"),
+    ).toEqual([
+      {
+        name: "profile_ladder_stale_no_position_skipped",
+        value: 1,
+        labels: '{"band":"medium_low","source":"bbo_rebuild","reason":"open_sell_exists"}',
+      },
+    ]);
   });
 
   it("places ladder orders with calibrated rung count and metadata", async () => {
@@ -926,7 +1001,10 @@ describe("ProfileLadderModule", () => {
   });
 
   it("recovers an existing planned-only ladder when a later market update has min order size", async () => {
-    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [position()] },
+    });
     await ctx.module.start();
 
     await ctx.bus.publish("NormalizedMarketUpdated", {
@@ -980,6 +1058,7 @@ describe("ProfileLadderModule", () => {
     const ctx = setup(policy(), {
       modeReader: { getMode: () => "flat" },
       bookCache,
+      positionRepo: { findOpen: () => [position()] },
       now: () => nowMs,
     });
     await ctx.module.start();
@@ -1032,6 +1111,7 @@ describe("ProfileLadderModule", () => {
       const ctx = setup(policy(), {
         modeReader: { getMode: () => "flat" },
         bookCache,
+        positionRepo: { findOpen: () => [position()] },
         now: () => nowMs,
       });
       ctx.repo.upsertLadder(
@@ -1143,6 +1223,110 @@ describe("ProfileLadderModule", () => {
       name: "profile_ladder_planned_no_live_recovered",
       value: 1,
       labels: '{"band":"medium_high"}',
+    });
+  });
+
+  it("closes a stale active planned ladder when the position is already closed", async () => {
+    const ctx = setup(mediumHighPolicy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [] },
+      orderRepo: { findByTokenId: () => [] },
+    });
+    ctx.repo.upsertLadder(stalePlannedNoLiveState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [stalePlannedNoLiveMarket()],
+      timestamp: NOW,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.cancels).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+      status: "closed",
+      closedAtMs: NOW,
+    });
+    expect(JSON.parse(ctx.repo.getLadder(tokenId)?.metadataJson ?? "{}")).toMatchObject({
+      closeReason: "stale_no_open_position",
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_stale_no_position_closed",
+      value: 1,
+      labels: '{"band":"medium_high","source":"planned_no_live_recovery","reason":"no_open_sell"}',
+    });
+    expect(ctx.riskEvents).toContainEqual({
+      eventType: "profile_ladder_stale_no_position_closed",
+      payload: expect.objectContaining({
+        tokenId: String(tokenId),
+        conditionId: String(conditionId),
+        ladderId: "profile_ladder_existing",
+        band: "medium_high",
+        source: "planned_no_live_recovery",
+        reason: "no_open_sell",
+      }),
+    });
+  });
+
+  it("does not advance a stale active ladder with no position while a SELL is open", async () => {
+    const openProfileOrder = openSellOrder({
+      decisionRuleId: "PROFILE_LADDER",
+      signalReason: "profile-ladder-exit",
+      metadata: { source: "profile_ladder" },
+      status: OrderStatus.Open,
+    });
+    const ctx = setup(mediumHighPolicy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [] },
+      orderRepo: { findByTokenId: () => [openProfileOrder] },
+    });
+    ctx.repo.upsertLadder(stalePlannedNoLiveState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [stalePlannedNoLiveMarket()],
+      timestamp: NOW,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+      status: "active",
+      activeRungs: [{ price: 0.26, lifecycle: "planned" }],
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_stale_no_position_skipped",
+      value: 1,
+      labels:
+        '{"band":"medium_high","source":"planned_no_live_recovery","reason":"open_sell_exists"}',
+    });
+  });
+
+  it("reopens with a fresh ladder after a stale no-position ladder is closed", async () => {
+    let openPositions: Position[] = [];
+    const ctx = setup(mediumHighPolicy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => openPositions },
+      orderRepo: { findByTokenId: () => [] },
+    });
+    ctx.repo.upsertLadder(stalePlannedNoLiveState());
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [stalePlannedNoLiveMarket()],
+      timestamp: NOW,
+    });
+    expect(ctx.repo.getLadder(tokenId)?.status).toBe("closed");
+
+    openPositions = [stalePlannedNoLivePosition({ size: 8, costBasisUsdc: 2.07956 })];
+    await ctx.bus.publish("PositionUpdated", { position: openPositions[0]! });
+
+    const reopened = ctx.repo.getLadder(tokenId);
+    expect(ctx.orders).toHaveLength(1);
+    expect(reopened).toMatchObject({
+      status: "active",
+      lastCostBasisUsdc: 2.07956,
+    });
+    expect(JSON.parse(reopened?.metadataJson ?? "{}")).toMatchObject({
+      eventType: "ladder_placed",
     });
   });
 
@@ -1315,6 +1499,7 @@ describe("ProfileLadderModule", () => {
       const ctx = setup(policy(), {
         modeReader: { getMode: () => "flat" },
         bookCache,
+        positionRepo: { findOpen: () => [position()] },
         now: () => nowMs,
       });
       ctx.repo.upsertLadder(
@@ -1344,6 +1529,7 @@ describe("ProfileLadderModule", () => {
     let nowMs = NOW;
     const ctx = setup(policy(), {
       modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [position()] },
       now: () => nowMs,
     });
     await ctx.module.start();
@@ -1419,7 +1605,10 @@ describe("ProfileLadderModule", () => {
 
   it("rate-limits crossing-only planned rung retries", async () => {
     let nowMs = NOW;
-    const ctx = setup(policy(), { now: () => nowMs });
+    const ctx = setup(policy(), {
+      positionRepo: { findOpen: () => [position()] },
+      now: () => nowMs,
+    });
     ctx.repo.upsertLadder(
       ladderState({
         activeRungs: [rung({ price: 0.09, sizeShares: 60 })],
@@ -1468,7 +1657,11 @@ describe("ProfileLadderModule", () => {
 
   it("cooldown-gates planned rung retry after duplicate clientOrderId skip", async () => {
     let nowMs = NOW;
-    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" }, now: () => nowMs });
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [position()] },
+      now: () => nowMs,
+    });
     ctx.repo.upsertLadder(
       ladderState({
         activeRungs: [rung({ price: 0.12, sizeShares: 60 })],
@@ -3394,7 +3587,10 @@ describe("ProfileLadderModule", () => {
     it("rests after a full bottom-rung SELL fill, then places the next rung only once the cooldown elapses", async () => {
       vi.useFakeTimers();
       try {
-        const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+        const ctx = setup(policy(), {
+          modeReader: { getMode: () => "flat" },
+          positionRepo: { findOpen: () => [position()] },
+        });
         await placeAndBackfill(ctx);
         expect(ctx.orders).toHaveLength(1);
 
@@ -3431,10 +3627,48 @@ describe("ProfileLadderModule", () => {
       }
     });
 
+    it("does not place a post-fill next rung after the position is closed", async () => {
+      vi.useFakeTimers();
+      try {
+        let openPositions = [position()];
+        const ctx = setup(policy(), {
+          modeReader: { getMode: () => "flat" },
+          positionRepo: { findOpen: () => openPositions },
+          orderRepo: { findByTokenId: () => [] },
+        });
+        await placeAndBackfill(ctx);
+
+        await ctx.bus.publish(
+          "FillReceived",
+          fill({ orderId: createOrderId("profile-ladder-bottom-rung"), size: 95 }),
+        );
+        openPositions = [];
+
+        await vi.advanceTimersByTimeAsync(900_000 + 1);
+
+        expect(ctx.orders).toHaveLength(1);
+        expect(ctx.cancels).toHaveLength(0);
+        expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+          status: "closed",
+          closedAtMs: NOW,
+        });
+        expect(ctx.counters).toContainEqual({
+          name: "profile_ladder_stale_no_position_closed",
+          value: 1,
+          labels: '{"band":"medium_low","source":"post_fill_reeval","reason":"no_open_sell"}',
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("rests on a partial SELL fill and never duplicates the live rung at reevaluation", async () => {
       vi.useFakeTimers();
       try {
-        const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+        const ctx = setup(policy(), {
+          modeReader: { getMode: () => "flat" },
+          positionRepo: { findOpen: () => [position()] },
+        });
         await placeAndBackfill(ctx);
 
         await ctx.bus.publish(
@@ -3467,7 +3701,10 @@ describe("ProfileLadderModule", () => {
     it("does not chase up after a top-rung fill once the cooldown elapses", async () => {
       vi.useFakeTimers();
       try {
-        const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+        const ctx = setup(policy(), {
+          modeReader: { getMode: () => "flat" },
+          positionRepo: { findOpen: () => [position()] },
+        });
         const topOrderId = createOrderId("profile-ladder-top-rung");
         ctx.repo.upsertLadder(
           ladderState({
@@ -3611,7 +3848,10 @@ describe("ProfileLadderModule", () => {
     it("places the post-fill next rung with its own clientOrderId without cancelling the filled rung", async () => {
       vi.useFakeTimers();
       try {
-        const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+        const ctx = setup(policy(), {
+          modeReader: { getMode: () => "flat" },
+          positionRepo: { findOpen: () => [position()] },
+        });
         await ctx.module.start();
         await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
         await ctx.bus.publish("PositionUpdated", { position: position() });

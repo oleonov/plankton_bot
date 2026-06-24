@@ -15,7 +15,7 @@ import type {
   RuntimeModule,
   TokenId,
 } from "@krabs/domain";
-import { OrderStatus, PositionStatus, createCommandId, createPositionId } from "@krabs/domain";
+import { OrderStatus, PositionStatus, createCommandId } from "@krabs/domain";
 import { buildClientOrderId } from "@krabs/domain/node";
 
 import {
@@ -88,6 +88,12 @@ type ProfileLadderBookCacheStatus =
   | "cache-stale"
   | "refresh-budget-exhausted"
   | "refresh-failed";
+
+type StaleNoPositionSource =
+  | "bbo_rebuild"
+  | "planned_no_live_recovery"
+  | "planned_rung_retry"
+  | "post_fill_reeval";
 
 export interface ProfileLadderBookCache {
   getFreshOrRefresh(
@@ -567,6 +573,7 @@ export class ProfileLadderModule implements RuntimeModule {
         await this.recoverMissingAdoptedLadderIfReady(market);
         continue;
       }
+      if (state.status !== "active") continue;
       if (this.isDormant(market.tokenId)) {
         this.writeCounter("ladder_rebuild_skipped_dormant", 1);
         continue;
@@ -580,7 +587,9 @@ export class ProfileLadderModule implements RuntimeModule {
 
       const reason = resolveBboRebuildReason(state, market, this.policy());
       if (reason == null) continue;
-      await this.rebuildLadder(positionFromLadderState(state), market, reason);
+      const position = this.resolveOpenPositionForActiveLadder(state, "bbo_rebuild");
+      if (position == null) continue;
+      await this.rebuildLadder(position, market, reason);
     }
   }
 
@@ -600,6 +609,10 @@ export class ProfileLadderModule implements RuntimeModule {
 
     const state = this.deps.repository.getLadder(position.tokenId);
     if (state == null) {
+      await this.placeLadder(position, market);
+      return;
+    }
+    if (state.status === "closed") {
       await this.placeLadder(position, market);
       return;
     }
@@ -688,7 +701,7 @@ export class ProfileLadderModule implements RuntimeModule {
     this.deps.repository.upsertLadder(state);
 
     this.writeCounter("profile_ladder_planned_rungs", plan.rungs.length, { band: plan.band });
-    const liveRungs = await this.advanceLiveRungs(state, market, now);
+    const liveRungs = await this.advanceLiveRungs(state, market, now, position);
     this.writeCounter("profile_ladder_placed_live_rungs", liveRungs.placed, { band: plan.band });
     if (liveRungs.placed === 0 && state.activeRungs.some((rung) => rung.lifecycle === "planned")) {
       this.writeCounter("profile_ladder_planned_only_ladder_count", 1, { band: plan.band });
@@ -709,6 +722,7 @@ export class ProfileLadderModule implements RuntimeModule {
     state: LadderState,
     market: NormalizedMarket,
     now: number,
+    position: Position,
   ): Promise<LiveRungAdvanceResult> {
     const cap = this.resolveLiveRungCap(state.band);
     const pendingRungsForToken = this.pendingRungsForToken(state.tokenId);
@@ -717,7 +731,6 @@ export class ProfileLadderModule implements RuntimeModule {
       state.activeRungs.filter(
         (rung) => rung.lifecycle === "placed" || rung.lifecycle === "partially_filled",
       ).length + pendingRungsForToken.length;
-    const position = positionFromLadderState(state);
     let placed = 0;
     let skippedUnknownMinOrderSize = 0;
     let attempted = false;
@@ -777,7 +790,9 @@ export class ProfileLadderModule implements RuntimeModule {
     market: NormalizedMarket,
   ): Promise<boolean> {
     if (!this.canRetryPlannedLiveRungs(state)) return false;
-    const result = await this.advanceLiveRungs(state, market, this.now());
+    const position = this.resolveOpenPositionForActiveLadder(state, "planned_rung_retry");
+    if (position == null) return true;
+    const result = await this.advanceLiveRungs(state, market, this.now(), position);
     if (result.attempted) {
       this.armPlannedRungRetryCooldown(state.tokenId, this.now());
       return true;
@@ -799,6 +814,14 @@ export class ProfileLadderModule implements RuntimeModule {
     if (this.hasPendingRungForToken(state.tokenId)) return false;
 
     const openSellOrders = this.findOpenSellOrders(state.tokenId);
+    const position = this.resolveOpenPositionForActiveLadder(
+      state,
+      "planned_no_live_recovery",
+      openSellOrders,
+    );
+    if (position == null) {
+      return true;
+    }
     const openProfileLadderOrders = openSellOrders.filter(isProfileLadderOrder);
     if (openProfileLadderOrders.length > 0) {
       if (!stateTracksAnyOrder(state, openProfileLadderOrders)) {
@@ -816,8 +839,6 @@ export class ProfileLadderModule implements RuntimeModule {
       return true;
     }
 
-    const position = this.findOpenPosition(state.tokenId);
-    if (position == null) return false;
     const result = await this.buildAndPlace(position, market, "ladder_rebuilt", undefined, {
       preservePreviousLiveRungs: false,
       ladderIdSuffix: "planned_no_live_recovery",
@@ -910,6 +931,76 @@ export class ProfileLadderModule implements RuntimeModule {
         ?.findOpen()
         .find((position) => String(position.tokenId) === tokenKey && position.size > 0) ?? null
     );
+  }
+
+  private resolveOpenPositionForActiveLadder(
+    state: LadderState,
+    source: StaleNoPositionSource,
+    openSellOrders: readonly Order[] | null = null,
+  ): Position | null {
+    if (this.deps.positionRepo == null) {
+      this.skipActiveLadderWithoutOpenPosition(state, source, "position_reader_unavailable");
+      return null;
+    }
+    const position = this.findOpenPosition(state.tokenId);
+    if (position != null) return position;
+    if (this.isPlannedRungRetryCooldownActive(state.tokenId)) return null;
+    this.handleActiveLadderWithoutOpenPosition(state, source, openSellOrders);
+    return null;
+  }
+
+  private handleActiveLadderWithoutOpenPosition(
+    state: LadderState,
+    source: StaleNoPositionSource,
+    openSellOrders: readonly Order[] | null,
+  ): void {
+    if (this.deps.orderRepo == null) {
+      this.skipActiveLadderWithoutOpenPosition(state, source, "order_reader_unavailable");
+      return;
+    }
+    const currentOpenSellOrders = openSellOrders ?? this.findOpenSellOrders(state.tokenId);
+    if (currentOpenSellOrders.length > 0) {
+      this.skipActiveLadderWithoutOpenPosition(state, source, "open_sell_exists");
+      return;
+    }
+
+    const closedAtMs = this.now();
+    this.deps.repository.markClosed(state.tokenId, "stale_no_open_position", closedAtMs);
+    this.writeCounter("profile_ladder_stale_no_position_closed", 1, {
+      band: state.band,
+      source,
+      reason: "no_open_sell",
+    });
+    this.insertRiskEvent("profile_ladder_stale_no_position_closed", {
+      tokenId: String(state.tokenId),
+      conditionId: String(state.conditionId),
+      ladderId: state.ladderId,
+      band: state.band,
+      source,
+      reason: "no_open_sell",
+      closedAtMs,
+    });
+  }
+
+  private skipActiveLadderWithoutOpenPosition(
+    state: LadderState,
+    source: StaleNoPositionSource,
+    reason: "open_sell_exists" | "position_reader_unavailable" | "order_reader_unavailable",
+  ): void {
+    this.armPlannedRungRetryCooldown(state.tokenId, this.now());
+    this.writeCounter("profile_ladder_stale_no_position_skipped", 1, {
+      band: state.band,
+      source,
+      reason,
+    });
+    this.insertRiskEvent("profile_ladder_stale_no_position_skipped", {
+      tokenId: String(state.tokenId),
+      conditionId: String(state.conditionId),
+      ladderId: state.ladderId,
+      band: state.band,
+      source,
+      reason,
+    });
   }
 
   private armMissingLadderRecoveryCooldown(tokenId: TokenId): void {
@@ -1389,7 +1480,9 @@ export class ProfileLadderModule implements RuntimeModule {
     }
     const market = this.marketByToken.get(String(tokenId));
     if (market == null) return;
-    const placed = await this.advanceLiveRungs(state, market, this.now());
+    const position = this.resolveOpenPositionForActiveLadder(state, "post_fill_reeval");
+    if (position == null) return;
+    const placed = await this.advanceLiveRungs(state, market, this.now(), position);
     this.writeCounter("profile_ladder_post_fill_action", 1, {
       action: placed.placed > 0 ? "place_next" : "rest",
       band: state.band,
@@ -1898,30 +1991,6 @@ function parseBboReference(
   } catch {
     return null;
   }
-}
-
-function positionFromLadderState(state: LadderState): Position {
-  const size =
-    isPositiveFinite(state.lastAvgEntry) && isPositiveFinite(state.lastCostBasisUsdc)
-      ? state.lastCostBasisUsdc / state.lastAvgEntry
-      : 0;
-  const openedAt = new Date(state.createdAtMs).toISOString();
-  return {
-    positionId: createPositionId(`profile-ladder-rebuild-${String(state.tokenId)}`),
-    tokenId: state.tokenId,
-    conditionId: state.conditionId,
-    side: "buy",
-    size,
-    avgEntryPrice: state.lastAvgEntry,
-    costBasisUsdc: state.lastCostBasisUsdc,
-    currentValueUsdc: state.lastCostBasisUsdc,
-    realizedPnl: 0,
-    status: PositionStatus.Open,
-    entryStyle: "probe",
-    openedAt,
-    closedAt: null,
-    updatedAt: new Date(state.updatedAtMs).toISOString(),
-  };
 }
 
 function hasPositionBasisChanged(state: LadderState, position: Position): boolean {
