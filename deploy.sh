@@ -24,6 +24,12 @@ if [ ! -f ".env.production" ]; then
     echo "Copy .env.production.example to .env.production and fill in your values."
     exit 1
 fi
+if grep -Eq '^ALCHEMY_POLYGON_KEYS=.+$' .env.production && grep -Eq '^(POLYGON_RPC_URL|POLYGON_RPC_URLS)=' .env.production; then
+    echo -e "${RED}ERROR: mixed Polygon RPC env in .env.production.${NC}"
+    echo "ALCHEMY_POLYGON_KEYS is the source of truth; remove these deprecated legacy vars:"
+    grep -E '^(POLYGON_RPC_URL|POLYGON_RPC_URLS)=' .env.production | cut -d'=' -f1 | sort -u
+    exit 1
+fi
 
 # Load deploy-time secrets (GHCR_PAT) — NOT shipped to server
 if [ ! -f ".env.deploy" ]; then
