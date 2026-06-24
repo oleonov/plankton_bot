@@ -1337,6 +1337,7 @@ async function main(): Promise<void> {
     algoRulesRepo: repos.algoRules,
     positionRepo: repos.position,
     orderRepo: repos.order,
+    ledgerDb: ledgerConn.db,
     decisionSignalLogRepo: repos.decisionSignalLog,
     riskEventRepo: repos.riskEvent,
     runtimeMetrics,

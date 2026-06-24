@@ -475,6 +475,12 @@ export interface AlgoDecisionModuleDeps {
    */
   positionRepo?: Pick<PositionRepository, "findByTokenId" | "findOpen"> | undefined;
   orderRepo?: Pick<OrderRepository, "findByTokenId" | "findRecentByTokenId"> | undefined;
+  /**
+   * Read-only startup recovery for recent BUY no-order-id rejects. The live
+   * event path owns the cooldown in memory, but deploy/restart must not clear a
+   * just-triggered no-id loop before reconciliation has had time to observe it.
+   */
+  ledgerDb?: Database.Database | undefined;
   decisionSignalLogRepo?: DecisionSignalLogRepository | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
   selectedMarketCache: SelectedMarketCache;
@@ -571,6 +577,10 @@ const FULL_SWEEP_INTERVAL_MS = 60_000;
 const OPEN_POSITION_WORKING_SET_REFRESH_MS = 5 * 60_000;
 const LIVE_LITE_ACTIVE_MARKETS_CAP_FULL_REASON = "live_lite_active_markets_cap_full";
 const R23_PROBE_CAP_FULL_SKIP_METRIC = "r23_probe_skipped_active_market_cap_full_total";
+const R23_PROBE_NO_ORDER_ID_COOLDOWN_REASON = "r23_probe_no_order_id_cooldown";
+const R23_PROBE_NO_ORDER_ID_COOLDOWN_METRIC = "r23_probe_no_order_id_cooldown_suppressed_total";
+const R23_PROBE_NO_ORDER_ID_RECOVERED_METRIC = "r23_probe_no_order_id_cooldown_recovered_total";
+const R23_PROBE_NO_ORDER_ID_COOLDOWN_MS = 15 * 60 * 1000;
 const OPEN_POSITION_STALE_EVALUATION_WARN_MS = 24 * 60 * 60_000;
 
 /**
@@ -748,6 +758,23 @@ function isOpenPosition(position: Position | null | undefined): position is Posi
   return position?.status === "open" && position.size > 0;
 }
 
+function isNoOrderIdRejectText(values: readonly (string | null | undefined)[]): boolean {
+  const text = values
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join(" | ")
+    .toLowerCase();
+  return (
+    text.includes("exchange returned no order id") ||
+    text.includes("gateway returned success without order id")
+  );
+}
+
+function parseLedgerTimestampMs(value: string | null | undefined): number {
+  if (!value) return Number.NaN;
+  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  return Date.parse(normalized);
+}
+
 export class AlgoDecisionModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly persistence: DecisionPersistenceBuffer;
@@ -828,6 +855,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly staticRuleSellBelowAvgEntryDedupe = new Map<string, number>();
   private readonly d9ProfileOwnedSuppressionDedupe = new Map<string, number>();
   private readonly lastBuyFillByWallet = new Map<string, number>();
+  private readonly r23ProbeNoOrderIdCooldownUntilMs = new Map<string, number>();
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
   private buyBudgetRecoveryNotionalUsdc = 0;
@@ -892,6 +920,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.buySizeRules = this.deps.algoRulesRepo.getSizeRules("BUY");
     this.sellSizeRules = this.deps.algoRulesRepo.getSizeRules("SELL");
     this.hydrateDecisionStateCaches();
+    this.recoverR23ProbeNoOrderIdCooldowns();
     this.lastOpenPositionWorkingSetRefreshAt = Date.now();
     this.refreshOpenPositionWorkingSet(this.lastOpenPositionWorkingSetRefreshAt, false);
 
@@ -1276,6 +1305,10 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async handleOrderRejected(payload: RuntimeEventMap["OrderRejected"]): Promise<void> {
+    if (this.isR23ProbeNoOrderIdBuyRejection(payload)) {
+      this.activateR23ProbeNoOrderIdCooldown(payload.tokenId, payload.timestamp);
+    }
+
     const clientOrderId = String(payload.clientOrderId);
     const tokenId = this.clientOrderToToken.get(clientOrderId);
     if (tokenId) {
@@ -1368,6 +1401,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.lastFullSweepAt = now;
       this.markFullSweepDirty();
     }
+    this.pruneR23ProbeNoOrderIdCooldowns(now);
     await this.evaluateDirtyTokens();
   }
 
@@ -1574,6 +1608,18 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.recordR23ProbeSkippedActiveMarketCapFull();
       return null;
     }
+    if (
+      this.shouldSkipFlatProbeForR23NoOrderIdCooldown(
+        tokenId,
+        legState,
+        openPosition,
+        selectedForEntry,
+        now,
+      )
+    ) {
+      this.recordR23ProbeNoOrderIdCooldownSuppressed();
+      return null;
+    }
 
     const market = this.marketCache.get(String(tokenId)) ?? null;
     const prevMidPrice = this.prevMidPrices.get(String(tokenId)) ?? null;
@@ -1669,6 +1715,115 @@ export class AlgoDecisionModule implements RuntimeModule {
         action: "skip",
       }),
     );
+  }
+
+  private shouldSkipFlatProbeForR23NoOrderIdCooldown(
+    tokenId: TokenId,
+    legState: LegState | null,
+    openPosition: Position | null,
+    selectedForEntry: boolean,
+    now: number,
+  ): boolean {
+    if (!selectedForEntry) return false;
+    if (legState || openPosition) return false;
+    const blockedUntilMs = this.r23ProbeNoOrderIdCooldownUntilMs.get(String(tokenId));
+    if (blockedUntilMs == null) return false;
+    if (now < blockedUntilMs) return true;
+    this.r23ProbeNoOrderIdCooldownUntilMs.delete(String(tokenId));
+    return false;
+  }
+
+  private recordR23ProbeNoOrderIdCooldownSuppressed(): void {
+    this.deps.runtimeMetrics?.writeCounter(
+      R23_PROBE_NO_ORDER_ID_COOLDOWN_METRIC,
+      1,
+      JSON.stringify({
+        reason: R23_PROBE_NO_ORDER_ID_COOLDOWN_REASON,
+        rule: R23_DIP_TRIGGER_RULE_ID,
+        source: "probe-entry",
+        action: "skip",
+      }),
+    );
+  }
+
+  private isR23ProbeNoOrderIdBuyRejection(event: RuntimeEventMap["OrderRejected"]): boolean {
+    if (event.side !== "buy") return false;
+    if (event.decisionRuleId !== R23_DIP_TRIGGER_RULE_ID) return false;
+    if (event.signalReason !== "probe-entry") return false;
+    return isNoOrderIdRejectText([event.reason, event.exchangeErrorMessage]);
+  }
+
+  private activateR23ProbeNoOrderIdCooldown(tokenId: TokenId, timestampMs: number): void {
+    const eventAt = Number.isFinite(timestampMs) && timestampMs > 0 ? timestampMs : Date.now();
+    const blockedUntilMs = eventAt + R23_PROBE_NO_ORDER_ID_COOLDOWN_MS;
+    const key = String(tokenId);
+    const current = this.r23ProbeNoOrderIdCooldownUntilMs.get(key) ?? 0;
+    if (blockedUntilMs > current) {
+      this.r23ProbeNoOrderIdCooldownUntilMs.set(key, blockedUntilMs);
+    }
+  }
+
+  private pruneR23ProbeNoOrderIdCooldowns(nowMs: number): void {
+    for (const [tokenId, blockedUntilMs] of this.r23ProbeNoOrderIdCooldownUntilMs) {
+      if (nowMs >= blockedUntilMs) this.r23ProbeNoOrderIdCooldownUntilMs.delete(tokenId);
+    }
+  }
+
+  private recoverR23ProbeNoOrderIdCooldowns(): void {
+    const db = this.deps.ledgerDb;
+    if (!db) return;
+
+    const nowMs = Date.now();
+    const cutoffIso = new Date(nowMs - R23_PROBE_NO_ORDER_ID_COOLDOWN_MS).toISOString();
+    try {
+      const rows = db
+        .prepare(
+          `SELECT token_id, MAX(updated_at) AS last_rejected_at
+           FROM orders
+           WHERE side = 'buy'
+             AND status = 'rejected'
+             AND decision_rule_id = ?
+             AND signal_reason = 'probe-entry'
+             AND exchange_error_message IN (
+               'exchange returned no order id',
+               'gateway returned success without order id'
+             )
+             AND updated_at >= ?
+           GROUP BY token_id`,
+        )
+        .all(R23_DIP_TRIGGER_RULE_ID, cutoffIso) as Array<{
+        token_id: string;
+        last_rejected_at: string | null;
+      }>;
+
+      let recovered = 0;
+      for (const row of rows) {
+        const rejectedAtMs = parseLedgerTimestampMs(row.last_rejected_at);
+        if (!Number.isFinite(rejectedAtMs)) continue;
+        const blockedUntilMs = rejectedAtMs + R23_PROBE_NO_ORDER_ID_COOLDOWN_MS;
+        if (blockedUntilMs <= nowMs) continue;
+        this.r23ProbeNoOrderIdCooldownUntilMs.set(row.token_id, blockedUntilMs);
+        recovered++;
+      }
+      if (recovered > 0) {
+        this.deps.runtimeMetrics?.writeCounter(
+          R23_PROBE_NO_ORDER_ID_RECOVERED_METRIC,
+          recovered,
+          JSON.stringify({
+            reason: R23_PROBE_NO_ORDER_ID_COOLDOWN_REASON,
+            rule: R23_DIP_TRIGGER_RULE_ID,
+            source: "probe-entry",
+            action: "recover",
+          }),
+        );
+        this.log.warn(
+          { recovered, cooldownMs: R23_PROBE_NO_ORDER_ID_COOLDOWN_MS },
+          "recovered R23 probe no-order-id cooldowns from rejected orders",
+        );
+      }
+    } catch (err) {
+      this.log.warn({ err }, "failed to recover R23 probe no-order-id cooldowns");
+    }
   }
 
   private getLatestSellOrderForSizing(tokenId: TokenId): SellOrderSizingContext | null {

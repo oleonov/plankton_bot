@@ -432,6 +432,31 @@ function makeOrderPlaced(
   };
 }
 
+function makeR23NoOrderIdRejected(
+  tokenId: string,
+  timestamp = Date.now(),
+  overrides: Partial<RuntimeEventMap["OrderRejected"]> = {},
+): RuntimeEventMap["OrderRejected"] {
+  return {
+    commandId: createCommandId(`cmd-r23-no-id-${tokenId}-${timestamp}`),
+    clientOrderId:
+      `client-r23-no-id-${tokenId}-${timestamp}` as RuntimeEventMap["OrderRejected"]["clientOrderId"],
+    tokenId: createTokenId(tokenId),
+    conditionId: "cond-1" as ConditionId,
+    reason: "exchange returned no order id",
+    errorCode: "UNKNOWN" as RuntimeEventMap["OrderRejected"]["errorCode"],
+    signalReason: "probe-entry",
+    side: "buy",
+    signalId: `signal-r23-no-id-${tokenId}-${timestamp}`,
+    decisionRuleId: "R23_DIP_TRIGGER",
+    signalTimestamp: new Date(timestamp).toISOString(),
+    exchangeErrorMessage: "exchange returned no order id",
+    exchangeErrorDetails: { responseBody: {} },
+    timestamp,
+    ...overrides,
+  };
+}
+
 function makeSuppressionFacts(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const tokenId = String(overrides.tokenId ?? "token-rollup");
   return {
@@ -1333,6 +1358,229 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("suppresses same-token R23 probe after no-order-id BUY rejection", async () => {
+    const tokenId = "token-r23-no-id-cooldown";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      maxMidpointInWindow: vi.fn(() => 0.6),
+    };
+    const mod = buildModule({
+      runtimeMetrics,
+      priceHistoryProvider,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("OrderRejected", makeR23NoOrderIdRejected(tokenId));
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.3)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(0);
+    expect(priceHistoryProvider.maxMidpointInWindow).not.toHaveBeenCalled();
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "r23_probe_no_order_id_cooldown_suppressed_total",
+      1,
+      expect.not.stringContaining("token"),
+    );
+    const labels = JSON.parse(
+      (runtimeMetrics.writeCounter as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([name]) => name === "r23_probe_no_order_id_cooldown_suppressed_total",
+      )?.[2] as string,
+    );
+    expect(Object.keys(labels).sort()).toEqual(["action", "reason", "rule", "source"]);
+    expect(labels).toMatchObject({
+      action: "skip",
+      reason: "r23_probe_no_order_id_cooldown",
+      rule: "R23_DIP_TRIGGER",
+      source: "probe-entry",
+    });
+
+    await mod.stop();
+  });
+
+  it("allows R23 probe retry after no-order-id cooldown expires", async () => {
+    const tokenId = "token-r23-no-id-expired";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      maxMidpointInWindow: vi.fn(() => 0.6),
+    };
+    const mod = buildModule({
+      priceHistoryProvider,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit(
+      "OrderRejected",
+      makeR23NoOrderIdRejected(tokenId, Date.now() - 16 * 60_000),
+    );
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.3)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    expect(signalCalls[0]![1].signal.decisionRuleId).toBe("R23_DIP_TRIGGER");
+    expect(priceHistoryProvider.maxMidpointInWindow).toHaveBeenCalled();
+
+    await mod.stop();
+  });
+
+  it("does not suppress a different token after R23 probe no-order-id cooldown", async () => {
+    const blockedToken = "token-r23-no-id-blocked";
+    const allowedToken = "token-r23-no-id-allowed";
+    selectedMarketCache = createMockSelectedMarketCache([blockedToken, allowedToken]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      maxMidpointInWindow: vi.fn(() => 0.6),
+    };
+    const mod = buildModule({
+      priceHistoryProvider,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("OrderRejected", makeR23NoOrderIdRejected(blockedToken));
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(blockedToken, null, 0.3), makeMarket(allowedToken, null, 0.3)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    expect(signalCalls[0]![1].signal.tokenId).toBe(allowedToken);
+    expect(signalCalls[0]![1].signal.decisionRuleId).toBe("R23_DIP_TRIGGER");
+
+    await mod.stop();
+  });
+
+  it("recovers recent R23 probe no-order-id cooldowns from rejected orders on startup", async () => {
+    const tokenId = "token-r23-no-id-recovered";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const ledgerDb = new Database(":memory:");
+    ledgerDb.exec(`
+      CREATE TABLE orders (
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        status TEXT NOT NULL,
+        decision_rule_id TEXT,
+        signal_reason TEXT,
+        exchange_error_message TEXT,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    ledgerDb
+      .prepare(
+        `INSERT INTO orders
+         (token_id, side, status, decision_rule_id, signal_reason, exchange_error_message, updated_at)
+         VALUES (?, 'buy', 'rejected', 'R23_DIP_TRIGGER', 'probe-entry',
+                 'exchange returned no order id', ?)`,
+      )
+      .run(tokenId, new Date().toISOString());
+    const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      maxMidpointInWindow: vi.fn(() => 0.6),
+    };
+    const mod = buildModule({
+      ledgerDb,
+      runtimeMetrics,
+      priceHistoryProvider,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+
+    try {
+      await mod.start();
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.3)],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls).toHaveLength(0);
+      expect(priceHistoryProvider.maxMidpointInWindow).not.toHaveBeenCalled();
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "r23_probe_no_order_id_cooldown_recovered_total",
+        1,
+        expect.not.stringContaining(tokenId),
+      );
+    } finally {
+      await mod.stop();
+      ledgerDb.close();
+    }
+  });
+
   it("resumes flat R23 probe generation after an active market slot is freed", async () => {
     const tokenId = "token-r23-resume";
     const activeTokenId = "token-active-before-close";
@@ -1465,6 +1713,7 @@ describe("AlgoDecisionModule", () => {
     });
     await mod.start();
 
+    await (bus as any).emit("OrderRejected", makeR23NoOrderIdRejected(tokenId));
     await (bus as any).emit("NormalizedMarketUpdated", {
       markets: [makeMarket(tokenId, null, 0.1)],
       timestamp: Date.now(),
