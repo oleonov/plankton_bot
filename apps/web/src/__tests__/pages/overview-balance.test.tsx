@@ -80,6 +80,82 @@ describe("Overview Balance Card", () => {
     expect(within(card).getByText(/\$62\.51 position value \/ \$100\.00 cap/i)).toBeInTheDocument();
   });
 
+  it("replaces the live-lite envelope with compact risk capacity", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          runtimeMode: "live-lite",
+          walletBalanceUsdc: 487,
+          polymarketPortfolio: {
+            portfolioUsdc: 549.51,
+            availableUsdc: 487,
+            positionValueUsdc: 62.51,
+            positionCount: 23,
+            costBasisUsdc: 50.04,
+            source: "polymarket",
+            capturedAt: "2026-04-24T13:25:55.000Z",
+          },
+          openOrderBreakdown: {
+            total: 42,
+            buy: { open: 3, cap: 25 },
+            sell: { open: 39, cap: 200 },
+            profileLadderSell: { open: 39 },
+          },
+          liveLite: {
+            maxOpenValueUsdc: 500,
+            maxOrderUsdc: 25,
+            maxActiveMarkets: 250,
+            activeMarketCount: 101,
+            activeMarketCapUtilizationPct: 40.4,
+            walletMode: "relayer",
+            minOrderUsdc: 0.05,
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    const card = await screen.findByTestId("risk-capacity-card");
+    expect(within(card).getByText("Risk Capacity")).toBeInTheDocument();
+    expect(within(card).getByText("101/250")).toBeInTheDocument();
+    expect(within(card).getByText("40%")).toBeInTheDocument();
+    expect(within(card).getByText("$549.51")).toBeInTheDocument();
+    expect(within(card).getByText("3/25")).toBeInTheDocument();
+    expect(within(card).getByText("39/200")).toBeInTheDocument();
+    expect(screen.queryByText(/Live-Lite Envelope/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Wallet: RELAYER/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Min order/i)).not.toBeInTheDocument();
+  });
+
+  it("uses runtime health instead of a redundant runtime-mode card", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          runtimeMode: "live-lite",
+          paused: false,
+          tradingState: "EXITS_ONLY",
+          liveLite: {
+            maxOpenValueUsdc: 500,
+            maxOrderUsdc: 25,
+            maxActiveMarkets: 250,
+            activeMarketCount: 101,
+            activeMarketCapUtilizationPct: 40.4,
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    expect(await screen.findByText("Runtime Health")).toBeInTheDocument();
+    expect(screen.getByText("RUNNING")).toBeInTheDocument();
+    expect(screen.getAllByText("EXITS ONLY").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Runtime Mode")).not.toBeInTheDocument();
+  });
+
   it("falls back to local if-close-all when Polymarket portfolio is unavailable", async () => {
     server.use(
       http.get("/api/v1/status", () =>
@@ -209,6 +285,78 @@ describe("Overview Balance Card", () => {
     expect(within(card).getByText("View selection rules")).toBeInTheDocument();
   });
 
+  it("shows compact trading activity instead of the raw capacity chain", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          tradingState: "EXITS_ONLY",
+          signalActivity: {
+            signalsProducedLast10m: 47,
+            signalsApprovedLast10m: 47,
+            signalsRejectedLast10m: 0,
+            entrySignalsApprovedLast10m: 0,
+            exitSignalsApprovedLast10m: 47,
+            lastEntryApprovedAt: "2026-04-05T11:00:00Z",
+            lastSignalRejectedAt: null,
+            approvalRate: 100,
+          },
+          executionQueue: {
+            activeCount: 0,
+            queueDepth: 0,
+            reservedBuyUsdc: 12.34,
+            freeUsdcForNewOrders: 56.78,
+            buyCapacity: {
+              enabled: true,
+              minNewEntryWalletHeadroomUsdc: 7,
+              minAddWalletHeadroomUsdc: 5,
+              maxOpenBuyOrders: 25,
+              maxOpenBuyOrdersPerToken: 2,
+              openBuyOrderCount: 1,
+              newEntryCapacityUsdc: 10,
+              addCapacityUsdc: 11,
+              entriesBlocked: false,
+              addsBlocked: false,
+            },
+            sellCapacity: {
+              enabled: true,
+              maxOpenSellOrders: 200,
+              maxOpenSellOrdersPerToken: 2,
+              openSellOrderCount: 39,
+              blocked: false,
+            },
+            orderCapacity: {
+              enabled: true,
+              maxOpenOrdersTotal: 200,
+              openOrdersTotal: 40,
+              blocked: false,
+            },
+          },
+          openOrderBreakdown: {
+            total: 40,
+            buy: { open: 1, cap: 25 },
+            sell: { open: 39, cap: 200 },
+            profileLadderSell: { open: 39 },
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    expect((await screen.findAllByText("EXITS ONLY")).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/Signals 47 produced \/ 0 rejected/)).toBeInTheDocument();
+    expect(screen.getByText(/Orders 0 active \/ 0 queued/)).toBeInTheDocument();
+    expect(screen.getByText("BUY 1/25")).toBeInTheDocument();
+    expect(screen.getByText("SELL 39/200")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Entry capacity exhausted|Only exit signals active/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/reserved buy/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/per token/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/entry reserve/i)).not.toBeInTheDocument();
+  });
+
   it("shows last order placed by createdAt, not last status update", async () => {
     vi.spyOn(Date, "now").mockReturnValue(new Date("2026-04-05T12:00:00Z").getTime());
 
@@ -313,6 +461,82 @@ describe("Overview Balance Card", () => {
     expect(ordersCard).toHaveTextContent("S ?/?");
     expect(ordersCard).toHaveTextContent("PL ?");
     expect(ordersCard).not.toHaveTextContent("0 in last min");
+  });
+
+  it("uses execution queue order capacity fallback consistently when breakdown is missing", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          runtimeMode: "live-lite",
+          walletBalanceUsdc: 487,
+          openOrderBreakdown: undefined,
+          openOrderCount: 16,
+          tradingState: "EXITS_ONLY",
+          signalActivity: {
+            signalsProducedLast10m: 12,
+            signalsApprovedLast10m: 10,
+            signalsRejectedLast10m: 2,
+            entrySignalsApprovedLast10m: 0,
+            exitSignalsApprovedLast10m: 10,
+            lastEntryApprovedAt: null,
+            lastSignalRejectedAt: null,
+            approvalRate: 83,
+          },
+          executionQueue: {
+            activeCount: 1,
+            queueDepth: 2,
+            buyCapacity: {
+              enabled: true,
+              minNewEntryWalletHeadroomUsdc: 7,
+              minAddWalletHeadroomUsdc: 5,
+              maxOpenBuyOrders: 25,
+              maxOpenBuyOrdersPerToken: 2,
+              openBuyOrderCount: 4,
+              newEntryCapacityUsdc: 10,
+              addCapacityUsdc: 11,
+              entriesBlocked: false,
+              addsBlocked: false,
+            },
+            sellCapacity: {
+              enabled: true,
+              maxOpenSellOrders: 200,
+              maxOpenSellOrdersPerToken: 2,
+              openSellOrderCount: 12,
+              blocked: false,
+            },
+            orderCapacity: {
+              enabled: true,
+              maxOpenOrdersTotal: 225,
+              openOrdersTotal: 16,
+              blocked: false,
+            },
+          },
+          liveLite: {
+            maxOpenValueUsdc: 500,
+            maxOrderUsdc: 25,
+            maxActiveMarkets: 250,
+            activeMarketCount: 101,
+            activeMarketCapUtilizationPct: 40.4,
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    const ordersCard = (await screen.findByText("Open Orders")).closest(".card");
+    expect(ordersCard).toBeInstanceOf(HTMLElement);
+    expect(ordersCard).toHaveTextContent("16");
+    expect(ordersCard).toHaveTextContent("B 4/25");
+    expect(ordersCard).toHaveTextContent("S 12/200");
+
+    const riskCapacity = screen.getByTestId("risk-capacity-card");
+    expect(within(riskCapacity).getByText("4/25")).toBeInTheDocument();
+    expect(within(riskCapacity).getByText("12/200")).toBeInTheDocument();
+
+    expect(screen.getByText("BUY 4/25")).toBeInTheDocument();
+    expect(screen.getByText("SELL 12/200")).toBeInTheDocument();
   });
 
   it("keeps Last Events focused on timestamped events only", async () => {

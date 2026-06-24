@@ -13,7 +13,6 @@ import type {
   DashboardKpiData,
   DashboardHealthSeverity,
   DashboardHealthCheck,
-  DashboardWinrateCohort,
   StatusData,
 } from "../api/types.ts";
 
@@ -66,55 +65,25 @@ function formatExecutionRejects(rejects?: Record<string, number>): string | null
     .join(", ");
 }
 
-function formatBuyCapacity(
-  capacity?: NonNullable<import("../api/types.ts").StatusData["executionQueue"]>["buyCapacity"],
-): string | null {
-  if (!capacity?.enabled) return null;
-  const parts = [
-    `entry reserve ${formatUsd(capacity.minNewEntryWalletHeadroomUsdc)}`,
-    `add reserve ${formatUsd(capacity.minAddWalletHeadroomUsdc)}`,
-    `open buys ${capacity.openBuyOrderCount}/${capacity.maxOpenBuyOrders}`,
-    `per token ${capacity.maxOpenBuyOrdersPerToken}`,
-  ];
-  if (capacity.newEntryCapacityUsdc != null) {
-    parts.push(`entry cap ${formatUsd(capacity.newEntryCapacityUsdc)}`);
-  }
-  if (capacity.addCapacityUsdc != null) {
-    parts.push(`add cap ${formatUsd(capacity.addCapacityUsdc)}`);
-  }
-  return parts.join(" · ");
-}
-
-function formatOrderCapacity(
-  queue?: NonNullable<import("../api/types.ts").StatusData["executionQueue"]>,
-): string | null {
-  if (!queue) return null;
-  const parts: string[] = [];
-  if (queue.sellCapacity?.enabled) {
-    parts.push(
-      `sells ${queue.sellCapacity.openSellOrderCount}/${queue.sellCapacity.maxOpenSellOrders}`,
-      `sell/token ${queue.sellCapacity.maxOpenSellOrdersPerToken}`,
-    );
-  }
-  if (queue.orderCapacity?.enabled) {
-    parts.push(
-      `total ${queue.orderCapacity.openOrdersTotal}/${queue.orderCapacity.maxOpenOrdersTotal}`,
-    );
-  }
-  return parts.length > 0 ? parts.join(" · ") : null;
-}
-
 function formatOrderBreakdownValue(value: number | null | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "?";
 }
 
+function resolveOrderCapacity(status: StatusData) {
+  const breakdown = status.openOrderBreakdown;
+  return {
+    buyOpen: breakdown?.buy.open ?? status.executionQueue?.buyCapacity?.openBuyOrderCount,
+    buyCap: breakdown?.buy.cap ?? status.executionQueue?.buyCapacity?.maxOpenBuyOrders,
+    sellOpen: breakdown?.sell.open ?? status.executionQueue?.sellCapacity?.openSellOrderCount,
+    sellCap: breakdown?.sell.cap ?? status.executionQueue?.sellCapacity?.maxOpenSellOrders,
+    profileLadderSellOpen: breakdown?.profileLadderSell.open,
+  };
+}
+
 function OpenOrdersCard({ status }: { status: StatusData }) {
   const breakdown = status.openOrderBreakdown;
-  const buyOpen = breakdown?.buy.open ?? status.executionQueue?.buyCapacity?.openBuyOrderCount;
-  const buyCap = breakdown?.buy.cap ?? status.executionQueue?.buyCapacity?.maxOpenBuyOrders;
-  const sellOpen = breakdown?.sell.open ?? status.executionQueue?.sellCapacity?.openSellOrderCount;
-  const sellCap = breakdown?.sell.cap ?? status.executionQueue?.sellCapacity?.maxOpenSellOrders;
-  const profileLadderSellOpen = breakdown?.profileLadderSell.open;
+  const { buyOpen, buyCap, sellOpen, sellCap, profileLadderSellOpen } =
+    resolveOrderCapacity(status);
 
   return (
     <div
@@ -133,6 +102,108 @@ function OpenOrdersCard({ status }: { status: StatusData }) {
       </div>
     </div>
   );
+}
+
+function RuntimeHealthCard({ status }: { status: StatusData }) {
+  const marketFreshness = status.marketDataStale ? "STALE" : "FRESH";
+  return (
+    <div className={status.paused ? "card card-accent-red" : "card card-accent-green"}>
+      <div className="label">Runtime Health</div>
+      <div className={status.paused ? "value-lg text-red" : "value-lg text-green"}>
+        {status.paused ? "PAUSED" : "RUNNING"}
+      </div>
+      <div className="value-sm">{tradingStateLabel(status.tradingState)}</div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        recon {formatAgo(status.lastReconciliationAt)} · mktdata {marketFreshness}
+      </div>
+    </div>
+  );
+}
+
+function RiskCapacityCard({ status }: { status: StatusData }) {
+  if (!status.liveLite) return null;
+  const live = status.liveLite;
+  const activeMarkets =
+    live.activeMarketCount != null
+      ? `${live.activeMarketCount}/${live.maxActiveMarkets}`
+      : `—/${live.maxActiveMarkets}`;
+  const activeMarketPct =
+    live.activeMarketCapUtilizationPct != null
+      ? `${live.activeMarketCapUtilizationPct.toFixed(0)}%`
+      : "—";
+  const equity =
+    status.polymarketPortfolio?.portfolioUsdc ??
+    (status.walletBalanceUsdc != null
+      ? status.walletBalanceUsdc + status.totalCurrentValueUsdc
+      : null);
+  const { buyOpen, buyCap, sellOpen, sellCap, profileLadderSellOpen } =
+    resolveOrderCapacity(status);
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }} data-testid="risk-capacity-card">
+      <div className="label">Risk Capacity</div>
+      <div
+        style={{
+          display: "grid",
+          gap: 12,
+          gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+          marginTop: 10,
+        }}
+      >
+        <CapacityMetric label="Markets" value={activeMarkets} detail={activeMarketPct} />
+        <CapacityMetric label="Portfolio" value={formatUsd(equity)} detail="equity" />
+        <CapacityMetric
+          label="Open BUY"
+          value={`${formatOrderBreakdownValue(buyOpen)}/${formatOrderBreakdownValue(buyCap)}`}
+          detail="orders"
+        />
+        <CapacityMetric
+          label="Open SELL"
+          value={`${formatOrderBreakdownValue(sellOpen)}/${formatOrderBreakdownValue(sellCap)}`}
+          detail={`${formatOrderBreakdownValue(profileLadderSellOpen)} PL`}
+        />
+      </div>
+      <div className="value-sm" style={{ color: "var(--text-dim)", marginTop: 10 }}>
+        Legacy envelope: {formatUsd(live.maxOpenValueUsdc)} open value ·{" "}
+        {formatUsd(live.maxOrderUsdc)} max order
+      </div>
+    </div>
+  );
+}
+
+function CapacityMetric({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <div>
+      <div className="value-sm" style={{ color: "var(--text-muted)" }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}>{value}</div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        {detail}
+      </div>
+    </div>
+  );
+}
+
+function tradingActivityWarnings(status: StatusData): string[] {
+  const queue = status.executionQueue;
+  const warnings: string[] = [];
+  const replacementLocks = queue?.cancelReplacePendingCount ?? 0;
+  const reservationRejects = queue?.internalReservationRejectsLast10m ?? 0;
+  const executionRejects = formatExecutionRejects(queue?.gatewayRejectsLast10mByCode);
+
+  if (replacementLocks > 0) warnings.push(`replace locks ${replacementLocks}`);
+  if (reservationRejects > 0) warnings.push(`reservation rejects ${reservationRejects}`);
+  if (executionRejects) warnings.push(`gateway rejects ${executionRejects}`);
+  return warnings;
 }
 
 function exitsOnlyMessage(status: StatusData): string {
@@ -316,49 +387,6 @@ function KpiCardShell({
   );
 }
 
-function WinrateCohortBlock({
-  cohort,
-  cutoff,
-  testId,
-}: {
-  cohort: DashboardWinrateCohort;
-  cutoff: string;
-  testId: "pre_v072" | "post_v072";
-}) {
-  const severity = severityFromValue(cohort.value, KPI_THRESHOLDS.winrate);
-  return (
-    <div
-      className="kpi-cohort"
-      data-state={severity}
-      data-testid={`kpi-winrate-cohort-${testId}`}
-      title={`v072 deploy cutoff: ${cutoff}`}
-    >
-      <div className="kpi-cohort__head">
-        <span className="kpi-cohort__label">{cohort.label}</span>
-        <span
-          className={`kpi-cohort__value ${severityClass(severity, "kpi-cohort__value")}`}
-          data-testid={`kpi-winrate-cohort-${testId}-value`}
-        >
-          {formatPercent(cohort.value)}
-        </span>
-      </div>
-      <div className="kpi-cohort__line">
-        <span>{formatThousands(cohort.total)} closed</span>
-        <span>
-          {formatThousands(cohort.wins)}W · {formatThousands(cohort.losses)}L
-        </span>
-      </div>
-      <div className="kpi-cohort__line">
-        <span>SELL {formatPercent(cohort.sell_closed_pct)}</span>
-        <span>Resolved {formatPercent(cohort.resolved_closed_pct)}</span>
-      </div>
-      <div className="kpi-cohort__baseline">
-        Plankton {formatPercent(PLANKTON_BASELINES.winrate)}
-      </div>
-    </div>
-  );
-}
-
 function WinrateCard({ kpi }: { kpi: DashboardKpiData["winrate_7d"] }) {
   const severity = severityFromValue(kpi.value, KPI_THRESHOLDS.winrate);
   const delta = kpi.value - PLANKTON_BASELINES.winrate;
@@ -367,11 +395,6 @@ function WinrateCard({ kpi }: { kpi: DashboardKpiData["winrate_7d"] }) {
     kpi.resolved_closed_pct,
     SUB_METRIC_THRESHOLDS.resolvedClosed,
   );
-  const preV072Cohort = kpi.cohorts?.pre_v072;
-  const postV072Cohort = kpi.cohorts?.post_v072;
-  const cohortCutoff = kpi.cohort_cutoff;
-  const hasCohortSplit =
-    preV072Cohort != null && postV072Cohort != null && typeof cohortCutoff === "string";
 
   return (
     <KpiCardShell
@@ -434,13 +457,6 @@ function WinrateCard({ kpi }: { kpi: DashboardKpiData["winrate_7d"] }) {
           / {Math.round(PLANKTON_BASELINES.winrateResolved)}% bl
         </span>
       </div>
-      <hr className="kpi-sep" />
-      {hasCohortSplit ? (
-        <div className="kpi-cohort-grid" aria-label="Winrate by v072 deployment cohort">
-          <WinrateCohortBlock cohort={preV072Cohort} cutoff={cohortCutoff} testId="pre_v072" />
-          <WinrateCohortBlock cohort={postV072Cohort} cutoff={cohortCutoff} testId="post_v072" />
-        </div>
-      ) : null}
     </KpiCardShell>
   );
 }
@@ -786,16 +802,13 @@ export function Overview() {
   const execution = status.executionTelemetry24h;
   const makerPct = execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
   const leakagePct = execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
+  const orderCapacity = resolveOrderCapacity(status);
 
   return (
     <div className="page">
       {/* Primary status cards */}
       <div className="grid-5" style={{ marginBottom: 16 }}>
-        <div className="card card-accent-green">
-          <div className="label">Runtime Mode</div>
-          <div className="value-lg text-green">{status.runtimeMode.toUpperCase()}</div>
-          <div className="value-sm">{status.paused ? "Paused" : "Not paused"}</div>
-        </div>
+        <RuntimeHealthCard status={status} />
         <BalanceCard status={status} />
         <Link to="/positions" style={{ textDecoration: "none" }}>
           <div
@@ -824,38 +837,7 @@ export function Overview() {
         </Link>
       </div>
 
-      {status.liveLite && (
-        <div
-          className="card"
-          style={{
-            marginBottom: 16,
-            border: "1px solid var(--red)",
-            borderLeft: "3px solid var(--red)",
-            padding: "10px 16px",
-            fontSize: 12,
-          }}
-        >
-          <div className="label" style={{ color: "var(--red)", fontWeight: 700, marginBottom: 6 }}>
-            Live-Lite Envelope
-          </div>
-          <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-            <span>Wallet: {(status.liveLite.walletMode ?? "eoa").toUpperCase()}</span>
-            <span>
-              Min order: $
-              {status.liveLite.minOrderUsdc != null ? status.liveLite.minOrderUsdc.toFixed(2) : "—"}
-            </span>
-            <span>
-              Caps: ${status.liveLite.maxOpenValueUsdc} total / ${status.liveLite.maxOrderUsdc} per
-              order / {status.liveLite.maxActiveMarkets} markets
-              {status.liveLite.activeMarketCount != null
-                ? ` (${status.liveLite.activeMarketCount}/${status.liveLite.maxActiveMarkets}, ${(
-                    status.liveLite.activeMarketCapUtilizationPct ?? 0
-                  ).toFixed(0)}%)`
-                : ""}
-            </span>
-          </div>
-        </div>
-      )}
+      <RiskCapacityCard status={status} />
 
       <DashboardKpiRow kpi={dashboardKpi} />
 
@@ -903,7 +885,15 @@ export function Overview() {
       {status && (
         <div className="card" style={{ marginBottom: 16 }}>
           <div className="label">Trading Activity (10m window)</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              flexWrap: "wrap",
+              marginTop: 8,
+            }}
+          >
             <span
               style={{
                 padding: "4px 10px",
@@ -918,64 +908,36 @@ export function Overview() {
             </span>
             {status.signalActivity && (
               <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
-                {status.signalActivity.signalsProducedLast10m} produced
-                {" · "}
-                {status.signalActivity.signalsApprovedLast10m} approved
-                {status.signalActivity.lastEntryApprovedAt && (
-                  <> ({formatAgo(status.signalActivity.lastEntryApprovedAt)})</>
-                )}
-                {" · "}
-                {status.signalActivity.signalsRejectedLast10m} rejected
-                {status.signalActivity.lastSignalRejectedAt && (
-                  <> ({formatAgo(status.signalActivity.lastSignalRejectedAt)})</>
-                )}
-                {status.signalActivity.approvalRate != null && (
-                  <> · {status.signalActivity.approvalRate}% approval</>
-                )}
-                {status.executionQueue && (
-                  <>
-                    {" · "}
-                    exec {status.executionQueue.activeCount ?? 0} active /{" "}
-                    {status.executionQueue.queueDepth ?? 0} queued /{" "}
-                    {status.executionQueue.maxConcurrency ?? "∞"} max
-                    {" · "}
-                    reserved buy {formatUsd(status.executionQueue.reservedBuyUsdc ?? 0)}
-                    {status.executionQueue.freeUsdcForNewOrders != null && (
-                      <> / free {formatUsd(status.executionQueue.freeUsdcForNewOrders)}</>
-                    )}
-                    {formatBuyCapacity(status.executionQueue.buyCapacity) && (
-                      <>
-                        {" · "}
-                        capacity {formatBuyCapacity(status.executionQueue.buyCapacity)}
-                      </>
-                    )}
-                    {formatOrderCapacity(status.executionQueue) && (
-                      <>
-                        {" · "}
-                        {formatOrderCapacity(status.executionQueue)}
-                      </>
-                    )}
-                    {(status.executionQueue.cancelReplacePendingCount ?? 0) > 0 && (
-                      <> · replace locks {status.executionQueue.cancelReplacePendingCount}</>
-                    )}
-                    {(status.executionQueue.internalReservationRejectsLast10m ?? 0) > 0 && (
-                      <>
-                        {" · "}
-                        reservation rejects{" "}
-                        {status.executionQueue.internalReservationRejectsLast10m}
-                      </>
-                    )}
-                    {formatExecutionRejects(status.executionQueue.gatewayRejectsLast10mByCode) && (
-                      <>
-                        {" · "}
-                        gateway rejects{" "}
-                        {formatExecutionRejects(status.executionQueue.gatewayRejectsLast10mByCode)}
-                      </>
-                    )}
-                  </>
-                )}
+                Signals {status.signalActivity.signalsProducedLast10m} produced /{" "}
+                {status.signalActivity.signalsRejectedLast10m} rejected · Orders{" "}
+                {status.executionQueue?.activeCount ?? 0} active /{" "}
+                {status.executionQueue?.queueDepth ?? 0} queued
               </span>
             )}
+          </div>
+          <div
+            style={{
+              display: "flex",
+              gap: 16,
+              flexWrap: "wrap",
+              marginTop: 8,
+              fontSize: 12,
+              color: "var(--text-dim)",
+            }}
+          >
+            <span>
+              BUY {formatOrderBreakdownValue(orderCapacity.buyOpen)}/
+              {formatOrderBreakdownValue(orderCapacity.buyCap)}
+            </span>
+            <span>
+              SELL {formatOrderBreakdownValue(orderCapacity.sellOpen)}/
+              {formatOrderBreakdownValue(orderCapacity.sellCap)}
+            </span>
+            {tradingActivityWarnings(status).map((warning) => (
+              <span key={warning} style={{ color: "var(--orange)" }}>
+                {warning}
+              </span>
+            ))}
           </div>
           {status.tradingState === "ALIVE_BUT_BLOCKED" && status.signalActivity && (
             <div style={{ marginTop: 8, fontSize: 12, color: "var(--orange)" }}>

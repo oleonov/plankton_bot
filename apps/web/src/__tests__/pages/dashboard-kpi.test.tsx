@@ -146,7 +146,7 @@ describe("dashboard KPI cards", () => {
     expect(screen.getByTestId("kpi-winrate-card")).toHaveAttribute("data-state", "crit");
   });
 
-  it("renders pre-v072 and post-v072 winrate cohorts inside the winrate card", async () => {
+  it("does not render historical v072 cohorts on the main Overview", async () => {
     mockKpi(
       kpi({
         winrate_7d: {
@@ -182,25 +182,16 @@ describe("dashboard KPI cards", () => {
     renderWithProviders(<Overview />);
 
     const winrateCard = await screen.findByTestId("kpi-winrate-card");
-    const preCohort = within(winrateCard).getByTestId("kpi-winrate-cohort-pre_v072");
-    const postCohort = within(winrateCard).getByTestId("kpi-winrate-cohort-post_v072");
-
-    expect(preCohort).toHaveAttribute("title", "v072 deploy cutoff: 2026-06-03T11:54:56Z");
-    expect(within(preCohort).getByText("Pre-v072")).toBeInTheDocument();
-    expect(within(preCohort).getByTestId("kpi-winrate-cohort-pre_v072-value")).toHaveTextContent(
-      "23.5%",
-    );
-    expect(within(preCohort).getByText("17 closed")).toBeInTheDocument();
-    expect(within(preCohort).getByText("4W · 13L")).toBeInTheDocument();
-    expect(within(preCohort).getByText("SELL 20.0%")).toBeInTheDocument();
-    expect(within(preCohort).getByText("Resolved 25.0%")).toBeInTheDocument();
-    expect(within(preCohort).getByText("Plankton 84.9%")).toBeInTheDocument();
-
-    expect(within(postCohort).getByText("Post-v072")).toBeInTheDocument();
-    expect(within(postCohort).getByTestId("kpi-winrate-cohort-post_v072-value")).toHaveTextContent(
-      "0.0%",
-    );
-    expect(within(postCohort).getByText("2 closed")).toBeInTheDocument();
+    expect(within(winrateCard).getByText("Winrate")).toBeInTheDocument();
+    expect(within(winrateCard).getByText("19")).toBeInTheDocument();
+    expect(
+      within(winrateCard).queryByTestId("kpi-winrate-cohort-pre_v072"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(winrateCard).queryByTestId("kpi-winrate-cohort-post_v072"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Pre-v072")).not.toBeInTheDocument();
+    expect(screen.queryByText("Post-v072")).not.toBeInTheDocument();
   });
 
   it("keeps the winrate card usable when cohort data is absent during API/web skew", async () => {

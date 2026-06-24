@@ -21,6 +21,7 @@ export function StatusBar() {
       <span style={{ color: "var(--red)" }}>&#10005; disconnected</span>
     );
   const topInfraAlert = status.infraAlerts?.[0] ?? null;
+  const showExecutionMode = status.marketDataSource !== "live" || status.executionMode !== "live";
 
   return (
     <div
@@ -35,11 +36,12 @@ export function StatusBar() {
         borderBottom: "1px solid var(--border)",
       }}
     >
-      <Badge value={status.runtimeMode} type="mode" />
-      <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: 4 }}>
-        data:{status.marketDataSource} exec:{status.executionMode}
-      </span>
       <Badge value={status.paused ? "PAUSED" : "RUNNING"} type="mode" />
+      {showExecutionMode && (
+        <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
+          data:{status.marketDataSource} exec:{status.executionMode}
+        </span>
+      )}
       <span>uptime: {formatUptime(status.uptimeSeconds)}</span>
       <span>recon: {formatAgo(status.lastReconciliationAt)}</span>
       <span>

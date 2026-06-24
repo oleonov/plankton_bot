@@ -11,7 +11,7 @@ function ok<T>(data: T) {
 }
 
 describe("StatusBar", () => {
-  it("keeps live-lite status indicators without the constant real-orders banner", async () => {
+  it("keeps health indicators without redundant live-lite labels", async () => {
     server.use(
       http.get("/api/v1/status", () =>
         ok({
@@ -25,9 +25,12 @@ describe("StatusBar", () => {
 
     renderWithProviders(<StatusBar />);
 
-    expect(await screen.findByText("live-lite")).toBeInTheDocument();
-    expect(screen.getByText("RUNNING")).toBeInTheDocument();
-    expect(screen.getByText(/data:live exec:live/)).toBeInTheDocument();
+    expect(await screen.findByText("RUNNING")).toBeInTheDocument();
+    expect(screen.getByText(/uptime:/)).toBeInTheDocument();
+    expect(screen.getByText(/recon:/)).toBeInTheDocument();
+    expect(screen.getByText("FRESH")).toBeInTheDocument();
+    expect(screen.queryByText("live-lite")).not.toBeInTheDocument();
+    expect(screen.queryByText(/data:live exec:live/)).not.toBeInTheDocument();
     expect(screen.queryByText(/real orders on exchange/i)).not.toBeInTheDocument();
   });
 });
