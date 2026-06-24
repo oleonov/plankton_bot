@@ -434,9 +434,7 @@ describe("SignalToOrderBridge", () => {
 
     expect(placed).toHaveLength(0);
     expect(skipped).toHaveLength(1);
-    expect(skipped[0]!.reasons).toEqual([
-      "position-concentration-below_min_after_clamp",
-    ]);
+    expect(skipped[0]!.reasons).toEqual(["position-concentration-below_min_after_clamp"]);
   });
 
   it("does not block order publication on execution-policy observation writes", async () => {

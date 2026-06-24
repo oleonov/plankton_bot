@@ -145,7 +145,8 @@ export class PositionConcentrationService {
 
     const nowIso = new Date(this.now()).toISOString();
     const state = this.findActiveState(key.concentrationKey);
-    const lifecycleStartAt = state?.lifecycle_start_at ?? this.resolveLifecycleStartAt(key) ?? nowIso;
+    const lifecycleStartAt =
+      state?.lifecycle_start_at ?? this.resolveLifecycleStartAt(key) ?? nowIso;
     const bankrollAtFirstBuy = state?.bankroll_at_first_buy_usdc ?? bankroll.valueUsdc;
     const capBankroll = Math.min(bankrollAtFirstBuy, bankroll.valueUsdc);
     const pendingBuyUsdc = this.sumPendingBuyResidual(key);
@@ -205,11 +206,7 @@ export class PositionConcentrationService {
 
   recordFill(input: PositionConcentrationFillInput): void {
     if (!input.policy.enabled) return;
-    const key = deriveConcentrationKey(
-      input.fill.tokenId,
-      input.fill.conditionId,
-      input.policy,
-    );
+    const key = deriveConcentrationKey(input.fill.tokenId, input.fill.conditionId, input.policy);
     if (key == null) return;
     const existing = this.findActiveState(key.concentrationKey);
     const nowIso = input.fill.filledAt;
@@ -267,7 +264,10 @@ export class PositionConcentrationService {
       updatedAt: nowIso,
     };
     this.upsertState(nextState);
-    if (input.positionAfter.status === "closed" && this.sumPendingBuyResidual(key) <= EPSILON_USDC) {
+    if (
+      input.positionAfter.status === "closed" &&
+      this.sumPendingBuyResidual(key) <= EPSILON_USDC
+    ) {
       this.archiveState(key.concentrationKey, nowIso);
       this.deps.runtimeMetrics?.writeCounter(
         "position_concentration_lifecycle_reset_total",
@@ -514,7 +514,8 @@ export class PositionConcentrationService {
       | { total_equity_liquidation_usdc: number | null; equity_usdc: number; captured_at: string }
       | undefined;
     if (!row) return null;
-    const value = finitePositive(row.total_equity_liquidation_usdc) ?? finitePositive(row.equity_usdc);
+    const value =
+      finitePositive(row.total_equity_liquidation_usdc) ?? finitePositive(row.equity_usdc);
     const capturedAtMs = Date.parse(row.captured_at);
     if (value == null || !Number.isFinite(capturedAtMs)) return null;
     return { valueUsdc: value, capturedAtMs, source: "portfolio_snapshot", fresh: false };
@@ -581,7 +582,10 @@ export class PositionConcentrationService {
     );
   }
 
-  private recordFallbackIfNeeded(key: ConcentrationKeyInfo, stage: PositionConcentrationStage): void {
+  private recordFallbackIfNeeded(
+    key: ConcentrationKeyInfo,
+    stage: PositionConcentrationStage,
+  ): void {
     if (key.fallbackReason == null) return;
     this.deps.runtimeMetrics?.writeCounter(
       "position_concentration_condition_key_fallback_total",

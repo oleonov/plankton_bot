@@ -409,9 +409,16 @@ function recordSell(
     },
     policy: DEFAULT_EXECUTION_POLICY.positionConcentration,
     positionBefore: makePosition(token, condition, preSellAvgEntry, 10, 10 * preSellAvgEntry),
-    positionAfter: makePosition(token, condition, preSellAvgEntry, nextStatus === "closed" ? 0 : 5, 1, {
-      status: nextStatus,
-    }),
+    positionAfter: makePosition(
+      token,
+      condition,
+      preSellAvgEntry,
+      nextStatus === "closed" ? 0 : 5,
+      1,
+      {
+        status: nextStatus,
+      },
+    ),
   });
 }
 

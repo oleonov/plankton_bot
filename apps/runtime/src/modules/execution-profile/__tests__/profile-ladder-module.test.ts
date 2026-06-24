@@ -2720,12 +2720,14 @@ describe("ProfileLadderModule", () => {
 
       expect(ctx.cancels).toHaveLength(0);
       expect(ctx.orders).toHaveLength(0);
-      expect(counterLabels(ctx.counters, "profile_ladder_replacement_place_skipped_total")).toEqual([
-        expect.objectContaining({
-          action: "skip",
-          reason: "sell-replace-duplicate-live-sell",
-        }),
-      ]);
+      expect(counterLabels(ctx.counters, "profile_ladder_replacement_place_skipped_total")).toEqual(
+        [
+          expect.objectContaining({
+            action: "skip",
+            reason: "sell-replace-duplicate-live-sell",
+          }),
+        ],
+      );
     });
 
     it.each(["sell-replace-pending", "sell-replace-lock-retry"])(
@@ -2999,10 +3001,11 @@ describe("ProfileLadderModule", () => {
         await ctx.bus.publish("OrderPlaced", orderPlaced(command, createOrderId("late-new-order")));
 
         const state = ctx.repo.getLadder(tokenId)!;
-        expect(state.activeRungs.find((entry) => entry.orderId === String(oldOrderId)))
-          .toMatchObject({
-            lifecycle: "placed",
-          });
+        expect(
+          state.activeRungs.find((entry) => entry.orderId === String(oldOrderId)),
+        ).toMatchObject({
+          lifecycle: "placed",
+        });
         expect(state.activeRungs.find((entry) => entry.orderId === "late-new-order")).toBeFalsy();
         expect(ctx.orders).toHaveLength(1);
         expect(
@@ -3064,11 +3067,12 @@ describe("ProfileLadderModule", () => {
         ).pendingRungByClientOrderId.size,
       ).toBe(0);
       expect(ctx.orders).toHaveLength(1);
-      expect(ctx.repo.getLadder(tokenId)?.activeRungs.find((entry) => entry.orderId === oldOrderId))
-        .toMatchObject({
-          lifecycle: "partially_filled",
-          filledSizeShares: 10,
-        });
+      expect(
+        ctx.repo.getLadder(tokenId)?.activeRungs.find((entry) => entry.orderId === oldOrderId),
+      ).toMatchObject({
+        lifecycle: "partially_filled",
+        filledSizeShares: 10,
+      });
       expect(counterLabels(ctx.counters, "profile_ladder_replacement_failed_total")).toEqual([
         expect.objectContaining({ action: "fail", reason: "old_order_filled" }),
       ]);

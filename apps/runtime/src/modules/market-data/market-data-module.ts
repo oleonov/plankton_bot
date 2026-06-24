@@ -287,9 +287,7 @@ export interface MarketDataModuleDeps {
   };
 }
 
-type FullLifetimeMarketCacheMissReason =
-  | "market_lookup_error"
-  | "market_row_missing";
+type FullLifetimeMarketCacheMissReason = "market_lookup_error" | "market_row_missing";
 
 type FullLifetimeMarketCacheHydratedReason = "cache_miss_hydrated";
 

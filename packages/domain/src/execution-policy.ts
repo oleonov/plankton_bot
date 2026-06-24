@@ -3717,10 +3717,7 @@ function parseBuyCapacity(raw: unknown, issues: string[]): BuyCapacityPolicy {
   };
 }
 
-function parsePositionConcentration(
-  raw: unknown,
-  issues: string[],
-): PositionConcentrationPolicy {
+function parsePositionConcentration(raw: unknown, issues: string[]): PositionConcentrationPolicy {
   const fallback = DEFAULT_POSITION_CONCENTRATION_POLICY;
   if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
     if (raw !== undefined) issues.push("positionConcentration must be an object");

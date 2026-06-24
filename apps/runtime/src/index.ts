@@ -839,8 +839,7 @@ async function main(): Promise<void> {
       enabled: true,
       heartbeatMs: 5 * 60 * 1000,
       postCloseGraceMs: 0,
-      activePositionTokenIds: () =>
-        repos.position.findOpen().map((position) => position.tokenId),
+      activePositionTokenIds: () => repos.position.findOpen().map((position) => position.tokenId),
       recordMissingMarket: (reason) => {
         runtimeMetrics.writeCounter("full_lifetime_missing_market", 1, JSON.stringify({ reason }));
       },
