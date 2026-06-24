@@ -696,6 +696,7 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
       fallbackBatchSize: 500,
       fallbackPollMaxConcurrency: 50,
       fallbackPollRatePerSec: 5,
+      tieredPricingCacheTtlMs: 0,
     });
 
     await mod.start();
@@ -703,7 +704,6 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
     expect(streamRef).not.toBeNull();
     getMarketPricing.mockClear();
     capturedIds.length = 0;
-    silentLog.warn.mockClear();
 
     // Trigger forceFullPoll.
     await streamRef!.triggerGap("socket-closed");
@@ -716,7 +716,7 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
     // Batch must be trimmed to the bounded cap.
     expect(capturedIds[0]).toHaveLength(50);
 
-    // Warn log must fire with tokenCount and cap fields.
+    // Cap warn logs once and then throttles repeated poll-cycle exceedances.
     const warnCalls = silentLog.warn.mock.calls as Array<[unknown, string]>;
     const capWarn = warnCalls.find(
       ([, msg]) => typeof msg === "string" && msg.includes("bounded rate cap"),
@@ -725,9 +725,133 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
     const [warnMeta] = capWarn!;
     expect((warnMeta as Record<string, unknown>).candidateCount).toBe(600);
     expect((warnMeta as Record<string, unknown>).limit).toBe(50);
+    expect((warnMeta as Record<string, unknown>).suppressedCount).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    const capWarnsAfterNextPoll = (silentLog.warn.mock.calls as Array<[unknown, string]>).filter(
+      ([, msg]) => typeof msg === "string" && msg.includes("bounded rate cap"),
+    );
+    expect(capWarnsAfterNextPoll).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(15 * 60_000);
+
+    const throttledCapWarns = (silentLog.warn.mock.calls as Array<[unknown, string]>).filter(
+      ([, msg]) => typeof msg === "string" && msg.includes("bounded rate cap"),
+    );
+    expect(throttledCapWarns.length).toBeGreaterThanOrEqual(2);
+    const [throttledWarnMeta] = throttledCapWarns.at(-1)!;
+    expect((throttledWarnMeta as Record<string, unknown>).suppressedCount).toBeGreaterThan(0);
 
     // Suppress unused variable lint.
     void polledIds;
+
+    await mod.stop();
+  });
+
+  it("resets fallback cap warning throttle when backlog returns under cap", async () => {
+    const overCapIds = Array.from({ length: 600 }, (_, i) => `over-${i}`);
+    const underCapIds = Array.from({ length: 10 }, (_, i) => `under-${i}`);
+    const overCapTiered = makeTiered(overCapIds.slice(0, 300), overCapIds.slice(300), []);
+    const underCapTiered = makeTiered(underCapIds, [], []);
+    const repo = createMockRepo(underCapTiered);
+    const findTrackedForPricingTiered = vi.mocked(repo.findTrackedForPricingTiered);
+    const findTrackedForPricing = vi.mocked(repo.findTrackedForPricing);
+
+    const capturedIds: string[][] = [];
+    const getMarketPricing = vi.fn().mockImplementation(async (polled: string[]) => {
+      capturedIds.push([...polled]);
+      return new Map();
+    });
+
+    const gateway: MarketDataGateway = {
+      getMarkets: vi.fn().mockResolvedValue([]),
+      getMarket: vi.fn().mockResolvedValue(null),
+      getOrderBook: vi.fn().mockResolvedValue({
+        tokenId: createTokenId(""),
+        bids: [],
+        asks: [],
+        bestBid: null,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        timestamp: Date.now(),
+      }),
+      getTickSize: vi.fn().mockResolvedValue(0.01),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
+      getMarketPricing,
+      createMarketPricingStream: (handlers) => {
+        const s = new FakePricingStream(handlers);
+        streamRef = s;
+        return s;
+      },
+    };
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+      fallbackPollMaxConcurrency: 50,
+      fallbackPollRatePerSec: 5,
+      tieredPricingCacheTtlMs: 0,
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+    silentLog.warn.mockClear();
+    getMarketPricing.mockClear();
+    capturedIds.length = 0;
+
+    findTrackedForPricingTiered.mockReturnValue(overCapTiered);
+    findTrackedForPricing.mockReturnValue([
+      ...overCapTiered.executionCritical,
+      ...overCapTiered.entryCandidates,
+    ]);
+    await vi.advanceTimersByTimeAsync(1);
+    await streamRef!.triggerGap("socket-closed");
+    await mod.poll();
+
+    expect(capturedIds.at(-1)).toHaveLength(50);
+    let capWarns = (silentLog.warn.mock.calls as Array<[unknown, string]>).filter(
+      ([, msg]) => typeof msg === "string" && msg.includes("bounded rate cap"),
+    );
+    expect(capWarns).toHaveLength(1);
+    expect((capWarns[0]![0] as Record<string, unknown>).suppressedCount).toBe(0);
+
+    findTrackedForPricingTiered.mockReturnValue(underCapTiered);
+    findTrackedForPricing.mockReturnValue([
+      ...underCapTiered.executionCritical,
+      ...underCapTiered.entryCandidates,
+    ]);
+    await vi.advanceTimersByTimeAsync(1);
+    await mod.poll();
+
+    expect(capturedIds.at(-1)).toHaveLength(10);
+    capWarns = (silentLog.warn.mock.calls as Array<[unknown, string]>).filter(
+      ([, msg]) => typeof msg === "string" && msg.includes("bounded rate cap"),
+    );
+    expect(capWarns).toHaveLength(1);
+
+    findTrackedForPricingTiered.mockReturnValue(overCapTiered);
+    findTrackedForPricing.mockReturnValue([
+      ...overCapTiered.executionCritical,
+      ...overCapTiered.entryCandidates,
+    ]);
+    await vi.advanceTimersByTimeAsync(1);
+    await mod.poll();
+
+    expect(capturedIds.at(-1)).toHaveLength(50);
+    capWarns = (silentLog.warn.mock.calls as Array<[unknown, string]>).filter(
+      ([, msg]) => typeof msg === "string" && msg.includes("bounded rate cap"),
+    );
+    expect(capWarns).toHaveLength(2);
+    expect((capWarns[1]![0] as Record<string, unknown>).suppressedCount).toBe(0);
 
     await mod.stop();
   });

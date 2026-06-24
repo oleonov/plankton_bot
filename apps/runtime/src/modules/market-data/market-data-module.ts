@@ -347,6 +347,7 @@ export class MarketDataModule implements RuntimeModule {
   private lastDiscoveryBatchTokenIds: Set<string> = new Set();
   private readonly cachedPollDegradeWarn: WarnThrottleState = createWarnThrottleState();
   private readonly discoveryPollFailureWarn: WarnThrottleState = createWarnThrottleState();
+  private readonly fallbackRateCapWarn: WarnThrottleState = createWarnThrottleState();
   private readonly bookSignalFullBookCapWarn: WarnThrottleState = createWarnThrottleState();
   private lastBookSignalFullBookDemandCount = 0;
   private lastBookSignalFullBookSubscribedCount = 0;
@@ -831,15 +832,25 @@ export class MarketDataModule implements RuntimeModule {
         fallbackCandidates.length - selectedFallbackCandidates.length,
       );
       if (fallbackCandidates.length > selectedFallbackCandidates.length) {
-        this.log.warn(
-          {
-            candidateCount: fallbackCandidates.length,
-            selectedCount: selectedFallbackCandidates.length,
-            deferredCount,
-            limit: fallbackPollLimit,
-          },
-          "fallback poll candidates exceed bounded rate cap — deferring tail",
+        const suppressedCount = consumeWarnThrottle(
+          this.fallbackRateCapWarn,
+          now,
+          TRANSIENT_POLL_WARN_THROTTLE_MS,
         );
+        if (suppressedCount != null) {
+          this.log.warn(
+            {
+              candidateCount: fallbackCandidates.length,
+              selectedCount: selectedFallbackCandidates.length,
+              deferredCount,
+              limit: fallbackPollLimit,
+              suppressedCount,
+            },
+            "fallback poll candidates exceed bounded rate cap — deferring tail",
+          );
+        }
+      } else {
+        resetWarnThrottle(this.fallbackRateCapWarn);
       }
 
       this.lastStaleTokenCount = tokenIdsToPoll.length;
