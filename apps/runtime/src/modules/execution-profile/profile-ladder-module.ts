@@ -22,7 +22,13 @@ import {
   computeProfileLadder,
   isValidLadderBbo,
   resolveLadderBand,
+  wouldCrossProfileLadderPostOnly,
 } from "./profile-ladder-builder.js";
+import {
+  computeProfileLadderShadowEvaluation,
+  type ProfileLadderShadowCandidateResult,
+  type ProfileLadderShadowEvaluation,
+} from "./profile-ladder-shadow-policy.js";
 import {
   isProfileLadderOrder,
   orderMatchesOrderId,
@@ -248,6 +254,7 @@ export class ProfileLadderModule implements RuntimeModule {
   private readonly missingLadderRecoveryCooldownUntilByToken = new Map<string, number>();
   private readonly pendingRebuildDeferCooldownUntilByToken = new Map<string, number>();
   private readonly staleLiveRungRiskEventDedupeUntilByKey = new Map<string, number>();
+  private readonly shadowRiskEventDedupeUntilByKey = new Map<string, number>();
   private readonly replacementCooldownUntilByToken = new Map<string, number>();
   // Plankton post-fill REST: one bounded reevaluation timer per token. A SELL
   // fill never places the next rung inline; it schedules a delayed reevaluation.
@@ -313,6 +320,7 @@ export class ProfileLadderModule implements RuntimeModule {
     this.pendingRebuildDeferCooldownUntilByToken.clear();
     this.pendingRungByClientOrderId.clear();
     this.replacementCooldownUntilByToken.clear();
+    this.shadowRiskEventDedupeUntilByKey.clear();
     this.adoptionDone = false;
     this.adoptionAttemptCount = 0;
     this.adoptExistingEnabled = false;
@@ -659,6 +667,10 @@ export class ProfileLadderModule implements RuntimeModule {
     if (!plan.ok) return null;
     const ladderId =
       options.ladderIdSuffix == null ? plan.ladderId : `${plan.ladderId}_${options.ladderIdSuffix}`;
+    const activeRungs =
+      options.preservePreviousLiveRungs === false
+        ? plan.rungs.map((rung) => ({ ...rung }))
+        : mergeLiveRungs(plan.rungs, previous);
     // GAP-2: surface every rung whose raw price was clamped up to the positive
     // sell floor. Bounded labels only (no token labels) — band/mode/rungIndex.
     for (const rung of plan.rungs) {
@@ -671,6 +683,14 @@ export class ProfileLadderModule implements RuntimeModule {
       }
     }
     this.emitModeReaderDarkCompare(position, market, policy, previous, mode, plan);
+    this.emitShadowPlanktonPolicy(
+      position,
+      market,
+      policy,
+      mode,
+      ladderId,
+      activeRungs.map((rung) => ({ ...rung })),
+    );
 
     const now = this.now();
     const state: LadderState = {
@@ -680,10 +700,7 @@ export class ProfileLadderModule implements RuntimeModule {
       band: plan.band,
       phase: policy.phase,
       status: "active",
-      activeRungs:
-        options.preservePreviousLiveRungs === false
-          ? plan.rungs.map((rung) => ({ ...rung }))
-          : mergeLiveRungs(plan.rungs, previous),
+      activeRungs,
       filledRungs: [],
       lastAvgEntry: position.avgEntryPrice,
       lastCostBasisUsdc: position.costBasisUsdc,
@@ -745,7 +762,7 @@ export class ProfileLadderModule implements RuntimeModule {
       // Plankton no-taker-sell: a post-only SELL at/below the best bid would
       // cross and execute as a taker. Skip it (it never goes live) and let the
       // loop rest the slot on the next non-crossing planned rung, if any.
-      if (wouldCrossPostOnly(rung.price, market.bestBid)) {
+      if (wouldCrossProfileLadderPostOnly(rung.price, market.bestBid)) {
         this.writeCounter("profile_ladder_skipped_crossing_post_only", 1, { band: state.band });
         continue;
       }
@@ -1156,6 +1173,165 @@ export class ProfileLadderModule implements RuntimeModule {
     } catch {
       // Dark-compare telemetry must never affect ladder behavior.
     }
+  }
+
+  private emitShadowPlanktonPolicy(
+    position: Position,
+    market: NormalizedMarket,
+    policy: ExecutionProfilePolicy["sellLadder"],
+    mode: ProfileLadderMode,
+    ladderId: string,
+    currentRungs: readonly LadderRung[],
+  ): void {
+    try {
+      const config = policy.shadowPlanktonPolicy;
+      if (config == null || !config.enabled) return;
+      const evaluation = computeProfileLadderShadowEvaluation({
+        avgEntryPrice: position.avgEntryPrice,
+        costBasisUsd: position.costBasisUsdc,
+        positionSizeShares: position.size,
+        mode,
+        bestBid: market.bestBid,
+        bestAsk: market.bestAsk,
+        tickSize: market.tickSize,
+        minOrderSize: market.minOrderSize ?? 1,
+        config,
+        currentRungs,
+      });
+      if (evaluation == null) return;
+      const state = shadowProfileStateLabel(this.resolveProfileState(position.tokenId));
+      for (const result of evaluation.results) {
+        this.emitShadowCandidateCounters(result, mode, state);
+        this.emitShadowCandidateRiskEvent(position, market, ladderId, result, evaluation);
+      }
+      if (evaluation.variantCollapse != null) {
+        this.writeCounter("profile_ladder_shadow_variants_collapsed_total", 1, {
+          band: evaluation.band,
+          collapseType: evaluation.variantCollapse.collapseType,
+        });
+      }
+    } catch {
+      this.writeCounter("profile_ladder_shadow_candidate_evaluated_total", 1, {
+        variant: "median",
+        band: "gte_0_10",
+        mode: "unknown",
+        state: "unknown",
+        result: "invalid_input",
+        reason: "invalid_input",
+      });
+    }
+  }
+
+  private emitShadowCandidateCounters(
+    result: ProfileLadderShadowCandidateResult,
+    mode: ProfileLadderMode,
+    state: "accumulating" | "harvesting" | "exiting" | "unknown",
+  ): void {
+    this.writeCounter("profile_ladder_shadow_candidate_evaluated_total", 1, {
+      variant: result.variant,
+      band: result.band,
+      mode,
+      state,
+      result: result.result,
+      reason: result.reason,
+    });
+    this.writeCounter("profile_ladder_shadow_candidate_executable_total", 1, {
+      variant: result.variant,
+      band: result.band,
+      rungCountBucket: result.rungCountBucket,
+      reason: result.reason,
+    });
+    this.writeCounter("profile_ladder_shadow_target_delta_bucket", 1, {
+      variant: result.variant,
+      band: result.band,
+      deltaBucket: result.deltaBucket,
+    });
+    this.writeCounter("profile_ladder_shadow_first_size_fraction_bucket", 1, {
+      variant: result.variant,
+      band: result.band,
+      fractionBucket: result.candidateFirstFractionBucket,
+    });
+    if (result.collapsedDueMinOrder) {
+      this.writeCounter("profile_ladder_shadow_min_order_collapse_total", 1, {
+        variant: result.variant,
+        band: result.band,
+        collapseReason: result.collapseReason,
+      });
+    }
+    if (result.wouldAvoidLowFullExitLe110) {
+      this.writeCounter("profile_ladder_shadow_low_full_exit_avoided_total", 1, {
+        variant: result.variant,
+        band: result.band,
+        threshold: "le_1_10",
+      });
+    }
+    if (result.hasHigherExposureCandidate) {
+      this.writeCounter("profile_ladder_shadow_higher_exposure_present_total", 1, {
+        variant: result.variant,
+        band: result.band,
+        rungCountBucket: result.rungCountBucket,
+      });
+    }
+    if (result.pr2ProtectedExposureConflict) {
+      this.writeCounter("profile_ladder_shadow_pr2_conflict_total", 1, {
+        variant: result.variant,
+        band: result.band,
+        reason: "pr2_conflict",
+      });
+    }
+  }
+
+  private emitShadowCandidateRiskEvent(
+    position: Position,
+    market: NormalizedMarket,
+    ladderId: string,
+    result: ProfileLadderShadowCandidateResult,
+    evaluation: ProfileLadderShadowEvaluation,
+  ): void {
+    const config = this.policy().shadowPlanktonPolicy;
+    if (config == null || !config.writeRiskEvents) return;
+    if (!this.shouldWriteShadowRiskEvent(ladderId, result, config.riskEventDedupeMs)) return;
+    this.insertRiskEvent("profile_ladder_shadow_candidate_sampled", {
+      tokenId: String(position.tokenId),
+      conditionId: String(position.conditionId),
+      ladderId,
+      variant: result.variant,
+      band: result.band,
+      avgEntry: result.avgEntry,
+      currentFirstTargetMultiple: result.currentFirstTargetMultiple,
+      currentFirstSizeFraction: result.currentFirstSizeFraction,
+      candidateRungs: result.candidateRungs,
+      effectiveFirstTargetMultiple: result.effectiveFirstTargetMultiple,
+      firstSizeFraction: result.firstSizeFraction,
+      deltaBucket: result.deltaBucket,
+      collapsedDueMinOrder: result.collapsedDueMinOrder,
+      singleExecutableRung: result.singleExecutableRung,
+      variantsCollapsedByTick: evaluation.variantCollapse != null,
+      collapseType: evaluation.variantCollapse?.collapseType ?? null,
+      pr2ProtectedExposureConflict: result.pr2ProtectedExposureConflict,
+      bestBid: market.bestBid,
+      bestAsk: market.bestAsk,
+      minOrderSize: market.minOrderSize ?? null,
+      tickSize: market.tickSize,
+    });
+  }
+
+  private shouldWriteShadowRiskEvent(
+    ladderId: string,
+    result: ProfileLadderShadowCandidateResult,
+    dedupeMs: number,
+  ): boolean {
+    const now = this.now();
+    if (this.shadowRiskEventDedupeUntilByKey.size > 1_000) {
+      for (const [key, untilMs] of this.shadowRiskEventDedupeUntilByKey) {
+        if (untilMs <= now) this.shadowRiskEventDedupeUntilByKey.delete(key);
+      }
+    }
+    const key = [ladderId, result.variant, result.band, result.deltaBucket].join("|");
+    const dedupeUntilMs = this.shadowRiskEventDedupeUntilByKey.get(key) ?? 0;
+    if (dedupeUntilMs > now) return false;
+    this.shadowRiskEventDedupeUntilByKey.set(key, now + dedupeMs);
+    return true;
   }
 
   private async publishPlaceOrder(
@@ -1928,7 +2104,7 @@ function isSubmittablePostRefillPlannedRung(rung: LadderRung, market: Normalized
     rung.lifecycle === "planned" &&
     rung.orderId == null &&
     rung.sizeShares >= minOrderSize &&
-    !wouldCrossPostOnly(rung.price, market.bestBid)
+    !wouldCrossProfileLadderPostOnly(rung.price, market.bestBid)
   );
 }
 
@@ -2054,13 +2230,6 @@ function isPositiveFinite(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
-// A post-only SELL only rests as a maker when it sits strictly above the best
-// bid; at or below the bid the exchange would either reject it or cross it into
-// a taker fill. An unknown bid cannot be evaluated, so it is treated as safe.
-function wouldCrossPostOnly(price: number, bestBid: number | null): boolean {
-  return isPositiveFinite(bestBid) && price <= bestBid;
-}
-
 function stateTracksAnyOrder(state: LadderState, orders: readonly Order[]): boolean {
   const trackedOrderIds = new Set(
     state.activeRungs
@@ -2100,6 +2269,21 @@ function boundedReplacementReason(reason: string): string {
       return reason;
     default:
       return "other";
+  }
+}
+
+function shadowProfileStateLabel(
+  state: ProfileLadderTelemetryState,
+): "accumulating" | "harvesting" | "exiting" | "unknown" {
+  switch (state) {
+    case "ACCUMULATING":
+      return "accumulating";
+    case "HARVESTING":
+      return "harvesting";
+    case "EXITING":
+      return "exiting";
+    default:
+      return "unknown";
   }
 }
 

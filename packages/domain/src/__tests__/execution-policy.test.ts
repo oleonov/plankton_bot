@@ -271,6 +271,72 @@ describe("execution profile sell ladder policy", () => {
     expect(DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.adoptExisting).toEqual({ enabled: false });
   });
 
+  it("defaults sellLadder.shadowPlanktonPolicy to shadow-only", () => {
+    const policy = parseExecutionPolicyJson(null).policy.executionProfile.sellLadder;
+
+    expect(policy.shadowPlanktonPolicy).toMatchObject({
+      enabled: true,
+      writeRiskEvents: true,
+      variants: ["p25", "median", "cheap_tail"],
+      liveBehaviorEnabled: false,
+      riskEventDedupeMs: 600_000,
+    });
+    expect(policy.shadowPlanktonPolicy.bands.gte_0_01_lt_0_02).toMatchObject({
+      p25: 1.14,
+      median: 1.36,
+      p75: 1.73,
+      sampleSize: 1455,
+    });
+  });
+
+  it("parses a shadow Plankton policy without enabling live behavior", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            shadowPlanktonPolicy: {
+              enabled: false,
+              writeRiskEvents: false,
+              variants: ["p25", "p75"],
+              riskEventDedupeMs: 120_000,
+            },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.issues).toEqual([]);
+    expect(parsed.policy.executionProfile.sellLadder.shadowPlanktonPolicy).toMatchObject({
+      enabled: false,
+      writeRiskEvents: false,
+      variants: ["p25", "p75"],
+      liveBehaviorEnabled: false,
+      riskEventDedupeMs: 120_000,
+    });
+  });
+
+  it("rejects shadow Plankton live behavior activation in Phase 1", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        executionProfile: {
+          sellLadder: {
+            shadowPlanktonPolicy: {
+              enabled: true,
+              liveBehaviorEnabled: true,
+            },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.issues).toContain(
+      "executionProfile.sellLadder.shadowPlanktonPolicy.liveBehaviorEnabled=true is unsupported in Phase 1",
+    );
+    expect(parsed.policy.executionProfile.sellLadder.shadowPlanktonPolicy.liveBehaviorEnabled).toBe(
+      false,
+    );
+  });
+
   it("parses a non-default sellLadder.adoptExisting enabled flag", () => {
     const parsed = parseExecutionPolicyJson(
       JSON.stringify({

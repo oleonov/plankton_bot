@@ -1060,6 +1060,33 @@ export interface ProfileLadderPostRefillFollowThroughConfig {
   cancelAckTimeoutMs: number;
 }
 
+export type ProfileLadderShadowEntryBand =
+  | "lt_0_005"
+  | "gte_0_005_lt_0_01"
+  | "gte_0_01_lt_0_02"
+  | "gte_0_02_lt_0_05"
+  | "gte_0_05_lt_0_10"
+  | "gte_0_10";
+
+export type ProfileLadderShadowVariant = "p25" | "median" | "p75" | "cheap_tail";
+
+export interface ProfileLadderShadowBandTargets {
+  p25: number;
+  median: number;
+  p75: number;
+  observedMedianFirstFraction: number;
+  sampleSize: number;
+}
+
+export interface ProfileLadderShadowPlanktonPolicyConfig {
+  enabled: boolean;
+  writeRiskEvents: boolean;
+  variants: readonly ProfileLadderShadowVariant[];
+  liveBehaviorEnabled: boolean;
+  riskEventDedupeMs: number;
+  bands: Record<ProfileLadderShadowEntryBand, ProfileLadderShadowBandTargets>;
+}
+
 export type ProfileLadderModeReaderSource = "algo_token_mode_state";
 export type ProfileLadderModeReaderMappedMode = "up" | "flat";
 export type ProfileLadderModeReaderMissingBehavior = "local";
@@ -1083,6 +1110,7 @@ export interface ExecutionProfileSellLadderConfig {
   staleReview: ProfileLadderStaleReviewConfig;
   postFill: ProfileLadderPostFillConfig;
   postRefillFollowThrough: ProfileLadderPostRefillFollowThroughConfig;
+  shadowPlanktonPolicy: ProfileLadderShadowPlanktonPolicyConfig;
   modeReader: ProfileLadderModeReaderConfig;
   adoptExisting: ExecutionProfileFeatureToggle;
 }

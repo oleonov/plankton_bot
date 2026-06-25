@@ -99,6 +99,10 @@ export function isValidLadderBbo(bestBid: number | null, bestAsk: number | null)
   return isValidBbo(bestBid, bestAsk);
 }
 
+export function wouldCrossProfileLadderPostOnly(price: number, bestBid: number | null): boolean {
+  return isPositiveFinite(bestBid) && price <= bestBid;
+}
+
 function resolveActiveRungCount(input: LadderBuilderInput, band: ProfileLadderBand): number {
   const costBasis = input.costBasisUsd;
   if (costBasis < 5) return 1;
@@ -117,7 +121,7 @@ function normalizeActiveSizing(raw: readonly number[], count: number): number[] 
   return active.map((value) => roundRatio(value / sum));
 }
 
-function fitRungsToMinNotional(
+export function fitRungsToMinNotional(
   rawRungs: readonly LadderRung[],
   positionSizeShares: number,
   minOrderNotionalUsd: number,

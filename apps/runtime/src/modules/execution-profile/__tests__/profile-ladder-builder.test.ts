@@ -2,17 +2,76 @@ import {
   DEFAULT_EXECUTION_PROFILE_POLICY,
   createConditionId,
   createTokenId,
+  type ExecutionProfileSellLadderConfig,
   type LadderBuilderInput,
+  type LadderRung,
   type ProfileLadderBand,
   type ProfileLadderMode,
 } from "@krabs/domain";
 import { describe, expect, it, vi } from "vitest";
 
-import { computeProfileLadder } from "../profile-ladder-builder.js";
+import { computeProfileLadder, fitRungsToMinNotional } from "../profile-ladder-builder.js";
+import {
+  computeProfileLadderShadowEvaluation,
+  resolveProfileLadderShadowEntryBand,
+} from "../profile-ladder-shadow-policy.js";
+
+const shadowPlanktonPolicy = {
+  enabled: true,
+  writeRiskEvents: true,
+  variants: ["p25", "median", "cheap_tail"],
+  liveBehaviorEnabled: false,
+  riskEventDedupeMs: 600_000,
+  bands: {
+    lt_0_005: {
+      p25: 1.5,
+      median: 2.33,
+      p75: 4.5,
+      observedMedianFirstFraction: 0.7,
+      sampleSize: 1166,
+    },
+    gte_0_005_lt_0_01: {
+      p25: 1.2,
+      median: 1.47,
+      p75: 2,
+      observedMedianFirstFraction: 1,
+      sampleSize: 531,
+    },
+    gte_0_01_lt_0_02: {
+      p25: 1.14,
+      median: 1.36,
+      p75: 1.73,
+      observedMedianFirstFraction: 1,
+      sampleSize: 1455,
+    },
+    gte_0_02_lt_0_05: {
+      p25: 1.1,
+      median: 1.23,
+      p75: 1.46,
+      observedMedianFirstFraction: 1,
+      sampleSize: 3918,
+    },
+    gte_0_05_lt_0_10: {
+      p25: 1.1,
+      median: 1.19,
+      p75: 1.43,
+      observedMedianFirstFraction: 1,
+      sampleSize: 2390,
+    },
+    gte_0_10: {
+      p25: 1.06,
+      median: 1.13,
+      p75: 1.25,
+      observedMedianFirstFraction: 1,
+      sampleSize: 11531,
+    },
+  },
+} satisfies ExecutionProfileSellLadderConfig["shadowPlanktonPolicy"];
 
 const config = {
   ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder,
   enabled: true,
+  shadowPlanktonPolicy,
   bands: {
     ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands,
     cheap: { ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands.cheap, enabled: true },
@@ -297,3 +356,202 @@ describe("computeProfileLadder positive floor (GAP-2)", () => {
     expect(result.rungs.every((rung) => rung.floored !== true)).toBe(true);
   });
 });
+
+function shadowEvaluation(overrides: Partial<LadderBuilderInput> = {}) {
+  const builderInput = input({
+    bestBid: 0.001,
+    bestAsk: 0.5,
+    ...overrides,
+  });
+  const live = computeProfileLadder(builderInput);
+  if (!live.ok) throw new Error(`expected live ladder, got ${live.reason}`);
+  const evaluation = computeProfileLadderShadowEvaluation({
+    avgEntryPrice: builderInput.avgEntryPrice,
+    costBasisUsd: builderInput.costBasisUsd,
+    positionSizeShares: builderInput.positionSizeShares,
+    mode: builderInput.mode,
+    bestBid: builderInput.bestBid,
+    bestAsk: builderInput.bestAsk,
+    tickSize: builderInput.tickSize,
+    minOrderSize: builderInput.minOrderSize,
+    config: builderInput.config.shadowPlanktonPolicy,
+    currentRungs: live.rungs,
+  });
+  if (evaluation == null) throw new Error("expected shadow evaluation");
+  return evaluation;
+}
+
+describe("ProfileLadder Plankton shadow policy", () => {
+  it.each([
+    [0.004999, "lt_0_005"],
+    [0.005, "gte_0_005_lt_0_01"],
+    [0.01, "gte_0_01_lt_0_02"],
+    [0.02, "gte_0_02_lt_0_05"],
+    [0.05, "gte_0_05_lt_0_10"],
+    [0.1, "gte_0_10"],
+  ] as const)("resolves shadow band boundary %s", (avgEntryPrice, expected) => {
+    expect(resolveProfileLadderShadowEntryBand(avgEntryPrice)).toBe(expected);
+  });
+
+  it("calculates P25, median, P75, and cheap-tail targets from the Plankton table", () => {
+    const evaluation = computeProfileLadderShadowEvaluation({
+      avgEntryPrice: 0.01,
+      costBasisUsd: 25,
+      positionSizeShares: 250,
+      mode: "flat",
+      bestBid: 0.001,
+      bestAsk: 0.5,
+      tickSize: 0.001,
+      minOrderSize: 0.1,
+      config: { ...config.shadowPlanktonPolicy, variants: ["p25", "median", "p75", "cheap_tail"] },
+      currentRungs: [
+        rungForTest({ sizingFraction: 0.6, sizeShares: 150 }),
+        rungForTest({ sizingFraction: 0.4, sizeShares: 100 }),
+      ],
+    });
+    if (evaluation == null) throw new Error("expected shadow evaluation");
+
+    expect(evaluation.band).toBe("gte_0_01_lt_0_02");
+    const byVariant = new Map(evaluation.results.map((result) => [result.variant, result]));
+    expect(byVariant.get("p25")?.firstTargetMultiple).toBe(1.14);
+    expect(byVariant.get("median")?.firstTargetMultiple).toBe(1.36);
+    expect(byVariant.get("p75")?.firstTargetMultiple).toBe(1.73);
+    expect(byVariant.get("cheap_tail")?.candidateRungs.map((rung) => rung.targetKind)).toEqual([
+      "median",
+      "p75",
+    ]);
+  });
+
+  it("uses tick rounding and positive floor and detects variants collapsed by floor/tick", () => {
+    const evaluation = shadowEvaluation({
+      avgEntryPrice: 0.105,
+      tickSize: 0.05,
+      bestBid: 0.01,
+      bestAsk: 0.5,
+      config: {
+        ...config,
+        shadowPlanktonPolicy: {
+          ...config.shadowPlanktonPolicy,
+          variants: ["p25", "median", "p75"],
+        },
+      },
+    });
+
+    expect(evaluation.variantCollapse?.collapseType).toBe(
+      "same_effective_price_after_tick_and_floor",
+    );
+    expect(evaluation.results.map((result) => result.candidateRungs[0]?.price)).toEqual([
+      0.2, 0.2, 0.2,
+    ]);
+  });
+
+  it("reuses the live min-order collapse helper for shadow candidate collapse", () => {
+    const rawRungs = [
+      rungForTest({ rungIndex: 0, price: 0.01, sizeShares: 35, notionalUsd: 0.35 }),
+      rungForTest({ rungIndex: 1, price: 0.018, sizeShares: 15, notionalUsd: 0.27 }),
+    ];
+    const expected = fitRungsToMinNotional(rawRungs, 50, 0.5);
+    const evaluation = computeProfileLadderShadowEvaluation({
+      avgEntryPrice: 0.004,
+      costBasisUsd: 0.62,
+      positionSizeShares: 50,
+      mode: "flat",
+      bestBid: 0.001,
+      bestAsk: 0.5,
+      tickSize: 0.001,
+      minOrderSize: 0.5,
+      config: { ...config.shadowPlanktonPolicy, variants: ["cheap_tail"] },
+      currentRungs: [rungForTest({ sizingFraction: 0.7 }), rungForTest({ sizingFraction: 0.3 })],
+    });
+    if (evaluation == null) throw new Error("expected shadow evaluation");
+    const candidate = evaluation.results[0]!;
+
+    expect(expected).toHaveLength(1);
+    expect(candidate.collapsedDueMinOrder).toBe(true);
+    expect(candidate.candidateRungs).toHaveLength(expected.length);
+    expect(candidate.candidateRungs[0]?.sizingFraction).toBe(expected[0]?.sizingFraction);
+  });
+
+  it("recomputes shadow band when scale-in changes avgEntry", () => {
+    expect(resolveProfileLadderShadowEntryBand(0.009)).toBe("gte_0_005_lt_0_01");
+    expect(resolveProfileLadderShadowEntryBand(0.02)).toBe("gte_0_02_lt_0_05");
+  });
+
+  it("does not default cheap entries to a <=1.10x normal target", () => {
+    const evaluation = shadowEvaluation({ avgEntryPrice: 0.01, tickSize: 0.001 });
+    const median = evaluation.results.find((result) => result.variant === "median");
+
+    expect(median?.firstTargetMultiple).toBe(1.36);
+    expect(median?.effectiveFirstTargetMultiple).toBeGreaterThan(1.1);
+  });
+
+  it("allows an expensive entry to use a full-size lower-multiple candidate", () => {
+    const evaluation = shadowEvaluation({ avgEntryPrice: 0.2, tickSize: 0.001 });
+    const p25 = evaluation.results.find((result) => result.variant === "p25");
+
+    expect(p25?.firstTargetMultiple).toBe(1.06);
+    expect(p25?.firstSizeFraction).toBe(1);
+    expect(p25?.result).not.toBe("candidate_not_executable");
+  });
+
+  it("marks crossing post-only candidates non-executable without changing live ladder output", () => {
+    const evaluation = shadowEvaluation({
+      avgEntryPrice: 0.1,
+      bestBid: 0.2,
+      bestAsk: 0.25,
+    });
+
+    expect(evaluation.results.every((result) => result.result === "crossing_post_only")).toBe(true);
+    expect(evaluation.results.every((result) => result.reason === "post_only_crossing")).toBe(true);
+  });
+
+  it("detects PR2 protected-exposure conflicts without mutating current rungs", () => {
+    const currentRungs = [
+      rungForTest({
+        rungIndex: 0,
+        price: 0.018,
+        sizeShares: 50,
+        sizingFraction: 0.5,
+        lifecycle: "placed",
+        orderId: "old-high-rung",
+      }),
+      rungForTest({
+        rungIndex: 1,
+        price: 0.014,
+        sizeShares: 50,
+        sizingFraction: 0.5,
+      }),
+    ];
+    const evaluation = computeProfileLadderShadowEvaluation({
+      avgEntryPrice: 0.01,
+      costBasisUsd: 1,
+      positionSizeShares: 100,
+      mode: "flat",
+      bestBid: 0.001,
+      bestAsk: 0.5,
+      tickSize: 0.001,
+      minOrderSize: 0.1,
+      config: { ...config.shadowPlanktonPolicy, variants: ["cheap_tail"] },
+      currentRungs,
+    });
+
+    expect(evaluation?.results[0]?.pr2ProtectedExposureConflict).toBe(true);
+    expect(currentRungs[0]?.lifecycle).toBe("placed");
+    expect(currentRungs[0]?.orderId).toBe("old-high-rung");
+  });
+});
+
+function rungForTest(overrides: Partial<LadderRung> = {}): LadderRung {
+  return {
+    rungIndex: 0,
+    price: 0.014,
+    sizeShares: 30,
+    notionalUsd: 0.42,
+    multiplier: 1.36,
+    sizingFraction: 0.6,
+    lifecycle: "planned" as const,
+    orderId: null,
+    filledSizeShares: 0,
+    ...overrides,
+  };
+}

@@ -62,6 +62,10 @@ import type {
   DynamicChainCapPolicyConfig,
   ProfileLadderBand,
   ProfileLadderBandConfig,
+  ProfileLadderShadowBandTargets,
+  ProfileLadderShadowEntryBand,
+  ProfileLadderShadowPlanktonPolicyConfig,
+  ProfileLadderShadowVariant,
 } from "./types.js";
 import type { AlgoState } from "./algo-engine.js";
 import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
@@ -294,6 +298,57 @@ export const DEFAULT_EXECUTION_PROFILE_SELL_LADDER: ExecutionProfileSellLadderCo
     minMaterialPositionSizeShares: 1,
     replacementCooldownMs: 120_000,
     cancelAckTimeoutMs: 60_000,
+  },
+  shadowPlanktonPolicy: {
+    enabled: true,
+    writeRiskEvents: true,
+    variants: ["p25", "median", "cheap_tail"],
+    liveBehaviorEnabled: false,
+    riskEventDedupeMs: 10 * 60_000,
+    bands: {
+      lt_0_005: {
+        p25: 1.5,
+        median: 2.33,
+        p75: 4.5,
+        observedMedianFirstFraction: 0.7,
+        sampleSize: 1166,
+      },
+      gte_0_005_lt_0_01: {
+        p25: 1.2,
+        median: 1.47,
+        p75: 2,
+        observedMedianFirstFraction: 1,
+        sampleSize: 531,
+      },
+      gte_0_01_lt_0_02: {
+        p25: 1.14,
+        median: 1.36,
+        p75: 1.73,
+        observedMedianFirstFraction: 1,
+        sampleSize: 1455,
+      },
+      gte_0_02_lt_0_05: {
+        p25: 1.1,
+        median: 1.23,
+        p75: 1.46,
+        observedMedianFirstFraction: 1,
+        sampleSize: 3918,
+      },
+      gte_0_05_lt_0_10: {
+        p25: 1.1,
+        median: 1.19,
+        p75: 1.43,
+        observedMedianFirstFraction: 1,
+        sampleSize: 2390,
+      },
+      gte_0_10: {
+        p25: 1.06,
+        median: 1.13,
+        p75: 1.25,
+        observedMedianFirstFraction: 1,
+        sampleSize: 11531,
+      },
+    },
   },
   modeReader: {
     enabled: false,
@@ -2258,6 +2313,11 @@ function parseExecutionProfileSellLadder(
       fallback.postRefillFollowThrough,
       issues,
     ),
+    shadowPlanktonPolicy: parseProfileLadderShadowPlanktonPolicy(
+      obj.shadowPlanktonPolicy,
+      fallback.shadowPlanktonPolicy,
+      issues,
+    ),
     modeReader: parseProfileLadderModeReader(obj.modeReader, fallback.modeReader, issues),
     adoptExisting: parseExecutionProfileToggle(
       obj.adoptExisting,
@@ -2659,6 +2719,161 @@ function parseProfileLadderPostRefillFollowThrough(
     return fallback;
   }
   return parsed;
+}
+
+const PROFILE_LADDER_SHADOW_VARIANTS: readonly ProfileLadderShadowVariant[] = [
+  "p25",
+  "median",
+  "p75",
+  "cheap_tail",
+];
+
+const PROFILE_LADDER_SHADOW_BANDS: readonly ProfileLadderShadowEntryBand[] = [
+  "lt_0_005",
+  "gte_0_005_lt_0_01",
+  "gte_0_01_lt_0_02",
+  "gte_0_02_lt_0_05",
+  "gte_0_05_lt_0_10",
+  "gte_0_10",
+];
+
+function parseProfileLadderShadowPlanktonPolicy(
+  raw: unknown,
+  fallback: ProfileLadderShadowPlanktonPolicyConfig,
+  issues: string[],
+): ProfileLadderShadowPlanktonPolicyConfig {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined)
+      issues.push("executionProfile.sellLadder.shadowPlanktonPolicy must be an object");
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const previousIssueCount = issues.length;
+  const parsed: ProfileLadderShadowPlanktonPolicyConfig = {
+    enabled: booleanOr(
+      obj.enabled,
+      fallback.enabled,
+      issues,
+      "executionProfile.sellLadder.shadowPlanktonPolicy.enabled",
+    ),
+    writeRiskEvents: booleanOr(
+      obj.writeRiskEvents,
+      fallback.writeRiskEvents,
+      issues,
+      "executionProfile.sellLadder.shadowPlanktonPolicy.writeRiskEvents",
+    ),
+    variants: parseProfileLadderShadowVariants(obj.variants, fallback.variants, issues),
+    liveBehaviorEnabled: booleanOr(
+      obj.liveBehaviorEnabled,
+      fallback.liveBehaviorEnabled,
+      issues,
+      "executionProfile.sellLadder.shadowPlanktonPolicy.liveBehaviorEnabled",
+    ),
+    riskEventDedupeMs: positiveNumberOr(
+      obj.riskEventDedupeMs,
+      fallback.riskEventDedupeMs,
+      issues,
+      "executionProfile.sellLadder.shadowPlanktonPolicy.riskEventDedupeMs",
+    ).value,
+    bands: parseProfileLadderShadowBands(obj.bands, fallback.bands, issues),
+  };
+  if (parsed.liveBehaviorEnabled) {
+    issues.push(
+      "executionProfile.sellLadder.shadowPlanktonPolicy.liveBehaviorEnabled=true is unsupported in Phase 1",
+    );
+    return fallback;
+  }
+  return issues.length === previousIssueCount ? parsed : fallback;
+}
+
+function parseProfileLadderShadowVariants(
+  raw: unknown,
+  fallback: readonly ProfileLadderShadowVariant[],
+  issues: string[],
+): readonly ProfileLadderShadowVariant[] {
+  if (raw === undefined) return fallback;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    issues.push(
+      "executionProfile.sellLadder.shadowPlanktonPolicy.variants must be a non-empty array",
+    );
+    return fallback;
+  }
+  const allowed = new Set(PROFILE_LADDER_SHADOW_VARIANTS);
+  const variants: ProfileLadderShadowVariant[] = [];
+  for (const value of raw) {
+    if (typeof value !== "string" || !allowed.has(value as ProfileLadderShadowVariant)) {
+      issues.push(
+        "executionProfile.sellLadder.shadowPlanktonPolicy.variants must contain only p25, median, p75, cheap_tail",
+      );
+      return fallback;
+    }
+    const variant = value as ProfileLadderShadowVariant;
+    if (!variants.includes(variant)) variants.push(variant);
+  }
+  return variants;
+}
+
+function parseProfileLadderShadowBands(
+  raw: unknown,
+  fallback: ProfileLadderShadowPlanktonPolicyConfig["bands"],
+  issues: string[],
+): ProfileLadderShadowPlanktonPolicyConfig["bands"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined)
+      issues.push("executionProfile.sellLadder.shadowPlanktonPolicy.bands must be an object");
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  return PROFILE_LADDER_SHADOW_BANDS.reduce(
+    (acc, band) => ({
+      ...acc,
+      [band]: parseProfileLadderShadowBandTargets(obj[band], fallback[band], issues, band),
+    }),
+    {} as ProfileLadderShadowPlanktonPolicyConfig["bands"],
+  );
+}
+
+function parseProfileLadderShadowBandTargets(
+  raw: unknown,
+  fallback: ProfileLadderShadowBandTargets,
+  issues: string[],
+  band: ProfileLadderShadowEntryBand,
+): ProfileLadderShadowBandTargets {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined)
+      issues.push(
+        `executionProfile.sellLadder.shadowPlanktonPolicy.bands.${band} must be an object`,
+      );
+    return fallback;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const name = `executionProfile.sellLadder.shadowPlanktonPolicy.bands.${band}`;
+  const previousIssueCount = issues.length;
+  const parsed: ProfileLadderShadowBandTargets = {
+    p25: positiveNumberOr(obj.p25, fallback.p25, issues, `${name}.p25`).value,
+    median: positiveNumberOr(obj.median, fallback.median, issues, `${name}.median`).value,
+    p75: positiveNumberOr(obj.p75, fallback.p75, issues, `${name}.p75`).value,
+    observedMedianFirstFraction: positiveNumberOr(
+      obj.observedMedianFirstFraction,
+      fallback.observedMedianFirstFraction,
+      issues,
+      `${name}.observedMedianFirstFraction`,
+    ).value,
+    sampleSize: positiveNumberOr(obj.sampleSize, fallback.sampleSize, issues, `${name}.sampleSize`)
+      .value,
+  };
+  if (parsed.observedMedianFirstFraction > 1) {
+    issues.push(`${name}.observedMedianFirstFraction must be <= 1`);
+    return fallback;
+  }
+  if (parsed.p25 > parsed.median || parsed.median > parsed.p75) {
+    issues.push(`${name} must satisfy p25 <= median <= p75`);
+    return fallback;
+  }
+  return issues.length === previousIssueCount ? parsed : fallback;
 }
 
 function parseProfileLadderStaleReview(

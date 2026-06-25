@@ -12,6 +12,7 @@ import {
   createOrderId,
   createTokenId,
   type ClientOrderId,
+  type ExecutionProfileSellLadderConfig,
   type LadderRung,
   type LadderState,
   type NormalizedMarket,
@@ -42,6 +43,57 @@ import type { ExecutionProfilePolicy, ProfileState } from "../types.js";
 const tokenId = createTokenId("profile-ladder-token");
 const conditionId = createConditionId("profile-ladder-condition");
 const NOW = Date.parse("2026-06-15T00:00:00.000Z");
+const SHADOW_PLANKTON_POLICY = {
+  enabled: true,
+  writeRiskEvents: true,
+  variants: ["p25", "median", "cheap_tail"],
+  liveBehaviorEnabled: false,
+  riskEventDedupeMs: 600_000,
+  bands: {
+    lt_0_005: {
+      p25: 1.5,
+      median: 2.33,
+      p75: 4.5,
+      observedMedianFirstFraction: 0.7,
+      sampleSize: 1166,
+    },
+    gte_0_005_lt_0_01: {
+      p25: 1.2,
+      median: 1.47,
+      p75: 2,
+      observedMedianFirstFraction: 1,
+      sampleSize: 531,
+    },
+    gte_0_01_lt_0_02: {
+      p25: 1.14,
+      median: 1.36,
+      p75: 1.73,
+      observedMedianFirstFraction: 1,
+      sampleSize: 1455,
+    },
+    gte_0_02_lt_0_05: {
+      p25: 1.1,
+      median: 1.23,
+      p75: 1.46,
+      observedMedianFirstFraction: 1,
+      sampleSize: 3918,
+    },
+    gte_0_05_lt_0_10: {
+      p25: 1.1,
+      median: 1.19,
+      p75: 1.43,
+      observedMedianFirstFraction: 1,
+      sampleSize: 2390,
+    },
+    gte_0_10: {
+      p25: 1.06,
+      median: 1.13,
+      p75: 1.25,
+      observedMedianFirstFraction: 1,
+      sampleSize: 11531,
+    },
+  },
+} satisfies ExecutionProfileSellLadderConfig["shadowPlanktonPolicy"];
 
 class InMemoryProfileLadderRepository implements ProfileLadderRepository {
   readonly states = new Map<string, LadderState>();
@@ -107,6 +159,10 @@ function policy(
   const sellLadder = {
     ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder,
     enabled: true,
+    shadowPlanktonPolicy: {
+      ...SHADOW_PLANKTON_POLICY,
+      enabled: false,
+    },
     bands: {
       ...DEFAULT_EXECUTION_PROFILE_POLICY.sellLadder.bands,
       medium_low: {
@@ -617,6 +673,69 @@ describe("ProfileLadderModule", () => {
     expect(ctx.repo.getLadder(mediumLowToken)?.band).toBe("medium_low");
     expect(ctx.repo.getLadder(mediumHighToken)).toBeNull();
     expect(ctx.orders.every((order) => order.metadata?.source === "profile_ladder")).toBe(true);
+  });
+
+  it("emits Plankton shadow telemetry without changing live ladder placement", async () => {
+    const shadowPolicy = policy({
+      shadowPlanktonPolicy: {
+        ...SHADOW_PLANKTON_POLICY,
+        enabled: true,
+        writeRiskEvents: true,
+        variants: ["p25", "median", "cheap_tail"],
+      },
+    });
+    const liveOnly = setup();
+    const shadow = setup(shadowPolicy, {
+      profileStateReader: { getProfileState: () => "HARVESTING" },
+    });
+
+    await liveOnly.module.placeLadder(position({ avgEntryPrice: 0.1 }), market());
+    await shadow.module.placeLadder(position({ avgEntryPrice: 0.1 }), market());
+
+    expect(shadow.orders).toHaveLength(liveOnly.orders.length);
+    expect(shadow.cancels).toHaveLength(0);
+    expect(shadow.orders[0]).toMatchObject({
+      side: liveOnly.orders[0]?.side,
+      price: liveOnly.orders[0]?.price,
+      size: liveOnly.orders[0]?.size,
+      metadata: liveOnly.orders[0]?.metadata,
+    });
+    expect(shadow.repo.getLadder(tokenId)?.activeRungs).toEqual(
+      liveOnly.repo.getLadder(tokenId)?.activeRungs,
+    );
+    expect(
+      counterLabels(shadow.counters, "profile_ladder_shadow_candidate_evaluated_total"),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          variant: "p25",
+          band: "gte_0_10",
+          mode: "up",
+          state: "harvesting",
+        }),
+      ]),
+    );
+    expect(
+      shadow.riskEvents.some(
+        (event) => event.eventType === "profile_ladder_shadow_candidate_sampled",
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(shadow.counters)).not.toContain(String(tokenId));
+    expect(JSON.stringify(shadow.counters)).not.toContain(String(conditionId));
+    expect(JSON.stringify(shadow.counters)).not.toContain("clientOrderId");
+  });
+
+  it("keeps Plankton shadow disabled silent", async () => {
+    const ctx = setup();
+
+    await ctx.module.placeLadder(position({ avgEntryPrice: 0.1 }), market());
+
+    expect(ctx.counters.some((counter) => counter.name.startsWith("profile_ladder_shadow_"))).toBe(
+      false,
+    );
+    expect(ctx.riskEvents.some((event) => event.eventType.includes("shadow_candidate"))).toBe(
+      false,
+    );
   });
 
   it("respects multiple activated bands while keeping inactive bands dark", async () => {
