@@ -145,6 +145,28 @@ function makeRedeemQuarantineRepo(
           };
         },
       ),
+      recordBenignZeroBalanceSkip: vi.fn(
+        ({ conditionId, nowTs, ttlMs }: { conditionId: string; nowTs: number; ttlMs: number }) => {
+          const previous = states.get(conditionId);
+          const previousUntil = previous?.redeemQuarantineUntilTs ?? null;
+          const nextUntil = Math.max(previousUntil ?? 0, nowTs + ttlMs);
+          // Mirrors the repo: a benign zero-balance skip clears the STATE_FAILED
+          // markers so the quarantine is unambiguously zero-balance (count 0).
+          const state = {
+            conditionId,
+            consecutiveStateFailedCount: 0,
+            redeemQuarantineUntilTs: nextUntil,
+            lastStateFailedTs: null,
+            positionRows: previous?.positionRows ?? 1,
+            totalBasisUsdc: previous?.totalBasisUsdc ?? 1,
+          };
+          states.set(conditionId, state);
+          return {
+            ...state,
+            enteredQuarantine: previousUntil === null || previousUntil <= nowTs,
+          };
+        },
+      ),
       clearAfterSuccess: reset,
       clearExpired: reset,
     },
@@ -155,7 +177,7 @@ function makeHarness(
   opts: {
     positions?: any[];
     readImpl?: () => Promise<any[] | null>;
-    redeemImpl?: () => Promise<any>;
+    redeemImpl?: (...args: any[]) => Promise<any>;
     policy?: Partial<typeof DEFAULT_EXECUTION_POLICY.redeemSweep>;
     redeemLogRows?: any[];
     uniqueViolationOnFirstAttemptingInsert?: boolean;
@@ -665,6 +687,184 @@ describe("RedeemSweepModule", () => {
     expect(h.log.error).toHaveBeenCalled();
   });
 
+  it("treats a zero-position-balance precheck skip as a benign terminal quarantine", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const zeroBalanceErr = new Error(
+      '{"error":"request error","status":400,"data":{"error":"PRECHECK_SKIPPED: redeem skipped: zero position balance"}}',
+    );
+    const h = makeHarness({
+      redeemImpl: vi.fn().mockRejectedValue(zeroBalanceErr),
+      policy: { intervalMs: 60 * 60_000 },
+    });
+    await runStableStartup(h);
+
+    // One relayer call, resolved to a benign "skipped" (not "failed") outcome.
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(h.redeemLogRows.map((row) => row.status)).toEqual(["skipped"]);
+    expect(h.redeemLogRows.at(-1)).toMatchObject({ errorMsg: "zero_balance_precheck_skip" });
+    expect(h.redeemQuarantineRepo.recordBenignZeroBalanceSkip).toHaveBeenCalledWith(
+      expect.objectContaining({ conditionId: CONDITION }),
+    );
+
+    // No retry fires after the backoff window would have elapsed.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await h.bus.drain();
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+
+    // The next sweep finds the persisted quarantine and never calls the relayer.
+    h.gateway.redeemPositions.mockClear();
+    await runSweepForTest(h.module, "post-quarantine");
+    await h.bus.drain();
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a non-zero-balance PRECHECK_SKIPPED as benign — it fails and retries", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const genericErr = new Error(
+      '{"error":"request error","status":400,"data":{"error":"PRECHECK_SKIPPED: nothing to do"}}',
+    );
+    const h = makeHarness({
+      redeemImpl: vi.fn().mockRejectedValue(genericErr),
+      policy: { maxRetries: 1, retryBackoffMs: [60_000], intervalMs: 60 * 60_000 },
+    });
+    await runStableStartup(h);
+
+    expect(h.redeemLogRows.at(-1)).toMatchObject({ status: "failed" });
+    expect(h.redeemQuarantineRepo.recordBenignZeroBalanceSkip).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await h.bus.drain();
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+    expect(h.redeemLogRows.at(-1)).toMatchObject({ status: "failed_max_retries" });
+  });
+
+  it("keeps the STATE_FAILED quarantine path for a genuine settlement failure", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemImpl: vi.fn().mockRejectedValue(new Error("settlement STATE_FAILED: reverted")),
+      policy: { intervalMs: 60 * 60_000 },
+    });
+    await runStableStartup(h);
+
+    expect(h.redeemQuarantineRepo.recordStateFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ conditionId: CONDITION }),
+    );
+    expect(h.redeemQuarantineRepo.recordBenignZeroBalanceSkip).not.toHaveBeenCalled();
+    expect(h.redeemLogRows.at(-1)).toMatchObject({ status: "failed" });
+  });
+
+  it("converges a multi-condition zero-balance batch to per-condition quarantine on retry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const zeroBalanceErr = new Error(
+      '{"error":"request error","status":400,"data":{"error":"PRECHECK_SKIPPED: redeem skipped: zero position balance"}}',
+    );
+    // The relayer rejects any batch that still contains cond-a as zero-balance; a
+    // batch that is only cond-b redeems cleanly. A single batch call cannot attribute
+    // the error to one condition, so the original two-condition batch must NOT
+    // quarantine — only cond-a's single-condition retry may.
+    const redeemImpl = vi.fn((conditionIds: readonly string[]) =>
+      conditionIds.includes("cond-a")
+        ? Promise.reject(zeroBalanceErr)
+        : Promise.resolve({ status: "confirmed", conditionIds, txHash: "0xok", gasUsed: 1 }),
+    );
+    const h = makeHarness({
+      positions: [
+        remotePosition({ tokenId: "tok-a", conditionId: "cond-a" }),
+        remotePosition({ tokenId: "tok-b", conditionId: "cond-b" }),
+      ],
+      redeemImpl,
+      policy: { intervalMs: 60 * 60_000, retryBackoffMs: [60_000], maxRetries: 3 },
+    });
+    await runStableStartup(h);
+
+    // First call is the multi-condition batch; the error is not attributable, so no
+    // quarantine and no STATE_FAILED counter from the original batch.
+    expect((h.gateway.redeemPositions.mock.calls as unknown[][])[0]![0]).toEqual([
+      "cond-a",
+      "cond-b",
+    ]);
+    expect(h.redeemQuarantineRepo.recordBenignZeroBalanceSkip).not.toHaveBeenCalled();
+    expect(h.redeemQuarantineRepo.recordStateFailed).not.toHaveBeenCalled();
+
+    // Backoff elapses: both conditions retry as single-condition batches.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await h.bus.drain();
+
+    // Only cond-a's retry attributes the zero-balance skip and quarantines; cond-b
+    // redeems successfully and is never quarantined.
+    const benignConditions = h.redeemQuarantineRepo.recordBenignZeroBalanceSkip.mock.calls.map(
+      (call: any[]) => call[0].conditionId,
+    );
+    expect(benignConditions).toEqual(["cond-a"]);
+    expect(h.redeemQuarantineRepo.recordStateFailed).not.toHaveBeenCalled();
+
+    const condARow = h.redeemLogRows.filter((row) => row.conditionId === "cond-a").at(-1);
+    const condBRow = h.redeemLogRows.filter((row) => row.conditionId === "cond-b").at(-1);
+    expect(condARow).toMatchObject({ status: "skipped", errorMsg: "zero_balance_precheck_skip" });
+    expect(condBRow).toMatchObject({ status: "success" });
+
+    // Quarantine is anchored at the retry time (NOW + one 60s backoff) and is a
+    // benign zero-balance quarantine (counter stays 0), distinct from STATE_FAILED.
+    expect(h.quarantineStates.get("cond-a")).toMatchObject({
+      consecutiveStateFailedCount: 0,
+      redeemQuarantineUntilTs: NOW + 60_000 + 24 * 60 * 60_000,
+    });
+    expect(h.quarantineStates.get("cond-b")?.redeemQuarantineUntilTs ?? null).toBeNull();
+  });
+
+  it("downsamples redeem_log skip rows for an already-quarantined condition", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [remotePosition({ tokenId: "tok-q", conditionId: "cond-q" })],
+      quarantineStates: {
+        "cond-q": { consecutiveStateFailedCount: 5, redeemQuarantineUntilTs: NOW + 60_000 },
+      },
+      policy: { intervalMs: 60 * 60_000 },
+    });
+    await h.module.start();
+    await h.bus.drain();
+    await runSweepForTest(h.module, "sweep-1");
+    await runSweepForTest(h.module, "sweep-2");
+    await runSweepForTest(h.module, "sweep-3");
+    await h.bus.drain();
+
+    const skipRows = h.redeemLogRows.filter((row) => row.status === "skipped");
+    expect(skipRows).toHaveLength(1);
+    expect(skipRows[0]).toMatchObject({ errorMsg: "state_failed_quarantine" });
+    const counterTicks = h.runtimeMetrics.writeCounter.mock.calls.filter(
+      (call: unknown[]) => call[0] === "redeem_quarantine_skipped_total",
+    );
+    expect(counterTicks.length).toBeGreaterThanOrEqual(4);
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+  });
+
+  it("does not call the relayer on startup while a persisted hard-pause window is open", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const breaker = new SettlementInfraBreaker({
+      now: () => Date.now(),
+      store: {
+        load: () => ({ disabledUntilMs: NOW + 5 * 60_000, code: "POLYGON_RPC_RATE_LIMITED" }),
+        save: vi.fn(),
+      },
+    });
+    const h = makeHarness({ settlementInfraBreaker: breaker, policy: { intervalMs: 60 * 60_000 } });
+    await runStableStartup(h);
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+
+    // Once the persisted window expires, sweeps resume (two snapshots → stable).
+    vi.setSystemTime(NOW + 5 * 60_000 + 1);
+    await runSweepForTest(h.module, "post-pause-1");
+    await runSweepForTest(h.module, "post-pause-2");
+    await h.bus.drain();
+    expect(h.gateway.redeemPositions).toHaveBeenCalled();
+  });
+
   it("redeems only the redeemable token in a partial condition", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
@@ -1134,10 +1334,19 @@ describe("RedeemSweepModule", () => {
     await vi.advanceTimersByTimeAsync(30 * 60_000 - 1);
     await runSweepForTest(h.module, "blocked");
     expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
-    expect(h.redeemLogRows.at(-1)).toMatchObject({
+
+    // Downsampling (requirement C): the recurring cooldown skip is logged once per
+    // cooldown episode, not once per sweep. The retry-triggered skip writes the row;
+    // the later "blocked" sweep hits the same episode key and is deduped, so no second
+    // skipped row is emitted for the same cooldown window.
+    const cooldownRows = h.redeemLogRows.filter(
+      (row) => row.status === "skipped" && row.errorMsg === "state_failed_cooldown",
+    );
+    expect(cooldownRows).toHaveLength(1);
+    expect(cooldownRows[0]).toMatchObject({
       status: "skipped",
       errorMsg: "state_failed_cooldown",
-      details: { reason: "state_failed_cooldown", source: "blocked" },
+      details: { reason: "state_failed_cooldown" },
     });
 
     await vi.advanceTimersByTimeAsync(1);

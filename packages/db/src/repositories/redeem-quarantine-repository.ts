@@ -101,6 +101,51 @@ export class SqliteRedeemQuarantineRepository {
     };
   }
 
+  /**
+   * Quarantine a condition the relayer rejected as a benign zero-position-balance
+   * precheck skip. Reuses `redeem_quarantine_until_ts` so the existing sweep gate
+   * (and `clearExpired`/`clearAfterSuccess`) handle it for free.
+   *
+   * A zero-balance skip is NOT a settlement failure, so the STATE_FAILED markers
+   * are reset (`consecutive_state_failed_count = 0`, `last_state_failed_ts = NULL`).
+   * This keeps the quarantine unambiguously classifiable as a benign zero-balance
+   * quarantine (count 0) rather than a STATE_FAILED one (count > 0) even when the
+   * condition previously accumulated state-failed strikes — without a schema change.
+   */
+  recordBenignZeroBalanceSkip(input: {
+    conditionId: string;
+    nowTs: number;
+    ttlMs: number;
+  }): RedeemQuarantineStateFailedResult {
+    const before = this.findOne(input.conditionId);
+    const previousUntil = before?.redeemQuarantineUntilTs ?? null;
+    const nextUntil = Math.max(previousUntil ?? 0, input.nowTs + input.ttlMs);
+    const enteredQuarantine = previousUntil === null || previousUntil <= input.nowTs;
+
+    this.db
+      .prepare(
+        `UPDATE positions
+            SET redeem_quarantine_until_ts = ?,
+                consecutive_state_failed_count = 0,
+                last_state_failed_ts = NULL,
+                updated_at = datetime('now')
+          WHERE condition_id = ?`,
+      )
+      .run(nextUntil, input.conditionId);
+
+    return {
+      ...(this.findOne(input.conditionId) ?? {
+        conditionId: input.conditionId,
+        consecutiveStateFailedCount: 0,
+        redeemQuarantineUntilTs: nextUntil,
+        lastStateFailedTs: null,
+        positionRows: 0,
+        totalBasisUsdc: 0,
+      }),
+      enteredQuarantine,
+    };
+  }
+
   clearAfterSuccess(conditionId: string): RedeemQuarantineResetResult {
     return this.resetCondition(conditionId);
   }

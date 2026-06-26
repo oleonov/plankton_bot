@@ -76,6 +76,79 @@ describe("SqliteRedeemQuarantineRepository", () => {
     });
   });
 
+  it("quarantines a benign zero-balance skip without touching the STATE_FAILED counter", () => {
+    insertPosition("pos-1", "tok-1", "cond-1", 2);
+
+    const result = repo.recordBenignZeroBalanceSkip({
+      conditionId: "cond-1",
+      nowTs: 1_000,
+      ttlMs: 10_000,
+    });
+    expect(result).toMatchObject({
+      consecutiveStateFailedCount: 0,
+      redeemQuarantineUntilTs: 11_000,
+      enteredQuarantine: true,
+      positionRows: 1,
+    });
+
+    // A second benign skip while still quarantined extends the window but is not
+    // a fresh entry, and never increments the STATE_FAILED counter.
+    const again = repo.recordBenignZeroBalanceSkip({
+      conditionId: "cond-1",
+      nowTs: 2_000,
+      ttlMs: 10_000,
+    });
+    expect(again).toMatchObject({
+      consecutiveStateFailedCount: 0,
+      redeemQuarantineUntilTs: 12_000,
+      enteredQuarantine: false,
+    });
+
+    // TTL expiry clears it through the shared machinery.
+    expect(repo.clearExpired("cond-1").reset).toBe(true);
+    expect(repo.findByConditionIds(["cond-1"]).get("cond-1")).toMatchObject({
+      consecutiveStateFailedCount: 0,
+      redeemQuarantineUntilTs: null,
+    });
+  });
+
+  it("resets prior STATE_FAILED markers when recording a benign zero-balance skip", () => {
+    insertPosition("pos-1", "tok-1", "cond-1", 3);
+    // Condition accumulated a state-failed strike below the quarantine threshold.
+    repo.recordStateFailed({
+      conditionId: "cond-1",
+      nowTs: 1_000,
+      threshold: 5,
+      ttlMs: 86_400_000,
+    });
+    expect(repo.findByConditionIds(["cond-1"]).get("cond-1")).toMatchObject({
+      consecutiveStateFailedCount: 1,
+      lastStateFailedTs: 1_000,
+    });
+
+    const result = repo.recordBenignZeroBalanceSkip({
+      conditionId: "cond-1",
+      nowTs: 2_000,
+      ttlMs: 10_000,
+    });
+
+    // The benign skip wins the classification: counter and last-failed marker are
+    // cleared so the active quarantine reads as zero-balance, not STATE_FAILED.
+    // The sub-threshold strike never opened a quarantine window, so this is a fresh
+    // quarantine entry.
+    expect(result).toMatchObject({
+      consecutiveStateFailedCount: 0,
+      lastStateFailedTs: null,
+      redeemQuarantineUntilTs: 12_000,
+      enteredQuarantine: true,
+    });
+    expect(repo.findByConditionIds(["cond-1"]).get("cond-1")).toMatchObject({
+      consecutiveStateFailedCount: 0,
+      lastStateFailedTs: null,
+      redeemQuarantineUntilTs: 12_000,
+    });
+  });
+
   it("summarizes active quarantines and recent audit events", () => {
     insertPosition("pos-1", "tok-1", "cond-1", 1.25);
     insertPosition("pos-2", "tok-2", "cond-1", 0.75);

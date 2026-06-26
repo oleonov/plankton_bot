@@ -28,6 +28,10 @@ export { SqliteServiceHeartbeatRepository } from "./repositories/service-heartbe
 export { SqliteConfigImportRepository } from "./repositories/config-import-repository.js";
 export { SqliteMergeLedgerRepository } from "./repositories/merge-ledger-repository.js";
 export { SqliteSettlementLedgerRepository } from "./repositories/settlement-ledger-repository.js";
+export {
+  SqliteSettlementInfraPauseRepository,
+  type SettlementInfraPauseRecord,
+} from "./repositories/settlement-infra-pause-repository.js";
 export { SqlitePositionDriftRepository } from "./repositories/position-drift-repository.js";
 export { SqliteExecutionPolicyObservationRepository } from "./repositories/execution-policy-observation-repository.js";
 export { SqliteDecisionSignalLogRepository } from "./repositories/decision-signal-log-repository.js";

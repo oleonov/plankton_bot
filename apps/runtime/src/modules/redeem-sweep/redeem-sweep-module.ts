@@ -25,6 +25,7 @@ import type {
 import type { SettlementInfraBreaker } from "../settlement-infra-breaker.js";
 import {
   isSettlementInfraRateLimitError,
+  isZeroBalancePrecheckSkipError,
   parseRpcRateLimitResetMs,
 } from "../settlement-infra-breaker.js";
 
@@ -98,6 +99,11 @@ export class RedeemSweepModule implements RuntimeModule {
   private readonly inFlightByCondition = new Map<string, number>();
   private readonly lastAttemptByCondition = new Map<string, number>();
   private readonly blockedUntilByCondition = new Map<string, number>();
+  // Downsamples recurring skip telemetry: condition_id -> "reason:episodeKey"
+  // (the quarantine/cooldown unlock ts). One redeem_log "skipped" row is written
+  // per quarantine episode instead of one every ~15s sweep; bounded counters
+  // still tick every skip.
+  private readonly loggedRecurringSkipByCondition = new Map<string, string>();
   private readonly stabilityByCondition = new Map<string, { count: number; signature: string }>();
   private readonly verificationAttemptsByCondition = new Map<string, number>();
   private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -624,7 +630,7 @@ export class RedeemSweepModule implements RuntimeModule {
     return true;
   }
 
-  private recordRedeemSkip(
+  private insertRedeemSkipRow(
     group: RedeemGroup,
     source: string,
     reason: string,
@@ -638,7 +644,37 @@ export class RedeemSweepModule implements RuntimeModule {
       errorMsg: reason,
       details: { source, reason, excludedTokenIds: group.excludedTokenIds, ...extraDetails },
     });
+  }
+
+  private recordRedeemSkip(
+    group: RedeemGroup,
+    source: string,
+    reason: string,
+    extraDetails: Record<string, unknown> = {},
+  ): void {
+    this.insertRedeemSkipRow(group, source, reason, extraDetails);
     this.recordBoundedMetricCounter("redeem_sweep_skipped_total", { reason });
+  }
+
+  /**
+   * Telemetry for a skip that repeats every sweep (quarantine / cooldown). The
+   * bounded `redeem_sweep_skipped_total` counter ticks on every skip so volume
+   * stays observable, but the redeem_log "skipped" row is written at most once
+   * per quarantine episode (keyed by unlock ts) instead of every ~15s — that
+   * per-sweep row was the dominant source of redeem_log bloat.
+   */
+  private recordRecurringSkip(
+    group: RedeemGroup,
+    source: string,
+    reason: string,
+    episodeKey: number,
+    extraDetails: Record<string, unknown> = {},
+  ): void {
+    this.recordBoundedMetricCounter("redeem_sweep_skipped_total", { reason });
+    const dedupKey = `${reason}:${episodeKey}`;
+    if (this.loggedRecurringSkipByCondition.get(group.conditionId) === dedupKey) return;
+    this.loggedRecurringSkipByCondition.set(group.conditionId, dedupKey);
+    this.insertRedeemSkipRow(group, source, reason, extraDetails);
   }
 
   private isRedeemQuarantineActive(
@@ -654,16 +690,22 @@ export class RedeemSweepModule implements RuntimeModule {
     const untilTs = state?.redeemQuarantineUntilTs ?? null;
     if (untilTs === null) return false;
     if (untilTs > now) {
-      this.recordRedeemSkip(group, source, "state_failed_quarantine", {
+      // A quarantine with no STATE_FAILED count is a benign zero-balance skip
+      // (recordBenignZeroBalanceSkip leaves the counter at 0); a counted one is a
+      // real STATE_FAILED quarantine. Same gate, distinct telemetry.
+      const reason =
+        (state?.consecutiveStateFailedCount ?? 0) > 0
+          ? "state_failed_quarantine"
+          : "zero_balance_quarantine";
+      this.recordBoundedMetricCounter("redeem_quarantine_skipped_total", { reason });
+      this.recordRecurringSkip(group, source, reason, untilTs, {
         consecutiveStateFailedCount: state?.consecutiveStateFailedCount ?? 0,
         quarantineUntilTs: untilTs,
-      });
-      this.recordBoundedMetricCounter("redeem_quarantine_skipped_total", {
-        reason: "state_failed_quarantine",
       });
       return true;
     }
 
+    this.loggedRecurringSkipByCondition.delete(group.conditionId);
     const reset = this.deps.redeemQuarantineRepo.clearExpired(group.conditionId);
     if (reset.reset) {
       this.recordMetricLabels("redeem_quarantine_expired_total", {
@@ -690,9 +732,10 @@ export class RedeemSweepModule implements RuntimeModule {
     if (blockedUntil === undefined) return false;
     if (now >= blockedUntil) {
       this.blockedUntilByCondition.delete(group.conditionId);
+      this.loggedRecurringSkipByCondition.delete(group.conditionId);
       return false;
     }
-    this.recordRedeemSkip(group, source, "state_failed_cooldown");
+    this.recordRecurringSkip(group, source, "state_failed_cooldown", blockedUntil);
     return true;
   }
 
@@ -797,8 +840,18 @@ export class RedeemSweepModule implements RuntimeModule {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const rateLimited = isSettlementInfraRateLimitError(err);
-      const settlementFailed = isSettlementStateFailedError(err);
       if (rateLimited) this.hardPauseSweep("POLYGON_RPC_RATE_LIMITED", err);
+      // A zero-position-balance precheck skip is benign and terminal — there is
+      // nothing on-chain to redeem, so retrying just burns relayer/RPC calls.
+      // `redeemPositions` is a single batch call, so a single error can only be
+      // attributed to a specific condition when the batch holds exactly one. For
+      // multi-condition batches we fall through to the existing retry path, where
+      // each group is re-driven individually (length 1) and quarantined then.
+      if (!rateLimited && reservedGroups.length === 1 && isZeroBalancePrecheckSkipError(err)) {
+        this.recordZeroBalanceSkip(reservedGroups[0]!, policy, source, errorMsg);
+        return;
+      }
+      const settlementFailed = isSettlementStateFailedError(err);
       for (const group of reservedGroups) {
         if (settlementFailed) {
           this.blockedUntilByCondition.set(
@@ -911,8 +964,59 @@ export class RedeemSweepModule implements RuntimeModule {
     });
   }
 
+  /**
+   * Treat a zero-position-balance precheck skip as a benign terminal outcome:
+   * resolve the in-flight "attempting" row to "skipped" (NOT "failed", so no
+   * retry and no failed_max_retries alert) and quarantine the condition so
+   * subsequent sweeps stop calling the relayer. The quarantine is persisted
+   * (positions table) and cleared by the existing TTL-expiry / post-success
+   * machinery, so it survives a restart.
+   */
+  private recordZeroBalanceSkip(
+    group: RedeemGroup,
+    policy: RedeemSweepPolicy,
+    source: string,
+    errorMsg: string,
+  ): void {
+    this.recordAttemptOutcome({
+      conditionId: group.conditionId,
+      tokenIds: group.includedTokenIds,
+      status: "skipped",
+      errorMsg: "zero_balance_precheck_skip",
+      details: {
+        source,
+        reason: "zero_balance_precheck_skip",
+        excludedTokenIds: group.excludedTokenIds,
+        relayerMessage: errorMsg,
+      },
+    });
+    this.recordBoundedMetricCounter("redeem_zero_balance_skipped_total", {
+      reason: "zero_balance_precheck_skip",
+    });
+    if (!isRedeemCircuitBreakerEnabled(policy)) return;
+    const result = this.deps.redeemQuarantineRepo.recordBenignZeroBalanceSkip({
+      conditionId: group.conditionId,
+      nowTs: this.now(),
+      ttlMs:
+        (policy.stateFailedQuarantineTtlHours ?? DEFAULT_STATE_FAILED_QUARANTINE_TTL_HOURS) *
+        HOUR_MS,
+    });
+    if (!result.enteredQuarantine) return;
+    this.deps.riskEventRepo?.insert({
+      eventType: "redeem_quarantine_entered",
+      payload: {
+        condition_id: group.conditionId,
+        reason: "zero_balance_precheck_skip",
+        expected_unlock_ts: result.redeemQuarantineUntilTs,
+        token_ids: group.includedTokenIds,
+        source,
+      },
+    });
+  }
+
   private clearStateFailedCounterAfterSuccess(group: RedeemGroup, policy: RedeemSweepPolicy): void {
     if (!isRedeemCircuitBreakerEnabled(policy)) return;
+    this.loggedRecurringSkipByCondition.delete(group.conditionId);
     const result = this.deps.redeemQuarantineRepo.clearAfterSuccess(group.conditionId);
     if (!result.reset) return;
     this.recordMetricLabels("redeem_quarantine_counter_reset_total", {

@@ -177,6 +177,7 @@ import {
   SqliteDecisionSignalLogRepository,
   SqliteRedeemLogRepository,
   SqliteRedeemQuarantineRepository,
+  SqliteSettlementInfraPauseRepository,
 } from "@krabs/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { createTrackRFeeProvider } from "./track-r-fee-provider.js";
@@ -505,7 +506,12 @@ async function main(): Promise<void> {
     log,
     runtimeMetrics,
   });
-  const settlementInfraBreaker = new SettlementInfraBreaker();
+  const settlementInfraBreaker = new SettlementInfraBreaker({
+    // Persist the hard-pause window so a restart re-arms an open Polygon-RPC
+    // rate-limit pause instead of clearing it and hammering the relayer on the
+    // startup sweep.
+    store: new SqliteSettlementInfraPauseRepository(ledgerConn.db),
+  });
   // Aggregated counter flush — high-frequency `*_total` metrics buffer in
   // memory and persist as one row per (name, labels) pair every 30s. Keeps
   // total runtime_metrics write rate from dominating SQLite disk I/O.
