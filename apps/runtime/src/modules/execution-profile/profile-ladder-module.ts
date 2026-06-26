@@ -35,6 +35,7 @@ import {
   validateProfileLadderReplacementSellTarget,
 } from "../profile-ladder-order-helpers.js";
 import { resolvePositiveSellFloor } from "../../executable-price.js";
+import { isExecutableOrderSize, resolveEffectiveMinOrderSize } from "../../min-order-size.js";
 import type { ProfileLadderRepository } from "./profile-ladder-repository.js";
 import type { ExecutionProfilePolicy, ProfileState } from "./types.js";
 
@@ -131,6 +132,10 @@ export interface ProfileLadderModuleDeps {
   // Lets the module react to a sellLadder.adoptExisting false -> true hot-enable
   // while already started; returns an unsubscribe handle. Mirrors DustAutoCloseModule.
   onPolicyReload?: (handler: () => void) => () => void;
+  // Mirrors the executor's min-order fallback gate: a conservative min-order
+  // fallback for planned ladder rungs is only available in live-lite. Other
+  // modes stay fail-closed when min order size cannot be hydrated.
+  runtimeMode?: "simulation" | "paper" | "live-lite" | undefined;
   runtimeMetrics?: ProfileLadderMetricWriter;
   riskEvents?: ProfileLadderRiskEventWriter;
   now?: () => number;
@@ -242,6 +247,7 @@ interface ProfileLadderOrderMarketData {
   effectiveMinOrderSize: number;
   tickSize: number;
   cacheStatus?: "base-market" | ProfileLadderBookCacheStatus;
+  minOrderSource: "base-market" | "book-cache" | "fallback";
 }
 
 export class ProfileLadderModule implements RuntimeModule {
@@ -660,7 +666,7 @@ export class ProfileLadderModule implements RuntimeModule {
       bestBid: market.bestBid,
       bestAsk: market.bestAsk,
       tickSize: market.tickSize,
-      minOrderSize: market.minOrderSize ?? 1,
+      minOrderSize: resolveEffectiveMinOrderSize(market.minOrderSize),
       config: policy,
       previousBand: previous?.band ?? null,
     });
@@ -766,7 +772,9 @@ export class ProfileLadderModule implements RuntimeModule {
         this.writeCounter("profile_ladder_skipped_crossing_post_only", 1, { band: state.band });
         continue;
       }
-      const marketData = await this.resolveOrderMarketData(state.band, market, now);
+      const marketData = await this.resolveOrderMarketData(state.band, market, now, {
+        allowFallback: true,
+      });
       if (marketData == null) {
         this.writeCounter("profile_ladder_skipped_unknown_min_order_size", 1, {
           band: state.band,
@@ -775,6 +783,9 @@ export class ProfileLadderModule implements RuntimeModule {
         skippedUnknownMinOrderSize += 1;
         break;
       }
+      // A fallback-hydrated rung below the conservative floor is skipped, not
+      // fatal: a later rung in the same pass may still clear it.
+      if (!this.clearsFallbackMinOrder(state.band, marketData, rung)) continue;
       await this.publishPlaceOrder(position, market, marketData, state.ladderId, rung, now);
       occupied += 1;
       placed += 1;
@@ -1147,7 +1158,7 @@ export class ProfileLadderModule implements RuntimeModule {
         bestBid: market.bestBid,
         bestAsk: market.bestAsk,
         tickSize: market.tickSize,
-        minOrderSize: market.minOrderSize ?? 1,
+        minOrderSize: resolveEffectiveMinOrderSize(market.minOrderSize),
         config: policy,
         previousBand: previous?.band ?? null,
       });
@@ -1194,7 +1205,7 @@ export class ProfileLadderModule implements RuntimeModule {
         bestBid: market.bestBid,
         bestAsk: market.bestAsk,
         tickSize: market.tickSize,
-        minOrderSize: market.minOrderSize ?? 1,
+        minOrderSize: resolveEffectiveMinOrderSize(market.minOrderSize),
         config,
         currentRungs,
       });
@@ -1442,6 +1453,7 @@ export class ProfileLadderModule implements RuntimeModule {
     band: ProfileLadderBand,
     market: NormalizedMarket,
     now: number,
+    options: { allowFallback?: boolean } = {},
   ): Promise<ProfileLadderOrderMarketData | null> {
     const marketData = this.resolveOrderMarketDataFromMarket(market);
     if (marketData != null) return marketData;
@@ -1449,24 +1461,29 @@ export class ProfileLadderModule implements RuntimeModule {
     const resolution = await this.deps.bookCache?.getFreshOrRefresh(String(market.tokenId), now);
     const book = resolution?.entry?.book;
     const minOrderSize = book?.minOrderSize;
-    if (typeof minOrderSize !== "number" || !Number.isFinite(minOrderSize) || minOrderSize <= 0) {
-      if (resolution != null) {
-        this.writeCounter("profile_ladder_min_order_size_hydration_miss", 1, { band });
-      }
-      return null;
+    if (typeof minOrderSize === "number" && Number.isFinite(minOrderSize) && minOrderSize > 0) {
+      const cacheStatus = resolution?.status ?? "refreshed";
+      this.writeCounter("profile_ladder_min_order_size_hydrated_from_book_cache", 1, {
+        band,
+        source: cacheStatus,
+      });
+      return {
+        bookSource: resolution?.entry?.bookSource ?? "clob",
+        minOrderSize,
+        effectiveMinOrderSize: minOrderSize,
+        tickSize: market.tickSize,
+        cacheStatus,
+        minOrderSource: "book-cache",
+      };
     }
-    const cacheStatus = resolution?.status ?? "refreshed";
-    this.writeCounter("profile_ladder_min_order_size_hydrated_from_book_cache", 1, {
+    // Neither the base market nor the book cache yielded a usable min order size.
+    // The reason distinguishes a missing book (cache refresh failed) from a book
+    // that simply omits the min order size, keeping the label a closed enum.
+    this.writeCounter("profile_ladder_min_order_size_hydration_miss", 1, {
       band,
-      source: cacheStatus,
+      reason: book == null ? "cache_refresh_failed" : "no_market_min_order",
     });
-    return {
-      bookSource: resolution?.entry?.bookSource ?? "clob",
-      minOrderSize,
-      effectiveMinOrderSize: minOrderSize,
-      tickSize: market.tickSize,
-      cacheStatus,
-    };
+    return this.resolveFallbackOrderMarketData(band, market, options.allowFallback ?? false);
   }
 
   private resolveOrderMarketDataFromMarket(
@@ -1482,7 +1499,64 @@ export class ProfileLadderModule implements RuntimeModule {
       effectiveMinOrderSize: minOrderSize,
       tickSize: market.tickSize,
       cacheStatus: "base-market",
+      minOrderSource: "base-market",
     };
+  }
+
+  private isLiveLite(): boolean {
+    return this.deps.runtimeMode === "live-lite";
+  }
+
+  // Last-resort min-order hydration for planned rungs. Mirrors the executor's
+  // live-lite min-order floor: the conservative fallback is only available in
+  // live-lite; every other mode stays fail-closed so unknown min order size never
+  // produces a live SELL. The fallback never weakens the executor's own floor
+  // because both resolve to DEFAULT_FALLBACK_MIN_ORDER_SIZE.
+  private resolveFallbackOrderMarketData(
+    band: ProfileLadderBand,
+    market: NormalizedMarket,
+    allowFallback: boolean,
+  ): ProfileLadderOrderMarketData | null {
+    if (!allowFallback) return null;
+    if (!this.isLiveLite()) {
+      this.writeCounter("profile_ladder_min_order_fallback_total", 1, {
+        band,
+        result: "fallback_unavailable",
+      });
+      return null;
+    }
+    const effectiveMinOrderSize = resolveEffectiveMinOrderSize(undefined);
+    return {
+      bookSource: market.bookSource ?? "unknown",
+      minOrderSize: effectiveMinOrderSize,
+      effectiveMinOrderSize,
+      tickSize: market.tickSize,
+      minOrderSource: "fallback",
+    };
+  }
+
+  // Defends the conservative fallback floor at the placement source: a planned
+  // rung whose notional is below the fallback min order size never goes live.
+  // Non-fallback hydration (base market / book cache) already carries an
+  // authoritative min order size, so it clears unconditionally.
+  private clearsFallbackMinOrder(
+    band: ProfileLadderBand,
+    marketData: ProfileLadderOrderMarketData,
+    rung: LadderRung,
+  ): boolean {
+    if (marketData.minOrderSource !== "fallback") return true;
+    if (!isExecutableOrderSize(rung.notionalUsd, marketData.effectiveMinOrderSize)) {
+      this.writeCounter("profile_ladder_min_order_fallback_total", 1, {
+        band,
+        result: "below_fallback_min_order",
+      });
+      return false;
+    }
+    this.writeCounter("profile_ladder_min_order_fallback_total", 1, {
+      band,
+      result: "fallback_used",
+    });
+    return true;
   }
 
   private handleOrderPlaced(event: RuntimeEventMap["OrderPlaced"]): void {
@@ -2099,7 +2173,12 @@ function remainingRungShares(rung: LadderRung): number {
 }
 
 function isSubmittablePostRefillPlannedRung(rung: LadderRung, market: NormalizedMarket): boolean {
-  const minOrderSize = market.minOrderSize ?? 1;
+  // PR2 detection only — never a placement gate. Live PR2 placement stays
+  // fail-closed via resolveOrderMarketData(...) without allowFallback. Reuse the
+  // shared fallback helper instead of an ad-hoc `?? 1` to keep min-order
+  // semantics in one place; the resolved value is identical for null/positive
+  // min order sizes.
+  const minOrderSize = resolveEffectiveMinOrderSize(market.minOrderSize);
   return (
     rung.lifecycle === "planned" &&
     rung.orderId == null &&

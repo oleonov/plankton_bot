@@ -1295,6 +1295,7 @@ async function main(): Promise<void> {
       executionPolicyProvider.onReload(() => {
         handler();
       }),
+    runtimeMode,
     runtimeMetrics,
     riskEvents: repos.riskEvent,
   });

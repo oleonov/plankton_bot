@@ -490,6 +490,7 @@ function setup(
     profileStateReader?: { getProfileState: (token: TokenId) => ProfileState | null };
     onPolicyReload?: (handler: () => void) => () => void;
     bookCache?: ProfileLadderBookCache;
+    runtimeMode?: "simulation" | "paper" | "live-lite";
     now?: () => number;
   } = {},
 ) {
@@ -1031,24 +1032,41 @@ describe("ProfileLadderModule", () => {
     expect(state?.activeRungs.every((rung) => rung.lifecycle === "planned")).toBe(true);
   });
 
-  it("does not publish a live rung when market min order size is unknown", async () => {
-    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
+  it("places a live rung via the live-lite fallback when market min order size is unknown", async () => {
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      runtimeMode: "live-lite",
+    });
 
     await ctx.module.placeLadder(position(), market({ minOrderSize: null }));
 
-    expect(ctx.orders).toHaveLength(0);
-    expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
-      lifecycle: "planned",
-      orderId: null,
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]).toMatchObject({
+      price: 0.11,
+      size: 95,
+      side: "sell",
+      postOnly: true,
+      metadata: {
+        marketData: {
+          minOrderSize: 1,
+          effectiveMinOrderSize: 1,
+          minOrderSource: "fallback",
+        },
+      },
     });
     expect(ctx.counters).toContainEqual({
-      name: "profile_ladder_skipped_unknown_min_order_size",
+      name: "profile_ladder_min_order_size_hydration_miss",
       value: 1,
-      labels: '{"band":"medium_low"}',
+      labels: '{"band":"medium_low","reason":"cache_refresh_failed"}',
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_min_order_fallback_total",
+      value: 1,
+      labels: '{"band":"medium_low","result":"fallback_used"}',
     });
     expect(ctx.counters).toContainEqual({
       name: "profile_ladder_placed_live_rungs",
-      value: 0,
+      value: 1,
       labels: '{"band":"medium_low"}',
     });
   });
@@ -1091,14 +1109,18 @@ describe("ProfileLadderModule", () => {
     });
   });
 
-  it("keeps rung planned when candidate book cache misses min order size", async () => {
+  it("keeps rung planned and fails closed in non-live-lite when min order size is unknown", async () => {
     const bookCache = {
       getFreshOrRefresh: vi.fn(async () => ({
         entry: null,
         status: "cache-miss" as const,
       })),
     };
-    const ctx = setup(policy(), { modeReader: { getMode: () => "flat" }, bookCache });
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      bookCache,
+      runtimeMode: "paper",
+    });
 
     await ctx.module.placeLadder(position(), market({ minOrderSize: null }));
 
@@ -1110,13 +1132,268 @@ describe("ProfileLadderModule", () => {
     expect(ctx.counters).toContainEqual({
       name: "profile_ladder_min_order_size_hydration_miss",
       value: 1,
-      labels: '{"band":"medium_low"}',
+      labels: '{"band":"medium_low","reason":"cache_refresh_failed"}',
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_min_order_fallback_total",
+      value: 1,
+      labels: '{"band":"medium_low","result":"fallback_unavailable"}',
     });
     expect(ctx.counters).toContainEqual({
       name: "profile_ladder_skipped_unknown_min_order_size",
       value: 1,
       labels: '{"band":"medium_low"}',
     });
+  });
+
+  it("places a live rung via fallback when the book cache returns a book without min order size", async () => {
+    const bookCache = {
+      getFreshOrRefresh: vi.fn(async () => ({
+        entry: {
+          tokenId: String(tokenId),
+          snapshotTs: NOW,
+          cachedAtMs: NOW,
+          sourcePolledAtMs: NOW,
+          bookSource: "clob" as const,
+          sourceKind: "rest" as const,
+          book: orderBook({ minOrderSize: 0 }),
+        },
+        status: "refreshed" as const,
+      })),
+    };
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      bookCache,
+      runtimeMode: "live-lite",
+    });
+
+    await ctx.module.placeLadder(position(), market({ minOrderSize: null }));
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.metadata).toMatchObject({
+      marketData: {
+        minOrderSize: 1,
+        effectiveMinOrderSize: 1,
+        minOrderSource: "fallback",
+      },
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_min_order_size_hydration_miss",
+      value: 1,
+      labels: '{"band":"medium_low","reason":"no_market_min_order"}',
+    });
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_min_order_fallback_total",
+      value: 1,
+      labels: '{"band":"medium_low","result":"fallback_used"}',
+    });
+  });
+
+  it("does not place a planned rung whose notional is below the live-lite fallback floor", async () => {
+    let nowMs = NOW;
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [position()] },
+      runtimeMode: "live-lite",
+      now: () => nowMs,
+    });
+    await ctx.module.start();
+    ctx.repo.upsertLadder(
+      ladderState({
+        activeRungs: [
+          rung({
+            lifecycle: "planned",
+            orderId: null,
+            price: 0.2,
+            sizeShares: 2.5,
+            notionalUsd: 0.5,
+          }),
+        ],
+      }),
+    );
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: null })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_min_order_fallback_total",
+      value: 1,
+      labels: '{"band":"medium_low","result":"below_fallback_min_order"}',
+    });
+    expect(
+      counterLabels(ctx.counters, "profile_ladder_min_order_fallback_total").filter(
+        (labels) => labels.result === "fallback_used",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("skips a crossing planned rung before consulting the live-lite fallback", async () => {
+    let nowMs = NOW;
+    const ctx = setup(policy(), {
+      positionRepo: { findOpen: () => [position()] },
+      runtimeMode: "live-lite",
+      now: () => nowMs,
+    });
+    await ctx.module.start();
+    ctx.repo.upsertLadder(
+      ladderState({
+        activeRungs: [rung({ lifecycle: "planned", orderId: null, price: 0.09, sizeShares: 60 })],
+      }),
+    );
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.09, bestAsk: 0.11, minOrderSize: null })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(
+      ctx.counters.filter(
+        (counter) => counter.name === "profile_ladder_skipped_crossing_post_only",
+      ),
+    ).toHaveLength(1);
+    expect(counterLabels(ctx.counters, "profile_ladder_min_order_fallback_total")).toHaveLength(0);
+    expect(
+      counterLabels(ctx.counters, "profile_ladder_min_order_size_hydration_miss"),
+    ).toHaveLength(0);
+  });
+
+  it("places at most one live rung under cap=1 even when the fallback clears multiple rungs", async () => {
+    let nowMs = NOW;
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [position()] },
+      runtimeMode: "live-lite",
+      now: () => nowMs,
+    });
+    await ctx.module.start();
+    ctx.repo.upsertLadder(
+      ladderState({
+        activeRungs: [
+          rung({
+            rungIndex: 0,
+            lifecycle: "planned",
+            orderId: null,
+            price: 0.11,
+            sizeShares: 95,
+            notionalUsd: 10.45,
+          }),
+          rung({
+            rungIndex: 1,
+            lifecycle: "planned",
+            orderId: null,
+            price: 0.13,
+            sizeShares: 60,
+            notionalUsd: 7.8,
+          }),
+        ],
+      }),
+    );
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: null })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.price).toBe(0.11);
+    expect(
+      counterLabels(ctx.counters, "profile_ladder_min_order_fallback_total").filter(
+        (labels) => labels.result === "fallback_used",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("recovers a planned-only ladder via fallback and places exactly once", async () => {
+    let nowMs = NOW;
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [position()] },
+      runtimeMode: "live-lite",
+      now: () => nowMs,
+    });
+    await ctx.module.start();
+    ctx.repo.upsertLadder(
+      ladderState({
+        activeRungs: [rung({ lifecycle: "planned", orderId: null })],
+      }),
+    );
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: null })],
+      timestamp: nowMs,
+    });
+    // A second market update inside the retry cooldown / occupied cap must not
+    // place a duplicate live rung.
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: null })],
+      timestamp: nowMs,
+    });
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.metadata).toMatchObject({
+      marketData: { minOrderSize: 1, effectiveMinOrderSize: 1, minOrderSource: "fallback" },
+    });
+    expect(
+      counterLabels(ctx.counters, "profile_ladder_min_order_fallback_total").filter(
+        (labels) => labels.result === "fallback_used",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("emits only bounded closed-enum labels for the min-order fallback metrics", async () => {
+    let nowMs = NOW;
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [position()] },
+      runtimeMode: "live-lite",
+      now: () => nowMs,
+    });
+    await ctx.module.start();
+    ctx.repo.upsertLadder(
+      ladderState({
+        activeRungs: [
+          rung({
+            lifecycle: "planned",
+            orderId: null,
+            price: 0.2,
+            sizeShares: 2.5,
+            notionalUsd: 0.5,
+          }),
+        ],
+      }),
+    );
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ minOrderSize: null })],
+      timestamp: nowMs,
+    });
+
+    const hydrationLabels = counterLabels(
+      ctx.counters,
+      "profile_ladder_min_order_size_hydration_miss",
+    );
+    const fallbackLabels = counterLabels(ctx.counters, "profile_ladder_min_order_fallback_total");
+    expect(hydrationLabels.length).toBeGreaterThan(0);
+    expect(fallbackLabels.length).toBeGreaterThan(0);
+    for (const labels of hydrationLabels) {
+      expect(Object.keys(labels).sort()).toEqual(["band", "reason"]);
+      expect(["cache_refresh_failed", "no_market_min_order"]).toContain(labels.reason);
+    }
+    for (const labels of fallbackLabels) {
+      expect(Object.keys(labels).sort()).toEqual(["band", "result"]);
+      expect(["fallback_unavailable", "below_fallback_min_order", "fallback_used"]).toContain(
+        labels.result,
+      );
+    }
   });
 
   it("recovers an existing planned-only ladder when a later market update has min order size", async () => {
@@ -2354,6 +2631,46 @@ describe("ProfileLadderModule", () => {
       expect(state.activeRungs.some((activeRung) => activeRung.price === 0.088)).toBe(true);
     });
 
+    it("detects the same stale live rung when market min order size is unknown", async () => {
+      // PR2 detection resolves the intended planned rung via the shared
+      // min-order fallback helper. With market.minOrderSize null the helper
+      // resolves the same floor as the previous `?? 1`, so detection is byte
+      // identical to the known-min case above and no order is placed (placement
+      // still fails closed without allowFallback).
+      const ctx = setup(postRefillPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+      });
+      ctx.repo.upsertLadder(staleLowerPriorityState());
+
+      await rebuildWithPostRefillContext(ctx, {}, { minOrderSize: null });
+
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+      expect(counterLabels(ctx.counters, "profile_ladder_stale_live_rung_detected_total")).toEqual([
+        {
+          action: "dry_run",
+          band: "medium_low",
+          coverageBucket: "lt25",
+          mode: "flat",
+          priceDistanceBucket: "ge25pct",
+          reason: "intended_active_blocked",
+          state: "unknown",
+        },
+      ]);
+      expect(ctx.riskEvents).toContainEqual(
+        expect.objectContaining({
+          eventType: "profile_ladder_stale_live_rung_detected",
+          payload: expect.objectContaining({
+            action: "dry_run",
+            intendedRungIndex: 0,
+            oldLivePrice: 0.104,
+            selectedPlannedPrice: 0.088,
+          }),
+        }),
+      );
+    });
+
     it.each(["ACCUMULATING", "HARVESTING"] as const)(
       "emits the real profile state in stale-rung telemetry for %s",
       async (profileState) => {
@@ -2983,6 +3300,64 @@ describe("ProfileLadderModule", () => {
           state: "HARVESTING",
         }),
       ]);
+    });
+
+    it("keeps PR2 fail-closed in live-lite when min order size is unknown (no fallback leak)", async () => {
+      const oldOrderId = createOrderId("stale-lower-priority-live");
+      const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+        runtimeMode: "live-lite",
+        profileStateReader: { getProfileState: () => "HARVESTING" },
+        orderRepo: {
+          findByTokenId: () => [
+            openSellOrder({
+              orderId: oldOrderId,
+              exchangeOrderId: String(oldOrderId),
+              signalReason: "profile-ladder-exit",
+              decisionRuleId: "PROFILE_LADDER",
+              metadata: { source: "profile_ladder" },
+              price: 0.104,
+              size: 40,
+              sizeUsdc: 4.16,
+              status: OrderStatus.Open,
+            }),
+          ],
+        },
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.104,
+              sizeShares: 40,
+              notionalUsd: 4.16,
+              lifecycle: "placed",
+              orderId: String(oldOrderId),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(ctx, {}, { minOrderSize: null });
+
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.orders).toHaveLength(0);
+      expect(counterLabels(ctx.counters, "profile_ladder_replacement_place_skipped_total")).toEqual(
+        [
+          expect.objectContaining({
+            action: "skip",
+            band: "medium_low",
+            mode: "flat",
+            reason: "unknown_min_order",
+            state: "HARVESTING",
+          }),
+        ],
+      );
+      expect(counterLabels(ctx.counters, "profile_ladder_min_order_fallback_total")).toHaveLength(
+        0,
+      );
     });
 
     it("fails closed before publish when a non-ProfileLadder live SELL creates ambiguity", async () => {
