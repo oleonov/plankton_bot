@@ -10,6 +10,7 @@ import type {
   Position,
   ProfileLadderBand,
   ProfileLadderMode,
+  RungLifecycle,
   RuntimeEventMap,
   TokenOrderLifetimeMode,
   RuntimeModule,
@@ -867,6 +868,11 @@ export class ProfileLadderModule implements RuntimeModule {
     const openProfileLadderOrders = openSellOrders.filter(isProfileLadderOrder);
     if (openProfileLadderOrders.length > 0) {
       if (!stateTracksAnyOrder(state, openProfileLadderOrders)) {
+        // Adoption already re-linked the resting order into the persisted state;
+        // stop this pass (like every other handled branch) so the now-stale
+        // in-memory state never drives a redundant retry/rebuild placement. The
+        // next pass re-reads the tracked state and exits via stateTracksAnyOrder.
+        if (this.adoptRecoveryOrderIntoState(state, openProfileLadderOrders)) return true;
         this.armPlannedRungRetryCooldown(state.tokenId, this.now());
         return true;
       }
@@ -897,6 +903,42 @@ export class ProfileLadderModule implements RuntimeModule {
       rungCount: result.state.activeRungs.length,
       placedLiveRungs: result.placedLiveRungs,
       ladderId: result.state.ladderId,
+    });
+    return true;
+  }
+
+  // Restart/lost-OrderPlaced orphan: a recovery-placed SELL still rests on the
+  // exchange under a suffixed ladderId, but the persisted base-ladder rung never
+  // got its orderId backfilled (handleOrderPlaced's ladderId guard skipped it).
+  // Re-link the resting order into its price-matching planned rung instead of
+  // rebuilding/placing again. Fail closed (no mutation) unless exactly one
+  // order/rung pair matches, so a duplicate live SELL can never be created here.
+  private adoptRecoveryOrderIntoState(state: LadderState, openOrders: readonly Order[]): boolean {
+    const match = resolveSingleAdoptableRungMatch(state, openOrders);
+    if (match == null) return false;
+    const { order, index } = match;
+    const lifecycle: RungLifecycle =
+      order.status === OrderStatus.PartiallyFilled ? "partially_filled" : "placed";
+    const activeRungs = state.activeRungs.map((rung, rungIndex) =>
+      rungIndex === index
+        ? {
+            ...rung,
+            orderId: String(order.orderId),
+            lifecycle,
+            filledSizeShares: resolveAdoptedFilledSizeShares(order, rung),
+          }
+        : rung,
+    );
+    this.deps.repository.upsertLadder({ ...state, activeRungs, updatedAtMs: this.now() });
+    this.writeCounter("profile_ladder_recovery_order_adopted", 1, { band: state.band });
+    this.insertRiskEvent("ladder_recovery_order_adopted", {
+      tokenId: String(state.tokenId),
+      conditionId: String(state.conditionId),
+      band: state.band,
+      ladderId: state.ladderId,
+      rungIndex: activeRungs[index]!.rungIndex,
+      orderId: String(order.orderId),
+      lifecycle,
     });
     return true;
   }
@@ -2401,6 +2443,35 @@ function stateTracksAnyOrder(state: LadderState, orders: readonly Order[]): bool
     }
     return false;
   });
+}
+
+// Adoption is only safe when the resting order maps to exactly one planned rung:
+// collect every (open order, planned/orderId-null rung) pair whose prices match
+// and return it only when there is precisely one. Zero or multiple pairs are
+// ambiguous — the caller fails closed rather than risk a wrong/duplicate link.
+function resolveSingleAdoptableRungMatch(
+  state: LadderState,
+  orders: readonly Order[],
+): { order: Order; index: number } | null {
+  const matches: Array<{ order: Order; index: number }> = [];
+  state.activeRungs.forEach((rung, index) => {
+    if (rung.lifecycle !== "planned" || rung.orderId != null) return;
+    for (const order of orders) {
+      if (pricesEqual(rung.price, order.price)) matches.push({ order, index });
+    }
+  });
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+// Seed known fill progress when adopting a partially-filled order so later
+// FillReceived events accumulate on top of (not instead of) shares already
+// executed before the orphan formed. Clamp to the rung size; fall back to the
+// rung's existing value when the order is not partially filled or progress is
+// absent/non-positive.
+function resolveAdoptedFilledSizeShares(order: Order, rung: LadderRung): number {
+  if (order.status !== OrderStatus.PartiallyFilled) return rung.filledSizeShares;
+  if (!isPositiveFinite(order.fillProgressShares)) return rung.filledSizeShares;
+  return roundQuantity(Math.min(order.fillProgressShares, rung.sizeShares));
 }
 
 function roundQuantity(value: number): number {

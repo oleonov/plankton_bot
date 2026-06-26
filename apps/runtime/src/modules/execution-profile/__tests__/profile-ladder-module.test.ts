@@ -1786,6 +1786,262 @@ describe("ProfileLadderModule", () => {
     });
   });
 
+  describe("planned-no-live recovery adopts an existing open PL SELL (re-link, no churn)", () => {
+    // Mirrors the prod orphan: the persisted state keeps the BASE ladderId with a
+    // planned/orderId-null rung, while a real PL SELL still rests on the exchange
+    // under a recovery-suffixed ladderId (its OrderPlaced backfill was lost on a
+    // restart). Recovery must re-link that order, not churn forever.
+    function restingProfileLadderSell(overrides: Partial<Order> = {}): Order {
+      return openSellOrder({
+        orderId: createOrderId("recovery-suffixed-resting-sell"),
+        price: 0.26,
+        status: OrderStatus.Open,
+        decisionRuleId: "PROFILE_LADDER",
+        signalReason: "profile-ladder-exit",
+        metadata: {
+          source: "profile_ladder",
+          ladderId: "profile_ladder_existing_planned_no_live_recovery",
+        },
+        ...overrides,
+      });
+    }
+
+    function orphanContext(orders: Order[], stateOverrides: Partial<LadderState> = {}) {
+      const openPosition = position({
+        avgEntryPrice: 0.259945,
+        costBasisUsdc: 1.541004,
+        size: 5.9282,
+      });
+      const ctx = setup(mediumHighPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        positionRepo: { findOpen: () => [openPosition] },
+        orderRepo: { findByTokenId: () => orders, findByClientOrderId: () => null },
+      });
+      ctx.repo.upsertLadder(
+        ladderState({
+          band: "medium_high",
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.26,
+              sizeShares: 5.9282,
+              notionalUsd: 1.54,
+              lifecycle: "planned",
+              orderId: null,
+            }),
+          ],
+          lastAvgEntry: 0.259945,
+          lastCostBasisUsdc: 1.541004,
+          lastMode: "flat",
+          // Align the reference with the recovery market BBO so no BBO rebuild
+          // fires: the second recovery pass is a true no-op that isolates
+          // adoption stability (the resting order stays tracked at its rung).
+          lastBboReferenceJson: JSON.stringify({ bestBid: 0.24, bestAsk: 0.26 }),
+          ...stateOverrides,
+        }),
+      );
+      return ctx;
+    }
+
+    async function fireRecoveryPass(ctx: ReturnType<typeof orphanContext>) {
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          market({ tickSize: 0.01, bestBid: 0.24, bestAsk: 0.26, midPrice: 0.25, minOrderSize: 1 }),
+        ],
+        timestamp: NOW,
+      });
+    }
+
+    it("re-links the resting PL SELL into the matching planned rung instead of churning", async () => {
+      const resting = restingProfileLadderSell();
+      const ctx = orphanContext([resting]);
+      await ctx.module.start();
+
+      await fireRecoveryPass(ctx);
+
+      // No new order placed — the existing resting SELL is adopted.
+      expect(ctx.orders).toHaveLength(0);
+      const adopted = ctx.repo.getLadder(tokenId);
+      expect(adopted?.activeRungs[0]).toMatchObject({
+        orderId: String(resting.orderId),
+        lifecycle: "placed",
+        price: 0.26,
+        rungIndex: 0,
+      });
+      // Base ladder identity is preserved (no suffix churn on the persisted row).
+      expect(adopted?.ladderId).toBe("profile_ladder_existing");
+      // No recovery rebuild / retry_blocked churn.
+      expect(ctx.counters.some((c) => c.name === "profile_ladder_planned_no_live_recovered")).toBe(
+        false,
+      );
+      expect(
+        ctx.counters.some((c) => c.name === "profile_ladder_clientorderid_retry_blocked"),
+      ).toBe(false);
+      expect(ctx.counters).toContainEqual({
+        name: "profile_ladder_recovery_order_adopted",
+        value: 1,
+        labels: '{"band":"medium_high"}',
+      });
+    });
+
+    it("does not place or churn again on the next recovery pass after adoption", async () => {
+      const resting = restingProfileLadderSell();
+      const ctx = orphanContext([resting]);
+      await ctx.module.start();
+
+      await fireRecoveryPass(ctx);
+      ctx.orders.length = 0;
+      ctx.counters.length = 0;
+      await fireRecoveryPass(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]?.orderId).toBe(String(resting.orderId));
+      expect(ctx.counters.some((c) => c.name === "profile_ladder_recovery_order_adopted")).toBe(
+        false,
+      );
+    });
+
+    it("marks the rung partially_filled when the adopted order is partially filled", async () => {
+      const resting = restingProfileLadderSell({ status: OrderStatus.PartiallyFilled });
+      const ctx = orphanContext([resting]);
+      await ctx.module.start();
+
+      await fireRecoveryPass(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        orderId: String(resting.orderId),
+        lifecycle: "partially_filled",
+      });
+    });
+
+    it("seeds filledSizeShares from a partially-filled order's fillProgressShares", async () => {
+      const resting = restingProfileLadderSell({
+        status: OrderStatus.PartiallyFilled,
+        fillProgressShares: 3,
+      });
+      const ctx = orphanContext([resting]);
+      await ctx.module.start();
+
+      await fireRecoveryPass(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "partially_filled",
+        filledSizeShares: 3,
+      });
+    });
+
+    it("clamps the seeded filledSizeShares to the rung size", async () => {
+      const resting = restingProfileLadderSell({
+        status: OrderStatus.PartiallyFilled,
+        fillProgressShares: 100,
+      });
+      const ctx = orphanContext([resting]);
+      await ctx.module.start();
+
+      await fireRecoveryPass(ctx);
+
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]?.filledSizeShares).toBe(5.9282);
+    });
+
+    it.each([
+      { name: "null", fillProgressShares: null },
+      { name: "zero", fillProgressShares: 0 },
+      { name: "negative", fillProgressShares: -1 },
+    ])(
+      "keeps filledSizeShares unchanged when partial fill progress is $name",
+      async ({ fillProgressShares }) => {
+        const resting = restingProfileLadderSell({
+          status: OrderStatus.PartiallyFilled,
+          fillProgressShares,
+        });
+        const ctx = orphanContext([resting]);
+        await ctx.module.start();
+
+        await fireRecoveryPass(ctx);
+
+        expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+          lifecycle: "partially_filled",
+          filledSizeShares: 0,
+        });
+      },
+    );
+
+    it("fails closed when two open PL SELLs match the same planned rung price", async () => {
+      const a = restingProfileLadderSell({ orderId: createOrderId("resting-a") });
+      const b = restingProfileLadderSell({ orderId: createOrderId("resting-b") });
+      const ctx = orphanContext([a, b]);
+      await ctx.module.start();
+
+      await fireRecoveryPass(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "planned",
+        orderId: null,
+      });
+      expect(ctx.counters.some((c) => c.name === "profile_ladder_recovery_order_adopted")).toBe(
+        false,
+      );
+    });
+
+    it("fails closed when one open PL SELL matches two planned rungs at the same price", async () => {
+      const resting = restingProfileLadderSell();
+      const ctx = orphanContext([resting], {
+        activeRungs: [
+          rung({ rungIndex: 0, price: 0.26, lifecycle: "planned", orderId: null }),
+          rung({ rungIndex: 1, price: 0.26, lifecycle: "planned", orderId: null }),
+        ],
+      });
+      await ctx.module.start();
+
+      await fireRecoveryPass(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs.every((r) => r.lifecycle === "planned")).toBe(
+        true,
+      );
+      expect(ctx.counters.some((c) => c.name === "profile_ladder_recovery_order_adopted")).toBe(
+        false,
+      );
+    });
+
+    it("does not adopt a non-ProfileLadder open SELL at the rung price", async () => {
+      const legacy = openSellOrder({ price: 0.26, status: OrderStatus.Open });
+      const ctx = orphanContext([legacy]);
+      await ctx.module.start();
+
+      await fireRecoveryPass(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "planned",
+        orderId: null,
+      });
+      expect(ctx.counters.some((c) => c.name === "profile_ladder_recovery_order_adopted")).toBe(
+        false,
+      );
+    });
+
+    it("fails closed when no open PL SELL price matches a planned rung (price drift)", async () => {
+      const drifted = restingProfileLadderSell({ price: 0.31 });
+      const ctx = orphanContext([drifted]);
+      await ctx.module.start();
+
+      await fireRecoveryPass(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "planned",
+        orderId: null,
+      });
+      expect(ctx.counters.some((c) => c.name === "profile_ladder_recovery_order_adopted")).toBe(
+        false,
+      );
+    });
+  });
+
   it("closes a stale active planned ladder when the position is already closed", async () => {
     const ctx = setup(mediumHighPolicy(), {
       modeReader: { getMode: () => "flat" },
