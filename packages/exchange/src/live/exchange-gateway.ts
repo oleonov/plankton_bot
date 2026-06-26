@@ -1521,7 +1521,29 @@ function extractOrderId(raw: unknown): string | null {
   return orderId.length > 0 ? orderId : null;
 }
 
-function classifySettlementInfraAlert(error: unknown): {
+// The Polymarket relayer wraps *every* non-2xx response — including benign
+// application-level rejections — in a generic
+// `{"error":"request error","status":400,...,"data":{"error":"PRECHECK_SKIPPED: ..."}}`
+// envelope. The ONE approved benign case is a redeem whose on-chain outcome-token
+// balance is already zero (already redeemed / dust / collateral-token divergence):
+// the relayer answers HTTP 400 with `PRECHECK_SKIPPED: redeem skipped: zero
+// position balance`. The relayer *responded* — it is not unavailable — and there
+// is simply nothing to settle. Without this guard the outer "request error" string
+// below would mislabel these as a relayer outage (observed: 100% of
+// POLYMARKET_RELAYER_UNAVAILABLE alerts in prod were zero-balance skips).
+//
+// The predicate is intentionally narrow: it requires BOTH the `PRECHECK_SKIPPED`
+// marker AND the `zero position balance` reason. Any other `PRECHECK_SKIPPED`
+// rejection is left to fall through to the real-error classification below — we do
+// not blanket-suppress the whole precheck-skip family.
+function isBenignSettlementPrecheckSkip(normalizedMessage: string): boolean {
+  return (
+    normalizedMessage.includes("precheck_skipped") &&
+    normalizedMessage.includes("zero position balance")
+  );
+}
+
+export function classifySettlementInfraAlert(error: unknown): {
   code: string;
   severity: "warning" | "error";
   source: string;
@@ -1530,6 +1552,12 @@ function classifySettlementInfraAlert(error: unknown): {
 } | null {
   const rawMessage = error instanceof Error ? error.message : String(error ?? "");
   const normalized = rawMessage.toLowerCase();
+
+  // A benign precheck skip is an expected, non-actionable outcome (the per-condition
+  // result is already recorded in the redeem_log). Never raise an operator infra
+  // alert for it — and short-circuit before the transport-error branch that would
+  // otherwise match the relayer's "request error" envelope wrapper.
+  if (isBenignSettlementPrecheckSkip(normalized)) return null;
 
   if (
     normalized.includes("429") ||

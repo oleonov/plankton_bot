@@ -485,7 +485,10 @@ function setup(
     };
     isDormant?: (token: TokenId) => boolean;
     positionRepo?: { findOpen: () => Position[] };
-    orderRepo?: { findByTokenId: (token: TokenId) => Order[] };
+    orderRepo?: {
+      findByTokenId: (token: TokenId) => Order[];
+      findByClientOrderId?: (clientOrderId: string) => Order | null;
+    };
     isProfileOwned?: (token: TokenId) => boolean;
     profileStateReader?: { getProfileState: (token: TokenId) => ProfileState | null };
     onPolicyReload?: (handler: () => void) => () => void;
@@ -1619,6 +1622,167 @@ describe("ProfileLadderModule", () => {
       name: "profile_ladder_planned_no_live_recovered",
       value: 1,
       labels: '{"band":"medium_high"}',
+    });
+  });
+
+  describe("stale-rejected clientOrderId recovery (no permanent duplicate block)", () => {
+    function deadRejectedProfileLadderSell(overrides: Partial<Order> = {}): Order {
+      return openSellOrder({
+        orderId: createOrderId("dead-rejected-profile-ladder-order"),
+        status: OrderStatus.Rejected,
+        exchangeOrderId: null,
+        fillProgressShares: null,
+        decisionRuleId: "PROFILE_LADDER",
+        signalReason: "profile-ladder-exit",
+        metadata: { source: "profile_ladder" },
+        ...overrides,
+      });
+    }
+
+    // The first distinct clientOrderId the module probes resolves to `order`
+    // (the stale row from a prior attempt); every later candidate is free. This
+    // mirrors prod: only the base recovery clientOrderId has a rejected row.
+    function blockFirstClientOrderId(order: Order): {
+      findByTokenId: () => Order[];
+      findByClientOrderId: (clientOrderId: string) => Order | null;
+      blockedId: () => string | null;
+    } {
+      let blocked: string | null = null;
+      return {
+        findByTokenId: () => [],
+        findByClientOrderId: (clientOrderId: string) => {
+          if (blocked === null) blocked = clientOrderId;
+          return clientOrderId === blocked ? order : null;
+        },
+        blockedId: () => blocked,
+      };
+    }
+
+    function recoveryContext(reader: {
+      findByTokenId: () => Order[];
+      findByClientOrderId: (clientOrderId: string) => Order | null;
+    }) {
+      const openPosition = position({
+        avgEntryPrice: 0.259945,
+        costBasisUsdc: 1.541004,
+        size: 5.9282,
+      });
+      const ctx = setup(mediumHighPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        positionRepo: { findOpen: () => [openPosition] },
+        orderRepo: reader,
+      });
+      ctx.repo.upsertLadder(
+        ladderState({
+          band: "medium_high",
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.26,
+              sizeShares: 5.9282,
+              notionalUsd: 1.54,
+              lifecycle: "planned",
+              orderId: null,
+            }),
+          ],
+          lastAvgEntry: 0.259945,
+          lastCostBasisUsdc: 1.541004,
+          lastMode: "flat",
+        }),
+      );
+      return ctx;
+    }
+
+    async function fireRecovery(ctx: Awaited<ReturnType<typeof recoveryContext>>) {
+      await ctx.module.start();
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          market({ tickSize: 0.01, bestBid: 0.24, bestAsk: 0.26, midPrice: 0.25, minOrderSize: 1 }),
+        ],
+        timestamp: NOW,
+      });
+    }
+
+    it("places a fresh PL SELL with a distinct deterministic clientOrderId when the recovery rung's base clientOrderId already has a terminal-dead rejected order", async () => {
+      const reader = blockFirstClientOrderId(deadRejectedProfileLadderSell());
+      const ctx = recoveryContext(reader);
+
+      await fireRecovery(ctx);
+
+      // Exactly one new PL SELL is published — the token un-sticks.
+      expect(ctx.orders).toHaveLength(1);
+      const published = ctx.orders[0]!;
+
+      // Ladder identity is NOT churned: the retry lives only in the
+      // signalId/clientOrderId, never the ladderId (occupancy/PR2/shadow keys).
+      const recoveredLadderId = ctx.repo.getLadder(tokenId)?.ladderId ?? "";
+      expect(recoveredLadderId).toContain("planned_no_live_recovery");
+      expect(recoveredLadderId).not.toContain("retry");
+
+      // The distinct clientOrderId comes from a retry-suffixed signalId.
+      expect(String(published.signalId)).toContain("planned_no_live_recovery");
+      expect(String(published.signalId)).toMatch(/_retry1$/);
+      expect(published.clientOrderId).toBe(
+        buildClientOrderId({ signalId: String(published.signalId), tokenId, side: "sell" }),
+      );
+
+      // The blocked (base) clientOrderId is never reused.
+      expect(published.clientOrderId).not.toBe(reader.blockedId());
+    });
+
+    it.each([
+      { name: "open", order: () => openSellOrder({ status: OrderStatus.Open }) },
+      { name: "cancelled", order: () => openSellOrder({ status: OrderStatus.Cancelled }) },
+      { name: "filled", order: () => openSellOrder({ status: OrderStatus.Filled }) },
+      {
+        name: "partially-filled",
+        order: () => openSellOrder({ status: OrderStatus.PartiallyFilled }),
+      },
+      {
+        name: "rejected-with-exchange-id",
+        order: () =>
+          deadRejectedProfileLadderSell({ exchangeOrderId: String(createOrderId("rested")) }),
+      },
+      {
+        name: "rejected-with-fills",
+        order: () => deadRejectedProfileLadderSell({ fillProgressShares: 3 }),
+      },
+    ])(
+      "does not reuse or retry a clientOrderId whose existing row is $name — no duplicate live SELL",
+      async ({ order }) => {
+        const blocking = order();
+        const ctx = recoveryContext({
+          findByTokenId: () => [],
+          findByClientOrderId: () => blocking,
+        });
+
+        await fireRecovery(ctx);
+
+        expect(ctx.orders).toHaveLength(0);
+        expect(
+          ctx.counters.some(
+            (counter) => counter.name === "profile_ladder_clientorderid_retry_used",
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it("gives up after a bounded number of retries when every candidate clientOrderId is a terminal-dead rejected row", async () => {
+      const ctx = recoveryContext({
+        findByTokenId: () => [],
+        findByClientOrderId: () => deadRejectedProfileLadderSell(),
+      });
+
+      await fireRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(
+        ctx.counters.some(
+          (counter) =>
+            counter.name === "profile_ladder_clientorderid_retry_blocked" &&
+            counter.labels?.includes("exhausted"),
+        ),
+      ).toBe(true);
     });
   });
 
@@ -3300,6 +3464,67 @@ describe("ProfileLadderModule", () => {
           state: "HARVESTING",
         }),
       ]);
+    });
+
+    it("keeps PR2 replacement clientOrderId deterministic (no retry probe) even when a terminal-dead rejected row exists for it", async () => {
+      const oldOrderId = createOrderId("stale-lower-priority-live");
+      const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+        profileStateReader: { getProfileState: () => "HARVESTING" },
+        orderRepo: {
+          findByTokenId: () => [
+            openSellOrder({
+              orderId: oldOrderId,
+              exchangeOrderId: String(oldOrderId),
+              signalReason: "profile-ladder-exit",
+              decisionRuleId: "PROFILE_LADDER",
+              metadata: { source: "profile_ladder" },
+              price: 0.104,
+              size: 40,
+              sizeUsdc: 4.16,
+              status: OrderStatus.Open,
+            }),
+          ],
+          // A terminal-dead rejected row for *every* clientOrderId would make the
+          // standard retry probe bump to a `_retry` suffix. PR2 must NOT probe.
+          findByClientOrderId: () =>
+            openSellOrder({
+              orderId: createOrderId("dead-rejected-pr2"),
+              status: OrderStatus.Rejected,
+              exchangeOrderId: null,
+              decisionRuleId: "PROFILE_LADDER",
+              metadata: { source: "profile_ladder" },
+            }),
+        },
+      });
+      ctx.repo.upsertLadder(
+        staleLowerPriorityState({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.104,
+              sizeShares: 40,
+              notionalUsd: 4.16,
+              lifecycle: "placed",
+              orderId: String(oldOrderId),
+            }),
+          ],
+        }),
+      );
+
+      await rebuildWithPostRefillContext(ctx);
+
+      expect(ctx.orders).toHaveLength(1);
+      const published = ctx.orders[0]!;
+      // PR2 keeps its deterministic, non-suffixed clientOrderId/signalId.
+      expect(String(published.signalId)).not.toContain("retry");
+      expect(published.clientOrderId).toBe(
+        buildClientOrderId({ signalId: String(published.signalId), tokenId, side: "sell" }),
+      );
+      expect(
+        ctx.counters.some((counter) => counter.name === "profile_ladder_clientorderid_retry_used"),
+      ).toBe(false);
     });
 
     it("keeps PR2 fail-closed in live-lite when min order size is unknown (no fallback leak)", async () => {

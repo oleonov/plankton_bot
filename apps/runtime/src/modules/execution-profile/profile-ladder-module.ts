@@ -86,6 +86,7 @@ export interface ProfileLadderPositionReader {
 
 export interface ProfileLadderOrderReader {
   findByTokenId(tokenId: TokenId): Order[];
+  findByClientOrderId?(clientOrderId: string): Order | null;
 }
 
 type ProfileLadderBookCacheStatus =
@@ -175,6 +176,11 @@ const DEFAULT_POST_REFILL_FOLLOW_THROUGH = {
 } satisfies ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"];
 
 const STALE_LIVE_RUNG_RISK_EVENT_DEDUPE_MS = 5 * 60_000;
+
+// Bounded number of `_retry<n>` clientOrderId candidates probed when the base
+// recovery clientOrderId is occupied by a terminal-dead rejected row. Keeps the
+// recovery deterministic and prevents an unbounded probe loop.
+const PROFILE_LADDER_CLIENT_ORDER_ID_MAX_RETRIES = 3;
 
 interface LadderAdoptionSummary {
   attempt: number;
@@ -786,7 +792,15 @@ export class ProfileLadderModule implements RuntimeModule {
       // A fallback-hydrated rung below the conservative floor is skipped, not
       // fatal: a later rung in the same pass may still clear it.
       if (!this.clearsFallbackMinOrder(state.band, marketData, rung)) continue;
-      await this.publishPlaceOrder(position, market, marketData, state.ladderId, rung, now);
+      // A stale terminal-rejected row on the base clientOrderId would make the
+      // global EM guard skip every resend forever. Resolve a distinct, still
+      // deterministic clientOrderId; decline (leave the rung planned) if no
+      // free candidate exists rather than risk a duplicate live SELL.
+      const signalId = this.resolveRetryAwareSignalId(position, state.ladderId, rung, state.band);
+      if (signalId == null) continue;
+      await this.publishPlaceOrder(position, market, marketData, state.ladderId, rung, now, {
+        signalId,
+      });
       occupied += 1;
       placed += 1;
     }
@@ -1345,6 +1359,53 @@ export class ProfileLadderModule implements RuntimeModule {
     return true;
   }
 
+  // Probe deterministic clientOrderId candidates for the standard placement
+  // path. Attempt 0 is the base signalId; later attempts append `_retry<n>` to
+  // the signalId only (never the ladderId, so occupancy/PR2/shadow keys are
+  // untouched). A reusable terminal-dead rejected row is skipped; a live/filled/
+  // cancelled row (or exhausting the bound) declines without publishing.
+  private resolveRetryAwareSignalId(
+    position: Position,
+    ladderId: string,
+    rung: LadderRung,
+    band: ProfileLadderBand,
+  ): string | null {
+    const baseSignalId = `profile_ladder_${String(position.tokenId)}_${ladderId}_${rung.rungIndex}`;
+    const reader = this.deps.orderRepo;
+    const probe = reader?.findByClientOrderId?.bind(reader);
+    if (probe == null) return baseSignalId;
+    for (let attempt = 0; attempt <= PROFILE_LADDER_CLIENT_ORDER_ID_MAX_RETRIES; attempt += 1) {
+      const signalId = attempt === 0 ? baseSignalId : `${baseSignalId}_retry${attempt}`;
+      const clientOrderId = buildClientOrderId({
+        signalId,
+        tokenId: position.tokenId,
+        side: "sell",
+      });
+      const existing = probe(String(clientOrderId));
+      if (existing == null) {
+        if (attempt > 0) {
+          this.writeCounter("profile_ladder_clientorderid_retry_used", 1, {
+            band,
+            attempt: String(attempt),
+          });
+        }
+        return signalId;
+      }
+      if (!isReusableDeadRejectedOrder(existing)) {
+        this.writeCounter("profile_ladder_clientorderid_retry_blocked", 1, {
+          band,
+          reason: "live_or_filled",
+        });
+        return null;
+      }
+    }
+    this.writeCounter("profile_ladder_clientorderid_retry_blocked", 1, {
+      band,
+      reason: "exhausted",
+    });
+    return null;
+  }
+
   private async publishPlaceOrder(
     position: Position,
     market: NormalizedMarket,
@@ -1353,6 +1414,10 @@ export class ProfileLadderModule implements RuntimeModule {
     rung: LadderRung,
     timestamp: number,
     options: {
+      // Retry-suffixed signalId resolved by the standard path so a stale
+      // terminal-rejected row on the base clientOrderId cannot permanently
+      // block recovery. Replacement path omits it and keeps the base identity.
+      signalId?: string;
       replacement?: {
         oldOrderId: string;
         oldLiveSellPrice: number;
@@ -1368,7 +1433,9 @@ export class ProfileLadderModule implements RuntimeModule {
       };
     } = {},
   ): Promise<void> {
-    const signalId = `profile_ladder_${String(position.tokenId)}_${ladderId}_${rung.rungIndex}`;
+    const signalId =
+      options.signalId ??
+      `profile_ladder_${String(position.tokenId)}_${ladderId}_${rung.rungIndex}`;
     const clientOrderId = buildClientOrderId({
       signalId,
       tokenId: position.tokenId,
@@ -2066,6 +2133,19 @@ export class ProfileLadderModule implements RuntimeModule {
 
 function isBboReason(reason: string): boolean {
   return reason === "bbo_major" || reason === "bbo_strong";
+}
+
+// A rejected order is "reusable-dead" only when it never reached the exchange
+// (no exchange order id) and never filled. Such a row can never become live, so
+// reusing a fresh clientOrderId around it cannot duplicate a live SELL. Any
+// open/filled/cancelled row — or a rejected row that touched the exchange or
+// took fills — must keep the slot blocked.
+function isReusableDeadRejectedOrder(order: Order): boolean {
+  if (order.status !== OrderStatus.Rejected) return false;
+  if (order.exchangeOrderId != null && order.exchangeOrderId !== "") return false;
+  const fills = order.fillProgressShares;
+  if (fills != null && fills > 0) return false;
+  return true;
 }
 
 function resolvePostRefillFollowThroughConfig(
