@@ -200,6 +200,51 @@ function createMockGateway(
   } as unknown as ExchangeGateway;
 }
 
+function createMockRedeemQuarantineRepo(
+  initialStates?: Record<
+    string,
+    { consecutiveStateFailedCount: number; redeemQuarantineUntilTs: number | null }
+  >,
+) {
+  const states = new Map<
+    string,
+    { consecutiveStateFailedCount: number; redeemQuarantineUntilTs: number | null }
+  >();
+  for (const [conditionId, state] of Object.entries(initialStates ?? {})) {
+    states.set(conditionId, { ...state });
+  }
+
+  const repo = {
+    findByConditionIds: vi.fn((conditionIds: readonly string[]) => {
+      const result = new Map<
+        string,
+        { consecutiveStateFailedCount: number; redeemQuarantineUntilTs: number | null }
+      >();
+      for (const conditionId of conditionIds) {
+        const state = states.get(conditionId);
+        if (state) result.set(conditionId, { ...state });
+      }
+      return result;
+    }),
+    recordBenignZeroBalanceSkip: vi.fn(
+      ({ conditionId, nowTs, ttlMs }: { conditionId: string; nowTs: number; ttlMs: number }) => {
+        const state = {
+          consecutiveStateFailedCount: 0,
+          redeemQuarantineUntilTs: nowTs + ttlMs,
+        };
+        states.set(conditionId, state);
+        return { enteredQuarantine: true, ...state };
+      },
+    ),
+    clearExpired: vi.fn((conditionId: string) => {
+      const hadState = states.delete(conditionId);
+      return { reset: hadState };
+    }),
+  };
+
+  return { repo, states };
+}
+
 const log = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -207,6 +252,12 @@ const log = {
   debug: vi.fn(),
   fatal: vi.fn(),
   child: vi.fn().mockReturnThis(),
+};
+
+type RuntimeMetricsMock = {
+  writeEvent: ReturnType<typeof vi.fn>;
+  writeCounter?: ReturnType<typeof vi.fn>;
+  writeLatest?: ReturnType<typeof vi.fn>;
 };
 
 function delay(ms: number): Promise<void> {
@@ -246,6 +297,8 @@ describe("ResolutionModule", () => {
   function createModule(overrides?: {
     gateway?: ExchangeGateway;
     settlementInfraBreaker?: SettlementInfraBreaker;
+    redeemQuarantineRepo?: ReturnType<typeof createMockRedeemQuarantineRepo>["repo"];
+    runtimeMetrics?: RuntimeMetricsMock;
   }) {
     return new ResolutionModule({
       detector: detector as unknown as ResolutionDetector,
@@ -266,6 +319,10 @@ describe("ResolutionModule", () => {
       ...(overrides?.settlementInfraBreaker
         ? { settlementInfraBreaker: overrides.settlementInfraBreaker }
         : {}),
+      ...(overrides?.redeemQuarantineRepo
+        ? { redeemQuarantineRepo: overrides.redeemQuarantineRepo }
+        : {}),
+      ...(overrides?.runtimeMetrics ? { runtimeMetrics: overrides.runtimeMetrics } : {}),
     });
   }
 
@@ -972,6 +1029,182 @@ describe("ResolutionModule", () => {
     );
   });
 
+  it("records zero-balance quarantine after resolution redeem precheck skip", async () => {
+    const gateway = createMockGateway({ "tok-yes": 50 });
+    (gateway.redeemPositions as any).mockRejectedValue(
+      new Error("PRECHECK_SKIPPED: redeem skipped: zero position balance"),
+    );
+    const quarantine = createMockRedeemQuarantineRepo();
+    const runtimeMetrics = { writeCounter: vi.fn(), writeEvent: vi.fn(), writeLatest: vi.fn() };
+    mod = createModule({
+      gateway,
+      redeemQuarantineRepo: quarantine.repo,
+      runtimeMetrics,
+    });
+    (detector.detect as any).mockResolvedValue([makeDetectedResolution()]);
+    const settled = [makeSettledPosition()];
+    (settler.settle as any).mockReturnValue(settled);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-07T00:00:00Z"));
+    try {
+      const count = await mod.runCheck();
+
+      expect(count).toBe(0);
+      expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION], {
+        redeemTokenIdsByCondition: { [CONDITION]: [TOK_YES] },
+      });
+      expect(quarantine.repo.recordBenignZeroBalanceSkip).toHaveBeenCalledWith({
+        conditionId: CONDITION,
+        nowTs: Date.now(),
+        ttlMs: 24 * 60 * 60_000,
+      });
+      expect(quarantine.states.get(CONDITION)).toMatchObject({
+        consecutiveStateFailedCount: 0,
+      });
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "resolution_redeem_zero_balance_quarantined_total",
+        1,
+        JSON.stringify({ reason: "zero_balance_precheck_skip" }),
+      );
+      expect((mod as any).redeemFailures.has(CONDITION)).toBe(false);
+      expect(settler.settle as any).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips subsequent resolution redeem inside zero-balance quarantine", async () => {
+    const gateway = createMockGateway({ "tok-yes": 50 });
+    (gateway.redeemPositions as any).mockRejectedValueOnce(
+      new Error("PRECHECK_SKIPPED: redeem skipped: zero position balance"),
+    );
+    const quarantine = createMockRedeemQuarantineRepo();
+    const runtimeMetrics = { writeCounter: vi.fn(), writeEvent: vi.fn(), writeLatest: vi.fn() };
+    mod = createModule({
+      gateway,
+      redeemQuarantineRepo: quarantine.repo,
+      runtimeMetrics,
+    });
+    (detector.detect as any).mockResolvedValue([makeDetectedResolution()]);
+    let saved = false;
+    (resolutionRepo.findByConditionId as any).mockImplementation(() =>
+      saved ? { conditionId: CONDITION } : null,
+    );
+    (resolutionRepo.save as any).mockImplementation(() => {
+      saved = true;
+    });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-07T00:00:00Z"));
+    try {
+      await mod.runCheck();
+      vi.setSystemTime(new Date("2026-05-07T00:05:00Z"));
+      await mod.runCheck();
+
+      expect(gateway.redeemPositions as any).toHaveBeenCalledTimes(1);
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "resolution_redeem_quarantine_skipped_total",
+        1,
+        JSON.stringify({ reason: "zero_balance_quarantine" }),
+      );
+      expect(runtimeMetrics.writeCounter).not.toHaveBeenCalledWith(
+        "resolution_redeem_quarantine_skipped_total",
+        1,
+        JSON.stringify({ reason: "state_failed_quarantine" }),
+      );
+      expect(log.info).toHaveBeenCalledWith(
+        expect.objectContaining({ conditionId: CONDITION, reason: "zero_balance_quarantine" }),
+        "resolution on-chain redeem skipped by redeem quarantine",
+      );
+      expect(settler.settle as any).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears expired resolution redeem quarantine and retries gateway redeem", async () => {
+    const gateway = createMockGateway({ "tok-yes": 50 });
+    const expiredUntil = Date.parse("2026-05-06T23:59:59Z");
+    const quarantine = createMockRedeemQuarantineRepo({
+      [CONDITION]: {
+        consecutiveStateFailedCount: 0,
+        redeemQuarantineUntilTs: expiredUntil,
+      },
+    });
+    const runtimeMetrics = { writeCounter: vi.fn(), writeEvent: vi.fn(), writeLatest: vi.fn() };
+    mod = createModule({
+      gateway,
+      redeemQuarantineRepo: quarantine.repo,
+      runtimeMetrics,
+    });
+    (detector.detect as any).mockResolvedValue([makeDetectedResolution()]);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-07T00:00:00Z"));
+    try {
+      await mod.runCheck();
+
+      expect(quarantine.repo.clearExpired).toHaveBeenCalledWith(CONDITION);
+      expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION], {
+        redeemTokenIdsByCondition: { [CONDITION]: [TOK_YES] },
+      });
+      expect(runtimeMetrics.writeCounter).not.toHaveBeenCalledWith(
+        "resolution_redeem_quarantine_skipped_total",
+        1,
+        expect.any(String),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not quarantine a generic PRECHECK_SKIPPED resolution redeem error as benign", async () => {
+    const gateway = createMockGateway({ "tok-yes": 50 });
+    (gateway.redeemPositions as any).mockRejectedValue(
+      new Error("PRECHECK_SKIPPED: nothing to do"),
+    );
+    const quarantine = createMockRedeemQuarantineRepo();
+    const runtimeMetrics = { writeCounter: vi.fn(), writeEvent: vi.fn(), writeLatest: vi.fn() };
+    mod = createModule({
+      gateway,
+      redeemQuarantineRepo: quarantine.repo,
+      runtimeMetrics,
+    });
+    (detector.detect as any).mockResolvedValue([makeDetectedResolution()]);
+
+    await mod.runCheck();
+
+    expect(gateway.redeemPositions as any).toHaveBeenCalledTimes(1);
+    expect(quarantine.repo.recordBenignZeroBalanceSkip).not.toHaveBeenCalled();
+    expect(quarantine.states.get(CONDITION)).toBeUndefined();
+    expect(runtimeMetrics.writeCounter).not.toHaveBeenCalledWith(
+      "resolution_redeem_zero_balance_quarantined_total",
+      1,
+      JSON.stringify({ reason: "zero_balance_precheck_skip" }),
+    );
+    expect((mod as any).redeemFailures.get(CONDITION)).toMatchObject({ failureCount: 1 });
+    expect(settler.settle as any).not.toHaveBeenCalled();
+  });
+
+  it("keeps STATE_FAILED resolution redeem handling on the existing failure path", async () => {
+    const gateway = createMockGateway({ "tok-yes": 50 });
+    (gateway.redeemPositions as any).mockRejectedValue(
+      new Error("execution reverted: STATE_FAILED"),
+    );
+    const quarantine = createMockRedeemQuarantineRepo();
+    mod = createModule({ gateway, redeemQuarantineRepo: quarantine.repo });
+    (detector.detect as any).mockResolvedValue([makeDetectedResolution()]);
+
+    await mod.runCheck();
+
+    expect(gateway.redeemPositions as any).toHaveBeenCalledTimes(1);
+    expect(quarantine.repo.recordBenignZeroBalanceSkip).not.toHaveBeenCalled();
+    expect(quarantine.states.get(CONDITION)).toBeUndefined();
+    expect((mod as any).redeemFailures.get(CONDITION)).toMatchObject({ failureCount: 1 });
+    expect(settler.settle as any).not.toHaveBeenCalled();
+  });
+
   it("settles without balance check when no gateway is provided", async () => {
     // No gateway = simulation/paper mode, settle immediately
     mod = createModule();
@@ -1669,6 +1902,204 @@ describe("ResolutionModule", () => {
         expect.objectContaining({ conditionIds: [CONDITION] }),
         "algo-triggered redeem skipped local settlement until on-chain redeem succeeds",
       );
+    });
+
+    it("records zero-balance quarantine after algo redeem precheck skip", async () => {
+      const gateway = createMockGateway();
+      (gateway.redeemPositions as any).mockRejectedValue(
+        new Error("PRECHECK_SKIPPED: redeem skipped: zero position balance"),
+      );
+      const quarantine = createMockRedeemQuarantineRepo();
+      const runtimeMetrics = { writeCounter: vi.fn(), writeEvent: vi.fn(), writeLatest: vi.fn() };
+      mod = createModule({
+        gateway,
+        redeemQuarantineRepo: quarantine.repo,
+        runtimeMetrics,
+      });
+
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-07T00:00:00Z"));
+      try {
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+
+        expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION]);
+        expect(quarantine.repo.recordBenignZeroBalanceSkip).toHaveBeenCalledWith({
+          conditionId: CONDITION,
+          nowTs: Date.now(),
+          ttlMs: 24 * 60 * 60_000,
+        });
+        expect(quarantine.states.get(CONDITION)).toMatchObject({
+          consecutiveStateFailedCount: 0,
+        });
+        expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+          "resolution_redeem_zero_balance_quarantined_total",
+          1,
+          JSON.stringify({ reason: "zero_balance_precheck_skip" }),
+        );
+        expect(log.info).toHaveBeenCalledWith(
+          expect.objectContaining({ conditionIds: [CONDITION] }),
+          "algo-triggered on-chain redeem zero-balance precheck skip quarantined",
+        );
+        expect(log.error).not.toHaveBeenCalledWith(
+          expect.objectContaining({ conditionIds: [CONDITION] }),
+          "algo-triggered on-chain redeem failed",
+        );
+        expect((mod as any).redeemFailures.has(CONDITION)).toBe(false);
+        expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("skips subsequent algo redeem inside zero-balance quarantine", async () => {
+      const gateway = createMockGateway();
+      (gateway.redeemPositions as any).mockRejectedValueOnce(
+        new Error("PRECHECK_SKIPPED: redeem skipped: zero position balance"),
+      );
+      const quarantine = createMockRedeemQuarantineRepo();
+      const runtimeMetrics = { writeCounter: vi.fn(), writeEvent: vi.fn(), writeLatest: vi.fn() };
+      mod = createModule({
+        gateway,
+        redeemQuarantineRepo: quarantine.repo,
+        runtimeMetrics,
+      });
+
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-07T00:00:00Z"));
+      try {
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        vi.setSystemTime(new Date("2026-05-07T00:05:00Z"));
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+
+        expect(gateway.redeemPositions as any).toHaveBeenCalledTimes(1);
+        expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+          "algo_redeem_quarantine_skipped_total",
+          1,
+          JSON.stringify({ reason: "zero_balance_quarantine" }),
+        );
+        expect(runtimeMetrics.writeCounter).not.toHaveBeenCalledWith(
+          "algo_redeem_quarantine_skipped_total",
+          1,
+          JSON.stringify({ reason: "state_failed_quarantine" }),
+        );
+        expect(log.info).toHaveBeenCalledWith(
+          expect.objectContaining({ conditionId: CONDITION, reason: "zero_balance_quarantine" }),
+          "algo-triggered on-chain redeem skipped by redeem quarantine",
+        );
+        expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("clears expired algo redeem quarantine and retries gateway redeem", async () => {
+      const gateway = createMockGateway();
+      const expiredUntil = Date.parse("2026-05-06T23:59:59Z");
+      const quarantine = createMockRedeemQuarantineRepo({
+        [CONDITION]: {
+          consecutiveStateFailedCount: 0,
+          redeemQuarantineUntilTs: expiredUntil,
+        },
+      });
+      const runtimeMetrics = { writeCounter: vi.fn(), writeEvent: vi.fn(), writeLatest: vi.fn() };
+      mod = createModule({
+        gateway,
+        redeemQuarantineRepo: quarantine.repo,
+        runtimeMetrics,
+      });
+      const settled = [makeSettledPosition({ resolution: "algo-redeem", settlementPrice: 0 })];
+      (settler.settleAlgoRedeem as any).mockReturnValue(settled);
+
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-07T00:00:00Z"));
+      try {
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+
+        expect(quarantine.repo.clearExpired).toHaveBeenCalledWith(CONDITION);
+        expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION]);
+        expect(runtimeMetrics.writeCounter).not.toHaveBeenCalledWith(
+          "algo_redeem_quarantine_skipped_total",
+          1,
+          expect.any(String),
+        );
+        expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([CONDITION]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("skips algo redeem inside state-failed quarantine with distinct reason", async () => {
+      const gateway = createMockGateway();
+      const until = Date.parse("2026-05-08T00:00:00Z");
+      const quarantine = createMockRedeemQuarantineRepo({
+        [CONDITION]: {
+          consecutiveStateFailedCount: 2,
+          redeemQuarantineUntilTs: until,
+        },
+      });
+      const runtimeMetrics = { writeCounter: vi.fn(), writeEvent: vi.fn(), writeLatest: vi.fn() };
+      mod = createModule({
+        gateway,
+        redeemQuarantineRepo: quarantine.repo,
+        runtimeMetrics,
+      });
+
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-07T00:00:00Z"));
+      try {
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+
+        expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
+        expect(quarantine.repo.recordBenignZeroBalanceSkip).not.toHaveBeenCalled();
+        expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+          "algo_redeem_quarantine_skipped_total",
+          1,
+          JSON.stringify({ reason: "state_failed_quarantine" }),
+        );
+        expect(runtimeMetrics.writeCounter).not.toHaveBeenCalledWith(
+          "algo_redeem_quarantine_skipped_total",
+          1,
+          JSON.stringify({ reason: "zero_balance_quarantine" }),
+        );
+        expect(log.info).toHaveBeenCalledWith(
+          expect.objectContaining({ conditionId: CONDITION, reason: "state_failed_quarantine" }),
+          "algo-triggered on-chain redeem skipped by redeem quarantine",
+        );
+        expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not quarantine a generic PRECHECK_SKIPPED algo redeem error as benign", async () => {
+      const gateway = createMockGateway();
+      (gateway.redeemPositions as any).mockRejectedValue(
+        new Error("PRECHECK_SKIPPED: nothing to do"),
+      );
+      const quarantine = createMockRedeemQuarantineRepo();
+      const runtimeMetrics = { writeCounter: vi.fn(), writeEvent: vi.fn(), writeLatest: vi.fn() };
+      mod = createModule({
+        gateway,
+        redeemQuarantineRepo: quarantine.repo,
+        runtimeMetrics,
+      });
+
+      await (mod as any).handleAlgoRedeem([CONDITION]);
+
+      expect(gateway.redeemPositions as any).toHaveBeenCalledTimes(1);
+      expect(quarantine.repo.recordBenignZeroBalanceSkip).not.toHaveBeenCalled();
+      expect(quarantine.states.get(CONDITION)).toBeUndefined();
+      expect(runtimeMetrics.writeCounter).not.toHaveBeenCalledWith(
+        "resolution_redeem_zero_balance_quarantined_total",
+        1,
+        JSON.stringify({ reason: "zero_balance_precheck_skip" }),
+      );
+      expect((mod as any).redeemFailures.get(CONDITION)).toMatchObject({ failureCount: 1 });
+      expect(log.error).toHaveBeenCalledWith(
+        expect.objectContaining({ conditionIds: [CONDITION] }),
+        "algo-triggered on-chain redeem failed",
+      );
+      expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
     });
 
     describe("redeemability guard", () => {

@@ -35,6 +35,7 @@ import type { PositionSettler } from "./position-settler.js";
 import type { Logger } from "../../logger.js";
 import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
 import type { SettlementInfraBreaker } from "../settlement-infra-breaker.js";
+import { isZeroBalancePrecheckSkipError } from "../settlement-infra-breaker.js";
 
 function normalizeOutcomeLabel(value: string): string {
   return value.trim().toLowerCase();
@@ -65,6 +66,7 @@ const REDEEM_BACKOFF_MS_BY_COUNT: readonly number[] = [
 const REDEEM_CIRCUIT_OPEN_COOLDOWN_MS = 60 * 60_000;
 const REDEEM_CIRCUIT_OPEN_THRESHOLD = 3;
 const RESOLUTION_REDEEM_RETRY_COOLDOWN_MS = 60 * 60_000;
+const RESOLUTION_ZERO_BALANCE_QUARANTINE_TTL_MS = 24 * 60 * 60_000;
 const ASYNC_RESOLUTION_QUEUE_MAX_DEPTH = 32;
 
 interface RedeemFailureEntry {
@@ -102,6 +104,22 @@ interface ResolutionRuntimeMetrics {
   ) => void;
 }
 
+interface ResolutionRedeemQuarantineState {
+  readonly consecutiveStateFailedCount: number;
+  readonly redeemQuarantineUntilTs: number | null;
+}
+
+interface ResolutionRedeemQuarantineStore {
+  findByConditionIds(conditionIds: readonly string[]): Map<string, ResolutionRedeemQuarantineState>;
+  recordBenignZeroBalanceSkip(input: { conditionId: string; nowTs: number; ttlMs: number }): {
+    readonly enteredQuarantine: boolean;
+    readonly redeemQuarantineUntilTs: number | null;
+  };
+  clearExpired(conditionId: string): { readonly reset: boolean };
+}
+
+type RedeemQuarantineReason = "state_failed_quarantine" | "zero_balance_quarantine";
+
 export interface ResolutionModuleDeps {
   detector: ResolutionDetector;
   settler: PositionSettler;
@@ -132,6 +150,7 @@ export interface ResolutionModuleDeps {
   runtimeControl?: RuntimeControl;
   runtimeMetrics?: ResolutionRuntimeMetrics;
   settlementInfraBreaker?: SettlementInfraBreaker | undefined;
+  redeemQuarantineRepo?: ResolutionRedeemQuarantineStore | undefined;
 }
 
 export class ResolutionModule implements RuntimeModule {
@@ -274,6 +293,14 @@ export class ResolutionModule implements RuntimeModule {
 
   private writeResolutionCounter(metricName: string, value = 1, kind?: string): void {
     const labels = kind ? JSON.stringify({ kind }) : null;
+    this.writeResolutionCounterWithLabels(metricName, value, labels);
+  }
+
+  private writeResolutionCounterWithLabels(
+    metricName: string,
+    value = 1,
+    labels: string | null = null,
+  ): void {
     try {
       if (this.deps.runtimeMetrics?.writeCounter) {
         this.deps.runtimeMetrics.writeCounter(metricName, value, labels);
@@ -389,6 +416,9 @@ export class ResolutionModule implements RuntimeModule {
           );
           break;
         }
+        if (this.skipIfActiveRedeemQuarantine(conditionId, Date.now(), "algo")) {
+          continue;
+        }
         const result = await this.submitRedeemAttempt(conditionId);
         if (result.ok) {
           this.deps.log.info(
@@ -396,6 +426,11 @@ export class ResolutionModule implements RuntimeModule {
             "algo-triggered on-chain redeem submitted",
           );
           successfullyRedeemed.push(conditionId);
+        } else if (result.zeroBalanceQuarantined) {
+          this.deps.log.info(
+            { conditionIds: [conditionId] },
+            "algo-triggered on-chain redeem zero-balance precheck skip quarantined",
+          );
         } else {
           this.deps.log.error(
             { err: result.err, conditionIds: [conditionId] },
@@ -1002,6 +1037,10 @@ export class ResolutionModule implements RuntimeModule {
     redeemTokenIds: readonly TokenId[],
   ): Promise<"ready" | "deferred"> {
     const now = Date.now();
+    if (this.skipIfActiveRedeemQuarantine(conditionId, now, "resolution")) {
+      return "deferred";
+    }
+
     const failure = this.redeemFailures.get(conditionId);
     if (failure && now - failure.failedAt < RESOLUTION_REDEEM_RETRY_COOLDOWN_MS) {
       this.deps.log.debug(
@@ -1026,6 +1065,13 @@ export class ResolutionModule implements RuntimeModule {
 
     const result = await this.submitRedeemAttempt(conditionId, redeemTokenIds);
     if (!result.ok) {
+      if (result.zeroBalanceQuarantined) {
+        this.deps.log.info(
+          { conditionId },
+          "resolution on-chain redeem zero-balance precheck skip quarantined",
+        );
+        return "deferred";
+      }
       const err = summarizeError(result.err);
       this.deps.log.warn(
         { conditionId, ...err },
@@ -1048,7 +1094,10 @@ export class ResolutionModule implements RuntimeModule {
   private async submitRedeemAttempt(
     conditionId: string,
     redeemTokenIds?: readonly TokenId[],
-  ): Promise<{ readonly ok: true } | { readonly ok: false; readonly err: unknown }> {
+  ): Promise<
+    | { readonly ok: true }
+    | { readonly ok: false; readonly err: unknown; readonly zeroBalanceQuarantined?: boolean }
+  > {
     const infraPause = this.deps.settlementInfraBreaker?.current();
     if (infraPause) {
       this.deps.log.warn(
@@ -1072,9 +1121,82 @@ export class ResolutionModule implements RuntimeModule {
       this.redeemFailures.delete(conditionId);
       return { ok: true };
     } catch (err) {
+      if (this.deps.redeemQuarantineRepo && isZeroBalancePrecheckSkipError(err)) {
+        this.recordResolutionZeroBalanceQuarantine(conditionId, err);
+        return { ok: false, err, zeroBalanceQuarantined: true };
+      }
       this.recordRedeemFailure([conditionId], Date.now());
       return { ok: false, err };
     }
+  }
+
+  private getActiveRedeemQuarantine(
+    conditionId: string,
+    now: number,
+  ): { readonly reason: RedeemQuarantineReason; untilTs: number } | null {
+    const repo = this.deps.redeemQuarantineRepo;
+    if (!repo) return null;
+    const state = repo.findByConditionIds([conditionId]).get(conditionId);
+    const untilTs = state?.redeemQuarantineUntilTs ?? null;
+    if (untilTs === null) return null;
+    if (untilTs > now) {
+      return {
+        reason:
+          (state?.consecutiveStateFailedCount ?? 0) > 0
+            ? "state_failed_quarantine"
+            : "zero_balance_quarantine",
+        untilTs,
+      };
+    }
+    repo.clearExpired(conditionId);
+    return null;
+  }
+
+  private skipIfActiveRedeemQuarantine(
+    conditionId: string,
+    now: number,
+    path: "algo" | "resolution",
+  ): boolean {
+    const activeQuarantine = this.getActiveRedeemQuarantine(conditionId, now);
+    if (!activeQuarantine) return false;
+    const metricName =
+      path === "algo"
+        ? "algo_redeem_quarantine_skipped_total"
+        : "resolution_redeem_quarantine_skipped_total";
+    const logMessage =
+      path === "algo"
+        ? "algo-triggered on-chain redeem skipped by redeem quarantine"
+        : "resolution on-chain redeem skipped by redeem quarantine";
+    this.writeResolutionCounterWithLabels(
+      metricName,
+      1,
+      JSON.stringify({ reason: activeQuarantine.reason }),
+    );
+    this.deps.log.info(
+      { conditionId, reason: activeQuarantine.reason, until: activeQuarantine.untilTs },
+      logMessage,
+    );
+    return true;
+  }
+
+  private recordResolutionZeroBalanceQuarantine(conditionId: string, err: unknown): void {
+    this.redeemFailures.delete(conditionId);
+    this.writeResolutionCounterWithLabels(
+      "resolution_redeem_zero_balance_quarantined_total",
+      1,
+      JSON.stringify({ reason: "zero_balance_precheck_skip" }),
+    );
+    const repo = this.deps.redeemQuarantineRepo;
+    if (!repo) return;
+    repo.recordBenignZeroBalanceSkip({
+      conditionId,
+      nowTs: Date.now(),
+      ttlMs: RESOLUTION_ZERO_BALANCE_QUARANTINE_TTL_MS,
+    });
+    this.deps.log.info(
+      { conditionId, err: summarizeError(err) },
+      "resolution recorded zero-balance redeem quarantine",
+    );
   }
 
   /**

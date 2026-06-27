@@ -1653,6 +1653,7 @@ async function main(): Promise<void> {
     graceMinutes: 30,
     runtimeControl,
     settlementInfraBreaker,
+    redeemQuarantineRepo: repos.redeemQuarantine,
     // In live-lite mode, provide the exchange gateway so the resolution module
     // verifies on-chain token balance is 0 before settling in the ledger.
     // In simulation/paper modes, no gateway is needed (no on-chain state).
