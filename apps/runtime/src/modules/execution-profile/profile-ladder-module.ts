@@ -157,6 +157,14 @@ const OPEN_ORDER_STATUSES = new Set<OrderStatus>([
 const ADOPTION_WARMUP_MS = 60_000;
 export const PLANNED_RUNG_RETRY_MS = 60_000;
 
+// A recovery rebuild that places no live rung (e.g. the deterministic base
+// clientOrderId is burned by a terminal cancelled order) is pure churn: it never
+// un-sticks. After this many consecutive zero-placed rebuilds of the SAME candidate
+// (ladder id + rung shape) that candidate's recovery pass is suppressed — the token
+// itself is NOT made dormant, so a changed candidate or a BBO/position rebuild still
+// recovers exit coverage.
+export const MAX_RECOVERY_ZERO_PLACED_RECOVERIES = 3;
+
 // Tokens skipped only because their market/BBO had not warmed yet are retried on a
 // bounded schedule; every other skip (not owned, band disabled, existing ladder or
 // open SELL, dormant) is final. The attempt cap stops a permanently missing market
@@ -204,10 +212,19 @@ interface LadderAdoptionSummary {
   retryable_skip_count: number;
 }
 
+// Why a placement pass put zero rungs live, bounded to the abandonment-relevant
+// distinction. `client_order_id_blocked` is the only deterministic, self-healing
+// -resistant cause (a terminal-rejected base clientOrderId with no free distinct
+// candidate) that may advance the abandon streak. `transient` covers every other
+// zero-placement cause (post-only crossing, unknown/below min order size, missing
+// market data) — conditions that a later pass can clear, so they reset the streak.
+type ZeroPlacementCause = "client_order_id_blocked" | "transient" | null;
+
 interface LiveRungAdvanceResult {
   placed: number;
   skippedUnknownMinOrderSize: number;
   attempted: boolean;
+  zeroPlacementCause: ZeroPlacementCause;
 }
 
 interface BuildAndPlaceOptions {
@@ -264,6 +281,14 @@ export class ProfileLadderModule implements RuntimeModule {
   private readonly scaleInBuyPendingByToken = new Set<string>();
   private readonly pendingRungByClientOrderId = new Map<string, PendingProfileLadderRung>();
   private readonly plannedRungRetryCooldownUntilByToken = new Map<string, number>();
+  // Per-token tracker of consecutive recovery rebuilds that placed zero live rungs
+  // for one candidate signature. Once the count reaches the cap the matching planned/
+  // no-live candidate is abandoned (its recovery pass is skipped); a different
+  // signature restarts the streak so the token is never globally dormant.
+  private readonly recoveryZeroPlacedByToken = new Map<
+    string,
+    { signature: string; count: number }
+  >();
   private readonly missingLadderRecoveryCooldownUntilByToken = new Map<string, number>();
   private readonly pendingRebuildDeferCooldownUntilByToken = new Map<string, number>();
   private readonly staleLiveRungRiskEventDedupeUntilByKey = new Map<string, number>();
@@ -329,6 +354,7 @@ export class ProfileLadderModule implements RuntimeModule {
     for (const timer of this.postFillTimerByToken.values()) clearTimeout(timer);
     this.postFillTimerByToken.clear();
     this.plannedRungRetryCooldownUntilByToken.clear();
+    this.recoveryZeroPlacedByToken.clear();
     this.missingLadderRecoveryCooldownUntilByToken.clear();
     this.pendingRebuildDeferCooldownUntilByToken.clear();
     this.pendingRungByClientOrderId.clear();
@@ -657,6 +683,7 @@ export class ProfileLadderModule implements RuntimeModule {
     state: LadderState;
     placedLiveRungs: number;
     skippedUnknownMinOrderSize: number;
+    zeroPlacementCause: ZeroPlacementCause;
   } | null> {
     const policy = this.policy();
     if (!policy.enabled) return null;
@@ -740,6 +767,7 @@ export class ProfileLadderModule implements RuntimeModule {
       state,
       placedLiveRungs: liveRungs.placed,
       skippedUnknownMinOrderSize: liveRungs.skippedUnknownMinOrderSize,
+      zeroPlacementCause: liveRungs.zeroPlacementCause,
     };
   }
 
@@ -764,6 +792,10 @@ export class ProfileLadderModule implements RuntimeModule {
     let placed = 0;
     let skippedUnknownMinOrderSize = 0;
     let attempted = false;
+    // Track which zero-placement causes the pass hit so the recovery accounting can
+    // tell a deterministic clientOrderId block apart from a self-healing transient.
+    let sawTransientSkip = false;
+    let sawClientOrderIdBlocked = false;
     for (const rung of state.activeRungs) {
       if (occupied >= cap) break;
       const submittable =
@@ -777,6 +809,7 @@ export class ProfileLadderModule implements RuntimeModule {
       // loop rest the slot on the next non-crossing planned rung, if any.
       if (wouldCrossProfileLadderPostOnly(rung.price, market.bestBid)) {
         this.writeCounter("profile_ladder_skipped_crossing_post_only", 1, { band: state.band });
+        sawTransientSkip = true;
         continue;
       }
       const marketData = await this.resolveOrderMarketData(state.band, market, now, {
@@ -788,24 +821,41 @@ export class ProfileLadderModule implements RuntimeModule {
         });
         this.armPlannedRungRetryCooldown(state.tokenId, now);
         skippedUnknownMinOrderSize += 1;
+        sawTransientSkip = true;
         break;
       }
       // A fallback-hydrated rung below the conservative floor is skipped, not
       // fatal: a later rung in the same pass may still clear it.
-      if (!this.clearsFallbackMinOrder(state.band, marketData, rung)) continue;
+      if (!this.clearsFallbackMinOrder(state.band, marketData, rung)) {
+        sawTransientSkip = true;
+        continue;
+      }
       // A stale terminal-rejected row on the base clientOrderId would make the
       // global EM guard skip every resend forever. Resolve a distinct, still
       // deterministic clientOrderId; decline (leave the rung planned) if no
       // free candidate exists rather than risk a duplicate live SELL.
       const signalId = this.resolveRetryAwareSignalId(position, state.ladderId, rung, state.band);
-      if (signalId == null) continue;
+      if (signalId == null) {
+        sawClientOrderIdBlocked = true;
+        continue;
+      }
       await this.publishPlaceOrder(position, market, marketData, state.ladderId, rung, now, {
         signalId,
       });
       occupied += 1;
       placed += 1;
     }
-    return { placed, skippedUnknownMinOrderSize, attempted };
+    // A transient skip anywhere in the pass dominates: only a pass blocked purely
+    // on the deterministic clientOrderId guard counts toward abandonment.
+    const zeroPlacementCause: ZeroPlacementCause =
+      placed > 0
+        ? null
+        : sawTransientSkip
+          ? "transient"
+          : sawClientOrderIdBlocked
+            ? "client_order_id_blocked"
+            : null;
+    return { placed, skippedUnknownMinOrderSize, attempted, zeroPlacementCause };
   }
 
   private startPlannedRungRecoveryTimer(): void {
@@ -850,10 +900,21 @@ export class ProfileLadderModule implements RuntimeModule {
     if (state.status !== "active") return false;
     if (this.deps.positionRepo == null || this.deps.orderRepo == null) return false;
     if (this.postFillTimerByToken.has(String(state.tokenId))) return false;
-    if (!state.activeRungs.some((rung) => rung.lifecycle === "planned" && rung.orderId == null)) {
+    if (!hasPlannedNoLiveRung(state)) {
+      // No longer a recovery candidate: the planned/null rung went live or away,
+      // so the consecutive zero-placed streak restarts for any future candidate.
+      this.recoveryZeroPlacedByToken.delete(String(state.tokenId));
       return false;
     }
     if (this.isPlannedRungRetryCooldownActive(state.tokenId)) return true;
+    if (this.isRecoveryCandidateAbandoned(state)) {
+      // This exact planned/no-live candidate already churned the zero-placed cap;
+      // suppress only its recovery pass (re-arm the cooldown, record once-per-window)
+      // without emitting any order and without making the token dormant.
+      this.armPlannedRungRetryCooldown(state.tokenId, this.now());
+      this.writeCounter("ladder_recovery_skipped_abandoned", 1, { band: state.band });
+      return true;
+    }
     if (this.hasPendingRungForToken(state.tokenId)) return false;
 
     const openSellOrders = this.findOpenSellOrders(state.tokenId);
@@ -904,7 +965,52 @@ export class ProfileLadderModule implements RuntimeModule {
       placedLiveRungs: result.placedLiveRungs,
       ladderId: result.state.ladderId,
     });
+    this.recordRecoveryPlacementOutcome(
+      result.state,
+      result.placedLiveRungs,
+      result.zeroPlacementCause,
+    );
     return true;
+  }
+
+  // A recovery rebuild that placed a live rung clears the streak. A zero-placed
+  // rebuild only extends it when the cause is the deterministic clientOrderId block
+  // (a terminal-rejected base id with no free distinct candidate) AND the candidate
+  // signature is unchanged. Every transient zero-placement (post-only crossing,
+  // unknown/below min order size, missing market data) resets the streak instead,
+  // so a passing market/min-order condition never latches off exit coverage. After
+  // MAX_RECOVERY_ZERO_PLACED_RECOVERIES consecutive blocked rebuilds of the same
+  // candidate it is abandoned (its recovery pass is skipped) — recorded once. A new
+  // signature (rung went live/away, or the position moved the ladder id) starts over.
+  private recordRecoveryPlacementOutcome(
+    state: LadderState,
+    placedLiveRungs: number,
+    zeroPlacementCause: ZeroPlacementCause,
+  ): void {
+    const tokenKey = String(state.tokenId);
+    if (placedLiveRungs > 0 || zeroPlacementCause !== "client_order_id_blocked") {
+      this.recoveryZeroPlacedByToken.delete(tokenKey);
+      return;
+    }
+    const signature = recoveryCandidateSignature(state);
+    const previous = this.recoveryZeroPlacedByToken.get(tokenKey);
+    const count = previous != null && previous.signature === signature ? previous.count + 1 : 1;
+    this.recoveryZeroPlacedByToken.set(tokenKey, { signature, count });
+    if (count === MAX_RECOVERY_ZERO_PLACED_RECOVERIES) {
+      this.writeCounter("profile_ladder_recovery_abandoned", 1, {
+        band: state.band,
+        reason: "client_order_id_blocked_zero_placed",
+      });
+    }
+  }
+
+  private isRecoveryCandidateAbandoned(state: LadderState): boolean {
+    const entry = this.recoveryZeroPlacedByToken.get(String(state.tokenId));
+    return (
+      entry != null &&
+      entry.count >= MAX_RECOVERY_ZERO_PLACED_RECOVERIES &&
+      entry.signature === recoveryCandidateSignature(state)
+    );
   }
 
   // Restart/lost-OrderPlaced orphan: a recovery-placed SELL still rests on the
@@ -947,7 +1053,7 @@ export class ProfileLadderModule implements RuntimeModule {
     if (state.status !== "active") return false;
     if (this.postFillTimerByToken.has(String(state.tokenId))) return false;
     if (this.isPlannedRungRetryCooldownActive(state.tokenId)) return false;
-    if (!state.activeRungs.some((rung) => rung.lifecycle === "planned" && rung.orderId == null)) {
+    if (!hasPlannedNoLiveRung(state)) {
       return false;
     }
     const occupied =
@@ -2175,6 +2281,23 @@ export class ProfileLadderModule implements RuntimeModule {
 
 function isBboReason(reason: string): boolean {
   return reason === "bbo_major" || reason === "bbo_strong";
+}
+
+// A ladder is a planned-no-live recovery candidate exactly while it still holds a
+// rung that was planned but never went live (orderId null).
+function hasPlannedNoLiveRung(state: LadderState): boolean {
+  return state.activeRungs.some((rung) => rung.lifecycle === "planned" && rung.orderId == null);
+}
+
+// Identity of a planned-no-live recovery candidate: the canonical ladder id plus the
+// per-rung lifecycle/live shape. Bounded abandonment is keyed on this so it suppresses
+// only the churning candidate. Once the position moves (new ladder id), the rung goes
+// live, or the planned/null rung disappears, the signature changes and recovery reopens.
+function recoveryCandidateSignature(state: LadderState): string {
+  const rungs = state.activeRungs
+    .map((rung) => `${rung.rungIndex}:${rung.lifecycle}:${rung.orderId == null ? "0" : "1"}`)
+    .join("|");
+  return `${state.ladderId}#${rungs}`;
 }
 
 // A rejected order is "reusable-dead" only when it never reached the exchange

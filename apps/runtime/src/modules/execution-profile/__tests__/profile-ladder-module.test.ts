@@ -30,6 +30,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ADOPTION_RETRY_MS,
   MAX_ADOPTION_ATTEMPTS,
+  MAX_RECOVERY_ZERO_PLACED_RECOVERIES,
   PLANNED_RUNG_RETRY_MS,
   ProfileLadderModule,
   evaluatePostRefillLiveRung,
@@ -2039,6 +2040,461 @@ describe("ProfileLadderModule", () => {
       expect(ctx.counters.some((c) => c.name === "profile_ladder_recovery_order_adopted")).toBe(
         false,
       );
+    });
+  });
+
+  describe("bounded recovery abandonment (narrowed to the churning candidate)", () => {
+    // Reproduces prod token 243384: a terminal cancelled order burned the
+    // deterministic base clientOrderId, so every recovery rebuild resolves to a
+    // blocked placement (placedLiveRungs == 0) and would churn forever. After K
+    // consecutive zero-placed rebuilds the *current* planned/no-live candidate is
+    // abandoned (its recovery pass is skipped) — but the token is NOT made dormant,
+    // so BBO/position rebuilds and a changed candidate still recover exit coverage.
+    function plannedNoLiveLadder(overrides: Partial<LadderState> = {}): LadderState {
+      return ladderState({
+        band: "medium_high",
+        // Match the recovery-pass BBO so an interim non-candidate pass never fires a
+        // spurious BBO rebuild while we exercise the abandonment reset paths.
+        lastBboReferenceJson: JSON.stringify({ bestBid: 0.24, bestAsk: 0.26 }),
+        activeRungs: [
+          rung({
+            rungIndex: 0,
+            price: 0.26,
+            sizeShares: 5.9282,
+            notionalUsd: 1.54,
+            lifecycle: "planned",
+            orderId: null,
+          }),
+        ],
+        lastAvgEntry: 0.259945,
+        lastCostBasisUsdc: 1.541004,
+        lastMode: "flat",
+        ...overrides,
+      });
+    }
+
+    function abandonmentHarness(findClientOrder: () => Order | null) {
+      const clock = { ms: NOW };
+      // findOpen reads a mutable ref so a PositionUpdated can move the basis (and
+      // hence the canonical ladder id) mid-test, modelling a real scale-in.
+      const positionRef = {
+        current: position({
+          avgEntryPrice: 0.259945,
+          costBasisUsdc: 1.541004,
+          size: 5.9282,
+        }),
+      };
+      const ctx = setup(mediumHighPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        positionRepo: { findOpen: () => [positionRef.current] },
+        orderRepo: { findByTokenId: () => [], findByClientOrderId: () => findClientOrder() },
+        now: () => clock.ms,
+      });
+      ctx.repo.upsertLadder(plannedNoLiveLadder());
+      return { ctx, clock, positionRef };
+    }
+
+    // Fire one recovery pass, then advance the clock past the per-rebuild cooldown
+    // so the next pass is free to rebuild again (each rebuild arms a fresh cooldown).
+    // The non-crossing, known-min default drives the clientOrderId-blocked path;
+    // overrides let a test inject a transient zero-placement cause (crossing BBO or
+    // unknown min order size) on a single pass.
+    async function fireRecoveryPassWith(
+      ctx: ReturnType<typeof abandonmentHarness>["ctx"],
+      clock: { ms: number },
+      marketOverrides: Partial<NormalizedMarket> = {},
+    ): Promise<void> {
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          market({
+            tickSize: 0.01,
+            bestBid: 0.24,
+            bestAsk: 0.26,
+            midPrice: 0.25,
+            minOrderSize: 1,
+            ...marketOverrides,
+          }),
+        ],
+        timestamp: NOW,
+      });
+      clock.ms += PLANNED_RUNG_RETRY_MS + 1;
+    }
+
+    async function fireRecoveryPass(
+      ctx: ReturnType<typeof abandonmentHarness>["ctx"],
+      clock: { ms: number },
+    ): Promise<void> {
+      await fireRecoveryPassWith(ctx, clock);
+    }
+
+    // Move the open position so the next rebuild derives a fresh canonical ladder id.
+    async function movePosition(
+      ctx: ReturnType<typeof abandonmentHarness>["ctx"],
+      positionRef: ReturnType<typeof abandonmentHarness>["positionRef"],
+      overrides: Partial<Position>,
+    ): Promise<void> {
+      positionRef.current = position({
+        avgEntryPrice: 0.259945,
+        costBasisUsdc: 1.541004,
+        size: 5.9282,
+        ...overrides,
+      });
+      await ctx.bus.publish("PositionUpdated", { position: positionRef.current });
+    }
+
+    function abandonedLabels(
+      ctx: ReturnType<typeof abandonmentHarness>["ctx"],
+    ): Array<Record<string, string>> {
+      return counterLabels(ctx.counters, "profile_ladder_recovery_abandoned");
+    }
+
+    function skippedAbandonedLabels(
+      ctx: ReturnType<typeof abandonmentHarness>["ctx"],
+    ): Array<Record<string, string>> {
+      return counterLabels(ctx.counters, "ladder_recovery_skipped_abandoned");
+    }
+
+    const cancelled = () => openSellOrder({ status: OrderStatus.Cancelled });
+
+    async function abandonOnce(
+      ctx: ReturnType<typeof abandonmentHarness>["ctx"],
+      clock: { ms: number },
+    ): Promise<void> {
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES; pass += 1) {
+        await fireRecoveryPass(ctx, clock);
+      }
+    }
+
+    it("abandons the churning candidate after K zero-placed rebuilds and suppresses it without going token-wide dormant", async () => {
+      const { ctx, clock } = abandonmentHarness(cancelled);
+      await ctx.module.start();
+
+      await abandonOnce(ctx, clock);
+
+      // Every rebuild was blocked at clientOrderId: no live SELL ever placed.
+      expect(ctx.orders).toHaveLength(0);
+      // The bounded abandoned metric is written exactly once, at the K-th rebuild.
+      expect(abandonedLabels(ctx)).toEqual([
+        { band: "medium_high", reason: "client_order_id_blocked_zero_placed" },
+      ]);
+
+      // The next identical pass is suppressed by the *candidate-scoped* bucket — not
+      // by token-wide dormancy — and the abandoned metric stays at exactly one.
+      const recoveredBefore = counterLabels(
+        ctx.counters,
+        "profile_ladder_planned_no_live_recovered",
+      ).length;
+      await fireRecoveryPass(ctx, clock);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(abandonedLabels(ctx)).toHaveLength(1);
+      expect(counterLabels(ctx.counters, "profile_ladder_planned_no_live_recovered")).toHaveLength(
+        recoveredBefore,
+      );
+      expect(skippedAbandonedLabels(ctx)).toEqual([{ band: "medium_high" }]);
+      expect(ctx.counters.some((c) => c.name === "ladder_rebuild_skipped_dormant")).toBe(false);
+    });
+
+    it("runs no buildAndPlace for the abandoned candidate: suppressed passes are pure telemetry", async () => {
+      const { ctx, clock } = abandonmentHarness(cancelled);
+      await ctx.module.start();
+
+      await abandonOnce(ctx, clock);
+      // Clear the pre-abandonment telemetry so the suppressed passes are isolated.
+      ctx.counters.length = 0;
+
+      for (let pass = 0; pass < 3; pass += 1) {
+        await fireRecoveryPass(ctx, clock);
+      }
+
+      // No rebuild ran: no planned-rungs / recovered / placed-live telemetry, no orders.
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.counters.some((c) => c.name === "profile_ladder_planned_no_live_recovered")).toBe(
+        false,
+      );
+      expect(ctx.counters.some((c) => c.name === "profile_ladder_planned_rungs")).toBe(false);
+      expect(ctx.counters.some((c) => c.name === "profile_ladder_placed_live_rungs")).toBe(false);
+      // The candidate-scoped skip bucket is the only thing that fires on a suppressed pass.
+      expect(ctx.counters.every((c) => c.name === "ladder_recovery_skipped_abandoned")).toBe(true);
+      expect(skippedAbandonedLabels(ctx)).toHaveLength(3);
+    });
+
+    it("resets the consecutive zero-placed streak once a recovery rebuild places a live rung", async () => {
+      let blocked = true;
+      const { ctx, clock } = abandonmentHarness(() => (blocked ? cancelled() : null));
+      await ctx.module.start();
+
+      // K-1 blocked zero-placed rebuilds: one short of the abandonment threshold.
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES - 1; pass += 1) {
+        await fireRecoveryPass(ctx, clock);
+      }
+      expect(ctx.orders).toHaveLength(0);
+      expect(abandonedLabels(ctx)).toHaveLength(0);
+
+      // A rebuild now places a live rung; the consecutive streak resets to zero.
+      blocked = false;
+      await fireRecoveryPass(ctx, clock);
+      expect(ctx.orders).toHaveLength(1);
+      // Reject the placement so the rung reverts to planned/null (clears the
+      // in-flight pending rung) and a fresh recovery streak can begin.
+      await ctx.bus.publish("OrderRejected", orderRejected(ctx.orders[0]!));
+      blocked = true;
+
+      // Another K-1 blocked rebuilds must NOT abandon: the streak restarted at zero.
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES - 1; pass += 1) {
+        await fireRecoveryPass(ctx, clock);
+      }
+      expect(abandonedLabels(ctx)).toHaveLength(0);
+
+      // Only after a full fresh K consecutive zero-placed rebuilds does it abandon.
+      await fireRecoveryPass(ctx, clock);
+      expect(abandonedLabels(ctx)).toEqual([
+        { band: "medium_high", reason: "client_order_id_blocked_zero_placed" },
+      ]);
+    });
+
+    it("reopens recovery after abandonment once the planned/null rung disappears", async () => {
+      const { ctx, clock } = abandonmentHarness(cancelled);
+      await ctx.module.start();
+
+      await abandonOnce(ctx, clock);
+      expect(abandonedLabels(ctx)).toHaveLength(1);
+
+      // The rung goes live (placed/non-null): the ladder is no longer a recovery
+      // candidate, so the abandonment for that candidate is cleared.
+      ctx.repo.upsertLadder(
+        plannedNoLiveLadder({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.26,
+              sizeShares: 5.9282,
+              notionalUsd: 1.54,
+              lifecycle: "placed",
+              orderId: String(createOrderId("live-rung")),
+            }),
+          ],
+        }),
+      );
+      await fireRecoveryPass(ctx, clock);
+
+      // A fresh planned/null candidate (same signature) must start a brand-new streak,
+      // proving the token was never left token-wide dormant.
+      ctx.repo.upsertLadder(plannedNoLiveLadder());
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES - 1; pass += 1) {
+        await fireRecoveryPass(ctx, clock);
+      }
+      expect(abandonedLabels(ctx)).toHaveLength(1);
+
+      await fireRecoveryPass(ctx, clock);
+      expect(abandonedLabels(ctx)).toHaveLength(2);
+    });
+
+    it("clears the candidate abandonment as soon as a live rung/orderId appears", async () => {
+      const { ctx, clock } = abandonmentHarness(cancelled);
+      await ctx.module.start();
+
+      await abandonOnce(ctx, clock);
+      expect(abandonedLabels(ctx)).toHaveLength(1);
+
+      // A live rung now exists (placed + orderId): the candidate is no longer a
+      // planned/no-live recovery target, so no candidate-scoped suppression fires.
+      ctx.repo.upsertLadder(
+        plannedNoLiveLadder({
+          activeRungs: [
+            rung({
+              rungIndex: 0,
+              price: 0.26,
+              sizeShares: 5.9282,
+              notionalUsd: 1.54,
+              lifecycle: "placed",
+              orderId: String(createOrderId("live-rung")),
+            }),
+          ],
+        }),
+      );
+      await fireRecoveryPass(ctx, clock);
+      expect(skippedAbandonedLabels(ctx)).toHaveLength(0);
+      expect(ctx.counters.some((c) => c.name === "ladder_rebuild_skipped_dormant")).toBe(false);
+
+      // And the abandonment is fully cleared: a fresh planned/null candidate needs a
+      // brand-new full K streak before it is abandoned again (a second episode).
+      ctx.repo.upsertLadder(plannedNoLiveLadder());
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES - 1; pass += 1) {
+        await fireRecoveryPass(ctx, clock);
+      }
+      expect(abandonedLabels(ctx)).toHaveLength(1);
+      await fireRecoveryPass(ctx, clock);
+      expect(abandonedLabels(ctx)).toHaveLength(2);
+    });
+
+    it("gives a position-moved candidate (new ladder id) a fresh streak instead of token-wide blocking", async () => {
+      const { ctx, clock, positionRef } = abandonmentHarness(cancelled);
+      await ctx.module.start();
+
+      await abandonOnce(ctx, clock);
+      expect(abandonedLabels(ctx)).toHaveLength(1);
+
+      // A scale-in moves the average entry: the canonical ladder id changes, so this
+      // is a *different* recovery candidate that must not inherit the abandonment.
+      await movePosition(ctx, positionRef, { avgEntryPrice: 0.28, costBasisUsdc: 1.68 });
+
+      // K-1 blocked rebuilds of the new candidate must NOT abandon yet.
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES - 1; pass += 1) {
+        await fireRecoveryPass(ctx, clock);
+      }
+      expect(abandonedLabels(ctx)).toHaveLength(1);
+
+      // Only after a full fresh K consecutive zero-placed rebuilds of the new
+      // candidate does it abandon — a second, independently counted episode.
+      await fireRecoveryPass(ctx, clock);
+      expect(abandonedLabels(ctx)).toEqual([
+        { band: "medium_high", reason: "client_order_id_blocked_zero_placed" },
+        { band: "medium_high", reason: "client_order_id_blocked_zero_placed" },
+      ]);
+    });
+
+    it("does not block a position-update rebuild as dormant after a candidate is abandoned", async () => {
+      const { ctx, clock, positionRef } = abandonmentHarness(cancelled);
+      await ctx.module.start();
+
+      await abandonOnce(ctx, clock);
+      expect(abandonedLabels(ctx)).toHaveLength(1);
+      ctx.counters.length = 0;
+
+      // A scale-in arrives while the prior candidate is abandoned. Exit coverage must
+      // still rebuild: the token was never made dormant.
+      await movePosition(ctx, positionRef, { avgEntryPrice: 0.28, costBasisUsdc: 1.68 });
+
+      expect(ctx.counters.some((c) => c.name === "ladder_rebuild_skipped_dormant")).toBe(false);
+      expect(ctx.counters.some((c) => c.name === "profile_ladder_planned_rungs")).toBe(true);
+    });
+
+    it("never places or cancels an order through the abandon branch", async () => {
+      const { ctx, clock } = abandonmentHarness(cancelled);
+      await ctx.module.start();
+
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES + 3; pass += 1) {
+        await fireRecoveryPass(ctx, clock);
+      }
+
+      // The abandon path is pure telemetry: no PlaceOrderRequested, no CancelOrderRequested.
+      expect(abandonedLabels(ctx)).toEqual([
+        { band: "medium_high", reason: "client_order_id_blocked_zero_placed" },
+      ]);
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.cancels).toHaveLength(0);
+    });
+
+    // ---- cause-aware abandonment: only deterministic clientOrderId-blocked ----
+    // zero-placements may abandon a candidate. Transient zero-placement causes
+    // (post-only crossing, unknown/below min order size) must NOT advance the
+    // streak; they reset it so recovery resumes the instant the condition clears.
+
+    it("does not abandon a candidate that keeps crossing post-only, and places once the BBO is non-crossing", async () => {
+      // Never clientOrderId-blocked: the only zero-placement cause here is the
+      // post-only crossing guard (the recomputed 0.26 SELL rung sits at/below the
+      // best bid), which is transient — a later BBO move can lift it off the bid.
+      const { ctx, clock } = abandonmentHarness(() => null);
+      await ctx.module.start();
+
+      // K+ consecutive crossing passes (bestBid 0.30 >= the 0.26 rung price).
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES + 2; pass += 1) {
+        await fireRecoveryPassWith(ctx, clock, { bestBid: 0.3, bestAsk: 0.31, midPrice: 0.305 });
+      }
+      expect(ctx.orders).toHaveLength(0);
+      // Crossing is transient: the candidate is never abandoned.
+      expect(abandonedLabels(ctx)).toHaveLength(0);
+      expect(ctx.counters.some((c) => c.name === "profile_ladder_skipped_crossing_post_only")).toBe(
+        true,
+      );
+
+      // The BBO drops back below the rung price: the same candidate now places.
+      await fireRecoveryPassWith(ctx, clock, { bestBid: 0.24, bestAsk: 0.26, midPrice: 0.25 });
+      expect(ctx.orders).toHaveLength(1);
+      expect(abandonedLabels(ctx)).toHaveLength(0);
+    });
+
+    it("does not abandon a candidate blocked on unknown min order size, and places once it is hydrated", async () => {
+      // Never clientOrderId-blocked: the zero-placement cause is unknown min order
+      // size (base market omits it, no book cache, fallback unavailable off
+      // live-lite). That is transient — a later market snapshot can carry it.
+      const { ctx, clock } = abandonmentHarness(() => null);
+      await ctx.module.start();
+
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES + 2; pass += 1) {
+        await fireRecoveryPassWith(ctx, clock, { minOrderSize: null });
+      }
+      expect(ctx.orders).toHaveLength(0);
+      expect(abandonedLabels(ctx)).toHaveLength(0);
+      expect(
+        ctx.counters.some((c) => c.name === "profile_ladder_skipped_unknown_min_order_size"),
+      ).toBe(true);
+
+      // A snapshot now carries the min order size: the same candidate places.
+      await fireRecoveryPassWith(ctx, clock, { minOrderSize: 1 });
+      expect(ctx.orders).toHaveLength(1);
+      expect(abandonedLabels(ctx)).toHaveLength(0);
+    });
+
+    it("does not abandon a candidate whose rung is below the min order size, and places once the size grows valid", async () => {
+      // A position too small to clear the min order notional yields a rejected
+      // plan (no placement, no abandon-streak increment). Regression guard: a
+      // below-min condition must never latch off exit coverage, and recovery must
+      // resume the moment the position size grows enough to clear the floor.
+      const { ctx, clock, positionRef } = abandonmentHarness(() => null);
+      await ctx.module.start();
+
+      // 3 shares * 0.26 ≈ 0.78 notional < the 1.0 min order size → plan rejected.
+      positionRef.current = position({
+        avgEntryPrice: 0.259945,
+        costBasisUsdc: 0.78,
+        size: 3,
+      });
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES + 2; pass += 1) {
+        await fireRecoveryPass(ctx, clock);
+      }
+      expect(ctx.orders).toHaveLength(0);
+      expect(abandonedLabels(ctx)).toHaveLength(0);
+
+      // Size grows so the single rung clears the floor: the candidate places.
+      positionRef.current = position({
+        avgEntryPrice: 0.259945,
+        costBasisUsdc: 1.541004,
+        size: 5.9282,
+      });
+      await fireRecoveryPass(ctx, clock);
+      expect(ctx.orders).toHaveLength(1);
+      expect(abandonedLabels(ctx)).toHaveLength(0);
+    });
+
+    it("resets a clientOrderId-blocked streak when a transient zero-placement intervenes", async () => {
+      // K-1 deterministic clientOrderId-blocked rebuilds bring the streak one short
+      // of the cap. A single transient pass (unknown min order size) then resets it,
+      // so a further K-1 blocked rebuilds must not abandon — only a fresh full K does.
+      const { ctx, clock } = abandonmentHarness(cancelled);
+      await ctx.module.start();
+
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES - 1; pass += 1) {
+        await fireRecoveryPass(ctx, clock);
+      }
+      expect(abandonedLabels(ctx)).toHaveLength(0);
+
+      // Transient pass: the crossing/unknown-min cause resets the consecutive streak.
+      await fireRecoveryPassWith(ctx, clock, { minOrderSize: null });
+      expect(abandonedLabels(ctx)).toHaveLength(0);
+
+      // Another K-1 blocked rebuilds: still below the cap because the streak reset.
+      for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES - 1; pass += 1) {
+        await fireRecoveryPass(ctx, clock);
+      }
+      expect(abandonedLabels(ctx)).toHaveLength(0);
+
+      // Only a full fresh K consecutive clientOrderId-blocked rebuilds abandons.
+      await fireRecoveryPass(ctx, clock);
+      expect(abandonedLabels(ctx)).toEqual([
+        { band: "medium_high", reason: "client_order_id_blocked_zero_placed" },
+      ]);
     });
   });
 
