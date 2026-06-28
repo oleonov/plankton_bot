@@ -32,6 +32,7 @@ import {
 } from "./profile-ladder-shadow-policy.js";
 import {
   isProfileLadderOrder,
+  isProfileLadderSellOrder,
   orderMatchesOrderId,
   validateProfileLadderReplacementSellTarget,
 } from "../profile-ladder-order-helpers.js";
@@ -187,8 +188,8 @@ const DEFAULT_POST_REFILL_FOLLOW_THROUGH = {
 const STALE_LIVE_RUNG_RISK_EVENT_DEDUPE_MS = 5 * 60_000;
 
 // Bounded number of `_retry<n>` clientOrderId candidates probed when the base
-// recovery clientOrderId is occupied by a terminal-dead rejected row. Keeps the
-// recovery deterministic and prevents an unbounded probe loop.
+// recovery clientOrderId is occupied by a terminal cancelled/rejected no-fill PL
+// SELL row. Keeps the recovery deterministic and prevents an unbounded probe loop.
 const PROFILE_LADDER_CLIENT_ORDER_ID_MAX_RETRIES = 3;
 
 interface LadderAdoptionSummary {
@@ -1535,8 +1536,10 @@ export class ProfileLadderModule implements RuntimeModule {
   // Probe deterministic clientOrderId candidates for the standard placement
   // path. Attempt 0 is the base signalId; later attempts append `_retry<n>` to
   // the signalId only (never the ladderId, so occupancy/PR2/shadow keys are
-  // untouched). A reusable terminal-dead rejected row is skipped; a live/filled/
-  // cancelled row (or exhausting the bound) declines without publishing.
+  // untouched). A terminal no-fill PL SELL row (cancelled/rejected, fill 0, even
+  // exchange-backed) is skipped; a live/pending/partially-filled/filled row, a
+  // terminal row that took fills, a non-PL row (or exhausting the bound) declines
+  // without publishing.
   private resolveRetryAwareSignalId(
     position: Position,
     ladderId: string,
@@ -1564,7 +1567,7 @@ export class ProfileLadderModule implements RuntimeModule {
         }
         return signalId;
       }
-      if (!isReusableDeadRejectedOrder(existing)) {
+      if (!isRetrySkippableTerminalPlSellOrder(existing)) {
         this.writeCounter("profile_ladder_clientorderid_retry_blocked", 1, {
           band,
           reason: "live_or_filled",
@@ -2325,17 +2328,22 @@ function recoveryCandidateSignature(state: LadderState): string {
   return `${state.ladderId}#${rungs}`;
 }
 
-// A rejected order is "reusable-dead" only when it never reached the exchange
-// (no exchange order id) and never filled. Such a row can never become live, so
-// reusing a fresh clientOrderId around it cannot duplicate a live SELL. Any
-// open/filled/cancelled row — or a rejected row that touched the exchange or
-// took fills — must keep the slot blocked.
-function isReusableDeadRejectedOrder(order: Order): boolean {
-  if (order.status !== OrderStatus.Rejected) return false;
-  if (order.exchangeOrderId != null && order.exchangeOrderId !== "") return false;
+// A terminal PL SELL row is "retry-skippable" only when it can never become a
+// live sell again and provably took no shares: a ProfileLadder SELL in a terminal
+// cancelled/rejected state with a fill progress of exactly null or 0. Such a row
+// can be stepped over with a fresh deterministic clientOrderId without risking a
+// duplicate live SELL or an oversell — even if it touched the exchange (has an
+// exchange order id). The fill check is fail-closed: any non-zero, negative, or
+// NaN fill progress is treated as "may have moved shares" and keeps the slot
+// blocked, as does anything open/pending/partially-filled, anything filled, and
+// any non-ProfileLadder or BUY row.
+function isRetrySkippableTerminalPlSellOrder(order: Order): boolean {
+  if (!isProfileLadderSellOrder(order)) return false;
+  if (order.status !== OrderStatus.Cancelled && order.status !== OrderStatus.Rejected) {
+    return false;
+  }
   const fills = order.fillProgressShares;
-  if (fills != null && fills > 0) return false;
-  return true;
+  return fills == null || fills === 0;
 }
 
 function resolvePostRefillFollowThroughConfig(
