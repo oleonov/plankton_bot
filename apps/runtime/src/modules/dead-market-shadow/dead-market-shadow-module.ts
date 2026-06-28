@@ -1,5 +1,6 @@
 import {
   type EventBus,
+  type LegStateRepository,
   type NormalizedMarket,
   type RiskEventRepository,
   type RuntimeEventMap,
@@ -17,8 +18,16 @@ import {
   type DeadMarketScoreResult,
   type DeadMarketSourceGroup,
 } from "./dead-market-score.js";
+import {
+  evaluateTrackAAddThrottle,
+  type TrackAAddThrottleResult,
+  type TrackAReason,
+} from "./track-a-add-throttle-shadow.js";
 
 export const DEAD_MARKET_SHADOW_RISK_EVENT_TYPE = "dead_market_shadow";
+// Krabs-specific add-throttle telemetry (NOT Plankton logic — Plankton loses
+// money under this rule; see track-a-add-throttle-shadow.ts header).
+export const TRACK_A_RISK_EVENT_TYPE = "track_a_add_throttle_shadow";
 
 const EVALUATED_METRIC = "dead_market_shadow_evaluated_total";
 const SCORE_BUCKET_METRIC = "dead_market_shadow_score_bucket_total";
@@ -27,6 +36,11 @@ const COMPONENT_METRIC = "dead_market_shadow_component_total";
 // Named for what it actually measures: a top-of-book (bestBid && bestAsk)
 // presence check, not full order-book depth. The module keeps no book cache.
 const BBO_AVAILABLE_METRIC = "dead_market_shadow_bbo_available_total";
+
+// Track A add-throttle shadow telemetry (bounded labels only).
+const TRACK_A_EVALUATED_METRIC = "track_a_shadow_evaluated_total";
+const TRACK_A_CANDIDATE_METRIC = "track_a_shadow_candidate_total";
+const TRACK_A_MISSING_STATE_METRIC = "track_a_shadow_missing_state_total";
 
 // Bounded version/feature-set labels so the live signal is never silently
 // compared against the richer research score: live only computes 3 of the 6
@@ -54,6 +68,9 @@ export interface DeadMarketShadowModuleDeps {
   log: Logger;
   metrics?: ShadowMetricSink | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
+  // Authoritative leg source for Track A (leg age + in-leg SELL state). Only
+  // queried for add/scale-in BUYs; a null/absent repo fails open to "unknown".
+  legStateRepo?: LegStateRepository | undefined;
   now?: (() => number) | undefined;
   riskEventCooldownMs?: number | undefined;
 }
@@ -121,6 +138,101 @@ export class DeadMarketShadowModule implements RuntimeModule {
 
     this.emitMetrics(result, decisionType, sourceGroup, market);
     this.maybeRecordRiskEvent(result, decisionType, sourceGroup, signal, market, price);
+    this.evaluateTrackA(decisionType, sourceGroup, signal, market, price);
+  }
+
+  // Track A: shadow-flag an add/scale-in BUY whose leg is >= 60 minutes old and
+  // has seen no SELL yet. Pure observation — no order is placed, resized, or
+  // cancelled. The leg is read only for adds; entries/unknowns short-circuit to
+  // not_add without a leg lookup (and without touching legStateRepo).
+  private evaluateTrackA(
+    decisionType: DeadMarketDecisionType,
+    sourceGroup: DeadMarketSourceGroup,
+    signal: Signal,
+    market: NormalizedMarket,
+    price: number | null,
+  ): void {
+    const legState =
+      decisionType === "add" ? (this.deps.legStateRepo?.get(signal.tokenId) ?? null) : null;
+    const firstBuyTs = legState ? parseLegStartMs(legState.firstTradeAt) : null;
+    const hasSellInLeg = legState ? (legState.sellCount ?? 0) > 0 : null;
+
+    const result = evaluateTrackAAddThrottle({
+      decisionType,
+      firstBuyTs,
+      hasSellInLeg,
+      now: this.now(),
+    });
+
+    this.emitTrackAMetrics(result, legState != null);
+    if (result.classification === "throttle_candidate") {
+      this.maybeRecordTrackARiskEvent(
+        result,
+        sourceGroup,
+        signal,
+        market,
+        price,
+        firstBuyTs,
+        hasSellInLeg,
+      );
+    }
+  }
+
+  private emitTrackAMetrics(result: TrackAAddThrottleResult, legStatePresent: boolean): void {
+    const metrics = this.deps.metrics;
+    if (!metrics) return;
+    metrics.writeCounter(
+      TRACK_A_EVALUATED_METRIC,
+      1,
+      JSON.stringify({ classification: result.classification, reason: result.reason }),
+    );
+    if (result.classification === "throttle_candidate") {
+      metrics.writeCounter(TRACK_A_CANDIDATE_METRIC, 1, JSON.stringify({ reason: result.reason }));
+    }
+    if (result.classification === "unknown") {
+      metrics.writeCounter(
+        TRACK_A_MISSING_STATE_METRIC,
+        1,
+        JSON.stringify({ field: trackAMissingField(result.reason, legStatePresent) }),
+      );
+    }
+  }
+
+  private maybeRecordTrackARiskEvent(
+    result: TrackAAddThrottleResult,
+    sourceGroup: DeadMarketSourceGroup,
+    signal: Signal,
+    market: NormalizedMarket,
+    price: number | null,
+    firstBuyTs: number | null,
+    hasSellInLeg: boolean | null,
+  ): void {
+    const repo = this.deps.riskEventRepo;
+    if (!repo) return;
+    // Per-token dedup, namespaced so it never collides with the dead-market key.
+    const key = `tracka:${signal.tokenId}`;
+    const nowMs = this.now();
+    const lastAt = this.riskEventCooldown.get(key);
+    if (lastAt !== undefined && nowMs - lastAt < this.cooldownMs) return;
+    this.riskEventCooldown.set(key, nowMs);
+    this.pruneCooldownPeriodically(nowMs);
+
+    repo.insert({
+      eventType: TRACK_A_RISK_EVENT_TYPE,
+      payload: {
+        tokenId: String(signal.tokenId),
+        conditionId: String(signal.conditionId),
+        marketTitle: market.question,
+        sourceGroup,
+        decisionRuleId: signal.decisionRuleId,
+        reason: result.reason,
+        signalReason: signal.reason,
+        firstBuyTs,
+        legAgeMinutes: result.legAgeMinutes,
+        hasSellInLeg,
+        price,
+      },
+    });
   }
 
   private emitMetrics(
@@ -228,4 +340,20 @@ function classificationLabel(classification: DeadMarketClassification): string {
 
 function scoreBucketLabel(score: number): string {
   return Number.isInteger(score) && score >= 0 && score <= 6 ? String(score) : "unknown";
+}
+
+function parseLegStartMs(firstTradeAt: string): number | null {
+  const ts = Date.parse(firstTradeAt);
+  return Number.isFinite(ts) ? ts : null;
+}
+
+// Bounded field label for the missing-state counter: distinguish "no leg row at
+// all" from "leg row present but its first-buy timestamp is unparseable" from a
+// missing in-leg SELL state.
+function trackAMissingField(
+  reason: TrackAReason,
+  legStatePresent: boolean,
+): "first_buy_ts" | "sell_state" | "leg_state" {
+  if (reason === "missing_sell_state") return "sell_state";
+  return legStatePresent ? "first_buy_ts" : "leg_state";
 }

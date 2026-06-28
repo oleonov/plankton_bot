@@ -97,9 +97,7 @@ export function classifyDeadMarketScore(score: number): DeadMarketClassification
 export function computeDeadMarketScore(input: DeadMarketScoreInput): DeadMarketScoreResult {
   const evaluated: Record<DeadMarketComponentKey, Component> = {
     cheapTail: cheapTailComponent(input.selectedPrice),
-    r23OrFallbackSource: present(
-      input.sourceGroup === "r23" || input.sourceGroup === "fallback",
-    ),
+    r23OrFallbackSource: present(input.sourceGroup === "r23" || input.sourceGroup === "fallback"),
     planktonNotActive24h: booleanFeatureComponent(input.planktonActive24h, false),
     planktonNeverTouched: booleanFeatureComponent(input.planktonEverTouched, false),
     lowGammaLiquidity: lowLiquidityComponent(input.gammaLiquidity),
@@ -142,9 +140,7 @@ const ADD_REASONS: ReadonlySet<string> = new Set([
   SignalReason.HeavyScale,
 ]);
 
-export function deriveDecisionType(
-  reason: string | null | undefined,
-): DeadMarketDecisionType {
+export function deriveDecisionType(reason: string | null | undefined): DeadMarketDecisionType {
   if (reason === SignalReason.ProbeEntry) return "entry";
   if (reason != null && ADD_REASONS.has(reason)) return "add";
   return "unknown";

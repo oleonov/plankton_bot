@@ -4,6 +4,8 @@ import {
   SignalReason,
   createConditionId,
   createTokenId,
+  type LegState,
+  type LegStateRepository,
   type NormalizedMarket,
   type RiskEventRepository,
   type Signal,
@@ -59,6 +61,52 @@ function makeRiskEvents(): RiskEventStub {
   };
 }
 
+// A Map-backed LegStateRepository. `getTokens` records every lookup so a test
+// can assert the module never touches leg state for non-add signals.
+interface LegStateStub extends LegStateRepository {
+  getTokens: string[];
+  preload: (state: LegState) => void;
+}
+
+function makeLegStates(): LegStateStub {
+  const map = new Map<string, LegState>();
+  const getTokens: string[] = [];
+  const unsupported = (): never => {
+    throw new Error("leg-state mutation is not used by the shadow module");
+  };
+  return {
+    getTokens,
+    preload(state) {
+      map.set(String(state.tokenId), state);
+    },
+    get(tokenId) {
+      getTokens.push(String(tokenId));
+      return map.get(String(tokenId)) ?? null;
+    },
+    upsert: unsupported,
+    delete: unsupported,
+    getAll: () => [...map.values()],
+    incrementSellResidualReject: unsupported,
+    markAbandoned: unsupported,
+    resetAbandoned: unsupported,
+    applyRepriceChainEvent: unsupported,
+  };
+}
+
+function makeLegState(overrides: Partial<LegState> = {}): LegState {
+  return {
+    tokenId: createTokenId("tok-dead-1"),
+    buyCount: 1,
+    sellCount: 0,
+    lastAction: "BUY",
+    firstTradePrice: 0.5,
+    firstTradeAt: new Date(NOW - 90 * 60_000).toISOString(),
+    lastTradeAt: new Date(NOW).toISOString(),
+    updatedAt: new Date(NOW).toISOString(),
+    ...overrides,
+  };
+}
+
 function makeMarket(overrides: Partial<NormalizedMarket> = {}): NormalizedMarket {
   return {
     tokenId: createTokenId("tok-dead-1"),
@@ -111,6 +159,7 @@ interface Harness {
   bus: InProcessEventBus;
   metrics: ReturnType<typeof makeMetrics>;
   riskEvents: RiskEventStub;
+  legStates: LegStateStub;
   published: { placeOrder: number; approved: number; rejected: number };
   start: () => Promise<void>;
   stop: () => Promise<void>;
@@ -121,6 +170,7 @@ function makeHarness(opts: { cooldownMs?: number } = {}): Harness {
   const bus = new InProcessEventBus();
   const metrics = makeMetrics();
   const riskEvents = makeRiskEvents();
+  const legStates = makeLegStates();
   const published = { placeOrder: 0, approved: 0, rejected: 0 };
   bus.subscribe("PlaceOrderRequested", async () => {
     published.placeOrder += 1;
@@ -136,6 +186,7 @@ function makeHarness(opts: { cooldownMs?: number } = {}): Harness {
     log: silentLog,
     metrics,
     riskEventRepo: riskEvents,
+    legStateRepo: legStates,
     now: () => NOW,
     ...(opts.cooldownMs !== undefined ? { riskEventCooldownMs: opts.cooldownMs } : {}),
   });
@@ -143,6 +194,7 @@ function makeHarness(opts: { cooldownMs?: number } = {}): Harness {
     bus,
     metrics,
     riskEvents,
+    legStates,
     published,
     start: () => module.start(),
     stop: () => module.stop(),
@@ -203,10 +255,7 @@ describe("DeadMarketShadowModule", () => {
     const h = makeHarness();
     await h.start();
 
-    await h.emit(
-      makeSignal({ decisionRuleId: "D3", reason: SignalReason.ScaleIn }),
-      makeMarket(),
-    );
+    await h.emit(makeSignal({ decisionRuleId: "D3", reason: SignalReason.ScaleIn }), makeMarket());
 
     const evaluated = labelsOf(h.metrics.calls, "dead_market_shadow_evaluated_total");
     expect(evaluated[0]).toMatchObject({ decisionType: "add", sourceGroup: "d1_d3" });
@@ -263,10 +312,7 @@ describe("DeadMarketShadowModule", () => {
     const h = makeHarness();
     await h.start();
 
-    await h.emit(
-      makeSignal({ decisionRuleId: "D3", reason: SignalReason.Operator }),
-      makeMarket(),
-    );
+    await h.emit(makeSignal({ decisionRuleId: "D3", reason: SignalReason.Operator }), makeMarket());
 
     const evaluated = labelsOf(h.metrics.calls, "dead_market_shadow_evaluated_total");
     expect(evaluated[0]).toMatchObject({ decisionType: "unknown", sourceGroup: "d1_d3" });
@@ -376,13 +422,142 @@ describe("DeadMarketShadowModule", () => {
     await h.stop();
   });
 
+  // ── Track A add-throttle shadow telemetry (Krabs-specific; observe-only) ──
+
+  it("flags an aged add with no SELL as a Track A throttle_candidate and records a sampled risk event", async () => {
+    const h = makeHarness();
+    await h.start();
+    h.legStates.preload(
+      makeLegState({ firstTradeAt: new Date(NOW - 90 * 60_000).toISOString(), sellCount: 0 }),
+    );
+
+    await h.emit(makeSignal({ reason: SignalReason.ScaleIn }), makeMarket({ question: "Aged?" }));
+
+    expect(labelsOf(h.metrics.calls, "track_a_shadow_evaluated_total")).toEqual([
+      { classification: "throttle_candidate", reason: "age_60m_no_sell" },
+    ]);
+    expect(labelsOf(h.metrics.calls, "track_a_shadow_candidate_total")).toEqual([
+      { reason: "age_60m_no_sell" },
+    ]);
+
+    const trackA = h.riskEvents.inserts.filter(
+      (e) => e.eventType === "track_a_add_throttle_shadow",
+    );
+    expect(trackA).toHaveLength(1);
+    expect(trackA[0]?.payload).toMatchObject({
+      tokenId: "tok-dead-1",
+      marketTitle: "Aged?",
+      reason: "age_60m_no_sell",
+      hasSellInLeg: false,
+      legAgeMinutes: 90,
+    });
+    // Observe-only: Track A must never drive the trading pipeline.
+    expect(h.published).toEqual({ placeOrder: 0, approved: 0, rejected: 0 });
+
+    await h.stop();
+  });
+
+  it("does not flag a Track A candidate when the add is younger than 60 minutes", async () => {
+    const h = makeHarness();
+    await h.start();
+    h.legStates.preload(makeLegState({ firstTradeAt: new Date(NOW - 30 * 60_000).toISOString() }));
+
+    await h.emit(makeSignal({ reason: SignalReason.ScaleIn }), makeMarket());
+
+    expect(labelsOf(h.metrics.calls, "track_a_shadow_evaluated_total")).toEqual([
+      { classification: "allow", reason: "insufficient_age" },
+    ]);
+    expect(labelsOf(h.metrics.calls, "track_a_shadow_candidate_total")).toHaveLength(0);
+    expect(
+      h.riskEvents.inserts.filter((e) => e.eventType === "track_a_add_throttle_shadow"),
+    ).toHaveLength(0);
+
+    await h.stop();
+  });
+
+  it("does not flag a Track A candidate when a SELL has already occurred in the leg", async () => {
+    const h = makeHarness();
+    await h.start();
+    h.legStates.preload(
+      makeLegState({ firstTradeAt: new Date(NOW - 90 * 60_000).toISOString(), sellCount: 2 }),
+    );
+
+    await h.emit(makeSignal({ reason: SignalReason.ScaleIn }), makeMarket());
+
+    expect(labelsOf(h.metrics.calls, "track_a_shadow_evaluated_total")).toEqual([
+      { classification: "allow", reason: "sell_seen" },
+    ]);
+    expect(labelsOf(h.metrics.calls, "track_a_shadow_candidate_total")).toHaveLength(0);
+
+    await h.stop();
+  });
+
+  it("fails open on a missing leg state: unknown + missing_state(field=leg_state), no candidate", async () => {
+    const h = makeHarness();
+    await h.start();
+    // No leg state preloaded for this token → the leg start is unknown.
+
+    await h.emit(makeSignal({ reason: SignalReason.ScaleIn }), makeMarket());
+
+    expect(labelsOf(h.metrics.calls, "track_a_shadow_evaluated_total")).toEqual([
+      { classification: "unknown", reason: "missing_first_buy_ts" },
+    ]);
+    expect(labelsOf(h.metrics.calls, "track_a_shadow_missing_state_total")).toEqual([
+      { field: "leg_state" },
+    ]);
+    expect(labelsOf(h.metrics.calls, "track_a_shadow_candidate_total")).toHaveLength(0);
+    expect(
+      h.riskEvents.inserts.filter((e) => e.eventType === "track_a_add_throttle_shadow"),
+    ).toHaveLength(0);
+    expect(h.published).toEqual({ placeOrder: 0, approved: 0, rejected: 0 });
+
+    await h.stop();
+  });
+
+  it("treats an entry as Track A not_add and never queries leg state for it", async () => {
+    const h = makeHarness();
+    await h.start();
+
+    await h.emit(makeSignal({ reason: SignalReason.ProbeEntry }), makeMarket());
+
+    expect(labelsOf(h.metrics.calls, "track_a_shadow_evaluated_total")).toEqual([
+      { classification: "allow", reason: "not_add" },
+    ]);
+    // Entries are out of Track A scope: the module must not pay the leg lookup.
+    expect(h.legStates.getTokens).toHaveLength(0);
+
+    await h.stop();
+  });
+
+  it("emits Track A telemetry alongside the dead-market score metrics on an add", async () => {
+    const h = makeHarness();
+    await h.start();
+    h.legStates.preload(makeLegState({ firstTradeAt: new Date(NOW - 90 * 60_000).toISOString() }));
+
+    await h.emit(makeSignal({ reason: SignalReason.ScaleIn }), makeMarket());
+
+    expect(labelsOf(h.metrics.calls, "dead_market_shadow_evaluated_total")).toHaveLength(1);
+    expect(labelsOf(h.metrics.calls, "track_a_shadow_evaluated_total")).toHaveLength(1);
+
+    await h.stop();
+  });
+
   it("only ever emits bounded, low-cardinality metric labels", async () => {
     const h = makeHarness();
     await h.start();
 
+    // Entry candidate (dead-market labels + Track A allow/not_add).
     await h.emit(
       makeSignal({ decisionRuleId: "R23_DIP_TRIGGER", suggestedPrice: 0.01 }),
       makeMarket({ liquidity: 50 }),
+    );
+    // Aged add with no SELL → Track A throttle_candidate + candidate counter.
+    h.legStates.preload(makeLegState({ firstTradeAt: new Date(NOW - 90 * 60_000).toISOString() }));
+    await h.emit(makeSignal({ reason: SignalReason.ScaleIn }), makeMarket());
+    // Add with no leg state → Track A unknown + missing_state(field=leg_state).
+    await h.emit(
+      makeSignal({ tokenId: createTokenId("tok-dead-2"), reason: SignalReason.ScaleIn }),
+      makeMarket({ tokenId: createTokenId("tok-dead-2") }),
     );
 
     const allowedValues: Record<string, ReadonlySet<string | boolean>> = {
@@ -392,6 +567,8 @@ describe("DeadMarketShadowModule", () => {
         "downweight_candidate",
         "block_candidate",
         "hard_block_candidate",
+        "throttle_candidate",
+        "unknown",
       ]),
       scoreBucket: new Set(["0", "1", "2", "3", "4", "5", "6", "unknown"]),
       sourceGroup: new Set(["r23", "fallback", "scale_in", "ladder", "d1_d3", "other", "unknown"]),
@@ -400,6 +577,15 @@ describe("DeadMarketShadowModule", () => {
       available: new Set([true, false]),
       scoreVersion: new Set(["dead_market_v1"]),
       featureSet: new Set(["live_3of6"]),
+      reason: new Set([
+        "not_add",
+        "insufficient_age",
+        "sell_seen",
+        "missing_first_buy_ts",
+        "missing_sell_state",
+        "age_60m_no_sell",
+      ]),
+      field: new Set(["first_buy_ts", "sell_state", "leg_state"]),
     };
 
     for (const call of h.metrics.calls) {

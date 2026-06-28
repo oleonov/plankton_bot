@@ -1226,6 +1226,7 @@ async function main(): Promise<void> {
     log,
     metrics: runtimeMetrics,
     riskEventRepo: repos.riskEvent,
+    legStateRepo: repos.legState,
   });
   const signalFeedRepo = new SqliteSignalFeedRepository(ledgerConn.db);
   const signalFeedManager = new SignalFeedManager({

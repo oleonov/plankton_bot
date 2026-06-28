@@ -26,6 +26,8 @@ describe("buildRiskEventVolumeSnapshot", () => {
   it("classifies planner suppression rollups as signal telemetry", () => {
     expect(SIGNAL_TELEMETRY_RISK_EVENT_TYPES).toContain("planner_suppressed_rollup");
     expect(SIGNAL_TELEMETRY_RISK_EVENT_TYPES).toContain("execution_profile_decision_chain_rollup");
+    expect(SIGNAL_TELEMETRY_RISK_EVENT_TYPES).toContain("dead_market_shadow");
+    expect(SIGNAL_TELEMETRY_RISK_EVENT_TYPES).toContain("track_a_add_throttle_shadow");
     expect(
       buildRiskEventVolumeSnapshot({
         last1h: 1200,

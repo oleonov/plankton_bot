@@ -1,0 +1,76 @@
+// Track A "add throttle" shadow telemetry. This is KRABS-SPECIFIC risk
+// telemetry, NOT Plankton logic — under this rule Plankton loses money; it is
+// kept only because a Krabs replay improved Krabs by +$74.69 at the 60-minute /
+// no-SELL threshold (30m, 120m, 180m were worse). The function is PURE and
+// observational: it never blocks, resizes, reprices, or cancels an order.
+//
+// Rule: flag an add/scale-in BUY as a throttle candidate when
+//   decisionType == "add" AND leg age >= 60 minutes AND no SELL has occurred in
+//   the current leg before this add.
+//
+// Fail-open: if the leg start (firstBuyTs) or the in-leg SELL state is unknown,
+// the result is `unknown` with a typed reason — never a throttle_candidate.
+
+import type { DeadMarketDecisionType } from "./dead-market-score.js";
+
+/** Validated leg-age threshold (minutes). Krabs replay optimum; see header. */
+export const TRACK_A_MIN_LEG_AGE_MINUTES = 60;
+
+export type TrackAClassification = "allow" | "throttle_candidate" | "unknown";
+
+export type TrackAReason =
+  | "not_add"
+  | "insufficient_age"
+  | "sell_seen"
+  | "missing_first_buy_ts"
+  | "missing_sell_state"
+  | "age_60m_no_sell";
+
+export interface TrackAAddThrottleInput {
+  /** entry/add/unknown derived from signal.reason (see deriveDecisionType). */
+  decisionType: DeadMarketDecisionType;
+  /** Epoch ms of the current leg's first BUY fill. null => unknown. */
+  firstBuyTs: number | null;
+  /** Whether any SELL fill has occurred in the current leg. null => unknown. */
+  hasSellInLeg: boolean | null;
+  /** Evaluation time (epoch ms). */
+  now: number;
+}
+
+export interface TrackAAddThrottleResult {
+  classification: TrackAClassification;
+  reason: TrackAReason;
+  legAgeMinutes: number | null;
+}
+
+const result = (
+  classification: TrackAClassification,
+  reason: TrackAReason,
+  legAgeMinutes: number | null,
+): TrackAAddThrottleResult => ({ classification, reason, legAgeMinutes });
+
+export function evaluateTrackAAddThrottle(input: TrackAAddThrottleInput): TrackAAddThrottleResult {
+  // The rule only targets adds; entries and unknowns are out of scope.
+  if (input.decisionType !== "add") return result("allow", "not_add", null);
+
+  // Without a leg start we cannot compute age at all.
+  if (input.firstBuyTs == null || !Number.isFinite(input.firstBuyTs)) {
+    return result("unknown", "missing_first_buy_ts", null);
+  }
+
+  const legAgeMinutes = (input.now - input.firstBuyTs) / 60_000;
+
+  // Age is decisive: if the add is too young the throttle can never apply, so
+  // we don't need (and don't wait on) the SELL state — definitive allow.
+  if (legAgeMinutes < TRACK_A_MIN_LEG_AGE_MINUTES) {
+    return result("allow", "insufficient_age", legAgeMinutes);
+  }
+
+  // Old enough to throttle, but the SELL state is required to decide.
+  if (input.hasSellInLeg == null) {
+    return result("unknown", "missing_sell_state", legAgeMinutes);
+  }
+  if (input.hasSellInLeg) return result("allow", "sell_seen", legAgeMinutes);
+
+  return result("throttle_candidate", "age_60m_no_sell", legAgeMinutes);
+}
