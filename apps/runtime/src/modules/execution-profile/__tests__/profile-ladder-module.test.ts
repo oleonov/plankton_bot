@@ -2043,6 +2043,237 @@ describe("ProfileLadderModule", () => {
     });
   });
 
+  describe("stale live-rung orderId reconciliation", () => {
+    const staleOrderId = createOrderId("stale-profile-ladder-order");
+
+    function focusShapeState(overrides: Partial<LadderState> = {}): LadderState {
+      return ladderState({
+        band: "medium_low",
+        activeRungs: [
+          rung({
+            rungIndex: 0,
+            price: 0.099,
+            sizeShares: 108.275484,
+            notionalUsd: 10.72,
+            lifecycle: "planned",
+            orderId: null,
+          }),
+          rung({
+            rungIndex: 1,
+            price: 0.117,
+            sizeShares: 68.384516,
+            notionalUsd: 8,
+            lifecycle: "planned",
+            orderId: null,
+          }),
+          rung({
+            rungIndex: 2,
+            price: 0.063,
+            sizeShares: 108.275484,
+            notionalUsd: 6.82,
+            lifecycle: "placed",
+            orderId: String(staleOrderId),
+          }),
+        ],
+        lastAvgEntry: 0.09,
+        lastCostBasisUsdc: 18.72,
+        lastMode: "flat",
+        lastBboReferenceJson: JSON.stringify({ bestBid: 0.08, bestAsk: 0.1 }),
+        ...overrides,
+      });
+    }
+
+    function staleProfileLadderOrder(overrides: Partial<Order> = {}): Order {
+      return openSellOrder({
+        orderId: staleOrderId,
+        price: 0.063,
+        size: 108.275484,
+        sizeUsdc: 6.82,
+        status: OrderStatus.Cancelled,
+        decisionRuleId: "PROFILE_LADDER",
+        signalReason: "profile-ladder-exit",
+        metadata: { source: "profile_ladder", ladderId: "profile_ladder_existing" },
+        ...overrides,
+      });
+    }
+
+    function staleContext(
+      orders: readonly Order[],
+      overrides: {
+        findByClientOrderId?: (clientOrderId: string) => Order | null;
+        openPosition?: Position;
+      } = {},
+    ) {
+      const openPosition =
+        overrides.openPosition ??
+        position({ avgEntryPrice: 0.09, costBasisUsdc: 18.72, size: 176.66 });
+      return setup(policy(), {
+        modeReader: { getMode: () => "flat" },
+        positionRepo: { findOpen: () => [openPosition] },
+        orderRepo: {
+          findByTokenId: () => [...orders],
+          findByClientOrderId: overrides.findByClientOrderId ?? (() => null),
+        },
+      });
+    }
+
+    it("does not let a cancelled stale PL order occupy the only live slot on rebuild", async () => {
+      const ctx = staleContext([staleProfileLadderOrder()]);
+      ctx.repo.upsertLadder(focusShapeState());
+
+      await ctx.module.placeLadder(
+        position({ avgEntryPrice: 0.09, costBasisUsdc: 18.72, size: 176.66 }),
+        market({ bestBid: 0.08, bestAsk: 0.1, midPrice: 0.09, minOrderSize: 1 }),
+      );
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.orders[0]?.side).toBe("sell");
+      expect(ctx.orders[0]?.price).toBeGreaterThan(0.08);
+      expect(
+        ctx.orders.some((order) => String(order.commandId).includes(String(staleOrderId))),
+      ).toBe(false);
+      expect(ctx.counters).toContainEqual({
+        name: "profile_ladder_stale_live_rung_reconciled",
+        value: 1,
+        labels: '{"band":"medium_low","reason":"terminal_no_fill"}',
+      });
+    });
+
+    it("keeps the focus stale-tail shape fail-closed when BBO is invalid", async () => {
+      const ctx = staleContext([staleProfileLadderOrder()]);
+      ctx.repo.upsertLadder(focusShapeState());
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ bestBid: null, bestAsk: null, midPrice: null, minOrderSize: 1 })],
+        timestamp: NOW,
+      });
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.cancels).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[2]).toMatchObject({
+        lifecycle: "cancelled",
+        orderId: null,
+        filledSizeShares: 0,
+      });
+      expect(ctx.counters).toContainEqual({
+        name: "profile_ladder_stale_live_rung_reconciled",
+        value: 1,
+        labels: '{"band":"medium_low","reason":"terminal_no_fill"}',
+      });
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ bestBid: 0.08, bestAsk: 0.1, midPrice: 0.09, minOrderSize: 1 })],
+        timestamp: NOW + 1,
+      });
+      expect(ctx.orders).toHaveLength(0);
+    });
+
+    it("treats a missing order row as dead unless rung fill progress says otherwise", async () => {
+      const ctx = staleContext([]);
+      ctx.repo.upsertLadder(focusShapeState());
+
+      await ctx.module.placeLadder(
+        position({ avgEntryPrice: 0.09, costBasisUsdc: 18.72, size: 176.66 }),
+        market({ bestBid: 0.08, bestAsk: 0.1, midPrice: 0.09, minOrderSize: 1 }),
+      );
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.counters).toContainEqual({
+        name: "profile_ladder_stale_live_rung_reconciled",
+        value: 1,
+        labels: '{"band":"medium_low","reason":"missing_no_fill"}',
+      });
+    });
+
+    it("preserves known partial fill progress while freeing the stale live slot", async () => {
+      const ctx = staleContext([
+        staleProfileLadderOrder({
+          status: OrderStatus.Cancelled,
+          fillProgressShares: 25,
+        }),
+      ]);
+      ctx.repo.upsertLadder(
+        focusShapeState({
+          activeRungs: [
+            ...focusShapeState().activeRungs.slice(0, 2),
+            rung({
+              rungIndex: 2,
+              price: 0.063,
+              sizeShares: 108.275484,
+              notionalUsd: 6.82,
+              lifecycle: "partially_filled",
+              orderId: String(staleOrderId),
+              filledSizeShares: 10,
+            }),
+          ],
+        }),
+      );
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ bestBid: null, bestAsk: null, midPrice: null, minOrderSize: 1 })],
+        timestamp: NOW,
+      });
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[2]).toMatchObject({
+        lifecycle: "cancelled",
+        orderId: null,
+        filledSizeShares: 25,
+      });
+      expect(ctx.counters).toContainEqual({
+        name: "profile_ladder_stale_live_rung_reconciled",
+        value: 1,
+        labels: '{"band":"medium_low","reason":"terminal_with_fill"}',
+      });
+    });
+
+    it("does not oversell when a stale rung is already filled", async () => {
+      const ctx = staleContext([
+        staleProfileLadderOrder({
+          status: OrderStatus.Filled,
+          fillProgressShares: 108.275484,
+        }),
+      ]);
+      ctx.repo.upsertLadder(focusShapeState());
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ bestBid: null, bestAsk: null, midPrice: null, minOrderSize: 1 })],
+        timestamp: NOW,
+      });
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[2]).toMatchObject({
+        lifecycle: "filled",
+        orderId: null,
+        filledSizeShares: 108.275484,
+      });
+    });
+
+    it("keeps duplicate client-order protection for rejected rows that touched exchange state", async () => {
+      const blocking = staleProfileLadderOrder({
+        status: OrderStatus.Rejected,
+        exchangeOrderId: String(createOrderId("exchange-touched-order")),
+      });
+      const ctx = staleContext([blocking], { findByClientOrderId: () => blocking });
+      ctx.repo.upsertLadder(focusShapeState());
+
+      await ctx.module.placeLadder(
+        position({ avgEntryPrice: 0.09, costBasisUsdc: 18.72, size: 176.66 }),
+        market({ bestBid: 0.08, bestAsk: 0.1, midPrice: 0.09, minOrderSize: 1 }),
+      );
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.counters).toContainEqual({
+        name: "profile_ladder_clientorderid_retry_blocked",
+        value: 1,
+        labels: '{"band":"medium_low","reason":"live_or_filled"}',
+      });
+    });
+  });
+
   describe("bounded recovery abandonment (narrowed to the churning candidate)", () => {
     // Reproduces prod token 243384: a terminal cancelled order burned the
     // deterministic base clientOrderId, so every recovery rebuild resolves to a

@@ -687,7 +687,7 @@ export class ProfileLadderModule implements RuntimeModule {
   } | null> {
     const policy = this.policy();
     if (!policy.enabled) return null;
-    const previous = this.deps.repository.getLadder(position.tokenId);
+    const previous = this.reconcileRungLiveness(this.deps.repository.getLadder(position.tokenId));
     const mode = this.resolveMode(position, market, modeOverride);
     const plan = computeProfileLadder({
       tokenId: position.tokenId,
@@ -782,6 +782,7 @@ export class ProfileLadderModule implements RuntimeModule {
     now: number,
     position: Position,
   ): Promise<LiveRungAdvanceResult> {
+    state = this.reconcileRungLiveness(state);
     const cap = this.resolveLiveRungCap(state.band);
     const pendingRungsForToken = this.pendingRungsForToken(state.tokenId);
     const pendingRungIndexes = this.pendingRungIndexesFor(state);
@@ -897,6 +898,7 @@ export class ProfileLadderModule implements RuntimeModule {
     state: LadderState,
     market: NormalizedMarket,
   ): Promise<boolean> {
+    state = this.reconcileRungLiveness(state);
     if (state.status !== "active") return false;
     if (this.deps.positionRepo == null || this.deps.orderRepo == null) return false;
     if (this.postFillTimerByToken.has(String(state.tokenId))) return false;
@@ -1050,6 +1052,7 @@ export class ProfileLadderModule implements RuntimeModule {
   }
 
   private canRetryPlannedLiveRungs(state: LadderState): boolean {
+    state = this.reconcileRungLiveness(state);
     if (state.status !== "active") return false;
     if (this.postFillTimerByToken.has(String(state.tokenId))) return false;
     if (this.isPlannedRungRetryCooldownActive(state.tokenId)) return false;
@@ -1061,6 +1064,28 @@ export class ProfileLadderModule implements RuntimeModule {
         (rung) => rung.lifecycle === "placed" || rung.lifecycle === "partially_filled",
       ).length + this.pendingRungsForToken(state.tokenId).length;
     return occupied < this.resolveLiveRungCap(state.band);
+  }
+
+  private reconcileRungLiveness(state: null): null;
+  private reconcileRungLiveness(state: LadderState): LadderState;
+  private reconcileRungLiveness(state: LadderState | null): LadderState | null;
+  private reconcileRungLiveness(state: LadderState | null): LadderState | null {
+    if (state == null || this.deps.orderRepo == null) return state;
+    const orders = this.deps.orderRepo.findByTokenId(state.tokenId);
+    const results = state.activeRungs.map((rung) => reconcileRungLiveness(rung, orders));
+    if (results.every((result) => result.changed === false)) return state;
+
+    const activeRungs = results.map((result) => result.rung);
+    const next = { ...state, activeRungs, updatedAtMs: this.now() };
+    this.deps.repository.upsertLadder(next);
+    for (const result of results) {
+      if (!result.changed) continue;
+      this.writeCounter("profile_ladder_stale_live_rung_reconciled", 1, {
+        band: state.band,
+        reason: result.reason,
+      });
+    }
+    return next;
   }
 
   private isPlannedRungRetryCooldownActive(tokenId: TokenId): boolean {
@@ -2411,6 +2436,88 @@ export function evaluatePostRefillLiveRung(input: {
 
 function isPlacedOrPartiallyFilledRung(rung: LadderRung): boolean {
   return rung.lifecycle === "placed" || rung.lifecycle === "partially_filled";
+}
+
+type RungLivenessReconciliation =
+  | { changed: false; rung: LadderRung }
+  | {
+      changed: true;
+      rung: LadderRung;
+      reason: "missing_no_fill" | "terminal_no_fill" | "terminal_with_fill" | "filled";
+    };
+
+function reconcileRungLiveness(
+  rung: LadderRung,
+  orders: readonly Order[],
+): RungLivenessReconciliation {
+  if (!isPlacedOrPartiallyFilledRung(rung) || rung.orderId == null) {
+    return { changed: false, rung };
+  }
+  const order = orders.find((candidate) => orderMatchesOrderId(candidate, rung.orderId!));
+  if (order != null && isLiveProfileLadderSellOrder(order)) {
+    return { changed: false, rung };
+  }
+
+  const filledSizeShares = resolveKnownRungFillProgress(rung, order);
+  if (order?.status === OrderStatus.Filled || filledSizeShares + 1e-9 >= rung.sizeShares) {
+    return {
+      changed: true,
+      reason: "filled",
+      rung: {
+        ...rung,
+        lifecycle: "filled",
+        orderId: null,
+        filledSizeShares:
+          order?.status === OrderStatus.Filled
+            ? roundQuantity(rung.sizeShares)
+            : roundQuantity(Math.min(rung.sizeShares, Math.max(filledSizeShares, 0))),
+      },
+    };
+  }
+  if (filledSizeShares > 0) {
+    return {
+      changed: true,
+      reason: "terminal_with_fill",
+      rung: {
+        ...rung,
+        lifecycle: "cancelled",
+        orderId: null,
+        filledSizeShares,
+      },
+    };
+  }
+  return {
+    changed: true,
+    reason: order == null ? "missing_no_fill" : "terminal_no_fill",
+    rung: {
+      ...rung,
+      lifecycle: "cancelled",
+      orderId: null,
+      filledSizeShares: 0,
+    },
+  };
+}
+
+function isLiveProfileLadderSellOrder(order: Order): boolean {
+  return (
+    order.side === "sell" &&
+    isProfileLadderOrder(order) &&
+    OPEN_ORDER_STATUSES.has(order.status) &&
+    hasUsableOrderIdentifier(order)
+  );
+}
+
+function hasUsableOrderIdentifier(order: Order): boolean {
+  return String(order.orderId).length > 0 || (order.exchangeOrderId ?? "").length > 0;
+}
+
+function resolveKnownRungFillProgress(rung: LadderRung, order: Order | undefined): number {
+  const orderFillProgress = order?.fillProgressShares;
+  const knownProgress = Math.max(
+    isPositiveFinite(rung.filledSizeShares) ? rung.filledSizeShares : 0,
+    isPositiveFinite(orderFillProgress) ? orderFillProgress : 0,
+  );
+  return roundQuantity(Math.min(rung.sizeShares, knownProgress));
 }
 
 function remainingRungShares(rung: LadderRung): number {
