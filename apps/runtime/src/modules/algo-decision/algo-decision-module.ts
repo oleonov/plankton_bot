@@ -77,6 +77,7 @@ import {
 } from "../../executable-price.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { SAME_PRICE_COOLDOWN_REASON } from "../same-price-cooldown/same-price-cooldown-module.js";
+import { TRACK_A_ADD_THROTTLE_REASON } from "../dead-market-shadow/track-a-add-throttle-shadow.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js";
 import { SlidingLatencyWindow, type LatencySnapshot } from "./decision-metrics.js";
@@ -617,6 +618,7 @@ const INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS: ReadonlySet<string> = new Set([
   "price-above-entry-ceiling",
   "sell-price-below-signal-floor",
   "taker-below-margin",
+  TRACK_A_ADD_THROTTLE_REASON,
 ]);
 
 /**

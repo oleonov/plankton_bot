@@ -6363,6 +6363,7 @@ describe("execution is regime-blind (Track B §9.3)", () => {
 describe("SignalToOrderBridge Track A add-throttle live enforcement", () => {
   const ADD_RULE = "D3";
   const BLOCKED_METRIC = "track_a_add_throttle_blocked_total";
+  const SUPPRESSED_METRIC = "track_a_add_throttle_suppressed_total";
   const BLOCKED_EVENT = "track_a_add_throttle_blocked";
 
   function makeAddSignal(overrides?: Partial<Signal>): Signal {
@@ -6393,17 +6394,24 @@ describe("SignalToOrderBridge Track A add-throttle live enforcement", () => {
     return { get: vi.fn(() => legState) } as unknown as LegStateRepository;
   }
 
-  async function run(opts: {
-    signal: Signal;
+  function legRepoFromMap(states: Map<string, LegState>): LegStateRepository {
+    return {
+      get: vi.fn((tokenId: TokenId) => states.get(String(tokenId)) ?? null),
+    } as unknown as LegStateRepository;
+  }
+
+  async function makeRunHarness(opts: {
     enforce?: boolean;
     legStateRepo?: LegStateRepository | undefined;
+    log?: import("../logger.js").Logger;
   }) {
     const bus = new InProcessEventBus();
     const metrics = { writeCounter: vi.fn() };
     const riskEvent = { insert: vi.fn() } as unknown as RiskEventRepository;
+    const log = opts.log ?? makeLogger();
     const bridge = new SignalToOrderBridge({
       bus,
-      log: makeLogger(),
+      log,
       liveLiteGuard: { getWalletMode: () => "relayer" } as never,
       runtimeMetrics: metrics as never,
       riskEventRepo: riskEvent,
@@ -6426,17 +6434,35 @@ describe("SignalToOrderBridge Track A add-throttle live enforcement", () => {
       skipped.push(p);
     });
 
-    await bus.publish("SignalApproved", {
-      signal: opts.signal,
-      market: makeMarket(),
-      approvedAt: NOW,
+    return {
+      placed,
+      skipped,
+      metrics,
+      riskEvent,
+      publishApproved: async (signal: Signal, market: NormalizedMarket = makeMarket()) => {
+        await bus.publish("SignalApproved", { signal, market, approvedAt: NOW });
+        await bus.drain();
+      },
+    };
+  }
+
+  async function run(opts: {
+    signal: Signal;
+    enforce?: boolean;
+    legStateRepo?: LegStateRepository | undefined;
+  }) {
+    const h = await makeRunHarness({
+      ...(opts.enforce !== undefined ? { enforce: opts.enforce } : {}),
+      legStateRepo: opts.legStateRepo,
     });
-    await bus.drain();
-    return { placed, skipped, metrics, riskEvent };
+    await h.publishApproved(opts.signal);
+    return h;
   }
 
   const blockedMetricCalls = (metrics: { writeCounter: ReturnType<typeof vi.fn> }) =>
     metrics.writeCounter.mock.calls.filter((c) => c[0] === BLOCKED_METRIC);
+  const suppressedMetricCalls = (metrics: { writeCounter: ReturnType<typeof vi.fn> }) =>
+    metrics.writeCounter.mock.calls.filter((c) => c[0] === SUPPRESSED_METRIC);
 
   it("blocks an approved add BUY at age>=60m with no SELL when enforce is on", async () => {
     const { placed, skipped, metrics, riskEvent } = await run({
@@ -6468,6 +6494,104 @@ describe("SignalToOrderBridge Track A add-throttle live enforcement", () => {
     expect(event.eventType).toBe(BLOCKED_EVENT);
     expect(event.payload.tokenId).toBe(String(TOKEN_ID));
     expect(event.payload.reason).toBe("age_60m_no_sell");
+  });
+
+  it("suppresses repeated same-candidate Track A block logs/risk events while still clearing pending", async () => {
+    const rootLog = makeLogger() as unknown as { child: ReturnType<typeof vi.fn> };
+    const childLog = makeLogger() as unknown as { info: ReturnType<typeof vi.fn> };
+    rootLog.child.mockReturnValue(childLog);
+    const h = await makeRunHarness({
+      enforce: true,
+      legStateRepo: legRepoReturning(makeLeg()),
+      log: rootLog as never,
+    });
+
+    await h.publishApproved(makeAddSignal({ signalId: "sig-track-a-1" }));
+    await h.publishApproved(makeAddSignal({ signalId: "sig-track-a-2" }));
+    await h.publishApproved(makeAddSignal({ signalId: "sig-track-a-3" }));
+
+    expect(h.placed).toHaveLength(0);
+    expect(h.skipped).toHaveLength(3);
+    expect(h.skipped.every((s) => s.stage === "track-a-add-throttle")).toBe(true);
+    expect(h.skipped.map((s) => s.diagnostics.suppressed)).toEqual([false, true, true]);
+    expect(blockedMetricCalls(h.metrics)).toHaveLength(1);
+    expect(suppressedMetricCalls(h.metrics)).toHaveLength(2);
+    expect(h.riskEvent.insert).toHaveBeenCalledTimes(1);
+    const blockLogs = childLog.info.mock.calls.filter(
+      (call) =>
+        call[1] ===
+        "approved add BUY blocked by Track A add-throttle (leg age>=60m, no SELL in leg)",
+    );
+    expect(blockLogs).toHaveLength(1);
+  });
+
+  it("resets Track A block suppression after a SELL appears in the leg", async () => {
+    let leg = makeLeg();
+    const h = await makeRunHarness({
+      enforce: true,
+      legStateRepo: { get: vi.fn(() => leg) } as unknown as LegStateRepository,
+    });
+
+    await h.publishApproved(makeAddSignal({ signalId: "sig-track-a-before-sell" }));
+    leg = makeLeg({ sellCount: 1, lastAction: "SELL" });
+    await h.publishApproved(makeAddSignal({ signalId: "sig-track-a-after-sell" }));
+
+    expect(h.placed).toHaveLength(1);
+    expect(h.skipped).toHaveLength(1);
+    expect(blockedMetricCalls(h.metrics)).toHaveLength(1);
+    expect(suppressedMetricCalls(h.metrics)).toHaveLength(0);
+  });
+
+  it("starts a new Track A block episode when the leg firstTradeAt changes", async () => {
+    let leg = makeLeg();
+    const h = await makeRunHarness({
+      enforce: true,
+      legStateRepo: { get: vi.fn(() => leg) } as unknown as LegStateRepository,
+    });
+
+    await h.publishApproved(makeAddSignal({ signalId: "sig-track-a-old-leg-1" }));
+    await h.publishApproved(makeAddSignal({ signalId: "sig-track-a-old-leg-2" }));
+    const nextLegStart = new Date(NOW - 120 * 60_000).toISOString();
+    leg = makeLeg({ firstTradeAt: nextLegStart, lastTradeAt: nextLegStart });
+    await h.publishApproved(makeAddSignal({ signalId: "sig-track-a-new-leg" }));
+
+    expect(h.placed).toHaveLength(0);
+    expect(blockedMetricCalls(h.metrics)).toHaveLength(2);
+    expect(suppressedMetricCalls(h.metrics)).toHaveLength(1);
+    expect(h.riskEvent.insert).toHaveBeenCalledTimes(2);
+  });
+
+  it("tracks different Track A block candidates independently by token and source", async () => {
+    const otherToken = createTokenId("tok-track-a-other");
+    const states = new Map<string, LegState>([
+      [String(TOKEN_ID), makeLeg()],
+      [String(otherToken), makeLeg({ tokenId: otherToken })],
+    ]);
+    const h = await makeRunHarness({
+      enforce: true,
+      legStateRepo: legRepoFromMap(states),
+    });
+
+    await h.publishApproved(makeAddSignal({ signalId: "sig-track-a-token-1" }));
+    await h.publishApproved(
+      makeAddSignal({
+        signalId: "sig-track-a-token-2",
+        tokenId: otherToken,
+        conditionId: "cond-2" as ConditionId,
+        decisionRuleId: "EXECUTION_PROFILE_SCALE_IN",
+      }),
+      makeMarket({ tokenId: otherToken, conditionId: "cond-2" }),
+    );
+
+    expect(h.placed).toHaveLength(0);
+    expect(blockedMetricCalls(h.metrics)).toHaveLength(2);
+    expect(suppressedMetricCalls(h.metrics)).toHaveLength(0);
+    expect(h.riskEvent.insert).toHaveBeenCalledTimes(2);
+    const labels = blockedMetricCalls(h.metrics).map((call) => JSON.parse(call[2] as string));
+    expect(labels).toEqual([
+      { reason: "age_60m_no_sell", sourceGroup: "d1_d3", decisionType: "add" },
+      { reason: "age_60m_no_sell", sourceGroup: "scale_in", decisionType: "add" },
+    ]);
   });
 
   it("allows an add BUY younger than 60m even with enforce on", async () => {

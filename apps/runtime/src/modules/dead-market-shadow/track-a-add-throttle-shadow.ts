@@ -21,6 +21,7 @@ import {
 
 /** Validated leg-age threshold (minutes). Krabs replay optimum; see header. */
 export const TRACK_A_MIN_LEG_AGE_MINUTES = 60;
+export const TRACK_A_ADD_THROTTLE_REASON = "age_60m_no_sell";
 
 export type TrackAClassification = "allow" | "throttle_candidate" | "unknown";
 
@@ -30,7 +31,7 @@ export type TrackAReason =
   | "sell_seen"
   | "missing_first_buy_ts"
   | "missing_sell_state"
-  | "age_60m_no_sell";
+  | typeof TRACK_A_ADD_THROTTLE_REASON;
 
 export interface TrackAAddThrottleInput {
   /** entry/add/unknown derived from signal.reason (see deriveDecisionType). */
@@ -78,7 +79,7 @@ export function evaluateTrackAAddThrottle(input: TrackAAddThrottleInput): TrackA
   }
   if (input.hasSellInLeg) return result("allow", "sell_seen", legAgeMinutes);
 
-  return result("throttle_candidate", "age_60m_no_sell", legAgeMinutes);
+  return result("throttle_candidate", TRACK_A_ADD_THROTTLE_REASON, legAgeMinutes);
 }
 
 /** Signal fields the shared evaluator needs (a structural subset of Signal). */

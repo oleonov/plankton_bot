@@ -7578,6 +7578,7 @@ describe("conversionSkipReEvalDelayMs", () => {
     expect(conversionSkipReEvalDelayMs(["price-above-entry-ceiling"])).toBe(250);
     expect(conversionSkipReEvalDelayMs(["sell-price-below-signal-floor"])).toBe(250);
     expect(conversionSkipReEvalDelayMs(["taker-below-margin"])).toBe(250);
+    expect(conversionSkipReEvalDelayMs(["age_60m_no_sell"])).toBe(250);
     expect(conversionSkipReEvalDelayMs(["sell-order-acceptable-price-already-open"])).toBe(250);
     expect(conversionSkipReEvalDelayMs(["no_bid", "one-sided-book"])).toBe(250);
     expect(isInputsUnchangedConversionSkip(["spread-above-cap"])).toBe(true);

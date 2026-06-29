@@ -124,6 +124,15 @@ const DEFAULT_TRACK_R_RUNTIME_POLICY: TrackRHonestPricingPolicy = {
   partialExitMinShares: 1,
   partialExitMaxPerHour: 3,
 };
+const TRACK_A_BLOCKED_METRIC = "track_a_add_throttle_blocked_total";
+const TRACK_A_SUPPRESSED_METRIC = "track_a_add_throttle_suppressed_total";
+const TRACK_A_BLOCK_EVENT_TYPE = "track_a_add_throttle_blocked";
+const TRACK_A_BLOCK_EPISODE_COOLDOWN_MS = 60 * 60_000;
+
+interface TrackABlockEpisode {
+  firstEmittedAt: number;
+  suppressedCount: number;
+}
 
 // ADR-013 defaults exposed for callers that don't thread the policy provider
 // (tests, scenario runner). Runtime always reads the live policy via
@@ -245,6 +254,7 @@ export class SignalToOrderBridge {
   // is acceptable for a taker partial (a restart re-opens the budget — bounded
   // by the same cap thereafter, never amplified within a window).
   private readonly partialHistoryByToken = new Map<string, number[]>();
+  private readonly trackABlockEpisodes = new Map<string, TrackABlockEpisode>();
 
   constructor(private readonly deps: SignalToOrderBridgeDeps) {
     this.log = deps.log.child({ component: "signal-to-order" });
@@ -354,12 +364,27 @@ export class SignalToOrderBridge {
   ): Promise<boolean> {
     const enforce = (policy.trackAAddThrottle ?? DEFAULT_EXECUTION_POLICY.trackAAddThrottle)
       .enforce;
-    if (!enforce) return false;
+    if (!enforce) {
+      this.trackABlockEpisodes.clear();
+      return false;
+    }
 
-    const evaluation = evaluateSignalTrackAAddThrottle(signal, this.deps.legStateRepo, this.now());
-    if (evaluation.result.classification !== "throttle_candidate") return false;
+    const nowMs = this.now();
+    const evaluation = evaluateSignalTrackAAddThrottle(signal, this.deps.legStateRepo, nowMs);
+    if (evaluation.result.classification !== "throttle_candidate") {
+      this.clearTrackABlockEpisodesForToken(signal.tokenId);
+      return false;
+    }
 
     const { decisionType, sourceGroup, result } = evaluation;
+    const episodeKey = this.trackABlockEpisodeKey(signal, evaluation);
+    const suppressed = this.trackABlockEpisodeSuppressed(episodeKey, nowMs);
+    if (suppressed) {
+      this.recordTrackABlockSuppressedMetric(result.reason, sourceGroup, decisionType);
+      await this.publishTrackAConversionSkipped(signal, evaluation, true);
+      return true;
+    }
+
     this.recordTrackABlockMetric(result.reason, sourceGroup, decisionType);
     this.recordTrackABlockRiskEvent(signal, evaluation);
     this.log.info(
@@ -373,14 +398,70 @@ export class SignalToOrderBridge {
       },
       "approved add BUY blocked by Track A add-throttle (leg age>=60m, no SELL in leg)",
     );
-    await this.publishConversionSkipped(signal, "track-a-add-throttle", [result.reason], {
-      sourceGroup,
-      decisionType,
-      legAgeMinutes: result.legAgeMinutes,
-      firstBuyTs: evaluation.firstBuyTs,
-      hasSellInLeg: evaluation.hasSellInLeg,
-    });
+    await this.publishTrackAConversionSkipped(signal, evaluation, false);
     return true;
+  }
+
+  private trackABlockEpisodeKey(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    evaluation: TrackASignalEvaluation,
+  ): string {
+    return [
+      String(signal.tokenId),
+      String(signal.conditionId),
+      evaluation.firstBuyTs ?? "unknown_first_buy",
+      evaluation.sourceGroup,
+      evaluation.decisionType,
+      evaluation.result.reason,
+      signal.decisionRuleId ?? "unknown_rule",
+      signal.reason ?? "unknown_reason",
+    ].join("|");
+  }
+
+  private trackABlockEpisodeSuppressed(episodeKey: string, nowMs: number): boolean {
+    this.pruneTrackABlockEpisodes(nowMs);
+    const existing = this.trackABlockEpisodes.get(episodeKey);
+    if (!existing) {
+      this.trackABlockEpisodes.set(episodeKey, { firstEmittedAt: nowMs, suppressedCount: 0 });
+      return false;
+    }
+    existing.suppressedCount += 1;
+    return true;
+  }
+
+  private pruneTrackABlockEpisodes(nowMs: number): void {
+    for (const [key, episode] of this.trackABlockEpisodes) {
+      if (nowMs - episode.firstEmittedAt >= TRACK_A_BLOCK_EPISODE_COOLDOWN_MS) {
+        this.trackABlockEpisodes.delete(key);
+      }
+    }
+  }
+
+  private clearTrackABlockEpisodesForToken(tokenId: TokenId): void {
+    const prefix = `${String(tokenId)}|`;
+    for (const key of this.trackABlockEpisodes.keys()) {
+      if (key.startsWith(prefix)) this.trackABlockEpisodes.delete(key);
+    }
+  }
+
+  private async publishTrackAConversionSkipped(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    evaluation: TrackASignalEvaluation,
+    suppressed: boolean,
+  ): Promise<void> {
+    await this.publishConversionSkipped(
+      signal,
+      "track-a-add-throttle",
+      [evaluation.result.reason],
+      {
+        sourceGroup: evaluation.sourceGroup,
+        decisionType: evaluation.decisionType,
+        legAgeMinutes: evaluation.result.legAgeMinutes,
+        firstBuyTs: evaluation.firstBuyTs,
+        hasSellInLeg: evaluation.hasSellInLeg,
+        suppressed,
+      },
+    );
   }
 
   // Bounded labels only — the token is intentionally NOT a label (it would be
@@ -388,12 +469,28 @@ export class SignalToOrderBridge {
   private recordTrackABlockMetric(reason: string, sourceGroup: string, decisionType: string): void {
     try {
       this.deps.runtimeMetrics?.writeCounter(
-        "track_a_add_throttle_blocked_total",
+        TRACK_A_BLOCKED_METRIC,
         1,
         JSON.stringify({ reason, sourceGroup, decisionType }),
       );
     } catch (err) {
       this.log.debug({ err }, "failed to record Track A add-throttle block metric");
+    }
+  }
+
+  private recordTrackABlockSuppressedMetric(
+    reason: string,
+    sourceGroup: string,
+    decisionType: string,
+  ): void {
+    try {
+      this.deps.runtimeMetrics?.writeCounter(
+        TRACK_A_SUPPRESSED_METRIC,
+        1,
+        JSON.stringify({ reason, sourceGroup, decisionType }),
+      );
+    } catch (err) {
+      this.log.debug({ err }, "failed to record Track A add-throttle suppressed metric");
     }
   }
 
@@ -405,7 +502,7 @@ export class SignalToOrderBridge {
     if (!repo) return;
     try {
       repo.insert({
-        eventType: "track_a_add_throttle_blocked",
+        eventType: TRACK_A_BLOCK_EVENT_TYPE,
         payload: {
           tokenId: String(signal.tokenId),
           conditionId: String(signal.conditionId),
