@@ -95,7 +95,14 @@ export class DeadMarketShadowModule implements RuntimeModule {
   }
 
   async start(): Promise<void> {
-    this.unsubs = [this.deps.bus.subscribe("SignalProduced", (e) => this.onSignalProduced(e))];
+    // Dead-market score reads the raw SignalProduced stream (every candidate the
+    // strategy emits). Track A reads SignalApproved only (post-RiskGate), so it
+    // counts approved adds once instead of re-counting the per-tick re-emits that
+    // SignalProduced carries for held positions.
+    this.unsubs = [
+      this.deps.bus.subscribe("SignalProduced", (e) => this.onSignalProduced(e)),
+      this.deps.bus.subscribe("SignalApproved", (e) => this.onSignalApproved(e)),
+    ];
     this.log.info(
       { riskEventMinScore: RISK_EVENT_MIN_SCORE, riskEventCooldownMs: this.cooldownMs },
       "dead-market shadow scoring started (observe-only; never affects live trading)",
@@ -138,6 +145,20 @@ export class DeadMarketShadowModule implements RuntimeModule {
 
     this.emitMetrics(result, decisionType, sourceGroup, market);
     this.maybeRecordRiskEvent(result, decisionType, sourceGroup, signal, market, price);
+  }
+
+  // Track A runs on the approved (post-RiskGate) signal, not the raw produced
+  // stream. The derivation mirrors onSignalProduced: decisionType follows
+  // signal.reason, sourceGroup follows signal.decisionRuleId, and price/market
+  // fields are taken from the approved snapshot as available.
+  private async onSignalApproved(e: RuntimeEventMap["SignalApproved"]): Promise<void> {
+    const { signal, market } = e;
+    if (signal.side !== "buy") return;
+
+    const sourceGroup = deriveSourceGroup(signal.decisionRuleId);
+    const decisionType = deriveDecisionType(signal.reason);
+    const price = Number.isFinite(signal.suggestedPrice) ? signal.suggestedPrice : null;
+
     this.evaluateTrackA(decisionType, sourceGroup, signal, market, price);
   }
 
@@ -164,7 +185,7 @@ export class DeadMarketShadowModule implements RuntimeModule {
       now: this.now(),
     });
 
-    this.emitTrackAMetrics(result, legState != null);
+    this.emitTrackAMetrics(result, legState != null, decisionType, sourceGroup);
     if (result.classification === "throttle_candidate") {
       this.maybeRecordTrackARiskEvent(
         result,
@@ -178,16 +199,30 @@ export class DeadMarketShadowModule implements RuntimeModule {
     }
   }
 
-  private emitTrackAMetrics(result: TrackAAddThrottleResult, legStatePresent: boolean): void {
+  private emitTrackAMetrics(
+    result: TrackAAddThrottleResult,
+    legStatePresent: boolean,
+    decisionType: DeadMarketDecisionType,
+    sourceGroup: DeadMarketSourceGroup,
+  ): void {
     const metrics = this.deps.metrics;
     if (!metrics) return;
     metrics.writeCounter(
       TRACK_A_EVALUATED_METRIC,
       1,
-      JSON.stringify({ classification: result.classification, reason: result.reason }),
+      JSON.stringify({
+        classification: result.classification,
+        reason: result.reason,
+        decisionType,
+        sourceGroup,
+      }),
     );
     if (result.classification === "throttle_candidate") {
-      metrics.writeCounter(TRACK_A_CANDIDATE_METRIC, 1, JSON.stringify({ reason: result.reason }));
+      metrics.writeCounter(
+        TRACK_A_CANDIDATE_METRIC,
+        1,
+        JSON.stringify({ reason: result.reason, decisionType, sourceGroup }),
+      );
     }
     if (result.classification === "unknown") {
       metrics.writeCounter(
@@ -231,6 +266,7 @@ export class DeadMarketShadowModule implements RuntimeModule {
         legAgeMinutes: result.legAgeMinutes,
         hasSellInLeg,
         price,
+        gammaLiquidity: market.liquidity ?? null,
       },
     });
   }
