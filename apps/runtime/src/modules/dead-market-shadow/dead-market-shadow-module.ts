@@ -19,7 +19,7 @@ import {
   type DeadMarketSourceGroup,
 } from "./dead-market-score.js";
 import {
-  evaluateTrackAAddThrottle,
+  evaluateSignalTrackAAddThrottle,
   type TrackAAddThrottleResult,
   type TrackAReason,
 } from "./track-a-add-throttle-shadow.js";
@@ -148,53 +148,33 @@ export class DeadMarketShadowModule implements RuntimeModule {
   }
 
   // Track A runs on the approved (post-RiskGate) signal, not the raw produced
-  // stream. The derivation mirrors onSignalProduced: decisionType follows
-  // signal.reason, sourceGroup follows signal.decisionRuleId, and price/market
-  // fields are taken from the approved snapshot as available.
+  // stream. It shadow-flags an add/scale-in BUY whose leg is >= 60 minutes old
+  // and has seen no SELL yet. Pure observation — no order is placed, resized, or
+  // cancelled. The classification comes from the shared evaluator so this shadow
+  // telemetry and the live bridge enforcement stay byte-for-byte identical
+  // (same fail-open semantics; leg read only for adds).
   private async onSignalApproved(e: RuntimeEventMap["SignalApproved"]): Promise<void> {
     const { signal, market } = e;
     if (signal.side !== "buy") return;
 
-    const sourceGroup = deriveSourceGroup(signal.decisionRuleId);
-    const decisionType = deriveDecisionType(signal.reason);
     const price = Number.isFinite(signal.suggestedPrice) ? signal.suggestedPrice : null;
+    const evaluation = evaluateSignalTrackAAddThrottle(signal, this.deps.legStateRepo, this.now());
 
-    this.evaluateTrackA(decisionType, sourceGroup, signal, market, price);
-  }
-
-  // Track A: shadow-flag an add/scale-in BUY whose leg is >= 60 minutes old and
-  // has seen no SELL yet. Pure observation — no order is placed, resized, or
-  // cancelled. The leg is read only for adds; entries/unknowns short-circuit to
-  // not_add without a leg lookup (and without touching legStateRepo).
-  private evaluateTrackA(
-    decisionType: DeadMarketDecisionType,
-    sourceGroup: DeadMarketSourceGroup,
-    signal: Signal,
-    market: NormalizedMarket,
-    price: number | null,
-  ): void {
-    const legState =
-      decisionType === "add" ? (this.deps.legStateRepo?.get(signal.tokenId) ?? null) : null;
-    const firstBuyTs = legState ? parseLegStartMs(legState.firstTradeAt) : null;
-    const hasSellInLeg = legState ? (legState.sellCount ?? 0) > 0 : null;
-
-    const result = evaluateTrackAAddThrottle({
-      decisionType,
-      firstBuyTs,
-      hasSellInLeg,
-      now: this.now(),
-    });
-
-    this.emitTrackAMetrics(result, legState != null, decisionType, sourceGroup);
-    if (result.classification === "throttle_candidate") {
+    this.emitTrackAMetrics(
+      evaluation.result,
+      evaluation.legStatePresent,
+      evaluation.decisionType,
+      evaluation.sourceGroup,
+    );
+    if (evaluation.result.classification === "throttle_candidate") {
       this.maybeRecordTrackARiskEvent(
-        result,
-        sourceGroup,
+        evaluation.result,
+        evaluation.sourceGroup,
         signal,
         market,
         price,
-        firstBuyTs,
-        hasSellInLeg,
+        evaluation.firstBuyTs,
+        evaluation.hasSellInLeg,
       );
     }
   }
@@ -376,11 +356,6 @@ function classificationLabel(classification: DeadMarketClassification): string {
 
 function scoreBucketLabel(score: number): string {
   return Number.isInteger(score) && score >= 0 && score <= 6 ? String(score) : "unknown";
-}
-
-function parseLegStartMs(firstTradeAt: string): number | null {
-  const ts = Date.parse(firstTradeAt);
-  return Number.isFinite(ts) ? ts : null;
 }
 
 // Bounded field label for the missing-state counter: distinguish "no leg row at

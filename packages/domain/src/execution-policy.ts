@@ -54,6 +54,7 @@ import type {
   SellCapacityPolicy,
   SellLoopGuardPolicy,
   TakerAtProfitPolicy,
+  TrackAAddThrottlePolicy,
   TrackRHonestPricingPolicy,
   TrackS3MarginAwareSpreadPolicy,
   TrackS3SpreadTierPolicy,
@@ -561,6 +562,12 @@ export const DEFAULT_DEPOSIT_ACTIVATION_POLICY: DepositActivationPolicy = {
   minAmountUsdcCents: 100,
 };
 
+// Track A live enforcement is OFF by default: the add-throttle stays shadow-only
+// until an operator opts in by flipping enforce:true in control.db (hot-reloaded).
+export const DEFAULT_TRACK_A_ADD_THROTTLE_POLICY: TrackAAddThrottlePolicy = {
+  enforce: false,
+};
+
 export const DEFAULT_LOSS_EXIT_POLICY: D9LossExitPolicy = {
   enabled: false,
   // minPublicTradeCount24h: 41 derived from R96 Q3 best 2D rule
@@ -734,6 +741,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   lossExit: DEFAULT_LOSS_EXIT_POLICY,
   preResolutionExit: DEFAULT_PRE_RESOLUTION_EXIT_POLICY,
   depositActivation: DEFAULT_DEPOSIT_ACTIVATION_POLICY,
+  trackAAddThrottle: DEFAULT_TRACK_A_ADD_THROTTLE_POLICY,
 };
 
 const DEAD_SIDE_MODES = ["off", "observe", "enforce"] as const;
@@ -1036,6 +1044,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const lossExit = parseLossExit(obj.lossExit, issues);
   const preResolutionExit = parsePreResolutionExit(obj.preResolutionExit, issues);
   const depositActivation = parseDepositActivation(obj.depositActivation, issues);
+  const trackAAddThrottle = parseTrackAAddThrottle(obj.trackAAddThrottle, issues);
 
   return {
     policy: {
@@ -1084,6 +1093,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       lossExit,
       preResolutionExit,
       depositActivation,
+      trackAAddThrottle,
     },
     issues,
   };
@@ -4643,6 +4653,22 @@ function parseTelemetry(raw: unknown, issues: string[]): ExecutionPolicyTelemetr
       DEFAULT_TELEMETRY.pricingShadow,
       issues,
       "telemetry.pricingShadow",
+    ),
+  };
+}
+
+function parseTrackAAddThrottle(raw: unknown, issues: string[]): TrackAAddThrottlePolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("trackAAddThrottle must be an object");
+    return DEFAULT_TRACK_A_ADD_THROTTLE_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enforce: booleanOr(
+      obj.enforce,
+      DEFAULT_TRACK_A_ADD_THROTTLE_POLICY.enforce,
+      issues,
+      "trackAAddThrottle.enforce",
     ),
   };
 }

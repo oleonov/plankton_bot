@@ -128,7 +128,12 @@ export interface RuntimeEventMap {
 
   SignalConversionSkipped: {
     readonly signal: Signal;
-    readonly stage: "market-cache-miss" | "marketability" | "execution-terms" | "hard-liveness";
+    readonly stage:
+      | "market-cache-miss"
+      | "marketability"
+      | "execution-terms"
+      | "hard-liveness"
+      | "track-a-add-throttle";
     readonly reasons: readonly string[];
     readonly diagnostics: Readonly<Record<string, unknown>>;
     readonly skippedAt: number;

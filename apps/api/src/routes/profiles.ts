@@ -576,6 +576,12 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
         ...current.telemetry,
         ...((patch.telemetry as Partial<ExecutionPolicy["telemetry"]> | undefined) ?? {}),
       },
+      trackAAddThrottle: {
+        ...(current.trackAAddThrottle ?? DEFAULT_EXECUTION_POLICY.trackAAddThrottle),
+        ...((patch.trackAAddThrottle as
+          | Partial<ExecutionPolicy["trackAAddThrottle"]>
+          | undefined) ?? {}),
+      },
       profitTarget: {
         ...(current.profitTarget ?? DEFAULT_PROFIT_TARGET_POLICY),
         ...((patch.profitTarget as Partial<ExecutionPolicy["profitTarget"]> | undefined) ?? {}),

@@ -1541,6 +1541,9 @@ async function main(): Promise<void> {
     profileId: activeProfile as import("@krabs/domain").ProfileId,
     runtimeMetrics,
     riskEventRepo: repos.riskEvent,
+    // Track A live add-throttle (Krabs-specific). Authoritative leg source for the
+    // shared evaluator; gated by policy.trackAAddThrottle.enforce (default off).
+    legStateRepo: repos.legState,
     signalPathTelemetry,
     resolutionTracker: marketResolutionTracker,
     effectiveResolution,

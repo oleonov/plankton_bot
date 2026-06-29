@@ -430,3 +430,29 @@ describe("execution profile abandonment policy", () => {
     );
   });
 });
+
+describe("track A add-throttle live enforcement policy", () => {
+  it("defaults trackAAddThrottle.enforce to false (shadow-only)", () => {
+    const policy = parseExecutionPolicyJson(null).policy;
+
+    expect(policy.trackAAddThrottle).toEqual({ enforce: false });
+  });
+
+  it("parses trackAAddThrottle.enforce override", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({ trackAAddThrottle: { enforce: true } }),
+    );
+
+    expect(parsed.issues).toEqual([]);
+    expect(parsed.policy.trackAAddThrottle).toEqual({ enforce: true });
+  });
+
+  it("falls back invalid trackAAddThrottle.enforce to default with an issue", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({ trackAAddThrottle: { enforce: "yes" } }),
+    );
+
+    expect(parsed.issues).toContain("trackAAddThrottle.enforce must be boolean");
+    expect(parsed.policy.trackAAddThrottle).toEqual({ enforce: false });
+  });
+});

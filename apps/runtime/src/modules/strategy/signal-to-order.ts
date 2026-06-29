@@ -29,6 +29,7 @@ import type {
   PlaceOrderCommand,
   TokenId,
   Order,
+  LegStateRepository,
   RiskEventRepository,
   S1OwnershipReader,
   SellShadowAvgEntrySource,
@@ -93,6 +94,10 @@ import {
   isExecutableOrderSize,
   resolveEffectiveMinOrderSize,
 } from "../../min-order-size.js";
+import {
+  evaluateSignalTrackAAddThrottle,
+  type TrackASignalEvaluation,
+} from "../dead-market-shadow/track-a-add-throttle-shadow.js";
 import type { SignalPathTelemetry } from "./signal-path-telemetry.js";
 import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
 import type { PositionConcentrationService } from "../../position-concentration-service.js";
@@ -173,6 +178,12 @@ export interface SignalToOrderBridgeDeps {
   runtimeMetrics?: RuntimeMetricWriter | undefined;
   /** Per-event forensic audit for successful taker-at-profit activations. */
   riskEventRepo?: RiskEventRepository | undefined;
+  /**
+   * Track A live enforcement leg source. Read only for add/scale-in BUYs when
+   * `policy.trackAAddThrottle.enforce` is on, to classify leg age + in-leg SELL
+   * state. A null/absent repo fails open to "unknown" (never blocks).
+   */
+  legStateRepo?: LegStateRepository | undefined;
   /** Track R honest pricing fee source. Optional so disabled/default deployments keep old behavior. */
   trackRFeeProvider?: TrackRTakerFeeProvider | undefined;
   /**
@@ -330,6 +341,92 @@ export class SignalToOrderBridge {
     return null;
   }
 
+  // Track A live enforcement: the live arm of the Krabs-specific add-throttle
+  // shadow (DeadMarketShadowModule). Shares the SAME evaluator so the live block
+  // and the shadow telemetry classify identically (fail-open semantics: any
+  // non-throttle_candidate verdict — incl. unknown/missing leg — allows). Opt-in
+  // only: returns false immediately unless policy.trackAAddThrottle.enforce is on,
+  // so the kill switch is a single hot-reloadable boolean with no restart.
+  // Returns true when the BUY was blocked (caller must `return` without placing).
+  private async enforceTrackAAddThrottle(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    policy: ExecutionPolicy,
+  ): Promise<boolean> {
+    const enforce = (policy.trackAAddThrottle ?? DEFAULT_EXECUTION_POLICY.trackAAddThrottle)
+      .enforce;
+    if (!enforce) return false;
+
+    const evaluation = evaluateSignalTrackAAddThrottle(signal, this.deps.legStateRepo, this.now());
+    if (evaluation.result.classification !== "throttle_candidate") return false;
+
+    const { decisionType, sourceGroup, result } = evaluation;
+    this.recordTrackABlockMetric(result.reason, sourceGroup, decisionType);
+    this.recordTrackABlockRiskEvent(signal, evaluation);
+    this.log.info(
+      {
+        signalId: signal.signalId,
+        tokenId: String(signal.tokenId),
+        reason: result.reason,
+        sourceGroup,
+        decisionType,
+        legAgeMinutes: result.legAgeMinutes,
+      },
+      "approved add BUY blocked by Track A add-throttle (leg age>=60m, no SELL in leg)",
+    );
+    await this.publishConversionSkipped(signal, "track-a-add-throttle", [result.reason], {
+      sourceGroup,
+      decisionType,
+      legAgeMinutes: result.legAgeMinutes,
+      firstBuyTs: evaluation.firstBuyTs,
+      hasSellInLeg: evaluation.hasSellInLeg,
+    });
+    return true;
+  }
+
+  // Bounded labels only — the token is intentionally NOT a label (it would be
+  // unbounded cardinality); it lives in the risk-event payload instead.
+  private recordTrackABlockMetric(reason: string, sourceGroup: string, decisionType: string): void {
+    try {
+      this.deps.runtimeMetrics?.writeCounter(
+        "track_a_add_throttle_blocked_total",
+        1,
+        JSON.stringify({ reason, sourceGroup, decisionType }),
+      );
+    } catch (err) {
+      this.log.debug({ err }, "failed to record Track A add-throttle block metric");
+    }
+  }
+
+  private recordTrackABlockRiskEvent(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    evaluation: TrackASignalEvaluation,
+  ): void {
+    const repo = this.deps.riskEventRepo;
+    if (!repo) return;
+    try {
+      repo.insert({
+        eventType: "track_a_add_throttle_blocked",
+        payload: {
+          tokenId: String(signal.tokenId),
+          conditionId: String(signal.conditionId),
+          decisionRuleId: signal.decisionRuleId,
+          signalReason: signal.reason,
+          sourceGroup: evaluation.sourceGroup,
+          decisionType: evaluation.decisionType,
+          reason: evaluation.result.reason,
+          legAgeMinutes: evaluation.result.legAgeMinutes,
+          firstBuyTs: evaluation.firstBuyTs,
+          hasSellInLeg: evaluation.hasSellInLeg,
+        },
+      });
+    } catch (err) {
+      this.log.warn(
+        { err, tokenId: String(signal.tokenId) },
+        "failed to record Track A add-throttle block risk event",
+      );
+    }
+  }
+
   subscribe(): void {
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
@@ -440,6 +537,10 @@ export class SignalToOrderBridge {
           });
           return;
         }
+
+        // Track A live enforcement (Krabs-specific add-throttle). Buy-only; SELLs
+        // and exits never reach this gate. Blocks BEFORE PlaceOrderRequested.
+        if (await this.enforceTrackAAddThrottle(signal, policy)) return;
       }
 
       // Hard-liveness on the embedded snapshot. Same function, same semantics as

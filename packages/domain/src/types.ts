@@ -1867,12 +1867,23 @@ export interface ExecutionPolicy {
   /** Sub-Track Q.D — pre-resolution forced exit on cheap longshots (shadow). */
   preResolutionExit: QdPreResolutionExitPolicy;
   depositActivation: DepositActivationPolicy;
+  /** Track A — Krabs-specific add/scale-in BUY throttle (leg_age>=60m AND no SELL in leg). */
+  trackAAddThrottle: TrackAAddThrottlePolicy;
 }
 
 export interface DepositActivationPolicy {
   enabled: boolean;
   /** Minimum USDC-equivalent balance in cents (e.g. 100 = $1.00) to trigger activation. */
   minAmountUsdcCents: number;
+}
+
+export interface TrackAAddThrottlePolicy {
+  /**
+   * When true, an approved add/scale-in BUY that matches the Track A throttle
+   * (leg age >= 60m and no SELL yet in the current leg) is blocked before
+   * PlaceOrderRequested. Default false keeps Track A shadow-only.
+   */
+  enforce: boolean;
 }
 
 export interface ProfileSummary {

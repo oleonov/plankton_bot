@@ -11,7 +11,13 @@
 // Fail-open: if the leg start (firstBuyTs) or the in-leg SELL state is unknown,
 // the result is `unknown` with a typed reason — never a throttle_candidate.
 
-import type { DeadMarketDecisionType } from "./dead-market-score.js";
+import type { LegStateRepository, TokenId } from "@krabs/domain";
+import {
+  deriveDecisionType,
+  deriveSourceGroup,
+  type DeadMarketDecisionType,
+  type DeadMarketSourceGroup,
+} from "./dead-market-score.js";
 
 /** Validated leg-age threshold (minutes). Krabs replay optimum; see header. */
 export const TRACK_A_MIN_LEG_AGE_MINUTES = 60;
@@ -73,4 +79,56 @@ export function evaluateTrackAAddThrottle(input: TrackAAddThrottleInput): TrackA
   if (input.hasSellInLeg) return result("allow", "sell_seen", legAgeMinutes);
 
   return result("throttle_candidate", "age_60m_no_sell", legAgeMinutes);
+}
+
+/** Signal fields the shared evaluator needs (a structural subset of Signal). */
+export interface TrackASignalInput {
+  reason: string | null | undefined;
+  decisionRuleId: string | null | undefined;
+  tokenId: TokenId;
+}
+
+export interface TrackASignalEvaluation {
+  decisionType: DeadMarketDecisionType;
+  sourceGroup: DeadMarketSourceGroup;
+  result: TrackAAddThrottleResult;
+  /** Epoch ms of the leg's first BUY (adds only); null when unknown. */
+  firstBuyTs: number | null;
+  /** In-leg SELL presence (adds only); null when unknown. */
+  hasSellInLeg: boolean | null;
+  /** Whether a leg row was found (adds only; always false for entries). */
+  legStatePresent: boolean;
+}
+
+// Single source of truth shared by the shadow module and the live bridge so the
+// shadow telemetry and any live enforcement classify identically (same
+// fail-open semantics). The leg repo is queried ONLY for adds; entries/unknowns
+// short-circuit without a lookup. A null/absent repo or unparseable leg start
+// fails open to `unknown` (never a throttle_candidate).
+export function evaluateSignalTrackAAddThrottle(
+  signal: TrackASignalInput,
+  legStateRepo: LegStateRepository | undefined,
+  now: number,
+): TrackASignalEvaluation {
+  const decisionType = deriveDecisionType(signal.reason);
+  const sourceGroup = deriveSourceGroup(signal.decisionRuleId);
+  const legState = decisionType === "add" ? (legStateRepo?.get(signal.tokenId) ?? null) : null;
+  const firstBuyTs = legState ? parseLegStartMs(legState.firstTradeAt) : null;
+  const hasSellInLeg = legState ? (legState.sellCount ?? 0) > 0 : null;
+
+  const result = evaluateTrackAAddThrottle({ decisionType, firstBuyTs, hasSellInLeg, now });
+
+  return {
+    decisionType,
+    sourceGroup,
+    result,
+    firstBuyTs,
+    hasSellInLeg,
+    legStatePresent: legState != null,
+  };
+}
+
+function parseLegStartMs(firstTradeAt: string): number | null {
+  const ts = Date.parse(firstTradeAt);
+  return Number.isFinite(ts) ? ts : null;
 }
