@@ -140,6 +140,8 @@ function makeHarness(opts: {
     marketRepo: {
       findByConditionId: vi.fn(() => [{ tokenId: createTokenId(TOKEN) }]),
     } as any,
+    marketResolutionRepo: { findByConditionId: vi.fn(() => null) } as any,
+    settler: { settle: vi.fn(() => []) } as any,
     orderRepo: { findOpen: vi.fn(() => []) } as any,
     redeemLogRepo: redeemLogRepo as any,
     redeemQuarantineRepo: makeRedeemQuarantineRepo() as any,

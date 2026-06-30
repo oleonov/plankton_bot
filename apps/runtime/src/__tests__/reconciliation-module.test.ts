@@ -342,6 +342,8 @@ describe("ReconciliationModule", () => {
         positionRepo: { findByTokenId: vi.fn(), save: vi.fn() } as any,
         lotRepo: { settleAll: vi.fn() } as any,
         marketRepo: { findByConditionId: vi.fn(() => []) } as any,
+        marketResolutionRepo: { findByConditionId: vi.fn(() => null) } as any,
+        settler: { settle: vi.fn(() => []) } as any,
         orderRepo: { findOpen: vi.fn(() => []) } as any,
         redeemLogRepo: {
           insert: vi.fn(),

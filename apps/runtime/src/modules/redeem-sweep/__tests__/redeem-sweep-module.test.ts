@@ -1,7 +1,29 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InProcessEventBus } from "@krabs/event-bus";
-import { createConditionId, createPositionId, createTokenId, type Position } from "@krabs/domain";
+import {
+  createBotRunId,
+  createConditionId,
+  createFillId,
+  createLotId,
+  createOrderId,
+  createPositionId,
+  createTokenId,
+  type ClientOrderId,
+  type MarketResolution,
+  type Position,
+} from "@krabs/domain";
+import {
+  bootstrapDatabase,
+  SqliteFillRepository,
+  SqliteInventoryLotRepository,
+  SqliteMarketRepository,
+  SqliteMarketResolutionRepository,
+  SqliteOrderRepository,
+  SqlitePositionRepository,
+} from "@krabs/db";
 import { RedeemSweepModule } from "../redeem-sweep-module.js";
+import { PositionSettler } from "../../resolution/position-settler.js";
+import { makeMockSettler } from "./test-settler.js";
 import { DEFAULT_EXECUTION_POLICY } from "../../../execution-policy.js";
 import { SettlementInfraBreaker } from "../../settlement-infra-breaker.js";
 
@@ -173,6 +195,16 @@ function makeRedeemQuarantineRepo(
   };
 }
 
+const DEFAULT_RESOLUTION: MarketResolution = {
+  conditionId: CONDITION,
+  resolution: "Yes",
+  resolvedAt: new Date(NOW).toISOString(),
+  detectedAt: new Date(NOW).toISOString(),
+  source: "gamma-api",
+  rawResponse: null,
+  status: "detected",
+};
+
 function makeHarness(
   opts: {
     positions?: any[];
@@ -186,17 +218,26 @@ function makeHarness(
     runtimeControl?: { isPaused: () => boolean };
     quarantineStates?: Parameters<typeof makeRedeemQuarantineRepo>[0];
     settlementInfraBreaker?: SettlementInfraBreaker;
+    positionRepo?: any;
+    lotRepo?: any;
+    marketRepo?: any;
+    marketResolutionRepo?: any;
+    settler?: any;
+    now?: () => number;
   } = {},
 ) {
   const bus = new InProcessEventBus();
   const log = logger();
   const redeemLogRows: any[] = opts.redeemLogRows ?? [];
+  const nowFn = opts.now ?? (() => Date.now());
   const position = localPosition();
-  const positionRepo = {
-    findByTokenId: vi.fn((tokenId) => (String(tokenId) === TOKEN ? position : null)),
-    save: vi.fn(),
-  };
-  const lotRepo = { settleAll: vi.fn() };
+  const positionRepo =
+    opts.positionRepo ??
+    ({
+      findByTokenId: vi.fn((tokenId) => (String(tokenId) === TOKEN ? position : null)),
+      save: vi.fn(),
+    } as any);
+  const lotRepo = opts.lotRepo ?? ({ settleAll: vi.fn() } as any);
   const gateway = {
     redeemPositions: vi.fn(
       opts.redeemImpl ??
@@ -216,13 +257,9 @@ function makeHarness(
   const orderRepo = { findOpen: vi.fn(() => opts.openOrders ?? []) };
   const quarantine = makeRedeemQuarantineRepo(opts.quarantineStates);
   let uniqueViolationOnFirstAttemptingInsert = opts.uniqueViolationOnFirstAttemptingInsert ?? false;
-  const module = new RedeemSweepModule({
-    bus,
-    gateway: gateway as any,
-    positionReader: reader,
-    positionRepo: positionRepo as any,
-    lotRepo: lotRepo as any,
-    marketRepo: {
+  const marketRepo =
+    opts.marketRepo ??
+    ({
       findByConditionId: vi.fn(
         () =>
           opts.marketRows ?? [
@@ -230,7 +267,19 @@ function makeHarness(
             { tokenId: createTokenId(TOKEN_TWO), endDate: null },
           ],
       ),
-    } as any,
+    } as any);
+  const marketResolutionRepo =
+    opts.marketResolutionRepo ?? ({ findByConditionId: vi.fn(() => DEFAULT_RESOLUTION) } as any);
+  const settler = opts.settler ?? makeMockSettler(positionRepo, lotRepo, nowFn);
+  const module = new RedeemSweepModule({
+    bus,
+    gateway: gateway as any,
+    positionReader: reader,
+    positionRepo,
+    lotRepo,
+    marketRepo,
+    marketResolutionRepo,
+    settler,
     orderRepo: orderRepo as any,
     redeemLogRepo: {
       insert: vi.fn((row) => {
@@ -320,7 +369,7 @@ function makeHarness(
     }),
     log,
     runtimeMetrics: runtimeMetrics as any,
-    now: () => Date.now(),
+    now: nowFn,
     ...(opts.settlementInfraBreaker ? { settlementInfraBreaker: opts.settlementInfraBreaker } : {}),
     ...(opts.runtimeControl ? { runtimeControl: opts.runtimeControl } : {}),
   });
@@ -332,6 +381,9 @@ function makeHarness(
     redeemLogRows,
     positionRepo,
     lotRepo,
+    marketRepo,
+    marketResolutionRepo,
+    settler,
     orderRepo,
     log,
     runtimeMetrics,
@@ -2102,5 +2154,428 @@ describe("RedeemSweepModule", () => {
     await h.bus.drain();
 
     expect(orphanRow.status).toBe("failed_orphaned");
+  });
+});
+
+// ─── Settlement accounting (real ledger DB + real PositionSettler) ────────────
+//
+// These tests exercise closeLocalPositions through the public confirmed-redeem
+// path with REAL repositories and a REAL PositionSettler backed by an in-memory
+// SQLite ledger DB. They prove the resolution-gated close records correct
+// accounting (settlement_ledger + realized_pnl), is idempotent, never fabricates
+// losses on winners, and leaves the position open for the normal settler when no
+// resolution is known.
+
+const PAST_END = new Date(NOW - 60_000).toISOString();
+
+interface LedgerSeed {
+  outcome: string;
+  size: number;
+  avgEntryPrice: number;
+  resolution?: string; // omit → no market_resolutions row (delisted/unknown)
+  realizedPnl?: number;
+  status?: Position["status"];
+}
+
+function seedLedger(conn: ReturnType<typeof bootstrapDatabase>, seed: LedgerSeed) {
+  const tokenId = createTokenId(TOKEN);
+  const conditionId = createConditionId(CONDITION);
+  const positionId = createPositionId(`pos-${TOKEN}`);
+  const nowIso = new Date(NOW).toISOString();
+
+  const marketRepo = new SqliteMarketRepository(conn.db);
+  const positionRepo = new SqlitePositionRepository(conn.db);
+  const lotRepo = new SqliteInventoryLotRepository(conn.db);
+  const resolutionRepo = new SqliteMarketResolutionRepository(conn.db);
+  const orderRepo = new SqliteOrderRepository(conn.db);
+  const fillRepo = new SqliteFillRepository(conn.db);
+
+  marketRepo.save({
+    tokenId,
+    conditionId: String(conditionId),
+    slug: "redeem-accounting-market",
+    eventSlug: null,
+    question: "Will it settle correctly?",
+    outcome: seed.outcome,
+    regime: null,
+    horizon: null,
+    endDate: PAST_END,
+    active: true,
+    tradable: true,
+    tickSize: 0.01,
+    negRisk: false,
+    eventMarketCount: 1,
+    gammaCreatedAt: null,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  });
+
+  if (seed.resolution !== undefined) {
+    resolutionRepo.save({
+      conditionId: String(conditionId),
+      resolution: seed.resolution,
+      resolvedAt: nowIso,
+      detectedAt: nowIso,
+      source: "gamma-api",
+      rawResponse: null,
+      status: "detected",
+    });
+  }
+
+  const costBasisUsdc = seed.size * seed.avgEntryPrice;
+  positionRepo.save({
+    positionId,
+    tokenId,
+    conditionId,
+    side: "buy",
+    size: seed.status === "closed" ? 0 : seed.size,
+    avgEntryPrice: seed.avgEntryPrice,
+    costBasisUsdc,
+    currentValueUsdc: seed.status === "closed" ? 0 : costBasisUsdc,
+    realizedPnl: seed.realizedPnl ?? 0,
+    status: seed.status ?? "open",
+    entryStyle: null,
+    openedAt: nowIso,
+    closedAt: seed.status === "closed" ? nowIso : null,
+    updatedAt: nowIso,
+  });
+
+  // inventory_lots.fill_id → fills.fill_id → orders.order_id: seed the FK chain.
+  const orderId = createOrderId(`order-${TOKEN}`);
+  const fillId = createFillId(`fill-${TOKEN}`);
+  orderRepo.save({
+    orderId,
+    clientOrderId: `coid-${TOKEN}` as ClientOrderId,
+    tokenId,
+    conditionId,
+    side: "buy",
+    orderType: "GTC",
+    price: seed.avgEntryPrice,
+    size: seed.size,
+    sizeUsdc: costBasisUsdc,
+    status: "filled",
+    exchangeOrderId: `ex-${TOKEN}`,
+    signalId: null,
+    signalReason: "seed",
+    botRunId: createBotRunId("run-seed"),
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  });
+  fillRepo.save({
+    fillId,
+    orderId,
+    tokenId,
+    conditionId,
+    side: "buy",
+    price: seed.avgEntryPrice,
+    size: seed.size,
+    sizeUsdc: costBasisUsdc,
+    liquidityRole: "maker",
+    fee: 0,
+    feeRateBps: 0,
+    filledAt: nowIso,
+  });
+
+  lotRepo.save({
+    lotId: createLotId(`lot-${TOKEN}`),
+    positionId,
+    tokenId,
+    side: "buy",
+    size: seed.size,
+    remainingSize: seed.status === "closed" ? 0 : seed.size,
+    entryPrice: seed.avgEntryPrice,
+    costUsdc: costBasisUsdc,
+    fillId,
+    createdAt: nowIso,
+  });
+
+  const settler = new PositionSettler(positionRepo, lotRepo, conn.db, marketRepo);
+  return {
+    tokenId,
+    conditionId,
+    positionId,
+    marketRepo,
+    positionRepo,
+    lotRepo,
+    resolutionRepo,
+    settler,
+  };
+}
+
+function settlementRows(conn: ReturnType<typeof bootstrapDatabase>, positionId: unknown) {
+  return conn.db
+    .prepare("SELECT * FROM settlement_ledger WHERE position_id = ?")
+    .all(String(positionId)) as Array<{
+    settlement_price: number;
+    size: number;
+    delta: number;
+    resolution: string;
+  }>;
+}
+
+function makeAccountingHarness(seeded: ReturnType<typeof seedLedger>) {
+  return makeHarness({
+    positionRepo: seeded.positionRepo,
+    lotRepo: seeded.lotRepo,
+    marketRepo: seeded.marketRepo,
+    marketResolutionRepo: seeded.resolutionRepo,
+    settler: seeded.settler,
+    now: () => NOW,
+    policy: { intervalMs: 60 * 60_000 },
+  });
+}
+
+function findPosition(seeded: ReturnType<typeof seedLedger>) {
+  return seeded.positionRepo
+    .findAll()
+    .find((p: Position) => String(p.positionId) === String(seeded.positionId));
+}
+
+/** The RedeemGroup the module would build for the single seeded token. */
+function redeemGroupFor(seeded: ReturnType<typeof seedLedger>) {
+  return {
+    conditionId: String(seeded.conditionId),
+    includedTokenIds: [String(seeded.tokenId)],
+    excludedTokenIds: [] as string[],
+  };
+}
+
+/**
+ * Settle the seeded position through the canonical PositionSettler directly,
+ * mirroring exactly the DetectedResolution the RedeemSweep close path builds.
+ * Used by the agreement tests to prove both code paths converge on the same PnL.
+ */
+function directSettle(seeded: ReturnType<typeof seedLedger>, resolution: string) {
+  const market = seeded.marketRepo.findByConditionId(String(seeded.conditionId))[0]!;
+  const position = seeded.positionRepo.findByTokenId(seeded.tokenId)!;
+  return seeded.settler.settle({
+    conditionId: String(seeded.conditionId),
+    resolution,
+    winnerTokenId: null,
+    resolvedAt: new Date(NOW).toISOString(),
+    source: "gamma-api",
+    rawResponse: null,
+    candidates: [
+      {
+        tokenId: seeded.tokenId,
+        conditionId: String(seeded.conditionId),
+        slug: market.slug,
+        outcome: market.outcome,
+        endDate: market.endDate ?? "",
+        positionId: position.positionId,
+      },
+    ],
+  });
+}
+
+/** Insert a pre-existing settlement_ledger row (simulates an already-settled position). */
+function insertSettlementRow(
+  conn: ReturnType<typeof bootstrapDatabase>,
+  seeded: ReturnType<typeof seedLedger>,
+  price: number,
+  size: number,
+  delta: number,
+) {
+  conn.db
+    .prepare(
+      `INSERT INTO settlement_ledger
+         (settlement_id, condition_id, position_id, token_id,
+          resolution, settlement_price, size, delta, settled_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      `settlement-${String(seeded.conditionId)}-${String(seeded.tokenId)}`,
+      String(seeded.conditionId),
+      String(seeded.positionId),
+      String(seeded.tokenId),
+      "No",
+      price,
+      size,
+      delta,
+      new Date(NOW).toISOString(),
+    );
+}
+
+describe("RedeemSweep settlement accounting (real ledger DB)", () => {
+  const connections: Array<ReturnType<typeof bootstrapDatabase>> = [];
+
+  function freshDb() {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const conn = bootstrapDatabase(":memory:");
+    connections.push(conn);
+    return conn;
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    while (connections.length > 0) connections.pop()!.close();
+  });
+
+  it("records a settlement_ledger loss row + realized_pnl loss when a zero-return loser is closed", async () => {
+    const conn = freshDb();
+    // Held outcome "Yes" but the market resolved "No" → zero-return loser.
+    const seeded = seedLedger(conn, {
+      outcome: "Yes",
+      resolution: "No",
+      size: 10,
+      avgEntryPrice: 0.05,
+    });
+
+    await runStableStartup(makeAccountingHarness(seeded));
+
+    const rows = settlementRows(conn, seeded.positionId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.settlement_price).toBe(0);
+    expect(rows[0]!.delta).toBeCloseTo(-0.5, 6);
+
+    const position = findPosition(seeded);
+    expect(position!.status).toBe("closed");
+    expect(position!.size).toBe(0);
+    expect(position!.realizedPnl).toBeCloseTo(-0.5, 6);
+
+    expect(seeded.lotRepo.findOpen(seeded.positionId)).toHaveLength(0);
+  });
+
+  it("leaves the position open (no settlement_ledger row) when no resolution is known", async () => {
+    const conn = freshDb();
+    // No market_resolutions row → delisted/unknown: must defer to the normal settler.
+    const seeded = seedLedger(conn, {
+      outcome: "Yes",
+      size: 10,
+      avgEntryPrice: 0.05,
+    });
+
+    await runStableStartup(makeAccountingHarness(seeded));
+
+    expect(settlementRows(conn, seeded.positionId)).toHaveLength(0);
+
+    const position = findPosition(seeded);
+    expect(position!.status).toBe("open");
+    expect(position!.size).toBe(10);
+    expect(position!.realizedPnl).toBe(0);
+    expect(seeded.lotRepo.findOpen(seeded.positionId)).toHaveLength(1);
+  });
+
+  it("books a winner gain (settlement_price 1.0) without fabricating a loss", async () => {
+    const conn = freshDb();
+    // Held outcome "Yes" and the market resolved "Yes" → redeemed winner.
+    const seeded = seedLedger(conn, {
+      outcome: "Yes",
+      resolution: "Yes",
+      size: 10,
+      avgEntryPrice: 0.05,
+    });
+
+    await runStableStartup(makeAccountingHarness(seeded));
+
+    const rows = settlementRows(conn, seeded.positionId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.settlement_price).toBe(1);
+    expect(rows[0]!.delta).toBeCloseTo(9.5, 6);
+
+    const position = findPosition(seeded);
+    expect(position!.status).toBe("closed");
+    expect(position!.realizedPnl).toBeCloseTo(9.5, 6);
+  });
+
+  it("books the full cost as the loss for a $0.99 buy with no sells and zero return", async () => {
+    const conn = freshDb();
+    // 1 share bought at $0.99, never sold, market resolved against → net PnL -$0.99.
+    const seeded = seedLedger(conn, {
+      outcome: "Yes",
+      resolution: "No",
+      size: 1,
+      avgEntryPrice: 0.99,
+    });
+
+    await runStableStartup(makeAccountingHarness(seeded));
+
+    const rows = settlementRows(conn, seeded.positionId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.delta).toBeCloseTo(-0.99, 6);
+    expect(findPosition(seeded)!.realizedPnl).toBeCloseTo(-0.99, 6);
+  });
+
+  it("is idempotent: a repeated close writes no duplicate settlement_ledger row", async () => {
+    const conn = freshDb();
+    const seeded = seedLedger(conn, {
+      outcome: "Yes",
+      resolution: "No",
+      size: 10,
+      avgEntryPrice: 0.05,
+    });
+    const h = makeAccountingHarness(seeded);
+
+    await runStableStartup(h);
+    expect(settlementRows(conn, seeded.positionId)).toHaveLength(1);
+
+    // Drive the close path a second time (verify→close re-entry in production).
+    (h.module as unknown as { closeLocalPositions(group: unknown): void }).closeLocalPositions(
+      redeemGroupFor(seeded),
+    );
+
+    expect(settlementRows(conn, seeded.positionId)).toHaveLength(1);
+    expect(findPosition(seeded)!.realizedPnl).toBeCloseTo(-0.5, 6);
+  });
+
+  it("does not double-count a position already settled with a ledger row", async () => {
+    const conn = freshDb();
+    // Position already closed + settled by the normal path: ledger row present,
+    // realized_pnl already includes the -0.5 settlement loss.
+    const seeded = seedLedger(conn, {
+      outcome: "Yes",
+      resolution: "No",
+      size: 10,
+      avgEntryPrice: 0.05,
+      status: "closed",
+      realizedPnl: -0.5,
+    });
+    insertSettlementRow(conn, seeded, 0, 10, -0.5);
+
+    await runStableStartup(makeAccountingHarness(seeded));
+
+    expect(settlementRows(conn, seeded.positionId)).toHaveLength(1);
+    expect(findPosition(seeded)!.realizedPnl).toBeCloseTo(-0.5, 6);
+  });
+
+  it("agrees with a direct PositionSettler.settle on the same loser scenario", async () => {
+    const connA = freshDb();
+    const connB = freshDb();
+    const seed = { outcome: "Yes", resolution: "No", size: 10, avgEntryPrice: 0.05 } as const;
+    const armA = seedLedger(connA, seed);
+    const armB = seedLedger(connB, seed);
+
+    await runStableStartup(makeAccountingHarness(armA)); // RedeemSweep path
+    directSettle(armB, "No"); // canonical settler path
+
+    const rowsA = settlementRows(connA, armA.positionId);
+    const rowsB = settlementRows(connB, armB.positionId);
+    expect(rowsA[0]!.delta).toBeCloseTo(rowsB[0]!.delta, 6);
+    expect(findPosition(armA)!.realizedPnl).toBeCloseTo(findPosition(armB)!.realizedPnl, 6);
+  });
+
+  it("matches the canonical settler for a partially-sold position (no behavior change)", async () => {
+    const connA = freshDb();
+    const connB = freshDb();
+    // Prior sells already booked +0.30; 5 shares remain at avg 0.05; resolves loser.
+    const seed = {
+      outcome: "Yes",
+      resolution: "No",
+      size: 5,
+      avgEntryPrice: 0.05,
+      realizedPnl: 0.3,
+    } as const;
+    const armA = seedLedger(connA, seed);
+    const armB = seedLedger(connB, seed);
+
+    await runStableStartup(makeAccountingHarness(armA));
+    directSettle(armB, "No");
+
+    // Settlement adds (0 - 0.05) * 5 = -0.25 on top of the prior +0.30 → 0.05.
+    expect(findPosition(armA)!.realizedPnl).toBeCloseTo(0.05, 6);
+    expect(findPosition(armA)!.realizedPnl).toBeCloseTo(findPosition(armB)!.realizedPnl, 6);
+    const rowsA = settlementRows(connA, armA.positionId);
+    expect(rowsA[0]!.delta).toBeCloseTo(-0.25, 6);
   });
 });

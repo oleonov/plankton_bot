@@ -3,6 +3,7 @@ import type {
   ExchangeGateway,
   InventoryLotRepository,
   MarketRepository,
+  MarketResolutionRepository,
   OrderRepository,
   PositionRepository,
   RedeemSweepPolicy,
@@ -15,6 +16,8 @@ import type {
 } from "@krabs/domain";
 import { createTokenId } from "@krabs/domain";
 import type { PolymarketPositionReader } from "@krabs/exchange";
+import type { PositionSettler } from "../resolution/position-settler.js";
+import type { ResolutionCandidate } from "../resolution/resolution-detector.js";
 import type { Logger } from "../../logger.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type {
@@ -49,6 +52,8 @@ interface RedeemSweepDeps {
   positionRepo: PositionRepository;
   lotRepo: InventoryLotRepository;
   marketRepo: MarketRepository;
+  marketResolutionRepo: MarketResolutionRepository;
+  settler: PositionSettler;
   orderRepo?: OrderRepository | undefined;
   redeemLogRepo: SqliteRedeemLogRepository;
   redeemQuarantineRepo: SqliteRedeemQuarantineRepository;
@@ -1068,7 +1073,7 @@ export class RedeemSweepModule implements RuntimeModule {
 
   private handleRedeemResult(group: RedeemGroup, result: RedeemPositionsResult): void {
     if (result.status === "confirmed") {
-      this.closeLocalPositions(group.includedTokenIds);
+      this.closeLocalPositions(group);
       this.recordMetric("redeem_sweep_success_total", group);
       this.scheduleVerification(group);
       return;
@@ -1219,7 +1224,7 @@ export class RedeemSweepModule implements RuntimeModule {
         status: "success",
         details: { source: "verify", excludedTokenIds: group.excludedTokenIds },
       });
-      this.closeLocalPositions(group.includedTokenIds);
+      this.closeLocalPositions(group);
       this.inFlightByCondition.delete(group.conditionId);
       this.verificationAttemptsByCondition.delete(group.conditionId);
       this.recordMetric("redeem_sweep_verified_cleared_total", group);
@@ -1273,21 +1278,58 @@ export class RedeemSweepModule implements RuntimeModule {
     return attempt;
   }
 
-  private closeLocalPositions(tokenIds: readonly string[]): void {
-    const updatedAt = new Date(this.now()).toISOString();
-    for (const tokenId of tokenIds) {
+  /**
+   * Close the local positions after an on-chain redeem.
+   *
+   * Resolution-gated (Option 2): a position is only closed here when a
+   * market_resolutions row is known for the condition, in which case we delegate
+   * to the canonical PositionSettler so settlement_ledger + realized_pnl record
+   * the true economic outcome (winner 1.0 / loser 0.0). When the resolution is
+   * unknown (no row, or stored as "unknown"), we never close with a fabricated
+   * PnL of 0 — we leave the position open for the ResolutionDetector →
+   * PositionSettler path. Settlement itself is idempotent (already-closed
+   * positions are skipped), so a repeated close writes no duplicate ledger rows.
+   */
+  private closeLocalPositions(group: RedeemGroup): void {
+    const resolution = this.deps.marketResolutionRepo.findByConditionId(group.conditionId);
+    if (!resolution || resolution.resolution.trim().toLowerCase() === "unknown") {
+      this.deps.log.info(
+        { conditionId: group.conditionId, tokenIds: group.includedTokenIds },
+        "redeem sweep deferring local close: resolution unknown, leaving position for settler",
+      );
+      return;
+    }
+    const candidates = this.buildSettlementCandidates(group);
+    if (candidates.length === 0) return;
+    this.deps.settler.settle({
+      conditionId: group.conditionId,
+      resolution: resolution.resolution,
+      winnerTokenId: null,
+      resolvedAt: resolution.resolvedAt,
+      source: resolution.source === "gamma-delisted" ? "gamma-delisted" : "gamma-api",
+      rawResponse: resolution.rawResponse,
+      candidates,
+    });
+  }
+
+  private buildSettlementCandidates(group: RedeemGroup): ResolutionCandidate[] {
+    const markets = this.deps.marketRepo.findByConditionId(group.conditionId);
+    const marketByToken = new Map(markets.map((market) => [String(market.tokenId), market]));
+    const candidates: ResolutionCandidate[] = [];
+    for (const tokenId of group.includedTokenIds) {
       const position = this.deps.positionRepo.findByTokenId(createTokenId(tokenId));
-      if (!position) continue;
-      this.deps.lotRepo.settleAll(position.positionId);
-      this.deps.positionRepo.save({
-        ...position,
-        size: 0,
-        currentValueUsdc: 0,
-        status: "closed",
-        closedAt: updatedAt,
-        updatedAt,
+      if (!position || position.status === "closed") continue;
+      const market = marketByToken.get(tokenId);
+      candidates.push({
+        tokenId: createTokenId(tokenId),
+        conditionId: group.conditionId,
+        slug: market?.slug ?? "",
+        outcome: market?.outcome ?? "",
+        endDate: market?.endDate ?? "",
+        positionId: position.positionId,
       });
     }
+    return candidates;
   }
 
   private async tryActivateUsdcCollateral(trigger: string): Promise<void> {

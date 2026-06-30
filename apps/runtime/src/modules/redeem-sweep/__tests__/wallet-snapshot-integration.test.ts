@@ -5,6 +5,7 @@ import { normalizePolymarketPosition } from "@krabs/exchange";
 import type { PolymarketDataPosition } from "@krabs/exchange";
 import { DEFAULT_EXECUTION_POLICY } from "../../../execution-policy.js";
 import { RedeemSweepModule } from "../redeem-sweep-module.js";
+import { makeMockSettler, makeResolvedResolutionRepo } from "./test-settler.js";
 
 const NOW = Date.parse("2026-05-11T00:00:00.000Z");
 
@@ -131,20 +132,24 @@ describe("redeem sweep wallet snapshot integration", () => {
     const positionReader = {
       read: vi.fn().mockResolvedValueOnce([]).mockResolvedValue(positions),
     };
+    const positionRepo = {
+      findByTokenId: vi.fn((tokenId) => localByToken.get(String(tokenId)) ?? null),
+      save: vi.fn((position) => savedPositions.push(position)),
+    } as any;
+    const lotRepo = { settleAll: vi.fn() } as any;
     const module = new RedeemSweepModule({
       bus,
       gateway: gateway as any,
       positionReader,
-      positionRepo: {
-        findByTokenId: vi.fn((tokenId) => localByToken.get(String(tokenId)) ?? null),
-        save: vi.fn((position) => savedPositions.push(position)),
-      } as any,
-      lotRepo: { settleAll: vi.fn() } as any,
+      positionRepo,
+      lotRepo,
       marketRepo: {
         findByConditionId: vi.fn((conditionId) => [
           { tokenId: createTokenId(`${conditionId}-other`) },
         ]),
       } as any,
+      marketResolutionRepo: makeResolvedResolutionRepo() as any,
+      settler: makeMockSettler(positionRepo, lotRepo, () => Date.now()) as any,
       redeemLogRepo: {
         insert: vi.fn((row) => logRows.push({ id: logRows.length + 1, ...row })),
         updateLatestActiveAttempt: vi.fn((entry) => {

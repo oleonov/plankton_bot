@@ -1683,6 +1683,8 @@ async function main(): Promise<void> {
           positionRepo: repos.position,
           lotRepo: repos.inventoryLot,
           marketRepo: repos.market,
+          marketResolutionRepo,
+          settler: positionSettler,
           orderRepo: repos.order,
           redeemLogRepo: repos.redeemLog,
           redeemQuarantineRepo: repos.redeemQuarantine,

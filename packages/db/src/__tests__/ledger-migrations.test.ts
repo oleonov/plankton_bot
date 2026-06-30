@@ -1329,3 +1329,262 @@ describe("migration 079 — legacy accounting warning backfill", () => {
     ).toBe(0);
   });
 });
+
+describe("migration 080 — redeem sweep zero-return P&L backfill", () => {
+  // Two exact affected rows from closed_zero_return_pnl_affected_2026-06-30.csv.
+  // NO_MR has no market_resolutions row (37/40 affected); HAS_MR already has a
+  // gamma-delisted detection row (3/40).
+  const NO_MR_TOKEN =
+    "70781911088713239237748492025950997105300640174486237821499168939935120968223";
+  const NO_MR_CONDITION = "0x835c0ca9914b5c6e3ce4b77e448b70c0808c30fabf39b64e6799a79c178a772e";
+  const NO_MR_POSITION = `pos-${NO_MR_TOKEN}-1782187061889`;
+  const NO_MR_SETTLEMENT = `redeem-sweep-backfill-080-${NO_MR_TOKEN}`;
+
+  const HAS_MR_TOKEN =
+    "8793371545582822810690698136612044556737147618554458155782168291347570682358";
+  const HAS_MR_CONDITION = "0x1d4f707bfc4d4737a1063f8770e37f03098745e9b28202a29f093d3524ba34e9";
+  const HAS_MR_POSITION = `pos-${HAS_MR_TOKEN}-1779034215486`;
+  const HAS_MR_SETTLEMENT = `redeem-sweep-backfill-080-${HAS_MR_TOKEN}`;
+
+  beforeEach(() => {
+    // Real prod schema: settlement_ledger carries the condition_id FK to
+    // market_resolutions, so the migration MUST seed a marker before settling
+    // conditions that lack a resolution. foreign_keys ON exercises that path.
+    db.pragma("foreign_keys = ON");
+    db.exec(`
+      CREATE TABLE market_resolutions (
+        condition_id TEXT PRIMARY KEY,
+        resolution   TEXT NOT NULL,
+        resolved_at  TEXT NOT NULL,
+        detected_at  TEXT NOT NULL,
+        source       TEXT NOT NULL,
+        raw_response TEXT,
+        status       TEXT NOT NULL DEFAULT 'settled'
+      );
+      CREATE TABLE settlement_ledger (
+        settlement_id    TEXT PRIMARY KEY,
+        condition_id     TEXT NOT NULL REFERENCES market_resolutions(condition_id),
+        position_id      TEXT NOT NULL REFERENCES positions(position_id),
+        token_id         TEXT NOT NULL,
+        resolution       TEXT NOT NULL,
+        settlement_price REAL NOT NULL,
+        size             REAL NOT NULL,
+        delta            REAL NOT NULL,
+        settled_at       TEXT NOT NULL,
+        created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE pnl_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fill_id TEXT NOT NULL,
+        position_id TEXT NOT NULL,
+        delta REAL NOT NULL,
+        filled_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE inventory_lots (
+        lot_id TEXT PRIMARY KEY,
+        position_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        size REAL NOT NULL,
+        remaining_size REAL NOT NULL,
+        entry_price REAL NOT NULL,
+        cost_usdc REAL NOT NULL,
+        fill_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+  });
+
+  function seedAffected(args: {
+    positionId: string;
+    tokenId: string;
+    conditionId: string;
+    costBasis: number;
+    avgEntry: number;
+    shares: number;
+    realizedPnl?: number;
+    remainingLot?: number;
+  }): void {
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, realized_pnl, status,
+          opened_at, closed_at, updated_at)
+       VALUES (?, ?, ?, 'buy', 0, ?, ?, 0, ?, 'closed',
+               '2026-06-23T03:57:41.889Z', '2026-06-23T06:02:35.104Z',
+               '2026-06-23T06:02:35.104Z')`,
+    ).run(
+      args.positionId,
+      args.tokenId,
+      args.conditionId,
+      args.avgEntry,
+      args.costBasis,
+      args.realizedPnl ?? 0,
+    );
+    db.prepare(
+      `INSERT INTO inventory_lots
+         (lot_id, position_id, token_id, side, size, remaining_size, entry_price,
+          cost_usdc, fill_id, created_at)
+       VALUES (?, ?, ?, 'buy', ?, ?, ?, ?, ?, '2026-06-23T03:57:41.000Z')`,
+    ).run(
+      `lot-${args.tokenId}`,
+      args.positionId,
+      args.tokenId,
+      args.shares,
+      args.remainingLot ?? 0,
+      args.avgEntry,
+      args.costBasis,
+      `fill-${args.tokenId}`,
+    );
+  }
+
+  function settlementRow(settlementId: string) {
+    return db
+      .prepare(
+        "SELECT condition_id, settlement_price, size, delta, resolution FROM settlement_ledger WHERE settlement_id = ?",
+      )
+      .get(settlementId) as
+      | {
+          condition_id: string;
+          settlement_price: number;
+          size: number;
+          delta: number;
+          resolution: string;
+        }
+      | undefined;
+  }
+
+  function realizedPnl(positionId: string): number {
+    return (
+      db.prepare("SELECT realized_pnl FROM positions WHERE position_id = ?").get(positionId) as {
+        realized_pnl: number;
+      }
+    ).realized_pnl;
+  }
+
+  it("settles a no-resolution zero-return loss (marker + settlement + realized_pnl) and is idempotent", () => {
+    seedAffected({
+      positionId: NO_MR_POSITION,
+      tokenId: NO_MR_TOKEN,
+      conditionId: NO_MR_CONDITION,
+      costBasis: 0.99,
+      avgEntry: 0.006,
+      shares: 165,
+    });
+
+    const sql = readMigration("080_redeem_sweep_zero_return_pnl_backfill_20260630.sql");
+    db.exec(sql);
+    db.exec(sql);
+
+    const marker = db
+      .prepare("SELECT source, status FROM market_resolutions WHERE condition_id = ?")
+      .get(NO_MR_CONDITION) as { source: string; status: string } | undefined;
+    expect(marker?.source).toBe("redeem-sweep-backfill");
+
+    const settlement = settlementRow(NO_MR_SETTLEMENT);
+    expect(settlement?.settlement_price).toBe(0);
+    expect(settlement?.size).toBeCloseTo(165, 6);
+    expect(settlement?.delta).toBeCloseTo(-0.99, 6);
+    expect(realizedPnl(NO_MR_POSITION)).toBeCloseTo(-0.99, 6);
+
+    expect(
+      (db.prepare("SELECT COUNT(*) AS c FROM settlement_ledger").get() as { c: number }).c,
+    ).toBe(1);
+    expect(
+      (db.prepare("SELECT COUNT(*) AS c FROM market_resolutions").get() as { c: number }).c,
+    ).toBe(1);
+  });
+
+  it("reuses an existing market_resolutions row without overwriting it", () => {
+    db.prepare(
+      `INSERT INTO market_resolutions
+         (condition_id, resolution, resolved_at, detected_at, source, status)
+       VALUES (?, 'No', '2026-05-18T12:00:00Z', '2026-05-18T12:00:00Z',
+               'gamma-delisted', 'detected')`,
+    ).run(HAS_MR_CONDITION);
+    seedAffected({
+      positionId: HAS_MR_POSITION,
+      tokenId: HAS_MR_TOKEN,
+      conditionId: HAS_MR_CONDITION,
+      costBasis: 0.25431,
+      avgEntry: 0.01,
+      shares: 25.431,
+    });
+
+    db.exec(readMigration("080_redeem_sweep_zero_return_pnl_backfill_20260630.sql"));
+
+    const mr = db
+      .prepare("SELECT source, status FROM market_resolutions WHERE condition_id = ?")
+      .get(HAS_MR_CONDITION) as { source: string; status: string };
+    expect(mr.source).toBe("gamma-delisted");
+    expect(mr.status).toBe("detected");
+
+    const settlement = settlementRow(HAS_MR_SETTLEMENT);
+    expect(settlement?.delta).toBeCloseTo(-0.25431, 6);
+    expect(realizedPnl(HAS_MR_POSITION)).toBeCloseTo(-0.25431, 6);
+    expect(
+      (db.prepare("SELECT COUNT(*) AS c FROM market_resolutions").get() as { c: number }).c,
+    ).toBe(1);
+  });
+
+  it("skips an allow-listed row that fails the zero-return guards", () => {
+    // Same exact IDs as the screenshot row, but it already has a sell fill and
+    // a nonzero realized_pnl, so it is NOT a clean zero-return loss.
+    seedAffected({
+      positionId: NO_MR_POSITION,
+      tokenId: NO_MR_TOKEN,
+      conditionId: NO_MR_CONDITION,
+      costBasis: 0.99,
+      avgEntry: 0.006,
+      shares: 165,
+      realizedPnl: -0.4,
+    });
+    db.prepare(
+      `INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at)
+       VALUES ('sell-fill-1', ?, 0.2, '2026-06-23T05:00:00Z')`,
+    ).run(NO_MR_POSITION);
+
+    db.exec(readMigration("080_redeem_sweep_zero_return_pnl_backfill_20260630.sql"));
+
+    expect(settlementRow(NO_MR_SETTLEMENT)).toBeUndefined();
+    expect(realizedPnl(NO_MR_POSITION)).toBeCloseTo(-0.4, 6);
+    expect(
+      (db.prepare("SELECT COUNT(*) AS c FROM settlement_ledger").get() as { c: number }).c,
+    ).toBe(0);
+    expect(
+      (db.prepare("SELECT COUNT(*) AS c FROM market_resolutions").get() as { c: number }).c,
+    ).toBe(0);
+  });
+
+  it("leaves unrelated closed positions and ledgers untouched", () => {
+    const otherToken = "111122223333";
+    const otherCondition = "0xunrelated";
+    const otherPosition = `pos-${otherToken}-1`;
+    db.prepare(
+      `INSERT INTO market_resolutions
+         (condition_id, resolution, resolved_at, detected_at, source, status)
+       VALUES (?, 'Yes', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'gamma-api', 'settled')`,
+    ).run(otherCondition);
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
+       VALUES (?, ?, ?, 'buy', 0, 0.5, 5, 5, 'closed',
+               '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')`,
+    ).run(otherPosition, otherToken, otherCondition);
+    db.prepare(
+      `INSERT INTO settlement_ledger
+         (settlement_id, condition_id, position_id, token_id, resolution,
+          settlement_price, size, delta, settled_at)
+       VALUES ('unrelated-settlement', ?, ?, ?, 'Yes', 1, 10, 5, '2026-01-02T00:00:00Z')`,
+    ).run(otherCondition, otherPosition, otherToken);
+
+    db.exec(readMigration("080_redeem_sweep_zero_return_pnl_backfill_20260630.sql"));
+
+    expect(realizedPnl(otherPosition)).toBeCloseTo(5, 6);
+    expect(
+      (db.prepare("SELECT COUNT(*) AS c FROM settlement_ledger").get() as { c: number }).c,
+    ).toBe(1);
+  });
+});

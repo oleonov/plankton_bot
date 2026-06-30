@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { bootstrapDatabase, type DbConnection } from "@krabs/db";
 import type { AppConfig } from "@krabs/config";
 import { buildServer } from "../server.js";
@@ -263,10 +265,28 @@ async function withSavepoint<T>(name: string, fn: () => Promise<T>): Promise<T> 
   }
 }
 
-async function fetchCycles(path = "/api/v1/pnl/position-cycles?period=all&pageSize=50") {
-  const res = await app.inject({ method: "GET", url: path, headers: authHeaders() });
+async function fetchCycles(url = "/api/v1/pnl/position-cycles?period=all&pageSize=50") {
+  const res = await app.inject({ method: "GET", url, headers: authHeaders() });
   expect(res.statusCode).toBe(200);
   return res.json<PositionCyclesResponse>();
+}
+
+function readMigration(filename: string): string {
+  return readFileSync(
+    path.join(
+      import.meta.dirname,
+      "..",
+      "..",
+      "..",
+      "..",
+      "packages",
+      "db",
+      "src",
+      "migrations",
+      filename,
+    ),
+    "utf-8",
+  );
 }
 
 beforeAll(async () => {
@@ -930,6 +950,76 @@ describe("GET /pnl/position-cycles", () => {
       expect(reconciled.settlementReturnedUsd).toBeCloseTo(0);
       expect(reconciled.realizedPnlUsd).toBeCloseTo(-0.525);
       expect(reconciled.netPnlUsd).toBeCloseTo(-0.525);
+    }));
+
+  it("backfill 080 turns a redeem-sweep zero-return close from CLOSED_PROFIT into a recorded loss", async () =>
+    withSavepoint("redeem_sweep_backfill_080", async () => {
+      // An exact allow-listed affected row (the screenshot case): closed with size 0
+      // and realized_pnl 0, a single fully-settled buy lot, no sell pnl_ledger and no
+      // settlement_ledger — the historical RedeemSweep.closeLocalPositions() bug.
+      const positionId =
+        "pos-70781911088713239237748492025950997105300640174486237821499168939935120968223-1782187061889";
+      const tokenId =
+        "70781911088713239237748492025950997105300640174486237821499168939935120968223";
+      const conditionId = "0x835c0ca9914b5c6e3ce4b77e448b70c0808c30fabf39b64e6799a79c178a772e";
+
+      seedMarket(tokenId, conditionId, "redeem-sweep-zero-return-market");
+      seedPosition({
+        positionId,
+        tokenId,
+        conditionId,
+        status: "closed",
+        size: 0,
+        avgEntry: 0.006,
+        costBasis: 0.99,
+        realizedPnl: 0,
+        openedAt: isoHoursAgo(60),
+        closedAt: isoHoursAgo(50),
+      });
+      seedBuyLot({
+        positionId,
+        tokenId,
+        conditionId,
+        fillId: "buy-redeem-sweep-080",
+        orderId: "ord-buy-redeem-sweep-080",
+        price: 0.006,
+        size: 165,
+        source: "R23_DIP_TRIGGER",
+        filledAt: isoHoursAgo(60),
+      });
+
+      // BUG: the unrecorded loss surfaces as a high-confidence break-even win.
+      const before = await fetchCycles();
+      const buggy = before.data.cycles.find((cycle) => cycle.positionId === positionId)!;
+      expect(buggy.status).toBe("CLOSED_PROFIT");
+      expect(buggy.realizedPnlUsd).toBeCloseTo(0);
+      expect(buggy.netPnlUsd).toBeCloseTo(0);
+      expect(buggy.accountingConfidence).toBe("HIGH");
+      expect(before.data.accountingWarnings.some((c) => c.positionId === positionId)).toBe(false);
+
+      conn.db.exec(readMigration("080_redeem_sweep_zero_return_pnl_backfill_20260630.sql"));
+
+      // FIX: the settlement marker + ledger row + realized_pnl reconcile to a loss.
+      const after = await fetchCycles();
+      const fixed = after.data.cycles.find((cycle) => cycle.positionId === positionId)!;
+      expect(fixed.status).toBe("HELD_TO_LOSING_RESOLUTION");
+      expect(fixed.realizedPnlUsd).toBeCloseTo(-0.99);
+      expect(fixed.netPnlUsd).toBeCloseTo(-0.99);
+      expect(fixed.settlementReturnedUsd).toBeCloseTo(0);
+      expect(fixed.returnedUsd).toBeCloseTo(0);
+      expect(fixed.accountingConfidence).toBe("MED");
+      expect(fixed.exitSources).toContain("settlement");
+      expect(after.data.accountingWarnings.some((c) => c.positionId === positionId)).toBe(false);
+
+      // Closed realized P&L drops by exactly the corrected loss; a pre-existing
+      // healthy cycle is untouched.
+      expect(after.data.summary.closedRealizedPnlUsd).toBeCloseTo(
+        before.data.summary.closedRealizedPnlUsd - 0.99,
+      );
+      const profitBefore = before.data.cycles.find((c) => c.positionId === "pos-profit-1")!;
+      const profitAfter = after.data.cycles.find((c) => c.positionId === "pos-profit-1")!;
+      expect(profitAfter.status).toBe(profitBefore.status);
+      expect(profitAfter.realizedPnlUsd).toBeCloseTo(profitBefore.realizedPnlUsd ?? 0);
     }));
 
   it("period filter drives summary and list", async () => {
