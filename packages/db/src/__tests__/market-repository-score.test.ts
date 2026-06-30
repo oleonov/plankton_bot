@@ -197,6 +197,37 @@ describe("ledger schema — score columns (audit §F3)", () => {
         reconciled INTEGER NOT NULL DEFAULT 0
       );
 
+      CREATE TABLE pnl_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fill_id TEXT NOT NULL,
+        position_id TEXT NOT NULL,
+        delta REAL NOT NULL,
+        filled_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE market_resolutions (
+        condition_id TEXT PRIMARY KEY,
+        resolution TEXT NOT NULL,
+        resolved_at TEXT NOT NULL,
+        detected_at TEXT NOT NULL,
+        source TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'settled'
+      );
+
+      CREATE TABLE settlement_ledger (
+        settlement_id TEXT PRIMARY KEY,
+        condition_id TEXT NOT NULL,
+        position_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        resolution TEXT NOT NULL,
+        settlement_price REAL NOT NULL,
+        size REAL NOT NULL,
+        delta REAL NOT NULL,
+        settled_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
       CREATE TABLE leg_states (
         token_id TEXT PRIMARY KEY,
         sell_count INTEGER NOT NULL DEFAULT 0,

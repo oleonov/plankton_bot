@@ -240,6 +240,29 @@ function seedSellPnl(input: {
     .run(input.fillId, input.positionId, input.pnl, input.filledAt);
 }
 
+function seedSellFillWithoutPnl(input: {
+  tokenId: string;
+  conditionId: string;
+  fillId: string;
+  orderId: string;
+  price: number;
+  size: number;
+  source: string;
+  filledAt: string;
+}) {
+  seedOrderFill({ ...input, side: "sell" });
+}
+
+async function withSavepoint<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  conn.db.exec(`SAVEPOINT ${name}`);
+  try {
+    return await fn();
+  } finally {
+    conn.db.exec(`ROLLBACK TO ${name}`);
+    conn.db.exec(`RELEASE ${name}`);
+  }
+}
+
 async function fetchCycles(path = "/api/v1/pnl/position-cycles?period=all&pageSize=50") {
   const res = await app.inject({ method: "GET", url: path, headers: authHeaders() });
   expect(res.statusCode).toBe(200);
@@ -745,6 +768,169 @@ describe("GET /pnl/position-cycles", () => {
     // Known closed cycles sum to 1000.3; mismatched ledger deltas are excluded.
     expect(body.data.summary.closedRealizedPnlUsd).toBeCloseTo(1000.3);
   });
+
+  it("clears a legacy orphan sell warning once the missing pnl_ledger row exists", async () =>
+    withSavepoint("legacy_orphan_sell", async () => {
+      seedMarket("tok-legacy-orphan", "cond-legacy-orphan", "legacy-orphan-sell-market");
+      seedPosition({
+        positionId: "pos-legacy-orphan",
+        tokenId: "tok-legacy-orphan",
+        conditionId: "cond-legacy-orphan",
+        status: "closed",
+        size: 0,
+        avgEntry: 0.006,
+        costBasis: 0,
+        realizedPnl: 0.12631,
+        openedAt: isoHoursAgo(40),
+        closedAt: isoHoursAgo(30),
+      });
+      seedBuyLot({
+        positionId: "pos-legacy-orphan",
+        tokenId: "tok-legacy-orphan",
+        conditionId: "cond-legacy-orphan",
+        fillId: "buy-legacy-orphan",
+        orderId: "ord-buy-legacy-orphan",
+        price: 0.006,
+        size: 7.43,
+        source: "FALLBACK",
+        filledAt: isoHoursAgo(40),
+      });
+      seedSellFillWithoutPnl({
+        tokenId: "tok-legacy-orphan",
+        conditionId: "cond-legacy-orphan",
+        fillId: "sell-legacy-orphan",
+        orderId: "ord-sell-legacy-orphan",
+        price: 0.023,
+        size: 7.43,
+        source: "orphan-reconciled-test",
+        filledAt: isoHoursAgo(30),
+      });
+
+      const before = await fetchCycles();
+      const warning = before.data.accountingWarnings.find(
+        (cycle) => cycle.positionId === "pos-legacy-orphan",
+      )!;
+      expect(warning.status).toBe("UNKNOWN_ACCT");
+      expect(warning.accountingReasons).toContain("ledger_mismatch");
+
+      conn.db
+        .prepare(
+          "INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at) VALUES (?, ?, ?, ?)",
+        )
+        .run("sell-legacy-orphan", "pos-legacy-orphan", 0.12631, isoHoursAgo(30));
+
+      const after = await fetchCycles();
+      expect(
+        after.data.accountingWarnings.some((cycle) => cycle.positionId === "pos-legacy-orphan"),
+      ).toBe(false);
+      const reconciled = after.data.cycles.find(
+        (cycle) => cycle.positionId === "pos-legacy-orphan",
+      )!;
+      expect(reconciled.status).toBe("CLOSED_PROFIT");
+      expect(reconciled.realizedPnlUsd).toBeCloseTo(0.12631);
+      expect(reconciled.netPnlUsd).toBeCloseTo(0.12631);
+      expect(reconciled.returnedUsd).toBeCloseTo(0.17089);
+    }));
+
+  it("clears a duplicate resolution-cycle warning once the missing settlement row exists", async () =>
+    withSavepoint("legacy_doge_settlement", async () => {
+      seedMarket("tok-legacy-doge", "cond-legacy-doge", "legacy-doge-updown", "Down");
+      conn.db
+        .prepare(
+          `INSERT INTO market_resolutions
+             (condition_id, resolution, resolved_at, detected_at, source, status)
+           VALUES ('cond-legacy-doge', 'algo-redeem', ?, ?, 'algo', 'detected')`,
+        )
+        .run(isoHoursAgo(50), isoHoursAgo(50));
+
+      seedPosition({
+        positionId: "pos-legacy-doge-first",
+        tokenId: "tok-legacy-doge",
+        conditionId: "cond-legacy-doge",
+        status: "closed",
+        size: 0,
+        avgEntry: 0.01,
+        costBasis: 0.525,
+        realizedPnl: -0.525,
+        openedAt: isoHoursAgo(50),
+        closedAt: isoHoursAgo(49),
+      });
+      seedBuyLot({
+        positionId: "pos-legacy-doge-first",
+        tokenId: "tok-legacy-doge",
+        conditionId: "cond-legacy-doge",
+        fillId: "buy-legacy-doge-first",
+        orderId: "ord-buy-legacy-doge-first",
+        price: 0.01,
+        size: 52.5,
+        source: "probe-entry",
+        filledAt: isoHoursAgo(50),
+      });
+      conn.db
+        .prepare(
+          `INSERT INTO settlement_ledger
+             (settlement_id, condition_id, position_id, token_id, resolution,
+              settlement_price, size, delta, settled_at)
+           VALUES ('settle-legacy-doge-first', 'cond-legacy-doge', 'pos-legacy-doge-first',
+                   'tok-legacy-doge', 'algo-redeem', 0, 52.5, -0.525, ?)`,
+        )
+        .run(isoHoursAgo(49));
+
+      seedPosition({
+        positionId: "pos-legacy-doge-second",
+        tokenId: "tok-legacy-doge",
+        conditionId: "cond-legacy-doge",
+        status: "closed",
+        size: 0,
+        avgEntry: 0.01,
+        costBasis: 0.525,
+        realizedPnl: -0.525,
+        openedAt: isoHoursAgo(48),
+        closedAt: isoHoursAgo(47),
+      });
+      seedBuyLot({
+        positionId: "pos-legacy-doge-second",
+        tokenId: "tok-legacy-doge",
+        conditionId: "cond-legacy-doge",
+        fillId: "buy-legacy-doge-second",
+        orderId: "ord-buy-legacy-doge-second",
+        price: 0.01,
+        size: 52.5,
+        source: "probe-entry",
+        filledAt: isoHoursAgo(48),
+      });
+
+      const before = await fetchCycles();
+      const warning = before.data.accountingWarnings.find(
+        (cycle) => cycle.positionId === "pos-legacy-doge-second",
+      )!;
+      expect(warning.status).toBe("UNKNOWN_ACCT");
+      expect(warning.accountingReasons).toContain("ledger_mismatch");
+
+      conn.db
+        .prepare(
+          `INSERT INTO settlement_ledger
+             (settlement_id, condition_id, position_id, token_id, resolution,
+              settlement_price, size, delta, settled_at)
+           VALUES ('settle-legacy-doge-second', 'cond-legacy-doge', 'pos-legacy-doge-second',
+                   'tok-legacy-doge', 'algo-redeem', 0, 52.5, -0.525, ?)`,
+        )
+        .run(isoHoursAgo(47));
+
+      const after = await fetchCycles();
+      expect(
+        after.data.accountingWarnings.some(
+          (cycle) => cycle.positionId === "pos-legacy-doge-second",
+        ),
+      ).toBe(false);
+      const reconciled = after.data.cycles.find(
+        (cycle) => cycle.positionId === "pos-legacy-doge-second",
+      )!;
+      expect(reconciled.status).toBe("HELD_TO_LOSING_RESOLUTION");
+      expect(reconciled.settlementReturnedUsd).toBeCloseTo(0);
+      expect(reconciled.realizedPnlUsd).toBeCloseTo(-0.525);
+      expect(reconciled.netPnlUsd).toBeCloseTo(-0.525);
+    }));
 
   it("period filter drives summary and list", async () => {
     const all = await fetchCycles("/api/v1/pnl/position-cycles?period=all&pageSize=50");

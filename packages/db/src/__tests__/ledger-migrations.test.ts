@@ -1149,3 +1149,183 @@ describe("migration 066 — orphan fill correction (token 34928863…)", () => {
     ).toBe("startup-adoption");
   });
 });
+
+describe("migration 079 — legacy accounting warning backfill", () => {
+  const LEADER_TOKEN =
+    "34928863542604747577136069195537517831839938618288352858238947625130728675067";
+  const LEADER_CONDITION = "0x84a45609bfdb644a15be71d679fbb4f115dea9109d9bac96e1bc049853e002f6";
+  const LEADER_POSITION = `pos-${LEADER_TOKEN}-1779091115233`;
+  const LEADER_FILL = "212af2ee-9b5f-430d-be71-bfa9b99bc3a8#maker:0";
+  const DOGE_TOKEN =
+    "83537444247216274574034531285415887826691018030217949635658894281737339757145";
+  const DOGE_CONDITION = "0x63acbf4e10da74f77c5fde2ba04607af499531b5960cc879c4d6ee03ad66a07f";
+  const DOGE_POSITION = `pos-${DOGE_TOKEN}-1776980204052`;
+  const DOGE_SETTLEMENT = "legacy-backfill-doge-20260630-pos-1776980204052";
+
+  beforeEach(() => {
+    db.exec(`
+      CREATE TABLE fills (
+        fill_id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        condition_id TEXT NOT NULL DEFAULT '',
+        side TEXT NOT NULL,
+        price REAL NOT NULL,
+        size REAL NOT NULL,
+        size_usdc REAL NOT NULL,
+        reconciled INTEGER NOT NULL DEFAULT 1,
+        filled_at TEXT NOT NULL
+      );
+      CREATE TABLE pnl_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fill_id TEXT NOT NULL,
+        position_id TEXT NOT NULL,
+        delta REAL NOT NULL,
+        filled_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE inventory_lots (
+        lot_id TEXT PRIMARY KEY,
+        position_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        size REAL NOT NULL,
+        remaining_size REAL NOT NULL,
+        entry_price REAL NOT NULL,
+        cost_usdc REAL NOT NULL,
+        fill_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE market_resolutions (
+        condition_id TEXT PRIMARY KEY,
+        resolution TEXT NOT NULL,
+        resolved_at TEXT NOT NULL,
+        detected_at TEXT NOT NULL,
+        source TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'settled'
+      );
+      CREATE TABLE settlement_ledger (
+        settlement_id TEXT PRIMARY KEY,
+        condition_id TEXT NOT NULL,
+        position_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        resolution TEXT NOT NULL,
+        settlement_price REAL NOT NULL,
+        size REAL NOT NULL,
+        delta REAL NOT NULL,
+        settled_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+  });
+
+  function seedLeaderCase(): void {
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, realized_pnl, status, opened_at, closed_at, updated_at)
+       VALUES (?, ?, ?, 'buy', 0, 0.006, 0.000006, 1.105584, 'closed',
+               '2026-05-18T07:58:35.233Z', '2026-06-12T04:08:58.639Z',
+               '2026-06-12T04:08:58.639Z')`,
+    ).run(LEADER_POSITION, LEADER_TOKEN, LEADER_CONDITION);
+    db.prepare(
+      `INSERT INTO fills
+         (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at)
+       VALUES (?, '0xe43fd65351bf7015', ?, ?, 'sell', 0.023, 7.43, 0.17089,
+               '2026-06-05T03:48:51.000Z')`,
+    ).run(LEADER_FILL, LEADER_TOKEN, LEADER_CONDITION);
+  }
+
+  function seedDogeCase(): void {
+    db.prepare(
+      `INSERT INTO market_resolutions
+         (condition_id, resolution, resolved_at, detected_at, source, status)
+       VALUES (?, 'algo-redeem', '2026-04-23T21:35:24.618Z',
+               '2026-04-23T21:35:24.618Z', 'algo', 'detected')`,
+    ).run(DOGE_CONDITION);
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, realized_pnl, status, opened_at, closed_at, updated_at)
+       VALUES (?, ?, ?, 'buy', 0, 0.01, 0.525, -0.525, 'closed',
+               '2026-04-23T21:36:44.052Z', '2026-04-23T21:39:24.426Z',
+               '2026-04-23T21:39:24.426Z')`,
+    ).run(DOGE_POSITION, DOGE_TOKEN, DOGE_CONDITION);
+    db.prepare(
+      `INSERT INTO inventory_lots
+         (lot_id, position_id, token_id, side, size, remaining_size, entry_price,
+          cost_usdc, fill_id, created_at)
+       VALUES ('lot-doge-second', ?, ?, 'buy', 52.5, 0, 0.01, 0.525,
+               'eac8228d-75fb-457a-834-test#maker:0', '2026-04-23T21:36:39.000Z')`,
+    ).run(DOGE_POSITION, DOGE_TOKEN);
+  }
+
+  it("inserts the two exact missing accounting rows and is idempotent", () => {
+    seedLeaderCase();
+    seedDogeCase();
+    db.prepare(
+      `INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at)
+       VALUES ('unrelated-fill', 'unrelated-position', 9, '2026-01-01T00:00:00Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO settlement_ledger
+         (settlement_id, condition_id, position_id, token_id, resolution,
+          settlement_price, size, delta, settled_at)
+       VALUES ('unrelated-settlement', 'cond-other', 'pos-other', 'tok-other',
+               'algo-redeem', 0, 1, -1, '2026-01-01T00:00:00Z')`,
+    ).run();
+
+    const sql = readMigration("079_legacy_accounting_backfill_20260630.sql");
+    db.exec(sql);
+    db.exec(sql);
+
+    const leaderRows = db
+      .prepare("SELECT delta FROM pnl_ledger WHERE fill_id = ? AND position_id = ?")
+      .all(LEADER_FILL, LEADER_POSITION) as Array<{ delta: number }>;
+    expect(leaderRows).toHaveLength(1);
+    expect(leaderRows[0]!.delta).toBeCloseTo(0.12631, 6);
+
+    const dogeRows = db
+      .prepare(
+        "SELECT settlement_price, size, delta FROM settlement_ledger WHERE settlement_id = ?",
+      )
+      .all(DOGE_SETTLEMENT) as Array<{ settlement_price: number; size: number; delta: number }>;
+    expect(dogeRows).toHaveLength(1);
+    expect(dogeRows[0]!.settlement_price).toBe(0);
+    expect(dogeRows[0]!.size).toBeCloseTo(52.5, 6);
+    expect(dogeRows[0]!.delta).toBeCloseTo(-0.525, 6);
+
+    expect(
+      (db.prepare("SELECT COUNT(*) AS count FROM pnl_ledger").get() as { count: number }).count,
+    ).toBe(2);
+    expect(
+      (db.prepare("SELECT COUNT(*) AS count FROM settlement_ledger").get() as { count: number })
+        .count,
+    ).toBe(2);
+  });
+
+  it("does nothing when exact forensic guards do not match", () => {
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, realized_pnl, status, opened_at, updated_at)
+       VALUES ('pos-near-miss', ?, ?, 'buy', 0, 1.105584, 'closed',
+               '2026-05-18T07:58:35.233Z', '2026-06-12T04:08:58.639Z')`,
+    ).run(LEADER_TOKEN, LEADER_CONDITION);
+    db.prepare(
+      `INSERT INTO fills
+         (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at)
+       VALUES (?, '0xe43fd65351bf7015', ?, ?, 'sell', 0.023, 7.43, 0.17089,
+               '2026-06-05T03:48:51.000Z')`,
+    ).run(LEADER_FILL, LEADER_TOKEN, LEADER_CONDITION);
+
+    db.exec(readMigration("079_legacy_accounting_backfill_20260630.sql"));
+
+    expect(
+      (db.prepare("SELECT COUNT(*) AS count FROM pnl_ledger").get() as { count: number }).count,
+    ).toBe(0);
+    expect(
+      (db.prepare("SELECT COUNT(*) AS count FROM settlement_ledger").get() as { count: number })
+        .count,
+    ).toBe(0);
+  });
+});
