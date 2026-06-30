@@ -351,13 +351,13 @@ export class SignalToOrderBridge {
     return null;
   }
 
-  // Track A live enforcement: the live arm of the Krabs-specific add-throttle
-  // shadow (DeadMarketShadowModule). Shares the SAME evaluator so the live block
-  // and the shadow telemetry classify identically (fail-open semantics: any
-  // non-throttle_candidate verdict — incl. unknown/missing leg — allows). Opt-in
-  // only: returns false immediately unless policy.trackAAddThrottle.enforce is on,
-  // so the kill switch is a single hot-reloadable boolean with no restart.
-  // Returns true when the BUY was blocked (caller must `return` without placing).
+  // Track A live enforcement: blocks an approved add/scale-in BUY before
+  // PlaceOrderRequested. Uses the shared Track A add-throttle evaluator
+  // (fail-open semantics: any non-throttle_candidate verdict — incl.
+  // unknown/missing leg — allows). Opt-in only: returns false immediately unless
+  // policy.trackAAddThrottle.enforce is on, so the kill switch is a single
+  // hot-reloadable boolean with no restart. Returns true when the BUY was
+  // blocked (caller must `return` without placing).
   private async enforceTrackAAddThrottle(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     policy: ExecutionPolicy,

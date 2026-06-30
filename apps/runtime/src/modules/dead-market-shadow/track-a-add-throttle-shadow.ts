@@ -1,8 +1,11 @@
-// Track A "add throttle" shadow telemetry. This is KRABS-SPECIFIC risk
-// telemetry, NOT Plankton logic — under this rule Plankton loses money; it is
-// kept only because a Krabs replay improved Krabs by +$74.69 at the 60-minute /
-// no-SELL threshold (30m, 120m, 180m were worse). The function is PURE and
-// observational: it never blocks, resizes, reprices, or cancels an order.
+// Track A "add throttle" — the shared, pure Track A add-throttle evaluator.
+// KRABS-SPECIFIC risk logic, NOT Plankton logic — under this rule Plankton loses
+// money; it is kept only because a Krabs replay improved Krabs by +$74.69 at the
+// 60-minute / no-SELL threshold (30m, 120m, 180m were worse). The function is
+// PURE (no side effects), but its verdict drives LIVE enforcement in the
+// signal-to-order bridge: an approved add BUY is blocked before
+// PlaceOrderRequested when the result is a throttle_candidate and
+// policy.trackAAddThrottle.enforce is on.
 //
 // Rule: flag an add/scale-in BUY as a throttle candidate when
 //   decisionType == "add" AND leg age >= 60 minutes AND no SELL has occurred in
@@ -101,11 +104,10 @@ export interface TrackASignalEvaluation {
   legStatePresent: boolean;
 }
 
-// Single source of truth shared by the shadow module and the live bridge so the
-// shadow telemetry and any live enforcement classify identically (same
-// fail-open semantics). The leg repo is queried ONLY for adds; entries/unknowns
-// short-circuit without a lookup. A null/absent repo or unparseable leg start
-// fails open to `unknown` (never a throttle_candidate).
+// Single source of truth for Track A classification, used by the live bridge
+// enforcement (same fail-open semantics). The leg repo is queried ONLY for adds;
+// entries/unknowns short-circuit without a lookup. A null/absent repo or
+// unparseable leg start fails open to `unknown` (never a throttle_candidate).
 export function evaluateSignalTrackAAddThrottle(
   signal: TrackASignalInput,
   legStateRepo: LegStateRepository | undefined,
