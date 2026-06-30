@@ -14,6 +14,7 @@ import { bootstrapControlDb, bootstrapLedgerDb } from "@krabs/db";
 import { buildServer } from "./server.js";
 import { LedgerPool } from "./ledger-pool.js";
 import { resolveStartupLedgerProfile } from "./startup-profile.js";
+import { StatusHistorySampler } from "./status-history-sampler.js";
 
 async function main(): Promise<void> {
   const config = loadEnv();
@@ -80,7 +81,18 @@ async function main(): Promise<void> {
   // eslint-disable-next-line no-console
   console.log(`krabs API listening on :${port}`);
 
+  // Records Status-screen history from the API process (so a runtime outage is
+  // captured as crit, not a gap). Fail-soft — never affects request handling.
+  const statusHistorySampler = new StatusHistorySampler({
+    ledgerDb: ledgerConn.db,
+    controlDb: controlConn.db,
+    ledgerPool,
+    marketDataStaleThresholdMs: config.marketDataStaleThresholdMs,
+  });
+  statusHistorySampler.start();
+
   const shutdown = async () => {
+    statusHistorySampler.stop();
     await app.close();
     ledgerPool.closeAll();
     ledgerConn.close();

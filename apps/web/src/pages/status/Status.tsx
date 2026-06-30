@@ -1,10 +1,37 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSystemHealth } from "../../api/hooks.ts";
-import type { Sev, SystemHealthResource } from "../../api/types.ts";
+import type { HistPoint, Sev, SystemHealthResource } from "../../api/types.ts";
 import { analyze, resSev, SEV_WORD } from "./severity.ts";
 import "./status.css";
 
-const GAP_BARS = 40;
+const GAP_BARS = 45;
+
+function histDate(t: number): string {
+  return new Date(t).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function humanizeDuration(secs: number): string {
+  const s = Math.max(0, Math.round(secs));
+  if (s < 60) return `${s} secs`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} mins`;
+  const h = Math.floor(m / 60);
+  return `${h} hrs ${m % 60} mins`;
+}
+
+/** status.claude.com-style per-day hover text: date + outcome + duration. */
+function histTitle(p: HistPoint): string {
+  const date = histDate(p.t);
+  if (p.s === "nodata") return `${date} — No data (before monitoring started).`;
+  if (p.s === "ok") return `${date} — No downtime recorded on this day.`;
+  const dur = humanizeDuration(p.s === "crit" ? p.critSecs : p.downSecs);
+  const label = p.s === "crit" ? "Major outage" : "Partial outage";
+  return `${date} — ${label}  ${dur}${p.detail ? ` · ${p.detail}` : ""}`;
+}
 
 function Gauge({ val, max, sev }: { val: number; max: number; sev: Sev }) {
   const R = 58,
@@ -67,16 +94,29 @@ function Spark({ data, sev }: { data: number[]; sev: Sev }) {
   );
 }
 
-/** Statuspage-style uptime/history bar. Empty history => neutral "gap" bars. */
-function HistBar({ hist, width }: { hist: Sev[]; width?: number }) {
-  const bars: Sev[] | "gap"[] = hist.length > 0 ? hist : (Array(GAP_BARS).fill("gap") as "gap"[]);
+/**
+ * Statuspage-style per-day history bar. The API always returns a full window
+ * (nodata for un-sampled days); the empty fallback is only a defensive guard.
+ * Every bar carries a native-title tooltip — including green/ok and nodata days.
+ */
+function HistBar({ hist, width }: { hist: HistPoint[]; width?: number }) {
+  const points: HistPoint[] =
+    hist.length > 0
+      ? hist
+      : Array.from({ length: GAP_BARS }, () => ({
+          t: 0,
+          s: "nodata" as const,
+          downSecs: 0,
+          critSecs: 0,
+        }));
   return (
     <div className="uptime" style={width ? { width } : undefined}>
-      {bars.map((s, i) => (
+      {points.map((p, i) => (
         <i
           key={i}
-          className={s === "gap" ? "gap" : s}
-          style={{ height: s === "ok" ? "55%" : "100%" }}
+          className={p.s}
+          style={{ height: p.s === "ok" ? "55%" : p.s === "nodata" ? "40%" : "100%" }}
+          title={p.t ? histTitle(p) : undefined}
         />
       ))}
     </div>
@@ -118,6 +158,9 @@ export function Status() {
 
   const { global, sections, probs } = analysis;
   const secs = Math.max(0, Math.round((now - dataUpdatedAt) / 1000));
+  const windowDays = data.uptodayHist.length || GAP_BARS;
+  // Unknown until the first sample — render "—", never a fabricated 100%.
+  const uptimePctTxt = data.uptimePct === null ? "—" : `${data.uptimePct}%`;
   const maxErr = Math.max(...data.errors.hist.map((h) => h.n), 1);
   const lockedDot =
     data.db.locked === null
@@ -176,8 +219,15 @@ export function Status() {
             {data.paused ? `⏸ paused · ${data.pauseReason ?? "manual"}` : "▶ running"}
           </span>
           <div className="uptoday">
-            <span className="lab">uptime today · {data.uptimePct}%</span>
+            <span className="lab">
+              uptime · last {windowDays}d · {uptimePctTxt}
+            </span>
             <HistBar hist={data.uptodayHist} width={200} />
+            <div className="upfoot">
+              <span>{windowDays}d ago</span>
+              <span>{uptimePctTxt} uptime</span>
+              <span>today</span>
+            </div>
           </div>
           <div className="kv">
             <span className="k">version</span>
@@ -269,18 +319,18 @@ export function Status() {
                 <div className="big">
                   {x.s === "crit" ? "—" : x.lat !== null ? x.lat : "·"}
                   <span className="u">
-                    {x.lat !== null && x.s !== "crit"
-                      ? " ms"
-                      : x.s === "crit"
-                        ? " no resp"
-                        : " reachable"}
+                    {x.s === "crit" ? " no resp" : x.lat !== null ? " ms" : " not sampled"}
                   </span>
                 </div>
                 <div className={"err" + (typeof x.err === "number" && x.err > 1 ? " bad" : "")}>
                   {x.err === null ? "n/a" : `${x.err}%`} err
                 </div>
               </div>
-              <Spark data={x.hist} sev={x.s} />
+              {x.hist.length >= 2 ? (
+                <Spark data={x.hist} sev={x.s} />
+              ) : (
+                <div className="depnote">latency history not sampled · Phase 2</div>
+              )}
             </div>
           ))}
         </div>
@@ -320,6 +370,12 @@ export function Status() {
                   key={i}
                   className={h.crit ? "crit" : h.n > 0 ? "has" : ""}
                   style={{ height: Math.max(8, (h.n / maxErr) * 100) + "%" }}
+                  title={`${new Date(h.t).toLocaleString("en-GB", {
+                    day: "numeric",
+                    month: "short",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })} — ${h.n} error${h.n === 1 ? "" : "s"}`}
                 />
               ))}
             </div>

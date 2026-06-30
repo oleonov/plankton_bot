@@ -4,12 +4,15 @@
  * (the invariant: a clean problem list must render an OK hero). Ported from the
  * design prototype `analyze()` / `resSev()`; thresholds live only here.
  */
+import { STATUS_SEV_RANK, worstStatusSev } from "@krabs/domain";
 import type { Sev, SystemHealthData, SystemHealthResource } from "../../api/types.ts";
 
-const RANK: Record<Sev, number> = { ok: 0, warn: 1, crit: 2 };
+// Rank order + worst-of-many come from @krabs/domain so the client severity model
+// and the server-side StatusHistorySampler can never drift.
+const RANK = STATUS_SEV_RANK;
 
 export function worst(arr: Sev[]): Sev {
-  return arr.reduce<Sev>((a, s) => (RANK[s] > RANK[a] ? s : a), "ok");
+  return worstStatusSev(arr);
 }
 
 export const SEV_WORD: Record<Sev, "OK" | "WARNING" | "CRITICAL"> = {

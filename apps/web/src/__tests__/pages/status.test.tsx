@@ -61,8 +61,21 @@ describe("Status page", () => {
     expect(text).toContain("SQLite locked n/a");
     expect(text).toContain("acct warnings n/a · UNKNOWN n/a");
     expect(text).toContain("n/a err"); // dependency error-rate is unmeasured
+    expect(text).toContain("not sampled"); // dependency latency is unmeasured (Phase 2)
+    expect(text).not.toContain("reachable"); // no longer claims more than it measures
     expect(text).not.toContain("SQLite locked ×0");
     expect(text).not.toContain("acct warnings 0");
+  });
+
+  it("renders unknown uptime as — instead of a fabricated 100%", async () => {
+    server.use(
+      http.get("/api/v1/system-health", () => ok({ ...mockSystemHealth, uptimePct: null })),
+    );
+    const { container } = renderWithProviders(<Status />);
+    await screen.findByText("All systems nominal — no active problems");
+    const uptoday = container.querySelector(".uptoday")!.textContent ?? "";
+    expect(uptoday).toContain("—");
+    expect(uptoday).not.toContain("100%");
   });
 
   it("shadow section carries no verdict text or status/lane badges", async () => {

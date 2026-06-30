@@ -4,12 +4,26 @@ import { readFileSync, statSync, statfsSync } from "node:fs";
 import os from "node:os";
 import { ok } from "../errors.js";
 import type { LedgerPool } from "../ledger-pool.js";
-import { resolveActiveLedger } from "./status.js";
+import { resolveActiveLedger } from "../active-ledger.js";
+import {
+  collectSystemHealthSnapshot,
+  countOpenBreakers,
+  safe,
+  type InfraAlertRow,
+  type Sev,
+} from "../system-health-snapshot.js";
+import {
+  computeUptimePct,
+  readStatusHistory,
+  STATUS_HISTORY_WINDOW_DAYS,
+  type HistPoint,
+} from "../status-history-store.js";
 
-// Read-only technical health snapshot for the Status screen. Severity is NOT
-// computed here — the UI derives ok/warn/crit from these raw values via one
-// shared helper, so thresholds live in a single place. Every probe is isolated
-// so a single failure degrades to a safe default rather than failing the page.
+// Read-only technical health snapshot for the Status screen. The per-module /
+// uptime severity comes from the SHARED collectSystemHealthSnapshot (also used
+// by the StatusHistorySampler) so the live screen and recorded history can never
+// disagree. History bars come from status_history (control.db). Every probe is
+// isolated so a single failure degrades to a safe default rather than 500ing.
 
 interface SystemHealthOpts {
   db: Database.Database;
@@ -18,14 +32,12 @@ interface SystemHealthOpts {
   marketDataStaleThresholdMs?: number;
 }
 
-type Sev = "ok" | "warn" | "crit";
-
 interface ModuleHealth {
   nm: string;
   s: Sev;
   since: string;
   detail: string;
-  hist: Sev[];
+  hist: HistPoint[];
 }
 interface ResourceGauge {
   nm: string;
@@ -54,8 +66,9 @@ interface SystemHealthData {
   tradingState: "RUNNING" | "PAUSED";
   paused: boolean;
   pauseReason: string | null;
-  uptimePct: number;
-  uptodayHist: Sev[];
+  // null = no observed history yet (unknown) — UI renders "—", never a fake 100%.
+  uptimePct: number | null;
+  uptodayHist: HistPoint[];
   // null = no market-data freshness metric available yet (unknown, not "fresh").
   marketDataStale: boolean | null;
   reconDrift: boolean;
@@ -68,7 +81,7 @@ interface SystemHealthData {
     l50_24h: number;
     l60_24h: number;
     breakers: string;
-    hist: { n: number; crit: boolean }[];
+    hist: { n: number; crit: boolean; t: number }[];
     top: { lv: "l50" | "l60"; code: string; cnt: number; when: string }[];
   };
   db: {
@@ -97,14 +110,6 @@ const SHADOW_REGISTRY: { nm: string; added: string }[] = [
   { nm: "ProfileLadder / sell-side shadow", added: "Jun 9" },
 ];
 
-function safe<T>(fn: () => T, fallback: T): T {
-  try {
-    return fn();
-  } catch {
-    return fallback;
-  }
-}
-
 function readGitSha(): string {
   return safe(() => readFileSync("/app/GIT_SHA", "utf-8").trim(), "");
 }
@@ -132,22 +137,6 @@ function bytesToMb(bytes: number): number {
 }
 function fileSizeMb(path: string): number {
   return safe(() => bytesToMb(statSync(path).size), 0);
-}
-
-function readControlState(controlDb: Database.Database | undefined): {
-  paused: boolean;
-  status: string;
-} {
-  if (!controlDb) return { paused: false, status: "unknown" };
-  return safe(
-    () => {
-      const row = controlDb
-        .prepare("SELECT runtime_status, paused FROM runtime_control_state WHERE id = 1")
-        .get() as { runtime_status?: string; paused?: number } | undefined;
-      return { paused: (row?.paused ?? 0) === 1, status: row?.runtime_status ?? "unknown" };
-    },
-    { paused: false, status: "unknown" },
-  );
 }
 
 function readHostResources(dbPath: string, walMb: number): ResourceGauge[] {
@@ -207,43 +196,6 @@ function readHostResources(dbPath: string, walMb: number): ResourceGauge[] {
   return [disk, cpu, mem, wal];
 }
 
-interface InfraAlertRow {
-  code: string;
-  severity: "warning" | "error";
-  source: string;
-  capturedAt: string;
-}
-
-function readInfraAlerts(db: Database.Database, sinceMs: number): InfraAlertRow[] {
-  const sinceIso = new Date(Date.now() - sinceMs).toISOString();
-  return safe(() => {
-    const rows = db
-      .prepare(
-        `SELECT labels, captured_at FROM runtime_metrics
-          WHERE metric_name = 'infra_alert' AND captured_at >= ?
-          ORDER BY captured_at DESC LIMIT 500`,
-      )
-      .all(sinceIso) as Array<{ labels: string | null; captured_at: string }>;
-    const out: InfraAlertRow[] = [];
-    for (const row of rows) {
-      if (!row.labels) continue;
-      const parsed = JSON.parse(row.labels) as {
-        code?: string;
-        severity?: string;
-        source?: string;
-      };
-      if (!parsed.code || !parsed.source) continue;
-      out.push({
-        code: parsed.code,
-        severity: parsed.severity === "warning" ? "warning" : "error",
-        source: parsed.source,
-        capturedAt: row.captured_at,
-      });
-    }
-    return out;
-  }, []);
-}
-
 function humanizeAgo(iso: string): string {
   const ms = Date.now() - Date.parse(iso);
   if (!Number.isFinite(ms) || ms < 0) return "now";
@@ -262,15 +214,20 @@ function buildErrors(alerts24h: InfraAlertRow[]): SystemHealthData["errors"] {
   const inLastHour = (a: InfraAlertRow) => Date.parse(a.capturedAt) >= oneHourAgo;
   const l50 = alerts24h.filter((a) => a.severity === "warning");
   const l60 = alerts24h.filter((a) => a.severity === "error");
-  const breakerOpen = alerts24h.filter(
-    (a) => /BREAKER|CIRCUIT/i.test(a.code) && inLastHour(a),
-  ).length;
+  const breakerOpen = countOpenBreakers(alerts24h);
 
-  // 24 hourly buckets, oldest first.
-  const hist = Array.from({ length: 24 }, () => ({ n: 0, crit: false }));
+  // 24 hourly buckets, oldest first; each carries its hour-start timestamp for
+  // the bar tooltip.
+  const hourMs = 3_600_000;
   const now = Date.now();
+  const nowHour = Math.floor(now / hourMs) * hourMs;
+  const hist = Array.from({ length: 24 }, (_, i) => ({
+    n: 0,
+    crit: false,
+    t: nowHour - (23 - i) * hourMs,
+  }));
   for (const a of alerts24h) {
-    const ageH = Math.floor((now - Date.parse(a.capturedAt)) / 3_600_000);
+    const ageH = Math.floor((now - Date.parse(a.capturedAt)) / hourMs);
     const bucket = hist[23 - ageH];
     if (bucket) {
       bucket.n += 1;
@@ -305,8 +262,9 @@ function depFromAlerts(nm: string, codeRe: RegExp, alerts: InfraAlertRow[]): Dep
   const recent = alerts.filter((a) => codeRe.test(a.code) || codeRe.test(a.source));
   const hasError = recent.some((a) => a.severity === "error");
   const hasWarn = recent.some((a) => a.severity === "warning");
-  // No latency/error-rate sampling exists yet — reachability/severity only.
-  // err is null (unmeasured), never a fabricated 0.
+  // No latency/error-rate sampling exists yet (Phase 2) — reachability/severity
+  // only. err is null (unmeasured), never a fabricated 0; hist stays empty so the
+  // UI renders an explicit "not sampled" state rather than a fake "about to fill".
   return {
     nm,
     s: hasError ? "crit" : hasWarn ? "warn" : "ok",
@@ -314,30 +272,6 @@ function depFromAlerts(nm: string, codeRe: RegExp, alerts: InfraAlertRow[]): Dep
     err: null,
     hist: [],
   };
-}
-
-// Real market-data freshness from the runtime metric the bot writes on every
-// MarketSnapshotReceived. null when the metric is absent (unknown) — we never
-// claim "fresh" without evidence.
-function readMarketDataStale(db: Database.Database, staleThresholdMs: number): boolean | null {
-  return safe<boolean | null>(() => {
-    const row = db
-      .prepare(
-        "SELECT captured_at AS ts FROM runtime_metrics WHERE metric_name = 'market_data_last_update' ORDER BY captured_at DESC LIMIT 1",
-      )
-      .get() as { ts?: string } | undefined;
-    if (!row?.ts) return null;
-    return Date.now() - new Date(row.ts).getTime() > staleThresholdMs;
-  }, null);
-}
-
-function countOpenDrifts(db: Database.Database): number {
-  return safe(() => {
-    const row = db
-      .prepare("SELECT COUNT(*) AS n FROM position_drifts WHERE status = 'open'")
-      .get() as { n: number };
-    return row.n;
-  }, 0);
 }
 
 function latestMigration(db: Database.Database): string {
@@ -349,47 +283,6 @@ function latestMigration(db: Database.Database): string {
   }, "unknown");
 }
 
-function buildModules(args: {
-  marketDataStale: boolean | null;
-  reconDrift: boolean;
-  paused: boolean;
-  breakerOpen: boolean;
-  runtimeAlive: boolean;
-  since: string;
-}): ModuleHealth[] {
-  const base = (nm: string, s: Sev, detail: string): ModuleHealth => ({
-    nm,
-    s,
-    since: args.since,
-    detail,
-    hist: [], // per-module history is not persisted yet (TODO)
-  });
-  const live: Sev = args.runtimeAlive ? "ok" : "crit";
-  // Unknown freshness (null) is a warning, not a silent "fresh".
-  const mdSev: Sev =
-    args.marketDataStale === true ? "crit" : args.marketDataStale === false ? live : "warn";
-  const mdDetail =
-    args.marketDataStale === true ? "STALE" : args.marketDataStale === false ? "fresh" : "unknown";
-  return [
-    base("scanner", live, args.runtimeAlive ? "scanning" : "no heartbeat"),
-    base("market data", mdSev, mdDetail),
-    base("strategy", live, args.runtimeAlive ? "live" : "no heartbeat"),
-    base(
-      "risk",
-      args.breakerOpen ? "crit" : live,
-      args.breakerOpen ? "breaker open" : "no breakers",
-    ),
-    base("execution", live, "posting"),
-    base(
-      "reconciliation",
-      args.reconDrift ? "crit" : live,
-      args.reconDrift ? "drift detected" : "no drift",
-    ),
-    base("redeem", live, "idle"),
-    base("manager / API", "ok", "responding"),
-  ];
-}
-
 function humanizeUptime(seconds: number): string {
   const d = Math.floor(seconds / 86_400);
   const h = Math.floor((seconds % 86_400) / 3_600);
@@ -399,26 +292,31 @@ function humanizeUptime(seconds: number): string {
 export const systemHealthRoutes: FastifyPluginAsync<SystemHealthOpts> = async (app, opts) => {
   app.get("/system-health", async () => {
     const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
+    const staleMs = opts.marketDataStaleThresholdMs ?? 120_000;
+    const now = Date.now();
+    const windowDays = STATUS_HISTORY_WINDOW_DAYS;
 
     const meta = readDeployMeta();
     const gitSha = readGitSha();
-    const control = readControlState(opts.controlDb);
-    const paused = control.paused;
-    const runtimeAlive = control.status === "running" || control.status === "ready_paused";
+
+    // Shared snapshot — same computation the StatusHistorySampler records.
+    const { snapshot, alerts1h, alerts24h } = collectSystemHealthSnapshot(db, opts.controlDb, staleMs);
+    const paused = snapshot.paused;
 
     const ledgerPath = safe(() => db.name, "");
     const controlPath = safe(() => opts.controlDb?.name ?? "", "");
     const walMb = ledgerPath ? fileSizeMb(`${ledgerPath}-wal`) : 0;
 
-    const alerts1h = readInfraAlerts(db, 3_600_000);
-    const alerts24h = readInfraAlerts(db, 86_400_000);
     const errors = buildErrors(alerts24h);
-    const breakerOpen = errors.breakers !== "closed";
-
-    const reconDrift = countOpenDrifts(db) > 0;
-    const marketDataStale = readMarketDataStale(db, opts.marketDataStaleThresholdMs ?? 120_000);
-
     const sinceUptime = humanizeUptime(process.uptime());
+
+    const modules: ModuleHealth[] = snapshot.modules.map((m) => ({
+      nm: m.nm,
+      s: m.s,
+      since: sinceUptime,
+      detail: m.detail,
+      hist: readStatusHistory(opts.controlDb, m.series, windowDays, now),
+    }));
 
     const data: SystemHealthData = {
       version: meta.version,
@@ -428,18 +326,11 @@ export const systemHealthRoutes: FastifyPluginAsync<SystemHealthOpts> = async (a
       tradingState: paused ? "PAUSED" : "RUNNING",
       paused,
       pauseReason: paused ? "see Risk / runtime control" : null,
-      uptimePct: runtimeAlive ? 100 : 0, // no downtime history yet (TODO)
-      uptodayHist: [], // uptime history not persisted yet (TODO)
-      marketDataStale,
-      reconDrift,
-      modules: buildModules({
-        marketDataStale,
-        reconDrift,
-        paused,
-        breakerOpen,
-        runtimeAlive,
-        since: sinceUptime,
-      }),
+      uptimePct: computeUptimePct(opts.controlDb, windowDays, now),
+      uptodayHist: readStatusHistory(opts.controlDb, "uptime", windowDays, now),
+      marketDataStale: snapshot.marketDataStale,
+      reconDrift: snapshot.reconDrift,
+      modules,
       resources: readHostResources(ledgerPath || os.tmpdir(), walMb),
       deps: [
         depFromAlerts("CLOB API", /CLOB|POLYMARKET_CLOB|ORDER/i, alerts1h),

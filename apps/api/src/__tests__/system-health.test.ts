@@ -122,6 +122,33 @@ describe("GET /api/v1/system-health", () => {
     expect(d.marketDataStale).toBeNull();
   });
 
+  it("returns history bars as a bounded window of objects with a numeric uptimePct", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/system-health",
+      headers: authHeaders(),
+    });
+    const d = res.json<{
+      data: {
+        uptimePct: number | null;
+        uptodayHist: { t: number; s: string }[];
+        modules: { hist: { t: number; s: string }[] }[];
+        errors: { hist: { t: number }[] };
+      };
+    }>().data;
+    // No status_history table in the in-memory DB → uptime is unknown (null),
+    // never a fabricated 100%.
+    expect(d.uptimePct).toBeNull();
+    // Bounded rolling window (45 daily bars). Every day is the honest "nodata"
+    // state — never a fake green.
+    expect(d.uptodayHist).toHaveLength(45);
+    expect(d.uptodayHist[0]).toHaveProperty("t");
+    expect(d.uptodayHist.every((p) => p.s === "nodata")).toBe(true);
+    expect(d.modules[0]!.hist).toHaveLength(45);
+    // error bars now carry an hour timestamp for the tooltip
+    expect(d.errors.hist[0]).toHaveProperty("t");
+  });
+
   it("returns the shadow registry as plain name/date items (no verdict/badge)", async () => {
     const res = await app.inject({
       method: "GET",

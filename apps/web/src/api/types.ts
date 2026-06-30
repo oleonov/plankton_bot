@@ -1046,12 +1046,25 @@ export interface ControlOverviewDTO {
 /** Severity level for the Status (system-health) screen. */
 export type Sev = "ok" | "warn" | "crit";
 
+/**
+ * One history bar/day. `s === "nodata"` is the honest "before monitoring
+ * started / not yet sampled" state — distinct from a healthy `ok`. `downSecs`
+ * (warn+crit) and `critSecs` (outage) drive the per-day duration tooltip.
+ */
+export interface HistPoint {
+  t: number;
+  s: Sev | "nodata";
+  downSecs: number;
+  critSecs: number;
+  detail?: string;
+}
+
 export interface SystemHealthModule {
   nm: string;
   s: Sev;
   since: string;
   detail: string;
-  hist: Sev[];
+  hist: HistPoint[];
 }
 export interface SystemHealthResource {
   nm: string;
@@ -1076,7 +1089,7 @@ export interface SystemHealthErrors {
   l50_24h: number;
   l60_24h: number;
   breakers: string;
-  hist: { n: number; crit: boolean }[];
+  hist: { n: number; crit: boolean; t: number }[];
   top: { lv: "l50" | "l60"; code: string; cnt: number; when: string }[];
 }
 export interface SystemHealthDb {
@@ -1102,8 +1115,9 @@ export interface SystemHealthData {
   tradingState: "RUNNING" | "PAUSED";
   paused: boolean;
   pauseReason: string | null;
-  uptimePct: number;
-  uptodayHist: Sev[];
+  /** null = no observed history yet (unknown) — render "—", never a fake 100%. */
+  uptimePct: number | null;
+  uptodayHist: HistPoint[];
   /** null = no freshness metric available (unknown, not "fresh"). */
   marketDataStale: boolean | null;
   reconDrift: boolean;

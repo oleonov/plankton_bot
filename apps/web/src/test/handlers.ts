@@ -473,6 +473,19 @@ export const mockPositionCycles = {
 };
 
 // ─── System health (Status screen) ───────────────────────────────────
+const MOCK_HIST_DAY = 86_400_000;
+const MOCK_HIST_NOW = Date.UTC(2026, 5, 30); // fixed for deterministic tests
+function mockHistWindow(states: ("ok" | "warn" | "crit" | "nodata")[]) {
+  const start = MOCK_HIST_NOW - (states.length - 1) * MOCK_HIST_DAY;
+  return states.map((s, i) => ({
+    t: start + i * MOCK_HIST_DAY,
+    s,
+    downSecs: s === "warn" ? 1800 : s === "crit" ? 3600 : 0,
+    critSecs: s === "crit" ? 3600 : 0,
+  }));
+}
+const MOCK_OK_WINDOW = mockHistWindow(Array(45).fill("ok"));
+
 export const mockSystemHealth = {
   version: "v61",
   deploy: "2026-06-29 03:11Z",
@@ -482,18 +495,30 @@ export const mockSystemHealth = {
   paused: false,
   pauseReason: null,
   uptimePct: 100,
-  uptodayHist: [] as ("ok" | "warn" | "crit")[],
+  uptodayHist: MOCK_OK_WINDOW,
   marketDataStale: false,
   reconDrift: false,
   modules: [
-    { nm: "scanner", s: "ok" as const, since: "4d 6h", detail: "scanning", hist: [] },
-    { nm: "market data", s: "ok" as const, since: "4d 6h", detail: "fresh", hist: [] },
-    { nm: "strategy", s: "ok" as const, since: "4d 6h", detail: "live", hist: [] },
-    { nm: "risk", s: "ok" as const, since: "4d 6h", detail: "no breakers", hist: [] },
-    { nm: "execution", s: "ok" as const, since: "4d 6h", detail: "posting", hist: [] },
-    { nm: "reconciliation", s: "ok" as const, since: "4d 6h", detail: "no drift", hist: [] },
-    { nm: "redeem", s: "ok" as const, since: "4d 6h", detail: "idle", hist: [] },
-    { nm: "manager / API", s: "ok" as const, since: "4d 6h", detail: "responding", hist: [] },
+    { nm: "scanner", s: "ok" as const, since: "4d 6h", detail: "scanning", hist: MOCK_OK_WINDOW },
+    { nm: "market data", s: "ok" as const, since: "4d 6h", detail: "fresh", hist: MOCK_OK_WINDOW },
+    { nm: "strategy", s: "ok" as const, since: "4d 6h", detail: "live", hist: MOCK_OK_WINDOW },
+    { nm: "risk", s: "ok" as const, since: "4d 6h", detail: "no breakers", hist: MOCK_OK_WINDOW },
+    { nm: "execution", s: "ok" as const, since: "4d 6h", detail: "posting", hist: MOCK_OK_WINDOW },
+    {
+      nm: "reconciliation",
+      s: "ok" as const,
+      since: "4d 6h",
+      detail: "no drift",
+      hist: MOCK_OK_WINDOW,
+    },
+    { nm: "redeem", s: "ok" as const, since: "4d 6h", detail: "idle", hist: MOCK_OK_WINDOW },
+    {
+      nm: "manager / API",
+      s: "ok" as const,
+      since: "4d 6h",
+      detail: "responding",
+      hist: MOCK_OK_WINDOW,
+    },
   ],
   resources: [
     {
@@ -542,7 +567,11 @@ export const mockSystemHealth = {
     l50_24h: 0,
     l60_24h: 0,
     breakers: "closed",
-    hist: Array.from({ length: 24 }, () => ({ n: 0, crit: false })),
+    hist: Array.from({ length: 24 }, (_, i) => ({
+      n: 0,
+      crit: false,
+      t: MOCK_HIST_NOW + i * 3_600_000,
+    })),
     top: [],
   },
   db: {

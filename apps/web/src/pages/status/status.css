@@ -365,6 +365,23 @@
 .status-page .uptime i.gap {
   background: #1a212b;
 }
+/* "no data" day — honest pre-history / un-sampled state, distinct from a healthy
+   green and from a solid gap: short, faint, hollow. */
+.status-page .uptime i.nodata {
+  background: #161c24;
+  box-shadow: inset 0 0 0 1px #232b36;
+}
+.status-page .uptoday .upfoot {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  color: var(--fg-dim);
+}
+.status-page .uptoday .upfoot span:nth-child(2) {
+  color: var(--fg);
+}
 .status-page .mtile .ft {
   display: flex;
   justify-content: space-between;
@@ -474,6 +491,15 @@
   display: flex;
   flex-direction: column;
   gap: 9px;
+}
+.status-page .dtile .depnote {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--fg-dim);
+  font-style: italic;
+  height: 30px;
+  display: flex;
+  align-items: center;
 }
 .status-page .dtile .top {
   display: flex;
