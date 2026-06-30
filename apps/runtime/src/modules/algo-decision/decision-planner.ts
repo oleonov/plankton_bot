@@ -55,8 +55,13 @@ import {
   type QdShadowProjection,
   type QdShadowReason,
 } from "./qd-pre-resolution-exit.js";
+import {
+  evaluateTwoLaneEntryShadow,
+  type TwoLaneEntryShadowProjection,
+} from "./two-lane-entry-shadow.js";
 
 export type { QdShadowProjection, QdShadowReason } from "./qd-pre-resolution-exit.js";
+export type { TwoLaneEntryShadowProjection } from "./two-lane-entry-shadow.js";
 
 export type TradeCountSource = "market_wide" | "leg_local_fallback" | "leg_local";
 
@@ -219,6 +224,13 @@ export type DecisionPlanSideEffect =
       confidence: string;
       thresholdBucket: string;
       timestamp: string;
+    }
+  | {
+      kind: "two_lane_entry_shadow";
+      tokenId: TokenId;
+      conditionId: string;
+      timestamp: string;
+      projection: TwoLaneEntryShadowProjection;
     };
 
 export type TrackQShadowReason =
@@ -685,6 +697,42 @@ function recordQdShadow(
   });
 }
 
+/**
+ * Two-lane entry shadow: observe-only projection for first-entry candidates only
+ * (`!legState`, the inverse of the Track Q recorders). Recomputes the R23 dip
+ * trigger and the Plankton GATE off market data already in hand and pushes a side
+ * effect; never alters price, suppressions, or the signal. See
+ * research_plankton/two_lane_entry_shadow_spec_2026-06-30.md.
+ */
+export function isOpenPosition(position: Position | null | undefined): position is Position {
+  return position?.status === "open" && position.size > 0;
+}
+
+function recordTwoLaneEntryShadow(
+  input: DecisionPlanningInput,
+  market: NormalizedMarket,
+  nowIso: string,
+  sideEffects: DecisionPlanSideEffect[],
+): void {
+  // Flat first-entry only: a non-null position with open shares (even without a
+  // leg) is an existing holding, not a first entry, so the entry-lane shadow skips it.
+  if (input.legState || isOpenPosition(input.position)) return;
+  const projection = evaluateTwoLaneEntryShadow({
+    market,
+    r23MaxMidpoint: input.r23MaxMidpoint,
+    executionPolicy: input.executionPolicy,
+    buySizeRules: input.buySizeRules,
+    decisionRules: input.decisionRules,
+  });
+  sideEffects.push({
+    kind: "two_lane_entry_shadow",
+    tokenId: input.tokenId,
+    conditionId: market.conditionId,
+    timestamp: nowIso,
+    projection,
+  });
+}
+
 export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlanResult {
   const metrics = createDecisionMetricsDelta();
   const suppressions: SuppressionPlan[] = [];
@@ -749,6 +797,7 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   const d8EvalPrice = midPrice;
   recordTrackQShadow(input, market, price, nowIso, sideEffects);
   recordQdShadow(input, market, d8EvalPrice, price, nowIso, sideEffects);
+  recordTwoLaneEntryShadow(input, market, nowIso, sideEffects);
 
   if (legState && isAbandoned(legState) && input.executionPolicy?.dustAbandonment.enabled) {
     const dustPolicy = input.executionPolicy.dustAbandonment;

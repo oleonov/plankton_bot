@@ -8,6 +8,7 @@ export const SIGNAL_TELEMETRY_RISK_EVENT_TYPES = [
   "execution_profile_decision_chain_rollup",
   "dead_market_shadow",
   "track_a_add_throttle_shadow",
+  "entry_lane_shadow",
 ] as const;
 
 export interface RiskEventVolumeSnapshotInput {
