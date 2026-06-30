@@ -1168,6 +1168,7 @@ describe("migration 079 — legacy accounting warning backfill", () => {
         fill_id TEXT PRIMARY KEY,
         order_id TEXT NOT NULL,
         token_id TEXT NOT NULL,
+        family_id TEXT,
         condition_id TEXT NOT NULL DEFAULT '',
         side TEXT NOT NULL,
         price REAL NOT NULL,
@@ -1180,6 +1181,7 @@ describe("migration 079 — legacy accounting warning backfill", () => {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         fill_id TEXT NOT NULL,
         position_id TEXT NOT NULL,
+        family_id TEXT NOT NULL,
         delta REAL NOT NULL,
         filled_at TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1209,6 +1211,7 @@ describe("migration 079 — legacy accounting warning backfill", () => {
         condition_id TEXT NOT NULL,
         position_id TEXT NOT NULL,
         token_id TEXT NOT NULL,
+        family_id TEXT,
         resolution TEXT NOT NULL,
         settlement_price REAL NOT NULL,
         size REAL NOT NULL,
@@ -1260,12 +1263,26 @@ describe("migration 079 — legacy accounting warning backfill", () => {
     ).run(DOGE_POSITION, DOGE_TOKEN);
   }
 
+  function run079Migration(): void {
+    db.exec(
+      applySafeAddColumnStatements(
+        db,
+        readMigration("079_legacy_accounting_backfill_20260630.sql"),
+      ),
+    );
+  }
+
   it("inserts the two exact missing accounting rows and is idempotent", () => {
     seedLeaderCase();
     seedDogeCase();
     db.prepare(
-      `INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at)
-       VALUES ('unrelated-fill', 'unrelated-position', 9, '2026-01-01T00:00:00Z')`,
+      `INSERT INTO pnl_ledger (fill_id, position_id, family_id, delta, filled_at)
+       VALUES ('leader-existing-fill', ?, 'legacy', 0.979274, '2026-06-04T00:00:00Z')`,
+    ).run(LEADER_POSITION);
+    db.prepare(
+      `INSERT INTO pnl_ledger (fill_id, position_id, family_id, delta, filled_at)
+       VALUES ('unrelated-fill', 'unrelated-position', 'unrelated-family', 9,
+               '2026-01-01T00:00:00Z')`,
     ).run();
     db.prepare(
       `INSERT INTO settlement_ledger
@@ -1275,15 +1292,15 @@ describe("migration 079 — legacy accounting warning backfill", () => {
                'algo-redeem', 0, 1, -1, '2026-01-01T00:00:00Z')`,
     ).run();
 
-    const sql = readMigration("079_legacy_accounting_backfill_20260630.sql");
-    db.exec(sql);
-    db.exec(sql);
+    run079Migration();
+    run079Migration();
 
     const leaderRows = db
-      .prepare("SELECT delta FROM pnl_ledger WHERE fill_id = ? AND position_id = ?")
-      .all(LEADER_FILL, LEADER_POSITION) as Array<{ delta: number }>;
+      .prepare("SELECT delta, family_id FROM pnl_ledger WHERE fill_id = ? AND position_id = ?")
+      .all(LEADER_FILL, LEADER_POSITION) as Array<{ delta: number; family_id: string }>;
     expect(leaderRows).toHaveLength(1);
     expect(leaderRows[0]!.delta).toBeCloseTo(0.12631, 6);
+    expect(leaderRows[0]!.family_id).toBe("legacy");
 
     const dogeRows = db
       .prepare(
@@ -1297,7 +1314,7 @@ describe("migration 079 — legacy accounting warning backfill", () => {
 
     expect(
       (db.prepare("SELECT COUNT(*) AS count FROM pnl_ledger").get() as { count: number }).count,
-    ).toBe(2);
+    ).toBe(3);
     expect(
       (db.prepare("SELECT COUNT(*) AS count FROM settlement_ledger").get() as { count: number })
         .count,
@@ -1318,7 +1335,7 @@ describe("migration 079 — legacy accounting warning backfill", () => {
                '2026-06-05T03:48:51.000Z')`,
     ).run(LEADER_FILL, LEADER_TOKEN, LEADER_CONDITION);
 
-    db.exec(readMigration("079_legacy_accounting_backfill_20260630.sql"));
+    run079Migration();
 
     expect(
       (db.prepare("SELECT COUNT(*) AS count FROM pnl_ledger").get() as { count: number }).count,
