@@ -472,9 +472,101 @@ export const mockPositionCycles = {
   },
 };
 
+// ─── System health (Status screen) ───────────────────────────────────
+export const mockSystemHealth = {
+  version: "v61",
+  deploy: "2026-06-29 03:11Z",
+  sha: "a4f9c21",
+  dirty: null,
+  tradingState: "RUNNING" as const,
+  paused: false,
+  pauseReason: null,
+  uptimePct: 100,
+  uptodayHist: [] as ("ok" | "warn" | "crit")[],
+  marketDataStale: false,
+  reconDrift: false,
+  modules: [
+    { nm: "scanner", s: "ok" as const, since: "4d 6h", detail: "scanning", hist: [] },
+    { nm: "market data", s: "ok" as const, since: "4d 6h", detail: "fresh", hist: [] },
+    { nm: "strategy", s: "ok" as const, since: "4d 6h", detail: "live", hist: [] },
+    { nm: "risk", s: "ok" as const, since: "4d 6h", detail: "no breakers", hist: [] },
+    { nm: "execution", s: "ok" as const, since: "4d 6h", detail: "posting", hist: [] },
+    { nm: "reconciliation", s: "ok" as const, since: "4d 6h", detail: "no drift", hist: [] },
+    { nm: "redeem", s: "ok" as const, since: "4d 6h", detail: "idle", hist: [] },
+    { nm: "manager / API", s: "ok" as const, since: "4d 6h", detail: "responding", hist: [] },
+  ],
+  resources: [
+    {
+      nm: "Disk · krabs-data",
+      val: 62,
+      max: 100,
+      unit: "% used",
+      sub: ["24.1 GB free", "62 / 64 GB"] as [string, string],
+      good: "low" as const,
+    },
+    {
+      nm: "CPU load / core",
+      val: 0.42,
+      max: 2,
+      unit: "norm",
+      sub: ["8 cores", "1m avg"] as [string, string],
+      good: "low" as const,
+      dec: 2,
+    },
+    {
+      nm: "Memory",
+      val: 61,
+      max: 100,
+      unit: "% used",
+      sub: ["swap n/a", "9.8 / 16 GB"] as [string, string],
+      good: "low" as const,
+    },
+    {
+      nm: "WAL size",
+      val: 14,
+      max: 256,
+      unit: "MB",
+      sub: ["stable", "ckpt n/a"] as [string, string],
+      good: "low" as const,
+    },
+  ],
+  deps: [
+    { nm: "CLOB API", s: "ok" as const, lat: null, err: null, hist: [] },
+    { nm: "Gamma API", s: "ok" as const, lat: null, err: null, hist: [] },
+    { nm: "Polygon RPC", s: "ok" as const, lat: null, err: null, hist: [] },
+    { nm: "Relayer / redeem", s: "ok" as const, lat: null, err: null, hist: [] },
+  ],
+  errors: {
+    l50_1h: 0,
+    l60_1h: 0,
+    l50_24h: 0,
+    l60_24h: 0,
+    breakers: "closed",
+    hist: Array.from({ length: 24 }, () => ({ n: 0, crit: false })),
+    top: [],
+  },
+  db: {
+    ledger: 412,
+    control: 88,
+    wal: 14,
+    locked: null,
+    migration: "applied",
+    retention: "unknown",
+    acctWarnings: null,
+    unknownAcct: null,
+    lastVacuum: "n/a",
+  },
+  shadow: [
+    { nm: "Dead-market / Track B shadow", added: "Jun 12" },
+    { nm: "Two-lane entry shadow", added: "Jun 18" },
+    { nm: "Entry fresh-edge shadow", added: "Jun 21" },
+  ],
+};
+
 // ─── Handlers ────────────────────────────────────────────────────────
 
 export const handlers = [
+  http.get("/api/v1/system-health", () => ok(mockSystemHealth)),
   http.get("/api/v1/health", () =>
     ok({
       status: "ok",

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 import { StatusBar } from "./StatusBar.tsx";
 import { AlertStrip } from "./AlertStrip.tsx";
 import { AppFooter } from "./AppFooter.tsx";
@@ -54,6 +54,10 @@ function SettingsDropdown() {
 }
 
 export function Layout() {
+  // The Status screen is a self-contained health dashboard — the global
+  // StatusBar / AlertStrip are intentionally hidden there (handoff: no status
+  // bar below the nav). Every other page keeps them.
+  const showGlobalBars = useLocation().pathname !== "/status";
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
       <header
@@ -91,6 +95,9 @@ export function Layout() {
           Risk
         </NavLink>
         <SettingsDropdown />
+        <NavLink className="nav-link" to="/status">
+          Status
+        </NavLink>
         <span style={{ flex: 1 }} />
         <button
           className="nav-link"
@@ -112,8 +119,8 @@ export function Layout() {
           Logout
         </button>
       </header>
-      <StatusBar />
-      <AlertStrip />
+      {showGlobalBars && <StatusBar />}
+      {showGlobalBars && <AlertStrip />}
       <div style={{ flex: 1, overflowY: "auto" }}>
         <Outlet />
       </div>

@@ -18,6 +18,7 @@ import { fail } from "./errors.js";
 import { authRoutes } from "./routes/auth.js";
 import { healthRoutes } from "./routes/health.js";
 import { statusRoutes } from "./routes/status.js";
+import { systemHealthRoutes } from "./routes/system-health.js";
 import { positionRoutes } from "./routes/positions.js";
 import { orderRoutes } from "./routes/orders.js";
 import { fillRoutes } from "./routes/fills.js";
@@ -112,6 +113,14 @@ export async function buildServer(deps: ServerDeps) {
     marketDataStaleThresholdMs: staleMs,
     envMode: deps.config.runtimeMode,
     defaultInitialBalanceUsdc: deps.defaultInitialBalanceUsdc,
+  });
+  // System health — read-only technical dashboard for the Status screen.
+  await app.register(systemHealthRoutes, {
+    prefix: "/api/v1",
+    db: deps.ledgerDb,
+    controlDb: deps.controlDb,
+    ledgerPool: deps.ledgerPool,
+    marketDataStaleThresholdMs: staleMs,
   });
   await app.register(positionRoutes, {
     prefix: "/api/v1",

@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, apiPost, apiPut, apiPatch, apiDelete } from "./client.ts";
 import type {
   StatusData,
+  SystemHealthData,
   MetricsData,
   DashboardKpiData,
   CoverageMetricsData,
@@ -65,6 +66,14 @@ export function useStatus() {
     queryKey: ["status"],
     queryFn: () => apiFetch<StatusData>("/api/v1/status"),
     refetchInterval: 30_000,
+  });
+}
+
+export function useSystemHealth() {
+  return useQuery({
+    queryKey: ["system-health"],
+    queryFn: () => apiFetch<SystemHealthData>("/api/v1/system-health"),
+    refetchInterval: 15_000,
   });
 }
 

@@ -1040,3 +1040,77 @@ export interface ControlOverviewDTO {
   recentTransitions: AuditEntryDTO[];
   heartbeats: Record<string, unknown>[];
 }
+
+// ─── System health (Status screen) ───────────────────────────────────────────
+
+/** Severity level for the Status (system-health) screen. */
+export type Sev = "ok" | "warn" | "crit";
+
+export interface SystemHealthModule {
+  nm: string;
+  s: Sev;
+  since: string;
+  detail: string;
+  hist: Sev[];
+}
+export interface SystemHealthResource {
+  nm: string;
+  val: number;
+  max: number;
+  unit: string;
+  sub: [string, string];
+  good: "low" | "high";
+  dec?: number;
+}
+export interface SystemHealthDep {
+  nm: string;
+  s: Sev;
+  lat: number | null;
+  /** null = error-rate not measured (not a healthy 0). */
+  err: number | null;
+  hist: number[];
+}
+export interface SystemHealthErrors {
+  l50_1h: number;
+  l60_1h: number;
+  l50_24h: number;
+  l60_24h: number;
+  breakers: string;
+  hist: { n: number; crit: boolean }[];
+  top: { lv: "l50" | "l60"; code: string; cnt: number; when: string }[];
+}
+export interface SystemHealthDb {
+  ledger: number;
+  control: number;
+  wal: number;
+  /** null = SQLITE_BUSY count not tracked (unknown, not 0). */
+  locked: number | null;
+  migration: string;
+  retention: string;
+  /** null = accounting cycle not computed here (unknown, not 0). */
+  acctWarnings: number | null;
+  unknownAcct: number | null;
+  lastVacuum: string;
+}
+/** GET /system-health — raw values; severity is computed client-side. */
+export interface SystemHealthData {
+  version: string;
+  deploy: string;
+  sha: string;
+  /** null = working-tree dirty state not captured (unknown). */
+  dirty: boolean | null;
+  tradingState: "RUNNING" | "PAUSED";
+  paused: boolean;
+  pauseReason: string | null;
+  uptimePct: number;
+  uptodayHist: Sev[];
+  /** null = no freshness metric available (unknown, not "fresh"). */
+  marketDataStale: boolean | null;
+  reconDrift: boolean;
+  modules: SystemHealthModule[];
+  resources: SystemHealthResource[];
+  deps: SystemHealthDep[];
+  errors: SystemHealthErrors;
+  db: SystemHealthDb;
+  shadow: { nm: string; added: string }[];
+}

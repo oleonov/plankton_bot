@@ -20,6 +20,7 @@ import { ExecutionSettings } from "./pages/ExecutionSettings.tsx";
 import { ProfileSettings } from "./pages/ProfileSettings.tsx";
 import { Audit } from "./pages/Audit.tsx";
 import { Debug } from "./pages/Debug.tsx";
+import { Status } from "./pages/status/Status.tsx";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 10_000, retry: 1 } },
@@ -52,6 +53,7 @@ export function App() {
                 <Route path="/settings/execution" element={<ExecutionSettings />} />
                 <Route path="/settings/profiles/:profileId" element={<ProfileSettings />} />
                 <Route path="/audit" element={<Audit />} />
+                <Route path="/status" element={<Status />} />
                 <Route path="/debug" element={<Debug />} />
               </Route>
             </Routes>
