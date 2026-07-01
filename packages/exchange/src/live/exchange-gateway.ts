@@ -609,7 +609,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
         // Use a short constant slug; the relayer accepts these, and conditionIds are
         // already logged separately via logSettlementLifecycle.
         const response = await timeDepCall(this.depHealthRecorder, "relayer", () =>
-          settlementExecute(requests.map((request) => request.tx), RELAYER_METADATA_REDEEM),
+          settlementExecute(
+            requests.map((request) => request.tx),
+            RELAYER_METADATA_REDEEM,
+          ),
         );
         const submittedAt = Date.now();
         for (const request of requests) {

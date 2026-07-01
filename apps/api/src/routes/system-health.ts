@@ -300,7 +300,11 @@ export const systemHealthRoutes: FastifyPluginAsync<SystemHealthOpts> = async (a
     const gitSha = readGitSha();
 
     // Shared snapshot — same computation the StatusHistorySampler records.
-    const { snapshot, alerts1h, alerts24h } = collectSystemHealthSnapshot(db, opts.controlDb, staleMs);
+    const { snapshot, alerts1h, alerts24h } = collectSystemHealthSnapshot(
+      db,
+      opts.controlDb,
+      staleMs,
+    );
     const paused = snapshot.paused;
 
     const ledgerPath = safe(() => db.name, "");

@@ -48,7 +48,9 @@ describe("StatusHistorySampler", () => {
     s.tick(NOON); // first tick assumes one interval (60s)
     s.tick(NOON + 60_000); // +60s delta
     const row = ctrl.db
-      .prepare("SELECT known_secs AS k FROM status_history WHERE series = 'uptime' AND bucket_ts = ?")
+      .prepare(
+        "SELECT known_secs AS k FROM status_history WHERE series = 'uptime' AND bucket_ts = ?",
+      )
       .get(DAY) as { k: number };
     expect(row.k).toBe(120);
   });
@@ -58,7 +60,9 @@ describe("StatusHistorySampler", () => {
     s.tick(NOON); // 60s
     s.tick(NOON + 10 * 60_000); // 10-minute gap → clamped to 2× interval = 120s
     const row = ctrl.db
-      .prepare("SELECT known_secs AS k FROM status_history WHERE series = 'uptime' AND bucket_ts = ?")
+      .prepare(
+        "SELECT known_secs AS k FROM status_history WHERE series = 'uptime' AND bucket_ts = ?",
+      )
       .get(DAY) as { k: number };
     expect(row.k).toBe(180); // 60 + 120 (clamped)
   });

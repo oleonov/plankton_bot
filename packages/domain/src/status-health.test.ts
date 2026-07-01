@@ -1,10 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  STATUS_SERIES,
-  STATUS_SEV_RANK,
-  worstStatusSev,
-  type StatusSev,
-} from "./status-health.js";
+import { STATUS_SERIES, STATUS_SEV_RANK, worstStatusSev, type StatusSev } from "./status-health.js";
 
 describe("status-health shared helper", () => {
   it("ranks ok < warn < crit", () => {

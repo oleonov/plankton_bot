@@ -236,11 +236,16 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     do {
       // Timeout enforced by axios.defaults.timeout (45 s, set in apps/runtime/src/index.ts).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const page: any = await timeDepCall(this.depHealthRecorder, "clob", () => this.client.getMarkets(cursor), {
-        // The SDK returns { error } instead of throwing — classify that as a failed call.
-        isOk: (p: { error?: unknown; data?: unknown }) =>
-          !(p?.error !== undefined && p?.data === undefined),
-      });
+      const page: any = await timeDepCall(
+        this.depHealthRecorder,
+        "clob",
+        () => this.client.getMarkets(cursor),
+        {
+          // The SDK returns { error } instead of throwing — classify that as a failed call.
+          isOk: (p: { error?: unknown; data?: unknown }) =>
+            !(p?.error !== undefined && p?.data === undefined),
+        },
+      );
       pageNum++;
       // The SDK swallows axios errors and returns { error: "..." } instead of throwing.
       // Detect this and surface it so the poll is treated as a failure.
