@@ -47,7 +47,8 @@ export function analyze(d: SystemHealthData): Analysis {
     if (m.s === "crit") probs.push({ sev: "crit", msg: `${m.nm} — ${m.detail}` });
     else if (m.s === "warn") probs.push({ sev: "warn", msg: `${m.nm} degraded — ${m.detail}` });
   }
-  if (d.paused) probs.unshift({ sev: "crit", msg: `Bot PAUSED — ${d.pauseReason ?? "manual"}` });
+  // Pause is an intentional operator state, not an outage — it is surfaced as a
+  // distinct amber "PAUSED" hero, not a crit problem, so it must NOT force crit here.
 
   // resources
   for (const r of d.resources) {
@@ -91,9 +92,9 @@ export function analyze(d: SystemHealthData): Analysis {
           : "ok",
     db: lockedCrit ? "crit" : acctWarn ? "warn" : "ok",
   };
-  if (d.paused) sections.modules = "crit";
 
-  const global = worst([...Object.values(sections), d.paused ? "crit" : "ok"]);
+  // `global` reflects real health only; pause is handled by the hero, not here.
+  const global = worst(Object.values(sections));
   probs.sort((a, b) => RANK[b.sev] - RANK[a.sev]);
   return { global, sections, probs: probs.slice(0, 4) };
 }

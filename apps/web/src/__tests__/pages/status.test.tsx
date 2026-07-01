@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { screen, within } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { server } from "../../test/server.ts";
 import { renderWithProviders } from "../../test/test-utils.tsx";
@@ -100,7 +100,7 @@ describe("Status page", () => {
     expect(await screen.findByText(/uptime:/)).toBeInTheDocument();
   });
 
-  it("a paused bot drives a CRITICAL hero from the shared severity computation", async () => {
+  it("a paused bot shows an amber PAUSED hero, not a critical outage", async () => {
     server.use(
       http.get("/api/v1/system-health", () =>
         ok({
@@ -112,8 +112,10 @@ describe("Status page", () => {
       ),
     );
     const { container } = renderWithProviders(<Status />);
-    const probs = await screen.findByText(/Bot PAUSED/);
-    expect(container.querySelector(".hero .st")).toHaveTextContent("CRITICAL");
-    expect(within(probs.closest(".prob")!).getByText("CRIT")).toBeInTheDocument();
+    await screen.findByText(/Trading paused by operator/);
+    const hero = container.querySelector(".hero")!;
+    expect(hero.querySelector(".st")).toHaveTextContent("PAUSED");
+    expect(hero.querySelector(".st")).not.toHaveTextContent("CRITICAL");
+    expect(hero.getAttribute("data-sev")).toBe("WARNING"); // amber, not red
   });
 });

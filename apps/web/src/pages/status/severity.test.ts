@@ -73,14 +73,13 @@ describe("status severity model", () => {
     expect(probs).toHaveLength(0);
   });
 
-  it("paused bot is CRITICAL and PAUSED is the first problem", () => {
+  it("a paused bot is NOT crit in analyze — pause is handled by the hero, not severity", () => {
     const d = base();
     d.paused = true;
     d.pauseReason = "risk circuit breaker";
     const { global, probs } = analyze(d);
-    expect(global).toBe("crit");
-    expect(probs[0]?.sev).toBe("crit");
-    expect(probs[0]?.msg).toContain("PAUSED");
+    expect(global).toBe("ok"); // pause no longer forces a critical hero
+    expect(probs.some((p) => /PAUSED/i.test(p.msg))).toBe(false);
   });
 
   it("accounting warnings raise WARNING", () => {

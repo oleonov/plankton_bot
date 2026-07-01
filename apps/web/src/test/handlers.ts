@@ -475,13 +475,15 @@ export const mockPositionCycles = {
 // ─── System health (Status screen) ───────────────────────────────────
 const MOCK_HIST_DAY = 86_400_000;
 const MOCK_HIST_NOW = Date.UTC(2026, 5, 30); // fixed for deterministic tests
-function mockHistWindow(states: ("ok" | "warn" | "crit" | "nodata")[]) {
+function mockHistWindow(states: ("ok" | "warn" | "crit" | "nodata" | "maintenance" | "paused")[]) {
   const start = MOCK_HIST_NOW - (states.length - 1) * MOCK_HIST_DAY;
   return states.map((s, i) => ({
     t: start + i * MOCK_HIST_DAY,
     s,
     downSecs: s === "warn" ? 1800 : s === "crit" ? 3600 : 0,
     critSecs: s === "crit" ? 3600 : 0,
+    maintenanceSecs: s === "maintenance" ? 180 : 0,
+    pausedSecs: s === "paused" ? 1200 : 0,
   }));
 }
 const MOCK_OK_WINDOW = mockHistWindow(Array(45).fill("ok"));

@@ -1053,9 +1053,12 @@ export type Sev = "ok" | "warn" | "crit";
  */
 export interface HistPoint {
   t: number;
-  s: Sev | "nodata";
+  /** `maintenance`/`paused` = the whole observed day was deploy warm-up / operator pause. */
+  s: Sev | "nodata" | "maintenance" | "paused";
   downSecs: number;
   critSecs: number;
+  maintenanceSecs: number;
+  pausedSecs: number;
   detail?: string;
 }
 

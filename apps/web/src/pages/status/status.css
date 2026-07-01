@@ -371,6 +371,16 @@
   background: #161c24;
   box-shadow: inset 0 0 0 1px #232b36;
 }
+/* planned deploy / warm-up — blue, not red */
+.status-page .uptime i.maintenance {
+  background: #4a90d9;
+  opacity: 0.8;
+}
+/* operator pause — amber, intentional (not an outage) */
+.status-page .uptime i.paused {
+  background: var(--st-amber);
+  opacity: 0.72;
+}
 .status-page .uptoday .upfoot {
   display: flex;
   justify-content: space-between;

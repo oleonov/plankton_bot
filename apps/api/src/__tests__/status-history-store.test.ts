@@ -175,4 +175,84 @@ describe("status-history store", () => {
       .get() as { n: number };
     expect(left.n).toBe(1);
   });
+
+  it("migration 065 added the maintenance/paused accumulators", () => {
+    const cols = conn.db.prepare("PRAGMA table_info(status_history)").all() as { name: string }[];
+    const names = cols.map((c) => c.name);
+    expect(names).toContain("maintenance_secs");
+    expect(names).toContain("paused_secs");
+  });
+
+  it("computeUptimePct excludes maintenance + paused from the denominator", () => {
+    // 600 known: 60 crit + 240 maintenance + 100 paused → real-health = 200, crit 60.
+    upsertStatusBucket(conn.db, {
+      series: "uptime",
+      bucketTs: DAY,
+      sev: "crit",
+      downSecs: 60,
+      critSecs: 60,
+      knownSecs: 600,
+      maintenanceSecs: 240,
+      pausedSecs: 100,
+    });
+    // 60 / (600 − 240 − 100) = 60/260 ≈ 23.08% down → 76.9% uptime.
+    expect(computeUptimePct(conn.db, 45, DAY + 12 * 3_600_000)).toBe(76.9);
+  });
+
+  it("computeUptimePct returns null for a fully maintenance/paused window (denom ≤ 0)", () => {
+    upsertStatusBucket(conn.db, {
+      series: "uptime",
+      bucketTs: DAY,
+      sev: "ok",
+      downSecs: 0,
+      critSecs: 0,
+      knownSecs: 300,
+      pausedSecs: 300,
+    });
+    expect(computeUptimePct(conn.db, 45, DAY + 12 * 3_600_000)).toBeNull();
+  });
+
+  it("renders a whole-day paused bucket as 'paused' (pause wins over maintenance)", () => {
+    upsertStatusBucket(conn.db, {
+      series: "uptime",
+      bucketTs: DAY,
+      sev: "ok",
+      downSecs: 0,
+      critSecs: 0,
+      knownSecs: 600,
+      maintenanceSecs: 300,
+      pausedSecs: 300,
+    });
+    const hist = readStatusHistory(conn.db, "uptime", 1, DAY + 12 * 3_600_000);
+    expect(hist[0]!.s).toBe("paused");
+  });
+
+  it("renders a whole-day maintenance bucket as 'maintenance'", () => {
+    upsertStatusBucket(conn.db, {
+      series: "uptime",
+      bucketTs: DAY,
+      sev: "ok",
+      downSecs: 0,
+      critSecs: 0,
+      knownSecs: 300,
+      maintenanceSecs: 300,
+    });
+    const hist = readStatusHistory(conn.db, "uptime", 1, DAY + 12 * 3_600_000);
+    expect(hist[0]!.s).toBe("maintenance");
+  });
+
+  it("a day with any real crit still renders 'crit' despite maintenance/paused seconds", () => {
+    upsertStatusBucket(conn.db, {
+      series: "uptime",
+      bucketTs: DAY,
+      sev: "crit",
+      downSecs: 60,
+      critSecs: 60,
+      knownSecs: 600,
+      maintenanceSecs: 300,
+      pausedSecs: 200,
+    });
+    const hist = readStatusHistory(conn.db, "uptime", 1, DAY + 12 * 3_600_000);
+    expect(hist[0]!.s).toBe("crit");
+  });
 });

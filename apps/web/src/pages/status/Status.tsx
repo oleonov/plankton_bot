@@ -27,10 +27,17 @@ function humanizeDuration(secs: number): string {
 function histTitle(p: HistPoint): string {
   const date = histDate(p.t);
   if (p.s === "nodata") return `${date} — No data (before monitoring started).`;
-  if (p.s === "ok") return `${date} — No downtime recorded on this day.`;
+  if (p.s === "maintenance")
+    return `${date} — Deploy / warm-up  ${humanizeDuration(p.maintenanceSecs)} (planned).`;
+  if (p.s === "paused") return `${date} — Paused by operator  ${humanizeDuration(p.pausedSecs)}.`;
+  const extra =
+    p.maintenanceSecs > 0 || p.pausedSecs > 0
+      ? ` (${humanizeDuration(p.maintenanceSecs + p.pausedSecs)} deploy/pause)`
+      : "";
+  if (p.s === "ok") return `${date} — No downtime recorded on this day.${extra}`;
   const dur = humanizeDuration(p.s === "crit" ? p.critSecs : p.downSecs);
   const label = p.s === "crit" ? "Major outage" : "Partial outage";
-  return `${date} — ${label}  ${dur}${p.detail ? ` · ${p.detail}` : ""}`;
+  return `${date} — ${label}  ${dur}${p.detail ? ` · ${p.detail}` : ""}${extra}`;
 }
 
 function Gauge({ val, max, sev }: { val: number; max: number; sev: Sev }) {
@@ -108,14 +115,24 @@ function HistBar({ hist, width }: { hist: HistPoint[]; width?: number }) {
           s: "nodata" as const,
           downSecs: 0,
           critSecs: 0,
+          maintenanceSecs: 0,
+          pausedSecs: 0,
         }));
+  const barHeight = (s: HistPoint["s"]): string =>
+    s === "ok"
+      ? "55%"
+      : s === "nodata"
+        ? "40%"
+        : s === "maintenance" || s === "paused"
+          ? "70%"
+          : "100%";
   return (
     <div className="uptime" style={width ? { width } : undefined}>
       {points.map((p, i) => (
         <i
           key={i}
           className={p.s}
-          style={{ height: p.s === "ok" ? "55%" : p.s === "nodata" ? "40%" : "100%" }}
+          style={{ height: barHeight(p.s) }}
           title={p.t ? histTitle(p) : undefined}
         />
       ))}
@@ -177,22 +194,30 @@ export function Status() {
         ? "warn"
         : "ok";
 
+  // Pause is intentional, not an outage: an amber "PAUSED" hero (unless a real
+  // crit also exists, which still shows red).
+  const heroPaused = data.paused && global !== "crit";
+  const heroSev: Sev = heroPaused ? "warn" : global;
+  const heroWord = heroPaused ? "PAUSED" : SEV_WORD[global];
+  const heroIcon = heroPaused ? "⏸" : global === "ok" ? "✓" : global === "warn" ? "!" : "✕";
+  const heroSub = heroPaused
+    ? `Trading paused by operator${data.pauseReason ? ` · ${data.pauseReason}` : ""}`
+    : global === "ok"
+      ? "All systems nominal — no active problems"
+      : `${probs.length} issue${probs.length > 1 ? "s" : ""} need attention`;
+
   return (
     <div className="status-page">
       {/* hero */}
-      <div className="hero" data-sev={SEV_WORD[global]}>
+      <div className="hero" data-sev={SEV_WORD[heroSev]}>
         <div>
           <div className="lite">
             <div className="lamp">
-              <span className="ic">{global === "ok" ? "✓" : global === "warn" ? "!" : "✕"}</span>
+              <span className="ic">{heroIcon}</span>
             </div>
             <div>
-              <div className="st">{SEV_WORD[global]}</div>
-              <div className="sub">
-                {global === "ok"
-                  ? "All systems nominal — no active problems"
-                  : `${probs.length} issue${probs.length > 1 ? "s" : ""} need attention`}
-              </div>
+              <div className="st">{heroWord}</div>
+              <div className="sub">{heroSub}</div>
             </div>
           </div>
           {probs.length > 0 ? (
