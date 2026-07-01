@@ -15,7 +15,9 @@ import {
   type ClobMarket,
   type OrderBookSnapshot,
   type TokenId,
+  type DepHealthRecorder,
 } from "@krabs/domain";
+import { timeDepCall } from "../dep-health.js";
 import { mapMarket, mapOrderBook, parseStringOrArray } from "../mappers.js";
 import { isTransientNetworkError, sleep } from "../network-errors.js";
 import { SharedMarketPricingStreamHub } from "./market-pricing-stream-hub.js";
@@ -96,6 +98,8 @@ export interface LiveMarketDataConfig {
    */
   slugFilter?: ((slug: string) => boolean) | undefined;
   createWebSocket?: ((url: string) => MarketDataWebSocketLike) | undefined;
+  /** Optional Phase-2 dependency-latency recorder (measure-only; no-op when absent). */
+  depHealthRecorder?: DepHealthRecorder | null;
   /**
    * Target tradable-universe size (MARKET_DATA_MAX_TRACKED_TOKENS). Combined
    * with `maxWsShards` to derive per-shard subscription size:
@@ -171,9 +175,11 @@ export class LiveMarketDataGateway implements MarketDataGateway {
   private readonly slugFilter: ((slug: string) => boolean) | undefined;
   private readonly createWebSocket: (url: string) => MarketDataWebSocketLike;
   private readonly sharedMarketStreamHub: SharedMarketPricingStreamHub;
+  private readonly depHealthRecorder: DepHealthRecorder | null;
 
   constructor(config: LiveMarketDataConfig) {
     this.client = config.client;
+    this.depHealthRecorder = config.depHealthRecorder ?? null;
     const clientHost =
       typeof (config.client as { host?: unknown } | null)?.host === "string"
         ? (config.client as { host: string }).host
@@ -230,7 +236,11 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     do {
       // Timeout enforced by axios.defaults.timeout (45 s, set in apps/runtime/src/index.ts).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const page: any = await this.client.getMarkets(cursor);
+      const page: any = await timeDepCall(this.depHealthRecorder, "clob", () => this.client.getMarkets(cursor), {
+        // The SDK returns { error } instead of throwing — classify that as a failed call.
+        isOk: (p: { error?: unknown; data?: unknown }) =>
+          !(p?.error !== undefined && p?.data === undefined),
+      });
       pageNum++;
       // The SDK swallows axios errors and returns { error: "..." } instead of throwing.
       // Detect this and surface it so the poll is treated as a failure.
@@ -263,7 +273,9 @@ export class LiveMarketDataGateway implements MarketDataGateway {
 
   async getOrderBook(tokenId: TokenId): Promise<OrderBookSnapshot> {
     try {
-      const raw = await this.client.getOrderBook(String(tokenId));
+      const raw = await timeDepCall(this.depHealthRecorder, "clob", () =>
+        this.client.getOrderBook(String(tokenId)),
+      );
       return mapOrderBook(tokenId, raw as Record<string, unknown>);
     } catch {
       return mapOrderBook(tokenId, {});
@@ -301,7 +313,9 @@ export class LiveMarketDataGateway implements MarketDataGateway {
 
   async getTickSize(tokenId: TokenId): Promise<number> {
     try {
-      const raw = await this.client.getTickSize(String(tokenId));
+      const raw = await timeDepCall(this.depHealthRecorder, "clob", () =>
+        this.client.getTickSize(String(tokenId)),
+      );
       return Number(raw);
     } catch {
       return 0.01;

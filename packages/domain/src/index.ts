@@ -177,3 +177,4 @@ export { buildFeatureRow } from "./scoring/feature-builder.js";
 export type { FeatureRowInput } from "./scoring/feature-builder.js";
 export { STATUS_SEV_RANK, worstStatusSev, STATUS_SERIES } from "./status-health.js";
 export type { StatusSev, StatusSeries } from "./status-health.js";
+export type { DepKey, DepHealthRecorder } from "./dep-health.js";

@@ -176,4 +176,89 @@ describe("RuntimeMetricWriter", () => {
       expect(true).toBe(true);
     });
   });
+
+  describe("record / flushDepHealth (dep_health)", () => {
+    const flushAt = "2026-04-25T00:00:30.000Z";
+    const makeWriter = () => new RuntimeMetricWriter(db, () => new Date(flushAt));
+
+    function depRows() {
+      return (
+        db
+          .prepare(
+            "SELECT value, labels FROM runtime_metrics WHERE metric_name = 'dep_health' ORDER BY labels",
+          )
+          .all() as Array<{ value: number; labels: string }>
+      ).map((r) => ({ value: r.value, labels: JSON.parse(r.labels) as Record<string, unknown> }));
+    }
+
+    it("emits ONE append-only row PER dep (not a single overwritten latest row)", () => {
+      const writer = makeWriter();
+      writer.record("clob", 100, true);
+      writer.record("clob", 200, true);
+      writer.record("rpc", 50, false);
+      writer.record("gamma", 80, true);
+
+      // Buffered until flush.
+      expect(depRows()).toHaveLength(0);
+      writer.flushDepHealth();
+
+      const rows = depRows();
+      expect(rows).toHaveLength(3); // clob, gamma, rpc — NOT 1 overwritten row
+      const clob = rows.find((r) => r.labels.dep === "clob")!;
+      expect(clob.value).toBe(150); // avg of 100/200
+      expect(clob.labels.maxMs).toBe(200);
+      expect(clob.labels.count).toBe(2);
+      expect(clob.labels.errors).toBe(0);
+      expect(clob.labels.errorRatePct).toBe(0);
+      const rpc = rows.find((r) => r.labels.dep === "rpc")!;
+      expect(rpc.value).toBe(50);
+      expect(rpc.labels.errors).toBe(1);
+      expect(rpc.labels.errorRatePct).toBe(100);
+    });
+
+    it("labels are a bounded aggregate only — no URL/tokenId/conditionId/orderId", () => {
+      const writer = makeWriter();
+      writer.record("clob", 120, true);
+      writer.flushDepHealth();
+      const [row] = depRows();
+      expect(Object.keys(row!.labels).sort()).toEqual([
+        "count",
+        "dep",
+        "errorRatePct",
+        "errors",
+        "maxMs",
+        "windowMs",
+      ]);
+    });
+
+    it("stays append-only across flushes and clears the buffer", () => {
+      const writer = makeWriter();
+      writer.record("clob", 100, true);
+      writer.flushDepHealth();
+      writer.record("clob", 100, true);
+      writer.flushDepHealth();
+      expect(depRows()).toHaveLength(2); // two separate rows, not one updated
+    });
+
+    it("record never throws on a bad latency and a degenerate sample is clamped", () => {
+      const writer = makeWriter();
+      expect(() => writer.record("clob", Number.NaN, true)).not.toThrow();
+      expect(() => writer.record("clob", -5, false)).not.toThrow();
+      writer.flushDepHealth();
+      const [row] = depRows();
+      expect(row!.labels.count).toBe(2);
+      expect(row!.value).toBe(0); // both clamped to 0ms → avg 0
+    });
+
+    it("flushAll flushes counters AND dep_health together", () => {
+      const writer = makeWriter();
+      writer.writeCounter("taker_attempt_total", 1, '{"side":"buy"}');
+      writer.record("clob", 100, true);
+      writer.flushAll();
+      const total = db
+        .prepare("SELECT metric_name FROM runtime_metrics ORDER BY metric_name")
+        .all() as Array<{ metric_name: string }>;
+      expect(total.map((r) => r.metric_name)).toEqual(["dep_health", "taker_attempt_total"]);
+    });
+  });
 });

@@ -9,8 +9,9 @@
  * Does NOT perform slug filtering -- that is the scanner module's job.
  */
 
-import type { MarketDiscoveryGateway, ClobMarket } from "@krabs/domain";
+import type { MarketDiscoveryGateway, ClobMarket, DepHealthRecorder } from "@krabs/domain";
 import { drainResponseBody } from "../live/market-data-gateway.js";
+import { timeDepCall } from "../dep-health.js";
 import { mapGammaMarket } from "../mappers.js";
 import { isTransientNetworkError, sleep } from "../network-errors.js";
 
@@ -27,6 +28,8 @@ export interface GammaDiscoveryConfig {
   maxRetries?: number;
   /** Delay between retries in ms (default 1000) */
   retryDelayMs?: number;
+  /** Optional Phase-2 dependency-latency recorder (measure-only; no-op when absent). */
+  depHealthRecorder?: DepHealthRecorder | null;
 }
 
 const DEFAULT_BASE_URL = "https://gamma-api.polymarket.com";
@@ -96,6 +99,7 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
   private readonly pageSize: number;
   private readonly maxRetries: number;
   private readonly retryDelayMs: number;
+  private readonly depHealthRecorder: DepHealthRecorder | null;
 
   constructor(config: GammaDiscoveryConfig = {}) {
     this.baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
@@ -104,6 +108,7 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
     this.pageSize = config.pageSize ?? DEFAULT_PAGE_SIZE;
     this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.retryDelayMs = config.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+    this.depHealthRecorder = config.depHealthRecorder ?? null;
   }
 
   async discoverMarkets(): Promise<ClobMarket[]> {
@@ -187,9 +192,16 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
         const url = this.buildUrl(afterCursor);
-        const response = await fetch(url.toString(), {
-          signal: AbortSignal.timeout(this.timeoutMs),
-        });
+        // Phase-2a: HEADER-LEVEL HTTP telemetry — `fetch` resolves on response
+        // headers, so body read/parse latency is NOT included and a post-200
+        // body/parse failure is not counted. Tightened to full-attempt
+        // measurement in 2b (before threshold calibration).
+        const response = await timeDepCall(
+          this.depHealthRecorder,
+          "gamma",
+          () => fetch(url.toString(), { signal: AbortSignal.timeout(this.timeoutMs) }),
+          { isOk: (r: Response) => r.ok },
+        );
 
         if (!response.ok) {
           await drainResponseBody(response);

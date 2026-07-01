@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createTokenId } from "@krabs/domain";
+import { createTokenId, type DepHealthRecorder, type DepKey } from "@krabs/domain";
 import { decodeFunctionData, parseAbi } from "viem";
 import { LiveExchangeGateway } from "../live/exchange-gateway.js";
 import { LiveMarketDataGateway, buildTokenIdBatches } from "../live/market-data-gateway.js";
@@ -188,6 +188,37 @@ describe("LiveExchangeGateway", () => {
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("UNKNOWN");
     expect(result.errorMessage).toContain("no order id");
+  });
+
+  it("records the CLOB dep sample as ok=false when placeOrder returns no order id", async () => {
+    const calls: { dep: DepKey; ok: boolean }[] = [];
+    const recorder: DepHealthRecorder = {
+      record: (dep, _latencyMs, ok) => calls.push({ dep, ok }),
+    };
+    const gwR = new LiveExchangeGateway({ client, depHealthRecorder: recorder });
+    const params = {
+      clientOrderId: "cloid-1",
+      tokenId: createTokenId("tok-1"),
+      side: "buy" as const,
+      size: 100,
+      price: 0.5,
+      orderType: "GTC" as const,
+      tickSize: 0.01,
+      negRisk: false,
+    };
+
+    // Resolved payload with no order id → failed placement → dep ok=false.
+    client.createAndPostOrder.mockResolvedValue({});
+    const bad = await gwR.placeOrder(params);
+    expect(bad.success).toBe(false);
+    expect(calls).toEqual([{ dep: "clob", ok: false }]);
+
+    // A real order id → success → dep ok=true.
+    calls.length = 0;
+    client.createAndPostOrder.mockResolvedValue({ orderID: "ord-ok" });
+    const good = await gwR.placeOrder(params);
+    expect(good.success).toBe(true);
+    expect(calls).toEqual([{ dep: "clob", ok: true }]);
   });
 
   it("cancelOrder calls SDK cancelOrder", async () => {

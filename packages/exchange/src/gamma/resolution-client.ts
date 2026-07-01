@@ -1,4 +1,6 @@
+import type { DepHealthRecorder } from "@krabs/domain";
 import { drainResponseBody } from "../live/market-data-gateway.js";
+import { timeDepCall } from "../dep-health.js";
 import { isTransientNetworkError, sleep } from "../network-errors.js";
 
 /**
@@ -24,6 +26,8 @@ export interface GammaResolutionConfig {
   timeoutMs?: number;
   maxRetries?: number;
   retryDelayMs?: number;
+  /** Optional Phase-2 dependency-latency recorder (measure-only; no-op when absent). */
+  depHealthRecorder?: DepHealthRecorder | null;
 }
 
 export interface GammaMarketInfo {
@@ -41,12 +45,14 @@ export class GammaResolutionClient {
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
   private readonly retryDelayMs: number;
+  private readonly depHealthRecorder: DepHealthRecorder | null;
 
   constructor(config: GammaResolutionConfig = {}) {
     this.baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.retryDelayMs = config.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+    this.depHealthRecorder = config.depHealthRecorder ?? null;
   }
 
   async getMarketBySlug(slug: string): Promise<GammaMarketInfo | null> {
@@ -68,9 +74,17 @@ export class GammaResolutionClient {
   private async fetchMarket(url: URL): Promise<GammaMarketInfo | null> {
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
-        const response = await fetch(url.toString(), {
-          signal: AbortSignal.timeout(this.timeoutMs),
-        });
+        // Phase-2a: HEADER-LEVEL HTTP telemetry — `fetch` resolves when response
+        // headers arrive, so body read/parse latency is NOT included and a
+        // post-200 body/parse failure is not counted here. Tightened to full-
+        // attempt measurement in 2b (before threshold calibration).
+        // 404/422 are valid "not found" responses — the dependency is reachable.
+        const response = await timeDepCall(
+          this.depHealthRecorder,
+          "gamma",
+          () => fetch(url.toString(), { signal: AbortSignal.timeout(this.timeoutMs) }),
+          { isOk: (r: Response) => r.ok || r.status === 404 || r.status === 422 },
+        );
 
         // 404 = not found, 422 = endpoint doesn't accept this ID format
         if (response.status === 404 || response.status === 422) {

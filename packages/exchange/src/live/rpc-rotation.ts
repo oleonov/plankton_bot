@@ -11,6 +11,9 @@
  * endpoint that actually served the request.
  */
 
+import type { DepHealthRecorder } from "@krabs/domain";
+import { timeDepCall } from "../dep-health.js";
+
 export interface RpcRotatorOptions {
   primaryUrls: readonly string[];
   fallbackUrls?: readonly string[];
@@ -19,6 +22,8 @@ export interface RpcRotatorOptions {
   logger?: {
     warn: (message: string, meta?: Record<string, unknown>) => void;
   };
+  /** Optional Phase-2 dependency-latency recorder (measure-only; no-op when absent). */
+  depHealthRecorder?: DepHealthRecorder | null;
 }
 
 export interface EthCallContext {
@@ -96,6 +101,7 @@ export function createRpcRotator(opts: RpcRotatorOptions): RpcRotator {
     // eslint-disable-next-line no-console
     warn: (m, meta) => console.warn(m, meta),
   };
+  const recorder = opts.depHealthRecorder ?? null;
   let cursor = 0;
 
   async function tryTier(
@@ -127,26 +133,32 @@ export function createRpcRotator(opts: RpcRotatorOptions): RpcRotator {
   }
 
   return {
-    async ethCall(to, data, ctx) {
-      // Reserve a start index synchronously (before any await) so concurrent
-      // callers fan out across primaries instead of all reading the same cursor.
-      const start = cursor;
-      cursor = (start + 1) % primaryUrls.length;
+    ethCall(to, data, ctx) {
+      // Measure-only: the whole rotation (incl. in-call 429 failover) is one
+      // dependency call. Throws on exhaustion → recorded as fail and rethrown.
+      return timeDepCall(recorder, "rpc", async () => {
+        // Reserve a start index synchronously (before any await) so concurrent
+        // callers fan out across primaries instead of all reading the same cursor.
+        const start = cursor;
+        cursor = (start + 1) % primaryUrls.length;
 
-      const primary = await tryTier(primaryUrls, start, to, data, ctx, (index) => {
-        // Advance past the endpoint that actually served the call so the next
-        // sequential call skips it (covers the in-call 429-failover edge case).
-        cursor = (index + 1) % primaryUrls.length;
+        const primary = await tryTier(primaryUrls, start, to, data, ctx, (index) => {
+          // Advance past the endpoint that actually served the call so the next
+          // sequential call skips it (covers the in-call 429-failover edge case).
+          cursor = (index + 1) % primaryUrls.length;
+        });
+        if (primary.ok) return primary.result;
+
+        // All primaries returned 429 → last-resort fallback tier (not in the circle).
+        if (fallbackUrls.length > 0) {
+          const fb = await tryTier(fallbackUrls, 0, to, data, ctx, () => {});
+          if (fb.ok) return fb.result;
+          throw fb.lastErr instanceof Error ? fb.lastErr : new Error(String(fb.lastErr));
+        }
+        throw primary.lastErr instanceof Error
+          ? primary.lastErr
+          : new Error(String(primary.lastErr));
       });
-      if (primary.ok) return primary.result;
-
-      // All primaries returned 429 → last-resort fallback tier (not in the circle).
-      if (fallbackUrls.length > 0) {
-        const fb = await tryTier(fallbackUrls, 0, to, data, ctx, () => {});
-        if (fb.ok) return fb.result;
-        throw fb.lastErr instanceof Error ? fb.lastErr : new Error(String(fb.lastErr));
-      }
-      throw primary.lastErr instanceof Error ? primary.lastErr : new Error(String(primary.lastErr));
     },
   };
 }

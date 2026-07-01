@@ -720,6 +720,7 @@ async function main(): Promise<void> {
       userWsAuth,
       slugFilter,
       initialBalanceUsdc,
+      depHealthRecorder: runtimeMetrics,
       onInfraAlert: runtimeMode === "live-lite" ? recordInfraAlert : undefined,
       polygonRpcUrl:
         runtimeMode === "live-lite"
@@ -771,9 +772,10 @@ async function main(): Promise<void> {
   // When GAMMA_TAG_ID is set, the scanner narrows to that tag server-side
   // (5–10× fewer markets crawled). When unset, the scanner broad-crawls all
   // active Gamma events and relies on selection rules for local filtering.
-  const discoveryGateway = new GammaMarketDiscoveryGateway(
-    config.gammaTagId !== undefined ? { tagId: config.gammaTagId } : {},
-  );
+  const discoveryGateway = new GammaMarketDiscoveryGateway({
+    ...(config.gammaTagId !== undefined ? { tagId: config.gammaTagId } : {}),
+    depHealthRecorder: runtimeMetrics,
+  });
 
   // ADR-015: DB-backed execution policy. The provider polls
   // `runtime_control_state.execution_policy_version` and hot-swaps the
@@ -1634,7 +1636,7 @@ async function main(): Promise<void> {
   // earlier (alongside the repos block) so they are available to
   // RiskInventoryModule and SignalToOrderBridge upstream. The Gamma client and
   // detector live with the resolution module that owns them.
-  const gammaResolutionClient = new GammaResolutionClient();
+  const gammaResolutionClient = new GammaResolutionClient({ depHealthRecorder: runtimeMetrics });
 
   const resolutionDetector = new ResolutionDetector(
     repos.position,

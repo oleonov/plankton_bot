@@ -117,3 +117,4 @@ export {
   toSdkTickSize,
   type GammaPricing,
 } from "./mappers.js";
+export { timeDepCall, fetchResultOk } from "./dep-health.js";

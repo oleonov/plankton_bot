@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import type { DepHealthRecorder, DepKey } from "@krabs/domain";
 
 type CounterEntry = {
   metricName: string;
@@ -6,15 +7,21 @@ type CounterEntry = {
   sum: number;
 };
 
+type DepAccumulator = { count: number; sumMs: number; maxMs: number; errors: number };
+
 const counterKey = (metricName: string, labels: string | null): string =>
   labels === null ? `${metricName}-NULL-` : `${metricName}-LABELED-${labels}`;
 
-export class RuntimeMetricWriter {
+const round1 = (n: number): number => Math.round(n * 10) / 10;
+
+export class RuntimeMetricWriter implements DepHealthRecorder {
   private readonly findLatest;
   private readonly insertMetric;
   private readonly updateMetric;
   private readonly counterBuffer = new Map<string, CounterEntry>();
+  private readonly depBuffer = new Map<DepKey, DepAccumulator>();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private flushIntervalMs = 0;
 
   constructor(
     private readonly db: Database.Database,
@@ -85,14 +92,59 @@ export class RuntimeMetricWriter {
     this.counterBuffer.clear();
   }
 
+  // DepHealthRecorder: accumulate one outbound gateway call (Phase 2a). Pure
+  // arithmetic, never throws — telemetry must not affect the trading call.
+  record(dep: DepKey, latencyMs: number, ok: boolean): void {
+    const ms = Number.isFinite(latencyMs) && latencyMs > 0 ? latencyMs : 0;
+    const acc = this.depBuffer.get(dep) ?? { count: 0, sumMs: 0, maxMs: 0, errors: 0 };
+    acc.count += 1;
+    acc.sumMs += ms;
+    if (ms > acc.maxMs) acc.maxMs = ms;
+    if (!ok) acc.errors += 1;
+    this.depBuffer.set(dep, acc);
+  }
+
+  // Emits one APPEND-ONLY `dep_health` row per accumulated dep (NOT writeLatest,
+  // which keys on metric_name alone and would overwrite across deps). Labels are
+  // a bounded aggregate only — no endpoint URL / tokenId / conditionId / orderId.
+  // Buffer is cleared only after the insert transaction succeeds.
+  flushDepHealth(capturedAt = this.now().toISOString()): void {
+    if (this.depBuffer.size === 0) return;
+    const entries = Array.from(this.depBuffer.entries());
+    const insert = this.db.transaction((rows: [DepKey, DepAccumulator][]) => {
+      for (const [dep, acc] of rows) {
+        const avgMs = acc.count > 0 ? acc.sumMs / acc.count : 0;
+        const errorRatePct = acc.count > 0 ? (acc.errors / acc.count) * 100 : 0;
+        const labels = JSON.stringify({
+          dep,
+          maxMs: round1(acc.maxMs),
+          count: acc.count,
+          errors: acc.errors,
+          errorRatePct: round1(errorRatePct),
+          windowMs: this.flushIntervalMs,
+        });
+        this.insertMetric.run("dep_health", round1(avgMs), labels, capturedAt);
+      }
+    });
+    insert(entries);
+    this.depBuffer.clear();
+  }
+
+  // Single flush point for the periodic timer: counters + dep_health together.
+  flushAll(capturedAt = this.now().toISOString()): void {
+    this.flushCounters(capturedAt);
+    this.flushDepHealth(capturedAt);
+  }
+
   startPeriodicFlush(intervalMs: number): void {
     if (this.flushTimer !== null) return;
+    this.flushIntervalMs = intervalMs;
     this.flushTimer = setInterval(() => {
       try {
-        this.flushCounters();
+        this.flushAll();
       } catch {
-        // Periodic telemetry flush must never crash the runtime; the buffer
-        // is preserved on failure so the next tick retries.
+        // Periodic telemetry flush must never crash the runtime; the buffers
+        // are preserved on failure so the next tick retries.
       }
     }, intervalMs);
     this.flushTimer.unref?.();

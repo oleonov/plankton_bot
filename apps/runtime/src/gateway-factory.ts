@@ -6,6 +6,7 @@ import {
   assertSupportedRuntimeProfile,
   type ExchangeGateway,
   type MarketDataGateway,
+  type DepHealthRecorder,
 } from "@krabs/domain";
 import {
   LiveMarketDataGateway,
@@ -39,6 +40,8 @@ export interface CreateGatewaysInput {
   polygonRpcFallbackUrl?: string | undefined;
   /** Alchemy Polygon API keys (not URLs). Mapped to primary RPC URLs in rotation order. */
   alchemyPolygonKeys?: readonly string[] | undefined;
+  /** Phase-2 dependency-latency recorder, threaded into the live gateways + RPC rotator. */
+  depHealthRecorder?: DepHealthRecorder | null | undefined;
   onInfraAlert?:
     | ((alert: {
         code: string;
@@ -106,6 +109,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     polygonRpcUrls,
     polygonRpcFallbackUrl,
     alchemyPolygonKeys,
+    depHealthRecorder,
     onInfraAlert,
     marketDataMaxTrackedTokens,
     marketDataMaxWsShards,
@@ -152,6 +156,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     circuitOpenShardFloor: marketDataCircuitOpenShardFloor,
     circuitOpenMs: marketDataCircuitOpenMs,
     streamStableMs: marketDataStreamStableMs,
+    ...(depHealthRecorder ? { depHealthRecorder } : {}),
   };
 
   const { primaryUrls, fallbackUrls } = resolvePolygonRpcConfig({
@@ -162,7 +167,11 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
   });
   // ONE rotator per process: shared by the collateral resolver and the gateway's
   // balance reader so the round-robin cursor is global, not per-consumer.
-  const rpcRotator = createRpcRotator({ primaryUrls, fallbackUrls });
+  const rpcRotator = createRpcRotator({
+    primaryUrls,
+    fallbackUrls,
+    ...(depHealthRecorder ? { depHealthRecorder } : {}),
+  });
   const collateralResolver = createCollateralResolver({
     rotator: rpcRotator,
     conditionalTokensAddress: CONDITIONAL_TOKENS_POLYGON,
@@ -174,6 +183,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     ...(userWsAuth ? { userWsAuth } : {}),
     ...(traderAddress ? { traderAddress } : {}),
     ...(onInfraAlert ? { onInfraAlert } : {}),
+    ...(depHealthRecorder ? { depHealthRecorder } : {}),
     collateralResolver,
     rpcRotator,
     fetchRetry: {

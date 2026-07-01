@@ -55,6 +55,8 @@ import {
 } from "./pusd-wrapper.js";
 import { readErc20Balance, readErc20Allowance } from "./usdc-balance-reader.js";
 import type { RpcRotator } from "./rpc-rotation.js";
+import type { DepHealthRecorder } from "@krabs/domain";
+import { timeDepCall, fetchResultOk } from "../dep-health.js";
 
 export interface LiveExchangeConfig {
   /** ClobClient instance — typed as unknown to avoid SDK type leakage. */
@@ -87,6 +89,8 @@ export interface LiveExchangeConfig {
     | undefined;
   /** Shared read-path RPC rotator used for on-chain balance reads and the pUSD activation flow. */
   rpcRotator?: RpcRotator | null;
+  /** Optional Phase-2 dependency-latency recorder (measure-only; no-op when absent). */
+  depHealthRecorder?: DepHealthRecorder | null;
   /** Override for balance reads — for testing without a live RPC. */
   __readErc20Balance?: typeof readErc20Balance;
   /** Override for allowance reads — for testing without a live RPC. */
@@ -293,6 +297,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
     | null;
   private readonly collateralResolver: CollateralResolver | null;
   private readonly rpcRotator: RpcRotator | null;
+  private readonly depHealthRecorder: DepHealthRecorder | null;
   private readonly readErc20BalanceFn: typeof readErc20Balance;
   private readonly readErc20AllowanceFn: typeof readErc20Allowance;
   private readonly fetchRetries: number;
@@ -323,6 +328,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
     this.onInfraAlert = config.onInfraAlert ?? null;
     this.collateralResolver = config.collateralResolver ?? null;
     this.rpcRotator = config.rpcRotator ?? null;
+    this.depHealthRecorder = config.depHealthRecorder ?? null;
     this.readErc20BalanceFn = config.__readErc20Balance ?? readErc20Balance;
     this.readErc20AllowanceFn = config.__readErc20Allowance ?? readErc20Allowance;
     this.fetchRetries = config.fetchRetry?.retries ?? 3;
@@ -346,9 +352,18 @@ export class LiveExchangeGateway implements ExchangeGateway {
         negRisk: params.negRisk,
       };
 
-      const result = params.postOnly
-        ? await this.postMakerOnlyOrder(userOrder, options, params.orderType)
-        : await this.client.createAndPostOrder(userOrder, options, params.orderType);
+      const result = await timeDepCall(
+        this.depHealthRecorder,
+        "clob",
+        () =>
+          params.postOnly
+            ? this.postMakerOnlyOrder(userOrder, options, params.orderType)
+            : this.client.createAndPostOrder(userOrder, options, params.orderType),
+        // A resolved SDK payload with no order id is a FAILED placement (see the
+        // no-order-id branch below) — classify it as such so the most
+        // safety-critical CLOB call isn't recorded as healthy on failure.
+        { isOk: (r) => Boolean(extractOrderId(r)) },
+      );
       const orderId = extractOrderId(result);
       if (!orderId) {
         return {
@@ -378,7 +393,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   async cancelOrder(params: CancelOrderParams): Promise<CancelOrderResult> {
     try {
-      await this.client.cancelOrder({ orderID: params.orderId });
+      await timeDepCall(this.depHealthRecorder, "clob", () =>
+        this.client.cancelOrder({ orderID: params.orderId }),
+      );
       return { success: true };
     } catch (err) {
       const { code, message } = classifyError(err);
@@ -388,7 +405,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   async cancelAllOrders(): Promise<CancelOrderResult> {
     try {
-      await this.client.cancelAll();
+      await timeDepCall(this.depHealthRecorder, "clob", () => this.client.cancelAll());
       return { success: true };
     } catch (err) {
       const { code, message } = classifyError(err);
@@ -432,13 +449,19 @@ export class LiveExchangeGateway implements ExchangeGateway {
    * genuine empty snapshot from a fetch failure (#36).
    */
   async getOpenOrdersResult(): Promise<FetchResult<ExchangeOrder[]>> {
-    return executeWithRetry(() => this.fetchOpenOrders(), classifyFetchError, {
-      retries: this.fetchRetries,
-      backoffMs: this.fetchBackoffMs,
-      sleep: this.fetchSleep,
-      source: "open_orders",
-      log: this.fetchRetryLog,
-    });
+    return timeDepCall(
+      this.depHealthRecorder,
+      "clob",
+      () =>
+        executeWithRetry(() => this.fetchOpenOrders(), classifyFetchError, {
+          retries: this.fetchRetries,
+          backoffMs: this.fetchBackoffMs,
+          sleep: this.fetchSleep,
+          source: "open_orders",
+          log: this.fetchRetryLog,
+        }),
+      { isOk: fetchResultOk },
+    );
   }
 
   async getOpenOrdersForToken(tokenId: TokenId): Promise<ExchangeOrder[]> {
@@ -462,13 +485,19 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   /** Reliable variant of {@link getFills} — see {@link getOpenOrdersResult}. */
   async getFillsResult(sinceMs: number): Promise<FetchResult<ExchangeFill[]>> {
-    return executeWithRetry(() => this.fetchFills(sinceMs), classifyFetchError, {
-      retries: this.fetchRetries,
-      backoffMs: this.fetchBackoffMs,
-      sleep: this.fetchSleep,
-      source: "fills",
-      log: this.fetchRetryLog,
-    });
+    return timeDepCall(
+      this.depHealthRecorder,
+      "clob",
+      () =>
+        executeWithRetry(() => this.fetchFills(sinceMs), classifyFetchError, {
+          retries: this.fetchRetries,
+          backoffMs: this.fetchBackoffMs,
+          sleep: this.fetchSleep,
+          source: "fills",
+          log: this.fetchRetryLog,
+        }),
+      { isOk: fetchResultOk },
+    );
   }
 
   createUserEventStream(
@@ -579,9 +608,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
         // Polymarket relayer rejects free-form metadata with 400 `invalid metadata field`.
         // Use a short constant slug; the relayer accepts these, and conditionIds are
         // already logged separately via logSettlementLifecycle.
-        const response = await settlementExecute(
-          requests.map((request) => request.tx),
-          RELAYER_METADATA_REDEEM,
+        const response = await timeDepCall(this.depHealthRecorder, "relayer", () =>
+          settlementExecute(requests.map((request) => request.tx), RELAYER_METADATA_REDEEM),
         );
         const submittedAt = Date.now();
         for (const request of requests) {
