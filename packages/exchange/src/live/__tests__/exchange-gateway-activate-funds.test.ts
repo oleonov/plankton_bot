@@ -22,8 +22,15 @@ function makeGateway(opts: {
   allowances?: Partial<Record<string, bigint>>;
   settlementExecute?: ReturnType<typeof vi.fn>;
   onInfraAlert?: ReturnType<typeof vi.fn>;
+  settlementLaneBackstopMs?: number;
 }): LiveExchangeGateway {
-  const { balances = {}, allowances = {}, settlementExecute, onInfraAlert } = opts;
+  const {
+    balances = {},
+    allowances = {},
+    settlementExecute,
+    onInfraAlert,
+    settlementLaneBackstopMs,
+  } = opts;
 
   const readBalance = vi.fn<typeof readErc20Balance>(async (o) => balances[o.token] ?? 0n);
   const readAllowance = vi.fn<typeof readErc20Allowance>(async (o) => allowances[o.token] ?? 0n);
@@ -38,7 +45,20 @@ function makeGateway(opts: {
     onInfraAlert,
     __readErc20Balance: readBalance,
     __readErc20Allowance: readAllowance,
+    ...(settlementLaneBackstopMs !== undefined
+      ? { __settlementLaneBackstopMs: settlementLaneBackstopMs }
+      : {}),
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("activatePendingUsdcCollateral", () => {
@@ -121,5 +141,30 @@ describe("activatePendingUsdcCollateral", () => {
     // generic "relayer 500" error may not match an infra-alert pattern — what
     // matters is that it does NOT fire more than once.
     expect(infraAlert.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
+  it("serializes activation submissions through the settlement submit lane", async () => {
+    const firstWait = deferred<unknown>();
+    const execute = vi
+      .fn()
+      .mockResolvedValueOnce({ wait: vi.fn(() => firstWait.promise) })
+      .mockResolvedValueOnce({ wait: vi.fn().mockResolvedValue({ state: "MINED" }) });
+    const gw = makeGateway({
+      balances: { [USDC_E_ADDRESS]: USDC_E_7_03 },
+      settlementExecute: execute,
+    });
+
+    const first = gw.activatePendingUsdcCollateral({ minAmountWei: MIN_WEI });
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+
+    const second = gw.activatePendingUsdcCollateral({ minAmountWei: MIN_WEI });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(execute).toHaveBeenCalledTimes(1);
+
+    firstWait.resolve({ state: "MINED" });
+    await expect(first).resolves.toMatchObject({ status: "confirmed" });
+    await second;
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 });

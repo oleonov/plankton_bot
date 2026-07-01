@@ -65,6 +65,15 @@ describe("classifySettlementInfraAlert", () => {
     expect(classifySettlementInfraAlert(new Error("duplicate nonce; already known"))).toBeNull();
   });
 
+  it("does not misclassify duplicate in-flight relayer submit envelopes as unavailable", () => {
+    const envelope =
+      '{"error":"request error","status":409,"statusText":"Conflict",' +
+      '"data":{"error":"duplicate in-flight transaction for this nonce"}}';
+    const alert = classifySettlementInfraAlert(new Error(envelope));
+    expect(alert?.code).toBe("POLYMARKET_RELAYER_DUPLICATE_IN_FLIGHT");
+    expect(alert?.message).not.toContain("unavailable");
+  });
+
   it("returns null for unrecognized / benign errors", () => {
     expect(classifySettlementInfraAlert(new Error("something unexpected"))).toBeNull();
     expect(classifySettlementInfraAlert(null)).toBeNull();

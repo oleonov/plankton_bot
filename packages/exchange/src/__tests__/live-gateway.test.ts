@@ -40,6 +40,20 @@ function createMockSettlementClient() {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushMicrotasks(iterations = 8): Promise<void> {
+  for (let i = 0; i < iterations; i += 1) await Promise.resolve();
+}
+
 class FakeMarketSocket {
   sent: string[] = [];
   onopen: ((event: unknown) => void) | null = null;
@@ -715,7 +729,7 @@ describe("LiveExchangeGateway", () => {
     const conditionId = "0x6666666666666666666666666666666666666666666666666666666666666666";
     await gw.redeemPositions([conditionId]);
 
-    expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(true);
+    expect(gw.__hasPendingRedeemSubmission(conditionId)).toBe(true);
   });
 
   it("redeemPositions clears pending state when relayer confirmation resolves quickly", async () => {
@@ -738,7 +752,7 @@ describe("LiveExchangeGateway", () => {
 
     expect(result).toMatchObject({ status: "confirmed", conditionIds: [conditionId] });
     expect(wait).toHaveBeenCalledTimes(1);
-    expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(false);
+    expect(gw.__hasPendingRedeemSubmission(conditionId)).toBe(false);
   });
 
   it("redeemPositions returns tx metadata from submit and wait responses", async () => {
@@ -787,7 +801,7 @@ describe("LiveExchangeGateway", () => {
     });
 
     expect(wait).toHaveBeenCalledTimes(1);
-    expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(false);
+    expect(gw.__hasPendingRedeemSubmission(conditionId)).toBe(false);
   });
 
   it("redeemPositions clears pending state when wait result is empty and balances remain non-zero", async () => {
@@ -811,7 +825,7 @@ describe("LiveExchangeGateway", () => {
     );
 
     expect(wait).toHaveBeenCalledTimes(1);
-    expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(false);
+    expect(gw.__hasPendingRedeemSubmission(conditionId)).toBe(false);
   });
 
   it("redeemPositions keeps pending state when confirmation check errors after submit", async () => {
@@ -836,7 +850,131 @@ describe("LiveExchangeGateway", () => {
     });
 
     expect(wait).toHaveBeenCalledTimes(1);
-    expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(true);
+    expect(gw.__hasPendingRedeemSubmission(conditionId)).toBe(true);
+  });
+
+  it("redeemPositions serializes concurrent relayer submissions until confirmation releases the lane", async () => {
+    const firstWait = deferred<unknown>();
+    const settlementClient = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ wait: vi.fn(() => firstWait.promise) })
+        .mockResolvedValueOnce({ wait: vi.fn().mockResolvedValue({ state: "MINED" }) }),
+    };
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }],
+    });
+    client.getBalanceAllowance.mockResolvedValue({ balance: "1000000" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    const first = gw.redeemPositions([
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ]);
+    await vi.waitFor(() => expect(settlementClient.execute).toHaveBeenCalledTimes(1));
+
+    const second = gw.redeemPositions([
+      "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+
+    firstWait.resolve({ state: "MINED" });
+    await expect(first).resolves.toMatchObject({ status: "confirmed" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(settlementClient.execute).toHaveBeenCalledTimes(2);
+    await expect(second).resolves.toMatchObject({ status: "confirmed" });
+  });
+
+  it("redeemPositions rechecks recent submissions after queued same-condition calls", async () => {
+    vi.useFakeTimers();
+    try {
+      const settlementClient = {
+        execute: vi.fn().mockResolvedValue({ txHash: "0xsubmitted" }),
+      };
+      client.getMarket.mockResolvedValue({
+        condition_id: "0xcond",
+        neg_risk: false,
+        tokens: [{ token_id: "tok-yes" }],
+      });
+      client.getBalanceAllowance.mockResolvedValue({ balance: "1000000" });
+      gw = new LiveExchangeGateway({
+        client,
+        settlementClient,
+        __settlementLaneBackstopMs: 1_000,
+      });
+
+      const conditionId = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+      await expect(gw.redeemPositions([conditionId])).resolves.toMatchObject({
+        status: "submitted",
+      });
+      expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+      expect(gw.__hasPendingRedeemSubmission(conditionId)).toBe(true);
+
+      const second = gw.redeemPositions([conditionId]);
+      await Promise.resolve();
+      expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(second).resolves.toMatchObject({
+        status: "skipped",
+        reason: "no_redeem_requests",
+      });
+      expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("redeemPositions releases the settlement lane when the submit task watchdog expires", async () => {
+    vi.useFakeTimers();
+    try {
+      const settlementClient = {
+        execute: vi
+          .fn()
+          .mockReturnValueOnce(new Promise<unknown>(() => {}))
+          .mockResolvedValueOnce({ wait: vi.fn().mockResolvedValue({ state: "MINED" }) }),
+      };
+      client.getMarket.mockResolvedValue({
+        condition_id: "0xcond",
+        neg_risk: false,
+        tokens: [{ token_id: "tok-yes" }],
+      });
+      client.getBalanceAllowance.mockResolvedValue({ balance: "1000000" });
+      gw = new LiveExchangeGateway({
+        client,
+        settlementClient,
+        __settlementLaneTaskTimeoutMs: 1_000,
+      });
+
+      const first = gw.redeemPositions([
+        "0xcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcf",
+      ]);
+      await flushMicrotasks();
+      expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+
+      const second = gw.redeemPositions([
+        "0xdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf",
+      ]);
+      await flushMicrotasks();
+      expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+
+      const firstRejected = expect(first).rejects.toThrow(
+        "Settlement submit lane redeem task timed out after 1000ms",
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      await firstRejected;
+
+      await flushMicrotasks();
+      expect(settlementClient.execute).toHaveBeenCalledTimes(2);
+      await expect(second).resolves.toMatchObject({ status: "confirmed" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("redeemPositions reports polygon rpc upstream failures as infra alerts", async () => {
@@ -934,6 +1072,46 @@ describe("LiveExchangeGateway", () => {
     // Verify encoded data roughly contains the amount (10 tokens -> 10 * 10^6 = 10000000)
     // 10000000 decimal is 0x989680 hex.
     expect(txs[0].data).toContain("989680");
+  });
+
+  it("mergePositions shares the relayer submit lane with redeemPositions", async () => {
+    const firstWait = deferred<unknown>();
+    const settlementClient = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ wait: vi.fn(() => firstWait.promise) })
+        .mockResolvedValueOnce({ wait: vi.fn().mockResolvedValue({ state: "MINED" }) }),
+    };
+    gw = new LiveExchangeGateway({ client, settlementClient });
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [
+        { outcome: "Yes", token_id: "tok-yes" },
+        { outcome: "No", token_id: "tok-no" },
+      ],
+    });
+    client.getBalanceAllowance.mockResolvedValue({ balance: "1000000" });
+
+    const redeem = gw.redeemPositions([
+      "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    ]);
+    await vi.waitFor(() => expect(settlementClient.execute).toHaveBeenCalledTimes(1));
+
+    const merge = gw.mergePositions([
+      {
+        conditionId: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        amount: 10,
+      },
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+
+    firstWait.resolve({ state: "MINED" });
+    await expect(redeem).resolves.toMatchObject({ status: "confirmed" });
+    await merge;
+    expect(settlementClient.execute).toHaveBeenCalledTimes(2);
   });
 
   it("mergePositions uses a constant slug as relayer metadata for batched submissions", async () => {

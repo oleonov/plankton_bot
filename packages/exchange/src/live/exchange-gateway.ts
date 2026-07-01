@@ -91,6 +91,10 @@ export interface LiveExchangeConfig {
   rpcRotator?: RpcRotator | null;
   /** Optional Phase-2 dependency-latency recorder (measure-only; no-op when absent). */
   depHealthRecorder?: DepHealthRecorder | null;
+  /** Test-only override for the relayer settlement submit lane backstop. */
+  __settlementLaneBackstopMs?: number;
+  /** Test-only override for the relayer settlement submit lane task watchdog. */
+  __settlementLaneTaskTimeoutMs?: number;
   /** Override for balance reads — for testing without a live RPC. */
   __readErc20Balance?: typeof readErc20Balance;
   /** Override for allowance reads — for testing without a live RPC. */
@@ -120,6 +124,8 @@ const NEG_RISK_REDEEM_ABI = parseAbi([
 ]);
 const RECENT_SETTLEMENT_SUBMISSION_TTL_MS = 10 * 60 * 1000;
 const SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS = 15 * 1000;
+const SETTLEMENT_SUBMIT_LANE_BACKSTOP_MS = 60_000;
+const SETTLEMENT_SUBMIT_LANE_TASK_TIMEOUT_MS = 90_000;
 // Polymarket relayer validates the `metadata` field server-side and rejects
 // free-form strings (colon, spaces, hex digests) with 400 `invalid metadata
 // field`. Use short alphanumeric slugs — the relayer accepts these and the
@@ -148,6 +154,19 @@ type SettlementTxMetadata = {
   gasUsed: number | null;
 };
 
+type SettlementSubmitOperation = "redeem" | "merge" | "activation";
+
+type SettlementLaneRelease =
+  | "released_confirmed"
+  | "released_ttl"
+  | "released_watchdog"
+  | "released_error";
+
+type SettlementLaneTaskResult<T> = {
+  value: T;
+  release: SettlementLaneRelease;
+};
+
 type MarketTokenEntry = {
   readonly tokenId: string;
   readonly index: number;
@@ -157,6 +176,16 @@ class SettlementTransactionFailedError extends Error {
   constructor() {
     super("Settlement transaction reached failed state before balances cleared");
     this.name = "SettlementTransactionFailedError";
+  }
+}
+
+class SettlementSubmitLaneTimeoutError extends Error {
+  constructor(
+    readonly operation: SettlementSubmitOperation,
+    readonly timeoutMs: number,
+  ) {
+    super(`Settlement submit lane ${operation} task timed out after ${timeoutMs}ms`);
+    this.name = "SettlementSubmitLaneTimeoutError";
   }
 }
 
@@ -278,6 +307,12 @@ function skippedRedeemResult(
   return { status: "skipped", conditionIds, reason, txHash: null, gasUsed: null };
 }
 
+function settlementLaneReleaseForStatus(
+  status: RedeemPositionsResult["status"] | DepositActivationResult["status"],
+): SettlementLaneRelease {
+  return status === "submitted" || status === "pending" ? "released_ttl" : "released_confirmed";
+}
+
 export class LiveExchangeGateway implements ExchangeGateway {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly client: any;
@@ -304,6 +339,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
   private readonly fetchBackoffMs: number[];
   private readonly fetchSleep: (ms: number) => Promise<void>;
   private readonly fetchRetryLog: RetryDiagnosticLogger | undefined;
+  private readonly settlementLaneBackstopMs: number;
+  private readonly settlementLaneTaskTimeoutMs: number;
+  private settlementSubmitTail: Promise<void> = Promise.resolve();
   private readonly warnedCollateralFallback = new Set<string>();
   private warnedRedeemUnsupported = false;
   private warnedMergeUnsupported = false;
@@ -335,6 +373,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
     this.fetchBackoffMs = config.fetchRetry?.backoffMs ?? [100, 500, 2000];
     this.fetchSleep = config.fetchRetry?.sleep ?? sleep;
     this.fetchRetryLog = config.fetchRetry?.log;
+    this.settlementLaneBackstopMs =
+      config.__settlementLaneBackstopMs ?? SETTLEMENT_SUBMIT_LANE_BACKSTOP_MS;
+    this.settlementLaneTaskTimeoutMs =
+      config.__settlementLaneTaskTimeoutMs ?? SETTLEMENT_SUBMIT_LANE_TASK_TIMEOUT_MS;
   }
 
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
@@ -597,65 +639,75 @@ export class LiveExchangeGateway implements ExchangeGateway {
   ): Promise<RedeemPositionsResult> {
     const settlementExecute = this.getSettlementExecuteMethod();
     if (settlementExecute) {
-      const requests = await this.buildRedeemRequests(
-        conditionIds,
-        options?.redeemTokenIdsByCondition,
-      );
-      if (requests.length === 0) return skippedRedeemResult(conditionIds, "no_redeem_requests");
-
-      const submitStartedAt = Date.now();
-      try {
-        // Polymarket relayer rejects free-form metadata with 400 `invalid metadata field`.
-        // Use a short constant slug; the relayer accepts these, and conditionIds are
-        // already logged separately via logSettlementLifecycle.
-        const response = await timeDepCall(this.depHealthRecorder, "relayer", () =>
-          settlementExecute(
-            requests.map((request) => request.tx),
-            RELAYER_METADATA_REDEEM,
-          ),
+      return this.withSettlementSubmitLane("redeem", async () => {
+        const requests = await this.buildRedeemRequests(
+          conditionIds,
+          options?.redeemTokenIdsByCondition,
         );
-        const submittedAt = Date.now();
-        for (const request of requests) {
-          this.recentRedeemSubmissions.set(request.conditionId, submittedAt);
+        if (requests.length === 0) {
+          return {
+            value: skippedRedeemResult(conditionIds, "no_redeem_requests"),
+            release: "released_confirmed",
+          };
         }
-        logSettlementLifecycle({
-          lifecycle: "redeem_submit_response",
-          conditionIds: requests.map((r) => r.conditionId),
-          elapsedMs: submittedAt - submitStartedAt,
-          responseShape: describeShape(response),
-        });
-        const metadata = extractSettlementTxMetadata(response);
-        const observed = await this.observeSettlementExecution(response, requests);
-        return {
-          status: observed.status,
-          conditionIds: requests.map((request) => request.conditionId),
-          txHash: observed.metadata.txHash ?? metadata.txHash,
-          gasUsed: observed.metadata.gasUsed ?? metadata.gasUsed,
-        };
-      } catch (e) {
-        const confirmedSettlementFailure = e instanceof SettlementTransactionFailedError;
-        logSettlementLifecycle({
-          lifecycle: confirmedSettlementFailure
-            ? "redeem_settlement_failed"
-            : "redeem_submit_error",
-          conditionIds: requests.map((r) => r.conditionId),
-          elapsedMs: Date.now() - submitStartedAt,
-          errorMessage: e instanceof Error ? e.message : String(e),
-          errorName: e instanceof Error ? e.name : undefined,
-          revertReason:
-            e && typeof e === "object" && "reason" in e
-              ? (e as { reason?: unknown }).reason
-              : undefined,
-        });
-        if (!confirmedSettlementFailure) {
-          this.reportInfraAlert(e);
-          console.error(
-            `Failed to submit relayer redeem for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
-            sanitizeLogArg(e),
+
+        const submitStartedAt = Date.now();
+        try {
+          // Polymarket relayer rejects free-form metadata with 400 `invalid metadata field`.
+          // Use a short constant slug; the relayer accepts these, and conditionIds are
+          // already logged separately via logSettlementLifecycle.
+          const response = await timeDepCall(this.depHealthRecorder, "relayer", () =>
+            settlementExecute(
+              requests.map((request) => request.tx),
+              RELAYER_METADATA_REDEEM,
+            ),
           );
+          const submittedAt = Date.now();
+          for (const request of requests) {
+            this.recentRedeemSubmissions.set(request.conditionId, submittedAt);
+          }
+          logSettlementLifecycle({
+            lifecycle: "redeem_submit_response",
+            conditionIds: requests.map((r) => r.conditionId),
+            elapsedMs: submittedAt - submitStartedAt,
+            responseShape: describeShape(response),
+          });
+          const metadata = extractSettlementTxMetadata(response);
+          const observed = await this.observeSettlementExecution(response, requests);
+          return {
+            value: {
+              status: observed.status,
+              conditionIds: requests.map((request) => request.conditionId),
+              txHash: observed.metadata.txHash ?? metadata.txHash,
+              gasUsed: observed.metadata.gasUsed ?? metadata.gasUsed,
+            },
+            release: settlementLaneReleaseForStatus(observed.status),
+          };
+        } catch (e) {
+          const confirmedSettlementFailure = e instanceof SettlementTransactionFailedError;
+          logSettlementLifecycle({
+            lifecycle: confirmedSettlementFailure
+              ? "redeem_settlement_failed"
+              : "redeem_submit_error",
+            conditionIds: requests.map((r) => r.conditionId),
+            elapsedMs: Date.now() - submitStartedAt,
+            errorMessage: e instanceof Error ? e.message : String(e),
+            errorName: e instanceof Error ? e.name : undefined,
+            revertReason:
+              e && typeof e === "object" && "reason" in e
+                ? (e as { reason?: unknown }).reason
+                : undefined,
+          });
+          if (!confirmedSettlementFailure) {
+            this.reportInfraAlert(e);
+            console.error(
+              `Failed to submit relayer redeem for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
+              sanitizeLogArg(e),
+            );
+          }
+          throw e;
         }
-        throw e;
-      }
+      });
     }
 
     const redeemOne = this.getClientMethod("postRedeem") ?? this.getClientMethod("redeem");
@@ -692,47 +744,54 @@ export class LiveExchangeGateway implements ExchangeGateway {
     return { status: "submitted", conditionIds, ...mergedMetadata };
   }
 
-  hasPendingRedeemSubmission(conditionId: string): boolean {
+  __hasPendingRedeemSubmission(conditionId: string): boolean {
     return this.wasRedeemRecentlySubmitted(conditionId);
   }
 
   async mergePositions(merges: { conditionId: string; amount: number }[]): Promise<void> {
     const settlementExecute = this.getSettlementExecuteMethod();
     if (settlementExecute) {
-      const requests = await this.buildMergeRequests(merges);
-      if (requests.length === 0) return;
-
-      const submitStartedAt = Date.now();
-      try {
-        const response = await settlementExecute(
-          requests.map((request) => request.tx),
-          RELAYER_METADATA_MERGE,
-        );
-        logSettlementLifecycle({
-          lifecycle: "merge_submit_response",
-          conditionIds: requests.map((r) => r.conditionId),
-          elapsedMs: Date.now() - submitStartedAt,
-          responseShape: describeShape(response),
-        });
-        await this.observeSettlementExecution(response, requests);
-      } catch (e) {
-        const confirmedSettlementFailure = e instanceof SettlementTransactionFailedError;
-        logSettlementLifecycle({
-          lifecycle: confirmedSettlementFailure ? "merge_settlement_failed" : "merge_submit_error",
-          conditionIds: requests.map((r) => r.conditionId),
-          elapsedMs: Date.now() - submitStartedAt,
-          errorMessage: e instanceof Error ? e.message : String(e),
-          errorName: e instanceof Error ? e.name : undefined,
-        });
-        if (!confirmedSettlementFailure) {
-          this.reportInfraAlert(e);
-          console.error(
-            `Failed to submit relayer merge for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
-            sanitizeLogArg(e),
-          );
+      await this.withSettlementSubmitLane("merge", async () => {
+        const requests = await this.buildMergeRequests(merges);
+        if (requests.length === 0) {
+          return { value: undefined, release: "released_confirmed" };
         }
-        throw e;
-      }
+
+        const submitStartedAt = Date.now();
+        try {
+          const response = await settlementExecute(
+            requests.map((request) => request.tx),
+            RELAYER_METADATA_MERGE,
+          );
+          logSettlementLifecycle({
+            lifecycle: "merge_submit_response",
+            conditionIds: requests.map((r) => r.conditionId),
+            elapsedMs: Date.now() - submitStartedAt,
+            responseShape: describeShape(response),
+          });
+          const observed = await this.observeSettlementExecution(response, requests);
+          return { value: undefined, release: settlementLaneReleaseForStatus(observed.status) };
+        } catch (e) {
+          const confirmedSettlementFailure = e instanceof SettlementTransactionFailedError;
+          logSettlementLifecycle({
+            lifecycle: confirmedSettlementFailure
+              ? "merge_settlement_failed"
+              : "merge_submit_error",
+            conditionIds: requests.map((r) => r.conditionId),
+            elapsedMs: Date.now() - submitStartedAt,
+            errorMessage: e instanceof Error ? e.message : String(e),
+            errorName: e instanceof Error ? e.name : undefined,
+          });
+          if (!confirmedSettlementFailure) {
+            this.reportInfraAlert(e);
+            console.error(
+              `Failed to submit relayer merge for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
+              sanitizeLogArg(e),
+            );
+          }
+          throw e;
+        }
+      });
       return;
     }
 
@@ -786,6 +845,98 @@ export class LiveExchangeGateway implements ExchangeGateway {
           ) => Promise<unknown>
         ).bind(this.settlementClient)
       : null;
+  }
+
+  private async withSettlementSubmitLane<T>(
+    operation: SettlementSubmitOperation,
+    task: () => Promise<SettlementLaneTaskResult<T>>,
+  ): Promise<T> {
+    const previousTail = this.settlementSubmitTail;
+    let releaseTail!: () => void;
+    const currentTail = new Promise<void>((resolve) => {
+      releaseTail = resolve;
+    });
+    this.settlementSubmitTail = previousTail.then(() => currentTail);
+
+    const queuedAt = Date.now();
+    await previousTail;
+    const waitMs = Date.now() - queuedAt;
+    if (waitMs > 0) {
+      logSettlementLifecycle({
+        lifecycle: "settlement_submit_lane_wait",
+        operation,
+        waitMs,
+      });
+    }
+
+    try {
+      const result = await this.runSettlementLaneTaskWithWatchdog(operation, task);
+      this.releaseSettlementSubmitLane(operation, result.release, releaseTail);
+      return result.value;
+    } catch (error) {
+      this.releaseSettlementSubmitLane(
+        operation,
+        error instanceof SettlementSubmitLaneTimeoutError ? "released_watchdog" : "released_error",
+        releaseTail,
+      );
+      throw error;
+    }
+  }
+
+  private async runSettlementLaneTaskWithWatchdog<T>(
+    operation: SettlementSubmitOperation,
+    task: () => Promise<SettlementLaneTaskResult<T>>,
+  ): Promise<SettlementLaneTaskResult<T>> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        task(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              new SettlementSubmitLaneTimeoutError(operation, this.settlementLaneTaskTimeoutMs),
+            );
+          }, this.settlementLaneTaskTimeoutMs);
+          const maybeUnref = (timer as { unref?: () => void }).unref;
+          if (typeof maybeUnref === "function") maybeUnref.call(timer);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private releaseSettlementSubmitLane(
+    operation: SettlementSubmitOperation,
+    release: SettlementLaneRelease,
+    releaseTail: () => void,
+  ): void {
+    if (release !== "released_ttl") {
+      releaseTail();
+      logSettlementLifecycle({
+        lifecycle: "settlement_submit_lane_release",
+        operation,
+        result: release,
+      });
+      return;
+    }
+
+    logSettlementLifecycle({
+      lifecycle: "settlement_submit_lane_hold",
+      operation,
+      result: release,
+      holdMs: this.settlementLaneBackstopMs,
+    });
+    const timer = setTimeout(() => {
+      releaseTail();
+      logSettlementLifecycle({
+        lifecycle: "settlement_submit_lane_release",
+        operation,
+        result: release,
+      });
+    }, this.settlementLaneBackstopMs);
+    const maybeUnref = (timer as { unref?: () => void }).unref;
+    if (typeof maybeUnref === "function") maybeUnref.call(timer);
   }
 
   private async buildMergeRequests(
@@ -1324,22 +1475,28 @@ export class LiveExchangeGateway implements ExchangeGateway {
       };
     }
 
-    const submitStartedAt = Date.now();
+    let submitStartedAt = Date.now();
     try {
-      const response = await settlementExecute(txs, RELAYER_METADATA_ACTIVATE_FUNDS);
-      logSettlementLifecycle({
-        lifecycle: "activate_submit_response",
-        elapsedMs: Date.now() - submitStartedAt,
-        responseShape: describeShape(response),
+      return await this.withSettlementSubmitLane("activation", async () => {
+        submitStartedAt = Date.now();
+        const response = await settlementExecute(txs, RELAYER_METADATA_ACTIVATE_FUNDS);
+        logSettlementLifecycle({
+          lifecycle: "activate_submit_response",
+          elapsedMs: Date.now() - submitStartedAt,
+          responseShape: describeShape(response),
+        });
+        const metadata = extractSettlementTxMetadata(response);
+        const observed = await this.observeActivationExecution(response);
+        return {
+          value: {
+            status: observed.status,
+            perAsset,
+            txHash: observed.metadata.txHash ?? metadata.txHash,
+            gasUsed: observed.metadata.gasUsed ?? metadata.gasUsed,
+          },
+          release: settlementLaneReleaseForStatus(observed.status),
+        };
       });
-      const metadata = extractSettlementTxMetadata(response);
-      const observed = await this.observeActivationExecution(response);
-      return {
-        status: observed.status,
-        perAsset,
-        txHash: observed.metadata.txHash ?? metadata.txHash,
-        gasUsed: observed.metadata.gasUsed ?? metadata.gasUsed,
-      };
     } catch (e) {
       const confirmedSettlementFailure = e instanceof SettlementTransactionFailedError;
       logSettlementLifecycle({
@@ -1574,6 +1731,13 @@ function isBenignSettlementPrecheckSkip(normalizedMessage: string): boolean {
   );
 }
 
+function isDuplicateInFlightSettlementSubmit(normalizedMessage: string): boolean {
+  return (
+    normalizedMessage.includes("duplicate in-flight transaction") &&
+    normalizedMessage.includes("nonce")
+  );
+}
+
 export function classifySettlementInfraAlert(error: unknown): {
   code: string;
   severity: "warning" | "error";
@@ -1589,6 +1753,16 @@ export function classifySettlementInfraAlert(error: unknown): {
   // alert for it — and short-circuit before the transport-error branch that would
   // otherwise match the relayer's "request error" envelope wrapper.
   if (isBenignSettlementPrecheckSkip(normalized)) return null;
+
+  if (isDuplicateInFlightSettlementSubmit(normalized)) {
+    return {
+      code: "POLYMARKET_RELAYER_DUPLICATE_IN_FLIGHT",
+      severity: "warning",
+      source: "polymarket-relayer",
+      message: "Polymarket relayer reports settlement already in flight - Krabs will retry.",
+      details: { rawMessage },
+    };
+  }
 
   if (
     normalized.includes("429") ||
