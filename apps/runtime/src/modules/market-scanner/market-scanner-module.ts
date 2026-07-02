@@ -37,6 +37,9 @@ import type { EffectiveResolutionGate } from "../../effective-resolution-service
 const HINT_SCAN_DEBOUNCE_MS = 250;
 const DEFAULT_HINT_SCAN_MIN_INTERVAL_MS = 15 * 60 * 1000;
 const TRANSIENT_SCAN_WARN_THROTTLE_MS = 15 * 60_000;
+// Plankton-signature features (sig_*) are treated as stale after this window
+// even when unchanged, forcing a refresh write (spec 2026-07-01 §4.3).
+export const SIGNATURE_FEATURE_TTL_MS = 24 * 60 * 60 * 1000;
 
 type MarketScanTrigger = "startup" | "periodic" | "hint" | "manual";
 
@@ -514,6 +517,14 @@ export class MarketScannerModule implements RuntimeModule {
                 }
               }
             }
+            // Plankton-signature ranking features captured at discovery
+            // (spec 2026-07-01 §4.3) — fresh markets have no market_snapshots
+            // to rank from, so these ride along on the markets row itself.
+            const mids = clobMarket.tokens
+              .map((t) => (typeof t.midPrice === "number" ? t.midPrice : null))
+              .filter((m): m is number => m !== null);
+            const cheapMid = mids.length > 0 ? Math.min(...mids) : null;
+            const tokenMid = typeof token.midPrice === "number" ? token.midPrice : null;
             pageBatch.push({
               tokenId,
               conditionId: clobMarket.conditionId,
@@ -539,6 +550,11 @@ export class MarketScannerModule implements RuntimeModule {
               groupItemTitle: clobMarket.groupItemTitle ?? null,
               groupItemThreshold: clobMarket.groupItemThreshold ?? null,
               tags: clobMarket.tags ?? null,
+              sigMid: tokenMid,
+              sigCheapMid: cheapMid,
+              sigLiquidity: clobMarket.liquidity ?? null,
+              sigVol24h: clobMarket.volume24hr ?? null,
+              sigFeaturesAt: now,
               createdAt: now,
               updatedAt: now,
             });
@@ -707,10 +723,11 @@ export class MarketScannerModule implements RuntimeModule {
     const changedMarkets: Market[] = [];
     let skippedUnchanged = 0;
     let skippedCoalesceNoop = 0;
+    const nowMs = Date.now();
 
     for (const market of markets) {
       const existing = existingByTokenId.get(String(market.tokenId));
-      const decision = classifyMarketWrite(market, existing ?? null);
+      const decision = classifyMarketWrite(market, existing ?? null, nowMs);
       if (decision === "changed") {
         changedMarkets.push(market);
       } else if (decision === "coalesce_noop") {
@@ -779,7 +796,11 @@ export class MarketScannerModule implements RuntimeModule {
   }
 }
 
-function classifyMarketWrite(next: Market, existing: Market | null): MarketWriteDecision {
+export function classifyMarketWrite(
+  next: Market,
+  existing: Market | null,
+  nowMs: number,
+): MarketWriteDecision {
   if (existing === null) return "changed";
 
   const coalesceNoop =
@@ -791,6 +812,21 @@ function classifyMarketWrite(next: Market, existing: Market | null): MarketWrite
 
   const effectiveNextEventSlug = next.eventSlug == null ? existing.eventSlug : next.eventSlug;
   const effectiveNextGammaCreatedAt = existing.gammaCreatedAt ?? next.gammaCreatedAt ?? null;
+
+  // Plankton-signature features (spec 2026-07-01 §4.3): a write is forced
+  // when the captured features differ from the stored row, or when the
+  // stored capture has gone stale (TTL) even if the values themselves match
+  // — this keeps `sig_features_at` refreshing so the tier's TTL gate stays
+  // meaningful.
+  const sigStale =
+    existing.sigFeaturesAt == null ||
+    !Number.isFinite(Date.parse(existing.sigFeaturesAt)) ||
+    nowMs - Date.parse(existing.sigFeaturesAt) > SIGNATURE_FEATURE_TTL_MS;
+  const sigEqual =
+    (next.sigMid ?? null) === (existing.sigMid ?? null) &&
+    (next.sigCheapMid ?? null) === (existing.sigCheapMid ?? null) &&
+    (next.sigLiquidity ?? null) === (existing.sigLiquidity ?? null) &&
+    (next.sigVol24h ?? null) === (existing.sigVol24h ?? null);
 
   const unchanged =
     String(next.conditionId) === String(existing.conditionId) &&
@@ -814,7 +850,9 @@ function classifyMarketWrite(next: Market, existing: Market | null): MarketWrite
     // market's life but included for correctness (cost is negligible).
     (next.groupItemTitle ?? null) === (existing.groupItemTitle ?? null) &&
     (next.groupItemThreshold ?? null) === (existing.groupItemThreshold ?? null) &&
-    tagsEqual(next.tags ?? null, existing.tags ?? null);
+    tagsEqual(next.tags ?? null, existing.tags ?? null) &&
+    sigEqual &&
+    !sigStale;
 
   if (!unchanged) return "changed";
   return coalesceNoop === null ? "unchanged" : "coalesce_noop";

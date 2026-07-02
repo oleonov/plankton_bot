@@ -591,6 +591,7 @@ export const mockSystemHealth = {
     { nm: "Dead-market / Track B shadow", added: "Jun 12" },
     { nm: "Two-lane entry shadow", added: "Jun 18" },
     { nm: "Entry fresh-edge shadow", added: "Jun 21" },
+    { nm: "Plankton-signature entry shadow", added: "Jul 2" },
   ],
 };
 

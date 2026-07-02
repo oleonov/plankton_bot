@@ -42,6 +42,14 @@ CREATE TABLE IF NOT EXISTS markets (
   score_model_version       TEXT,
   scored_at                 TEXT,
   features_captured_at      TEXT,
+  -- Plankton-signature ranking features (migration 081): Gamma-at-discovery
+  -- features persisted so findTrackedForPricingTiered can rank fresh
+  -- untracked markets that have no market_snapshots row yet. All nullable.
+  sig_mid                   REAL,
+  sig_cheap_mid             REAL,
+  sig_liquidity             REAL,
+  sig_vol24h                REAL,
+  sig_features_at           TEXT,
   created_at                TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at                TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -52,6 +60,8 @@ CREATE INDEX IF NOT EXISTS idx_markets_condition_id ON markets(condition_id);
 CREATE INDEX IF NOT EXISTS idx_markets_selection_status ON markets(selection_status);
 CREATE INDEX IF NOT EXISTS idx_markets_tracked ON markets(active, tradable) WHERE active = 1;
 CREATE INDEX IF NOT EXISTS idx_markets_score ON markets(score) WHERE score IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_markets_signature
+  ON markets(tradable, selection_status, sig_liquidity, tick_size);
 
 -- ═══════════ MARKET SNAPSHOTS ═══════════
 -- From 001_initial.sql

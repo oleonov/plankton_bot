@@ -64,10 +64,36 @@ export interface OrderCancelTelemetry {
 export interface TrackedForPricing {
   /** Markets with open/dust positions or pending/open orders — never dropped from WS. */
   executionCritical: Market[];
+  /**
+   * Signature-matching markets (spec 2026-07-01). When `opts.reserveSignature`
+   * is true (live/default), these are pulled out of the V4 pool and given a
+   * guaranteed live slot before V4 ranking. When `opts.reserveSignature` is
+   * false (shadow mode), this is a measurement projection ONLY — these markets
+   * are left in the V4 pool and flow into `entryCandidates`/`discoveryOnly` on
+   * their own merit, exactly as they would without the signature feature.
+   */
+  planktonSignature: Market[];
   /** Active+tradable markets up to the remaining cap after executionCritical. */
   entryCandidates: Market[];
   /** Active+tradable markets beyond the cap — polled via discovery loop, not WS. */
   discoveryOnly: Market[];
+  /** Count of signature-matching markets that did NOT get a live slot (coverage metric denominator). */
+  signatureOverflow: number;
+}
+
+/**
+ * Thresholds gating the reserved plankton-signature tier (spec 2026-07-01 §4.1/§4.2).
+ * All fields are required — callers pass a fully-resolved config, defaults live
+ * with the repository implementation.
+ */
+export interface SignatureThresholds {
+  minLiquidity: number;
+  minMid: number;
+  maxMid: number;
+  minRemainingDays: number;
+  minVol24h: number;
+  minTick: number;
+  featureTtlMs: number;
 }
 
 export interface MarketRepository {
@@ -160,10 +186,27 @@ export interface MarketRepository {
    * Ranking uses only columns present in `markets` (`ledger.sql:10-32`).
    * No join to `market_snapshots`. Liquidity-aware ranking is a follow-up.
    *
-   * @param opts.maxTokens - Total WS-tier cap: `executionCritical + entryCandidates ≤ maxTokens`
+   * @param opts.maxTokens - Total WS-tier cap:
+   *   `executionCritical + planktonSignature + entryCandidates ≤ maxTokens`
    *   (executionCritical is never dropped even if it exceeds maxTokens alone).
+   * @param opts.signatureReserve - Max number of slots reserved for the
+   *   plankton-signature tier (computed before the V4 admit/reject split,
+   *   spec 2026-07-01 §4.1). Defaults to the repository's own constant.
+   * @param opts.signature - Thresholds gating signature-tier membership.
+   *   Defaults to the repository's own constant.
+   * @param opts.reserveSignature - When true (default, live behavior), signature
+   *   markets are removed from the V4 pool and reserved a guaranteed live slot.
+   *   When false (shadow mode), signature markets stay in the V4 pool and
+   *   `entryCandidates`/`discoveryOnly` come back byte-for-byte identical to a
+   *   call without the signature feature — `planktonSignature` is returned as
+   *   a projection only, for the coverage metric.
    */
-  findTrackedForPricingTiered(opts: { maxTokens: number }): TrackedForPricing;
+  findTrackedForPricingTiered(opts: {
+    maxTokens: number;
+    signatureReserve?: number;
+    signature?: SignatureThresholds;
+    reserveSignature?: boolean;
+  }): TrackedForPricing;
 
   /**
    * Look up the event_market_count stored for a given market slug.

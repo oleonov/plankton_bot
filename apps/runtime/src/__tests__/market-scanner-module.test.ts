@@ -799,6 +799,15 @@ describe("MarketScannerModule", () => {
       selectionStatus: "matched_include",
       selectionWinningRuleId: null,
       gammaCreatedAt: "2026-04-15T08:30:00.000Z",
+      // Signature features must match what makeClobMarket() re-scan produces
+      // (midPrice 0.32, liquidity 250, volume24hr null) with a FRESH sig_features_at,
+      // so the sig_* comparison is a no-op and this test isolates the
+      // eventSlug/gammaCreatedAt COALESCE no-op behavior.
+      sigMid: 0.32,
+      sigCheapMid: 0.32,
+      sigLiquidity: 250,
+      sigVol24h: null,
+      sigFeaturesAt: new Date().toISOString(),
       createdAt: "2026-05-01T00:00:00.000Z",
       updatedAt: "2026-05-01T00:00:00.000Z",
     };

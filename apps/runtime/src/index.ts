@@ -831,6 +831,24 @@ async function main(): Promise<void> {
     staleThresholdMs: config.marketDataStaleThresholdMs,
     botRunId: String(botRunId),
     maxTrackedTokens: config.marketDataMaxTrackedTokens,
+    signatureReserve: config.marketDataSignatureReserve,
+    signatureThresholds: {
+      minLiquidity: config.signatureMinLiquidity,
+      minMid: config.signatureMinMid,
+      maxMid: config.signatureMaxMid,
+      minRemainingDays: config.signatureMinRemainingDays,
+      minVol24h: config.signatureMinVol24h,
+      minTick: config.signatureMinTick,
+      featureTtlMs: config.signatureFeatureTtlMs,
+    },
+    signatureTierMode: config.marketDataSignatureTierMode,
+    recordSignatureCoverage: (inLiveTier, count, mode) => {
+      runtimeMetrics.writeCounter(
+        "entry_coverage_signature_total",
+        count,
+        JSON.stringify({ in_live_tier: inLiveTier, mode }),
+      );
+    },
     discoveryPollIntervalMs: config.marketDataDiscoveryPollIntervalMs,
     discoveryBatchSize: config.marketDataDiscoveryBatchSize,
     fallbackBatchSize: config.marketDataFallbackBatchSize,

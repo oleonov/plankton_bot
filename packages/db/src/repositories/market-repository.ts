@@ -3,6 +3,7 @@ import type {
   MarketRepository,
   Market,
   MarketScoreUpdate,
+  SignatureThresholds,
   TrackedForPricing,
   V4AdmissionTelemetrySnapshot,
 } from "@krabs/domain";
@@ -68,6 +69,47 @@ type PricingCandidate = {
   features: SelectionFeatures;
 };
 
+// Reserved plankton-signature tier (spec 2026-07-01 §4.1/§4.2): fresh markets
+// have no market_snapshots to rank from, so they carry their own Gamma-at-
+// discovery features (`sig_*`) and get a live slot ahead of the V4 split.
+const DEFAULT_SIGNATURE_RESERVE = 300;
+const DEFAULT_SIGNATURE: SignatureThresholds = {
+  minLiquidity: 500,
+  minMid: 0.01,
+  maxMid: 0.3,
+  minRemainingDays: 14,
+  minVol24h: 50,
+  minTick: 0.001,
+  featureTtlMs: 24 * 60 * 60 * 1000,
+};
+
+function matchesSignature(market: Market, thr: SignatureThresholds, nowMs: number): boolean {
+  if (market.sigFeaturesAt == null) return false;
+  const capMs = Date.parse(market.sigFeaturesAt);
+  if (!Number.isFinite(capMs) || nowMs - capMs > thr.featureTtlMs) return false;
+  if (market.tickSize !== thr.minTick) return false;
+  const liq = market.sigLiquidity;
+  if (liq == null || liq < thr.minLiquidity) return false;
+  const vol = market.sigVol24h;
+  if (vol == null || vol < thr.minVol24h) return false;
+  const cheap = market.sigCheapMid;
+  if (cheap == null || cheap <= thr.minMid || cheap > thr.maxMid) return false;
+  const remainingDays = horizonDaysFromNow(market.endDate, nowMs);
+  if (remainingDays == null || remainingDays < thr.minRemainingDays) return false;
+  // R9 category gate: use the V4 category classifier — an unrecognized (null)
+  // category is treated as blocked (junk categories map to null).
+  const category = evaluateV4Selection({
+    slug: market.slug,
+    eventSlug: market.eventSlug,
+    question: market.question,
+    liquidity: market.sigLiquidity ?? null,
+    volume24h: market.sigVol24h ?? null,
+    bestBid: null,
+    bestAsk: null,
+  }).category;
+  return category != null;
+}
+
 // Step 3 (audit doc §D3/§P2) **score-column ownership invariant**.
 // `score`, `score_model_version`, `scored_at`, `features_captured_at` are
 // written exclusively by `updateScoresBatch`. The market-upsert path below
@@ -86,8 +128,9 @@ const UPSERT_MARKET_SQL = `INSERT INTO markets
           regime, horizon, end_date, active, tradable, tick_size, neg_risk,
           event_market_count, selection_status, selection_winning_rule_id,
           gamma_created_at, group_item_title, group_item_threshold, tags_json,
+          sig_mid, sig_cheap_mid, sig_liquidity, sig_vol24h, sig_features_at,
           created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(token_id) DO UPDATE SET
            condition_id = excluded.condition_id,
            slug = excluded.slug,
@@ -109,6 +152,11 @@ const UPSERT_MARKET_SQL = `INSERT INTO markets
            group_item_title = excluded.group_item_title,
            group_item_threshold = excluded.group_item_threshold,
            tags_json = excluded.tags_json,
+           sig_mid = excluded.sig_mid,
+           sig_cheap_mid = excluded.sig_cheap_mid,
+           sig_liquidity = excluded.sig_liquidity,
+           sig_vol24h = excluded.sig_vol24h,
+           sig_features_at = excluded.sig_features_at,
            updated_at = excluded.updated_at`;
 
 export class SqliteMarketRepository implements MarketRepository {
@@ -155,6 +203,11 @@ export class SqliteMarketRepository implements MarketRepository {
       market.groupItemTitle ?? null,
       market.groupItemThreshold ?? null,
       market.tags != null ? JSON.stringify(market.tags) : null,
+      market.sigMid ?? null,
+      market.sigCheapMid ?? null,
+      market.sigLiquidity ?? null,
+      market.sigVol24h ?? null,
+      market.sigFeaturesAt ?? null,
       market.createdAt,
       market.updatedAt,
     );
@@ -279,7 +332,12 @@ export class SqliteMarketRepository implements MarketRepository {
     return rows.map((r) => this.rowToMarket(r));
   }
 
-  findTrackedForPricingTiered(opts: { maxTokens: number }): TrackedForPricing {
+  findTrackedForPricingTiered(opts: {
+    maxTokens: number;
+    signatureReserve?: number;
+    signature?: SignatureThresholds;
+    reserveSignature?: boolean;
+  }): TrackedForPricing {
     // Single SQL scan: pull every market that is either execution-critical
     // (open position/order, regardless of selection_status — safety invariant)
     // or an active+tradable entry candidate with a non-excluded selection status.
@@ -366,11 +424,41 @@ export class SqliteMarketRepository implements MarketRepository {
     const candidates = tradableOnly.filter((candidate) => {
       return !criticalIds.has(String(candidate.market.tokenId));
     });
+    const nowMs = Date.now();
+
+    // Reserved plankton-signature tier (spec 2026-07-01 §4.1, gated by
+    // opts.reserveSignature since 2026-07-02): computed BEFORE the V4
+    // admit/reject split so signature-matching markets get a live slot
+    // regardless of V4 outcome. In live mode (reserveSignature !== false,
+    // the default) the matched set is removed from the V4 pool so it is never
+    // double-counted or re-evaluated by V4 admission. In shadow mode
+    // (reserveSignature === false) reservation is disabled entirely:
+    // `planktonSignature` becomes a measurement projection only — matched
+    // markets stay in the V4 pool so entryCandidates/discoveryOnly come back
+    // byte-for-byte identical to a call without the signature feature.
+    const reserveSignature = opts.reserveSignature !== false;
+    const sigThr = opts.signature ?? DEFAULT_SIGNATURE;
+    const sigReserve = opts.signatureReserve ?? DEFAULT_SIGNATURE_RESERVE;
+    const remainingAfterCritical = Math.max(0, opts.maxTokens - executionCritical.length);
+    const sigMatched = candidates
+      .filter((c) => matchesSignature(c.market, sigThr, nowMs))
+      .sort((a, b) => {
+        const ga = a.market.gammaCreatedAt ?? "";
+        const gb = b.market.gammaCreatedAt ?? "";
+        if (ga !== gb) return ga < gb ? 1 : -1; // DESC: newest first
+        return String(a.market.tokenId).localeCompare(String(b.market.tokenId));
+      });
+    const sigSlots = Math.min(sigReserve, remainingAfterCritical);
+    const planktonSignature = sigMatched.slice(0, sigSlots).map((c) => c.market);
+    const sigIds = new Set(planktonSignature.map((mk) => String(mk.tokenId)));
+    const v4Pool = reserveSignature
+      ? candidates.filter((c) => !sigIds.has(String(c.market.tokenId)))
+      : candidates;
+
     const admittedCandidates: PricingCandidate[] = [];
     const rejectedCandidates: PricingCandidate[] = [];
-    const nowMs = Date.now();
     let v4AdmissionTelemetry = createV4AdmissionTelemetrySnapshot(new Date(nowMs).toISOString());
-    for (const candidate of candidates) {
+    for (const candidate of v4Pool) {
       const result = evaluateV4Selection({
         slug: candidate.market.slug,
         eventSlug: candidate.market.eventSlug,
@@ -411,14 +499,44 @@ export class SqliteMarketRepository implements MarketRepository {
       return String(a.market.tokenId).localeCompare(String(b.market.tokenId));
     });
 
-    const remaining = Math.max(0, opts.maxTokens - executionCritical.length);
+    // In shadow mode planktonSignature never consumed a slot from the V4 pool,
+    // so it must not shrink the entryCandidates budget either — the split has
+    // to match a baseline call with no signature feature at all.
+    const remaining = Math.max(
+      0,
+      opts.maxTokens - executionCritical.length - (reserveSignature ? planktonSignature.length : 0),
+    );
     const entryCandidates = admittedCandidates.slice(0, remaining).map((c) => c.market);
     const discoveryOnly = [
       ...admittedCandidates.slice(remaining).map((c) => c.market),
       ...rejectedCandidates.map((c) => c.market),
     ];
 
-    return { executionCritical, entryCandidates, discoveryOnly };
+    // signatureOverflow in live mode must reflect the FINAL live set (spec
+    // 2026-07-01 §4.5): a sigMatched market that missed its reserved signature
+    // slot may still win a live entryCandidate slot via V4 admission, so it is
+    // covered and must not be double-counted as overflow. In shadow mode there
+    // is no reserved/live set to compare against — this is simply a projection
+    // of what live mode would overflow, for the coverage metric.
+    let signatureOverflow: number;
+    if (reserveSignature) {
+      const liveIds = new Set([
+        ...executionCritical.map((m) => String(m.tokenId)),
+        ...planktonSignature.map((m) => String(m.tokenId)),
+        ...entryCandidates.map((m) => String(m.tokenId)),
+      ]);
+      signatureOverflow = sigMatched.filter((c) => !liveIds.has(String(c.market.tokenId))).length;
+    } else {
+      signatureOverflow = Math.max(0, sigMatched.length - planktonSignature.length);
+    }
+
+    return {
+      executionCritical,
+      planktonSignature,
+      entryCandidates,
+      discoveryOnly,
+      signatureOverflow,
+    };
   }
 
   findEventMarketCountBySlug(slug: string): number | null {
@@ -456,6 +574,11 @@ export class SqliteMarketRepository implements MarketRepository {
       scoreModelVersion: (row.score_model_version as string | null) ?? null,
       scoredAt: (row.scored_at as string | null) ?? null,
       featuresCapturedAt: (row.features_captured_at as string | null) ?? null,
+      sigMid: (row.sig_mid as number | null) ?? null,
+      sigCheapMid: (row.sig_cheap_mid as number | null) ?? null,
+      sigLiquidity: (row.sig_liquidity as number | null) ?? null,
+      sigVol24h: (row.sig_vol24h as number | null) ?? null,
+      sigFeaturesAt: (row.sig_features_at as string | null) ?? null,
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
     };

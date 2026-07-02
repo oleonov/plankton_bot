@@ -57,8 +57,10 @@ function makeTiered(
 ): TrackedForPricing {
   return {
     executionCritical: criticalIds.map((id) => makeMarket(id)),
+    planktonSignature: [],
     entryCandidates: candidateIds.map((id) => makeMarket(id)),
     discoveryOnly: discoveryIds.map((id) => makeMarket(id)),
+    signatureOverflow: 0,
   };
 }
 
@@ -911,6 +913,79 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
     await mod.poll();
 
     expect(capturedIds[0]).toEqual(["crit-a", "crit-b", "crit-c", "entry-a"]);
+
+    await mod.stop();
+  });
+
+  it("prioritizes plankton-signature fallback work ahead of entry candidates", async () => {
+    const criticalIds = ["crit-a"];
+    const signatureIds = ["sig-a", "sig-b"];
+    const entryIds = ["entry-a", "entry-b"];
+    const tiered: TrackedForPricing = {
+      executionCritical: criticalIds.map((id) => makeMarket(id)),
+      planktonSignature: signatureIds.map((id) => makeMarket(id)),
+      entryCandidates: entryIds.map((id) => makeMarket(id)),
+      discoveryOnly: [],
+      signatureOverflow: 0,
+    };
+    const repo = createMockRepo(tiered);
+    const capturedIds: string[][] = [];
+    const getMarketPricing = vi.fn().mockImplementation(async (polled: string[]) => {
+      capturedIds.push([...polled]);
+      return new Map();
+    });
+    const gateway: MarketDataGateway = {
+      getMarkets: vi.fn().mockResolvedValue([]),
+      getMarket: vi.fn().mockResolvedValue(null),
+      getOrderBook: vi.fn().mockResolvedValue({
+        tokenId: createTokenId(""),
+        bids: [],
+        asks: [],
+        bestBid: null,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        timestamp: Date.now(),
+      }),
+      getTickSize: vi.fn().mockResolvedValue(0.01),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
+      getMarketPricing,
+      createMarketPricingStream: (handlers) => {
+        const s = new FakePricingStream(handlers);
+        streamRef = s;
+        return s;
+      },
+    };
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 100,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+      // Cap below the full candidate count (5) so priority ordering decides who survives.
+      fallbackPollMaxConcurrency: 4,
+      fallbackPollRatePerSec: 5,
+      // This test exercises live-tier fallback prioritization for
+      // planktonSignature tokens — shadow mode (the new default) would
+      // route them to discovery instead, so opt into "live" explicitly.
+      signatureTierMode: "live",
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+    getMarketPricing.mockClear();
+    capturedIds.length = 0;
+
+    await streamRef!.triggerGap("socket-closed");
+    await mod.poll();
+
+    // executionCritical (1) + planktonSignature (2) fully survive the cap of 4;
+    // only one of the two entryCandidate tokens gets the remaining slot.
+    expect(capturedIds[0]).toEqual(["crit-a", "sig-a", "sig-b", "entry-a"]);
 
     await mod.stop();
   });

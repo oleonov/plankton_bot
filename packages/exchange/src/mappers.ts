@@ -254,6 +254,7 @@ export function mapMarket(raw: Record<string, unknown>): ClobMarket {
     negRisk: Boolean(raw.neg_risk),
     tickSize: Number(raw.minimum_tick_size ?? raw.tick_size ?? 0.01),
     volume24h: raw.volume_num != null ? Number(raw.volume_num) : null,
+    volume24hr: null,
     // CLOB endpoint returns individual markets (not event-grouped); treat as single-market event.
     eventMarketCount: 1,
     // CLOB market endpoint does not expose Gamma `createdAt` — discovery path
@@ -395,6 +396,8 @@ export function mapGammaMarket(
     // with no recent activity. The domain field name is kept as `volume24h`
     // for backward-compat; ADR-007 documents the semantic.
     volume24h: raw.volumeNum != null ? Number(raw.volumeNum) : null,
+    // Rolling 24h window — the plankton-signature activity proxy (spec §4.4).
+    volume24hr: raw.volume24hr != null ? Number(raw.volume24hr) : null,
     liquidity: parseOptionalNumber(raw.liquidity),
     eventMarketCount: eventContext.marketCount,
     // Gamma exposes ISO-8601 `createdAt` directly. We round-trip it through

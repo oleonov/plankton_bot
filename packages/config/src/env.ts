@@ -126,7 +126,7 @@ const envSchema = z
       .default("false")
       .transform((v) => v === "true"),
     // Task 1 — bounded pricing universe
-    MARKET_DATA_MAX_TRACKED_TOKENS: z.coerce.number().int().min(100).max(5_000).default(1_000),
+    MARKET_DATA_MAX_TRACKED_TOKENS: z.coerce.number().int().min(100).max(5_000).default(2_000),
     MARKET_DATA_MAX_WS_SHARDS: z.coerce.number().int().min(1).max(20).default(2),
     WS_WORKER_COUNT: z.coerce.number().int().min(0).max(8).default(4),
     MARKET_DATA_DISCOVERY_POLL_INTERVAL_MS: z.coerce
@@ -208,6 +208,20 @@ const envSchema = z
       .positive()
       .default(30 * 1024 * 1024 * 1024),
     DB_SIZE_GUARD_CHECK_INTERVAL_MS: z.coerce.number().int().min(1_000).default(60_000),
+    // Plankton-signature live-watch coverage (spec 2026-07-01) — reserved WS-tier
+    // slots for fresh markets that match the signature before V4 ranking applies.
+    MARKET_DATA_SIGNATURE_RESERVE: z.coerce.number().int().min(0).max(2_000).default(300),
+    SIGNATURE_MIN_LIQUIDITY: z.coerce.number().min(0).default(500),
+    SIGNATURE_MIN_MID: z.coerce.number().min(0).max(1).default(0.01),
+    SIGNATURE_MAX_MID: z.coerce.number().min(0).max(1).default(0.3),
+    SIGNATURE_MIN_REMAINING_DAYS: z.coerce.number().min(0).default(14),
+    SIGNATURE_MIN_VOL24H: z.coerce.number().min(0).default(50),
+    SIGNATURE_MIN_TICK: z.coerce.number().positive().default(0.001),
+    SIGNATURE_FEATURE_TTL_MS: z.coerce.number().int().min(60_000).default(86_400_000),
+    // Shadow-first rollout (2026-07-02) — "shadow" computes the signature tier
+    // and emits coverage telemetry only; "live" feeds it into the WS pricing
+    // tier so R23 can enter signature markets. See market-data-module.ts.
+    MARKET_DATA_SIGNATURE_TIER_MODE: z.enum(["shadow", "live"]).default("shadow"),
   })
   .superRefine((data, ctx) => {
     // When RUNTIME_MODE is undefined, mode comes from control.db — skip env validation
@@ -333,6 +347,16 @@ export interface AppConfig {
     thresholdBytes: number;
     checkIntervalMs: number;
   };
+  // Plankton-signature live-watch coverage (spec 2026-07-01)
+  marketDataSignatureReserve: number;
+  signatureMinLiquidity: number;
+  signatureMinMid: number;
+  signatureMaxMid: number;
+  signatureMinRemainingDays: number;
+  signatureMinVol24h: number;
+  signatureMinTick: number;
+  signatureFeatureTtlMs: number;
+  marketDataSignatureTierMode: "shadow" | "live";
 }
 
 function findMonorepoRoot(): string {
@@ -461,5 +485,14 @@ export function loadEnv(envPath?: string): AppConfig {
       thresholdBytes: env.DB_SIZE_GUARD_THRESHOLD_BYTES,
       checkIntervalMs: env.DB_SIZE_GUARD_CHECK_INTERVAL_MS,
     },
+    marketDataSignatureReserve: env.MARKET_DATA_SIGNATURE_RESERVE,
+    signatureMinLiquidity: env.SIGNATURE_MIN_LIQUIDITY,
+    signatureMinMid: env.SIGNATURE_MIN_MID,
+    signatureMaxMid: env.SIGNATURE_MAX_MID,
+    signatureMinRemainingDays: env.SIGNATURE_MIN_REMAINING_DAYS,
+    signatureMinVol24h: env.SIGNATURE_MIN_VOL24H,
+    signatureMinTick: env.SIGNATURE_MIN_TICK,
+    signatureFeatureTtlMs: env.SIGNATURE_FEATURE_TTL_MS,
+    marketDataSignatureTierMode: env.MARKET_DATA_SIGNATURE_TIER_MODE,
   };
 }

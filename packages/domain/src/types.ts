@@ -101,6 +101,17 @@ export interface Market {
   scoreModelVersion?: string | null;
   scoredAt?: string | null; // ISO timestamp — when the model ran
   featuresCapturedAt?: string | null; // ISO timestamp — when the input snapshot was observed
+  /**
+   * Plankton-signature ranking features persisted by the scanner from Gamma at
+   * discovery (spec 2026-07-01 §4.3). Available for fresh untracked markets
+   * (unlike market_snapshots). `sigCheapMid` = min mid over both outcomes.
+   * `sigFeaturesAt` is the capture time (TTL freshness). All nullable.
+   */
+  sigMid?: number | null;
+  sigCheapMid?: number | null;
+  sigLiquidity?: number | null;
+  sigVol24h?: number | null;
+  sigFeaturesAt?: string | null; // ISO timestamp
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp
 }

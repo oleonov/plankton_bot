@@ -32,6 +32,7 @@ import type {
   TokenId,
   MarketTradeCountProvider,
   V4AdmissionTelemetrySnapshot,
+  SignatureThresholds,
 } from "@krabs/domain";
 import {
   PositionStatus,
@@ -90,6 +91,8 @@ const BOOK_SIGNAL_FULL_BOOK_CAP_WARN_THROTTLE_MS = 15 * 60_000;
 
 export interface MarketDataTrackedRoleCounts {
   executionCritical: number;
+  /** Reserved plankton-signature tier (spec 2026-07-01) — see WsTierRole. */
+  planktonSignature: number;
   entryCandidate: number;
   legacy: number;
   unassigned: number;
@@ -198,7 +201,7 @@ export interface MarketDataStreamActivitySnapshot {
   readonly wsWorkerMemory: MarketPricingStreamMetricsSnapshot["wsWorkerMemory"] | null;
 }
 
-type WsTierRole = "executionCritical" | "entryCandidate" | "legacy";
+type WsTierRole = "executionCritical" | "planktonSignature" | "entryCandidate" | "legacy";
 type FallbackReason = keyof MarketDataFallbackReasonCounts;
 
 interface FallbackPollCandidate {
@@ -217,6 +220,39 @@ export interface MarketDataModuleDeps {
   botRunId?: string;
   /** Max tokens subscribed via WebSocket (executionCritical + entryCandidates). Default: unbounded (legacy). */
   maxTrackedTokens?: number;
+  /**
+   * Reserved WS-tier slots for plankton-signature markets (spec 2026-07-01),
+   * given live slots before V4 ranking applies. Forwarded to
+   * `findTrackedForPricingTiered`. Default: repo default (300).
+   */
+  signatureReserve?: number;
+  /** Thresholds a fresh market must clear to match the signature. Default: repo default. */
+  signatureThresholds?: SignatureThresholds;
+  /**
+   * Shadow-first rollout (2026-07-02). "shadow" (default when undefined) calls
+   * the repo with `reserveSignature: false` so signature markets are never
+   * pulled out of the V4 pool — `planktonSignature` is a measurement
+   * projection only, and every market still flows into entryCandidates/
+   * discoveryOnly (and therefore into `tracked`/`discoveryTier`) exactly as it
+   * would without the signature feature, producing ZERO change to live
+   * placement vs baseline. "live" calls the repo with `reserveSignature: true`,
+   * feeds `planktonSignature` into `tracked`, and tags them with the
+   * `planktonSignature` WS-tier role, so R23 can start entering signature
+   * markets.
+   */
+  signatureTierMode?: "shadow" | "live";
+  /**
+   * Observe-only coverage metric sink (spec 2026-07-01 §4.5): called once per
+   * poll with `inLiveTier: "yes"` (count = planktonSignature.length) and once
+   * with `"no"` (count = signatureOverflow) — the denominator is always the
+   * full signature-matching set, not just what fit in the WS tier. `mode`
+   * reflects whether the tier is currently shadow-only or live (§4.6).
+   */
+  recordSignatureCoverage?: (
+    inLiveTier: "yes" | "no",
+    count: number,
+    mode: "shadow" | "live",
+  ) => void;
   /** Interval in ms between discovery-tier poll batches. Default: 300_000. */
   discoveryPollIntervalMs?: number;
   /** Number of discovery-tier tokens to poll per batch cycle. Default: 50. */
@@ -356,6 +392,7 @@ export class MarketDataModule implements RuntimeModule {
   private discoveryPollBackoffUntilMs = 0;
   private tieredPricingCache: {
     maxTokens: number;
+    reserveSignature: boolean;
     capturedAtMs: number;
     value: TrackedForPricing;
   } | null = null;
@@ -619,15 +656,46 @@ export class MarketDataModule implements RuntimeModule {
 
       // Determine tracked WS-tier markets (executionCritical + entryCandidates).
       if (this.deps.maxTrackedTokens != null) {
-        const tiered = this.getTieredTrackedForPricing(this.deps.maxTrackedTokens, Date.now());
-        this.syncWsTierRoles({
-          executionCritical: tiered.executionCritical,
-          entryCandidates: tiered.entryCandidates,
-        });
-        // Merge WS tier into a flat list for the existing poll machinery.
-        tracked = [...tiered.executionCritical, ...tiered.entryCandidates];
-        // Discovery tier refreshed each poll cycle so cursor stays valid.
-        this.discoveryTier = tiered.discoveryOnly;
+        const sigMode = this.deps.signatureTierMode ?? "shadow";
+        const tiered = this.getTieredTrackedForPricing(
+          this.deps.maxTrackedTokens,
+          Date.now(),
+          sigMode === "live",
+        );
+        if (sigMode === "live") {
+          this.syncWsTierRoles({
+            executionCritical: tiered.executionCritical,
+            planktonSignature: tiered.planktonSignature,
+            entryCandidates: tiered.entryCandidates,
+          });
+          // Merge WS tier into a flat list for the existing poll machinery.
+          tracked = [
+            ...tiered.executionCritical,
+            ...tiered.planktonSignature,
+            ...tiered.entryCandidates,
+          ];
+          this.discoveryTier = tiered.discoveryOnly;
+        } else {
+          // Shadow-first (default): the repo was called with
+          // reserveSignature=false, so `tiered.planktonSignature` is a
+          // measurement projection ONLY — those markets were never removed
+          // from the V4 pool and already flow into entryCandidates/
+          // discoveryOnly on their own merit, exactly as they would without
+          // the signature feature. Do NOT re-home them here: that would let a
+          // signature market skip the normal V4 admit/reject split and change
+          // live placement vs baseline, defeating shadow mode's entire point.
+          this.syncWsTierRoles({
+            executionCritical: tiered.executionCritical,
+            entryCandidates: tiered.entryCandidates,
+          });
+          tracked = [...tiered.executionCritical, ...tiered.entryCandidates];
+          this.discoveryTier = tiered.discoveryOnly;
+        }
+        // Observe-only coverage metric (spec §4.5) — denominator is the full
+        // signature-matching set (planktonSignature + signatureOverflow), not
+        // just what fit in the WS tier. Emitted regardless of mode.
+        this.deps.recordSignatureCoverage?.("yes", tiered.planktonSignature.length, sigMode);
+        this.deps.recordSignatureCoverage?.("no", tiered.signatureOverflow, sigMode);
         if (this.discoveryCursor >= this.discoveryTier.length) {
           this.discoveryCursor = 0;
         }
@@ -990,16 +1058,30 @@ export class MarketDataModule implements RuntimeModule {
     }
   }
 
-  private getTieredTrackedForPricing(maxTokens: number, nowMs: number): TrackedForPricing {
+  private getTieredTrackedForPricing(
+    maxTokens: number,
+    nowMs: number,
+    reserveSignature: boolean,
+  ): TrackedForPricing {
     const ttlMs = this.deps.tieredPricingCacheTtlMs ?? DEFAULT_TIERED_PRICING_CACHE_TTL_MS;
     if (
       this.tieredPricingCache &&
       this.tieredPricingCache.maxTokens === maxTokens &&
+      this.tieredPricingCache.reserveSignature === reserveSignature &&
       nowMs - this.tieredPricingCache.capturedAtMs <= ttlMs
     ) {
       return this.tieredPricingCache.value;
     }
-    const value = this.deps.marketRepo.findTrackedForPricingTiered({ maxTokens });
+    const value = this.deps.marketRepo.findTrackedForPricingTiered({
+      maxTokens,
+      reserveSignature,
+      ...(this.deps.signatureReserve != null
+        ? { signatureReserve: this.deps.signatureReserve }
+        : {}),
+      ...(this.deps.signatureThresholds != null
+        ? { signature: this.deps.signatureThresholds }
+        : {}),
+    });
     const v4Telemetry = readV4AdmissionTelemetry(this.deps.marketRepo);
     if (v4Telemetry) {
       this.log.debug(
@@ -1013,7 +1095,7 @@ export class MarketDataModule implements RuntimeModule {
         "V4 admission telemetry updated",
       );
     }
-    this.tieredPricingCache = { maxTokens, capturedAtMs: nowMs, value };
+    this.tieredPricingCache = { maxTokens, reserveSignature, capturedAtMs: nowMs, value };
     return value;
   }
 
@@ -1578,12 +1660,16 @@ export class MarketDataModule implements RuntimeModule {
 
   private syncWsTierRoles(args: {
     executionCritical?: readonly Market[];
+    planktonSignature?: readonly Market[];
     entryCandidates?: readonly Market[];
     legacy?: readonly Market[];
   }): void {
     this.wsTierRoleByToken.clear();
     for (const market of args.executionCritical ?? []) {
       this.wsTierRoleByToken.set(String(market.tokenId), "executionCritical");
+    }
+    for (const market of args.planktonSignature ?? []) {
+      this.wsTierRoleByToken.set(String(market.tokenId), "planktonSignature");
     }
     for (const market of args.entryCandidates ?? []) {
       this.wsTierRoleByToken.set(String(market.tokenId), "entryCandidate");
@@ -1976,9 +2062,10 @@ function selectFallbackPollCandidates(
 
 function fallbackCandidatePriority(candidate: FallbackPollCandidate): number {
   if (candidate.role === "executionCritical") return 0;
-  if (candidate.role === "entryCandidate") return 1;
-  if (candidate.role === "legacy") return 2;
-  return 3;
+  if (candidate.role === "planktonSignature") return 1;
+  if (candidate.role === "entryCandidate") return 2;
+  if (candidate.role === "legacy") return 3;
+  return 4;
 }
 
 function countFallbackReasons(
@@ -2019,6 +2106,7 @@ function isFullLifetimeActivePosition(position: Position): boolean {
 function zeroTrackedRoleCounts(): MarketDataTrackedRoleCounts {
   return {
     executionCritical: 0,
+    planktonSignature: 0,
     entryCandidate: 0,
     legacy: 0,
     unassigned: 0,
@@ -2033,6 +2121,10 @@ function incrementTrackedRoleCounts(
     counts.executionCritical += 1;
     return;
   }
+  if (role === "planktonSignature") {
+    counts.planktonSignature += 1;
+    return;
+  }
   if (role === "entryCandidate") {
     counts.entryCandidate += 1;
     return;
@@ -2044,7 +2136,8 @@ function incrementTrackedRoleCounts(
   counts.unassigned += 1;
 }
 
-function countTrackedRoleCounts(
+/** Exported for testing — role-count aggregation used by tracked/fallback metrics. */
+export function countTrackedRoleCounts(
   roles: IterableIterator<WsTierRole> | Iterable<WsTierRole>,
 ): MarketDataTrackedRoleCounts {
   const counts = zeroTrackedRoleCounts();

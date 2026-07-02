@@ -39,6 +39,12 @@ export interface ClobMarket {
   readonly tickSize: number;
   /** 24-hour trading volume in USD. Null when unavailable. */
   readonly volume24h: number | null;
+  /**
+   * Rolling 24h Gamma `volume24hr` (distinct from lifetime `volume24h`/`volumeNum`).
+   * Used as the plankton-signature "early third-party activity" proxy. Null when
+   * absent (CLOB-only path / sparse markets).
+   */
+  readonly volume24hr?: number | null;
   readonly liquidity?: number | null;
   /** Number of markets in the parent Gamma event; retained for telemetry/ranking. */
   readonly eventMarketCount: number;

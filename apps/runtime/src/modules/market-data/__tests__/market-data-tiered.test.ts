@@ -95,8 +95,10 @@ function makeTiered(
 ): TrackedForPricing {
   return {
     executionCritical: criticalIds.map((id) => makeMarket(id)),
+    planktonSignature: [],
     entryCandidates: candidateIds.map((id) => makeMarket(id)),
     discoveryOnly: discoveryIds.map((id) => makeMarket(id)),
+    signatureOverflow: 0,
   };
 }
 
@@ -289,7 +291,11 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
 
     await mod.poll();
 
-    expect(repo.findTrackedForPricingTiered).toHaveBeenCalledWith({ maxTokens: 1000 });
+    // signatureTierMode defaults to "shadow" -> reserveSignature: false.
+    expect(repo.findTrackedForPricingTiered).toHaveBeenCalledWith({
+      maxTokens: 1000,
+      reserveSignature: false,
+    });
   });
 
   it("caches tiered pricing universe between poll cycles", async () => {
@@ -991,6 +997,140 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
     const snapshot = mod.getMetricsSnapshot();
     // trackedTokenCount comes from the WS stream (3 tokens: c1+e1+e2)
     expect(snapshot.trackedTokenCount).toBe(3);
+
+    await mod.stop();
+  });
+
+  it("shadow mode (default) never re-homes planktonSignature markets — not WS-tracked, not added to discoveryTier beyond baseline — but still records coverage", async () => {
+    vi.useFakeTimers();
+
+    const tiered: TrackedForPricing = {
+      executionCritical: [makeMarket("crit-1")],
+      // In shadow mode these are a measurement projection only (spec
+      // 2026-07-02): the repo call used reserveSignature: false, so sig-1/
+      // sig-2 were never pulled out of entryCandidates/discoveryOnly — they
+      // simply didn't win a V4 slot on their own merit in this fixture.
+      planktonSignature: [makeMarket("sig-1"), makeMarket("sig-2")],
+      entryCandidates: [makeMarket("cand-1")],
+      discoveryOnly: [makeMarket("disc-1")],
+      signatureOverflow: 5,
+    };
+    const repo = createMockRepo(tiered);
+    const coverageCalls: Array<[string, number, string]> = [];
+
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+    const getMarketPricing = vi.fn().mockResolvedValue(new Map());
+    gateway.getMarketPricing = getMarketPricing;
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      discoveryPollIntervalMs: 10_000,
+      discoveryBatchSize: 10,
+      // signatureTierMode intentionally omitted — must default to "shadow".
+      recordSignatureCoverage: (inLiveTier, count, mode) => {
+        coverageCalls.push([inLiveTier, count, mode]);
+      },
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(repo.findTrackedForPricingTiered).toHaveBeenCalledWith({
+      maxTokens: 1000,
+      reserveSignature: false,
+    });
+
+    // WS tier is exactly executionCritical + entryCandidates — the baseline
+    // shape, with no reserved signature slots.
+    const lastCall = stream!.setTokenIdsCalls.at(-1)!;
+    const wsTokenSet = new Set(lastCall);
+    expect(wsTokenSet.has("crit-1")).toBe(true);
+    expect(wsTokenSet.has("cand-1")).toBe(true);
+    expect(wsTokenSet.has("sig-1")).toBe(false);
+    expect(wsTokenSet.has("sig-2")).toBe(false);
+
+    // Not role-tagged planktonSignature either.
+    const snapshot = mod.getMetricsSnapshot();
+    expect(snapshot.trackedRoleCounts.planktonSignature).toBe(0);
+    expect(snapshot.trackedRoleCounts.executionCritical).toBe(1);
+    expect(snapshot.trackedRoleCounts.entryCandidate).toBe(1);
+
+    // Coverage metric is still emitted, labeled with the shadow mode.
+    expect(coverageCalls).toContainEqual(["yes", 2, "shadow"]);
+    expect(coverageCalls).toContainEqual(["no", 5, "shadow"]);
+
+    // The critical invariant: discoveryTier must be `discoveryOnly` verbatim,
+    // NOT `[...planktonSignature, ...discoveryOnly]`. Advance to the next
+    // discovery poll batch and confirm sig-1/sig-2 are never polled — only
+    // disc-1 (the baseline discoveryOnly set) is.
+    getMarketPricing.mockClear();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const polledIds = getMarketPricing.mock.calls.flatMap((call) => call[0] as string[]);
+    expect(polledIds).toContain("disc-1");
+    expect(polledIds).not.toContain("sig-1");
+    expect(polledIds).not.toContain("sig-2");
+
+    await mod.stop();
+  });
+
+  it("live mode feeds planktonSignature into the WS tier and tags the role", async () => {
+    const tiered: TrackedForPricing = {
+      executionCritical: [makeMarket("crit-1")],
+      planktonSignature: [makeMarket("sig-1"), makeMarket("sig-2")],
+      entryCandidates: [makeMarket("cand-1")],
+      discoveryOnly: [makeMarket("disc-1")],
+      signatureOverflow: 5,
+    };
+    const repo = createMockRepo(tiered);
+    const coverageCalls: Array<[string, number, string]> = [];
+
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      signatureTierMode: "live",
+      recordSignatureCoverage: (inLiveTier, count, mode) => {
+        coverageCalls.push([inLiveTier, count, mode]);
+      },
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(stream).not.toBeNull();
+    });
+    await vi.waitFor(() => {
+      expect(stream!.setTokenIdsCalls.length).toBeGreaterThanOrEqual(1);
+    });
+
+    const lastCall = stream!.setTokenIdsCalls.at(-1)!;
+    const wsTokenSet = new Set(lastCall);
+    expect(wsTokenSet.has("sig-1")).toBe(true);
+    expect(wsTokenSet.has("sig-2")).toBe(true);
+
+    const snapshot = mod.getMetricsSnapshot();
+    expect(snapshot.trackedRoleCounts.planktonSignature).toBe(2);
+
+    expect(coverageCalls).toContainEqual(["yes", 2, "live"]);
+    expect(coverageCalls).toContainEqual(["no", 5, "live"]);
 
     await mod.stop();
   });

@@ -80,8 +80,10 @@ describe("MarketDataModule — queue_overflow routing (Finding #2)", () => {
       findTrackedForPricing: () => trackedMarkets,
       findTrackedForPricingTiered: () => ({
         executionCritical: trackedMarkets,
+        planktonSignature: [],
         entryCandidates: [],
         discoveryOnly: [],
+        signatureOverflow: 0,
       }),
     };
     const fakeLogger = {
@@ -177,8 +179,10 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
       findTrackedForPricing: () => [],
       findTrackedForPricingTiered: () => ({
         executionCritical: [],
+        planktonSignature: [],
         entryCandidates: [],
         discoveryOnly: discoveryMarkets,
+        signatureOverflow: 0,
       }),
     };
     const fakeLogger = {
@@ -276,8 +280,10 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
       findTrackedForPricing: () => [],
       findTrackedForPricingTiered: () => ({
         executionCritical: [],
+        planktonSignature: [],
         entryCandidates: [],
         discoveryOnly: discoveryMarkets,
+        signatureOverflow: 0,
       }),
     };
     const fakeLogger = {
@@ -361,8 +367,10 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
       findTrackedForPricing: () => [],
       findTrackedForPricingTiered: () => ({
         executionCritical: [],
+        planktonSignature: [],
         entryCandidates: [],
         discoveryOnly: discoveryMarkets,
+        signatureOverflow: 0,
       }),
     };
     const fakeLogger = {
@@ -438,8 +446,10 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
       findTrackedForPricing: () => [],
       findTrackedForPricingTiered: () => ({
         executionCritical: [],
+        planktonSignature: [],
         entryCandidates: [],
         discoveryOnly: discoveryVisible ? initialDiscovery : [],
+        signatureOverflow: 0,
       }),
     };
     const fakeLogger = {

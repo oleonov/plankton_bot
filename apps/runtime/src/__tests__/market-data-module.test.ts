@@ -177,8 +177,10 @@ function createMockMarketRepo(): MarketRepository {
     findTrackedForPricing: vi.fn<() => Market[]>().mockReturnValue([]),
     findTrackedForPricingTiered: vi.fn().mockReturnValue({
       executionCritical: [],
+      planktonSignature: [],
       entryCandidates: [],
       discoveryOnly: [],
+      signatureOverflow: 0,
     }),
     findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
     updateScoresBatch: vi.fn(),
@@ -1028,8 +1030,10 @@ describe("MarketDataModule", () => {
       ];
       (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
         executionCritical,
+        planktonSignature: [],
         entryCandidates,
         discoveryOnly: [],
+        signatureOverflow: 0,
       });
       (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
       gateway.createMarketPricingStream = (handlers) => {
@@ -1087,6 +1091,7 @@ describe("MarketDataModule", () => {
       });
       expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
         executionCritical: 1,
+        planktonSignature: 0,
         entryCandidate: 0,
         legacy: 0,
         unassigned: 0,
@@ -1115,8 +1120,10 @@ describe("MarketDataModule", () => {
       ];
       (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
         executionCritical,
+        planktonSignature: [],
         entryCandidates: [],
         discoveryOnly: [],
+        signatureOverflow: 0,
       });
       (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
       gateway.createMarketPricingStream = (handlers) => {
@@ -1174,6 +1181,7 @@ describe("MarketDataModule", () => {
       });
       expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
         executionCritical: 1,
+        planktonSignature: 0,
         entryCandidate: 0,
         legacy: 0,
         unassigned: 0,
@@ -1256,6 +1264,7 @@ describe("MarketDataModule", () => {
     });
     expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
       executionCritical: 0,
+      planktonSignature: 0,
       entryCandidate: 0,
       legacy: 2,
       unassigned: 0,
@@ -1562,8 +1571,10 @@ describe("MarketDataModule", () => {
       ];
       (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
         executionCritical: tracked,
+        planktonSignature: [],
         entryCandidates: [],
         discoveryOnly: [],
+        signatureOverflow: 0,
       });
       (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
       mod = new MarketDataModule({
@@ -1589,8 +1600,10 @@ describe("MarketDataModule", () => {
       ];
       (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
         executionCritical: tracked,
+        planktonSignature: [],
         entryCandidates: [],
         discoveryOnly: [],
+        signatureOverflow: 0,
       });
       (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
       mod = new MarketDataModule({
