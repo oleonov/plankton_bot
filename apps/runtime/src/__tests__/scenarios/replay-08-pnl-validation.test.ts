@@ -245,6 +245,10 @@ describe.skipIf(!existsSync(DB_PATH))(
       // includes superset activity, so we use soft lower bounds only.
       expect(noClamp.closed_positions).toBeGreaterThan(0);
       expect(noClamp.total_sell_events).toBeGreaterThan(0);
-    });
+      // Reads the full (multi-GB) research plankton_trades.db; the default 5s
+      // per-test timeout flakes under full-suite parallel CPU load, so give this
+      // single DB-replay test a generous ceiling. Skipped entirely where DB_PATH
+      // is absent (e.g. the server), so it never runs in CI/deploy image builds.
+    }, 60_000);
   },
 );
