@@ -29,12 +29,15 @@ export function computeShadowOrderId(tokenId: string, postedAt: string): string 
 
 /**
  * Returns true when the market meets the maker-entry universe thresholds
- * (makerMinLiquidity, makerMinVol24h). Either missing field is treated as
- * below threshold (conservative — avoid opening shadows on thin data).
+ * (makerMinLiquidity, makerMinVol24h). Prefers scanner-persisted sig fields
+ * (sigLiquidity / sigVol24hr) because CLOB stream updates do not carry Gamma
+ * features, so the live liquidity / volume24hr are frequently NULL on the hot
+ * decision path. Falls back to the live fields when the sig fields are absent.
+ * Either path resolving to null is treated as below threshold (conservative).
  */
 export function isMakerUniverse(market: NormalizedMarket, policy: MakerEntryPolicy): boolean {
-  const liq = market.liquidity ?? null;
-  const vol = market.volume24hr ?? null;
+  const liq = market.sigLiquidity ?? market.liquidity ?? null;
+  const vol = market.sigVol24hr ?? market.volume24hr ?? null;
   if (liq === null || vol === null) return false;
   return liq >= policy.makerMinLiquidity && vol >= policy.makerMinVol24h;
 }

@@ -1556,6 +1556,47 @@ describe("MarketDataModule", () => {
     expect(received[0]!.enableOrderBook).toBe(false);
   });
 
+  it("propagates sigLiquidity and sigVol24hr from tracked Market row onto NormalizedMarket", async () => {
+    // Confirms the fix for isMakerUniverse zero-shadow bug: sig fields from the
+    // DB row must survive into NormalizedMarket so the gate uses them when the
+    // live liquidity/volume24hr are null (CLOB stream path omits Gamma features).
+    const tracked = [
+      makeTrackedMarket({
+        tokenId: createTokenId("tok-sig"),
+        conditionId: "cond-sig",
+        sigLiquidity: 7_500,
+        sigVol24h: 3_000,
+      }),
+    ];
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+
+    const pricingMap = new Map<string, import("@krabs/domain").MarketPricingSnapshot>([
+      [
+        "tok-sig",
+        {
+          bestBid: 0.4,
+          bestAsk: 0.6,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          lastTradePrice: null,
+          // intentionally no liquidity / volume24hr to simulate CLOB-only update
+        },
+      ],
+    ]);
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(pricingMap);
+
+    const received: NormalizedMarket[] = [];
+    bus.subscribe("MarketSnapshotReceived", async (p) => {
+      received.push(...p.markets);
+    });
+
+    await mod.poll();
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.sigLiquidity).toBe(7_500);
+    expect(received[0]!.sigVol24hr).toBe(3_000);
+  });
+
   // ── ADR-021 §D-F #1 wsCapUtilizationPct ────────────────────────────────
   describe("watch-set capacity telemetry (ADR-021 §D-F)", () => {
     it("getMetricsSnapshot reports wsCapUtilizationPct=null when maxTrackedTokens is unset", async () => {

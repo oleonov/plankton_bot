@@ -2287,6 +2287,13 @@ function syncTrackedMarket(
     // Step 3 (audit doc §P3 step 0) — propagate Step2 verdict so the
     // soft-ranking-score subscriber can filter without DB round-trip.
     selectionStatus: tracked.selectionStatus ?? null,
+    // Scanner-persisted signature features (spec §4.3). These survive stream
+    // updates automatically because applyPricingSnapshot / applyStreamUpdate
+    // use `...market` spread and do NOT explicitly overwrite these fields.
+    // Primary input to isMakerUniverse — CLOB stream updates omit liquidity /
+    // volume24hr so the live fields are frequently NULL on the decision path.
+    sigLiquidity: tracked.sigLiquidity ?? null,
+    sigVol24hr: tracked.sigVol24h ?? null,
   };
 }
 

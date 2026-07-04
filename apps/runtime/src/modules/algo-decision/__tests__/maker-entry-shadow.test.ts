@@ -154,6 +154,44 @@ describe("isMakerUniverse", () => {
       true,
     );
   });
+
+  // ── sig-field fallback (the bug being fixed) ────────────────────────────────
+
+  it("passes when live liq/vol are null but sig fields qualify (core bug fix)", () => {
+    // CLOB stream updates omit Gamma features → live fields frequently null.
+    // isMakerUniverse must fall back to sig fields so shadows are not silently blocked.
+    expect(
+      isMakerUniverse(
+        makeMarket({ liquidity: null, volume24hr: null, sigLiquidity: 6_000, sigVol24hr: 2_000 }),
+        makePolicy(),
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects when both sig and live fields are null", () => {
+    expect(
+      isMakerUniverse(
+        makeMarket({ liquidity: null, volume24hr: null, sigLiquidity: null, sigVol24hr: null }),
+        makePolicy(),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects when sig fields are present but below threshold", () => {
+    expect(
+      isMakerUniverse(
+        makeMarket({ liquidity: null, volume24hr: null, sigLiquidity: 100, sigVol24hr: 50 }),
+        makePolicy(),
+      ),
+    ).toBe(false);
+  });
+
+  it("passes via live fallback when sig fields are absent", () => {
+    // sig fields omitted (not set in makeMarket) → falls back to live liquidity / volume24hr
+    expect(isMakerUniverse(makeMarket({ liquidity: 5_000, volume24hr: 1_000 }), makePolicy())).toBe(
+      true,
+    );
+  });
 });
 
 // ─── tryOpenShadow ───────────────────────────────────────────────────────────

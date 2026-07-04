@@ -537,6 +537,21 @@ export interface NormalizedMarket {
   selectionStatus?: SelectionStatus | null;
   snapshotTs: number; // unix ms when pricing was captured
   /**
+   * Scanner-persisted signature liquidity (spec §4.3). Reliably populated at
+   * discovery time from Gamma; survives in DB even when live CLOB stream
+   * updates omit `liquidity`. Used as the primary input to `isMakerUniverse`
+   * so the maker-entry shadow gate does not silently drop markets whose live
+   * `liquidity` field is NULL on the hot decision path.
+   */
+  sigLiquidity?: number | null;
+  /**
+   * Scanner-persisted 24h rolling volume (spec §4.3). Same provenance as
+   * `sigLiquidity` — see above. Maps from `Market.sigVol24h` (note: no `r`
+   * suffix on the DB column) with the `r` suffix added here for consistency
+   * with the live `volume24hr` field on this interface.
+   */
+  sigVol24hr?: number | null;
+  /**
    * Step 3 (audit doc §D4) — wall-clock (unix ms) of the most recent
    * REST/Gamma refresh of the score-feature inputs (`liquidity`, `volume24hr`).
    * Distinct from `snapshotTs`, which is bumped on every CLOB stream update
