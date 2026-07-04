@@ -46,6 +46,7 @@ import {
   createCommandId,
   isAlive,
   isSellTimeoutReplacement,
+  R23_DIP_TRIGGER_RULE_ID,
   recordStageDuration,
   resolveTrackS3SpreadCap,
   shouldSkipSellPriceCap,
@@ -98,6 +99,7 @@ import {
   evaluateSignalTrackAAddThrottle,
   type TrackASignalEvaluation,
 } from "../dead-market-shadow/track-a-add-throttle-shadow.js";
+import { computeMakerEntryPrice } from "../algo-decision/maker-entry.js";
 import type { SignalPathTelemetry } from "./signal-path-telemetry.js";
 import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
 import type { PositionConcentrationService } from "../../position-concentration-service.js";
@@ -569,6 +571,68 @@ export class SignalToOrderBridge {
     if (payload.booksByToken && payload.booksByToken.size > 0) {
       this.exitBookCache.writeHeartbeatBooks(payload.booksByToken);
     }
+  }
+
+  /**
+   * R23 Phase 5 — micro-live maker-entry override. Returns non-null only when all
+   * conditions for a post-only BUY limit order are met and the book allows a
+   * non-crossing entry. Returns null (skips the override) in all other cases.
+   */
+  private tryMakerEntryOverride(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    policy: ExecutionPolicy,
+    orderSize: number,
+    executionTerms: { tickSize: number },
+  ): { price: number; size: number; postOnly: true; entryStyle: "maker" } | null {
+    if (signal.side !== "buy") return null;
+    if (signal.decisionRuleId !== R23_DIP_TRIGGER_RULE_ID) return null;
+    if (signal.reason !== "probe-entry") return null;
+    if (policy.makerEntry.mode !== "micro_live") return null;
+    if (policy.makerEntry.whitelistConditionIds.length === 0) return null;
+    if (!policy.makerEntry.whitelistConditionIds.includes(String(signal.conditionId))) return null;
+
+    const bestBid = market.bestBid;
+    if (bestBid == null || !Number.isFinite(bestBid) || bestBid <= 0) {
+      this.log.warn(
+        { signalId: signal.signalId, tokenId: String(signal.tokenId), bestBid },
+        "maker-entry skipped — bestBid unavailable or non-positive",
+      );
+      return null;
+    }
+
+    const bestAsk = market.bestAsk;
+    if (bestAsk == null || !Number.isFinite(bestAsk)) {
+      this.log.warn(
+        { signalId: signal.signalId, tokenId: String(signal.tokenId), bestAsk },
+        "maker-entry skipped — bestAsk unavailable",
+      );
+      return null;
+    }
+
+    const tickSize = executionTerms.tickSize;
+    const makerPrice = computeMakerEntryPrice(bestBid, tickSize, policy.makerEntry.bidImproveTicks);
+
+    if (makerPrice >= bestAsk) {
+      this.log.warn(
+        {
+          signalId: signal.signalId,
+          tokenId: String(signal.tokenId),
+          makerPrice,
+          bestAsk,
+        },
+        "maker-entry would cross bestAsk — skipping",
+      );
+      return null;
+    }
+
+    const cappedSize = Math.min(orderSize, policy.makerEntry.microMaxOrderUsdc / makerPrice);
+    return {
+      price: makerPrice,
+      size: cappedSize,
+      postOnly: true as const,
+      entryStyle: "maker" as const,
+    };
   }
 
   private async handleApproved(payload: RuntimeEventMap["SignalApproved"]): Promise<void> {
@@ -1224,6 +1288,17 @@ export class SignalToOrderBridge {
         }
       }
 
+      const makerOverride = this.tryMakerEntryOverride(
+        signal,
+        market,
+        policy,
+        orderSize,
+        executionTerms,
+      );
+      if (makerOverride != null) {
+        orderSize = makerOverride.size;
+      }
+
       // Track S5 P1 — a partial exit (size override present) uses a slot-bucketed
       // clientOrderId so two partials inside one 5-minute slot dedupe at the CLOB
       // while a fresh slot mints a new id; full exits keep the signal-derived id.
@@ -1245,8 +1320,12 @@ export class SignalToOrderBridge {
         conditionId: signal.conditionId,
         side: signal.side,
         size: orderSize,
-        price: executionTerms.price,
-        ...(executionTerms.postOnly !== undefined ? { postOnly: executionTerms.postOnly } : {}),
+        price: makerOverride != null ? makerOverride.price : executionTerms.price,
+        ...(makerOverride != null
+          ? { postOnly: true as const, entryStyle: "maker" as const }
+          : executionTerms.postOnly !== undefined
+            ? { postOnly: executionTerms.postOnly }
+            : {}),
         orderType: "GTC",
         tickSize: executionTerms.tickSize,
         negRisk: market.negRisk,

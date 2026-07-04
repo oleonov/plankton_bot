@@ -81,3 +81,4 @@ export {
   ensureDefaultExecutionPolicy,
 } from "./control-profiles.js";
 export { withImmediate } from "./immediate-transaction.js";
+export { SqliteMakerShadowOrderRepository } from "./repositories/maker-shadow-order-repository.js";

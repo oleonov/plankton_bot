@@ -365,6 +365,8 @@ export class ExecutionProfileManager implements RuntimeModule {
           previousAddCount: state.addCount,
           initialProbeSizeUsd:
             state.initialProbeSizeUsd ?? policy.profiles[state.profile].scaleIn.initialProbeSizeUsd,
+          entryStyle: position.entryStyle,
+          collapseFloorPrice: policy.collapseFloorPrice,
         },
         toScaleInConfig(policy),
       );

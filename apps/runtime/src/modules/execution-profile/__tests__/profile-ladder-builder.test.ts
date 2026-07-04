@@ -355,6 +355,96 @@ describe("computeProfileLadder positive floor (GAP-2)", () => {
     expect(result.rungs.map((rung) => rung.price)).toEqual([0.3, 0.33, 0.38]);
     expect(result.rungs.every((rung) => rung.floored !== true)).toBe(true);
   });
+
+  // Phase 6: maker-entry first-rung override
+  describe("maker-entry first-rung override (Phase 6)", () => {
+    const cheapConfig = {
+      ...config,
+      bands: {
+        ...config.bands,
+        cheap: { ...config.bands.cheap, enabled: true },
+      },
+    };
+
+    it("maker-tagged cheap position: first rung price == ceil(avgEntry * 1.5, tick) (+50%)", () => {
+      const result = computeProfileLadder(
+        input({ avgEntryPrice: 0.03, costBasisUsd: 25, config: cheapConfig, entryStyle: "maker" }),
+      );
+
+      expect(result).toMatchObject({ ok: true, band: "cheap" });
+      if (!result.ok) throw new Error("expected ok ladder");
+      // ceilToTick(0.03 * 1.5, 0.001) = ceilToTick(0.045, 0.001) = 0.045
+      expect(result.rungs[0]?.price).toBe(0.045);
+      expect(result.rungs[0]?.multiplier).toBe(1.5);
+    });
+
+    it("maker only overrides index 0; subsequent rungs keep band multipliers", () => {
+      const result = computeProfileLadder(
+        input({ avgEntryPrice: 0.03, costBasisUsd: 25, config: cheapConfig, entryStyle: "maker" }),
+      );
+
+      if (!result.ok) throw new Error("expected ok ladder");
+      // cheap band multipliers: [1.1, 1.25, 1.5, 1.75, 2.35]; maker overrides index 0 to 1.5
+      expect(result.rungs[0]?.multiplier).toBe(1.5);
+      expect(result.rungs[1]?.multiplier).toBe(1.25);
+      expect(result.rungs[2]?.multiplier).toBe(1.5);
+    });
+
+    it.each([null, "probe"] as const)(
+      "non-maker cheap position (entryStyle=%s): first rung keeps band multiplier (regression)",
+      (entryStyle) => {
+        const result = computeProfileLadder(
+          input({ avgEntryPrice: 0.03, costBasisUsd: 25, config: cheapConfig, entryStyle }),
+        );
+
+        expect(result).toMatchObject({ ok: true, band: "cheap" });
+        if (!result.ok) throw new Error("expected ok ladder");
+        // ceilToTick(0.03 * 1.1, 0.001) = ceilToTick(0.033, 0.001) = 0.033
+        expect(result.rungs[0]?.price).toBe(0.033);
+        expect(result.rungs[0]?.multiplier).toBe(1.1);
+      },
+    );
+
+    it("non-maker cheap ladder prices are byte-identical regardless of entryStyle variant", () => {
+      const baseline = computeProfileLadder(
+        input({ avgEntryPrice: 0.03, costBasisUsd: 25, config: cheapConfig }),
+      );
+      const withNull = computeProfileLadder(
+        input({ avgEntryPrice: 0.03, costBasisUsd: 25, config: cheapConfig, entryStyle: null }),
+      );
+      const withProbe = computeProfileLadder(
+        input({ avgEntryPrice: 0.03, costBasisUsd: 25, config: cheapConfig, entryStyle: "probe" }),
+      );
+
+      if (!baseline.ok || !withNull.ok || !withProbe.ok) throw new Error("expected ok ladders");
+      expect(withNull.rungs.map((r) => r.price)).toEqual(baseline.rungs.map((r) => r.price));
+      expect(withProbe.rungs.map((r) => r.price)).toEqual(baseline.rungs.map((r) => r.price));
+      expect(withNull.rungs.map((r) => r.multiplier)).toEqual(
+        baseline.rungs.map((r) => r.multiplier),
+      );
+    });
+
+    it.each([["up", 0.95] as const, ["flat", 1.0] as const, ["avg_down", 1.5] as const] as const)(
+      "maker first rung price == ceilToTick(avgEntry*1.5, tick) in %s mode (modeAdjustment bypassed)",
+      (mode, _modeAdjustment) => {
+        const avgEntryPrice = 0.03;
+        const tickSize = 0.001;
+        const expected = ceilToTick(avgEntryPrice * 1.5, tickSize); // 0.045, always
+        const result = computeProfileLadder(
+          input({
+            avgEntryPrice,
+            costBasisUsd: 25,
+            config: cheapConfig,
+            entryStyle: "maker",
+            mode,
+          }),
+        );
+        expect(result).toMatchObject({ ok: true, band: "cheap" });
+        if (!result.ok) throw new Error("expected ok ladder");
+        expect(result.rungs[0]?.price).toBe(expected);
+      },
+    );
+  });
 });
 
 function shadowEvaluation(overrides: Partial<LadderBuilderInput> = {}) {

@@ -637,6 +637,10 @@ export class ProfileLadderModule implements RuntimeModule {
       if (reason == null) continue;
       const position = this.resolveOpenPositionForActiveLadder(state, "bbo_rebuild");
       if (position == null) continue;
+      // Phase 6 patient reprice: maker-tagged positions only reprice on material BBO moves
+      // (bbo_strong ≥ 10%); minor moves (bbo_major ≥ 5% < 10%) are skipped so the resting
+      // sell has enough time to fill (fixes cap-fdv over-reprice 0-fill).
+      if (reason === "bbo_major" && position.entryStyle === "maker") continue;
       await this.rebuildLadder(position, market, reason);
     }
   }
@@ -704,6 +708,7 @@ export class ProfileLadderModule implements RuntimeModule {
       minOrderSize: resolveEffectiveMinOrderSize(market.minOrderSize),
       config: policy,
       previousBand: previous?.band ?? null,
+      entryStyle: position.entryStyle ?? null,
     });
     if (!plan.ok) return null;
     const ladderId =

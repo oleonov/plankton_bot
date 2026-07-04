@@ -90,6 +90,9 @@ import {
 import { ExecutionQueue } from "./execution-queue.js";
 import {
   buildReservationSnapshot,
+  computeMakerOpenOrderUsdc,
+  computeMakerOpenPositionUsdc,
+  computeMakerPendingReservationUsdc,
   getOpenOrderCountForToken,
   getReservedSellSize,
   type PendingReservation,
@@ -626,6 +629,59 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
 
+    // Micro-live maker BUY cap: defense-in-depth cap
+    if (cmd.entryStyle === "maker" && cmd.side === "buy") {
+      const makerPolicy = this.deps.executionPolicy?.()?.makerEntry;
+      if (makerPolicy && makerPolicy.mode === "micro_live") {
+        // (a) Per-order notional cap
+        if (makerPolicy.microMaxOrderUsdc > 0 && notional > makerPolicy.microMaxOrderUsdc) {
+          this.log.warn(
+            {
+              commandId: cmd.commandId,
+              notional,
+              microMaxOrderUsdc: makerPolicy.microMaxOrderUsdc,
+            },
+            "maker BUY rejected — exceeds microMaxOrderUsdc per-order cap",
+          );
+          await this.rejectOrder(
+            cmd,
+            "maker-micro-order-cap-exceeded",
+            ExchangeErrorCode.LivePolicyBlocked,
+          );
+          return;
+        }
+        // (b) Open exposure cap (orders + positions + pending in-flight + this order)
+        if (makerPolicy.microMaxOpenUsdc > 0) {
+          const openOrders = this.deps.orderRepo.findOpen();
+          const openPositionUsdc = this.deps.positionRepo
+            ? computeMakerOpenPositionUsdc(this.deps.positionRepo.findOpenByEntryStyle("maker"))
+            : 0;
+          const pendingUsdc = computeMakerPendingReservationUsdc(this.pendingReservations.values());
+          const makerOpenUsdc =
+            computeMakerOpenOrderUsdc(openOrders, this.deps.fillRepo) +
+            openPositionUsdc +
+            pendingUsdc +
+            notional;
+          if (makerOpenUsdc > makerPolicy.microMaxOpenUsdc) {
+            this.log.warn(
+              {
+                commandId: cmd.commandId,
+                makerOpenUsdc,
+                microMaxOpenUsdc: makerPolicy.microMaxOpenUsdc,
+              },
+              "maker BUY rejected — microMaxOpenUsdc cap exceeded",
+            );
+            await this.rejectOrder(
+              cmd,
+              "maker-micro-open-cap-exceeded",
+              ExchangeErrorCode.LivePolicyBlocked,
+            );
+            return;
+          }
+        }
+      }
+    }
+
     if (cmd.side !== "sell") {
       const minOrderSizeRejection = this.getMinOrderSizeRejection(cmd);
       if (minOrderSizeRejection) {
@@ -756,6 +812,7 @@ export class ExecutionModule implements RuntimeModule {
       decisionRuleId: effectiveCmd.decisionRuleId,
       signalReason: effectiveCmd.signalReason,
       metadata: effectiveCmd.metadata,
+      entryStyle: effectiveCmd.entryStyle ?? null,
     });
     this.acceptedCommandAt.set(String(effectiveCmd.commandId), Date.now());
 
@@ -1536,19 +1593,35 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   private getPostOnlyCrossPreSubmitSkip(cmd: PlaceOrderCommand): PostOnlyCrossPreSubmitSkip | null {
-    if (cmd.side !== "sell") return null;
     if (cmd.postOnly !== true) return null;
     const market = this.marketCache.get(String(cmd.tokenId));
-    const bestBid = market?.bestBid ?? null;
-    const bestAsk = market?.bestAsk ?? null;
-    if (bestBid == null || !Number.isFinite(bestBid) || bestBid <= 0) return null;
-    if (cmd.price > bestBid + ExecutionModule.PRICE_EPSILON) return null;
-    return {
-      bestBid,
-      bestAsk,
-      bookSource: market?.bookSource ?? null,
-      snapshotTs: market?.snapshotTs ?? null,
-    };
+
+    if (cmd.side === "sell") {
+      const bestBid = market?.bestBid ?? null;
+      const bestAsk = market?.bestAsk ?? null;
+      if (bestBid == null || !Number.isFinite(bestBid) || bestBid <= 0) return null;
+      if (cmd.price > bestBid + ExecutionModule.PRICE_EPSILON) return null;
+      return {
+        bestBid,
+        bestAsk,
+        bookSource: market?.bookSource ?? null,
+        snapshotTs: market?.snapshotTs ?? null,
+      };
+    }
+
+    if (cmd.side === "buy") {
+      const bestAsk = market?.bestAsk ?? null;
+      if (bestAsk === null || !Number.isFinite(bestAsk)) return null;
+      if (cmd.price + ExecutionModule.PRICE_EPSILON < bestAsk) return null;
+      return {
+        bestBid: market?.bestBid ?? 0,
+        bestAsk,
+        bookSource: market?.bookSource ?? null,
+        snapshotTs: market?.snapshotTs ?? null,
+      };
+    }
+
+    return null;
   }
 
   private async skipDuplicateBuyPreSubmitIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
@@ -1637,6 +1710,10 @@ export class ExecutionModule implements RuntimeModule {
     cmd: PlaceOrderCommand,
     postOnlyCross: PostOnlyCrossPreSubmitSkip,
   ): Promise<void> {
+    const msg =
+      cmd.side === "buy"
+        ? "buy order skipped — post-only price would cross current ask"
+        : "sell order skipped — post-only price would cross current bid";
     this.log.warn(
       {
         commandId: cmd.commandId,
@@ -1647,7 +1724,7 @@ export class ExecutionModule implements RuntimeModule {
         currentBestAsk: postOnlyCross.bestAsk,
         bookSource: postOnlyCross.bookSource,
       },
-      "sell order skipped — post-only price would cross current bid",
+      msg,
     );
     const details = {
       price: cmd.price,
@@ -2312,6 +2389,7 @@ export class ExecutionModule implements RuntimeModule {
       signalReason: cmd.signalReason ?? null,
       decisionRuleId: cmd.decisionRuleId ?? null,
       signalTimestamp: cmd.signalTimestamp ?? null,
+      entryStyle: cmd.entryStyle ?? null,
       exchangeErrorCode: exchangeError?.errorCode ?? null,
       exchangeErrorMessage: exchangeError?.errorMessage ?? null,
       exchangeErrorPayload: stringifyExchangeErrorPayload(exchangeError?.errorDetails ?? null),

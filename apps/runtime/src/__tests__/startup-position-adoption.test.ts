@@ -879,6 +879,173 @@ describe("runStartupPositionAdoption", () => {
       expect(legStateRepo.get(TOKEN_ID)?.buyCount).toBe(1);
     });
   });
+
+  describe("maker entryStyle propagation through adoption", () => {
+    it("carries 'maker' entryStyle from a local order into the created position", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+
+      const marketRepo = new SqliteMarketRepository(conn.db);
+      const orderRepo = new SqliteOrderRepository(conn.db);
+      const fillRepo = new SqliteFillRepository(conn.db);
+      const positionRepo = new SqlitePositionRepository(conn.db);
+      const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+      const legStateRepo = new SqliteLegStateRepository(conn.db);
+      seedMarket(marketRepo);
+
+      const orderId = createOrderId("ord-maker");
+      orderRepo.save({
+        orderId,
+        clientOrderId: "plk_maker" as ClientOrderId,
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        side: "buy",
+        orderType: "GTC",
+        price: 0.4,
+        size: 10,
+        sizeUsdc: 4,
+        status: "open",
+        exchangeOrderId: "ex-maker",
+        signalId: null,
+        signalReason: "maker-entry",
+        entryStyle: "maker",
+        botRunId: createBotRunId("run-1"),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      await runStartupPositionAdoption({
+        gateway: {
+          getFills: vi
+            .fn()
+            .mockResolvedValue([
+              makeExchangeFill({ orderId: "ex-maker", clientOrderId: "plk_maker" }),
+            ]),
+        },
+        marketRepo,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        legStateRepo,
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-1"),
+      });
+
+      const position = positionRepo.findByTokenId(TOKEN_ID);
+      expect(position).not.toBeNull();
+      expect(position?.entryStyle).toBe("maker");
+    });
+
+    it("defaults position to 'probe' when order has no entryStyle (byte-identical for non-maker path)", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+
+      const marketRepo = new SqliteMarketRepository(conn.db);
+      const orderRepo = new SqliteOrderRepository(conn.db);
+      const fillRepo = new SqliteFillRepository(conn.db);
+      const positionRepo = new SqlitePositionRepository(conn.db);
+      const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+      const legStateRepo = new SqliteLegStateRepository(conn.db);
+      seedMarket(marketRepo);
+
+      // No entryStyle on the order — probe default
+      await runStartupPositionAdoption({
+        gateway: {
+          getFills: vi.fn().mockResolvedValue([makeExchangeFill()]),
+        },
+        marketRepo,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        legStateRepo,
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-1"),
+      });
+
+      const position = positionRepo.findByTokenId(TOKEN_ID);
+      expect(position).not.toBeNull();
+      expect(position?.entryStyle).toBe("probe");
+    });
+
+    it("preserves 'maker' entryStyle through a second startup (reconcileAndRepairPosition path)", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+
+      const marketRepo = new SqliteMarketRepository(conn.db);
+      const orderRepo = new SqliteOrderRepository(conn.db);
+      const fillRepo = new SqliteFillRepository(conn.db);
+      const positionRepo = new SqlitePositionRepository(conn.db);
+      const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+      const legStateRepo = new SqliteLegStateRepository(conn.db);
+      seedMarket(marketRepo);
+
+      const gateway = {
+        getFills: vi
+          .fn()
+          .mockResolvedValue([
+            makeExchangeFill({ orderId: "ex-restart", clientOrderId: "plk_restart" }),
+          ]),
+      };
+
+      const orderId = createOrderId("ord-restart");
+      orderRepo.save({
+        orderId,
+        clientOrderId: "plk_restart" as ClientOrderId,
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        side: "buy",
+        orderType: "GTC",
+        price: 0.4,
+        size: 10,
+        sizeUsdc: 4,
+        status: "open",
+        exchangeOrderId: "ex-restart",
+        signalId: null,
+        signalReason: "maker-entry",
+        entryStyle: "maker",
+        botRunId: createBotRunId("run-1"),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      // First startup — creates the position with "maker"
+      await runStartupPositionAdoption({
+        gateway,
+        marketRepo,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        legStateRepo,
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-1"),
+      });
+
+      expect(positionRepo.findByTokenId(TOKEN_ID)?.entryStyle).toBe("maker");
+
+      // Second startup — goes through reconcileAndRepairPosition which reads entry_style from DB
+      await runStartupPositionAdoption({
+        gateway,
+        marketRepo,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        legStateRepo,
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-2"),
+      });
+
+      const afterRestart = positionRepo.findByTokenId(TOKEN_ID);
+      expect(afterRestart?.entryStyle).toBe("maker");
+    });
+  });
 });
 
 describe("cleanupPriorStartupAdoptionArtifacts — orphan-loop guard", () => {

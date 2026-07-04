@@ -37,8 +37,15 @@ export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOu
   const sizing = normalizeActiveSizing(bandConfig.sizingVector, activeRungCount);
   const modeAdjustment = input.config.modeAdjustments[input.mode];
   const initialRungs = sizing.map((sizingFraction, index): LadderRung => {
-    const multiplier = bandConfig.multipliers[index]!;
-    const rawPrice = ceilToTick(input.avgEntryPrice * multiplier * modeAdjustment, input.tickSize);
+    const bandMultiplier = bandConfig.multipliers[index]!;
+    // Phase 6: maker-tagged positions get a fixed +50% first rung so the harvest target
+    // is always avgEntry × 1.5. Subsequent rungs and all non-maker positions keep the
+    // band multipliers byte-identical.
+    const multiplier = input.entryStyle === "maker" && index === 0 ? 1.5 : bandMultiplier;
+    const rawPrice =
+      input.entryStyle === "maker" && index === 0
+        ? ceilToTick(input.avgEntryPrice * 1.5, input.tickSize)
+        : ceilToTick(input.avgEntryPrice * bandMultiplier * modeAdjustment, input.tickSize);
     const { positiveFloorPrice } = resolvePositiveSellFloor(input.avgEntryPrice, input.tickSize);
     const price = Math.max(rawPrice, positiveFloorPrice);
     const sizeShares = roundQuantity(input.positionSizeShares * sizingFraction);

@@ -248,6 +248,7 @@ export async function runStartupPositionAdoption(
         sizeUsdc: savedFill.sizeUsdc,
         fee: savedFill.fee,
         signalReason: localOrder.signalReason ?? SYNTHETIC_SIGNAL_REASON,
+        entryStyle: localOrder.entryStyle ?? null,
         timestamp: pending.fill.timestamp,
       });
       deps.fillRepo.markReconciled([savedFill.fillId]);
@@ -557,7 +558,7 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logge
     )
     .all(tokenId) as Array<{
     position_id: string;
-    entry_style: "probe" | null;
+    entry_style: "probe" | "maker" | null;
     opened_at: string;
   }>;
 

@@ -222,6 +222,11 @@ const envSchema = z
     // and emits coverage telemetry only; "live" feeds it into the WS pricing
     // tier so R23 can enter signature markets. See market-data-module.ts.
     MARKET_DATA_SIGNATURE_TIER_MODE: z.enum(["shadow", "live"]).default("shadow"),
+    // Maker-entry R23 prototype mode (Phase 0). Runtime behavior is controlled
+    // via execution_policy_json.makerEntry.mode in control.db; this env var is a
+    // startup-time override / smoke-test knob. Default "off" ensures no maker
+    // paths execute unless explicitly enabled.
+    MAKER_ENTRY_MODE: z.enum(["off", "shadow", "micro_live"]).default("off"),
   })
   .superRefine((data, ctx) => {
     // When RUNTIME_MODE is undefined, mode comes from control.db — skip env validation
@@ -357,6 +362,7 @@ export interface AppConfig {
   signatureMinTick: number;
   signatureFeatureTtlMs: number;
   marketDataSignatureTierMode: "shadow" | "live";
+  makerEntryMode: "off" | "shadow" | "micro_live";
 }
 
 function findMonorepoRoot(): string {
@@ -494,5 +500,6 @@ export function loadEnv(envPath?: string): AppConfig {
     signatureMinTick: env.SIGNATURE_MIN_TICK,
     signatureFeatureTtlMs: env.SIGNATURE_FEATURE_TTL_MS,
     marketDataSignatureTierMode: env.MARKET_DATA_SIGNATURE_TIER_MODE,
+    makerEntryMode: env.MAKER_ENTRY_MODE,
   };
 }

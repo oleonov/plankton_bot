@@ -128,6 +128,7 @@ const REASONS = new Set<ScaleInReason>([
   "mode_no_signal",
   "avg_down_no_recovery",
   "avg_down_disabled",
+  "avg_down_collapsed_tail",
   "flat_no_trigger",
   "below_min_add",
   "near_death_add",

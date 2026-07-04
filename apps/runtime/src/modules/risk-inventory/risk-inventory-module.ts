@@ -707,6 +707,7 @@ export class RiskInventoryModule implements RuntimeModule {
     try {
       const position = withImmediate(this.deps.db, () => {
         const positionBefore = this.deps.positionRepo.findByTokenId(payload.tokenId);
+        const origOrder = this.deps.orderRepo.findById(payload.orderId);
         const applied = this.inventory.applyFill({
           fillId: payload.fillId,
           tokenId: payload.tokenId,
@@ -718,6 +719,7 @@ export class RiskInventoryModule implements RuntimeModule {
           fee: payload.fee,
           signalReason: payload.signalReason,
           timestamp: payload.timestamp,
+          entryStyle: origOrder?.entryStyle ?? null,
         });
         this.deps.positionConcentration?.recordFill({
           fill: {

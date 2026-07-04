@@ -25,6 +25,11 @@ export function decideScaleIn(input: ScaleInInput, config: ScaleInConfig): Scale
   }
 
   const mode = detectMode(input, profileConfig);
+
+  if (isCollapsingTailBlocked(input, mode)) {
+    return skip("avg_down_collapsed_tail", triggerSignals, costCapContext, mode);
+  }
+
   const modeBlock = resolveModeBlock(mode, triggerSignals, profileConfig);
   if (modeBlock != null) {
     return skip(modeBlock, triggerSignals, costCapContext, mode);
@@ -148,6 +153,17 @@ function resolveModeBlock(
 function resolveSizingMultiplier(decay: readonly number[], previousAddCount: number): number {
   const idx = Math.min(Math.floor(previousAddCount), decay.length - 1);
   return decay[Math.max(0, idx)] ?? 0;
+}
+
+// Phase 4 guard: block avg-down scale-ins for maker-tagged positions below their collapse floor.
+// No-op when entryStyle is not "maker" or collapseFloorPrice is null (default).
+function isCollapsingTailBlocked(input: ScaleInInput, mode: ScaleInMode): boolean {
+  return (
+    mode === "avg_down" &&
+    input.entryStyle === "maker" &&
+    input.collapseFloorPrice != null &&
+    input.currentMarkPrice < input.collapseFloorPrice
+  );
 }
 
 function skip(

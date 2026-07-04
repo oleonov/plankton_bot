@@ -209,6 +209,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         healthRiskEventEveryMs: 1_800_000,
         anomalyDetection: { enabled: false, cooldownMs: 3_600_000 },
       },
+      collapseFloorPrice: null,
     });
   });
 

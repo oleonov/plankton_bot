@@ -50,6 +50,7 @@ export {
   DEFAULT_PRE_RESOLUTION_EXIT_POLICY,
   DEFAULT_DEPOSIT_ACTIVATION_POLICY,
   DEFAULT_FEE_SCHEDULE_CONFIG,
+  DEFAULT_MAKER_ENTRY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
 } from "./execution-policy.js";

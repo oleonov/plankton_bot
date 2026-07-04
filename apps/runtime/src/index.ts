@@ -179,6 +179,7 @@ import {
   SqliteRedeemLogRepository,
   SqliteRedeemQuarantineRepository,
   SqliteSettlementInfraPauseRepository,
+  SqliteMakerShadowOrderRepository,
 } from "@krabs/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { createTrackRFeeProvider } from "./track-r-fee-provider.js";
@@ -441,6 +442,7 @@ async function main(): Promise<void> {
     floorIntent: new SqliteFloorIntentRepository(ledgerConn.db),
     holdResolutionState: new SqliteHoldResolutionStateRepository(ledgerConn.db),
     tradingCalendar: new SqliteTradingCalendarRepository(ledgerConn.db),
+    makerShadowOrders: new SqliteMakerShadowOrderRepository(ledgerConn.db),
     // Control-side
     operatorCommand: new SqliteOperatorCommandRepository(controlConn.db),
     operatorAction: new SqliteOperatorActionRepository(controlConn.db),
@@ -790,9 +792,16 @@ async function main(): Promise<void> {
   const currentExecutionPolicy = () => {
     executionPolicyProvider.refreshIfStale();
     const snapshot = executionPolicyProvider.snapshot();
-    return config.sellTimeoutMs == null
-      ? snapshot
-      : { ...snapshot, sellTimeoutMs: config.sellTimeoutMs };
+    const withSellTimeout =
+      config.sellTimeoutMs == null
+        ? snapshot
+        : { ...snapshot, sellTimeoutMs: config.sellTimeoutMs };
+    return config.makerEntryMode === "off"
+      ? withSellTimeout
+      : {
+          ...withSellTimeout,
+          makerEntry: { ...withSellTimeout.makerEntry, mode: config.makerEntryMode },
+        };
   };
 
   // ADR-016 — market-wide trade-count provider for the post-entry continuation
@@ -1503,6 +1512,7 @@ async function main(): Promise<void> {
         });
       }
     },
+    makerShadowOrderRepo: repos.makerShadowOrders,
     log,
     sweepIntervalMs: config.strategyScanIntervalMs,
     plannerSuppressionRollupWindowMs: config.plannerSuppressionRollupWindowMs,

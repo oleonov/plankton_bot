@@ -36,6 +36,9 @@ export interface FillEvent {
   sizeUsdc: number;
   fee: number;
   signalReason: string | null;
+  /** Maker-entry provenance marker carried from the originating order.
+   * Defaults to "probe" when absent or null. Set to "maker" in Phase 5. */
+  entryStyle?: "probe" | "maker" | null;
   timestamp: number;
 }
 
@@ -90,7 +93,7 @@ export class InventoryHandler {
       currentValueUsdc: fill.sizeUsdc,
       realizedPnl: 0,
       status: "open",
-      entryStyle: "probe",
+      entryStyle: fill.entryStyle ?? "probe",
       openedAt: now,
       closedAt: null,
       updatedAt: now,

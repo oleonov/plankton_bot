@@ -1,4 +1,4 @@
-import type { FillRepository, Order, TokenId } from "@krabs/domain";
+import type { FillRepository, Order, Position, TokenId } from "@krabs/domain";
 import { classifySellCapacitySource } from "../../wallet-buy-budget.js";
 
 const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
@@ -12,6 +12,7 @@ export interface PendingReservation {
   decisionRuleId?: string | null | undefined;
   signalReason?: string | null | undefined;
   metadata?: Readonly<Record<string, unknown>> | null | undefined;
+  entryStyle?: "probe" | "maker" | null | undefined;
 }
 
 export interface ReservationSnapshot {
@@ -126,4 +127,53 @@ function addReservation(snapshot: ReservationSnapshot, reservation: PendingReser
 function increment(map: Map<string, number>, tokenId: TokenId): void {
   const key = String(tokenId);
   map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+/**
+ * Compute the total open-order USDC exposure from maker BUY orders (remaining size × price).
+ * Used by the micro-live cap enforcement in the execution module.
+ */
+export function computeMakerOpenOrderUsdc(
+  openOrders: Order[],
+  fillRepo: ReservationFillLookup,
+): number {
+  const makerBuyOrders = openOrders.filter(
+    (o) => o.entryStyle === "maker" && o.side === "buy" && OPEN_ORDER_STATUSES.has(o.status),
+  );
+  if (makerBuyOrders.length === 0) return 0;
+  const filledSizeByOrderId = getFilledSizeByOrderId(makerBuyOrders, fillRepo);
+  return makerBuyOrders.reduce((sum, o) => {
+    const remaining = getRemainingOrderSize(o, filledSizeByOrderId);
+    return sum + remaining * o.price;
+  }, 0);
+}
+
+/**
+ * Compute the total USDC cost basis from open maker positions.
+ * Used alongside computeMakerOpenOrderUsdc for the microMaxOpenUsdc cap.
+ */
+export function computeMakerOpenPositionUsdc(
+  openPositions: Pick<Position, "entryStyle" | "costBasisUsdc">[],
+): number {
+  return openPositions
+    .filter((p) => p.entryStyle === "maker")
+    .reduce((sum, p) => sum + p.costBasisUsdc, 0);
+}
+
+/**
+ * Compute the total USDC notional of pending (in-flight, not yet persisted)
+ * maker BUY reservations. Used alongside computeMakerOpenOrderUsdc for the
+ * microMaxOpenUsdc cap to prevent concurrent queued maker BUYs from breaching
+ * the cap before their orders are written to the DB.
+ */
+export function computeMakerPendingReservationUsdc(
+  pendingReservations: Iterable<PendingReservation>,
+): number {
+  let total = 0;
+  for (const r of pendingReservations) {
+    if (r.side === "buy" && r.entryStyle === "maker" && r.size > 0 && r.price > 0) {
+      total += r.size * r.price;
+    }
+  }
+  return total;
 }

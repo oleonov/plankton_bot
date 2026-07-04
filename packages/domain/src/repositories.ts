@@ -741,3 +741,62 @@ export interface PublicTradeCount24hResult {
   capReached: boolean;
   fetchedAt: number;
 }
+
+// ─── MakerShadowOrderRepository ─────────────────────────────────────────────
+
+/** Stage lifecycle for a maker-entry shadow order. */
+export type MakerShadowStage = "pending" | "filled" | "harvested" | "marked" | "expired";
+
+/** How the shadow order was treated as filled. */
+export type MakerShadowFillKind = "trade_through" | "touch";
+
+/**
+ * A hypothetical post-only maker BUY tracked across ticks.
+ * Opened when R23 fires on a flat first-entry in the maker universe;
+ * advanced as the book evolves. Zero live effect.
+ */
+export interface MakerShadowOrder {
+  /** Deterministic sha256 prefix of `token_id + posted_at` — distinct per R23 attempt. */
+  shadowOrderId: string;
+  tokenId: TokenId;
+  conditionId: string;
+  buyPx: number;
+  harvestPx: number;
+  postedAt: string; // ISO
+  fillDeadline: string; // ISO — postedAt + fillWaitMs
+  stage: MakerShadowStage;
+  fillKind: MakerShadowFillKind | null;
+  fillPx: number | null; // bestAsk or bestBid at fill time
+  markPx: number | null; // bestBid at mark time
+  netMark: number | null; // markPx / buyPx - 1 (or 1.0 for harvested)
+  updatedAt: string; // ISO
+}
+
+export interface MakerShadowStageUpdate {
+  stage: "filled" | "harvested" | "marked" | "expired";
+  fillKind?: MakerShadowFillKind | null;
+  fillPx?: number | null;
+  markPx?: number | null;
+  netMark?: number | null;
+  updatedAt: string;
+}
+
+export interface MakerShadowOrderRepository {
+  /** Insert or replace a shadow order row (idempotent on shadowOrderId). */
+  upsert(order: MakerShadowOrder): void;
+
+  /** Return all rows with stage in (pending, filled) — the "open" set. */
+  findOpen(): MakerShadowOrder[];
+
+  /** Return open rows for a specific token. */
+  findOpenByToken(tokenId: TokenId): MakerShadowOrder[];
+
+  /** Advance a row to a later stage, recording fill/mark telemetry. */
+  updateStage(shadowOrderId: string, update: MakerShadowStageUpdate): void;
+
+  /**
+   * Delete expired rows older than `beforeIso`. Returns count deleted.
+   * Intended for periodic TTL cleanup; keeps the table bounded.
+   */
+  pruneExpired(beforeIso: string): number;
+}

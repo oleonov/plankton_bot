@@ -16,6 +16,7 @@ import {
   DEFAULT_DUST_ABANDONMENT_POLICY,
   DEFAULT_REPRICE_CHAIN_POLICY,
   DEFAULT_LOSS_EXIT_POLICY,
+  DEFAULT_MAKER_ENTRY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
   type ExecutionPolicy,
@@ -604,6 +605,10 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
             | Partial<ExecutionPolicy["lossExit"]["cohortGuard"]>
             | undefined) ?? {}),
         },
+      },
+      makerEntry: {
+        ...(current.makerEntry ?? DEFAULT_MAKER_ENTRY),
+        ...((patch.makerEntry as Partial<ExecutionPolicy["makerEntry"]> | undefined) ?? {}),
       },
     };
 

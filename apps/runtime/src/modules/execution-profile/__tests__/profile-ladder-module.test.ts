@@ -925,6 +925,75 @@ describe("ProfileLadderModule", () => {
     });
   });
 
+  // Phase 6: patient reprice — maker-tagged positions only reprice on bbo_strong (≥10%)
+  it("skips bbo_major reprice for maker-tagged position (patient reprice)", async () => {
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [position({ entryStyle: "maker" })] },
+    });
+    ctx.repo.upsertLadder(ladderState());
+    await ctx.module.start();
+
+    // 7.78% bid move: above majorBboMovePct (5%) but below strongBboMovePct (10%) → bbo_major
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.097, bestAsk: 0.117, midPrice: 0.107 })],
+      timestamp: NOW,
+    });
+
+    // No rebuild counter for maker + bbo_major
+    expect(ctx.counters.filter((c) => c.name === "profile_ladder_rebuilt")).toHaveLength(0);
+    // BBO reference is NOT updated — the sell rests undisturbed
+    expect(ctx.repo.getLadder(tokenId)?.lastBboReferenceJson).toBe(
+      JSON.stringify({ bestBid: 0.09, bestAsk: 0.11 }),
+    );
+  });
+
+  it("allows bbo_strong reprice for maker-tagged position (patient reprice)", async () => {
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [position({ entryStyle: "maker" })] },
+    });
+    ctx.repo.upsertLadder(ladderState());
+    await ctx.module.start();
+
+    // 11.1% bid move: above strongBboMovePct (10%) → bbo_strong; maker should rebuild
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.08, bestAsk: 0.1, midPrice: 0.09 })],
+      timestamp: NOW,
+    });
+
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_rebuilt",
+      value: 1,
+      labels: '{"band":"medium_low","reason":"bbo_strong"}',
+    });
+  });
+
+  it("probe position still reprices on bbo_major (non-maker cadence unchanged)", async () => {
+    const ctx = setup(policy(), {
+      modeReader: { getMode: () => "flat" },
+      positionRepo: { findOpen: () => [position({ entryStyle: "probe" })] },
+    });
+    ctx.repo.upsertLadder(ladderState());
+    await ctx.module.start();
+
+    // Same 7.78% move: non-maker (probe) position MUST rebuild
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market({ bestBid: 0.097, bestAsk: 0.117, midPrice: 0.107 })],
+      timestamp: NOW,
+    });
+
+    expect(ctx.counters).toContainEqual({
+      name: "profile_ladder_rebuilt",
+      value: 1,
+      labels: '{"band":"medium_low","reason":"bbo_major"}',
+    });
+    // BBO reference IS updated for non-maker
+    expect(ctx.repo.getLadder(tokenId)?.lastBboReferenceJson).toBe(
+      JSON.stringify({ bestBid: 0.097, bestAsk: 0.117 }),
+    );
+  });
+
   it("closes a stale active live-rung ladder without a position before a BBO rebuild", async () => {
     const ctx = setup(policy(), {
       modeReader: { getMode: () => "flat" },

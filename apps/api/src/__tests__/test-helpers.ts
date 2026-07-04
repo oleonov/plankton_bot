@@ -58,4 +58,5 @@ export const MARKET_DATA_TEST_DEFAULTS = {
     thresholdBytes: 30_000_000_000,
     checkIntervalMs: 60_000,
   },
+  makerEntryMode: "off" as const,
 };

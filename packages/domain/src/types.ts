@@ -363,6 +363,8 @@ export interface Order {
   signalReason: string | null;
   decisionRuleId?: string | null;
   signalTimestamp?: string | null;
+  /** Maker-entry provenance marker. Set to "maker" for Phase 5 micro-live BUYs; null/undefined otherwise. */
+  entryStyle?: "probe" | "maker" | null;
   exchangeErrorCode?: string | null;
   exchangeErrorMessage?: string | null;
   exchangeErrorPayload?: string | null;
@@ -412,7 +414,7 @@ export interface Position {
   liquidationValueUpdatedAt?: string | null;
   realizedPnl: number;
   status: PositionStatus;
-  entryStyle: "probe" | null;
+  entryStyle: "probe" | "maker" | null;
   openedAt: string; // ISO timestamp
   closedAt: string | null; // ISO timestamp
   updatedAt: string; // ISO timestamp
@@ -1140,6 +1142,8 @@ export interface LadderBuilderInput {
   minOrderSize: number;
   config: ExecutionProfileSellLadderConfig;
   previousBand: ProfileLadderBand | null;
+  // Phase 6: maker-tagged positions use a +50% first rung; non-maker/null is byte-identical.
+  entryStyle?: "probe" | "maker" | null;
 }
 
 export type LadderBuilderOutput =
@@ -1358,6 +1362,7 @@ export type ScaleInReason =
   | "mode_no_signal"
   | "avg_down_no_recovery"
   | "avg_down_disabled"
+  | "avg_down_collapsed_tail"
   | "flat_no_trigger"
   | "below_min_add"
   | "near_death_add"
@@ -1401,6 +1406,10 @@ export interface ScaleInInput {
   marketSignals: ScaleInMarketSignals;
   previousAddCount: number;
   initialProbeSizeUsd: number;
+  /** Provenance of the position's entry. Guards keyed on "maker" are no-ops when null/probe. */
+  entryStyle?: "probe" | "maker" | null;
+  /** Phase 4 avg-down tail guard floor. null = guard off (default). */
+  collapseFloorPrice?: number | null;
 }
 
 export interface ScaleInDecision {
@@ -1519,6 +1528,8 @@ export interface ExecutionProfilePolicy {
   adoptExistingPositions: ExecutionProfileFeatureToggle;
   adoptExistingS1Ladders: ExecutionProfileFeatureToggle;
   monitoring: ExecutionProfileMonitoringConfig;
+  /** Phase 4 avg-down tail guard floor, propagated from makerEntry. null = guard off (default). */
+  collapseFloorPrice: number | null;
 }
 
 export type FeeScheduleSide = "buy" | "sell";
@@ -1880,6 +1891,8 @@ export interface ExecutionPolicy {
   depositActivation: DepositActivationPolicy;
   /** Track A — Krabs-specific add/scale-in BUY throttle (leg_age>=60m AND no SELL in leg). */
   trackAAddThrottle: TrackAAddThrottlePolicy;
+  /** R23 maker-entry prototype — default mode off; empty whitelist ⇒ no live orders. */
+  makerEntry: MakerEntryPolicy;
 }
 
 export interface DepositActivationPolicy {
@@ -1895,6 +1908,40 @@ export interface TrackAAddThrottlePolicy {
    * PlaceOrderRequested. Default false keeps Track A shadow-only.
    */
   enforce: boolean;
+}
+
+/**
+ * R23 maker-entry policy (Phase 0 — config only, no runtime effect until Phase 5).
+ * Default mode "off" and empty whitelist ensure zero live-order changes.
+ */
+export interface MakerEntryPolicy {
+  /** Operating mode. "off" disables all maker paths (default). */
+  mode: "off" | "shadow" | "micro_live";
+  /** CLOB ticks to improve above current best bid for the post-only limit BUY. */
+  bidImproveTicks: number;
+  /** Required gross gain pct from entry to harvest target (e.g. 0.50 = +50%). */
+  harvestGainPct: number;
+  /** How long to wait for a maker limit BUY to fill before abandoning, in ms. */
+  fillWaitMs: number;
+  /** Minimum market liquidity (USDC) for maker entry universe. */
+  makerMinLiquidity: number;
+  /** Minimum 24-hour traded volume (USDC) for maker entry universe. */
+  makerMinVol24h: number;
+  /**
+   * Condition IDs eligible for micro-live real orders.
+   * Empty array ⇒ no live orders regardless of mode.
+   */
+  whitelistConditionIds: string[];
+  /** Hard cap on a single maker BUY order size in USDC (micro-live only). */
+  microMaxOrderUsdc: number;
+  /** Hard cap on total open maker BUY exposure in USDC across all tokens (micro-live only). */
+  microMaxOpenUsdc: number;
+  /**
+   * avg-down tail guard: collapse scale-ins on maker positions when mark price
+   * falls below this level. null = guard off (default — non-maker scale-ins
+   * are byte-identical regardless). Set by operator after reviewing Phase 4.
+   */
+  collapseFloorPrice: number | null;
 }
 
 export interface ProfileSummary {

@@ -23,8 +23,8 @@ export class SqliteOrderRepository implements OrderRepository {
           fill_progress_shares, market_horizon,
           decision_rule_id, signal_timestamp, exchange_error_code,
           exchange_error_message, exchange_error_payload, exchange_rejection_reason,
-          metadata_json, bot_run_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          metadata_json, entry_style, bot_run_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(order_id) DO UPDATE SET
            status = excluded.status,
            exchange_order_id = excluded.exchange_order_id,
@@ -74,6 +74,7 @@ export class SqliteOrderRepository implements OrderRepository {
         order.exchangeErrorPayload ?? null,
         order.exchangeRejectionReason ?? null,
         order.metadata ? JSON.stringify(order.metadata) : null,
+        order.entryStyle ?? null,
         order.botRunId,
         order.createdAt,
         order.updatedAt,
@@ -262,6 +263,7 @@ export class SqliteOrderRepository implements OrderRepository {
       signalReason: (row.signal_reason as string) ?? null,
       decisionRuleId: (row.decision_rule_id as string) ?? null,
       signalTimestamp: (row.signal_timestamp as string) ?? null,
+      entryStyle: (row.entry_style as "probe" | "maker") ?? null,
       exchangeErrorCode: (row.exchange_error_code as string) ?? null,
       exchangeErrorMessage: (row.exchange_error_message as string) ?? null,
       exchangeErrorPayload: (row.exchange_error_payload as string) ?? null,

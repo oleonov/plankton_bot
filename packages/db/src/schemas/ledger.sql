@@ -152,6 +152,8 @@ CREATE TABLE IF NOT EXISTS orders (
   exchange_error_message TEXT,
   exchange_error_payload TEXT,
   exchange_rejection_reason TEXT,
+  -- Maker-entry provenance marker (migration 082). NULL = taker/probe; "maker" = Phase 5 micro-live BUY.
+  entry_style        TEXT,
   bot_run_id         TEXT NOT NULL,
   created_at         TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
@@ -710,3 +712,27 @@ CREATE INDEX IF NOT EXISTS idx_leg_state_transitions_position_ts
 
 CREATE INDEX IF NOT EXISTS idx_leg_state_transitions_created_at
   ON leg_state_transitions(created_at);
+
+-- ═══════════ MAKER SHADOW ORDERS ════════════
+-- From migration 083_maker_shadow_orders.sql
+
+CREATE TABLE IF NOT EXISTS maker_shadow_orders (
+  shadow_order_id  TEXT PRIMARY KEY,
+  token_id         TEXT NOT NULL,
+  condition_id     TEXT NOT NULL,
+  buy_px           REAL NOT NULL,
+  harvest_px       REAL NOT NULL,
+  posted_at        TEXT NOT NULL,
+  fill_deadline    TEXT NOT NULL,
+  stage            TEXT NOT NULL DEFAULT 'pending'
+    CHECK (stage IN ('pending', 'filled', 'harvested', 'marked', 'expired')),
+  fill_kind        TEXT
+    CHECK (fill_kind IS NULL OR fill_kind IN ('trade_through', 'touch')),
+  fill_px          REAL,
+  mark_px          REAL,
+  net_mark         REAL,
+  updated_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_maker_shadow_orders_stage_token
+  ON maker_shadow_orders (stage, token_id);

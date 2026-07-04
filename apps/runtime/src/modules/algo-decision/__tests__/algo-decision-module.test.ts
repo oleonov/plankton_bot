@@ -7846,6 +7846,47 @@ describe("AlgoDecisionModule", () => {
       db.close();
     });
   });
+
+  describe("maker-entry shadow deduplication (Bug 2)", () => {
+    it("two consecutive openMakerShadow calls for the same token produce only one DB upsert", async () => {
+      const makerShadowOrderRepo = {
+        upsert: vi.fn(),
+        findOpen: vi.fn().mockReturnValue([]),
+        findOpenByToken: vi.fn().mockReturnValue([]),
+        updateStage: vi.fn(),
+        pruneExpired: vi.fn().mockReturnValue(0),
+      };
+      const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+      const riskEventRepo = { insert: vi.fn(), countSince: vi.fn() };
+      const mod = buildModule({ makerShadowOrderRepo, runtimeMetrics, riskEventRepo });
+      await mod.start();
+
+      const policy = {
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: { ...DEFAULT_EXECUTION_POLICY.makerEntry, mode: "shadow" as const },
+      };
+
+      const sideEffect1 = {
+        kind: "maker_entry_shadow_open" as const,
+        tokenId: createTokenId("token-shadow-dedup"),
+        conditionId: "cond-dedup-1",
+        timestamp: "2026-07-04T10:00:00.000Z",
+        buyPx: 0.3,
+        harvestPx: 0.45,
+        r23Ratio: 0.68,
+        r23MaxMidpoint: 0.5,
+      };
+      const sideEffect2 = { ...sideEffect1, timestamp: "2026-07-04T10:01:00.000Z" };
+
+      (mod as any).openMakerShadow(sideEffect1, policy);
+      (mod as any).openMakerShadow(sideEffect2, policy);
+
+      expect(makerShadowOrderRepo.upsert).toHaveBeenCalledTimes(1);
+      expect((mod as any).makerShadowOpen.size).toBe(1);
+
+      await mod.stop();
+    });
+  });
 });
 
 describe("conversionSkipReEvalDelayMs", () => {

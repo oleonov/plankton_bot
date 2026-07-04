@@ -55,6 +55,7 @@ import type {
   SellLoopGuardPolicy,
   TakerAtProfitPolicy,
   TrackAAddThrottlePolicy,
+  MakerEntryPolicy,
   TrackRHonestPricingPolicy,
   TrackS3MarginAwareSpreadPolicy,
   TrackS3SpreadTierPolicy,
@@ -531,6 +532,8 @@ export const DEFAULT_EXECUTION_PROFILE_POLICY: ExecutionProfilePolicy = {
       cooldownMs: 3_600_000,
     },
   },
+  // Phase 4 guard floor — null keeps the guard off until an operator sets a value.
+  collapseFloorPrice: null,
 };
 
 export const DEFAULT_EXIT_TTL_BY_LIQUIDITY_POLICY: ExitTtlByLiquidityPolicyConfig = {
@@ -566,6 +569,28 @@ export const DEFAULT_DEPOSIT_ACTIVATION_POLICY: DepositActivationPolicy = {
 // until an operator opts in by flipping enforce:true in control.db (hot-reloaded).
 export const DEFAULT_TRACK_A_ADD_THROTTLE_POLICY: TrackAAddThrottlePolicy = {
   enforce: false,
+};
+
+// Maker-entry prototype defaults (Phase 0).
+// mode="off" + empty whitelist ⇒ zero live-order changes until an operator sets
+// mode=shadow or micro_live with a non-empty whitelist (config-only rollout).
+// collapseFloorPrice defaults to null so the avg-down guard (Phase 4) is a no-op
+// on all existing scale-in paths until an operator explicitly sets a floor.
+export const DEFAULT_MAKER_ENTRY: MakerEntryPolicy = {
+  mode: "off",
+  bidImproveTicks: 1,
+  harvestGainPct: 0.5,
+  // 5 minutes — wide enough to avoid premature abandonment on thin markets.
+  fillWaitMs: 300_000,
+  makerMinLiquidity: 5_000,
+  makerMinVol24h: 1_000,
+  whitelistConditionIds: [],
+  // Conservative micro caps: $10/order, $50 total open.
+  // These are defaults only; operators must set meaningful values before micro_live.
+  microMaxOrderUsdc: 10,
+  microMaxOpenUsdc: 50,
+  // null = guard off; 0.02 is a representative operator rollout value for Phase 4.
+  collapseFloorPrice: null,
 };
 
 export const DEFAULT_LOSS_EXIT_POLICY: D9LossExitPolicy = {
@@ -742,6 +767,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   preResolutionExit: DEFAULT_PRE_RESOLUTION_EXIT_POLICY,
   depositActivation: DEFAULT_DEPOSIT_ACTIVATION_POLICY,
   trackAAddThrottle: DEFAULT_TRACK_A_ADD_THROTTLE_POLICY,
+  makerEntry: DEFAULT_MAKER_ENTRY,
 };
 
 const DEAD_SIDE_MODES = ["off", "observe", "enforce"] as const;
@@ -898,6 +924,25 @@ const BOUND_QD_SALVAGE_FLOOR_RATIO_MAX = 1;
 const BOUND_SELL_LOOP_GUARD_WINDOW_MIN_MS = 60_000;
 const BOUND_SELL_LOOP_GUARD_WINDOW_MAX_MS = 24 * 60 * 60_000;
 
+// Maker-entry bounds.
+const BOUND_MAKER_BID_IMPROVE_TICKS_MIN = 1;
+const BOUND_MAKER_BID_IMPROVE_TICKS_MAX = 100;
+const BOUND_MAKER_HARVEST_GAIN_PCT_MIN = 0.01;
+const BOUND_MAKER_HARVEST_GAIN_PCT_MAX = 10;
+const BOUND_MAKER_FILL_WAIT_MS_MIN = 60_000;
+const BOUND_MAKER_FILL_WAIT_MS_MAX = 24 * 60 * 60_000;
+const BOUND_MAKER_MIN_LIQUIDITY_MIN = 0;
+const BOUND_MAKER_MIN_LIQUIDITY_MAX = 1_000_000;
+const BOUND_MAKER_MIN_VOL24H_MIN = 0;
+const BOUND_MAKER_MIN_VOL24H_MAX = 1_000_000;
+const BOUND_MAKER_MICRO_MAX_ORDER_USDC_MIN = 1;
+const BOUND_MAKER_MICRO_MAX_ORDER_USDC_MAX = 10_000;
+const BOUND_MAKER_MICRO_MAX_OPEN_USDC_MIN = 1;
+const BOUND_MAKER_MICRO_MAX_OPEN_USDC_MAX = 100_000;
+const BOUND_MAKER_COLLAPSE_FLOOR_MIN = 0.001;
+const BOUND_MAKER_COLLAPSE_FLOOR_MAX = 0.99;
+const MAKER_ENTRY_MODES = ["off", "shadow", "micro_live"] as const;
+
 export interface ParseResult {
   policy: ExecutionPolicy;
   issues: string[];
@@ -1045,6 +1090,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const preResolutionExit = parsePreResolutionExit(obj.preResolutionExit, issues);
   const depositActivation = parseDepositActivation(obj.depositActivation, issues);
   const trackAAddThrottle = parseTrackAAddThrottle(obj.trackAAddThrottle, issues);
+  const makerEntry = parseMakerEntry(obj.makerEntry, issues);
 
   return {
     policy: {
@@ -1075,7 +1121,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       trackS1,
       trackS4,
       feeSchedule,
-      executionProfile,
+      executionProfile: { ...executionProfile, collapseFloorPrice: makerEntry.collapseFloorPrice },
       orderLifetime,
       postBuyFillSellCooldownMs,
       repriceOnOutbid,
@@ -1094,6 +1140,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       preResolutionExit,
       depositActivation,
       trackAAddThrottle,
+      makerEntry,
     },
     issues,
   };
@@ -2068,6 +2115,8 @@ function parseExecutionProfile(raw: unknown, issues: string[]): ExecutionProfile
       "executionProfile.adoptExistingS1Ladders",
     ),
     monitoring: parseExecutionProfileMonitoring(obj.monitoring, issues),
+    // Placeholder — the top-level parser overwrites this with makerEntry.collapseFloorPrice.
+    collapseFloorPrice: null,
   };
 }
 
@@ -5032,6 +5081,121 @@ function parseDepositActivation(raw: unknown, issues: string[]): DepositActivati
       issues,
       "depositActivation.minAmountUsdcCents",
     ),
+  };
+}
+
+function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("makerEntry must be an object");
+    return DEFAULT_MAKER_ENTRY;
+  }
+  const obj = raw as Record<string, unknown>;
+
+  const mode = enumOr(
+    obj.mode,
+    MAKER_ENTRY_MODES,
+    DEFAULT_MAKER_ENTRY.mode,
+    issues,
+    "makerEntry.mode",
+  );
+  const bidImproveTicks = clampedInt(
+    obj.bidImproveTicks,
+    DEFAULT_MAKER_ENTRY.bidImproveTicks,
+    BOUND_MAKER_BID_IMPROVE_TICKS_MIN,
+    BOUND_MAKER_BID_IMPROVE_TICKS_MAX,
+    issues,
+    "makerEntry.bidImproveTicks",
+  );
+  const harvestGainPct = clampedNumber(
+    obj.harvestGainPct,
+    DEFAULT_MAKER_ENTRY.harvestGainPct,
+    BOUND_MAKER_HARVEST_GAIN_PCT_MIN,
+    BOUND_MAKER_HARVEST_GAIN_PCT_MAX,
+    issues,
+    "makerEntry.harvestGainPct",
+  );
+  const fillWaitMs = clampedInt(
+    obj.fillWaitMs,
+    DEFAULT_MAKER_ENTRY.fillWaitMs,
+    BOUND_MAKER_FILL_WAIT_MS_MIN,
+    BOUND_MAKER_FILL_WAIT_MS_MAX,
+    issues,
+    "makerEntry.fillWaitMs",
+  );
+  const makerMinLiquidity = clampedNumber(
+    obj.makerMinLiquidity,
+    DEFAULT_MAKER_ENTRY.makerMinLiquidity,
+    BOUND_MAKER_MIN_LIQUIDITY_MIN,
+    BOUND_MAKER_MIN_LIQUIDITY_MAX,
+    issues,
+    "makerEntry.makerMinLiquidity",
+  );
+  const makerMinVol24h = clampedNumber(
+    obj.makerMinVol24h,
+    DEFAULT_MAKER_ENTRY.makerMinVol24h,
+    BOUND_MAKER_MIN_VOL24H_MIN,
+    BOUND_MAKER_MIN_VOL24H_MAX,
+    issues,
+    "makerEntry.makerMinVol24h",
+  );
+
+  // Parse whitelist: must be an array of non-empty strings; invalid ⇒ fallback to default.
+  let whitelistConditionIds: string[] = [...DEFAULT_MAKER_ENTRY.whitelistConditionIds];
+  if (obj.whitelistConditionIds !== undefined) {
+    if (!Array.isArray(obj.whitelistConditionIds)) {
+      issues.push("makerEntry.whitelistConditionIds must be an array");
+    } else {
+      const parsed: string[] = [];
+      let valid = true;
+      for (const id of obj.whitelistConditionIds) {
+        if (typeof id !== "string" || id.trim().length === 0) {
+          issues.push("makerEntry.whitelistConditionIds must contain only non-empty strings");
+          valid = false;
+          break;
+        }
+        const trimmed = id.trim();
+        if (!parsed.includes(trimmed)) parsed.push(trimmed);
+      }
+      if (valid) whitelistConditionIds = parsed;
+    }
+  }
+
+  const microMaxOrderUsdc = clampedNumber(
+    obj.microMaxOrderUsdc,
+    DEFAULT_MAKER_ENTRY.microMaxOrderUsdc,
+    BOUND_MAKER_MICRO_MAX_ORDER_USDC_MIN,
+    BOUND_MAKER_MICRO_MAX_ORDER_USDC_MAX,
+    issues,
+    "makerEntry.microMaxOrderUsdc",
+  );
+  const microMaxOpenUsdc = clampedNumber(
+    obj.microMaxOpenUsdc,
+    DEFAULT_MAKER_ENTRY.microMaxOpenUsdc,
+    BOUND_MAKER_MICRO_MAX_OPEN_USDC_MIN,
+    BOUND_MAKER_MICRO_MAX_OPEN_USDC_MAX,
+    issues,
+    "makerEntry.microMaxOpenUsdc",
+  );
+  const collapseFloorPrice = nullableClampedNumber(
+    obj.collapseFloorPrice,
+    DEFAULT_MAKER_ENTRY.collapseFloorPrice,
+    BOUND_MAKER_COLLAPSE_FLOOR_MIN,
+    BOUND_MAKER_COLLAPSE_FLOOR_MAX,
+    issues,
+    "makerEntry.collapseFloorPrice",
+  );
+
+  return {
+    mode,
+    bidImproveTicks,
+    harvestGainPct,
+    fillWaitMs,
+    makerMinLiquidity,
+    makerMinVol24h,
+    whitelistConditionIds,
+    microMaxOrderUsdc,
+    microMaxOpenUsdc,
+    collapseFloorPrice,
   };
 }
 

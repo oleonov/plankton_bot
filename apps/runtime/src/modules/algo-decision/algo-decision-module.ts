@@ -41,6 +41,8 @@ import type {
   OrderRepository,
   S1OwnershipReader,
   SellOrderSizingContext,
+  MakerShadowOrder,
+  MakerShadowOrderRepository,
 } from "@krabs/domain";
 import {
   deriveState,
@@ -118,6 +120,7 @@ import {
 } from "./planner-suppression-rollup.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
+import { tryOpenShadow, advanceShadowOrder, computeShadowOrderId } from "./maker-entry-shadow.js";
 
 // Re-exported for existing consumers; the canonical contract now lives in @krabs/domain.
 export type { S1OwnershipReader };
@@ -559,6 +562,11 @@ export interface AlgoDecisionModuleDeps {
    */
   s1Ownership?: S1OwnershipReader | undefined;
   profileLadderOwnership?: ProfileLadderOwnershipReader | undefined;
+  /**
+   * Phase 3 — durable shadow order store for the maker-entry R23 projection.
+   * Optional: when absent the tracker is a no-op (mode gating also applies).
+   */
+  makerShadowOrderRepo?: MakerShadowOrderRepository | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -861,6 +869,11 @@ export class AlgoDecisionModule implements RuntimeModule {
   // the per-eval counters are summable runtime_metrics, not in-memory state.
   // See research_plankton/two_lane_entry_shadow_spec_2026-06-30.md.
   private readonly twoLaneShadowDedupe = new Map<string, number>();
+  // Phase 3 — maker-entry shadow tracker. In-memory map of open shadows keyed
+  // by shadowOrderId; hydrated from DB on startup. Gated on mode !== "off".
+  private readonly makerShadowOpen = new Map<string, MakerShadowOrder>();
+  // ms since epoch of last TTL prune to avoid pruning on every sweep tick
+  private makerShadowLastPruneAt = 0;
   private readonly legacyProfileOwnedGuardDedupe = new Map<string, number>();
   private readonly staticRuleSellBelowAvgEntryDedupe = new Map<string, number>();
   private readonly d9ProfileOwnedSuppressionDedupe = new Map<string, number>();
@@ -931,6 +944,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.sellSizeRules = this.deps.algoRulesRepo.getSizeRules("SELL");
     this.hydrateDecisionStateCaches();
     this.recoverR23ProbeNoOrderIdCooldowns();
+    this.hydrateMakerShadowOrders();
     this.lastOpenPositionWorkingSetRefreshAt = Date.now();
     this.refreshOpenPositionWorkingSet(this.lastOpenPositionWorkingSetRefreshAt, false);
 
@@ -1401,6 +1415,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   async sweep(): Promise<void> {
     if (this.isPaused()) return;
     this.pruneExpiredPending();
+    this.maybePruneMakerShadows();
 
     const now = Date.now();
     if (now - this.lastOpenPositionWorkingSetRefreshAt >= OPEN_POSITION_WORKING_SET_REFRESH_MS) {
@@ -1588,6 +1603,9 @@ export class AlgoDecisionModule implements RuntimeModule {
         market: result.market,
       });
     }
+
+    // Phase 3 — advance all open maker-entry shadows using latest market data.
+    this.advanceMakerShadows(now);
 
     // ADR-022 §D-F — promote the just-completed histogram so healthcheck
     // immediately reflects this sweep, not the previous one.
@@ -1969,6 +1987,9 @@ export class AlgoDecisionModule implements RuntimeModule {
       }
       if (sideEffect.kind === "two_lane_entry_shadow") {
         this.recordTwoLaneEntryShadowSideEffect(sideEffect);
+      }
+      if (sideEffect.kind === "maker_entry_shadow_open") {
+        this.openMakerShadow(sideEffect, executionPolicy);
       }
       if (sideEffect.kind === "sell_loop_guard_suppressed") {
         this.deps.runtimeMetrics?.writeCounter(
@@ -2380,6 +2401,171 @@ export class AlgoDecisionModule implements RuntimeModule {
         signalTimestamp: sideEffect.timestamp,
       },
     });
+  }
+
+  // ─── Phase 3: Maker-entry shadow tracker ────────────────────────────────────
+
+  /** Load open rows from DB into the in-memory map at startup. */
+  private hydrateMakerShadowOrders(): void {
+    const repo = this.deps.makerShadowOrderRepo;
+    if (!repo) return;
+    const rows = repo.findOpen();
+    for (const row of rows) {
+      this.makerShadowOpen.set(row.shadowOrderId, row);
+    }
+    if (rows.length > 0) {
+      this.log.info({ count: rows.length }, "maker-entry shadow: hydrated open rows");
+    }
+  }
+
+  /** Persist + register a new pending shadow (from the planner's side effect). */
+  private openMakerShadow(
+    sideEffect: Extract<DecisionPlanSideEffect, { kind: "maker_entry_shadow_open" }>,
+    executionPolicy: ExecutionPolicy | null,
+  ): void {
+    if (executionPolicy?.makerEntry.mode === "off") return;
+    const repo = this.deps.makerShadowOrderRepo;
+    if (!repo) return;
+
+    const fillWaitMs = executionPolicy?.makerEntry.fillWaitMs ?? 300_000;
+    const fillDeadlineMs = Date.parse(sideEffect.timestamp) + fillWaitMs;
+    const shadowOrderId = computeShadowOrderId(String(sideEffect.tokenId), sideEffect.timestamp);
+    // Skip if a row with the same deterministic ID already exists (idempotent)
+    if (this.makerShadowOpen.has(shadowOrderId)) return;
+    // Skip if a non-terminal (pending or filled) shadow already exists for this token
+    const tokenStr = String(sideEffect.tokenId);
+    for (const s of this.makerShadowOpen.values()) {
+      if (String(s.tokenId) === tokenStr) return;
+    }
+
+    const order: MakerShadowOrder = {
+      shadowOrderId,
+      tokenId: sideEffect.tokenId,
+      conditionId: sideEffect.conditionId,
+      buyPx: sideEffect.buyPx,
+      harvestPx: sideEffect.harvestPx,
+      postedAt: sideEffect.timestamp,
+      fillDeadline: new Date(fillDeadlineMs).toISOString(),
+      stage: "pending",
+      fillKind: null,
+      fillPx: null,
+      markPx: null,
+      netMark: null,
+      updatedAt: sideEffect.timestamp,
+    };
+    try {
+      repo.upsert(order);
+    } catch (err) {
+      this.log.warn({ err, shadowOrderId }, "maker-entry shadow: failed to persist open row");
+      return;
+    }
+    this.makerShadowOpen.set(shadowOrderId, order);
+
+    this.deps.runtimeMetrics?.writeCounter("maker_entry_shadow_opened_total", 1);
+    this.persistence.enqueueRiskEvent({
+      eventType: "maker_entry_shadow",
+      payload: {
+        transition: "opened",
+        shadowOrderId,
+        tokenId: String(sideEffect.tokenId),
+        conditionId: sideEffect.conditionId,
+        buyPx: sideEffect.buyPx,
+        harvestPx: sideEffect.harvestPx,
+        postedAt: sideEffect.timestamp,
+        fillDeadline: order.fillDeadline,
+        r23Ratio: sideEffect.r23Ratio,
+        r23MaxMidpoint: sideEffect.r23MaxMidpoint,
+      },
+    });
+  }
+
+  /**
+   * Advance all open shadow orders using the latest market data from the cache.
+   * Called once per evaluation tick (after plans are processed).
+   */
+  private advanceMakerShadows(now: number): void {
+    if (this.makerShadowOpen.size === 0) return;
+    const repo = this.deps.makerShadowOrderRepo;
+    if (!repo) return;
+
+    const nowIso = new Date(now).toISOString();
+    for (const [shadowOrderId, shadow] of this.makerShadowOpen) {
+      const market = this.marketCache.get(String(shadow.tokenId)) ?? null;
+      if (!market) continue;
+
+      const outcome = advanceShadowOrder(shadow, market, nowIso);
+      if (!outcome.transition) continue;
+
+      const updated: MakerShadowOrder = { ...shadow, ...outcome.update };
+      try {
+        repo.updateStage(shadowOrderId, outcome.update);
+      } catch (err) {
+        this.log.warn({ err, shadowOrderId }, "maker-entry shadow: failed to persist stage update");
+        continue;
+      }
+
+      // Remove from open set if terminal
+      if (
+        updated.stage === "harvested" ||
+        updated.stage === "marked" ||
+        updated.stage === "expired"
+      ) {
+        this.makerShadowOpen.delete(shadowOrderId);
+      } else {
+        // filled — keep in memory for harvest/mark advance next tick
+        this.makerShadowOpen.set(shadowOrderId, updated);
+      }
+
+      this.emitMakerShadowTransition(updated, outcome.update.stage);
+    }
+  }
+
+  private emitMakerShadowTransition(
+    order: MakerShadowOrder,
+    transition: "filled" | "harvested" | "marked" | "expired",
+  ): void {
+    const metricName = `maker_entry_shadow_${transition}_total`;
+    const labels =
+      transition === "filled"
+        ? JSON.stringify({ fillKind: order.fillKind ?? "unknown" })
+        : undefined;
+    this.deps.runtimeMetrics?.writeCounter(metricName, 1, labels);
+    this.persistence.enqueueRiskEvent({
+      eventType: "maker_entry_shadow",
+      payload: {
+        transition,
+        shadowOrderId: order.shadowOrderId,
+        tokenId: String(order.tokenId),
+        conditionId: order.conditionId,
+        buyPx: order.buyPx,
+        harvestPx: order.harvestPx,
+        stage: order.stage,
+        fillKind: order.fillKind,
+        fillPx: order.fillPx,
+        markPx: order.markPx,
+        netMark: order.netMark,
+        updatedAt: order.updatedAt,
+      },
+    });
+  }
+
+  /** TTL prune: remove expired rows older than 48 h from DB. */
+  private maybePruneMakerShadows(): void {
+    const repo = this.deps.makerShadowOrderRepo;
+    if (!repo) return;
+    const now = Date.now();
+    const PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1h
+    if (now - this.makerShadowLastPruneAt < PRUNE_INTERVAL_MS) return;
+    this.makerShadowLastPruneAt = now;
+    const cutoff = new Date(now - 48 * 60 * 60 * 1000).toISOString();
+    try {
+      const pruned = repo.pruneExpired(cutoff);
+      if (pruned > 0) {
+        this.log.info({ pruned, cutoff }, "maker-entry shadow: pruned expired rows");
+      }
+    } catch (err) {
+      this.log.warn({ err }, "maker-entry shadow: prune failed");
+    }
   }
 
   private materializeSignalDraft(

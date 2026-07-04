@@ -52,6 +52,8 @@ export interface PlaceOrderCommand {
   readonly signalTimestamp?: string | null;
   /** Unix seconds, used only when orderType is "GTD". */
   readonly expiration?: number;
+  /** Maker-entry provenance. Set to "maker" for Phase 5 micro-live post-only BUYs; null/undefined otherwise. */
+  readonly entryStyle?: "probe" | "maker" | null;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 

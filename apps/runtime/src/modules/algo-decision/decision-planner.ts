@@ -57,8 +57,11 @@ import {
 } from "./qd-pre-resolution-exit.js";
 import {
   evaluateTwoLaneEntryShadow,
+  resolveShadowR23Policy,
   type TwoLaneEntryShadowProjection,
 } from "./two-lane-entry-shadow.js";
+import { evaluateMakerEntry } from "./maker-entry.js";
+import { isMakerUniverse } from "./maker-entry-shadow.js";
 
 export type { QdShadowProjection, QdShadowReason } from "./qd-pre-resolution-exit.js";
 export type { TwoLaneEntryShadowProjection } from "./two-lane-entry-shadow.js";
@@ -231,6 +234,17 @@ export type DecisionPlanSideEffect =
       conditionId: string;
       timestamp: string;
       projection: TwoLaneEntryShadowProjection;
+    }
+  | {
+      /** Phase 3 — open a new maker-entry shadow pending order. */
+      kind: "maker_entry_shadow_open";
+      tokenId: TokenId;
+      conditionId: string;
+      timestamp: string;
+      buyPx: number;
+      harvestPx: number;
+      r23Ratio: number | null;
+      r23MaxMidpoint: number | null;
     };
 
 export type TrackQShadowReason =
@@ -733,6 +747,60 @@ function recordTwoLaneEntryShadow(
   });
 }
 
+/**
+ * Maker-entry shadow: open a pending shadow order when R23 fires on a flat
+ * first-entry within the maker universe. Gated on mode !== "off".
+ * Never blocks, reprices, or emits an order/signal — pure projection only.
+ */
+function recordMakerEntryShadow(
+  input: DecisionPlanningInput,
+  market: NormalizedMarket,
+  nowIso: string,
+  sideEffects: DecisionPlanSideEffect[],
+): void {
+  // Flat first-entry only (mirror of recordTwoLaneEntryShadow gate)
+  if (input.legState || isOpenPosition(input.position)) return;
+
+  const policy = input.executionPolicy?.makerEntry;
+  if (!policy || policy.mode === "off") return;
+
+  // Evaluate R23 via shadow policy (works even when live R23 toggle is off)
+  const r23Policy = resolveShadowR23Policy(input.executionPolicy);
+  const r23 = evaluateR23DipTrigger(
+    {
+      state: "OTHER",
+      currentMidpoint: market.midPrice ?? 0,
+      maxMidpointInWindow: input.r23MaxMidpoint,
+    },
+    r23Policy,
+  );
+  if (!r23.fire) return;
+
+  if (!isMakerUniverse(market, policy)) return;
+
+  const book = {
+    bestBid: market.bestBid ?? 0,
+    bestAsk: market.bestAsk ?? 0,
+    tickSize: market.tickSize,
+  };
+  const decision = evaluateMakerEntry(r23, book, {
+    improveTicks: policy.bidImproveTicks,
+    harvestGainPct: policy.harvestGainPct,
+  });
+  if (!decision.shouldPost || decision.buyPx === null || decision.harvestPx === null) return;
+
+  sideEffects.push({
+    kind: "maker_entry_shadow_open",
+    tokenId: input.tokenId,
+    conditionId: market.conditionId,
+    timestamp: nowIso,
+    buyPx: decision.buyPx,
+    harvestPx: decision.harvestPx,
+    r23Ratio: r23.ratio,
+    r23MaxMidpoint: r23.maxMidpoint,
+  });
+}
+
 export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlanResult {
   const metrics = createDecisionMetricsDelta();
   const suppressions: SuppressionPlan[] = [];
@@ -798,6 +866,7 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   recordTrackQShadow(input, market, price, nowIso, sideEffects);
   recordQdShadow(input, market, d8EvalPrice, price, nowIso, sideEffects);
   recordTwoLaneEntryShadow(input, market, nowIso, sideEffects);
+  recordMakerEntryShadow(input, market, nowIso, sideEffects);
 
   if (legState && isAbandoned(legState) && input.executionPolicy?.dustAbandonment.enabled) {
     const dustPolicy = input.executionPolicy.dustAbandonment;

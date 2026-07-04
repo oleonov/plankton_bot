@@ -4294,4 +4294,115 @@ describe("ExecutionModule", () => {
 
     await concentrationMod.stop();
   });
+
+  // ─── Maker micro-cap (Bug 3) ───────────────────────────────────────────────
+
+  describe("maker micro-cap enforcement", () => {
+    it("maker BUY over microMaxOrderUsdc is rejected", async () => {
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live" as const,
+            microMaxOrderUsdc: 5,
+            microMaxOpenUsdc: 50,
+          },
+        }),
+      });
+      await microMod.start();
+
+      const rejected: any[] = [];
+      bus.subscribe("OrderRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      // notional = size 10 * price 0.6 = 6, which exceeds microMaxOrderUsdc: 5
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({ entryStyle: "maker", side: "buy", size: 10, price: 0.6 }),
+        timestamp: Date.now(),
+      });
+
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toBe("maker-micro-order-cap-exceeded");
+
+      await microMod.stop();
+    });
+
+    it("two concurrent maker BUYs that together exceed microMaxOpenUsdc: second is rejected", async () => {
+      let resolvePlace: () => void;
+      const slowPlace = new Promise<{ success: true; orderId: string }>((resolve) => {
+        resolvePlace = () => resolve({ success: true, orderId: "sim-ord-maker-slow" });
+      });
+      (gateway.placeOrder as ReturnType<typeof vi.fn>).mockReturnValueOnce(slowPlace);
+
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        maxConcurrency: 1,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live" as const,
+            microMaxOrderUsdc: 20,
+            microMaxOpenUsdc: 15,
+          },
+        }),
+      });
+      await microMod.start();
+
+      const rejected: any[] = [];
+      bus.subscribe("OrderRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      // First maker BUY: notional 9 (within per-order cap=20 and open cap=15)
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("maker-buy-1"),
+          entryStyle: "maker",
+          side: "buy",
+          size: 10,
+          price: 0.9,
+        }),
+        timestamp: Date.now(),
+      });
+
+      // Second maker BUY: notional 7.2 — within per-order cap, but 9 + 7.2 = 16.2 > 15 open cap
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("maker-buy-2"),
+          clientOrderId: "plk_maker_buy_2" as any,
+          entryStyle: "maker",
+          side: "buy",
+          size: 8,
+          price: 0.9,
+        }),
+        timestamp: Date.now(),
+      });
+
+      expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toBe("maker-micro-open-cap-exceeded");
+
+      resolvePlace!();
+      await microMod.stop();
+    });
+  });
 });

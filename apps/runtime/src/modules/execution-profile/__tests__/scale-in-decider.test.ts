@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_EXECUTION_PROFILE_POLICY, type ScaleInInput } from "@krabs/domain";
 
 import { decideScaleIn } from "../scale-in-decider.js";
+import { validateExecutionProfileLabels } from "../execution-profile-metrics.js";
 
 const baseConfig = {
   enabled: true,
@@ -198,5 +199,107 @@ describe("decideScaleIn", () => {
         baseConfig,
       ).costCapContext.hasStrongOverrideSignal,
     ).toBe(false);
+  });
+});
+
+// avgEntryPrice: 0.1, avgDown threshold: 5% → avg_down when mark < 0.095
+const AVG_DOWN_MARK = 0.094;
+const FLOOR_ABOVE_MARK = 0.1; // floor > mark → guard fires (0.094 < 0.10)
+const FLOOR_AT_MARK = 0.094; // floor === mark → not blocked (strict <)
+const FLOOR_BELOW_MARK = 0.02; // floor < mark → not blocked (0.094 > 0.02)
+
+describe("decideScaleIn — Phase 4 avg_down_collapsed_tail guard", () => {
+  it("blocks a maker-tagged avg_down position when mark is below collapseFloorPrice", () => {
+    const decision = decideScaleIn(
+      input({
+        currentMarkPrice: AVG_DOWN_MARK,
+        entryStyle: "maker",
+        collapseFloorPrice: FLOOR_ABOVE_MARK,
+      }),
+      baseConfig,
+    );
+    expect(decision).toMatchObject({
+      action: "skip",
+      reason: "avg_down_collapsed_tail",
+      mode: "avg_down",
+    });
+  });
+
+  it("does NOT block when mark equals collapseFloorPrice (strict < boundary)", () => {
+    const decision = decideScaleIn(
+      input({
+        currentMarkPrice: AVG_DOWN_MARK,
+        entryStyle: "maker",
+        collapseFloorPrice: FLOOR_AT_MARK,
+      }),
+      baseConfig,
+    );
+    expect(decision.reason).not.toBe("avg_down_collapsed_tail");
+  });
+
+  it("does NOT block a maker position when mark is above collapseFloorPrice", () => {
+    const decision = decideScaleIn(
+      input({
+        currentMarkPrice: AVG_DOWN_MARK,
+        entryStyle: "maker",
+        collapseFloorPrice: FLOOR_BELOW_MARK,
+        marketSignals: { ...input().marketSignals, recovery60: 0.08 },
+      }),
+      baseConfig,
+    );
+    expect(decision.reason).not.toBe("avg_down_collapsed_tail");
+  });
+
+  it("does NOT block a probe-tagged position even when mark is below floor", () => {
+    const decision = decideScaleIn(
+      input({
+        currentMarkPrice: AVG_DOWN_MARK,
+        entryStyle: "probe",
+        collapseFloorPrice: FLOOR_ABOVE_MARK,
+      }),
+      baseConfig,
+    );
+    expect(decision.reason).not.toBe("avg_down_collapsed_tail");
+  });
+
+  it("does NOT block a null-entryStyle position even when mark is below floor", () => {
+    const decision = decideScaleIn(
+      input({
+        currentMarkPrice: AVG_DOWN_MARK,
+        entryStyle: null,
+        collapseFloorPrice: FLOOR_ABOVE_MARK,
+      }),
+      baseConfig,
+    );
+    expect(decision.reason).not.toBe("avg_down_collapsed_tail");
+  });
+
+  it("is a no-op when collapseFloorPrice is null (regression: floor-null paths byte-identical)", () => {
+    const withFloorNull = decideScaleIn(
+      input({ currentMarkPrice: AVG_DOWN_MARK, entryStyle: "maker", collapseFloorPrice: null }),
+      baseConfig,
+    );
+    const withNoProvenance = decideScaleIn(input({ currentMarkPrice: AVG_DOWN_MARK }), baseConfig);
+    // Neither should be blocked by the collapse guard; both should match the pre-guard behavior
+    expect(withFloorNull.reason).not.toBe("avg_down_collapsed_tail");
+    expect(withNoProvenance.reason).not.toBe("avg_down_collapsed_tail");
+    // Both take the same code path (avg_down_no_recovery by default)
+    expect(withFloorNull.reason).toBe(withNoProvenance.reason);
+  });
+
+  it("is a no-op for non-avg_down modes even for maker-tagged positions with a floor set", () => {
+    // UP mode — mark above entry
+    const up = decideScaleIn(
+      input({ currentMarkPrice: 0.106, entryStyle: "maker", collapseFloorPrice: 0.05 }),
+      baseConfig,
+    );
+    expect(up.reason).not.toBe("avg_down_collapsed_tail");
+    expect(up.mode).toBe("up");
+  });
+
+  it("metric allowlist accepts avg_down_collapsed_tail as a reason label", () => {
+    expect(() =>
+      validateExecutionProfileLabels("test_metric", { reason: "avg_down_collapsed_tail" }),
+    ).not.toThrow();
   });
 });

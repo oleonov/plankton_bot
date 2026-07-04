@@ -70,4 +70,22 @@ export class LiveLiteGuard {
     const minOrderUsdc = this.getMinOrderUsdc();
     return Math.max(minOrderUsdc ?? 0, marketableBuyMinNotionalUsdc);
   }
+
+  /**
+   * Validate that a micro-live maker order cap is achievable given the EOA minimum entry notional.
+   * Throws if `microMaxOrderUsdc` is below the minimum entry notional, because the cap would cause
+   * every maker order to be sized below the exchange minimum and rejected immediately.
+   */
+  static validateMicroMaxOrderCap(
+    microMaxOrderUsdc: number,
+    guard: LiveLiteGuard,
+    label: string = "makerEntry.microMaxOrderUsdc",
+  ): void {
+    const minEntry = guard.getMinEntryNotionalUsdc();
+    if (minEntry != null && microMaxOrderUsdc < minEntry) {
+      throw new Error(
+        `${label} (${microMaxOrderUsdc}) is below the EOA minimum entry notional (${minEntry} USDC) — micro-live orders would always be rejected`,
+      );
+    }
+  }
 }
