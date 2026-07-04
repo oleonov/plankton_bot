@@ -23,12 +23,10 @@ import {
   createOrderId,
   createTokenId,
   DEFAULT_EXECUTION_POLICY,
-  ExchangeErrorCode,
   R23_DIP_TRIGGER_RULE_ID,
 } from "@krabs/domain";
 import type {
   ClientOrderId,
-  ConditionId,
   Fill,
   FillRepository,
   MakerEntryPolicy,
@@ -39,7 +37,6 @@ import type {
   Position,
   PositionRepository,
   Signal,
-  TokenId,
 } from "@krabs/domain";
 import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
 import { ExecutionModule } from "../modules/execution/execution-module.js";

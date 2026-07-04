@@ -120,7 +120,7 @@ import {
 } from "./planner-suppression-rollup.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
-import { tryOpenShadow, advanceShadowOrder, computeShadowOrderId } from "./maker-entry-shadow.js";
+import { advanceShadowOrder, computeShadowOrderId } from "./maker-entry-shadow.js";
 
 // Re-exported for existing consumers; the canonical contract now lives in @krabs/domain.
 export type { S1OwnershipReader };

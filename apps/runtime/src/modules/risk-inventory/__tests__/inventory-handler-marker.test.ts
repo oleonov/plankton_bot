@@ -9,13 +9,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import {
-  createConditionId,
-  createFillId,
-  createLotId,
-  createPositionId,
-  createTokenId,
-} from "@krabs/domain";
+import { createConditionId, createFillId, createPositionId, createTokenId } from "@krabs/domain";
 import type { InventoryLotRepository, Position, PositionRepository } from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
 import { InventoryHandler, type FillEvent } from "../inventory-handler.js";
