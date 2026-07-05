@@ -713,4 +713,56 @@ describe("maker shadow advance loop: BBO overlay on unusable live cache", () => 
 
     await mod.stop();
   });
+
+  it("expires a pending order past its fill deadline even when no BBO resolves (dead market)", async () => {
+    // Root cause of the shadow "freeze": time-based expiry was gated behind a
+    // resolvable BBO (`if (!bbo) continue`), so pending orders on dead/churned
+    // markets (no live BBO, snapshot past the 30-min cutoff) lingered forever.
+    // Expiry needs no book — a pending order past its deadline never filled — so
+    // it must still fire when resolveBbo returns null.
+    const bus = createMockBus();
+    const shadow = {
+      ...makeFilledShadow(),
+      stage: "pending" as const,
+      fillKind: null,
+      fillPx: null,
+      filledAt: null,
+      fillDeadline: "2020-01-01T00:00:00.000Z", // long past
+    } as unknown as MakerShadowOrder;
+    const shadowRepo = makeFilledShadowRepo(shadow);
+
+    // No snapshot for this token → resolveBbo returns null (true dead market)
+    const marketSnapshotRepo = { findLatestBboByTokens: vi.fn(() => new Map()) };
+
+    const mod = new AlgoDecisionModule({
+      bus,
+      legStateRepo: makeLegStateRepo(),
+      algoRulesRepo: makeAlgoRulesRepo(),
+      selectedMarketCache: makeSelectedMarketCache(),
+      log: makeLogger(),
+      sweepIntervalMs: 60_000,
+      runtimeMetrics: makeRuntimeMetrics(),
+      makerShadowOrderRepo: shadowRepo,
+      marketSnapshotRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: { ...DEFAULT_EXECUTION_POLICY.makerEntry, mode: "shadow" as const },
+      }),
+    });
+
+    await mod.start();
+
+    // Drive a tick. Token in cache with null bestBid + no snapshot → resolveBbo null.
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(), bestBid: null } as unknown as NormalizedMarket],
+      timestamp: Date.now(),
+    });
+
+    // The pending order must have been expired despite the unresolvable BBO.
+    const updateCalls = (shadowRepo.updateStage as ReturnType<typeof vi.fn>).mock.calls;
+    const expiredCall = updateCalls.find(([, update]) => update?.stage === "expired");
+    expect(expiredCall).toBeDefined();
+
+    await mod.stop();
+  });
 });

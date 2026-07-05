@@ -2635,17 +2635,32 @@ export class AlgoDecisionModule implements RuntimeModule {
     for (const [shadowOrderId, shadow] of this.makerShadowOpen) {
       const tokenStr = String(shadow.tokenId);
       const bbo = resolveBbo(tokenStr);
-      if (!bbo) continue;
 
-      // advanceShadowOrder reads only bestBid/bestAsk from the market argument.
-      // Always overlay the resolved BBO so that a token in cache with null/NaN
-      // bestBid/bestAsk uses the validated snapshot values, not the unusable live ones.
-      // (live ?? stand-in) was wrong: when live IS present but carries null/NaN BBO,
-      // the ?? short-circuits and passes the broken values to fill/harvest/mark checks.
-      const live = this.marketCache.get(tokenStr);
-      const marketForAdvance: NormalizedMarket = live
-        ? { ...live, bestBid: bbo.bestBid, bestAsk: bbo.bestAsk }
-        : ({ bestBid: bbo.bestBid, bestAsk: bbo.bestAsk } as NormalizedMarket);
+      // Resolve the market view fed to advanceShadowOrder:
+      //  • valid BBO (live or snapshot) → full advance: fill / harvest / mark / expire.
+      //    advanceShadowOrder reads only bestBid/bestAsk; overlay the resolved BBO so a
+      //    cache entry with null/NaN BBO uses the validated snapshot values, not the
+      //    unusable live ones. (`live ?? stand-in` was wrong: when live IS present but
+      //    carries null/NaN BBO, the ?? short-circuits and passes the broken values on.)
+      //  • no BBO but the level is pending → a null-book view so the purely time-based
+      //    expiry (now >= fillDeadline) still runs. Fill checks need a book and are
+      //    correct no-ops on a null book. Without this, orders on dead/churned markets
+      //    (no live BBO, snapshot older than the 30-min cutoff) never expire and linger
+      //    in the open set forever.
+      //  • no BBO and the level is filled → skip: marking needs a book, and marking at a
+      //    null price on a transient BBO gap would corrupt the measurement.
+      let marketForAdvance: NormalizedMarket | null;
+      if (bbo) {
+        const live = this.marketCache.get(tokenStr);
+        marketForAdvance = live
+          ? { ...live, bestBid: bbo.bestBid, bestAsk: bbo.bestAsk }
+          : ({ bestBid: bbo.bestBid, bestAsk: bbo.bestAsk } as NormalizedMarket);
+      } else if (shadow.stage === "pending") {
+        marketForAdvance = { bestBid: null, bestAsk: null } as NormalizedMarket;
+      } else {
+        marketForAdvance = null;
+      }
+      if (!marketForAdvance) continue;
 
       const outcome = advanceShadowOrder(shadow, marketForAdvance, nowIso, holdWindowMs);
       if (!outcome.transition) continue;
