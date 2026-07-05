@@ -215,6 +215,105 @@ describe("makerEntry — whitelistConditionIds", () => {
   });
 });
 
+// ──────────────────────────────────────────────────────────────────────────────
+// holdWindowMs
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe("makerEntry — holdWindowMs", () => {
+  it("default holdWindowMs is 10_800_000 (3h)", () => {
+    const result = parseExecutionPolicyJson(null);
+    expect(result.policy.makerEntry.holdWindowMs).toBe(10_800_000);
+  });
+
+  it("accepts a valid holdWindowMs", () => {
+    const result = parseExecutionPolicyJson(
+      JSON.stringify({ makerEntry: { holdWindowMs: 3_600_000 } }),
+    );
+    expect(result.issues).toEqual([]);
+    expect(result.policy.makerEntry.holdWindowMs).toBe(3_600_000);
+  });
+
+  it("clamps holdWindowMs=0 to default", () => {
+    const result = parseExecutionPolicyJson(JSON.stringify({ makerEntry: { holdWindowMs: 0 } }));
+    expect(result.issues.some((i) => i.includes("makerEntry.holdWindowMs"))).toBe(true);
+    expect(result.policy.makerEntry.holdWindowMs).toBe(DEFAULT_MAKER_ENTRY.holdWindowMs);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// maxScaleInLevels
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe("makerEntry — maxScaleInLevels", () => {
+  it("default maxScaleInLevels is 4", () => {
+    const result = parseExecutionPolicyJson(null);
+    expect(result.policy.makerEntry.maxScaleInLevels).toBe(4);
+  });
+
+  it("accepts valid maxScaleInLevels=1 (min bound)", () => {
+    const result = parseExecutionPolicyJson(
+      JSON.stringify({ makerEntry: { maxScaleInLevels: 1 } }),
+    );
+    expect(result.issues).toEqual([]);
+    expect(result.policy.makerEntry.maxScaleInLevels).toBe(1);
+  });
+
+  it("accepts valid maxScaleInLevels=20 (max bound)", () => {
+    const result = parseExecutionPolicyJson(
+      JSON.stringify({ makerEntry: { maxScaleInLevels: 20 } }),
+    );
+    expect(result.issues).toEqual([]);
+    expect(result.policy.makerEntry.maxScaleInLevels).toBe(20);
+  });
+
+  it("clamps maxScaleInLevels=0 to default", () => {
+    const result = parseExecutionPolicyJson(
+      JSON.stringify({ makerEntry: { maxScaleInLevels: 0 } }),
+    );
+    expect(result.issues.some((i) => i.includes("makerEntry.maxScaleInLevels"))).toBe(true);
+    expect(result.policy.makerEntry.maxScaleInLevels).toBe(DEFAULT_MAKER_ENTRY.maxScaleInLevels);
+  });
+
+  it("clamps maxScaleInLevels=21 (above max) to default", () => {
+    const result = parseExecutionPolicyJson(
+      JSON.stringify({ makerEntry: { maxScaleInLevels: 21 } }),
+    );
+    expect(result.issues.some((i) => i.includes("makerEntry.maxScaleInLevels"))).toBe(true);
+    expect(result.policy.makerEntry.maxScaleInLevels).toBe(DEFAULT_MAKER_ENTRY.maxScaleInLevels);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// scaleInStepPct
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe("makerEntry — scaleInStepPct", () => {
+  it("default scaleInStepPct is 0.10", () => {
+    const result = parseExecutionPolicyJson(null);
+    expect(result.policy.makerEntry.scaleInStepPct).toBe(0.1);
+  });
+
+  it("accepts a valid scaleInStepPct", () => {
+    const result = parseExecutionPolicyJson(
+      JSON.stringify({ makerEntry: { scaleInStepPct: 0.15 } }),
+    );
+    expect(result.issues).toEqual([]);
+    expect(result.policy.makerEntry.scaleInStepPct).toBe(0.15);
+  });
+
+  it("clamps scaleInStepPct=0 to default", () => {
+    const result = parseExecutionPolicyJson(JSON.stringify({ makerEntry: { scaleInStepPct: 0 } }));
+    expect(result.issues.some((i) => i.includes("makerEntry.scaleInStepPct"))).toBe(true);
+    expect(result.policy.makerEntry.scaleInStepPct).toBe(DEFAULT_MAKER_ENTRY.scaleInStepPct);
+  });
+
+  it("clamps scaleInStepPct=1 (at max boundary) to default", () => {
+    const result = parseExecutionPolicyJson(JSON.stringify({ makerEntry: { scaleInStepPct: 1 } }));
+    expect(result.issues.some((i) => i.includes("makerEntry.scaleInStepPct"))).toBe(true);
+    expect(result.policy.makerEntry.scaleInStepPct).toBe(DEFAULT_MAKER_ENTRY.scaleInStepPct);
+  });
+});
+
 // ──────��───────────────────────────���────────────────────────────��──────────────
 // Serialize → parse round-trip
 // ────���───────────��──────────────────────────────────��──────────────────────────
@@ -226,14 +325,17 @@ describe("makerEntry — serialize ��� parse round-trip", () => {
       makerEntry: {
         mode: "shadow" as const,
         bidImproveTicks: 2,
-        harvestGainPct: 0.5,
-        fillWaitMs: 600_000,
+        harvestGainPct: 0.2,
+        fillWaitMs: 7_200_000,
         makerMinLiquidity: 7_500,
         makerMinVol24h: 2_000,
         whitelistConditionIds: ["0xabc123", "0xdef456"],
         microMaxOrderUsdc: 25,
         microMaxOpenUsdc: 100,
         collapseFloorPrice: 0.02,
+        holdWindowMs: 10_800_000,
+        maxScaleInLevels: 4,
+        scaleInStepPct: 0.1,
       },
     };
     const json = serializeExecutionPolicy(policy);

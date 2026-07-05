@@ -3,6 +3,7 @@ import type {
   LadderBuilderOutput,
   LadderRung,
   LadderState,
+  MakerEntryPolicy,
   NormalizedMarket,
   Order,
   OrderBookSnapshot,
@@ -123,6 +124,8 @@ export interface ProfileLadderModuleDeps {
   bus: EventBus;
   repository: ProfileLadderRepository;
   policy: () => ExecutionProfilePolicy;
+  // Phase 2: provides harvestGainPct for the config-driven maker first rung.
+  makerEntryPolicy?: () => Pick<MakerEntryPolicy, "harvestGainPct">;
   modeReader?: ProfileLadderModeReader;
   modeCandidateReader?: ProfileLadderModeCandidateReader;
   profileStateReader?: ProfileLadderProfileStateReader;
@@ -709,6 +712,7 @@ export class ProfileLadderModule implements RuntimeModule {
       config: policy,
       previousBand: previous?.band ?? null,
       entryStyle: position.entryStyle ?? null,
+      harvestGainPct: this.makerHarvestGainPct(),
     });
     if (!plan.ok) return null;
     const ladderId =
@@ -1354,6 +1358,8 @@ export class ProfileLadderModule implements RuntimeModule {
         minOrderSize: resolveEffectiveMinOrderSize(market.minOrderSize),
         config: policy,
         previousBand: previous?.band ?? null,
+        entryStyle: position.entryStyle ?? null,
+        harvestGainPct: this.makerHarvestGainPct(),
       });
 
       this.writeCounter("profile_ladder_mode_reader_price_delta_bucket", 1, {
@@ -1989,6 +1995,10 @@ export class ProfileLadderModule implements RuntimeModule {
 
   private policy(): ExecutionProfilePolicy["sellLadder"] {
     return this.deps.policy().sellLadder;
+  }
+
+  private makerHarvestGainPct(): number {
+    return this.deps.makerEntryPolicy?.().harvestGainPct ?? 0.5;
   }
 
   private isBboCooldownActive(tokenId: TokenId): boolean {

@@ -480,4 +480,27 @@ describe("API against real split schemas", () => {
     });
     expect(body.data.policy.repriceOnOutbid).toEqual(DEFAULT_EXECUTION_POLICY.repriceOnOutbid);
   });
+
+  it("PATCH /execution-policy: partial makerEntry patch preserves holdWindowMs, maxScaleInLevels, scaleInStepPct", async () => {
+    // Patch ONLY mode — the three scale-in fields must survive unchanged.
+    const res = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: {
+        makerEntry: { mode: "shadow" },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+
+    const { makerEntry } = body.data.policy as { makerEntry: Record<string, unknown> };
+    expect(makerEntry.mode).toBe("shadow");
+    // Scale-in fields must not be wiped by a partial patch.
+    expect(makerEntry.holdWindowMs).toBe(DEFAULT_EXECUTION_POLICY.makerEntry.holdWindowMs);
+    expect(makerEntry.maxScaleInLevels).toBe(DEFAULT_EXECUTION_POLICY.makerEntry.maxScaleInLevels);
+    expect(makerEntry.scaleInStepPct).toBe(DEFAULT_EXECUTION_POLICY.makerEntry.scaleInStepPct);
+  });
 });

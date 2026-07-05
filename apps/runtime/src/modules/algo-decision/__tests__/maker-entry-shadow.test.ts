@@ -33,8 +33,11 @@ function makePolicy(overrides: Partial<MakerEntryPolicy> = {}): MakerEntryPolicy
     bidImproveTicks: 1,
     harvestGainPct: 0.5,
     fillWaitMs: 300_000,
+    holdWindowMs: 10_800_000,
     makerMinLiquidity: 5_000,
     makerMinVol24h: 1_000,
+    maxScaleInLevels: 4,
+    scaleInStepPct: 0.1,
     whitelistConditionIds: [],
     microMaxOrderUsdc: 5,
     microMaxOpenUsdc: 25,
@@ -88,6 +91,9 @@ function makePendingShadow(overrides: Partial<MakerShadowOrder> = {}): MakerShad
     markPx: null,
     netMark: null,
     updatedAt: "2026-07-04T10:00:00.000Z",
+    ladderId: "abc123",
+    levelIndex: 0,
+    filledAt: null,
     ...overrides,
   };
 }
@@ -293,6 +299,7 @@ describe("advanceShadowOrder — pending", () => {
       shadow,
       makeMarket({ bestBid: 0.25, bestAsk: 0.32 }),
       "2026-07-04T10:01:00.000Z",
+      300_000,
     );
     expect(result.transition).toBe(false);
   });
@@ -304,6 +311,7 @@ describe("advanceShadowOrder — pending", () => {
       shadow,
       makeMarket({ bestBid: 0.28, bestAsk: 0.3 }),
       "2026-07-04T10:01:00.000Z",
+      300_000,
     );
     expect(result.transition).toBe(true);
     if (!result.transition) return;
@@ -319,6 +327,7 @@ describe("advanceShadowOrder — pending", () => {
       shadow,
       makeMarket({ bestBid: 0.31, bestAsk: 0.33 }),
       "2026-07-04T10:01:00.000Z",
+      300_000,
     );
     expect(result.transition).toBe(true);
     if (!result.transition) return;
@@ -335,6 +344,7 @@ describe("advanceShadowOrder — pending", () => {
       shadow,
       makeMarket({ bestBid: 0.32, bestAsk: 0.3 }),
       "2026-07-04T10:01:00.000Z",
+      300_000,
     );
     expect(result.transition).toBe(true);
     if (!result.transition) return;
@@ -347,6 +357,7 @@ describe("advanceShadowOrder — pending", () => {
       shadow,
       makeMarket({ bestBid: 0.2, bestAsk: 0.5 }),
       "2026-07-04T10:05:00.000Z", // exactly at deadline
+      300_000,
     );
     expect(result.transition).toBe(true);
     if (!result.transition) return;
@@ -359,6 +370,7 @@ describe("advanceShadowOrder — pending", () => {
       shadow,
       makeMarket({ bestBid: 0.2, bestAsk: 0.5 }),
       "2026-07-04T10:04:59.999Z", // 1ms before
+      300_000,
     );
     expect(result.transition).toBe(false);
   });
@@ -378,6 +390,7 @@ describe("advanceShadowOrder — filled", () => {
       filledShadow,
       makeMarket({ bestBid: 0.47, bestAsk: 0.5 }),
       "2026-07-04T10:03:00.000Z",
+      300_000,
     );
     expect(result.transition).toBe(true);
     if (!result.transition) return;
@@ -392,6 +405,7 @@ describe("advanceShadowOrder — filled", () => {
       filledShadow,
       makeMarket({ bestBid: 0.25, bestAsk: 0.4 }),
       "2026-07-04T10:05:00.000Z", // at deadline
+      300_000,
     );
     expect(result.transition).toBe(true);
     if (!result.transition) return;
@@ -406,6 +420,7 @@ describe("advanceShadowOrder — filled", () => {
       filledShadow,
       makeMarket({ bestBid: null, bestAsk: null }),
       "2026-07-04T10:05:00.000Z",
+      300_000,
     );
     expect(result.transition).toBe(true);
     if (!result.transition) return;
@@ -419,6 +434,7 @@ describe("advanceShadowOrder — filled", () => {
       filledShadow,
       makeMarket({ bestBid: 0.35, bestAsk: 0.4 }),
       "2026-07-04T10:02:00.000Z",
+      300_000,
     );
     expect(result.transition).toBe(false);
   });

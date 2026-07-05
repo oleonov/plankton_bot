@@ -754,6 +754,10 @@ export type MakerShadowFillKind = "trade_through" | "touch";
  * A hypothetical post-only maker BUY tracked across ticks.
  * Opened when R23 fires on a flat first-entry in the maker universe;
  * advanced as the book evolves. Zero live effect.
+ *
+ * Phase 1 adds scale-in ladder support: multiple levels can be opened for the
+ * same token as the bid dips. All levels in one entry run share the same
+ * `ladderId`; each is individually assigned a `levelIndex`.
  */
 export interface MakerShadowOrder {
   /** Deterministic sha256 prefix of `token_id + posted_at` — distinct per R23 attempt. */
@@ -763,13 +767,23 @@ export interface MakerShadowOrder {
   buyPx: number;
   harvestPx: number;
   postedAt: string; // ISO
-  fillDeadline: string; // ISO — postedAt + fillWaitMs
+  fillDeadline: string; // ISO — postedAt + fillWaitMs (pending expiry clock)
   stage: MakerShadowStage;
   fillKind: MakerShadowFillKind | null;
   fillPx: number | null; // bestAsk or bestBid at fill time
   markPx: number | null; // bestBid at mark time
   netMark: number | null; // markPx / buyPx - 1 (or 1.0 for harvested)
   updatedAt: string; // ISO
+  /** Groups all levels of one entry run. Level 0: ladderId === shadowOrderId. */
+  ladderId: string;
+  /** 0-based position within the ladder. */
+  levelIndex: number;
+  /**
+   * ISO timestamp set at the pending→filled transition. Kept separate from
+   * updatedAt (which is overwritten on later transitions) so the post-fill
+   * hold clock can be anchored to the actual fill time.
+   */
+  filledAt: string | null;
 }
 
 export interface MakerShadowStageUpdate {
@@ -778,6 +792,8 @@ export interface MakerShadowStageUpdate {
   fillPx?: number | null;
   markPx?: number | null;
   netMark?: number | null;
+  /** Set at the pending→filled transition. Required when stage==="filled". */
+  filledAt?: string | null;
   updatedAt: string;
 }
 
@@ -790,6 +806,12 @@ export interface MakerShadowOrderRepository {
 
   /** Return open rows for a specific token. */
   findOpenByToken(tokenId: TokenId): MakerShadowOrder[];
+
+  /**
+   * Return ALL rows for a ladder (open + terminal), sorted by level_index ASC.
+   * Used by the tracker on restart to reconstruct full ladder state.
+   */
+  findLadder(ladderId: string): MakerShadowOrder[];
 
   /** Advance a row to a later stage, recording fill/mark telemetry. */
   updateStage(shadowOrderId: string, update: MakerShadowStageUpdate): void;

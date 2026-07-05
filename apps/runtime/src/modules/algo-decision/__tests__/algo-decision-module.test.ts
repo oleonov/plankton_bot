@@ -7853,6 +7853,7 @@ describe("AlgoDecisionModule", () => {
         upsert: vi.fn(),
         findOpen: vi.fn().mockReturnValue([]),
         findOpenByToken: vi.fn().mockReturnValue([]),
+        findLadder: vi.fn().mockReturnValue([]),
         updateStage: vi.fn(),
         pruneExpired: vi.fn().mockReturnValue(0),
       };

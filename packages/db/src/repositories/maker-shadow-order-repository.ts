@@ -23,6 +23,10 @@ interface MakerShadowOrderRow {
   mark_px: number | null;
   net_mark: number | null;
   updated_at: string;
+  // Phase 1 ladder columns (may be NULL on pre-migration rows until backfill runs)
+  ladder_id: string | null;
+  level_index: number | null;
+  filled_at: string | null;
 }
 
 const OPEN_STAGES_PLACEHOLDER = "('pending','filled')";
@@ -42,6 +46,10 @@ function toModel(row: MakerShadowOrderRow): MakerShadowOrder {
     markPx: row.mark_px,
     netMark: row.net_mark,
     updatedAt: row.updated_at,
+    // Backfill: pre-migration rows have NULL; default to shadow_order_id / 0
+    ladderId: row.ladder_id ?? row.shadow_order_id,
+    levelIndex: row.level_index ?? 0,
+    filledAt: row.filled_at ?? null,
   };
 }
 
@@ -53,8 +61,9 @@ export class SqliteMakerShadowOrderRepository implements MakerShadowOrderReposit
       .prepare(
         `INSERT OR REPLACE INTO maker_shadow_orders
            (shadow_order_id, token_id, condition_id, buy_px, harvest_px,
-            posted_at, fill_deadline, stage, fill_kind, fill_px, mark_px, net_mark, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            posted_at, fill_deadline, stage, fill_kind, fill_px, mark_px, net_mark,
+            updated_at, ladder_id, level_index, filled_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         order.shadowOrderId,
@@ -70,6 +79,9 @@ export class SqliteMakerShadowOrderRepository implements MakerShadowOrderReposit
         order.markPx ?? null,
         order.netMark ?? null,
         order.updatedAt,
+        order.ladderId,
+        order.levelIndex,
+        order.filledAt ?? null,
       );
   }
 
@@ -96,15 +108,27 @@ export class SqliteMakerShadowOrderRepository implements MakerShadowOrderReposit
     return rows.map(toModel);
   }
 
+  findLadder(ladderId: string): MakerShadowOrder[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM maker_shadow_orders
+          WHERE ladder_id = ?
+          ORDER BY level_index ASC`,
+      )
+      .all(ladderId) as MakerShadowOrderRow[];
+    return rows.map(toModel);
+  }
+
   updateStage(shadowOrderId: string, update: MakerShadowStageUpdate): void {
     this.db
       .prepare(
         `UPDATE maker_shadow_orders
-            SET stage = ?,
-                fill_kind = COALESCE(?, fill_kind),
-                fill_px   = COALESCE(?, fill_px),
-                mark_px   = COALESCE(?, mark_px),
-                net_mark  = COALESCE(?, net_mark),
+            SET stage      = ?,
+                fill_kind  = COALESCE(?, fill_kind),
+                fill_px    = COALESCE(?, fill_px),
+                mark_px    = COALESCE(?, mark_px),
+                net_mark   = COALESCE(?, net_mark),
+                filled_at  = COALESCE(?, filled_at),
                 updated_at = ?
           WHERE shadow_order_id = ?`,
       )
@@ -114,6 +138,7 @@ export class SqliteMakerShadowOrderRepository implements MakerShadowOrderReposit
         update.fillPx ?? null,
         update.markPx ?? null,
         update.netMark ?? null,
+        update.filledAt ?? null,
         update.updatedAt,
         shadowOrderId,
       );

@@ -571,17 +571,22 @@ export const DEFAULT_TRACK_A_ADD_THROTTLE_POLICY: TrackAAddThrottlePolicy = {
   enforce: false,
 };
 
-// Maker-entry prototype defaults (Phase 0).
+// Maker-entry prototype defaults (plankton-derived, Phase 0 rev 2).
 // mode="off" + empty whitelist ⇒ zero live-order changes until an operator sets
 // mode=shadow or micro_live with a non-empty whitelist (config-only rollout).
 // collapseFloorPrice defaults to null so the avg-down guard (Phase 4) is a no-op
 // on all existing scale-in paths until an operator explicitly sets a floor.
+// Plankton-derived params (research 2026-07-05):
+//   harvestGainPct 0.20 (+20% median, fifo 168k); fillWaitMs 7_200_000 (2h wait peak);
+//   holdWindowMs 10_800_000 (3h, p50 hold ~2.7h); maxScaleInLevels 4 (median 3/p75 7);
+//   scaleInStepPct 0.10 (≥10% drop to open next level).
 export const DEFAULT_MAKER_ENTRY: MakerEntryPolicy = {
   mode: "off",
   bidImproveTicks: 1,
-  harvestGainPct: 0.5,
-  // 5 minutes — wide enough to avoid premature abandonment on thin markets.
-  fillWaitMs: 300_000,
+  // plankton median harvest gain (+20% from entry)
+  harvestGainPct: 0.2,
+  // 2 hours — plankton wait-peak derived (~2.3h, 6h-capped)
+  fillWaitMs: 7_200_000,
   makerMinLiquidity: 5_000,
   makerMinVol24h: 1_000,
   whitelistConditionIds: [],
@@ -591,6 +596,12 @@ export const DEFAULT_MAKER_ENTRY: MakerEntryPolicy = {
   microMaxOpenUsdc: 50,
   // null = guard off; 0.02 is a representative operator rollout value for Phase 4.
   collapseFloorPrice: null,
+  // 3 hours — plankton post-fill hold horizon (p50 ~2.7h)
+  holdWindowMs: 10_800_000,
+  // median 3 scale-in levels / p75 7; 4 balances coverage vs risk
+  maxScaleInLevels: 4,
+  // open a new scale-in level when the best bid is ≥10% below the last entry price
+  scaleInStepPct: 0.1,
 };
 
 export const DEFAULT_LOSS_EXIT_POLICY: D9LossExitPolicy = {
@@ -941,6 +952,12 @@ const BOUND_MAKER_MICRO_MAX_OPEN_USDC_MIN = 1;
 const BOUND_MAKER_MICRO_MAX_OPEN_USDC_MAX = 100_000;
 const BOUND_MAKER_COLLAPSE_FLOOR_MIN = 0.001;
 const BOUND_MAKER_COLLAPSE_FLOOR_MAX = 0.99;
+const BOUND_MAKER_HOLD_WINDOW_MS_MIN = 1;
+const BOUND_MAKER_HOLD_WINDOW_MS_MAX = 7 * 24 * 60 * 60_000; // 7 days
+const BOUND_MAKER_MAX_SCALE_IN_LEVELS_MIN = 1;
+const BOUND_MAKER_MAX_SCALE_IN_LEVELS_MAX = 20;
+const BOUND_MAKER_SCALE_IN_STEP_PCT_MIN = 0.001;
+const BOUND_MAKER_SCALE_IN_STEP_PCT_MAX = 0.999;
 const MAKER_ENTRY_MODES = ["off", "shadow", "micro_live"] as const;
 
 export interface ParseResult {
@@ -5184,6 +5201,30 @@ function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
     issues,
     "makerEntry.collapseFloorPrice",
   );
+  const holdWindowMs = clampedInt(
+    obj.holdWindowMs,
+    DEFAULT_MAKER_ENTRY.holdWindowMs,
+    BOUND_MAKER_HOLD_WINDOW_MS_MIN,
+    BOUND_MAKER_HOLD_WINDOW_MS_MAX,
+    issues,
+    "makerEntry.holdWindowMs",
+  );
+  const maxScaleInLevels = clampedInt(
+    obj.maxScaleInLevels,
+    DEFAULT_MAKER_ENTRY.maxScaleInLevels,
+    BOUND_MAKER_MAX_SCALE_IN_LEVELS_MIN,
+    BOUND_MAKER_MAX_SCALE_IN_LEVELS_MAX,
+    issues,
+    "makerEntry.maxScaleInLevels",
+  );
+  const scaleInStepPct = clampedNumber(
+    obj.scaleInStepPct,
+    DEFAULT_MAKER_ENTRY.scaleInStepPct,
+    BOUND_MAKER_SCALE_IN_STEP_PCT_MIN,
+    BOUND_MAKER_SCALE_IN_STEP_PCT_MAX,
+    issues,
+    "makerEntry.scaleInStepPct",
+  );
 
   return {
     mode,
@@ -5196,6 +5237,9 @@ function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
     microMaxOrderUsdc,
     microMaxOpenUsdc,
     collapseFloorPrice,
+    holdWindowMs,
+    maxScaleInLevels,
+    scaleInStepPct,
   };
 }
 

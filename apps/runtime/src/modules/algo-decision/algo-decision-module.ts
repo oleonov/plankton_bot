@@ -120,7 +120,11 @@ import {
 } from "./planner-suppression-rollup.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
-import { advanceShadowOrder, computeShadowOrderId } from "./maker-entry-shadow.js";
+import {
+  advanceShadowOrder,
+  computeShadowOrderId,
+  openNextLevelOrder,
+} from "./maker-entry-shadow.js";
 
 // Re-exported for existing consumers; the canonical contract now lives in @krabs/domain.
 export type { S1OwnershipReader };
@@ -788,6 +792,17 @@ function parseLedgerTimestampMs(value: string | null | undefined): number {
   return Date.parse(normalized);
 }
 
+/**
+ * Per-token maker-shadow ladder state, held in memory by the tracker.
+ * `levels` contains ALL levels — open (pending/filled) and terminal
+ * (harvested/marked/expired) — so shouldOpenNextLevel can count correctly
+ * and avoid crossing the maxScaleInLevels cap even across restarts.
+ */
+interface MakerLadderState {
+  ladderId: string;
+  levels: MakerShadowOrder[];
+}
+
 export class AlgoDecisionModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly persistence: DecisionPersistenceBuffer;
@@ -869,9 +884,14 @@ export class AlgoDecisionModule implements RuntimeModule {
   // the per-eval counters are summable runtime_metrics, not in-memory state.
   // See research_plankton/two_lane_entry_shadow_spec_2026-06-30.md.
   private readonly twoLaneShadowDedupe = new Map<string, number>();
-  // Phase 3 — maker-entry shadow tracker. In-memory map of open shadows keyed
-  // by shadowOrderId; hydrated from DB on startup. Gated on mode !== "off".
+  // Phase 3 — maker-entry shadow tracker.
+  // makerShadowOpen: open (pending/filled) levels keyed by shadowOrderId —
+  //   fast iteration for the per-tick advance loop.
+  // makerShadowLadders: per-token ladder state (ALL levels incl. terminal) —
+  //   used to check shouldOpenNextLevel and guard new ladder starts.
+  // Both are hydrated from DB on startup. Gated on mode !== "off".
   private readonly makerShadowOpen = new Map<string, MakerShadowOrder>();
+  private readonly makerShadowLadders = new Map<string, MakerLadderState>(); // keyed by tokenId string
   // ms since epoch of last TTL prune to avoid pruning on every sweep tick
   private makerShadowLastPruneAt = 0;
   private readonly legacyProfileOwnedGuardDedupe = new Map<string, number>();
@@ -1605,7 +1625,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
 
     // Phase 3 — advance all open maker-entry shadows using latest market data.
-    this.advanceMakerShadows(now);
+    this.advanceMakerShadows(now, executionPolicy);
 
     // ADR-022 §D-F — promote the just-completed histogram so healthcheck
     // immediately reflects this sweep, not the previous one.
@@ -2405,20 +2425,39 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   // ─── Phase 3: Maker-entry shadow tracker ────────────────────────────────────
 
-  /** Load open rows from DB into the in-memory map at startup. */
+  /**
+   * Load open rows from DB into the in-memory maps at startup.
+   * For each unique ladderId among open rows, load ALL levels (open + terminal)
+   * so the tracker can reconstruct correct next-index and shouldOpenNextLevel
+   * even when some levels are already in a terminal state.
+   */
   private hydrateMakerShadowOrders(): void {
     const repo = this.deps.makerShadowOrderRepo;
     if (!repo) return;
-    const rows = repo.findOpen();
-    for (const row of rows) {
+
+    const openRows = repo.findOpen();
+    // Group open rows by ladderId to identify active ladders
+    const ladderIds = new Set(openRows.map((r) => r.ladderId));
+
+    for (const ladderId of ladderIds) {
+      const allLevels = repo.findLadder(ladderId);
+      if (allLevels.length === 0) continue;
+      const tokenStr = String(allLevels[0]!.tokenId);
+      this.makerShadowLadders.set(tokenStr, { ladderId, levels: allLevels });
+    }
+    for (const row of openRows) {
       this.makerShadowOpen.set(row.shadowOrderId, row);
     }
-    if (rows.length > 0) {
-      this.log.info({ count: rows.length }, "maker-entry shadow: hydrated open rows");
+
+    if (openRows.length > 0) {
+      this.log.info(
+        { openRows: openRows.length, ladders: ladderIds.size },
+        "maker-entry shadow: hydrated open rows",
+      );
     }
   }
 
-  /** Persist + register a new pending shadow (from the planner's side effect). */
+  /** Persist + register a new pending shadow level 0 (from the planner's R23 side effect). */
   private openMakerShadow(
     sideEffect: Extract<DecisionPlanSideEffect, { kind: "maker_entry_shadow_open" }>,
     executionPolicy: ExecutionPolicy | null,
@@ -2427,16 +2466,16 @@ export class AlgoDecisionModule implements RuntimeModule {
     const repo = this.deps.makerShadowOrderRepo;
     if (!repo) return;
 
+    const tokenStr = String(sideEffect.tokenId);
+    // Skip if the token already has open (pending/filled) levels — levels 1..N
+    // are opened by the scale-in path in advanceMakerShadows, not by R23.
+    if (this.hasOpenLevelsForToken(tokenStr)) return;
+
     const fillWaitMs = executionPolicy?.makerEntry.fillWaitMs ?? 300_000;
     const fillDeadlineMs = Date.parse(sideEffect.timestamp) + fillWaitMs;
-    const shadowOrderId = computeShadowOrderId(String(sideEffect.tokenId), sideEffect.timestamp);
-    // Skip if a row with the same deterministic ID already exists (idempotent)
+    const shadowOrderId = computeShadowOrderId(tokenStr, sideEffect.timestamp);
+    // Idempotent: skip if the deterministic ID already exists in the open set
     if (this.makerShadowOpen.has(shadowOrderId)) return;
-    // Skip if a non-terminal (pending or filled) shadow already exists for this token
-    const tokenStr = String(sideEffect.tokenId);
-    for (const s of this.makerShadowOpen.values()) {
-      if (String(s.tokenId) === tokenStr) return;
-    }
 
     const order: MakerShadowOrder = {
       shadowOrderId,
@@ -2451,6 +2490,9 @@ export class AlgoDecisionModule implements RuntimeModule {
       fillPx: null,
       markPx: null,
       netMark: null,
+      ladderId: shadowOrderId, // level 0: ladderId === shadowOrderId
+      levelIndex: 0,
+      filledAt: null,
       updatedAt: sideEffect.timestamp,
     };
     try {
@@ -2460,6 +2502,8 @@ export class AlgoDecisionModule implements RuntimeModule {
       return;
     }
     this.makerShadowOpen.set(shadowOrderId, order);
+    // Start a new per-token ladder; overwrite any fully-terminal prior ladder.
+    this.makerShadowLadders.set(tokenStr, { ladderId: shadowOrderId, levels: [order] });
 
     this.deps.runtimeMetrics?.writeCounter("maker_entry_shadow_opened_total", 1);
     this.persistence.enqueueRiskEvent({
@@ -2467,7 +2511,9 @@ export class AlgoDecisionModule implements RuntimeModule {
       payload: {
         transition: "opened",
         shadowOrderId,
-        tokenId: String(sideEffect.tokenId),
+        ladderId: shadowOrderId,
+        levelIndex: 0,
+        tokenId: tokenStr,
         conditionId: sideEffect.conditionId,
         buyPx: sideEffect.buyPx,
         harvestPx: sideEffect.harvestPx,
@@ -2479,21 +2525,36 @@ export class AlgoDecisionModule implements RuntimeModule {
     });
   }
 
+  /** True when the token has at least one non-terminal (pending or filled) level. */
+  private hasOpenLevelsForToken(tokenStr: string): boolean {
+    for (const s of this.makerShadowOpen.values()) {
+      if (String(s.tokenId) === tokenStr) return true;
+    }
+    return false;
+  }
+
   /**
-   * Advance all open shadow orders using the latest market data from the cache.
+   * Advance all open shadow orders using the latest market data from the cache,
+   * then check whether any active ladder should open a new scale-in level.
    * Called once per evaluation tick (after plans are processed).
+   *
+   * `executionPolicy` — hot-reloaded snapshot; gates mode and supplies policy
+   * values (holdWindowMs, fillWaitMs, bidImproveTicks, scaleInStepPct, ...).
    */
-  private advanceMakerShadows(now: number): void {
-    if (this.makerShadowOpen.size === 0) return;
+  private advanceMakerShadows(now: number, executionPolicy: ExecutionPolicy | null): void {
+    if (this.makerShadowOpen.size === 0 && this.makerShadowLadders.size === 0) return;
     const repo = this.deps.makerShadowOrderRepo;
     if (!repo) return;
 
     const nowIso = new Date(now).toISOString();
+    const holdWindowMs = executionPolicy?.makerEntry.holdWindowMs ?? 10_800_000;
+
+    // ── Advance existing open levels ──────────────────────────────────────────
     for (const [shadowOrderId, shadow] of this.makerShadowOpen) {
       const market = this.marketCache.get(String(shadow.tokenId)) ?? null;
       if (!market) continue;
 
-      const outcome = advanceShadowOrder(shadow, market, nowIso);
+      const outcome = advanceShadowOrder(shadow, market, nowIso, holdWindowMs);
       if (!outcome.transition) continue;
 
       const updated: MakerShadowOrder = { ...shadow, ...outcome.update };
@@ -2504,7 +2565,14 @@ export class AlgoDecisionModule implements RuntimeModule {
         continue;
       }
 
-      // Remove from open set if terminal
+      // Keep the ladder state in sync with the updated level
+      const tokenStr = String(shadow.tokenId);
+      const ladder = this.makerShadowLadders.get(tokenStr);
+      if (ladder) {
+        ladder.levels = ladder.levels.map((l) => (l.shadowOrderId === shadowOrderId ? updated : l));
+      }
+
+      // Remove from open set when terminal; keep for filled (harvest/mark next tick)
       if (
         updated.stage === "harvested" ||
         updated.stage === "marked" ||
@@ -2512,11 +2580,79 @@ export class AlgoDecisionModule implements RuntimeModule {
       ) {
         this.makerShadowOpen.delete(shadowOrderId);
       } else {
-        // filled — keep in memory for harvest/mark advance next tick
         this.makerShadowOpen.set(shadowOrderId, updated);
       }
 
       this.emitMakerShadowTransition(updated, outcome.update.stage);
+    }
+
+    // ── Scale-in: open next levels where conditions are met ───────────────────
+    // Gated on mode !== "off" so a hot-reload to off immediately stops new levels.
+    if (executionPolicy?.makerEntry.mode === "off") return;
+    if (!executionPolicy) return;
+
+    for (const [tokenStr, ladderState] of this.makerShadowLadders) {
+      // Skip if no open levels — the ladder is fully terminal; a new R23 will
+      // start a fresh ladder.
+      const hasOpen = ladderState.levels.some((l) => l.stage === "pending" || l.stage === "filled");
+      if (!hasOpen) continue;
+
+      const market = this.marketCache.get(tokenStr) ?? null;
+      if (!market) continue;
+
+      const book = {
+        bestBid: market.bestBid ?? 0,
+        bestAsk: market.bestAsk ?? 0,
+        tickSize: market.tickSize,
+      };
+      const newLevel = openNextLevelOrder(
+        ladderState,
+        tokenStr,
+        market.conditionId,
+        book,
+        executionPolicy.makerEntry,
+        nowIso,
+      );
+      if (!newLevel) continue;
+      // Idempotent: skip if already in-flight (same deterministic ID)
+      if (this.makerShadowOpen.has(newLevel.shadowOrderId)) continue;
+
+      try {
+        repo.upsert(newLevel);
+      } catch (err) {
+        this.log.warn(
+          { err, shadowOrderId: newLevel.shadowOrderId },
+          "maker-entry shadow: failed to persist scale-in level",
+        );
+        continue;
+      }
+
+      this.makerShadowOpen.set(newLevel.shadowOrderId, newLevel);
+      ladderState.levels.push(newLevel);
+
+      this.deps.runtimeMetrics?.writeCounter("maker_entry_shadow_opened_total", 1);
+      // Depth-tagged counter (level_index ≥ 1): lets the read-back chart scale-in
+      // depth distribution without querying the full maker_shadow_orders table.
+      this.deps.runtimeMetrics?.writeCounter(
+        "maker_entry_shadow_level_opened_total",
+        1,
+        JSON.stringify({ level_index: newLevel.levelIndex }),
+      );
+      this.persistence.enqueueRiskEvent({
+        eventType: "maker_entry_shadow",
+        payload: {
+          transition: "opened",
+          shadowOrderId: newLevel.shadowOrderId,
+          ladderId: ladderState.ladderId,
+          levelIndex: newLevel.levelIndex,
+          tokenId: tokenStr,
+          conditionId: market.conditionId,
+          buyPx: newLevel.buyPx,
+          harvestPx: newLevel.harvestPx,
+          postedAt: nowIso,
+          fillDeadline: newLevel.fillDeadline,
+        },
+      });
     }
   }
 

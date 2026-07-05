@@ -1240,4 +1240,151 @@ describe("control-db migration infrastructure", () => {
     expect(JSON.parse(raw.json).exitPricingMode).toBe("bid-anchored");
     expect(after.version).toBe(before.version);
   });
+
+  it("migration 067 upgrades old-default off/shadow row and bumps version", () => {
+    const dbPath = path.join(tmpDir, "control-maker067-upgrade.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    // Revert to pre-067 state: old defaults + remove new fields
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_remove(
+              json_set(
+                execution_policy_json,
+                '$.makerEntry.harvestGainPct', 0.5,
+                '$.makerEntry.fillWaitMs', 300000
+              ),
+              '$.makerEntry.holdWindowMs',
+              '$.makerEntry.maxScaleInLevels',
+              '$.makerEntry.scaleInStepPct'
+            )
+          WHERE profile_id = 'live-lite'`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("067_maker_scalein_policy.sql");
+    const before = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const after = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    const maker = JSON.parse(raw.json).makerEntry;
+
+    expect(maker.harvestGainPct).toBe(0.2);
+    expect(maker.fillWaitMs).toBe(7_200_000);
+    expect(maker.holdWindowMs).toBe(10_800_000);
+    expect(maker.maxScaleInLevels).toBe(4);
+    expect(maker.scaleInStepPct).toBe(0.1);
+    expect(after.version).toBeGreaterThan(before.version);
+  });
+
+  it("migration 067 does NOT clobber an operator-customized harvestGainPct", () => {
+    const dbPath = path.join(tmpDir, "control-maker067-preserve-custom.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    // Operator set harvestGainPct to 0.35 (not the old default 0.5)
+    // Also remove new fields + set old fillWaitMs default so migration runs on this row
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_remove(
+              json_set(
+                execution_policy_json,
+                '$.makerEntry.harvestGainPct', 0.35,
+                '$.makerEntry.fillWaitMs', 300000
+              ),
+              '$.makerEntry.holdWindowMs',
+              '$.makerEntry.maxScaleInLevels',
+              '$.makerEntry.scaleInStepPct'
+            )
+          WHERE profile_id = 'live-lite'`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("067_maker_scalein_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const maker = JSON.parse(raw.json).makerEntry;
+
+    // Operator value preserved
+    expect(maker.harvestGainPct).toBe(0.35);
+    // fillWaitMs was old default — should be upgraded
+    expect(maker.fillWaitMs).toBe(7_200_000);
+    // New fields added
+    expect(maker.holdWindowMs).toBe(10_800_000);
+    expect(maker.maxScaleInLevels).toBe(4);
+    expect(maker.scaleInStepPct).toBe(0.1);
+  });
+
+  it("migration 067 does NOT touch a micro_live+non-empty-whitelist row", () => {
+    const dbPath = path.join(tmpDir, "control-maker067-guard-live-active.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    // Put ALL profiles back to pre-067 old defaults (so migration targets them all),
+    // but make live-lite micro_live+non-empty-whitelist (the guard case).
+    // paper and simulation get old defaults → will be upgraded → version bumps.
+    // live-lite gets guarded → its harvestGainPct stays 0.5.
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_remove(
+              json_set(
+                execution_policy_json,
+                '$.makerEntry.harvestGainPct', 0.5,
+                '$.makerEntry.fillWaitMs', 300000
+              ),
+              '$.makerEntry.holdWindowMs',
+              '$.makerEntry.maxScaleInLevels',
+              '$.makerEntry.scaleInStepPct'
+            )`,
+      )
+      .run();
+    // Promote live-lite to the guarded state
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.makerEntry.mode', 'micro_live',
+              '$.makerEntry.whitelistConditionIds', json('["0xdeadbeef"]')
+            )
+          WHERE profile_id = 'live-lite'`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("067_maker_scalein_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const maker = JSON.parse(raw.json).makerEntry;
+
+    // Guard fired — live-lite's makerEntry fields were NOT updated
+    expect(maker.mode).toBe("micro_live");
+    expect(maker.harvestGainPct).toBe(0.5);
+    expect(maker.fillWaitMs).toBe(300000);
+    expect(maker.holdWindowMs).toBeUndefined();
+    expect(maker.maxScaleInLevels).toBeUndefined();
+    expect(maker.scaleInStepPct).toBeUndefined();
+  });
 });

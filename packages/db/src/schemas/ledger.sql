@@ -714,7 +714,7 @@ CREATE INDEX IF NOT EXISTS idx_leg_state_transitions_created_at
   ON leg_state_transitions(created_at);
 
 -- ═══════════ MAKER SHADOW ORDERS ════════════
--- From migration 083_maker_shadow_orders.sql
+-- From migrations 083_maker_shadow_orders.sql + 084_maker_shadow_ladder.sql
 
 CREATE TABLE IF NOT EXISTS maker_shadow_orders (
   shadow_order_id  TEXT PRIMARY KEY,
@@ -731,8 +731,15 @@ CREATE TABLE IF NOT EXISTS maker_shadow_orders (
   fill_px          REAL,
   mark_px          REAL,
   net_mark         REAL,
-  updated_at       TEXT NOT NULL
+  updated_at       TEXT NOT NULL,
+  -- Scale-in ladder columns (migration 084)
+  ladder_id        TEXT,          -- groups all levels of one entry run; level 0: ladder_id = shadow_order_id
+  level_index      INTEGER,       -- 0-based position within the ladder
+  filled_at        TEXT           -- ISO timestamp set at pending→filled; distinct from updated_at
 );
 
 CREATE INDEX IF NOT EXISTS idx_maker_shadow_orders_stage_token
   ON maker_shadow_orders (stage, token_id);
+
+CREATE INDEX IF NOT EXISTS idx_maker_shadow_orders_ladder
+  ON maker_shadow_orders (ladder_id, level_index);

@@ -444,6 +444,70 @@ describe("computeProfileLadder positive floor (GAP-2)", () => {
         expect(result.rungs[0]?.price).toBe(expected);
       },
     );
+
+    // Phase 2: config-driven harvestGainPct tests
+    it("maker first rung at harvestGainPct=0.20 → ceilToTick(avgEntry × 1.20, tick)", () => {
+      const avgEntryPrice = 0.03;
+      const harvestGainPct = 0.2;
+      const expectedPrice = ceilToTick(avgEntryPrice * (1 + harvestGainPct), 0.001); // 0.036
+      const expectedMultiplier = 1 + harvestGainPct; // 1.2
+
+      const result = computeProfileLadder(
+        input({
+          avgEntryPrice,
+          costBasisUsd: 25,
+          config: cheapConfig,
+          entryStyle: "maker",
+          harvestGainPct,
+        }),
+      );
+
+      expect(result).toMatchObject({ ok: true, band: "cheap" });
+      if (!result.ok) throw new Error("expected ok ladder");
+      expect(result.rungs[0]?.price).toBe(expectedPrice);
+      expect(result.rungs[0]?.multiplier).toBe(expectedMultiplier);
+    });
+
+    it("maker first rung at harvestGainPct=0.50 (explicit) matches absent fallback", () => {
+      const avgEntryPrice = 0.03;
+      const explicit = computeProfileLadder(
+        input({
+          avgEntryPrice,
+          costBasisUsd: 25,
+          config: cheapConfig,
+          entryStyle: "maker",
+          harvestGainPct: 0.5,
+        }),
+      );
+      const fallback = computeProfileLadder(
+        input({ avgEntryPrice, costBasisUsd: 25, config: cheapConfig, entryStyle: "maker" }),
+      );
+
+      if (!explicit.ok || !fallback.ok) throw new Error("expected ok ladders");
+      expect(explicit.rungs[0]?.price).toBe(fallback.rungs[0]?.price);
+      expect(explicit.rungs[0]?.multiplier).toBe(fallback.rungs[0]?.multiplier);
+      expect(explicit.rungs[0]?.price).toBe(ceilToTick(avgEntryPrice * 1.5, 0.001)); // 0.045
+    });
+
+    it("harvestGainPct only affects maker rung 0; subsequent rungs are byte-identical", () => {
+      const base = input({
+        avgEntryPrice: 0.03,
+        costBasisUsd: 25,
+        config: cheapConfig,
+        entryStyle: "maker",
+      });
+      const with020 = computeProfileLadder({ ...base, harvestGainPct: 0.2 });
+      const with050 = computeProfileLadder({ ...base, harvestGainPct: 0.5 });
+
+      if (!with020.ok || !with050.ok) throw new Error("expected ok ladders");
+      // Rung 0 must differ
+      expect(with020.rungs[0]?.price).not.toBe(with050.rungs[0]?.price);
+      // Rungs 1+ must be byte-identical
+      const tail020 = with020.rungs.slice(1);
+      const tail050 = with050.rungs.slice(1);
+      expect(tail020.map((r) => r.price)).toEqual(tail050.map((r) => r.price));
+      expect(tail020.map((r) => r.multiplier)).toEqual(tail050.map((r) => r.multiplier));
+    });
   });
 });
 

@@ -24,8 +24,9 @@ afterEach(() => {
 });
 
 function makeOrder(overrides: Partial<MakerShadowOrder> = {}): MakerShadowOrder {
+  const shadowOrderId = overrides.shadowOrderId ?? "abc123def456abc123def456abc123de";
   return {
-    shadowOrderId: "abc123def456abc123def456abc123de",
+    shadowOrderId,
     tokenId: createTokenId("tok-1"),
     conditionId: "cond-1",
     buyPx: 0.31,
@@ -38,6 +39,10 @@ function makeOrder(overrides: Partial<MakerShadowOrder> = {}): MakerShadowOrder 
     markPx: null,
     netMark: null,
     updatedAt: "2026-07-04T10:00:00.000Z",
+    // Phase 1 ladder fields
+    ladderId: shadowOrderId,
+    levelIndex: 0,
+    filledAt: null,
     ...overrides,
   };
 }

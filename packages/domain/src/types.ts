@@ -1159,6 +1159,8 @@ export interface LadderBuilderInput {
   previousBand: ProfileLadderBand | null;
   // Phase 6: maker-tagged positions use a +50% first rung; non-maker/null is byte-identical.
   entryStyle?: "probe" | "maker" | null;
+  // Phase 2: config-driven harvest gain for the maker first rung. Absent → +50% fallback.
+  harvestGainPct?: number;
 }
 
 export type LadderBuilderOutput =
@@ -1957,6 +1959,23 @@ export interface MakerEntryPolicy {
    * are byte-identical regardless). Set by operator after reviewing Phase 4.
    */
   collapseFloorPrice: number | null;
+  /**
+   * How long a filled shadow position stays open for harvesting before being
+   * marked, in ms. Separated from fillWaitMs so the fill clock and the hold
+   * clock are independent. (e.g. 10_800_000 = 3 h, plankton p50 hold ~2.7 h)
+   */
+  holdWindowMs: number;
+  /**
+   * Maximum number of scale-in levels per ladder (level 0 is the initial entry).
+   * Bounds: [1, 20].
+   */
+  maxScaleInLevels: number;
+  /**
+   * Minimum fractional drop below the last entry price required to open the next
+   * scale-in level. e.g. 0.10 = best bid must be ≥10% below the prior entry.
+   * Bounds: (0, 1) exclusive.
+   */
+  scaleInStepPct: number;
 }
 
 export interface ProfileSummary {

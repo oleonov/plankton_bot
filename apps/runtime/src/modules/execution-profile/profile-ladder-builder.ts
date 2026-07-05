@@ -36,16 +36,17 @@ export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOu
   const activeRungCount = resolveActiveRungCount(input, band);
   const sizing = normalizeActiveSizing(bandConfig.sizingVector, activeRungCount);
   const modeAdjustment = input.config.modeAdjustments[input.mode];
+  // Phase 2: config-driven harvest multiplier; absent harvestGainPct → +50% fallback (0.5).
+  const harvestMultiplier = 1 + (input.harvestGainPct ?? 0.5);
   const initialRungs = sizing.map((sizingFraction, index): LadderRung => {
     const bandMultiplier = bandConfig.multipliers[index]!;
-    // Phase 6: maker-tagged positions get a fixed +50% first rung so the harvest target
-    // is always avgEntry × 1.5. Subsequent rungs and all non-maker positions keep the
-    // band multipliers byte-identical.
-    const multiplier = input.entryStyle === "maker" && index === 0 ? 1.5 : bandMultiplier;
-    const rawPrice =
-      input.entryStyle === "maker" && index === 0
-        ? ceilToTick(input.avgEntryPrice * 1.5, input.tickSize)
-        : ceilToTick(input.avgEntryPrice * bandMultiplier * modeAdjustment, input.tickSize);
+    // Phase 6/2: maker first rung uses the config-driven harvest multiplier.
+    // Subsequent rungs and all non-maker positions keep band multipliers byte-identical.
+    const isMakerFirstRung = input.entryStyle === "maker" && index === 0;
+    const multiplier = isMakerFirstRung ? harvestMultiplier : bandMultiplier;
+    const rawPrice = isMakerFirstRung
+      ? ceilToTick(input.avgEntryPrice * harvestMultiplier, input.tickSize)
+      : ceilToTick(input.avgEntryPrice * bandMultiplier * modeAdjustment, input.tickSize);
     const { positiveFloorPrice } = resolvePositiveSellFloor(input.avgEntryPrice, input.tickSize);
     const price = Math.max(rawPrice, positiveFloorPrice);
     const sizeShares = roundQuantity(input.positionSizeShares * sizingFraction);

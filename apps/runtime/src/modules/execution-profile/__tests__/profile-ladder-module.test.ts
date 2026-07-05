@@ -495,6 +495,7 @@ function setup(
     onPolicyReload?: (handler: () => void) => () => void;
     bookCache?: ProfileLadderBookCache;
     runtimeMode?: "simulation" | "paper" | "live-lite";
+    makerEntryPolicy?: () => { harvestGainPct: number };
     now?: () => number;
   } = {},
 ) {
@@ -3597,6 +3598,36 @@ describe("ProfileLadderModule", () => {
       modeStatus: "confirmed",
       modeConfidence: "low",
     });
+  });
+
+  // Phase 2: second call site (dark-compare candidate) must also receive entryStyle + harvestGainPct.
+  // Force local mode=flat (via modeReader) and candidate mode=flat so non-maker rungs 1–3 are
+  // identical in both plans. Only rung 0 is controlled by entryStyle+harvestGainPct:
+  //   WITH fix: candidate rung0 = ceilToTick(0.1 * 1.20, 0.001) = 0.12  → delta≡0
+  //   WITHOUT fix: candidate rung0 = ceilToTick(0.1 * 1.1, 0.001) = 0.11 → delta≈-8% (different bucket)
+  it("dark-compare candidate plan uses maker entryStyle + config harvestGainPct at second call site", async () => {
+    const ctx = setup(darkComparePolicy(), {
+      modeReader: { getMode: () => "flat" },
+      modeCandidateReader: {
+        getCandidate: () => modeCandidate({ sourceMode: "PASSIVE", mappedMode: "flat" }),
+      },
+      makerEntryPolicy: () => ({ harvestGainPct: 0.2 }),
+    });
+
+    await ctx.module.placeLadder(
+      position({ entryStyle: "maker" }),
+      market({ bestBid: 0.09, bestAsk: 0.2, midPrice: 0.145 }),
+    );
+
+    // Placed order is rung 0 of the local plan: 0.1 * 1.20 (maker, flat mode)
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]?.price).toBe(0.12);
+    // Both plans are flat+maker → all rungs identical → zero delta
+    const deltaBuckets = counterLabels(
+      ctx.counters,
+      "profile_ladder_mode_reader_price_delta_bucket",
+    );
+    expect(deltaBuckets[0]).toMatchObject({ deltaBucket: "minus_2_to_plus_2pct" });
   });
 
   it("passes UP mode from the mode reader into LadderBuilder", async () => {

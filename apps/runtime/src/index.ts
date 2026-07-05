@@ -1328,6 +1328,7 @@ async function main(): Promise<void> {
     bus,
     repository: profileLadderRepo,
     policy: () => currentExecutionPolicy().executionProfile,
+    makerEntryPolicy: () => currentExecutionPolicy().makerEntry,
     modeCandidateReader: profileLadderModeCandidateReader,
     profileStateReader: {
       getProfileState: (tokenId) => executionProfileStateRepo.getState(tokenId)?.state ?? null,
