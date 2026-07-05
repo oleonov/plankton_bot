@@ -571,6 +571,20 @@ export interface AlgoDecisionModuleDeps {
    * Optional: when absent the tracker is a no-op (mode gating also applies).
    */
   makerShadowOrderRepo?: MakerShadowOrderRepository | undefined;
+  /**
+   * BBO snapshot fallback for `advanceMakerShadows`. Tokens evicted from the
+   * in-memory `marketCache` (churned by TrackedMarketsChanged) have no live BBO.
+   * When provided, the scale-in and advance loops do ONE batched lookup per tick
+   * against the last-30-min snapshot table so churned tokens can still trigger.
+   * Optional: when absent, the existing live-cache-only behaviour is preserved.
+   */
+  marketSnapshotRepo?:
+    | {
+        findLatestBboByTokens(
+          tokenIds: readonly TokenId[],
+        ): Map<string, { bestBid: number | null; bestAsk: number | null; tickSize: number | null }>;
+      }
+    | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -2549,12 +2563,91 @@ export class AlgoDecisionModule implements RuntimeModule {
     const nowIso = new Date(now).toISOString();
     const holdWindowMs = executionPolicy?.makerEntry.holdWindowMs ?? 10_800_000;
 
+    // ── BBO fallback: snapshot lookup for tokens with absent or unusable live BBO ──
+    // Tokens churned out of the WS subscription (TrackedMarketsChanged.removedTokenIds)
+    // have their marketCache entry deleted. Additionally, a token may be in the cache
+    // but with null/NaN/∞ bestBid or bestAsk (e.g. a stale pricing tick before the
+    // first real update). Both cases are captured here so the snapshot fallback
+    // covers the real failure mode, not just the cache-miss case.
+    // ONE batched DB lookup is done per tick; live cache is always preferred when valid.
+    const isLiveBboUsable = (tokenStr: string): boolean => {
+      const live = this.marketCache.get(tokenStr);
+      if (!live) return false;
+      const bid = live.bestBid;
+      const ask = live.bestAsk;
+      return (
+        typeof bid === "number" &&
+        Number.isFinite(bid) &&
+        bid > 0 &&
+        typeof ask === "number" &&
+        Number.isFinite(ask) &&
+        ask > bid
+      );
+    };
+    const missingTokenIds: TokenId[] = [];
+    for (const [, shadow] of this.makerShadowOpen) {
+      const tokenStr = String(shadow.tokenId);
+      if (!isLiveBboUsable(tokenStr)) missingTokenIds.push(shadow.tokenId);
+    }
+    for (const tokenStr of this.makerShadowLadders.keys()) {
+      if (!isLiveBboUsable(tokenStr)) missingTokenIds.push(tokenStr as TokenId);
+    }
+    type SnapshotBboEntry = {
+      bestBid: number | null;
+      bestAsk: number | null;
+      tickSize: number | null;
+    };
+    const snapshotBbo: Map<string, SnapshotBboEntry> = new Map<string, SnapshotBboEntry>();
+    if (missingTokenIds.length > 0 && this.deps.marketSnapshotRepo) {
+      const fetched = this.deps.marketSnapshotRepo.findLatestBboByTokens(missingTokenIds);
+      for (const [k, v] of fetched) snapshotBbo.set(k, v);
+    }
+
+    /**
+     * Resolve a valid BBO for a token: prefer live marketCache (when valid),
+     * fall back to snapshot. A BBO is valid only when bestBid and bestAsk are
+     * both finite, bestBid > 0, and bestAsk > bestBid (non-crossed book).
+     * NaN or ±Infinity values are treated as unusable to prevent NaN marks.
+     */
+    const resolveBbo = (tokenStr: string): { bestBid: number; bestAsk: number } | null => {
+      // Try live cache first
+      if (isLiveBboUsable(tokenStr)) {
+        const live = this.marketCache.get(tokenStr)!;
+        return { bestBid: live.bestBid as number, bestAsk: live.bestAsk as number };
+      }
+      // Fall back to snapshot BBO
+      const snap = snapshotBbo.get(tokenStr);
+      if (!snap) return null;
+      const { bestBid, bestAsk } = snap;
+      if (
+        typeof bestBid !== "number" ||
+        !Number.isFinite(bestBid) ||
+        bestBid <= 0 ||
+        typeof bestAsk !== "number" ||
+        !Number.isFinite(bestAsk) ||
+        bestAsk <= bestBid
+      )
+        return null;
+      return { bestBid, bestAsk };
+    };
+
     // ── Advance existing open levels ──────────────────────────────────────────
     for (const [shadowOrderId, shadow] of this.makerShadowOpen) {
-      const market = this.marketCache.get(String(shadow.tokenId)) ?? null;
-      if (!market) continue;
+      const tokenStr = String(shadow.tokenId);
+      const bbo = resolveBbo(tokenStr);
+      if (!bbo) continue;
 
-      const outcome = advanceShadowOrder(shadow, market, nowIso, holdWindowMs);
+      // advanceShadowOrder reads only bestBid/bestAsk from the market argument.
+      // Always overlay the resolved BBO so that a token in cache with null/NaN
+      // bestBid/bestAsk uses the validated snapshot values, not the unusable live ones.
+      // (live ?? stand-in) was wrong: when live IS present but carries null/NaN BBO,
+      // the ?? short-circuits and passes the broken values to fill/harvest/mark checks.
+      const live = this.marketCache.get(tokenStr);
+      const marketForAdvance: NormalizedMarket = live
+        ? { ...live, bestBid: bbo.bestBid, bestAsk: bbo.bestAsk }
+        : ({ bestBid: bbo.bestBid, bestAsk: bbo.bestAsk } as NormalizedMarket);
+
+      const outcome = advanceShadowOrder(shadow, marketForAdvance, nowIso, holdWindowMs);
       if (!outcome.transition) continue;
 
       const updated: MakerShadowOrder = { ...shadow, ...outcome.update };
@@ -2566,7 +2659,6 @@ export class AlgoDecisionModule implements RuntimeModule {
       }
 
       // Keep the ladder state in sync with the updated level
-      const tokenStr = String(shadow.tokenId);
       const ladder = this.makerShadowLadders.get(tokenStr);
       if (ladder) {
         ladder.levels = ladder.levels.map((l) => (l.shadowOrderId === shadowOrderId ? updated : l));
@@ -2597,18 +2689,28 @@ export class AlgoDecisionModule implements RuntimeModule {
       const hasOpen = ladderState.levels.some((l) => l.stage === "pending" || l.stage === "filled");
       if (!hasOpen) continue;
 
-      const market = this.marketCache.get(tokenStr) ?? null;
-      if (!market) continue;
+      const bbo = resolveBbo(tokenStr);
+      if (!bbo) continue;
+
+      // conditionId: from live market if present, else from the first ladder level
+      // (always stored on MakerShadowOrder). tickSize: from live market when present,
+      // then from the snapshot's markets JOIN (which returns the token's real tick), then
+      // last-resort default 0.01 (standard Polymarket tick for binary markets).
+      // Using the real tick is critical: maker tokens may have tick=0.001, and a wrong
+      // tick shifts buyPx computation, preventing valid scale-in entries from opening.
+      const live = this.marketCache.get(tokenStr);
+      const conditionId = live?.conditionId ?? ladderState.levels[0]?.conditionId ?? "";
+      const tickSize = live?.tickSize ?? snapshotBbo.get(tokenStr)?.tickSize ?? 0.01;
 
       const book = {
-        bestBid: market.bestBid ?? 0,
-        bestAsk: market.bestAsk ?? 0,
-        tickSize: market.tickSize,
+        bestBid: bbo.bestBid,
+        bestAsk: bbo.bestAsk,
+        tickSize,
       };
       const newLevel = openNextLevelOrder(
         ladderState,
         tokenStr,
-        market.conditionId,
+        conditionId,
         book,
         executionPolicy.makerEntry,
         nowIso,
@@ -2646,7 +2748,7 @@ export class AlgoDecisionModule implements RuntimeModule {
           ladderId: ladderState.ladderId,
           levelIndex: newLevel.levelIndex,
           tokenId: tokenStr,
-          conditionId: market.conditionId,
+          conditionId,
           buyPx: newLevel.buyPx,
           harvestPx: newLevel.harvestPx,
           postedAt: nowIso,

@@ -287,3 +287,430 @@ describe("maker shadow scale-in metrics", () => {
     await mod.stop();
   });
 });
+
+// ─── BBO snapshot fallback tests ─────────────────────────────────────────────
+
+describe("maker shadow scale-in: BBO snapshot fallback", () => {
+  /**
+   * When a token is evicted from marketCache (TrackedMarketsChanged removes it),
+   * advanceMakerShadows must fall back to the snapshot repo for BBO data.
+   * If the snapshot shows bestBid=0.43 (≥10% below level-0 buyPx=0.50),
+   * scale-in should open level 1.
+   */
+  it("opens scale-in level 1 using snapshot BBO when token is absent from marketCache", async () => {
+    const bus = createMockBus();
+    const runtimeMetrics = makeRuntimeMetrics();
+    const level0 = makeLevel0();
+    const shadowRepo = makeShadowRepo(level0);
+
+    // Snapshot repo returns the BBO that qualifies for scale-in:
+    // bestBid=0.43 → buyPx = floor(0.43+0.01, 0.01) = 0.44 ≤ 0.45 (= 0.50×0.9)
+    const snapshotBbo = new Map([
+      [String(TOKEN_ID), { bestBid: 0.43, bestAsk: 0.55, tickSize: 0.01 }],
+    ]);
+    const marketSnapshotRepo = {
+      findLatestBboByTokens: vi.fn(() => snapshotBbo),
+    };
+
+    const mod = new AlgoDecisionModule({
+      bus,
+      legStateRepo: makeLegStateRepo(),
+      algoRulesRepo: makeAlgoRulesRepo(),
+      selectedMarketCache: makeSelectedMarketCache(),
+      log: makeLogger(),
+      sweepIntervalMs: 60_000,
+      runtimeMetrics,
+      makerShadowOrderRepo: shadowRepo,
+      marketSnapshotRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: {
+          ...DEFAULT_EXECUTION_POLICY.makerEntry,
+          mode: "shadow" as const,
+        },
+      }),
+    });
+
+    await mod.start();
+
+    // Fire NormalizedMarketUpdated with an EMPTY markets array to trigger evaluation
+    // WITHOUT populating marketCache for TOKEN_ID. The scale-in must use the snapshot.
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [],
+      timestamp: Date.now(),
+    });
+
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "maker_entry_shadow_level_opened_total",
+      1,
+      JSON.stringify({ level_index: 1 }),
+    );
+    expect(marketSnapshotRepo.findLatestBboByTokens).toHaveBeenCalledWith(
+      expect.arrayContaining([TOKEN_ID]),
+    );
+
+    await mod.stop();
+  });
+
+  it("still fires scale-in when marketCache has valid BBO (existing path unchanged)", async () => {
+    const bus = createMockBus();
+    const runtimeMetrics = makeRuntimeMetrics();
+    const level0 = makeLevel0();
+    const shadowRepo = makeShadowRepo(level0);
+
+    // Snapshot repo is never called when live market is present
+    const marketSnapshotRepo = {
+      findLatestBboByTokens: vi.fn(() => new Map()),
+    };
+
+    const mod = new AlgoDecisionModule({
+      bus,
+      legStateRepo: makeLegStateRepo(),
+      algoRulesRepo: makeAlgoRulesRepo(),
+      selectedMarketCache: makeSelectedMarketCache(),
+      log: makeLogger(),
+      sweepIntervalMs: 60_000,
+      runtimeMetrics,
+      makerShadowOrderRepo: shadowRepo,
+      marketSnapshotRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: {
+          ...DEFAULT_EXECUTION_POLICY.makerEntry,
+          mode: "shadow" as const,
+        },
+      }),
+    });
+
+    await mod.start();
+
+    // Fire with a real market update (bestBid=0.43 → scale-in fires via live cache)
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket()],
+      timestamp: Date.now(),
+    });
+
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "maker_entry_shadow_level_opened_total",
+      1,
+      JSON.stringify({ level_index: 1 }),
+    );
+    // findLatestBboByTokens must NOT be called: TOKEN_ID is in the live cache
+    expect(marketSnapshotRepo.findLatestBboByTokens).not.toHaveBeenCalled();
+
+    await mod.stop();
+  });
+});
+
+// ─── Finding 1 + 2 + 3: unusable live BBO → snapshot fallback ────────────────
+
+describe("maker shadow scale-in: unusable live BBO triggers snapshot fallback", () => {
+  /**
+   * Finding 1: A token that IS in marketCache but with null bestBid was previously
+   * skipped (only cache-miss tokens were sent to the snapshot). After the fix,
+   * a null/NaN/∞ live BBO also qualifies for snapshot lookup so scale-in can fire.
+   */
+  it("opens scale-in level 1 when token in marketCache has null bestBid (Finding 1)", async () => {
+    const bus = createMockBus();
+    const runtimeMetrics = makeRuntimeMetrics();
+    const level0 = makeLevel0();
+    const shadowRepo = makeShadowRepo(level0);
+
+    const snapshotBbo = new Map([
+      [String(TOKEN_ID), { bestBid: 0.43, bestAsk: 0.55, tickSize: 0.01 }],
+    ]);
+    const marketSnapshotRepo = { findLatestBboByTokens: vi.fn(() => snapshotBbo) };
+
+    const mod = new AlgoDecisionModule({
+      bus,
+      legStateRepo: makeLegStateRepo(),
+      algoRulesRepo: makeAlgoRulesRepo(),
+      selectedMarketCache: makeSelectedMarketCache(),
+      log: makeLogger(),
+      sweepIntervalMs: 60_000,
+      runtimeMetrics,
+      makerShadowOrderRepo: shadowRepo,
+      marketSnapshotRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: { ...DEFAULT_EXECUTION_POLICY.makerEntry, mode: "shadow" as const },
+      }),
+    });
+    await mod.start();
+
+    // Token IS in cache (active=true fires marketCache.set) but bestBid is null —
+    // this is the "stale cache entry" scenario (live BBO not yet received).
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(), bestBid: null } as unknown as NormalizedMarket],
+      timestamp: Date.now(),
+    });
+
+    // snapshot fallback must be queried because live BBO is unusable
+    expect(marketSnapshotRepo.findLatestBboByTokens).toHaveBeenCalledWith(
+      expect.arrayContaining([TOKEN_ID]),
+    );
+    // scale-in must still fire using the snapshot BBO
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "maker_entry_shadow_level_opened_total",
+      1,
+      JSON.stringify({ level_index: 1 }),
+    );
+
+    await mod.stop();
+  });
+
+  /**
+   * Finding 2: NaN live BBO was previously accepted (NaN <= 0 is false) and would
+   * produce NaN marks. After the fix, Number.isFinite() rejects NaN and the
+   * snapshot fallback is used instead.
+   */
+  it("NaN live BBO is treated as invalid — snapshot fallback is queried (Finding 2)", async () => {
+    const bus = createMockBus();
+    const runtimeMetrics = makeRuntimeMetrics();
+    const level0 = makeLevel0();
+    const shadowRepo = makeShadowRepo(level0);
+
+    const snapshotBbo = new Map([
+      [String(TOKEN_ID), { bestBid: 0.43, bestAsk: 0.55, tickSize: 0.01 }],
+    ]);
+    const marketSnapshotRepo = { findLatestBboByTokens: vi.fn(() => snapshotBbo) };
+
+    const mod = new AlgoDecisionModule({
+      bus,
+      legStateRepo: makeLegStateRepo(),
+      algoRulesRepo: makeAlgoRulesRepo(),
+      selectedMarketCache: makeSelectedMarketCache(),
+      log: makeLogger(),
+      sweepIntervalMs: 60_000,
+      runtimeMetrics,
+      makerShadowOrderRepo: shadowRepo,
+      marketSnapshotRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: { ...DEFAULT_EXECUTION_POLICY.makerEntry, mode: "shadow" as const },
+      }),
+    });
+    await mod.start();
+
+    // bestBid=NaN in live cache → isLiveBboUsable returns false → snapshot queried
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(), bestBid: NaN } as unknown as NormalizedMarket],
+      timestamp: Date.now(),
+    });
+
+    expect(marketSnapshotRepo.findLatestBboByTokens).toHaveBeenCalledWith(
+      expect.arrayContaining([TOKEN_ID]),
+    );
+    // scale-in fires via snapshot — no NaN propagated into upsert
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "maker_entry_shadow_level_opened_total",
+      1,
+      JSON.stringify({ level_index: 1 }),
+    );
+    // Verify upsert received a finite buyPx — NaN must not propagate
+    const upsertCalls = (shadowRepo.upsert as ReturnType<typeof vi.fn>).mock.calls;
+    const openedLevel = upsertCalls.find(([o]) => o.levelIndex === 1)?.[0];
+    expect(openedLevel).toBeDefined();
+    expect(Number.isFinite(openedLevel.buyPx)).toBe(true);
+
+    await mod.stop();
+  });
+
+  /**
+   * Finding 3: The fallback book previously hardcoded tickSize=0.01. Maker tokens
+   * often use tick=0.001; the wrong tick shifts buyPx and may prevent valid scale-in.
+   * After the fix, the snapshot JOIN returns the real tick and it is used here.
+   *
+   * Setup: token evicted from cache, snapshot returns tick=0.001.
+   * buyPx = floorToTick(0.43 + 1×0.001, 0.001) = 0.431
+   * NOT 0.44 (which floorToTick(0.43+0.01, 0.01) would produce with tick=0.01).
+   */
+  it("uses snapshot tickSize=0.001 for buyPx computation instead of hardcoded 0.01 (Finding 3)", async () => {
+    const bus = createMockBus();
+    const runtimeMetrics = makeRuntimeMetrics();
+    const level0 = makeLevel0();
+    const shadowRepo = makeShadowRepo(level0);
+
+    // Snapshot returns tick=0.001 — the actual maker-universe tick
+    const snapshotBbo = new Map([
+      [String(TOKEN_ID), { bestBid: 0.43, bestAsk: 0.55, tickSize: 0.001 }],
+    ]);
+    const marketSnapshotRepo = { findLatestBboByTokens: vi.fn(() => snapshotBbo) };
+
+    const mod = new AlgoDecisionModule({
+      bus,
+      legStateRepo: makeLegStateRepo(),
+      algoRulesRepo: makeAlgoRulesRepo(),
+      selectedMarketCache: makeSelectedMarketCache(),
+      log: makeLogger(),
+      sweepIntervalMs: 60_000,
+      runtimeMetrics,
+      makerShadowOrderRepo: shadowRepo,
+      marketSnapshotRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: { ...DEFAULT_EXECUTION_POLICY.makerEntry, mode: "shadow" as const },
+      }),
+    });
+    await mod.start();
+
+    // Empty markets array → token NOT in live cache → snapshot fallback used
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [],
+      timestamp: Date.now(),
+    });
+
+    // Confirm scale-in fired
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "maker_entry_shadow_level_opened_total",
+      1,
+      JSON.stringify({ level_index: 1 }),
+    );
+
+    // buyPx must reflect tick=0.001: floorToTick(0.43 + 0.001, 0.001) = 0.431
+    // NOT 0.44 = floorToTick(0.43 + 0.01, 0.01) which the hardcoded tick=0.01 would give
+    const upsertCalls = (shadowRepo.upsert as ReturnType<typeof vi.fn>).mock.calls;
+    const openedLevel = upsertCalls.find(([o]) => o.levelIndex === 1)?.[0];
+    expect(openedLevel).toBeDefined();
+    expect(openedLevel.buyPx).toBeCloseTo(0.431, 3);
+
+    await mod.stop();
+  });
+});
+
+// ─── Advance-loop BBO-overlay regression (IN-PLAN finding) ───────────────────
+
+describe("maker shadow advance loop: BBO overlay on unusable live cache", () => {
+  /**
+   * Regression: the advance loop used `live ?? stand-in` which passes the raw
+   * live market (with null/NaN bestBid) to advanceShadowOrder when the token IS
+   * in marketCache. The fix overlays the resolved BBO values regardless of
+   * whether live is present.
+   */
+
+  /** A filled shadow whose harvest target (harvestPx=0.6) the snapshot can reach. */
+  function makeFilledShadow(): MakerShadowOrder {
+    const postedAt = "2026-07-05T09:00:00.000Z";
+    return {
+      shadowOrderId: LADDER_ID,
+      tokenId: TOKEN_ID,
+      conditionId: COND_ID,
+      buyPx: 0.5,
+      harvestPx: 0.6,
+      postedAt,
+      fillDeadline: "2099-12-31T00:00:00.000Z",
+      stage: "filled",
+      fillKind: "touch",
+      fillPx: 0.5,
+      markPx: null,
+      netMark: null,
+      ladderId: LADDER_ID,
+      levelIndex: 0,
+      filledAt: "2026-07-05T09:01:00.000Z",
+      updatedAt: "2026-07-05T09:01:00.000Z",
+    } as unknown as MakerShadowOrder;
+  }
+
+  function makeFilledShadowRepo(shadow: MakerShadowOrder): MakerShadowOrderRepository {
+    return {
+      findOpen: vi.fn(() => [shadow]),
+      findOpenByToken: vi.fn(() => [shadow]),
+      findLadder: vi.fn(() => [shadow]),
+      upsert: vi.fn(),
+      updateStage: vi.fn(),
+      prune: vi.fn(),
+    } as unknown as MakerShadowOrderRepository;
+  }
+
+  it("harvests a filled shadow via snapshot BBO when live cache has null bestBid", async () => {
+    // Regression: previously the advance loop passed live (with null bestBid) to
+    // advanceShadowOrder, so bestBid >= harvestPx was never true and harvest was skipped.
+    const bus = createMockBus();
+    const shadow = makeFilledShadow();
+    const shadowRepo = makeFilledShadowRepo(shadow);
+
+    // Snapshot has bestBid=0.65 which is >= harvestPx=0.6 → should trigger harvest
+    const snapshotBbo = new Map([
+      [String(TOKEN_ID), { bestBid: 0.65, bestAsk: 0.75, tickSize: 0.01 }],
+    ]);
+    const marketSnapshotRepo = { findLatestBboByTokens: vi.fn(() => snapshotBbo) };
+
+    const mod = new AlgoDecisionModule({
+      bus,
+      legStateRepo: makeLegStateRepo(),
+      algoRulesRepo: makeAlgoRulesRepo(),
+      selectedMarketCache: makeSelectedMarketCache(),
+      log: makeLogger(),
+      sweepIntervalMs: 60_000,
+      runtimeMetrics: makeRuntimeMetrics(),
+      makerShadowOrderRepo: shadowRepo,
+      marketSnapshotRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: { ...DEFAULT_EXECUTION_POLICY.makerEntry, mode: "shadow" as const },
+      }),
+    });
+
+    await mod.start();
+
+    // Token IS in marketCache (active=true populates it) but bestBid is null — the
+    // "in cache but unusable BBO" case the fallback was meant to fix.
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(), bestBid: null } as unknown as NormalizedMarket],
+      timestamp: Date.now(),
+    });
+
+    // Snapshot must have been consulted because live BBO is unusable
+    expect(marketSnapshotRepo.findLatestBboByTokens).toHaveBeenCalledWith(
+      expect.arrayContaining([TOKEN_ID]),
+    );
+
+    // The advance loop must have applied the snapshot BBO and detected harvest
+    const updateCalls = (shadowRepo.updateStage as ReturnType<typeof vi.fn>).mock.calls;
+    const harvestCall = updateCalls.find(([, update]) => update?.stage === "harvested");
+    expect(harvestCall).toBeDefined();
+    // markPx must equal the resolved bestBid=0.65 (not null or NaN)
+    expect(harvestCall![1].markPx).toBeCloseTo(0.65, 5);
+
+    await mod.stop();
+  });
+
+  it("skips advance when no valid BBO from either source — no crash, no NaN mark", async () => {
+    // When resolveBbo returns null the advance loop must continue (skip) gracefully.
+    const bus = createMockBus();
+    const shadow = makeFilledShadow();
+    const shadowRepo = makeFilledShadowRepo(shadow);
+
+    // Snapshot returns nothing for this token
+    const marketSnapshotRepo = { findLatestBboByTokens: vi.fn(() => new Map()) };
+
+    const mod = new AlgoDecisionModule({
+      bus,
+      legStateRepo: makeLegStateRepo(),
+      algoRulesRepo: makeAlgoRulesRepo(),
+      selectedMarketCache: makeSelectedMarketCache(),
+      log: makeLogger(),
+      sweepIntervalMs: 60_000,
+      runtimeMetrics: makeRuntimeMetrics(),
+      makerShadowOrderRepo: shadowRepo,
+      marketSnapshotRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: { ...DEFAULT_EXECUTION_POLICY.makerEntry, mode: "shadow" as const },
+      }),
+    });
+
+    await mod.start();
+
+    // null bestBid in live cache + no snapshot → resolveBbo returns null → skip
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(), bestBid: null } as unknown as NormalizedMarket],
+      timestamp: Date.now(),
+    });
+
+    // Advance loop must not persist any stage update (no harvest, no NaN mark)
+    expect(shadowRepo.updateStage).not.toHaveBeenCalled();
+
+    await mod.stop();
+  });
+});

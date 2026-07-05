@@ -458,6 +458,20 @@ export interface MarketSnapshotRepository {
 
   /** Delete snapshots older than the given ISO timestamp. Returns rows deleted. */
   prune(olderThanIso: string, options?: { readonly preserveTokenIds?: readonly TokenId[] }): number;
+
+  /**
+   * Return the latest best_bid / best_ask (and the token's tick_size from the
+   * markets table) per token from the last 30 minutes.
+   * ONE batched query using ROW_NUMBER() with a LEFT JOIN to markets — intended
+   * as a BBO fallback for tokens that have been evicted from the in-memory
+   * market cache (churned tokens) OR whose live BBO is unusable (null/NaN/∞).
+   * Missing tokens (no recent snapshot) are absent from the result map.
+   * `tickSize` is null when the markets row is absent (LEFT JOIN miss).
+   * Optional: existing mocks that only implement saveBatch/prune do not need to add this.
+   */
+  findLatestBboByTokens?(
+    tokenIds: readonly TokenId[],
+  ): Map<string, { bestBid: number | null; bestAsk: number | null; tickSize: number | null }>;
 }
 
 export interface MarketSnapshotPositionValuation {

@@ -173,4 +173,63 @@ describe("SqliteMarketSnapshotRepository", () => {
     const deleted = repo.prune("2026-01-01T00:00:00.000Z");
     expect(deleted).toBe(0);
   });
+
+  describe("findLatestBboByTokens", () => {
+    it("returns the latest best_bid/best_ask per token within 30 minutes", () => {
+      const recentIso = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      const olderIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+      // Two snapshots for tok-1 (older first); only the later one should be returned.
+      repo.saveBatch([
+        makeSnapshot({
+          tokenId: createTokenId("tok-1"),
+          bestBid: 0.3,
+          bestAsk: 0.4,
+          capturedAt: olderIso,
+        }),
+        makeSnapshot({
+          tokenId: createTokenId("tok-1"),
+          bestBid: 0.43,
+          bestAsk: 0.55,
+          capturedAt: recentIso,
+        }),
+        makeSnapshot({
+          tokenId: createTokenId("tok-2"),
+          bestBid: 0.6,
+          bestAsk: 0.7,
+          capturedAt: recentIso,
+        }),
+      ]);
+
+      const result = repo.findLatestBboByTokens([createTokenId("tok-1"), createTokenId("tok-2")]);
+
+      expect(result.size).toBe(2);
+      // tickSize comes from the markets JOIN (insertMarket uses tick_size=0.01)
+      expect(result.get("tok-1")).toEqual({ bestBid: 0.43, bestAsk: 0.55, tickSize: 0.01 });
+      expect(result.get("tok-2")).toEqual({ bestBid: 0.6, bestAsk: 0.7, tickSize: 0.01 });
+    });
+
+    it("excludes snapshots older than 30 minutes", () => {
+      const staleIso = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+      repo.saveBatch([makeSnapshot({ tokenId: createTokenId("tok-1"), capturedAt: staleIso })]);
+
+      const result = repo.findLatestBboByTokens([createTokenId("tok-1")]);
+      expect(result.size).toBe(0);
+    });
+
+    it("returns an empty map for an empty input array", () => {
+      const result = repo.findLatestBboByTokens([]);
+      expect(result.size).toBe(0);
+    });
+
+    it("does not include tokens absent from the table", () => {
+      // tok-2 has no snapshot — should not appear in result
+      const recentIso = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      repo.saveBatch([makeSnapshot({ tokenId: createTokenId("tok-1"), capturedAt: recentIso })]);
+
+      const result = repo.findLatestBboByTokens([createTokenId("tok-1"), createTokenId("tok-2")]);
+      expect(result.has("tok-1")).toBe(true);
+      expect(result.has("tok-2")).toBe(false);
+    });
+  });
 });

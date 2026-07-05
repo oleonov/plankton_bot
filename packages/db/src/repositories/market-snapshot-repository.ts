@@ -87,6 +87,51 @@ export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository 
     );
   }
 
+  findLatestBboByTokens(
+    tokenIds: readonly TokenId[],
+  ): Map<string, { bestBid: number | null; bestAsk: number | null; tickSize: number | null }> {
+    const result = new Map<
+      string,
+      { bestBid: number | null; bestAsk: number | null; tickSize: number | null }
+    >();
+    if (tokenIds.length === 0) return result;
+
+    const ids = [...new Set(tokenIds.map(String))];
+    const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const placeholders = ids.map(() => "?").join(", ");
+
+    // LEFT JOIN markets to retrieve the token's actual tick_size. The JOIN key is
+    // token_id (PK in both tables). tick_size is NULL when the markets row is absent.
+    const rows = this.db
+      .prepare(
+        `SELECT s.token_id, s.best_bid, s.best_ask, m.tick_size
+           FROM (
+             SELECT token_id, best_bid, best_ask,
+                    ROW_NUMBER() OVER (PARTITION BY token_id ORDER BY captured_at DESC) AS rn
+               FROM market_snapshots
+              WHERE token_id IN (${placeholders})
+                AND captured_at >= ?
+           ) s
+           LEFT JOIN markets m ON m.token_id = s.token_id
+          WHERE s.rn = 1`,
+      )
+      .all(...ids, cutoff) as Array<{
+      token_id: string;
+      best_bid: number | null;
+      best_ask: number | null;
+      tick_size: number | null;
+    }>;
+
+    for (const row of rows) {
+      result.set(row.token_id, {
+        bestBid: row.best_bid,
+        bestAsk: row.best_ask,
+        tickSize: row.tick_size,
+      });
+    }
+    return result;
+  }
+
   prune(
     olderThanIso: string,
     options?: { readonly preserveTokenIds?: readonly TokenId[] },

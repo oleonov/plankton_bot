@@ -1514,6 +1514,7 @@ async function main(): Promise<void> {
       }
     },
     makerShadowOrderRepo: repos.makerShadowOrders,
+    marketSnapshotRepo: repos.marketSnapshot,
     log,
     sweepIntervalMs: config.strategyScanIntervalMs,
     plannerSuppressionRollupWindowMs: config.plannerSuppressionRollupWindowMs,
