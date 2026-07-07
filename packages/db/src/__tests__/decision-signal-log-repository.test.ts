@@ -174,6 +174,12 @@ describe("SqliteDecisionSignalLogRepository", () => {
       entryFreshEdgeKind: "first_entry",
       entryFreshEdgeShadowClass: "AFTER_PUMP_EXPENSIVE",
       entryFreshEdgePayloadJson: JSON.stringify(payload),
+      entryCategory: "geopolitics" as const,
+      entryCategoryGateClass: "PRIORITIZE" as const,
+      entryCategoryPayloadJson: JSON.stringify({
+        category: "geopolitics",
+        gateClass: "PRIORITIZE",
+      }),
     });
 
     const row = conn.db
@@ -183,6 +189,11 @@ describe("SqliteDecisionSignalLogRepository", () => {
       entry_fresh_edge_kind: "first_entry",
       entry_fresh_edge_shadow_class: "AFTER_PUMP_EXPENSIVE",
       entry_fresh_edge_payload_json: JSON.stringify(payload),
+      entry_category: "geopolitics",
+      entry_category_gate_class: "PRIORITIZE",
+    });
+    expect(JSON.parse((row?.entry_category_payload_json as string | null) ?? "{}")).toMatchObject({
+      gateClass: "PRIORITIZE",
     });
   });
 });

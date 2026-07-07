@@ -268,6 +268,52 @@ function hasOrderbookProxy(
   return spread >= 0 && spread < ORDERBOOK_PROXY_MAX_SPREAD;
 }
 
+export type EntryCategoryGateClass = "PRIORITIZE" | "BLOCK" | "NEUTRAL" | "UNKNOWN";
+
+// Static mapping over every V4SelectionCategory — a missing key is a compile error.
+const CATEGORY_BUCKET_MAP: Record<V4SelectionCategory, "PRIORITIZE" | "BLOCK" | "NEUTRAL"> = {
+  geopolitics: "PRIORITIZE",
+  "crypto-btc": "PRIORITIZE",
+  politics: "PRIORITIZE",
+  esports: "BLOCK",
+  "crypto-sol": "BLOCK",
+  "crypto-xrp": "BLOCK",
+  entertainment: "BLOCK",
+  "crypto-eth": "NEUTRAL",
+  stocks: "NEUTRAL",
+  weather: "NEUTRAL",
+  "price-binary": "NEUTRAL",
+  other: "NEUTRAL",
+};
+
+export function categoryQualityBucket(
+  cat: V4SelectionCategory,
+): "PRIORITIZE" | "BLOCK" | "NEUTRAL" {
+  return CATEGORY_BUCKET_MAP[cat];
+}
+
+// Priority prevents co-occurring politics+geopolitics tags (20% of live events)
+// from demoting the stronger research signal to the weaker broad one.
+const GAMMA_TAG_PRIORITY: readonly V4SelectionCategory[] = [
+  "geopolitics",
+  "esports",
+  "entertainment",
+  "stocks",
+  "weather",
+  "politics",
+];
+
+export function mapGammaTagsToCategory(
+  tags: readonly string[] | null | undefined,
+): V4SelectionCategory | null {
+  if (!tags || tags.length === 0) return null;
+  const tagSet = new Set(tags);
+  for (const cat of GAMMA_TAG_PRIORITY) {
+    if (tagSet.has(cat)) return cat;
+  }
+  return null;
+}
+
 function zeroCategoryCounts(): Record<V4SelectionCategory, number> {
   return Object.fromEntries(HOT_CATS_40.map((category) => [category, 0])) as Record<
     V4SelectionCategory,

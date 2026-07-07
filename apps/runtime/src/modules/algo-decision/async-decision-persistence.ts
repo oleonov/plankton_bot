@@ -210,8 +210,9 @@ INSERT INTO decision_signal_log
   nth_buy_at_emit,
   is_exit, is_first_sell, holding_time_ms, holding_time_bucket,
   exit_pnl_pct, exit_pnl_bucket, sold_bought_ratio, sold_bought_ratio_bucket,
-  entry_fresh_edge_kind, entry_fresh_edge_shadow_class, entry_fresh_edge_payload_json)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  entry_fresh_edge_kind, entry_fresh_edge_shadow_class, entry_fresh_edge_payload_json,
+  entry_category, entry_category_gate_class, entry_category_payload_json)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 const DECISION_PERSISTENCE_WORKER_SOURCE = `
 const { parentPort, workerData } = require("node:worker_threads");
@@ -256,7 +257,10 @@ function persist(write) {
       signal.soldBoughtRatioBucket,
       signal.entryFreshEdgeKind ?? null,
       signal.entryFreshEdgeShadowClass ?? null,
-      signal.entryFreshEdgePayloadJson ?? null
+      signal.entryFreshEdgePayloadJson ?? null,
+      signal.entryCategory ?? null,
+      signal.entryCategoryGateClass ?? null,
+      signal.entryCategoryPayloadJson ?? null
     );
     return;
   }

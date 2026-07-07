@@ -30,6 +30,7 @@ import type {
   LedgerResetPolicy,
 } from "./enums.js";
 import type { D9LossExitPolicy } from "./d9-loss-exit.js";
+import type { EntryCategoryGateClass, V4SelectionCategory } from "./v4-selection.js";
 
 // ─── Market ───────────────────────────────────────────────────────────────────
 //
@@ -212,6 +213,9 @@ export interface DecisionSignalLog {
     | "RANGE_DATA_UNAVAILABLE"
     | null;
   entryFreshEdgePayloadJson?: string | null;
+  entryCategory?: V4SelectionCategory | null;
+  entryCategoryGateClass?: EntryCategoryGateClass | null;
+  entryCategoryPayloadJson?: string | null;
 }
 
 /**

@@ -200,6 +200,9 @@ CREATE TABLE IF NOT EXISTS decision_signal_log (
   entry_fresh_edge_kind    TEXT,
   entry_fresh_edge_shadow_class TEXT,
   entry_fresh_edge_payload_json TEXT,
+  entry_category           TEXT,
+  entry_category_gate_class TEXT,
+  entry_category_payload_json TEXT,
   created_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

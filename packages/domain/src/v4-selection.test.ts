@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   HOT_CATS_40,
+  categoryQualityBucket,
   createV4AdmissionTelemetrySnapshot,
   deriveV4SelectionCategory,
   evaluateV4Selection,
+  mapGammaTagsToCategory,
   recordV4AdmissionTelemetry,
 } from "./v4-selection.js";
 
@@ -145,5 +147,43 @@ describe("V4 Plankton priority selection", () => {
     expect(telemetry.rejectCountByReason.rejected_liquidity_below_100).toBe(1);
     expect(telemetry.rejectCountByReason.rejected_no_orderbook_proxy).toBe(1);
     expect(telemetry.rejectCountByReason.rejected_category_not_in_hot_cats).toBe(1);
+  });
+
+  it("categoryQualityBucket covers every HOT_CATS_40 member", () => {
+    for (const cat of HOT_CATS_40) {
+      expect(categoryQualityBucket(cat)).toMatch(/^(PRIORITIZE|BLOCK|NEUTRAL)$/);
+    }
+  });
+
+  it("categoryQualityBucket maps research buckets correctly", () => {
+    expect(categoryQualityBucket("geopolitics")).toBe("PRIORITIZE");
+    expect(categoryQualityBucket("crypto-btc")).toBe("PRIORITIZE");
+    expect(categoryQualityBucket("politics")).toBe("PRIORITIZE");
+    expect(categoryQualityBucket("esports")).toBe("BLOCK");
+    expect(categoryQualityBucket("crypto-sol")).toBe("BLOCK");
+    expect(categoryQualityBucket("crypto-xrp")).toBe("BLOCK");
+    expect(categoryQualityBucket("entertainment")).toBe("BLOCK");
+    expect(categoryQualityBucket("crypto-eth")).toBe("NEUTRAL");
+    expect(categoryQualityBucket("stocks")).toBe("NEUTRAL");
+    expect(categoryQualityBucket("weather")).toBe("NEUTRAL");
+    expect(categoryQualityBucket("price-binary")).toBe("NEUTRAL");
+    expect(categoryQualityBucket("other")).toBe("NEUTRAL");
+  });
+
+  it("mapGammaTagsToCategory resolves by priority, not input order", () => {
+    expect(mapGammaTagsToCategory(["geopolitics"])).toBe("geopolitics");
+    // politics+geopolitics co-occur in ~20% of live events; geopolitics must win regardless of order
+    expect(mapGammaTagsToCategory(["politics", "geopolitics"])).toBe("geopolitics");
+    expect(mapGammaTagsToCategory(["geopolitics", "politics"])).toBe("geopolitics");
+  });
+
+  it("mapGammaTagsToCategory returns null for coarse/unrecognized/empty tags", () => {
+    // coarse crypto tag defers to slug-derived category
+    expect(mapGammaTagsToCategory(["crypto"])).toBeNull();
+    // fine-grained Gamma tag without a V4 match this cycle
+    expect(mapGammaTagsToCategory(["us-presidential-election"])).toBeNull();
+    expect(mapGammaTagsToCategory([])).toBeNull();
+    expect(mapGammaTagsToCategory(null)).toBeNull();
+    expect(mapGammaTagsToCategory(undefined)).toBeNull();
   });
 });

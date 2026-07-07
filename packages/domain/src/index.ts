@@ -156,12 +156,15 @@ export { deriveCategory, HEURISTIC_CATEGORIES } from "./category.js";
 export type { HeuristicCategory } from "./category.js";
 export {
   HOT_CATS_40,
+  categoryQualityBucket,
   createV4AdmissionTelemetrySnapshot,
   deriveV4SelectionCategory,
   evaluateV4Selection,
+  mapGammaTagsToCategory,
   recordV4AdmissionTelemetry,
 } from "./v4-selection.js";
 export type {
+  EntryCategoryGateClass,
   V4AdmissionRejectReason,
   V4AdmissionTelemetrySnapshot,
   V4SelectionCategory,

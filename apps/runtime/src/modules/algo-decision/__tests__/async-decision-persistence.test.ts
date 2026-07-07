@@ -44,6 +44,9 @@ function makeSignal(signalId = "sig-1"): DecisionSignalLog {
     entryFreshEdgeKind: "first_entry",
     entryFreshEdgeShadowClass: "RANGE_DATA_UNAVAILABLE",
     entryFreshEdgePayloadJson: JSON.stringify({ shadowClassification: "RANGE_DATA_UNAVAILABLE" }),
+    entryCategory: "geopolitics" as const,
+    entryCategoryGateClass: "PRIORITIZE" as const,
+    entryCategoryPayloadJson: JSON.stringify({ category: "geopolitics", gateClass: "PRIORITIZE" }),
   };
 }
 
@@ -110,7 +113,7 @@ describe("DecisionPersistenceBuffer", () => {
     try {
       const signalRow = verifyConn.db
         .prepare(
-          "SELECT decision_rule_id, entry_fresh_edge_kind, entry_fresh_edge_shadow_class, entry_fresh_edge_payload_json FROM decision_signal_log WHERE signal_id = ?",
+          "SELECT decision_rule_id, entry_fresh_edge_kind, entry_fresh_edge_shadow_class, entry_fresh_edge_payload_json, entry_category, entry_category_gate_class, entry_category_payload_json FROM decision_signal_log WHERE signal_id = ?",
         )
         .get("sig-worker") as
         | {
@@ -118,6 +121,9 @@ describe("DecisionPersistenceBuffer", () => {
             entry_fresh_edge_kind: string | null;
             entry_fresh_edge_shadow_class: string | null;
             entry_fresh_edge_payload_json: string | null;
+            entry_category: string | null;
+            entry_category_gate_class: string | null;
+            entry_category_payload_json: string | null;
           }
         | undefined;
       const riskRow = verifyConn.db
@@ -129,6 +135,11 @@ describe("DecisionPersistenceBuffer", () => {
       expect(signalRow?.entry_fresh_edge_shadow_class).toBe("RANGE_DATA_UNAVAILABLE");
       expect(JSON.parse(signalRow?.entry_fresh_edge_payload_json ?? "{}")).toMatchObject({
         shadowClassification: "RANGE_DATA_UNAVAILABLE",
+      });
+      expect(signalRow?.entry_category).toBe("geopolitics");
+      expect(signalRow?.entry_category_gate_class).toBe("PRIORITIZE");
+      expect(JSON.parse(signalRow?.entry_category_payload_json ?? "{}")).toMatchObject({
+        gateClass: "PRIORITIZE",
       });
       expect(JSON.parse(riskRow?.payload ?? "{}")).toMatchObject({ tokenId: "tok-worker" });
       expect(buffer.getStats().workerFailedWrites).toBe(0);

@@ -115,6 +115,10 @@ import {
   type EntryFreshEdgeSignalFields,
 } from "./entry-fresh-edge.js";
 import {
+  computeEntryCategoryGateSignalFields,
+  type EntryCategoryGateSignalFields,
+} from "./entry-category-gate.js";
+import {
   DEFAULT_PLANNER_SUPPRESSION_ROLLUP_WINDOW_MS,
   PlannerSuppressionRollup,
 } from "./planner-suppression-rollup.js";
@@ -2847,6 +2851,10 @@ export class AlgoDecisionModule implements RuntimeModule {
       signal.side === "buy"
         ? this.computeEntryFreshEdgeTelemetry(draft.market, now, signal, draft.logDraft.buyCount)
         : null;
+    const entryCategoryTelemetry =
+      signal.side === "buy"
+        ? this.computeEntryCategoryGateTelemetry(draft.market, now, signal, draft.logDraft.buyCount)
+        : null;
     return {
       type: "signal",
       signal,
@@ -2862,6 +2870,9 @@ export class AlgoDecisionModule implements RuntimeModule {
             entryFreshEdgeKind: entryFreshEdgeTelemetry?.entryFreshEdgeKind ?? null,
             entryFreshEdgeShadowClass: entryFreshEdgeTelemetry?.entryFreshEdgeShadowClass ?? null,
             entryFreshEdgePayloadJson: entryFreshEdgeTelemetry?.entryFreshEdgePayloadJson ?? null,
+            entryCategory: entryCategoryTelemetry?.entryCategory ?? null,
+            entryCategoryGateClass: entryCategoryTelemetry?.entryCategoryGateClass ?? null,
+            entryCategoryPayloadJson: entryCategoryTelemetry?.entryCategoryPayloadJson ?? null,
           },
           draft.emissionFacts,
           draft.triggerTelemetry,
@@ -3791,6 +3802,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     const exitTelemetry = computeExitTelemetry(side, ctx.price, now, emissionFacts);
     const entryFreshEdgeTelemetry =
       side === "buy" ? this.computeEntryFreshEdgeTelemetry(market, now, signal, buyCount) : null;
+    const entryCategoryTelemetry =
+      side === "buy" ? this.computeEntryCategoryGateTelemetry(market, now, signal, buyCount) : null;
 
     const commitLog = (): void => {
       this.recordDecisionSignal(
@@ -3817,6 +3830,9 @@ export class AlgoDecisionModule implements RuntimeModule {
           entryFreshEdgeKind: entryFreshEdgeTelemetry?.entryFreshEdgeKind ?? null,
           entryFreshEdgeShadowClass: entryFreshEdgeTelemetry?.entryFreshEdgeShadowClass ?? null,
           entryFreshEdgePayloadJson: entryFreshEdgeTelemetry?.entryFreshEdgePayloadJson ?? null,
+          entryCategory: entryCategoryTelemetry?.entryCategory ?? null,
+          entryCategoryGateClass: entryCategoryTelemetry?.entryCategoryGateClass ?? null,
+          entryCategoryPayloadJson: entryCategoryTelemetry?.entryCategoryPayloadJson ?? null,
         },
         emissionFacts,
         triggerTelemetry,
@@ -3883,6 +3899,32 @@ export class AlgoDecisionModule implements RuntimeModule {
           err: err instanceof Error ? err.message : String(err),
         },
         "entry fresh-edge telemetry failed",
+      );
+      return null;
+    }
+  }
+
+  private computeEntryCategoryGateTelemetry(
+    market: NormalizedMarket,
+    now: number,
+    signal: import("@krabs/domain").Signal,
+    buyCount: number,
+  ): EntryCategoryGateSignalFields | null {
+    try {
+      return computeEntryCategoryGateSignalFields({
+        market,
+        nowMs: now,
+        decisionRuleId: signal.decisionRuleId,
+        signalReason: signal.reason,
+        buyCount,
+      });
+    } catch (err) {
+      this.log.warn(
+        {
+          tokenId: String(market.tokenId),
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "entry category-gate telemetry failed",
       );
       return null;
     }
