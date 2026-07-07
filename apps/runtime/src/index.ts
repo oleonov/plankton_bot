@@ -129,7 +129,6 @@ import { SignalToOrderBridge } from "./modules/strategy/signal-to-order.js";
 import { ExecutionPolicyProvider } from "./execution-policy-provider.js";
 import { AlgoDecisionModule } from "./modules/algo-decision/algo-decision-module.js";
 import { SellLoopGuardModule } from "./modules/sell-loop-guard/sell-loop-guard-module.js";
-import { DeadMarketShadowModule } from "./modules/dead-market-shadow/dead-market-shadow-module.js";
 import { ExecutionProfileManager } from "./modules/execution-profile/execution-profile-manager.js";
 import { ExecutionProfileAnomalyDetector } from "./modules/execution-profile/execution-profile-anomaly-detector.js";
 import { ExecutionProfileHealthChecker } from "./modules/execution-profile/execution-profile-health-checker.js";
@@ -1247,15 +1246,6 @@ async function main(): Promise<void> {
     db: ledgerConn.db,
     log,
   });
-  // Shadow-only "dead market" scorer: observes BUY candidates and emits
-  // telemetry only. It never publishes to the bus, so it cannot affect live
-  // trading; enabled by default because its only effect is bounded telemetry.
-  const deadMarketShadowModule = new DeadMarketShadowModule({
-    bus,
-    log,
-    metrics: runtimeMetrics,
-    riskEventRepo: repos.riskEvent,
-  });
   const signalFeedRepo = new SqliteSignalFeedRepository(ledgerConn.db);
   const signalFeedManager = new SignalFeedManager({
     bus,
@@ -1841,7 +1831,6 @@ async function main(): Promise<void> {
       ? [["redeem-sweep", redeemSweepModule] as [string, import("@krabs/domain").RuntimeModule]]
       : []),
     ["sell-loop-guard", sellLoopGuardModule],
-    ["dead-market-shadow", deadMarketShadowModule],
     ["execution-profile-signal-feed", signalFeedManager],
     ["execution-profile", executionProfileManager],
     ["profile-ladder", profileLadderModule],

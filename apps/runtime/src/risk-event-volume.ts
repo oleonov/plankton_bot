@@ -6,7 +6,6 @@ export const SIGNAL_TELEMETRY_RISK_EVENT_TYPES = [
   "signal_suppressed",
   "planner_suppressed_rollup",
   "execution_profile_decision_chain_rollup",
-  "dead_market_shadow",
   "entry_lane_shadow",
 ] as const;
 
