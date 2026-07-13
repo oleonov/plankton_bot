@@ -36,7 +36,6 @@ import type {
   TokenId,
   ClientOrderId,
   NormalizedMarket,
-  RiskEventRepository,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";

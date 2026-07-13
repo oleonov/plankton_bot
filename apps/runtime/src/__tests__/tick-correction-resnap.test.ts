@@ -180,7 +180,7 @@ describe("ExecutionModule — proactive tick correction + price re-snap (Phase 1
     });
 
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
-    const params = (gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    const params = gateway.placeOrder.mock.calls[0]![0];
     // Price must be on the 0.01 grid and specifically the floor (BUY never overpays).
     expect(params.price).toBeCloseTo(0.15, 10);
     expect(params.tickSize).toBe(0.01);
@@ -216,7 +216,7 @@ describe("ExecutionModule — proactive tick correction + price re-snap (Phase 1
 
     // The gateway must be called with the ORIGINAL tick/price, not authTick + invalid price=0.
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
-    const params = (gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    const params = gateway.placeOrder.mock.calls[0]![0];
     expect(params.price).toBeCloseTo(0.155, 10);
     expect(params.tickSize).toBe(0.001);
 
@@ -248,7 +248,7 @@ describe("ExecutionModule — proactive tick correction + price re-snap (Phase 1
     });
 
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
-    const params = (gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    const params = gateway.placeOrder.mock.calls[0]![0];
     // Original values preserved unchanged.
     expect(params.price).toBeCloseTo(0.155, 10);
     expect(params.tickSize).toBe(0.001);

@@ -235,7 +235,7 @@ describe("ExecutionModule — Phase 2 in-attempt invalid-tick retry", () => {
 
     // Order saved as "open" with retry price.
     expect(orderRepo.save).toHaveBeenCalledTimes(1);
-    const saved = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    const saved = orderRepo.save.mock.calls[0]![0];
     expect(saved.status).toBe("open");
     expect(saved.price).toBeCloseTo(0.15, 10);
 
@@ -284,7 +284,7 @@ describe("ExecutionModule — Phase 2 in-attempt invalid-tick retry", () => {
 
     // Order saved once as "rejected" (retry's price, not original).
     expect(orderRepo.save).toHaveBeenCalledTimes(1);
-    const saved = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    const saved = orderRepo.save.mock.calls[0]![0];
     expect(saved.status).toBe("rejected");
     expect(saved.price).toBeCloseTo(0.15, 10); // retry price
 
@@ -320,7 +320,7 @@ describe("ExecutionModule — Phase 2 in-attempt invalid-tick retry", () => {
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
 
     // Order saved as rejected with original price.
-    const saved = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    const saved = orderRepo.save.mock.calls[0]![0];
     expect(saved.status).toBe("rejected");
     expect(saved.price).toBeCloseTo(0.155, 10);
 
@@ -362,7 +362,7 @@ describe("ExecutionModule — Phase 2 in-attempt invalid-tick retry", () => {
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
 
     // Order saved as rejected with original price.
-    const saved = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    const saved = orderRepo.save.mock.calls[0]![0];
     expect(saved.status).toBe("rejected");
     expect(saved.price).toBeCloseTo(0.155, 10);
 
@@ -452,7 +452,7 @@ describe("ExecutionModule — Phase 2 in-attempt invalid-tick retry", () => {
 
     // retryAfterInvalidTick returned false → original reject path runs.
     expect(orderRepo.save).toHaveBeenCalledTimes(1);
-    const saved = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    const saved = orderRepo.save.mock.calls[0]![0];
     expect(saved.status).toBe("rejected");
     expect(saved.price).toBeCloseTo(0.005, 10); // original cmd price
 

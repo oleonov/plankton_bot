@@ -18,7 +18,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { AuthoritativeTickResolver } from "../modules/execution/authoritative-tick-resolver.js";
-import type { ClobMarket, TokenId } from "@krabs/domain";
+import type { ClobMarket } from "@krabs/domain";
 import { createTokenId } from "@krabs/domain";
 
 const TOKEN_ID = createTokenId("tok-yes");
@@ -100,7 +100,7 @@ describe("AuthoritativeTickResolver", () => {
     getMarket.mockResolvedValue(null);
     getTickSize.mockResolvedValue(0.001);
     const resolver = new AuthoritativeTickResolver({ getMarket, getTickSize });
-    const myToken = createTokenId("my-special-token") as TokenId;
+    const myToken = createTokenId("my-special-token");
     await resolver.resolve("cond-x", 0, myToken);
     expect(getTickSize).toHaveBeenCalledWith(myToken);
   });
