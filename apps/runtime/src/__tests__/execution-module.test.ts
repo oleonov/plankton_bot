@@ -119,6 +119,7 @@ function createMockMarketRepo() {
     findTrackedForPricing: vi.fn().mockReturnValue([]),
     findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
     updateScoresBatch: vi.fn(),
+    updateTickSize: vi.fn(),
   };
 }
 

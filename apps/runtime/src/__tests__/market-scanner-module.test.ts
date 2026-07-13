@@ -174,6 +174,7 @@ function createMockMarketRepo(): MarketRepository {
     }),
     findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
     updateScoresBatch: vi.fn(),
+    updateTickSize: vi.fn(),
   };
 }
 
@@ -1104,6 +1105,7 @@ describe("MarketScannerModule", () => {
       }),
       findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
       updateScoresBatch: vi.fn(),
+      updateTickSize: vi.fn(),
     };
     const { mod } = buildModule({ discoveryGateway, marketRepo });
 

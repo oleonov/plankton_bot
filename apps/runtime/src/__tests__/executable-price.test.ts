@@ -13,6 +13,7 @@ import {
   computePricingDeltaTicks,
   deriveExecutableTopOfBook,
   floorToTick,
+  resnapPriceToTick,
   resolveBoundedMidpointPrice,
   roundToTick,
   validateExecutablePrice,
@@ -666,5 +667,51 @@ describe("classifySoldBoughtRatioBucket", () => {
     expect(classifySoldBoughtRatioBucket(Number.POSITIVE_INFINITY)).toBeNull();
     expect(classifySoldBoughtRatioBucket(Number.NEGATIVE_INFINITY)).toBeNull();
     expect(classifySoldBoughtRatioBucket(-0.01)).toBeNull();
+  });
+});
+
+describe("resnapPriceToTick (Phase 1 tick-correction helper)", () => {
+  it("BUY at 0.001 grid price 0.155 re-snapped to 0.01 grid → floor gives 0.15, valid", () => {
+    // A command built on tick=0.001 with price=0.155 (on the 0.001 grid).
+    // After correction to authTick=0.01, floor-snap gives 0.15 (< 0.155).
+    const result = resnapPriceToTick(0.155, "buy", 0.01);
+    expect(result.valid).toBe(true);
+    // BUY snaps floor: floor(0.155 / 0.01) * 0.01 = 0.15
+    expect(result.price).toBeCloseTo(0.15, 10);
+  });
+
+  it("SELL at 0.001 grid price 0.155 re-snapped to 0.01 grid → ceil gives 0.16, valid", () => {
+    // SELL snaps ceil: ceil(0.155 / 0.01) * 0.01 = 0.16
+    const result = resnapPriceToTick(0.155, "sell", 0.01);
+    expect(result.valid).toBe(true);
+    expect(result.price).toBeCloseTo(0.16, 10);
+  });
+
+  it("already on-grid price is unchanged", () => {
+    const result = resnapPriceToTick(0.5, "buy", 0.01);
+    expect(result.valid).toBe(true);
+    expect(result.price).toBeCloseTo(0.5, 10);
+  });
+
+  it("legit 0.001 market — re-snap with same tick leaves price unchanged", () => {
+    // When authTick === cmd.tickSize the correction branch is skipped entirely,
+    // but if called anyway, re-snap is a no-op for an already on-grid price.
+    const result = resnapPriceToTick(0.155, "buy", 0.001);
+    expect(result.valid).toBe(true);
+    expect(result.price).toBeCloseTo(0.155, 10);
+  });
+
+  it("price below min tick after snap → valid=false (below-min-tick boundary)", () => {
+    // A price so low that floor-snap would land below tickSize (e.g. price < tickSize).
+    // clampExecutablePrice returns minPrice (= tickSize) in this case, which is valid.
+    const result = resnapPriceToTick(0.005, "buy", 0.01);
+    // Clamped to 0.01 (minPrice for 0.01 tick)
+    expect(result.valid).toBe(true);
+    expect(result.price).toBeCloseTo(0.01, 10);
+  });
+
+  it("non-finite price returns valid=false", () => {
+    const result = resnapPriceToTick(NaN, "buy", 0.01);
+    expect(result.valid).toBe(false);
   });
 });

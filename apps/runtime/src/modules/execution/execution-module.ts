@@ -20,6 +20,7 @@ import type {
   FillRepository,
   Order,
   PlaceOrderCommand,
+  PlaceOrderParams,
   CancelOrderCommand,
   OrderId,
   BotRunId,
@@ -52,7 +53,7 @@ import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-calculator.js";
-import { validateExecutablePrice } from "../../executable-price.js";
+import { resnapPriceToTick, validateExecutablePrice } from "../../executable-price.js";
 import {
   evaluateWalletBuyCapacity,
   evaluatePerTokenOrderCapacity,
@@ -88,6 +89,7 @@ import {
   findOldestStaleOpenBuy,
 } from "../../buy-order-lifecycle.js";
 import { ExecutionQueue } from "./execution-queue.js";
+import { AuthoritativeTickResolver } from "./authoritative-tick-resolver.js";
 import {
   buildReservationSnapshot,
   computeMakerOpenOrderUsdc,
@@ -230,6 +232,12 @@ export interface ExecutionModuleDeps {
   repriceChainPolicy?: (() => RepriceChainPolicyConfig) | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
   positionConcentration?: Pick<PositionConcentrationService, "evaluateBuy"> | undefined;
+  /**
+   * Lazy resolver that fetches the authoritative CLOB minimum_tick_size at the
+   * order boundary (Phase 1 of the tick-size rejection fix). Optional — when
+   * absent the existing cmd.tickSize is used unchanged (legacy / test default).
+   */
+  tickResolver?: AuthoritativeTickResolver | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -902,10 +910,123 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    // Phase 3: suppress placement when the market is explicitly not accepting
+    // orders (fail-open: unknown / absent from cache → proceed).
+    // NEVER calls marketRepo.deactivate() — active=1 must be preserved for
+    // open-position pricing regardless of transient liveness state.
+    if (this.getNotAcceptingOrdersSkip(cmd)) {
+      await this.skipNotAcceptingOrders(cmd);
+      return;
+    }
+
     const postOnlyCross = this.getPostOnlyCrossPreSubmitSkip(cmd);
     if (postOnlyCross) {
       await this.skipPostOnlyCrossPreSubmit(cmd, postOnlyCross);
       return;
+    }
+
+    // Phase 1: resolve authoritative CLOB tick at the order boundary (cached,
+    // lazy). Falls back to cmd.tickSize on any lookup failure — never blocks.
+    // tokenId is passed for the /tick-size last-resort fallback (step 3).
+    const authTick = this.deps.tickResolver
+      ? await this.deps.tickResolver.resolve(cmd.conditionId, cmd.tickSize, cmd.tokenId)
+      : cmd.tickSize;
+
+    let effectiveTick = cmd.tickSize;
+    let effectivePrice = cmd.price;
+
+    if (authTick !== cmd.tickSize) {
+      // Re-snap the price to the corrected tick grid (side-aware) before validating.
+      // If re-snap fails we fall back to the original cmd tick/price — the order
+      // may still get an exchange reject, but we never place a knowingly invalid one.
+      const resnap = resnapPriceToTick(cmd.price, cmd.side, authTick);
+      if (resnap.valid) {
+        effectiveTick = authTick;
+        effectivePrice = resnap.price;
+        this.log.info(
+          {
+            commandId: cmd.commandId,
+            conditionId: cmd.conditionId,
+            staleTick: cmd.tickSize,
+            authTick,
+            originalPrice: cmd.price,
+            snappedPrice: resnap.price,
+          },
+          "authoritative CLOB tick differs — price re-snapped and tick corrected before submit",
+        );
+        await this.applyTickCorrection(cmd.conditionId, cmd.tokenId, authTick);
+      } else {
+        this.log.warn(
+          {
+            commandId: cmd.commandId,
+            conditionId: cmd.conditionId,
+            staleTick: cmd.tickSize,
+            authTick,
+            originalPrice: cmd.price,
+          },
+          "authoritative tick mismatch but re-snap invalid — keeping original tick/price",
+        );
+      }
+    }
+
+    // C1: effectiveCmd carries the final price/tick so DB rows and events
+    // always reflect exactly what was submitted to the exchange.
+    const effectiveCmd: PlaceOrderCommand =
+      effectiveTick === cmd.tickSize && effectivePrice === cmd.price
+        ? cmd
+        : ({ ...cmd, price: effectivePrice, tickSize: effectiveTick } as PlaceOrderCommand);
+
+    // M3: if a proactive correction changed price/tick, re-run the guards
+    // that depend on those values before the first submit — the corrected
+    // price might now cross the book or match an open near-duplicate BUY.
+    if (effectiveCmd !== cmd) {
+      const reCross = this.getPostOnlyCrossPreSubmitSkip(effectiveCmd);
+      if (reCross) {
+        await this.skipPostOnlyCrossPreSubmit(effectiveCmd, reCross);
+        return;
+      }
+      if (effectiveCmd.side === "buy") {
+        const reDuplicate = findNearDuplicateOpenBuy(
+          this.deps.orderRepo.findOpen(),
+          effectiveCmd,
+          effectiveTick,
+        );
+        if (reDuplicate) {
+          this.log.warn(
+            {
+              commandId: cmd.commandId,
+              conditionId: cmd.conditionId,
+              effectivePrice,
+              effectiveTick,
+            },
+            "proactive tick correction produced near-duplicate BUY — skipping",
+          );
+          await this.publishOrderSkipped(effectiveCmd, "tick-corrected-near-duplicate-buy", {
+            effectiveTick,
+            effectivePrice,
+          });
+          return;
+        }
+      }
+      const priceCheck = validateExecutablePrice(effectivePrice, effectiveTick);
+      if (!priceCheck.ok) {
+        this.log.warn(
+          {
+            commandId: cmd.commandId,
+            conditionId: cmd.conditionId,
+            effectivePrice,
+            effectiveTick,
+            reason: priceCheck.reason,
+          },
+          "proactive tick correction produced invalid price — skipping",
+        );
+        await this.publishOrderSkipped(effectiveCmd, "tick-corrected-invalid-price", {
+          effectiveTick,
+          effectivePrice,
+          reason: priceCheck.reason,
+        });
+        return;
+      }
     }
 
     const placeParams = {
@@ -913,10 +1034,10 @@ export class ExecutionModule implements RuntimeModule {
       tokenId: cmd.tokenId,
       side: cmd.side,
       size: cmd.size,
-      price: cmd.price,
+      price: effectivePrice,
       ...(cmd.postOnly !== undefined ? { postOnly: cmd.postOnly } : {}),
       orderType: cmd.orderType,
-      tickSize: cmd.tickSize,
+      tickSize: effectiveTick,
       negRisk: cmd.negRisk,
       ...(cmd.expiration !== undefined ? { expiration: cmd.expiration } : {}),
     };
@@ -956,7 +1077,20 @@ export class ExecutionModule implements RuntimeModule {
         exchangeErrorDetails,
         cmd.commandId,
       );
-      const rejectedOrder = this.buildOrder(cmd, "rejected", null, {
+
+      // Phase 2: before persisting the first-attempt rejection, try once more
+      // with a corrected tick/price if the CLOB told us the tick was wrong.
+      // Hard cap = 1: retryAfterInvalidTick handles both success and failure
+      // persistence paths and returns true so we exit immediately.
+      if (exchangeRejectionReason === "rejection_invalid_tick") {
+        if (await this.retryAfterInvalidTick(cmd, effectiveTick, placeParams, now)) {
+          return;
+        }
+      }
+
+      // C1: use effectiveCmd so the persisted row reflects the price/tick
+      // that was actually sent to the exchange (not the stale original).
+      const rejectedOrder = this.buildOrder(effectiveCmd, "rejected", null, {
         errorCode,
         errorMessage: result.errorMessage ?? reason,
         errorDetails: exchangeErrorDetails,
@@ -964,7 +1098,7 @@ export class ExecutionModule implements RuntimeModule {
       });
       this.deps.orderRepo.save(rejectedOrder);
 
-      await this.publishOrderRejected(cmd, {
+      await this.publishOrderRejected(effectiveCmd, {
         reason,
         errorCode,
         exchangeErrorMessage: result.errorMessage ?? null,
@@ -985,7 +1119,8 @@ export class ExecutionModule implements RuntimeModule {
         exchangeErrorDetails,
         cmd.commandId,
       );
-      const rejectedOrder = this.buildOrder(cmd, "rejected", null, {
+      // C1: use effectiveCmd here too.
+      const rejectedOrder = this.buildOrder(effectiveCmd, "rejected", null, {
         errorCode: ExchangeErrorCode.Unknown,
         errorMessage: "gateway returned success without order id",
         errorDetails: exchangeErrorDetails,
@@ -993,7 +1128,7 @@ export class ExecutionModule implements RuntimeModule {
       });
       this.deps.orderRepo.save(rejectedOrder);
 
-      await this.publishOrderRejected(cmd, {
+      await this.publishOrderRejected(effectiveCmd, {
         reason: "gateway returned success without order id",
         errorCode: ExchangeErrorCode.Unknown,
         exchangeErrorMessage: "gateway returned success without order id",
@@ -1003,24 +1138,25 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
-    // Order accepted
+    // Order accepted — use effectiveCmd (C1) so DB row and event carry the
+    // price/tick that the exchange actually accepted, not the stale original.
     const orderId = createOrderId(result.orderId);
-    const order = this.buildOrder(cmd, "open", result.orderId);
-    this.persistAcceptedOrderOrThrow(cmd, order, result.orderId);
+    const order = this.buildOrder(effectiveCmd, "open", result.orderId);
+    this.persistAcceptedOrderOrThrow(effectiveCmd, order, result.orderId);
 
-    this.log.info({ commandId: cmd.commandId, orderId: result.orderId }, "order placed");
+    this.log.info({ commandId: effectiveCmd.commandId, orderId: result.orderId }, "order placed");
 
     await this.deps.bus.publish("OrderPlaced", {
-      commandId: cmd.commandId,
-      clientOrderId: cmd.clientOrderId,
+      commandId: effectiveCmd.commandId,
+      clientOrderId: effectiveCmd.clientOrderId,
       orderId,
-      tokenId: cmd.tokenId,
-      conditionId: cmd.conditionId,
-      side: cmd.side,
-      price: cmd.price,
-      size: cmd.size,
-      orderType: cmd.orderType,
-      signalReason: cmd.signalReason ?? null,
+      tokenId: effectiveCmd.tokenId,
+      conditionId: effectiveCmd.conditionId,
+      side: effectiveCmd.side,
+      price: effectiveCmd.price,
+      size: effectiveCmd.size,
+      orderType: effectiveCmd.orderType,
+      signalReason: effectiveCmd.signalReason ?? null,
       timestamp: now,
     });
 
@@ -1624,6 +1760,32 @@ export class ExecutionModule implements RuntimeModule {
     return null;
   }
 
+  /**
+   * Phase 3: returns true only when the in-memory marketCache EXPLICITLY says
+   * acceptingOrders === false. Absent from cache (unknown liveness) → returns
+   * false so the order proceeds (fail-open). Never calls deactivate().
+   */
+  private getNotAcceptingOrdersSkip(cmd: PlaceOrderCommand): boolean {
+    const market = this.marketCache.get(String(cmd.tokenId));
+    return market !== undefined && market.acceptingOrders === false;
+  }
+
+  private async skipNotAcceptingOrders(cmd: PlaceOrderCommand): Promise<void> {
+    this.log.warn(
+      {
+        commandId: cmd.commandId,
+        tokenId: cmd.tokenId,
+        conditionId: cmd.conditionId,
+        side: cmd.side,
+        price: cmd.price,
+      },
+      "order suppressed — market not accepting orders",
+    );
+    await this.publishOrderSkipped(cmd, "not_accepting_orders", {
+      conditionId: String(cmd.conditionId),
+    });
+  }
+
   private async skipDuplicateBuyPreSubmitIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
     if (cmd.side !== "buy") return false;
     const duplicate = findNearDuplicateOpenBuy(this.deps.orderRepo.findOpen(), cmd, cmd.tickSize);
@@ -1860,6 +2022,42 @@ export class ExecutionModule implements RuntimeModule {
         );
       }
       throw err;
+    }
+  }
+
+  /** Write corrected tick to DB + refresh all in-memory caches. Fire-and-
+   *  forget from the bus perspective — NormalizedMarketUpdated is awaited so
+   *  the signal-to-order cache is updated before the next sweep.
+   *
+   *  M5: iterates the entire marketCache to update BOTH tokens of the binary
+   *  market (YES and NO share the same conditionId but each has its own cache
+   *  key). The tokenId param is kept for call-site compatibility but is unused
+   *  — the conditionId is the authoritative key for the DB write. */
+  private async applyTickCorrection(
+    conditionId: string,
+    _tokenId: TokenId,
+    authTick: number,
+  ): Promise<void> {
+    // Narrow DB write: only tick_size + updated_at (no saveBatch clobber risk).
+    this.deps.marketRepo.updateTickSize(conditionId, authTick);
+
+    // Refresh every cached token that belongs to this condition (typically 2:
+    // the YES and NO outcomes). Collect into an array for a single bus publish.
+    const correctedMarkets: NormalizedMarket[] = [];
+    for (const [key, market] of this.marketCache) {
+      if (market.conditionId === conditionId) {
+        const corrected: NormalizedMarket = { ...market, tickSize: authTick };
+        this.marketCache.set(key, corrected);
+        correctedMarkets.push(corrected);
+      }
+    }
+
+    if (correctedMarkets.length > 0) {
+      // Propagate to all EventBus subscribers (signal-to-order, etc.).
+      await this.deps.bus.publish("NormalizedMarketUpdated", {
+        markets: correctedMarkets,
+        timestamp: Date.now(),
+      });
     }
   }
 
@@ -2399,6 +2597,174 @@ export class ExecutionModule implements RuntimeModule {
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  /**
+   * Phase 2: one-shot retry for rejection_invalid_tick, called from the rejection
+   * branch BEFORE orderRepo.save(). Hard cap = 1 (the caller returns immediately on
+   * `true`; it cannot be called again for the same executePlace invocation).
+   * Returns true when a retry was attempted so the caller can return; false when a
+   * pre-submit guard blocks the retry (caller falls through to persist the original
+   * rejection normally).
+   */
+  private async retryAfterInvalidTick(
+    cmd: PlaceOrderCommand,
+    firstAttemptTick: number,
+    firstPlaceParams: PlaceOrderParams,
+    nowMs: number,
+  ): Promise<boolean> {
+    if (!this.deps.tickResolver) return false;
+
+    // Evict the stale cache entry — the CLOB just confirmed the tick was wrong.
+    this.deps.tickResolver.invalidate(cmd.conditionId);
+    const retryTick = await this.deps.tickResolver.resolve(
+      cmd.conditionId,
+      cmd.tickSize,
+      cmd.tokenId,
+    );
+
+    // M4: if the resolver returned the same tick as the first attempt (e.g.
+    // all CLOB lookups failed and it fell back to the persisted value) there
+    // is nothing to improve — skip the retry to avoid a guaranteed second rejection.
+    if (retryTick === firstAttemptTick) {
+      this.log.warn(
+        { commandId: cmd.commandId, conditionId: cmd.conditionId, retryTick },
+        "invalid-tick rejection — resolved retry tick matches first attempt, skipping retry",
+      );
+      return false;
+    }
+
+    const retryResnap = resnapPriceToTick(cmd.price, cmd.side, retryTick);
+    if (!retryResnap.valid) {
+      this.log.warn(
+        { commandId: cmd.commandId, conditionId: cmd.conditionId, retryTick },
+        "invalid-tick rejection — re-snap invalid for retry tick, skipping retry",
+      );
+      return false;
+    }
+
+    // Re-run all price/tick-dependent pre-submit guards on the corrected values.
+    const retryCmd = { ...cmd, price: retryResnap.price, tickSize: retryTick } as PlaceOrderCommand;
+    const retryPostOnlyCross = this.getPostOnlyCrossPreSubmitSkip(retryCmd);
+    const retryDuplicate =
+      cmd.side === "buy"
+        ? findNearDuplicateOpenBuy(this.deps.orderRepo.findOpen(), retryCmd, retryTick)
+        : null;
+    const retryPriceValidation = validateExecutablePrice(retryResnap.price, retryTick);
+
+    if (retryPostOnlyCross || retryDuplicate || !retryPriceValidation.ok) {
+      this.log.warn(
+        {
+          commandId: cmd.commandId,
+          conditionId: cmd.conditionId,
+          retryTick,
+          retryPrice: retryResnap.price,
+          blockedByPostOnlyCross: !!retryPostOnlyCross,
+          blockedByDuplicate: !!retryDuplicate,
+          priceValid: retryPriceValidation.ok,
+        },
+        "invalid-tick rejection — retry blocked by pre-submit guard",
+      );
+      return false;
+    }
+
+    const retryParams: PlaceOrderParams = {
+      ...firstPlaceParams,
+      price: retryResnap.price,
+      tickSize: retryTick,
+    };
+    this.log.info(
+      {
+        commandId: cmd.commandId,
+        conditionId: cmd.conditionId,
+        firstAttemptTick,
+        retryTick,
+        retryPrice: retryResnap.price,
+      },
+      "invalid-tick rejection — retrying once with corrected tick/price",
+    );
+
+    const retryResult = await this.deps.gateway.placeOrder(retryParams);
+
+    if (retryResult.success) {
+      await this.applyTickCorrection(cmd.conditionId, cmd.tokenId, retryTick);
+
+      if (!retryResult.orderId || retryResult.orderId.trim().length === 0) {
+        // Success with no orderId — same treatment as the main path (lines ~1028+).
+        const exchangeErrorDetails = { responseBody: null, reason: "missing-order-id" };
+        const exchangeRejectionReason = this.classifyExchangeRejection(
+          exchangeErrorDetails,
+          cmd.commandId,
+        );
+        const rejectedOrder = this.buildOrder(retryCmd, "rejected", null, {
+          errorCode: ExchangeErrorCode.Unknown,
+          errorMessage: "gateway returned success without order id",
+          errorDetails: exchangeErrorDetails,
+          rejectionReason: exchangeRejectionReason,
+        });
+        this.deps.orderRepo.save(rejectedOrder);
+        await this.publishOrderRejected(cmd, {
+          reason: "gateway returned success without order id",
+          errorCode: ExchangeErrorCode.Unknown,
+          exchangeErrorMessage: "gateway returned success without order id",
+          exchangeErrorDetails,
+          timestamp: nowMs,
+        });
+        return true;
+      }
+
+      const orderId = createOrderId(retryResult.orderId);
+      const order = this.buildOrder(retryCmd, "open", retryResult.orderId);
+      this.persistAcceptedOrderOrThrow(retryCmd, order, retryResult.orderId);
+      this.log.info(
+        { commandId: cmd.commandId, orderId: retryResult.orderId },
+        "order placed (invalid-tick retry)",
+      );
+      await this.deps.bus.publish("OrderPlaced", {
+        commandId: cmd.commandId,
+        clientOrderId: cmd.clientOrderId,
+        orderId,
+        tokenId: cmd.tokenId,
+        conditionId: cmd.conditionId,
+        side: cmd.side,
+        price: retryCmd.price,
+        size: cmd.size,
+        orderType: cmd.orderType,
+        signalReason: cmd.signalReason ?? null,
+        timestamp: nowMs,
+      });
+      if (
+        !this.deps.runtimeMode ||
+        this.deps.runtimeMode === "simulation" ||
+        this.deps.runtimeMode === "paper"
+      ) {
+        await this.checkForFills(orderId);
+      }
+      return true;
+    }
+
+    // Retry also failed — persist using the retry's (final) price and tick.
+    const retryErrorCode = retryResult.errorCode ?? ExchangeErrorCode.Unknown;
+    this.recordGatewayReject(retryErrorCode);
+    const retryErrorDetails = retryResult.errorDetails ?? null;
+    const retryRejectionReason = this.classifyExchangeRejection(retryErrorDetails, cmd.commandId);
+    const rejectedOrder = this.buildOrder(retryCmd, "rejected", null, {
+      errorCode: retryErrorCode,
+      errorMessage:
+        retryResult.errorMessage ??
+        this.gatewayRejectReason(retryResult.errorCode, retryResult.errorMessage),
+      errorDetails: retryErrorDetails,
+      rejectionReason: retryRejectionReason,
+    });
+    this.deps.orderRepo.save(rejectedOrder);
+    await this.publishOrderRejected(cmd, {
+      reason: this.gatewayRejectReason(retryResult.errorCode, retryResult.errorMessage),
+      errorCode: retryErrorCode,
+      exchangeErrorMessage: retryResult.errorMessage ?? null,
+      exchangeErrorDetails: retryErrorDetails,
+      timestamp: nowMs,
+    });
+    return true;
   }
 
   private classifyExchangeRejection(

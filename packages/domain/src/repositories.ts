@@ -224,6 +224,15 @@ export interface MarketRepository {
    * (UPDATE ... WHERE token_id = ?).
    */
   updateScoresBatch(updates: Iterable<MarketScoreUpdate>): void;
+
+  /**
+   * Narrow tick-size correction (Phase 1 of the authoritative-tick fix).
+   * Writes ONLY the `tick_size` column for every token in the condition.
+   * Intentionally does NOT call save()/saveBatch() to avoid broad row
+   * rewrites — only touches tick_size + updated_at.
+   * Rows whose `condition_id` does not exist are silently ignored.
+   */
+  updateTickSize(conditionId: string, tickSize: number): void;
 }
 
 // ─── Trading Calendar ─────────────────────────────────────────────────────

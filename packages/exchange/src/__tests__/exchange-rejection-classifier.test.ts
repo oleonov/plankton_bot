@@ -84,4 +84,28 @@ describe("classifyExchangeRejectionReason", () => {
   it("returns no-payload for empty string payload", () => {
     expect(classifyExchangeRejectionReason("")).toBe("rejection_no_payload");
   });
+
+  it("classifies invalid tick size bodies", () => {
+    expect(
+      classifyExchangeRejectionReason({
+        responseBody: {
+          error: "invalid tick size",
+        },
+      }),
+    ).toBe("rejection_invalid_tick");
+  });
+
+  it("classifies minimum-for-the-market-is bodies", () => {
+    expect(
+      classifyExchangeRejectionReason({
+        responseBody: {
+          error: "the minimum for the market is 0.01",
+        },
+      }),
+    ).toBe("rejection_invalid_tick");
+  });
+
+  it("classifies invalid tick size as plain string payload", () => {
+    expect(classifyExchangeRejectionReason("invalid tick size")).toBe("rejection_invalid_tick");
+  });
 });

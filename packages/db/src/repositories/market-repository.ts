@@ -616,6 +616,20 @@ export class SqliteMarketRepository implements MarketRepository {
     }
     this.updateScoresTx(batch, this.updateScoreStmt);
   }
+
+  // Narrow tick-size correction. Touches ONLY tick_size + updated_at so the
+  // broad saveBatch ownership invariant for score columns is not disturbed.
+  private updateTickSizeStmt: Database.Statement | null = null;
+
+  updateTickSize(conditionId: string, tickSize: number): void {
+    if (!this.updateTickSizeStmt) {
+      this.updateTickSizeStmt = this.db.prepare(
+        `UPDATE markets SET tick_size = ?, updated_at = ? WHERE condition_id = ?`,
+      );
+    }
+    const updatedAt = new Date().toISOString();
+    this.updateTickSizeStmt.run(tickSize, updatedAt, conditionId);
+  }
 }
 
 function effectiveScore(market: Market, nowMs: number): number | null {

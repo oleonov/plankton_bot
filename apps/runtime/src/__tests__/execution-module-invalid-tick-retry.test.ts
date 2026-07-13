@@ -1,0 +1,627 @@
+/**
+ * Phase 2 tests — invalid-tick in-attempt retry in ExecutionModule.
+ *
+ * Verifies:
+ *  1. Retry success: first attempt gets rejection_invalid_tick, retry succeeds →
+ *     order persisted with corrected price/tick, OrderPlaced published.
+ *  2. Retry cap: retry also rejected → exactly one retry (two gateway calls total),
+ *     final rejection persisted with the retry price/tick.
+ *  3. Non-tick rejection untouched: balance-insufficient rejection → no retry,
+ *     gateway called exactly once.
+ *  4. No retry when tickResolver is absent → original rejection persisted, one call.
+ *  5. Guard blocks retry (near-duplicate BUY) → no second placeOrder call.
+ */
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import {
+  createTokenId,
+  createCommandId,
+  createBotRunId,
+  createConditionId,
+  ExchangeErrorCode,
+  SignalReason,
+} from "@krabs/domain";
+import type {
+  ExchangeGateway,
+  PlaceOrderParams,
+  PlaceOrderResult,
+  CancelOrderParams,
+  CancelOrderResult,
+  ExchangeOrder,
+  ExchangeFill,
+  ExchangeBalance,
+  OrderRepository,
+  FillRepository,
+  PlaceOrderCommand,
+  TokenId,
+  ClientOrderId,
+  NormalizedMarket,
+  RiskEventRepository,
+} from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
+import { ExecutionModule } from "../modules/execution/execution-module.js";
+import { AuthoritativeTickResolver } from "../modules/execution/authoritative-tick-resolver.js";
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const BOT_RUN_ID = createBotRunId("test-run-p2");
+
+const INVALID_TICK_ERROR_DETAILS = {
+  reason: "invalid tick size (0.001), minimum for the market is 0.01",
+};
+
+function makePlaceCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand {
+  return {
+    type: "PlaceOrderCommand",
+    commandId: createCommandId("cmd-p2"),
+    clientOrderId: "plk_p2_abc" as ClientOrderId,
+    source: "strategy",
+    tokenId: createTokenId("tok-p2"),
+    conditionId: createConditionId("cond-p2"),
+    side: "buy",
+    size: 10,
+    price: 0.5,
+    orderType: "GTC",
+    // cmd carries the stale Gamma tick
+    tickSize: 0.001,
+    negRisk: false,
+    sequenceInTick: 0,
+    signalReason: null,
+    ...overrides,
+  };
+}
+
+function createMockGateway(): ExchangeGateway {
+  return {
+    placeOrder: vi
+      .fn<(params: PlaceOrderParams) => Promise<PlaceOrderResult>>()
+      .mockResolvedValue({ success: true, orderId: "ord-p2-1" }),
+    cancelOrder: vi
+      .fn<(params: CancelOrderParams) => Promise<CancelOrderResult>>()
+      .mockResolvedValue({ success: true }),
+    cancelAllOrders: vi.fn().mockResolvedValue({ success: true }),
+    getOpenOrders: vi.fn<() => Promise<ExchangeOrder[]>>().mockResolvedValue([]),
+    getOpenOrdersForToken: vi
+      .fn<(tokenId: TokenId) => Promise<ExchangeOrder[]>>()
+      .mockResolvedValue([]),
+    getFills: vi.fn<(sinceMs: number) => Promise<ExchangeFill[]>>().mockResolvedValue([]),
+    getBalances: vi.fn<() => Promise<ExchangeBalance[]>>().mockResolvedValue([]),
+    getPositionBalance: vi.fn<(tokenId: TokenId) => Promise<number>>().mockResolvedValue(0),
+    getOutcomeTokenBalance: vi.fn<(tokenId: TokenId) => Promise<bigint>>().mockResolvedValue(0n),
+    redeemPositions: vi.fn().mockResolvedValue({
+      status: "skipped" as const,
+      conditionIds: [],
+      txHash: null,
+      gasUsed: null,
+    }),
+    mergePositions: vi
+      .fn<(merges: { conditionId: string; amount: number }[]) => Promise<void>>()
+      .mockResolvedValue(),
+    healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 1 }),
+  };
+}
+
+function createMockOrderRepo(): OrderRepository {
+  return {
+    save: vi.fn(),
+    findById: vi.fn().mockReturnValue(null),
+    findByClientOrderId: vi.fn().mockReturnValue(null),
+    findByExchangeOrderId: vi.fn().mockReturnValue(null),
+    findOpen: vi.fn().mockReturnValue([]),
+    findByTokenId: vi.fn().mockReturnValue([]),
+    updateStatus: vi.fn(),
+    sumOpenBuyNotional: vi.fn().mockReturnValue(0),
+  };
+}
+
+function createMockFillRepo(): FillRepository {
+  return {
+    save: vi.fn(),
+    exists: vi.fn().mockReturnValue(false),
+    findByOrderId: vi.fn().mockReturnValue([]),
+    findByTokenId: vi.fn().mockReturnValue([]),
+    findRecent: vi.fn().mockReturnValue([]),
+    findUnreconciled: vi.fn().mockReturnValue([]),
+    markReconciled: vi.fn(),
+    getLatestTimestamp: vi.fn().mockReturnValue(null),
+  };
+}
+
+function createMockMarketRepo() {
+  return {
+    save: vi.fn(),
+    saveBatch: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue({ active: true }),
+    findByTokenIds: vi.fn().mockReturnValue([]),
+    findByConditionId: vi.fn().mockReturnValue([]),
+    findActive: vi.fn().mockReturnValue([]),
+    findAll: vi.fn().mockReturnValue([]),
+    upsertAll: vi.fn(),
+    deactivate: vi.fn(),
+    iterateActiveTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
+    iterateAllTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
+    deactivateMissing: vi.fn().mockReturnValue(0),
+    findTrackedForPricing: vi.fn().mockReturnValue([]),
+    findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
+    updateScoresBatch: vi.fn(),
+    updateTickSize: vi.fn(),
+  };
+}
+
+function makeNormalizedMarket(overrides: Partial<NormalizedMarket> = {}): NormalizedMarket {
+  return {
+    tokenId: createTokenId("tok-p2"),
+    conditionId: createConditionId("cond-p2"),
+    slug: "test-market-p2",
+    eventSlug: null,
+    question: "Test market P2?",
+    outcome: "Yes",
+    regime: null,
+    horizon: null,
+    endDate: null,
+    active: true,
+    tradable: true,
+    tickSize: 0.001,
+    negRisk: false,
+    acceptingOrders: true,
+    enableOrderBook: true,
+    bestBid: 0.48,
+    bestAsk: 0.52,
+    midPrice: 0.5,
+    spread: 0.04,
+    minOrderSize: null,
+    bookSource: "clob",
+    gammaCreatedAt: null,
+    snapshotTs: Date.now(),
+    eventMarketCount: 1,
+    ...overrides,
+  };
+}
+
+/** Minimal stub that always returns the same tick for every resolve() call. */
+function createMockTickResolver(resolvedTick: number): AuthoritativeTickResolver {
+  return {
+    resolve: vi.fn().mockResolvedValue(resolvedTick),
+    invalidate: vi.fn(),
+  } as unknown as AuthoritativeTickResolver;
+}
+
+/**
+ * Staged resolver: Phase 1 resolve() returns `firstTick` (so the proactive
+ * correction block is a no-op when firstTick === cmd.tickSize). After
+ * invalidation the Phase 2 retry resolve() returns `retryTick`.
+ *
+ * Use this when the test is specifically exercising the retry path: Phase 1
+ * does nothing, the stale tick goes to the exchange, gets rejected, then
+ * Phase 2 fetches the real tick and retries once.
+ */
+function createStagedMockTickResolver(
+  firstTick: number,
+  retryTick: number,
+): AuthoritativeTickResolver {
+  return {
+    resolve: vi.fn().mockResolvedValueOnce(firstTick).mockResolvedValueOnce(retryTick),
+    invalidate: vi.fn(),
+  } as unknown as AuthoritativeTickResolver;
+}
+
+const silentLog = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+  fatal: vi.fn(),
+  child: () => silentLog,
+} as any;
+
+function getExecutePlaceCaller(mod: ExecutionModule): {
+  executePlace(cmd: PlaceOrderCommand): Promise<void>;
+} {
+  return mod as unknown as {
+    executePlace(cmd: PlaceOrderCommand): Promise<void>;
+  };
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+describe("ExecutionModule — invalid-tick in-attempt retry (Phase 2)", () => {
+  let gateway: ReturnType<typeof createMockGateway>;
+  let bus: InProcessEventBus;
+  let marketRepo: ReturnType<typeof createMockMarketRepo>;
+  let orderRepo: ReturnType<typeof createMockOrderRepo>;
+  let fillRepo: ReturnType<typeof createMockFillRepo>;
+
+  beforeEach(() => {
+    gateway = createMockGateway();
+    bus = new InProcessEventBus();
+    marketRepo = createMockMarketRepo();
+    orderRepo = createMockOrderRepo();
+    fillRepo = createMockFillRepo();
+  });
+
+  it("retries once on invalid-tick rejection and persists success with corrected price/tick", async () => {
+    // Phase 1 resolver returns the same stale tick (0.001) as in cmd, so no
+    // proactive correction happens and the stale tick goes to the exchange.
+    // The exchange rejects it; Phase 2 then invalidates the cache, re-resolves
+    // to 0.01, and retries — the second call succeeds.
+    (gateway.placeOrder as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        success: false,
+        errorCode: ExchangeErrorCode.Unknown,
+        errorMessage: "invalid tick size (0.001), minimum for the market is 0.01",
+        errorDetails: INVALID_TICK_ERROR_DETAILS,
+      })
+      .mockResolvedValueOnce({ success: true, orderId: "ord-retry-ok" });
+
+    // Phase 1 sees no tick mismatch (0.001 === cmd.tickSize); retry gets 0.01.
+    const tickResolver = createStagedMockTickResolver(/* phase1 */ 0.001, /* retry */ 0.01);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      tickResolver,
+    });
+    await mod.start();
+
+    const cmd = makePlaceCmd({ price: 0.5, tickSize: 0.001 });
+    const caller = getExecutePlaceCaller(mod);
+
+    const placedEvents: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (e) => {
+      placedEvents.push(e);
+    });
+
+    await caller.executePlace(cmd);
+
+    // Gateway called twice: first attempt + retry.
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
+
+    // Resolver invalidated and re-resolved after the rejection.
+    expect(tickResolver.invalidate).toHaveBeenCalledWith(String(cmd.conditionId));
+    expect(tickResolver.resolve).toHaveBeenCalledTimes(2); // once proactive (Phase 1) + once retry
+
+    // The retry call uses the corrected tick and price.
+    const retryCall = (gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[1]![0];
+    expect(retryCall.tickSize).toBe(0.01);
+    expect(retryCall.price).toBe(0.5); // 0.5 is already on 0.01 grid
+
+    // Order persisted as open with the retry price.
+    expect(orderRepo.save).toHaveBeenCalledTimes(1);
+    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(savedOrder.status).toBe("open");
+    expect(savedOrder.price).toBe(0.5);
+
+    // OrderPlaced published.
+    expect(placedEvents).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("hard cap: retry also rejected → persists retry rejection; gateway called exactly twice", async () => {
+    // Same staged setup: Phase 1 sees no mismatch (0.001), stale tick goes to
+    // exchange, gets rejected; Phase 2 resolves to 0.01 and retries once —
+    // but the retry also fails. The hard cap means no third attempt.
+    (gateway.placeOrder as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        success: false,
+        errorCode: ExchangeErrorCode.Unknown,
+        errorMessage: "invalid tick size (0.001), minimum for the market is 0.01",
+        errorDetails: INVALID_TICK_ERROR_DETAILS,
+      })
+      .mockResolvedValueOnce({
+        success: false,
+        errorCode: ExchangeErrorCode.Unknown,
+        errorMessage: "still failing",
+        errorDetails: { reason: "still failing" },
+      });
+
+    const tickResolver = createStagedMockTickResolver(/* phase1 */ 0.001, /* retry */ 0.01);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      tickResolver,
+    });
+    await mod.start();
+
+    const cmd = makePlaceCmd({ price: 0.5, tickSize: 0.001 });
+    await getExecutePlaceCaller(mod).executePlace(cmd);
+
+    // Exactly two gateway calls; no third attempt.
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
+
+    // Rejection persisted once with the retry's corrected price.
+    expect(orderRepo.save).toHaveBeenCalledTimes(1);
+    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(savedOrder.status).toBe("rejected");
+    // Retry price: 0.5 snapped to 0.01 tick → still 0.5.
+    expect(savedOrder.price).toBe(0.5);
+
+    await mod.stop();
+  });
+
+  it("non-tick rejection leaves gateway called exactly once and no retry", async () => {
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      success: false,
+      errorCode: ExchangeErrorCode.Unknown,
+      errorMessage: "not enough balance",
+      errorDetails: { reason: "not enough balance" },
+    });
+
+    const tickResolver = createMockTickResolver(0.01);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      tickResolver,
+    });
+    await mod.start();
+
+    await getExecutePlaceCaller(mod).executePlace(makePlaceCmd({ price: 0.5, tickSize: 0.001 }));
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    // invalidate must NOT have been called.
+    expect(tickResolver.invalidate).not.toHaveBeenCalled();
+
+    await mod.stop();
+  });
+
+  it("skips retry when no tickResolver is configured; original rejection persisted with one gateway call", async () => {
+    // Without a tickResolver dep there is nothing to re-resolve from, so
+    // retryAfterInvalidTick returns false immediately and the original
+    // rejection is persisted on the first (and only) gateway call.
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      success: false,
+      errorCode: ExchangeErrorCode.Unknown,
+      errorMessage: "invalid tick size (0.001), minimum for the market is 0.01",
+      errorDetails: INVALID_TICK_ERROR_DETAILS,
+    });
+
+    // No tickResolver in deps.
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      // tickResolver intentionally omitted
+    });
+    await mod.start();
+
+    await getExecutePlaceCaller(mod).executePlace(makePlaceCmd({ price: 0.5, tickSize: 0.001 }));
+
+    // No retry — gateway called only once.
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    // Original rejection persisted.
+    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(savedOrder.status).toBe("rejected");
+
+    await mod.stop();
+  });
+
+  it("skips retry when near-duplicate BUY guard fires; original rejection persisted", async () => {
+    // First attempt → invalid-tick rejection.
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      success: false,
+      errorCode: ExchangeErrorCode.Unknown,
+      errorMessage: "invalid tick size (0.001), minimum for the market is 0.01",
+      errorDetails: INVALID_TICK_ERROR_DETAILS,
+    });
+
+    // Phase 1 sees no mismatch → no proactive correction → M3 never fires.
+    // Phase 2 retry resolves 0.01 (different from 0.001) but is blocked by the
+    // near-duplicate guard inside retryAfterInvalidTick.
+    const tickResolver = createStagedMockTickResolver(/* phase1 */ 0.001, /* retry */ 0.01);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      tickResolver,
+    });
+
+    // Inject a near-duplicate open BUY so the guard fires.
+    // findNearDuplicateOpenBuy requires matching tokenId, isSameBuyFamily
+    // (same signalReason + non-null decisionRuleId), and isNearPrice (within 1 tick).
+    const SHARED_RULE_ID = "rule-p2-dup";
+    const existingBuyOrder = {
+      orderId: "existing-buy-1",
+      clientOrderId: "plk_existing_buy" as ClientOrderId,
+      tokenId: createTokenId("tok-p2"),
+      conditionId: createConditionId("cond-p2"),
+      side: "buy" as const,
+      orderType: "GTC",
+      postOnly: false,
+      price: 0.5, // same price as retry → near-duplicate
+      size: 10,
+      sizeUsdc: 5,
+      status: "open" as const,
+      exchangeOrderId: "existing-buy-1",
+      signalId: null,
+      signalReason: SignalReason.ProbeEntry,
+      decisionRuleId: SHARED_RULE_ID,
+      signalTimestamp: null,
+      entryStyle: null,
+      exchangeErrorCode: null,
+      exchangeErrorMessage: null,
+      exchangeErrorPayload: null,
+      exchangeRejectionReason: null,
+      metadata: null,
+      botRunId: BOT_RUN_ID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    (orderRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([existingBuyOrder]);
+
+    await mod.start();
+
+    // Cmd must have the same signalReason + decisionRuleId so isSameBuyFamily returns true.
+    const cmd = makePlaceCmd({
+      price: 0.5,
+      tickSize: 0.001,
+      signalReason: SignalReason.ProbeEntry,
+      decisionRuleId: SHARED_RULE_ID,
+    });
+    await getExecutePlaceCaller(mod).executePlace(cmd);
+
+    // Guard should block retry — only one gateway call.
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    // Original rejection (first attempt) persisted.
+    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(savedOrder.status).toBe("rejected");
+    // Price is from original cmd (0.5).
+    expect(savedOrder.price).toBe(0.5);
+
+    await mod.stop();
+  });
+});
+
+// ─── M4 / M5 regression tests (Codex review bugs) ────────────────────────────
+
+describe("ExecutionModule — M4: same-tick guard in retryAfterInvalidTick", () => {
+  it("skips retry when resolver returns the same tick as first attempt", async () => {
+    // Scenario: all CLOB lookups failed, resolver fell back to the persisted
+    // stale tick (0.001) — same as firstAttemptTick. Retrying with the same
+    // tick guarantees a second rejection, so we should bail out immediately.
+    const bus = new InProcessEventBus();
+    const gateway = createMockGateway();
+    const orderRepo = createMockOrderRepo();
+    const marketRepo = createMockMarketRepo();
+    const fillRepo = createMockFillRepo();
+
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: false,
+      errorCode: ExchangeErrorCode.Unknown,
+      errorMessage: "invalid tick size (0.001), minimum for the market is 0.01",
+      errorDetails: INVALID_TICK_ERROR_DETAILS,
+    });
+
+    // Resolver always returns the same stale tick: no improvement available.
+    const tickResolver = createMockTickResolver(0.001);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      tickResolver,
+    });
+    await mod.start();
+
+    const cmd = makePlaceCmd({ price: 0.5, tickSize: 0.001 });
+    await getExecutePlaceCaller(mod).executePlace(cmd);
+
+    // M4 guard: only one gateway call (no retry placed).
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    // Original rejection was persisted after the guard short-circuited.
+    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(savedOrder.status).toBe("rejected");
+
+    await mod.stop();
+  });
+});
+
+describe("ExecutionModule — M5: applyTickCorrection refreshes sibling token", () => {
+  it("updates both YES and NO tokens in marketCache when correcting tick on retry success", async () => {
+    // Two tokens share the same conditionId — a YES and a NO outcome.
+    // After a successful retry, applyTickCorrection must refresh BOTH so
+    // subsequent commands for the sibling token don't get a stale tick.
+    const bus = new InProcessEventBus();
+    const gateway = createMockGateway();
+    const orderRepo = createMockOrderRepo();
+    const marketRepo = createMockMarketRepo();
+    const fillRepo = createMockFillRepo();
+
+    const COND_ID = createConditionId("cond-m5");
+    const YES_TOKEN = createTokenId("tok-m5-yes");
+    const NO_TOKEN = createTokenId("tok-m5-no");
+
+    // Phase 1 sees no mismatch (resolver returns 0.001 = cmd.tickSize) →
+    // no proactive correction. The stale tick goes to the exchange and is
+    // rejected. Phase 2 retry resolves 0.01, places a second call that
+    // succeeds, and applyTickCorrection should update BOTH cached tokens.
+    (gateway.placeOrder as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        success: false,
+        errorCode: ExchangeErrorCode.Unknown,
+        errorMessage: "invalid tick size (0.001), minimum for the market is 0.01",
+        errorDetails: INVALID_TICK_ERROR_DETAILS,
+      })
+      .mockResolvedValueOnce({ success: true, orderId: "ord-m5-ok" });
+
+    const tickResolver = createStagedMockTickResolver(/* phase1 */ 0.001, /* retry */ 0.01);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      tickResolver,
+    });
+    await mod.start();
+
+    // Pre-populate marketCache with both tokens via NormalizedMarketUpdated.
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeNormalizedMarket({ tokenId: YES_TOKEN, conditionId: COND_ID, tickSize: 0.001 }),
+        makeNormalizedMarket({ tokenId: NO_TOKEN, conditionId: COND_ID, tickSize: 0.001 }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    // Track NormalizedMarketUpdated events after mod.start() so we catch the
+    // applyTickCorrection publish (the initial inject above fires before subscribe).
+    const updateEvents: ReadonlyArray<NormalizedMarket>[] = [];
+    bus.subscribe("NormalizedMarketUpdated", async (e) => {
+      updateEvents.push(e.markets);
+    });
+
+    const cmd = makePlaceCmd({ tokenId: YES_TOKEN, conditionId: COND_ID, tickSize: 0.001 });
+    await getExecutePlaceCaller(mod).executePlace(cmd);
+
+    // Retry must have succeeded.
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
+
+    // NormalizedMarketUpdated from applyTickCorrection should include BOTH tokens.
+    const allUpdatedTokenIds = updateEvents.flat().map((m) => String(m.tokenId));
+    expect(allUpdatedTokenIds).toContain(String(YES_TOKEN));
+    expect(allUpdatedTokenIds).toContain(String(NO_TOKEN));
+
+    // Both entries should carry the corrected tick.
+    for (const m of updateEvents.flat()) {
+      if (m.conditionId === COND_ID) {
+        expect(m.tickSize).toBe(0.01);
+      }
+    }
+
+    await mod.stop();
+  });
+});

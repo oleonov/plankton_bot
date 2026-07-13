@@ -205,6 +205,31 @@ export function clampExecutablePrice(
 }
 
 /**
+ * Re-snap a price to a new tick grid when the authoritative tick has changed.
+ *
+ * Uses `clampExecutablePrice` (BUY=floor, SELL=ceil) to find the nearest
+ * on-grid price, then validates it. Returns the candidate price + a `valid`
+ * flag so callers can decide whether to proceed or fall back.
+ *
+ * Shared by Phase 1 (proactive tick correction at the order boundary) and
+ * Phase 2 (in-attempt retry after an invalid-tick rejection).
+ */
+export interface ResnapResult {
+  readonly price: number;
+  readonly valid: boolean;
+}
+
+export function resnapPriceToTick(
+  price: number,
+  side: ExecutableSide,
+  tickSize: number,
+): ResnapResult {
+  const snapped = clampExecutablePrice(price, tickSize, side);
+  const validation = validateExecutablePrice(snapped, tickSize);
+  return { price: snapped, valid: validation.ok };
+}
+
+/**
  * ADR-014: Bounded-midpoint price improvement.
  *
  * The naive `max(bestBid, midpoint - tickSize)` is unsafe on wide books

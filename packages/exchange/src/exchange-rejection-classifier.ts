@@ -2,6 +2,7 @@ export type ExchangeRejectionReason =
   | "rejection_balance_insufficient"
   | "rejection_min_size"
   | "rejection_post_only_cross"
+  | "rejection_invalid_tick"
   | "rejection_missing_order_id"
   | "rejection_unknown"
   | "rejection_no_payload";
@@ -32,6 +33,9 @@ export function classifyExchangeRejectionReason(payload: unknown): ExchangeRejec
   }
   if (lower.includes("invalid post-only") || lower.includes("order crosses book")) {
     return "rejection_post_only_cross";
+  }
+  if (lower.includes("invalid tick size") || lower.includes("minimum for the market is")) {
+    return "rejection_invalid_tick";
   }
 
   return "rejection_unknown";

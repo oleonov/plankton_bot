@@ -69,7 +69,8 @@ function isPermanentBusinessRejection(message: string): boolean {
   return (
     reason === "rejection_balance_insufficient" ||
     reason === "rejection_min_size" ||
-    reason === "rejection_post_only_cross"
+    reason === "rejection_post_only_cross" ||
+    reason === "rejection_invalid_tick"
   );
 }
 

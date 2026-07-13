@@ -122,6 +122,7 @@ import {
 } from "./modules/soft-ranking/score-distribution-snapshot.js";
 import { softRankingDisabledCleanup } from "./soft-ranking-disabled-cleanup.js";
 import { ExecutionModule } from "./modules/execution/execution-module.js";
+import { AuthoritativeTickResolver } from "./modules/execution/authoritative-tick-resolver.js";
 import { ExchangeStateStore } from "./modules/execution/exchange-state-store.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
 import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
@@ -1099,6 +1100,10 @@ async function main(): Promise<void> {
       .filter(
         (position) => executionProfileManagerRef.current?.isProfileOwned(position.tokenId) ?? false,
       ).length;
+  const tickResolver = new AuthoritativeTickResolver({
+    getMarket: (conditionId) => marketDataGateway.getMarket(conditionId),
+    getTickSize: (tokenId) => marketDataGateway.getTickSize(tokenId),
+  });
   const executionModule = new ExecutionModule({
     gateway: exchangeGateway,
     bus,
@@ -1130,6 +1135,7 @@ async function main(): Promise<void> {
     repriceChainPolicy: () => currentExecutionPolicy().repriceChain,
     riskEventRepo: repos.riskEvent,
     positionConcentration,
+    tickResolver,
   });
 
   // 7g. Risk + Inventory module
