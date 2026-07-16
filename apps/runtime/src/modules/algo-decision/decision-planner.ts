@@ -14,14 +14,19 @@ import type {
 } from "@krabs/domain";
 import {
   deriveState,
+  evaluateBounceExit,
   evaluateContinuation,
   evaluateD8ProfitRatio,
   evaluateD9LossExit,
   evaluateDecision,
+  evaluateGateEntryEligibility,
   evaluateMinMarketAge,
   evaluateR23DipTrigger,
   evaluateSize,
   computeSellSizingPlan,
+  BOUNCE_EXIT_TARGET_RULE_ID,
+  BOUNCE_EXIT_TIMEOUT_RULE_ID,
+  GATE_ENTRY_RULE_ID,
   H5_WIDE_COHORT_GUARD_REASON,
   isAbandoned,
   isAlive,
@@ -346,6 +351,14 @@ export type DecisionPlanningInput = {
   postBuyCooldown: { cooldownMs: number; ageMs: number; lastBuyFillAt: number } | null;
   latestSellOrder: SellOrderSizingContext | null;
   hasActiveSellOrderForQd: boolean;
+  /**
+   * Whether a BOUNCE_EXIT_TARGET SELL is already resting (docs/plans/2026-07-15-
+   * gate-bounce-live-experiment.md, Phase 3). Optional — like `s1Ownership`/
+   * `profileLadderOwned` above — so the ~dozen existing DecisionPlanningInput
+   * fixtures don't need a mechanical field-add sweep; missing/undefined is
+   * treated as false (no resting target), which is the safe default.
+   */
+  hasActiveBounceTargetOrder?: boolean;
   sellLoopGuard: SellLoopGuardSnapshot | null;
   s1Ownership?: S1OwnershipSnapshot | null;
   profileLadderOwned?: boolean;
@@ -737,6 +750,7 @@ function recordTwoLaneEntryShadow(
     executionPolicy: input.executionPolicy,
     buySizeRules: input.buySizeRules,
     decisionRules: input.decisionRules,
+    gateEntryPolicy: input.executionPolicy?.gateEntry ?? null,
   });
   sideEffects.push({
     kind: "two_lane_entry_shadow",
@@ -956,6 +970,77 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
         timestamp: nowIso,
       });
       return none(metrics, suppressions, sideEffects);
+    }
+  }
+
+  // Bounce-exit branch (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
+  // Phase 3): GATE-lane positions are governed exclusively by the resting-
+  // target/timeout bounce-exit rule once enabled — D8/D9/continuation-stop/
+  // static rules never fire for them (R23-lane and null-lane positions are
+  // untouched and continue through the normal stack below).
+  // SENSITIVE CLASS: any condition below unmet SUPPRESSES — falls through to
+  // D8/D9 exactly as if bounce-exit didn't exist, never substitutes another
+  // order. This is what makes bounceExit.enabled:false a true no-op.
+  if (legState && isOpenPosition(input.position) && input.position.entryLane === "GATE") {
+    const bounceExit = input.executionPolicy?.bounceExit;
+    if (
+      bounceExit?.enabled === true &&
+      bounceExit.mode === "micro_live" &&
+      bounceExit.whitelistConditionIds.includes(market.conditionId)
+    ) {
+      const bounceDecision = evaluateBounceExit(
+        {
+          avgBuyPrice: input.position.avgEntryPrice,
+          holdSeconds: holdDurationSeconds ?? 0,
+          tickSize: market.tickSize,
+          hasActiveBounceTargetOrder: input.hasActiveBounceTargetOrder ?? false,
+        },
+        bounceExit,
+      );
+      if (bounceDecision.intent === "none") {
+        suppressions.push({
+          tokenId: market.tokenId,
+          conditionId: market.conditionId,
+          reasonCode: "bounce-exit-target-resting",
+          side: "SELL",
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          state,
+          price,
+          buyCount,
+          timeSinceLastSeconds,
+          emissionFacts,
+          timestamp: nowIso,
+        });
+        return none(metrics, suppressions, sideEffects);
+      }
+      const bounceRuleId =
+        bounceDecision.intent === "maker_target"
+          ? BOUNCE_EXIT_TARGET_RULE_ID
+          : BOUNCE_EXIT_TIMEOUT_RULE_ID;
+      return buildSignalOrSuppression({
+        input,
+        market,
+        decision: {
+          action: "SELL",
+          ruleId: bounceRuleId,
+          // Phase 4 (Codex M3): the resting maker target's price is the
+          // harvest target itself, computed by evaluateBounceExit — carried
+          // through so resolveActionPrice below never re-derives it from
+          // best-bid/spread guards. The timeout intent has no target price;
+          // it takes the normal sell-executable-price path (bestBid-anchored),
+          // matching a plain force-exit signal.
+          ...(bounceDecision.intent === "maker_target"
+            ? { explicitPrice: bounceDecision.targetPx }
+            : {}),
+        },
+        buyCount,
+        emissionFacts,
+        triggerTelemetry,
+        suppressions,
+        sideEffects,
+        metrics,
+        nowIso,
+      });
     }
   }
 
@@ -1279,6 +1364,39 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
     });
   }
 
+  // GATE live first-entry branch (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
+  // Phase 2): a config-driven alternative first-entry lane for long-lived, cheap
+  // longshots, evaluated alongside R23 above. Placed here (after the R23 branch)
+  // so `!r23Fired` holds by control flow — R23 firing already returned a signal
+  // above, so reaching this line means R23 did not fire; no separate R23
+  // re-evaluation is introduced. `!input.hasPendingBuyOrder` similarly already
+  // holds: the pending-buy suppression earlier in this function returns for any
+  // `!legState && hasPendingBuyOrder` case before this point is ever reached.
+  // SENSITIVE CLASS: any condition below unmet SUPPRESSES — falls through to the
+  // normal decision-rule table below, never substitutes another order.
+  if (!legState && !isOpenPosition(input.position)) {
+    const gateEntry = input.executionPolicy?.gateEntry;
+    if (
+      gateEntry?.enabled === true &&
+      gateEntry.mode === "micro_live" &&
+      gateEntry.whitelistConditionIds.includes(market.conditionId) &&
+      evaluateGateEntryEligibility(gateEntry, market)
+    ) {
+      return buildSignalOrSuppression({
+        input,
+        market,
+        decision: { action: "BUY", ruleId: GATE_ENTRY_RULE_ID },
+        buyCount,
+        emissionFacts,
+        triggerTelemetry,
+        suppressions,
+        sideEffects,
+        metrics,
+        nowIso,
+      });
+    }
+  }
+
   const decision = evaluateDecision(ctx, input.decisionRules);
   if (decision.action === "HOLD") {
     suppressions.push({
@@ -1324,7 +1442,7 @@ function none(
 function buildSignalOrSuppression(args: {
   input: DecisionPlanningInput;
   market: NormalizedMarket;
-  decision: { action: TradeDecisionAction; ruleId: string };
+  decision: { action: TradeDecisionAction; ruleId: string; explicitPrice?: number };
   buyCount: number;
   emissionFacts: EmissionFacts;
   triggerTelemetry: TriggerTelemetry;
@@ -1338,9 +1456,12 @@ function buildSignalOrSuppression(args: {
   const timeSinceLastSeconds = input.legState
     ? (input.now - new Date(input.legState.lastTradeAt).getTime()) / 1000
     : null;
-  const actionPrice = resolveActionPrice(decision.action, market, {
-    avgEntryPrice: input.position?.avgEntryPrice ?? null,
-  });
+  const actionPrice: SellExecutablePriceResult =
+    decision.explicitPrice != null
+      ? { price: decision.explicitPrice, reasonCode: null }
+      : resolveActionPrice(decision.action, market, {
+          avgEntryPrice: input.position?.avgEntryPrice ?? null,
+        });
   if (actionPrice.price == null) {
     args.suppressions.push({
       tokenId: market.tokenId,
@@ -1471,7 +1592,14 @@ function buildSignalOrSuppression(args: {
 
   // Track Q loop guard: a blocked token suppresses SELL signal generation for the
   // cooldown, regardless of which rule produced the SELL. BUY is never gated here.
-  if (decision.action === "SELL" && input.sellLoopGuard?.blocked) {
+  // BOUNCE_EXIT_TIMEOUT is a dedicated 4h force-exit (docs/plans/2026-07-15-
+  // gate-bounce-live-experiment.md, Phase 4 / Codex R3-M3) and must bypass this
+  // guard — the resting BOUNCE_EXIT_TARGET maker order still respects it.
+  if (
+    decision.action === "SELL" &&
+    input.sellLoopGuard?.blocked &&
+    decision.ruleId !== BOUNCE_EXIT_TIMEOUT_RULE_ID
+  ) {
     const guard = input.sellLoopGuard;
     args.sideEffects.push({
       kind: "sell_loop_guard_suppressed",
@@ -1592,7 +1720,7 @@ function legacyGuardForDecisionRule(ruleId: string): ProfileOwnedLegacyGuard | n
 function buildSignalDraft(args: {
   input: DecisionPlanningInput;
   market: NormalizedMarket;
-  decision: { action: TradeDecisionAction; ruleId: string };
+  decision: { action: TradeDecisionAction; ruleId: string; explicitPrice?: number };
   buyCount: number;
   emissionFacts: EmissionFacts;
   triggerTelemetry: TriggerTelemetry;
@@ -1607,14 +1735,26 @@ function buildSignalDraft(args: {
     ? (input.now - new Date(input.legState.lastTradeAt).getTime()) / 1000
     : null;
   const side = decision.action === "BUY" ? "buy" : ("sell" as const);
-  const actionPrice = resolveActionPrice(decision.action, market, {
-    avgEntryPrice: input.position?.avgEntryPrice ?? null,
-  });
+  const actionPrice: SellExecutablePriceResult =
+    decision.explicitPrice != null
+      ? { price: decision.explicitPrice, reasonCode: null }
+      : resolveActionPrice(decision.action, market, {
+          avgEntryPrice: input.position?.avgEntryPrice ?? null,
+        });
   if (actionPrice.price == null) return null;
   const price = actionPrice.price;
   const reason = resolveSignalReason(side, buyCount);
 
-  if (side === "sell" && input.postBuyCooldown) {
+  // Bounce-exit SELLs (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
+  // Phase 3 fix) are exits on our own just-filled GATE position, not a new
+  // buy-throttled entry — the cooldown concept doesn't apply. Exempting both
+  // rule IDs matters for different reasons: the resting target must post
+  // immediately on fill (that's the whole point of "post the target as soon
+  // as the GATE fill lands"), and the timeout must never be delayed by an
+  // unrelated recent buy elsewhere.
+  const isBounceExitRule =
+    decision.ruleId === BOUNCE_EXIT_TARGET_RULE_ID || decision.ruleId === BOUNCE_EXIT_TIMEOUT_RULE_ID;
+  if (side === "sell" && input.postBuyCooldown && !isBounceExitRule) {
     args.suppressions.push({
       tokenId: market.tokenId,
       conditionId: market.conditionId,

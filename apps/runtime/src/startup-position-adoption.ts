@@ -249,6 +249,7 @@ export async function runStartupPositionAdoption(
         fee: savedFill.fee,
         signalReason: localOrder.signalReason ?? SYNTHETIC_SIGNAL_REASON,
         entryStyle: localOrder.entryStyle ?? null,
+        decisionRuleId: localOrder.decisionRuleId ?? null,
         timestamp: pending.fill.timestamp,
       });
       deps.fillRepo.markReconciled([savedFill.fillId]);

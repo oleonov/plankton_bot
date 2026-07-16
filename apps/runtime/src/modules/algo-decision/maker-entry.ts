@@ -6,8 +6,15 @@
 // SELL/harvest target uses ceilToTick (never accept less than intended). This
 // mirrors the side-aware snapping convention already in executable-price.ts.
 
-import { floorToTick, ceilToTick } from "../../executable-price.js";
+import { floorToTick } from "../../executable-price.js";
+import { computeHarvestTarget } from "@krabs/domain";
 import type { R23DipTriggerResult } from "@krabs/domain";
+
+// Re-exported for existing callers (maker-entry-shadow.ts, __tests__/maker-entry.test.ts):
+// moved into packages/domain/src/tick-math.ts (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
+// Phase 3) so packages/domain/src/bounce-exit.ts can compute the same target
+// without importing from apps/runtime. No behavior change.
+export { computeHarvestTarget };
 
 export interface MakerBookSnapshot {
   readonly bestBid: number;
@@ -37,14 +44,6 @@ export function computeMakerEntryPrice(
   improveTicks: number,
 ): number {
   return floorToTick(bestBid + improveTicks * tickSize, tickSize);
-}
-
-/**
- * Compute the harvest (SELL) target: entryPx scaled up by gainPct, ceil-snapped
- * to tick (sell no less than target).
- */
-export function computeHarvestTarget(entryPx: number, gainPct: number, tickSize: number): number {
-  return ceilToTick(entryPx * (1 + gainPct), tickSize);
 }
 
 function isValidBook(book: MakerBookSnapshot): boolean {

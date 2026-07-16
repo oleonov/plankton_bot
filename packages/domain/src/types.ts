@@ -419,6 +419,16 @@ export interface Position {
   realizedPnl: number;
   status: PositionStatus;
   entryStyle: "probe" | "maker" | null;
+  /**
+   * First-entry lane provenance (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
+   * Phase 3), derived from the first fill's decisionRuleId and durable for the
+   * position's lifetime. "GATE" scopes the bounce-exit rule; everything else
+   * (including unknown/legacy/undefined positions) stays on the D8/D9 static
+   * exit stack. Optional (rather than required) so the ~60 existing Position
+   * fixtures across the repo don't need a mechanical field-add sweep — every
+   * read site treats `undefined` the same as `null` (both are non-GATE, safe).
+   */
+  entryLane?: "GATE" | "R23" | null;
   openedAt: string; // ISO timestamp
   closedAt: string | null; // ISO timestamp
   updatedAt: string; // ISO timestamp
@@ -1914,6 +1924,10 @@ export interface ExecutionPolicy {
   trackAAddThrottle: TrackAAddThrottlePolicy;
   /** R23 maker-entry prototype — default mode off; empty whitelist ⇒ no live orders. */
   makerEntry: MakerEntryPolicy;
+  /** GATE-lane entry eligibility (live experiment) — default mode off; empty whitelist ⇒ no live orders. */
+  gateEntry: GateEntryPolicy;
+  /** GATE-scoped bounce-exit target/timeout (live experiment) — default mode off; empty whitelist ⇒ no live orders. */
+  bounceExit: BounceExitPolicy;
 }
 
 export interface DepositActivationPolicy {
@@ -1980,6 +1994,52 @@ export interface MakerEntryPolicy {
    * Bounds: (0, 1) exclusive.
    */
   scaleInStepPct: number;
+}
+
+/**
+ * GATE-lane entry eligibility policy (live experiment, config-only until wired into
+ * decision-planner). Default mode "off" and empty whitelist ensure zero live-order changes.
+ */
+export interface GateEntryPolicy {
+  /** Operating mode. "off" disables all GATE-lane live entries (default). */
+  mode: "off" | "micro_live";
+  /** Master enable switch; both this AND mode==="micro_live" are required for live effect. */
+  enabled: boolean;
+  /** Minimum market lifespan (days from creation to end date) for GATE eligibility. */
+  minLifespanDays: number;
+  /** Minimum token mid-price (inclusive) for GATE eligibility. */
+  minPrice: number;
+  /** Maximum token mid-price (inclusive) for GATE eligibility. */
+  maxPrice: number;
+  /**
+   * Condition IDs eligible for micro-live real orders.
+   * Empty array ⇒ no live orders regardless of mode.
+   */
+  whitelistConditionIds: string[];
+  /** Hard cap on a single GATE-lane BUY order size in USDC (micro-live only). */
+  microMaxOrderUsdc: number;
+}
+
+/**
+ * GATE-scoped bounce-exit policy (live experiment, config-only until wired into
+ * decision-planner). Default mode "off" and empty whitelist ensure zero live-order changes.
+ */
+export interface BounceExitPolicy {
+  /** Operating mode. "off" disables all bounce-exit live behavior (default). */
+  mode: "off" | "micro_live";
+  /** Master enable switch; both this AND mode==="micro_live" are required for live effect. */
+  enabled: boolean;
+  /** Required gross gain pct from entry to trigger the bounce-exit target sell (e.g. 0.257 = +25.7%). */
+  targetGainPct: number;
+  /** How long to wait for the bounce target before timing out and exiting via taker, in ms. */
+  timeoutMs: number;
+  /**
+   * Condition IDs eligible for micro-live real orders.
+   * Empty array ⇒ no live orders regardless of mode.
+   */
+  whitelistConditionIds: string[];
+  /** Hard cap on a single bounce-exit sell order size in USDC (micro-live only). */
+  microMaxOrderUsdc: number;
 }
 
 export interface ProfileSummary {

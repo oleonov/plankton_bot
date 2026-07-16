@@ -64,6 +64,7 @@ import {
   shouldRecoverFromPriceMove,
   computeSellSizingPlan,
   S1_LADDER_RULE_ID,
+  BOUNCE_EXIT_TARGET_RULE_ID,
 } from "@krabs/domain";
 import { readContinuationMode, readContinuationModeVersion } from "@krabs/db";
 import type { EvalContext } from "@krabs/domain";
@@ -493,7 +494,9 @@ export interface AlgoDecisionModuleDeps {
    * Optional: omitted only by tests that don't exercise SELL telemetry.
    */
   positionRepo?: Pick<PositionRepository, "findByTokenId" | "findOpen"> | undefined;
-  orderRepo?: Pick<OrderRepository, "findByTokenId" | "findRecentByTokenId"> | undefined;
+  orderRepo?:
+    | Pick<OrderRepository, "findByTokenId" | "findRecentByTokenId" | "findOpen">
+    | undefined;
   /**
    * Read-only startup recovery for recent BUY no-order-id rejects. The live
    * event path owns the cooldown in memory, but deploy/restart must not clear a
@@ -1737,6 +1740,8 @@ export class AlgoDecisionModule implements RuntimeModule {
       postBuyCooldown,
       latestSellOrder: legState ? this.getLatestSellOrderForSizing(tokenId) : null,
       hasActiveSellOrderForQd: legState ? this.hasActiveSellOrderForQd(tokenId) : false,
+      hasActiveBounceTargetOrder:
+        position?.entryLane === "GATE" ? this.hasActiveBounceTargetOrder(tokenId) : false,
       sellLoopGuard: this.deps.sellLoopGuard?.getSnapshot(tokenId, now) ?? null,
       s1Ownership: this.deps.s1Ownership?.getSnapshot(tokenId) ?? null,
       profileLadderOwned: this.deps.profileLadderOwnership?.isProfileLadderOwned(tokenId) ?? false,
@@ -1927,6 +1932,22 @@ export class AlgoDecisionModule implements RuntimeModule {
         !isProfileLadderOrderForQd(order) &&
         isWorkingSellOrderStatus(order.status ?? null),
     );
+  }
+
+  // Bounce-exit branch input (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
+  // Phase 3): whether a BOUNCE_EXIT_TARGET SELL is already resting, so
+  // evaluateBounceExit doesn't post a duplicate target while one is unfilled.
+  // Uses findOpen() (not the recent-N scan the sibling helpers above use) —
+  // a resting target can outlive many newer BUY/add orders on the same token
+  // while it waits to fill, so a bounded "last 20" window can miss it and let
+  // a duplicate target through. findOpen() is unbounded and status-scoped, so
+  // it always finds a still-working row regardless of how old it is.
+  private hasActiveBounceTargetOrder(tokenId: TokenId): boolean {
+    const repo = this.deps.orderRepo;
+    if (!repo) return false;
+    return repo
+      .findOpen()
+      .some((order) => order.tokenId === tokenId && order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID);
   }
 
   private async resolveContinuationFactsForPlanner(

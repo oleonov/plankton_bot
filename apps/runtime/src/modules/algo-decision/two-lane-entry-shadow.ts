@@ -21,6 +21,7 @@ import {
   type AlgoDecisionRule,
   type AlgoSizeRule,
   type ExecutionPolicy,
+  type GateEntryPolicy,
   type NormalizedMarket,
   type R23DipTriggerPolicy,
   type TradeDecisionAction,
@@ -78,6 +79,14 @@ export interface TwoLaneEntryShadowInput {
   executionPolicy: ExecutionPolicy | null;
   buySizeRules: readonly AlgoSizeRule[];
   decisionRules: readonly AlgoDecisionRule[];
+  /**
+   * Optional override for the GATE lane's price/lifespan thresholds (live
+   * experiment, docs/plans/2026-07-15-gate-bounce-live-experiment.md). When
+   * omitted, the shadow falls back to the fixed GATE_MIN_PRICE/GATE_MAX_PRICE/
+   * GATE_MIN_LIFESPAN_DAYS research constants — byte-for-byte unchanged.
+   * GATE_MAX_NOTIONAL has no policy equivalent and is never overridden.
+   */
+  gateEntryPolicy?: GateEntryPolicy | null;
 }
 
 export interface TwoLaneEntryShadowProjection {
@@ -168,6 +177,11 @@ export function evaluateTwoLaneEntryShadow(
   const lifespanDays = computeLifespanDays(market.endDate, market.gammaCreatedAt);
   const proposedNotional = computeProposedNotional(midPrice, input.buySizeRules);
 
+  // GATE_MAX_NOTIONAL has no GateEntryPolicy equivalent and is never overridden.
+  const gateMinPrice = input.gateEntryPolicy?.minPrice ?? GATE_MIN_PRICE;
+  const gateMaxPrice = input.gateEntryPolicy?.maxPrice ?? GATE_MAX_PRICE;
+  const gateMinLifespanDays = input.gateEntryPolicy?.minLifespanDays ?? GATE_MIN_LIFESPAN_DAYS;
+
   const r23 = evaluateR23DipTrigger(
     { state: "OTHER", currentMidpoint: midPrice ?? 0, maxMidpointInWindow: input.r23MaxMidpoint },
     resolveShadowR23Policy(input.executionPolicy),
@@ -181,10 +195,10 @@ export function evaluateTwoLaneEntryShadow(
   const evaluated: Record<GateComponentKey, Component> = {
     size_le_13:
       proposedNotional == null ? unknownComponent : present(proposedNotional <= GATE_MAX_NOTIONAL),
-    price_gt_0_01: midPrice == null ? unknownComponent : present(midPrice > GATE_MIN_PRICE),
-    cheap_side_le_055: midPrice == null ? unknownComponent : present(midPrice <= GATE_MAX_PRICE),
+    price_gt_0_01: midPrice == null ? unknownComponent : present(midPrice > gateMinPrice),
+    cheap_side_le_055: midPrice == null ? unknownComponent : present(midPrice <= gateMaxPrice),
     lifespan_gt_21d:
-      lifespanDays == null ? unknownComponent : present(lifespanDays > GATE_MIN_LIFESPAN_DAYS),
+      lifespanDays == null ? unknownComponent : present(lifespanDays > gateMinLifespanDays),
     own_token_readd: present(false),
     category_not_blocked: unknownComponent,
   };

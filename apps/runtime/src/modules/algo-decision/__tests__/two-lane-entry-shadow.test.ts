@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   createTokenId,
+  DEFAULT_GATE_ENTRY,
   type AlgoDecisionRule,
   type AlgoSizeRule,
+  type GateEntryPolicy,
   type NormalizedMarket,
 } from "@krabs/domain";
 import {
@@ -17,6 +19,7 @@ const tokenId = createTokenId("two-lane-token");
 const CREATED_AT = "2026-05-01T00:00:00.000Z";
 const END_40D = "2026-06-10T00:00:00.000Z";
 const END_5D = "2026-05-06T00:00:00.000Z";
+const END_10D = "2026-05-11T00:00:00.000Z";
 
 function market(overrides: Partial<NormalizedMarket> = {}): NormalizedMarket {
   return {
@@ -91,6 +94,7 @@ function evaluate(
     market?: NormalizedMarket;
     r23MaxMidpoint?: number | null;
     sizeUsdc?: number;
+    gateEntryPolicy?: GateEntryPolicy | null;
   } = {},
 ) {
   return evaluateTwoLaneEntryShadow({
@@ -99,6 +103,7 @@ function evaluate(
     executionPolicy: null, // forces the DEFAULT enabled R23 policy (ratio 0.683)
     buySizeRules: buySizeRules(overrides.sizeUsdc ?? 1),
     decisionRules: DECISION_RULES,
+    gateEntryPolicy: overrides.gateEntryPolicy ?? null,
   });
 }
 
@@ -208,5 +213,54 @@ describe("evaluateTwoLaneEntryShadow", () => {
     expect(p.r23Match).toBe(false);
     expect(p.proposedNotional).toBe(7);
     expect(p.gateComponents.size_le_13).toBe(true);
+  });
+});
+
+describe("evaluateTwoLaneEntryShadow — gateEntryPolicy injection", () => {
+  it("gateEntryPolicy=null behaves identically to omitting it (defaults apply)", () => {
+    const m = market({ midPrice: 0.12 });
+    const omitted = evaluate({ market: m, r23MaxMidpoint: 0.13 });
+    const explicitNull = evaluate({ market: m, r23MaxMidpoint: 0.13, gateEntryPolicy: null });
+    expect(explicitNull).toEqual(omitted);
+  });
+
+  it("overrides the lifespan threshold when a gateEntryPolicy is injected", () => {
+    // 10-day lifespan fails the fixed GATE_MIN_LIFESPAN_DAYS=21 default.
+    const shortLifeMarket = market({ midPrice: 0.12, endDate: END_10D });
+    const withoutPolicy = evaluate({ market: shortLifeMarket, r23MaxMidpoint: 0.13 });
+    expect(withoutPolicy.gateComponents.lifespan_gt_21d).toBe(false);
+    expect(withoutPolicy.laneClass).toBe("NEITHER");
+
+    const gateEntryPolicy: GateEntryPolicy = { ...DEFAULT_GATE_ENTRY, minLifespanDays: 5 };
+    const withPolicy = evaluate({
+      market: shortLifeMarket,
+      r23MaxMidpoint: 0.13,
+      gateEntryPolicy,
+    });
+    expect(withPolicy.gateComponents.lifespan_gt_21d).toBe(true);
+    expect(withPolicy.laneClass).toBe("GATE_ONLY");
+  });
+
+  it("overrides the price ceiling when a gateEntryPolicy is injected", () => {
+    // 0.60 fails the fixed GATE_MAX_PRICE=0.55 default.
+    const pricierMarket = market({ midPrice: 0.6 });
+    const withoutPolicy = evaluate({ market: pricierMarket, r23MaxMidpoint: 0.13 });
+    expect(withoutPolicy.gateComponents.cheap_side_le_055).toBe(false);
+
+    const gateEntryPolicy: GateEntryPolicy = { ...DEFAULT_GATE_ENTRY, maxPrice: 0.65 };
+    const withPolicy = evaluate({ market: pricierMarket, r23MaxMidpoint: 0.13, gateEntryPolicy });
+    expect(withPolicy.gateComponents.cheap_side_le_055).toBe(true);
+  });
+
+  it("GATE_MAX_NOTIONAL (size_le_13) is never overridden by gateEntryPolicy", () => {
+    const gateEntryPolicy: GateEntryPolicy = { ...DEFAULT_GATE_ENTRY, minPrice: 0, maxPrice: 1 };
+    const p = evaluate({
+      market: market({ midPrice: 0.12 }),
+      r23MaxMidpoint: 0.13,
+      sizeUsdc: 999,
+      gateEntryPolicy,
+    });
+    expect(p.gateComponents.size_le_13).toBe(false);
+    expect(p.gateMatch).toBe(false);
   });
 });

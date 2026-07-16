@@ -1387,4 +1387,88 @@ describe("control-db migration infrastructure", () => {
     expect(maker.maxScaleInLevels).toBeUndefined();
     expect(maker.scaleInStepPct).toBeUndefined();
   });
+
+  it("migration 068 backfills default-off gateEntry + bounceExit and bumps version", () => {
+    const dbPath = path.join(tmpDir, "control-gate-bounce-068-backfill.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    // Revert to pre-068 state: remove the gateEntry/bounceExit keys entirely.
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_remove(
+              execution_policy_json,
+              '$.gateEntry',
+              '$.bounceExit'
+            )`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("068_gate_entry_bounce_exit_policy.sql");
+    const before = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const after = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    const policy = JSON.parse(raw.json);
+
+    expect(policy.gateEntry).toEqual({
+      enabled: false,
+      mode: "off",
+      minLifespanDays: 30,
+      minPrice: 0.01,
+      maxPrice: 0.15,
+      whitelistConditionIds: [],
+      microMaxOrderUsdc: 2,
+    });
+    expect(policy.bounceExit).toEqual({
+      enabled: false,
+      mode: "off",
+      targetGainPct: 0.257,
+      timeoutMs: 14_400_000,
+      whitelistConditionIds: [],
+      microMaxOrderUsdc: 2,
+    });
+    expect(after.version).toBeGreaterThan(before.version);
+  });
+
+  it("migration 068 does NOT overwrite an already-present gateEntry/bounceExit block", () => {
+    const dbPath = path.join(tmpDir, "control-gate-bounce-068-preserve-custom.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    // Operator (or an earlier apply) already customized gateEntry on live-lite.
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.gateEntry.minLifespanDays', 45
+            )
+          WHERE profile_id = 'live-lite'`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("068_gate_entry_bounce_exit_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const policy = JSON.parse(raw.json);
+
+    // Customized value preserved — migration only targets rows missing the key.
+    expect(policy.gateEntry.minLifespanDays).toBe(45);
+  });
 });

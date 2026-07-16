@@ -47,6 +47,9 @@ import {
   resolveDynamicChainCapDetails,
   shouldBlockRepriceChain,
   S1_LADDER_RULE_ID,
+  GATE_ENTRY_RULE_ID,
+  BOUNCE_EXIT_TARGET_RULE_ID,
+  BOUNCE_EXIT_TIMEOUT_RULE_ID,
 } from "@krabs/domain";
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
@@ -690,6 +693,37 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
 
+    // Micro-live GATE BUY cap: defense-in-depth cap, mirrors the maker-BUY
+    // per-order cap above (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
+    // Phase 4 / Codex C3). GATE has no open-exposure cap analog in policy —
+    // only a per-order notional cap, so that's the only check here. Sizing
+    // already clamps to this same cap in signal-to-order.ts; this is the
+    // independent execution-side enforcement required by the plan.
+    if (cmd.side === "buy" && cmd.decisionRuleId === GATE_ENTRY_RULE_ID) {
+      const gatePolicy = this.deps.executionPolicy?.()?.gateEntry;
+      if (
+        gatePolicy &&
+        gatePolicy.mode === "micro_live" &&
+        gatePolicy.microMaxOrderUsdc > 0 &&
+        notional > gatePolicy.microMaxOrderUsdc
+      ) {
+        this.log.warn(
+          {
+            commandId: cmd.commandId,
+            notional,
+            microMaxOrderUsdc: gatePolicy.microMaxOrderUsdc,
+          },
+          "GATE BUY rejected — exceeds microMaxOrderUsdc per-order cap",
+        );
+        await this.rejectOrder(
+          cmd,
+          "gate-micro-order-cap-exceeded",
+          ExchangeErrorCode.LivePolicyBlocked,
+        );
+        return;
+      }
+    }
+
     if (cmd.side !== "sell") {
       const minOrderSizeRejection = this.getMinOrderSizeRejection(cmd);
       if (minOrderSizeRejection) {
@@ -1243,11 +1277,36 @@ export class ExecutionModule implements RuntimeModule {
 
   // ─── Helpers ──────────────────────────────────────────────────────────
 
-  private getReservationSnapshot() {
-    return buildReservationSnapshot(
-      this.deps.orderRepo.findOpen(),
-      this.deps.fillRepo,
-      this.pendingReservations.values(),
+  private getReservationSnapshot(cmd?: PlaceOrderCommand) {
+    const openOrders = this.excludeBounceTargetBeingReplaced(this.deps.orderRepo.findOpen(), cmd);
+    return buildReservationSnapshot(openOrders, this.deps.fillRepo, this.pendingReservations.values());
+  }
+
+  /**
+   * A BOUNCE_EXIT_TIMEOUT force-exit cancels the resting BOUNCE_EXIT_TARGET maker
+   * SELL (see signal-to-order.ts) then immediately places its own taker SELL for
+   * the full remaining position. The CancelOrderRequested is processed
+   * asynchronously, so the target order can still show as "open" in orderRepo
+   * when this reservation check runs. Left uncorrected, the target's reserved
+   * size double-counts against the timeout's own full-position SELL and can trip
+   * reserved-token-limit, defeating the guaranteed 4h force-exit. Excluding it
+   * only applies when the incoming command IS that same-token timeout force-exit,
+   * so reservation accounting for every other order is unchanged.
+   */
+  private excludeBounceTargetBeingReplaced(
+    openOrders: Order[],
+    cmd: PlaceOrderCommand | undefined,
+  ): Order[] {
+    if (!cmd || cmd.side !== "sell" || cmd.decisionRuleId !== BOUNCE_EXIT_TIMEOUT_RULE_ID) {
+      return openOrders;
+    }
+    return openOrders.filter(
+      (order) =>
+        !(
+          order.side === "sell" &&
+          order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+          String(order.tokenId) === String(cmd.tokenId)
+        ),
     );
   }
 
@@ -1338,7 +1397,7 @@ export class ExecutionModule implements RuntimeModule {
         newSize: number;
         details: Record<string, unknown>;
       } {
-    const reservations = this.getReservationSnapshot();
+    const reservations = this.getReservationSnapshot(cmd);
     const orderCapacity = evaluateTotalOrdersCapacity({
       policy: this.currentOrderCapacityPolicy(),
       openOrdersTotal: reservations.openOrdersTotal,
@@ -2178,6 +2237,14 @@ export class ExecutionModule implements RuntimeModule {
 
   private async deferSellReplacementIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
     if (cmd.side !== "sell") return false;
+    // Bounce-exit 4h force-exit (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
+    // Phase 4 / Codex M6) bypasses the generic reprice-threshold/lock/chain-cap
+    // gating below entirely — signal-to-order.ts already explicitly cancels the
+    // resting BOUNCE_EXIT_TARGET order before submitting this taker command, and
+    // the ExecutionQueue's per-token mutex (execution-queue.ts) independently
+    // guarantees the cancel executes before this place does, regardless of
+    // whether orderRepo has caught up with the cancel by the time this runs.
+    if (cmd.decisionRuleId === BOUNCE_EXIT_TIMEOUT_RULE_ID) return false;
     if (this.isSellReplacementSubmit(cmd)) return false;
 
     // Normal exit management keeps one live price per token and replaces it

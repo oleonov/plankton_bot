@@ -21,7 +21,12 @@ import type {
   TokenId,
   ConditionId,
 } from "@krabs/domain";
-import { createPositionId, createLotId } from "@krabs/domain";
+import {
+  createPositionId,
+  createLotId,
+  GATE_ENTRY_RULE_ID,
+  R23_DIP_TRIGGER_RULE_ID,
+} from "@krabs/domain";
 import { withImmediate } from "@krabs/db";
 import type { Logger } from "../../logger.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
@@ -39,7 +44,23 @@ export interface FillEvent {
   /** Maker-entry provenance marker carried from the originating order.
    * Defaults to "probe" when absent or null. Set to "maker" in Phase 5. */
   entryStyle?: "probe" | "maker" | null;
+  /** Decision-rule ID of the order that produced this fill; drives Position.entryLane
+   * on first fill (docs/plans/2026-07-15-gate-bounce-live-experiment.md, Phase 3). */
+  decisionRuleId?: string | null;
   timestamp: number;
+}
+
+/**
+ * Durable first-entry lane for a new position, derived once from the first
+ * fill's decisionRuleId (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
+ * Phase 3). Anything other than the GATE/R23 first-entry rule IDs — including
+ * absent/legacy decisionRuleId — resolves to null, which bounce-exit treats as
+ * non-GATE (safe: D8/D9 keep owning it).
+ */
+function deriveEntryLane(decisionRuleId: string | null | undefined): "GATE" | "R23" | null {
+  if (decisionRuleId === GATE_ENTRY_RULE_ID) return "GATE";
+  if (decisionRuleId === R23_DIP_TRIGGER_RULE_ID) return "R23";
+  return null;
 }
 
 export class InventoryHandler {
@@ -94,6 +115,7 @@ export class InventoryHandler {
       realizedPnl: 0,
       status: "open",
       entryStyle: fill.entryStyle ?? "probe",
+      entryLane: deriveEntryLane(fill.decisionRuleId),
       openedAt: now,
       closedAt: null,
       updatedAt: now,

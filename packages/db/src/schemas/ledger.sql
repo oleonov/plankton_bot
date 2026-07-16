@@ -277,6 +277,7 @@ CREATE TABLE IF NOT EXISTS positions (
   realized_pnl       REAL NOT NULL DEFAULT 0,
   status             TEXT NOT NULL DEFAULT 'open',
   entry_style        TEXT,
+  entry_lane         TEXT, -- migration 086: 'GATE' | 'R23' | NULL, set from the first fill
   opened_at          TEXT NOT NULL DEFAULT (datetime('now')),
   closed_at          TEXT,
   consecutive_state_failed_count INTEGER NOT NULL DEFAULT 0,

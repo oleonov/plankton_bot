@@ -15,6 +15,7 @@
  */
 
 import type {
+  CancelOrderCommand,
   DeadSideGuardMode as DomainDeadSideGuardMode,
   EventBus,
   ExecutionPolicy,
@@ -50,6 +51,9 @@ import {
   recordStageDuration,
   resolveTrackS3SpreadCap,
   shouldSkipSellPriceCap,
+  GATE_ENTRY_RULE_ID,
+  BOUNCE_EXIT_TARGET_RULE_ID,
+  BOUNCE_EXIT_TIMEOUT_RULE_ID,
 } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
 import { buildClientOrderId, buildPartialExitClientOrderId } from "@krabs/domain/node";
@@ -639,6 +643,26 @@ export class SignalToOrderBridge {
     const bridgeStartMs = performance.now();
     try {
       const { signal, market: embeddedMarket } = payload;
+
+      // Bounce-exit 4h force-exit (Phase 4 / Codex M6 — round 2 review): the
+      // guaranteed force-exit must reach the cancel-resting-target-then-place-
+      // taker sequence near the end of this function regardless of every
+      // business-logic guard in between (same-price duplicate detection,
+      // order-lifetime rate budget, same-price cooldown, taker-below-margin,
+      // sell-price-below-signal-floor) — each one is scoped to normal SELL
+      // exits and can incorrectly treat this bot's own resting target order,
+      // or a temporarily unprofitable bid, as a reason to silently drop the
+      // one exit that MUST happen. Computed once, up front, so every guard
+      // below can gate on it consistently instead of re-deriving it (and so
+      // a newly added guard in this stretch is bypassed by construction
+      // rather than requiring a fresh one-off edit). Deliberately NOT bypassed:
+      // market-cache-miss, hard-liveness, execution-price validity/tick-bounds,
+      // and order-size-below-minimum — those reflect whether the exchange can
+      // accept an order at all right now, not this bot's own bookkeeping, so
+      // bypassing them would not make the exit any more guaranteed.
+      const isBounceExitTimeoutForceExit =
+        signal.side === "sell" && signal.decisionRuleId === BOUNCE_EXIT_TIMEOUT_RULE_ID;
+
       // Snapshot the policy once so the full approval flow uses a consistent view,
       // even if the provider hot-reloads mid-decision. The S5 ownership guard may
       // return a policy with the Track S5 exit extensions forced off for an
@@ -857,57 +881,62 @@ export class SignalToOrderBridge {
         return;
       }
 
-      const takerMarginBlock = this.resolveTakerBelowMarginBlock(
-        signal,
-        executionTerms,
-        policy,
-        trackRFeeQuote,
-      );
-      if (takerMarginBlock) {
-        this.log.info(
-          {
-            signalId: signal.signalId,
-            tokenId: signal.tokenId,
-            price: executionTerms.price,
-            avgEntry: takerMarginBlock.avgEntry,
-            minExit: takerMarginBlock.minExit,
-            minGrossExitRatio: takerMarginBlock.minGrossExitRatio,
-            blockReason: takerMarginBlock.reason,
-            cacheStatus: pricing.cacheStatus,
-          },
-          "approved SELL skipped — taker price below configured profit margin",
-        );
-        this.recordTakerAtProfitMetric(signal, "blocked", TAKER_BELOW_MARGIN_REASON, {
-          avgEntry: takerMarginBlock.avgEntry,
-          price: executionTerms.price,
-          minExit: takerMarginBlock.minExit,
-          minGrossExitRatio: takerMarginBlock.minGrossExitRatio,
-          reason_detail: takerMarginBlock.reason,
-        });
-        await this.publishConversionSkipped(
+      // Wrapped (not individually flagged) so any future guard added inside
+      // this block is bypassed for the force-exit by construction — see
+      // isBounceExitTimeoutForceExit above.
+      if (!isBounceExitTimeoutForceExit) {
+        const takerMarginBlock = this.resolveTakerBelowMarginBlock(
           signal,
-          "execution-terms",
-          [TAKER_BELOW_MARGIN_REASON],
-          {
-            cacheStatus: pricing.cacheStatus,
-            price: executionTerms.price,
-            avgEntry: takerMarginBlock.avgEntry,
-            minExit: takerMarginBlock.minExit,
-            minGrossExitRatio: takerMarginBlock.minGrossExitRatio,
-            reason: takerMarginBlock.reason,
-          },
-        );
-        this.writeObservation({
-          signal,
-          clientOrderId: null,
-          market,
-          policy,
           executionTerms,
-          canary,
-          sellPricingShadow,
-          skippedReason: TAKER_BELOW_MARGIN_REASON,
-        });
-        return;
+          policy,
+          trackRFeeQuote,
+        );
+        if (takerMarginBlock) {
+          this.log.info(
+            {
+              signalId: signal.signalId,
+              tokenId: signal.tokenId,
+              price: executionTerms.price,
+              avgEntry: takerMarginBlock.avgEntry,
+              minExit: takerMarginBlock.minExit,
+              minGrossExitRatio: takerMarginBlock.minGrossExitRatio,
+              blockReason: takerMarginBlock.reason,
+              cacheStatus: pricing.cacheStatus,
+            },
+            "approved SELL skipped — taker price below configured profit margin",
+          );
+          this.recordTakerAtProfitMetric(signal, "blocked", TAKER_BELOW_MARGIN_REASON, {
+            avgEntry: takerMarginBlock.avgEntry,
+            price: executionTerms.price,
+            minExit: takerMarginBlock.minExit,
+            minGrossExitRatio: takerMarginBlock.minGrossExitRatio,
+            reason_detail: takerMarginBlock.reason,
+          });
+          await this.publishConversionSkipped(
+            signal,
+            "execution-terms",
+            [TAKER_BELOW_MARGIN_REASON],
+            {
+              cacheStatus: pricing.cacheStatus,
+              price: executionTerms.price,
+              avgEntry: takerMarginBlock.avgEntry,
+              minExit: takerMarginBlock.minExit,
+              minGrossExitRatio: takerMarginBlock.minGrossExitRatio,
+              reason: takerMarginBlock.reason,
+            },
+          );
+          this.writeObservation({
+            signal,
+            clientOrderId: null,
+            market,
+            policy,
+            executionTerms,
+            canary,
+            sellPricingShadow,
+            skippedReason: TAKER_BELOW_MARGIN_REASON,
+          });
+          return;
+        }
       }
 
       if (signal.side === "buy" && executionTerms.price > policy.entryPriceCeiling) {
@@ -947,6 +976,7 @@ export class SignalToOrderBridge {
       const nowMs = this.now();
 
       if (
+        !isBounceExitTimeoutForceExit &&
         signal.side === "sell" &&
         executionTerms.kind === "ok" &&
         shouldSkipSellBelowSignalFloor(
@@ -1038,6 +1068,19 @@ export class SignalToOrderBridge {
         executionTerms.kind === "ok" && executionTerms.size != null
           ? executionTerms.size
           : resolveOrderSize(signal, executionTerms.price);
+      // Micro cap enforcement, sizing side (docs/plans/2026-07-15-gate-bounce-
+      // live-experiment.md, Phase 4 / Codex C3): GATE BUY notional must never
+      // exceed gateEntry.microMaxOrderUsdc. execution-module.ts enforces the
+      // same cap independently (defense-in-depth) right before submission.
+      if (
+        signal.side === "buy" &&
+        signal.decisionRuleId === GATE_ENTRY_RULE_ID &&
+        policy.gateEntry.microMaxOrderUsdc > 0 &&
+        executionTerms.price > 0
+      ) {
+        const gateCapSize = policy.gateEntry.microMaxOrderUsdc / executionTerms.price;
+        orderSize = Math.min(orderSize, gateCapSize);
+      }
       const effectiveMinOrderSize = resolveEffectiveMinOrderSize(market.minOrderSize);
       let positionConcentrationMetadata: Record<string, unknown> | null = null;
       if (signal.side === "buy" && this.deps.positionConcentration) {
@@ -1139,13 +1182,22 @@ export class SignalToOrderBridge {
         return;
       }
 
-      const duplicateSell = this.findSamePriceOpenSellOrder(
-        signal.tokenId,
-        signal.side,
-        executionTerms.price,
-        market.tickSize,
-        policy,
-      );
+      // The resting BOUNCE_EXIT_TARGET maker order this signal is about to
+      // cancel is itself an open SELL, and its price can easily sit inside
+      // the same-price tolerance window of a falling bestBid (e.g.
+      // target=0.19, bestBid=0.18, 2-tick window=0.02). Without this bypass,
+      // findSamePriceOpenSellOrder below would treat that resting order as a
+      // reason to skip this force-exit signal (see isBounceExitTimeoutForceExit
+      // above for the full guard-bypass rationale).
+      const duplicateSell = isBounceExitTimeoutForceExit
+        ? null
+        : this.findSamePriceOpenSellOrder(
+            signal.tokenId,
+            signal.side,
+            executionTerms.price,
+            market.tickSize,
+            policy,
+          );
       if (duplicateSell) {
         const timedOutSizeReplacement = isSellTimeoutReplacement({
           existingOrder: duplicateSell,
@@ -1203,7 +1255,7 @@ export class SignalToOrderBridge {
         }
       }
 
-      if (signal.side === "sell" && this.deps.orderLifetime) {
+      if (signal.side === "sell" && !isBounceExitTimeoutForceExit && this.deps.orderLifetime) {
         const placementDecision = this.deps.orderLifetime.canPlaceExitOrder(signal.tokenId, nowMs);
         if (!placementDecision.allowed) {
           const reason = placementDecision.reason ?? "order-lifetime-placement-blocked";
@@ -1237,7 +1289,7 @@ export class SignalToOrderBridge {
         }
       }
 
-      if (this.deps.samePriceCooldown) {
+      if (!isBounceExitTimeoutForceExit && this.deps.samePriceCooldown) {
         const placementDecision = this.deps.samePriceCooldown.canPlaceOrder({
           tokenId: signal.tokenId,
           side: signal.side,
@@ -1321,7 +1373,11 @@ export class SignalToOrderBridge {
         side: signal.side,
         size: orderSize,
         price: makerOverride != null ? makerOverride.price : executionTerms.price,
-        ...(makerOverride != null
+        // Bounce-exit resting target (Phase 4 / Codex M3): a real maker order,
+        // same provenance marker as tryMakerEntryOverride's BUY-side maker
+        // entries — makerOverride is BUY-only (R23_DIP_TRIGGER_RULE_ID), so
+        // this SELL case is handled as its own branch here.
+        ...(makerOverride != null || executionTerms.pricedMode === "bounce-exit-target"
           ? { postOnly: true as const, entryStyle: "maker" as const }
           : executionTerms.postOnly !== undefined
             ? { postOnly: executionTerms.postOnly }
@@ -1377,6 +1433,29 @@ export class SignalToOrderBridge {
         sellPricingShadow,
         skippedReason: null,
       });
+
+      // Bounce-exit 4h force-exit (Phase 4 / Codex M6): cancel the resting
+      // BOUNCE_EXIT_TARGET maker order before submitting the taker exit.
+      // Publishing the cancel first (awaited) then the place is enough at
+      // this bridge layer — the actual exchange-level ordering guarantee
+      // (cancel executes before the taker place) comes independently from
+      // execution-module.ts's per-token ExecutionQueue mutex, regardless of
+      // whether this cancel has fully drained by the time we publish below.
+      if (signal.side === "sell" && signal.decisionRuleId === BOUNCE_EXIT_TIMEOUT_RULE_ID) {
+        const restingTarget = this.findOpenBounceTargetOrder(signal.tokenId);
+        if (restingTarget) {
+          const cancelCmd: CancelOrderCommand = {
+            type: "CancelOrderCommand",
+            commandId: createCommandId(randomUUID()),
+            orderId: restingTarget.orderId,
+            reason: "sell_timeout_escalation",
+          };
+          await this.deps.bus.publish("CancelOrderRequested", {
+            command: cancelCmd,
+            timestamp: Date.now(),
+          });
+        }
+      }
 
       this.recordPartialPlacementOnSend(signal, executionTerms, nowMs);
       await this.deps.bus.publish("PlaceOrderRequested", {
@@ -1821,6 +1900,14 @@ export class SignalToOrderBridge {
     policy: ExecutionPolicy,
   ): ExecutionTermsResolution {
     if (signal.side !== "sell" || resolution.kind !== "ok") return resolution;
+    // Bounce-exit target bypass (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
+    // Phase 4 / Codex M4): the +25.7% target IS the plankton-derived markup —
+    // the generic tier cap (1.17x at avgEntry>=0.15) would clip it back down to
+    // +17%, double-clamping a price that's already the intended markup. Placed
+    // after the `kind !== "ok"` guard above, so the bypass only applies once the
+    // target has already passed validateExecutablePrice/tick-bounds validation
+    // in resolveExecutionTerms.
+    if (signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID) return resolution;
     const avgEntry = this.resolveSellShadowAvgEntry(signal).value;
     const trackR = this.getTrackRPolicy(policy);
     const tier = planktonMarkupTierLabel(avgEntry);
@@ -1925,6 +2012,75 @@ export class SignalToOrderBridge {
             tickSize: effectiveTick.tickSize,
             pricedMode: "ladder",
           };
+      return normalizeExecutionTerms(ok, signal, effectiveTick);
+    }
+
+    // Bounce-exit resting target (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
+    // Phase 4 / Codex M3+M4): the target price is the harvest-target computed
+    // upstream by decision-planner.ts and carried verbatim as signal.suggestedPrice
+    // — unconditional (no config gating), same rationale as the ladder-price
+    // branch above. Only tick-bounds validation applies; the plankton sell-cap
+    // is bypassed separately in applySellPriceCap. A post-only price that would
+    // cross the live bid is caught downstream by execution-module.ts's generic
+    // getPostOnlyCrossPreSubmitSkip (reprice next tick), not here.
+    if (signal.side === "sell" && signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID) {
+      const targetPrice = signal.suggestedPrice;
+      if (!Number.isFinite(targetPrice) || targetPrice <= 0 || !Number.isFinite(pricingTickSize)) {
+        return { kind: "unavailable" };
+      }
+      const validation = validateExecutablePrice(targetPrice, pricingTickSize);
+      if (!validation.ok) {
+        return {
+          kind: "invalid",
+          price: targetPrice,
+          tickSize: validation.tickSize,
+          minPrice: validation.minPrice,
+          maxPrice: validation.maxPrice,
+          validationReason: validation.reason,
+        };
+      }
+      const ok: ExecutionTermsResolution = {
+        kind: "ok",
+        price: targetPrice,
+        tickSize: effectiveTick.tickSize,
+        postOnly: true,
+        pricedMode: "bounce-exit-target",
+      };
+      return normalizeExecutionTerms(ok, signal, effectiveTick);
+    }
+
+    // Bounce-exit 4h force-exit (Phase 4 / Codex M6): a dedicated, unconditional
+    // marketable-taker price — deliberately NOT routed through
+    // resolveTakerAtProfitTerms/resolveOpportunisticTakerTerms, both of which are
+    // config/allowlist-gated and could silently fail to activate, defeating the
+    // force-exit's purpose. Uses the live best bid directly; no postOnly.
+    if (signal.side === "sell" && signal.decisionRuleId === BOUNCE_EXIT_TIMEOUT_RULE_ID) {
+      const bestBid = market.bestBid;
+      if (
+        bestBid == null ||
+        !Number.isFinite(bestBid) ||
+        bestBid <= 0 ||
+        !Number.isFinite(pricingTickSize)
+      ) {
+        return { kind: "unavailable" };
+      }
+      const validation = validateExecutablePrice(bestBid, pricingTickSize);
+      if (!validation.ok) {
+        return {
+          kind: "invalid",
+          price: bestBid,
+          tickSize: validation.tickSize,
+          minPrice: validation.minPrice,
+          maxPrice: validation.maxPrice,
+          validationReason: validation.reason,
+        };
+      }
+      const ok: ExecutionTermsResolution = {
+        kind: "ok",
+        price: bestBid,
+        tickSize: effectiveTick.tickSize,
+        pricedMode: "taker",
+      };
       return normalizeExecutionTerms(ok, signal, effectiveTick);
     }
 
@@ -2720,6 +2876,26 @@ export class SignalToOrderBridge {
     );
   }
 
+  /**
+   * The resting BOUNCE_EXIT_TARGET maker SELL for a GATE position, if still
+   * open (docs/plans/2026-07-15-gate-bounce-live-experiment.md, Phase 4 /
+   * Codex M6). Keyed on decisionRuleId rather than price — the 4h timeout
+   * must cancel whatever target is resting regardless of how close its price
+   * sits to the taker exit's bestBid-derived price.
+   */
+  private findOpenBounceTargetOrder(tokenId: TokenId): Order | null {
+    if (!this.deps.orderRepo) return null;
+    const orders = this.deps.orderRepo.findByTokenId(tokenId);
+    return (
+      orders.find(
+        (order) =>
+          order.side === "sell" &&
+          isOpenOrderStatus(order.status) &&
+          order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID,
+      ) ?? null
+    );
+  }
+
   private recordPricingMetrics(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     executionTerms: Extract<ExecutionTermsResolution, { kind: "ok" }>,
@@ -3492,7 +3668,8 @@ type OrderPricedMode =
   | "midpoint-anchored"
   | "bounded-midpoint"
   | "taker"
-  | "ladder";
+  | "ladder"
+  | "bounce-exit-target";
 
 export type DeadSideBucket = "<0" | "<1m" | "1-5m" | "5-15m" | "15-60m" | "1-4h" | ">4h";
 

@@ -16,6 +16,8 @@ import {
   createOrderId,
   createPositionId,
   createTokenId,
+  GATE_ENTRY_RULE_ID,
+  R23_DIP_TRIGGER_RULE_ID,
   type ClientOrderId,
   type ExchangeFill,
 } from "@krabs/domain";
@@ -1044,6 +1046,226 @@ describe("runStartupPositionAdoption", () => {
 
       const afterRestart = positionRepo.findByTokenId(TOKEN_ID);
       expect(afterRestart?.entryStyle).toBe("maker");
+    });
+  });
+
+  describe("entry lane propagation through adoption (Phase 3 plumbing)", () => {
+    it("carries entryLane='GATE' from a local order's decisionRuleId into the created position", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+
+      const marketRepo = new SqliteMarketRepository(conn.db);
+      const orderRepo = new SqliteOrderRepository(conn.db);
+      const fillRepo = new SqliteFillRepository(conn.db);
+      const positionRepo = new SqlitePositionRepository(conn.db);
+      const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+      const legStateRepo = new SqliteLegStateRepository(conn.db);
+      seedMarket(marketRepo);
+
+      const orderId = createOrderId("ord-gate");
+      orderRepo.save({
+        orderId,
+        clientOrderId: "plk_gate" as ClientOrderId,
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        side: "buy",
+        orderType: "GTC",
+        price: 0.4,
+        size: 10,
+        sizeUsdc: 4,
+        status: "open",
+        exchangeOrderId: "ex-gate",
+        signalId: null,
+        signalReason: "probe-entry",
+        decisionRuleId: GATE_ENTRY_RULE_ID,
+        botRunId: createBotRunId("run-1"),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      await runStartupPositionAdoption({
+        gateway: {
+          getFills: vi
+            .fn()
+            .mockResolvedValue([makeExchangeFill({ orderId: "ex-gate", clientOrderId: "plk_gate" })]),
+        },
+        marketRepo,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        legStateRepo,
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-1"),
+      });
+
+      const position = positionRepo.findByTokenId(TOKEN_ID);
+      expect(position).not.toBeNull();
+      expect(position?.entryLane).toBe("GATE");
+    });
+
+    it("carries entryLane='R23' from a local order's decisionRuleId into the created position", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+
+      const marketRepo = new SqliteMarketRepository(conn.db);
+      const orderRepo = new SqliteOrderRepository(conn.db);
+      const fillRepo = new SqliteFillRepository(conn.db);
+      const positionRepo = new SqlitePositionRepository(conn.db);
+      const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+      const legStateRepo = new SqliteLegStateRepository(conn.db);
+      seedMarket(marketRepo);
+
+      const orderId = createOrderId("ord-r23");
+      orderRepo.save({
+        orderId,
+        clientOrderId: "plk_r23" as ClientOrderId,
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        side: "buy",
+        orderType: "GTC",
+        price: 0.4,
+        size: 10,
+        sizeUsdc: 4,
+        status: "open",
+        exchangeOrderId: "ex-r23",
+        signalId: null,
+        signalReason: "r23-dip-entry",
+        decisionRuleId: R23_DIP_TRIGGER_RULE_ID,
+        botRunId: createBotRunId("run-1"),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      await runStartupPositionAdoption({
+        gateway: {
+          getFills: vi
+            .fn()
+            .mockResolvedValue([makeExchangeFill({ orderId: "ex-r23", clientOrderId: "plk_r23" })]),
+        },
+        marketRepo,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        legStateRepo,
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-1"),
+      });
+
+      const position = positionRepo.findByTokenId(TOKEN_ID);
+      expect(position).not.toBeNull();
+      expect(position?.entryLane).toBe("R23");
+    });
+
+    it("defaults entryLane to null when the order has no/unknown decisionRuleId (legacy path)", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+
+      const marketRepo = new SqliteMarketRepository(conn.db);
+      const orderRepo = new SqliteOrderRepository(conn.db);
+      const fillRepo = new SqliteFillRepository(conn.db);
+      const positionRepo = new SqlitePositionRepository(conn.db);
+      const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+      const legStateRepo = new SqliteLegStateRepository(conn.db);
+      seedMarket(marketRepo);
+
+      // No decisionRuleId on the order — legacy/unknown path
+      await runStartupPositionAdoption({
+        gateway: {
+          getFills: vi.fn().mockResolvedValue([makeExchangeFill()]),
+        },
+        marketRepo,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        legStateRepo,
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-1"),
+      });
+
+      const position = positionRepo.findByTokenId(TOKEN_ID);
+      expect(position).not.toBeNull();
+      expect(position?.entryLane).toBeNull();
+    });
+
+    it("preserves entryLane='GATE' through a second startup (reconcileAndRepairPosition path)", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+
+      const marketRepo = new SqliteMarketRepository(conn.db);
+      const orderRepo = new SqliteOrderRepository(conn.db);
+      const fillRepo = new SqliteFillRepository(conn.db);
+      const positionRepo = new SqlitePositionRepository(conn.db);
+      const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+      const legStateRepo = new SqliteLegStateRepository(conn.db);
+      seedMarket(marketRepo);
+
+      const gateway = {
+        getFills: vi
+          .fn()
+          .mockResolvedValue([
+            makeExchangeFill({ orderId: "ex-gate-restart", clientOrderId: "plk_gate_restart" }),
+          ]),
+      };
+
+      const orderId = createOrderId("ord-gate-restart");
+      orderRepo.save({
+        orderId,
+        clientOrderId: "plk_gate_restart" as ClientOrderId,
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        side: "buy",
+        orderType: "GTC",
+        price: 0.4,
+        size: 10,
+        sizeUsdc: 4,
+        status: "open",
+        exchangeOrderId: "ex-gate-restart",
+        signalId: null,
+        signalReason: "probe-entry",
+        decisionRuleId: GATE_ENTRY_RULE_ID,
+        botRunId: createBotRunId("run-1"),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      // First startup — creates the position with entryLane='GATE'
+      await runStartupPositionAdoption({
+        gateway,
+        marketRepo,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        legStateRepo,
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-1"),
+      });
+
+      expect(positionRepo.findByTokenId(TOKEN_ID)?.entryLane).toBe("GATE");
+
+      // Second startup — goes through reconcileAndRepairPosition which reads entry_lane from DB
+      await runStartupPositionAdoption({
+        gateway,
+        marketRepo,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        legStateRepo,
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-2"),
+      });
+
+      const afterRestart = positionRepo.findByTokenId(TOKEN_ID);
+      expect(afterRestart?.entryLane).toBe("GATE");
     });
   });
 });

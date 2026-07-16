@@ -720,6 +720,7 @@ export class RiskInventoryModule implements RuntimeModule {
           signalReason: payload.signalReason,
           timestamp: payload.timestamp,
           entryStyle: origOrder?.entryStyle ?? null,
+          decisionRuleId: origOrder?.decisionRuleId ?? payload.decisionRuleId ?? null,
         });
         this.deps.positionConcentration?.recordFill({
           fill: {

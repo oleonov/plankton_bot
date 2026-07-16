@@ -12,8 +12,8 @@ export class SqlitePositionRepository implements PositionRepository {
         `INSERT INTO positions
          (position_id, token_id, condition_id, side, size, avg_entry_price,
           cost_basis_usdc, current_value_usdc, realized_pnl, status,
-          entry_style, opened_at, closed_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          entry_style, entry_lane, opened_at, closed_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(position_id) DO UPDATE SET
            size = excluded.size,
            avg_entry_price = excluded.avg_entry_price,
@@ -22,6 +22,7 @@ export class SqlitePositionRepository implements PositionRepository {
            realized_pnl = excluded.realized_pnl,
            status = excluded.status,
            entry_style = excluded.entry_style,
+           entry_lane = excluded.entry_lane,
            closed_at = excluded.closed_at,
            updated_at = excluded.updated_at`,
       )
@@ -37,6 +38,7 @@ export class SqlitePositionRepository implements PositionRepository {
         position.realizedPnl,
         position.status,
         position.entryStyle,
+        position.entryLane ?? null,
         position.openedAt,
         position.closedAt,
         position.updatedAt,
@@ -100,6 +102,7 @@ export class SqlitePositionRepository implements PositionRepository {
       realizedPnl: row.realized_pnl as number,
       status: row.status as PositionStatus,
       entryStyle: (row.entry_style as "probe" | "maker") ?? null,
+      entryLane: (row.entry_lane as "GATE" | "R23") ?? null,
       openedAt: row.opened_at as string,
       closedAt: (row.closed_at as string) ?? null,
       updatedAt: row.updated_at as string,

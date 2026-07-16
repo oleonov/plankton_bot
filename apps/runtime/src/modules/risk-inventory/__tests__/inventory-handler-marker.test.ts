@@ -9,7 +9,14 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { createConditionId, createFillId, createPositionId, createTokenId } from "@krabs/domain";
+import {
+  createConditionId,
+  createFillId,
+  createPositionId,
+  createTokenId,
+  GATE_ENTRY_RULE_ID,
+  R23_DIP_TRIGGER_RULE_ID,
+} from "@krabs/domain";
 import type { InventoryLotRepository, Position, PositionRepository } from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
 import { InventoryHandler, type FillEvent } from "../inventory-handler.js";
@@ -172,5 +179,72 @@ describe("InventoryHandler — maker provenance marker (Phase 2 plumbing)", () =
 
     const saved = (positionRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
     expect(saved.entryStyle).toBe("probe");
+  });
+});
+
+describe("InventoryHandler — entry lane provenance (Phase 3 plumbing)", () => {
+  it("stamps entryLane='GATE' on a new position when the first fill's decisionRuleId is GATE_ENTRY_RULE_ID", () => {
+    const { handler, positionRepo } = makeHandler();
+
+    handler.applyFill(makeFill({ fillId: createFillId("fill-gate"), decisionRuleId: GATE_ENTRY_RULE_ID }));
+
+    const saved = (positionRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
+    expect(saved.entryLane).toBe("GATE");
+  });
+
+  it("stamps entryLane='R23' on a new position when the first fill's decisionRuleId is R23_DIP_TRIGGER_RULE_ID", () => {
+    const { handler, positionRepo } = makeHandler();
+
+    handler.applyFill(
+      makeFill({ fillId: createFillId("fill-r23"), decisionRuleId: R23_DIP_TRIGGER_RULE_ID }),
+    );
+
+    const saved = (positionRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
+    expect(saved.entryLane).toBe("R23");
+  });
+
+  it("stamps entryLane=null on a new position when decisionRuleId is unknown/legacy/absent", () => {
+    const { handler, positionRepo } = makeHandler();
+
+    handler.applyFill(makeFill({ fillId: createFillId("fill-legacy"), decisionRuleId: "D5" }));
+    const savedKnownRule = (positionRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
+    expect(savedKnownRule.entryLane).toBeNull();
+
+    const { handler: handler2, positionRepo: positionRepo2 } = makeHandler();
+    handler2.applyFill(makeFill({ fillId: createFillId("fill-absent") }));
+    const savedAbsent = (positionRepo2.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
+    expect(savedAbsent.entryLane).toBeNull();
+  });
+
+  it("preserves the first fill's entryLane='GATE' on scale-in even when the second fill's decisionRuleId differs", () => {
+    const existing: Position = {
+      positionId: createPositionId("pos-gate-existing"),
+      tokenId: TOKEN_ID,
+      conditionId: COND_ID,
+      side: "buy",
+      size: 10,
+      avgEntryPrice: 0.4,
+      costBasisUsdc: 4,
+      currentValueUsdc: 4,
+      realizedPnl: 0,
+      status: "open",
+      entryStyle: "probe",
+      entryLane: "GATE",
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const { handler, positionRepo } = makeHandler(existing);
+
+    // Scale-in fill carries a different (or absent) decisionRuleId — addToPosition
+    // spreads the existing position, so the durable first-fill lane must survive.
+    handler.applyFill(
+      makeFill({ fillId: createFillId("fill-gate-scalein"), size: 5, sizeUsdc: 2, decisionRuleId: null }),
+    );
+
+    const saved = (positionRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
+    expect(saved.entryLane).toBe("GATE");
+    expect(saved.size).toBe(15);
   });
 });

@@ -292,4 +292,26 @@ describe("SqlitePositionRepository", () => {
     expect(found).not.toBeNull();
     expect(found!.entryStyle).toBeNull();
   });
+
+  it("persists and loads entryLane='GATE'", () => {
+    const pos = makePosition({
+      positionId: createPositionId("pos-gate"),
+      tokenId: createTokenId("tok-gate"),
+      entryLane: "GATE",
+    });
+    repo.save(pos);
+
+    const found = repo.findByTokenId(createTokenId("tok-gate"));
+    expect(found).not.toBeNull();
+    expect(found!.entryLane).toBe("GATE");
+  });
+
+  it("defaults entryLane to null when not set", () => {
+    const pos = makePosition();
+    repo.save(pos);
+
+    const found = repo.findByTokenId(createTokenId("tok-1"));
+    expect(found).not.toBeNull();
+    expect(found!.entryLane).toBeNull();
+  });
 });

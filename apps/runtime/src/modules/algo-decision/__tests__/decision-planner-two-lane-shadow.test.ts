@@ -202,4 +202,35 @@ describe("two-lane entry shadow recorder (planner)", () => {
     );
     expect(twoLaneSideEffects(result)).toHaveLength(0);
   });
+
+  it("honours the live executionPolicy.gateEntry thresholds instead of the shadow's fixed research constants (Codex round-3 FIX B)", () => {
+    // Market midPrice 0.1 is within the shadow's own fallback price ceiling
+    // (GATE_MAX_PRICE 0.55) but ABOVE a tightened live gateEntry.maxPrice of
+    // 0.05. If decision-planner failed to thread input.executionPolicy.gateEntry
+    // into evaluateTwoLaneEntryShadow, the shadow would silently fall back to
+    // the fixed 0.55 ceiling and still report gateMatch=true/laneClass=BOTH,
+    // drifting from the configured policy.
+    const result = evaluateDecisionPlan(
+      input({
+        executionPolicy: {
+          ...DEFAULT_EXECUTION_POLICY,
+          entryMinMarketAgeSeconds: 0,
+          r23DipTrigger: { enabled: true, dropThresholdRatio: 0.683, windowMs: 86_400_000 },
+          gateEntry: {
+            ...DEFAULT_EXECUTION_POLICY.gateEntry,
+            maxPrice: 0.05,
+          },
+        },
+      }),
+    );
+    const effects = twoLaneSideEffects(result);
+    expect(effects).toHaveLength(1);
+    const effect = effects[0];
+    expect(effect).toBeDefined();
+    if (!effect) return;
+    expect(effect.projection.gateComponents.cheap_side_le_055).toBe(false);
+    expect(effect.projection.gateMatch).toBe(false);
+    expect(effect.projection.r23Match).toBe(true);
+    expect(effect.projection.laneClass).toBe("R23_ONLY");
+  });
 });

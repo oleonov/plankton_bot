@@ -56,6 +56,8 @@ import type {
   TakerAtProfitPolicy,
   TrackAAddThrottlePolicy,
   MakerEntryPolicy,
+  GateEntryPolicy,
+  BounceExitPolicy,
   TrackRHonestPricingPolicy,
   TrackS3MarginAwareSpreadPolicy,
   TrackS3SpreadTierPolicy,
@@ -604,6 +606,36 @@ export const DEFAULT_MAKER_ENTRY: MakerEntryPolicy = {
   scaleInStepPct: 0.1,
 };
 
+// GATE-lane entry eligibility defaults (live-experiment, plan
+// docs/plans/2026-07-15-gate-bounce-live-experiment.md, Phase 1: config only, no
+// runtime effect). enabled=false + mode="off" + empty whitelist ⇒ zero live-order
+// changes until an operator deliberately enables the experiment.
+// Research-backed params (fixed, do not tune): minLifespanDays 30, minPrice 0.01,
+// maxPrice 0.15 (inclusive bounds), microMaxOrderUsdc 2 ($2 micro cap).
+export const DEFAULT_GATE_ENTRY: GateEntryPolicy = {
+  enabled: false,
+  mode: "off",
+  minLifespanDays: 30,
+  minPrice: 0.01,
+  maxPrice: 0.15,
+  whitelistConditionIds: [],
+  microMaxOrderUsdc: 2,
+};
+
+// GATE-scoped bounce-exit defaults (live-experiment, same plan as DEFAULT_GATE_ENTRY,
+// Phase 1: config only, no runtime effect). enabled=false + mode="off" + empty
+// whitelist ⇒ zero live-order changes until an operator deliberately enables it.
+// Research-backed params (fixed, do not tune): targetGainPct 0.257 (+25.7%),
+// timeoutMs 14_400_000 (4h), microMaxOrderUsdc 2 ($2 micro cap).
+export const DEFAULT_BOUNCE_EXIT: BounceExitPolicy = {
+  enabled: false,
+  mode: "off",
+  targetGainPct: 0.257,
+  timeoutMs: 14_400_000,
+  whitelistConditionIds: [],
+  microMaxOrderUsdc: 2,
+};
+
 export const DEFAULT_LOSS_EXIT_POLICY: D9LossExitPolicy = {
   enabled: false,
   // minPublicTradeCount24h: 41 derived from R96 Q3 best 2D rule
@@ -779,6 +811,8 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   depositActivation: DEFAULT_DEPOSIT_ACTIVATION_POLICY,
   trackAAddThrottle: DEFAULT_TRACK_A_ADD_THROTTLE_POLICY,
   makerEntry: DEFAULT_MAKER_ENTRY,
+  gateEntry: DEFAULT_GATE_ENTRY,
+  bounceExit: DEFAULT_BOUNCE_EXIT,
 };
 
 const DEAD_SIDE_MODES = ["off", "observe", "enforce"] as const;
@@ -960,6 +994,13 @@ const BOUND_MAKER_SCALE_IN_STEP_PCT_MIN = 0.001;
 const BOUND_MAKER_SCALE_IN_STEP_PCT_MAX = 0.999;
 const MAKER_ENTRY_MODES = ["off", "shadow", "micro_live"] as const;
 
+// GATE-lane entry / bounce-exit (live experiment) share the same fail-safe
+// mode union as maker-entry, minus "shadow" (Phase 1 has no observe-only mode).
+const GATE_ENTRY_MODES = ["off", "micro_live"] as const;
+const BOUNCE_EXIT_MODES = ["off", "micro_live"] as const;
+const BOUND_GATE_MIN_LIFESPAN_DAYS_MIN = 0;
+const BOUND_GATE_MIN_LIFESPAN_DAYS_MAX = BOUND_H5_DAYS_TO_RESOLVE_MAX;
+
 export interface ParseResult {
   policy: ExecutionPolicy;
   issues: string[];
@@ -1108,6 +1149,8 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const depositActivation = parseDepositActivation(obj.depositActivation, issues);
   const trackAAddThrottle = parseTrackAAddThrottle(obj.trackAAddThrottle, issues);
   const makerEntry = parseMakerEntry(obj.makerEntry, issues);
+  const gateEntry = parseGateEntry(obj.gateEntry, issues);
+  const bounceExit = parseBounceExit(obj.bounceExit, issues);
 
   return {
     policy: {
@@ -1158,6 +1201,8 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       depositActivation,
       trackAAddThrottle,
       makerEntry,
+      gateEntry,
+      bounceExit,
     },
     issues,
   };
@@ -5101,6 +5146,31 @@ function parseDepositActivation(raw: unknown, issues: string[]): DepositActivati
   };
 }
 
+// Shared by parseMakerEntry / parseGateEntry / parseBounceExit: whitelist must be an
+// array of non-empty (trimmed, de-duplicated) strings; invalid ⇒ fallback to default.
+function parseWhitelistConditionIds(
+  raw: unknown,
+  fallback: string[],
+  issues: string[],
+  name: string,
+): string[] {
+  if (raw === undefined) return [...fallback];
+  if (!Array.isArray(raw)) {
+    issues.push(`${name} must be an array`);
+    return [...fallback];
+  }
+  const parsed: string[] = [];
+  for (const id of raw) {
+    if (typeof id !== "string" || id.trim().length === 0) {
+      issues.push(`${name} must contain only non-empty strings`);
+      return [...fallback];
+    }
+    const trimmed = id.trim();
+    if (!parsed.includes(trimmed)) parsed.push(trimmed);
+  }
+  return parsed;
+}
+
 function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
   if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
     if (raw !== undefined) issues.push("makerEntry must be an object");
@@ -5156,26 +5226,12 @@ function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
     "makerEntry.makerMinVol24h",
   );
 
-  // Parse whitelist: must be an array of non-empty strings; invalid ⇒ fallback to default.
-  let whitelistConditionIds: string[] = [...DEFAULT_MAKER_ENTRY.whitelistConditionIds];
-  if (obj.whitelistConditionIds !== undefined) {
-    if (!Array.isArray(obj.whitelistConditionIds)) {
-      issues.push("makerEntry.whitelistConditionIds must be an array");
-    } else {
-      const parsed: string[] = [];
-      let valid = true;
-      for (const id of obj.whitelistConditionIds) {
-        if (typeof id !== "string" || id.trim().length === 0) {
-          issues.push("makerEntry.whitelistConditionIds must contain only non-empty strings");
-          valid = false;
-          break;
-        }
-        const trimmed = id.trim();
-        if (!parsed.includes(trimmed)) parsed.push(trimmed);
-      }
-      if (valid) whitelistConditionIds = parsed;
-    }
-  }
+  const whitelistConditionIds = parseWhitelistConditionIds(
+    obj.whitelistConditionIds,
+    DEFAULT_MAKER_ENTRY.whitelistConditionIds,
+    issues,
+    "makerEntry.whitelistConditionIds",
+  );
 
   const microMaxOrderUsdc = clampedNumber(
     obj.microMaxOrderUsdc,
@@ -5240,6 +5296,121 @@ function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
     holdWindowMs,
     maxScaleInLevels,
     scaleInStepPct,
+  };
+}
+
+function parseGateEntry(raw: unknown, issues: string[]): GateEntryPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("gateEntry must be an object");
+    return DEFAULT_GATE_ENTRY;
+  }
+  const obj = raw as Record<string, unknown>;
+
+  const mode = enumOr(obj.mode, GATE_ENTRY_MODES, DEFAULT_GATE_ENTRY.mode, issues, "gateEntry.mode");
+  const enabled = booleanOr(obj.enabled, DEFAULT_GATE_ENTRY.enabled, issues, "gateEntry.enabled");
+  const minLifespanDays = clampedNumber(
+    obj.minLifespanDays,
+    DEFAULT_GATE_ENTRY.minLifespanDays,
+    BOUND_GATE_MIN_LIFESPAN_DAYS_MIN,
+    BOUND_GATE_MIN_LIFESPAN_DAYS_MAX,
+    issues,
+    "gateEntry.minLifespanDays",
+  );
+  const minPrice = clampedNumber(
+    obj.minPrice,
+    DEFAULT_GATE_ENTRY.minPrice,
+    BOUND_EXECUTION_PROFILE_PRICE_MIN,
+    BOUND_EXECUTION_PROFILE_PRICE_MAX,
+    issues,
+    "gateEntry.minPrice",
+  );
+  const maxPrice = clampedNumber(
+    obj.maxPrice,
+    DEFAULT_GATE_ENTRY.maxPrice,
+    BOUND_EXECUTION_PROFILE_PRICE_MIN,
+    BOUND_EXECUTION_PROFILE_PRICE_MAX,
+    issues,
+    "gateEntry.maxPrice",
+  );
+  const whitelistConditionIds = parseWhitelistConditionIds(
+    obj.whitelistConditionIds,
+    DEFAULT_GATE_ENTRY.whitelistConditionIds,
+    issues,
+    "gateEntry.whitelistConditionIds",
+  );
+  const microMaxOrderUsdc = clampedNumber(
+    obj.microMaxOrderUsdc,
+    DEFAULT_GATE_ENTRY.microMaxOrderUsdc,
+    BOUND_MAKER_MICRO_MAX_ORDER_USDC_MIN,
+    BOUND_MAKER_MICRO_MAX_ORDER_USDC_MAX,
+    issues,
+    "gateEntry.microMaxOrderUsdc",
+  );
+
+  return {
+    mode,
+    enabled,
+    minLifespanDays,
+    minPrice,
+    maxPrice,
+    whitelistConditionIds,
+    microMaxOrderUsdc,
+  };
+}
+
+function parseBounceExit(raw: unknown, issues: string[]): BounceExitPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("bounceExit must be an object");
+    return DEFAULT_BOUNCE_EXIT;
+  }
+  const obj = raw as Record<string, unknown>;
+
+  const mode = enumOr(
+    obj.mode,
+    BOUNCE_EXIT_MODES,
+    DEFAULT_BOUNCE_EXIT.mode,
+    issues,
+    "bounceExit.mode",
+  );
+  const enabled = booleanOr(obj.enabled, DEFAULT_BOUNCE_EXIT.enabled, issues, "bounceExit.enabled");
+  const targetGainPct = clampedNumber(
+    obj.targetGainPct,
+    DEFAULT_BOUNCE_EXIT.targetGainPct,
+    BOUND_MAKER_HARVEST_GAIN_PCT_MIN,
+    BOUND_MAKER_HARVEST_GAIN_PCT_MAX,
+    issues,
+    "bounceExit.targetGainPct",
+  );
+  const timeoutMs = clampedInt(
+    obj.timeoutMs,
+    DEFAULT_BOUNCE_EXIT.timeoutMs,
+    BOUND_SELL_TIMEOUT_MIN_MS,
+    BOUND_SELL_TIMEOUT_MAX_MS,
+    issues,
+    "bounceExit.timeoutMs",
+  );
+  const whitelistConditionIds = parseWhitelistConditionIds(
+    obj.whitelistConditionIds,
+    DEFAULT_BOUNCE_EXIT.whitelistConditionIds,
+    issues,
+    "bounceExit.whitelistConditionIds",
+  );
+  const microMaxOrderUsdc = clampedNumber(
+    obj.microMaxOrderUsdc,
+    DEFAULT_BOUNCE_EXIT.microMaxOrderUsdc,
+    BOUND_MAKER_MICRO_MAX_ORDER_USDC_MIN,
+    BOUND_MAKER_MICRO_MAX_ORDER_USDC_MAX,
+    issues,
+    "bounceExit.microMaxOrderUsdc",
+  );
+
+  return {
+    mode,
+    enabled,
+    targetGainPct,
+    timeoutMs,
+    whitelistConditionIds,
+    microMaxOrderUsdc,
   };
 }
 
