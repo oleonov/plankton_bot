@@ -188,7 +188,9 @@ export {
   evaluateGateEntryEligibility,
   GATE_ENTRY_RULE_ID,
   evaluateBounceExit,
+  bounceExitTierGain,
+  isBounceForceExit,
   BOUNCE_EXIT_TARGET_RULE_ID,
-  BOUNCE_EXIT_TIMEOUT_RULE_ID,
+  BOUNCE_EXIT_BACKSTOP_RULE_ID,
 } from "./bounce-exit.js";
 export type { GateEntryMarketInput, BounceExitContext, BounceExitDecision } from "./bounce-exit.js";

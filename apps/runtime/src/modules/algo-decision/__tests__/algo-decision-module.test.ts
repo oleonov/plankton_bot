@@ -35,7 +35,11 @@ import type {
 } from "@krabs/domain";
 import { createTokenId, createCommandId, createOrderId, createPositionId } from "@krabs/domain";
 import type { ConditionId } from "@krabs/domain";
-import { DEFAULT_EXECUTION_POLICY, S1_LADDER_RULE_ID } from "@krabs/domain";
+import {
+  BOUNCE_EXIT_TARGET_RULE_ID,
+  DEFAULT_EXECUTION_POLICY,
+  S1_LADDER_RULE_ID,
+} from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
 import { LiveLiteGuard } from "../../../live-lite-guard.js";
 
@@ -7844,6 +7848,205 @@ describe("AlgoDecisionModule", () => {
       expect(byReason).toBe(3);
 
       db.close();
+    });
+  });
+
+  // docs/plans/2026-07-16-bounce-exit-ladder-redesign.md Phase 3 (REV3
+  // R2-H1): the GATE-scoped bounce-exit backstop needs its OWN active-sell
+  // check, deliberately a SIBLING of hasActiveSellOrderForQd (the general,
+  // unmodified Track Q.D shadow check above) rather than a reuse of it — a
+  // resting bounce ladder rung is exactly what the backstop is about to
+  // cancel, so it must never veto its own force-exit, while the general Q.D
+  // shadow's own handoff behavior must stay unchanged.
+  describe("GATE-scoped bounce-exit backstop active-sell wiring (Phase 3)", () => {
+    it("excludes a resting bounce ladder rung while the general Q.D shadow check still counts it as active", async () => {
+      const tokenId = createTokenId("token-bounce-backstop-divergence");
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi.fn().mockReturnValue([
+          makeOrder(String(tokenId), {
+            status: "open",
+            decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          }),
+        ]),
+        findByTokenId: vi.fn().mockReturnValue([]),
+      };
+      const mod = buildModule({ orderRepo: orderRepo as OrderRepository });
+      await mod.start();
+
+      expect((mod as any).hasActiveSellOrderForBounceBackstop(tokenId)).toBe(false);
+      expect((mod as any).hasActiveSellOrderForQd(tokenId)).toBe(true);
+
+      await mod.stop();
+    });
+
+    it("still detects a genuinely unrelated resting SELL as active (not a blanket bypass)", async () => {
+      const tokenId = createTokenId("token-bounce-backstop-generic-active");
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi
+          .fn()
+          .mockReturnValue([
+            makeOrder(String(tokenId), { status: "open", decisionRuleId: "SOME_OTHER_RULE" }),
+          ]),
+        findByTokenId: vi.fn().mockReturnValue([]),
+      };
+      const mod = buildModule({ orderRepo: orderRepo as OrderRepository });
+      await mod.start();
+
+      expect((mod as any).hasActiveSellOrderForBounceBackstop(tokenId)).toBe(true);
+      expect((mod as any).hasActiveSellOrderForQd(tokenId)).toBe(true);
+
+      await mod.stop();
+    });
+
+    it("wires hasActiveSellOrderForBounceBackstop/placedBounceRungIndices into DecisionPlanningInput for a GATE-lane open position", async () => {
+      const tokenId = "token-bounce-backstop-wiring";
+      legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+      const positionRepo = {
+        findByTokenId: vi.fn().mockReturnValue(makeOpenPosition(tokenId, { entryLane: "GATE" })),
+      };
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi
+          .fn()
+          .mockReturnValue([
+            makeOrder(tokenId, { status: "open", decisionRuleId: "SOME_OTHER_RULE" }),
+          ]),
+        findByTokenId: vi.fn().mockReturnValue([]),
+      };
+
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        DEFAULT_EXECUTION_POLICY,
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      expect(decisionInput!.hasActiveSellOrderForBounceBackstop).toBe(true);
+      expect(Array.isArray(decisionInput!.placedBounceRungIndices)).toBe(true);
+
+      await mod.stop();
+    });
+
+    // Phase 4 add-invariance fix: originalLadderPositionSize must be recovered
+    // from the earliest already-placed rung's own recorded
+    // originalPositionSize metadata (the MIN across all placed rungs for this
+    // ladderId), NOT recomputed from the position's live/current size — this
+    // is what lets decision-planner.ts pin rung sizing to the ladder's
+    // start-of-life basis even if a later BUY (add) grows the leg's
+    // cumulativeBuySize.
+    it("wires originalLadderPositionSize from the MIN originalPositionSize recorded across already-placed bounce rungs", async () => {
+      const tokenId = "token-bounce-original-size-wiring";
+      const legState = makeSellReadyLegState(tokenId, { cumulativeBuySize: 150, buyCount: 2 });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const positionRepo = {
+        findByTokenId: vi
+          .fn()
+          .mockReturnValue(makeOpenPosition(tokenId, { entryLane: "GATE", size: 150 })),
+      };
+      const ladderId = `${tokenId}:${legState.firstTradeAt}`;
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi.fn().mockReturnValue([]),
+        findByTokenId: vi.fn().mockReturnValue([
+          // rung0, placed BEFORE the add — recorded the true original (100).
+          makeOrder(tokenId, {
+            status: "filled",
+            decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+            metadata: {
+              bounceRung: { ladderId, rungIndex: 0, originalPositionSize: 100 },
+            },
+          }),
+        ]),
+      };
+
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        DEFAULT_EXECUTION_POLICY,
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      // Pinned to rung0's recorded 100, not the post-add live size of 150.
+      expect(decisionInput!.originalLadderPositionSize).toBe(100);
+
+      await mod.stop();
+    });
+
+    it("defaults originalLadderPositionSize to null when no bounce rung has been placed yet (nothing to pin to)", async () => {
+      const tokenId = "token-bounce-original-size-unset";
+      legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+      const positionRepo = {
+        findByTokenId: vi.fn().mockReturnValue(makeOpenPosition(tokenId, { entryLane: "GATE" })),
+      };
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi.fn().mockReturnValue([]),
+        findByTokenId: vi.fn().mockReturnValue([]),
+      };
+
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        DEFAULT_EXECUTION_POLICY,
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      expect(decisionInput!.originalLadderPositionSize).toBeNull();
+
+      await mod.stop();
+    });
+
+    it("defaults hasActiveSellOrderForBounceBackstop to false and placedBounceRungIndices to [] for a non-GATE-lane position (no-op wiring)", async () => {
+      const tokenId = "token-bounce-backstop-non-gate";
+      legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+      const positionRepo = {
+        findByTokenId: vi.fn().mockReturnValue(makeOpenPosition(tokenId, { entryLane: "R23" })),
+      };
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi
+          .fn()
+          .mockReturnValue([
+            makeOrder(tokenId, { status: "open", decisionRuleId: "SOME_OTHER_RULE" }),
+          ]),
+        findByTokenId: vi.fn().mockReturnValue([]),
+      };
+
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        DEFAULT_EXECUTION_POLICY,
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      expect(decisionInput!.hasActiveSellOrderForBounceBackstop).toBe(false);
+      expect(decisionInput!.placedBounceRungIndices).toEqual([]);
+
+      await mod.stop();
     });
   });
 

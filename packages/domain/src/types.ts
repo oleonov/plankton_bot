@@ -157,6 +157,43 @@ export interface MarketSnapshot {
 // tokenId + side within one scanner tick (F3 resolution).
 // Required for deterministic buildClientOrderId deduplication.
 
+/**
+ * Bounce-exit ladder rung identity, carried on a BOUNCE_EXIT_TARGET SELL
+ * signal/order so the next-un-placed-rung selection (decision-planner.ts /
+ * algo-decision-module.ts) can tell rungs apart — every rung shares the same
+ * `decisionRuleId`, so this is the only way to distinguish them.
+ * docs/plans/2026-07-16-bounce-exit-ladder-redesign.md.
+ */
+export interface BounceRungMetadata {
+  /** Ties this rung to one position's ladder instance — `${tokenId}:${firstTradeAt}` —
+   * so a closed-then-reopened GATE position on the same token starts a fresh ladder. */
+  ladderId: string;
+  /** 0-based rung index within `BounceExitPolicy.ladderFractions`. */
+  rungIndex: number;
+  /** Position's first-fill price at signal time (the ladder's fixed anchor). */
+  anchorPrice: number;
+  /** Size fraction of `originalPositionSize` (NOT the shrinking residual)
+   * this rung represents — sizing off the residual would let a later rung
+   * undersize itself once an earlier rung had already filled. */
+  fraction: number;
+  /** GATE first-entry / original position size the ladder's fractions are
+   * computed against — fixed for the ladder's whole lifetime (GATE-lane
+   * positions have exactly one entry fill, no scale-in). */
+  originalPositionSize: number;
+  /** Position size still available to sell at the moment this rung's signal
+   * was generated (cumulativeBuySize - cumulativeSellSize). Every rung (and
+   * any rolled-forward merge of rungs) is capped to this value so the ladder
+   * never oversells, even once the residual has shrunk below what the
+   * fraction math alone would imply. */
+  remainingPositionSize: number;
+  /** Set only when signal-to-order.ts rolled one or more too-small rungs
+   * forward into this order (docs/plans/2026-07-16-bounce-exit-ladder-
+   * redesign.md ladder min-order rollover) — every rung index absorbed into
+   * this single placed order, including `rungIndex` itself. Absent when the
+   * rung was placed on its own. */
+  rungIndicesCovered?: readonly number[];
+}
+
 export interface Signal {
   signalId: string;
   tokenId: TokenId;
@@ -172,6 +209,7 @@ export interface Signal {
   decisionRuleId: string | null;
   sizingRuleId: string | null;
   generatedAt: string; // ISO timestamp
+  bounceRung?: BounceRungMetadata;
 }
 
 export interface DecisionSignalLog {
@@ -2021,24 +2059,62 @@ export interface GateEntryPolicy {
 }
 
 /**
- * GATE-scoped bounce-exit policy (live experiment, config-only until wired into
- * decision-planner). Default mode "off" and empty whitelist ensure zero live-order changes.
+ * One entry-price-tiered gain target for the bounce-exit ladder (cheaper
+ * entries need a bigger multiple to be worth exiting — plankton reverse-eng,
+ * docs/plans/2026-07-16-bounce-exit-ladder-redesign.md). Inclusive lookup:
+ * applies when `entryPrice <= maxPrice` (see `bounceExitTierGain`).
+ */
+export interface BounceExitTargetTier {
+  /** Inclusive upper bound of this tier's entry-price range. */
+  maxPrice: number;
+  /** Gross gain pct target for entries falling in this tier (e.g. 0.36 = +36%). */
+  gainPct: number;
+}
+
+/**
+ * GATE-scoped bounce-exit policy (live experiment, wired into decision-planner as of
+ * Phase 3 of the ladder redesign). Default mode "off" and empty whitelist ensure zero
+ * live-order changes.
+ *
+ * Ladder redesign (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md): the shipped
+ * evaluator (`evaluateBounceExit`) reads `targetTiers`/`ladderFractions`/
+ * `ladderStepPct`/`backstopTtcHours` to compute an entry-price-tiered, multi-rung
+ * resting-maker ladder plus a near-resolution taker backstop. `targetGainPct`/
+ * `timeoutMs` (the original flat-target + hold-time-timeout fields) are now VESTIGIAL
+ * — kept only so an old operator JSON round-trips without crashing
+ * (`parseBounceExit` is tolerant-but-fail-closed for legacy shape); the live path
+ * never reads them.
  */
 export interface BounceExitPolicy {
   /** Operating mode. "off" disables all bounce-exit live behavior (default). */
   mode: "off" | "micro_live";
   /** Master enable switch; both this AND mode==="micro_live" are required for live effect. */
   enabled: boolean;
-  /** Required gross gain pct from entry to trigger the bounce-exit target sell (e.g. 0.257 = +25.7%). */
+  /** VESTIGIAL — superseded by `targetTiers`; kept only for legacy-JSON parse tolerance. Not read by the live evaluator. */
   targetGainPct: number;
-  /** How long to wait for the bounce target before timing out and exiting via taker, in ms. */
+  /** VESTIGIAL — superseded by `backstopTtcHours`; kept only for legacy-JSON parse tolerance. Not read by the live evaluator. */
   timeoutMs: number;
+  /**
+   * Entry-price-tiered gross gain targets, ordered by ascending `maxPrice`. Must be
+   * monotonic non-increasing `gainPct` and the last tier's `maxPrice` must be >= 1.0
+   * (a catch-all covering the full price domain). The live evaluator's rung0 base price.
+   */
+  targetTiers: BounceExitTargetTier[];
+  /**
+   * Resting-maker ladder rung size fractions, rung0 (base tier price) first. Must
+   * sum to ~1.0.
+   */
+  ladderFractions: number[];
+  /** Price step between consecutive ladder rungs above the tiered base (e.g. 0.22 = +22%). */
+  ladderStepPct: number;
+  /** Near-resolution window (hours to market close) driving the taker backstop. */
+  backstopTtcHours: number;
   /**
    * Condition IDs eligible for micro-live real orders.
    * Empty array ⇒ no live orders regardless of mode.
    */
   whitelistConditionIds: string[];
-  /** Hard cap on a single bounce-exit sell order size in USDC (micro-live only). */
+  /** Hard cap on a single resting-maker ladder rung size in USDC (micro-live only); the near-resolution backstop is exempt. */
   microMaxOrderUsdc: number;
 }
 

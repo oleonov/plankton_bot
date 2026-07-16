@@ -10,6 +10,8 @@ import {
   type ExecutionPolicy,
   type MarketRepository,
   type Order,
+  BOUNCE_EXIT_TARGET_RULE_ID,
+  isBounceForceExit,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
@@ -28,6 +30,7 @@ import {
   normalizeBuyCapacityPolicy,
   normalizeOrderCapacityPolicy,
   normalizeSellCapacityPolicy,
+  resolveEffectiveMaxOpenSellOrdersPerToken,
   resolveWalletBuyBudget,
   PER_TOKEN_BUY_LIMIT_REASON,
   PER_TOKEN_SELL_LIMIT_REASON,
@@ -71,8 +74,30 @@ function isOpenOrder(order: Order): boolean {
   return OPEN_ORDER_STATUSES.has(order.status);
 }
 
-function getOpenOrderCounts(orderRepo: OrderRepository, tokenId: TokenId): OpenOrderCounts {
-  const openOrders = orderRepo.findOpen().filter(isOpenOrder);
+function getOpenOrderCounts(
+  orderRepo: OrderRepository,
+  tokenId: TokenId,
+  excludeBounceTargetRungsForToken = false,
+): OpenOrderCounts {
+  // Bounce-exit backstop force-exit (docs/plans/2026-07-16-bounce-exit-
+  // ladder-redesign.md, Phase 3 Codex fix): mirrors execution-module.ts's
+  // `excludeBounceTargetBeingReplaced`. When the incoming signal IS the
+  // backstop, every resting BOUNCE_EXIT_TARGET rung for this token is about
+  // to be cancelled by signal-to-order.ts, so it must not count against the
+  // backstop's own per-token/wallet SELL capacity check — otherwise N resting
+  // rungs at the cap would block the very force-exit meant to replace them.
+  const openOrders = orderRepo
+    .findOpen()
+    .filter(isOpenOrder)
+    .filter(
+      (order) =>
+        !excludeBounceTargetRungsForToken ||
+        !(
+          order.side === "sell" &&
+          order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+          order.tokenId === tokenId
+        ),
+    );
   let openBuyOrderCount = 0;
   let openSellOrderCount = 0;
   let perTokenOpenBuyOrderCount = 0;
@@ -114,10 +139,28 @@ function getOpenOrderCounts(orderRepo: OrderRepository, tokenId: TokenId): OpenO
 
 // SELL repricing is net-neutral: execution cancels the existing token SELL
 // before submitting the replacement, but risk-gate runs before that flow.
+//
+// Bounce-exit ladder rungs are exempt (docs/plans/2026-07-16-bounce-exit-
+// ladder-redesign.md, Phase 3 Codex fix): a new BOUNCE_EXIT_TARGET rung
+// coexists alongside up to `ladderFractions.length - 1` other resting
+// rungs — it never replaces one — so no discount applies here; capacity is
+// enforced as a strict ceiling via resolveEffectiveMaxOpenSellOrdersPerToken
+// instead, consistent with execution-module.ts's own undiscounted model.
+// The BOUNCE_EXIT_BACKSTOP force-exit is handled separately and earlier, in
+// `getOpenOrderCounts`, which already excludes every resting rung the
+// backstop is about to replace before this function ever runs — so it needs
+// no discount here either.
 function getReplacementAwareSellCounts(
   counts: OpenOrderCounts,
   source: SellCapacitySource,
+  decisionRuleId: string | null,
 ): SellCapacityCounts {
+  if (
+    decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID ||
+    isBounceForceExit({ side: "sell", decisionRuleId })
+  ) {
+    return counts;
+  }
   if (counts.perTokenOpenSellOrderCount <= 0) {
     return counts;
   }
@@ -161,7 +204,11 @@ export class AlgoRiskGateImpl implements RiskGate {
     const passed: string[] = [];
     const rejected: string[] = [];
     const isBuy = isBuySignal(signal);
-    const counts = getOpenOrderCounts(this.orderRepo, signal.tokenId);
+    const isBounceBackstopSignal = isBounceForceExit({
+      side: signal.side,
+      decisionRuleId: signal.decisionRuleId ?? null,
+    });
+    const counts = getOpenOrderCounts(this.orderRepo, signal.tokenId, isBounceBackstopSignal);
     const policy = this.executionPolicy?.();
     const buyPolicy = normalizeBuyCapacityPolicy(this.buyCapacityPolicy?.() ?? policy?.buyCapacity);
     const sellPolicy = normalizeSellCapacityPolicy(policy?.sellCapacity);
@@ -203,8 +250,24 @@ export class AlgoRiskGateImpl implements RiskGate {
     }
 
     // Sell signals bypass BUY entry checks, but still respect SELL/total caps.
+    //
+    // The BOUNCE_EXIT_BACKSTOP force-exit is the one exception (docs/plans/
+    // 2026-07-16-bounce-exit-ladder-redesign.md, final Codex fix): the plan
+    // requires it to bypass every bot-bookkeeping cap/capacity check — wallet
+    // sell capacity, per-token sell capacity, total order capacity — and keep
+    // ONLY exchange-feasibility checks (the residual-below-exchange-min-size
+    // check just below is NOT skipped: an actually-unsellable dust residual is
+    // still unsellable no matter which rule requested the SELL). Without this,
+    // N resting rungs (or an unrelated token) already at the cap would block
+    // the very force-exit meant to guarantee the position exits, orphaning the
+    // residual. `isBounceBackstopSignal` is computed once above from the same
+    // `isBounceForceExit` helper used everywhere else this bypass applies.
     if (!isBuy) {
-      const sellCounts = getReplacementAwareSellCounts(counts, sellCapacitySource);
+      const sellCounts = getReplacementAwareSellCounts(
+        counts,
+        sellCapacitySource,
+        signal.decisionRuleId ?? null,
+      );
       const sellCapacity = evaluateWalletSellCapacity({
         policy: sellPolicy,
         source: sellCapacitySource,
@@ -213,7 +276,7 @@ export class AlgoRiskGateImpl implements RiskGate {
         openNonProfileLadderSellOrderCount: sellCounts.openNonProfileLadderSellOrderCount,
         profileOwnedOpenPositionCount: this.profileOwnedOpenPositionCount?.() ?? 0,
       });
-      if (!sellCapacity.allowed) {
+      if (!sellCapacity.allowed && !isBounceBackstopSignal) {
         rejected.push(WALLET_SELL_CAPACITY_EXHAUSTED_REASON);
         return finish(false, WALLET_SELL_CAPACITY_EXHAUSTED_REASON, sellCapacity);
       }
@@ -221,11 +284,15 @@ export class AlgoRiskGateImpl implements RiskGate {
 
       const perTokenSell = evaluatePerTokenOrderCapacity({
         side: "sell",
-        maxOpenOrdersPerToken: sellPolicy.maxOpenSellOrdersPerToken,
+        maxOpenOrdersPerToken: resolveEffectiveMaxOpenSellOrdersPerToken({
+          decisionRuleId: signal.decisionRuleId ?? null,
+          sellPolicy,
+          bounceLadderRungCount: policy?.bounceExit.ladderFractions.length,
+        }),
         openOrdersForToken: sellCounts.perTokenOpenSellOrderCount,
         enabled: sellPolicy.enabled,
       });
-      if (!perTokenSell.allowed) {
+      if (!perTokenSell.allowed && !isBounceBackstopSignal) {
         rejected.push(PER_TOKEN_SELL_LIMIT_REASON);
         return finish(false, PER_TOKEN_SELL_LIMIT_REASON, sellCapacity);
       }
@@ -241,7 +308,7 @@ export class AlgoRiskGateImpl implements RiskGate {
         policy: orderPolicy,
         openOrdersTotal: sellCounts.openOrdersTotal,
       });
-      if (!totalCapacity.allowed) {
+      if (!totalCapacity.allowed && !isBounceBackstopSignal) {
         rejected.push(TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON);
         return finish(false, TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON, sellCapacity);
       }

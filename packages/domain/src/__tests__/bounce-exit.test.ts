@@ -4,9 +4,14 @@ import { DEFAULT_GATE_ENTRY, DEFAULT_BOUNCE_EXIT } from "../execution-policy.js"
 import {
   evaluateGateEntryEligibility,
   evaluateBounceExit,
+  bounceExitTierGain,
+  isBounceForceExit,
+  BOUNCE_EXIT_TARGET_RULE_ID,
+  BOUNCE_EXIT_BACKSTOP_RULE_ID,
   type GateEntryMarketInput,
   type BounceExitContext,
 } from "../bounce-exit.js";
+import type { BounceExitPolicy } from "../types.js";
 
 const CREATED_AT = "2026-01-01T00:00:00.000Z";
 
@@ -102,59 +107,154 @@ describe("evaluateGateEntryEligibility — custom policy overrides", () => {
   });
 });
 
-// evaluateBounceExit — Phase 3 (docs/plans/2026-07-15-gate-bounce-live-experiment.md).
-// DEFAULT_BOUNCE_EXIT: targetGainPct 0.257, timeoutMs 14_400_000 (4h == 14_400s).
+// bounceExitTierGain — Phase 1 (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md).
+// DEFAULT_BOUNCE_EXIT.targetTiers: ≤0.02→0.36, ≤0.03→0.27, ≤0.05→0.19, ≤0.08→0.15,
+// ≤0.15→0.15, ≤0.35→0.12, ≤1.0→0.08. Inclusive lookup (price <= maxPrice), unlike
+// D8's exclusive `<` bucket lookup.
+describe("bounceExitTierGain — inclusive tier boundaries", () => {
+  it("entry 0.02 (exactly the first tier's maxPrice, inclusive) → 0.36", () => {
+    expect(bounceExitTierGain(DEFAULT_BOUNCE_EXIT, 0.02)).toBe(0.36);
+  });
+
+  it("entry exactly 0.05 (tier boundary, inclusive) → 0.19", () => {
+    expect(bounceExitTierGain(DEFAULT_BOUNCE_EXIT, 0.05)).toBe(0.19);
+  });
+
+  it("entry 0.051 (just above the 0.05 boundary) → falls into the next tier, 0.15", () => {
+    expect(bounceExitTierGain(DEFAULT_BOUNCE_EXIT, 0.051)).toBe(0.15);
+  });
+
+  it("entry 0.5 (within the catch-all ≤1.0 tier) → 0.08", () => {
+    expect(bounceExitTierGain(DEFAULT_BOUNCE_EXIT, 0.5)).toBe(0.08);
+  });
+
+  it("entry below the smallest tier's maxPrice still resolves to that tier", () => {
+    expect(bounceExitTierGain(DEFAULT_BOUNCE_EXIT, 0.001)).toBe(0.36);
+  });
+
+  it("falls back to the last tier's gainPct for an entry beyond every maxPrice (defensive only)", () => {
+    const policy: BounceExitPolicy = {
+      ...DEFAULT_BOUNCE_EXIT,
+      targetTiers: [{ maxPrice: 0.5, gainPct: 0.2 }],
+    };
+    expect(bounceExitTierGain(policy, 0.9)).toBe(0.2);
+  });
+});
+
+// evaluateBounceExit — ladder redesign Phase 2 (docs/plans/2026-07-16-bounce-
+// exit-ladder-redesign.md). DEFAULT_BOUNCE_EXIT.ladderFractions: [0.3, 0.4, 0.3];
+// ladderStepPct: 0.22. For firstEntryPrice 0.1, bounceExitTierGain resolves to
+// 0.15 (0.08 < 0.1 <= 0.15 tier — see the tier-gain tests above), so:
+//   rung0 px = ceilToTick(0.1 * 1.15, 0.01)                          = 0.12
+//   rung1 px = ceilToTick(0.1 * (1.15 * 1.22 - 1 + 1), 0.01)         = 0.15
+//   rung2 px = ceilToTick(0.1 * (1.15 * 1.22^2 - 1 + 1), 0.01)       = 0.18
+// (values hand-verified against tick-math.ts's ceilQuantize).
 const bounceExitPolicy = DEFAULT_BOUNCE_EXIT;
 
 function bounceCtx(overrides: Partial<BounceExitContext> = {}): BounceExitContext {
   return {
-    avgBuyPrice: 0.1,
-    holdSeconds: 0,
+    firstEntryPrice: 0.1,
     tickSize: 0.01,
-    hasActiveBounceTargetOrder: false,
+    placedRungIndices: [],
+    backstopEligible: false,
     ...overrides,
   };
 }
 
-describe("evaluateBounceExit — maker_target on a fresh fill", () => {
-  it("returns maker_target at entry x 1.257, ceil-snapped to tick, when no target is resting", () => {
-    const result = evaluateBounceExit(
-      bounceCtx({ avgBuyPrice: 0.1, holdSeconds: 0 }),
-      bounceExitPolicy,
-    );
-    expect(result).toEqual({ intent: "maker_target", targetPx: 0.13 });
+describe("evaluateBounceExit — rung selection on a fresh GATE position", () => {
+  it("emits rung0 at firstEntryPrice x (1 + tierGain), sized by ladderFractions[0]", () => {
+    const result = evaluateBounceExit(bounceCtx(), bounceExitPolicy);
+    expect(result).toEqual({ intent: "maker_rung", rungIndex: 0, px: 0.12, fraction: 0.3 });
   });
 
-  it("does not fire a duplicate target while one is already resting", () => {
+  it("anchors to firstEntryPrice, not a different (e.g. averaged) entry price", () => {
+    // entry 0.05 sits in the <=0.05 tier (gainPct 0.19, inclusive boundary).
+    const result = evaluateBounceExit(bounceCtx({ firstEntryPrice: 0.05 }), bounceExitPolicy);
+    expect(result).toEqual({ intent: "maker_rung", rungIndex: 0, px: 0.06, fraction: 0.3 });
+  });
+});
+
+describe("evaluateBounceExit — next-cycle rung advancement", () => {
+  it("skips rung0 once placed and emits rung1 at the compounded ladder step, sized 0.4", () => {
+    const result = evaluateBounceExit(bounceCtx({ placedRungIndices: [0] }), bounceExitPolicy);
+    expect(result).toEqual({ intent: "maker_rung", rungIndex: 1, px: 0.15, fraction: 0.4 });
+  });
+
+  it("emits rung2 once rung0 and rung1 are both placed, sized 0.3", () => {
+    const result = evaluateBounceExit(bounceCtx({ placedRungIndices: [0, 1] }), bounceExitPolicy);
+    expect(result).toEqual({ intent: "maker_rung", rungIndex: 2, px: 0.18, fraction: 0.3 });
+  });
+
+  it("selects the lowest un-placed rung, not merely 'after the highest placed'", () => {
+    // Only rung1 is placed (e.g. an out-of-order fill/backfill) — rung0 is
+    // still open work and must be selected ahead of rung2.
+    const result = evaluateBounceExit(bounceCtx({ placedRungIndices: [1] }), bounceExitPolicy);
+    expect(result).toEqual({ intent: "maker_rung", rungIndex: 0, px: 0.12, fraction: 0.3 });
+  });
+
+  it("does not re-emit a rung that is already placed (open or filled)", () => {
     const result = evaluateBounceExit(
-      bounceCtx({ holdSeconds: 60, hasActiveBounceTargetOrder: true }),
+      bounceCtx({ placedRungIndices: [0, 1, 2] }),
+      bounceExitPolicy,
+    );
+    expect(result.intent).not.toBe("maker_rung");
+  });
+});
+
+describe("evaluateBounceExit — ladder complete, no backstop", () => {
+  it("returns none once every rung is placed and backstopEligible is false", () => {
+    const result = evaluateBounceExit(
+      bounceCtx({ placedRungIndices: [0, 1, 2], backstopEligible: false }),
       bounceExitPolicy,
     );
     expect(result).toEqual({ intent: "none" });
   });
 });
 
-describe("evaluateBounceExit — 4h timeout", () => {
-  it("stays maker_target just below the timeout boundary", () => {
-    const result = evaluateBounceExit(bounceCtx({ holdSeconds: 14_399 }), bounceExitPolicy);
-    expect(result.intent).toBe("maker_target");
-  });
-
-  it("fires timeout_taker exactly at the timeout boundary (inclusive >=)", () => {
-    const result = evaluateBounceExit(bounceCtx({ holdSeconds: 14_400 }), bounceExitPolicy);
-    expect(result).toEqual({ intent: "timeout_taker" });
-  });
-
-  it("fires timeout_taker even when a target is still resting (hard bail-out)", () => {
+describe("evaluateBounceExit — backstop_taker", () => {
+  it("returns backstop_taker when backstopEligible is true, even with rungs still open", () => {
     const result = evaluateBounceExit(
-      bounceCtx({ holdSeconds: 20_000, hasActiveBounceTargetOrder: true }),
+      bounceCtx({ placedRungIndices: [], backstopEligible: true }),
       bounceExitPolicy,
     );
-    expect(result).toEqual({ intent: "timeout_taker" });
+    expect(result).toEqual({ intent: "backstop_taker" });
   });
 
-  it("fires timeout_taker well past the timeout", () => {
-    const result = evaluateBounceExit(bounceCtx({ holdSeconds: 100_000 }), bounceExitPolicy);
-    expect(result).toEqual({ intent: "timeout_taker" });
+  it("returns backstop_taker when backstopEligible is true even with every rung already placed", () => {
+    const result = evaluateBounceExit(
+      bounceCtx({ placedRungIndices: [0, 1, 2], backstopEligible: true }),
+      bounceExitPolicy,
+    );
+    expect(result).toEqual({ intent: "backstop_taker" });
+  });
+});
+
+describe("isBounceForceExit", () => {
+  it("is true for a lowercase sell signal on the backstop rule id", () => {
+    expect(isBounceForceExit({ side: "sell", decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID })).toBe(
+      true,
+    );
+  });
+
+  it("is true case-insensitively for an uppercase SELL side", () => {
+    expect(isBounceForceExit({ side: "SELL", decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID })).toBe(
+      true,
+    );
+  });
+
+  it("is false for the ladder target rule id (not a force-exit)", () => {
+    expect(isBounceForceExit({ side: "sell", decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID })).toBe(
+      false,
+    );
+  });
+
+  it("is false for a buy side even on the backstop rule id", () => {
+    expect(isBounceForceExit({ side: "buy", decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID })).toBe(
+      false,
+    );
+  });
+
+  it("is false when decisionRuleId is null", () => {
+    expect(isBounceForceExit({ side: "sell", decisionRuleId: null })).toBe(false);
   });
 });

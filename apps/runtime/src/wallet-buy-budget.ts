@@ -1,4 +1,6 @@
 import {
+  BOUNCE_EXIT_BACKSTOP_RULE_ID,
+  BOUNCE_EXIT_TARGET_RULE_ID,
   DEFAULT_BUY_CAPACITY_POLICY,
   DEFAULT_ORDER_CAPACITY_POLICY,
   DEFAULT_SELL_CAPACITY_POLICY,
@@ -435,6 +437,35 @@ export function evaluatePerTokenOrderCapacity(args: {
     return { ...base, allowed: false, reason };
   }
   return { ...base, allowed: true, reason: null };
+}
+
+/**
+ * Per-decisionRuleId per-token SELL cap override (docs/plans/2026-07-16-
+ * bounce-exit-ladder-redesign.md REV3 R2-M: "SELL capacity is enforced in
+ * TWO places" — algo-risk-gate.ts before the bridge and execution-module.ts
+ * at submission — so this lives here, shared, rather than duplicated.
+ * Mirrors the pre-existing S1-ladder carve-out (S1 gets its own
+ * `s1MaxOrdersPerToken`): a GATE-lane bounce-exit rung/backstop must not trip
+ * the generic per-token cap (default 2) once more than 2 ladder rungs are
+ * configured to rest simultaneously — `Math.max` only ever raises the cap
+ * for this decision rule, never lowers the generic policy for anyone else.
+ */
+export function resolveEffectiveMaxOpenSellOrdersPerToken(args: {
+  decisionRuleId: string | null | undefined;
+  sellPolicy: Pick<SellCapacityPolicy, "maxOpenSellOrdersPerToken">;
+  s1MaxOrdersPerToken?: number | undefined;
+  bounceLadderRungCount?: number | undefined;
+}): number {
+  if (args.decisionRuleId === S1_LADDER_RULE_ID) {
+    return args.s1MaxOrdersPerToken ?? args.sellPolicy.maxOpenSellOrdersPerToken;
+  }
+  if (
+    args.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID ||
+    args.decisionRuleId === BOUNCE_EXIT_BACKSTOP_RULE_ID
+  ) {
+    return Math.max(args.sellPolicy.maxOpenSellOrdersPerToken, args.bounceLadderRungCount ?? 0);
+  }
+  return args.sellPolicy.maxOpenSellOrdersPerToken;
 }
 
 export function normalizeSellCapacityPolicy(

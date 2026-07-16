@@ -59,55 +59,105 @@ export function evaluateGateEntryEligibility(
   );
 }
 
-// Decision-rule IDs for the GATE-lane bounce-exit SELL branch (decision-planner.ts,
-// Phase 3): a resting maker target (re)established while unfilled, or a taker
-// force-exit once the position has aged past the timeout. Two distinct IDs so
-// downstream sizing/pricing/order-repo lookups (Phase 4) can tell the two
-// intents apart.
+// Decision-rule IDs for the GATE-lane bounce-exit SELL branch (decision-planner.ts).
+// Every rung of the resting-maker ladder shares BOUNCE_EXIT_TARGET_RULE_ID —
+// rungs are told apart via the order metadata's `bounceRung.rungIndex`/`ladderId`
+// (see decision-planner.ts/signal-to-order.ts), not the rule id. BACKSTOP is the
+// near-resolution taker force-exit (docs/plans/2026-07-16-bounce-exit-ladder-
+// redesign.md), replacing the old hold-time BOUNCE_EXIT_TIMEOUT_RULE_ID.
 export const BOUNCE_EXIT_TARGET_RULE_ID = "BOUNCE_EXIT_TARGET";
-export const BOUNCE_EXIT_TIMEOUT_RULE_ID = "BOUNCE_EXIT_TIMEOUT";
+export const BOUNCE_EXIT_BACKSTOP_RULE_ID = "BOUNCE_EXIT_BACKSTOP";
+
+/**
+ * True for the bounce-exit near-resolution force-exit SELL — the one signal
+ * every guard-bypass/cancel/pricing site along the exit path must recognize
+ * (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md). A single predicate
+ * so every call site stays in sync with the rule id (was duplicated ad hoc
+ * under the old BOUNCE_EXIT_TIMEOUT_RULE_ID name). `side` is compared
+ * case-insensitively: decision-planner's internal `TradeDecisionAction` is
+ * uppercase ("SELL"), while `Signal.side` (what callers in signal-to-order.ts
+ * hold) is lowercase ("sell").
+ */
+export function isBounceForceExit(sig: { side: string; decisionRuleId: string | null }): boolean {
+  return sig.side.toLowerCase() === "sell" && sig.decisionRuleId === BOUNCE_EXIT_BACKSTOP_RULE_ID;
+}
 
 /**
  * Narrow inputs `evaluateBounceExit` needs from an open GATE-lane position and
- * its live order state. Mirrors `GateEntryMarketInput`'s narrowing pattern —
+ * its persisted rung state. Mirrors `GateEntryMarketInput`'s narrowing pattern —
  * avoids forcing callers/tests to build a full `Position`/`NormalizedMarket`.
  */
 export interface BounceExitContext {
-  /** Position's avg entry price (buy-side cost basis for the harvest target). */
-  avgBuyPrice: number;
-  /** Seconds since the position's first fill (legState.firstTradeAt). */
-  holdSeconds: number;
-  /** Market tick size, for snapping the harvest target price. */
+  /** Position's first-fill price — the ladder's fixed anchor (never the
+   * mutable avgEntryPrice, which drifts with every add/partial-sell). */
+  firstEntryPrice: number;
+  /** Market tick size, for snapping each rung's price. */
   tickSize: number;
-  /** True when a live BOUNCE_EXIT_TARGET SELL order is already resting (orderRepo). */
-  hasActiveBounceTargetOrder: boolean;
+  /** Rung indices already placed (open or filled) for this position's ladder —
+   * see decision-planner.ts/algo-decision-module.ts for how this is derived
+   * from persisted order metadata. */
+  placedRungIndices: readonly number[];
+  /** Precomputed by the caller (Phase 2: always false — the real near-
+   * resolution Track-Q wrapper is a later phase; this evaluator only accepts
+   * the input and never derives it itself, keeping it pure/I-O-free). */
+  backstopEligible: boolean;
 }
 
 export type BounceExitDecision =
-  | { intent: "maker_target"; targetPx: number }
-  | { intent: "timeout_taker" }
+  | { intent: "maker_rung"; rungIndex: number; px: number; fraction: number }
+  | { intent: "backstop_taker" }
   | { intent: "none" };
 
 /**
- * GATE-lane bounce-exit decision (live experiment, Phase 3): resting maker
- * target at `avgBuyPrice * (1 + targetGainPct)` while unfilled and within the
- * timeout window; a taker force-exit once `holdSeconds` passes the timeout,
- * regardless of whether a target is still resting (the timeout is a hard
- * bail-out, not conditioned on order state). Pure — no I/O, no runtime import.
+ * Inclusive entry-price-tiered gain lookup: the first tier where
+ * `entryPrice <= maxPrice` wins (unlike D8's exclusive `<` bucket lookup —
+ * see docs/plans/2026-07-16-bounce-exit-ladder-redesign.md REV2 H-M). Config
+ * validation (`parseBounceExit`) requires the last tier's `maxPrice` to be
+ * >= 1.0 — the top of the price domain — so the fallback below is defensive
+ * only. Pure config-lookup.
+ */
+export function bounceExitTierGain(policy: BounceExitPolicy, entryPrice: number): number {
+  for (const tier of policy.targetTiers) {
+    if (entryPrice <= tier.maxPrice) return tier.gainPct;
+  }
+  return policy.targetTiers[policy.targetTiers.length - 1]!.gainPct;
+}
+
+/**
+ * GATE-lane bounce-exit decision: the laddered resting-maker exit
+ * (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md). Selects the lowest
+ * un-placed rung index and returns its price + size fraction; `{intent:"none"}`
+ * once every configured rung is placed (open or filled) and no backstop is
+ * eligible. `backstopEligible` is a precomputed input (Phase 2: the caller
+ * always passes `false`, so `backstop_taker` is never produced yet — the real
+ * near-resolution eligibility wrapper lands in a later phase) so this stays
+ * pure — no I/O, no runtime import, no market/order lookups of its own.
+ *
+ * Rung pricing: rung0 = firstEntryPrice * (1 + bounceExitTierGain(...)); rung_k
+ * (k >= 1) compounds the ladder step on top of rung0's *pre-tick-rounding*
+ * value — `(1+tierGain) * (1+ladderStepPct)^k` — then snaps once via
+ * `computeHarvestTarget`. Compounding from the raw anchor (rather than
+ * chaining ceilToTick(ceilToTick(...))) applies exactly one tick-rounding per
+ * rung instead of accumulating rounding drift rung over rung.
  */
 export function evaluateBounceExit(
   ctx: BounceExitContext,
   policy: BounceExitPolicy,
 ): BounceExitDecision {
-  const timeoutSeconds = policy.timeoutMs / 1000;
-  if (ctx.holdSeconds >= timeoutSeconds) {
-    return { intent: "timeout_taker" };
+  if (ctx.backstopEligible) {
+    return { intent: "backstop_taker" };
   }
-  if (ctx.hasActiveBounceTargetOrder) {
-    return { intent: "none" };
+  const tierGain = bounceExitTierGain(policy, ctx.firstEntryPrice);
+  const placed = new Set(ctx.placedRungIndices);
+  for (let rungIndex = 0; rungIndex < policy.ladderFractions.length; rungIndex++) {
+    if (placed.has(rungIndex)) continue;
+    const compoundedGain = (1 + tierGain) * Math.pow(1 + policy.ladderStepPct, rungIndex) - 1;
+    return {
+      intent: "maker_rung",
+      rungIndex,
+      px: computeHarvestTarget(ctx.firstEntryPrice, compoundedGain, ctx.tickSize),
+      fraction: policy.ladderFractions[rungIndex]!,
+    };
   }
-  return {
-    intent: "maker_target",
-    targetPx: computeHarvestTarget(ctx.avgBuyPrice, policy.targetGainPct, ctx.tickSize),
-  };
+  return { intent: "none" };
 }

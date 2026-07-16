@@ -65,6 +65,7 @@ import {
   computeSellSizingPlan,
   S1_LADDER_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
+  BOUNCE_EXIT_BACKSTOP_RULE_ID,
 } from "@krabs/domain";
 import { readContinuationMode, readContinuationModeVersion } from "@krabs/db";
 import type { EvalContext } from "@krabs/domain";
@@ -1719,6 +1720,10 @@ export class AlgoDecisionModule implements RuntimeModule {
             executionPolicy.dropTrigger.historyMaxAgeMs,
           )
         : null;
+    const bounceLadderState =
+      position?.entryLane === "GATE" && legState
+        ? this.resolveBounceLadderState(tokenId, `${tokenId}:${legState.firstTradeAt}`)
+        : null;
 
     return {
       tokenId,
@@ -1740,8 +1745,12 @@ export class AlgoDecisionModule implements RuntimeModule {
       postBuyCooldown,
       latestSellOrder: legState ? this.getLatestSellOrderForSizing(tokenId) : null,
       hasActiveSellOrderForQd: legState ? this.hasActiveSellOrderForQd(tokenId) : false,
-      hasActiveBounceTargetOrder:
-        position?.entryLane === "GATE" ? this.hasActiveBounceTargetOrder(tokenId) : false,
+      placedBounceRungIndices: bounceLadderState?.placedRungIndices ?? [],
+      originalLadderPositionSize: bounceLadderState?.originalPositionSize ?? null,
+      hasActiveSellOrderForBounceBackstop:
+        position?.entryLane === "GATE" && legState
+          ? this.hasActiveSellOrderForBounceBackstop(tokenId)
+          : false,
       sellLoopGuard: this.deps.sellLoopGuard?.getSnapshot(tokenId, now) ?? null,
       s1Ownership: this.deps.s1Ownership?.getSnapshot(tokenId) ?? null,
       profileLadderOwned: this.deps.profileLadderOwnership?.isProfileLadderOwned(tokenId) ?? false,
@@ -1898,15 +1907,24 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
   }
 
-  private getLatestSellOrderForSizing(tokenId: TokenId): SellOrderSizingContext | null {
+  // Shared by every "recent sell order" consumer below (sizing, the general
+  // Track Q shadow, the GATE bounce-exit backstop) — findRecentByTokenId is
+  // an optional repo capability (some fixtures/backends don't implement it),
+  // so every caller needs the identical fallback to an unbounded scan sorted
+  // newest-first. Extracted once rather than copy-pasted a third time (CLAUDE.md DRY).
+  private recentOrdersByToken(tokenId: TokenId): Order[] {
     const repo = this.deps.orderRepo;
-    if (!repo) return null;
-    const orders =
+    if (!repo) return [];
+    return (
       repo.findRecentByTokenId?.(tokenId, 20) ??
       repo
         .findByTokenId(tokenId)
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    const latest = orders.find((order) => order.side === "sell");
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    );
+  }
+
+  private getLatestSellOrderForSizing(tokenId: TokenId): SellOrderSizingContext | null {
+    const latest = this.recentOrdersByToken(tokenId).find((order) => order.side === "sell");
     if (!latest) return null;
     return {
       size: latest.size,
@@ -1918,14 +1936,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private hasActiveSellOrderForQd(tokenId: TokenId): boolean {
-    const repo = this.deps.orderRepo;
-    if (!repo) return false;
-    const orders =
-      repo.findRecentByTokenId?.(tokenId, 20) ??
-      repo
-        .findByTokenId(tokenId)
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    return orders.some(
+    return this.recentOrdersByToken(tokenId).some(
       (order) =>
         order.side === "sell" &&
         order.decisionRuleId !== S1_LADDER_RULE_ID &&
@@ -1934,22 +1945,84 @@ export class AlgoDecisionModule implements RuntimeModule {
     );
   }
 
-  // Bounce-exit branch input (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
-  // Phase 3): whether a BOUNCE_EXIT_TARGET SELL is already resting, so
-  // evaluateBounceExit doesn't post a duplicate target while one is unfilled.
-  // Uses findOpen() (not the recent-N scan the sibling helpers above use) —
-  // a resting target can outlive many newer BUY/add orders on the same token
-  // while it waits to fill, so a bounded "last 20" window can miss it and let
-  // a duplicate target through. findOpen() is unbounded and status-scoped, so
-  // it always finds a still-working row regardless of how old it is.
-  private hasActiveBounceTargetOrder(tokenId: TokenId): boolean {
+  // GATE-scoped bounce-exit backstop active-sell check (docs/plans/2026-07-16-
+  // bounce-exit-ladder-redesign.md Phase 3, REV3 R2-H1): deliberately a
+  // SIBLING of hasActiveSellOrderForQd above, not a reuse of it — the general
+  // Track Q shadow's check must stay unchanged (it never excludes bounce
+  // rungs), while the backstop's own check MUST exclude them: a resting
+  // bounce rung is exactly what the backstop is about to cancel, so it must
+  // never veto its own force-exit.
+  private hasActiveSellOrderForBounceBackstop(tokenId: TokenId): boolean {
+    return this.recentOrdersByToken(tokenId).some(
+      (order) =>
+        order.side === "sell" &&
+        order.decisionRuleId !== S1_LADDER_RULE_ID &&
+        order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID &&
+        order.decisionRuleId !== BOUNCE_EXIT_BACKSTOP_RULE_ID &&
+        !isProfileLadderOrderForQd(order) &&
+        isWorkingSellOrderStatus(order.status ?? null),
+    );
+  }
+
+  // Bounce-exit ladder branch input (docs/plans/2026-07-16-bounce-exit-ladder-
+  // redesign.md, Phase 2 + Phase 4): a single order scan derives both (a)
+  // which rung indices are already placed (open OR filled — not just
+  // "currently resting") for this position's ladder, so evaluateBounceExit
+  // skips them and selects the next un-placed rung, and (b) the ladder's
+  // PINNED original-position-size basis, recovered from the earliest placed
+  // rung's own `originalPositionSize` metadata (Phase 4 add-invariance fix —
+  // see `originalLadderPositionSize` doc in decision-planner.ts).
+  // Uses findByTokenId (unbounded, all statuses) rather than the recent-N scan
+  // the sibling helpers above use or findOpen()'s open-only scope — a filled
+  // rung must still count as "placed" even though it's no longer open, and a
+  // resting rung can outlive many newer BUY/add orders on the same token.
+  // Cancelled/rejected rungs are NOT placed — they get retried.
+  // Scoped to `ladderId` so a closed-then-reopened GATE position on the same
+  // token starts a fresh ladder rather than inheriting a stale rung set.
+  private resolveBounceLadderState(
+    tokenId: TokenId,
+    ladderId: string,
+  ): { placedRungIndices: readonly number[]; originalPositionSize: number | null } {
     const repo = this.deps.orderRepo;
-    if (!repo) return false;
-    return repo
-      .findOpen()
-      .some(
-        (order) => order.tokenId === tokenId && order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID,
-      );
+    if (!repo) return { placedRungIndices: [], originalPositionSize: null };
+    const indices = new Set<number>();
+    // MIN, not first-seen: pins to whatever the smallest recorded value ever
+    // was across all placed rungs. Since cumulativeBuySize only grows (an add
+    // can only increase it, never decrease it), the smallest value any rung
+    // ever recorded is necessarily the earliest (pre-add) one, regardless of
+    // repository iteration order.
+    let originalPositionSize: number | null = null;
+    for (const order of repo.findByTokenId(tokenId)) {
+      if (order.side !== "sell") continue;
+      if (order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID) continue;
+      if (order.status === "cancelled" || order.status === "rejected") continue;
+      const bounceRung = order.metadata?.bounceRung as
+        | {
+            ladderId?: string;
+            rungIndex?: number;
+            rungIndicesCovered?: number[];
+            originalPositionSize?: number;
+          }
+        | undefined;
+      if (!bounceRung || bounceRung.ladderId !== ladderId) continue;
+      // rungIndicesCovered (min-order rollover) marks every absorbed index as
+      // placed, not just the order's own rungIndex.
+      if (Array.isArray(bounceRung.rungIndicesCovered)) {
+        for (const covered of bounceRung.rungIndicesCovered) {
+          if (typeof covered === "number") indices.add(covered);
+        }
+      } else if (typeof bounceRung.rungIndex === "number") {
+        indices.add(bounceRung.rungIndex);
+      }
+      if (
+        typeof bounceRung.originalPositionSize === "number" &&
+        Number.isFinite(bounceRung.originalPositionSize) &&
+        (originalPositionSize === null || bounceRung.originalPositionSize < originalPositionSize)
+      ) {
+        originalPositionSize = bounceRung.originalPositionSize;
+      }
+    }
+    return { placedRungIndices: Array.from(indices), originalPositionSize };
   }
 
   private async resolveContinuationFactsForPlanner(
@@ -2869,6 +2942,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       decisionRuleId: draft.decisionRuleId,
       sizingRuleId: draft.sizingRuleId,
       generatedAt,
+      ...(draft.bounceRung ? { bounceRung: draft.bounceRung } : {}),
     };
     const entryFreshEdgeTelemetry =
       signal.side === "buy"

@@ -58,6 +58,7 @@ import type {
   MakerEntryPolicy,
   GateEntryPolicy,
   BounceExitPolicy,
+  BounceExitTargetTier,
   TrackRHonestPricingPolicy,
   TrackS3MarginAwareSpreadPolicy,
   TrackS3SpreadTierPolicy,
@@ -622,16 +623,41 @@ export const DEFAULT_GATE_ENTRY: GateEntryPolicy = {
   microMaxOrderUsdc: 2,
 };
 
-// GATE-scoped bounce-exit defaults (live-experiment, same plan as DEFAULT_GATE_ENTRY,
-// Phase 1: config only, no runtime effect). enabled=false + mode="off" + empty
-// whitelist ⇒ zero live-order changes until an operator deliberately enables it.
-// Research-backed params (fixed, do not tune): targetGainPct 0.257 (+25.7%),
-// timeoutMs 14_400_000 (4h), microMaxOrderUsdc 2 ($2 micro cap).
+// GATE-scoped bounce-exit defaults (live-experiment, same plan as DEFAULT_GATE_ENTRY).
+// enabled=false + mode="off" + empty whitelist ⇒ zero live-order changes until an
+// operator deliberately enables it.
+//
+// Ladder redesign (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md): Phase 3
+// wired the laddered evaluator in and it is the ONLY thing the live path reads now
+// (decision-planner.ts / bounce-exit.ts). targetGainPct/timeoutMs are VESTIGIAL —
+// kept solely so an old flat-shape operator JSON still parses without crashing
+// (parseBounceExit is tolerant-but-fail-closed for legacy shape); they no longer
+// drive any live decision. Research-backed params (fixed, do not tune): targetTiers
+// scale with entry price (≤0.02→+36%, 0.02–0.03→+27%, 0.03–0.05→+19%,
+// 0.05–0.08→+15%, 0.08–0.15→+15%, 0.15–0.35→+12%, 0.35+→+8%); ladderFractions
+// 30/40/30 (median 3-tranche scale-out); ladderStepPct 0.22 (~+22% between rungs);
+// backstopTtcHours 24 (near-resolution taker backstop window, replacing the old 4h
+// hold-time timeout; see plan's "Horizon: no 4h cut" finding); microMaxOrderUsdc 2
+// ($2 micro cap, applies to resting rungs only — the backstop is exempt).
+const DEFAULT_BOUNCE_EXIT_TARGET_TIERS: readonly BounceExitTargetTier[] = [
+  { maxPrice: 0.02, gainPct: 0.36 },
+  { maxPrice: 0.03, gainPct: 0.27 },
+  { maxPrice: 0.05, gainPct: 0.19 },
+  { maxPrice: 0.08, gainPct: 0.15 },
+  { maxPrice: 0.15, gainPct: 0.15 },
+  { maxPrice: 0.35, gainPct: 0.12 },
+  { maxPrice: 1.0, gainPct: 0.08 },
+];
+
 export const DEFAULT_BOUNCE_EXIT: BounceExitPolicy = {
   enabled: false,
   mode: "off",
   targetGainPct: 0.257,
   timeoutMs: 14_400_000,
+  targetTiers: [...DEFAULT_BOUNCE_EXIT_TARGET_TIERS],
+  ladderFractions: [0.3, 0.4, 0.3],
+  ladderStepPct: 0.22,
+  backstopTtcHours: 24,
   whitelistConditionIds: [],
   microMaxOrderUsdc: 2,
 };
@@ -1000,6 +1026,12 @@ const GATE_ENTRY_MODES = ["off", "micro_live"] as const;
 const BOUNCE_EXIT_MODES = ["off", "micro_live"] as const;
 const BOUND_GATE_MIN_LIFESPAN_DAYS_MIN = 0;
 const BOUND_GATE_MIN_LIFESPAN_DAYS_MAX = BOUND_H5_DAYS_TO_RESOLVE_MAX;
+
+// Bounce-exit ladder bounds (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md).
+const BOUND_BOUNCE_LADDER_STEP_PCT_MIN = 0.001;
+const BOUND_BOUNCE_LADDER_STEP_PCT_MAX = 5;
+const BOUND_BOUNCE_BACKSTOP_TTC_HOURS_MIN = 0.1;
+const BOUND_BOUNCE_BACKSTOP_TTC_HOURS_MAX = 720;
 
 export interface ParseResult {
   policy: ExecutionPolicy;
@@ -5364,6 +5396,115 @@ function parseGateEntry(raw: unknown, issues: string[]): GateEntryPolicy {
   };
 }
 
+// Bounce-exit ladder config (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md).
+// Each field parses independently and falls back to its own default when
+// absent or invalid — same fallback posture as every other field in this file
+// (clampedNumber/enumOr/etc.), NOT a fail-closed unit. These fields are what
+// the shipped evaluator actually reads (`evaluateBounceExit` — Phase 3);
+// `targetGainPct`/`timeoutMs` below are the legacy flat-target fields, parsed
+// only so an old operator JSON still round-trips without crashing.
+
+function parseBounceExitTargetTiers(
+  raw: unknown,
+  fallback: BounceExitTargetTier[],
+  issues: string[],
+): BounceExitTargetTier[] {
+  if (raw === undefined) return fallback;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    issues.push("bounceExit.targetTiers must be a non-empty array");
+    return fallback;
+  }
+  const tiers: BounceExitTargetTier[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i];
+    if (item == null || typeof item !== "object" || Array.isArray(item)) {
+      issues.push(`bounceExit.targetTiers[${i}] must be an object`);
+      return fallback;
+    }
+    const { maxPrice, gainPct } = item as Record<string, unknown>;
+    if (
+      typeof maxPrice !== "number" ||
+      !Number.isFinite(maxPrice) ||
+      maxPrice < BOUND_EXECUTION_PROFILE_PRICE_MIN ||
+      maxPrice > BOUND_EXECUTION_PROFILE_PRICE_MAX
+    ) {
+      issues.push(
+        `bounceExit.targetTiers[${i}].maxPrice must be a number in [${BOUND_EXECUTION_PROFILE_PRICE_MIN}, ${BOUND_EXECUTION_PROFILE_PRICE_MAX}]`,
+      );
+      return fallback;
+    }
+    if (
+      typeof gainPct !== "number" ||
+      !Number.isFinite(gainPct) ||
+      gainPct < BOUND_MAKER_HARVEST_GAIN_PCT_MIN ||
+      gainPct > BOUND_MAKER_HARVEST_GAIN_PCT_MAX
+    ) {
+      issues.push(
+        `bounceExit.targetTiers[${i}].gainPct must be a number in [${BOUND_MAKER_HARVEST_GAIN_PCT_MIN}, ${BOUND_MAKER_HARVEST_GAIN_PCT_MAX}]`,
+      );
+      return fallback;
+    }
+    const prev = tiers[i - 1];
+    if (prev !== undefined && maxPrice <= prev.maxPrice) {
+      issues.push("bounceExit.targetTiers maxPrice must be strictly ascending");
+      return fallback;
+    }
+    if (prev !== undefined && gainPct > prev.gainPct) {
+      issues.push("bounceExit.targetTiers gainPct must be monotonic non-increasing by maxPrice");
+      return fallback;
+    }
+    tiers.push({ maxPrice, gainPct });
+  }
+  if (tiers[tiers.length - 1]!.maxPrice < 1.0) {
+    issues.push("bounceExit.targetTiers last tier's maxPrice must be >= 1.0 (catch-all)");
+    return fallback;
+  }
+  return tiers;
+}
+
+function parseBounceExitLadderFractions(
+  raw: unknown,
+  fallback: number[],
+  issues: string[],
+): number[] {
+  if (raw === undefined) return fallback;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    issues.push("bounceExit.ladderFractions must be a non-empty array");
+    return fallback;
+  }
+  const fractions: number[] = [];
+  let sum = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i];
+    if (typeof item !== "number" || !Number.isFinite(item) || item <= 0) {
+      issues.push(`bounceExit.ladderFractions[${i}] must be a positive finite number`);
+      return fallback;
+    }
+    fractions.push(item);
+    sum += item;
+  }
+  if (Math.abs(sum - 1) > 0.001) {
+    issues.push(`bounceExit.ladderFractions must sum to ~1.0 (got ${sum})`);
+    return fallback;
+  }
+  return fractions;
+}
+
+/**
+ * Parses BOTH the legacy flat fields (`targetGainPct`/`timeoutMs` — vestigial,
+ * parsed only so an old operator JSON round-trips without crashing;
+ * `evaluateBounceExit` no longer reads them) and the ladder fields
+ * (`targetTiers`/`ladderFractions`/`ladderStepPct`/`backstopTtcHours`, the
+ * fields the shipped evaluator actually reads). FAIL-CLOSED
+ * (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md Phase 2 Codex fix):
+ * the ladder is now the ACTIVE bounce-exit path, so `enabled`/`mode` are only
+ * honoured when all four ladder fields are legitimately present AND valid.
+ * An old flat block (legacy fields only, ladder fields absent or invalid)
+ * must never silently activate the new ladder by defaulting the missing
+ * fields into a valid-looking one — it is forced to `enabled:false`,
+ * `mode:"off"` instead, so an old `enabled:true` row stays effectively
+ * disabled rather than running the ladder with unreviewed defaults.
+ */
 function parseBounceExit(raw: unknown, issues: string[]): BounceExitPolicy {
   if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
     if (raw !== undefined) issues.push("bounceExit must be an object");
@@ -5395,6 +5536,51 @@ function parseBounceExit(raw: unknown, issues: string[]): BounceExitPolicy {
     issues,
     "bounceExit.timeoutMs",
   );
+
+  // Track presence+validity of each required ladder field independently of
+  // its own fallback-to-default value — a field that fell back (absent OR
+  // invalid) must not be silently treated as "legitimately configured".
+  const issuesBeforeTargetTiers = issues.length;
+  const targetTiers = parseBounceExitTargetTiers(
+    obj.targetTiers,
+    DEFAULT_BOUNCE_EXIT.targetTiers,
+    issues,
+  );
+  const targetTiersOk = obj.targetTiers !== undefined && issues.length === issuesBeforeTargetTiers;
+
+  const issuesBeforeLadderFractions = issues.length;
+  const ladderFractions = parseBounceExitLadderFractions(
+    obj.ladderFractions,
+    DEFAULT_BOUNCE_EXIT.ladderFractions,
+    issues,
+  );
+  const ladderFractionsOk =
+    obj.ladderFractions !== undefined && issues.length === issuesBeforeLadderFractions;
+
+  const issuesBeforeLadderStepPct = issues.length;
+  const ladderStepPct = clampedNumber(
+    obj.ladderStepPct,
+    DEFAULT_BOUNCE_EXIT.ladderStepPct,
+    BOUND_BOUNCE_LADDER_STEP_PCT_MIN,
+    BOUND_BOUNCE_LADDER_STEP_PCT_MAX,
+    issues,
+    "bounceExit.ladderStepPct",
+  );
+  const ladderStepPctOk =
+    obj.ladderStepPct !== undefined && issues.length === issuesBeforeLadderStepPct;
+
+  const issuesBeforeBackstopTtcHours = issues.length;
+  const backstopTtcHours = clampedNumber(
+    obj.backstopTtcHours,
+    DEFAULT_BOUNCE_EXIT.backstopTtcHours,
+    BOUND_BOUNCE_BACKSTOP_TTC_HOURS_MIN,
+    BOUND_BOUNCE_BACKSTOP_TTC_HOURS_MAX,
+    issues,
+    "bounceExit.backstopTtcHours",
+  );
+  const backstopTtcHoursOk =
+    obj.backstopTtcHours !== undefined && issues.length === issuesBeforeBackstopTtcHours;
+
   const whitelistConditionIds = parseWhitelistConditionIds(
     obj.whitelistConditionIds,
     DEFAULT_BOUNCE_EXIT.whitelistConditionIds,
@@ -5410,11 +5596,25 @@ function parseBounceExit(raw: unknown, issues: string[]): BounceExitPolicy {
     "bounceExit.microMaxOrderUsdc",
   );
 
+  const ladderFieldsComplete =
+    targetTiersOk && ladderFractionsOk && ladderStepPctOk && backstopTtcHoursOk;
+  if (!ladderFieldsComplete && (enabled || mode !== "off")) {
+    issues.push(
+      "bounceExit: ladder fields (targetTiers/ladderFractions/ladderStepPct/backstopTtcHours) " +
+        "missing or invalid — forcing enabled:false, mode:off (fail-closed; the ladder is the " +
+        "active bounce-exit path)",
+    );
+  }
+
   return {
-    mode,
-    enabled,
+    mode: ladderFieldsComplete ? mode : "off",
+    enabled: ladderFieldsComplete ? enabled : false,
     targetGainPct,
     timeoutMs,
+    targetTiers,
+    ladderFractions,
+    ladderStepPct,
+    backstopTtcHours,
     whitelistConditionIds,
     microMaxOrderUsdc,
   };

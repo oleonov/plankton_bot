@@ -1,6 +1,7 @@
 import type {
   AlgoDecisionRule,
   AlgoSizeRule,
+  BounceRungMetadata,
   DecisionSignalLog,
   ExecutionPolicy,
   LegState,
@@ -25,7 +26,8 @@ import {
   evaluateSize,
   computeSellSizingPlan,
   BOUNCE_EXIT_TARGET_RULE_ID,
-  BOUNCE_EXIT_TIMEOUT_RULE_ID,
+  BOUNCE_EXIT_BACKSTOP_RULE_ID,
+  isBounceForceExit,
   GATE_ENTRY_RULE_ID,
   H5_WIDE_COHORT_GUARD_REASON,
   isAbandoned,
@@ -56,6 +58,7 @@ import {
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import {
+  evaluateBounceBackstopEligibility,
   evaluateQdPreResolutionExit,
   type QdShadowProjection,
   type QdShadowReason,
@@ -314,6 +317,11 @@ export type DecisionSignalDraft = {
   logDraft: Omit<DecisionSignalLog, "signalId" | "tokenId" | "conditionId" | "signalTimestamp">;
   emissionFacts: EmissionFacts;
   triggerTelemetry: TriggerTelemetry;
+  /** Bounce-exit ladder rung metadata (docs/plans/2026-07-16-bounce-exit-
+   * ladder-redesign.md) — present only for BOUNCE_EXIT_TARGET rung signals;
+   * carried through to Signal/Order metadata so the next planning cycle can
+   * tell which rungs are already placed. */
+  bounceRung?: BounceRungMetadata;
 };
 
 export type DecisionPlanResult =
@@ -352,13 +360,43 @@ export type DecisionPlanningInput = {
   latestSellOrder: SellOrderSizingContext | null;
   hasActiveSellOrderForQd: boolean;
   /**
-   * Whether a BOUNCE_EXIT_TARGET SELL is already resting (docs/plans/2026-07-15-
-   * gate-bounce-live-experiment.md, Phase 3). Optional — like `s1Ownership`/
-   * `profileLadderOwned` above — so the ~dozen existing DecisionPlanningInput
-   * fixtures don't need a mechanical field-add sweep; missing/undefined is
-   * treated as false (no resting target), which is the safe default.
+   * Bounce-exit ladder rung indices already placed (open or filled) for the
+   * current position's ladder (docs/plans/2026-07-16-bounce-exit-ladder-
+   * redesign.md) — derived from persisted order metadata
+   * (algo-decision-module.ts). Optional — like `s1Ownership`/`profileLadderOwned`
+   * above — so the ~dozen existing DecisionPlanningInput fixtures don't need a
+   * mechanical field-add sweep; missing/undefined is treated as an empty ladder
+   * (no rungs placed yet), the safe default.
    */
-  hasActiveBounceTargetOrder?: boolean;
+  placedBounceRungIndices?: readonly number[];
+  /**
+   * The position size basis rung fractions are computed against, PINNED to
+   * whatever it was when the ladder's first rung was placed (docs/plans/
+   * 2026-07-16-bounce-exit-ladder-redesign.md Phase 4 add-invariance fix) —
+   * derived from the earliest already-placed rung's own recorded
+   * `originalPositionSize` metadata (algo-decision-module.ts), NOT from the
+   * live `emissionFacts.cumulativeBuySize`, which keeps growing if a later
+   * BUY fill (an "add") lands on the same leg. GATE is a first-entry lane and
+   * Track A blocks down-adds in practice, but this pins the ladder
+   * defensively so an add — should one ever slip through — cannot re-anchor
+   * or re-ladder rungs that are already resting/filled. Optional for the same
+   * reason as `placedBounceRungIndices`: undefined means no rung has been
+   * placed yet, so there is nothing to pin to and the live
+   * `emissionFacts.cumulativeBuySize` (this cycle's true original size, since
+   * no add has landed before the very first rung) is the correct basis.
+   */
+  originalLadderPositionSize?: number | null;
+  /**
+   * Active-sell check for the GATE-scoped bounce-exit backstop (docs/plans/
+   * 2026-07-16-bounce-exit-ladder-redesign.md Phase 3, REV3 R2-H1) —
+   * deliberately a SEPARATE field from `hasActiveSellOrderForQd` above: the
+   * general Track Q shadow's check excludes S1/profile-ladder orders but NOT
+   * bounce rungs, while the backstop must ignore its own ladder's resting
+   * rungs too (a rung must never veto the very backstop that would cancel
+   * it). Optional for the same reason as `placedBounceRungIndices`; missing
+   * defaults to `false` (no active sell), the safe default.
+   */
+  hasActiveSellOrderForBounceBackstop?: boolean;
   sellLoopGuard: SellLoopGuardSnapshot | null;
   s1Ownership?: S1OwnershipSnapshot | null;
   profileLadderOwned?: boolean;
@@ -973,27 +1011,74 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
     }
   }
 
-  // Bounce-exit branch (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
-  // Phase 3): GATE-lane positions are governed exclusively by the resting-
-  // target/timeout bounce-exit rule once enabled — D8/D9/continuation-stop/
-  // static rules never fire for them (R23-lane and null-lane positions are
-  // untouched and continue through the normal stack below).
+  // Bounce-exit branch (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md,
+  // Phase 2): GATE-lane positions are governed exclusively by the laddered
+  // resting-maker bounce-exit once enabled — D8/D9/continuation-stop/static
+  // rules never fire for them (R23-lane and null-lane positions are untouched
+  // and continue through the normal stack below).
   // SENSITIVE CLASS: any condition below unmet SUPPRESSES — falls through to
   // D8/D9 exactly as if bounce-exit didn't exist, never substitutes another
   // order. This is what makes bounceExit.enabled:false a true no-op.
   if (legState && isOpenPosition(input.position) && input.position.entryLane === "GATE") {
-    const bounceExit = input.executionPolicy?.bounceExit;
+    const policy = input.executionPolicy;
+    const bounceExit = policy?.bounceExit;
     if (
+      policy &&
       bounceExit?.enabled === true &&
       bounceExit.mode === "micro_live" &&
       bounceExit.whitelistConditionIds.includes(market.conditionId)
     ) {
+      // Anchored to the position's FIRST fill, never the mutable avgEntryPrice
+      // (which drifts with every scale-in/partial-sell) — the whole point of a
+      // laddered exit is that every rung's price is fixed at first-entry time.
+      const firstEntryPrice = legState.firstTradePrice;
+      const ladderId = `${market.tokenId}:${legState.firstTradeAt}`;
+      // GATE-lane positions have exactly one entry fill (no scale-in), so
+      // cumulativeBuySize is fixed for the ladder's whole lifetime — the
+      // correct basis for each rung's FRACTION (Codex Phase-2 fix: sizing off
+      // the shrinking residual let rung1/rung2 undersize themselves once an
+      // earlier rung had already filled, e.g. 0.4 x residual instead of
+      // 0.4 x ORIGINAL, leaving an unmanaged tail once the ladder "completed").
+      //
+      // Phase 4 add-invariance fix: prefer the PINNED
+      // `originalLadderPositionSize` (captured from the first rung ever
+      // placed) over the live `emissionFacts.cumulativeBuySize` whenever one
+      // exists. Track A blocks down-adds on a GATE-lane leg, so in practice
+      // the two values are identical — but cumulativeBuySize keeps
+      // accumulating if a later BUY fill ever does land on this leg, which
+      // would silently re-anchor (grow) every rung's size. Falling back to
+      // the live value is correct only when no rung has been placed yet
+      // (nothing to pin to, and no add could have landed before the very
+      // first rung).
+      const originalPositionSize =
+        input.originalLadderPositionSize ?? emissionFacts.cumulativeBuySize ?? 0;
+      const remainingPositionSize = Math.max(
+        0,
+        (emissionFacts.cumulativeBuySize ?? 0) - (emissionFacts.cumulativeSellSize ?? 0),
+      );
+      // Phase 3 (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md): the
+      // GATE-scoped backstop wrapper reuses Track Q's Mode-A/B shape but with
+      // its OWN active-sell check (ignores bounce rungs — a resting rung must
+      // never veto the backstop that would cancel it) and its own tier
+      // ceiling (gateEntry.maxPrice, the whole GATE band — not Q.D's 0.05).
+      // Reuses the same d8EvalPrice/price this cycle already computed for the
+      // general (unmodified) Q.D shadow above, so both see identical inputs.
+      const backstopEligible = evaluateBounceBackstopEligibility({
+        market,
+        legState,
+        position: input.position,
+        executionPolicy: policy,
+        now: input.now,
+        d8EvalPrice,
+        d9EvalPrice: price,
+        hasActiveSell: input.hasActiveSellOrderForBounceBackstop ?? false,
+      });
       const bounceDecision = evaluateBounceExit(
         {
-          avgBuyPrice: input.position.avgEntryPrice,
-          holdSeconds: holdDurationSeconds ?? 0,
+          firstEntryPrice,
           tickSize: market.tickSize,
-          hasActiveBounceTargetOrder: input.hasActiveBounceTargetOrder ?? false,
+          placedRungIndices: input.placedBounceRungIndices ?? [],
+          backstopEligible,
         },
         bounceExit,
       );
@@ -1001,7 +1086,7 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
         suppressions.push({
           tokenId: market.tokenId,
           conditionId: market.conditionId,
-          reasonCode: "bounce-exit-target-resting",
+          reasonCode: "bounce-exit-ladder-complete",
           side: "SELL",
           decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
           state,
@@ -1013,25 +1098,47 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
         });
         return none(metrics, suppressions, sideEffects);
       }
-      const bounceRuleId =
-        bounceDecision.intent === "maker_target"
-          ? BOUNCE_EXIT_TARGET_RULE_ID
-          : BOUNCE_EXIT_TIMEOUT_RULE_ID;
+      if (bounceDecision.intent === "backstop_taker") {
+        return buildSignalOrSuppression({
+          input,
+          market,
+          decision: { action: "SELL", ruleId: BOUNCE_EXIT_BACKSTOP_RULE_ID },
+          buyCount,
+          emissionFacts,
+          triggerTelemetry,
+          suppressions,
+          sideEffects,
+          metrics,
+          nowIso,
+        });
+      }
       return buildSignalOrSuppression({
         input,
         market,
         decision: {
           action: "SELL",
-          ruleId: bounceRuleId,
-          // Phase 4 (Codex M3): the resting maker target's price is the
-          // harvest target itself, computed by evaluateBounceExit — carried
-          // through so resolveActionPrice below never re-derives it from
-          // best-bid/spread guards. The timeout intent has no target price;
-          // it takes the normal sell-executable-price path (bestBid-anchored),
-          // matching a plain force-exit signal.
-          ...(bounceDecision.intent === "maker_target"
-            ? { explicitPrice: bounceDecision.targetPx }
-            : {}),
+          ruleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          // The rung's price is the ladder target itself, computed by
+          // evaluateBounceExit — carried through so resolveActionPrice below
+          // never re-derives it from best-bid/spread guards. The size is the
+          // rung's own fraction of the ORIGINAL position (fixed at first
+          // entry), capped to whatever remains available to sell right now —
+          // this never oversells even if the residual has already shrunk
+          // below what the fraction math alone would imply, overriding the
+          // generic sell-sizing-plan (which sizes a full-position exit).
+          explicitPrice: bounceDecision.px,
+          explicitSize: Math.min(
+            bounceDecision.fraction * originalPositionSize,
+            remainingPositionSize,
+          ),
+          bounceRung: {
+            ladderId,
+            rungIndex: bounceDecision.rungIndex,
+            anchorPrice: firstEntryPrice,
+            fraction: bounceDecision.fraction,
+            originalPositionSize,
+            remainingPositionSize,
+          },
         },
         buyCount,
         emissionFacts,
@@ -1442,7 +1549,13 @@ function none(
 function buildSignalOrSuppression(args: {
   input: DecisionPlanningInput;
   market: NormalizedMarket;
-  decision: { action: TradeDecisionAction; ruleId: string; explicitPrice?: number };
+  decision: {
+    action: TradeDecisionAction;
+    ruleId: string;
+    explicitPrice?: number;
+    explicitSize?: number;
+    bounceRung?: BounceRungMetadata;
+  };
   buyCount: number;
   emissionFacts: EmissionFacts;
   triggerTelemetry: TriggerTelemetry;
@@ -1592,13 +1705,13 @@ function buildSignalOrSuppression(args: {
 
   // Track Q loop guard: a blocked token suppresses SELL signal generation for the
   // cooldown, regardless of which rule produced the SELL. BUY is never gated here.
-  // BOUNCE_EXIT_TIMEOUT is a dedicated 4h force-exit (docs/plans/2026-07-15-
-  // gate-bounce-live-experiment.md, Phase 4 / Codex R3-M3) and must bypass this
-  // guard — the resting BOUNCE_EXIT_TARGET maker order still respects it.
+  // BOUNCE_EXIT_BACKSTOP is the near-resolution force-exit
+  // (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md) and must bypass this
+  // guard — the resting BOUNCE_EXIT_TARGET rungs still respect it.
   if (
     decision.action === "SELL" &&
     input.sellLoopGuard?.blocked &&
-    decision.ruleId !== BOUNCE_EXIT_TIMEOUT_RULE_ID
+    !isBounceForceExit({ side: decision.action, decisionRuleId: decision.ruleId })
   ) {
     const guard = input.sellLoopGuard;
     args.sideEffects.push({
@@ -1720,7 +1833,13 @@ function legacyGuardForDecisionRule(ruleId: string): ProfileOwnedLegacyGuard | n
 function buildSignalDraft(args: {
   input: DecisionPlanningInput;
   market: NormalizedMarket;
-  decision: { action: TradeDecisionAction; ruleId: string; explicitPrice?: number };
+  decision: {
+    action: TradeDecisionAction;
+    ruleId: string;
+    explicitPrice?: number;
+    explicitSize?: number;
+    bounceRung?: BounceRungMetadata;
+  };
   buyCount: number;
   emissionFacts: EmissionFacts;
   triggerTelemetry: TriggerTelemetry;
@@ -1745,16 +1864,16 @@ function buildSignalDraft(args: {
   const price = actionPrice.price;
   const reason = resolveSignalReason(side, buyCount);
 
-  // Bounce-exit SELLs (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
-  // Phase 3 fix) are exits on our own just-filled GATE position, not a new
-  // buy-throttled entry — the cooldown concept doesn't apply. Exempting both
-  // rule IDs matters for different reasons: the resting target must post
-  // immediately on fill (that's the whole point of "post the target as soon
-  // as the GATE fill lands"), and the timeout must never be delayed by an
-  // unrelated recent buy elsewhere.
+  // Bounce-exit SELLs (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md)
+  // are exits on our own just-filled GATE position, not a new buy-throttled
+  // entry — the cooldown concept doesn't apply. Exempting both rule IDs
+  // matters for different reasons: a resting rung must post immediately on
+  // fill (that's the whole point of "post the next rung as soon as the GATE
+  // fill lands"), and the backstop must never be delayed by an unrelated
+  // recent buy elsewhere.
   const isBounceExitRule =
     decision.ruleId === BOUNCE_EXIT_TARGET_RULE_ID ||
-    decision.ruleId === BOUNCE_EXIT_TIMEOUT_RULE_ID;
+    decision.ruleId === BOUNCE_EXIT_BACKSTOP_RULE_ID;
   if (side === "sell" && input.postBuyCooldown && !isBounceExitRule) {
     args.suppressions.push({
       tokenId: market.tokenId,
@@ -1838,6 +1957,16 @@ function buildSignalDraft(args: {
     });
   }
   let suggestedSize = sellPlan?.size ?? (price > 0 ? suggestedSizeUsdc / price : 0);
+  // Bounce-exit ladder rung (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md):
+  // overrides the generic sell-sizing-plan, which sizes a full-position exit —
+  // a rung is only `fraction` of the remaining position. `sizeForExecutability`
+  // below still checks against the full remaining position (via `Math.max`),
+  // so this never spuriously suppresses a small-but-valid rung; the ladder's
+  // own min-order rollover happens downstream in signal-to-order.ts.
+  if (decision.explicitSize != null) {
+    suggestedSize = decision.explicitSize;
+    suggestedSizeUsdc = decision.explicitSize * price;
+  }
   let sizeForExecutability =
     side === "buy"
       ? computeBuyOrderSizeForFilter(suggestedSizeUsdc, market, price)
@@ -1976,6 +2105,7 @@ function buildSignalDraft(args: {
     },
     emissionFacts,
     triggerTelemetry,
+    ...(decision.bounceRung ? { bounceRung: decision.bounceRung } : {}),
   };
 }
 

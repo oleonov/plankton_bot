@@ -39,6 +39,7 @@ import type {
   TrackRHonestPricingPolicy,
   TrackRTakerFeeProvider,
   TrackS3MarginAwareSpreadPolicy,
+  BounceRungMetadata,
 } from "@krabs/domain";
 import {
   canPlaceBuyOrderForMarket,
@@ -53,7 +54,7 @@ import {
   shouldSkipSellPriceCap,
   GATE_ENTRY_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
-  BOUNCE_EXIT_TIMEOUT_RULE_ID,
+  isBounceForceExit,
 } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
 import { buildClientOrderId, buildPartialExitClientOrderId } from "@krabs/domain/node";
@@ -660,8 +661,7 @@ export class SignalToOrderBridge {
       // and order-size-below-minimum — those reflect whether the exchange can
       // accept an order at all right now, not this bot's own bookkeeping, so
       // bypassing them would not make the exit any more guaranteed.
-      const isBounceExitTimeoutForceExit =
-        signal.side === "sell" && signal.decisionRuleId === BOUNCE_EXIT_TIMEOUT_RULE_ID;
+      const isBounceExitForceExit = isBounceForceExit(signal);
 
       // Snapshot the policy once so the full approval flow uses a consistent view,
       // even if the provider hot-reloads mid-decision. The S5 ownership guard may
@@ -883,8 +883,8 @@ export class SignalToOrderBridge {
 
       // Wrapped (not individually flagged) so any future guard added inside
       // this block is bypassed for the force-exit by construction — see
-      // isBounceExitTimeoutForceExit above.
-      if (!isBounceExitTimeoutForceExit) {
+      // isBounceExitForceExit above.
+      if (!isBounceExitForceExit) {
         const takerMarginBlock = this.resolveTakerBelowMarginBlock(
           signal,
           executionTerms,
@@ -976,7 +976,7 @@ export class SignalToOrderBridge {
       const nowMs = this.now();
 
       if (
-        !isBounceExitTimeoutForceExit &&
+        !isBounceExitForceExit &&
         signal.side === "sell" &&
         executionTerms.kind === "ok" &&
         shouldSkipSellBelowSignalFloor(
@@ -1068,6 +1068,15 @@ export class SignalToOrderBridge {
         executionTerms.kind === "ok" && executionTerms.size != null
           ? executionTerms.size
           : resolveOrderSize(signal, executionTerms.price);
+      // Ladder min-order rollover (docs/plans/2026-07-16-bounce-exit-ladder-
+      // redesign.md) needs the ladder's fixed original basis (for the merged
+      // fraction math) and the residual available right now (as an oversell
+      // ceiling) — both carried on the signal by decision-planner.ts, rather
+      // than back-derived from `orderSize`/`fraction` here (that back-
+      // derivation degenerates whenever the residual, not the fraction, was
+      // the binding constraint on this rung's own size).
+      const bounceOriginalPositionSize = signal.bounceRung?.originalPositionSize ?? null;
+      const bounceRemainingPositionSize = signal.bounceRung?.remainingPositionSize ?? null;
       // Micro cap enforcement, sizing side (docs/plans/2026-07-15-gate-bounce-
       // live-experiment.md, Phase 4 / Codex C3): GATE BUY notional must never
       // exceed gateEntry.microMaxOrderUsdc. execution-module.ts enforces the
@@ -1080,6 +1089,22 @@ export class SignalToOrderBridge {
       ) {
         const gateCapSize = policy.gateEntry.microMaxOrderUsdc / executionTerms.price;
         orderSize = Math.min(orderSize, gateCapSize);
+      }
+      // Bounce-exit rung micro cap: a resting SELL rung's notional must never
+      // exceed bounceExit.microMaxOrderUsdc while the ladder mechanism is
+      // validated live with real money — same rationale as the gateEntry cap
+      // above. Applied before the ladder rollover below, which only ever
+      // grows the size back up to clear the exchange minimum — never
+      // re-capped afterward, since the exchange floor takes precedence over
+      // this soft risk cap once rolling forward is already required.
+      if (
+        signal.side === "sell" &&
+        signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+        policy.bounceExit.microMaxOrderUsdc > 0 &&
+        executionTerms.price > 0
+      ) {
+        const bounceCapSize = policy.bounceExit.microMaxOrderUsdc / executionTerms.price;
+        orderSize = Math.min(orderSize, bounceCapSize);
       }
       const effectiveMinOrderSize = resolveEffectiveMinOrderSize(market.minOrderSize);
       let positionConcentrationMetadata: Record<string, unknown> | null = null;
@@ -1145,41 +1170,109 @@ export class SignalToOrderBridge {
           metrics: concentrationDecision.metrics,
         };
       }
+      let bounceRungOverride: BounceRungMetadata | null = null;
       if (!isExecutableOrderSize(orderSize, market.minOrderSize)) {
-        this.log.info(
-          {
-            signalId: signal.signalId,
-            tokenId: signal.tokenId,
-            side: signal.side,
-            orderSize,
-            minOrderSize: market.minOrderSize ?? null,
-            effectiveMinOrderSize,
-            cacheStatus: pricing.cacheStatus,
-          },
-          "approved signal skipped — order size below exchange minimum",
-        );
-        await this.publishConversionSkipped(
-          signal,
-          "execution-terms",
-          ["order-size-below-minimum"],
-          {
-            cacheStatus: pricing.cacheStatus,
-            orderSize,
-            minOrderSize: market.minOrderSize ?? null,
-            effectiveMinOrderSize,
-          },
-        );
-        this.writeObservation({
-          signal,
-          clientOrderId: null,
-          market,
-          policy,
-          executionTerms,
-          canary,
-          sellPricingShadow,
-          skippedReason: "order-size-below-minimum",
-        });
-        return;
+        const rollover =
+          signal.bounceRung &&
+          bounceOriginalPositionSize != null &&
+          bounceRemainingPositionSize != null
+            ? resolveBounceRungRollover(
+                signal.bounceRung,
+                bounceOriginalPositionSize,
+                bounceRemainingPositionSize,
+                policy.bounceExit.ladderFractions,
+                market.minOrderSize,
+              )
+            : null;
+        // The $2 bounce micro cap (applied above, pre-rollover) only bounded
+        // THIS rung's own size — a merge can grow the size back past it to
+        // clear the exchange minimum. Re-check post-merge: if the exchange
+        // floor cannot be satisfied within the cap, skip rather than place an
+        // over-cap order (the cap is a hard risk ceiling while the ladder is
+        // validated live, so it must win over "always place something").
+        const rolloverNotionalUsdc =
+          rollover && executionTerms.price > 0 ? rollover.size * executionTerms.price : null;
+        const rolloverOverCap =
+          rollover != null &&
+          signal.side === "sell" &&
+          signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+          policy.bounceExit.microMaxOrderUsdc > 0 &&
+          rolloverNotionalUsdc != null &&
+          rolloverNotionalUsdc > policy.bounceExit.microMaxOrderUsdc;
+        if (rollover && rolloverOverCap) {
+          this.log.info(
+            {
+              signalId: signal.signalId,
+              tokenId: signal.tokenId,
+              rolloverSize: rollover.size,
+              rolloverNotionalUsdc,
+              microMaxOrderUsdc: policy.bounceExit.microMaxOrderUsdc,
+              rungIndicesCovered: rollover.metadata.rungIndicesCovered ?? null,
+            },
+            "approved SELL skipped — bounce ladder rollover exceeds micro order cap",
+          );
+          await this.publishConversionSkipped(
+            signal,
+            "execution-terms",
+            ["bounce-rollover-exceeds-micro-cap"],
+            {
+              cacheStatus: pricing.cacheStatus,
+              rolloverSize: rollover.size,
+              rolloverNotionalUsdc,
+              microMaxOrderUsdc: policy.bounceExit.microMaxOrderUsdc,
+            },
+          );
+          this.writeObservation({
+            signal,
+            clientOrderId: null,
+            market,
+            policy,
+            executionTerms,
+            canary,
+            sellPricingShadow,
+            skippedReason: "bounce-rollover-exceeds-micro-cap",
+          });
+          return;
+        }
+        if (rollover) {
+          orderSize = rollover.size;
+          bounceRungOverride = rollover.metadata;
+        } else {
+          this.log.info(
+            {
+              signalId: signal.signalId,
+              tokenId: signal.tokenId,
+              side: signal.side,
+              orderSize,
+              minOrderSize: market.minOrderSize ?? null,
+              effectiveMinOrderSize,
+              cacheStatus: pricing.cacheStatus,
+            },
+            "approved signal skipped — order size below exchange minimum",
+          );
+          await this.publishConversionSkipped(
+            signal,
+            "execution-terms",
+            ["order-size-below-minimum"],
+            {
+              cacheStatus: pricing.cacheStatus,
+              orderSize,
+              minOrderSize: market.minOrderSize ?? null,
+              effectiveMinOrderSize,
+            },
+          );
+          this.writeObservation({
+            signal,
+            clientOrderId: null,
+            market,
+            policy,
+            executionTerms,
+            canary,
+            sellPricingShadow,
+            skippedReason: "order-size-below-minimum",
+          });
+          return;
+        }
       }
 
       // The resting BOUNCE_EXIT_TARGET maker order this signal is about to
@@ -1187,17 +1280,30 @@ export class SignalToOrderBridge {
       // the same-price tolerance window of a falling bestBid (e.g.
       // target=0.19, bestBid=0.18, 2-tick window=0.02). Without this bypass,
       // findSamePriceOpenSellOrder below would treat that resting order as a
-      // reason to skip this force-exit signal (see isBounceExitTimeoutForceExit
+      // reason to skip this force-exit signal (see isBounceExitForceExit
       // above for the full guard-bypass rationale).
-      const duplicateSell = isBounceExitTimeoutForceExit
+      // For a regular (non-backstop) bounce rung, the generic same-PRICE
+      // guard is the wrong identity check: adjacent rungs are tick-rounded
+      // and can legitimately share a price or land inside the tolerance
+      // window, so it would treat a distinct, not-yet-placed rung as a
+      // duplicate of an earlier resting rung, skip it without ever
+      // persisting its metadata, and the planner would re-emit the same
+      // rung forever (Codex Phase-2 fix). Narrow the guard to the ladder's
+      // own identity — same ladderId AND an overlapping rung index — so a
+      // different rungIndex is never treated as a duplicate, while a true
+      // re-processing of the same rung(s) still is.
+      const effectiveBounceRung = bounceRungOverride ?? signal.bounceRung ?? null;
+      const duplicateSell = isBounceExitForceExit
         ? null
-        : this.findSamePriceOpenSellOrder(
-            signal.tokenId,
-            signal.side,
-            executionTerms.price,
-            market.tickSize,
-            policy,
-          );
+        : effectiveBounceRung
+          ? this.findDuplicateBounceRungOrder(signal.tokenId, effectiveBounceRung)
+          : this.findSamePriceOpenSellOrder(
+              signal.tokenId,
+              signal.side,
+              executionTerms.price,
+              market.tickSize,
+              policy,
+            );
       if (duplicateSell) {
         const timedOutSizeReplacement = isSellTimeoutReplacement({
           existingOrder: duplicateSell,
@@ -1255,7 +1361,7 @@ export class SignalToOrderBridge {
         }
       }
 
-      if (signal.side === "sell" && !isBounceExitTimeoutForceExit && this.deps.orderLifetime) {
+      if (signal.side === "sell" && !isBounceExitForceExit && this.deps.orderLifetime) {
         const placementDecision = this.deps.orderLifetime.canPlaceExitOrder(signal.tokenId, nowMs);
         if (!placementDecision.allowed) {
           const reason = placementDecision.reason ?? "order-lifetime-placement-blocked";
@@ -1289,7 +1395,7 @@ export class SignalToOrderBridge {
         }
       }
 
-      if (!isBounceExitTimeoutForceExit && this.deps.samePriceCooldown) {
+      if (!isBounceExitForceExit && this.deps.samePriceCooldown) {
         const placementDecision = this.deps.samePriceCooldown.canPlaceOrder({
           tokenId: signal.tokenId,
           side: signal.side,
@@ -1400,6 +1506,17 @@ export class SignalToOrderBridge {
           ...(positionConcentrationMetadata
             ? { positionConcentration: positionConcentrationMetadata }
             : {}),
+          // Bounce-exit ladder rung identity (docs/plans/2026-07-16-bounce-
+          // exit-ladder-redesign.md), persisted on the order so the next
+          // planning cycle's placedBounceRungIndices lookup can tell rungs
+          // apart — every rung shares the same decisionRuleId. Prefer the
+          // rollover override (rungIndicesCovered set) when the min-order
+          // merge above fired.
+          ...(bounceRungOverride
+            ? { bounceRung: bounceRungOverride }
+            : signal.bounceRung
+              ? { bounceRung: signal.bounceRung }
+              : {}),
         },
       };
 
@@ -1434,16 +1551,19 @@ export class SignalToOrderBridge {
         skippedReason: null,
       });
 
-      // Bounce-exit 4h force-exit (Phase 4 / Codex M6): cancel the resting
-      // BOUNCE_EXIT_TARGET maker order before submitting the taker exit.
-      // Publishing the cancel first (awaited) then the place is enough at
-      // this bridge layer — the actual exchange-level ordering guarantee
-      // (cancel executes before the taker place) comes independently from
-      // execution-module.ts's per-token ExecutionQueue mutex, regardless of
-      // whether this cancel has fully drained by the time we publish below.
-      if (signal.side === "sell" && signal.decisionRuleId === BOUNCE_EXIT_TIMEOUT_RULE_ID) {
-        const restingTarget = this.findOpenBounceTargetOrder(signal.tokenId);
-        if (restingTarget) {
+      // Bounce-exit backstop force-exit (docs/plans/2026-07-16-bounce-exit-
+      // ladder-redesign.md, Phase 3): cancel every resting BOUNCE_EXIT_TARGET
+      // maker rung before submitting the taker exit for the full residual —
+      // the ladder can rest multiple rungs simultaneously, so all of them
+      // must be cancelled, not just one. Publishing the cancels first
+      // (awaited) then the place is enough at this bridge layer — the actual
+      // exchange-level ordering guarantee (cancels execute before the taker
+      // place) comes independently from execution-module.ts's per-token
+      // ExecutionQueue mutex, regardless of whether these cancels have fully
+      // drained by the time we publish below.
+      if (isBounceExitForceExit) {
+        const restingTargets = this.findOpenBounceTargetOrders(signal.tokenId);
+        for (const restingTarget of restingTargets) {
           const cancelCmd: CancelOrderCommand = {
             type: "CancelOrderCommand",
             commandId: createCommandId(randomUUID()),
@@ -2015,13 +2135,14 @@ export class SignalToOrderBridge {
       return normalizeExecutionTerms(ok, signal, effectiveTick);
     }
 
-    // Bounce-exit resting target (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
-    // Phase 4 / Codex M3+M4): the target price is the harvest-target computed
-    // upstream by decision-planner.ts and carried verbatim as signal.suggestedPrice
-    // — unconditional (no config gating), same rationale as the ladder-price
-    // branch above. Only tick-bounds validation applies; the plankton sell-cap
-    // is bypassed separately in applySellPriceCap. A post-only price that would
-    // cross the live bid is caught downstream by execution-module.ts's generic
+    // Bounce-exit resting rung (docs/plans/2026-07-16-bounce-exit-ladder-
+    // redesign.md): the rung's price is the ladder target computed upstream
+    // by decision-planner.ts (evaluateBounceExit) and carried verbatim as
+    // signal.suggestedPrice — unconditional (no config gating), same
+    // rationale as the ladder-price branch above. Only tick-bounds validation
+    // applies; the plankton sell-cap is bypassed separately in
+    // applySellPriceCap. A post-only price that would cross the live bid is
+    // caught downstream by execution-module.ts's generic
     // getPostOnlyCrossPreSubmitSkip (reprice next tick), not here.
     if (signal.side === "sell" && signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID) {
       const targetPrice = signal.suggestedPrice;
@@ -2049,12 +2170,18 @@ export class SignalToOrderBridge {
       return normalizeExecutionTerms(ok, signal, effectiveTick);
     }
 
-    // Bounce-exit 4h force-exit (Phase 4 / Codex M6): a dedicated, unconditional
-    // marketable-taker price — deliberately NOT routed through
-    // resolveTakerAtProfitTerms/resolveOpportunisticTakerTerms, both of which are
-    // config/allowlist-gated and could silently fail to activate, defeating the
-    // force-exit's purpose. Uses the live best bid directly; no postOnly.
-    if (signal.side === "sell" && signal.decisionRuleId === BOUNCE_EXIT_TIMEOUT_RULE_ID) {
+    // Bounce-exit backstop force-exit (docs/plans/2026-07-16-bounce-exit-
+    // ladder-redesign.md): a dedicated, unconditional marketable-taker price —
+    // deliberately NOT routed through resolveTakerAtProfitTerms/
+    // resolveOpportunisticTakerTerms, both of which are config/allowlist-gated
+    // and could silently fail to activate, defeating the force-exit's
+    // purpose. Uses the live best bid directly; no postOnly. Live since Phase
+    // 3: decision-planner.ts computes backstopEligible for real via
+    // evaluateBounceBackstopEligibility (qd-pre-resolution-exit.ts), reusing
+    // Sub-Track Q.D's Mode-A/B near-resolution activation logic scoped to the
+    // GATE band (avgEntryPrice <= gateEntry.maxPrice, inclusive) and gated on
+    // bounceExit.backstopTtcHours.
+    if (isBounceForceExit(signal)) {
       const bestBid = market.bestBid;
       if (
         bestBid == null ||
@@ -2877,22 +3004,67 @@ export class SignalToOrderBridge {
   }
 
   /**
-   * The resting BOUNCE_EXIT_TARGET maker SELL for a GATE position, if still
-   * open (docs/plans/2026-07-15-gate-bounce-live-experiment.md, Phase 4 /
-   * Codex M6). Keyed on decisionRuleId rather than price — the 4h timeout
-   * must cancel whatever target is resting regardless of how close its price
-   * sits to the taker exit's bestBid-derived price.
+   * Every resting BOUNCE_EXIT_TARGET maker SELL rung for a GATE position,
+   * still open (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md, Phase
+   * 3). Keyed on decisionRuleId rather than price — the backstop must cancel
+   * whatever rungs are resting regardless of how close their prices sit to
+   * the taker exit's bestBid-derived price. The ladder can rest multiple
+   * rungs simultaneously (execution-module.ts's capacity carve-out —
+   * resolveMaxOpenSellOrdersPerToken — allows up to `ladderFractions.length`
+   * concurrent rungs), so every matching rung is returned, not just one.
    */
-  private findOpenBounceTargetOrder(tokenId: TokenId): Order | null {
-    if (!this.deps.orderRepo) return null;
-    const orders = this.deps.orderRepo.findByTokenId(tokenId);
-    return (
-      orders.find(
+  private findOpenBounceTargetOrders(tokenId: TokenId): Order[] {
+    if (!this.deps.orderRepo) return [];
+    return this.deps.orderRepo
+      .findByTokenId(tokenId)
+      .filter(
         (order) =>
           order.side === "sell" &&
           isOpenOrderStatus(order.status) &&
           order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID,
-      ) ?? null
+      );
+  }
+
+  /**
+   * Identity-scoped duplicate check for a bounce-exit rung (docs/plans/
+   * 2026-07-16-bounce-exit-ladder-redesign.md, Phase 2 Codex fix): matches
+   * an existing non-cancelled/rejected BOUNCE_EXIT_TARGET SELL order for this
+   * token, on the SAME ladderId, whose own placed rung index (or, for a
+   * rolled-forward merge, any of its `rungIndicesCovered`) overlaps this
+   * rung's own index set. A different rungIndex on the same ladder is never
+   * a match, even at an identical or near price — adjacent rungs are tick-
+   * rounded and can legitimately land within the generic same-price
+   * tolerance window; treating that as a duplicate silently drops the rung
+   * (no metadata ever persisted) and the planner re-emits it forever.
+   * Mirrors algo-decision-module.ts's `placedBounceRungIndices` matching.
+   */
+  private findDuplicateBounceRungOrder(
+    tokenId: TokenId,
+    bounceRung: BounceRungMetadata,
+  ): Order | null {
+    if (!this.deps.orderRepo) return null;
+    const targetIndices = new Set<number>(
+      bounceRung.rungIndicesCovered && bounceRung.rungIndicesCovered.length > 0
+        ? bounceRung.rungIndicesCovered
+        : [bounceRung.rungIndex],
+    );
+    const orders = this.deps.orderRepo.findByTokenId(tokenId);
+    return (
+      orders.find((order) => {
+        if (order.side !== "sell") return false;
+        if (order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID) return false;
+        if (order.status === "cancelled" || order.status === "rejected") return false;
+        const existingRung = order.metadata?.bounceRung as
+          | { ladderId?: string; rungIndex?: number; rungIndicesCovered?: number[] }
+          | undefined;
+        if (!existingRung || existingRung.ladderId !== bounceRung.ladderId) return false;
+        const existingIndices = Array.isArray(existingRung.rungIndicesCovered)
+          ? existingRung.rungIndicesCovered
+          : typeof existingRung.rungIndex === "number"
+            ? [existingRung.rungIndex]
+            : [];
+        return existingIndices.some((idx) => targetIndices.has(idx));
+      }) ?? null
     );
   }
 
@@ -3507,6 +3679,50 @@ function resolveOrderSize(
   if (signal.side !== "buy") return signal.suggestedSize;
   if (!Number.isFinite(executionPrice) || executionPrice <= 0) return signal.suggestedSize;
   return signal.suggestedSizeUsdc / executionPrice;
+}
+
+/**
+ * Ladder min-order rollover (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md):
+ * a single rung's own fraction of the original position can fall below the
+ * exchange's minimum tradable size (this is expected — `microMaxOrderUsdc`
+ * caps the whole position at a few dollars, split across up to 3 rungs). Full-
+ * position clamping would defeat the point of a ladder, and skipping the rung
+ * entirely would silently strand size. Instead, merge this rung forward with
+ * however many of the NEXT rungs' fractions are needed to clear the minimum,
+ * place one order at the current (lowest reachable) rung's price, and mark
+ * every absorbed index as placed via `rungIndicesCovered` so the next
+ * planning cycle resumes at the rung after the last one covered. Returns null
+ * when no forward combination clears the minimum (exhausted the ladder) —
+ * callers fall through to the existing generic below-minimum skip.
+ *
+ * Fractions are computed against `originalPositionSize` (fixed at first
+ * entry, Codex Phase-2 fix — see decision-planner.ts) so a merge of several
+ * rungs' fractions still reflects their true share of the position; the
+ * merged size is then capped to `remainingPositionSize` so the roll-forward
+ * never oversells beyond what is actually still available to sell.
+ */
+function resolveBounceRungRollover(
+  bounceRung: BounceRungMetadata,
+  originalPositionSize: number,
+  remainingPositionSize: number,
+  ladderFractions: readonly number[],
+  minOrderSize: number | null | undefined,
+): { size: number; metadata: BounceRungMetadata } | null {
+  if (!(originalPositionSize > 0) || !(remainingPositionSize > 0)) return null;
+  let cumulativeFraction = 0;
+  const rungIndicesCovered: number[] = [];
+  for (let idx = bounceRung.rungIndex; idx < ladderFractions.length; idx++) {
+    cumulativeFraction += ladderFractions[idx] ?? 0;
+    rungIndicesCovered.push(idx);
+    const mergedSize = Math.min(cumulativeFraction * originalPositionSize, remainingPositionSize);
+    if (isExecutableOrderSize(mergedSize, minOrderSize)) {
+      return {
+        size: mergedSize,
+        metadata: { ...bounceRung, fraction: cumulativeFraction, rungIndicesCovered },
+      };
+    }
+  }
+  return null;
 }
 
 function resolveShadowExecutionPrice(executionTerms: ExecutionTermsResolution): number | null {

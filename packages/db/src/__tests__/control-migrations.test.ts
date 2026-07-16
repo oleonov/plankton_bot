@@ -1471,4 +1471,137 @@ describe("control-db migration infrastructure", () => {
     // Customized value preserved — migration only targets rows missing the key.
     expect(policy.gateEntry.minLifespanDays).toBe(45);
   });
+
+  it("migration 069 adds the ladder shape to bounceExit, preserving legacy fields, and bumps version", () => {
+    const dbPath = path.join(tmpDir, "control-bounce-ladder-069-backfill.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    // Revert to the pre-069, migration-068 flat shape (targetGainPct/timeoutMs,
+    // no ladder fields).
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.bounceExit',
+              json('{"enabled":false,"mode":"off","targetGainPct":0.257,"timeoutMs":14400000,"whitelistConditionIds":[],"microMaxOrderUsdc":2}')
+            )`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("069_bounce_exit_ladder_policy.sql");
+    const before = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const after = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    const policy = JSON.parse(raw.json);
+
+    // Additive: legacy fields (still read by the shipped evaluateBounceExit)
+    // are preserved exactly as they were pre-migration...
+    expect(policy.bounceExit.enabled).toBe(false);
+    expect(policy.bounceExit.mode).toBe("off");
+    expect(policy.bounceExit.targetGainPct).toBe(0.257);
+    expect(policy.bounceExit.timeoutMs).toBe(14_400_000);
+    expect(policy.bounceExit.whitelistConditionIds).toEqual([]);
+    expect(policy.bounceExit.microMaxOrderUsdc).toBe(2);
+    // ...and the new ladder scaffolding fields are added alongside them.
+    expect(policy.bounceExit.targetTiers).toEqual([
+      { maxPrice: 0.02, gainPct: 0.36 },
+      { maxPrice: 0.03, gainPct: 0.27 },
+      { maxPrice: 0.05, gainPct: 0.19 },
+      { maxPrice: 0.08, gainPct: 0.15 },
+      { maxPrice: 0.15, gainPct: 0.15 },
+      { maxPrice: 0.35, gainPct: 0.12 },
+      { maxPrice: 1.0, gainPct: 0.08 },
+    ]);
+    expect(policy.bounceExit.ladderFractions).toEqual([0.3, 0.4, 0.3]);
+    expect(policy.bounceExit.ladderStepPct).toBe(0.22);
+    expect(policy.bounceExit.backstopTtcHours).toBe(24);
+    expect(after.version).toBeGreaterThan(before.version);
+  });
+
+  it("migration 069 does NOT overwrite an already-migrated/custom ladder bounceExit block", () => {
+    const dbPath = path.join(tmpDir, "control-bounce-ladder-069-preserve-custom.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    // Operator (or an earlier apply) already customized ladderStepPct on live-lite.
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.bounceExit.ladderStepPct', 0.5
+            )
+          WHERE profile_id = 'live-lite'`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("069_bounce_exit_ladder_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const policy = JSON.parse(raw.json);
+
+    // Customized value preserved — migration only targets rows missing targetTiers.
+    expect(policy.bounceExit.ladderStepPct).toBe(0.5);
+  });
+
+  it("migration 069 forces enabled:false/mode:off when backfilling an old enabled:true legacy row (fail-closed, Codex Phase-2 fix)", () => {
+    const dbPath = path.join(tmpDir, "control-bounce-ladder-069-fail-closed.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    // An old, previously-live flat bounceExit block: enabled:true/mode:micro_live,
+    // no ladder fields at all — exactly the shape this migration is about to
+    // backfill ladder fields onto for the first time.
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.bounceExit',
+              json('{"enabled":true,"mode":"micro_live","targetGainPct":0.257,"timeoutMs":14400000,"whitelistConditionIds":["cond-1"],"microMaxOrderUsdc":2}')
+            )`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("069_bounce_exit_ladder_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const policy = JSON.parse(raw.json);
+
+    // Fail-closed: this migration is what makes the ladder fields
+    // "legitimately present" for the first time, so it must NOT also carry
+    // forward a pre-existing enabled:true/mode:micro_live from the old flat
+    // shape — that would silently activate the ladder on unreviewed scaffold
+    // defaults the moment this migration lands.
+    expect(policy.bounceExit.enabled).toBe(false);
+    expect(policy.bounceExit.mode).toBe("off");
+    // Legacy fields (still read by evaluateBounceExit) and the whitelist are
+    // preserved untouched — only enabled/mode are forced.
+    expect(policy.bounceExit.targetGainPct).toBe(0.257);
+    expect(policy.bounceExit.whitelistConditionIds).toEqual(["cond-1"]);
+    expect(policy.bounceExit.targetTiers.length).toBeGreaterThan(0);
+    expect(policy.bounceExit.ladderFractions).toEqual([0.3, 0.4, 0.3]);
+  });
 });

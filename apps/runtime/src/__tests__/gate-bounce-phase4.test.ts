@@ -9,18 +9,18 @@
  *  2. BOUNCE_EXIT_TARGET → postOnly maker command at the harvest-target
  *     price, NOT clamped by the generic 1.17x plankton sell-cap (avgEntry
  *     = 0.15 case), confirming resolveActionPrice's override is honoured.
- *  3. BOUNCE_EXIT_TIMEOUT → cancels the resting target order, then submits
+ *  3. BOUNCE_EXIT_BACKSTOP → cancels the resting target order, then submits
  *     the taker exit for the remainder (cancel-before-place sequencing).
  *     Includes regression guards (Codex review, post-Phase-4, two rounds) for
  *     business-logic guards that could otherwise silently drop the guaranteed
- *     4h force-exit: the same-price "acceptable price already open" guard,
+ *     backstop force-exit: the same-price "acceptable price already open" guard,
  *     the taker-below-margin invariant, and the sell-price-below-signal-floor
- *     guard. None of these may short-circuit BOUNCE_EXIT_TIMEOUT.
+ *     guard. None of these may short-circuit BOUNCE_EXIT_BACKSTOP.
  *  4. ExecutionModule: GATE BUY execution-side rejection above the cap,
  *     pass-through at/under the cap, and default-OFF safety (mode!=="micro_live"
  *     never rejects via the GATE path).
  *  5. ExecutionModule: a post-only BOUNCE_EXIT_TARGET that would cross the
- *     bid is skipped (reprice next tick); BOUNCE_EXIT_TIMEOUT bypasses the
+ *     bid is skipped (reprice next tick); BOUNCE_EXIT_BACKSTOP bypasses the
  *     generic sell-replacement gating even when a stale resting order is
  *     still visible in orderRepo (still force-exits).
  */
@@ -29,7 +29,7 @@ import { describe, expect, it, vi } from "vitest";
 import { InProcessEventBus } from "@krabs/event-bus";
 import {
   BOUNCE_EXIT_TARGET_RULE_ID,
-  BOUNCE_EXIT_TIMEOUT_RULE_ID,
+  BOUNCE_EXIT_BACKSTOP_RULE_ID,
   GATE_ENTRY_RULE_ID,
   computeHarvestTarget,
   createBotRunId,
@@ -53,10 +53,13 @@ import type {
 } from "@krabs/domain";
 import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
+import { ExchangeStateStore } from "../modules/execution/exchange-state-store.js";
+import { LiveLiteGuard } from "../live-lite-guard.js";
 
 // ─── Shared constants ─────────────────────────────────────────────────────
 
 const TOKEN_ID = createTokenId("tok-gate-bounce");
+const OTHER_TOKEN_ID = createTokenId("tok-gate-bounce-other");
 const COND_ID = createConditionId("cond-gate-bounce-1");
 const BOT_RUN_ID = createBotRunId("test-run-gate-bounce");
 const NOW = Date.parse("2026-07-15T10:00:00.000Z");
@@ -281,9 +284,207 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TARGET maker command", () => {
   });
 });
 
-// ─── 3: BOUNCE_EXIT_TIMEOUT cancel-then-taker ─────────────────────────────
+// ─── 2b: bounce ladder rung identity guard + rollover-vs-cap (Codex Phase-2 fixes) ──
 
-describe("SignalToOrderBridge — BOUNCE_EXIT_TIMEOUT cancel-then-taker", () => {
+describe("SignalToOrderBridge — bounce rung duplicate guard scoped to ladderId+rungIndex (FIX 3)", () => {
+  it("places rung1 even though its price exactly matches an already-resting, different-rungIndex rung0 order", async () => {
+    const ladderId = "tok-gate-bounce:1000";
+    const restingRung0 = makeOrder({
+      price: 0.15,
+      status: "open",
+      metadata: { bounceRung: { ladderId, rungIndex: 0, anchorPrice: 0.1, fraction: 0.3 } },
+    });
+    const orderRepo = { findByTokenId: vi.fn().mockReturnValue([restingRung0]) };
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: 0.15,
+      suggestedSize: 40,
+      suggestedSizeUsdc: 40 * 0.15,
+      bounceRung: {
+        ladderId,
+        rungIndex: 1,
+        anchorPrice: 0.1,
+        fraction: 0.4,
+        originalPositionSize: 100,
+        remainingPositionSize: 70,
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 100,
+    };
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      { marketOverrides: { bestBid: 0.1, bestAsk: 0.2, tickSize: 0.01 }, orderRepo },
+    );
+
+    // Pre-fix, the generic same-price guard would have matched rung0's still-
+    // open order (identical price) and silently dropped rung1 forever, since
+    // its metadata is never persisted for the planner's placedBounceRungIndices
+    // lookup to see next cycle.
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.price).toBeCloseTo(0.15, 5);
+    expect((placed[0]!.metadata?.bounceRung as { rungIndex: number } | undefined)?.rungIndex).toBe(
+      1,
+    );
+  });
+
+  it("still treats a resting order for the SAME rungIndex as a true duplicate (no regression)", async () => {
+    const ladderId = "tok-gate-bounce:1000";
+    const restingRung1 = makeOrder({
+      price: 0.15,
+      status: "open",
+      metadata: { bounceRung: { ladderId, rungIndex: 1, anchorPrice: 0.1, fraction: 0.4 } },
+    });
+    const orderRepo = { findByTokenId: vi.fn().mockReturnValue([restingRung1]) };
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: 0.15,
+      suggestedSize: 40,
+      suggestedSizeUsdc: 40 * 0.15,
+      bounceRung: {
+        ladderId,
+        rungIndex: 1,
+        anchorPrice: 0.1,
+        fraction: 0.4,
+        originalPositionSize: 100,
+        remainingPositionSize: 70,
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 100,
+    };
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      { marketOverrides: { bestBid: 0.1, bestAsk: 0.2, tickSize: 0.01 }, orderRepo },
+    );
+
+    // A true same-rungIndex duplicate (fresh resting order, same size) still
+    // falls into the existing "acceptable price already open" skip branch —
+    // the identity-scoped guard must not turn into a no-op that re-places
+    // every rung on every tick.
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect((skipped[0] as { reasons: string[] }).reasons).toContain(
+      "sell-order-acceptable-price-already-open",
+    );
+  });
+});
+
+describe("SignalToOrderBridge — bounce ladder rollover re-checked against the micro cap (FIX 4)", () => {
+  it("skips a min-order rollover merge whose notional still exceeds bounceExit.microMaxOrderUsdc", async () => {
+    const ladderId = "tok-gate-bounce:2000";
+    const price = 0.15;
+    // rung0 alone: fraction 0.3 * original(100) = 30 shares. The pre-rollover
+    // $2 cap (microMaxOrderUsdc=2) clamps that down to 2/0.15 ≈ 13.33 shares,
+    // which is below market.minOrderSize=50 -> rollover triggers. Merging
+    // rung0+rung1 (cumulative fraction 0.7) yields 70 shares, which clears the
+    // 50-share exchange floor, but at $0.15/share that is $10.50 notional —
+    // far above the $2 cap. Pre-fix, this over-cap merged order would have
+    // been placed anyway (the cap was only checked pre-rollover).
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: price,
+      suggestedSize: 30,
+      suggestedSizeUsdc: 30 * price,
+      bounceRung: {
+        ladderId,
+        rungIndex: 0,
+        anchorPrice: 0.1,
+        fraction: 0.3,
+        originalPositionSize: 100,
+        remainingPositionSize: 100,
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 2,
+      ladderFractions: [0.3, 0.4, 0.3],
+    };
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      {
+        marketOverrides: {
+          bestBid: 0.1,
+          bestAsk: 0.2,
+          tickSize: 0.01,
+          minOrderSize: 50,
+        },
+      },
+    );
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect((skipped[0] as { reasons: string[] }).reasons).toContain(
+      "bounce-rollover-exceeds-micro-cap",
+    );
+  });
+
+  it("still places the merge when the rolled-over notional clears the min-order floor within the cap", async () => {
+    const ladderId = "tok-gate-bounce:2001";
+    const price = 0.15;
+    // Same rollover mechanics as above, but with a cap generous enough
+    // ($20) that the merged 70-share / $10.50 order clears both the
+    // exchange minimum and the micro cap — proves FIX 4 only skips
+    // over-cap merges, not every rollover.
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: price,
+      suggestedSize: 30,
+      suggestedSizeUsdc: 30 * price,
+      bounceRung: {
+        ladderId,
+        rungIndex: 0,
+        anchorPrice: 0.1,
+        fraction: 0.3,
+        originalPositionSize: 100,
+        remainingPositionSize: 100,
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 20,
+      ladderFractions: [0.3, 0.4, 0.3],
+    };
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      {
+        marketOverrides: {
+          bestBid: 0.1,
+          bestAsk: 0.2,
+          tickSize: 0.01,
+          minOrderSize: 50,
+        },
+      },
+    );
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.size).toBeCloseTo(70, 5);
+    expect(
+      (placed[0]!.metadata?.bounceRung as { rungIndicesCovered?: number[] } | undefined)
+        ?.rungIndicesCovered,
+    ).toEqual([0, 1]);
+  });
+});
+
+// ─── 3: BOUNCE_EXIT_BACKSTOP cancel-then-taker ────────────────────────────
+
+describe("SignalToOrderBridge — BOUNCE_EXIT_BACKSTOP cancel-then-taker", () => {
   it("cancels the resting BOUNCE_EXIT_TARGET order, then submits a non-postOnly taker exit", async () => {
     const restingTarget = makeOrder();
     const orderRepo = {
@@ -291,7 +492,7 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TIMEOUT cancel-then-taker", () => 
     };
     const signal = makeSignal({
       side: "sell",
-      decisionRuleId: BOUNCE_EXIT_TIMEOUT_RULE_ID,
+      decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
       suggestedPrice: 0.09,
       suggestedSize: 50,
       suggestedSizeUsdc: 50 * 0.09,
@@ -329,7 +530,7 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TIMEOUT cancel-then-taker", () => 
     };
     const signal = makeSignal({
       side: "sell",
-      decisionRuleId: BOUNCE_EXIT_TIMEOUT_RULE_ID,
+      decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
       suggestedPrice: 0.18,
       suggestedSize: 50,
       suggestedSizeUsdc: 50 * 0.18,
@@ -365,7 +566,7 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TIMEOUT cancel-then-taker", () => 
     };
     const signal = makeSignal({
       side: "sell",
-      decisionRuleId: BOUNCE_EXIT_TIMEOUT_RULE_ID,
+      decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
       suggestedPrice: 0.15,
       suggestedSize: 50,
       suggestedSizeUsdc: 50 * 0.15,
@@ -395,7 +596,7 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TIMEOUT cancel-then-taker", () => 
     const orderRepo = { findByTokenId: vi.fn().mockReturnValue([restingTarget]) };
     const signal = makeSignal({
       side: "sell",
-      decisionRuleId: BOUNCE_EXIT_TIMEOUT_RULE_ID,
+      decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
       suggestedPrice: 0.3,
       suggestedSize: 50,
       suggestedSizeUsdc: 50 * 0.3,
@@ -419,7 +620,7 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TIMEOUT cancel-then-taker", () => 
     const orderRepo = { findByTokenId: vi.fn().mockReturnValue([]) };
     const signal = makeSignal({
       side: "sell",
-      decisionRuleId: BOUNCE_EXIT_TIMEOUT_RULE_ID,
+      decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
       suggestedPrice: 0.09,
       suggestedSize: 50,
       suggestedSizeUsdc: 50 * 0.09,
@@ -432,6 +633,56 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TIMEOUT cancel-then-taker", () => 
 
     expect(cancelled).toHaveLength(0);
     expect(placed).toHaveLength(1);
+  });
+
+  it("cancels EVERY resting BOUNCE_EXIT_TARGET rung, not just the first, when the ladder has multiple simultaneously open (Phase 3 multi-rung)", async () => {
+    const ladderId = "tok-gate-bounce:3000";
+    const rung0 = makeOrder({
+      orderId: createOrderId("ord-bounce-rung-0"),
+      price: 0.15,
+      metadata: { bounceRung: { ladderId, rungIndex: 0, anchorPrice: 0.1, fraction: 0.3 } },
+    });
+    const rung1 = makeOrder({
+      orderId: createOrderId("ord-bounce-rung-1"),
+      price: 0.18,
+      metadata: { bounceRung: { ladderId, rungIndex: 1, anchorPrice: 0.1, fraction: 0.4 } },
+    });
+    const rung2 = makeOrder({
+      orderId: createOrderId("ord-bounce-rung-2"),
+      price: 0.21,
+      metadata: { bounceRung: { ladderId, rungIndex: 2, anchorPrice: 0.1, fraction: 0.3 } },
+    });
+    const orderRepo = { findByTokenId: vi.fn().mockReturnValue([rung0, rung1, rung2]) };
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      suggestedPrice: 0.09,
+      suggestedSize: 100,
+      suggestedSizeUsdc: 100 * 0.09,
+    });
+    const { placed, cancelled, skipped } = await runBridge(
+      signal,
+      {},
+      { marketOverrides: { bestBid: 0.09, bestAsk: 0.12 }, orderRepo },
+    );
+
+    // Pre-Phase-3, only a single resting order was ever cancelled (the ladder
+    // used to rest at most one rung at a time). With multi-rung coexistence,
+    // all 3 resting rungs must be cancelled before the taker exit is placed —
+    // leaving any behind would strand a stale maker SELL alongside the fresh
+    // full-position taker exit.
+    expect(skipped).toHaveLength(0);
+    expect(cancelled).toHaveLength(3);
+    const cancelledOrderIds = cancelled.map((c) => (c as { orderId: unknown }).orderId);
+    expect(cancelledOrderIds).toEqual(
+      expect.arrayContaining([rung0.orderId, rung1.orderId, rung2.orderId]),
+    );
+    for (const c of cancelled) {
+      expect((c as { reason: string }).reason).toBe("sell_timeout_escalation");
+    }
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.postOnly).not.toBe(true);
   });
 });
 
@@ -613,12 +864,15 @@ describe("ExecutionModule — GATE BUY micro cap", () => {
   });
 });
 
-// ─── 5: ExecutionModule — post-only cross skip + timeout force-exit ──────
+// ─── 5: ExecutionModule — post-only cross skip + backstop force-exit ─────
 
-describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_TIMEOUT execution behavior", () => {
+describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_BACKSTOP execution behavior", () => {
   function makeExecModule(
     orderRepoOverrides?: Partial<OrderRepository>,
     positionRepo?: Pick<PositionRepository, "findByTokenId">,
+    executionPolicy?: () => ExecutionPolicy,
+    exchangeStateStore?: ExchangeStateStore,
+    liveLiteGuard?: LiveLiteGuard,
   ) {
     const bus = new InProcessEventBus();
     const gateway = {
@@ -687,6 +941,9 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_TIMEOUT execution
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
       runtimeMode: "simulation",
+      executionPolicy,
+      exchangeStateStore,
+      liveLiteGuard,
     });
 
     return { bus, gateway, mod, orderRepo };
@@ -742,13 +999,13 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_TIMEOUT execution
     await mod.stop();
   });
 
-  it("still force-exits a BOUNCE_EXIT_TIMEOUT taker command even when a stale resting sell order is still visible locally", async () => {
+  it("still force-exits a BOUNCE_EXIT_BACKSTOP taker command even when a stale resting sell order is still visible locally", async () => {
     // Simulates the race the M6 bypass is designed for: signal-to-order.ts
     // published the cancel for the resting target, but orderRepo hasn't
     // caught up yet — this order is still returned as "open". Without the
     // bypass, deferSellReplacementIfNeeded's generic reprice-threshold/lock
     // path would hold this taker command back; the bypass must let it
-    // through unconditionally for BOUNCE_EXIT_TIMEOUT_RULE_ID.
+    // through unconditionally for a BOUNCE_EXIT_BACKSTOP force-exit.
     const staleRestingOrder = makeOrder();
     const { bus, gateway, mod } = makeExecModule({
       findByTokenId: vi.fn().mockReturnValue([staleRestingOrder]),
@@ -776,7 +1033,7 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_TIMEOUT execution
         negRisk: false,
         sequenceInTick: 0,
         signalReason: "probe-entry",
-        decisionRuleId: BOUNCE_EXIT_TIMEOUT_RULE_ID,
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
       } satisfies PlaceOrderCommand,
       timestamp: NOW,
     });
@@ -787,16 +1044,16 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_TIMEOUT execution
     await mod.stop();
   });
 
-  it("does not reject a BOUNCE_EXIT_TIMEOUT full-position taker SELL as reserved-token-limit while its own resting BOUNCE_EXIT_TARGET is still visible in orderRepo", async () => {
+  it("does not reject a BOUNCE_EXIT_BACKSTOP full-position taker SELL as reserved-token-limit while its own resting BOUNCE_EXIT_TARGET is still visible in orderRepo", async () => {
     // Reproduces the FIX A race: signal-to-order.ts publishes CancelOrderRequested
-    // for the resting target, then immediately publishes the timeout taker
+    // for the resting target, then immediately publishes the backstop taker
     // PlaceOrderRequested. The cancel is processed asynchronously, so orderRepo
     // still returns the target as "open" when this reservation check runs.
     // Unlike the "stale resting order" test above (no positionRepo configured,
     // which short-circuits the whole reservation check), this test wires a real
     // GATE position + orderRepo.findOpen() so the reserved-token-limit math is
     // actually exercised — the resting target's size must NOT double-count
-    // against the timeout's own full-position SELL.
+    // against the backstop's own full-position SELL.
     const gatePosition = {
       tokenId: TOKEN_ID,
       conditionId: COND_ID,
@@ -837,7 +1094,7 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_TIMEOUT execution
         negRisk: false,
         sequenceInTick: 0,
         signalReason: "probe-entry",
-        decisionRuleId: BOUNCE_EXIT_TIMEOUT_RULE_ID,
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
       } satisfies PlaceOrderCommand,
       timestamp: NOW,
     });
@@ -845,6 +1102,643 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_TIMEOUT execution
     expect(rejected).toHaveLength(0);
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
     expect(placed).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("still force-exits a BOUNCE_EXIT_BACKSTOP taker SELL even when the token is balance-blocked (pending-wallet-sync) — Phase 3 Codex FIX 1", async () => {
+    // Reproduces the CRITICAL orphan-residual race: signal-to-order.ts cancels
+    // every resting BOUNCE_EXIT_TARGET rung THEN publishes the backstop taker.
+    // If the balance-block gate rejected the backstop too, the rungs would
+    // already be gone with no replacement exit ever placed — the residual
+    // position would be orphaned with zero live exit orders on the book.
+    const exchangeStateStore = new ExchangeStateStore();
+    exchangeStateStore.markBalanceReject(TOKEN_ID);
+    expect(exchangeStateStore.isBalanceBlocked(TOKEN_ID)).toBe(true);
+
+    const { bus, gateway, mod } = makeExecModule(
+      undefined,
+      undefined,
+      undefined,
+      exchangeStateStore,
+    );
+    await mod.start();
+
+    const placed: unknown[] = [];
+    const rejected: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-backstop-balance-blocked"),
+        clientOrderId: "plk_bounce_backstop_balance_blocked" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.09,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(placed).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("still rejects a non-bounce SELL as pending-wallet-sync while the token is balance-blocked (balance-block bypass is bounce-only)", async () => {
+    // Guards the FIX 1 bypass from over-widening: a generic/non-bounce SELL
+    // (e.g. a Track D8 exit) for the SAME balance-blocked token must still be
+    // rejected — only the bounce-exit backstop force-exit is exempt.
+    const exchangeStateStore = new ExchangeStateStore();
+    exchangeStateStore.markBalanceReject(TOKEN_ID);
+
+    const { bus, gateway, mod } = makeExecModule(
+      undefined,
+      undefined,
+      undefined,
+      exchangeStateStore,
+    );
+    await mod.start();
+
+    const placed: unknown[] = [];
+    const rejected: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-d8-balance-blocked"),
+        clientOrderId: "plk_d8_balance_blocked" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.09,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: "D8",
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(placed).toHaveLength(0);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as { reason: string }).reason).toBe("pending-wallet-sync");
+
+    await mod.stop();
+  });
+
+  it("rejects an over-cap BOUNCE_EXIT_TARGET rung at execution (bounce-micro-order-cap-exceeded) — Phase 3 Codex FIX 2", async () => {
+    // signal-to-order.ts already clamps rung notional to
+    // bounceExit.microMaxOrderUsdc at sizing, but this is the independent
+    // execution-side enforcement so a malformed/direct PlaceOrderRequested
+    // can't place an over-cap rung.
+    const { bus, gateway, mod } = makeExecModule(undefined, undefined, () => ({
+      ...DEFAULT_EXECUTION_POLICY,
+      bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, microMaxOrderUsdc: 2 },
+    }));
+    await mod.start();
+
+    const placed: unknown[] = [];
+    const rejected: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-rung-over-cap"),
+        clientOrderId: "plk_rung_over_cap" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.2, // notional = 50 * 0.2 = $10 > $2 microMaxOrderUsdc
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(placed).toHaveLength(0);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as { reason: string }).reason).toBe("bounce-micro-order-cap-exceeded");
+
+    await mod.stop();
+  });
+
+  it("does NOT cap a BOUNCE_EXIT_BACKSTOP taker at the same over-microMaxOrderUsdc notional — the backstop is exempt from the bounce micro cap", async () => {
+    const { bus, gateway, mod } = makeExecModule(undefined, undefined, () => ({
+      ...DEFAULT_EXECUTION_POLICY,
+      bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, microMaxOrderUsdc: 2 },
+    }));
+    await mod.start();
+
+    const placed: unknown[] = [];
+    const rejected: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-backstop-over-cap"),
+        clientOrderId: "plk_backstop_over_cap" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.2, // same over-cap notional ($10) — backstop must still proceed
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(placed).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("carves out per-token SELL execution capacity for the bounce ladder — a 3rd resting rung is accepted when ladderFractions has 3 entries", async () => {
+    const existingRungs = [
+      makeOrder({
+        orderId: createOrderId("ord-rung-0"),
+        clientOrderId: "plk_rung_0" as ClientOrderId,
+        price: 0.15,
+      }),
+      makeOrder({
+        orderId: createOrderId("ord-rung-1"),
+        clientOrderId: "plk_rung_1" as ClientOrderId,
+        price: 0.18,
+      }),
+    ];
+    const { bus, gateway, mod } = makeExecModule(
+      {
+        findOpen: vi.fn().mockReturnValue(existingRungs),
+        findByTokenId: vi.fn().mockReturnValue(existingRungs),
+      },
+      undefined,
+      // microMaxOrderUsdc raised well above these rungs' notional (~$5-10):
+      // this test is about per-token SELL capacity counting, not the FIX 2
+      // micro cap, which is covered by its own dedicated tests above.
+      () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        bounceExit: {
+          ...DEFAULT_EXECUTION_POLICY.bounceExit,
+          ladderFractions: [0.3, 0.4, 0.3],
+          microMaxOrderUsdc: 1000,
+        },
+      }),
+    );
+    await mod.start();
+
+    const rejected: unknown[] = [];
+    const placed: unknown[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-rung-2"),
+        clientOrderId: "plk_rung_2" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 30,
+        price: 0.21,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    // Generic per-token SELL cap defaults to 2 (DEFAULT_SELL_CAPACITY_POLICY);
+    // without the ladder carve-out, this 3rd resting rung would trip
+    // per_token_sell_limit even though the ladder is explicitly configured
+    // for 3 concurrent rungs.
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(placed).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("rejects a 4th resting bounce rung once the ladder's own rung-count ceiling (3) is reached (per_token_sell_limit)", async () => {
+    const existingRungs = [0, 1, 2].map((index) =>
+      makeOrder({
+        orderId: createOrderId(`ord-rung-${index}`),
+        clientOrderId: `plk_rung_${index}` as ClientOrderId,
+        price: 0.15 + index * 0.03,
+      }),
+    );
+    const { bus, gateway, mod } = makeExecModule(
+      {
+        findOpen: vi.fn().mockReturnValue(existingRungs),
+        findByTokenId: vi.fn().mockReturnValue(existingRungs),
+      },
+      undefined,
+      // microMaxOrderUsdc raised well above these rungs' notional (~$5-10):
+      // this test is about per-token SELL capacity counting, not the FIX 2
+      // micro cap, which is covered by its own dedicated tests above.
+      () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        bounceExit: {
+          ...DEFAULT_EXECUTION_POLICY.bounceExit,
+          ladderFractions: [0.3, 0.4, 0.3],
+          microMaxOrderUsdc: 1000,
+        },
+      }),
+    );
+    await mod.start();
+
+    const rejected: unknown[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-rung-3"),
+        clientOrderId: "plk_rung_3" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 30,
+        price: 0.24,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as { reason: string }).reason).toBe("per_token_sell_limit");
+
+    await mod.stop();
+  });
+
+  it("does not cancel an earlier resting rung when a new bounce-ladder rung is submitted (deferSellReplacementIfNeeded bypass fix)", async () => {
+    const earlierRung = makeOrder({
+      orderId: createOrderId("ord-rung-0"),
+      clientOrderId: "plk_rung_0" as ClientOrderId,
+      price: 0.15,
+      status: "open",
+    });
+    const { bus, gateway, mod } = makeExecModule(
+      {
+        findOpen: vi.fn().mockReturnValue([earlierRung]),
+        findByTokenId: vi.fn().mockReturnValue([earlierRung]),
+      },
+      undefined,
+      // microMaxOrderUsdc raised well above these rungs' notional (~$5-10):
+      // this test is about per-token SELL capacity counting, not the FIX 2
+      // micro cap, which is covered by its own dedicated tests above.
+      () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        bounceExit: {
+          ...DEFAULT_EXECUTION_POLICY.bounceExit,
+          ladderFractions: [0.3, 0.4, 0.3],
+          microMaxOrderUsdc: 1000,
+        },
+      }),
+    );
+    await mod.start();
+
+    const rejected: unknown[] = [];
+    const placed: unknown[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+
+    // A brand-new rung (rung1) at a different price, while rung0 is still
+    // resting. Pre-fix, deferSellReplacementIfNeeded's generic "keep one live
+    // price per token" model treated rung0 as the thing being replaced and
+    // would cancel it (or defer/reject this command) before the multi-rung
+    // capacity carve-out above ever got a chance to run — defeating N-rung
+    // coexistence entirely.
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-rung-1"),
+        clientOrderId: "plk_rung_1" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 40,
+        price: 0.18,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(placed).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  // ─── Final Codex fix: backstop bypasses bot-bookkeeping capacity/caps ────
+  //
+  // docs/plans/2026-07-16-bounce-exit-ladder-redesign.md — the backstop taker
+  // must clear wallet sell capacity, per-token sell capacity, total order
+  // capacity, and the live-lite per-order cap unconditionally (bot-
+  // bookkeeping), while a normal SELL under the exact same exhausted
+  // conditions is still rejected.
+
+  function makeSaturatedSellCapacityPolicy(): () => ExecutionPolicy {
+    return () => ({
+      ...DEFAULT_EXECUTION_POLICY,
+      sellCapacity: {
+        ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+        maxOpenSellOrders: 1,
+        maxOpenSellOrdersPerToken: 1,
+      },
+      orderCapacity: {
+        ...DEFAULT_EXECUTION_POLICY.orderCapacity,
+        maxOpenOrdersTotal: 1,
+      },
+    });
+  }
+
+  function makeSaturatingRestingSells(): Order[] {
+    // 4 resting non-bounce SELLs on TOKEN_ID: exceeds not just the tiny
+    // policy caps above but also the pre-existing bounce ladder-count
+    // carve-out (max(policy, ladderFractions.length=3) = 3), so only the
+    // NEW unconditional bypass — not the older per-token carve-out — can
+    // admit the backstop below.
+    return [0, 1, 2, 3].map((index) =>
+      makeOrder({
+        orderId: createOrderId(`ord-saturate-${index}`),
+        clientOrderId: `plk_saturate_${index}` as ClientOrderId,
+        decisionRuleId: "D8",
+        price: 0.15 + index * 0.01,
+      }),
+    );
+  }
+
+  it("admits a BOUNCE_EXIT_BACKSTOP taker SELL even when wallet/per-token/total sell capacity are already exhausted", async () => {
+    const restingSells = makeSaturatingRestingSells();
+    const { bus, gateway, mod } = makeExecModule(
+      { findOpen: vi.fn().mockReturnValue(restingSells) },
+      undefined,
+      makeSaturatedSellCapacityPolicy(),
+    );
+    await mod.start();
+
+    const placed: unknown[] = [];
+    const rejected: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-backstop-capacity-exhausted"),
+        clientOrderId: "plk_backstop_capacity_exhausted" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.09,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(placed).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("still rejects a normal SELL under the same exhausted wallet/total sell capacity (bypass is bounce-backstop-only)", async () => {
+    // Uses a different token than the saturating resting SELLs so the
+    // generic sell-replacement gate (deferSellReplacementIfNeeded — already
+    // covered by its own dedicated tests above) never engages, isolating the
+    // wallet/total capacity checks this test targets: openSellOrderCount
+    // (global, counts every token) is 4, already above maxOpenSellOrders=1.
+    const restingSells = makeSaturatingRestingSells();
+    const { bus, gateway, mod } = makeExecModule(
+      { findOpen: vi.fn().mockReturnValue(restingSells) },
+      undefined,
+      makeSaturatedSellCapacityPolicy(),
+    );
+    await mod.start();
+
+    const placed: unknown[] = [];
+    const rejected: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-d8-capacity-exhausted"),
+        clientOrderId: "plk_d8_capacity_exhausted" as ClientOrderId,
+        source: "strategy",
+        tokenId: OTHER_TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.09,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: "D8",
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(placed).toHaveLength(0);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as { reason: string }).reason).toBe("wallet_sell_capacity_exhausted");
+
+    await mod.stop();
+  });
+
+  it("does not cap a BOUNCE_EXIT_BACKSTOP taker at the live-lite per-order cap — it must sell the whole residual above the $2 cap", async () => {
+    const guard = new LiveLiteGuard({
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 2,
+      maxActiveMarkets: 10,
+    });
+    const { bus, gateway, mod } = makeExecModule(undefined, undefined, undefined, undefined, guard);
+    await mod.start();
+
+    const placed: unknown[] = [];
+    const rejected: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-backstop-live-lite-cap"),
+        clientOrderId: "plk_backstop_live_lite_cap" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.5, // notional = $25, far above the $2 live-lite order cap
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(placed).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("still rejects a normal SELL above the live-lite per-order cap (bypass is bounce-backstop-only)", async () => {
+    const guard = new LiveLiteGuard({
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 2,
+      maxActiveMarkets: 10,
+    });
+    const { bus, gateway, mod } = makeExecModule(undefined, undefined, undefined, undefined, guard);
+    await mod.start();
+
+    const placed: unknown[] = [];
+    const rejected: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-d8-live-lite-cap"),
+        clientOrderId: "plk_d8_live_lite_cap" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.5, // same over-cap notional
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: "D8",
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(placed).toHaveLength(0);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as { reason: string }).reason).toBe("live-lite-order-cap-exceeded");
 
     await mod.stop();
   });

@@ -46,10 +46,9 @@ import {
   normalizeSellSizeForMinOrder,
   resolveDynamicChainCapDetails,
   shouldBlockRepriceChain,
-  S1_LADDER_RULE_ID,
   GATE_ENTRY_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
-  BOUNCE_EXIT_TIMEOUT_RULE_ID,
+  isBounceForceExit,
 } from "@krabs/domain";
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
@@ -69,6 +68,7 @@ import {
   normalizeSellCapacityPolicy,
   PER_TOKEN_BUY_LIMIT_REASON,
   PER_TOKEN_SELL_LIMIT_REASON,
+  resolveEffectiveMaxOpenSellOrdersPerToken,
   TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
   type OrderCapacityMetricsSample,
   type WalletSellCapacityDecision,
@@ -549,6 +549,14 @@ export class ExecutionModule implements RuntimeModule {
 
     const notional = cmd.price * cmd.size;
 
+    // Computed early — reused by both the balance-block bypass and the
+    // bounce-exit micro-cap bypass below (bounce-exit ladder redesign,
+    // Phase 3 Codex fix): the BACKSTOP taker is exempt from both.
+    const isBounceBackstop = isBounceForceExit({
+      side: cmd.side,
+      decisionRuleId: cmd.decisionRuleId ?? null,
+    });
+
     if (cmd.side === "buy" && this.deps.positionConcentration) {
       const executionPolicy = this.deps.executionPolicy?.() ?? DEFAULT_EXECUTION_POLICY;
       const concentrationDecision = this.deps.positionConcentration.evaluateBuy({
@@ -583,8 +591,13 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
 
-    // Live-lite order cap check (Layer 4)
-    if (this.deps.liveLiteGuard?.isActive) {
+    // Live-lite order cap check (Layer 4). The BOUNCE_EXIT_BACKSTOP force-exit
+    // is exempt (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md, final
+    // Codex fix): it must liquidate the whole residual position regardless of
+    // notional, and this per-order envelope cap is bot-bookkeeping, not an
+    // exchange-feasibility check — same bypass category as the GATE/bounce
+    // micro-caps and balance-block further down in this method.
+    if (this.deps.liveLiteGuard?.isActive && !isBounceBackstop) {
       if (!this.deps.liveLiteGuard.isOrderWithinCap(notional)) {
         this.log.warn(
           { commandId: cmd.commandId, notional },
@@ -724,6 +737,42 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
 
+    // Bounce-exit ladder rung $ cap: defense-in-depth cap, mirrors the GATE
+    // BUY / maker-BUY per-order caps above (docs/plans/2026-07-16-bounce-
+    // exit-ladder-redesign.md, Phase 3 Codex fix). signal-to-order.ts already
+    // clamps rung notional to bounceExit.microMaxOrderUsdc, but this is the
+    // independent execution-side enforcement so a malformed/direct
+    // PlaceOrderRequested can't place an over-cap rung. The BACKSTOP taker is
+    // explicitly exempt — it liquidates whatever residual remains and must
+    // not be capped like a resting rung.
+    if (
+      cmd.side === "sell" &&
+      cmd.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+      !isBounceBackstop
+    ) {
+      const bounceExitPolicy = this.deps.executionPolicy?.()?.bounceExit;
+      if (
+        bounceExitPolicy &&
+        bounceExitPolicy.microMaxOrderUsdc > 0 &&
+        notional > bounceExitPolicy.microMaxOrderUsdc
+      ) {
+        this.log.warn(
+          {
+            commandId: cmd.commandId,
+            notional,
+            microMaxOrderUsdc: bounceExitPolicy.microMaxOrderUsdc,
+          },
+          "BOUNCE_EXIT_TARGET rejected — exceeds microMaxOrderUsdc per-order cap",
+        );
+        await this.rejectOrder(
+          cmd,
+          "bounce-micro-order-cap-exceeded",
+          ExchangeErrorCode.LivePolicyBlocked,
+        );
+        return;
+      }
+    }
+
     if (cmd.side !== "sell") {
       const minOrderSizeRejection = this.getMinOrderSizeRejection(cmd);
       if (minOrderSizeRejection) {
@@ -774,7 +823,16 @@ export class ExecutionModule implements RuntimeModule {
     // does not get its existing exit SELL cancelled into a void: replacement
     // would cancel the live order then the new SELL would itself be rejected
     // by the same block, leaving no exit order on the book.
-    if (cmd.side === "sell" && this.isBalanceBlocked(cmd)) {
+    //
+    // Bounce-exit backstop force-exit (docs/plans/2026-07-16-bounce-exit-
+    // ladder-redesign.md, Phase 3 Codex fix): signal-to-order.ts already
+    // cancelled every resting BOUNCE_EXIT_TARGET rung before publishing this
+    // taker command. If this balance-block rejected the backstop too, the
+    // rungs would already be gone with no replacement exit order ever placed
+    // — the residual position would be orphaned with no live exit at all.
+    // The backstop must always proceed, consistent with the other bot-
+    // bookkeeping bypasses guarded by isBounceForceExit.
+    if (cmd.side === "sell" && !isBounceBackstop && this.isBalanceBlocked(cmd)) {
       this.recordInternalReservationReject();
       this.recordExecutionCapacityReject(cmd, "pending-wallet-sync");
       await this.rejectOrder(cmd, "pending-wallet-sync", ExchangeErrorCode.InsufficientBalance);
@@ -1287,21 +1345,30 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   /**
-   * A BOUNCE_EXIT_TIMEOUT force-exit cancels the resting BOUNCE_EXIT_TARGET maker
+   * A BOUNCE_EXIT_BACKSTOP force-exit cancels the resting BOUNCE_EXIT_TARGET maker
    * SELL (see signal-to-order.ts) then immediately places its own taker SELL for
    * the full remaining position. The CancelOrderRequested is processed
    * asynchronously, so the target order can still show as "open" in orderRepo
    * when this reservation check runs. Left uncorrected, the target's reserved
-   * size double-counts against the timeout's own full-position SELL and can trip
-   * reserved-token-limit, defeating the guaranteed 4h force-exit. Excluding it
-   * only applies when the incoming command IS that same-token timeout force-exit,
+   * size double-counts against the backstop's own full-position SELL and can
+   * trip reserved-token-limit, defeating the guaranteed force-exit. Excluding it
+   * only applies when the incoming command IS that same-token backstop force-exit,
    * so reservation accounting for every other order is unchanged.
+   *
+   * Ladder redesign (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md
+   * Phase 3): `.filter` below drops every matching resting rung for this
+   * token, not just one — the ladder can rest multiple rungs simultaneously
+   * (see the `resolveMaxOpenSellOrdersPerToken` carve-out above), and the
+   * backstop cancels all of them, so all of them must be excluded here too.
    */
   private excludeBounceTargetBeingReplaced(
     openOrders: Order[],
     cmd: PlaceOrderCommand | undefined,
   ): Order[] {
-    if (!cmd || cmd.side !== "sell" || cmd.decisionRuleId !== BOUNCE_EXIT_TIMEOUT_RULE_ID) {
+    if (
+      !cmd ||
+      !isBounceForceExit({ side: cmd.side, decisionRuleId: cmd.decisionRuleId ?? null })
+    ) {
       return openOrders;
     }
     return openOrders.filter(
@@ -1379,6 +1446,10 @@ export class ExecutionModule implements RuntimeModule {
     return this.deps.executionPolicy?.().trackS1;
   }
 
+  private currentBounceExitPolicy(): ExecutionPolicy["bounceExit"] | undefined {
+    return this.deps.executionPolicy?.().bounceExit;
+  }
+
   private currentOrderCapacityPolicy(): ExecutionPolicy["orderCapacity"] | undefined {
     return this.deps.executionPolicy?.().orderCapacity;
   }
@@ -1405,6 +1476,15 @@ export class ExecutionModule implements RuntimeModule {
     const orderCapacity = evaluateTotalOrdersCapacity({
       policy: this.currentOrderCapacityPolicy(),
       openOrdersTotal: reservations.openOrdersTotal,
+    });
+    // BOUNCE_EXIT_BACKSTOP force-exit bypasses every bot-bookkeeping SELL
+    // capacity check below (wallet sell / per-token sell / total order —
+    // docs/plans/2026-07-16-bounce-exit-ladder-redesign.md, final Codex fix).
+    // It does NOT bypass the position-existence / residual-below-exchange-
+    // min-size checks further down, which are exchange-feasibility, not caps.
+    const isBounceBackstop = isBounceForceExit({
+      side: cmd.side,
+      decisionRuleId: cmd.decisionRuleId ?? null,
     });
 
     if (cmd.side === "buy") {
@@ -1498,7 +1578,7 @@ export class ExecutionModule implements RuntimeModule {
       openNonProfileLadderSellOrderCount: reservations.openNonProfileLadderSellOrderCount,
       profileOwnedOpenPositionCount: this.currentProfileOwnedOpenPositionCount(),
     });
-    if (!sellCapacity.allowed) {
+    if (!sellCapacity.allowed && !isBounceBackstop) {
       this.recordExecutionSellCapacitySample(
         cmd,
         false,
@@ -1529,7 +1609,7 @@ export class ExecutionModule implements RuntimeModule {
       openOrdersForToken: getOpenOrderCountForToken(reservations, cmd.tokenId, "sell"),
       enabled: sellPolicy.enabled,
     });
-    if (!perTokenSell.allowed) {
+    if (!perTokenSell.allowed && !isBounceBackstop) {
       return {
         kind: "reject",
         reason: PER_TOKEN_SELL_LIMIT_REASON,
@@ -1542,7 +1622,7 @@ export class ExecutionModule implements RuntimeModule {
       };
     }
 
-    if (!orderCapacity.allowed) {
+    if (!orderCapacity.allowed && !isBounceBackstop) {
       return {
         kind: "reject",
         reason: TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
@@ -1685,16 +1765,24 @@ export class ExecutionModule implements RuntimeModule {
     };
   }
 
+  /**
+   * GATE-lane bounce-exit ladder carve-out (docs/plans/2026-07-16-bounce-
+   * exit-ladder-redesign.md Phase 3): a resting rung or the near-resolution
+   * backstop must not trip the generic per-token SELL cap (default 2) once
+   * `bounceExit.ladderFractions` configures more than 2 simultaneous rungs.
+   * Delegates to the shared resolver (also used by algo-risk-gate.ts, which
+   * enforces this same cap earlier in the pipeline) so both call sites agree.
+   */
   private resolveMaxOpenSellOrdersPerToken(
     cmd: PlaceOrderCommand,
     sellPolicy: ReturnType<typeof normalizeSellCapacityPolicy>,
   ): number {
-    if (cmd.decisionRuleId === S1_LADDER_RULE_ID) {
-      return (
-        this.currentTrackS1Policy()?.s1MaxOrdersPerToken ?? sellPolicy.maxOpenSellOrdersPerToken
-      );
-    }
-    return sellPolicy.maxOpenSellOrdersPerToken;
+    return resolveEffectiveMaxOpenSellOrdersPerToken({
+      decisionRuleId: cmd.decisionRuleId ?? null,
+      sellPolicy,
+      s1MaxOrdersPerToken: this.currentTrackS1Policy()?.s1MaxOrdersPerToken,
+      bounceLadderRungCount: this.currentBounceExitPolicy()?.ladderFractions.length,
+    });
   }
 
   /** CHANGE B — wallet/local upper-bound for SELL clamp. */
@@ -2241,14 +2329,33 @@ export class ExecutionModule implements RuntimeModule {
 
   private async deferSellReplacementIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
     if (cmd.side !== "sell") return false;
-    // Bounce-exit 4h force-exit (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
-    // Phase 4 / Codex M6) bypasses the generic reprice-threshold/lock/chain-cap
-    // gating below entirely — signal-to-order.ts already explicitly cancels the
-    // resting BOUNCE_EXIT_TARGET order before submitting this taker command, and
-    // the ExecutionQueue's per-token mutex (execution-queue.ts) independently
+    // Bounce-exit backstop force-exit (docs/plans/2026-07-16-bounce-exit-ladder-
+    // redesign.md) bypasses the generic reprice-threshold/lock/chain-cap gating
+    // below entirely — signal-to-order.ts already explicitly cancels the resting
+    // BOUNCE_EXIT_TARGET order before submitting this taker command, and the
+    // ExecutionQueue's per-token mutex (execution-queue.ts) independently
     // guarantees the cancel executes before this place does, regardless of
     // whether orderRepo has caught up with the cancel by the time this runs.
-    if (cmd.decisionRuleId === BOUNCE_EXIT_TIMEOUT_RULE_ID) return false;
+    //
+    // A regular (non-backstop) bounce ladder rung bypasses this gate too: this
+    // method's "keep one live price per token" model was built for the old
+    // single-resting-SELL exit and would otherwise treat a second/third rung
+    // as a "replacement" of whichever rung is already open (existingSells[0]),
+    // cancelling it before the multi-rung capacity carve-out
+    // (resolveMaxOpenSellOrdersPerToken) ever runs — defeating N-rung
+    // coexistence entirely. Each BOUNCE_EXIT_TARGET command reaching here is,
+    // by construction, a brand-new rung at a rung-specific price, never a
+    // reprice of an already-placed one — signal-to-order.ts's
+    // findDuplicateBounceRungOrder already scopes duplicate detection to the
+    // same ladderId+rungIndex (a different rung is never treated as a
+    // duplicate there), and the exchange-level deterministic clientOrderId
+    // hash independently guards against a true resubmit of the same rung.
+    if (
+      isBounceForceExit({ side: cmd.side, decisionRuleId: cmd.decisionRuleId ?? null }) ||
+      cmd.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID
+    ) {
+      return false;
+    }
     if (this.isSellReplacementSubmit(cmd)) return false;
 
     // Normal exit management keeps one live price per token and replaces it

@@ -3,6 +3,8 @@ import {
   createPositionId,
   createTokenId,
   createConditionId,
+  BOUNCE_EXIT_BACKSTOP_RULE_ID,
+  BOUNCE_EXIT_TARGET_RULE_ID,
   DEFAULT_BUY_CAPACITY_POLICY,
   DEFAULT_EXECUTION_POLICY,
   type Signal,
@@ -614,6 +616,163 @@ describe("AlgoRiskGateImpl", () => {
 
     expect(decision.approved).toBe(approved);
     if (!approved) expect(decision.rejectionReasons).toContain("per_token_sell_limit");
+  });
+
+  it.each([
+    [1, true],
+    [2, true],
+    [3, false],
+    [4, false],
+  ])(
+    "enforces a strict (undiscounted) per-token SELL ceiling of ladderFractions.length for new bounce-exit rungs at count %i (Phase 3 Codex FIX 4)",
+    async (count, approved) => {
+      const orders = Array.from({ length: count }, (_, index) =>
+        makeOpenSellOrder({
+          orderId: `bounce-rung-${index}` as any,
+          clientOrderId: `bounce-rung-cl-${index}` as any,
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        }),
+      );
+      const gate = new AlgoRiskGateImpl(
+        makeOrderRepo(orders),
+        makePositionRepo(null),
+        makeLogger(),
+        undefined,
+        undefined,
+        undefined,
+        () => makeExecutionPolicy(),
+      );
+
+      // DEFAULT_EXECUTION_POLICY.bounceExit.ladderFractions has 3 entries, so the
+      // carve-out ceiling is max(sellCapacity.maxOpenSellOrdersPerToken=2, 3) = 3.
+      // Unlike a genuine same-source replacement, a new BOUNCE_EXIT_TARGET rung
+      // gets NO -1 "replacement-aware" discount (getReplacementAwareSellCounts
+      // exempts it) — ladder rungs coexist rather than replace one another, so
+      // 3 already-resting rungs must reject a would-be 4th, consistent with
+      // execution-module.ts's own undiscounted per-token cap enforcement.
+      const decision = await gate.evaluate(
+        makeSignal({
+          side: "sell",
+          reason: "repricing-exit",
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        }),
+      );
+
+      expect(decision.approved).toBe(approved);
+      if (!approved) expect(decision.rejectionReasons).toContain("per_token_sell_limit");
+    },
+  );
+
+  it("also grants the BOUNCE_EXIT_BACKSTOP taker signal the same ladder-sized carve-out (N rungs + backstop coexist)", async () => {
+    const orders = Array.from({ length: 3 }, (_, index) =>
+      makeOpenSellOrder({
+        orderId: `bounce-rung-${index}` as any,
+        clientOrderId: `bounce-rung-cl-${index}` as any,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      }),
+    );
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(null),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+    );
+
+    const decision = await gate.evaluate(
+      makeSignal({
+        side: "sell",
+        reason: "repricing-exit",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      }),
+    );
+
+    expect(decision.approved).toBe(true);
+    expect(decision.rejectionReasons).toHaveLength(0);
+  });
+
+  it("does not extend the ladder carve-out to a non-bounce SELL signal, even with 3 bounce rungs already resting for the same token", async () => {
+    const orders = Array.from({ length: 3 }, (_, index) =>
+      makeOpenSellOrder({
+        orderId: `bounce-rung-${index}` as any,
+        clientOrderId: `bounce-rung-cl-${index}` as any,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      }),
+    );
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(null),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+    );
+
+    // A generic/non-bounce SELL (e.g. a Track D8 exit) does not inherit the
+    // ladder's carve-out — it stays capped at the generic per-token limit (2),
+    // so it is rejected here despite the same 3 resting orders that the
+    // bounce-classified signal above was approved against.
+    const decision = await gate.evaluate(
+      makeSignal({ side: "sell", reason: "repricing-exit", decisionRuleId: "D8" }),
+    );
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("per_token_sell_limit");
+  });
+
+  it("admits a BOUNCE_EXIT_BACKSTOP signal even when wallet/per-token/total sell capacity are all already exhausted (final Codex fix)", async () => {
+    // 4 resting non-bounce SELLs on the same token: exceeds not just the tiny
+    // policy caps below but also the pre-existing bounce ladder-count
+    // carve-out (max(policy, ladderFractions.length=3) = 3), so only the NEW
+    // unconditional bypass — not the older per-token carve-out — can admit
+    // the backstop here.
+    const orders = Array.from({ length: 4 }, (_, index) =>
+      makeOpenSellOrder({
+        orderId: `saturate-${index}` as any,
+        clientOrderId: `saturate-cl-${index}` as any,
+        decisionRuleId: "D8",
+      }),
+    );
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(null),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () =>
+        makeExecutionPolicy({
+          sellCapacity: {
+            ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+            maxOpenSellOrders: 1,
+            maxOpenSellOrdersPerToken: 1,
+          },
+          orderCapacity: { ...DEFAULT_EXECUTION_POLICY.orderCapacity, maxOpenOrdersTotal: 1 },
+        }),
+    );
+
+    const backstopDecision = await gate.evaluate(
+      makeSignal({
+        side: "sell",
+        reason: "repricing-exit",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      }),
+    );
+
+    expect(backstopDecision.approved).toBe(true);
+    expect(backstopDecision.rejectionReasons).toHaveLength(0);
+
+    // Same exhausted conditions, same token — a normal SELL is still rejected;
+    // the bypass is bounce-backstop-only.
+    const normalDecision = await gate.evaluate(
+      makeSignal({ side: "sell", reason: "repricing-exit", decisionRuleId: "D8" }),
+    );
+
+    expect(normalDecision.approved).toBe(false);
+    expect(normalDecision.rejectionReasons).toContain("wallet_sell_capacity_exhausted");
   });
 
   it("rejects new BUY and SELL when total open-order cap is reached", async () => {

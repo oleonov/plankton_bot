@@ -75,6 +75,16 @@ export type QdEvaluationInput = {
   /** Executable D9 trigger price (best bid in production). */
   d9EvalPrice: number;
   hasActiveSell: boolean;
+  /**
+   * Tier-ceiling comparison mode. Default (`false`/omitted) is Q.D's own
+   * exclusive `avgEntry >= tierCeiling` — unchanged for every existing R23/
+   * D8/D9/Q.D caller. Only the GATE-lane backstop wrapper
+   * (`evaluateBounceBackstopEligibility`) sets this to `true`, because GATE
+   * admission itself is inclusive (`avgEntry <= gateEntry.maxPrice`) and the
+   * backstop must cover every GATE-lane entry, including one at exactly the
+   * admission ceiling.
+   */
+  tierCeilingInclusive?: boolean;
 };
 
 const DEFAULT_QD_MODERATE_ANCHOR_TICKS = 4;
@@ -142,6 +152,7 @@ function resolveActivation(
   gate: {
     avgEntry: number | null;
     tierCeiling: number;
+    tierCeilingInclusive: boolean;
     ttcMs: number | null;
     withinTtc: boolean;
     d8Fired: boolean;
@@ -156,7 +167,10 @@ function resolveActivation(
     return { reason: "disabled", qdWouldActivate: false, activationMode: "not_activated" };
   if (gate.avgEntry === null)
     return { reason: "no_position", qdWouldActivate: false, activationMode: "not_activated" };
-  if (gate.avgEntry >= gate.tierCeiling)
+  const wrongTier = gate.tierCeilingInclusive
+    ? gate.avgEntry > gate.tierCeiling
+    : gate.avgEntry >= gate.tierCeiling;
+  if (wrongTier)
     return { reason: "wrong_tier", qdWouldActivate: false, activationMode: "not_activated" };
   if (gate.ttcMs === null)
     return { reason: "ttc_unavailable", qdWouldActivate: false, activationMode: "not_activated" };
@@ -233,6 +247,7 @@ export function evaluateQdPreResolutionExit(input: QdEvaluationInput): QdShadowP
     const activation = resolveActivation(enabled, salvageEnabled, {
       avgEntry,
       tierCeiling,
+      tierCeilingInclusive: input.tierCeilingInclusive === true,
       ttcMs,
       withinTtc,
       d8Fired,
@@ -267,4 +282,66 @@ export function evaluateQdPreResolutionExit(input: QdEvaluationInput): QdShadowP
   } catch {
     return null;
   }
+}
+
+/**
+ * GATE-lane near-resolution backstop eligibility (docs/plans/2026-07-16-
+ * bounce-exit-ladder-redesign.md Phase 3, REV3 R2-H1).
+ *
+ * Reuses Track Q.D's Mode-A/B shape (bid-quality-gated near-resolution exit)
+ * rather than re-implementing it, but the backstop is NOT the observe-only
+ * Q.D shadow — it is a real, runtime-enforced fallback for GATE-lane
+ * residuals, so two of Q.D's defaults are overridden for this call only:
+ *   - `ttcThresholdMs` becomes `bounceExit.backstopTtcHours` (the ladder's own
+ *     near-resolution window), not Q.D's 2h default.
+ *   - `tierCeiling` becomes `gateEntry.maxPrice` (the GATE admission band,
+ *     0.15 by default), not Q.D's 0.05 — the backstop must cover every
+ *     GATE-lane entry, not just the cheapest longshot tier Q.D targets.
+ *   - the tier comparison is INCLUSIVE (`avgEntry <= tierCeiling`), not Q.D's
+ *     own exclusive `avgEntry >= tierCeiling` — GATE admission itself is
+ *     inclusive (`avgEntry <= gateEntry.maxPrice`), so an entry at exactly
+ *     the ceiling must still be backstop-eligible (Phase 3 Codex fix).
+ * `bidFloorAbs`/`salvageEnabled`/`salvageTtcMs`/`salvageFloorRatio` are left
+ * as whatever the live policy (or Q.D's own internal defaults) already say —
+ * Mode A/B applicability logic itself is untouched.
+ *
+ * The caller (decision-planner.ts) is responsible for gating on
+ * `bounceExit.enabled && mode === "micro_live" && whitelist` and for ignoring
+ * bounce ladder rungs (not just S1/profile-ladder orders) when it computes
+ * `hasActiveSell` — that active-sell check must NOT veto the backstop just
+ * because the ladder itself has resting rungs open (REV3 R2-H1).
+ */
+export type BounceBackstopEligibilityInput = {
+  market: NormalizedMarket;
+  legState: LegState;
+  position: Position | null;
+  executionPolicy: ExecutionPolicy;
+  now: number;
+  d8EvalPrice: number;
+  d9EvalPrice: number;
+  hasActiveSell: boolean;
+};
+
+export function evaluateBounceBackstopEligibility(input: BounceBackstopEligibilityInput): boolean {
+  const overriddenPolicy: ExecutionPolicy = {
+    ...input.executionPolicy,
+    preResolutionExit: {
+      ...input.executionPolicy.preResolutionExit,
+      enabled: true,
+      ttcThresholdMs: input.executionPolicy.bounceExit.backstopTtcHours * 3_600_000,
+      tierCeiling: input.executionPolicy.gateEntry.maxPrice,
+    },
+  };
+  const projection = evaluateQdPreResolutionExit({
+    market: input.market,
+    legState: input.legState,
+    position: input.position,
+    executionPolicy: overriddenPolicy,
+    now: input.now,
+    d8EvalPrice: input.d8EvalPrice,
+    d9EvalPrice: input.d9EvalPrice,
+    hasActiveSell: input.hasActiveSell,
+    tierCeilingInclusive: true,
+  });
+  return projection !== null && projection.qdWouldActivate;
 }

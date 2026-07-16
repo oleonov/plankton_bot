@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_BOUNCE_EXIT,
   DEFAULT_EXECUTION_POLICY,
+  DEFAULT_GATE_ENTRY,
   createTokenId,
   type ExecutionPolicy,
   type LegState,
@@ -8,7 +10,11 @@ import {
   type Position,
   type QdPreResolutionExitPolicy,
 } from "@krabs/domain";
-import { evaluateQdPreResolutionExit, type QdShadowProjection } from "../qd-pre-resolution-exit.js";
+import {
+  evaluateBounceBackstopEligibility,
+  evaluateQdPreResolutionExit,
+  type QdShadowProjection,
+} from "../qd-pre-resolution-exit.js";
 
 const tokenId = createTokenId("qd-token");
 const now = Date.parse("2026-06-11T00:00:00.000Z");
@@ -435,5 +441,221 @@ describe("evaluateQdPreResolutionExit — pricing (F1 + F2, TTC-tiered anchor)",
     expect(p.f2Cap).toBeCloseTo(0.0408, 9);
     expect(p.candidatePrice).toBeCloseTo(0.04, 9);
     expect(p.candidatePrice).toBeLessThan(p.bidAnchoredPrice);
+  });
+});
+
+// docs/plans/2026-07-16-bounce-exit-ladder-redesign.md Phase 3 (REV3 R2-H1):
+// the GATE-scoped bounce-exit backstop wrapper. Reuses this file's Mode-A/B
+// shape via evaluateQdPreResolutionExit, but with `ttcThresholdMs` overridden
+// to `bounceExit.backstopTtcHours` and `tierCeiling` overridden to
+// `gateEntry.maxPrice` — both proven explicitly below, distinct from the
+// general (unmodified) Q.D shadow covered by the describe blocks above.
+describe("evaluateBounceBackstopEligibility", () => {
+  const ENABLED_BOUNCE_EXIT = {
+    ...DEFAULT_BOUNCE_EXIT,
+    enabled: true,
+    mode: "micro_live" as const,
+    whitelistConditionIds: ["condition"],
+    backstopTtcHours: 2,
+  };
+
+  function backstopPolicy(
+    overrides: {
+      bounceExit?: Partial<ExecutionPolicy["bounceExit"]>;
+      gateEntry?: Partial<ExecutionPolicy["gateEntry"]>;
+    } = {},
+  ): ExecutionPolicy {
+    return {
+      ...DEFAULT_EXECUTION_POLICY,
+      preResolutionExit: QD_DEFAULTS,
+      bounceExit: { ...ENABLED_BOUNCE_EXIT, ...overrides.bounceExit },
+      gateEntry: { ...DEFAULT_GATE_ENTRY, ...overrides.gateEntry },
+    };
+  }
+
+  function evalBackstop(
+    overrides: {
+      market?: NormalizedMarket;
+      legState?: LegState;
+      position?: Position | null;
+      executionPolicy?: ExecutionPolicy;
+      d8EvalPrice?: number;
+      d9EvalPrice?: number;
+      hasActiveSell?: boolean;
+    } = {},
+  ): boolean {
+    return evaluateBounceBackstopEligibility({
+      market: overrides.market ?? market(),
+      legState: overrides.legState ?? leg(),
+      position: overrides.position === undefined ? position() : overrides.position,
+      executionPolicy: overrides.executionPolicy ?? backstopPolicy(),
+      now,
+      d8EvalPrice: overrides.d8EvalPrice ?? 0.01,
+      d9EvalPrice: overrides.d9EvalPrice ?? 0.005,
+      hasActiveSell: overrides.hasActiveSell ?? false,
+    });
+  }
+
+  it("is true near resolution with a qualifying bid at/above avg entry (Mode A shape reused)", () => {
+    expect(
+      evalBackstop({
+        market: market({
+          endDate: endDateAt(HOUR_MS),
+          bestBid: 0.03,
+          bestAsk: 0.05,
+          midPrice: 0.04,
+        }),
+        position: position({ avgEntryPrice: 0.03 }),
+      }),
+    ).toBe(true);
+  });
+
+  it("still fires for a GATE entry priced above Q.D's own 0.05 tier ceiling but within the GATE band (0.15)", () => {
+    const entryOverrides = {
+      market: market({ endDate: endDateAt(HOUR_MS), bestBid: 0.1, bestAsk: 0.12, midPrice: 0.11 }),
+      position: position({ avgEntryPrice: 0.1 }),
+    };
+
+    // Contrast: the general (unmodified) Q.D shadow rejects this same
+    // position/market outright — proves the override is doing real work,
+    // not that 0.1 happens to qualify under Q.D's own tierCeiling.
+    const generalQd = evaluate(entryOverrides)!;
+    expect(generalQd.reason).toBe("wrong_tier");
+    expect(generalQd.qdWouldActivate).toBe(false);
+
+    expect(evalBackstop(entryOverrides)).toBe(true);
+  });
+
+  it("still enforces a tier ceiling — false once avgEntry clears the GATE band (gateEntry.maxPrice)", () => {
+    expect(
+      evalBackstop({
+        market: market({
+          endDate: endDateAt(HOUR_MS),
+          bestBid: 0.16,
+          bestAsk: 0.18,
+          midPrice: 0.17,
+        }),
+        position: position({ avgEntryPrice: 0.16 }),
+      }),
+    ).toBe(false);
+  });
+
+  // Phase 3 Codex FIX 3: GATE admission is inclusive (avgEntry <= maxPrice,
+  // 0.15 by default), but Q.D's own tier check is exclusive
+  // (avgEntry >= tierCeiling → wrong_tier). A GATE entry at exactly the
+  // admission ceiling must still be backstop-eligible — the GATE wrapper's
+  // tierCeilingInclusive override is what makes that true.
+  it("is eligible for a GATE entry at exactly gateEntry.maxPrice (0.15) — inclusive tier boundary", () => {
+    expect(
+      evalBackstop({
+        market: market({
+          endDate: endDateAt(HOUR_MS),
+          bestBid: 0.15,
+          bestAsk: 0.17,
+          midPrice: 0.16,
+        }),
+        position: position({ avgEntryPrice: 0.15 }),
+      }),
+    ).toBe(true);
+  });
+
+  it("is NOT eligible one tick above gateEntry.maxPrice (0.151) — inclusive boundary does not widen the band", () => {
+    expect(
+      evalBackstop({
+        market: market({
+          endDate: endDateAt(HOUR_MS),
+          bestBid: 0.151,
+          bestAsk: 0.17,
+          midPrice: 0.16,
+        }),
+        position: position({ avgEntryPrice: 0.151 }),
+      }),
+    ).toBe(false);
+  });
+
+  it("is false once TTC exceeds bounceExit.backstopTtcHours (converted to ms)", () => {
+    const oneHourWindow = backstopPolicy({ bounceExit: { backstopTtcHours: 1 } });
+    expect(
+      evalBackstop({
+        executionPolicy: oneHourWindow,
+        market: market({
+          endDate: endDateAt(59 * MIN_MS),
+          bestBid: 0.03,
+          bestAsk: 0.05,
+          midPrice: 0.04,
+        }),
+        position: position({ avgEntryPrice: 0.03 }),
+      }),
+    ).toBe(true);
+
+    expect(
+      evalBackstop({
+        executionPolicy: oneHourWindow,
+        market: market({
+          endDate: endDateAt(61 * MIN_MS),
+          bestBid: 0.03,
+          bestAsk: 0.05,
+          midPrice: 0.04,
+        }),
+        position: position({ avgEntryPrice: 0.03 }),
+      }),
+    ).toBe(false);
+  });
+
+  it("is false when there is no open position (no_position)", () => {
+    expect(
+      evalBackstop({
+        market: market({
+          endDate: endDateAt(HOUR_MS),
+          bestBid: 0.03,
+          bestAsk: 0.05,
+          midPrice: 0.04,
+        }),
+        position: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("is false when a (caller-filtered) active sell is already resting", () => {
+    expect(
+      evalBackstop({
+        market: market({
+          endDate: endDateAt(HOUR_MS),
+          bestBid: 0.03,
+          bestAsk: 0.05,
+          midPrice: 0.04,
+        }),
+        position: position({ avgEntryPrice: 0.03 }),
+        hasActiveSell: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("is false when the bid is below the qualifying-bid floor", () => {
+    expect(
+      evalBackstop({
+        market: market({
+          endDate: endDateAt(HOUR_MS),
+          bestBid: 0.009,
+          bestAsk: 0.05,
+          midPrice: 0.03,
+        }),
+        position: position({ avgEntryPrice: 0.03 }),
+      }),
+    ).toBe(false);
+  });
+
+  it("is false when the bid qualifies but sits below avg entry and salvage (Mode B) is off", () => {
+    expect(
+      evalBackstop({
+        market: market({
+          endDate: endDateAt(HOUR_MS),
+          bestBid: 0.02,
+          bestAsk: 0.05,
+          midPrice: 0.035,
+        }),
+        position: position({ avgEntryPrice: 0.03 }),
+      }),
+    ).toBe(false);
   });
 });
