@@ -5306,7 +5306,13 @@ function parseGateEntry(raw: unknown, issues: string[]): GateEntryPolicy {
   }
   const obj = raw as Record<string, unknown>;
 
-  const mode = enumOr(obj.mode, GATE_ENTRY_MODES, DEFAULT_GATE_ENTRY.mode, issues, "gateEntry.mode");
+  const mode = enumOr(
+    obj.mode,
+    GATE_ENTRY_MODES,
+    DEFAULT_GATE_ENTRY.mode,
+    issues,
+    "gateEntry.mode",
+  );
   const enabled = booleanOr(obj.enabled, DEFAULT_GATE_ENTRY.enabled, issues, "gateEntry.enabled");
   const minLifespanDays = clampedNumber(
     obj.minLifespanDays,

@@ -186,7 +186,9 @@ describe("InventoryHandler — entry lane provenance (Phase 3 plumbing)", () => 
   it("stamps entryLane='GATE' on a new position when the first fill's decisionRuleId is GATE_ENTRY_RULE_ID", () => {
     const { handler, positionRepo } = makeHandler();
 
-    handler.applyFill(makeFill({ fillId: createFillId("fill-gate"), decisionRuleId: GATE_ENTRY_RULE_ID }));
+    handler.applyFill(
+      makeFill({ fillId: createFillId("fill-gate"), decisionRuleId: GATE_ENTRY_RULE_ID }),
+    );
 
     const saved = (positionRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
     expect(saved.entryLane).toBe("GATE");
@@ -207,12 +209,14 @@ describe("InventoryHandler — entry lane provenance (Phase 3 plumbing)", () => 
     const { handler, positionRepo } = makeHandler();
 
     handler.applyFill(makeFill({ fillId: createFillId("fill-legacy"), decisionRuleId: "D5" }));
-    const savedKnownRule = (positionRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
+    const savedKnownRule = (positionRepo.save as ReturnType<typeof vi.fn>).mock
+      .calls[0]![0] as Position;
     expect(savedKnownRule.entryLane).toBeNull();
 
     const { handler: handler2, positionRepo: positionRepo2 } = makeHandler();
     handler2.applyFill(makeFill({ fillId: createFillId("fill-absent") }));
-    const savedAbsent = (positionRepo2.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
+    const savedAbsent = (positionRepo2.save as ReturnType<typeof vi.fn>).mock
+      .calls[0]![0] as Position;
     expect(savedAbsent.entryLane).toBeNull();
   });
 
@@ -240,7 +244,12 @@ describe("InventoryHandler — entry lane provenance (Phase 3 plumbing)", () => 
     // Scale-in fill carries a different (or absent) decisionRuleId — addToPosition
     // spreads the existing position, so the durable first-fill lane must survive.
     handler.applyFill(
-      makeFill({ fillId: createFillId("fill-gate-scalein"), size: 5, sizeUsdc: 2, decisionRuleId: null }),
+      makeFill({
+        fillId: createFillId("fill-gate-scalein"),
+        size: 5,
+        sizeUsdc: 2,
+        decisionRuleId: null,
+      }),
     );
 
     const saved = (positionRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;

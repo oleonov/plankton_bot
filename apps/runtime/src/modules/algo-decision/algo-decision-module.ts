@@ -1947,7 +1947,9 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (!repo) return false;
     return repo
       .findOpen()
-      .some((order) => order.tokenId === tokenId && order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID);
+      .some(
+        (order) => order.tokenId === tokenId && order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID,
+      );
   }
 
   private async resolveContinuationFactsForPlanner(

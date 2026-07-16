@@ -1087,7 +1087,9 @@ describe("runStartupPositionAdoption", () => {
         gateway: {
           getFills: vi
             .fn()
-            .mockResolvedValue([makeExchangeFill({ orderId: "ex-gate", clientOrderId: "plk_gate" })]),
+            .mockResolvedValue([
+              makeExchangeFill({ orderId: "ex-gate", clientOrderId: "plk_gate" }),
+            ]),
         },
         marketRepo,
         orderRepo,

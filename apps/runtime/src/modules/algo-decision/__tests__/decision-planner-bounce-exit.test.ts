@@ -330,7 +330,9 @@ describe("bounce-exit SELL branch (decision-planner) — non-GATE lanes untouche
   // midPrice 0.085 → profitRatio 1.7, well above the applicable R66 threshold),
   // reused here to prove entryLane gates bounce-exit strictly: D8 must own the
   // SELL regardless of bounceExit being enabled and whitelisted.
-  function profitableLegInput(overrides: Partial<DecisionPlanningInput> = {}): DecisionPlanningInput {
+  function profitableLegInput(
+    overrides: Partial<DecisionPlanningInput> = {},
+  ): DecisionPlanningInput {
     return input({
       legState: leg({ buyCount: 1, cumulativeBuySize: 100, cumulativeBuyNotional: 5 }),
       position: position({ avgEntryPrice: 0.05, size: 100 }),
@@ -344,7 +346,9 @@ describe("bounce-exit SELL branch (decision-planner) — non-GATE lanes untouche
 
   it("does not touch an R23-lane position at +25.7%+ gain — D8 owns it", () => {
     const result = evaluateDecisionPlan(
-      profitableLegInput({ position: position({ avgEntryPrice: 0.05, size: 100, entryLane: "R23" }) }),
+      profitableLegInput({
+        position: position({ avgEntryPrice: 0.05, size: 100, entryLane: "R23" }),
+      }),
     );
     expect(result.type).toBe("signal");
     if (result.type !== "signal") return;
@@ -355,7 +359,9 @@ describe("bounce-exit SELL branch (decision-planner) — non-GATE lanes untouche
 
   it("does not touch a null-lane (legacy) position at +25.7%+ gain — D8 owns it", () => {
     const result = evaluateDecisionPlan(
-      profitableLegInput({ position: position({ avgEntryPrice: 0.05, size: 100, entryLane: null }) }),
+      profitableLegInput({
+        position: position({ avgEntryPrice: 0.05, size: 100, entryLane: null }),
+      }),
     );
     expect(result.type).toBe("signal");
     if (result.type !== "signal") return;

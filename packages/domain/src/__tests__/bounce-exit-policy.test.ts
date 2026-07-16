@@ -99,9 +99,7 @@ describe("bounceExit — bounds", () => {
   });
 
   it("accepts a valid targetGainPct override", () => {
-    const result = parseExecutionPolicyJson(
-      JSON.stringify({ bounceExit: { targetGainPct: 0.3 } }),
-    );
+    const result = parseExecutionPolicyJson(JSON.stringify({ bounceExit: { targetGainPct: 0.3 } }));
     expect(result.issues).toEqual([]);
     expect(result.policy.bounceExit.targetGainPct).toBe(0.3);
   });

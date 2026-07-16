@@ -1753,7 +1753,8 @@ function buildSignalDraft(args: {
   // as the GATE fill lands"), and the timeout must never be delayed by an
   // unrelated recent buy elsewhere.
   const isBounceExitRule =
-    decision.ruleId === BOUNCE_EXIT_TARGET_RULE_ID || decision.ruleId === BOUNCE_EXIT_TIMEOUT_RULE_ID;
+    decision.ruleId === BOUNCE_EXIT_TARGET_RULE_ID ||
+    decision.ruleId === BOUNCE_EXIT_TIMEOUT_RULE_ID;
   if (side === "sell" && input.postBuyCooldown && !isBounceExitRule) {
     args.suppressions.push({
       tokenId: market.tokenId,

@@ -1279,7 +1279,11 @@ export class ExecutionModule implements RuntimeModule {
 
   private getReservationSnapshot(cmd?: PlaceOrderCommand) {
     const openOrders = this.excludeBounceTargetBeingReplaced(this.deps.orderRepo.findOpen(), cmd);
-    return buildReservationSnapshot(openOrders, this.deps.fillRepo, this.pendingReservations.values());
+    return buildReservationSnapshot(
+      openOrders,
+      this.deps.fillRepo,
+      this.pendingReservations.values(),
+    );
   }
 
   /**

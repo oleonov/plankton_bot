@@ -90,7 +90,10 @@ describe("evaluateGateEntryEligibility — custom policy overrides", () => {
   it("uses the injected policy thresholds, not the defaults", () => {
     const loosePolicy = { ...policy, minLifespanDays: 1, minPrice: 0, maxPrice: 1 };
     expect(
-      evaluateGateEntryEligibility(loosePolicy, market({ endDate: daysAfterCreated(2), midPrice: 0.9 })),
+      evaluateGateEntryEligibility(
+        loosePolicy,
+        market({ endDate: daysAfterCreated(2), midPrice: 0.9 }),
+      ),
     ).toBe(true);
     // Same market fails under the stricter default policy (midPrice 0.9 > maxPrice 0.15).
     expect(
@@ -115,7 +118,10 @@ function bounceCtx(overrides: Partial<BounceExitContext> = {}): BounceExitContex
 
 describe("evaluateBounceExit — maker_target on a fresh fill", () => {
   it("returns maker_target at entry x 1.257, ceil-snapped to tick, when no target is resting", () => {
-    const result = evaluateBounceExit(bounceCtx({ avgBuyPrice: 0.1, holdSeconds: 0 }), bounceExitPolicy);
+    const result = evaluateBounceExit(
+      bounceCtx({ avgBuyPrice: 0.1, holdSeconds: 0 }),
+      bounceExitPolicy,
+    );
     expect(result).toEqual({ intent: "maker_target", targetPx: 0.13 });
   });
 

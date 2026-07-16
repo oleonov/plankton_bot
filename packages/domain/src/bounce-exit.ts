@@ -48,7 +48,8 @@ export function evaluateGateEntryEligibility(
   market: GateEntryMarketInput,
 ): boolean {
   const lifespanDays = computeLifespanDays(market.endDate, market.gammaCreatedAt);
-  const midPrice = market.midPrice != null && Number.isFinite(market.midPrice) ? market.midPrice : null;
+  const midPrice =
+    market.midPrice != null && Number.isFinite(market.midPrice) ? market.midPrice : null;
   if (lifespanDays == null || midPrice == null) return false;
 
   return (

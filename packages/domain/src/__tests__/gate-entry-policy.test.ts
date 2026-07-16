@@ -92,9 +92,7 @@ describe("gateEntry — enabled", () => {
 
 describe("gateEntry — bounds", () => {
   it("clamps minLifespanDays below min to default", () => {
-    const result = parseExecutionPolicyJson(
-      JSON.stringify({ gateEntry: { minLifespanDays: -1 } }),
-    );
+    const result = parseExecutionPolicyJson(JSON.stringify({ gateEntry: { minLifespanDays: -1 } }));
     expect(result.issues.some((i) => i.includes("gateEntry.minLifespanDays"))).toBe(true);
     expect(result.policy.gateEntry.minLifespanDays).toBe(DEFAULT_GATE_ENTRY.minLifespanDays);
   });
@@ -118,7 +116,9 @@ describe("gateEntry — bounds", () => {
   });
 
   it("clamps microMaxOrderUsdc below min to default", () => {
-    const result = parseExecutionPolicyJson(JSON.stringify({ gateEntry: { microMaxOrderUsdc: 0 } }));
+    const result = parseExecutionPolicyJson(
+      JSON.stringify({ gateEntry: { microMaxOrderUsdc: 0 } }),
+    );
     expect(result.issues.some((i) => i.includes("gateEntry.microMaxOrderUsdc"))).toBe(true);
     expect(result.policy.gateEntry.microMaxOrderUsdc).toBe(DEFAULT_GATE_ENTRY.microMaxOrderUsdc);
   });

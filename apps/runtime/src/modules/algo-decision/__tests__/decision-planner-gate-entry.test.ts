@@ -204,14 +204,18 @@ describe("GATE live first-entry branch (decision-planner)", () => {
 
   it("SUPPRESSES (no draft) when gateEntry.enabled is false", () => {
     const result = evaluateDecisionPlan(
-      input({ executionPolicy: executionPolicy({ gateEntry: { ...ENABLED_GATE_ENTRY, enabled: false } }) }),
+      input({
+        executionPolicy: executionPolicy({ gateEntry: { ...ENABLED_GATE_ENTRY, enabled: false } }),
+      }),
     );
     expect(result.type).toBe("none");
   });
 
   it("SUPPRESSES (no draft) when gateEntry.mode is 'off'", () => {
     const result = evaluateDecisionPlan(
-      input({ executionPolicy: executionPolicy({ gateEntry: { ...ENABLED_GATE_ENTRY, mode: "off" } }) }),
+      input({
+        executionPolicy: executionPolicy({ gateEntry: { ...ENABLED_GATE_ENTRY, mode: "off" } }),
+      }),
     );
     expect(result.type).toBe("none");
   });
@@ -268,7 +272,8 @@ describe("GATE live first-entry branch (decision-planner)", () => {
 
   it("does not fire GATE for an add/scale-in candidate (legState present) — first-entry only", () => {
     const result = evaluateDecisionPlan(input({ legState: leg(), selectedForEntry: false }));
-    const isGateSignal = result.type === "signal" && result.signal.decisionRuleId === GATE_ENTRY_RULE_ID;
+    const isGateSignal =
+      result.type === "signal" && result.signal.decisionRuleId === GATE_ENTRY_RULE_ID;
     expect(isGateSignal).toBe(false);
   });
 });

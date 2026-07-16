@@ -263,9 +263,13 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TARGET maker command", () => {
       suggestedSizeUsdc: 50 * targetPrice,
     });
     const bounceExit = { ...DEFAULT_EXECUTION_POLICY.bounceExit, mode: "micro_live" as const };
-    const { placed, skipped } = await runBridge(signal, { bounceExit }, {
-      marketOverrides: { bestBid: 0.15, bestAsk: 0.3, midPrice: 0.2 },
-    });
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      {
+        marketOverrides: { bestBid: 0.15, bestAsk: 0.3, midPrice: 0.2 },
+      },
+    );
 
     expect(skipped).toHaveLength(0);
     expect(placed).toHaveLength(1);
@@ -530,7 +534,11 @@ describe("ExecutionModule — GATE BUY micro cap", () => {
   it("rejects a GATE BUY above microMaxOrderUsdc when mode=micro_live", async () => {
     const { bus, gateway, mod } = makeExecModule(() => ({
       ...DEFAULT_EXECUTION_POLICY,
-      gateEntry: { ...DEFAULT_EXECUTION_POLICY.gateEntry, mode: "micro_live", microMaxOrderUsdc: 2 },
+      gateEntry: {
+        ...DEFAULT_EXECUTION_POLICY.gateEntry,
+        mode: "micro_live",
+        microMaxOrderUsdc: 2,
+      },
     }));
     await mod.start();
 
@@ -555,7 +563,11 @@ describe("ExecutionModule — GATE BUY micro cap", () => {
   it("passes a GATE BUY at/under microMaxOrderUsdc through to the gateway", async () => {
     const { bus, gateway, mod } = makeExecModule(() => ({
       ...DEFAULT_EXECUTION_POLICY,
-      gateEntry: { ...DEFAULT_EXECUTION_POLICY.gateEntry, mode: "micro_live", microMaxOrderUsdc: 2 },
+      gateEntry: {
+        ...DEFAULT_EXECUTION_POLICY.gateEntry,
+        mode: "micro_live",
+        microMaxOrderUsdc: 2,
+      },
     }));
     await mod.start();
 
