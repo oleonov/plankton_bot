@@ -979,7 +979,16 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
     ? (input.now - new Date(legState.firstTradeAt).getTime()) / 1000
     : null;
   const ctx = { state, price, timeSinceLastSeconds, buyCount, holdDurationSeconds };
-  const liveness = isAlive(market);
+  // GATE-whitelist liveness override (docs/plans/2026-07-17-gate-isalive-plankton-
+  // whitelist.md): scoped to the pure-GATE bypass flat-first-entry path only, so only
+  // GATE_ENTRY can result and no existing-position path is touched. `no_bid` still
+  // blocks (handled inside isAlive; the override needs a live bestBid).
+  const gateLivenessOverride =
+    input.gateBypass === true &&
+    !input.selectedForEntry &&
+    !legState &&
+    !isOpenPosition(input.position);
+  const liveness = isAlive(market, { gateWhitelistOverride: gateLivenessOverride });
   if (!liveness.healthy) {
     recordLivenessMetric(metrics, liveness.reasons, ctx, input.decisionRules);
     suppressions.push({

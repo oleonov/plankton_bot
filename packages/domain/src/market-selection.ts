@@ -299,6 +299,15 @@ export function evaluateContinuation(legTradeCount: number, firstTradePrice: num
 }
 
 /**
+ * GATE-lane liveness override (docs/plans/2026-07-17-gate-isalive-plankton-whitelist.md).
+ * Opt-in on `isAlive` / `canPlaceBuyOrder` / `canPlaceBuyOrderForMarket`; threaded from
+ * the GATE-whitelist flat-first-entry runtime paths only. Absent = strict default.
+ */
+export interface GateLivenessOpts {
+  readonly gateWhitelistOverride?: boolean;
+}
+
+/**
  * Binary hard-liveness gate: can this market physically accept an order right now?
  *
  * All four fields fail CLOSED on null/false — absent affirmative signal is
@@ -309,11 +318,23 @@ export function evaluateContinuation(legTradeCount: number, firstTradePrice: num
  * Soft-quality checks (liquidityClob, competitive, spread thresholds) are
  * intentionally excluded — not part of 06.
  */
-export function isAlive(market: HealthInput): HealthResult {
+export function isAlive(market: HealthInput, opts?: GateLivenessOpts): HealthResult {
   const reasons: HealthFailReason[] = [];
   if (market.acceptingOrders !== true) reasons.push("not_accepting_orders");
   if (market.enableOrderBook !== true) reasons.push("order_book_disabled");
   if (market.bestBid == null) reasons.push("no_bid");
+  // GATE-whitelist liveness override (docs/plans/2026-07-17-gate-isalive-plankton-
+  // whitelist.md): thin-book GATE markets carry stale `acceptingOrders`/`enableOrderBook`
+  // = false in the runtime even when the CLOB reports them live. When a live `bestBid`
+  // is present, drop ONLY those two metadata reasons for the GATE lane — `no_bid` is
+  // NEVER dropped (an empty/one-sided book still blocks), and the exchange remains the
+  // real accepting-orders gate. Default (no opts) = unchanged behaviour.
+  if (opts?.gateWhitelistOverride === true && market.bestBid != null) {
+    const filtered = reasons.filter(
+      (r) => r !== "not_accepting_orders" && r !== "order_book_disabled",
+    );
+    return { healthy: filtered.length === 0, reasons: filtered };
+  }
   return { healthy: reasons.length === 0, reasons };
 }
 
@@ -357,7 +378,11 @@ export interface BuyPlacementResult {
  * Resolved-market blocking is handled separately by `MarketResolutionTracker`
  * because resolution arrives as an event, not a NormalizedMarket field.
  */
-export function canPlaceBuyOrder(market: BuyPlacementInput, nowMs: number): BuyPlacementResult {
+export function canPlaceBuyOrder(
+  market: BuyPlacementInput,
+  nowMs: number,
+  opts?: GateLivenessOpts,
+): BuyPlacementResult {
   const reasons: BuyPlacementBlockReason[] = [];
   if (market.active !== true) reasons.push("market_inactive");
   if (market.tradable !== true) reasons.push("market_not_tradable");
@@ -379,7 +404,7 @@ export function canPlaceBuyOrder(market: BuyPlacementInput, nowMs: number): BuyP
       reasons.push("effective_resolution_short_runway");
     }
   }
-  const liveness = isAlive(market);
+  const liveness = isAlive(market, opts);
   if (!liveness.healthy) reasons.push("market_not_alive");
   return { allowed: reasons.length === 0, reasons };
 }
@@ -395,6 +420,7 @@ export function canPlaceBuyOrderForMarket(
     appliesToBuy?: boolean | null;
     minRunwayHours?: number | null;
   },
+  opts?: GateLivenessOpts,
 ): BuyPlacementResult {
   return canPlaceBuyOrder(
     {
@@ -411,5 +437,6 @@ export function canPlaceBuyOrderForMarket(
       effectiveResolutionMinRunwayHours: effectiveResolution?.minRunwayHours ?? null,
     },
     nowMs,
+    opts,
   );
 }

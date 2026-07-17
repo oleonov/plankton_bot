@@ -5,6 +5,7 @@ import {
   createOrderId,
   createTokenId,
   SignalReason,
+  GATE_ENTRY_RULE_ID,
   type ConditionId,
   type LegState,
   type LegStateRepository,
@@ -6106,6 +6107,8 @@ describe("ADR-015 telemetry flags", () => {
       tracker?: ReturnType<typeof makeStubTracker>;
       market?: Partial<NormalizedMarket>;
       effectiveResolution?: SignalToOrderBridgeDeps["effectiveResolution"];
+      policy?: SignalToOrderBridgeDeps["policy"];
+      signal?: Partial<Signal>;
       now?: number;
       side?: "buy" | "sell";
     }) {
@@ -6116,6 +6119,7 @@ describe("ADR-015 telemetry flags", () => {
         liveLiteGuard: { getWalletMode: () => "relayer" } as never,
         ...(opts.tracker ? { resolutionTracker: opts.tracker as any } : {}),
         ...(opts.effectiveResolution ? { effectiveResolution: opts.effectiveResolution } : {}),
+        ...(opts.policy ? { policy: opts.policy } : {}),
         ...(opts.now != null ? { now: () => opts.now! } : {}),
       });
       bridge.subscribe();
@@ -6134,7 +6138,7 @@ describe("ADR-015 telemetry flags", () => {
       });
 
       await bus.publish("SignalApproved", {
-        signal: { ...makeSignal(), side: opts.side ?? "buy" },
+        signal: { ...makeSignal(), side: opts.side ?? "buy", ...opts.signal },
         market: makeMarket(opts.market),
         approvedAt: Date.now(),
       });
@@ -6154,6 +6158,62 @@ describe("ADR-015 telemetry flags", () => {
       expect(skipped).toHaveLength(1);
       expect(skipped[0]!.stage).toBe("marketability");
       expect(skipped[0]!.reasons).toEqual(["market_ended"]);
+    });
+
+    // docs/plans/2026-07-17-gate-isalive-plankton-whitelist.md — GATE-whitelist liveness
+    // override at the signal-to-order bridge layer (both admission + embedded isAlive).
+    const gateEnabledPolicy = () => ({
+      ...DEFAULT_EXECUTION_POLICY,
+      gateEntry: {
+        enabled: true,
+        mode: "micro_live" as const,
+        minLifespanDays: 30,
+        minPrice: 0.01,
+        maxPrice: 0.15,
+        whitelistConditionIds: ["cond-1"],
+        microMaxOrderUsdc: 2,
+      },
+    });
+    const staleMetadata = { acceptingOrders: false, enableOrderBook: false };
+
+    it("GATE override: a GATE_ENTRY BUY on a stale whitelisted market passes BOTH liveness gates (marketability + hard-liveness) and is placed", async () => {
+      const { placed, skipped } = await runApproved({
+        market: staleMetadata,
+        signal: { decisionRuleId: GATE_ENTRY_RULE_ID },
+        policy: gateEnabledPolicy,
+      });
+      // Neither liveness site (evaluateBuyAdmission = "marketability", embedded isAlive =
+      // "hard-liveness") may block it — catches a missed override at either site.
+      const livenessSkip = skipped.find(
+        (s) => s.stage === "marketability" || s.stage === "hard-liveness",
+      );
+      expect(livenessSkip).toBeUndefined();
+      expect(placed).toHaveLength(1);
+    });
+
+    it("no override: a NON-GATE BUY on the same stale market is skipped at marketability/market_not_alive", async () => {
+      const { placed, skipped } = await runApproved({
+        market: staleMetadata,
+        signal: { decisionRuleId: "R23_DIP_TRIGGER" },
+        policy: gateEnabledPolicy,
+      });
+      expect(placed).toHaveLength(0);
+      const marketability = skipped.find((s) => s.stage === "marketability");
+      expect(marketability?.reasons).toContain("market_not_alive");
+    });
+
+    it("no override: a non-whitelisted GATE_ENTRY BUY on the stale market is still blocked (market_not_alive)", async () => {
+      const { placed, skipped } = await runApproved({
+        market: staleMetadata,
+        signal: { decisionRuleId: GATE_ENTRY_RULE_ID },
+        policy: () => ({
+          ...gateEnabledPolicy(),
+          gateEntry: { ...gateEnabledPolicy().gateEntry, whitelistConditionIds: ["other-cond"] },
+        }),
+      });
+      expect(placed).toHaveLength(0);
+      const marketability = skipped.find((s) => s.stage === "marketability");
+      expect(marketability?.reasons).toContain("market_not_alive");
     });
 
     it("skips BUY when effective US equity runway is below 24h", async () => {

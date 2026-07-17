@@ -40,6 +40,8 @@ import {
   evaluatePostSellBuybackGuard,
   recordStageDuration,
   roundToTick,
+  isGateWhitelisted,
+  GATE_ENTRY_RULE_ID,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
@@ -397,7 +399,10 @@ export class RiskInventoryModule implements RuntimeModule {
    * rejected with `resolution_tracker_unavailable` rather than risking a
    * placement on a market that may be silently resolved.
    */
-  private evaluateBuyAdmission(market: RuntimeEventMap["SignalProduced"]["market"]): string | null {
+  private evaluateBuyAdmission(
+    market: RuntimeEventMap["SignalProduced"]["market"],
+    gateWhitelistOverride: boolean,
+  ): string | null {
     const tracker = this.deps.resolutionTracker;
     if (tracker) {
       if (!tracker.healthy()) return "resolution_tracker_unavailable";
@@ -407,6 +412,7 @@ export class RiskInventoryModule implements RuntimeModule {
       market,
       this.now(),
       this.deps.effectiveResolution?.toBuyPlacementFields(market),
+      { gateWhitelistOverride },
     );
     if (!placement.allowed) return placement.reasons[0] ?? "market_not_alive";
     return null;
@@ -543,7 +549,16 @@ export class RiskInventoryModule implements RuntimeModule {
       // BUYs on markets that have already ended, gone inactive, lost tradability,
       // resolved, or aren't physically capable of accepting an order. SELL and
       // REDEEM signals bypass this check entirely.
-      const buyBlock = signal.side === "buy" ? this.evaluateBuyAdmission(market) : null;
+      // GATE-whitelist liveness override (docs/plans/2026-07-17-gate-isalive-plankton-
+      // whitelist.md): only a GATE_ENTRY first-entry BUY on a whitelisted market with a
+      // live bestBid may relax the stale acceptingOrders/enableOrderBook rejection.
+      const gateWhitelistOverride =
+        signal.side === "buy" &&
+        signal.decisionRuleId === GATE_ENTRY_RULE_ID &&
+        market.bestBid != null &&
+        isGateWhitelisted(this.deps.executionPolicy?.().gateEntry, market.conditionId);
+      const buyBlock =
+        signal.side === "buy" ? this.evaluateBuyAdmission(market, gateWhitelistOverride) : null;
       if (buyBlock) {
         this.signalsRejectedCount++;
         this.deps.signalPathTelemetry?.recordRejected(signal.signalId, buyBlock);

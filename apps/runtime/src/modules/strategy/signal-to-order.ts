@@ -55,6 +55,7 @@ import {
   GATE_ENTRY_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
   isBounceForceExit,
+  isGateWhitelisted,
 } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
 import { buildClientOrderId, buildPartialExitClientOrderId } from "@krabs/domain/node";
@@ -343,7 +344,10 @@ export class SignalToOrderBridge {
    * (tracker availability → resolution → market lifecycle), same reason
    * codes. Returns null when the BUY is admitted.
    */
-  private evaluateBuyAdmission(market: NormalizedMarket): string | null {
+  private evaluateBuyAdmission(
+    market: NormalizedMarket,
+    gateWhitelistOverride: boolean,
+  ): string | null {
     const tracker = this.deps.resolutionTracker;
     if (tracker) {
       if (!tracker.healthy()) return "resolution_tracker_unavailable";
@@ -353,6 +357,7 @@ export class SignalToOrderBridge {
       market,
       this.now(),
       this.deps.effectiveResolution?.toBuyPlacementFields(market),
+      { gateWhitelistOverride },
     );
     if (!placement.allowed) return placement.reasons[0] ?? "market_not_alive";
     return null;
@@ -689,6 +694,17 @@ export class SignalToOrderBridge {
         return;
       }
 
+      // GATE-whitelist liveness override (docs/plans/2026-07-17-gate-isalive-plankton-
+      // whitelist.md): a GATE_ENTRY first-entry BUY on a whitelisted market with a live
+      // bestBid may relax the stale acceptingOrders/enableOrderBook rejection at BOTH the
+      // admission gate below AND the embedded-liveness check. no_bid still blocks (enforced
+      // inside canPlaceBuyOrder / isAlive). Non-GATE / non-whitelist / SELLs = strict.
+      const gateWhitelistOverride =
+        signal.side === "buy" &&
+        signal.decisionRuleId === GATE_ENTRY_RULE_ID &&
+        baseMarket.bestBid != null &&
+        isGateWhitelisted(policy.gateEntry, baseMarket.conditionId);
+
       // BUY-side admission guard (defense-in-depth). RiskInventoryModule already
       // ran the same check upstream, but the bridge sees the freshest snapshot
       // (post candidate-book merge) and the resolution tracker may have flipped
@@ -702,7 +718,7 @@ export class SignalToOrderBridge {
         const cachedMarket = this.marketCache.get(String(signal.tokenId));
         const admissionMarket = cachedMarket ?? baseMarket;
         const cacheStatus = cachedMarket ? "fresh" : "embedded";
-        const buyBlock = this.evaluateBuyAdmission(admissionMarket);
+        const buyBlock = this.evaluateBuyAdmission(admissionMarket, gateWhitelistOverride);
         if (buyBlock) {
           this.log.info(
             {
@@ -731,12 +747,15 @@ export class SignalToOrderBridge {
       // Hard-liveness on the embedded snapshot. Same function, same semantics as
       // algo-decision-module.ts:389 — eliminates the residual tail where the
       // book transitioned to `no_bid` in the gap between pre-entry and bridge.
-      const embeddedLiveness = isAlive({
-        acceptingOrders: baseMarket.acceptingOrders,
-        enableOrderBook: baseMarket.enableOrderBook,
-        bestBid: baseMarket.bestBid,
-        bestAsk: baseMarket.bestAsk,
-      });
+      const embeddedLiveness = isAlive(
+        {
+          acceptingOrders: baseMarket.acceptingOrders,
+          enableOrderBook: baseMarket.enableOrderBook,
+          bestBid: baseMarket.bestBid,
+          bestAsk: baseMarket.bestAsk,
+        },
+        { gateWhitelistOverride },
+      );
       if (!embeddedLiveness.healthy) {
         const onlyExpectedFlags = embeddedLiveness.reasons.every(
           (r) => r === "not_accepting_orders" || r === "order_book_disabled",

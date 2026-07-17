@@ -323,3 +323,44 @@ describe("GATE selection-bypass path (decision-planner)", () => {
     expect(result.suppressions.some((s) => s.reasonCode === "gate-not-eligible")).toBe(true);
   });
 });
+
+// docs/plans/2026-07-17-gate-isalive-plankton-whitelist.md — the GATE-whitelist liveness
+// override: a gateBypass flat-first-entry market whose runtime carries stale
+// acceptingOrders/enableOrderBook=false (CLOB says live) but a live bestBid must reach the
+// GATE lane; no_bid still blocks; a non-gateBypass market is NOT relaxed.
+describe("GATE-whitelist liveness override (decision-planner)", () => {
+  it("enters a gateBypass market with stale acceptingOrders/enableOrderBook=false + live bestBid", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        gateBypass: true,
+        market: market({ acceptingOrders: false, enableOrderBook: false }),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe(GATE_ENTRY_RULE_ID);
+  });
+
+  it("still blocks (market-not-live) a gateBypass market with no_bid, even under the override", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        gateBypass: true,
+        market: market({ acceptingOrders: false, enableOrderBook: false, bestBid: null }),
+      }),
+    );
+    expect(result.type).toBe("none");
+  });
+
+  it("does NOT relax isAlive for a non-gateBypass (selectedForEntry) market — stays market-not-live", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: true,
+        gateBypass: false,
+        market: market({ acceptingOrders: false, enableOrderBook: false }),
+      }),
+    );
+    expect(result.type).toBe("none");
+  });
+});

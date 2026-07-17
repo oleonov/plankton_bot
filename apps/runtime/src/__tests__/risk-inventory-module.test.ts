@@ -8,6 +8,7 @@ import {
   createConditionId,
   createBotRunId,
   DEFAULT_EXECUTION_POLICY,
+  GATE_ENTRY_RULE_ID,
 } from "@krabs/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -853,11 +854,13 @@ describe("RiskInventoryModule", () => {
     effectiveResolution?: ConstructorParameters<
       typeof RiskInventoryModule
     >[0]["effectiveResolution"];
+    executionPolicy?: ConstructorParameters<typeof RiskInventoryModule>[0]["executionPolicy"];
     now?: number;
   }) {
     mod = createModule(undefined, {
       ...(opts.tracker ? { resolutionTracker: opts.tracker as any } : {}),
       ...(opts.effectiveResolution ? { effectiveResolution: opts.effectiveResolution } : {}),
+      ...(opts.executionPolicy ? { executionPolicy: opts.executionPolicy } : {}),
       ...(opts.now != null ? { now: () => opts.now! } : {}),
     });
     await mod.start();
@@ -943,6 +946,65 @@ describe("RiskInventoryModule", () => {
 
   it("rejects BUY with reason market_not_alive when bestBid is null", async () => {
     const { approved, rejected } = await runBuyAdmission({ market: { bestBid: null } });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toBe("market_not_alive");
+  });
+
+  // docs/plans/2026-07-17-gate-isalive-plankton-whitelist.md — GATE-whitelist liveness
+  // override at the RiskInventory layer.
+  const gateEnabledPolicy = () => ({
+    ...DEFAULT_EXECUTION_POLICY,
+    gateEntry: {
+      enabled: true,
+      mode: "micro_live" as const,
+      minLifespanDays: 30,
+      minPrice: 0.01,
+      maxPrice: 0.15,
+      whitelistConditionIds: [String(COND_ID)],
+      microMaxOrderUsdc: 2,
+    },
+  });
+  const staleMetadataMarket = { acceptingOrders: false, enableOrderBook: false };
+
+  it("GATE override: ADMITS a GATE_ENTRY BUY on a whitelisted market with stale accepting/enable=false + bestBid", async () => {
+    const { approved, rejected } = await runBuyAdmission({
+      market: staleMetadataMarket,
+      signal: { decisionRuleId: GATE_ENTRY_RULE_ID },
+      executionPolicy: gateEnabledPolicy,
+    });
+    expect(rejected).toHaveLength(0);
+    expect(approved).toHaveLength(1);
+  });
+
+  it("no override: REJECTS a NON-GATE BUY on the same stale market (market_not_alive)", async () => {
+    const { approved, rejected } = await runBuyAdmission({
+      market: staleMetadataMarket,
+      signal: { decisionRuleId: "R23_DIP_TRIGGER" },
+      executionPolicy: gateEnabledPolicy,
+    });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toBe("market_not_alive");
+  });
+
+  it("no override: REJECTS a GATE_ENTRY BUY on the stale market when bestBid is null (no_bid)", async () => {
+    const { approved, rejected } = await runBuyAdmission({
+      market: { ...staleMetadataMarket, bestBid: null },
+      signal: { decisionRuleId: GATE_ENTRY_RULE_ID },
+      executionPolicy: gateEnabledPolicy,
+    });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toBe("market_not_alive");
+  });
+
+  it("no override: REJECTS a GATE_ENTRY BUY whose conditionId is NOT whitelisted", async () => {
+    const { approved, rejected } = await runBuyAdmission({
+      market: staleMetadataMarket,
+      signal: { decisionRuleId: GATE_ENTRY_RULE_ID },
+      executionPolicy: () => ({
+        ...gateEnabledPolicy(),
+        gateEntry: { ...gateEnabledPolicy().gateEntry, whitelistConditionIds: ["other-cond"] },
+      }),
+    });
     expect(approved).toHaveLength(0);
     expect(rejected[0].reason).toBe("market_not_alive");
   });

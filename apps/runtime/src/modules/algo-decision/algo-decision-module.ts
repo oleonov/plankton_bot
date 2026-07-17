@@ -1687,39 +1687,6 @@ export class AlgoDecisionModule implements RuntimeModule {
       market.tradable === true &&
       isGateWhitelisted(executionPolicy?.gateEntry, market.conditionId) &&
       (this.deps.selectedMarketCache.isGateBypassEligible?.(tokenId) ?? false);
-    // TEMP diagnostic (docs/plans/2026-07-17-gate-entry-debug-log.md): localize why
-    // the GATE selection-bypass produces no live entries. One log line per evaluation
-    // of a whitelisted conditionId (the 5 curated markets — tiny volume), emitted
-    // BEFORE the entry guard so it fires even when `gateBypass` is false. Remove after
-    // diagnosis. No behavior change.
-    if (
-      market != null &&
-      executionPolicy?.gateEntry?.whitelistConditionIds?.includes(market.conditionId)
-    ) {
-      this.log.info(
-        {
-          tokenId: String(tokenId),
-          conditionId: market.conditionId,
-          selectedForEntry,
-          gateBypass,
-          isGateBypassEligible:
-            this.deps.selectedMarketCache.isGateBypassEligible?.(tokenId) ?? null,
-          tradable: market.tradable,
-          midPrice: market.midPrice,
-          endDate: market.endDate,
-          gammaCreatedAt: market.gammaCreatedAt,
-          // isAlive() inputs (decision-planner.ts:982 market-not-live gate, which runs
-          // BEFORE the gate-only block) — confirm whether the runtime NormalizedMarket
-          // carries these as true despite the CLOB reporting the market live.
-          acceptingOrders: market.acceptingOrders,
-          enableOrderBook: market.enableOrderBook,
-          bestBid: market.bestBid,
-          hasLeg: legState != null,
-          hasOpenPosition: openPosition != null,
-        },
-        "gate-debug: whitelist decision input",
-      );
-    }
     if (!legState && !selectedForEntry && !openPosition && !gateBypass) return null;
     if (
       this.shouldSkipFlatProbeForActiveMarketCap(

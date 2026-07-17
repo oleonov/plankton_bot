@@ -685,6 +685,43 @@ describe("isAlive", () => {
     };
     expect(isAlive(all).reasons).toEqual(["not_accepting_orders", "order_book_disabled", "no_bid"]);
   });
+
+  // docs/plans/2026-07-17-gate-isalive-plankton-whitelist.md — GATE-whitelist override.
+  describe("gateWhitelistOverride", () => {
+    // Thin-book GATE market: stale metadata false, but a live bestBid is present.
+    const STALE_METADATA: HealthInput = {
+      acceptingOrders: false,
+      enableOrderBook: false,
+      bestBid: 0.05,
+      bestAsk: 0.06,
+    };
+
+    it("drops accepting/orderbook reasons when override + bestBid present", () => {
+      expect(isAlive(STALE_METADATA, { gateWhitelistOverride: true })).toEqual({
+        healthy: true,
+        reasons: [],
+      });
+    });
+
+    it("default (no opts) still blocks the same market", () => {
+      expect(isAlive(STALE_METADATA)).toEqual({
+        healthy: false,
+        reasons: ["not_accepting_orders", "order_book_disabled"],
+      });
+    });
+
+    it("NEVER drops no_bid — an empty book still blocks even with override", () => {
+      const r = isAlive({ ...STALE_METADATA, bestBid: null }, { gateWhitelistOverride: true });
+      expect(r.healthy).toBe(false);
+      expect(r.reasons).toContain("no_bid");
+    });
+
+    it("override=false is byte-identical to the default", () => {
+      expect(isAlive(STALE_METADATA, { gateWhitelistOverride: false })).toEqual(
+        isAlive(STALE_METADATA),
+      );
+    });
+  });
 });
 
 describe("canPlaceBuyOrder", () => {
@@ -702,6 +739,26 @@ describe("canPlaceBuyOrder", () => {
   it("allows BUY on a fully eligible market", () => {
     const r = canPlaceBuyOrder(HEALTHY_LIVE, NOW);
     expect(r).toEqual({ allowed: true, reasons: [] });
+  });
+
+  // docs/plans/2026-07-17-gate-isalive-plankton-whitelist.md — GATE-whitelist override.
+  it("GATE override relaxes market_not_alive (stale accepting/orderbook) when bestBid present", () => {
+    const stale = { ...HEALTHY_LIVE, acceptingOrders: false, enableOrderBook: false };
+    expect(canPlaceBuyOrder(stale, NOW).allowed).toBe(false);
+    expect(canPlaceBuyOrder(stale, NOW).reasons).toContain("market_not_alive");
+    expect(canPlaceBuyOrder(stale, NOW, { gateWhitelistOverride: true })).toEqual({
+      allowed: true,
+      reasons: [],
+    });
+  });
+
+  it("GATE override does NOT relax no_bid or lifecycle blockers", () => {
+    const noBid = { ...HEALTHY_LIVE, acceptingOrders: false, bestBid: null };
+    expect(canPlaceBuyOrder(noBid, NOW, { gateWhitelistOverride: true }).allowed).toBe(false);
+    const inactive = { ...HEALTHY_LIVE, active: false, acceptingOrders: false };
+    const r = canPlaceBuyOrder(inactive, NOW, { gateWhitelistOverride: true });
+    expect(r.allowed).toBe(false);
+    expect(r.reasons).toContain("market_inactive");
   });
 
   it("allows BUY when endDate is null (no expiry)", () => {
