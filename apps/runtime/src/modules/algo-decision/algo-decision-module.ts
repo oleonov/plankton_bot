@@ -1708,6 +1708,12 @@ export class AlgoDecisionModule implements RuntimeModule {
           midPrice: market.midPrice,
           endDate: market.endDate,
           gammaCreatedAt: market.gammaCreatedAt,
+          // isAlive() inputs (decision-planner.ts:982 market-not-live gate, which runs
+          // BEFORE the gate-only block) — confirm whether the runtime NormalizedMarket
+          // carries these as true despite the CLOB reporting the market live.
+          acceptingOrders: market.acceptingOrders,
+          enableOrderBook: market.enableOrderBook,
+          bestBid: market.bestBid,
           hasLeg: legState != null,
           hasOpenPosition: openPosition != null,
         },
