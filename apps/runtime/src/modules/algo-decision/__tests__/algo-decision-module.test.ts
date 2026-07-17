@@ -38,6 +38,7 @@ import type { ConditionId } from "@krabs/domain";
 import {
   BOUNCE_EXIT_TARGET_RULE_ID,
   DEFAULT_EXECUTION_POLICY,
+  GATE_ENTRY_RULE_ID,
   S1_LADDER_RULE_ID,
 } from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
@@ -228,11 +229,16 @@ function createMockAlgoRulesRepo(): AlgoRulesRepository {
   };
 }
 
-function createMockSelectedMarketCache(eligible: string[] = []): SelectedMarketCache {
+function createMockSelectedMarketCache(
+  eligible: string[] = [],
+  gateBypassEligible: string[] = [],
+): SelectedMarketCache {
   const set = new Set(eligible);
+  const bypassSet = new Set(gateBypassEligible);
   return {
     isEligible: vi.fn((tokenId) => set.has(String(tokenId))),
     getEligibleTokenIds: vi.fn(() => eligible.map((id) => createTokenId(id))),
+    isGateBypassEligible: vi.fn((tokenId) => bypassSet.has(String(tokenId))),
   };
 }
 
@@ -1050,6 +1056,80 @@ describe("AlgoDecisionModule", () => {
     // Phase 2.A: payload embeds the NormalizedMarket snapshot observed by the
     // pre-entry hard-liveness gate so the bridge downstream can re-use it.
     expect(signalCalls[0]![1].market).toBe(market);
+
+    await mod.stop();
+  });
+
+  // docs/plans/2026-07-17-gate-entry-selection-bypass.md — end-to-end wiring:
+  // MarketSelectionCache.isGateBypassEligible → createDecisionPlanningInput.gateBypass
+  // → the planner's pure GATE path. A whitelisted market with null live liquidity
+  // (rejected by v5.11, so NOT selectedForEntry) must still enter via GATE only.
+  const gateBypassPolicy = () => ({
+    ...DEFAULT_EXECUTION_POLICY,
+    entryMinMarketAgeSeconds: 0,
+    r23DipTrigger: { enabled: false, dropThresholdRatio: 0.683, windowMs: 86_400_000 },
+    gateEntry: {
+      enabled: true,
+      mode: "micro_live" as const,
+      minLifespanDays: 30,
+      minPrice: 0.01,
+      maxPrice: 0.15,
+      whitelistConditionIds: ["cond-1"],
+      microMaxOrderUsdc: 2,
+    },
+  });
+
+  function gateBypassMarket(tokenId: string): NormalizedMarket {
+    return {
+      ...makeMarket(tokenId, "fam-1", 0.05),
+      // ~151d lifespan ≥ 30d floor; the prod trigger: null live liquidity.
+      gammaCreatedAt: "2026-01-01T00:00:00.000Z",
+      endDate: "2026-06-01T00:00:00.000Z",
+      liquidity: null,
+    };
+  }
+
+  it("GATE selection-bypass: enters a whitelisted, bypass-eligible market that is NOT selectedForEntry", async () => {
+    const tokenId = "token-gate-bypass";
+    // Not selectedForEntry (empty eligible set) but IS bypass-eligible.
+    selectedMarketCache = createMockSelectedMarketCache([], [tokenId]);
+
+    const mod = buildModule({ executionPolicy: gateBypassPolicy });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [gateBypassMarket(tokenId)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls.length).toBe(1);
+    const signal = signalCalls[0]![1].signal as import("@krabs/domain").Signal;
+    // Pure GATE path: enters via GATE_ENTRY, never the generic FALLBACK rule.
+    expect(signal.decisionRuleId).toBe(GATE_ENTRY_RULE_ID);
+    expect(signal.side).toBe("buy");
+
+    await mod.stop();
+  });
+
+  it("GATE selection-bypass: does NOT enter when the market is neither selectedForEntry nor bypass-eligible", async () => {
+    const tokenId = "token-gate-nobypass";
+    selectedMarketCache = createMockSelectedMarketCache([], []);
+
+    const mod = buildModule({ executionPolicy: gateBypassPolicy });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [gateBypassMarket(tokenId)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls.length).toBe(0);
 
     await mod.stop();
   });

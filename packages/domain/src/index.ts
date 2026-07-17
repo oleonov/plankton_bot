@@ -186,6 +186,7 @@ export type { StatusSev, StatusSeries } from "./status-health.js";
 export type { DepKey, DepHealthRecorder } from "./dep-health.js";
 export {
   evaluateGateEntryEligibility,
+  isGateWhitelisted,
   GATE_ENTRY_RULE_ID,
   evaluateBounceExit,
   bounceExitTierGain,

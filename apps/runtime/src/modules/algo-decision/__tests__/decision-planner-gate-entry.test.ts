@@ -277,3 +277,49 @@ describe("GATE live first-entry branch (decision-planner)", () => {
     expect(isGateSignal).toBe(false);
   });
 });
+
+// Covers docs/plans/2026-07-17-gate-entry-selection-bypass.md — the GATE selection
+// bypass: a whitelisted market that failed ONLY the v5.11 hard data filters reaches
+// the planner via `gateBypass` (NOT `selectedForEntry`) and is evaluated on a PURE
+// GATE path — it may enter only via GATE, never fall through to R23 / the rule table.
+describe("GATE selection-bypass path (decision-planner)", () => {
+  it("emits a GATE_ENTRY probe-entry BUY for a gateBypass market that is NOT selectedForEntry", () => {
+    const result = evaluateDecisionPlan(input({ selectedForEntry: false, gateBypass: true }));
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe(GATE_ENTRY_RULE_ID);
+    expect(result.signal.side).toBe("buy");
+    expect(result.signal.reason).toBe("probe-entry");
+  });
+
+  it("SUPPRESSES a not-selectedForEntry whitelist market when gateBypass is false (bypass is required)", () => {
+    const result = evaluateDecisionPlan(input({ selectedForEntry: false, gateBypass: false }));
+    expect(result.type).toBe("none");
+  });
+
+  it("SUPPRESSES (gate-not-eligible) a gateBypass market whose mid is outside the GATE band, and NEVER falls through to R23", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        selectedForEntry: false,
+        gateBypass: true,
+        // mid 0.3 > maxPrice 0.15 → GATE eligibility fails; book two-sided so the
+        // mid-price/isAlive checks still pass and we reach the gate-only block.
+        market: market({ bestBid: 0.29, bestAsk: 0.31, midPrice: 0.3 }),
+        // R23 armed with a dip that WOULD fire (0.3 / 0.6 = 0.5 <= 0.683) — it must
+        // NOT fire, proving the gate-only path returns before ever reaching R23.
+        executionPolicy: executionPolicy({
+          r23DipTrigger: { enabled: true, dropThresholdRatio: 0.683, windowMs: 86_400_000 },
+        }),
+        r23MaxMidpoint: 0.6,
+      }),
+    );
+    expect(result.type).toBe("none");
+    if (result.type !== "none") return;
+    // Hard proof the gate-only path returned BEFORE the R23 branch: R23 was never
+    // evaluated (counter stays 0), and the suppression carries the GATE-scoped reason
+    // — not an R23 reason, and not a min-size suppression from an accidental
+    // fall-through to R23 / the generic rule table.
+    expect(result.metrics.r23DipChecked).toBe(0);
+    expect(result.suppressions.some((s) => s.reasonCode === "gate-not-eligible")).toBe(true);
+  });
+});

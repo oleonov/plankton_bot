@@ -66,6 +66,7 @@ import {
   S1_LADDER_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
   BOUNCE_EXIT_BACKSTOP_RULE_ID,
+  isGateWhitelisted,
 } from "@krabs/domain";
 import { readContinuationMode, readContinuationModeVersion } from "@krabs/db";
 import type { EvalContext } from "@krabs/domain";
@@ -144,6 +145,13 @@ export type { S1OwnershipReader };
 export interface SelectedMarketCache {
   isEligible(tokenId: TokenId): boolean;
   getEligibleTokenIds(): TokenId[];
+  /**
+   * GATE selection-bypass (docs/plans/2026-07-17-gate-entry-selection-bypass.md):
+   * true when the token was rejected by v5.11 only via a bypassable hard data
+   * filter, so the GATE lane may still evaluate it. Optional — absent on test
+   * stubs; treated as `false` (no bypass) when not implemented.
+   */
+  isGateBypassEligible?(tokenId: TokenId): boolean;
   /**
    * ADR-018 §D2 — optional Step 1 universe-filter funnel snapshot. Implemented
    * by `MarketSelectionCache`; absent on test stubs that don't need telemetry.
@@ -1665,7 +1673,21 @@ export class AlgoDecisionModule implements RuntimeModule {
     const legState = this.getCachedLegState(tokenId);
     const openPosition = this.findOpenPositionByTokenId(tokenId);
     const selectedForEntry = this.deps.selectedMarketCache.isEligible(tokenId);
-    if (!legState && !selectedForEntry && !openPosition) return null;
+    const market = this.marketCache.get(String(tokenId)) ?? null;
+    // GATE selection-bypass (docs/plans/2026-07-17-gate-entry-selection-bypass.md):
+    // a whitelisted, tradable market that failed ONLY the v5.11 hard data filters is
+    // admitted for evaluation here even when not `selectedForEntry`. It can then enter
+    // ONLY via the GATE lane — the planner routes a `gateBypass` market on a pure GATE
+    // path (never R23 / the generic rule table, which carry no $2 micro-cap).
+    const gateBypass =
+      !legState &&
+      !selectedForEntry &&
+      !openPosition &&
+      market != null &&
+      market.tradable === true &&
+      isGateWhitelisted(executionPolicy?.gateEntry, market.conditionId) &&
+      (this.deps.selectedMarketCache.isGateBypassEligible?.(tokenId) ?? false);
+    if (!legState && !selectedForEntry && !openPosition && !gateBypass) return null;
     if (
       this.shouldSkipFlatProbeForActiveMarketCap(
         tokenId,
@@ -1691,7 +1713,6 @@ export class AlgoDecisionModule implements RuntimeModule {
       return null;
     }
 
-    const market = this.marketCache.get(String(tokenId)) ?? null;
     const prevMidPrice = this.prevMidPrices.get(String(tokenId)) ?? null;
     const position =
       legState || openPosition ? (openPosition ?? this.getCachedPosition(tokenId)) : null;
@@ -1729,6 +1750,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       tokenId,
       now,
       selectedForEntry,
+      gateBypass,
       hasPendingBuyOrder: this.pendingEntries.has(String(tokenId)),
       legState,
       position,

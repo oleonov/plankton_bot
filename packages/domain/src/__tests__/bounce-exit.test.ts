@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_GATE_ENTRY, DEFAULT_BOUNCE_EXIT } from "../execution-policy.js";
 import {
   evaluateGateEntryEligibility,
+  isGateWhitelisted,
   evaluateBounceExit,
   bounceExitTierGain,
   isBounceForceExit,
@@ -11,7 +12,7 @@ import {
   type GateEntryMarketInput,
   type BounceExitContext,
 } from "../bounce-exit.js";
-import type { BounceExitPolicy } from "../types.js";
+import type { BounceExitPolicy, GateEntryPolicy } from "../types.js";
 
 const CREATED_AT = "2026-01-01T00:00:00.000Z";
 
@@ -256,5 +257,38 @@ describe("isBounceForceExit", () => {
 
   it("is false when decisionRuleId is null", () => {
     expect(isBounceForceExit({ side: "sell", decisionRuleId: null })).toBe(false);
+  });
+});
+
+// docs/plans/2026-07-17-gate-entry-selection-bypass.md — the single predicate the
+// GATE entry branch and the GATE selection-bypass share (must stay in sync).
+describe("isGateWhitelisted", () => {
+  const COND = "cond-x";
+  const live: GateEntryPolicy = {
+    ...DEFAULT_GATE_ENTRY,
+    enabled: true,
+    mode: "micro_live",
+    whitelistConditionIds: [COND],
+  };
+
+  it("is true when enabled + micro_live + conditionId whitelisted", () => {
+    expect(isGateWhitelisted(live, COND)).toBe(true);
+  });
+
+  it("is false when disabled", () => {
+    expect(isGateWhitelisted({ ...live, enabled: false }, COND)).toBe(false);
+  });
+
+  it("is false when mode is 'off'", () => {
+    expect(isGateWhitelisted({ ...live, mode: "off" }, COND)).toBe(false);
+  });
+
+  it("is false when the conditionId is not on the whitelist", () => {
+    expect(isGateWhitelisted(live, "other-cond")).toBe(false);
+  });
+
+  it("is false for a null or undefined policy", () => {
+    expect(isGateWhitelisted(null, COND)).toBe(false);
+    expect(isGateWhitelisted(undefined, COND)).toBe(false);
   });
 });

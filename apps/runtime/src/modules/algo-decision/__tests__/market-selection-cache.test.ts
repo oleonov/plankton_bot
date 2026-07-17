@@ -569,3 +569,87 @@ describe("MarketSelectionCache", () => {
     });
   });
 });
+
+// docs/plans/2026-07-17-gate-entry-selection-bypass.md — the GATE selection-bypass:
+// tokens rejected ONLY by a v5.11 hard DATA filter (liquidity/mid/category) stay
+// reachable by the GATE lane; explicit excludes / strike / short-lifetime do not.
+describe("MarketSelectionCache — GATE selection-bypass (isGateBypassEligible)", () => {
+  it("marks a token rejected by liquidity_too_low (null live liquidity) as bypass-eligible — the prod scenario", async () => {
+    const { bus, cache } = makeCache();
+    await updateMarket(bus, makeMarket({ tokenId: TOK_A, liquidity: null, midPrice: 0.03 }));
+    expect(cache.isEligible(TOK_A)).toBe(false);
+    expect(cache.isGateBypassEligible(TOK_A)).toBe(true);
+    cache.dispose();
+  });
+
+  it("marks a token rejected by mid_price_too_high as bypass-eligible", async () => {
+    const { bus, cache } = makeCache();
+    await updateMarket(bus, makeMarket({ tokenId: TOK_A, midPrice: 0.6 }));
+    expect(cache.isEligible(TOK_A)).toBe(false);
+    expect(cache.isGateBypassEligible(TOK_A)).toBe(true);
+    cache.dispose();
+  });
+
+  it("does NOT mark a non-tradable token bypass-eligible (returns before evaluation)", async () => {
+    const { bus, cache } = makeCache();
+    await updateMarket(bus, makeMarket({ tokenId: TOK_A, tradable: false, liquidity: null }));
+    expect(cache.isEligible(TOK_A)).toBe(false);
+    expect(cache.isGateBypassEligible(TOK_A)).toBe(false);
+    cache.dispose();
+  });
+
+  it("does NOT mark a normally-admitted (INCLUDE) token bypass-eligible", async () => {
+    const { bus, cache } = makeCache();
+    await updateMarket(bus, makeMarket({ tokenId: TOK_A }));
+    expect(cache.isEligible(TOK_A)).toBe(true);
+    expect(cache.isGateBypassEligible(TOK_A)).toBe(false);
+    cache.dispose();
+  });
+
+  it("does NOT bypass an explicit rule-exclude — operator excludes stay authoritative", async () => {
+    const engine = makeEngine([
+      makeRule({ ruleId: "x-fed", ruleType: "exclude_slug", pattern: "fed-rate-cut-yes" }),
+    ]);
+    const { bus, cache } = makeCache(engine);
+    // Passes the mid/liquidity hard filters but is explicitly excluded by a rule —
+    // a non-bypassable reject, so the GATE lane must NOT be able to reach it.
+    await updateMarket(bus, makeMarket({ tokenId: TOK_A }));
+    expect(cache.isEligible(TOK_A)).toBe(false);
+    expect(cache.isGateBypassEligible(TOK_A)).toBe(false);
+    cache.dispose();
+  });
+
+  it("does NOT bypass a hard-filter reject that is ALSO short-lifetime — near-resolution stays authoritative", async () => {
+    // The masked-short-lifetime edge: evaluatePreEntry returns liquidity_too_low
+    // (a bypassable reason) BEFORE it ever checks short-lifetime, so the cache must
+    // re-run the short-lifetime guard when deciding bypass eligibility. A crypto
+    // up-or-down market resolving within the 1h window must be vetoed.
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, EMPTY_ENGINE, () => shortLifetimePolicy());
+    cache.subscribe();
+    const soon = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    await updateMarket(
+      bus,
+      makeMarket({
+        tokenId: TOK_A,
+        slug: "btc-up-or-down-june",
+        eventSlug: "btc-up-or-down-june",
+        liquidity: null,
+        endDate: soon,
+      }),
+    );
+    expect(cache.isEligible(TOK_A)).toBe(false);
+    expect(cache.isGateBypassEligible(TOK_A)).toBe(false);
+    cache.dispose();
+  });
+
+  it("clears bypass eligibility when a token flips from a hard-filter reject to INCLUDE", async () => {
+    const { bus, cache } = makeCache();
+    await updateMarket(bus, makeMarket({ tokenId: TOK_A, liquidity: null, midPrice: 0.03 }));
+    expect(cache.isGateBypassEligible(TOK_A)).toBe(true);
+    await updateMarket(bus, makeMarket({ tokenId: TOK_A, liquidity: 250, midPrice: 0.03 }));
+    expect(cache.isEligible(TOK_A)).toBe(true);
+    expect(cache.isGateBypassEligible(TOK_A)).toBe(false);
+    cache.dispose();
+  });
+});

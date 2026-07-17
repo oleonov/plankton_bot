@@ -5,10 +5,26 @@ import type {
   RiskEventRepository,
   TokenId,
 } from "@krabs/domain";
-import { evaluatePreEntry, type PreEntryRejectReason } from "@krabs/domain";
+import {
+  evaluatePreEntry,
+  evaluateShortLifetimeGuard,
+  DEFAULT_BUY_GUARD_SHORT_LIFETIME_POLICY,
+  type PreEntryRejectReason,
+} from "@krabs/domain";
 import type { SelectedMarketCache } from "./algo-decision-module.js";
 import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
 import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
+
+// GATE selection-bypass (docs/plans/2026-07-17-gate-entry-selection-bypass.md):
+// ONLY the v5.11 hard *data* filters (null live liquidity / mid / zero-coverage
+// category) are bypassable for a whitelisted GATE market — those wrongly drop the
+// cheap deep-OTM longshots GATE targets. Explicit selection-rule excludes, strike,
+// and short-lifetime rejects stay authoritative and are NEVER bypassed.
+const GATE_BYPASSABLE_REJECT_REASONS: ReadonlySet<PreEntryRejectReason> = new Set([
+  "liquidity_too_low",
+  "mid_price_too_high",
+  "zero_coverage_category",
+]);
 
 // v5.11 §1 — Live Pre-Entry Filter, driven by hard price/liquidity/category gates.
 //
@@ -40,6 +56,9 @@ export interface UniverseFilterSnapshot {
 
 export class MarketSelectionCache implements SelectedMarketCache {
   private readonly eligible = new Set<string>();
+  // GATE selection-bypass: tokens rejected by v5.11 ONLY via a bypassable hard
+  // data filter (see GATE_BYPASSABLE_REJECT_REASONS). Disjoint from `eligible`.
+  private readonly gateBypassEligible = new Set<string>();
   private unsub: (() => void) | null = null;
   private trackedUnsub: (() => void) | null = null;
 
@@ -79,6 +98,7 @@ export class MarketSelectionCache implements SelectedMarketCache {
     this.trackedUnsub = this.bus.subscribe("TrackedMarketsChanged", async (payload) => {
       for (const tokenId of payload.removedTokenIds) {
         this.eligible.delete(String(tokenId));
+        this.gateBypassEligible.delete(String(tokenId));
         // Allow a token to be re-persisted if it re-enters the universe later.
         this.persistedRejects.delete(String(tokenId));
       }
@@ -94,6 +114,18 @@ export class MarketSelectionCache implements SelectedMarketCache {
 
   isEligible(tokenId: TokenId): boolean {
     return this.eligible.has(String(tokenId));
+  }
+
+  /**
+   * GATE selection-bypass (docs/plans/2026-07-17-gate-entry-selection-bypass.md):
+   * true when this token was rejected by v5.11 ONLY via a bypassable hard data
+   * filter (null live liquidity / mid / zero-coverage category), never via an
+   * explicit rule-exclude / strike / short-lifetime reject, and it is tradable
+   * (non-tradable tokens return before evaluation and are cleared here). The GATE
+   * lane may then evaluate it on a pure GATE path; nothing else may enter it.
+   */
+  isGateBypassEligible(tokenId: TokenId): boolean {
+    return this.gateBypassEligible.has(String(tokenId));
   }
 
   getEligibleTokenIds(): TokenId[] {
@@ -120,8 +152,9 @@ export class MarketSelectionCache implements SelectedMarketCache {
     const tokenId = String(market.tokenId);
     if (!market.tradable) {
       // Untracked/preserved-for-lifecycle tokens are out of scope for the
-      // admission funnel — they cannot be NEW-BUY admitted.
+      // admission funnel — they cannot be NEW-BUY admitted (GATE bypass included).
       this.eligible.delete(tokenId);
+      this.gateBypassEligible.delete(tokenId);
       return;
     }
     this.seen++;
@@ -130,31 +163,49 @@ export class MarketSelectionCache implements SelectedMarketCache {
     } else {
       this.volumePositiveEvaluated++;
     }
-    const evalResult = evaluatePreEntry(
-      this.selectionRuleEngine.current,
-      {
-        eventSlug: market.eventSlug,
-        slug: market.slug,
-        eventMarketCount: market.eventMarketCount,
-        question: market.question,
-        midPrice: market.midPrice,
-        liquidity: market.liquidity ?? null,
-        endDate: market.endDate,
-        groupItemTitle: market.groupItemTitle ?? null,
-        groupItemThreshold: market.groupItemThreshold ?? null,
-        tags: market.tags ?? null,
-        ...this.effectiveResolution?.toPreEntryFields(market),
-      },
-      policy,
-    );
+    const preEntryInput = {
+      eventSlug: market.eventSlug,
+      slug: market.slug,
+      eventMarketCount: market.eventMarketCount,
+      question: market.question,
+      midPrice: market.midPrice,
+      liquidity: market.liquidity ?? null,
+      endDate: market.endDate,
+      groupItemTitle: market.groupItemTitle ?? null,
+      groupItemThreshold: market.groupItemThreshold ?? null,
+      tags: market.tags ?? null,
+      ...this.effectiveResolution?.toPreEntryFields(market),
+    };
+    const evalResult = evaluatePreEntry(this.selectionRuleEngine.current, preEntryInput, policy);
     if (evalResult.finalStatus === "INCLUDE") {
       this.selectionRuleAdmitted++;
       this.eligible.add(tokenId);
+      // Normally eligible now — no bypass needed; clear any stale bypass flag.
+      this.gateBypassEligible.delete(tokenId);
     } else {
       this.selectionRuleRejected++;
       this.incrementRejectReason(classifySelectionRejectReason(market, evalResult.rejectReason));
       this.persistStrikeReject(tokenId, market, evalResult.rejectReason, evalResult.horizonHours);
       this.eligible.delete(tokenId);
+      // GATE selection-bypass: only a bypassable hard-data-filter reject keeps the
+      // token reachable by the GATE lane; any other reject (rule_exclude / strike /
+      // short_lifetime) is authoritative and clears bypass eligibility. A hard-filter
+      // reject MASKS the short-lifetime guard (evaluatePreEntry checks hard filters
+      // BEFORE short-lifetime and returns early), so re-check it explicitly here: a
+      // near-resolution market must NOT be bypassed even when whitelisted, since
+      // GATE's own eligibility gates total lifespan, not time-to-close.
+      const bypassable =
+        evalResult.rejectReason != null &&
+        GATE_BYPASSABLE_REJECT_REASONS.has(evalResult.rejectReason) &&
+        !evaluateShortLifetimeGuard(
+          preEntryInput,
+          policy?.shortLifetime ?? DEFAULT_BUY_GUARD_SHORT_LIFETIME_POLICY,
+        ).blocked;
+      if (bypassable) {
+        this.gateBypassEligible.add(tokenId);
+      } else {
+        this.gateBypassEligible.delete(tokenId);
+      }
     }
   }
 

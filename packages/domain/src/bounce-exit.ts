@@ -59,6 +59,26 @@ export function evaluateGateEntryEligibility(
   );
 }
 
+/**
+ * True when the GATE first-entry lane is live (`enabled && micro_live`) and this
+ * market's condition is on the operator whitelist. The single predicate the GATE
+ * entry branch AND the GATE selection-bypass share (docs/plans/2026-07-17-gate-
+ * entry-selection-bypass.md), so the two stay in sync from one source. The
+ * bypass admits a whitelisted market that failed only the v5.11 hard filters into
+ * the decision planner; the market can still enter ONLY via this same GATE lane,
+ * and `evaluateGateEntryEligibility` (band + lifespan) remains the real gate.
+ */
+export function isGateWhitelisted(
+  gate: GateEntryPolicy | null | undefined,
+  conditionId: string,
+): boolean {
+  return (
+    gate?.enabled === true &&
+    gate.mode === "micro_live" &&
+    gate.whitelistConditionIds.includes(conditionId)
+  );
+}
+
 // Decision-rule IDs for the GATE-lane bounce-exit SELL branch (decision-planner.ts).
 // Every rung of the resting-maker ladder shares BOUNCE_EXIT_TARGET_RULE_ID —
 // rungs are told apart via the order metadata's `bounceRung.rungIndex`/`ladderId`

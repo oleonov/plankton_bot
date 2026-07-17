@@ -21,6 +21,7 @@ import {
   evaluateD9LossExit,
   evaluateDecision,
   evaluateGateEntryEligibility,
+  isGateWhitelisted,
   evaluateMinMarketAge,
   evaluateR23DipTrigger,
   evaluateSize,
@@ -343,6 +344,14 @@ export type DecisionPlanningInput = {
   tokenId: TokenId;
   now: number;
   selectedForEntry: boolean;
+  /**
+   * GATE selection-bypass (docs/plans/2026-07-17-gate-entry-selection-bypass.md):
+   * true when a whitelisted, tradable market failed ONLY the v5.11 hard data
+   * filters and is admitted for a PURE GATE-lane evaluation despite
+   * `selectedForEntry === false`. Optional so the existing DecisionPlanningInput
+   * fixtures need no field-add; missing/undefined = no bypass (the safe default).
+   */
+  gateBypass?: boolean;
   hasPendingBuyOrder: boolean;
   legState: LegState | null;
   position: Position | null;
@@ -860,7 +869,7 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   const nowIso = new Date(input.now).toISOString();
   const legState = input.legState;
 
-  if (!legState && !input.selectedForEntry && !input.position) {
+  if (!legState && !input.selectedForEntry && !input.position && !input.gateBypass) {
     return none(metrics, suppressions, sideEffects);
   }
   metrics.evalTotal++;
@@ -1422,6 +1431,42 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
     }
   }
 
+  // GATE selection-bypass (docs/plans/2026-07-17-gate-entry-selection-bypass.md):
+  // a whitelisted market admitted here only via `gateBypass` (it failed the v5.11
+  // hard data filters, so it is NOT `selectedForEntry`) is evaluated on a PURE GATE
+  // path — it must never fall through to R23 or the generic decision-rule table,
+  // neither of which carries the GATE $2 micro-cap. Placed AFTER the market-cache /
+  // mid-price / isAlive / min-age checks above (those still apply) and BEFORE R23,
+  // then returns unconditionally so control never reaches R23 / the rule table.
+  if (input.gateBypass && !input.selectedForEntry && !legState && !isOpenPosition(input.position)) {
+    const gated = tryGateEntry({
+      input,
+      market,
+      buyCount,
+      emissionFacts,
+      triggerTelemetry,
+      suppressions,
+      sideEffects,
+      metrics,
+      nowIso,
+    });
+    if (gated) return gated;
+    suppressions.push({
+      tokenId: input.tokenId,
+      conditionId: market.conditionId,
+      reasonCode: "gate-not-eligible",
+      side: "BUY",
+      decisionRuleId: GATE_ENTRY_RULE_ID,
+      state,
+      price,
+      buyCount,
+      timeSinceLastSeconds,
+      emissionFacts,
+      timestamp: nowIso,
+    });
+    return none(metrics, suppressions, sideEffects);
+  }
+
   if (!legState && input.executionPolicy?.r23DipTrigger?.enabled) {
     const r23Policy = input.executionPolicy.r23DipTrigger;
     metrics.r23DipChecked++;
@@ -1482,26 +1527,18 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   // SENSITIVE CLASS: any condition below unmet SUPPRESSES — falls through to the
   // normal decision-rule table below, never substitutes another order.
   if (!legState && !isOpenPosition(input.position)) {
-    const gateEntry = input.executionPolicy?.gateEntry;
-    if (
-      gateEntry?.enabled === true &&
-      gateEntry.mode === "micro_live" &&
-      gateEntry.whitelistConditionIds.includes(market.conditionId) &&
-      evaluateGateEntryEligibility(gateEntry, market)
-    ) {
-      return buildSignalOrSuppression({
-        input,
-        market,
-        decision: { action: "BUY", ruleId: GATE_ENTRY_RULE_ID },
-        buyCount,
-        emissionFacts,
-        triggerTelemetry,
-        suppressions,
-        sideEffects,
-        metrics,
-        nowIso,
-      });
-    }
+    const gated = tryGateEntry({
+      input,
+      market,
+      buyCount,
+      emissionFacts,
+      triggerTelemetry,
+      suppressions,
+      sideEffects,
+      metrics,
+      nowIso,
+    });
+    if (gated) return gated;
   }
 
   const decision = evaluateDecision(ctx, input.decisionRules);
@@ -1544,6 +1581,47 @@ function none(
   sideEffects: DecisionPlanSideEffect[],
 ): DecisionPlanResult {
   return { type: "none", metrics, suppressions, sideEffects };
+}
+
+/**
+ * GATE first-entry emit, shared by the normal GATE branch (`selectedForEntry`
+ * markets) and the GATE selection-bypass path (docs/plans/2026-07-17-gate-entry-
+ * selection-bypass.md). Returns a BUY `DecisionPlanResult` when the GATE lane is
+ * live (`enabled && micro_live`), this market is whitelisted, and
+ * `evaluateGateEntryEligibility` (price band + lifespan) passes; else null. One
+ * emit site keeps both callers in sync (DRY).
+ */
+function tryGateEntry(args: {
+  input: DecisionPlanningInput;
+  market: NormalizedMarket;
+  buyCount: number;
+  emissionFacts: EmissionFacts;
+  triggerTelemetry: TriggerTelemetry;
+  suppressions: SuppressionPlan[];
+  sideEffects: DecisionPlanSideEffect[];
+  metrics: DecisionMetricsDelta;
+  nowIso: string;
+}): DecisionPlanResult | null {
+  const gateEntry = args.input.executionPolicy?.gateEntry;
+  if (
+    gateEntry != null &&
+    isGateWhitelisted(gateEntry, args.market.conditionId) &&
+    evaluateGateEntryEligibility(gateEntry, args.market)
+  ) {
+    return buildSignalOrSuppression({
+      input: args.input,
+      market: args.market,
+      decision: { action: "BUY", ruleId: GATE_ENTRY_RULE_ID },
+      buyCount: args.buyCount,
+      emissionFacts: args.emissionFacts,
+      triggerTelemetry: args.triggerTelemetry,
+      suppressions: args.suppressions,
+      sideEffects: args.sideEffects,
+      metrics: args.metrics,
+      nowIso: args.nowIso,
+    });
+  }
+  return null;
 }
 
 function buildSignalOrSuppression(args: {
