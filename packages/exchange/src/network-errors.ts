@@ -11,8 +11,13 @@ export const TRANSIENT_NETWORK_ERROR_PATTERN =
 // 429/408 carry an HTTP response, so the CLOB client's built-in
 // `isTransientAxiosError` misses them. We treat them as transient explicitly.
 export const RATE_LIMIT_ERROR_PATTERN = /(?:\b429\b|too many requests|rate.?limit)/i;
+// 403 is included alongside 5xx because Gamma returns 403 (Forbidden) for
+// rate-limiting/WAF throttling on this path — a transient condition. Scoped to the
+// Gamma-prefixed message so a bare/CLOB/order 403 is NOT reclassified (order
+// execution uses a separate classifier). A genuinely-permanent 403 (geo-block)
+// surfaces via the scanner's staleness health check, not a crash.
 const RETRYABLE_HTTP_RESPONSE_ERROR_PATTERN =
-  /(?:Gamma API responded with|Gamma pricing request failed:)\s+5\d\d/i;
+  /(?:Gamma API responded with|Gamma pricing request failed:)\s+(?:403|5\d\d)/i;
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

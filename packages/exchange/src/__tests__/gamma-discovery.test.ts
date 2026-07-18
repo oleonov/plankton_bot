@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { GammaMarketDiscoveryGateway } from "../gamma/market-discovery-gateway.js";
+import { sleep } from "../network-errors.js";
+
+// Replace ONLY `sleep` with a spy (keep the real classifier) so retry backoff delays
+// are observable without real waits.
+vi.mock("../network-errors.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../network-errors.js")>();
+  return { ...actual, sleep: vi.fn(() => Promise.resolve()) };
+});
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -300,6 +308,53 @@ describe("GammaMarketDiscoveryGateway", () => {
 
     await expect(gateway.discoverMarkets()).rejects.toThrow("Gamma API responded with 400");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("discoverMarkets() retries a transient Gamma 403 (rate-limit) before succeeding", async () => {
+    const gateway = new GammaMarketDiscoveryGateway({
+      baseUrl: "https://test.gamma.api",
+      pageSize: 10,
+      maxRetries: 3,
+      retryDelayMs: 0,
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock
+      .mockResolvedValueOnce(mockFetchResponse(null, false, 403))
+      .mockResolvedValueOnce(
+        mockFetchResponse(makeEventsPage([makeEvent("ok", [makeGammaMarket("ok")])])),
+      );
+
+    const markets = await gateway.discoverMarkets();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(markets).toHaveLength(1);
+    expect(markets[0]!.conditionId).toBe("cond-ok");
+  });
+
+  it("discoverMarkets() backs off exponentially between transient retries", async () => {
+    (sleep as ReturnType<typeof vi.fn>).mockClear();
+    const gateway = new GammaMarketDiscoveryGateway({
+      baseUrl: "https://test.gamma.api",
+      pageSize: 10,
+      maxRetries: 3,
+      retryDelayMs: 1000,
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    // Two transient 403s then success -> two inter-retry sleeps on the [1000, 2000] schedule.
+    fetchMock
+      .mockResolvedValueOnce(mockFetchResponse(null, false, 403))
+      .mockResolvedValueOnce(mockFetchResponse(null, false, 403))
+      .mockResolvedValueOnce(
+        mockFetchResponse(makeEventsPage([makeEvent("ok", [makeGammaMarket("ok")])])),
+      );
+
+    await gateway.discoverMarkets();
+
+    const delays = (sleep as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+    expect(delays).toEqual([1000, 2000]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("forEachMarketPage() attaches bounded request context to exhausted Gamma 5xx", async () => {

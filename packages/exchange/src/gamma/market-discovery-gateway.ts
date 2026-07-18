@@ -37,6 +37,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_PAGE_SIZE = 100;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
+// Cap on the exponential per-page retry backoff. Defensive if maxRetries is ever raised;
+// with the defaults (retries=3, base=1s) the schedule is [1s, 2s] and never reaches the cap.
+const MAX_DISCOVERY_BACKOFF_MS = 8_000;
 const CURSOR_PREVIEW_MAX_LENGTH = 32;
 
 /**
@@ -217,7 +220,7 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
         return this.parseEventsPage(await response.json());
       } catch (err: unknown) {
         if (attempt === this.maxRetries || !this.isTransient(err)) throw err;
-        await sleep(this.retryDelayMs);
+        await sleep(this.backoffDelayMs(attempt));
       }
     }
     throw new Error("unreachable");
@@ -225,6 +228,11 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
 
   private isTransient(err: unknown): boolean {
     return isTransientNetworkError(err);
+  }
+
+  /** Exponential backoff (ms) before retrying `attempt` (1-based), capped. */
+  private backoffDelayMs(attempt: number): number {
+    return Math.min(this.retryDelayMs * 2 ** (attempt - 1), MAX_DISCOVERY_BACKOFF_MS);
   }
 
   private buildUrl(afterCursor: string | null, limitOverride?: number): URL {

@@ -560,6 +560,36 @@ describe("MarketScannerModule", () => {
     expect(silentLog.error).not.toHaveBeenCalledWith(expect.anything(), "scan cycle failed");
   });
 
+  it("scanOrThrow() starts from cached catalog on a startup Gamma 403 (no crash-loop)", async () => {
+    silentLog.warn.mockClear();
+    silentLog.error.mockClear();
+    const marketRepo = createMockMarketRepo();
+    (marketRepo.iterateAllTokenIds as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      [createTokenId("tok-cached")][Symbol.iterator](),
+    );
+    const positionRepo = createMockPositionRepo();
+    (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+      { tokenId: createTokenId("tok-cached"), status: "open" },
+    ]);
+    const { mod, discoveryGateway } = buildModule({ marketRepo, positionRepo });
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("Gamma API responded with 403: Forbidden"),
+    );
+
+    // Must NOT throw — the 403 is transient and a cached catalog exists, so startup
+    // degrades instead of crashing the process (the production crash-loop root cause).
+    const result = await mod.scanOrThrow();
+    const health = await mod.healthCheck();
+
+    expect(result).toMatchObject({ discoveredMarkets: 0, savedTokens: 0, preservedTokens: 1 });
+    expect(health.ok).toBe(true);
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ cachedTokens: 1 }),
+      "startup scan degraded — using existing catalog until next scanner cycle",
+    );
+    expect(silentLog.error).not.toHaveBeenCalledWith(expect.anything(), "scan cycle failed");
+  });
+
   // ── Health check ──────────────────────────────────────────────────────────
 
   it("healthCheck() returns not-ok before first scan", async () => {
