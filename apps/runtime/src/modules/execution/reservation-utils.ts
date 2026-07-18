@@ -1,4 +1,5 @@
 import type { FillRepository, Order, Position, TokenId } from "@krabs/domain";
+import { GATE_ENTRY_RULE_ID } from "@krabs/domain";
 import { classifySellCapacitySource } from "../../wallet-buy-budget.js";
 
 const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
@@ -18,6 +19,8 @@ export interface PendingReservation {
 export interface ReservationSnapshot {
   reservedBuyUsdc: number;
   openBuyOrderCount: number;
+  /** Open+in-flight BUY orders whose decisionRuleId is GATE_ENTRY (for the GATE sub-cap). */
+  openGateBuyOrderCount: number;
   openSellOrderCount: number;
   openProfileLadderSellOrderCount: number;
   openNonProfileLadderSellOrderCount: number;
@@ -35,6 +38,7 @@ export function buildReservationSnapshot(
   const snapshot: ReservationSnapshot = {
     reservedBuyUsdc: 0,
     openBuyOrderCount: 0,
+    openGateBuyOrderCount: 0,
     openSellOrderCount: 0,
     openProfileLadderSellOrderCount: 0,
     openNonProfileLadderSellOrderCount: 0,
@@ -106,6 +110,9 @@ function addReservation(snapshot: ReservationSnapshot, reservation: PendingReser
   if (reservation.side === "buy") {
     snapshot.reservedBuyUsdc += reservation.size * reservation.price;
     snapshot.openBuyOrderCount += 1;
+    if (reservation.decisionRuleId === GATE_ENTRY_RULE_ID) {
+      snapshot.openGateBuyOrderCount += 1;
+    }
     increment(snapshot.openBuyOrdersByToken, reservation.tokenId);
     return;
   }

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   DEFAULT_EXECUTION_POLICY,
   DEFAULT_REPRICE_CHAIN_POLICY,
+  GATE_ENTRY_RULE_ID,
   createTokenId,
   createOrderId,
   createConditionId,
@@ -333,6 +334,48 @@ describe("cleanStaleEntryOrders", () => {
 
     expect(result.staleTtlCancelled).toBe(1);
     expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_entry_ttl");
+  });
+
+  it("does NOT cancel a GATE entry order within its 12h cap (adaptive TTL, not probe 10-min)", async () => {
+    const oneHourAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+    const order = makeOrder({
+      createdAt: oneHourAgo,
+      signalReason: "probe-entry",
+      decisionRuleId: GATE_ENTRY_RULE_ID,
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await run();
+    await bus.drain();
+
+    expect(result.staleTtlCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+  });
+
+  it("cancels a GATE entry order once older than the 12h cap", async () => {
+    const thirteenHoursAgo = new Date(Date.now() - 13 * 60 * 60_000).toISOString();
+    const order = makeOrder({
+      createdAt: thirteenHoursAgo,
+      signalReason: "probe-entry",
+      decisionRuleId: GATE_ENTRY_RULE_ID,
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await run();
+    await bus.drain();
+
+    expect(result.staleTtlCancelled).toBe(1);
     expect(cancelled[0].command.reason).toBe("stale_entry_ttl");
   });
 

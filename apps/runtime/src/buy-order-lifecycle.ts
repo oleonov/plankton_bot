@@ -1,4 +1,10 @@
-import { SignalReason, type Market, type Order, type PlaceOrderCommand } from "@krabs/domain";
+import {
+  GATE_ENTRY_RULE_ID,
+  SignalReason,
+  type Market,
+  type Order,
+  type PlaceOrderCommand,
+} from "@krabs/domain";
 
 export const BUY_DUPLICATE_DEDUPED_REASON = "buy_duplicate_deduped";
 export const BUY_CAP_FULL_TARGETED_REPLACEMENT_REASON = "buy_cap_full_targeted_replacement";
@@ -15,6 +21,28 @@ export const PROBE_LIKE_DAILY_TTL_MS = 5 * 60_000;
 export const PROBE_LIKE_AD_HOC_TTL_MS = 10 * 60_000;
 export const CONFIRM_SCALE_TTL_MS = 3 * 60 * 60_000;
 export const SCALE_IN_DEFAULT_TTL_MS = 3 * 60 * 60_000;
+
+// GATE adaptive TTL — research-derived (research_plankton/gate_ttl_calibration_report_2026-07-18.md).
+// Observer market-total fill timing (6.57M trades) gives time-to-fill ≈ C/rate with
+// C = 193 min·(trades/hour); rate = tradeCount3h / 3, so TTL_min = 580 / tradeCount3h. The maker
+// entry it enables is plankton's edge-carrying sub-strategy (78% of P&L, P&L-validated).
+export const GATE_TTL_DIVISOR_MIN = 580;
+// Busy-market (41–80 trades/3h) p90 fill ≈ 24m — never cancel a GATE bid before a realistic fill.
+export const GATE_TTL_FLOOR_MS = 30 * 60_000;
+// p75 fill even on 0-activity markets ≈ 11h — patient enough for the deadest longshot.
+export const GATE_TTL_CAP_MS = 12 * 60 * 60_000;
+// Operational (not from plankton): bound GATE's share of the shared 25-slot buy pool (protect R23).
+export const MAX_OPEN_GATE_BUYS = 6;
+
+/**
+ * Adaptive TTL (ms) for a GATE maker bid given the market's trailing-3h public trade count.
+ * `clamp(580 / tradeCount3h minutes, floor, cap)`; unknown/dead market (null/≤0) → cap (max patience).
+ */
+export function gateAdaptiveTtlMs(tradeCount3h: number | null): number {
+  if (tradeCount3h == null || tradeCount3h <= 0) return GATE_TTL_CAP_MS;
+  const rawMs = Math.round(GATE_TTL_DIVISOR_MIN / tradeCount3h) * 60_000;
+  return Math.min(Math.max(rawMs, GATE_TTL_FLOOR_MS), GATE_TTL_CAP_MS);
+}
 
 const PRICE_EPSILON = 1e-9;
 const ADD_BUY_REASONS = new Set<string>([
@@ -46,9 +74,15 @@ type BuyOrderCandidate = Pick<
 >;
 
 export function resolveEntryBuyOrderTtlMs(
-  order: Pick<Order, "signalReason">,
+  order: Pick<Order, "signalReason" | "decisionRuleId">,
   market: Pick<Market, "horizon"> | null,
+  tradeCount3h?: number | null,
 ): number {
+  // GATE first-entry maker bids use a market-activity-adaptive TTL, decoupled from the
+  // ProbeEntry probe-TTL floor they would otherwise inherit (they emit as ProbeEntry).
+  if (order.decisionRuleId === GATE_ENTRY_RULE_ID) {
+    return gateAdaptiveTtlMs(tradeCount3h ?? null);
+  }
   const horizon = market?.horizon ?? null;
   const horizonTtlMs =
     horizon != null ? (HORIZON_TTL_MS[horizon] ?? DEFAULT_TTL_MS) : DEFAULT_TTL_MS;
@@ -114,6 +148,7 @@ export function findOldestStaleOpenBuy(
   orders: readonly Order[],
   marketForOrder: (order: Order) => Pick<Market, "horizon"> | null,
   nowMs: number,
+  tradeCountForOrder?: (order: Order) => number | null,
 ): Order | null {
   let oldest: Order | null = null;
   let oldestAgeMs = -1;
@@ -122,7 +157,10 @@ export function findOldestStaleOpenBuy(
     const createdAtMs = Date.parse(order.createdAt);
     if (!Number.isFinite(createdAtMs)) continue;
     const ageMs = nowMs - createdAtMs;
-    if (ageMs < resolveEntryBuyOrderTtlMs(order, marketForOrder(order))) continue;
+    // Consult the live trade-count accessor for GATE orders only — non-GATE TTLs never use it.
+    const tradeCount3h =
+      order.decisionRuleId === GATE_ENTRY_RULE_ID ? tradeCountForOrder?.(order) : undefined;
+    if (ageMs < resolveEntryBuyOrderTtlMs(order, marketForOrder(order), tradeCount3h)) continue;
     if (ageMs > oldestAgeMs) {
       oldest = order;
       oldestAgeMs = ageMs;

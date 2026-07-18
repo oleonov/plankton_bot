@@ -1102,9 +1102,11 @@ function shouldWarnStuckSell(
 }
 
 function resolveOrderTtlMs(
-  order: Pick<Order, "signalReason">,
+  order: Pick<Order, "signalReason" | "decisionRuleId">,
   market: Pick<Market, "horizon"> | null,
 ): number {
+  // tradeCount3h intentionally omitted — the cleaner is not the live eviction path, so a GATE order
+  // gets the 12h cap (never the 10-min probe TTL) and is not cancelled prematurely here.
   return resolveEntryBuyOrderTtlMs(order, market);
 }
 

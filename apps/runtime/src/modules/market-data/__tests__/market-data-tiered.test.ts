@@ -752,6 +752,53 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
     await mod.stop();
   });
 
+  it("tracks the extended trackedTokenIds for trade-stats but keeps full-book depth position-only", async () => {
+    const tiered = makeTiered(["crit-1"], ["cand-1"], []);
+    const repo = createMockRepo(tiered);
+    const openPositionTokenIds = ["open-1", "open-2"].map((id) => createTokenId(id));
+    // positions ∪ GATE-whitelist entry candidates (wl-*)
+    const trackedTokenIds = ["open-1", "open-2", "wl-1", "wl-2"].map((id) => createTokenId(id));
+    const setOpenPositionTokenIds = vi.fn();
+
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 10,
+      bookSignals: {
+        openPositionTokenIds: () => openPositionTokenIds,
+        trackedTokenIds: () => trackedTokenIds,
+        setOpenPositionTokenIds,
+        ingestTopOfBook: vi.fn(),
+        ingestLastTradePrice: vi.fn(),
+        ingestBook: vi.fn(),
+      },
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(stream).not.toBeNull();
+    });
+    await vi.waitFor(() => {
+      expect(stream!.setFullBookTokenIdsCalls.length).toBeGreaterThanOrEqual(1);
+    });
+
+    // Trade-stats track-set = extended set (positions ∪ whitelist), so tradeCount3h accrues for entries.
+    expect(setOpenPositionTokenIds).toHaveBeenCalledWith(trackedTokenIds);
+    // Full-book depth subscription stays position-only — decoupled from the extended track-set.
+    expect(stream!.fullBookTokenIds).toEqual(["open-1", "open-2"]);
+
+    await mod.stop();
+  });
+
   it("throttles repeated discovery poll failures while preserving batch context", async () => {
     vi.useFakeTimers();
 

@@ -302,6 +302,13 @@ export interface MarketDataModuleDeps {
   runtimeControl?: RuntimeControl;
   bookSignals?: {
     openPositionTokenIds: () => readonly import("@krabs/domain").TokenId[];
+    /**
+     * Trade-stats track-set — the tokens book-signals should accumulate (positions ∪ GATE-whitelist
+     * entry candidates), so `tradeCount3h` is available at GATE entry time. Falls back to
+     * `openPositionTokenIds` when absent. Distinct from the full-book (depth) subscription, which
+     * stays position-only to respect its capped WS budget.
+     */
+    trackedTokenIds?: () => readonly import("@krabs/domain").TokenId[];
     setOpenPositionTokenIds: (tokenIds: readonly import("@krabs/domain").TokenId[]) => void;
     ingestTopOfBook: (observation: {
       readonly tokenId: import("@krabs/domain").TokenId;
@@ -1334,7 +1341,11 @@ export class MarketDataModule implements RuntimeModule {
     const bookSignals = this.deps.bookSignals;
     if (!bookSignals || !this.stream) return;
     const openPositionTokenIds = bookSignals.openPositionTokenIds();
-    bookSignals.setOpenPositionTokenIds(openPositionTokenIds);
+    // Trade-stats track-set may extend beyond open positions (e.g. GATE-whitelist entry candidates)
+    // so tradeCount3h is available at entry; the full-book depth subscription stays position-only to
+    // respect its capped WS budget (resolveBookSignalFullBookTokenIds).
+    const trackedTokenIds = bookSignals.trackedTokenIds?.() ?? openPositionTokenIds;
+    bookSignals.setOpenPositionTokenIds(trackedTokenIds);
     const fullBookTokenIds = this.resolveBookSignalFullBookTokenIds(openPositionTokenIds);
     this.stream.setFullBookTokenIds?.("open-position", fullBookTokenIds);
   }

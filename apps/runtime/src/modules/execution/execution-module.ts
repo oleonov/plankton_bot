@@ -90,6 +90,7 @@ import {
   findDuplicateOpenBuyPair,
   findNearDuplicateOpenBuy,
   findOldestStaleOpenBuy,
+  MAX_OPEN_GATE_BUYS,
 } from "../../buy-order-lifecycle.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import { AuthoritativeTickResolver } from "./authoritative-tick-resolver.js";
@@ -188,6 +189,14 @@ export interface ExecutionModuleDeps {
   allowSellSizeClamp?: boolean | undefined;
   capacityMetricsSink?: ((sample: OrderCapacityMetricsSample) => void) | undefined;
   profileOwnedOpenPositionCount?: (() => number) | undefined;
+  /**
+   * Live per-token public trade activity (trailing 3h) used ONLY for the GATE adaptive entry TTL.
+   * Structural subset of the book-signals provider's `getTradeStats3h`. Absent in unit tests / when
+   * book-signals is off → GATE falls back to the 12h TTL cap (never shorter than today).
+   */
+  tradeStatsReader?:
+    | { getTradeStats3h(tokenId: TokenId): { publicTradeCount3h: number } | null }
+    | undefined;
   /**
    * Shared store of exchange-side SELL state (open orders + wallet balance)
    * updated by the reconciliation module. When provided, the SELL clamp
@@ -842,6 +851,10 @@ export class ExecutionModule implements RuntimeModule {
     const postOnlyCross = this.getPostOnlyCrossPreSubmitSkip(cmd);
     if (postOnlyCross) {
       await this.skipPostOnlyCrossPreSubmit(cmd, postOnlyCross);
+      return;
+    }
+
+    if (await this.skipGateOverCapIfNeeded(cmd)) {
       return;
     }
 
@@ -1937,6 +1950,27 @@ export class ExecutionModule implements RuntimeModule {
     });
   }
 
+  /**
+   * GATE sub-cap: at most MAX_OPEN_GATE_BUYS concurrent open GATE_ENTRY buys, so GATE's adaptive
+   * long TTL cannot occupy more than its share of the shared 25-slot buy pool and starve R23.
+   * Counts persisted + in-flight reservations via the reservation snapshot (race-safe).
+   */
+  private async skipGateOverCapIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
+    if (cmd.side !== "buy" || cmd.decisionRuleId !== GATE_ENTRY_RULE_ID) return false;
+    const openGateBuys = this.getReservationSnapshot(cmd).openGateBuyOrderCount;
+    if (openGateBuys < MAX_OPEN_GATE_BUYS) return false;
+    this.log.debug(
+      { commandId: cmd.commandId, tokenId: String(cmd.tokenId), openGateBuys },
+      "GATE buy skipped — open GATE cap reached",
+    );
+    await this.publishOrderSkipped(cmd, "gate_open_cap", {
+      openGateBuyOrders: openGateBuys,
+      maxOpenGateBuys: MAX_OPEN_GATE_BUYS,
+      decisionRuleId: cmd.decisionRuleId ?? null,
+    });
+    return true;
+  }
+
   private async skipDuplicateBuyPreSubmitIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
     if (cmd.side !== "buy") return false;
     const duplicate = findNearDuplicateOpenBuy(this.deps.orderRepo.findOpen(), cmd, cmd.tickSize);
@@ -1984,6 +2018,8 @@ export class ExecutionModule implements RuntimeModule {
         openOrders,
         (order) => this.deps.marketRepo.findByTokenId(order.tokenId),
         now,
+        (order) =>
+          this.deps.tradeStatsReader?.getTradeStats3h(order.tokenId)?.publicTradeCount3h ?? null,
       );
     if (!blocker) return false;
 

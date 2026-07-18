@@ -8,6 +8,7 @@ import {
   createConditionId,
   DEFAULT_EXECUTION_POLICY,
   ExchangeErrorCode,
+  GATE_ENTRY_RULE_ID,
   S1_LADDER_RULE_ID,
 } from "@krabs/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
@@ -357,6 +358,67 @@ describe("ExecutionModule", () => {
   });
 
   // ─── Place order ───────────────────────────────────────────────────
+
+  const makeOpenGateBuys = (n: number): Order[] =>
+    Array.from(
+      { length: n },
+      (_, i) =>
+        ({
+          orderId: createOrderId(`gate-open-${i}`),
+          tokenId: createTokenId("tok-yes"),
+          side: "buy",
+          status: "open",
+          price: 0.05,
+          size: 20,
+          decisionRuleId: GATE_ENTRY_RULE_ID,
+          signalReason: "probe-entry",
+        }) as unknown as Order,
+    );
+
+  it("skips a GATE buy once the open-GATE cap (6) is reached — gate_open_cap", async () => {
+    orderRepo.findOpen = vi.fn().mockReturnValue(makeOpenGateBuys(6));
+    await mod.start();
+    const skipped: any[] = [];
+    bus.subscribe("OrderSkipped", async (p) => {
+      skipped.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("cmd-gate-7"),
+        decisionRuleId: GATE_ENTRY_RULE_ID,
+        price: 0.05,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(skipped.some((s) => s.reasonCode === "gate_open_cap")).toBe(true);
+    await mod.stop();
+  });
+
+  it("does NOT gate_open_cap-skip a GATE buy while under the cap (5 open)", async () => {
+    orderRepo.findOpen = vi.fn().mockReturnValue(makeOpenGateBuys(5));
+    await mod.start();
+    const skipped: any[] = [];
+    bus.subscribe("OrderSkipped", async (p) => {
+      skipped.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("cmd-gate-6"),
+        decisionRuleId: GATE_ENTRY_RULE_ID,
+        price: 0.05,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped.some((s) => s.reasonCode === "gate_open_cap")).toBe(false);
+    await mod.stop();
+  });
 
   it("places order via gateway and persists Order row", async () => {
     await mod.start();

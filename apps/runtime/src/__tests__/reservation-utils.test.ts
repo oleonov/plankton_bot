@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  GATE_ENTRY_RULE_ID,
   createBotRunId,
   createConditionId,
   createFillId,
@@ -96,5 +97,43 @@ describe("reservation-utils", () => {
     expect(fillRepo.findByOrderId).toHaveBeenCalledTimes(2);
     expect(snapshot.reservedBuyUsdc).toBeCloseTo(3);
     expect(getReservedSellSize(snapshot, TOKEN_ID)).toBeCloseTo(7);
+  });
+
+  it("openGateBuyOrderCount counts GATE buys from persisted orders AND in-flight reservations", () => {
+    const gateBuy = makeOrder({
+      orderId: createOrderId("ord-gate"),
+      side: "buy",
+      decisionRuleId: GATE_ENTRY_RULE_ID,
+    });
+    const r23Buy = makeOrder({
+      orderId: createOrderId("ord-r23"),
+      side: "buy",
+      decisionRuleId: "R23",
+    });
+    const gateSell = makeOrder({
+      orderId: createOrderId("ord-gate-sell"),
+      side: "sell",
+      decisionRuleId: GATE_ENTRY_RULE_ID,
+    });
+    const fillRepo = {
+      findByOrderId: vi.fn().mockReturnValue([]),
+    } satisfies Pick<FillRepository, "findByOrderId">;
+
+    // 1 persisted GATE buy + 1 in-flight GATE buy reservation = 2; R23 buy and GATE sell excluded.
+    const snapshot = buildReservationSnapshot([gateBuy, r23Buy, gateSell], fillRepo, [
+      { tokenId: TOKEN_ID, side: "buy", size: 10, price: 0.5, decisionRuleId: GATE_ENTRY_RULE_ID },
+    ]);
+
+    expect(snapshot.openGateBuyOrderCount).toBe(2);
+    expect(snapshot.openBuyOrderCount).toBe(3); // gate + r23 persisted + 1 pending gate
+  });
+
+  it("openGateBuyOrderCount is 0 when there are no GATE buys", () => {
+    const r23Buy = makeOrder({ side: "buy", decisionRuleId: "R23" });
+    const fillRepo = {
+      findByOrderId: vi.fn().mockReturnValue([]),
+    } satisfies Pick<FillRepository, "findByOrderId">;
+    const snapshot = buildReservationSnapshot([r23Buy], fillRepo);
+    expect(snapshot.openGateBuyOrderCount).toBe(0);
   });
 });

@@ -896,6 +896,18 @@ async function main(): Promise<void> {
     },
     bookSignals: {
       openPositionTokenIds: () => repos.position.findOpen().map((position) => position.tokenId),
+      // Trade-stats track-set = open positions ∪ GATE-whitelist entry-candidate tokens, so
+      // tradeCount3h is accumulated for GATE first-entry markets (which have no position yet) and
+      // the adaptive entry TTL has a live input. Full-book (depth) subscription stays position-only.
+      trackedTokenIds: () => {
+        const positionTokens = repos.position.findOpen().map((position) => position.tokenId);
+        const gate = currentExecutionPolicy().gateEntry;
+        if (!gate?.enabled || gate.whitelistConditionIds.length === 0) return positionTokens;
+        const gateTokens = gate.whitelistConditionIds.flatMap((conditionId) =>
+          repos.market.findByConditionId(conditionId).map((market) => market.tokenId),
+        );
+        return [...positionTokens, ...gateTokens];
+      },
       setOpenPositionTokenIds: (tokenIds) => {
         trackCBookSignalsProvider.setOpenPositionTokenIds(tokenIds);
       },
@@ -1124,6 +1136,8 @@ async function main(): Promise<void> {
     allowSellSizeClamp: config.allowSellSizeClamp,
     capacityMetricsSink: recordOrderCapacitySample,
     profileOwnedOpenPositionCount: countProfileOwnedOpenPositions,
+    // GATE adaptive entry TTL — live per-token trailing-3h public trade activity.
+    tradeStatsReader: trackCBookSignalsProvider,
     controlDb: controlConn.db,
     activeProfile: activeProfile as import("@krabs/domain").ProfileId,
     exchangeStateStore,
