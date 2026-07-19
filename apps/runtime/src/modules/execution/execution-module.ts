@@ -190,9 +190,10 @@ export interface ExecutionModuleDeps {
   capacityMetricsSink?: ((sample: OrderCapacityMetricsSample) => void) | undefined;
   profileOwnedOpenPositionCount?: (() => number) | undefined;
   /**
-   * Live per-token public trade activity (trailing 3h) used ONLY for the GATE adaptive entry TTL.
-   * Structural subset of the book-signals provider's `getTradeStats3h`. Absent in unit tests / when
-   * book-signals is off → GATE falls back to the 12h TTL cap (never shorter than today).
+   * Live per-token public trade activity (trailing 3h) used for the first-entry adaptive entry TTL
+   * (GATE and R23/FALLBACK/D-rule alike). Structural subset of the book-signals provider's
+   * `getTradeStats3h`. Absent in unit tests / when book-signals is off → first-entry falls back to
+   * the 12h TTL cap (never shorter than today).
    */
   tradeStatsReader?:
     | { getTradeStats3h(tokenId: TokenId): { publicTradeCount3h: number } | null }

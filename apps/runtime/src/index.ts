@@ -1136,7 +1136,7 @@ async function main(): Promise<void> {
     allowSellSizeClamp: config.allowSellSizeClamp,
     capacityMetricsSink: recordOrderCapacitySample,
     profileOwnedOpenPositionCount: countProfileOwnedOpenPositions,
-    // GATE adaptive entry TTL — live per-token trailing-3h public trade activity.
+    // First-entry adaptive entry TTL — live per-token trailing-3h public trade activity.
     tradeStatsReader: trackCBookSignalsProvider,
     controlDb: controlConn.db,
     activeProfile: activeProfile as import("@krabs/domain").ProfileId,

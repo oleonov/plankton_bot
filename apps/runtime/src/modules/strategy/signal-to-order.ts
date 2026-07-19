@@ -1577,6 +1577,11 @@ export class SignalToOrderBridge {
       // On a flat first entry with sellableFlow on, SKIP rather than enter an
       // un-sellable / over-budget position — the floor guarantee must survive it.
       const finalEntryPrice = makerOverride != null ? makerOverride.price : executionTerms.price;
+      // Effective (post-override) pricing mode — makerOverride converts an opportunistic taker into a
+      // genuine maker (postOnly:true, non-crossing price). Computed once and used CONSISTENTLY in both
+      // cmd.metadata (the first-entry adaptive-TTL discriminator) and the conversion log/metric below,
+      // so persisted orders and observability never disagree.
+      const effectivePricingMode = makerOverride != null ? "maker" : executionTerms.pricedMode;
       const belowFloor = sellableShareFloor != null && orderSize + 1e-9 < sellableShareFloor;
       const overMaxEntry =
         finalEntryPrice > 0 &&
@@ -1655,6 +1660,10 @@ export class SignalToOrderBridge {
         decisionRuleId: signal.decisionRuleId,
         signalTimestamp: signal.generatedAt,
         metadata: {
+          // Effective (post-override) pricing mode — the first-entry adaptive TTL reads this to keep
+          // marketable-taker residuals on the short probe leash. "maker" when makerOverride converts an
+          // opportunistic taker into a genuine maker, else the resolver mode. See effectivePricingMode.
+          executionPricingMode: effectivePricingMode,
           cacheStatus: pricing.cacheStatus,
           marketData: {
             bookSource: market.bookSource ?? "unknown",
@@ -1687,7 +1696,7 @@ export class SignalToOrderBridge {
           size: cmd.size,
           postOnly: cmd.postOnly ?? null,
           pricingMode: policy.pricing.mode,
-          executionPricingMode: executionTerms.pricedMode,
+          executionPricingMode: effectivePricingMode,
           ...(executionTerms.pricingDiagnostics
             ? { pricingDiagnostics: executionTerms.pricingDiagnostics }
             : {}),

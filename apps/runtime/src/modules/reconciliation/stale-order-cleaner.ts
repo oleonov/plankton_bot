@@ -1102,11 +1102,13 @@ function shouldWarnStuckSell(
 }
 
 function resolveOrderTtlMs(
-  order: Pick<Order, "signalReason" | "decisionRuleId">,
+  order: Pick<Order, "signalReason" | "decisionRuleId" | "metadata">,
   market: Pick<Market, "horizon"> | null,
 ): number {
-  // tradeCount3h intentionally omitted — the cleaner is not the live eviction path, so a GATE order
-  // gets the 12h cap (never the 10-min probe TTL) and is not cancelled prematurely here.
+  // tradeCount3h intentionally omitted — the cleaner is not the live eviction path. Orders that
+  // qualify for the adaptive first-entry TTL (usesAdaptiveFirstEntryTtl) therefore get the 12h cap
+  // here instead of a shorter TTL and are not cancelled prematurely; every order the predicate rejects
+  // keeps its existing horizon / probe / scale-in TTL.
   return resolveEntryBuyOrderTtlMs(order, market);
 }
 

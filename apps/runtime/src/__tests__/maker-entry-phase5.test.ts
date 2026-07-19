@@ -262,6 +262,22 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
     expect(placed[0]?.entryStyle).toBe("maker");
     expect(placed[0]?.price).toBeCloseTo(0.1);
     expect(placed[0]?.size).toBeCloseTo(50);
+    // 2026-07-19 taker-residual guard: a makerOverride-converted order persists the EFFECTIVE mode
+    // "maker" (never the raw resolver mode), so the first-entry adaptive TTL keeps applying to it.
+    expect(placed[0]?.metadata?.executionPricingMode).toBe("maker");
+  });
+
+  it("1b. opportunistic-taker base + makerOverride → persists effective mode 'maker', not 'taker'", async () => {
+    const makerEntry = makeMakerEntryPolicy({ microMaxOrderUsdc: 5 });
+    // Tight 2-tick spread (bid=0.09, ask=0.11) makes the opportunistic-taker resolver fire first
+    // (pricedMode="taker", price=ask). The R23 whitelist then applies makerOverride → non-crossing
+    // maker price 0.10, postOnly:true. The persisted executionPricingMode must reflect the override.
+    const { placed, skipped } = await runBridge(makeSignal(), { makerEntry }, { bestAsk: 0.11 });
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]?.postOnly).toBe(true);
+    expect(placed[0]?.metadata?.executionPricingMode).toBe("maker");
   });
 
   it("2. non-whitelisted condition → standard order (no maker override)", async () => {

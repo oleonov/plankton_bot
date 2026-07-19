@@ -344,6 +344,11 @@ describe("cleanStaleEntryOrders", () => {
       signalReason: "probe-entry",
       decisionRuleId: GATE_ENTRY_RULE_ID,
     });
+    // Adaptive first-entry TTL requires a present market row (2026-07-19 plan finding #2: a missing
+    // row falls back to the conservative 10-min probe TTL for every lane, GATE included). Real GATE
+    // markets always have a row, so pin the intended 12h-cap behavior with one. endDate stays null so
+    // the endDate-safety-window branch never fires.
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(makeMarket({ horizon: null }));
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
 
     const cancelled: any[] = [];
@@ -365,6 +370,9 @@ describe("cleanStaleEntryOrders", () => {
       signalReason: "probe-entry",
       decisionRuleId: GATE_ENTRY_RULE_ID,
     });
+    // Present market row so this genuinely tests the 12h cap boundary (see finding #2 note above),
+    // not the fall-through 10-min probe path.
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(makeMarket({ horizon: null }));
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
 
     const cancelled: any[] = [];
