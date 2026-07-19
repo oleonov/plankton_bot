@@ -347,8 +347,6 @@ describe("Overview Balance Card", () => {
     expect((await screen.findAllByText("EXITS ONLY")).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/Signals 47 produced \/ 0 rejected/)).toBeInTheDocument();
     expect(screen.getByText(/Orders 0 active \/ 0 queued/)).toBeInTheDocument();
-    expect(screen.getByText("BUY 1/25")).toBeInTheDocument();
-    expect(screen.getByText("SELL 39/200")).toBeInTheDocument();
     expect(
       screen.getByText(/Entry capacity exhausted|Only exit signals active/i),
     ).toBeInTheDocument();
@@ -534,9 +532,6 @@ describe("Overview Balance Card", () => {
     const riskCapacity = screen.getByTestId("risk-capacity-card");
     expect(within(riskCapacity).getByText("4/25")).toBeInTheDocument();
     expect(within(riskCapacity).getByText("12/200")).toBeInTheDocument();
-
-    expect(screen.getByText("BUY 4/25")).toBeInTheDocument();
-    expect(screen.getByText("SELL 12/200")).toBeInTheDocument();
   });
 
   it("keeps Last Events focused on timestamped events only", async () => {

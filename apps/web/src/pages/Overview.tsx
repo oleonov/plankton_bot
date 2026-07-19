@@ -802,7 +802,6 @@ export function Overview() {
   const execution = status.executionTelemetry24h;
   const makerPct = execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
   const leakagePct = execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
-  const orderCapacity = resolveOrderCapacity(status);
 
   return (
     <div className="page">
@@ -925,14 +924,6 @@ export function Overview() {
               color: "var(--text-dim)",
             }}
           >
-            <span>
-              BUY {formatOrderBreakdownValue(orderCapacity.buyOpen)}/
-              {formatOrderBreakdownValue(orderCapacity.buyCap)}
-            </span>
-            <span>
-              SELL {formatOrderBreakdownValue(orderCapacity.sellOpen)}/
-              {formatOrderBreakdownValue(orderCapacity.sellCap)}
-            </span>
             {tradingActivityWarnings(status).map((warning) => (
               <span key={warning} style={{ color: "var(--orange)" }}>
                 {warning}
