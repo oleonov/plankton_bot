@@ -2,6 +2,49 @@ import { describe, expect, it } from "vitest";
 
 import { DEFAULT_EXECUTION_PROFILE_POLICY, parseExecutionPolicyJson } from "../execution-policy.js";
 
+describe("sellableFlow policy", () => {
+  it("defaults to OFF (byte-identical behaviour when off)", () => {
+    const sf = parseExecutionPolicyJson(null).policy.sellableFlow;
+    expect(sf).toMatchObject({ enabled: false, buffer: 1.2, maxEntryUsdc: 5, appliesFromMs: null });
+  });
+
+  it("fail-closed: enabled:true with appliesFromMs=null forces enabled=false", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({ sellableFlow: { enabled: true, appliesFromMs: null } }),
+    );
+    expect(parsed.policy.sellableFlow.enabled).toBe(false);
+    expect(parsed.issues.some((i) => i.includes("appliesFromMs"))).toBe(true);
+  });
+
+  it("enables only with an explicit appliesFromMs cutoff", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({ sellableFlow: { enabled: true, appliesFromMs: 1_700_000_000_000 } }),
+    );
+    expect(parsed.policy.sellableFlow).toMatchObject({
+      enabled: true,
+      appliesFromMs: 1_700_000_000_000,
+    });
+  });
+
+  // Codex H5 fix: a malformed non-null appliesFromMs must fail closed to
+  // null/disabled, never silently fall back to 0 (epoch zero) — 0 is itself
+  // a valid non-null timestamp that would satisfy the enabled-requires-
+  // cutoff check and enable bounce-for-all for every position ever opened.
+  // (NaN can't be represented in real JSON text, so only type-mismatches
+  // reachable through the actual JSON-string API are exercised here.)
+  it.each([
+    ["a non-numeric string", '"not-a-timestamp"'],
+    ["an object", '{"bad":true}'],
+  ])("fail-closed: %s appliesFromMs is treated as null, not 0", (_label, rawJsonValue) => {
+    const parsed = parseExecutionPolicyJson(
+      `{"sellableFlow":{"enabled":true,"appliesFromMs":${rawJsonValue}}}`,
+    );
+    expect(parsed.policy.sellableFlow.enabled).toBe(false);
+    expect(parsed.policy.sellableFlow.appliesFromMs).toBeNull();
+    expect(parsed.issues.some((i) => i.includes("appliesFromMs"))).toBe(true);
+  });
+});
+
 describe("execution profile signal feed policy", () => {
   it("defaults signal feed and real-feed consumption to dark", () => {
     const policy = parseExecutionPolicyJson(null).policy.executionProfile;

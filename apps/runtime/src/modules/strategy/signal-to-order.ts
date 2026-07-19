@@ -56,6 +56,7 @@ import {
   BOUNCE_EXIT_TARGET_RULE_ID,
   isBounceForceExit,
   isGateWhitelisted,
+  resolveSellableShareFloor,
 } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
 import { buildClientOrderId, buildPartialExitClientOrderId } from "@krabs/domain/node";
@@ -1096,6 +1097,15 @@ export class SignalToOrderBridge {
       // the binding constraint on this rung's own size).
       const bounceOriginalPositionSize = signal.bounceRung?.originalPositionSize ?? null;
       const bounceRemainingPositionSize = signal.bounceRung?.remainingPositionSize ?? null;
+      // Codex H4 fix: when sellableFlow is on, decision-planner.ts carries the
+      // fill-aware `uncommittedRemainder` on the rung metadata — prefer it as
+      // the rollover's oversell ceiling so a merge never expands past what is
+      // genuinely still uncommitted (soldShares + openCommitment already
+      // account for actual fills/resting orders the leg-level
+      // remainingPositionSize can't see). Absent when the flag is off, so the
+      // rollover falls back to the original leg-level basis unchanged.
+      const bounceRolloverCeiling =
+        signal.bounceRung?.uncommittedRemainder ?? bounceRemainingPositionSize;
       // Micro cap enforcement, sizing side (docs/plans/2026-07-15-gate-bounce-
       // live-experiment.md, Phase 4 / Codex C3): GATE BUY notional must never
       // exceed gateEntry.microMaxOrderUsdc. execution-module.ts enforces the
@@ -1116,9 +1126,15 @@ export class SignalToOrderBridge {
       // grows the size back up to clear the exchange minimum — never
       // re-capped afterward, since the exchange floor takes precedence over
       // this soft risk cap once rolling forward is already required.
+      // CAP-EXEMPT for the Phase-3 residual "cleanup" rung (docs/plans/
+      // 2026-07-19-sellable-sizing-bounce-for-all.md): that order was
+      // deliberately sized to clear the ladder's fill-aware uncommitted
+      // remainder in one shot — re-fragmenting it below that size here would
+      // strand shares the same way the cleanup rung exists to prevent.
       if (
         signal.side === "sell" &&
         signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+        signal.bounceRung?.isCleanupRung !== true &&
         policy.bounceExit.microMaxOrderUsdc > 0 &&
         executionTerms.price > 0
       ) {
@@ -1126,13 +1142,93 @@ export class SignalToOrderBridge {
         orderSize = Math.min(orderSize, bounceCapSize);
       }
       const effectiveMinOrderSize = resolveEffectiveMinOrderSize(market.minOrderSize);
+
+      // Sellable-sizing floor (Phase 2, docs/plans/2026-07-19-sellable-sizing-
+      // bounce-for-all.md): a FLAT FIRST ENTRY (buyCount===0, i.e. signal.reason
+      // === "probe-entry" — same idiom tryMakerEntryOverride above already uses
+      // for this concept) must be sized so every bounce-ladder rung clears the
+      // exchange min_order_size, or the position has no legal SELL later
+      // (bot_pnl_exit_root_cause_2026-07-19.md: 352 held-to-zero positions,
+      // -$387). Scale-ins/adds are NEVER bumped (H6 — averaging down is
+      // plankton's #1 realized loss driver). Gated behind sellableFlow.enabled
+      // — OFF is byte-identical to today.
+      const isFlatFirstEntryBuy = signal.side === "buy" && signal.reason === "probe-entry";
+      let sellableShareFloor: number | null = null;
+      if (policy.sellableFlow.enabled && isFlatFirstEntryBuy) {
+        sellableShareFloor = resolveSellableShareFloor({
+          minOrderSize: market.minOrderSize,
+          ladderFractions: policy.bounceExit.ladderFractions,
+          buffer: policy.sellableFlow.buffer,
+        });
+        if (sellableShareFloor == null) {
+          this.log.info(
+            {
+              signalId: signal.signalId,
+              tokenId: signal.tokenId,
+              minOrderSize: market.minOrderSize ?? null,
+            },
+            "approved BUY skipped — sellable-sizing floor unknown (min_order_size unknown)",
+          );
+          await this.publishConversionSkipped(signal, "execution-terms", ["entry_unknown_min"], {
+            cacheStatus: pricing.cacheStatus,
+            minOrderSize: market.minOrderSize ?? null,
+          });
+          this.writeObservation({
+            signal,
+            clientOrderId: null,
+            market,
+            policy,
+            executionTerms,
+            canary,
+            sellPricingShadow,
+            skippedReason: "entry_unknown_min",
+          });
+          return;
+        }
+        const sellableFloorNotionalUsdc = sellableShareFloor * executionTerms.price;
+        if (sellableFloorNotionalUsdc > policy.sellableFlow.maxEntryUsdc) {
+          this.log.info(
+            {
+              signalId: signal.signalId,
+              tokenId: signal.tokenId,
+              sellableShareFloor,
+              sellableFloorNotionalUsdc,
+              maxEntryUsdc: policy.sellableFlow.maxEntryUsdc,
+            },
+            "approved BUY skipped — sellable-sizing floor exceeds max entry notional",
+          );
+          await this.publishConversionSkipped(signal, "execution-terms", ["entry_not_sellable"], {
+            cacheStatus: pricing.cacheStatus,
+            sellableShareFloor,
+            sellableFloorNotionalUsdc,
+            maxEntryUsdc: policy.sellableFlow.maxEntryUsdc,
+          });
+          this.writeObservation({
+            signal,
+            clientOrderId: null,
+            market,
+            policy,
+            executionTerms,
+            canary,
+            sellPricingShadow,
+            skippedReason: "entry_not_sellable",
+          });
+          return;
+        }
+        // Never down-size (H6-safe): only ever bumps orderSize up to the floor.
+        orderSize = Math.max(orderSize, sellableShareFloor);
+      }
+
       let positionConcentrationMetadata: Record<string, unknown> | null = null;
       if (signal.side === "buy" && this.deps.positionConcentration) {
         const concentrationDecision = this.deps.positionConcentration.evaluateBuy({
           tokenId: signal.tokenId,
           conditionId: signal.conditionId,
           candidateNotionalUsdc: orderSize * executionTerms.price,
-          minExecutableNotionalUsdc: effectiveMinOrderSize * executionTerms.price,
+          minExecutableNotionalUsdc:
+            sellableShareFloor != null
+              ? Math.max(effectiveMinOrderSize, sellableShareFloor) * executionTerms.price
+              : effectiveMinOrderSize * executionTerms.price,
           policy: policy.positionConcentration,
           stage: "signal_to_order",
           signalReason: signal.reason,
@@ -1192,13 +1288,11 @@ export class SignalToOrderBridge {
       let bounceRungOverride: BounceRungMetadata | null = null;
       if (!isExecutableOrderSize(orderSize, market.minOrderSize)) {
         const rollover =
-          signal.bounceRung &&
-          bounceOriginalPositionSize != null &&
-          bounceRemainingPositionSize != null
+          signal.bounceRung && bounceOriginalPositionSize != null && bounceRolloverCeiling != null
             ? resolveBounceRungRollover(
                 signal.bounceRung,
                 bounceOriginalPositionSize,
-                bounceRemainingPositionSize,
+                bounceRolloverCeiling,
                 policy.bounceExit.ladderFractions,
                 market.minOrderSize,
               )
@@ -1474,6 +1568,51 @@ export class SignalToOrderBridge {
       );
       if (makerOverride != null) {
         orderSize = makerOverride.size;
+      }
+
+      // The maker-entry override can (a) shrink orderSize back BELOW the sellable
+      // floor via its own micro-cap, or (b) RAISE the entry price so the sellable
+      // floor's notional (size × price) exceeds maxEntryUsdc — the pre-override
+      // maxEntryUsdc/floor checks used the un-overridden price (Codex audit r2).
+      // On a flat first entry with sellableFlow on, SKIP rather than enter an
+      // un-sellable / over-budget position — the floor guarantee must survive it.
+      const finalEntryPrice = makerOverride != null ? makerOverride.price : executionTerms.price;
+      const belowFloor = sellableShareFloor != null && orderSize + 1e-9 < sellableShareFloor;
+      const overMaxEntry =
+        finalEntryPrice > 0 &&
+        orderSize * finalEntryPrice > policy.sellableFlow.maxEntryUsdc + 1e-9;
+      if (policy.sellableFlow.enabled && isFlatFirstEntryBuy && (belowFloor || overMaxEntry)) {
+        this.log.info(
+          {
+            signalId: signal.signalId,
+            tokenId: signal.tokenId,
+            orderSize,
+            sellableShareFloor,
+            finalEntryPrice,
+            finalNotionalUsdc: orderSize * finalEntryPrice,
+            maxEntryUsdc: policy.sellableFlow.maxEntryUsdc,
+            reason: belowFloor ? "below_floor_after_override" : "over_max_entry_after_override",
+          },
+          "approved BUY skipped — sellable-sizing invariant broken after maker-entry override",
+        );
+        await this.publishConversionSkipped(signal, "execution-terms", ["entry_not_sellable"], {
+          cacheStatus: pricing.cacheStatus,
+          orderSize,
+          sellableShareFloor,
+          finalNotionalUsdc: orderSize * finalEntryPrice,
+          maxEntryUsdc: policy.sellableFlow.maxEntryUsdc,
+        });
+        this.writeObservation({
+          signal,
+          clientOrderId: null,
+          market,
+          policy,
+          executionTerms,
+          canary,
+          sellPricingShadow,
+          skippedReason: "entry_not_sellable",
+        });
+        return;
       }
 
       // Track S5 P1 — a partial exit (size override present) uses a slot-bucketed
@@ -3074,9 +3213,30 @@ export class SignalToOrderBridge {
         if (order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID) return false;
         if (order.status === "cancelled" || order.status === "rejected") return false;
         const existingRung = order.metadata?.bounceRung as
-          | { ladderId?: string; rungIndex?: number; rungIndicesCovered?: number[] }
+          | {
+              ladderId?: string;
+              rungIndex?: number;
+              rungIndicesCovered?: number[];
+              isCleanupRung?: boolean;
+            }
           | undefined;
         if (!existingRung || existingRung.ladderId !== bounceRung.ladderId) return false;
+        // Codex C2 fix: a cleanup rung deliberately reuses the LAST
+        // configured rung's own index (docs/plans/2026-07-19-sellable-
+        // sizing-bounce-for-all.md, Phase 3), which the ordinary ladder
+        // already marks "placed" — matching by index would make the
+        // duplicate check always collide with that earlier, unrelated
+        // order and the cleanup rung would never place. A cleanup rung is
+        // only a duplicate of ANOTHER already-resting cleanup rung, which
+        // still enforces "only one cleanup rung open at a time".
+        // Codex r2 fix: only a still-OPEN cleanup rung is a duplicate. A
+        // TERMINAL (filled) cleanup can carry a within-tolerance shortfall
+        // leaving a real >=min residual; the planner must be able to emit a
+        // fresh cleanup for it rather than have the bridge suppress it as a
+        // "duplicate" of the filled one and strand the residual.
+        if (bounceRung.isCleanupRung === true) {
+          return existingRung.isCleanupRung === true && isOpenOrderStatus(order.status);
+        }
         const existingIndices = Array.isArray(existingRung.rungIndicesCovered)
           ? existingRung.rungIndicesCovered
           : typeof existingRung.rungIndex === "number"
@@ -3717,23 +3877,26 @@ function resolveOrderSize(
  * Fractions are computed against `originalPositionSize` (fixed at first
  * entry, Codex Phase-2 fix — see decision-planner.ts) so a merge of several
  * rungs' fractions still reflects their true share of the position; the
- * merged size is then capped to `remainingPositionSize` so the roll-forward
- * never oversells beyond what is actually still available to sell.
+ * merged size is then capped to `oversellCeiling` so the roll-forward never
+ * oversells beyond what is actually still available to sell. The caller
+ * passes the fill-aware `uncommittedRemainder` here when sellableFlow is on
+ * (Codex H4 fix), and the leg-level `remainingPositionSize` otherwise —
+ * this function itself is agnostic to which basis it received.
  */
 function resolveBounceRungRollover(
   bounceRung: BounceRungMetadata,
   originalPositionSize: number,
-  remainingPositionSize: number,
+  oversellCeiling: number,
   ladderFractions: readonly number[],
   minOrderSize: number | null | undefined,
 ): { size: number; metadata: BounceRungMetadata } | null {
-  if (!(originalPositionSize > 0) || !(remainingPositionSize > 0)) return null;
+  if (!(originalPositionSize > 0) || !(oversellCeiling > 0)) return null;
   let cumulativeFraction = 0;
   const rungIndicesCovered: number[] = [];
   for (let idx = bounceRung.rungIndex; idx < ladderFractions.length; idx++) {
     cumulativeFraction += ladderFractions[idx] ?? 0;
     rungIndicesCovered.push(idx);
-    const mergedSize = Math.min(cumulativeFraction * originalPositionSize, remainingPositionSize);
+    const mergedSize = Math.min(cumulativeFraction * originalPositionSize, oversellCeiling);
     if (isExecutableOrderSize(mergedSize, minOrderSize)) {
       return {
         size: mergedSize,

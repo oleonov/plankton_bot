@@ -1394,6 +1394,10 @@ async function main(): Promise<void> {
     algoRulesRepo: repos.algoRules,
     positionRepo: repos.position,
     orderRepo: repos.order,
+    // Fill-aware bounce-ladder accounting (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md):
+    // resolveBounceLadderState uses actual fills to compute soldShares/openCommitment and prevent
+    // oversell. Also improves the already-live GATE-lane bounce accounting.
+    fillRepo: repos.fill,
     ledgerDb: ledgerConn.db,
     decisionSignalLogRepo: repos.decisionSignalLog,
     riskEventRepo: repos.riskEvent,

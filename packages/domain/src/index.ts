@@ -14,6 +14,7 @@ export * from "./slug-pattern.js";
 export * from "./trading-state.js";
 export * from "./algo-engine.js";
 export * from "./market-selection.js";
+export * from "./sellable-sizing.js";
 export * from "./strike-classifier.js";
 export * from "./effective-resolution.js";
 export * from "./buy-guards.js";

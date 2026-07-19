@@ -184,6 +184,23 @@ function executionPolicy(overrides: Partial<ExecutionPolicy> = {}): ExecutionPol
   };
 }
 
+// Codex C1 fix (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md): the
+// fill-aware sizing/completion path is new Phase-3 behavior gated behind
+// sellableFlow.enabled — GATE eligibility itself never consults appliesFromMs,
+// so any cutoff value is fine here; used only by tests that deliberately
+// exercise the flag-ON fill-aware path.
+function sellableFlowOnPolicy(overrides: Partial<ExecutionPolicy> = {}): ExecutionPolicy {
+  return executionPolicy({
+    sellableFlow: {
+      enabled: true,
+      buffer: 1.2,
+      maxEntryUsdc: 5,
+      appliesFromMs: now - ONE_MINUTE_MS,
+    },
+    ...overrides,
+  });
+}
+
 function input(overrides: Partial<DecisionPlanningInput> = {}): DecisionPlanningInput {
   return {
     tokenId,
@@ -336,27 +353,184 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
   // Residual-capping half of the fix: if the residual has shrunk below what
   // this rung's own fraction of the ORIGINAL basis would imply (e.g. an
   // externally-reduced position), the rung must still never oversell beyond
-  // what is actually left.
-  it("caps a rung's size to the available residual when the residual is smaller than fraction x original", () => {
+  // what is actually left. Phase 3 (docs/plans/2026-07-19-sellable-sizing-
+  // bounce-for-all.md) moved this cap's BASIS from the leg-level
+  // cumulativeBuySize/cumulativeSellSize delta to fill-aware
+  // bounceLadderSoldShares/bounceLadderOpenCommitment (requires
+  // sellableFlow.enabled — Codex C1 fix) — cumulativeSellSize:85 is set here
+  // too only so the (unrelated, still leg-level) remainingPositionSize
+  // metadata field keeps reading a realistic value.
+  it("caps a rung's size to the fill-aware uncommitted remainder when it is smaller than fraction x original (sellableFlow on)", () => {
     const result = evaluateDecisionPlan(
       input({
         legState: leg({ cumulativeSellSize: 85 }),
         placedBounceRungIndices: [0],
+        bounceLadderSoldShares: 85,
+        executionPolicy: sellableFlowOnPolicy(),
       }),
     );
     expect(result.type).toBe("signal");
     if (result.type !== "signal") return;
-    // fraction(0.4) x original(100) = 40, but only 15 remains — capped to 15.
+    // fraction(0.4) x original(100) = 40, but only 15 remains uncommitted — capped to 15.
     expect(result.signal.suggestedSize).toBeCloseTo(15, 10);
+    // remainingPositionSize is the separate, unchanged leg-level metric (still
+    // consumed by signal-to-order.ts's min-order rollover) — 100 - 85 = 15
+    // here too, but derived independently of the fill-aware cap above.
     expect(result.signal.bounceRung?.remainingPositionSize).toBeCloseTo(15, 10);
   });
 
-  it("SUPPRESSES (no re-emission) once every rung is placed — ladder complete, no backstop yet", () => {
-    const result = evaluateDecisionPlan(input({ placedBounceRungIndices: [0, 1, 2] }));
+  // Proves the invariant is actually fill-aware, not leg-level: cumulativeSellSize
+  // (leg-level) says nothing has sold, but bounceLadderSoldShares (actual fills)
+  // says 85 have — the cap must follow the fill-aware figure. Requires
+  // sellableFlow.enabled (Codex C1 fix) — see the flag-off byte-identity
+  // block below for the same scenario with the flag off.
+  it("caps by bounceLadderSoldShares even when legState.cumulativeSellSize disagrees (sellableFlow on)", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        legState: leg({ cumulativeSellSize: 0 }),
+        placedBounceRungIndices: [0],
+        bounceLadderSoldShares: 85,
+        executionPolicy: sellableFlowOnPolicy(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedSize).toBeCloseTo(15, 10);
+    // remainingPositionSize stays the (unrelated) leg-level 100 - 0 = 100.
+    expect(result.signal.bounceRung?.remainingPositionSize).toBeCloseTo(100, 10);
+  });
+
+  // A resting (not-yet-filled) rung counts against the residual too, via
+  // bounceLadderOpenCommitment — otherwise the next cycle could double-place
+  // it. Requires sellableFlow.enabled (Codex C1 fix).
+  it("caps a rung's size by bounceLadderOpenCommitment (a still-resting earlier rung, sellableFlow on)", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        placedBounceRungIndices: [0],
+        bounceLadderOpenCommitment: 70,
+        executionPolicy: sellableFlowOnPolicy(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    // fraction(0.4) x original(100) = 40, but only 30 is uncommitted — capped to 30.
+    expect(result.signal.suggestedSize).toBeCloseTo(30, 10);
+  });
+
+  it("SUPPRESSES (no re-emission) once every rung is placed AND fully committed — ladder complete, no backstop yet", () => {
+    const result = evaluateDecisionPlan(
+      input({ placedBounceRungIndices: [0, 1, 2], bounceLadderSoldShares: 100 }),
+    );
     expect(result.type).toBe("none");
     expect(result.suppressions.map((item) => item.reasonCode)).toContain(
       "bounce-exit-ladder-complete",
     );
+  });
+
+  // Phase 3 residual-driven completion: every configured rung is placed, but
+  // the fill-aware residual (100 - 70 = 30) still clears market().minOrderSize
+  // (5) — must NOT complete/suppress; instead sell the residual via a
+  // cap-exempt "cleanup" rung at the LAST configured rung's own target price.
+  // Requires sellableFlow.enabled (Codex C1 fix) — see the flag-off
+  // byte-identity block below for the same scenario with the flag off.
+  it("emits a cap-exempt cleanup rung sized to the uncommitted remainder once every rung is placed but the residual still clears the exchange minimum (sellableFlow on)", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        placedBounceRungIndices: [0, 1, 2],
+        bounceLadderSoldShares: 70,
+        executionPolicy: sellableFlowOnPolicy(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe(BOUNCE_EXIT_TARGET_RULE_ID);
+    // Same price as rung2 (the last configured rung, index 2 of [0.3,0.4,0.3]).
+    expect(result.signal.suggestedPrice).toBeCloseTo(0.18, 10);
+    expect(result.signal.suggestedSize).toBeCloseTo(30, 10);
+    expect(result.signal.bounceRung).toMatchObject({
+      rungIndex: 2,
+      originalPositionSize: 100,
+      isCleanupRung: true,
+    });
+  });
+
+  // Sub-min dust (a physical exchange limit) is accepted, not chased — the
+  // ladder completes/suppresses rather than emitting an unplaceable rung.
+  // Requires sellableFlow.enabled: with the flag off this would suppress
+  // anyway (see the byte-identity block below), but for the RIGHT reason
+  // here it must be the sub-min-dust check, not the flag-off shortcut.
+  it("does NOT emit a cleanup rung when the uncommitted remainder is below the exchange minimum — accepts the dust and suppresses (sellableFlow on)", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        placedBounceRungIndices: [0, 1, 2],
+        bounceLadderSoldShares: 97, // remainder 3 < minOrderSize 5
+        executionPolicy: sellableFlowOnPolicy(),
+      }),
+    );
+    expect(result.type).toBe("none");
+    expect(result.suppressions.map((item) => item.reasonCode)).toContain(
+      "bounce-exit-ladder-complete",
+    );
+  });
+
+  // Codex C1 fix — flag-off byte-identity: the exact same scenarios above
+  // (fill-aware sold/open-commitment data present, e.g. because fillRepo is
+  // now wired) must NOT change GATE behaviour when sellableFlow.enabled is
+  // false (the default/production-today state). Sizing must use the ORIGINAL
+  // leg-level remainingPositionSize (ignoring bounceLadderSoldShares/
+  // bounceLadderOpenCommitment entirely), and ladder completion must use the
+  // ORIGINAL unconditional suppression (never emit a cleanup rung), exactly
+  // as decision-planner.ts behaved before Phase 3.
+  describe("Codex C1 fix — flag-off byte-identity (sellableFlow.enabled: false, the default)", () => {
+    it("sizes a rung from the ORIGINAL leg-level remainingPositionSize, ignoring bounceLadderSoldShares fill data", () => {
+      const result = evaluateDecisionPlan(
+        input({
+          legState: leg({ cumulativeSellSize: 0 }),
+          placedBounceRungIndices: [0],
+          bounceLadderSoldShares: 85, // would cap to 15 if fill-aware (flag on) — must be ignored here
+        }),
+      );
+      expect(result.type).toBe("signal");
+      if (result.type !== "signal") return;
+      // fraction(0.4) x original(100) = 40, capped only by the ORIGINAL
+      // leg-level remainingPositionSize (100 - cumulativeSellSize:0 = 100).
+      expect(result.signal.suggestedSize).toBeCloseTo(40, 10);
+      expect(result.signal.bounceRung).toEqual({
+        ladderId: `${tokenId}:${leg().firstTradeAt}`,
+        rungIndex: 1,
+        anchorPrice: 0.1,
+        fraction: 0.4,
+        originalPositionSize: 100,
+        remainingPositionSize: 100,
+        // uncommittedRemainder is absent (Codex H4 fix — byte-identical
+        // metadata shape) when the flag is off.
+      });
+    });
+
+    it("sizes a rung from the ORIGINAL leg-level remainingPositionSize, ignoring bounceLadderOpenCommitment fill data", () => {
+      const result = evaluateDecisionPlan(
+        input({
+          placedBounceRungIndices: [0],
+          bounceLadderOpenCommitment: 70, // would cap to 30 if fill-aware (flag on) — must be ignored here
+        }),
+      );
+      expect(result.type).toBe("signal");
+      if (result.type !== "signal") return;
+      expect(result.signal.suggestedSize).toBeCloseTo(40, 10);
+    });
+
+    it("keeps the ORIGINAL unconditional-suppress completion — no cleanup rung — even though the fill-aware residual would clear the exchange minimum", () => {
+      const result = evaluateDecisionPlan(
+        input({
+          placedBounceRungIndices: [0, 1, 2],
+          bounceLadderSoldShares: 70, // fill-aware residual 30 clears minOrderSize 5 — would emit a cleanup rung if flag on
+        }),
+      );
+      expect(result.type).toBe("none");
+      expect(result.suppressions.map((item) => item.reasonCode)).toContain(
+        "bounce-exit-ladder-complete",
+      );
+    });
   });
 
   it("anchors every rung to legState.firstTradePrice, not the position's (mutable) avgEntryPrice", () => {
@@ -591,5 +765,125 @@ describe("bounce-exit SELL branch (decision-planner) — non-GATE lanes untouche
     expect(result.type).toBe("signal");
     if (result.type !== "signal") return;
     expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
+  });
+});
+
+// Phase 4 (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md): the same
+// laddered bounce-exit that used to be GATE-lane-exclusive now also governs
+// any OTHER open position, but only once sellableFlow.enabled AND only for
+// positions opened at/after its appliesFromMs cutoff — pre-cutoff positions
+// keep flowing through the normal D8/D9 stack exactly as before (untouched).
+describe("bounce-exit SELL branch (decision-planner) — Phase 4 bounce-for-all", () => {
+  const CUTOFF_MS = Date.parse("2026-06-01T00:00:00.000Z");
+
+  function sellableFlowPolicy(overrides: Partial<ExecutionPolicy> = {}): ExecutionPolicy {
+    return executionPolicy({
+      sellableFlow: { enabled: true, buffer: 1.2, maxEntryUsdc: 5, appliesFromMs: CUTOFF_MS },
+      ...overrides,
+    });
+  }
+
+  it("governs a non-GATE position opened AT/AFTER appliesFromMs exactly like a GATE position (rung0)", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        position: position({
+          entryLane: null,
+          openedAt: new Date(CUTOFF_MS + 1_000).toISOString(),
+        }),
+        executionPolicy: sellableFlowPolicy(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe(BOUNCE_EXIT_TARGET_RULE_ID);
+    expect(result.signal.suggestedPrice).toBeCloseTo(0.12, 10);
+    expect(result.signal.suggestedSize).toBeCloseTo(30, 10);
+  });
+
+  function profitableLegInput(
+    overrides: Partial<DecisionPlanningInput> = {},
+  ): DecisionPlanningInput {
+    return input({
+      legState: leg({ buyCount: 1, cumulativeBuySize: 100, cumulativeBuyNotional: 5 }),
+      position: position({ avgEntryPrice: 0.05, size: 100 }),
+      market: market({ bestBid: 0.08, bestAsk: 0.09, midPrice: 0.085, spread: 0.01 }),
+      executionPolicy: sellableFlowPolicy({
+        profitTarget: { ...DEFAULT_EXECUTION_POLICY.profitTarget, holdSecondsMin: 0 },
+      }),
+      ...overrides,
+    });
+  }
+
+  it("leaves a non-GATE position opened BEFORE appliesFromMs untouched — D8 still owns it", () => {
+    const result = evaluateDecisionPlan(
+      profitableLegInput({
+        position: position({
+          avgEntryPrice: 0.05,
+          size: 100,
+          entryLane: null,
+          openedAt: new Date(CUTOFF_MS - 1_000).toISOString(),
+        }),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
+  });
+
+  it("falls through to D8/D9 (not suppressed) once a bounce-for-all ladder is dust-complete and no rung is resting", () => {
+    const result = evaluateDecisionPlan(
+      profitableLegInput({
+        position: position({
+          avgEntryPrice: 0.05,
+          size: 100,
+          entryLane: null,
+          openedAt: new Date(CUTOFF_MS + 1_000).toISOString(),
+        }),
+        placedBounceRungIndices: [0, 1, 2],
+        bounceLadderSoldShares: 100,
+        hasOpenBounceRung: false,
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe("D8_PROFIT_RATIO");
+  });
+
+  it("stays suppressed (does not fall through) while a bounce rung is still resting, even once the ladder is otherwise dust-complete", () => {
+    const result = evaluateDecisionPlan(
+      profitableLegInput({
+        position: position({
+          avgEntryPrice: 0.05,
+          size: 100,
+          entryLane: null,
+          openedAt: new Date(CUTOFF_MS + 1_000).toISOString(),
+        }),
+        placedBounceRungIndices: [0, 1, 2],
+        bounceLadderSoldShares: 100,
+        hasOpenBounceRung: true,
+      }),
+    );
+    expect(result.type).toBe("none");
+    expect(result.suppressions.map((item) => item.reasonCode)).toContain(
+      "bounce-exit-ladder-complete",
+    );
+  });
+
+  it("still emits a cap-exempt cleanup rung for a non-GATE bounce-for-all position, same as GATE", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        position: position({
+          entryLane: null,
+          openedAt: new Date(CUTOFF_MS + 1_000).toISOString(),
+        }),
+        executionPolicy: sellableFlowPolicy(),
+        placedBounceRungIndices: [0, 1, 2],
+        bounceLadderSoldShares: 70,
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.bounceRung).toMatchObject({ isCleanupRung: true });
+    expect(result.signal.suggestedSize).toBeCloseTo(30, 10);
   });
 });

@@ -48,6 +48,13 @@ export interface PositionConcentrationEvaluateInput {
   tokenId: TokenId;
   conditionId: ConditionId | string | null | undefined;
   candidateNotionalUsdc: number;
+  /**
+   * Threshold below which a clamp is not worth placing — `clamp()` never
+   * returns less than this (it skips instead). Normally the exchange's min
+   * order notional; a caller enforcing the sellable-sizing floor (docs/plans/
+   * 2026-07-19-sellable-sizing-bounce-for-all.md) passes the floor's notional
+   * instead, so a clamp can never land the BUY below the sellable floor.
+   */
   minExecutableNotionalUsdc: number;
   policy: ExecutionPolicy["positionConcentration"];
   stage: PositionConcentrationStage;

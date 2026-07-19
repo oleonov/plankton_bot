@@ -753,11 +753,17 @@ export class ExecutionModule implements RuntimeModule {
     // independent execution-side enforcement so a malformed/direct
     // PlaceOrderRequested can't place an over-cap rung. The BACKSTOP taker is
     // explicitly exempt — it liquidates whatever residual remains and must
-    // not be capped like a resting rung.
+    // not be capped like a resting rung. The Phase-3 "cleanup" rung (Codex C2
+    // fix, docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md) is
+    // exempt for the same reason: it's deliberately sized to clear the
+    // ladder's fill-aware uncommitted residual in one shot, and re-capping it
+    // here would strand shares the same way the cleanup rung exists to
+    // prevent (mirrors signal-to-order.ts's own cap-exemption check).
     if (
       cmd.side === "sell" &&
       cmd.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
-      !isBounceBackstop
+      !isBounceBackstop &&
+      !this.isCleanupBounceRungCommand(cmd)
     ) {
       const bounceExitPolicy = this.deps.executionPolicy?.()?.bounceExit;
       if (
@@ -1374,6 +1380,18 @@ export class ExecutionModule implements RuntimeModule {
    * (see the `resolveMaxOpenSellOrdersPerToken` carve-out above), and the
    * backstop cancels all of them, so all of them must be excluded here too.
    */
+  /**
+   * Codex C2 fix (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md,
+   * Phase 3): identifies the residual-driven "cleanup" bounce rung so the
+   * microMaxOrderUsdc cap check above can exempt it — mirrors the same
+   * `isCleanupRung` flag signal-to-order.ts's own cap-exemption reads off
+   * `signal.bounceRung`, here read off the command's persisted metadata.
+   */
+  private isCleanupBounceRungCommand(cmd: PlaceOrderCommand): boolean {
+    const bounceRung = cmd.metadata?.bounceRung as { isCleanupRung?: boolean } | undefined;
+    return bounceRung?.isCleanupRung === true;
+  }
+
   private excludeBounceTargetBeingReplaced(
     openOrders: Order[],
     cmd: PlaceOrderCommand | undefined,

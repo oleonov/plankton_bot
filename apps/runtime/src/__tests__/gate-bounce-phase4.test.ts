@@ -377,6 +377,204 @@ describe("SignalToOrderBridge — bounce rung duplicate guard scoped to ladderId
       "sell-order-acceptable-price-already-open",
     );
   });
+
+  // Codex C2 fix (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md):
+  // the residual-driven "cleanup" rung deliberately reuses the LAST
+  // configured rung's own index, which the ordinary ladder already marks
+  // "placed" — the generic ladderId+rungIndex duplicate check must not treat
+  // that pre-existing (unrelated) order as a collision, or the cleanup rung
+  // would never place.
+  it("places a cleanup rung (isCleanupRung) even though its reused rungIndex matches an already-resting ORDINARY rung at that index", async () => {
+    const ladderId = "tok-gate-bounce:4000";
+    const restingRung2 = makeOrder({
+      price: 0.18,
+      status: "open",
+      metadata: { bounceRung: { ladderId, rungIndex: 2, anchorPrice: 0.1, fraction: 0.3 } },
+    });
+    const orderRepo = { findByTokenId: vi.fn().mockReturnValue([restingRung2]) };
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: 0.18,
+      suggestedSize: 30,
+      suggestedSizeUsdc: 30 * 0.18,
+      bounceRung: {
+        ladderId,
+        rungIndex: 2,
+        anchorPrice: 0.1,
+        fraction: 0.3,
+        originalPositionSize: 100,
+        remainingPositionSize: 30,
+        uncommittedRemainder: 30,
+        isCleanupRung: true,
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 100,
+    };
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      { marketOverrides: { bestBid: 0.1, bestAsk: 0.2, tickSize: 0.01 }, orderRepo },
+    );
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(
+      (placed[0]!.metadata?.bounceRung as { isCleanupRung?: boolean } | undefined)?.isCleanupRung,
+    ).toBe(true);
+  });
+
+  // A cleanup rung is still a duplicate of ANOTHER already-resting cleanup
+  // rung at the same ladder — "only one cleanup rung open at a time" must
+  // still be enforced, the C2 fix only exempts the reused-index collision.
+  it("still treats an already-resting CLEANUP rung as a true duplicate of a new cleanup rung on the same ladder", async () => {
+    const ladderId = "tok-gate-bounce:4001";
+    const restingCleanup = makeOrder({
+      price: 0.18,
+      status: "open",
+      metadata: {
+        bounceRung: {
+          ladderId,
+          rungIndex: 2,
+          anchorPrice: 0.1,
+          fraction: 0.3,
+          isCleanupRung: true,
+        },
+      },
+    });
+    const orderRepo = { findByTokenId: vi.fn().mockReturnValue([restingCleanup]) };
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: 0.18,
+      suggestedSize: 30,
+      suggestedSizeUsdc: 30 * 0.18,
+      bounceRung: {
+        ladderId,
+        rungIndex: 2,
+        anchorPrice: 0.1,
+        fraction: 0.3,
+        originalPositionSize: 100,
+        remainingPositionSize: 30,
+        uncommittedRemainder: 30,
+        isCleanupRung: true,
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 100,
+    };
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      { marketOverrides: { bestBid: 0.1, bestAsk: 0.2, tickSize: 0.01 }, orderRepo },
+    );
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect((skipped[0] as { reasons: string[] }).reasons).toContain(
+      "sell-order-acceptable-price-already-open",
+    );
+  });
+
+  // Codex r2 fix: a TERMINAL (filled) cleanup rung is NOT a duplicate. The
+  // reconciler can mark a cleanup filled with a within-tolerance shortfall,
+  // leaving a real >=min residual; a fresh cleanup for that residual must NOT
+  // be suppressed as a "duplicate" of the already-filled one (else the residual
+  // is stranded forever).
+  it("does NOT treat an already-FILLED cleanup rung as a duplicate — a fresh cleanup for the leftover residual places", async () => {
+    const ladderId = "tok-gate-bounce:4003";
+    const filledCleanup = makeOrder({
+      price: 0.18,
+      status: "filled", // terminal — reconciler marked it filled within shortfall tolerance
+      metadata: {
+        bounceRung: {
+          ladderId,
+          rungIndex: 2,
+          anchorPrice: 0.1,
+          fraction: 0.3,
+          isCleanupRung: true,
+        },
+      },
+    });
+    const orderRepo = { findByTokenId: vi.fn().mockReturnValue([filledCleanup]) };
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: 0.18,
+      suggestedSize: 30,
+      suggestedSizeUsdc: 30 * 0.18,
+      bounceRung: {
+        ladderId,
+        rungIndex: 2,
+        anchorPrice: 0.1,
+        fraction: 0.3,
+        originalPositionSize: 100,
+        remainingPositionSize: 30,
+        uncommittedRemainder: 30,
+        isCleanupRung: true,
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 100,
+    };
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      { marketOverrides: { bestBid: 0.1, bestAsk: 0.2, tickSize: 0.01 }, orderRepo },
+    );
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(
+      (placed[0]!.metadata?.bounceRung as { isCleanupRung?: boolean } | undefined)?.isCleanupRung,
+    ).toBe(true);
+  });
+
+  // Codex C2 fix, bridge-side half: the cleanup rung is deliberately sized to
+  // clear the ladder's fill-aware residual in one shot — the bridge's own
+  // bounceExit.microMaxOrderUsdc soft cap must not fragment it back down.
+  it("does not shrink a cleanup rung below its residual size via the bridge's own micro cap", async () => {
+    const ladderId = "tok-gate-bounce:4002";
+    const price = 0.18;
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: price,
+      suggestedSize: 30,
+      suggestedSizeUsdc: 30 * price,
+      bounceRung: {
+        ladderId,
+        rungIndex: 2,
+        anchorPrice: 0.1,
+        fraction: 0.3,
+        originalPositionSize: 100,
+        remainingPositionSize: 30,
+        uncommittedRemainder: 30,
+        isCleanupRung: true,
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 2, // 30 * 0.18 = $5.40 notional, far above this cap
+    };
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      { marketOverrides: { bestBid: 0.1, bestAsk: 0.2, tickSize: 0.01, minOrderSize: 5 } },
+    );
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.size).toBeCloseTo(30, 5);
+  });
 });
 
 describe("SignalToOrderBridge — bounce ladder rollover re-checked against the micro cap (FIX 4)", () => {
@@ -479,6 +677,112 @@ describe("SignalToOrderBridge — bounce ladder rollover re-checked against the 
       (placed[0]!.metadata?.bounceRung as { rungIndicesCovered?: number[] } | undefined)
         ?.rungIndicesCovered,
     ).toEqual([0, 1]);
+  });
+
+  // Codex H4 fix: decision-planner.ts carries the fill-aware
+  // uncommittedRemainder on the rung metadata only when sellableFlow is on —
+  // the rollover must prefer it over the leg-level remainingPositionSize so a
+  // merge never expands past what is genuinely still uncommitted.
+  it("caps a rollover merge to the fill-aware uncommittedRemainder, not the leg-level remainingPositionSize", async () => {
+    const ladderId = "tok-gate-bounce:2002";
+    const price = 0.15;
+    // Same rollover mechanics as the tests above (fraction 0.3 alone is below
+    // minOrderSize=50, so rung0+rung1 merge to cumulative fraction 0.7 = 70
+    // shares against the leg-level remainingPositionSize=100), but here
+    // uncommittedRemainder=60 (fill-aware, smaller) is also present. Pre-fix,
+    // the rollover read remainingPositionSize (100) and would have merged to
+    // 70 shares uncapped by the smaller fill-aware ceiling; the fix must cap
+    // the merge to 60 instead.
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: price,
+      suggestedSize: 30,
+      suggestedSizeUsdc: 30 * price,
+      bounceRung: {
+        ladderId,
+        rungIndex: 0,
+        anchorPrice: 0.1,
+        fraction: 0.3,
+        originalPositionSize: 100,
+        remainingPositionSize: 100,
+        uncommittedRemainder: 60,
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 20,
+      ladderFractions: [0.3, 0.4, 0.3],
+    };
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      {
+        marketOverrides: {
+          bestBid: 0.1,
+          bestAsk: 0.2,
+          tickSize: 0.01,
+          minOrderSize: 50,
+        },
+      },
+    );
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    // 70 (leg-level cap) would be the pre-H4-fix result — must be 60 (fill-aware).
+    expect(placed[0]!.size).toBeCloseTo(60, 5);
+    expect(
+      (placed[0]!.metadata?.bounceRung as { rungIndicesCovered?: number[] } | undefined)
+        ?.rungIndicesCovered,
+    ).toEqual([0, 1]);
+  });
+
+  // Flag-off byte-identity companion: without uncommittedRemainder on the
+  // metadata (the shape when sellableFlow is off — Codex H4 fix), the
+  // rollover must fall back to the ORIGINAL leg-level remainingPositionSize
+  // basis exactly as before, merging to 70 shares.
+  it("falls back to the leg-level remainingPositionSize when uncommittedRemainder is absent from the metadata (sellableFlow off)", async () => {
+    const ladderId = "tok-gate-bounce:2003";
+    const price = 0.15;
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: price,
+      suggestedSize: 30,
+      suggestedSizeUsdc: 30 * price,
+      bounceRung: {
+        ladderId,
+        rungIndex: 0,
+        anchorPrice: 0.1,
+        fraction: 0.3,
+        originalPositionSize: 100,
+        remainingPositionSize: 100,
+        // uncommittedRemainder intentionally absent.
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 20,
+      ladderFractions: [0.3, 0.4, 0.3],
+    };
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      {
+        marketOverrides: {
+          bestBid: 0.1,
+          bestAsk: 0.2,
+          tickSize: 0.01,
+          minOrderSize: 50,
+        },
+      },
+    );
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.size).toBeCloseTo(70, 5);
   });
 });
 
@@ -1296,6 +1600,57 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_BACKSTOP executio
         sequenceInTick: 0,
         signalReason: "probe-entry",
         decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(placed).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  // Codex C2 fix (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md):
+  // the residual-driven "cleanup" rung is deliberately sized to clear the
+  // ladder's fill-aware uncommitted residual in one shot — the execution-side
+  // microMaxOrderUsdc cap must exempt it the same way it already exempts the
+  // BOUNCE_EXIT_BACKSTOP taker, or the cleanup rung would be rejected right
+  // back into the very residual it exists to clear.
+  it("does NOT cap a cleanup rung (isCleanupRung) at the same over-microMaxOrderUsdc notional — the cleanup rung is exempt from the bounce micro cap", async () => {
+    const { bus, gateway, mod } = makeExecModule(undefined, undefined, () => ({
+      ...DEFAULT_EXECUTION_POLICY,
+      bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, microMaxOrderUsdc: 2 },
+    }));
+    await mod.start();
+
+    const placed: unknown[] = [];
+    const rejected: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-cleanup-over-cap"),
+        clientOrderId: "plk_cleanup_over_cap" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.2, // same over-cap notional ($10) — cleanup rung must still proceed
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: { isCleanupRung: true } },
       } satisfies PlaceOrderCommand,
       timestamp: NOW,
     });

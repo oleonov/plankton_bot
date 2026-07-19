@@ -39,6 +39,8 @@ import type {
   Position,
   Order,
   OrderRepository,
+  Fill,
+  FillRepository,
   S1OwnershipReader,
   SellOrderSizingContext,
   MakerShadowOrder,
@@ -506,6 +508,16 @@ export interface AlgoDecisionModuleDeps {
   orderRepo?:
     | Pick<OrderRepository, "findByTokenId" | "findRecentByTokenId" | "findOpen">
     | undefined;
+  /**
+   * Phase 3 fill-aware bounce-ladder accounting (docs/plans/2026-07-19-
+   * sellable-sizing-bounce-for-all.md) — `resolveBounceLadderState` uses this
+   * to compute ACTUAL filled shares per bounce-ladder order (reusing the same
+   * findByOrderIds/findByOrderId fill-reduction shape as
+   * modules/execution/reservation-utils.ts). Optional: omitted only by tests
+   * that don't exercise bounce-ladder sizing (soldShares/openCommitment then
+   * default to 0, matching pre-Phase-3 behavior).
+   */
+  fillRepo?: Pick<FillRepository, "findByOrderId" | "findByOrderIds"> | undefined;
   /**
    * Read-only startup recovery for recent BUY no-order-id rejects. The live
    * event path owns the cooldown in memory, but deploy/restart must not clear a
@@ -1741,9 +1753,22 @@ export class AlgoDecisionModule implements RuntimeModule {
             executionPolicy.dropTrigger.historyMaxAgeMs,
           )
         : null;
+    // Phase 4 bounce-for-all (docs/plans/2026-07-19-sellable-sizing-bounce-
+    // for-all.md): resolve ladder state for ANY eligible open position, not
+    // just GATE — gated by isBounceLadderEligiblePosition's appliesFromMs
+    // cutoff, so pre-flag positions are untouched.
+    const bounceLadderEligible =
+      legState != null &&
+      position != null &&
+      this.isBounceLadderEligiblePosition(position, executionPolicy, legState.firstTradeAt);
+    // fillAware = sellableFlow actually on — only then does the planner USE the
+    // fill-aware fields, so only then do we pay (and risk) the fillRepo read.
+    const fillAware =
+      executionPolicy?.sellableFlow?.enabled === true &&
+      executionPolicy.sellableFlow.appliesFromMs != null;
     const bounceLadderState =
-      position?.entryLane === "GATE" && legState
-        ? this.resolveBounceLadderState(tokenId, `${tokenId}:${legState.firstTradeAt}`)
+      bounceLadderEligible && legState
+        ? this.resolveBounceLadderState(tokenId, `${tokenId}:${legState.firstTradeAt}`, fillAware)
         : null;
 
     return {
@@ -1769,10 +1794,12 @@ export class AlgoDecisionModule implements RuntimeModule {
       hasActiveSellOrderForQd: legState ? this.hasActiveSellOrderForQd(tokenId) : false,
       placedBounceRungIndices: bounceLadderState?.placedRungIndices ?? [],
       originalLadderPositionSize: bounceLadderState?.originalPositionSize ?? null,
-      hasActiveSellOrderForBounceBackstop:
-        position?.entryLane === "GATE" && legState
-          ? this.hasActiveSellOrderForBounceBackstop(tokenId)
-          : false,
+      bounceLadderSoldShares: bounceLadderState?.soldShares ?? 0,
+      bounceLadderOpenCommitment: bounceLadderState?.openCommitment ?? 0,
+      hasOpenBounceRung: bounceLadderState?.hasOpenBounceRung ?? false,
+      hasActiveSellOrderForBounceBackstop: bounceLadderEligible
+        ? this.hasActiveSellOrderForBounceBackstop(tokenId)
+        : false,
       sellLoopGuard: this.deps.sellLoopGuard?.getSnapshot(tokenId, now) ?? null,
       s1Ownership: this.deps.s1Ownership?.getSnapshot(tokenId) ?? null,
       profileLadderOwned: this.deps.profileLadderOwnership?.isProfileLadderOwned(tokenId) ?? false,
@@ -2004,9 +2031,23 @@ export class AlgoDecisionModule implements RuntimeModule {
   private resolveBounceLadderState(
     tokenId: TokenId,
     ladderId: string,
-  ): { placedRungIndices: readonly number[]; originalPositionSize: number | null } {
+    fillAware: boolean,
+  ): {
+    placedRungIndices: readonly number[];
+    originalPositionSize: number | null;
+    soldShares: number;
+    openCommitment: number;
+    hasOpenBounceRung: boolean;
+  } {
     const repo = this.deps.orderRepo;
-    if (!repo) return { placedRungIndices: [], originalPositionSize: null };
+    const emptyState = {
+      placedRungIndices: [],
+      originalPositionSize: null,
+      soldShares: 0,
+      openCommitment: 0,
+      hasOpenBounceRung: false,
+    };
+    if (!repo) return emptyState;
     const indices = new Set<number>();
     // MIN, not first-seen: pins to whatever the smallest recorded value ever
     // was across all placed rungs. Since cumulativeBuySize only grows (an add
@@ -2014,10 +2055,17 @@ export class AlgoDecisionModule implements RuntimeModule {
     // ever recorded is necessarily the earliest (pre-add) one, regardless of
     // repository iteration order.
     let originalPositionSize: number | null = null;
+    // Phase 3 fill-aware accounting (docs/plans/2026-07-19-sellable-sizing-
+    // bounce-for-all.md): every non-rejected BOUNCE_EXIT_TARGET order on this
+    // ladder, INCLUDING cancelled ones — a cancel-then-repost cycle must not
+    // let an already-sold partial fill vanish from the accounting below.
+    // Rejected orders never receive exchange fills, so they're excluded
+    // exactly as before.
+    const ladderOrders: Order[] = [];
     for (const order of repo.findByTokenId(tokenId)) {
       if (order.side !== "sell") continue;
       if (order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID) continue;
-      if (order.status === "cancelled" || order.status === "rejected") continue;
+      if (order.status === "rejected") continue;
       const bounceRung = order.metadata?.bounceRung as
         | {
             ladderId?: string;
@@ -2027,24 +2075,125 @@ export class AlgoDecisionModule implements RuntimeModule {
           }
         | undefined;
       if (!bounceRung || bounceRung.ladderId !== ladderId) continue;
-      // rungIndicesCovered (min-order rollover) marks every absorbed index as
-      // placed, not just the order's own rungIndex.
-      if (Array.isArray(bounceRung.rungIndicesCovered)) {
-        for (const covered of bounceRung.rungIndicesCovered) {
-          if (typeof covered === "number") indices.add(covered);
+      // Cancelled rungs are NOT "placed" — they get retried (unchanged from
+      // pre-Phase-3 behavior) — but they still flow into `ladderOrders` below
+      // so any partial fill they carry counts toward soldShares.
+      if (order.status !== "cancelled") {
+        // rungIndicesCovered (min-order rollover) marks every absorbed index
+        // as placed, not just the order's own rungIndex.
+        if (Array.isArray(bounceRung.rungIndicesCovered)) {
+          for (const covered of bounceRung.rungIndicesCovered) {
+            if (typeof covered === "number") indices.add(covered);
+          }
+        } else if (typeof bounceRung.rungIndex === "number") {
+          indices.add(bounceRung.rungIndex);
         }
-      } else if (typeof bounceRung.rungIndex === "number") {
-        indices.add(bounceRung.rungIndex);
+        if (
+          typeof bounceRung.originalPositionSize === "number" &&
+          Number.isFinite(bounceRung.originalPositionSize) &&
+          (originalPositionSize === null || bounceRung.originalPositionSize < originalPositionSize)
+        ) {
+          originalPositionSize = bounceRung.originalPositionSize;
+        }
       }
-      if (
-        typeof bounceRung.originalPositionSize === "number" &&
-        Number.isFinite(bounceRung.originalPositionSize) &&
-        (originalPositionSize === null || bounceRung.originalPositionSize < originalPositionSize)
-      ) {
-        originalPositionSize = bounceRung.originalPositionSize;
+      ladderOrders.push(order);
+    }
+
+    // Flag-off failure-mode identity (Codex audit r4): the fill-aware read hits
+    // fillRepo (a DB/ledger read that can throw). When sellableFlow is off the
+    // planner ignores these fields entirely (GATE keeps its original index-driven
+    // path), so skip the read — a fillRepo error must not kill a GATE decision
+    // that master would have completed. placedRungIndices/originalPositionSize
+    // (no fillRepo) are still resolved as before.
+    const { soldShares, openCommitment, hasOpenBounceRung } = fillAware
+      ? this.sumBounceLadderFills(ladderOrders)
+      : { soldShares: 0, openCommitment: 0, hasOpenBounceRung: false };
+    return {
+      placedRungIndices: Array.from(indices),
+      originalPositionSize,
+      soldShares,
+      openCommitment,
+      hasOpenBounceRung,
+    };
+  }
+
+  // Fill-reduction pattern mirrors modules/execution/reservation-utils.ts:50
+  // (`getFilledSizeByOrderId`/`getRemainingOrderSize`) — duplicated rather
+  // than imported since that helper is module-private there and this plan's
+  // scope budget doesn't include touching that file to export it.
+  private sumBounceLadderFills(ladderOrders: readonly Order[]): {
+    soldShares: number;
+    openCommitment: number;
+    hasOpenBounceRung: boolean;
+  } {
+    const fillRepo = this.deps.fillRepo;
+    const filledSizeByOrderId = new Map<string, number>();
+    if (fillRepo && ladderOrders.length > 0) {
+      const fills: Fill[] =
+        fillRepo.findByOrderIds?.(ladderOrders.map((order) => order.orderId)) ??
+        ladderOrders.flatMap((order) => fillRepo.findByOrderId(order.orderId));
+      for (const fill of fills) {
+        const key = String(fill.orderId);
+        filledSizeByOrderId.set(key, (filledSizeByOrderId.get(key) ?? 0) + fill.size);
       }
     }
-    return { placedRungIndices: Array.from(indices), originalPositionSize };
+    let soldShares = 0;
+    let openCommitment = 0;
+    let hasOpenBounceRung = false;
+    for (const order of ladderOrders) {
+      const key = String(order.orderId);
+      // Codex H3 fix: the reconciler marks an order "filled" within a 0.5%
+      // shortfall tolerance, so a "filled" order's ACTUAL fills can be
+      // slightly less than order.size — flooring at order.size whenever real
+      // fill data exists would overstate soldShares and hide a real
+      // (potentially >= min-order-size) residual on a large/cheap position.
+      // Real fill data — any row the ledger actually returned for this
+      // order (`.has`, not `?? 0`) — always wins. The order.size floor is a
+      // fallback ONLY when the ledger has NO data at all for this order
+      // (fillRepo unwired entirely, or a genuine ledger gap for a "filled"
+      // order), so the never-oversell invariant still holds without data.
+      const filled = filledSizeByOrderId.has(key)
+        ? filledSizeByOrderId.get(key)!
+        : order.status === "filled"
+          ? order.size
+          : 0;
+      soldShares += filled;
+      if (!isWorkingSellOrderStatus(order.status ?? null)) continue;
+      const remaining = Math.max(0, order.size - filled);
+      openCommitment += remaining;
+      if (remaining > 0) hasOpenBounceRung = true;
+    }
+    return { soldShares, openCommitment, hasOpenBounceRung };
+  }
+
+  // Phase 4 bounce-for-all eligibility (docs/plans/2026-07-19-sellable-sizing-
+  // bounce-for-all.md): GATE-lane positions are always eligible (unchanged
+  // pre-Phase-4 behavior); any other open position becomes eligible only once
+  // sellableFlow is enabled AND only from its cutoff forward — positions
+  // opened before appliesFromMs are pre-flagged and stay on the D8/D9 stack.
+  // Mirrored (duplicated, not imported) in decision-planner.ts's identical
+  // predicate — the two modules don't share a util file in this plan's scope.
+  private isBounceLadderEligiblePosition(
+    position: Position,
+    executionPolicy: ExecutionPolicy | null,
+    firstTradeAt: string | null,
+  ): boolean {
+    if (position.entryLane === "GATE") return true;
+    const sellableFlow = executionPolicy?.sellableFlow;
+    if (!sellableFlow?.enabled || sellableFlow.appliesFromMs == null) return false;
+    // Fail-closed cutoff (Codex audit r1): require BOTH `openedAt` AND the leg's
+    // real first-fill time to be valid and >= cutoff. Startup adoption re-stamps
+    // `openedAt` to the adoption wall-clock, so `openedAt` alone can read
+    // post-cutoff for a position actually first filled before the cutoff — the
+    // `firstTradeAt` check keeps the operator's pre-flag positions off bounce-for-all.
+    const openedAtMs = Date.parse(position.openedAt);
+    const firstTradeAtMs = firstTradeAt != null ? Date.parse(firstTradeAt) : NaN;
+    return (
+      Number.isFinite(openedAtMs) &&
+      openedAtMs >= sellableFlow.appliesFromMs &&
+      Number.isFinite(firstTradeAtMs) &&
+      firstTradeAtMs >= sellableFlow.appliesFromMs
+    );
   }
 
   private async resolveContinuationFactsForPlanner(

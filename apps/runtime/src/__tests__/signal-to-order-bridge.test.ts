@@ -253,6 +253,25 @@ function makerOnlyPolicy(overrides?: Partial<ExecutionPolicy>): ExecutionPolicy 
   };
 }
 
+// Sellable-sizing floor test policy (docs/plans/2026-07-19-sellable-sizing-
+// bounce-for-all.md, Phase 2): ladderFractions=[0.1,0.2,0.3,0.4] + minOrderSize=5
+// gives a floor of exactly 60 shares (5 / 0.1 * 1.2 = 60, the plan's own worked
+// example) — chosen over the default [0.3,0.4,0.3] fractions purely to keep the
+// expected numbers integer-clean in assertions.
+function sellableFlowPolicy(overrides?: Partial<ExecutionPolicy["sellableFlow"]>): ExecutionPolicy {
+  return {
+    ...DEFAULT_EXECUTION_POLICY,
+    bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, ladderFractions: [0.1, 0.2, 0.3, 0.4] },
+    sellableFlow: {
+      enabled: true,
+      buffer: 1.2,
+      maxEntryUsdc: 10,
+      appliesFromMs: 1,
+      ...overrides,
+    },
+  };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -439,6 +458,203 @@ describe("SignalToOrderBridge", () => {
     expect(placed).toHaveLength(0);
     expect(skipped).toHaveLength(1);
     expect(skipped[0]!.reasons).toEqual(["position-concentration-below_min_after_clamp"]);
+  });
+
+  it("bumps a flat-first-entry BUY up to the sellable-sizing floor when sellableFlow is enabled", async () => {
+    const bus = new InProcessEventBus();
+    const policy = sellableFlowPolicy();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => policy,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { size: number; price: number } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload as never);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), suggestedSize: 25, suggestedSizeUsdc: 1 },
+      market: makeMarket({ bestBid: 0.04, bestAsk: 0.04, midPrice: 0.04, minOrderSize: 5 }),
+      approvedAt: NOW,
+    });
+
+    // Unbumped size would be suggestedSizeUsdc / price = 1 / 0.04 = 25 shares,
+    // below the 60-share floor — the bridge must bump up to the floor, never down.
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.size).toBeCloseTo(60);
+  });
+
+  it("never bumps a scale-in BUY to the sellable-sizing floor (H6 — never averages down)", async () => {
+    const bus = new InProcessEventBus();
+    const policy = sellableFlowPolicy();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => policy,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { size: number; price: number } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload as never);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), suggestedSize: 25, suggestedSizeUsdc: 1, reason: "confirm-scale" },
+      market: makeMarket({ bestBid: 0.04, bestAsk: 0.04, midPrice: 0.04, minOrderSize: 5 }),
+      approvedAt: NOW,
+    });
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.size).toBeCloseTo(25);
+  });
+
+  it("skips a flat-first-entry BUY with entry_unknown_min when market.minOrderSize is unknown", async () => {
+    const bus = new InProcessEventBus();
+    const policy = sellableFlowPolicy();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => policy,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: unknown[] = [];
+    const skipped: Array<{ reasons: readonly string[] }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+    bus.subscribe("SignalConversionSkipped", async (payload) => {
+      skipped.push(payload);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      // makeMarket() default has no minOrderSize override — unknown min.
+      market: makeMarket({ bestBid: 0.04, bestAsk: 0.04, midPrice: 0.04 }),
+      approvedAt: NOW,
+    });
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toEqual(["entry_unknown_min"]);
+  });
+
+  it("skips a flat-first-entry BUY with entry_not_sellable when the floor's notional exceeds maxEntryUsdc", async () => {
+    const bus = new InProcessEventBus();
+    const policy = sellableFlowPolicy({ maxEntryUsdc: 1 });
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => policy,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: unknown[] = [];
+    const skipped: Array<{ reasons: readonly string[] }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+    bus.subscribe("SignalConversionSkipped", async (payload) => {
+      skipped.push(payload);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      // floor = 60 shares @ 0.04 = $2.40 notional > $1 maxEntryUsdc.
+      market: makeMarket({ bestBid: 0.04, bestAsk: 0.04, midPrice: 0.04, minOrderSize: 5 }),
+      approvedAt: NOW,
+    });
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toEqual(["entry_not_sellable"]);
+  });
+
+  it("leaves BUY sizing byte-identical when sellableFlow is disabled (default)", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => DEFAULT_EXECUTION_POLICY,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { size: number; price: number } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload as never);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), suggestedSize: 25, suggestedSizeUsdc: 1 },
+      // Same market as the bump-to-floor test (minOrderSize=5) — with the flag
+      // off, sizing must stay exactly what it was before Phase 2 existed.
+      market: makeMarket({ bestBid: 0.04, bestAsk: 0.04, midPrice: 0.04, minOrderSize: 5 }),
+      approvedAt: NOW,
+    });
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.size).toBeCloseTo(25);
+  });
+
+  it("passes the sellable-sizing floor as the concentration minExecutableNotionalUsdc for a flat-first-entry BUY", async () => {
+    const bus = new InProcessEventBus();
+    const policy = sellableFlowPolicy();
+    const evaluateBuy = vi.fn(() => ({
+      action: "allow",
+      reason: "under_caps",
+      concentrationKey: "condition:cond-1",
+      keyType: "condition",
+      fallbackReason: null,
+      effectiveNotionalUsdc: 2.4,
+      metrics: null,
+    }));
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => policy,
+      positionConcentration: { evaluateBuy } as never,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { size: number; price: number } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload as never);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), suggestedSize: 25, suggestedSizeUsdc: 1 },
+      market: makeMarket({ bestBid: 0.04, bestAsk: 0.04, midPrice: 0.04, minOrderSize: 5 }),
+      approvedAt: NOW,
+    });
+
+    // orderSize is bumped 25 -> 60 (the floor) BEFORE concentration runs, so both
+    // the candidate and the floor guard reflect the post-bump 60-share size —
+    // 60 * 0.04 = $2.40 either way (effectiveMinOrderSize=5 < shareFloor=60, so
+    // the floor wins the max()).
+    expect(evaluateBuy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidateNotionalUsdc: expect.closeTo(2.4, 5),
+        minExecutableNotionalUsdc: expect.closeTo(2.4, 5),
+      }),
+    );
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.size).toBeCloseTo(60);
   });
 
   it("does not block order publication on execution-policy observation writes", async () => {

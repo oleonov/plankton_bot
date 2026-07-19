@@ -58,6 +58,7 @@ import type {
   MakerEntryPolicy,
   GateEntryPolicy,
   BounceExitPolicy,
+  SellableFlowPolicy,
   BounceExitTargetTier,
   TrackRHonestPricingPolicy,
   TrackS3MarginAwareSpreadPolicy,
@@ -662,6 +663,13 @@ export const DEFAULT_BOUNCE_EXIT: BounceExitPolicy = {
   microMaxOrderUsdc: 2,
 };
 
+export const DEFAULT_SELLABLE_FLOW: SellableFlowPolicy = {
+  enabled: false,
+  buffer: 1.2,
+  maxEntryUsdc: 5,
+  appliesFromMs: null,
+};
+
 export const DEFAULT_LOSS_EXIT_POLICY: D9LossExitPolicy = {
   enabled: false,
   // minPublicTradeCount24h: 41 derived from R96 Q3 best 2D rule
@@ -839,6 +847,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   makerEntry: DEFAULT_MAKER_ENTRY,
   gateEntry: DEFAULT_GATE_ENTRY,
   bounceExit: DEFAULT_BOUNCE_EXIT,
+  sellableFlow: DEFAULT_SELLABLE_FLOW,
 };
 
 const DEAD_SIDE_MODES = ["off", "observe", "enforce"] as const;
@@ -1183,6 +1192,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const makerEntry = parseMakerEntry(obj.makerEntry, issues);
   const gateEntry = parseGateEntry(obj.gateEntry, issues);
   const bounceExit = parseBounceExit(obj.bounceExit, issues);
+  const sellableFlow = parseSellableFlow(obj.sellableFlow, issues);
 
   return {
     policy: {
@@ -1235,6 +1245,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       makerEntry,
       gateEntry,
       bounceExit,
+      sellableFlow,
     },
     issues,
   };
@@ -5505,6 +5516,55 @@ function parseBounceExitLadderFractions(
  * `mode:"off"` instead, so an old `enabled:true` row stays effectively
  * disabled rather than running the ladder with unreviewed defaults.
  */
+/**
+ * Sellable-flow parser — FAIL-CLOSED: `enabled:true` with `appliesFromMs == null`
+ * is forced to `enabled:false`, so bounce-for-all can never touch pre-flag positions
+ * through a mis-set config (the cutoff must be an explicit timestamp to act).
+ */
+function parseSellableFlow(raw: unknown, issues: string[]): SellableFlowPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("sellableFlow must be an object");
+    return DEFAULT_SELLABLE_FLOW;
+  }
+  const obj = raw as Record<string, unknown>;
+  const requestedEnabled = booleanOr(
+    obj.enabled,
+    DEFAULT_SELLABLE_FLOW.enabled,
+    issues,
+    "sellableFlow.enabled",
+  );
+  const buffer = numberOr(obj.buffer, DEFAULT_SELLABLE_FLOW.buffer, issues, "sellableFlow.buffer");
+  const maxEntryUsdc = numberOr(
+    obj.maxEntryUsdc,
+    DEFAULT_SELLABLE_FLOW.maxEntryUsdc,
+    issues,
+    "sellableFlow.maxEntryUsdc",
+  );
+  // Codex H5 fix: a malformed non-null appliesFromMs (wrong type, NaN, etc.)
+  // must become null, never numberOr's numeric fallback — `numberOr(x, 0, …)`
+  // would return 0 for a malformed value, and 0 is a valid non-null
+  // timestamp (epoch zero) that would satisfy the `appliesFromMs != null`
+  // fail-closed check below and silently enable bounce-for-all from 1970
+  // instead of staying off.
+  let appliesFromMs: number | null = null;
+  if (obj.appliesFromMs != null) {
+    if (typeof obj.appliesFromMs === "number" && Number.isFinite(obj.appliesFromMs)) {
+      appliesFromMs = obj.appliesFromMs;
+    } else {
+      issues.push("sellableFlow.appliesFromMs must be a finite number");
+    }
+  }
+  // Fail-closed: enabling without a valid cutoff would let bounce-for-all touch
+  // pre-flag positions — force OFF instead.
+  const enabled = requestedEnabled && appliesFromMs != null;
+  if (requestedEnabled && appliesFromMs == null) {
+    issues.push(
+      "sellableFlow.enabled requires appliesFromMs — forcing enabled=false (fail-closed)",
+    );
+  }
+  return { enabled, buffer, maxEntryUsdc, appliesFromMs };
+}
+
 function parseBounceExit(raw: unknown, issues: string[]): BounceExitPolicy {
   if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
     if (raw !== undefined) issues.push("bounceExit must be an object");

@@ -16,6 +16,8 @@ import type {
 import {
   deriveState,
   evaluateBounceExit,
+  bounceExitTierGain,
+  computeHarvestTarget,
   evaluateContinuation,
   evaluateD8ProfitRatio,
   evaluateD9LossExit,
@@ -396,6 +398,29 @@ export type DecisionPlanningInput = {
    */
   originalLadderPositionSize?: number | null;
   /**
+   * Actual filled shares summed over every BOUNCE_EXIT_TARGET order on this
+   * ladder — open, filled, or cancelled-with-partial-fills (docs/plans/
+   * 2026-07-19-sellable-sizing-bounce-for-all.md, Phase 3; derived in
+   * algo-decision-module.ts via fillRepo). Optional for the same reason as
+   * `placedBounceRungIndices`; missing defaults to 0 (nothing sold yet).
+   */
+  bounceLadderSoldShares?: number;
+  /**
+   * Remaining (size − filled) shares summed over OPEN BOUNCE_EXIT_TARGET
+   * orders only — the ladder's currently-resting commitment. Paired with
+   * `bounceLadderSoldShares` to derive `uncommittedRemainder` in the bounce
+   * branch below. Optional; missing defaults to 0.
+   */
+  bounceLadderOpenCommitment?: number;
+  /** True when at least one BOUNCE_EXIT_TARGET order on this ladder is still
+   * open with remaining size > 0. Phase 4 (docs/plans/2026-07-19-sellable-
+   * sizing-bounce-for-all.md): gates whether a non-GATE bounce-for-all
+   * position may fall through to D8/D9 once the ladder is "complete" — a
+   * still-resting rung must keep suppressing exclusively, exactly like GATE,
+   * so D8/D9 never race a live order on the same position. Optional; missing
+   * defaults to `false`. */
+  hasOpenBounceRung?: boolean;
+  /**
    * Active-sell check for the GATE-scoped bounce-exit backstop (docs/plans/
    * 2026-07-16-bounce-exit-ladder-redesign.md Phase 3, REV3 R2-H1) —
    * deliberately a SEPARATE field from `hasActiveSellOrderForQd` above: the
@@ -732,6 +757,37 @@ export function isWorkingSellOrderStatus(
   return status !== "filled" && status !== "rejected" && status !== "cancelled";
 }
 
+// Phase 4 bounce-for-all eligibility (docs/plans/2026-07-19-sellable-sizing-
+// bounce-for-all.md): GATE-lane positions are always eligible (unchanged
+// pre-Phase-4 behavior); any other open position becomes eligible only once
+// sellableFlow is enabled AND only from its cutoff forward — positions
+// opened before appliesFromMs are pre-flagged and stay on the D8/D9 stack.
+// Mirrored (duplicated, not imported) in algo-decision-module.ts's identical
+// predicate — the two modules don't share a util file in this plan's scope.
+function isBounceLadderEligiblePosition(
+  position: Position,
+  executionPolicy: ExecutionPolicy | null,
+  firstTradeAt: string | null,
+): boolean {
+  if (position.entryLane === "GATE") return true;
+  const sellableFlow = executionPolicy?.sellableFlow;
+  if (!sellableFlow?.enabled || sellableFlow.appliesFromMs == null) return false;
+  // Fail-closed cutoff (Codex audit r1): require BOTH `openedAt` AND the leg's
+  // real first-fill time to be valid and >= cutoff. Startup adoption re-stamps
+  // `openedAt` to the adoption wall-clock (inventory-handler createNewPosition),
+  // so `openedAt` alone can read post-cutoff for a position actually first filled
+  // BEFORE the cutoff — checking `firstTradeAt` too keeps the pre-flag positions
+  // (the operator's protected set) off bounce-for-all.
+  const openedAtMs = Date.parse(position.openedAt);
+  const firstTradeAtMs = firstTradeAt != null ? Date.parse(firstTradeAt) : NaN;
+  return (
+    Number.isFinite(openedAtMs) &&
+    openedAtMs >= sellableFlow.appliesFromMs &&
+    Number.isFinite(firstTradeAtMs) &&
+    firstTradeAtMs >= sellableFlow.appliesFromMs
+  );
+}
+
 /**
  * Emit a Q.D pre-resolution-exit shadow side effect (observe-only) for cheap
  * longshots inside the TTC window — the cohort that can still be held when the
@@ -1037,7 +1093,11 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   // SENSITIVE CLASS: any condition below unmet SUPPRESSES — falls through to
   // D8/D9 exactly as if bounce-exit didn't exist, never substitutes another
   // order. This is what makes bounceExit.enabled:false a true no-op.
-  if (legState && isOpenPosition(input.position) && input.position.entryLane === "GATE") {
+  if (
+    legState &&
+    isOpenPosition(input.position) &&
+    isBounceLadderEligiblePosition(input.position, input.executionPolicy, legState.firstTradeAt)
+  ) {
     const policy = input.executionPolicy;
     const bounceExit = policy?.bounceExit;
     if (
@@ -1074,6 +1134,29 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
         0,
         (emissionFacts.cumulativeBuySize ?? 0) - (emissionFacts.cumulativeSellSize ?? 0),
       );
+      // Phase 3 fill-aware residual (docs/plans/2026-07-19-sellable-sizing-
+      // bounce-for-all.md): the binding constraint on every rung's SIZE is now
+      // ACTUAL committed shares (filled, plus still-resting on this ladder),
+      // not the leg-level cumulativeBuySize/cumulativeSellSize delta above —
+      // `remainingPositionSize` stays exactly as computed above; it is still
+      // the oversell ceiling signal-to-order.ts's separate min-order ROLLOVER
+      // mechanism reads from the `bounceRung` metadata, which this plan does
+      // not touch. Never oversells: soldShares + openCommitment can only grow
+      // toward originalPositionSize, and the subtraction is clamped at 0.
+      const soldShares = input.bounceLadderSoldShares ?? 0;
+      const openCommitment = input.bounceLadderOpenCommitment ?? 0;
+      const uncommittedRemainder = Math.max(0, originalPositionSize - soldShares - openCommitment);
+      // Codex C1 fix (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md):
+      // GATE-lane positions are unconditionally eligible for this branch —
+      // that eligibility predicate is unrelated to the sellableFlow flag and
+      // must stay untouched. But the fill-aware sizing/completion path below
+      // IS new Phase-3 behavior, so it must only engage once the flag is on;
+      // otherwise a GATE ladder's behavior would silently change the moment
+      // fillRepo happens to be wired, breaking flag-off byte-identity. Flag
+      // off uses the ORIGINAL leg-level `remainingPositionSize` cap and the
+      // ORIGINAL unconditional-suppress completion (see the two usages below).
+      const sellableFlowOn = policy?.sellableFlow?.enabled === true;
+      const rungSizeCapBasis = sellableFlowOn ? uncommittedRemainder : remainingPositionSize;
       // Phase 3 (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md): the
       // GATE-scoped backstop wrapper reuses Track Q's Mode-A/B shape but with
       // its OWN active-sell check (ignores bounce rungs — a resting rung must
@@ -1100,7 +1183,129 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
         },
         bounceExit,
       );
-      if (bounceDecision.intent === "none") {
+      if (bounceDecision.intent === "backstop_taker") {
+        return buildSignalOrSuppression({
+          input,
+          market,
+          decision: { action: "SELL", ruleId: BOUNCE_EXIT_BACKSTOP_RULE_ID },
+          buyCount,
+          emissionFacts,
+          triggerTelemetry,
+          suppressions,
+          sideEffects,
+          metrics,
+          nowIso,
+        });
+      }
+      if (bounceDecision.intent === "maker_rung") {
+        return buildSignalOrSuppression({
+          input,
+          market,
+          decision: {
+            action: "SELL",
+            ruleId: BOUNCE_EXIT_TARGET_RULE_ID,
+            // The rung's price is the ladder target itself, computed by
+            // evaluateBounceExit — carried through so resolveActionPrice below
+            // never re-derives it from best-bid/spread guards. The size is the
+            // rung's own fraction of the ORIGINAL position, capped to the
+            // fill-aware uncommittedRemainder (Phase 3) rather than the
+            // leg-level remainingPositionSize whenever sellableFlow is on —
+            // this never oversells even when an earlier rung's own resting
+            // order only partially filled, which the leg-level delta alone
+            // can't see. Flag off keeps the ORIGINAL remainingPositionSize
+            // cap (Codex C1 fix — byte-identical to pre-Phase-3 GATE sizing).
+            explicitPrice: bounceDecision.px,
+            explicitSize: Math.min(
+              bounceDecision.fraction * originalPositionSize,
+              rungSizeCapBasis,
+            ),
+            bounceRung: {
+              ladderId,
+              rungIndex: bounceDecision.rungIndex,
+              anchorPrice: firstEntryPrice,
+              fraction: bounceDecision.fraction,
+              originalPositionSize,
+              remainingPositionSize,
+              // Carried only when sellableFlow is on (Codex H4 fix): lets
+              // signal-to-order.ts's min-order rollover cap its merge to the
+              // fill-aware residual instead of the leg-level
+              // remainingPositionSize — never expanding past what is
+              // genuinely still uncommitted. Omitted entirely when the flag
+              // is off, so the metadata shape stays byte-identical.
+              ...(sellableFlowOn ? { uncommittedRemainder } : {}),
+            },
+          },
+          buyCount,
+          emissionFacts,
+          triggerTelemetry,
+          suppressions,
+          sideEffects,
+          metrics,
+          nowIso,
+        });
+      }
+      // bounceDecision.intent === "none" from here: every configured rung is
+      // already placed, but that doesn't mean the ladder is DONE — a rung's
+      // own resting order can have partially filled below its planned size,
+      // or a cancelled rung's partial fill was never replaced, leaving an
+      // uncommittedRemainder that would otherwise strand shares forever.
+      // Codex C1 fix: this residual-driven completion is new Phase-3
+      // behavior — gated on sellableFlowOn so a GATE-lane position (always
+      // eligible for this whole branch, independent of the flag) keeps its
+      // ORIGINAL unconditional-suppress completion below when the flag is
+      // off, instead of silently gaining a cleanup rung.
+      if (sellableFlowOn && isExecutableOrderSize(uncommittedRemainder, market.minOrderSize)) {
+        // Sell the residual at the LAST configured rung's own target price
+        // (same tier-gain/ladder-step compounding evaluateBounceExit uses
+        // internally for that rung index) rather than leaving it unmanaged.
+        // CAP-EXEMPT downstream: signal-to-order.ts's bounce micro-cap must
+        // never fragment this order back below the size it was deliberately
+        // sized to clear (see `isCleanupRung` on BounceRungMetadata).
+        const lastRungIndex = bounceExit.ladderFractions.length - 1;
+        const lastRungGain =
+          (1 + bounceExitTierGain(bounceExit, firstEntryPrice)) *
+            Math.pow(1 + bounceExit.ladderStepPct, lastRungIndex) -
+          1;
+        const lastRungPrice = computeHarvestTarget(firstEntryPrice, lastRungGain, market.tickSize);
+        return buildSignalOrSuppression({
+          input,
+          market,
+          decision: {
+            action: "SELL",
+            ruleId: BOUNCE_EXIT_TARGET_RULE_ID,
+            explicitPrice: lastRungPrice,
+            explicitSize: uncommittedRemainder,
+            bounceRung: {
+              ladderId,
+              rungIndex: lastRungIndex,
+              anchorPrice: firstEntryPrice,
+              fraction: originalPositionSize > 0 ? uncommittedRemainder / originalPositionSize : 0,
+              originalPositionSize,
+              remainingPositionSize,
+              // Reached only when sellableFlowOn is true (guarded above), so
+              // this is always populated here — kept symmetric with the
+              // maker_rung emission's Codex H4 field above.
+              uncommittedRemainder,
+              isCleanupRung: true,
+            },
+          },
+          buyCount,
+          emissionFacts,
+          triggerTelemetry,
+          suppressions,
+          sideEffects,
+          metrics,
+          nowIso,
+        });
+      }
+      // Residual is sub-min dust (a physical exchange limit — accepted, not
+      // chased). GATE always suppresses exclusively here (unchanged
+      // pre-Phase-4 behavior). A non-GATE bounce-for-all position falls
+      // through to D8/D9 below ONLY once no rung is still resting — otherwise
+      // a live resting order on this position could race a D8/D9 signal.
+      if (input.position.entryLane !== "GATE" && !(input.hasOpenBounceRung ?? false)) {
+        // Fall through to D8/D9 below — no suppression pushed, no return.
+      } else {
         suppressions.push({
           tokenId: market.tokenId,
           conditionId: market.conditionId,
@@ -1116,56 +1321,6 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
         });
         return none(metrics, suppressions, sideEffects);
       }
-      if (bounceDecision.intent === "backstop_taker") {
-        return buildSignalOrSuppression({
-          input,
-          market,
-          decision: { action: "SELL", ruleId: BOUNCE_EXIT_BACKSTOP_RULE_ID },
-          buyCount,
-          emissionFacts,
-          triggerTelemetry,
-          suppressions,
-          sideEffects,
-          metrics,
-          nowIso,
-        });
-      }
-      return buildSignalOrSuppression({
-        input,
-        market,
-        decision: {
-          action: "SELL",
-          ruleId: BOUNCE_EXIT_TARGET_RULE_ID,
-          // The rung's price is the ladder target itself, computed by
-          // evaluateBounceExit — carried through so resolveActionPrice below
-          // never re-derives it from best-bid/spread guards. The size is the
-          // rung's own fraction of the ORIGINAL position (fixed at first
-          // entry), capped to whatever remains available to sell right now —
-          // this never oversells even if the residual has already shrunk
-          // below what the fraction math alone would imply, overriding the
-          // generic sell-sizing-plan (which sizes a full-position exit).
-          explicitPrice: bounceDecision.px,
-          explicitSize: Math.min(
-            bounceDecision.fraction * originalPositionSize,
-            remainingPositionSize,
-          ),
-          bounceRung: {
-            ladderId,
-            rungIndex: bounceDecision.rungIndex,
-            anchorPrice: firstEntryPrice,
-            fraction: bounceDecision.fraction,
-            originalPositionSize,
-            remainingPositionSize,
-          },
-        },
-        buyCount,
-        emissionFacts,
-        triggerTelemetry,
-        suppressions,
-        sideEffects,
-        metrics,
-        nowIso,
-      });
     }
   }
 

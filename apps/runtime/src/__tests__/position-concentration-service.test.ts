@@ -81,6 +81,30 @@ describe("PositionConcentrationService", () => {
     expect(decision.metrics?.remainingCapUsdc).toBe(5);
   });
 
+  it("skips instead of clamping when minExecutableNotionalUsdc reflects a sellable-sizing floor above the clamp cap", () => {
+    // docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md, Phase 2: a caller
+    // enforcing the sellable-sizing floor passes the floor's notional (instead of
+    // the bare exchange minimum) as minExecutableNotionalUsdc, so a clamp can
+    // never land a flat-first-entry BUY below the floor. Same fresh-token setup
+    // as "clamps a small-bankroll first BUY to the $5 gross cap" above (which
+    // clamps to $5 when minExecutableNotionalUsdc=1) — raising
+    // minExecutableNotionalUsdc past the $5 clamp cap flips clamp -> skip.
+    const h = track(createHarness());
+    const decision = h.service.evaluateBuy({
+      tokenId: createTokenId("tok-floor"),
+      conditionId: createConditionId("cond-floor"),
+      candidateNotionalUsdc: 10,
+      minExecutableNotionalUsdc: 6,
+      policy: DEFAULT_EXECUTION_POLICY.positionConcentration,
+      stage: "signal_to_order",
+      signalReason: "probe-entry",
+      decisionRuleId: "R23_DIP_TRIGGER",
+    });
+
+    expect(decision.action).toBe("skip");
+    expect(decision.reason).toBe("below_min_after_clamp");
+  });
+
   it("uses the $8 exceptional gross cap for small-bankroll strong overrides", () => {
     const h = track(createHarness());
     recordBuy(h, "tok-exceptional", "cond-exceptional", 0.5, 5);

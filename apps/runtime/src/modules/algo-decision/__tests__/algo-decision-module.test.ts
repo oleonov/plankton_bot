@@ -32,6 +32,7 @@ import type {
   Position,
   Order,
   OrderRepository,
+  Fill,
 } from "@krabs/domain";
 import { createTokenId, createCommandId, createOrderId, createPositionId } from "@krabs/domain";
 import type { ConditionId } from "@krabs/domain";
@@ -531,6 +532,25 @@ function makeOrder(tokenId: string, overrides: Partial<Order> = {}): Order {
     botRunId: "bot-test" as Order["botRunId"],
     createdAt: nowIso,
     updatedAt: nowIso,
+    ...overrides,
+  };
+}
+
+function makeFill(orderId: Order["orderId"], size: number, overrides: Partial<Fill> = {}): Fill {
+  const nowIso = new Date().toISOString();
+  return {
+    fillId: `fill-${orderId}-${size}` as Fill["fillId"],
+    orderId,
+    tokenId: createTokenId("fill-token-placeholder"),
+    conditionId: "cond-1" as ConditionId,
+    side: "sell",
+    price: 0.1,
+    size,
+    sizeUsdc: size * 0.1,
+    liquidityRole: "maker",
+    fee: 0,
+    feeRateBps: 0,
+    filledAt: nowIso,
     ...overrides,
   };
 }
@@ -8119,6 +8139,500 @@ describe("AlgoDecisionModule", () => {
         createTokenId(tokenId),
         Date.now(),
         DEFAULT_EXECUTION_POLICY,
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      expect(decisionInput!.hasActiveSellOrderForBounceBackstop).toBe(false);
+      expect(decisionInput!.placedBounceRungIndices).toEqual([]);
+
+      await mod.stop();
+    });
+  });
+
+  // Phase 3 (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md): the
+  // ladder scan must derive ACTUAL committed shares — soldShares (every fill
+  // across the whole ladder, any order status) and openCommitment (unfilled
+  // remainder of still-resting orders only) — not just which rung indices
+  // have an order on file.
+  describe("Phase 3 fill-aware bounce ladder accounting (fillRepo wiring)", () => {
+    // Fill-aware accounting (the fillRepo read) is only performed when sellableFlow
+    // is on (Codex audit r4 — flag-off must not risk a fillRepo read on GATE). These
+    // tests exercise that path, so they opt sellableFlow ON with a past cutoff.
+    const FILL_AWARE_POLICY = {
+      ...DEFAULT_EXECUTION_POLICY,
+      sellableFlow: { enabled: true, buffer: 1.2, maxEntryUsdc: 5, appliesFromMs: 1 },
+    };
+    it("sums soldShares/openCommitment/hasOpenBounceRung across filled, partially-filled, cancelled-with-partial-fill, and rejected orders", async () => {
+      const tokenId = "token-bounce-fill-aware";
+      const legState = makeSellReadyLegState(tokenId, { cumulativeBuySize: 100 });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const ladderId = `${tokenId}:${legState.firstTradeAt}`;
+      const positionRepo = {
+        findByTokenId: vi
+          .fn()
+          .mockReturnValue(makeOpenPosition(tokenId, { entryLane: "GATE", size: 100 })),
+      };
+      const bounceRung = (rungIndex: number) => ({
+        ladderId,
+        rungIndex,
+        originalPositionSize: 100,
+      });
+      // rung0: fully filled (status alone guarantees size sold — no fill row needed).
+      const rung0 = makeOrder(tokenId, {
+        status: "filled",
+        size: 30,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: bounceRung(0) },
+      });
+      // rung1 retry: an earlier rung1 attempt was cancelled after a 5-share
+      // partial fill, then re-placed and is now itself partially filled 15/40.
+      const rung1Cancelled = makeOrder(tokenId, {
+        status: "cancelled",
+        size: 20,
+        createdAt: "2026-06-01T00:00:00.000Z",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: bounceRung(1) },
+      });
+      const rung1Retry = makeOrder(tokenId, {
+        status: "partially-filled",
+        size: 40,
+        createdAt: "2026-06-01T00:05:00.000Z",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: bounceRung(1) },
+      });
+      // rung2: resting, untouched so far.
+      const rung2 = makeOrder(tokenId, {
+        status: "open",
+        size: 30,
+        createdAt: "2026-06-01T00:10:00.000Z",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: bounceRung(2) },
+      });
+      // A rejected order can never carry a real fill — proves it's excluded
+      // even if the fill ledger erroneously had a row for it.
+      const rejected = makeOrder(tokenId, {
+        status: "rejected",
+        size: 50,
+        createdAt: "2026-06-01T00:15:00.000Z",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: bounceRung(1) },
+      });
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi.fn().mockReturnValue([]),
+        findByTokenId: vi
+          .fn()
+          .mockReturnValue([rung0, rung1Cancelled, rung1Retry, rung2, rejected]),
+      };
+      const fillRepo = {
+        findByOrderIds: vi.fn().mockReturnValue([
+          makeFill(rung1Cancelled.orderId, 5),
+          makeFill(rung1Retry.orderId, 15),
+          makeFill(rejected.orderId, 50), // must never be counted
+        ] satisfies Fill[]),
+        findByOrderId: vi.fn().mockReturnValue([]),
+      };
+
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+        fillRepo,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        FILL_AWARE_POLICY,
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      // soldShares: rung0 (30, status floor) + rung1Cancelled (5) + rung1Retry (15) = 50.
+      expect(decisionInput!.bounceLadderSoldShares).toBe(50);
+      // openCommitment: only "working" statuses — rung1Retry (40-15=25) + rung2 (30-0=30) = 55.
+      expect(decisionInput!.bounceLadderOpenCommitment).toBe(55);
+      expect(decisionInput!.hasOpenBounceRung).toBe(true);
+      expect([...decisionInput!.placedBounceRungIndices!].sort()).toEqual([0, 1, 2]);
+      expect(fillRepo.findByOrderId).not.toHaveBeenCalled();
+
+      await mod.stop();
+    });
+
+    it("falls back to per-order findByOrderId when the fillRepo has no batched findByOrderIds", async () => {
+      const tokenId = "token-bounce-fill-fallback";
+      const legState = makeSellReadyLegState(tokenId, { cumulativeBuySize: 100 });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const ladderId = `${tokenId}:${legState.firstTradeAt}`;
+      const positionRepo = {
+        findByTokenId: vi
+          .fn()
+          .mockReturnValue(makeOpenPosition(tokenId, { entryLane: "GATE", size: 100 })),
+      };
+      const rung0 = makeOrder(tokenId, {
+        status: "filled",
+        size: 20,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: { ladderId, rungIndex: 0, originalPositionSize: 100 } },
+      });
+      const rung1 = makeOrder(tokenId, {
+        status: "partially-filled",
+        size: 40,
+        createdAt: "2026-06-01T00:05:00.000Z",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: { ladderId, rungIndex: 1, originalPositionSize: 100 } },
+      });
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi.fn().mockReturnValue([]),
+        findByTokenId: vi.fn().mockReturnValue([rung0, rung1]),
+      };
+      const findByOrderId = vi.fn((orderId: Order["orderId"]) =>
+        orderId === rung1.orderId ? [makeFill(rung1.orderId, 4)] : [],
+      );
+      const fillRepo = { findByOrderId }; // no findByOrderIds — forces the per-order fallback.
+
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+        fillRepo,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        FILL_AWARE_POLICY,
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      expect(decisionInput!.bounceLadderSoldShares).toBe(24); // 20 (status floor) + 4 (fill)
+      expect(decisionInput!.bounceLadderOpenCommitment).toBe(36); // 40 - 4
+      expect(findByOrderId).toHaveBeenCalledTimes(2);
+
+      await mod.stop();
+    });
+
+    // Defends against a missing/unwired fillRepo silently understating
+    // soldShares for an order that has, per its OWN status, already fully
+    // sold — the wrong direction for a live-money never-oversell invariant.
+    // Working-status orders stay conservatively fully-outstanding (no fill
+    // data available), which is the safe direction (never overstates sold).
+    it("floors soldShares at each order's own size for status:'filled' orders even when fillRepo is not wired at all", async () => {
+      const tokenId = "token-bounce-no-fillrepo";
+      const legState = makeSellReadyLegState(tokenId, { cumulativeBuySize: 100 });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const ladderId = `${tokenId}:${legState.firstTradeAt}`;
+      const positionRepo = {
+        findByTokenId: vi
+          .fn()
+          .mockReturnValue(makeOpenPosition(tokenId, { entryLane: "GATE", size: 100 })),
+      };
+      const rung0 = makeOrder(tokenId, {
+        status: "filled",
+        size: 25,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: { ladderId, rungIndex: 0, originalPositionSize: 100 } },
+      });
+      const rung1 = makeOrder(tokenId, {
+        status: "partially-filled",
+        size: 10,
+        createdAt: "2026-06-01T00:05:00.000Z",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: { ladderId, rungIndex: 1, originalPositionSize: 100 } },
+      });
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi.fn().mockReturnValue([]),
+        findByTokenId: vi.fn().mockReturnValue([rung0, rung1]),
+      };
+
+      // No fillRepo override — buildModule's default deps leave it unset.
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        FILL_AWARE_POLICY,
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      expect(decisionInput!.bounceLadderSoldShares).toBe(25); // rung0's status floor only
+      expect(decisionInput!.bounceLadderOpenCommitment).toBe(10); // rung1 treated as fully outstanding
+      expect(decisionInput!.hasOpenBounceRung).toBe(true);
+
+      await mod.stop();
+    });
+
+    // Codex H3 fix: the reconciler marks an order "filled" within a 0.5%
+    // shortfall tolerance (not necessarily 100% of size), so a large/cheap
+    // position's "filled" rung can carry a REAL shortfall that is small in
+    // percentage terms but still clears minOrderSize in absolute shares.
+    // Math.max(actualFills, size) would have overstated soldShares and hidden
+    // this residual entirely; the fix must let the real (lower) fill sum win
+    // whenever the ledger actually has data for that order.
+    it("uses ACTUAL fills (not the order.size floor) for a 'filled' order that shorted within the reconciler's tolerance, exposing a real residual on a large-cheap position", async () => {
+      const tokenId = "token-bounce-large-cheap-shortfall";
+      // 2,000-share position (e.g. a cheap ~$0.05 token) — a 0.5% reconciler
+      // shortfall on a rung this size is 10 shares, well above minOrderSize (5).
+      const legState = makeSellReadyLegState(tokenId, { cumulativeBuySize: 2000 });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const ladderId = `${tokenId}:${legState.firstTradeAt}`;
+      const positionRepo = {
+        findByTokenId: vi
+          .fn()
+          .mockReturnValue(makeOpenPosition(tokenId, { entryLane: "GATE", size: 2000 })),
+      };
+      // Every configured rung (fractions [0.3, 0.4, 0.3] of 2000 = 600/800/600)
+      // is marked "filled" by the reconciler, but rung1's REAL fills are only
+      // 790 of its 800 planned size — a 1.25% shortfall the reconciler's 0.5%
+      // tolerance would still accept as "filled" (illustrative; the exact
+      // reconciler tolerance math lives elsewhere — this test only proves
+      // sumBounceLadderFills prefers real fill data over the status floor).
+      const rung0 = makeOrder(tokenId, {
+        status: "filled",
+        size: 600,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: { ladderId, rungIndex: 0, originalPositionSize: 2000 } },
+      });
+      const rung1 = makeOrder(tokenId, {
+        status: "filled",
+        size: 800,
+        createdAt: "2026-06-01T00:05:00.000Z",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: { ladderId, rungIndex: 1, originalPositionSize: 2000 } },
+      });
+      const rung2 = makeOrder(tokenId, {
+        status: "filled",
+        size: 600,
+        createdAt: "2026-06-01T00:10:00.000Z",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: { ladderId, rungIndex: 2, originalPositionSize: 2000 } },
+      });
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi.fn().mockReturnValue([]),
+        findByTokenId: vi.fn().mockReturnValue([rung0, rung1, rung2]),
+      };
+      const fillRepo = {
+        findByOrderIds: vi.fn().mockReturnValue([
+          makeFill(rung0.orderId, 600), // rung0's real fills match its size exactly
+          makeFill(rung1.orderId, 790), // rung1 shorted 10 shares within tolerance
+          makeFill(rung2.orderId, 600), // rung2's real fills match its size exactly
+        ] satisfies Fill[]),
+        findByOrderId: vi.fn().mockReturnValue([]),
+      };
+
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+        fillRepo,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        FILL_AWARE_POLICY,
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      // 600 + 790 + 600 = 1990, NOT 2000 (the Math.max/status-floor figure
+      // that pre-H3 code would have produced) — the real shortfall survives.
+      expect(decisionInput!.bounceLadderSoldShares).toBe(1990);
+      expect(decisionInput!.bounceLadderOpenCommitment).toBe(0);
+      // The resulting uncommittedRemainder (2000 - 1990 - 0 = 10) is >= the
+      // exchange minOrderSize (5, per decision-planner-bounce-exit.test.ts's
+      // market()) — enough to drive a cleanup rung in decision-planner.ts
+      // once sellableFlow is on, instead of being silently absorbed as if
+      // the ladder were 100% complete.
+      expect(decisionInput!.originalLadderPositionSize).toBe(2000);
+
+      await mod.stop();
+    });
+  });
+
+  // Phase 4 (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md): the
+  // ladder-state resolution itself must widen to any eligible open position,
+  // not just GATE — gated by isBounceLadderEligiblePosition's appliesFromMs.
+  describe("Phase 4 bounce-for-all eligibility wiring", () => {
+    const CUTOFF_MS = Date.parse("2026-06-01T00:00:00.000Z");
+
+    function sellableFlowExecutionPolicy() {
+      return {
+        ...DEFAULT_EXECUTION_POLICY,
+        sellableFlow: { enabled: true, buffer: 1.2, maxEntryUsdc: 5, appliesFromMs: CUTOFF_MS },
+      };
+    }
+
+    it("resolves bounce ladder state for a non-GATE position opened AT/AFTER appliesFromMs, same as GATE", async () => {
+      const tokenId = "token-bounce-for-all-eligible";
+      const legState = makeSellReadyLegState(tokenId, { cumulativeBuySize: 100 });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const positionRepo = {
+        findByTokenId: vi.fn().mockReturnValue(
+          makeOpenPosition(tokenId, {
+            entryLane: null,
+            size: 100,
+            openedAt: new Date(CUTOFF_MS + 1_000).toISOString(),
+          }),
+        ),
+      };
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi
+          .fn()
+          .mockReturnValue([
+            makeOrder(tokenId, { status: "open", decisionRuleId: "SOME_OTHER_RULE" }),
+          ]),
+        findByTokenId: vi.fn().mockReturnValue([]),
+      };
+
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        sellableFlowExecutionPolicy(),
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      // Same wiring a GATE position gets: active-sell/placed-rung resolution
+      // actually ran (not the all-defaults no-op a pre-cutoff/ineligible
+      // position would get).
+      expect(decisionInput!.hasActiveSellOrderForBounceBackstop).toBe(true);
+      expect(Array.isArray(decisionInput!.placedBounceRungIndices)).toBe(true);
+
+      await mod.stop();
+    });
+
+    // Codex audit r1: a pre-flag position whose openedAt was RE-STAMPED by startup
+    // adoption to a post-cutoff wall-clock, but whose REAL first fill (firstTradeAt)
+    // predates the cutoff, must NOT become bounce-for-all eligible — the fail-closed
+    // check requires BOTH timestamps >= cutoff.
+    it("does NOT resolve bounce state for a non-GATE position whose firstTradeAt predates the cutoff even if openedAt is post-cutoff", async () => {
+      const tokenId = "token-bounce-preflag-firsttrade";
+      const legState = makeSellReadyLegState(tokenId, {
+        cumulativeBuySize: 100,
+        firstTradeAt: new Date(CUTOFF_MS - 86_400_000).toISOString(), // one day BEFORE cutoff
+      });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const positionRepo = {
+        findByTokenId: vi.fn().mockReturnValue(
+          makeOpenPosition(tokenId, {
+            entryLane: null,
+            size: 100,
+            openedAt: new Date(CUTOFF_MS + 1_000).toISOString(), // re-stamped AFTER cutoff
+          }),
+        ),
+      };
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi.fn().mockReturnValue([]),
+        findByTokenId: vi.fn().mockReturnValue([]),
+      };
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        sellableFlowExecutionPolicy(),
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      // Ineligible → the all-defaults no-op (no bounce state resolved), so pre-flag
+      // positions stay on the D8/D9 stack.
+      expect(decisionInput!.hasActiveSellOrderForBounceBackstop).toBe(false);
+      expect(decisionInput!.placedBounceRungIndices).toEqual([]);
+
+      await mod.stop();
+    });
+
+    it("leaves a non-GATE position opened BEFORE appliesFromMs on the untouched (all-defaults) no-op wiring", async () => {
+      const tokenId = "token-bounce-for-all-pre-cutoff";
+      legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+      const positionRepo = {
+        findByTokenId: vi.fn().mockReturnValue(
+          makeOpenPosition(tokenId, {
+            entryLane: null,
+            openedAt: new Date(CUTOFF_MS - 1_000).toISOString(),
+          }),
+        ),
+      };
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi
+          .fn()
+          .mockReturnValue([
+            makeOrder(tokenId, { status: "open", decisionRuleId: "SOME_OTHER_RULE" }),
+          ]),
+        findByTokenId: vi.fn().mockReturnValue([]),
+      };
+
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        sellableFlowExecutionPolicy(),
+        null,
+        null,
+      );
+      expect(decisionInput).not.toBeNull();
+      expect(decisionInput!.hasActiveSellOrderForBounceBackstop).toBe(false);
+      expect(decisionInput!.placedBounceRungIndices).toEqual([]);
+      expect(decisionInput!.bounceLadderSoldShares).toBe(0);
+      expect(decisionInput!.bounceLadderOpenCommitment).toBe(0);
+      expect(decisionInput!.hasOpenBounceRung).toBe(false);
+
+      await mod.stop();
+    });
+
+    it("leaves a non-GATE position untouched when sellableFlow is disabled, regardless of openedAt", async () => {
+      const tokenId = "token-bounce-for-all-disabled";
+      legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+      const positionRepo = {
+        findByTokenId: vi.fn().mockReturnValue(
+          makeOpenPosition(tokenId, {
+            entryLane: null,
+            openedAt: new Date(CUTOFF_MS + 1_000).toISOString(),
+          }),
+        ),
+      };
+      const orderRepo: Partial<OrderRepository> = {
+        findRecentByTokenId: vi
+          .fn()
+          .mockReturnValue([
+            makeOrder(tokenId, { status: "open", decisionRuleId: "SOME_OTHER_RULE" }),
+          ]),
+        findByTokenId: vi.fn().mockReturnValue([]),
+      };
+
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+      });
+      await mod.start();
+
+      const decisionInput = await (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        DEFAULT_EXECUTION_POLICY, // sellableFlow.enabled: false by default
         null,
         null,
       );

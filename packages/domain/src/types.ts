@@ -192,6 +192,21 @@ export interface BounceRungMetadata {
    * this single placed order, including `rungIndex` itself. Absent when the
    * rung was placed on its own. */
   rungIndicesCovered?: readonly number[];
+  /** Fill-aware uncommitted residual (originalPositionSize - soldShares -
+   * openCommitment) at signal time — set ONLY when
+   * `executionPolicy.sellableFlow.enabled` is true (docs/plans/2026-07-19-
+   * sellable-sizing-bounce-for-all.md, Codex H4 fix). signal-to-order.ts's
+   * min-order rollover prefers this over `remainingPositionSize` so a merge
+   * never expands past what is genuinely still uncommitted. Absent when the
+   * flag is off, keeping the metadata shape byte-identical to pre-Phase-3. */
+  uncommittedRemainder?: number;
+  /** Set only on the residual-driven "cleanup" SELL emitted after every
+   * configured rung is already placed but a fill-aware uncommitted residual
+   * still clears the exchange minimum (docs/plans/2026-07-19-sellable-sizing-
+   * bounce-for-all.md, Phase 3) — signal-to-order.ts's bounce micro-cap must
+   * never fragment this order back below the size it was deliberately sized
+   * to clear. Absent for every ordinary ladder rung. */
+  isCleanupRung?: boolean;
 }
 
 export interface Signal {
@@ -1966,6 +1981,26 @@ export interface ExecutionPolicy {
   gateEntry: GateEntryPolicy;
   /** GATE-scoped bounce-exit target/timeout (live experiment) — default mode off; empty whitelist ⇒ no live orders. */
   bounceExit: BounceExitPolicy;
+  /** Sellable-sizing + bounce-exit-for-all-lanes (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md) — default OFF. */
+  sellableFlow: SellableFlowPolicy;
+}
+
+/**
+ * Sellable-sizing + bounce-for-all feature (default OFF = byte-identical to today).
+ * Fail-closed: `enabled:true` with `appliesFromMs == null` is treated as OFF by the
+ * parser, so bounce-for-all can never touch pre-flag positions through a mis-set config.
+ */
+export interface SellableFlowPolicy {
+  enabled: boolean;
+  /** Headroom multiplier for the sellable share-floor (default 1.2). */
+  buffer: number;
+  /** Max USDC a sellable-sizing first entry may cost; dearer markets are skipped. */
+  maxEntryUsdc: number;
+  /**
+   * Cutoff epoch-ms: bounce-for-all applies ONLY to positions opened at/after this.
+   * `null` ⇒ feature forced OFF by the parser (protects pre-flag positions).
+   */
+  appliesFromMs: number | null;
 }
 
 export interface DepositActivationPolicy {
