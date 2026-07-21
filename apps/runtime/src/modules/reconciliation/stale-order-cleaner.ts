@@ -170,7 +170,11 @@ export interface StaleOrderCleanerDeps {
     getMarket: (tokenId: TokenId) => Pick<NormalizedMarket, "bestBid" | "tickSize"> | null;
   };
   exitRepriceOnDownprice?: {
-    policy: () => ExitRepriceOnDownpricePolicy;
+    /** ONE atomic snapshot of the live nested policy + the top-level `exitMidpointAnchorTicks`,
+     *  read from a SINGLE execution-policy read. Track L Stage 1 (predictor + threshold) and Stage 2
+     *  (thin gate) both consume this one snapshot so a hot config PATCH cannot tear the read mid-order
+     *  — the predictor must use the SAME anchor the real replacement pricing uses. */
+    snapshot: () => { policy: ExitRepriceOnDownpricePolicy; anchorTicks: number };
     getMarket: (
       tokenId: TokenId,
     ) => Pick<
@@ -208,6 +212,7 @@ export interface StaleCleanResult {
   staleExitTtlCancelled: number;
   outbidRepriceCancelled: number;
   downpriceRepriceCancelled: number;
+  downpriceRepriceHeld: number;
   stuckSellWarnings: number;
   repriceChainCapBlocked: number;
 }
@@ -254,6 +259,7 @@ export async function cleanStaleEntryOrders(
   let staleExitTtlCancelled = 0;
   let outbidRepriceCancelled = 0;
   let downpriceRepriceCancelled = 0;
+  let downpriceRepriceHeld = 0;
   let stuckSellWarnings = 0;
   let repriceChainCapBlocked = 0;
 
@@ -355,10 +361,16 @@ export async function cleanStaleEntryOrders(
     }
 
     const repriceKey = String(order.tokenId);
+    // Capture the live nested policy + top-level anchor in ONE snapshot per order so a hot config
+    // PATCH cannot tear the read across stuck-warn, shouldRepriceDownprice, Stage 1 and Stage 2.
+    const downpriceSnapshot = deps.exitRepriceOnDownprice?.snapshot();
+    const downpriceProvider = downpriceSnapshot
+      ? { policy: () => downpriceSnapshot.policy }
+      : undefined;
     const stuckSell = shouldWarnStuckSell(
       order,
       repriceMarket,
-      deps.exitRepriceOnDownprice,
+      downpriceProvider,
       ageMs,
       now,
       sellDownpriceRepriceMap,
@@ -383,18 +395,33 @@ export async function cleanStaleEntryOrders(
     const repriceDecision = shouldRepriceDownprice(
       order,
       repriceMarket,
-      deps.exitRepriceOnDownprice,
+      downpriceProvider,
       sellDownpriceRepriceMap,
       now,
       trackC?.repriceThreshold ?? null,
     );
     if (repriceDecision.shouldReprice) {
-      const noOpGuard = evaluateTrackLNoopDownpriceGuard(order, repriceMarket);
+      const downpricePolicy =
+        downpriceSnapshot?.policy ?? DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice;
+      const anchorTicks =
+        downpriceSnapshot?.anchorTicks ?? DEFAULT_EXECUTION_POLICY.exitMidpointAnchorTicks;
+      const noOpGuard = evaluateTrackLNoopDownpriceGuard(
+        order,
+        repriceMarket,
+        anchorTicks,
+        downpricePolicy.minReplacementImprovementTicks,
+      );
       if (noOpGuard.blocked) {
+        downpriceRepriceHeld++;
         deps.metrics?.writeCounter?.(
           "track_l_noop_guard_total",
           1,
           JSON.stringify({ mode: noOpGuard.mode }),
+        );
+        deps.metrics?.writeCounter?.(
+          "exit_downprice_reprice_held_total",
+          1,
+          JSON.stringify({ reason: "noop" }),
         );
         log.info(
           {
@@ -410,14 +437,84 @@ export async function cleanStaleEntryOrders(
         );
         continue;
       }
+      // Resolve the dynamic-cap liveness ONCE — the SAME resolution feeds the Stage-2 thin gate
+      // AND the chain-cap block below (single source, no duplicate read). resolveDynamicChainCapDetails
+      // normalizes publicTradeCount24h to null when the dynamic cap is DISABLED or the count is
+      // UNAVAILABLE, so an absent/stale count can never make a market look thin (plan-review: unknown
+      // or disabled → NOT thin → reprice as before). No repriceChainGate → no liveness source at all.
+      const chainPolicy = deps.repriceChainGate?.policy() ?? null;
+      const capDetails = chainPolicy
+        ? resolveDynamicChainCapDetails(repriceMarket, chainPolicy)
+        : null;
+
+      // Track L Stage 2 (2026-07-21, docs/plans/2026-07-21-exit-downprice-reprice-
+      // stage2.md): thin-market HOLD gate. On a dead/thin market the downprice-chase
+      // does not raise fill probability (prod: one token 65 sells, −33%, 0 fills) —
+      // hold the ladder target like plankton, do NOT cancel / repost / advance the
+      // 24h reprice chain. Thin ONLY when the NORMALIZED publicTradeCount24h is finite,
+      // ≥0, and ≤ the threshold. Default-OFF.
+      if (downpricePolicy.skipDownpriceWhenThin && capDetails && chainPolicy) {
+        const tradeCount = capDetails.publicTradeCount24h;
+        const thinThreshold =
+          downpricePolicy.thinTradeCountThreshold ??
+          chainPolicy.dynamicChainCap.tradeCountThinThreshold;
+        if (
+          tradeCount != null &&
+          Number.isFinite(tradeCount) &&
+          tradeCount >= 0 &&
+          thinThreshold != null &&
+          Number.isFinite(thinThreshold) &&
+          tradeCount <= thinThreshold
+        ) {
+          downpriceRepriceHeld++;
+          deps.metrics?.writeCounter?.(
+            "exit_downprice_reprice_held_total",
+            1,
+            JSON.stringify({ reason: "thin" }),
+          );
+          // Durable survivorship event (deduped by MIN(created_at) per orderId at
+          // ANALYSIS time — the cleaner re-scans each pass and has no persistent
+          // per-order dedup; best-effort, never blocks the hold decision).
+          try {
+            deps.repriceChainGate?.riskEventRepo?.insert({
+              eventType: "exit_downprice_reprice_held",
+              payload: {
+                tokenId: String(order.tokenId),
+                orderId: String(order.orderId),
+                orderPrice: order.price,
+                bestBid: repriceMarket?.bestBid ?? null,
+                bestAsk: repriceMarket?.bestAsk ?? null,
+                publicTradeCount24h: tradeCount,
+                thresholdUsed: thinThreshold,
+                heldAt: new Date(now).toISOString(),
+              },
+            });
+          } catch {
+            /* best-effort telemetry — never break the hold */
+          }
+          log.info(
+            {
+              token_id: String(order.tokenId),
+              current_price: order.price,
+              bid: repriceMarket?.bestBid ?? null,
+              public_trade_count_24h: tradeCount,
+              thin_threshold: thinThreshold,
+            },
+            "Track L Stage 2 thin-market downprice reprice held",
+          );
+          continue;
+        }
+      }
       // CHANGE C — R65 p90 = 13 reprice events per token per 24h cap. Block
       // before publishing the cancel so a runaway loop cannot exceed the
       // historical ceiling. Cap applies across BOTH sources (downpriced and
       // sell_replace) — counter is shared via leg_states columns.
       if (deps.repriceChainGate) {
         const legState = deps.repriceChainGate.legStateRepo.get(order.tokenId);
-        const policy = deps.repriceChainGate.policy();
-        const cap = resolveDynamicChainCapDetails(repriceMarket, policy);
+        // Reuse the single resolution taken above (chainPolicy/capDetails are non-null here because
+        // repriceChainGate exists); the `??` only satisfies the type-narrowing, never re-resolves.
+        const policy = chainPolicy ?? deps.repriceChainGate.policy();
+        const cap = capDetails ?? resolveDynamicChainCapDetails(repriceMarket, policy);
         const effectivePolicy = { ...policy, maxChainCount: cap.maxChainCount };
         deps.repriceChainGate.metrics?.writeCounter?.(
           "exit_chain_cap_resolved_total",
@@ -529,6 +626,7 @@ export async function cleanStaleEntryOrders(
     staleExitTtlCancelled,
     outbidRepriceCancelled,
     downpriceRepriceCancelled,
+    downpriceRepriceHeld,
     stuckSellWarnings,
     repriceChainCapBlocked,
   };
@@ -957,6 +1055,11 @@ function shouldRepriceDownprice(
 function evaluateTrackLNoopDownpriceGuard(
   order: Pick<Order, "tokenId" | "price">,
   market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "tickSize"> | null,
+  // Live snapshot (2026-07-21): the predictor MUST use the same anchor the real
+  // replacement pricing uses (signal-to-order.ts) instead of the default, and the
+  // block threshold is now the configurable `minReplacementImprovementTicks`.
+  anchorTicks: number,
+  minImprovementTicks: number,
 ): {
   blocked: boolean;
   mode: "midpoint-anchored";
@@ -972,7 +1075,7 @@ function evaluateTrackLNoopDownpriceGuard(
     market.bestBid,
     market.bestAsk,
     market.tickSize,
-    DEFAULT_EXECUTION_POLICY.exitMidpointAnchorTicks,
+    anchorTicks,
   );
   const midpoint =
     market.bestBid != null &&
@@ -1000,7 +1103,7 @@ function evaluateTrackLNoopDownpriceGuard(
   // Track L Stage 2 (potential, 2026-06-07+): conditional downprice logic if data warrants
   const expectedImprovement = order.price - predictedPrice;
   return {
-    blocked: expectedImprovement < market.tickSize - PRICE_EPSILON,
+    blocked: expectedImprovement < minImprovementTicks * market.tickSize - PRICE_EPSILON,
     mode,
     predictedPrice,
     midpoint,

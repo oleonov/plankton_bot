@@ -935,6 +935,16 @@ export interface ExitRepriceOnDownpricePolicy {
   thresholdTicks: number;
   /** Maximum confirmed downprice-driven cancel attempts tracked while a token has open SELLs. */
   maxRepricesPerOrder: number;
+  /** Track L Stage 1 no-op guard: skip the downprice cancel+repost when the prospective replacement
+   *  price improves by fewer than this many CLOB ticks (default 1 = today's hardcoded 1-tick behavior). */
+  minReplacementImprovementTicks: number;
+  /** Track L Stage 2 (2026-07-21): when true, do NOT downprice-chase a resting exit SELL on a THIN
+   *  market — hold the ladder target (plankton-aligned). Default false = today's behavior; enabled via
+   *  config PATCH after deploy + observation. */
+  skipDownpriceWhenThin: boolean;
+  /** Public 24h trade-count at/below which a market counts as THIN for `skipDownpriceWhenThin`. `null`
+   *  reuses the live `repriceChain.dynamicChainCap.tradeCountThinThreshold` (single source of truth). */
+  thinTradeCountThreshold: number | null;
   /** Operational alert for SELL orders that remained far above the live bid. */
   stuckWarningEnabled: boolean;
   /** Minimum open SELL age before stuck warning checks run, in milliseconds. */

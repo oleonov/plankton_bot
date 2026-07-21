@@ -1934,6 +1934,70 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     });
   });
 
+  it("defaults the new Stage-1/Stage-2 downprice guard fields to safe no-op values", () => {
+    // Default policy ships byte-identical: guard threshold 1 tick, thin gate OFF, reuse-cap null.
+    expect(DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice.minReplacementImprovementTicks).toBe(1);
+    expect(DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice.skipDownpriceWhenThin).toBe(false);
+    expect(DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice.thinTradeCountThreshold).toBeNull();
+  });
+
+  it("parses the new downprice guard fields (minReplacementImprovementTicks, skipDownpriceWhenThin, thinTradeCountThreshold)", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        exitRepriceOnDownprice: {
+          minReplacementImprovementTicks: 3,
+          skipDownpriceWhenThin: true,
+          thinTradeCountThreshold: 12,
+        },
+      }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.exitRepriceOnDownprice).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice,
+      minReplacementImprovementTicks: 3,
+      skipDownpriceWhenThin: true,
+      thinTradeCountThreshold: 12,
+    });
+  });
+
+  it("accepts a fractional minReplacementImprovementTicks (contract is finite ≥ 0, not integer)", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({ exitRepriceOnDownprice: { minReplacementImprovementTicks: 1.5 } }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.exitRepriceOnDownprice.minReplacementImprovementTicks).toBe(1.5);
+  });
+
+  it("rejects invalid new downprice guard fields and falls back to DEFAULTS with issues", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        exitRepriceOnDownprice: {
+          minReplacementImprovementTicks: -5,
+          skipDownpriceWhenThin: "yes",
+          thinTradeCountThreshold: -1,
+        },
+      }),
+    );
+    expect(policy.exitRepriceOnDownprice.minReplacementImprovementTicks).toBe(
+      DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice.minReplacementImprovementTicks,
+    );
+    expect(policy.exitRepriceOnDownprice.skipDownpriceWhenThin).toBe(
+      DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice.skipDownpriceWhenThin,
+    );
+    // An invalid nullable threshold must fall back to the DEFAULT (null = "reuse the dynamicChainCap
+    // threshold"), NOT the range floor 0 — 0 would silently mean "threshold 0" instead of reuse.
+    expect(policy.exitRepriceOnDownprice.thinTradeCountThreshold).toBeNull();
+    expect(
+      issues.some((i) => i.includes("exitRepriceOnDownprice.minReplacementImprovementTicks")),
+    ).toBe(true);
+    expect(issues.some((i) => i.includes("exitRepriceOnDownprice.skipDownpriceWhenThin"))).toBe(
+      true,
+    );
+    expect(issues.some((i) => i.includes("exitRepriceOnDownprice.thinTradeCountThreshold"))).toBe(
+      true,
+    );
+  });
+
   it("parses redeem sweep policy and defaults missing fields", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({

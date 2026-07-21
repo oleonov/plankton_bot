@@ -181,7 +181,7 @@ export interface ReconciliationModuleDeps {
     ) => Pick<import("@krabs/domain").NormalizedMarket, "bestBid" | "tickSize"> | null;
   };
   exitRepriceOnDownprice?: {
-    policy: () => ExitRepriceOnDownpricePolicy;
+    snapshot: () => { policy: ExitRepriceOnDownpricePolicy; anchorTicks: number };
     getMarket: (
       tokenId: import("@krabs/domain").TokenId,
     ) => Pick<

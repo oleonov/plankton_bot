@@ -666,11 +666,14 @@ function makeCleanerEnv(input: {
           bus: bus as EventBus,
           log: silentLog,
           exitRepriceOnDownprice: {
-            policy: () => ({
-              ...DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice,
-              enabled: true,
-              thresholdTicks: 5,
-              maxRepricesPerOrder: 3,
+            snapshot: () => ({
+              policy: {
+                ...DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice,
+                enabled: true,
+                thresholdTicks: 5,
+                maxRepricesPerOrder: 3,
+              },
+              anchorTicks: DEFAULT_EXECUTION_POLICY.exitMidpointAnchorTicks,
             }),
             getMarket: () =>
               makePricing({

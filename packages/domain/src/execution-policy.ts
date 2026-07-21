@@ -157,6 +157,9 @@ export const DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY: ExitRepriceOnDownpricePol
   enabled: false,
   thresholdTicks: 5,
   maxRepricesPerOrder: 3,
+  minReplacementImprovementTicks: 1,
+  skipDownpriceWhenThin: false,
+  thinTradeCountThreshold: null,
   stuckWarningEnabled: true,
   stuckWarningAgeMs: 4 * 60 * 60_000,
   stuckWarningGapPct: 0.1,
@@ -3810,6 +3813,28 @@ function parseExitRepriceOnDownprice(raw: unknown, issues: string[]): ExitRepric
       issues,
       "exitRepriceOnDownprice.maxRepricesPerOrder",
     ),
+    minReplacementImprovementTicks: clampedNumber(
+      obj.minReplacementImprovementTicks,
+      DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY.minReplacementImprovementTicks,
+      0,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "exitRepriceOnDownprice.minReplacementImprovementTicks",
+    ),
+    skipDownpriceWhenThin: booleanOr(
+      obj.skipDownpriceWhenThin,
+      DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY.skipDownpriceWhenThin,
+      issues,
+      "exitRepriceOnDownprice.skipDownpriceWhenThin",
+    ),
+    thinTradeCountThreshold: nullableClampedNumberOrDefault(
+      obj.thinTradeCountThreshold,
+      DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY.thinTradeCountThreshold,
+      0,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "exitRepriceOnDownprice.thinTradeCountThreshold",
+    ),
     stuckWarningEnabled: booleanOr(
       obj.stuckWarningEnabled,
       DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY.stuckWarningEnabled,
@@ -5022,6 +5047,27 @@ function nullableClampedNumber(
   if (raw === undefined) return fallback;
   if (raw === null) return null;
   return clampedNumber(raw, fallback ?? min, min, max, issues, name);
+}
+
+/**
+ * Like `nullableClampedNumber`, but an INVALID value falls back to the (possibly `null`) default
+ * instead of the range floor. Use where `null` is a meaningful sentinel (e.g. "reuse the shared
+ * default") and coercing garbage to `0` would silently change semantics.
+ */
+function nullableClampedNumberOrDefault(
+  raw: unknown,
+  fallback: number | null,
+  min: number,
+  max: number,
+  issues: string[],
+  name: string,
+): number | null {
+  if (raw === undefined || raw === null) return fallback;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < min || raw > max) {
+    issues.push(`${name} must be a finite number in [${min}, ${max}] or null`);
+    return fallback;
+  }
+  return raw;
 }
 
 function clampedInt(

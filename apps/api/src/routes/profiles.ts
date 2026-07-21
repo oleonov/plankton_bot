@@ -565,6 +565,12 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
         ...((patch.repriceOnOutbid as Partial<ExecutionPolicy["repriceOnOutbid"]> | undefined) ??
           {}),
       },
+      exitRepriceOnDownprice: {
+        ...current.exitRepriceOnDownprice,
+        ...((patch.exitRepriceOnDownprice as
+          | Partial<ExecutionPolicy["exitRepriceOnDownprice"]>
+          | undefined) ?? {}),
+      },
       dropTrigger: {
         ...current.dropTrigger,
         ...((patch.dropTrigger as Partial<ExecutionPolicy["dropTrigger"]> | undefined) ?? {}),

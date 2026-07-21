@@ -923,7 +923,7 @@ describe("GET /status", () => {
         ('coverage-tok-1', 'coverage-cond-1', 'coverage-1', 'Coverage 1?', 'Yes', 1, 1, 0.01, 0, '2026-06-01T00:00:00Z', '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z'),
         ('coverage-tok-2', 'coverage-cond-2', 'coverage-2', 'Coverage 2?', 'Yes', 1, 1, 0.01, 0, '2026-06-01T00:00:00Z', '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z');
       DELETE FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity';
-      DELETE FROM runtime_metrics WHERE metric_name IN ('algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class', 'signal_path_activity', 'exit_order_ttl_cancel_total', 'exit_order_ttl_cancel_near_resolution_total', 'exit_anchor_mode_total', 'exit_ttl_resolved_total', 'exit_reprice_suppressed_threshold_total', 'exit_chain_cap_resolved_total', 'exit_loss_floor_blocked_total', 'exit_loss_floor_cost_unavailable_total');
+      DELETE FROM runtime_metrics WHERE metric_name IN ('algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class', 'signal_path_activity', 'exit_order_ttl_cancel_total', 'exit_order_ttl_cancel_near_resolution_total', 'exit_anchor_mode_total', 'exit_ttl_resolved_total', 'exit_reprice_suppressed_threshold_total', 'exit_chain_cap_resolved_total', 'exit_loss_floor_blocked_total', 'exit_loss_floor_cost_unavailable_total', 'exit_downprice_reprice_held_total');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES ('market_data_stream_activity', 1, '{"trackedTokenCount":2,"wsEventsReceivedPerSec":7.5,"rawWsRecords":120,"rawWsRecordsPerSec":2,"parsedUpdates":90,"parsedUpdatesPerSec":1.5,"emittedUpdates":15,"emittedUpdatesPerSec":0.25,"noopUpdates":30,"noopUpdatesPerSec":0.5,"suppressedTradingNoopCountTotal":75,"suppressedTradingNoopPerSec":1.25,"suppressedTradingNoopByReason":{"topOfBookOnly":70,"bookOnly":1,"lastTradeOnly":2,"tickSizeOnly":0,"mixedNonCritical":2},"hubFilterChecked":450,"hubFilterCheckedPerSec":7.5,"hubFilterPassed":90,"hubFilterPassedPerSec":1.5,"shardCount":2,"wsHeartbeat":{"pingSent":4,"pongReceived":3,"timeoutFired":1,"timeoutSuppressedByInbound":2,"workerEventLoopLagMaxMs":11,"byShard":{"0":{"pingSent":2,"pongReceived":2,"timeoutFired":0,"timeoutSuppressedByInbound":1,"lastPingSentAt":1779292800000,"lastPongAt":1779292800010,"lastInboundMessageAt":1779292800010,"workerEventLoopLagMaxMs":5}}},"v4AdmissionTelemetry":{"evaluatedTotal":10,"admitCountTotal":2,"rejectCountTotal":8,"admitRate":0.2,"admitCountByCategory":{"crypto-btc":2},"seenCountByCategory":{"crypto-btc":3},"admitRateByCategory":{"crypto-btc":0.6666666667},"rejectCountByReason":{"rejected_category_not_in_hot_cats":5,"rejected_liquidity_below_100":2,"rejected_volume_below_5":1,"rejected_no_orderbook_proxy":0}}}', '2026-05-18T00:00:00Z');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
@@ -959,6 +959,8 @@ describe("GET /status", () => {
       '{"reason":"cost_inconsistent","phase":"authoritative"}',
       nowIso,
     );
+    insertMetric.run("exit_downprice_reprice_held_total", 6, '{"reason":"noop"}', nowIso);
+    insertMetric.run("exit_downprice_reprice_held_total", 4, '{"reason":"thin"}', nowIso);
     conn.db
       .prepare(
         "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, ?, ?, ?)",
@@ -1079,6 +1081,7 @@ describe("GET /status", () => {
     expect(body.data.exit_chain_cap_resolved_total).toEqual({ "50": 5, "13": 1 });
     expect(body.data.exit_loss_floor_blocked_total).toBe(3);
     expect(body.data.exit_loss_floor_cost_unavailable_total).toBe(1);
+    expect(body.data.exit_downprice_reprice_held_total).toEqual({ noop: 6, thin: 4 });
     expect(body.data.http_errors_by_class_1h).toEqual({ "gamma-pricing:timeout": 2 });
     expect(body.data.ws_heartbeat.pingSent).toBe(4);
     expect(body.data.ws_heartbeat.workerEventLoopLagMaxMs).toBe(11);
@@ -1097,7 +1100,7 @@ describe("GET /status", () => {
     });
 
     conn.db.exec(
-      `DELETE FROM runtime_metrics WHERE metric_name IN ('market_data_stream_activity', 'algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class', 'signal_path_activity', 'exit_order_ttl_cancel_total', 'exit_order_ttl_cancel_near_resolution_total', 'exit_anchor_mode_total', 'exit_ttl_resolved_total', 'exit_reprice_suppressed_threshold_total', 'exit_chain_cap_resolved_total', 'exit_loss_floor_blocked_total', 'exit_loss_floor_cost_unavailable_total')`,
+      `DELETE FROM runtime_metrics WHERE metric_name IN ('market_data_stream_activity', 'algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class', 'signal_path_activity', 'exit_order_ttl_cancel_total', 'exit_order_ttl_cancel_near_resolution_total', 'exit_anchor_mode_total', 'exit_ttl_resolved_total', 'exit_reprice_suppressed_threshold_total', 'exit_chain_cap_resolved_total', 'exit_loss_floor_blocked_total', 'exit_loss_floor_cost_unavailable_total', 'exit_downprice_reprice_held_total')`,
     );
   });
 

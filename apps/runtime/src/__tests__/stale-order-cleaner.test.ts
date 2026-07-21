@@ -226,9 +226,17 @@ describe("cleanStaleEntryOrders", () => {
       bestAskSize?: number | null;
       askDepthExcludingOurs?: number | null;
       maxRepricesPerOrder?: number;
+      minReplacementImprovementTicks?: number;
+      skipDownpriceWhenThin?: boolean;
+      thinTradeCountThreshold?: number | null;
+      anchorTicks?: number;
       extraOpenOrders?: Order[];
       publicTradeCount24h?: number | null;
       repriceChainEvents24h?: number;
+      chainPolicy?: typeof DEFAULT_REPRICE_CHAIN_POLICY;
+      riskEvents?: unknown[];
+      riskEventInsertThrows?: boolean;
+      snapshotCalls?: { n: number };
       tickSize?: number;
       metrics?: { writeCounter: ReturnType<typeof vi.fn> };
     } = {},
@@ -243,14 +251,24 @@ describe("cleanStaleEntryOrders", () => {
         log: silentLog,
         ...(opts.metrics ? { metrics: opts.metrics } : {}),
         exitRepriceOnDownprice: {
-          policy: () => ({
-            enabled: true,
-            thresholdTicks: 5,
-            maxRepricesPerOrder: opts.maxRepricesPerOrder ?? 3,
-            stuckWarningEnabled: true,
-            stuckWarningAgeMs: 4 * 60 * 60_000,
-            stuckWarningGapPct: 0.1,
-          }),
+          // ONE atomic snapshot: nested policy + top-level anchor from a single read.
+          snapshot: () => {
+            if (opts.snapshotCalls) opts.snapshotCalls.n++;
+            return {
+              policy: {
+                enabled: true,
+                thresholdTicks: 5,
+                maxRepricesPerOrder: opts.maxRepricesPerOrder ?? 3,
+                minReplacementImprovementTicks: opts.minReplacementImprovementTicks ?? 1,
+                skipDownpriceWhenThin: opts.skipDownpriceWhenThin ?? false,
+                thinTradeCountThreshold: opts.thinTradeCountThreshold ?? null,
+                stuckWarningEnabled: true,
+                stuckWarningAgeMs: 4 * 60 * 60_000,
+                stuckWarningGapPct: 0.1,
+              },
+              anchorTicks: opts.anchorTicks ?? DEFAULT_EXECUTION_POLICY.exitMidpointAnchorTicks,
+            };
+          },
           getMarket: () =>
             makePricing({
               bestBid,
@@ -264,7 +282,7 @@ describe("cleanStaleEntryOrders", () => {
         ...(opts.repriceChainEvents24h != null
           ? {
               repriceChainGate: {
-                policy: () => DEFAULT_REPRICE_CHAIN_POLICY,
+                policy: () => opts.chainPolicy ?? DEFAULT_REPRICE_CHAIN_POLICY,
                 legStateRepo: {
                   get: () => {
                     const now = Date.now();
@@ -280,6 +298,17 @@ describe("cleanStaleEntryOrders", () => {
                     } as any;
                   },
                 },
+                ...(opts.riskEvents || opts.riskEventInsertThrows
+                  ? {
+                      riskEventRepo: {
+                        insert: (e: unknown) => {
+                          if (opts.riskEventInsertThrows) throw new Error("insert boom");
+                          opts.riskEvents!.push(e);
+                        },
+                        countSince: () => 0,
+                      } as any,
+                    }
+                  : {}),
                 metrics: opts.metrics,
               },
             }
@@ -952,13 +981,19 @@ describe("cleanStaleEntryOrders", () => {
         exitTtlByLiquidity: DEFAULT_EXECUTION_POLICY.exitTtlByLiquidity,
         metrics,
         exitRepriceOnDownprice: {
-          policy: () => ({
-            enabled: false,
-            thresholdTicks: 5,
-            maxRepricesPerOrder: 3,
-            stuckWarningEnabled: false,
-            stuckWarningAgeMs: 4 * 60 * 60_000,
-            stuckWarningGapPct: 0.1,
+          snapshot: () => ({
+            policy: {
+              enabled: false,
+              thresholdTicks: 5,
+              maxRepricesPerOrder: 3,
+              minReplacementImprovementTicks: 1,
+              skipDownpriceWhenThin: false,
+              thinTradeCountThreshold: null,
+              stuckWarningEnabled: false,
+              stuckWarningAgeMs: 4 * 60 * 60_000,
+              stuckWarningGapPct: 0.1,
+            },
+            anchorTicks: DEFAULT_EXECUTION_POLICY.exitMidpointAnchorTicks,
           }),
           getMarket: () => makePricing({ bestBid: order.price, publicTradeCount24h: 4 }),
         },
@@ -1111,6 +1146,318 @@ describe("cleanStaleEntryOrders", () => {
       expect.any(Number),
       expect.any(String),
     );
+  });
+
+  it("Stage 2: HOLDS a downprice reprice on a THIN market when skipDownpriceWhenThin is on", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const metrics = { writeCounter: vi.fn() };
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    // bid six ticks lower (would normally downprice-reprice, see the test above),
+    // but the market is THIN (5 trades ≤ threshold 10) and the gate is ON → hold.
+    // repriceChainEvents24h:0 wires the repriceChainGate (the liveness source the thin gate needs).
+    const riskEvents: any[] = [];
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      skipDownpriceWhenThin: true,
+      publicTradeCount24h: 5,
+      thinTradeCountThreshold: 10,
+      repriceChainEvents24h: 0,
+      riskEvents,
+      metrics,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(result.downpriceRepriceHeld).toBe(1);
+    expect(cancelled).toHaveLength(0);
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "exit_downprice_reprice_held_total",
+      1,
+      JSON.stringify({ reason: "thin" }),
+    );
+    // Chain NOT advanced — the hold continues BEFORE the chain-cap block, so no cap metric fires.
+    expect(metrics.writeCounter).not.toHaveBeenCalledWith(
+      "exit_chain_cap_resolved_total",
+      expect.any(Number),
+      expect.any(String),
+    );
+    // Durable survivorship event with the full joinable payload (incl. the tokenId/orderId/bestAsk
+    // join keys the later readonly survivorship query needs).
+    expect(riskEvents).toHaveLength(1);
+    expect(riskEvents[0].eventType).toBe("exit_downprice_reprice_held");
+    expect(riskEvents[0].payload).toMatchObject({
+      tokenId: String(order.tokenId),
+      orderId: String(order.orderId),
+      orderPrice: 0.29,
+      bestBid: 0.23,
+      bestAsk: null,
+      publicTradeCount24h: 5,
+      thresholdUsed: 10,
+    });
+    expect(typeof riskEvents[0].payload.heldAt).toBe("string");
+  });
+
+  it("Stage 2: a THROWING durable-event insert never breaks the hold (best-effort telemetry)", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    // riskEventRepo.insert throws — the order must still be HELD, with no cancel published.
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      skipDownpriceWhenThin: true,
+      publicTradeCount24h: 5,
+      thinTradeCountThreshold: 10,
+      repriceChainEvents24h: 0,
+      riskEventInsertThrows: true,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceHeld).toBe(1);
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+  });
+
+  it("Stage 2: does NOT hold when publicTradeCount24h is unknown/null (null must not coerce to thin)", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      skipDownpriceWhenThin: true,
+      publicTradeCount24h: null,
+      thinTradeCountThreshold: 10,
+      repriceChainEvents24h: 0,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceHeld).toBe(0);
+    expect(result.downpriceRepriceCancelled).toBe(1);
+    expect(cancelled[0].command.reason).toBe("downpriced_reprice");
+  });
+
+  it("Stage 2: does NOT hold when the market is NOT thin (count above threshold)", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      skipDownpriceWhenThin: true,
+      publicTradeCount24h: 50,
+      thinTradeCountThreshold: 10,
+      repriceChainEvents24h: 0,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceHeld).toBe(0);
+    expect(result.downpriceRepriceCancelled).toBe(1);
+  });
+
+  it("Stage 2: does NOT hold when the dynamic chain cap is DISABLED (normalized count is unavailable)", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    // Gate ON, market count 5 ≤ 10, BUT dynamicChainCap.enabled=false → resolveDynamicChainCapDetails
+    // normalizes the count to null → NOT thin → reprice as before (Codex finding 1).
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      skipDownpriceWhenThin: true,
+      publicTradeCount24h: 5,
+      thinTradeCountThreshold: 10,
+      repriceChainEvents24h: 0,
+      chainPolicy: {
+        ...DEFAULT_REPRICE_CHAIN_POLICY,
+        dynamicChainCap: { ...DEFAULT_REPRICE_CHAIN_POLICY.dynamicChainCap, enabled: false },
+      },
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceHeld).toBe(0);
+    expect(result.downpriceRepriceCancelled).toBe(1);
+  });
+
+  it("Stage 2: does NOT hold when there is NO repriceChainGate at all (no liveness source), even with an explicit threshold", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    // No repriceChainEvents24h → no repriceChainGate wired → no liveness source → the thin gate
+    // cannot fire, even though an explicit thinTradeCountThreshold is set and the market count is low.
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      skipDownpriceWhenThin: true,
+      publicTradeCount24h: 5,
+      thinTradeCountThreshold: 10,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceHeld).toBe(0);
+    expect(result.downpriceRepriceCancelled).toBe(1);
+  });
+
+  it("Stage 2: explicit thinTradeCountThreshold OVERRIDES the dynamicChainCap threshold", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    // count 5; dynamicChainCap.tradeCountThinThreshold=10 (would be thin), but an explicit override
+    // of 3 makes 5 > 3 → NOT thin → reprice. Proves the override wins over the reuse-from-cap default.
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      skipDownpriceWhenThin: true,
+      publicTradeCount24h: 5,
+      thinTradeCountThreshold: 3,
+      repriceChainEvents24h: 0,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceHeld).toBe(0);
+    expect(result.downpriceRepriceCancelled).toBe(1);
+  });
+
+  it("Stage 2: null thinTradeCountThreshold REUSES the dynamicChainCap threshold (10)", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    // No explicit threshold → reuse dynamicChainCap.tradeCountThinThreshold=10; count 5 ≤ 10 → hold.
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      skipDownpriceWhenThin: true,
+      publicTradeCount24h: 5,
+      thinTradeCountThreshold: null,
+      repriceChainEvents24h: 0,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceHeld).toBe(1);
+    expect(result.downpriceRepriceCancelled).toBe(0);
+  });
+
+  it("Stage 1: minReplacementImprovementTicks holds a reprice whose replacement improves by fewer than N ticks", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const cancelledDefault: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelledDefault.push(p);
+    });
+    // Same market that downprice-reprices at the default (1-tick) threshold, but a
+    // large minReplacementImprovementTicks makes the same replacement a no-op HOLD.
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      minReplacementImprovementTicks: 100,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceHeld).toBe(1);
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(cancelledDefault).toHaveLength(0);
+  });
+
+  it("Stage 1: the no-op guard predictor tracks the LIVE anchorTicks snapshot (not the default)", async () => {
+    const makeSell = (id: string) =>
+      makeOrder({
+        orderId: createOrderId(id),
+        clientOrderId: `${id}-client` as ClientOrderId,
+        side: "sell",
+        price: 0.29,
+        createdAt: new Date(Date.now() - 60_000).toISOString(),
+        signalReason: "repricing-exit",
+      });
+
+    // No ask → predicted = floorToTick(bestBid + anchorTicks·tick). anchor 0 → predicted ≈ 0.23,
+    // a 6-tick improvement → reprices.
+    const low = await runWithDownprice(makeSell("anchor-low"), 0.23, new Map(), { anchorTicks: 0 });
+    await bus.drain();
+    expect(low.downpriceRepriceCancelled).toBe(1);
+    expect(low.downpriceRepriceHeld).toBe(0);
+
+    // Same market, only the anchor changes: anchor 10 → predicted ≈ 0.33 ≥ order price → no
+    // improvement → HELD. Proves the guard uses the live anchor snapshot, not DEFAULT.
+    const high = await runWithDownprice(makeSell("anchor-high"), 0.23, new Map(), {
+      anchorTicks: 10,
+    });
+    await bus.drain();
+    expect(high.downpriceRepriceHeld).toBe(1);
+    expect(high.downpriceRepriceCancelled).toBe(0);
+  });
+
+  it("Stage 1/2: reads the execution-policy snapshot EXACTLY once per order (no torn read)", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    // One order → snapshot() must be invoked exactly once; stuck-warn, shouldRepriceDownprice,
+    // Stage 1 and Stage 2 all share that single coherent read (a torn read is impossible).
+    const snapshotCalls = { n: 0 };
+    await runWithDownprice(order, 0.23, new Map(), {
+      skipDownpriceWhenThin: true,
+      publicTradeCount24h: 5,
+      thinTradeCountThreshold: 10,
+      repriceChainEvents24h: 0,
+      snapshotCalls,
+    });
+    await bus.drain();
+
+    expect(snapshotCalls.n).toBe(1);
   });
 
   it("uses the dynamic thin-market cap for downpriced reprice gating", async () => {

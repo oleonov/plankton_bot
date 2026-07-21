@@ -503,4 +503,57 @@ describe("API against real split schemas", () => {
     expect(makerEntry.maxScaleInLevels).toBe(DEFAULT_EXECUTION_POLICY.makerEntry.maxScaleInLevels);
     expect(makerEntry.scaleInStepPct).toBe(DEFAULT_EXECUTION_POLICY.makerEntry.scaleInStepPct);
   });
+
+  it("PATCH /execution-policy: partial exitRepriceOnDownprice patch preserves every sibling field (enable + rollback)", async () => {
+    // Seed NON-DEFAULT siblings FIRST — a broken (wholesale-replace) merge would revert these to
+    // defaults, so surviving non-default values are what actually proves the deep-merge works.
+    const seed = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: { exitRepriceOnDownprice: { thresholdTicks: 9, maxRepricesPerOrder: 7 } },
+    });
+    expect(seed.statusCode).toBe(200);
+    const seeded = seed.json().data.policy.exitRepriceOnDownprice;
+    expect(seeded.thresholdTicks).toBe(9);
+    expect(seeded.maxRepricesPerOrder).toBe(7);
+    expect(seeded.thresholdTicks).not.toBe(
+      DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice.thresholdTicks,
+    );
+
+    // Enable the Stage-2 thin gate + set a threshold; the seeded non-default siblings must survive.
+    const enable = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: {
+        exitRepriceOnDownprice: { skipDownpriceWhenThin: true, thinTradeCountThreshold: 15 },
+      },
+    });
+    expect(enable.statusCode).toBe(200);
+    const enabled = enable.json().data.policy.exitRepriceOnDownprice;
+    expect(enabled.skipDownpriceWhenThin).toBe(true);
+    expect(enabled.thinTradeCountThreshold).toBe(15);
+    // Seeded NON-DEFAULT siblings survived the partial PATCH → deep-merge is real, not a replace.
+    expect(enabled.thresholdTicks).toBe(9);
+    expect(enabled.maxRepricesPerOrder).toBe(7);
+    expect(enabled.enabled).toBe(DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice.enabled);
+    expect(enabled.minReplacementImprovementTicks).toBe(
+      DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice.minReplacementImprovementTicks,
+    );
+
+    // Rollback — turn the gate back off; the just-set threshold and seeded siblings stay intact.
+    const rollback = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: { exitRepriceOnDownprice: { skipDownpriceWhenThin: false } },
+    });
+    expect(rollback.statusCode).toBe(200);
+    const rolledBack = rollback.json().data.policy.exitRepriceOnDownprice;
+    expect(rolledBack.skipDownpriceWhenThin).toBe(false);
+    expect(rolledBack.thinTradeCountThreshold).toBe(15);
+    expect(rolledBack.thresholdTicks).toBe(9);
+    expect(rolledBack.maxRepricesPerOrder).toBe(7);
+  });
 });

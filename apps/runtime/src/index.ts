@@ -1625,7 +1625,12 @@ async function main(): Promise<void> {
       getMarket: (tokenId) => entryLifecycleModule.getMarket(tokenId),
     },
     exitRepriceOnDownprice: {
-      policy: () => currentExecutionPolicy().exitRepriceOnDownprice,
+      // ONE execution-policy read → the nested policy and the top-level anchor are always a
+      // coherent pair (no torn read if a config PATCH lands mid-scan).
+      snapshot: () => {
+        const p = currentExecutionPolicy();
+        return { policy: p.exitRepriceOnDownprice, anchorTicks: p.exitMidpointAnchorTicks };
+      },
       getMarket: (tokenId) => entryLifecycleModule.getMarket(tokenId),
     },
     runtimeMetrics,

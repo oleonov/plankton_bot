@@ -388,6 +388,12 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
         "exit_loss_floor_cost_unavailable_total",
         exitMetricSinceIso,
       ),
+      exit_downprice_reprice_held_total: readCounterByLabel(
+        db,
+        "exit_downprice_reprice_held_total",
+        "reason",
+        exitMetricSinceIso,
+      ),
       http_errors_by_class_1h: aggregateHttpErrors(httpErrorRows),
       ws_heartbeat: wsHeartbeat,
       ws_worker_memory: wsWorkerMemory,
