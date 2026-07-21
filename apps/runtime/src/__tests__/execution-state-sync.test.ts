@@ -22,6 +22,8 @@ import {
   createCommandId,
   createBotRunId,
   createConditionId,
+  createFillId,
+  createLotId,
   createOrderId,
   createPositionId,
 } from "@krabs/domain";
@@ -34,6 +36,7 @@ import type {
   ExchangeOrder,
   ExchangeFill,
   ExchangeBalance,
+  InventoryLotRepository,
   Order,
   OrderRepository,
   FillRepository,
@@ -175,6 +178,33 @@ function createMockPositionRepo(positionSize: number): PositionRepository {
     updateSize: vi.fn(),
     close: vi.fn(),
   } as unknown as PositionRepository;
+}
+
+// Exit-loss-floor gate (docs/plans/2026-07-20-exit-loss-floor.md) fails closed
+// without a positionRepo-consistent inventoryLotRepo. Mirrors
+// createMockPositionRepo's own size/avgEntryPrice(0.5)/costBasis math with a
+// single lot spanning the whole position, so it stays consistent for
+// whatever positionSize a test wires up.
+function createMockInventoryLotRepo(positionSize: number): InventoryLotRepository {
+  const lot = {
+    lotId: createLotId("lot-state-1"),
+    positionId: createPositionId("pos-state-1"),
+    tokenId: TOKEN,
+    side: "buy" as const,
+    size: positionSize,
+    remainingSize: positionSize,
+    entryPrice: 0.5,
+    costUsdc: positionSize * 0.5,
+    fillId: createFillId("fill-state-1"),
+    createdAt: new Date().toISOString(),
+  };
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue([lot]),
+    findOpen: vi.fn().mockReturnValue([lot]),
+    consumeFifo: vi.fn().mockReturnValue([]),
+    settleAll: vi.fn(),
+  };
 }
 
 const silentLog = {
@@ -459,6 +489,7 @@ describe("ExecutionModule — exchange state integration", () => {
       orderRepo,
       fillRepo,
       positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(50),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -572,6 +603,7 @@ describe("ExecutionModule — exchange state integration", () => {
       orderRepo,
       fillRepo,
       positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(10),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -609,6 +641,7 @@ describe("ExecutionModule — exchange state integration", () => {
       orderRepo,
       fillRepo,
       positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(10),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -642,6 +675,7 @@ describe("ExecutionModule — exchange state integration", () => {
       orderRepo,
       fillRepo,
       positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(10),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -677,6 +711,7 @@ describe("ExecutionModule — exchange state integration", () => {
       orderRepo,
       fillRepo,
       positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(10),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -715,6 +750,7 @@ describe("ExecutionModule — exchange state integration", () => {
       orderRepo,
       fillRepo,
       positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(50),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },

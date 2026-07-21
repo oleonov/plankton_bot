@@ -10,6 +10,11 @@
  *     gateway called exactly once.
  *  4. No retry when tickResolver is absent → original rejection persisted, one call.
  *  5. Guard blocks retry (near-duplicate BUY) → no second placeOrder call.
+ *  6. Exit loss-floor gate blocks the retry itself (docs/plans/2026-07-20-exit-
+ *     loss-floor.md §Phase 4, step 3): the retry's own authoritative floor
+ *     checkpoint blocks and returns false → no second gateway call, and the
+ *     ORIGINAL invalid-tick rejection is persisted exactly once (no 2nd
+ *     OrderRejected).
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -18,6 +23,9 @@ import {
   createCommandId,
   createBotRunId,
   createConditionId,
+  createPositionId,
+  createLotId,
+  createFillId,
   ExchangeErrorCode,
   SignalReason,
 } from "@krabs/domain";
@@ -32,6 +40,9 @@ import type {
   ExchangeBalance,
   OrderRepository,
   FillRepository,
+  PositionRepository,
+  InventoryLotRepository,
+  Position,
   PlaceOrderCommand,
   TokenId,
   ClientOrderId,
@@ -492,6 +503,157 @@ describe("ExecutionModule — invalid-tick in-attempt retry (Phase 2)", () => {
     expect(savedOrder.status).toBe("rejected");
     // Price is from original cmd (0.5).
     expect(savedOrder.price).toBe(0.5);
+
+    await mod.stop();
+  });
+
+  it("exit loss-floor gate blocks the retry itself — no 2nd OrderRejected (docs/plans/2026-07-20-exit-loss-floor.md)", async () => {
+    // Same staged invalid-tick setup as the "hard cap" test above, but cmd is
+    // a SELL. The retry price is unchanged from the first attempt (0.10 is
+    // already on both the 0.001 and 0.01 grids), so the only way for the
+    // RETRY's own floor checkpoint (~:3281) to diverge from the first
+    // attempt's checkpoint (~:1416) is for the position/lots the gate reads
+    // to change in between — e.g. a concurrent scale-in/fill landing between
+    // the first submit attempt and the retry, exactly the race the plan's
+    // "re-evaluate fresh on every checkpoint" design defends against. The
+    // mocked positionRepo/inventoryLotRepo below switch from a cheap (safe)
+    // position to an expensive (>85%-loss) one the instant the first gateway
+    // call has happened, so the first checkpoint sees "safe" (reaches the
+    // gateway, gets the mocked invalid-tick rejection) and the retry
+    // checkpoint sees "unsafe" (blocks). Per the plan, the retry must return
+    // false so executePlace falls through to persist the ORIGINAL invalid-
+    // tick rejection exactly once — never a second OrderRejected for the
+    // retry attempt.
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      success: false,
+      errorCode: ExchangeErrorCode.Unknown,
+      errorMessage: "invalid tick size (0.001), minimum for the market is 0.01",
+      errorDetails: INVALID_TICK_ERROR_DETAILS,
+    });
+
+    const positionId = createPositionId("pos-p2-floor-retry");
+    const tokenId = createTokenId("tok-p2");
+    const conditionId = createConditionId("cond-p2");
+    const safePosition: Position = {
+      positionId,
+      tokenId,
+      conditionId,
+      side: "buy",
+      size: 10,
+      avgEntryPrice: 0.1,
+      costBasisUsdc: 1.0,
+      currentValueUsdc: 1.0,
+      realizedPnl: 0,
+      status: "open",
+      entryStyle: null,
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      updatedAt: new Date().toISOString(),
+    };
+    // Same 10-share lot, entry price raised from 0.10 to 0.90 — cost basis
+    // moves from 1.0 to 9.0. Selling at 0.10 (net ~0.0937 after taker fee) is
+    // a ~6% loss against the cheap lot but a ~90% loss against the expensive
+    // one — comfortably on either side of the default 50% floor.
+    const unsafePosition: Position = {
+      ...safePosition,
+      avgEntryPrice: 0.9,
+      costBasisUsdc: 9.0,
+      currentValueUsdc: 9.0,
+    };
+    const safeLot = {
+      lotId: createLotId("lot-p2-floor-safe"),
+      positionId,
+      tokenId,
+      side: "buy" as const,
+      size: 10,
+      remainingSize: 10,
+      entryPrice: 0.1,
+      costUsdc: 1.0,
+      fillId: createFillId("fill-p2-floor-safe"),
+      createdAt: new Date().toISOString(),
+    };
+    const unsafeLot = { ...safeLot, entryPrice: 0.9, costUsdc: 9.0 };
+
+    // The floor gate re-fetches position/lots fresh at every checkpoint
+    // (evaluateSellExitLossFloor). Switch the instant the first gateway
+    // attempt has happened, so the pre-submit checkpoint sees the cheap
+    // position and the retry checkpoint sees the expensive one.
+    const hasSubmittedFirstAttempt = () =>
+      (gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls.length > 0;
+    const positionRepo: PositionRepository = {
+      save: vi.fn(),
+      findById: vi.fn().mockReturnValue(null),
+      findByTokenId: vi.fn(() => (hasSubmittedFirstAttempt() ? unsafePosition : safePosition)),
+      findByConditionId: vi.fn().mockReturnValue([]),
+      findAllOpen: vi.fn(() => [hasSubmittedFirstAttempt() ? unsafePosition : safePosition]),
+      updateSize: vi.fn(),
+      close: vi.fn(),
+    } as unknown as PositionRepository;
+    const inventoryLotRepo: InventoryLotRepository = {
+      save: vi.fn(),
+      findByTokenId: vi.fn(() => [hasSubmittedFirstAttempt() ? unsafeLot : safeLot]),
+      findOpen: vi.fn(() => [hasSubmittedFirstAttempt() ? unsafeLot : safeLot]),
+      consumeFifo: vi.fn().mockReturnValue([]),
+      settleAll: vi.fn(),
+    };
+
+    const tickResolver = createStagedMockTickResolver(/* phase1 */ 0.001, /* retry */ 0.01);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      tickResolver,
+    });
+    await mod.start();
+
+    const rejectedEvents: Array<{ reason: string }> = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejectedEvents.push({ reason: p.reason });
+    });
+    const skippedEvents: Array<{ reasonCode: string; details?: Record<string, unknown> }> = [];
+    bus.subscribe("OrderSkipped", async (p) => {
+      skippedEvents.push({
+        reasonCode: p.reasonCode,
+        details: p.details as Record<string, unknown>,
+      });
+    });
+
+    const cmd = makePlaceCmd({
+      side: "sell",
+      price: 0.1,
+      size: 10,
+      tickSize: 0.001,
+      tokenId,
+      conditionId,
+    });
+    await getExecutePlaceCaller(mod).executePlace(cmd);
+
+    // Retry never reached the gateway a second time — the floor blocked it first.
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    // The floor block surfaces as an OrderSkipped for the retry attempt...
+    expect(skippedEvents).toHaveLength(1);
+    expect(skippedEvents[0]!.reasonCode).toBe("exit_loss_floor_blocked");
+    expect(skippedEvents[0]!.details).toMatchObject({
+      exitLossFloorReason: "exit_loss_floor_blocked",
+      phase: "invalid-tick-retry",
+    });
+
+    // ...but persistence/publish for the command itself still reflects only
+    // the ORIGINAL invalid-tick rejection — exactly one OrderRejected, not two.
+    expect(rejectedEvents).toHaveLength(1);
+    expect(orderRepo.save).toHaveBeenCalledTimes(1);
+    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(savedOrder.status).toBe("rejected");
+    expect(savedOrder.exchangeRejectionReason).toBe("rejection_invalid_tick");
+    expect(savedOrder.price).toBe(0.1);
 
     await mod.stop();
   });

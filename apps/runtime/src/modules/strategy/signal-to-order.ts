@@ -21,6 +21,7 @@ import type {
   ExecutionPolicy,
   ExecutionPolicyObservation,
   ExecutionPolicyObservationRepository,
+  InventoryLotRepository,
   NormalizedMarket,
   OrderRepository,
   OrderBookSnapshot,
@@ -169,6 +170,15 @@ export interface SignalToOrderBridgeDeps {
   log: Logger;
   orderRepo?: OrderRepository | undefined;
   positionRepo?: PositionRepository | undefined;
+  /**
+   * FIFO lot read access for the bounce-exit backstop's exit-loss-floor
+   * pre-cancel screen (docs/plans/2026-07-20-exit-loss-floor.md §Phase 5).
+   * Optional and best-effort only: the authoritative safety gate lives at
+   * execution-module.ts's pre-submit checkpoint regardless of whether this is
+   * wired. When unset, the screen has no lot data to confirm a loss with, so
+   * it fails OPEN (never blocks the backstop on its own uncertainty).
+   */
+  inventoryLotRepo?: InventoryLotRepository | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
   candidateBookCache?: CandidateBookCache | undefined;
   /**
@@ -337,6 +347,26 @@ export class SignalToOrderBridge {
 
   private now(): number {
     return this.deps.now ? this.deps.now() : Date.now();
+  }
+
+  /**
+   * Every resting BOUNCE_EXIT_TARGET maker SELL rung still open for a token — the
+   * bounce backstop cancels all of them before submitting its full-residual taker
+   * exit. Keyed on decisionRuleId (not price) so it catches every rung regardless
+   * of how close each sits to the taker's bestBid-derived price.
+   */
+  private findOpenBounceTargetOrders(tokenId: TokenId): Order[] {
+    if (!this.deps.orderRepo) return [];
+    return this.deps.orderRepo
+      .findByTokenId(tokenId)
+      .filter(
+        (order) =>
+          order.side === "sell" &&
+          (order.status === "open" ||
+            order.status === "pending" ||
+            order.status === "partially-filled") &&
+          order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID,
+      );
   }
 
   /**
@@ -1718,27 +1748,23 @@ export class SignalToOrderBridge {
         skippedReason: null,
       });
 
-      // Bounce-exit backstop force-exit (docs/plans/2026-07-16-bounce-exit-
-      // ladder-redesign.md, Phase 3): cancel every resting BOUNCE_EXIT_TARGET
-      // maker rung before submitting the taker exit for the full residual —
-      // the ladder can rest multiple rungs simultaneously, so all of them
-      // must be cancelled, not just one. Publishing the cancels first
-      // (awaited) then the place is enough at this bridge layer — the actual
-      // exchange-level ordering guarantee (cancels execute before the taker
-      // place) comes independently from execution-module.ts's per-token
-      // ExecutionQueue mutex, regardless of whether these cancels have fully
-      // drained by the time we publish below.
+      // Bounce-exit backstop force-exit: cancel every resting BOUNCE_EXIT_TARGET
+      // maker rung before submitting the taker exit for the full residual (the
+      // ladder can rest multiple rungs at once). The taker exit is independently
+      // gated by ExecutionModule's authoritative max-lot loss-floor check — a
+      // below-floor taker is refused there and the position simply HOLDS. Because
+      // the max-lot verdict does NOT depend on other resting SELLs, no confirmed-
+      // cancel or target-exclusion coordination is needed (design:
+      // research_plankton/exit_loss_floor_maxlot_decision_2026-07-20.md).
       if (isBounceExitForceExit) {
-        const restingTargets = this.findOpenBounceTargetOrders(signal.tokenId);
-        for (const restingTarget of restingTargets) {
-          const cancelCmd: CancelOrderCommand = {
-            type: "CancelOrderCommand",
-            commandId: createCommandId(randomUUID()),
-            orderId: restingTarget.orderId,
-            reason: "sell_timeout_escalation",
-          };
+        for (const restingTarget of this.findOpenBounceTargetOrders(signal.tokenId)) {
           await this.deps.bus.publish("CancelOrderRequested", {
-            command: cancelCmd,
+            command: {
+              type: "CancelOrderCommand",
+              commandId: createCommandId(randomUUID()),
+              orderId: restingTarget.orderId,
+              reason: "sell_timeout_escalation",
+            } satisfies CancelOrderCommand,
             timestamp: Date.now(),
           });
         }
@@ -3168,28 +3194,6 @@ export class SignalToOrderBridge {
           Math.abs(order.price - executionPrice) < acceptablePriceWindow,
       ) ?? null
     );
-  }
-
-  /**
-   * Every resting BOUNCE_EXIT_TARGET maker SELL rung for a GATE position,
-   * still open (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md, Phase
-   * 3). Keyed on decisionRuleId rather than price — the backstop must cancel
-   * whatever rungs are resting regardless of how close their prices sit to
-   * the taker exit's bestBid-derived price. The ladder can rest multiple
-   * rungs simultaneously (execution-module.ts's capacity carve-out —
-   * resolveMaxOpenSellOrdersPerToken — allows up to `ladderFractions.length`
-   * concurrent rungs), so every matching rung is returned, not just one.
-   */
-  private findOpenBounceTargetOrders(tokenId: TokenId): Order[] {
-    if (!this.deps.orderRepo) return [];
-    return this.deps.orderRepo
-      .findByTokenId(tokenId)
-      .filter(
-        (order) =>
-          order.side === "sell" &&
-          isOpenOrderStatus(order.status) &&
-          order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID,
-      );
   }
 
   /**

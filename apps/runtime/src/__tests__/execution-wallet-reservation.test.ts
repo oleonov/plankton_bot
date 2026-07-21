@@ -14,6 +14,9 @@ import {
   createCommandId,
   createBotRunId,
   createConditionId,
+  createPositionId,
+  createLotId,
+  createFillId,
   DEFAULT_BUY_CAPACITY_POLICY,
   DEFAULT_EXECUTION_POLICY,
 } from "@krabs/domain";
@@ -30,6 +33,9 @@ import type {
   FillRepository,
   PlaceOrderCommand,
   ExecutionPolicy,
+  Position,
+  PositionRepository,
+  InventoryLotRepository,
   TokenId,
   ClientOrderId,
 } from "@krabs/domain";
@@ -203,6 +209,62 @@ function createMockControlDb(walletBalance: number | null) {
         ),
     }),
   };
+}
+
+/**
+ * Position + a single FIFO lot spanning it, consistent with makeBuyCmd's
+ * default price (0.5) — satisfies the exit-loss-floor gate's FIFO-sufficiency
+ * and cost-consistency checks for SELLs on `tokenId`.
+ */
+function createMockPositionWithLots(
+  tokenId: TokenId,
+  size: number,
+): { positionRepo: PositionRepository; inventoryLotRepo: InventoryLotRepository } {
+  const position: Position = {
+    positionId: createPositionId("pos-wallet-1"),
+    tokenId,
+    conditionId: createConditionId("cond-wallet-1"),
+    side: "buy",
+    size,
+    avgEntryPrice: 0.5,
+    costBasisUsdc: size * 0.5,
+    currentValueUsdc: size * 0.5,
+    realizedPnl: 0,
+    status: "open",
+    entryStyle: null,
+    openedAt: new Date().toISOString(),
+    closedAt: null,
+    updatedAt: new Date().toISOString(),
+  };
+  const positionRepo = {
+    save: vi.fn(),
+    findById: vi.fn().mockReturnValue(null),
+    findByTokenId: vi.fn().mockReturnValue(position),
+    findByConditionId: vi.fn().mockReturnValue([]),
+    findAllOpen: vi.fn().mockReturnValue([position]),
+    updateSize: vi.fn(),
+    close: vi.fn(),
+  } as unknown as PositionRepository;
+  const lot = {
+    lotId: createLotId("lot-wallet-1"),
+    positionId: position.positionId,
+    tokenId,
+    side: "buy" as const,
+    size,
+    remainingSize: size,
+    entryPrice: 0.5,
+    costUsdc: size * 0.5,
+    fillId: createFillId("fill-wallet-1"),
+    createdAt: position.openedAt,
+  };
+  const inventoryLotRepo: InventoryLotRepository = {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue([lot]),
+    findOpen: vi.fn().mockReturnValue([lot]),
+    consumeFifo: vi.fn().mockReturnValue([]),
+    settleAll: vi.fn(),
+  };
+  return { positionRepo, inventoryLotRepo };
 }
 
 const silentLog = {
@@ -908,12 +970,21 @@ describe("ExecutionModule — wallet reservation rejection", () => {
         ),
       ),
     );
+    // The D8 SELL below is on tokenId "tok-yes" (makeSellCmd's default), distinct
+    // from the 150 profile-ladder orders above — so reservedSell for it is 0 and
+    // position.size=100 alone gates availableSize, well clear of the cmd.size=10.
+    const { positionRepo, inventoryLotRepo } = createMockPositionWithLots(
+      createTokenId("tok-yes"),
+      100,
+    );
     const mod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      positionRepo,
+      inventoryLotRepo,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },

@@ -81,7 +81,8 @@ export type CancelOrderReason =
   | "sell_timeout_escalation"
   | "s1_handoff_to_qd"
   | "operator"
-  | "phantom_missing_on_exchange";
+  | "phantom_missing_on_exchange"
+  | "exit_loss_floor";
 
 export interface CancelOrderCommand {
   readonly type: "CancelOrderCommand";

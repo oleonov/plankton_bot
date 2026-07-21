@@ -196,6 +196,8 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
     marketRepo: repos.market,
     orderRepo: repos.order,
     fillRepo: repos.fill,
+    positionRepo: repos.position,
+    inventoryLotRepo: repos.inventoryLot,
     log,
     botRunId,
     runtimeControl,
@@ -245,6 +247,8 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
     log,
     orderRepo: repos.order,
     candidateBookCache,
+    positionRepo: repos.position,
+    inventoryLotRepo: repos.inventoryLot,
   });
 
   const reconciliationModule = new ReconciliationModule({

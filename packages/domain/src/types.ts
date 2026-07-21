@@ -1983,6 +1983,15 @@ export interface ExecutionPolicy {
   bounceExit: BounceExitPolicy;
   /** Sellable-sizing + bounce-exit-for-all-lanes (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md) — default OFF. */
   sellableFlow: SellableFlowPolicy;
+  /**
+   * Always-on safety envelope (docs/plans/2026-07-20-exit-loss-floor.md):
+   * never SUBMIT an exit SELL whose fee-adjusted realized loss on the FIFO
+   * lots it would consume exceeds this fraction. Default 0.50 — plankton
+   * never dumps (only 1.1% of his sells are ≤ -50%, p1 ≈ -53%); 0.50
+   * isolates the true-dump tail without suppressing his validated small-loss
+   * behavior. Bounds (0, 1]; see `evaluateExitLossFloor`.
+   */
+  maxExitLossFraction: number;
 }
 
 /**

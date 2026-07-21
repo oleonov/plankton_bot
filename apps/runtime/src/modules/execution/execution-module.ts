@@ -22,12 +22,14 @@ import type {
   PlaceOrderCommand,
   PlaceOrderParams,
   CancelOrderCommand,
+  CancelOrderReason,
   OrderId,
   BotRunId,
   RuntimeControl,
   ProfileId,
   TokenId,
   PositionRepository,
+  InventoryLotRepository,
   ExchangeFill,
   ExecutionPolicy,
   LegStateRepository,
@@ -35,6 +37,7 @@ import type {
   RiskEventRepository,
   NormalizedMarket,
   RuntimeEventMap,
+  ExitLossFloorVerdict,
 } from "@krabs/domain";
 import {
   createCommandId,
@@ -49,6 +52,9 @@ import {
   GATE_ENTRY_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
   isBounceForceExit,
+  evaluateExitLossFloor,
+  computePolymarketPlatformFeeRate,
+  POLYMARKET_CRYPTO_TAKER_FEE_RATE,
 } from "@krabs/domain";
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
@@ -136,6 +142,12 @@ function boundedMetricLabel(value: string | null | undefined): string {
   return value.length <= 64 ? value : "other";
 }
 
+// No "pending-cancel" status exists on OrderStatus (packages/domain/src/enums.ts) —
+// terminal means the order can never be cancelled again.
+function isTerminalOrderStatus(status: Order["status"]): boolean {
+  return status === "cancelled" || status === "filled";
+}
+
 function resolveSellRepriceThreshold(
   lastPlacedAnchor: number,
   tickSize: number,
@@ -164,6 +176,20 @@ function resolveSellRepriceThreshold(
   };
 }
 
+/** CLOB-V2 builder-fee protocol maxima (fraction of notional). Additive to the
+ *  platform fee; the exit loss-floor fee estimate uses these upper bounds because
+ *  the live builder rate is mutable outside this code (currently 0 in prod). */
+const EXIT_LOSS_FLOOR_BUILDER_MAKER_FEE_MAX = 0.005;
+const EXIT_LOSS_FLOOR_BUILDER_TAKER_FEE_MAX = 0.01;
+
+/** Checkpoint that observed an exit loss-floor STOP (telemetry/risk-event label). */
+type ExitLossFloorPhase =
+  | "pre-cancel-screen"
+  | "authoritative"
+  | "invalid-tick-retry"
+  | "position-updated-reeval"
+  | "startup-scan";
+
 export interface ExecutionModuleDeps {
   gateway: ExchangeGateway;
   bus: EventBus;
@@ -171,6 +197,14 @@ export interface ExecutionModuleDeps {
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
   positionRepo?: PositionRepository | undefined;
+  /**
+   * FIFO cost-basis lots for the exit-loss-floor gate (docs/plans/2026-07-20-
+   * exit-loss-floor.md §Phase 3/4). Optional so legacy unit tests don't need
+   * a mechanical wiring sweep — absent repo/position/lots is treated as
+   * missing input and the evaluator fails CLOSED (blocks the sell), it is
+   * never used to skip the gate.
+   */
+  inventoryLotRepo?: InventoryLotRepository | undefined;
   log: Logger;
   botRunId: BotRunId;
   runtimeControl?: RuntimeControl | undefined;
@@ -269,6 +303,17 @@ export class ExecutionModule implements RuntimeModule {
   >();
   private readonly gatewayRejects: Array<{ ts: number; code: string }> = [];
   private readonly internalReservationRejects: number[] = [];
+  /**
+   * In-flight cancel dedup (docs/plans/2026-07-20-exit-loss-floor.md §Phase 6,
+   * finding #5): reserved just before the gateway cancel call, cleared on
+   * cancel FAILURE (so a later retry — e.g. the next PositionUpdated
+   * re-evaluation — can try again), retained through successful terminal
+   * persistence (from that point on `isTerminalOrderStatus` alone guards
+   * against duplicates). Prevents two concurrent CancelOrderCommands for the
+   * same orderId (e.g. a PositionUpdated re-eval racing the profile ladder,
+   * which also rebuilds on PositionUpdated) from both reaching the gateway.
+   */
+  private readonly cancelReservations = new Set<string>();
   private sellSizeClamps = 0;
   private readonly queue: ExecutionQueue | null;
   private readonly acceptedCommandAt = new Map<string, number>();
@@ -303,9 +348,58 @@ export class ExecutionModule implements RuntimeModule {
       this.deps.bus.subscribe("CancelOrderRequested", (p) => this.handleCancel(p.command)),
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
+      this.deps.bus.subscribe("PositionUpdated", (p) => this.handlePositionUpdated(p)),
     );
+    // One-time startup re-evaluation of every existing resting exit SELL against
+    // the loss floor (code-review finding #3): risk/inventory starts before
+    // execution and can publish PositionUpdated BEFORE we subscribe, so a SELL
+    // that became below-floor while we were down would otherwise never be
+    // re-checked in a quiet period. Runs after subscribing so nothing is missed.
+    await this.reEvaluateRestingSellsAtStartup();
     this.started = true;
     this.log.info("execution module started");
+  }
+
+  private async reEvaluateRestingSellsAtStartup(): Promise<void> {
+    for (const order of this.deps.orderRepo.findOpen()) {
+      if (order.side === "sell") await this.cancelRestingSellIfBelowFloor(order, "startup-scan");
+    }
+  }
+
+  /**
+   * Per-order max-lot re-check of a resting exit SELL. The verdict is a per-order
+   * bound (independent of other sells, size, or fill order), so each resting order
+   * is checked and cancelled independently — no set/survivor computation, and
+   * cancelling one order cannot make another unsafe.
+   */
+  private async cancelRestingSellIfBelowFloor(
+    order: Order,
+    phase: "startup-scan" | "position-updated-reeval",
+  ): Promise<void> {
+    const remainingShares = this.getRemainingOrderShares(order);
+    if (remainingShares <= 0) return;
+    const verdict = this.evaluateSellExitLossFloor(order, order.price);
+    if (!verdict.block) return;
+    this.log.warn(
+      {
+        orderId: String(order.orderId),
+        tokenId: String(order.tokenId),
+        remainingShares,
+        price: order.price,
+        exitLossFloorReason: verdict.reason,
+      },
+      phase === "startup-scan"
+        ? "resting exit SELL below loss floor at startup — cancelling"
+        : "resting exit SELL now below loss floor after position update — cancelling",
+    );
+    this.recordExitLossFloorCounter(verdict.reason, phase);
+    this.recordExitLossFloorRiskEvent(verdict.reason, phase, {
+      tokenId: String(order.tokenId),
+      orderId: String(order.orderId),
+      submittedPrice: order.price,
+      effectiveSellShares: remainingShares,
+    });
+    await this.requestExitLossFloorCancel(order.orderId);
   }
 
   private async handleMarketUpdate(
@@ -873,6 +967,10 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    if (await this.blockSellReplacementBelowExitLossFloor(cmd)) {
+      return;
+    }
+
     if (await this.deferSellReplacementIfNeeded(cmd)) {
       return;
     }
@@ -995,6 +1093,246 @@ export class ExecutionModule implements RuntimeModule {
       this.cancelCompleted++;
       this.cancelLatencyTotalMs += latencyMs;
     }
+  }
+
+  // ─── Exit loss-floor gate (docs/plans/2026-07-20-exit-loss-floor.md) ──
+
+  /**
+   * Shared evaluator call for every sell-submit checkpoint: the two
+   * authoritative ones (main submit and invalid-tick retry, both pass a
+   * PlaceOrderCommand) plus the best-effort pre-cancel screen and the
+   * PositionUpdated re-eval (Part 1/2 below, which pass an already-resting
+   * Order). `Pick` keeps this structurally compatible with both shapes
+   * without a translation layer — Order and PlaceOrderCommand both carry
+   * `tokenId`/`postOnly`. Missing position/lots are NOT treated as "gate not
+   * applicable" — they are passed through as missing inputs so the pure
+   * evaluator fails CLOSED (blocks), per the plan.
+   */
+  /**
+   * Per-share NON-underestimated exit fee at a submit price = platform fee +
+   * additive CLOB-V2 builder fee (code-review 2026-07-20 finding: an under-
+   * estimated fee can let a near-boundary dump pass, so this must be an UPPER
+   * bound on what the exchange will actually deduct).
+   *
+   * Platform fee: empirically (verified live on clob.polymarket.com/markets,
+   * 2026-07-20) the CLOB never supplies the `fd` object — only
+   * `taker_base_fee=1000` → `{rate: 0.07, exponent: 1}`, so exponent<1 markets do
+   * NOT exist here and `computePolymarketPlatformFeeRate` at exponent=1 is
+   * authoritative. A maker (postOnly, and every RESTING sell — it fills as maker)
+   * pays no platform taker fee.
+   *
+   * Builder fee: live-lite attaches a builder code and the builder rate is mutable
+   * OUTSIDE this code, so we bound it by the protocol MAXIMA (0.5% maker / 1%
+   * taker of notional = `rate × price` per share). Current prod builder rates are
+   * 0, so this is a conservative over-estimate today — the safe direction.
+   */
+  private exitLossFloorFeePerShare(price: number, postOnly: boolean): number {
+    const platformFee = postOnly
+      ? 0
+      : computePolymarketPlatformFeeRate({
+          price,
+          rate: POLYMARKET_CRYPTO_TAKER_FEE_RATE,
+          exponent: 1,
+        });
+    const builderFeeRateMax = postOnly
+      ? EXIT_LOSS_FLOOR_BUILDER_MAKER_FEE_MAX
+      : EXIT_LOSS_FLOOR_BUILDER_TAKER_FEE_MAX;
+    return platformFee + builderFeeRateMax * price;
+  }
+
+  /**
+   * Max-lot exit loss-floor verdict for a SELL at `submittedPrice` (design:
+   * research_plankton/exit_loss_floor_maxlot_decision_2026-07-20.md). Bounds the
+   * realized loss by the position's most expensive remaining lot, so it needs no
+   * sell size, competing-order set, priority, or exclusions and is safe under any
+   * fill order / partial fill / concurrency. Fails CLOSED on missing/inconsistent
+   * position or lot data.
+   */
+  private evaluateSellExitLossFloor(
+    cmd: Pick<PlaceOrderCommand, "tokenId" | "postOnly">,
+    submittedPrice: number,
+  ): ExitLossFloorVerdict {
+    const position = this.deps.positionRepo?.findByTokenId(cmd.tokenId) ?? null;
+    const lots = position ? (this.deps.inventoryLotRepo?.findOpen(position.positionId) ?? []) : [];
+    const policy = this.deps.executionPolicy?.() ?? DEFAULT_EXECUTION_POLICY;
+    return evaluateExitLossFloor({
+      submittedPrice,
+      fifoLots: lots.map((lot) => ({
+        remainingSize: lot.remainingSize,
+        entryPrice: lot.entryPrice,
+      })),
+      positionSize: position?.size ?? null,
+      positionCostBasisUsdc: position?.costBasisUsdc ?? null,
+      estSellFeePerShare: this.exitLossFloorFeePerShare(submittedPrice, cmd.postOnly === true),
+      maxExitLossFraction: policy.maxExitLossFraction,
+    });
+  }
+
+  /**
+   * Best-effort pre-cancel screen (docs/plans/2026-07-20-exit-loss-floor.md
+   * §Phase 1 "Resolution (rev 5)", §Phase 4 checkpoint 1) — runs BEFORE
+   * `deferSellReplacementIfNeeded` so a below-floor replacement never gets a
+   * chance to cancel the safe resting order it would replace. NOT the
+   * guarantee: the authoritative checkpoint inside `executePlace` (already
+   * wired) is what actually blocks a bad submit. This screen only tries to
+   * avoid the wasted (and observable) cancel-then-reject churn — so any
+   * uncertainty here (no target, no position, ambiguous size) must fall
+   * through to `deferSellReplacementIfNeeded` unchanged, never block on its
+   * own authority. Returns true only when it confirmed a below-floor replace
+   * and skipped it.
+   */
+  private async blockSellReplacementBelowExitLossFloor(cmd: PlaceOrderCommand): Promise<boolean> {
+    const target = this.identifyReplacementCancelTarget(cmd);
+    if (!target) return false;
+
+    const prospectiveSize = this.computeProspectiveReplacementSellSize(cmd, target.orderId);
+    if (prospectiveSize == null || prospectiveSize <= 0) return false;
+
+    const verdict = this.evaluateSellExitLossFloor(cmd, cmd.price);
+    // Only act on a CONFIRMED below-floor result. Every other reason
+    // (invalid_submitted_price, invalid_position_size, insufficient_fifo_lots,
+    // cost_inconsistent, ...) means the inputs were missing/inconsistent, not
+    // that a loss was actually confirmed — best-effort means treating that
+    // uncertainty as "let it flow to the authoritative gate", never a block.
+    if (!verdict.block || verdict.reason !== "exit_loss_floor_blocked") return false;
+
+    this.log.warn(
+      {
+        commandId: cmd.commandId,
+        tokenId: cmd.tokenId,
+        existingOrderId: String(target.orderId),
+        submittedPrice: cmd.price,
+        prospectiveReplacementSize: prospectiveSize,
+      },
+      "sell replacement skipped — prospective replacement below exit loss floor (pre-cancel screen)",
+    );
+    this.recordExitLossFloorCounter(verdict.reason, "pre-cancel-screen");
+    await this.publishOrderSkipped(cmd, "exit_loss_floor_blocked", {
+      exitLossFloorReason: verdict.reason,
+      submittedPrice: cmd.price,
+      effectiveSellShares: prospectiveSize,
+      phase: "pre-cancel-screen",
+      existingOrderId: String(target.orderId),
+    });
+    return true;
+  }
+
+  /**
+   * Read-only mirror of `deferSellReplacementIfNeeded`'s target-selection
+   * logic (same bypasses, same existingSells[0]/profileLadderReplacement
+   * resolution — see ~:2472 and its existingSell derivation) — identifies
+   * WHICH resting order that method would cancel, without any of its
+   * side-effecting reject/lock/cancel decisions. Deliberately duplicated
+   * rather than extracted into a shared helper: this is money-critical
+   * cancellation-flow code, and refactoring the tested, authoritative
+   * selector carries more regression risk than a dozen duplicated lines.
+   * Returns null on any bypass/ambiguity — callers treat null as "uncertain,
+   * let it flow to deferSellReplacementIfNeeded unchanged".
+   */
+  private identifyReplacementCancelTarget(cmd: PlaceOrderCommand): Order | null {
+    if (cmd.side !== "sell") return null;
+    if (
+      isBounceForceExit({ side: cmd.side, decisionRuleId: cmd.decisionRuleId ?? null }) ||
+      cmd.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID ||
+      this.isSellReplacementSubmit(cmd)
+    ) {
+      return null;
+    }
+    const existingSells = this.findOpenSellOrdersForToken(cmd.tokenId);
+    if (existingSells.length === 0) return null;
+    const profileLadderOldOrderId = this.getProfileLadderReplacementOldOrderId(cmd);
+    if (profileLadderOldOrderId == null) return existingSells[0] ?? null;
+    return (
+      existingSells.find((order) => orderMatchesOrderId(order, profileLadderOldOrderId)) ?? null
+    );
+  }
+
+  /**
+   * Prospective size of the replacement SELL that would follow cancelling
+   * `excludeOrderId` — the reservation snapshot minus that one order (all
+   * other local/pending/exchange-only reservations still count), clamped
+   * against the wallet/local upper bound exactly like the authoritative
+   * reservation clamp in `getReservationDecision`. Returns null when there is
+   * no position to size against (uncertain — let the screen pass through).
+   */
+  private computeProspectiveReplacementSellSize(
+    cmd: PlaceOrderCommand,
+    excludeOrderId: OrderId,
+  ): number | null {
+    const position = this.deps.positionRepo?.findByTokenId(cmd.tokenId);
+    if (!position) return null;
+    const reservations = this.getReservationSnapshotExcludingOrder(cmd, excludeOrderId);
+    const localReservedSell = getReservedSellSize(reservations, cmd.tokenId);
+    const reservedSell = this.effectiveReservedSell(cmd.tokenId, localReservedSell);
+    const upperBound = this.computeSellUpperBound(cmd.tokenId, position.size);
+    const availableSize = upperBound - reservedSell;
+    return Math.min(cmd.size, Math.max(0, availableSize));
+  }
+
+  private getReservationSnapshotExcludingOrder(
+    cmd: PlaceOrderCommand,
+    excludeOrderId: OrderId,
+  ): ReservationSnapshot {
+    const openOrders = this.excludeBounceTargetBeingReplaced(
+      this.deps.orderRepo.findOpen(),
+      cmd,
+    ).filter((order) => order.orderId !== excludeOrderId);
+    return buildReservationSnapshot(
+      openOrders,
+      this.deps.fillRepo,
+      this.pendingReservations.values(),
+    );
+  }
+
+  /**
+   * PositionUpdated re-evaluation (docs/plans/2026-07-20-exit-loss-floor.md
+   * §Phase 6): published AFTER the inventory module applies a fill, so lots
+   * and cost basis here are already current. Unlike the best-effort pre-
+   * cancel screen above, this re-eval is fully fail-closed — any `block`
+   * result (any reason, not just a confirmed loss) cancels the resting SELL,
+   * because cancelling is the SAFE direction here (leaves an unquoted
+   * residual, never risks a dump) — the mirror image of the pre-cancel
+   * screen's "never block on uncertainty" stance. Re-evaluates every open
+   * SELL for the token; there is no prior-basis comparison.
+   */
+  private async handlePositionUpdated(payload: RuntimeEventMap["PositionUpdated"]): Promise<void> {
+    // A scale-in that raised the max remaining lot can push a resting exit SELL
+    // below the floor — re-check each of the token's resting SELLs independently.
+    for (const order of this.findOpenSellOrdersForToken(payload.position.tokenId)) {
+      await this.cancelRestingSellIfBelowFloor(order, "position-updated-reeval");
+    }
+  }
+
+  /**
+   * Per-order remaining (unfilled) share count. Mirrors the private
+   * `getRemainingOrderSize` in reservation-utils.ts (not exported, and that
+   * file is out of scope for this change) but only ever needs one order at a
+   * time here, so the batched fill lookup used there isn't warranted.
+   */
+  private getRemainingOrderShares(order: Order): number {
+    const filled = this.deps.fillRepo
+      .findByOrderId(order.orderId)
+      .reduce((sum, fill) => sum + fill.size, 0);
+    return Math.max(0, order.size - filled);
+  }
+
+  private async requestExitLossFloorCancel(orderId: OrderId): Promise<void> {
+    await this.publishManagedCancel(orderId, "exit_loss_floor");
+  }
+
+  private async publishManagedCancel(orderId: OrderId, reason: CancelOrderReason): Promise<void> {
+    const now = Date.now();
+    await this.deps.bus.publish("CancelOrderRequested", {
+      command: {
+        type: "CancelOrderCommand",
+        commandId: createCommandId(
+          `${reason}-${String(orderId)}-${now}-${Math.random().toString(36).slice(2)}`,
+        ),
+        orderId,
+        reason,
+      },
+      timestamp: now,
+    });
   }
 
   // ─── Place execution (gateway call) ──────────────────────────────────
@@ -1153,6 +1491,42 @@ export class ExecutionModule implements RuntimeModule {
       negRisk: cmd.negRisk,
       ...(cmd.expiration !== undefined ? { expiration: cmd.expiration } : {}),
     };
+
+    // Authoritative exit loss-floor checkpoint (docs/plans/2026-07-20-exit-
+    // loss-floor.md §Phase 4, step 2) — the ACTUAL price/size about to be
+    // submitted, after tick resnap and sell-size clamp. Never rewrite the
+    // price: block-and-skip, or submit unchanged.
+    if (cmd.side === "sell") {
+      const floorVerdict = this.evaluateSellExitLossFloor(effectiveCmd, placeParams.price);
+      if (floorVerdict.block) {
+        this.log.warn(
+          {
+            commandId: cmd.commandId,
+            tokenId: cmd.tokenId,
+            conditionId: cmd.conditionId,
+            submittedPrice: placeParams.price,
+            effectiveSellShares: placeParams.size,
+            exitLossFloorReason: floorVerdict.reason,
+          },
+          "exit SELL blocked by loss-floor gate — not submitted to exchange",
+        );
+        this.recordExitLossFloorCounter(floorVerdict.reason, "authoritative");
+        this.recordExitLossFloorRiskEvent(floorVerdict.reason, "authoritative", {
+          commandId: String(cmd.commandId),
+          tokenId: String(cmd.tokenId),
+          conditionId: cmd.conditionId ? String(cmd.conditionId) : undefined,
+          submittedPrice: placeParams.price,
+          effectiveSellShares: placeParams.size,
+        });
+        await this.publishOrderSkipped(effectiveCmd, "exit_loss_floor_blocked", {
+          exitLossFloorReason: floorVerdict.reason,
+          submittedPrice: placeParams.price,
+          effectiveSellShares: placeParams.size,
+        });
+        return;
+      }
+    }
+
     const result = await this.deps.gateway.placeOrder(placeParams);
 
     const now = Date.now();
@@ -1286,50 +1660,85 @@ export class ExecutionModule implements RuntimeModule {
   // ─── Cancel execution (gateway call) ─────────────────────────────────
 
   private async executeCancel(cmd: CancelOrderCommand): Promise<void> {
-    const result = await this.deps.gateway.cancelOrder({
-      orderId: String(cmd.orderId),
-    });
+    const orderKey = String(cmd.orderId);
 
-    const now = Date.now();
-
-    if (!result.success) {
-      this.log.warn(
-        { commandId: cmd.commandId, orderId: cmd.orderId, errorCode: result.errorCode },
-        "cancel rejected by gateway",
+    // Idempotency (docs/plans/2026-07-20-exit-loss-floor.md §Phase 6, finding
+    // #5). Terminal-status guard first: once a prior cancel (or a fill) has
+    // already been persisted, that alone is authoritative and permanent —
+    // checked ahead of the in-flight reservation so it also covers duplicates
+    // that arrive well after the reservation below would have been cleared.
+    const existingOrder = this.deps.orderRepo.findById(cmd.orderId);
+    if (existingOrder && isTerminalOrderStatus(existingOrder.status)) {
+      this.log.debug(
+        { commandId: cmd.commandId, orderId: cmd.orderId, status: existingOrder.status },
+        "cancel skipped — order already in a terminal status",
       );
       return;
     }
-
-    const orderForTelemetry = this.deps.orderRepo.findById(cmd.orderId);
-    const telemetry = orderForTelemetry
-      ? buildCancelTelemetry({
-          order: orderForTelemetry,
-          nowMs: now,
-          fillRepo: this.deps.fillRepo,
-          marketRepo: this.deps.marketRepo,
-        })
-      : undefined;
-
-    this.deps.orderRepo.updateStatus(cmd.orderId, "cancelled", undefined, cmd.reason, telemetry);
-
-    this.log.info({ commandId: cmd.commandId, orderId: cmd.orderId }, "order cancelled");
-
-    if (!orderForTelemetry) {
-      this.log.warn(
+    if (this.cancelReservations.has(orderKey)) {
+      this.log.debug(
         { commandId: cmd.commandId, orderId: cmd.orderId },
-        "cancel succeeded but local order not found — skipping OrderCancelled event",
+        "cancel skipped — a cancel for this order is already in flight",
       );
-    } else {
-      await this.deps.bus.publish("OrderCancelled", {
-        commandId: cmd.commandId,
-        orderId: cmd.orderId,
-        tokenId: orderForTelemetry.tokenId,
-        conditionId: orderForTelemetry.conditionId,
-        reason: cmd.reason,
-        signalReason: orderForTelemetry.signalReason,
-        timestamp: now,
+      return;
+    }
+    this.cancelReservations.add(orderKey);
+    this.pruneCancelReservations();
+
+    // Retain the reservation ONLY when the cancel AND its terminal persistence
+    // both complete; clear it on ANY non-success — a {success:false} result OR a
+    // THROWN gateway/repo/bus error — so a transient failure can't permanently
+    // poison the reservation and suppress a needed later retry (code-review #4).
+    let cancelPersisted = false;
+    try {
+      const result = await this.deps.gateway.cancelOrder({
+        orderId: orderKey,
       });
-      await this.releasePendingSellReplacement(cmd.orderId);
+
+      const now = Date.now();
+
+      if (!result.success) {
+        this.log.warn(
+          { commandId: cmd.commandId, orderId: cmd.orderId, errorCode: result.errorCode },
+          "cancel rejected by gateway",
+        );
+        return;
+      }
+
+      const orderForTelemetry = this.deps.orderRepo.findById(cmd.orderId);
+      const telemetry = orderForTelemetry
+        ? buildCancelTelemetry({
+            order: orderForTelemetry,
+            nowMs: now,
+            fillRepo: this.deps.fillRepo,
+            marketRepo: this.deps.marketRepo,
+          })
+        : undefined;
+
+      this.deps.orderRepo.updateStatus(cmd.orderId, "cancelled", undefined, cmd.reason, telemetry);
+
+      this.log.info({ commandId: cmd.commandId, orderId: cmd.orderId }, "order cancelled");
+
+      if (!orderForTelemetry) {
+        this.log.warn(
+          { commandId: cmd.commandId, orderId: cmd.orderId },
+          "cancel succeeded but local order not found — skipping OrderCancelled event",
+        );
+      } else {
+        await this.deps.bus.publish("OrderCancelled", {
+          commandId: cmd.commandId,
+          orderId: cmd.orderId,
+          tokenId: orderForTelemetry.tokenId,
+          conditionId: orderForTelemetry.conditionId,
+          reason: cmd.reason,
+          signalReason: orderForTelemetry.signalReason,
+          timestamp: now,
+        });
+        await this.releasePendingSellReplacement(cmd.orderId);
+      }
+      cancelPersisted = true;
+    } finally {
+      if (!cancelPersisted) this.cancelReservations.delete(orderKey);
     }
   }
 
@@ -2622,6 +3031,52 @@ export class ExecutionModule implements RuntimeModule {
     );
   }
 
+  /**
+   * Telemetry for the exit loss-floor gate (docs/plans/2026-07-20-exit-loss-
+   * floor.md §Phase 7). `exit_loss_floor_blocked` is the one CONFIRMED-dump
+   * reason `evaluateExitLossFloor` returns; every other reason means the
+   * inputs needed to evaluate the floor were missing/inconsistent, so the
+   * gate failed CLOSED without confirming an actual loss — tracked
+   * separately so an operator can tell "we caught a dump" apart from "we
+   * couldn't read cost basis" (the latter should be ~0 in steady state, per
+   * the plan's prod baseline).
+   */
+  private recordExitLossFloorCounter(reason: string | null, phase: ExitLossFloorPhase): void {
+    const metricName =
+      reason === "exit_loss_floor_blocked"
+        ? "exit_loss_floor_blocked_total"
+        : "exit_loss_floor_cost_unavailable_total";
+    this.deps.runtimeMetrics?.writeCounter?.(metricName, 1, JSON.stringify({ reason, phase }));
+  }
+
+  /**
+   * Operator-visible risk event for a loss-floor STOP (code-review finding #5):
+   * a counter alone is easy to miss, but a blocked exit SELL — or a fail-closed
+   * data inconsistency that prevents one — is a money-critical event that must
+   * surface in the risk log. Best-effort: a risk-event write failure must never
+   * break the (already-correct) block decision.
+   */
+  private recordExitLossFloorRiskEvent(
+    reason: string | null,
+    phase: ExitLossFloorPhase,
+    context: Record<string, unknown>,
+  ): void {
+    try {
+      this.deps.riskEventRepo?.insert({
+        eventType:
+          reason === "exit_loss_floor_blocked"
+            ? "exit_loss_floor_blocked"
+            : "exit_loss_floor_cost_unavailable",
+        payload: { reason, phase, ...context, occurredAt: new Date().toISOString() },
+      });
+    } catch (riskErr) {
+      this.log.error(
+        { err: riskErr, phase, reason },
+        "failed to persist exit-loss-floor risk event",
+      );
+    }
+  }
+
   private async rejectOrder(
     cmd: PlaceOrderCommand,
     reason: string,
@@ -2789,6 +3244,24 @@ export class ExecutionModule implements RuntimeModule {
     }
   }
 
+  /**
+   * Bounds `cancelReservations` for a long-running process — entries for
+   * successfully cancelled orders are retained (per the idempotency design in
+   * executeCancel) rather than cleared, so without this the set would grow
+   * for the lifetime of the bot. Mirrors `pruneProcessedCommandIds`'s
+   * cap/evict-batch sizing. Set iteration order is insertion order, so the
+   * oldest entries are evicted first.
+   */
+  private pruneCancelReservations(): void {
+    if (this.cancelReservations.size <= 10_000) return;
+    let removed = 0;
+    for (const key of this.cancelReservations) {
+      if (removed >= 1000) break;
+      this.cancelReservations.delete(key);
+      removed++;
+    }
+  }
+
   private buildOrder(
     cmd: PlaceOrderCommand,
     status: "open" | "rejected",
@@ -2916,6 +3389,37 @@ export class ExecutionModule implements RuntimeModule {
       },
       "invalid-tick rejection — retrying once with corrected tick/price",
     );
+
+    // Authoritative exit loss-floor checkpoint — retry path (docs/plans/2026-
+    // 07-20-exit-loss-floor.md §Phase 4, step 3). Same gate as the main
+    // submit, evaluated on the retry's resnapped price/size. On block, return
+    // the same "false" a pre-submit guard uses above (~:2988) so the caller
+    // falls through to persist/publish the ORIGINAL invalid-tick rejection
+    // exactly once — no second OrderRejected for the retry attempt.
+    if (cmd.side === "sell") {
+      const floorVerdict = this.evaluateSellExitLossFloor(retryCmd, retryParams.price);
+      if (floorVerdict.block) {
+        this.log.warn(
+          {
+            commandId: cmd.commandId,
+            conditionId: cmd.conditionId,
+            retryTick,
+            submittedPrice: retryParams.price,
+            effectiveSellShares: retryParams.size,
+            exitLossFloorReason: floorVerdict.reason,
+          },
+          "exit SELL blocked by loss-floor gate — invalid-tick retry not submitted",
+        );
+        this.recordExitLossFloorCounter(floorVerdict.reason, "invalid-tick-retry");
+        await this.publishOrderSkipped(retryCmd, "exit_loss_floor_blocked", {
+          exitLossFloorReason: floorVerdict.reason,
+          submittedPrice: retryParams.price,
+          effectiveSellShares: retryParams.size,
+          phase: "invalid-tick-retry",
+        });
+        return false;
+      }
+    }
 
     const retryResult = await this.deps.gateway.placeOrder(retryParams);
 

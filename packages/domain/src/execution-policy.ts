@@ -848,6 +848,10 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   gateEntry: DEFAULT_GATE_ENTRY,
   bounceExit: DEFAULT_BOUNCE_EXIT,
   sellableFlow: DEFAULT_SELLABLE_FLOW,
+  // docs/plans/2026-07-20-exit-loss-floor.md: only 1.1% of plankton's
+  // realized sells are ≤ -50% (p1 ≈ -53%) — 0.50 isolates the true-dump
+  // tail without suppressing his validated small-loss behavior.
+  maxExitLossFraction: 0.5,
 };
 
 const DEAD_SIDE_MODES = ["off", "observe", "enforce"] as const;
@@ -911,6 +915,7 @@ const BOUND_EXIT_REPRICE_THRESHOLD_TICKS_MIN = 1;
 const BOUND_EXIT_REPRICE_THRESHOLD_TICKS_MAX = 10_000;
 const BOUND_STUCK_WARNING_GAP_PCT_MIN = 0;
 const BOUND_STUCK_WARNING_GAP_PCT_MAX = 1;
+const BOUND_MAX_EXIT_LOSS_FRACTION_MAX = 1;
 const BOUND_DROP_TRIGGER_THRESHOLD_MIN = -1;
 const BOUND_DROP_TRIGGER_THRESHOLD_MAX = 0;
 const BOUND_R23_DIP_TRIGGER_RATIO_MIN = 0.001;
@@ -1193,6 +1198,13 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const gateEntry = parseGateEntry(obj.gateEntry, issues);
   const bounceExit = parseBounceExit(obj.bounceExit, issues);
   const sellableFlow = parseSellableFlow(obj.sellableFlow, issues);
+  const maxExitLossFraction = positiveClampedNumber(
+    obj.maxExitLossFraction,
+    DEFAULT_EXECUTION_POLICY.maxExitLossFraction,
+    BOUND_MAX_EXIT_LOSS_FRACTION_MAX,
+    issues,
+    "maxExitLossFraction",
+  );
 
   return {
     policy: {
@@ -1246,6 +1258,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       gateEntry,
       bounceExit,
       sellableFlow,
+      maxExitLossFraction,
     },
     issues,
   };

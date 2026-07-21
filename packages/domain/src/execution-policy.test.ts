@@ -2758,3 +2758,39 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.positionConcentration).toEqual(DEFAULT_EXECUTION_POLICY.positionConcentration);
   });
 });
+
+describe("maxExitLossFraction (exit-loss-floor safety envelope, docs/plans/2026-07-20-exit-loss-floor.md)", () => {
+  it("defaults to 0.50 when absent", () => {
+    const { policy, issues } = parseExecutionPolicyJson(null);
+    expect(policy.maxExitLossFraction).toBe(0.5);
+    expect(issues).toHaveLength(0);
+  });
+
+  it("accepts a valid value within (0, 1], including the upper bound", () => {
+    const mid = parseExecutionPolicyJson(JSON.stringify({ maxExitLossFraction: 0.35 }));
+    expect(mid.policy.maxExitLossFraction).toBe(0.35);
+    expect(mid.issues).toHaveLength(0);
+
+    const atUpperBound = parseExecutionPolicyJson(JSON.stringify({ maxExitLossFraction: 1 }));
+    expect(atUpperBound.policy.maxExitLossFraction).toBe(1);
+    expect(atUpperBound.issues).toHaveLength(0);
+  });
+
+  it("rejects out-of-bounds/invalid values and falls back to the 0.50 default", () => {
+    const zero = parseExecutionPolicyJson(JSON.stringify({ maxExitLossFraction: 0 }));
+    expect(zero.policy.maxExitLossFraction).toBe(0.5);
+    expect(zero.issues).toContain("maxExitLossFraction=0 out of range (0, 1]");
+
+    const negative = parseExecutionPolicyJson(JSON.stringify({ maxExitLossFraction: -0.1 }));
+    expect(negative.policy.maxExitLossFraction).toBe(0.5);
+    expect(negative.issues).toContain("maxExitLossFraction=-0.1 out of range (0, 1]");
+
+    const tooHigh = parseExecutionPolicyJson(JSON.stringify({ maxExitLossFraction: 1.5 }));
+    expect(tooHigh.policy.maxExitLossFraction).toBe(0.5);
+    expect(tooHigh.issues).toContain("maxExitLossFraction=1.5 out of range (0, 1]");
+
+    const nonNumber = parseExecutionPolicyJson(JSON.stringify({ maxExitLossFraction: "0.4" }));
+    expect(nonNumber.policy.maxExitLossFraction).toBe(0.5);
+    expect(nonNumber.issues).toContain("maxExitLossFraction must be a finite number");
+  });
+});

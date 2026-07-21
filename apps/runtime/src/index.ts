@@ -1123,6 +1123,7 @@ async function main(): Promise<void> {
     orderRepo: repos.order,
     fillRepo: repos.fill,
     positionRepo: repos.position,
+    inventoryLotRepo: repos.inventoryLot,
     log,
     botRunId,
     runtimeControl,
@@ -1575,6 +1576,7 @@ async function main(): Promise<void> {
     log,
     orderRepo: repos.order,
     positionRepo: repos.position,
+    inventoryLotRepo: repos.inventoryLot,
     liveLiteGuard,
     candidateBookCache,
     // Track S5 P0a — secondary exit-book source: direct CLOB fetch for cold-miss / stale-primary /

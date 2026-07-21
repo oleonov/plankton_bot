@@ -6,6 +6,8 @@ import {
   createBotRunId,
   createPositionId,
   createConditionId,
+  createLotId,
+  createFillId,
   DEFAULT_EXECUTION_POLICY,
   ExchangeErrorCode,
   GATE_ENTRY_RULE_ID,
@@ -31,6 +33,7 @@ import type {
   Fill,
   Position,
   PositionRepository,
+  InventoryLotRepository,
   LegStateRepository,
   NormalizedMarket,
   RiskEventRepository,
@@ -245,6 +248,38 @@ function createMockPositionRepo(position: Position | null = null): PositionRepos
   };
 }
 
+// Exit-loss-floor gate (docs/plans/2026-07-20-exit-loss-floor.md) fails closed
+// on a missing/inconsistent inventoryLotRepo. A single lot spanning the whole
+// position — remainingSize=position.size, entryPrice=costBasisUsdc/size — is
+// the simplest fixture that satisfies both FIFO-sufficiency and the
+// cost-consistency check, so normal SELLs above the floor keep passing.
+function createMockInventoryLotRepo(position: Position | null = null): InventoryLotRepository {
+  const lots =
+    position == null
+      ? []
+      : [
+          {
+            lotId: createLotId(`lot-${position.positionId}`),
+            positionId: position.positionId,
+            tokenId: position.tokenId,
+            side: position.side,
+            size: position.size,
+            remainingSize: position.size,
+            entryPrice: position.costBasisUsdc / position.size,
+            costUsdc: position.costBasisUsdc,
+            fillId: createFillId(`fill-${position.positionId}`),
+            createdAt: position.openedAt,
+          },
+        ];
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue(lots),
+    findOpen: vi.fn().mockReturnValue(lots),
+    consumeFifo: vi.fn().mockReturnValue([]),
+    settleAll: vi.fn(),
+  };
+}
+
 function createMockLegStateRepo(): LegStateRepository {
   let count = 0;
   let abandoned = false;
@@ -318,6 +353,10 @@ describe("ExecutionModule", () => {
     marketRepo = createMockMarketRepo();
     orderRepo = createMockOrderRepo();
     fillRepo = createMockFillRepo();
+    // Low cost basis vs. the ~0.1-0.14 SELL prices used across this file's
+    // shared-`mod` post-only tests keeps every one of them well clear of the
+    // exit-loss-floor (this is a profit scenario, not a floor-adjacent one).
+    const position = makePosition({ size: 5, costBasisUsdc: 0.1 });
     mod = new ExecutionModule({
       gateway,
       bus,
@@ -327,6 +366,8 @@ describe("ExecutionModule", () => {
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
+      positionRepo: createMockPositionRepo(position),
+      inventoryLotRepo: createMockInventoryLotRepo(position),
     });
   });
 
@@ -463,6 +504,7 @@ describe("ExecutionModule", () => {
 
   it("places post-only SELL pre-submit when submit price is above refreshed ask", async () => {
     const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const position = makePosition({ size: 5, costBasisUsdc: 0.1 });
     const guarded = new ExecutionModule({
       gateway,
       bus,
@@ -473,6 +515,8 @@ describe("ExecutionModule", () => {
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
       riskEventRepo,
+      positionRepo: createMockPositionRepo(position),
+      inventoryLotRepo: createMockInventoryLotRepo(position),
     });
     await guarded.start();
 
@@ -1185,6 +1229,7 @@ describe("ExecutionModule", () => {
 
   it("emits critical orphan-risk telemetry when persistence fails after exchange accept", async () => {
     const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const position = makePosition({ size: 13.56, costBasisUsdc: 13.56 * 0.03 });
     const orphanRiskMod = new ExecutionModule({
       gateway,
       bus,
@@ -1195,6 +1240,8 @@ describe("ExecutionModule", () => {
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
       riskEventRepo,
+      positionRepo: createMockPositionRepo(position),
+      inventoryLotRepo: createMockInventoryLotRepo(position),
     });
     const persistError = new Error("UNIQUE constraint failed: orders.client_order_id");
     (orderRepo.save as ReturnType<typeof vi.fn>).mockImplementation(() => {
@@ -1630,13 +1677,15 @@ describe("ExecutionModule", () => {
     });
     (gateway.placeOrder as ReturnType<typeof vi.fn>).mockReturnValueOnce(slowPlace);
 
+    const reservePosition = makePosition({ size: 10 });
     const reserveMod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      positionRepo: createMockPositionRepo(reservePosition),
+      inventoryLotRepo: createMockInventoryLotRepo(reservePosition),
 
       log: silentLog,
       botRunId: BOT_RUN_ID,
@@ -1732,12 +1781,21 @@ describe("ExecutionModule", () => {
     bus.subscribe("OrderRejected", async (payload) => {
       rejected.push(payload);
     });
+    // Constant-return position mock is shared by both s1Token and normalToken
+    // commands below (findByTokenId ignores its argument). The sell-capacity
+    // gate's availableSize = position.size - alreadyReservedSell must clear
+    // existing reservations (3 open sells on s1Token, 1 on normalToken) plus
+    // the 1-share command being evaluated, so size must be >= 4; cost basis
+    // stays low relative to the 0.5 submit price for the floor gate.
+    const budgetPosition = makePosition({ size: 10, costBasisUsdc: 0.5 });
     const budgetMod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      positionRepo: createMockPositionRepo(budgetPosition),
+      inventoryLotRepo: createMockInventoryLotRepo(budgetPosition),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1901,13 +1959,15 @@ describe("ExecutionModule", () => {
         },
       },
     });
+    const dustPosition = makePosition({ size: 17.64, costBasisUsdc: 17.64 * 0.05 });
     const dustMod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      positionRepo: createMockPositionRepo(makePosition({ size: 17.64 })),
+      positionRepo: createMockPositionRepo(dustPosition),
+      inventoryLotRepo: createMockInventoryLotRepo(dustPosition),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -2137,13 +2197,15 @@ describe("ExecutionModule", () => {
     const existingSell = openSellAt(0.3);
     orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
     orderRepo.findById = vi.fn().mockReturnValue(existingSell);
+    const replacePosition = makePosition({ size: 10 });
     const replaceMod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      positionRepo: createMockPositionRepo(replacePosition),
+      inventoryLotRepo: createMockInventoryLotRepo(replacePosition),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -2288,13 +2350,15 @@ describe("ExecutionModule", () => {
       cancelled = true;
     });
 
+    const replacePosition = makePosition({ size: 10 });
     const replaceMod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      positionRepo: createMockPositionRepo(replacePosition),
+      inventoryLotRepo: createMockInventoryLotRepo(replacePosition),
 
       log: silentLog,
       botRunId: BOT_RUN_ID,
@@ -2340,13 +2404,17 @@ describe("ExecutionModule", () => {
     });
     orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
     orderRepo.findById = vi.fn().mockReturnValue(existingSell);
+    // Submit price (0.077) is well below the default costBasisUsdc=5 ratio,
+    // so this site needs an explicit low cost basis to stay a profit exit.
+    const replacePosition = makePosition({ size: 10, costBasisUsdc: 0.3 });
     const replaceMod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      positionRepo: createMockPositionRepo(replacePosition),
+      inventoryLotRepo: createMockInventoryLotRepo(replacePosition),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -2735,13 +2803,17 @@ describe("ExecutionModule", () => {
         exchangeOrderId: "still-open-other-sell",
       }),
     ]);
+    // Submit price (0.077) is below the default costBasisUsdc=5 ratio, so an
+    // explicit low cost basis is needed to stay a profit exit.
+    const replacePosition = makePosition({ size: 10, costBasisUsdc: 0.3 });
     const replaceMod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      positionRepo: createMockPositionRepo(replacePosition),
+      inventoryLotRepo: createMockInventoryLotRepo(replacePosition),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -2888,13 +2960,15 @@ describe("ExecutionModule", () => {
       orders.push(order);
     });
 
+    const cascadePosition = makePosition({ size: 100 });
     const replaceMod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      positionRepo: createMockPositionRepo(makePosition({ size: 100 })),
+      positionRepo: createMockPositionRepo(cascadePosition),
+      inventoryLotRepo: createMockInventoryLotRepo(cascadePosition),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -2929,6 +3003,285 @@ describe("ExecutionModule", () => {
     await replaceMod.stop();
   });
 
+  // docs/plans/2026-07-20-exit-loss-floor.md §Phase 6 — best-effort pre-cancel
+  // screen, PositionUpdated re-evaluation, and executeCancel idempotency.
+  describe("exit loss floor — Phase 6 (pre-cancel screen, PositionUpdated re-eval, cancel idempotency)", () => {
+    it("pre-cancel screen leaves the resting order in place when the replacement is below floor", async () => {
+      const existingSell: Order = {
+        orderId: createOrderId("existing-sell"),
+        clientOrderId: "plk_existing_sell" as ClientOrderId,
+        tokenId: createTokenId("tok-yes"),
+        conditionId: createConditionId("cond-1"),
+        side: "sell",
+        orderType: "GTC",
+        price: 0.55,
+        size: 5,
+        sizeUsdc: 2.75,
+        status: "open",
+        exchangeOrderId: "existing-sell",
+        signalId: null,
+        signalReason: "repricing-exit",
+        botRunId: BOT_RUN_ID,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+      orderRepo.findOpen = vi.fn().mockReturnValue([existingSell]);
+      orderRepo.findById = vi.fn().mockReturnValue(existingSell);
+
+      // entryPrice = costBasisUsdc / size = 5 / 5 = 1.0/share. The existing
+      // sell fully reserves the position (size 5 of 5), so excluding it from
+      // the reservation snapshot frees the whole position for the
+      // prospective replacement — a 0.44 submit realizes ~58% loss, past the
+      // default 50% floor (execution-policy.ts maxExitLossFraction).
+      const floorPosition = makePosition({ size: 5, costBasisUsdc: 5 });
+      const screenMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo: createMockPositionRepo(floorPosition),
+        inventoryLotRepo: createMockInventoryLotRepo(floorPosition),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+      });
+      await screenMod.start();
+
+      const skipped: any[] = [];
+      bus.subscribe("OrderSkipped", async (p) => {
+        skipped.push(p);
+      });
+
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("sell-replace-below-floor"),
+          clientOrderId: "plk_sell_replace_floor" as ClientOrderId,
+          side: "sell",
+          price: 0.44,
+          size: 5,
+        }),
+        timestamp: Date.now(),
+      });
+
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0].reasonCode).toBe("exit_loss_floor_blocked");
+      expect(skipped[0].details).toMatchObject({
+        phase: "pre-cancel-screen",
+        existingOrderId: "existing-sell",
+        exitLossFloorReason: "exit_loss_floor_blocked",
+      });
+
+      await screenMod.stop();
+    });
+
+    it("PositionUpdated cancels a now-below-floor resting SELL after a scale-in raises cost basis", async () => {
+      const existingSell = openSellAt(0.4);
+      orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+      orderRepo.findById = vi.fn().mockReturnValue(existingSell);
+
+      // Scale-in raised the average entry to 1.0/share — the resting SELL at
+      // 0.4 now realizes ~62% loss, past the default 50% floor.
+      // handlePositionUpdated re-evaluates against the CURRENT
+      // positionRepo/inventoryLotRepo state; the event payload's `position`
+      // is only used to resolve which token to re-check.
+      const scaledInPosition = makePosition({ size: 5, costBasisUsdc: 5 });
+      const posUpdateMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo: createMockPositionRepo(scaledInPosition),
+        inventoryLotRepo: createMockInventoryLotRepo(scaledInPosition),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+      });
+      await posUpdateMod.start();
+
+      await bus.publish("PositionUpdated", { position: scaledInPosition });
+
+      expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "existing-sell" });
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+        existingSell.orderId,
+        "cancelled",
+        undefined,
+        "exit_loss_floor",
+        expect.anything(),
+      );
+
+      await posUpdateMod.stop();
+    });
+
+    it("cancels a below-floor resting SELL only once for concurrent duplicate PositionUpdated events", async () => {
+      const existingSell = openSellAt(0.4);
+      orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+      orderRepo.findById = vi.fn().mockReturnValue(existingSell);
+
+      const scaledInPosition = makePosition({ size: 5, costBasisUsdc: 5 });
+      const posUpdateMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo: createMockPositionRepo(scaledInPosition),
+        inventoryLotRepo: createMockInventoryLotRepo(scaledInPosition),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+      });
+      await posUpdateMod.start();
+
+      // Two concurrent subscribers re-evaluating the same PositionUpdated
+      // (e.g. this handler racing the ProfileLadder rebuild, which also
+      // listens on PositionUpdated) must still only cancel the resting order
+      // once — the in-flight `cancelReservations` guard in executeCancel
+      // dedupes them.
+      await Promise.all([
+        bus.publish("PositionUpdated", { position: scaledInPosition }),
+        bus.publish("PositionUpdated", { position: scaledInPosition }),
+      ]);
+
+      expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+
+      await posUpdateMod.stop();
+    });
+
+    it("clears the cancel reservation on gateway failure so the next PositionUpdated retries", async () => {
+      const existingSell = openSellAt(0.4);
+      orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+      orderRepo.findById = vi.fn().mockReturnValue(existingSell);
+      (gateway.cancelOrder as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ success: false, errorCode: ExchangeErrorCode.NetworkError })
+        .mockResolvedValueOnce({ success: true });
+
+      const scaledInPosition = makePosition({ size: 5, costBasisUsdc: 5 });
+      const posUpdateMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo: createMockPositionRepo(scaledInPosition),
+        inventoryLotRepo: createMockInventoryLotRepo(scaledInPosition),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+      });
+      await posUpdateMod.start();
+
+      await bus.publish("PositionUpdated", { position: scaledInPosition });
+      expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+      expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+
+      await bus.publish("PositionUpdated", { position: scaledInPosition });
+      expect(gateway.cancelOrder).toHaveBeenCalledTimes(2);
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+        existingSell.orderId,
+        "cancelled",
+        undefined,
+        "exit_loss_floor",
+        expect.anything(),
+      );
+
+      await posUpdateMod.stop();
+    });
+
+    it("cancels an already-below-floor resting SELL at startup — WITHOUT any PositionUpdated (code-review finding #3)", async () => {
+      // risk/inventory starts before execution and can emit PositionUpdated
+      // BEFORE we subscribe. A SELL that went below floor while we were down
+      // must still be re-checked once at startup, driven purely by start()'s
+      // scan of orderRepo.findOpen() — never waiting for a fresh PositionUpdated.
+      const existingSell = openSellAt(0.4);
+      orderRepo.findOpen = vi.fn().mockReturnValue([existingSell]);
+      orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+      orderRepo.findById = vi.fn().mockReturnValue(existingSell);
+
+      const belowFloorPosition = makePosition({ size: 5, costBasisUsdc: 5 }); // 1.0/share
+      const startupMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo: createMockPositionRepo(belowFloorPosition),
+        inventoryLotRepo: createMockInventoryLotRepo(belowFloorPosition),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+      });
+
+      let positionUpdatedCount = 0;
+      bus.subscribe("PositionUpdated", async () => {
+        positionUpdatedCount++;
+      });
+
+      await startupMod.start();
+
+      // Cancelled purely from the startup scan — no PositionUpdated was published.
+      expect(positionUpdatedCount).toBe(0);
+      expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "existing-sell" });
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+        existingSell.orderId,
+        "cancelled",
+        undefined,
+        "exit_loss_floor",
+        expect.anything(),
+      );
+
+      await startupMod.stop();
+    });
+
+    it("blocks a post-only exit SELL at the exact platform boundary once the additive builder fee is charged (code-review 2026-07-20)", async () => {
+      // Position 10 @ 0.20/share (maxLot 0.20). A post-only SELL at exactly
+      // 0.5×maxLot = 0.10 sits AT the 50% floor with the platform fee alone (a
+      // maker pays 0 platform fee, so it would be ALLOWED at the boundary). The
+      // additive CLOB-V2 builder maker fee (0.5% × price = 0.0005) nets it to
+      // 0.0995 → 50.25% loss → BLOCKED. Proves the builder fee is included.
+      const boundaryPosition = makePosition({ size: 10, costBasisUsdc: 10 * 0.2 });
+      const builderMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo: createMockPositionRepo(boundaryPosition),
+        inventoryLotRepo: createMockInventoryLotRepo(boundaryPosition),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+      });
+      await builderMod.start();
+
+      const skipped: any[] = [];
+      bus.subscribe("OrderSkipped", async (p) => {
+        skipped.push(p);
+      });
+
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("builder-fee-boundary"),
+          side: "sell",
+          price: 0.1,
+          size: 10,
+          postOnly: true,
+        }),
+        timestamp: Date.now(),
+      });
+
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0].reasonCode).toBe("exit_loss_floor_blocked");
+
+      await builderMod.stop();
+    });
+  });
+
   it("clamps a sub-min SELL replacement after canceling the existing order", async () => {
     const existingSell: Order = {
       orderId: createOrderId("existing-sell"),
@@ -2952,13 +3305,17 @@ describe("ExecutionModule", () => {
     orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
     orderRepo.findById = vi.fn().mockReturnValue(existingSell);
 
+    // Order is clamped up to the full position size (6) before submit; keep
+    // cost basis low relative to the 0.44 submit price for a clear margin.
+    const clampPosition = makePosition({ size: 6, costBasisUsdc: 6 * 0.05 });
     const replaceMod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      positionRepo: createMockPositionRepo(makePosition({ size: 6 })),
+      positionRepo: createMockPositionRepo(clampPosition),
+      inventoryLotRepo: createMockInventoryLotRepo(clampPosition),
 
       log: silentLog,
       botRunId: BOT_RUN_ID,
@@ -3102,13 +3459,15 @@ describe("ExecutionModule", () => {
   });
 
   it("places SELL residual that meets the refreshed market minimum", async () => {
+    const residualPosition = makePosition({ size: 5.5, costBasisUsdc: 5.5 * 0.05 });
     const mod2 = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      positionRepo: createMockPositionRepo(makePosition({ size: 5.5 })),
+      positionRepo: createMockPositionRepo(residualPosition),
+      inventoryLotRepo: createMockInventoryLotRepo(residualPosition),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -4205,12 +4564,15 @@ describe("ExecutionModule", () => {
     const controlDb = createMockControlDb(1); // very low balance
     (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(0);
 
+    const balancePosition = makePosition({ size: 10, costBasisUsdc: 0.5 });
     const balanceMod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      positionRepo: createMockPositionRepo(balancePosition),
+      inventoryLotRepo: createMockInventoryLotRepo(balancePosition),
 
       log: silentLog,
       botRunId: BOT_RUN_ID,

@@ -35,7 +35,10 @@ import {
   createBotRunId,
   createCommandId,
   createConditionId,
+  createFillId,
+  createLotId,
   createOrderId,
+  createPositionId,
   createTokenId,
   DEFAULT_EXECUTION_POLICY,
 } from "@krabs/domain";
@@ -43,6 +46,7 @@ import type {
   ClientOrderId,
   ExecutionPolicy,
   FillRepository,
+  InventoryLotRepository,
   NormalizedMarket,
   Order,
   OrderRepository,
@@ -159,6 +163,61 @@ function makeOrder(overrides?: Partial<Order>): Order {
   } as Order;
 }
 
+// Exit-loss-floor gate (docs/plans/2026-07-20-exit-loss-floor.md) fails closed
+// whenever a SELL's positionRepo/inventoryLotRepo is missing or inconsistent.
+// A generous, low-cost-basis default position (well above every command size
+// and submitted price used in this file's ExecutionModule describe block)
+// keeps normal SELLs comfortably clear of both the FIFO-consistency checks
+// and the loss-fraction threshold, without individual tests needing to
+// hand-roll a position just to satisfy the gate.
+function makeGatePosition(overrides?: Partial<Position>): Position {
+  return {
+    positionId: createPositionId("pos-gate-bounce-default"),
+    tokenId: TOKEN_ID,
+    conditionId: COND_ID,
+    side: "buy",
+    size: 1000,
+    avgEntryPrice: 0.05,
+    costBasisUsdc: 1000 * 0.05,
+    currentValueUsdc: null,
+    realizedPnl: 0,
+    status: "open",
+    entryStyle: "maker",
+    entryLane: "GATE",
+    openedAt: new Date(NOW).toISOString(),
+    closedAt: null,
+    updatedAt: new Date(NOW).toISOString(),
+    ...overrides,
+  };
+}
+
+// Single lot spanning the whole position (remainingSize=size,
+// entryPrice=costBasisUsdc/size) satisfies both the FIFO-sufficiency check
+// and the cost-consistency check (findOpen ignores its positionId argument,
+// so this is safe even for partial/legacy Position literals in this file
+// that omit positionId).
+function makeInventoryLotRepoForPosition(position: Position): InventoryLotRepository {
+  const lot = {
+    lotId: createLotId(`lot-${String(position.positionId ?? position.tokenId)}`),
+    positionId: position.positionId,
+    tokenId: position.tokenId,
+    side: position.side ?? "buy",
+    size: position.size,
+    remainingSize: position.size,
+    entryPrice: position.costBasisUsdc / position.size,
+    costUsdc: position.costBasisUsdc,
+    fillId: createFillId(`fill-${String(position.positionId ?? position.tokenId)}`),
+    createdAt: position.openedAt ?? new Date(NOW).toISOString(),
+  };
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue([lot]),
+    findOpen: vi.fn().mockReturnValue([lot]),
+    consumeFifo: vi.fn().mockReturnValue([]),
+    settleAll: vi.fn(),
+  };
+}
+
 async function runBridge(
   signal: Signal,
   policyOverrides: Partial<ExecutionPolicy>,
@@ -166,6 +225,7 @@ async function runBridge(
     marketOverrides?: Partial<NormalizedMarket>;
     orderRepo?: Pick<OrderRepository, "findByTokenId">;
     positionRepo?: Pick<PositionRepository, "findByTokenId">;
+    inventoryLotRepo?: InventoryLotRepository;
   },
 ) {
   const bus = new InProcessEventBus();
@@ -176,6 +236,7 @@ async function runBridge(
     policy: () => ({ ...DEFAULT_EXECUTION_POLICY, ...policyOverrides }),
     orderRepo: options?.orderRepo as unknown as OrderRepository | undefined,
     positionRepo: options?.positionRepo as unknown as PositionRepository | undefined,
+    inventoryLotRepo: options?.inventoryLotRepo,
     now: () => NOW,
   });
   bridge.subscribe();
@@ -884,9 +945,7 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_BACKSTOP cancel-then-taker", () =>
 
     expect(skipped).toHaveLength(0);
     expect(cancelled).toHaveLength(1);
-    expect((cancelled[0] as { orderId: unknown; reason: string }).orderId).toBe(
-      restingTarget.orderId,
-    );
+    expect((cancelled[0] as { orderId: unknown }).orderId).toBe(restingTarget.orderId);
     expect(placed).toHaveLength(1);
     expect(placed[0]!.price).toBeCloseTo(0.15, 5);
   });
@@ -913,9 +972,7 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_BACKSTOP cancel-then-taker", () =>
 
     expect(skipped).toHaveLength(0);
     expect(cancelled).toHaveLength(1);
-    expect((cancelled[0] as { orderId: unknown; reason: string }).orderId).toBe(
-      restingTarget.orderId,
-    );
+    expect((cancelled[0] as { orderId: unknown }).orderId).toBe(restingTarget.orderId);
     expect(placed).toHaveLength(1);
     expect(placed[0]!.price).toBeCloseTo(0.1, 5);
   });
@@ -1234,13 +1291,27 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_BACKSTOP executio
       findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
       updateScoresBatch: vi.fn(),
     };
+    // Exit-loss-floor gate (docs/plans/2026-07-20-exit-loss-floor.md) fails
+    // closed without a position + consistent FIFO lots. Default to a generous
+    // gate position when the test doesn't wire its own, and derive the
+    // inventoryLotRepo from whatever positionRepo ends up in play so every
+    // SELL fixture below gets consistent lots automatically.
+    const resolvedPositionRepo: Pick<PositionRepository, "findByTokenId"> = positionRepo ?? {
+      findByTokenId: vi.fn().mockReturnValue(makeGatePosition()),
+    };
+    const resolvedPosition = resolvedPositionRepo.findByTokenId(TOKEN_ID);
+    const inventoryLotRepo = resolvedPosition
+      ? makeInventoryLotRepoForPosition(resolvedPosition)
+      : undefined;
+
     const mod = new ExecutionModule({
       gateway: gateway as any,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      positionRepo: positionRepo as unknown as PositionRepository | undefined,
+      positionRepo: resolvedPositionRepo as unknown as PositionRepository,
+      inventoryLotRepo,
       log: makeLogger(),
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1364,6 +1435,9 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_BACKSTOP executio
       status: "open",
       size: 50,
       avgEntryPrice: 0.15,
+      // Exit-loss-floor gate needs a cost basis consistent with avgEntryPrice*size
+      // (7.5); the 0.09 submit price below is a real, above-floor profit exit.
+      costBasisUsdc: 50 * 0.15,
       entryLane: "GATE",
     } as Position;
     const restingTargetOrder = makeOrder({ size: 50, status: "open" });

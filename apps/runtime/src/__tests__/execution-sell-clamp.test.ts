@@ -20,6 +20,8 @@ import {
   createConditionId,
   createOrderId,
   createPositionId,
+  createLotId,
+  createFillId,
 } from "@krabs/domain";
 import type {
   ExchangeGateway,
@@ -35,6 +37,7 @@ import type {
   PlaceOrderCommand,
   Position,
   PositionRepository,
+  InventoryLotRepository,
   TokenId,
   ClientOrderId,
   Order,
@@ -173,6 +176,98 @@ function createMockPositionRepo(
     updateSize: vi.fn(),
     close: vi.fn(),
   } as unknown as PositionRepository;
+}
+
+// A single FIFO lot spanning the whole position — entryPrice matches
+// createMockPositionRepo's avgEntryPrice (0.5) exactly, so the exit-loss-floor
+// gate sees a consistent cost basis (Σ remainingSize == position.size,
+// Σ remainingSize*entryPrice == position.costBasisUsdc) for any position size.
+function createMockInventoryLotRepo(positionSize: number): InventoryLotRepository {
+  const lot = {
+    lotId: createLotId("lot-clamp-1"),
+    positionId: createPositionId("pos-clamp-1"),
+    tokenId: SELL_TOKEN,
+    side: "buy" as const,
+    size: positionSize,
+    remainingSize: positionSize,
+    entryPrice: 0.5,
+    costUsdc: positionSize * 0.5,
+    fillId: createFillId("fill-clamp-1"),
+    createdAt: new Date().toISOString(),
+  };
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue([lot]),
+    findOpen: vi.fn().mockReturnValue([lot]),
+    consumeFifo: vi.fn().mockReturnValue([]),
+    settleAll: vi.fn(),
+  };
+}
+
+// Same position/lot shape as createMockPositionRepo/createMockInventoryLotRepo
+// above, except costBasisUsdc is caller-supplied so the exit-loss-floor gate
+// (docs/plans/2026-07-20-exit-loss-floor.md) can be exercised with a cost
+// basis that does NOT equal positionSize * 0.5.
+function createMockPositionRepoWithBasis(
+  positionSize: number,
+  costBasisUsdc: number,
+): PositionRepository {
+  const pos: Position = {
+    positionId: createPositionId("pos-clamp-floor-1"),
+    tokenId: SELL_TOKEN,
+    conditionId: SELL_COND,
+    side: "buy",
+    size: positionSize,
+    avgEntryPrice: costBasisUsdc / positionSize,
+    costBasisUsdc,
+    currentValueUsdc: costBasisUsdc,
+    realizedPnl: 0,
+    status: "open",
+    entryStyle: null,
+    openedAt: new Date().toISOString(),
+    closedAt: null,
+    updatedAt: new Date().toISOString(),
+  };
+  return {
+    save: vi.fn(),
+    findById: vi.fn().mockReturnValue(null),
+    findByTokenId: vi.fn().mockReturnValue(pos),
+    findByConditionId: vi.fn().mockReturnValue([]),
+    findAllOpen: vi.fn().mockReturnValue([pos]),
+    updateSize: vi.fn(),
+    close: vi.fn(),
+  } as unknown as PositionRepository;
+}
+
+// Two heterogeneous FIFO lots (oldest cheap, newer expensive) — lets a test
+// prove the exit-loss-floor gate (docs/plans/2026-07-20-exit-loss-floor.md
+// §Phase 1 "critical ordering") consumes the ACTUAL post-clamp submit size,
+// not the pre-clamp intent: a clamp-up to the full position pulls in the
+// pricier lot and can tip a loss that looked safe at the smaller intent past
+// the floor.
+function createMockInventoryLotRepoWithLots(
+  positionId: ReturnType<typeof createPositionId>,
+  lots: ReadonlyArray<{ remainingSize: number; entryPrice: number }>,
+): InventoryLotRepository {
+  const built = lots.map((lot, index) => ({
+    lotId: createLotId(`lot-floor-${index}`),
+    positionId,
+    tokenId: SELL_TOKEN,
+    side: "buy" as const,
+    size: lot.remainingSize,
+    remainingSize: lot.remainingSize,
+    entryPrice: lot.entryPrice,
+    costUsdc: lot.remainingSize * lot.entryPrice,
+    fillId: createFillId(`fill-floor-${index}`),
+    createdAt: new Date(Date.now() - (lots.length - index) * 60_000).toISOString(),
+  }));
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue(built),
+    findOpen: vi.fn().mockReturnValue(built),
+    consumeFifo: vi.fn().mockReturnValue([]),
+    settleAll: vi.fn(),
+  };
 }
 
 function createMockLegStateRepo() {
@@ -693,6 +788,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
       orderRepo,
       fillRepo,
       positionRepo: createMockPositionRepo(6.85),
+      inventoryLotRepo: createMockInventoryLotRepo(6.85),
       legStateRepo: legStateRepo as any,
       executionPolicy: () => DEFAULT_EXECUTION_POLICY,
       log: silentLog,
@@ -793,6 +889,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
       orderRepo,
       fillRepo,
       positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(6.85),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -866,6 +963,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
       orderRepo,
       fillRepo,
       positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(2.0),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1157,6 +1255,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
       orderRepo,
       fillRepo,
       positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(10),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1191,6 +1290,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
       orderRepo,
       fillRepo,
       positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(12),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1211,6 +1311,71 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     expect(rejected).toHaveLength(0);
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
     expect(vi.mocked(gateway.placeOrder).mock.calls[0]![0].size).toBe(5.73);
+
+    await mod.stop();
+  });
+
+  // docs/plans/2026-07-20-exit-loss-floor.md §Phase 1 "critical ordering" +
+  // §Phase 7 tests: "clamp/effective-size + floor".
+  it("evaluates the exit loss floor on the CLAMPED size, not the pre-clamp intent", async () => {
+    // 7-share position, 2 FIFO lots consumed oldest-first: 2 cheap shares
+    // @0.05 then 5 pricier shares @0.90 (total cost 4.60). A 2-share intent
+    // alone would only touch the cheap lot (~25% loss at price 0.04 — under
+    // the default 50% floor), but the intent is below minOrderSize(5) while
+    // the residual (7, no other reservations) satisfies it, so ADR-008
+    // clamps UP to the full 7-share position. Selling all 7 pulls in the
+    // expensive lot (~94% loss at 0.04) — past the floor. The gate must
+    // block using the CLAMPED (post-ADR-008) size, or this dump would slip
+    // through disguised as a small, safe-looking intent.
+    const positionSize = 7;
+    const costBasisUsdc = 2 * 0.05 + 5 * 0.9; // 4.6
+    const positionRepo = createMockPositionRepoWithBasis(positionSize, costBasisUsdc);
+    const inventoryLotRepo = createMockInventoryLotRepoWithLots(
+      createPositionId("pos-clamp-floor-1"),
+      [
+        { remainingSize: 2, entryPrice: 0.05 },
+        { remainingSize: 5, entryPrice: 0.9 },
+      ],
+    );
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      allowSellSizeClamp: true,
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+    const skipped: Array<{ reasonCode: string; details?: Record<string, unknown> }> = [];
+    bus.subscribe("OrderSkipped", async (p) => {
+      skipped.push({ reasonCode: p.reasonCode, details: p.details as Record<string, unknown> });
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(2, {
+        price: 0.04,
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasonCode).toBe("exit_loss_floor_blocked");
+    expect(skipped[0]!.details).toMatchObject({
+      exitLossFloorReason: "exit_loss_floor_blocked",
+      effectiveSellShares: 7,
+    });
 
     await mod.stop();
   });

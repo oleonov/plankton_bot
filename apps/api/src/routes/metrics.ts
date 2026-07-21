@@ -378,6 +378,16 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
         "bucket",
         exitMetricSinceIso,
       ),
+      exit_loss_floor_blocked_total: readCounterTotal(
+        db,
+        "exit_loss_floor_blocked_total",
+        exitMetricSinceIso,
+      ),
+      exit_loss_floor_cost_unavailable_total: readCounterTotal(
+        db,
+        "exit_loss_floor_cost_unavailable_total",
+        exitMetricSinceIso,
+      ),
       http_errors_by_class_1h: aggregateHttpErrors(httpErrorRows),
       ws_heartbeat: wsHeartbeat,
       ws_worker_memory: wsWorkerMemory,
