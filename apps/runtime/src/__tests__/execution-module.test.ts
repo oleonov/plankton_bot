@@ -1725,10 +1725,16 @@ describe("ExecutionModule", () => {
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toBe("reserved-token-limit");
-    expect(reserveMod.getDiagnostics()).toMatchObject({
+    const diag = reserveMod.getDiagnostics();
+    expect(diag).toMatchObject({
       reservedSellTokenCount: 1,
       internalReservationRejectsLast10m: 1,
+      internalReservationRejectsLast10mByReason: { "reserved-token-limit": 1 },
     });
+    // count and by-reason come from ONE pruned window → their totals must always agree.
+    expect(
+      Object.values(diag.internalReservationRejectsLast10mByReason).reduce((sum, n) => sum + n, 0),
+    ).toBe(diag.internalReservationRejectsLast10m);
 
     resolvePlace!();
     await reserveMod.stop();

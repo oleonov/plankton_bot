@@ -65,6 +65,48 @@ function formatExecutionRejects(rejects?: Record<string, number>): string | null
     .join(", ");
 }
 
+const INTERNAL_REJECT_REASON_LABELS: Record<string, string> = {
+  below_min_size: "below 5-share minimum",
+  "clamped-below-min-order-size": "below 5-share minimum",
+  "sell-residual-below-min-order-size": "below 5-share minimum",
+  "sell-residual-unknown-min": "unknown min size",
+  "pending-wallet-sync": "wallet sync pending",
+  wallet_buy_capacity_exhausted: "insufficient buy budget",
+  wallet_sell_capacity_exhausted: "insufficient sell capacity",
+  total_orders_capacity_exhausted: "order-count limit",
+  per_token_buy_limit: "per-token buy limit",
+  "reserved-usdc-limit": "reserved-USDC limit",
+};
+
+export function humanizeInternalRejectReason(code: string): string {
+  return INTERNAL_REJECT_REASON_LABELS[code] ?? code.replace(/[-_]/g, " ");
+}
+
+export function formatReservationRejects(
+  byReason?: Record<string, number>,
+  count?: number,
+): string | null {
+  const raw = byReason ? Object.entries(byReason).filter(([, n]) => n > 0) : [];
+  if (raw.length > 0) {
+    // Aggregate by human label — distinct codes can share a label (e.g. the min-size family), so this
+    // avoids duplicate labels while keeping the per-label counts summing to the total.
+    const byLabel = new Map<string, number>();
+    for (const [code, n] of raw) {
+      const label = humanizeInternalRejectReason(code);
+      byLabel.set(label, (byLabel.get(label) ?? 0) + n);
+    }
+    const total = [...byLabel.values()].reduce((sum, n) => sum + n, 0);
+    const sorted = [...byLabel.entries()].sort((left, right) => right[1] - left[1]);
+    const detail =
+      sorted.length === 1
+        ? sorted[0]![0]
+        : sorted.map(([label, n]) => `${label} (${n})`).join(", ");
+    return `${total} order${total === 1 ? "" : "s"} blocked pre-exchange: ${detail}`;
+  }
+  if (count && count > 0) return `reservation rejects ${count}`;
+  return null;
+}
+
 function formatOrderBreakdownValue(value: number | null | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "?";
 }
@@ -197,11 +239,14 @@ function tradingActivityWarnings(status: StatusData): string[] {
   const queue = status.executionQueue;
   const warnings: string[] = [];
   const replacementLocks = queue?.cancelReplacePendingCount ?? 0;
-  const reservationRejects = queue?.internalReservationRejectsLast10m ?? 0;
+  const reservationRejects = formatReservationRejects(
+    queue?.internalReservationRejectsLast10mByReason,
+    queue?.internalReservationRejectsLast10m,
+  );
   const executionRejects = formatExecutionRejects(queue?.gatewayRejectsLast10mByCode);
 
   if (replacementLocks > 0) warnings.push(`replace locks ${replacementLocks}`);
-  if (reservationRejects > 0) warnings.push(`reservation rejects ${reservationRejects}`);
+  if (reservationRejects) warnings.push(reservationRejects);
   if (executionRejects) warnings.push(`gateway rejects ${executionRejects}`);
   return warnings;
 }

@@ -426,6 +426,7 @@ export interface StatusData {
     cancelReplacePendingCount?: number;
     gatewayRejectsLast10mByCode?: Record<string, number>;
     internalReservationRejectsLast10m?: number;
+    internalReservationRejectsLast10mByReason?: Record<string, number>;
   } | null;
   orderCapacityActivity?: {
     placeCalls?: number;

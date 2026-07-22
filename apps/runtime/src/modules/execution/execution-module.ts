@@ -303,7 +303,7 @@ export class ExecutionModule implements RuntimeModule {
     { orderId: OrderId; command: PlaceOrderCommand; createdAt: number }
   >();
   private readonly gatewayRejects: Array<{ ts: number; code: string }> = [];
-  private readonly internalReservationRejects: number[] = [];
+  private readonly internalReservationRejects: Array<{ ts: number; reason: string }> = [];
   /**
    * In-flight cancel dedup (docs/plans/2026-07-20-exit-loss-floor.md §Phase 6,
    * finding #5): reserved just before the gateway cancel call, cleared on
@@ -482,6 +482,7 @@ export class ExecutionModule implements RuntimeModule {
     cancelReplacePendingCount: number;
     gatewayRejectsLast10mByCode: Record<string, number>;
     internalReservationRejectsLast10m: number;
+    internalReservationRejectsLast10mByReason: Record<string, number>;
     sellSizeClamps: number;
   } {
     const queue = this.queue?.diagnostics;
@@ -530,6 +531,7 @@ export class ExecutionModule implements RuntimeModule {
               newEntryDecision.availableAfterOrderUsdc - buyCapacity.minNewEntryWalletHeadroomUsdc,
             ).toFixed(6),
           );
+    const internalRejects = this.getInternalReservationRejectsSnapshot();
     return {
       pendingCount: this.pendingCount,
       queueDepth: queue?.queueDepth ?? 0,
@@ -606,7 +608,8 @@ export class ExecutionModule implements RuntimeModule {
       reservedSellTokenCount: reservations.reservedSellByToken.size,
       cancelReplacePendingCount: this.sellReplaceLocks.size,
       gatewayRejectsLast10mByCode: this.getGatewayRejectsLast10mByCode(),
-      internalReservationRejectsLast10m: this.getInternalReservationRejectsLast10m(),
+      internalReservationRejectsLast10m: internalRejects.count,
+      internalReservationRejectsLast10mByReason: internalRejects.byReason,
       sellSizeClamps: this.sellSizeClamps,
     };
   }
@@ -953,7 +956,7 @@ export class ExecutionModule implements RuntimeModule {
     // The backstop must always proceed, consistent with the other bot-
     // bookkeeping bypasses guarded by isBounceForceExit.
     if (cmd.side === "sell" && !isBounceBackstop && this.isBalanceBlocked(cmd)) {
-      this.recordInternalReservationReject();
+      this.recordInternalReservationReject("pending-wallet-sync");
       this.recordExecutionCapacityReject(cmd, "pending-wallet-sync");
       await this.rejectOrder(cmd, "pending-wallet-sync", ExchangeErrorCode.InsufficientBalance);
       return;
@@ -987,7 +990,7 @@ export class ExecutionModule implements RuntimeModule {
 
     const decision = this.getReservationDecision(cmd, notional);
     if (decision.kind === "reject") {
-      this.recordInternalReservationReject();
+      this.recordInternalReservationReject(decision.reason);
       if (!decision.capacitySampleRecorded) {
         this.recordExecutionCapacityReject(cmd, decision.reason);
       }
@@ -1005,7 +1008,7 @@ export class ExecutionModule implements RuntimeModule {
       const clampedCmd: PlaceOrderCommand = { ...cmd, size: decision.newSize };
       const postClampMinCheck = this.getMinOrderSizeRejection(clampedCmd);
       if (postClampMinCheck) {
-        this.recordInternalReservationReject();
+        this.recordInternalReservationReject("clamped-below-min-order-size");
         this.log.warn(
           {
             commandId: cmd.commandId,
@@ -1350,7 +1353,7 @@ export class ExecutionModule implements RuntimeModule {
   private async executePlace(cmd: PlaceOrderCommand): Promise<void> {
     const sellMinOrderBlock = this.getSellPreSubmitMinOrderBlock(cmd);
     if (sellMinOrderBlock) {
-      this.recordInternalReservationReject();
+      this.recordInternalReservationReject(sellMinOrderBlock.reason);
       this.recordExecutionCapacityReject(cmd, sellMinOrderBlock.reason);
       this.log.warn(
         {
@@ -3213,9 +3216,23 @@ export class ExecutionModule implements RuntimeModule {
     return message ?? "unknown";
   }
 
-  private recordInternalReservationReject(): void {
-    this.internalReservationRejects.push(Date.now());
+  private recordInternalReservationReject(reason: string): void {
+    this.internalReservationRejects.push({ ts: Date.now(), reason });
     this.pruneDiagnosticsWindows();
+  }
+
+  // count + by-reason from ONE pruned window so the two diagnostic fields can never disagree at a
+  // 10-minute boundary (two separate getters each pruning with their own Date.now() could).
+  private getInternalReservationRejectsSnapshot(): {
+    count: number;
+    byReason: Record<string, number>;
+  } {
+    this.pruneDiagnosticsWindows();
+    const byReason: Record<string, number> = {};
+    for (const reject of this.internalReservationRejects) {
+      byReason[reject.reason] = (byReason[reject.reason] ?? 0) + 1;
+    }
+    return { count: this.internalReservationRejects.length, byReason };
   }
 
   private getGatewayRejectsLast10mByCode(): Record<string, number> {
@@ -3227,11 +3244,6 @@ export class ExecutionModule implements RuntimeModule {
     return counts;
   }
 
-  private getInternalReservationRejectsLast10m(): number {
-    this.pruneDiagnosticsWindows();
-    return this.internalReservationRejects.length;
-  }
-
   private pruneDiagnosticsWindows(): void {
     const cutoff = Date.now() - 10 * 60 * 1000;
     while (this.gatewayRejects.length > 0 && this.gatewayRejects[0]!.ts < cutoff) {
@@ -3239,7 +3251,7 @@ export class ExecutionModule implements RuntimeModule {
     }
     while (
       this.internalReservationRejects.length > 0 &&
-      this.internalReservationRejects[0]! < cutoff
+      this.internalReservationRejects[0]!.ts < cutoff
     ) {
       this.internalReservationRejects.shift();
     }
