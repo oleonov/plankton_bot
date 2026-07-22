@@ -64,6 +64,7 @@ import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-c
 import { resnapPriceToTick, validateExecutablePrice } from "../../executable-price.js";
 import {
   evaluateWalletBuyCapacity,
+  resolveEntriesBlocked,
   evaluatePerTokenOrderCapacity,
   evaluateTotalOrdersCapacity,
   evaluateWalletSellCapacity,
@@ -446,6 +447,7 @@ export class ExecutionModule implements RuntimeModule {
       enabled: boolean;
       minNewEntryWalletHeadroomUsdc: number;
       minAddWalletHeadroomUsdc: number;
+      minViableEntryUsdc: number;
       maxOpenBuyOrders: number;
       maxOpenBuyOrdersPerToken: number;
       openBuyOrderCount: number;
@@ -519,6 +521,15 @@ export class ExecutionModule implements RuntimeModule {
       signalReason: "scale-in",
       openBuyOrderCount: reservations.openBuyOrderCount,
     });
+    const newEntryCapacityUsdc =
+      newEntryDecision.availableAfterOrderUsdc == null
+        ? null
+        : Number(
+            Math.max(
+              0,
+              newEntryDecision.availableAfterOrderUsdc - buyCapacity.minNewEntryWalletHeadroomUsdc,
+            ).toFixed(6),
+          );
     return {
       pendingCount: this.pendingCount,
       queueDepth: queue?.queueDepth ?? 0,
@@ -540,19 +551,11 @@ export class ExecutionModule implements RuntimeModule {
         enabled: buyCapacity.enabled,
         minNewEntryWalletHeadroomUsdc: buyCapacity.minNewEntryWalletHeadroomUsdc,
         minAddWalletHeadroomUsdc: buyCapacity.minAddWalletHeadroomUsdc,
+        minViableEntryUsdc: buyCapacity.minViableEntryUsdc,
         maxOpenBuyOrders: buyCapacity.maxOpenBuyOrders,
         maxOpenBuyOrdersPerToken: buyCapacity.maxOpenBuyOrdersPerToken,
         openBuyOrderCount: reservations.openBuyOrderCount,
-        newEntryCapacityUsdc:
-          newEntryDecision.availableAfterOrderUsdc == null
-            ? null
-            : Number(
-                Math.max(
-                  0,
-                  newEntryDecision.availableAfterOrderUsdc -
-                    buyCapacity.minNewEntryWalletHeadroomUsdc,
-                ).toFixed(6),
-              ),
+        newEntryCapacityUsdc,
         addCapacityUsdc:
           addDecision.availableAfterOrderUsdc == null
             ? null
@@ -562,7 +565,14 @@ export class ExecutionModule implements RuntimeModule {
                   addDecision.availableAfterOrderUsdc - buyCapacity.minAddWalletHeadroomUsdc,
                 ).toFixed(6),
               ),
-        entriesBlocked: !newEntryDecision.allowed,
+        // Diagnostic only (dashboard): "effectively blocked" = hard-blocked OR deployable capacity
+        // below the minimum viable entry. NOT a trading gate — the real entry gate uses the true
+        // order notional via evaluateWalletBuyCapacity (index.ts / algo-risk-gate.ts).
+        entriesBlocked: resolveEntriesBlocked({
+          hardAllowed: newEntryDecision.allowed,
+          newEntryCapacityUsdc,
+          minViableEntryUsdc: buyCapacity.minViableEntryUsdc,
+        }),
         addsBlocked: !addDecision.allowed,
       },
       sellCapacity: {

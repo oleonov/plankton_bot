@@ -206,41 +206,38 @@ function tradingActivityWarnings(status: StatusData): string[] {
   return warnings;
 }
 
-function exitsOnlyMessage(status: StatusData): string {
-  const capacity = status.executionQueue?.buyCapacity;
-  if (capacity?.entriesBlocked) {
+export function exitsOnlyMessage(status: StatusData): string {
+  const eq = status.executionQueue;
+  const capacity = eq?.buyCapacity;
+  // Diagnostics unavailable: the API returns `executionQueue: null` when the metric is absent, so
+  // capacity is UNKNOWN — not "fine". Show the neutral message, never the selection/risk wording.
+  if (eq == null || capacity == null) {
+    return "Only exit signals active — no new entries being opened";
+  }
+  if (capacity.entriesBlocked) {
     if (capacity.maxOpenBuyOrders > 0 && capacity.openBuyOrderCount >= capacity.maxOpenBuyOrders) {
       return `Entry capacity exhausted — open BUY order limit reached (${capacity.openBuyOrderCount}/${capacity.maxOpenBuyOrders})`;
     }
-    if (capacity.newEntryCapacityUsdc != null && capacity.newEntryCapacityUsdc <= 0) {
-      return `Entry capacity exhausted — new entries need ${formatUsd(
-        capacity.minNewEntryWalletHeadroomUsdc,
-      )} usable wallet headroom after order placement`;
-    }
-    return `Entry capacity exhausted — new entries need ${formatUsd(
+    // Not order-limited → the wallet cannot fund a viable entry. Show the real deployable capacity.
+    return `Insufficient entry capacity — ${formatUsd(
+      capacity.newEntryCapacityUsdc,
+    )} available for a new entry (${formatUsd(eq.freeUsdcForNewOrders)} free − ${formatUsd(
       capacity.minNewEntryWalletHeadroomUsdc,
-    )} usable wallet headroom after order placement`;
+    )} reserve)`;
   }
-  if (capacity?.addsBlocked) {
+  if (capacity.addsBlocked) {
     if (capacity.maxOpenBuyOrders > 0 && capacity.openBuyOrderCount >= capacity.maxOpenBuyOrders) {
       return `Add-buy capacity exhausted — open BUY order limit reached (${capacity.openBuyOrderCount}/${capacity.maxOpenBuyOrders})`;
-    }
-    if (capacity.addCapacityUsdc != null && capacity.addCapacityUsdc <= 0) {
-      return `Add-buy capacity exhausted — adds need ${formatUsd(
-        capacity.minAddWalletHeadroomUsdc,
-      )} usable wallet headroom after order placement`;
     }
     return `Add-buy capacity exhausted — adds need ${formatUsd(
       capacity.minAddWalletHeadroomUsdc,
     )} usable wallet headroom after order placement`;
   }
-  if (
-    status.executionQueue?.freeUsdcForNewOrders != null &&
-    status.executionQueue.freeUsdcForNewOrders <= 0
-  ) {
+  if (eq.freeUsdcForNewOrders != null && eq.freeUsdcForNewOrders <= 0) {
     return "Wallet buy budget exhausted — only exit signals are active";
   }
-  return "Only exit signals active — no new entries being opened";
+  // Capacity is present AND unblocked → entries are held back upstream, not by money.
+  return "No new entries — capacity is available but signals are not being approved (selection / risk gate)";
 }
 
 type KpiSeverity = DashboardHealthSeverity;

@@ -111,6 +111,9 @@ export const DEFAULT_BUY_CAPACITY_POLICY: BuyCapacityPolicy = {
   enabled: true,
   minNewEntryWalletHeadroomUsdc: 7,
   minAddWalletHeadroomUsdc: 5,
+  // Operational floor for the STATUS diagnostic: ≈ the cheapest sellable entry (sellable sizing
+  // ceil(5/0.3×1.2)=20 shares × ~$0.05 ≈ $1). Not plankton-derived. PATCHable.
+  minViableEntryUsdc: 1,
   maxOpenBuyOrders: 25,
   maxOpenBuyOrdersPerToken: 2,
 };
@@ -4114,6 +4117,14 @@ function parseBuyCapacity(raw: unknown, issues: string[]): BuyCapacityPolicy {
       BOUND_BUY_CAPACITY_HEADROOM_MAX_USDC,
       issues,
       "buyCapacity.minAddWalletHeadroomUsdc",
+    ),
+    minViableEntryUsdc: clampedNumber(
+      obj.minViableEntryUsdc,
+      DEFAULT_BUY_CAPACITY_POLICY.minViableEntryUsdc,
+      BOUND_BUY_CAPACITY_HEADROOM_MIN_USDC,
+      BOUND_BUY_CAPACITY_HEADROOM_MAX_USDC,
+      issues,
+      "buyCapacity.minViableEntryUsdc",
     ),
     maxOpenBuyOrders: clampedInt(
       obj.maxOpenBuyOrders,

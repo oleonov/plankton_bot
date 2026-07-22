@@ -5,6 +5,7 @@ import {
   evaluateWalletBuyCapacity,
   evaluateWalletSellCapacity,
   readWalletBalanceUsdc,
+  resolveEntriesBlocked,
 } from "../wallet-buy-budget.js";
 import type {
   BuyCapacityPolicy,
@@ -17,6 +18,7 @@ const buyPolicy: BuyCapacityPolicy = {
   enabled: true,
   minNewEntryWalletHeadroomUsdc: 7,
   minAddWalletHeadroomUsdc: 5,
+  minViableEntryUsdc: 1,
   maxOpenBuyOrders: 25,
   maxOpenBuyOrdersPerToken: 2,
 };
@@ -288,5 +290,46 @@ describe("order capacity policy evaluators", () => {
     expect(decision.allowed).toBe(false);
     expect(decision.maxOpenSellOrders).toBe(10);
     expect(decision.dynamic).toBeNull();
+  });
+});
+
+describe("resolveEntriesBlocked (diagnostic-only)", () => {
+  it("blocks when hard-blocked regardless of capacity", () => {
+    expect(
+      resolveEntriesBlocked({
+        hardAllowed: false,
+        newEntryCapacityUsdc: 100,
+        minViableEntryUsdc: 1,
+      }),
+    ).toBe(true);
+  });
+
+  it("blocks when deployable capacity is below the minimum viable entry", () => {
+    expect(
+      resolveEntriesBlocked({
+        hardAllowed: true,
+        newEntryCapacityUsdc: 0.4,
+        minViableEntryUsdc: 1,
+      }),
+    ).toBe(true);
+  });
+
+  it("does NOT block when capacity is at or above the minimum viable entry", () => {
+    expect(
+      resolveEntriesBlocked({ hardAllowed: true, newEntryCapacityUsdc: 1, minViableEntryUsdc: 1 }),
+    ).toBe(false);
+    expect(
+      resolveEntriesBlocked({ hardAllowed: true, newEntryCapacityUsdc: 5, minViableEntryUsdc: 1 }),
+    ).toBe(false);
+  });
+
+  it("does NOT block when capacity is unknown (null) — unknown is not blocked", () => {
+    expect(
+      resolveEntriesBlocked({
+        hardAllowed: true,
+        newEntryCapacityUsdc: null,
+        minViableEntryUsdc: 1,
+      }),
+    ).toBe(false);
   });
 });

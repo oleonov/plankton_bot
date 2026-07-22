@@ -202,6 +202,7 @@ describe("control-db migration infrastructure", () => {
         enabled: true,
         minNewEntryWalletHeadroomUsdc: 7,
         minAddWalletHeadroomUsdc: 5,
+        minViableEntryUsdc: 1,
         maxOpenBuyOrders: 25,
         maxOpenBuyOrdersPerToken: 2,
       });

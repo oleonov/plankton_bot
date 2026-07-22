@@ -310,6 +310,7 @@ describe("Overview Balance Card", () => {
               enabled: true,
               minNewEntryWalletHeadroomUsdc: 7,
               minAddWalletHeadroomUsdc: 5,
+              minViableEntryUsdc: 1,
               maxOpenBuyOrders: 25,
               maxOpenBuyOrdersPerToken: 2,
               openBuyOrderCount: 1,
@@ -347,9 +348,8 @@ describe("Overview Balance Card", () => {
     expect((await screen.findAllByText("EXITS ONLY")).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/Signals 47 produced \/ 0 rejected/)).toBeInTheDocument();
     expect(screen.getByText(/Orders 0 active \/ 0 queued/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/Entry capacity exhausted|Only exit signals active/i),
-    ).toBeInTheDocument();
+    // capacity present + unblocked (entriesBlocked=false, freeUsdc>0) → the non-money "upstream" message
+    expect(screen.getByText(/signals are not being approved/i)).toBeInTheDocument();
     expect(screen.queryByText(/reserved buy/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/per token/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/entry reserve/i)).not.toBeInTheDocument();

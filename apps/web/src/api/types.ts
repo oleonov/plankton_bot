@@ -84,6 +84,7 @@ export interface BuyCapacityPolicy {
   enabled: boolean;
   minNewEntryWalletHeadroomUsdc: number;
   minAddWalletHeadroomUsdc: number;
+  minViableEntryUsdc: number;
   maxOpenBuyOrders: number;
   maxOpenBuyOrdersPerToken: number;
 }
@@ -399,6 +400,7 @@ export interface StatusData {
       enabled: boolean;
       minNewEntryWalletHeadroomUsdc: number;
       minAddWalletHeadroomUsdc: number;
+      minViableEntryUsdc: number;
       maxOpenBuyOrders: number;
       maxOpenBuyOrdersPerToken: number;
       openBuyOrderCount: number;

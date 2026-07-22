@@ -822,6 +822,14 @@ export interface BuyCapacityPolicy {
   minNewEntryWalletHeadroomUsdc: number;
   /** Reserve kept after scale-in/add BUY placement. */
   minAddWalletHeadroomUsdc: number;
+  /**
+   * OPERATIONAL floor: the smallest new-entry notional treated as fundable. When deployable capacity
+   * (freeUsdc − reserve) falls below this, entries are effectively blocked in the STATUS diagnostic so
+   * the dashboard can state "insufficient entry capacity" instead of a generic message. Diagnostic
+   * only — the real entry gate uses the true order notional. Not plankton-derived (plankton has no
+   * observable wallet-reserve concept); an operational value for a small account.
+   */
+  minViableEntryUsdc: number;
   /** Maximum pending/open BUY orders across the profile wallet. */
   maxOpenBuyOrders: number;
   /** Maximum pending/open BUY orders for one token. */

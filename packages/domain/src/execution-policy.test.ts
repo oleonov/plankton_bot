@@ -980,6 +980,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         enabled: true,
         minNewEntryWalletHeadroomUsdc: 7,
         minAddWalletHeadroomUsdc: 5,
+        minViableEntryUsdc: 1,
         maxOpenBuyOrders: 15,
         maxOpenBuyOrdersPerToken: 2,
       },
@@ -1111,6 +1112,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       enabled: true,
       minNewEntryWalletHeadroomUsdc: 7,
       minAddWalletHeadroomUsdc: 5,
+      minViableEntryUsdc: 1,
       maxOpenBuyOrders: 15,
       maxOpenBuyOrdersPerToken: 2,
     });
@@ -1782,6 +1784,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           enabled: "yes",
           minNewEntryWalletHeadroomUsdc: -1,
           minAddWalletHeadroomUsdc: 20_000,
+          minViableEntryUsdc: 20_000,
           maxOpenBuyOrders: 1.5,
           maxOpenBuyOrdersPerToken: -1,
         },
@@ -1791,8 +1794,25 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("buyCapacity.enabled"))).toBe(true);
     expect(issues.some((i) => i.includes("buyCapacity.minNewEntryWalletHeadroomUsdc"))).toBe(true);
     expect(issues.some((i) => i.includes("buyCapacity.minAddWalletHeadroomUsdc"))).toBe(true);
+    expect(issues.some((i) => i.includes("buyCapacity.minViableEntryUsdc"))).toBe(true);
     expect(issues.some((i) => i.includes("buyCapacity.maxOpenBuyOrders"))).toBe(true);
     expect(issues.some((i) => i.includes("buyCapacity.maxOpenBuyOrdersPerToken"))).toBe(true);
+  });
+
+  it("parses a valid minViableEntryUsdc override, defaults when absent, rejects an invalid type", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({ buyCapacity: { minViableEntryUsdc: 3 } }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.buyCapacity.minViableEntryUsdc).toBe(3);
+    // absent → default 1
+    expect(parseExecutionPolicyJson("{}").policy.buyCapacity.minViableEntryUsdc).toBe(1);
+    // non-numeric type → default 1 with an issue
+    const bad = parseExecutionPolicyJson(
+      JSON.stringify({ buyCapacity: { minViableEntryUsdc: "invalid" } }),
+    );
+    expect(bad.policy.buyCapacity.minViableEntryUsdc).toBe(1);
+    expect(bad.issues.some((i) => i.includes("buyCapacity.minViableEntryUsdc"))).toBe(true);
   });
 
   it("preserves partial sell/order-capacity overrides and defaults the rest", () => {

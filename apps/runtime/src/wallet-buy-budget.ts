@@ -262,6 +262,26 @@ export function evaluateWalletBuyCapacity(args: {
   };
 }
 
+/**
+ * DIAGNOSTIC-only (status/dashboard): whether new entries are EFFECTIVELY blocked. True when the entry
+ * is hard-blocked (`!hardAllowed` — open-BUY-order limit reached or wallet dry) OR the deployable
+ * `newEntryCapacityUsdc` (free − reserve) is below the minimum viable entry notional. A `null` capacity
+ * (walletBudget/diagnostics unavailable) is NOT treated as blocked (unknown ≠ blocked). This never
+ * gates trading — the real entry gate uses `evaluateWalletBuyCapacity` with the true order notional.
+ */
+export function resolveEntriesBlocked(args: {
+  hardAllowed: boolean;
+  newEntryCapacityUsdc: number | null;
+  minViableEntryUsdc: number;
+}): boolean {
+  if (!args.hardAllowed) return true;
+  return (
+    args.newEntryCapacityUsdc != null &&
+    Number.isFinite(args.newEntryCapacityUsdc) &&
+    args.newEntryCapacityUsdc < args.minViableEntryUsdc
+  );
+}
+
 export function normalizeBuyCapacityPolicy(
   policy: BuyCapacityPolicy | null | undefined,
 ): BuyCapacityPolicy {
