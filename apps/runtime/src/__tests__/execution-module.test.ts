@@ -4744,6 +4744,10 @@ describe("ExecutionModule", () => {
           makerEntry: {
             ...DEFAULT_EXECUTION_POLICY.makerEntry,
             mode: "micro_live" as const,
+            // Fix #1+TOCTOU's whitelist check runs before the cap check — must
+            // include the command's conditionId ("cond-1") so this test still
+            // exercises the per-order cap rejection, not the whitelist one.
+            whitelistConditionIds: ["cond-1"],
             microMaxOrderUsdc: 5,
             microMaxOpenUsdc: 50,
           },
@@ -4791,6 +4795,10 @@ describe("ExecutionModule", () => {
           makerEntry: {
             ...DEFAULT_EXECUTION_POLICY.makerEntry,
             mode: "micro_live" as const,
+            // Fix #1+TOCTOU's whitelist check runs before the cap check — must
+            // include the command's conditionId ("cond-1") so this test still
+            // exercises the aggregate-cap rejection, not the whitelist one.
+            whitelistConditionIds: ["cond-1"],
             microMaxOrderUsdc: 20,
             microMaxOpenUsdc: 15,
           },
@@ -4833,6 +4841,216 @@ describe("ExecutionModule", () => {
       expect(rejected[0].reason).toBe("maker-micro-open-cap-exceeded");
 
       resolvePlace!();
+      await microMod.stop();
+    });
+
+    it("Fix #4 — a DUST maker position counts toward microMaxOpenUsdc (not just open)", async () => {
+      // cap=5. No open maker positions/orders. One DUST maker position (cost 4.5)
+      // exists from a partial exit. A new maker BUY of notional 1 → 4.5 (dust) + 1
+      // = 5.5 > 5 → rejected. If dust were NOT counted, 0 + 1 = 1 ≤ 5 would place.
+      const positionRepo = {
+        save: vi.fn(),
+        findByTokenId: vi.fn().mockReturnValue(null),
+        findOpen: vi.fn().mockReturnValue([]),
+        findAll: vi.fn().mockReturnValue([]),
+        findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+        findDust: vi
+          .fn()
+          .mockReturnValue([
+            makePosition({
+              tokenId: createTokenId("tok-dust"),
+              entryStyle: "maker",
+              status: "dust",
+              costBasisUsdc: 4.5,
+            }),
+          ]),
+      } as unknown as PositionRepository;
+
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live" as const,
+            whitelistConditionIds: ["cond-1"],
+            microMaxOrderUsdc: 100,
+            microMaxOpenUsdc: 5,
+          },
+        }),
+      });
+      await microMod.start();
+
+      const rejected: any[] = [];
+      bus.subscribe("OrderRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("maker-buy-dust"),
+          entryStyle: "maker",
+          side: "buy",
+          size: 2,
+          price: 0.5,
+        }),
+        timestamp: Date.now(),
+      });
+
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toBe("maker-micro-open-cap-exceeded");
+      expect(positionRepo.findDust).toHaveBeenCalled();
+
+      await microMod.stop();
+    });
+
+    it("Fix #1+TOCTOU — an upward tick re-snap after admission counts at the FINAL submit notional (no cap bypass)", async () => {
+      // Admitted at price 0.005 → reservation notional 0.005*110 = 0.55 (≤ cap 1).
+      // The authoritative tick resolves UP to 0.01, re-snapping the price to 0.01, so
+      // the real submit notional is 0.01*110 = 1.10 > cap 1. The submit validator must
+      // exclude the stale 0.55 reservation and count the LIVE 1.10 → reject BEFORE the
+      // exchange. (The old candidateReserved=true accounting counted only the stale
+      // 0.55 and would have placed $1.10 — the bypass Codex flagged.)
+      const tickResolver = { resolve: vi.fn().mockResolvedValue(0.01), invalidate: vi.fn() };
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        tickResolver: tickResolver as any,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live" as const,
+            whitelistConditionIds: ["cond-1"],
+            microMaxOrderUsdc: 100,
+            microMaxOpenUsdc: 1,
+          },
+        }),
+      });
+      await microMod.start();
+
+      const rejected: any[] = [];
+      bus.subscribe("OrderRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("maker-resnap"),
+          entryStyle: "maker",
+          side: "buy",
+          size: 110,
+          price: 0.005,
+          tickSize: 0.005,
+        }),
+        timestamp: Date.now(),
+      });
+
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toBe("maker-micro-open-cap-exceeded");
+
+      await microMod.stop();
+    });
+
+    it("Fix #1 concurrency — a persisted-open maker order is not double-counted (open + its own stale reservation)", async () => {
+      // order-1 places successfully → persisted-open → its reservation is cleared AT
+      // persist (before the awaited OrderPlaced publish). A concurrent order-2 admission
+      // that runs during that window must count order-1 EXACTLY ONCE (via findOpen), not
+      // also via a stale reservation. cap=10, order-1=4, order-2=5 → 9 ≤ 10 → admitted.
+      // Without the fix: 4 (open) + 4 (stale reservation) + 5 = 13 > 10 → falsely rejected.
+      (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        orderId: "ord-conc-1",
+      });
+
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        maxConcurrency: 1,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live" as const,
+            whitelistConditionIds: ["cond-1"],
+            microMaxOrderUsdc: 100,
+            microMaxOpenUsdc: 10,
+          },
+        }),
+      });
+      await microMod.start();
+
+      const rejected: any[] = [];
+      bus.subscribe("OrderRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      // When order-1's OrderPlaced fires it is persisted-open (reservation already
+      // cleared by the fix). Simulate it in findOpen (the mock is not stateful) and run
+      // order-2's admission inside this window.
+      let order2CheckDone = false;
+      bus.subscribe("OrderPlaced", async (e: any) => {
+        if (order2CheckDone || String(e.commandId) !== "maker-conc-1") return;
+        order2CheckDone = true;
+        (orderRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+          {
+            orderId: createOrderId("ord-conc-1"),
+            entryStyle: "maker",
+            side: "buy",
+            status: "open",
+            price: 0.5,
+            size: 8,
+          } as unknown as Order,
+        ]);
+        await bus.publish("PlaceOrderRequested", {
+          command: makePlaceCmd({
+            commandId: createCommandId("maker-conc-2"),
+            entryStyle: "maker",
+            side: "buy",
+            price: 0.5,
+            size: 10,
+          }),
+          timestamp: Date.now(),
+        });
+      });
+
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("maker-conc-1"),
+          entryStyle: "maker",
+          side: "buy",
+          price: 0.5,
+          size: 8,
+        }),
+        timestamp: Date.now(),
+      });
+
+      expect(order2CheckDone).toBe(true);
+      // order-2 admitted (not falsely rejected by a double-counted order-1).
+      expect(rejected).toHaveLength(0);
+
       await microMod.stop();
     });
   });

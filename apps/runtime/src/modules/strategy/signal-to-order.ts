@@ -1538,11 +1538,29 @@ export class SignalToOrderBridge {
         }
       }
 
+      // R23 Phase 5 / Fix #6 — resolve the maker-entry override BEFORE the same-price
+      // cooldown check so the cooldown (and its diagnostics + persisted observation)
+      // key off the price a maker BUY will actually rest at, not the pre-override
+      // taker price the signal started with. tryMakerEntryOverride is pure and is
+      // computed exactly ONCE here; the later maker-BUY handling below reuses this
+      // SAME result instead of calling it again. When there is no override (the
+      // overwhelming majority of signals, and every non-BUY / non-R23 signal),
+      // cooldownPrice === executionTerms.price and this block is byte-identical to
+      // the prior behavior.
+      const makerOverride = this.tryMakerEntryOverride(
+        signal,
+        market,
+        policy,
+        orderSize,
+        executionTerms,
+      );
+      const cooldownPrice = makerOverride?.price ?? executionTerms.price;
+
       if (!isBounceExitForceExit && this.deps.samePriceCooldown) {
         const placementDecision = this.deps.samePriceCooldown.canPlaceOrder({
           tokenId: signal.tokenId,
           side: signal.side,
-          price: executionTerms.price,
+          price: cooldownPrice,
           nowMs,
         });
         if (!placementDecision.allowed) {
@@ -1552,7 +1570,7 @@ export class SignalToOrderBridge {
               signal.signalId,
               String(signal.tokenId),
               signal.side === "buy" ? "BUY" : "SELL",
-              executionTerms.price,
+              cooldownPrice,
               market.tickSize,
             ) ?? false;
           if (sample) {
@@ -1561,7 +1579,7 @@ export class SignalToOrderBridge {
                 signalId: signal.signalId,
                 tokenId: signal.tokenId,
                 side: signal.side,
-                executionPrice: executionTerms.price,
+                executionPrice: cooldownPrice,
                 staleCancelCount: placementDecision.staleCancelCount,
                 cooldownUntilTsUtc: placementDecision.cooldownUntilTsUtc,
                 cacheStatus: pricing.cacheStatus,
@@ -1571,7 +1589,7 @@ export class SignalToOrderBridge {
           }
           await this.publishConversionSkipped(signal, "execution-terms", [reason], {
             cacheStatus: pricing.cacheStatus,
-            executionPrice: executionTerms.price,
+            executionPrice: cooldownPrice,
             staleCancelCount: placementDecision.staleCancelCount,
             cooldownUntilTsUtc: placementDecision.cooldownUntilTsUtc,
           });
@@ -1580,7 +1598,10 @@ export class SignalToOrderBridge {
             clientOrderId: null,
             market,
             policy,
-            executionTerms,
+            executionTerms:
+              cooldownPrice === executionTerms.price
+                ? executionTerms
+                : { ...executionTerms, price: cooldownPrice },
             canary,
             sellPricingShadow,
             skippedReason: reason,
@@ -1589,13 +1610,6 @@ export class SignalToOrderBridge {
         }
       }
 
-      const makerOverride = this.tryMakerEntryOverride(
-        signal,
-        market,
-        policy,
-        orderSize,
-        executionTerms,
-      );
       if (makerOverride != null) {
         orderSize = makerOverride.size;
       }

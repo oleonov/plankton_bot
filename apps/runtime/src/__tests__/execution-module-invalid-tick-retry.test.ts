@@ -15,6 +15,12 @@
  *     checkpoint blocks and returns false → no second gateway call, and the
  *     ORIGINAL invalid-tick rejection is persisted exactly once (no 2nd
  *     OrderRejected).
+ *  7. R23 Fix #1+TOCTOU (docs/plans/2026-07-23-maker-rails-slice1-4a.md): the
+ *     fail-closed maker-BUY validator re-runs at BOTH the main submit boundary
+ *     AND the invalid-tick retry submit boundary — a maker cap tightened in the
+ *     gap between admission and either submit attempt is caught there, and the
+ *     retry rejection publishes exactly ONE OrderRejected (never a duplicate of
+ *     the original invalid-tick rejection).
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -50,6 +56,7 @@ import type {
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
+import { DEFAULT_EXECUTION_POLICY } from "../execution-policy.js";
 import { AuthoritativeTickResolver } from "../modules/execution/authoritative-tick-resolver.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -782,6 +789,224 @@ describe("ExecutionModule — M5: applyTickCorrection refreshes sibling token", 
         expect(m.tickSize).toBe(0.01);
       }
     }
+
+    await mod.stop();
+  });
+});
+
+describe("ExecutionModule — R23 Fix #1+TOCTOU: maker-cap re-validated at submit boundaries", () => {
+  it("maker BUY whose cap was lowered after admission is rejected at the MAIN submit boundary, before reaching the exchange", async () => {
+    const bus = new InProcessEventBus();
+    const gateway = createMockGateway();
+    const orderRepo = createMockOrderRepo();
+    const marketRepo = createMockMarketRepo();
+    const fillRepo = createMockFillRepo();
+
+    // Models "the cap was fine at admission time, but by the time executePlace
+    // reaches the submit boundary the policy has been tightened" by invoking
+    // executePlace directly (bypassing handlePlace's admission entirely) with
+    // the ALREADY-tightened policy in effect — the submit-boundary re-check
+    // (Fix #1+TOCTOU) is the only thing that can still catch it.
+    const policy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      makerEntry: {
+        ...DEFAULT_EXECUTION_POLICY.makerEntry,
+        mode: "micro_live" as const,
+        whitelistConditionIds: ["cond-p2"],
+        microMaxOrderUsdc: 1, // cmd notional = 10 * 0.5 = 5, well over this
+        microMaxOpenUsdc: 100,
+      },
+    };
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => policy,
+    });
+    await mod.start();
+
+    const rejected: Array<{ reason: string }> = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push({ reason: p.reason });
+    });
+
+    const cmd = makePlaceCmd({
+      entryStyle: "maker",
+      side: "buy",
+      price: 0.5,
+      size: 10,
+      tickSize: 0.01,
+    });
+    await getExecutePlaceCaller(mod).executePlace(cmd);
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("maker-micro-order-cap-exceeded");
+    expect(orderRepo.save).not.toHaveBeenCalled();
+
+    await mod.stop();
+  });
+
+  it("maker BUY cap lowered before the invalid-tick retry submit is rejected there — exactly one OrderRejected, no double reject", async () => {
+    const bus = new InProcessEventBus();
+    const gateway = createMockGateway();
+    const orderRepo = createMockOrderRepo();
+    const marketRepo = createMockMarketRepo();
+    const fillRepo = createMockFillRepo();
+
+    // First attempt: invalid-tick rejection from the exchange, forcing the retry path.
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      success: false,
+      errorCode: ExchangeErrorCode.Unknown,
+      errorMessage: "invalid tick size (0.001), minimum for the market is 0.01",
+      errorDetails: INVALID_TICK_ERROR_DETAILS,
+    });
+
+    const generousPolicy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      makerEntry: {
+        ...DEFAULT_EXECUTION_POLICY.makerEntry,
+        mode: "micro_live" as const,
+        whitelistConditionIds: ["cond-p2"],
+        microMaxOrderUsdc: 100,
+        microMaxOpenUsdc: 100,
+      },
+    };
+    const tightenedPolicy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      makerEntry: {
+        ...DEFAULT_EXECUTION_POLICY.makerEntry,
+        mode: "micro_live" as const,
+        whitelistConditionIds: ["cond-p2"],
+        microMaxOrderUsdc: 1, // cmd notional (10 * 0.5 = 5) now over cap
+        microMaxOpenUsdc: 100,
+      },
+    };
+    // Fix #1+TOCTOU calls makerBuyLiveRejection exactly twice for this command
+    // when executePlace is invoked directly (admission bypassed): once at the
+    // main submit boundary (passes under the generous cap, so the first
+    // gateway attempt happens and gets the mocked invalid-tick rejection), once
+    // at the retry submit boundary (this call sees the tightened cap — an
+    // operator change that landed in the gap between the two submit attempts).
+    let policyCallCount = 0;
+    const executionPolicy = () => {
+      policyCallCount += 1;
+      return policyCallCount === 1 ? generousPolicy : tightenedPolicy;
+    };
+
+    const tickResolver = createStagedMockTickResolver(/* phase1 */ 0.001, /* retry */ 0.01);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      tickResolver,
+      executionPolicy,
+    });
+    await mod.start();
+
+    const rejected: Array<{ reason: string }> = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push({ reason: p.reason });
+    });
+
+    const cmd = makePlaceCmd({
+      entryStyle: "maker",
+      side: "buy",
+      price: 0.5,
+      size: 10,
+      tickSize: 0.001,
+    });
+    await getExecutePlaceCaller(mod).executePlace(cmd);
+
+    // Only the FIRST gateway attempt happens — the retry is intercepted by the
+    // fail-closed maker-cap check before it ever reaches the exchange again.
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    // Exactly one OrderRejected — the maker-cap rejection, not a second copy of
+    // the original invalid-tick rejection (Fix #1+TOCTOU's retryRej branch
+    // returns `true`, short-circuiting the caller's own invalid-tick reject path).
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("maker-micro-order-cap-exceeded");
+    expect(orderRepo.save).not.toHaveBeenCalled();
+
+    await mod.stop();
+  });
+
+  it("maker BUY whose price re-snaps UP before the retry submit is counted at the FINAL retry notional (aggregate cap, no bypass)", async () => {
+    const bus = new InProcessEventBus();
+    const gateway = createMockGateway();
+    const orderRepo = createMockOrderRepo();
+    const marketRepo = createMockMarketRepo();
+    const fillRepo = createMockFillRepo();
+
+    // First attempt (at 0.005) gets an invalid-tick rejection, forcing the retry.
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      success: false,
+      errorCode: ExchangeErrorCode.Unknown,
+      errorMessage: "invalid tick size (0.005), minimum for the market is 0.01",
+      errorDetails: INVALID_TICK_ERROR_DETAILS,
+    });
+
+    // Constant small aggregate cap. Main submit at 0.005 (notional 0.55) passes;
+    // the retry re-snaps the price UP to 0.01 (notional 1.10) which exceeds the
+    // aggregate cap. The retry validator must count the LIVE 1.10 (Fix #1's
+    // exclude-own-reservation + current-notional), not a stale 0.55, and reject.
+    const policy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      makerEntry: {
+        ...DEFAULT_EXECUTION_POLICY.makerEntry,
+        mode: "micro_live" as const,
+        whitelistConditionIds: ["cond-p2"],
+        microMaxOrderUsdc: 100,
+        microMaxOpenUsdc: 1,
+      },
+    };
+
+    // phase1 = 0.005 (no proactive resnap on the main path); retry = 0.01.
+    const tickResolver = createStagedMockTickResolver(/* phase1 */ 0.005, /* retry */ 0.01);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      tickResolver,
+      executionPolicy: () => policy,
+    });
+    await mod.start();
+
+    const rejected: Array<{ reason: string }> = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push({ reason: p.reason });
+    });
+
+    const cmd = makePlaceCmd({
+      entryStyle: "maker",
+      side: "buy",
+      price: 0.005,
+      size: 110,
+      tickSize: 0.005,
+    });
+    await getExecutePlaceCaller(mod).executePlace(cmd);
+
+    // First (0.005) attempt reached the exchange; the resnapped-up retry (1.10)
+    // is rejected by the aggregate-cap check before a second gateway call.
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("maker-micro-open-cap-exceeded");
 
     await mod.stop();
   });

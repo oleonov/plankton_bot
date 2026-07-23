@@ -796,12 +796,7 @@ async function main(): Promise<void> {
       config.sellTimeoutMs == null
         ? snapshot
         : { ...snapshot, sellTimeoutMs: config.sellTimeoutMs };
-    return config.makerEntryMode === "off"
-      ? withSellTimeout
-      : {
-          ...withSellTimeout,
-          makerEntry: { ...withSellTimeout.makerEntry, mode: config.makerEntryMode },
-        };
+    return withSellTimeout;
   };
 
   // ADR-016 — market-wide trade-count provider for the post-entry continuation

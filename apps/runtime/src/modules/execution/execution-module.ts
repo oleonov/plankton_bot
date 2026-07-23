@@ -625,6 +625,87 @@ export class ExecutionModule implements RuntimeModule {
     };
   }
 
+  /**
+   * R23 Phase 5 — single fail-closed maker-BUY validator. Called at admission
+   * AND at both exchange submit sites (main + invalid-tick retry) so a mode
+   * flip / whitelist change / cap tightening that lands between admission and
+   * submit is caught before an order reaches the exchange (TOCTOU fix), rather
+   * than racing on a stale admission-time snapshot. Re-reads the CURRENT
+   * execution policy on every call. Returns null when the command is not a
+   * maker BUY — every other command is unaffected by this validator.
+   *
+   * Aggregate-cap accounting is reservation-safe under price drift: the caller's
+   * own pending reservation (keyed by commandId) is EXCLUDED from the pending sum
+   * and its CURRENT `notional` is always added instead. At admission the command
+   * is not yet reserved (exclusion is a no-op) so its notional is added once; at a
+   * submit site the command IS reserved (set at admission, cleared in
+   * executeCommand's `finally` AFTER executePlace), and excluding the stale
+   * reservation while adding the live `notional` is what makes an upward tick
+   * re-snap between admission and submit count at its FINAL notional, not the
+   * stale admission-price one.
+   */
+  private makerBuyLiveRejection(
+    cmd: PlaceOrderCommand,
+    notional: number,
+  ): { reason: string; code: ExchangeErrorCode } | null {
+    if (!(cmd.entryStyle === "maker" && cmd.side === "buy")) return null;
+
+    const makerPolicy = this.deps.executionPolicy?.()?.makerEntry;
+    if (!makerPolicy || makerPolicy.mode !== "micro_live") {
+      return { reason: "maker-mode-inactive", code: ExchangeErrorCode.LivePolicyBlocked };
+    }
+
+    // Whitelist semantics mirror tryMakerEntryOverride (signal-to-order.ts) but
+    // fully fail-closed at the execution boundary: a missing/non-array/EMPTY
+    // whitelist rejects (never throws, never opens), and a missing conditionId
+    // rejects too (a command with no market cannot be on any whitelist).
+    const whitelist = makerPolicy.whitelistConditionIds;
+    if (!Array.isArray(whitelist) || whitelist.length === 0) {
+      return { reason: "maker-mode-inactive", code: ExchangeErrorCode.LivePolicyBlocked };
+    }
+    if (cmd.conditionId == null || !whitelist.includes(String(cmd.conditionId))) {
+      return { reason: "maker-mode-inactive", code: ExchangeErrorCode.LivePolicyBlocked };
+    }
+
+    if (makerPolicy.microMaxOrderUsdc > 0 && notional > makerPolicy.microMaxOrderUsdc) {
+      return { reason: "maker-micro-order-cap-exceeded", code: ExchangeErrorCode.LivePolicyBlocked };
+    }
+
+    if (makerPolicy.microMaxOpenUsdc > 0) {
+      // Dust-inclusive maker exposure (Fix #4): a maker BUY that fills and then
+      // drops below the sellable minimum becomes "dust", not "closed" — it is
+      // still real, unrealized maker exposure and must count toward the cap.
+      // findDust() and findOpenByEntryStyle() are disjoint by status, so no
+      // dedup is needed when concatenating them.
+      const makerPositions = this.deps.positionRepo
+        ? [
+            ...this.deps.positionRepo.findOpenByEntryStyle("maker"),
+            ...this.deps.positionRepo.findDust().filter((p) => p.entryStyle === "maker"),
+          ]
+        : [];
+      const openPositionUsdc = this.deps.positionRepo
+        ? computeMakerOpenPositionUsdc(makerPositions)
+        : 0;
+      // Exclude THIS command's own reservation (if already reserved at a submit
+      // site) and always add its CURRENT `notional` — so a post-admission upward
+      // tick re-snap counts at the final notional, not the stale reserved one.
+      const otherReservations = [...this.pendingReservations]
+        .filter(([id]) => id !== String(cmd.commandId))
+        .map(([, reservation]) => reservation);
+      const pendingUsdc = computeMakerPendingReservationUsdc(otherReservations);
+      const makerOpenUsdc =
+        computeMakerOpenOrderUsdc(this.deps.orderRepo.findOpen(), this.deps.fillRepo) +
+        openPositionUsdc +
+        pendingUsdc +
+        notional;
+      if (makerOpenUsdc > makerPolicy.microMaxOpenUsdc) {
+        return { reason: "maker-micro-open-cap-exceeded", code: ExchangeErrorCode.LivePolicyBlocked };
+      }
+    }
+
+    return null;
+  }
+
   // ─── Place order handler ──────────────────────────────────────────────
 
   private async handlePlace(cmd: PlaceOrderCommand): Promise<void> {
@@ -770,57 +851,19 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
 
-    // Micro-live maker BUY cap: defense-in-depth cap
-    if (cmd.entryStyle === "maker" && cmd.side === "buy") {
-      const makerPolicy = this.deps.executionPolicy?.()?.makerEntry;
-      if (makerPolicy && makerPolicy.mode === "micro_live") {
-        // (a) Per-order notional cap
-        if (makerPolicy.microMaxOrderUsdc > 0 && notional > makerPolicy.microMaxOrderUsdc) {
-          this.log.warn(
-            {
-              commandId: cmd.commandId,
-              notional,
-              microMaxOrderUsdc: makerPolicy.microMaxOrderUsdc,
-            },
-            "maker BUY rejected — exceeds microMaxOrderUsdc per-order cap",
-          );
-          await this.rejectOrder(
-            cmd,
-            "maker-micro-order-cap-exceeded",
-            ExchangeErrorCode.LivePolicyBlocked,
-          );
-          return;
-        }
-        // (b) Open exposure cap (orders + positions + pending in-flight + this order)
-        if (makerPolicy.microMaxOpenUsdc > 0) {
-          const openOrders = this.deps.orderRepo.findOpen();
-          const openPositionUsdc = this.deps.positionRepo
-            ? computeMakerOpenPositionUsdc(this.deps.positionRepo.findOpenByEntryStyle("maker"))
-            : 0;
-          const pendingUsdc = computeMakerPendingReservationUsdc(this.pendingReservations.values());
-          const makerOpenUsdc =
-            computeMakerOpenOrderUsdc(openOrders, this.deps.fillRepo) +
-            openPositionUsdc +
-            pendingUsdc +
-            notional;
-          if (makerOpenUsdc > makerPolicy.microMaxOpenUsdc) {
-            this.log.warn(
-              {
-                commandId: cmd.commandId,
-                makerOpenUsdc,
-                microMaxOpenUsdc: makerPolicy.microMaxOpenUsdc,
-              },
-              "maker BUY rejected — microMaxOpenUsdc cap exceeded",
-            );
-            await this.rejectOrder(
-              cmd,
-              "maker-micro-open-cap-exceeded",
-              ExchangeErrorCode.LivePolicyBlocked,
-            );
-            return;
-          }
-        }
-      }
+    // Micro-live maker BUY cap: fail-closed defense-in-depth. A maker BUY whose
+    // mode/whitelist/caps don't check out is now REJECTED here (not silently
+    // skipped) — the same makerBuyLiveRejection validator runs again at both
+    // exchange submit sites to close the TOCTOU window between admission and
+    // submit (Fix #1+TOCTOU, docs/plans/2026-07-23-maker-rails-slice1-4a.md).
+    const makerRej = this.makerBuyLiveRejection(cmd, notional);
+    if (makerRej) {
+      this.log.warn(
+        { commandId: cmd.commandId, notional, reason: makerRej.reason },
+        "maker BUY rejected at admission",
+      );
+      await this.rejectOrder(cmd, makerRej.reason, makerRej.code);
+      return;
     }
 
     // Micro-live GATE BUY cap: defense-in-depth cap, mirrors the maker-BUY
@@ -1538,6 +1581,21 @@ export class ExecutionModule implements RuntimeModule {
         });
         return;
       }
+    }
+
+    // Fix #1+TOCTOU — revalidate the maker-BUY at the actual submit boundary. The
+    // validator excludes this command's own (possibly stale-priced) reservation and
+    // re-counts the LIVE submit notional, so an upward tick re-snap between admission
+    // and submit is capped at its final notional.
+    const submitNotional = placeParams.price * placeParams.size;
+    const submitRej = this.makerBuyLiveRejection(effectiveCmd, submitNotional);
+    if (submitRej) {
+      this.log.warn(
+        { commandId: cmd.commandId, submitNotional, reason: submitRej.reason },
+        "maker BUY rejected at submit",
+      );
+      await this.rejectOrder(effectiveCmd, submitRej.reason, submitRej.code);
+      return;
     }
 
     const result = await this.deps.gateway.placeOrder(placeParams);
@@ -2611,6 +2669,12 @@ export class ExecutionModule implements RuntimeModule {
   ): void {
     try {
       this.deps.orderRepo.save(order);
+      // Once the order is persisted "open", findOpen() accounts for its exposure.
+      // Clear its pending reservation NOW (before the caller's awaited OrderPlaced
+      // publish, and before executeCommand's finally) so a CONCURRENT maker BUY's
+      // cap check cannot count this same order twice — once via findOpen() and once
+      // via the still-live reservation. Idempotent with the finally delete.
+      this.pendingReservations.delete(String(cmd.commandId));
     } catch (err) {
       const persistenceError = errorToLogMessage(err);
       const payload = {
@@ -3441,6 +3505,21 @@ export class ExecutionModule implements RuntimeModule {
         });
         return false;
       }
+    }
+
+    // Fix #1+TOCTOU — revalidate the maker-BUY at the retry submit boundary too.
+    // Must return true (not false) on rejection: false would fall through to the
+    // caller's ORIGINAL invalid-tick rejection path and publish a SECOND
+    // OrderRejected for the same command. rejectOrder here is the only
+    // OrderRejected for this command.
+    const retryRej = this.makerBuyLiveRejection(retryCmd, retryParams.price * retryParams.size);
+    if (retryRej) {
+      this.log.warn(
+        { commandId: cmd.commandId, reason: retryRej.reason },
+        "maker BUY rejected at invalid-tick retry submit",
+      );
+      await this.rejectOrder(retryCmd, retryRej.reason, retryRej.code);
+      return true;
     }
 
     const retryResult = await this.deps.gateway.placeOrder(retryParams);

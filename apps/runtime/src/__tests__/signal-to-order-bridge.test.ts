@@ -5842,6 +5842,67 @@ describe("ADR-015 execution policy observations", () => {
     expect(rows[0]!.roundLevelHit).toBe("0.05x");
   });
 
+  it("Fix #6 — same-price cooldown keys off the post-override maker price, not the pre-override taker price", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const { repo, rows } = makeCapturingRepo();
+    const canPlaceOrder = vi.fn(() => ({
+      allowed: false,
+      reason: "same-price-cooldown",
+      staleCancelCount: 2,
+      cooldownUntilTsUtc: NOW + 60_000,
+    }));
+    const policy: ExecutionPolicy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      makerEntry: {
+        ...DEFAULT_EXECUTION_POLICY.makerEntry,
+        mode: "micro_live",
+        whitelistConditionIds: ["cond-1"],
+      },
+    };
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => policy,
+      samePriceCooldown: { canPlaceOrder },
+      observations: repo,
+      profileId: PROFILE_ID,
+    });
+    bridge.subscribe();
+
+    const placed: unknown[] = [];
+    bus.subscribe("PlaceOrderRequested", async (p) => {
+      placed.push(p);
+    });
+
+    // bestBid 0.04, tickSize 0.01, default bidImproveTicks=1 -> maker price
+    // = floorToTick(0.04 + 0.01, 0.01) = 0.05, distinct from the pre-override
+    // taker price (bestBid 0.04) the signal would otherwise have used.
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        decisionRuleId: "R23_DIP_TRIGGER",
+        reason: "probe-entry",
+      },
+      market: makeMarket({ bestBid: 0.04, bestAsk: 0.09, midPrice: 0.065, tickSize: 0.01 }),
+      approvedAt: NOW,
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(canPlaceOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: TOKEN_ID, side: "buy", price: 0.05, nowMs: NOW }),
+    );
+
+    await waitForRows(rows, 1);
+    expect(rows[0]!.skippedReason).toBe("same-price-cooldown");
+    // The persisted observation must report the maker price plankton would
+    // have rested at, not the pre-override taker price.
+    expect(rows[0]!.selectedPrice).toBe(0.05);
+  });
+
   it("writes a skip observation when SELL price is below signal-distance floor", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
