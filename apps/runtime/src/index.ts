@@ -2666,8 +2666,20 @@ async function main(): Promise<void> {
   const startupScan = await marketScannerModule.scanOrThrow();
   log.info(startupScan, "blocking startup market scan complete");
 
-  const startupAdoption = await runStartupPositionAdoption({
-    gateway: exchangeGateway,
+  // Gap 2 fail-closed: startup adoption requires the reliable result-returning fill
+  // API (distinguishes empty from failure). Real gateways provide it; refuse to
+  // start if it is somehow absent rather than falling back to the false-flat path.
+  const getFillsResult = exchangeGateway.getFillsResult?.bind(exchangeGateway);
+  if (!getFillsResult) {
+    throw new Error("exchange gateway missing getFillsResult — cannot fail-closed on startup");
+  }
+  const startupAdoptionDeps = {
+    gateway: {
+      getFillsResult,
+      ...(exchangeGateway.getMarketFeeInfo
+        ? { getMarketFeeInfo: exchangeGateway.getMarketFeeInfo.bind(exchangeGateway) }
+        : {}),
+    },
     marketRepo: repos.market,
     orderRepo: repos.order,
     fillRepo: repos.fill,
@@ -2678,7 +2690,28 @@ async function main(): Promise<void> {
     db: ledgerConn.db,
     botRunId,
     fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
-  });
+  };
+  let startupAdoption: Awaited<ReturnType<typeof runStartupPositionAdoption>>;
+  try {
+    startupAdoption = await runStartupPositionAdoption(startupAdoptionDeps);
+  } catch (err) {
+    // Gap 2: persist a failed/paused control state BEFORE exiting so a stale
+    // `running, paused=0` row cannot linger (deploy resume-intent must not resume
+    // onto a failed/aborted startup). publishFailed() only sets status, not paused.
+    try {
+      controlConn.db
+        .prepare(
+          "UPDATE runtime_control_state SET runtime_status = 'failed', paused = 1, updated_at = datetime('now') WHERE id = 1",
+        )
+        .run();
+    } catch (persistErr) {
+      log.error(
+        { err: persistErr },
+        "failed to persist failed/paused control state after startup abort",
+      );
+    }
+    throw err;
+  }
   log.info(startupAdoption, "startup position adoption complete");
   ledgerConn.db
     .prepare(

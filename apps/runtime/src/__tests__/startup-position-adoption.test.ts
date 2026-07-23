@@ -24,6 +24,7 @@ import {
 import {
   cleanupPriorStartupAdoptionArtifacts,
   runStartupPositionAdoption,
+  StartupSnapshotUnreliableError,
 } from "../startup-position-adoption.js";
 
 const TOKEN_ID = createTokenId("tok-btc-yes");
@@ -32,6 +33,7 @@ const silentLog = {
   info: vi.fn(),
   warn: vi.fn(),
   error: vi.fn(),
+  fatal: vi.fn(),
   debug: vi.fn(),
   child: () => silentLog,
 } as any;
@@ -98,7 +100,7 @@ describe("runStartupPositionAdoption", () => {
 
     const result = await runStartupPositionAdoption({
       gateway: {
-        getFills: vi.fn().mockResolvedValue([makeExchangeFill()]),
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
       },
       marketRepo,
       orderRepo,
@@ -124,6 +126,41 @@ describe("runStartupPositionAdoption", () => {
     expect(position).not.toBeNull();
     expect(position?.size).toBe(10);
     expect(position?.costBasisUsdc).toBe(4);
+  });
+
+  it("FAIL CLOSED (Gap 2): an unreliable fill snapshot (ok:false) aborts startup and mutates nothing", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+
+    const marketRepo = new SqliteMarketRepository(conn.db);
+    const orderRepo = new SqliteOrderRepository(conn.db);
+    const fillRepo = new SqliteFillRepository(conn.db);
+    const positionRepo = new SqlitePositionRepository(conn.db);
+    const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+    const legStateRepo = new SqliteLegStateRepository(conn.db);
+    seedMarket(marketRepo);
+
+    const getFillsResult = vi.fn().mockResolvedValue({ ok: false, reason: "timeout", attempts: 3 });
+
+    await expect(
+      runStartupPositionAdoption({
+        gateway: { getFillsResult },
+        marketRepo,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        legStateRepo,
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-1"),
+      }),
+    ).rejects.toBeInstanceOf(StartupSnapshotUnreliableError);
+
+    // Ledger untouched: no positions/orders/fills created (throw happened BEFORE cleanup/mutation).
+    expect(positionRepo.findOpen()).toHaveLength(0);
+    expect(fillRepo.findByTokenId(TOKEN_ID)).toHaveLength(0);
+    expect(getFillsResult).toHaveBeenCalledOnce();
   });
 
   it("forwards fillCompletionTolerance=0 → near-complete fill leaves local order partially-filled (#36)", async () => {
@@ -160,14 +197,17 @@ describe("runStartupPositionAdoption", () => {
 
     await runStartupPositionAdoption({
       gateway: {
-        getFills: vi.fn().mockResolvedValue([
-          makeExchangeFill({
-            fillId: "fill-known",
-            orderId: "ex-known",
-            clientOrderId: "plk_known",
-            size: 9.97,
-          }),
-        ]),
+        getFillsResult: vi.fn().mockResolvedValue({
+          ok: true,
+          data: [
+            makeExchangeFill({
+              fillId: "fill-known",
+              orderId: "ex-known",
+              clientOrderId: "plk_known",
+              size: 9.97,
+            }),
+          ],
+        }),
       },
       marketRepo,
       orderRepo,
@@ -197,7 +237,7 @@ describe("runStartupPositionAdoption", () => {
     seedMarket(marketRepo);
 
     const gateway = {
-      getFills: vi.fn().mockResolvedValue([makeExchangeFill()]),
+      getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
     };
 
     const first = await runStartupPositionAdoption({
@@ -246,7 +286,7 @@ describe("runStartupPositionAdoption", () => {
 
     const result = await runStartupPositionAdoption({
       gateway: {
-        getFills: vi.fn().mockResolvedValue([makeExchangeFill()]),
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
       },
       marketRepo,
       orderRepo,
@@ -278,7 +318,9 @@ describe("runStartupPositionAdoption", () => {
 
     const result = await runStartupPositionAdoption({
       gateway: {
-        getFills: vi.fn().mockResolvedValue([makeExchangeFill({ timestamp: Number.NaN })]),
+        getFillsResult: vi
+          .fn()
+          .mockResolvedValue({ ok: true, data: [makeExchangeFill({ timestamp: Number.NaN })] }),
       },
       marketRepo,
       orderRepo,
@@ -377,15 +419,18 @@ describe("runStartupPositionAdoption", () => {
 
     const result = await runStartupPositionAdoption({
       gateway: {
-        getFills: vi.fn().mockResolvedValue([
-          makeExchangeFill({
-            fillId: "good-fill",
-            orderId: "good-order",
-            clientOrderId: "",
-            size: 43.47,
-            price: 0.11,
-          }),
-        ]),
+        getFillsResult: vi.fn().mockResolvedValue({
+          ok: true,
+          data: [
+            makeExchangeFill({
+              fillId: "good-fill",
+              orderId: "good-order",
+              clientOrderId: "",
+              size: 43.47,
+              price: 0.11,
+            }),
+          ],
+        }),
       },
       marketRepo,
       orderRepo,
@@ -493,7 +538,7 @@ describe("runStartupPositionAdoption", () => {
       const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
       const legStateRepo = new SqliteLegStateRepository(conn.db);
       const result = await runStartupPositionAdoption({
-        gateway: { getFills: vi.fn().mockResolvedValue([]) },
+        gateway: { getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }) },
         marketRepo,
         orderRepo,
         fillRepo,
@@ -918,11 +963,10 @@ describe("runStartupPositionAdoption", () => {
 
       await runStartupPositionAdoption({
         gateway: {
-          getFills: vi
-            .fn()
-            .mockResolvedValue([
-              makeExchangeFill({ orderId: "ex-maker", clientOrderId: "plk_maker" }),
-            ]),
+          getFillsResult: vi.fn().mockResolvedValue({
+            ok: true,
+            data: [makeExchangeFill({ orderId: "ex-maker", clientOrderId: "plk_maker" })],
+          }),
         },
         marketRepo,
         orderRepo,
@@ -955,7 +999,7 @@ describe("runStartupPositionAdoption", () => {
       // No entryStyle on the order — probe default
       await runStartupPositionAdoption({
         gateway: {
-          getFills: vi.fn().mockResolvedValue([makeExchangeFill()]),
+          getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
         },
         marketRepo,
         orderRepo,
@@ -986,11 +1030,10 @@ describe("runStartupPositionAdoption", () => {
       seedMarket(marketRepo);
 
       const gateway = {
-        getFills: vi
-          .fn()
-          .mockResolvedValue([
-            makeExchangeFill({ orderId: "ex-restart", clientOrderId: "plk_restart" }),
-          ]),
+        getFillsResult: vi.fn().mockResolvedValue({
+          ok: true,
+          data: [makeExchangeFill({ orderId: "ex-restart", clientOrderId: "plk_restart" })],
+        }),
       };
 
       const orderId = createOrderId("ord-restart");
@@ -1085,11 +1128,10 @@ describe("runStartupPositionAdoption", () => {
 
       await runStartupPositionAdoption({
         gateway: {
-          getFills: vi
-            .fn()
-            .mockResolvedValue([
-              makeExchangeFill({ orderId: "ex-gate", clientOrderId: "plk_gate" }),
-            ]),
+          getFillsResult: vi.fn().mockResolvedValue({
+            ok: true,
+            data: [makeExchangeFill({ orderId: "ex-gate", clientOrderId: "plk_gate" })],
+          }),
         },
         marketRepo,
         orderRepo,
@@ -1142,9 +1184,10 @@ describe("runStartupPositionAdoption", () => {
 
       await runStartupPositionAdoption({
         gateway: {
-          getFills: vi
-            .fn()
-            .mockResolvedValue([makeExchangeFill({ orderId: "ex-r23", clientOrderId: "plk_r23" })]),
+          getFillsResult: vi.fn().mockResolvedValue({
+            ok: true,
+            data: [makeExchangeFill({ orderId: "ex-r23", clientOrderId: "plk_r23" })],
+          }),
         },
         marketRepo,
         orderRepo,
@@ -1177,7 +1220,7 @@ describe("runStartupPositionAdoption", () => {
       // No decisionRuleId on the order — legacy/unknown path
       await runStartupPositionAdoption({
         gateway: {
-          getFills: vi.fn().mockResolvedValue([makeExchangeFill()]),
+          getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
         },
         marketRepo,
         orderRepo,
@@ -1208,11 +1251,12 @@ describe("runStartupPositionAdoption", () => {
       seedMarket(marketRepo);
 
       const gateway = {
-        getFills: vi
-          .fn()
-          .mockResolvedValue([
+        getFillsResult: vi.fn().mockResolvedValue({
+          ok: true,
+          data: [
             makeExchangeFill({ orderId: "ex-gate-restart", clientOrderId: "plk_gate_restart" }),
-          ]),
+          ],
+        }),
       };
 
       const orderId = createOrderId("ord-gate-restart");

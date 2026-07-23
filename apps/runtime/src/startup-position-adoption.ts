@@ -5,6 +5,7 @@ import type {
   EventBus,
   ExchangeFill,
   ExchangeGateway,
+  FetchResult,
   FillRepository,
   LegStateRepository,
   MarketRepository,
@@ -25,8 +26,29 @@ import {
 } from "./modules/reconciliation/fill-reconciler.js";
 import { updateLegStateForFill } from "./modules/leg-state/update-leg-state-for-fill.js";
 
+/**
+ * Thrown when the authoritative exchange fill snapshot cannot be read reliably at
+ * startup. FAIL CLOSED (core-infra Gap 2): a transport/parse failure must NOT be
+ * read as an authoritative empty ("flat") snapshot — that silently drops real
+ * open positions/orphans. The bot must refuse to start rather than act on a false
+ * flat. Thrown BEFORE any cleanup/mutation so the ledger is left untouched.
+ */
+export class StartupSnapshotUnreliableError extends Error {
+  constructor(
+    readonly reason: string,
+    readonly attempts: number,
+  ) {
+    super(
+      `startup aborted — exchange fill snapshot unreliable (reason=${reason}, attempts=${attempts})`,
+    );
+    this.name = "StartupSnapshotUnreliableError";
+  }
+}
+
 export interface StartupPositionAdoptionDeps {
-  gateway: Pick<ExchangeGateway, "getFills" | "getMarketFeeInfo">;
+  gateway: Pick<ExchangeGateway, "getMarketFeeInfo"> & {
+    getFillsResult(sinceMs: number): Promise<FetchResult<ExchangeFill[]>>;
+  };
   marketRepo: MarketRepository;
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
@@ -92,7 +114,20 @@ export async function runStartupPositionAdoption(
   const log = deps.log.child({ module: "startup-position-adoption" });
   const inventory = new InventoryHandler(deps.positionRepo, deps.inventoryLotRepo, log, deps.db);
 
-  const rawFills = await deps.gateway.getFills(0);
+  // FAIL CLOSED (Gap 2): use the reliable result-returning API that distinguishes
+  // an authoritative empty snapshot (ok:true, data:[]) from a transport/parse
+  // failure (ok:false). On failure, throw BEFORE any cleanup/mutation below so the
+  // ledger is untouched and the bot refuses to start rather than acting on a false
+  // "flat" snapshot (the legacy getFills(0) returned [] on failure).
+  const fillsResult = await deps.gateway.getFillsResult(0);
+  if (!fillsResult.ok) {
+    log.fatal(
+      { reason: fillsResult.reason, attempts: fillsResult.attempts },
+      "startup adoption ABORTED — exchange fill snapshot unreliable (fail-closed, no ledger mutation)",
+    );
+    throw new StartupSnapshotUnreliableError(fillsResult.reason, fillsResult.attempts);
+  }
+  const rawFills = fillsResult.data;
   const result: StartupPositionAdoptionResult = {
     scannedFills: rawFills.length,
     alreadyKnownFills: 0,
