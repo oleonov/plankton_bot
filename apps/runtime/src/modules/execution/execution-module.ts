@@ -668,7 +668,10 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     if (makerPolicy.microMaxOrderUsdc > 0 && notional > makerPolicy.microMaxOrderUsdc) {
-      return { reason: "maker-micro-order-cap-exceeded", code: ExchangeErrorCode.LivePolicyBlocked };
+      return {
+        reason: "maker-micro-order-cap-exceeded",
+        code: ExchangeErrorCode.LivePolicyBlocked,
+      };
     }
 
     if (makerPolicy.microMaxOpenUsdc > 0) {
@@ -699,7 +702,10 @@ export class ExecutionModule implements RuntimeModule {
         pendingUsdc +
         notional;
       if (makerOpenUsdc > makerPolicy.microMaxOpenUsdc) {
-        return { reason: "maker-micro-open-cap-exceeded", code: ExchangeErrorCode.LivePolicyBlocked };
+        return {
+          reason: "maker-micro-open-cap-exceeded",
+          code: ExchangeErrorCode.LivePolicyBlocked,
+        };
       }
     }
 

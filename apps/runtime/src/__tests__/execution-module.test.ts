@@ -4854,16 +4854,14 @@ describe("ExecutionModule", () => {
         findOpen: vi.fn().mockReturnValue([]),
         findAll: vi.fn().mockReturnValue([]),
         findOpenByEntryStyle: vi.fn().mockReturnValue([]),
-        findDust: vi
-          .fn()
-          .mockReturnValue([
-            makePosition({
-              tokenId: createTokenId("tok-dust"),
-              entryStyle: "maker",
-              status: "dust",
-              costBasisUsdc: 4.5,
-            }),
-          ]),
+        findDust: vi.fn().mockReturnValue([
+          makePosition({
+            tokenId: createTokenId("tok-dust"),
+            entryStyle: "maker",
+            status: "dust",
+            costBasisUsdc: 4.5,
+          }),
+        ]),
       } as unknown as PositionRepository;
 
       const microMod = new ExecutionModule({
