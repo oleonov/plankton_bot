@@ -63,6 +63,23 @@ describe("SqlitePositionRepository", () => {
     expect(found!.closedAt).toBeNull();
   });
 
+  it("exit_owner is set on insert and is write-once (UPSERT never overwrites it)", () => {
+    // Insert with exit_owner='bounce'.
+    repo.save(makePosition({ exitOwner: "bounce" }));
+    expect(repo.findByTokenId(createTokenId("tok-1"))!.exitOwner).toBe("bounce");
+
+    // Re-save the SAME position (UPSERT) attempting to change exit_owner + other
+    // fields. exit_owner must stay 'bounce' (write-once); other fields update.
+    repo.save(makePosition({ exitOwner: "profile", size: 42 }));
+    const after = repo.findByTokenId(createTokenId("tok-1"))!;
+    expect(after.exitOwner).toBe("bounce"); // unchanged (sticky)
+    expect(after.size).toBe(42); // other fields still update
+
+    // A NULL-owner position stays NULL until explicitly assigned (inert default).
+    repo.save(makePosition({ positionId: createPositionId("pos-null"), tokenId: createTokenId("tok-null") }));
+    expect(repo.findByTokenId(createTokenId("tok-null"))!.exitOwner ?? null).toBeNull();
+  });
+
   it("findOpen returns only open positions", () => {
     repo.save(
       makePosition({

@@ -482,6 +482,17 @@ export interface Position {
    * read site treats `undefined` the same as `null` (both are non-GATE, safe).
    */
   entryLane?: "GATE" | "R23" | null;
+  /**
+   * Sticky exit-ownership marker (Release A —
+   * docs/plans/2026-07-23-release-a-exit-ownership.md). Decided ONCE at the
+   * position's first BUY fill and immutable for the position's life: "bounce"
+   * (serviced only by the tiered bounce-exit ladder) or "profile" (today's
+   * complete non-bounce exit stack, unchanged). `undefined`/`null` = a
+   * pre-activation / legacy position routed by today's per-cycle logic until the
+   * census backfills it. Optional (like entryLane) so existing Position fixtures
+   * don't need a mechanical field-add sweep; every read treats undefined as null.
+   */
+  exitOwner?: "profile" | "bounce" | null;
   openedAt: string; // ISO timestamp
   closedAt: string | null; // ISO timestamp
   updatedAt: string; // ISO timestamp

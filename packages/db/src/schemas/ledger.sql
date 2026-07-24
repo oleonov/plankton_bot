@@ -278,6 +278,7 @@ CREATE TABLE IF NOT EXISTS positions (
   status             TEXT NOT NULL DEFAULT 'open',
   entry_style        TEXT,
   entry_lane         TEXT, -- migration 086: 'GATE' | 'R23' | NULL, set from the first fill
+  exit_owner         TEXT, -- migration 087 (Release A): 'bounce' | 'profile' | NULL, sticky, set once at first fill
   opened_at          TEXT NOT NULL DEFAULT (datetime('now')),
   closed_at          TEXT,
   consecutive_state_failed_count INTEGER NOT NULL DEFAULT 0,
@@ -297,6 +298,15 @@ CREATE INDEX IF NOT EXISTS idx_positions_condition_redeem_quarantine
 -- status='open') is created in bootstrapLedgerDb after an idempotent repair
 -- step so that upgrade installs with pre-existing duplicate-open rows don't
 -- break on `CREATE UNIQUE INDEX`. See packages/db/src/bootstrap.ts.
+
+-- Release A (migration 087): exit_owner is immutable once set (sticky ownership).
+CREATE TRIGGER IF NOT EXISTS trg_positions_exit_owner_immutable
+BEFORE UPDATE OF exit_owner ON positions
+FOR EACH ROW
+WHEN OLD.exit_owner IS NOT NULL AND (NEW.exit_owner IS NULL OR NEW.exit_owner <> OLD.exit_owner)
+BEGIN
+  SELECT RAISE(ABORT, 'exit_owner is immutable once set');
+END;
 
 -- ═══════════ INVENTORY LOTS (FIFO) ═══════════
 -- From 001_initial.sql

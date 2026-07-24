@@ -12,8 +12,10 @@ export class SqlitePositionRepository implements PositionRepository {
         `INSERT INTO positions
          (position_id, token_id, condition_id, side, size, avg_entry_price,
           cost_basis_usdc, current_value_usdc, realized_pnl, status,
-          entry_style, entry_lane, opened_at, closed_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          entry_style, entry_lane, exit_owner, opened_at, closed_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         -- NB: exit_owner is intentionally OMITTED from DO UPDATE — it is
+         -- write-once on INSERT (sticky ownership, Release A). Never overwrite it.
          ON CONFLICT(position_id) DO UPDATE SET
            size = excluded.size,
            avg_entry_price = excluded.avg_entry_price,
@@ -39,6 +41,7 @@ export class SqlitePositionRepository implements PositionRepository {
         position.status,
         position.entryStyle,
         position.entryLane ?? null,
+        position.exitOwner ?? null,
         position.openedAt,
         position.closedAt,
         position.updatedAt,
@@ -103,6 +106,7 @@ export class SqlitePositionRepository implements PositionRepository {
       status: row.status as PositionStatus,
       entryStyle: (row.entry_style as "probe" | "maker") ?? null,
       entryLane: (row.entry_lane as "GATE" | "R23") ?? null,
+      exitOwner: (row.exit_owner as "profile" | "bounce") ?? null,
       openedAt: row.opened_at as string,
       closedAt: (row.closed_at as string) ?? null,
       updatedAt: row.updated_at as string,
