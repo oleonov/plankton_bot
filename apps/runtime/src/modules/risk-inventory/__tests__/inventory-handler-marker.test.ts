@@ -127,6 +127,30 @@ describe("InventoryHandler — maker provenance marker (Phase 2 plumbing)", () =
     expect(saved.entryStyle).toBe("probe");
   });
 
+  it("Release A Phase 2: assigns exit_owner from the injected resolver; NULL when no resolver", () => {
+    // With a resolver → exit_owner is set on the new position.
+    const positionRepo = makePositionRepo(null);
+    const lotRepo = makeLotRepo();
+    const db = makeMockDb();
+    const handler = new InventoryHandler(
+      positionRepo,
+      lotRepo,
+      silentLog,
+      db,
+      undefined,
+      () => "bounce",
+    );
+    handler.applyFill(makeFill({ fillId: createFillId("fill-eo") }));
+    const saved = (positionRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
+    expect(saved.exitOwner).toBe("bounce");
+
+    // Without a resolver (e.g. startup adoption) → exit_owner stays NULL.
+    const { handler: h2, positionRepo: repo2 } = makeHandler();
+    h2.applyFill(makeFill({ fillId: createFillId("fill-eo2") }));
+    const saved2 = (repo2.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
+    expect(saved2.exitOwner ?? null).toBeNull();
+  });
+
   it("preserves existing position's 'maker' entryStyle on scale-in (addToPosition spreads existing)", () => {
     const existing: Position = {
       positionId: createPositionId("pos-existing"),

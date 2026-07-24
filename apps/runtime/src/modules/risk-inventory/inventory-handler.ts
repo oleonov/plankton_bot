@@ -72,6 +72,17 @@ export class InventoryHandler {
     private readonly log: Logger,
     private readonly db: Database.Database,
     private readonly latestMinOrderSize?: (tokenId: TokenId) => number | null,
+    /**
+     * Release A Phase 2 — decide a NEW position's sticky exit_owner at first fill.
+     * Optional: when absent (e.g. startup adoption), a new position keeps
+     * exit_owner = NULL (routed by today's per-cycle logic until the census
+     * backfills it). Injected by risk-inventory-module from the current policy.
+     */
+    private readonly resolveNewExitOwner?: (
+      fill: FillEvent,
+      entryLane: "GATE" | "R23" | null,
+      openedAt: string,
+    ) => "bounce" | "profile" | null,
   ) {
     this.pnlLedgerInsert = db.prepare(resolvePnlLedgerInsertSql(db));
   }
@@ -102,6 +113,7 @@ export class InventoryHandler {
     const now = new Date().toISOString();
     const positionId = createPositionId(`pos-${fill.tokenId}-${Date.now()}`);
     const unitCost = fill.size > 0 ? fill.sizeUsdc / fill.size : fill.price;
+    const entryLane = deriveEntryLane(fill.decisionRuleId);
 
     const position: Position = {
       positionId,
@@ -115,7 +127,11 @@ export class InventoryHandler {
       realizedPnl: 0,
       status: "open",
       entryStyle: fill.entryStyle ?? "probe",
-      entryLane: deriveEntryLane(fill.decisionRuleId),
+      entryLane,
+      // Release A Phase 2: sticky exit owner, decided once at first fill (NULL
+      // when no resolver is injected, e.g. startup adoption). INERT until Phase 3
+      // reads it — nothing routes exits by exit_owner yet.
+      exitOwner: this.resolveNewExitOwner?.(fill, entryLane, now) ?? null,
       openedAt: now,
       closedAt: null,
       updatedAt: now,

@@ -50,6 +50,7 @@ import { resolveOpenPositionStatus } from "../../position-status.js";
 import { normalizeReasonCode } from "../../risk-event-codes.js";
 import { AlgoRiskGateImpl } from "./algo-risk-gate.js";
 import { InventoryHandler } from "./inventory-handler.js";
+import { resolveNewPositionExitOwner } from "../exit-ownership/resolve-new-position-exit-owner.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
 import type { OrderCapacityMetricsSample, WalletBudgetControlDb } from "../../wallet-buy-budget.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
@@ -180,6 +181,18 @@ export class RiskInventoryModule implements RuntimeModule {
       this.log,
       deps.db,
       (tokenId) => this.getLatestMinOrderSize(tokenId),
+      // Release A Phase 2 — assign a new position's sticky exit_owner at first fill,
+      // mirroring today's bounce-exit routing (inert by default).
+      (fill, entryLane, openedAt) =>
+        resolveNewPositionExitOwner(
+          {
+            entryLane,
+            conditionId: String(fill.conditionId),
+            openedAt,
+            firstTradeAt: new Date(fill.timestamp).toISOString(),
+          },
+          deps.executionPolicy?.(),
+        ),
     );
   }
 
