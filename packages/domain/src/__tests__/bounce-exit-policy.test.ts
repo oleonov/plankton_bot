@@ -461,6 +461,32 @@ describe("bounceExit — whitelistConditionIds", () => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
+// applyToAllMarkets (Release A Phase 5)
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe("bounceExit — applyToAllMarkets", () => {
+  it("defaults to false when absent", () => {
+    const result = parseExecutionPolicyJson(JSON.stringify({ bounceExit: {} }));
+    expect(result.policy.bounceExit.applyToAllMarkets).toBe(false);
+  });
+
+  it("parses an explicit true", () => {
+    const result = parseExecutionPolicyJson(
+      JSON.stringify({ bounceExit: { applyToAllMarkets: true } }),
+    );
+    expect(result.policy.bounceExit.applyToAllMarkets).toBe(true);
+  });
+
+  it("falls back to default (false) on a non-boolean and records an issue", () => {
+    const result = parseExecutionPolicyJson(
+      JSON.stringify({ bounceExit: { applyToAllMarkets: "yes" } }),
+    );
+    expect(result.issues.some((i) => i.includes("bounceExit.applyToAllMarkets"))).toBe(true);
+    expect(result.policy.bounceExit.applyToAllMarkets).toBe(false);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Serialize → parse round-trip
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -482,6 +508,7 @@ describe("bounceExit — serialize → parse round-trip", () => {
         backstopTtcHours: 12,
         whitelistConditionIds: ["0xabc123"],
         microMaxOrderUsdc: 5,
+        applyToAllMarkets: true,
       },
     };
     const json = serializeExecutionPolicy(policy);

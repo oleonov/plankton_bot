@@ -2205,6 +2205,15 @@ export interface BounceExitPolicy {
   whitelistConditionIds: string[];
   /** Hard cap on a single resting-maker ladder rung size in USDC (micro-live only); the near-resolution backstop is exempt. */
   microMaxOrderUsdc: number;
+  /**
+   * Release A Phase 5 — bounce-for-all broadening. When true, a NEW position's exit
+   * owner is assigned "bounce" on ANY market (not only `whitelistConditionIds`),
+   * still subject to the same enabled/micro_live + GATE/sellable eligibility gates.
+   * Default false ⇒ byte-identical to whitelist-only assignment. Broadens ONLY
+   * new-position OWNERSHIP; owner-authoritative servicing then honors it. Existing
+   * NULL-owner positions are unaffected (they keep legacy routing until the census).
+   */
+  applyToAllMarkets: boolean;
 }
 
 export interface ProfileSummary {

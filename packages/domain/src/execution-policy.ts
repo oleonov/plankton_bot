@@ -667,6 +667,7 @@ export const DEFAULT_BOUNCE_EXIT: BounceExitPolicy = {
   backstopTtcHours: 24,
   whitelistConditionIds: [],
   microMaxOrderUsdc: 2,
+  applyToAllMarkets: false,
 };
 
 export const DEFAULT_SELLABLE_FLOW: SellableFlowPolicy = {
@@ -5725,6 +5726,12 @@ function parseBounceExit(raw: unknown, issues: string[]): BounceExitPolicy {
     issues,
     "bounceExit.microMaxOrderUsdc",
   );
+  const applyToAllMarkets = booleanOr(
+    obj.applyToAllMarkets,
+    DEFAULT_BOUNCE_EXIT.applyToAllMarkets,
+    issues,
+    "bounceExit.applyToAllMarkets",
+  );
 
   const ladderFieldsComplete =
     targetTiersOk && ladderFractionsOk && ladderStepPctOk && backstopTtcHoursOk;
@@ -5747,6 +5754,7 @@ function parseBounceExit(raw: unknown, issues: string[]): BounceExitPolicy {
     backstopTtcHours,
     whitelistConditionIds,
     microMaxOrderUsdc,
+    applyToAllMarkets,
   };
 }
 

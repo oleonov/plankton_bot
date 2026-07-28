@@ -48,20 +48,18 @@ describe("resolveNewPositionExitOwner (Release A Phase 2)", () => {
     expect(resolveNewPositionExitOwner({ ...base, entryLane: "GATE" }, policy({}))).toBe("bounce");
   });
 
-  it("GATE lane but NOT whitelisted → profile (Phase 2 mirrors today: whitelist only)", () => {
+  it("GATE lane but NOT whitelisted (applyToAllMarkets off) → profile (whitelist only)", () => {
     expect(
       resolveNewPositionExitOwner(
         { ...base, entryLane: "GATE" },
         policy({ whitelist: ["0xother"] }),
       ),
     ).toBe("profile");
-    // applyToAllMarkets must NOT broaden in Phase 2 — it lands atomically with the
-    // Phase-5 owner-driven routing. A non-whitelisted market stays profile even if
-    // the (undeclared) flag were somehow set.
+    // Default (flag absent / false) stays whitelist-only — byte-identical to today.
     expect(
       resolveNewPositionExitOwner(
         { ...base, entryLane: "GATE" },
-        policy({ whitelist: ["0xother"], applyToAllMarkets: true }),
+        policy({ whitelist: ["0xother"], applyToAllMarkets: false }),
       ),
     ).toBe("profile");
   });
@@ -93,5 +91,51 @@ describe("resolveNewPositionExitOwner (Release A Phase 2)", () => {
         policy({ sellableEnabled: false }),
       ),
     ).toBe("bounce");
+  });
+});
+
+describe("resolveNewPositionExitOwner (Release A Phase 5 — applyToAllMarkets)", () => {
+  const nonWhitelisted = { conditionId: "0xnot_whitelisted", openedAt: AFTER, firstTradeAt: AFTER };
+
+  it("applyToAllMarkets broadens ownership to a NON-whitelisted market (GATE lane)", () => {
+    expect(
+      resolveNewPositionExitOwner(
+        { ...nonWhitelisted, entryLane: "GATE" },
+        policy({ whitelist: [CID], applyToAllMarkets: true }),
+      ),
+    ).toBe("bounce");
+  });
+
+  it("applyToAllMarkets broadens a non-whitelisted non-GATE position that is otherwise eligible", () => {
+    expect(
+      resolveNewPositionExitOwner(
+        { ...nonWhitelisted, entryLane: null },
+        policy({ whitelist: [CID], applyToAllMarkets: true }),
+      ),
+    ).toBe("bounce");
+  });
+
+  it("applyToAllMarkets does NOT bypass the eligibility gate (non-GATE, sellable disabled → profile)", () => {
+    expect(
+      resolveNewPositionExitOwner(
+        { ...nonWhitelisted, entryLane: null },
+        policy({ whitelist: [CID], applyToAllMarkets: true, sellableEnabled: false }),
+      ),
+    ).toBe("profile");
+  });
+
+  it("applyToAllMarkets does NOT bypass the enable/mode gate (disabled → profile)", () => {
+    expect(
+      resolveNewPositionExitOwner(
+        { ...nonWhitelisted, entryLane: "GATE" },
+        policy({ whitelist: [CID], applyToAllMarkets: true, enabled: false }),
+      ),
+    ).toBe("profile");
+    expect(
+      resolveNewPositionExitOwner(
+        { ...nonWhitelisted, entryLane: "GATE" },
+        policy({ whitelist: [CID], applyToAllMarkets: true, mode: "off" }),
+      ),
+    ).toBe("profile");
   });
 });

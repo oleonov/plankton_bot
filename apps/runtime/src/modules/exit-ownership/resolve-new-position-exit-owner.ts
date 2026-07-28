@@ -33,11 +33,15 @@ export function resolveNewPositionExitOwner(
     return "profile";
   }
   if (!isFreshPositionBounceEligible(input, policy)) return "profile";
-  // Phase 2 mirrors today's planner (decision-planner.ts:1103) EXACTLY: whitelist
-  // membership only. The `applyToAllMarkets` broadening is added ATOMICALLY with
-  // Phase 5 (flag + owner-driven servicing) so ownership never broadens ahead of
-  // the routing that honors it.
-  return bounceExit.whitelistConditionIds.includes(input.conditionId) ? "bounce" : "profile";
+  // Release A Phase 5 — market scope. Owner assignment broadens to ALL markets when
+  // `applyToAllMarkets` is set; otherwise it mirrors today's planner
+  // (decision-planner.ts:1103) EXACTLY: whitelist membership only. Broadening OWNERSHIP
+  // is sufficient because servicing is owner-authoritative (isBounceOwned) — the routing
+  // that honors it follows automatically, so ownership never broadens ahead of servicing.
+  const inScope =
+    bounceExit.applyToAllMarkets === true ||
+    bounceExit.whitelistConditionIds.includes(input.conditionId);
+  return inScope ? "bounce" : "profile";
 }
 
 /**

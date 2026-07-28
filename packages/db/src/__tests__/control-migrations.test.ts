@@ -1605,4 +1605,45 @@ describe("control-db migration infrastructure", () => {
     expect(policy.bounceExit.targetTiers.length).toBeGreaterThan(0);
     expect(policy.bounceExit.ladderFractions).toEqual([0.3, 0.4, 0.3]);
   });
+
+  it("migration 070 backfills bounceExit.applyToAllMarkets=false without clobbering an operator-set value or siblings", () => {
+    const dbPath = path.join(tmpDir, "control-apply-all.db");
+    conn = bootstrapControlDb(dbPath);
+
+    // Simulate pre-070 state: one profile MISSING the field, one where an operator
+    // already set it true. Then delete the migration marker so it re-runs.
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_remove(execution_policy_json, '$.bounceExit.applyToAllMarkets')
+          WHERE profile_id = 'live-lite'`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(execution_policy_json, '$.bounceExit.applyToAllMarkets', json('true'))
+          WHERE profile_id = 'paper'`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("070_bounce_exit_applyToAllMarkets.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare("SELECT profile_id, execution_policy_json AS json FROM profile_settings")
+      .all() as Array<{ profile_id: string; json: string }>;
+    const byProfile = new Map(rows.map((row) => [row.profile_id, JSON.parse(row.json)]));
+
+    // Missing → backfilled to false.
+    expect(byProfile.get("live-lite").bounceExit.applyToAllMarkets).toBe(false);
+    // Operator-set true → preserved (idempotent, no clobber).
+    expect(byProfile.get("paper").bounceExit.applyToAllMarkets).toBe(true);
+    // Sibling bounceExit fields untouched on the backfilled row.
+    expect(byProfile.get("live-lite").bounceExit.whitelistConditionIds).toBeDefined();
+    expect(Array.isArray(byProfile.get("live-lite").bounceExit.targetTiers)).toBe(true);
+  });
 });

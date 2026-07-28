@@ -17,6 +17,7 @@ import {
   DEFAULT_REPRICE_CHAIN_POLICY,
   DEFAULT_LOSS_EXIT_POLICY,
   DEFAULT_MAKER_ENTRY,
+  DEFAULT_BOUNCE_EXIT,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
   type ExecutionPolicy,
@@ -616,6 +617,10 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
         ...(current.makerEntry ?? DEFAULT_MAKER_ENTRY),
         ...((patch.makerEntry as Partial<ExecutionPolicy["makerEntry"]> | undefined) ?? {}),
       },
+      bounceExit: {
+        ...(current.bounceExit ?? DEFAULT_BOUNCE_EXIT),
+        ...((patch.bounceExit as Partial<ExecutionPolicy["bounceExit"]> | undefined) ?? {}),
+      },
     };
 
     const parsed = parseExecutionPolicyJson(serializeExecutionPolicy(candidate));
@@ -624,6 +629,27 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
         400,
         `invalid execution policy: ${parsed.issues.join("; ")}`,
         "INVALID_EXECUTION_POLICY",
+      );
+    }
+
+    // Release A Phase 5 — bounce-for-all gate. Broadening `applyToAllMarkets`
+    // false→true is only safe once every existing position has an assigned owner
+    // (the census backfilled them); an active/dust NULL-owner position would be a
+    // pre-census legacy holdout the broadening cannot reason about. FAIL-CLOSED:
+    // if the ledger is unavailable we cannot confirm the invariant, so we refuse
+    // rather than broaden blindly. The zero-NULL-owner CHECK and the policy commit
+    // run together under a single ledger BEGIN IMMEDIATE write-barrier (held across
+    // `applyWrite`), so no ledger writer can slip a NULL owner in between the check
+    // and activation.
+    const broadeningToAll =
+      current.bounceExit?.applyToAllMarkets !== true &&
+      parsed.policy.bounceExit.applyToAllMarkets === true;
+    const gateLedger = broadeningToAll ? opts.ledgerPool.get(profileId) : null;
+    if (broadeningToAll && !gateLedger) {
+      throw new ApiError(
+        409,
+        `cannot enable bounceExit.applyToAllMarkets: ledger for profile ${profileId} is unavailable — cannot verify no NULL-owner positions remain (run the census first)`,
+        "APPLY_TO_ALL_MARKETS_UNVERIFIABLE",
       );
     }
 
@@ -660,7 +686,31 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
         ]);
       }
     });
-    applyWrite();
+    if (broadeningToAll && gateLedger) {
+      // Hold the ledger write-barrier across the control-policy commit: verify no
+      // active/dust NULL-owner position exists AND activate the flag in the same
+      // transaction, so a concurrent first-fill cannot create a NULL owner after the
+      // check but before activation. A violation throws (409) and rolls back both.
+      gateLedger
+        .transaction(() => {
+          const { n: nullOwners } = gateLedger
+            .prepare(
+              `SELECT COUNT(*) AS n FROM positions WHERE exit_owner IS NULL AND status IN ('open', 'dust')`,
+            )
+            .get() as { n: number };
+          if (nullOwners > 0) {
+            throw new ApiError(
+              409,
+              `cannot enable bounceExit.applyToAllMarkets: ${nullOwners} active/dust position(s) still have NULL exit_owner — run the census to backfill ownership first`,
+              "APPLY_TO_ALL_MARKETS_REQUIRES_CENSUS",
+            );
+          }
+          applyWrite();
+        })
+        .immediate();
+    } else {
+      applyWrite();
+    }
 
     const version = readExecutionPolicyVersion(controlDb);
 

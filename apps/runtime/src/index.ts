@@ -189,6 +189,10 @@ import { calculateTotalExposure } from "./exposure-calculator.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
 import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
+import {
+  assertBounceForAllOwnershipInvariant,
+  BounceForAllNullOwnerError,
+} from "./modules/exit-ownership/assert-bounce-for-all-invariant.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { PositionConcentrationService } from "./position-concentration-service.js";
@@ -2748,6 +2752,35 @@ async function main(): Promise<void> {
   if (liveLiteConfig) {
     log.info("running pre-supervisor reconciliation for live-lite preflight");
     await reconciliationModule.runReconciliation();
+  }
+
+  // Release A Phase 5 — post-activation invariant (fail-closed hard-stop). Once
+  // `bounceExit.applyToAllMarkets` is enabled, EVERY active/dust position must have
+  // an assigned owner: the census backfilled the existing ones and the API gate
+  // refuses enabling the flag while any NULL owner remains. A NULL owner surfacing
+  // here means startup adoption/reconciliation (which does not assign ownership)
+  // recreated an unowned position AFTER activation — under owner-authoritative
+  // servicing it would be legacy-routed (profile) instead of bounce, silently
+  // violating the bounce-for-all intent. HARD-STOP rather than trade a mis-owned
+  // position; the operator re-runs the census to backfill before resuming.
+  try {
+    assertBounceForAllOwnershipInvariant(
+      ledgerConn.db,
+      currentExecutionPolicy().bounceExit.applyToAllMarkets,
+    );
+  } catch (err) {
+    if (err instanceof BounceForAllNullOwnerError) {
+      controlConn.db
+        .prepare(
+          "UPDATE runtime_control_state SET runtime_status = 'failed', paused = 1, updated_at = datetime('now') WHERE id = 1",
+        )
+        .run();
+      log.fatal(
+        { nullOwners: err.nullOwners },
+        "startup HARD-STOP — bounceExit.applyToAllMarkets is enabled but the ledger holds active/dust NULL-owner position(s); run the census to backfill ownership before resuming",
+      );
+    }
+    throw err;
   }
 
   // Read active switch request ID (if this boot is part of a profile switch)

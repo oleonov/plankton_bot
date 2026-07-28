@@ -12,6 +12,7 @@ import { DEFAULT_EXECUTION_POLICY } from "@krabs/domain";
 import type { DbConnection } from "@krabs/db";
 import type { AppConfig } from "@krabs/config";
 import { buildServer } from "../server.js";
+import type { LedgerPool } from "../ledger-pool.js";
 import { stubLedgerPool, MARKET_DATA_TEST_DEFAULTS } from "./test-helpers.js";
 
 const TEST_API_KEY = "test-split-key";
@@ -555,5 +556,138 @@ describe("API against real split schemas", () => {
     expect(rolledBack.thinTradeCountThreshold).toBe(15);
     expect(rolledBack.thresholdTicks).toBe(9);
     expect(rolledBack.maxRepricesPerOrder).toBe(7);
+  });
+});
+
+// ── Release A Phase 5 — bounceExit.applyToAllMarkets (deep-merge + census gate) ──
+describe("PATCH /execution-policy — bounceExit.applyToAllMarkets (Phase 5)", () => {
+  let tmp: string;
+  let control: DbConnection;
+  let ledger: DbConnection;
+  let phaseApp: Awaited<ReturnType<typeof buildServer>>;
+  // The gate reads the TARGET profile's ledger via ledgerPool.get(); a mutable ref
+  // lets a single test flip it to null to exercise the fail-closed-when-unavailable path.
+  let ledgerForGate: DbConnection["db"] | null;
+
+  function h() {
+    return { authorization: `Bearer ${TEST_API_KEY}` };
+  }
+  function setPositions(rows: { id: string; status: string; exitOwner: string | null }[]) {
+    ledger.db.exec("DELETE FROM positions");
+    const stmt = ledger.db.prepare(
+      `INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc,
+         current_value_usdc, realized_pnl, status, exit_owner, opened_at, updated_at)
+       VALUES (?, 'tok-1', 'buy', 100, 0.5, 50, 60, 0, ?, ?, '2026-03-14T00:00:00Z', '2026-03-14T01:00:00Z')`,
+    );
+    for (const r of rows) stmt.run(r.id, r.status, r.exitOwner);
+  }
+
+  beforeAll(async () => {
+    tmp = mkdtempSync(path.join(tmpdir(), "krabs-p5-apply-"));
+    control = bootstrapControlDb(path.join(tmp, "control.db"));
+    ledger = bootstrapLedgerDb(path.join(tmp, "ledger-sim.db"));
+    ledgerForGate = ledger.db;
+    control.db.exec(`
+      INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation');
+      INSERT INTO runtime_control_state (id, current_profile, desired_profile, runtime_status, paused)
+      VALUES (1, 'simulation', 'simulation', 'running', 0)
+      ON CONFLICT(id) DO UPDATE SET current_profile = excluded.current_profile;
+    `);
+    phaseApp = await buildServer({
+      config: testConfig(),
+      controlDb: control.db,
+      ledgerDb: ledger.db,
+      ledgerPool: { get: () => ledgerForGate } as unknown as LedgerPool,
+    });
+  });
+
+  afterAll(async () => {
+    await phaseApp.close();
+    control.close();
+    ledger.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("deep-merges bounceExit — a partial patch preserves sibling fields and keeps applyToAllMarkets false", async () => {
+    const res = await phaseApp.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: h(),
+      payload: { bounceExit: { microMaxOrderUsdc: 7 } },
+    });
+    expect(res.statusCode).toBe(200);
+    const { bounceExit } = res.json().data.policy as { bounceExit: Record<string, unknown> };
+    expect(bounceExit.microMaxOrderUsdc).toBe(7);
+    // A wholesale-replace merge would have wiped these back to defaults / fail-closed.
+    expect(bounceExit.applyToAllMarkets).toBe(false);
+    expect(Array.isArray(bounceExit.targetTiers)).toBe(true);
+    expect(bounceExit.ladderFractions).toEqual(DEFAULT_EXECUTION_POLICY.bounceExit.ladderFractions);
+  });
+
+  it("REFUSES enabling applyToAllMarkets while an active NULL-owner position exists (census required)", async () => {
+    setPositions([{ id: "p-null", status: "open", exitOwner: null }]);
+    const res = await phaseApp.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: h(),
+      payload: { bounceExit: { applyToAllMarkets: true } },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("APPLY_TO_ALL_MARKETS_REQUIRES_CENSUS");
+    // And it must NOT have committed the flag.
+    const check = await phaseApp.inject({
+      method: "GET",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: h(),
+    });
+    expect(check.json().data.policy.bounceExit.applyToAllMarkets).toBe(false);
+  });
+
+  it("also refuses when a NULL-owner DUST position exists (dust is counted, not exempt here)", async () => {
+    setPositions([{ id: "p-dust", status: "dust", exitOwner: null }]);
+    const res = await phaseApp.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: h(),
+      payload: { bounceExit: { applyToAllMarkets: true } },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("APPLY_TO_ALL_MARKETS_REQUIRES_CENSUS");
+  });
+
+  it("ALLOWS enabling applyToAllMarkets once every active/dust position has an owner", async () => {
+    setPositions([
+      { id: "p-owned", status: "open", exitOwner: "bounce" },
+      { id: "p-closed", status: "closed", exitOwner: null }, // closed NULL owners don't block
+    ]);
+    const res = await phaseApp.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: h(),
+      payload: { bounceExit: { applyToAllMarkets: true } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.policy.bounceExit.applyToAllMarkets).toBe(true);
+  });
+
+  it("FAIL-CLOSED: refuses when the target ledger is unavailable (cannot verify the invariant)", async () => {
+    // First force the flag back to false so this is a genuine false→true transition.
+    setPositions([{ id: "p-owned2", status: "open", exitOwner: "bounce" }]);
+    await phaseApp.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: h(),
+      payload: { bounceExit: { applyToAllMarkets: false } },
+    });
+    ledgerForGate = null; // ledger vanishes
+    const res = await phaseApp.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: h(),
+      payload: { bounceExit: { applyToAllMarkets: true } },
+    });
+    ledgerForGate = ledger.db; // restore for afterAll
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("APPLY_TO_ALL_MARKETS_UNVERIFIABLE");
   });
 });
