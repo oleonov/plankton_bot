@@ -449,7 +449,7 @@ async function classifyStartupTransitionTargets(
     );
     drainTargets.push({
       tokenId,
-      activePositionId: (activePositions[0]?.positionId ?? null) as PositionId | null,
+      activePositionId: activePositions[0]?.positionId ?? null,
       orders: staleOrders,
     });
   }

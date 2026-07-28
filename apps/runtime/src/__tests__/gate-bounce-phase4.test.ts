@@ -1509,7 +1509,7 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_BACKSTOP executio
     const STALE_DEFERRED_COID = "plk_bounce_defer_freshid" as ClientOrderId;
     const reEmitted: PlaceOrderCommand[] = [];
     bus.subscribe("PlaceOrderRequested", async (p) => {
-      reEmitted.push(p.command as PlaceOrderCommand);
+      reEmitted.push(p.command);
     });
 
     await bus.publish("PlaceOrderRequested", {

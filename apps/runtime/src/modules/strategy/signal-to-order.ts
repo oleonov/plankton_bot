@@ -15,7 +15,6 @@
  */
 
 import type {
-  CancelOrderCommand,
   DeadSideGuardMode as DomainDeadSideGuardMode,
   EventBus,
   ExecutionPolicy,
