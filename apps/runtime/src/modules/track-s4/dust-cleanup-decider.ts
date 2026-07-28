@@ -13,6 +13,9 @@ export function computeDustCleanup(
   if (!config.enabled) return skip("disabled");
   if (input.redeemInFlight) return skip("redeem_in_flight");
   if (input.profileOwned) return skip("profile_owned");
+  // Release A Phase 3: a bounce owner is serviced exclusively by the bounce ladder
+  // — its terminal dust is left to bounce/redeem-sweep, not auto-closed here.
+  if (input.bounceOwned) return skip("bounce_owned");
   if (!input.retryEligible) return skip("retry_backoff");
 
   const thresholds = config.thresholds;

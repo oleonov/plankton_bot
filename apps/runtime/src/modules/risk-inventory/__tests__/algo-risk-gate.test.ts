@@ -113,6 +113,8 @@ function makePositionRepo(position: Position | null = null): PositionRepository 
     findDust: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
     findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    findById: vi.fn(() => null),
+    findActiveByTokenId: vi.fn(() => []),
   };
 }
 

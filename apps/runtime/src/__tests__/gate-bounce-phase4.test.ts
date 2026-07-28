@@ -869,11 +869,10 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_BACKSTOP cancel-then-taker", () =>
     );
 
     expect(skipped).toHaveLength(0);
-    expect(cancelled).toHaveLength(1);
-    expect((cancelled[0] as { orderId: unknown; reason: string }).orderId).toBe(
-      restingTarget.orderId,
-    );
-    expect((cancelled[0] as { reason: string }).reason).toBe("sell_timeout_escalation");
+    // Release A P7: the bridge no longer cancels rungs — the executor owns the
+    // cancel+confirm transition. The bridge just publishes the backstop taker,
+    // unblocked by the short-circuit guards.
+    expect(cancelled).toHaveLength(0);
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.price).toBeCloseTo(0.09, 5);
@@ -907,11 +906,10 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_BACKSTOP cancel-then-taker", () =>
     );
 
     expect(skipped).toHaveLength(0);
-    expect(cancelled).toHaveLength(1);
-    expect((cancelled[0] as { orderId: unknown; reason: string }).orderId).toBe(
-      restingTarget.orderId,
-    );
-    expect((cancelled[0] as { reason: string }).reason).toBe("sell_timeout_escalation");
+    // Release A P7: the bridge no longer cancels rungs — the executor owns the
+    // cancel+confirm transition. The bridge just publishes the backstop taker,
+    // unblocked by the short-circuit guards.
+    expect(cancelled).toHaveLength(0);
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.price).toBeCloseTo(0.18, 5);
@@ -944,8 +942,8 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_BACKSTOP cancel-then-taker", () =>
     );
 
     expect(skipped).toHaveLength(0);
-    expect(cancelled).toHaveLength(1);
-    expect((cancelled[0] as { orderId: unknown }).orderId).toBe(restingTarget.orderId);
+    // Release A P7: cancel moved to the executor; the bridge only publishes the taker.
+    expect(cancelled).toHaveLength(0);
     expect(placed).toHaveLength(1);
     expect(placed[0]!.price).toBeCloseTo(0.15, 5);
   });
@@ -971,8 +969,8 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_BACKSTOP cancel-then-taker", () =>
     );
 
     expect(skipped).toHaveLength(0);
-    expect(cancelled).toHaveLength(1);
-    expect((cancelled[0] as { orderId: unknown }).orderId).toBe(restingTarget.orderId);
+    // Release A P7: cancel moved to the executor; the bridge only publishes the taker.
+    expect(cancelled).toHaveLength(0);
     expect(placed).toHaveLength(1);
     expect(placed[0]!.price).toBeCloseTo(0.1, 5);
   });
@@ -1027,21 +1025,12 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_BACKSTOP cancel-then-taker", () =>
       { marketOverrides: { bestBid: 0.09, bestAsk: 0.12 }, orderRepo },
     );
 
-    // Pre-Phase-3, only a single resting order was ever cancelled (the ladder
-    // used to rest at most one rung at a time). With multi-rung coexistence,
-    // all 3 resting rungs must be cancelled before the taker exit is placed —
-    // leaving any behind would strand a stale maker SELL alongside the fresh
-    // full-position taker exit.
+    // Release A P7: the bridge no longer cancels rungs on the same tick as the
+    // taker — the executor's transition barrier cancels EVERY resting rung and
+    // CONFIRMS them before the taker places (see the executor multi-rung test
+    // below). The bridge only publishes the taker command.
     expect(skipped).toHaveLength(0);
-    expect(cancelled).toHaveLength(3);
-    const cancelledOrderIds = cancelled.map((c) => (c as { orderId: unknown }).orderId);
-    expect(cancelledOrderIds).toEqual(
-      expect.arrayContaining([rung0.orderId, rung1.orderId, rung2.orderId]),
-    );
-    for (const c of cancelled) {
-      expect((c as { reason: string }).reason).toBe("sell_timeout_escalation");
-    }
-
+    expect(cancelled).toHaveLength(0);
     expect(placed).toHaveLength(1);
     expect(placed[0]!.postOnly).not.toBe(true);
   });
@@ -1061,6 +1050,7 @@ describe("ExecutionModule — GATE BUY micro cap", () => {
       getFills: vi.fn().mockResolvedValue([]),
       getBalances: vi.fn().mockResolvedValue([]),
       getPositionBalance: vi.fn().mockResolvedValue(0),
+      getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
       getOutcomeTokenBalance: vi.fn().mockResolvedValue(0n),
       redeemPositions: vi
         .fn()
@@ -1245,6 +1235,7 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_BACKSTOP executio
       getFills: vi.fn().mockResolvedValue([]),
       getBalances: vi.fn().mockResolvedValue([]),
       getPositionBalance: vi.fn().mockResolvedValue(0),
+      getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
       getOutcomeTokenBalance: vi.fn().mockResolvedValue(0n),
       redeemPositions: vi
         .fn()
@@ -1296,8 +1287,13 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_BACKSTOP executio
     // gate position when the test doesn't wire its own, and derive the
     // inventoryLotRepo from whatever positionRepo ends up in play so every
     // SELL fixture below gets consistent lots automatically.
-    const resolvedPositionRepo: Pick<PositionRepository, "findByTokenId"> = positionRepo ?? {
-      findByTokenId: vi.fn().mockReturnValue(makeGatePosition()),
+    const resolvedPositionRepo: Pick<
+      PositionRepository,
+      "findByTokenId" | "findById" | "findActiveByTokenId"
+    > = {
+      findById: vi.fn(() => null),
+      findActiveByTokenId: vi.fn(() => []),
+      ...(positionRepo ?? { findByTokenId: vi.fn().mockReturnValue(makeGatePosition()) }),
     };
     const resolvedPosition = resolvedPositionRepo.findByTokenId(TOKEN_ID);
     const inventoryLotRepo = resolvedPosition
@@ -1374,13 +1370,16 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_BACKSTOP executio
     await mod.stop();
   });
 
-  it("still force-exits a BOUNCE_EXIT_BACKSTOP taker command even when a stale resting sell order is still visible locally", async () => {
-    // Simulates the race the M6 bypass is designed for: signal-to-order.ts
-    // published the cancel for the resting target, but orderRepo hasn't
-    // caught up yet — this order is still returned as "open". Without the
-    // bypass, deferSellReplacementIfNeeded's generic reprice-threshold/lock
-    // path would hold this taker command back; the bypass must let it
-    // through unconditionally for a BOUNCE_EXIT_BACKSTOP force-exit.
+  it("defers a BOUNCE_EXIT_BACKSTOP taker and cancels the resting rung first when a cycle rung is still open (P7 confirm-then-place)", async () => {
+    // Release A P7 rework (durable executor-owned B1): the backstop no longer
+    // places on the SAME tick as a still-resting BOUNCE_EXIT_TARGET rung (that
+    // race could leave dual orders on a failed cancel). The executor opens the P6
+    // transition to cancel + CONFIRM the rung, records a durable deferred-intent
+    // (`pendingBackstops`), and DEFERS this taker — the EXECUTOR ITSELF (not a
+    // planner re-emission) places it once the token barrier reaches quiescent
+    // (see the "confirms the rung then places the deferred backstop" test below
+    // for the full confirm-then-place flow). So the rung is cancelled and the
+    // taker does NOT place on this tick.
     const staleRestingOrder = makeOrder();
     const { bus, gateway, mod } = makeExecModule({
       findByTokenId: vi.fn().mockReturnValue([staleRestingOrder]),
@@ -1413,8 +1412,406 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_BACKSTOP executio
       timestamp: NOW,
     });
 
-    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    // Deferred, not placed: the transition cancels the rung; the taker holds.
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(placed).toHaveLength(0);
+    expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+
+    await mod.stop();
+  });
+
+  it("confirms the drained rung then places the DEFERRED bounce backstop, resized from the authoritative wallet balance (P7 rework finding 2)", async () => {
+    // Release A P7 rework (finding 2): once the P6 barrier confirms the rung
+    // exchange-cancelled and closes, the EXECUTOR ITSELF — not a planner
+    // re-emission — fires the durably-deferred backstop. It must be resized
+    // from `getPositionBalance` (the authoritative remote residual), NOT the
+    // stale local size (50) the original deferred command carried.
+    const restingOrderId = createOrderId("ord-rung-confirm-1");
+    let status: Order["status"] = "open";
+    const restingOrder = (): Order => makeOrder({ orderId: restingOrderId, status });
+
+    const { bus, gateway, mod } = makeExecModule({
+      findById: vi.fn((id) => (String(id) === String(restingOrderId) ? restingOrder() : null)),
+      findByTokenId: vi.fn(() => (status === "open" ? [restingOrder()] : [])),
+      updateStatus: vi.fn((_id, newStatus) => {
+        status = newStatus as Order["status"];
+      }),
+    });
+    gateway.getPositionBalance.mockResolvedValue(37);
+    await mod.start();
+
+    const placed: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-defer-confirm"),
+        clientOrderId: "plk_bounce_defer_confirm" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50, // stale local residual — must NOT be what actually places
+        price: 0.09,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    // The rung's cancel fires first; the barrier then closes once the cancel
+    // is exchange-confirmed, and the executor's own deferred-intent hook
+    // (placeDeferredBackstop) fires the resized taker. With this stateful
+    // mock the whole chain (confirm → barrier close → reconcile → resubmit)
+    // resolves within the same microtask chain the initial publish awaits —
+    // `vi.waitFor` still guards against that timing being an implementation
+    // detail rather than a contract.
+    expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(gateway.placeOrder).toHaveBeenCalledTimes(1));
+
+    expect(gateway.getPositionBalance).toHaveBeenCalledWith(TOKEN_ID);
+    expect(gateway.placeOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: TOKEN_ID, side: "sell", size: 37 }),
+    );
     expect(placed).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("places the DEFERRED bounce backstop under a FRESH clientOrderId, never reusing the stale deferred command id (P7 round-4 anti-poisoning)", async () => {
+    // Release A P7 (round-4 finding 1): a deferred retry must NOT reuse the
+    // original command's stable clientOrderId — a prior REJECTED order with that
+    // same id would poison every retry via the duplicate-clientOrderId gate,
+    // leaving the drained position naked. Each deferred submit gets a fresh id
+    // (buildClientOrderId with a `bounce-backstop:<token>:<uuid>` provenance), so
+    // the re-emitted command's clientOrderId must differ from the deferred one.
+    const restingOrderId = createOrderId("ord-rung-freshid-1");
+    let status: Order["status"] = "open";
+    const restingOrder = (): Order => makeOrder({ orderId: restingOrderId, status });
+
+    const { bus, gateway, mod } = makeExecModule({
+      findById: vi.fn((id) => (String(id) === String(restingOrderId) ? restingOrder() : null)),
+      findByTokenId: vi.fn(() => (status === "open" ? [restingOrder()] : [])),
+      updateStatus: vi.fn((_id, newStatus) => {
+        status = newStatus as Order["status"];
+      }),
+    });
+    gateway.getPositionBalance.mockResolvedValue(37);
+    await mod.start();
+
+    const STALE_DEFERRED_COID = "plk_bounce_defer_freshid" as ClientOrderId;
+    const reEmitted: PlaceOrderCommand[] = [];
+    bus.subscribe("PlaceOrderRequested", async (p) => {
+      reEmitted.push(p.command as PlaceOrderCommand);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-defer-freshid"),
+        clientOrderId: STALE_DEFERRED_COID,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.09,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    await vi.waitFor(() => expect(gateway.placeOrder).toHaveBeenCalledTimes(1));
+
+    // The executor's own deferred re-emission (the reconciled taker) must carry a
+    // FRESH clientOrderId — never the stale deferred one, and never the original
+    // command id either.
+    const deferredReemit = reEmitted.find(
+      (c) => c.decisionRuleId === BOUNCE_EXIT_BACKSTOP_RULE_ID && c.size === 37,
+    );
+    expect(deferredReemit).toBeDefined();
+    expect(String(deferredReemit?.clientOrderId)).not.toBe(String(STALE_DEFERRED_COID));
+    expect(String(deferredReemit?.commandId)).not.toBe("cmd-bounce-defer-freshid");
+    // …and it is what actually reached the gateway.
+    const gatewayArg = gateway.placeOrder.mock.calls[0]?.[0] as { clientOrderId?: unknown };
+    expect(String(gatewayArg?.clientOrderId)).toBe(String(deferredReemit?.clientOrderId));
+
+    await mod.stop();
+  });
+
+  it("HOLDS the deferred bounce backstop (no second taker) when a SELL already rests remotely, retaining the intent (P7 round-5 finding 4 — no double-exit on an UNKNOWN-landed order)", async () => {
+    // Release A P7 (round-5 finding 4): a prior deferred submit may have landed on
+    // the exchange with an UNKNOWN outcome (the live gateway never echoes
+    // clientOrderId, so there is no exchange-side dedup). Before placing again the
+    // executor reconciles open orders: if a SELL is already working remotely for the
+    // token, it must HOLD — NOT fire a second full-residual taker (that would
+    // double-exit) — and RETAIN the intent so it completes once that SELL fills
+    // (→ residual gone) or persists locally (→ completion signal 1).
+    const restingOrderId = createOrderId("ord-rung-remote-sell-1");
+    let status: Order["status"] = "open";
+    const restingOrder = (): Order => makeOrder({ orderId: restingOrderId, status });
+
+    const { bus, gateway, mod } = makeExecModule({
+      findById: vi.fn((id) => (String(id) === String(restingOrderId) ? restingOrder() : null)),
+      findByTokenId: vi.fn(() => (status === "open" ? [restingOrder()] : [])),
+      updateStatus: vi.fn((_id, newStatus) => {
+        status = newStatus as Order["status"];
+      }),
+    });
+    gateway.getPositionBalance.mockResolvedValue(37); // executable residual still remote
+    // A SELL is already working remotely for this token (an UNKNOWN-landed prior taker).
+    gateway.getOpenOrdersResult.mockResolvedValue({
+      ok: true,
+      data: [{ tokenId: TOKEN_ID, side: "sell", status: "OPEN" }],
+    });
+    await mod.start();
+
+    const placed: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-defer-remote-sell"),
+        clientOrderId: "plk_bounce_defer_remote_sell" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.09,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+    // The executor gets far enough to reconcile the wallet + open orders…
+    await vi.waitFor(() => expect(gateway.getOpenOrdersResult).toHaveBeenCalled());
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // …then HOLDS: no second taker placed (the remote SELL covers the residual).
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(placed).toHaveLength(0);
+
+    await mod.stop();
+  });
+
+  it("DROPS the deferred bounce backstop when the authoritative wallet balance shows the rung already filled during drain (P7 rework finding 2 — no double-exit)", async () => {
+    // Release A P7 rework (finding 2): a confirmed cancel does not guarantee
+    // the rung was still outstanding — it may have filled moments before (or
+    // raced) the cancel. The deferred backstop must reconcile against the
+    // AUTHORITATIVE wallet balance before placing; if that residual is (near)
+    // zero, the position is already fully closed, so the backstop must be
+    // DROPPED — never re-armed, never placed — or it would double-exit.
+    const restingOrderId = createOrderId("ord-rung-filled-during-drain");
+    let status: Order["status"] = "open";
+    const restingOrder = (): Order => makeOrder({ orderId: restingOrderId, status });
+
+    const { bus, gateway, mod } = makeExecModule({
+      findById: vi.fn((id) => (String(id) === String(restingOrderId) ? restingOrder() : null)),
+      findByTokenId: vi.fn(() => (status === "open" ? [restingOrder()] : [])),
+      updateStatus: vi.fn((_id, newStatus) => {
+        status = newStatus as Order["status"];
+      }),
+    });
+    gateway.getPositionBalance.mockResolvedValue(0); // rung already filled — nothing left to backstop
+    await mod.start();
+
+    const placed: unknown[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-defer-drop"),
+        clientOrderId: "plk_bounce_defer_drop" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.09,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+
+    // Wait for the deferred hook to actually reconcile against the wallet —
+    // the drop decision follows synchronously right after, with no further
+    // await, so once this resolves the drop has already happened.
+    await vi.waitFor(() => expect(gateway.getPositionBalance).toHaveBeenCalledWith(TOKEN_ID));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(placed).toHaveLength(0);
+
+    await mod.stop();
+  });
+
+  it("refuses a BOUNCE_EXIT_BACKSTOP at the submit boundary when a bounce rung is still in-flight — admitted and dispatched but not yet persisted (P7 rework finding 3)", async () => {
+    // Release A P7 rework (finding 3): the rung check must also run at the
+    // token-serialized SUBMIT boundary and cover a rung that has been ADMITTED
+    // (accepted for dispatch) but hasn't reached orderRepo yet — a persisted-
+    // orders-only check (as at admission) would miss it and let the backstop
+    // place alongside the still-resting rung (dual order).
+    const { bus, gateway, mod } = makeExecModule();
+    await mod.start();
+
+    const rejected: { reason?: string }[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p as { reason?: string });
+    });
+
+    let resolveRungPlace!: (value: { success: true; orderId: string }) => void;
+    gateway.placeOrder.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRungPlace = resolve;
+        }),
+    );
+
+    const rungCommandPromise = bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-rung-in-flight"),
+        clientOrderId: "plk_bounce_rung_in_flight" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.09,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    // Wait until the rung has actually reached the exchange call — proves it
+    // is admitted-and-dispatched (tracked in-flight) while its own placement
+    // is still pending (not yet a persisted Order row).
+    await vi.waitFor(() => expect(gateway.placeOrder).toHaveBeenCalledTimes(1));
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-backstop-vs-inflight-rung"),
+        clientOrderId: "plk_bounce_backstop_vs_inflight_rung" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.09,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    // Only the rung ever reached the exchange; the backstop was refused at
+    // the submit boundary — no second (dual) gateway.placeOrder call.
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(rejected.some((r) => r.reason === "bounce-backstop-draining-rungs")).toBe(true);
+
+    resolveRungPlace({ success: true, orderId: "sim-ord-rung-in-flight" });
+    await rungCommandPromise;
+
+    await mod.stop();
+  });
+
+  it("HOLDS a below-floor BOUNCE_EXIT_BACKSTOP taker WITHOUT cancelling the resting rung (P7 preflight)", async () => {
+    // Release A P7: preflight the loss floor BEFORE cancelling protection. A taker
+    // that would breach the floor (here avgEntry 0.5, taker 0.09 = ~82% loss) must
+    // NOT cause the resting rung to be cancelled — cancelling it would strand the
+    // position with no live exit. The position simply HOLDS (rung preserved, no place).
+    const belowFloorPosition = makeGatePosition({
+      size: 50,
+      avgEntryPrice: 0.5,
+      costBasisUsdc: 25,
+    });
+    const restingRung = makeOrder({ size: 50, status: "open" });
+    const { bus, gateway, mod } = makeExecModule(
+      { findByTokenId: vi.fn().mockReturnValue([restingRung]) },
+      { findByTokenId: vi.fn().mockReturnValue(belowFloorPosition) },
+    );
+    await mod.start();
+
+    const placed: unknown[] = [];
+    const rejected: { reason?: string }[] = [];
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p as { reason?: string });
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-below-floor-hold"),
+        clientOrderId: "plk_bounce_below_floor_hold" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.09,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled(); // held
+    expect(gateway.cancelOrder).not.toHaveBeenCalled(); // rung preserved (protection kept)
+    expect(placed).toHaveLength(0);
+    expect(rejected.some((r) => r.reason === "bounce-backstop-below-floor-hold")).toBe(true);
 
     await mod.stop();
   });

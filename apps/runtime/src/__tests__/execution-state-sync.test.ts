@@ -171,6 +171,7 @@ function createMockPositionRepo(positionSize: number): PositionRepository {
   return {
     save: vi.fn(),
     findById: vi.fn().mockReturnValue(null),
+    findActiveByTokenId: vi.fn(() => []),
     findByTokenId: vi.fn().mockReturnValue(pos),
     findByConditionId: vi.fn().mockReturnValue([]),
     findAllOpen: vi.fn().mockReturnValue([pos]),

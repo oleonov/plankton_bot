@@ -368,6 +368,19 @@ export interface PositionRepository {
   /** Find the position for a specific outcome token (at most one open per token). */
   findByTokenId(tokenId: TokenId): Position | null;
 
+  /**
+   * Exact-identity lookup. Release A Phase 3: used at the execution boundaries to
+   * verify a command's carried positionId still matches a live position.
+   */
+  findById(positionId: PositionId): Position | null;
+
+  /**
+   * Every NON-closed position for a token (open AND dust). Release A Phase 3:
+   * exposes the open+dust ambiguity that findByTokenId's `LIMIT 1` hides, so the
+   * executor can fail-closed on an ambiguous (count≠1) token before acting.
+   */
+  findActiveByTokenId(tokenId: TokenId): Position[];
+
   /** Return all positions whose status is open or partially filled. */
   findOpen(): Position[];
 

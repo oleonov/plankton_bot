@@ -239,6 +239,7 @@ function createMockPositionWithLots(
   const positionRepo = {
     save: vi.fn(),
     findById: vi.fn().mockReturnValue(null),
+    findActiveByTokenId: vi.fn(() => []),
     findByTokenId: vi.fn().mockReturnValue(position),
     findByConditionId: vi.fn().mockReturnValue([]),
     findAllOpen: vi.fn().mockReturnValue([position]),

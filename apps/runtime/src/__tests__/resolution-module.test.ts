@@ -159,6 +159,8 @@ function createMockPositionRepo(): PositionRepository {
     findByFamily: vi.fn().mockReturnValue([]),
     findOpen: vi.fn().mockReturnValue([]),
     findDust: vi.fn().mockReturnValue([]),
+    findById: vi.fn(() => null),
+    findActiveByTokenId: vi.fn(() => []),
     findAll: vi.fn().mockReturnValue([]),
   } as unknown as PositionRepository;
 }

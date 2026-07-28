@@ -350,12 +350,15 @@ export class SignalToOrderBridge {
   }
 
   /**
-   * Every resting BOUNCE_EXIT_TARGET maker SELL rung still open for a token — the
-   * bounce backstop cancels all of them before submitting its full-residual taker
-   * exit. Keyed on decisionRuleId (not price) so it catches every rung regardless
-   * of how close each sits to the taker's bestBid-derived price.
+   * Every resting BOUNCE_EXIT_TARGET maker SELL rung still open for a token, FOR
+   * THE SAME CYCLE as the driving signal — the bounce backstop cancels all of
+   * them before submitting its full-residual taker exit. Keyed on decisionRuleId
+   * (not price) so it catches every rung regardless of how close each sits to
+   * the taker's bestBid-derived price. Scoped by positionId (Release A Phase 3,
+   * P6) so a different/newer cycle's resting rung on the same token is never
+   * cancelled by token match alone.
    */
-  private findOpenBounceTargetOrders(tokenId: TokenId): Order[] {
+  private findOpenBounceTargetOrders(tokenId: TokenId, positionId: string | null): Order[] {
     if (!this.deps.orderRepo) return [];
     return this.deps.orderRepo
       .findByTokenId(tokenId)
@@ -365,7 +368,8 @@ export class SignalToOrderBridge {
           (order.status === "open" ||
             order.status === "pending" ||
             order.status === "partially-filled") &&
-          order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID,
+          order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+          String(order.positionId ?? null) === String(positionId ?? null),
       );
   }
 
@@ -1703,6 +1707,7 @@ export class SignalToOrderBridge {
         signalId: signal.signalId,
         decisionRuleId: signal.decisionRuleId,
         signalTimestamp: signal.generatedAt,
+        positionId: signal.positionId ?? null,
         metadata: {
           // Effective (post-override) pricing mode — the first-entry adaptive TTL reads this to keep
           // marketable-taker residuals on the short probe leash. "maker" when makerOverride converts an
@@ -1762,28 +1767,19 @@ export class SignalToOrderBridge {
         skippedReason: null,
       });
 
-      // Bounce-exit backstop force-exit: cancel every resting BOUNCE_EXIT_TARGET
-      // maker rung before submitting the taker exit for the full residual (the
-      // ladder can rest multiple rungs at once). The taker exit is independently
-      // gated by ExecutionModule's authoritative max-lot loss-floor check — a
-      // below-floor taker is refused there and the position simply HOLDS. Because
-      // the max-lot verdict does NOT depend on other resting SELLs, no confirmed-
-      // cancel or target-exclusion coordination is needed (design:
-      // research_plankton/exit_loss_floor_maxlot_decision_2026-07-20.md).
-      if (isBounceExitForceExit) {
-        for (const restingTarget of this.findOpenBounceTargetOrders(signal.tokenId)) {
-          await this.deps.bus.publish("CancelOrderRequested", {
-            command: {
-              type: "CancelOrderCommand",
-              commandId: createCommandId(randomUUID()),
-              orderId: restingTarget.orderId,
-              reason: "sell_timeout_escalation",
-            } satisfies CancelOrderCommand,
-            timestamp: Date.now(),
-          });
-        }
-      }
-
+      // Release A Phase 3 (P7 rework — durable executor-owned B1): the bounce-exit
+      // backstop no longer cancels resting BOUNCE_EXIT_TARGET rungs then places the
+      // taker on the SAME tick (that race could leave dual orders on a failed
+      // cancel, or no-target+no-backstop on a post-cancel loss-floor reject). The
+      // executor owns the ENTIRE transition durably: on receiving this backstop
+      // command it preflights the loss floor, opens the P6 transition barrier to
+      // cancel + CONFIRM the cycle's rungs, and records a persisted deferred-intent
+      // (`pendingBackstops`) that the executor itself fires — reconciling the
+      // residual from the authoritative wallet balance and resubmitting with a
+      // stable clientOrderId — once the barrier reaches quiescent. This does NOT
+      // depend on the planner re-emitting the signal; the bridge just publishes the
+      // backstop command below and the executor's own barrier-close hook takes it
+      // from there even across tick/liveness gaps.
       this.recordPartialPlacementOnSend(signal, executionTerms, nowMs);
       await this.deps.bus.publish("PlaceOrderRequested", {
         command: cmd,

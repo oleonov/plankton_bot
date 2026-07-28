@@ -1605,3 +1605,71 @@ describe("migration 080 — redeem sweep zero-return P&L backfill", () => {
     ).toBe(1);
   });
 });
+
+describe("migration 088 — orders.position_id", () => {
+  it("adds position_id (idempotently) to an orders table that lacks it", () => {
+    db.exec(`
+      CREATE TABLE orders (
+        order_id        TEXT PRIMARY KEY,
+        client_order_id TEXT NOT NULL,
+        token_id        TEXT NOT NULL,
+        side            TEXT NOT NULL,
+        order_type      TEXT NOT NULL,
+        price           REAL NOT NULL,
+        size            REAL NOT NULL,
+        size_usdc       REAL NOT NULL,
+        bot_run_id      TEXT NOT NULL
+      );
+    `);
+    const sql = readMigration("088_orders_position_id.sql");
+    db.exec(applySafeAddColumnStatements(db, sql));
+    const cols = db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>;
+    expect(cols.some((c) => c.name === "position_id")).toBe(true);
+    // Idempotent replay must not throw (split-ledger double-apply).
+    expect(() => db.exec(applySafeAddColumnStatements(db, sql))).not.toThrow();
+    db.prepare(
+      `INSERT INTO orders (order_id, client_order_id, token_id, side, order_type,
+         price, size, size_usdc, bot_run_id, position_id)
+       VALUES ('o1', 'c1', 'tok', 'sell', 'GTC', 0.5, 10, 5, 'run', 'pos-tok-1')`,
+    ).run();
+    const row = db.prepare("SELECT position_id FROM orders WHERE order_id = 'o1'").get() as {
+      position_id: string;
+    };
+    expect(row.position_id).toBe("pos-tok-1");
+  });
+});
+
+describe("migration 089 — exit_owner allowed-values enforcement (upgrade path)", () => {
+  beforeEach(() => {
+    // Upgrade path: exit_owner arrives CHECK-less via 087, then 089 adds the
+    // allowed-values triggers (SQLite cannot ALTER-ADD a CHECK).
+    db.exec(applySafeAddColumnStatements(db, readMigration("087_positions_exit_owner.sql")));
+    db.exec(readMigration("089_positions_exit_owner_allowed_values.sql"));
+  });
+
+  function insertOwner(positionId: string, tokenId: string, owner: string | null): void {
+    db.prepare(
+      `INSERT INTO positions (position_id, token_id, side, status, exit_owner, opened_at, updated_at)
+       VALUES (?, ?, 'buy', 'open', ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+    ).run(positionId, tokenId, owner);
+  }
+
+  it("accepts bounce / profile / NULL", () => {
+    expect(() => insertOwner("p-b", "t-b", "bounce")).not.toThrow();
+    expect(() => insertOwner("p-p", "t-p", "profile")).not.toThrow();
+    expect(() => insertOwner("p-n", "t-n", null)).not.toThrow();
+  });
+
+  it("aborts an INSERT with an out-of-range exit_owner", () => {
+    expect(() => insertOwner("p-x", "t-x", "garbage")).toThrow(
+      /exit_owner must be bounce, profile, or NULL/,
+    );
+  });
+
+  it("aborts an UPDATE that sets an out-of-range exit_owner (NULL → invalid)", () => {
+    insertOwner("p-u", "t-u", null);
+    expect(() =>
+      db.prepare("UPDATE positions SET exit_owner = 'garbage' WHERE position_id = 'p-u'").run(),
+    ).toThrow(/exit_owner must be bounce, profile, or NULL/);
+  });
+});

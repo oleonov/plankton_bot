@@ -5,12 +5,14 @@ import type {
   EventBus,
   ExchangeFill,
   ExchangeGateway,
+  ExchangeOrder,
   FetchResult,
   FillRepository,
   LegStateRepository,
   MarketRepository,
   Order,
   OrderRepository,
+  PositionId,
   PositionRepository,
   InventoryLotRepository,
   ClientOrderId,
@@ -48,6 +50,14 @@ export class StartupSnapshotUnreliableError extends Error {
 export interface StartupPositionAdoptionDeps {
   gateway: Pick<ExchangeGateway, "getMarketFeeInfo"> & {
     getFillsResult(sinceMs: number): Promise<FetchResult<ExchangeFill[]>>;
+    /**
+     * Release A Phase 3 (P6): authoritative open-orders snapshot used to find
+     * stale/reopening-risk working orders BEFORE the supervisor starts
+     * servicing. Hard-required (no optional fallback) for the same reason
+     * `getFillsResult` is hard-required above: a startup fence that silently
+     * skipped classification on a missing method would defeat the fence.
+     */
+    getOpenOrdersResult(): Promise<FetchResult<ExchangeOrder[]>>;
   };
   marketRepo: MarketRepository;
   orderRepo: OrderRepository;
@@ -60,6 +70,19 @@ export interface StartupPositionAdoptionDeps {
   botRunId: BotRunId;
   /** Relative fill-completion tolerance forwarded to importExchangeFills (#36). */
   fillCompletionTolerance?: number | undefined;
+}
+
+/**
+ * Release A Phase 3 (P6): one token's stale/reopening-risk working orders,
+ * classified at startup but not yet cancelled — `ExecutionModule.
+ * seedStartupTransitions` performs the actual drain once the module has
+ * started (its bus subscriptions must be wired before the cancel publish is
+ * consumed).
+ */
+export interface StartupDrainTarget {
+  tokenId: TokenId;
+  activePositionId: PositionId | null;
+  orders: Order[];
 }
 
 export interface StartupPositionAdoptionResult {
@@ -78,6 +101,14 @@ export interface StartupPositionAdoptionResult {
   seededLegStates: number;
   alreadyPresentLegStates: number;
   positionsWithoutFills: TokenId[];
+  /** Working SELL orders classified stale (NULL/legacy or non-active-cycle positionId). */
+  quarantinedStaleSells: number;
+  /** Resting BUYs that could reopen a token with zero currently-active positions. */
+  quarantinedReopeningBuys: number;
+  /** Exchange-reported open orders with no matching local Order record. */
+  unknownExchangeOrders: number;
+  /** Per-token drain targets to hand to `ExecutionModule.seedStartupTransitions`. */
+  drainTargets: StartupDrainTarget[];
   details: string[];
 }
 
@@ -144,6 +175,10 @@ export async function runStartupPositionAdoption(
     seededLegStates: 0,
     alreadyPresentLegStates: 0,
     positionsWithoutFills: [],
+    quarantinedStaleSells: 0,
+    quarantinedReopeningBuys: 0,
+    unknownExchangeOrders: 0,
+    drainTargets: [],
     details: [],
   };
   const cleanup = cleanupPriorStartupAdoptionArtifacts(deps);
@@ -316,7 +351,132 @@ export async function runStartupPositionAdoption(
 
   rebuildLegStatesFromLedger(deps, result, log);
 
+  result.drainTargets = await classifyStartupTransitionTargets(deps, result, log);
+
   return result;
+}
+
+/**
+ * Release A Phase 3 (P6) startup fence: read-only classification of exchange
+ * open orders that could reopen or fill against a stale/closed cycle. Never
+ * mutates the exchange or the ledger — cancellation is deferred entirely to
+ * `ExecutionModule.seedStartupTransitions` (called after the supervisor
+ * starts), which reuses the same confirm/fill-race machinery the live barrier
+ * uses, so there is exactly one place that owns "cancel + wait for terminal".
+ *
+ * Fail-closed like the fills fetch above: an unreliable open-orders snapshot
+ * must abort startup rather than silently skip the fence.
+ */
+async function classifyStartupTransitionTargets(
+  deps: StartupPositionAdoptionDeps,
+  result: StartupPositionAdoptionResult,
+  log: Logger,
+): Promise<StartupDrainTarget[]> {
+  const openOrdersResult = await deps.gateway.getOpenOrdersResult();
+  if (!openOrdersResult.ok) {
+    log.fatal(
+      { reason: openOrdersResult.reason, attempts: openOrdersResult.attempts },
+      "startup adoption ABORTED — exchange open-orders snapshot unreliable (fail-closed)",
+    );
+    throw new StartupSnapshotUnreliableError(openOrdersResult.reason, openOrdersResult.attempts);
+  }
+
+  const restingByToken = new Map<string, ExchangeOrder[]>();
+  for (const exchangeOrder of openOrdersResult.data) {
+    if (exchangeOrder.status !== "OPEN" && exchangeOrder.status !== "PARTIALLY_FILLED") continue;
+    const key = String(exchangeOrder.tokenId);
+    const bucket = restingByToken.get(key) ?? [];
+    bucket.push(exchangeOrder);
+    restingByToken.set(key, bucket);
+  }
+
+  const drainTargets: StartupDrainTarget[] = [];
+  for (const [tokenKey, exchangeOrders] of restingByToken) {
+    const tokenId = exchangeOrders[0]!.tokenId;
+    const activePositions = deps.positionRepo.findActiveByTokenId(tokenId);
+    const activePositionIds = new Set(activePositions.map((p) => String(p.positionId)));
+    const staleOrders: Order[] = [];
+
+    for (const exchangeOrder of exchangeOrders) {
+      const localOrder = deps.orderRepo.findByExchangeOrderId(exchangeOrder.orderId);
+      if (!localOrder) {
+        result.unknownExchangeOrders++;
+        // Finding 5/6 fail-closed: an exchange-live order with NO local record cannot be
+        // barrier-tracked (no local OrderId). ABORT startup rather than resume trading
+        // blind (mirrors the unreliable-snapshot abort) when it could interfere:
+        //  - it sits on a token where we hold an ACTIVE position (could fill against a
+        //    cycle we are about to service), OR
+        //  - it is a BUY (reopening-capable — could fill and reopen inventory that live
+        //    fill-reconciliation cannot associate with a local order), even with no
+        //    active position (finding 6).
+        // A SELL on a token with no active position is benign for Release A → tolerated.
+        const isUnknownBuy = String(exchangeOrder.side).toLowerCase() === "buy";
+        if (activePositions.length > 0 || isUnknownBuy) {
+          log.fatal(
+            {
+              tokenId: tokenKey,
+              exchangeOrderId: exchangeOrder.orderId,
+              side: exchangeOrder.side,
+              activePositionIds: [...activePositionIds],
+            },
+            "startup adoption ABORTED — unknown reopening-capable exchange-live order (fail-closed)",
+          );
+          throw new StartupSnapshotUnreliableError(
+            `unknown exchange order ${exchangeOrder.orderId} (${String(exchangeOrder.side)}) on token ${tokenKey}`,
+            1,
+          );
+        }
+        log.warn(
+          { tokenId: tokenKey, exchangeOrderId: exchangeOrder.orderId },
+          "startup fence — unknown SELL on a token with no active position (tolerated)",
+        );
+        continue;
+      }
+      if (!isStaleOrReopeningWorkingOrder(localOrder, activePositionIds)) continue;
+      staleOrders.push(localOrder);
+      if (localOrder.side === "sell") result.quarantinedStaleSells++;
+      else result.quarantinedReopeningBuys++;
+    }
+
+    if (staleOrders.length === 0) continue;
+    log.warn(
+      {
+        tokenId: tokenKey,
+        activePositionIds: [...activePositionIds],
+        orderIds: staleOrders.map((o) => String(o.orderId)),
+      },
+      "startup fence — quarantining stale/reopening-risk working order(s)",
+    );
+    drainTargets.push({
+      tokenId,
+      activePositionId: (activePositions[0]?.positionId ?? null) as PositionId | null,
+      orders: staleOrders,
+    });
+  }
+
+  return drainTargets;
+}
+
+/**
+ * SELL: stale if its cycle identity can't be established (NULL/legacy —
+ * fail-closed) or its cycle has already closed (not in `activePositionIds`).
+ * BUY: quarantine-worthy ONLY when there is NO currently active position for
+ * the token — a resting BUY alongside an active position is a legitimate
+ * scale-in add, not a reopening risk, and is left untouched (common-path
+ * byte-identical behavior).
+ */
+function isStaleOrReopeningWorkingOrder(
+  order: Order,
+  activePositionIds: ReadonlySet<string>,
+): boolean {
+  // Finding 5: classify BOTH sides strictly by cycle identity. Any working order —
+  // a SELL or a scale-in add BUY — is stale/reopening-risk UNLESS its positionId
+  // matches a CURRENT active cycle. A NULL/legacy positionId or a positionId that
+  // matches no active position is fail-closed to stale (a resting BUY with no cycle
+  // identity could reopen a closed cycle; a legit scale-in add carries the matching
+  // positionId and is left untouched).
+  const positionId = order.positionId != null ? String(order.positionId) : null;
+  return positionId == null || !activePositionIds.has(positionId);
 }
 
 /**

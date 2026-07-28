@@ -19,6 +19,7 @@ import { DustAutoCloseModule, type DustAutoCloseCandidate } from "../dust-auto-c
 const NOW = 1_800_000_000_000;
 const tokenId = createTokenId("s4-module-token");
 const conditionId = createConditionId("s4-module-condition");
+const positionId = createPositionId("s4-module-position");
 
 class FakeDustAutoCloseRepository implements DustAutoCloseRepository {
   states = new Map<string, DustAutoCloseState>();
@@ -76,6 +77,8 @@ function candidate(overrides: Partial<DustAutoCloseCandidate> = {}): DustAutoClo
   return {
     tokenId,
     conditionId,
+    positionId,
+    bounceOwned: false,
     status: "open",
     liquidationValueUsdc: 0.49,
     costBasisUsdc: 5,
@@ -283,6 +286,15 @@ describe("DustAutoCloseModule", () => {
 
     expect(ctx.orders).toHaveLength(0);
     expect(labelOf(ctx.counters[0]!)).toEqual({ reason: "profile_owned" });
+  });
+
+  it("skips bounce-owned candidates before placement (Release A Phase 3)", async () => {
+    const ctx = setup({ candidates: [candidate({ bounceOwned: true })] });
+
+    await ctx.module.runOnce();
+
+    expect(ctx.orders).toHaveLength(0);
+    expect(labelOf(ctx.counters[0]!)).toEqual({ reason: "bounce_owned" });
   });
 
   it("honors next_retry_at_ms before reattempting", async () => {

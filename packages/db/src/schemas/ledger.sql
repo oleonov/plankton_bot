@@ -154,6 +154,10 @@ CREATE TABLE IF NOT EXISTS orders (
   exchange_rejection_reason TEXT,
   -- Maker-entry provenance marker (migration 082). NULL = taker/probe; "maker" = Phase 5 micro-live BUY.
   entry_style        TEXT,
+  -- Release A Phase 3 (migration 088): exact originating position identity. NULL = legacy/pre-migration order.
+  -- Lets the executor scope cancel/replace/backstop by position cycle instead of by token, and reject stale
+  -- cross-cycle commands. See docs/plans/2026-07-24-release-a-phase3-owner-servicing.md.
+  position_id        TEXT,
   bot_run_id         TEXT NOT NULL,
   created_at         TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
@@ -165,6 +169,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_client_oid ON orders(client_order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_exchange_oid ON orders(exchange_order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_bot_run ON orders(bot_run_id);
 CREATE INDEX IF NOT EXISTS idx_orders_token_status ON orders(token_id, status);
+CREATE INDEX IF NOT EXISTS idx_orders_position ON orders(position_id);
 
 -- ═══════════ DECISION SIGNAL LOG ═══════════
 -- From 041_decision_signal_telemetry.sql
@@ -278,7 +283,9 @@ CREATE TABLE IF NOT EXISTS positions (
   status             TEXT NOT NULL DEFAULT 'open',
   entry_style        TEXT,
   entry_lane         TEXT, -- migration 086: 'GATE' | 'R23' | NULL, set from the first fill
-  exit_owner         TEXT, -- migration 087 (Release A): 'bounce' | 'profile' | NULL, sticky, set once at first fill
+  -- migration 087 (Release A): 'bounce' | 'profile' | NULL, sticky, set once at first fill.
+  -- migration 089: allowed-values CHECK (fresh DBs); upgraded DBs enforce the same via a trigger.
+  exit_owner         TEXT CHECK (exit_owner IN ('bounce', 'profile') OR exit_owner IS NULL),
   opened_at          TEXT NOT NULL DEFAULT (datetime('now')),
   closed_at          TEXT,
   consecutive_state_failed_count INTEGER NOT NULL DEFAULT 0,

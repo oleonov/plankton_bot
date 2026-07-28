@@ -2,6 +2,7 @@ import type {
   ConditionId,
   EventBus,
   NormalizedMarket,
+  PositionId,
   RuntimeModule,
   RuntimeEventMap,
   TokenId,
@@ -15,6 +16,12 @@ import { computeDustCleanup } from "./dust-cleanup-decider.js";
 export interface DustAutoCloseCandidate {
   tokenId: TokenId;
   conditionId: ConditionId;
+  /** Release A Phase 3: exact originating position identity (the candidate's
+   * own Position row) — carried onto the close signal, never re-looked-up. */
+  positionId: PositionId;
+  /** Release A Phase 3: mirrors `profileOwned` — this candidate's own exact
+   * Position is bounce-owned, so it is serviced exclusively by the bounce ladder. */
+  bounceOwned: boolean;
   market?: NormalizedMarket;
   status: "open" | "dust";
   liquidationValueUsdc: number;
@@ -192,6 +199,7 @@ export class DustAutoCloseModule implements RuntimeModule {
         minValidPrice: candidate.minValidPrice,
         retryEligible: nextRetryAtMs == null || now >= nextRetryAtMs,
         profileOwned: this.deps.isProfileOwned?.(candidate.tokenId) ?? false,
+        bounceOwned: candidate.bounceOwned,
         redeemInFlight: this.deps.redeemInFlightGuard?.(candidate.conditionId) ?? false,
       },
       policy,
@@ -243,6 +251,7 @@ export class DustAutoCloseModule implements RuntimeModule {
         decisionRuleId: "TRACK_S4_DUST_AUTO_CLOSE",
         sizingRuleId: "dust_cleanup",
         generatedAt: new Date(timestamp).toISOString(),
+        positionId: candidate.positionId,
       },
     });
   }

@@ -803,6 +803,7 @@ function buildModule(
   return new EntryLifecycleModule({
     bus: new InProcessEventBus(),
     orderRepo: makeOrderRepo(null),
+    positionRepo: { findByTokenId: vi.fn(() => null) },
     fillRepo: makeFillRepo([]),
     legStateRepo: makeLegStateRepo(),
     algoRulesRepo: makeRulesRepo(),

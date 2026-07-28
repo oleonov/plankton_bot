@@ -3,6 +3,7 @@ import { PositionStatus } from "@krabs/domain";
 
 import { resolveOpenPositionStatus } from "../../position-status.js";
 import type { CandidateBookCache } from "../strategy/candidate-book-cache.js";
+import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import type {
   DustAutoCloseCandidate,
   DustAutoCloseCandidateProvider,
@@ -57,6 +58,8 @@ export class RepositoryDustAutoCloseCandidateProvider implements DustAutoCloseCa
     return {
       tokenId: position.tokenId,
       conditionId: position.conditionId,
+      positionId: position.positionId,
+      bounceOwned: isBounceOwned(position),
       status,
       liquidationValueUsdc:
         position.liquidationValueUsdc ?? position.currentValueUsdc ?? Number.POSITIVE_INFINITY,

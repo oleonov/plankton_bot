@@ -176,6 +176,8 @@ function makePositionRepo(rows: Position[]): PositionRepository {
     findDust: vi.fn(() => []),
     findAll: vi.fn(() => rows),
     findOpenByEntryStyle: vi.fn(() => []),
+    findById: vi.fn(() => null),
+    findActiveByTokenId: vi.fn(() => []),
   };
 }
 

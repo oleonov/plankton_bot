@@ -179,6 +179,8 @@ function createMockPositionRepo(position: Position | null = null): PositionRepos
     findDust: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue(position ? [position] : []),
     findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    findById: vi.fn(() => null),
+    findActiveByTokenId: vi.fn(() => []),
   };
 }
 

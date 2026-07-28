@@ -7,6 +7,7 @@ import type {
   LegState,
   NormalizedMarket,
   Position,
+  PositionId,
   S1OwnershipSnapshot,
   SellLoopGuardSnapshot,
   SellOrderSizingContext,
@@ -60,6 +61,7 @@ import {
 } from "../../executable-price.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
+import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import {
   evaluateBounceBackstopEligibility,
   evaluateQdPreResolutionExit,
@@ -325,6 +327,13 @@ export type DecisionSignalDraft = {
    * carried through to Signal/Order metadata so the next planning cycle can
    * tell which rungs are already placed. */
   bounceRung?: BounceRungMetadata;
+  /**
+   * Release A Phase 3: EXACT originating position identity, taken from the
+   * planner snapshot `input.position` (NEVER a token re-lookup). Non-null for
+   * a SELL / scale-in add BUY bound to an existing position; null for an
+   * initial-entry BUY that opens a new cycle.
+   */
+  positionId?: PositionId | null;
 };
 
 export type DecisionPlanResult =
@@ -1096,16 +1105,36 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   if (
     legState &&
     isOpenPosition(input.position) &&
-    isBounceLadderEligiblePosition(input.position, input.executionPolicy, legState.firstTradeAt)
+    // Release A Phase 3: a bounce OWNER (sticky exit_owner='bounce') is eligible for
+    // this branch REGARDLESS of the live whitelist/cutoff/sellableFlow eligibility —
+    // owner-authoritative, so a flag/whitelist change can never strand it. A
+    // 'profile' owner is NEVER bounce-serviced (owner-authoritative the other way);
+    // legacy eligibility applies only to an UNASSIGNED (NULL) position — pre-census
+    // legacy positions keep today's GATE/sellableFlow routing.
+    (isBounceOwned(input.position) ||
+      (input.position.exitOwner == null &&
+        isBounceLadderEligiblePosition(
+          input.position,
+          input.executionPolicy,
+          legState.firstTradeAt,
+        )))
   ) {
     const policy = input.executionPolicy;
-    const bounceExit = policy?.bounceExit;
     if (
-      policy &&
-      bounceExit?.enabled === true &&
-      bounceExit.mode === "micro_live" &&
-      bounceExit.whitelistConditionIds.includes(market.conditionId)
+      // Release A Phase 3: a bounce owner is SERVICED regardless of enabled/mode/
+      // whitelist (owner authoritative). `policy != null` is required either way —
+      // it is the ladder config source (policy.bounceExit, a required field always
+      // present in prod, even when disabled). A non-owner keeps today's exact live
+      // gate → byte-identical.
+      policy != null &&
+      (isBounceOwned(input.position) ||
+        (policy.bounceExit.enabled === true &&
+          policy.bounceExit.mode === "micro_live" &&
+          policy.bounceExit.whitelistConditionIds.includes(market.conditionId)))
     ) {
+      // policy is narrowed non-null here → bounceExit is the (always-present)
+      // required BounceExitPolicy, never undefined.
+      const bounceExit = policy.bounceExit;
       // Anchored to the position's FIRST fill, never the mutable avgEntryPrice
       // (which drifts with every scale-in/partial-sell) — the whole point of a
       // laddered exit is that every rung's price is fixed at first-entry time.
@@ -1155,7 +1184,11 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
       // fillRepo happens to be wired, breaking flag-off byte-identity. Flag
       // off uses the ORIGINAL leg-level `remainingPositionSize` cap and the
       // ORIGINAL unconditional-suppress completion (see the two usages below).
-      const sellableFlowOn = policy?.sellableFlow?.enabled === true;
+      // Release A Phase 3: a bounce owner ALWAYS uses the fill-aware accounting path
+      // (its ladder state / dedup / residual must not regress after a sellableFlow
+      // rollback). A non-owner keeps today's exact sellableFlow gate.
+      const sellableFlowOn =
+        isBounceOwned(input.position) || policy?.sellableFlow?.enabled === true;
       const rungSizeCapBasis = sellableFlowOn ? uncommittedRemainder : remainingPositionSize;
       // Phase 3 (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md): the
       // GATE-scoped backstop wrapper reuses Track Q's Mode-A/B shape but with
@@ -1303,7 +1336,13 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
       // pre-Phase-4 behavior). A non-GATE bounce-for-all position falls
       // through to D8/D9 below ONLY once no rung is still resting — otherwise
       // a live resting order on this position could race a D8/D9 signal.
-      if (input.position.entryLane !== "GATE" && !(input.hasOpenBounceRung ?? false)) {
+      // Release A Phase 3: a bounce OWNER always suppresses exclusively here (like
+      // GATE) — it must NEVER fall through to the non-bounce D8/D9 stack.
+      if (
+        !isBounceOwned(input.position) &&
+        input.position.entryLane !== "GATE" &&
+        !(input.hasOpenBounceRung ?? false)
+      ) {
         // Fall through to D8/D9 below — no suppression pushed, no return.
       } else {
         suppressions.push({
@@ -2347,6 +2386,7 @@ function buildSignalDraft(args: {
     },
     emissionFacts,
     triggerTelemetry,
+    positionId: input.position?.positionId ?? null,
     ...(decision.bounceRung ? { bounceRung: decision.bounceRung } : {}),
   };
 }

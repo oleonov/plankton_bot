@@ -558,6 +558,9 @@ export class ExecutionProfileManager implements RuntimeModule {
           signalId: `execution-profile:${String(tokenId)}:${timestamp}:${state.addCount + 1}`,
           tokenId,
           conditionId: position.conditionId,
+          // Release A Phase 3: a scale-in add is bound to THIS exact position cycle —
+          // carry its id so the executor rejects it if the cycle has since closed.
+          positionId: position.positionId,
           side: "buy",
           suggestedPrice: currentMarkPrice,
           suggestedSize: proposedAddSizeUsd / currentMarkPrice,

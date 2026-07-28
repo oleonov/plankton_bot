@@ -14,7 +14,7 @@
  *  - sequenceInTick is carried forward from the Signal (F3 decision) for audit trails.
  */
 
-import type { TokenId, ConditionId, OrderId, ClientOrderId, CommandId } from "./ids.js";
+import type { TokenId, ConditionId, OrderId, ClientOrderId, CommandId, PositionId } from "./ids.js";
 import type { OrderSide, OrderType } from "./enums.js";
 
 // ─── Exchange Order Commands ───────────────────────────────────────────────
@@ -54,6 +54,14 @@ export interface PlaceOrderCommand {
   readonly expiration?: number;
   /** Maker-entry provenance. Set to "maker" for Phase 5 micro-live post-only BUYs; null/undefined otherwise. */
   readonly entryStyle?: "probe" | "maker" | null;
+  /**
+   * Release A Phase 3: EXACT originating position identity, taken from the planner
+   * snapshot / the producing engine's Position (NEVER re-looked-up by token). Present
+   * on every strategy SELL and on a scale-in/add BUY bound to an existing position;
+   * absent on an initial-entry BUY that opens a new cycle. The executor rejects any
+   * command whose positionId ≠ the token's single active position (stale cross-cycle).
+   */
+  readonly positionId?: PositionId | null;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 

@@ -76,7 +76,12 @@ describe("SqlitePositionRepository", () => {
     expect(after.size).toBe(42); // other fields still update
 
     // A NULL-owner position stays NULL until explicitly assigned (inert default).
-    repo.save(makePosition({ positionId: createPositionId("pos-null"), tokenId: createTokenId("tok-null") }));
+    repo.save(
+      makePosition({
+        positionId: createPositionId("pos-null"),
+        tokenId: createTokenId("tok-null"),
+      }),
+    );
     expect(repo.findByTokenId(createTokenId("tok-null"))!.exitOwner ?? null).toBeNull();
   });
 
@@ -330,5 +335,59 @@ describe("SqlitePositionRepository", () => {
     const found = repo.findByTokenId(createTokenId("tok-1"));
     expect(found).not.toBeNull();
     expect(found!.entryLane).toBeNull();
+  });
+
+  it("findById returns the exact position or null (Release A Phase 3)", () => {
+    repo.save(makePosition({ positionId: createPositionId("pos-1") }));
+    expect(repo.findById(createPositionId("pos-1"))!.positionId).toBe("pos-1");
+    expect(repo.findById(createPositionId("pos-missing"))).toBeNull();
+  });
+
+  it("findById returns a closed position too (exact identity, status-agnostic)", () => {
+    repo.save(
+      makePosition({
+        positionId: createPositionId("pos-closed"),
+        tokenId: createTokenId("tok-closed"),
+        status: "closed",
+      }),
+    );
+    expect(repo.findById(createPositionId("pos-closed"))!.status).toBe("closed");
+  });
+
+  it("findActiveByTokenId exposes the open+dust ambiguity findByTokenId hides", () => {
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p-open"),
+        tokenId: createTokenId("tok-1"),
+        status: "open",
+        openedAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p-dust"),
+        tokenId: createTokenId("tok-1"),
+        status: "dust",
+        openedAt: "2026-01-02T00:00:00Z",
+      }),
+    );
+    // findByTokenId collapses to one row (LIMIT 1) — the executor cannot see the
+    // ambiguity; findActiveByTokenId returns BOTH so it can fail-closed on count≠1.
+    expect(repo.findByTokenId(createTokenId("tok-1"))!.positionId).toBe("p-dust");
+    const active = repo.findActiveByTokenId(createTokenId("tok-1"));
+    expect(active).toHaveLength(2);
+    expect(active.map((p) => p.positionId).sort()).toEqual(["p-dust", "p-open"]);
+  });
+
+  it("findActiveByTokenId excludes closed rows and returns [] for unknown token", () => {
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p-closed"),
+        tokenId: createTokenId("tok-1"),
+        status: "closed",
+      }),
+    );
+    expect(repo.findActiveByTokenId(createTokenId("tok-1"))).toHaveLength(0);
+    expect(repo.findActiveByTokenId(createTokenId("nope"))).toHaveLength(0);
   });
 });

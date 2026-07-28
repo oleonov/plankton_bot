@@ -100,6 +100,7 @@ describe("runStartupPositionAdoption", () => {
 
     const result = await runStartupPositionAdoption({
       gateway: {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
         getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
       },
       marketRepo,
@@ -128,6 +129,122 @@ describe("runStartupPositionAdoption", () => {
     expect(position?.costBasisUsdc).toBe(4);
   });
 
+  it("Release A Phase 3 (P6): startup fence quarantines mismatched/NULL-positionId working SELLs as drain targets before servicing resumes", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+
+    const marketRepo = new SqliteMarketRepository(conn.db);
+    const orderRepo = new SqliteOrderRepository(conn.db);
+    const fillRepo = new SqliteFillRepository(conn.db);
+    const positionRepo = new SqlitePositionRepository(conn.db);
+    const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+    const legStateRepo = new SqliteLegStateRepository(conn.db);
+    seedMarket(marketRepo);
+
+    // Two resting SELLs left over from a prior cycle: one with a NULL/legacy
+    // positionId (pre-migration order), one whose positionId points at a
+    // cycle that is no longer active. Both must fail-closed as stale per
+    // isStaleOrReopeningWorkingOrder's SELL branch, since neither matches the
+    // active position the fill replay below is about to (re)create.
+    const staleSellNullId = createOrderId("ord-stale-sell-null");
+    orderRepo.save({
+      orderId: staleSellNullId,
+      clientOrderId: "plk_stale_sell_null" as ClientOrderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
+      side: "sell",
+      orderType: "GTC",
+      price: 0.6,
+      size: 10,
+      sizeUsdc: 6,
+      status: "open",
+      exchangeOrderId: "ex-stale-sell-null",
+      signalId: null,
+      signalReason: "bounce-exit",
+      botRunId: createBotRunId("run-1"),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      // positionId intentionally omitted — NULL/legacy.
+    });
+    const staleSellMismatchId = createOrderId("ord-stale-sell-mismatch");
+    orderRepo.save({
+      orderId: staleSellMismatchId,
+      clientOrderId: "plk_stale_sell_mismatch" as ClientOrderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
+      side: "sell",
+      orderType: "GTC",
+      price: 0.62,
+      size: 10,
+      sizeUsdc: 6.2,
+      status: "open",
+      exchangeOrderId: "ex-stale-sell-mismatch",
+      signalId: null,
+      signalReason: "bounce-exit",
+      positionId: createPositionId("pos-prior-closed-cycle"),
+      botRunId: createBotRunId("run-1"),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const result = await runStartupPositionAdoption({
+      gateway: {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({
+          ok: true,
+          data: [
+            {
+              orderId: "ex-stale-sell-null",
+              clientOrderId: "plk_stale_sell_null",
+              tokenId: TOKEN_ID,
+              side: "sell",
+              price: 0.6,
+              sizeTotal: 10,
+              sizeFilled: 0,
+              sizeRemaining: 10,
+              status: "OPEN",
+              createdAt: Date.now(),
+            },
+            {
+              orderId: "ex-stale-sell-mismatch",
+              clientOrderId: "plk_stale_sell_mismatch",
+              tokenId: TOKEN_ID,
+              side: "sell",
+              price: 0.62,
+              sizeTotal: 10,
+              sizeFilled: 0,
+              sizeRemaining: 10,
+              status: "OPEN",
+              createdAt: Date.now(),
+            },
+          ],
+        }),
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
+      },
+      marketRepo,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo,
+      legStateRepo,
+      log: silentLog,
+      db: conn.db,
+      botRunId: createBotRunId("run-1"),
+    });
+
+    // The BUY fill replay above (re)establishes the token's ONLY active
+    // position, so both resting SELLs are cross-cycle relative to it —
+    // neither carries that position's id.
+    expect(result.quarantinedStaleSells).toBe(2);
+    expect(result.quarantinedReopeningBuys).toBe(0);
+    expect(result.drainTargets).toHaveLength(1);
+    const target = result.drainTargets[0]!;
+    expect(target.tokenId).toBe(TOKEN_ID);
+    expect(target.activePositionId).not.toBeNull();
+    expect(new Set(target.orders.map((o) => String(o.orderId)))).toEqual(
+      new Set([String(staleSellNullId), String(staleSellMismatchId)]),
+    );
+  });
+
   it("FAIL CLOSED (Gap 2): an unreliable fill snapshot (ok:false) aborts startup and mutates nothing", async () => {
     const conn = bootstrapLedgerDb(":memory:");
     connections.push(conn);
@@ -144,7 +261,10 @@ describe("runStartupPositionAdoption", () => {
 
     await expect(
       runStartupPositionAdoption({
-        gateway: { getFillsResult },
+        gateway: {
+          getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+          getFillsResult,
+        },
         marketRepo,
         orderRepo,
         fillRepo,
@@ -197,6 +317,7 @@ describe("runStartupPositionAdoption", () => {
 
     await runStartupPositionAdoption({
       gateway: {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
         getFillsResult: vi.fn().mockResolvedValue({
           ok: true,
           data: [
@@ -237,6 +358,7 @@ describe("runStartupPositionAdoption", () => {
     seedMarket(marketRepo);
 
     const gateway = {
+      getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
       getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
     };
 
@@ -286,6 +408,7 @@ describe("runStartupPositionAdoption", () => {
 
     const result = await runStartupPositionAdoption({
       gateway: {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
         getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
       },
       marketRepo,
@@ -318,6 +441,7 @@ describe("runStartupPositionAdoption", () => {
 
     const result = await runStartupPositionAdoption({
       gateway: {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
         getFillsResult: vi
           .fn()
           .mockResolvedValue({ ok: true, data: [makeExchangeFill({ timestamp: Number.NaN })] }),
@@ -419,6 +543,7 @@ describe("runStartupPositionAdoption", () => {
 
     const result = await runStartupPositionAdoption({
       gateway: {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
         getFillsResult: vi.fn().mockResolvedValue({
           ok: true,
           data: [
@@ -538,7 +663,10 @@ describe("runStartupPositionAdoption", () => {
       const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
       const legStateRepo = new SqliteLegStateRepository(conn.db);
       const result = await runStartupPositionAdoption({
-        gateway: { getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }) },
+        gateway: {
+          getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+          getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        },
         marketRepo,
         orderRepo,
         fillRepo,
@@ -963,6 +1091,7 @@ describe("runStartupPositionAdoption", () => {
 
       await runStartupPositionAdoption({
         gateway: {
+          getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
           getFillsResult: vi.fn().mockResolvedValue({
             ok: true,
             data: [makeExchangeFill({ orderId: "ex-maker", clientOrderId: "plk_maker" })],
@@ -999,6 +1128,7 @@ describe("runStartupPositionAdoption", () => {
       // No entryStyle on the order — probe default
       await runStartupPositionAdoption({
         gateway: {
+          getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
           getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
         },
         marketRepo,
@@ -1030,6 +1160,7 @@ describe("runStartupPositionAdoption", () => {
       seedMarket(marketRepo);
 
       const gateway = {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
         getFillsResult: vi.fn().mockResolvedValue({
           ok: true,
           data: [makeExchangeFill({ orderId: "ex-restart", clientOrderId: "plk_restart" })],
@@ -1128,6 +1259,7 @@ describe("runStartupPositionAdoption", () => {
 
       await runStartupPositionAdoption({
         gateway: {
+          getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
           getFillsResult: vi.fn().mockResolvedValue({
             ok: true,
             data: [makeExchangeFill({ orderId: "ex-gate", clientOrderId: "plk_gate" })],
@@ -1184,6 +1316,7 @@ describe("runStartupPositionAdoption", () => {
 
       await runStartupPositionAdoption({
         gateway: {
+          getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
           getFillsResult: vi.fn().mockResolvedValue({
             ok: true,
             data: [makeExchangeFill({ orderId: "ex-r23", clientOrderId: "plk_r23" })],
@@ -1220,6 +1353,7 @@ describe("runStartupPositionAdoption", () => {
       // No decisionRuleId on the order — legacy/unknown path
       await runStartupPositionAdoption({
         gateway: {
+          getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
           getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
         },
         marketRepo,
@@ -1251,6 +1385,7 @@ describe("runStartupPositionAdoption", () => {
       seedMarket(marketRepo);
 
       const gateway = {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
         getFillsResult: vi.fn().mockResolvedValue({
           ok: true,
           data: [

@@ -9,6 +9,7 @@ import type {
   NormalizedMarket,
   Order,
   OrderRepository,
+  PositionRepository,
   RuntimeEventMap,
   RuntimeModule,
   Signal,
@@ -61,6 +62,8 @@ interface EntryLifecycleMetrics {
 export interface EntryLifecycleModuleDeps {
   bus: EventBus;
   orderRepo: OrderRepository;
+  // Release A Phase 3: read the current cycle's positionId to stamp ladder-step BUYs.
+  positionRepo: Pick<PositionRepository, "findByTokenId">;
   fillRepo: Pick<FillRepository, "findByOrderId" | "findByTokenId">;
   legStateRepo: LegStateRepository;
   algoRulesRepo: AlgoRulesRepository;
@@ -295,6 +298,10 @@ export class EntryLifecycleModule implements RuntimeModule {
       signalId,
       tokenId,
       conditionId: createConditionId(market.conditionId),
+      // Release A Phase 3: capture the EXACT current cycle identity at ladder-fire
+      // time (not deferred to the bridge — a later token lookup could bind to a
+      // reopened cycle). null on the first step (opens a new cycle).
+      positionId: this.deps.positionRepo.findByTokenId(tokenId)?.positionId ?? null,
       side: "buy",
       suggestedPrice: price,
       ladderTargetPrice: price,
@@ -395,6 +402,9 @@ export class EntryLifecycleModule implements RuntimeModule {
       signalId: buildRepriceSignalId(repriceCount),
       tokenId: order.tokenId,
       conditionId: order.conditionId,
+      // Release A Phase 3: repricing a position-bound add must PRESERVE the exact
+      // cycle identity of the order being repriced (write-once, not re-derived).
+      positionId: order.positionId ?? null,
       side: "buy",
       suggestedPrice: price,
       suggestedSize: remainingSize,

@@ -167,7 +167,10 @@ describe("Scenario: restart — no double-entry on existing open position", () =
     // all historical fills are already known. The adoption step must seed
     // leg_states from the ledger.
     const adoption = await runStartupPositionAdoption({
-      gateway: { getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }) },
+      gateway: {
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+      },
       marketRepo,
       orderRepo,
       fillRepo,
@@ -282,7 +285,10 @@ describe("Scenario: restart — no double-entry on existing open position", () =
     });
 
     const baseDeps = {
-      gateway: { getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }) },
+      gateway: {
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+      },
       marketRepo,
       orderRepo,
       fillRepo,

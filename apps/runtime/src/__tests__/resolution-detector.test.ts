@@ -82,6 +82,8 @@ function createMockPositionRepo(): PositionRepository {
   return {
     findOpen: vi.fn().mockReturnValue([makePosition()]),
     findDust: vi.fn().mockReturnValue([]),
+    findById: vi.fn(() => null),
+    findActiveByTokenId: vi.fn(() => []),
     findByTokenId: vi.fn(),
     save: vi.fn(),
     findAll: vi.fn().mockReturnValue([]),

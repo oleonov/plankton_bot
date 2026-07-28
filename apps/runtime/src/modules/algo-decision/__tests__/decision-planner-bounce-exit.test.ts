@@ -887,3 +887,53 @@ describe("bounce-exit SELL branch (decision-planner) — Phase 4 bounce-for-all"
     expect(result.signal.suggestedSize).toBeCloseTo(30, 10);
   });
 });
+
+describe("Release A Phase 3 — owner-authoritative bounce servicing (isBounceOwned)", () => {
+  const DISABLED_BOUNCE: BounceExitPolicy = {
+    ...ENABLED_BOUNCE_EXIT,
+    enabled: false,
+    mode: "off",
+  };
+
+  it("services a bounce OWNER even when bounceExit is DISABLED and the lane is not GATE", () => {
+    // entryLane=null → NOT GATE-eligible; exit_owner='bounce' → owner-authoritative.
+    const result = evaluateDecisionPlan(
+      input({
+        position: position({ entryLane: null, exitOwner: "bounce" }),
+        executionPolicy: executionPolicy({ bounceExit: DISABLED_BOUNCE }),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe(BOUNCE_EXIT_TARGET_RULE_ID);
+    expect(result.signal.side).toBe("sell");
+  });
+
+  it("services a bounce OWNER even when the market is dropped from the whitelist", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        position: position({ entryLane: null, exitOwner: "bounce" }),
+        executionPolicy: executionPolicy({
+          bounceExit: { ...ENABLED_BOUNCE_EXIT, whitelistConditionIds: [] },
+        }),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe(BOUNCE_EXIT_TARGET_RULE_ID);
+  });
+
+  it("does NOT bounce-service a NON-owner non-GATE position when bounceExit is disabled (contrast)", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        position: position({ entryLane: null, exitOwner: null }),
+        executionPolicy: executionPolicy({ bounceExit: DISABLED_BOUNCE }),
+      }),
+    );
+    // Owner is what flips servicing on — without it, a disabled/non-GATE position
+    // must NOT be routed to the bounce ladder.
+    const isBounceSignal =
+      result.type === "signal" && result.signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID;
+    expect(isBounceSignal).toBe(false);
+  });
+});

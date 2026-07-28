@@ -5,7 +5,13 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteOrderRepository } from "../repositories/order-repository.js";
-import { createOrderId, createTokenId, createConditionId, createBotRunId } from "@krabs/domain";
+import {
+  createOrderId,
+  createTokenId,
+  createConditionId,
+  createPositionId,
+  createBotRunId,
+} from "@krabs/domain";
 import type { Order, ClientOrderId } from "@krabs/domain";
 
 let conn: DbConnection;
@@ -573,5 +579,32 @@ describe("SqliteOrderRepository", () => {
     );
 
     expect(repo.sumOpenBuyNotional()).toBe(10);
+  });
+
+  it("persists positionId round-trip and defaults to null when absent (Release A Phase 3)", () => {
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o-pid"),
+        clientOrderId: "cloid-pid" as ClientOrderId,
+        positionId: createPositionId("pos-9"),
+      }),
+    );
+    expect(repo.findById(createOrderId("o-pid"))!.positionId).toBe("pos-9");
+
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o-nopid"),
+        clientOrderId: "cloid-nopid" as ClientOrderId,
+      }),
+    );
+    expect(repo.findById(createOrderId("o-nopid"))!.positionId).toBeNull();
+  });
+
+  it("positionId is write-once on upsert (status update never overwrites the cycle)", () => {
+    repo.save(makeOrder({ orderId: createOrderId("o1"), positionId: createPositionId("pos-A") }));
+    // A later save of the SAME order (e.g. status transition) that omits positionId
+    // must NOT null out the persisted cycle identity.
+    repo.save(makeOrder({ orderId: createOrderId("o1"), status: "open", positionId: null }));
+    expect(repo.findById(createOrderId("o1"))!.positionId).toBe("pos-A");
   });
 });

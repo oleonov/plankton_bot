@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { PositionRepository, Position } from "@krabs/domain";
-import type { TokenId, OrderSide, PositionStatus } from "@krabs/domain";
+import type { TokenId, PositionId, OrderSide, PositionStatus } from "@krabs/domain";
 import { createPositionId, createTokenId, createConditionId } from "@krabs/domain";
 
 export class SqlitePositionRepository implements PositionRepository {
@@ -57,6 +57,24 @@ export class SqlitePositionRepository implements PositionRepository {
       )
       .get(tokenId) as Record<string, unknown> | undefined;
     return row ? this.rowToPosition(row) : null;
+  }
+
+  findById(positionId: PositionId): Position | null {
+    const row = this.db.prepare("SELECT * FROM positions WHERE position_id = ?").get(positionId) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? this.rowToPosition(row) : null;
+  }
+
+  findActiveByTokenId(tokenId: TokenId): Position[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM positions
+         WHERE token_id = ? AND status != 'closed'
+         ORDER BY opened_at DESC`,
+      )
+      .all(tokenId) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToPosition(r));
   }
 
   findOpen(): Position[] {

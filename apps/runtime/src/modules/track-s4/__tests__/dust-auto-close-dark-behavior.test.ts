@@ -21,6 +21,7 @@ const NOW = 1_800_000_000_000;
 const tokenA = createTokenId("s4-dark-token-a");
 const tokenB = createTokenId("s4-dark-token-b");
 const conditionId = createConditionId("s4-dark-condition");
+const positionId = createPositionId("s4-dark-position");
 
 let tmpDir: string;
 let db: Database.Database;
@@ -56,6 +57,8 @@ function candidate(tokenId = tokenA): DustAutoCloseCandidate {
   return {
     tokenId,
     conditionId,
+    positionId,
+    bounceOwned: false,
     status: "open",
     liquidationValueUsdc: 0.49,
     costBasisUsdc: 5,

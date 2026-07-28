@@ -590,6 +590,7 @@ describe("ExecutionModule — invalid-tick in-attempt retry (Phase 2)", () => {
     const positionRepo: PositionRepository = {
       save: vi.fn(),
       findById: vi.fn().mockReturnValue(null),
+      findActiveByTokenId: vi.fn(() => []),
       findByTokenId: vi.fn(() => (hasSubmittedFirstAttempt() ? unsafePosition : safePosition)),
       findByConditionId: vi.fn().mockReturnValue([]),
       findAllOpen: vi.fn(() => [hasSubmittedFirstAttempt() ? unsafePosition : safePosition]),

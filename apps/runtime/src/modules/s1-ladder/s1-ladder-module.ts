@@ -24,6 +24,7 @@ import {
   PositionStatus,
 } from "@krabs/domain";
 import { buildClientOrderId } from "@krabs/domain/node";
+import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import type { Logger } from "../../logger.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 
@@ -308,6 +309,9 @@ export class S1LadderModule implements RuntimeModule {
     plan: Extract<ReturnType<typeof buildLadder>, { ok: true }>,
     timestamp: number,
   ): Promise<void> {
+    // Release A Phase 3: a bounce owner is serviced exclusively by the bounce ladder
+    // — no S1 claim, no placement.
+    if (isBounceOwned(position)) return;
     if (!this.acquirePlacement(market.tokenId, timestamp)) return;
     this.assumeOwnership(position, market, plan.ladderId, {
       reason: "eligible",
@@ -345,6 +349,7 @@ export class S1LadderModule implements RuntimeModule {
           signalId,
           decisionRuleId: S1_LADDER_RULE_ID,
           signalTimestamp: new Date(timestamp).toISOString(),
+          positionId: position.positionId,
           metadata: {
             s1: {
               ladderId: plan.ladderId,

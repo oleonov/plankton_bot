@@ -32,6 +32,7 @@ function input(overrides: Partial<DustCleanupDecisionInput> = {}): DustCleanupDe
     minValidPrice: 0.001,
     retryEligible: true,
     profileOwned: false,
+    bounceOwned: false,
     redeemInFlight: false,
     ...overrides,
   };
@@ -64,6 +65,7 @@ describe("computeDustCleanup", () => {
     [{ lastSellAgeMs: 7 * DAY_MS - 1 }, "recent_sell"],
     [{ retryEligible: false }, "retry_backoff"],
     [{ profileOwned: true }, "profile_owned"],
+    [{ bounceOwned: true }, "bounce_owned"],
     [{ redeemInFlight: true }, "redeem_in_flight"],
   ] as const)("skips when %j with reason %s", (overrides, reason) => {
     expect(computeDustCleanup(input(overrides), config())).toMatchObject({

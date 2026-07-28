@@ -28,6 +28,7 @@ import type {
   RuntimeControl,
   ProfileId,
   TokenId,
+  Position,
   PositionRepository,
   InventoryLotRepository,
   ExchangeFill,
@@ -42,6 +43,7 @@ import type {
 import {
   createCommandId,
   createOrderId,
+  createTokenId,
   DEFAULT_EXECUTION_POLICY,
   ExchangeErrorCode,
   isPositionDust,
@@ -57,7 +59,10 @@ import {
   POLYMARKET_CRYPTO_TAKER_FEE_RATE,
 } from "@krabs/domain";
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
+import { randomUUID } from "node:crypto";
+import { buildClientOrderId } from "@krabs/domain/node";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
+import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-calculator.js";
@@ -86,6 +91,7 @@ import {
 import {
   DEFAULT_FALLBACK_MIN_ORDER_SIZE,
   evaluateSellPreSubmitGuard,
+  isExecutableOrderSize,
 } from "../../min-order-size.js";
 import {
   SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
@@ -148,6 +154,18 @@ function boundedMetricLabel(value: string | null | undefined): string {
 function isTerminalOrderStatus(status: Order["status"]): boolean {
   return status === "cancelled" || status === "filled";
 }
+
+// Finding 5: autonomous transition-reconcile cadence + the minimum interval between
+// cancel-retries for a single stuck drain target (backoff — no cancel storms).
+const AUTONOMOUS_RECONCILE_INTERVAL_MS = 5_000;
+const TRANSITION_CANCEL_RETRY_BACKOFF_MS = 5_000;
+// Finding 3 / round 5: cap on ACTIVE placement attempts. Beyond it the intent is not
+// dropped — it escalates (retained + reconciling + alerted). Bounds active placement only.
+const MAX_DEFERRED_BACKSTOP_RETRIES = 6;
+// Finding 1 / round 5: minimum interval between deferred-backstop submits for a token, so
+// the open-orders reconcile reliably reflects a prior (possibly UNKNOWN-landed) submit
+// before another full-residual taker is sent. Comfortably above the reconcile cadence.
+const DEFERRED_BACKSTOP_PLACE_GRACE_MS = 15_000;
 
 function resolveSellRepriceThreshold(
   lastPlacedAnchor: number,
@@ -315,6 +333,54 @@ export class ExecutionModule implements RuntimeModule {
    * which also rebuilds on PositionUpdated) from both reaching the gateway.
    */
   private readonly cancelReservations = new Set<string>();
+  /**
+   * Release A Phase 3 (P6) — executor-owned per-token transition barrier.
+   * Presence of a tokenId key = "draining": the token has one or more working
+   * orders being cancelled because they belong to a stale/closed/legacy cycle,
+   * and no new PlaceOrderCommand for that token may be admitted until every
+   * target is exchange-confirmed terminal (cancelled or filled). Absence =
+   * "quiescent" — today's ungated behavior. `activePositionId` is descriptive
+   * (audit/telemetry) only; it is not consulted to carve out an exception.
+   */
+  private readonly tokenTransitions = new Map<
+    string /* tokenId */,
+    { activePositionId: string | null; targets: Set<string /* orderId */> }
+  >();
+  /**
+   * Per-token count of commands accepted for dispatch (queued or executing)
+   * but not yet finished. `ExecutionQueue` (execution-queue.ts) only exposes a
+   * GLOBAL pending count, so the transition barrier tracks its own per-token
+   * view to know a queued/in-flight command still exists for a token before
+   * declaring it quiescent (closing the barrier while a stale command is still
+   * mid-flight would let it race a freshly-admitted command for the same token).
+   */
+  private readonly tokenInFlightCount = new Map<string, number>();
+  /**
+   * Release A Phase 3 (P7 rework, finding 2) — durable deferred bounce-backstop
+   * intent. Set when a backstop is refused because its cycle's rungs are still
+   * draining (admission OR submit boundary); consumed exactly once, when the
+   * token's transition barrier closes (`maybeCloseTokenTransition`), by
+   * `placeDeferredBackstop`. Survives across ticks / planner re-emission gaps —
+   * the ONLY thing that fires the deferred placement is the barrier itself
+   * reaching quiescent, never a timer or a re-delivered signal.
+   */
+  private readonly pendingBackstops = new Map<
+    string /* tokenId */,
+    { positionId: string | null; command: PlaceOrderCommand }
+  >();
+  /**
+   * Release A Phase 3 (P7 rework, finding 3) — bounce rungs (BOUNCE_EXIT_TARGET
+   * SELLs) accepted for dispatch but not yet reflected as an Order row. Recorded
+   * right before `dispatchCommand` (handlePlace) and cleared once `executeCommand`
+   * finishes (whether the rung ends up placed, rejected, or skipped) — closes the
+   * "queued/executing but not yet persisted" gap that a persisted-orders-only
+   * check (`findCycleBounceRungs`) cannot see, so a backstop reaching submit at
+   * that exact moment is not fooled into thinking the cycle has no resting rung.
+   */
+  private readonly inFlightBounceRungs = new Map<
+    string /* commandId */,
+    { tokenId: string; positionId: string }
+  >();
   private sellSizeClamps = 0;
   private readonly queue: ExecutionQueue | null;
   private readonly acceptedCommandAt = new Map<string, number>();
@@ -325,6 +391,35 @@ export class ExecutionModule implements RuntimeModule {
   private cancelLatencyTotalMs = 0;
   private unsubs: Array<() => void> = [];
   private started = false;
+  // Finding 6: a hard startup fence — set BEFORE supervisor.start() and cleared only
+  // AFTER seedStartupTransitions, so every placement is refused during the window in
+  // which the command-poller may resume but the barrier isn't seeded yet (independent
+  // of pause state, which the poller can flip during start()).
+  private startupFenceActive = false;
+  // Finding 5: autonomous barrier reconciliation so a stuck drain (failed/lost cancel
+  // with a deferred backstop waiting on it) can never deadlock waiting for a placement.
+  private reconcileTimer: ReturnType<typeof setInterval> | null = null;
+  // Finding 5: per-target last cancel-retry timestamp — bounds the retry cadence so a
+  // stuck token cannot cancel-storm.
+  private readonly transitionCancelRetryAt = new Map<string, number>();
+  // Finding 1 (round 3): a per-token guard so the barrier-close fire and the autonomous
+  // timer can never place two deferred backstops for the same token concurrently.
+  private readonly inFlightDeferredBackstop = new Set<string>();
+  // Finding 3 / round 5: count of ACTIVE placement attempts per token. Bounds active
+  // placement (no storm); when the cap is reached the intent is NOT dropped — it is
+  // ESCALATED (retained, keeps reconciling for completion + alerts once).
+  private readonly deferredBackstopRetries = new Map<string, number>();
+  // Finding 1 / round 5-6: timestamp of the last deferred-backstop EXCHANGE SUBMIT per
+  // token (set at the actual gateway boundary, not at publish). A GRACE window before the
+  // next submit lets the eventually-consistent open-orders view reflect the prior submit,
+  // closing the snapshot→submit double-place race (the live gateway does not echo
+  // clientOrderId, so the exchange offers no dedup fallback).
+  private readonly lastDeferredPlaceAt = new Map<string, number>();
+  // Finding 1/2 / round 6: a deferred-backstop command that has been published but whose
+  // outcome is not yet known — while one is in flight for a token we NEVER publish another
+  // (closes the publish→submit double window a bare timestamp grace can't). Maps
+  // tokenId → the in-flight commandId.
+  private readonly pendingDeferredSubmit = new Map<string, string>();
 
   constructor(private readonly deps: ExecutionModuleDeps) {
     this.log = deps.log.child({ module: "execution" });
@@ -333,14 +428,17 @@ export class ExecutionModule implements RuntimeModule {
           maxConcurrency: deps.maxConcurrency,
           shutdownTimeoutMs: 10_000,
           execute: (cmd) => this.executeCommand(cmd),
-          resolveTokenId: (cmd) => {
-            if (cmd.type === "PlaceOrderCommand") return cmd.tokenId;
-            const order = this.deps.orderRepo.findById(cmd.orderId);
-            return order?.tokenId ?? (cmd.orderId as unknown as TokenId);
-          },
+          resolveTokenId: (cmd) => this.resolveCommandTokenId(cmd),
           log: this.log,
         })
       : null;
+  }
+
+  /** Shared by the queue's per-token mutex and the transition barrier's in-flight counter. */
+  private resolveCommandTokenId(cmd: PlaceOrderCommand | CancelOrderCommand): TokenId {
+    if (cmd.type === "PlaceOrderCommand") return cmd.tokenId;
+    const order = this.deps.orderRepo.findById(cmd.orderId);
+    return order?.tokenId ?? (cmd.orderId as unknown as TokenId);
   }
 
   async start(): Promise<void> {
@@ -350,7 +448,27 @@ export class ExecutionModule implements RuntimeModule {
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
       this.deps.bus.subscribe("PositionUpdated", (p) => this.handlePositionUpdated(p)),
+      // Release A Phase 3 (P6) — terminal confirmation for the transition barrier.
+      // OrderCancelled is ALSO published independently by user-order-stream-module.ts
+      // (live exchange websocket echo) which never goes through executeCancel, so this
+      // subscription is the only path that catches that source; a fill is the other
+      // way a drain target can reach terminal status (it filled instead of cancelling).
+      this.deps.bus.subscribe("OrderCancelled", async (p) =>
+        this.removeTransitionTargetIfTerminal(p.tokenId, p.orderId),
+      ),
+      this.deps.bus.subscribe("FillReceived", async (p) =>
+        this.removeTransitionTargetIfTerminal(p.tokenId, p.orderId),
+      ),
     );
+
+    // Finding 5: autonomous transition reconciliation. unref() so it never keeps the
+    // process alive; cleared in stop(). Fire-and-forget (its own errors are logged).
+    this.reconcileTimer = setInterval(() => {
+      void this.reconcileAllTransitions().catch((err: unknown) => {
+        this.log.error({ err }, "autonomous transition reconcile failed");
+      });
+    }, AUTONOMOUS_RECONCILE_INTERVAL_MS);
+    this.reconcileTimer.unref?.();
     // One-time startup re-evaluation of every existing resting exit SELL against
     // the loss floor (code-review finding #3): risk/inventory starts before
     // execution and can publish PositionUpdated BEFORE we subscribe, so a SELL
@@ -420,11 +538,28 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   async stop(): Promise<void> {
+    if (this.reconcileTimer) {
+      clearInterval(this.reconcileTimer);
+      this.reconcileTimer = null;
+    }
+    this.pendingDeferredSubmit.clear();
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     if (this.queue) await this.queue.shutdown();
     this.started = false;
     this.log.info("execution module stopped");
+  }
+
+  /**
+   * Finding 6: latch/unlatch the hard startup fence. `begin` is called BEFORE the
+   * supervisor starts and `end` right AFTER the startup transitions are seeded, so no
+   * placement can slip through the resume-before-seed window regardless of pause state.
+   */
+  beginStartupFence(): void {
+    this.startupFenceActive = true;
+  }
+  endStartupFence(): void {
+    this.startupFenceActive = false;
   }
 
   /** Number of queued + in-flight execution tasks. Zero = fully drained. */
@@ -644,6 +779,646 @@ export class ExecutionModule implements RuntimeModule {
    * re-snap between admission and submit count at its FINAL notional, not the
    * stale admission-price one.
    */
+  /**
+   * Release A Phase 3 — reject a command that would violate bounce exclusivity or
+   * act on a stale/ambiguous position cycle. Applied at all three placement
+   * boundaries (admission, main submit, invalid-tick retry).
+   *
+   * Requires positionRepo (always wired in prod); a no-op when absent. A no-op for
+   * a non-owner command whose positionId matches its single live position → today's
+   * behavior is byte-identical on the common path. Fail-closed: a bounce-ruled SELL
+   * on a non-bounce owner, a non-bounce SELL on a bounce owner, a stale/absent cycle
+   * id, or an ambiguous (>1 live) token are all rejected.
+   */
+  private exitOwnerIdentityRejection(
+    cmd: PlaceOrderCommand,
+  ): { reason: string; code: ExchangeErrorCode } | null {
+    const positionRepo = this.deps.positionRepo;
+    if (!positionRepo) return null;
+
+    const isSell = cmd.side === "sell";
+    // An initial-entry BUY carries no positionId (it opens a new cycle) — nothing to verify.
+    if (!isSell && cmd.positionId == null) return null;
+
+    const active = positionRepo.findActiveByTokenId(cmd.tokenId);
+
+    let target: Position | null = null;
+    if (cmd.positionId != null) {
+      target = active.find((p) => String(p.positionId) === String(cmd.positionId)) ?? null;
+      if (target == null) {
+        // The claimed cycle is gone/closed (or on another token) — stale cross-cycle.
+        return { reason: "exit-owner-stale-position", code: ExchangeErrorCode.LivePolicyBlocked };
+      }
+      if (active.length > 1) {
+        // A second live cycle on the same token = an unfinished transition; act on
+        // neither until the P6 fence has drained it.
+        return {
+          reason: "exit-owner-ambiguous-position",
+          code: ExchangeErrorCode.LivePolicyBlocked,
+        };
+      }
+    } else {
+      // A SELL with no captured cycle id (legacy edge — should not happen post-P2).
+      // Still apply the SAME ambiguity + owner/rule exclusivity checks below against
+      // the token's single active position (a NULL-owner legacy position stays
+      // allowed). Fail-closed on an ambiguous token — we cannot say which cycle.
+      if (active.length > 1) {
+        return {
+          reason: "exit-owner-ambiguous-position",
+          code: ExchangeErrorCode.LivePolicyBlocked,
+        };
+      }
+      target = active[0] ?? null;
+    }
+
+    // Owner exclusivity is a SELL concern; an add-BUY is identity-checked above only.
+    if (!isSell) return null;
+    // A SELL against no matchable active position: nothing to enforce (today's behavior).
+    if (target == null) return null;
+
+    const bounceRuled =
+      isBounceForceExit({ side: cmd.side, decisionRuleId: cmd.decisionRuleId ?? null }) ||
+      cmd.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID;
+    const ownerIsBounce = isBounceOwned(target);
+
+    // A bounce-ruled SELL on a 'profile' OWNER is a violation (defense-in-depth —
+    // P3 never produces one). A NULL owner (pre-census legacy) legitimately receives
+    // bounce SELLs via today's GATE/sellableFlow routing, so it is NOT rejected here;
+    // a stale cross-cycle bounce SELL is caught by the positionId identity check above.
+    if (bounceRuled && target.exitOwner === "profile") {
+      return {
+        reason: "exit-owner-bounce-rule-on-profile-owner",
+        code: ExchangeErrorCode.LivePolicyBlocked,
+      };
+    }
+    // A non-bounce SELL (ProfileLadder / S1 / D8·D9 / dust) on a bounce OWNER is the
+    // core exclusivity violation.
+    if (!bounceRuled && ownerIsBounce) {
+      return {
+        reason: "exit-owner-non-bounce-rule-on-bounce-owner",
+        code: ExchangeErrorCode.LivePolicyBlocked,
+      };
+    }
+    return null;
+  }
+
+  // ─── P6 transition barrier ────────────────────────────────────────────
+
+  /**
+   * Release A Phase 3 (P6) — reject a command competing with a token's
+   * in-progress drain, opening the barrier first if this command is the one
+   * that exposes a stale/cross-cycle working order. Mirrors
+   * `exitOwnerIdentityRejection`'s insertion at the same 3 boundaries. A no-op
+   * (byte-identical to today) whenever the token has no stale working SELL and
+   * is not already draining.
+   */
+  private async transitionRejection(
+    cmd: PlaceOrderCommand,
+  ): Promise<{ reason: string; code: ExchangeErrorCode } | null> {
+    // Self-heal before deciding: prune terminal targets / retry stuck cancels so a
+    // stale barrier can never block this placement (finding 4).
+    await this.reconcileTokenTransition(cmd.tokenId);
+    if (this.tokenTransitions.has(String(cmd.tokenId))) {
+      return { reason: "transition-draining", code: ExchangeErrorCode.LivePolicyBlocked };
+    }
+    if (await this.openTransitionForStaleWorkingSells(cmd)) {
+      return { reason: "transition-draining", code: ExchangeErrorCode.LivePolicyBlocked };
+    }
+    return null;
+  }
+
+  /**
+   * Pre-BUY cross-cycle gate. A reopening/scale-in BUY must never be admitted
+   * while a working SELL from a PRIOR/closed cycle (or a legacy NULL-positionId
+   * SELL — fail-closed) can still fill against it. Drains those SELLs and
+   * defers this BUY rather than admitting it alongside them. No-op for a SELL
+   * command or when positionRepo is absent (legacy unit tests).
+   */
+  private async openTransitionForStaleWorkingSells(cmd: PlaceOrderCommand): Promise<boolean> {
+    if (cmd.side !== "buy") return false;
+    const positionRepo = this.deps.positionRepo;
+    if (!positionRepo) return false;
+
+    const activePositionIds = new Set(
+      positionRepo.findActiveByTokenId(cmd.tokenId).map((p) => String(p.positionId)),
+    );
+    const staleSells = this.findOpenSellOrdersForToken(cmd.tokenId).filter((order) =>
+      this.isStaleWorkingSell(order, cmd, activePositionIds),
+    );
+    if (staleSells.length === 0) return false;
+
+    await this.openTokenTransition(cmd.tokenId, cmd.positionId ?? null, staleSells);
+    return true;
+  }
+
+  private isStaleWorkingSell(
+    order: Order,
+    cmd: PlaceOrderCommand,
+    activePositionIds: ReadonlySet<string>,
+  ): boolean {
+    const orderPositionId = order.positionId != null ? String(order.positionId) : null;
+    if (orderPositionId == null) return true; // legacy/NULL — fail closed
+    if (!activePositionIds.has(orderPositionId)) return true; // its cycle already closed
+    return cmd.positionId != null && orderPositionId !== String(cmd.positionId);
+  }
+
+  /**
+   * Opens (or extends) the drain for a token: records each not-yet-targeted
+   * order and publishes its cancel. Idempotent — re-adding an order already in
+   * `targets` is a no-op, so repeated calls (e.g. a retried BUY re-triggering
+   * the same stale SELL) never double-publish a cancel.
+   */
+  private async openTokenTransition(
+    tokenId: TokenId,
+    activePositionId: string | null,
+    staleOrders: readonly Order[],
+  ): Promise<void> {
+    const key = String(tokenId);
+    const transition = this.tokenTransitions.get(key) ?? {
+      activePositionId,
+      targets: new Set<string>(),
+    };
+    const newlyTargeted: Order[] = [];
+    for (const order of staleOrders) {
+      const orderKey = String(order.orderId);
+      if (transition.targets.has(orderKey)) continue;
+      // Never target an already-terminal order (finding-4 prune-at-open) — it would
+      // strand the barrier with a target that can never reach OrderCancelled/FillReceived.
+      if (isTerminalOrderStatus(order.status)) continue;
+      transition.targets.add(orderKey);
+      newlyTargeted.push(order);
+    }
+    this.tokenTransitions.set(key, transition);
+    // If every stale order was already terminal, close immediately (nothing to drain).
+    if (transition.targets.size === 0) {
+      this.maybeCloseTokenTransition(tokenId);
+      return;
+    }
+
+    for (const order of newlyTargeted) {
+      this.log.warn(
+        {
+          tokenId: key,
+          orderId: String(order.orderId),
+          positionId: order.positionId ?? null,
+        },
+        "transition barrier opened — draining stale/cross-cycle working order",
+      );
+      await this.publishManagedCancel(order.orderId, "operator");
+    }
+  }
+
+  /**
+   * Startup wiring only (P6 part 3): seed the barrier for tokens whose
+   * stale/reopening working orders survived startup classification unconfirmed
+   * (startup-position-adoption.ts only classifies — it never mutates the
+   * exchange). Reuses the exact same drain machinery a live-running token
+   * transition uses, so normal servicing stays blocked until the barrier's own
+   * cancel-confirmation hooks resolve every seeded target. Must be called
+   * AFTER the module has started (subscriptions wired) so the cancel publish
+   * is actually consumed.
+   */
+  async seedStartupTransitions(
+    targets: ReadonlyArray<{
+      tokenId: TokenId;
+      activePositionId: string | null;
+      orders: readonly Order[];
+    }>,
+  ): Promise<void> {
+    for (const target of targets) {
+      if (target.orders.length === 0) continue;
+      await this.openTokenTransition(target.tokenId, target.activePositionId, target.orders);
+    }
+  }
+
+  /**
+   * Removes a target from its token's drain once it is exchange-confirmed
+   * terminal (cancelled OR filled — a drain target may fill instead of
+   * cancelling). Called from THREE places: the local cancel result path
+   * (`executeCancel`, right after `releasePendingSellReplacement`), the
+   * `OrderCancelled` subscription, and the `FillReceived` subscription.
+   * Idempotent (a no-op target/transition is simply skipped) and safe to call
+   * redundantly from more than one of those hooks for the same order. An
+   * ambiguous/non-terminal current status (still open/pending/partially-filled)
+   * leaves the target in place and the token draining — P7 will add
+   * authoritative wallet reconciliation for that case.
+   */
+  private removeTransitionTargetIfTerminal(tokenId: TokenId, orderId: OrderId): void {
+    const key = String(tokenId);
+    const transition = this.tokenTransitions.get(key);
+    if (!transition) return;
+    const orderKey = String(orderId);
+    if (!transition.targets.has(orderKey)) return;
+
+    const order = this.deps.orderRepo.findById(orderId);
+    if (!order || !isTerminalOrderStatus(order.status)) return;
+
+    transition.targets.delete(orderKey);
+    // Finding 3 (round 3): a target confirmed terminal via OrderCancelled/FillReceived
+    // must also drop its backoff entry — otherwise `transitionCancelRetryAt` leaks
+    // unboundedly (the transition closes and autonomous reconcile can't reach it).
+    this.transitionCancelRetryAt.delete(orderKey);
+    this.maybeCloseTokenTransition(tokenId);
+  }
+
+  private maybeCloseTokenTransition(tokenId: TokenId): void {
+    const key = String(tokenId);
+    const transition = this.tokenTransitions.get(key);
+    if (!transition) return;
+    if (transition.targets.size > 0) return;
+    if (this.hasInFlightCommand(tokenId)) return; // a queued/in-flight command could still race
+    this.tokenTransitions.delete(key);
+    this.log.info({ tokenId: key }, "transition barrier closed — token quiescent");
+
+    // P7 finding 2: the barrier reaching quiescent is the ONLY thing that fires a
+    // durable deferred backstop — never a timer or a re-delivered signal. Guard on
+    // `started` so a stopped module never places (and a fire-and-forget chain cannot
+    // outlive the module into unrelated work).
+    if (this.started && this.pendingBackstops.has(key)) {
+      void this.placeDeferredBackstop(tokenId).catch((err: unknown) => {
+        this.log.error({ err, tokenId: key }, "deferred bounce backstop placement failed");
+      });
+    }
+  }
+
+  /**
+   * Finding-4 self-heal: re-derive a token's drain against the AUTHORITATIVE order
+   * status (orderRepo) so the barrier can never get stuck open. Run before every
+   * placement decision for the token. Prunes any target that is now terminal —
+   * regardless of HOW it got terminal (local cancel, reconciliation marking it
+   * cancelled WITHOUT an OrderCancelled event, or a fill) — because it re-reads the
+   * status directly. Retries the cancel for any target still working (idempotent:
+   * cancelReservations dedups an in-flight cancel; a terminal order early-returns),
+   * so a failed/lost cancel is re-attempted rather than blocking the token forever.
+   */
+  private async reconcileTokenTransition(tokenId: TokenId): Promise<void> {
+    const transition = this.tokenTransitions.get(String(tokenId));
+    if (!transition) return;
+    const now = Date.now();
+    for (const orderKey of [...transition.targets]) {
+      const order = this.deps.orderRepo.findById(createOrderId(orderKey));
+      if (!order || isTerminalOrderStatus(order.status)) {
+        transition.targets.delete(orderKey);
+        this.transitionCancelRetryAt.delete(orderKey);
+        continue;
+      }
+      // Finding 5 backoff: retry a stuck cancel at most once per backoff window, so a
+      // token whose cancel keeps failing cannot cancel-storm on every reconcile tick.
+      const lastRetry = this.transitionCancelRetryAt.get(orderKey) ?? 0;
+      if (
+        !this.cancelReservations.has(orderKey) &&
+        now - lastRetry >= TRANSITION_CANCEL_RETRY_BACKOFF_MS
+      ) {
+        this.transitionCancelRetryAt.set(orderKey, now);
+        await this.publishManagedCancel(order.orderId, "operator");
+      }
+    }
+    this.maybeCloseTokenTransition(tokenId);
+  }
+
+  /**
+   * Finding 5: autonomous driver — reconciles EVERY open transition (prune terminal +
+   * backoff-retry stuck cancels + fire any now-quiescent deferred backstop) WITHOUT
+   * needing a placement to arrive, so a failed/lost cancel can't deadlock a deferred
+   * backstop forever. Also retries a deferred backstop that was re-armed after a
+   * transient wallet-read failure (finding 1) but whose token has no open transition.
+   */
+  private async reconcileAllTransitions(): Promise<void> {
+    if (!this.started) return;
+    for (const key of [...this.tokenTransitions.keys()]) {
+      await this.reconcileTokenTransition(createTokenId(key));
+    }
+    // Re-armed intents with no transition (F1 read-failure retry) — fire directly.
+    for (const key of [...this.pendingBackstops.keys()]) {
+      if (!this.tokenTransitions.has(key)) {
+        await this.placeDeferredBackstop(createTokenId(key));
+      }
+    }
+  }
+
+  /** Working BOUNCE_EXIT_TARGET rungs for this command's exact position cycle. */
+  private findCycleBounceRungs(cmd: PlaceOrderCommand): Order[] {
+    return this.deps.orderRepo
+      .findByTokenId(cmd.tokenId)
+      .filter(
+        (order) =>
+          order.side === "sell" &&
+          (order.status === "open" ||
+            order.status === "pending" ||
+            order.status === "partially-filled") &&
+          order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+          this.matchesPositionCycle(order.positionId, cmd.positionId ?? null),
+      );
+  }
+
+  /**
+   * Finding 2 (round 4): a working LOCAL backstop taker for this cycle — the RELIABLE,
+   * positively-identified "the backstop is already placed" signal (a prior deferred
+   * placement that succeeded and persisted its order). Distinct from a size heuristic on
+   * exchange orders, which cannot tell a backstop from a full-residual cleanup rung.
+   */
+  private findCycleBackstopWorking(cmd: PlaceOrderCommand): Order[] {
+    return this.deps.orderRepo
+      .findByTokenId(cmd.tokenId)
+      .filter(
+        (order) =>
+          order.side === "sell" &&
+          (order.status === "open" ||
+            order.status === "pending" ||
+            order.status === "partially-filled") &&
+          isBounceForceExit({ side: order.side, decisionRuleId: order.decisionRuleId ?? null }) &&
+          this.matchesPositionCycle(order.positionId, cmd.positionId ?? null),
+      );
+  }
+
+  /**
+   * P7 transactional B1 pre-step. If the backstop's cycle still has resting rungs:
+   * preflight the loss floor (return a HOLD rejection WITHOUT cancelling if the
+   * full-residual taker is below floor — never sacrifice the resting protection for
+   * a taker that can't place), else record a DURABLE deferred-backstop intent
+   * (finding 2) and open the P6 transition to cancel + CONFIRM the rungs, returning
+   * a "draining" rejection so this backstop is deferred. Returns null when there are
+   * no resting rungs (place the backstop normally). The deferred intent — not a
+   * planner re-emission — is what fires the eventual placement, from
+   * `placeDeferredBackstop` once `maybeCloseTokenTransition` sees the token quiescent.
+   */
+  private async openBackstopTransitionIfRungsResting(
+    cmd: PlaceOrderCommand,
+  ): Promise<{ reason: string; code: ExchangeErrorCode } | null> {
+    const rungs = this.findCycleBounceRungs(cmd);
+    if (rungs.length === 0) return null;
+    const floorVerdict = this.evaluateSellExitLossFloor(cmd, cmd.price);
+    if (floorVerdict.block) {
+      return {
+        reason: "bounce-backstop-below-floor-hold",
+        code: ExchangeErrorCode.LivePolicyBlocked,
+      };
+    }
+    this.pendingBackstops.set(String(cmd.tokenId), {
+      positionId: cmd.positionId ?? null,
+      command: cmd,
+    });
+    await this.openTokenTransition(cmd.tokenId, cmd.positionId ?? null, rungs);
+    return { reason: "bounce-backstop-draining-rungs", code: ExchangeErrorCode.LivePolicyBlocked };
+  }
+
+  /** Working BOUNCE_EXIT_TARGET rungs, including admitted-but-not-yet-persisted ones
+   * (finding 3) — the persisted-orders check alone misses a rung that has been
+   * dispatched (accepted at admission) but hasn't reached `orderRepo` yet. */
+  private hasInFlightBounceRungForCycle(cmd: PlaceOrderCommand): boolean {
+    const cmdPositionId = String(cmd.positionId ?? null);
+    for (const pending of this.inFlightBounceRungs.values()) {
+      if (pending.tokenId === String(cmd.tokenId) && pending.positionId === cmdPositionId)
+        return true;
+    }
+    return false;
+  }
+
+  /**
+   * P7 finding 3: re-run the backstop rung check at the token-serialized
+   * MAIN-SUBMIT boundary, not just at admission. A rung command can be admitted
+   * and queued (or mid-`executeCommand`) without yet being a persisted Order row —
+   * `findCycleBounceRungs` alone can't see it, so a backstop reaching submit at
+   * that exact moment would otherwise slip through and double-exit alongside the
+   * rung. Persisted rungs (re)open the P6 transition + re-arm the deferred intent
+   * (idempotent — replaces any earlier entry for this token) so the backstop still
+   * places once the barrier closes; an in-flight-only rung (no persisted target to
+   * track) is refused without opening a transition — the rung's own admission path
+   * (or the next submit-boundary check once it persists) will drain it.
+   */
+  private async backstopSubmitRungRejection(
+    cmd: PlaceOrderCommand,
+  ): Promise<{ reason: string; code: ExchangeErrorCode } | null> {
+    if (!isBounceForceExit({ side: cmd.side, decisionRuleId: cmd.decisionRuleId ?? null }))
+      return null;
+
+    const persistedRungs = this.findCycleBounceRungs(cmd);
+    if (persistedRungs.length === 0 && !this.hasInFlightBounceRungForCycle(cmd)) return null;
+
+    // Finding 3: record the durable intent whenever we refuse the backstop — for a
+    // persisted rung AND an in-flight-only rung — so the backstop is NEVER lost. For
+    // a persisted rung, open the drain now; for an in-flight-only rung (no persisted
+    // OrderId to target yet), the rung's own place-completion hook in `executeCommand`
+    // opens the drain (or fires the backstop directly if it fails to persist).
+    this.pendingBackstops.set(String(cmd.tokenId), {
+      positionId: cmd.positionId ?? null,
+      command: cmd,
+    });
+    if (persistedRungs.length > 0) {
+      await this.openTokenTransition(cmd.tokenId, cmd.positionId ?? null, persistedRungs);
+    }
+    return { reason: "bounce-backstop-draining-rungs", code: ExchangeErrorCode.LivePolicyBlocked };
+  }
+
+  /**
+   * Finding 3: when an in-flight BOUNCE_EXIT_TARGET rung finishes executing, if a
+   * deferred backstop is waiting on its cycle, connect them: open the drain for the
+   * now-persisted rung (so the barrier closes → the backstop fires), or — if the rung
+   * failed to persist — fire the backstop directly (nothing left to drain).
+   */
+  private async connectPersistedRungToPendingBackstop(cmd: PlaceOrderCommand): Promise<void> {
+    if (!this.started || !this.pendingBackstops.has(String(cmd.tokenId))) return;
+    const rungs = this.findCycleBounceRungs(cmd);
+    if (rungs.length > 0) {
+      await this.openTokenTransition(cmd.tokenId, cmd.positionId ?? null, rungs);
+    } else {
+      await this.placeDeferredBackstop(cmd.tokenId);
+    }
+  }
+
+  /**
+   * P7 findings 1+2: fires exactly once per deferred intent, when the token's P6
+   * transition barrier reaches quiescent (called from `maybeCloseTokenTransition`).
+   * Reads+clears the pending entry FIRST (so a re-entrant close can't double-fire),
+   * then reconciles the ACTUAL residual from the exchange wallet (never the stale
+   * local reservation/position size the backstop was originally sized from) before
+   * rebuilding and resubmitting the command through the normal `PlaceOrderRequested`
+   * path — so every main-submit guard (loss floor, identity, barrier, min-size)
+   * re-applies to the reconciled command exactly as it would to any fresh signal.
+   */
+  private async placeDeferredBackstop(tokenId: TokenId): Promise<void> {
+    const key = String(tokenId);
+    if (!this.pendingBackstops.has(key)) return;
+    // Finding 1 (round 3): concurrency guard — the barrier-close fire and the autonomous
+    // timer must not place two backstops at once. The intent is RETAINED throughout and
+    // only removed when the backstop is confirmed working, the residual is gone, or it is
+    // authoritatively dropped — so a pause / submit-reject / UNKNOWN placement always
+    // leaves something for the autonomous timer to retry (never naked-and-forgotten).
+    if (this.inFlightDeferredBackstop.has(key)) return;
+    this.inFlightDeferredBackstop.add(key);
+    try {
+      const pending = this.pendingBackstops.get(key);
+      if (!pending) return;
+
+      // Completion signal 1 (finding 2): a working LOCAL backstop order for the cycle is
+      // the RELIABLE "already placed" signal (a prior deferred place succeeded + persisted)
+      // — positively identified, not a size heuristic. Complete the intent.
+      if (this.findCycleBackstopWorking(pending.command).length > 0) {
+        this.completeDeferredBackstop(key, "local backstop order already working");
+        return;
+      }
+
+      // Transient — wallet read failed: HOLD, do NOT count as a failed attempt.
+      let remoteSize: number;
+      try {
+        remoteSize = await this.deps.gateway.getPositionBalance(tokenId);
+      } catch (err) {
+        this.log.error(
+          { err, tokenId: key, positionId: pending.positionId },
+          "deferred bounce backstop HOLD (intent retained) — wallet balance read failed",
+        );
+        return;
+      }
+
+      // Completion signal 2 (finding 2): residual no longer executable → the position sold
+      // out (the backstop filled, or a fill drained it). Complete the intent.
+      const minOrderSize = this.resolveCommandMinOrderSize(pending.command);
+      if (remoteSize <= 0 || !isExecutableOrderSize(remoteSize, minOrderSize)) {
+        this.completeDeferredBackstop(key, "residual already sold");
+        return;
+      }
+
+      // Transient — open-orders reconcile unavailable: HOLD, do NOT count as an attempt.
+      const openOrders = await this.deps.gateway.getOpenOrdersResult?.();
+      if (openOrders == null || !openOrders.ok) {
+        this.log.warn(
+          { tokenId: key, positionId: pending.positionId },
+          "deferred bounce backstop HOLD (intent retained) — open-orders reconcile unavailable",
+        );
+        return;
+      }
+
+      // Finding 4: a working SELL already rests remotely (a prior ambiguous/UNKNOWN place
+      // may have landed without a local record) → do NOT place a second taker. Retain — if
+      // it is our backstop it fills (→ residual gone → complete) or persists a local order
+      // (→ completion signal 1). Not counted as a placement attempt.
+      const remoteWorkingSell = openOrders.data.some(
+        (o) =>
+          String(o.tokenId) === key &&
+          String(o.side).toLowerCase() === "sell" &&
+          (o.status === "OPEN" || o.status === "PARTIALLY_FILLED"),
+      );
+      if (remoteWorkingSell) {
+        this.log.warn(
+          { tokenId: key, positionId: pending.positionId },
+          "deferred bounce backstop HOLD (intent retained) — a SELL is already working remotely (avoids a double taker)",
+        );
+        return;
+      }
+
+      // Finding 1 (round 6): NEVER publish another deferred backstop while a prior one's
+      // outcome is still unknown — the accounting (grace + attempt) is anchored at the real
+      // exchange-submit boundary in executeCommand, so this in-flight marker (not a bare
+      // timestamp) is what closes the publish→submit double window even under a slow (45s)
+      // gateway call.
+      if (this.pendingDeferredSubmit.has(key)) return;
+
+      // Finding 1 (round 5): grace window — do NOT submit again until the eventually-
+      // consistent open-orders view has had time to reflect the previous SUBMIT (timestamp
+      // set at the gateway boundary), so an UNKNOWN-landed prior order can't be followed by
+      // a second full-residual taker.
+      const now = Date.now();
+      const lastPlace = this.lastDeferredPlaceAt.get(key) ?? 0;
+      if (now - lastPlace < DEFERRED_BACKSTOP_PLACE_GRACE_MS) return; // retained; re-check next cycle
+
+      // Finding 3 (round 5): cap ACTIVE placement (no storm) but do NOT abandon the intent —
+      // once the cap is hit, ESCALATE: retain the intent, keep reconciling for completion on
+      // every cycle (the checks above), and alert ONCE. The count is incremented at the
+      // gateway boundary (finding 2), so transient pre-gateway rejects don't consume it.
+      const attempts = this.deferredBackstopRetries.get(key) ?? 0;
+      if (attempts >= MAX_DEFERRED_BACKSTOP_RETRIES) {
+        if (attempts === MAX_DEFERRED_BACKSTOP_RETRIES) {
+          this.deferredBackstopRetries.set(key, attempts + 1); // mark escalated (alert once)
+          this.log.fatal(
+            { tokenId: key, positionId: pending.positionId, attempts, remoteSize },
+            "deferred bounce backstop ESCALATED — active placement capped; intent RETAINED, still reconciling; MANUAL INTERVENTION required",
+          );
+        }
+        return; // retained + reconciling; never abandoned
+      }
+
+      const reconciledCmd: PlaceOrderCommand = {
+        ...pending.command,
+        commandId: createCommandId(randomUUID()),
+        // Finding 1: a FRESH clientOrderId per attempt — a prior REJECTED order with a
+        // stable id would otherwise poison every retry via the duplicate-clientOrderId gate.
+        clientOrderId: buildClientOrderId({
+          signalId: `bounce-backstop:${key}:${randomUUID()}`,
+          tokenId,
+          side: "sell",
+        }),
+        size: remoteSize,
+        // Marker so the gateway-boundary accounting (executeCommand) recognises this as a
+        // deferred backstop submit.
+        metadata: { ...(pending.command.metadata ?? {}), __deferredBackstop: true },
+      };
+      // Track in flight until its outcome is known (cleared in executeCommand's finally).
+      this.pendingDeferredSubmit.set(key, String(reconciledCmd.commandId));
+      this.log.warn(
+        {
+          tokenId: key,
+          positionId: pending.positionId,
+          reconciledSize: remoteSize,
+          attempts: attempts + 1,
+          clientOrderId: String(reconciledCmd.clientOrderId),
+        },
+        "deferred bounce backstop placing — residual reconciled from wallet (intent retained until confirmed)",
+      );
+      await this.deps.bus.publish("PlaceOrderRequested", {
+        command: reconciledCmd,
+        timestamp: Date.now(),
+      });
+    } finally {
+      this.inFlightDeferredBackstop.delete(key);
+    }
+  }
+
+  /** Complete + forget a deferred backstop intent (placed/filled) and clear its bookkeeping. */
+  private completeDeferredBackstop(key: string, reason: string): void {
+    this.pendingBackstops.delete(key);
+    this.deferredBackstopRetries.delete(key);
+    this.lastDeferredPlaceAt.delete(key);
+    this.log.info({ tokenId: key, reason }, "deferred bounce backstop intent completed");
+  }
+
+  /**
+   * Finding 1 (round 7): clear the in-flight deferred-submit marker when THIS command
+   * resolves — covers the admission-stage reject/skip paths (pause / startup fence /
+   * loss-floor / etc.) that return from handlePlace BEFORE dispatch, so the marker (and
+   * thus the whole deferred intent) can never be stranded by a rejected submit.
+   */
+  private clearPendingDeferredSubmit(cmd: PlaceOrderCommand): void {
+    const tk = String(cmd.tokenId);
+    if (this.pendingDeferredSubmit.get(tk) === String(cmd.commandId)) {
+      this.pendingDeferredSubmit.delete(tk);
+    }
+  }
+
+  /** True when `orderPositionId` matches `cmd`'s cycle. `undefined` cmdPositionId = unscoped (match all). */
+  private matchesPositionCycle(
+    orderPositionId: Order["positionId"],
+    cmdPositionId: string | null | undefined,
+  ): boolean {
+    if (cmdPositionId === undefined) return true;
+    return String(orderPositionId ?? null) === String(cmdPositionId ?? null);
+  }
+
+  private incrementTokenInFlight(cmd: PlaceOrderCommand | CancelOrderCommand): void {
+    const key = String(this.resolveCommandTokenId(cmd));
+    this.tokenInFlightCount.set(key, (this.tokenInFlightCount.get(key) ?? 0) + 1);
+  }
+
+  private decrementTokenInFlight(cmd: PlaceOrderCommand | CancelOrderCommand): void {
+    const key = String(this.resolveCommandTokenId(cmd));
+    const next = (this.tokenInFlightCount.get(key) ?? 1) - 1;
+    if (next <= 0) this.tokenInFlightCount.delete(key);
+    else this.tokenInFlightCount.set(key, next);
+  }
+
+  private hasInFlightCommand(tokenId: TokenId): boolean {
+    return (this.tokenInFlightCount.get(String(tokenId)) ?? 0) > 0;
+  }
+
   private makerBuyLiveRejection(
     cmd: PlaceOrderCommand,
     notional: number,
@@ -721,6 +1496,15 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    // Finding 6: hard startup fence — refuse EVERY placement until the startup
+    // transitions are seeded, independent of pause (the command-poller can resume
+    // during supervisor.start(), before seeding).
+    if (this.startupFenceActive) {
+      this.log.warn({ commandId: cmd.commandId }, "order rejected — startup fence active");
+      await this.rejectOrder(cmd, "startup-fence-active", ExchangeErrorCode.LivePolicyBlocked);
+      return;
+    }
+
     // Market active check: reject orders on deactivated/resolved markets
     const market = this.deps.marketRepo.findByTokenId(cmd.tokenId);
     if (market && !market.active) {
@@ -751,6 +1535,42 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    // Release A Phase 3: bounce-exclusivity / position-identity guard (admission).
+    const exitOwnerRejAdmit = this.exitOwnerIdentityRejection(cmd);
+    if (exitOwnerRejAdmit) {
+      this.log.warn(
+        {
+          commandId: cmd.commandId,
+          tokenId: cmd.tokenId,
+          side: cmd.side,
+          positionId: cmd.positionId ?? null,
+          reason: exitOwnerRejAdmit.reason,
+        },
+        "order rejected — exit-owner/position-identity guard (admission)",
+      );
+      await this.rejectOrder(cmd, exitOwnerRejAdmit.reason, exitOwnerRejAdmit.code);
+      return;
+    }
+
+    // Release A Phase 3 (P6): executor-owned per-token transition barrier. Opens
+    // (if this BUY just exposed a stale/cross-cycle working SELL) or checks
+    // (if the token is already draining) before anything else is admitted.
+    const transitionRejAdmit = await this.transitionRejection(cmd);
+    if (transitionRejAdmit) {
+      this.log.warn(
+        {
+          commandId: cmd.commandId,
+          tokenId: cmd.tokenId,
+          side: cmd.side,
+          positionId: cmd.positionId ?? null,
+          reason: transitionRejAdmit.reason,
+        },
+        "order rejected — token transition draining (admission)",
+      );
+      await this.rejectOrder(cmd, transitionRejAdmit.reason, transitionRejAdmit.code);
+      return;
+    }
+
     const notional = cmd.price * cmd.size;
 
     // Computed early — reused by both the balance-block bypass and the
@@ -760,6 +1580,25 @@ export class ExecutionModule implements RuntimeModule {
       side: cmd.side,
       decisionRuleId: cmd.decisionRuleId ?? null,
     });
+
+    // Release A Phase 3 (P7 — transactional B1): a bounce backstop must not place
+    // while its cycle's resting BOUNCE_EXIT_TARGET rungs are still working. Preflight
+    // the loss floor (HOLD without cancelling if the taker is below floor), else open
+    // the P6 transition to cancel + CONFIRM the rungs and record a durable deferred
+    // intent (`pendingBackstops`) — the executor itself places the reconciled residual
+    // once the token barrier reaches quiescent (`placeDeferredBackstop`), never a
+    // planner re-emission or a timer.
+    if (isBounceBackstop) {
+      const backstopRej = await this.openBackstopTransitionIfRungsResting(cmd);
+      if (backstopRej) {
+        this.log.warn(
+          { commandId: cmd.commandId, tokenId: cmd.tokenId, reason: backstopRej.reason },
+          "bounce backstop deferred — draining resting rungs / holding below floor",
+        );
+        await this.rejectOrder(cmd, backstopRej.reason, backstopRej.code);
+        return;
+      }
+    }
 
     if (cmd.side === "buy" && this.deps.positionConcentration) {
       const executionPolicy = this.deps.executionPolicy?.() ?? DEFAULT_EXECUTION_POLICY;
@@ -1096,12 +1935,22 @@ export class ExecutionModule implements RuntimeModule {
     });
     this.acceptedCommandAt.set(String(effectiveCmd.commandId), Date.now());
 
-    if (this.queue) {
-      this.queue.enqueue(effectiveCmd);
-      return;
+    // P7 finding 3: track an admitted bounce rung as in-flight from the moment it's
+    // accepted for dispatch — closes the "queued/executing but not yet persisted"
+    // gap a persisted-orders-only check (`findCycleBounceRungs`) can't see, so a
+    // backstop reaching the submit boundary at that exact moment isn't fooled into
+    // thinking the cycle has no resting rung. Cleared in `executeCommand`'s finally.
+    if (
+      effectiveCmd.side === "sell" &&
+      effectiveCmd.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID
+    ) {
+      this.inFlightBounceRungs.set(String(effectiveCmd.commandId), {
+        tokenId: String(effectiveCmd.tokenId),
+        positionId: String(effectiveCmd.positionId ?? null),
+      });
     }
 
-    await this.executeCommand(effectiveCmd);
+    await this.dispatchCommand(effectiveCmd);
   }
 
   // ─── Cancel order handler ─────────────────────────────────────────────
@@ -1116,15 +1965,20 @@ export class ExecutionModule implements RuntimeModule {
     this.pruneProcessedCommandIds();
     this.acceptedCommandAt.set(String(cmd.commandId), Date.now());
 
-    if (this.queue) {
-      this.queue.enqueue(cmd);
-      return;
-    }
-
-    await this.executeCommand(cmd);
+    await this.dispatchCommand(cmd);
   }
 
   // ─── Command dispatcher ───────────────────────────────────────────────
+
+  /** Shared enqueue-or-execute path for both PlaceOrderCommand and CancelOrderCommand. */
+  private dispatchCommand(cmd: PlaceOrderCommand | CancelOrderCommand): Promise<void> {
+    this.incrementTokenInFlight(cmd);
+    if (this.queue) {
+      this.queue.enqueue(cmd);
+      return Promise.resolve();
+    }
+    return this.executeCommand(cmd);
+  }
 
   private async executeCommand(cmd: PlaceOrderCommand | CancelOrderCommand): Promise<void> {
     try {
@@ -1136,8 +1990,32 @@ export class ExecutionModule implements RuntimeModule {
     } finally {
       if (cmd.type === "PlaceOrderCommand") {
         this.pendingReservations.delete(String(cmd.commandId));
+        const wasBounceRung = this.inFlightBounceRungs.delete(String(cmd.commandId));
+        // Finding 3: a just-finished in-flight rung connects to any deferred backstop
+        // waiting on its cycle (opens the drain, or fires the backstop if it failed).
+        if (wasBounceRung) {
+          void this.connectPersistedRungToPendingBackstop(cmd).catch((err: unknown) => {
+            this.log.error(
+              { err, tokenId: String(cmd.tokenId) },
+              "failed to connect persisted rung to pending backstop",
+            );
+          });
+        }
+        // Finding 1 (round 6-7): a deferred backstop submit has now resolved (dispatched
+        // path). Clear the in-flight marker (accounting already happened at the gateway
+        // boundary). Admission-stage rejects clear it via rejectOrder/publishOrderSkipped.
+        this.clearPendingDeferredSubmit(cmd);
       }
+      this.decrementTokenInFlight(cmd);
       this.recordExecutionLatency(cmd);
+      // Release A Phase 3 (P6): the terminal-confirmation hooks
+      // (`removeTransitionTargetIfTerminal`, fired from INSIDE `executeCancel`
+      // for this very command) always run while this command still counts as
+      // in-flight, so `maybeCloseTokenTransition`'s in-flight guard blocks
+      // closing there even once the last target is gone. Re-check now, after
+      // the decrement above, so a drain whose last target was confirmed by
+      // THIS command's own cancel still closes instead of staying stuck open.
+      this.maybeCloseTokenTransition(this.resolveCommandTokenId(cmd));
     }
   }
 
@@ -1300,7 +2178,7 @@ export class ExecutionModule implements RuntimeModule {
     ) {
       return null;
     }
-    const existingSells = this.findOpenSellOrdersForToken(cmd.tokenId);
+    const existingSells = this.findOpenSellOrdersForToken(cmd.tokenId, cmd.positionId ?? null);
     if (existingSells.length === 0) return null;
     const profileLadderOldOrderId = this.getProfileLadderReplacementOldOrderId(cmd);
     if (profileLadderOldOrderId == null) return existingSells[0] ?? null;
@@ -1604,6 +2482,63 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    // Release A Phase 3: bounce-exclusivity / position-identity guard (main submit) —
+    // re-checked against the authoritative live position just before the exchange call.
+    const exitOwnerRejSubmit = this.exitOwnerIdentityRejection(effectiveCmd);
+    if (exitOwnerRejSubmit) {
+      this.log.warn(
+        { commandId: cmd.commandId, reason: exitOwnerRejSubmit.reason },
+        "order rejected — exit-owner/position-identity guard (submit)",
+      );
+      await this.rejectOrder(effectiveCmd, exitOwnerRejSubmit.reason, exitOwnerRejSubmit.code);
+      return;
+    }
+
+    // Release A Phase 3 (P6): re-check the transition barrier right before the
+    // exchange call — a competing BUY could have opened a drain between admission
+    // and here (the two boundaries are not atomic with each other).
+    const transitionRejSubmit = await this.transitionRejection(effectiveCmd);
+    if (transitionRejSubmit) {
+      this.log.warn(
+        {
+          commandId: cmd.commandId,
+          tokenId: effectiveCmd.tokenId,
+          reason: transitionRejSubmit.reason,
+        },
+        "order rejected — token transition draining (main submit)",
+      );
+      await this.rejectOrder(effectiveCmd, transitionRejSubmit.reason, transitionRejSubmit.code);
+      return;
+    }
+
+    // Release A Phase 3 (P7 rework, finding 3): backstop-specific rung re-check at
+    // the token-serialized submit boundary, covering persisted AND in-flight rungs
+    // (see backstopSubmitRungRejection) — the admission-time check alone can miss a
+    // rung that was admitted after this backstop but persists/executes first.
+    const backstopSubmitRej = await this.backstopSubmitRungRejection(effectiveCmd);
+    if (backstopSubmitRej) {
+      this.log.warn(
+        {
+          commandId: cmd.commandId,
+          tokenId: effectiveCmd.tokenId,
+          reason: backstopSubmitRej.reason,
+        },
+        "bounce backstop refused at submit — resting/in-flight rung still present",
+      );
+      await this.rejectOrder(effectiveCmd, backstopSubmitRej.reason, backstopSubmitRej.code);
+      return;
+    }
+
+    // Finding 2 (round 6-7): this is the ACTUAL exchange-submit boundary for a deferred
+    // backstop — count the placement attempt + start the grace HERE, so a pre-gateway
+    // reject/skip above (pause / fence / loss-floor / acceptingOrders) never consumes the
+    // cap or sets the grace. Reached only for a real gateway submit.
+    if (effectiveCmd.metadata?.["__deferredBackstop"] === true) {
+      const tk = String(effectiveCmd.tokenId);
+      this.lastDeferredPlaceAt.set(tk, Date.now());
+      this.deferredBackstopRetries.set(tk, (this.deferredBackstopRetries.get(tk) ?? 0) + 1);
+    }
+
     const result = await this.deps.gateway.placeOrder(placeParams);
 
     const now = Date.now();
@@ -1750,6 +2685,9 @@ export class ExecutionModule implements RuntimeModule {
         { commandId: cmd.commandId, orderId: cmd.orderId, status: existingOrder.status },
         "cancel skipped — order already in a terminal status",
       );
+      // Finding 4: a target that is already terminal must still be pruned from any
+      // open drain — otherwise this early-return leaves the barrier stuck.
+      this.removeTransitionTargetIfTerminal(existingOrder.tokenId, cmd.orderId);
       return;
     }
     if (this.cancelReservations.has(orderKey)) {
@@ -1812,6 +2750,11 @@ export class ExecutionModule implements RuntimeModule {
           timestamp: now,
         });
         await this.releasePendingSellReplacement(cmd.orderId);
+        // Release A Phase 3 (P6): this order may be a transition-barrier target —
+        // the OrderCancelled subscription above would catch it too, but checking
+        // directly here means the barrier closes within THIS call, not on the next
+        // microtask tick, which matters for tests that assert immediately after.
+        this.removeTransitionTargetIfTerminal(orderForTelemetry.tokenId, cmd.orderId);
       }
       cancelPersisted = true;
     } finally {
@@ -1894,7 +2837,8 @@ export class ExecutionModule implements RuntimeModule {
         !(
           order.side === "sell" &&
           order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
-          String(order.tokenId) === String(cmd.tokenId)
+          String(order.tokenId) === String(cmd.tokenId) &&
+          this.matchesPositionCycle(order.positionId, cmd.positionId ?? null)
         ),
     );
   }
@@ -2649,6 +3593,7 @@ export class ExecutionModule implements RuntimeModule {
     reasonCode: string,
     details: Readonly<Record<string, unknown>>,
   ): Promise<void> {
+    this.clearPendingDeferredSubmit(cmd); // finding 1 (round 7): any skip resolves the submit marker
     this.recordOrderSkipped(cmd, reasonCode, details);
     await this.deps.bus.publish("OrderSkipped", {
       commandId: cmd.commandId,
@@ -2908,7 +3853,7 @@ export class ExecutionModule implements RuntimeModule {
     // Normal exit management keeps one live price per token and replaces it
     // when strategy moves. The per-token SELL cap is a race/legacy-state
     // ceiling, not permission to stack multiple independent exit prices.
-    const existingSells = this.findOpenSellOrdersForToken(cmd.tokenId);
+    const existingSells = this.findOpenSellOrdersForToken(cmd.tokenId, cmd.positionId ?? null);
     const key = String(cmd.tokenId);
     const profileLadderOldOrderId = this.getProfileLadderReplacementOldOrderId(cmd);
     if (profileLadderOldOrderId != null) {
@@ -3051,7 +3996,17 @@ export class ExecutionModule implements RuntimeModule {
     return true;
   }
 
-  private findOpenSellOrdersForToken(tokenId: TokenId): Order[] {
+  /**
+   * `positionId` omitted (not even `null`) = unscoped — every working SELL for
+   * the token, regardless of cycle. Passing `cmd.positionId ?? null` (even
+   * `null`) scopes the result to orders sharing that exact cycle, so a cancel
+   * side effect can never target a different cycle's order by token match
+   * alone. `handlePositionUpdated`'s loss-floor re-eval deliberately calls this
+   * unscoped: a below-floor resting SELL is unconditionally worth cancelling
+   * regardless of cycle ownership, and scoping it could leave a stale/legacy
+   * below-floor order unmonitored.
+   */
+  private findOpenSellOrdersForToken(tokenId: TokenId, positionId?: string | null): Order[] {
     return this.deps.orderRepo
       .findByTokenId(tokenId)
       .filter(
@@ -3059,7 +4014,8 @@ export class ExecutionModule implements RuntimeModule {
           order.side === "sell" &&
           (order.status === "pending" ||
             order.status === "open" ||
-            order.status === "partially-filled"),
+            order.status === "partially-filled") &&
+          this.matchesPositionCycle(order.positionId, positionId),
       );
   }
 
@@ -3165,6 +4121,7 @@ export class ExecutionModule implements RuntimeModule {
     reason: string,
     errorCode: ExchangeErrorCode,
   ): Promise<void> {
+    this.clearPendingDeferredSubmit(cmd); // finding 1 (round 7): any reject resolves the submit marker
     await this.publishOrderRejected(cmd, { reason, errorCode, timestamp: Date.now() });
     this.maybeIncrementDustCounterForExecutionReject(cmd, reason);
   }
@@ -3373,6 +4330,7 @@ export class ExecutionModule implements RuntimeModule {
       clientOrderId: cmd.clientOrderId,
       tokenId: cmd.tokenId,
       conditionId: cmd.conditionId,
+      positionId: cmd.positionId ?? null,
       side: cmd.side,
       orderType: cmd.orderType,
       postOnly: cmd.postOnly === true,
@@ -3526,6 +4484,40 @@ export class ExecutionModule implements RuntimeModule {
       );
       await this.rejectOrder(retryCmd, retryRej.reason, retryRej.code);
       return true;
+    }
+
+    // Release A Phase 3: bounce-exclusivity / position-identity guard (invalid-tick
+    // retry). Return true (like the maker guard above) so this rejectOrder is the
+    // ONLY OrderRejected for the command, not a second one over the original path.
+    const exitOwnerRejRetry = this.exitOwnerIdentityRejection(retryCmd);
+    if (exitOwnerRejRetry) {
+      this.log.warn(
+        { commandId: cmd.commandId, reason: exitOwnerRejRetry.reason },
+        "order rejected — exit-owner/position-identity guard (invalid-tick retry)",
+      );
+      await this.rejectOrder(retryCmd, exitOwnerRejRetry.reason, exitOwnerRejRetry.code);
+      return true;
+    }
+
+    // Release A Phase 3 (P6): transition-barrier guard (invalid-tick retry).
+    // Return true (like the guards above) so this rejectOrder is the ONLY
+    // OrderRejected for the command, not a second one over the original path.
+    const transitionRejRetry = await this.transitionRejection(retryCmd);
+    if (transitionRejRetry) {
+      this.log.warn(
+        { commandId: cmd.commandId, reason: transitionRejRetry.reason },
+        "order rejected — token transition draining (invalid-tick retry)",
+      );
+      await this.rejectOrder(retryCmd, transitionRejRetry.reason, transitionRejRetry.code);
+      return true;
+    }
+
+    // Finding 2 (round 6-7): a deferred backstop reaching the gateway via the invalid-tick
+    // retry path is a real submit too — count + set grace at this boundary.
+    if (retryCmd.metadata?.["__deferredBackstop"] === true) {
+      const tk = String(retryCmd.tokenId);
+      this.lastDeferredPlaceAt.set(tk, Date.now());
+      this.deferredBackstopRetries.set(tk, (this.deferredBackstopRetries.get(tk) ?? 0) + 1);
     }
 
     const retryResult = await this.deps.gateway.placeOrder(retryParams);

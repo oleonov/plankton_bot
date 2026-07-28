@@ -90,6 +90,8 @@ function createMockPositionRepo(positionMap: Map<string, Position>): PositionRep
     findDust: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
     findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    findById: vi.fn(() => null),
+    findActiveByTokenId: vi.fn(() => []),
   } as unknown as PositionRepository;
 }
 

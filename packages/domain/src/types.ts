@@ -225,6 +225,13 @@ export interface Signal {
   sizingRuleId: string | null;
   generatedAt: string; // ISO timestamp
   bounceRung?: BounceRungMetadata;
+  /**
+   * Release A Phase 3: exact originating position identity, carried from the
+   * producing engine's Position snapshot (DecisionSignalDraft.positionId), NEVER
+   * re-looked-up by token. Present on a SELL / scale-in add BUY bound to an
+   * existing position; absent on an initial-entry BUY that opens a new cycle.
+   */
+  positionId?: PositionId | null;
 }
 
 export interface DecisionSignalLog {
@@ -399,6 +406,12 @@ export interface Order {
   clientOrderId: ClientOrderId;
   tokenId: TokenId;
   conditionId: ConditionId;
+  /**
+   * Release A Phase 3: exact originating position identity (migration 088). NULL =
+   * legacy/pre-migration order. Lets cancel/replace/backstop be scoped by position
+   * CYCLE and stale cross-cycle commands be rejected. Persisted on the orders table.
+   */
+  positionId?: PositionId | null;
   side: OrderSide;
   orderType: OrderType;
   postOnly?: boolean;
@@ -1825,6 +1838,7 @@ export type DustAutoCloseSkipReason =
   | "recent_sell"
   | "retry_backoff"
   | "profile_owned"
+  | "bounce_owned"
   | "redeem_in_flight";
 
 export type DustAutoCloseNonCloseableReason =
@@ -1852,6 +1866,8 @@ export interface DustCleanupDecisionInput {
   minValidPrice: number;
   retryEligible: boolean;
   profileOwned: boolean;
+  /** Release A Phase 3: a bounce owner is serviced exclusively by the bounce ladder. */
+  bounceOwned: boolean;
   redeemInFlight: boolean;
 }
 

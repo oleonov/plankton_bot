@@ -1553,6 +1553,7 @@ async function main(): Promise<void> {
   const entryLifecycleModule = new EntryLifecycleModule({
     bus,
     orderRepo: repos.order,
+    positionRepo: repos.position,
     fillRepo: repos.fill,
     legStateRepo: repos.legState,
     algoRulesRepo: repos.algoRules,
@@ -2673,9 +2674,17 @@ async function main(): Promise<void> {
   if (!getFillsResult) {
     throw new Error("exchange gateway missing getFillsResult — cannot fail-closed on startup");
   }
+  // Release A Phase 3 (P6): same fail-closed requirement as getFillsResult above —
+  // the startup transition fence needs an authoritative open-orders snapshot to
+  // classify stale/reopening-risk working orders before the supervisor starts.
+  const getOpenOrdersResult = exchangeGateway.getOpenOrdersResult?.bind(exchangeGateway);
+  if (!getOpenOrdersResult) {
+    throw new Error("exchange gateway missing getOpenOrdersResult — cannot fail-closed on startup");
+  }
   const startupAdoptionDeps = {
     gateway: {
       getFillsResult,
+      getOpenOrdersResult,
       ...(exchangeGateway.getMarketFeeInfo
         ? { getMarketFeeInfo: exchangeGateway.getMarketFeeInfo.bind(exchangeGateway) }
         : {}),
@@ -2830,7 +2839,26 @@ async function main(): Promise<void> {
     // paused=true AFTER supervisor.start() clobbered any such resume.
     setPausedAndPersist(true);
 
+    // Finding 6 (round 2): a LATCHED startup fence, set BEFORE the supervisor starts.
+    // The command-poller (first module) can apply a pending resume DURING
+    // supervisor.start(), before the barrier is seeded — the after-start re-pause used
+    // to be too late for that window. While the fence is latched the ExecutionModule
+    // refuses EVERY placement regardless of pause, so nothing can slip through until
+    // the barrier is seeded.
+    executionModule.beginStartupFence();
+
     await supervisor.start();
+
+    // Release A Phase 3 (P6): drain any stale/reopening-risk working order the
+    // startup fence classified, via the SAME barrier machinery the live gate
+    // uses. Must run AFTER supervisor.start() — ExecutionModule's OrderCancelled/
+    // FillReceived subscriptions (wired in its own start()) are what actually
+    // consume the cancel-confirmation, and must run BEFORE any other module gets
+    // a chance to place a competing order for a still-draining token.
+    await executionModule.seedStartupTransitions(startupAdoption.drainTargets);
+
+    // Barrier seeded — release the hard fence (normal pause/resume state now governs).
+    executionModule.endStartupFence();
 
     // Publish runtime state to control.db for cross-service visibility
     const instanceId = randomUUID();

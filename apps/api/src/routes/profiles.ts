@@ -663,7 +663,48 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     applyWrite();
 
     const version = readExecutionPolicyVersion(controlDb);
-    return ok({ policy: parsed.policy, version, issues: parsed.issues });
+
+    // Release A Phase 3 (P8 — owner-liveness drain reporting). Disabling bounce only
+    // stops NEW bounce-owner assignment; EXISTING bounce owners keep being serviced
+    // (owner-authoritative servicing — they are never stranded). Report the two states
+    // separately, with an AUTHORITATIVE drain count taken under a ledger BEGIN IMMEDIATE
+    // write-barrier so it cannot race a first-fill transaction that commits a new bounce
+    // owner just after a plain SELECT. Irreducible dust (status='dust') is excluded — it
+    // retires only at resolution and would otherwise block the count indefinitely.
+    const bounceDisabled =
+      parsed.policy.bounceExit.enabled !== true || parsed.policy.bounceExit.mode === "off";
+    if (!bounceDisabled) {
+      return ok({ policy: parsed.policy, version, issues: parsed.issues });
+    }
+    // Best-effort drain count — the policy change already committed above, so ANY
+    // ledger error (bootstrap / prepare / transaction) must NOT fail the PATCH;
+    // report bounceDraining=null and still return the committed 200.
+    let bounceDraining: number | null = null;
+    try {
+      const ledger = opts.ledgerPool.get(profileId);
+      if (ledger) {
+        const drain = ledger
+          .transaction(
+            () =>
+              ledger
+                .prepare(
+                  `SELECT COUNT(*) AS n FROM positions WHERE exit_owner = 'bounce' AND status = 'open'`,
+                )
+                .get() as { n: number },
+          )
+          .immediate();
+        bounceDraining = drain.n;
+      }
+    } catch (err) {
+      request.log.warn({ err, profileId }, "bounce drain count unavailable — reporting null");
+    }
+    return ok({
+      policy: parsed.policy,
+      version,
+      issues: parsed.issues,
+      bounceAssignment: "disabled",
+      bounceDraining,
+    });
   });
 
   // ── GET /profiles/:profileId/history ─────────────────────────────────

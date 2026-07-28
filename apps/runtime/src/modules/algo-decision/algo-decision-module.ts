@@ -87,6 +87,7 @@ import { SAME_PRICE_COOLDOWN_REASON } from "../same-price-cooldown/same-price-co
 import { TRACK_A_ADD_THROTTLE_REASON } from "../dead-market-shadow/track-a-add-throttle-shadow.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js";
+import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import { SlidingLatencyWindow, type LatencySnapshot } from "./decision-metrics.js";
 import { DecisionPersistenceBuffer } from "./async-decision-persistence.js";
 import { DecisionWorkerPool } from "./decision-worker-pool.js";
@@ -1757,15 +1758,25 @@ export class AlgoDecisionModule implements RuntimeModule {
     // for-all.md): resolve ladder state for ANY eligible open position, not
     // just GATE — gated by isBounceLadderEligiblePosition's appliesFromMs
     // cutoff, so pre-flag positions are untouched.
+    // Release A Phase 3: a bounce OWNER (sticky exit_owner='bounce') is eligible for
+    // ladder-state resolution regardless of the live whitelist/cutoff/sellableFlow
+    // eligibility — owner-authoritative, so a flag rollback can't drop its state.
     const bounceLadderEligible =
       legState != null &&
       position != null &&
-      this.isBounceLadderEligiblePosition(position, executionPolicy, legState.firstTradeAt);
+      (isBounceOwned(position) ||
+        // 'profile' owners are never bounce-serviced; legacy eligibility is for
+        // UNASSIGNED (NULL) positions only (owner-authoritative).
+        (position.exitOwner == null &&
+          this.isBounceLadderEligiblePosition(position, executionPolicy, legState.firstTradeAt)));
     // fillAware = sellableFlow actually on — only then does the planner USE the
     // fill-aware fields, so only then do we pay (and risk) the fillRepo read.
+    // Release A Phase 3: a bounce owner ALWAYS uses fill-aware accounting so its
+    // dedup / residual can't regress after a sellableFlow rollback.
     const fillAware =
-      executionPolicy?.sellableFlow?.enabled === true &&
-      executionPolicy.sellableFlow.appliesFromMs != null;
+      isBounceOwned(position) ||
+      (executionPolicy?.sellableFlow?.enabled === true &&
+        executionPolicy.sellableFlow.appliesFromMs != null);
     const bounceLadderState =
       bounceLadderEligible && legState
         ? this.resolveBounceLadderState(tokenId, `${tokenId}:${legState.firstTradeAt}`, fillAware)
@@ -1801,8 +1812,17 @@ export class AlgoDecisionModule implements RuntimeModule {
         ? this.hasActiveSellOrderForBounceBackstop(tokenId)
         : false,
       sellLoopGuard: this.deps.sellLoopGuard?.getSnapshot(tokenId, now) ?? null,
-      s1Ownership: this.deps.s1Ownership?.getSnapshot(tokenId) ?? null,
-      profileLadderOwned: this.deps.profileLadderOwnership?.isProfileLadderOwned(tokenId) ?? false,
+      // Release A Phase 3: MASK stale non-bounce ownership for a bounce owner — its
+      // exit is exclusively the bounce ladder, so a stale s1/profile ownership flag
+      // must not suppress the bounce servicing or a below-entry bounce backstop.
+      // Safe because the atomic-deploy invariant + the P6 transition fence guarantee
+      // no live non-bounce order/queued submission coexists with a bounce owner.
+      s1Ownership: isBounceOwned(position)
+        ? null
+        : (this.deps.s1Ownership?.getSnapshot(tokenId) ?? null),
+      profileLadderOwned: isBounceOwned(position)
+        ? false
+        : (this.deps.profileLadderOwnership?.isProfileLadderOwned(tokenId) ?? false),
     };
   }
 
@@ -3113,6 +3133,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       decisionRuleId: draft.decisionRuleId,
       sizingRuleId: draft.sizingRuleId,
       generatedAt,
+      positionId: draft.positionId ?? null,
       ...(draft.bounceRung ? { bounceRung: draft.bounceRung } : {}),
     };
     const entryFreshEdgeTelemetry =

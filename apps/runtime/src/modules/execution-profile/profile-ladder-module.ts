@@ -38,6 +38,7 @@ import {
   validateProfileLadderReplacementSellTarget,
 } from "../profile-ladder-order-helpers.js";
 import { resolvePositiveSellFloor } from "../../executable-price.js";
+import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import { isExecutableOrderSize, resolveEffectiveMinOrderSize } from "../../min-order-size.js";
 import type { ProfileLadderRepository } from "./profile-ladder-repository.js";
 import type { ExecutionProfilePolicy, ProfileState } from "./types.js";
@@ -654,6 +655,9 @@ export class ProfileLadderModule implements RuntimeModule {
       await this.cancelLadder(position.tokenId, "position_closed");
       return;
     }
+    // Release A Phase 3: a bounce owner is serviced exclusively by the bounce ladder
+    // — no profile-ladder claim, no placement.
+    if (isBounceOwned(position)) return;
     if (this.isDormant(position.tokenId)) {
       this.writeCounter("ladder_rebuild_skipped_dormant", 1);
       return;
@@ -1620,6 +1624,10 @@ export class ProfileLadderModule implements RuntimeModule {
       };
     } = {},
   ): Promise<void> {
+    // Release A Phase 3: a bounce owner is serviced exclusively by the bounce ladder
+    // — belt-and-suspenders catch for any recovery/startup path that reaches
+    // placement without going through handlePositionUpdated.
+    if (isBounceOwned(position)) return;
     const signalId =
       options.signalId ??
       `profile_ladder_${String(position.tokenId)}_${ladderId}_${rung.rungIndex}`;
@@ -1671,6 +1679,7 @@ export class ProfileLadderModule implements RuntimeModule {
         signalId,
         decisionRuleId: this.policy().decisionRuleId,
         signalTimestamp: new Date(timestamp).toISOString(),
+        positionId: position.positionId,
         metadata: {
           source: this.policy().orderTag,
           ...(marketData.cacheStatus == null ? {} : { cacheStatus: marketData.cacheStatus }),

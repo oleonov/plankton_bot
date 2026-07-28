@@ -611,6 +611,8 @@ describe("maker fill entryStyle propagation", () => {
       findOpenByEntryStyle: vi.fn((style) =>
         [...positions.values()].filter((p) => p.entryStyle === style),
       ),
+      findById: vi.fn(() => null),
+      findActiveByTokenId: vi.fn(() => []),
     };
     const lotRepo = {
       save: vi.fn(),

@@ -8,7 +8,13 @@ import type {
   OrderSide,
   OrderType,
 } from "@krabs/domain";
-import { createOrderId, createTokenId, createConditionId, createBotRunId } from "@krabs/domain";
+import {
+  createOrderId,
+  createTokenId,
+  createConditionId,
+  createPositionId,
+  createBotRunId,
+} from "@krabs/domain";
 
 export class SqliteOrderRepository implements OrderRepository {
   constructor(private readonly db: Database.Database) {}
@@ -23,8 +29,10 @@ export class SqliteOrderRepository implements OrderRepository {
           fill_progress_shares, market_horizon,
           decision_rule_id, signal_timestamp, exchange_error_code,
           exchange_error_message, exchange_error_payload, exchange_rejection_reason,
-          metadata_json, entry_style, bot_run_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          metadata_json, entry_style, position_id, bot_run_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         -- NB: position_id is OMITTED from DO UPDATE — it is write-once on INSERT
+         -- (an order belongs to exactly one position cycle for its whole life).
          ON CONFLICT(order_id) DO UPDATE SET
            status = excluded.status,
            exchange_order_id = excluded.exchange_order_id,
@@ -75,6 +83,7 @@ export class SqliteOrderRepository implements OrderRepository {
         order.exchangeRejectionReason ?? null,
         order.metadata ? JSON.stringify(order.metadata) : null,
         order.entryStyle ?? null,
+        order.positionId ?? null,
         order.botRunId,
         order.createdAt,
         order.updatedAt,
@@ -246,6 +255,7 @@ export class SqliteOrderRepository implements OrderRepository {
       clientOrderId: row.client_order_id as string as ClientOrderId,
       tokenId: createTokenId(row.token_id as string),
       conditionId: createConditionId(row.condition_id as string),
+      positionId: row.position_id ? createPositionId(row.position_id as string) : null,
       side: row.side as OrderSide,
       orderType: row.order_type as OrderType,
       postOnly: row.post_only === 1,

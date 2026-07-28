@@ -245,6 +245,8 @@ function createMockPositionRepo(position: Position | null = null): PositionRepos
     findDust: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue(position ? [position] : []),
     findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    findById: vi.fn(() => null),
+    findActiveByTokenId: vi.fn(() => []),
   };
 }
 
@@ -2310,8 +2312,29 @@ describe("ExecutionModule", () => {
   });
 
   it("does not apply SELL replacement tolerance to BUY commands", async () => {
-    orderRepo.findByTokenId = vi.fn().mockReturnValue([openSellAt(0.3)]);
-    await mod.start();
+    // The resting SELL belongs to the SAME cycle as the shared `mod` fixture's
+    // position (pos-1), and that position is reported active — this keeps the
+    // P6 pre-BUY cross-cycle gate (Release A Phase 3) a no-op here, isolating
+    // the assertion to the SELL-replacement-tolerance behavior under test.
+    const samePosition = makePosition({ positionId: createPositionId("pos-1") });
+    const samePositionRepo = createMockPositionRepo(samePosition);
+    samePositionRepo.findActiveByTokenId = vi.fn().mockReturnValue([samePosition]);
+    const noReplaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: samePositionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(samePosition),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    orderRepo.findByTokenId = vi
+      .fn()
+      .mockReturnValue([openSellAt(0.3, { positionId: createPositionId("pos-1") })]);
+    await noReplaceMod.start();
 
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd({
@@ -2326,7 +2349,7 @@ describe("ExecutionModule", () => {
 
     expect(gateway.cancelOrder).not.toHaveBeenCalled();
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
-    await mod.stop();
+    await noReplaceMod.stop();
   });
 
   it("cancels an existing SELL before submitting the replacement order", async () => {
@@ -3007,6 +3030,208 @@ describe("ExecutionModule", () => {
     );
 
     await replaceMod.stop();
+  });
+
+  // Release A Phase 3 (P6) — executor-owned per-token transition barrier
+  // (docs/plans/2026-07-24-release-a-phase3-owner-servicing.md).
+  describe("Release A Phase 3 (P6) — transition barrier", () => {
+    it("blocks a reopening BUY while a stale prior-cycle SELL drains, then admits a retry once it is confirmed-cancelled", async () => {
+      let cancelled = false;
+      const staleSell = openSellAt(0.3, {
+        orderId: createOrderId("stale-sell-1"),
+        exchangeOrderId: "stale-sell-1",
+        positionId: createPositionId("pos-old-cycle"),
+      });
+      orderRepo.findByTokenId = vi.fn().mockImplementation(() => (cancelled ? [] : [staleSell]));
+      orderRepo.findById = vi
+        .fn()
+        .mockImplementation((id: unknown) =>
+          String(id) === String(staleSell.orderId)
+            ? { ...staleSell, status: cancelled ? "cancelled" : "open" }
+            : null,
+        );
+      orderRepo.updateStatus = vi.fn().mockImplementation(() => {
+        cancelled = true;
+      });
+      // The shared `mod` fixture's positionRepo.findActiveByTokenId() always
+      // returns [] — "pos-old-cycle" is active nowhere, so the resting SELL
+      // is a genuine prior/closed cycle (the reopening scenario Part 2 guards).
+      await mod.start();
+
+      const rejected: Array<{ reason: string }> = [];
+      bus.subscribe("OrderRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("reopen-buy-1"),
+          clientOrderId: "plk_reopen_buy_1" as ClientOrderId,
+          side: "buy",
+        }),
+        timestamp: Date.now(),
+      });
+
+      // The stale SELL is drained instead of being left to fill alongside a
+      // newly (re)admitted cycle, and the exposing BUY itself is deferred.
+      expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "stale-sell-1" });
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]!.reason).toBe("transition-draining");
+
+      // The drain's terminal confirmation (the local cancel-result path, via
+      // the executeCommand finally-block re-check) already closed the
+      // barrier within the same call above — a retried BUY is now admitted.
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("reopen-buy-2-retry"),
+          clientOrderId: "plk_reopen_buy_2" as ClientOrderId,
+          side: "buy",
+        }),
+        timestamp: Date.now(),
+      });
+
+      expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+      await mod.stop();
+    });
+
+    it("blocks a competing PlaceOrderCommand while a token is draining, and admits again only once the drain target is confirmed terminal", async () => {
+      let sellStatus: "open" | "cancelled" = "open";
+      const stuckSell = openSellAt(0.35, {
+        orderId: createOrderId("stuck-sell-1"),
+        exchangeOrderId: "stuck-sell-1",
+        positionId: createPositionId("pos-old-cycle-2"),
+      });
+      orderRepo.findByTokenId = vi
+        .fn()
+        .mockImplementation(() =>
+          sellStatus === "open" ? [{ ...stuckSell, status: sellStatus }] : [],
+        );
+      orderRepo.findById = vi
+        .fn()
+        .mockImplementation((id: unknown) =>
+          String(id) === String(stuckSell.orderId) ? { ...stuckSell, status: sellStatus } : null,
+        );
+      // Simulates an ambiguous/unknown exchange cancel outcome (P6 spec: must
+      // NOT be treated as terminal) — the target stays in `targets` and the
+      // token keeps draining.
+      (gateway.cancelOrder as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ success: false });
+
+      await mod.start();
+      const rejected: Array<{ reason: string }> = [];
+      bus.subscribe("OrderRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("drain-open-buy"),
+          clientOrderId: "plk_drain_open_buy" as ClientOrderId,
+          side: "buy",
+        }),
+        timestamp: Date.now(),
+      });
+      expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]!.reason).toBe("transition-draining");
+
+      // A second, competing command for the SAME token arrives while still
+      // draining — rejected too. Finding 4: the barrier now SELF-HEALS on each
+      // placement attempt — the first cancel came back ambiguous (success:false)
+      // and the target is still working, so the self-heal RETRIES the cancel
+      // (a stuck/failed cancel must be re-attempted, not left blocking forever).
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("competing-buy"),
+          clientOrderId: "plk_competing_buy" as ClientOrderId,
+          side: "buy",
+        }),
+        timestamp: Date.now(),
+      });
+      expect(gateway.cancelOrder).toHaveBeenCalledTimes(2); // retried the stuck cancel
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      expect(rejected).toHaveLength(2);
+      expect(rejected[1]!.reason).toBe("transition-draining");
+
+      // Terminal confirmation arrives via the OTHER source — an independent
+      // OrderCancelled echo (user-order-stream-module.ts), not executeCancel.
+      sellStatus = "cancelled";
+      await bus.publish("OrderCancelled", {
+        commandId: createCommandId("external-cancel-echo"),
+        orderId: stuckSell.orderId,
+        tokenId: stuckSell.tokenId,
+        conditionId: stuckSell.conditionId,
+        reason: "operator",
+        signalReason: null,
+        timestamp: Date.now(),
+      });
+
+      // The token is quiescent again — a fresh command is admitted.
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("post-drain-buy"),
+          clientOrderId: "plk_post_drain_buy" as ClientOrderId,
+          side: "buy",
+        }),
+        timestamp: Date.now(),
+      });
+      expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+      await mod.stop();
+    });
+
+    it("cancel-side lookups only act on positionId-matching orders — a cross-cycle resting SELL is never picked as the replacement target", async () => {
+      const currentCyclePosition = makePosition({ positionId: createPositionId("pos-1") });
+      const scopedPositionRepo = createMockPositionRepo(currentCyclePosition);
+      // The shared helper's findActiveByTokenId ignores its constructor arg
+      // (a pre-existing fixture gap, unrelated to P6) — override it here so
+      // the P5 exit-owner identity check (a single active cycle matching
+      // cmd.positionId) passes and this test isolates Part 4's cancel-side
+      // scoping in findOpenSellOrdersForToken/identifyReplacementCancelTarget.
+      scopedPositionRepo.findActiveByTokenId = vi.fn().mockReturnValue([currentCyclePosition]);
+
+      // Resting SELL left over from a DIFFERENT (older/closed) cycle on the
+      // SAME token. Before Part 4's positionId scoping, a token-only lookup
+      // would treat this as "the existing sell to replace" and cancel a
+      // prior cycle's order out from under it.
+      const crossCycleSell = openSellAt(0.3, { positionId: createPositionId("pos-old-cycle") });
+      orderRepo.findByTokenId = vi.fn().mockReturnValue([crossCycleSell]);
+      orderRepo.findById = vi.fn().mockReturnValue(crossCycleSell);
+
+      const scopedMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo: scopedPositionRepo,
+        inventoryLotRepo: createMockInventoryLotRepo(currentCyclePosition),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      });
+      await scopedMod.start();
+
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("sell-current-cycle"),
+          clientOrderId: "plk_sell_current_cycle" as ClientOrderId,
+          side: "sell",
+          price: 0.4,
+          size: 5,
+          positionId: createPositionId("pos-1"),
+        }),
+        timestamp: Date.now(),
+      });
+
+      // No cancel of the cross-cycle order — the new SELL is placed fresh,
+      // never treated as a "replacement" of a different cycle's resting order.
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+      expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+      await scopedMod.stop();
+    });
   });
 
   // docs/plans/2026-07-20-exit-loss-floor.md §Phase 6 — best-effort pre-cancel
@@ -3710,6 +3935,8 @@ describe("ExecutionModule", () => {
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
       findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+      findById: vi.fn(() => null),
+      findActiveByTokenId: vi.fn(() => []),
     } as PositionRepository;
     const guardedMod = new ExecutionModule({
       gateway,
@@ -3757,6 +3984,8 @@ describe("ExecutionModule", () => {
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
       findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+      findById: vi.fn(() => null),
+      findActiveByTokenId: vi.fn(() => []),
     } as PositionRepository;
     const guardedMod = new ExecutionModule({
       gateway,
@@ -3807,6 +4036,8 @@ describe("ExecutionModule", () => {
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
       findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+      findById: vi.fn(() => null),
+      findActiveByTokenId: vi.fn(() => []),
     } as PositionRepository;
     const guardedMod = new ExecutionModule({
       gateway,
@@ -3861,6 +4092,8 @@ describe("ExecutionModule", () => {
         ]),
       findAll: vi.fn().mockReturnValue([]),
       findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+      findById: vi.fn(() => null),
+      findActiveByTokenId: vi.fn(() => []),
     } as PositionRepository;
     const guardedMod = new ExecutionModule({
       gateway,
@@ -4854,6 +5087,8 @@ describe("ExecutionModule", () => {
         findOpen: vi.fn().mockReturnValue([]),
         findAll: vi.fn().mockReturnValue([]),
         findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+        findById: vi.fn(() => null),
+        findActiveByTokenId: vi.fn(() => []),
         findDust: vi.fn().mockReturnValue([
           makePosition({
             tokenId: createTokenId("tok-dust"),

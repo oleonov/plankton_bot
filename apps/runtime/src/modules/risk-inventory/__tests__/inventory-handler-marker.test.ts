@@ -62,6 +62,8 @@ function makePositionRepo(existingPosition: Position | null = null): PositionRep
     findDust: vi.fn(() => []),
     findAll: vi.fn(() => []),
     findOpenByEntryStyle: vi.fn(() => []),
+    findById: vi.fn(() => null),
+    findActiveByTokenId: vi.fn(() => []),
   } as unknown as PositionRepository;
 }
 
