@@ -78,3 +78,32 @@ baseline-coverage.txt
 
 # Pinned SQLite CLI builds for the census tests (§7) — binary artifacts, never committed
 .cache/
+
+# --- Research raw data exports (regenerable, too large for git) ---
+# Per CLAUDE.md the research/* scripts, .md reports and small result tables ARE committed.
+# These 15 files are raw regenerable dumps (571 MB total); markets.csv alone is 105 MB and
+# exceeds GitHub's 100 MB hard limit. Regenerate with the sibling *.py that produced them.
+research_plankton/add_scalein_deepdive/krabs/markets.csv
+research_plankton/add_scalein_deepdive/krabs/decision_signal_log.csv
+research_plankton/krabs_plankton_overlap/p_legs.json
+research_plankton/maker_cut_exit_phaseA_lot_outcomes_2026-07-07.csv
+research_plankton/replay_data/titles.csv
+research_plankton/vpin_order_flow_features_2026-06-29.csv
+research_plankton/plankton_follow_through/legs_enriched.jsonl
+research_plankton/plankton_follow_through/legs.jsonl
+research_plankton/plankton_follow_through/plankton_legs.csv
+research_plankton/plankton_follow_through_add_policy_2026-06-28_leg_features.csv
+research_plankton/trackAB_deepdive/pl_legs_raw.jsonl
+research_plankton/trackAB_deepdive/gamma_index.json
+research_plankton/trackAB_deepdive/obs_asset_index.json
+research_plankton/plankton_fast_cascade_add_features_2026-06-30.csv
+research_plankton/r23_investigation/clob_hist_raw.tsv
+
+# Archives and run logs under research/ — not project artifacts
+research_plankton/**/*.zip
+research_plankton/**/*.log
+research_plankton/*.zip
+research_plankton/*.log
+
+# Playwright MCP browser snapshots — local tool artifacts, never committed
+.playwright-mcp/
