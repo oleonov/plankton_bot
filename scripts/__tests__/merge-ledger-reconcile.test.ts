@@ -97,11 +97,21 @@ describe("merge-ledger-reconcile: parseArgs", () => {
     });
   });
 
-  it("no longer offers --settle, so an operator cannot mark a row 'applied' from the CLI", () => {
-    // The old flag manufactured an 'applied' row without consuming lots or booking P&L. It is now
-    // parsed as nothing at all — falling through to the read-only list rather than writing.
-    const args = parseArgs(["--db", "x.db", "--settle", "m-1", "--apply"]);
-    expect(args.action).toBe("list");
+  it("rejects the removed --settle instead of silently listing", () => {
+    // The old flag manufactured an 'applied' row without consuming lots or booking P&L. Falling
+    // through to the read-only list would be the worse failure: operator automation still calling
+    // `--settle <id> --apply` would exit 0 having reconciled nothing, and the row would look healed.
+    expect(() => parseArgs(["--db", "x.db", "--settle", "m-1", "--apply"])).toThrow(
+      /--settle was removed/,
+    );
+  });
+
+  it("rejects an unknown flag rather than treating it as list mode", () => {
+    expect(() => parseArgs(["--db", "x.db", "--force"])).toThrow(/unknown flag --force/);
+  });
+
+  it("still answers --help even alongside a removed flag", () => {
+    expect(parseArgs(["--settle", "m-1", "--help"]).action).toBe("help");
   });
 });
 

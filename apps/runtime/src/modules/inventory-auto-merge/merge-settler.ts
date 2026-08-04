@@ -7,6 +7,12 @@ import type {
 } from "@krabs/domain";
 import type { MergeCandidate } from "./merge-candidate-service.js";
 
+/** Both legs exactly as this merge left them — including a leg the merge closed. */
+export interface MergedPositions {
+  yes: Position;
+  no: Position;
+}
+
 export class MergeSettler {
   private readonly db: Database.Database;
 
@@ -23,9 +29,13 @@ export class MergeSettler {
    * `mergeId` is the SAME id `InventoryManagerModule` already recorded as 'pending'/'onchain'
    * before this ran — it is passed in, not generated here, so this transaction advances that exact
    * row to 'applied' instead of inserting an unrelated second one.
+   *
+   * Returns both post-merge legs because the caller CANNOT read them back: a merge that consumes a
+   * leg entirely closes it, and `PositionRepository.findByTokenId` filters `status != 'closed'`, so
+   * a re-read silently drops exactly the leg whose closure subscribers most need to hear about.
    */
-  applyMerge(candidate: MergeCandidate, mergeId: string): void {
-    const runMerge = this.db.transaction(() => {
+  applyMerge(candidate: MergeCandidate, mergeId: string): MergedPositions {
+    const runMerge = this.db.transaction((): MergedPositions => {
       // 1. Fetch positions (must be open)
       const yesPos = this.positionRepo.findByTokenId(candidate.yesTokenId);
       const noPos = this.positionRepo.findByTokenId(candidate.noTokenId);
@@ -59,11 +69,18 @@ export class MergeSettler {
       });
 
       // 5. Update positions
-      this.updatePositionAfterMerge(yesPos, candidate.mergeAmount, yesCostBasis, spreadPnl / 2);
-      this.updatePositionAfterMerge(noPos, candidate.mergeAmount, noCostBasis, spreadPnl / 2);
+      return {
+        yes: this.updatePositionAfterMerge(
+          yesPos,
+          candidate.mergeAmount,
+          yesCostBasis,
+          spreadPnl / 2,
+        ),
+        no: this.updatePositionAfterMerge(noPos, candidate.mergeAmount, noCostBasis, spreadPnl / 2),
+      };
     });
 
-    runMerge();
+    return runMerge();
   }
 
   private updatePositionAfterMerge(
@@ -71,12 +88,12 @@ export class MergeSettler {
     mergedSize: number,
     costBasisConsumed: number,
     pnlShare: number,
-  ): void {
+  ): Position {
     const newSize = position.size - mergedSize;
     const isClosed = newSize <= 0.000001; // Handle precision
     const newCostBasis = Math.max(0, position.costBasisUsdc - costBasisConsumed);
 
-    this.positionRepo.save({
+    const updated: Position = {
       ...position,
       size: isClosed ? 0 : newSize,
       avgEntryPrice: isClosed ? 0 : newCostBasis / newSize,
@@ -86,6 +103,8 @@ export class MergeSettler {
       status: isClosed ? "closed" : position.status,
       closedAt: isClosed ? new Date().toISOString() : position.closedAt,
       updatedAt: new Date().toISOString(),
-    });
+    };
+    this.positionRepo.save(updated);
+    return updated;
   }
 }

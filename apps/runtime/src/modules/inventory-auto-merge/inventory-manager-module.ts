@@ -20,6 +20,12 @@ import type { SettlementInfraBreaker } from "../settlement-infra-breaker.js";
 import { isSettlementInfraRateLimitError } from "../settlement-infra-breaker.js";
 import { MergeCandidateService } from "./merge-candidate-service.js";
 import { MergeSettler } from "./merge-settler.js";
+import {
+  applyMergeAndPublish,
+  recordMetricCounter,
+  recoverConfirmedOnchainMerges,
+  republishMergeLegs,
+} from "./recover-onchain-merges.js";
 
 export interface InventoryManagerDeps {
   bus: EventBus;
@@ -91,6 +97,21 @@ export class InventoryManagerModule implements RuntimeModule {
   private stopping = false;
   private debounceTimer: NodeJS.Timeout | null = null;
   private unsubs: Array<() => void> = [];
+  /**
+   * Process-local fail-safe fence, IN ADDITION to the durable `merge_ledger` rows. Populated for
+   * every unappliable case (r12 review) EXCEPT "appliable": a "pending" row is already re-fenced by
+   * its own surviving ledger row, but "absent" (already 'applied' elsewhere, or discarded by the
+   * reconcile CLI) and "unreadable" can leave `findNonTerminal()` with NOTHING for the condition —
+   * without this set, the very next sweep would see an unfenced candidate whose shares may already
+   * be merged on chain and resubmit them.
+   *
+   * Deliberately never cleared within the process. Clearing it would assert the divergence is
+   * resolved, which nothing here has proven — that is an operator action via
+   * `scripts/merge-ledger-reconcile.ts`. A process restart also clears it, which is safe only
+   * because `repairAndReportFencedMerges` re-derives the durable half of the fence from the ledger
+   * on every start() and every sweep.
+   */
+  private readonly unresolvedOnchainMerges = new Set<string>();
 
   constructor(private readonly deps: InventoryManagerDeps) {
     this.candidateService = new MergeCandidateService(
@@ -112,7 +133,7 @@ export class InventoryManagerModule implements RuntimeModule {
     if (this.interval) clearInterval(this.interval);
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = null;
-    this.reconcileNonTerminalMerges();
+    await this.repairAndReportFencedMerges();
 
     const intervalMs = this.deps.sweepIntervalMs ?? 5 * 60 * 1000;
     this.interval = setInterval(() => void this.sweep(), intervalMs);
@@ -188,86 +209,52 @@ export class InventoryManagerModule implements RuntimeModule {
   }
 
   /**
-   * An 'onchain' row is the ONE non-terminal state that needs no guess. `gateway.mergePositions`
-   * resolves only on a proven on-chain settlement, so the shares really are merged and the only
-   * thing missing is this process's local half — the FIFO lot consumption, the spread P&L and the
-   * two position updates `MergeSettler` normally commits in the same transaction as the status
-   * flip. Replaying that transaction is a REPAIR, not a retry: nothing is submitted, and the fence
-   * lifts because the divergence is genuinely gone rather than merely hidden.
+   * Repairs what can be repaired, then reports what is still fenced — the same shared pass
+   * `index.ts` runs before the supervisor, deliberately run AGAIN here: once at `start()`, and
+   * (r12-P1) again at the top of every `runSweep()`.
    *
-   * The amount comes from the LEDGER row, never from a freshly computed candidate: the chain moved
-   * by the amount that was recorded, whatever the local book looks like now. The candidate is
-   * consulted only for the two legs' ids — recomputing the size here would settle a different
-   * merge than the one that happened.
+   * The pre-supervisor pass is the unconditional one: it works with auto-merge disabled, when this
+   * module is never constructed, and it runs before any module hydrates. What it cannot do is see
+   * the future. It takes ONE snapshot, and a row that was 'pending' in that snapshot — correctly
+   * skipped, because a pending row cannot be told apart from "never broadcast" — can be flipped to
+   * 'onchain' by the process that owned it at any point afterward. That row is then provably
+   * settleable, and a repair that only ran once (at `start()`, or once per process restart) would
+   * leave this runtime trading on positions and FIFO lots whose shares are already merged on chain
+   * until the next restart happened to notice.
    *
-   * A 'pending' row is deliberately left alone. It cannot be told apart from "never broadcast"
-   * without an on-chain read this module does not do, and consuming lots for a merge that may never
-   * have happened is the one error no later step can undo.
+   * Running it again — at start() AND on every sweep — closes that window continuously rather than
+   * only at a fixed point in time. It is safe to repeat: over an already-repaired ledger it reads
+   * zero non-terminal rows and returns, and every transition it makes is a CAS, so a row another
+   * process settled first is lost cleanly rather than double-consumed. The start()-time call runs
+   * BEFORE the bus subscriptions below so the `PositionUpdated` it publishes cannot re-enter as a
+   * sweep hint; the sweep-time call runs before candidates are computed, so a just-repaired
+   * condition's closed legs are never offered as a fresh candidate in the same pass.
+   *
+   * Failures are swallowed rather than aborting the caller. At the pre-supervisor call site an
+   * unreadable fence MUST abort the boot, because with auto-merge off nothing checks again; here
+   * `healthCheck` re-reads the fence continuously and fails closed on that same unreadable ledger,
+   * and the next sweep tries again — so the operator is told either way, and refusing to proceed
+   * over one read that hit a busy lock is strictly worse than continuing unhealthy.
    */
-  private settleConfirmedOnchainMerges(rows: MergeRecord[]): void {
-    const confirmed = rows.filter((r) => r.status === "onchain");
-    if (confirmed.length === 0) return;
-
-    const legsByCondition = new Map(
-      this.candidateService.findMergeCandidates().map((c) => [c.conditionId, c]),
-    );
-    for (const row of confirmed) {
-      const legs = legsByCondition.get(row.conditionId);
-      if (!legs) {
-        this.deps.log.error(
-          { mergeId: row.mergeId, conditionId: row.conditionId },
-          "confirmed on-chain merge cannot be settled locally — no open YES/NO pair for the condition; the row stays fenced",
-        );
-        continue;
-      }
-      try {
-        this.settler.applyMerge({ ...legs, mergeAmount: row.mergedAmount }, row.mergeId);
-        this.deps.log.warn(
-          { mergeId: row.mergeId, conditionId: row.conditionId, mergedAmount: row.mergedAmount },
-          "settled a confirmed on-chain merge a previous run left unapplied — fence lifted",
-        );
-        this.recordBoundedMetricCounter("inventory_merge_recovered_total", { count: 1 });
-      } catch (e) {
-        this.deps.log.error(
-          { mergeId: row.mergeId, conditionId: row.conditionId, err: String(e) },
-          "failed to settle a confirmed on-chain merge — the row stays fenced for an operator",
-        );
-      }
+  private async repairAndReportFencedMerges(): Promise<void> {
+    try {
+      await recoverConfirmedOnchainMerges(this.deps);
+    } catch (e) {
+      this.deps.log.error(
+        { err: String(e) },
+        "merge fence repair could not run — the fence is unproven; healthCheck fails closed while it lasts",
+      );
     }
   }
 
   /**
-   * Read failures are swallowed here because start-up alerting is a diagnostic: a bot that will not
-   * start because its alerting query threw is strictly worse than one that starts without the
-   * alert. The sweep treats the same failure differently — see `runSweep`.
-   */
-  private reconcileNonTerminalMerges(): void {
-    const rows = this.readMergeFence();
-    if (rows === null || rows.length === 0) return;
-    this.settleConfirmedOnchainMerges(rows);
-
-    // Re-read rather than filtering `rows`: the settles above deleted nothing but advanced rows to
-    // 'applied', and reporting the pre-repair set would fence conditions that are no longer fenced.
-    const remaining = this.readMergeFence();
-    if (remaining === null || remaining.length === 0) return;
-    this.deps.log.error(
-      {
-        count: remaining.length,
-        merges: remaining.map((r) => ({
-          mergeId: r.mergeId,
-          conditionId: r.conditionId,
-          status: r.status,
-        })),
-      },
-      "merge ledger has non-terminal rows — those conditions are FENCED from further merges until an operator reconciles them on chain with scripts/merge-ledger-reconcile.ts",
-    );
-  }
-
-  /**
-   * Unhealthy while any condition is fenced. Nothing in the runtime acts on this automatically
-   * (`collectHealth` only reports it), which is exactly what is wanted: an unreconciled merge is an
-   * operator task, not a reason to stop trading — but it must not be invisible either, and a log
-   * line emitted once at start-up is invisible by the time it matters.
+   * Unhealthy while any condition is fenced — either the durable ledger fence or the process-local
+   * `unresolvedOnchainMerges` fail-safe (r12-P2c: a condition whose ledger row can no longer prove
+   * the divergence itself, because it is 'applied' elsewhere or its row is gone). Nothing in the
+   * runtime acts on this automatically (`collectHealth` only reports it), which is exactly what is
+   * wanted: an unreconciled merge is an operator task, not a reason to stop trading — but it must
+   * not be invisible either, and a log line emitted once at start-up is invisible by the time it
+   * matters.
    *
    * Fail-closed on an unreadable ledger, for the same reason the sweep skips: a health check that
    * cannot see the fence has not proven there is none, and reporting ok is the one answer that
@@ -276,12 +263,16 @@ export class InventoryManagerModule implements RuntimeModule {
   public async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
     const rows = this.readMergeFence();
     const sweepDetail = `last_sweep_active=${this.sweepInFlight !== null}`;
+    const unresolvedDetail = `unresolved_onchain_merges=${this.unresolvedOnchainMerges.size}`;
     if (rows === null) {
-      return { ok: false, detail: `${sweepDetail} fenced_conditions=unknown (ledger unreadable)` };
+      return {
+        ok: false,
+        detail: `${sweepDetail} fenced_conditions=unknown (ledger unreadable) ${unresolvedDetail}`,
+      };
     }
     return {
-      ok: rows.length === 0,
-      detail: `${sweepDetail} fenced_conditions=${rows.length}`,
+      ok: rows.length === 0 && this.unresolvedOnchainMerges.size === 0,
+      detail: `${sweepDetail} fenced_conditions=${rows.length} ${unresolvedDetail}`,
     };
   }
 
@@ -316,6 +307,15 @@ export class InventoryManagerModule implements RuntimeModule {
       this.deps.log.debug({ reason: entryHalt }, "inventory manager sweep skipped");
       return;
     }
+
+    // r12-P1: start() only snapshots the fence ONCE. A row that was 'pending' at that snapshot
+    // (owned by an overlapping process still awaiting its own `mergePositions`) can flip to
+    // 'onchain' any time after — and nothing looked again until the next restart, so this runtime
+    // kept trading on positions and FIFO lots whose shares were already merged on chain. Re-running
+    // the repair here, on every periodic sweep, closes that window instead of leaving it open until
+    // the process happens to restart. Cheap over a clean fence: one `findNonTerminal()` read that
+    // returns zero rows and returns immediately.
+    await this.repairAndReportFencedMerges();
 
     // Declared outside the try because the catch has to know which intents this pass wrote: a row
     // recorded here and then abandoned by a throw is precisely the state the catch has to dispose of.
@@ -366,7 +366,15 @@ export class InventoryManagerModule implements RuntimeModule {
         this.deps.log.error("merge sweep skipped — could not read the merge ledger fence");
         return;
       }
-      const fenced = new Set(fenceRows.map((r) => r.conditionId));
+      // The ledger's own non-terminal rows are the durable half of the fence; `unresolvedOnchainMerges`
+      // (r12-P2c) is the process-local fail-safe half for a condition whose ledger row can no longer
+      // prove anything — 'applied' by another writer, discarded by the reconcile CLI, or an
+      // unreadable re-read. Both halves feed the SAME suppression path below, so one log line and
+      // one metric cover either source.
+      const fenced = new Set([
+        ...fenceRows.map((r) => r.conditionId),
+        ...this.unresolvedOnchainMerges,
+      ]);
       const eligible = candidates.filter((c) => !fenced.has(c.conditionId));
       if (eligible.length < candidates.length) {
         const suppressed = candidates
@@ -442,7 +450,8 @@ export class InventoryManagerModule implements RuntimeModule {
       // follows into unambiguous divergence (chain moved, ledger didn't) instead of the merely
       // ambiguous 'pending' state, which is exactly what a recovery path needs to act without
       // guessing whether the on-chain call actually landed.
-      for (const mergeId of mergeIds.values()) {
+      const unappliable = new Map<string, "pending" | "absent" | "unreadable">();
+      for (const [conditionId, mergeId] of mergeIds) {
         try {
           this.deps.mergeLedgerRepo.markOnchain(mergeId);
         } catch (e) {
@@ -451,14 +460,54 @@ export class InventoryManagerModule implements RuntimeModule {
           // one broken row abort the loop below would manufacture the very divergence we are
           // reporting, for every other candidate in the batch.
           this.deps.log.error({ mergeId, err: String(e) }, "failed to mark merge 'onchain'");
+          const kind = this.classifyMergeRow(mergeId);
+          if (kind === "appliable") continue;
+          // The row is NOT in the one state `applyMerge`'s CAS can advance. Applying anyway would
+          // throw inside its transaction and report "another process moved it" — a message that
+          // sends an operator looking for a race that never happened, while the real condition
+          // (confirmed on chain, ledger stuck) goes unnamed.
+          unappliable.set(conditionId, kind);
+          // A durable ledger row only re-fences "pending" — its own presence is the fence. "absent"
+          // and "unreadable" have NOTHING durable left to prove the divergence, so without this
+          // process-local fail-safe the very next sweep would see an unfenced candidate whose shares
+          // may already be merged on chain and resubmit them.
+          this.unresolvedOnchainMerges.add(conditionId);
+          this.deps.log.error(
+            { mergeId, conditionId, kind },
+            "merge is CONFIRMED on chain but its ledger row could not be advanced to 'onchain' — local settlement skipped; the condition stays fenced until an operator reconciles it with scripts/merge-ledger-reconcile.ts",
+          );
+          this.recordBoundedMetricCounter("inventory_merge_onchain_mark_failed_total", {
+            count: 1,
+          });
         }
       }
 
       // 2. Apply to ledger
       for (const candidate of claimed) {
+        const unappliableKind = unappliable.get(candidate.conditionId);
+        if (unappliableKind !== undefined) {
+          // Republishing is right ONLY for "absent": that is the one case where somebody else
+          // already advanced the row all the way to 'applied', moving the shared positions on its
+          // own bus while this process's caches still hold pre-merge sizes. "pending" (the flip
+          // itself just failed — nothing moved) and "unreadable" (we do not know what moved) must
+          // NOT publish: there is no proven new state to announce, and publishing a position this
+          // process never actually changed would be exactly the kind of phantom update the fence
+          // exists to prevent.
+          if (unappliableKind === "absent") {
+            await republishMergeLegs(this.deps, candidate);
+          }
+          continue;
+        }
         try {
           const mergeId = mergeIds.get(candidate.conditionId)!;
-          this.settler.applyMerge(candidate, mergeId);
+          // 3. Apply to the ledger AND notify the system of both updated positions, so exposure
+          // and every event-driven cache recompute. One shared helper with the recovery path —
+          // two call sites that must never drift apart in what "a merge landed" means locally.
+          await applyMergeAndPublish(
+            { bus: this.deps.bus, settler: this.settler },
+            candidate,
+            mergeId,
+          );
           this.deps.log.info(
             {
               conditionId: candidate.conditionId,
@@ -466,18 +515,12 @@ export class InventoryManagerModule implements RuntimeModule {
             },
             "inventory merge applied to ledger",
           );
-
-          // 3. Notify system of updated positions to trigger exposure recomputation
-          // We can just publish PositionUpdated for both sides
-          const yesPos = this.deps.positionRepo.findByTokenId(candidate.yesTokenId);
-          const noPos = this.deps.positionRepo.findByTokenId(candidate.noTokenId);
-          if (yesPos) await this.deps.bus.publish("PositionUpdated", { position: yesPos });
-          if (noPos) await this.deps.bus.publish("PositionUpdated", { position: noPos });
         } catch (e) {
           this.deps.log.error(
             { conditionId: candidate.conditionId, err: String(e) },
             "failed to apply merge to ledger",
           );
+          await republishMergeLegs(this.deps, candidate);
         }
       }
     } catch (e) {
@@ -533,6 +576,36 @@ export class InventoryManagerModule implements RuntimeModule {
     });
   }
 
+  /**
+   * Classifies this merge's row after `markOnchain` threw. That throw collapses FOUR situations a
+   * caller must not treat alike:
+   * - "appliable" — the row is still there, already 'onchain' (the reconcile CLI, or a duplicate
+   *   flip): settling is exactly the right thing to do.
+   * - "pending" — the flip itself failed and the row is still 'pending'. Settling would strand an
+   *   UNCONFIRMED merge behind a misleading CAS error; the row's own presence already re-fences the
+   *   condition, so nothing further is needed here.
+   * - "absent" — `findNonTerminal` has NOTHING for this mergeId: 'applied' elsewhere (a winning
+   *   process, or the reconcile CLI's `--discard`). The row can no longer prove anything, which is
+   *   exactly why callers must fence the condition themselves rather than trust the ledger alone.
+   * - "unreadable" — the re-read itself threw. Treated the same as "absent" by callers (fence and
+   *   move on) because an unreadable ledger proves nothing either.
+   */
+  private classifyMergeRow(mergeId: string): "appliable" | "pending" | "absent" | "unreadable" {
+    let rows: MergeRecord[];
+    try {
+      rows = this.deps.mergeLedgerRepo.findNonTerminal();
+    } catch (e) {
+      this.deps.log.error(
+        { mergeId, err: String(e) },
+        "failed to re-read the merge ledger after a failed 'onchain' flip",
+      );
+      return "unreadable";
+    }
+    const row = rows.find((r) => r.mergeId === mergeId);
+    if (!row) return "absent";
+    return row.status === "onchain" ? "appliable" : "pending";
+  }
+
   private discardUnsubmittedIntents(mergeIds: Map<string, string>): void {
     for (const mergeId of mergeIds.values()) {
       try {
@@ -547,11 +620,6 @@ export class InventoryManagerModule implements RuntimeModule {
   }
 
   private recordBoundedMetricCounter(metricName: string, labels: Record<string, unknown>): void {
-    const serializedLabels = JSON.stringify(labels);
-    if (this.deps.runtimeMetrics?.writeCounter) {
-      this.deps.runtimeMetrics.writeCounter(metricName, 1, serializedLabels);
-      return;
-    }
-    this.deps.runtimeMetrics?.writeEvent(metricName, 1, serializedLabels);
+    recordMetricCounter(this.deps.runtimeMetrics, metricName, labels);
   }
 }

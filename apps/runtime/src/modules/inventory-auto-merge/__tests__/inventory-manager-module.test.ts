@@ -257,8 +257,11 @@ describe("InventoryManagerModule", () => {
     );
 
     void mod.sweep();
-    await Promise.resolve();
-    expect(gateway.mergePositions).toHaveBeenCalledTimes(1);
+    // `runSweep()` now awaits an async ledger-repair pass before computing candidates, so the
+    // number of microtask ticks before the gateway call is reached is an implementation detail —
+    // pinning it with a fixed `await Promise.resolve()` count is exactly what broke here. Poll for
+    // the call instead of pinning a tick count.
+    await vi.waitFor(() => expect(gateway.mergePositions).toHaveBeenCalledTimes(1));
     // The pending row must already be written by the time the on-chain call is in flight — it is
     // written and committed BEFORE that call, not merely queued behind it.
     expect(mergeLedgerRepo.recordPending).toHaveBeenCalledTimes(1);

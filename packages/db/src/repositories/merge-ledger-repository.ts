@@ -28,13 +28,36 @@ function toMergeRecord(row: MergeLedgerRow): MergeRecord {
  * write-ahead scheme degrades silently: `markApplied` would let `applyMerge`'s transaction commit
  * the position and lot mutations with no ledger row behind them — the exact untracked divergence
  * the 'pending'/'onchain'/'applied' states exist to make impossible, just in a new shape.
+ *
+ * Every transition below is therefore a compare-and-swap on the status it advances FROM, and this
+ * is what makes zero matched rows meaningful rather than merely unlucky. Two processes can read the
+ * same 'onchain' row at start-up — a rolling deploy, an overlapping restart — and both can decide
+ * to settle it locally; only one `markApplied` can win the CAS, and the loser throws INSIDE
+ * `MergeSettler.applyMerge`'s transaction, so its FIFO consumption and position writes roll back
+ * instead of double-consuming inventory the chain only moved once.
+ *
+ * The message distinguishes "no such row" from "another process moved it": both are `changes = 0`,
+ * but they call for opposite operator responses, and the row is re-read only on the failure path.
  */
-function assertMatchedOneRow(changes: number, mergeId: string, target: string): void {
-  if (changes !== 1) {
-    throw new Error(
-      `merge_ledger has no row for mergeId=${mergeId} — cannot mark '${target}' (matched ${changes} rows)`,
-    );
-  }
+function assertClaimedTransition(
+  db: Database,
+  changes: number,
+  mergeId: string,
+  from: MergeRecord["status"],
+  to: MergeRecord["status"],
+): void {
+  if (changes === 1) return;
+  const current = (
+    db.prepare(`SELECT status FROM merge_ledger WHERE merge_id = ?`).get(mergeId) as
+      | { status: MergeRecord["status"] }
+      | undefined
+  )?.status;
+  throw new Error(
+    current === undefined
+      ? `merge_ledger has no row for mergeId=${mergeId} — cannot mark '${to}'`
+      : `merge_ledger row mergeId=${mergeId} is '${current}', not '${from}' — refusing to mark ` +
+          `'${to}' (another process moved it)`,
+  );
 }
 
 export class SqliteMergeLedgerRepository implements MergeLedgerRepository {
@@ -66,21 +89,29 @@ export class SqliteMergeLedgerRepository implements MergeLedgerRepository {
   }
 
   markOnchain(mergeId: string): void {
+    // CAS from 'pending': without it this UPDATE can drag an already-'applied' row BACK to
+    // 'onchain' — re-fencing a condition that was settled and inviting the recovery path to apply
+    // the same merge a second time.
     const { changes } = this.db
-      .prepare(`UPDATE merge_ledger SET status = 'onchain' WHERE merge_id = ?`)
+      .prepare(
+        `UPDATE merge_ledger SET status = 'onchain' WHERE merge_id = ? AND status = 'pending'`,
+      )
       .run(mergeId);
-    assertMatchedOneRow(changes, mergeId, "onchain");
+    assertClaimedTransition(this.db, changes, mergeId, "pending", "onchain");
   }
 
   markApplied(merge: MergeRecord): void {
+    // CAS from 'onchain': this is the row-level lock that makes local settlement single-shot
+    // across processes. See `assertClaimedTransition` for why losing it must throw rather than
+    // no-op.
     const { changes } = this.db
       .prepare(
         `UPDATE merge_ledger
            SET merged_amount = ?, spread_pnl = ?, merged_at = ?, status = 'applied'
-         WHERE merge_id = ?`,
+         WHERE merge_id = ? AND status = 'onchain'`,
       )
       .run(merge.mergedAmount, merge.spreadPnl, merge.mergedAt, merge.mergeId);
-    assertMatchedOneRow(changes, merge.mergeId, "applied");
+    assertClaimedTransition(this.db, changes, merge.mergeId, "onchain", "applied");
   }
 
   deletePending(mergeId: string): void {

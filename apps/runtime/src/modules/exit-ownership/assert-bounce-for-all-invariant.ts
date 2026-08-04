@@ -7,6 +7,8 @@ import {
 } from "@krabs/db";
 import type { Database } from "better-sqlite3";
 
+import { persistFailedStartupState } from "../../persist-failed-startup-state.js";
+
 /**
  * Release A Phase 5 — post-activation ownership invariant, widened to I1–I5 in Phase 6 (§9a).
  *
@@ -80,26 +82,15 @@ export interface OwnershipInvariantStartupGate {
  * the typed `catch` entirely and reached the top-level handler, which exits WITHOUT persisting,
  * leaving `runtime_status='running'`.
  *
- * The inner `try/catch` is the load-bearing half: an unwritable/locked `control.db` must not
- * replace the error being reported, or the operator debugs a SQLite write failure instead of the
- * invariant violation. Same pattern as the startup-adoption abort in `index.ts`.
+ * {@link persistFailedStartupState} is shared with the startup-adoption and merge-recovery aborts
+ * in `index.ts`; it swallows its own write failure so an unwritable/locked `control.db` cannot
+ * replace the error being reported here.
  */
 export function runOwnershipInvariantStartupGate(gate: OwnershipInvariantStartupGate): void {
   try {
     assertBounceForAllOwnershipInvariant(gate.ledgerDb, gate.applyToAllMarkets);
   } catch (err) {
-    try {
-      gate.controlDb
-        .prepare(
-          "UPDATE runtime_control_state SET runtime_status = 'failed', paused = 1, updated_at = datetime('now') WHERE id = 1",
-        )
-        .run();
-    } catch (persistErr) {
-      gate.log.error(
-        { err: persistErr },
-        "failed to persist failed/paused control state after ownership-invariant abort",
-      );
-    }
+    persistFailedStartupState(gate.controlDb, gate.log, "ownership-invariant abort");
     if (err instanceof BounceForAllNullOwnerError) {
       gate.log.fatal(
         { ...err.counts },

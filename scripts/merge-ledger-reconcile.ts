@@ -92,10 +92,40 @@ Run this with the runtime STOPPED. Writes are compare-and-swap on the status rea
 earlier, so a concurrent runtime cannot be silently overwritten — the command aborts instead.
 `;
 
+const KNOWN_FLAGS = new Set(["--help", "-h", "--db", "--mark-onchain", "--discard", "--apply"]);
+
+/**
+ * Flags this script USED to accept, with the reason they are gone. Silence here would be the worst
+ * outcome: an unrecognised flag used to fall through to the read-only list, so old operator
+ * automation calling `--settle <id> --apply` exited 0 having reconciled NOTHING, and the operator
+ * had every reason to believe the row was healed.
+ */
+const REMOVED_FLAGS: Record<string, string> = {
+  "--settle":
+    "--settle was removed. It only flipped status to 'applied' — no FIFO lots consumed, no spread " +
+    "P&L booked, no positions updated — which lifted the fence while both legs stayed open and let " +
+    "the next sweep merge the same inventory twice. Verify the merge on chain, then use " +
+    "--mark-onchain <mergeId> --apply and restart the runtime: it settles the row atomically.",
+};
+
+function rejectUnsupportedFlags(raw: string[]): void {
+  for (const token of raw) {
+    // Values (db paths, merge ids) never start with '-', so a leading dash means "this was meant
+    // as a flag" — and a flag this script does not implement must never be silently ignored.
+    if (!token.startsWith("-")) continue;
+    const removed = REMOVED_FLAGS[token];
+    if (removed) throw new Error(removed);
+    if (!KNOWN_FLAGS.has(token)) {
+      throw new Error(`unknown flag ${token} — run with --help for the supported commands`);
+    }
+  }
+}
+
 export function parseArgs(raw: string[]): Args {
   if (raw.includes("--help") || raw.includes("-h")) {
     return { dbPath: "", action: "help", mergeId: null, apply: false };
   }
+  rejectUnsupportedFlags(raw);
 
   const value = (name: string): string | null => {
     const index = raw.indexOf(name);
