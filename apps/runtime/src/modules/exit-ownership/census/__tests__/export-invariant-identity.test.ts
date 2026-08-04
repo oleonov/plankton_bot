@@ -154,6 +154,20 @@ function renderThroughDisplay(values: readonly number[]): string[] {
   return lines;
 }
 
+/**
+ * Whether this build's `%!.17g` is correctly rounded — and therefore injective over binary64, which is
+ * what decides whether a render collision can exist at all.
+ *
+ * It is a property of the HOST, not of the version: 3.37.2 converts through `LONGDOUBLE_TYPE`, 80-bit on
+ * x86_64 (production and CI) where the rendering is exact, and 64-bit on arm64 macOS (dev) where it is off
+ * by up to ~1 ULP. `12` is the decisive probe: it renders "12.0" on the first and "11.999999999999999" —
+ * which reads back as 11.999999999999998 — on the second. Measured, never assumed, because the tests must
+ * make the same claim on both machines and only one of them is the one the census will run on.
+ */
+function rendererIsCorrectlyRounded(): boolean {
+  return Object.is(Number(renderThroughDisplay([12])[0]), 12);
+}
+
 // ───────────────────────────── the row-set comparison ─────────────────────────────
 
 /** I4's `GROUP_CONCAT` guarantees MEMBERSHIP, not sequence — comparing the raw text would over-assert. */
@@ -240,9 +254,12 @@ function expectRowSetIdentity(run: CensusRun, verdict: ReferenceVerdict): void {
  *
  * Measured on this exact seed: the reference engine computes `remaining_sell_shares` as
  * `0.8400000000000001` and `position_shares` as `0.84` (`Object.is` is FALSE, and the violation is real —
- * the predicate is evaluated on those doubles), while the pinned 3.37.2 renders BOTH as
- * `0.84000000000000003`. A deep-equality assertion over the diagnostics therefore fails on it with both
- * sides correct, which is why the fixture is required rather than optional.
+ * the predicate is evaluated on those doubles). On arm64 macOS the pinned 3.37.2 renders BOTH as
+ * `0.84000000000000003`: a deep-equality assertion over the diagnostics fails on it with both sides
+ * correct, which is why the fixture is required rather than optional. On x86_64 the wider `long double`
+ * makes `%!.17g` correctly rounded and hence injective, so the same pair renders `0.84000000000000008` and
+ * `0.83999999999999997` and no collision exists. (b2) compares renderings on both, because the census must
+ * decide the same thing on the dev machine and on production — see `rendererIsCorrectlyRounded`.
  */
 const RENDER_COLLISION = seedSql({
   positions: [{ positionId: "pos-r", tokenId: "tok-r", exitOwner: "profile", size: 0.84 }],
@@ -337,11 +354,18 @@ describe("§9a.6 test 8(b) — the exported rows ARE the shared definition's row
     // Different doubles — so the violation is genuine and a deep-equality assertion WOULD fire here …
     expect(Object.is(remaining, shares)).toBe(false);
     expect(remaining).toBeGreaterThan(shares);
-    // … and identical renderings — so firing would be a false alarm about a correct export.
-    expect(renderThroughDisplay([remaining, shares])).toEqual([
-      "0.84000000000000003",
-      "0.84000000000000003",
-    ]);
+
+    const [renderedRemaining, renderedShares] = renderThroughDisplay([remaining, shares]);
+    if (rendererIsCorrectlyRounded()) {
+      // x86_64: 17 significant digits are injective over binary64, so distinct doubles render distinctly
+      // and (b2)'s rendering comparison is exactly as strict here as comparing the doubles would be.
+      expect(renderedRemaining).not.toBe(renderedShares);
+      expect([Number(renderedRemaining), Number(renderedShares)]).toEqual([remaining, shares]);
+    } else {
+      // arm64: ~1 ULP of renderer error costs injectivity, and this fixture is the witness — identical
+      // renderings, so a deep-equality assertion over the diagnostics would fire with both sides correct.
+      expect(renderedRemaining).toBe(renderedShares);
+    }
   });
 });
 

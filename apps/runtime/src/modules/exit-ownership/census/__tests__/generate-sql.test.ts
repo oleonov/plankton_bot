@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { AFTER_CUTOFF, BEFORE_CUTOFF, soloTargetSeed, WHITELISTED_CONDITION } from "./fixtures.js";
+import { realString } from "../export-sql.js";
+import {
+  AFTER_CUTOFF,
+  BEFORE_CUTOFF,
+  soloTargetSeed,
+  WHITELISTED_CONDITION,
+  type CensusFixture,
+} from "./fixtures.js";
 import { prepareApply } from "./pipeline.js";
 
 /**
@@ -152,34 +159,65 @@ describe("§7.6 — literal escaping", () => {
 /**
  * §5.1.10, as the operator approved it on 2026-07-29: a REAL crosses into the apply script as the decimal
  * string sqlite RENDERED, and guard #3 compares that string against the same rendering taken under the
- * lock. The bare-numeric transport it replaced reported drift on 17.4% of measured sizes — on rows that
- * had not moved — so `--apply` could not have committed against production at all.
+ * lock. It is never parsed back into a double, by anything.
+ *
+ * The transport it replaced did parse — the exporter emitted a JSON number and the generator emitted it
+ * back as a bare SQL numeric — and whether THAT survives turns out to be a property of the machine rather
+ * than of the ledger. `printf('%!.17g')` in 3.37.2 converts through `LONGDOUBLE_TYPE`: 80-bit on x86_64
+ * (production and CI), where it is correctly rounded, and 64-bit on arm64 macOS (dev), where 28.4% of a
+ * 200 000-size sample read back as a different double — guard #3 aborting runs on rows that never moved.
+ * So the tests below measure which of the two hosts they are running on and assert the matching claim. The
+ * TRANSPORT does not branch, and that is the whole point of it: it is correct on both.
  */
 describe("§7.6 — §5.1.10: sizes travel as renderings, not as numbers", () => {
   const SIZE_SEED = soloTargetSeed({ positionId: "pos-size", tokenId: "tok-size", size: 12 });
+  const SIZE_RENDERING = `SELECT ${realString("size")} FROM positions WHERE position_id = 'pos-size';`;
 
-  it("the transport this replaced would have reported drift on this very row", () => {
+  /**
+   * How many of a realistic size sample this build renders into a decimal that reads back as a different
+   * double — the leg the bare-numeric transport depended on and §5.1.10 does not take at all.
+   */
+  function lossyRenderings(fixture: CensusFixture): number {
+    return Number(
+      fixture.query(
+        `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000),
+                        v(x) AS (SELECT (i % 4000) + (i % 977) / 977.0 + (i % 89) / 8900.0 FROM n)
+         SELECT sum(CAST(printf('%!.17g', x) AS REAL) IS NOT x) FROM v;`,
+      ),
+    );
+  }
+
+  it("the manifest carries the ledger renderer's own output, and the host decides whether that parses", () => {
     const { fixture, loaded } = prepareApply(SIZE_SEED);
     const rendered = loaded.manifest.targets[0]?.size ?? "";
 
-    // (1) 3.37.2 renders the ledger's `12` as a decimal that is not 12, and (2) Node reads that text
-    // back — correctly — as a DIFFERENT double. (3) The number the old `sqlReal` would then have emitted
-    // does not compare equal to the untouched ledger REAL: guard #3 aborting a run that had no drift.
-    expect(rendered).toBe("11.999999999999999");
-    expect(Number(rendered)).toBe(11.999999999999998);
-    expect(
-      fixture.query(
-        `SELECT ${Number(rendered)} IS (SELECT size FROM positions WHERE position_id = 'pos-size');`,
-      ),
-    ).toBe("0");
+    // Host-independent: the string in the manifest is exactly what the ledger's renderer produced. The
+    // export chain adds nothing to it, and there is nothing else it could be compared against.
+    expect(rendered).toBe(fixture.query(SIZE_RENDERING));
+
+    const parsedBack = fixture.query(
+      `SELECT ${Number(rendered)} IS (SELECT size FROM positions WHERE position_id = 'pos-size');`,
+    );
+    if (lossyRenderings(fixture) === 0) {
+      // x86_64: the 80-bit intermediate rounds correctly, so `12` renders "12.0" and the old numeric
+      // transport would have committed. It was replaced anyway — this leg is the host's property, not ours.
+      expect(Number(rendered)).toBe(12);
+      expect(parsedBack).toBe("1");
+    } else {
+      // arm64: `12` renders "11.999999999999999", which Node reads back as 11.999999999999998, and
+      // `11.999999999999998 IS 12.0` is FALSE — guard #3 aborting a run that had no drift.
+      expect(Number(rendered)).not.toBe(12);
+      expect(parsedBack).toBe("0");
+    }
   });
 
-  it("a size 3.37.2 renders lossily still commits on an unchanged ledger", () => {
+  it("a size 3.37.2 may render lossily still commits on an unchanged ledger", () => {
     const { fixture, loaded, applySql, plannedOwners } = prepareApply(SIZE_SEED);
+    const rendered = fixture.query(SIZE_RENDERING);
 
-    expect(loaded.manifest.targets[0]?.size).toBe("11.999999999999999");
+    expect(loaded.manifest.targets[0]?.size).toBe(rendered);
     // A quoted TEXT literal, so the temp table holds the rendering and guard #3 compares like with like.
-    expect(applySql).toContain("'11.999999999999999'");
+    expect(applySql).toContain(`'${rendered}'`);
 
     const run = fixture.runApply(applySql);
     expect(run.stderr).toBe("");

@@ -46,16 +46,17 @@ import {
  * pinned 3.37.2 build.** Neither weakens what is asserted; each replaces an unconstructible claim with the
  * measured property the code actually has.
  *
- *  - **16b's `Number(exported) === originalRealBits` is FALSE on 3.37.2, by measurement, and no
- *    implementation could make it true.** `%!.17g` predates the 3.44 dtoa rewrite and is off by up to ~1 ULP
- *    (`export-sql.ts` records 15.6% of realistic sizes diverging on this leg alone), and the build's
- *    decimal→double PARSER is off by ~1 ULP too — the literal `0.22599999999999998` stored and re-rendered
- *    comes back `0.22600000000000002`, so a JS literal is not even reliably the double SQLite holds. The
- *    operator-approved contract is therefore render-against-render (`export-sql.ts`, guard #3 in
- *    `generate-sql.ts`): the rendering must be DETERMINISTIC, not accurate. 16b below pins it as a per-value
- *    expected-rendering table with an explicit `exact` column — so the ~15% that do not round-trip are
- *    recorded as data rather than hidden by a tolerance — plus two-export determinism. `Object.is` is used
- *    throughout; nothing here is `toBeCloseTo`.
+ *  - **16b's `Number(exported) === originalRealBits` is not a property this build has — on some hosts.**
+ *    `%!.17g` predates the 3.44 dtoa rewrite and converts through `LONGDOUBLE_TYPE`, so on arm64 macOS
+ *    (`long double == double`) it is off by up to ~1 ULP and the build's decimal→double parser is off too;
+ *    on x86_64 the 80-bit intermediate makes it correctly rounded. Measured on the same pinned 3.37.2
+ *    source over 200 000 realistic sizes: **56 820 fail the render→parse round trip on arm64, 0 on
+ *    x86_64.** A contract that held only where `long double` is wide would be no contract, so the
+ *    operator-approved one is render-against-render (`export-sql.ts`, guard #3 in `generate-sql.ts`): the
+ *    rendering must be DETERMINISTIC, not accurate — it is never parsed back. 16b below therefore asserts
+ *    only what holds on both hosts: the exported string is the ledger renderer's own output, identical
+ *    across all four columns, stable across two exports, and within 1 ULP. Nothing here is `toBeCloseTo`,
+ *    and no rendering is pinned as a literal.
  *  - **16e's "`null` accepted unchanged for a nullable REAL" is not constructible.** All four REALs §5.1
  *    exports come from NOT NULL columns (`ledger.sql`: `positions.size`, `orders.size`, `fills.size`) and
  *    `filled_size` is COALESCEd, so no export can carry a null REAL. The NULL transport is pinned one level
@@ -444,13 +445,13 @@ describe("§7.16a — the emitter is not json_object, and the precision case is 
     expect(row.remaining_sell_shares).toBe("9.7740000000000009");
     expect(row.position_shares).toBe("9.7739999999999991");
 
-    // The fill aggregate the two are computed from, in the content group that carries it. The literal is
-    // 3.37.2's rendering, not JS's: `String(0.015 + 0.211)` is `…98` and `%!.17g` emits `…97` — the ~1 ULP
-    // skew §7.16b tabulates. Measured, both parse back to the IDENTICAL double, so this leg loses nothing;
-    // it is the renderer's form rather than the canonical one, and §5.1.10 asks for determinism, not for
-    // the shortest representation.
+    // The fill aggregate the two are computed from, in the content group that carries it. Asked of the
+    // ledger rather than pinned as a literal: `String(0.015 + 0.211)` is `…98`, and `%!.17g` emits `…97`
+    // on arm64 macOS and `…98` on x86_64 — the ~1 ULP skew §7.16b documents, which is a property of the
+    // host's `long double` and not of this export. What the export owes is the renderer's own output,
+    // whatever it is; §5.1.10 asks for determinism, not for the shortest representation.
     expect(one(run.loaded.manifest.activeSellOrders, () => true, "order").filledSize).toBe(
-      "0.22599999999999997",
+      fixture.query(`SELECT ${realString("sum(size)")} FROM fills WHERE order_id = 'o-precision';`),
     );
   });
 
@@ -497,60 +498,58 @@ describe("§7.16a — the emitter is not json_object, and the precision case is 
 // ───────────────────────────── §7.16b — every REAL, through 3.37.2 ─────────────────────────────
 
 /**
- * The pinned renderer, measured — not derived from a specification, because the specification it would be
- * derived from is the one this build does not implement.
+ * The values, measured through the pinned renderer — but NOT with the rendering pinned as a literal.
  *
- * `exact` says whether `Number(rendered)` is bit-identical to the double the ledger holds. Four of these
- * eight are not, and that is a property of SQLite 3.37.2, not of anything here: `%!.17g` is off by up to
- * ~1 ULP, and for the 17-digit row the build's decimal→double PARSER is off too (the literal
- * `0.22599999999999998` is stored as the double that renders `0.22600000000000002`). Recording it as a
- * column is the honest form: what §5.1.10 needs is a rendering that is DETERMINISTIC, and drift is compared
- * render-against-render (`generate-sql.ts` guard #3) precisely because no leg of this is a round trip.
+ * That was the first shape of this table and it was wrong. `printf('%!.17g')` in 3.37.2 converts through
+ * `LONGDOUBLE_TYPE`, which is 80-bit on x86_64 and 64-bit (i.e. plain `double`) on arm64 macOS, so the SAME
+ * pinned 3.37.2 build renders the same double differently on the two machines — and a literal measured on
+ * the dev Mac fails on the only host that matters. Measured on both, for the eight below:
+ *
+ *   value                    arm64 macOS (dev)         x86_64 (production + CI)
+ *   5e-324                   4.940656458412465e-324    4.9406564584124654e-324
+ *   2.2250738585072014e-308  2.2250738585072009e-308   2.2250738585072014e-308
+ *   12                       11.999999999999999        12.0
+ *   10                       10.0                      10.0
+ *   0.22599999999999998      0.22600000000000002       0.22599999999999998
+ *   5.3199999999999994       5.3199999999999993        5.3199999999999994
+ *   5.3200000000000003       5.3200000000000002        5.3200000000000003
+ *   31897.89                 31897.889999999997        31897.889999999999
+ *
+ * On x86_64 the 80-bit intermediate makes `%!.17g` correctly rounded, so every rendering parses back into
+ * its own double; on arm64 four of these eight do not. That asymmetry is exactly why §5.1.10 carries the
+ * rendering as TEXT and compares render-against-render: the transport must not depend on the width of the
+ * host's `long double`. So what this group pins is the properties that hold on BOTH — the rendering is what
+ * the ledger's own renderer produced, it is identical in all four exported columns, it is deterministic,
+ * and it is never more than 1 ULP from the double it came from. The rendering itself is read off the pinned
+ * CLI at run time, because the CLI *is* the specification here.
  */
 const RENDERED_REALS = [
-  {
-    label: "the smallest denormal",
-    value: 5e-324,
-    rendered: "4.940656458412465e-324",
-    exact: true,
-  },
-  {
-    label: "the smallest normal double",
-    value: 2.2250738585072014e-308,
-    rendered: "2.2250738585072009e-308",
-    exact: false,
-  },
-  { label: "an integer stored as REAL", value: 12, rendered: "11.999999999999999", exact: false },
-  { label: "an integer that survives", value: 10, rendered: "10.0", exact: true },
-  {
-    label: "all 17 significant digits",
-    value: 0.22599999999999998,
-    rendered: "0.22600000000000002",
-    exact: false,
-  },
-  {
-    label: "production's resting SELL, lower",
-    value: 5.3199999999999994,
-    rendered: "5.3199999999999993",
-    exact: true,
-  },
-  {
-    label: "production's resting SELL, upper",
-    value: 5.3200000000000003,
-    rendered: "5.3200000000000002",
-    exact: true,
-  },
-  {
-    label: "the value §5.1.10 names",
-    value: 31897.89,
-    rendered: "31897.889999999997",
-    exact: false,
-  },
+  { label: "the smallest denormal", value: 5e-324 },
+  { label: "the smallest normal double", value: 2.2250738585072014e-308 },
+  { label: "an integer stored as REAL", value: 12 },
+  { label: "an integer that survives", value: 10 },
+  { label: "all 17 significant digits", value: 0.22599999999999998 },
+  { label: "production's resting SELL, lower", value: 5.3199999999999994 },
+  { label: "production's resting SELL, upper", value: 5.3200000000000003 },
+  { label: "the value §5.1.10 names", value: 31897.89 },
 ].map((real, index) => ({ ...real, id: `r${index}` }));
+
+/** Distance in representable doubles. Adjacent binary64 values differ by 1 in this encoding, denormals included. */
+function ulpDistance(a: number, b: number): bigint {
+  const view = new DataView(new ArrayBuffer(8));
+  const bits = (x: number): bigint => {
+    view.setFloat64(0, x);
+    return view.getBigUint64(0);
+  };
+  const [x, y] = [bits(a), bits(b)];
+  return x > y ? x - y : y - x;
+}
 
 describe("§7.16b — every REAL column §5.1 exports, on the pinned 3.37.2 renderer", () => {
   let first: CensusManifest = {} as CensusManifest;
   let second: CensusManifest = {} as CensusManifest;
+  /** What the pinned CLI renders the seeded REAL as, asked of the ledger column itself — the expectation. */
+  const rendered = new Map<string, string>();
 
   beforeAll(() => {
     const fixture = createCensusFixture();
@@ -579,31 +578,54 @@ describe("§7.16b — every REAL column §5.1 exports, on the pinned 3.37.2 rend
         })),
       }),
     );
+    // Read the expectation off the ledger through the SAME fragment the exporter uses, before the export
+    // runs. Not circular: it is the renderer that is being taken as given, and the export chain
+    // (`json_object` → the file → `loadManifest`) that is being asserted to add nothing to it.
+    for (const { id } of RENDERED_REALS) {
+      rendered.set(
+        id,
+        fixture.query(
+          `SELECT ${realString("size")} FROM positions WHERE position_id = 'pos-${id}';`,
+        ),
+      );
+    }
+
     first = fixture.exportManifest().loaded.manifest;
     second = fixture.exportManifest().loaded.manifest;
   });
 
-  it.each(RENDERED_REALS)("$label renders identically in all four columns", ({ id, rendered }) => {
+  it.each(RENDERED_REALS)("$label renders identically in all four columns", ({ id }) => {
+    const expected = rendered.get(id) ?? "";
+    expect(expected).not.toBe("");
     expect(one(first.targets, (t) => t.positionId === `pos-${id}`, `target ${id}`).size).toBe(
-      rendered,
+      expected,
     );
     expect(
       one(first.nonclosedPositions, (p) => p.positionId === `pos-${id}`, `position ${id}`).size,
-    ).toBe(rendered);
+    ).toBe(expected);
     const order = one(first.activeSellOrders, (o) => o.orderId === `o-${id}`, `order ${id}`);
-    expect(order.size).toBe(rendered);
+    expect(order.size).toBe(expected);
     // The SUM aggregate over one fill, which must not differ from the column it summed.
-    expect(order.filledSize).toBe(rendered);
+    expect(order.filledSize).toBe(expected);
   });
 
   it.each(RENDERED_REALS)(
-    "$label round-trips back into its own double iff `exact`",
-    ({ value, rendered, exact }) => {
-      // `Object.is`, never `toBeCloseTo`: a tolerance-based assertion here would pass on the very defect
-      // §5.1.10 exists for, and would hide the values this build cannot carry back at all.
-      expect(Object.is(Number(rendered), value)).toBe(exact);
+    "$label lands within 1 ULP of the double it came from",
+    ({ id, value }) => {
+      // NOT `toBeCloseTo`: a tolerance-based assertion here would pass on the very defect §5.1.10 exists for.
+      // Exactness cannot be asserted — it holds on x86_64 and fails on four of these on arm64 (see the table
+      // above) — but "off by at most one representable double" holds on both, and separates a renderer that
+      // is merely imprecise from one that is broken. §5.1.10 needs neither: it never parses this back.
+      expect(ulpDistance(Number(rendered.get(id) ?? ""), value)).toBeLessThanOrEqual(1n);
     },
   );
+
+  it("the alternate form keeps an integral REAL a REAL", () => {
+    // `%!.17g`, not `%.17g`: the `!` is what makes `10` render `10.0` rather than `10`, on every host. A
+    // rendering that lost the point would re-enter the ledger as an INTEGER and change the row's type.
+    const ten = RENDERED_REALS.find((real) => real.value === 10);
+    expect(rendered.get(ten?.id ?? "")).toBe("10.0");
+  });
 
   it("two exports of the same ledger render every REAL to the same bytes", () => {
     // Determinism is the property the whole transport rests on — drift is detected by comparing renderings,

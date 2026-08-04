@@ -47,23 +47,25 @@ const INACTIVE_SELL_STATUSES = "('filled', 'rejected', 'cancelled')";
 /**
  * §5.1.10 — a REAL leaves the ledger as the decimal string this renders, and is COMPARED as that string.
  *
- * It is not a round-trip. sqlite 3.37.2 predates the 3.44 dtoa rewrite, so `%!.17g` is off by up to ~1 ULP
- * and NO leg of the transport survives it. Measured over 30 010 realistic sizes stored as binary64:
+ * It is not a round-trip, and on some hosts it cannot be one. sqlite 3.37.2 predates the 3.44 dtoa rewrite
+ * and converts through `LONGDOUBLE_TYPE`, which is 80-bit on x86_64 and 64-bit (== `double`) on arm64
+ * macOS — so the SAME pinned source renders the same double differently on the two machines, and `%!.17g`
+ * is correctly rounded on one and off by up to ~1 ULP on the other. Measured on both, over 200 000
+ * realistic sizes stored as binary64, `CAST(printf('%!.17g', v) AS REAL) IS v`:
  *
- *   sqlite renders → sqlite re-reads   `CAST(printf('%!.17g', v) AS REAL) IS v`      19.6% differ
- *   sqlite renders → Node re-reads     `Object.is(Number(printf('%!.17g', v)), v)`   15.6% differ
- *   the whole chain the old bare-numeric transport took (render → Number → SQL)      17.4% differ
+ *   arm64 macOS (dev)          56 820 / 200 000 differ   (28.4%)
+ *   x86_64 (production + CI)        0 / 200 000 differ
  *
- * `31897.89` renders as "31897.889999999997"; a ledger `12` renders as "11.999999999999999", which Node
- * reads back as 11.999999999999998 — and `11.999999999999998 IS 12.0` is FALSE, i.e. guard #3 reporting
- * drift on a row that never moved. No fixed precision from 15 to 25 rescues ~3% of them, `quote()` is no
- * better (13.3% on the first leg), and the pinned build has no `log2`/`pow`, so an exact binary
- * decomposition is unavailable: on this version there IS no accurate rendering.
+ * On arm64, `31897.89` renders as "31897.889999999997" and a ledger `12` renders as "11.999999999999999",
+ * which Node reads back as 11.999999999999998 — and `11.999999999999998 IS 12.0` is FALSE, i.e. guard #3
+ * reporting drift on a row that never moved. On x86_64 those two render "31897.889999999999" and "12.0"
+ * and the bare-numeric transport would have survived. Neither number is a property of the ledger, and a
+ * transport whose safety depends on the width of the host's `long double` is not a transport.
  *
  * What the census needs is drift detection, which requires the rendering to be DETERMINISTIC, not
  * accurate. So `size` is compared render-against-render (`generate-sql.ts` guard #3) and is never parsed
  * back into a double by anything that must be exact. The `Number()` the TS-side invariants take is within
- * 2.7e-16 relative — far below the 0.01-share granularity by which a fill actually moves a position.
+ * 1 ULP — far below the 0.01-share granularity by which a fill actually moves a position.
  */
 export function realString(expr: string): string {
   return `CASE WHEN ${expr} IS NULL THEN NULL ELSE ${REAL_DISPLAY(expr)} END`;
