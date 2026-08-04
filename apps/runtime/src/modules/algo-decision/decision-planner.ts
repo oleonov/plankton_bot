@@ -60,7 +60,8 @@ import {
   SELL_PRICE_CEILING,
 } from "../../executable-price.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
-import { isExecutableOrderSize } from "../../min-order-size.js";
+import { isExecutableOrderSize, isKnownMinOrderSize } from "../../min-order-size.js";
+import { isBounceLadderEligible } from "../exit-ownership/bounce-eligibility.js";
 import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import {
   evaluateBounceBackstopEligibility,
@@ -443,6 +444,17 @@ export type DecisionPlanningInput = {
   sellLoopGuard: SellLoopGuardSnapshot | null;
   s1Ownership?: S1OwnershipSnapshot | null;
   profileLadderOwned?: boolean;
+  /**
+   * True when the runtime can actually hydrate a missing exchange
+   * `min_order_size` (a book-cache refresh is wired). The planner is a pure,
+   * worker-cloneable function, so it receives the *capability* as a boolean and
+   * the module performs the request itself when it sees the suppression.
+   * Without it the unknown-minimum pre-filter below stays inert — suppressing
+   * with no way to hydrate would block entry on the affected market forever
+   * (docs/plans/2026-07-30-min-order-size-hydration-entry-loop.md §4 F3).
+   * Optional like the fields above so existing fixtures need no field-add.
+   */
+  minOrderSizeHydrationAvailable?: boolean;
 };
 
 const SELL_ONLY: ReadonlySet<TradeDecisionAction> = new Set(["SELL"]);
@@ -462,6 +474,15 @@ export const D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON =
 // already suppressed there). This floor requires one tick above avg entry.
 export const STATIC_RULE_SELL_BELOW_AVG_ENTRY_GUARD_REASON =
   "static_rule_sell_below_avg_entry_guard";
+/**
+ * Probe-entry BUY on a market whose exchange `min_order_size` has never been
+ * observed. Sellable sizing cannot compute its share floor without it, so
+ * signal-to-order is guaranteed to skip the signal (`entry_unknown_min`) —
+ * without changing any state, so the next book tick re-emits it. Suppressing
+ * here turns that ~31 iterations/s/token loop into one telemetry row per dedupe
+ * window (docs/plans/2026-07-30-min-order-size-hydration-entry-loop.md §4 F3).
+ */
+export const ENTRY_MIN_ORDER_SIZE_UNKNOWN_REASON = "entry-min-order-size-unknown";
 const POST_BUY_FILL_COOLDOWN_REASON = "post-buy-fill-cooldown";
 // Track Q loop guard: token-level SELL circuit breaker. When the guard reports a
 // blocked token (>= threshold no-op SELL outcomes in the rolling window) the
@@ -759,43 +780,6 @@ const QD_PRE_COHORT_REASONS: ReadonlySet<QdShadowReason> = new Set([
   "ttc_unavailable",
   "ttc_too_far",
 ]);
-
-export function isWorkingSellOrderStatus(
-  status: SellOrderSizingContext["status"] | null | undefined,
-): boolean {
-  return status !== "filled" && status !== "rejected" && status !== "cancelled";
-}
-
-// Phase 4 bounce-for-all eligibility (docs/plans/2026-07-19-sellable-sizing-
-// bounce-for-all.md): GATE-lane positions are always eligible (unchanged
-// pre-Phase-4 behavior); any other open position becomes eligible only once
-// sellableFlow is enabled AND only from its cutoff forward — positions
-// opened before appliesFromMs are pre-flagged and stay on the D8/D9 stack.
-// Mirrored (duplicated, not imported) in algo-decision-module.ts's identical
-// predicate — the two modules don't share a util file in this plan's scope.
-function isBounceLadderEligiblePosition(
-  position: Position,
-  executionPolicy: ExecutionPolicy | null,
-  firstTradeAt: string | null,
-): boolean {
-  if (position.entryLane === "GATE") return true;
-  const sellableFlow = executionPolicy?.sellableFlow;
-  if (!sellableFlow?.enabled || sellableFlow.appliesFromMs == null) return false;
-  // Fail-closed cutoff (Codex audit r1): require BOTH `openedAt` AND the leg's
-  // real first-fill time to be valid and >= cutoff. Startup adoption re-stamps
-  // `openedAt` to the adoption wall-clock (inventory-handler createNewPosition),
-  // so `openedAt` alone can read post-cutoff for a position actually first filled
-  // BEFORE the cutoff — checking `firstTradeAt` too keeps the pre-flag positions
-  // (the operator's protected set) off bounce-for-all.
-  const openedAtMs = Date.parse(position.openedAt);
-  const firstTradeAtMs = firstTradeAt != null ? Date.parse(firstTradeAt) : NaN;
-  return (
-    Number.isFinite(openedAtMs) &&
-    openedAtMs >= sellableFlow.appliesFromMs &&
-    Number.isFinite(firstTradeAtMs) &&
-    firstTradeAtMs >= sellableFlow.appliesFromMs
-  );
-}
 
 /**
  * Emit a Q.D pre-resolution-exit shadow side effect (observe-only) for cheap
@@ -1113,10 +1097,13 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
     // legacy positions keep today's GATE/sellableFlow routing.
     (isBounceOwned(input.position) ||
       (input.position.exitOwner == null &&
-        isBounceLadderEligiblePosition(
-          input.position,
-          input.executionPolicy,
-          legState.firstTradeAt,
+        isBounceLadderEligible(
+          {
+            entryLane: input.position.entryLane,
+            openedAt: input.position.openedAt,
+            firstTradeAt: legState.firstTradeAt,
+          },
+          input.executionPolicy?.sellableFlow,
         )))
   ) {
     const policy = input.executionPolicy;
@@ -2316,6 +2303,35 @@ function buildSignalDraft(args: {
           ? "stock_close_tail_damp_below_min_order"
           : "order-size-below-minimum",
       side: side === "buy" ? "BUY" : "SELL",
+      decisionRuleId: decision.ruleId,
+      state,
+      price,
+      buyCount,
+      timeSinceLastSeconds,
+      emissionFacts,
+      timestamp: args.nowIso,
+    });
+    return null;
+  }
+  // Sized fine against the fallback minimum, but the REAL exchange minimum is
+  // still unknown — `resolveSellableShareFloor` will refuse to size the exit and
+  // signal-to-order will drop this signal without changing state. Cut it here
+  // (the module kicks a book refresh off this suppression) instead of paying an
+  // emission + a skip row on every tick. Placed AFTER the executability guard so
+  // a genuinely-too-small size keeps its existing `order-size-below-minimum`
+  // reason. `buyCount === 0` is exactly `resolveSignalReason`'s probe-entry.
+  if (
+    side === "buy" &&
+    buyCount === 0 &&
+    input.minOrderSizeHydrationAvailable === true &&
+    input.executionPolicy?.sellableFlow?.enabled === true &&
+    !isKnownMinOrderSize(market.minOrderSize)
+  ) {
+    args.suppressions.push({
+      tokenId: market.tokenId,
+      conditionId: market.conditionId,
+      reasonCode: ENTRY_MIN_ORDER_SIZE_UNKNOWN_REASON,
+      side: "BUY",
       decisionRuleId: decision.ruleId,
       state,
       price,

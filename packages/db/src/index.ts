@@ -1,4 +1,11 @@
-export { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
+export {
+  openDatabase,
+  openDatabaseWithSchema,
+  withShutdownBusyTimeout,
+  disableAutoCheckpoint,
+  SHUTDOWN_BUSY_TIMEOUT_MS,
+  type DbConnection,
+} from "./connection.js";
 export { runMigrations } from "./migrations/runner.js";
 export { bootstrapDatabase, bootstrapControlDb, bootstrapLedgerDb } from "./bootstrap.js";
 export { SqliteMarketRepository } from "./repositories/market-repository.js";
@@ -81,4 +88,17 @@ export {
   ensureDefaultExecutionPolicy,
 } from "./control-profiles.js";
 export { withImmediate } from "./immediate-transaction.js";
+export {
+  OWNERSHIP_INVARIANT_GUARD_SQL,
+  OWNERSHIP_INVARIANT_ROW_SQL,
+  PROJECTED_OWNERS_CREATE_SQL,
+  formatOwnershipInvariantBreakdown,
+  formatOwnershipInvariantRemedy,
+  hasOwnershipInvariantViolation,
+  isWorkingSellOrderStatus,
+  readOwnershipInvariantViolations,
+  type ExitOwner,
+  type OwnershipInvariantId,
+  type OwnershipInvariantViolations,
+} from "./exit-ownership-invariants.js";
 export { SqliteMakerShadowOrderRepository } from "./repositories/maker-shadow-order-repository.js";

@@ -567,10 +567,21 @@ CREATE TABLE IF NOT EXISTS merge_ledger (
   merged_amount  REAL NOT NULL,
   spread_pnl     REAL NOT NULL,
   merged_at      TEXT NOT NULL,
-  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  -- migration 092: write-ahead merge intent. 'pending' = recorded before the on-chain submission,
+  -- 'onchain' = the chain moved and this ledger has not caught up yet, 'applied' = settled.
+  status         TEXT NOT NULL DEFAULT 'applied'
+    CHECK (status IN ('pending', 'onchain', 'applied'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_merge_ledger_merged_at ON merge_ledger(merged_at);
+CREATE INDEX IF NOT EXISTS idx_merge_ledger_status_pending
+  ON merge_ledger(status) WHERE status != 'applied';
+-- migration 093: at most one in-flight merge per condition. This is the fence itself — the runtime
+-- claims a condition by inserting its 'pending' row, and a losing INSERT is how a second process
+-- learns the condition is already claimed.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_merge_ledger_one_non_terminal_per_condition
+  ON merge_ledger(condition_id) WHERE status != 'applied';
 
 -- ═══════════ ALGO DECISION ENGINE ═══════════
 

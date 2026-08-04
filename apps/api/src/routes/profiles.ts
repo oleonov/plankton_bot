@@ -22,7 +22,13 @@ import {
   serializeExecutionPolicy,
   type ExecutionPolicy,
 } from "@krabs/domain";
-import { readExecutionPolicyVersion } from "@krabs/db";
+import {
+  formatOwnershipInvariantBreakdown,
+  formatOwnershipInvariantRemedy,
+  hasOwnershipInvariantViolation,
+  readExecutionPolicyVersion,
+  readOwnershipInvariantViolations,
+} from "@krabs/db";
 
 const TRACKED_COLUMNS =
   "initial_balance_usdc, envelope_json, risk_caps_json, wallet_mode, min_order_usdc, relayer_json, execution_policy_json";
@@ -637,10 +643,10 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     // (the census backfilled them); an active/dust NULL-owner position would be a
     // pre-census legacy holdout the broadening cannot reason about. FAIL-CLOSED:
     // if the ledger is unavailable we cannot confirm the invariant, so we refuse
-    // rather than broaden blindly. The zero-NULL-owner CHECK and the policy commit
-    // run together under a single ledger BEGIN IMMEDIATE write-barrier (held across
-    // `applyWrite`), so no ledger writer can slip a NULL owner in between the check
-    // and activation.
+    // rather than broaden blindly. The ownership-invariant CHECK (I1–I5 as well as
+    // NULL owners) and the policy commit run together under a single ledger BEGIN
+    // IMMEDIATE write-barrier (held across `applyWrite`), so no ledger writer can slip
+    // a violation in between the check and activation.
     const broadeningToAll =
       current.bounceExit?.applyToAllMarkets !== true &&
       parsed.policy.bounceExit.applyToAllMarkets === true;
@@ -687,22 +693,29 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       }
     });
     if (broadeningToAll && gateLedger) {
-      // Hold the ledger write-barrier across the control-policy commit: verify no
-      // active/dust NULL-owner position exists AND activate the flag in the same
-      // transaction, so a concurrent first-fill cannot create a NULL owner after the
-      // check but before activation. A violation throws (409) and rolls back both.
+      // Hold the ledger write-barrier across the control-policy commit: evaluate the ownership
+      // invariants AND activate the flag in the same transaction, so a concurrent first-fill
+      // cannot create a NULL owner (or a mis-bound SELL) after the check but before activation.
+      // `.immediate()` is load-bearing — a deferred BEGIN takes no write lock under WAL, so a
+      // competing writer could commit a violating row inside the window. A violation throws
+      // (409) and rolls back both. No projection is passed: no run is projecting an owner here,
+      // so the invariants are evaluated against the ledger exactly as it stands.
       gateLedger
         .transaction(() => {
-          const { n: nullOwners } = gateLedger
-            .prepare(
-              `SELECT COUNT(*) AS n FROM positions WHERE exit_owner IS NULL AND status IN ('open', 'dust')`,
-            )
-            .get() as { n: number };
+          const violations = readOwnershipInvariantViolations(gateLedger);
+          const nullOwners = violations.counts.nullOwners;
           if (nullOwners > 0) {
             throw new ApiError(
               409,
-              `cannot enable bounceExit.applyToAllMarkets: ${nullOwners} active/dust position(s) still have NULL exit_owner — run the census to backfill ownership first`,
+              `cannot enable bounceExit.applyToAllMarkets: ${nullOwners} active position(s) still have NULL exit_owner — run the census to backfill ownership first`,
               "APPLY_TO_ALL_MARKETS_REQUIRES_CENSUS",
+            );
+          }
+          if (hasOwnershipInvariantViolation(violations)) {
+            throw new ApiError(
+              409,
+              `cannot enable bounceExit.applyToAllMarkets: the ledger violates exit-ownership invariants (${formatOwnershipInvariantBreakdown(violations.counts)}) — ${formatOwnershipInvariantRemedy(violations.counts)}`,
+              "APPLY_TO_ALL_MARKETS_INVARIANT_VIOLATION",
             );
           }
           applyWrite();

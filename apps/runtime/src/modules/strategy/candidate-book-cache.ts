@@ -1,6 +1,7 @@
 import type { Logger } from "../../logger.js";
 import type { NormalizedMarket, OrderBookSnapshot } from "@krabs/domain";
 import { deriveExecutableTopOfBook } from "../../executable-price.js";
+import { isKnownMinOrderSize } from "../../min-order-size.js";
 
 export interface CandidateBookGateway {
   getOrderBooks(tokenIds: string[]): Promise<Map<string, OrderBookSnapshot>>;
@@ -51,6 +52,14 @@ interface CandidateBookCacheDeps {
   readonly pruneMaxAgeMs?: number;
   readonly onRefreshObserved?: ((event: CandidateBookRefreshObserved) => void) | undefined;
   readonly onUsageObserved?: ((event: CandidateBookUsageObserved) => void) | undefined;
+  /**
+   * The REST `/books` payload is the ONLY source of `min_order_size` the runtime
+   * sees — the WSS `book` event omits it (0 hits over 115k Observer events), so a
+   * WSS-tracked market keeps `minOrderSize: null` forever and every sellable-sizing
+   * entry decision on it is skipped. Hand each observed value back so the pricing
+   * snapshot can seed it once and keep it sticky.
+   */
+  readonly onMinOrderSizeObserved?: ((tokenId: string, minOrderSize: number) => void) | undefined;
 }
 
 const DEFAULT_MAX_AGE_MS = 3_000;
@@ -209,6 +218,7 @@ export class CandidateBookCache {
       };
       nextEntries.set(tokenId, entry);
       nextMap.set(tokenId, entry);
+      this.notifyMinOrderSize(tokenId, book);
       this.resolveWaiters(tokenId, entry);
     }
 
@@ -219,11 +229,23 @@ export class CandidateBookCache {
   async getFreshOrRefresh(
     tokenId: string,
     nowMs: number = Date.now(),
+    options?: { readonly requireKnownMinOrderSize?: boolean },
   ): Promise<CandidateBookResolution> {
     const fresh = this.getFreshEntry(tokenId, nowMs);
-    if (fresh) {
+    // A caller that needs the exchange minimum cannot be served by a book that
+    // omits it (every WS book, and any partial REST payload). Letting such an
+    // entry short-circuit would skip the one REST refresh that can supply the
+    // value, so the unknown-minimum guard would never self-heal.
+    if (fresh && (options?.requireKnownMinOrderSize !== true || hasKnownMinOrderSize(fresh))) {
       if (fresh.sourceKind === "ws") {
         this.deps.onUsageObserved?.({ type: "ws-hit", tokenId });
+      }
+      // The original observation may have been dropped downstream (token not
+      // tracked at the time), while the cache kept the value. A caller asking
+      // for the minimum is exactly the caller whose suppression depends on it,
+      // so re-announce instead of silently serving from cache.
+      if (options?.requireKnownMinOrderSize === true) {
+        this.notifyMinOrderSize(tokenId, fresh.book);
       }
       return { entry: fresh, status: "fresh-cache" };
     }
@@ -231,7 +253,17 @@ export class CandidateBookCache {
     const cached = this.getEntry(tokenId);
     const fallbackStatus: CandidateBookResolution["status"] = cached ? "cache-stale" : "cache-miss";
     this.deps.onUsageObserved?.({ type: "rest-fallback", tokenId });
-    return this.enqueueRefresh(tokenId, fallbackStatus);
+    const resolution = await this.enqueueRefresh(tokenId, fallbackStatus);
+    // A REST payload that still omits the minimum satisfies nothing for this
+    // caller; handing it back would read as "requirement met".
+    if (
+      options?.requireKnownMinOrderSize === true &&
+      resolution.entry != null &&
+      !hasKnownMinOrderSize(resolution.entry)
+    ) {
+      return { entry: null, status: fallbackStatus };
+    }
+    return resolution;
   }
 
   private async fetchAndStore(
@@ -255,6 +287,23 @@ export class CandidateBookCache {
     for (const tokenId of uniqueTokenIds) {
       const book = books.get(tokenId);
       if (!book) continue;
+      // Two `/books` refreshes for the same token can be open at once: the flush
+      // window is 10 ms and `flushQueuedRefreshes` clears `pendingRefreshes`
+      // BEFORE awaiting, so a second batch starts while the first is still in
+      // flight. Responses may land out of order, and applying the older one
+      // regresses the cached book AND re-announces a superseded minimum.
+      // Compared against REST polls only: a WS entry is always newer by clock but
+      // never carries `min_order_size`, so REST must still enrich it.
+      const known = nextMap.get(tokenId);
+      if (known?.sourceKind === "rest" && known.sourcePolledAtMs > sourcePolledAtMs) {
+        // The newer entry wins for the BOOK — but skipping this response wholesale
+        // would drop its `min_order_size` too, and a `/books` payload can omit the
+        // field the older response carries. Announcing it here keeps the only known
+        // minimum without regressing the cached book: `notifyMinOrderSize` ignores
+        // an absent or invalid value, so a min-less older response is still a no-op.
+        if (!hasKnownMinOrderSize(known)) this.notifyMinOrderSize(tokenId, book);
+        continue;
+      }
       const entry: CandidateBookCacheEntry = {
         tokenId,
         snapshotTs: book.timestamp,
@@ -266,6 +315,7 @@ export class CandidateBookCache {
       };
       nextEntries.set(tokenId, entry);
       nextMap.set(tokenId, entry);
+      this.notifyMinOrderSize(tokenId, book);
       this.resolveWaiters(tokenId, entry);
     }
 
@@ -286,6 +336,13 @@ export class CandidateBookCache {
       durationMs: Date.now() - startedAtMs,
     });
     return nextEntries;
+  }
+
+  /** Only a REST `/books` payload ever carries `min_order_size`; the WS book omits
+   *  it, so an absent/zero value here is the norm and must stay silent. */
+  private notifyMinOrderSize(tokenId: string, book: OrderBookSnapshot): void {
+    if (!isKnownMinOrderSize(book.minOrderSize)) return;
+    this.deps.onMinOrderSizeObserved?.(tokenId, book.minOrderSize);
   }
 
   private enqueueRefresh(
@@ -382,6 +439,15 @@ export class CandidateBookCache {
     this.refreshesInWindow += 1;
     return true;
   }
+}
+
+/**
+ * Whether a cached book can answer a sellable-floor question. Shared by the
+ * cache's own refresh short-circuit and by the bridge's lookup path so the two
+ * cannot drift into disagreeing about what counts as a usable hit.
+ */
+export function hasKnownMinOrderSize(entry: CandidateBookCacheEntry): boolean {
+  return isKnownMinOrderSize(entry.book.minOrderSize);
 }
 
 export function applyOrderBookToMarket(

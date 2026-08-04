@@ -88,6 +88,7 @@ import {
 export { planktonAlignedMarkupCap, SELL_PRICE_CEILING };
 import {
   applyOrderBookToMarket,
+  hasKnownMinOrderSize,
   type CandidateBookCache,
   type CandidateBookCacheEntry,
   type CandidateBookResolution,
@@ -98,8 +99,10 @@ import {
   type ExitBookSource,
 } from "./exit-book-fallback-cache.js";
 import {
+  ENTRY_UNKNOWN_MIN_SKIP_REASON,
   floorToMinOrderStep,
   isExecutableOrderSize,
+  isKnownMinOrderSize,
   resolveEffectiveMinOrderSize,
 } from "../../min-order-size.js";
 import {
@@ -1202,10 +1205,15 @@ export class SignalToOrderBridge {
             },
             "approved BUY skipped — sellable-sizing floor unknown (min_order_size unknown)",
           );
-          await this.publishConversionSkipped(signal, "execution-terms", ["entry_unknown_min"], {
-            cacheStatus: pricing.cacheStatus,
-            minOrderSize: market.minOrderSize ?? null,
-          });
+          await this.publishConversionSkipped(
+            signal,
+            "execution-terms",
+            [ENTRY_UNKNOWN_MIN_SKIP_REASON],
+            {
+              cacheStatus: pricing.cacheStatus,
+              minOrderSize: market.minOrderSize ?? null,
+            },
+          );
           this.writeObservation({
             signal,
             clientOrderId: null,
@@ -1214,7 +1222,7 @@ export class SignalToOrderBridge {
             executionTerms,
             canary,
             sellPricingShadow,
-            skippedReason: "entry_unknown_min",
+            skippedReason: ENTRY_UNKNOWN_MIN_SKIP_REASON,
           });
           return;
         }
@@ -1942,32 +1950,47 @@ export class SignalToOrderBridge {
     }
 
     const nowMs = Date.now();
+    // This order cannot be placed until the exchange minimum is known, so a book
+    // that omits it (every WS book, and any partial REST payload) is not a hit:
+    // accepting one falls through to the `entry_unknown_min` skip on the BUY side,
+    // which changes no state and so re-emits on the very next tick, or to the
+    // `sell-residual-unknown-min` rejection on a live-lite exit. Only a REST
+    // refresh can supply the value, so every lookup below has to hold out for one.
+    const requireKnownMin = needsKnownMinOrderSize(
+      signal,
+      baseMarket,
+      policy,
+      this.deps.liveLiteGuard?.isActive === true,
+    );
     const freshEntry = this.deps.candidateBookCache.getFreshEntry(String(signal.tokenId), nowMs);
-    if (freshEntry) {
+    if (freshEntry && (!requireKnownMin || hasKnownMinOrderSize(freshEntry))) {
       return this.candidateHit(signal, baseMarket, freshEntry, "fresh-cache");
     }
 
     // A usable base market carries only top-of-book (no depth ladder); a Track R SELL still needs
     // the full book, so route through the exit-book fallback before settling for base-market pricing.
-    if (canUseBaseMarketForPricing(baseMarket)) {
+    if (canUseBaseMarketForPricing(baseMarket) && !requireKnownMin) {
       return this.withExitBookFallback(signal, baseMarket, policy, {
         market: baseMarket,
         cacheStatus: "base-market",
       });
     }
 
+    // Still worth waiting even when the minimum is required: waiters are also
+    // resolved by a REST batch refresh, which does carry it.
     const wsEntry = await this.deps.candidateBookCache.waitForFreshEntry(
       String(signal.tokenId),
       BRIDGE_WS_BOOK_WAIT_MS,
       nowMs,
     );
-    if (wsEntry) {
+    if (wsEntry && (!requireKnownMin || hasKnownMinOrderSize(wsEntry))) {
       return this.candidateHit(signal, baseMarket, wsEntry, "fresh-cache");
     }
 
     const resolution = await this.deps.candidateBookCache.getFreshOrRefresh(
       String(signal.tokenId),
       nowMs,
+      { requireKnownMinOrderSize: requireKnownMin },
     );
     if (resolution.entry) {
       return this.candidateHit(signal, baseMarket, resolution.entry, resolution.status);
@@ -3666,6 +3689,38 @@ export class SignalToOrderBridge {
       );
     }
   }
+}
+
+/**
+ * A first-entry BUY needs `market.minOrderSize` to compute the sellable-sizing
+ * floor, and the REST book is the ONLY payload that carries it — the WSS `book`
+ * event omits it, yet still stamps `bookSource: "clob"`. So the base-market
+ * short-circuit below would settle for pricing that can never reveal the minimum,
+ * and the entry would skip on every single book tick forever (measured: 1.94M
+ * `entry_unknown_min` rows over 151 tokens in 3 days). Route those signals through
+ * the candidate-book path instead, which hydrates the minimum from the REST book.
+ *
+ * A live-lite SELL needs the same value for the opposite reason:
+ * `evaluateSellPreSubmitGuard` rejects an unknown minimum outright
+ * (`sell-residual-unknown-min`), so a position opened before the minimum was ever
+ * observed cannot EXIT. Nothing on the SELL path fetches `/books` by itself — the
+ * exit-book fallback builds its entry from a different cache and carries no
+ * minimum — so without this the position stays stuck until some unrelated consumer
+ * happens to fetch that token's book. The live-lite test mirrors the guard's own:
+ * elsewhere the rejection never fires, and forcing every simulation/paper exit
+ * through a REST refresh would buy nothing. The fallback still runs when the
+ * refresh comes back empty, so this can only add a hydration attempt, never remove
+ * an exit route.
+ */
+function needsKnownMinOrderSize(
+  signal: RuntimeEventMap["SignalApproved"]["signal"],
+  market: NormalizedMarket,
+  policy: ExecutionPolicy,
+  liveLite: boolean,
+): boolean {
+  if (isKnownMinOrderSize(market.minOrderSize)) return false;
+  if (signal.side === "sell") return liveLite;
+  return policy.sellableFlow.enabled && signal.reason === "probe-entry";
 }
 
 function canUseBaseMarketForPricing(market: NormalizedMarket): boolean {

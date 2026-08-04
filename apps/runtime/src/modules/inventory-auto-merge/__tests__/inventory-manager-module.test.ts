@@ -38,7 +38,15 @@ describe("InventoryManagerModule", () => {
     marketRepo = { findByTokenId: vi.fn() } as any;
     fillRepo = { findByOrderId: vi.fn().mockReturnValue([]) } as any;
     lotRepo = { consumeFifo: vi.fn() } as any;
-    mergeLedgerRepo = { save: vi.fn(), findByFamily: vi.fn() } as any;
+    mergeLedgerRepo = {
+      // `true` = the claim was won. The real repository returns `false` only when another writer
+      // already holds a non-terminal merge for that condition, which is not what these tests cover.
+      recordPending: vi.fn().mockReturnValue(true),
+      markOnchain: vi.fn(),
+      markApplied: vi.fn(),
+      deletePending: vi.fn(),
+      findNonTerminal: vi.fn().mockReturnValue([]),
+    } as any;
     db = {
       prepare: vi.fn().mockReturnValue({ run: vi.fn() }),
       transaction: vi.fn((cb) => cb),
@@ -235,5 +243,73 @@ describe("InventoryManagerModule", () => {
     expect(isPaused).toHaveBeenCalledTimes(1);
     expect(positionRepo.findOpen).not.toHaveBeenCalled();
     expect(gateway.mergePositions).not.toHaveBeenCalled();
+  });
+
+  it("records the merge intent as 'pending' before the on-chain call, then drains to 'applied' on stop()", async () => {
+    makeMergeableInventory();
+    // Park the sweep exactly where the damage lives: the merge is irrevocable on chain and the
+    // ledger row that mirrors it is not 'applied' yet. A stop that returns here lets the process
+    // exit into permanent drift, and nothing downstream reconciles it unless that row is already
+    // discoverable — which is what recordPending (below, before the gateway call) exists for.
+    let releaseMerge!: () => void;
+    (gateway.mergePositions as any).mockImplementation(
+      () => new Promise<void>((resolve) => (releaseMerge = resolve)),
+    );
+
+    void mod.sweep();
+    await Promise.resolve();
+    expect(gateway.mergePositions).toHaveBeenCalledTimes(1);
+    // The pending row must already be written by the time the on-chain call is in flight — it is
+    // written and committed BEFORE that call, not merely queued behind it.
+    expect(mergeLedgerRepo.recordPending).toHaveBeenCalledTimes(1);
+    expect(mergeLedgerRepo.markOnchain).not.toHaveBeenCalled();
+    expect(mergeLedgerRepo.markApplied).not.toHaveBeenCalled();
+
+    let stopped = false;
+    const stopping = mod.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    releaseMerge();
+    await stopping;
+
+    expect(stopped).toBe(true);
+    expect(mergeLedgerRepo.markOnchain).toHaveBeenCalledTimes(1);
+    expect(mergeLedgerRepo.markApplied).toHaveBeenCalledTimes(1);
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it("start() re-arms the module after a stop, so a restart still merges", async () => {
+    const { condId } = makeMergeableInventory();
+    (bus.subscribe as any).mockReturnValue(() => undefined);
+
+    await mod.start();
+    await mod.stop();
+    // `Supervisor.stop()` -> `start()` is a supported sequence. `stopping` is a latch against a
+    // sweep already past clearTimeout's reach, not a terminal state: left set, auto-merge is
+    // silently off for the whole next run while `healthCheck()` keeps reporting ok.
+    await mod.start();
+
+    await mod.sweep();
+
+    expect(gateway.mergePositions).toHaveBeenCalledWith([{ conditionId: condId, amount: 100 }]);
+    await mod.stop();
+  });
+
+  it("stop() keeps a late sweep from opening a new on-chain merge", async () => {
+    makeMergeableInventory();
+
+    await mod.stop();
+    // The debounce timer is cleared by stop(), but a timer that has ALREADY fired is past its
+    // reach — this is that sweep, arriving after the module was told to shut down.
+    await mod.sweep();
+
+    expect(gateway.mergePositions).not.toHaveBeenCalled();
+    expect(log.debug).toHaveBeenCalledWith(
+      { reason: "shutting down" },
+      "inventory manager sweep skipped",
+    );
   });
 });

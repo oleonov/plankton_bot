@@ -1,0 +1,22 @@
+-- r4-M1: make the merge fence an ATOMIC CLAIM instead of an observation.
+--
+-- 092 gave every merge a write-ahead 'pending' row, and the runtime refuses to submit a merge for a
+-- condition that still has a non-terminal row. Read-then-write cannot enforce that across
+-- processes: two runtimes (a rolling deploy, an operator's second instance, a supervisor restart
+-- overlapping its predecessor's drain) both read an empty fence, both mint a merge id, both insert,
+-- and both submit the SAME merge. The second one merges shares the first already consumed.
+--
+-- A unique index over the non-terminal rows moves the decision into SQLite: the first INSERT wins,
+-- the second fails on the constraint, and the loser learns "already claimed" from the database
+-- rather than from a snapshot that was stale before it was read. `status` is deliberately part of
+-- the predicate and not the key — settled history is unbounded per condition (a condition may be
+-- merged many times over its life), while at most ONE merge for it may be in flight.
+--
+-- Safe to create on an upgraded ledger: 092 backfilled every pre-existing row to 'applied', so the
+-- set this index covers is empty on arrival. If it ever DOES fail, that is a real duplicate pair of
+-- in-flight merges for one condition, and failing the migration loudly is correct — reconcile them
+-- with scripts/merge-ledger-reconcile.ts (which is why that CLI exists) and restart. Silently
+-- collapsing the duplicates here would destroy the only local record of a merge that may be on
+-- chain.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_merge_ledger_one_non_terminal_per_condition
+  ON merge_ledger(condition_id) WHERE status != 'applied';

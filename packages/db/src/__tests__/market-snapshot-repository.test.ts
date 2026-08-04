@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
+import { RUNTIME_BUSY_TIMEOUT_MS, SHUTDOWN_BUSY_TIMEOUT_MS } from "../connection.js";
 import { SqliteMarketSnapshotRepository } from "../repositories/market-snapshot-repository.js";
 import { createTokenId } from "@krabs/domain";
 import type { MarketSnapshot } from "@krabs/domain";
@@ -230,6 +231,79 @@ describe("SqliteMarketSnapshotRepository", () => {
       const result = repo.findLatestBboByTokens([createTokenId("tok-1"), createTokenId("tok-2")]);
       expect(result.has("tok-1")).toBe(true);
       expect(result.has("tok-2")).toBe(false);
+    });
+  });
+
+  describe("enterShutdownMode", () => {
+    // market_snapshots keeps being written while modules stop: the MarketSnapshotReceived /
+    // MarketSnapshotHeartbeat subscribers are permanent, and MarketDataModule.stop() flushes
+    // pending stream updates through them. better-sqlite3 is synchronous, so one such write losing
+    // the writer lock to the checkpoint worker freezes the event loop for the connection's full
+    // runtime timeout — longer than the entire shutdown budget.
+    const pragmaCalls: string[] = [];
+
+    beforeEach(() => {
+      pragmaCalls.length = 0;
+      const original = conn.db.pragma.bind(conn.db);
+      conn.db.pragma = ((source: string, options?: unknown) => {
+        pragmaCalls.push(source);
+        return original(source, options as never);
+      }) as typeof conn.db.pragma;
+    });
+
+    function expectBoundedAndRestored(): void {
+      expect(pragmaCalls).toContain(`busy_timeout = ${SHUTDOWN_BUSY_TIMEOUT_MS}`);
+      // Restored, not left low: execution drains its order queue on this same connection and an
+      // exchange-accepted order must still persist at the full runtime timeout.
+      expect(pragmaCalls.at(-1)).toBe(`busy_timeout = ${RUNTIME_BUSY_TIMEOUT_MS}`);
+      expect(conn.db.pragma("busy_timeout", { simple: true })).toBe(RUNTIME_BUSY_TIMEOUT_MS);
+      pragmaCalls.length = 0;
+    }
+
+    it("leaves steady-state writes unbounded", () => {
+      repo.saveBatch([makeSnapshot()]);
+      repo.saveBatchWithPositionValuations([makeSnapshot()], []);
+      repo.prune("2999-01-01T00:00:00.000Z");
+      // The bound is per-write and shutdown-only: no pragma round-trip before enterShutdownMode.
+      expect(pragmaCalls).toEqual([]);
+    });
+
+    it("bounds every write path to the teardown busy_timeout and restores the connection's own", () => {
+      repo.enterShutdownMode();
+
+      repo.saveBatch([makeSnapshot()]);
+      expectBoundedAndRestored();
+
+      repo.saveBatchWithPositionValuations([makeSnapshot({ bestBid: 0.46 })], []);
+      expectBoundedAndRestored();
+
+      // Both prune branches: the unfiltered DELETE and the preserve-list one are separate
+      // statements, so a bound on only one of them still leaves the largest DELETE in the ledger
+      // able to outlast the grace period.
+      repo.prune("2999-01-01T00:00:00.000Z");
+      expectBoundedAndRestored();
+
+      repo.prune("2999-01-01T00:00:00.000Z", { preserveTokenIds: [createTokenId("tok-2")] });
+      expectBoundedAndRestored();
+    });
+
+    it("still performs the write it bounds", () => {
+      repo.saveBatch([makeSnapshot(), makeSnapshot({ tokenId: createTokenId("tok-2") })]);
+      repo.enterShutdownMode();
+
+      repo.saveBatch([makeSnapshot({ capturedAt: "2026-03-22T13:00:00.000Z" })]);
+      const inserted = conn.db.prepare("SELECT COUNT(*) AS c FROM market_snapshots").get() as {
+        c: number;
+      };
+      expect(inserted.c).toBe(3);
+
+      expect(
+        repo.prune("2999-01-01T00:00:00.000Z", { preserveTokenIds: [createTokenId("tok-2")] }),
+      ).toBe(2);
+      const remaining = conn.db.prepare("SELECT token_id FROM market_snapshots").all() as Array<{
+        token_id: string;
+      }>;
+      expect(remaining.map((r) => r.token_id)).toEqual(["tok-2"]);
     });
   });
 });

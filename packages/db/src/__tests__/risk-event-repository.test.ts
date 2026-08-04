@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
+import { RUNTIME_BUSY_TIMEOUT_MS, SHUTDOWN_BUSY_TIMEOUT_MS } from "../connection.js";
 import { SqliteRiskEventRepository } from "../repositories/risk-event-repository.js";
 
 let conn: DbConnection;
@@ -47,6 +48,50 @@ describe("SqliteRiskEventRepository", () => {
 
     const count = conn.db.prepare("SELECT COUNT(*) as c FROM risk_events").get() as { c: number };
     expect(count.c).toBe(2);
+  });
+
+  describe("enterShutdownMode", () => {
+    // risk_events keeps being written while modules stop: RiskEventWriter's OrderRejected /
+    // SignalRejected subscriptions are permanent, and order-lifetime inserts from inside its own
+    // stop(). better-sqlite3 is synchronous, so one such insert losing the writer lock to the
+    // checkpoint worker freezes the event loop for the connection's full 30s timeout — longer than
+    // the whole shutdown budget. The bound sits on the repository because ~a dozen holders insert
+    // through it directly; bounding one caller would leave the rest open.
+    const pragmaCalls: string[] = [];
+
+    beforeEach(() => {
+      pragmaCalls.length = 0;
+      const original = conn.db.pragma.bind(conn.db);
+      conn.db.pragma = ((source: string, options?: unknown) => {
+        pragmaCalls.push(source);
+        return original(source, options as never);
+      }) as typeof conn.db.pragma;
+    });
+
+    it("bounds the insert to the teardown busy_timeout and restores the connection's own", () => {
+      repo.insert({ eventType: "signal_rejected", payload: {} });
+      // Steady state pays no pragma round-trip — the bound is per-write, not per-connection.
+      expect(pragmaCalls).toEqual([]);
+
+      repo.enterShutdownMode();
+      repo.insert({ eventType: "signal_rejected", payload: {} });
+
+      expect(pragmaCalls).toContain(`busy_timeout = ${SHUTDOWN_BUSY_TIMEOUT_MS}`);
+      // Restored, not left low: execution drains its queue on this same connection and an
+      // exchange-accepted order must still persist at the full runtime timeout.
+      expect(pragmaCalls.at(-1)).toBe(`busy_timeout = ${RUNTIME_BUSY_TIMEOUT_MS}`);
+      expect(conn.db.pragma("busy_timeout", { simple: true })).toBe(RUNTIME_BUSY_TIMEOUT_MS);
+    });
+
+    it("still persists the row", () => {
+      repo.enterShutdownMode();
+      repo.insert({ eventType: "max_exposure_breach", payload: { limit: 500 } });
+
+      const rows = conn.db.prepare("SELECT event_type FROM risk_events").all() as Array<{
+        event_type: string;
+      }>;
+      expect(rows.map((r) => r.event_type)).toEqual(["max_exposure_breach"]);
+    });
   });
 
   it("countSince returns recent event volume", () => {

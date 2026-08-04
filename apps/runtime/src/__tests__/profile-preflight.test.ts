@@ -330,6 +330,64 @@ describe("runProfilePreflight", () => {
     expect(result.blockers).toHaveLength(0);
   });
 
+  it("live-lite EOA mode fails when auto-merge is enabled (no relayer settlement client)", () => {
+    seedProfile(controlConn.db, "live-lite");
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: ENVELOPE,
+      polyBuilderCodeConfigured: true,
+      enableInventoryAutoMerge: true,
+    });
+
+    expect(result.status).toBe("failed");
+    const blocker = result.blockers.find((b) => b.code === "INVENTORY_AUTO_MERGE_REQUIRES_RELAYER");
+    expect(blocker).toBeDefined();
+    expect(blocker?.message).toContain("ENABLE_INVENTORY_AUTO_MERGE");
+    expect(blocker?.message).toContain("relayer");
+  });
+
+  it("live-lite relayer mode passes with auto-merge enabled", () => {
+    seedProfile(controlConn.db, "live-lite");
+    seedProfileSettings(controlConn.db, "live-lite", {
+      relayerJson: JSON.stringify({
+        walletType: "proxy",
+        funderAddress: "0x1111111111111111111111111111111111111111",
+      }),
+    });
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      relayerBuilderAuthConfigured: true,
+      polyBuilderCodeConfigured: true,
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.05 },
+      enableInventoryAutoMerge: true,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.blockers).toHaveLength(0);
+  });
+
+  it("live-lite EOA mode passes when auto-merge is disabled", () => {
+    seedProfile(controlConn.db, "live-lite");
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: ENVELOPE,
+      polyBuilderCodeConfigured: true,
+      enableInventoryAutoMerge: false,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.blockers).toHaveLength(0);
+  });
+
   it("includes openPositions in info", () => {
     seedProfile(controlConn.db, "paper");
 

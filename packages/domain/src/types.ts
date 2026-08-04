@@ -2312,12 +2312,20 @@ export interface SettlementRecord {
   createdAt?: string;
 }
 
+/**
+ * Where a merge sits relative to the on-chain call it records the intent for. 'pending' and
+ * 'onchain' both predate the settlement transaction and exist only so a process that dies before
+ * that transaction runs leaves a discoverable trace instead of none — see 092_merge_ledger_status.sql.
+ */
+export type MergeLedgerStatus = "pending" | "onchain" | "applied";
+
 export interface MergeRecord {
   mergeId: string;
   conditionId: string;
   mergedAmount: number;
   spreadPnl: number;
   mergedAt: string;
+  status: MergeLedgerStatus;
   createdAt?: string;
 }
 

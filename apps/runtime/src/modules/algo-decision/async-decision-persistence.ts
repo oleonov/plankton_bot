@@ -4,7 +4,29 @@ import type {
   RiskEventRepository,
 } from "@krabs/domain";
 import { Worker } from "node:worker_threads";
+import { waitAtMost } from "../../lifecycle-chain.js";
 import type { Logger } from "../../logger.js";
+
+/**
+ * How long `stop()` waits for the worker to acknowledge the shutdown message.
+ *
+ * The worker acknowledges only after `db.close()`, and it processes messages one at a time — so an
+ * ack that is late means the worker is inside a synchronous better-sqlite3 transaction, waiting on
+ * the ledger's write lock. Waiting longer does not help: the ack arrives when the lock is released,
+ * on a timescale the shutdown budget cannot afford. Losing the tail of a telemetry batch is the
+ * cheapest thing in this teardown.
+ */
+const WORKER_SHUTDOWN_ACK_WAIT_MS = 2_000;
+
+/**
+ * How long `stop()` waits for the worker THREAD to exit after `terminate()`.
+ *
+ * Only reachable once the worker HAS acknowledged — it is then idle behind a closed database, so
+ * this bound is defensive, not load-bearing. The wedged case never terminates at all; see the
+ * comment on the unref path in `stop()`. Both terms are cited by name in `docker-compose.yml`'s
+ * `stop_grace_period` arithmetic.
+ */
+const WORKER_TERMINATE_WAIT_MS = 2_000;
 
 type RiskEvent = { eventType: string; payload: Record<string, unknown> };
 type QueuedWrite =
@@ -75,19 +97,47 @@ export class DecisionPersistenceBuffer {
       this.flushSync();
       return;
     }
+    const worker = this.worker;
     while (this.queue.length > 0) {
       const batch = this.queue.splice(0, this.batchSize);
-      this.worker.postMessage({ type: "batch", writes: batch });
+      worker.postMessage({ type: "batch", writes: batch });
     }
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(resolve, 5_000);
-      this.shutdownAck = () => {
-        clearTimeout(timeout);
-        resolve();
-      };
-      this.worker?.postMessage({ type: "shutdown" });
+    let acknowledged = true;
+    await waitAtMost(
+      new Promise<void>((resolve) => {
+        this.shutdownAck = resolve;
+        worker.postMessage({ type: "shutdown" });
+      }),
+      {
+        ms: WORKER_SHUTDOWN_ACK_WAIT_MS,
+        onExpired: () => {
+          acknowledged = false;
+          this.deps.log.warn(
+            { waitMs: WORKER_SHUTDOWN_ACK_WAIT_MS },
+            "decision persistence worker did not acknowledge shutdown — abandoning the wedged thread",
+          );
+        },
+      },
+    );
+    this.shutdownAck = null;
+    if (!acknowledged) {
+      // A missing ack means the worker is INSIDE a synchronous better-sqlite3 call. `terminate()`
+      // must not be called there: it puts the worker isolate into terminating state, and when the
+      // wedged statement's `busy_timeout` finally expires better-sqlite3 has to ALLOCATE a JS Error
+      // to throw SQLITE_BUSY. That allocation returns an empty MaybeLocal and Node aborts the whole
+      // process — mid-shutdown, before the final metric flush and `process.exit(0)`. Reproduced.
+      // Left alone the worker just throws SQLITE_BUSY normally into its own catch and goes idle.
+      worker.unref();
+      return;
+    }
+    await waitAtMost(worker.terminate(), {
+      ms: WORKER_TERMINATE_WAIT_MS,
+      onExpired: () =>
+        this.deps.log.warn(
+          { waitMs: WORKER_TERMINATE_WAIT_MS },
+          "decision persistence worker did not exit — abandoning the thread to the process exit",
+        ),
     });
-    await this.worker.terminate();
   }
 
   getStats(): {

@@ -64,6 +64,8 @@ import { buildClientOrderId } from "@krabs/domain/node";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import type { Logger } from "../../logger.js";
+import type { LifecycleToken } from "../../lifecycle-chain.js";
+import { LifecycleChain, LIFECYCLE_STOP_WAIT_MS } from "../../lifecycle-chain.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-calculator.js";
 import { resnapPriceToTick, validateExecutablePrice } from "../../executable-price.js";
@@ -90,6 +92,7 @@ import {
 } from "../../wallet-buy-budget.js";
 import {
   DEFAULT_FALLBACK_MIN_ORDER_SIZE,
+  MIN_ORDER_SIZE_HYDRATION_RETRY_MS,
   evaluateSellPreSubmitGuard,
   isExecutableOrderSize,
 } from "../../min-order-size.js";
@@ -105,7 +108,7 @@ import {
   findOldestStaleOpenBuy,
   MAX_OPEN_GATE_BUYS,
 } from "../../buy-order-lifecycle.js";
-import { ExecutionQueue } from "./execution-queue.js";
+import { ExecutionQueue, drainGenerations } from "./execution-queue.js";
 import { AuthoritativeTickResolver } from "./authoritative-tick-resolver.js";
 import {
   buildReservationSnapshot,
@@ -128,6 +131,13 @@ import {
   validateProfileLadderReplacementSellTarget,
 } from "../profile-ladder-order-helpers.js";
 import type { PositionConcentrationService } from "../../position-concentration-service.js";
+
+/**
+ * How long `stop()` waits for commands already dispatched to finish, on either path — the queue's
+ * own drain and the queue-less one. One value because it answers one question (how long a shutdown
+ * may wait on the gateway), and two would drift.
+ */
+const EXECUTION_SHUTDOWN_TIMEOUT_MS = 10_000;
 
 type OrderFillLookupGateway = ExchangeGateway & {
   getFillsForOrder?: (orderId: string) => Promise<ExchangeFill[]>;
@@ -229,6 +239,17 @@ export interface ExecutionModuleDeps {
   runtimeControl?: RuntimeControl | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
   runtimeMode?: "simulation" | "paper" | "live-lite" | undefined;
+  /**
+   * Fetches the CLOB `/books` entry for a token so its `min_order_size` becomes
+   * known. Required here because `signal-to-order` — the other hydration
+   * trigger — only sees orders that came through the signal bridge. An S1 ladder
+   * exit publishes `PlaceOrderRequested` directly, and the planner suppresses
+   * algo SELLs for S1-owned tokens, so on that route NOTHING else ever fetches a
+   * book: a live-lite exit with an unknown minimum would be rejected here every
+   * single attempt with no path to learning the value. Left unset when the
+   * gateway cannot fetch books, which keeps the behaviour exactly as before.
+   */
+  requestMinOrderSizeHydration?: ((tokenId: string) => void) | undefined;
   maxConcurrency?: number | undefined;
   controlDb?: {
     prepare(sql: string): { get(...args: unknown[]): unknown };
@@ -316,6 +337,13 @@ export class ExecutionModule implements RuntimeModule {
   private readonly processedCommandIds = new Set<string>();
   private readonly processedCommandOrder: string[] = [];
   private readonly pendingReservations = new Map<string, PendingReservation>();
+  /**
+   * Command ids whose idempotency mark must be dropped once `executeCommand`'s
+   * `finally` has undone every other piece of this attempt's accounting — see
+   * {@link releaseProcessedCommandId}. Bounded by construction: an entry is
+   * added inside `executePlace` and consumed by that same command's `finally`.
+   */
+  private readonly commandIdsPendingRelease = new Set<string>();
   private readonly sellReplaceLocks = new Map<
     string,
     { orderId: OrderId; command: PlaceOrderCommand; createdAt: number }
@@ -385,12 +413,23 @@ export class ExecutionModule implements RuntimeModule {
   private readonly queue: ExecutionQueue | null;
   private readonly acceptedCommandAt = new Map<string, number>();
   private readonly marketCache = new Map<string, NormalizedMarket>();
+  /** tokenId -> last `/books` hydration request, for the retry-window throttle. */
+  private readonly minOrderSizeHydrationRequestedAt = new Map<string, number>();
   private placeCompleted = 0;
   private cancelCompleted = 0;
   private placeLatencyTotalMs = 0;
   private cancelLatencyTotalMs = 0;
   private unsubs: Array<() => void> = [];
   private started = false;
+  /**
+   * Every lifecycle transition runs through here, in call order, one at a time. Joining "the
+   * teardown currently running" is not enough: a `start()` that yields mid-body would otherwise
+   * resume AFTER a later `stop()` finished and re-subscribe on top of a completed teardown,
+   * leaving a module the supervisor believes is down while its queue accepts commands.
+   */
+  private readonly lifecycle = new LifecycleChain(() =>
+    this.log.error("lifecycle transition superseded by a later one — dropped"),
+  );
   // Finding 6: a hard startup fence — set BEFORE supervisor.start() and cleared only
   // AFTER seedStartupTransitions, so every placement is refused during the window in
   // which the command-poller may resume but the barrier isn't seeded yet (independent
@@ -421,12 +460,19 @@ export class ExecutionModule implements RuntimeModule {
   // tokenId → the in-flight commandId.
   private readonly pendingDeferredSubmit = new Map<string, string>();
 
+  /**
+   * In-flight commands on the queue-less path (`maxConcurrency` unset), settled-successfully so
+   * they can be awaited together. The queue tracks its own; this set is the only handle `stop()`
+   * has when there is no queue.
+   */
+  private readonly directInFlight = new Set<Promise<void>>();
+
   constructor(private readonly deps: ExecutionModuleDeps) {
     this.log = deps.log.child({ module: "execution" });
     this.queue = deps.maxConcurrency
       ? new ExecutionQueue({
           maxConcurrency: deps.maxConcurrency,
-          shutdownTimeoutMs: 10_000,
+          shutdownTimeoutMs: EXECUTION_SHUTDOWN_TIMEOUT_MS,
           execute: (cmd) => this.executeCommand(cmd),
           resolveTokenId: (cmd) => this.resolveCommandTokenId(cmd),
           log: this.log,
@@ -441,7 +487,15 @@ export class ExecutionModule implements RuntimeModule {
     return order?.tokenId ?? (cmd.orderId as unknown as TokenId);
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    return this.lifecycle.run((token) => this.executeStart(token));
+  }
+
+  private async executeStart(token: LifecycleToken): Promise<void> {
+    // A previous stop() left the queue refusing everything. Re-open BEFORE subscribing, or
+    // the restarted module silently drops every command at `enqueue` — including the S1
+    // retry the deferred release exists to admit — for the life of the process.
+    this.queue?.reopen();
     this.unsubs.push(
       this.deps.bus.subscribe("PlaceOrderRequested", (p) => this.handlePlace(p.command)),
       this.deps.bus.subscribe("CancelOrderRequested", (p) => this.handleCancel(p.command)),
@@ -474,13 +528,39 @@ export class ExecutionModule implements RuntimeModule {
     // execution and can publish PositionUpdated BEFORE we subscribe, so a SELL
     // that became below-floor while we were down would otherwise never be
     // re-checked in a quiet period. Runs after subscribing so nothing is missed.
-    await this.reEvaluateRestingSellsAtStartup();
+    await this.reEvaluateRestingSellsAtStartup(token);
+    // A `stop()` that gave up waiting for THIS start already tore it down: the subscriptions and
+    // the reconcile timer above are installed before the first await, so its unsub loop and
+    // `clearInterval` both reached them, and it left `started = false`. Flipping that back is not
+    // a stale log line — `started` is the guard that keeps a torn-down module from PLACING.
+    // `removeTransitionTargetIfTerminal` and `connectPersistedRungToPendingBackstop` are both
+    // reachable from chains still in flight after `stop()` returns (it does not await bus handlers,
+    // and a queue shutdown that hit its deadline leaves commands executing), and both fire a
+    // deferred backstop onto the exchange the moment `started` is true — here, while the ledger is
+    // being closed. Only the token sees this: a stop that escaped its ceiling is usually followed
+    // by a restart, which resets any plain flag back to "running".
+    if (token.superseded) {
+      this.log.warn("execution module was stopped during its startup pass — start abandoned");
+      return;
+    }
     this.started = true;
     this.log.info("execution module started");
   }
 
-  private async reEvaluateRestingSellsAtStartup(): Promise<void> {
+  /**
+   * The token is re-read per order, not once on entry: each `cancelRestingSellIfBelowFloor` awaits a
+   * publish, and a `stop()` that gives up during any one of them tears the module down and lets a
+   * restart install its own subscriptions. Resuming this loop afterwards would publish a fresh
+   * cancel through the REPLACEMENT's live subscriptions — real exchange work by a startup whose stop
+   * already returned. Checking only after the loop (at the caller's final guard) is too late by
+   * however many orders remain.
+   */
+  private async reEvaluateRestingSellsAtStartup(token: LifecycleToken): Promise<void> {
     for (const order of this.deps.orderRepo.findOpen()) {
+      if (token.superseded) {
+        this.log.warn("execution module startup scan abandoned — a later stop superseded it");
+        return;
+      }
       if (order.side === "sell") await this.cancelRestingSellIfBelowFloor(order, "startup-scan");
     }
   }
@@ -537,15 +617,62 @@ export class ExecutionModule implements RuntimeModule {
     }
   }
 
-  async stop(): Promise<void> {
+  /** Serialized against every other transition, so the LAST caller decides the final state. */
+  stop(): Promise<void> {
+    return this.lifecycle.run(() => this.executeStop(), {
+      ms: LIFECYCLE_STOP_WAIT_MS,
+      onExpired: () =>
+        this.log.error(
+          { waitMs: LIFECYCLE_STOP_WAIT_MS },
+          "lifecycle transition never settled — stopping anyway",
+        ),
+    });
+  }
+
+  private async executeStop(): Promise<void> {
     if (this.reconcileTimer) {
       clearInterval(this.reconcileTimer);
       this.reconcileTimer = null;
     }
     this.pendingDeferredSubmit.clear();
+    // A restarted module must not inherit a throttle window from the previous
+    // run: the book cache is rebuilt too, so the value it was suppressing a
+    // refetch of is gone.
+    this.minOrderSizeHydrationRequestedAt.clear();
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
-    if (this.queue) await this.queue.shutdown();
+    const drained = this.queue
+      ? (await this.queue.shutdown()).drained
+      : await drainGenerations(this.directInFlight, EXECUTION_SHUTDOWN_TIMEOUT_MS);
+    // EXECUTE the pending intents, do not drop them. `stop()` does not await in-flight bus
+    // handlers, so an unknown-minimum SELL suspended inside its own `OrderRejected` publish
+    // reaches `executeCommand`'s `finally` AFTER this point: it would find nothing left to drain
+    // and leave the id marked in `processedCommandIds`, which `stop()` does not clear. The
+    // identical S1 retry is then swallowed as a duplicate for the lifetime of the process — the
+    // exact tight loop this whole mechanism exists to end, re-created by a restart.
+    //
+    // LAST, after unsubscribing and after the queue has drained, for the same reason the
+    // block site defers instead of releasing inline: while this command's reservation and
+    // in-flight slot are still live, a concurrent delivery of the SAME id that got past the
+    // idempotency check is rejected as `reserved-token-limit` — an admission-stage branch
+    // with no `executeCommand` finally — and re-burns the id for good. Draining first
+    // unwinds that accounting and stops new deliveries from arriving at all.
+    //
+    // ONLY when the queue actually reached quiescence. A shutdown that returned at its deadline
+    // still has commands executing, and releasing THEIR marks re-creates the defect this ordering
+    // exists to prevent. The set is deliberately left intact instead: `executeCommand`'s own
+    // `finally` drains each id as its command finishes, so nothing is lost by waiting.
+    if (drained) {
+      for (const commandId of this.commandIdsPendingRelease) {
+        this.releaseProcessedCommandId(commandId);
+      }
+      this.commandIdsPendingRelease.clear();
+    } else {
+      this.log.warn(
+        { pendingRelease: this.commandIdsPendingRelease.size },
+        "queue shutdown timed out — deferring idempotency release to each command's own finally",
+      );
+    }
     this.started = false;
     this.log.info("execution module stopped");
   }
@@ -565,6 +692,41 @@ export class ExecutionModule implements RuntimeModule {
   /** Number of queued + in-flight execution tasks. Zero = fully drained. */
   get pendingCount(): number {
     return this.queue?.pendingCount ?? 0;
+  }
+
+  /**
+   * Hand whatever is LEFT of the runtime's teardown budget to the commands `stop()` had to abandon
+   * at its own, much shorter deadline.
+   *
+   * That deadline is a SCHEDULING decision, not a correctness one: `stop()` runs while two dozen
+   * other modules are still queued behind it, so a generous bound there would starve them. What it
+   * abandons, though, can be a POST the exchange has already ACCEPTED — and if the process exits
+   * before that command's own `finally` writes the order row, the order exists on the exchange with
+   * no local row, which fail-closes startup adoption at the next boot. Once every module is down the
+   * teardown budget is normally almost entirely unspent, so the remainder goes to exactly the
+   * commands that can still lose trading state with it.
+   *
+   * Reusing that one budget rather than adding to it is the point: the container's grace period
+   * measures the TOTAL, so a slow module teardown must shorten this tail, never extend the sum.
+   *
+   * Nothing new can start here — the queue latched itself closed inside `stop()` and the module's
+   * subscriptions are already gone — so this only ever awaits work that was running when the module
+   * reported itself stopped.
+   */
+  async drainAbandonedTail(timeoutMs: number): Promise<boolean> {
+    const inFlight = this.queue?.inFlightCount ?? this.directInFlight.size;
+    if (inFlight === 0) return true;
+    this.log.info({ inFlight, timeoutMs }, "tail-draining execution commands abandoned by stop()");
+    const drained = this.queue
+      ? await this.queue.drainAbandoned(timeoutMs)
+      : await drainGenerations(this.directInFlight, timeoutMs);
+    if (!drained) {
+      this.log.error(
+        { stillRunning: this.queue?.inFlightCount ?? this.directInFlight.size },
+        "execution tail drain expired — a command the exchange may have accepted is unpersisted",
+      );
+    }
+    return drained;
   }
 
   getDiagnostics(): {
@@ -1974,10 +2136,62 @@ export class ExecutionModule implements RuntimeModule {
   private dispatchCommand(cmd: PlaceOrderCommand | CancelOrderCommand): Promise<void> {
     this.incrementTokenInFlight(cmd);
     if (this.queue) {
-      this.queue.enqueue(cmd);
+      if (!this.queue.enqueue(cmd)) this.unwindRefusedDispatch(cmd);
       return Promise.resolve();
     }
-    return this.executeCommand(cmd);
+    // Without a queue this call IS the in-flight work, and `stop()` has no other handle on it: the
+    // caller that awaits it is a bus handler the supervisor does not wait for. Untracked, `stop()`
+    // declared the module drained while a command was mid-`executePlace` and bulk-released its
+    // deferred idempotency mark — the reservation still live — which is the exact accounting the
+    // deferred release exists to keep intact.
+    // Claimed BEFORE `executeCommand` is invoked. It reaches a SYNCHRONOUS publish, and a handler on
+    // that publish can call stop() from inside this very stack frame — a claim registered only after
+    // the call RETURNS leaves that stop draining an empty set, declaring the module drained over a
+    // command that is mid-flight, and bulk-releasing its idempotency mark while the reservation is
+    // still live. That is the production defect, re-entered through the door.
+    //
+    // Never rejects: `drainGenerations` awaits these together, and one rejection would abandon the
+    // wait and report a drain that never happened.
+    let finished!: () => void;
+    const claim = new Promise<void>((resolve) => (finished = resolve));
+    this.directInFlight.add(claim);
+    const running = this.executeCommand(cmd);
+    void running.then(
+      () => {
+        this.directInFlight.delete(claim);
+        finished();
+      },
+      () => {
+        this.directInFlight.delete(claim);
+        finished();
+      },
+    );
+    return running;
+  }
+
+  /**
+   * The queue refuses commands only after a shutdown, and it refuses them SILENTLY: the command
+   * never reaches {@link executeCommand}, so its `finally` never runs. Everything admission
+   * already recorded would then outlive the command — the idempotency mark most of all, which
+   * for a deterministic retry id means the retry is swallowed for the life of the process (the
+   * exact tight loop the deferred release exists to end), plus a reservation and an in-flight
+   * slot that permanently shrink capacity. Nothing was submitted, so leave no trace.
+   *
+   * Deliberately NOT the full `executeCommand` unwind: no rung was ever persisted here, so there
+   * is no cycle to connect a deferred backstop to.
+   */
+  private unwindRefusedDispatch(cmd: PlaceOrderCommand | CancelOrderCommand): void {
+    const commandId = String(cmd.commandId);
+    this.acceptedCommandAt.delete(commandId);
+    if (cmd.type === "PlaceOrderCommand") {
+      this.pendingReservations.delete(commandId);
+      this.inFlightBounceRungs.delete(commandId);
+      this.clearPendingDeferredSubmit(cmd);
+    }
+    this.decrementTokenInFlight(cmd);
+    this.commandIdsPendingRelease.delete(commandId);
+    this.releaseProcessedCommandId(commandId);
+    this.maybeCloseTokenTransition(this.resolveCommandTokenId(cmd));
   }
 
   private async executeCommand(cmd: PlaceOrderCommand | CancelOrderCommand): Promise<void> {
@@ -2016,6 +2230,15 @@ export class ExecutionModule implements RuntimeModule {
       // the decrement above, so a drain whose last target was confirmed by
       // THIS command's own cancel still closes instead of staying stuck open.
       this.maybeCloseTokenTransition(this.resolveCommandTokenId(cmd));
+      // LAST: every other trace of this attempt (reservation, in-flight slot,
+      // deferred-submit marker) is gone by now, so the identical retry this
+      // release exists to admit cannot collide with its own predecessor.
+      if (
+        cmd.type === "PlaceOrderCommand" &&
+        this.commandIdsPendingRelease.delete(String(cmd.commandId))
+      ) {
+        this.releaseProcessedCommandId(String(cmd.commandId));
+      }
     }
   }
 
@@ -2280,6 +2503,22 @@ export class ExecutionModule implements RuntimeModule {
   private async executePlace(cmd: PlaceOrderCommand): Promise<void> {
     const sellMinOrderBlock = this.getSellPreSubmitMinOrderBlock(cmd);
     if (sellMinOrderBlock) {
+      if (sellMinOrderBlock.reason === SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON) {
+        this.requestMinOrderSizeHydrationFor(String(cmd.tokenId), Date.now());
+        // Only this reason releases: it is the one the hydration above is
+        // actively repairing, so the identical retry is the whole point. The
+        // other pre-submit blocks keep the idempotency mark.
+        //
+        // DEFERRED, not released here: this attempt still holds a reservation
+        // (`pendingReservations`) and an in-flight token slot, both cleared only
+        // by `executeCommand`'s `finally`. Releasing the mark now lets a
+        // concurrent delivery of the SAME commandId past the idempotency check
+        // while that accounting is still live; it is then rejected as
+        // `reserved-token-limit` — a branch that does NOT release — and burns
+        // the id for good, so the post-hydration retry is dropped as a
+        // duplicate and the exit stays blocked. Release after the unwind.
+        this.commandIdsPendingRelease.add(String(cmd.commandId));
+      }
       this.recordInternalReservationReject(sellMinOrderBlock.reason);
       this.recordExecutionCapacityReject(cmd, sellMinOrderBlock.reason);
       this.log.warn(
@@ -3339,6 +3578,54 @@ export class ExecutionModule implements RuntimeModule {
       return null;
     }
     return { reason: guard.reason, minOrderSize: guard.minOrderSize };
+  }
+
+  /**
+   * One `/books` refresh per token per retry window, not one per blocked order:
+   * an S1 ladder re-places every tier on each reprice, so an unthrottled call
+   * here would reproduce the very hammering loop this whole change removes.
+   *
+   * Fire-and-forget by design — the refresh may legitimately come back without a
+   * minimum. This order is rejected either way; the point is that the NEXT one
+   * has a chance of finding the value cached.
+   */
+  private requestMinOrderSizeHydrationFor(tokenId: string, now: number): void {
+    const requestHydration = this.deps.requestMinOrderSizeHydration;
+    if (requestHydration == null) return;
+    const lastRequestedAt = this.minOrderSizeHydrationRequestedAt.get(tokenId);
+    if (lastRequestedAt != null && now - lastRequestedAt <= MIN_ORDER_SIZE_HYDRATION_RETRY_MS) {
+      return;
+    }
+    // An expired entry can never throttle anything again, so sweeping on the
+    // (already rate-limited) allow path bounds the map by the tokens actively
+    // retrying rather than by every token ever blocked for the process lifetime.
+    for (const [key, requestedAt] of this.minOrderSizeHydrationRequestedAt) {
+      if (now - requestedAt > MIN_ORDER_SIZE_HYDRATION_RETRY_MS) {
+        this.minOrderSizeHydrationRequestedAt.delete(key);
+      }
+    }
+    this.minOrderSizeHydrationRequestedAt.set(tokenId, now);
+    requestHydration(tokenId);
+  }
+
+  /**
+   * Un-marks a command that was rejected BEFORE it ever reached the exchange, so
+   * the identical retry is not swallowed as a duplicate.
+   *
+   * The producer that retries an unknown-minimum exit is the S1 ladder, and its
+   * `commandId` is deterministic — `s1_<tokenId>_<ladderId>_<tierIndex>` with
+   * `ladderId` hashed from (token, openedAt, avgEntryPrice). It re-places the
+   * same tiers after a phantom release, rebuilding byte-identical ids. Since the
+   * idempotency mark is taken before the pre-submit guards run, the retry would
+   * hit `processedCommandIds` and be dropped silently — the minimum we just
+   * hydrated could never be used, and algo SELLs stay suppressed for an
+   * S1-owned token. Releasing is safe precisely here: nothing was submitted, no
+   * order row and no client-order-id were persisted.
+   */
+  private releaseProcessedCommandId(commandId: string): void {
+    if (!this.processedCommandIds.delete(commandId)) return;
+    const index = this.processedCommandOrder.lastIndexOf(commandId);
+    if (index >= 0) this.processedCommandOrder.splice(index, 1);
   }
 
   private getPostOnlyCrossPreSubmitSkip(cmd: PlaceOrderCommand): PostOnlyCrossPreSubmitSkip | null {

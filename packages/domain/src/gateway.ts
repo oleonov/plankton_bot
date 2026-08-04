@@ -98,6 +98,19 @@ export interface RedeemPositionsResult {
   readonly reason?: "no_redeem_requests" | "unsupported_settlement" | null;
   readonly txHash?: string | null;
   readonly gasUsed?: number | null;
+  /**
+   * Per-condition transaction metadata, present ONLY when each condition went out in its OWN
+   * transaction (the sequential single-condition fallback). A batch path — the relayer, or a
+   * client-side `redeemPositions` — really does settle every condition in one transaction, so the
+   * flat `txHash`/`gasUsed` above describe all of them and this field stays absent.
+   *
+   * When it IS present the flat fields carry only the first submission, so a caller recording
+   * per-condition provenance must read this map and nothing else: attributing the flat hash to the
+   * remaining conditions files each of them under another condition's transaction.
+   */
+  readonly txByCondition?: Readonly<
+    Record<string, { readonly txHash: string | null; readonly gasUsed: number | null }>
+  >;
 }
 
 export interface DepositActivationResult {
@@ -660,6 +673,16 @@ export interface ExchangeGateway {
   /**
    * Merge opposing shares (YES + NO) into collateral (USDC).
    * Polymarket-specific: calls ConditionalTokens.merge().
+   *
+   * Contract, because callers act on the resolution irreversibly (they mark a write-ahead intent
+   * terminal and mutate local positions): it resolves ONLY when EVERY requested merge is proven to
+   * have settled on chain. A submission that was broadcast but not confirmed must reject, not
+   * resolve — "probably fine" is indistinguishable from "landed" to a caller that only sees void.
+   *
+   * A rejection means "not proven to have happened". The caller must NOT apply the merge locally.
+   * Whether it may also discard its write-ahead rows depends on the error type: only an error that
+   * proves nothing was broadcast (`SettlementNotSubmittedError`) licenses discarding them. Every
+   * other rejection leaves the outcome unknown, and an unknown outcome must stay recorded.
    */
   mergePositions(merges: { conditionId: string; amount: number }[]): Promise<void>;
 

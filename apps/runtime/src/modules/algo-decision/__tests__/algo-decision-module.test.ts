@@ -8458,7 +8458,7 @@ describe("AlgoDecisionModule", () => {
 
   // Phase 4 (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md): the
   // ladder-state resolution itself must widen to any eligible open position,
-  // not just GATE — gated by isBounceLadderEligiblePosition's appliesFromMs.
+  // not just GATE — gated by isBounceLadderEligible's appliesFromMs.
   describe("Phase 4 bounce-for-all eligibility wiring", () => {
     const CUTOFF_MS = Date.parse("2026-06-01T00:00:00.000Z");
 

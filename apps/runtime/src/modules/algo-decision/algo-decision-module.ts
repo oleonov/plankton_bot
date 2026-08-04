@@ -70,7 +70,11 @@ import {
   BOUNCE_EXIT_BACKSTOP_RULE_ID,
   isGateWhitelisted,
 } from "@krabs/domain";
-import { readContinuationMode, readContinuationModeVersion } from "@krabs/db";
+import {
+  isWorkingSellOrderStatus,
+  readContinuationMode,
+  readContinuationModeVersion,
+} from "@krabs/db";
 import type { EvalContext } from "@krabs/domain";
 import type { RuntimeControl } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -85,8 +89,14 @@ import {
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { SAME_PRICE_COOLDOWN_REASON } from "../same-price-cooldown/same-price-cooldown-module.js";
 import { TRACK_A_ADD_THROTTLE_REASON } from "../dead-market-shadow/track-a-add-throttle-shadow.js";
-import { isExecutableOrderSize } from "../../min-order-size.js";
+import {
+  ENTRY_UNKNOWN_MIN_SKIP_REASON,
+  MIN_ORDER_SIZE_HYDRATION_RETRY_MS,
+  isExecutableOrderSize,
+  isKnownMinOrderSize,
+} from "../../min-order-size.js";
 import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js";
+import { isBounceLadderEligible } from "../exit-ownership/bounce-eligibility.js";
 import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import { SlidingLatencyWindow, type LatencySnapshot } from "./decision-metrics.js";
 import { DecisionPersistenceBuffer } from "./async-decision-persistence.js";
@@ -96,9 +106,9 @@ import {
   D8_PROFIT_BELOW_AVG_ENTRY_GUARD_REASON,
   D9_LOSS_EXIT_AVG_ENTRY_UNAVAILABLE_BYPASS_REASON,
   D9_LOSS_EXIT_BELOW_AVG_ENTRY_GUARD_REASON,
+  ENTRY_MIN_ORDER_SIZE_UNKNOWN_REASON,
   STATIC_RULE_SELL_BELOW_AVG_ENTRY_GUARD_REASON,
   isOpenPosition,
-  isWorkingSellOrderStatus,
 } from "./decision-planner.js";
 import type {
   DecisionMetricsDelta,
@@ -557,6 +567,27 @@ export interface AlgoDecisionModuleDeps {
    * entirely (e.g. tests that don't supply a provider).
    */
   executionPolicy?: (() => ExecutionPolicy) | undefined;
+  /**
+   * Fire-and-forget request to fetch the REST order book for a token — the only
+   * payload that carries `min_order_size` (the WSS `book` event omits it). Wired
+   * to `CandidateBookCache.getFreshOrRefresh` in `index.ts`; the observed value
+   * flows back into the market cache and reaches the next pricing snapshot.
+   *
+   * When it is NOT supplied (simulation, tests, any mode without a CLOB
+   * gateway) the entry pre-filter that depends on it stays inert: suppressing
+   * without the ability to hydrate would make the state permanent.
+   */
+  requestMinOrderSizeHydration?: ((tokenId: string) => void) | undefined;
+  /**
+   * Whether a hydrated minimum for THIS token can actually reach us. The
+   * capability above is module-wide, but MarketData can only republish tokens
+   * it caches — discovery-tier markets are deliberately excluded from those
+   * caches, so for them the observed minimum is parked and dropped. Same
+   * reasoning as an absent `requestMinOrderSizeHydration`, one token at a time:
+   * without a delivery route the pre-filter must stay inert and let
+   * signal-to-order fetch the minimum for the signal it is about to place.
+   */
+  canHydrateMinOrderSize?: ((tokenId: string) => boolean) | undefined;
   evalMetricsSink?: ((snapshot: DecisionEvalMetricsSnapshot) => void) | undefined;
   evalMetricsEmitIntervalMs?: number | undefined;
   decisionPersistenceMode?: "sync" | "async" | "worker" | undefined;
@@ -680,6 +711,15 @@ const INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS: ReadonlySet<string> = new Set([
   "price-above-entry-ceiling",
   "sell-price-below-signal-floor",
   "taker-below-margin",
+  // The bridge's own literal for "this market's exchange minimum is unknown".
+  // The planner guard above only pre-empts the emission for tokens market-data
+  // can republish; on every other path (discovery tier, tracked-but-uncached)
+  // the signal still reaches the bridge and skips here. Without this entry that
+  // skip re-triggers itself at 0 ms — the exact production tight loop this
+  // change exists to kill. The minimum arrives asynchronously, so the re-eval
+  // that acts on it comes from the resulting market publish, or the 60 s sweep
+  // when no publish route exists.
+  ENTRY_UNKNOWN_MIN_SKIP_REASON,
   TRACK_A_ADD_THROTTLE_REASON,
 ]);
 
@@ -760,6 +800,10 @@ export const DEDUPED_SUPPRESSION_REASONS = new Set([
   // is a per-leg pricing/budget condition, not a fleet-wide-unavailable
   // condition, so each token's row preserves a useful diagnostic dimension.
   "order-size-below-minimum",
+  // Same stickiness as `order-size-below-minimum`, one step earlier: the
+  // minimum stays unknown until a REST book lands, and every book tick in
+  // between (measured: 545 554 rows/hour at peak) would write an identical row.
+  ENTRY_MIN_ORDER_SIZE_UNKNOWN_REASON,
   // Short-lived exchange settlement timing guard. Deduping keeps clustered
   // SELL-capable legs from writing several identical rows during a 5s window.
   POST_BUY_FILL_COOLDOWN_REASON,
@@ -940,6 +984,23 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly legacyProfileOwnedGuardDedupe = new Map<string, number>();
   private readonly staticRuleSellBelowAvgEntryDedupe = new Map<string, number>();
   private readonly d9ProfileOwnedSuppressionDedupe = new Map<string, number>();
+  private readonly minOrderSizeHydrationDedupe = new Map<string, number>();
+  /**
+   * Tokens whose entry was skipped on an unknown exchange minimum and that need
+   * ONE deferred re-evaluation once the hydration retry window has elapsed.
+   *
+   * Deliberately NOT `dirtyTokenIds` + a delayed `scheduleDirtyEvaluation`: that
+   * set is drained by ANY subsequent evaluation, so the token would be re-planned
+   * within milliseconds — the incident loop — instead of after the backoff. The
+   * delay must happen BEFORE the token becomes dirty, which is what this staging
+   * set does.
+   *
+   * Bounded by construction: it is drained wholesale every
+   * `MIN_ORDER_SIZE_HYDRATION_RETRY_MS`, so it holds at most the distinct tokens
+   * suppressed inside one 60 s window (~900 at the worst observed 15 signals/s).
+   */
+  private readonly minOrderSizeRearmTokenIds = new Set<string>();
+  private minOrderSizeRearmTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly lastBuyFillByWallet = new Map<string, number>();
   private readonly r23ProbeNoOrderIdCooldownUntilMs = new Map<string, number>();
   private buyBudgetCooldownUntilMs = 0;
@@ -1074,6 +1135,11 @@ export class AlgoDecisionModule implements RuntimeModule {
       clearTimeout(this.dirtyEvaluationTimer);
       this.dirtyEvaluationTimer = null;
     }
+    if (this.minOrderSizeRearmTimer) {
+      clearTimeout(this.minOrderSizeRearmTimer);
+      this.minOrderSizeRearmTimer = null;
+    }
+    this.minOrderSizeRearmTokenIds.clear();
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     await this.plannerRollup.stop();
@@ -1199,6 +1265,9 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
     for (const market of payload.markets) {
       const tokenIdStr = String(market.tokenId);
+      if (!market.active || isKnownMinOrderSize(market.minOrderSize)) {
+        this.releaseMinOrderSizeHydration(tokenIdStr);
+      }
       if (!market.active) {
         this.marketCache.delete(tokenIdStr);
         this.prevMidPrices.delete(tokenIdStr);
@@ -1238,6 +1307,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       const tokenIdStr = String(tokenId);
       this.marketCache.delete(tokenIdStr);
       this.prevMidPrices.delete(tokenIdStr);
+      this.releaseMinOrderSizeHydration(tokenIdStr);
       const openPosition = this.findOpenPositionByTokenId(tokenId);
       if (openPosition) {
         this.positionCache.set(tokenIdStr, openPosition);
@@ -1375,10 +1445,45 @@ export class AlgoDecisionModule implements RuntimeModule {
   private async handleSignalConversionSkipped(
     payload: RuntimeEventMap["SignalConversionSkipped"],
   ): Promise<void> {
-    this.clearPendingByTokenId(String(payload.signal.tokenId));
-    if (isInputsUnchangedConversionSkip(payload.reasons)) return;
+    const tokenKey = String(payload.signal.tokenId);
+    this.clearPendingByTokenId(tokenKey);
+    if (isInputsUnchangedConversionSkip(payload.reasons)) {
+      if (payload.reasons.includes(ENTRY_UNKNOWN_MIN_SKIP_REASON)) {
+        this.scheduleMinOrderSizeRearm(tokenKey);
+      }
+      return;
+    }
     this.markDirty(payload.signal.tokenId);
     this.scheduleDirtyEvaluation(conversionSkipReEvalDelayMs(payload.reasons));
+  }
+
+  /**
+   * `entry_unknown_min` is inputs-unchanged like its neighbours, but unlike them
+   * it has NO reliable event that re-triggers evaluation: the hydration this skip
+   * provokes is asynchronous and may return no minimum at all (a partial `/books`
+   * payload), in which case no market publish follows. The 60 s full sweep is not
+   * the recovery route either — `markFullSweepDirty` unions leg state, OPEN
+   * positions and `getEligibleTokenIds()`, and `eligible` / `gateBypassEligible`
+   * are mutually exclusive in `market-selection-cache.ts`, so a GATE-bypass token
+   * is never swept. Without this re-arm such a token waits for the next discovery
+   * rotation (~8 h at 5 000 tokens / 50 per batch / 5 min) before trying again.
+   *
+   * One deferred re-evaluation per retry window is enough: it re-enters the
+   * planner, which re-requests hydration under its own 60 s dedupe. If the
+   * minimum is still unknown the skip re-arms once more — a 1/60 s cycle, four
+   * orders of magnitude below the ~31/s that caused the incident.
+   */
+  private scheduleMinOrderSizeRearm(tokenKey: string): void {
+    this.minOrderSizeRearmTokenIds.add(tokenKey);
+    if (this.minOrderSizeRearmTimer !== null) return;
+    this.minOrderSizeRearmTimer = setTimeout(() => {
+      this.minOrderSizeRearmTimer = null;
+      const tokenIds = [...this.minOrderSizeRearmTokenIds];
+      this.minOrderSizeRearmTokenIds.clear();
+      if (tokenIds.length === 0) return;
+      for (const tokenId of tokenIds) this.markDirty(tokenId);
+      this.scheduleDirtyEvaluation(0);
+    }, MIN_ORDER_SIZE_HYDRATION_RETRY_MS);
   }
 
   private async handleOrderCancelled(payload: RuntimeEventMap["OrderCancelled"]): Promise<void> {
@@ -1644,6 +1749,10 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.applyDecisionMetricsDelta(plan.metrics);
       this.applyDecisionPlanSideEffects(plan.sideEffects, executionPolicy);
       for (const suppression of plan.suppressions) {
+        // Hydration first: recordDecisionSuppressed writes telemetry and can
+        // throw (DB busy/locked), which would drop the very refresh that clears
+        // the suppression and leave the loop re-emitting forever.
+        this.requestMinOrderSizeHydrationFor(suppression as SuppressionFacts, now);
         this.recordDecisionSuppressed(suppression as SuppressionFacts);
       }
       if (plan.type !== "signal") continue;
@@ -1674,6 +1783,68 @@ export class AlgoDecisionModule implements RuntimeModule {
     // immediately reflects this sweep, not the previous one.
     this.lastTickRuleMix = this.currentTickRuleMix;
     this.lastEvalMetrics = this.currentEvalMetrics;
+  }
+
+  /**
+   * The planner's unknown-minimum suppression only breaks the loop if something
+   * eventually hydrates the minimum — the book cache is filled ONLY reactively
+   * (from `signal-to-order`), so a market that never emits never fetches a REST
+   * book. Kick one refresh per token per `MIN_ORDER_SIZE_HYDRATION_RETRY_MS`
+   * rather than per ~31/s tick, which is what caused the incident.
+   *
+   * The refresh is fire-and-forget and can fail silently — `/books` may omit the
+   * token, or MarketData may park the value when the runtime pauses or its pricing
+   * goes stale mid-flight. On THIS path the suppression happens before any signal
+   * is emitted, so no `SignalConversionSkipped` ever arrives and the bridge-side
+   * re-arm cannot cover it; `markFullSweepDirty` excludes GATE-bypass-only tokens
+   * too. Without the re-arm below, a quiet GATE-bypass token whose refresh failed
+   * stays suppressed until the next discovery rotation (~8 h). Re-arming
+   * unconditionally rather than only on failure costs one redundant evaluation
+   * when the refresh did work; the dedupe below bounds the REFRESH to one per
+   * token per window either way.
+   *
+   * The re-arm must happen BEFORE the dedupe check and independently of it. The
+   * re-arm timer is shared, so every token in a batch inherits the deadline of
+   * whichever token started it: a token suppressed at t=59 s is re-evaluated at
+   * t=60 s, one second into its own window. Gating the re-arm on the dedupe
+   * would then drop it — the deduped tick returns early, nothing re-schedules
+   * it, and the quiet GATE-bypass token this mechanism exists to recover waits
+   * out the discovery rotation. Re-arming here keeps it in the cycle until a
+   * tick lands outside its window and the refresh actually fires.
+   */
+  private requestMinOrderSizeHydrationFor(suppression: SuppressionFacts, now: number): void {
+    if (suppression.reasonCode !== ENTRY_MIN_ORDER_SIZE_UNKNOWN_REASON) return;
+    const requestHydration = this.deps.requestMinOrderSizeHydration;
+    if (requestHydration == null) return;
+    const tokenKey = String(suppression.tokenId);
+    this.scheduleMinOrderSizeRearm(tokenKey);
+    const allowed = this.dedupeAllows(
+      this.minOrderSizeHydrationDedupe,
+      tokenKey,
+      now,
+      MIN_ORDER_SIZE_HYDRATION_RETRY_MS,
+    );
+    if (!allowed) return;
+    requestHydration(tokenKey);
+  }
+
+  /**
+   * The dedupe window above is a retry backoff for a refresh that did NOT
+   * produce a minimum (a `/books` payload can omit the token). It must not
+   * outlive a refresh that DID: the token would otherwise keep its entry
+   * blocked for the rest of the window after being dropped and re-added — a new
+   * snapshot arrives with `minOrderSize: null` and no refresh is requested.
+   * Released on the two edges that end an episode: the minimum landing, and the
+   * token leaving the tracked universe.
+   */
+  private releaseMinOrderSizeHydration(tokenIdStr: string): void {
+    this.minOrderSizeHydrationDedupe.delete(tokenIdStr);
+  }
+
+  /** Whether the entry pre-filter has a route to hydrate THIS token's minimum. */
+  private canHydrateMinOrderSizeFor(tokenId: TokenId): boolean {
+    if (this.deps.requestMinOrderSizeHydration == null) return false;
+    return this.deps.canHydrateMinOrderSize?.(String(tokenId)) ?? true;
   }
 
   private async createDecisionPlanningInput(
@@ -1756,8 +1927,8 @@ export class AlgoDecisionModule implements RuntimeModule {
         : null;
     // Phase 4 bounce-for-all (docs/plans/2026-07-19-sellable-sizing-bounce-
     // for-all.md): resolve ladder state for ANY eligible open position, not
-    // just GATE — gated by isBounceLadderEligiblePosition's appliesFromMs
-    // cutoff, so pre-flag positions are untouched.
+    // just GATE — gated by isBounceLadderEligible's appliesFromMs cutoff, so
+    // pre-flag positions are untouched.
     // Release A Phase 3: a bounce OWNER (sticky exit_owner='bounce') is eligible for
     // ladder-state resolution regardless of the live whitelist/cutoff/sellableFlow
     // eligibility — owner-authoritative, so a flag rollback can't drop its state.
@@ -1768,7 +1939,14 @@ export class AlgoDecisionModule implements RuntimeModule {
         // 'profile' owners are never bounce-serviced; legacy eligibility is for
         // UNASSIGNED (NULL) positions only (owner-authoritative).
         (position.exitOwner == null &&
-          this.isBounceLadderEligiblePosition(position, executionPolicy, legState.firstTradeAt)));
+          isBounceLadderEligible(
+            {
+              entryLane: position.entryLane,
+              openedAt: position.openedAt,
+              firstTradeAt: legState.firstTradeAt,
+            },
+            executionPolicy?.sellableFlow,
+          )));
     // fillAware = sellableFlow actually on — only then does the planner USE the
     // fill-aware fields, so only then do we pay (and risk) the fillRepo read.
     // Release A Phase 3: a bounce owner ALWAYS uses fill-aware accounting so its
@@ -1823,6 +2001,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       profileLadderOwned: isBounceOwned(position)
         ? false
         : (this.deps.profileLadderOwnership?.isProfileLadderOwned(tokenId) ?? false),
+      minOrderSizeHydrationAvailable: this.canHydrateMinOrderSizeFor(tokenId),
     };
   }
 
@@ -2184,36 +2363,6 @@ export class AlgoDecisionModule implements RuntimeModule {
       if (remaining > 0) hasOpenBounceRung = true;
     }
     return { soldShares, openCommitment, hasOpenBounceRung };
-  }
-
-  // Phase 4 bounce-for-all eligibility (docs/plans/2026-07-19-sellable-sizing-
-  // bounce-for-all.md): GATE-lane positions are always eligible (unchanged
-  // pre-Phase-4 behavior); any other open position becomes eligible only once
-  // sellableFlow is enabled AND only from its cutoff forward — positions
-  // opened before appliesFromMs are pre-flagged and stay on the D8/D9 stack.
-  // Mirrored (duplicated, not imported) in decision-planner.ts's identical
-  // predicate — the two modules don't share a util file in this plan's scope.
-  private isBounceLadderEligiblePosition(
-    position: Position,
-    executionPolicy: ExecutionPolicy | null,
-    firstTradeAt: string | null,
-  ): boolean {
-    if (position.entryLane === "GATE") return true;
-    const sellableFlow = executionPolicy?.sellableFlow;
-    if (!sellableFlow?.enabled || sellableFlow.appliesFromMs == null) return false;
-    // Fail-closed cutoff (Codex audit r1): require BOTH `openedAt` AND the leg's
-    // real first-fill time to be valid and >= cutoff. Startup adoption re-stamps
-    // `openedAt` to the adoption wall-clock, so `openedAt` alone can read
-    // post-cutoff for a position actually first filled before the cutoff — the
-    // `firstTradeAt` check keeps the operator's pre-flag positions off bounce-for-all.
-    const openedAtMs = Date.parse(position.openedAt);
-    const firstTradeAtMs = firstTradeAt != null ? Date.parse(firstTradeAt) : NaN;
-    return (
-      Number.isFinite(openedAtMs) &&
-      openedAtMs >= sellableFlow.appliesFromMs &&
-      Number.isFinite(firstTradeAtMs) &&
-      firstTradeAtMs >= sellableFlow.appliesFromMs
-    );
   }
 
   private async resolveContinuationFactsForPlanner(

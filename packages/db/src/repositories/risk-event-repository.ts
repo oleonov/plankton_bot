@@ -1,13 +1,45 @@
 import type Database from "better-sqlite3";
 import type { RiskEventRepository, S1OrphanOwnership } from "@krabs/domain";
+import { withShutdownBusyTimeout } from "../connection.js";
 
 export class SqliteRiskEventRepository implements RiskEventRepository {
+  private shuttingDown = false;
+
   constructor(private readonly db: Database.Database) {}
 
+  /**
+   * From here on every risk_events INSERT is bounded by the short teardown busy_timeout.
+   *
+   * The bound lives HERE, not in `RiskEventWriter`, because that writer is only one of roughly a
+   * dozen holders of this repository, and several of them — the order-lifetime module among them —
+   * insert during their own `stop()`. better-sqlite3 is synchronous, so a single insert that loses
+   * the writer lock to the checkpoint worker freezes the event loop for the connection's full
+   * 30-second timeout, during which neither the teardown deadline nor the global shutdown timer can
+   * fire. One choke point every holder already goes through is the only place the bound is
+   * checkable; per-caller bounds would be a list to keep in sync forever.
+   *
+   * Reads are deliberately left alone: WAL readers do not contend for the writer lock.
+   *
+   * Like {@link withShutdownBusyTimeout} itself, this is per-WRITE and never a connection-wide
+   * pragma — execution drains its queue on this same connection, and an order the exchange has
+   * already accepted must be persisted at the full runtime timeout or it exists on the exchange
+   * with no local row.
+   */
+  enterShutdownMode(): void {
+    this.shuttingDown = true;
+  }
+
   insert(event: { eventType: string; payload: Record<string, unknown> }): void {
-    this.db
-      .prepare("INSERT INTO risk_events (event_type, payload) VALUES (?, ?)")
-      .run(event.eventType, JSON.stringify(event.payload));
+    const write = (): void => {
+      this.db
+        .prepare("INSERT INTO risk_events (event_type, payload) VALUES (?, ?)")
+        .run(event.eventType, JSON.stringify(event.payload));
+    };
+    if (this.shuttingDown) {
+      withShutdownBusyTimeout(this.db, write);
+      return;
+    }
+    write();
   }
 
   countSince(createdAtIso: string): number {

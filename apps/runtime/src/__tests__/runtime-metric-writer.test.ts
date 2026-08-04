@@ -1,6 +1,12 @@
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { SHUTDOWN_BUSY_TIMEOUT_MS } from "@krabs/db";
 import { RuntimeMetricWriter } from "../runtime-metric-writer.js";
+import type { TimerRegistry } from "../periodic-timers.js";
+
+const rawTimers: TimerRegistry = {
+  every: (_name, intervalMs, tick) => setInterval(tick, intervalMs),
+};
 
 let db: Database.Database;
 
@@ -66,6 +72,81 @@ describe("RuntimeMetricWriter", () => {
       { value: 1, captured_at: "2026-04-24T00:00:00.000Z" },
       { value: 0, captured_at: "2026-04-25T00:00:00.000Z" },
     ]);
+  });
+
+  describe("replaceLatest / clearLatest — the writes permanent bus subscriptions make", () => {
+    // These two exist so the entrypoint's `MarketDataPollProgress` / `SignalApproved` /
+    // `SignalRejected` subscribers do not hold raw prepared statements. Those subscriptions are
+    // permanent: they keep firing while modules stop, and a raw statement there would wait the full
+    // 30s runtime busy_timeout per write against the checkpoint worker's lock, blocking the event
+    // loop for the entire shutdown budget. `enterShutdownMode()` can only bound what routes here.
+    const pragmaCalls: string[] = [];
+
+    function spyOnPragma(): void {
+      const original = db.pragma.bind(db);
+      db.pragma = ((source: string, options?: unknown) => {
+        pragmaCalls.push(source);
+        return original(source, options as never);
+      }) as typeof db.pragma;
+    }
+
+    beforeEach(() => {
+      pragmaCalls.length = 0;
+      spyOnPragma();
+    });
+
+    it("replaceLatest collapses pre-existing duplicates instead of leaving a stale row behind", () => {
+      // Unlike writeLatest, which refreshes only the newest. `market_data_poll_progress` is read
+      // with a bare `LIMIT 1` and no ORDER BY (apps/api/src/routes/status.ts:573), so a surviving
+      // legacy duplicate is a stale answer, not just a row for retention to prune.
+      for (const capturedAt of ["2026-04-24T00:00:00.000Z", "2026-04-24T01:00:00.000Z"]) {
+        db.prepare(
+          "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES (?, 1, ?)",
+        ).run("market_data_poll_progress", capturedAt);
+      }
+
+      const writer = new RuntimeMetricWriter(db);
+      writer.replaceLatest(
+        "market_data_poll_progress",
+        1,
+        '{"active":true}',
+        "2026-04-25T00:00:00.000Z",
+      );
+
+      expect(db.prepare("SELECT labels, captured_at FROM runtime_metrics").all()).toEqual([
+        { labels: '{"active":true}', captured_at: "2026-04-25T00:00:00.000Z" },
+      ]);
+    });
+
+    it("clearLatest removes every row of the metric", () => {
+      const writer = new RuntimeMetricWriter(db);
+      writer.replaceLatest("market_data_poll_progress", 1, "{}", "2026-04-25T00:00:00.000Z");
+      writer.writeEvent("infra_alert", 1, null, "2026-04-25T00:00:00.000Z");
+
+      writer.clearLatest("market_data_poll_progress");
+
+      const remaining = db.prepare("SELECT metric_name FROM runtime_metrics").all() as Array<{
+        metric_name: string;
+      }>;
+      expect(remaining.map((r) => r.metric_name)).toEqual(["infra_alert"]);
+    });
+
+    it("both drop to the teardown busy_timeout once shutdown mode is entered", () => {
+      const writer = new RuntimeMetricWriter(db);
+
+      writer.replaceLatest("last_entry_approved");
+      writer.clearLatest("last_entry_approved");
+      // Steady state pays no pragma round-trip — the bound is per-write, not per-connection.
+      expect(pragmaCalls).toEqual([]);
+
+      writer.enterShutdownMode();
+      writer.replaceLatest("last_entry_approved");
+      expect(pragmaCalls).toContain(`busy_timeout = ${SHUTDOWN_BUSY_TIMEOUT_MS}`);
+
+      pragmaCalls.length = 0;
+      writer.clearLatest("last_entry_approved");
+      expect(pragmaCalls).toContain(`busy_timeout = ${SHUTDOWN_BUSY_TIMEOUT_MS}`);
+    });
   });
 
   describe("writeCounter / flushCounters", () => {
@@ -168,8 +249,8 @@ describe("RuntimeMetricWriter", () => {
 
     it("startPeriodicFlush is idempotent and stopPeriodicFlush cancels the timer", () => {
       const writer = makeWriter();
-      writer.startPeriodicFlush(60_000);
-      writer.startPeriodicFlush(60_000);
+      writer.startPeriodicFlush(60_000, rawTimers);
+      writer.startPeriodicFlush(60_000, rawTimers);
       writer.stopPeriodicFlush();
       writer.stopPeriodicFlush();
       // Reaching here without leaking handles or throwing is the assertion.

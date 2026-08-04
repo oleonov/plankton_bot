@@ -3183,6 +3183,31 @@ function parseHarvestingGuardOverride(
   };
 }
 
+/**
+ * Bounds for the three signal-feed cadences, all of which reach `setInterval` unchanged
+ * (`signal-feed-manager.ts`). "Positive and finite" is not a usable contract there: Node clamps any
+ * delay outside `[1, 2**31 - 1]` ms to **1 ms**, so `5e-324` and `1e300` both land on a timer firing
+ * a thousand times a second — and one of those timers drives `writeGaugeSnapshot`, which writes
+ * three `runtime_metrics` rows per tick. That is 3 000 rows/s into the ledger this retention work
+ * exists to keep bounded.
+ *
+ * The floor is one second because the feed's own finest granularity is the 60 000 ms warm bucket:
+ * no flush or prune below a second can correspond to a bucket boundary. The ceiling is one day —
+ * an upper bound on any maintenance cadence, and far enough below the 2**31 - 1 ms overflow point
+ * that the clamp is unreachable from the other end too.
+ */
+const SIGNAL_FEED_INTERVAL_MIN_MS = 1_000;
+const SIGNAL_FEED_INTERVAL_MAX_MS = 24 * 60 * 60_000;
+
+/**
+ * `retentionDays` is multiplied by a day and used as a DELETE horizon. The floor mirrors the
+ * consumer's own one-hour floor (`ledger-retention-module.ts`) so a value the API accepts can never
+ * be one the sweep then refuses forever — silently retaining everything while reporting healthy.
+ * The ceiling keeps `retentionDays * DAY_MS` finite; ten years is already "retain indefinitely".
+ */
+const SIGNAL_FEED_RETENTION_DAYS_MIN = 1 / 24;
+const SIGNAL_FEED_RETENTION_DAYS_MAX = 3_650;
+
 function parseExecutionProfileSignalFeed(
   raw: unknown,
   issues: string[],
@@ -3230,12 +3255,14 @@ function parseExecutionProfileSignalFeed(
       issues,
       "executionProfile.signalFeed.coldArchiveBucketMs",
     ).value,
-    retentionDays: positiveNumberOr(
+    retentionDays: clampedNumber(
       obj.retentionDays,
       fallback.retentionDays,
+      SIGNAL_FEED_RETENTION_DAYS_MIN,
+      SIGNAL_FEED_RETENTION_DAYS_MAX,
       issues,
       "executionProfile.signalFeed.retentionDays",
-    ).value,
+    ),
     minSamplesForSnapshot: positiveNumberOr(
       obj.minSamplesForSnapshot,
       fallback.minSamplesForSnapshot,
@@ -3254,24 +3281,30 @@ function parseExecutionProfileSignalFeed(
       issues,
       "executionProfile.signalFeed.minWarmBucketsForTradeCount",
     ).value,
-    flushHotToWarmIntervalMs: positiveNumberOr(
+    flushHotToWarmIntervalMs: clampedNumber(
       obj.flushHotToWarmIntervalMs,
       fallback.flushHotToWarmIntervalMs,
+      SIGNAL_FEED_INTERVAL_MIN_MS,
+      SIGNAL_FEED_INTERVAL_MAX_MS,
       issues,
       "executionProfile.signalFeed.flushHotToWarmIntervalMs",
-    ).value,
-    flushWarmToColdIntervalMs: positiveNumberOr(
+    ),
+    flushWarmToColdIntervalMs: clampedNumber(
       obj.flushWarmToColdIntervalMs,
       fallback.flushWarmToColdIntervalMs,
+      SIGNAL_FEED_INTERVAL_MIN_MS,
+      SIGNAL_FEED_INTERVAL_MAX_MS,
       issues,
       "executionProfile.signalFeed.flushWarmToColdIntervalMs",
-    ).value,
-    maintenanceIntervalMs: positiveNumberOr(
+    ),
+    maintenanceIntervalMs: clampedNumber(
       obj.maintenanceIntervalMs,
       fallback.maintenanceIntervalMs,
+      SIGNAL_FEED_INTERVAL_MIN_MS,
+      SIGNAL_FEED_INTERVAL_MAX_MS,
       issues,
       "executionProfile.signalFeed.maintenanceIntervalMs",
-    ).value,
+    ),
   };
 }
 

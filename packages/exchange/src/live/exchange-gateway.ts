@@ -179,6 +179,55 @@ class SettlementTransactionFailedError extends Error {
   }
 }
 
+/**
+ * A settlement call that provably broadcast NOTHING — the failure happened before submission.
+ *
+ * This is the one class of failure whose write-ahead intent rows are safe to discard: they record
+ * something that demonstrably did not happen. Everything else — a rejected submission whose request
+ * may still have reached the relayer, a confirmation we could not observe — stays "we do not know".
+ *
+ * The message deliberately carries no transport vocabulary (`429`, `rate limit`): the caller
+ * classifies rate limits by matching text, and a borrowed token here would route this into the
+ * breaker branch and open a breaker for a failure that has nothing to do with infrastructure.
+ */
+export class SettlementNotSubmittedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SettlementNotSubmittedError";
+  }
+}
+
+/**
+ * A settlement batch that WAS broadcast but whose on-chain outcome we could not confirm.
+ *
+ * `observeSettlementExecution` reports `submitted` when the relayer response exposes no `wait()`,
+ * and `pending` when the wait timed out or errored. Both mean the transaction is somewhere between
+ * the mempool and a receipt — it may land, it may revert. Resolving on either is what let the merge
+ * caller mark its rows 'onchain', consume the local YES/NO lots and settle to 'applied': terminal,
+ * and the startup divergence report surfaces only NON-terminal rows, so a merge that never landed
+ * would be invisible forever.
+ *
+ * Throwing puts the caller on its "we do not know" path, which leaves the rows 'pending' — visible
+ * to that report, and re-checkable. The opposite mistake (leaving rows 'pending' for a merge that
+ * DID land) is recoverable precisely because 'pending' is non-terminal.
+ *
+ * Production evidence that this is the exception and not the norm: the live relayer response does
+ * expose `wait()`, and every observed settlement confirmed inside the wait window (4/4
+ * `redeem_wait_result`, zero `redeem_pending_after_wait_error` in the runtime log).
+ */
+export class SettlementUnconfirmedError extends Error {
+  constructor(
+    readonly operation: SettlementSubmitOperation,
+    readonly observedStatus: string,
+    readonly conditionIds: readonly string[],
+  ) {
+    super(
+      `Settlement ${operation} was broadcast but not confirmed (observed status '${observedStatus}') for ${conditionIds.join(",")}`,
+    );
+    this.name = "SettlementUnconfirmedError";
+  }
+}
+
 class SettlementSubmitLaneTimeoutError extends Error {
   constructor(
     readonly operation: SettlementSubmitOperation,
@@ -728,20 +777,47 @@ export class LiveExchangeGateway implements ExchangeGateway {
       }
     }
 
+    // Sequential submission means a batch can be PARTIALLY on chain when a later condition fails.
+    // Unlike `mergePositions` — which returns void and therefore has no way to say "these went out,
+    // those did not", so it must throw — `RedeemPositionsResult` carries the submitted set, and the
+    // caller partitions on it: reported conditions get a non-terminal 'submitted' row plus
+    // verification, unreported ones are recorded as never-submitted and verified separately. Throwing
+    // instead would erase which conditions were already broadcast, and the caller's retry path would
+    // redeem them a second time.
+    const submittedConditionIds: string[] = [];
+    // Each iteration is its own transaction, so a single flat txHash cannot describe the batch:
+    // `mergeSettlementTxMetadata` keeps the FIRST non-null hash, and the caller used to stamp it on
+    // every submitted condition — filing conditions 2..n under condition 1's transaction, which is
+    // wrong provenance in the redeem_log and misleads any on-chain follow-up. The map is the truth
+    // here; the flat fields below stay only as a summary for callers that predate it.
+    const txByCondition: Record<string, SettlementTxMetadata> = {};
     let mergedMetadata: SettlementTxMetadata = emptySettlementTxMetadata();
     for (const conditionId of conditionIds) {
       try {
         const response = await redeemOne!({ conditionId });
-        mergedMetadata = mergeSettlementTxMetadata(
-          mergedMetadata,
-          extractSettlementTxMetadata(response),
-        );
+        submittedConditionIds.push(conditionId);
+        const metadata = extractSettlementTxMetadata(response);
+        txByCondition[conditionId] = metadata;
+        mergedMetadata = mergeSettlementTxMetadata(mergedMetadata, metadata);
       } catch (e) {
         console.error(`Failed to redeem ${conditionId}:`, sanitizeLogArg(e));
-        throw e;
+        // Nothing was broadcast, so the error is attributable to the whole call: rethrow it intact so
+        // the caller keeps its 429 hard-pause, zero-balance and STATE_FAILED classification.
+        if (submittedConditionIds.length === 0) throw e;
+        // A partial batch reports the truth instead. The classification above is lost for THIS sweep,
+        // so raise the infra alert directly — that is what carries a Polygon RPC 429 through to the
+        // shared breaker — and let the next sweep, which will fail with an empty submitted list,
+        // throw properly.
+        this.reportInfraAlert(e);
+        break;
       }
     }
-    return { status: "submitted", conditionIds, ...mergedMetadata };
+    return {
+      status: "submitted",
+      conditionIds: submittedConditionIds,
+      ...mergedMetadata,
+      txByCondition,
+    };
   }
 
   __hasPendingRedeemSubmission(conditionId: string): boolean {
@@ -751,10 +827,31 @@ export class LiveExchangeGateway implements ExchangeGateway {
   async mergePositions(merges: { conditionId: string; amount: number }[]): Promise<void> {
     const settlementExecute = this.getSettlementExecuteMethod();
     if (settlementExecute) {
-      await this.withSettlementSubmitLane("merge", async () => {
+      const observed = await this.withSettlementSubmitLane("merge", async () => {
         const requests = await this.buildMergeRequests(merges);
+        // `buildMergeRequests` DROPS a condition it cannot build — a market with no token ids, or
+        // any build error that is not `SettlementCollateralUnresolvedError` — and the drop is
+        // invisible because `mergePositions` returns void. Resolving on a short request list is
+        // therefore the exact divergence the unsupported-client path below throws on, on the path
+        // live-lite actually uses: the caller reads a resolved call as "every requested merge is
+        // irrevocable", marks all its write-ahead rows 'onchain', consumes the local YES/NO lots and
+        // settles the rows to 'applied' — terminal, so the startup divergence report (non-terminal
+        // rows only) never mentions the conditions that never hit chain. Throwing BEFORE anything is
+        // submitted keeps the batch atomic: nothing is broadcast, the rows stay 'pending' (honestly
+        // "we do not know"), and the next sweep retries for real. A permanently unbuildable
+        // condition therefore stalls its batch loudly instead of quietly destroying inventory.
+        const built = new Set(requests.map((request) => request.conditionId));
+        const unbuilt = merges
+          .map((merge) => merge.conditionId)
+          .filter((conditionId) => !built.has(conditionId));
+        if (unbuilt.length > 0) {
+          throw new SettlementNotSubmittedError(
+            `mergePositions aborted before submission: could not build merge requests for ${unbuilt.join(",")}`,
+          );
+        }
+        // Only reachable for an empty batch now that every requested condition must be covered.
         if (requests.length === 0) {
-          return { value: undefined, release: "released_confirmed" };
+          return { value: null, release: "released_confirmed" };
         }
 
         const submitStartedAt = Date.now();
@@ -770,7 +867,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
             responseShape: describeShape(response),
           });
           const observed = await this.observeSettlementExecution(response, requests);
-          return { value: undefined, release: settlementLaneReleaseForStatus(observed.status) };
+          return {
+            value: { status: observed.status, conditionIds: requests.map((r) => r.conditionId) },
+            release: settlementLaneReleaseForStatus(observed.status),
+          };
         } catch (e) {
           const confirmedSettlementFailure = e instanceof SettlementTransactionFailedError;
           logSettlementLifecycle({
@@ -792,24 +892,33 @@ export class LiveExchangeGateway implements ExchangeGateway {
           throw e;
         }
       });
-      return;
-    }
-
-    // Fallback: use client merge if available
-    const mergeOne = this.getClientMethod("postMerge") ?? this.getClientMethod("merge");
-    if (!mergeOne) {
-      this.warnUnsupportedSettlement("merge");
-      return;
-    }
-
-    for (const merge of merges) {
-      try {
-        await mergeOne({ conditionId: merge.conditionId, amount: merge.amount });
-      } catch (e) {
-        console.error(`Failed to merge ${merge.conditionId}:`, sanitizeLogArg(e));
-        throw e;
+      // Thrown OUTSIDE the lane, and after it released with the status-appropriate release: an
+      // unconfirmed submission is not a lane failure (the batch really was broadcast, and the lane's
+      // TTL release is what stops the next sweep from racing it), and routing it through the catch
+      // above would raise a settlement infra alert for a transaction that may be perfectly healthy
+      // and merely slow. What it MUST NOT do is resolve — see `SettlementUnconfirmedError`.
+      if (observed && observed.status !== "confirmed") {
+        throw new SettlementUnconfirmedError("merge", observed.status, observed.conditionIds);
       }
+      return;
     }
+
+    // No relayer settlement client: refuse BEFORE broadcasting anything.
+    //
+    // A per-condition `postMerge`/`merge` fallback used to live here. It resolved on acceptance for
+    // broadcast, never on a receipt, so it could not honour the `mergePositions` contract
+    // (@krabs/domain): resolve only on a proven on-chain settlement. Every outcome it could produce
+    // was unsupported — resolving handed the caller a terminal, invisible divergence (rows flipped
+    // 'onchain' → 'applied', local YES/NO lots consumed, transaction still able to revert), and
+    // rejecting after a broadcast left conditions fenced with no way to confirm what landed. A path
+    // that cannot confirm must also never retry, because a blind retry double-merges whatever DID
+    // land — so its only honest end state was permanent. Refusing before the first broadcast is
+    // strictly better: nothing is on chain, so the caller drops its write-ahead rows, no condition is
+    // fenced, and auto-merge without a relayer fails loudly as the misconfiguration it is.
+    this.warnUnsupportedSettlement("merge");
+    throw new SettlementNotSubmittedError(
+      "mergePositions unsupported: merging requires a relayer settlement client",
+    );
   }
 
   async healthCheck(): Promise<{ ok: boolean; latencyMs: number }> {
@@ -948,11 +1057,12 @@ export class LiveExchangeGateway implements ExchangeGateway {
         const request = await this.buildMergeRequest(merge.conditionId, merge.amount);
         if (request) requests.push(request);
       } catch (e) {
-        // Unresolved collateral is fatal for merge: the inventory caller has
-        // no per-condition feedback channel (mergePositions returns void),
-        // so silently dropping the condition would let the ledger apply a
-        // merge that never hit chain. Other build-time errors stay tolerated
-        // to preserve existing behavior for malformed-market edge cases.
+        // Unresolved collateral aborts the batch here so the failure keeps its own type and message.
+        // Every OTHER build failure is logged and dropped from `requests` — but NOT forgiven: the
+        // caller compares the built set against `merges` and refuses to submit a short batch, which
+        // is what stops a dropped condition from becoming a merge the ledger applies but the chain
+        // never saw. Tolerating it at THIS level only keeps one malformed market from masking the
+        // others in the log.
         if (e instanceof SettlementCollateralUnresolvedError) throw e;
         console.error(
           `Failed to build merge request for condition ${merge.conditionId}:`,

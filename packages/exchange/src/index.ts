@@ -24,7 +24,12 @@ export {
 export { SimulationMarketDataGateway } from "./simulation/market-data-gateway.js";
 
 // Live
-export { LiveExchangeGateway, type LiveExchangeConfig } from "./live/exchange-gateway.js";
+export {
+  LiveExchangeGateway,
+  SettlementNotSubmittedError,
+  SettlementUnconfirmedError,
+  type LiveExchangeConfig,
+} from "./live/exchange-gateway.js";
 export { LiveMarketDataGateway, type LiveMarketDataConfig } from "./live/market-data-gateway.js";
 export { type UserEventStreamAuth } from "./live/user-event-stream.js";
 export {

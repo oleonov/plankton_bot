@@ -19,7 +19,12 @@ export class MergeSettler {
     this.db = db;
   }
 
-  applyMerge(candidate: MergeCandidate): void {
+  /**
+   * `mergeId` is the SAME id `InventoryManagerModule` already recorded as 'pending'/'onchain'
+   * before this ran — it is passed in, not generated here, so this transaction advances that exact
+   * row to 'applied' instead of inserting an unrelated second one.
+   */
+  applyMerge(candidate: MergeCandidate, mergeId: string): void {
     const runMerge = this.db.transaction(() => {
       // 1. Fetch positions (must be open)
       const yesPos = this.positionRepo.findByTokenId(candidate.yesTokenId);
@@ -41,13 +46,16 @@ export class MergeSettler {
       const totalCost = yesCostBasis + noCostBasis;
       const spreadPnl = candidate.mergeAmount - totalCost;
 
-      // 4. Record in merge_ledger
-      this.mergeLedgerRepo.save({
-        mergeId: `merge-${candidate.conditionId}-${Date.now()}`,
+      // 4. Advance the ledger row that already recorded this merge's intent ('pending' then
+      // 'onchain') to 'applied', in the SAME transaction as the position/lot mutations below —
+      // that is what guarantees the ledger and the positions can never disagree with each other.
+      this.mergeLedgerRepo.markApplied({
+        mergeId,
         conditionId: candidate.conditionId,
         mergedAmount: candidate.mergeAmount,
         spreadPnl,
         mergedAt: new Date().toISOString(),
+        status: "applied",
       });
 
       // 5. Update positions

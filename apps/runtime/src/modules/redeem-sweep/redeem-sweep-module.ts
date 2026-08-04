@@ -811,13 +811,57 @@ export class RedeemSweepModule implements RuntimeModule {
         redeemResult.status === "submitted" ||
         redeemResult.status === "pending" ||
         redeemResult.reason === "no_redeem_requests";
-      for (const group of reservedGroups) {
+      // `buildRedeemRequests` DROPS conditions silently — a stale token map, market metadata with no
+      // tokens, or an all-zero balance each `continue` past a candidate without an error — and the
+      // result then reports only the subset that made it into the transaction. Applying the batch
+      // status to a dropped group would write a success row carrying ANOTHER condition's txHash and
+      // then `closeLocalPositions` it, while its shares are still in the wallet on chain. The
+      // positions would be `closed`, so `buildSettlementCandidates` skips them forever: the
+      // divergence is terminal and invisible. Partitioning on the reported set is the whole fix.
+      const submittedConditionIds = new Set(redeemResult.conditionIds);
+      const submittedGroups = reservedGroups.filter((g) =>
+        submittedConditionIds.has(g.conditionId),
+      );
+      const droppedGroups = reservedGroups.filter((g) => !submittedConditionIds.has(g.conditionId));
+      for (const group of droppedGroups) {
+        // Terminal, so the 'attempting' row does not linger and keep `hasRecentActiveAttempt`
+        // reporting an in-flight redeem that was never submitted. Verification — not a retry — is
+        // the right follow-up for all four drop reasons: `verifyRedeem` reads the REAL positions and
+        // only closes locally when nothing redeemable is left, otherwise it re-drives the redeem.
+        this.recordAttemptOutcome({
+          conditionId: group.conditionId,
+          tokenIds: group.includedTokenIds,
+          status: "skipped",
+          retryCount,
+          details: {
+            source,
+            reason: "not_in_submitted_batch",
+            gatewayStatus: redeemResult.status,
+            gatewayReason: redeemResult.reason ?? null,
+            excludedTokenIds: group.excludedTokenIds,
+          },
+        });
+        this.recordMetric("redeem_sweep_dropped_from_batch_total", group);
+        this.scheduleVerification(group);
+      }
+      if (droppedGroups.length > 0) {
+        this.deps.log.warn(
+          {
+            dropped: droppedGroups.map((g) => g.conditionId),
+            submitted: [...submittedConditionIds],
+            gatewayStatus: redeemResult.status,
+          },
+          "redeem batch returned a strict subset — the dropped conditions were never submitted and keep their positions open",
+        );
+      }
+      for (const group of submittedGroups) {
+        const tx = redeemTxMetadataFor(redeemResult, group.conditionId);
         this.recordAttemptOutcome({
           conditionId: group.conditionId,
           tokenIds: group.includedTokenIds,
           status: redeemLogStatus,
-          txHash: redeemResult.txHash ?? null,
-          gasUsed: redeemResult.gasUsed ?? null,
+          txHash: tx.txHash,
+          gasUsed: tx.gasUsed,
           retryCount,
           details: {
             source,
@@ -1420,6 +1464,27 @@ export class RedeemSweepModule implements RuntimeModule {
       new Date(this.now()).toISOString(),
     );
   }
+}
+
+/**
+ * A batch settlement really does put every condition in ONE transaction, so its flat txHash/gasUsed
+ * describe all of them. The sequential fallback sends one transaction PER condition and reports
+ * `txByCondition`; there the flat fields carry only the FIRST submission, so stamping them on the
+ * rest files each redeem_log row under another condition's transaction — provenance that then
+ * misdirects every manual on-chain check of a redeem that looks recorded but is not.
+ *
+ * When the map exists it is therefore the only source, with no fall back to the flat fields: a
+ * condition missing from it has no transaction of its own, and `null` says exactly that.
+ */
+function redeemTxMetadataFor(
+  result: RedeemPositionsResult,
+  conditionId: string,
+): { txHash: string | null; gasUsed: number | null } {
+  if (!result.txByCondition) {
+    return { txHash: result.txHash ?? null, gasUsed: result.gasUsed ?? null };
+  }
+  const perCondition = result.txByCondition[conditionId];
+  return { txHash: perCondition?.txHash ?? null, gasUsed: perCondition?.gasUsed ?? null };
 }
 
 function redeemLogStatusForGatewayResult(

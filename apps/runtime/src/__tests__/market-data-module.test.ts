@@ -776,6 +776,9 @@ describe("MarketDataModule", () => {
       await vi.waitFor(() => {
         expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
       });
+      console.error("INIT", JSON.stringify((gateway.getMarketPricing as any).mock.calls), [
+        ...(mod as any).marketCache.keys(),
+      ]);
       clearInterval((mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer!);
       (mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer = null;
       (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
@@ -1089,6 +1092,7 @@ describe("MarketDataModule", () => {
         forceFullPoll: 0,
         streamUnavailable: 0,
         featureFreshness: 0,
+        minOrderSizeHydration: 0,
       });
       expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
         executionCritical: 1,
@@ -1111,6 +1115,405 @@ describe("MarketDataModule", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("re-polls a quiet token whose parked minOrderSize is blocked only by stale pricing", async () => {
+    vi.useFakeTimers();
+    try {
+      const executionCritical = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-exec"), conditionId: "cond-exec" }),
+      ];
+      const entryCandidates = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-entry"), conditionId: "cond-entry" }),
+      ];
+      (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
+        executionCritical,
+        planktonSignature: [],
+        entryCandidates,
+        discoveryOnly: [],
+        signatureOverflow: 0,
+      });
+      // A known `bookSource` plus primed features is the production shape of the
+      // bug: neither the book budget nor the feature-freshness safeguard would
+      // ever pick this token back up. `minOrderSize` stays absent because Gamma
+      // never carries it — only the /books REST call does.
+      const pricing = {
+        bestBid: 0.4,
+        bestAsk: 0.6,
+        acceptingOrders: true,
+        enableOrderBook: true,
+        lastTradePrice: 0.5,
+        bookSource: "gamma",
+        volume24hr: 1000,
+        liquidity: 5000,
+      };
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+        new Map([
+          ["tok-exec", pricing],
+          ["tok-entry", pricing],
+        ]),
+      );
+      gateway.createMarketPricingStream = (handlers) => {
+        stream = new FakePricingStream(handlers);
+        return stream;
+      };
+      mod = new MarketDataModule({
+        gateway,
+        marketRepo,
+        bus,
+        log: silentLog,
+        pollIntervalMs: 5_000,
+        staleThresholdMs: 120_000,
+        botRunId: "run-test-123",
+        maxTrackedTokens: 2,
+      });
+
+      await mod.start();
+      await vi.waitFor(() => {
+        expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      });
+      clearInterval((mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer!);
+      (mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer = null;
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+
+      // Inside the 30s gamma book budget: a quiet cycle that polls nobody.
+      await vi.advanceTimersByTimeAsync(20_000);
+      await mod.poll();
+      expect(gateway.getMarketPricing).not.toHaveBeenCalled();
+      expect(mod.getMetricsSnapshot().fallbackReasonCounts.minOrderSizeHydration).toBe(0);
+
+      // A minimum observed while placing the entry: pricing is already past the
+      // publish-freshness budget, so the flush parks it instead of delivering.
+      // The repoll returns a batch that OMITS the token — the partial-response
+      // case that leaves the value parked and used to re-request every cycle.
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+      mod.noteMinOrderSizeObserved(createTokenId("tok-entry"), 5);
+      await mod.poll();
+
+      expect(gateway.getMarketPricing).toHaveBeenLastCalledWith(["tok-entry"], expect.anything());
+      expect(mod.getMetricsSnapshot().fallbackReasonCounts.minOrderSizeHydration).toBe(1);
+
+      // Still parked, so the branch still matches — but the unknown-source
+      // entry-candidate budget (120s) must throttle it instead of hammering.
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+      await vi.advanceTimersByTimeAsync(9_000);
+      await mod.poll();
+      expect(gateway.getMarketPricing).not.toHaveBeenCalled();
+
+      // Past the budget it retries — throttled, not abandoned.
+      await vi.advanceTimersByTimeAsync(120_000);
+      await mod.poll();
+      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      expect((gateway.getMarketPricing as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toContain(
+        "tok-entry",
+      );
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rotates parked minOrderSize repolls the rate cap deferred instead of starving them", async () => {
+    vi.useFakeTimers();
+    try {
+      const executionCritical = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-exec"), conditionId: "cond-exec" }),
+      ];
+      const entryCandidates = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-entry"), conditionId: "cond-entry" }),
+      ];
+      (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
+        executionCritical,
+        planktonSignature: [],
+        entryCandidates,
+        discoveryOnly: [],
+        signatureOverflow: 0,
+      });
+      const pricing = {
+        bestBid: 0.4,
+        bestAsk: 0.6,
+        acceptingOrders: true,
+        enableOrderBook: true,
+        lastTradePrice: 0.5,
+        bookSource: "gamma",
+        volume24hr: 1000,
+        liquidity: 5000,
+      };
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+        new Map([
+          ["tok-exec", pricing],
+          ["tok-entry", pricing],
+        ]),
+      );
+      gateway.createMarketPricingStream = (handlers) => {
+        stream = new FakePricingStream(handlers);
+        return stream;
+      };
+      mod = new MarketDataModule({
+        gateway,
+        marketRepo,
+        bus,
+        log: silentLog,
+        pollIntervalMs: 5_000,
+        staleThresholdMs: 120_000,
+        botRunId: "run-test-123",
+        maxTrackedTokens: 2,
+      });
+
+      await mod.start();
+      await vi.waitFor(() => {
+        expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      });
+      clearInterval((mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer!);
+      (mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer = null;
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+      // Squeezed to a per-cycle fallback budget of exactly 1 token (0.2 tok/s x
+      // 5s) only AFTER the priming poll: the same cap also trims the first full
+      // poll, which would leave the second token uncached and route it down the
+      // `missingCache` branch instead of the parked-hydration one under test.
+      (
+        mod as unknown as { deps: { fallbackPollRatePerSec?: number } }
+      ).deps.fallbackPollRatePerSec = 0.2;
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      // The repoll batch omits both, so both stay parked and keep matching the
+      // hydration branch — the partial-response case the throttle exists for.
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+      mod.noteMinOrderSizeObserved(createTokenId("tok-exec"), 5);
+      mod.noteMinOrderSizeObserved(createTokenId("tok-entry"), 5);
+
+      await mod.poll();
+      expect(gateway.getMarketPricing).toHaveBeenLastCalledWith(["tok-exec"], expect.anything());
+      expect(mod.getMetricsSnapshot().fallbackReasonCounts.minOrderSizeHydration).toBe(1);
+
+      // The deferred token was never polled, so it must NOT have started a
+      // backoff: the very next cycle is its turn while tok-exec sits out its own.
+      // Asserted on the REASON, not just the polled token — other fallback
+      // branches can reach the same token and would mask a starved hydration.
+      await mod.poll();
+      expect(gateway.getMarketPricing).toHaveBeenLastCalledWith(["tok-entry"], expect.anything());
+      expect(mod.getMetricsSnapshot().fallbackReasonCounts.minOrderSizeHydration).toBe(1);
+
+      // Both are now inside their budgets — the rotation stops rather than
+      // alternating forever.
+      await mod.poll();
+      expect(mod.getMetricsSnapshot().fallbackReasonCounts.minOrderSizeHydration).toBe(0);
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("walks the whole over-limit hydration set instead of starving the tail", async () => {
+    vi.useFakeTimers();
+    try {
+      const tokenIds = ["tok-0", "tok-1", "tok-2", "tok-3", "tok-4"];
+      const executionCritical = tokenIds.map((tokenId) =>
+        makeTrackedMarket({ tokenId: createTokenId(tokenId), conditionId: `cond-${tokenId}` }),
+      );
+      (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
+        executionCritical,
+        planktonSignature: [],
+        entryCandidates: [],
+        discoveryOnly: [],
+        signatureOverflow: 0,
+      });
+      const pricing = {
+        bestBid: 0.4,
+        bestAsk: 0.6,
+        acceptingOrders: true,
+        enableOrderBook: true,
+        lastTradePrice: 0.5,
+        // `clob` keeps the book-refresh budget at 60s, so the whole walk below
+        // stays inside it and every poll is charged to the hydration reason —
+        // a shorter budget would let `knownSourceRefresh` reach the same tokens
+        // and mask a starved hydration.
+        bookSource: "clob",
+        volume24hr: 1000,
+        liquidity: 5000,
+      };
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+        new Map(tokenIds.map((tokenId) => [tokenId, pricing])),
+      );
+      gateway.createMarketPricingStream = (handlers) => {
+        stream = new FakePricingStream(handlers);
+        return stream;
+      };
+      mod = new MarketDataModule({
+        gateway,
+        marketRepo,
+        bus,
+        log: silentLog,
+        pollIntervalMs: 5_000,
+        staleThresholdMs: 120_000,
+        botRunId: "run-test-123",
+        maxTrackedTokens: tokenIds.length,
+      });
+
+      await mod.start();
+      await vi.waitFor(() => {
+        expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      });
+      clearInterval((mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer!);
+      (mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer = null;
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+      // One token per cycle (0.2 tok/s x 5s), applied only after the priming
+      // poll cached all five.
+      (
+        mod as unknown as { deps: { fallbackPollRatePerSec?: number } }
+      ).deps.fallbackPollRatePerSec = 0.2;
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      // The repoll batch never carries the minimum back, so all five stay parked
+      // and keep matching the hydration branch for the whole walk.
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+      for (const tokenId of tokenIds) {
+        mod.noteMinOrderSizeObserved(createTokenId(tokenId), 5);
+      }
+
+      const polled: string[] = [];
+      // The 15s execution-critical budget is three 5s cycles, so from the fourth
+      // poll on the earliest tokens are eligible again. Priority is equal and the
+      // sort is stable, so without rotation that same prefix wins the single slot
+      // forever and `tok-4` — one past 15s/5s tokens — is never polled.
+      for (let round = 0; round < 8; round += 1) {
+        await mod.poll();
+        if (mod.getMetricsSnapshot().fallbackReasonCounts.minOrderSizeHydration === 1) {
+          const calls = (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mock.calls;
+          polled.push(...(calls[calls.length - 1]![0] as string[]));
+        }
+        await vi.advanceTimersByTimeAsync(5_000);
+      }
+
+      expect([...new Set(polled)].sort()).toEqual([...tokenIds].sort());
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("does not charge a hydration backoff to tokens skipped by the Gamma rate-limit backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const executionCritical = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-exec"), conditionId: "cond-exec" }),
+      ];
+      (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
+        executionCritical,
+        planktonSignature: [],
+        entryCandidates: [],
+        discoveryOnly: [],
+        signatureOverflow: 0,
+      });
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+        new Map([
+          [
+            "tok-exec",
+            {
+              bestBid: 0.4,
+              bestAsk: 0.6,
+              acceptingOrders: true,
+              enableOrderBook: true,
+              lastTradePrice: 0.5,
+              bookSource: "clob",
+              volume24hr: 1000,
+              liquidity: 5000,
+            },
+          ],
+        ]),
+      );
+      gateway.createMarketPricingStream = (handlers) => {
+        stream = new FakePricingStream(handlers);
+        return stream;
+      };
+      mod = new MarketDataModule({
+        gateway,
+        marketRepo,
+        bus,
+        log: silentLog,
+        pollIntervalMs: 5_000,
+        staleThresholdMs: 120_000,
+        botRunId: "run-test-123",
+        maxTrackedTokens: 1,
+      });
+
+      await mod.start();
+      await vi.waitFor(() => {
+        expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      });
+      clearInterval((mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer!);
+      (mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer = null;
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+      mod.noteMinOrderSizeObserved(createTokenId("tok-exec"), 5);
+
+      const backoff = mod as unknown as { pricingPollBackoffUntilMs: number };
+      backoff.pricingPollBackoffUntilMs = Date.now() + 60_000;
+      await mod.poll();
+      expect(gateway.getMarketPricing).not.toHaveBeenCalled();
+
+      // Gamma was never asked, so the token cannot have earned a hydration
+      // backoff: the very next poll — one second later, far inside the 15s
+      // budget — must still select it.
+      backoff.pricingPollBackoffUntilMs = 0;
+      await vi.advanceTimersByTimeAsync(1_000);
+      await mod.poll();
+
+      expect(gateway.getMarketPricing).toHaveBeenLastCalledWith(["tok-exec"], expect.anything());
+      expect(mod.getMetricsSnapshot().fallbackReasonCounts.minOrderSizeHydration).toBe(1);
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("drops parked minOrderSize hydrations on stop so a restart cannot republish them", async () => {
+    (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
+      executionCritical: [
+        makeTrackedMarket({ tokenId: createTokenId("tok-exec"), conditionId: "cond-exec" }),
+      ],
+      planktonSignature: [],
+      entryCandidates: [],
+      discoveryOnly: [],
+      signatureOverflow: 0,
+    });
+    // No pricing at all: the token never reaches `marketCache`, so the observed
+    // minimum can only survive as a parked entry.
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+    mod = new MarketDataModule({
+      gateway,
+      marketRepo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 5_000,
+      staleThresholdMs: 120_000,
+      botRunId: "run-test-123",
+      maxTrackedTokens: 1,
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+    });
+    mod.noteMinOrderSizeObserved(createTokenId("tok-exec"), 5);
+
+    const parked = (mod as unknown as { pendingMinOrderSizeByToken: Map<string, unknown> })
+      .pendingMinOrderSizeByToken;
+    expect(parked.size).toBe(1);
+
+    await mod.stop();
+
+    // A minimum observed an arbitrary time ago must not survive the largest gap
+    // there is — the restart releases the `/books` dedupe and re-observes it.
+    expect(parked.size).toBe(0);
   });
 
   it("still re-polls quiet unknown execution-critical tokens on the short safety budget", async () => {
@@ -1179,6 +1582,7 @@ describe("MarketDataModule", () => {
         forceFullPoll: 0,
         streamUnavailable: 0,
         featureFreshness: 0,
+        minOrderSizeHydration: 0,
       });
       expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
         executionCritical: 1,
@@ -1262,6 +1666,7 @@ describe("MarketDataModule", () => {
       forceFullPoll: 2,
       streamUnavailable: 0,
       featureFreshness: 0,
+      minOrderSizeHydration: 0,
     });
     expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
       executionCritical: 0,

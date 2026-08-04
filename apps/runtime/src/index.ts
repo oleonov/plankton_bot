@@ -74,6 +74,8 @@ import {
   SqliteFloorIntentRepository,
   SqliteHoldResolutionStateRepository,
   SqliteTradingCalendarRepository,
+  withShutdownBusyTimeout,
+  disableAutoCheckpoint,
 } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
 import {
@@ -108,6 +110,7 @@ import {
 
 import { createLogger } from "./logger.js";
 import { buildTradeCountObserver } from "./trade-count-observer.js";
+import { LifecycleSupersededError, RUNTIME_STOP_WAIT_MS, waitAtMost } from "./lifecycle-chain.js";
 import { Supervisor } from "./supervisor/supervisor.js";
 import { CommandPoller } from "./supervisor/command-poller.js";
 import { MarketDataModule } from "./modules/market-data/market-data-module.js";
@@ -189,13 +192,11 @@ import { calculateTotalExposure } from "./exposure-calculator.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
 import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
-import {
-  assertBounceForAllOwnershipInvariant,
-  BounceForAllNullOwnerError,
-} from "./modules/exit-ownership/assert-bounce-for-all-invariant.js";
+import { runOwnershipInvariantStartupGate } from "./modules/exit-ownership/assert-bounce-for-all-invariant.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { PositionConcentrationService } from "./position-concentration-service.js";
+import { PeriodicTimers } from "./periodic-timers.js";
 import { RuntimeMetricWriter } from "./runtime-metric-writer.js";
 import { RuntimeEffectiveResolutionService } from "./effective-resolution-service.js";
 import {
@@ -357,6 +358,7 @@ async function main(): Promise<void> {
   // 1. Load config
   const config = loadEnv();
   const log = createLogger(config.logLevel, config.runtimeMode);
+  const periodicTimers = new PeriodicTimers(log);
   log.info({ mode: config.runtimeMode }, "krabs runtime starting (env mode)");
   for (const issue of config.polygonRpcConfigIssues ?? []) {
     log.warn(
@@ -522,7 +524,7 @@ async function main(): Promise<void> {
   // Aggregated counter flush — high-frequency `*_total` metrics buffer in
   // memory and persist as one row per (name, labels) pair every 30s. Keeps
   // total runtime_metrics write rate from dominating SQLite disk I/O.
-  runtimeMetrics.startPeriodicFlush(30_000);
+  runtimeMetrics.startPeriodicFlush(30_000, periodicTimers);
   const recordInfraAlert = (alert: {
     code: string;
     severity: "warning" | "error";
@@ -591,6 +593,7 @@ async function main(): Promise<void> {
     metricsWriter: runtimeMetrics,
     recordInfraAlert,
     intervalMs: 30 * 60 * 1000,
+    timers: periodicTimers,
   });
 
   // 7. Build modules
@@ -1115,6 +1118,35 @@ async function main(): Promise<void> {
     getMarket: (conditionId) => marketDataGateway.getMarket(conditionId),
     getTickSize: (tokenId) => marketDataGateway.getTickSize(tokenId),
   });
+  // Built here rather than with the strategy modules below because BOTH the
+  // entry pre-filter and the execution SELL guard need the same hydration route,
+  // and execution is constructed first.
+  const candidateBookCache = marketDataGateway.getOrderBooks
+    ? new CandidateBookCache({
+        gateway: { getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway) },
+        log: log.child({ module: "candidate-book-cache" }),
+        // The REST `/books` payload is the only place `min_order_size` ever
+        // appears — Gamma pricing and the WSS `book` event both omit it. Feed it
+        // back so the market cache keeps it and sellable sizing can size an entry.
+        onMinOrderSizeObserved: (tokenId, minOrderSize) =>
+          marketDataModule.noteMinOrderSizeObserved(tokenId, minOrderSize),
+      })
+    : undefined;
+  // Closes the self-heal loop for every consumer that can be blocked by an
+  // unknown exchange minimum: the REST book fetched here is what teaches the
+  // market its `min_order_size` (via `onMinOrderSizeObserved` above). Left
+  // undefined when the gateway cannot fetch books, which keeps each consumer
+  // inert rather than permanently blocking. Each consumer applies its own
+  // `MIN_ORDER_SIZE_HYDRATION_RETRY_MS` throttle around this call.
+  const requestMinOrderSizeHydration = candidateBookCache
+    ? (tokenId: string) => {
+        void candidateBookCache
+          .getFreshOrRefresh(tokenId, Date.now(), { requireKnownMinOrderSize: true })
+          .catch((error: unknown) => {
+            log.debug({ err: error, tokenId }, "min order size hydration refresh failed");
+          });
+      }
+    : undefined;
   const executionModule = new ExecutionModule({
     gateway: exchangeGateway,
     bus,
@@ -1128,6 +1160,7 @@ async function main(): Promise<void> {
     runtimeControl,
     liveLiteGuard,
     runtimeMode,
+    requestMinOrderSizeHydration,
     maxConcurrency: config.executionMaxConcurrency,
     fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
     walletBufferPct: config.executionWalletBufferPct,
@@ -1187,12 +1220,6 @@ async function main(): Promise<void> {
   });
 
   // 7h. Strategy module
-  const candidateBookCache = marketDataGateway.getOrderBooks
-    ? new CandidateBookCache({
-        gateway: { getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway) },
-        log: log.child({ module: "candidate-book-cache" }),
-      })
-    : undefined;
   const feeScheduleProvider = createHybridFeeScheduleProvider({
     feeGateway: exchangeGateway,
     runtimeMetrics,
@@ -1231,23 +1258,24 @@ async function main(): Promise<void> {
   // post-normalization counters. Independent of scan-cycle / pricing-tick:
   // `NormalizedMarketUpdated` arrives continuously and the cumulative funnel
   // is the spec-enforcer's view, not the scanner's.
-  const universeFunnelLogTimer = setInterval(() => {
-    const snap = selectedMarketCache.getUniverseFilterSnapshot();
-    if (snap.seen === 0) return;
-    log.info(
-      {
-        seen: snap.seen,
-        volumeZeroDropped: snap.volumeZeroDropped,
-        volumeNullEvaluated: snap.volumeNullEvaluated,
-        volumePositiveEvaluated: snap.volumePositiveEvaluated,
-        selectionRuleAdmitted: snap.selectionRuleAdmitted,
-        selectionRuleRejected: snap.selectionRuleRejected,
-        selectionRejectReasons: snap.selectionRejectReasons,
-      },
-      "universeFunnel",
-    );
-  }, config.universeFunnelLogIntervalMs);
-  universeFunnelLogTimer.unref();
+  periodicTimers
+    .every("universe_funnel_log", config.universeFunnelLogIntervalMs, () => {
+      const snap = selectedMarketCache.getUniverseFilterSnapshot();
+      if (snap.seen === 0) return;
+      log.info(
+        {
+          seen: snap.seen,
+          volumeZeroDropped: snap.volumeZeroDropped,
+          volumeNullEvaluated: snap.volumeNullEvaluated,
+          volumePositiveEvaluated: snap.volumePositiveEvaluated,
+          selectionRuleAdmitted: snap.selectionRuleAdmitted,
+          selectionRuleRejected: snap.selectionRuleRejected,
+          selectionRejectReasons: snap.selectionRejectReasons,
+        },
+        "universeFunnel",
+      );
+    })
+    .unref();
 
   const priceHistoryProvider = new MarketSnapshotPriceHistoryProvider(ledgerConn.db, {
     syncMissLookup: false,
@@ -1485,6 +1513,16 @@ async function main(): Promise<void> {
     tradeCountProvider,
     priceHistoryProvider,
     executionPolicy: currentExecutionPolicy,
+    ...(requestMinOrderSizeHydration
+      ? {
+          requestMinOrderSizeHydration,
+          // Per token, because the capability above is module-wide: MarketData
+          // can only republish what it caches, and the discovery tier is
+          // deliberately outside those caches.
+          canHydrateMinOrderSize: (tokenId: string) =>
+            marketDataModule.canHydrateMinOrderSize(tokenId),
+        }
+      : {}),
     evalMetricsSink: (snapshot) => {
       runtimeMetrics.writeLatest(
         "algo_decision_eval_counters",
@@ -1753,6 +1791,10 @@ async function main(): Promise<void> {
   // 7k. Inventory Auto-Merge (P3-1) — Polymarket-specific USDC-release operational
   // extension. Not in spec §0; gated behind ENABLE_INVENTORY_AUTO_MERGE=true.
   // See docs/adr/002-inventory-auto-merge.md.
+  // Wallet-mode compatibility (auto-merge needs a relayer settlement client) is enforced
+  // by the startup preflight further down (INVENTORY_AUTO_MERGE_REQUIRES_RELAYER in
+  // profile-preflight.ts), which exits before supervisor.start() ever runs this module —
+  // constructing it here unconditionally is safe.
   const inventoryManagerModule = config.enableInventoryAutoMerge
     ? new InventoryManagerModule({
         bus,
@@ -1801,6 +1843,16 @@ async function main(): Promise<void> {
     db: ledgerConn.db,
     log,
     runtimeControl,
+    // The checkpoint opens its own connection in a worker thread — a synchronous multi-GB TRUNCATE
+    // on THIS connection would freeze the runtime for minutes.
+    checkpointDbPath: ledgerDbPath,
+    // Single source of truth: the operator's declared signal-feed retention, so lowering it in the
+    // profile actually shrinks the ledger instead of silently diverging from it. Resolved per pass,
+    // not once at construction — `currentExecutionPolicy()` reloads on a version bump, and a horizon
+    // that only takes effect after a restart is exactly what an operator raising it to protect
+    // history would NOT expect.
+    resolveSignalFeedBucketsTtlMs: () =>
+      currentExecutionPolicy().executionProfile.signalFeed.retentionDays * 24 * 60 * 60_000,
   });
   // v063 safety net: pause the bot through the normal operator-pause path
   // (a system-initiated `pause` command, applied by the command-poller) if the
@@ -1973,25 +2025,19 @@ async function main(): Promise<void> {
     });
   }
 
-  const deletePollProgress = ledgerConn.db.prepare(
-    "DELETE FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress'",
-  );
-  const insertPollProgress = ledgerConn.db.prepare(
-    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('market_data_poll_progress', 1, ?, ?)",
-  );
-  const upsertPollProgress = ledgerConn.db.transaction((labels: string, capturedAt: string) => {
-    deletePollProgress.run();
-    insertPollProgress.run(labels, capturedAt);
-  });
-
+  // Through `runtimeMetrics`, not a raw statement, because this subscription is permanent: it keeps
+  // firing while modules stop, and only the writer knows teardown has begun and must therefore drop
+  // to the short busy_timeout. A raw prepared statement here would wait the full 30s per write
+  // against the checkpoint worker's lock and eat the whole shutdown budget.
   bus.subscribe("MarketDataPollProgress", async ({ active, page, botRunId: runId }) => {
     if (active) {
-      upsertPollProgress(
+      runtimeMetrics.replaceLatest(
+        "market_data_poll_progress",
+        1,
         JSON.stringify({ active: true, page, botRunId: runId }),
-        new Date().toISOString(),
       );
     } else {
-      deletePollProgress.run();
+      runtimeMetrics.clearLatest("market_data_poll_progress");
     }
   });
 
@@ -2002,18 +2048,6 @@ async function main(): Promise<void> {
   );
   const insertSignalActivity = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('signal_activity', 1, ?, ?)",
-  );
-  const deleteLastEntryApproved = ledgerConn.db.prepare(
-    "DELETE FROM runtime_metrics WHERE metric_name = 'last_entry_approved'",
-  );
-  const insertLastEntryApproved = ledgerConn.db.prepare(
-    "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES ('last_entry_approved', 1, ?)",
-  );
-  const deleteLastSignalRejected = ledgerConn.db.prepare(
-    "DELETE FROM runtime_metrics WHERE metric_name = 'last_signal_rejected'",
-  );
-  const insertLastSignalRejected = ledgerConn.db.prepare(
-    "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES ('last_signal_rejected', 1, ?)",
   );
   const deleteSignalConversionActivity = ledgerConn.db.prepare(
     "DELETE FROM runtime_metrics WHERE metric_name = 'signal_conversion_activity'",
@@ -2136,8 +2170,7 @@ async function main(): Promise<void> {
     if (ENTRY_REASONS.has(signal.reason)) {
       signalWindow.entryApproved++;
       // Persist last entry approval timestamp separately (not cleared by signal_activity upsert)
-      deleteLastEntryApproved.run();
-      insertLastEntryApproved.run(new Date().toISOString());
+      runtimeMetrics.replaceLatest("last_entry_approved");
     } else {
       signalWindow.exitApproved++;
     }
@@ -2145,8 +2178,7 @@ async function main(): Promise<void> {
 
   bus.subscribe("SignalRejected", async () => {
     signalWindow.rejected++;
-    deleteLastSignalRejected.run();
-    insertLastSignalRejected.run(new Date().toISOString());
+    runtimeMetrics.replaceLatest("last_signal_rejected");
   });
 
   bus.subscribe("SignalConversionSkipped", async ({ reasons, diagnostics }) => {
@@ -2307,7 +2339,7 @@ async function main(): Promise<void> {
   let lastRiskEventVolumeWarningAtMs = 0;
 
   // Flush signal + scanner activity to DB every 30 seconds, reset windows every 10 minutes
-  setInterval(() => {
+  periodicTimers.every("metrics_flush", 30_000, () => {
     const metricsFlushStartMs = performance.now();
     const serializeLabels = (value: unknown): string => {
       const startMs = performance.now();
@@ -2539,25 +2571,27 @@ async function main(): Promise<void> {
     } finally {
       recordStageDuration("metrics_flush_total", performance.now() - metricsFlushStartMs);
     }
-  }, 30_000);
+  });
 
   // Memory-usage breakdown log — helps locate the source of the post-resume
   // RSS climb that has been tripping the 520 MiB cgroup OOM. Distinguishes
   // V8 heap (rss-arrayBuffers-external ~ heap) from off-heap native buffers
   // (arrayBuffers — WebSocket messages) and other external memory.
-  setInterval(() => {
-    const mu = process.memoryUsage();
-    log.info(
-      {
-        rssMb: Math.round(mu.rss / 1024 / 1024),
-        heapUsedMb: Math.round(mu.heapUsed / 1024 / 1024),
-        heapTotalMb: Math.round(mu.heapTotal / 1024 / 1024),
-        externalMb: Math.round(mu.external / 1024 / 1024),
-        arrayBuffersMb: Math.round(mu.arrayBuffers / 1024 / 1024),
-      },
-      "process.memoryUsage",
-    );
-  }, 60_000).unref();
+  periodicTimers
+    .every("memory_usage_log", 60_000, () => {
+      const mu = process.memoryUsage();
+      log.info(
+        {
+          rssMb: Math.round(mu.rss / 1024 / 1024),
+          heapUsedMb: Math.round(mu.heapUsed / 1024 / 1024),
+          heapTotalMb: Math.round(mu.heapTotal / 1024 / 1024),
+          externalMb: Math.round(mu.external / 1024 / 1024),
+          arrayBuffersMb: Math.round(mu.arrayBuffers / 1024 / 1024),
+        },
+        "process.memoryUsage",
+      );
+    })
+    .unref();
 
   // Event-loop lag instrumentation — the P8 canary auto-rolled back because
   // AbortSignal.timeout(2s) callbacks were firing ~30s late under sweep
@@ -2577,45 +2611,47 @@ async function main(): Promise<void> {
     log.warn({ err }, "gc_pause_observer_unavailable");
   }
   let diagnosticsTickCount = 0;
-  const runtimeDiagnosticsTimer = setInterval(() => {
-    diagnosticsTickCount++;
-    if (diagnosticsTickCount % 10 === 0) {
-      const cooldownSweepStartMs = performance.now();
-      try {
-        cooldownRegistry.sweepExpired(Date.now());
-      } finally {
-        recordStageDuration("cooldown_registry_sweep", performance.now() - cooldownSweepStartMs);
+  periodicTimers
+    .every("runtime_diagnostics", 30_000, () => {
+      diagnosticsTickCount++;
+      if (diagnosticsTickCount % 10 === 0) {
+        const cooldownSweepStartMs = performance.now();
+        try {
+          cooldownRegistry.sweepExpired(Date.now());
+        } finally {
+          recordStageDuration("cooldown_registry_sweep", performance.now() - cooldownSweepStartMs);
+        }
       }
-    }
-    const eventLoopLag = {
-      p50Ms: Math.round(loopLag.percentile(50) / 1e6),
-      p95Ms: Math.round(loopLag.percentile(95) / 1e6),
-      p99Ms: Math.round(loopLag.percentile(99) / 1e6),
-      maxMs: Math.round(loopLag.max / 1e6),
-    };
-    const gcPause = gcPauseWindow.snapshot();
-    const stageTimers = snapshotAndResetStageTimers();
-    const diagnostics = buildRuntimeDiagnosticsSnapshot(
-      eventLoopLag,
-      gcPause,
-      process.memoryUsage(),
-      stageTimers,
-    );
-    log.info(
-      {
-        ...eventLoopLag,
-      },
-      "event_loop_lag",
-    );
-    const diagnosticsWriteStartMs = performance.now();
-    runtimeMetrics.writeLatest(
-      "runtime_diagnostics",
-      diagnostics.eventLoopLagMs.p95Ms,
-      JSON.stringify(diagnostics),
-    );
-    recordStageDuration("diagnostics_write", performance.now() - diagnosticsWriteStartMs);
-    loopLag.reset();
-  }, 30_000).unref();
+      const eventLoopLag = {
+        p50Ms: Math.round(loopLag.percentile(50) / 1e6),
+        p95Ms: Math.round(loopLag.percentile(95) / 1e6),
+        p99Ms: Math.round(loopLag.percentile(99) / 1e6),
+        maxMs: Math.round(loopLag.max / 1e6),
+      };
+      const gcPause = gcPauseWindow.snapshot();
+      const stageTimers = snapshotAndResetStageTimers();
+      const diagnostics = buildRuntimeDiagnosticsSnapshot(
+        eventLoopLag,
+        gcPause,
+        process.memoryUsage(),
+        stageTimers,
+      );
+      log.info(
+        {
+          ...eventLoopLag,
+        },
+        "event_loop_lag",
+      );
+      const diagnosticsWriteStartMs = performance.now();
+      runtimeMetrics.writeLatest(
+        "runtime_diagnostics",
+        diagnostics.eventLoopLagMs.p95Ms,
+        JSON.stringify(diagnostics),
+      );
+      recordStageDuration("diagnostics_write", performance.now() - diagnosticsWriteStartMs);
+      loopLag.reset();
+    })
+    .unref();
 
   // 7q. Wire SignalToOrderBridge subscriptions (not a RuntimeModule — subscribe directly)
   signalToOrderBridge.subscribe();
@@ -2632,40 +2668,126 @@ async function main(): Promise<void> {
     shuttingDown = true;
     log.info({ signal }, "shutdown signal received");
 
+    // FIRST, before the long `await` below. These timers write to SQLite at the full connection
+    // timeout; left running they fire repeatedly across the teardown wait, and a lock one of them
+    // loses would take the process down through Node's uncaught-exception path — skipping the final
+    // flush, the shutdown-state publish and `process.exit(0)` at the bottom of this handler. Losing
+    // the last periodic telemetry window is the cheapest thing in this teardown.
+    periodicTimers.stopAll();
+
+    // Bounds every REMAINING telemetry write — the ones module stops emit as well as the final
+    // flush below — to SHUTDOWN_BUSY_TIMEOUT_MS. Telemetry reaches the ledger through exactly three
+    // tables, so it takes all three calls to make that sentence true:
+    //   • `runtime_metrics` — holds while every teardown-reachable write goes through
+    //     `runtimeMetrics`: the raw prepared statements above are all inside `periodicTimers`,
+    //     already killed one line up, and the three that hang off permanent bus subscriptions use
+    //     `replaceLatest`/`clearLatest`. A new raw statement on a permanent subscription silently
+    //     reopens the 30s-per-write hole this line claims to have closed.
+    //   • `risk_events` — bounded at the REPOSITORY, because ~a dozen holders insert directly
+    //     (`RiskEventWriter`'s permanent `OrderRejected`/`SignalRejected` subscriptions keep firing
+    //     while modules stop, and order-lifetime writes from inside its own `stop()`). A per-caller
+    //     bound would be a list to keep in sync; the repository is the one choke point they share.
+    //   • `market_snapshots` — the least obvious of the three, because no module writes it from its
+    //     own `stop()`. It is reached through the PERMANENT `MarketSnapshotReceived` /
+    //     `MarketSnapshotHeartbeat` subscriptions, and `MarketDataModule.stop()` flushes pending
+    //     stream updates, which can publish either event. Its `prune` is on the same connection and
+    //     is the largest single DELETE in the ledger.
+    // Deliberately NOT a connection-wide pragma:
+    // execution drains its queue on this same ledger connection, and an order the exchange has
+    // already ACCEPTED must be persisted at the full runtime timeout or it exists on the exchange
+    // with no local row, which fail-closes startup adoption at the next boot. Telemetry loses one
+    // row; trading state loses the position.
+    runtimeMetrics.enterShutdownMode();
+    repos.riskEvent.enterShutdownMode();
+    repos.marketSnapshot.enterShutdownMode();
+
     try {
-      await supervisor.stop();
+      // A teardown commit must not trigger SQLite's implicit PASSIVE checkpoint: it runs
+      // synchronously on this thread and copies + fsyncs the whole WAL backlog, which is multi-GB
+      // whenever the retention worker's explicit checkpoint has been failing. busy_timeout does not
+      // bound that (it is I/O, not lock contention) and the ceiling below cannot fire while a native
+      // call runs. Steady state keeps the auto-checkpoint — there it is the safety net.
+      disableAutoCheckpoint(ledgerConn.db);
+      disableAutoCheckpoint(controlConn.db);
+
+      // Captured BEFORE the wait, not derived after it: the execution tail drain below spends what
+      // is LEFT of this same budget, so a slow module teardown shortens the tail rather than
+      // extending the total the container's grace period is sized against.
+      const teardownDeadlineMs = Date.now() + RUNTIME_STOP_WAIT_MS;
+
+      // One ceiling over the WHOLE module teardown. Each module bounds its own waits, but the stop
+      // is a sequence of two dozen of them: bounded-each is not bounded-total, and the total is what
+      // the container's grace period actually measures. Past this point the process exits — whatever
+      // is still stopping would have been SIGKILLed a few seconds later anyway.
+      await waitAtMost(
+        supervisor.stop().catch((err: unknown) => log.error({ err }, "supervisor stop error")),
+        {
+          ms: RUNTIME_STOP_WAIT_MS,
+          onExpired: () =>
+            log.error(
+              { waitMs: RUNTIME_STOP_WAIT_MS },
+              "module teardown exceeded the shutdown budget — exiting anyway",
+            ),
+        },
+      );
+
+      // Execution's own stop deadline is short so one module cannot starve the rest, and what it
+      // abandons can be a POST the exchange already accepted — an order that never reaches the
+      // ledger fail-closes startup adoption at the next boot. Module stops normally take
+      // milliseconds, so nearly the whole budget above is still unspent here; give the remainder to
+      // those commands instead of exiting on top of them. The databases are deliberately left open
+      // until `process.exit` (see the `finally` below), which is what makes a write from this tail
+      // still land.
+      await executionModule.drainAbandonedTail(Math.max(0, teardownDeadlineMs - Date.now()));
+
+      signalToOrderBridge.unsubscribe();
+      loopLag.disable();
+      gcObserver.disconnect();
+      selectedMarketCache.dispose();
+      candidateBookCache?.dispose();
+
+      runtimeMetrics.stopPeriodicFlush();
+      try {
+        runtimeMetrics.flushCounters();
+      } catch (err) {
+        log.warn({ err }, "final runtime metrics flush failed");
+      }
+
+      const statePublisher = statePublisherRef.current;
+      if (statePublisher) {
+        statePublisher.stopHeartbeatLoop();
+        try {
+          withShutdownBusyTimeout(controlConn.db, () => statePublisher.publishShutdown());
+        } catch (err) {
+          // The API's control-DB connection holding the writer lock must not cost us the exit: the
+          // dashboard shows a stale status for one run, which is strictly cheaper than a SIGKILL.
+          log.warn({ err }, "final shutdown state publish failed");
+        }
+      }
     } catch (err) {
-      log.error({ err }, "supervisor stop error");
+      log.error({ err }, "shutdown teardown failed — exiting anyway");
+    } finally {
+      // The databases are deliberately NOT closed. In WAL mode `close()` checkpoints once it takes
+      // the last-connection exclusive lock — an unbounded copy + fsync of the entire WAL — and it
+      // buys nothing on the way to `process.exit`: every committed transaction is already in the WAL
+      // file, process exit cannot lose the OS page cache, and the next open recovers the WAL exactly
+      // as it does after any crash. Under `synchronous = NORMAL` those frames were never fsynced
+      // per-commit anyway, so closing would not raise the durability we already accept.
+      log.info("runtime stopped — WAL left for recovery on next open");
+      process.exit(0);
     }
-
-    signalToOrderBridge.unsubscribe();
-    clearInterval(universeFunnelLogTimer);
-    clearInterval(runtimeDiagnosticsTimer);
-    loopLag.disable();
-    gcObserver.disconnect();
-    selectedMarketCache.dispose();
-    candidateBookCache?.dispose();
-
-    runtimeMetrics.stopPeriodicFlush();
-    try {
-      runtimeMetrics.flushCounters();
-    } catch (err) {
-      log.warn({ err }, "final runtime metrics flush failed");
-    }
-
-    if (statePublisherRef.current) {
-      statePublisherRef.current.stopHeartbeatLoop();
-      statePublisherRef.current.publishShutdown();
-    }
-
-    controlConn.close();
-    ledgerConn.close();
-    log.info("databases closed — runtime stopped");
-    process.exit(0);
   };
 
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  // `.catch` rather than `void`: the handler owns the exit, so a rejection escaping it would become
+  // an unhandled rejection and Node would exit through a path that is not this one.
+  const onSignal = (signal: string): void => {
+    shutdown(signal).catch((err: unknown) => {
+      log.error({ err, signal }, "shutdown handler rejected — forcing exit");
+      process.exit(1);
+    });
+  };
+  process.on("SIGINT", () => onSignal("SIGINT"));
+  process.on("SIGTERM", () => onSignal("SIGTERM"));
 
   // 10. Profile-aware preflight — runs for ALL profiles before supervisor.start()
   const startupScan = await marketScannerModule.scanOrThrow();
@@ -2754,34 +2876,21 @@ async function main(): Promise<void> {
     await reconciliationModule.runReconciliation();
   }
 
-  // Release A Phase 5 — post-activation invariant (fail-closed hard-stop). Once
-  // `bounceExit.applyToAllMarkets` is enabled, EVERY active/dust position must have
-  // an assigned owner: the census backfilled the existing ones and the API gate
-  // refuses enabling the flag while any NULL owner remains. A NULL owner surfacing
-  // here means startup adoption/reconciliation (which does not assign ownership)
-  // recreated an unowned position AFTER activation — under owner-authoritative
-  // servicing it would be legacy-routed (profile) instead of bounce, silently
-  // violating the bounce-for-all intent. HARD-STOP rather than trade a mis-owned
-  // position; the operator re-runs the census to backfill before resuming.
-  try {
-    assertBounceForAllOwnershipInvariant(
-      ledgerConn.db,
-      currentExecutionPolicy().bounceExit.applyToAllMarkets,
-    );
-  } catch (err) {
-    if (err instanceof BounceForAllNullOwnerError) {
-      controlConn.db
-        .prepare(
-          "UPDATE runtime_control_state SET runtime_status = 'failed', paused = 1, updated_at = datetime('now') WHERE id = 1",
-        )
-        .run();
-      log.fatal(
-        { nullOwners: err.nullOwners },
-        "startup HARD-STOP — bounceExit.applyToAllMarkets is enabled but the ledger holds active/dust NULL-owner position(s); run the census to backfill ownership before resuming",
-      );
-    }
-    throw err;
-  }
+  // Release A Phase 5 — post-activation invariant (fail-closed hard-stop), widened to I1–I5 in
+  // Phase 6 (§9a). Once `bounceExit.applyToAllMarkets` is enabled, EVERY active position must have
+  // an assigned owner AND the ledger must be structurally consistent: the census repaired the
+  // existing ones and the API gate refuses enabling the flag while any violation remains. A
+  // violation surfacing HERE means startup adoption/reconciliation (which does not assign
+  // ownership) recreated an unowned or mis-bound position AFTER activation — under
+  // owner-authoritative servicing it would be legacy-routed (profile) instead of bounce, or its
+  // resting SELL would be serviced by the wrong owner, silently violating the bounce-for-all
+  // intent. HARD-STOP rather than trade it; the operator re-runs the census before resuming.
+  runOwnershipInvariantStartupGate({
+    ledgerDb: ledgerConn.db,
+    controlDb: controlConn.db,
+    applyToAllMarkets: currentExecutionPolicy().bounceExit.applyToAllMarkets,
+    log,
+  });
 
   // Read active switch request ID (if this boot is part of a profile switch)
   const activeSwitchRow = controlConn.db
@@ -2800,6 +2909,7 @@ async function main(): Promise<void> {
       !!(config as typeof config & { polyBuilderPassphrase?: string }).polyBuilderPassphrase,
     polyBuilderCodeConfigured: !!(config as typeof config & { polyBuilderCode?: string })
       .polyBuilderCode,
+    enableInventoryAutoMerge: config.enableInventoryAutoMerge,
     ...(liveLiteConfig ? { liveLiteConfig } : {}),
   });
   writePreflightReport(controlConn.db, activeProfile, preflightResult, activeSwitchRow?.switch_id);
@@ -2909,7 +3019,7 @@ async function main(): Promise<void> {
     if (!supervisor.isPaused()) {
       statePublisher.publishRunning();
     }
-    statePublisher.startHeartbeatLoop(15_000);
+    statePublisher.startHeartbeatLoop(15_000, periodicTimers);
 
     // Evaluate resume intent (read+cleared earlier, before preflight exit paths)
     const intentResult = evaluateResumeIntent({
@@ -2936,9 +3046,16 @@ async function main(): Promise<void> {
 
     log.info({ phase: supervisor.getPhase(), paused: supervisor.isPaused() }, "runtime ready");
   } catch (err) {
+    if (err instanceof LifecycleSupersededError) {
+      // A signal arrived mid-startup and the shutdown handler took over: it owns the teardown and
+      // the exit code. Exiting here too would race it.
+      log.warn({ err }, "runtime startup superseded by shutdown");
+      return;
+    }
+    // Not closed, for the same reason the signal path does not close — see the comment there. A
+    // startup that failed on a multi-GB ledger would otherwise sit in a close-time checkpoint
+    // instead of surfacing the failure.
     log.fatal({ err }, "runtime startup failed");
-    controlConn.close();
-    ledgerConn.close();
     process.exit(1);
   }
 }

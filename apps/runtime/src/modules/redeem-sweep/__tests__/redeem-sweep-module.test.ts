@@ -1194,6 +1194,144 @@ describe("RedeemSweepModule", () => {
     });
   });
 
+  it("applies the batch status only to the conditions the gateway reports as submitted", async () => {
+    // `buildRedeemRequests` drops conditions silently (stale token map, market metadata with no
+    // tokens, all-zero balance), so the result can name a strict subset of what we sent. Applying
+    // the batch status to a dropped condition would stamp it 'success' with ANOTHER condition's
+    // txHash and close its positions while the shares are still on chain — and `closed` positions
+    // never come back through `buildSettlementCandidates`, so the divergence is terminal.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [
+        remotePosition({ tokenId: TOKEN, conditionId: "cond-1" }),
+        remotePosition({ tokenId: TOKEN_TWO, conditionId: "cond-2" }),
+      ],
+      marketRepo: {
+        findByConditionId: vi.fn((conditionId: string) => [
+          { tokenId: createTokenId(conditionId === "cond-1" ? TOKEN : TOKEN_TWO), endDate: null },
+        ]),
+      } as any,
+      redeemImpl: vi.fn().mockResolvedValue({
+        status: "confirmed",
+        conditionIds: ["cond-2"],
+        txHash: "0xpartial",
+        gasUsed: 12345,
+      }),
+      policy: { postRedeemVerifyDelayMs: 1_000 },
+    });
+    await runStableStartup(h);
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect((h.gateway.redeemPositions.mock.calls as any[])[0]?.[0]).toEqual(["cond-1", "cond-2"]);
+    expect(h.redeemLogRows.filter((row) => row.conditionId === "cond-2").at(-1)).toMatchObject({
+      status: "success",
+      txHash: "0xpartial",
+    });
+    const droppedRow = h.redeemLogRows.filter((row) => row.conditionId === "cond-1").at(-1);
+    expect(droppedRow).toMatchObject({
+      status: "skipped",
+      details: expect.objectContaining({ reason: "not_in_submitted_batch" }),
+    });
+    // The dropped condition must never inherit the submitted condition's transaction.
+    expect(droppedRow?.txHash ?? null).toBeNull();
+    // The only local position in this harness belongs to cond-1 — the dropped one. Any close here
+    // is the defect itself.
+    expect(h.positionRepo.save).not.toHaveBeenCalled();
+    expect(h.lotRepo.settleAll).not.toHaveBeenCalled();
+    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+      "redeem_sweep_dropped_from_batch_total",
+      1,
+      expect.stringContaining("cond-1"),
+      expect.any(String),
+    );
+    expect(h.log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ dropped: ["cond-1"], submitted: ["cond-2"] }),
+      "redeem batch returned a strict subset — the dropped conditions were never submitted and keep their positions open",
+    );
+
+    // The dropped condition must be re-driven, not abandoned: verification reads the real wallet and
+    // retries because cond-1's shares are still there.
+    h.reader.read.mockResolvedValue([remotePosition({ tokenId: TOKEN, conditionId: "cond-1" })]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await h.bus.drain();
+
+    expect((h.gateway.redeemPositions.mock.calls as any[])[1]?.[0]).toEqual(["cond-1"]);
+  });
+
+  it("records each condition's OWN transaction when the gateway reports one per condition", async () => {
+    // The sequential redeem fallback broadcasts a separate transaction per condition and reports
+    // them in `txByCondition`; the flat txHash is then only the FIRST submission. Reading the flat
+    // field here files cond-2's redeem_log row under cond-1's transaction, so any later on-chain
+    // check of that row confirms a redeem that never touched cond-2.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [
+        remotePosition({ tokenId: TOKEN, conditionId: "cond-1" }),
+        remotePosition({ tokenId: TOKEN_TWO, conditionId: "cond-2" }),
+      ],
+      marketRepo: {
+        findByConditionId: vi.fn((conditionId: string) => [
+          { tokenId: createTokenId(conditionId === "cond-1" ? TOKEN : TOKEN_TWO), endDate: null },
+        ]),
+      } as any,
+      redeemImpl: vi.fn().mockResolvedValue({
+        status: "submitted",
+        conditionIds: ["cond-1", "cond-2"],
+        txHash: "0xfirst",
+        gasUsed: 111,
+        txByCondition: {
+          "cond-1": { txHash: "0xfirst", gasUsed: 111 },
+          "cond-2": { txHash: "0xsecond", gasUsed: 222 },
+        },
+      }),
+      policy: { postRedeemVerifyDelayMs: 60 * 60_000 },
+    });
+    await runStableStartup(h);
+
+    expect(h.redeemLogRows.filter((row) => row.conditionId === "cond-1").at(-1)).toMatchObject({
+      txHash: "0xfirst",
+      gasUsed: 111,
+    });
+    expect(h.redeemLogRows.filter((row) => row.conditionId === "cond-2").at(-1)).toMatchObject({
+      txHash: "0xsecond",
+      gasUsed: 222,
+    });
+  });
+
+  it("records no transaction for a submitted condition the per-condition map does not name", async () => {
+    // Once the map exists it is the ONLY source: falling back to the flat txHash for a condition it
+    // omits re-creates the very mis-attribution the map was added to remove. `null` is the honest
+    // answer — we submitted it, we just have no transaction of its own to point at.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [
+        remotePosition({ tokenId: TOKEN, conditionId: "cond-1" }),
+        remotePosition({ tokenId: TOKEN_TWO, conditionId: "cond-2" }),
+      ],
+      marketRepo: {
+        findByConditionId: vi.fn((conditionId: string) => [
+          { tokenId: createTokenId(conditionId === "cond-1" ? TOKEN : TOKEN_TWO), endDate: null },
+        ]),
+      } as any,
+      redeemImpl: vi.fn().mockResolvedValue({
+        status: "submitted",
+        conditionIds: ["cond-1", "cond-2"],
+        txHash: "0xfirst",
+        gasUsed: 111,
+        txByCondition: { "cond-1": { txHash: "0xfirst", gasUsed: 111 } },
+      }),
+      policy: { postRedeemVerifyDelayMs: 60 * 60_000 },
+    });
+    await runStableStartup(h);
+
+    const row = h.redeemLogRows.filter((r) => r.conditionId === "cond-2").at(-1);
+    expect(row?.txHash ?? null).toBeNull();
+    expect(row?.gasUsed ?? null).toBeNull();
+  });
+
   it("caps redeem batch size at 9 and waits 5 minutes between batches", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);

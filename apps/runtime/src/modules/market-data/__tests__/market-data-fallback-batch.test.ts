@@ -152,6 +152,35 @@ function createMockRepo(tiered: TrackedForPricing): MarketRepository {
   };
 }
 
+/**
+ * A gateway that deliberately OMITS `createMarketPricingStream`, so `this.stream` stays null and
+ * every poll takes the `streamUnavailable` branch — the branch that offers every tracked token as
+ * a candidate on every cycle, with no refresh budget and no per-token backoff. That is the only
+ * surface on which a selection order can starve a token permanently rather than merely delay it.
+ */
+function createStreamlessGateway(onPricingPoll: (batch: string[]) => void): MarketDataGateway {
+  return {
+    getMarkets: vi.fn().mockResolvedValue([]),
+    getMarket: vi.fn().mockResolvedValue(null),
+    getOrderBook: vi.fn().mockResolvedValue({
+      tokenId: createTokenId(""),
+      bids: [],
+      asks: [],
+      bestBid: null,
+      bestAsk: null,
+      midPrice: null,
+      spread: null,
+      timestamp: Date.now(),
+    }),
+    getTickSize: vi.fn().mockResolvedValue(0.01),
+    healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
+    getMarketPricing: vi.fn().mockImplementation(async (batch: string[]) => {
+      onPricingPoll(batch);
+      return new Map();
+    }),
+  };
+}
+
 const silentLog = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -913,7 +942,13 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
     await streamRef!.triggerGap("socket-closed");
     await mod.poll();
 
-    expect(capturedIds[0]).toEqual(["crit-a", "crit-b", "crit-c", "entry-a"]);
+    // The whole critical tier survives the cap, and the leftover slot goes to
+    // `entry-b`, not `entry-a`: the start() poll already spent its fourth slot
+    // on `entry-a`, so the least-recently-polled tie-break hands this one to a
+    // peer that has never been polled. That is the anti-starvation walk, and it
+    // is deterministic — not a rotation whose landing spot depends on which
+    // candidates happen to be eligible this cycle.
+    expect(capturedIds[0]).toEqual([...criticalIds, "entry-b"]);
 
     await mod.stop();
   });
@@ -984,9 +1019,269 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
     await streamRef!.triggerGap("socket-closed");
     await mod.poll();
 
-    // executionCritical (1) + planktonSignature (2) fully survive the cap of 4;
-    // only one of the two entryCandidate tokens gets the remaining slot.
-    expect(capturedIds[0]).toEqual(["crit-a", "sig-a", "sig-b", "entry-a"]);
+    // Same tie-break as above: `entry-a` took the start() poll's last slot, so
+    // the never-polled `entry-b` wins this one.
+    expect(capturedIds[0]).toEqual([...criticalIds, ...signatureIds, "entry-b"]);
+
+    await mod.stop();
+  });
+
+  it("over-limit same-role candidates are all eventually polled (no permanent starvation)", async () => {
+    // The gateway advertises no pricing stream, so `this.stream` stays null and
+    // every poll takes the `streamUnavailable` branch. That branch is the one
+    // real permanent-starvation surface: it pushes EVERY tracked token as a
+    // candidate unconditionally — no refresh budget, no per-token backoff — so
+    // the same 101 candidates are eligible at every single poll forever.
+    //
+    // Under a stable sort by role alone, the first 25 therefore win all 25
+    // slots on every cycle and tok-25..tok-100 are never polled at all — their
+    // pricing goes permanently stale while the module reports healthy polling.
+    // (The budget-gated branches do not starve: a polled token's backoff hands
+    // the next slot to its peers, which is why the bug hides until the stream
+    // is gone.)
+    //
+    // Assert the property that actually matters — every candidate gets served —
+    // rather than one exact sequence, so the test stays honest about the goal
+    // instead of pinning today's tie-break.
+    const ids = Array.from({ length: 101 }, (_, i) => `tok-${i}`);
+    const tiered = makeTiered(ids, [], []);
+    const repo = createMockRepo(tiered);
+    const polled: string[] = [];
+    const getMarketPricing = vi.fn().mockImplementation(async (batch: string[]) => {
+      polled.push(...batch);
+      return new Map();
+    });
+    const gateway: MarketDataGateway = {
+      getMarkets: vi.fn().mockResolvedValue([]),
+      getMarket: vi.fn().mockResolvedValue(null),
+      getOrderBook: vi.fn().mockResolvedValue({
+        tokenId: createTokenId(""),
+        bids: [],
+        asks: [],
+        bestBid: null,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        timestamp: Date.now(),
+      }),
+      getTickSize: vi.fn().mockResolvedValue(0.01),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
+      getMarketPricing,
+      // Deliberately absent: `createMarketPricingStream` is optional on the
+      // gateway, and its absence is what pins every poll to the branch under
+      // test.
+    };
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 5_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 200,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+      fallbackPollMaxConcurrency: 25,
+      fallbackPollRatePerSec: 5,
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+
+    // 30 cycles is far more than the five a fair walk needs to cover 101 tokens
+    // at 25 a cycle — a token missing after that is starved, not waiting.
+    for (let cycle = 0; cycle < 30; cycle += 1) {
+      await vi.advanceTimersByTimeAsync(5_000);
+      await mod.poll();
+    }
+
+    expect([...new Set(polled)].sort()).toEqual([...ids].sort());
+
+    await mod.stop();
+  });
+
+  it("a lower-role candidate is not starved by a continuously eligible higher-role one", async () => {
+    // Least-recently-polled ordering only settles ties WITHIN a role — the priority term dominates
+    // it. With a single fallback slot and one always-eligible `executionCritical`, the
+    // `entryCandidate` loses every cycle forever no matter how long it has waited, and a token
+    // that is never polled is a token whose pending hydration never lands (the unknown-minimum
+    // exit block is exactly that). Coverage, not order, is the property under test.
+    const repo = createMockRepo(makeTiered(["crit-0"], ["entry-0"], []));
+    const polled: string[] = [];
+    const mod = new MarketDataModule({
+      gateway: createStreamlessGateway((batch) => polled.push(...batch)),
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 5_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 200,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+      // One slot: the whole point is that the two candidates must SHARE it.
+      fallbackPollMaxConcurrency: 1,
+      fallbackPollRatePerSec: 5,
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+    for (let cycle = 0; cycle < 30; cycle += 1) {
+      await vi.advanceTimersByTimeAsync(5_000);
+      await mod.poll();
+    }
+
+    expect(polled).toContain("crit-0");
+    expect(polled).toContain("entry-0");
+
+    await mod.stop();
+  });
+
+  it("a resident candidate is not starved by a stream of newly admitted peers", async () => {
+    // The rotation key must mean "waiting since", not "never polled". Defaulted to 0, a newcomer
+    // sorts ahead of every peer that has ever been polled — so one fresh token per cycle (the
+    // tracked set churns constantly) hands the single slot to a different newcomer forever while
+    // the resident, whose stamp is positive, never wins again.
+    let cycle = 0;
+    const repo = createMockRepo(makeTiered([], [], []));
+    const tieredForCycle = () => makeTiered([], ["resident", `new-${cycle}`], []);
+    repo.findTrackedForPricingTiered = vi.fn().mockImplementation(tieredForCycle);
+    repo.findTrackedForPricing = vi.fn().mockImplementation(() => {
+      const tiered = tieredForCycle();
+      return [...tiered.executionCritical, ...tiered.entryCandidates];
+    });
+
+    const polledByCycle: string[][] = [];
+    const mod = new MarketDataModule({
+      gateway: createStreamlessGateway((batch) => polledByCycle.at(-1)!.push(...batch)),
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 5_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 200,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+      fallbackPollMaxConcurrency: 1,
+      fallbackPollRatePerSec: 5,
+      // Churn is the point: without this the tiered set is served from cache and the "newcomer"
+      // never changes, so the poll order under test is never actually exercised.
+      tieredPricingCacheTtlMs: 0,
+    });
+
+    polledByCycle.push([]);
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+    // Exactly ONE poll per cycle — the interval tick, with no manual `poll()` chaser. Two polls at
+    // the same timestamp hide the bug: the first hands the slot to the newcomer and stamps it, so
+    // the second finds the resident least-recently-polled and serves it anyway, every cycle.
+    for (cycle = 1; cycle <= 30; cycle += 1) {
+      polledByCycle.push([]);
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+
+    // The LATE half, not "polled at all". The resident is first in the candidate list, so it wins
+    // the opening cycle either way — and then, with newcomers measured from zero, it never wins
+    // again. Being served once and starved for the remaining 29 cycles is the bug, not the fix.
+    expect(polledByCycle.slice(16).flat()).toContain("resident");
+
+    await mod.stop();
+  });
+
+  it("a candidate is not starved by a peer that keeps leaving and rejoining", async () => {
+    // Admission time only measures a genuine wait if it SURVIVES a round trip out of the tracked
+    // set. Stamped fresh on every rejoin, a token that drops out and returns is permanently
+    // younger than the resident it is queued behind, so it loses every cycle it is even present
+    // for — and it never waits long enough in one stretch to trip the starvation tier either.
+    // Dropping in and out is ordinary churn here (the scanner's tiered view moves markets
+    // constantly), not an adversarial pattern.
+    let cycle = 0;
+    const repo = createMockRepo(makeTiered([], [], []));
+    const tieredForCycle = () =>
+      makeTiered([], cycle % 2 === 1 ? ["resident", "rejoiner"] : ["resident"], []);
+    repo.findTrackedForPricingTiered = vi.fn().mockImplementation(tieredForCycle);
+    repo.findTrackedForPricing = vi.fn().mockImplementation(() => {
+      const tiered = tieredForCycle();
+      return [...tiered.executionCritical, ...tiered.entryCandidates];
+    });
+
+    const polledByCycle: string[][] = [];
+    const mod = new MarketDataModule({
+      gateway: createStreamlessGateway((batch) => polledByCycle.at(-1)!.push(...batch)),
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 5_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 200,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+      fallbackPollMaxConcurrency: 1,
+      fallbackPollRatePerSec: 5,
+      // Without this the tiered set is served from cache and the membership never actually churns.
+      tieredPricingCacheTtlMs: 0,
+    });
+
+    polledByCycle.push([]);
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+    for (cycle = 1; cycle <= 30; cycle += 1) {
+      polledByCycle.push([]);
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+
+    // Both, in the LATE half: the resident must keep its share too, or "fairness" would just be
+    // the same starvation pointed the other way.
+    expect(polledByCycle.slice(16).flat()).toContain("rejoiner");
+    expect(polledByCycle.slice(16).flat()).toContain("resident");
+
+    await mod.stop();
+  });
+
+  it("a long-absent token does not outrank an execution-critical peer on rejoin", async () => {
+    // The carried-over wait must be a DURATION, not the stamp it was measured from. Held as a
+    // stamp, a token that spent 40 cycles OUTSIDE the tracked set re-enters looking as if it had
+    // waited all of them, trips the starvation tier on its very first cycle back, and takes the
+    // slot from an execution-critical resident that really has been waiting its turn — for time
+    // the absentee could not have been polled in anyway.
+    let cycle = 0;
+    const repo = createMockRepo(makeTiered([], [], []));
+    // Present only in cycle 1, then gone for 39 cycles, then back from cycle 41.
+    const tieredForCycle = () =>
+      makeTiered(["critical"], cycle === 1 || cycle >= 41 ? ["absentee"] : [], []);
+    repo.findTrackedForPricingTiered = vi.fn().mockImplementation(tieredForCycle);
+    repo.findTrackedForPricing = vi.fn().mockImplementation(() => {
+      const tiered = tieredForCycle();
+      return [...tiered.executionCritical, ...tiered.entryCandidates];
+    });
+
+    const polledByCycle: string[][] = [];
+    const mod = new MarketDataModule({
+      gateway: createStreamlessGateway((batch) => polledByCycle.at(-1)!.push(...batch)),
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 5_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 200,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+      fallbackPollMaxConcurrency: 1,
+      fallbackPollRatePerSec: 5,
+      tieredPricingCacheTtlMs: 0,
+    });
+
+    polledByCycle.push([]);
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+    for (cycle = 1; cycle <= 41; cycle += 1) {
+      polledByCycle.push([]);
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+
+    // The rejoin cycle itself is the discriminator: the absentee accrued one cycle of wait before
+    // it left, so it comes back queued behind the critical peer, not ahead of it.
+    expect(polledByCycle[41]).toContain("critical");
+    expect(polledByCycle[41]).not.toContain("absentee");
 
     await mod.stop();
   });

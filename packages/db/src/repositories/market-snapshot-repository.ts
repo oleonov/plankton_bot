@@ -5,9 +5,41 @@ import type {
   MarketSnapshotPositionValuation,
   TokenId,
 } from "@krabs/domain";
+import { withShutdownBusyTimeout } from "../connection.js";
 
 export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository {
+  private shuttingDown = false;
+
   constructor(private readonly db: Database.Database) {}
+
+  /**
+   * From here on every market_snapshots WRITE is bounded by the short teardown busy_timeout.
+   *
+   * `market_snapshots` is the third telemetry table on the shared ledger connection, and the one
+   * that is easiest to miss: nothing writes it from a module's `stop()` directly. It is reached
+   * through PERMANENT bus subscribers for `MarketSnapshotReceived` / `MarketSnapshotHeartbeat`,
+   * which outlive every module — and `MarketDataModule.stop()` flushes pending stream updates, which
+   * can publish either event. better-sqlite3 is synchronous, so if the checkpoint worker holds the
+   * writer lock at that moment, one snapshot transaction freezes the event loop for the
+   * connection's full runtime timeout, and neither the teardown deadline nor the global shutdown
+   * timer can fire — exactly the ceiling the bound exists to protect.
+   *
+   * `prune` is included for the same reason and then some: an unbounded DELETE on the largest table
+   * in the ledger is the single most expensive write here.
+   *
+   * Reads (`findLatestBboByTokens`) are deliberately left alone: WAL readers do not contend for the
+   * writer lock. Like {@link withShutdownBusyTimeout}, this is per-WRITE and never a
+   * connection-wide pragma — execution drains its order queue on this same connection and must keep
+   * the full runtime timeout.
+   */
+  enterShutdownMode(): void {
+    this.shuttingDown = true;
+  }
+
+  /** Runs `write` under the teardown busy_timeout once shutdown has begun, unbounded before that. */
+  private bounded<T>(write: () => T): T {
+    return this.shuttingDown ? withShutdownBusyTimeout(this.db, write) : write();
+  }
 
   saveBatch(snapshots: MarketSnapshot[]): void {
     if (snapshots.length === 0) return;
@@ -27,7 +59,7 @@ export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository 
         );
       }
     });
-    run(snapshots);
+    this.bounded(() => run(snapshots));
   }
 
   saveBatchWithPositionValuations(
@@ -75,7 +107,7 @@ export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository 
         }
       },
     );
-    run(snapshots, valuations);
+    this.bounded(() => run(snapshots, valuations));
   }
 
   private prepareInsert(): Database.Statement {
@@ -138,19 +170,22 @@ export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository 
   ): number {
     const preserveTokenIds = [...new Set(options?.preserveTokenIds?.map(String) ?? [])];
     if (preserveTokenIds.length === 0) {
-      const result = this.db
-        .prepare("DELETE FROM market_snapshots WHERE captured_at < ?")
-        .run(olderThanIso);
-      return result.changes;
+      return this.bounded(
+        () =>
+          this.db.prepare("DELETE FROM market_snapshots WHERE captured_at < ?").run(olderThanIso)
+            .changes,
+      );
     }
     const placeholders = preserveTokenIds.map(() => "?").join(", ");
-    const result = this.db
-      .prepare(
-        `DELETE FROM market_snapshots
+    return this.bounded(
+      () =>
+        this.db
+          .prepare(
+            `DELETE FROM market_snapshots
          WHERE captured_at < ?
            AND token_id NOT IN (${placeholders})`,
-      )
-      .run(olderThanIso, ...preserveTokenIds);
-    return result.changes;
+          )
+          .run(olderThanIso, ...preserveTokenIds).changes,
+    );
   }
 }

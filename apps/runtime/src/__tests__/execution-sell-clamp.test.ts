@@ -44,6 +44,7 @@ import type {
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
+import { LIFECYCLE_STOP_WAIT_MS } from "../lifecycle-chain.js";
 import { evaluateSellPreSubmitGuard, isExecutableOrderSize } from "../min-order-size.js";
 import { RiskEventWriter } from "../risk-event-writer.js";
 
@@ -1380,5 +1381,78 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     });
 
     await mod.stop();
+  });
+
+  it("abandons the startup rescan mid-loop when an escaped stop supersedes the start", async () => {
+    // The token is re-read PER ORDER, not once on entry. A stop that gives up waiting for this
+    // parked scan has already unsubscribed, cleared the reconcile timer and left `started = false`;
+    // the restart that normally follows installs its own subscriptions. Resuming this loop then
+    // publishes a fresh cancel through the REPLACEMENT's live subscriptions — real exchange work
+    // ordered by a startup whose own stop() already returned. Checking only after the loop is too
+    // late by however many resting sells remain.
+    vi.useFakeTimers();
+    try {
+      const positionRepo = createMockPositionRepoWithBasis(7, 2 * 0.05 + 5 * 0.9);
+      const inventoryLotRepo = createMockInventoryLotRepoWithLots(
+        createPositionId("pos-clamp-floor-1"),
+        [
+          { remainingSize: 2, entryPrice: 0.05 },
+          { remainingSize: 5, entryPrice: 0.9 },
+        ],
+      );
+      // Two resting exit SELLs, both below the floor at 0.04 — the second one is what the guard
+      // has to refuse; with a single order the loop would end on its own and prove nothing.
+      orderRepo.findOpen = vi
+        .fn()
+        .mockReturnValue([
+          makeOpenSellOrder({ orderId: createOrderId("ord-startup-1"), price: 0.04 }),
+          makeOpenSellOrder({ orderId: createOrderId("ord-startup-2"), price: 0.04 }),
+        ]);
+
+      const cancelled: string[] = [];
+      let releaseFirstCancel!: () => void;
+      const parkedBus = {
+        // Parking the FIRST cancel is what puts the start past an await while the stop runs — the
+        // only interleaving in which `superseded` can flip mid-loop.
+        publish: vi.fn(async (event: string, payload: unknown) => {
+          if (event !== "CancelOrderRequested") return;
+          cancelled.push(String((payload as { command: { orderId: unknown } }).command.orderId));
+          if (cancelled.length === 1) {
+            await new Promise<void>((resolve) => (releaseFirstCancel = resolve));
+          }
+        }),
+        subscribe: vi.fn(() => () => undefined),
+      } as unknown as InProcessEventBus;
+
+      const mod = new ExecutionModule({
+        gateway,
+        bus: parkedBus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+      });
+
+      const superseded = mod.start();
+      const escapedStop = mod.stop();
+      // The stop's own ceiling: it stops waiting for the parked start and proceeds without it.
+      await vi.advanceTimersByTimeAsync(LIFECYCLE_STOP_WAIT_MS);
+      await escapedStop;
+
+      releaseFirstCancel();
+      await superseded;
+
+      expect(cancelled).toEqual(["ord-startup-1"]);
+      expect(silentLog.warn).toHaveBeenCalledWith(
+        "execution module startup scan abandoned — a later stop superseded it",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

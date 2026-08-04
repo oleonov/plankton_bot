@@ -24,7 +24,11 @@ describe("MergeSettler", () => {
       consumeFifo: vi.fn(),
     } as any;
     mergeLedgerRepo = {
-      save: vi.fn(),
+      recordPending: vi.fn(),
+      markOnchain: vi.fn(),
+      markApplied: vi.fn(),
+      deletePending: vi.fn(),
+      findNonTerminal: vi.fn().mockReturnValue([]),
     } as any;
     db = {
       prepare: vi.fn().mockReturnValue({ run: vi.fn() }),
@@ -75,7 +79,13 @@ describe("MergeSettler", () => {
       return [];
     });
 
-    settler.applyMerge(candidate);
+    settler.applyMerge(candidate, "merge-cond-1");
+
+    // The settler must advance the SAME mergeId it was given, not mint its own — that id is the
+    // one InventoryManagerModule already wrote as 'pending'/'onchain' before this ran.
+    expect(mergeLedgerRepo.markApplied).toHaveBeenCalledWith(
+      expect.objectContaining({ mergeId: "merge-cond-1", status: "applied" }),
+    );
 
     // Verify lots consumed
     expect(lotRepo.consumeFifo).toHaveBeenCalledWith("pos-yes", 50);
@@ -151,7 +161,7 @@ describe("MergeSettler", () => {
       return [];
     });
 
-    settler.applyMerge(candidate);
+    settler.applyMerge(candidate, "merge-cond-2");
 
     // Total cost = 50*0.2 + 50*0.6 = 10 + 30 = 40.
     // Total merge value = 50 * 1.0 = 50.

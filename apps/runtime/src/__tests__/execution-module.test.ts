@@ -12,6 +12,8 @@ import {
   ExchangeErrorCode,
   GATE_ENTRY_RULE_ID,
   S1_LADDER_RULE_ID,
+  buildS1LadderId,
+  buildS1SignalId,
 } from "@krabs/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -40,6 +42,7 @@ import type {
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
+import { LIFECYCLE_STOP_WAIT_MS } from "../lifecycle-chain.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
 
@@ -398,6 +401,76 @@ describe("ExecutionModule", () => {
     expect(h.ok).toBe(false);
     expect(h.detail).toContain("unreachable");
     await mod.stop();
+  });
+
+  it("does not finish stopping while a command that triggered the stop is still executing", async () => {
+    // Without a queue the dispatch call IS the in-flight work, and `stop()` has no other handle on
+    // it. `executePlace` reaches its `not_accepting_orders` publish with no preceding await, and the
+    // bus dispatches handlers SYNCHRONOUSLY — so a handler calling `stop()` runs inside
+    // `dispatchCommand`'s own stack frame. A claim registered only after the executor RETURNS is not
+    // in `directInFlight` yet: the drain sees an empty set, reports the module drained over a
+    // command that is mid-flight, and bulk-releases its idempotency mark with the reservation live.
+    await mod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ acceptingOrders: false })],
+      timestamp: Date.now(),
+    });
+
+    let releaseCommand!: () => void;
+    let stopped = false;
+    let stopping!: Promise<void>;
+    bus.subscribe("OrderSkipped", async () => {
+      stopping = mod.stop().then(() => {
+        stopped = true;
+      });
+      // Holds the publish — and with it the command — open, so "stopped" can only become true
+      // while the command is demonstrably still running.
+      await new Promise<void>((r) => (releaseCommand = r));
+    });
+
+    const dispatched = bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stopped).toBe(false);
+
+    releaseCommand();
+    await dispatched;
+    await stopping;
+    expect(stopped).toBe(true);
+  });
+
+  it("tail-drains an abandoned command on the queue-less path too", async () => {
+    // `maxConcurrency` unset is the configuration this whole file runs under, so a tail drain wired
+    // only into the queue would be a silent no-op in exactly the mode where `directInFlight` is the
+    // only handle anything has on the work.
+    await mod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ acceptingOrders: false })],
+      timestamp: Date.now(),
+    });
+
+    let releaseCommand!: () => void;
+    bus.subscribe("OrderSkipped", async () => {
+      await new Promise<void>((r) => (releaseCommand = r));
+    });
+
+    const dispatched = bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    // A bounded tail cannot finish a command that is still running, and it has to SAY so — a
+    // verdict of "drained" over live work is what makes the caller exit on top of it.
+    expect(await mod.drainAbandonedTail(20)).toBe(false);
+
+    const tail = mod.drainAbandonedTail(5_000);
+    releaseCommand();
+    expect(await tail).toBe(true);
+    await dispatched;
   });
 
   // ─── Place order ───────────────────────────────────────────────────
@@ -3769,6 +3842,415 @@ describe("ExecutionModule", () => {
     await mod2.stop();
   });
 
+  it("recovers a blocked S1 exit: hydrates once, then the identical retry places", async () => {
+    const requestMinOrderSizeHydration = vi.fn();
+    // Entry at 0.40 so the 0.95 exit clears the loss-floor gate — this test is
+    // about the minimum, not the floor.
+    const exitPosition = makePosition({ size: 0.8, avgEntryPrice: 0.4, costBasisUsdc: 0.32 });
+    const mod2 = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(exitPosition),
+      inventoryLotRepo: createMockInventoryLotRepo(exitPosition),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+      requestMinOrderSizeHydration,
+    });
+    await mod2.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+    const skipped: any[] = [];
+    bus.subscribe("OrderSkipped", async (p) => {
+      skipped.push(p);
+    });
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ minOrderSize: null, bestAsk: 0.9 })],
+      timestamp: Date.now(),
+    });
+
+    // The REAL deterministic S1 identity: `s1_<tokenId>_<ladderId>_<tierIndex>`
+    // with `ladderId` hashed from (token, openedAt, avgEntryPrice). A phantom
+    // release re-places the same tier and rebuilds this byte-for-byte, so the
+    // retry below is the exact command the ladder republishes — not a fresh id
+    // that would trivially bypass the idempotency set.
+    const tokenId = createTokenId("tok-yes");
+    const ladderId = buildS1LadderId({
+      tokenId,
+      openedAt: "2026-07-30T00:00:00.000Z",
+      avgEntryPrice: 0.42,
+    });
+    const signalId = buildS1SignalId(tokenId, ladderId, 0);
+    const s1Command = makePlaceCmd({
+      commandId: createCommandId(`s1_${String(tokenId)}_${ladderId}_0`),
+      clientOrderId: "krb_s1laddertier0" as ClientOrderId,
+      side: "sell",
+      price: 0.95,
+      size: 0.8,
+      postOnly: true,
+      signalId,
+      decisionRuleId: S1_LADDER_RULE_ID,
+      metadata: { s1: { ladderId, tierIndex: 0 } },
+    });
+
+    // An S1 ladder re-places every tier on each reprice, so the same token gets
+    // blocked repeatedly — the throttle must collapse that into one /books fetch.
+    await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+    await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+
+    // Two rejections, not one: the second publish of the SAME commandId must not
+    // be swallowed by `processedCommandIds` — nothing was ever submitted.
+    expect(rejected).toHaveLength(2);
+    expect(rejected[0].reason).toBe("sell-residual-unknown-min");
+    expect(requestMinOrderSizeHydration).toHaveBeenCalledTimes(1);
+    expect(requestMinOrderSizeHydration).toHaveBeenCalledWith("tok-yes");
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+
+    // What the hydration produces: the `/books` minimum lands in the market cache.
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ minOrderSize: 0.5, bestAsk: 0.9 })],
+      timestamp: Date.now(),
+    });
+
+    await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+
+    // End to end: the exit the unknown minimum was blocking now reaches the CLOB.
+    expect(skipped).toEqual([]);
+    expect(rejected).toHaveLength(2);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect((gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
+      tokenId: "tok-yes",
+      side: "sell",
+      size: 0.8,
+    });
+
+    await mod2.stop();
+  });
+
+  /**
+   * The CONCURRENT half of the release, which the sequential test above cannot reach: there, each
+   * publish fully unwinds before the next starts, so the mark is only ever released with no accounting
+   * left behind. Here the duplicate is delivered while the first attempt is still suspended inside
+   * `rejectOrder` — its reservation and in-flight slot are still live.
+   *
+   * Releasing the mark at the block site (rather than deferring it to `executeCommand`'s `finally`) lets
+   * that duplicate past the idempotency check into a `reserved-token-limit` reject — a branch that does
+   * NOT release — so the id is re-marked for good and the post-hydration retry is dropped silently. The
+   * exit stays blocked forever, which is the very tight loop this whole fix exists to end.
+   */
+  it("survives an identical command delivered while the first rejection is still unwinding", async () => {
+    const requestMinOrderSizeHydration = vi.fn();
+    const exitPosition = makePosition({ size: 0.8, avgEntryPrice: 0.4, costBasisUsdc: 0.32 });
+    const mod2 = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(exitPosition),
+      inventoryLotRepo: createMockInventoryLotRepo(exitPosition),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+      requestMinOrderSizeHydration,
+    });
+    await mod2.start();
+
+    const tokenId = createTokenId("tok-yes");
+    const ladderId = buildS1LadderId({
+      tokenId,
+      openedAt: "2026-07-30T00:00:00.000Z",
+      avgEntryPrice: 0.42,
+    });
+    const s1Command = makePlaceCmd({
+      commandId: createCommandId(`s1_${String(tokenId)}_${ladderId}_0`),
+      clientOrderId: "krb_s1laddertier0" as ClientOrderId,
+      side: "sell",
+      price: 0.95,
+      size: 0.8,
+      postOnly: true,
+      signalId: buildS1SignalId(tokenId, ladderId, 0),
+      decisionRuleId: S1_LADDER_RULE_ID,
+      metadata: { s1: { ladderId, tierIndex: 0 } },
+    });
+
+    // The window is opened from INSIDE the first rejection, not by publishing twice up front: the
+    // idempotency mark is set synchronously at admission, so a duplicate published before the first
+    // attempt suspends is swallowed no matter where the release lives — such a test passes either way
+    // and proves nothing. Awaiting here parks `rejectOrder`, so the first attempt sits PAST the block
+    // site (where the buggy version already released the mark) and BEFORE `executeCommand`'s `finally`
+    // (where its reservation and in-flight slot are still live). That is the only observable window.
+    const rejected: any[] = [];
+    let duplicate: Promise<void> | undefined;
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+      if (rejected.length > 1) return;
+      duplicate = bus.publish("PlaceOrderRequested", {
+        command: s1Command,
+        timestamp: Date.now(),
+      });
+      await duplicate;
+    });
+    const skipped: any[] = [];
+    bus.subscribe("OrderSkipped", async (p) => {
+      skipped.push(p);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ minOrderSize: null, bestAsk: 0.9 })],
+      timestamp: Date.now(),
+    });
+
+    await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+    await duplicate;
+
+    // Exactly one rejection, and it is the block — not a `reserved-token-limit` from the duplicate
+    // colliding with its own predecessor's still-live reservation. `reserved-token-limit` is decided at
+    // admission (`execution-module.ts:1906`), before the reservation is registered and before
+    // `executeCommand` runs at all, so it never reaches the `finally` that releases: one such reject
+    // re-marks the id for good.
+    expect(rejected.map((r) => r.reason)).toEqual(["sell-residual-unknown-min"]);
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ minOrderSize: 0.5, bestAsk: 0.9 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+
+    // The release still happened, just later: the identical retry the ladder republishes gets through.
+    expect(skipped).toEqual([]);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    await mod2.stop();
+  });
+
+  /**
+   * The SHUTDOWN half of the deferred release. `stop()` does not await in-flight bus handlers, so a
+   * blocked SELL suspended inside its own `OrderRejected` publish reaches `executeCommand`'s
+   * `finally` AFTER `stop()` has already run: dropping the pending intents there leaves the id
+   * marked in `processedCommandIds`, which `stop()` deliberately does not clear. The S1 commandId is
+   * deterministic, so every post-hydration retry rebuilds the same id and is swallowed as a
+   * duplicate for the life of the process — the tight loop, re-created by a restart.
+   */
+  it("releases a pending mark when stop() lands before the unwind finishes", async () => {
+    const exitPosition = makePosition({ size: 0.8, avgEntryPrice: 0.4, costBasisUsdc: 0.32 });
+    const mod2 = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(exitPosition),
+      inventoryLotRepo: createMockInventoryLotRepo(exitPosition),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+      requestMinOrderSizeHydration: vi.fn(),
+    });
+    await mod2.start();
+
+    const tokenId = createTokenId("tok-yes");
+    const ladderId = buildS1LadderId({
+      tokenId,
+      openedAt: "2026-07-30T00:00:00.000Z",
+      avgEntryPrice: 0.42,
+    });
+    const s1Command = makePlaceCmd({
+      commandId: createCommandId(`s1_${String(tokenId)}_${ladderId}_0`),
+      clientOrderId: "krb_s1stoprelease0" as ClientOrderId,
+      side: "sell",
+      price: 0.95,
+      size: 0.8,
+      postOnly: true,
+      signalId: buildS1SignalId(tokenId, ladderId, 0),
+      decisionRuleId: S1_LADDER_RULE_ID,
+      metadata: { s1: { ladderId, tierIndex: 0 } },
+    });
+
+    // Started, NOT awaited, from inside the rejection: `stop()` runs synchronously up to its first
+    // await, and the intents are handled before it — so this reproduces the real interleaving
+    // (block site done, `finally` still pending) without the test itself waiting on a queue drain
+    // that cannot finish until this very handler returns.
+    let stopping: Promise<void> | undefined;
+    bus.subscribe("OrderRejected", async () => {
+      stopping ??= mod2.stop();
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ minOrderSize: null, bestAsk: 0.9 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+    await stopping;
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+
+    await mod2.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ minOrderSize: 0.5, bestAsk: 0.9 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    await mod2.stop();
+  });
+
+  /**
+   * The restart the test above relies on only works because the queue is re-opened. Production
+   * ALWAYS builds one (`index.ts` passes `executionMaxConcurrency`, default 16), and
+   * `ExecutionQueue.shutdown()` latches `accepting = false` permanently — so without a re-open a
+   * restarted module accepts commands, marks them, reserves for them, and then drops every one of
+   * them at `enqueue`: zero orders placed, marks and reservations stranded, for the life of the
+   * process. The queue-less shape the other tests use cannot see it.
+   */
+  it("dispatches again after a restart in the production queue shape", async () => {
+    const mod2 = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      maxConcurrency: 16,
+    });
+
+    await mod2.start();
+    await mod2.stop();
+    await mod2.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("cmd-restart-queue"),
+        clientOrderId: "krb_restartqueue" as ClientOrderId,
+      }),
+      timestamp: Date.now(),
+    });
+
+    // The queue executes off the publish, so drain before asserting.
+    await mod2.stop();
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The queue refuses SILENTLY once shut down, and a refused command never reaches
+   * `executeCommand` — so nothing unwinds what admission already recorded. The idempotency mark is
+   * the damaging one: S1 ids are deterministic, so the identical retry is swallowed as a duplicate
+   * forever and the exit stays blocked — the tight loop again, this time entered through the
+   * shutdown window rather than through the block site.
+   */
+  it("leaves no trace when the queue refuses a command mid-shutdown", async () => {
+    const exitPosition = makePosition({ size: 0.8, avgEntryPrice: 0.4, costBasisUsdc: 0.32 });
+    const positionRepo = createMockPositionRepo(exitPosition);
+    let stopping: Promise<void> | undefined;
+    const mod2 = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(exitPosition),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+      maxConcurrency: 16,
+    });
+    // `getReservationDecision` is the first thing to ask for the position, and it runs AFTER the
+    // idempotency mark and BEFORE the dispatch — the exact window in which a shutdown turns an
+    // admitted command into a silently dropped one.
+    positionRepo.findByTokenId = vi.fn(() => {
+      stopping ??= mod2.stop();
+      return exitPosition;
+    });
+    await mod2.start();
+
+    const sell = makePlaceCmd({
+      commandId: createCommandId("cmd-refused-dispatch"),
+      clientOrderId: "krb_refuseddispatch" as ClientOrderId,
+      side: "sell",
+      price: 0.95,
+      size: 0.8,
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ minOrderSize: 0.5, bestAsk: 0.9 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", { command: sell, timestamp: Date.now() });
+    await stopping;
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+
+    await mod2.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ minOrderSize: 0.5, bestAsk: 0.9 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", { command: sell, timestamp: Date.now() });
+
+    await mod2.stop();
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not inherit the hydration throttle window across a module restart", async () => {
+    const requestMinOrderSizeHydration = vi.fn();
+    const blockedPosition = makePosition({ size: 0.8 });
+    const mod2 = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(blockedPosition),
+      inventoryLotRepo: createMockInventoryLotRepo(blockedPosition),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+      requestMinOrderSizeHydration,
+    });
+
+    const blockedSell = {
+      command: makePlaceCmd({
+        commandId: createCommandId("cmd-restart-hydrate"),
+        clientOrderId: "krb_restarthydrate" as ClientOrderId,
+        side: "sell",
+        price: 0.5,
+        size: 0.8,
+        postOnly: false,
+        metadata: { marketData: { minOrderSize: null } },
+      }),
+      timestamp: Date.now(),
+    };
+
+    for (const run of [1, 2]) {
+      await mod2.start();
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ minOrderSize: null, bestAsk: 0.9 })],
+        timestamp: Date.now(),
+      });
+      await bus.publish("PlaceOrderRequested", blockedSell);
+      // The restarted module rebuilds its book cache too, so the value the
+      // throttle was suppressing a refetch of is gone — inheriting the window
+      // would leave the exit blocked for the rest of it.
+      expect(requestMinOrderSizeHydration).toHaveBeenCalledTimes(run);
+      await mod2.stop();
+    }
+  });
+
   // ─── Live-lite allowlist (removed) ──────────────────────────────────────────
   // The per-family allowlist gate was removed from ExecutionModule.
   // Orders are no longer rejected based on family allowlist membership.
@@ -4531,6 +5013,377 @@ describe("ExecutionModule", () => {
     await queuedMod.stop();
     expect(queuedMod.getDiagnostics().placeCompleted).toBe(1);
     expect(queuedMod.getDiagnostics().avgPlaceLatencyMs).not.toBeNull();
+  });
+
+  it("a restart overlapping an in-flight stop does not leave the module half-started", async () => {
+    // `stop()` parks inside the queue drain. A `start()` landing in that window used to re-open
+    // the queue and re-subscribe on top of a teardown that had not finished — and the resuming
+    // `stop()` then set `started = false` underneath it. The supervisor is told the module is
+    // down while its subscriptions are live and its queue accepts commands, i.e. it places
+    // orders after `stop()` returned.
+    let resolvePlace: () => void;
+    const slowPlace = new Promise<PlaceOrderResult>((r) => {
+      resolvePlace = () => r({ success: true, orderId: "sim-ord-slow" });
+    });
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockReturnValueOnce(slowPlace);
+
+    const restartMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      maxConcurrency: 4,
+    });
+
+    await restartMod.start();
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    const stopping = restartMod.stop();
+    const starting = restartMod.start(); // lands while the drain is still parked
+    resolvePlace!();
+    await Promise.all([stopping, starting]);
+
+    // The restart must win outright — not be silently un-started by the teardown it raced.
+    expect(await restartMod.healthCheck()).toMatchObject({ ok: true });
+
+    // …and the module the supervisor now believes is up really does execute.
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("cmd-after-restart"),
+        clientOrderId: "plk_after_restart" as ClientOrderId,
+      }),
+      timestamp: Date.now(),
+    });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
+
+    await restartMod.stop();
+  });
+
+  it("a stop that follows a start wins, even with the start still mid-flight", async () => {
+    // The mirror of the test above, and the one a "join the teardown in progress" guard cannot
+    // cover: here the START is the transition already running. It yields mid-body, the later
+    // `stop()` runs to completion in that window, and the resuming start then re-opens the queue
+    // and re-subscribes on top of a teardown that has already finished — a module the supervisor
+    // believes is down, still placing orders.
+    const lifecycleMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      maxConcurrency: 4,
+    });
+
+    const starting = lifecycleMod.start();
+    const stopping = lifecycleMod.stop(); // the LAST intent — it must decide the final state
+    await Promise.all([starting, stopping]);
+
+    expect(await lifecycleMod.healthCheck()).toMatchObject({ ok: false });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+  });
+
+  it("a stop that gave up waiting for a mid-flight start is not undone when that start resumes", async () => {
+    // The window the test above cannot reach: there the stop WAITS for the start, so call order
+    // alone settles it. Here the start parks past LIFECYCLE_STOP_WAIT_MS, the stop escapes its
+    // ceiling and completes the whole teardown, and only THEN does the start resume — the one case
+    // no `stopping`-style flag can see, because the restart that normally follows an escape resets
+    // it. What the resuming start re-arms is not cosmetic: `started` is the guard that stops a
+    // torn-down module from placing a deferred backstop from a chain still in flight.
+    vi.useFakeTimers();
+    try {
+      const existingSell = openSellAt(0.4);
+      orderRepo.findOpen = vi.fn().mockReturnValue([existingSell]);
+      orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+      orderRepo.findById = vi.fn().mockReturnValue(existingSell);
+      // 1.0/share cost basis against a 0.4 resting SELL — below the exit loss floor, so the
+      // startup scan issues the managed cancel this test parks on.
+      const belowFloorPosition = makePosition({ size: 5, costBasisUsdc: 5 });
+
+      // Parks the startup scan inside its own cancel publish. `publish` awaits `allSettled` over
+      // the subscribers, so the module's own handler still runs — only the publish stays pending.
+      let releaseScan!: () => void;
+      bus.subscribe(
+        "CancelOrderRequested",
+        () =>
+          new Promise<void>((resolve) => {
+            releaseScan = resolve;
+          }),
+      );
+
+      const escapeMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo: createMockPositionRepo(belowFloorPosition),
+        inventoryLotRepo: createMockInventoryLotRepo(belowFloorPosition),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+      });
+
+      const starting = escapeMod.start();
+      const stopping = escapeMod.stop();
+      await vi.advanceTimersByTimeAsync(LIFECYCLE_STOP_WAIT_MS);
+      await stopping;
+      expect(await escapeMod.healthCheck()).toMatchObject({ ok: false });
+
+      releaseScan();
+      await starting;
+
+      // The teardown was the last intent — a start resuming on top of it must not report up.
+      expect(await escapeMod.healthCheck()).toMatchObject({ ok: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stop → start → stop leaves the module down, not up", async () => {
+    // A second `stop()` that merely joins the first one loses: it settles when the FIRST teardown
+    // does, the start queued between them then resumes and wins, and the module ends up live
+    // although the latest requested transition was a stop.
+    let resolvePlace: () => void;
+    const slowPlace = new Promise<PlaceOrderResult>((r) => {
+      resolvePlace = () => r({ success: true, orderId: "sim-ord-seq" });
+    });
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockReturnValueOnce(slowPlace);
+
+    const seqMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      maxConcurrency: 4,
+    });
+
+    await seqMod.start();
+    await bus.publish("PlaceOrderRequested", { command: makePlaceCmd(), timestamp: Date.now() });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    const stopping1 = seqMod.stop(); // parks in the queue drain
+    const starting = seqMod.start();
+    const stopping2 = seqMod.stop();
+    resolvePlace!();
+    await Promise.all([stopping1, starting, stopping2]);
+
+    expect(await seqMod.healthCheck()).toMatchObject({ ok: false });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("cmd-after-seq"),
+        clientOrderId: "plk_after_seq" as ClientOrderId,
+      }),
+      timestamp: Date.now(),
+    });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The release of a deferred idempotency mark is ordered AFTER the drain for one reason: while
+   * the command is still running, its reservation and in-flight slot are live, so a duplicate that
+   * gets past the idempotency check takes a NON-releasing admission branch and burns the
+   * deterministic S1 id for good. A shutdown that returned at its DEADLINE has not drained — it
+   * still has commands executing — so releasing there re-creates exactly that defect. The set is
+   * left intact instead: each command releases its own id in `executeCommand`'s `finally`.
+   */
+  it("does not release pending marks when the queue shutdown times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const exitPosition = makePosition({ size: 0.8, avgEntryPrice: 0.4, costBasisUsdc: 0.32 });
+      const timeoutMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo: createMockPositionRepo(exitPosition),
+        inventoryLotRepo: createMockInventoryLotRepo(exitPosition),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        runtimeMode: "live-lite",
+        requestMinOrderSizeHydration: vi.fn(),
+        maxConcurrency: 4,
+      });
+      await timeoutMod.start();
+
+      const tokenId = createTokenId("tok-yes");
+      const ladderId = buildS1LadderId({
+        tokenId,
+        openedAt: "2026-07-30T00:00:00.000Z",
+        avgEntryPrice: 0.42,
+      });
+      const s1Command = makePlaceCmd({
+        commandId: createCommandId(`s1_${String(tokenId)}_${ladderId}_0`),
+        clientOrderId: "krb_s1timeout0" as ClientOrderId,
+        side: "sell",
+        price: 0.95,
+        size: 0.8,
+        postOnly: true,
+        signalId: buildS1SignalId(tokenId, ladderId, 0),
+        decisionRuleId: S1_LADDER_RULE_ID,
+        metadata: { s1: { ladderId, tierIndex: 0 } },
+      });
+
+      // The blocked SELL suspends inside its own `OrderRejected` publish and never reaches
+      // `executeCommand`'s `finally` — so the queue cannot drain and the shutdown must time out.
+      // Only the FIRST rejection parks: a released mark lets the retry through to the
+      // non-releasing `reserved-token-limit` branch, and parking THAT one too would deadlock the
+      // test instead of letting the burned id show up as a failed assertion.
+      let releaseBlocked!: () => void;
+      const blocked = new Promise<void>((r) => {
+        releaseBlocked = r;
+      });
+      let parked = false;
+      bus.subscribe("OrderRejected", async () => {
+        if (parked) return;
+        parked = true;
+        await blocked;
+      });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ minOrderSize: null, bestAsk: 0.9 })],
+        timestamp: Date.now(),
+      });
+      await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+
+      const stopping = timeoutMod.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await stopping;
+
+      // The original command is STILL running, so its id must still be marked: an identical
+      // retry has to be swallowed as a duplicate rather than admitted alongside it.
+      await timeoutMod.start();
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ minOrderSize: 0.5, bestAsk: 0.9 })],
+        timestamp: Date.now(),
+      });
+      await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+
+      // …and once it finishes, its own `finally` performs the release the stop skipped, so the
+      // retry is admitted exactly as it would have been after a clean drain.
+      releaseBlocked();
+      await vi.advanceTimersByTimeAsync(0);
+      await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+      expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+      await timeoutMod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The same defect in the queue-less shape (`maxConcurrency` unset — a supported constructor
+   * configuration). With no queue there is nothing whose drain verdict to consult, and declaring
+   * the module drained unconditionally released every pending mark while the command was still
+   * inside `executePlace`: its reservation and in-flight slot are live, so the duplicate that the
+   * released mark now admits takes the non-releasing `reserved-token-limit` branch and burns the
+   * deterministic S1 id for good.
+   */
+  it("does not release pending marks while a queue-less command is still executing", async () => {
+    vi.useFakeTimers();
+    try {
+      const exitPosition = makePosition({ size: 0.8, avgEntryPrice: 0.4, costBasisUsdc: 0.32 });
+      const directMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo: createMockPositionRepo(exitPosition),
+        inventoryLotRepo: createMockInventoryLotRepo(exitPosition),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        runtimeMode: "live-lite",
+        requestMinOrderSizeHydration: vi.fn(),
+      });
+      await directMod.start();
+
+      const tokenId = createTokenId("tok-yes");
+      const ladderId = buildS1LadderId({
+        tokenId,
+        openedAt: "2026-07-30T00:00:00.000Z",
+        avgEntryPrice: 0.42,
+      });
+      const s1Command = makePlaceCmd({
+        commandId: createCommandId(`s1_${String(tokenId)}_${ladderId}_0`),
+        clientOrderId: "krb_s1direct0" as ClientOrderId,
+        side: "sell",
+        price: 0.95,
+        size: 0.8,
+        postOnly: true,
+        signalId: buildS1SignalId(tokenId, ladderId, 0),
+        decisionRuleId: S1_LADDER_RULE_ID,
+        metadata: { s1: { ladderId, tierIndex: 0 } },
+      });
+
+      let releaseBlocked!: () => void;
+      const blocked = new Promise<void>((r) => {
+        releaseBlocked = r;
+      });
+      let parked = false;
+      bus.subscribe("OrderRejected", async () => {
+        if (parked) return;
+        parked = true;
+        await blocked;
+      });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ minOrderSize: null, bestAsk: 0.9 })],
+        timestamp: Date.now(),
+      });
+      // NOT awaited: without a queue the publish runs the command inline, so it cannot resolve
+      // until the parked `OrderRejected` handler returns — which is the whole point of the case.
+      const placing = bus.publish("PlaceOrderRequested", {
+        command: s1Command,
+        timestamp: Date.now(),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      const stopping = directMod.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await stopping;
+
+      await directMod.start();
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ minOrderSize: 0.5, bestAsk: 0.9 })],
+        timestamp: Date.now(),
+      });
+      await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+
+      releaseBlocked();
+      await placing;
+      await vi.advanceTimersByTimeAsync(0);
+      await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
+      expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+      await directMod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ─── Unsubscribe on stop ──────────────────────────────────────────

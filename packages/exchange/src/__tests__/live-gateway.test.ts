@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTokenId, type DepHealthRecorder, type DepKey } from "@krabs/domain";
 import { decodeFunctionData, parseAbi } from "viem";
-import { LiveExchangeGateway } from "../live/exchange-gateway.js";
+import {
+  LiveExchangeGateway,
+  SettlementNotSubmittedError,
+  SettlementUnconfirmedError,
+} from "../live/exchange-gateway.js";
 import { LiveMarketDataGateway, buildTokenIdBatches } from "../live/market-data-gateway.js";
 import { SharedMarketPricingStreamHub } from "../live/market-pricing-stream-hub.js";
 
@@ -36,7 +40,13 @@ function createMockClient() {
 
 function createMockSettlementClient() {
   return {
-    execute: vi.fn().mockResolvedValue({}),
+    // `wait()` resolving to a mined receipt is the SHAPE PRODUCTION ACTUALLY RETURNS — the live
+    // relayer response exposes it, and the runtime log shows 4/4 settlements confirming inside the
+    // wait window with zero `redeem_pending_after_wait_error`. The previous bare `{}` modelled a
+    // response production does not send, and since `mergePositions` now rejects on anything short of
+    // a confirmed settlement, defaulting to that shape would make every merge test exercise the
+    // failure path. Tests that WANT `submitted`/`pending` override `execute` themselves.
+    execute: vi.fn().mockResolvedValue({ wait: vi.fn().mockResolvedValue({ state: "MINED" }) }),
   };
 }
 
@@ -1145,7 +1155,51 @@ describe("LiveExchangeGateway", () => {
     expect(metadata).not.toMatch(/[:\s,]/);
   });
 
-  it("mergePositions warns once and no-ops when the SDK has no merge API", async () => {
+  it("mergePositions rejects, submitting nothing, when one condition's request cannot be built", async () => {
+    // Regression: the relayer path resolved on a SHORT request list. `buildMergeRequests` drops a
+    // condition whose market has no token ids (and any other non-collateral build failure), and
+    // `mergePositions` returns void, so the caller could not tell — it marked every write-ahead row
+    // 'onchain', consumed the local YES/NO lots and settled the rows to 'applied'. Terminal, and the
+    // startup divergence report only surfaces non-terminal rows, so the merge that never hit chain
+    // was invisible forever. Same defect class as the no-merge-API case below, on the path live-lite
+    // actually uses.
+    const settlementClient = createMockSettlementClient();
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    client.getMarket
+      .mockResolvedValueOnce({
+        tokens: [
+          { outcome: "Yes", token_id: "tok-yes" },
+          { outcome: "No", token_id: "tok-no" },
+        ],
+      })
+      // Malformed market: no tokens -> buildMergeRequest returns null -> the condition is dropped.
+      .mockResolvedValueOnce({ tokens: [] });
+
+    await expect(
+      gw.mergePositions([
+        {
+          conditionId: "0x1111111111111111111111111111111111111111111111111111111111111111",
+          amount: 5,
+        },
+        {
+          conditionId: "0x2222222222222222222222222222222222222222222222222222222222222222",
+          amount: 7,
+        },
+      ]),
+    ).rejects.toThrow(/could not build merge requests for 0x2222/);
+
+    // The batch is atomic: the buildable condition must NOT go on chain either, or its ledger row
+    // would be left 'pending' for a merge that actually happened.
+    expect(settlementClient.execute).not.toHaveBeenCalled();
+  });
+
+  it("mergePositions rejects (never silently resolves) when the SDK has no merge API", async () => {
+    // Regression: resolving here told the caller the merge was irrevocable. Its write-ahead
+    // ledger then marked the intents 'onchain' and settled them to 'applied', consuming the
+    // local positions — a divergence that is both terminal and INVISIBLE, since the startup
+    // report only surfaces non-terminal rows. A configuration with auto-merge on and no merge
+    // API must fail loudly on every sweep instead.
     const emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
 
     await expect(
@@ -1153,16 +1207,217 @@ describe("LiveExchangeGateway", () => {
         { conditionId: "cond-1", amount: 10 },
         { conditionId: "cond-2", amount: 20 },
       ]),
-    ).resolves.toBeUndefined();
-    await expect(
-      gw.mergePositions([{ conditionId: "cond-3", amount: 30 }]),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/mergePositions unsupported/);
+    await expect(gw.mergePositions([{ conditionId: "cond-3", amount: 30 }])).rejects.toThrow(
+      /mergePositions unsupported/,
+    );
 
     expect(emitWarning).toHaveBeenCalledTimes(1);
     expect(emitWarning).toHaveBeenCalledWith(
       expect.stringContaining("mergePositions skipped"),
       expect.objectContaining({ code: "KRABS_MERGE_UNSUPPORTED" }),
     );
+  });
+
+  it("mergePositions rejects when the relayer submitted but never confirmed", async () => {
+    // Regression (round-2 #1): the relayer response is observed, and anything short of 'confirmed'
+    // used to be DISCARDED — mergePositions resolved, and InventoryManagerModule read that as "the
+    // batch is on chain and irrevocable": every write-ahead intent went 'onchain' and then the
+    // TERMINAL 'applied', with the local YES/NO lots consumed. Merge requests carry no
+    // precheckTokenIds, so the balance post-check returns false vacuously and can never rescue it.
+    // If the transaction then failed, the ledger claimed a merge that never happened — and the
+    // startup divergence report only surfaces NON-terminal rows, so it was invisible forever.
+    vi.useFakeTimers();
+    try {
+      const settlementClient = {
+        // A wait() that rejects is how a confirmation we could not observe reaches the caller:
+        // observeSettlementExecution converts every non-SettlementTransactionFailedError into
+        // { status: "pending" }. The batch WAS broadcast — which is why the rows must survive.
+        execute: vi.fn().mockResolvedValue({
+          wait: vi.fn().mockRejectedValue(new Error("confirmation stream closed")),
+        }),
+      };
+      gw = new LiveExchangeGateway({
+        client,
+        settlementClient,
+        __settlementLaneBackstopMs: 1_000,
+      });
+      client.getMarket.mockResolvedValue({
+        tokens: [
+          { outcome: "Yes", token_id: "tok-yes" },
+          { outcome: "No", token_id: "tok-no" },
+        ],
+      });
+
+      const conditionId = "0x1111111111111111111111111111111111111111111111111111111111111111";
+      const err = await gw.mergePositions([{ conditionId, amount: 10 }]).then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+      expect(err).toBeInstanceOf(SettlementUnconfirmedError);
+      expect((err as SettlementUnconfirmedError).observedStatus).toBe("pending");
+      expect((err as SettlementUnconfirmedError).conditionIds).toEqual([conditionId]);
+      // It really was submitted — the rejection means "unconfirmed", never "not attempted".
+      expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+
+      // The throw is raised AFTER the lane released for the observed status, so the TTL hold that
+      // an unconfirmed submission earns is intact: the next sweep is made to wait out the backstop
+      // rather than racing a transaction that may still be in flight. Routing this through the
+      // lane's catch instead would have released it as a plain error, immediately.
+      const second = gw.mergePositions([{ conditionId, amount: 10 }]).catch((e: unknown) => e);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(second).resolves.toBeInstanceOf(SettlementUnconfirmedError);
+      expect(settlementClient.execute).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("mergePositions rejects a response with no wait(), without raising an infra alert", async () => {
+    // The second unconfirmable shape: a relayer response that exposes no wait() at all resolves as
+    // 'submitted'. Same verdict — the caller must not apply it locally.
+    const settlementClient = { execute: vi.fn().mockResolvedValue({ transactionID: "0xabc" }) };
+    const onInfraAlert = vi.fn();
+    gw = new LiveExchangeGateway({ client, settlementClient, onInfraAlert });
+    client.getMarket.mockResolvedValue({
+      tokens: [
+        { outcome: "Yes", token_id: "tok-yes" },
+        { outcome: "No", token_id: "tok-no" },
+      ],
+    });
+
+    const err = await gw
+      .mergePositions([
+        {
+          conditionId: "0x3333333333333333333333333333333333333333333333333333333333333333",
+          amount: 4,
+        },
+      ])
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(err).toBeInstanceOf(SettlementUnconfirmedError);
+    expect((err as SettlementUnconfirmedError).observedStatus).toBe("submitted");
+    // Thrown OUTSIDE the lane's try/catch on purpose: a transaction that is merely slow to confirm
+    // is not an infrastructure failure, and routing it through the submit-error handler would open
+    // a settlement alert (and its breaker) for a batch that is probably perfectly healthy.
+    expect(onInfraAlert).not.toHaveBeenCalled();
+  });
+
+  it("mergePositions refuses without a relayer client instead of broadcasting per condition", async () => {
+    // A per-condition `postMerge` fallback used to run here. It resolved on acceptance for
+    // broadcast, never on a receipt, so every outcome it could produce was unsupported: resolving
+    // handed the caller a terminal invisible divergence, and rejecting after a broadcast left the
+    // conditions permanently fenced with no way to confirm what landed. Refusing BEFORE the first
+    // broadcast is the only recoverable answer — nothing is on chain, so the caller may safely
+    // discard its write-ahead rows and nothing is fenced. The presence of a client merge API must
+    // NOT re-enable submission.
+    const mergeOne = vi.fn().mockResolvedValue(undefined);
+    Object.assign(client as Record<string, unknown>, { postMerge: mergeOne });
+
+    const err = await gw
+      .mergePositions([
+        { conditionId: "cond-a", amount: 10 },
+        { conditionId: "cond-b", amount: 20 },
+      ])
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(mergeOne).not.toHaveBeenCalled();
+    expect(err).toBeInstanceOf(SettlementNotSubmittedError);
+  });
+
+  it("redeemPositions reports the partially submitted fallback batch instead of rejecting", async () => {
+    // The sequential fallback can leave cond-a irrevocable when cond-b throws. Unlike merge — whose
+    // void return forces a throw — the redeem contract carries the submitted set, and the caller
+    // partitions on it: cond-a keeps a non-terminal 'submitted' row, cond-b is recorded as never
+    // submitted. Rejecting instead would erase that cond-a was already broadcast and let the retry
+    // path redeem it a second time.
+    const onInfraAlert = vi.fn();
+    const gwWithAlert = new LiveExchangeGateway({ client, onInfraAlert });
+    const redeemOne = vi
+      .fn()
+      .mockResolvedValueOnce({ transactionHash: "0xpartial" })
+      .mockRejectedValueOnce(new Error("429 Too Many Requests"));
+    Object.assign(client as Record<string, unknown>, { postRedeem: redeemOne });
+
+    await expect(gwWithAlert.redeemPositions(["cond-a", "cond-b"])).resolves.toMatchObject({
+      status: "submitted",
+      conditionIds: ["cond-a"],
+      txHash: "0xpartial",
+    });
+
+    expect(redeemOne).toHaveBeenCalledTimes(2);
+    // The per-call error classification is lost for this sweep, so the 429 must still reach the
+    // shared settlement breaker through the alert channel.
+    expect(onInfraAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "POLYGON_RPC_RATE_LIMITED" }),
+    );
+  });
+
+  it("redeemPositions rethrows the original error when the fallback batch broadcast nothing", async () => {
+    // Nothing is on chain, so the error is attributable to the whole call — the caller needs it
+    // intact for its 429 hard-pause, zero-balance and STATE_FAILED classification.
+    const redeemOne = vi.fn().mockRejectedValue(new Error("429 Too Many Requests"));
+    Object.assign(client as Record<string, unknown>, { postRedeem: redeemOne });
+
+    await expect(gw.redeemPositions(["cond-a", "cond-b"])).rejects.toThrow(/429/);
+    expect(redeemOne).toHaveBeenCalledTimes(1);
+  });
+
+  it("redeemPositions reports every condition when the whole fallback batch is broadcast", async () => {
+    const redeemOne = vi.fn().mockResolvedValue({ transactionHash: "0xfull" });
+    Object.assign(client as Record<string, unknown>, { postRedeem: redeemOne });
+
+    await expect(gw.redeemPositions(["cond-a", "cond-b"])).resolves.toMatchObject({
+      status: "submitted",
+      conditionIds: ["cond-a", "cond-b"],
+      txHash: "0xfull",
+    });
+    expect(redeemOne).toHaveBeenCalledTimes(2);
+  });
+
+  it("redeemPositions reports each fallback condition's OWN transaction, not the first one's", async () => {
+    // The sequential fallback broadcasts one transaction per condition, so a single flat txHash
+    // cannot describe the batch: it keeps whichever hash came back first. Without the per-condition
+    // map the caller stamps 0xaaa on cond-b too, and cond-b's redeem_log row points at a
+    // transaction that never touched it — an on-chain check of that row confirms the wrong redeem.
+    const redeemOne = vi
+      .fn()
+      .mockResolvedValueOnce({ transactionHash: "0xaaa", gasUsed: 111 })
+      .mockResolvedValueOnce({ transactionHash: "0xbbb", gasUsed: 222 });
+    Object.assign(client as Record<string, unknown>, { postRedeem: redeemOne });
+
+    const result = await gw.redeemPositions(["cond-a", "cond-b"]);
+
+    expect(result.txByCondition).toEqual({
+      "cond-a": { txHash: "0xaaa", gasUsed: 111 },
+      "cond-b": { txHash: "0xbbb", gasUsed: 222 },
+    });
+    // The flat fields stay as a batch summary for callers that predate the map.
+    expect(result.txHash).toBe("0xaaa");
+  });
+
+  it("redeemPositions omits txByCondition on the batch path, where one transaction really covers all", async () => {
+    // A client-side batch redeem settles every condition in ONE transaction, so the flat txHash is
+    // correct for all of them. Emitting a map here would be a lie of precision, and the caller reads
+    // the map's absence as exactly that signal.
+    const redeemBatch = vi.fn().mockResolvedValue({ transactionHash: "0xbatch" });
+    Object.assign(client as Record<string, unknown>, { redeemPositions: redeemBatch });
+
+    const result = await gw.redeemPositions(["cond-a", "cond-b"]);
+
+    expect(result.txByCondition).toBeUndefined();
+    expect(result.txHash).toBe("0xbatch");
   });
 
   it("mergePositions does not use batch fallback that drops merge amount", async () => {
@@ -1172,12 +1427,14 @@ describe("LiveExchangeGateway", () => {
       mergePositions: mergeBatch,
     });
 
+    // The amount-dropping batch method must stay untouched — and, having no usable merge API,
+    // the call must reject rather than report a merge that never happened.
     await expect(
       gw.mergePositions([
         { conditionId: "cond-1", amount: 10 },
         { conditionId: "cond-2", amount: 20 },
       ]),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/mergePositions unsupported/);
 
     expect(mergeBatch).not.toHaveBeenCalled();
     expect(emitWarning).toHaveBeenCalledWith(

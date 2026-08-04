@@ -22,13 +22,51 @@ export type SellPreSubmitGuardResult =
 // block before CLOB rather than producing external reject storms.
 export const DEFAULT_FALLBACK_MIN_ORDER_SIZE = 1;
 
+/**
+ * The `SignalConversionSkipped` reason meaning "this market's exchange minimum is
+ * unknown". Produced by `signal-to-order`, consumed by `algo-decision-module` to
+ * decide that this one inputs-unchanged skip must still be re-armed. Both sides
+ * already import this module, so it is the shared home that adds no new edge.
+ *
+ * NOT in `internal-order-reasons.ts`: those are order-level rejection reasons on a
+ * different event with a different (kebab-case) convention. A rename on either
+ * side of THIS literal silently disables the re-arm, which is why it is one const.
+ */
+export const ENTRY_UNKNOWN_MIN_SKIP_REASON = "entry_unknown_min";
+
+/**
+ * Retry backoff for a `/books` hydration that produced NO minimum.
+ *
+ * Deliberately not a telemetry-scale dedupe: while the minimum stays unknown the
+ * caller's entry (algo-decision) or exit (execution) is blocked, so a first
+ * request that failed or omitted the token would cost a full blackout even though
+ * the value became available immediately afterwards. 60 s matches the full-sweep
+ * cadence the suppression path documents as its recovery route, and stays three
+ * orders of magnitude below the ~31/s tick rate that caused the incident.
+ *
+ * Shared here rather than per-module because both callers throttle the SAME
+ * gateway call; two windows drifting apart would silently change how hard the
+ * `/books` endpoint is hit.
+ */
+export const MIN_ORDER_SIZE_HYDRATION_RETRY_MS = 60 * 1000;
+
+/**
+ * Single definition of "the exchange minimum is KNOWN". Mirrors the guard in
+ * `resolveSellableShareFloor` (@krabs/domain) so the entry path, the book-cache
+ * hydration path and the pricing path can never disagree about whether a market's
+ * `min_order_size` has been observed yet.
+ */
+export function isKnownMinOrderSize(
+  minOrderSize: number | null | undefined,
+): minOrderSize is number {
+  return typeof minOrderSize === "number" && Number.isFinite(minOrderSize) && minOrderSize > 0;
+}
+
 export function resolveEffectiveMinOrderSize(
   minOrderSize: number | null | undefined,
   fallback = DEFAULT_FALLBACK_MIN_ORDER_SIZE,
 ): number {
-  return typeof minOrderSize === "number" && Number.isFinite(minOrderSize) && minOrderSize > 0
-    ? minOrderSize
-    : fallback;
+  return isKnownMinOrderSize(minOrderSize) ? minOrderSize : fallback;
 }
 
 export function isExecutableOrderSize(

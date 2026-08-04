@@ -3,6 +3,15 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { openDatabase, type DbConnection } from "@krabs/db";
 import { RuntimeStatePublisher } from "../runtime-state-publisher.js";
+import { PeriodicTimers } from "../periodic-timers.js";
+import type { TimerRegistry } from "../periodic-timers.js";
+
+// A RAW registry on purpose: the real `PeriodicTimers` swallows a throwing tick, which would make
+// the "SQLITE_BUSY is swallowed" assertions below vacuous — they must keep proving that
+// `tryHeartbeat` itself swallows BUSY, not that the registry hides everything.
+const rawTimers: TimerRegistry = {
+  every: (_name, intervalMs, tick) => setInterval(tick, intervalMs),
+};
 
 const CONTROL_SQL = readFileSync(
   resolve(import.meta.dirname, "../../../../packages/db/src/schemas/control.sql"),
@@ -126,7 +135,7 @@ describe("RuntimeStatePublisher", () => {
       const brokenPublisher = new RuntimeStatePublisher(conn.db, config);
 
       // First heartbeat with missing table → SQLITE_ERROR → should propagate
-      expect(() => brokenPublisher.startHeartbeatLoop(60_000)).toThrow();
+      expect(() => brokenPublisher.startHeartbeatLoop(60_000, rawTimers)).toThrow();
       brokenPublisher.stopHeartbeatLoop();
     });
 
@@ -139,7 +148,7 @@ describe("RuntimeStatePublisher", () => {
     });
 
     it("startHeartbeatLoop with valid DB succeeds and writes heartbeat", () => {
-      publisher.startHeartbeatLoop(60_000);
+      publisher.startHeartbeatLoop(60_000, rawTimers);
 
       const row = conn.db
         .prepare("SELECT * FROM service_heartbeats WHERE service_name = 'runtime'")
@@ -159,7 +168,7 @@ describe("RuntimeStatePublisher", () => {
       });
 
       // Should NOT throw — SQLITE_BUSY is swallowed on first heartbeat
-      expect(() => publisher.startHeartbeatLoop(60_000)).not.toThrow();
+      expect(() => publisher.startHeartbeatLoop(60_000, rawTimers)).not.toThrow();
       publisher.stopHeartbeatLoop();
       spy.mockRestore();
     });
@@ -170,7 +179,7 @@ describe("RuntimeStatePublisher", () => {
       const busyError = new Error("database is locked") as Error & { code: string };
       busyError.code = "SQLITE_BUSY";
 
-      publisher.startHeartbeatLoop(1_000);
+      publisher.startHeartbeatLoop(1_000, rawTimers);
 
       // Verify first heartbeat wrote normally
       const row1 = conn.db
@@ -191,6 +200,28 @@ describe("RuntimeStatePublisher", () => {
       vi.advanceTimersByTime(1_000);
 
       publisher.stopHeartbeatLoop();
+      vi.useRealTimers();
+    });
+
+    it("registers the tick so teardown's stopAll() cancels it before the supervisor wait", () => {
+      // `tryHeartbeat` rethrows everything that is not SQLITE_BUSY — SQLITE_FULL under disk
+      // pressure, or a closed connection during teardown. A bare interval has no handler above it,
+      // so that escape ends Node; and `stopHeartbeatLoop()` only runs AFTER the 40-second
+      // supervisor wait, across which a 15-second heartbeat fires about nine times. Being in the
+      // registry is what moves the cancellation to the top of the handler.
+      vi.useFakeTimers();
+      const log = { warn: vi.fn(), error: vi.fn(), info: vi.fn(), child: () => log } as any;
+      const timers = new PeriodicTimers(log);
+      const spy = vi.spyOn(publisher, "publishHeartbeat");
+
+      publisher.startHeartbeatLoop(1_000, timers);
+      expect(spy).toHaveBeenCalledTimes(1); // the direct first heartbeat
+
+      timers.stopAll();
+      vi.advanceTimersByTime(5_000);
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      spy.mockRestore();
       vi.useRealTimers();
     });
   });

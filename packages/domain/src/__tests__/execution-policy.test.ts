@@ -159,6 +159,47 @@ describe("execution profile signal feed policy", () => {
       strongActivityRecoveryFloor: 0.05,
     });
   });
+
+  // `retentionDays` is the ONLY source of truth for the signal_feed_buckets DELETE horizon
+  // (ledger-retention-module.ts), and that consumer refuses any horizon under one hour — it skips
+  // the sweep rather than delete on a mis-scaled value. A policy that accepts what the sweep will
+  // refuse forever is a table that grows unbounded while everything reports healthy: this is how
+  // signal_feed_buckets reached 35.1M rows / 15.50 GB. The parser must reject it at the door.
+  it.each([
+    ["under the consumer's one-hour floor", 1 / 1440],
+    ["past the ten-year ceiling", 3_651],
+  ])("rejects a retentionDays %s instead of passing it to the sweep", (_label, retentionDays) => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({ executionProfile: { signalFeed: { retentionDays } } }),
+    );
+
+    expect(parsed.policy.executionProfile.signalFeed.retentionDays).toBe(
+      DEFAULT_EXECUTION_PROFILE_POLICY.signalFeed.retentionDays,
+    );
+    expect(
+      parsed.issues.some((i) => i.startsWith("executionProfile.signalFeed.retentionDays=")),
+    ).toBe(true);
+  });
+
+  // A sub-second maintenance cadence is not a tuning choice — it is a mis-scaled value that fires
+  // the feed's own timers a thousand times a second, and one of them writes three runtime_metrics
+  // rows per tick: 3 000 rows/s into the very ledger this retention work bounds.
+  it.each<[keyof typeof DEFAULT_EXECUTION_PROFILE_POLICY.signalFeed, number]>([
+    ["flushHotToWarmIntervalMs", 999],
+    ["flushWarmToColdIntervalMs", 0],
+    ["maintenanceIntervalMs", 24 * 60 * 60_000 + 1],
+  ])("rejects an out-of-range %s", (field, value) => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({ executionProfile: { signalFeed: { [field]: value } } }),
+    );
+
+    expect(parsed.policy.executionProfile.signalFeed[field]).toBe(
+      DEFAULT_EXECUTION_PROFILE_POLICY.signalFeed[field],
+    );
+    expect(parsed.issues.some((i) => i.startsWith(`executionProfile.signalFeed.${field}=`))).toBe(
+      true,
+    );
+  });
 });
 
 describe("execution profile sell ladder policy", () => {

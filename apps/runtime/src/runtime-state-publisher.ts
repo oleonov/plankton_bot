@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import type { TimerRegistry } from "./periodic-timers.js";
 
 export interface RuntimeStatePublisherConfig {
   profile: string;
@@ -86,15 +87,23 @@ export class RuntimeStatePublisher {
       );
   }
 
-  startHeartbeatLoop(intervalMs: number): void {
+  /**
+   * `timers` rather than a bare `setInterval`: both halves of this tick touch the control DB and
+   * rethrow everything that is not `SQLITE_BUSY` — `SQLITE_FULL` under disk pressure, or a closed
+   * connection during teardown. With no handler above the interval that escape terminates Node, and
+   * at 15 s it fires ~9 times across the supervisor wait, so it would land squarely in the window
+   * where the final flush, the shutdown publish and `process.exit(0)` have not run yet. Registering
+   * it means `stopAll()` cancels it BEFORE that wait instead of `stopHeartbeatLoop()` after it.
+   */
+  startHeartbeatLoop(intervalMs: number, timers: TimerRegistry): void {
     // First heartbeat is best-effort — SQLITE_BUSY at startup is not fatal
     this.tryHeartbeat("ready_paused");
-    this.heartbeatTimer = setInterval(() => {
+    this.heartbeatTimer = timers.every("runtime_heartbeat", intervalMs, () => {
       const state = this.tryQuery<{ runtime_status: string }>(
         "SELECT runtime_status FROM runtime_control_state WHERE id = 1",
       );
       this.tryHeartbeat(state?.runtime_status ?? "unknown");
-    }, intervalMs);
+    });
   }
 
   /** Attempt a heartbeat write, swallowing only SQLITE_BUSY. */

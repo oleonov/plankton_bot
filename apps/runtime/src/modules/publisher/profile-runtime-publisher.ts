@@ -27,6 +27,11 @@ export class ProfileRuntimePublisher implements RuntimeModule {
 
   async start(): Promise<void> {
     await this.publish();
+    // `publish()` awaits the exchange gateway, so two starts can be inside this method at once: a
+    // start a stop gave up waiting for is still live when the restart behind it runs. Assigning over
+    // a live handle would leak that interval with nothing left holding it — `stop()` can only clear
+    // the last one written.
+    if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => {
       this.publish().catch(() => {});
     }, this.deps.intervalMs);

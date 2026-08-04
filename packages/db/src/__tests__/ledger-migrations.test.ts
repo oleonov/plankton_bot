@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { applySafeAddColumnStatements } from "../migrations/runner.js";
+import { applySafeAddColumnStatements, runMigrations } from "../migrations/runner.js";
 
 let tmpDir: string;
 let dbPath: string;
@@ -237,6 +237,56 @@ describe("migration 071 — signal feed buckets", () => {
     );
 
     db.exec(readMigration("071_signal_feed_buckets.sql"));
+  });
+});
+
+describe("migration 090 — signal_feed_buckets age index", () => {
+  /**
+   * The retention sweep's own tests hand-create `signal_feed_buckets`, so they stay green whether
+   * or not this migration exists — and on production the missing index is not a correctness bug
+   * but a 2.3–3.9 s synchronous stall per sweep on a 35.1M-row table. So run the REAL migration
+   * set end-to-end and check the plan, not just the presence of a file.
+   */
+  it("makes the age-only retention sweep a range seek instead of a full scan + sort", () => {
+    const migrated = new Database(":memory:");
+    try {
+      runMigrations(migrated);
+
+      const indexed = migrated
+        .prepare("PRAGMA index_info(idx_signal_feed_buckets_start_ms)")
+        .all() as Array<{ name: string }>;
+      expect(indexed.map((column) => column.name)).toEqual(["bucket_start_ms"]);
+
+      // The shape `LedgerRetentionModule.deleteOlderThanTask` builds for this table: age-only
+      // predicate, deliberately NOT pinned to a bucket_granularity_ms (a fixed granularity is
+      // what made signal-feed-manager's own prune match zero rows for 44 days), so neither
+      // existing index — both lead with another column — can serve it.
+      const plan = migrated
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           DELETE FROM signal_feed_buckets
+           WHERE rowid IN (
+             SELECT rowid FROM signal_feed_buckets
+             WHERE bucket_start_ms < ?
+             ORDER BY bucket_start_ms ASC, rowid ASC
+             LIMIT ?
+           )`,
+        )
+        .all(0, 1) as Array<{ detail: string }>;
+      const details = plan.map((step) => step.detail);
+
+      expect(details).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("SEARCH signal_feed_buckets"),
+          expect.stringContaining("idx_signal_feed_buckets_start_ms"),
+        ]),
+      );
+      // Without the index the planner falls back to a full covering scan of
+      // idx_signal_feed_buckets_granularity_time plus a temp sort — the 3898 ms measured case.
+      expect(details.join(" | ")).not.toContain("TEMP B-TREE");
+    } finally {
+      migrated.close();
+    }
   });
 });
 

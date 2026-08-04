@@ -122,9 +122,13 @@ describe("redeem sweep wallet snapshot integration", () => {
     ]);
     const savedPositions: Position[] = [];
     const gateway = {
+      // `conditionIds` must echo the full input here: it is the set that actually went into the
+      // transaction, and the module now applies the batch status only to that set. This test is
+      // about wallet-snapshot normalisation, not about a partially built batch — the strict-subset
+      // case has its own test in redeem-sweep-module.test.ts.
       redeemPositions: vi.fn().mockResolvedValue({
         status: "confirmed",
-        conditionIds: ["cond-r1"],
+        conditionIds: ["cond-r1", "cond-r2", "cond-zero"],
         txHash: "0xredeem",
         gasUsed: 12_345,
       }),

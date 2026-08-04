@@ -13,6 +13,16 @@ const silentLog = {
   child: () => silentLog,
 } as any;
 
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitUntil(condition: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("condition never became true");
+    await delay(10);
+  }
+}
+
 function makeSignal(signalId = "sig-1"): DecisionSignalLog {
   return {
     signalId,
@@ -149,4 +159,86 @@ describe("DecisionPersistenceBuffer", () => {
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("stop() abandons a worker wedged on the ledger write lock instead of terminating it", async () => {
+    // The unit tests above only ever exercise a worker that answers, so the acknowledgment bound in
+    // `stop()` could be deleted and they would stay green. The only way to pin it is to wedge the
+    // worker for real: a second connection holds the write lock, so the worker sits INSIDE
+    // better-sqlite3 — where no message and no timer can reach it — and `stop()` has to leave
+    // without it. It must leave by UNREF, not `terminate()`: terminating an isolate that is about
+    // to allocate a SQLITE_BUSY error aborts the whole process (v8::ToLocalChecked Empty
+    // MaybeLocal), which is exactly what this shutdown path exists to avoid.
+    const tmpDir = mkdtempSync(join(tmpdir(), "krabs-decision-persistence-stop-"));
+    const dbPath = join(tmpDir, "ledger.db");
+    bootstrapLedgerDb(dbPath).close();
+
+    const warnings: string[] = [];
+    const capturingLog = {
+      warn: (_details: unknown, message?: string) => {
+        if (typeof message === "string") warnings.push(message);
+      },
+      error: vi.fn(),
+      child: () => capturingLog,
+    } as any;
+
+    const blocker = bootstrapLedgerDb(dbPath);
+    let blockerOpen = true;
+    const buffer = new DecisionPersistenceBuffer(
+      { log: capturingLog },
+      { mode: "worker", workerDbPath: dbPath, batchSize: 1 },
+    );
+
+    try {
+      // One write that CAN commit, so the wedge below is the worker blocking — not the worker
+      // still booting, compiling its statements, or never having received anything at all.
+      buffer.enqueueRiskEvent({ eventType: "warmup", payload: { tokenId: "tok-warmup" } });
+      await waitUntil(() => buffer.getStats().workerPersistedWrites === 1);
+
+      blocker.db.exec("BEGIN IMMEDIATE");
+      for (let i = 0; i < 4; i++) {
+        buffer.enqueueRiskEvent({ eventType: `blocked-${i}`, payload: { tokenId: "tok-blocked" } });
+      }
+      await waitUntil(() => buffer.getStats().queued === 0);
+      await delay(250);
+
+      const wedged = buffer.getStats();
+      expect(wedged.workerPersistedWrites + wedged.workerFailedWrites).toBe(1);
+
+      await buffer.stop();
+
+      // `stop()` left WITHOUT the worker — this warning only exists on the path where the
+      // acknowledgment ceiling expired, so it is also the proof that stop did not simply wait the
+      // wedge out. Deliberately no wall-clock bound around `stop()`: it would assert nothing this
+      // warning does not already, and an absolute ceiling a couple of seconds above a 2 s timer is
+      // a coin flip on a loaded CI rather than a statement about the code.
+      expect(warnings).toContain(
+        "decision persistence worker did not acknowledge shutdown — abandoning the wedged thread",
+      );
+      // The wedged worker is never terminated, so the terminate ceiling must not have run at all.
+      expect(warnings).not.toContain(
+        "decision persistence worker did not exit — abandoning the thread to the process exit",
+      );
+
+      // Release the lock and let the ABANDONED thread prove it is still alive: it drains the whole
+      // batch it was holding, all four blocked writes. This is what separates `unref()` from
+      // `terminate()` — a terminated isolate dies the moment its native call returns, so the writes
+      // behind the wedged one would never land — and it reads persisted state, not elapsed time.
+      blocker.db.exec("ROLLBACK");
+      blocker.close();
+      blockerOpen = false;
+      await waitUntil(() => {
+        const stats = buffer.getStats();
+        return stats.workerPersistedWrites + stats.workerFailedWrites === 5;
+      });
+      expect(buffer.getStats().workerPersistedWrites).toBe(5);
+    } finally {
+      if (blockerOpen) {
+        blocker.db.exec("ROLLBACK");
+        blocker.close();
+        // The abandoned thread dies once its native call returns, which the rollback above allows.
+        await delay(500);
+      }
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

@@ -12,6 +12,84 @@ services:
     volumes:
       - krabs-data:/app/apps/runtime/data
     restart: unless-stopped
+    # Docker's default is 10s, and the runtime's own shutdown budget does not fit in it — SIGKILL
+    # would land mid-teardown, with the modules after the slow one never stopped at all. The budget
+    # is NOT a sum of the per-module ceilings: there are two dozen modules, each stop can block, and
+    # "every wait is bounded" says nothing about their total. So the whole teardown runs under ONE
+    # ceiling in index.ts's signal handler — plus one term that ceiling provably cannot cover:
+    #   a ledger write already inside better-sqlite3 when SIGTERM lands
+    #                                                        RUNTIME_BUSY_TIMEOUT_MS     30s
+    #   supervisor.stop() in its entirety, PLUS the execution
+    #   tail drain that spends whatever it left unspent      RUNTIME_STOP_WAIT_MS        40s
+    #   the one write at that ceiling that JS provably
+    #   cannot preempt                                       RUNTIME_BUSY_TIMEOUT_MS     30s
+    #   final metrics flush + shutdown state publish         2 x SHUTDOWN_BUSY_TIMEOUT_MS 4s
+    #   database closes                                      (not performed — see below)  0s
+    #                                                                                 = 104s
+    # The FIRST term is not removable from JavaScript. better-sqlite3 is synchronous, so while a
+    # write is blocked inside the native call Node cannot enter the signal handler at all: the
+    # handler's own ceiling only starts once that write returns, and no JS timer can preempt it.
+    # 30s is what bounds it only because busy_timeout bounds LOCK contention. A write that is slow
+    # for the other reason — SQLite's auto-checkpoint firing on it and copying the WAL backlog
+    # synchronously — is bounded by I/O volume, which busy_timeout does not touch and the handler
+    # cannot preempt either, since disableAutoCheckpoint runs INSIDE the handler this write precedes.
+    # So that copy spends margin like the chain tail below, and on the multi-GB WAL a starved
+    # checkpoint can leave it is a SIGKILL — the same accepted outcome, for the same reason.
+    # The THIRD term is the same fact applied to the stop ceiling: a write that begins just under it
+    # holds the thread for its full busy_timeout, and RUNTIME_STOP_WAIT_MS's own timer cannot fire
+    # until that call returns.
+    # It used to read `2 x`, the second unit standing for the write that CHAINS into the first, on the
+    # claim that the chains reachable from execution's drain are exactly two links long. That
+    # derivation is gone, because it was false and because the shape of it could not be kept true.
+    # False: `bus.publish("OrderPlaced")` dispatches handlers SYNCHRONOUSLY, and
+    # ProfileLadderModule.handleOrderPlaced alone does two ledger writes in one dispatch — the
+    # profile_ladder_replacement_completed risk event, then repository.upsertLadder() — on top of the
+    # orderRepo.save() that preceded the publish. Six subscribers hang off that one event.
+    # Un-keepable: a number that has to be re-derived every time someone adds a synchronous write to
+    # any teardown-reachable handler is not a bound, it is a comment that goes stale in silence.
+    # So the term is now a policy rather than a count. Budgeted: the one write JavaScript provably
+    # cannot preempt. Not budgeted: whatever chains after it — past that ceiling the process has
+    # already declared teardown failed, every remaining write is best-effort by the ceiling's own
+    # definition, and the margin below is what those links spend. A pathological chain is SIGKILLed,
+    # which is the accepted outcome: once the ledger is wedged that hard, every other route ends the
+    # same way. Adding another write to a teardown-reachable handler therefore spends margin instead
+    # of invalidating this number.
+    # Trading-state writes still keep the full runtime timeout while teardown TELEMETRY is bounded to
+    # 2s (RuntimeMetricWriter.enterShutdownMode): an order the exchange has already accepted must
+    # reach the ledger, or it lives on the exchange with no local row and startup adoption fail-closes
+    # on it at the next boot. Losing a metric costs one row; losing that write costs the position.
+    # The whole budget is cooperative, not enforced — no ceiling in this process can interrupt a
+    # native call, so SIGKILL at the grace period is the only hard bound there is.
+    # Nothing is budgeted for closing the databases because the handler does not close them: in WAL
+    # mode close() checkpoints on taking the last-connection exclusive lock — an unbounded copy of
+    # the whole WAL — and buys no durability ahead of process.exit, since the frames are already in
+    # the WAL file and the next open recovers them.
+    # The per-module ceilings still govern the ORDINARY path and are what keeps it far under 40s:
+    #   supervisor.stop() waiting out an in-progress start   LIFECYCLE_STOP_WAIT_MS       5s
+    #   execution module: its lifecycle wait + queue drain   + EXECUTION_SHUTDOWN_TIMEOUT_MS 15s
+    #     (what that drain ABANDONS is awaited again by the tail below — inside the 40s, not after)
+    #   decision persistence worker: ack + terminate         WORKER_SHUTDOWN_ACK_WAIT_MS
+    #                                                        + WORKER_TERMINATE_WAIT_MS    4s
+    #   retention module: its lifecycle wait + pass wait     + STOP_PASS_WAIT_MS          10s
+    #   inventory manager: draining a sweep past its merge   SWEEP_DRAIN_WAIT_MS           5s
+    #     (only when ENABLE_INVENTORY_AUTO_MERGE=true — the module is not built otherwise)
+    #   two event-bus drains around STOPPED                  2 x shutdownTimeoutMs        20s
+    # Raising any of those constants means redoing this — they are cited by name so it can be.
+    # The execution tail drain (ExecutionModule.drainAbandonedTail, called once supervisor.stop()
+    # returns) adds NO term. It is handed RUNTIME_STOP_WAIT_MS minus what the module teardown already
+    # spent, so a slow teardown shortens the tail rather than extending the sum — deliberately one
+    # budget, because the grace period measures the total and nothing else here is enforceable.
+    # It exists because EXECUTION_SHUTDOWN_TIMEOUT_MS is a SCHEDULING bound, kept short so one module
+    # cannot starve the two dozen queued behind it — while what it abandons can be a POST the exchange
+    # has already accepted, which must reach the ledger or startup adoption fail-closes on it.
+    # It engages only when that 10s drain already timed out, which is not the ordinary path: with
+    # nothing in flight it returns at once and this budget is untouched. Where it does engage, the
+    # last ledger write can now begin anywhere up to the 40s ceiling instead of the 10s one — which is
+    # exactly the case the THIRD term above already budgets 30s for, so the arithmetic is unchanged.
+    # 104s of budgeted terms + 46s of margin. The grace period is unchanged at 150s even though the
+    # arithmetic shrank: the 46s is not slack, it is the room the un-budgeted chain tail runs in, and
+    # giving it back would only convert a logged overrun into a SIGKILL.
+    stop_grace_period: 150s
     env_file: .env.production
     mem_limit: 4g
     logging: *json-logging

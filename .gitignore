@@ -75,3 +75,6 @@ config/*.bak
 
 # Local coverage baseline snapshot (regenerate locally; never committed)
 baseline-coverage.txt
+
+# Pinned SQLite CLI builds for the census tests (§7) — binary artifacts, never committed
+.cache/

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { openDatabase, type DbConnection } from "@krabs/db";
@@ -228,6 +228,35 @@ describe("ProfileRuntimePublisher", () => {
     expect(summary.open_orders).toBe(0);
     expect(summary.open_positions).toBe(0);
     expect(summary.total_exposure_usdc).toBe(0);
+  });
+
+  it("a second start() does not leak the first interval past stop()", async () => {
+    // `start()` awaits `publish()`, so two starts can be inside it at once: a start the supervisor's
+    // stop gave up waiting for is still live when the restart behind it runs. Overwriting a live
+    // handle leaves an interval nothing holds — `stop()` clears only the last one written, and the
+    // orphan keeps writing profile_summaries after the runtime reports STOPPED.
+    vi.useFakeTimers();
+    const restarted = new ProfileRuntimePublisher({
+      controlDb: controlConn.db,
+      ledgerDb: ledgerConn.db,
+      profile: PROFILE,
+      getPaused: () => false,
+      log,
+      intervalMs: 1_000,
+    });
+    const publishSpy = vi.spyOn(restarted, "publish");
+    try {
+      await restarted.start();
+      await restarted.start();
+      await restarted.stop();
+
+      const publishesAtStop = publishSpy.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(publishSpy.mock.calls.length).toBe(publishesAtStop);
+    } finally {
+      await restarted.stop();
+      vi.useRealTimers();
+    }
   });
 
   // ─── Portfolio snapshot tests ──────────────────────────────────────────

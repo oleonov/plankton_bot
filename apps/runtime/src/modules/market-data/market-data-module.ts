@@ -42,6 +42,7 @@ import {
 } from "@krabs/domain";
 import { performance } from "node:perf_hooks";
 import type { Logger } from "../../logger.js";
+import { isKnownMinOrderSize } from "../../min-order-size.js";
 import {
   classifyHttpError,
   isRateLimitError,
@@ -67,6 +68,23 @@ const STREAM_UNKNOWN_EXECUTION_CRITICAL_REFRESH_MIN_STALE_MS = 15_000;
 const STREAM_UNKNOWN_ENTRY_CANDIDATE_REFRESH_MIN_STALE_MS = 120_000;
 const STREAM_UNKNOWN_LEGACY_REFRESH_MIN_STALE_MS = 30_000;
 const STREAM_UPDATE_COALESCE_MS = 100;
+/**
+ * Floor for the parked-hydration cap; the real cap follows `maxTrackedTokens`.
+ *
+ * Parked hydrations are retried every poll, so the cap only stops tokens that
+ * never return — but every parked value belongs to a token we still route to,
+ * and evicting one loses a minimum nothing re-observes until the hydration
+ * retry window elapses. A fixed 512 was below the 2 000–5 000 tracked tier the
+ * runtime advertises, so one pre-pause `/books` batch could overflow it. The
+ * floor covers the legacy flat path, which sets no tracked-token cap.
+ */
+const MIN_PENDING_MIN_ORDER_SIZE_HYDRATIONS = 512;
+
+/** A minimum awaiting delivery, plus when the hydration branch last repolled it. */
+interface ParkedMinOrderSize {
+  minOrderSize: number;
+  repolledAt: number;
+}
 // Step 3 (audit doc §F2): soft-ranking feature inputs (`liquidity`,
 // `volume24hr`) only refresh via REST/Gamma — CLOB stream updates do NOT
 // carry them. The book-refresh budget can return Infinity for healthy
@@ -88,6 +106,12 @@ const GAMMA_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 const PUBLIC_TRADE_COUNT_ENRICH_CONCURRENCY = 5;
 const DEFAULT_TIERED_PRICING_CACHE_TTL_MS = 60_000;
 const BOOK_SIGNAL_FULL_BOOK_CAP_WARN_THROTTLE_MS = 15 * 60_000;
+/**
+ * How many departed tokens keep their fallback-poll wait for a possible rejoin. Comfortably above
+ * any realistic tracked set, so a token that leaves and returns within the same trading day always
+ * resumes its wait, while a process that churns through tokens for weeks stays bounded.
+ */
+const RETAINED_FALLBACK_WAIT_LIMIT = 5_000;
 
 export interface MarketDataTrackedRoleCounts {
   executionCritical: number;
@@ -120,6 +144,13 @@ export interface MarketDataFallbackReasonCounts {
    * even when the book itself is still considered fresh by the stream.
    */
   featureFreshness: number;
+  /**
+   * Tokens repolled because a hydrated `minOrderSize` is still parked. A parked
+   * value only reaches downstream on a publish, and a publish needs fresh
+   * pricing; a healthy WS-tier token with a known `bookSource` has an INFINITE
+   * book budget, so nothing else would poll it.
+   */
+  minOrderSizeHydration: number;
 }
 
 export interface MarketDataTrackedDiffCounts {
@@ -349,6 +380,30 @@ export class MarketDataModule implements RuntimeModule {
   private readonly lastPricingUpdateAtByToken = new Map<string, number>();
   private readonly lastPricingAttemptAtByToken = new Map<string, number>();
   private readonly pendingGapTokenIds = new Map<string, number>();
+  /**
+   * Hydrated minimums that could not be delivered yet — see
+   * `noteMinOrderSizeObserved`. `repolledAt` is carried per entry rather than in
+   * a second map so it shares this one's lifecycle and cannot outlive it.
+   */
+  private readonly pendingMinOrderSizeByToken = new Map<string, ParkedMinOrderSize>();
+  /**
+   * When each token was last actually polled by the fallback batch — the
+   * least-recently-polled ordering that makes the over-limit set starvation-free
+   * (see `selectFallbackPollCandidates`). Pruned with `trackedMarketsByToken`.
+   */
+  private readonly lastFallbackPollAtByToken = new Map<string, number>();
+  /** Admission time per tracked token — the start of a never-polled token's wait. Pruned with it. */
+  private readonly trackedTokenAdmittedAtByToken = new Map<string, number>();
+  /**
+   * How much wait a token had ACCUMULATED (a duration, not a stamp) when it left the tracked
+   * set, so re-admission RESUMES it instead of restarting it. A fresh admission stamp is newer
+   * than every resident's, so it never trips the starvation tier: a peer that keeps dropping out
+   * and rejoining (the tracked set churns on every scan) would be passed over forever, which is
+   * the very starvation the tier exists to prevent. Storing the duration is what keeps time
+   * spent OUTSIDE the set from counting as wait. Insertion-ordered and capped, so a process that
+   * churns through tokens for weeks cannot grow it without bound.
+   */
+  private readonly retainedFallbackWaitMsByToken = new Map<string, number>();
   private readonly log: Logger;
   private forceFullPoll = false;
   private lastTrackedTokenCount = 0;
@@ -378,6 +433,12 @@ export class MarketDataModule implements RuntimeModule {
   private readonly gapLogBurstReasons = new Set<string>();
   /** Discovery-tier markets (beyond WS cap) — polled in rolling batches. */
   private discoveryTier: Market[] = [];
+  /**
+   * `discoveryTier` keyed for O(1) membership. Only `canHydrateLater` needs it,
+   * and that runs once per parked minimum per poll — scanning the array there
+   * would be O(parked x discovery) on every cycle.
+   */
+  private discoveryTokenIds = new Set<string>();
   private discoveryCursor = 0;
   /**
    * Token ids from the last discovery poll batch. Discovery snapshots flow
@@ -477,6 +538,203 @@ export class MarketDataModule implements RuntimeModule {
     }, discoveryIntervalMs);
   }
 
+  /** Single writer for both discovery views, so the id set cannot drift. */
+  private setDiscoveryTier(markets: Market[]): void {
+    this.discoveryTier = markets;
+    this.discoveryTokenIds = new Set(markets.map((market) => String(market.tokenId)));
+  }
+
+  /**
+   * Seed `minOrderSize` from a REST `/books` payload — the only source that
+   * carries it. Gamma pricing and the WSS `book` event both omit the field, so a
+   * WSS-tracked market would otherwise keep `minOrderSize: null` for its whole
+   * lifetime and every sellable-sizing entry decision on it would be skipped.
+   * Once seeded the value is sticky: `syncTrackedMarket`, `applyPricingSnapshot`
+   * and `applyStreamUpdate` all fall back to the cached market's value.
+   */
+  noteMinOrderSizeObserved(tokenId: string, minOrderSize: number): void {
+    if (!isKnownMinOrderSize(minOrderSize)) return;
+    const tokenKey = String(tokenId);
+    if (this.deliverMinOrderSizeHydration(tokenKey, minOrderSize)) {
+      // An older parked value for the same token is now stale. Leaving it would
+      // let the next flush republish it OVER this newer minimum — and since the
+      // parked one can be smaller, that sizes an entry below the exchange floor.
+      this.pendingMinOrderSizeByToken.delete(tokenKey);
+      return;
+    }
+    // Undeliverable right now (runtime paused, or the token is not tracked yet).
+    // Dropping the value would be permanent: the book cache dedupes the refresh
+    // request, so nothing re-observes this minimum and the suppression never
+    // clears. Park it for the next poll instead.
+    this.parkMinOrderSizeHydration(tokenKey, minOrderSize);
+  }
+
+  /**
+   * Park an undeliverable minimum for the next poll.
+   *
+   * Eviction prefers tokens we have no route to: evicting a token we still track
+   * costs a hydration-retry window (`MIN_ORDER_SIZE_HYDRATION_RETRY_MS`) during
+   * which nothing re-observes the minimum and the entry stays suppressed. When
+   * every parked token is still routable the oldest one goes anyway — an
+   * unbounded map is worse than one re-requested refresh, and without that
+   * fallback the cap would not bound anything at all.
+   */
+  private get maxPendingMinOrderSizeHydrations(): number {
+    return Math.max(MIN_PENDING_MIN_ORDER_SIZE_HYDRATIONS, this.deps.maxTrackedTokens ?? 0);
+  }
+
+  private parkMinOrderSizeHydration(tokenKey: string, minOrderSize: number): void {
+    const pending = this.pendingMinOrderSizeByToken;
+    const existing = pending.get(tokenKey);
+    if (existing == null && pending.size >= this.maxPendingMinOrderSizeHydrations) {
+      const routeless = [...pending.keys()].find((key) => !this.canHydrateLater(key));
+      const evictable = routeless ?? pending.keys().next().value;
+      if (evictable !== undefined) pending.delete(evictable);
+    }
+    // A re-observed value must not reset `repolledAt`: the token would then
+    // become eligible for another repoll immediately, which is exactly the
+    // hammering loop the budget exists to stop.
+    pending.set(tokenKey, { minOrderSize, repolledAt: existing?.repolledAt ?? 0 });
+  }
+
+  private stampSelectedMinOrderSizeRepolls(
+    selected: readonly FallbackPollCandidate[],
+    now: number,
+  ): void {
+    for (const candidate of selected) {
+      if (candidate.reason !== "minOrderSizeHydration") continue;
+      const parked = this.pendingMinOrderSizeByToken.get(candidate.tokenId);
+      if (parked != null) parked.repolledAt = now;
+    }
+  }
+
+  /**
+   * Whether a hydrated minimum for this token can reach downstream modules.
+   *
+   * Deliberately BOTH preconditions `deliverMinOrderSizeHydration` enforces — a
+   * publishable `marketCache` entry AND fresh pricing — and NOT the broader
+   * `canHydrateLater`. Discovery-tier markets are kept out of that cache on
+   * purpose (see `pollDiscoveryBatch`), and a token can also sit in
+   * `trackedMarketsByToken` with no cache entry: promoted into the WS tier, then
+   * omitted from the Gamma batch with no initial WS book. Answering "yes" there
+   * makes the entry pre-filter suppress a signal only a delivery that cannot
+   * happen would unblock. Answering "no" is fail-safe — the signal is emitted and
+   * signal-to-order fetches the minimum from the REST book itself.
+   *
+   * The freshness half is not redundant with the cache check: the book-refresh
+   * budget returns Infinity for a healthy WS-tier token (see
+   * `SOFT_RANKING_FEATURE_REFRESH_MAX_AGE_MS` above), so a quiet token is never
+   * REST-repolled and `lastPricingUpdateAtByToken` only advances on a WS tick.
+   * After a long pause such a token keeps a cache entry with stale pricing
+   * indefinitely — advertising it as hydratable would suppress the entry while
+   * the delivery it is waiting on can never fire.
+   */
+  canHydrateMinOrderSize(tokenId: string): boolean {
+    const tokenKey = String(tokenId);
+    return this.marketCache.has(tokenKey) && this.hasPublishableFreshPricing(tokenKey, Date.now());
+  }
+
+  /**
+   * Whether a parked minimum still has a delivery route on a LATER poll.
+   *
+   * Broader than `canHydrateMinOrderSize` on purpose: this one drives eviction,
+   * where the question is "will this token ever become deliverable", and a
+   * tracked-but-uncached token normally gains its cache entry on the next poll.
+   * The advertiser above answers about right now, so it must be stricter.
+   *
+   * Discovery-tier membership counts as a route. A discovery market is held out
+   * of BOTH caches on purpose (see `pollDiscoveryBatch`), so without this clause
+   * a minimum observed while placing a discovery-tier entry looks routeless and
+   * `flushPendingMinOrderSizeHydration` discards it on the very next poll —
+   * before the fill can promote the token into the execution-critical tier. The
+   * book cache dedupes the refresh, so nothing re-observes the value, and the
+   * promoted snapshot carries a null minimum: live-lite then blocks the EXIT as
+   * unknown-minimum. Such a token has not "left" the tracked set the way the
+   * discard rule assumes — it has not joined it yet.
+   */
+  private canHydrateLater(tokenKey: string): boolean {
+    return (
+      this.marketCache.has(tokenKey) ||
+      this.trackedMarketsByToken.has(tokenKey) ||
+      this.discoveryTokenIds.has(tokenKey)
+    );
+  }
+
+  /**
+   * Publish a hydrated minimum to downstream modules.
+   *
+   * Downstream modules keep their OWN market caches, fed only by
+   * `MarketSnapshotReceived`, so seeding ours is invisible to the entry decision
+   * until this market is next published — hours on a quiet market.
+   *
+   * "Already downstream" is read off `lastPublishedMarketByToken`, never off
+   * `marketCache`: several writers (`flushPendingStreamUpdates` and
+   * `retainCachedMarketState`) update the cache while paused and publish
+   * nothing, so a matching cached value proves only that we know the minimum,
+   * not that anyone else does.
+   *
+   * @returns whether the value is now downstream (or already was).
+   */
+  private deliverMinOrderSizeHydration(tokenKey: string, minOrderSize: number): boolean {
+    if (this.lastPublishedMarketByToken.get(tokenKey)?.minOrderSize === minOrderSize) return true;
+    const current = this.marketCache.get(tokenKey);
+    if (!current) return false;
+    const hydrated = current.minOrderSize === minOrderSize ? current : { ...current, minOrderSize };
+    // Seed the cache even when the publish below is refused. `syncTrackedMarket`
+    // carries `minOrderSize` forward, so this poll's own pricing publish then
+    // delivers the minimum together with FRESH prices — the preferred route. The
+    // value stays parked until something actually reaches downstream.
+    this.marketCache.set(tokenKey, hydrated);
+    if (this.deps.runtimeControl?.isPaused()) return false;
+    if (!this.hasPublishableFreshPricing(tokenKey, Date.now())) return false;
+    // The book-cache callback is synchronous, hence fire-and-forget.
+    void this.publishMarketSnapshotDelta([hydrated], Date.now()).catch((err: unknown) => {
+      this.log.error({ err, tokenId: tokenKey }, "min order size hydration publish failed");
+    });
+    return true;
+  }
+
+  /**
+   * Whether this token's cached prices may be republished on their own.
+   *
+   * Delivering a hydrated minimum republishes the CACHED market, so its prices
+   * ride along. A pause that outlasts the pricing cadence leaves those prices
+   * arbitrarily old, and a republished market carrying a known minimum and
+   * `bookSource: "clob"` is accepted by signal-to-order WITHOUT a fresh book —
+   * so an unguarded delivery can price a real BUY off pre-pause data before the
+   * current poll's pricing work lands. Refusing here only defers: the poll
+   * refreshes the price and republishes the seeded minimum with it.
+   *
+   * Uses the same staleness budget as the poll's own stream-fallback trigger, so
+   * the two cannot drift into disagreeing about what counts as current pricing.
+   */
+  private hasPublishableFreshPricing(tokenKey: string, nowMs: number): boolean {
+    const lastUpdatedAt = this.lastPricingUpdateAtByToken.get(tokenKey) ?? 0;
+    if (lastUpdatedAt === 0) return false;
+    const budgetMs = Math.max(STREAM_FALLBACK_MIN_STALE_MS, this.deps.pollIntervalMs * 3);
+    return nowMs - lastUpdatedAt <= budgetMs;
+  }
+
+  /**
+   * Retry parked hydrations — the poll loop is the only unpaused, tracked-token tick.
+   *
+   * A value whose token has since left the tracked set is discarded here rather
+   * than kept: nothing will deliver it (this runs right after the tracked-set
+   * reconcile, so the caches it needs are already gone), and holding it lets a
+   * later rejoin republish a minimum observed an arbitrary time ago. The rejoin
+   * releases the hydration dedupe anyway, so a fresh `/books` re-observes the
+   * current value — keeping the stale one buys nothing and can only mis-size.
+   */
+  private flushPendingMinOrderSizeHydration(): void {
+    for (const [tokenKey, parked] of [...this.pendingMinOrderSizeByToken]) {
+      if (this.deliverMinOrderSizeHydration(tokenKey, parked.minOrderSize)) {
+        this.pendingMinOrderSizeByToken.delete(tokenKey);
+        continue;
+      }
+      if (!this.canHydrateLater(tokenKey)) this.pendingMinOrderSizeByToken.delete(tokenKey);
+    }
+  }
+
   async stop(): Promise<void> {
     if (this.timer) {
       clearInterval(this.timer);
@@ -508,6 +766,15 @@ export class MarketDataModule implements RuntimeModule {
     await this.flushDiscoveryBatchEviction(new Set(), Date.now());
     this.stream?.close();
     this.stream = null;
+    // Same policy `flushPendingMinOrderSizeHydration` already applies to a token
+    // that left the tracked set: a minimum observed an arbitrary time ago must
+    // not be republished after a gap, and a stop/start is the largest gap there
+    // is. Dropping it costs nothing — the restart releases the hydration dedupe,
+    // so a fresh `/books` re-observes the current value.
+    this.pendingMinOrderSizeByToken.clear();
+    this.lastFallbackPollAtByToken.clear();
+    this.trackedTokenAdmittedAtByToken.clear();
+    this.retainedFallbackWaitMsByToken.clear();
     this.log.info("market-data module stopped");
   }
 
@@ -681,7 +948,7 @@ export class MarketDataModule implements RuntimeModule {
             ...tiered.planktonSignature,
             ...tiered.entryCandidates,
           ];
-          this.discoveryTier = tiered.discoveryOnly;
+          this.setDiscoveryTier(tiered.discoveryOnly);
         } else {
           // Shadow-first (default): the repo was called with
           // reserveSignature=false, so `tiered.planktonSignature` is a
@@ -696,7 +963,7 @@ export class MarketDataModule implements RuntimeModule {
             entryCandidates: tiered.entryCandidates,
           });
           tracked = [...tiered.executionCritical, ...tiered.entryCandidates];
-          this.discoveryTier = tiered.discoveryOnly;
+          this.setDiscoveryTier(tiered.discoveryOnly);
         }
         // Observe-only coverage metric (spec §4.5) — denominator is the full
         // signature-matching set (planktonSignature + signatureOverflow), not
@@ -709,7 +976,7 @@ export class MarketDataModule implements RuntimeModule {
       } else {
         // Legacy flat path (simulation / tests that don't set maxTrackedTokens).
         tracked = this.deps.marketRepo.findTrackedForPricing();
-        this.discoveryTier = [];
+        this.setDiscoveryTier([]);
         this.syncWsTierRoles({ legacy: tracked });
       }
 
@@ -720,6 +987,13 @@ export class MarketDataModule implements RuntimeModule {
         unchanged: tracked.length - trackedDiff.added.length,
       };
       await this.publishTrackedMarketsChanged(trackedDiff);
+      // AFTER the tracked set is reconciled and its removals are published, and
+      // before this poll's pricing work — a parked hydration must not depend on
+      // this poll happening to select its token, but it must not resurrect a
+      // token that just left the WS tier either: publishing a stale cached
+      // market for a deselected token can start an Algo evaluation that places a
+      // real BUY on a market we no longer track.
+      this.flushPendingMinOrderSizeHydration();
       this.lastTrackedTokenCount = tracked.length;
       if (tracked.length === 0) {
         this.lastFallbackPollCount = 0;
@@ -850,6 +1124,44 @@ export class MarketDataModule implements RuntimeModule {
             });
             continue;
           }
+          // The book budget above says this token needs no refresh — for a
+          // healthy WS-tier token with a known `bookSource` it is literally
+          // Infinity. But a minimum still parked at this point already failed
+          // delivery in THIS poll's flush (it runs before this loop), and the
+          // only reason left is stale pricing: a publish republishes the cached
+          // market, so `hasPublishableFreshPricing` gates it. Waiting for the
+          // 3h feature-freshness repoll below leaves the token's EXIT
+          // unpriceable in live-lite for that whole window, because SELL
+          // pricing never fetches `/books` itself. Poll it now instead — the
+          // fresh book refreshes pricing AND re-observes the minimum, so the
+          // delta publish carries the value out on current prices rather than
+          // pre-pause ones.
+          //
+          // Rate-limited against ITSELF, not against `lastPricingAttemptAtByToken`:
+          // a partial Gamma batch that omits the token records an attempt yet
+          // leaves the value parked, and a gateway error records no attempt at
+          // all — either way an unthrottled branch re-requests this token every
+          // single poll for as long as the minimum stays undelivered. The budget
+          // is the unknown-source one the `cached == null` branch above already
+          // applies, so both anti-hammering paths move together.
+          const parked = this.pendingMinOrderSizeByToken.get(tokenId);
+          if (parked != null) {
+            const repollBudgetMs = getTrackedTokenRefreshBudgetMs(
+              { bookSource: "unknown" },
+              this.deps.pollIntervalMs,
+              quietWsTierPollingRelaxed && role != null,
+              role,
+            );
+            if (now - parked.repolledAt > repollBudgetMs) {
+              // NOT stamped here: `selectFallbackPollCandidates` sorts by role
+              // with a STABLE sort and slices, so the same over-limit prefix wins
+              // every round. Stamping at candidacy would put the dropped tail
+              // into a fresh backoff it never earned — permanent starvation, not
+              // "one more budget". Stamp only what is actually polled (below).
+              fallbackCandidates.push({ tokenId, role, reason: "minOrderSizeHydration" });
+              continue;
+            }
+          }
           // Step 3 (audit doc §F2): even when the book is still considered
           // fresh by the stream, soft-ranking feature inputs (liquidity /
           // volume24hr) only refresh via REST/Gamma. The book-refresh budget
@@ -898,6 +1210,12 @@ export class MarketDataModule implements RuntimeModule {
       const selectedFallbackCandidates = selectFallbackPollCandidates(
         fallbackCandidates,
         fallbackPollLimit,
+        (tokenId) => ({
+          lastPolledAt: this.lastFallbackPollAtByToken.get(tokenId) ?? null,
+          admittedAt: this.trackedTokenAdmittedAtByToken.get(tokenId) ?? 0,
+        }),
+        now,
+        this.deps.pollIntervalMs,
       );
       tokenIdsToPoll = selectedFallbackCandidates.map((candidate) => candidate.tokenId);
       const fallbackReasonCounts = countFallbackReasons(selectedFallbackCandidates);
@@ -968,6 +1286,19 @@ export class MarketDataModule implements RuntimeModule {
           now,
         );
         return;
+      }
+      // Stamped here, not at selection: only tokens Gamma is actually asked
+      // about have earned a backoff. Selection happens before the rate-limit
+      // early return above, so stamping there would charge a full hydration
+      // budget to tokens the poll never reached — stretching an entry or exit
+      // recovery by that budget on top of the five-minute Gamma backoff. The
+      // dropped tail likewise keeps its old `repolledAt` and stays eligible.
+      this.stampSelectedMinOrderSizeRepolls(selectedFallbackCandidates, now);
+      // Same reason, same place: the least-recently-polled cursor must record
+      // what Gamma was actually asked about, or a token dropped by the backoff
+      // goes to the back of the queue without ever having been polled.
+      for (const candidate of selectedFallbackCandidates) {
+        this.lastFallbackPollAtByToken.set(candidate.tokenId, now);
       }
       const pricingMap =
         tokenIdsToPoll.length > 0
@@ -1579,6 +1910,31 @@ export class MarketDataModule implements RuntimeModule {
     }
   }
 
+  /**
+   * Carry a departing token's accumulated wait over to a possible rejoin, as a DURATION rather
+   * than the absolute stamp it was measured from: a token that leaves and returns months later
+   * would otherwise re-enter carrying a months-old `waitingSince`, trip the starvation tier
+   * immediately, and outrank execution-critical residents that have genuinely been waiting —
+   * for time it spent outside the set and could not have been polled anyway.
+   *
+   * Insertion order is eviction order: the oldest retained entry is the one least likely to
+   * still be waiting for anything, and dropping it only costs that token a restarted wait if it
+   * ever returns.
+   */
+  private retainWaitForRejoin(tokenId: string, nowMs: number): void {
+    const waitingSince =
+      this.lastFallbackPollAtByToken.get(tokenId) ??
+      this.trackedTokenAdmittedAtByToken.get(tokenId);
+    if (waitingSince == null) return;
+    this.retainedFallbackWaitMsByToken.delete(tokenId);
+    this.retainedFallbackWaitMsByToken.set(tokenId, Math.max(0, nowMs - waitingSince));
+    while (this.retainedFallbackWaitMsByToken.size > RETAINED_FALLBACK_WAIT_LIMIT) {
+      const oldest = this.retainedFallbackWaitMsByToken.keys().next().value;
+      if (oldest == null) break;
+      this.retainedFallbackWaitMsByToken.delete(oldest);
+    }
+  }
+
   private refreshTrackedMarkets(tracked: readonly Market[]): {
     added: string[];
     removed: string[];
@@ -1587,11 +1943,26 @@ export class MarketDataModule implements RuntimeModule {
     const previousTokenIds = new Set(this.trackedMarketsByToken.keys());
     const nextTokenIds = new Set<string>();
     const added: string[] = [];
+    const admittedAtMs = Date.now();
     for (const market of tracked) {
       const tokenKey = String(market.tokenId);
       nextTokenIds.add(tokenKey);
       this.trackedMarketsByToken.set(tokenKey, market);
-      if (!previousTokenIds.has(tokenKey)) added.push(tokenKey);
+      if (previousTokenIds.has(tokenKey)) continue;
+      added.push(tokenKey);
+      // Where a never-polled token's wait starts. Measured from zero instead, it outranks every
+      // peer that has ever been polled — and the tracked set churns, so a trickle of newcomers
+      // (each one "oldest", each one first) starves a continuously eligible resident forever.
+      // A REJOINING token resumes the wait it left with: a fresh stamp would hand any peer that
+      // drops out and returns a permanently newer wait than the residents it is queued behind.
+      // It resumes the DURATION it had accrued, not the stamp — time spent outside the set is
+      // not wait, and back-dating by it would let a long-absent token jump the whole queue.
+      const retainedWaitMs = this.retainedFallbackWaitMsByToken.get(tokenKey);
+      this.retainedFallbackWaitMsByToken.delete(tokenKey);
+      this.trackedTokenAdmittedAtByToken.set(
+        tokenKey,
+        retainedWaitMs == null ? admittedAtMs : admittedAtMs - retainedWaitMs,
+      );
     }
     const removed: string[] = [];
     for (const tokenId of [...this.trackedMarketsByToken.keys()]) {
@@ -1604,6 +1975,9 @@ export class MarketDataModule implements RuntimeModule {
       this.latestOrderBookByToken.delete(tokenId);
       this.lastPublishedMarketByToken.delete(tokenId);
       this.lastPricingUpdateAtByToken.delete(tokenId);
+      this.retainWaitForRejoin(tokenId, admittedAtMs);
+      this.lastFallbackPollAtByToken.delete(tokenId);
+      this.trackedTokenAdmittedAtByToken.delete(tokenId);
       removed.push(tokenId);
     }
     // Defensive sweep: any entry in the aux caches that isn't in the current
@@ -2061,15 +2435,82 @@ function resolveFallbackPollLimit(args: {
   return Math.max(1, Math.min(args.fallbackBatchSize, args.maxConcurrency, rateWindow));
 }
 
+/**
+ * Role priority first, then least-recently-polled — `lastPolledAt` returns 0 for
+ * a token never polled, so newcomers lead.
+ *
+ * Skipping the tail is not enough on its own: the sort is STABLE and role
+ * priority alone leaves candidates in tracked-token order, so a token sitting
+ * past the limit loses to the same earlier prefix every time that prefix's
+ * refresh budget expires — with 101 same-role tokens, a limit of 25 and a
+ * budget under 4 poll cycles, token 101 is eligible at every poll and polled at
+ * none.
+ *
+ * A rotating cursor over the candidate list does NOT fix that, because the list
+ * is not stable: a selected token disappears under its own backoff and returns
+ * later, so an offset counted in list POSITIONS lands on a different membership
+ * each cycle and can cycle through a strict subset forever (7 same-role
+ * candidates, limit 1, poll 5 s, budget 15 s → `tok-1/3/5` are never reached).
+ * The wait is a property of the TOKEN, not of its position, so it survives the
+ * set changing: a selected token's stamp becomes strictly the newest, so it
+ * cannot win again until every continuously-eligible peer of the same role has
+ * been polled.
+ *
+ * That wait starts at ADMISSION, not at zero. A never-polled token measured
+ * from zero outranks every peer that has ever been polled, and the tracked set
+ * churns — so a trickle of newcomers, each one "oldest", starves a resident
+ * forever. Admission time makes the order a genuine FIFO; never-polled only
+ * breaks the tie among tokens whose wait began at the same instant.
+ *
+ * Within a role that is enough; ACROSS roles it is not, because the priority
+ * term dominates the wait: with a limit of 1 and one continuously eligible
+ * `executionCritical`, an `entryCandidate` loses every single cycle no matter
+ * how long it has waited — and a token that never gets polled is a token whose
+ * pending hydration never lands. Hence the starvation tier: a full rotation at
+ * this limit takes `ceil(n / limit)` poll cycles, so anything that has waited
+ * longer than that was passed over by the ORDERING, not merely by its turn not
+ * having come, and is promoted above every role for one cycle. The bound is
+ * derived from the candidate set and the limit themselves, so it self-calibrates
+ * instead of trading one hard-coded starvation horizon for another. Coverage
+ * then holds for any limit, role mix, and churn.
+ */
 function selectFallbackPollCandidates(
   candidates: readonly FallbackPollCandidate[],
   limit: number,
+  rotationState: (tokenId: string) => FallbackRotationState,
+  nowMs: number,
+  pollIntervalMs: number,
 ): FallbackPollCandidate[] {
   if (candidates.length <= limit) return [...candidates];
-  return [...candidates]
-    .sort((a, b) => fallbackCandidatePriority(a) - fallbackCandidatePriority(b))
-    .slice(0, limit);
+  const rotationMs = Math.ceil(candidates.length / limit) * pollIntervalMs;
+  return candidates
+    .map((candidate) => {
+      const { lastPolledAt, admittedAt } = rotationState(candidate.tokenId);
+      const waitingSince = lastPolledAt ?? admittedAt;
+      const starved = nowMs - waitingSince > rotationMs;
+      return {
+        candidate,
+        waitingSince,
+        neverPolled: lastPolledAt == null ? 0 : 1,
+        tier: starved ? FALLBACK_STARVED_TIER : fallbackCandidatePriority(candidate),
+      };
+    })
+    .sort(
+      (a, b) => a.tier - b.tier || a.waitingSince - b.waitingSince || a.neverPolled - b.neverPolled,
+    )
+    .slice(0, limit)
+    .map((entry) => entry.candidate);
 }
+
+interface FallbackRotationState {
+  /** Null when the token has never been fallback-polled — its wait runs from {@link admittedAt}. */
+  lastPolledAt: number | null;
+  /** When the token entered the tracked set. */
+  admittedAt: number;
+}
+
+/** Above every value {@link fallbackCandidatePriority} can return. */
+const FALLBACK_STARVED_TIER = -1;
 
 function fallbackCandidatePriority(candidate: FallbackPollCandidate): number {
   if (candidate.role === "executionCritical") return 0;
@@ -2207,6 +2648,7 @@ function zeroFallbackReasonCounts(): MarketDataFallbackReasonCounts {
     forceFullPoll: 0,
     streamUnavailable: 0,
     featureFreshness: 0,
+    minOrderSizeHydration: 0,
   };
 }
 

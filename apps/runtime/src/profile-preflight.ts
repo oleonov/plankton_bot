@@ -28,6 +28,7 @@ export function runProfilePreflight(opts: {
   liveLiteConfig?: LiveLiteConfig;
   relayerBuilderAuthConfigured?: boolean;
   polyBuilderCodeConfigured?: boolean;
+  enableInventoryAutoMerge?: boolean;
 }): ProfilePreflightResult {
   const blockers: PreflightBlocker[] = [];
   const warnings: PreflightWarning[] = [];
@@ -45,6 +46,7 @@ export function runProfilePreflight(opts: {
       opts.liveLiteConfig,
       opts.relayerBuilderAuthConfigured ?? false,
       opts.polyBuilderCodeConfigured ?? false,
+      opts.enableInventoryAutoMerge ?? false,
       blockers,
       warnings,
     );
@@ -67,6 +69,7 @@ function runLiveLiteChecks(
   envelope: LiveLiteConfig,
   relayerBuilderAuthConfigured: boolean,
   polyBuilderCodeConfigured: boolean,
+  enableInventoryAutoMerge: boolean,
   blockers: PreflightBlocker[],
   warnings: PreflightWarning[],
 ): void {
@@ -76,6 +79,21 @@ function runLiveLiteChecks(
   const settingsRow = controlDb
     .prepare("SELECT relayer_json FROM profile_settings WHERE profile_id = 'live-lite'")
     .get() as { relayer_json: string | null } | undefined;
+
+  // Auto-merge settles exclusively through a relayer settlement client (see
+  // exchange-gateway.ts mergePositions, which refuses every merge before broadcast when
+  // one isn't wired up). Booting anyway would leave InventoryManagerModule healthy and
+  // permanently inert instead of loudly refusing — strictly worse, so gate it here
+  // alongside every other wallet_mode incoherence this preflight already blocks on.
+  if (enableInventoryAutoMerge && walletMode !== "relayer") {
+    blockers.push({
+      code: "INVENTORY_AUTO_MERGE_REQUIRES_RELAYER",
+      message:
+        `ENABLE_INVENTORY_AUTO_MERGE=true requires wallet_mode="relayer" (current: "${walletMode}") ` +
+        "— auto-merge can never settle a merge without a relayer settlement client. Fix: " +
+        'unset/disable ENABLE_INVENTORY_AUTO_MERGE, or switch profile_settings.wallet_mode to "relayer".',
+    });
+  }
 
   if (!polyBuilderCodeConfigured) {
     blockers.push({

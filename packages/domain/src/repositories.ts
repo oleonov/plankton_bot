@@ -610,8 +610,47 @@ export interface SettlementLedgerRepository {
 // ─── MergeLedgerRepository ──────────────────────────────────────────────
 
 export interface MergeLedgerRepository {
-  /** Record a completed inventory merge action. */
-  save(merge: import("./types.js").MergeRecord): void;
+  /**
+   * Write the merge's INTENT before `gateway.mergePositions()` is called. Callers must let this
+   * commit on its own (no ambient transaction) — that is what makes the row durable before the
+   * on-chain submission ever leaves the process, so a crash a moment later still finds it.
+   *
+   * Returns whether this caller CLAIMED the condition. `false` means another writer already has a
+   * non-terminal merge for it — the claim is atomic in the store, so reading the fence beforehand
+   * is an optimisation, never the guarantee. A caller that gets `false` must drop the candidate and
+   * touch nothing: the row it collided with belongs to a merge that may already be on chain.
+   */
+  recordPending(merge: {
+    mergeId: string;
+    conditionId: string;
+    mergedAmount: number;
+    recordedAt: string;
+  }): boolean;
+
+  /**
+   * Advance a 'pending' row to 'onchain' immediately after `gateway.mergePositions()` resolves.
+   * Throws if no row matched: an UPDATE that quietly changes nothing would leave the caller
+   * believing the intent it wrote is being tracked when it is not.
+   */
+  markOnchain(mergeId: string): void;
+
+  /**
+   * Advance an 'onchain' row to 'applied' with the settlement's final numbers. Called inside the
+   * same transaction as the position/lot mutations it accompanies, so the two can never diverge.
+   * Throws if no row matched — that throw is what rolls those mutations back, rather than
+   * committing a merge the ledger has no record of.
+   */
+  markApplied(merge: import("./types.js").MergeRecord): void;
+
+  /**
+   * Drop an intent row that provably never reached the chain. Deletes ONLY while the row is still
+   * 'pending', so it can never erase a merge that already happened; a row that has advanced is left
+   * alone and the call is a no-op.
+   */
+  deletePending(mergeId: string): void;
+
+  /** Rows not yet 'applied' — what a startup reconciliation/alert path reads to find divergence. */
+  findNonTerminal(): import("./types.js").MergeRecord[];
 }
 
 // ─── PositionDriftRepository ────────────────────────────────────────────

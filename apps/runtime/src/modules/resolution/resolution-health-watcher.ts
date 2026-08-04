@@ -15,6 +15,7 @@
  *      stays unhealthy.
  */
 
+import type { TimerRegistry } from "../../periodic-timers.js";
 import type { MarketResolutionTracker } from "./market-resolution-tracker.js";
 
 export interface ResolutionHealthMetricsWriter {
@@ -40,6 +41,14 @@ export interface StartResolutionHealthWatcherOptions {
   recordInfraAlert: (alert: ResolutionHealthInfraAlert) => void;
   /** Re-emission cadence for the `infra_alert` row + health flag refresh. */
   intervalMs: number;
+  /**
+   * The watcher is owned by the entrypoint, not by the supervisor, so nothing else cancels it. Its
+   * tick writes to the ledger, and a write that loses the lock throws `SQLITE_BUSY` with no handler
+   * above a bare interval — during teardown that kills the process while `shutdown()` is still
+   * awaiting the supervisor. Registering here buys both: the tick is wrapped, and `stopAll()`
+   * cancels it before the long await instead of after it.
+   */
+  timers: TimerRegistry;
 }
 
 export const RESOLUTION_TRACKER_HEALTHY_METRIC = "entry_guard_resolution_tracker_healthy";
@@ -62,8 +71,10 @@ export function startResolutionHealthWatcher(opts: StartResolutionHealthWatcherO
     }
   };
 
+  // The first emission is deliberately NOT wrapped: it runs at boot, where a failing metrics write
+  // means the ledger is unusable and the runtime must not come up pretending it is healthy.
   emit();
-  const handle: ReturnType<typeof setInterval> = setInterval(emit, opts.intervalMs);
+  const handle = opts.timers.every("resolution_health", opts.intervalMs, emit);
   if (typeof handle.unref === "function") handle.unref();
   return {
     stop: () => clearInterval(handle),
