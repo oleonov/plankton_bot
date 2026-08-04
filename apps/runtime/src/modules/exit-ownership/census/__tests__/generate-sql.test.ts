@@ -159,7 +159,9 @@ describe("§7.6 — literal escaping", () => {
 /**
  * §5.1.10, as the operator approved it on 2026-07-29: a REAL crosses into the apply script as the decimal
  * string sqlite RENDERED, and guard #3 compares that string against the same rendering taken under the
- * lock. It is never parsed back into a double, by anything.
+ * lock. Nothing that must be exact parses it back: `loadManifest` does run `Number(...)` over it, to
+ * reject a non-finite decimal, and the TS-side invariants read that parse — but the drift decision, the
+ * one place an off-by-1-ULP parse would change an outcome, never sees a double.
  *
  * The transport it replaced did parse — the exporter emitted a JSON number and the generator emitted it
  * back as a bare SQL numeric — and whether THAT survives turns out to be a property of the machine rather

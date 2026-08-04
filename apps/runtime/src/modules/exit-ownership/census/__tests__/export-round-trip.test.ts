@@ -53,10 +53,13 @@ import {
  *    source over 200 000 realistic sizes: **56 820 fail the render→parse round trip on arm64, 0 on
  *    x86_64.** A contract that held only where `long double` is wide would be no contract, so the
  *    operator-approved one is render-against-render (`export-sql.ts`, guard #3 in `generate-sql.ts`): the
- *    rendering must be DETERMINISTIC, not accurate — it is never parsed back. 16b below therefore asserts
- *    only what holds on both hosts: the exported string is the ledger renderer's own output, identical
- *    across all four columns, stable across two exports, and within 1 ULP. Nothing here is `toBeCloseTo`,
- *    and no rendering is pinned as a literal.
+ *    rendering must be DETERMINISTIC, not accurate — nothing that must be exact parses it back. (It IS
+ *    parsed: `loadManifest` runs `Number(...)` to reject a non-finite decimal, and the TS-side invariants
+ *    read the same parse. Neither decides drift, which is what an exact round trip would have been for.)
+ *    16b below therefore asserts what holds on both hosts — the exported string is the ledger renderer's
+ *    own output, identical across all four columns and stable across two exports — and then, for accuracy,
+ *    the strongest claim the host it runs on actually supports. Nothing here is `toBeCloseTo`, and no
+ *    rendering is pinned as a literal.
  *  - **16e's "`null` accepted unchanged for a nullable REAL" is not constructible.** All four REALs §5.1
  *    exports come from NOT NULL columns (`ledger.sql`: `positions.size`, `orders.size`, `fills.size`) and
  *    `filled_size` is COALESCEd, so no export can carry a null REAL. The NULL transport is pinned one level
@@ -518,10 +521,15 @@ describe("§7.16a — the emitter is not json_object, and the precision case is 
  * On x86_64 the 80-bit intermediate makes `%!.17g` correctly rounded, so every rendering parses back into
  * its own double; on arm64 four of these eight do not. That asymmetry is exactly why §5.1.10 carries the
  * rendering as TEXT and compares render-against-render: the transport must not depend on the width of the
- * host's `long double`. So what this group pins is the properties that hold on BOTH — the rendering is what
- * the ledger's own renderer produced, it is identical in all four exported columns, it is deterministic,
- * and it is never more than 1 ULP from the double it came from. The rendering itself is read off the pinned
- * CLI at run time, because the CLI *is* the specification here.
+ * host's `long double`. So this group pins the host-independent properties — the rendering is what the
+ * ledger's own renderer produced, it is identical in all four exported columns, and it is deterministic —
+ * and then, for accuracy, the strongest claim the host it is running on actually supports: an exact round
+ * trip where `%!.17g` is correctly rounded, agreement to 16 significant digits (AND within 1 ULP) where it
+ * is not. A flat 1-ULP bound on both would be too weak to notice a real regression: `5.3199999999999994`
+ * and `5.3200000000000003` above are ADJACENT doubles, so a renderer that swapped one for the other would
+ * stay inside 1 ULP while changing the 16th significant digit — and every other assertion here, being
+ * render-against-render, would agree with it. The rendering itself is read off the pinned CLI at run time,
+ * because the CLI *is* the specification here.
  */
 const RENDERED_REALS = [
   { label: "the smallest denormal", value: 5e-324 },
@@ -550,6 +558,8 @@ describe("§7.16b — every REAL column §5.1 exports, on the pinned 3.37.2 rend
   let second: CensusManifest = {} as CensusManifest;
   /** What the pinned CLI renders the seeded REAL as, asked of the ledger column itself — the expectation. */
   const rendered = new Map<string, string>();
+  /** Which `LONGDOUBLE_TYPE` width this host renders through — measured below, never assumed. */
+  let correctlyRounded = false;
 
   beforeAll(() => {
     const fixture = createCensusFixture();
@@ -589,6 +599,12 @@ describe("§7.16b — every REAL column §5.1 exports, on the pinned 3.37.2 rend
         ),
       );
     }
+    // The same probe as `rendererIsCorrectlyRounded()` in export-invariant-identity.test.ts, taken from a
+    // rendering this group already has: `12` is "12.0" on the 80-bit host and "11.999999999999999" — which
+    // reads back as 11.999999999999998 — on the 64-bit one. It classifies the host between those two; it
+    // is not a proof of correct rounding over binary64, and nothing below needs it to be.
+    const twelve = RENDERED_REALS.find((real) => real.value === 12);
+    correctlyRounded = Object.is(Number(rendered.get(twelve?.id ?? "")), 12);
 
     first = fixture.exportManifest().loaded.manifest;
     second = fixture.exportManifest().loaded.manifest;
@@ -610,13 +626,24 @@ describe("§7.16b — every REAL column §5.1 exports, on the pinned 3.37.2 rend
   });
 
   it.each(RENDERED_REALS)(
-    "$label lands within 1 ULP of the double it came from",
+    "$label survives the renderer to the precision this host can give",
     ({ id, value }) => {
       // NOT `toBeCloseTo`: a tolerance-based assertion here would pass on the very defect §5.1.10 exists for.
-      // Exactness cannot be asserted — it holds on x86_64 and fails on four of these on arm64 (see the table
-      // above) — but "off by at most one representable double" holds on both, and separates a renderer that
-      // is merely imprecise from one that is broken. §5.1.10 needs neither: it never parses this back.
-      expect(ulpDistance(Number(rendered.get(id) ?? ""), value)).toBeLessThanOrEqual(1n);
+      const back = Number(rendered.get(id) ?? "");
+      if (correctlyRounded) {
+        // x86_64 (production + CI): the 80-bit intermediate makes `%!.17g` correctly rounded, so EVERY
+        // rendering parses back into its own double — measured, 0 of 200 000 realistic sizes do not. On the
+        // only host the census will run on, exactness is the real property, so it is what gets asserted.
+        expect(Object.is(back, value)).toBe(true);
+        return;
+      }
+      // arm64 macOS (dev): four of these eight do not round-trip, so exactness is unassertable here. What
+      // still holds is 16 significant digits — and that is NOT implied by the 1-ULP bound this replaced:
+      // 5.3199999999999994 and 5.3200000000000003 are adjacent doubles that already differ at the 16th
+      // digit, so a renderer that swapped one for the other would pass the bound and fail this. Both are
+      // asserted because neither implies the other: 16 digits admits ~4 ULP at some magnitudes.
+      expect(back.toPrecision(16)).toBe(value.toPrecision(16));
+      expect(ulpDistance(back, value)).toBeLessThanOrEqual(1n);
     },
   );
 

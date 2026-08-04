@@ -155,14 +155,18 @@ function renderThroughDisplay(values: readonly number[]): string[] {
 }
 
 /**
- * Whether this build's `%!.17g` is correctly rounded — and therefore injective over binary64, which is
- * what decides whether a render collision can exist at all.
+ * Which of the two `LONGDOUBLE_TYPE` widths this build's `%!.17g` behaves as — the wide one, where the
+ * rendering round-trips and is therefore injective over binary64, or the narrow one, where a render
+ * collision can exist at all.
  *
  * It is a property of the HOST, not of the version: 3.37.2 converts through `LONGDOUBLE_TYPE`, 80-bit on
  * x86_64 (production and CI) where the rendering is exact, and 64-bit on arm64 macOS (dev) where it is off
- * by up to ~1 ULP. `12` is the decisive probe: it renders "12.0" on the first and "11.999999999999999" —
- * which reads back as 11.999999999999998 — on the second. Measured, never assumed, because the tests must
- * make the same claim on both machines and only one of them is the one the census will run on.
+ * by up to ~1 ULP. `12` is the decisive probe BETWEEN THOSE TWO: it renders "12.0" on the first and
+ * "11.999999999999999" — which reads back as 11.999999999999998 — on the second. One value classifies the
+ * host; it does not by itself PROVE correct rounding over all of binary64, and nothing here needs it to.
+ * What backs the wide host's claim is the 200 000-size sample (`lossyRenderings()` in generate-sql.test.ts,
+ * 0 lossy). Measured, never assumed, because the tests must make the same claim on both machines and only
+ * one of them is the one the census will run on.
  */
 function rendererIsCorrectlyRounded(): boolean {
   return Object.is(Number(renderThroughDisplay([12])[0]), 12);
@@ -256,7 +260,8 @@ function expectRowSetIdentity(run: CensusRun, verdict: ReferenceVerdict): void {
  * `0.8400000000000001` and `position_shares` as `0.84` (`Object.is` is FALSE, and the violation is real —
  * the predicate is evaluated on those doubles). On arm64 macOS the pinned 3.37.2 renders BOTH as
  * `0.84000000000000003`: a deep-equality assertion over the diagnostics fails on it with both sides
- * correct, which is why the fixture is required rather than optional. On x86_64 the wider `long double`
+ * correct, which is the reason §9a.6 makes the fixture required rather than optional. On x86_64 — where
+ * the census actually runs — it is the same fixture demonstrating the converse. The wider `long double`
  * makes `%!.17g` correctly rounded and hence injective, so the same pair renders `0.84000000000000008` and
  * `0.83999999999999997` and no collision exists. (b2) compares renderings on both, because the census must
  * decide the same thing on the dev machine and on production — see `rendererIsCorrectlyRounded`.
@@ -345,7 +350,7 @@ describe("§9a.6 test 8(b) — the exported rows ARE the shared definition's row
     expectRowSetIdentity(run, verdict);
   });
 
-  it("the render-collision fixture is what makes (b2) necessary, not decoration", () => {
+  it("the render-collision fixture shows, per host, what (b2)'s rendering comparison is worth", () => {
     const run = runCensus(withClean(RENDER_COLLISION));
     const row = referenceVerdict(run.fixture, projectionOf(run)).overcommittedTokens.rows[0];
     const remaining = row?.remaining_sell_shares as number;
