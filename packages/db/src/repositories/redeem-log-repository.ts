@@ -77,7 +77,7 @@ const REDEEM_LOG_STATUSES: readonly RedeemLogStatus[] = [
   "failed_orphaned",
 ];
 
-const ACTIVE_REDEEM_LOG_STATUS_SQL = "'attempting','submitted','pending'";
+export const ACTIVE_REDEEM_LOG_STATUS_SQL = "'attempting','submitted','pending'";
 
 export class SqliteRedeemLogRepository {
   private readonly insertStmt;

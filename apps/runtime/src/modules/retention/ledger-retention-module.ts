@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import type Database from "better-sqlite3";
 import type { RuntimeControl, RuntimeModule } from "@krabs/domain";
+import { ACTIVE_REDEEM_LOG_STATUS_SQL } from "@krabs/db";
 import { SIGNAL_TELEMETRY_RISK_EVENT_TYPES } from "../../risk-event-volume.js";
 import type { LifecycleToken } from "../../lifecycle-chain.js";
 import { LifecycleChain, LIFECYCLE_STOP_WAIT_MS, waitAtMost } from "../../lifecycle-chain.js";
@@ -64,6 +65,8 @@ export interface LedgerRetentionConfig {
   riskEventsTtlMs?: number;
   criticalRiskEventsTtlMs?: number;
   signalFeedBucketsTtlMs?: number;
+  redeemLogChurnTtlMs?: number;
+  redeemLogMaxRowsPerRun?: number;
   checkpointIntervalMs?: number;
   checkpointMinDeletedRows?: number;
   /** How long the off-thread checkpoint may wait for readers — see {@link CHECKPOINT_BUSY_TIMEOUT_MS}. */
@@ -196,6 +199,21 @@ const DEFAULT_CONFIG: Required<LedgerRetentionConfig> = {
   // operator's declared `executionProfile.signalFeed.retentionDays`, which is the single
   // source of truth. This mirrors that field's own domain default (execution-policy.ts).
   signalFeedBucketsTtlMs: 7 * DAY_MS,
+  // redeem_log had NO retention: 4.28M rows / 2.0 GB (11% of the ledger), 99.55% of it the two
+  // churn reason codes this task is scoped to. That backlog is legacy — the writer used to emit one
+  // row per sweep for a condition the bot had already stopped touching, and `recordRecurringSkip`
+  // now downsamples to one row per quarantine episode per module instance — but it still trickles,
+  // so this keeps draining rather than running dry. 7 d is 7x the widest window any reader actually
+  // DECIDES on (`findLatestAttemptTs` against `inFlightTtlMs`, operator-configurable up to 24 h —
+  // execution-policy.ts:997). Readers that scan further back are covered instead by the condition
+  // guard in the task below, which keeps every row of a condition that still has an active one.
+  redeemLogChurnTtlMs: 7 * DAY_MS,
+  // Caps this task at 50k rows — 10 batches at today's `batchSize` — instead of letting one pass
+  // take 500k of the backlog against the shared budget, inside a startup pass `executeStart` awaits
+  // before reconciliation and the redeem sweep. It bounds rows and statement count, NOT wall-clock:
+  // `LIMIT` says nothing about rows examined, lock wait or I/O, and `runTask` checks the deadline
+  // only after each synchronous DELETE returns.
+  redeemLogMaxRowsPerRun: 50_000,
   // Unconditional checkpoint cadence (separate from the delete-driven trigger
   // below). Without this the WAL grows indefinitely for a freshly-deployed
   // ledger where retention has nothing to delete yet — observed at 642 MB on
@@ -221,6 +239,7 @@ const HIGH_VOLUME_RISK_EVENTS = [
 type DeleteTask = {
   key: string;
   run: (limit: number) => number;
+  maxRowsPerRun?: number;
 };
 
 export class LedgerRetentionModule implements RuntimeModule {
@@ -457,9 +476,10 @@ export class LedgerRetentionModule implements RuntimeModule {
     remainingBudget: number,
     deadlineMs: number,
   ): Promise<number> {
+    const budget = Math.min(remainingBudget, task.maxRowsPerRun ?? Infinity);
     let removedTotal = 0;
-    while (removedTotal < remainingBudget) {
-      const limit = Math.min(this.config.batchSize, remainingBudget - removedTotal);
+    while (removedTotal < budget) {
+      const limit = Math.min(this.config.batchSize, budget - removedTotal);
       const removed = task.run(limit);
       removedTotal += removed;
       if (removed < limit) break;
@@ -608,6 +628,39 @@ export class LedgerRetentionModule implements RuntimeModule {
         ),
       );
     }
+
+    // Last position can defer this task past the startup pass; the rotation in `executePass` keeps
+    // that from hardening into starvation. `maxRowsPerRun` applies only once the task is reached.
+    tasks.push(
+      this.deleteOlderThanTask(
+        "redeem_log",
+        "redeem_log",
+        "attempt_ts",
+        nowMs - this.config.redeemLogChurnTtlMs,
+        // Only the two churn reasons. Every other `skipped` reason is evidence (zero_balance_* is
+        // what an accounting bug looks like), and every non-churn outcome is the audit trail the
+        // /redeem-log API serves. retry_count/tx_hash/gas_used are redundant against today's census
+        // ON PURPOSE:
+        // they stop a future writer that stamps a hash or a retry onto a quarantine row from
+        // silently enrolling it.
+        //
+        // The condition guard is not about the status list. findRecentActiveAttempts,
+        // hasRecentActiveAttempt and markOrphanedActiveAttempts all define "latest" as "no strictly
+        // newer row of ANY status", so deleting a newer skipped row would un-mask an older active row
+        // and make the sweep report an 80-day-old attempt as orphaned. A condition holding no active
+        // row has nothing to un-mask.
+        `status = 'skipped'
+           AND error_msg IN ('state_failed_quarantine','state_failed_cooldown')
+           AND retry_count = 0
+           AND tx_hash IS NULL
+           AND gas_used IS NULL
+           AND condition_id NOT IN (
+             SELECT condition_id FROM redeem_log WHERE status IN (${ACTIVE_REDEEM_LOG_STATUS_SQL})
+           )`,
+        undefined,
+        { timestampFormat: "epochMs", maxRowsPerRun: this.config.redeemLogMaxRowsPerRun },
+      ),
+    );
     return tasks;
   }
 
@@ -651,7 +704,7 @@ export class LedgerRetentionModule implements RuntimeModule {
     cutoffMs: number,
     extraWhere?: string,
     extraParams: unknown[] = [],
-    options?: { timestampFormat?: "iso" | "epochMs"; rowIdColumn?: string },
+    options?: { timestampFormat?: "iso" | "epochMs"; rowIdColumn?: string; maxRowsPerRun?: number },
   ): DeleteTask {
     const rowIdColumn = options?.rowIdColumn ?? "id";
     const cutoff =
@@ -669,6 +722,7 @@ export class LedgerRetentionModule implements RuntimeModule {
     return {
       key,
       run: (limit: number) => stmt.run(cutoff, ...extraParams, limit).changes,
+      ...(options?.maxRowsPerRun !== undefined ? { maxRowsPerRun: options.maxRowsPerRun } : {}),
     };
   }
 

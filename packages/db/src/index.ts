@@ -64,6 +64,7 @@ export {
 } from "./repositories/floor-intents.js";
 export {
   SqliteRedeemLogRepository,
+  ACTIVE_REDEEM_LOG_STATUS_SQL,
   type RedeemLogEntry,
   type RedeemLogQuery,
   type RedeemLogRow,

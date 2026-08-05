@@ -4,9 +4,11 @@ import path from "node:path";
 
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SqliteRedeemLogRepository } from "@krabs/db";
 import { LedgerRetentionModule } from "../ledger-retention-module.js";
 
 const NOW = Date.parse("2026-04-25T00:00:00.000Z");
+const DAY_MS = 24 * 60 * 60_000;
 
 let db: Database.Database;
 
@@ -82,6 +84,27 @@ beforeEach(() => {
     CREATE TABLE orders (order_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
     CREATE TABLE positions (position_id TEXT PRIMARY KEY, opened_at TEXT NOT NULL);
     CREATE TABLE fills (fill_id TEXT PRIMARY KEY, filled_at TEXT NOT NULL);
+
+    -- Mirrors packages/db/src/schemas/ledger.sql:407-428 — same columns, constraints and all three
+    -- indexes, differing only in whitespace and in IF NOT EXISTS, which an in-memory per-test db
+    -- does not need. The 9-value status CHECK matters: a misspelled status in a test row fails at
+    -- insert time exactly as production would reject it. So does idx_redeem_log_condition_ts — the
+    -- delete guard and markOrphanedActiveAttempts both key on condition_id, and a fixture without
+    -- it would exercise a different query plan than the one this retention task ships against.
+    CREATE TABLE redeem_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      condition_id TEXT NOT NULL,
+      token_ids TEXT NOT NULL,
+      attempt_ts INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('attempting','success','submitted','pending','skipped',
+        'failed','rejected','failed_max_retries','failed_orphaned')),
+      tx_hash TEXT, gas_used INTEGER, error_msg TEXT,
+      retry_count INTEGER NOT NULL DEFAULT 0, details_json TEXT
+    );
+    CREATE INDEX idx_redeem_log_condition_ts ON redeem_log(condition_id, attempt_ts DESC);
+    CREATE INDEX idx_redeem_log_status_ts ON redeem_log(status, attempt_ts DESC);
+    CREATE UNIQUE INDEX idx_redeem_log_unique_in_flight
+      ON redeem_log(condition_id) WHERE status IN ('attempting','submitted','pending');
   `);
 });
 
@@ -98,6 +121,30 @@ function insertMetric(metricName: string, capturedAt: string): void {
 
 function count(table: string): number {
   return (db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c;
+}
+
+function insertRedeemLog(row: {
+  conditionId: string;
+  attemptTs: number;
+  status: string;
+  errorMsg?: string | null;
+  retryCount?: number;
+  txHash?: string | null;
+  gasUsed?: number | null;
+}): void {
+  db.prepare(
+    `INSERT INTO redeem_log
+     (condition_id, token_ids, attempt_ts, status, tx_hash, gas_used, error_msg, retry_count)
+     VALUES (?, '[]', ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    row.conditionId,
+    row.attemptTs,
+    row.status,
+    row.txHash ?? null,
+    row.gasUsed ?? null,
+    row.errorMsg ?? null,
+    row.retryCount ?? 0,
+  );
 }
 
 function insertBucket(bucketStartMs: number, bucketGranularityMs: number): void {
@@ -857,6 +904,358 @@ describe("LedgerRetentionModule", () => {
     expect(result.deleted["signal_feed_buckets"]).toBe(3);
     expect(remainingMidSweep).toBeGreaterThan(0);
     expect(countRows()).toBe(0);
+  });
+});
+
+describe("LedgerRetentionModule — redeem_log churn retention", () => {
+  it("deletes state_failed_quarantine and state_failed_cooldown rows past the 7-day TTL", async () => {
+    const eightDaysAgo = NOW - 8 * DAY_MS;
+    insertRedeemLog({
+      conditionId: "cond-quarantine",
+      attemptTs: eightDaysAgo,
+      status: "skipped",
+      errorMsg: "state_failed_quarantine",
+    });
+    insertRedeemLog({
+      conditionId: "cond-cooldown",
+      attemptTs: eightDaysAgo,
+      status: "skipped",
+      errorMsg: "state_failed_cooldown",
+    });
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["redeem_log"]).toBe(2);
+    expect(count("redeem_log")).toBe(0);
+  });
+
+  it("keeps a state_failed_quarantine row inside the 7-day TTL", async () => {
+    const oneDayAgo = NOW - 1 * DAY_MS;
+    insertRedeemLog({
+      conditionId: "cond-fresh",
+      attemptTs: oneDayAgo,
+      status: "skipped",
+      errorMsg: "state_failed_quarantine",
+    });
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["redeem_log"]).toBeUndefined();
+    expect(count("redeem_log")).toBe(1);
+  });
+
+  it("never deletes the success/failed/rejected audit trail, even 80 days old (v1 regression)", async () => {
+    const eightyDaysAgo = NOW - 80 * DAY_MS;
+    const auditStatuses = [
+      "success",
+      "failed",
+      "rejected",
+      "failed_max_retries",
+      "failed_orphaned",
+    ];
+    for (const status of auditStatuses) {
+      insertRedeemLog({ conditionId: `cond-${status}`, attemptTs: eightyDaysAgo, status });
+    }
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["redeem_log"]).toBeUndefined();
+    expect(count("redeem_log")).toBe(auditStatuses.length);
+  });
+
+  it("never deletes evidential skipped rows, even 80 days old (v2 regression)", async () => {
+    // Must fail if the predicate is widened back to `status = 'skipped'`.
+    const eightyDaysAgo = NOW - 80 * DAY_MS;
+    insertRedeemLog({
+      conditionId: "cond-zero-balance-quarantine",
+      attemptTs: eightyDaysAgo,
+      status: "skipped",
+      errorMsg: "zero_balance_quarantine",
+    });
+    insertRedeemLog({
+      conditionId: "cond-zero-balance-precheck",
+      attemptTs: eightyDaysAgo,
+      status: "skipped",
+      errorMsg: "zero_balance_precheck_skip",
+    });
+    insertRedeemLog({
+      conditionId: "cond-active-orders",
+      attemptTs: eightyDaysAgo,
+      status: "skipped",
+      errorMsg: "active_orders_exist",
+    });
+    insertRedeemLog({
+      conditionId: "cond-null-reason",
+      attemptTs: eightyDaysAgo,
+      status: "skipped",
+      errorMsg: null,
+    });
+    // The census tuple `skipped / NULL / retry_count=1` (52 rows in production) — kept by the
+    // error_msg term AND by the retry_count term, so it survives either one being relaxed alone.
+    insertRedeemLog({
+      conditionId: "cond-null-reason-retried",
+      attemptTs: eightyDaysAgo,
+      status: "skipped",
+      errorMsg: null,
+      retryCount: 1,
+    });
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["redeem_log"]).toBeUndefined();
+    expect(count("redeem_log")).toBe(5);
+  });
+
+  it("keeps a non-skipped row that carries a churn reason (isolates the status term)", async () => {
+    // The v1 audit-trail rows all have error_msg NULL, and `NULL IN (...)` is UNKNOWN — so they stay
+    // even if `status = 'skipped'` were widened, and that test alone does not pin the status term.
+    // These rows differ from a deletable one in status ONLY: same reason, retry 0, no hash, no gas.
+    const eightyDaysAgo = NOW - 80 * DAY_MS;
+    insertRedeemLog({
+      conditionId: "cond-failed-with-churn-reason",
+      attemptTs: eightyDaysAgo,
+      status: "failed",
+      errorMsg: "state_failed_quarantine",
+    });
+    insertRedeemLog({
+      conditionId: "cond-rejected-with-churn-reason",
+      attemptTs: eightyDaysAgo,
+      status: "rejected",
+      errorMsg: "state_failed_cooldown",
+    });
+    // The production census tuple, which the v1 test approximates with retry_count 0.
+    insertRedeemLog({
+      conditionId: "cond-max-retries-census",
+      attemptTs: eightyDaysAgo,
+      status: "failed_max_retries",
+      errorMsg: "retries exhausted",
+      retryCount: 2,
+    });
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["redeem_log"]).toBeUndefined();
+    expect(count("redeem_log")).toBe(3);
+  });
+
+  it("keeps a churn row with retry_count, tx_hash or gas_used set, even 80 days old (belt-and-braces)", async () => {
+    const eightyDaysAgo = NOW - 80 * DAY_MS;
+    insertRedeemLog({
+      conditionId: "cond-retried",
+      attemptTs: eightyDaysAgo,
+      status: "skipped",
+      errorMsg: "state_failed_quarantine",
+      retryCount: 1,
+    });
+    insertRedeemLog({
+      conditionId: "cond-tx-hash",
+      attemptTs: eightyDaysAgo,
+      status: "skipped",
+      errorMsg: "state_failed_quarantine",
+      txHash: "0xabc",
+    });
+    insertRedeemLog({
+      conditionId: "cond-gas-used",
+      attemptTs: eightyDaysAgo,
+      status: "skipped",
+      errorMsg: "state_failed_quarantine",
+      gasUsed: 21_000,
+    });
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["redeem_log"]).toBeUndefined();
+    expect(count("redeem_log")).toBe(3);
+  });
+
+  it("the promotion guard: a stale active row's condition keeps its churn row too, and nothing is orphaned", async () => {
+    // T1 (attempting) < T2 (churn skip), both older than the 7-day cutoff. Deleting the T2 row would
+    // un-mask the T1 attempting row as "latest" for findRecentActiveAttempts / hasRecentActiveAttempt
+    // / markOrphanedActiveAttempts — all three define "latest" as "no strictly newer row of ANY
+    // status". The guard must keep every row of this condition instead.
+    // All three active statuses, not just `attempting` — the guard's subquery lists all three, and
+    // markOrphanedActiveAttempts marks all three.
+    const tenDaysAgo = NOW - 10 * DAY_MS;
+    const nineDaysAgo = NOW - 9 * DAY_MS;
+    const activeStatuses = ["attempting", "submitted", "pending"];
+    for (const status of activeStatuses) {
+      insertRedeemLog({
+        conditionId: `cond-stale-${status}`,
+        attemptTs: tenDaysAgo,
+        status,
+      });
+      insertRedeemLog({
+        conditionId: `cond-stale-${status}`,
+        attemptTs: nineDaysAgo,
+        status: "skipped",
+        errorMsg: "state_failed_quarantine",
+      });
+    }
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["redeem_log"]).toBeUndefined();
+    expect(count("redeem_log")).toBe(activeStatuses.length * 2);
+
+    const repo = new SqliteRedeemLogRepository(db);
+    const orphaned = repo.markOrphanedActiveAttempts(NOW, "test_orphan");
+    expect(orphaned).toEqual([]);
+  });
+
+  it("never deletes an active row, regardless of age, even with no other rows for its condition", async () => {
+    const eightyDaysAgo = NOW - 80 * DAY_MS;
+    insertRedeemLog({
+      conditionId: "cond-lone-active",
+      attemptTs: eightyDaysAgo,
+      status: "attempting",
+    });
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["redeem_log"]).toBeUndefined();
+    expect(count("redeem_log")).toBe(1);
+  });
+
+  it("epoch-ms cutoff: a row just past 7 days old is deleted, one just inside survives", async () => {
+    // Fails loudly if `timestampFormat: "epochMs"` is dropped — attempt_ts is epoch ms, and the ISO
+    // default would compare an INTEGER column against a TEXT cutoff. SQLite's type ordering puts
+    // every integer below every string, so BOTH rows would be deleted, the one inside the TTL too.
+    const justPastTtl = NOW - (7 * DAY_MS + 60_000);
+    const justInsideTtl = NOW - (7 * DAY_MS - 60_000);
+    insertRedeemLog({
+      conditionId: "cond-just-past",
+      attemptTs: justPastTtl,
+      status: "skipped",
+      errorMsg: "state_failed_quarantine",
+    });
+    insertRedeemLog({
+      conditionId: "cond-just-inside",
+      attemptTs: justInsideTtl,
+      status: "skipped",
+      errorMsg: "state_failed_quarantine",
+    });
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["redeem_log"]).toBe(1);
+    const rows = db.prepare("SELECT condition_id FROM redeem_log").all() as Array<{
+      condition_id: string;
+    }>;
+    expect(rows).toEqual([{ condition_id: "cond-just-inside" }]);
+  });
+
+  it("caps redeem_log at the DEFAULT redeemLogMaxRowsPerRun across two passes", async () => {
+    // No config override on purpose: the assertion is against the shipped default, so raising it to
+    // the shared 500k budget would fail here.
+    const eightDaysAgo = NOW - 8 * DAY_MS;
+    const insert = db.prepare(
+      `INSERT INTO redeem_log (condition_id, token_ids, attempt_ts, status, error_msg)
+       VALUES (?, '[]', ?, 'skipped', 'state_failed_quarantine')`,
+    );
+    const insertMany = db.transaction(() => {
+      for (let i = 0; i < 60_000; i++) {
+        insert.run(`cond-bulk-${i}`, eightDaysAgo + i);
+      }
+    });
+    insertMany();
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const first = await mod.runOnce(NOW);
+    expect(first.deleted["redeem_log"]).toBe(50_000);
+    expect(count("redeem_log")).toBe(10_000);
+
+    const second = await mod.runOnce(NOW);
+    expect(second.deleted["redeem_log"]).toBe(10_000);
+    expect(count("redeem_log")).toBe(0);
+  });
+
+  it("the per-task cap binds redeem_log only, not a task that leaves maxRowsPerRun undefined", async () => {
+    // Both tasks have MORE rows past their TTL than the cap allows, so a cap applied to the whole
+    // pass instead of to one task would show up as decision_signal_log deleting 2 of 3.
+    const eightDaysAgo = NOW - 8 * DAY_MS;
+    for (let i = 0; i < 3; i++) {
+      insertRedeemLog({
+        conditionId: `cond-isolation-${i}`,
+        attemptTs: eightDaysAgo + i,
+        status: "skipped",
+        errorMsg: "state_failed_quarantine",
+      });
+      db.prepare("INSERT INTO decision_signal_log (signal_timestamp) VALUES (?)").run(
+        "2025-12-01T00:00:00.000Z",
+      );
+    }
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99, redeemLogMaxRowsPerRun: 2 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["redeem_log"]).toBe(2);
+    expect(result.deleted["decision_signal_log"]).toBe(3);
+    expect(count("redeem_log")).toBe(1);
+    expect(count("decision_signal_log")).toBe(0);
   });
 });
 
