@@ -10,7 +10,7 @@
     "prepare": "node scripts/install-git-hooks.mjs",
     "build": "turbo run build",
     "test": "turbo run test",
-    "test:prepush": "pnpm --filter @krabs/domain build && pnpm --filter @krabs/db build && pnpm --filter @krabs/config exec vitest run src/__tests__/loader.test.ts && pnpm --filter @krabs/api exec vitest run src/__tests__/config-import.test.ts && pnpm --filter @krabs/runtime exec vitest run src/__tests__/bootstrap-import.test.ts src/__tests__/marketability.test.ts src/__tests__/scanner.test.ts src/__tests__/signal-to-order-bridge.test.ts && pnpm --filter @krabs/db exec vitest run src/__tests__/family-config-import.test.ts",
+    "test:prepush": "node scripts/prepush-suites.mjs",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "dev": "turbo run dev",
