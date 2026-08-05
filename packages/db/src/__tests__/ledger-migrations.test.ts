@@ -290,6 +290,63 @@ describe("migration 090 — signal_feed_buckets age index", () => {
   });
 });
 
+describe("migration 094 — decision_signal_log rule+time index", () => {
+  /**
+   * The index existed only on production, created by hand — no migration made it, so a rebuilt
+   * or restored ledger lost it silently and `/metrics/r23` degraded without any test noticing.
+   * Run the REAL migration set and assert the plan, so a deleted file fails here rather than in
+   * an operator's dashboard.
+   */
+  it("serves the rule-scoped hourly rollup that the side-leading index cannot", () => {
+    const migrated = new Database(":memory:");
+    try {
+      runMigrations(migrated);
+
+      // index_xinfo, not index_info: the point of this migration is byte-exact parity with the
+      // index a human already created on production, and only xinfo exposes the sort order — under
+      // index_info an accidental flip of signal_timestamp to ASC still passes.
+      const indexed = migrated
+        .prepare("PRAGMA index_xinfo(idx_decision_signal_log_rule_ts)")
+        .all() as Array<{ name: string | null; desc: number; key: number }>;
+      expect(
+        indexed.filter((column) => column.key === 1).map((column) => [column.name, column.desc]),
+      ).toEqual([
+        ["decision_rule_id", 0],
+        ["signal_timestamp", 1],
+      ]);
+
+      // The exact shape of the fireRows query in apps/api/src/routes/metrics.ts — filtered by
+      // decision_rule_id with NO `side` term, which is why migration 041's
+      // idx_decision_signal_log_side_rule_ts (side leading) cannot serve it.
+      const plan = migrated
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT strftime('%Y-%m-%dT%H:00:00Z', signal_timestamp) AS hour, COUNT(*) AS count
+             FROM decision_signal_log
+            WHERE decision_rule_id = ?
+              AND signal_timestamp >= ?
+            GROUP BY hour
+            ORDER BY hour`,
+        )
+        .all("R23_DIP_TRIGGER", "2026-08-04T00:00:00Z") as Array<{ detail: string }>;
+      const details = plan.map((step) => step.detail);
+
+      // Assert the index BY NAME: without this migration the planner still reports a SEARCH,
+      // but over idx_decision_signal_log_ts, filtering every row in the window.
+      expect(details).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("SEARCH decision_signal_log"),
+          expect.stringContaining("idx_decision_signal_log_rule_ts"),
+        ]),
+      );
+      // The GROUP BY on a strftime() expression always needs a temp sort — that cost is inherent
+      // to the query, not to the index, so it is deliberately not asserted against here.
+    } finally {
+      migrated.close();
+    }
+  });
+});
+
 describe("migration 074 — dust auto close state", () => {
   it("creates the dust_auto_close_state table, retry index, and status check", () => {
     db.exec(readMigration("074_dust_auto_close_state.sql"));
