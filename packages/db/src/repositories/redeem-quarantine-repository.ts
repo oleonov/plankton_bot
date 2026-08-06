@@ -1,5 +1,7 @@
 import type Database from "better-sqlite3";
 
+import { nowIso, toSqliteDateTime } from "../db-timestamp.js";
+
 export interface RedeemQuarantineState {
   conditionId: string;
   consecutiveStateFailedCount: number;
@@ -83,10 +85,10 @@ export class SqliteRedeemQuarantineRepository {
             SET consecutive_state_failed_count = ?,
                 redeem_quarantine_until_ts = ?,
                 last_state_failed_ts = ?,
-                updated_at = datetime('now')
+                updated_at = ?
           WHERE condition_id = ?`,
       )
-      .run(nextCount, nextUntil, input.nowTs, input.conditionId);
+      .run(nextCount, nextUntil, input.nowTs, nowIso(), input.conditionId);
 
     return {
       ...(this.findOne(input.conditionId) ?? {
@@ -128,10 +130,10 @@ export class SqliteRedeemQuarantineRepository {
             SET redeem_quarantine_until_ts = ?,
                 consecutive_state_failed_count = 0,
                 last_state_failed_ts = NULL,
-                updated_at = datetime('now')
+                updated_at = ?
           WHERE condition_id = ?`,
       )
-      .run(nextUntil, input.conditionId);
+      .run(nextUntil, nowIso(), input.conditionId);
 
     return {
       ...(this.findOne(input.conditionId) ?? {
@@ -206,10 +208,10 @@ export class SqliteRedeemQuarantineRepository {
         `UPDATE positions
             SET consecutive_state_failed_count = 0,
                 redeem_quarantine_until_ts = NULL,
-                updated_at = datetime('now')
+                updated_at = ?
           WHERE condition_id = ?`,
       )
-      .run(conditionId);
+      .run(nowIso(), conditionId);
     const previousCount = before?.consecutiveStateFailedCount ?? 0;
     const previousUntil = before?.redeemQuarantineUntilTs ?? null;
     return {
@@ -245,8 +247,4 @@ function mapState(row: RawRedeemQuarantineState): RedeemQuarantineState {
     positionRows: row.position_rows,
     totalBasisUsdc: row.total_basis_usdc ?? 0,
   };
-}
-
-function toSqliteDateTime(valueMs: number): string {
-  return new Date(valueMs).toISOString().slice(0, 19).replace("T", " ");
 }

@@ -5,6 +5,7 @@ import type {
   PositionRepository,
   RuntimeModule,
 } from "@krabs/domain";
+import { parseLedgerInstantMs } from "@krabs/db";
 import type { Logger } from "../../logger.js";
 import {
   recordLegStateClearTransition,
@@ -150,7 +151,7 @@ export class LegStateTrackerModule implements RuntimeModule {
       await this.deps.bus.publish("LegStateCleared", {
         tokenId: p.position.tokenId,
         reason: "position_size_zero",
-        timestamp: Date.parse(p.position.updatedAt),
+        timestamp: parseLedgerInstantMs(p.position.updatedAt),
       });
       this.log.info(
         { tokenId: String(p.position.tokenId) },

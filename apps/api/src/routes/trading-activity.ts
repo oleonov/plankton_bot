@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import { ledgerInstant } from "@krabs/db";
 import { ok } from "../errors.js";
 
 interface TradingActivityOpts {
@@ -26,12 +27,18 @@ export const tradingActivityRoutes: FastifyPluginAsync<TradingActivityOpts> = as
     since.setDate(since.getDate() - days);
     const sinceStr = since.toISOString();
 
+    // Both sides go through `ledgerInstant()`: the bind is an ISO instant, while
+    // `captured_at TEXT NOT NULL DEFAULT (datetime('now'))` survives on the production table
+    // (SQLite has no `ALTER COLUMN … SET DEFAULT`), so a writer that omits the column would
+    // render space-form — and ' ' (0x20) < 'T' (0x54) puts every such row below every same-day
+    // ISO bind, silently dropping it from the window and mis-ordering the series. Cold route
+    // over a table 14-day retention caps at ~2k rows, so losing the index seek costs nothing.
     const rows = opts.db
       .prepare(
         `SELECT trading_state, signals_produced, signals_approved, signals_rejected, captured_at
          FROM trading_state_snapshots
-         WHERE captured_at >= ?
-         ORDER BY captured_at ASC`,
+         WHERE ${ledgerInstant("captured_at")} >= ${ledgerInstant("?")}
+         ORDER BY ${ledgerInstant("captured_at")} ASC`,
       )
       .all(sinceStr) as SnapshotRow[];
 

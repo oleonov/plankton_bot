@@ -446,18 +446,28 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       .all(sinceIso) as Array<{ hour: string | null; reason: string | null; count: number }>;
     const orderStats = db
       .prepare(
+        // The bug was the BIND, not the column: `datetime(?)` rendered the ISO cutoff in SQLite's
+        // space format, and every same-day ISO row then compared above it (`'T'` > `' '`),
+        // counting orders placed BEFORE the window. `sinceIso` is already canonical ISO and
+        // `orders.created_at` is single-rendering (68,098/68,098 on the live ledger — its sole
+        // writer binds it explicitly), so comparing the raw column to the raw bind is both correct
+        // and index-friendly. (`risk_events.created_at` above is deliberately space-format, so its
+        // `datetime(?)` bound is correct as written.)
         `SELECT COUNT(*) AS ordersPlaced
            FROM orders
           WHERE decision_rule_id = 'R23_DIP_TRIGGER'
-            AND created_at >= datetime(?)`,
+            AND created_at >= ?`,
       )
       .get(sinceIso) as { ordersPlaced: number };
     const fillStats = db
       .prepare(
+        // Same shape, same reasoning: `fills.filled_at` is single-rendering (2,648/2,648, sole
+        // writer binds it explicitly, so the column DEFAULT is unreachable), so the raw comparison
+        // cannot mis-rank and keeps both seek columns of `idx_fills_decision_rule_filled_at`.
         `SELECT COUNT(*) AS fills, COALESCE(SUM(size_usdc), 0) AS fillNotionalUsdc
            FROM fills
           WHERE decision_rule_id = 'R23_DIP_TRIGGER'
-            AND filled_at >= datetime(?)`,
+            AND filled_at >= ?`,
       )
       .get(sinceIso) as { fills: number; fillNotionalUsdc: number };
 

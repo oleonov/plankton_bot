@@ -24,11 +24,24 @@
 
 import Database from "better-sqlite3";
 
+/**
+ * `ledgerInstant()` from @krabs/db, inlined — this script is a standalone .mjs run
+ * inside the runtime container with no workspace resolution. Keep the two in sync.
+ */
+const LEDGER_INSTANT = (column) => `julianday(replace(${column}, '+00', ''))`;
+
 const args = parseArgs(process.argv.slice(2));
 const dbPath = args.db ?? "/app/apps/runtime/data/ledger-live-lite.db";
 const since = args.since ?? "2026-04-22";
 
 const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+
+// `closed_at` is bounded and ordered by INSTANT below, so an unparseable --since would
+// silently yield an empty cohort instead of an obviously-wrong one. Fail loudly instead.
+if (db.prepare(`SELECT ${LEDGER_INSTANT("?")} AS jd`).get(since).jd === null) {
+  console.error(`--since "${since}" is not a timestamp SQLite can parse`);
+  process.exit(1);
+}
 
 const cohort = db
   .prepare(
@@ -76,8 +89,12 @@ const cohort = db
   FROM positions p
   LEFT JOIN markets m ON m.token_id = p.token_id
   WHERE p.status = 'closed'
-    AND p.closed_at >= ?
-  ORDER BY p.closed_at DESC
+    -- Bounded and ordered by INSTANT, not by text: the two renderings of closed_at
+    -- interleave lexically within one calendar day (space 0x20 < 'T' 0x54), so a raw
+    -- >= '2026-08-05T05:30:00Z' drops every same-day redeem-closed row, and a raw
+    -- ORDER BY interleaves the two formats into a wrong chronology.
+    AND ${LEDGER_INSTANT("p.closed_at")} >= ${LEDGER_INSTANT("?")}
+  ORDER BY ${LEDGER_INSTANT("p.closed_at")} DESC
 `,
   )
   .all(since);

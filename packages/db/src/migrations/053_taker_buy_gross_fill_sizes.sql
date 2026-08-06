@@ -1,6 +1,10 @@
 -- Polymarket wallet positions count the full share quantity from taker BUY
 -- fills. Before 2026-05-11 we incorrectly persisted BUY taker `fills.size`
 -- net of the taker fee, which made local positions smaller than the wallet.
+--
+-- `updated_at` is written ISO-8601, not `datetime('now')`: every other writer of
+-- positions/leg_states emits ISO, and the space format sorts BELOW any same-day ISO
+-- string, breaking `MAX()`/`> ?`/`ORDER BY` over the column. See db-timestamp.ts.
 
 UPDATE fills
    SET size = size_usdc / price
@@ -103,7 +107,7 @@ UPDATE positions
          )
          ELSE avg_entry_price
        END,
-       updated_at = datetime('now')
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
  WHERE position_id IN (SELECT position_id FROM position_totals)
    AND (
          ABS(size - (
@@ -157,7 +161,7 @@ UPDATE leg_states
             AND f.side = 'sell'
             AND f.filled_at >= leg_states.first_trade_at
        ), 0),
-       updated_at = datetime('now')
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
  WHERE EXISTS (
          SELECT 1
            FROM fills f

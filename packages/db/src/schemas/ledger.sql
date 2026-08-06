@@ -159,8 +159,11 @@ CREATE TABLE IF NOT EXISTS orders (
   -- cross-cycle commands. See docs/plans/2026-07-24-release-a-phase3-owner-servicing.md.
   position_id        TEXT,
   bot_run_id         TEXT NOT NULL,
-  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+  -- ISO-8601 UTC, not `datetime('now')`: readers bound and order on these columns, and SQLite's
+  -- space format sorts BELOW any same-day ISO string (`' '` 0x20 < `'T'` 0x54). A column written
+  -- in both renderings breaks every `MAX()`/`> ?`/`ORDER BY` over it. See db-timestamp.ts.
+  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
@@ -239,7 +242,8 @@ CREATE TABLE IF NOT EXISTS fills (
   decision_rule_id TEXT,
   signal_timestamp TEXT,
   reconciled   INTEGER NOT NULL DEFAULT 0,
-  filled_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  -- ISO-8601 UTC for the same reason as orders.created_at — see db-timestamp.ts.
+  filled_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_id);
@@ -286,12 +290,13 @@ CREATE TABLE IF NOT EXISTS positions (
   -- migration 087 (Release A): 'bounce' | 'profile' | NULL, sticky, set once at first fill.
   -- migration 089: allowed-values CHECK (fresh DBs); upgraded DBs enforce the same via a trigger.
   exit_owner         TEXT CHECK (exit_owner IN ('bounce', 'profile') OR exit_owner IS NULL),
-  opened_at          TEXT NOT NULL DEFAULT (datetime('now')),
+  -- ISO-8601 UTC for the same reason as orders.created_at — see db-timestamp.ts.
+  opened_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   closed_at          TEXT,
   consecutive_state_failed_count INTEGER NOT NULL DEFAULT 0,
   redeem_quarantine_until_ts     INTEGER,
   last_state_failed_ts           INTEGER,
-  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);

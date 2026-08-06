@@ -1694,6 +1694,184 @@ describe("AlgoDecisionModule", () => {
     }
   });
 
+  it("retains R23 probe no-order-id cooldown recovered from a same-day space-format rejection row", async () => {
+    // The defect only exists when the fixture row and the module's own cutoff share a UTC
+    // calendar day — across days a raw TEXT compare is correct in both renderings, so an
+    // unpinned clock would let this test pass against the UNFIXED code whenever the run
+    // starts within minutes of UTC midnight. Pin Date to a mid-day instant so the minute-scale
+    // offsets below have room in both directions; timers stay real because `mod.start()` and
+    // the bus emit below await real async work.
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-05-08T12:00:00.000Z") });
+    // Whole-second anchor so stripping milliseconds for the legacy space-format fixture below
+    // loses no precision.
+    const nowMs = Math.floor(Date.now() / 1000) * 1000;
+    const cooldownMs = 15 * 60 * 1000;
+    const rejectedAtMs = nowMs - 5 * 60_000;
+    const spaceFormatRejectedAt = new Date(rejectedAtMs)
+      .toISOString()
+      .replace("T", " ")
+      .replace(/\.\d+Z$/, "");
+
+    const tokenId = "token-r23-no-id-space-only";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const ledgerDb = new Database(":memory:");
+    ledgerDb.exec(`
+      CREATE TABLE orders (
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        status TEXT NOT NULL,
+        decision_rule_id TEXT,
+        signal_reason TEXT,
+        exchange_error_message TEXT,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    // Inserted as raw TEXT in the legacy `datetime('now')` space rendering — going
+    // through the repository would emit ISO and would not exercise the mixed-format bug.
+    ledgerDb
+      .prepare(
+        `INSERT INTO orders
+         (token_id, side, status, decision_rule_id, signal_reason, exchange_error_message, updated_at)
+         VALUES (?, 'buy', 'rejected', 'R23_DIP_TRIGGER', 'probe-entry',
+                 'exchange returned no order id', ?)`,
+      )
+      .run(tokenId, spaceFormatRejectedAt);
+    const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      maxMidpointInWindow: vi.fn(() => 0.6),
+    };
+    const mod = buildModule({
+      ledgerDb,
+      runtimeMetrics,
+      priceHistoryProvider,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+
+    try {
+      await mod.start();
+
+      // A raw `updated_at >= isoCutoff` compare drops this row outright (same-day
+      // space-format text lexically sorts below any same-day ISO cutoff), so the
+      // unfixed query recovers nothing here and this map lookup is undefined.
+      const blockedUntilMs = (mod as any).r23ProbeNoOrderIdCooldownUntilMs.get(tokenId);
+      expect(blockedUntilMs).toBe(rejectedAtMs + cooldownMs);
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.3)],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls).toHaveLength(0);
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "r23_probe_no_order_id_cooldown_recovered_total",
+        1,
+        expect.not.stringContaining(tokenId),
+      );
+    } finally {
+      await mod.stop();
+      ledgerDb.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("computes R23 probe no-order-id remaining cooldown from the chronologically newest rejection when ISO and space-format rows collide same day", async () => {
+    // Same calendar-day dependency as the test above — see its comment for why Date is pinned.
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-05-08T12:00:00.000Z") });
+    const nowMs = Math.floor(Date.now() / 1000) * 1000;
+    const cooldownMs = 15 * 60 * 1000;
+    const olderIsoAtMs = nowMs - 10 * 60_000;
+    const newerSpaceAtMs = nowMs - 3 * 60_000;
+    const olderIsoRejectedAt = new Date(olderIsoAtMs).toISOString();
+    const newerSpaceRejectedAt = new Date(newerSpaceAtMs)
+      .toISOString()
+      .replace("T", " ")
+      .replace(/\.\d+Z$/, "");
+
+    const tokenId = "token-r23-no-id-mixed-format";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const ledgerDb = new Database(":memory:");
+    ledgerDb.exec(`
+      CREATE TABLE orders (
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        status TEXT NOT NULL,
+        decision_rule_id TEXT,
+        signal_reason TEXT,
+        exchange_error_message TEXT,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    const insertRejection = ledgerDb.prepare(
+      `INSERT INTO orders
+       (token_id, side, status, decision_rule_id, signal_reason, exchange_error_message, updated_at)
+       VALUES (?, 'buy', 'rejected', 'R23_DIP_TRIGGER', 'probe-entry',
+               'exchange returned no order id', ?)`,
+    );
+    // Older ISO row (what a raw-TEXT MAX() prefers, since 'T' sorts above the
+    // space-format rendering) plus a chronologically newer same-day space-format
+    // row — written directly, not via the repository, so both renderings are real.
+    insertRejection.run(tokenId, olderIsoRejectedAt);
+    insertRejection.run(tokenId, newerSpaceRejectedAt);
+
+    const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      maxMidpointInWindow: vi.fn(() => 0.6),
+    };
+    const mod = buildModule({
+      ledgerDb,
+      runtimeMetrics,
+      priceHistoryProvider,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+
+    try {
+      await mod.start();
+
+      const blockedUntilMs = (mod as any).r23ProbeNoOrderIdCooldownUntilMs.get(tokenId);
+      // Unfixed: raw MAX(updated_at) returns the older ISO row (olderIsoAtMs + cooldownMs),
+      // understating the remaining cooldown by the 7-minute gap to the real newest rejection.
+      expect(blockedUntilMs).toBe(newerSpaceAtMs + cooldownMs);
+      expect(blockedUntilMs).not.toBe(olderIsoAtMs + cooldownMs);
+    } finally {
+      await mod.stop();
+      ledgerDb.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("resumes flat R23 probe generation after an active market slot is freed", async () => {
     const tokenId = "token-r23-resume";
     const activeTokenId = "token-active-before-close";

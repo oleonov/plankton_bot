@@ -19,6 +19,7 @@ import type {
   TokenId,
 } from "@krabs/domain";
 import { createFillId, createOrderId, createTokenId } from "@krabs/domain";
+import { ledgerInstant, parseLedgerInstantMs } from "@krabs/db";
 import type { Logger } from "./logger.js";
 import { resolveOpenPositionStatus } from "./position-status.js";
 import { InventoryHandler } from "./modules/risk-inventory/inventory-handler.js";
@@ -529,8 +530,8 @@ function rebuildLegStatesFromLedger(
   // than the active leg's `opened_at`: that's the chronologically-prior
   // close. Filtering on `closed_at < active.opened_at` is essential because
   // bootstrap's duplicate-open repair (`ensureUniqueOpenPositionIndex` in
-  // packages/db/src/bootstrap.ts) writes `closed_at = datetime('now')`,
-  // which would otherwise outrank any real prior close and mask out the
+  // packages/db/src/bootstrap.ts) stamps `closed_at` at repair time, which
+  // would otherwise outrank any real prior close and mask out the
   // active leg's own fills. Using `closed_at` (rather than `opened_at`) for
   // the prior leg avoids the clock-skew gap between exchange `filled_at`
   // (event-time) and the active position's `opened_at` (wall-clock at handler
@@ -538,27 +539,32 @@ function rebuildLegStatesFromLedger(
   // but it always has `filled_at > prior.closed_at` since the prior leg's
   // closure happened chronologically earlier on the wire.
   //
-  // Comparisons go through `julianday()` because the duplicate-open repair
-  // writes SQLite's `datetime('now')` format (`YYYY-MM-DD HH:MM:SS`) while
-  // runtime opens/fills/closes are ISO strings (`YYYY-MM-DDTHH:mm:ss.sssZ`).
-  // Lexical ordering disagrees with chronological ordering on the same calendar
-  // day (space sorts before `T`), so a same-day synthetic close would falsely
-  // qualify as "prior" without numeric time parsing.
+  // Comparisons AND the pick of the latest leg both go through `ledgerInstant()` because
+  // `closed_at` carries three renderings of the same instant — see packages/db/src/db-timestamp.ts.
+  // Lexical ordering disagrees with chronological ordering on the same calendar day (space sorts
+  // before `T`), so `MAX(closed_at)` would return the earlier ISO leg over a later space-format
+  // one and replay would start too early, leaking the intervening leg's fills into the active leg.
+  // Ordering numerically instead of maxing lexically is what keeps the filter and the pick agreed.
   //
   // When no prior closed leg exists, fall back to no lower bound — there is
   // nothing to leak from.
   const priorCloseStmt = deps.db.prepare(
-    `SELECT MAX(closed_at) AS max_closed_at FROM positions
+    `SELECT closed_at AS max_closed_at FROM positions
        WHERE token_id = ?
          AND status = 'closed'
          AND closed_at IS NOT NULL
-         AND julianday(closed_at) < julianday(?)`,
+         AND ${ledgerInstant("closed_at")} < ${ledgerInstant("?")}
+       ORDER BY ${ledgerInstant("closed_at")} DESC
+       LIMIT 1`,
   );
+  // The lower bound is wrapped because its bind is the prior leg's `closed_at`, which carries the
+  // legacy space and Gamma renderings. The ORDER BY compares `filled_at` only against itself — a
+  // single-rendering canonical column — so it sorts raw and keeps the plain string ordering.
   const selectFillsScoped = deps.db.prepare(
     `SELECT fill_id, token_id, condition_id, side, price, size, size_usdc, filled_at
        FROM fills
       WHERE token_id = ?
-        AND julianday(filled_at) > julianday(?)
+        AND ${ledgerInstant("filled_at")} > ${ledgerInstant("?")}
       ORDER BY filled_at ASC, fill_id ASC`,
   );
 
@@ -739,10 +745,157 @@ function deleteWhereIn(
   db.prepare(`DELETE FROM ${table} WHERE ${column} IN (${placeholders})`).run(...values);
 }
 
+/**
+ * Hand every merge source's ENTIRE ledger footprint to the winner: every lot it owns — live AND
+ * fully consumed — and every realized row.
+ *
+ * Moving only the live lots splits one round trip across two positions. `buildPositionCycles`
+ * (apps/api/src/routes/position-cycles.ts) attributes a BUY by `inventory_lots.position_id` while
+ * carrying `fills.size` — the FULL original fill, never `remaining_size` — and attributes the SELL
+ * by `pnl_ledger.position_id`. A lot that bought 10 and still holds 4 would hand the winner a
+ * 10-share BUY it never made and leave the source a SELL with no BUY (`UNKNOWN_ACCT`), corrupting
+ * invested value, holding interval and P&L percentage on both cycles. Whole-footprint is what makes
+ * the survivor's cycle add up, and it is why this is the ONLY place lot ownership moves.
+ *
+ * `orders.position_id` deliberately stays put. It is the exit-owner servicing key (ledger.sql:160,
+ * Release A Phase 3): the executor scopes cancel/replace/backstop by it and rejects stale
+ * cross-cycle commands, so reparenting a source's orders would present them to the executor as the
+ * winner's live cycle. `settlement_ledger` stays too — settlement calls `settleAll` before closing
+ * (modules/resolution/position-settler.ts), which zeroes `remaining_size`, so a settled position
+ * can never appear among the live-lot owners this merges, and a non-closed source cannot own a
+ * settlement row at all.
+ */
+function mergeRetiredPositionFootprint(
+  db: Database.Database,
+  winnerPositionId: string,
+  mergeSourceIds: readonly string[],
+): void {
+  if (mergeSourceIds.length === 0) return;
+  const placeholders = mergeSourceIds.map(() => "?").join(", ");
+  for (const table of ["inventory_lots", "pnl_ledger"] as const) {
+    db.prepare(`UPDATE ${table} SET position_id = ? WHERE position_id IN (${placeholders})`).run(
+      winnerPositionId,
+      ...mergeSourceIds,
+    );
+  }
+}
+
+/**
+ * Retire exactly the positions named in `positionIds`: DELETE the rows that are provably
+ * unreferenced, CLOSE the rest. The caller passes an explicit list rather than a token-wide
+ * `status != 'closed'` filter because a merge source can ALREADY be closed — `rebuildTokenPosition`
+ * absorbs the footprint of every position that still owns a live lot for the token, and a closed
+ * position owning one is an ordinary state (reconciliation force-closes a position that vanished
+ * remotely without touching its lots, `ensureUniqueOpenPositionIndex` and migration 032 close
+ * duplicate opens the same way, and modules/resolution/resolution-module.ts searches for exactly
+ * that shape). Such a source is emptied by the merge and must be re-accounted too, or it keeps a
+ * basis and a realized total whose underlying rows now belong to the winner.
+ *
+ * DELETE alone is not safe. `inventory_lots`, `pnl_ledger` and `settlement_ledger` each declare
+ * `position_id ... REFERENCES positions(position_id)` with no ON DELETE clause (ledger.sql:328,
+ * 350, 377) and every runtime connection sets `PRAGMA foreign_keys = ON` (connection.ts:98), so
+ * deleting a position that still owns a fully-consumed lot (`remaining_size = 0`, invisible to the
+ * `remaining_size > 0` scan in `rebuildTokenPosition`), a realized-P&L row or a settlement row
+ * raises SQLITE_CONSTRAINT_FOREIGNKEY — aborting the whole adoption transaction and failing the
+ * very boot this repair exists to rescue. Closing such a row frees the slot in
+ * `idx_positions_unique_open_per_token` (partial, `WHERE status = 'open'`) just as deletion did,
+ * keeps it invisible to readers (they filter `status != 'closed'`) and preserves the audit trail
+ * its dependent rows belong to. Same primitive `ensureUniqueOpenPositionIndex` uses at
+ * bootstrap.ts:538.
+ *
+ * CLOSE alone is not safe either. A position with no dependent rows at all has no history to
+ * preserve, and closing it fabricates one: both the merge above and
+ * `cleanupPriorStartupAdoptionArtifacts` (which deletes a synthetic order's lots, fills and P&L
+ * rows immediately before calling here) can leave behind an empty husk — and a zero-`realized_pnl`
+ * closed row is counted as a LOSS by `readClosedWinrate` (apps/api/src/routes/dashboard.ts, which
+ * filters on nothing but `status`/`closed_at` and derives losses as `total - wins`) and returned as
+ * a phantom `CLOSED_PROFIT` cycle by `buildPositionCycles` (apps/api/src/routes/position-cycles.ts,
+ * which maps every `positions` row with no zero-fill guard). Those husks are deleted.
+ *
+ * `orders.position_id` (ledger.sql:160) does NOT join the test, and that holds for WORKING orders
+ * too. It declares no FK, so deleting the position cannot raise SQLITE_CONSTRAINT, and retaining
+ * the row buys nothing a working order can use: I2 (`stalePointerSells`, packages/db
+ * exit-ownership-invariants.ts) requires the pointed-to position to be `status <> 'closed'`, so a
+ * retired row flags exactly as a missing one does, and `exitOwnerIdentityRejection`
+ * (modules/execution/execution-module.ts) resolves its target out of `findActiveByTokenId`, where
+ * a closed row is equally absent — the order is unserviceable either way. Every other consumer is
+ * an in-memory equality or membership check that fails to match identically, I5 INNER JOINs
+ * `positions` and drops the row, and the P6 fence classifies the order stale off
+ * `activePositionIds` and drains it in the same boot. Deleted and closed are therefore
+ * indistinguishable to every reader — except that closing additionally fabricates the loss +
+ * phantom cycle described above, and does so permanently. So orders never pin a row.
+ * `leg_state_transitions.position_id` (ledger.sql:719) deliberately does NOT join the test —
+ * `cleanupPriorStartupAdoptionArtifacts` preserves those rows on purpose (they are the record that
+ * the reconciliation happened, and it removes only orders/fills/lots/P&L), so gating on them would
+ * make every cleaned artifact undeletable and reinstate exactly the phantom row described above.
+ *
+ * The rows that survive as closed are re-accounted, not merely flagged. At every call site the
+ * retired row provably holds no inventory — either the token has no remaining lots at all, or the
+ * winner has already absorbed AND taken ownership of every one of them (see
+ * `rebuildTokenPosition`) — so `size`, `cost_basis_usdc`, `current_value_usdc` and
+ * `liquidation_value_usdc` all go to zero. Zeroing the basis is not cosmetic: the winner's
+ * `cost_basis_usdc` already counts those same lots, and `GET /metrics/events`
+ * (apps/api/src/routes/metrics.ts) aggregates `cost_basis_usdc` and
+ * `current_value_usdc - cost_basis_usdc` over `positions` with NO status filter, so a retained
+ * basis is double-counted volume plus a fabricated unrealized loss of exactly that size.
+ * `liquidation_value_usdc` is the depth-aware valuation of that same vanished inventory and is
+ * read the same way — every aggregate takes it as `COALESCE(liquidation_value_usdc,
+ * current_value_usdc)` (metrics.ts, apps/api/src/routes/status.ts,
+ * modules/publisher/profile-runtime-publisher.ts, position-concentration-service.ts), so leaving it
+ * set would override the zeroed `current_value_usdc` and re-fabricate the profit as depth-aware.
+ * `realized_pnl` is recomputed from the row's OWN surviving `pnl_ledger` rows rather than kept,
+ * because the column is a denormalized cache of them: `cleanupPriorStartupAdoptionArtifacts`
+ * deletes the synthetic fills' P&L rows immediately before calling here, and `rebuildTokenPosition`
+ * hands a retired duplicate's realized rows to the winner — in both cases the stored total is
+ * orphaned, and it would be reported as a win by `readClosedWinrate` (dashboard.ts) and counted a
+ * second time in the winner's. `pnl_ledger` is the complete realized source for these rows:
+ * settlement always closes the position it settles (modules/resolution/position-settler.ts), and a
+ * settled row cannot reach here — `settleAll` zeroes `remaining_size`, so it never appears among
+ * the live-lot owners the caller merges, and the non-closed sources cannot own a settlement row.
+ *
+ * `closed_at = COALESCE(closed_at, ?)` keeps an already-closed source's original close time; only a
+ * row being closed for the first time gets a fresh stamp.
+ */
+function retirePositions(db: Database.Database, positionIds: readonly string[]): void {
+  if (positionIds.length === 0) return;
+  const placeholders = positionIds.map(() => "?").join(", ");
+  db.prepare(
+    `DELETE FROM positions
+      WHERE position_id IN (${placeholders})
+        AND NOT EXISTS (SELECT 1 FROM inventory_lots WHERE position_id = positions.position_id)
+        AND NOT EXISTS (SELECT 1 FROM pnl_ledger WHERE position_id = positions.position_id)
+        AND NOT EXISTS (SELECT 1 FROM settlement_ledger WHERE position_id = positions.position_id)`,
+  ).run(...positionIds);
+
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE positions
+        SET status = 'closed',
+            size = 0,
+            cost_basis_usdc = 0,
+            current_value_usdc = 0,
+            liquidation_value_usdc = 0,
+            realized_pnl = (SELECT COALESCE(SUM(delta), 0)
+                              FROM pnl_ledger
+                             WHERE position_id = positions.position_id),
+            closed_at = COALESCE(closed_at, ?),
+            updated_at = ?
+      WHERE position_id IN (${placeholders})`,
+  ).run(now, now, ...positionIds);
+}
+
 function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logger): void {
   // Winner selection matches the DB invariant:
-  //   `idx_positions_unique_open_per_token` + migration 032 repair rule =
-  //   `opened_at DESC, position_id DESC`.
+  //   `idx_positions_unique_open_per_token` + migration 032 repair rule — both rank by INSTANT,
+  // never by text (032:43-47 spells out `ledgerInstant()` inline because migrations cannot import
+  // it). The index is UNIQUE on token_id WHERE status = 'open', so it constrains only the 'open'
+  // rows; this query selects `status != 'closed'`, so an older 'open' row and a newer 'dust' row
+  // for one token are a legal state that lands here with something to rank. Text ordering would
+  // then pick the wrong survivor for a same-day space-vs-ISO pair — ' ' (0x20) < 'T' (0x54) puts
+  // the chronologically newer space row last — and every loser is CLOSED below, so the wrong
+  // ranking retires the live row rather than mis-sorting a display. `opened_at` is 100% canonical
+  // ISO on production today (680/680 measured 2026-08-06); the wrap costs nothing at that size and
+  // keeps this ranking identical to the migration's on any row that is not.
   // Tie-break on position_id DESC eliminates SQLite's implementation-defined
   // ordering when two rows share the same opened_at.
   const openRows = db
@@ -750,7 +903,7 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logge
       `SELECT position_id, entry_style, opened_at
        FROM positions
        WHERE token_id = ? AND status != 'closed'
-       ORDER BY opened_at DESC, position_id DESC`,
+       ORDER BY ${ledgerInstant("opened_at")} DESC, position_id DESC`,
     )
     .all(tokenId) as Array<{
     position_id: string;
@@ -773,7 +926,10 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logge
   }>;
 
   if (remainingLots.length === 0) {
-    db.prepare(`DELETE FROM positions WHERE token_id = ? AND status != 'closed'`).run(tokenId);
+    retirePositions(
+      db,
+      openRows.map((row) => row.position_id),
+    );
     return;
   }
 
@@ -790,20 +946,87 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logge
   }
 
   const activePositionId = openRows[0]?.position_id ?? remainingLots[0]!.position_id;
+  // Every position whose history the winner is about to absorb, and exactly the set retired below.
+  // Two sources, one rule:
+  //   - the non-closed duplicates (`openRows` minus the winner) — the invariant breach this repair
+  //     exists for;
+  //   - every OTHER owner of a live lot for this token, INCLUDING an already-closed one. The totals
+  //     below sum `remainingLots` token-wide, so each of those lots ends up in the winner's size and
+  //     basis; ownership has to follow, because every downstream consumer scopes by `position_id`,
+  //     never by token — SELL lot consumption (inventory-lot-repository.ts `consumeFifo`), exit
+  //     validation (modules/execution, @krabs/domain exit-loss-floor.ts) and settlement. A lot left
+  //     parented elsewhere is counted in the winner's basis and still unspendable by the SELL that
+  //     tries to consume it, surfacing as `cost_inconsistent` or `Insufficient inventory`.
+  // Merging the WHOLE footprint of both classes — rather than reparenting the live lots alone — is
+  // what keeps the round trip on one position (see `mergeRetiredPositionFootprint`). It also lets a
+  // source that contributed nothing but ledger rows come out dependency-free, so it is deleted
+  // rather than left behind as a phantom closed row.
+  const mergeSourceIds = [
+    ...new Set([...openRows, ...remainingLots].map((row) => row.position_id)),
+  ].filter((positionId) => positionId !== activePositionId);
+  // Read BEFORE `retirePositions` below, which deletes a source left with no dependent rows
+  // once the merge reparents them — a deleted row can no longer be read back for its opened_at.
+  // Covers the winner too, not just its sources: `openRows` excludes an already-closed position
+  // that still owns a live lot (see the comment above), and when `openRows` is empty entirely,
+  // `activePositionId` above falls back to `remainingLots[0]`'s owner — which can BE that
+  // already-closed position. It is also excluded from `mergeSourceIds` by definition (it's the
+  // winner, not a source), so without this its own opened_at wouldn't be read from `positions`
+  // at all.
+  const openedAtLookupIds = [activePositionId, ...mergeSourceIds];
+  const openedAtRows = db
+    .prepare(
+      `SELECT opened_at FROM positions WHERE position_id IN (${openedAtLookupIds
+        .map(() => "?")
+        .join(", ")})`,
+    )
+    .all(...openedAtLookupIds) as Array<{ opened_at: string }>;
+  mergeRetiredPositionFootprint(db, activePositionId, mergeSourceIds);
+
   const totalSize = remainingLots.reduce((sum, lot) => sum + lot.remaining_size, 0);
   const totalCost = remainingLots.reduce(
     (sum, lot) => sum + lot.remaining_size * lot.entry_price,
     0,
   );
   const avgEntryPrice = totalSize > 0 ? totalCost / totalSize : 0;
+  // Read AFTER the merge above, so the winner's realized total includes the rows it absorbed.
+  // Nothing is double-counted: those rows now belong to exactly one position, and every retired
+  // row's `realized_pnl` is recomputed from what is left under it (`retirePositions`).
   const realizedRow = db
     .prepare(`SELECT COALESCE(SUM(delta), 0) AS total FROM pnl_ledger WHERE position_id = ?`)
     .get(activePositionId) as { total: number } | undefined;
   const activeRow = openRows.find((row) => row.position_id === activePositionId);
   const entryStyle = activeRow?.entry_style ?? null;
-  const openedAt = activeRow?.opened_at ?? remainingLots[0]!.created_at;
+  // The merged position's cycle start is the EARLIEST opened_at across the winner and every
+  // absorbed source, not just the winner's own: when the winner is the more recently opened
+  // duplicate, a retired source's absorbed BUY/SELL fills predate the winner's own `opened_at`,
+  // understating hold duration and dropping those fills from any `filled_at >= opened_at` read
+  // (e.g. dashboard hold-time queries). `openedAtRows` (above) already includes the winner's own
+  // row read straight from `positions`, so this covers the closed-winner case too — falling back
+  // to `activeRow`/`openRows` here would miss it. `remainingLots[0]!.created_at` is the
+  // last-resort fallback for the pathological case where the winner has no row in `positions` at
+  // all. Renderings can mix (ISO vs SQLite space-form, see `ledgerInstant`), so compare parsed
+  // instants rather than the raw text.
+  const openedAtCandidates = openedAtRows.map((row) => row.opened_at);
+  const openedAt =
+    openedAtCandidates.length > 0
+      ? openedAtCandidates.reduce((earliest, candidate) =>
+          parseLedgerInstantMs(candidate) < parseLedgerInstantMs(earliest) ? candidate : earliest,
+        )
+      : remainingLots[0]!.created_at;
   const status = resolveOpenPositionStatus(totalCost, { size: totalSize, minOrderSize: null });
   const now = new Date().toISOString();
+
+  // Losers are retired BEFORE the winner is promoted, not after.
+  // `idx_positions_unique_open_per_token` is UNIQUE on token_id WHERE status = 'open', so it
+  // permits one 'open' row alongside any number of 'dust' ones — and `openRows` selects
+  // `status != 'closed'`, so a token legitimately reaches here with a newer 'dust' row ranking
+  // above an older 'open' one. Promoting that winner to 'open' first puts a SECOND 'open' row on
+  // the token and throws SQLITE_CONSTRAINT out of startup adoption — the repair path this branch
+  // exists for is exactly the one that used to abort boot. Retiring first frees the slot; the
+  // winner is excluded by position_id, so it is never the row touched, and nothing below reads the
+  // loser rows (the totals come from `remainingLots`, `pnl_ledger` and the already-materialized
+  // `openRows`).
+  retirePositions(db, mergeSourceIds);
 
   db.prepare(
     `UPDATE positions
@@ -831,12 +1054,6 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logge
     now,
     activePositionId,
   );
-
-  if (openRows.length > 1) {
-    db.prepare(
-      `DELETE FROM positions WHERE token_id = ? AND status != 'closed' AND position_id != ?`,
-    ).run(tokenId, activePositionId);
-  }
 }
 
 function resolveSyntheticOrder(

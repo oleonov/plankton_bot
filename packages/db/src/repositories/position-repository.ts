@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { PositionRepository, Position } from "@krabs/domain";
 import type { TokenId, PositionId, OrderSide, PositionStatus } from "@krabs/domain";
 import { createPositionId, createTokenId, createConditionId } from "@krabs/domain";
+import { ledgerInstant } from "../db-timestamp.js";
 
 export class SqlitePositionRepository implements PositionRepository {
   constructor(private readonly db: Database.Database) {}
@@ -48,12 +49,25 @@ export class SqlitePositionRepository implements PositionRepository {
       );
   }
 
+  // "Newest row wins" is decided in three places that must not disagree on a row they BOTH rank:
+  // migration 032's repair UPDATE, `rebuildTokenPosition` in startup-position-adoption.ts, and
+  // here. Their scopes differ deliberately — 032 ranks only 'open' × 'open' (the pairs its unique
+  // index forbids going forward), the other two rank every non-closed row — so this is agreement on
+  // the ordering, not on the population.
+  //
+  // All three rank by INSTANT (032 inlines `ledgerInstant()`, since migrations cannot import it):
+  // ranking by raw text would pick a different winner for a same-day space-vs-ISO pair — ' ' (0x20)
+  // sorts below 'T' (0x54), putting the chronologically newer space row last. `position_id DESC`
+  // then makes ties deterministic instead of SQLite-implementation-defined, matching the other two.
+  // Production `opened_at` is 100% canonical ISO today (680/680 measured 2026-08-06), but
+  // `DEFAULT (datetime('now'))` survives on the production column and cannot be dropped without
+  // recreating the table on the 18.38 GB live ledger.
   findByTokenId(tokenId: TokenId): Position | null {
     const row = this.db
       .prepare(
         `SELECT * FROM positions
          WHERE token_id = ? AND status != 'closed'
-         ORDER BY opened_at DESC LIMIT 1`,
+         ORDER BY ${ledgerInstant("opened_at")} DESC, position_id DESC LIMIT 1`,
       )
       .get(tokenId) as Record<string, unknown> | undefined;
     return row ? this.rowToPosition(row) : null;
@@ -66,12 +80,19 @@ export class SqlitePositionRepository implements PositionRepository {
     return row ? this.rowToPosition(row) : null;
   }
 
+  // Unlike findByTokenId this returns every row, and all three callers are order-independent
+  // (a Set of ids, a `.find()` by id, a `.length` check) — so the ordering is for consistency, not
+  // a fix. It stays because the next caller to reach for `[0]` must get the same winner the three
+  // ranking sites above pick, and sorting a handful of rows per token costs nothing. That is also
+  // why `position_id DESC` is here: without the tie-breaker `[0]` would fall back to SQLite's
+  // implementation-defined order on equal `opened_at` and disagree with the very sites it exists
+  // to match.
   findActiveByTokenId(tokenId: TokenId): Position[] {
     const rows = this.db
       .prepare(
         `SELECT * FROM positions
          WHERE token_id = ? AND status != 'closed'
-         ORDER BY opened_at DESC`,
+         ORDER BY ${ledgerInstant("opened_at")} DESC, position_id DESC`,
       )
       .all(tokenId) as Record<string, unknown>[];
     return rows.map((r) => this.rowToPosition(r));

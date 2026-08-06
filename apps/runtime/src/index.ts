@@ -76,6 +76,8 @@ import {
   SqliteTradingCalendarRepository,
   withShutdownBusyTimeout,
   disableAutoCheckpoint,
+  ledgerInstant,
+  isWorkingSellOrderStatus,
 } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
 import {
@@ -85,7 +87,7 @@ import {
   resolveTradingState,
   snapshotAndResetStageTimers,
 } from "@krabs/domain";
-import type { TokenId } from "@krabs/domain";
+import type { OrderId, TokenId } from "@krabs/domain";
 import {
   DataApiTradeCountProvider,
   GammaMarketDiscoveryGateway,
@@ -194,7 +196,12 @@ import { calculateTotalExposure } from "./exposure-calculator.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
 import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
-import { runOwnershipInvariantStartupGate } from "./modules/exit-ownership/assert-bounce-for-all-invariant.js";
+import {
+  DrainedOrderUnfencedError,
+  reportAbandonedDrainWaiver,
+  runDrainedOrderFenceGate,
+  runOwnershipInvariantStartupGate,
+} from "./modules/exit-ownership/assert-bounce-for-all-invariant.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { PositionConcentrationService } from "./position-concentration-service.js";
@@ -232,6 +239,7 @@ const RISK_EVENT_WARNING_COOLDOWN_MS = 10 * 60 * 1000;
 const DECISION_TICK_LATENCY_ALERT_THRESHOLD_MS = 30_000;
 const DECISION_TICK_LATENCY_ALERT_SUSTAINED_MS = 5 * 60 * 1000;
 const DECISION_TICK_LATENCY_ALERT_COOLDOWN_MS = 15 * 60 * 1000;
+const TRADING_STATE_SNAPSHOT_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 
 interface OrderCapacityWindow {
   placeCalls: number;
@@ -2344,8 +2352,15 @@ async function main(): Promise<void> {
     `INSERT INTO trading_state_snapshots (trading_state, signals_produced, signals_approved, signals_rejected, captured_at)
    VALUES (?, ?, ?, ?, ?)`,
   );
+  // The cutoff is an ISO instant computed in JS, not `datetime('now', ...)`, which renders
+  // space-form and sorts wrong against ISO on the cutoff's own calendar day (' ' < 'T').
+  // The COLUMN is wrapped too: the INSERT above binds ISO explicitly, but
+  // `captured_at TEXT NOT NULL DEFAULT (datetime('now'))` survives on the production table
+  // (SQLite has no `ALTER COLUMN … SET DEFAULT`), so a future writer that omits the column
+  // would re-split the rendering and leave those rows unprunable forever. The wrap costs the
+  // `captured_at` index, affordable on a table this retention itself caps at 14 days.
   const pruneSnapshots = ledgerConn.db.prepare(
-    "DELETE FROM trading_state_snapshots WHERE captured_at < datetime('now', '-14 days')",
+    `DELETE FROM trading_state_snapshots WHERE ${ledgerInstant("captured_at")} < ${ledgerInstant("?")}`,
   );
 
   let lastSnapshotMs = 0;
@@ -2578,7 +2593,10 @@ async function main(): Promise<void> {
             sa.rejected,
             new Date().toISOString(),
           );
-          pruneSnapshots.run();
+          const pruneCutoffIso = new Date(
+            Date.now() - TRADING_STATE_SNAPSHOT_RETENTION_MS,
+          ).toISOString();
+          pruneSnapshots.run(pruneCutoffIso);
         });
       }
     } finally {
@@ -2926,22 +2944,6 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  // Release A Phase 5 — post-activation invariant (fail-closed hard-stop), widened to I1–I5 in
-  // Phase 6 (§9a). Once `bounceExit.applyToAllMarkets` is enabled, EVERY active position must have
-  // an assigned owner AND the ledger must be structurally consistent: the census repaired the
-  // existing ones and the API gate refuses enabling the flag while any violation remains. A
-  // violation surfacing HERE means startup adoption/reconciliation (which does not assign
-  // ownership) recreated an unowned or mis-bound position AFTER activation — under
-  // owner-authoritative servicing it would be legacy-routed (profile) instead of bounce, or its
-  // resting SELL would be serviced by the wrong owner, silently violating the bounce-for-all
-  // intent. HARD-STOP rather than trade it; the operator re-runs the census before resuming.
-  runOwnershipInvariantStartupGate({
-    ledgerDb: ledgerConn.db,
-    controlDb: controlConn.db,
-    applyToAllMarkets: currentExecutionPolicy().bounceExit.applyToAllMarkets,
-    log,
-  });
-
   // Read active switch request ID (if this boot is part of a profile switch)
   const activeSwitchRow = controlConn.db
     .prepare(
@@ -3018,12 +3020,74 @@ async function main(): Promise<void> {
   if (runtimeMode === "live-lite" && liveLiteGuard.getWalletMode() === "relayer") {
     const balances = await exchangeGateway.getBalances();
     if (balances.length === 0) {
+      // Every other fatal boot path records the failure for the runtime manager; this one used to
+      // exit silently, leaving `runtime_status` stuck on the previous state.
+      persistFailedStartupState(controlConn.db, log, "live-lite relayer auth abort");
       log.fatal("live-lite relayer auth check failed — exchange returned no balances");
       controlConn.close();
       ledgerConn.close();
       process.exit(1);
     }
   }
+
+  // Release A Phase 5 — post-activation invariant (fail-closed hard-stop), widened to I1–I5 in
+  // Phase 6 (§9a). Once `bounceExit.applyToAllMarkets` is enabled, EVERY active position must have
+  // an assigned owner AND the ledger must be structurally consistent: the census repaired the
+  // existing ones and the API gate refuses enabling the flag while any violation remains. A
+  // violation surfacing HERE means startup adoption/reconciliation (which does not assign
+  // ownership) recreated an unowned or mis-bound position AFTER activation — under
+  // owner-authoritative servicing it would be legacy-routed (profile) instead of bounce, or its
+  // resting SELL would be serviced by the wrong owner, silently violating the bounce-for-all
+  // intent. HARD-STOP rather than trade it; the operator re-runs the census before resuming.
+  //
+  // One class of violation is NOT the operator's to repair: the exchange-live working orders this
+  // boot's own classification has ALREADY quarantined as drain targets. `retirePositions` closes a
+  // consolidated position and leaves its resting SELL pointing at a retired row (I2) — the exact row
+  // the drain below is about to cancel, which is also this invariant's own declared remedy.
+  // Hard-stopping there is the WORSE direction: it terminates before issuing the remedy and leaves
+  // the real SELL resting on the exchange unsupervised. So those exact order ids are projected out
+  // of the active-SELL relation for the gate (never from the ledger, never from the census), and
+  // `runDrainedOrderFenceGate` re-proves after seeding that the barrier actually holds each one
+  // before the startup fence is released.
+  //
+  // The gate therefore runs HERE, immediately before the fence, and not earlier: an excuse granted
+  // above the preflight/relayer aborts would be handed out by a boot that then exits before
+  // `seedStartupTransitions` can keep the promise. With no abort left between the deferral and the
+  // drain, the excuse and its remedy are inseparable.
+  //
+  // Only orders that are STILL working earn the waiver. `classifyStartupTransitionTargets` selects
+  // by exchange status and cycle identity, never by local status, so a locally-terminal row can ride
+  // along in `drainTargets`. Such a row is not in the active-SELL relation to begin with — waiving it
+  // masks nothing, but it would enter the fence gate's obligation set and then clear it on the same
+  // terminal status, which reads like a proof and is not one. Keeping the waiver exactly equal to
+  // "violations this boot will drain" is what makes the fence gate's later check meaningful.
+  const bounceAppliesToAllMarkets = currentExecutionPolicy().bounceExit.applyToAllMarkets;
+  // Side matters as much as status. `classifyStartupTransitionTargets` also quarantines reopening
+  // BUYs, and `isWorkingSellOrderStatus` inspects only the status column — so without this filter a
+  // BUY would raise the waiver latch while deferring nothing (a BUY is not in the active-SELL
+  // relation), and the abandoned-waiver fatal would then name it as a "SELL with no owning
+  // position", which is simply false.
+  const drainedOrderIds = new Set(
+    startupAdoption.drainTargets.flatMap((target) =>
+      target.orders
+        .filter((order) => order.side === "sell" && isWorkingSellOrderStatus(order.status))
+        .map((order) => String(order.orderId)),
+    ),
+  );
+  runOwnershipInvariantStartupGate({
+    ledgerDb: ledgerConn.db,
+    controlDb: controlConn.db,
+    applyToAllMarkets: bounceAppliesToAllMarkets,
+    log,
+    drainedOrderIds,
+  });
+  // The drain is `await`ed work that can itself reject, so no statement order can buy
+  // "waiver ⇒ drain ran". What the ordering above DOES buy is "waiver ⇒ drain ran OR the process
+  // dies" — every remaining path terminates, so an excused violation can never carry into live
+  // trading. This latch covers the second disjunct: it stays true from the waiver until the fence
+  // gate proves the drain, and the catch reads it so the abort names the SELL orders left resting
+  // instead of burying them under whatever failed first.
+  let drainWaiverOutstanding = bounceAppliesToAllMarkets && drainedOrderIds.size > 0;
 
   // 11. Start
   try {
@@ -3069,6 +3133,57 @@ async function main(): Promise<void> {
     // consume the cancel-confirmation, and must run BEFORE any other module gets
     // a chance to place a competing order for a still-draining token.
     await executionModule.seedStartupTransitions(startupAdoption.drainTargets);
+
+    // `bounceAppliesToAllMarkets` was read before `supervisor.start()`, and the policy is NOT a boot
+    // constant: `currentExecutionPolicy()` re-reads control.db on every call with no throttle, so an
+    // operator enabling the flag through the API mid-start — which IS the sanctioned activation
+    // sequence right after a deploy — makes that snapshot stale. The API certifies the ledger it
+    // sees, and the awaited reconciliation pass below can break it afterwards, so a stale `false`
+    // here would skip the post-start proof entirely and release the fence onto a ledger the
+    // now-enabled flag demands be clean.
+    const bounceAppliesAtFenceRelease = currentExecutionPolicy().bounceExit.applyToAllMarkets;
+
+    // The other half of the ownership gate's drain-target deferral: it excused those orders on the
+    // promise that the barrier would drain them, and this is the point that promise is either kept
+    // or the boot dies with the fence still latched. Only runs when the gate actually deferred —
+    // with `applyToAllMarkets` off nothing was excused, so demanding a barrier here would invent a
+    // brand-new hard-stop for a configuration that boots fine today. The second disjunct covers the
+    // mid-start enable: gate #1 ran as a no-op and left no waiver, but the checkpoint below will
+    // excuse these orders under the fresh `true`, and an excuse with no barrier proving it is
+    // exactly what this gate exists to refuse.
+    if (drainWaiverOutstanding || (bounceAppliesAtFenceRelease && drainedOrderIds.size > 0)) {
+      runDrainedOrderFenceGate({
+        controlDb: controlConn.db,
+        drainedOrderIds,
+        readOrderStatus: (orderId) => repos.order.findById(orderId as OrderId)?.status,
+        isTransitionTarget: (orderId) => executionModule.hasTransitionTarget(orderId as OrderId),
+        log,
+      });
+      drainWaiverOutstanding = false;
+    }
+
+    // Second ownership checkpoint — the gate above proved the ledger BEFORE `supervisor.start()`,
+    // and module startup writes to that same ledger while the fence is still latched. The concrete
+    // case: `ReconciliationModule.start()` `await`s a full reconciliation pass, and its
+    // missing-remote auto-close sets a position to `closed` WITHOUT cancelling the SELL resting
+    // against it. That SELL was correctly bound when the gate ran, so adoption never classified it
+    // as a drain target and nothing downstream revisits it — releasing the fence here would put the
+    // runtime live on exactly the ledger the gate exists to refuse.
+    //
+    // Same projection, so the drain targets the gate excused stay excused (their cancels may not be
+    // confirmed yet) and only violations module startup CREATED can trip it. Failing closed here
+    // costs one boot, not a crash loop: the auto-close is already persisted, so on the next boot
+    // that SELL's cycle is no longer active, adoption classifies it as stale, and the drain cancels
+    // it. This does NOT extend to fire-and-forget startup work (`ResolutionModule.start()` kicks
+    // `runCheck()` without awaiting it) — no boot-time read can cover mutations that land after it.
+    runOwnershipInvariantStartupGate({
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      applyToAllMarkets: bounceAppliesAtFenceRelease,
+      log,
+      drainedOrderIds,
+      phase: "pre-fence-release",
+    });
 
     // Barrier seeded — release the hard fence (normal pause/resume state now governs).
     executionModule.endStartupFence();
@@ -3116,6 +3231,14 @@ async function main(): Promise<void> {
 
     log.info({ phase: supervisor.getPhase(), paused: supervisor.isPaused() }, "runtime ready");
   } catch (err) {
+    // Before the branch that decides HOW this boot dies, and on both branches: a waiver the drain
+    // never honoured is the one fact an operator has to act on, and it is invisible in whatever
+    // error actually got us here. Excluded is the one abort that already said it better — the fence
+    // gate names the precise subset it could not prove and persists the failed state itself, so
+    // re-listing every candidate on top of that would bury an exact diagnosis under a broad one.
+    if (drainWaiverOutstanding && !(err instanceof DrainedOrderUnfencedError)) {
+      reportAbandonedDrainWaiver({ controlDb: controlConn.db, drainedOrderIds, log });
+    }
     if (err instanceof LifecycleSupersededError) {
       // A signal arrived mid-startup and the shutdown handler took over: it owns the teardown and
       // the exit code. Exiting here too would race it.

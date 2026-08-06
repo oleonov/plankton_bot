@@ -52,7 +52,9 @@ describe("SqliteMarketResolutionRepository", () => {
 
     const result = repo.findByConditionId("cond-1");
     expect(result?.resolution).toBe("YES");
-    expect(result?.resolvedAt).toBe("2026-01-02T00:00:00Z");
+    // Canonicalized by the repository (migration 095's invariant) — not a verbatim passthrough
+    // of the 20-char ISO-without-ms value passed in.
+    expect(result?.resolvedAt).toBe("2026-01-02T00:00:00.000Z");
     expect(result?.status).toBe("settled");
     expect(result?.source).toBe("gamma-api");
   });
@@ -64,7 +66,7 @@ describe("SqliteMarketResolutionRepository", () => {
 
     const result = repo.findByConditionId("cond-1");
     expect(result?.resolution).toBe("NO");
-    expect(result?.resolvedAt).toBe("2026-01-02T00:00:00Z");
+    expect(result?.resolvedAt).toBe("2026-01-02T00:00:00.000Z");
     expect(result?.status).toBe("settled");
   });
 
@@ -72,5 +74,23 @@ describe("SqliteMarketResolutionRepository", () => {
     repo.updateResolution("non-existent", "YES", "2026-01-02T00:00:00Z", "gamma-api");
     const result = repo.findByConditionId("non-existent");
     expect(result).toBeNull();
+  });
+
+  // Migration 095 canonicalizes every `resolved_at` rendering to ISO-ms-Z. Without normalizing
+  // at this write boundary, `save()` would persist a 20-char ISO-without-ms `endDate` verbatim
+  // (production holds 1M+ `markets.end_date` values in that shape) and re-split the column
+  // within hours of a delisted market resolving — these two cases FAIL without the
+  // `canonicalResolvedAt` normalization in `save()`/`updateResolution()`.
+  it("save() canonicalizes a resolvedAt rendering with no sub-second part", () => {
+    repo.save(makeResolution({ resolvedAt: "2026-05-18T12:00:00Z" }));
+    const result = repo.findByConditionId("cond-1");
+    expect(result?.resolvedAt).toBe("2026-05-18T12:00:00.000Z");
+  });
+
+  it("updateResolution() canonicalizes a Gamma +00 resolvedAt rendering", () => {
+    repo.save(makeResolution());
+    repo.updateResolution("cond-1", "YES", "2026-01-02 00:00:00+00", "gamma-api");
+    const result = repo.findByConditionId("cond-1");
+    expect(result?.resolvedAt).toBe("2026-01-02T00:00:00.000Z");
   });
 });

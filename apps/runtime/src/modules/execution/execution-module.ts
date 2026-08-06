@@ -689,6 +689,21 @@ export class ExecutionModule implements RuntimeModule {
     this.startupFenceActive = false;
   }
 
+  /**
+   * Whether an order is a live target of some token's transition barrier — i.e. whether the drain
+   * still owns it. Read-only, and deliberately keyed by ORDER rather than token: the caller
+   * (`runDrainedOrderFenceGate`) must prove the barrier holds each specific order the ownership
+   * gate excused, and a token-level answer would pass a token whose barrier targets a DIFFERENT
+   * order. Scans the map because a boot has a handful of transitions at most.
+   */
+  hasTransitionTarget(orderId: OrderId): boolean {
+    const key = String(orderId);
+    for (const transition of this.tokenTransitions.values()) {
+      if (transition.targets.has(key)) return true;
+    }
+    return false;
+  }
+
   /** Number of queued + in-flight execution tasks. Zero = fully drained. */
   get pendingCount(): number {
     return this.queue?.pendingCount ?? 0;

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { bootstrapDatabase } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
 import type { AppConfig } from "@krabs/config";
@@ -189,5 +189,51 @@ describe("GET /metrics/trading-activity", () => {
     expect(body.ok).toBe(true);
     expect(body.data.items).toHaveLength(1);
     expect(body.data.items[0].tradingState).toBe("PROBING_ONLY");
+  });
+
+  it("keeps a same-day space-form row that is chronologically inside the window but lexically outside it, in chronological order", async () => {
+    conn.db.prepare("DELETE FROM trading_state_snapshots").run();
+
+    // The route's `since` cutoff is derived from local-time `Date.setDate()`, so pin the host TZ to
+    // UTC as well as freezing the instant itself — otherwise the calendar-day math below could land
+    // on a different day depending on the machine's ambient timezone.
+    const originalTz = process.env.TZ;
+    process.env.TZ = "UTC";
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const NOW_MS = Date.parse("2026-08-05T08:53:21.000Z");
+    vi.setSystemTime(NOW_MS);
+    try {
+      // days=1 -> since = 2026-08-04T08:53:21.000Z (the ISO cutoff bind).
+      // Chronologically INSIDE the window (20:00 on 08-04 is after the cutoff, same calendar day)
+      // but rendered in SQLite's space form. ' ' (0x20) < 'T' (0x54), so a raw
+      // `captured_at >= <ISO cutoff>` compares this row's string BELOW the cutoff and drops it from
+      // the window — exactly the bug wrapping both sides in `ledgerInstant()` exists to fix.
+      insertSnapshot("SPACE_INSIDE", 1, 1, 0, "2026-08-04 20:00:00");
+      // Also inside the window, ISO rendering, chronologically LATER than SPACE_INSIDE — proves the
+      // returned order is chronological, not merely "everything after the cutoff, any order".
+      insertSnapshot("ISO_INSIDE", 2, 2, 0, "2026-08-04T23:00:00.000Z");
+      // Genuinely OUTSIDE the window (more than a full day before the cutoff, cross-day comparison
+      // so unaffected by the bug) — the control: a handler that just returns every row can't satisfy
+      // the assertion below either.
+      insertSnapshot("OUTSIDE_CONTROL", 3, 3, 0, "2026-08-03T00:00:00.000Z");
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/metrics/trading-activity?days=1",
+        headers: authHeaders(),
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = json(res);
+      expect(body.ok).toBe(true);
+      expect(body.data.items.map((item: { tradingState: string }) => item.tradingState)).toEqual([
+        "SPACE_INSIDE",
+        "ISO_INSIDE",
+      ]);
+    } finally {
+      vi.useRealTimers();
+      if (originalTz === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTz;
+    }
   });
 });

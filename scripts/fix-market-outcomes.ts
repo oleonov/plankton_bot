@@ -275,13 +275,13 @@ async function main() {
 
   // Apply fixes in a single transaction
   const updateOutcome = db.prepare(
-    `UPDATE markets SET outcome = ?, updated_at = datetime('now') WHERE token_id = ?`,
+    `UPDATE markets SET outcome = ?, updated_at = ? WHERE token_id = ?`,
   );
 
   const applyFixes = db.transaction(() => {
     let updated = 0;
     for (const f of fixes) {
-      const result = updateOutcome.run(f.newOutcome, f.tokenId);
+      const result = updateOutcome.run(f.newOutcome, new Date().toISOString(), f.tokenId);
       if (result.changes === 1) {
         updated++;
       } else {

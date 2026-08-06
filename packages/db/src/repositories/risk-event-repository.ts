@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import type { RiskEventRepository, S1OrphanOwnership } from "@krabs/domain";
 import { withShutdownBusyTimeout } from "../connection.js";
+import { toSqliteDateTime } from "../db-timestamp.js";
 
 export class SqliteRiskEventRepository implements RiskEventRepository {
   private shuttingDown = false;
@@ -43,9 +44,14 @@ export class SqliteRiskEventRepository implements RiskEventRepository {
   }
 
   countSince(createdAtIso: string): number {
+    // The bound is rendered in the column's own space format because `insert` above never binds
+    // `created_at` — the `DEFAULT (datetime('now'))` is its sole writer. An unparseable bound is
+    // passed through untouched rather than silently shifted to a different instant.
+    const ms = Date.parse(createdAtIso);
+    const bound = Number.isFinite(ms) ? toSqliteDateTime(ms) : createdAtIso;
     const row = this.db
       .prepare("SELECT COUNT(*) as c FROM risk_events WHERE created_at >= ?")
-      .get(toSqliteDateTime(createdAtIso)) as { c: number };
+      .get(bound) as { c: number };
     return row.c;
   }
 
@@ -83,12 +89,6 @@ export class SqliteRiskEventRepository implements RiskEventRepository {
 
     return [...latestByToken.values()].sort((a, b) => a.id - b.id).map((entry) => entry.ownership);
   }
-}
-
-function toSqliteDateTime(value: string): string {
-  const ms = Date.parse(value);
-  if (!Number.isFinite(ms)) return value;
-  return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
 }
 
 function parsePayload(raw: string): Record<string, unknown> {

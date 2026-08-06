@@ -5,6 +5,10 @@
 -- Full audit + reconciliation plan ("State X"):
 --   research_plankton/inventory_drift_investigation_2026-06-10.md (§6-8).
 --
+-- `updated_at` is written ISO-8601, not `datetime('now')`: every other writer of
+-- positions/leg_states/orders emits ISO, and the space format sorts BELOW any same-day
+-- ISO string, breaking `MAX()`/`> ?`/`ORDER BY` over the column. See db-timestamp.ts.
+--
 -- Pathology: a repricing-exit SELL (order 0xe43fd65351bf) filled 7.43 @ 0.023
 -- on-chain after the local order was cancelled (race) -> orphan fill
 -- 212af2ee…#maker:0 with no local order, reconciled=0. On each restart, startup
@@ -83,7 +87,7 @@ UPDATE positions
        current_value_usdc = 0.4123,
        realized_pnl = 0.904974,
        status = 'open',
-       updated_at = datetime('now')
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
  WHERE position_id = 'pos-34928863542604747577136069195537517831839938618288352858238947625130728675067-1779091115233'
    AND EXISTS (
      SELECT 1 FROM fills
@@ -96,7 +100,7 @@ UPDATE positions
 UPDATE leg_states
    SET sell_count = 6,
        cumulative_sell_size = 100.681,
-       updated_at = datetime('now')
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
  WHERE token_id = '34928863542604747577136069195537517831839938618288352858238947625130728675067'
    AND EXISTS (
      SELECT 1 FROM fills
@@ -108,7 +112,7 @@ UPDATE leg_states
 --    longer re-adopt this token (belt; the B1 code guard is the suspenders).
 UPDATE orders
    SET signal_reason = 'orphan-reconciled-20260610',
-       updated_at = datetime('now')
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
  WHERE token_id = '34928863542604747577136069195537517831839938618288352858238947625130728675067'
    AND signal_reason = 'startup-adoption'
    AND lower(side) = 'sell'

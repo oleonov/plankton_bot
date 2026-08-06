@@ -1,8 +1,10 @@
 import type { RuntimeModule, ExchangeGateway } from "@krabs/domain";
-import { withImmediate } from "@krabs/db";
+import { ledgerInstant, withImmediate } from "@krabs/db";
 import type Database from "better-sqlite3";
 import type { Logger } from "../../logger.js";
 import { ValidationMetricsReader } from "./validation-metrics-reader.js";
+
+const PORTFOLIO_SNAPSHOT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 export interface ProfileRuntimePublisherDeps {
   controlDb: Database.Database;
@@ -194,9 +196,19 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       );
     this.lastSnapshotAt = now;
 
-    // Prune old snapshots
+    // The cutoff is an ISO instant computed in JS, not `datetime('now', ...)`, which renders
+    // space-form and sorts wrong against ISO on the cutoff's own calendar day (' ' < 'T').
+    // The COLUMN is wrapped too: every INSERT above binds ISO explicitly, but
+    // `captured_at TEXT NOT NULL DEFAULT (datetime('now'))` survives on the production table
+    // (SQLite has no `ALTER COLUMN … SET DEFAULT`), so a future writer that omits the column
+    // would re-split the rendering — and an unwrapped compare would then leave those rows
+    // unprunable forever. The wrap costs the `captured_at` index, which is affordable on a
+    // table this retention itself caps at 90 days.
+    const pruneCutoffIso = new Date(Date.now() - PORTFOLIO_SNAPSHOT_RETENTION_MS).toISOString();
     this.deps.ledgerDb
-      .prepare("DELETE FROM portfolio_snapshots WHERE captured_at < datetime('now', '-90 days')")
-      .run();
+      .prepare(
+        `DELETE FROM portfolio_snapshots WHERE ${ledgerInstant("captured_at")} < ${ledgerInstant("?")}`,
+      )
+      .run(pruneCutoffIso);
   }
 }

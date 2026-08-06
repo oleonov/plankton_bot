@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { bootstrapControlDb, bootstrapLedgerDb, type DbConnection } from "@krabs/db";
+import {
+  bootstrapControlDb,
+  bootstrapLedgerDb,
+  toSqliteDateTime,
+  type DbConnection,
+} from "@krabs/db";
 import {
   createConditionId,
   createOrderId,
@@ -241,6 +246,34 @@ describe("PositionConcentrationService", () => {
     expect(decision.metrics?.capBankrollUsdc).toBe(117);
   });
 
+  it("picks the newest snapshot by instant, not by string, when renderings are mixed", () => {
+    // `portfolio_snapshots.captured_at` is canonical ISO on production only because every INSERT
+    // names the column; `captured_at TEXT NOT NULL DEFAULT (datetime('now'))` survives on the table
+    // and SQLite has no `ALTER COLUMN … SET DEFAULT`, so the space-form writer path is permanent
+    // and merely dormant. `' '` (0x20) < `'T'` (0x54), so a raw `ORDER BY captured_at DESC` sorts
+    // EVERY same-day space row below EVERY same-day ISO row regardless of time-of-day: the 11:57
+    // row below would lose to the 11:55 one and this per-signal read would size against a stale
+    // bankroll. Migration 096's expression index is what keeps the fixed ordering a seek.
+    const h = track(createHarness({ portfolioUsdc: null }));
+    insertPortfolioSnapshot(h.ledger, 117, "2026-06-23T11:55:00.000Z");
+    insertPortfolioSnapshot(h.ledger, 1_000, "2026-06-23 11:57:00");
+
+    const decision = h.service.evaluateBuy({
+      tokenId: createTokenId("tok-mixed-rendering"),
+      conditionId: createConditionId("cond-mixed-rendering"),
+      candidateNotionalUsdc: 5,
+      minExecutableNotionalUsdc: 1,
+      policy: DEFAULT_EXECUTION_POLICY.positionConcentration,
+      stage: "signal_to_order",
+      signalReason: "probe-entry",
+      decisionRuleId: "R23_DIP_TRIGGER",
+    });
+
+    // Both rows are inside portfolioSnapshotMaxAgeMs (10 min at NOW=12:00:00Z), so freshness cannot
+    // explain the choice — only the ordering can. 1_000 is the 11:57 row; 117 is the older 11:55.
+    expect(decision.metrics?.capBankrollUsdc).toBe(1_000);
+  });
+
   it("uses a stale stable portfolio snapshot during startup grace", () => {
     const h = track(createHarness({ portfolioUsdc: null }));
     insertPortfolioSnapshot(h.ledger, 117, new Date(NOW - 24 * 60 * 60_000).toISOString());
@@ -372,6 +405,69 @@ describe("PositionConcentrationService", () => {
   });
 });
 
+describe("PositionConcentrationService — SQLite space-format profile-summary staleness (non-UTC host)", () => {
+  // `readProfileSummaryBankroll` parses `profile_summaries.updated_at` via `parseLedgerInstantMs`
+  // rather than bare `Date.parse` for the same reason as mark-staleness-timestamp.test.ts:
+  // `updated_at TEXT NOT NULL DEFAULT (datetime('now'))` renders SQLite's zone-less space form,
+  // and bare `Date.parse` would read that as HOST-LOCAL time. A UTC test host would let a
+  // `Date.parse` regression pass by accident, so the TZ switch below is required to make it
+  // observable at all.
+  const originalTz = process.env.TZ;
+
+  afterEach(() => {
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  });
+
+  it("uses a fresh profile-summary bankroll when updated_at is the zone-less SQLite space rendering", () => {
+    process.env.TZ = "Asia/Bangkok";
+
+    // 30s old, against a 120s profileSummaryMaxAgeMs threshold — fresh under either sign of the
+    // bug's absence. Regressed to bare `Date.parse`, the space rendering is misread as
+    // Bangkok-local (UTC+7) time: the mark looks ~7h stale, there is no portfolio snapshot to
+    // fall back on, and evaluateBuy fails open instead of sizing against the real bankroll.
+    const h = track(createHarness({ portfolioUsdc: null }));
+    insertProfileSummary(h.control, PROFILE, 250, toSqliteDateTime(NOW - 30_000));
+
+    const decision = h.service.evaluateBuy({
+      tokenId: createTokenId("tok-tz-fresh"),
+      conditionId: createConditionId("cond-tz-fresh"),
+      candidateNotionalUsdc: 5,
+      minExecutableNotionalUsdc: 1,
+      policy: DEFAULT_EXECUTION_POLICY.positionConcentration,
+      stage: "signal_to_order",
+      signalReason: "probe-entry",
+      decisionRuleId: "R23_DIP_TRIGGER",
+    });
+
+    expect(decision.reason).not.toBe("missing_bankroll_startup_fail_open");
+    expect(decision.metrics?.capBankrollUsdc).toBe(250);
+  });
+
+  it("falls open when the space-rendered updated_at is genuinely past profileSummaryMaxAgeMs", () => {
+    process.env.TZ = "Asia/Bangkok";
+
+    // Positive control for the assertion above: same TZ and fixture shape, differing only in the
+    // mark's age (300s, past the 120s threshold regardless of parsing) — proves the profile-summary
+    // path is actually read and correctly judged stale in general, not merely dead code.
+    const h = track(createHarness({ portfolioUsdc: null }));
+    insertProfileSummary(h.control, PROFILE, 250, toSqliteDateTime(NOW - 300_000));
+
+    const decision = h.service.evaluateBuy({
+      tokenId: createTokenId("tok-tz-stale"),
+      conditionId: createConditionId("cond-tz-stale"),
+      candidateNotionalUsdc: 5,
+      minExecutableNotionalUsdc: 1,
+      policy: DEFAULT_EXECUTION_POLICY.positionConcentration,
+      stage: "signal_to_order",
+      signalReason: "probe-entry",
+      decisionRuleId: "R23_DIP_TRIGGER",
+    });
+
+    expect(decision.reason).toBe("missing_bankroll_startup_fail_open");
+  });
+});
+
 function track(harness: ReturnType<typeof createHarness>): ReturnType<typeof createHarness> {
   harnesses.push(harness);
   return harness;
@@ -387,6 +483,23 @@ function insertPortfolioSnapshot(conn: DbConnection, value: number, capturedAt: 
        VALUES (?, ?, ?, 0, 0, ?, 0, 0, ?)`,
     )
     .run(PROFILE, value, value, value, capturedAt);
+}
+
+function insertProfileSummary(
+  conn: DbConnection,
+  profileId: string,
+  walletBalanceUsdc: number,
+  updatedAt: string,
+): void {
+  conn.db
+    .prepare(
+      `INSERT INTO profile_summaries (profile_id, wallet_balance_usdc, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(profile_id) DO UPDATE SET
+         wallet_balance_usdc = excluded.wallet_balance_usdc,
+         updated_at = excluded.updated_at`,
+    )
+    .run(profileId, walletBalanceUsdc, updatedAt);
 }
 
 function recordBuy(

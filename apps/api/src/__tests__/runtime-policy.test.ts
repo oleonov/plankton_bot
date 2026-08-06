@@ -107,11 +107,18 @@ describe("PATCH /runtime/policy", () => {
 
     const recorded = controlConn.db
       .prepare(
-        "SELECT action, reason FROM operator_commands WHERE action LIKE 'set_continuation_mode:%' ORDER BY id DESC LIMIT 1",
+        "SELECT action, reason, created_at, applied_at FROM operator_commands WHERE action LIKE 'set_continuation_mode:%' ORDER BY id DESC LIMIT 1",
       )
-      .get() as { action: string; reason: string } | undefined;
+      .get() as
+      | { action: string; reason: string; created_at: string; applied_at: string }
+      | undefined;
     expect(recorded?.action).toBe("set_continuation_mode:market_wide");
     expect(recorded?.reason).toBe("test flip");
+    // Canonical ISO (24 ch), not SQLite `datetime('now')` space form — FAILS pre-fix, when the
+    // route bound a literal `datetime('now')` instead of `nowIso()` (see migrations-control/071).
+    const canonicalIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+    expect(recorded?.created_at).toMatch(canonicalIso);
+    expect(recorded?.applied_at).toMatch(canonicalIso);
   });
 
   it("is idempotent on same value", async () => {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { applySafeAddColumnStatements, runMigrations } from "../migrations/runner.js";
+import { ledgerInstant } from "../db-timestamp.js";
 
 let tmpDir: string;
 let dbPath: string;
@@ -341,6 +342,139 @@ describe("migration 094 — decision_signal_log rule+time index", () => {
       );
       // The GROUP BY on a strftime() expression always needs a temp sort — that cost is inherent
       // to the query, not to the index, so it is deliberately not asserted against here.
+    } finally {
+      migrated.close();
+    }
+  });
+});
+
+describe("migration 096 — portfolio_snapshots instant-ordered index", () => {
+  /**
+   * `PositionConcentrationService.readPortfolioSnapshot` orders by `ledgerInstant("captured_at")`
+   * rather than the raw column, because `captured_at TEXT NOT NULL DEFAULT (datetime('now'))`
+   * survives on the production table and a space-form row sorts BELOW every same-day ISO row
+   * (' ' 0x20 < 'T' 0x54) — the reader would silently return an OLDER bankroll. That wrap discards
+   * `idx_portfolio_snapshots_profile_ts`, and this query runs on EVERY signal evaluation, so the
+   * expression index is what keeps it a seek. Losing it is invisible in behaviour: the query still
+   * returns the right row, just after a temp sort of the whole profile — which is exactly why it
+   * needs a plan assertion rather than a result assertion.
+   */
+  it("keeps the per-signal bankroll lookup a seek instead of a scan + temp sort", () => {
+    const migrated = new Database(":memory:");
+    try {
+      runMigrations(migrated);
+
+      // index_xinfo, not index_info: only xinfo exposes DESC, and an expression column is reported
+      // with `cid: -2` and a NULL name (there is no column to name). An accidental flip to ASC or a
+      // rewrite into a plain column index would still pass index_info.
+      const indexed = migrated
+        .prepare("PRAGMA index_xinfo(idx_portfolio_snapshots_profile_instant)")
+        .all() as Array<{ name: string | null; desc: number; key: number; cid: number }>;
+      expect(
+        indexed
+          .filter((column) => column.key === 1)
+          .map((column) => [column.name, column.cid, column.desc]),
+      ).toEqual([
+        ["profile", 1, 0],
+        [null, -2, 1],
+      ]);
+
+      // Built from `ledgerInstant()` on purpose: SQLite matches an expression index by the
+      // expression TEXT, so if the helper and the migration ever drift apart this plan silently
+      // stops using the index — and this assertion is what catches that drift.
+      const plan = migrated
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT total_equity_liquidation_usdc, equity_usdc, captured_at
+             FROM portfolio_snapshots
+            WHERE profile = ?
+            ORDER BY ${ledgerInstant("captured_at")} DESC
+            LIMIT 1`,
+        )
+        .all("live-lite") as Array<{ detail: string }>;
+      const details = plan.map((step) => step.detail);
+
+      expect(details).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("SEARCH portfolio_snapshots"),
+          expect.stringContaining("idx_portfolio_snapshots_profile_instant"),
+        ]),
+      );
+      // Assert the name AND the absence of the sort: without this migration the planner still
+      // reports a SEARCH — over idx_portfolio_snapshots_profile_ts for the `profile=?` term — and
+      // then adds "USE TEMP B-TREE FOR ORDER BY" over every snapshot the profile has.
+      expect(details.join(" | ")).not.toContain("TEMP B-TREE");
+    } finally {
+      migrated.close();
+    }
+  });
+});
+
+describe("migration 097 — orders instant-ordered index", () => {
+  /**
+   * `apps/api/src/routes/events.ts` wraps `orders.updated_at` in `ledgerInstant()` for the same
+   * reason migration 096 wraps `portfolio_snapshots.captured_at`: the live ledger carries both
+   * canonical-ISO and legacy SQLite-space renderings, and a space row sorts BELOW every same-day
+   * ISO row (' ' 0x20 < 'T' 0x54) — a raw `MAX()`/`ORDER BY` would silently pick the OLDER row,
+   * which is what stalled the order:filled/order:cancelled SSE stream. That wrap discards any index
+   * on the raw column, and `takeSnapshot()` runs the wrapped `MAX()` on EVERY ~2 s tick of EVERY SSE
+   * connection, so the expression index is what keeps both the `MAX()` and the follow-up delta
+   * query a seek instead of a full scan. Losing it is invisible in behaviour: the query still
+   * returns the right row, just after scanning the whole table — which is exactly why it needs a
+   * plan assertion rather than a result assertion.
+   */
+  it("keeps the SSE change-detection MAX() and delta query a seek instead of a full scan", () => {
+    const migrated = new Database(":memory:");
+    try {
+      runMigrations(migrated);
+
+      // index_xinfo, not index_info: only xinfo exposes DESC, and an expression column is reported
+      // with `cid: -2` and a NULL name (there is no column to name). An accidental flip to ASC or a
+      // rewrite into a plain column index would still pass index_info.
+      const indexed = migrated
+        .prepare("PRAGMA index_xinfo(idx_orders_updated_instant)")
+        .all() as Array<{ name: string | null; desc: number; key: number; cid: number }>;
+      expect(
+        indexed
+          .filter((column) => column.key === 1)
+          .map((column) => [column.name, column.cid, column.desc]),
+      ).toEqual([[null, -2, 1]]);
+
+      // The exact shape of `takeSnapshot()`'s bare aggregate in events.ts — no WHERE clause, so
+      // without this migration the planner still reports a bare "SEARCH orders" (SQLite's min/max
+      // optimization falls back to a full-table pass when no index covers the aggregated
+      // expression), naming no index at all. Built from `ledgerInstant()` on purpose: SQLite
+      // matches an expression index by the expression TEXT, so if the helper and the migration ever
+      // drift apart this plan silently stops using the index — and this assertion is what catches
+      // that drift.
+      const maxPlan = migrated
+        .prepare(`EXPLAIN QUERY PLAN SELECT MAX(${ledgerInstant("updated_at")}) as ts FROM orders`)
+        .all() as Array<{ detail: string }>;
+      expect(maxPlan.map((step) => step.detail)).toEqual(
+        expect.arrayContaining([expect.stringContaining("idx_orders_updated_instant")]),
+      );
+
+      // The exact shape of the delta query that follows a changed MAX(): filtered by the same
+      // expression and ordered DESC. Without this migration the planner falls back to
+      // `SCAN orders` plus a temp sort over all 101k rows.
+      const rangePlan = migrated
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT * FROM orders WHERE ${ledgerInstant("updated_at")} > ?
+           ORDER BY ${ledgerInstant("updated_at")} DESC LIMIT 20`,
+        )
+        .all(0) as Array<{ detail: string }>;
+      const rangeDetails = rangePlan.map((step) => step.detail);
+
+      expect(rangeDetails).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("SEARCH orders"),
+          expect.stringContaining("idx_orders_updated_instant"),
+        ]),
+      );
+      // Assert the name AND the absence of the sort: without this migration the planner reports
+      // "SCAN orders" plus "USE TEMP B-TREE FOR ORDER BY" over the full table.
+      expect(rangeDetails.join(" | ")).not.toContain("TEMP B-TREE");
     } finally {
       migrated.close();
     }

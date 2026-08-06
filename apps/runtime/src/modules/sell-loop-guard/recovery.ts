@@ -4,6 +4,7 @@ import {
   classifySellLoopGuardSkip,
   type LoopGuardOutcomeKind,
 } from "@krabs/domain";
+import { toSqliteDateTime } from "@krabs/db";
 
 /**
  * Startup recovery rebuilds the loop-guard counts inside the active window from
@@ -52,7 +53,7 @@ export function recoverSellLoopGuardEvents(
   windowStartMs: number,
 ): RecoveredLoopGuardEvent[] {
   const isoBound = new Date(windowStartMs).toISOString();
-  const spaceBound = isoBound.slice(0, 19).replace("T", " ");
+  const spaceBound = toSqliteDateTime(windowStartMs);
   const recovered: RecoveredLoopGuardEvent[] = [];
   const hasDecisionRuleId = hasColumn(db, "orders", "decision_rule_id");
 

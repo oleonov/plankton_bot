@@ -1445,6 +1445,48 @@ describe("GET /status", () => {
     }
   });
 
+  it("GET /dashboard/kpi classifies a position opened at the canonical-ms rendering of the v072 cutoff as post-v072", async () => {
+    // V072_DEPLOY_CUTOFF_ISO is second-precision ("...56Z"), but production renders opened_at in
+    // canonical ISO-ms form ("...56.000Z") — the SAME instant. A raw string compare puts
+    // "...56.000Z" BELOW "...56Z" ('.' 0x2E < 'Z' 0x5A), so a position opened exactly at the
+    // cutoff would be misclassified as pre-v072 without the ledgerInstant() wrap on both bounds.
+    const nowIso = new Date().toISOString();
+    const cutoffMsIso = "2026-06-03T11:54:56.000Z";
+    const cleanup = () => {
+      conn.db.exec(`
+        DELETE FROM positions WHERE position_id LIKE 'pos-kpi-boundary-ms-%';
+      `);
+    };
+
+    try {
+      cleanup();
+      conn.db.exec(`
+        INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, closed_at, updated_at)
+        VALUES
+          ('pos-kpi-boundary-ms-post', 'tok-kpi-boundary-ms-post', 'cond-kpi-boundary-ms-post', 'buy',
+           10, 0.10, 1, 2, 1, 'closed', '${cutoffMsIso}', '${nowIso}', '${nowIso}');
+      `);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/dashboard/kpi",
+        headers: authHeaders(),
+      });
+      const body = json(res);
+
+      expect(body.ok).toBe(true);
+      expect(body.data.winrate_7d.cohorts.post_v072).toMatchObject({
+        wins: 1,
+        losses: 0,
+        total: 1,
+      });
+      expect(body.data.winrate_7d.cohorts.pre_v072.total).toBe(0);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("GET /hold-resolution returns active hold markers with filtering", async () => {
     const nowIso = new Date().toISOString();
     conn.db.exec(`

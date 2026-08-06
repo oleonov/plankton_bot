@@ -935,6 +935,127 @@ describe("GET /metrics/portfolio-series", () => {
     }
   });
 
+  it("fails closed on ALL when profileStart is recorded but unparseable", async () => {
+    // A start we could not parse is NOT the same as no start recorded: the boundary EXISTS
+    // and is unknown, so the series must not claim full-lifetime coverage. Falling back to
+    // `historyStart` here (dropping the `profileStartUnknown` guard) would let this pass
+    // with coverageComplete === true, silently swapping the initial-balance baseline for the
+    // first ledger snapshot. Paired with the control case right below on the SAME fixture
+    // minus the profiles row, so `false` here can only be attributed to the unparseable
+    // start, not to a broken fixture.
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('simulation', 'Simulation', 'not-a-timestamp')`,
+      )
+      .run();
+
+    try {
+      insertSnapshot("simulation", 10010, 5, 10, 8, minutesAgo(30));
+      insertSnapshot("simulation", 10025, 12, 25, 8, minutesAgo(5));
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=all",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.coverageComplete).toBe(false);
+    } finally {
+      conn.db.prepare("DELETE FROM profiles WHERE profile_id = 'simulation'").run();
+    }
+  });
+
+  it("keeps ALL coverage complete when no profile start is recorded at all", async () => {
+    // Control for the case above: with no start recorded, the ledger's own first snapshot is
+    // the only lifetime boundary that exists, so history trivially covers it.
+    conn.db.prepare("DELETE FROM profiles WHERE profile_id = 'simulation'").run();
+
+    insertSnapshot("simulation", 10010, 5, 10, 8, minutesAgo(30));
+    insertSnapshot("simulation", 10025, 12, 25, 8, minutesAgo(5));
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/portfolio-series?interval=all",
+      headers: auth(),
+    });
+    const body = res.json();
+
+    expect(body.ok).toBe(true);
+    expect(body.data.coverageComplete).toBe(true);
+  });
+
+  it("keeps a WINDOWED interval complete when history predates the window and the profile start is unparseable", async () => {
+    // The unknown-boundary guard is correct for `all` and wrong for a window. `all` asks about the
+    // whole lifetime, which the unreadable start defines; a 1d request asks only about the last 24h,
+    // and history starting 33h ago covers that outright whatever the profile start was. Applying the
+    // guard here would report coverageComplete === false, swap the in-window baseline (10010) for the
+    // initial balance (10000), and report portfolioPnl 25 instead of the true 15 — a silently wrong
+    // chart and headline, not a crash. Asserting all three pins the boolean AND its consequence.
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('simulation', 'Simulation', 'not-a-timestamp')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc)
+         VALUES ('simulation', 10000)`,
+      )
+      .run();
+
+    try {
+      insertSnapshot("simulation", 9000, 0, 0, 0, minutesAgo(2000));
+      insertSnapshot("simulation", 10010, 5, 10, 8, minutesAgo(600));
+      insertSnapshot("simulation", 10025, 12, 25, 8, minutesAgo(5));
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=1d",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.coverageComplete).toBe(true);
+      expect(body.data.baseline).toBe(10010);
+      expect(body.data.portfolioPnl).toBe(15);
+    } finally {
+      conn.db.prepare("DELETE FROM profiles WHERE profile_id = 'simulation'").run();
+      conn.db.prepare("DELETE FROM profile_settings WHERE profile_id = 'simulation'").run();
+    }
+  });
+
+  it("fails closed on ALL when the profile-start lookup itself throws", async () => {
+    // A lookup that throws must not be laundered into the same null a profile with no recorded
+    // start produces: the boundary may well exist and we simply could not read it. Renaming the
+    // table away makes `prepare` throw exactly as a corrupt or migrating control.db would, without
+    // having to restate its DDL. `effectiveProfile` comes from `runtime_control_state`, so the rest
+    // of the request is unaffected — the assertion below can only be about the failed lookup.
+    conn.db.prepare("DELETE FROM profiles WHERE profile_id = 'simulation'").run();
+    conn.db.prepare("ALTER TABLE profiles RENAME TO profiles_lookup_failure_fixture").run();
+
+    try {
+      insertSnapshot("simulation", 10010, 5, 10, 8, minutesAgo(30));
+      insertSnapshot("simulation", 10025, 12, 25, 8, minutesAgo(5));
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=all",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.coverageComplete).toBe(false);
+    } finally {
+      conn.db.prepare("ALTER TABLE profiles_lookup_failure_fixture RENAME TO profiles").run();
+    }
+  });
+
   it("filters snapshots by the current profile", async () => {
     // Insert snapshots for simulation and paper profiles
     insertSnapshot("simulation", 100, 0, 50, 40, minutesAgo(30));

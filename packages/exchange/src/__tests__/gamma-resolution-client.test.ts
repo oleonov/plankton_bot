@@ -51,9 +51,9 @@ describe("GammaResolutionClient", () => {
     expect(info).not.toBeNull();
     expect(info!.conditionId).toBe("0xabc123");
     expect(info!.closed).toBe(true);
-    expect(info!.closedTime).toBe("2026-03-25T16:00:00Z");
+    expect(info!.closedTime).toBe("2026-03-25T16:00:00.000Z");
     expect(info!.umaResolutionStatus).toBe("resolved");
-    expect(info!.endDate).toBe("2026-03-25T16:00:00Z");
+    expect(info!.endDate).toBe("2026-03-25T16:00:00.000Z");
   });
 
   it("parses snake_case fields for backwards compatibility", async () => {
@@ -72,9 +72,9 @@ describe("GammaResolutionClient", () => {
 
     expect(info).not.toBeNull();
     expect(info!.conditionId).toBe("0xdef456");
-    expect(info!.closedTime).toBe("2026-03-20T00:00:00Z");
+    expect(info!.closedTime).toBe("2026-03-20T00:00:00.000Z");
     expect(info!.umaResolutionStatus).toBe("resolved");
-    expect(info!.endDate).toBe("2026-03-20T00:00:00Z");
+    expect(info!.endDate).toBe("2026-03-20T00:00:00.000Z");
   });
 
   it("returns null when response has no conditionId in either case", async () => {
@@ -124,13 +124,44 @@ describe("GammaResolutionClient", () => {
         condition_id: "snake",
         slug: "test",
         closed: false,
-        closedTime: "camel-time",
-        closed_time: "snake-time",
+        closedTime: "2026-03-25 16:00:00+00",
+        closed_time: "2026-03-26 16:00:00+00",
       }),
     );
 
     const info = await client.getMarketBySlug("test");
     expect(info!.conditionId).toBe("camel");
-    expect(info!.closedTime).toBe("camel-time");
+    expect(info!.closedTime).toBe("2026-03-25T16:00:00.000Z");
+  });
+
+  it("normalizes Gamma's `+00` closedTime before it reaches positions.closed_at", async () => {
+    // The raw shape is malformed for SQLite (its timezone modifier needs `+HH:MM`),
+    // so julianday()/strftime() return NULL and every reader bounding on closed_at
+    // drops the row. Normalizing at the ingress is what keeps new rows readable.
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      mockResponse(gammaMarketPayload({ closedTime: "2026-03-25 16:00:00+00" })),
+    );
+
+    const info = await client.getMarketBySlug("test");
+    expect(info!.closedTime).toBe("2026-03-25T16:00:00.000Z");
+  });
+
+  it("normalizes the endDate fallback, which every consumer feeds to Date.parse", async () => {
+    // `endDateIso` is canonical, but the `endDate`/`end_date` fallbacks are not — and a
+    // zone-less value would be read as LOCAL time, shifting the instant by the host offset.
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      mockResponse({
+        conditionId: "0xabc123",
+        slug: "test",
+        closed: false,
+        endDate: "2026-03-25 16:00:00",
+      }),
+    );
+
+    const info = await client.getMarketBySlug("test");
+    expect(info!.endDate).toBe("2026-03-25T16:00:00.000Z");
   });
 });
+
+// `toCanonicalIso` itself now lives in `@krabs/domain` (packages/domain/src/timestamp.ts) and is
+// tested there — it is shared with `parseLedgerInstantMs`, not specific to this Gamma client.

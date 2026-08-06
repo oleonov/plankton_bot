@@ -44,6 +44,8 @@ interface PositionCycle {
   positionId: string;
   tokenId: string;
   status: string;
+  lastActionAt: string;
+  heldDurationMs: number;
   investedUsd: number;
   returnedUsd: number;
   sellReturnedUsd: number;
@@ -1044,5 +1046,65 @@ describe("GET /pnl/position-cycles", () => {
     );
     expect(best.data.cycles[0]!.positionId).toBe("pos-large-relative-drift");
     expect(best.data.cycles.findIndex((c) => c.positionId === "pos-unknown")).toBeGreaterThan(0);
+  });
+
+  it("computes heldDurationMs and lastActionAt correctly when closed_at is a bare SQLite space timestamp", async () => {
+    const originalTz = process.env.TZ;
+    process.env.TZ = "Asia/Bangkok";
+    try {
+      await withSavepoint("timestamp_format_split", async () => {
+        seedMarket("tok-ts-split", "cond-ts-split", "timestamp-split-market");
+        seedPosition({
+          positionId: "pos-ts-split",
+          tokenId: "tok-ts-split",
+          conditionId: "cond-ts-split",
+          status: "closed",
+          size: 0,
+          avgEntry: 0.2,
+          costBasis: 2,
+          realizedPnl: 0.5,
+          openedAt: "2026-08-05T01:00:00.000Z",
+          // Same calendar day as openedAt, but rendered the way a legacy `datetime('now')`
+          // partial UPDATE writes it: no zone designator at all, space instead of "T".
+          closedAt: "2026-08-05 05:53:26",
+        });
+        seedBuyLot({
+          positionId: "pos-ts-split",
+          tokenId: "tok-ts-split",
+          conditionId: "cond-ts-split",
+          fillId: "buy-ts-split",
+          orderId: "ord-buy-ts-split",
+          price: 0.2,
+          size: 10,
+          source: "R23_DIP_TRIGGER",
+          filledAt: "2026-08-05T01:00:00.000Z",
+        });
+        seedSellPnl({
+          positionId: "pos-ts-split",
+          tokenId: "tok-ts-split",
+          conditionId: "cond-ts-split",
+          fillId: "sell-ts-split",
+          orderId: "ord-sell-ts-split",
+          price: 0.25,
+          size: 10,
+          source: "PROFILE_LADDER",
+          pnl: 0.5,
+          filledAt: "2026-08-05T03:00:00.000Z",
+        });
+
+        const body = await fetchCycles();
+        const cycle = body.data.cycles.find((c) => c.positionId === "pos-ts-split")!;
+        // Under a host/TZ that reads the zone-less space form as LOCAL time, closed_at
+        // (05:53:26) misparses to a UTC instant *before* both openedAt and the sell fill,
+        // so it loses latestTimestamp() to the sell fill and heldDurationMs clamps to 0.
+        // Parsed as UTC (the fix), closed_at is genuinely the latest of the three and the
+        // hold is 01:00:00Z -> 05:53:26Z = 4h53m26s.
+        expect(cycle.lastActionAt).toBe("2026-08-05 05:53:26");
+        expect(cycle.heldDurationMs).toBe(17_606_000);
+      });
+    } finally {
+      if (originalTz === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTz;
+    }
   });
 });

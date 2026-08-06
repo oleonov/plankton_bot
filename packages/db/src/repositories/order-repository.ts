@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { OrderRepository, Order, OrderCancelTelemetry, CancelAgeBucket } from "@krabs/domain";
+import { nowIso } from "../db-timestamp.js";
 import type {
   OrderId,
   TokenId,
@@ -165,8 +166,8 @@ export class SqliteOrderRepository implements OrderRepository {
     cancelReason?: string,
     telemetry?: OrderCancelTelemetry,
   ): void {
-    const assignments = ["status = ?", "updated_at = datetime('now')"];
-    const params: unknown[] = [status];
+    const assignments = ["status = ?", "updated_at = ?"];
+    const params: unknown[] = [status, nowIso()];
 
     if (exchangeOrderId !== undefined) {
       assignments.push("exchange_order_id = ?");
@@ -240,10 +241,10 @@ export class SqliteOrderRepository implements OrderRepository {
     const result = this.db
       .prepare(
         `UPDATE orders
-         SET metadata_json = ?, updated_at = datetime('now')
+         SET metadata_json = ?, updated_at = ?
          WHERE order_id = ?`,
       )
-      .run(JSON.stringify(metadata), id);
+      .run(JSON.stringify(metadata), nowIso(), id);
     if (result.changes !== 1) {
       throw new Error(`Order metadata update expected one row for order_id=${String(id)}`);
     }

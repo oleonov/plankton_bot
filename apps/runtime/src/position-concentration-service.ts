@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { ledgerInstant, parseLedgerInstantMs } from "@krabs/db";
 import type {
   ConditionId,
   ExecutionPolicy,
@@ -511,10 +512,17 @@ export class PositionConcentrationService {
     const profile = this.deps.profileId ?? "live-lite";
     const row = this.deps.ledgerDb
       .prepare(
+        // This picks the bankroll that sizing and the concentration caps are computed against, so
+        // "newest row" has to mean newest INSTANT, not newest string. The column is 24,063/24,063
+        // canonical ISO today only because every INSERT names it — `DEFAULT (datetime('now'))`
+        // survives on the production table and cannot be dropped, and once it fires a space row at
+        // 10:10 sorts BELOW an ISO row at 10:05 (' ' < 'T'), returning the older bankroll as if it
+        // were current. Migration 096 adds the matching expression index so the wrap keeps its seek
+        // on this per-signal path instead of scanning the profile's snapshots every call.
         `SELECT total_equity_liquidation_usdc, equity_usdc, captured_at
            FROM portfolio_snapshots
           WHERE profile = ?
-          ORDER BY captured_at DESC
+          ORDER BY ${ledgerInstant("captured_at")} DESC
           LIMIT 1`,
       )
       .get(profile) as
@@ -523,7 +531,7 @@ export class PositionConcentrationService {
     if (!row) return null;
     const value =
       finitePositive(row.total_equity_liquidation_usdc) ?? finitePositive(row.equity_usdc);
-    const capturedAtMs = Date.parse(row.captured_at);
+    const capturedAtMs = parseLedgerInstantMs(row.captured_at);
     if (value == null || !Number.isFinite(capturedAtMs)) return null;
     return { valueUsdc: value, capturedAtMs, source: "portfolio_snapshot", fresh: false };
   }
@@ -544,7 +552,12 @@ export class PositionConcentrationService {
       | undefined;
     if (!row) return null;
     const wallet = finiteNonNegativeOrNull(row.wallet_balance_usdc ?? row.balance_usdc);
-    const capturedAtMs = Date.parse(row.updated_at);
+    // `profile_summaries.updated_at` is space-form on production — measured 2026-08-06, all three
+    // rows at 19 chars, live-lite's written that same day — because its only writer is the column
+    // DEFAULT. Bare `Date.parse` reads that zone-less shape as HOST-LOCAL, so this staleness gate
+    // on a bankroll value that feeds sizing is correct today only because the container happens to
+    // run UTC. `parseLedgerInstantMs` pins it to UTC and removes the dependency on that.
+    const capturedAtMs = parseLedgerInstantMs(row.updated_at);
     if (wallet == null || !Number.isFinite(capturedAtMs)) return null;
     return {
       valueUsdc: wallet + this.sumConservativeOpenValue(),

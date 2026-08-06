@@ -14,7 +14,7 @@
  */
 
 import type Database from "better-sqlite3";
-import { withImmediate } from "@krabs/db";
+import { parseLedgerInstantMs, withImmediate } from "@krabs/db";
 import { performance } from "node:perf_hooks";
 import type {
   RuntimeModule,
@@ -351,7 +351,7 @@ export class RiskInventoryModule implements RuntimeModule {
 
   private shouldApplyMarketDataMark(pos: Position, nowMs: number): boolean {
     if (this.needsStartupCurrentValueBackfill(pos)) return true;
-    const updatedAtMs = pos.updatedAt ? Date.parse(pos.updatedAt) : 0;
+    const updatedAtMs = pos.updatedAt ? parseLedgerInstantMs(pos.updatedAt) : 0;
     if (!Number.isFinite(updatedAtMs)) return true;
     return nowMs - updatedAtMs > W4_STALENESS_FALLBACK_MS;
   }

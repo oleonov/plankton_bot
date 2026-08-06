@@ -7,6 +7,7 @@ import type {
   TokenId,
 } from "@krabs/domain";
 import { createTokenId } from "@krabs/domain";
+import { parseLedgerInstantMs } from "@krabs/db";
 import type { PolymarketDataPosition, PolymarketPositionReader } from "@krabs/exchange";
 import type { Logger } from "../../logger.js";
 import type { LatestUsablePriceLookup } from "../../market-snapshot-pricing.js";
@@ -360,7 +361,10 @@ function groupPositionsByToken(positions: readonly Position[]): Map<string, Posi
 function latestPosition(positions: readonly Position[]): Position | null {
   let latest: Position | null = null;
   for (const position of positions) {
-    if (!latest || Date.parse(position.updatedAt) > Date.parse(latest.updatedAt)) {
+    if (
+      !latest ||
+      parseLedgerInstantMs(position.updatedAt) > parseLedgerInstantMs(latest.updatedAt)
+    ) {
       latest = position;
     }
   }
@@ -390,8 +394,8 @@ function isFutureEndDate(endDate: string, nowMs: number): boolean {
 
 function isWithinMissingRemoteGrace(position: Position, nowMs: number): boolean {
   const latestLocalChangeMs = Math.max(
-    Date.parse(position.openedAt),
-    Date.parse(position.updatedAt),
+    parseLedgerInstantMs(position.openedAt),
+    parseLedgerInstantMs(position.updatedAt),
   );
   return (
     Number.isFinite(latestLocalChangeMs) && nowMs - latestLocalChangeMs < MISSING_REMOTE_GRACE_MS

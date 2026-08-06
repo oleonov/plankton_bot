@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import type { AppConfig } from "@krabs/config";
 import { DEFAULT_REPRICE_CHAIN_MAX_COUNT } from "@krabs/domain";
+import { ledgerInstant } from "@krabs/db";
 import { resolveActiveLedger } from "../active-ledger.js";
 import { computeExecutionTelemetry } from "../execution-telemetry.js";
 import { ok } from "../errors.js";
@@ -62,13 +63,22 @@ const HOLD_RESOLUTION_STATUSES = new Set([
   "cancelled",
   "superseded",
 ]);
+// A bound goes through `ledgerInstant()` if and only if one side of the comparison carries a
+// rendering other than canonical ISO-ms. `closed_at` does — the legacy space format and Gamma's
+// `YYYY-MM-DD HH:mm:ss+00` — so every bound touching it is wrapped: lexically `' '` (0x20) sorts
+// below `'T'` (0x54), so a same-day ISO `filled_at` compares ABOVE a space-format bound, and bare
+// `julianday()` is NULL for the whole Gamma shape, which drops the row outright. Both failures
+// silently under-count sell-closed positions. `filled_at` and `opened_at` are single-rendering
+// canonical ISO, so the lower bound compares them raw and keeps plain string ordering.
+// The caller already requires `status = 'closed' AND closed_at IS NOT NULL`, so no open-position
+// branch is reachable here and no `COALESCE` fallback bound is needed.
 const SELL_CLOSED_WINRATE_PREDICATE = `AND EXISTS (
    SELECT 1
      FROM fills f
     WHERE f.token_id = positions.token_id
       AND LOWER(f.side) = 'sell'
       AND f.filled_at >= positions.opened_at
-      AND f.filled_at <= COALESCE(positions.closed_at, datetime('now'))
+      AND ${ledgerInstant("f.filled_at")} <= ${ledgerInstant("positions.closed_at")}
  )
  AND NOT EXISTS (
    SELECT 1
@@ -90,12 +100,23 @@ export const dashboardRoutes: FastifyPluginAsync<DashboardOpts> = async (app, op
     const since24h = new Date(Date.now() - DAY_MS).toISOString();
 
     const winrate7d = readWinrateBreakdown(db, since7d);
-    const preV072Winrate = readWinrateBreakdown(db, since7d, "AND positions.opened_at < ?", [
-      V072_DEPLOY_CUTOFF_ISO,
-    ]);
-    const postV072Winrate = readWinrateBreakdown(db, since7d, "AND positions.opened_at >= ?", [
-      V072_DEPLOY_CUTOFF_ISO,
-    ]);
+    // These two bounds stay wrapped even though `opened_at` is single-rendering: the BIND is not.
+    // `V072_DEPLOY_CUTOFF_ISO` is second-precision, and raw `"…56.000Z"` sorts BELOW `"…56Z"`
+    // ('.' < 'Z'), so a position opened exactly at the cutoff would land in the wrong cohort. The
+    // constant is echoed verbatim as `cohort_cutoff` in the response, so it is normalized here
+    // rather than rewritten at its declaration.
+    const preV072Winrate = readWinrateBreakdown(
+      db,
+      since7d,
+      `AND ${ledgerInstant("positions.opened_at")} < ${ledgerInstant("?")}`,
+      [V072_DEPLOY_CUTOFF_ISO],
+    );
+    const postV072Winrate = readWinrateBreakdown(
+      db,
+      since7d,
+      `AND ${ledgerInstant("positions.opened_at")} >= ${ledgerInstant("?")}`,
+      [V072_DEPLOY_CUTOFF_ISO],
+    );
 
     const exitMultiples = readExitMultiples(db, since7d);
     const fills24h = computeExecutionTelemetry(db, { sinceIso: since24h });
@@ -305,7 +326,7 @@ function readClosedWinrate(
          FROM positions
         WHERE status = 'closed'
           AND closed_at IS NOT NULL
-          AND closed_at >= ?
+          AND ${ledgerInstant("closed_at")} >= ${ledgerInstant("?")}
           ${extraPredicate}`,
     )
     .get(sinceIso, ...extraParams) as ClosedPositionRow;
@@ -351,11 +372,11 @@ function readExitMultiples(db: Database.Database, sinceIso: string): number[] {
          JOIN fills f ON f.token_id = p.token_id
         WHERE p.status = 'closed'
           AND p.closed_at IS NOT NULL
-          AND p.closed_at >= ?
+          AND ${ledgerInstant("p.closed_at")} >= ${ledgerInstant("?")}
           AND p.avg_entry_price > 0
           AND LOWER(f.side) = 'sell'
           AND f.filled_at >= p.opened_at
-          AND f.filled_at <= p.closed_at
+          AND ${ledgerInstant("f.filled_at")} <= ${ledgerInstant("p.closed_at")}
         GROUP BY p.position_id, p.avg_entry_price
        HAVING multiple IS NOT NULL AND multiple >= 2.0`,
     )

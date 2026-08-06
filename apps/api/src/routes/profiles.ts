@@ -26,6 +26,7 @@ import {
   formatOwnershipInvariantBreakdown,
   formatOwnershipInvariantRemedy,
   hasOwnershipInvariantViolation,
+  ledgerInstant,
   readExecutionPolicyVersion,
   readOwnershipInvariantViolations,
 } from "@krabs/db";
@@ -236,8 +237,12 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    // updated_at mixes ISO and legacy space-format renderings (see @krabs/db ledgerInstant) — a
+    // raw TEXT ORDER BY ranks an older same-day ISO row above a newer space-format one.
     const orderBy =
-      sort === "tail_cost" ? "ORDER BY cost_basis_usdc DESC" : "ORDER BY updated_at DESC";
+      sort === "tail_cost"
+        ? "ORDER BY cost_basis_usdc DESC"
+        : `ORDER BY ${ledgerInstant("updated_at")} DESC`;
 
     const rows = ledger
       .prepare(`SELECT * FROM positions ${where} ${orderBy}`)

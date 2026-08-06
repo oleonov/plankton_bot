@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { ensureControlProfiles, ensureDefaultExecutionPolicy } from "./control-profiles.js";
+import { ledgerInstant, nowIso } from "./db-timestamp.js";
 import {
   BOOTSTRAP_BUSY_TIMEOUT_MS,
   openDatabase,
@@ -520,6 +521,11 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
  * opened_at DESC, position_id DESC as tie-breaker) and then creates the
  * partial UNIQUE index. Fresh DBs skip the repair (empty positions).
  *
+ * The winner is picked on the INSTANT, not the raw text: this runs over legacy
+ * rows that may predate the ISO-only writers, and a lexical `<` would rank a
+ * same-day space-format `opened_at` below an ISO one regardless of which is
+ * actually newer — closing the row that findByTokenId would have returned.
+ *
  * Kept in bootstrapLedgerDb rather than ledger.sql because db.exec() cannot
  * repair before creating the index — the CREATE UNIQUE INDEX would fail on
  * upgrade DBs with pre-existing duplicates.
@@ -527,11 +533,12 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
 function ensureUniqueOpenPositionIndex(db: import("better-sqlite3").Database): void {
   try {
     db.transaction(() => {
+      const repairedAt = nowIso();
       db.prepare(
         `UPDATE positions
             SET status = 'closed',
-                closed_at = COALESCE(closed_at, datetime('now')),
-                updated_at = datetime('now')
+                closed_at = COALESCE(closed_at, ?),
+                updated_at = ?
           WHERE position_id IN (
             SELECT p1.position_id
               FROM positions p1
@@ -540,11 +547,12 @@ function ensureUniqueOpenPositionIndex(db: import("better-sqlite3").Database): v
                AND p1.status = 'open'
                AND p2.status = 'open'
                AND (
-                     p1.opened_at < p2.opened_at
-                  OR (p1.opened_at = p2.opened_at AND p1.position_id < p2.position_id)
+                     ${ledgerInstant("p1.opened_at")} < ${ledgerInstant("p2.opened_at")}
+                  OR (${ledgerInstant("p1.opened_at")} = ${ledgerInstant("p2.opened_at")}
+                      AND p1.position_id < p2.position_id)
                )
           )`,
-      ).run();
+      ).run(repairedAt, repairedAt);
       db.exec(
         `CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_unique_open_per_token
            ON positions(token_id) WHERE status = 'open'`,

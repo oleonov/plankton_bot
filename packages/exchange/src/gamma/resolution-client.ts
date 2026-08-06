@@ -1,4 +1,4 @@
-import type { DepHealthRecorder } from "@krabs/domain";
+import { toCanonicalIso, type DepHealthRecorder } from "@krabs/domain";
 import { drainResponseBody } from "../live/market-data-gateway.js";
 import { timeDepCall } from "../dep-health.js";
 import { isTransientNetworkError, sleep } from "../network-errors.js";
@@ -109,11 +109,15 @@ export class GammaResolutionClient {
           conditionId: cid,
           slug: (raw.slug as string) ?? "",
           closed: raw.closed === true || raw.closed === "true",
-          closedTime: ((raw.closedTime ?? raw.closed_time) as string) ?? null,
+          closedTime: toCanonicalIso(raw.closedTime ?? raw.closed_time),
           umaResolutionStatus:
             ((raw.umaResolutionStatus ?? raw.uma_resolution_status) as string) ?? null,
+          // Normalized for the same reason as closedTime: the `endDate`/`end_date`
+          // fallbacks are rendered `YYYY-MM-DD HH:mm:ss+00`, and every consumer feeds
+          // this straight into `Date.parse`, which reads a zone-less date-time as LOCAL
+          // time — the parsed instant would then depend on the host's UTC offset.
           endDate:
-            ((raw.endDateIso ?? raw.end_date_iso ?? raw.endDate ?? raw.end_date) as string) ?? "",
+            toCanonicalIso(raw.endDateIso ?? raw.end_date_iso ?? raw.endDate ?? raw.end_date) ?? "",
           rawPayload: raw,
         };
       } catch (err: unknown) {

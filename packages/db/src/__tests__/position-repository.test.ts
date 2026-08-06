@@ -211,6 +211,39 @@ describe("SqlitePositionRepository", () => {
     expect(found!.positionId).toBe("p-new");
   });
 
+  it("findByTokenId ranks by instant, not raw text — a same-day space-form time beats an earlier ISO time", () => {
+    // Chronologically OLDER (09:00), rendered ISO. Under a raw-text
+    // `ORDER BY opened_at DESC`, 'T' (0x54) at the date/time separator
+    // outranks the space-form row below regardless of the hour digits, so
+    // this row wrongly sorts FIRST. Give it the textually-LARGER
+    // position_id: under `position_id DESC` tie-break, if it ever engaged,
+    // it would ALSO favor this row — same as the broken raw-text ordering —
+    // so this test can only pass because of ledgerInstant(), never because
+    // the tie-break happens to rescue it.
+    repo.save(
+      makePosition({
+        positionId: createPositionId("pos-z-iso-older"),
+        tokenId: createTokenId("tok-instant-race"),
+        status: "open",
+        openedAt: "2026-08-05T09:00:00.000Z",
+      }),
+    );
+    // Chronologically NEWER (10:00 > 09:00), rendered space-form the way the
+    // legacy `datetime('now')` DEFAULT/partial-UPDATE path writes it.
+    repo.save(
+      makePosition({
+        positionId: createPositionId("pos-a-space-newer"),
+        tokenId: createTokenId("tok-instant-race"),
+        status: "dust",
+        openedAt: "2026-08-05 10:00:00",
+      }),
+    );
+
+    const found = repo.findByTokenId(createTokenId("tok-instant-race"));
+    expect(found).not.toBeNull();
+    expect(found!.positionId).toBe("pos-a-space-newer");
+  });
+
   it("unique index prevents two open rows for same token", () => {
     repo.save(
       makePosition({

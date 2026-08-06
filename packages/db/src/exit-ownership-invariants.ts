@@ -48,9 +48,49 @@ const INACTIVE_SELL_ORDER_STATUS_LIST = INACTIVE_SELL_ORDER_STATUSES.map((s) => 
   ", ",
 );
 
+/**
+ * `isWorkingSellOrderStatus` as SQL, over a caller-supplied status column. The three excluded
+ * statuses are terminal for EITHER side (`OrderStatus` = pending | open | partially-filled | filled
+ * | cancelled | rejected), so this is side-agnostic: a caller asking "does this position still have
+ * live order state?" must count a working BUY as well as a working SELL, and adds its own
+ * `side = 'sell'` when it wants only exits. Taking the column as an argument keeps it usable in a
+ * correlated subquery, where a bare `status` would silently bind to whichever table declares one.
+ * The polarity lives here rather than at each call site so no caller can write `IN` by mistake, and
+ * it inherits the exclusion-set property above: an unrecognised status reads as WORKING.
+ */
+export function workingOrderStatusSql(statusColumn: string): string {
+  return `${statusColumn} NOT IN (${INACTIVE_SELL_ORDER_STATUS_LIST})`;
+}
+
 /** The same predicate as `isWorkingSellOrderStatus`, over the alias every order-based row SQL uses. */
 const ACTIVE_SELL_SQL = `o.side = 'sell'
-   AND o.status NOT IN (${INACTIVE_SELL_ORDER_STATUS_LIST})`;
+   AND ${workingOrderStatusSql("o.status")}`;
+
+/**
+ * The drain projection's table NAME and shape are CONTRACT for the same reason `projected_owners`
+ * is: one SQL text names exactly one table. Unlike `projected_owners` this one has NO remote form —
+ * the census must keep reporting the RAW ledger, so it never binds this table and never sees a
+ * predicate that references it (see `buildOwnershipInvariantRowSql`).
+ */
+const DRAINED_ORDERS_COLUMNS = "(order_id TEXT PRIMARY KEY)";
+
+/** Local-only. Same pooled-connection hazard as `projected_owners`: CREATE IF NOT EXISTS + DELETE. */
+const DRAINED_ORDERS_RESET_SQL = `CREATE TEMP TABLE IF NOT EXISTS drained_orders${DRAINED_ORDERS_COLUMNS};
+DELETE FROM drained_orders;`;
+
+/**
+ * "Active SELL, minus the orders this boot has ALREADY handed to the P6 drain."
+ *
+ * Not a weaker invariant — a different QUESTION. The canonical form asks "is the ledger consistent
+ * for an executor that will never revisit these resting orders?"; that premise is false for exactly
+ * the orders startup classification has quarantined, whose declared remedy (`cancel the listed SELL
+ * order(s)`) is precisely what the drain is about to perform. Subtracting them from the shared
+ * relation — rather than filtering rows out of the four order-scoped result sets — is load-bearing:
+ * I3 is a per-token AGGREGATE, so a quarantined order must also stop contributing its shares to the
+ * overcommitment sum, which no post-hoc row filter can express.
+ */
+const ACTIVE_SELL_EXCLUDING_DRAINED_SQL = `${ACTIVE_SELL_SQL}
+   AND o.order_id NOT IN (SELECT order_id FROM drained_orders)`;
 
 /**
  * The projection table's NAME and column names are CONTRACT, not an implementation detail: one
@@ -113,7 +153,7 @@ const IMPLIED_OWNER_SQL = `CASE WHEN o.decision_rule_id IN ('${BOUNCE_EXIT_TARGE
  * to stay within — but it must remain evaluable under `projected_owners`, the TEMP table the callers bind
  * (see `PROJECTED_OWNERS_CREATE_SQL`), because both of them bind it and neither substitutes a literal.
  */
-export const OWNERSHIP_INVARIANT_ROW_SQL: ReadonlyArray<{
+export interface OwnershipInvariantRowSql {
   id: OwnershipInvariantId;
   sql: string; // SELECT <diagnostic columns> FROM … WHERE <violation predicate>; NO trailing `;`
   /**
@@ -141,47 +181,58 @@ export const OWNERSHIP_INVARIANT_ROW_SQL: ReadonlyArray<{
    * blocked by no invariant), which is why every remedy ends up pointing there.
    */
   remedy: string;
-}> = [
-  {
-    id: "nullOwners",
-    columns: ["position_id", "token_id", "status", "exit_owner"],
-    // The one class the census CAN write — but not for every row it detects: this predicate is
-    // `status <> 'closed'` while the census targets `status IN ('open','dust')`, and `positions.status`
-    // carries no CHECK, so a nonclosed row with an out-of-domain status is detected here, excluded from
-    // the target set, AND fails the census's own status-domain gate. "Run --apply" would loop forever
-    // on it; reconcile-first is valid for the whole invariant.
-    remedy:
-      "reconcile any nonclosed position whose status is outside open/dust, then run the census --apply",
-    sql: `SELECT p.position_id, p.token_id, p.status, p.exit_owner
+}
+
+/**
+ * The six invariants as a FUNCTION of their "active SELL" relation. The drain-projected reader is
+ * therefore GENERATED from these same predicates rather than hand-copied — `activeSellSql` is the
+ * only knob, and columns, remedies and ORDER BY keys are shared by construction, so a seventh
+ * invariant (or a fix to an existing one) cannot land in one form and miss the other.
+ */
+function buildOwnershipInvariantRowSql(
+  activeSellSql: string,
+): ReadonlyArray<OwnershipInvariantRowSql> {
+  return [
+    {
+      id: "nullOwners",
+      columns: ["position_id", "token_id", "status", "exit_owner"],
+      // The one class the census CAN write — but not for every row it detects: this predicate is
+      // `status <> 'closed'` while the census targets `status IN ('open','dust')`, and `positions.status`
+      // carries no CHECK, so a nonclosed row with an out-of-domain status is detected here, excluded from
+      // the target set, AND fails the census's own status-domain gate. "Run --apply" would loop forever
+      // on it; reconcile-first is valid for the whole invariant.
+      remedy:
+        "reconcile any nonclosed position whose status is outside open/dust, then run the census --apply",
+      sql: `SELECT p.position_id, p.token_id, p.status, p.exit_owner
   FROM positions p
  WHERE p.status <> 'closed'
    AND ${effectiveOwnerSql("p")} IS NULL
  ORDER BY p.position_id`,
-  },
-  {
-    // I1 — an unbound legacy SELL cannot be owner-checked, and the executor's identity rejection
-    // never revisits an order that is already resting on the exchange.
-    id: "unboundSells",
-    columns: ["order_id", "token_id", "status", "size", "decision_rule_id"],
-    remedy: "cancel the listed unbound SELL order(s)",
-    sql: `SELECT o.order_id, o.token_id, o.status, o.size, o.decision_rule_id
+    },
+    {
+      // I1 — an unbound legacy SELL cannot be owner-checked, and the executor's identity rejection
+      // never revisits an order that is already resting on the exchange.
+      id: "unboundSells",
+      columns: ["order_id", "token_id", "status", "size", "decision_rule_id"],
+      remedy: "cancel the listed unbound SELL order(s)",
+      sql: `SELECT o.order_id, o.token_id, o.status, o.size, o.decision_rule_id
   FROM orders o
- WHERE ${ACTIVE_SELL_SQL}
+ WHERE ${activeSellSql}
    AND o.position_id IS NULL
  ORDER BY o.order_id`,
-  },
-  {
-    // I2 — "resolves to a nonclosed position ON THE ORDER'S OWN TOKEN". The token-blind reading is
-    // strictly weaker and fails as a SILENT PASS: `orders.position_id` has no foreign key, so a
-    // SELL on token A pointing at a nonclosed position of token B satisfies it while the executor
-    // already rejects `exit-owner-stale-position`. `position_id IS NOT NULL` keeps this disjoint
-    // from I1; `NOT EXISTS` is the (i)-class-safe shape for a predicate about ABSENCE.
-    id: "stalePointerSells",
-    columns: ["order_id", "token_id", "position_id", "status", "decision_rule_id"],
-    remedy: "cancel the listed stale-pointer SELL order(s)",
-    sql: `SELECT o.order_id, o.token_id, o.position_id, o.status, o.decision_rule_id
+    },
+    {
+      // I2 — "resolves to a nonclosed position ON THE ORDER'S OWN TOKEN". The token-blind reading is
+      // strictly weaker and fails as a SILENT PASS: `orders.position_id` has no foreign key, so a
+      // SELL on token A pointing at a nonclosed position of token B satisfies it while the executor
+      // already rejects `exit-owner-stale-position`. `position_id IS NOT NULL` keeps this disjoint
+      // from I1; `NOT EXISTS` is the (i)-class-safe shape for a predicate about ABSENCE.
+      id: "stalePointerSells",
+      columns: ["order_id", "token_id", "position_id", "status", "decision_rule_id"],
+      remedy: "cancel the listed stale-pointer SELL order(s)",
+      sql: `SELECT o.order_id, o.token_id, o.position_id, o.status, o.decision_rule_id
   FROM orders o
- WHERE ${ACTIVE_SELL_SQL}
+ WHERE ${activeSellSql}
    AND o.position_id IS NOT NULL
    AND NOT EXISTS (
          SELECT 1
@@ -191,16 +242,16 @@ export const OWNERSHIP_INVARIANT_ROW_SQL: ReadonlyArray<{
             AND p.status     <> 'closed'
        )
  ORDER BY o.order_id`,
-  },
-  {
-    // I3 — per token: Σ remaining active SELL shares ≤ position size. Overcommit means two engines
-    // are already selling the same shares, which is why this is the money-risking one. Remaining
-    // shares are `size − COALESCE(SUM(fills.size), 0)` floored at 0, never `fill_progress_shares`
-    // (cancel-time telemetry). Holdings are SUMmed per token; I4 refuses the ambiguous case anyway.
-    id: "overcommittedTokens",
-    columns: ["token_id", "remaining_sell_shares", "position_shares"],
-    remedy: "cancel or reduce the excess SELL commitment on the listed token(s)",
-    sql: `SELECT * FROM (
+    },
+    {
+      // I3 — per token: Σ remaining active SELL shares ≤ position size. Overcommit means two engines
+      // are already selling the same shares, which is why this is the money-risking one. Remaining
+      // shares are `size − COALESCE(SUM(fills.size), 0)` floored at 0, never `fill_progress_shares`
+      // (cancel-time telemetry). Holdings are SUMmed per token; I4 refuses the ambiguous case anyway.
+      id: "overcommittedTokens",
+      columns: ["token_id", "remaining_sell_shares", "position_shares"],
+      remedy: "cancel or reduce the excess SELL commitment on the listed token(s)",
+      sql: `SELECT * FROM (
   SELECT s.token_id AS token_id,
          s.remaining_sell_shares AS remaining_sell_shares,
          COALESCE((SELECT SUM(p.size) FROM positions p
@@ -211,47 +262,47 @@ export const OWNERSHIP_INVARIANT_ROW_SQL: ReadonlyArray<{
             FROM orders o
             LEFT JOIN (SELECT order_id, SUM(size) AS filled FROM fills GROUP BY order_id) f
                    ON f.order_id = o.order_id
-           WHERE ${ACTIVE_SELL_SQL}
+           WHERE ${activeSellSql}
            GROUP BY o.token_id
          ) s
 ) WHERE remaining_sell_shares > position_shares
  ORDER BY token_id`,
-  },
-  {
-    // I4 — the token→position lookup must be unambiguous. GROUP BY … HAVING rather than a
-    // self-join because the diagnostic is per TOKEN, and a self-join emits one row per unordered
-    // pair, double-counting a 3-row token. Genuinely reachable: the UNIQUE index is
-    // `UNIQUE(token_id) WHERE status='open'`, so two `dust` rows on one token are permitted.
-    id: "duplicateNonclosedTokens",
-    columns: ["token_id", "nonclosed_rows", "position_ids"],
-    remedy: "reconcile the listed token(s) down to one nonclosed position",
-    sql: `SELECT p.token_id, COUNT(*) AS nonclosed_rows, GROUP_CONCAT(p.position_id) AS position_ids
+    },
+    {
+      // I4 — the token→position lookup must be unambiguous. GROUP BY … HAVING rather than a
+      // self-join because the diagnostic is per TOKEN, and a self-join emits one row per unordered
+      // pair, double-counting a 3-row token. Genuinely reachable: the UNIQUE index is
+      // `UNIQUE(token_id) WHERE status='open'`, so two `dust` rows on one token are permitted.
+      id: "duplicateNonclosedTokens",
+      columns: ["token_id", "nonclosed_rows", "position_ids"],
+      remedy: "reconcile the listed token(s) down to one nonclosed position",
+      sql: `SELECT p.token_id, COUNT(*) AS nonclosed_rows, GROUP_CONCAT(p.position_id) AS position_ids
   FROM positions p
  WHERE p.status <> 'closed'
  GROUP BY p.token_id
 HAVING COUNT(*) > 1
  ORDER BY p.token_id`,
-  },
-  {
-    // I5 — a resting `bounce` SELL against a `profile`-owned position (or the converse) is exactly
-    // the wrong-owner state the canonical hard-stop list names, and I2 never compares the order's
-    // rule with the owner. Evaluated over the EFFECTIVE owner for EVERY position carrying an
-    // active SELL, not only for the census's targets: on a recovery run the offending position may
-    // already be owned, and restricting this to targets would let it through on the second pass.
-    id: "wrongOwnerSells",
-    columns: [
-      "order_id",
-      "token_id",
-      "position_id",
-      "status",
-      "decision_rule_id",
-      "effective_owner",
-      "implied_owner",
-    ],
-    // Not "reassign the owner": `positions.exit_owner` is immutable (the migration carries the
-    // trigger), so the ONLY side that can move is the order.
-    remedy: "cancel the listed wrong-owner SELL order(s)",
-    sql: `SELECT * FROM (
+    },
+    {
+      // I5 — a resting `bounce` SELL against a `profile`-owned position (or the converse) is exactly
+      // the wrong-owner state the canonical hard-stop list names, and I2 never compares the order's
+      // rule with the owner. Evaluated over the EFFECTIVE owner for EVERY position carrying an
+      // active SELL, not only for the census's targets: on a recovery run the offending position may
+      // already be owned, and restricting this to targets would let it through on the second pass.
+      id: "wrongOwnerSells",
+      columns: [
+        "order_id",
+        "token_id",
+        "position_id",
+        "status",
+        "decision_rule_id",
+        "effective_owner",
+        "implied_owner",
+      ],
+      // Not "reassign the owner": `positions.exit_owner` is immutable (the migration carries the
+      // trigger), so the ONLY side that can move is the order.
+      remedy: "cancel the listed wrong-owner SELL order(s)",
+      sql: `SELECT * FROM (
   SELECT o.order_id AS order_id,
          o.token_id AS token_id,
          o.position_id AS position_id,
@@ -261,11 +312,29 @@ HAVING COUNT(*) > 1
          ${IMPLIED_OWNER_SQL} AS implied_owner
     FROM orders o
     JOIN positions p ON p.position_id = o.position_id AND p.status <> 'closed'
-   WHERE ${ACTIVE_SELL_SQL}
+   WHERE ${activeSellSql}
 ) WHERE effective_owner IS NOT NULL AND effective_owner <> implied_owner
  ORDER BY order_id`,
-  },
-];
+    },
+  ];
+}
+
+/**
+ * THE canonical table — the raw ledger, no projection. Byte-for-byte what it has always been, which
+ * is what keeps the census export (which embeds `sql` verbatim), the API gate and the ordinary
+ * startup gate on exactly one definition.
+ */
+export const OWNERSHIP_INVARIANT_ROW_SQL = buildOwnershipInvariantRowSql(ACTIVE_SELL_SQL);
+
+/**
+ * The drain-projected table. Module-private ON PURPOSE: it is only ever correct for a caller that
+ * can PROVE the excluded orders are under the execution barrier, and `readOwnershipInvariantViolations`
+ * is the one place that binds the table the predicate reads. Exporting it would invite a second,
+ * unproven caller.
+ */
+const DRAIN_PROJECTED_INVARIANT_ROW_SQL = buildOwnershipInvariantRowSql(
+  ACTIVE_SELL_EXCLUDING_DRAINED_SQL,
+);
 
 /**
  * The SAME invariants as boolean SQL, for the ONE consumer that cannot call TypeScript: the remote
@@ -290,15 +359,26 @@ export const OWNERSHIP_INVARIANT_GUARD_SQL: ReadonlyArray<{
  *
  * The projection is bound as the TEMP TABLE `projected_owners` so ONE SQL text serves both forms.
  * There is no second SQL variant and no branch inside any predicate.
+ *
+ * `drainedOrderIds` is the SECOND projection, and it answers a different question: "would the ledger
+ * be consistent once the orders this boot has already handed to the P6 drain are gone?" Supplying it
+ * is a CLAIM the caller must have earned — that each id is an authoritative drain target which the
+ * execution barrier will cancel — so only the startup gate passes it, and only for the exact ids
+ * `classifyStartupTransitionTargets` produced. Absent or empty ⇒ raw ledger semantics, unchanged.
  */
 export function readOwnershipInvariantViolations(
   ledgerDb: Database.Database,
   projectedOwners?: ReadonlyMap<string, ExitOwner>,
+  drainedOrderIds?: ReadonlySet<string>,
 ): OwnershipInvariantViolations {
   bindProjectedOwners(ledgerDb, projectedOwners);
+  const drainProjected = bindDrainedOrders(ledgerDb, drainedOrderIds);
+  const invariants = drainProjected
+    ? DRAIN_PROJECTED_INVARIANT_ROW_SQL
+    : OWNERSHIP_INVARIANT_ROW_SQL;
   const rows = {} as Record<OwnershipInvariantId, ReadonlyArray<Record<string, unknown>>>;
   const counts = {} as Record<OwnershipInvariantId, number>;
-  for (const { id, sql } of OWNERSHIP_INVARIANT_ROW_SQL) {
+  for (const { id, sql } of invariants) {
     const offending = ledgerDb.prepare(sql).all() as Array<Record<string, unknown>>;
     rows[id] = offending;
     counts[id] = offending.length;
@@ -351,4 +431,23 @@ function bindProjectedOwners(
   if (!projectedOwners?.size) return;
   const insert = db.prepare("INSERT INTO projected_owners(position_id, owner) VALUES (?, ?)");
   for (const [positionId, owner] of projectedOwners) insert.run(positionId, owner);
+}
+
+/**
+ * Returns whether the DRAIN-PROJECTED predicates should be used — i.e. whether there is anything to
+ * project at all. An absent or EMPTY set answers `false` and leaves the connection untouched, so the
+ * overwhelmingly common caller (both activation gates, the census, every ordinary boot) runs the
+ * canonical SQL against a connection that has never heard of `drained_orders`. An empty set must not
+ * silently take the projected branch: the two are equivalent in RESULT, but only the canonical
+ * branch is the one the census's own text is pinned against.
+ */
+function bindDrainedOrders(
+  db: Database.Database,
+  drainedOrderIds: ReadonlySet<string> | undefined,
+): boolean {
+  if (!drainedOrderIds?.size) return false;
+  db.exec(DRAINED_ORDERS_RESET_SQL);
+  const insert = db.prepare("INSERT OR IGNORE INTO drained_orders(order_id) VALUES (?)");
+  for (const orderId of drainedOrderIds) insert.run(orderId);
+  return true;
 }

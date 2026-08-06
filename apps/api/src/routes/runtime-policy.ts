@@ -1,6 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { readContinuationMode, readContinuationModeVersion, setContinuationMode } from "@krabs/db";
+import {
+  readContinuationMode,
+  readContinuationModeVersion,
+  setContinuationMode,
+  nowIso,
+} from "@krabs/db";
 import type { ContinuationMode } from "@krabs/domain";
 import { ok, ApiError } from "../errors.js";
 import { getActor } from "../auth.js";
@@ -49,16 +54,19 @@ export const runtimePolicyRoutes: FastifyPluginAsync<RuntimePolicyOpts> = async 
 
       if (result.changed) {
         const actor = getActor(request);
+        const stamp = nowIso();
         controlDb
           .prepare(
             `INSERT INTO operator_commands
                (action, target_id, reason, initiator_type, initiator, status, created_at, applied_at)
-             VALUES (?, NULL, ?, 'operator', ?, 'applied', datetime('now'), datetime('now'))`,
+             VALUES (?, NULL, ?, 'operator', ?, 'applied', ?, ?)`,
           )
           .run(
             `set_continuation_mode:${requested}`,
             body.reason ?? `flip ${before} → ${requested}`,
             actor,
+            stamp,
+            stamp,
           );
       }
 

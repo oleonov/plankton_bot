@@ -15,6 +15,7 @@ import {
   recordV4AdmissionTelemetry,
 } from "@krabs/domain";
 import type { Regime } from "@krabs/domain";
+import { nowIso } from "../db-timestamp.js";
 
 // Track B (§4.2d): tags persist as a JSON string array in `tags_json`. A
 // corrupt string must not fail a market read — fall back to null.
@@ -282,8 +283,8 @@ export class SqliteMarketRepository implements MarketRepository {
 
   deactivate(tokenId: TokenId): void {
     this.db
-      .prepare(`UPDATE markets SET active = 0, updated_at = datetime('now') WHERE token_id = ?`)
-      .run(tokenId);
+      .prepare(`UPDATE markets SET active = 0, updated_at = ? WHERE token_id = ?`)
+      .run(nowIso(), tokenId);
   }
 
   deactivateMissing(

@@ -163,6 +163,14 @@ describe("ledger schema — score columns (audit §F3)", () => {
       CREATE TABLE risk_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         event_type TEXT NOT NULL,
+        -- payload has been NOT NULL on this table since 001_initial.sql, and nothing drops it
+        -- (033 drops only family_id), so no reachable pre-043 database lacks it. This stub omitted
+        -- it purely because the score-column assertions never read it — an omission that only stays
+        -- invisible while no migration touches the column. Migrations run BEFORE ledger.sql on the
+        -- upgrade branch, so a migration indexing payload sees this fixture, not ledger.sql's
+        -- definition. The two sibling fixtures that also replay migrations
+        -- (ledger-migrations.test.ts, 033-drop-family-columns.test.ts) already declare it.
+        payload TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL
       );
 
@@ -181,6 +189,7 @@ describe("ledger schema — score columns (audit §F3)", () => {
         signal_reason TEXT,
         exchange_order_id TEXT,
         bot_run_id TEXT,
+        created_at TEXT,
         updated_at TEXT
       );
 

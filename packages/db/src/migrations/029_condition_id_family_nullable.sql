@@ -9,6 +9,16 @@
 -- Existing rows get condition_id = '' (empty string) as a migration default.
 -- New inserts always provide the real conditionId.
 -- The audit guarantee (conditionId always present) applies to newly written rows only.
+--
+-- 2026-08-05: the timestamp DEFAULTs below were changed from `datetime('now')` to ISO-8601.
+-- Editing an already-applied migration is safe here because this file cannot re-run on any
+-- existing DB: migrations are keyed by filename in `schema_migrations`, and `bootstrapLedgerDb`
+-- lists 029 in LEDGER_BASELINE_MIGRATIONS so it never executes on the production split DB at all.
+-- It only shapes fresh DBs built by `bootstrapDatabase` (the legacy merged path — scenario runner
+-- and the test suites), which is exactly where the wrong default was still reachable.
+-- Why it matters: readers bound and order on these columns, and SQLite's space format sorts BELOW
+-- any same-day ISO string (`' '` 0x20 < `'T'` 0x54), so one row written by the DEFAULT would break
+-- every `MAX()`/`> ?`/`ORDER BY` over the column. See db-timestamp.ts.
 
 -- ═══ ORDERS: rebuild to make family_id nullable + add condition_id ═══
 
@@ -29,8 +39,8 @@ CREATE TABLE orders_new (
   signal_id          TEXT,
   signal_reason      TEXT,
   bot_run_id         TEXT NOT NULL,
-  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 INSERT INTO orders_new SELECT
@@ -65,7 +75,7 @@ CREATE TABLE fills_new (
   fee          REAL NOT NULL DEFAULT 0,
   fee_rate_bps REAL NOT NULL DEFAULT 0,
   reconciled   INTEGER NOT NULL DEFAULT 0,
-  filled_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  filled_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 INSERT INTO fills_new SELECT
@@ -98,9 +108,9 @@ CREATE TABLE positions_new (
   realized_pnl       REAL NOT NULL DEFAULT 0,
   status             TEXT NOT NULL DEFAULT 'open',
   entry_style        TEXT,
-  opened_at          TEXT NOT NULL DEFAULT (datetime('now')),
+  opened_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   closed_at          TEXT,
-  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 INSERT INTO positions_new SELECT

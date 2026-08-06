@@ -1,0 +1,23 @@
+-- `PositionConcentrationService.readPortfolioSnapshot` picks the bankroll that sizing and the
+-- concentration caps are computed against:
+--   SELECT ... FROM portfolio_snapshots WHERE profile = ? ORDER BY captured_at DESC LIMIT 1
+-- and it runs on EVERY signal evaluation.
+--
+-- Ordering on the raw column is only correct while the column carries one rendering. It measures
+-- 24,063/24,063 canonical ISO on the live ledger today, but solely because every INSERT names the
+-- column: `captured_at TEXT NOT NULL DEFAULT (datetime('now'))` survives on the production table,
+-- SQLite has no `ALTER COLUMN … SET DEFAULT`, and recreating an 18.38 GB ledger to drop it is not
+-- on the table. That space-form writer path is therefore permanent and merely dormant — and `' '`
+-- (0x20) < `'T'` (0x54), so the moment it fires, a space row written at 10:10 sorts BELOW an ISO
+-- row written at 10:05 on the same day and the reader silently returns the OLDER bankroll.
+-- Reproduced on the pinned SQLite 3.51.3: raw DESC picks 10:05, wrapped DESC picks 10:10.
+--
+-- Wrapping the ORDER BY in `ledgerInstant()` fixes that but discards
+-- `idx_portfolio_snapshots_profile_ts`, and a per-signal full scan + sort is not affordable. This
+-- expression index restores the seek for the wrapped ordering — verified on 3.51.3, the planner
+-- reports `SEARCH portfolio_snapshots USING INDEX idx_portfolio_snapshots_profile_instant`.
+--
+-- It must stay byte-identical to `ledgerInstant("captured_at")` in packages/db/src/db-timestamp.ts;
+-- SQLite matches expression indexes by expression, so any drift silently costs the seek.
+CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_profile_instant
+  ON portfolio_snapshots(profile, julianday(replace(captured_at, '+00', '')) DESC);

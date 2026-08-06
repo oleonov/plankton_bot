@@ -428,4 +428,31 @@ describe("ProfileRuntimePublisher", () => {
     // The remaining snapshot should be the new one, not the old one from 2025-01-01
     expect(snaps[0]!.captured_at).not.toBe("2025-01-01T00:00:00.000Z");
   });
+
+  it("prunes a row on the cutoff's own calendar day (ISO-vs-space lexical mismatch)", async () => {
+    controlConn.db
+      .prepare("INSERT INTO profile_settings (profile_id, initial_balance_usdc) VALUES (?, ?)")
+      .run(PROFILE, 100);
+
+    // SQLite's old `datetime('now', '-90 days')` cutoff rendered as space-form
+    // ("YYYY-MM-DD HH:MM:SS"); since ' ' (0x20) sorts below 'T' (0x54), a canonical-ISO row on the
+    // cutoff's own calendar day always compared as "newer" than that cutoff, no matter its
+    // time-of-day, and was never deleted. This row is 6 minutes past the 90-day horizon but shares
+    // the cutoff's calendar day — exactly the case the lexical bug missed.
+    const staleIso = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000 - 6 * 60 * 1000).toISOString();
+    ledgerConn.db
+      .prepare(
+        `INSERT INTO portfolio_snapshots
+          (profile, equity_usdc, wallet_usdc, position_value_usdc, realized_pnl_usdc, open_value_usdc, captured_at)
+         VALUES (?, ?, NULL, ?, ?, ?, ?)`,
+      )
+      .run(PROFILE, 100, 0, 0, 0, staleIso);
+
+    expect(getSnapshots()).toHaveLength(1);
+
+    await publisher.publish();
+
+    const remaining = getSnapshots().map((s) => s.captured_at);
+    expect(remaining).not.toContain(staleIso);
+  });
 });

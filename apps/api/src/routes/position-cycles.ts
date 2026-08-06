@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import type { LedgerPool } from "../ledger-pool.js";
+import { parseLedgerInstantMs } from "@krabs/db";
 import { ok, ApiError } from "../errors.js";
 import { resolveActiveLedger } from "./status.js";
 
@@ -719,12 +720,8 @@ function latestTimestamp(values: Array<string | null | undefined>): string {
 }
 
 function parseTimestamp(value: string | null | undefined): number {
-  if (!value) return 0;
-  const parsed = Date.parse(value);
-  if (Number.isFinite(parsed)) return parsed;
-  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
-  const fallback = Date.parse(normalized);
-  return Number.isFinite(fallback) ? fallback : 0;
+  const ms = parseLedgerInstantMs(value);
+  return Number.isFinite(ms) ? ms : 0;
 }
 
 function isOpenLike(status: string): boolean {

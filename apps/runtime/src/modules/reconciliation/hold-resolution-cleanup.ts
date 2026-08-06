@@ -1,5 +1,6 @@
 import type { EventBus, RuntimeEventMap, RuntimeModule, TokenId } from "@krabs/domain";
 import type { HoldResolutionStatus } from "@krabs/db";
+import { parseLedgerInstantMs } from "@krabs/db";
 import type { Logger } from "../../logger.js";
 
 export interface HoldResolutionCleanupRepository {
@@ -57,7 +58,7 @@ export class HoldResolutionCleanupModule implements RuntimeModule {
 
   private async handlePositionUpdated(event: RuntimeEventMap["PositionUpdated"]): Promise<void> {
     if (event.position.status !== "closed") return;
-    const closedAtMs = Date.parse(event.position.closedAt ?? event.position.updatedAt);
+    const closedAtMs = parseLedgerInstantMs(event.position.closedAt ?? event.position.updatedAt);
     this.transition(event.position.tokenId, {
       status: "cancelled",
       clearedAt: new Date(Number.isFinite(closedAtMs) ? closedAtMs : Date.now()).toISOString(),

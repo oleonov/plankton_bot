@@ -132,6 +132,9 @@ describe("SwitchDriver", () => {
       .prepare("SELECT * FROM operator_commands WHERE action = 'pause'")
       .all() as Array<Record<string, unknown>>;
     expect(cmds).toHaveLength(1);
+    // Canonical ISO (24 ch), not SQLite `datetime('now')` space form — FAILS pre-fix, when
+    // toPausing() bound a literal `datetime('now')` instead of `nowIso()`.
+    expect(cmds[0]!.created_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 
     // 2. pausing -> stopping (waits for pause, then stops container)
     // Not yet paused -- tick should be no-op

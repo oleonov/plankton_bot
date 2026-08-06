@@ -5,6 +5,7 @@ import type {
   StateTransitionRepository,
 } from "@krabs/domain";
 import { isSupportedRuntimeProfile, SwitchState } from "@krabs/domain";
+import { nowIso } from "@krabs/db";
 import type Database from "better-sqlite3";
 import type { ContainerControl } from "./container-control.js";
 
@@ -131,12 +132,16 @@ export class SwitchDriver {
       return;
     }
 
+    // Bind canonical ISO explicitly — a literal `datetime('now')` renders SQLite-space
+    // (`YYYY-MM-DD HH:MM:SS`), which sorts below same-day ISO rows and would let a later-issued
+    // command be applied before this pause (see migrations/095_normalize_legacy_timestamp_renderings.sql
+    // and migrations-control/071_normalize_operator_commands_timestamps.sql).
     this.db
       .prepare(
         `INSERT INTO operator_commands (action, reason, scope, initiator_type, initiator, status, created_at)
-         VALUES ('pause', 'profile switch', 'global', 'runtime_manager', ?, 'pending', datetime('now'))`,
+         VALUES ('pause', 'profile switch', 'global', 'runtime_manager', ?, 'pending', ?)`,
       )
-      .run(req.switchId);
+      .run(req.switchId, nowIso());
     this.transitionAndUpdate(req, SwitchState.Pausing);
   }
 

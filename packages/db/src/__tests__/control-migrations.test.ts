@@ -1646,4 +1646,75 @@ describe("control-db migration infrastructure", () => {
     expect(byProfile.get("live-lite").bounceExit.whitelistConditionIds).toBeDefined();
     expect(Array.isArray(byProfile.get("live-lite").bounceExit.targetTiers)).toBe(true);
   });
+
+  // FAILS before migration 071 exists: created_at/applied_at would still read back SQLite-space
+  // (19 ch) instead of canonical ISO — the same defect migration 095 fixed on the ledger DB.
+  it("migration 071 normalizes operator_commands created_at/applied_at, preserves NULL and canonical rows", () => {
+    const dbPath = path.join(tmpDir, "control-071.db");
+    conn = bootstrapControlDb(dbPath);
+
+    conn.db
+      .prepare(
+        `INSERT INTO operator_commands (action, status, created_at, applied_at)
+         VALUES ('pause', 'applied', '2026-08-05 08:53:21', '2026-08-05 08:53:22')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT INTO operator_commands (action, status, created_at, applied_at)
+         VALUES ('resume', 'pending', '2026-08-05 05:00:00', NULL)`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT INTO operator_commands (action, status, created_at, applied_at)
+         VALUES ('set_continuation_mode:market_wide', 'applied',
+                 '2026-08-05T07:54:37.742Z', '2026-08-05T07:54:37.742Z')`,
+      )
+      .run();
+
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("071_normalize_operator_commands_timestamps.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare("SELECT action, created_at, applied_at FROM operator_commands ORDER BY action")
+      .all() as Array<{ action: string; created_at: string; applied_at: string | null }>;
+    const byAction = new Map(rows.map((row) => [row.action, row]));
+
+    // Space-form → canonical, same instant, for BOTH columns on the 'applied' pause command —
+    // this is the exact mis-ordering case: `ORDER BY created_at ASC` in
+    // `SqliteOperatorCommandRepository.getPending` would otherwise apply this row out of turn.
+    expect(byAction.get("pause")).toEqual({
+      action: "pause",
+      created_at: "2026-08-05T08:53:21.000Z",
+      applied_at: "2026-08-05T08:53:22.000Z",
+    });
+
+    // Pending command: created_at normalized, NULL applied_at preserved —
+    // `NULL NOT GLOB '…'` is NULL, never true, so the row is never selected.
+    expect(byAction.get("resume")).toEqual({
+      action: "resume",
+      created_at: "2026-08-05T05:00:00.000Z",
+      applied_at: null,
+    });
+
+    // Already-canonical row must not move.
+    expect(byAction.get("set_continuation_mode:market_wide")).toEqual({
+      action: "set_continuation_mode:market_wide",
+      created_at: "2026-08-05T07:54:37.742Z",
+      applied_at: "2026-08-05T07:54:37.742Z",
+    });
+
+    // MAX(applied_at) — the SSE statusHash key in apps/api/src/routes/events.ts — now resolves to
+    // the chronologically newest row instead of the lexically-largest space-form one.
+    expect(
+      conn.db
+        .prepare("SELECT MAX(applied_at) AS t FROM operator_commands WHERE applied_at IS NOT NULL")
+        .get(),
+    ).toEqual({ t: "2026-08-05T08:53:22.000Z" });
+  });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import {
   toDomainSide,
   toSdkSide,
@@ -407,7 +407,9 @@ describe("mapGammaMarket", () => {
     expect(market.tokens[1]!.outcome).toBe("No");
     expect(market.question).toBe("Will BTC hit 100k?");
     expect(market.slug).toBe("bitcoin-above-100k");
-    expect(market.endDate).toBe("2026-06-30T00:00:00Z");
+    // toCanonicalIso round-trips through Date.parse -> toISOString, which always
+    // renders milliseconds — ".000Z" is expected, not a passthrough of the input.
+    expect(market.endDate).toBe("2026-06-30T00:00:00.000Z");
     expect(market.active).toBe(true);
     expect(market.negRisk).toBe(true);
     expect(market.tickSize).toBe(0.001);
@@ -644,6 +646,49 @@ describe("mapGammaMarket", () => {
     it("tags default to null when eventContext omits them", () => {
       const market = mapGammaMarket({ slug: "x" }, { slug: "evt", marketCount: 2 });
       expect(market.tags).toBeNull();
+    });
+  });
+
+  // Regression coverage for the production ingress bug: mapGammaMarket used to pass
+  // `raw.endDate` through with a bare `String(...)`, so Gamma's zone-less
+  // `YYYY-MM-DD HH:mm:ss` shape flowed straight to downstream `Date.parse` calls
+  // (resolution/exit/ttc modules), which read a zone-less date-time as LOCAL time —
+  // a 7h shift on a UTC+7 host. `toCanonicalIso` (shared with GammaResolutionClient
+  // via @krabs/domain) now pins it to UTC at the mapper, the real
+  // discovery ingress (market-discovery-gateway.ts -> mapGammaMarket).
+  describe("endDate canonicalization (Gamma zone-less timestamp bug)", () => {
+    const originalTz = process.env.TZ;
+
+    afterEach(() => {
+      if (originalTz === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTz;
+    });
+
+    it("pins a zone-less endDate to UTC instead of the host-local timezone", () => {
+      // Proves UTC pinning rather than host luck: on a UTC+7 host, naively
+      // stripping/leaving the zone off (the pre-fix bug) would read
+      // "2026-03-25 16:00:00" as 16:00 Bangkok time -> 09:00Z, a 7h shift of
+      // the real market end time. Asserting under TZ=Asia/Bangkok makes a
+      // local-time-parse regression fail this test even when CI itself runs UTC.
+      process.env.TZ = "Asia/Bangkok";
+      const market = mapGammaMarket({ endDate: "2026-03-25 16:00:00" }, SINGLE_MARKET_EVENT);
+      expect(market.endDate).toBe("2026-03-25T16:00:00.000Z");
+    });
+
+    it("collapses an explicit bare +00 offset to the same instant", () => {
+      process.env.TZ = "Asia/Bangkok";
+      const market = mapGammaMarket({ endDate: "2026-03-25 16:00:00+00" }, SINGLE_MARKET_EVENT);
+      expect(market.endDate).toBe("2026-03-25T16:00:00.000Z");
+    });
+
+    it("leaves an already-canonical endDate unchanged", () => {
+      const market = mapGammaMarket({ endDate: "2026-03-25T16:00:00.000Z" }, SINGLE_MARKET_EVENT);
+      expect(market.endDate).toBe("2026-03-25T16:00:00.000Z");
+    });
+
+    it("still falls back to '' for a missing/unparseable endDate (regression guard on the old contract)", () => {
+      expect(mapGammaMarket({}, SINGLE_MARKET_EVENT).endDate).toBe("");
+      expect(mapGammaMarket({ endDate: "not-a-date" }, SINGLE_MARKET_EVENT).endDate).toBe("");
     });
   });
 });

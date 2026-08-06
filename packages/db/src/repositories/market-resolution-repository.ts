@@ -1,6 +1,27 @@
 import type Database from "better-sqlite3";
-import type { MarketResolutionRepository } from "@krabs/domain";
-import type { MarketResolution } from "@krabs/domain";
+import {
+  toCanonicalIso,
+  type MarketResolutionRepository,
+  type MarketResolution,
+} from "@krabs/domain";
+
+/**
+ * Canonicalize a `resolved_at` value before it lands in the NOT NULL column.
+ *
+ * This repository is the ONLY writer of `market_resolutions.resolved_at`, so it is the single
+ * place that must hold the invariant migration 095 established: every rendering is canonical
+ * ISO-8601 UTC with milliseconds, or lexical order stops matching chronological order again. A
+ * caller-side fix (e.g. only the detector's delisted-market fallback) would miss any other
+ * source of a legacy rendering — `candidates[].endDate` alone already carries 1M+ historical
+ * `markets.end_date` values in the 20-char ISO-without-ms shape.
+ *
+ * Falls back to the raw value, never NULL, when `toCanonicalIso` can't parse it: the column is
+ * declared NOT NULL, so writing NULL would trade a bad rendering for a crash. Preserving the raw
+ * value keeps today's behavior for whatever unparseable input already flows through unnoticed.
+ */
+function canonicalResolvedAt(resolvedAt: string): string {
+  return toCanonicalIso(resolvedAt) ?? resolvedAt;
+}
 
 export class SqliteMarketResolutionRepository implements MarketResolutionRepository {
   constructor(private readonly db: Database.Database) {}
@@ -16,7 +37,7 @@ export class SqliteMarketResolutionRepository implements MarketResolutionReposit
       .run(
         resolution.conditionId,
         resolution.resolution,
-        resolution.resolvedAt,
+        canonicalResolvedAt(resolution.resolvedAt),
         resolution.detectedAt,
         resolution.source,
         resolution.rawResponse,
@@ -51,7 +72,7 @@ export class SqliteMarketResolutionRepository implements MarketResolutionReposit
          SET resolution = ?, resolved_at = ?, source = ?, status = 'settled'
          WHERE condition_id = ?`,
       )
-      .run(resolution, resolvedAt, source, conditionId);
+      .run(resolution, canonicalResolvedAt(resolvedAt), source, conditionId);
   }
 
   markSettled(conditionId: string): void {

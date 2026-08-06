@@ -72,6 +72,8 @@ import {
 } from "@krabs/domain";
 import {
   isWorkingSellOrderStatus,
+  ledgerInstant,
+  parseLedgerInstantMs,
   readContinuationMode,
   readContinuationModeVersion,
 } from "@krabs/db";
@@ -873,12 +875,6 @@ function isNoOrderIdRejectText(values: readonly (string | null | undefined)[]): 
   );
 }
 
-function parseLedgerTimestampMs(value: string | null | undefined): number {
-  if (!value) return Number.NaN;
-  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
-  return Date.parse(normalized);
-}
-
 /**
  * Per-token maker-shadow ladder state, held in memory by the tracker.
  * `levels` contains ALL levels — open (pending/filled) and terminal
@@ -1631,10 +1627,10 @@ export class AlgoDecisionModule implements RuntimeModule {
   private warnIfOpenPositionStale(position: Position, now: number): void {
     const tokenId = String(position.tokenId);
     const lastEvaluatedAt = this.openPositionLastEvaluatedAt.get(tokenId);
-    const openedAtMs = Date.parse(position.openedAt);
+    const openedAtMs = parseLedgerInstantMs(position.openedAt);
     const referenceMs =
       lastEvaluatedAt ??
-      (Number.isFinite(openedAtMs) ? openedAtMs : Date.parse(position.updatedAt));
+      (Number.isFinite(openedAtMs) ? openedAtMs : parseLedgerInstantMs(position.updatedAt));
     if (!Number.isFinite(referenceMs)) return;
     if (now - referenceMs < OPEN_POSITION_STALE_EVALUATION_WARN_MS) return;
     this.log.warn(
@@ -2105,20 +2101,34 @@ export class AlgoDecisionModule implements RuntimeModule {
     const nowMs = Date.now();
     const cutoffIso = new Date(nowMs - R23_PROBE_NO_ORDER_ID_COOLDOWN_MS).toISOString();
     try {
+      // `updated_at` mixes ISO and legacy SQLite space-format renderings of the same
+      // instant (see @krabs/db ledgerInstant): within one calendar day the space form
+      // sorts lexically BELOW an ISO string of the same instant, so both the cutoff
+      // bound and the per-token "latest rejection" pick must compare via ledgerInstant()
+      // rather than the raw TEXT — a raw `updated_at >= ?` / `MAX(updated_at)` can drop a
+      // qualifying row or pick an older rejection, releasing the cooldown early. The
+      // ROW_NUMBER pick mirrors findLatestBboByTokens in market-snapshot-repository.ts.
       const rows = db
         .prepare(
-          `SELECT token_id, MAX(updated_at) AS last_rejected_at
-           FROM orders
-           WHERE side = 'buy'
-             AND status = 'rejected'
-             AND decision_rule_id = ?
-             AND signal_reason = 'probe-entry'
-             AND exchange_error_message IN (
-               'exchange returned no order id',
-               'gateway returned success without order id'
+          `SELECT token_id, updated_at AS last_rejected_at
+             FROM (
+               SELECT token_id, updated_at,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY token_id
+                        ORDER BY ${ledgerInstant("updated_at")} DESC
+                      ) AS rn
+                 FROM orders
+                WHERE side = 'buy'
+                  AND status = 'rejected'
+                  AND decision_rule_id = ?
+                  AND signal_reason = 'probe-entry'
+                  AND exchange_error_message IN (
+                    'exchange returned no order id',
+                    'gateway returned success without order id'
+                  )
+                  AND ${ledgerInstant("updated_at")} >= ${ledgerInstant("?")}
              )
-             AND updated_at >= ?
-           GROUP BY token_id`,
+            WHERE rn = 1`,
         )
         .all(R23_DIP_TRIGGER_RULE_ID, cutoffIso) as Array<{
         token_id: string;
@@ -2127,7 +2137,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
       let recovered = 0;
       for (const row of rows) {
-        const rejectedAtMs = parseLedgerTimestampMs(row.last_rejected_at);
+        const rejectedAtMs = parseLedgerInstantMs(row.last_rejected_at);
         if (!Number.isFinite(rejectedAtMs)) continue;
         const blockedUntilMs = rejectedAtMs + R23_PROBE_NO_ORDER_ID_COOLDOWN_MS;
         if (blockedUntilMs <= nowMs) continue;

@@ -21,6 +21,7 @@ import {
   createTokenId,
   hasText,
   resolvePolymarketTakerFeeRate,
+  toCanonicalIso,
 } from "@krabs/domain";
 
 // ─── Side mapping ────────────────────────────────────────────────────────
@@ -384,7 +385,13 @@ export function mapGammaMarket(
     question: String(raw.question ?? ""),
     slug: String(raw.slug ?? ""),
     ...(eventContext.slug != null ? { eventSlug: eventContext.slug } : {}),
-    endDate: String(raw.endDate ?? ""),
+    // Gamma renders `endDate` as `YYYY-MM-DD HH:mm:ss+00` (bare offset) or with
+    // no offset at all. `toCanonicalIso` pins zone-less values to UTC — without
+    // it, every downstream `Date.parse(market.endDate)` (resolution/exit/ttc
+    // modules) would read the zone-less shape as LOCAL time and shift a real
+    // market end time by the host's UTC offset. Missing/unparseable still maps
+    // to "" to preserve the pre-existing fallback contract.
+    endDate: toCanonicalIso(raw.endDate) ?? "",
     active: Boolean(raw.active),
     negRisk: Boolean(raw.negRisk),
     tickSize: Number(raw.orderPriceMinTickSize ?? 0.01),

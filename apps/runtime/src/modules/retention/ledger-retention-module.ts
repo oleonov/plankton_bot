@@ -1,7 +1,7 @@
 import { statSync } from "node:fs";
 import type Database from "better-sqlite3";
 import type { RuntimeControl, RuntimeModule } from "@krabs/domain";
-import { ACTIVE_REDEEM_LOG_STATUS_SQL } from "@krabs/db";
+import { ACTIVE_REDEEM_LOG_STATUS_SQL, ledgerInstant, toSqliteDateTime } from "@krabs/db";
 import { SIGNAL_TELEMETRY_RISK_EVENT_TYPES } from "../../risk-event-volume.js";
 import type { LifecycleToken } from "../../lifecycle-chain.js";
 import { LifecycleChain, LIFECYCLE_STOP_WAIT_MS, waitAtMost } from "../../lifecycle-chain.js";
@@ -241,6 +241,42 @@ type DeleteTask = {
   run: (limit: number) => number;
   maxRowsPerRun?: number;
 };
+
+type TimestampFormat = "iso" | "epochMs" | "sqliteSpace" | "mixed";
+
+/**
+ * Render the cutoff in the rendering its target column is actually written in — except for
+ * "mixed", where no single raw rendering is safe to match against at all: the column carries more
+ * than one, so `deleteOlderThanTask` compares parsed instants via `ledgerInstant()` on both sides
+ * instead of the raw text (see there). This function still owes that comparison a valid ISO
+ * string, which is exactly what the fallthrough branch below already produces.
+ *
+ * `' '` (0x20) sorts below `'T'` (0x54), so an ISO cutoff compared against a space-format column
+ * matches every row of the cutoff's own calendar day whatever its time-of-day. On the two 1-day
+ * risk-event TTLs that deletes up to ~24 h the sweep was supposed to keep — data loss, not churn.
+ *
+ * `risk_events.created_at` and `execution_policy_observations.created_at` are space-format because
+ * no INSERT binds them: `DEFAULT (datetime('now'))` is their only writer (production measures
+ * 50,000/50,000 and 72,511/72,511). Wrapping the column in `ledgerInstant()` would also fix the
+ * comparison, but this DELETE seeks `ORDER BY <column> ASC LIMIT ?` over the ledger's largest
+ * tables — burying the column in a function turns that index seek into a full scan.
+ *
+ * `trading_state_snapshots.captured_at` and `portfolio_snapshots.captured_at` are "mixed" for the
+ * opposite reason: every INSERT today binds ISO, but both columns still carry
+ * `captured_at TEXT NOT NULL DEFAULT (datetime('now'))` on the production table (SQLite has no
+ * `ALTER COLUMN … SET DEFAULT`), so a future writer that omits the column would silently re-split
+ * the rendering and a raw comparison would then delete rows newer than the cutoff on that column's
+ * own calendar day — same failure as above. Unlike `risk_events`, paying for the `julianday()` wrap
+ * here is affordable: `portfolio_snapshots` is capped at 90 days (~26k rows) and
+ * `trading_state_snapshots` at 14 days (~2k rows), swept at most every 5 minutes — a full scan of
+ * that size is negligible, so losing the index seek is not worth avoiding the way it is on
+ * `risk_events`'s largest tables.
+ */
+function renderCutoff(cutoffMs: number, format: TimestampFormat): string | number {
+  if (format === "epochMs") return cutoffMs;
+  if (format === "sqliteSpace") return toSqliteDateTime(cutoffMs);
+  return new Date(cutoffMs).toISOString();
+}
 
 export class LedgerRetentionModule implements RuntimeModule {
   private readonly config: Required<LedgerRetentionConfig>;
@@ -542,6 +578,9 @@ export class LedgerRetentionModule implements RuntimeModule {
         "execution_policy_observations",
         "created_at",
         nowMs - this.config.executionPolicyObservationsTtlMs,
+        undefined,
+        undefined,
+        { timestampFormat: "sqliteSpace" },
       ),
       this.deleteOlderThanTask(
         "decision_signal_log",
@@ -554,12 +593,18 @@ export class LedgerRetentionModule implements RuntimeModule {
         "trading_state_snapshots",
         "captured_at",
         nowMs - this.config.tradingStateSnapshotsTtlMs,
+        undefined,
+        undefined,
+        { timestampFormat: "mixed" },
       ),
       this.deleteOlderThanTask(
         "portfolio_snapshots",
         "portfolio_snapshots",
         "captured_at",
         nowMs - this.config.portfolioSnapshotsTtlMs,
+        undefined,
+        undefined,
+        { timestampFormat: "mixed" },
       ),
       this.deleteOlderThanTask(
         "risk_events.high_volume_debug",
@@ -568,6 +613,7 @@ export class LedgerRetentionModule implements RuntimeModule {
         nowMs - this.config.highVolumeRiskEventsTtlMs,
         `event_type IN (${HIGH_VOLUME_RISK_EVENTS.map(() => "?").join(", ")})`,
         [...HIGH_VOLUME_RISK_EVENTS],
+        { timestampFormat: "sqliteSpace" },
       ),
       this.deleteOlderThanTask(
         "risk_events.signal_telemetry",
@@ -576,6 +622,7 @@ export class LedgerRetentionModule implements RuntimeModule {
         nowMs - this.config.signalTelemetryRiskEventsTtlMs,
         `event_type IN (${SIGNAL_TELEMETRY_RISK_EVENT_TYPES.map(() => "?").join(", ")})`,
         [...SIGNAL_TELEMETRY_RISK_EVENT_TYPES],
+        { timestampFormat: "sqliteSpace" },
       ),
       this.deleteOlderThanTask(
         "risk_events.order_rejected",
@@ -583,6 +630,8 @@ export class LedgerRetentionModule implements RuntimeModule {
         "created_at",
         nowMs - this.config.orderRejectedRiskEventsTtlMs,
         "event_type = 'order_rejected'",
+        undefined,
+        { timestampFormat: "sqliteSpace" },
       ),
       this.deleteOlderThanTask(
         "risk_events.non_critical",
@@ -594,12 +643,16 @@ export class LedgerRetentionModule implements RuntimeModule {
             .map(() => "?")
             .join(", ")})`,
         [...SIGNAL_TELEMETRY_RISK_EVENT_TYPES, "order_rejected"],
+        { timestampFormat: "sqliteSpace" },
       ),
       this.deleteOlderThanTask(
         "risk_events.critical",
         "risk_events",
         "created_at",
         nowMs - this.config.criticalRiskEventsTtlMs,
+        undefined,
+        undefined,
+        { timestampFormat: "sqliteSpace" },
       ),
     ];
 
@@ -704,18 +757,30 @@ export class LedgerRetentionModule implements RuntimeModule {
     cutoffMs: number,
     extraWhere?: string,
     extraParams: unknown[] = [],
-    options?: { timestampFormat?: "iso" | "epochMs"; rowIdColumn?: string; maxRowsPerRun?: number },
+    options?: {
+      timestampFormat?: TimestampFormat;
+      rowIdColumn?: string;
+      maxRowsPerRun?: number;
+    },
   ): DeleteTask {
     const rowIdColumn = options?.rowIdColumn ?? "id";
-    const cutoff =
-      options?.timestampFormat === "epochMs" ? cutoffMs : new Date(cutoffMs).toISOString();
-    const where = [`${timestampColumn} < ?`, extraWhere].filter(Boolean).join(" AND ");
+    const format = options?.timestampFormat ?? "iso";
+    const cutoff = renderCutoff(cutoffMs, format);
+    // "mixed" columns hold more than one rendering (see TimestampFormat/renderCutoff), so the raw
+    // column can't be compared or ordered directly — both sides go through `ledgerInstant()` to
+    // compare parsed instants instead. Every other format compares the raw text, which is what
+    // keeps their index seek.
+    const comparableColumn = format === "mixed" ? ledgerInstant(timestampColumn) : timestampColumn;
+    const comparableCutoff = format === "mixed" ? ledgerInstant("?") : "?";
+    const where = [`${comparableColumn} < ${comparableCutoff}`, extraWhere]
+      .filter(Boolean)
+      .join(" AND ");
     const stmt = this.deps.db.prepare(
       `DELETE FROM ${table}
        WHERE ${rowIdColumn} IN (
          SELECT ${rowIdColumn} FROM ${table}
          WHERE ${where}
-         ORDER BY ${timestampColumn} ASC, ${rowIdColumn} ASC
+         ORDER BY ${comparableColumn} ASC, ${rowIdColumn} ASC
          LIMIT ?
        )`,
     );

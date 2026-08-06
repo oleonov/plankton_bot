@@ -16,6 +16,7 @@
 
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import { ledgerInstant } from "@krabs/db";
 import { buildStatusSnapshot, resolveActiveLedger } from "./status.js";
 import { normalizeRiskEvent } from "./normalize-risk-event.js";
 
@@ -27,8 +28,22 @@ interface EventsOpts {
 }
 
 interface ChangeSnapshot {
-  positions: string;
-  orders: string;
+  /**
+   * Julian-day instants (via `ledgerInstant()`), not raw text: `positions.updated_at` and
+   * `orders.updated_at` mix ISO and legacy space-format renderings, and a raw TEXT `MAX()`/`>`
+   * comparison picks the lexically largest string, not the chronologically newest row, whenever
+   * both renderings land on the same calendar day.
+   */
+  positions: number;
+  orders: number;
+  /**
+   * Raw ISO text, deliberately unwrapped. `fills.filled_at` is single-rendering — 2,648/2,648
+   * canonical on the live ledger — because its sole writer binds it explicitly, so the column
+   * DEFAULT is unreachable. Wrapping it would buy nothing and cost `idx_fills_filled_at` twice
+   * over: the `MAX()` below traverses the covering index on every 2 s tick of every SSE
+   * connection, and the delta query — which runs only once a newer fill actually lands — degrades
+   * from an indexed range to `SCAN fills` + a temp B-tree.
+   */
   fills: string;
   riskEvents: string;
   /** Composite key: changes in operator_commands OR bot_runs OR runtime_metrics trigger status events. */
@@ -48,13 +63,16 @@ const CATEGORY_TO_EVENTS: Record<string, string[]> = {
 };
 
 function takeSnapshot(controlDb: Database.Database, ledgerDb: Database.Database): ChangeSnapshot {
-  // Ledger tables
-  const pos = ledgerDb.prepare("SELECT MAX(updated_at) as ts FROM positions").get() as {
-    ts: string | null;
-  };
-  const ord = ledgerDb.prepare("SELECT MAX(updated_at) as ts FROM orders").get() as {
-    ts: string | null;
-  };
+  // Ledger tables — positions.updated_at / orders.updated_at mix ISO and legacy space-format
+  // renderings, so MAX() must go through ledgerInstant() to pick the chronologically newest row
+  // instead of the lexically largest string. fills.filled_at is single-rendering (see the
+  // ChangeSnapshot doc) and stays raw so it keeps idx_fills_filled_at.
+  const pos = ledgerDb
+    .prepare(`SELECT MAX(${ledgerInstant("updated_at")}) as ts FROM positions`)
+    .get() as { ts: number | null };
+  const ord = ledgerDb
+    .prepare(`SELECT MAX(${ledgerInstant("updated_at")}) as ts FROM orders`)
+    .get() as { ts: number | null };
   const fill = ledgerDb.prepare("SELECT MAX(filled_at) as ts FROM fills").get() as {
     ts: string | null;
   };
@@ -80,8 +98,8 @@ function takeSnapshot(controlDb: Database.Database, ledgerDb: Database.Database)
     .get() as string | null;
 
   return {
-    positions: pos.ts ?? "",
-    orders: ord.ts ?? "",
+    positions: pos.ts ?? 0,
+    orders: ord.ts ?? 0,
     fills: fill.ts ?? "",
     riskEvents: risk.ts ?? "",
     statusHash: `${opCmd.ts ?? ""}|${botRun.ts ?? ""}|${reconMetric.ts ?? ""}`,
@@ -148,7 +166,8 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
         if (next.positions !== snapshot.positions) {
           const rows = ledgerDb
             .prepare(
-              "SELECT * FROM positions WHERE updated_at > ? ORDER BY updated_at DESC LIMIT 20",
+              `SELECT * FROM positions WHERE ${ledgerInstant("updated_at")} > ?
+               ORDER BY ${ledgerInstant("updated_at")} DESC LIMIT 20`,
             )
             .all(snapshot.positions) as Record<string, unknown>[];
           for (const row of rows) {
@@ -165,7 +184,10 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
 
         if (next.orders !== snapshot.orders) {
           const rows = ledgerDb
-            .prepare("SELECT * FROM orders WHERE updated_at > ? ORDER BY updated_at DESC LIMIT 20")
+            .prepare(
+              `SELECT * FROM orders WHERE ${ledgerInstant("updated_at")} > ?
+               ORDER BY ${ledgerInstant("updated_at")} DESC LIMIT 20`,
+            )
             .all(snapshot.orders) as Record<string, unknown>[];
           for (const row of rows) {
             const status = row.status as string;

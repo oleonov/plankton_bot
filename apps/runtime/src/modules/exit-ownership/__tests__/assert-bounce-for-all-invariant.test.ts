@@ -1,6 +1,6 @@
 import { bootstrapControlDb, bootstrapLedgerDb, type OwnershipInvariantId } from "@krabs/db";
 import Database from "better-sqlite3";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -9,6 +9,7 @@ import {
   assertBounceForAllOwnershipInvariant,
   BounceForAllNullOwnerError,
   countActiveNullOwnerPositions,
+  reportAbandonedDrainWaiver,
   runOwnershipInvariantStartupGate,
 } from "../assert-bounce-for-all-invariant.js";
 
@@ -208,18 +209,23 @@ const REMEDIES: Readonly<Record<OwnershipInvariantId, string>> = {
 const GENERIC_REMEDY = "run the census to repair ownership before resuming";
 
 interface RecordingLogger {
+  warn(obj: object, msg: string): void;
   error(obj: object, msg: string): void;
   fatal(obj: object, msg: string): void;
+  warns: Array<{ obj: object; msg: string }>;
   errors: Array<{ obj: object; msg: string }>;
   fatals: Array<{ obj: object; msg: string }>;
 }
 
 function makeLogger(): RecordingLogger {
+  const warns: Array<{ obj: object; msg: string }> = [];
   const errors: Array<{ obj: object; msg: string }> = [];
   const fatals: Array<{ obj: object; msg: string }> = [];
   return {
+    warns,
     errors,
     fatals,
+    warn: (obj, msg) => void warns.push({ obj, msg }),
     error: (obj, msg) => void errors.push({ obj, msg }),
     fatal: (obj, msg) => void fatals.push({ obj, msg }),
   };
@@ -471,5 +477,270 @@ describe("runOwnershipInvariantStartupGate", () => {
       // A single generic sentence would satisfy the old matrix (counts only) on every row.
       expect(msg).not.toContain(GENERIC_REMEDY);
     });
+  });
+});
+
+/**
+ * The pre-start read proves the ledger the process INHERITED. It cannot prove the ledger the fence
+ * is released onto, because `supervisor.start()` writes to that same ledger in between — and one of
+ * those writes is `ReconciliationModule.start()`'s awaited startup pass, whose missing-remote
+ * auto-close marks a position `closed` and leaves the SELL resting against it untouched.
+ */
+describe("runOwnershipInvariantStartupGate — the pre-fence-release checkpoint", () => {
+  /** Exactly what `closeMissingRemotePosition` writes: status only, the resting SELL untouched. */
+  function reconciliationAutoClose(positionId: string): void {
+    db.prepare("UPDATE positions SET status = 'closed', size = 0 WHERE position_id = ?").run(
+      positionId,
+    );
+  }
+
+  it("catches a violation module startup created after the pre-start read passed", () => {
+    seedCleanBaseline();
+    const preStart = makeLogger();
+    runOwnershipInvariantStartupGate({
+      ledgerDb: db,
+      controlDb: control.db,
+      applyToAllMarkets: true,
+      log: preStart,
+    });
+    expect(preStart.fatals).toHaveLength(0);
+    expect(controlState().runtime_status).not.toBe("failed");
+
+    reconciliationAutoClose("p-clean");
+
+    const preRelease = makeLogger();
+    expect(() =>
+      runOwnershipInvariantStartupGate({
+        ledgerDb: db,
+        controlDb: control.db,
+        applyToAllMarkets: true,
+        log: preRelease,
+        phase: "pre-fence-release",
+      }),
+    ).toThrow(BounceForAllNullOwnerError);
+
+    expect(controlState()).toEqual({ runtime_status: "failed", paused: 1 });
+    expect(preRelease.fatals).toHaveLength(1);
+    expect(preRelease.fatals[0]!.obj).toMatchObject({
+      stalePointerSells: 1,
+      phase: "pre-fence-release",
+    });
+    // The diagnosis is the whole point of the phase: "already broken on boot" and "module startup
+    // broke it" send the operator to different places.
+    expect(preRelease.fatals[0]!.msg).toContain("pre-fence-release");
+    expect(preRelease.fatals[0]!.msg).toContain("module startup");
+  });
+
+  it("stays inert with the flag off, exactly like the pre-start read", () => {
+    seedCleanBaseline();
+    reconciliationAutoClose("p-clean");
+    const before = controlState();
+    const log = makeLogger();
+
+    expect(() =>
+      runOwnershipInvariantStartupGate({
+        ledgerDb: db,
+        controlDb: control.db,
+        applyToAllMarkets: false,
+        log,
+        phase: "pre-fence-release",
+      }),
+    ).not.toThrow();
+
+    expect(controlState()).toEqual(before);
+    expect(log.fatals).toHaveLength(0);
+  });
+
+  it("keeps excusing the drain targets the pre-start read deferred, without re-announcing them", () => {
+    seedCleanBaseline();
+    seedPosition({ positionId: "p-gone", tokenId: "tok-drain", status: "closed" });
+    seedSell({ orderId: "o-drain", tokenId: "tok-drain", positionId: "p-gone" });
+    const drainedOrderIds = new Set(["o-drain"]);
+
+    const preStart = makeLogger();
+    runOwnershipInvariantStartupGate({
+      ledgerDb: db,
+      controlDb: control.db,
+      applyToAllMarkets: true,
+      log: preStart,
+      drainedOrderIds,
+    });
+    expect(preStart.warns).toHaveLength(1);
+
+    const preRelease = makeLogger();
+    expect(() =>
+      runOwnershipInvariantStartupGate({
+        ledgerDb: db,
+        controlDb: control.db,
+        applyToAllMarkets: true,
+        log: preRelease,
+        drainedOrderIds,
+        phase: "pre-fence-release",
+      }),
+    ).not.toThrow();
+    // The cancel is still in flight, so the raw ledger still reports it — but the waiver was
+    // announced once, at the checkpoint that granted it, and the fence gate has since proved it.
+    expect(preRelease.warns).toHaveLength(0);
+    expect(preRelease.fatals).toHaveLength(0);
+  });
+});
+
+/**
+ * The deferral is only sound while the excuse and its remedy are inseparable: the gate waives a
+ * drain target's violation on the promise that `seedStartupTransitions` will cancel it. A boot
+ * abort placed BETWEEN the two breaks that promise silently — the waiver is granted and the process
+ * exits before the drain runs. So the ordering is the invariant, and boot ordering in `index.ts` is
+ * plain top-level statements with no seam a unit test could drive; asserting on the source is the
+ * only way to make a regression fail loudly instead of shipping.
+ */
+describe("boot ordering — the deferral's excuse cannot outlive its remedy", () => {
+  const src = readFileSync(new URL("../../../index.ts", import.meta.url), "utf8");
+  const at = (needle: string): number => {
+    const i = src.indexOf(needle);
+    expect(i, `${needle} not found in index.ts`).toBeGreaterThan(-1);
+    return i;
+  };
+
+  it("grants the drain waiver after every abort that could skip the drain", () => {
+    const gate = at("runOwnershipInvariantStartupGate({");
+    const fence = at("executionModule.beginStartupFence()");
+    expect(gate).toBeLessThan(fence);
+
+    const abortsBeforeFence = [...src.slice(0, fence).matchAll(/process\.exit\(1\)/g)].map(
+      (m) => m.index,
+    );
+    expect(abortsBeforeFence.length).toBeGreaterThan(0);
+    for (const abort of abortsBeforeFence) expect(abort).toBeLessThan(gate);
+  });
+
+  it("re-proves the waiver after the drain is seeded and before the fence is released", () => {
+    expect(at("seedStartupTransitions(")).toBeLessThan(at("runDrainedOrderFenceGate({"));
+    expect(at("runDrainedOrderFenceGate({")).toBeLessThan(at("endStartupFence()"));
+  });
+
+  /**
+   * The waiver is not the only thing the fence release depends on. `supervisor.start()` sits between
+   * the pre-start gate and the release, and `ReconciliationModule.start()` `await`s a reconciliation
+   * pass that can close a position out from under a correctly-bound resting SELL — a violation the
+   * pre-start read cannot have seen and no drain target covers. So the ledger has to be re-proved
+   * against the SAME projection right before the fence comes down.
+   */
+  it("re-proves the ownership invariants after module startup, before the fence is released", () => {
+    const gates = [...src.matchAll(/runOwnershipInvariantStartupGate\(\{/g)].map((m) => m.index);
+    expect(gates).toHaveLength(2);
+    expect(gates[1]).toBeGreaterThan(at("runDrainedOrderFenceGate({"));
+    expect(gates[1]).toBeLessThan(at("endStartupFence()"));
+    // Same projection as the pre-start read — the drain targets it excused must stay excused, since
+    // their cancels are in flight; only violations module startup CREATED may trip this one.
+    expect(src.slice(gates[1], at("endStartupFence()"))).toContain("drainedOrderIds,");
+    expect(src.slice(gates[1], at("endStartupFence()"))).toContain('phase: "pre-fence-release"');
+  });
+
+  /**
+   * The policy is a live read, not a boot constant — `currentExecutionPolicy()` re-reads control.db
+   * on every call with no throttle. The sanctioned activation sequence is "deploy, then enable
+   * applyToAllMarkets", so the flag can flip ON while `supervisor.start()` is still running: the API
+   * certifies the ledger it sees, the awaited reconciliation pass then breaks it, and a boot-time
+   * snapshot of `false` would release the fence having never proved the ledger the flag now demands.
+   */
+  it("re-reads the policy at the fence release rather than trusting the pre-start snapshot", () => {
+    const fresh = at("const bounceAppliesAtFenceRelease = currentExecutionPolicy()");
+    expect(fresh).toBeGreaterThan(at("seedStartupTransitions("));
+    expect(fresh).toBeLessThan(at("runDrainedOrderFenceGate({"));
+
+    const gates = [...src.matchAll(/runOwnershipInvariantStartupGate\(\{/g)].map((m) => m.index);
+    expect(src.slice(gates[1], at("endStartupFence()"))).toContain(
+      "applyToAllMarkets: bounceAppliesAtFenceRelease,",
+    );
+  });
+
+  /**
+   * A fresh `true` at that checkpoint excuses `drainedOrderIds` through the projection. But if the
+   * flag was off at boot, gate #1 deferred nothing and left no waiver — so gating the fence gate on
+   * the latch alone would hand out the excuse with no barrier backing it, which is precisely what
+   * the deferral's second half exists to refuse.
+   */
+  it("proves the drain whenever the checkpoint will excuse it, latch or not", () => {
+    const guard = src.slice(at("if (drainWaiverOutstanding ||"), at("runDrainedOrderFenceGate({"));
+    expect(guard).toContain("bounceAppliesAtFenceRelease && drainedOrderIds.size > 0");
+  });
+
+  /**
+   * `classifyStartupTransitionTargets` quarantines reopening BUYs alongside stale SELLs, and the
+   * status predicate reads only the status column. Without the side filter a BUY raises the latch
+   * while deferring nothing, and the abandoned-waiver fatal calls it a SELL.
+   */
+  it("admits only SELLs to the waiver, since only SELLs are in the relation being deferred", () => {
+    const decl = at("const drainedOrderIds = new Set(");
+    const body = src.slice(decl, src.indexOf("runOwnershipInvariantStartupGate({", decl));
+    expect(body).toContain('order.side === "sell"');
+    expect(body).toContain("isWorkingSellOrderStatus(order.status)");
+  });
+
+  /**
+   * The fence gate already persists failed state and names the precise subset it could not prove;
+   * the broad abandoned-waiver report on top of it would bury that diagnosis under every candidate.
+   */
+  it("does not re-report every candidate when the fence gate already named the exact subset", () => {
+    const guard = src.slice(
+      at("if (drainWaiverOutstanding &&"),
+      at("reportAbandonedDrainWaiver({"),
+    );
+    expect(guard).toContain("!(err instanceof DrainedOrderUnfencedError)");
+  });
+
+  /**
+   * The ordering assertions above only bound `process.exit(1)`, and that is all they CAN bound: the
+   * remaining span from the waiver to the drain contains `await supervisor.start()`, a rejecting
+   * module start, and a `LifecycleSupersededError` return — none of them a literal exit, none of
+   * them removable by reordering, since the drain is itself awaited work that can reject. So the
+   * latch is what has to hold, and it holds only while it is cleared in exactly one place.
+   */
+  it("clears the waiver latch only where the drain is proven, and reports it on every abort", () => {
+    // Raised where the waiver is granted, so no earlier statement can leave it stale-true.
+    expect(at("let drainWaiverOutstanding")).toBeGreaterThan(
+      at("runOwnershipInvariantStartupGate({"),
+    );
+    // Lowered in exactly one place, and that place is after the fence gate proved the drain.
+    const cleared = [...src.matchAll(/drainWaiverOutstanding = false/g)].map((m) => m.index);
+    expect(cleared).toHaveLength(1);
+    expect(cleared[0]!).toBeGreaterThan(at("runDrainedOrderFenceGate({"));
+    // And the abort path reads it, rather than the latch being write-only bookkeeping.
+    expect(at("reportAbandonedDrainWaiver({")).toBeGreaterThan(cleared[0]!);
+  });
+});
+
+/**
+ * The third outcome of the deferral. "Drained" and "unfenced" are covered above; this is the boot
+ * that died of something else entirely in between — and the only thing at stake is whether the
+ * operator can still find the SELL orders the gate excused.
+ */
+describe("reportAbandonedDrainWaiver", () => {
+  it("names the excused orders and leaves control.db failed+paused", () => {
+    const log = makeLogger();
+    reportAbandonedDrainWaiver({
+      controlDb: control.db,
+      drainedOrderIds: new Set(["o-drain-1", "o-drain-2"]),
+      log,
+    });
+
+    expect(log.fatals).toHaveLength(1);
+    expect(log.fatals[0]!.obj).toMatchObject({ orderIds: ["o-drain-1", "o-drain-2"] });
+    expect(log.fatals[0]!.msg).toContain("resting on the exchange with no owning position");
+    const row = control.db
+      .prepare("SELECT runtime_status, paused FROM runtime_control_state WHERE id = 1")
+      .get() as { runtime_status: string; paused: number };
+    expect(row).toEqual({ runtime_status: "failed", paused: 1 });
+  });
+
+  it("stays silent when the gate never deferred anything", () => {
+    const log = makeLogger();
+    reportAbandonedDrainWaiver({ controlDb: control.db, drainedOrderIds: new Set(), log });
+
+    expect(log.fatals).toHaveLength(0);
+    const row = control.db
+      .prepare("SELECT runtime_status FROM runtime_control_state WHERE id = 1")
+      .get() as { runtime_status: string | null };
+    expect(row.runtime_status).not.toBe("failed");
   });
 });

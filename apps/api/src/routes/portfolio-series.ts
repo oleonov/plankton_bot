@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import { ledgerInstant, parseLedgerInstantMs } from "@krabs/db";
 import { ok } from "../errors.js";
 import { resolveInitialBalanceUsdc } from "../initial-balance.js";
 import { resolveLiveLiteFunderAddress } from "../polymarket-portfolio.js";
@@ -31,18 +32,22 @@ const INTERVAL_WINDOW_MS: Partial<Record<"1d" | "1w" | "1m" | "all", number>> = 
   "1m": 30 * 24 * 60 * 60 * 1000,
 };
 
+// `lookupFailed` is not the same signal as a null `createdAt`: no control.db and no matching row
+// both mean "this profile has no recorded lifetime boundary", which the caller may safely treat as
+// covered. A thrown query means the boundary may well exist and we simply could not read it, which
+// must not be laundered into the same null the caller reads as "nothing to cover".
 function resolveProfileStart(
   controlDb: Database.Database | undefined,
   profileId: string,
-): string | null {
-  if (!controlDb) return null;
+): { createdAt: string | null; lookupFailed: boolean } {
+  if (!controlDb) return { createdAt: null, lookupFailed: false };
   try {
     const profileRow = controlDb
       .prepare("SELECT created_at FROM profiles WHERE profile_id = ?")
       .get(profileId) as { created_at: string | null } | undefined;
-    return profileRow?.created_at ?? null;
+    return { createdAt: profileRow?.created_at ?? null, lookupFailed: false };
   } catch {
-    return null;
+    return { createdAt: null, lookupFailed: true };
   }
 }
 
@@ -162,41 +167,57 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
       "1m": 60,
       all: 360,
     };
-    const sinceMap: Record<string, string> = {
-      "1d": "-1 day",
-      "1w": "-7 days",
-      "1m": "-30 days",
-      all: "-90 days",
+    // The cutoff is computed in JS as canonical ISO rather than bound as a SQLite modifier string,
+    // because `datetime('now', ...)` renders space-form and `' '` (0x20) sorts below `'T'` (0x54):
+    // a raw compare then puts every ISO row sharing the cutoff's calendar day ABOVE it regardless
+    // of time-of-day. These day counts are exact multiples of 86400s, same as the modifiers they
+    // replace ("-1 day" / "-7 days" / "-30 days" / "-90 days").
+    //
+    // Every comparison and ordering over `captured_at` below then goes through `ledgerInstant()`
+    // rather than comparing the bind lexically. Today's 24,063 production rows are all canonical
+    // ISO — the sole writer (`ProfileRuntimePublisher`) binds `new Date().toISOString()` — but the
+    // column also carries `DEFAULT (datetime('now'))`, which renders space-form and cannot be
+    // dropped without recreating the table on the 18.38 GB live ledger. So the canonical rendering
+    // holds only for as long as no writer omits the column, and this reader must not depend on
+    // that: a single space-form row would otherwise sort below every same-day ISO row and fall out
+    // of the window, or win the `ORDER BY … LIMIT 1` baseline it does not deserve. The wrap costs
+    // the two `captured_at` indexes on a table retention caps at 90 days, which is why it is
+    // affordable here and not on the tables `toSqliteDateTime` exists for.
+    const sinceDays: Record<string, number> = {
+      "1d": 1,
+      "1w": 7,
+      "1m": 30,
+      all: 90,
     };
-    const since = sinceMap[interval] ?? "-1 day";
+    const days = sinceDays[interval] ?? 1;
     const bucket = bucketMinutes[interval] ?? 5;
     const maxRawPoints = 200;
 
-    const windowStartRow = db.prepare("SELECT datetime('now', ?) as ts").get(since) as {
-      ts: string;
-    };
-    const windowStart = windowStartRow.ts;
+    const windowStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
     const historyStartRow = db
       .prepare(
         `SELECT captured_at
          FROM portfolio_snapshots
          WHERE profile = ?
-         ORDER BY captured_at ASC
+         ORDER BY ${ledgerInstant("captured_at")} ASC
          LIMIT 1`,
       )
       .get(effectiveProfile) as { captured_at: string } | undefined;
     const historyStart = historyStartRow?.captured_at ?? null;
 
-    const profileStart = resolveProfileStart(controlDb, effectiveProfile);
+    const { createdAt: profileStart, lookupFailed: profileLookupFailed } = resolveProfileStart(
+      controlDb,
+      effectiveProfile,
+    );
 
     const rawCountRow = db
       .prepare(
         `SELECT COUNT(*) as c
          FROM portfolio_snapshots
-         WHERE profile = ? AND captured_at >= datetime('now', ?)`,
+         WHERE profile = ? AND ${ledgerInstant("captured_at")} >= ${ledgerInstant("?")}`,
       )
-      .get(effectiveProfile, since) as { c: number };
+      .get(effectiveProfile, windowStart) as { c: number };
     const rawCount = rawCountRow.c;
 
     const itemQuery =
@@ -207,8 +228,8 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
                     unrealized_pnl_liquidation_usdc, total_equity_liquidation_usdc,
                     open_value_usdc, captured_at
              FROM portfolio_snapshots
-             WHERE profile = ? AND captured_at >= datetime('now', ?)
-             ORDER BY captured_at ASC`,
+             WHERE profile = ? AND ${ledgerInstant("captured_at")} >= ${ledgerInstant("?")}
+             ORDER BY ${ledgerInstant("captured_at")} ASC`,
           )
         : db.prepare(
             `SELECT ps.equity_usdc, ps.realized_pnl_usdc, ps.position_value_usdc,
@@ -219,17 +240,24 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
              INNER JOIN (
                SELECT MAX(id) as max_id
                FROM portfolio_snapshots
-               WHERE profile = ? AND captured_at >= datetime('now', ?)
+               WHERE profile = ? AND ${ledgerInstant("captured_at")} >= ${ledgerInstant("?")}
+               -- The bucket key stays unwrapped because strftime PARSES its argument instead of
+               -- comparing it lexically, so ISO-ms, SQLite-space and ISO-without-ms all bucket
+               -- identically. That tolerance is not total: strftime returns NULL for the Gamma
+               -- +00 shapes, which would collapse every such row into one GROUP BY NULL bucket.
+               -- No writer of this column can emit +00 (the explicit INSERT binds ISO, the
+               -- surviving DEFAULT emits space), so it is unreachable here — but if that ever stops
+               -- holding, this key needs the same replace(…, '+00', '') the comparisons use.
                GROUP BY strftime('%Y-%m-%d', captured_at) || 'T' ||
                  printf('%02d', (CAST(strftime('%H', captured_at) AS INTEGER) * 60
                    + CAST(strftime('%M', captured_at) AS INTEGER)) / ?)
              ) b ON ps.id = b.max_id
-             ORDER BY ps.captured_at ASC`,
+             ORDER BY ${ledgerInstant("ps.captured_at")} ASC`,
           );
 
     const items =
       rawCount <= maxRawPoints
-        ? (itemQuery.all(effectiveProfile, since) as Array<{
+        ? (itemQuery.all(effectiveProfile, windowStart) as Array<{
             equity_usdc: number;
             realized_pnl_usdc: number;
             position_value_usdc: number;
@@ -240,7 +268,7 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
             open_value_usdc: number;
             captured_at: string;
           }>)
-        : (itemQuery.all(effectiveProfile, since, bucket) as Array<{
+        : (itemQuery.all(effectiveProfile, windowStart, bucket) as Array<{
             equity_usdc: number;
             realized_pnl_usdc: number;
             position_value_usdc: number;
@@ -256,26 +284,55 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
     const baselineRow = db
       .prepare(
         `SELECT equity_usdc FROM portfolio_snapshots
-         WHERE profile = ? AND captured_at >= datetime('now', ?)
-         ORDER BY captured_at ASC LIMIT 1`,
+         WHERE profile = ? AND ${ledgerInstant("captured_at")} >= ${ledgerInstant("?")}
+         ORDER BY ${ledgerInstant("captured_at")} ASC LIMIT 1`,
       )
-      .get(effectiveProfile, since) as { equity_usdc: number } | undefined;
+      .get(effectiveProfile, windowStart) as { equity_usdc: number } | undefined;
 
     // Initial balance from profile_settings
     const initialBalance =
       resolveInitialBalanceUsdc(controlDb, effectiveProfile, defaultInitialBalanceUsdc) ?? 0;
 
     const hasInitialBalance = initialBalance > 0;
-    const effectiveCoverageStart =
+    // These three timestamps come from three different writers — `profileStart` from control.db
+    // (`profiles.created_at`), `historyStart` from the ledger, `windowStart` from JS — so a raw
+    // string compare hits the same `' '` (0x20) < `'T'` (0x54) trap the SQL above now avoids: a
+    // space-rendered profile start would compare below every same-day ISO window start and flip
+    // `coverageComplete`. Both columns are canonical ISO on production today (all 3 `profiles`
+    // rows measured 2026-08-06; `portfolio_snapshots.captured_at` 24,063/24,063 per migration
+    // 095), but both also carry `DEFAULT (datetime('now'))` as a second, un-removable writer
+    // path. Comparing parsed instants is the only ordering that survives either one firing.
+    const historyStartMs = parseLedgerInstantMs(historyStart);
+    const profileStartMs = parseLedgerInstantMs(profileStart);
+    const windowStartMs = Date.parse(windowStart);
+    // A start we could not read is NOT the same as a profile with no recorded start. With none
+    // recorded, the ledger's own first snapshot is the only lifetime boundary that exists, so
+    // history trivially covers it. With one recorded but unparseable — or with a lookup that threw —
+    // the boundary EXISTS and is unknown to us.
+    const profileStartUnknown =
+      profileLookupFailed || (profileStart != null && Number.isNaN(profileStartMs));
+    const coverageStartMs =
       interval === "all"
-        ? (profileStart ?? historyStart)
-        : profileStart && profileStart > windowStart
-          ? profileStart
-          : windowStart;
+        ? Number.isNaN(profileStartMs)
+          ? historyStartMs
+          : profileStartMs
+        : Number.isNaN(profileStartMs) || profileStartMs <= windowStartMs
+          ? windowStartMs
+          : profileStartMs;
+    // Only `all` has to fail closed on an unknown boundary, because for `all` that boundary IS the
+    // coverage question: falling back to history would let the series claim full-lifetime coverage
+    // it cannot prove and drop the initial-balance baseline in favour of the first snapshot. A
+    // windowed interval asks a strictly narrower question that `historyStartMs <= windowStartMs`
+    // answers outright — history predates the window, so the window is covered whatever the profile
+    // start was. That inequality is exactly what the comparison below reduces to when the start is
+    // unknown, since an unparsed `profileStartMs` already collapses `coverageStartMs` to
+    // `windowStartMs`. Failing closed there instead would substitute the initial balance for a real
+    // in-window snapshot and silently report the wrong portfolioPnl.
     const coverageComplete =
-      historyStart != null &&
-      effectiveCoverageStart != null &&
-      historyStart <= effectiveCoverageStart;
+      !(interval === "all" && profileStartUnknown) &&
+      !Number.isNaN(historyStartMs) &&
+      !Number.isNaN(coverageStartMs) &&
+      historyStartMs <= coverageStartMs;
 
     const baseline =
       !coverageComplete && hasInitialBalance

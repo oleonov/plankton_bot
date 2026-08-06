@@ -10,6 +10,13 @@ import { LedgerRetentionModule } from "../ledger-retention-module.js";
 const NOW = Date.parse("2026-04-25T00:00:00.000Z");
 const DAY_MS = 24 * 60 * 60_000;
 
+/**
+ * Production stores these two columns in SQLite's `datetime('now')` rendering — their only writer
+ * is the column DEFAULT, no INSERT binds them. Fixtures must use the same rendering or the tests
+ * silently stop covering the cutoff comparison the module actually performs.
+ */
+const sqliteSpace = (iso: string): string => iso.slice(0, 19).replace("T", " ");
+
 let db: Database.Database;
 
 const log = {
@@ -119,6 +126,38 @@ function insertMetric(metricName: string, capturedAt: string): void {
   );
 }
 
+/** `created_at` is rendered in SQLite space format — see `sqliteSpace` above. */
+function insertRiskEvent(eventType: string, payload: string, createdAtIso: string): void {
+  db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+    eventType,
+    payload,
+    sqliteSpace(createdAtIso),
+  );
+}
+
+/** `created_at` is rendered in SQLite space format — see `sqliteSpace` above. */
+function insertExecutionPolicyObservation(createdAtIso: string): void {
+  db.prepare("INSERT INTO execution_policy_observations (created_at) VALUES (?)").run(
+    sqliteSpace(createdAtIso),
+  );
+}
+
+/**
+ * `captured_at` here is written verbatim, not always through `sqliteSpace()`: these two tables use
+ * `timestampFormat: "mixed"` precisely because production carries BOTH renderings on the same
+ * column (every INSERT binds ISO today, but the column DEFAULT that would fire on an omitted bind
+ * is still `datetime('now')` — see `renderCutoff`'s doc comment). Callers pass whichever rendering
+ * the case under test needs.
+ */
+function insertTradingStateSnapshot(capturedAt: string): void {
+  db.prepare("INSERT INTO trading_state_snapshots (captured_at) VALUES (?)").run(capturedAt);
+}
+
+/** See {@link insertTradingStateSnapshot} — same mixed-rendering column, different table. */
+function insertPortfolioSnapshot(capturedAt: string): void {
+  db.prepare("INSERT INTO portfolio_snapshots (captured_at) VALUES (?)").run(capturedAt);
+}
+
 function count(table: string): number {
   return (db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c;
 }
@@ -225,21 +264,9 @@ describe("LedgerRetentionModule", () => {
   });
 
   it("caps critical and regular risk events at the same 90-day TTL", async () => {
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "signal_rejected",
-      "{}",
-      "2025-01-01T00:00:00.000Z",
-    );
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "reconciliation_drift",
-      '{"severity":"critical"}',
-      "2025-10-01T00:00:00.000Z",
-    );
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "reconciliation_drift",
-      '{"severity":"critical"}',
-      "2026-03-01T00:00:00.000Z",
-    );
+    insertRiskEvent("signal_rejected", "{}", "2025-01-01T00:00:00.000Z");
+    insertRiskEvent("reconciliation_drift", '{"severity":"critical"}', "2025-10-01T00:00:00.000Z");
+    insertRiskEvent("reconciliation_drift", '{"severity":"critical"}', "2026-03-01T00:00:00.000Z");
 
     const mod = new LedgerRetentionModule({
       db,
@@ -259,21 +286,9 @@ describe("LedgerRetentionModule", () => {
     // v063: TTL tightened from 7d → 1d. Rows from 2026-04-01 are 24 days old
     // at NOW (2026-04-25T00:00:00.000Z), well past both windows; the new test
     // below at the 1d boundary pins the v063 cutoff explicitly.
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "signal_suppressed",
-      "{}",
-      "2026-04-01T00:00:00.000Z",
-    );
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "signal_emitted",
-      "{}",
-      "2026-04-01T00:00:00.000Z",
-    );
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "signal_rejected",
-      "{}",
-      "2026-04-01T00:00:00.000Z",
-    );
+    insertRiskEvent("signal_suppressed", "{}", "2026-04-01T00:00:00.000Z");
+    insertRiskEvent("signal_emitted", "{}", "2026-04-01T00:00:00.000Z");
+    insertRiskEvent("signal_rejected", "{}", "2026-04-01T00:00:00.000Z");
 
     const mod = new LedgerRetentionModule({
       db,
@@ -290,16 +305,12 @@ describe("LedgerRetentionModule", () => {
   });
 
   it("deletes planner suppression rollups with the signal telemetry TTL", async () => {
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+    insertRiskEvent(
       "planner_suppressed_rollup",
       '{"reasonCode":"sell-spread-too-wide-below-avg-entry","count":42}',
       "2026-04-01T00:00:00.000Z",
     );
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "signal_rejected",
-      "{}",
-      "2026-04-01T00:00:00.000Z",
-    );
+    insertRiskEvent("signal_rejected", "{}", "2026-04-01T00:00:00.000Z");
 
     const mod = new LedgerRetentionModule({
       db,
@@ -316,16 +327,12 @@ describe("LedgerRetentionModule", () => {
   });
 
   it("deletes execution profile decision rollups with the signal telemetry TTL", async () => {
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+    insertRiskEvent(
       "execution_profile_decision_chain_rollup",
       '{"kind":"scale_in","reason":"time_gate_blocked","count":42}',
       "2026-04-01T00:00:00.000Z",
     );
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "profile_health_check",
-      '{"status":"ok"}',
-      "2026-04-01T00:00:00.000Z",
-    );
+    insertRiskEvent("profile_health_check", '{"status":"ok"}', "2026-04-01T00:00:00.000Z");
 
     const mod = new LedgerRetentionModule({
       db,
@@ -343,16 +350,8 @@ describe("LedgerRetentionModule", () => {
 
   it("v063: signal telemetry TTL boundary — keeps rows <1d old, deletes >1d", async () => {
     // NOW is 2026-04-25T00:00:00Z. 23h old (kept) vs 25h old (deleted).
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "signal_emitted",
-      "{}",
-      "2026-04-23T23:00:00.000Z", // 25h old → past 1d TTL
-    );
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "signal_suppressed",
-      "{}",
-      "2026-04-24T01:00:00.000Z", // 23h old → within 1d TTL
-    );
+    insertRiskEvent("signal_emitted", "{}", "2026-04-23T23:00:00.000Z"); // 25h old → past 1d TTL
+    insertRiskEvent("signal_suppressed", "{}", "2026-04-24T01:00:00.000Z"); // 23h old → within 1d TTL
 
     const mod = new LedgerRetentionModule({
       db,
@@ -366,8 +365,31 @@ describe("LedgerRetentionModule", () => {
       .prepare("SELECT event_type, created_at FROM risk_events ORDER BY created_at")
       .all() as Array<{ event_type: string; created_at: string }>;
     expect(rows).toEqual([
-      { event_type: "signal_suppressed", created_at: "2026-04-24T01:00:00.000Z" },
+      { event_type: "signal_suppressed", created_at: sqliteSpace("2026-04-24T01:00:00.000Z") },
     ]);
+  });
+
+  it("[reversion pin] risk_events same-day boundary: keeps a row 1h before NOW, deletes a row 1h before the cutoff (sqliteSpace cutoff regression)", async () => {
+    // Catches: reverting `risk_events.high_volume_debug`'s `timestampFormat: "sqliteSpace"` back to
+    // the default "iso". Production stores `risk_events.created_at` in SQLite's `datetime('now')`
+    // space-format rendering ("YYYY-MM-DD HH:MM:SS"); an ISO cutoff ("...T...Z") compares GREATER
+    // than every space-format string on the cutoff's calendar day (' ' 0x20 < 'T' 0x54), so an ISO
+    // bind would delete the "inside" row below even though it is only 1h old.
+    insertRiskEvent("d9_suppressed_on_profile_owned", "{}", "2026-04-24T23:00:00.000Z"); // 1h old, inside TTL — must survive
+    insertRiskEvent("d9_suppressed_on_profile_owned", "{}", "2026-04-23T23:00:00.000Z"); // 25h old, past cutoff — must be deleted
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    const rows = db.prepare("SELECT created_at FROM risk_events").all() as Array<{
+      created_at: string;
+    }>;
+    expect(rows).toEqual([{ created_at: sqliteSpace("2026-04-24T23:00:00.000Z") }]);
   });
 
   it("keeps decision_signal_log rows <72h old and deletes older rows", async () => {
@@ -394,12 +416,8 @@ describe("LedgerRetentionModule", () => {
   });
 
   it("keeps execution_policy_observations rows <72h old and deletes older rows", async () => {
-    db.prepare("INSERT INTO execution_policy_observations (created_at) VALUES (?)").run(
-      "2026-04-21T23:00:00.000Z", // 73h old → past 72h TTL
-    );
-    db.prepare("INSERT INTO execution_policy_observations (created_at) VALUES (?)").run(
-      "2026-04-22T01:00:00.000Z", // 71h old → within 72h TTL
-    );
+    insertExecutionPolicyObservation("2026-04-21T23:00:00.000Z"); // 73h old → past 72h TTL
+    insertExecutionPolicyObservation("2026-04-22T01:00:00.000Z"); // 71h old → within 72h TTL
 
     const mod = new LedgerRetentionModule({
       db,
@@ -412,7 +430,105 @@ describe("LedgerRetentionModule", () => {
     const rows = db
       .prepare("SELECT created_at FROM execution_policy_observations ORDER BY created_at")
       .all() as Array<{ created_at: string }>;
-    expect(rows).toEqual([{ created_at: "2026-04-22T01:00:00.000Z" }]);
+    expect(rows).toEqual([{ created_at: sqliteSpace("2026-04-22T01:00:00.000Z") }]);
+  });
+
+  it("[reversion pin] execution_policy_observations same-day boundary: keeps a row on the cutoff's calendar day, deletes an older row (sqliteSpace cutoff regression)", async () => {
+    // Catches: reverting the `execution_policy_observations` task's `timestampFormat: "sqliteSpace"`
+    // back to the default "iso". Production stores `execution_policy_observations.created_at` in
+    // SQLite's `datetime('now')` space-format rendering ("YYYY-MM-DD HH:MM:SS"). The 3-day TTL
+    // cutoff for NOW falls on 2026-04-22; an ISO cutoff ("2026-04-22T00:00:00.000Z") compares
+    // GREATER than every space-format string sharing that calendar day (' ' 0x20 < 'T' 0x54), so an
+    // ISO bind would incorrectly delete the row below even though it is only 49h old, well within
+    // the 72h TTL.
+    insertExecutionPolicyObservation("2026-04-22T23:00:00.000Z"); // 49h old, inside TTL — must survive
+    insertExecutionPolicyObservation("2026-04-21T23:00:00.000Z"); // 73h old, past TTL — must be deleted
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    const rows = db.prepare("SELECT created_at FROM execution_policy_observations").all() as Array<{
+      created_at: string;
+    }>;
+    expect(rows).toEqual([{ created_at: sqliteSpace("2026-04-22T23:00:00.000Z") }]);
+  });
+
+  it("[mixed-rendering] portfolio_snapshots same-day boundary: keeps a space-form row newer than the cutoff, deletes an ISO row genuinely older", async () => {
+    // NOW is 2026-04-25T00:00:00Z, so the 90-day portfolioSnapshotsTtlMs cutoff is
+    // 2026-01-25T00:00:00.000Z. A space-form row on that SAME calendar day but 23h AFTER the
+    // cutoff must survive: it is production's dormant `DEFAULT (datetime('now'))` writer path
+    // (see renderCutoff's doc comment), and a raw `captured_at < ?` compare against an ISO cutoff
+    // would delete it anyway because ' ' (0x20) < 'T' (0x54) makes every space-form string of the
+    // cutoff's calendar day sort below it, whatever its time-of-day. The ISO row is unambiguously
+    // past the cutoff and must go regardless of rendering.
+    insertPortfolioSnapshot("2026-01-25 23:00:00"); // 23h AFTER cutoff, space rendering — must survive
+    insertPortfolioSnapshot("2026-01-01T00:00:00.000Z"); // genuinely older — must be deleted
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["portfolio_snapshots"]).toBe(1);
+    const rows = db.prepare("SELECT captured_at FROM portfolio_snapshots").all() as Array<{
+      captured_at: string;
+    }>;
+    expect(rows).toEqual([{ captured_at: "2026-01-25 23:00:00" }]);
+  });
+
+  it("[mixed-rendering] trading_state_snapshots same-day boundary: keeps a space-form row newer than the cutoff, deletes an ISO row genuinely older", async () => {
+    // Mirrors the portfolio_snapshots case above at the 14-day tradingStateSnapshotsTtlMs TTL: the
+    // cutoff for NOW (2026-04-25T00:00:00Z) is 2026-04-11T00:00:00.000Z.
+    insertTradingStateSnapshot("2026-04-11 23:00:00"); // 23h AFTER cutoff, space rendering — must survive
+    insertTradingStateSnapshot("2026-04-01T00:00:00.000Z"); // genuinely older — must be deleted
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["trading_state_snapshots"]).toBe(1);
+    const rows = db.prepare("SELECT captured_at FROM trading_state_snapshots").all() as Array<{
+      captured_at: string;
+    }>;
+    expect(rows).toEqual([{ captured_at: "2026-04-11 23:00:00" }]);
+  });
+
+  it("[mixed-rendering] trading_state_snapshots ORDER BY: a one-row deletion budget removes the chronologically-oldest eligible row, not the lexically-smallest string", async () => {
+    // Both cases above only ever have ONE row past the cutoff, so a broken ORDER BY (sorting on the
+    // raw column instead of the parsed instant) is unobservable — deleting "the only eligible row"
+    // looks identical whichever comparator picked it. Here BOTH rows are eligible and share the SAME
+    // calendar day, so only the comparator decides which one a `maxDeletedRowsPerRun: 1` budget
+    // takes: the space-form row is chronologically LATER in the day (20:00) but ' ' (0x20) < 'T'
+    // (0x54) sorts it lexically BELOW the ISO row (01:00), so a raw-column ORDER BY would delete the
+    // younger row and keep the older one — backwards.
+    insertTradingStateSnapshot("2026-04-01T01:00:00.000Z"); // chronologically OLDEST — must be deleted
+    insertTradingStateSnapshot("2026-04-01 20:00:00"); // chronologically YOUNGER, lexically smaller — must survive
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99, maxDeletedRowsPerRun: 1 },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(result.deleted["trading_state_snapshots"]).toBe(1);
+    const rows = db.prepare("SELECT captured_at FROM trading_state_snapshots").all() as Array<{
+      captured_at: string;
+    }>;
+    expect(rows).toEqual([{ captured_at: "2026-04-01 20:00:00" }]);
   });
 
   it("deletes high-volume runtime metrics past the 1-day TTL", async () => {
@@ -447,31 +563,11 @@ describe("LedgerRetentionModule", () => {
   });
 
   it("deletes high-volume risk events past the 1-day TTL", async () => {
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "track_r_margin_threshold_sampled",
-      "{}",
-      "2026-04-23T23:00:00.000Z",
-    );
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "track_r_margin_threshold_sampled",
-      "{}",
-      "2026-04-24T01:00:00.000Z",
-    );
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "d9_suppressed_on_profile_owned",
-      "{}",
-      "2026-04-23T23:00:00.000Z",
-    );
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "d9_suppressed_on_profile_owned",
-      "{}",
-      "2026-04-24T01:00:00.000Z",
-    );
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "signal_rejected",
-      "{}",
-      "2026-04-23T23:00:00.000Z",
-    );
+    insertRiskEvent("track_r_margin_threshold_sampled", "{}", "2026-04-23T23:00:00.000Z");
+    insertRiskEvent("track_r_margin_threshold_sampled", "{}", "2026-04-24T01:00:00.000Z");
+    insertRiskEvent("d9_suppressed_on_profile_owned", "{}", "2026-04-23T23:00:00.000Z");
+    insertRiskEvent("d9_suppressed_on_profile_owned", "{}", "2026-04-24T01:00:00.000Z");
+    insertRiskEvent("signal_rejected", "{}", "2026-04-23T23:00:00.000Z");
 
     const mod = new LedgerRetentionModule({
       db,
@@ -487,32 +583,24 @@ describe("LedgerRetentionModule", () => {
     expect(rows).toEqual([
       {
         event_type: "d9_suppressed_on_profile_owned",
-        created_at: "2026-04-24T01:00:00.000Z",
+        created_at: sqliteSpace("2026-04-24T01:00:00.000Z"),
       },
       {
         event_type: "signal_rejected",
-        created_at: "2026-04-23T23:00:00.000Z",
+        created_at: sqliteSpace("2026-04-23T23:00:00.000Z"),
       },
       {
         event_type: "track_r_margin_threshold_sampled",
-        created_at: "2026-04-24T01:00:00.000Z",
+        created_at: sqliteSpace("2026-04-24T01:00:00.000Z"),
       },
     ]);
   });
 
   it("deletes order_rejected risk events after 14 days but keeps newer ones", async () => {
     // 24 days old — past the 14-day order_rejected TTL
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "order_rejected",
-      "{}",
-      "2026-04-01T00:00:00.000Z",
-    );
+    insertRiskEvent("order_rejected", "{}", "2026-04-01T00:00:00.000Z");
     // 10 days old — within the 14-day window
-    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
-      "order_rejected",
-      "{}",
-      "2026-04-15T00:00:00.000Z",
-    );
+    insertRiskEvent("order_rejected", "{}", "2026-04-15T00:00:00.000Z");
 
     const mod = new LedgerRetentionModule({
       db,
@@ -525,7 +613,7 @@ describe("LedgerRetentionModule", () => {
     const rows = db
       .prepare("SELECT created_at FROM risk_events ORDER BY created_at")
       .all() as Array<{ created_at: string }>;
-    expect(rows).toEqual([{ created_at: "2026-04-15T00:00:00.000Z" }]);
+    expect(rows).toEqual([{ created_at: sqliteSpace("2026-04-15T00:00:00.000Z") }]);
   });
 
   it("runs retention immediately on start by default", async () => {

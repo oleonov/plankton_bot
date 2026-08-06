@@ -1054,10 +1054,15 @@ SELECT captured_at, equity_usdc, wallet_usdc, position_value_usdc,
        realized_pnl_usdc, open_value_usdc
   FROM portfolio_snapshots
  WHERE profile = 'live-lite'
- ORDER BY captured_at DESC
+ ORDER BY julianday(replace(captured_at, '+00', '')) DESC
  LIMIT 30;
 SQL'
 ```
+
+The ordering is wrapped for the same reason the runtime readers are: `captured_at` still carries
+`DEFAULT (datetime('now'))` on the production table, and a space-rendered row sorts BELOW every
+same-day ISO row (`' '` 0x20 < `'T'` 0x54). A raw `ORDER BY captured_at DESC` would then show an
+older row as the latest snapshot — the exact wrong answer to ask a diagnostic query for.
 
 Known caveat: API field `equityUsdc` in the portfolio series currently carries
 windowed PnL points, not raw Polymarket portfolio equity. If the operator is
