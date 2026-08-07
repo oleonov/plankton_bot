@@ -103,6 +103,9 @@ research_plankton/trackAB_deepdive/gamma_index.json
 research_plankton/trackAB_deepdive/obs_asset_index.json
 research_plankton/plankton_fast_cascade_add_features_2026-06-30.csv
 research_plankton/r23_investigation/clob_hist_raw.tsv
+# 1.8 GB pickle of the raw Observer shard extraction — 18x GitHub's hard limit.
+# Regenerate with the sibling extract.py; analyze_conditional.py consumes it.
+research_plankton/observer_fill_prob_conditional_2026-08-06/raw_extract.pkl
 
 # Archives and run logs under research/ — not project artifacts
 research_plankton/**/*.zip

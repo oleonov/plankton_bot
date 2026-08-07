@@ -111,6 +111,10 @@ import {
 } from "./wallet-buy-budget.js";
 
 import { createLogger } from "./logger.js";
+import {
+  acquireLedgerInstanceLock,
+  type LedgerInstanceLockHandle,
+} from "./ledger-instance-lock.js";
 import { persistFailedStartupState } from "./persist-failed-startup-state.js";
 import { buildTradeCountObserver } from "./trade-count-observer.js";
 import { LifecycleSupersededError, RUNTIME_STOP_WAIT_MS, waitAtMost } from "./lifecycle-chain.js";
@@ -427,14 +431,30 @@ async function main(): Promise<void> {
     );
   }
 
-  // 2d. Open ledger DB scoped to active profile
+  // 2d. Ledger instance lock — refuse to start a second runtime against the same ledger
+  // (r8-M2: concurrent runtimes race the merge-ledger fence). Taken BEFORE the bootstrap below,
+  // because bootstrap itself applies migrations, backfills and position repairs: a runtime that
+  // is going to lose the lock must not get to write to a ledger it does not own. Held for the
+  // process lifetime.
   const ledgerDbPath = controlDbPath.replace("control.db", `ledger-${activeProfile}.db`);
+  let ledgerLock: LedgerInstanceLockHandle;
+  try {
+    ledgerLock = acquireLedgerInstanceLock(ledgerDbPath);
+    log.info({ lockDbPath: `${ledgerDbPath}.lock.db` }, "ledger instance lock acquired");
+  } catch (err) {
+    log.fatal({ err }, "ledger instance lock unavailable — refusing to start");
+    controlConn.close();
+    process.exit(1);
+  }
+
+  // 2e. Open ledger DB scoped to active profile
   let ledgerConn: DbConnection;
   try {
     ledgerConn = bootstrapLedgerDb(ledgerDbPath);
     log.info({ path: ledgerDbPath }, "ledger database ready");
   } catch (err) {
     log.fatal({ err }, "ledger database bootstrap failed");
+    ledgerLock.release();
     controlConn.close();
     process.exit(1);
   }
@@ -2798,6 +2818,14 @@ async function main(): Promise<void> {
     } catch (err) {
       log.error({ err }, "shutdown teardown failed — exiting anyway");
     } finally {
+      // The instance lock is deliberately NOT released here either. A degraded shutdown can leave
+      // an unref'ed checkpoint worker still running against its own ledger connection
+      // (`wal-checkpoint.ts` abandons rather than terminates it); only `process.exit` below stops
+      // that thread. Releasing first would open a window — however short — where a replacement
+      // runtime takes the lock and starts bootstrapping a ledger the old worker is still writing.
+      // Process exit reclaims the descriptor anyway, which is the whole point of putting the lock
+      // on an fd instead of in a PID file.
+      //
       // The databases are deliberately NOT closed. In WAL mode `close()` checkpoints once it takes
       // the last-connection exclusive lock — an unbounded copy + fsync of the entire WAL — and it
       // buys nothing on the way to `process.exit`: every committed transaction is already in the WAL

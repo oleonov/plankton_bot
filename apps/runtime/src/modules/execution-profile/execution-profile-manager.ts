@@ -29,6 +29,7 @@ import {
 
 import { AbandonmentManager } from "./abandonment-manager.js";
 import { decideCostCap } from "./cost-cap-enforcer.js";
+import { findActivePositions } from "../../active-positions.js";
 import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
 import type { ExecutionProfileAnomalyDetector } from "./execution-profile-anomaly-detector.js";
 import type { ExecutionProfileHealthChecker } from "./execution-profile-health-checker.js";
@@ -176,12 +177,22 @@ export class ExecutionProfileManager implements RuntimeModule {
   private recoverState(): void {
     const active = this.deps.stateRepo.findAllActive();
     this.ownership.hydrate(active.map(toSnapshot));
-    const openTokenIds = this.deps.positionRepo.findOpen().map((position) => position.tokenId);
-    for (const orphan of this.deps.stateRepo.findOrphans(openTokenIds)) {
+    // Alive = open ∪ dust. Dust positions are still real inventory we intend to
+    // sell, so their profile state must survive; only a token that is in neither
+    // set has genuinely stopped existing.
+    const aliveTokenIds = findActivePositions(this.deps.positionRepo).map(
+      (position) => position.tokenId,
+    );
+    for (const orphan of this.deps.stateRepo.findOrphans(aliveTokenIds)) {
       this.recordCounter(EXECUTION_PROFILE_METRICS.recoveryOrphan, {
         profile: orphan.profile,
         state: orphan.state,
       });
+      // closeToken() is normally reached only via PositionUpdated/PositionSettled,
+      // but boot-recovery can consume a leg *before* subscribe() runs — that event
+      // is published to nobody and the token would stay profile-owned forever.
+      // Counting the orphan is not enough; close it.
+      this.closeToken(orphan.tokenId);
     }
   }
 

@@ -173,7 +173,7 @@ function makePositionRepo(rows: Position[]): PositionRepository {
       (id) => rows.find((row) => row.tokenId === id && row.status === PositionStatus.Open) ?? null,
     ),
     findOpen: vi.fn(() => rows.filter((row) => row.status === PositionStatus.Open)),
-    findDust: vi.fn(() => []),
+    findDust: vi.fn(() => rows.filter((row) => row.status === PositionStatus.Dust)),
     findAll: vi.fn(() => rows),
     findOpenByEntryStyle: vi.fn(() => []),
     findById: vi.fn(() => null),
@@ -386,24 +386,8 @@ function makeRollup(
 describe("ExecutionProfileManager", () => {
   it("hydrates existing active state into the ownership cache", async () => {
     const repo = new InMemoryExecutionProfileStateRepository();
-    repo.upsertState({
-      tokenId,
-      conditionId,
-      profile: "medium",
-      state: "ACCUMULATING",
-      assumedAt: "2026-06-14T00:00:00.000Z",
-      lastAvgEntry: 0.12,
-      lastTransitionAt: "2026-06-14T00:00:00.000Z",
-      activeLadderId: null,
-      handoffStartedAt: null,
-      metadata: null,
-      createdAt: "2026-06-14T00:00:00.000Z",
-      updatedAt: "2026-06-14T00:00:00.000Z",
-      addCount: 0,
-      lastBuyAtMs: NOW - 60_000,
-      initialProbeSizeUsd: 7.15,
-    });
-    const manager = makeManager({ profilePolicy: policy(), repo });
+    repo.upsertState(state({ state: "ACCUMULATING" }));
+    const manager = makeManager({ profilePolicy: policy(), repo, positions: [position()] });
 
     await manager.start();
 
@@ -411,6 +395,37 @@ describe("ExecutionProfileManager", () => {
       profile: "medium",
       state: "ACCUMULATING",
     });
+    expect(manager.isProfileOwned(tokenId)).toBe(true);
+  });
+
+  it("closes profile state whose position no longer exists in open or dust", async () => {
+    // Boot-recovery can consume a leg before subscribe() runs, so the
+    // PositionUpdated that would have closed this row reaches nobody. recoverState
+    // is the only place left that can notice.
+    const repo = new InMemoryExecutionProfileStateRepository();
+    repo.upsertState(state({ state: "ACCUMULATING" }));
+    const manager = makeManager({ profilePolicy: policy(), repo, positions: [] });
+
+    await manager.start();
+
+    expect(repo.getState(tokenId)?.state).toBe("CLOSED");
+    expect(manager.isProfileOwned(tokenId)).toBe(false);
+  });
+
+  it("keeps profile state for a dust position", async () => {
+    // Dust is still real inventory we intend to sell — it must not be treated as
+    // an orphan just because findOpen() excludes it.
+    const repo = new InMemoryExecutionProfileStateRepository();
+    repo.upsertState(state({ state: "ACCUMULATING" }));
+    const manager = makeManager({
+      profilePolicy: policy(),
+      repo,
+      positions: [position({ status: PositionStatus.Dust, size: 1 })],
+    });
+
+    await manager.start();
+
+    expect(repo.getState(tokenId)?.state).toBe("ACCUMULATING");
     expect(manager.isProfileOwned(tokenId)).toBe(true);
   });
 
