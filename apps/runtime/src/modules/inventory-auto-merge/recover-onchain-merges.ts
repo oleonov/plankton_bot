@@ -10,6 +10,7 @@ import type {
   MergeRecord,
 } from "@krabs/domain";
 import type Database from "better-sqlite3";
+import { parseLedgerInstantMs } from "@krabs/db";
 import type { Logger } from "../../logger.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import { MergeCandidateService } from "./merge-candidate-service.js";
@@ -134,6 +135,163 @@ export interface OnchainMergeRecoveryDeps {
   runtimeMetrics?: RuntimeMetricWriter | undefined;
 }
 
+interface StaleMergeLeg {
+  leg: "yes" | "no";
+  positionId: string;
+  openedAt: string | undefined;
+  legConditionId: string | undefined;
+  reason: "opened-after" | "unparseable" | "foreign-condition" | "lot-after";
+  /** Only on `lot-after` — the lot whose age refused the leg, so an operator knows what to reconcile. */
+  lotCreatedAt?: string;
+}
+
+/**
+ * A leg that genuinely took part in a merge necessarily PRE-EXISTS the write-ahead ledger row:
+ * `recordPending` runs immediately before the on-chain call, and the legs it records are already
+ * open at that instant. The ledger row itself carries no leg ids — only `conditionId` and the
+ * merged amount — so recovery re-derives the legs from `findMergeCandidates()` on the CURRENT
+ * active rows. If the original leg closed (consumed by this very merge, or by anything else) and a
+ * new position cycle opened on the same token before recovery ran, `findMergeCandidates()` has no
+ * memory of the original id and silently hands back the replacement. A derived leg whose `openedAt`
+ * is LATER than the row's `mergedAt` is proof of exactly that substitution: it cannot be the leg
+ * the on-chain merge actually moved. Settling against it would debit FIFO lots and cost basis for a
+ * merge that leg never took part in. A fenced row is not free either — it never settles on a
+ * restart, so auto-merge stays blocked for that condition until an operator resolves it with
+ * `scripts/merge-ledger-reconcile.ts --discard <mergeId> --fenced --apply` and reconciles the
+ * unconsumed lots by hand. But that cost is bounded and visible, whereas a wrong debit after an
+ * irreversible on-chain merge cannot be undone. So the only safe disposition on any doubt is to
+ * stop and leave the row fenced.
+ *
+ * The anchor is `row.mergedAt`, NOT `row.createdAt`: `merge_ledger.created_at` is written by
+ * SQLite's `datetime('now')`, which has no sub-second resolution, so a replacement leg opened
+ * milliseconds into the SAME second as the row would floor to an equal value and slip past a
+ * second-truncated fence — exactly the wrong debit this check exists to stop. `merged_at` carries
+ * full millisecond precision for every row this function ever sees: `recordPending` INSERTs it
+ * from `recordedAt = new Date().toISOString()` (see `InventoryManagerModule.sweep()`'s
+ * `const recordedAt`), `markOnchain` is a pure CAS
+ * (`UPDATE merge_ledger SET status = 'onchain' WHERE merge_id = ? AND status = 'pending'`) that
+ * never touches `merged_at`, and while `markApplied` DOES overwrite it with the settlement's real
+ * value, that happens only on the terminal 'applied' state — which `findNonTerminal()` excludes and
+ * which the caller here filters to `status === 'onchain'` rows anyway, so this function never sees
+ * an already-applied row's `merged_at`. `mergedAt` is therefore always the exact instant the
+ * write-ahead intent was recorded, safe to compare against `positions.opened_at` at full
+ * millisecond precision with NO truncation on either side.
+ *
+ * Predating the row is necessary but not sufficient, because `findMergeCandidates` binds legs
+ * through the MUTABLE `markets` catalog rather than through anything the merge recorded. Each leg
+ * must also be OWNED by this merge's condition according to `positions.condition_id` — the one
+ * value a market upsert cannot rewrite. See the `foreign-condition` branch below.
+ *
+ * Nor is `opened_at` itself durable provenance. `runStartupPositionAdoption` runs BEFORE this
+ * recovery (see the boot sequence in index.ts) and its `rebuildTokenPosition` ranks a token's
+ * non-closed rows `opened_at DESC` — so the winner is the NEWEST row, precisely a post-merge
+ * replacement — then rewrites that winner's `opened_at` to the EARLIEST instant across itself and
+ * every position it absorbs. One stale sibling older than `merged_at` is therefore enough to
+ * backdate a replacement straight past the check below. The lot ages are what survive that: the
+ * consolidation reparents inventory by rewriting `inventory_lots.position_id` only
+ * (`mergeRetiredPositionFootprint`), never a lot's own `created_at`. See the `lot-after` branch.
+ *
+ * Returns the first leg that fails, or `null` when both legs are proven to belong to this
+ * condition AND to predate the row in both their own `opened_at` and every live lot under them.
+ */
+function findStaleMergeLeg(
+  positionRepo: PositionRepository,
+  lotRepo: InventoryLotRepository,
+  legs: MergeCandidate,
+  row: MergeRecord,
+): StaleMergeLeg | null {
+  const mergedAtMs = parseLedgerInstantMs(row.mergedAt);
+  const sides: Array<{ leg: "yes" | "no"; positionId: MergeCandidate["yesPositionId"] }> = [
+    { leg: "yes", positionId: legs.yesPositionId },
+    { leg: "no", positionId: legs.noPositionId },
+  ];
+  for (const side of sides) {
+    const position = positionRepo.findById(side.positionId);
+    const openedAt = position?.openedAt;
+    const legConditionId = position?.conditionId as string | undefined;
+    const openedAtMs = parseLedgerInstantMs(openedAt);
+    // Fail CLOSED: an unparseable openedAt/mergedAt cannot prove the leg predates the merge, so it
+    // is treated exactly like proof that it doesn't. A missing row lands here too — `findById`
+    // returns undefined, `openedAt` is undefined, and the parse is NaN.
+    if (!Number.isFinite(openedAtMs) || !Number.isFinite(mergedAtMs)) {
+      return {
+        leg: side.leg,
+        positionId: side.positionId,
+        openedAt,
+        legConditionId,
+        reason: "unparseable",
+      };
+    }
+    // Predating the merge is necessary but NOT sufficient. `findMergeCandidates` groups positions
+    // by `markets.conditionId` — the CURRENT catalog value, which `UPSERT_MARKET_SQL` rewrites
+    // wholesale on every scanner upsert (market-repository.ts:135-142) and which the startup market
+    // scan refreshes BEFORE this recovery runs. So an upsert that maps some OTHER condition's token
+    // onto this one hands us a long-lived, genuinely old position from that other condition as this
+    // merge's "leg": it predates `mergedAt` by months and sails through the freshness check, after
+    // which `MergeSettler` debits ITS FIFO lots and cost basis for a merge it never took part in.
+    // `positions.condition_id` is the only anchor that cannot be rewritten this way — the repository
+    // writes it once at INSERT and deliberately omits it from `ON CONFLICT DO UPDATE SET`
+    // (position-repository.ts:20-30) — so it, not the catalog, decides which condition owns the leg.
+    // Mismatch is fenced, and so is the legacy empty string written before the column existed
+    // (measured 2026-08-11 on the live ledger: 1 of 72 non-closed positions): an unknown owner
+    // cannot prove ownership, and the two costs are not symmetric — a falsely fenced row costs one
+    // operator escalation, a wrongly debited one is irreversible.
+    if (legConditionId !== row.conditionId) {
+      return {
+        leg: side.leg,
+        positionId: side.positionId,
+        openedAt,
+        legConditionId,
+        reason: "foreign-condition",
+      };
+    }
+    // `>=`, not `>`: both instants are millisecond-resolution, so a replacement opened in the SAME
+    // millisecond as `recordPending` renders EQUAL and a strict `>` would wave it through as an
+    // original leg. The two costs are not symmetric — a falsely fenced row costs one operator
+    // escalation (the `--discard --fenced` exit exists for exactly that), while a falsely accepted
+    // one debits a replacement's FIFO lots for a merge that already landed irreversibly on chain.
+    if (openedAtMs >= mergedAtMs) {
+      return {
+        leg: side.leg,
+        positionId: side.positionId,
+        openedAt,
+        legConditionId,
+        reason: "opened-after",
+      };
+    }
+    // The check above reads a field startup adoption rewrites BACKWARD (see the header): a
+    // replacement that absorbs one older sibling arrives here wearing that sibling's `opened_at`
+    // and clears it. Every live lot under a genuine original leg was bought before `recordPending`
+    // recorded the intent, so requiring that too closes the consolidation path — the winner keeps
+    // its own post-merge lots, and an old winner that absorbed a replacement inherits the
+    // replacement's. The threshold is `merged_at` floored to its SECOND because a lot's
+    // `created_at` is not uniformly millisecond-rendered — the column's schema DEFAULT is
+    // `datetime('now')` — and a second-truncated value reads as much as 999 ms EARLIER than the
+    // instant it records, which would slip a genuinely later lot under a raw comparison. Flooring
+    // fences the whole second containing the intent instead, the same conservatism the `>=` above
+    // applies to equality. An unparseable `created_at` fails CLOSED for the same reason a missing
+    // position does: it cannot prove the lot predates the merge. The costs stay asymmetric — a leg
+    // that scaled in after the intent was recorded is falsely fenced and costs one operator
+    // escalation via `--discard --fenced`, while a wrong debit after an irreversible on-chain merge
+    // cannot be undone.
+    const mergedAtSecondMs = Math.floor(mergedAtMs / 1000) * 1000;
+    const postMergeLot = lotRepo
+      .findOpen(side.positionId)
+      .find((lot) => !(parseLedgerInstantMs(lot.createdAt) < mergedAtSecondMs));
+    if (postMergeLot) {
+      return {
+        leg: side.leg,
+        positionId: side.positionId,
+        openedAt,
+        legConditionId,
+        reason: "lot-after",
+        lotCreatedAt: postMergeLot.createdAt,
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * Only for the POST-attempt re-read, where falling back to a known set is justified. The FIRST read
  * must never be swallowed — see `recoverConfirmedOnchainMerges`.
@@ -233,6 +391,76 @@ export async function recoverConfirmedOnchainMerges(
           { mergeId: row.mergeId, conditionId: row.conditionId },
           "confirmed on-chain merge cannot be settled locally — no open YES/NO pair for the condition; the row stays fenced",
         );
+        continue;
+      }
+      // The derived legs are a FRESH lookup, not the ones the on-chain merge actually moved — see
+      // `findStaleMergeLeg`. A stale leg here means the original was replaced (a new position cycle
+      // on the same token) since the write-ahead row was recorded, and settling against it would
+      // debit the wrong row's FIFO lots after an irreversible on-chain merge. Stop rather than guess.
+      const stale = findStaleMergeLeg(deps.positionRepo, deps.lotRepo, legs, row);
+      if (stale) {
+        const detail = {
+          mergeId: row.mergeId,
+          conditionId: row.conditionId,
+          leg: stale.leg,
+          positionId: stale.positionId,
+          openedAt: stale.openedAt,
+          legConditionId: stale.legConditionId,
+          mergedAt: row.mergedAt,
+          ...(stale.lotCreatedAt === undefined ? {} : { lotCreatedAt: stale.lotCreatedAt }),
+        };
+        if (stale.reason === "unparseable") {
+          deps.log.error(
+            detail,
+            "confirmed on-chain merge cannot be settled locally — a leg's openedAt or the ledger " +
+              "row's mergedAt is unparseable, so the leg cannot be proven to predate the merge; " +
+              "the row stays fenced for an operator to reconcile",
+          );
+        } else if (stale.reason === "foreign-condition") {
+          deps.log.error(
+            detail,
+            "confirmed on-chain merge cannot be settled locally — the derived leg's own " +
+              "condition_id, written once when the position was created and never rewritten by a " +
+              "market upsert, is not this merge's condition. The leg was derived from the CURRENT " +
+              "markets catalog, which a scanner upsert can remap, so this position may belong to a " +
+              "different condition entirely and its lots must not be debited for this merge. An " +
+              "empty condition_id (legacy rows predating the column) is fenced for the same reason " +
+              "— an unknown owner cannot prove ownership; the row stays fenced for an operator to " +
+              "reconcile",
+          );
+        } else if (stale.reason === "lot-after") {
+          deps.log.error(
+            detail,
+            "confirmed on-chain merge cannot be settled locally — the derived leg carries a LIVE " +
+              "FIFO lot that cannot be shown to predate the START of the SECOND in which the " +
+              "write-ahead row was recorded, so this leg's lots cannot be proven to be the ones " +
+              "the merge moved and must not be debited, even though its openedAt predates the " +
+              "merge. That threshold is the whole second, not the write-ahead instant, because " +
+              "inventory_lots.created_at defaults to second-resolution datetime('now') and would " +
+              "otherwise read up to 999 ms EARLIER than the moment it records — so a lot whose " +
+              "own timestamp is demonstrably milliseconds BEFORE the write-ahead row is fenced " +
+              "too, on purpose. openedAt alone is not evidence here: startup position adoption " +
+              "rewrites a winner's opened_at BACKWARD to the earliest instant across every row it " +
+              "absorbs, while never touching a lot's own created_at, so lot ages are the " +
+              "provenance that survives consolidation. This is a deliberately conservative fence " +
+              "and is NOT evidence of substitution — a legitimate scale-in made after the intent " +
+              "was recorded trips it identically; the row stays fenced for an operator to " +
+              "reconcile",
+          );
+        } else {
+          deps.log.error(
+            detail,
+            "confirmed on-chain merge cannot be settled locally — a derived leg opened AT OR " +
+              "AFTER the write-ahead row was recorded, so it cannot be shown to be the leg that " +
+              "merge actually moved and its lots must not be debited. Equality of the two " +
+              "timestamps is fenced deliberately and is NOT evidence of substitution — they are " +
+              "two independent millisecond-resolution clock reads, so the leg may be the " +
+              "original; the row stays fenced for an operator to reconcile",
+          );
+        }
+        recordMetricCounter(deps.runtimeMetrics, "inventory_merge_recovery_fenced_total", {
+          reason: stale.reason,
+        });
         continue;
       }
       try {

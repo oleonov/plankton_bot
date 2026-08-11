@@ -188,4 +188,63 @@ describe("MergeCandidateService", () => {
 
     expect(result).toHaveLength(0);
   });
+
+  it("abstains from a token that holds both an open and a dust row", () => {
+    // yesLocked/noLocked are summed per TOKEN from open SELL orders, not per row — with both an
+    // open and a dust row on tok-yes, sizing off the open row's free size can undercount a lock
+    // that actually belongs to the dust row. `MergeSettler.applyMerge` now anchors by the
+    // candidate's captured positionId (fixing the earlier wrong-row TOCTOU), but that does not
+    // close this token-level undercount — so the only safe disposition for an ambiguous token
+    // remains producing no candidate at all.
+    const yesToken = createTokenId("tok-yes");
+    const noToken = createTokenId("tok-no");
+    const conditionId = "cond-1";
+
+    const yesMarket: Partial<Market> = {
+      tokenId: yesToken,
+      conditionId,
+      outcome: "Yes",
+      outcomeIndex: 0,
+    };
+    const noMarket: Partial<Market> = {
+      tokenId: noToken,
+      conditionId,
+      outcome: "No",
+      outcomeIndex: 1,
+    };
+
+    const yesOpen: Partial<Position> = {
+      positionId: createPositionId("pos-yes-open"),
+      tokenId: yesToken,
+      size: 100,
+      status: "open",
+      openedAt: "2026-08-11T10:00:00.000Z",
+    };
+    const yesDust: Partial<Position> = {
+      positionId: createPositionId("pos-yes-dust"),
+      tokenId: yesToken,
+      size: 2,
+      status: "dust",
+      openedAt: "2026-08-11T12:00:00.000Z",
+    };
+    const noPos: Partial<Position> = {
+      positionId: createPositionId("pos-no"),
+      tokenId: noToken,
+      size: 50,
+      status: "open",
+      openedAt: "2026-08-11T10:00:00.000Z",
+    };
+
+    (positionRepo.findOpen as any).mockReturnValue([yesOpen, noPos]);
+    (positionRepo as any).findDust = vi.fn().mockReturnValue([yesDust]);
+    (marketRepo.findByTokenId as any).mockImplementation((tid: string) => {
+      if (tid === yesToken) return yesMarket;
+      if (tid === noToken) return noMarket;
+      return null;
+    });
+    (orderRepo.findByTokenId as any).mockReturnValue([]);
+
+    // Without the abstention this yields one candidate sized 50 off the open row.
+    expect(service.findMergeCandidates()).toEqual([]);
+  });
 });

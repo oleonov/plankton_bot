@@ -29,6 +29,10 @@ import {
 } from "@krabs/domain";
 import { withImmediate } from "@krabs/db";
 import type { Logger } from "../../logger.js";
+import {
+  blockedByConflictingOpenPosition,
+  openPositionConflictError,
+} from "../../open-position-conflict.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 
 export interface FillEvent {
@@ -174,6 +178,13 @@ export class InventoryHandler {
       status: "open",
       updatedAt: now,
     };
+    // `existing` came from findByTokenId — the newest non-closed row, which may be a dust row while
+    // a different open row still holds the token. Throwing is a deliberate fail-closed: it blocks a
+    // second `open` row / raw SQLITE_CONSTRAINT, but does not itself make the fill reconcilable —
+    // handleFill() swallows the error and replay re-selects the same row and fails again (#143).
+    if (blockedByConflictingOpenPosition(this.positionRepo, this.log, updated, "addToPosition")) {
+      throw openPositionConflictError(updated, "addToPosition");
+    }
     this.positionRepo.save(updated);
 
     // Create inventory lot for this fill
@@ -310,6 +321,11 @@ export class InventoryHandler {
       closedAt: status === "closed" ? now : existing.closedAt,
       updatedAt: now,
     };
+    // Same hazard as addToPosition: a SELL against a dust row whose remaining size is back above
+    // minOrderSize recomputes to "open" and would become a second open row for the token.
+    if (blockedByConflictingOpenPosition(this.positionRepo, this.log, updated, "saveSellOutcome")) {
+      throw openPositionConflictError(updated, "saveSellOutcome");
+    }
     this.positionRepo.save(updated);
 
     this.log.info(

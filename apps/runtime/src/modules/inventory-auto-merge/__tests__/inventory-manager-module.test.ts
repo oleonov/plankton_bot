@@ -32,6 +32,9 @@ describe("InventoryManagerModule", () => {
     positionRepo = {
       findOpen: vi.fn().mockReturnValue([]),
       findByTokenId: vi.fn(),
+      // `MergeSettler` re-reads both legs by `candidate.yesPositionId`/`noPositionId`, not by token,
+      // so a mock without `findById` makes settlement throw and silently swallow the whole sweep.
+      findById: vi.fn(),
       save: vi.fn(),
     } as any;
     orderRepo = { findByTokenId: vi.fn().mockReturnValue([]) } as any;
@@ -102,6 +105,11 @@ describe("InventoryManagerModule", () => {
     (positionRepo.findByTokenId as any).mockImplementation((tid: string) => {
       if (tid === yesToken) return yesPos;
       if (tid === noToken) return noPos;
+      return null;
+    });
+    (positionRepo.findById as any).mockImplementation((pid: string) => {
+      if (pid === "p-yes") return yesPos;
+      if (pid === "p-no") return noPos;
       return null;
     });
     (marketRepo.findByTokenId as any).mockImplementation((tid: string) => {

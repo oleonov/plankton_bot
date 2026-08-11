@@ -53,7 +53,7 @@ describe("SnapshotWriter", () => {
     });
   });
 
-  function makePosition(tokenId: string, size = 100): Position {
+  function makePosition(tokenId: string, size = 100, overrides: Partial<Position> = {}): Position {
     return {
       positionId: createPositionId(`pos-${tokenId}`),
       tokenId: createTokenId(tokenId),
@@ -69,6 +69,7 @@ describe("SnapshotWriter", () => {
       openedAt: "2026-06-12T00:00:00.000Z",
       closedAt: null,
       updatedAt: "2026-06-12T00:00:00.000Z",
+      ...overrides,
     };
   }
 
@@ -132,6 +133,7 @@ describe("SnapshotWriter", () => {
     expect(repo.saveBatchWithPositionValuations).toHaveBeenCalledTimes(1);
     expect(repo.saveBatchWithPositionValuations.mock.calls[0]![1]).toMatchObject([
       {
+        positionId: "pos-tok-1",
         tokenId: "tok-1",
         currentValueUsdc: 50,
         liquidationValueUsdc: 48,
@@ -145,6 +147,117 @@ describe("SnapshotWriter", () => {
       1,
       JSON.stringify({ outcome: "computed" }),
     );
+  });
+
+  it("values an open row and a dust row of the same token separately (#134)", () => {
+    // Migration 032's unique index is PARTIAL, so one `open` row legally coexists with dust rows on
+    // a token. Every mark below is derived from that row's OWN `size` — collapsing the token to one
+    // winner and writing it `WHERE token_id = ?` stamped the open row's value onto the dust row.
+    writer = new SnapshotWriter(repo, {
+      intervalMs: 5 * 60 * 1000,
+      pruneIntervalMs: 60 * 60 * 1000,
+      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+      positionValuation: {
+        activePositions: () => [
+          makePosition("tok-both", 100, { positionId: createPositionId("pos-open") }),
+          makePosition("tok-both", 4, {
+            positionId: createPositionId("pos-dust"),
+            status: "dust",
+          }),
+        ],
+      },
+    });
+
+    writer.onHeartbeat(
+      [makeMarket("tok-both", 0.48, 0.52)],
+      Date.parse("2026-08-11T12:00:00.000Z"),
+      new Map([["tok-both", makeBook("tok-both", [{ price: 0.48, size: 500 }])]]),
+    );
+
+    const valuations = repo.saveBatchWithPositionValuations.mock.calls[0]![1] as Array<{
+      positionId: string;
+      tokenId: string;
+      currentValueUsdc: number;
+      liquidationValueUsdc: number;
+    }>;
+    expect(valuations.map((v) => v.positionId)).toEqual(["pos-open", "pos-dust"]);
+    expect(valuations[0]!.currentValueUsdc).toBeCloseTo(50, 6);
+    expect(valuations[1]!.currentValueUsdc).toBeCloseTo(2, 6);
+    expect(valuations[0]!.liquidationValueUsdc).toBeCloseTo(48, 6);
+    expect(valuations[1]!.liquidationValueUsdc).toBeCloseTo(1.92, 6);
+  });
+
+  it("allocates shared book depth MARGINALLY when it can't cover every sibling row (#134-follow-up)", () => {
+    // Unlike the test above, depth here is insufficient: the book has exactly 100 bid shares — enough
+    // for the open row alone. Pricing each row against the FULL book independently (the pre-fix bug)
+    // would give the open row $48 AND the dust row $1.92, summing to $49.92 though only $48 is jointly
+    // realizable. The fix must allocate the depth marginally: the open row (ranked first — it's the
+    // live tradable position) claims it all, leaving the dust row nothing.
+    writer = new SnapshotWriter(repo, {
+      intervalMs: 5 * 60 * 1000,
+      pruneIntervalMs: 60 * 60 * 1000,
+      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+      positionValuation: {
+        activePositions: () => [
+          makePosition("tok-scarce", 100, { positionId: createPositionId("pos-open") }),
+          makePosition("tok-scarce", 4, {
+            positionId: createPositionId("pos-dust"),
+            status: "dust",
+          }),
+        ],
+      },
+    });
+
+    writer.onHeartbeat(
+      [makeMarket("tok-scarce", 0.48, 0.52)],
+      Date.parse("2026-08-11T12:00:00.000Z"),
+      new Map([["tok-scarce", makeBook("tok-scarce", [{ price: 0.48, size: 100 }])]]),
+    );
+
+    const valuations = repo.saveBatchWithPositionValuations.mock.calls[0]![1] as Array<{
+      positionId: string;
+      liquidationValueUsdc: number;
+      liquidationDepthExhausted: boolean;
+    }>;
+    expect(valuations.map((v) => v.positionId)).toEqual(["pos-open", "pos-dust"]);
+    const totalLiquidationValueUsdc = valuations.reduce(
+      (sum, v) => sum + v.liquidationValueUsdc,
+      0,
+    );
+    expect(totalLiquidationValueUsdc).toBeCloseTo(48, 6); // realizable total, not 49.92
+    expect(valuations[0]!.liquidationValueUsdc).toBeCloseTo(48, 6);
+    expect(valuations[1]!.liquidationValueUsdc).toBeCloseTo(0, 6);
+    expect(valuations[1]!.liquidationDepthExhausted).toBe(true);
+  });
+
+  it("leaves a single-row token's valuation unchanged by the marginal allocation (no-regression pin)", () => {
+    // A single-row token's cumulative IS its own size, and the previous cumulative is always 0, so
+    // the marginal formula must degrade to exactly the pre-fix per-row computation. This scenario
+    // mirrors the "atomically on heartbeat" test's numbers to pin that property explicitly.
+    writer = new SnapshotWriter(repo, {
+      intervalMs: 5 * 60 * 1000,
+      pruneIntervalMs: 60 * 60 * 1000,
+      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+      positionValuation: {
+        activePositions: () => [makePosition("tok-solo", 100)],
+      },
+    });
+
+    writer.onHeartbeat(
+      [makeMarket("tok-solo", 0.48, 0.52)],
+      Date.parse("2026-08-11T12:00:00.000Z"),
+      new Map([["tok-solo", makeBook("tok-solo", [{ price: 0.48, size: 100 }])]]),
+    );
+
+    expect(repo.saveBatchWithPositionValuations.mock.calls[0]![1]).toMatchObject([
+      {
+        tokenId: "tok-solo",
+        currentValueUsdc: 50,
+        liquidationValueUsdc: 48,
+        liquidationPrice: 0.48,
+        liquidationDepthExhausted: false,
+      },
+    ]);
   });
 
   it("liquidates thin books below mid and samples the liquidation-to-mid ratio", () => {
@@ -203,11 +316,14 @@ describe("SnapshotWriter", () => {
       new Map([["tok-exhausted", makeBook("tok-exhausted", [{ price: 0.48, size: 5 }])]]),
     );
 
+    // liquidationPrice is now valueUsdc / row size (not the book's per-unit fill price), so it stays
+    // self-consistent with liquidationValueUsdc even when the row's own size exceeds visible depth:
+    // 2.4 realized across a 100-share row is 0.024/share, not the 0.48 the filled 5 shares traded at.
     expect(repo.saveBatchWithPositionValuations.mock.calls[0]![1]).toMatchObject([
       {
         tokenId: "tok-exhausted",
         liquidationValueUsdc: 2.4,
-        liquidationPrice: 0.48,
+        liquidationPrice: 0.024,
         liquidationDepthExhausted: true,
       },
     ]);

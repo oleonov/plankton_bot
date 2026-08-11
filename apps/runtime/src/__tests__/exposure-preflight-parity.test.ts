@@ -200,6 +200,24 @@ describe("exposure formula parity (runtime helper ↔ preflight SQL)", () => {
     expect(runtime).toBeCloseTo(1007, 5); // 5 open + 999 dust + 3 open buy
   });
 
+  it("open and dust rows sharing the same token both contribute to exposure", () => {
+    // Migration 032's partial unique index allows one `open` row to coexist with dust rows on the
+    // SAME token — capital at risk is the sum over every non-closed row, not one winner per token.
+    // Regression guard for calculateTotalExposure/findActivePositionRows (apps/runtime/src/
+    // exposure-calculator.ts, active-positions.ts): a dedup back to one row per token would silently
+    // drop the dust row's cost basis and under-report exposure.
+    const { db, positionRepo, orderRepo } = open();
+    const sharedToken = createTokenId(`tok-shared-${nextId()}`);
+
+    positionRepo.save(makeOpenPosition({ tokenId: sharedToken, costBasisUsdc: 5 }));
+    positionRepo.save(makeOpenPosition({ tokenId: sharedToken, costBasisUsdc: 3, status: "dust" }));
+
+    const runtime = calculateTotalExposure(positionRepo, orderRepo);
+    const preflight = preflightExposure(db);
+    expect(runtime).toBe(preflight);
+    expect(runtime).toBeCloseTo(8, 5);
+  });
+
   it("sell orders are excluded from exposure", () => {
     const { db, positionRepo, orderRepo } = open();
     orderRepo.save(makeOpenBuyOrder({ sizeUsdc: 4, status: "open" }));

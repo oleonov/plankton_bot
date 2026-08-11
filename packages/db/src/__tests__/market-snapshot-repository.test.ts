@@ -6,7 +6,7 @@ import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { RUNTIME_BUSY_TIMEOUT_MS, SHUTDOWN_BUSY_TIMEOUT_MS } from "../connection.js";
 import { SqliteMarketSnapshotRepository } from "../repositories/market-snapshot-repository.js";
-import { createTokenId } from "@krabs/domain";
+import { createPositionId, createTokenId } from "@krabs/domain";
 import type { MarketSnapshot } from "@krabs/domain";
 
 let conn: DbConnection;
@@ -18,6 +18,19 @@ function insertMarket(db: import("better-sqlite3").Database, tokenId: string): v
     `INSERT OR IGNORE INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, created_at, updated_at)
      VALUES (?, 'cond-1', 'test-slug', 'test?', 'YES', 1, 0.01, 0, datetime('now'), datetime('now'))`,
   ).run(tokenId);
+}
+
+function insertPosition(
+  db: import("better-sqlite3").Database,
+  args: { positionId: string; tokenId: string; size: number; status: string; currentValue: number },
+): void {
+  db.prepare(
+    `INSERT INTO positions
+       (position_id, token_id, condition_id, side, size, avg_entry_price,
+        cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, updated_at)
+     VALUES (?, ?, 'cond-1', 'buy', ?, 0.1, ?, ?, 0, ?,
+             '2026-06-12T00:00:00.000Z', '2026-06-12T00:00:00.000Z')`,
+  ).run(args.positionId, args.tokenId, args.size, args.size * 0.1, args.currentValue, args.status);
 }
 
 function makeSnapshot(overrides?: Partial<MarketSnapshot>): MarketSnapshot {
@@ -81,20 +94,19 @@ describe("SqliteMarketSnapshotRepository", () => {
   });
 
   it("saveBatchWithPositionValuations writes snapshots and liquidation values together", () => {
-    conn.db
-      .prepare(
-        `INSERT INTO positions
-         (position_id, token_id, condition_id, side, size, avg_entry_price,
-          cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, updated_at)
-       VALUES ('pos-1', 'tok-1', 'cond-1', 'buy', 100, 0.1, 10, 50, 0, 'open',
-               '2026-06-12T00:00:00.000Z', '2026-06-12T00:00:00.000Z')`,
-      )
-      .run();
+    insertPosition(conn.db, {
+      positionId: "pos-1",
+      tokenId: "tok-1",
+      size: 100,
+      status: "open",
+      currentValue: 50,
+    });
 
     repo.saveBatchWithPositionValuations?.(
       [makeSnapshot()],
       [
         {
+          positionId: createPositionId("pos-1"),
           tokenId: createTokenId("tok-1"),
           currentValueUsdc: 50,
           liquidationValueUsdc: 21.4,
@@ -127,6 +139,63 @@ describe("SqliteMarketSnapshotRepository", () => {
       liquidation_value_updated_at: "2026-06-12T12:00:00.000Z",
       updated_at: "2026-06-12T12:00:00.000Z",
     });
+  });
+
+  it("leaves the dust sibling untouched when only the open row is valued (#134)", () => {
+    // Migration 032's unique index is PARTIAL, so an `open` row and a `dust` row on one token is a
+    // LEGAL state. The UPDATE used to be keyed on `token_id`, which wrote the open row's
+    // size-derived value onto the dust row — and refreshed the dust row's `updated_at`, the very
+    // field the revaluation loop reads to decide whether a row still needs marking.
+    insertPosition(conn.db, {
+      positionId: "pos-open",
+      tokenId: "tok-1",
+      size: 100,
+      status: "open",
+      currentValue: 50,
+    });
+    insertPosition(conn.db, {
+      positionId: "pos-dust",
+      tokenId: "tok-1",
+      size: 4,
+      status: "dust",
+      currentValue: 0.4,
+    });
+
+    repo.saveBatchWithPositionValuations?.(
+      [makeSnapshot()],
+      [
+        {
+          positionId: createPositionId("pos-open"),
+          tokenId: createTokenId("tok-1"),
+          currentValueUsdc: 60,
+          liquidationValueUsdc: 48,
+          liquidationPrice: 0.48,
+          liquidationDepthExhausted: false,
+          updatedAt: "2026-08-11T12:00:00.000Z",
+        },
+      ],
+    );
+
+    const rows = conn.db
+      .prepare(
+        `SELECT position_id, current_value_usdc, liquidation_value_usdc, updated_at
+           FROM positions ORDER BY position_id`,
+      )
+      .all() as Record<string, unknown>[];
+    expect(rows).toEqual([
+      {
+        position_id: "pos-dust",
+        current_value_usdc: 0.4,
+        liquidation_value_usdc: null,
+        updated_at: "2026-06-12T00:00:00.000Z",
+      },
+      {
+        position_id: "pos-open",
+        current_value_usdc: 60,
+        liquidation_value_usdc: 48,
+        updated_at: "2026-08-11T12:00:00.000Z",
+      },
+    ]);
   });
 
   it("prune deletes rows older than cutoff", () => {

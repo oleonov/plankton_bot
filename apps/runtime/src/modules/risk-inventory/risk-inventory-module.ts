@@ -45,7 +45,8 @@ import {
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
-import { findActivePositions } from "../../active-positions.js";
+import { findActivePositionRows } from "../../active-positions.js";
+import { blockedByConflictingOpenPosition } from "../../open-position-conflict.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 import { normalizeReasonCode } from "../../risk-event-codes.js";
 import { AlgoRiskGateImpl } from "./algo-risk-gate.js";
@@ -246,7 +247,10 @@ export class RiskInventoryModule implements RuntimeModule {
   }
 
   private async backfillStaleCurrentValues(): Promise<void> {
-    const positions = findActivePositions(this.deps.positionRepo);
+    // Every non-closed row, not one winner per token: a dust row that shares its token with an open
+    // row would otherwise never be revalued, and its current_value_usdc would stay stale forever.
+    // Promotion to a second `open` row is prevented by the guard below, not by narrowing the read.
+    const positions = findActivePositionRows(this.deps.positionRepo);
     if (positions.length === 0) return;
 
     const nowMs = this.now();
@@ -283,8 +287,10 @@ export class RiskInventoryModule implements RuntimeModule {
         status: nextStatus,
         updatedAt: nowIso,
       };
-      this.deps.positionRepo.save(updated);
-      await this.publishOpenToDustTransition(pos, updated);
+      const toSave = this.resolveDustPromotion(pos, updated, "backfillStaleCurrentValues");
+      if (toSave === null) continue;
+      this.deps.positionRepo.save(toSave);
+      await this.publishOpenToDustTransition(pos, toSave);
       backfilled++;
     }
 
@@ -354,6 +360,67 @@ export class RiskInventoryModule implements RuntimeModule {
     const updatedAtMs = pos.updatedAt ? parseLedgerInstantMs(pos.updatedAt) : 0;
     if (!Number.isFinite(updatedAtMs)) return true;
     return nowMs - updatedAtMs > W4_STALENESS_FALLBACK_MS;
+  }
+
+  /**
+   * Migration 032's partial unique index allows exactly one `open` row per token, and
+   * `findByTokenId` — the row a subsequent fill actually resolves against — ranks deterministically
+   * (newest `openedAt`, `positionId` tie-break). `findDust()` has no ORDER BY, so a revaluation loop
+   * iterating two dust rows for the same token could otherwise promote whichever one it reaches
+   * first. If that is not the `findByTokenId` winner, the next fill still resolves to the true
+   * winner, recomputes it to `open` too, and collides with this promotion via
+   * `blockedByConflictingOpenPosition` forever. Only the `findByTokenId` winner may be promoted.
+   *
+   * Declining a promotion must not also drop the refreshed valuation — a `dust` sibling still needs
+   * `current_value_usdc` to track price every cycle. Returns `updated` unchanged when no promotion
+   * is in play or nothing declines it; the row to persist instead with `status` forced back to the
+   * stored `dust` when a promotion is declined; or null when the stored row was not `dust` (an
+   * abnormal open-row conflict this fallback is not designed to downgrade — the caller keeps its
+   * pre-existing skip for that case).
+   *
+   * `ignorePositionId`, when supplied by site C, is the token's incumbent `open` row that this same
+   * batch has already queued for demotion — see `handleMarketUpdate` for why that ordering is safe.
+   * It is intentionally NOT used to relax the `findByTokenId` winner check above: if the demoted row
+   * is itself the winner (newer than this dust candidate), the candidate must stay dust — promoting
+   * a non-winner would make a later fill resolve back to the demoted row, recompute it to `open`,
+   * and collide with this promotion forever, the exact permanent-fill-failure this guard exists to
+   * prevent. That case is fail-closed by design; consolidating open+dust per token is tracked as
+   * follow-up #143.
+   */
+  private resolveDustPromotion(
+    pos: Position,
+    updated: Position,
+    site: string,
+    ignorePositionId?: string | null,
+  ): Position | null {
+    if (updated.status !== "open") return updated;
+
+    let declined = blockedByConflictingOpenPosition(
+      this.deps.positionRepo,
+      this.log,
+      updated,
+      site,
+      ignorePositionId,
+    );
+    if (!declined && pos.status === "dust") {
+      const winner = this.deps.positionRepo.findByTokenId(pos.tokenId);
+      const isWinner = winner !== null && winner.positionId === pos.positionId;
+      if (!isWinner) {
+        declined = true;
+        this.log.warn(
+          {
+            site,
+            tokenId: pos.tokenId,
+            positionId: pos.positionId,
+            winnerPositionId: winner?.positionId ?? null,
+          },
+          "declined dust promotion — not the findByTokenId winner for this token",
+        );
+      }
+    }
+    if (!declined) return updated;
+    if (pos.status !== "dust") return null;
+    return { ...updated, status: "dust" };
   }
 
   private rejectionLogCooldownMs(): number {
@@ -800,10 +867,25 @@ export class RiskInventoryModule implements RuntimeModule {
     if (this.deps.markToMarketEnabled === false) return;
     if (markPriceByToken.size === 0) return;
 
-    // Revalue all non-closed wallet inventory; dust can become open again.
-    const openPositions = findActivePositions(this.deps.positionRepo);
+    // Revalue all non-closed wallet inventory; dust can become open again. Same reason as the
+    // startup backfill: read every row, and let the guard — not a narrowed read — stop the illegal
+    // second `open` row.
+    const openPositions = findActivePositionRows(this.deps.positionRepo);
     const nowMs = this.now();
     const updates: Array<{ previous: Position; next: Position }> = [];
+    // `blockedByConflictingOpenPosition` only sees PERSISTED state, so two dust rows on one token
+    // that both revalue to `open` in this same tick would both pass it and only collide inside
+    // `saveBatch` — as a raw SQLITE_CONSTRAINT that rolls back every other token's mark. Track the
+    // open rows this batch has already accepted so the second one is demoted back to dust, not
+    // thrown into the batch.
+    const openTokensInBatch = new Set<string>();
+    // A token's incumbent `open` row demoting in THIS batch is also read-stale for the guard: it is
+    // still `open` in the database until `saveBatch` runs. `findActivePositionRows` returns
+    // `findOpen()` before `findDust()`, so by the time a dust row for that token reaches this loop,
+    // its incumbent's demotion (if any) is already in `updates` — and will be SAVED FIRST inside the
+    // transaction, since SQLite enforces the partial unique index per statement. That ordering is
+    // what makes it safe to pass the demoted row's id down as `ignorePositionId`.
+    const demotedOpenPositionIdByToken = new Map<string, string>();
     for (const pos of openPositions) {
       const markPrice = markPriceByToken.get(String(pos.tokenId));
       if (markPrice === undefined) continue;
@@ -832,7 +914,36 @@ export class RiskInventoryModule implements RuntimeModule {
         status: nextStatus,
         updatedAt: new Date(nowMs).toISOString(),
       };
-      updates.push({ previous: pos, next: updatedPosition });
+      // The guard runs BEFORE the row joins the batch: saveBatch is a single transaction, so one
+      // declined promotion would otherwise roll back every other position's mark in the same tick.
+      const tokenKey = String(pos.tokenId);
+      let toSave = this.resolveDustPromotion(
+        pos,
+        updatedPosition,
+        "handleMarketUpdate",
+        demotedOpenPositionIdByToken.get(tokenKey) ?? null,
+      );
+      if (toSave === null) continue;
+      if (toSave.status === "open") {
+        if (openTokensInBatch.has(tokenKey)) {
+          this.log.error(
+            {
+              site: "handleMarketUpdate",
+              tokenId: toSave.tokenId,
+              positionId: toSave.positionId,
+            },
+            "refusing to promote a second open position for a token already promoted in this batch",
+          );
+          if (pos.status !== "dust") continue;
+          toSave = { ...toSave, status: "dust" };
+        } else {
+          openTokensInBatch.add(tokenKey);
+        }
+      }
+      updates.push({ previous: pos, next: toSave });
+      if (pos.status === "open" && toSave.status !== "open") {
+        demotedOpenPositionIdByToken.set(tokenKey, String(pos.positionId));
+      }
     }
 
     if (updates.length === 0) return;

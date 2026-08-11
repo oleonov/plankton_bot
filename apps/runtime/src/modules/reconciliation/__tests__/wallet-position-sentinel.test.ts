@@ -92,6 +92,9 @@ function positionRepo(positions: Position[]): PositionRepository {
   return {
     findAll: vi.fn().mockReturnValue(positions),
     save: vi.fn(),
+    // Default: no conflicting open row for the token. Guard-conflict tests
+    // override this to return the "other" open position that blocks a save.
+    findActiveByTokenId: vi.fn().mockReturnValue([]),
   } as unknown as PositionRepository;
 }
 
@@ -942,5 +945,143 @@ describe("runWalletPositionSentinel", () => {
 
     expect(result.driftCount).toBe(0);
     expect(log.warn).toHaveBeenCalled();
+  });
+
+  // Migration 032's partial unique index allows only one `open` row per token.
+  // applyRemoteMark and applyMissingRemoteRevaluation both promote a local row
+  // toward "open" from a fresh Polymarket read; if a different open row already
+  // exists for the token they must skip the write (return null) rather than
+  // risk a raw SQLITE_CONSTRAINT — the sentinel re-runs every cycle, so a
+  // skipped mark is just one cycle of staleness, not a lost fact.
+  describe("open-position-conflict guard", () => {
+    it("skips applyRemoteMark when a different open position already exists for the token (D)", async () => {
+      const repo = positionRepo([
+        makePosition({
+          status: "dust",
+          size: 205,
+          costBasisUsdc: 2.05,
+          currentValueUsdc: 0.615,
+          realizedPnl: 0,
+          closedAt: null,
+        }),
+      ]);
+      const conflicting = makePosition({
+        positionId: createPositionId("pos-live-open-conflict"),
+        status: "open",
+        size: 10,
+        closedAt: null,
+      });
+      (repo.findActiveByTokenId as ReturnType<typeof vi.fn>).mockReturnValue([conflicting]);
+      log.error.mockClear();
+
+      const result = await runWalletPositionSentinel(
+        {
+          reader: reader([makeRemote({ size: 205, currentValueUsdc: 12.5049 })]),
+          positionRepo: repo,
+          marketRepo: marketRepo(makeMarket()),
+          log,
+        },
+        NOW,
+      );
+
+      expect(result.markUpdateCount).toBe(0);
+      expect(repo.save).not.toHaveBeenCalled();
+      expect(log.error).toHaveBeenCalled();
+    });
+
+    it("skips applyMissingRemoteRevaluation when a different open position already exists for the token (E)", async () => {
+      // The local row starts as `dust`, not `open`: migration 032's partial unique index allows only
+      // one `open` row per token, so a fixture with two simultaneously-open rows for the same token
+      // is unreachable. The realistic conflict this guard defends is a dust row about to be promoted
+      // (via revaluation) while a *different* row already holds `open` for the token.
+      const repo = positionRepo([
+        makePosition({
+          status: "dust",
+          size: 0.003,
+          costBasisUsdc: 0.0037,
+          currentValueUsdc: 3.21,
+          closedAt: null,
+        }),
+      ]);
+      const conflicting = makePosition({
+        positionId: createPositionId("pos-missing-remote-conflict"),
+        status: "open",
+        size: 5,
+        closedAt: null,
+      });
+      (repo.findActiveByTokenId as ReturnType<typeof vi.fn>).mockReturnValue([conflicting]);
+      log.error.mockClear();
+
+      const result = await runWalletPositionSentinel(
+        {
+          reader: reader([]),
+          positionRepo: repo,
+          marketRepo: marketRepo(makeMarket()),
+          latestUsablePriceLookup: { findUsablePrice: vi.fn().mockReturnValue(0.015) },
+          log,
+        },
+        NOW,
+      );
+
+      expect(result.missingRemoteRevaluedCount).toBe(0);
+      expect(repo.save).not.toHaveBeenCalled();
+      expect(log.error).toHaveBeenCalled();
+    });
+
+    // Both rows live in findAll() here, so the selector — not a stand-alone mock —
+    // decides which one the sentinel acts on. Ranking by updatedAt alone picks the
+    // newer dust row, whose promotion the guard then refuses every cycle: the mark
+    // is never applied and the next cycle re-selects the very same row. Preferring
+    // the open row is what turns that dead loop into progress.
+    it("marks the open row, not the newer dust sibling, when a token holds both (D)", async () => {
+      const openRow = makePosition({
+        positionId: createPositionId("pos-open"),
+        status: "open",
+        size: 10,
+        costBasisUsdc: 1,
+        currentValueUsdc: 1,
+        realizedPnl: 0,
+        closedAt: null,
+        updatedAt: "2026-04-24T01:00:00.000Z",
+      });
+      const dustRow = makePosition({
+        positionId: createPositionId("pos-dust"),
+        status: "dust",
+        size: 205,
+        costBasisUsdc: 2.05,
+        currentValueUsdc: 0.615,
+        realizedPnl: 0,
+        closedAt: null,
+        updatedAt: "2026-04-24T05:00:00.000Z",
+      });
+      const repo = positionRepo([openRow, dustRow]);
+      (repo.findActiveByTokenId as ReturnType<typeof vi.fn>).mockReturnValue([openRow, dustRow]);
+      log.error.mockClear();
+
+      const result = await runWalletPositionSentinel(
+        {
+          reader: reader([makeRemote({ size: 10, currentValueUsdc: 5 })]),
+          positionRepo: repo,
+          marketRepo: marketRepo(makeMarket()),
+          log,
+        },
+        NOW,
+      );
+
+      expect(result.markUpdateCount).toBe(1);
+      expect(repo.save).toHaveBeenCalledTimes(1);
+      const saved = (repo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
+      expect(String(saved.positionId)).toBe("pos-open");
+      expect(saved.status).toBe("open");
+      expect(saved.currentValueUsdc).toBe(5);
+      expect(log.error).not.toHaveBeenCalled();
+    });
+
+    // Negative controls: the pre-existing "updates active local mark and status
+    // from Polymarket data-api" (D) and "revalues a missing-remote local
+    // position from latest usable snapshot price" (E) tests above already cover
+    // the no-conflict path with the same positionRepo() factory used here — both
+    // still pass unchanged, confirming the added findActiveByTokenId default
+    // ([] = no conflict) doesn't alter unblocked behavior.
   });
 });

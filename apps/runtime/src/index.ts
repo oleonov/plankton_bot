@@ -195,7 +195,7 @@ import {
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { createTrackRFeeProvider } from "./track-r-fee-provider.js";
 import { createHybridFeeScheduleProvider } from "./fee-schedule-provider.js";
-import { findActivePositions } from "./active-positions.js";
+import { findActivePositionRows } from "./active-positions.js";
 import { calculateTotalExposure } from "./exposure-calculator.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
 import { resolveActiveProfile } from "./profile-boot.js";
@@ -2015,7 +2015,9 @@ async function main(): Promise<void> {
     enabled: () => !runtimeControl.isPaused(),
     preserveTokenIds: () => marketDataModule.getFullLifetimeSnapshotPreserveTokenIds(),
     positionValuation: {
-      activePositions: () => findActivePositions(repos.position),
+      // Valuation is per ROW, not per token: each row's mark comes from its own `size`, and the
+      // deduped read left every dust sibling's `current_value_usdc` frozen at its last write.
+      activePositions: () => findActivePositionRows(repos.position),
       runtimeMetrics,
       log,
     },

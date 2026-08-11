@@ -8,6 +8,7 @@ import type {
   TokenId,
 } from "@krabs/domain";
 import { computeEffectiveFillPrice } from "@krabs/domain";
+import { compareActivePositions } from "./active-positions.js";
 
 export interface SnapshotWriterConfig {
   intervalMs: number;
@@ -122,24 +123,66 @@ export class SnapshotWriter {
 
     const batchTokenIds = new Set(batch.map((snapshot) => String(snapshot.tokenId)));
     const marketByToken = new Map(markets.map((market) => [String(market.tokenId), market]));
-    const positionByToken = new Map(
-      valuation.activePositions().map((position) => [String(position.tokenId), position]),
-    );
+    // Every valuation below is derived from ONE row's `size`, so a token that holds an `open` row
+    // plus dust rows needs one valuation PER ROW — collapsing to a single winner and letting the
+    // repository write it `WHERE token_id = ?` stamped the winner's value and `updated_at` onto its
+    // siblings, which both overstates them and hides them from the revaluation loop's staleness check.
+    const positionsByToken = new Map<string, Position[]>();
+    for (const position of valuation.activePositions()) {
+      const key = String(position.tokenId);
+      const rowsForToken = positionsByToken.get(key);
+      if (rowsForToken) rowsForToken.push(position);
+      else positionsByToken.set(key, [position]);
+    }
     const updatedAt = new Date(timestamp).toISOString();
     const rows: MarketSnapshotPositionValuation[] = [];
 
     for (const tokenId of batchTokenIds) {
-      const position = positionByToken.get(tokenId);
+      const positions = positionsByToken.get(tokenId);
       const market = marketByToken.get(tokenId);
-      if (!position || !market) continue;
+      if (!positions || !market) continue;
+      const book = booksByToken?.get(tokenId) ?? null;
+      rows.push(...this.buildTokenValuations(positions, market, book, updatedAt));
+    }
 
+    return rows;
+  }
+
+  /**
+   * Sibling rows of a token share ONE order book, so pricing each row against the FULL book (as if
+   * it were the only claimant) double-counts depth and overstates their summed liquidation value —
+   * the exact defect this method exists to avoid. Rank rows with `compareActivePositions` (the
+   * `open` row first — it is the live tradable position and would really be sold off the top of the
+   * book before any dust row) and allocate the book's depth to each row MARGINALLY: row i gets
+   * whatever is left after the rows ranked ahead of it have already claimed their share.
+   */
+  private buildTokenValuations(
+    positions: readonly Position[],
+    market: NormalizedMarket,
+    book: OrderBookSnapshot | null,
+    updatedAt: string,
+  ): MarketSnapshotPositionValuation[] {
+    const ranked = [...positions].sort(compareActivePositions);
+    const rows: MarketSnapshotPositionValuation[] = [];
+    let cumulativeSize = 0;
+    let cumulativeValueUsdc = 0;
+
+    for (const position of ranked) {
       const currentValueUsdc =
         typeof market.midPrice === "number" && Number.isFinite(market.midPrice)
           ? position.size * market.midPrice
           : null;
-      const book = booksByToken?.get(tokenId) ?? null;
-      const liquidation = this.computeLiquidation(position, book);
+      cumulativeSize += position.size;
+      const liquidation = this.computeMarginalLiquidation(
+        book,
+        position.size,
+        cumulativeSize,
+        cumulativeValueUsdc,
+      );
+      cumulativeValueUsdc += liquidation.valueUsdc;
+
       rows.push({
+        positionId: position.positionId,
         tokenId: position.tokenId,
         currentValueUsdc,
         liquidationValueUsdc: liquidation.valueUsdc,
@@ -148,7 +191,8 @@ export class SnapshotWriter {
         updatedAt,
       });
       this.recordLiquidationMetrics({
-        tokenId,
+        tokenId: String(position.tokenId),
+        positionId: String(position.positionId),
         currentValueUsdc,
         liquidationValueUsdc: liquidation.valueUsdc,
         skippedReason: liquidation.skippedReason,
@@ -159,26 +203,33 @@ export class SnapshotWriter {
     return rows;
   }
 
-  private computeLiquidation(
-    position: Position,
+  private computeMarginalLiquidation(
     book: OrderBookSnapshot | null,
+    rowSize: number,
+    cumulativeSize: number,
+    priorCumulativeValueUsdc: number,
   ): {
     valueUsdc: number;
     price: number;
     depthExhausted: boolean;
     skippedReason: "missing_book" | null;
   } {
-    if (!book || book.bids.length === 0 || position.size <= 0) {
+    if (!book || book.bids.length === 0 || rowSize <= 0) {
       return { valueUsdc: 0, price: 0, depthExhausted: true, skippedReason: "missing_book" };
     }
-    const fill = computeEffectiveFillPrice(book, position.size, "sell");
+    const fill = computeEffectiveFillPrice(book, cumulativeSize, "sell");
     if (fill.effectiveFillPrice == null) {
       return { valueUsdc: 0, price: 0, depthExhausted: true, skippedReason: "missing_book" };
     }
-    const valueUsdc = fill.effectiveFillPrice * fill.liquidityAvailable;
+    // fill.effectiveFillPrice * fill.liquidityAvailable is V(cumulativeSize) — the value realizable
+    // by selling everything ranked at-or-above this row. It's monotonic non-decreasing in
+    // cumulativeSize (liquidityAvailable is capped by real depth), so the rows ranked ahead never
+    // claim more than this row's own marginal share; subtracting what they already claimed
+    // (priorCumulativeValueUsdc) leaves exactly what THIS row realizes.
+    const valueUsdc = fill.effectiveFillPrice * fill.liquidityAvailable - priorCumulativeValueUsdc;
     return {
       valueUsdc,
-      price: fill.effectiveFillPrice,
+      price: valueUsdc / rowSize,
       depthExhausted: fill.exhausted,
       skippedReason: null,
     };
@@ -186,6 +237,8 @@ export class SnapshotWriter {
 
   private recordLiquidationMetrics(args: {
     tokenId: string;
+    /** A token can carry several rows, and each has its own size-derived ratio — label them apart. */
+    positionId: string;
     currentValueUsdc: number | null;
     liquidationValueUsdc: number;
     skippedReason: "missing_book" | null;
@@ -210,13 +263,14 @@ export class SnapshotWriter {
       metrics?.writeEvent?.(
         "track_r_liquidation_value_vs_mid_ratio",
         ratio,
-        JSON.stringify({ tokenId: args.tokenId }),
+        JSON.stringify({ tokenId: args.tokenId, positionId: args.positionId }),
         args.updatedAt,
       );
       if (ratio > 1.01) {
         this.config.positionValuation?.log?.warn?.(
           {
             tokenId: args.tokenId,
+            positionId: args.positionId,
             currentValueUsdc: args.currentValueUsdc,
             liquidationValueUsdc: args.liquidationValueUsdc,
             ratio,

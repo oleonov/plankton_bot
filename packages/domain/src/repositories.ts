@@ -497,6 +497,13 @@ export interface MarketSnapshotRepository {
 }
 
 export interface MarketSnapshotPositionValuation {
+  /**
+   * The valuation is addressed by ROW, not by token. Migration 032's unique index is partial
+   * (`positions(token_id) WHERE status = 'open'`), so one `open` row legally coexists with any
+   * number of `dust` rows on a token — and a token-scoped write would stamp one row's size-derived
+   * value onto every other row of that token.
+   */
+  positionId: PositionId;
   tokenId: TokenId;
   currentValueUsdc: number | null;
   liquidationValueUsdc: number;

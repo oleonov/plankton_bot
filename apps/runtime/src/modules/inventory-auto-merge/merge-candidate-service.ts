@@ -7,7 +7,7 @@ import type {
   TokenId,
   PositionId,
 } from "@krabs/domain";
-import { findActivePositions } from "../../active-positions.js";
+import { findActivePositions, findActivePositionRows } from "../../active-positions.js";
 
 export interface MergeCandidate {
   conditionId: string;
@@ -26,14 +26,40 @@ export class MergeCandidateService {
     private readonly fillRepo: FillRepository,
   ) {}
 
+  /**
+   * A token holding more than one non-closed row is NOT mergeable here, and abstaining is the only
+   * safe disposition. `yesLocked`/`noLocked` below sum open SELL orders for a whole TOKEN, not for
+   * the single row `findActivePositions` picked as the winner — so when a token carries several
+   * non-closed rows, this can undercount one row's free size and size `mergeAmount` from the winner
+   * while the lock the count missed actually belongs to a sibling row.
+   *
+   * `MergeSettler.applyMerge` anchors both legs to the candidate's captured positionId rather than
+   * re-reading by token, which closes the wrong-row TOCTOU this abstention originally guarded
+   * against. What remains is the token-level lock undercount above: merging strictly less than we
+   * could is recoverable, merging against a lock that belongs to a different row is not — so this
+   * abstention stays as defence-in-depth.
+   */
+  private ambiguousTokens(): Set<string> {
+    const seen = new Set<string>();
+    const ambiguous = new Set<string>();
+    for (const row of findActivePositionRows(this.positionRepo)) {
+      const key = String(row.tokenId);
+      if (seen.has(key)) ambiguous.add(key);
+      seen.add(key);
+    }
+    return ambiguous;
+  }
+
   public findMergeCandidates(): MergeCandidate[] {
     const openPositions = findActivePositions(this.positionRepo);
     if (openPositions.length === 0) return [];
+    const ambiguous = this.ambiguousTokens();
 
     // Map positions by conditionId
     const positionsByCondition = new Map<string, Position[]>();
 
     for (const pos of openPositions) {
+      if (ambiguous.has(String(pos.tokenId))) continue;
       const market = this.marketRepo.findByTokenId(pos.tokenId);
       if (!market) continue;
 

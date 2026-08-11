@@ -14,14 +14,17 @@
  */
 
 import type { OrderRepository, PositionRepository } from "@krabs/domain";
-import { findActivePositions } from "./active-positions.js";
+import { findActivePositionRows } from "./active-positions.js";
 
 export function calculateTotalExposure(
   positionRepo: PositionRepository,
   orderRepo: OrderRepository,
   additionalNotional = 0,
 ): number {
-  const positionCostBasis = findActivePositions(positionRepo).reduce(
+  // Capital at risk is the sum over EVERY non-closed row: the partial unique index lets one `open`
+  // row coexist with dust rows on the same token, and the dust row's cost basis is real money we
+  // still hold. Taking one winner per token would under-report exposure and loosen the BUY cap.
+  const positionCostBasis = findActivePositionRows(positionRepo).reduce(
     (sum, p) => sum + p.costBasisUsdc,
     0,
   );

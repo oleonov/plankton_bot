@@ -36,9 +36,12 @@ export class MergeSettler {
    */
   applyMerge(candidate: MergeCandidate, mergeId: string): MergedPositions {
     const runMerge = this.db.transaction((): MergedPositions => {
-      // 1. Fetch positions (must be open)
-      const yesPos = this.positionRepo.findByTokenId(candidate.yesTokenId);
-      const noPos = this.positionRepo.findByTokenId(candidate.noTokenId);
+      // 1. Fetch positions (must be open). Anchored to the candidate's positionId, not re-selected by
+      // token: the candidate's identity was captured before an irreversible on-chain settlement, and
+      // a `findByTokenId` re-read here could resolve to a row a SELL+BUY replaced in the meantime,
+      // debiting the wrong row's lots.
+      const yesPos = this.positionRepo.findById(candidate.yesPositionId);
+      const noPos = this.positionRepo.findById(candidate.noPositionId);
 
       if (!yesPos || !noPos || yesPos.status === "closed" || noPos.status === "closed") {
         throw new Error(`Cannot merge: one or both positions are missing or closed`);

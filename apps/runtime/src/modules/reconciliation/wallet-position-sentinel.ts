@@ -11,6 +11,7 @@ import { parseLedgerInstantMs } from "@krabs/db";
 import type { PolymarketDataPosition, PolymarketPositionReader } from "@krabs/exchange";
 import type { Logger } from "../../logger.js";
 import type { LatestUsablePriceLookup } from "../../market-snapshot-pricing.js";
+import { blockedByConflictingOpenPosition } from "../../open-position-conflict.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 
 const MIN_REMOTE_SIZE = 1e-9;
@@ -286,6 +287,16 @@ function applyMissingRemoteRevaluation(
     status: nextStatus,
     updatedAt: new Date(nowMs).toISOString(),
   };
+  if (
+    blockedByConflictingOpenPosition(
+      deps.positionRepo,
+      deps.log,
+      updated,
+      "applyMissingRemoteRevaluation",
+    )
+  ) {
+    return null;
+  }
   deps.positionRepo.save(updated);
   return updated;
 }
@@ -326,6 +337,9 @@ function applyRemoteMark(
     status: nextStatus,
     updatedAt: new Date(nowMs).toISOString(),
   };
+  if (blockedByConflictingOpenPosition(deps.positionRepo, deps.log, updated, "applyRemoteMark")) {
+    return null;
+  }
   deps.positionRepo.save(updated);
   return updated;
 }
@@ -371,8 +385,25 @@ function latestPosition(positions: readonly Position[]): Position | null {
   return latest;
 }
 
+/**
+ * Prefer the `open` row when a token holds several non-closed rows.
+ *
+ * Migration 032's index is partial, so one `open` row legally coexists with dust rows. Ranking the
+ * candidates purely by `updatedAt` can land on a newer dust row — and re-saving that row as `open`
+ * is exactly what `blockedByConflictingOpenPosition` refuses, so D/E would return `null`, change
+ * nothing, and re-select the same row on the next cycle forever. The `open` row is both the live
+ * tradable position and the one the guard always lets through, so the sentinel makes progress.
+ *
+ * `latestPosition` is deliberately left alone: the closed-position path below relies on its plain
+ * newest-wins ordering.
+ */
+function latestOpenPreferred(positions: readonly Position[]): Position | null {
+  const open = positions.filter((position) => position.status === "open");
+  return latestPosition(open.length > 0 ? open : positions);
+}
+
 function latestActivePosition(positions: readonly Position[]): Position | null {
-  return latestPosition(
+  return latestOpenPreferred(
     positions.filter((position) => position.status !== "closed" && position.size > 0),
   );
 }
@@ -384,7 +415,7 @@ function latestMissingRemoteDriftPosition(positions: readonly Position[]): Posit
   const reportablePositions = activePositions.filter(
     (position) => !isMissingRemoteMicroDust(position),
   );
-  return latestPosition(reportablePositions) ?? latestPosition(activePositions);
+  return latestOpenPreferred(reportablePositions) ?? latestOpenPreferred(activePositions);
 }
 
 function isFutureEndDate(endDate: string, nowMs: number): boolean {

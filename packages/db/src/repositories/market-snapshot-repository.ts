@@ -68,6 +68,10 @@ export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository 
   ): void {
     if (snapshots.length === 0 && valuations.length === 0) return;
     const insert = this.prepareInsert();
+    // Addressed by position_id, not token_id: every valuation is derived from ONE row's `size`, and
+    // a token may legally hold an `open` row plus any number of `dust` rows (migration 032's index
+    // is partial). A `token_id` predicate stamped the winner's value — and its `updated_at`, which
+    // is what the revaluation loop keys its staleness check on — onto every sibling row.
     const updatePosition = this.db.prepare(
       `UPDATE positions
           SET current_value_usdc = COALESCE(?, current_value_usdc),
@@ -76,7 +80,7 @@ export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository 
               liquidation_depth_exhausted = ?,
               liquidation_value_updated_at = ?,
               updated_at = ?
-        WHERE token_id = ?
+        WHERE position_id = ?
           AND status IN ('open', 'dust')`,
     );
 
@@ -102,7 +106,7 @@ export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository 
             valuation.liquidationDepthExhausted ? 1 : 0,
             valuation.updatedAt,
             valuation.updatedAt,
-            valuation.tokenId,
+            valuation.positionId,
           );
         }
       },

@@ -2520,6 +2520,390 @@ describe("RiskInventoryModule", () => {
     });
   });
 
+  // Migration 032's partial unique index allows exactly one `open` row per token. Both
+  // revaluation loops recompute status and can attempt to promote a row back to `open`; when the
+  // promotion is declined — a persisted conflicting open row, an in-batch duplicate, or (Major 2)
+  // the row not being the findByTokenId winner among several dust siblings — the row is still
+  // saved, with status forced back to the stored `dust` and the refreshed valuation kept. Only the
+  // status flip is refused: dropping the whole row instead would leave current_value_usdc stale
+  // forever, since the incumbent keeps the token's `open` slot and the declined row is skipped
+  // again on every future cycle.
+  describe("open-position-conflict guard in the revaluation loops", () => {
+    const conflictToken = createTokenId("tok-guard-conflict");
+    const cleanToken = createTokenId("tok-guard-clean");
+
+    function conflictingOpenRow(tokenId: ReturnType<typeof createTokenId>): Position {
+      return makeMtmPosition({
+        positionId: createPositionId("pos-other-open"),
+        tokenId,
+        status: "open",
+      });
+    }
+
+    it("declines the conflicting promotion but still persists its refreshed dust value during startup backfill (B)", async () => {
+      positionRepo = createMockPositionRepo([
+        makeMtmPosition({
+          positionId: createPositionId("pos-backfill-conflict"),
+          tokenId: conflictToken,
+          status: "dust",
+          size: 6.85,
+          currentValueUsdc: null,
+        }),
+        makeMtmPosition({
+          positionId: createPositionId("pos-backfill-clean"),
+          tokenId: cleanToken,
+          size: 4,
+          currentValueUsdc: null,
+        }),
+      ]);
+      (positionRepo.findActiveByTokenId as any).mockImplementation((tokenId: unknown) =>
+        String(tokenId) === String(conflictToken) ? [conflictingOpenRow(conflictToken)] : [],
+      );
+      silentLog.error.mockClear();
+      mod = createModule(undefined, {
+        now: () => MTM_NOW_MS,
+        latestUsablePriceForToken: () => 0.2,
+      });
+
+      await mod.start();
+
+      const saveCalls = (positionRepo.save as any).mock.calls.map(
+        (call: unknown[]) => call[0] as Position,
+      );
+      expect(saveCalls).toHaveLength(2);
+      const conflictSave = saveCalls.find((p: Position) => p.tokenId === conflictToken);
+      const cleanSave = saveCalls.find((p: Position) => p.tokenId === cleanToken);
+      expect(conflictSave?.status).toBe("dust");
+      expect(conflictSave?.currentValueUsdc).toBeCloseTo(6.85 * 0.2, 6);
+      expect(cleanSave?.status).toBe("open");
+      expect(silentLog.error).toHaveBeenCalledWith(
+        expect.objectContaining({ site: "backfillStaleCurrentValues", tokenId: conflictToken }),
+        expect.any(String),
+      );
+
+      await mod.stop();
+    });
+
+    it("promotes the findByTokenId winner among two dust rows regardless of findDust()'s order (C)", async () => {
+      // findByTokenId — not iteration order — is the sole authority for which row a later fill
+      // resolves against (SqlitePositionRepository ranks newest opened_at, positionId DESC). The
+      // mock deliberately returns findDust() in the UNFAVOURABLE order (the non-winner first) to
+      // prove the promotion winner does not depend on findDust()'s (unordered) iteration order.
+      const twoDustToken = createTokenId("tok-two-dust");
+      const olderDust = makeMtmPosition({
+        positionId: createPositionId("pos-dust-older"),
+        tokenId: twoDustToken,
+        status: "dust",
+        size: 40,
+        currentValueUsdc: 0.5,
+        openedAt: "2026-05-14T09:00:00.000Z",
+      });
+      const newerDust = makeMtmPosition({
+        positionId: createPositionId("pos-dust-newer"),
+        tokenId: twoDustToken,
+        status: "dust",
+        size: 40,
+        currentValueUsdc: 0.5,
+        openedAt: "2026-05-14T10:00:00.000Z",
+      });
+      positionRepo = createMockPositionRepo([olderDust, newerDust]);
+      (positionRepo.findActiveByTokenId as any).mockReturnValue([]);
+      (positionRepo.findDust as any).mockReturnValue([olderDust, newerDust]);
+      (positionRepo.findByTokenId as any).mockImplementation((tokenId: unknown) =>
+        String(tokenId) === String(twoDustToken) ? newerDust : null,
+      );
+      silentLog.warn.mockClear();
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
+      await mod.start();
+      (positionRepo.save as any).mockClear();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ tokenId: twoDustToken, midPrice: 0.5 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls.map(
+        (call: unknown[]) => call[0] as Position,
+      );
+      const promoted = saveCalls.filter((p: Position) => p.status === "open");
+      expect(promoted).toHaveLength(1);
+      expect(promoted[0].positionId).toBe(createPositionId("pos-dust-newer"));
+      const demoted = saveCalls.filter((p: Position) => p.status === "dust");
+      expect(demoted).toHaveLength(1);
+      expect(demoted[0].positionId).toBe(createPositionId("pos-dust-older"));
+      expect(demoted[0].currentValueUsdc).toBeCloseTo(20, 6);
+      expect(silentLog.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          site: "handleMarketUpdate",
+          positionId: createPositionId("pos-dust-older"),
+          winnerPositionId: createPositionId("pos-dust-newer"),
+        }),
+        expect.any(String),
+      );
+
+      await mod.stop();
+    });
+
+    it("promotes the findByTokenId winner among two dust rows during startup backfill regardless of findDust()'s order (B)", async () => {
+      const twoDustBackfillToken = createTokenId("tok-two-dust-backfill");
+      const olderDust = makeMtmPosition({
+        positionId: createPositionId("pos-backfill-dust-older"),
+        tokenId: twoDustBackfillToken,
+        status: "dust",
+        size: 10,
+        currentValueUsdc: null,
+        openedAt: "2026-05-14T09:00:00.000Z",
+      });
+      const newerDust = makeMtmPosition({
+        positionId: createPositionId("pos-backfill-dust-newer"),
+        tokenId: twoDustBackfillToken,
+        status: "dust",
+        size: 10,
+        currentValueUsdc: null,
+        openedAt: "2026-05-14T10:00:00.000Z",
+      });
+      positionRepo = createMockPositionRepo([olderDust, newerDust]);
+      (positionRepo.findActiveByTokenId as any).mockReturnValue([]);
+      (positionRepo.findDust as any).mockReturnValue([olderDust, newerDust]);
+      (positionRepo.findByTokenId as any).mockImplementation((tokenId: unknown) =>
+        String(tokenId) === String(twoDustBackfillToken) ? newerDust : null,
+      );
+      silentLog.warn.mockClear();
+      mod = createModule(undefined, {
+        now: () => MTM_NOW_MS,
+        latestUsablePriceForToken: () => 0.2,
+      });
+
+      await mod.start();
+
+      const saveCalls = (positionRepo.save as any).mock.calls.map(
+        (call: unknown[]) => call[0] as Position,
+      );
+      const promoted = saveCalls.filter((p: Position) => p.status === "open");
+      expect(promoted).toHaveLength(1);
+      expect(promoted[0].positionId).toBe(createPositionId("pos-backfill-dust-newer"));
+      const demoted = saveCalls.filter((p: Position) => p.status === "dust");
+      expect(demoted).toHaveLength(1);
+      expect(demoted[0].positionId).toBe(createPositionId("pos-backfill-dust-older"));
+      expect(silentLog.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          site: "backfillStaleCurrentValues",
+          positionId: createPositionId("pos-backfill-dust-older"),
+          winnerPositionId: createPositionId("pos-backfill-dust-newer"),
+        }),
+        expect.any(String),
+      );
+
+      await mod.stop();
+    });
+
+    it("skips the conflicting token's promotion without rolling back the rest of the mark batch (C)", async () => {
+      positionRepo = createMockPositionRepo([
+        makeMtmPosition({
+          positionId: createPositionId("pos-mtm-conflict"),
+          tokenId: conflictToken,
+          status: "dust",
+          currentValueUsdc: 5,
+        }),
+        makeMtmPosition({
+          positionId: createPositionId("pos-mtm-clean"),
+          tokenId: cleanToken,
+          currentValueUsdc: 5,
+        }),
+      ]);
+      (positionRepo.findActiveByTokenId as any).mockImplementation((tokenId: unknown) =>
+        String(tokenId) === String(conflictToken) ? [conflictingOpenRow(conflictToken)] : [],
+      );
+      silentLog.error.mockClear();
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
+      await mod.start();
+      vi.mocked(mockDb.transaction).mockClear();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          makeMarket({ tokenId: conflictToken, midPrice: 0.08 }),
+          makeMarket({ tokenId: cleanToken, midPrice: 0.09 }),
+        ],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls.map(
+        (call: unknown[]) => call[0] as Position,
+      );
+      expect(saveCalls).toHaveLength(2);
+      const conflictSave = saveCalls.find((p: Position) => p.tokenId === conflictToken);
+      const cleanSave = saveCalls.find((p: Position) => p.tokenId === cleanToken);
+      expect(conflictSave?.status).toBe("dust");
+      expect(conflictSave?.currentValueUsdc).toBeCloseTo(100 * 0.08, 6);
+      expect(cleanSave?.status).toBe("open");
+      expect(cleanSave?.currentValueUsdc).toBeCloseTo(100 * 0.09, 6);
+      // The clean token's mark still lands in its own batch — one declined row no longer
+      // costs every other position its revaluation for this tick.
+      expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+      expect(silentLog.error).toHaveBeenCalledWith(
+        expect.objectContaining({ site: "handleMarketUpdate", tokenId: conflictToken }),
+        expect.any(String),
+      );
+
+      await mod.stop();
+    });
+
+    it("promotes the dust sibling in the same batch where the incumbent open row demotes below minOrderSize (Fix 1a — projected in-batch demotion)", async () => {
+      const demotionToken = createTokenId("tok-projected-demotion");
+      const openIncumbent = makeMtmPosition({
+        positionId: createPositionId("pos-incumbent-open"),
+        tokenId: demotionToken,
+        status: "open",
+        size: 4,
+      });
+      const dustWinner = makeMtmPosition({
+        positionId: createPositionId("pos-dust-winner"),
+        tokenId: demotionToken,
+        status: "dust",
+        size: 10,
+        // Later than the incumbent so the findByTokenId mock below agrees with the real query,
+        // which is status-BLIND and orders by `opened_at DESC, position_id DESC`. On an equal
+        // `openedAt` the tiebreak would hand the win to `pos-incumbent-open` instead.
+        openedAt: "2026-05-14T12:00:00.000Z",
+      });
+      positionRepo = createMockPositionRepo([openIncumbent, dustWinner]);
+      (positionRepo.findActiveByTokenId as any).mockImplementation((tokenId: unknown) =>
+        String(tokenId) === String(demotionToken) ? [openIncumbent] : [],
+      );
+      (positionRepo.findByTokenId as any).mockImplementation((tokenId: unknown) =>
+        String(tokenId) === String(demotionToken) ? dustWinner : null,
+      );
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
+      await mod.start();
+      (positionRepo.save as any).mockClear();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ tokenId: demotionToken, midPrice: 0.5, minOrderSize: 5 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls.map(
+        (call: unknown[]) => call[0] as Position,
+      );
+      expect(saveCalls).toHaveLength(2);
+      // The incumbent's demotion is queued — and therefore saved — before the dust sibling's
+      // promotion; that ordering is what makes `ignorePositionId` safe (see handleMarketUpdate).
+      expect(saveCalls[0].positionId).toBe(openIncumbent.positionId);
+      expect(saveCalls[0].status).toBe("dust");
+      expect(saveCalls[1].positionId).toBe(dustWinner.positionId);
+      expect(saveCalls[1].status).toBe("open");
+
+      await mod.stop();
+    });
+
+    it("keeps the dust sibling declined when the demoting incumbent is itself the findByTokenId winner (Fix 1c)", async () => {
+      const demotionToken = createTokenId("tok-projected-demotion-decline");
+      const openIncumbent = makeMtmPosition({
+        positionId: createPositionId("pos-incumbent-open-2"),
+        tokenId: demotionToken,
+        status: "open",
+        size: 4,
+      });
+      const dustSibling = makeMtmPosition({
+        positionId: createPositionId("pos-dust-sibling-2"),
+        tokenId: demotionToken,
+        status: "dust",
+        size: 10,
+      });
+      positionRepo = createMockPositionRepo([openIncumbent, dustSibling]);
+      (positionRepo.findActiveByTokenId as any).mockImplementation((tokenId: unknown) =>
+        String(tokenId) === String(demotionToken) ? [openIncumbent] : [],
+      );
+      // The demoted incumbent — not the dust sibling — is the findByTokenId winner, so the
+      // promotion must stay declined even though its incumbent-open conflict was excluded via
+      // ignorePositionId.
+      (positionRepo.findByTokenId as any).mockImplementation((tokenId: unknown) =>
+        String(tokenId) === String(demotionToken) ? openIncumbent : null,
+      );
+      silentLog.warn.mockClear();
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
+      await mod.start();
+      (positionRepo.save as any).mockClear();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ tokenId: demotionToken, midPrice: 0.5, minOrderSize: 5 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls.map(
+        (call: unknown[]) => call[0] as Position,
+      );
+      expect(saveCalls).toHaveLength(2);
+      expect(saveCalls.every((p: Position) => p.status === "dust")).toBe(true);
+      expect(silentLog.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          site: "handleMarketUpdate",
+          positionId: dustSibling.positionId,
+          winnerPositionId: openIncumbent.positionId,
+        }),
+        expect.any(String),
+      );
+
+      await mod.stop();
+    });
+
+    it("keeps refreshing current_value_usdc for a declined dust promotion across consecutive cycles (C)", async () => {
+      // Reflect save() back into what findDust() returns: a real repository persists the save and
+      // stamps a fresh updatedAt, and the second cycle's staleness gate (shouldApplyMarketDataMark)
+      // depends on that fresh stamp — an inert save() would leave updatedAt frozen at its original
+      // stale value and make the staleness gate pass for a reason the test isn't exercising.
+      let stored = makeMtmPosition({
+        positionId: createPositionId("pos-declined-refresh"),
+        tokenId: conflictToken,
+        status: "dust",
+        currentValueUsdc: 5,
+      });
+      positionRepo = createMockPositionRepo();
+      (positionRepo.findDust as any).mockImplementation(() => [stored]);
+      (positionRepo.save as any).mockImplementation((next: Position) => {
+        stored = next;
+      });
+      (positionRepo.findActiveByTokenId as any).mockImplementation((tokenId: unknown) =>
+        String(tokenId) === String(conflictToken) ? [conflictingOpenRow(conflictToken)] : [],
+      );
+      let nowMs = MTM_NOW_MS;
+      mod = createModule(undefined, { now: () => nowMs });
+      await mod.start();
+      (positionRepo.save as any).mockClear();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ tokenId: conflictToken, midPrice: 0.08 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      // Advance the injected clock past the staleness window so the second cycle's mark is not
+      // skipped by shouldApplyMarketDataMark against the updatedAt the first save just stamped.
+      nowMs += W4_STALENESS_FALLBACK_MS + 1;
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ tokenId: conflictToken, midPrice: 0.11 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls.map(
+        (call: unknown[]) => call[0] as Position,
+      );
+      expect(saveCalls).toHaveLength(2);
+      expect(saveCalls[0].status).toBe("dust");
+      expect(saveCalls[0].currentValueUsdc).toBeCloseTo(100 * 0.08, 6);
+      expect(saveCalls[1].status).toBe("dust");
+      expect(saveCalls[1].currentValueUsdc).toBeCloseTo(100 * 0.11, 6);
+
+      await mod.stop();
+    });
+  });
+
   // ─── Wave 5: operator diagnostics (P2-2) ───────────────────────────
 
   describe("operator diagnostics (P2-2)", () => {
