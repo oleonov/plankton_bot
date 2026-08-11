@@ -1131,14 +1131,18 @@ describe("GET /status", () => {
       VALUES
         ('signal_suppressed', '{"decisionRuleId":"R23_DIP_TRIGGER","reasonCode":"r23-no-history"}', '${eventSql}'),
         ('signal_suppressed', '{"decisionRuleId":"R23_DIP_TRIGGER","reasonCode":"r23-no-dip"}', '${eventSql}');
+      -- orders.created_at / fills.filled_at are single-rendering canonical ISO in the real ledger,
+      -- and /metrics/r23 compares them raw against an ISO cutoff. A space-format fixture silently
+      -- sorts BELOW the cutoff whenever both land on the same UTC date (00:00–01:00 UTC), so the
+      -- fixture must use the same rendering its production writers bind.
       INSERT INTO orders
         (order_id, client_order_id, token_id, condition_id, side, order_type, post_only, price, size, size_usdc, status, decision_rule_id, bot_run_id, created_at, updated_at)
       VALUES
-        ('ord-r23', 'client-r23', 'tok-r23', 'cond-r23', 'buy', 'limit', 1, 0.1, 10, 1, 'filled', 'R23_DIP_TRIGGER', 'run-r23', '${eventSql}', '${eventSql}');
+        ('ord-r23', 'client-r23', 'tok-r23', 'cond-r23', 'buy', 'limit', 1, 0.1, 10, 1, 'filled', 'R23_DIP_TRIGGER', 'run-r23', '${eventIso}', '${eventIso}');
       INSERT INTO fills
         (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, decision_rule_id, filled_at)
       VALUES
-        ('fill-r23', 'ord-r23', 'tok-r23', 'cond-r23', 'buy', 0.1, 10, 1, 'R23_DIP_TRIGGER', '${eventSql}');
+        ('fill-r23', 'ord-r23', 'tok-r23', 'cond-r23', 'buy', 0.1, 10, 1, 'R23_DIP_TRIGGER', '${eventIso}');
     `);
 
     const res = await app.inject({
