@@ -14,7 +14,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO = join(__dirname, "..", "..");
 const SHIM = join(__dirname, "socket_worker_shim.mjs");
 const MOCK = join(__dirname, "mock_polymarket_ws_server.mjs");
 

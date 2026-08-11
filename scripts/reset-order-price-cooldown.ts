@@ -11,7 +11,7 @@
 import { createRequire } from "node:module";
 
 const require = createRequire(new URL("../packages/db/package.json", import.meta.url));
-const Database = require("better-sqlite3") as typeof import("better-sqlite3").default;
+const Database = require("better-sqlite3") as typeof import("better-sqlite3");
 
 interface Args {
   dbPath: string;

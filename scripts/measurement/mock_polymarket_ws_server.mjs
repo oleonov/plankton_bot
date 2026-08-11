@@ -15,7 +15,6 @@ const {
 const PORT = Number(process.env.PORT ?? 8787);
 const RATE_HZ = Number(process.env.RATE_HZ ?? 200); // total messages/sec per connection across all subs
 const BURST_SIZE = Number(process.env.BURST_SIZE ?? 20); // records per WS frame
-const HEARTBEAT_INTERVAL_MS = 10_000;
 
 const wss = new WebSocketServer({ host: "127.0.0.1", port: PORT });
 console.error(
@@ -111,7 +110,9 @@ wss.on("connection", (ws) => {
       }
       try {
         ws.send(JSON.stringify(batch));
-      } catch {}
+      } catch {
+        // the peer may have gone away mid-burst; the next tick re-checks readyState
+      }
     }, intervalMs);
   }
 });

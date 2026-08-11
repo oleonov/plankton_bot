@@ -97,7 +97,7 @@ import { fileURLToPath } from "node:url";
 import type { Database as DatabaseType } from "better-sqlite3";
 
 const require = createRequire(new URL("../packages/db/package.json", import.meta.url));
-const Database = require("better-sqlite3") as typeof import("better-sqlite3").default;
+const Database = require("better-sqlite3") as typeof import("better-sqlite3");
 
 export type MergeLedgerStatus = "pending" | "onchain" | "applied";
 

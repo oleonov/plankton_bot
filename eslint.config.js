@@ -1,4 +1,5 @@
 import js from "@eslint/js";
+import globals from "globals";
 import tseslint from "typescript-eslint";
 import prettierConfig from "eslint-config-prettier";
 import reactHooks from "eslint-plugin-react-hooks";
@@ -35,6 +36,16 @@ export default tseslint.config(
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
+    },
+  },
+  // Plain-JS operator scripts belong to no tsconfig project, so the type-aware parser service
+  // cannot load them — parse them untyped and give them Node's globals instead.
+  {
+    files: ["**/*.mjs", "**/*.cjs", "**/*.js"],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      parserOptions: { projectService: false, project: false },
+      globals: globals.node,
     },
   },
   // Test files — relax rules that are noisy in test contexts

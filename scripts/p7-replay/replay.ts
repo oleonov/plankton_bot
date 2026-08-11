@@ -55,12 +55,12 @@ function parseCohort(): StopEvent[] {
   const lines = readFileSync(COHORT_CSV, "utf-8").replace(/\r/g, "").trim().split("\n");
   const out: StopEvent[] = [];
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(",");
-    const signalTs = cols[8];
+    const cols = (lines[i] ?? "").split(",");
+    const signalTs = cols[8] ?? "";
     out.push({
-      tokenId: cols[0],
-      conditionId: cols[1],
-      state: cols[2],
+      tokenId: cols[0] ?? "",
+      conditionId: cols[1] ?? "",
+      state: cols[2] ?? "",
       price: Number(cols[3]),
       buyCount: Number(cols[4]),
       firstTradePrice: Number(cols[5]),

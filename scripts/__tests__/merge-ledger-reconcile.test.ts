@@ -13,8 +13,15 @@ import {
   parseLedgerTimestamp,
   proveRecoveryFence,
   run,
+  type FenceProof,
   type MergeLedgerRow,
 } from "../merge-ledger-reconcile.js";
+
+// `expect(proof.proven).toBe(false)` asserts but does not narrow the union, so the `reason` the
+// refusal tests read stays invisible to the type checker. Assert through this instead.
+function assertRefused(proof: FenceProof): asserts proof is { proven: false; reason: string } {
+  expect(proof.proven).toBe(false);
+}
 
 // The real schema, executed verbatim — a hand-rolled CREATE TABLE here would drift from
 // migrations and could pass tests against a shape merge_ledger no longer has.
@@ -417,7 +424,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     });
 
     const proof = proveRecoveryFence(db, findRow(db, "m-settleable")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.proven === false && proof.reason).toMatch(/p-yes/);
     expect(proof.proven === false && proof.reason).toMatch(/p-no/);
   });
@@ -697,7 +704,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     // when that owner is closed, reopens it and BACKDATES opened_at past merged_at — so the token
     // comes back as an un-fenced settleable leg after this command already deleted its ledger row.
     const proof = proveRecoveryFence(db, findRow(db, "m-lots")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.reason).toContain("p-yes=7");
     expect(proof.reason).toContain("rebuildTokenPosition");
   });
@@ -881,7 +888,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     });
 
     const proof = proveRecoveryFence(db, findRow(db, "m-lot-unreadable")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.reason).toContain("t-yes (p-yes, opened_at=2026-06-01T00:00:00.000Z)");
   });
 
@@ -920,7 +927,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     // Dropping the unmapped leg would silently empty the YES side and read as proof. An ordinary
     // market upsert filling outcome_index turns that very row into a leg findMergeCandidates derives.
     const proof = proveRecoveryFence(db, findRow(db, "m-unclassified")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.reason).toContain("t-dem");
     expect(proof.reason).toContain('"Democrat"');
     expect(proof.reason).toContain("outcome_index");
@@ -1007,7 +1014,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     // and the survivor becomes a settleable leg — proving the fence off a transient state is exactly
     // the delete-wins race the proof exists to prevent.
     const proof = proveRecoveryFence(db, findRow(db, "m-ambiguous")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.proven === false && proof.reason).toContain("p-yes-open + p-yes-dust");
   });
 
@@ -1050,7 +1057,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     });
 
     const proof = proveRecoveryFence(db, findRow(db, "m-ambiguous-no")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.proven === false && proof.reason).toContain("p-no-open + p-no-dust");
   });
 
@@ -1089,7 +1096,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     });
 
     const proof = proveRecoveryFence(db, findRow(db, "m-noncanonical-opened")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
   });
 
   it("refuses a non-canonical merged_at even when both legs are otherwise fully fenced", () => {
@@ -1125,7 +1132,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     });
 
     const proof = proveRecoveryFence(db, findRow(db, "m-noncanonical-merged")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.proven === false && proof.reason).toMatch(/merged_at/);
   });
 
@@ -1146,7 +1153,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     });
 
     const proof = proveRecoveryFence(db, findRow(db, "m-no-markets")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
   });
 
   it("refuses when markets names only the YES side — the empty NO side is a catalog gap, not a fence", () => {
@@ -1174,7 +1181,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     });
 
     const proof = proveRecoveryFence(db, findRow(db, "m-one-sided")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.reason).toContain("NO: none");
     expect(proof.reason).toContain("t-yes");
   });
@@ -1202,7 +1209,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     // Every row on the named side is closed, so the old shape read "no usable NO leg" as proof even
     // though the side that could supply one was simply absent from the catalog.
     const proof = proveRecoveryFence(db, findRow(db, "m-no-only")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.reason).toContain("YES: none");
   });
 
@@ -1246,7 +1253,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     insertMarket(db, { token_id: "t-moved", condition_id: "c-elsewhere", outcome: "No" });
 
     const proof = proveRecoveryFence(db, findRow(db, "m-displaced")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.reason).toContain("t-moved");
     expect(proof.reason).toContain("p-moved");
   });
@@ -1269,7 +1276,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     });
 
     const proof = proveRecoveryFence(db, findRow(db, "m-displaced-lots")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.reason).toContain("t-moved-closed");
   });
 
@@ -1295,7 +1302,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     ).run();
 
     const proof = proveRecoveryFence(db, findRow(db, "m-null-token")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
     expect(proof.reason).toContain("t-moved-null");
   });
 
@@ -1347,7 +1354,7 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     });
 
     const proof = proveRecoveryFence(db, findRow(db, "m-index-based")!);
-    expect(proof.proven).toBe(false);
+    assertRefused(proof);
   });
 });
 

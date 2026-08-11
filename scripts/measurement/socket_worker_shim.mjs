@@ -37,7 +37,7 @@ function connectShard(shardId, url, tokenIds) {
       return;
     }
     const records = Array.isArray(parsed) ? parsed : [parsed];
-    const dropped = queue.push(records);
+    queue.push(records);
     if (queue.size > 0) {
       // drain synchronously per loop tick (mirrors worker behavior closely)
       while (queue.size > 0) {
@@ -64,7 +64,9 @@ parentPort.on("message", (msg) => {
     for (const s of sockets.values())
       try {
         s.ws.close();
-      } catch {}
+      } catch {
+        // best-effort teardown: a socket the peer already tore down is fine
+      }
     sockets.clear();
     process.exit(0);
   }
