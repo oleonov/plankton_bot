@@ -586,6 +586,13 @@ esac`,
     expect(deploySource).not.toContain("{{.Username}}");
     expect(deploySource).toContain('d.auths?.["ghcr.io"]');
     expect(deploySource).not.toContain('Labels \\"org.opencontainers.image.revision');
+    const rollbackStateDirectory = deploySource.indexOf(
+      'mkdir -p "$CONFIG_DIR" "$(dirname "$ROLLBACK_OPERATION_LOCK")"',
+    );
+    expect(rollbackStateDirectory).toBeGreaterThan(-1);
+    expect(rollbackStateDirectory).toBeLessThan(
+      deploySource.indexOf('take "$ROLLBACK_OPERATION_LOCK"'),
+    );
     const repo = mkdtempSync(join(tmpdir(), "krabs-rollback-boundary-"));
     dirs.push(repo);
     const git = (...args: string[]) => {

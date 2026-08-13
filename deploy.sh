@@ -410,7 +410,7 @@ PY
 controller() {
   local mode="$1" key="$2" full digest image_id state_id phase pre version candidate baseline runtime network cutover arbitration effective marker_aware
   deploy_paths; full="${KRABS_REMOTE_SHA:-$(git rev-parse HEAD)}"; sha "$full" || die 'HEAD must be a full SHA'
-  mkdir -p "$CONFIG_DIR"; take "$LOCK" || die 'deploy operation in progress'; take "$ROLLBACK_OPERATION_LOCK" || die 'rollback operation is in progress'; export KRABS_DEPLOY_OPERATION_OWNER=1
+  mkdir -p "$CONFIG_DIR" "$(dirname "$ROLLBACK_OPERATION_LOCK")"; chmod 700 "$(dirname "$ROLLBACK_OPERATION_LOCK")"; take "$LOCK" || die 'deploy operation in progress'; take "$ROLLBACK_OPERATION_LOCK" || die 'rollback operation is in progress'; export KRABS_DEPLOY_OPERATION_OWNER=1
   RECOVERY_DISPOSITION=normal
   if [[ -e "$RECOVERY" ]]; then
     [[ "$(recovery_field runtimeEnvSha256)" == "${KRABS_RUNTIME_ENV_SHA256:-}" ]] || die 'same-SHA retry runtime environment differs from recovery'
