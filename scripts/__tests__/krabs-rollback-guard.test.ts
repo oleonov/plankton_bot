@@ -603,7 +603,7 @@ esac`,
       const hash = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
       const counts = (passed: number) => ({ passed, failed: 0, skipped: 0, total: passed });
       // prettier-ignore
-      const deltas={"@krabs/runtime":[2,35],"@krabs/exchange":[0,1],"@krabs/scripts":[1,7],"@krabs/db":[0,1],"@krabs/api":[0,1]} as const;
+      const deltas={"@krabs/runtime":[2,36],"@krabs/exchange":[0,1],"@krabs/scripts":[1,7],"@krabs/db":[0,1],"@krabs/api":[0,1]} as const;
       mkdirSync(dir);
       writeFileSync(join(repo, ".git", "info", "exclude"), "gate-evidence/\n");
       for (const name of names)

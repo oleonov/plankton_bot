@@ -103,7 +103,7 @@ assert clean(logs['prettier.log']).rstrip().endswith('All matched files use Pret
 tags=('T1 T2 T3 T4 T5 T6 T7 T8 T9 T10a T10b T11 T12 T13 T13b T13d T14 T14b T15 T16 T17 T18a T18b-core T18b-log T18c T19 T20 T21a T21b T21c T22 T23 T24 T25 T26 T27 T28a T28b T28c T28d T28e T28f T28g T28h T28i').split()
 assert all(len(re.findall(rf'(?m){re.escape(tag)} — ',logs['gate-cases.txt']))==1 for tag in tags)
 summary=json.loads(logs['gate-summary.json']); assert summary=={'schemaVersion':1,'status':'passed','gateCompletedAtEpoch':d['gateCompletedAtEpoch'],'repoInputHash':sys.argv[4],'requiredSteps':d['requiredSteps']}
-census=json.loads(logs['test-census.json']); deltas={'@krabs/runtime':(2,35),'@krabs/exchange':(0,1),'@krabs/scripts':(1,7),'@krabs/db':(0,1),'@krabs/api':(0,1)}; assert set(census)=={'baseline','post'} and set(census['baseline'])==set(census['post'])==set(deltas)
+census=json.loads(logs['test-census.json']); deltas={'@krabs/runtime':(2,36),'@krabs/exchange':(0,1),'@krabs/scripts':(1,7),'@krabs/db':(0,1),'@krabs/api':(0,1)}; assert set(census)=={'baseline','post'} and set(census['baseline'])==set(census['post'])==set(deltas)
 line_re=re.compile(r'(@krabs/[^:]+):test:.*?(Test Files|Tests)\s+(?P<passed>\d+) passed(?:\s+\|\s+(?P<failed>\d+) failed)?(?:\s+\|\s+(?P<skipped>\d+) skipped)?\s+\((?P<total>\d+)\)')
 def parsed_census(log):
  out={}
