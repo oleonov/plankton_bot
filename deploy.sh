@@ -253,7 +253,8 @@ set_trading_restart() {
 }
 ordinary_preflight() {
   [[ -f .env.production ]] || die '.env.production is absent'; node -e 'process.exit(+process.versions.node.split(".")[0]>=24?0:1)' || die 'Node >=24 is required'
-  pnpm --version >/dev/null; run docker info >/dev/null; run docker info --format '{{.Username}}' | grep -q . || die 'GHCR Docker login is required'
+  pnpm --version >/dev/null; run docker info >/dev/null
+  node -e 'const f=require("fs"),o=require("os"),p=require("path");const r=process.env.DOCKER_CONFIG||p.join(o.homedir(),".docker"),d=JSON.parse(f.readFileSync(p.join(r,"config.json")));process.exit(d.auths?.["ghcr.io"]||d.credHelpers?.["ghcr.io"]?0:1)' || die 'GHCR Docker login is required'
 }
 rollback_preflight() { [[ -z "$(git status --porcelain)" && "$(git branch --show-current)" == master && "$(git rev-parse HEAD)" == "$(git rev-parse origin/master)" ]] || die 'rollback requires tracked, indexed, and untracked clean master at origin'; ordinary_preflight; pnpm run typecheck; pnpm run test; pnpm run lint; }
 api_healthy() {

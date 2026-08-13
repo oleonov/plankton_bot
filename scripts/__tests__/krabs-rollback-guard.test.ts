@@ -582,6 +582,9 @@ esac`,
     );
   };
   it("T28i — selective rollback Git-object boundary", () => {
+    const deploySource = readFileSync(deploy, "utf8");
+    expect(deploySource).not.toContain("{{.Username}}");
+    expect(deploySource).toContain('d.auths?.["ghcr.io"]');
     const repo = mkdtempSync(join(tmpdir(), "krabs-rollback-boundary-"));
     dirs.push(repo);
     const git = (...args: string[]) => {
