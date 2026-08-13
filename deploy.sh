@@ -159,7 +159,7 @@ stage_remote_controller() {
   "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
     "test -f '${runtime_env}' && test \"\$(stat -c '%U %G %a' '${runtime_env}')\" = 'root root 600' && test \"\$(sha256sum '${runtime_env}' | awk '{print \$1}')\" = '${env_hash}'"
   "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
-    "install -d -m 700 '${root}/config' && cat > '${stage}.tmp' && chmod 700 '${stage}.tmp' && mv -f '${stage}.tmp' '${stage}'" < "$0"
+    "install -d -m 711 '${root}/config' && cat > '${stage}.tmp' && chmod 700 '${stage}.tmp' && mv -f '${stage}.tmp' '${stage}'" < "$0"
   "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
     "cat > '${guard}.tmp' && chmod 700 '${guard}.tmp' && mv -f '${guard}.tmp' '${guard}'" < scripts/krabs-rollback-guard.sh
   sed -e "s|image: ${IMAGE}:latest|image: \${KRABS_IMAGE:?}|g" -e "s|env_file: .env.production|env_file: ${runtime_env}|g" docker-compose.yml | "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
@@ -195,7 +195,7 @@ stage_runtime_env() {
   local full="$1" env_hash="$2" source="$3" root runtime_env recovery ssh_cmd
   root="$(remote_root)"; ssh_cmd="${KRABS_DEPLOY_SSH:-ssh}"; runtime_env="${root}/config/deploy-runtime-env-${full}-${env_hash}"
   recovery="${root}/config/deploy-recovery.json"
-  "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" "set -eu; install -d -m 700 '${root}/config'; final='${runtime_env}'; temp='${runtime_env}.tmp'; recovery='${recovery}'; trap 'rm -f -- \"\$temp\"' EXIT; valid() { test -f \"\$final\" && test \"\$(stat -c '%U %G %a' \"\$final\")\" = 'root root 600' && test \"\$(sha256sum \"\$final\" | awk '{print \$1}')\" = '${env_hash}'; }; if valid; then exit 0; fi; if test -e \"\$final\"; then test ! -e \"\$recovery\" || exit 1; rm -f -- \"\$final\"; fi; cat > \"\$temp\"; chown root:root \"\$temp\"; chmod 600 \"\$temp\"; test \"\$(sha256sum \"\$temp\" | awk '{print \$1}')\" = '${env_hash}'; mv -n \"\$temp\" \"\$final\"; valid" < "$source"
+  "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" "set -eu; install -d -m 711 '${root}/config'; final='${runtime_env}'; temp='${runtime_env}.tmp'; recovery='${recovery}'; trap 'rm -f -- \"\$temp\"' EXIT; valid() { test -f \"\$final\" && test \"\$(stat -c '%U %G %a' \"\$final\")\" = 'root root 600' && test \"\$(sha256sum \"\$final\" | awk '{print \$1}')\" = '${env_hash}'; }; if valid; then exit 0; fi; if test -e \"\$final\"; then test ! -e \"\$recovery\" || exit 1; rm -f -- \"\$final\"; fi; cat > \"\$temp\"; chown root:root \"\$temp\"; chmod 600 \"\$temp\"; test \"\$(sha256sum \"\$temp\" | awk '{print \$1}')\" = '${env_hash}'; mv -n \"\$temp\" \"\$final\"; valid" < "$source"
 }
 
 stage_and_publish() { stage_runtime_env "$1" "$2" "$3"; publish_image "$1"; }
@@ -386,6 +386,7 @@ r=json.loads(sys.argv[7]); r.update(sha=sys.argv[1],digest=sys.argv[2],recoveryS
 print(json.dumps({'deployVersion':int(sys.argv[4])+1,'sha':sys.argv[1],'digest':sys.argv[2],'recoveryStateId':sys.argv[3],'apiId':sys.argv[5],'finalOperatorCommandHighWater':int(sys.argv[6]),'runtimeEnvSha256':sys.argv[9],'resumeCutoffAware':True,'receipt':r,'deployedAt':datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')},separators=(',',':')))
 PY
 )"
+  chmod 644 "$candidate"
   recovery "$(python3 - "$RECOVERY" "$(candidate_hash "$candidate")" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1])); d['candidateHash']=sys.argv[2]; print(json.dumps(d,separators=(',',':')))
@@ -415,6 +416,11 @@ controller() {
   if [[ -e "$RECOVERY" ]]; then
     [[ "$(recovery_field runtimeEnvSha256)" == "${KRABS_RUNTIME_ENV_SHA256:-}" ]] || die 'same-SHA retry runtime environment differs from recovery'
     KRABS_RUNTIME_ENV_PATH="$(recovery_field runtimeEnvPath)"; KRABS_RUNTIME_ENV_SHA256="$(recovery_field runtimeEnvSha256)"
+    recovery "$(python3 - "$RECOVERY" "$$" "$(owner_ticks $$)" "$(worker_pgid)" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); d.update(controllerPid=int(sys.argv[2]),controllerStartTicks=sys.argv[3],workerPgid=int(sys.argv[4])); print(json.dumps(d,separators=(',',':')))
+PY
+)"
   fi
   bound_runtime_env || die 'bound runtime environment is missing or corrupt'
   classify_recovery "$full" && return 0

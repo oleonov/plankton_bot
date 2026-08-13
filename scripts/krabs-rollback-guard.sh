@@ -62,7 +62,17 @@ if (d["phase"]=="restored") != (terminal <= set(d)) or (terminal <= set(d) and (
 if not all(isinstance(d[x],str) and re.fullmatch(r"[0-9a-f]{7,40}",d[x]) for x in ("originalSha","targetSha")): raise SystemExit(6)
 PY
 }
-api_json() { "$CURL" --silent --show-error --fail --connect-timeout 1 --max-time 2 "$API_BASE$1"; }
+api_json() {
+  local -a auth=()
+  if [[ "${KRABS_ROLLBACK_TEST_MODE:-}" != 1 ]]; then
+    local key
+    [[ "${KRABS_RUNTIME_ENV_PATH:-}" == /opt/krabs/config/deploy-runtime-env-* && -f "$KRABS_RUNTIME_ENV_PATH" ]] || return 1
+    key="$(sed -n 's/^KRABS_API_KEY=//p' "$KRABS_RUNTIME_ENV_PATH" | tail -1)"
+    [[ -n "$key" ]] || return 1
+    auth=(-H "Authorization: Bearer $key")
+  fi
+  "$CURL" --silent --show-error --fail --connect-timeout 1 --max-time 2 "${auth[@]}" "$API_BASE$1"
+}
 paused_status() { api_json /api/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("ok") is True and isinstance(d.get("data"),dict) and type(d["data"].get("paused")) is bool; print(str(d["data"]["paused"]).lower())'; }
 health_sha() { api_json /api/v1/health | python3 -c 'import json,re,sys; d=json.load(sys.stdin); s=d.get("data",{}).get("sha") if d.get("ok") is True and isinstance(d.get("data"),dict) else None; assert isinstance(s,str) and re.fullmatch(r"[0-9a-f]{7,40}",s); print(s)'; }
 read_identity() {
@@ -183,6 +193,7 @@ deploy_cutoff_probe() {
 }
 deploy_arbitrate() {
   local state_id="$1" pre="$2" baseline="$3" latest action effective high override=false
+  local POLL_ATTEMPTS="${KRABS_DEPLOY_ARBITRATION_POLL_ATTEMPTS:-60}"
   latest="$(sql "SELECT action FROM operator_commands WHERE initiator_type='operator' AND id > $baseline ORDER BY created_at ASC, id ASC;" | tail -n 1)"
   action=pause; [[ "$pre" == false ]] && action=resume
   [[ "$pre" == false && ( "$latest" == pause || "$latest" == resume ) ]] && action="$latest"; [[ "$latest" == pause ]] && override=true
@@ -393,7 +404,9 @@ main() {
   configure; local command="${1:-}"
   [[ -n "$command" ]] || die "usage: $0 {begin|finalize|watch|abort|status|install-service|deploy-baseline|deploy-cutover|deploy-arbitrate|deploy-cutoff-probe|deploy-watch}"
   if [[ "$command" == deploy-watch ]]; then [[ "${KRABS_DEPLOY_WATCH_INTERNAL:-}" == 1 ]] || exec env KRABS_DEPLOY_WATCH_INTERNAL=1 "$TIMEOUT_BIN" --signal=TERM --kill-after=2s 15s "$0" "$@"; deploy_watch; return; fi
-  [[ "${KRABS_ROLLBACK_INTERNAL:-}" == 1 ]] || exec env KRABS_ROLLBACK_INTERNAL=1 "$TIMEOUT_BIN" --signal=TERM --kill-after=5s "${COMMAND_TIMEOUT}s" "$0" "$@"
+  local command_timeout="$COMMAND_TIMEOUT"
+  [[ "$command" != deploy-arbitrate ]] || command_timeout="${KRABS_DEPLOY_ARBITRATION_TIMEOUT_SECONDS:-150}"
+  [[ "${KRABS_ROLLBACK_INTERNAL:-}" == 1 ]] || exec env KRABS_ROLLBACK_INTERNAL=1 "$TIMEOUT_BIN" --signal=TERM --kill-after=5s "${command_timeout}s" "$0" "$@"
   ordinary "$@"
 }
 main "$@"

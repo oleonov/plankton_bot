@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 // prettier-ignore
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -483,7 +483,15 @@ esac`,
       expect(calls, mode).not.toContain("start target-manager");
       expect(negative.stdout, mode).not.toContain("DEPLOY_RECEIPT");
       expect(existsSync(join(config, "deploy-meta.json")), mode).toBe(false);
-      expect(readFileSync(recoveryPath, "utf8"), mode).toBe(recoverySeed);
+      const refreshedRecovery = JSON.parse(readFileSync(recoveryPath, "utf8"));
+      const expectedRecovery = JSON.parse(recoverySeed);
+      expect(refreshedRecovery.controllerPid, mode).toBeGreaterThan(0);
+      expect(refreshedRecovery.workerPgid, mode).toBeGreaterThan(0);
+      for (const key of ["controllerPid", "controllerStartTicks", "workerPgid"]) {
+        delete refreshedRecovery[key];
+        delete expectedRecovery[key];
+      }
+      expect(refreshedRecovery, mode).toEqual(expectedRecovery);
       expect(readFileSync(markerPath, "utf8"), mode).toBe(markerSeed);
       expect(readFileSync(stagedRuntimeEnv, "utf8"), mode).toBe(boundSeed);
     }
@@ -516,6 +524,7 @@ esac`,
     expect(JSON.parse(readFileSync(join(config, "deploy-meta.json"), "utf8")).deployVersion).toBe(
       1,
     );
+    expect(statSync(join(config, "deploy-meta.json")).mode & 0o777).toBe(0o644);
     expect(retry.stdout).toContain("DEPLOY_RECEIPT");
     expect(existsSync(join(config, "deploy-recovery.json"))).toBe(false);
     expect(existsSync(join(config, "deploy-in-progress.json"))).toBe(false);
@@ -605,6 +614,20 @@ esac`,
     expect(guardSource).not.toContain("datetime.UTC");
     expect(deploySource).toContain("compose create --pull never");
     expect(deploySource).toContain("compose up -d --no-deps --pull never");
+    expect(deploySource).not.toContain("install -d -m 700 '${root}/config'");
+    expect(deploySource.match(/install -d -m 711 '\$\{root\}\/config'/g)).toHaveLength(2);
+    expect(guardSource).toContain('auth=(-H "Authorization: Bearer $key")');
+    expect(guardSource).toContain(
+      'local POLL_ATTEMPTS="${KRABS_DEPLOY_ARBITRATION_POLL_ATTEMPTS:-60}"',
+    );
+    expect(guardSource).toContain(
+      'command_timeout="${KRABS_DEPLOY_ARBITRATION_TIMEOUT_SECONDS:-150}"',
+    );
+    const retryOwnershipRefresh = deploySource.indexOf(
+      "d.update(controllerPid=int(sys.argv[2]),controllerStartTicks=sys.argv[3],workerPgid=int(sys.argv[4]))",
+    );
+    expect(retryOwnershipRefresh).toBeGreaterThan(-1);
+    expect(retryOwnershipRefresh).toBeLessThan(deploySource.indexOf('classify_recovery "$full"'));
     const rollbackStateDirectory = deploySource.indexOf(
       'mkdir -p "$CONFIG_DIR" "$(dirname "$ROLLBACK_OPERATION_LOCK")"',
     );
