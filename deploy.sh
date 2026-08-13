@@ -223,7 +223,7 @@ owner_alive() { [[ -n "${1:-}" && "$(owner_ticks "$1")" == "$2" ]]; }
 worker_pgid() { ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || printf '%s' "$$"; }
 write_marker() { atomic "$MARKER" "$(python3 - "$1" <<'PY'
 import json,sys,datetime
-print(json.dumps({'schemaVersion':1,'deploymentId':sys.argv[1],'updatedAt':datetime.datetime.now(datetime.UTC).isoformat().replace('+00:00','Z')},separators=(',',':')))
+print(json.dumps({'schemaVersion':1,'deploymentId':sys.argv[1],'updatedAt':datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')},separators=(',',':')))
 PY
 )"; chmod 644 "$MARKER"; }
 take() { local p="$1" fd; exec {fd}>"$p"; "$FLOCK" --exclusive --nonblock "$fd"; }
@@ -232,7 +232,7 @@ immutable_image() {
   local full="$1" digest id revision
   digest="${KRABS_REMOTE_DIGEST:-}"
   [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die 'controller lacks locally validated immutable digest'
-  run "$DOCKER" pull "$IMAGE@$digest"
+  run "$DOCKER" pull "$IMAGE@$digest" >&2
   id="$(run "$DOCKER" image inspect --format '{{.Id}}' "$IMAGE@$digest")"
   revision="$(run "$DOCKER" image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE@$digest")"
   [[ -n "$id" && "$revision" == "$full" ]] || die 'pulled image does not prove full SHA'
@@ -383,7 +383,7 @@ commit_metadata() {
   env_hash="$(recovery_field runtimeEnvSha256)"; atomic "$candidate" "$(python3 - "$full" "$digest" "$state_id" "$version" "$api" "$high" "$receipt" "$(recovery_field prePaused)" "$env_hash" <<'PY'
 import json,sys,datetime
 r=json.loads(sys.argv[7]); r.update(sha=sys.argv[1],digest=sys.argv[2],recoveryStateId=sys.argv[3],prePaused=sys.argv[8]=='true',previousVersion=int(sys.argv[4]),deployVersion=int(sys.argv[4])+1)
-print(json.dumps({'deployVersion':int(sys.argv[4])+1,'sha':sys.argv[1],'digest':sys.argv[2],'recoveryStateId':sys.argv[3],'apiId':sys.argv[5],'finalOperatorCommandHighWater':int(sys.argv[6]),'runtimeEnvSha256':sys.argv[9],'resumeCutoffAware':True,'receipt':r,'deployedAt':datetime.datetime.now(datetime.UTC).isoformat().replace('+00:00','Z')},separators=(',',':')))
+print(json.dumps({'deployVersion':int(sys.argv[4])+1,'sha':sys.argv[1],'digest':sys.argv[2],'recoveryStateId':sys.argv[3],'apiId':sys.argv[5],'finalOperatorCommandHighWater':int(sys.argv[6]),'runtimeEnvSha256':sys.argv[9],'resumeCutoffAware':True,'receipt':r,'deployedAt':datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')},separators=(',',':')))
 PY
 )"
   recovery "$(python3 - "$RECOVERY" "$(candidate_hash "$candidate")" <<'PY'
@@ -455,7 +455,7 @@ if not os.path.exists(sys.argv[1]): print('false')
 else:
  d=json.load(open(sys.argv[1])); print(str(d.get('resumeCutoffAware') is True and d.get('apiId') == sys.argv[2]).lower())
 PY
-)" || die 'deployment metadata is corrupt'; [[ "$marker_aware" == true || "$pre" != true ]] || die 'paused marker-unaware baseline requires a marker-aware upgrade'; digest=''; image_id=''; read -r digest image_id < <(immutable_image "$full")
+)" || die 'deployment metadata is corrupt'; [[ "$marker_aware" == true || "$pre" != true ]] || die 'paused marker-unaware baseline requires a marker-aware upgrade'; digest=''; image_id=''; read -r digest image_id < <(immutable_image "$full"); [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ && "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die 'immutable image result is malformed'
     recovery "$(python3 - "$state_id" "$mode" "$full" "$digest" "$image_id" "$pre" "$version" "$$" "$(owner_ticks $$)" "$(worker_pgid)" "$baseline" "$KRABS_RUNTIME_ENV_PATH" "$KRABS_RUNTIME_ENV_SHA256" <<'PY'
 import json,sys
 baseline=json.loads(sys.argv[11])
@@ -493,7 +493,7 @@ d=json.load(open(sys.argv[1])); c=json.loads(sys.argv[2]); d.update(phase='cutov
 PY
 )"; fi
   [[ "$marker_aware" == true ]] || write_marker "$state_id"
-  compose create krabs-runtime krabs-runtime-manager
+  compose create --pull never krabs-runtime krabs-runtime-manager
   runtime="$(service_ids krabs-runtime)"; manager="$(service_ids krabs-runtime-manager)"
   [[ -n "$runtime" && -n "$manager" ]] || die 'target containers were not created'
   set_trading_restart no "$runtime" "$manager"
@@ -502,7 +502,7 @@ import json,sys
 d=json.load(open(sys.argv[1])); d.update(phase='target_started',targetRuntimeId=sys.argv[2],targetManagerId=sys.argv[3]); print(json.dumps(d,separators=(',',':')))
 PY
 )"
-  compose up -d --no-deps krabs-api
+  compose up -d --no-deps --pull never krabs-api
   local healthy=false deadline now interval
   deadline=$((SECONDS + ${KRABS_DEPLOY_HEALTH_SECONDS:-90})); interval="${KRABS_DEPLOY_HEALTH_INTERVAL_SECONDS:-5}"
   while (( SECONDS <= deadline )); do api_healthy && { healthy=true; break; }; sleep "$interval"; done

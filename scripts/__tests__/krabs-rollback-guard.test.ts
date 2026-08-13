@@ -131,13 +131,14 @@ describe("krabs rollback guard", () => {
       adapter,
       `echo "$*" >> "$CALLS"; shift
 case "$1" in
-  compose) [[ "$*" == *" stop krabs-api"* ]] && rm -f "$API_AVAILABLE"; [[ "$*" == *" create "* ]] && rm -f "$NETWORK_FENCED"; [[ "$*" == *" up -d --no-deps krabs-api"* ]] && : > "$API_AVAILABLE"; [[ "$*" == *" ps --all -q "* ]] && echo "id-\${@: -1}"; exit 0 ;;
-  build|pull|tag|update) exit 0 ;;
+  compose) [[ "$*" == *" stop krabs-api"* ]] && rm -f "$API_AVAILABLE"; [[ "$*" == *" create "* ]] && rm -f "$NETWORK_FENCED"; [[ "$*" == *" up -d --no-deps"* ]] && : > "$API_AVAILABLE"; [[ "$*" == *" ps --all -q "* ]] && echo "id-\${@: -1}"; exit 0 ;;
+  build|tag|update) exit 0 ;;
+  pull) echo 'fake pull progress'; exit 0 ;;
   stop) : > "$STOPPED"; exit 0 ;;
   start) rm -f "$STOPPED"; exit 0 ;;
   network) [[ "$2" == connect && "\${NETWORK_MODE:-}" != zero-after-connect ]] && rm -f "$NETWORK_FENCED" || : > "$NETWORK_FENCED"; exit 0 ;;
   push) echo "digest: \${DEPLOY_DIGEST:-sha256:${digest}}"; exit 0 ;;
-  image) [[ "$*" == *revision* ]] && echo '${deployTarget}' || echo sha256:image; exit 0 ;;
+  image) [[ "$*" == *revision* ]] && echo '${deployTarget}' || echo 'sha256:${digest}'; exit 0 ;;
   inspect) [[ "$*" == *NetworkSettings.Networks* ]] && { [[ "\${NETWORK_MODE:-}" == multi ]] && echo '{"krabs_default":{},"unexpected":{}}' || [[ "\${NETWORK_MODE:-}" == wrong ]] && echo '{"unexpected":{}}' || { [[ -e "$NETWORK_FENCED" ]] && echo '{}' || echo '{"krabs_default":{"EndpointID":"endpoint","Gateway":"172.20.0.1","IPAddress":"172.20.0.2","NetworkID":"network"}}'; }; } || { [[ -e "$STOPPED" ]] && echo 'false ${deployTarget}' || echo 'true ${deployTarget}'; }; exit 0 ;;
   health) exit "\${DEPLOY_HEALTH_EXIT:-0}" ;;
 esac`,
@@ -327,9 +328,11 @@ esac`,
           timeout: 20_000,
         },
       );
-      expect(killed.status, `${point} signal=${killed.signal} error=${killed.error?.message}`).toBe(
-        137,
-      );
+      const killedCalls = readFileSync(fixture.calls, "utf8").slice(-4000);
+      expect(
+        killed.status,
+        `${point} signal=${killed.signal} error=${killed.error?.message}\n${killedCalls}`,
+      ).toBe(137);
       expect(existsSync(join(config, "deploy-recovery.json")), point).toBe(true);
       expect(existsSync(join(config, "deploy-in-progress.json")), point).toBe(true);
       expect(readFileSync(metadata, "utf8"), point).toBe(seed);
@@ -582,10 +585,26 @@ esac`,
     );
   };
   it("T28i — selective rollback Git-object boundary", () => {
+    const clearedRuntimeIdentity = makeFixture(false);
+    sql(
+      clearedRuntimeIdentity.control,
+      "UPDATE runtime_control_state SET current_run_id='',current_instance_id='' WHERE id=1;",
+    );
+    const cutover = run(clearedRuntimeIdentity, "deploy-cutover", "cleared-runtime-identity");
+    expect(cutover.status, cutover.stderr).toBe(0);
+    expect(JSON.parse(cutover.stdout)).toMatchObject({ effectivePaused: true });
+    expect(sql(clearedRuntimeIdentity.control, "SELECT paused FROM runtime_control_state;")).toBe(
+      "1",
+    );
     const deploySource = readFileSync(deploy, "utf8");
+    const guardSource = readFileSync(guard, "utf8");
     expect(deploySource).not.toContain("{{.Username}}");
     expect(deploySource).toContain('d.auths?.["ghcr.io"]');
     expect(deploySource).not.toContain('Labels \\"org.opencontainers.image.revision');
+    expect(deploySource).not.toContain("datetime.UTC");
+    expect(guardSource).not.toContain("datetime.UTC");
+    expect(deploySource).toContain("compose create --pull never");
+    expect(deploySource).toContain("compose up -d --no-deps --pull never");
     const rollbackStateDirectory = deploySource.indexOf(
       'mkdir -p "$CONFIG_DIR" "$(dirname "$ROLLBACK_OPERATION_LOCK")"',
     );

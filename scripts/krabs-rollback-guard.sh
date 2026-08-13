@@ -80,7 +80,7 @@ compose() {
 }
 marker_json() { local state="$1" phase="$2" original="$3" target="$4"; python3 - "$state" "$phase" "$original" "$target" <<'PY'
 import json,sys,datetime
-print(json.dumps({"schemaVersion":1,"rollbackStateId":sys.argv[1],"phase":sys.argv[2],"originalSha":sys.argv[3],"targetSha":sys.argv[4],"updatedAt":datetime.datetime.now(datetime.UTC).isoformat(timespec="milliseconds").replace("+00:00","Z")},separators=(",",":")))
+print(json.dumps({"schemaVersion":1,"rollbackStateId":sys.argv[1],"phase":sys.argv[2],"originalSha":sys.argv[3],"targetSha":sys.argv[4],"updatedAt":datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00","Z")},separators=(",",":")))
 PY
 }
 write_marker_from_state() { atomic_write "$MARKER_PATH" "$(marker_json "$(state_field rollbackStateId)" "$(state_field phase)" "$(state_field originalSha)" "$(state_field targetSha)")"; chmod 644 "$MARKER_PATH"; }
@@ -160,10 +160,10 @@ deploy_command() {
   return 1
 }
 deploy_cutover() {
-  local state_id="$1" high paused run instance
+  local state_id="$1" high paused
   sql "BEGIN IMMEDIATE; INSERT INTO operator_commands(action,reason,initiator_type,initiator,status,created_at) SELECT 'pause','deploy controller','system','deploy:$state_id:pause','pending',strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE NOT EXISTS (SELECT 1 FROM operator_commands WHERE initiator='deploy:$state_id:pause'); UPDATE operator_commands SET status='applied' WHERE initiator='deploy:$state_id:pause' AND status='pending'; UPDATE runtime_control_state SET paused=1 WHERE id=1; SELECT status FROM operator_commands WHERE initiator='deploy:$state_id:pause'; COMMIT;" | tail -1 | grep -qx applied || return 1
-  read -r paused run instance < <(sql "SELECT (CASE paused WHEN 1 THEN 'true' WHEN 0 THEN 'false' END) || ' ' || current_run_id || ' ' || current_instance_id FROM runtime_control_state WHERE id=1;")
-  [[ "$paused" == true && -n "$run" && -n "$instance" ]] || return 1
+  paused="$(sql "SELECT CASE paused WHEN 1 THEN 'true' WHEN 0 THEN 'false' END FROM runtime_control_state WHERE id=1;")"
+  [[ "$paused" == true ]] || return 1
   high="$(baseline_high_water)"
   python3 - "$high" <<'PY'
 import json,sys
