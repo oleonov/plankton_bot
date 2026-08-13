@@ -14,6 +14,13 @@ function readMigration(filename: string): string {
   return readFileSync(path.join(import.meta.dirname, "..", "migrations", filename), "utf-8");
 }
 
+function pnlLedgerIndex(db: Database.Database): Array<{ name: string; unique: number }> {
+  return db.prepare("PRAGMA index_list(pnl_ledger)").all() as Array<{
+    name: string;
+    unique: number;
+  }>;
+}
+
 /**
  * Minimal positions table matching the pre-032 shape — enough to exercise
  * migration 032's repair + partial unique index without pulling in the full
@@ -70,6 +77,88 @@ beforeEach(() => {
 afterEach(() => {
   db.close();
   rmSync(tmpDir, { recursive: true, force: true });
+});
+
+describe("migration 099 — unique pnl ledger fill", () => {
+  const createPnlLedger = (database: Database.Database, legacy: boolean) => {
+    database.exec(`
+      CREATE TABLE pnl_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fill_id TEXT NOT NULL,
+        position_id TEXT NOT NULL,
+        ${legacy ? "family_id TEXT NOT NULL," : ""}
+        delta REAL NOT NULL,
+        filled_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+  };
+
+  it.each([false, true])("creates the unique index on the %s ledger shape", (legacy) => {
+    createPnlLedger(db, legacy);
+    const columns = legacy
+      ? "fill_id, position_id, family_id, delta, filled_at"
+      : "fill_id, position_id, delta, filled_at";
+    const values = legacy ? "?, ?, 'family', ?, ?" : "?, ?, ?, ?";
+    const insert = db.prepare(`INSERT INTO pnl_ledger (${columns}) VALUES (${values})`);
+    insert.run("sell-1", "position-1", 1, "2026-08-13T00:00:00Z");
+    insert.run("sell-2", "position-1", 2, "2026-08-13T00:01:00Z");
+
+    db.exec(readMigration("099_pnl_ledger_fill_unique.sql"));
+
+    expect(pnlLedgerIndex(db)).toContainEqual(
+      expect.objectContaining({ name: "idx_pnl_ledger_fill_unique", unique: 1 }),
+    );
+    expect(db.prepare("PRAGMA index_info(idx_pnl_ledger_fill_unique)").all()).toEqual([
+      expect.objectContaining({ name: "fill_id" }),
+    ]);
+    expect(db.prepare("SELECT fill_id FROM pnl_ledger ORDER BY fill_id").pluck().all()).toEqual([
+      "sell-1",
+      "sell-2",
+    ]);
+    expect(() => insert.run("sell-1", "position-1", 3, "2026-08-13T00:02:00Z")).toThrow();
+  });
+
+  it("fails closed on duplicate fill ids without changing rows", () => {
+    createPnlLedger(db, false);
+    const insert = db.prepare(
+      "INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at) VALUES (?, 'position-1', 1, '2026-08-13T00:00:00Z')",
+    );
+    insert.run("sell-duplicate");
+    insert.run("sell-duplicate");
+
+    expect(() => db.exec(readMigration("099_pnl_ledger_fill_unique.sql"))).toThrow();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM pnl_ledger").get()).toEqual({ count: 2 });
+    expect(pnlLedgerIndex(db).map((index) => index.name)).not.toContain(
+      "idx_pnl_ledger_fill_unique",
+    );
+  });
+
+  it("defines the same unique fill index in the canonical fresh schema", () => {
+    const fresh = new Database(":memory:");
+    try {
+      fresh.exec(
+        readFileSync(path.join(import.meta.dirname, "..", "schemas", "ledger.sql"), "utf-8"),
+      );
+      fresh.exec("PRAGMA foreign_keys = OFF");
+      const insert = fresh.prepare(
+        "INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at) VALUES (?, 'position-1', 1, '2026-08-13T00:00:00Z')",
+      );
+      insert.run("sell-1");
+      insert.run("sell-2");
+
+      expect(pnlLedgerIndex(fresh)).toContainEqual(
+        expect.objectContaining({ name: "idx_pnl_ledger_fill_unique", unique: 1 }),
+      );
+      expect(fresh.prepare("PRAGMA index_info(idx_pnl_ledger_fill_unique)").all()).toEqual([
+        expect.objectContaining({ name: "fill_id" }),
+      ]);
+      expect(() => insert.run("sell-1")).toThrow();
+      expect(fresh.prepare("SELECT COUNT(*) AS count FROM pnl_ledger").get()).toEqual({ count: 2 });
+    } finally {
+      fresh.close();
+    }
+  });
 });
 
 describe("migration 032 — unique open position per token", () => {

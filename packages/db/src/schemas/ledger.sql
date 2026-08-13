@@ -354,6 +354,7 @@ CREATE TABLE IF NOT EXISTS pnl_ledger (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pnl_ledger_filled_at ON pnl_ledger(filled_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pnl_ledger_fill_unique ON pnl_ledger(fill_id);
 
 -- ═══════════ MARKET RESOLUTIONS ═══════════
 -- From 003_market_resolutions.sql + 004 (status)

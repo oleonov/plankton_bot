@@ -652,12 +652,11 @@ esac`,
     const gateEvidence = () => {
       const dir = join(repo, "gate-evidence");
       // prettier-ignore
-      const names=["baseline-test.log","baseline-lint.log","gate-cases.txt","typecheck.log","build.log","post-test.log","post-lint.log","prettier.log","gate-summary.json","test-census.json",...Array.from({length:13},(_,n)=>`focused-${n}.log`)];
+      let names=["baseline-test.log","baseline-lint.log","gate-cases.txt","typecheck.log","build.log","post-test.log","post-lint.log","prettier.log","gate-summary.json","test-census.json",...Array.from({length:5},(_,n)=>`focused-${n + 2}.log`)];
       const hash = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
       const counts = (passed: number) => ({ passed, failed: 0, skipped: 0, total: passed });
       // prettier-ignore
-      const deltas={"@krabs/runtime":[2,36],"@krabs/exchange":[0,1],"@krabs/scripts":[1,7],"@krabs/db":[0,1],"@krabs/api":[0,1]} as const;
-      const packageDeltas = { ...deltas, "@krabs/config": [0, 0] } as const;
+      const packageDeltas = { "@krabs/runtime": [3, 12], "@krabs/db": [1, 4], "@krabs/config": [0, 0] } as const;
       mkdirSync(dir);
       writeFileSync(join(repo, ".git", "info", "exclude"), "gate-evidence/\n");
       for (const name of names)
@@ -665,20 +664,21 @@ esac`,
           join(dir, name),
           name.startsWith("focused-") ? "Test Files  1 passed (1)\nTests  1 passed (1)\n" : "ok\n",
         );
-      const testLog = (delta = 0) =>
+      const testLog = (post = false, regress = false) =>
         Object.entries(packageDeltas)
           .flatMap(([name, [files, tests]]) => [
-            `${name}:test: Test Files  ${10 + delta * files} passed (${10 + delta * files})`,
-            `${name}:test: Tests  ${100 + delta * tests} passed (${100 + delta * tests})`,
+            `${name}:test: Test Files  ${10 + (post ? files : 0) - (regress && name === "@krabs/runtime" ? 1 : 0)} passed (${10 + (post ? files : 0) - (regress && name === "@krabs/runtime" ? 1 : 0)})`,
+            `${name}:test: Tests  ${100 + (post ? tests : 0) - (regress && name === "@krabs/runtime" ? 1 : 0)} passed (${100 + (post ? tests : 0) - (regress && name === "@krabs/runtime" ? 1 : 0)})`,
           ])
           .join("\n") + "\n";
       const lintLog =
-        "@krabs/runtime:lint: 33 problems (0 errors, 33 warnings)\n@krabs/scripts:lint: 116 problems (0 errors, 116 warnings)\n";
-      const postLintLog = lintLog.replaceAll("116", "117");
+        "@krabs/config:lint: > eslint\n@krabs/runtime:lint: 33 problems (0 errors, 33 warnings)\n@krabs/scripts:lint: 116 problems (0 errors, 116 warnings)\n";
+      const postLintLog =
+        "@krabs/config:lint: > eslint\n@krabs/scripts:lint: 116 problems (0 errors, 116 warnings)\n@krabs/runtime:lint: 33 problems (0 errors, 33 warnings)\n";
       writeFileSync(join(dir, "baseline-test.log"), testLog());
-      writeFileSync(join(dir, "post-test.log"), `Tasks: 15 successful, 15 total\n${testLog(1)}`);
-      writeFileSync(join(dir, "baseline-lint.log"), lintLog);
-      writeFileSync(join(dir, "post-lint.log"), postLintLog);
+      writeFileSync(join(dir, "post-test.log"), `Tasks: 15 successful, 15 total\n${testLog(true)}`);
+      writeFileSync(join(dir, "baseline-lint.log"), `Tasks: 9 successful, 9 total\n${lintLog}`);
+      writeFileSync(join(dir, "post-lint.log"), `Tasks: 9 successful, 9 total\n${postLintLog}`);
       writeFileSync(join(dir, "typecheck.log"), "Tasks: 15 successful, 15 total\n");
       writeFileSync(join(dir, "build.log"), "Tasks: 9 successful, 9 total\n");
       writeFileSync(join(dir, "prettier.log"), "All matched files use Prettier code style!\n");
@@ -699,23 +699,25 @@ esac`,
           requiredSteps: steps,
         }),
       );
-      writeFileSync(
-        join(dir, "test-census.json"),
-        JSON.stringify({
-          baseline: Object.fromEntries(
-            Object.keys(packageDeltas).map((key) => [
-              key,
-              { files: counts(10), tests: counts(100) },
-            ]),
-          ),
-          post: Object.fromEntries(
-            Object.entries(packageDeltas).map(([key, [files, tests]]) => [
-              key,
-              { files: counts(10 + files), tests: counts(100 + tests) },
-            ]),
-          ),
-        }),
-      );
+      const writeCensus = (post: Record<string, readonly [number, number]> = packageDeltas) =>
+        writeFileSync(
+          join(dir, "test-census.json"),
+          JSON.stringify({
+            baseline: Object.fromEntries(
+              Object.keys(packageDeltas).map((key) => [
+                key,
+                { files: counts(10), tests: counts(100) },
+              ]),
+            ),
+            post: Object.fromEntries(
+              Object.entries(post).map(([key, [files, tests]]) => [
+                key,
+                { files: counts(10 + files), tests: counts(100 + tests) },
+              ]),
+            ),
+          }),
+        );
+      writeCensus();
       const evidence = join(dir, "manifest.json");
       const manifest = () =>
         writeFileSync(
@@ -740,6 +742,21 @@ esac`,
         encoding: "utf8",
       });
       expect(valid.status, valid.stderr).toBe(0);
+      writeFileSync(
+        join(dir, "baseline-lint.log"),
+        `Tasks: 9 successful, 9 total\n${lintLog.replace(
+          "@krabs/config:lint: > eslint\n",
+          "@krabs/config:lint: > eslint\n@krabs/config:lint: 1 problem (0 errors, 1 warning)\n",
+        )}`,
+      );
+      manifest();
+      expect(
+        spawnSync(deploy, ["--verify-gate-evidence-only", evidence], {
+          cwd: repo,
+          encoding: "utf8",
+        }).status,
+      ).toBe(0);
+      writeFileSync(join(dir, "baseline-lint.log"), `Tasks: 9 successful, 9 total\n${lintLog}`);
       writeFileSync(join(dir, "baseline-test.log"), testLog().replace("100 passed", "101 passed"));
       manifest();
       expect(
@@ -750,8 +767,39 @@ esac`,
       ).not.toBe(0);
       writeFileSync(join(dir, "baseline-test.log"), testLog());
       writeFileSync(
+        join(dir, "post-test.log"),
+        `Tasks: 15 successful, 15 total\n${testLog(true).replace("112 passed (112)", "112 passed (113)")}`,
+      );
+      writeCensus();
+      const inconsistentCensus = JSON.parse(readFileSync(join(dir, "test-census.json"), "utf8"));
+      inconsistentCensus.post["@krabs/runtime"].tests.total = 113;
+      writeFileSync(join(dir, "test-census.json"), JSON.stringify(inconsistentCensus));
+      manifest();
+      expect(
+        spawnSync(deploy, ["--verify-gate-evidence-only", evidence], {
+          cwd: repo,
+          encoding: "utf8",
+        }).status,
+      ).not.toBe(0);
+      writeFileSync(join(dir, "post-test.log"), `Tasks: 15 successful, 15 total\n${testLog(true)}`);
+      writeCensus();
+      writeFileSync(
+        join(dir, "post-test.log"),
+        `Tasks: 15 successful, 15 total\n${testLog(false, true)}`,
+      );
+      writeCensus({ "@krabs/runtime": [-1, -1], "@krabs/db": [0, 0], "@krabs/config": [0, 0] });
+      manifest();
+      expect(
+        spawnSync(deploy, ["--verify-gate-evidence-only", evidence], {
+          cwd: repo,
+          encoding: "utf8",
+        }).status,
+      ).not.toBe(0);
+      writeFileSync(join(dir, "post-test.log"), `Tasks: 15 successful, 15 total\n${testLog(true)}`);
+      writeCensus();
+      writeFileSync(
         join(dir, "post-lint.log"),
-        postLintLog.replace("117 warnings", "118 warnings"),
+        `Tasks: 9 successful, 9 total\n${postLintLog.replace("116 warnings", "117 warnings")}`,
       );
       manifest();
       expect(
@@ -760,7 +808,40 @@ esac`,
           encoding: "utf8",
         }).status,
       ).not.toBe(0);
-      writeFileSync(join(dir, "post-lint.log"), postLintLog);
+      writeFileSync(join(dir, "post-lint.log"), `Tasks: 9 successful, 9 total\n${postLintLog}`);
+      writeFileSync(
+        join(dir, "post-lint.log"),
+        `Tasks: 9 successful, 9 total\n${postLintLog.replace("33 problems (0 errors, 33 warnings)", "1 problem (1 error, 1 warning)")}`,
+      );
+      manifest();
+      expect(
+        spawnSync(deploy, ["--verify-gate-evidence-only", evidence], {
+          cwd: repo,
+          encoding: "utf8",
+        }).status,
+      ).not.toBe(0);
+      writeFileSync(join(dir, "post-lint.log"), `Tasks: 9 successful, 9 total\n${postLintLog}`);
+      writeFileSync(
+        join(dir, "post-lint.log"),
+        `Tasks: 9 successful, 9 total\n${postLintLog}@krabs/config:lint: 1 problem (0 errors, 1 warning)\n`,
+      );
+      manifest();
+      expect(
+        spawnSync(deploy, ["--verify-gate-evidence-only", evidence], {
+          cwd: repo,
+          encoding: "utf8",
+        }).status,
+      ).not.toBe(0);
+      writeFileSync(join(dir, "post-lint.log"), `Tasks: 9 successful, 9 total\n${postLintLog}`);
+      names = names.filter((name) => !name.startsWith("focused-"));
+      manifest();
+      expect(
+        spawnSync(deploy, ["--verify-gate-evidence-only", evidence], {
+          cwd: repo,
+          encoding: "utf8",
+        }).status,
+      ).not.toBe(0);
+      names = [...names, ...Array.from({ length: 5 }, (_, n) => `focused-${n + 2}.log`)];
       writeFileSync(join(dir, "gate-cases.txt"), "T1 — changed\n");
       manifest();
       expect(

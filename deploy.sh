@@ -84,26 +84,27 @@ verify_gate() {
   python3 - "$evidence" "$head" "$(git rev-parse origin/master)" "$hash" "$(node --version)" "$(pnpm --version)" <<'PY'
 import hashlib,json,pathlib,re,sys
 p=pathlib.Path(sys.argv[1]).resolve(); d=json.loads(p.read_text())
-names={'baseline-test.log','baseline-lint.log','gate-cases.txt','typecheck.log','build.log','post-test.log','post-lint.log','prettier.log','gate-summary.json','test-census.json',*(f'focused-{n}.log' for n in range(13))}
+required_names={'baseline-test.log','baseline-lint.log','gate-cases.txt','typecheck.log','build.log','post-test.log','post-lint.log','prettier.log','gate-summary.json','test-census.json'}
 assert d.get('schemaVersion')==1 and d.get('status')=='passed' and isinstance(d.get('gateCompletedAtEpoch'),int) and d['gateCompletedAtEpoch']>=0 and d.get('branch')=='master'
 assert d['headSha']==sys.argv[2]==sys.argv[3] and d['originSha']==sys.argv[3] and d['repoInputHash']==sys.argv[4] and d['nodeVersion']==sys.argv[5] and d['pnpmVersion']==sys.argv[6]
-assert d.get('requiredSteps')==['focused','allowlist','bash','typecheck','build','test','census','lint','prettier'] and isinstance(d.get('logs'),list) and len(d['logs'])==len(names)
+assert d.get('requiredSteps')==['focused','allowlist','bash','typecheck','build','test','census','lint','prettier'] and isinstance(d.get('logs'),list)
 seen=set()
 for item in d['logs']:
- q=pathlib.Path(item['path']); assert q.name in names and q.name not in seen and not q.is_symlink(); q=q.resolve(strict=True); assert q.parent==p.parent and q.is_file() and q.stat().st_size and hashlib.sha256(q.read_bytes()).hexdigest()==item['sha256']; seen.add(q.name)
-assert seen==names
+ q=pathlib.Path(item['path']); assert (q.name in required_names or re.fullmatch(r'focused-\d+\.log',q.name)) and q.name not in seen and not q.is_symlink(); q=q.resolve(strict=True); assert q.parent==p.parent and q.is_file() and q.stat().st_size and hashlib.sha256(q.read_bytes()).hexdigest()==item['sha256']; seen.add(q.name)
+focused=sorted(name for name in seen if re.fullmatch(r'focused-\d+\.log',name))
+assert seen==required_names|set(focused) and focused
 logs={x['path'].rsplit('/',1)[-1]:pathlib.Path(x['path']).read_text(errors='replace') for x in d['logs']}
 clean=lambda s:re.sub(r'\x1b\[[0-9;]*[mK]','',s)
-for log in (clean(logs[f'focused-{n}.log']) for n in range(13)):
+for log in (clean(logs[name]) for name in focused):
  assert re.search(r'Test Files\s+1 passed \(1\)',log) and not re.search(r'Test Files.*failed|Tests.*failed|No test files found|↓',log)
  summary=re.findall(r'Tests\s+.*',log); assert summary; m=re.search(r'(\d+) passed.*\((\d+)\)',summary[-1]); assert m and m.group(1)==m.group(2)
-for name,count in (('typecheck.log',15),('build.log',9),('post-test.log',15)):
+for name,count in (('typecheck.log',15),('build.log',9),('post-test.log',15),('baseline-lint.log',9),('post-lint.log',9)):
  assert re.search(rf'Tasks:\s+{count} successful, {count} total',clean(logs[name])) and 'error TS' not in logs[name]
 assert clean(logs['prettier.log']).rstrip().endswith('All matched files use Prettier code style!')
 tags=('T1 T2 T3 T4 T5 T6 T7 T8 T9 T10a T10b T11 T12 T13 T13b T13d T14 T14b T15 T16 T17 T18a T18b-core T18b-log T18c T19 T20 T21a T21b T21c T22 T23 T24 T25 T26 T27 T28a T28b T28c T28d T28e T28f T28g T28h T28i').split()
 assert all(len(re.findall(rf'(?m){re.escape(tag)} — ',logs['gate-cases.txt']))==1 for tag in tags)
 summary=json.loads(logs['gate-summary.json']); assert summary=={'schemaVersion':1,'status':'passed','gateCompletedAtEpoch':d['gateCompletedAtEpoch'],'repoInputHash':sys.argv[4],'requiredSteps':d['requiredSteps']}
-census=json.loads(logs['test-census.json']); deltas={'@krabs/runtime':(2,36),'@krabs/exchange':(0,1),'@krabs/scripts':(1,7),'@krabs/db':(0,1),'@krabs/api':(0,1)}; assert set(census)=={'baseline','post'} and set(census['baseline'])==set(census['post']) and set(deltas)<=set(census['baseline'])
+census=json.loads(logs['test-census.json']); assert set(census)=={'baseline','post'} and set(census['baseline'])==set(census['post'])
 line_re=re.compile(r'(@krabs/[^:]+):test:.*?(Test Files|Tests)\s+(?P<passed>\d+) passed(?:\s+\|\s+(?P<failed>\d+) failed)?(?:\s+\|\s+(?P<skipped>\d+) skipped)?\s+\((?P<total>\d+)\)')
 def parsed_census(log):
  out={}
@@ -112,17 +113,23 @@ def parsed_census(log):
   assert kind not in out.setdefault(package,{})
   out[package][kind]={key:int(match.group(key) or 0) for key in ('passed','failed','skipped','total')}
  assert out and all(set(value)=={'files','tests'} for value in out.values()),out
+ assert all(cell['total']==cell['passed']+cell['failed']+cell['skipped'] for value in out.values() for cell in value.values()),out
  return out
 assert parsed_census(logs['baseline-test.log'])==census['baseline'] and parsed_census(logs['post-test.log'])==census['post']
-lint_re=re.compile(r'(?m)^(@krabs/[^:\n]+:lint:.*?\d+ problems.*?\d+ warnings.*)$')
-baseline_lint=lint_re.findall(clean(logs['baseline-lint.log'])); post_lint=lint_re.findall(clean(logs['post-lint.log']))
-assert baseline_lint and sorted(x for x in baseline_lint if not x.startswith('@krabs/scripts:lint:'))==sorted(x for x in post_lint if not x.startswith('@krabs/scripts:lint:'))
-script_lint_re=re.compile(r'^@krabs/scripts:lint:.*?(\d+) problems \((\d+) errors, (\d+) warnings\)$')
-before_script=[script_lint_re.match(x) for x in baseline_lint if x.startswith('@krabs/scripts:lint:')]; after_script=[script_lint_re.match(x) for x in post_lint if x.startswith('@krabs/scripts:lint:')]
-assert len(before_script)==len(after_script)==1 and all((before_script[0],after_script[0])); b,p=before_script[0],after_script[0]; assert int(b[2])==int(p[2])==0 and int(p[1])-int(b[1])==int(p[3])-int(b[3])==1
-for package,(files,tests) in deltas.items():
- for kind,delta in (('files',files),('tests',tests)):
-  before,after=census['baseline'][package][kind],census['post'][package][kind]; assert set(before)==set(after)=={'passed','failed','skipped','total'} and before['failed']==after['failed']==0 and before['skipped']==after['skipped'] and after['passed']-before['passed']==after['total']-before['total']==delta
+for package in census['baseline']:
+ for kind in ('files','tests'):
+  before,after=census['baseline'][package][kind],census['post'][package][kind]; assert set(before)==set(after)=={'passed','failed','skipped','total'} and before['failed']==after['failed']==0 and before['skipped']==after['skipped'] and after['passed']>=before['passed'] and after['total']>=before['total']
+lint_package_re=re.compile(r'(?m)^(@krabs/[^:\n]+):lint:')
+lint_count_re=re.compile(r'(?m)^(@krabs/[^:]+):lint:.*?(\d+) problems? \((\d+) errors?, (\d+) warnings?\)$')
+def parsed_lint(log):
+ cleaned=clean(log); packages=set(lint_package_re.findall(cleaned)); assert packages
+ out={package:(0,0,0) for package in packages}; seen=set()
+ for match in lint_count_re.finditer(cleaned):
+  package=match.group(1); assert package in out and package not in seen; seen.add(package)
+  out[package]=(int(match.group(2)),int(match.group(3)),int(match.group(4)))
+ return out
+before_lint,after_lint=parsed_lint(logs['baseline-lint.log']),parsed_lint(logs['post-lint.log']); assert set(before_lint)==set(after_lint)
+assert all(before_lint[package][1]==after_lint[package][1]==0 and after_lint[package][2]<=before_lint[package][2] for package in before_lint)
 PY
   printf 'GATE_EVIDENCE_OK %s %s\n' "$head" "$hash"
 }

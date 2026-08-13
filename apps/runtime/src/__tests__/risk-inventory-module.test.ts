@@ -1668,6 +1668,75 @@ describe("RiskInventoryModule", () => {
     }
   });
 
+  it("rolls back a replayed partial sell when the reconciliation claim is bypassed", async () => {
+    const conn = bootstrapDatabase(":memory:");
+    try {
+      const now = "2026-04-27T00:00:00.000Z";
+      const { positionId, buyFillId, sellFillId } = seedRealSellFillFixture(conn, {
+        positionId: "pos-replayed-partial-sell",
+        orderId: "ord-replayed-partial-sell",
+        clientOrderId: "coid-replayed-partial-sell",
+        buyFillId: "fill-buy-replayed-partial-sell",
+        sellFillId: "fill-sell-replayed-partial-sell",
+        runId: "run-replayed-partial-sell",
+        now,
+      });
+      const localBus = new InProcessEventBus();
+      const localModule = new RiskInventoryModule({
+        bus: localBus,
+        positionRepo: new SqlitePositionRepository(conn.db),
+        inventoryLotRepo: new SqliteInventoryLotRepository(conn.db),
+        orderRepo: createMockOrderRepo(),
+        fillRepo: {
+          claimForReconciliation: vi.fn().mockReturnValue(true),
+          findUnreconciled: vi.fn().mockReturnValue([]),
+        },
+        log: silentLog,
+        db: conn.db,
+        emitStrandedFillAlert: discardStrandedFillAlert,
+      });
+      const sell = {
+        fillId: sellFillId,
+        orderId: createOrderId("ord-replayed-partial-sell"),
+        clientOrderId: "coid-sell-replayed-partial-sell" as ClientOrderId,
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+        side: "sell" as const,
+        price: 0.6,
+        size: 5,
+        sizeUsdc: 3,
+        liquidityRole: "maker" as const,
+        fee: 0,
+        feeRateBps: 0,
+        signalReason: null,
+        timestamp: new Date(now).getTime(),
+      };
+      await localModule.start();
+      await localBus.publish("FillReceived", sell);
+      await localBus.publish("FillReceived", sell);
+
+      expect(
+        conn.db
+          .prepare("SELECT remaining_size FROM inventory_lots WHERE fill_id = ?")
+          .get(buyFillId),
+      ).toEqual({ remaining_size: 5 });
+      expect(
+        conn.db
+          .prepare("SELECT size, realized_pnl FROM positions WHERE position_id = ?")
+          .get(positionId),
+      ).toEqual({ size: 5, realized_pnl: 1 });
+      expect(
+        conn.db
+          .prepare("SELECT COUNT(*) AS count FROM pnl_ledger WHERE fill_id = ?")
+          .get(sellFillId),
+      ).toEqual({ count: 1 });
+
+      await localModule.stop();
+    } finally {
+      conn.close();
+    }
+  });
+
   // ─── Unsubscribe on stop ──────────────────────────────────────────
 
   it("does not process events after stop", async () => {
