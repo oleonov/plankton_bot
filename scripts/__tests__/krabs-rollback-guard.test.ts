@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 // prettier-ignore
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -88,6 +88,7 @@ function untouchedBegin(fixture: Fixture, paused: boolean) { expect(existsSync(j
 afterEach(() => {
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
 });
+beforeEach(() => new Promise<void>((resolve) => setImmediate(resolve)));
 describe("krabs rollback guard", () => {
   // prettier-ignore
   it("T28a — authoritative intent and receipt lifecycle", () => { const fixture=makeFixture(false); begin(fixture); const rollback=state(fixture); expect(rollback.phase).toBe("prepared"); expect(rollback.preRollbackPaused).toBe(false); expect(rollback.baselineCommandHighWater).toBeLessThan(1); expect(JSON.parse(readFileSync(fixture.marker,"utf8")).rollbackStateId).toBe(rollback.rollbackStateId); targetReady(fixture); const finalize=run(fixture,"finalize",target); expect(finalize.status).toBe(0); expect(finalize.stdout).toContain("ROLLBACK_RECEIPT"); expect(readFileSync(fixture.api,"utf8").trim()).toBe("false"); expect(rows(fixture)).toMatchObject([{action:"pause",initiator_type:"system",initiator:`rollback:${rollback.rollbackStateId}:pause`,status:"applied"},{action:"resume",initiator_type:"system",initiator:`rollback:${rollback.rollbackStateId}:resume`,status:"applied"}]); expect(existsSync(fixture.marker)).toBe(false); expect(run(fixture,"status").stdout.trim()).toBe("ROLLBACK_STATUS_NONE"); },60_000);
