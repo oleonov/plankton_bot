@@ -604,6 +604,7 @@ esac`,
       const counts = (passed: number) => ({ passed, failed: 0, skipped: 0, total: passed });
       // prettier-ignore
       const deltas={"@krabs/runtime":[2,36],"@krabs/exchange":[0,1],"@krabs/scripts":[1,7],"@krabs/db":[0,1],"@krabs/api":[0,1]} as const;
+      const packageDeltas = { ...deltas, "@krabs/config": [0, 0] } as const;
       mkdirSync(dir);
       writeFileSync(join(repo, ".git", "info", "exclude"), "gate-evidence/\n");
       for (const name of names)
@@ -612,7 +613,7 @@ esac`,
           name.startsWith("focused-") ? "Test Files  1 passed (1)\nTests  1 passed (1)\n" : "ok\n",
         );
       const testLog = (delta = 0) =>
-        Object.entries(deltas)
+        Object.entries(packageDeltas)
           .flatMap(([name, [files, tests]]) => [
             `${name}:test: Test Files  ${10 + delta * files} passed (${10 + delta * files})`,
             `${name}:test: Tests  ${100 + delta * tests} passed (${100 + delta * tests})`,
@@ -648,10 +649,13 @@ esac`,
         join(dir, "test-census.json"),
         JSON.stringify({
           baseline: Object.fromEntries(
-            Object.keys(deltas).map((key) => [key, { files: counts(10), tests: counts(100) }]),
+            Object.keys(packageDeltas).map((key) => [
+              key,
+              { files: counts(10), tests: counts(100) },
+            ]),
           ),
           post: Object.fromEntries(
-            Object.entries(deltas).map(([key, [files, tests]]) => [
+            Object.entries(packageDeltas).map(([key, [files, tests]]) => [
               key,
               { files: counts(10 + files), tests: counts(100 + tests) },
             ]),
