@@ -146,7 +146,7 @@ publish_image() {
   digest="$(run docker push "$IMAGE:$full" | sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' | tail -1)"
   [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die 'immutable registry digest is absent'
   id="$(run docker image inspect --format '{{.Id}}' "$IMAGE:$full")"
-  revision="$(run docker image inspect --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' "$IMAGE:$full")"
+  revision="$(run docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE:$full")"
   [[ -n "$id" && "$revision" == "$full" ]] || die 'local full-SHA image does not prove its revision'
   printf '%s\n' "$digest"
 }

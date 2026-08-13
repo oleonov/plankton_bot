@@ -585,6 +585,7 @@ esac`,
     const deploySource = readFileSync(deploy, "utf8");
     expect(deploySource).not.toContain("{{.Username}}");
     expect(deploySource).toContain('d.auths?.["ghcr.io"]');
+    expect(deploySource).not.toContain('Labels \\"org.opencontainers.image.revision');
     const repo = mkdtempSync(join(tmpdir(), "krabs-rollback-boundary-"));
     dirs.push(repo);
     const git = (...args: string[]) => {
