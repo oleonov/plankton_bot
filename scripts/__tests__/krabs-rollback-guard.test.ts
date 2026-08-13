@@ -75,7 +75,7 @@ function makeFixture(paused = false) {
   );
   executable(systemctl, `echo "systemctl $*" >> "$CALLS"`);
   // prettier-ignore
-  const env = { ...process.env, KRABS_ROLLBACK_TEST_MODE: "1", KRABS_ROLLBACK_STATE_DIR: stateDir, KRABS_ROLLBACK_MARKER_PATH: marker, KRABS_ROLLBACK_CONTROL_DB_PATH: control, KRABS_ROLLBACK_DATA_DIR: data, KRABS_ROLLBACK_SQLITE: sqlite, KRABS_ROLLBACK_CURL: curl, KRABS_ROLLBACK_DOCKER: docker, KRABS_ROLLBACK_FLOCK: flock, KRABS_ROLLBACK_SYSTEMCTL: systemctl, KRABS_ROLLBACK_INSTALL_BIN: installBin, KRABS_ROLLBACK_UNIT_DIR: units, KRABS_ROLLBACK_TIMEOUT_BIN: "/opt/homebrew/bin/timeout", KRABS_ROLLBACK_POLL_ATTEMPTS: "2", KRABS_ROLLBACK_POLL_INTERVAL_SECONDS: "0", KRABS_DEPLOY_LOCK_PATH: join(dir, "deploy.lock"), CALLS: calls, API_STATE: api, API_AVAILABLE: available, IDENTITY: identity, HEALTH_IDENTITY: health, NETWORK_FENCED: fenced, STOPPED: join(dir, "stopped") };
+  const env = { ...process.env, KRABS_ROLLBACK_TEST_MODE: "1", KRABS_ROLLBACK_STATE_DIR: stateDir, KRABS_ROLLBACK_MARKER_PATH: marker, KRABS_ROLLBACK_CONTROL_DB_PATH: control, KRABS_ROLLBACK_DATA_DIR: data, KRABS_ROLLBACK_SQLITE: sqlite, KRABS_ROLLBACK_CURL: curl, KRABS_ROLLBACK_DOCKER: docker, KRABS_ROLLBACK_FLOCK: flock, KRABS_ROLLBACK_SYSTEMCTL: systemctl, KRABS_ROLLBACK_INSTALL_BIN: installBin, KRABS_ROLLBACK_UNIT_DIR: units, KRABS_ROLLBACK_TIMEOUT_BIN: "timeout", KRABS_ROLLBACK_POLL_ATTEMPTS: "2", KRABS_ROLLBACK_POLL_INTERVAL_SECONDS: "0", KRABS_DEPLOY_LOCK_PATH: join(dir, "deploy.lock"), CALLS: calls, API_STATE: api, API_AVAILABLE: available, IDENTITY: identity, HEALTH_IDENTITY: health, NETWORK_FENCED: fenced, STOPPED: join(dir, "stopped") };
   // prettier-ignore
   return { dir, stateDir, marker, control, data, ledger, api, available, identity, health, calls, installBin, units, env };
 }
@@ -164,7 +164,7 @@ esac`,
         KRABS_DEPLOY_GUARD: guard,
         KRABS_DEPLOY_LOCK_PATH: join(fixture.dir, "deploy-controller.lock"),
         KRABS_DEPLOY_FLOCK: fixture.env.KRABS_ROLLBACK_FLOCK,
-        KRABS_DEPLOY_TIMEOUT: "/opt/homebrew/bin/timeout",
+        KRABS_DEPLOY_TIMEOUT: "timeout",
         KRABS_DEPLOY_ADAPTER: adapter,
         KRABS_ROLLBACK_STATE_PATH: statePath,
         KRABS_RUNTIME_ENV_PATH: runtimeEnv,
