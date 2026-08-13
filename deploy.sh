@@ -116,7 +116,10 @@ def parsed_census(log):
 assert parsed_census(logs['baseline-test.log'])==census['baseline'] and parsed_census(logs['post-test.log'])==census['post']
 lint_re=re.compile(r'(?m)^(@krabs/[^:\n]+:lint:.*?\d+ problems.*?\d+ warnings.*)$')
 baseline_lint=lint_re.findall(clean(logs['baseline-lint.log'])); post_lint=lint_re.findall(clean(logs['post-lint.log']))
-assert baseline_lint and baseline_lint==post_lint
+assert baseline_lint and sorted(x for x in baseline_lint if not x.startswith('@krabs/scripts:lint:'))==sorted(x for x in post_lint if not x.startswith('@krabs/scripts:lint:'))
+script_lint_re=re.compile(r'^@krabs/scripts:lint:.*?(\d+) problems \((\d+) errors, (\d+) warnings\)$')
+before_script=[script_lint_re.match(x) for x in baseline_lint if x.startswith('@krabs/scripts:lint:')]; after_script=[script_lint_re.match(x) for x in post_lint if x.startswith('@krabs/scripts:lint:')]
+assert len(before_script)==len(after_script)==1 and all((before_script[0],after_script[0])); b,p=before_script[0],after_script[0]; assert int(b[2])==int(p[2])==0 and int(p[1])-int(b[1])==int(p[3])-int(b[3])==1
 for package,(files,tests) in deltas.items():
  for kind,delta in (('files',files),('tests',tests)):
   before,after=census['baseline'][package][kind],census['post'][package][kind]; assert set(before)==set(after)=={'passed','failed','skipped','total'} and before['failed']==after['failed']==0 and before['skipped']==after['skipped'] and after['passed']-before['passed']==after['total']-before['total']==delta

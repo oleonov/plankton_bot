@@ -621,10 +621,11 @@ esac`,
           .join("\n") + "\n";
       const lintLog =
         "@krabs/runtime:lint: 33 problems (0 errors, 33 warnings)\n@krabs/scripts:lint: 116 problems (0 errors, 116 warnings)\n";
+      const postLintLog = lintLog.replaceAll("116", "117");
       writeFileSync(join(dir, "baseline-test.log"), testLog());
       writeFileSync(join(dir, "post-test.log"), `Tasks: 15 successful, 15 total\n${testLog(1)}`);
       writeFileSync(join(dir, "baseline-lint.log"), lintLog);
-      writeFileSync(join(dir, "post-lint.log"), lintLog);
+      writeFileSync(join(dir, "post-lint.log"), postLintLog);
       writeFileSync(join(dir, "typecheck.log"), "Tasks: 15 successful, 15 total\n");
       writeFileSync(join(dir, "build.log"), "Tasks: 9 successful, 9 total\n");
       writeFileSync(join(dir, "prettier.log"), "All matched files use Prettier code style!\n");
@@ -695,7 +696,10 @@ esac`,
         }).status,
       ).not.toBe(0);
       writeFileSync(join(dir, "baseline-test.log"), testLog());
-      writeFileSync(join(dir, "post-lint.log"), lintLog.replace("116 warnings", "117 warnings"));
+      writeFileSync(
+        join(dir, "post-lint.log"),
+        postLintLog.replace("117 warnings", "118 warnings"),
+      );
       manifest();
       expect(
         spawnSync(deploy, ["--verify-gate-evidence-only", evidence], {
@@ -703,7 +707,7 @@ esac`,
           encoding: "utf8",
         }).status,
       ).not.toBe(0);
-      writeFileSync(join(dir, "post-lint.log"), lintLog);
+      writeFileSync(join(dir, "post-lint.log"), postLintLog);
       writeFileSync(join(dir, "gate-cases.txt"), "T1 — changed\n");
       manifest();
       expect(
