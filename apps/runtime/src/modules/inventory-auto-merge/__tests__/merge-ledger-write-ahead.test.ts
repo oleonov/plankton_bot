@@ -5,7 +5,6 @@ import path from "node:path";
 import {
   bootstrapLedgerDb,
   openDatabase,
-  parseLedgerInstantMs,
   SqliteMergeLedgerRepository,
   type DbConnection,
 } from "@krabs/db";
@@ -54,6 +53,31 @@ const OTHER_NO_TOKEN = "tok-other-no";
 // replacement opened after the write-ahead row.
 const OPENED_AT_PAST = "2020-01-01T00:00:00.000Z";
 
+function recordPending(
+  repo: MergeLedgerRepository,
+  record: { conditionId: string } & Record<string, unknown>,
+): void {
+  repo.recordPending({ ...recordedIdentity(record.conditionId), ...record } as Parameters<
+    MergeLedgerRepository["recordPending"]
+  >[0]);
+}
+
+function recordedIdentity(conditionId: string) {
+  return conditionId === OTHER_CONDITION_ID
+    ? {
+        yesTokenId: createTokenId(OTHER_YES_TOKEN),
+        noTokenId: createTokenId(OTHER_NO_TOKEN),
+        yesPositionId: createPositionId("p-yes-y"),
+        noPositionId: createPositionId("p-no-y"),
+      }
+    : {
+        yesTokenId: createTokenId(YES_TOKEN),
+        noTokenId: createTokenId(NO_TOKEN),
+        yesPositionId: createPositionId("p-yes"),
+        noPositionId: createPositionId("p-no"),
+      };
+}
+
 /**
  * A position repository that behaves like the real SQLite one in the ONE respect these tests turn
  * on: `save` is visible to later reads, and `findByTokenId` filters out closed positions exactly as
@@ -100,34 +124,6 @@ function withScriptedFenceReads(
     deletePending: (id) => repo.deletePending(id),
     findNonTerminal: () => reads[call++]?.() ?? repo.findNonTerminal(),
   };
-}
-
-/**
- * Models the ONLY way `findMergeCandidates()` can derive a leg the write-ahead row never recorded:
- * the original position CLOSES (consumed by this very merge, or by anything else) and a genuinely
- * DIFFERENT position row opens for the same token afterward. Mutating `openedAt` on the ORIGINAL
- * position id in place — the old shape of these tests — is not a state the real repository can ever
- * produce: `SqlitePositionRepository.save()`'s `ON CONFLICT(position_id) DO UPDATE SET` deliberately
- * omits `opened_at`, so an existing row's `opened_at` never changes once inserted. Returns the
- * replacement so callers can assert against its (derived) position id.
- */
-function replaceLegAfterIntent(
-  positionRepo: PositionRepository,
-  original: { positionId: string },
-  replacementOpenedAt: string,
-  overrides: Record<string, unknown> = {},
-): Position {
-  const closed = positionRepo.findById(original.positionId as PositionId) as unknown as Position;
-  positionRepo.save({ ...closed, status: "closed", size: 0 } as unknown as Position);
-  const replacement = {
-    ...closed,
-    positionId: `${original.positionId}-v2`,
-    status: "open",
-    openedAt: replacementOpenedAt,
-    ...overrides,
-  } as unknown as Position;
-  positionRepo.save(replacement);
-  return replacement;
 }
 
 /** Fixtures for exactly one mergeable YES/NO position pair, sized so the merge clears the dust floor. */
@@ -303,14 +299,25 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     // The fake gateway reads through its OWN connection to the same file. If the row is visible
     // there, autocommit already flushed it to disk — a same-connection read (or a mocked repo)
     // could not tell that apart from mere transaction-local visibility.
-    let seenFromSeparateConnection: { status: string } | undefined;
+    let seenFromSeparateConnection:
+      | {
+          status: string;
+          yes_token_id: string;
+          no_token_id: string;
+          yes_position_id: string;
+          no_position_id: string;
+        }
+      | undefined;
     const gateway = {
       mergePositions: vi.fn().mockImplementation(async () => {
         const reader = openDatabase(dbPath);
         try {
           seenFromSeparateConnection = reader.db
-            .prepare(`SELECT status FROM merge_ledger WHERE condition_id = ?`)
-            .get(CONDITION_ID) as { status: string } | undefined;
+            .prepare(
+              `SELECT status, yes_token_id, no_token_id, yes_position_id, no_position_id
+               FROM merge_ledger WHERE condition_id = ?`,
+            )
+            .get(CONDITION_ID) as typeof seenFromSeparateConnection;
         } finally {
           reader.close();
         }
@@ -333,8 +340,65 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     await mod.sweep();
 
     expect(gateway.mergePositions).toHaveBeenCalledTimes(1);
-    expect(seenFromSeparateConnection?.status).toBe("pending");
+    expect(seenFromSeparateConnection).toEqual({
+      status: "pending",
+      yes_token_id: YES_TOKEN,
+      no_token_id: NO_TOKEN,
+      yes_position_id: "p-yes",
+      no_position_id: "p-no",
+    });
   });
+
+  it.each([
+    ["blank", { yesTokenId: createTokenId("") }, "incomplete-identity"],
+    ["same token", { noTokenId: createTokenId(YES_TOKEN) }, "same-token"],
+    ["same position", { noPositionId: createPositionId("p-yes") }, "same-position"],
+    ["cross-bound", { yesTokenId: createTokenId("p-no") }, "cross-bound-identity"],
+  ])(
+    "drops a %s leg identity before recordPending or the gateway",
+    async (_label, mutation, reason) => {
+      const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
+      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
+      const gateway = {
+        mergePositions: vi.fn().mockResolvedValue(undefined),
+      } as unknown as ExchangeGateway;
+      const mod = new InventoryManagerModule({
+        bus,
+        gateway,
+        positionRepo,
+        orderRepo,
+        marketRepo,
+        fillRepo,
+        lotRepo,
+        mergeLedgerRepo,
+        db: conn.db,
+        log,
+      });
+      const candidate = {
+        conditionId: CONDITION_ID,
+        mergeAmount: 40,
+        yesTokenId: createTokenId(YES_TOKEN),
+        noTokenId: createTokenId(NO_TOKEN),
+        yesPositionId: createPositionId("p-yes"),
+        noPositionId: createPositionId("p-no"),
+        ...mutation,
+      };
+      (
+        mod as unknown as {
+          candidateService: { findMergeCandidates(): Array<typeof candidate> };
+        }
+      ).candidateService.findMergeCandidates = vi.fn(() => [candidate]);
+
+      await mod.sweep();
+
+      expect(gateway.mergePositions).not.toHaveBeenCalled();
+      expect(conn.db.prepare("SELECT 1 FROM merge_ledger").all()).toEqual([]);
+      expect(log.error).toHaveBeenCalledWith(
+        { conditionId: CONDITION_ID, reason },
+        "merge candidate has invalid recorded leg identity — candidate dropped",
+      );
+    },
+  );
 
   it("leaves exactly one 'onchain' row when settlement fails right after the on-chain call resolves", async () => {
     // Stands in for a process crash between the on-chain submission and applyMerge's transaction:
@@ -806,17 +870,21 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
     const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
     // Two survivors of an earlier process: one that never got past submission, one the chain took.
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-stale-pending",
       conditionId: "0xcond-a",
       mergedAmount: 5,
       recordedAt: "2026-07-30T00:00:00.000Z",
     });
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-stale-onchain",
       conditionId: "0xcond-b",
       mergedAmount: 7,
       recordedAt: "2026-07-30T00:00:01.000Z",
+      yesTokenId: createTokenId("tok-stale-yes"),
+      noTokenId: createTokenId("tok-stale-no"),
+      yesPositionId: createPositionId("p-stale-yes"),
+      noPositionId: createPositionId("p-stale-no"),
     });
     mergeLedgerRepo.markOnchain("merge-stale-onchain");
 
@@ -866,7 +934,7 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
   it("start() settles a row that turned 'onchain' after the pre-supervisor snapshot instead of only reporting it", async () => {
     const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
     const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-raced-onchain",
       conditionId: CONDITION_ID,
       mergedAmount: 40,
@@ -925,7 +993,7 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     // balance open on both legs, and the SAME sweep's own candidate pass would then legitimately
     // submit a fresh merge for it — a real behavior, but not what this test is pinning. Consuming
     // the whole leg closes both positions, so nothing is left to re-candidate.
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-raced-post-start",
       conditionId: CONDITION_ID,
       mergedAmount: 100,
@@ -987,16 +1055,18 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     // The crash survivor: the merge went out, the chain took it, the process died before the local
     // half committed. Its recorded amount is deliberately SMALLER than the 100 shares on each leg —
     // recovery must move the amount that actually went on chain, not one recomputed from today's book.
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-confirmed",
       conditionId: CONDITION_ID,
       mergedAmount: 40,
       recordedAt: "2026-07-30T00:00:00.000Z",
+      yesPositionId: createPositionId("p-yes-x"),
+      noPositionId: createPositionId("p-no-x"),
     });
     mergeLedgerRepo.markOnchain("merge-confirmed");
     // A 'pending' row is NOT the same evidence: nothing distinguishes it from "never broadcast", so
     // it must survive untouched, still fencing its own condition.
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-ambiguous",
       conditionId: OTHER_CONDITION_ID,
       mergedAmount: 9,
@@ -1006,9 +1076,6 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     const { recovered, remaining, settled } = await recoverConfirmedOnchainMerges({
       bus,
       positionRepo,
-      orderRepo,
-      marketRepo,
-      fillRepo,
       lotRepo,
       mergeLedgerRepo,
       db: conn.db,
@@ -1129,24 +1196,25 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
   });
 
   it("leaves a confirmed 'onchain' row fenced when its legs are gone — a repair it cannot make is not a repair it may skip", async () => {
-    const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
+    const { positionRepo, lotRepo } = makeMergeableFixtures();
     const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
     // No YES/NO pair exists for this condition, so there is nothing to consume: wallet
     // reconciliation may already have closed the legs. Guessing here would book P&L twice.
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-orphan",
       conditionId: "0xcond-no-legs",
       mergedAmount: 5,
       recordedAt: "2026-07-30T00:00:00.000Z",
+      yesTokenId: createTokenId("tok-orphan-yes"),
+      noTokenId: createTokenId("tok-orphan-no"),
+      yesPositionId: createPositionId("p-orphan-yes"),
+      noPositionId: createPositionId("p-orphan-no"),
     });
     mergeLedgerRepo.markOnchain("merge-orphan");
 
     const { recovered, remaining } = await recoverConfirmedOnchainMerges({
       bus,
       positionRepo,
-      orderRepo,
-      marketRepo,
-      fillRepo,
       lotRepo,
       mergeLedgerRepo,
       db: conn.db,
@@ -1162,8 +1230,12 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     expect(positionRepo.save).not.toHaveBeenCalled();
     expect(bus.publish).not.toHaveBeenCalled();
     expect(log.error).toHaveBeenCalledWith(
-      { mergeId: "merge-orphan", conditionId: "0xcond-no-legs" },
-      "confirmed on-chain merge cannot be settled locally — no open YES/NO pair for the condition; the row stays fenced",
+      {
+        mergeId: "merge-orphan",
+        conditionId: "0xcond-no-legs",
+        reason: "yes-missing-or-closed",
+      },
+      "confirmed on-chain merge cannot be settled locally — recorded leg validation failed; row stays fenced",
     );
   });
 
@@ -1171,9 +1243,9 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
   // and the real `findByTokenId` filters closed rows out. Both legs are 100 here and the merge is
   // 100, so a re-reading implementation publishes NOTHING at all while both positions go to zero.
   it("announces both legs even when the merge closes them outright", async () => {
-    const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
+    const { positionRepo, lotRepo } = makeMergeableFixtures();
     const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-full",
       conditionId: CONDITION_ID,
       mergedAmount: 100,
@@ -1184,9 +1256,6 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     const { recovered } = await recoverConfirmedOnchainMerges({
       bus,
       positionRepo,
-      orderRepo,
-      marketRepo,
-      fillRepo,
       lotRepo,
       mergeLedgerRepo,
       db: conn.db,
@@ -1217,547 +1286,285 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     expect(positionRepo.findByTokenId(NO_TOKEN as TokenId)).toBeNull();
   });
 
-  // r3-M1. The freshness fence: a derived leg's `openedAt` must predate the write-ahead row's
-  // `mergedAt`, because a leg that genuinely took part in a merge was necessarily already open when
-  // `recordPending` ran. These four pin the fence's boundary — most importantly that it stays SILENT
-  // on the ordinary case, since a fence that fires on every settle would be indistinguishable from no
-  // recovery at all.
-  describe("freshness fence on derived legs", () => {
-    it("settles normally when both legs were opened before the ledger row's mergedAt", async () => {
-      const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
-      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-      mergeLedgerRepo.recordPending({
-        mergeId: "merge-fresh-legs",
-        conditionId: CONDITION_ID,
-        mergedAmount: 40,
-        recordedAt: "2026-07-30T00:00:00.000Z",
-      });
-      mergeLedgerRepo.markOnchain("merge-fresh-legs");
-
-      const { recovered, remaining } = await recoverConfirmedOnchainMerges({
+  describe("recorded merge-leg recovery fence", () => {
+    async function recover(
+      mergeId: string,
+      positionRepo: PositionRepository,
+      lotRepo: InventoryLotRepository,
+      mergeLedgerRepo: MergeLedgerRepository,
+      runtimeMetrics?: RuntimeMetricWriter,
+    ) {
+      return recoverConfirmedOnchainMerges({
         bus,
         positionRepo,
-        orderRepo,
-        marketRepo,
-        fillRepo,
-        lotRepo,
-        mergeLedgerRepo,
-        db: conn.db,
-        log,
-      });
-
-      expect(recovered).toBe(1);
-      expect(remaining).toEqual([]);
-      expect(lotRepo.consumeFifo).toHaveBeenCalled();
-      expect(
-        conn.db
-          .prepare(`SELECT status FROM merge_ledger WHERE merge_id = ?`)
-          .get("merge-fresh-legs"),
-      ).toEqual({ status: "applied" });
-      // Neither fence message fired — this is the case the fence must stay out of the way of.
-      expect(log.error).not.toHaveBeenCalledWith(
-        expect.anything(),
-        expect.stringContaining("opened AT OR AFTER the write-ahead row"),
-      );
-      expect(log.error).not.toHaveBeenCalledWith(
-        expect.anything(),
-        expect.stringContaining("cannot be proven to predate the merge"),
-      );
-    });
-
-    it("refuses to settle and leaves the row fenced when a derived leg opened AFTER the ledger row's mergedAt", async () => {
-      const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
-      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-      mergeLedgerRepo.recordPending({
-        mergeId: "merge-stale-leg",
-        conditionId: CONDITION_ID,
-        mergedAmount: 40,
-        recordedAt: "2026-07-30T00:00:00.000Z",
-      });
-      mergeLedgerRepo.markOnchain("merge-stale-leg");
-      const [row] = mergeLedgerRepo.findNonTerminal();
-      const mergedAt = row!.mergedAt;
-      // A token-cycle replacement: "p-no" CLOSES (as it would if consumed by this very merge) and a
-      // genuinely different position row opens for the same token TWO SECONDS after the write-ahead
-      // row — proof it cannot be the leg the chain actually merged.
-      const staleOpenedAt = new Date(parseLedgerInstantMs(mergedAt) + 2000).toISOString();
-      const replacement = replaceLegAfterIntent(
-        positionRepo,
-        { positionId: "p-no" },
-        staleOpenedAt,
-      );
-      const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
-
-      const { recovered, remaining } = await recoverConfirmedOnchainMerges({
-        bus,
-        positionRepo,
-        orderRepo,
-        marketRepo,
-        fillRepo,
         lotRepo,
         mergeLedgerRepo,
         db: conn.db,
         log,
         runtimeMetrics,
       });
+    }
 
-      expect(recovered).toBe(0);
-      expect(remaining.map((r) => r.mergeId)).toEqual(["merge-stale-leg"]);
-      // No lots consumed, nothing published, nothing advanced — the row stays exactly 'onchain'.
-      expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
-      expect(bus.publish).not.toHaveBeenCalled();
-      expect(
-        conn.db
-          .prepare(`SELECT status FROM merge_ledger WHERE merge_id = ?`)
-          .get("merge-stale-leg"),
-      ).toEqual({ status: "onchain" });
-      expect(log.error).toHaveBeenCalledWith(
-        {
-          mergeId: "merge-stale-leg",
-          conditionId: CONDITION_ID,
-          leg: "no",
-          positionId: replacement.positionId,
-          legConditionId: CONDITION_ID,
-          openedAt: staleOpenedAt,
-          mergedAt,
-        },
-        expect.stringContaining("opened AT OR AFTER the write-ahead row"),
-      );
-      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
-        "inventory_merge_recovery_fenced_total",
-        1,
-        JSON.stringify({ reason: "opened-after" }),
-      );
-    });
-
-    it("fences a leg opened milliseconds into the SAME second as the ledger row's mergedAt, not just a later one", async () => {
-      const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
-      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-      mergeLedgerRepo.recordPending({
-        mergeId: "merge-same-second",
-        conditionId: CONDITION_ID,
-        mergedAmount: 40,
-        recordedAt: "2026-07-30T00:00:00.000Z",
-      });
-      mergeLedgerRepo.markOnchain("merge-same-second");
-      const [row] = mergeLedgerRepo.findNonTerminal();
-      const mergedAt = row!.mergedAt;
-      // `mergedAt` carries full millisecond precision (unlike `merge_ledger.created_at`, SQLite's
-      // whole-second `datetime('now')`), so a replacement leg opened even 500ms later — still within
-      // the SAME calendar second as `mergedAt` — is strictly AFTER it at the resolution that matters.
-      // This is the boundary the bug lived at: a second-truncated fence let exactly this slip through.
-      const sameSecondOpenedAt = new Date(parseLedgerInstantMs(mergedAt) + 500).toISOString();
-      const replacement = replaceLegAfterIntent(
-        positionRepo,
-        { positionId: "p-yes" },
-        sameSecondOpenedAt,
-      );
-
-      const { recovered, remaining } = await recoverConfirmedOnchainMerges({
-        bus,
-        positionRepo,
-        orderRepo,
-        marketRepo,
-        fillRepo,
-        lotRepo,
-        mergeLedgerRepo,
-        db: conn.db,
-        log,
-      });
-
-      expect(recovered).toBe(0);
-      expect(remaining.map((r) => r.mergeId)).toEqual(["merge-same-second"]);
-      // No lots consumed, nothing published, nothing advanced — the row stays exactly 'onchain'.
-      expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
-      expect(bus.publish).not.toHaveBeenCalled();
-      expect(
-        conn.db
-          .prepare(`SELECT status FROM merge_ledger WHERE merge_id = ?`)
-          .get("merge-same-second"),
-      ).toEqual({ status: "onchain" });
-      expect(log.error).toHaveBeenCalledWith(
-        {
-          mergeId: "merge-same-second",
-          conditionId: CONDITION_ID,
-          leg: "yes",
-          positionId: replacement.positionId,
-          legConditionId: CONDITION_ID,
-          openedAt: sameSecondOpenedAt,
-          mergedAt,
-        },
-        expect.stringContaining("opened AT OR AFTER the write-ahead row"),
-      );
-    });
-
-    it("fences a leg opened in the SAME millisecond as mergedAt — equality cannot prove it is the original", async () => {
-      const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
-      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-      mergeLedgerRepo.recordPending({
-        mergeId: "merge-same-ms",
-        conditionId: CONDITION_ID,
-        mergedAmount: 40,
-        recordedAt: "2026-07-30T00:00:00.000Z",
-      });
-      mergeLedgerRepo.markOnchain("merge-same-ms");
-      const [row] = mergeLedgerRepo.findNonTerminal();
-      const mergedAt = row!.mergedAt;
-      // Millisecond is the FLOOR of both timestamps' resolution, so a replacement opened after
-      // recordPending can still render as the very same instant. The costs are asymmetric: fencing
-      // an original costs one operator escalation (`--discard --fenced` exists for it), accepting a
-      // replacement debits its FIFO lots for a merge that already landed irreversibly on chain.
-      const replacement = replaceLegAfterIntent(positionRepo, { positionId: "p-yes" }, mergedAt);
-
-      const { recovered, remaining } = await recoverConfirmedOnchainMerges({
-        bus,
-        positionRepo,
-        orderRepo,
-        marketRepo,
-        fillRepo,
-        lotRepo,
-        mergeLedgerRepo,
-        db: conn.db,
-        log,
-      });
-
-      expect(recovered).toBe(0);
-      expect(remaining.map((r) => r.mergeId)).toEqual(["merge-same-ms"]);
-      expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
-      expect(bus.publish).not.toHaveBeenCalled();
-      expect(
-        conn.db.prepare(`SELECT status FROM merge_ledger WHERE merge_id = ?`).get("merge-same-ms"),
-      ).toEqual({ status: "onchain" });
-      expect(log.error).toHaveBeenCalledWith(
-        {
-          mergeId: "merge-same-ms",
-          conditionId: CONDITION_ID,
-          leg: "yes",
-          positionId: replacement.positionId,
-          legConditionId: CONDITION_ID,
-          openedAt: mergedAt,
-          mergedAt,
-        },
-        expect.stringContaining("opened AT OR AFTER the write-ahead row"),
-      );
-    });
-
-    // final5-P1-1. Predating the row is NECESSARY but not SUFFICIENT. `findMergeCandidates` derives
-    // both legs through `markets`, whose `condition_id`/`outcome`/`outcome_index` `UPSERT_MARKET_SQL`
-    // rewrites wholesale on every scanner upsert — and the startup market scan refreshes them BEFORE
-    // this recovery runs. So a remap can hand this merge a genuinely OLD position that belongs to a
-    // DIFFERENT condition: it sails through the freshness fence by years, and the settler would then
-    // debit ITS FIFO lots for a merge it never took part in. Only `positions.condition_id` — written
-    // once at INSERT, never touched by `ON CONFLICT DO UPDATE SET` — can tell the two apart.
-    it.each([
-      {
-        label: "belongs to a different condition",
-        mergeId: "merge-foreign-condition",
-        legConditionId: OTHER_CONDITION_ID,
-      },
-      // Legacy rows predating the column carry the schema's empty-string default (measured
-      // 2026-08-11 on the live ledger: 1 of 72 non-closed positions). An unknown owner cannot
-      // prove ownership, so it is fenced exactly like a foreign one.
-      {
-        label: "carries the legacy empty condition_id",
-        mergeId: "merge-empty-condition",
-        legConditionId: "",
-      },
-    ])(
-      "fences a leg that predates the row by years but $label — the catalog that derived it is mutable",
-      async ({ mergeId, legConditionId }) => {
-        const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
-        const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-        mergeLedgerRepo.recordPending({
-          mergeId,
-          conditionId: CONDITION_ID,
-          mergedAmount: 40,
-          recordedAt: "2026-07-30T00:00:00.000Z",
-        });
-        mergeLedgerRepo.markOnchain(mergeId);
-        const [row] = mergeLedgerRepo.findNonTerminal();
-        const mergedAt = row!.mergedAt;
-        // `condition_id` is write-once, so a foreign owner has to ARRIVE with a new row — the same
-        // reason the unparseable-openedAt fixture below inserts instead of mutating in place. The
-        // replacement keeps OPENED_AT_PAST precisely so the freshness fence CANNOT be what refuses
-        // it: revert the ownership check and this test settles the merge.
-        const foreignLeg = replaceLegAfterIntent(
-          positionRepo,
-          { positionId: "p-yes" },
-          OPENED_AT_PAST,
-          { conditionId: legConditionId },
-        );
-        const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
-
-        const { recovered, remaining } = await recoverConfirmedOnchainMerges({
-          bus,
-          positionRepo,
-          orderRepo,
-          marketRepo,
-          fillRepo,
-          lotRepo,
-          mergeLedgerRepo,
-          db: conn.db,
-          log,
-          runtimeMetrics,
-        });
-
-        expect(recovered).toBe(0);
-        expect(remaining.map((r) => r.mergeId)).toEqual([mergeId]);
-        expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
-        expect(bus.publish).not.toHaveBeenCalled();
-        expect(
-          conn.db.prepare(`SELECT status FROM merge_ledger WHERE merge_id = ?`).get(mergeId),
-        ).toEqual({ status: "onchain" });
-        expect(log.error).toHaveBeenCalledWith(
-          {
-            mergeId,
-            conditionId: CONDITION_ID,
-            leg: "yes",
-            positionId: foreignLeg.positionId,
-            legConditionId,
-            openedAt: OPENED_AT_PAST,
-            mergedAt,
-          },
-          expect.stringContaining("condition_id, written once when the position was created"),
-        );
-        expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
-          "inventory_merge_recovery_fenced_total",
-          1,
-          JSON.stringify({ reason: "foreign-condition" }),
-        );
-      },
-    );
-
-    it("fails closed and fences the row when a derived leg's openedAt does not parse", async () => {
-      const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
-      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-      mergeLedgerRepo.recordPending({
-        mergeId: "merge-unparseable-leg",
-        conditionId: CONDITION_ID,
-        mergedAmount: 40,
-        recordedAt: "2026-07-30T00:00:00.000Z",
-      });
-      mergeLedgerRepo.markOnchain("merge-unparseable-leg");
-      // `opened_at` is written only on INSERT, so an unparseable value has to ARRIVE with a new row:
-      // mutating it on `p-yes` in place would test a state the real repository can never produce.
-      const unparseableLeg = replaceLegAfterIntent(
-        positionRepo,
-        { positionId: "p-yes" },
-        "not-a-timestamp",
-      );
-
-      const { recovered, remaining } = await recoverConfirmedOnchainMerges({
-        bus,
-        positionRepo,
-        orderRepo,
-        marketRepo,
-        fillRepo,
-        lotRepo,
-        mergeLedgerRepo,
-        db: conn.db,
-        log,
-      });
-
-      expect(recovered).toBe(0);
-      expect(remaining.map((r) => r.mergeId)).toEqual(["merge-unparseable-leg"]);
-      expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
-      expect(
-        conn.db
-          .prepare(`SELECT status FROM merge_ledger WHERE merge_id = ?`)
-          .get("merge-unparseable-leg"),
-      ).toEqual({ status: "onchain" });
-      // Distinguishable from the "opened-after" message — an operator reading the log must be able to
-      // tell "provably a replacement" apart from "cannot be proven either way".
-      expect(log.error).toHaveBeenCalledWith(
-        expect.objectContaining({
-          mergeId: "merge-unparseable-leg",
-          leg: "yes",
-          positionId: unparseableLeg.positionId,
-          openedAt: "not-a-timestamp",
-        }),
-        expect.stringContaining("cannot be proven to predate the merge"),
-      );
-    });
-
-    // r7-P1-1. `opened_at` is not durable provenance. `runStartupPositionAdoption` runs BEFORE this
-    // recovery, ranks a token's non-closed rows `opened_at DESC` — so the winner is the NEWEST row,
-    // precisely a post-merge replacement — and then rewrites that winner's `opened_at` to the
-    // EARLIEST instant across itself and every row it absorbs. One stale sibling older than
-    // `merged_at` therefore backdates a replacement straight past the freshness fence. Lot ages are
-    // what survive: `mergeRetiredPositionFootprint` reparents inventory by rewriting
-    // `inventory_lots.position_id` and nothing else.
-    it("fences a leg backdated past the freshness check when a LIVE lot under it postdates the ledger row", async () => {
-      const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
-      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-      mergeLedgerRepo.recordPending({
-        mergeId: "merge-backdated-leg",
-        conditionId: CONDITION_ID,
-        mergedAmount: 40,
-        recordedAt: "2026-07-30T00:00:00.000Z",
-      });
-      mergeLedgerRepo.markOnchain("merge-backdated-leg");
-      const [row] = mergeLedgerRepo.findNonTerminal();
-      const mergedAt = row!.mergedAt;
-      // The consolidated winner as adoption leaves it: `openedAt` is the absorbed sibling's, years
-      // before the merge, so the freshness fence sees nothing wrong. Its inventory is the
-      // replacement's — bought two seconds AFTER the intent was recorded.
-      const lotCreatedAt = new Date(parseLedgerInstantMs(mergedAt) + 2000).toISOString();
-      (lotRepo.findOpen as ReturnType<typeof vi.fn>).mockImplementation((positionId: string) =>
-        positionId === "p-no" ? [{ createdAt: lotCreatedAt }] : [],
-      );
-      const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
-
-      const { recovered, remaining } = await recoverConfirmedOnchainMerges({
-        bus,
-        positionRepo,
-        orderRepo,
-        marketRepo,
-        fillRepo,
-        lotRepo,
-        mergeLedgerRepo,
-        db: conn.db,
-        log,
-        runtimeMetrics,
-      });
-
-      expect(recovered).toBe(0);
-      expect(remaining.map((r) => r.mergeId)).toEqual(["merge-backdated-leg"]);
-      expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
-      expect(bus.publish).not.toHaveBeenCalled();
-      expect(
-        conn.db
-          .prepare(`SELECT status FROM merge_ledger WHERE merge_id = ?`)
-          .get("merge-backdated-leg"),
-      ).toEqual({ status: "onchain" });
-      expect(log.error).toHaveBeenCalledWith(
-        {
-          mergeId: "merge-backdated-leg",
-          conditionId: CONDITION_ID,
-          leg: "no",
-          positionId: "p-no",
-          legConditionId: CONDITION_ID,
-          openedAt: OPENED_AT_PAST,
-          mergedAt,
-          lotCreatedAt,
-        },
-        expect.stringContaining(
-          "LIVE FIFO lot that cannot be shown to predate the START of the SECOND in which the " +
-            "write-ahead row was recorded",
-        ),
-      );
-      // r8-P2: the message must not claim the leg was substituted. A legitimate scale-in made after
-      // the intent was recorded trips this same branch, and an operator who reads "substituted"
-      // will reconcile FIFO and the wallet against a conclusion the fence never proved.
-      expect(log.error).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.stringContaining("NOT evidence of substitution"),
-      );
-      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
-        "inventory_merge_recovery_fenced_total",
-        1,
-        JSON.stringify({ reason: "lot-after" }),
-      );
-    });
-
-    // The threshold is `mergedAt` floored to its SECOND, not `mergedAt` itself: `created_at` has a
-    // `datetime('now')` column DEFAULT, so a second-truncated value reads up to 999 ms EARLIER than
-    // the instant it records and a raw comparison would let a genuinely later lot through. An
-    // unparseable `created_at` fails closed for the same reason a missing position does.
-    it.each([
-      {
-        label: "a lot second-truncated into the same second as mergedAt",
-        lotAt: (mergedAt: string) =>
-          new Date(parseLedgerInstantMs(mergedAt)).toISOString().slice(0, 19).replace("T", " "),
-        mergeId: "merge-lot-same-second",
-      },
-      {
-        label: "a lot whose created_at does not parse at all",
-        lotAt: () => "not-a-timestamp",
-        mergeId: "merge-lot-unparseable",
-      },
-    ])("fences on $label", async ({ lotAt, mergeId }) => {
-      const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
-      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-      mergeLedgerRepo.recordPending({
+    function createOnchainRow(
+      mergeLedgerRepo: MergeLedgerRepository,
+      mergeId: string,
+      recordedAt = "2026-07-30T00:00:00.750Z",
+    ): MergeRecord {
+      recordPending(mergeLedgerRepo, {
         mergeId,
         conditionId: CONDITION_ID,
-        // 750 ms into its second, so flooring genuinely moves the threshold backward.
-        recordedAt: "2026-07-30T00:00:00.750Z",
         mergedAmount: 40,
+        recordedAt,
       });
       mergeLedgerRepo.markOnchain(mergeId);
-      const [row] = mergeLedgerRepo.findNonTerminal();
-      const lotCreatedAt = lotAt(row!.mergedAt);
-      (lotRepo.findOpen as ReturnType<typeof vi.fn>).mockImplementation((positionId: string) =>
-        positionId === "p-yes" ? [{ createdAt: lotCreatedAt }] : [],
-      );
+      return mergeLedgerRepo.findNonTerminal()[0]!;
+    }
 
-      const { recovered } = await recoverConfirmedOnchainMerges({
-        bus,
-        positionRepo,
-        orderRepo,
-        marketRepo,
-        fillRepo,
-        lotRepo,
-        mergeLedgerRepo,
-        db: conn.db,
-        log,
+    it("settles the recorded positions after an actual catalog condition/outcome rewrite", async () => {
+      const { positionRepo, marketRepo, lotRepo } = makeMergeableFixtures();
+      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
+      createOnchainRow(mergeLedgerRepo, "merge-recorded-legs");
+      const insertMarket = conn.db.prepare(
+        `INSERT INTO markets
+           (token_id, condition_id, slug, question, outcome, outcome_index, tick_size)
+         VALUES (?, ?, ?, ?, ?, ?, 0.01)`,
+      );
+      insertMarket.run(YES_TOKEN, CONDITION_ID, "yes-before", "yes before", "Yes", 0);
+      insertMarket.run(NO_TOKEN, CONDITION_ID, "no-before", "no before", "No", 1);
+      conn.db
+        .prepare(
+          `UPDATE markets
+              SET condition_id = 'remapped-condition',
+                  outcome = CASE token_id WHEN ? THEN 'No' ELSE 'Yes' END,
+                  outcome_index = CASE token_id WHEN ? THEN 1 ELSE 0 END
+            WHERE token_id IN (?, ?)`,
+        )
+        .run(YES_TOKEN, YES_TOKEN, YES_TOKEN, NO_TOKEN);
+
+      const result = await recover("merge-recorded-legs", positionRepo, lotRepo, mergeLedgerRepo);
+
+      expect(result.recovered).toBe(1);
+      expect(result.remaining).toEqual([]);
+      expect(lotRepo.consumeFifo).toHaveBeenCalledWith("p-yes", 40);
+      expect(lotRepo.consumeFifo).toHaveBeenCalledWith("p-no", 40);
+      expect(marketRepo.findByTokenId).not.toHaveBeenCalled();
+      expect(
+        conn.db
+          .prepare(
+            "SELECT token_id, condition_id, outcome, outcome_index FROM markets ORDER BY token_id",
+          )
+          .all(),
+      ).toEqual([
+        {
+          token_id: NO_TOKEN,
+          condition_id: "remapped-condition",
+          outcome: "Yes",
+          outcome_index: 0,
+        },
+        {
+          token_id: YES_TOKEN,
+          condition_id: "remapped-condition",
+          outcome: "No",
+          outcome_index: 1,
+        },
+      ]);
+    });
+
+    it("never substitutes a newer same-token position for a closed recorded position", async () => {
+      const { positionRepo, lotRepo } = makeMergeableFixtures();
+      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
+      createOnchainRow(mergeLedgerRepo, "merge-no-substitution");
+      const original = positionRepo.findById(createPositionId("p-yes"))!;
+      positionRepo.save({ ...original, status: "closed", size: 0 });
+      positionRepo.save({
+        ...original,
+        positionId: createPositionId("p-yes-replacement"),
+        status: "open",
+        openedAt: "2026-08-01T00:00:00.000Z",
       });
 
-      expect(recovered).toBe(0);
+      const result = await recover("merge-no-substitution", positionRepo, lotRepo, mergeLedgerRepo);
+
+      expect(result.recovered).toBe(0);
+      expect(result.remaining.map((row) => row.mergeId)).toEqual(["merge-no-substitution"]);
+      expect(positionRepo.findByTokenId).not.toHaveBeenCalled();
       expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
       expect(log.error).toHaveBeenCalledWith(
-        expect.objectContaining({ mergeId, leg: "yes", lotCreatedAt }),
-        expect.stringContaining(
-          "LIVE FIFO lot that cannot be shown to predate the START of the SECOND in which the " +
-            "write-ahead row was recorded",
-        ),
+        expect.objectContaining({
+          mergeId: "merge-no-substitution",
+          reason: "yes-missing-or-closed",
+        }),
+        "confirmed on-chain merge cannot be settled locally — recorded leg validation failed; row stays fenced",
       );
     });
 
-    // The other side of the same boundary: a lot bought before the intent is the ordinary case, and
-    // a fence that fired on it would refuse every legitimate settle.
-    it("settles normally when every live lot under both legs predates the ledger row", async () => {
-      const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
+    it("fails closed when an exact position no longer carries its recorded token", async () => {
+      const { positionRepo, lotRepo } = makeMergeableFixtures();
       const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-      mergeLedgerRepo.recordPending({
-        mergeId: "merge-old-lots",
-        conditionId: CONDITION_ID,
-        recordedAt: "2026-07-30T00:00:00.000Z",
-        mergedAmount: 40,
-      });
-      mergeLedgerRepo.markOnchain("merge-old-lots");
-      const [row] = mergeLedgerRepo.findNonTerminal();
-      // One second BEFORE the floored threshold — the last instant a lot can carry and still settle.
-      const lotCreatedAt = new Date(
-        Math.floor(parseLedgerInstantMs(row!.mergedAt) / 1000) * 1000 - 1000,
-      ).toISOString();
-      (lotRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([{ createdAt: lotCreatedAt }]);
+      createOnchainRow(mergeLedgerRepo, "merge-token-mismatch");
+      const yes = positionRepo.findById(createPositionId("p-yes"))!;
+      positionRepo.save({ ...yes, tokenId: createTokenId("wrong-token") });
+      const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
 
-      const { recovered, remaining } = await recoverConfirmedOnchainMerges({
-        bus,
+      const result = await recover(
+        "merge-token-mismatch",
         positionRepo,
-        orderRepo,
-        marketRepo,
-        fillRepo,
         lotRepo,
         mergeLedgerRepo,
-        db: conn.db,
-        log,
-      });
+        runtimeMetrics,
+      );
 
-      expect(recovered).toBe(1);
-      expect(remaining).toEqual([]);
-      expect(lotRepo.consumeFifo).toHaveBeenCalled();
-      expect(log.error).not.toHaveBeenCalledWith(
-        expect.anything(),
-        expect.stringContaining(
-          "LIVE FIFO lot that cannot be shown to predate the START of the SECOND in which the " +
-            "write-ahead row was recorded",
-        ),
+      expect(result.recovered).toBe(0);
+      expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "inventory_merge_recovery_fenced_total",
+        1,
+        JSON.stringify({ reason: "yes-token-mismatch" }),
+      );
+    });
+
+    it.each([
+      ["after", "2026-08-01T00:00:00.000Z", "yes-opened-after"],
+      ["equal", "2026-07-30T00:00:00.750Z", "yes-opened-after"],
+      ["unreadable", "not-a-timestamp", "yes-unreadable-opened-at"],
+    ])("fences an exact leg whose openedAt is %s the intent", async (_label, openedAt, reason) => {
+      const { positionRepo, lotRepo } = makeMergeableFixtures();
+      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
+      createOnchainRow(mergeLedgerRepo, `merge-opened-${_label}`);
+      const yes = positionRepo.findById(createPositionId("p-yes"))!;
+      positionRepo.save({ ...yes, openedAt });
+      const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+
+      const result = await recover(
+        `merge-opened-${_label}`,
+        positionRepo,
+        lotRepo,
+        mergeLedgerRepo,
+        runtimeMetrics,
+      );
+
+      expect(result.recovered).toBe(0);
+      expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "inventory_merge_recovery_fenced_total",
+        1,
+        JSON.stringify({ reason }),
+      );
+    });
+
+    it.each([
+      ["after", "2026-07-30T00:00:02.000Z"],
+      ["same second", "2026-07-30 00:00:00"],
+      ["unreadable", "not-a-timestamp"],
+    ])("fences a live lot created %s the intent's second floor", async (_label, createdAt) => {
+      const { positionRepo, lotRepo } = makeMergeableFixtures();
+      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
+      createOnchainRow(mergeLedgerRepo, `merge-lot-${_label.replace(" ", "-")}`);
+      (lotRepo.findOpen as ReturnType<typeof vi.fn>).mockImplementation((positionId: string) =>
+        positionId === "p-yes" ? [{ createdAt }] : [],
+      );
+      const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+
+      const result = await recover(
+        `merge-lot-${_label.replace(" ", "-")}`,
+        positionRepo,
+        lotRepo,
+        mergeLedgerRepo,
+        runtimeMetrics,
+      );
+
+      expect(result.recovered).toBe(0);
+      expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "inventory_merge_recovery_fenced_total",
+        1,
+        JSON.stringify({ reason: "yes-lot-after" }),
+      );
+    });
+
+    it("settles when every exact-position live lot predates the intent's second", async () => {
+      const { positionRepo, lotRepo } = makeMergeableFixtures();
+      const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
+      createOnchainRow(mergeLedgerRepo, "merge-old-lots");
+      (lotRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        { createdAt: "2026-07-29T23:59:59.999Z" },
+      ]);
+
+      const result = await recover("merge-old-lots", positionRepo, lotRepo, mergeLedgerRepo);
+
+      expect(result.recovered).toBe(1);
+      expect(result.remaining).toEqual([]);
+    });
+
+    it("keeps an unidentified legacy onchain row fenced", async () => {
+      const { positionRepo, lotRepo } = makeMergeableFixtures();
+      const real = new SqliteMergeLedgerRepository(conn.db);
+      const legacy = {
+        mergeId: "merge-legacy-null",
+        conditionId: CONDITION_ID,
+        mergedAmount: 40,
+        spreadPnl: 0,
+        mergedAt: "2026-07-30T00:00:00.000Z",
+        status: "onchain" as const,
+        yesTokenId: null,
+        noTokenId: null,
+        yesPositionId: null,
+        noPositionId: null,
+      };
+      const mergeLedgerRepo = {
+        ...real,
+        findNonTerminal: vi.fn(() => [legacy]),
+      } as unknown as MergeLedgerRepository;
+
+      const result = await recover("merge-legacy-null", positionRepo, lotRepo, mergeLedgerRepo);
+
+      expect(result.recovered).toBe(0);
+      expect(result.remaining).toEqual([legacy]);
+      expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["blank", { yesTokenId: createTokenId("") }, "incomplete-identity"],
+      ["same token", { noTokenId: createTokenId(YES_TOKEN) }, "same-token"],
+      ["same position", { noPositionId: createPositionId("p-yes") }, "same-position"],
+      ["cross-bound", { yesTokenId: createTokenId("p-no") }, "cross-bound-identity"],
+    ])("keeps a corrupt %s recorded row fenced", async (_label, mutation, reason) => {
+      const { positionRepo, lotRepo } = makeMergeableFixtures();
+      const real = new SqliteMergeLedgerRepository(conn.db);
+      const base = {
+        mergeId: `merge-corrupt-${_label.replace(" ", "-")}`,
+        conditionId: CONDITION_ID,
+        mergedAmount: 40,
+        spreadPnl: 0,
+        mergedAt: "2026-07-30T00:00:00.750Z",
+        status: "onchain" as const,
+        ...recordedIdentity(CONDITION_ID),
+        ...mutation,
+      };
+      const mergeLedgerRepo = {
+        ...real,
+        findNonTerminal: vi.fn(() => [base]),
+      } as unknown as MergeLedgerRepository;
+      const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
+
+      const result = await recover(
+        base.mergeId,
+        positionRepo,
+        lotRepo,
+        mergeLedgerRepo,
+        runtimeMetrics,
+      );
+
+      expect(result.recovered).toBe(0);
+      expect(result.remaining).toEqual([base]);
+      expect(lotRepo.consumeFifo).not.toHaveBeenCalled();
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "inventory_merge_recovery_fenced_total",
+        1,
+        JSON.stringify({ reason }),
       );
     });
   });
-
   // r7-M1. Start-up order is load-bearing, not cosmetic: the ownership gate and the profile
   // preflight both judge the runtime by the positions table, and an unapplied merge leaves both
   // legs open with their full cost basis. An operator who lowers maxOpenValueUsdc after such a
@@ -1823,9 +1630,9 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
   // r7-minor. Losing the CAS is a NORMAL outcome of two processes starting together, so what this
   // process REPORTS afterwards has to be true. These two pin the two ways the report could lie.
   it("reports a clean fence after losing the settle race, instead of the pre-race snapshot", async () => {
-    const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
+    const { positionRepo, lotRepo } = makeMergeableFixtures();
     const real = new SqliteMergeLedgerRepository(conn.db);
-    real.recordPending({
+    recordPending(real, {
       mergeId: "merge-lost",
       conditionId: CONDITION_ID,
       mergedAmount: 40,
@@ -1846,9 +1653,6 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     const { recovered, remaining } = await recoverConfirmedOnchainMerges({
       bus,
       positionRepo,
-      orderRepo,
-      marketRepo,
-      fillRepo,
       lotRepo,
       mergeLedgerRepo: withScriptedFenceReads(real, [() => stale]),
       db: conn.db,
@@ -1873,9 +1677,9 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
   // row, and the report says "nothing is fenced" — so a loser that only logged would keep pre-merge
   // sizes in every event-driven cache and trade phantom inventory behind a fence that looks lifted.
   it("republishes both legs after losing the settle race, so the loser's caches converge on the winner's rows", async () => {
-    const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
+    const { positionRepo, lotRepo } = makeMergeableFixtures();
     const real = new SqliteMergeLedgerRepository(conn.db);
-    real.recordPending({
+    recordPending(real, {
       mergeId: "merge-lost-republish",
       conditionId: CONDITION_ID,
       mergedAmount: 100,
@@ -1924,9 +1728,6 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     const { recovered, remaining } = await recoverConfirmedOnchainMerges({
       bus,
       positionRepo,
-      orderRepo,
-      marketRepo,
-      fillRepo,
       lotRepo,
       mergeLedgerRepo: withScriptedFenceReads(real, [() => stale]),
       db: conn.db,
@@ -1953,9 +1754,9 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
   // caller boots on — with auto-merge disabled nothing ever checks again, so an unapplied on-chain
   // merge would be handed to the trading runtime as if both legs were sound.
   it("throws instead of reporting a clear fence when the INITIAL fence read fails", async () => {
-    const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
+    const { positionRepo, lotRepo } = makeMergeableFixtures();
     const real = new SqliteMergeLedgerRepository(conn.db);
-    real.recordPending({
+    recordPending(real, {
       mergeId: "merge-hidden-by-the-unreadable-fence",
       conditionId: CONDITION_ID,
       mergedAmount: 100,
@@ -1967,9 +1768,6 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
       recoverConfirmedOnchainMerges({
         bus,
         positionRepo,
-        orderRepo,
-        marketRepo,
-        fillRepo,
         lotRepo,
         mergeLedgerRepo: withScriptedFenceReads(real, [
           () => {
@@ -1991,16 +1789,18 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
   });
 
   it("falls back to the rows it did not settle when the fence re-read fails, never to an empty fence", async () => {
-    const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeTwoConditionFixtures();
+    const { positionRepo, lotRepo } = makeTwoConditionFixtures();
     const real = new SqliteMergeLedgerRepository(conn.db);
-    real.recordPending({
+    recordPending(real, {
       mergeId: "merge-confirmed",
       conditionId: CONDITION_ID,
       mergedAmount: 40,
       recordedAt: "2026-07-30T00:00:00.000Z",
+      yesPositionId: createPositionId("p-yes-x"),
+      noPositionId: createPositionId("p-no-x"),
     });
     real.markOnchain("merge-confirmed");
-    real.recordPending({
+    recordPending(real, {
       mergeId: "merge-ambiguous",
       conditionId: OTHER_CONDITION_ID,
       mergedAmount: 9,
@@ -2011,9 +1811,6 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     const { recovered, remaining } = await recoverConfirmedOnchainMerges({
       bus,
       positionRepo,
-      orderRepo,
-      marketRepo,
-      fillRepo,
       lotRepo,
       mergeLedgerRepo: withScriptedFenceReads(real, [
         () => initial,
@@ -2049,7 +1846,7 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
         return [{ lot: { entryPrice: positionId === "p-yes" ? 0.3 : 0.4 }, consumed: amount }];
       },
     );
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-race",
       conditionId: CONDITION_ID,
       mergedAmount: 40,
@@ -2084,7 +1881,7 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
 
   it("refuses to drag an already-'applied' row back to 'onchain', and names a row that is simply gone", () => {
     const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-cas",
       conditionId: "0xcond-cas",
       mergedAmount: 10,
@@ -2123,7 +1920,7 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     // Left 'pending', not 'onchain': r12-P1 makes runSweep() repair-and-settle any already-'onchain'
     // row before the fence/candidate check below ever runs, which would settle this row instead of
     // suppressing it — 'pending' is the one non-terminal state repair leaves untouched.
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-survivor",
       conditionId: CONDITION_ID,
       mergedAmount: 100,
@@ -2499,10 +2296,20 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
       .mockImplementationOnce(() => {
         conn.db
           .prepare(
-            `INSERT INTO merge_ledger (merge_id, condition_id, merged_amount, spread_pnl, merged_at, status)
-             VALUES (?, ?, 5, 0, ?, 'pending')`,
+            `INSERT INTO merge_ledger (
+               merge_id, condition_id, merged_amount, spread_pnl, merged_at, status,
+               yes_token_id, no_token_id, yes_position_id, no_position_id
+             ) VALUES (?, ?, 5, 0, ?, 'pending', ?, ?, ?, ?)`,
           )
-          .run(FOREIGN_MERGE_ID, CONDITION_ID, "2026-07-30T00:00:00.000Z");
+          .run(
+            FOREIGN_MERGE_ID,
+            CONDITION_ID,
+            "2026-07-30T00:00:00.000Z",
+            YES_TOKEN,
+            NO_TOKEN,
+            "p-yes-x",
+            "p-no-x",
+          );
         return [];
       });
 
@@ -2556,7 +2363,7 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
   // "unknown" rather than silently falling back to "ok".
   it("healthCheck sees a pre-existing fenced row before any sweep ever runs, and fails closed when the ledger read itself throws", async () => {
     const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "merge-pre-existing",
       conditionId: CONDITION_ID,
       mergedAmount: 5,
@@ -2593,15 +2400,16 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     expect(healthOnReadFailure.detail).toContain("fenced_conditions=unknown");
   });
 
-  it("T10b — recovery's own candidate constructor refuses an ambiguous token and leaves its on-chain row fenced", async () => {
-    const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
+  it("settles the recorded position even when another current row exists for the same token", async () => {
+    const { positionRepo, lotRepo } = makeMergeableFixtures();
     const duplicateYes = {
       ...(positionRepo.findByTokenId(createTokenId(YES_TOKEN)) as Position),
       positionId: createPositionId("p-yes-duplicate"),
     };
     positionRepo.save(duplicateYes);
+    (positionRepo.findByTokenId as ReturnType<typeof vi.fn>).mockClear();
     const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
-    mergeLedgerRepo.recordPending({
+    recordPending(mergeLedgerRepo, {
       mergeId: "ambiguous-recovery",
       conditionId: CONDITION_ID,
       mergedAmount: 5,
@@ -2612,26 +2420,21 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     const result = await recoverConfirmedOnchainMerges({
       bus,
       positionRepo,
-      orderRepo,
-      marketRepo,
-      fillRepo,
       lotRepo,
       mergeLedgerRepo,
       db: conn.db,
       log,
     });
 
-    expect(result.recovered).toBe(0);
-    expect(result.remaining).toHaveLength(1);
-    expect(result.remaining[0]).toMatchObject({ mergeId: "ambiguous-recovery", status: "onchain" });
-    expect(log.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ ambiguousTokens: [YES_TOKEN], skippedConditions: 1 }),
-      "merge candidates skipped — token has multiple non-closed rows",
-    );
+    expect(result.recovered).toBe(1);
+    expect(result.remaining).toEqual([]);
+    expect(lotRepo.consumeFifo).toHaveBeenCalledWith("p-yes", 5);
+    expect(lotRepo.consumeFifo).toHaveBeenCalledWith("p-no", 5);
+    expect(positionRepo.findByTokenId).not.toHaveBeenCalled();
     expect(
       conn.db
         .prepare("SELECT status FROM merge_ledger WHERE merge_id = ?")
         .get("ambiguous-recovery"),
-    ).toEqual({ status: "onchain" });
+    ).toEqual({ status: "applied" });
   });
 });

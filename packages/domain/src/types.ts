@@ -11,6 +11,7 @@ import type {
   ReportId,
   ImportId,
 } from "./ids.js";
+import { parseInstantMs } from "./timestamp.js";
 import type {
   Regime,
   WalletMode,
@@ -2326,7 +2327,92 @@ export interface MergeRecord {
   spreadPnl: number;
   mergedAt: string;
   status: MergeLedgerStatus;
+  yesTokenId: TokenId | null;
+  noTokenId: TokenId | null;
+  yesPositionId: PositionId | null;
+  noPositionId: PositionId | null;
   createdAt?: string;
+}
+
+export interface RecordedMergeLegInput {
+  tokenId: string | null;
+  positionId: string | null;
+  position: { tokenId: string; status: string; openedAt: string | null } | null;
+  liveLotCreatedAts: Array<string | null>;
+  hasTokenWideLiveLots?: boolean;
+}
+
+export interface RecordedMergeIdentityInput {
+  yesTokenId: string | null;
+  noTokenId: string | null;
+  yesPositionId: string | null;
+  noPositionId: string | null;
+}
+
+/** Null means the four IDs are structurally valid; the string is a stable fail-closed reason. */
+export function invalidRecordedMergeIdentity(identity: RecordedMergeIdentityInput): string | null {
+  const { yesTokenId, noTokenId, yesPositionId, noPositionId } = identity;
+  const ids = [yesTokenId, noTokenId, yesPositionId, noPositionId];
+  if (ids.some((id) => !id || id.trim() === "")) return "incomplete-identity";
+  if (yesTokenId === noTokenId) return "same-token";
+  if (yesPositionId === noPositionId) return "same-position";
+  if (
+    yesTokenId === yesPositionId ||
+    yesTokenId === noPositionId ||
+    noTokenId === yesPositionId ||
+    noTokenId === noPositionId
+  ) {
+    return "cross-bound-identity";
+  }
+  return null;
+}
+
+/** Pure, catalog-independent recovery fence for the two identities persisted with a merge intent. */
+export function evaluateRecordedMergeLegs(input: {
+  mergedAt: string;
+  yes: RecordedMergeLegInput;
+  no: RecordedMergeLegInput;
+}): { ok: true } | { ok: false; reason: string } {
+  const invalidIdentity = invalidRecordedMergeIdentity({
+    yesTokenId: input.yes.tokenId,
+    noTokenId: input.no.tokenId,
+    yesPositionId: input.yes.positionId,
+    noPositionId: input.no.positionId,
+  });
+  if (invalidIdentity) return { ok: false, reason: invalidIdentity };
+  const mergedAt = parseInstantMs(input.mergedAt);
+  if (!Number.isFinite(mergedAt)) return { ok: false, reason: "unreadable-merged-at" };
+
+  // Validate every position that is still present before treating an exhausted opposite leg as a
+  // sufficient fence. Otherwise YES missing + NO bound to the wrong token returns
+  // `yes-missing-or-closed`, and the reconciliation CLI interprets that as permission to delete the
+  // only durable record of an on-chain merge. Token binding is static identity, so any mismatch on
+  // either side makes the whole record inconclusive regardless of the other leg's exhaustibility.
+  for (const [side, leg] of Object.entries({ yes: input.yes, no: input.no })) {
+    if (leg.position && leg.position.tokenId !== leg.tokenId) {
+      return { ok: false, reason: `${side}-token-mismatch` };
+    }
+  }
+
+  for (const [side, leg] of Object.entries({ yes: input.yes, no: input.no })) {
+    if (!leg.position || leg.position.status === "closed") {
+      if (leg.hasTokenWideLiveLots) return { ok: false, reason: `${side}-resurrectable` };
+      return { ok: false, reason: `${side}-missing-or-closed` };
+    }
+    const openedAt = parseInstantMs(leg.position.openedAt ?? "");
+    if (!Number.isFinite(openedAt)) return { ok: false, reason: `${side}-unreadable-opened-at` };
+    if (openedAt >= mergedAt) return { ok: false, reason: `${side}-opened-after` };
+    const floor = Math.floor(mergedAt / 1000) * 1000;
+    if (
+      leg.liveLotCreatedAts.some((at) => {
+        const createdAt = parseInstantMs(at ?? "");
+        return !Number.isFinite(createdAt) || createdAt >= floor;
+      })
+    ) {
+      return { ok: false, reason: `${side}-lot-after` };
+    }
+  }
+  return { ok: true };
 }
 
 export interface PositionDrift {

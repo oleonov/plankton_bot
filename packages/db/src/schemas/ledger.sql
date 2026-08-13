@@ -577,7 +577,16 @@ CREATE TABLE IF NOT EXISTS merge_ledger (
   -- migration 092: write-ahead merge intent. 'pending' = recorded before the on-chain submission,
   -- 'onchain' = the chain moved and this ledger has not caught up yet, 'applied' = settled.
   status         TEXT NOT NULL DEFAULT 'applied'
-    CHECK (status IN ('pending', 'onchain', 'applied'))
+    CHECK (status IN ('pending', 'onchain', 'applied')),
+  yes_token_id TEXT,
+  no_token_id TEXT,
+  yes_position_id TEXT,
+  no_position_id TEXT,
+  CHECK (status = 'applied' OR ((
+    trim(yes_token_id) != '' AND trim(no_token_id) != '' AND
+    trim(yes_position_id) != '' AND trim(no_position_id) != '' AND
+    yes_token_id != no_token_id AND yes_position_id != no_position_id
+  ) IS TRUE))
 );
 
 CREATE INDEX IF NOT EXISTS idx_merge_ledger_merged_at ON merge_ledger(merged_at);

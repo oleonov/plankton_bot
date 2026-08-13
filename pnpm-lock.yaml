@@ -287,6 +287,9 @@ importers:
 
   scripts:
     dependencies:
+      "@krabs/domain":
+        specifier: workspace:*
+        version: link:../packages/domain
       better-sqlite3:
         specifier: ^12.8.0
         version: 12.8.0

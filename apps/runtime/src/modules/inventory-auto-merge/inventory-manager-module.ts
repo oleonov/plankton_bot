@@ -10,6 +10,7 @@ import type {
   RuntimeControl,
   RuntimeModule,
 } from "@krabs/domain";
+import { invalidRecordedMergeIdentity } from "@krabs/domain";
 import { SettlementNotSubmittedError } from "@krabs/exchange";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
@@ -405,6 +406,14 @@ export class InventoryManagerModule implements RuntimeModule {
       const claimed: typeof eligible = [];
       const lostClaims: string[] = [];
       for (const candidate of eligible) {
+        const invalidIdentity = invalidRecordedMergeIdentity(candidate);
+        if (invalidIdentity) {
+          this.deps.log.error(
+            { conditionId: candidate.conditionId, reason: invalidIdentity },
+            "merge candidate has invalid recorded leg identity — candidate dropped",
+          );
+          continue;
+        }
         const mergeId = this.nextMergeId(candidate.conditionId);
         // Registered BEFORE the write: `recordPending` can commit its row and still throw, and an
         // id nobody recorded is an intent no failure path can discard. Safe only because the id is
@@ -416,6 +425,10 @@ export class InventoryManagerModule implements RuntimeModule {
             conditionId: candidate.conditionId,
             mergedAmount: candidate.mergeAmount,
             recordedAt,
+            yesTokenId: candidate.yesTokenId,
+            noTokenId: candidate.noTokenId,
+            yesPositionId: candidate.yesPositionId,
+            noPositionId: candidate.noPositionId,
           })
         ) {
           // A lost claim inserted nothing, so there is no row of ours to track or clean up.

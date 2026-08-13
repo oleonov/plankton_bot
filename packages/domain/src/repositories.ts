@@ -635,6 +635,10 @@ export interface MergeLedgerRepository {
     conditionId: string;
     mergedAmount: number;
     recordedAt: string;
+    yesTokenId: import("./ids.js").TokenId;
+    noTokenId: import("./ids.js").TokenId;
+    yesPositionId: import("./ids.js").PositionId;
+    noPositionId: import("./ids.js").PositionId;
   }): boolean;
 
   /**
@@ -650,7 +654,12 @@ export interface MergeLedgerRepository {
    * Throws if no row matched — that throw is what rolls those mutations back, rather than
    * committing a merge the ledger has no record of.
    */
-  markApplied(merge: import("./types.js").MergeRecord): void;
+  markApplied(
+    merge: Pick<
+      import("./types.js").MergeRecord,
+      "mergeId" | "conditionId" | "mergedAmount" | "spreadPnl" | "mergedAt" | "status"
+    >,
+  ): void;
 
   /**
    * Drop an intent row that provably never reached the chain. Deletes ONLY while the row is still

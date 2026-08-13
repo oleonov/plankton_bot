@@ -45,8 +45,10 @@ function insertRow(
   row: Partial<MergeLedgerRow> & { merge_id: string },
 ): void {
   db.prepare(
-    `INSERT INTO merge_ledger (merge_id, condition_id, merged_amount, spread_pnl, merged_at, created_at, status)
-     VALUES (@merge_id, @condition_id, @merged_amount, @spread_pnl, @merged_at, @created_at, @status)`,
+    `INSERT INTO merge_ledger (merge_id, condition_id, merged_amount, spread_pnl, merged_at, created_at, status,
+       yes_token_id, no_token_id, yes_position_id, no_position_id)
+     VALUES (@merge_id, @condition_id, @merged_amount, @spread_pnl, @merged_at, @created_at, @status,
+       @yes_token_id, @no_token_id, @yes_position_id, @no_position_id)`,
   ).run({
     condition_id: `c-${row.merge_id}`,
     merged_amount: 10,
@@ -54,12 +56,15 @@ function insertRow(
     merged_at: "2026-07-01T00:00:00.000Z",
     created_at: "2026-07-01T00:00:00.000Z",
     status: "pending",
+    yes_token_id: `yes-${row.merge_id}`,
+    no_token_id: `no-${row.merge_id}`,
+    yes_position_id: `p-yes-${row.merge_id}`,
+    no_position_id: `p-no-${row.merge_id}`,
     ...row,
   });
 }
 
-// Minimal fixture for the `markets` row a token lives on. Only the columns `proveRecoveryFence`
-// reads (outcome, outcome_index) vary per test; the rest are NOT NULL columns with no DEFAULT.
+// Minimal mutable-catalog fixture used to prove the exact-identity result is remap-invariant.
 function insertMarket(
   db: Database.Database,
   market: Partial<{
@@ -296,8 +301,13 @@ describe("merge-ledger-reconcile: row age", () => {
   it("uses the real DEFAULT that SQLite writes, so the test cannot drift from the schema", () => {
     const db = makeDb();
     db.prepare(
-      `INSERT INTO merge_ledger (merge_id, condition_id, merged_amount, spread_pnl, merged_at, status)
-       VALUES ('m-default', 'c-1', 10, 0, '2026-07-01T00:00:00.000Z', 'pending')`,
+      `INSERT INTO merge_ledger (
+         merge_id, condition_id, merged_amount, spread_pnl, merged_at, status,
+         yes_token_id, no_token_id, yes_position_id, no_position_id
+       ) VALUES (
+         'm-default', 'c-1', 10, 0, '2026-07-01T00:00:00.000Z', 'pending',
+         't-yes', 't-no', 'p-yes', 'p-no'
+       )`,
     ).run();
     const createdAt = findRow(db, "m-default")!.created_at;
 
@@ -391,970 +401,189 @@ describe("merge-ledger-reconcile: proveRecoveryFence", () => {
     db = makeDb();
   });
 
-  it("refuses a settleable pair — both legs still open and predate merged_at", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-settleable",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-settleable",
-      outcome: "No",
-      outcome_index: 1,
-    });
+  function insertExactPair(mergeId: string): void {
     insertPosition(db, {
-      position_id: "p-yes",
-      token_id: "t-yes",
-      status: "open",
+      position_id: `p-yes-${mergeId}`,
+      token_id: `yes-${mergeId}`,
       opened_at: "2026-06-01T00:00:00.000Z",
     });
     insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
+      position_id: `p-no-${mergeId}`,
+      token_id: `no-${mergeId}`,
       opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-settleable",
-      condition_id: "c-settleable",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    const proof = proveRecoveryFence(db, findRow(db, "m-settleable")!);
-    assertRefused(proof);
-    expect(proof.proven === false && proof.reason).toMatch(/p-yes/);
-    expect(proof.proven === false && proof.reason).toMatch(/p-no/);
-  });
-
-  it("proves a replaced YES leg — the original closed, its replacement opened after merged_at", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-replaced",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-replaced",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes-v1",
-      token_id: "t-yes",
-      status: "closed",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-yes-v2",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-07-02T00:00:00.000Z", // after merged_at — the r3/r4 replacement scenario
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-replaced",
-      condition_id: "c-replaced",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    const proof = proveRecoveryFence(db, findRow(db, "m-replaced")!);
-    expect(proof).toEqual({ proven: true });
-  });
-
-  it("proves the fence for a sole YES leg carrying the legacy empty condition_id", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-legacy",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-legacy",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z", // old enough to pass the freshness test
-      condition_id: "", // what a row written before the column existed carries
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-legacy",
-      condition_id: "c-legacy",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    // findStaleMergeLeg fences this leg — it cannot show the row belongs to the condition.
-    // Counting it as usable here would leave the merge with no reachable exit: the runtime
-    // refuses to settle it while this command refuses to discard it.
-    expect(proveRecoveryFence(db, findRow(db, "m-legacy")!)).toEqual({ proven: true });
-  });
-
-  it("proves the fence for a sole YES leg owned by a different condition", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-foreign",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-foreign",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-      condition_id: "c-somewhere-else",
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-foreign",
-      condition_id: "c-foreign",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    expect(proveRecoveryFence(db, findRow(db, "m-foreign")!)).toEqual({ proven: true });
-  });
-
-  it("judges ambiguity on the owned rows — two foreign rows on a token supply no leg at all", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-two-foreign",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-two-foreign",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    // Closing one of these leaves the other, which the runtime fences exactly as it fenced the
-    // first — so this is not the "ambiguous now, settleable after one closes" shape.
-    insertPosition(db, {
-      position_id: "p-yes-a",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-      condition_id: "",
-    });
-    // 'dust', not a second 'open': index 032 (idx_positions_unique_open_per_token) allows only one
-    // open row per token, so two open siblings would model a state the real ledger cannot hold.
-    // 'dust' is still non-closed, which is what `activeLegs` selects — the raw ambiguity survives.
-    insertPosition(db, {
-      position_id: "p-yes-b",
-      token_id: "t-yes",
-      status: "dust",
-      opened_at: "2026-06-02T00:00:00.000Z",
-      condition_id: "c-somewhere-else",
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-two-foreign",
-      condition_id: "c-two-foreign",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    expect(proveRecoveryFence(db, findRow(db, "m-two-foreign")!)).toEqual({ proven: true });
-  });
-
-  it("keeps a foreign non-closed row's live lots out of the resurrectable set", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-foreign-lots",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-foreign-lots",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes-foreign",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-      condition_id: "c-somewhere-else",
-    });
-    insertLot(db, { lot_id: "l-foreign", position_id: "p-yes-foreign", token_id: "t-yes" });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-foreign-lots",
-      condition_id: "c-foreign-lots",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    // The resurrection branch only covers lots hanging off rows OUTSIDE the non-closed set. Moving
-    // the ownership predicate into the activeLegs SQL would drop this row from that set, turn its
-    // own live lot into a "resurrectable" one, and flip the proof back to a refusal.
-    expect(proveRecoveryFence(db, findRow(db, "m-foreign-lots")!)).toEqual({ proven: true });
-  });
-
-  it("proves both legs consumed — only closed rows remain on either token", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-consumed",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-consumed",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes",
-      token_id: "t-yes",
-      status: "closed",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "closed",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-consumed",
-      condition_id: "c-consumed",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    const proof = proveRecoveryFence(db, findRow(db, "m-consumed")!);
-    expect(proof).toEqual({ proven: true });
-  });
-
-  it("refuses a token whose rows are all closed while a live lot still hangs off one of them", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-lots",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, { token_id: "t-no", condition_id: "c-lots", outcome: "No", outcome_index: 1 });
-    insertPosition(db, {
-      position_id: "p-yes",
-      token_id: "t-yes",
-      status: "closed",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    // A fenced discard is exactly the case where the ORIGINAL legs' lots were never consumed, so a
-    // live lot under a closed row is the expected state, not a corrupt one.
-    insertLot(db, { lot_id: "l-yes", position_id: "p-yes", token_id: "t-yes", remaining_size: 7 });
-    insertRow(db, {
-      merge_id: "m-lots",
-      condition_id: "c-lots",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    // "Every row is closed" is not durable: rebuildTokenPosition picks the live lot's owner even
-    // when that owner is closed, reopens it and BACKDATES opened_at past merged_at — so the token
-    // comes back as an un-fenced settleable leg after this command already deleted its ledger row.
-    const proof = proveRecoveryFence(db, findRow(db, "m-lots")!);
-    assertRefused(proof);
-    expect(proof.reason).toContain("p-yes=7");
-    expect(proof.reason).toContain("rebuildTokenPosition");
-  });
-
-  it("still proves the fence when the only live lots belong to the fenced replacement itself", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-own-lots",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-own-lots",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes-v2",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-07-02T00:00:00.000Z", // the replacement findStaleMergeLeg fences
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertLot(db, {
-      lot_id: "l-yes-v2",
-      position_id: "p-yes-v2",
-      token_id: "t-yes",
-      remaining_size: 12,
-    });
-    insertRow(db, {
-      merge_id: "m-own-lots",
-      condition_id: "c-own-lots",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    // A replacement always owns live lots. Counting them would make every genuinely fenced row
-    // refuse, leaving the escape hatch with no reachable use at all — the lot check is scoped to
-    // owners OUTSIDE the token's non-closed set precisely so this case still passes.
-    expect(proveRecoveryFence(db, findRow(db, "m-own-lots")!)).toEqual({ proven: true });
-  });
-
-  // The `lot-after` mirror. These three cover the same ground as the runtime's own fence tests in
-  // apps/runtime/src/modules/inventory-auto-merge/__tests__/merge-ledger-write-ahead.test.ts, from
-  // the opposite side: there the fence must FIRE, here the proof must SEE that it fires.
-  it("proves the fence when a leg old enough by opened_at carries a live lot created at the merge", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-lot-after",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-lot-after",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    // Exactly the consolidation aftermath: adoption backdated the replacement's opened_at to an
-    // absorbed sibling's, so the freshness check above reads it as old. The lot it bought is the
-    // provenance that survived, and the runtime refuses to debit it.
-    insertPosition(db, {
-      position_id: "p-yes",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertLot(db, {
-      lot_id: "l-yes-post",
-      position_id: "p-yes",
-      token_id: "t-yes",
-      created_at: "2026-07-01T00:00:00.000Z", // `>=`, same as the runtime
-    });
-    insertRow(db, {
-      merge_id: "m-lot-after",
-      condition_id: "c-lot-after",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    expect(proveRecoveryFence(db, findRow(db, "m-lot-after")!)).toEqual({ proven: true });
-  });
-
-  it("proves the fence for a lot second-truncated into merged_at's own second", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-lot-floor",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-lot-floor",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    // 250 ms BEFORE merged_at in wall-clock, yet the runtime fences it: `created_at` defaults to
-    // `datetime('now')`, whose second resolution can only render an instant EARLIER than the one it
-    // records. Both sides floor merged_at to its own second so a truncated lot still compares as
-    // post-merge — without that floor this proof would say "settleable" about a fenced row.
-    insertLot(db, {
-      lot_id: "l-yes-floor",
-      position_id: "p-yes",
-      token_id: "t-yes",
-      created_at: "2026-07-01T00:00:00.500Z",
-    });
-    insertRow(db, {
-      merge_id: "m-lot-floor",
-      condition_id: "c-lot-floor",
-      merged_at: "2026-07-01T00:00:00.750Z",
-      status: "onchain",
-    });
-
-    expect(proveRecoveryFence(db, findRow(db, "m-lot-floor")!)).toEqual({ proven: true });
-  });
-
-  it("refuses to prove the fence on a lot whose created_at it cannot read, even though the runtime fences it", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-lot-unreadable",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-lot-unreadable",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    // The space form the `datetime('now')` column DEFAULT actually writes. The runtime's reader is
-    // tolerant of it and fails CLOSED anyway, so it fences this leg; canonicalIsoMs rejects it
-    // outright. The asymmetry is deliberate and must stay in THIS direction: an unreadable lot costs
-    // one operator escalation, while accepting it as proof would delete a settleable ledger row.
-    insertLot(db, {
-      lot_id: "l-yes-space",
-      position_id: "p-yes",
-      token_id: "t-yes",
-      created_at: "2026-07-01 00:00:02",
-    });
-    insertRow(db, {
-      merge_id: "m-lot-unreadable",
-      condition_id: "c-lot-unreadable",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    const proof = proveRecoveryFence(db, findRow(db, "m-lot-unreadable")!);
-    assertRefused(proof);
-    expect(proof.reason).toContain("t-yes (p-yes, opened_at=2026-06-01T00:00:00.000Z)");
-  });
-
-  it("refuses a usable leg on a token it cannot map to YES or NO — a later upsert makes it settleable", () => {
-    insertMarket(db, {
-      token_id: "t-dem",
-      condition_id: "c-unclassified",
-      outcome: "Democrat",
-      outcome_index: null,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-unclassified",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-dem",
-      token_id: "t-dem",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-unclassified",
-      condition_id: "c-unclassified",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    // Dropping the unmapped leg would silently empty the YES side and read as proof. An ordinary
-    // market upsert filling outcome_index turns that very row into a leg findMergeCandidates derives.
-    const proof = proveRecoveryFence(db, findRow(db, "m-unclassified")!);
-    assertRefused(proof);
-    expect(proof.reason).toContain("t-dem");
-    expect(proof.reason).toContain('"Democrat"');
-    expect(proof.reason).toContain("outcome_index");
-  });
-
-  it("proves a replacement opened in merged_at's own millisecond — the mirror of findStaleMergeLeg's >=", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-same-ms",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-same-ms",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes-v2",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-07-01T00:00:00.000Z", // EQUAL to merged_at
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-same-ms",
-      condition_id: "c-same-ms",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    // The runtime fences an equal instant too, so reporting this leg usable would refuse the exact
-    // stuck row --fenced exists for. The CLI's one-sidedness applies to UNCERTAINTY, not to
-    // reproducing a predicate it knows.
-    expect(proveRecoveryFence(db, findRow(db, "m-same-ms")!)).toEqual({ proven: true });
-  });
-
-  it("refuses an ambiguous YES token — ambiguousTokens() skips it only until one row closes", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-ambiguous",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-ambiguous",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes-open",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-yes-dust",
-      token_id: "t-yes",
-      status: "dust",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-ambiguous",
-      condition_id: "c-ambiguous",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    // Both rows predate merged_at, so neither is a replacement findStaleMergeLeg would fence.
-    // Recovery skips the token TODAY, but startup adoption or dust abandonment closes one of the two
-    // and the survivor becomes a settleable leg — proving the fence off a transient state is exactly
-    // the delete-wins race the proof exists to prevent.
-    const proof = proveRecoveryFence(db, findRow(db, "m-ambiguous")!);
-    assertRefused(proof);
-    expect(proof.proven === false && proof.reason).toContain("p-yes-open + p-yes-dust");
-  });
-
-  it("refuses symmetrically when it is the NO token that carries the two non-closed rows", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-ambiguous-no",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-ambiguous-no",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes-open",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-no-open",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-no-dust",
-      token_id: "t-no",
-      status: "dust",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-ambiguous-no",
-      condition_id: "c-ambiguous-no",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    const proof = proveRecoveryFence(db, findRow(db, "m-ambiguous-no")!);
-    assertRefused(proof);
-    expect(proof.proven === false && proof.reason).toContain("p-no-open + p-no-dust");
-  });
-
-  it("refuses a non-canonical opened_at — uncertainty resolves toward usable, not toward the delete", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-noncanonical-opened",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-noncanonical-opened",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes",
-      token_id: "t-yes",
-      status: "open",
-      // SQLite space form, later in wall-clock terms than merged_at — but canonicalIsoMs cannot
-      // parse it, so the proof cannot reproduce the runtime's freshness comparison for this leg.
-      opened_at: "2026-07-01 00:00:00",
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-noncanonical-opened",
-      condition_id: "c-noncanonical-opened",
-      merged_at: "2026-06-15T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    const proof = proveRecoveryFence(db, findRow(db, "m-noncanonical-opened")!);
-    assertRefused(proof);
-  });
-
-  it("refuses a non-canonical merged_at even when both legs are otherwise fully fenced", () => {
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-noncanonical-merged",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-noncanonical-merged",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-yes",
-      token_id: "t-yes",
-      status: "closed",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "closed",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-noncanonical-merged",
-      condition_id: "c-noncanonical-merged",
-      merged_at: "2026-07-01 00:00:00", // SQLite space form, not the runtime's canonical ISO
-      status: "onchain",
-    });
-
-    const proof = proveRecoveryFence(db, findRow(db, "m-noncanonical-merged")!);
-    assertRefused(proof);
-    expect(proof.proven === false && proof.reason).toMatch(/merged_at/);
-  });
-
-  it("refuses when the condition has no markets rows — an ingestion gap is not proof of a fence", () => {
-    // A position exists, but on a token that is not linked to this condition_id via `markets` — the
-    // proof must still refuse, since it cannot identify which legs the merge moved.
-    insertPosition(db, {
-      position_id: "p-orphan",
-      token_id: "t-orphan",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-no-markets",
-      condition_id: "c-no-markets",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    const proof = proveRecoveryFence(db, findRow(db, "m-no-markets")!);
-    assertRefused(proof);
-  });
-
-  it("refuses when markets names only the YES side — the empty NO side is a catalog gap, not a fence", () => {
-    // The dangerous shape, and an ordinary one: on the live ledger 2026-08-11, 33 of the 72
-    // conditions holding an open position have `markets` rows for one side only. The YES leg here
-    // is live and predates merged_at, so the moment a scanner upsert supplies the NO row the pair
-    // findMergeCandidates derives is the ORIGINAL pair the on-chain merge already moved.
-    insertMarket(db, {
-      token_id: "t-yes",
-      condition_id: "c-one-sided",
-      outcome: "Yes",
-      outcome_index: 0,
-    });
-    insertPosition(db, {
-      position_id: "p-yes",
-      token_id: "t-yes",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-one-sided",
-      condition_id: "c-one-sided",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    const proof = proveRecoveryFence(db, findRow(db, "m-one-sided")!);
-    assertRefused(proof);
-    expect(proof.reason).toContain("NO: none");
-    expect(proof.reason).toContain("t-yes");
-  });
-
-  it("refuses symmetrically when it is the YES side that markets does not name", () => {
-    insertMarket(db, {
-      token_id: "t-no",
-      condition_id: "c-no-only",
-      outcome: "No",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-no",
-      token_id: "t-no",
-      status: "closed",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: "m-no-only",
-      condition_id: "c-no-only",
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
-    });
-
-    // Every row on the named side is closed, so the old shape read "no usable NO leg" as proof even
-    // though the side that could supply one was simply absent from the catalog.
-    const proof = proveRecoveryFence(db, findRow(db, "m-no-only")!);
-    assertRefused(proof);
-    expect(proof.reason).toContain("YES: none");
-  });
-
-  // The three tests below share one shape: `markets` names BOTH sides of the condition (so the
-  // catalog refusal above does not fire), the NO side holds no position at all, and the YES side
-  // holds a usable leg — the exact state the proof reads as "one side is empty, so recovery can
-  // never pair them" and returns proven. What varies is whether the condition ALSO owns a position
-  // whose token is currently mapped somewhere else.
-  function seedBothSidedCondition(conditionId: string, mergeId: string): void {
-    insertMarket(db, { token_id: `${conditionId}-yes`, condition_id: conditionId, outcome: "Yes" });
-    insertMarket(db, { token_id: `${conditionId}-no`, condition_id: conditionId, outcome: "No" });
-    insertPosition(db, {
-      position_id: `p-${conditionId}-yes`,
-      token_id: `${conditionId}-yes`,
-      condition_id: conditionId,
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertRow(db, {
-      merge_id: mergeId,
-      condition_id: conditionId,
-      merged_at: "2026-07-01T00:00:00.000Z",
-      status: "onchain",
     });
   }
 
-  it("refuses when the condition owns a non-closed position whose token markets no longer names", () => {
-    // A scanner upsert moved the NO leg's token to another condition (UPSERT_MARKET_SQL rewrites
-    // markets.condition_id wholesale), so the empty NO side is an artifact of the catalog, not of
-    // the ledger. Deleting here would leave nothing to fence the pair once the token is mapped
-    // back — findMergeCandidates would re-derive the ORIGINAL pair and merge it a second time on
-    // chain. positions.condition_id is the anchor because no market upsert rewrites it.
-    seedBothSidedCondition("c-displaced", "m-displaced");
-    insertPosition(db, {
-      position_id: "p-moved",
-      token_id: "t-moved",
-      condition_id: "c-displaced",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertMarket(db, { token_id: "t-moved", condition_id: "c-elsewhere", outcome: "No" });
+  it("refuses a recoverable exact pair", () => {
+    insertExactPair("m-recoverable");
+    insertRow(db, { merge_id: "m-recoverable", status: "onchain" });
 
-    const proof = proveRecoveryFence(db, findRow(db, "m-displaced")!);
+    const proof = proveRecoveryFence(db, findRow(db, "m-recoverable")!);
+
     assertRefused(proof);
-    expect(proof.reason).toContain("t-moved");
-    expect(proof.reason).toContain("p-moved");
+    expect(proof.reason).toBe("both exact recorded legs remain recoverable");
   });
 
-  it("refuses a displaced leg that is closed but still holds live FIFO lots", () => {
-    // Same durability notion describeUsableLeg applies to non-displaced tokens: startup adoption
-    // reopens a closed owner that still has remaining_size > 0, so "closed" is not the end state.
-    seedBothSidedCondition("c-displaced-lots", "m-displaced-lots");
+  it("is invariant under mutable market catalog remaps", () => {
+    insertExactPair("m-remap");
+    insertRow(db, { merge_id: "m-remap", condition_id: "c-original", status: "onchain" });
+    insertMarket(db, {
+      token_id: "yes-m-remap",
+      condition_id: "c-original",
+      outcome: "Yes",
+      outcome_index: 0,
+    });
+    const before = proveRecoveryFence(db, findRow(db, "m-remap")!);
+    db.prepare(
+      `UPDATE markets SET condition_id = 'c-replacement', outcome = 'No', outcome_index = 1
+       WHERE token_id = 'yes-m-remap'`,
+    ).run();
+
+    const after = proveRecoveryFence(db, findRow(db, "m-remap")!);
+
+    expect(after).toEqual(before);
+    assertRefused(after);
+  });
+
+  it("proves a missing exact leg only when its token has no live lots", () => {
     insertPosition(db, {
-      position_id: "p-moved-closed",
-      token_id: "t-moved-closed",
-      condition_id: "c-displaced-lots",
-      status: "closed",
+      position_id: "p-no-m-missing",
+      token_id: "no-m-missing",
+      opened_at: "2026-06-01T00:00:00.000Z",
+    });
+    insertRow(db, { merge_id: "m-missing", status: "onchain" });
+
+    expect(proveRecoveryFence(db, findRow(db, "m-missing")!)).toEqual({ proven: true });
+  });
+
+  it("proves a closed exact leg only when its token has no live lots", () => {
+    insertExactPair("m-closed");
+    db.prepare(`UPDATE positions SET status = 'closed' WHERE position_id = 'p-yes-m-closed'`).run();
+    insertRow(db, { merge_id: "m-closed", status: "onchain" });
+
+    expect(proveRecoveryFence(db, findRow(db, "m-closed")!)).toEqual({ proven: true });
+  });
+
+  it.each([
+    ["YES", "yes", "no", "no-token-mismatch"],
+    ["NO", "no", "yes", "yes-token-mismatch"],
+  ])(
+    "refuses an exhausted %s leg when the other exact position has a mismatched token",
+    (_label, exhausted, mismatched, expectedReason) => {
+      const mergeId = `m-exhausted-${exhausted}`;
+      insertPosition(db, {
+        position_id: `p-${mismatched}-${mergeId}`,
+        token_id: "wrong-token",
+        opened_at: "2026-06-01T00:00:00.000Z",
+      });
+      insertRow(db, { merge_id: mergeId, status: "onchain" });
+
+      const proof = proveRecoveryFence(db, findRow(db, mergeId)!);
+
+      assertRefused(proof);
+      expect(proof.reason).toContain(expectedReason);
+    },
+  );
+
+  it("refuses a missing exact leg while any live lot for its recorded token remains", () => {
+    insertPosition(db, {
+      position_id: "p-yes-replacement",
+      token_id: "yes-m-resurrectable",
+      opened_at: "2026-08-01T00:00:00.000Z",
+    });
+    insertPosition(db, {
+      position_id: "p-no-m-resurrectable",
+      token_id: "no-m-resurrectable",
       opened_at: "2026-06-01T00:00:00.000Z",
     });
     insertLot(db, {
-      lot_id: "l-moved-closed",
-      position_id: "p-moved-closed",
-      token_id: "t-moved-closed",
+      lot_id: "l-resurrectable",
+      position_id: "p-yes-replacement",
+      token_id: "yes-m-resurrectable",
+      created_at: "2026-08-01T00:00:00.000Z",
     });
+    insertRow(db, { merge_id: "m-resurrectable", status: "onchain" });
 
-    const proof = proveRecoveryFence(db, findRow(db, "m-displaced-lots")!);
+    const proof = proveRecoveryFence(db, findRow(db, "m-resurrectable")!);
+
     assertRefused(proof);
-    expect(proof.reason).toContain("t-moved-closed");
+    expect(proof.reason).toMatch(/yes-resurrectable/);
   });
 
-  it("still refuses a displaced leg when the condition also owns a markets row with a NULL token_id", () => {
-    // final5-P1-4. `markets.token_id` is a bare `TEXT PRIMARY KEY` (packages/db/src/schemas/
-    // ledger.sql:11) and SQLite's legacy rowid-table quirk lets a non-INTEGER PRIMARY KEY hold NULL.
-    // With `NOT IN`, one such row makes every comparison in the subquery UNKNOWN instead of TRUE —
-    // the displaced query returns zero rows and the refusal silently disables itself, which is
-    // exactly the failure mode a fail-closed proof must not have. This command runs against an
-    // arbitrary on-disk ledger, so the schema's own permissiveness is the reachability argument.
-    seedBothSidedCondition("c-null-token", "m-null-token");
+  it("refuses an exact position whose token differs from the recorded token", () => {
     insertPosition(db, {
-      position_id: "p-moved-null",
-      token_id: "t-moved-null",
-      condition_id: "c-null-token",
-      status: "open",
+      position_id: "p-yes-m-mismatch",
+      token_id: "wrong-token",
       opened_at: "2026-06-01T00:00:00.000Z",
     });
-    insertMarket(db, { token_id: "t-moved-null", condition_id: "c-elsewhere-null", outcome: "No" });
-    db.prepare(
-      `INSERT INTO markets (token_id, condition_id, slug, question, outcome, outcome_index, tick_size)
-       VALUES (NULL, 'c-null-token', 'slug-null', 'question-null', 'Yes', NULL, 0.01)`,
-    ).run();
+    insertPosition(db, {
+      position_id: "p-no-m-mismatch",
+      token_id: "no-m-mismatch",
+      opened_at: "2026-06-01T00:00:00.000Z",
+    });
+    insertRow(db, { merge_id: "m-mismatch", status: "onchain" });
 
-    const proof = proveRecoveryFence(db, findRow(db, "m-null-token")!);
+    const proof = proveRecoveryFence(db, findRow(db, "m-mismatch")!);
+
     assertRefused(proof);
-    expect(proof.reason).toContain("t-moved-null");
+    expect(proof.reason).toMatch(/yes-token-mismatch/);
   });
 
-  it("still proves the fence when nothing is displaced — the check must not refuse the normal shape", () => {
-    // The escape hatch has to stay reachable: every position anchored to the condition sits on a
-    // token markets still names, and the legacy row below carries the schema's default empty
-    // condition_id, which never equals a real condition and so cannot make this refuse.
-    seedBothSidedCondition("c-not-displaced", "m-not-displaced");
-    insertPosition(db, {
-      position_id: "p-legacy",
-      token_id: "t-legacy",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-
-    expect(proveRecoveryFence(db, findRow(db, "m-not-displaced")!).proven).toBe(true);
-  });
-
-  it("classifies by outcome_index when the outcome text itself is not YES/NO", () => {
-    insertMarket(db, {
-      token_id: "t-dem",
-      condition_id: "c-index-based",
-      outcome: "Democrat",
-      outcome_index: 0,
-    });
-    insertMarket(db, {
-      token_id: "t-rep",
-      condition_id: "c-index-based",
-      outcome: "Republican",
-      outcome_index: 1,
-    });
-    insertPosition(db, {
-      position_id: "p-dem",
-      token_id: "t-dem",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
-    insertPosition(db, {
-      position_id: "p-rep",
-      token_id: "t-rep",
-      status: "open",
-      opened_at: "2026-06-01T00:00:00.000Z",
-    });
+  it.each([
+    ["the YES position opened at the intent", "position", "yes"],
+    ["the NO position opened at the intent", "position", "no"],
+    ["a YES live lot from the intent second", "lot", "yes"],
+    ["a NO live lot from the intent second", "lot", "no"],
+  ])("refuses %s", (_label, kind, side) => {
+    insertExactPair("m-freshness");
     insertRow(db, {
-      merge_id: "m-index-based",
-      condition_id: "c-index-based",
-      merged_at: "2026-07-01T00:00:00.000Z",
+      merge_id: "m-freshness",
+      merged_at: "2026-07-01T00:00:00.750Z",
       status: "onchain",
     });
+    if (kind === "position") {
+      db.prepare(
+        `UPDATE positions SET opened_at = '2026-07-01T00:00:00.750Z'
+         WHERE position_id = ?`,
+      ).run(`p-${side}-m-freshness`);
+    } else {
+      insertLot(db, {
+        lot_id: `l-${side}-freshness`,
+        position_id: `p-${side}-m-freshness`,
+        token_id: `${side}-m-freshness`,
+        created_at: "2026-07-01 00:00:00",
+      });
+    }
 
-    const proof = proveRecoveryFence(db, findRow(db, "m-index-based")!);
+    const proof = proveRecoveryFence(db, findRow(db, "m-freshness")!);
+
     assertRefused(proof);
+    expect(proof.reason).toContain(`${side}-${kind === "position" ? "opened-after" : "lot-after"}`);
+  });
+
+  it.each([
+    ["missing YES token", { yes_token_id: null }],
+    ["missing NO token", { no_token_id: null }],
+    ["missing YES position", { yes_position_id: null }],
+    ["missing NO position", { no_position_id: null }],
+    ["blank YES token", { yes_token_id: " " }],
+    ["blank NO token", { no_token_id: "\t" }],
+    ["blank YES position", { yes_position_id: "" }],
+    ["blank NO position", { no_position_id: "  " }],
+    ["duplicate tokens", { no_token_id: "yes-m-invalid" }],
+    ["duplicate positions", { no_position_id: "p-yes-m-invalid" }],
+    ["YES token/YES position cross-bound", { yes_token_id: "p-yes-m-invalid" }],
+    ["YES token/NO position cross-bound", { yes_token_id: "p-no-m-invalid" }],
+    ["NO token/YES position cross-bound", { no_token_id: "p-yes-m-invalid" }],
+    ["NO token/NO position cross-bound", { no_token_id: "p-no-m-invalid" }],
+  ])("refuses %s recorded identity", (_label, mutation) => {
+    insertRow(db, { merge_id: "m-invalid", status: "onchain" });
+    const row = { ...findRow(db, "m-invalid")!, ...mutation };
+
+    const proof = proveRecoveryFence(db, row);
+
+    assertRefused(proof);
+    expect(proof.reason).toMatch(/invalid recorded leg identity/);
   });
 });
 
@@ -1429,8 +658,8 @@ describe("merge-ledger-reconcile: run() end-to-end against a file-backed db", ()
       expect(exitCode).toBe(1);
 
       // The old promise ("Start the runtime instead — it settles the row.") is false once boot
-      // recovery has fenced the row: the runtime refuses it on every boot that re-derives the same
-      // legs. The refusal must instead point at the --fenced escape hatch.
+      // Recovery may fence the exact recorded legs. The refusal must point at the bounded
+      // --fenced escape hatch rather than claiming a restart necessarily settles it.
       const message = errorSpy.mock.calls.map((call) => call.join(" ")).join("\n");
       expect(message).not.toMatch(/Start the runtime instead — it settles the row\./);
       expect(message).toMatch(/--discard m-landed --fenced --apply/);
@@ -1484,8 +713,7 @@ describe("merge-ledger-reconcile: run() end-to-end against a file-backed db", ()
     );
     const db = new Database(tmpPath);
     db.exec(LEDGER_SQL);
-    // Replaced-YES-leg scenario: the original YES leg closed and was replaced by one opened AFTER
-    // merged_at — exactly the state findStaleMergeLeg fences on, so this row must never be settled.
+    // The exact recorded YES leg is closed. A newer same-token row must never replace it.
     insertMarket(db, {
       token_id: "t-yes-fenced",
       condition_id: "c-m-fenced",
@@ -1521,6 +749,10 @@ describe("merge-ledger-reconcile: run() end-to-end against a file-backed db", ()
       condition_id: "c-m-fenced",
       merged_at: "2026-07-01T00:00:00.000Z",
       status: "onchain",
+      yes_token_id: "t-yes-fenced",
+      no_token_id: "t-no-fenced",
+      yes_position_id: "p-yes-fenced-v1",
+      no_position_id: "p-no-fenced",
     });
     db.close();
 
@@ -1586,6 +818,10 @@ describe("merge-ledger-reconcile: run() end-to-end against a file-backed db", ()
       condition_id: "c-m-fenced-dry",
       merged_at: "2026-07-01T00:00:00.000Z",
       status: "onchain",
+      yes_token_id: "t-yes-fenced-dry",
+      no_token_id: "t-no-fenced-dry",
+      yes_position_id: "p-yes-fenced-dry-v1",
+      no_position_id: "p-no-fenced-dry",
     });
     db.close();
 
@@ -1653,6 +889,10 @@ describe("merge-ledger-reconcile: run() end-to-end against a file-backed db", ()
       condition_id: "c-m-settleable-apply",
       merged_at: "2026-07-01T00:00:00.000Z",
       status: "onchain",
+      yes_token_id: "t-yes-settleable",
+      no_token_id: "t-no-settleable",
+      yes_position_id: "p-yes-settleable",
+      no_position_id: "p-no-settleable",
     });
     db.close();
 
@@ -1712,6 +952,10 @@ describe("merge-ledger-reconcile: run() end-to-end against a file-backed db", ()
       condition_id: "c-m-settleable-dry",
       merged_at: "2026-07-01T00:00:00.000Z",
       status: "onchain",
+      yes_token_id: "t-yes-settleable-dry",
+      no_token_id: "t-no-settleable-dry",
+      yes_position_id: "p-yes-settleable-dry",
+      no_position_id: "p-no-settleable-dry",
     });
     db.close();
 
@@ -1788,9 +1032,17 @@ describe("merge-ledger-reconcile: run() end-to-end against a file-backed db", ()
     );
     const db = new Database(tmpPath);
     db.exec(LEDGER_SQL);
-    insertRow(db, { merge_id: "m-done", status: "applied" });
+    insertRow(db, {
+      merge_id: "m-done",
+      status: "applied",
+      yes_token_id: null,
+      no_token_id: null,
+      yes_position_id: null,
+      no_position_id: null,
+    });
     db.close();
 
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       expect(
         run({
@@ -1812,7 +1064,15 @@ describe("merge-ledger-reconcile: run() end-to-end against a file-backed db", ()
       const afterDb = new Database(tmpPath, { readonly: true });
       expect(findRow(afterDb, "m-done")?.status).toBe("applied");
       afterDb.close();
+      expect(errorSpy).toHaveBeenCalledTimes(3);
+      expect(errorSpy).toHaveBeenCalledWith(
+        "mergeId=m-done is already 'applied' — nothing to reconcile",
+      );
+      expect(errorSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining("invalid recorded leg identity"),
+      );
     } finally {
+      errorSpy.mockRestore();
       cleanupDbFiles(tmpPath);
     }
   });
