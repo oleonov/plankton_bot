@@ -1076,6 +1076,7 @@ describe("ExecutionModule — GATE BUY micro cap", () => {
       findByTokenId: vi.fn().mockReturnValue([]),
       findRecent: vi.fn().mockReturnValue([]),
       findUnreconciled: vi.fn().mockReturnValue([]),
+      claimForReconciliation: vi.fn().mockReturnValue(true),
       markReconciled: vi.fn(),
       getLatestTimestamp: vi.fn().mockReturnValue(null),
     } as FillRepository;
@@ -1262,6 +1263,7 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_BACKSTOP executio
       findByTokenId: vi.fn().mockReturnValue([]),
       findRecent: vi.fn().mockReturnValue([]),
       findUnreconciled: vi.fn().mockReturnValue([]),
+      claimForReconciliation: vi.fn().mockReturnValue(true),
       markReconciled: vi.fn(),
       getLatestTimestamp: vi.fn().mockReturnValue(null),
     } as FillRepository;

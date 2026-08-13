@@ -11,7 +11,10 @@ import { parseLedgerInstantMs } from "@krabs/db";
 import type { PolymarketDataPosition, PolymarketPositionReader } from "@krabs/exchange";
 import type { Logger } from "../../logger.js";
 import type { LatestUsablePriceLookup } from "../../market-snapshot-pricing.js";
-import { blockedByConflictingOpenPosition } from "../../open-position-conflict.js";
+import {
+  blockedByConflictingOpenPosition,
+  resolveDustPromotion,
+} from "../../open-position-conflict.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 
 const MIN_REMOTE_SIZE = 1e-9;
@@ -34,6 +37,7 @@ export interface WalletPositionSentinelResult {
   driftCount: number;
   details: string[];
   markUpdateCount: number;
+  skippedInvalidInputTokens: number;
   missingRemoteRevaluedCount?: number;
   closedLivePositions: ClosedLivePositionDrift[];
   activePositionDrifts: ActivePositionSizeDrift[];
@@ -112,6 +116,7 @@ export async function runWalletPositionSentinel(
     driftCount: 0,
     details: [],
     markUpdateCount: 0,
+    skippedInvalidInputTokens: 0,
     missingRemoteRevaluedCount: 0,
     closedLivePositions: [],
     activePositionDrifts: [],
@@ -143,6 +148,7 @@ export async function runWalletPositionSentinel(
   const autoClosedMissingRemote: AutoClosedMissingRemotePosition[] = [];
   let markUpdateCount = 0;
   let missingRemoteRevaluedCount = 0;
+  let skippedInvalidInputTokens = 0;
 
   // Tokens for which Polymarket reports a meaningful position. Used below to
   // detect the inverse case (local active/dust but no remote row) without
@@ -150,27 +156,41 @@ export async function runWalletPositionSentinel(
   const remoteTokensWithSize = new Set<string>();
 
   for (const remote of remotePositions) {
+    const localPositions = localByToken.get(remote.tokenId) ?? [];
+    const activeRows = localPositions.filter((position) => position.status !== "closed");
+    const invalidReason = validateTokenInputs(remote, activeRows);
+    if (invalidReason) {
+      remoteTokensWithSize.add(remote.tokenId);
+      skippedInvalidInputTokens++;
+      deps.log.warn(
+        { tokenId: remote.tokenId, reason: invalidReason },
+        "wallet sentinel: skipping token — invalid valuation input",
+      );
+      continue;
+    }
     if (remote.size <= MIN_REMOTE_SIZE) continue;
     remoteTokensWithSize.add(remote.tokenId);
-
-    const localPositions = localByToken.get(remote.tokenId);
-    if (!localPositions) continue;
+    if (localPositions.length === 0) continue;
 
     const active = latestActivePosition(localPositions);
     if (active) {
-      const updated = applyRemoteMark(deps, active, remote, nowMs);
-      if (updated) {
-        markUpdateCount++;
-        await publishOpenToDustTransition(deps, active, updated);
+      const pricePerShare = remote.currentValueUsdc / remote.size;
+      for (const row of activeRows) {
+        const updated = applyRemoteMark(deps, row, pricePerShare, nowMs);
+        if (updated) {
+          markUpdateCount++;
+          await publishOpenToDustTransition(deps, row, updated);
+        }
       }
-      if (Math.abs(active.size - remote.size) > SIZE_DRIFT_EPSILON) {
+      const aggregateLocalSize = activeRows.reduce((sum, row) => sum + row.size, 0);
+      if (Math.abs(aggregateLocalSize - remote.size) > SIZE_DRIFT_EPSILON) {
         if (isWithinRecentFillGrace(deps.fillRepo, active.tokenId, nowMs)) continue;
         const market = deps.marketRepo.findByTokenId(createTokenId(remote.tokenId));
         activeDrifts.push({
           tokenId: createTokenId(remote.tokenId),
           positionId: String(active.positionId),
           slug: market?.slug ?? remote.slug ?? remote.marketSlug,
-          localSize: active.size,
+          localSize: aggregateLocalSize,
           remoteSize: remote.size,
           remoteCurrentValueUsdc: remote.currentValueUsdc,
         });
@@ -240,6 +260,7 @@ export async function runWalletPositionSentinel(
   return {
     driftCount: closedDrifts.length + activeDrifts.length + missingRemoteDrifts.length,
     markUpdateCount,
+    skippedInvalidInputTokens,
     missingRemoteRevaluedCount,
     details: [
       ...closedDrifts.map(formatClosedDriftDetail),
@@ -304,28 +325,26 @@ function applyMissingRemoteRevaluation(
 function applyRemoteMark(
   deps: WalletPositionSentinelDeps,
   position: Position,
-  remote: PolymarketDataPosition,
+  pricePerShare: number,
   nowMs: number,
 ): Position | null {
-  if (!Number.isFinite(remote.currentValueUsdc)) return null;
+  if (!Number.isFinite(pricePerShare)) return null;
   // Defence against upstream bug: Polymarket prices are bounded to [0,1].
   // Any remote.currentValueUsdc > position.size implies price > $1, which
   // is impossible. Drop the update; W4 fallback will recompute.
-  if (
-    Number.isFinite(position.size) &&
-    position.size > 0 &&
-    remote.currentValueUsdc > position.size + 1e-9
-  ) {
+  if (pricePerShare > 1 + 1e-9) {
     return null;
   }
+  if (!Number.isFinite(position.size) || position.size < 0) return null;
+  const rowValueUsdc = position.size * pricePerShare;
 
-  const nextStatus = resolveOpenPositionStatus(remote.currentValueUsdc, {
+  const nextStatus = resolveOpenPositionStatus(rowValueUsdc, {
     size: position.size,
     minOrderSize: deps.latestMinOrderSize?.(position.tokenId) ?? null,
   });
   if (
     position.currentValueUsdc !== null &&
-    Math.abs(position.currentValueUsdc - remote.currentValueUsdc) < 0.001 &&
+    Math.abs(position.currentValueUsdc - rowValueUsdc) < 0.001 &&
     position.status === nextStatus
   ) {
     return null;
@@ -333,15 +352,34 @@ function applyRemoteMark(
 
   const updated: Position = {
     ...position,
-    currentValueUsdc: remote.currentValueUsdc,
+    currentValueUsdc: rowValueUsdc,
     status: nextStatus,
     updatedAt: new Date(nowMs).toISOString(),
   };
-  if (blockedByConflictingOpenPosition(deps.positionRepo, deps.log, updated, "applyRemoteMark")) {
-    return null;
+  const toSave = resolveDustPromotion(
+    deps.positionRepo,
+    deps.log,
+    position,
+    updated,
+    "applyRemoteMark",
+  );
+  if (!toSave) return null;
+  deps.positionRepo.save(toSave);
+  return toSave;
+}
+
+function validateTokenInputs(
+  remote: PolymarketDataPosition,
+  activeRows: readonly Position[],
+): string | null {
+  if (!Number.isFinite(remote.currentValueUsdc) || remote.currentValueUsdc < 0) {
+    return "invalid_remote_current_value";
   }
-  deps.positionRepo.save(updated);
-  return updated;
+  if (!Number.isFinite(remote.size) || remote.size < 0) return "invalid_remote_size";
+  if (activeRows.some((row) => !Number.isFinite(row.size) || row.size < 0)) {
+    return "invalid_local_size";
+  }
+  return null;
 }
 
 async function publishOpenToDustTransition(

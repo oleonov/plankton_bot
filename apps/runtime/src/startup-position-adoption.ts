@@ -19,7 +19,7 @@ import type {
   TokenId,
 } from "@krabs/domain";
 import { createFillId, createOrderId, createTokenId } from "@krabs/domain";
-import { ledgerInstant, parseLedgerInstantMs } from "@krabs/db";
+import { ledgerInstant, parseLedgerInstantMs, withImmediate } from "@krabs/db";
 import type { Logger } from "./logger.js";
 import { resolveOpenPositionStatus } from "./position-status.js";
 import { InventoryHandler } from "./modules/risk-inventory/inventory-handler.js";
@@ -309,21 +309,25 @@ export async function runStartupPositionAdoption(
         throw new Error(`fill ${pending.fill.fillId} not found after import`);
       }
 
-      inventory.applyFill({
-        fillId: savedFill.fillId,
-        tokenId: pending.fill.tokenId,
-        conditionId: savedFill.conditionId,
-        side: pending.fill.side,
-        price: pending.fill.price,
-        size: savedFill.size,
-        sizeUsdc: savedFill.sizeUsdc,
-        fee: savedFill.fee,
-        signalReason: localOrder.signalReason ?? SYNTHETIC_SIGNAL_REASON,
-        entryStyle: localOrder.entryStyle ?? null,
-        decisionRuleId: localOrder.decisionRuleId ?? null,
-        timestamp: pending.fill.timestamp,
+      const applied = withImmediate(deps.db, () => {
+        if (!deps.fillRepo.claimForReconciliation(savedFill.fillId)) return false;
+        inventory.applyFill({
+          fillId: savedFill.fillId,
+          tokenId: pending.fill.tokenId,
+          conditionId: savedFill.conditionId,
+          side: pending.fill.side,
+          price: pending.fill.price,
+          size: savedFill.size,
+          sizeUsdc: savedFill.sizeUsdc,
+          fee: savedFill.fee,
+          signalReason: localOrder.signalReason ?? SYNTHETIC_SIGNAL_REASON,
+          entryStyle: localOrder.entryStyle ?? null,
+          decisionRuleId: localOrder.decisionRuleId ?? null,
+          timestamp: pending.fill.timestamp,
+        });
+        return true;
       });
-      deps.fillRepo.markReconciled([savedFill.fillId]);
+      if (!applied) continue;
 
       result.appliedFills++;
       if (!pending.localOrder) {

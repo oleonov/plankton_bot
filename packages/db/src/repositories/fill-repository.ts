@@ -144,6 +144,14 @@ export class SqliteFillRepository implements FillRepository {
     return rows.map((r) => this.rowToFill(r));
   }
 
+  claimForReconciliation(fillId: FillId): boolean {
+    return (
+      this.db
+        .prepare("UPDATE fills SET reconciled = 1 WHERE fill_id = ? AND reconciled = 0")
+        .run(fillId).changes > 0
+    );
+  }
+
   markReconciled(fillIds: FillId[]): void {
     if (fillIds.length === 0) return;
 

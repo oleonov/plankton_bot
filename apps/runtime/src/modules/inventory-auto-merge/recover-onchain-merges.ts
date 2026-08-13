@@ -373,6 +373,7 @@ export async function recoverConfirmedOnchainMerges(
       deps.orderRepo,
       deps.marketRepo,
       deps.fillRepo,
+      deps.log,
     );
     const settler = new MergeSettler(
       deps.positionRepo,

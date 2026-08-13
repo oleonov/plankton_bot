@@ -81,8 +81,10 @@ describe("redeem sweep wallet snapshot integration", () => {
     vi.setSystemTime(NOW);
     const bus = new InProcessEventBus();
     const logRows: any[] = [];
+    const normalizePosition = (raw: Record<string, unknown>) =>
+      normalizePolymarketPosition({ currentValue: "0", initialValue: "0", ...raw });
     const positions = [
-      normalizePolymarketPosition({
+      normalizePosition({
         asset: "tok-r1",
         conditionId: "cond-r1",
         size: "10",
@@ -90,7 +92,7 @@ describe("redeem sweep wallet snapshot integration", () => {
         slug: "redeem-one",
         outcome: "Yes",
       }),
-      normalizePolymarketPosition({
+      normalizePosition({
         asset: "tok-r2",
         condition_id: "cond-r2",
         size: "7",
@@ -98,19 +100,19 @@ describe("redeem sweep wallet snapshot integration", () => {
         marketSlug: "redeem-two",
         outcome: "No",
       }),
-      normalizePolymarketPosition({
+      normalizePosition({
         asset: "tok-open",
         conditionId: "cond-open",
         size: "4",
         redeemable: false,
       }),
-      normalizePolymarketPosition({
+      normalizePosition({
         asset: "tok-zero",
         conditionId: "cond-zero",
         size: "0",
         redeemable: true,
       }),
-      normalizePolymarketPosition({
+      normalizePosition({
         asset: "tok-missing-condition",
         size: "3",
         redeemable: false,

@@ -247,4 +247,21 @@ describe("MergeCandidateService", () => {
     // Without the abstention this yields one candidate sized 50 off the open row.
     expect(service.findMergeCandidates()).toEqual([]);
   });
+
+  it("T10a — the inventory-manager candidate constructor fails closed for an ambiguous token", () => {
+    const yes = createTokenId("t10a-yes");
+    const no = createTokenId("t10a-no");
+    (positionRepo.findOpen as any).mockReturnValue([
+      { positionId: createPositionId("t10a-open"), tokenId: yes, size: 10, status: "open" },
+      { positionId: createPositionId("t10a-dust"), tokenId: yes, size: 1, status: "dust" },
+      { positionId: createPositionId("t10a-no"), tokenId: no, size: 10, status: "open" },
+    ]);
+    (marketRepo.findByTokenId as any).mockImplementation((id: string) =>
+      id === yes
+        ? { tokenId: yes, conditionId: "t10a", outcome: "Yes", outcomeIndex: 0 }
+        : { tokenId: no, conditionId: "t10a", outcome: "No", outcomeIndex: 1 },
+    );
+    (orderRepo.findByTokenId as any).mockReturnValue([]);
+    expect(service.findMergeCandidates()).toEqual([]);
+  });
 });

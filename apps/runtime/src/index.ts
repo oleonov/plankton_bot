@@ -210,6 +210,7 @@ import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-pub
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { PositionConcentrationService } from "./position-concentration-service.js";
 import { PeriodicTimers } from "./periodic-timers.js";
+import { composeStrandedFillAlertEmitter } from "./stranded-fill-alert.js";
 import { RuntimeMetricWriter } from "./runtime-metric-writer.js";
 import { RuntimeEffectiveResolutionService } from "./effective-resolution-service.js";
 import {
@@ -1247,6 +1248,12 @@ async function main(): Promise<void> {
     markToMarketEnabled: true,
     latestUsablePriceForToken,
     positionConcentration,
+    timers: periodicTimers,
+    emitStrandedFillAlert: composeStrandedFillAlertEmitter({
+      riskEventRepo: repos.riskEvent,
+      recordInfraAlert,
+      log,
+    }),
   });
 
   // 7h. Strategy module
@@ -2727,6 +2734,11 @@ async function main(): Promise<void> {
     // flush, the shutdown-state publish and `process.exit(0)` at the bottom of this handler. Losing
     // the last periodic telemetry window is the cheapest thing in this teardown.
     periodicTimers.stopAll();
+    const teardownDeadlineMs = Date.now() + RUNTIME_STOP_WAIT_MS;
+    await waitAtMost(riskInventoryModule.quiescePeriodicReplay(), {
+      ms: Math.max(0, teardownDeadlineMs - Date.now()),
+      onExpired: () => log.error({}, "unreconciled replay drain exceeded the shutdown budget"),
+    });
 
     // Bounds every REMAINING telemetry write — the ones module stops emit as well as the final
     // flush below — to SHUTDOWN_BUSY_TIMEOUT_MS. Telemetry reaches the ledger through exactly three
@@ -2766,8 +2778,6 @@ async function main(): Promise<void> {
       // Captured BEFORE the wait, not derived after it: the execution tail drain below spends what
       // is LEFT of this same budget, so a slow module teardown shortens the tail rather than
       // extending the total the container's grace period is sized against.
-      const teardownDeadlineMs = Date.now() + RUNTIME_STOP_WAIT_MS;
-
       // One ceiling over the WHOLE module teardown. Each module bounds its own waits, but the stop
       // is a sequence of two dozen of them: bounded-each is not bounded-total, and the total is what
       // the container's grace period actually measures. Past this point the process exits — whatever
@@ -2775,7 +2785,7 @@ async function main(): Promise<void> {
       await waitAtMost(
         supervisor.stop().catch((err: unknown) => log.error({ err }, "supervisor stop error")),
         {
-          ms: RUNTIME_STOP_WAIT_MS,
+          ms: Math.max(0, teardownDeadlineMs - Date.now()),
           onExpired: () =>
             log.error(
               { waitMs: RUNTIME_STOP_WAIT_MS },

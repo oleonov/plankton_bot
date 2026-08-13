@@ -91,6 +91,10 @@ function reader(positions: PolymarketDataPosition[] | null): PolymarketPositionR
 function positionRepo(positions: Position[]): PositionRepository {
   return {
     findAll: vi.fn().mockReturnValue(positions),
+    findByTokenId: vi.fn(
+      (tokenId: string) =>
+        positions.find((position) => String(position.tokenId) === tokenId) ?? null,
+    ),
     save: vi.fn(),
     // Default: no conflicting open row for the token. Guard-conflict tests
     // override this to return the "other" open position that blocks a save.
@@ -954,7 +958,7 @@ describe("runWalletPositionSentinel", () => {
   // risk a raw SQLITE_CONSTRAINT — the sentinel re-runs every cycle, so a
   // skipped mark is just one cycle of staleness, not a lost fact.
   describe("open-position-conflict guard", () => {
-    it("skips applyRemoteMark when a different open position already exists for the token (D)", async () => {
+    it("preserves dust status but refreshes its value when an open sibling blocks promotion (D)", async () => {
       const repo = positionRepo([
         makePosition({
           status: "dust",
@@ -984,8 +988,8 @@ describe("runWalletPositionSentinel", () => {
         NOW,
       );
 
-      expect(result.markUpdateCount).toBe(0);
-      expect(repo.save).not.toHaveBeenCalled();
+      expect(result.markUpdateCount).toBe(1);
+      expect(repo.save).toHaveBeenCalledWith(expect.objectContaining({ status: "dust" }));
       expect(log.error).toHaveBeenCalled();
     });
 
@@ -1028,12 +1032,7 @@ describe("runWalletPositionSentinel", () => {
       expect(log.error).toHaveBeenCalled();
     });
 
-    // Both rows live in findAll() here, so the selector — not a stand-alone mock —
-    // decides which one the sentinel acts on. Ranking by updatedAt alone picks the
-    // newer dust row, whose promotion the guard then refuses every cycle: the mark
-    // is never applied and the next cycle re-selects the very same row. Preferring
-    // the open row is what turns that dead loop into progress.
-    it("marks the open row, not the newer dust sibling, when a token holds both (D)", async () => {
+    it("marks every non-closed row at the shared remote price while keeping a blocked dust sibling dust (D)", async () => {
       const openRow = makePosition({
         positionId: createPositionId("pos-open"),
         status: "open",
@@ -1068,13 +1067,22 @@ describe("runWalletPositionSentinel", () => {
         NOW,
       );
 
-      expect(result.markUpdateCount).toBe(1);
-      expect(repo.save).toHaveBeenCalledTimes(1);
+      expect(result.markUpdateCount).toBe(2);
+      expect(repo.save).toHaveBeenCalledTimes(2);
       const saved = (repo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
       expect(String(saved.positionId)).toBe("pos-open");
       expect(saved.status).toBe("open");
       expect(saved.currentValueUsdc).toBe(5);
-      expect(log.error).not.toHaveBeenCalled();
+      const savedDust = (repo.save as ReturnType<typeof vi.fn>).mock.calls[1]![0] as Position;
+      expect(savedDust).toMatchObject({
+        positionId: dustRow.positionId,
+        status: "dust",
+        currentValueUsdc: 102.5,
+      });
+      expect(log.error).toHaveBeenCalledWith(
+        expect.objectContaining({ positionId: dustRow.positionId }),
+        expect.any(String),
+      );
     });
 
     // Negative controls: the pre-existing "updates active local mark and status
@@ -1083,5 +1091,209 @@ describe("runWalletPositionSentinel", () => {
     // the no-conflict path with the same positionRepo() factory used here — both
     // still pass unchanged, confirming the added findActiveByTokenId default
     // ([] = no conflict) doesn't alter unblocked behavior.
+  });
+
+  it("T6 — a single matching row keeps its full remote value", async () => {
+    const repo = positionRepo([
+      makePosition({ status: "open", size: 40, currentValueUsdc: 1, closedAt: null }),
+    ]);
+    await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 40, currentValueUsdc: 20 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+    expect(repo.save).toHaveBeenCalledWith(expect.objectContaining({ currentValueUsdc: 20 }));
+  });
+
+  it("T7 — shared-token rows are valued at one price per share without drift", async () => {
+    const repo = positionRepo([
+      makePosition({
+        positionId: createPositionId("t7-open"),
+        status: "open",
+        size: 40,
+        closedAt: null,
+      }),
+      makePosition({
+        positionId: createPositionId("t7-dust"),
+        status: "dust",
+        size: 3,
+        closedAt: null,
+      }),
+    ]);
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 43, currentValueUsdc: 21.5 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+    expect(result.activePositionDrifts).toEqual([]);
+    expect(repo.save).toHaveBeenCalledWith(expect.objectContaining({ currentValueUsdc: 20 }));
+    expect(repo.save).toHaveBeenCalledWith(expect.objectContaining({ currentValueUsdc: 1.5 }));
+  });
+
+  it("T8 — aggregate local size, not one selected row, drives wallet drift", async () => {
+    const repo = positionRepo([
+      makePosition({
+        positionId: createPositionId("t8-open"),
+        status: "open",
+        size: 40,
+        closedAt: null,
+      }),
+      makePosition({
+        positionId: createPositionId("t8-dust"),
+        status: "dust",
+        size: 3,
+        closedAt: null,
+      }),
+    ]);
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 50, currentValueUsdc: 25 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+    expect(result.activePositionDrifts[0]).toMatchObject({ localSize: 43, remoteSize: 50 });
+  });
+
+  it("T9 — per-share values above one dollar are rejected", async () => {
+    const repo = positionRepo([makePosition({ status: "open", size: 1, closedAt: null })]);
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 1, currentValueUsdc: 1.01 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+    expect(result.markUpdateCount).toBe(0);
+    expect(repo.save).not.toHaveBeenCalled();
+  });
+
+  it("T19 — a divergent single local size receives only its proportional mark", async () => {
+    const repo = positionRepo([makePosition({ status: "open", size: 40, closedAt: null })]);
+    await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 43, currentValueUsdc: 21.5 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+    expect(repo.save).toHaveBeenCalledWith(expect.objectContaining({ currentValueUsdc: 20 }));
+  });
+
+  it("T22 — a blocked dust promotion retains dust status while persisting its mark", async () => {
+    const open = makePosition({
+      positionId: createPositionId("t22-open"),
+      status: "open",
+      size: 40,
+      closedAt: null,
+    });
+    const dust = makePosition({
+      positionId: createPositionId("t22-dust"),
+      status: "dust",
+      size: 3,
+      closedAt: null,
+    });
+    const repo = positionRepo([open, dust]);
+    (repo.findActiveByTokenId as ReturnType<typeof vi.fn>).mockReturnValue([open]);
+    await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 43, currentValueUsdc: 21.5 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+    expect(repo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        positionId: dust.positionId,
+        status: "dust",
+        currentValueUsdc: 1.5,
+      }),
+    );
+  });
+
+  it("T24 — only the deterministic dust winner promotes when no open sibling exists", async () => {
+    const older = makePosition({
+      positionId: createPositionId("t24-old"),
+      status: "dust",
+      size: 3,
+      openedAt: "2026-04-20T00:00:00.000Z",
+      closedAt: null,
+    });
+    const newer = makePosition({
+      positionId: createPositionId("t24-new"),
+      status: "dust",
+      size: 3,
+      openedAt: "2026-04-21T00:00:00.000Z",
+      closedAt: null,
+    });
+    const repo = positionRepo([newer, older]);
+    (repo.findByTokenId as ReturnType<typeof vi.fn>).mockReturnValue(older);
+    (repo.findActiveByTokenId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce([])
+      .mockReturnValue([older]);
+    await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 6, currentValueUsdc: 3 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+        latestMinOrderSize: () => 1,
+      },
+      NOW,
+    );
+    const saved = (repo.save as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([row]) => row as Position,
+    );
+    expect(saved.filter((row) => row.status === "open")).toHaveLength(1);
+    expect(saved.map((row) => row.currentValueUsdc)).toEqual([1.5, 1.5]);
+  });
+
+  it("T25 — invalid remote or local monetary inputs skip only their token", async () => {
+    const healthyToken = createTokenId("t25-healthy");
+    const invalid = makePosition({ status: "open", size: 5, closedAt: null });
+    const healthy = makePosition({
+      positionId: createPositionId("t25-healthy"),
+      tokenId: healthyToken,
+      status: "open",
+      size: 2,
+      closedAt: null,
+    });
+    const repo = positionRepo([invalid, healthy]);
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([
+          makeRemote({ size: Number.NaN }),
+          makeRemote({ tokenId: String(healthyToken), size: 2, currentValueUsdc: 1 }),
+        ]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+    expect(result.skippedInvalidInputTokens).toBe(1);
+    expect(repo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ positionId: healthy.positionId, currentValueUsdc: 1 }),
+    );
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: String(TOKEN) }),
+      expect.any(String),
+    );
   });
 });

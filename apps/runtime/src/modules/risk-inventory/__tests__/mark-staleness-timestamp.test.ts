@@ -24,6 +24,7 @@ import type {
 import { toSqliteDateTime } from "@krabs/db";
 import { InProcessEventBus } from "@krabs/event-bus";
 import type { Logger } from "../../../logger.js";
+import { discardStrandedFillAlert } from "../../../stranded-fill-alert.js";
 import { RiskInventoryModule } from "../risk-inventory-module.js";
 
 const TOK_ID = createTokenId("tok-tz-staleness");
@@ -149,10 +150,14 @@ async function publishMarkUpdate(position: Position): Promise<PositionRepository
     positionRepo,
     inventoryLotRepo: makeLotRepo(),
     orderRepo: makeOrderRepo(),
-    fillRepo: { markReconciled: vi.fn(), findUnreconciled: vi.fn().mockReturnValue([]) },
+    fillRepo: {
+      claimForReconciliation: vi.fn().mockReturnValue(true),
+      findUnreconciled: vi.fn().mockReturnValue([]),
+    },
     log: silentLog,
     db: mockDb,
     now: () => NOW_MS,
+    emitStrandedFillAlert: discardStrandedFillAlert,
   });
   await mod.start();
   // `start()` runs `backfillStaleCurrentValues()` and `replayUnreconciledFills()`, which read and

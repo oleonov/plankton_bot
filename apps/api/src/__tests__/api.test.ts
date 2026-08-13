@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { bootstrapDatabase } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
 import type { AppConfig } from "@krabs/config";
@@ -1879,6 +1882,180 @@ describe("operator actions", () => {
       payload: {},
     });
     expect(json(res).ok).toBe(true);
+  });
+
+  it("T28h — fences Resume at both markers with an immediate transaction", async () => {
+    const markerDir = mkdtempSync(path.join(tmpdir(), "krabs-action-marker-"));
+    const dbDir = mkdtempSync(path.join(tmpdir(), "krabs-action-db-"));
+    const dbPath = path.join(dbDir, "control.db");
+    const deployMarker = path.join(markerDir, "deploy.json");
+    const rollbackMarker = path.join(markerDir, "rollback.json");
+    const previousDeploy = process.env.KRABS_DEPLOY_MARKER_PATH;
+    const previousRollback = process.env.KRABS_ROLLBACK_MARKER_PATH;
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.KRABS_DEPLOY_MARKER_PATH = deployMarker;
+    process.env.KRABS_ROLLBACK_MARKER_PATH = rollbackMarker;
+
+    const actionConn = bootstrapDatabase(dbPath);
+    const highWaterConn = bootstrapDatabase(dbPath);
+    const preparedSql: string[] = [];
+    let transactionCalls = 0;
+    let immediateCalls = 0;
+    let publishMarkerBeforeInsert: (() => void) | undefined;
+    const recordingDb = new Proxy(actionConn.db, {
+      get(target, property) {
+        if (property === "transaction") {
+          return (fn: () => unknown) => {
+            transactionCalls += 1;
+            const transaction = target.transaction(fn);
+            return Object.assign(() => transaction(), {
+              immediate: () => {
+                immediateCalls += 1;
+                return transaction.immediate();
+              },
+            });
+          };
+        }
+        if (property === "prepare") {
+          return (sql: string) => {
+            preparedSql.push(sql);
+            const statement = target.prepare(sql);
+            return new Proxy(statement, {
+              get(statementTarget, statementProperty) {
+                const value = Reflect.get(statementTarget, statementProperty);
+                if (statementProperty === "run") {
+                  return (...args: unknown[]) => {
+                    if (sql.includes("INSERT INTO operator_commands")) {
+                      publishMarkerBeforeInsert?.();
+                    }
+                    return Reflect.apply(value, statementTarget, args);
+                  };
+                }
+                return typeof value === "function" ? value.bind(statementTarget) : value;
+              },
+            });
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const actionApp = await buildServer({
+      config: testConfig(),
+      controlDb: recordingDb,
+      ledgerDb: actionConn.db,
+      ledgerPool: stubLedgerPool(),
+    });
+
+    const resume = () =>
+      actionApp.inject({
+        method: "POST",
+        url: "/api/v1/actions/resume",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        payload: {},
+      });
+    const pause = () =>
+      actionApp.inject({
+        method: "POST",
+        url: "/api/v1/actions/pause",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        payload: {},
+      });
+    const pendingCount = () =>
+      Number(
+        (
+          actionConn.db
+            .prepare("SELECT COUNT(*) AS count FROM operator_commands WHERE status = 'pending'")
+            .get() as { count: number }
+        ).count,
+      );
+    const clearMarkers = () => {
+      rmSync(deployMarker, { recursive: true, force: true });
+      rmSync(rollbackMarker, { recursive: true, force: true });
+    };
+    const expectFence = async (code: string) => {
+      const before = pendingCount();
+      const response = await resume();
+      expect(response.statusCode).toBe(409);
+      expect(json(response).error.code).toBe(code);
+      expect(pendingCount()).toBe(before);
+    };
+
+    try {
+      const noMarker = await resume();
+      expect(noMarker.statusCode).toBe(200);
+      expect(pendingCount()).toBe(1);
+      expect(transactionCalls).toBe(1);
+      expect(immediateCalls).toBe(1);
+      expect(preparedSql).toContainEqual(expect.stringContaining("INSERT INTO operator_commands"));
+
+      writeFileSync(deployMarker, "{}");
+      await expectFence("DEPLOY_IN_PROGRESS");
+      expect((await pause()).statusCode).toBe(200);
+
+      clearMarkers();
+      writeFileSync(rollbackMarker, "{}");
+      await expectFence("ROLLBACK_IN_PROGRESS");
+      expect((await pause()).statusCode).toBe(200);
+
+      writeFileSync(deployMarker, "{}");
+      await expectFence("DEPLOY_IN_PROGRESS");
+      expect((await pause()).statusCode).toBe(200);
+      clearMarkers();
+      expect((await resume()).statusCode).toBe(200);
+
+      mkdirSync(deployMarker);
+      await expectFence("DEPLOY_IN_PROGRESS");
+      clearMarkers();
+      writeFileSync(path.join(markerDir, "marker-target"), "{}");
+      symlinkSync(path.join(markerDir, "marker-target"), rollbackMarker);
+      await expectFence("ROLLBACK_IN_PROGRESS");
+
+      clearMarkers();
+      for (const [marker, code] of [
+        [deployMarker, "DEPLOY_IN_PROGRESS"],
+        [rollbackMarker, "ROLLBACK_IN_PROGRESS"],
+      ] as const) {
+        publishMarkerBeforeInsert = () => {
+          publishMarkerBeforeInsert = undefined;
+          writeFileSync(marker, "{}");
+        };
+        const before = pendingCount();
+        const prePublication = await resume();
+        expect(prePublication.statusCode).toBe(200);
+        expect(pendingCount()).toBe(before + 1);
+        expect(
+          (
+            highWaterConn.db
+              .prepare("SELECT MAX(id) AS id FROM operator_commands WHERE status = 'pending'")
+              .get() as { id: number }
+          ).id,
+        ).toBeGreaterThan(0);
+        await expectFence(code);
+        clearMarkers();
+      }
+
+      process.env.NODE_ENV = "production";
+      writeFileSync(deployMarker, "{}");
+      const productionPath = await resume();
+      expect(productionPath.statusCode).toBe(200);
+      clearMarkers();
+
+      const afterRemoval = await resume();
+      expect(afterRemoval.statusCode).toBe(200);
+    } finally {
+      await actionApp.close();
+      actionConn.close();
+      highWaterConn.close();
+      if (previousDeploy === undefined) delete process.env.KRABS_DEPLOY_MARKER_PATH;
+      else process.env.KRABS_DEPLOY_MARKER_PATH = previousDeploy;
+      if (previousRollback === undefined) delete process.env.KRABS_ROLLBACK_MARKER_PATH;
+      else process.env.KRABS_ROLLBACK_MARKER_PATH = previousRollback;
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      rmSync(markerDir, { recursive: true, force: true });
+      rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 });
 

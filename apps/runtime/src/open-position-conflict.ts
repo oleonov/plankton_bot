@@ -49,6 +49,41 @@ export function blockedByConflictingOpenPosition(
   return true;
 }
 
+export function resolveDustPromotion(
+  positionRepo: Pick<PositionRepository, "findActiveByTokenId" | "findByTokenId">,
+  log: Pick<Logger, "error" | "warn">,
+  pos: Position,
+  updated: Position,
+  site: string,
+  ignorePositionId?: string | null,
+): Position | null {
+  if (updated.status !== "open") return updated;
+  let declined = blockedByConflictingOpenPosition(
+    positionRepo,
+    log,
+    updated,
+    site,
+    ignorePositionId,
+  );
+  if (!declined && pos.status === "dust") {
+    const winner = positionRepo.findByTokenId?.(pos.tokenId) ?? pos;
+    if (winner?.positionId !== pos.positionId) {
+      declined = true;
+      log.warn(
+        {
+          site,
+          tokenId: pos.tokenId,
+          positionId: pos.positionId,
+          winnerPositionId: winner?.positionId ?? null,
+        },
+        "declined dust promotion — not the findByTokenId winner for this token",
+      );
+    }
+  }
+  if (!declined) return updated;
+  return pos.status === "dust" ? { ...updated, status: "dust" } : null;
+}
+
 export function openPositionConflictError(next: Position, site: string): Error {
   return new Error(
     `${site}: refusing to promote position ${next.positionId} to open — ` +

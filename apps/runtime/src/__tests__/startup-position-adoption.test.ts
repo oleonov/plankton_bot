@@ -2761,4 +2761,48 @@ describe("cleanupPriorStartupAdoptionArtifacts — orphan-loop guard", () => {
       .run(workingOrderId);
     expect(fenceGate(() => false)).not.toThrow();
   });
+
+  it("T26 — startup adoption rolls back its real SQLite reconciliation claim when inventory application throws", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const marketRepo = new SqliteMarketRepository(conn.db);
+    const orderRepo = new SqliteOrderRepository(conn.db);
+    const fillRepo = new SqliteFillRepository(conn.db);
+    const positionRepo = new SqlitePositionRepository(conn.db);
+    const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+    const legStateRepo = new SqliteLegStateRepository(conn.db);
+    seedMarket(marketRepo);
+    const originalSave = positionRepo.save.bind(positionRepo);
+    positionRepo.save = vi.fn((_position) => {
+      const row = conn.db
+        .prepare("SELECT reconciled FROM fills WHERE fill_id = ?")
+        .get("fill-t26") as { reconciled: number } | undefined;
+      expect(row?.reconciled).toBe(1);
+      throw new Error("injected inventory failure");
+    });
+
+    const result = await runStartupPositionAdoption({
+      gateway: {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getFillsResult: vi
+          .fn()
+          .mockResolvedValue({ ok: true, data: [makeExchangeFill({ fillId: "fill-t26" })] }),
+      },
+      marketRepo,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo,
+      legStateRepo,
+      log: silentLog,
+      db: conn.db,
+      botRunId: createBotRunId("run-t26"),
+    });
+
+    expect(result.skippedInventoryDrift).toBe(1);
+    expect(result.appliedFills).toBe(0);
+    expect(fillRepo.findUnreconciled().map((fill) => String(fill.fillId))).toEqual(["fill-t26"]);
+    expect(positionRepo.findOpen()).toHaveLength(0);
+    positionRepo.save = originalSave;
+  });
 });

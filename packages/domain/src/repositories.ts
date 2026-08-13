@@ -352,6 +352,9 @@ export interface FillRepository {
   /** Return fills that have not yet been applied to a position or inventory lot. */
   findUnreconciled(): Fill[];
 
+  /** Atomically claim an unreconciled fill. False means another worker already applied it. */
+  claimForReconciliation(fillId: FillId): boolean;
+
   /** Mark one or more fills as reconciled (applied to position/lot). */
   markReconciled(fillIds: FillId[]): void;
 

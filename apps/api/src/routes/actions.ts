@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { lstatSync } from "node:fs";
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import { isSupportedRuntimeProfile, SUPPORTED_RUNTIME_PROFILE } from "@krabs/domain";
@@ -29,6 +30,45 @@ function insertCommand(
   return Number(info.lastInsertRowid);
 }
 
+function markerExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new ApiError(503, "resume fence is unavailable", "RESUME_FENCE_UNAVAILABLE");
+  }
+}
+
+function rollbackMarkerPaths(): { deploy: string; rollback: string } {
+  if (process.env.NODE_ENV === "test") {
+    return {
+      deploy: process.env.KRABS_DEPLOY_MARKER_PATH ?? "/opt/krabs/config/deploy-in-progress.json",
+      rollback:
+        process.env.KRABS_ROLLBACK_MARKER_PATH ?? "/opt/krabs/config/rollback-in-progress.json",
+    };
+  }
+  return {
+    deploy: "/app/config/deploy-in-progress.json",
+    rollback: "/app/config/rollback-in-progress.json",
+  };
+}
+
+function enqueueResume(db: Database.Database, reason: string | null, actor: string): number {
+  const paths = rollbackMarkerPaths();
+  return db
+    .transaction(() => {
+      if (markerExists(paths.deploy)) {
+        throw new ApiError(409, "deployment is in progress", "DEPLOY_IN_PROGRESS");
+      }
+      if (markerExists(paths.rollback)) {
+        throw new ApiError(409, "rollback is in progress", "ROLLBACK_IN_PROGRESS");
+      }
+      return insertCommand(db, "resume", null, reason, actor);
+    })
+    .immediate();
+}
+
 export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) => {
   const controlDb = opts.controlDb ?? opts.db;
 
@@ -43,7 +83,7 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
   app.post<{ Body: { reason?: string } }>("/actions/resume", async (request) => {
     const body = (request.body ?? {}) as { reason?: string };
     const actor = getActor(request);
-    const id = insertCommand(controlDb, "resume", null, body.reason ?? null, actor);
+    const id = enqueueResume(controlDb, body.reason ?? null, actor);
     return ok({ commandId: id, status: "enqueued" });
   });
 

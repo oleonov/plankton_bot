@@ -519,6 +519,7 @@ export class ReconciliationModule implements RuntimeModule {
             activePositionDrifts: [],
             missingRemotePositions: [],
             autoClosedMissingRemotePositions: [],
+            skippedInvalidInputTokens: 0,
           };
       stageTimingsMs.sentinel = Date.now() - stageSentinelStart;
       const walletResult = await this.confirmWalletSentinelDrifts(rawWalletResult);

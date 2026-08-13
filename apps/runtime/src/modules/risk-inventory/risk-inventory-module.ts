@@ -46,7 +46,7 @@ import {
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { findActivePositionRows } from "../../active-positions.js";
-import { blockedByConflictingOpenPosition } from "../../open-position-conflict.js";
+import { resolveDustPromotion } from "../../open-position-conflict.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 import { normalizeReasonCode } from "../../risk-event-codes.js";
 import { AlgoRiskGateImpl } from "./algo-risk-gate.js";
@@ -65,6 +65,8 @@ import type { SignalPathTelemetry } from "../strategy/signal-path-telemetry.js";
 import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
 import type { ExecutionProfileStateRecord } from "../execution-profile/types.js";
 import type { PositionConcentrationService } from "../../position-concentration-service.js";
+import type { TimerRegistry } from "../../periodic-timers.js";
+import type { StrandedFillAlertEmitter } from "../../stranded-fill-alert.js";
 
 const EXECUTION_PROFILE_SCALE_IN_RULE_ID = "EXECUTION_PROFILE_SCALE_IN";
 const LIVE_LITE_ACTIVE_MARKETS_CAP_FULL_REASON = "live_lite_active_markets_cap_full";
@@ -75,7 +77,7 @@ export interface RiskInventoryModuleDeps {
   inventoryLotRepo: InventoryLotRepository;
   orderRepo: OrderRepository;
   marketRepo?: Pick<MarketRepository, "findByTokenId"> | undefined;
-  fillRepo: Pick<FillRepository, "findUnreconciled" | "markReconciled">;
+  fillRepo: Pick<FillRepository, "findUnreconciled" | "claimForReconciliation">;
   log: Logger;
   db: Database.Database;
   liveLiteGuard?: LiveLiteGuard | undefined;
@@ -113,6 +115,9 @@ export interface RiskInventoryModuleDeps {
   markToMarketEnabled?: boolean | undefined;
   latestUsablePriceForToken?: ((tokenId: TokenId) => number | null) | undefined;
   positionConcentration?: Pick<PositionConcentrationService, "recordFill"> | undefined;
+  timers?: TimerRegistry | undefined;
+  unreconciledReplayIntervalMs?: number | undefined;
+  emitStrandedFillAlert: StrandedFillAlertEmitter;
 }
 
 /** Full diagnostics snapshot returned by getDiagnostics(). */
@@ -122,10 +127,15 @@ export interface RiskDiagnostics {
   signalsRejected: number;
   fillsProcessed: number;
   markToMarketUpdates: number;
+  fillApplicationFailures: number;
+  unreconciledFillCount: number;
 }
 
 const DEFAULT_REJECTION_LOG_COOLDOWN_MS = 60 * 60 * 1000;
 const IMPOSSIBLE_PRICE_EPSILON = 1e-9;
+const UNRECONCILED_REPLAY_BATCH_SIZE = 25;
+const DEFAULT_UNRECONCILED_REPLAY_INTERVAL_MS = 5 * 60_000;
+const STRANDED_FILL_ALERT_AGE_MS = 15 * 60_000;
 
 export const W4_STALENESS_FALLBACK_MS = 60_000;
 
@@ -140,6 +150,14 @@ export class RiskInventoryModule implements RuntimeModule {
   private signalsRejectedCount = 0;
   private fillsProcessed = 0;
   private mtmUpdates = 0;
+  private fillApplicationFailures = 0;
+  private unreconciledFillCount = 0;
+  private replayTimer: ReturnType<typeof setInterval> | null = null;
+  private replayWorker: Promise<void> | null = null;
+  private backfillWorker: Promise<void> | null = null;
+  private acceptingReplayWork = false;
+  private lifecycleGeneration = 0;
+  private readonly fillFailureLogState = new Map<string, number>();
   private readonly rejectionLogState = new Map<
     string,
     { lastLoggedAt: number; suppressed: number }
@@ -198,14 +216,33 @@ export class RiskInventoryModule implements RuntimeModule {
   }
 
   async start(): Promise<void> {
+    if (this.started) return;
+    this.clearReplayTimer();
+    this.acceptingReplayWork = true;
+    const generation = ++this.lifecycleGeneration;
     this.unsubs.push(
       this.deps.bus.subscribe("SignalProduced", (p) => this.handleSignal(p)),
       this.deps.bus.subscribe("FillReceived", (p) => this.handleFill(p)),
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
     );
-    await this.backfillStaleCurrentValues();
-    await this.replayUnreconciledFills();
+    const backfill = this.backfillStaleCurrentValues(generation).finally(() => {
+      if (this.backfillWorker === backfill) this.backfillWorker = null;
+    });
+    this.backfillWorker = backfill;
+    await backfill;
+    await this.runReplay(generation, "startup");
+    if (!this.acceptingReplayWork || generation !== this.lifecycleGeneration) return;
+    this.replayTimer =
+      this.deps.timers?.every(
+        "unreconciled_fill_replay",
+        this.deps.unreconciledReplayIntervalMs ?? DEFAULT_UNRECONCILED_REPLAY_INTERVAL_MS,
+        () => {
+          void this.runReplay(generation, "periodic").catch((err) =>
+            this.log.error({ err, source: "periodic" }, "unreconciled fill replay failed"),
+          );
+        },
+      ) ?? null;
     this.started = true;
     this.log.info("risk-inventory module started");
   }
@@ -218,12 +255,33 @@ export class RiskInventoryModule implements RuntimeModule {
     }
   }
 
-  private async replayUnreconciledFills(): Promise<void> {
-    const fills = this.deps.fillRepo.findUnreconciled();
+  private runReplay(generation: number, source: "startup" | "periodic"): Promise<void> {
+    if (!this.acceptingReplayWork || generation !== this.lifecycleGeneration)
+      return Promise.resolve();
+    if (this.replayWorker) return this.replayWorker;
+    const worker = this.replayUnreconciledFills(generation, source).finally(() => {
+      if (this.replayWorker === worker) this.replayWorker = null;
+    });
+    this.replayWorker = worker;
+    return worker;
+  }
+
+  private async replayUnreconciledFills(
+    generation: number,
+    source: "startup" | "periodic",
+  ): Promise<void> {
+    const allFills = this.deps.fillRepo.findUnreconciled();
+    this.unreconciledFillCount = allFills.length;
+    const fills =
+      source === "periodic" ? allFills.slice(0, UNRECONCILED_REPLAY_BATCH_SIZE) : allFills;
     if (fills.length === 0) return;
 
-    this.log.warn({ count: fills.length }, "replaying unreconciled fills before startup");
+    this.log.warn(
+      { count: fills.length, total: allFills.length, source },
+      "replaying unreconciled fills",
+    );
     for (const fill of fills) {
+      if (generation !== this.lifecycleGeneration) return;
       await this.handleFill({
         fillId: fill.fillId,
         orderId: fill.orderId,
@@ -244,9 +302,10 @@ export class RiskInventoryModule implements RuntimeModule {
         timestamp: new Date(fill.filledAt).getTime(),
       });
     }
+    if (generation === this.lifecycleGeneration) this.readUnreconciledState(this.now());
   }
 
-  private async backfillStaleCurrentValues(): Promise<void> {
+  private async backfillStaleCurrentValues(generation: number): Promise<void> {
     // Every non-closed row, not one winner per token: a dust row that shares its token with an open
     // row would otherwise never be revalued, and its current_value_usdc would stay stale forever.
     // Promotion to a second `open` row is prevented by the guard below, not by narrowing the read.
@@ -258,6 +317,7 @@ export class RiskInventoryModule implements RuntimeModule {
     let backfilled = 0;
 
     for (const pos of positions) {
+      if (generation !== this.lifecycleGeneration) return;
       if (!this.needsStartupCurrentValueBackfill(pos)) continue;
 
       const markPrice = this.deps.latestUsablePriceForToken
@@ -287,7 +347,13 @@ export class RiskInventoryModule implements RuntimeModule {
         status: nextStatus,
         updatedAt: nowIso,
       };
-      const toSave = this.resolveDustPromotion(pos, updated, "backfillStaleCurrentValues");
+      const toSave = resolveDustPromotion(
+        this.deps.positionRepo,
+        this.log,
+        pos,
+        updated,
+        "backfillStaleCurrentValues",
+      );
       if (toSave === null) continue;
       this.deps.positionRepo.save(toSave);
       await this.publishOpenToDustTransition(pos, toSave);
@@ -300,6 +366,7 @@ export class RiskInventoryModule implements RuntimeModule {
   }
 
   async stop(): Promise<void> {
+    await this.quiescePeriodicReplay();
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     this.started = false;
@@ -309,6 +376,13 @@ export class RiskInventoryModule implements RuntimeModule {
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
     if (!this.started) {
       return { ok: false, detail: "not started" };
+    }
+    const state = this.readUnreconciledState(this.now());
+    if (state.stale) {
+      return {
+        ok: false,
+        detail: `unreconciled fills=${state.count} oldestAgeMs=${state.oldestAgeMs}`,
+      };
     }
     return {
       ok: true,
@@ -324,6 +398,8 @@ export class RiskInventoryModule implements RuntimeModule {
       signalsRejected: this.signalsRejectedCount,
       fillsProcessed: this.fillsProcessed,
       markToMarketUpdates: this.mtmUpdates,
+      fillApplicationFailures: this.fillApplicationFailures,
+      unreconciledFillCount: this.unreconciledFillCount,
     };
   }
 
@@ -333,6 +409,44 @@ export class RiskInventoryModule implements RuntimeModule {
 
   private now(): number {
     return this.deps.now ? this.deps.now() : Date.now();
+  }
+
+  private clearReplayTimer(): void {
+    if (!this.replayTimer) return;
+    clearInterval(this.replayTimer);
+    this.replayTimer = null;
+  }
+
+  async quiescePeriodicReplay(): Promise<void> {
+    this.acceptingReplayWork = false;
+    ++this.lifecycleGeneration;
+    this.clearReplayTimer();
+    const workers = [this.replayWorker, this.backfillWorker].filter(
+      (worker): worker is Promise<void> => worker !== null,
+    );
+    await Promise.all(workers);
+  }
+
+  private readUnreconciledState(nowMs: number): {
+    count: number;
+    oldestAgeMs: number;
+    stale: boolean;
+  } {
+    const rows = this.deps.fillRepo.findUnreconciled();
+    this.unreconciledFillCount = rows.length;
+    const unreconciledIds = new Set(rows.map((row) => String(row.fillId)));
+    for (const fillId of this.fillFailureLogState.keys()) {
+      if (!unreconciledIds.has(fillId)) this.fillFailureLogState.delete(fillId);
+    }
+    const oldestAgeMs =
+      rows.length === 0 ? 0 : Math.max(0, nowMs - parseLedgerInstantMs(rows[0]!.filledAt));
+    const state = {
+      count: rows.length,
+      oldestAgeMs,
+      stale: oldestAgeMs >= STRANDED_FILL_ALERT_AGE_MS,
+    };
+    this.deps.emitStrandedFillAlert(state, nowMs);
+    return state;
   }
 
   private isMissingCurrentValue(pos: Position): boolean {
@@ -387,42 +501,6 @@ export class RiskInventoryModule implements RuntimeModule {
    * prevent. That case is fail-closed by design; consolidating open+dust per token is tracked as
    * follow-up #143.
    */
-  private resolveDustPromotion(
-    pos: Position,
-    updated: Position,
-    site: string,
-    ignorePositionId?: string | null,
-  ): Position | null {
-    if (updated.status !== "open") return updated;
-
-    let declined = blockedByConflictingOpenPosition(
-      this.deps.positionRepo,
-      this.log,
-      updated,
-      site,
-      ignorePositionId,
-    );
-    if (!declined && pos.status === "dust") {
-      const winner = this.deps.positionRepo.findByTokenId(pos.tokenId);
-      const isWinner = winner !== null && winner.positionId === pos.positionId;
-      if (!isWinner) {
-        declined = true;
-        this.log.warn(
-          {
-            site,
-            tokenId: pos.tokenId,
-            positionId: pos.positionId,
-            winnerPositionId: winner?.positionId ?? null,
-          },
-          "declined dust promotion — not the findByTokenId winner for this token",
-        );
-      }
-    }
-    if (!declined) return updated;
-    if (pos.status !== "dust") return null;
-    return { ...updated, status: "dust" };
-  }
-
   private rejectionLogCooldownMs(): number {
     return this.deps.rejectionLogCooldownMs ?? DEFAULT_REJECTION_LOG_COOLDOWN_MS;
   }
@@ -801,6 +879,7 @@ export class RiskInventoryModule implements RuntimeModule {
 
     try {
       const position = withImmediate(this.deps.db, () => {
+        if (!this.deps.fillRepo.claimForReconciliation(payload.fillId)) return null;
         const positionBefore = this.deps.positionRepo.findByTokenId(payload.tokenId);
         const origOrder = this.deps.orderRepo.findById(payload.orderId);
         const applied = this.inventory.applyFill({
@@ -833,16 +912,22 @@ export class RiskInventoryModule implements RuntimeModule {
           positionBefore,
           positionAfter: applied,
         });
-        this.deps.fillRepo.markReconciled([payload.fillId]);
         return applied;
       });
 
+      if (position === null) return;
       await this.deps.bus.publish("PositionUpdated", { position });
     } catch (err) {
-      this.log.error(
-        { err, fillId: payload.fillId, tokenId: payload.tokenId },
-        "fill application failed",
-      );
+      this.fillApplicationFailures++;
+      const now = this.now();
+      const lastLoggedAt = this.fillFailureLogState.get(String(payload.fillId));
+      if (lastLoggedAt === undefined || now - lastLoggedAt >= DEFAULT_REJECTION_LOG_COOLDOWN_MS) {
+        this.fillFailureLogState.set(String(payload.fillId), now);
+        this.log.error(
+          { err, fillId: payload.fillId, tokenId: payload.tokenId },
+          "fill application failed",
+        );
+      }
     }
   }
 
@@ -917,7 +1002,9 @@ export class RiskInventoryModule implements RuntimeModule {
       // The guard runs BEFORE the row joins the batch: saveBatch is a single transaction, so one
       // declined promotion would otherwise roll back every other position's mark in the same tick.
       const tokenKey = String(pos.tokenId);
-      let toSave = this.resolveDustPromotion(
+      let toSave = resolveDustPromotion(
+        this.deps.positionRepo,
+        this.log,
         pos,
         updatedPosition,
         "handleMarketUpdate",

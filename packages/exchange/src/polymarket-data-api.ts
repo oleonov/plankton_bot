@@ -39,10 +39,17 @@ interface PolymarketPositionsPage {
   positions: PolymarketDataPosition[];
 }
 
-function numericField(raw: Record<string, unknown>, field: string): number {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function nonNegativeNumericField(raw: Record<string, unknown>, field: string): number | null {
   const value = raw[field];
-  const parsed = typeof value === "number" ? value : Number(value ?? 0);
-  return Number.isFinite(parsed) ? parsed : 0;
+  if (typeof value === "string" && value.trim().length === 0) return null;
+  if (typeof value !== "number" && typeof value !== "string") return null;
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function stringField(raw: Record<string, unknown>, ...fields: string[]): string | null {
@@ -61,18 +68,22 @@ function booleanField(raw: Record<string, unknown>, field: string): boolean {
   return false;
 }
 
-export function normalizePolymarketPosition(
-  raw: Record<string, unknown>,
-): PolymarketDataPosition | null {
+export function normalizePolymarketPosition(raw: unknown): PolymarketDataPosition | null {
+  if (!isRecord(raw)) return null;
+
   const tokenId = stringField(raw, "asset", "asset_id", "token_id", "tokenId");
-  if (!tokenId) return null;
+  const size = nonNegativeNumericField(raw, "size");
+  const currentValueUsdc = nonNegativeNumericField(raw, "currentValue");
+  const initialValueUsdc = nonNegativeNumericField(raw, "initialValue");
+  if (!tokenId || size === null || currentValueUsdc === null || initialValueUsdc === null)
+    return null;
 
   return {
     tokenId,
     conditionId: stringField(raw, "conditionId", "condition_id"),
-    size: numericField(raw, "size"),
-    currentValueUsdc: numericField(raw, "currentValue"),
-    initialValueUsdc: numericField(raw, "initialValue"),
+    size,
+    currentValueUsdc,
+    initialValueUsdc,
     redeemable: booleanField(raw, "redeemable"),
     slug: stringField(raw, "slug"),
     marketSlug: stringField(raw, "marketSlug", "market_slug"),
@@ -141,10 +152,12 @@ async function fetchPolymarketPositionsPage(
 
     const data = (await res.json()) as unknown;
     if (!Array.isArray(data)) return null;
-    const positions = data
-      .filter((item): item is Record<string, unknown> => item !== null && typeof item === "object")
-      .map((item) => normalizePolymarketPosition(item))
-      .filter((item): item is PolymarketDataPosition => item !== null);
+    const positions: PolymarketDataPosition[] = [];
+    for (const item of data) {
+      const position = normalizePolymarketPosition(item);
+      if (position === null) return null;
+      positions.push(position);
+    }
     return { rawCount: data.length, positions };
   } catch {
     return null;

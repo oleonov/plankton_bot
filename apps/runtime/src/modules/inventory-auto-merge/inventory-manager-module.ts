@@ -119,6 +119,7 @@ export class InventoryManagerModule implements RuntimeModule {
       deps.orderRepo,
       deps.marketRepo,
       deps.fillRepo,
+      deps.log,
     );
     this.settler = new MergeSettler(deps.positionRepo, deps.lotRepo, deps.mergeLedgerRepo, deps.db);
   }

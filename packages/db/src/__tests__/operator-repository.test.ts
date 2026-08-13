@@ -66,6 +66,35 @@ describe("SqliteOperatorCommandRepository", () => {
     expect(pending[1]!.targetId).toBeNull();
   });
 
+  it("T28g — orders identical created_at commands by increasing id with the literal SQL contract", () => {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    cmdRepo.insert({ action: "resume", targetId: null, reason: null, createdAt });
+    cmdRepo.insert({ action: "pause", targetId: null, reason: null, createdAt });
+
+    const preparedSql: string[] = [];
+    const recordingDb = new Proxy(conn.db, {
+      get(target, property) {
+        if (property === "prepare") {
+          return (sql: string) => {
+            preparedSql.push(sql);
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const recordingRepo = new SqliteOperatorCommandRepository(recordingDb);
+
+    expect(recordingRepo.getPending().map((command) => command.action)).toEqual([
+      "resume",
+      "pause",
+    ]);
+    expect(preparedSql).toEqual([
+      "SELECT * FROM operator_commands WHERE status = 'pending' ORDER BY created_at ASC, id ASC",
+    ]);
+  });
+
   it("updateStatus marks as applied", () => {
     const id = cmdRepo.insert({
       action: "pause",

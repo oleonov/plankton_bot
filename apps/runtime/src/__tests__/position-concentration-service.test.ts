@@ -5,11 +5,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   bootstrapControlDb,
   bootstrapLedgerDb,
+  SqliteFillRepository,
+  SqliteInventoryLotRepository,
+  SqliteOrderRepository,
+  SqlitePositionRepository,
   toSqliteDateTime,
   type DbConnection,
 } from "@krabs/db";
 import {
   createConditionId,
+  createFillId,
   createOrderId,
   createPositionId,
   createTokenId,
@@ -17,7 +22,12 @@ import {
   type OrderSide,
   type Position,
 } from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { PositionConcentrationService } from "../position-concentration-service.js";
+import { runWalletPositionSentinel } from "../modules/reconciliation/wallet-position-sentinel.js";
+import { ProfileRuntimePublisher } from "../modules/publisher/profile-runtime-publisher.js";
+import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
+import { discardStrandedFillAlert } from "../stranded-fill-alert.js";
 
 const NOW = Date.parse("2026-06-23T12:00:00.000Z");
 const PROFILE = "live-lite" as const;
@@ -403,6 +413,181 @@ describe("PositionConcentrationService", () => {
       expect(metric.labels).not.toContain("cond-label");
     }
   });
+
+  it("T21a — sentinel marks drive the profile-summary bankroll path", async () => {
+    const h = track(createHarness({ portfolioUsdc: null }));
+    seedF21(h);
+    await markF21(h);
+    insertProfileSummary(h.control, PROFILE, 100, new Date(NOW).toISOString());
+
+    expect(readPositionValues(h.ledger, "pos-t21-a")).toEqual({
+      current: 20,
+      liquidation: null,
+      status: "open",
+    });
+    expect(readPositionValues(h.ledger, "pos-t21-b")).toEqual({
+      current: 1.5,
+      liquidation: null,
+      status: "dust",
+    });
+    expect(concentrationDecision(h, "t21a").metrics).toMatchObject({
+      currentEffectiveBankrollUsdc: 121.5,
+      capBankrollUsdc: 121.5,
+      grossCapUsdc: 60.75,
+    });
+  });
+
+  it("T21b — publisher liquidation equity drives the fresh portfolio snapshot", async () => {
+    const h = track(createHarness({ portfolioUsdc: null }));
+    seedF21(h);
+    upsertPosition(h.ledger, "t21-c", "cond-t21-c", 1, 10, 10);
+    h.ledger.db
+      .prepare("UPDATE positions SET liquidation_value_usdc = 5 WHERE position_id = ?")
+      .run("pos-t21-c");
+    await markF21(h);
+    const publisher = new ProfileRuntimePublisher({
+      controlDb: h.control.db,
+      ledgerDb: h.ledger.db,
+      profile: PROFILE,
+      getPaused: () => false,
+      log: testLogger(),
+      exchangeGateway: { getBalances: async () => [{ available: 100 }] } as never,
+    });
+    await publisher.publish();
+    insertProfileSummary(h.control, PROFILE, 10, new Date(NOW).toISOString());
+
+    expect(readPositionValues(h.ledger, "pos-t21-a")).toEqual({
+      current: 20,
+      liquidation: null,
+      status: "open",
+    });
+    expect(readPositionValues(h.ledger, "pos-t21-b")).toEqual({
+      current: 1.5,
+      liquidation: null,
+      status: "dust",
+    });
+    expect(readPositionValues(h.ledger, "pos-t21-c")).toEqual({
+      current: 10,
+      liquidation: 5,
+      status: "open",
+    });
+    expect(readLatestSnapshot(h.ledger)).toMatchObject({
+      position_value_usdc: 31.5,
+      liquidation_value_usdc: 26.5,
+      equity_usdc: 131.5,
+      total_equity_liquidation_usdc: 126.5,
+    });
+    expect(concentrationDecision(h, "t21b").metrics).toMatchObject({
+      currentEffectiveBankrollUsdc: 126.5,
+      capBankrollUsdc: 126.5,
+      grossCapUsdc: 63.25,
+    });
+  });
+
+  it("T21c — zero liquidation snapshot falls back to equity", async () => {
+    const h = track(createHarness({ portfolioUsdc: null }));
+    upsertPosition(h.ledger, "t21-single", "cond-t21-single", 0.5, 40, 20);
+    h.ledger.db
+      .prepare("UPDATE positions SET liquidation_value_usdc = 0 WHERE position_id = ?")
+      .run("pos-t21-single");
+    await runWalletPositionSentinel(
+      {
+        reader: { read: async () => [remotePosition("t21-single", "cond-t21-single", 43, 21.5)] },
+        positionRepo: new SqlitePositionRepository(h.ledger.db),
+        marketRepo: { findByTokenId: () => null } as never,
+        latestMinOrderSize: () => 5,
+        log: testLogger(),
+      },
+      NOW,
+    );
+    const publisher = new ProfileRuntimePublisher({
+      controlDb: h.control.db,
+      ledgerDb: h.ledger.db,
+      profile: PROFILE,
+      getPaused: () => false,
+      log: testLogger(),
+      exchangeGateway: { getBalances: async () => [{ available: 0 }] } as never,
+    });
+    await publisher.publish();
+    insertProfileSummary(h.control, PROFILE, 999, new Date(NOW).toISOString());
+
+    expect(readPositionValues(h.ledger, "pos-t21-single")).toEqual({
+      current: 20,
+      liquidation: 0,
+      status: "open",
+    });
+    expect(readLatestSnapshot(h.ledger)).toMatchObject({
+      equity_usdc: 20,
+      total_equity_liquidation_usdc: 0,
+    });
+    expect(concentrationDecision(h, "t21c").metrics).toMatchObject({
+      currentEffectiveBankrollUsdc: 20,
+      capBankrollUsdc: 20,
+      grossCapUsdc: 10,
+    });
+  });
+
+  it("T23 — RiskInventory fill application and concentration state share one SQLite connection", async () => {
+    const h = track(createHarness());
+    const bus = new InProcessEventBus();
+    const fillRepo = new SqliteFillRepository(h.ledger.db);
+    h.ledger.db
+      .prepare("INSERT INTO bot_runs (run_id, mode, started_at) VALUES ('t23-run', 'test', ?)")
+      .run(new Date(NOW).toISOString());
+    h.ledger.db
+      .prepare(
+        "INSERT INTO orders (order_id, client_order_id, token_id, condition_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES (?, ?, ?, ?, 'buy', 'GTC', 0.5, 2, 1, 'filled', 't23-run', ?, ?)",
+      )
+      .run(
+        "t23-order",
+        "t23-client",
+        "t23-token",
+        "t23-condition",
+        new Date(NOW).toISOString(),
+        new Date(NOW).toISOString(),
+      );
+    h.ledger.db
+      .prepare(
+        "INSERT INTO fills (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled) VALUES (?, ?, ?, ?, 'buy', 0.5, 2, 1, 'maker', 0, ?, 0)",
+      )
+      .run("t23-fill", "t23-order", "t23-token", "t23-condition", new Date(NOW).toISOString());
+    const module = new RiskInventoryModule({
+      bus,
+      db: h.ledger.db,
+      fillRepo,
+      positionRepo: new SqlitePositionRepository(h.ledger.db),
+      inventoryLotRepo: new SqliteInventoryLotRepository(h.ledger.db),
+      orderRepo: new SqliteOrderRepository(h.ledger.db),
+      positionConcentration: h.service,
+      log: testLogger(),
+      emitStrandedFillAlert: discardStrandedFillAlert,
+    });
+    await module.start();
+    await bus.publish("FillReceived", {
+      fillId: createFillId("t23-fill"),
+      orderId: createOrderId("t23-order"),
+      clientOrderId: "t23-client" as never,
+      tokenId: createTokenId("t23-token"),
+      conditionId: createConditionId("t23-condition"),
+      side: "buy",
+      price: 0.5,
+      size: 2,
+      sizeUsdc: 1,
+      liquidityRole: "maker",
+      fee: 0,
+      feeRateBps: 0,
+      signalReason: null,
+      timestamp: NOW,
+    });
+    expect(
+      h.ledger.db
+        .prepare(
+          "SELECT gross_buy_filled_usdc FROM position_concentration_state WHERE concentration_key = 'condition:t23-condition'",
+        )
+        .get(),
+    ).toEqual({ gross_buy_filled_usdc: 1 });
+    await module.stop();
+  });
 });
 
 describe("PositionConcentrationService — SQLite space-format profile-summary staleness (non-UTC host)", () => {
@@ -500,6 +685,79 @@ function insertProfileSummary(
          updated_at = excluded.updated_at`,
     )
     .run(profileId, walletBalanceUsdc, updatedAt);
+}
+
+function seedF21(h: ReturnType<typeof createHarness>): void {
+  upsertPosition(h.ledger, "t21-a", "cond-t21", 0.5, 40, 20);
+  upsertPosition(h.ledger, "t21-b", "cond-t21", 3, 3, 9, "dust");
+  h.ledger.db
+    .prepare(
+      "UPDATE positions SET token_id = ?, condition_id = ?, position_id = ? WHERE position_id = ?",
+    )
+    .run("t21-a", "cond-t21", "pos-t21-b", "pos-t21-b");
+  h.ledger.db.prepare("UPDATE positions SET liquidation_value_usdc = NULL").run();
+}
+
+async function markF21(h: ReturnType<typeof createHarness>): Promise<void> {
+  await runWalletPositionSentinel(
+    {
+      reader: { read: async () => [remotePosition("t21-a", "cond-t21", 43, 21.5)] },
+      positionRepo: new SqlitePositionRepository(h.ledger.db),
+      marketRepo: { findByTokenId: () => null } as never,
+      latestMinOrderSize: () => 5,
+      log: testLogger(),
+    },
+    NOW,
+  );
+}
+
+function remotePosition(
+  tokenId: string,
+  conditionId: string,
+  size: number,
+  currentValueUsdc: number,
+) {
+  return {
+    tokenId,
+    conditionId,
+    size,
+    currentValueUsdc,
+    initialValueUsdc: currentValueUsdc,
+    redeemable: false,
+    slug: null,
+    marketSlug: null,
+    outcome: "Yes",
+    raw: {},
+  };
+}
+
+function readPositionValues(conn: DbConnection, positionId: string) {
+  return conn.db
+    .prepare(
+      "SELECT current_value_usdc AS current, liquidation_value_usdc AS liquidation, status FROM positions WHERE position_id = ?",
+    )
+    .get(positionId) as { current: number; liquidation: number | null; status: string };
+}
+
+function readLatestSnapshot(conn: DbConnection) {
+  return conn.db
+    .prepare(
+      "SELECT position_value_usdc, liquidation_value_usdc, equity_usdc, total_equity_liquidation_usdc FROM portfolio_snapshots ORDER BY id DESC LIMIT 1",
+    )
+    .get() as Record<string, number>;
+}
+
+function concentrationDecision(h: ReturnType<typeof createHarness>, token: string) {
+  return h.service.evaluateBuy({
+    tokenId: createTokenId(token),
+    conditionId: createConditionId(`cond-${token}`),
+    candidateNotionalUsdc: 1,
+    minExecutableNotionalUsdc: 1,
+    policy: { ...DEFAULT_EXECUTION_POLICY.positionConcentration, grossPct: 0.5, minGrossCapUsd: 1 },
+    stage: "signal_to_order",
+    signalReason: "probe-entry",
+    decisionRuleId: null,
+  });
 }
 
 function recordBuy(

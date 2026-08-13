@@ -58,7 +58,9 @@ export class SqliteOperatorCommandRepository implements OperatorCommandRepositor
 
   getPending(): OperatorCommand[] {
     const rows = this.db
-      .prepare(`SELECT * FROM operator_commands WHERE status = 'pending' ORDER BY created_at ASC`)
+      .prepare(
+        "SELECT * FROM operator_commands WHERE status = 'pending' ORDER BY created_at ASC, id ASC",
+      )
       .all() as CommandRow[];
     return rows.map(rowToCommand);
   }

@@ -34,6 +34,7 @@ import {
   RiskInventoryModule,
   W4_STALENESS_FALLBACK_MS,
 } from "../modules/risk-inventory/risk-inventory-module.js";
+import { discardStrandedFillAlert } from "../stranded-fill-alert.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
 
@@ -308,7 +309,7 @@ describe("RiskInventoryModule", () => {
   let lotRepo: ReturnType<typeof createMockLotRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let fillRepo: {
-    markReconciled: ReturnType<typeof vi.fn>;
+    claimForReconciliation: ReturnType<typeof vi.fn>;
     findUnreconciled: ReturnType<typeof vi.fn>;
   };
   let mod: RiskInventoryModule;
@@ -326,6 +327,7 @@ describe("RiskInventoryModule", () => {
       log: silentLog,
       db: mockDb,
       liveLiteGuard,
+      emitStrandedFillAlert: discardStrandedFillAlert,
       ...overrides,
     });
   }
@@ -336,7 +338,10 @@ describe("RiskInventoryModule", () => {
     positionRepo = createMockPositionRepo();
     lotRepo = createMockLotRepo();
     orderRepo = createMockOrderRepo();
-    fillRepo = { markReconciled: vi.fn(), findUnreconciled: vi.fn().mockReturnValue([]) };
+    fillRepo = {
+      claimForReconciliation: vi.fn().mockReturnValue(true),
+      findUnreconciled: vi.fn().mockReturnValue([]),
+    };
     mod = createModule();
   });
 
@@ -1351,9 +1356,9 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
-  // ─── Fill reconciliation marking ─────────────────────────────────
+  // ─── Fill reconciliation claiming ─────────────────────────────────
 
-  it("marks fill as reconciled after successful applyFill", async () => {
+  it("claims fill before successful applyFill", async () => {
     await mod.start();
 
     await bus.publish("FillReceived", {
@@ -1373,12 +1378,46 @@ describe("RiskInventoryModule", () => {
       timestamp: Date.now(),
     });
 
-    expect(fillRepo.markReconciled).toHaveBeenCalledWith([createFillId("fill-1")]);
+    expect(fillRepo.claimForReconciliation).toHaveBeenCalledWith(createFillId("fill-1"));
 
     await mod.stop();
   });
 
-  it("does NOT call markReconciled when applyFill throws", async () => {
+  it("does not apply or publish a fill whose atomic claim was lost", async () => {
+    fillRepo.claimForReconciliation.mockReturnValue(false);
+    const updates: Position[] = [];
+    bus.subscribe("PositionUpdated", async ({ position }) => {
+      updates.push(position);
+    });
+    await mod.start();
+
+    await bus.publish("FillReceived", {
+      fillId: createFillId("fill-already-claimed"),
+      orderId: createOrderId("ord-already-claimed"),
+      clientOrderId: "plk_already_claimed" as ClientOrderId,
+      tokenId: TOK_ID,
+      conditionId: COND_ID,
+      side: "buy",
+      price: 0.5,
+      size: 10,
+      sizeUsdc: 5,
+      liquidityRole: "unknown",
+      fee: 0,
+      feeRateBps: 0,
+      signalReason: null,
+      timestamp: Date.now(),
+    });
+
+    expect(fillRepo.claimForReconciliation).toHaveBeenCalledWith(
+      createFillId("fill-already-claimed"),
+    );
+    expect(positionRepo.save).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+
+    await mod.stop();
+  });
+
+  it("claims a fill before applyFill throws", async () => {
     await mod.start();
 
     // Sell fill for a token with no existing position — applyFill will throw
@@ -1399,7 +1438,7 @@ describe("RiskInventoryModule", () => {
       timestamp: Date.now(),
     });
 
-    expect(fillRepo.markReconciled).not.toHaveBeenCalled();
+    expect(fillRepo.claimForReconciliation).toHaveBeenCalledWith(createFillId("fill-err"));
 
     await mod.stop();
   });
@@ -1469,7 +1508,9 @@ describe("RiskInventoryModule", () => {
         realizedPnl: 2,
       }),
     );
-    expect(fillRepo.markReconciled).toHaveBeenCalledWith([createFillId("fill-unreconciled-sell")]);
+    expect(fillRepo.claimForReconciliation).toHaveBeenCalledWith(
+      createFillId("fill-unreconciled-sell"),
+    );
 
     await mod.stop();
   });
@@ -1502,7 +1543,7 @@ describe("RiskInventoryModule", () => {
 
       const localBus = new InProcessEventBus();
       const localFillRepo = {
-        markReconciled: vi.fn(),
+        claimForReconciliation: vi.fn().mockReturnValue(true),
         findUnreconciled: vi.fn().mockReturnValue([]),
       };
       const localModule = new RiskInventoryModule({
@@ -1513,6 +1554,7 @@ describe("RiskInventoryModule", () => {
         fillRepo: localFillRepo,
         log: silentLog,
         db: conn.db,
+        emitStrandedFillAlert: discardStrandedFillAlert,
       });
       await localModule.start();
 
@@ -1546,7 +1588,7 @@ describe("RiskInventoryModule", () => {
       expect(lot.remaining_size).toBe(0);
       expect(position).toMatchObject({ size: 0, status: "closed", realized_pnl: 2 });
       expect(pnl).toEqual({ family_id: "legacy", delta: 2 });
-      expect(localFillRepo.markReconciled).toHaveBeenCalledWith([sellFillId]);
+      expect(localFillRepo.claimForReconciliation).toHaveBeenCalledWith(sellFillId);
 
       await localModule.stop();
     } finally {
@@ -1577,7 +1619,7 @@ describe("RiskInventoryModule", () => {
 
       const localBus = new InProcessEventBus();
       const localFillRepo = {
-        markReconciled: vi.fn(),
+        claimForReconciliation: vi.fn().mockReturnValue(true),
         findUnreconciled: vi.fn().mockReturnValue([]),
       };
       const localModule = new RiskInventoryModule({
@@ -1588,6 +1630,7 @@ describe("RiskInventoryModule", () => {
         fillRepo: localFillRepo,
         log: silentLog,
         db: conn.db,
+        emitStrandedFillAlert: discardStrandedFillAlert,
       });
       await localModule.start();
 
@@ -1617,7 +1660,7 @@ describe("RiskInventoryModule", () => {
 
       expect(lot.remaining_size).toBe(10);
       expect(position).toMatchObject({ size: 10, status: "open" });
-      expect(localFillRepo.markReconciled).not.toHaveBeenCalled();
+      expect(localFillRepo.claimForReconciliation).toHaveBeenCalledWith(sellFillId);
 
       await localModule.stop();
     } finally {
@@ -3019,6 +3062,296 @@ describe("RiskInventoryModule", () => {
       expect(h.detail).toContain("rejected=0");
       expect(h.detail).toContain("mtm=0");
 
+      await mod.stop();
+    });
+
+    it("T2 — periodic replay starts only after start, is cancelled by stop, and is not duplicated", async () => {
+      const ticks: Array<() => void> = [];
+      const timers = {
+        every: vi.fn((_name: string, _ms: number, tick: () => void) => {
+          ticks.push(tick);
+          return 1 as unknown as ReturnType<typeof setInterval>;
+        }),
+      };
+      mod = createModule(undefined, { timers });
+      expect(ticks).toHaveLength(0);
+      await mod.start();
+      await mod.start();
+      expect(timers.every).toHaveBeenCalledTimes(1);
+      await mod.stop();
+      ticks[0]!();
+      await Promise.resolve();
+      expect(fillRepo.findUnreconciled).toHaveBeenCalledTimes(1);
+    });
+
+    it("T3 — overlapping periodic ticks coalesce onto one replay worker", async () => {
+      let tick: (() => void) | undefined;
+      const timers = {
+        every: vi.fn((_n: string, _i: number, callback: () => void) => {
+          tick = callback;
+          return 1 as unknown as ReturnType<typeof setInterval>;
+        }),
+      };
+      fillRepo.findUnreconciled.mockReturnValueOnce([]).mockImplementation(() => {
+        throw new Error("periodic discovery failure");
+      });
+      mod = createModule(undefined, { timers });
+      await mod.start();
+      tick!();
+      tick!();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fillRepo.findUnreconciled).toHaveBeenCalledTimes(2);
+      await mod.stop();
+    });
+
+    it("T4 — health becomes unhealthy at the stranded-fill age boundary", async () => {
+      const now = 1_000_000;
+      fillRepo.findUnreconciled.mockReturnValue([
+        { filledAt: new Date(now - 15 * 60_000).toISOString() },
+      ]);
+      mod = createModule(undefined, { now: () => now });
+      await mod.start();
+      await expect(mod.healthCheck()).resolves.toMatchObject({ ok: false });
+      await mod.stop();
+    });
+
+    it("T5 — replay emits one causal stranded-fill snapshot per cooldown window", async () => {
+      const emit = vi.fn();
+      let now = 2_000_000;
+      fillRepo.findUnreconciled.mockReturnValue([
+        { filledAt: new Date(now - 15 * 60_000).toISOString() },
+      ]);
+      mod = createModule(undefined, { now: () => now, emitStrandedFillAlert: emit });
+      await mod.start();
+      await mod.healthCheck();
+      now += 31 * 60_000;
+      await mod.healthCheck();
+      expect(emit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ count: 1, oldestAgeMs: 46 * 60_000, stale: true }),
+        now,
+      );
+      await mod.stop();
+    });
+
+    it("T11 — a lost atomic claim is a silent no-op with no PositionUpdated", async () => {
+      fillRepo.claimForReconciliation.mockReturnValue(false);
+      const updates = vi.fn();
+      bus.subscribe("PositionUpdated", updates);
+      await mod.start();
+      await bus.publish("FillReceived", {
+        fillId: createFillId("t11"),
+        orderId: createOrderId("t11"),
+        clientOrderId: "t11" as ClientOrderId,
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+        side: "buy",
+        price: 0.5,
+        size: 1,
+        sizeUsdc: 0.5,
+        liquidityRole: "unknown",
+        fee: 0,
+        feeRateBps: 0,
+        signalReason: null,
+        timestamp: Date.now(),
+      });
+      expect(updates).not.toHaveBeenCalled();
+      expect(mod.getDiagnostics().fillApplicationFailures).toBe(0);
+      await mod.stop();
+    });
+
+    it("T12 — a failed application counts a failure while retaining the claim transaction boundary", async () => {
+      await mod.start();
+      await bus.publish("FillReceived", {
+        fillId: createFillId("t12"),
+        orderId: createOrderId("t12"),
+        clientOrderId: "t12" as ClientOrderId,
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        price: 0.5,
+        size: 1,
+        sizeUsdc: 0.5,
+        liquidityRole: "unknown",
+        fee: 0,
+        feeRateBps: 0,
+        signalReason: null,
+        timestamp: Date.now(),
+      });
+      expect(fillRepo.claimForReconciliation).toHaveBeenCalledWith(createFillId("t12"));
+      expect(mod.getDiagnostics().fillApplicationFailures).toBe(1);
+      await mod.stop();
+    });
+
+    it("T13 — quiesce synchronously fences a registered replay tick", async () => {
+      let tick!: () => void;
+      const timers = {
+        every: vi.fn((_n: string, _i: number, callback: () => void) => {
+          tick = callback;
+          return 1 as unknown as ReturnType<typeof setInterval>;
+        }),
+      };
+      mod = createModule(undefined, { timers });
+      await mod.start();
+      const drain = mod.quiescePeriodicReplay();
+      tick();
+      await drain;
+      expect(fillRepo.findUnreconciled).toHaveBeenCalledTimes(1);
+    });
+
+    it("T13b — quiesce during startup leaves the module not started and registers no replay timer", async () => {
+      const timers = { every: vi.fn() };
+      mod = createModule(undefined, { timers });
+      const start = mod.start();
+      const drain = mod.quiescePeriodicReplay();
+      await Promise.all([start, drain]);
+      expect(timers.every).not.toHaveBeenCalled();
+      await expect(mod.healthCheck()).resolves.toEqual({ ok: false, detail: "not started" });
+    });
+
+    it("T14 — periodic discovery failures are logged and do not poison the next tick", async () => {
+      let tick!: () => void;
+      const timers = {
+        every: vi.fn((_n: string, _i: number, callback: () => void) => {
+          tick = callback;
+          return 1 as unknown as ReturnType<typeof setInterval>;
+        }),
+      };
+      fillRepo.findUnreconciled
+        .mockReturnValueOnce([])
+        .mockImplementationOnce(() => {
+          throw new Error("boom");
+        })
+        .mockReturnValue([]);
+      mod = createModule(undefined, { timers });
+      await mod.start();
+      tick();
+      await Promise.resolve();
+      tick();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fillRepo.findUnreconciled).toHaveBeenCalledTimes(3);
+      await mod.stop();
+    });
+
+    it("T14b — startup discovery failures reject start before the module becomes healthy", async () => {
+      fillRepo.findUnreconciled.mockImplementation(() => {
+        throw new Error("closed");
+      });
+      await expect(mod.start()).rejects.toThrow("closed");
+      await expect(mod.healthCheck()).resolves.toEqual({ ok: false, detail: "not started" });
+    });
+
+    it("T16 — diagnostics distinguish failed applications from lost claims", async () => {
+      fillRepo.findUnreconciled.mockReturnValue([{ filledAt: new Date().toISOString() }]);
+      await mod.start();
+      expect(mod.getDiagnostics().unreconciledFillCount).toBe(1);
+      expect(mod.getDiagnostics().fillApplicationFailures).toBe(1);
+      await mod.stop();
+    });
+
+    it("T17 — reconciliation removes stale failure-log state", async () => {
+      fillRepo.findUnreconciled.mockReturnValue([
+        { fillId: createFillId("old"), filledAt: new Date().toISOString() },
+      ]);
+      await mod.start();
+      fillRepo.findUnreconciled.mockReturnValue([]);
+      await mod.healthCheck();
+      expect(mod.getDiagnostics().unreconciledFillCount).toBe(0);
+      await mod.stop();
+    });
+
+    it("T13d — quiesce waits for the startup backfill worker before returning", async () => {
+      const originalFindAll = positionRepo.findAll as ReturnType<typeof vi.fn>;
+      originalFindAll.mockReturnValue([]);
+      const start = mod.start();
+      const quiesce = mod.quiescePeriodicReplay();
+      await Promise.all([start, quiesce]);
+      await expect(mod.healthCheck()).resolves.toEqual({ ok: false, detail: "not started" });
+    });
+
+    it("T18a — periodic replay uses the fixed 25-fill batch ceiling", async () => {
+      let tick!: () => void;
+      const timers = {
+        every: vi.fn((_n: string, _i: number, callback: () => void) => {
+          tick = callback;
+          return 1 as unknown as ReturnType<typeof setInterval>;
+        }),
+      };
+      fillRepo.findUnreconciled.mockReturnValue([]);
+      mod = createModule(undefined, { timers });
+      await mod.start();
+      fillRepo.findUnreconciled.mockReturnValue(
+        Array.from({ length: 30 }, (_, i) => ({
+          fillId: createFillId(`t18a-${i}`),
+          orderId: createOrderId(`t18a-${i}`),
+          tokenId: TOK_ID,
+          conditionId: COND_ID,
+          side: "buy",
+          price: 0.5,
+          size: 1,
+          sizeUsdc: 0.5,
+          liquidityRole: "unknown",
+          fee: 0,
+          feeRateBps: 0,
+          signalId: null,
+          decisionRuleId: null,
+          signalTimestamp: null,
+          filledAt: new Date().toISOString(),
+        })),
+      );
+      tick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fillRepo.claimForReconciliation).toHaveBeenCalledTimes(25);
+      await mod.stop();
+    });
+
+    it("T18b-core — startup replay remains uncapped before module readiness", async () => {
+      fillRepo.findUnreconciled.mockReturnValue([]);
+      await mod.start();
+      expect((await mod.healthCheck()).ok).toBe(true);
+      await mod.stop();
+    });
+
+    it("T18b-log — startup replay logs its source and total", async () => {
+      fillRepo.findUnreconciled.mockReturnValue([
+        {
+          fillId: createFillId("t18blog"),
+          orderId: createOrderId("t18blog"),
+          tokenId: TOK_ID,
+          conditionId: COND_ID,
+          side: "buy",
+          price: 0.5,
+          size: 1,
+          sizeUsdc: 0.5,
+          liquidityRole: "unknown",
+          fee: 0,
+          feeRateBps: 0,
+          signalId: null,
+          decisionRuleId: null,
+          signalTimestamp: null,
+          filledAt: new Date().toISOString(),
+        },
+      ]);
+      await mod.start();
+      expect(silentLog.warn).toHaveBeenCalledWith(
+        { count: 1, total: 1, source: "startup" },
+        "replaying unreconciled fills",
+      );
+      await mod.stop();
+    });
+
+    it("T18c — startup completes its replay before it registers the periodic timer", async () => {
+      const observed: number[] = [];
+      const timers = {
+        every: vi.fn(() => {
+          observed.push(fillRepo.claimForReconciliation.mock.calls.length);
+          return 1 as unknown as ReturnType<typeof setInterval>;
+        }),
+      };
+      mod = createModule(undefined, { timers });
+      await mod.start();
+      expect(observed).toEqual([0]);
       await mod.stop();
     });
   });

@@ -32,6 +32,7 @@ import { MarketDataModule } from "../modules/market-data/market-data-module.js";
 import { NormalizationModule } from "../modules/normalization/normalization-module.js";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
+import { discardStrandedFillAlert } from "../stranded-fill-alert.js";
 import { AlgoDecisionModule } from "../modules/algo-decision/algo-decision-module.js";
 import type { SelectedMarketCache } from "../modules/algo-decision/algo-decision-module.js";
 import { LegStateTrackerModule } from "../modules/leg-state/leg-state-tracker-module.js";
@@ -211,6 +212,7 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
     fillRepo: repos.fill,
     log,
     db: conn.db,
+    emitStrandedFillAlert: discardStrandedFillAlert,
   });
 
   const candidateBookCache = marketDataGateway.getOrderBooks

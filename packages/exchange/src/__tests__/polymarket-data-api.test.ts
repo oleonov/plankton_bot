@@ -133,29 +133,58 @@ describe("polymarket-data-api", () => {
     expect(positions?.at(-1)?.tokenId).toBe("tok-502");
   });
 
-  it("continues pagination using raw page length when a full page has malformed rows", async () => {
+  it("T27 rejects invalid production rows instead of returning a partial wallet snapshot", async () => {
+    const validRow = { asset: "tok-valid", size: "1", currentValue: "0.5", initialValue: "0.4" };
+    const invalidCases: Array<{ name: string; row: unknown }> = [
+      ...["size", "currentValue", "initialValue"].flatMap((field) => [
+        { name: `${field} missing`, row: { ...validRow, [field]: undefined } },
+        { name: `${field} NaN`, row: { ...validRow, [field]: Number.NaN } },
+        { name: `${field} positive infinity`, row: { ...validRow, [field]: Infinity } },
+        { name: `${field} negative infinity`, row: { ...validRow, [field]: -Infinity } },
+        { name: `${field} negative`, row: { ...validRow, [field]: -1 } },
+        { name: `${field} blank`, row: { ...validRow, [field]: "   " } },
+        { name: `${field} boolean`, row: { ...validRow, [field]: true } },
+      ]),
+      { name: "non-object row", row: null },
+      { name: "missing token id", row: { size: "1", currentValue: "0.5", initialValue: "0.4" } },
+    ];
+
+    for (const { name, row } of invalidCases) {
+      expect(normalizePolymarketPosition(row), name).toBeNull();
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValue({ ok: true, json: async () => [validRow, row] } as Response);
+
+      await expect(
+        fetchPolymarketPositions("0xf00df00df00df00df00df00df00df00df00df00d", { fetchImpl }),
+        name,
+      ).resolves.toBeNull();
+      expect(fetchImpl, name).toHaveBeenCalledOnce();
+    }
+
+    expect(
+      normalizePolymarketPosition({
+        asset: "tok-zero",
+        size: "0",
+        currentValue: 0,
+        initialValue: "0.4",
+      }),
+    ).toMatchObject({ tokenId: "tok-zero", size: 0, currentValueUsdc: 0, initialValueUsdc: 0.4 });
+  });
+
+  it("fails closed on a malformed row in a full page", async () => {
     const malformedFullPage = [...positionRows(499), { size: "1", currentValue: "0.5" }];
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => malformedFullPage,
-      } as Response)
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => positionRows(2, 500),
-      } as Response);
+    const fetchImpl = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => malformedFullPage,
+    } as Response);
 
     const positions = await fetchPolymarketPositions("0xf00df00df00df00df00df00df00df00df00df00d", {
       fetchImpl,
     });
 
-    expect(positions).toHaveLength(501);
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    const secondUrl = fetchImpl.mock.calls[1]![0] as URL;
-    expect(secondUrl.searchParams.get("offset")).toBe("500");
-    expect(positions?.some((position) => position.tokenId === "tok-500")).toBe(true);
-    expect(positions?.at(-1)?.tokenId).toBe("tok-501");
+    expect(positions).toBeNull();
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it("returns null instead of a partial authoritative snapshot when a later page fails", async () => {

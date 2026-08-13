@@ -8,6 +8,7 @@ import type {
   PositionId,
 } from "@krabs/domain";
 import { findActivePositions, findActivePositionRows } from "../../active-positions.js";
+import type { Logger } from "../../logger.js";
 
 export interface MergeCandidate {
   conditionId: string;
@@ -24,6 +25,7 @@ export class MergeCandidateService {
     private readonly orderRepo: OrderRepository,
     private readonly marketRepo: MarketRepository,
     private readonly fillRepo: FillRepository,
+    private readonly log?: Pick<Logger, "warn">,
   ) {}
 
   /**
@@ -54,6 +56,18 @@ export class MergeCandidateService {
     const openPositions = findActivePositions(this.positionRepo);
     if (openPositions.length === 0) return [];
     const ambiguous = this.ambiguousTokens();
+    if (ambiguous.size > 0) {
+      const skippedConditions = new Set(
+        findActivePositionRows(this.positionRepo)
+          .filter((row) => ambiguous.has(String(row.tokenId)))
+          .map((row) => this.marketRepo.findByTokenId(row.tokenId)?.conditionId)
+          .filter((conditionId): conditionId is string => conditionId !== undefined),
+      ).size;
+      this.log?.warn(
+        { ambiguousTokens: [...ambiguous], skippedConditions },
+        "merge candidates skipped — token has multiple non-closed rows",
+      );
+    }
 
     // Map positions by conditionId
     const positionsByCondition = new Map<string, Position[]>();

@@ -23,6 +23,7 @@ import type {
   PositionId,
   TokenId,
 } from "@krabs/domain";
+import { createPositionId, createTokenId } from "@krabs/domain";
 import { SettlementNotSubmittedError, SettlementUnconfirmedError } from "@krabs/exchange";
 import { InventoryManagerModule } from "../inventory-manager-module.js";
 import { recoverConfirmedOnchainMerges, republishMergeLegs } from "../recover-onchain-merges.js";
@@ -2590,5 +2591,47 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     const healthOnReadFailure = await mod.healthCheck();
     expect(healthOnReadFailure.ok).toBe(false);
     expect(healthOnReadFailure.detail).toContain("fenced_conditions=unknown");
+  });
+
+  it("T10b — recovery's own candidate constructor refuses an ambiguous token and leaves its on-chain row fenced", async () => {
+    const { positionRepo, orderRepo, marketRepo, fillRepo, lotRepo } = makeMergeableFixtures();
+    const duplicateYes = {
+      ...(positionRepo.findByTokenId(createTokenId(YES_TOKEN)) as Position),
+      positionId: createPositionId("p-yes-duplicate"),
+    };
+    positionRepo.save(duplicateYes);
+    const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
+    mergeLedgerRepo.recordPending({
+      mergeId: "ambiguous-recovery",
+      conditionId: CONDITION_ID,
+      mergedAmount: 5,
+      recordedAt: "2026-07-30T00:00:00.000Z",
+    });
+    mergeLedgerRepo.markOnchain("ambiguous-recovery");
+
+    const result = await recoverConfirmedOnchainMerges({
+      bus,
+      positionRepo,
+      orderRepo,
+      marketRepo,
+      fillRepo,
+      lotRepo,
+      mergeLedgerRepo,
+      db: conn.db,
+      log,
+    });
+
+    expect(result.recovered).toBe(0);
+    expect(result.remaining).toHaveLength(1);
+    expect(result.remaining[0]).toMatchObject({ mergeId: "ambiguous-recovery", status: "onchain" });
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ ambiguousTokens: [YES_TOKEN], skippedConditions: 1 }),
+      "merge candidates skipped — token has multiple non-closed rows",
+    );
+    expect(
+      conn.db
+        .prepare("SELECT status FROM merge_ledger WHERE merge_id = ?")
+        .get("ambiguous-recovery"),
+    ).toEqual({ status: "onchain" });
   });
 });
