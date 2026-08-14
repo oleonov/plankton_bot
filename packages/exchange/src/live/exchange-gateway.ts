@@ -181,6 +181,15 @@ type PreparedOrderRecord = {
   readonly postOnly: boolean;
 };
 
+type PreparedOrderClient = {
+  readonly chainId: unknown;
+  createOrder(
+    userOrder: ReturnType<typeof toSdkUserOrder>,
+    options: ReturnType<typeof toSdkOrderOptions>,
+  ): Promise<unknown>;
+  postOrder(signedOrder: object, orderType: string, postOnly: boolean): Promise<unknown>;
+};
+
 function toSdkUserOrder(params: PlaceOrderParams) {
   return {
     tokenID: String(params.tokenId),
@@ -197,8 +206,8 @@ function toSdkOrderOptions(params: PlaceOrderParams) {
 
 function isDefinitiveSubmissionRejection(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
-  const response = Reflect.get(error, "response");
-  const status =
+  const response: unknown = Reflect.get(error, "response");
+  const status: unknown =
     response && typeof response === "object"
       ? Reflect.get(response, "status")
       : Reflect.get(error, "status");
@@ -510,7 +519,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
   }
 
   async prepareOrder(params: PlaceOrderParams): Promise<PreparedOrder> {
-    const signedOrder = await this.client.createOrder(
+    const signedOrder: unknown = await (this.client as PreparedOrderClient).createOrder(
       toSdkUserOrder(params),
       toSdkOrderOptions(params),
     );
@@ -518,7 +527,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       throw new Error("exchange returned an invalid signed order");
     }
 
-    const chainId = this.client.chainId;
+    const chainId: unknown = (this.client as PreparedOrderClient).chainId;
     if (typeof chainId !== "number") throw new Error("exchange client has no chain ID");
     const prepared = Object.freeze({
       orderId: hashSignedOrderV2(signedOrder, chainId, params.negRisk),
@@ -544,7 +553,11 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
     try {
       const response = await timeDepCall(this.depHealthRecorder, "clob", () =>
-        this.client.postOrder(record.signedOrder, record.orderType, record.postOnly),
+        (this.client as PreparedOrderClient).postOrder(
+          record.signedOrder,
+          record.orderType,
+          record.postOnly,
+        ),
       );
       const orderId = extractOrderId(response);
       if (!orderId) {
