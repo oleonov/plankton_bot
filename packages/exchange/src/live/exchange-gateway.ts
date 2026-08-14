@@ -191,6 +191,10 @@ type PreparedOrderClient = {
   postOrder(signedOrder: object, orderType: string, postOnly: boolean): Promise<unknown>;
 };
 
+type ExactOrderClient = {
+  getOrder(orderId: string): Promise<unknown>;
+};
+
 function toSdkUserOrder(params: PlaceOrderParams) {
   return {
     tokenID: String(params.tokenId),
@@ -643,7 +647,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   private async fetchExactOrder(orderId: string): Promise<ExchangeOrder | null> {
     try {
-      const raw = await this.client.getOrder(orderId);
+      const raw = await (this.client as ExactOrderClient).getOrder(orderId);
       if (raw === null || raw === undefined || isReturnedNotFound(raw)) return null;
       throwIfReturnedError(raw);
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -1950,8 +1954,8 @@ function throwIfReturnedError(raw: unknown): void {
 
 function isNotFoundError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
-  const response = Reflect.get(error, "response");
-  const status =
+  const response: unknown = Reflect.get(error, "response");
+  const status: unknown =
     response && typeof response === "object"
       ? Reflect.get(response, "status")
       : Reflect.get(error, "status");
@@ -1960,13 +1964,13 @@ function isNotFoundError(error: unknown): boolean {
 
 function isReturnedNotFound(raw: unknown): boolean {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
-  const status = Reflect.get(raw, "status");
+  const status: unknown = Reflect.get(raw, "status");
   return (status === 404 || status === "404") && Reflect.get(raw, "error") != null;
 }
 
 function cancelAcknowledged(raw: unknown, orderId: string): boolean {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
-  const canceled = Reflect.get(raw, "canceled");
+  const canceled: unknown = Reflect.get(raw, "canceled");
   return (
     Array.isArray(canceled) &&
     canceled.some((candidate) => typeof candidate === "string" && candidate === orderId)
@@ -1989,7 +1993,7 @@ function extractArrayOrThrow(raw: any): Array<Record<string, unknown>> {
 function extractOrderId(raw: unknown): string | null {
   if (!raw || typeof raw !== "object") return null;
 
-  const candidate = Reflect.get(raw, "orderID") ?? Reflect.get(raw, "id");
+  const candidate: unknown = Reflect.get(raw, "orderID") ?? Reflect.get(raw, "id");
   if (typeof candidate !== "string") return null;
 
   const orderId = candidate.trim();
