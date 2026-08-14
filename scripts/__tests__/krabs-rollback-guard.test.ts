@@ -246,6 +246,7 @@ esac`,
     expect(readFileSync(remoteMarker, "utf8")).toBe(mismatchMarker);
     reached.add("outer-preflight");
     reached.add("env-mismatch");
+    await yieldToWorker();
     writeFileSync(runtimeEnv, "KRABS_API_KEY=rotated\n");
     expect(
       spawnSync(deploy, ["--test-local-release"], {
@@ -497,6 +498,7 @@ esac`,
       expect(readFileSync(stagedRuntimeEnv, "utf8"), mode).toBe(boundSeed);
     }
     reached.add("negatives");
+    await yieldToWorker();
     writeFileSync(recoveryPath, recoverySeed);
     writeFileSync(markerPath, markerSeed);
     writeFileSync(fixture.env.NETWORK_FENCED, "fenced\n");
@@ -582,6 +584,7 @@ esac`,
     ).not.toBe(0);
     expect(metadata.resumeCutoffAware).toBe(true);
     reached.add("legacy-guard");
+    await yieldToWorker();
     rmSync(statePath, { force: true });
     rmSync(fixture.marker, { force: true });
     sql(fixture.control, "UPDATE runtime_control_state SET paused=1 WHERE id=1");
@@ -727,6 +730,7 @@ printf '{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s","markerWasPrese
     expect(readFileSync(fixture.api, "utf8").trim()).toBe("true");
     expect(existsSync(migrationRecoveryPath)).toBe(false);
     reached.add("target-started-recovery");
+    await yieldToWorker();
 
     const failedPost = runRelease({ ORDER_GATE_FAIL: "post" });
     expect(failedPost.status, failedPost.stderr).not.toBe(0);
