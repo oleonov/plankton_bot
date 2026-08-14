@@ -30,6 +30,10 @@ interface BufferedTradeEvent {
   readonly firstSeenAt: number;
 }
 
+type BufferedPreAckEvent =
+  | { readonly kind: "trade"; readonly event: ExchangeUserTradeEvent; readonly orderId: string }
+  | { readonly kind: "order"; readonly event: ExchangeUserOrderEvent; readonly orderId: string };
+
 interface LatencySummary {
   readonly count: number;
   readonly avgMs: number;
@@ -89,6 +93,7 @@ export class UserOrderStreamModule implements RuntimeModule {
   private readonly now: () => number;
   private readonly seenEventKeys = new Map<string, number>();
   private readonly orphanBuffer = new Map<string, BufferedTradeEvent>();
+  private readonly preAckBuffer = new Map<string, BufferedPreAckEvent>();
   private readonly window: UserOrderStreamWindow;
   private unsubs: Array<() => void> = [];
   private stream: ManagedUserEventStream | null = null;
@@ -119,8 +124,10 @@ export class UserOrderStreamModule implements RuntimeModule {
     );
     if (typeof this.seenPruneTimer.unref === "function") this.seenPruneTimer.unref();
     this.unsubs.push(
-      this.deps.bus.subscribe("OrderPlaced", async () => {
+      this.deps.bus.subscribe("OrderPlaced", async ({ orderId }) => {
         this.refreshSubscribedConditions();
+        await Promise.resolve();
+        await this.flushPreAckBuffer(String(orderId));
         await this.flushOrphanBuffer();
       }),
     );
@@ -228,6 +235,12 @@ export class UserOrderStreamModule implements RuntimeModule {
       }
       this.rememberEvent(dedupeKey, nowMs);
 
+      const pendingOrderId = this.findPendingExactOrderIdForTrade(event);
+      if (pendingOrderId) {
+        this.preAckBuffer.set(dedupeKey, { kind: "trade", event, orderId: pendingOrderId });
+        continue;
+      }
+
       if (!this.hasLocalOrderForTrade(event)) {
         this.orphanBuffer.set(dedupeKey, { event, firstSeenAt: nowMs });
         continue;
@@ -249,6 +262,11 @@ export class UserOrderStreamModule implements RuntimeModule {
         continue;
       }
       this.rememberEvent(dedupeKey, nowMs);
+      const pendingOrderId = this.findPendingExactOrderIdForOrderEvent(event);
+      if (pendingOrderId) {
+        this.preAckBuffer.set(dedupeKey, { kind: "order", event, orderId: pendingOrderId });
+        continue;
+      }
       await this.applyOrderEvent(event);
     }
 
@@ -263,6 +281,7 @@ export class UserOrderStreamModule implements RuntimeModule {
       log: this.log,
       gateway: this.deps.gateway,
       fillCompletionTolerance: this.deps.fillCompletionTolerance,
+      deferPendingExactFills: true,
     });
     this.window.wsFills += result.imported;
     if (result.skipped > 0) {
@@ -351,6 +370,18 @@ export class UserOrderStreamModule implements RuntimeModule {
     }
   }
 
+  private async flushPreAckBuffer(orderId: string): Promise<void> {
+    for (const [key, buffered] of [...this.preAckBuffer.entries()]) {
+      if (buffered.orderId !== orderId) continue;
+      this.preAckBuffer.delete(key);
+      if (buffered.kind === "trade") {
+        await this.importTradeEvent(buffered.event);
+      } else {
+        await this.applyOrderEvent(buffered.event);
+      }
+    }
+  }
+
   private async runCatchupSync(reason: "startup" | "gap"): Promise<void> {
     if (this.catchupInFlight) return;
     this.catchupInFlight = true;
@@ -389,6 +420,23 @@ export class UserOrderStreamModule implements RuntimeModule {
     return event.fills.some(
       (fill) => findLocalOrderForExchangeFill(this.deps.orderRepo, fill, this.log) != null,
     );
+  }
+
+  private findPendingExactOrderIdForTrade(event: ExchangeUserTradeEvent): string | null {
+    for (const fill of event.fills) {
+      const order = findLocalOrderForExchangeFill(this.deps.orderRepo, fill, this.log);
+      if (order?.status === "pending" && order.exchangeOrderId === fill.orderId) {
+        return String(order.orderId);
+      }
+    }
+    return null;
+  }
+
+  private findPendingExactOrderIdForOrderEvent(event: ExchangeUserOrderEvent): string | null {
+    const order = this.findLocalOrderForOrderEvent(event);
+    return order?.status === "pending" && order.exchangeOrderId === event.orderId
+      ? String(order.orderId)
+      : null;
   }
 
   private findLocalOrderForOrderEvent(event: ExchangeUserOrderEvent): Order | null {

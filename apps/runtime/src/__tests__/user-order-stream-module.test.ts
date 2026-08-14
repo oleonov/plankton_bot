@@ -16,6 +16,7 @@ import type {
   PlaceOrderResult,
   CancelOrderParams,
   CancelOrderResult,
+  Order,
   TokenId,
 } from "@krabs/domain";
 import { UserOrderStreamModule } from "../modules/reconciliation/user-order-stream-module.js";
@@ -387,6 +388,133 @@ describe("UserOrderStreamModule", () => {
 
     expect(fillRepo.save).toHaveBeenCalledTimes(1);
     expect(mod.getMetricsSnapshot().orphanBufferSize).toBe(0);
+  });
+
+  it("releases exact pending websocket events only after OrderPlaced", async () => {
+    const events: string[] = [];
+    const pendingOrder: Order = { ...order, status: "pending" };
+    let localOrder: Order = pendingOrder;
+    (orderRepo.findByClientOrderId as any).mockImplementation(() => localOrder);
+    (orderRepo.findByExchangeOrderId as any).mockImplementation(() => localOrder);
+    (orderRepo.updateStatus as any).mockImplementation((_id: unknown, status: Order["status"]) => {
+      localOrder = { ...localOrder, status };
+    });
+    (fillRepo.findByOrderId as any).mockReturnValue([{ size: 10 }]);
+    bus.subscribe("OrderPlaced", async () => {
+      events.push("placed");
+    });
+    bus.subscribe("OrderCancelled", async () => {
+      events.push("cancelled");
+    });
+    bus.subscribe("FillReceived", async () => {
+      events.push("fill");
+    });
+
+    await mod.start();
+    await stream.emitOrder({
+      type: "order",
+      event: "CANCELLATION",
+      orderId: order.exchangeOrderId,
+      clientOrderId: order.clientOrderId,
+      tokenId: order.tokenId,
+      side: order.side,
+      sizeTotal: 10,
+      sizeFilled: 0,
+      sizeRemaining: 10,
+      status: "CANCELLED",
+      timestamp: Date.now(),
+    });
+    await stream.emitTrade({
+      type: "trade",
+      tradeId: "trade-pre-ack",
+      status: "MATCHED",
+      timestamp: Date.now(),
+      fills: [
+        {
+          fillId: "fill-pre-ack",
+          orderId: order.exchangeOrderId,
+          clientOrderId: order.clientOrderId,
+          tokenId: order.tokenId,
+          side: order.side,
+          price: order.price,
+          size: order.size,
+          liquidityRole: "unknown",
+          fee: 0,
+          feeRateBps: 0,
+          timestamp: Date.now(),
+        },
+      ],
+    });
+
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+    expect(fillRepo.save).not.toHaveBeenCalled();
+
+    localOrder = { ...localOrder, status: "open" };
+    await bus.publish("OrderPlaced", {
+      commandId: "cmd-pre-ack" as any,
+      clientOrderId: order.clientOrderId,
+      orderId: order.orderId,
+      tokenId: order.tokenId,
+      conditionId: order.conditionId,
+      side: order.side,
+      price: order.price,
+      size: order.size,
+      orderType: order.orderType,
+      signalReason: order.signalReason,
+      timestamp: Date.now(),
+    });
+
+    expect(events[0]).toBe("placed");
+    expect(events).toContain("cancelled");
+    expect(events).toContain("fill");
+    expect(fillRepo.save).toHaveBeenCalledTimes(1);
+  });
+
+  it("notifies later synchronous OrderPlaced subscribers before flushing buffered events", async () => {
+    const events: string[] = [];
+    let localOrder: Order = { ...order, status: "pending" };
+    (orderRepo.findByClientOrderId as any).mockImplementation(() => localOrder);
+    (orderRepo.findByExchangeOrderId as any).mockImplementation(() => localOrder);
+    (fillRepo.findByOrderId as any).mockReturnValue([{ size: 10 }]);
+
+    await mod.start();
+    bus.subscribe("OrderPlaced", async () => {
+      events.push("placed-later");
+    });
+    bus.subscribe("OrderCancelled", async () => {
+      events.push("cancelled");
+    });
+
+    await stream.emitOrder({
+      type: "order",
+      event: "CANCELLATION",
+      orderId: order.exchangeOrderId,
+      clientOrderId: order.clientOrderId,
+      tokenId: order.tokenId,
+      side: order.side,
+      sizeTotal: 10,
+      sizeFilled: 0,
+      sizeRemaining: 10,
+      status: "CANCELLED",
+      timestamp: Date.now(),
+    });
+    localOrder = { ...localOrder, status: "open" };
+
+    await bus.publish("OrderPlaced", {
+      commandId: "cmd-pre-ack-order" as any,
+      clientOrderId: order.clientOrderId,
+      orderId: order.orderId,
+      tokenId: order.tokenId,
+      conditionId: order.conditionId,
+      side: order.side,
+      price: order.price,
+      size: order.size,
+      orderType: order.orderType,
+      signalReason: order.signalReason,
+      timestamp: Date.now(),
+    });
+
+    expect(events).toEqual(["placed-later", "cancelled"]);
   });
 
   it("applies cancellation order updates once and publishes OrderCancelled once", async () => {

@@ -407,4 +407,127 @@ describe("importExchangeFills", () => {
 
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("ord-1"), "partially-filled");
   });
+
+  it("defers only an exact pending-order fill before persistence or publication", async () => {
+    const pendingOrder = {
+      orderId: createOrderId("ord-1"),
+      exchangeOrderId: "exchange-1",
+      status: "pending",
+      conditionId: createConditionId("cond-1"),
+      signalId: null,
+      signalReason: null,
+      decisionRuleId: null,
+      signalTimestamp: null,
+      size: 10,
+    };
+    (orderRepo.findByClientOrderId as any).mockReturnValue(pendingOrder);
+
+    const received: unknown[] = [];
+    bus.subscribe("FillReceived", async (fill) => {
+      received.push(fill);
+    });
+
+    const result = await importExchangeFills(
+      [
+        {
+          fillId: "fill-pending",
+          orderId: "exchange-1",
+          clientOrderId: "co-1",
+          tokenId: createTokenId("tok-1"),
+          side: "buy",
+          price: 0.5,
+          size: 10,
+          liquidityRole: "unknown",
+          fee: 0,
+          feeRateBps: 0,
+          timestamp: Date.now(),
+        },
+      ],
+      { fillRepo, orderRepo, bus, log: silentLog, deferPendingExactFills: true },
+    );
+
+    expect(result).toMatchObject({ imported: 0, skipped: 0, deferred: 1 });
+    expect(result.deferredFillIds).toEqual(["fill-pending"]);
+    expect(fillRepo.save).not.toHaveBeenCalled();
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+    expect(received).toEqual([]);
+  });
+
+  it("does not treat client-ID-only pending matches as exact evidence", async () => {
+    const pendingOrder = {
+      orderId: createOrderId("ord-1"),
+      exchangeOrderId: "different-exchange-order",
+      status: "pending",
+      conditionId: createConditionId("cond-1"),
+      signalId: null,
+      signalReason: null,
+      decisionRuleId: null,
+      signalTimestamp: null,
+      size: 10,
+    };
+    (orderRepo.findByClientOrderId as any).mockReturnValue(pendingOrder);
+    (orderRepo.findById as any).mockReturnValue(pendingOrder);
+    (fillRepo.findByOrderId as any).mockReturnValue([{ size: 10 }]);
+
+    const result = await importExchangeFills(
+      [
+        {
+          fillId: "fill-client-only",
+          orderId: "exchange-1",
+          clientOrderId: "co-1",
+          tokenId: createTokenId("tok-1"),
+          side: "buy",
+          price: 0.5,
+          size: 10,
+          liquidityRole: "unknown",
+          fee: 0,
+          feeRateBps: 0,
+          timestamp: Date.now(),
+        },
+      ],
+      { fillRepo, orderRepo, bus, log: silentLog, deferPendingExactFills: true },
+    );
+
+    expect(result).toMatchObject({ imported: 1, skipped: 0, deferred: 0 });
+    expect(fillRepo.save).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps startup-style imports enabled for exact pending rows unless deferral is requested", async () => {
+    const pendingOrder = {
+      orderId: createOrderId("ord-1"),
+      exchangeOrderId: "exchange-1",
+      status: "pending",
+      conditionId: createConditionId("cond-1"),
+      signalId: null,
+      signalReason: null,
+      decisionRuleId: null,
+      signalTimestamp: null,
+      size: 10,
+    };
+    (orderRepo.findByClientOrderId as any).mockReturnValue(pendingOrder);
+    (orderRepo.findById as any).mockReturnValue(pendingOrder);
+    (fillRepo.findByOrderId as any).mockReturnValue([{ size: 10 }]);
+
+    const result = await importExchangeFills(
+      [
+        {
+          fillId: "fill-startup-pending",
+          orderId: "exchange-1",
+          clientOrderId: "co-1",
+          tokenId: createTokenId("tok-1"),
+          side: "buy",
+          price: 0.5,
+          size: 10,
+          liquidityRole: "unknown",
+          fee: 0,
+          feeRateBps: 0,
+          timestamp: Date.now(),
+        },
+      ],
+      { fillRepo, orderRepo, bus, log: silentLog },
+    );
+
+    expect(result).toMatchObject({ imported: 1, deferred: 0 });
+    expect(fillRepo.save).toHaveBeenCalledTimes(1);
+  });
 });

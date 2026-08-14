@@ -481,7 +481,7 @@ describe("ReconciliationModule", () => {
   // ─── Order reconciliation ─────────────────────────────────────────
 
   describe("order reconciliation", () => {
-    it("cancels phantom local orders not on exchange", async () => {
+    it("retains local orders absent from an open-only exchange snapshot", async () => {
       const threeMinAgo = new Date(Date.now() - 180_000).toISOString();
       const local = makeLocalOrder({
         exchangeOrderId: "ex-gone",
@@ -489,27 +489,19 @@ describe("ReconciliationModule", () => {
         updatedAt: threeMinAgo,
       });
       orderRepo.findOpen = vi.fn().mockReturnValue([local]);
-      // exchange returns empty — order is gone
+      // An empty open snapshot is not terminal proof.
       gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
 
-      // threshold=1 → a single confirmed miss cancels (isolates the cancel mechanism).
+      // threshold=1 → a single confirmed miss emits unresolved evidence.
       mod = buildModule({ consecutiveMissThreshold: 1 });
       const result = await mod.runReconciliation();
 
-      expect(result.phantomOrders).toBe(1);
+      expect(result.phantomOrders).toBe(0);
       expect(result.clean).toBe(false);
-      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
-        local.orderId,
-        "cancelled",
-        undefined,
-        "phantom_missing_on_exchange",
-        expect.objectContaining({
-          cancelAgeMs: expect.any(Number),
-          cancelAgeBucket: expect.any(String),
-          fillProgressShares: 0,
-          marketHorizon: null,
-        }),
+      expect(result.details).toContain(
+        `unresolved missing order: ${local.orderId} (exchange: ex-gone)`,
       );
+      expect(orderRepo.updateStatus).not.toHaveBeenCalled();
     });
 
     it("does not cancel local orders that exist on exchange", async () => {
@@ -523,6 +515,21 @@ describe("ReconciliationModule", () => {
 
       expect(result.phantomOrders).toBe(0);
       expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+    });
+
+    it("imports fills before it reads the open-orders snapshot", async () => {
+      const fill = makeExchangeFill({ fillId: "fills-first" });
+      gateway.getFills = vi.fn().mockResolvedValue([fill]);
+      fillRepo.exists = vi.fn().mockReturnValue(false);
+      orderRepo.findByClientOrderId = vi.fn().mockReturnValue(makeLocalOrder());
+      gateway.getOpenOrders = vi.fn().mockImplementation(async () => {
+        expect(fillRepo.save).toHaveBeenCalledWith(
+          expect.objectContaining({ fillId: "fills-first" }),
+        );
+        return [];
+      });
+
+      await mod.runReconciliation();
     });
 
     it("detects unknown exchange orders without local match", async () => {
@@ -576,7 +583,7 @@ describe("ReconciliationModule", () => {
       expect(orderRepo.updateStatus).not.toHaveBeenCalled();
     });
 
-    it("old order beyond grace period is cancelled as phantom", async () => {
+    it("old order beyond grace period remains open and is reported unresolved", async () => {
       const twoMinAgo = new Date(Date.now() - 120_000).toISOString();
       const old = makeLocalOrder({
         exchangeOrderId: "ex-old",
@@ -595,20 +602,10 @@ describe("ReconciliationModule", () => {
         phantomGraceMs: 90_000,
       });
 
-      expect(result.phantomsCancelled).toBe(1);
+      expect(result.phantomsCancelled).toBe(0);
+      expect(result.unresolvedMissingOnExchange).toBe(1);
       expect(result.phantomsSkippedGrace).toBe(0);
-      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
-        old.orderId,
-        "cancelled",
-        undefined,
-        "phantom_missing_on_exchange",
-        expect.objectContaining({
-          cancelAgeMs: expect.any(Number),
-          cancelAgeBucket: expect.any(String),
-          fillProgressShares: 0,
-          marketHorizon: null,
-        }),
-      );
+      expect(orderRepo.updateStatus).not.toHaveBeenCalled();
     });
 
     it("stale exchange order is still auto-cancelled (regression)", async () => {
@@ -678,7 +675,7 @@ describe("ReconciliationModule", () => {
       expect(result2.phantomsSkippedGrace).toBe(0);
     });
 
-    it("two-pass: old phantom absent from exchange is cancelled", async () => {
+    it("retains an old missing order after the grace period", async () => {
       const twoMinAgo = new Date(Date.now() - 120_000).toISOString();
       const old = makeLocalOrder({
         exchangeOrderId: "ex-phantom-old",
@@ -686,7 +683,7 @@ describe("ReconciliationModule", () => {
         updatedAt: twoMinAgo,
       });
 
-      // Pass 1: absent from exchange, beyond grace → cancelled
+      // Pass 1: absent from exchange, beyond grace → unresolved.
       orderRepo.findOpen = vi.fn().mockReturnValue([old]);
       gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
 
@@ -699,20 +696,10 @@ describe("ReconciliationModule", () => {
         phantomGraceMs: 90_000,
       });
 
-      expect(result.phantomsCancelled).toBe(1);
+      expect(result.phantomsCancelled).toBe(0);
+      expect(result.unresolvedMissingOnExchange).toBe(1);
       expect(result.phantomsSkippedGrace).toBe(0);
-      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
-        old.orderId,
-        "cancelled",
-        undefined,
-        "phantom_missing_on_exchange",
-        expect.objectContaining({
-          cancelAgeMs: expect.any(Number),
-          cancelAgeBucket: expect.any(String),
-          fillProgressShares: 0,
-          marketHorizon: null,
-        }),
-      );
+      expect(orderRepo.updateStatus).not.toHaveBeenCalled();
     });
   });
 
@@ -736,8 +723,8 @@ describe("ReconciliationModule", () => {
       expect(orderRepo.updateStatus).not.toHaveBeenCalledWith(local.orderId, "cancelled");
     });
 
-    it("order at 3 min age is phantom-cancelled under module-level grace (150s)", async () => {
-      // 180s > 150s → phantom cancel
+    it("order at 3 min age is retained under module-level grace (150s)", async () => {
+      // 180s > 150s → unresolved evidence, never a terminal transition.
       const threeMinAgo = new Date(Date.now() - 180_000).toISOString();
       const local = makeLocalOrder({
         exchangeOrderId: "ex-old-module",
@@ -751,19 +738,8 @@ describe("ReconciliationModule", () => {
       mod = buildModule({ consecutiveMissThreshold: 1 });
       const result = await mod.runReconciliation();
 
-      expect(result.phantomOrders).toBe(1);
-      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
-        local.orderId,
-        "cancelled",
-        undefined,
-        "phantom_missing_on_exchange",
-        expect.objectContaining({
-          cancelAgeMs: expect.any(Number),
-          cancelAgeBucket: expect.any(String),
-          fillProgressShares: 0,
-          marketHorizon: null,
-        }),
-      );
+      expect(result.phantomOrders).toBe(0);
+      expect(orderRepo.updateStatus).not.toHaveBeenCalled();
     });
   });
 
@@ -1026,7 +1002,7 @@ describe("ReconciliationModule", () => {
     // ─── Fix 3: consecutive-miss gate (default 3) ───────────────────
 
     describe("Fix 3 — consecutive-miss gate (default 3)", () => {
-      it("does not cancel a genuinely-missing order until the 3rd consecutive miss", async () => {
+      it("reports a genuinely-missing order on the 3rd consecutive miss without cancelling it", async () => {
         const order = oldMissingOrder("ex-disappeared");
         orderRepo.findOpen = vi.fn().mockReturnValue([order]);
         gateway.getOpenOrders = vi.fn().mockResolvedValue([]); // reliably empty across passes
@@ -1039,14 +1015,8 @@ describe("ReconciliationModule", () => {
         expect(orderRepo.updateStatus).not.toHaveBeenCalled();
 
         const r3 = await mod.runReconciliation();
-        expect(r3.phantomOrders).toBe(1);
-        expect(orderRepo.updateStatus).toHaveBeenCalledWith(
-          order.orderId,
-          "cancelled",
-          undefined,
-          "phantom_missing_on_exchange",
-          expect.any(Object),
-        );
+        expect(r3.phantomOrders).toBe(0);
+        expect(orderRepo.updateStatus).not.toHaveBeenCalled();
       });
 
       it("resets the miss streak when the order reappears before the threshold", async () => {
@@ -1082,7 +1052,7 @@ describe("ReconciliationModule", () => {
         expect(orderRepo.updateStatus).not.toHaveBeenCalled();
       });
 
-      it("never cancels across repeated unreliable snapshots, then resumes after recovery", async () => {
+      it("does not report missing orders until an open snapshot becomes reliable", async () => {
         const order = oldMissingOrder("ex-massdc");
         orderRepo.findOpen = vi.fn().mockReturnValue([order]);
         gateway.getOpenOrdersResult = vi
@@ -1099,9 +1069,10 @@ describe("ReconciliationModule", () => {
         expect(orderRepo.updateStatus).not.toHaveBeenCalled();
         expect([r1, r2, r3].every((r) => r.phantomOrders === 0)).toBe(true);
 
-        // First reliable snapshot post-recovery: threshold=1 → first confirmed miss cancels.
+        // First reliable snapshot post-recovery: threshold=1 → unresolved evidence.
         const r4 = await mod.runReconciliation();
-        expect(r4.phantomOrders).toBe(1);
+        expect(r4.phantomOrders).toBe(0);
+        expect(orderRepo.updateStatus).not.toHaveBeenCalled();
       });
     });
 
@@ -1387,7 +1358,7 @@ describe("ReconciliationModule", () => {
       expect(drifts[0]!.severity).toBe("critical");
     });
 
-    it("publishes ReconciliationDriftDetected with severity=warn for phantom orders only", async () => {
+    it("publishes ReconciliationDriftDetected with severity=warn for unresolved missing orders", async () => {
       const threeMinAgo = new Date(Date.now() - 180_000).toISOString();
       const local = makeLocalOrder({
         exchangeOrderId: "ex-gone",
@@ -1402,7 +1373,7 @@ describe("ReconciliationModule", () => {
         drifts.push({ severity: p.severity });
       });
 
-      // threshold=1 → single confirmed miss produces the warn-level phantom drift.
+      // threshold=1 → single confirmed miss produces a warn-level unresolved drift.
       mod = buildModule({ consecutiveMissThreshold: 1 });
       await mod.runReconciliation();
       await bus.drain();
@@ -1857,7 +1828,7 @@ describe("ReconciliationModule", () => {
   describe("re-entrancy", () => {
     it("prevents overlapping reconciliation runs", async () => {
       let resolveGateway: (() => void) | null = null;
-      gateway.getOpenOrders = vi.fn().mockImplementation(
+      gateway.getFills = vi.fn().mockImplementation(
         () =>
           new Promise<ExchangeOrder[]>((resolve) => {
             resolveGateway = () => resolve([]);
@@ -1876,7 +1847,7 @@ describe("ReconciliationModule", () => {
       await p1;
 
       // Only one call to gateway
-      expect(gateway.getOpenOrders).toHaveBeenCalledTimes(1);
+      expect(gateway.getFills).toHaveBeenCalledTimes(1);
     });
   });
 

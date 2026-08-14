@@ -314,6 +314,13 @@ export interface OrderRepository {
     telemetry?: OrderCancelTelemetry,
   ): void;
 
+  /**
+   * Replace a definitively-rejected live order's exact exchange identity with a
+   * newly prepared pending identity. The implementation must reject stale rows,
+   * client-identity changes, and any row already linked to a fill.
+   */
+  replacePendingIdentity?(currentOrderId: OrderId, replacement: Order): void;
+
   /** Sum the notional (size_usdc) of all open buy orders. */
   sumOpenBuyNotional(): number;
 }

@@ -89,6 +89,26 @@ function makeGateway(firstResult: PlaceOrderResult, secondResult?: PlaceOrderRes
   };
 }
 
+function makePreparedGateway(
+  first: import("@krabs/domain").PreparedOrderSubmitResult,
+  second: import("@krabs/domain").PreparedOrderSubmitResult,
+  beforeSecondSubmit?: () => void,
+) {
+  const gateway = makeGateway({ success: false });
+  let prepared = 0;
+  const submitPreparedOrder = vi.fn(async () => {
+    if (submitPreparedOrder.mock.calls.length === 2) beforeSecondSubmit?.();
+    return submitPreparedOrder.mock.calls.length === 1 ? first : second;
+  });
+  return Object.assign(gateway, {
+    prepareOrder: vi.fn().mockImplementation(async () => ({
+      orderId: prepared++ === 0 ? "0xold" : "0xnew",
+      __preparedOrderBrand: "PreparedOrder" as const,
+    })),
+    submitPreparedOrder,
+  });
+}
+
 function makeMarketRepo() {
   return {
     save: vi.fn(),
@@ -462,6 +482,96 @@ describe("ExecutionModule — Phase 2 in-attempt invalid-tick retry", () => {
     // invalidate was called even though the retry was blocked by the guard.
     expect(tickResolver.invalidate).toHaveBeenCalledWith(String(CONDITION_ID));
 
+    await mod.stop();
+  });
+
+  it("atomically replaces a rejected prepared hash with the corrected pending hash before retry POST", async () => {
+    let row: any = null;
+    const gateway = makePreparedGateway(
+      {
+        kind: "rejected",
+        errorCode: "INVALID_PRICE",
+        errorMessage: "invalid tick size",
+        errorDetails: { responseBody: { error: "invalid tick size" } },
+      },
+      { kind: "accepted", orderId: "0xnew" },
+      () => expect(row).toMatchObject({ orderId: "0xnew", status: "pending" }),
+    );
+    orderRepo.save.mockImplementation((order: any) => {
+      row = order;
+    });
+    (orderRepo as any).replacePendingIdentity = vi.fn((_old: string, replacement: any) => {
+      expect(row).toMatchObject({ orderId: "0xold", status: "rejected" });
+      row = replacement;
+    });
+    orderRepo.updateStatus.mockImplementation((id: string, status: string) => {
+      expect(id).toBe("0xnew");
+      row = { ...row, status };
+    });
+    orderRepo.findById.mockImplementation((id: string) => (row?.orderId === id ? row : null));
+    orderRepo.findOpen.mockImplementation(() => (row?.status === "pending" ? [row] : []));
+    const mod = new ExecutionModule({
+      gateway: gateway as any,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo: orderRepo as any,
+      fillRepo: fillRepo as any,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+      tickResolver: makeTickResolver(0.001, 0.01) as any,
+    });
+
+    await mod.start();
+    await bus.publish("PlaceOrderRequested", { command: makeCmd(), timestamp: Date.now() });
+
+    expect(gateway.prepareOrder).toHaveBeenCalledTimes(2);
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(2);
+    expect((orderRepo as any).replacePendingIdentity).toHaveBeenCalledWith(
+      "0xold",
+      expect.anything(),
+    );
+    expect(row).toMatchObject({ orderId: "0xnew", status: "open" });
+    await mod.stop();
+  });
+
+  it("keeps an ambiguous corrected prepared POST pending and fenced by findOpen", async () => {
+    let row: any = null;
+    const gateway = makePreparedGateway(
+      {
+        kind: "rejected",
+        errorCode: "INVALID_PRICE",
+        errorMessage: "invalid tick size",
+        errorDetails: { responseBody: { error: "invalid tick size" } },
+      },
+      { kind: "unknown", errorMessage: "timeout", errorDetails: null },
+    );
+    orderRepo.save.mockImplementation((order: any) => {
+      row = order;
+    });
+    (orderRepo as any).replacePendingIdentity = vi.fn((_old: string, replacement: any) => {
+      row = replacement;
+    });
+    orderRepo.findOpen.mockImplementation(() => (row?.status === "pending" ? [row] : []));
+    const mod = new ExecutionModule({
+      gateway: gateway as any,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo: orderRepo as any,
+      fillRepo: fillRepo as any,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+      tickResolver: makeTickResolver(0.001, 0.01) as any,
+    });
+
+    await mod.start();
+    await bus.publish("PlaceOrderRequested", { command: makeCmd(), timestamp: Date.now() });
+
+    expect(row).toMatchObject({ orderId: "0xnew", status: "pending" });
+    expect(orderRepo.findOpen()).toEqual([row]);
     await mod.stop();
   });
 });

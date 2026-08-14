@@ -38,6 +38,24 @@ function createMockClient() {
   };
 }
 
+function signedV2Order() {
+  return {
+    salt: "123456789",
+    maker: "0x1111111111111111111111111111111111111111",
+    signer: "0x2222222222222222222222222222222222222222",
+    tokenId: "9876543210123456789",
+    makerAmount: "5000000",
+    takerAmount: "10000000",
+    side: "BUY",
+    signatureType: 1,
+    timestamp: "1700000000000",
+    metadata: `0x${"00".repeat(32)}`,
+    builder: `0x${"ab".repeat(32)}`,
+    expiration: "0",
+    signature: "0xsignature",
+  };
+}
+
 function createMockSettlementClient() {
   return {
     // `wait()` resolving to a mined receipt is the SHAPE PRODUCTION ACTUALLY RETURNS — the live
@@ -174,6 +192,81 @@ describe("LiveExchangeGateway", () => {
     expect(client.createAndPostOrder).not.toHaveBeenCalled();
     expect(client.createOrder).toHaveBeenCalledOnce();
     expect(client.postOrder).toHaveBeenCalledWith(signedOrder, "GTC", true);
+  });
+
+  it("prepares once without posting, then posts the exact signed object", async () => {
+    const signedOrder = signedV2Order();
+    client.createOrder.mockResolvedValue(signedOrder);
+    client.postOrder.mockResolvedValue({ orderID: "live-ord-prepared" });
+
+    const prepared = await gw.prepareOrder({
+      clientOrderId: "cloid-prepared",
+      tokenId: createTokenId("tok-1"),
+      side: "buy",
+      size: 100,
+      price: 0.5,
+      orderType: "GTC",
+      tickSize: 0.01,
+      negRisk: false,
+    });
+
+    expect(client.createOrder).toHaveBeenCalledOnce();
+    expect(client.postOrder).not.toHaveBeenCalled();
+    expect(prepared.orderId).toBe(
+      "0xa2b09ce8441ecb0330c23b0622ccf7ffb3a9341b485f1748d08a983182c5a52d",
+    );
+
+    await expect(gw.submitPreparedOrder(prepared)).resolves.toEqual({
+      kind: "accepted",
+      orderId: "live-ord-prepared",
+    });
+    expect(client.postOrder).toHaveBeenCalledOnce();
+    expect(client.postOrder).toHaveBeenCalledWith(signedOrder, "GTC", false);
+  });
+
+  it("classifies thrown and SDK-resolved business rejections, but preserves ambiguous outcomes", async () => {
+    const prepare = async () => {
+      client.createOrder.mockResolvedValue(signedV2Order());
+      return gw.prepareOrder({
+        clientOrderId: "cloid-prepared",
+        tokenId: createTokenId("tok-1"),
+        side: "buy",
+        size: 100,
+        price: 0.5,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+      });
+    };
+
+    client.postOrder.mockRejectedValue(Object.assign(new Error("invalid price"), { status: 400 }));
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
+      kind: "rejected",
+      errorCode: "INVALID_PRICE",
+    });
+
+    client.postOrder.mockResolvedValue({ status: 422, error: "invalid price" });
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
+      kind: "rejected",
+      errorCode: "INVALID_PRICE",
+    });
+
+    client.postOrder.mockRejectedValue(
+      Object.assign(new Error("request timeout"), { status: 408 }),
+    );
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
+      kind: "unknown",
+    });
+
+    client.postOrder.mockResolvedValue({ status: 429, error: "rate limit" });
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
+      kind: "unknown",
+    });
+
+    client.postOrder.mockResolvedValue({});
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
+      kind: "unknown",
+    });
   });
 
   it("placeOrder returns error result on SDK failure", async () => {

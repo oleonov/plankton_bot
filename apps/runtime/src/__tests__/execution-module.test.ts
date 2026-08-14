@@ -81,6 +81,14 @@ function makeCancelCmd(overrides?: Partial<CancelOrderCommand>): CancelOrderComm
 
 function createMockGateway(): ExchangeGateway {
   return {
+    prepareOrder: vi.fn().mockResolvedValue({
+      orderId: "prepared-ord-1",
+      __preparedOrderBrand: "PreparedOrder" as const,
+    }),
+    submitPreparedOrder: vi.fn().mockResolvedValue({
+      kind: "accepted" as const,
+      orderId: "prepared-ord-1",
+    }),
     placeOrder: vi
       .fn<(params: PlaceOrderParams) => Promise<PlaceOrderResult>>()
       .mockResolvedValue({ success: true, orderId: "sim-ord-1" }),
@@ -576,6 +584,36 @@ describe("ExecutionModule", () => {
     expect(placed[0].side).toBe("buy");
 
     await mod.stop();
+  });
+
+  it("does not regress a prepared order that left pending before acceptance", () => {
+    const pending = makePlaceCmd();
+    const prepared: Order = {
+      orderId: createOrderId("prepared-ord-1"),
+      clientOrderId: pending.clientOrderId,
+      tokenId: pending.tokenId,
+      conditionId: pending.conditionId,
+      side: pending.side,
+      orderType: pending.orderType,
+      price: pending.price,
+      size: pending.size,
+      sizeUsdc: pending.price * pending.size,
+      status: "pending",
+      exchangeOrderId: "prepared-ord-1",
+      signalId: null,
+      signalReason: null,
+      botRunId: BOT_RUN_ID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue({
+      ...prepared,
+      status: "filled",
+    });
+
+    (mod as any).persistPreparedAcceptedOrder(pending, prepared, "prepared-ord-1");
+
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
   });
 
   it("places post-only SELL pre-submit when submit price is above refreshed ask", async () => {
@@ -1705,6 +1743,70 @@ describe("ExecutionModule", () => {
     expect(cancelled[0].reason).toBe("operator");
 
     await mod.stop();
+  });
+
+  it("fences live pending orders without reserving their later confirmed cancellation", async () => {
+    const savedOrder: Order = {
+      orderId: createOrderId("sim-ord-1"),
+      clientOrderId: "plk_abc123" as ClientOrderId,
+      tokenId: createTokenId("tok-yes"),
+      conditionId: createConditionId("cond-1"),
+      side: "buy",
+      orderType: "GTC",
+      price: 0.5,
+      size: 10,
+      sizeUsdc: 5,
+      status: "pending",
+      exchangeOrderId: "sim-ord-1",
+      signalId: null,
+      signalReason: null,
+      botRunId: BOT_RUN_ID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue(savedOrder);
+    const liveMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+    });
+    const cancelled: any[] = [];
+    bus.subscribe("OrderCancelled", async (event) => {
+      cancelled.push(event);
+    });
+    await liveMod.start();
+
+    await bus.publish("CancelOrderRequested", {
+      command: makeCancelCmd(),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+    expect(cancelled).toEqual([]);
+
+    savedOrder.status = "open";
+    await bus.publish("CancelOrderRequested", {
+      command: makeCancelCmd({ commandId: createCommandId("cancel-confirmed-open") }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledOnce();
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+      savedOrder.orderId,
+      "cancelled",
+      undefined,
+      "operator",
+      expect.anything(),
+    );
+    expect(cancelled).toHaveLength(1);
+    await liveMod.stop();
   });
 
   it("skips duplicate cancel commandId", async () => {
@@ -3925,8 +4027,8 @@ describe("ExecutionModule", () => {
     // End to end: the exit the unknown minimum was blocking now reaches the CLOB.
     expect(skipped).toEqual([]);
     expect(rejected).toHaveLength(2);
-    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
-    expect((gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(1);
+    expect((gateway.prepareOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
       tokenId: "tok-yes",
       side: "sell",
       size: 0.8,
@@ -4029,7 +4131,7 @@ describe("ExecutionModule", () => {
 
     // The release still happened, just later: the identical retry the ladder republishes gets through.
     expect(skipped).toEqual([]);
-    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(1);
 
     await mod2.stop();
   });
@@ -4102,7 +4204,7 @@ describe("ExecutionModule", () => {
     });
     await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
 
-    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(1);
 
     await mod2.stop();
   });
@@ -4203,7 +4305,7 @@ describe("ExecutionModule", () => {
     await bus.publish("PlaceOrderRequested", { command: sell, timestamp: Date.now() });
 
     await mod2.stop();
-    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(1);
   });
 
   it("does not inherit the hydration throttle window across a module restart", async () => {
@@ -5286,7 +5388,8 @@ describe("ExecutionModule", () => {
       releaseBlocked();
       await vi.advanceTimersByTimeAsync(0);
       await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
-      expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(1);
 
       await timeoutMod.stop();
     } finally {
@@ -5379,7 +5482,7 @@ describe("ExecutionModule", () => {
       await placing;
       await vi.advanceTimersByTimeAsync(0);
       await bus.publish("PlaceOrderRequested", { command: s1Command, timestamp: Date.now() });
-      expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+      expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(1);
 
       await directMod.stop();
     } finally {
@@ -6134,11 +6237,10 @@ describe("ExecutionModule", () => {
         timestamp: Date.now(),
       });
 
+      await microMod.stop();
       expect(order2CheckDone).toBe(true);
       // order-2 admitted (not falsely rejected by a double-counted order-1).
       expect(rejected).toHaveLength(0);
-
-      await microMod.stop();
     });
   });
 });

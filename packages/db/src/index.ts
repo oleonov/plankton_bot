@@ -1,6 +1,7 @@
 export {
   openDatabase,
   openDatabaseWithSchema,
+  setSynchronousFull,
   withShutdownBusyTimeout,
   disableAutoCheckpoint,
   SHUTDOWN_BUSY_TIMEOUT_MS,

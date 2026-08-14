@@ -47,6 +47,7 @@ export interface ClobClientCtorOptions {
   signatureType?: 1 | 2;
   funderAddress?: string;
   builderConfig?: { builderCode: string };
+  retryOnError?: boolean;
 }
 
 export interface PolymarketClientFactoryDeps {
@@ -187,6 +188,7 @@ export async function createPolymarketClient(
         chain: chainId,
         signer,
         creds,
+        retryOnError: false,
         ...builderCodeOption,
       }),
       settlementClient: null,
@@ -230,6 +232,7 @@ export async function createPolymarketClient(
       chain: chainId,
       signer,
       creds,
+      retryOnError: false,
       signatureType: resolveRelayerSignatureType(relayerConfig),
       funderAddress: relayerConfig.funderAddress,
       ...builderCodeOption,

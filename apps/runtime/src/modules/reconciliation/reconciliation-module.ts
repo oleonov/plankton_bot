@@ -149,8 +149,9 @@ export interface ReconciliationModuleDeps {
   /**
    * Reconciliation hardening (#36). Defaults applied here so legacy test
    * constructions keep working: suspicious-empty skip at >=3 local open orders,
-   * phantom-cancel only after 3 consecutive misses, 0.5% fill-completion
-   * tolerance. Set `consecutiveMissThreshold: 1` to restore single-pass marking.
+   * unresolved-missing evidence after 3 consecutive misses, and 0.5%
+   * fill-completion tolerance. Set `consecutiveMissThreshold: 1` for evidence
+   * on the first reliable miss; absence never terminalizes an order.
    */
   suspiciousEmptyThreshold?: number;
   consecutiveMissThreshold?: number;
@@ -254,8 +255,8 @@ export class ReconciliationModule implements RuntimeModule {
   private readonly walletSentinelConsecutiveCounts = new Map<string, number>();
   private lastWalletActionableDriftWarn: { key: string; atMs: number } | null = null;
   /**
-   * Persistent per-exchangeOrderId consecutive-miss counter for phantom
-   * detection (Fix 3). Owned by the module so the count survives across passes;
+   * Persistent per-exchangeOrderId consecutive-miss counter for unresolved
+   * missing-order evidence. Owned by the module so the count survives across passes;
    * reset on restart is an accepted risk (covered by age-grace + Fix 1/2).
    */
   private readonly consecutiveMissCounts = new Map<string, number>();
@@ -392,30 +393,8 @@ export class ReconciliationModule implements RuntimeModule {
       const allDetails: string[] = [];
       const stageTimingsMs: Record<string, number> = {};
 
-      // 1. Order reconciliation
-      // Phantom detection requires ALL of:
-      //  1. Order age >= graceMs (2 intervals + 30s buffer, ~60s at the 15s interval)
-      //  2. Order missing in `consecutiveMissThreshold` (default 3) consecutive
-      //     successful snapshots (Fix 3)
-      //  3. Snapshot considered reliable: FetchResult.ok === true (Fix 1) and not a
-      //     suspicious-empty skip (Fix 2)
-      const graceMs = this.deps.reconcileIntervalMs * 2 + 30_000;
-      const stageOrdersStart = Date.now();
-      const orderResult = await reconcileOrders({
-        gateway: this.deps.gateway,
-        orderRepo: this.deps.orderRepo,
-        fillRepo: this.deps.fillRepo,
-        marketRepo: this.deps.marketRepo,
-        log: this.log,
-        phantomGraceMs: graceMs,
-        suspiciousEmptyThreshold: this.deps.suspiciousEmptyThreshold ?? 3,
-        consecutiveMissThreshold: this.deps.consecutiveMissThreshold ?? 3,
-        consecutiveMissCounts: this.consecutiveMissCounts,
-      });
-      stageTimingsMs.orders = Date.now() - stageOrdersStart;
-      allDetails.push(...orderResult.details);
-
-      // 2. Fill reconciliation (startup uses sinceMs=0, periodic uses last run)
+      // 1. Import reliable fills before inspecting the open snapshot. A fill can
+      // prove a terminal local status whereas open-snapshot absence cannot.
       const sinceMs = this.lastRunAt ?? 0;
       const stageFillsStart = Date.now();
       const fillResult = await reconcileFills(
@@ -432,6 +411,22 @@ export class ReconciliationModule implements RuntimeModule {
       );
       stageTimingsMs.fills = Date.now() - stageFillsStart;
       allDetails.push(...fillResult.details);
+
+      // 2. Open-order reconciliation. Absence only emits unresolved evidence;
+      // it never changes working state until #137b adds exact terminal proof.
+      const graceMs = this.deps.reconcileIntervalMs * 2 + 30_000;
+      const stageOrdersStart = Date.now();
+      const orderResult = await reconcileOrders({
+        gateway: this.deps.gateway,
+        orderRepo: this.deps.orderRepo,
+        log: this.log,
+        phantomGraceMs: graceMs,
+        suspiciousEmptyThreshold: this.deps.suspiciousEmptyThreshold ?? 3,
+        consecutiveMissThreshold: this.deps.consecutiveMissThreshold ?? 3,
+        consecutiveMissCounts: this.consecutiveMissCounts,
+      });
+      stageTimingsMs.orders = Date.now() - stageOrdersStart;
+      allDetails.push(...orderResult.details);
 
       this.emitReconciliationMetrics(orderResult, fillResult, ranAt);
 
@@ -565,6 +560,7 @@ export class ReconciliationModule implements RuntimeModule {
       // 5. Build result
       const clean =
         orderResult.phantomsCancelled === 0 &&
+        (orderResult.unresolvedMissingOnExchange ?? 0) === 0 &&
         orderResult.unknownExchangeOrders === 0 &&
         fillResult.missingFillsImported === 0 &&
         orderResult.staleCancelled === 0 &&
@@ -966,6 +962,10 @@ export class ReconciliationModule implements RuntimeModule {
     );
 
     emit("reconciliation_consecutive_miss_tracked", orderResult.consecutiveMissTracked ?? 0);
+    emit(
+      "reconciliation_unresolved_missing_on_exchange",
+      orderResult.unresolvedMissingOnExchange ?? 0,
+    );
     emit("reconciliation_cascade_branch_evaluated", orderResult.cascadeEvaluated ?? 0);
     emit("reconciliation_cascade_cancel_executed", orderResult.cascadeCancelled ?? 0);
     emit("reconciliation_cascade_skipped_unreliable", orderResult.cascadeSkipped ?? 0);

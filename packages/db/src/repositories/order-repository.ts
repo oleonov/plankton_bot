@@ -200,6 +200,55 @@ export class SqliteOrderRepository implements OrderRepository {
       .run(...params);
   }
 
+  replacePendingIdentity(currentOrderId: OrderId, replacement: Order): void {
+    const replace = this.db.transaction(() => {
+      const current = this.findById(currentOrderId);
+      if (!current || current.status !== "rejected") {
+        throw new Error(
+          `Pending identity replacement requires rejected order: ${String(currentOrderId)}`,
+        );
+      }
+      if (current.clientOrderId !== replacement.clientOrderId) {
+        throw new Error("Pending identity replacement cannot change client order identity");
+      }
+      const hasFill = this.db
+        .prepare("SELECT 1 FROM fills WHERE order_id = ? LIMIT 1")
+        .get(currentOrderId);
+      if (hasFill) {
+        throw new Error(
+          `Pending identity replacement refused for filled order: ${String(currentOrderId)}`,
+        );
+      }
+
+      const result = this.db
+        .prepare(
+          `UPDATE orders
+           SET order_id = ?, exchange_order_id = ?, post_only = ?, price = ?, size = ?, size_usdc = ?,
+               status = 'pending', cancel_reason = NULL, cancel_age_ms = NULL, cancel_age_bucket = NULL,
+               fill_progress_shares = NULL, market_horizon = NULL, exchange_error_code = NULL,
+               exchange_error_message = NULL, exchange_error_payload = NULL,
+               exchange_rejection_reason = NULL, updated_at = ?
+           WHERE order_id = ? AND status = 'rejected' AND client_order_id = ?
+             AND NOT EXISTS (SELECT 1 FROM fills WHERE order_id = orders.order_id)`,
+        )
+        .run(
+          replacement.orderId,
+          replacement.exchangeOrderId,
+          replacement.postOnly === true ? 1 : 0,
+          replacement.price,
+          replacement.size,
+          replacement.sizeUsdc,
+          replacement.updatedAt,
+          currentOrderId,
+          replacement.clientOrderId,
+        );
+      if (result.changes !== 1) {
+        throw new Error(`Pending identity replacement failed for order: ${String(currentOrderId)}`);
+      }
+    });
+    replace();
+  }
+
   updateMetadata(id: OrderId, metadata: Readonly<Record<string, unknown>>): Order {
     this.runMetadataUpdate(id, metadata);
     const updated = this.findById(id);

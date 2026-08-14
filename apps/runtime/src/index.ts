@@ -76,6 +76,7 @@ import {
   SqliteTradingCalendarRepository,
   withShutdownBusyTimeout,
   disableAutoCheckpoint,
+  setSynchronousFull,
   ledgerInstant,
   isWorkingSellOrderStatus,
 } from "@krabs/db";
@@ -452,6 +453,7 @@ async function main(): Promise<void> {
   let ledgerConn: DbConnection;
   try {
     ledgerConn = bootstrapLedgerDb(ledgerDbPath);
+    if (runtimeMode === "live-lite") setSynchronousFull(ledgerConn);
     log.info({ path: ledgerDbPath }, "ledger database ready");
   } catch (err) {
     log.fatal({ err }, "ledger database bootstrap failed");
@@ -1189,6 +1191,7 @@ async function main(): Promise<void> {
     log,
     botRunId,
     runtimeControl,
+    pauseLiveTrading: () => setPausedAndPersist(true),
     liveLiteGuard,
     runtimeMode,
     requestMinOrderSizeHydration,

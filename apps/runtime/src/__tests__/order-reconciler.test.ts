@@ -199,7 +199,7 @@ describe("reconcileOrders — Fix 2: suspicious empty snapshot", () => {
     expect(orderRepo.updateStatus).not.toHaveBeenCalled();
   });
 
-  it("does NOT skip when local open below threshold", async () => {
+  it("reports unresolved orders when local open is below the suspicious-empty threshold", async () => {
     const orderRepo = createOrderRepo();
     orderRepo.findOpen = vi.fn().mockReturnValue(localOrders(2));
     const gateway = createGateway({ openOrders: [] });
@@ -211,7 +211,9 @@ describe("reconcileOrders — Fix 2: suspicious empty snapshot", () => {
     });
 
     expect(result.skipReason).toBeUndefined();
-    expect(result.phantomsCancelled).toBe(2);
+    expect(result.phantomsCancelled).toBe(0);
+    expect(result.unresolvedMissingOnExchange).toBe(2);
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
   });
 
   it("does NOT skip on an empty snapshot with zero local open", async () => {
@@ -228,7 +230,7 @@ describe("reconcileOrders — Fix 2: suspicious empty snapshot", () => {
     expect(result.phantomsCancelled).toBe(0);
   });
 
-  it("threshold 0 disables the guard (phantoms cancelled despite many local)", async () => {
+  it("threshold 0 disables the guard but retains every missing local order", async () => {
     const orderRepo = createOrderRepo();
     orderRepo.findOpen = vi.fn().mockReturnValue(localOrders(5));
     const gateway = createGateway({ openOrders: [] });
@@ -240,12 +242,29 @@ describe("reconcileOrders — Fix 2: suspicious empty snapshot", () => {
     });
 
     expect(result.skipReason).toBeUndefined();
-    expect(result.phantomsCancelled).toBe(5);
+    expect(result.phantomsCancelled).toBe(0);
+    expect(result.unresolvedMissingOnExchange).toBe(5);
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+  });
+
+  it("bounds unresolved details while retaining every missing order", async () => {
+    const orderRepo = createOrderRepo();
+    orderRepo.findOpen = vi.fn().mockReturnValue(localOrders(12));
+
+    const result = await reconcileOrders({
+      ...baseDeps(createGateway({ openOrders: [] }), orderRepo),
+      suspiciousEmptyThreshold: 0,
+      consecutiveMissThreshold: 1,
+    });
+
+    expect(result.unresolvedMissingOnExchange).toBe(12);
+    expect(result.details).toHaveLength(10);
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
   });
 });
 
-describe("reconcileOrders — Fix 3: consecutive miss counter", () => {
-  it("marks phantom only after threshold consecutive misses", async () => {
+describe("reconcileOrders — missing-order evidence", () => {
+  it("reports unresolved evidence only after the consecutive-miss threshold", async () => {
     const orderRepo = createOrderRepo();
     const order = makeLocalOrder({ exchangeOrderId: "ex-miss" });
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
@@ -268,9 +287,16 @@ describe("reconcileOrders — Fix 3: consecutive miss counter", () => {
     expect(missMap.get("ex-miss")).toBe(2);
 
     const r3 = await reconcileOrders(deps);
-    expect(r3.phantomsCancelled).toBe(1);
-    expect(missMap.has("ex-miss")).toBe(false); // cleared after marking
-    expect(orderRepo.updateStatus).toHaveBeenCalledTimes(1);
+    expect(r3.phantomsCancelled).toBe(0);
+    expect(r3.unresolvedMissingOnExchange).toBe(1);
+    expect(missMap.get("ex-miss")).toBe(3);
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+
+    const r4 = await reconcileOrders(deps);
+    expect(r4.phantomsCancelled).toBe(0);
+    expect(r4.unresolvedMissingOnExchange).toBe(1);
+    expect(missMap.get("ex-miss")).toBe(4);
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
   });
 
   it("resets the counter when the order reappears in the snapshot", async () => {
@@ -335,7 +361,7 @@ describe("reconcileOrders — Fix 3: consecutive miss counter", () => {
     expect(missMap.has("ex-stale-key")).toBe(false);
   });
 
-  it("threshold 1 marks phantom on the first miss (current behavior)", async () => {
+  it("threshold 1 reports unresolved evidence on the first miss without terminalizing", async () => {
     const orderRepo = createOrderRepo();
     orderRepo.findOpen = vi.fn().mockReturnValue([makeLocalOrder({ exchangeOrderId: "ex-1pass" })]);
     const gateway = createGateway({ openOrders: [] });
@@ -346,7 +372,9 @@ describe("reconcileOrders — Fix 3: consecutive miss counter", () => {
       consecutiveMissCounts: new Map(),
     });
 
-    expect(result.phantomsCancelled).toBe(1);
+    expect(result.phantomsCancelled).toBe(0);
+    expect(result.unresolvedMissingOnExchange).toBe(1);
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
   });
 });
 

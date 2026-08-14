@@ -127,6 +127,16 @@ export function setRuntimeBusyTimeout(conn: DbConnection): void {
   conn.db.pragma(`busy_timeout = ${RUNTIME_BUSY_TIMEOUT_MS}`);
 }
 
+/**
+ * Raise durability for the already-open live ledger before it accepts orders.
+ *
+ * This is deliberately an opt-in mutation rather than an `openDatabase` option:
+ * control, simulation, and paper databases retain SQLite's NORMAL setting.
+ */
+export function setSynchronousFull(conn: DbConnection): void {
+  conn.db.pragma("synchronous = FULL");
+}
+
 export function openDatabaseWithSchema(
   dbPath: string,
   schemaSql: string,

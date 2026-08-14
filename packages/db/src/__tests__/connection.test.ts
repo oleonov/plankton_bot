@@ -7,6 +7,7 @@ import {
   RUNTIME_BUSY_TIMEOUT_MS,
   SHUTDOWN_BUSY_TIMEOUT_MS,
   openDatabase,
+  setSynchronousFull,
   setRuntimeBusyTimeout,
   withShutdownBusyTimeout,
   disableAutoCheckpoint,
@@ -82,6 +83,18 @@ describe("openDatabase busy_timeout scoping", () => {
     const conn = openDatabase(":memory:", { busyTimeoutMs: BOOTSTRAP_BUSY_TIMEOUT_MS });
     withShutdownBusyTimeout(conn.db, () => undefined);
     expect(readBusyTimeout(conn.db)).toBe(BOOTSTRAP_BUSY_TIMEOUT_MS);
+    conn.close();
+  });
+});
+
+describe("setSynchronousFull", () => {
+  it("changes an existing connection to FULL durability", () => {
+    const conn = openDatabase(":memory:");
+    expect(conn.db.pragma("synchronous", { simple: true })).toBe(1);
+
+    setSynchronousFull(conn);
+
+    expect(conn.db.pragma("synchronous", { simple: true })).toBe(2);
     conn.close();
   });
 });

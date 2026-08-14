@@ -25,6 +25,8 @@ import type {
   ExchangeUserOrderEvent,
   ExchangeUserTradeEvent,
   DepositActivationResult,
+  PreparedOrder,
+  PreparedOrderSubmitResult,
 } from "@krabs/domain";
 import { encodeFunctionData, parseAbi, zeroHash } from "viem";
 import { classifyError } from "../errors.js";
@@ -57,6 +59,7 @@ import { readErc20Balance, readErc20Allowance } from "./usdc-balance-reader.js";
 import type { RpcRotator } from "./rpc-rotation.js";
 import type { DepHealthRecorder } from "@krabs/domain";
 import { timeDepCall, fetchResultOk } from "../dep-health.js";
+import { hashSignedOrderV2 } from "./order-hash.js";
 
 export interface LiveExchangeConfig {
   /** ClobClient instance — typed as unknown to avoid SDK type leakage. */
@@ -171,6 +174,49 @@ type MarketTokenEntry = {
   readonly tokenId: string;
   readonly index: number;
 };
+
+type PreparedOrderRecord = {
+  readonly signedOrder: object;
+  readonly orderType: string;
+  readonly postOnly: boolean;
+};
+
+function toSdkUserOrder(params: PlaceOrderParams) {
+  return {
+    tokenID: String(params.tokenId),
+    price: params.price,
+    size: params.size,
+    side: toSdkSide(params.side),
+    ...(params.expiration !== undefined ? { expiration: params.expiration } : {}),
+  };
+}
+
+function toSdkOrderOptions(params: PlaceOrderParams) {
+  return { tickSize: toSdkTickSize(params.tickSize), negRisk: params.negRisk };
+}
+
+function isDefinitiveSubmissionRejection(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const response = Reflect.get(error, "response");
+  const status =
+    response && typeof response === "object"
+      ? Reflect.get(response, "status")
+      : Reflect.get(error, "status");
+  return (
+    typeof status === "number" &&
+    Number.isInteger(status) &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 408 &&
+    status !== 429
+  );
+}
+
+function isResolvedSubmissionRejection(response: unknown): boolean {
+  if (!response || typeof response !== "object") return false;
+  if (Reflect.get(response, "error") == null) return false;
+  return isDefinitiveSubmissionRejection(response);
+}
 
 class SettlementTransactionFailedError extends Error {
   constructor() {
@@ -396,6 +442,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
   private warnedMergeUnsupported = false;
   private readonly recentRedeemSubmissions = new Map<string, number>();
   private readonly recentInfraAlerts = new Map<string, number>();
+  private readonly preparedOrders = new WeakMap<PreparedOrder, PreparedOrderRecord>();
   // V2 fee metadata cache with separate TTLs for hits vs misses so a transient
   // CLOB error cannot permanently disable V2 fee metadata for a market.
   // `info: null` is a valid hit (`fd` block legitimately absent).
@@ -430,18 +477,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
     try {
-      const userOrder = {
-        tokenID: String(params.tokenId),
-        price: params.price,
-        size: params.size,
-        side: toSdkSide(params.side),
-        ...(params.expiration !== undefined ? { expiration: params.expiration } : {}),
-      };
-
-      const options = {
-        tickSize: toSdkTickSize(params.tickSize),
-        negRisk: params.negRisk,
-      };
+      const userOrder = toSdkUserOrder(params);
+      const options = toSdkOrderOptions(params);
 
       const result = await timeDepCall(
         this.depHealthRecorder,
@@ -469,6 +506,70 @@ export class LiveExchangeGateway implements ExchangeGateway {
     } catch (err) {
       const { code, message, details } = classifyError(err);
       return { success: false, errorCode: code, errorMessage: message, errorDetails: details };
+    }
+  }
+
+  async prepareOrder(params: PlaceOrderParams): Promise<PreparedOrder> {
+    const signedOrder = await this.client.createOrder(
+      toSdkUserOrder(params),
+      toSdkOrderOptions(params),
+    );
+    if (!signedOrder || typeof signedOrder !== "object") {
+      throw new Error("exchange returned an invalid signed order");
+    }
+
+    const chainId = this.client.chainId;
+    if (typeof chainId !== "number") throw new Error("exchange client has no chain ID");
+    const prepared = Object.freeze({
+      orderId: hashSignedOrderV2(signedOrder, chainId, params.negRisk),
+      __preparedOrderBrand: "PreparedOrder" as const,
+    });
+    this.preparedOrders.set(prepared, {
+      signedOrder,
+      orderType: params.orderType,
+      postOnly: params.postOnly ?? false,
+    });
+    return prepared;
+  }
+
+  async submitPreparedOrder(prepared: PreparedOrder): Promise<PreparedOrderSubmitResult> {
+    const record = this.preparedOrders.get(prepared);
+    if (!record) {
+      return {
+        kind: "unknown",
+        errorMessage: "prepared order does not belong to this gateway",
+        errorDetails: null,
+      };
+    }
+
+    try {
+      const response = await timeDepCall(this.depHealthRecorder, "clob", () =>
+        this.client.postOrder(record.signedOrder, record.orderType, record.postOnly),
+      );
+      const orderId = extractOrderId(response);
+      if (!orderId) {
+        if (isResolvedSubmissionRejection(response)) {
+          const { code, message, details } = classifyError(response);
+          return {
+            kind: "rejected",
+            errorCode: code,
+            errorMessage: message,
+            errorDetails: details,
+          };
+        }
+        return {
+          kind: "unknown",
+          errorMessage: "exchange returned no order id",
+          errorDetails: { responseBody: redactSensitive(response) },
+        };
+      }
+      return { kind: "accepted", orderId };
+    } catch (err) {
+      const { code, message, details } = classifyError(err);
+      if (isDefinitiveSubmissionRejection(err)) {
+        return { kind: "rejected", errorCode: code, errorMessage: message, errorDetails: details };
+      }
+      return { kind: "unknown", errorMessage: message, errorDetails: details };
     }
   }
 

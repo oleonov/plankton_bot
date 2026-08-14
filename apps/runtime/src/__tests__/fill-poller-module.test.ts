@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { FillPollerModule } from "../modules/fill-poller/fill-poller-module.js";
 import { InProcessEventBus } from "@krabs/event-bus";
-import { createOrderId, createTokenId } from "@krabs/domain";
+import { createConditionId, createOrderId, createTokenId } from "@krabs/domain";
 import type {
   ExchangeGateway,
   ExchangeFill,
@@ -158,6 +158,56 @@ describe("FillPollerModule", () => {
 
     expect(received).toHaveLength(1);
     expect(fillRepo.save).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a deferred exact pending fill after OrderPlaced makes the row open", async () => {
+    const fillTs = Date.now() + 10_000;
+    const fill: ExchangeFill = {
+      fillId: "fill-pre-ack",
+      orderId: "exchange-1",
+      clientOrderId: "co-1",
+      tokenId: createTokenId("tok-1"),
+      side: "buy",
+      price: 0.5,
+      size: 10,
+      liquidityRole: "unknown",
+      fee: 0,
+      feeRateBps: 0,
+      timestamp: fillTs,
+    };
+    let localOrder: any = {
+      orderId: createOrderId("ord-1"),
+      exchangeOrderId: "exchange-1",
+      status: "pending",
+      conditionId: createConditionId("cond-1"),
+      signalId: null,
+      signalReason: null,
+      decisionRuleId: null,
+      signalTimestamp: null,
+      size: 10,
+    };
+    (orderRepo.findByClientOrderId as any).mockImplementation(() => localOrder);
+    (orderRepo.findById as any).mockImplementation(() => localOrder);
+    (fillRepo.findByOrderId as any).mockReturnValue([{ size: 10 }]);
+    (gateway.getFills as any).mockResolvedValue([fill]);
+    const received: unknown[] = [];
+    bus.subscribe("FillReceived", async (event) => {
+      received.push(event);
+    });
+
+    await mod.start();
+    await mod.poll();
+
+    expect(fillRepo.save).not.toHaveBeenCalled();
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+    expect(received).toEqual([]);
+
+    localOrder = { ...localOrder, status: "open" };
+    await mod.poll();
+
+    expect(gateway.getFills).toHaveBeenLastCalledWith(fillTs - 5000);
+    expect(fillRepo.save).toHaveBeenCalledTimes(1);
+    expect(received).toHaveLength(1);
   });
 
   it("reports imported fill counts to the optional observer", async () => {

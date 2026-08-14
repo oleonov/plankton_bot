@@ -32,6 +32,8 @@ import type {
   PositionRepository,
   InventoryLotRepository,
   ExchangeFill,
+  PreparedOrder,
+  PreparedOrderSubmitResult,
   ExecutionPolicy,
   LegStateRepository,
   RepriceChainPolicyConfig,
@@ -143,6 +145,11 @@ type OrderFillLookupGateway = ExchangeGateway & {
   getFillsForOrder?: (orderId: string) => Promise<ExchangeFill[]>;
 };
 
+type PreparedLiveGateway = ExchangeGateway & {
+  prepareOrder?: (params: PlaceOrderParams) => Promise<PreparedOrder>;
+  submitPreparedOrder?: (prepared: PreparedOrder) => Promise<PreparedOrderSubmitResult>;
+};
+
 type PostOnlyCrossPreSubmitSkip = {
   bestBid: number;
   bestAsk: number | null;
@@ -176,6 +183,23 @@ const MAX_DEFERRED_BACKSTOP_RETRIES = 6;
 // the open-orders reconcile reliably reflects a prior (possibly UNKNOWN-landed) submit
 // before another full-residual taker is sent. Comfortably above the reconcile cadence.
 const DEFERRED_BACKSTOP_PLACE_GRACE_MS = 15_000;
+
+let liveSubmissionLane: Promise<void> = Promise.resolve();
+let liveSubmissionLatched = false;
+
+async function withinLiveSubmissionLane<T>(operation: () => Promise<T>): Promise<T> {
+  const preceding = liveSubmissionLane;
+  let release!: () => void;
+  liveSubmissionLane = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await preceding;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
 
 function resolveSellRepriceThreshold(
   lastPlacedAnchor: number,
@@ -237,6 +261,8 @@ export interface ExecutionModuleDeps {
   log: Logger;
   botRunId: BotRunId;
   runtimeControl?: RuntimeControl | undefined;
+  /** Persists a fail-closed live pause after an exact-hash mismatch. */
+  pauseLiveTrading?: (() => void) | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
   runtimeMode?: "simulation" | "paper" | "live-lite" | undefined;
   /**
@@ -2793,7 +2819,11 @@ export class ExecutionModule implements RuntimeModule {
       this.deferredBackstopRetries.set(tk, (this.deferredBackstopRetries.get(tk) ?? 0) + 1);
     }
 
-    const result = await this.deps.gateway.placeOrder(placeParams);
+    const preparedLive = await this.submitPreparedLiveOrder(effectiveCmd, placeParams);
+    if (preparedLive?.submit.kind === "unknown") return;
+    const result = preparedLive
+      ? this.preparedSubmitResultToPlaceOrderResult(preparedLive.submit)
+      : await this.deps.gateway.placeOrder(placeParams);
 
     const now = Date.now();
 
@@ -2835,19 +2865,47 @@ export class ExecutionModule implements RuntimeModule {
       // Hard cap = 1: retryAfterInvalidTick handles both success and failure
       // persistence paths and returns true so we exit immediately.
       if (exchangeRejectionReason === "rejection_invalid_tick") {
-        if (await this.retryAfterInvalidTick(cmd, effectiveTick, placeParams, now)) {
+        const firstRejected = preparedLive
+          ? this.buildPreparedOrder(
+              effectiveCmd,
+              placeParams,
+              preparedLive.pending.orderId,
+              "rejected",
+              {
+                errorCode,
+                errorMessage: result.errorMessage ?? reason,
+                errorDetails: exchangeErrorDetails,
+                rejectionReason: exchangeRejectionReason,
+              },
+            )
+          : undefined;
+        if (firstRejected) this.deps.orderRepo.save(firstRejected);
+        if (await this.retryAfterInvalidTick(cmd, effectiveTick, placeParams, now, firstRejected)) {
           return;
         }
       }
 
       // C1: use effectiveCmd so the persisted row reflects the price/tick
       // that was actually sent to the exchange (not the stale original).
-      const rejectedOrder = this.buildOrder(effectiveCmd, "rejected", null, {
-        errorCode,
-        errorMessage: result.errorMessage ?? reason,
-        errorDetails: exchangeErrorDetails,
-        rejectionReason: exchangeRejectionReason,
-      });
+      const rejectedOrder = preparedLive
+        ? this.buildPreparedOrder(
+            effectiveCmd,
+            placeParams,
+            preparedLive.pending.orderId,
+            "rejected",
+            {
+              errorCode,
+              errorMessage: result.errorMessage ?? reason,
+              errorDetails: exchangeErrorDetails,
+              rejectionReason: exchangeRejectionReason,
+            },
+          )
+        : this.buildOrder(effectiveCmd, "rejected", null, {
+            errorCode,
+            errorMessage: result.errorMessage ?? reason,
+            errorDetails: exchangeErrorDetails,
+            rejectionReason: exchangeRejectionReason,
+          });
       this.deps.orderRepo.save(rejectedOrder);
 
       await this.publishOrderRejected(effectiveCmd, {
@@ -2893,8 +2951,12 @@ export class ExecutionModule implements RuntimeModule {
     // Order accepted — use effectiveCmd (C1) so DB row and event carry the
     // price/tick that the exchange actually accepted, not the stale original.
     const orderId = createOrderId(result.orderId);
-    const order = this.buildOrder(effectiveCmd, "open", result.orderId);
-    this.persistAcceptedOrderOrThrow(effectiveCmd, order, result.orderId);
+    if (preparedLive) {
+      this.persistPreparedAcceptedOrder(effectiveCmd, preparedLive.pending, result.orderId);
+    } else {
+      const order = this.buildOrder(effectiveCmd, "open", result.orderId);
+      this.persistAcceptedOrderOrThrow(effectiveCmd, order, result.orderId);
+    }
 
     this.log.info({ commandId: effectiveCmd.commandId, orderId: result.orderId }, "order placed");
 
@@ -2942,6 +3004,13 @@ export class ExecutionModule implements RuntimeModule {
       // Finding 4: a target that is already terminal must still be pruned from any
       // open drain — otherwise this early-return leaves the barrier stuck.
       this.removeTransitionTargetIfTerminal(existingOrder.tokenId, cmd.orderId);
+      return;
+    }
+    if (this.deps.runtimeMode === "live-lite" && existingOrder?.status === "pending") {
+      this.log.warn(
+        { commandId: cmd.commandId, orderId: cmd.orderId },
+        "cancel blocked — live order submission is still pending",
+      );
       return;
     }
     if (this.cancelReservations.has(orderKey)) {
@@ -3915,6 +3984,147 @@ export class ExecutionModule implements RuntimeModule {
     });
   }
 
+  private async submitPreparedLiveOrder(
+    cmd: PlaceOrderCommand,
+    params: PlaceOrderParams,
+    replacement?: Order,
+  ): Promise<{ pending: Order; submit: PreparedOrderSubmitResult } | null> {
+    if (this.deps.runtimeMode !== "live-lite") return null;
+    const gateway = this.deps.gateway as PreparedLiveGateway;
+    if (!gateway.prepareOrder || !gateway.submitPreparedOrder) {
+      throw new Error("live-lite gateway does not support prepared order submission");
+    }
+
+    const prepared = await gateway.prepareOrder(params);
+    const pending = this.buildPreparedOrder(cmd, params, prepared.orderId, "pending");
+    if (replacement) {
+      if (!this.deps.orderRepo.replacePendingIdentity) {
+        throw new Error("order repository does not support prepared identity replacement");
+      }
+      this.deps.orderRepo.replacePendingIdentity(replacement.orderId, pending);
+    } else {
+      this.deps.orderRepo.save(pending);
+    }
+
+    const submit = await withinLiveSubmissionLane(async () => {
+      if (liveSubmissionLatched) {
+        throw new Error("live submission latch is closed");
+      }
+      const outcome = await gateway.submitPreparedOrder!(prepared);
+      if (outcome.kind === "accepted" && outcome.orderId !== prepared.orderId) {
+        this.closeLiveSubmissionLatch(prepared.orderId, outcome.orderId, cmd);
+      }
+      return outcome;
+    });
+
+    if (submit.kind === "unknown") {
+      this.recordPreparedSubmitUnknown(cmd, pending, submit);
+    }
+    return { pending, submit };
+  }
+
+  private buildPreparedOrder(
+    cmd: PlaceOrderCommand,
+    params: PlaceOrderParams,
+    exactOrderId: string,
+    status: "pending" | "rejected",
+    exchangeError?: {
+      errorCode: string;
+      errorMessage: string | null;
+      errorDetails: Readonly<Record<string, unknown>> | null;
+      rejectionReason?: string | null;
+    },
+  ): Order {
+    const now = new Date().toISOString();
+    return {
+      orderId: createOrderId(exactOrderId),
+      clientOrderId: cmd.clientOrderId,
+      tokenId: cmd.tokenId,
+      conditionId: cmd.conditionId,
+      positionId: cmd.positionId ?? null,
+      side: cmd.side,
+      orderType: cmd.orderType,
+      postOnly: cmd.postOnly === true,
+      price: params.price,
+      size: params.size,
+      sizeUsdc: params.size * params.price,
+      status,
+      exchangeOrderId: exactOrderId,
+      signalId: cmd.signalId ?? null,
+      signalReason: cmd.signalReason ?? null,
+      decisionRuleId: cmd.decisionRuleId ?? null,
+      signalTimestamp: cmd.signalTimestamp ?? null,
+      entryStyle: cmd.entryStyle ?? null,
+      exchangeErrorCode: exchangeError?.errorCode ?? null,
+      exchangeErrorMessage: exchangeError?.errorMessage ?? null,
+      exchangeErrorPayload: stringifyExchangeErrorPayload(exchangeError?.errorDetails ?? null),
+      exchangeRejectionReason: exchangeError?.rejectionReason ?? null,
+      metadata: { ...(cmd.metadata ?? {}), orderSource: cmd.source },
+      botRunId: this.deps.botRunId,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  private preparedSubmitResultToPlaceOrderResult(
+    submit: Exclude<PreparedOrderSubmitResult, { kind: "unknown" }>,
+  ): import("@krabs/domain").PlaceOrderResult {
+    if (submit.kind === "accepted") return { success: true, orderId: submit.orderId };
+    return {
+      success: false,
+      ...(submit.errorCode !== undefined ? { errorCode: submit.errorCode } : {}),
+      ...(submit.errorMessage !== undefined ? { errorMessage: submit.errorMessage } : {}),
+      ...(submit.errorDetails !== undefined ? { errorDetails: submit.errorDetails } : {}),
+    };
+  }
+
+  private closeLiveSubmissionLatch(
+    preparedOrderId: string,
+    returnedOrderId: string,
+    cmd: PlaceOrderCommand,
+  ): never {
+    liveSubmissionLatched = true;
+    const payload = {
+      commandId: String(cmd.commandId),
+      clientOrderId: String(cmd.clientOrderId),
+      preparedOrderId,
+      returnedOrderId,
+      tokenId: String(cmd.tokenId),
+      occurredAt: new Date().toISOString(),
+    };
+    try {
+      this.deps.riskEventRepo?.insert({ eventType: "live_order_hash_mismatch", payload });
+    } catch (err) {
+      this.log.error({ err, ...payload }, "failed to persist live order hash mismatch evidence");
+    } finally {
+      this.deps.pauseLiveTrading?.();
+    }
+    throw new Error(
+      `live order hash mismatch: expected ${preparedOrderId}, received ${returnedOrderId}`,
+    );
+  }
+
+  private recordPreparedSubmitUnknown(
+    cmd: PlaceOrderCommand,
+    pending: Order,
+    submit: Extract<PreparedOrderSubmitResult, { kind: "unknown" }>,
+  ): void {
+    try {
+      this.deps.riskEventRepo?.insert({
+        eventType: "live_order_submit_unknown",
+        payload: {
+          commandId: String(cmd.commandId),
+          orderId: String(pending.orderId),
+          clientOrderId: String(cmd.clientOrderId),
+          errorMessage: submit.errorMessage ?? null,
+          errorDetails: submit.errorDetails ?? null,
+        },
+      });
+    } catch (err) {
+      this.log.warn({ err, commandId: cmd.commandId }, "failed to persist unknown submit evidence");
+    }
+  }
+
   private persistAcceptedOrderOrThrow(
     cmd: PlaceOrderCommand,
     order: Order,
@@ -3968,6 +4178,17 @@ export class ExecutionModule implements RuntimeModule {
       }
       throw err;
     }
+  }
+
+  private persistPreparedAcceptedOrder(
+    cmd: PlaceOrderCommand,
+    pending: Order,
+    exchangeOrderId: string,
+  ): void {
+    if (this.deps.orderRepo.findById(pending.orderId)?.status === "pending") {
+      this.deps.orderRepo.updateStatus(pending.orderId, "open", exchangeOrderId);
+    }
+    this.pendingReservations.delete(String(cmd.commandId));
   }
 
   /** Write corrected tick to DB + refresh all in-memory caches. Fire-and-
@@ -4670,6 +4891,7 @@ export class ExecutionModule implements RuntimeModule {
     firstAttemptTick: number,
     firstPlaceParams: PlaceOrderParams,
     nowMs: number,
+    rejectedPreparedOrder?: Order,
   ): Promise<boolean> {
     if (!this.deps.tickResolver) return false;
 
@@ -4822,7 +5044,15 @@ export class ExecutionModule implements RuntimeModule {
       this.deferredBackstopRetries.set(tk, (this.deferredBackstopRetries.get(tk) ?? 0) + 1);
     }
 
-    const retryResult = await this.deps.gateway.placeOrder(retryParams);
+    const retryPreparedLive = await this.submitPreparedLiveOrder(
+      retryCmd,
+      retryParams,
+      rejectedPreparedOrder,
+    );
+    if (retryPreparedLive?.submit.kind === "unknown") return true;
+    const retryResult = retryPreparedLive
+      ? this.preparedSubmitResultToPlaceOrderResult(retryPreparedLive.submit)
+      : await this.deps.gateway.placeOrder(retryParams);
 
     if (retryResult.success) {
       await this.applyTickCorrection(cmd.conditionId, cmd.tokenId, retryTick);
@@ -4852,8 +5082,12 @@ export class ExecutionModule implements RuntimeModule {
       }
 
       const orderId = createOrderId(retryResult.orderId);
-      const order = this.buildOrder(retryCmd, "open", retryResult.orderId);
-      this.persistAcceptedOrderOrThrow(retryCmd, order, retryResult.orderId);
+      if (retryPreparedLive) {
+        this.persistPreparedAcceptedOrder(retryCmd, retryPreparedLive.pending, retryResult.orderId);
+      } else {
+        const order = this.buildOrder(retryCmd, "open", retryResult.orderId);
+        this.persistAcceptedOrderOrThrow(retryCmd, order, retryResult.orderId);
+      }
       this.log.info(
         { commandId: cmd.commandId, orderId: retryResult.orderId },
         "order placed (invalid-tick retry)",
@@ -4886,14 +5120,29 @@ export class ExecutionModule implements RuntimeModule {
     this.recordGatewayReject(retryErrorCode);
     const retryErrorDetails = retryResult.errorDetails ?? null;
     const retryRejectionReason = this.classifyExchangeRejection(retryErrorDetails, cmd.commandId);
-    const rejectedOrder = this.buildOrder(retryCmd, "rejected", null, {
-      errorCode: retryErrorCode,
-      errorMessage:
-        retryResult.errorMessage ??
-        this.gatewayRejectReason(retryResult.errorCode, retryResult.errorMessage),
-      errorDetails: retryErrorDetails,
-      rejectionReason: retryRejectionReason,
-    });
+    const rejectedOrder = retryPreparedLive
+      ? this.buildPreparedOrder(
+          retryCmd,
+          retryParams,
+          retryPreparedLive.pending.orderId,
+          "rejected",
+          {
+            errorCode: retryErrorCode,
+            errorMessage:
+              retryResult.errorMessage ??
+              this.gatewayRejectReason(retryResult.errorCode, retryResult.errorMessage),
+            errorDetails: retryErrorDetails,
+            rejectionReason: retryRejectionReason,
+          },
+        )
+      : this.buildOrder(retryCmd, "rejected", null, {
+          errorCode: retryErrorCode,
+          errorMessage:
+            retryResult.errorMessage ??
+            this.gatewayRejectReason(retryResult.errorCode, retryResult.errorMessage),
+          errorDetails: retryErrorDetails,
+          rejectionReason: retryRejectionReason,
+        });
     this.deps.orderRepo.save(rejectedOrder);
     await this.publishOrderRejected(cmd, {
       reason: this.gatewayRejectReason(retryResult.errorCode, retryResult.errorMessage),

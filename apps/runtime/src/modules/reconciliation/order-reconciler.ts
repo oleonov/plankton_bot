@@ -2,19 +2,19 @@
  * Order Reconciler — diffs local open orders against exchange open orders.
  *
  * Detects:
- *  - Phantom orders: local orders marked open that no longer exist on the exchange
+ *  - Working local orders absent from an open-only exchange snapshot
  *  - Unknown exchange orders: orders on the exchange with no local record
  *
- * Exchange is source of truth. Phantom local orders are marked cancelled.
- * Unknown exchange orders are logged but not fabricated locally — we only
- * track orders we placed.
+ * An open-only snapshot is not terminal proof: a missing working order remains
+ * fenced until #137b obtains exact terminal evidence. Unknown exchange orders
+ * are logged but not fabricated locally — we only track orders we placed.
  *
  * Hardening (#36): a failed open-orders fetch used to surface as an empty array
  * (`catch { return [] }`), which reconciliation could not tell apart from a
  * genuine "no open orders" snapshot — the root cause of phantom cancellations.
  * The reconciler now consumes {@link ExchangeGateway.getOpenOrdersResult} and
- * skips the pass on an unreliable snapshot, on a suspiciously empty snapshot,
- * and requires several consecutive misses before treating an order as phantom.
+ * skips the pass on an unreliable snapshot or suspiciously empty snapshot, and
+ * reports only bounded unresolved evidence after consecutive misses.
  */
 
 import type {
@@ -28,13 +28,14 @@ import type {
   OrderRepository,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
-import { buildCancelTelemetry } from "./cancel-telemetry.js";
 
 export interface OrderReconcilerDeps {
   gateway: ExchangeGateway;
   orderRepo: OrderRepository;
-  fillRepo: FillRepository;
-  marketRepo: MarketRepository;
+  /** @deprecated Open-snapshot absence no longer needs fill state. */
+  fillRepo?: FillRepository;
+  /** @deprecated Open-snapshot absence no longer needs market state. */
+  marketRepo?: MarketRepository;
   log: Logger;
   phantomGraceMs?: number; // default: 90_000 (1.5× reconcile interval)
   /**
@@ -44,8 +45,8 @@ export interface OrderReconcilerDeps {
    */
   suspiciousEmptyThreshold?: number;
   /**
-   * Consecutive misses required before a missing local order is treated as a
-   * phantom. Default 1 (mark on the first miss — legacy behavior).
+   * Consecutive misses required before a missing local order is reported as
+   * unresolved. It is never terminalized from an open-orders snapshot.
    */
   consecutiveMissThreshold?: number;
   /**
@@ -61,6 +62,7 @@ export type ReconcileSkipReason = "unreliable_snapshot" | "suspicious_empty";
 export interface OrderReconcileResult {
   exchangeOpenCount: number;
   localOpenCount: number;
+  /** Always zero: open-snapshot absence is not terminal proof. */
   phantomsCancelled: number;
   unknownExchangeOrders: number;
   staleCancelled: number;
@@ -79,6 +81,8 @@ export interface OrderReconcileResult {
   fetchAttempts?: number;
   /** Missing orders whose consecutive-miss counter advanced but did not yet mark. */
   consecutiveMissTracked?: number;
+  /** Missing working orders that crossed the reporting threshold this pass. */
+  unresolvedMissingOnExchange?: number;
   /** Stale exchange orders evaluated by the cancel cascade. */
   cascadeEvaluated?: number;
   /** Stale exchange orders the cascade actually cancelled. */
@@ -88,7 +92,7 @@ export interface OrderReconcileResult {
 }
 
 export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderReconcileResult> {
-  const { gateway, orderRepo, fillRepo, marketRepo, log } = deps;
+  const { gateway, orderRepo, log } = deps;
 
   const snapshot = await resolveSnapshot(gateway);
   const capturedAtMs = Date.now();
@@ -128,15 +132,12 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     return skipResult("suspicious_empty", localOpenCount, capturedAtMs);
   }
 
-  const phantom = reconcilePhantomOrders({
+  const unresolved = reconcileMissingOrders({
     localOrders,
     exchangeOrderIds,
     missMap,
     graceMs: deps.phantomGraceMs ?? 90_000,
     consecutiveMissThreshold: deps.consecutiveMissThreshold ?? 1,
-    orderRepo,
-    fillRepo,
-    marketRepo,
     log,
   });
 
@@ -157,15 +158,16 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   return {
     exchangeOpenCount: exchangeOrders.length,
     localOpenCount,
-    phantomsCancelled: phantom.phantomsCancelled,
+    phantomsCancelled: 0,
     unknownExchangeOrders: cascade.unknownExchangeOrders,
     staleCancelled: cascade.staleCancelled,
     staleCancelFailed: cascade.staleCancelFailed,
-    phantomsSkippedGrace: phantom.phantomsSkippedGrace,
+    phantomsSkippedGrace: unresolved.phantomsSkippedGrace,
     exchangeOpenOrders: survivingExchangeOrders,
     capturedAtMs,
-    details: [...phantom.details, ...cascade.details],
-    consecutiveMissTracked: phantom.consecutiveMissTracked,
+    details: [...unresolved.details, ...cascade.details],
+    consecutiveMissTracked: unresolved.consecutiveMissTracked,
+    unresolvedMissingOnExchange: unresolved.unresolvedMissingOnExchange,
     cascadeEvaluated: cascade.cascadeEvaluated,
     cascadeCancelled: cascade.cascadeCancelled,
     cascadeSkipped: cascade.cascadeSkipped,
@@ -213,31 +215,30 @@ function pruneMissMap(missMap: Map<string, number>, localExchangeIds: Set<string
   }
 }
 
-interface PhantomDeps {
+const MAX_UNRESOLVED_DETAILS = 10;
+
+interface MissingOrderDeps {
   localOrders: readonly Order[];
   exchangeOrderIds: Set<string>;
   missMap: Map<string, number>;
   graceMs: number;
   consecutiveMissThreshold: number;
-  orderRepo: OrderRepository;
-  fillRepo: FillRepository;
-  marketRepo: MarketRepository;
   log: Logger;
 }
 
-interface PhantomResult {
-  phantomsCancelled: number;
+interface MissingOrderResult {
   phantomsSkippedGrace: number;
   consecutiveMissTracked: number;
+  unresolvedMissingOnExchange: number;
   details: string[];
 }
 
-function reconcilePhantomOrders(deps: PhantomDeps): PhantomResult {
+function reconcileMissingOrders(deps: MissingOrderDeps): MissingOrderResult {
   const { localOrders, exchangeOrderIds, missMap, graceMs, consecutiveMissThreshold, log } = deps;
   const details: string[] = [];
-  let phantomsCancelled = 0;
   let phantomsSkippedGrace = 0;
   let consecutiveMissTracked = 0;
+  let unresolvedMissingOnExchange = 0;
 
   for (const local of localOrders) {
     const exId = local.exchangeOrderId;
@@ -251,7 +252,7 @@ function reconcilePhantomOrders(deps: PhantomDeps): PhantomResult {
     const ageMs = Date.now() - new Date(local.createdAt).getTime();
     if (ageMs < graceMs) {
       phantomsSkippedGrace++;
-      log.debug({ orderId: local.orderId, ageMs, graceMs }, "phantom candidate skipped — grace");
+      log.debug({ orderId: local.orderId, ageMs, graceMs }, "missing order skipped — grace");
       continue;
     }
 
@@ -261,32 +262,25 @@ function reconcilePhantomOrders(deps: PhantomDeps): PhantomResult {
       consecutiveMissTracked++;
       log.debug(
         { orderId: local.orderId, misses, threshold: consecutiveMissThreshold },
-        "phantom candidate — consecutive miss tracked",
+        "missing order — consecutive miss tracked",
       );
       continue;
     }
 
-    missMap.delete(exId);
-    details.push(markPhantom(local, deps));
-    phantomsCancelled++;
+    if (misses >= consecutiveMissThreshold) {
+      unresolvedMissingOnExchange++;
+      if (details.length < MAX_UNRESOLVED_DETAILS) {
+        details.push(`unresolved missing order: ${local.orderId} (exchange: ${exId})`);
+      }
+      log.warn(
+        { orderId: local.orderId, exchangeOrderId: exId, misses },
+        "working order absent from open snapshot — retained pending #137b terminal proof",
+      );
+    }
+    missMap.set(exId, misses);
   }
 
-  return { phantomsCancelled, phantomsSkippedGrace, consecutiveMissTracked, details };
-}
-
-function markPhantom(local: Order, deps: PhantomDeps): string {
-  const { orderRepo, fillRepo, marketRepo, log } = deps;
-  const telemetry = buildCancelTelemetry({ order: local, nowMs: Date.now(), fillRepo, marketRepo });
-  orderRepo.updateStatus(
-    local.orderId,
-    "cancelled",
-    undefined,
-    "phantom_missing_on_exchange",
-    telemetry,
-  );
-  const msg = `phantom order cancelled: ${local.orderId} (exchange: ${local.exchangeOrderId})`;
-  log.warn({ orderId: local.orderId }, msg);
-  return msg;
+  return { phantomsSkippedGrace, consecutiveMissTracked, unresolvedMissingOnExchange, details };
 }
 
 export interface ReconcileStaleDeps {

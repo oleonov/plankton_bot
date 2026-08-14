@@ -79,12 +79,20 @@ export interface ImportFillsDeps {
    * `exactOptionalPropertyTypes` without a conditional spread.
    */
   fillCompletionTolerance?: number | undefined;
+  /** Hold exact-hash fills while an active live submission still awaits acknowledgement. */
+  deferPendingExactFills?: boolean | undefined;
 }
 
 export interface ImportFillsResult {
   imported: number;
   skipped: number;
+  deferred: number;
+  deferredFillIds: string[];
   details: string[];
+}
+
+function isPendingExactOrderForExchangeFill(order: Order, fill: ExchangeFill): boolean {
+  return order.status === "pending" && order.exchangeOrderId === fill.orderId;
 }
 
 export function findLocalOrderForExchangeFill(
@@ -257,6 +265,8 @@ export async function importExchangeFills(
   const { fillRepo, orderRepo, bus, log, gateway } = deps;
   let imported = 0;
   let skipped = 0;
+  let deferred = 0;
+  const deferredFillIds: string[] = [];
   const details: string[] = [];
 
   const feeInfoByCondition = new Map<string, MarketFeeInfo | null>();
@@ -303,6 +313,15 @@ export async function importExchangeFills(
       } else {
         log.debug({ fillId: ef.fillId }, "orphan fill already logged — suppressing repeat warning");
       }
+      continue;
+    }
+
+    if (deps.deferPendingExactFills && isPendingExactOrderForExchangeFill(localOrder, ef)) {
+      deferred++;
+      deferredFillIds.push(ef.fillId);
+      const msg = `fill ${ef.fillId} exactly matches pending local order ${localOrder.orderId} — deferred until OrderPlaced`;
+      details.push(msg);
+      log.info({ fillId: ef.fillId, orderId: localOrder.orderId }, msg);
       continue;
     }
 
@@ -380,7 +399,7 @@ export async function importExchangeFills(
     });
   }
 
-  return { imported, skipped, details };
+  return { imported, skipped, deferred, deferredFillIds, details };
 }
 
 // ─── Reconciler (uses shared import) ──────────────────────────────────────
@@ -457,6 +476,7 @@ export async function reconcileFills(
     log,
     gateway,
     fillCompletionTolerance: deps.fillCompletionTolerance,
+    deferPendingExactFills: true,
   });
 
   return {

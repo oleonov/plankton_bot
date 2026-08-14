@@ -175,6 +175,29 @@ export interface PlaceOrderResult {
   readonly errorDetails?: Readonly<Record<string, unknown>> | null;
 }
 
+/**
+ * An order signed by a gateway but not yet submitted. The signed exchange
+ * payload remains gateway-private; callers retain only its exact order hash.
+ */
+export interface PreparedOrder {
+  readonly orderId: string;
+  readonly __preparedOrderBrand: "PreparedOrder";
+}
+
+export type PreparedOrderSubmitResult =
+  | { readonly kind: "accepted"; readonly orderId: string }
+  | {
+      readonly kind: "rejected";
+      readonly errorCode: ExchangeErrorCode;
+      readonly errorMessage: string;
+      readonly errorDetails: Readonly<Record<string, unknown>> | null;
+    }
+  | {
+      readonly kind: "unknown";
+      readonly errorMessage: string;
+      readonly errorDetails: Readonly<Record<string, unknown>> | null;
+    };
+
 export interface CancelOrderResult {
   readonly success: boolean;
   readonly errorCode?: ExchangeErrorCode;
@@ -586,6 +609,12 @@ export type FetchResult<T> =
 export interface ExchangeGateway {
   /** Place a limit order. Never throws — errors are encoded in PlaceOrderResult. */
   placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult>;
+
+  /** Optional write-ahead path for gateways that can sign before submitting. */
+  prepareOrder?(params: PlaceOrderParams): Promise<PreparedOrder>;
+
+  /** Submits a previously prepared order without re-signing it. */
+  submitPreparedOrder?(prepared: PreparedOrder): Promise<PreparedOrderSubmitResult>;
 
   /** Cancel a single order by exchange-assigned ID. */
   cancelOrder(params: CancelOrderParams): Promise<CancelOrderResult>;

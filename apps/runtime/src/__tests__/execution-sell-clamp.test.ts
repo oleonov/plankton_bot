@@ -409,6 +409,19 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
   });
 
   it("does not apply the strict SELL pre-submit guard to BUY orders with unknown min", async () => {
+    const prepared = {
+      orderId: "prepared-buy-unknown-min",
+      __preparedOrderBrand: "PreparedOrder" as const,
+    };
+    gateway.prepareOrder = vi.fn().mockResolvedValue(prepared);
+    gateway.submitPreparedOrder = vi.fn().mockResolvedValue({
+      kind: "accepted",
+      orderId: prepared.orderId,
+    });
+    const command = makeSellCmd(2, {
+      side: "buy",
+      metadata: { marketData: { minOrderSize: null } } as unknown as Record<string, unknown>,
+    });
     const mod = new ExecutionModule({
       gateway,
       bus,
@@ -426,20 +439,24 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     const rejected = collectRejections(bus);
 
     await bus.publish("PlaceOrderRequested", {
-      command: makeSellCmd(2, {
-        side: "buy",
-        metadata: { marketData: { minOrderSize: null } } as unknown as Record<string, unknown>,
-      }),
+      command,
       timestamp: Date.now(),
     });
     await bus.drain();
 
     expect(rejected).toHaveLength(0);
-    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(gateway.placeOrder).mock.calls[0]![0]).toMatchObject({
+    expect(gateway.prepareOrder).toHaveBeenCalledExactlyOnceWith({
+      clientOrderId: command.clientOrderId,
+      tokenId: command.tokenId,
       side: "buy",
       size: 2,
+      price: 0.5,
+      orderType: "GTC",
+      tickSize: 0.01,
+      negRisk: false,
     });
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledExactlyOnceWith(prepared);
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
 
     await mod.stop();
   });

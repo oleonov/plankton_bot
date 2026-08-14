@@ -133,6 +133,47 @@ describe("SqliteOrderRepository", () => {
     });
   });
 
+  it("atomically replaces a rejected identity with a pending prepared identity", () => {
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("hash-first"),
+        clientOrderId: "stable-client" as ClientOrderId,
+        status: "rejected",
+        exchangeOrderId: "hash-first",
+        exchangeErrorCode: "INVALID_TICK",
+        exchangeErrorMessage: "bad tick",
+      }),
+    );
+    const replacement = makeOrder({
+      orderId: createOrderId("hash-second"),
+      clientOrderId: "stable-client" as ClientOrderId,
+      status: "pending",
+      exchangeOrderId: "hash-second",
+      price: 0.56,
+      size: 99,
+      sizeUsdc: 55.44,
+    });
+
+    repo.replacePendingIdentity(createOrderId("hash-first"), replacement);
+
+    expect(repo.findById(createOrderId("hash-first"))).toBeNull();
+    expect(repo.findById(createOrderId("hash-second"))).toMatchObject({
+      status: "pending",
+      exchangeOrderId: "hash-second",
+      price: 0.56,
+      size: 99,
+      exchangeErrorCode: null,
+      exchangeErrorMessage: null,
+    });
+  });
+
+  it("refuses identity replacement unless the rejected order is unfilled and client-stable", () => {
+    repo.save(makeOrder({ status: "pending" }));
+    expect(() => repo.replacePendingIdentity(createOrderId("ord-1"), makeOrder())).toThrow(
+      "requires rejected order",
+    );
+  });
+
   it("updates metadata by order_id and returns the persisted order", () => {
     repo.save(
       makeOrder({

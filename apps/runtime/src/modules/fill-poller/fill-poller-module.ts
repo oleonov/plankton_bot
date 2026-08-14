@@ -30,13 +30,19 @@ export interface FillPollerModuleDeps {
   /** Relative fill-completion tolerance forwarded to importExchangeFills (#36). */
   fillCompletionTolerance?: number | undefined;
   onImportObserved?:
-    | ((summary: { imported: number; skipped: number; timestamp: number }) => void)
+    | ((summary: {
+        imported: number;
+        skipped: number;
+        deferred: number;
+        timestamp: number;
+      }) => void)
     | undefined;
 }
 
 export class FillPollerModule implements RuntimeModule {
   private readonly log: Logger;
   private highWatermarkMs = 0;
+  private readonly deferredFillTimestamps = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   private started = false;
@@ -85,7 +91,11 @@ export class FillPollerModule implements RuntimeModule {
     this.polling = true;
 
     try {
-      const sinceMs = Math.max(0, this.highWatermarkMs - this.deps.overlapMs);
+      const deferredSinceMs = Math.min(
+        this.highWatermarkMs,
+        ...this.deferredFillTimestamps.values(),
+      );
+      const sinceMs = Math.max(0, deferredSinceMs - this.deps.overlapMs);
       const fills = await this.deps.gateway.getFills(sinceMs);
 
       if (fills.length > 0) {
@@ -96,7 +106,19 @@ export class FillPollerModule implements RuntimeModule {
           log: this.log,
           gateway: this.deps.gateway,
           fillCompletionTolerance: this.deps.fillCompletionTolerance,
+          deferPendingExactFills: true,
         });
+
+        const fetchedFillIds = new Set(fills.map((fill) => fill.fillId));
+        const deferredFillIds = new Set(result.deferredFillIds);
+        for (const fillId of fetchedFillIds) {
+          if (!deferredFillIds.has(fillId)) this.deferredFillTimestamps.delete(fillId);
+        }
+        for (const fill of fills) {
+          if (deferredFillIds.has(fill.fillId)) {
+            this.deferredFillTimestamps.set(fill.fillId, fill.timestamp);
+          }
+        }
 
         // Advance watermark to latest fill timestamp
         for (const f of fills) {
@@ -105,15 +127,16 @@ export class FillPollerModule implements RuntimeModule {
           }
         }
 
-        if (result.imported > 0) {
+        if (result.imported > 0 || result.deferred > 0) {
           this.log.info(
-            { imported: result.imported, skipped: result.skipped },
-            "fill poller imported fills",
+            { imported: result.imported, skipped: result.skipped, deferred: result.deferred },
+            "fill poller processed fills",
           );
         }
         this.deps.onImportObserved?.({
           imported: result.imported,
           skipped: result.skipped,
+          deferred: result.deferred,
           timestamp: Date.now(),
         });
       }

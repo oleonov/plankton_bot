@@ -98,6 +98,7 @@ describe("createPolymarketClient", () => {
         secret: "poly-secret",
         passphrase: "poly-passphrase",
       },
+      retryOnError: false,
       builderConfig: { builderCode: BUILDER_CODE },
     });
   });
@@ -168,6 +169,7 @@ describe("createPolymarketClient", () => {
         secret: "poly-secret",
         passphrase: "poly-passphrase",
       },
+      retryOnError: false,
       signatureType: 1,
       funderAddress: "0x1111111111111111111111111111111111111111",
       builderConfig: { builderCode: BUILDER_CODE },
@@ -225,6 +227,7 @@ describe("createPolymarketClient", () => {
         secret: "poly-secret",
         passphrase: "poly-passphrase",
       },
+      retryOnError: false,
       signatureType: 1,
       funderAddress: "0x1111111111111111111111111111111111111111",
       builderConfig: { builderCode: BUILDER_CODE },
