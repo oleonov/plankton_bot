@@ -1702,7 +1702,7 @@ describe("ProfileLadderModule", () => {
         orderId: createOrderId("dead-rejected-profile-ladder-order"),
         status: OrderStatus.Rejected,
         exchangeOrderId: null,
-        fillProgressShares: null,
+        fillProgressShares: 0,
         decisionRuleId: "PROFILE_LADDER",
         signalReason: "profile-ladder-exit",
         metadata: { source: "profile_ladder" },
@@ -1774,7 +1774,7 @@ describe("ProfileLadderModule", () => {
       });
     }
 
-    it("places a fresh PL SELL with a distinct deterministic clientOrderId when the recovery rung's base clientOrderId already has a terminal-dead rejected order", async () => {
+    it("places a fresh PL SELL with a distinct deterministic clientOrderId when the recovery rung's base clientOrderId has an exact-zero terminal rejected order", async () => {
       const reader = blockFirstClientOrderId(deadRejectedProfileLadderSell());
       const ctx = recoveryContext(reader);
 
@@ -1887,22 +1887,24 @@ describe("ProfileLadderModule", () => {
       ).toBe(true);
     });
 
-    it("retries past a terminal rejected exchange-backed no-fill PL SELL on the base clientOrderId", async () => {
-      const reader = blockFirstClientOrderId(
-        deadRejectedProfileLadderSell({
-          status: OrderStatus.Rejected,
-          exchangeOrderId: String(createOrderId("exchange-rested-rejected")),
-          fillProgressShares: null,
-        }),
-      );
-      const ctx = recoveryContext(reader);
+    it.each([OrderStatus.Cancelled, OrderStatus.Rejected])(
+      "does not retry past a terminal %s PL SELL with unknown fill progress",
+      async (status) => {
+        const reader = blockFirstClientOrderId(
+          deadRejectedProfileLadderSell({ status, fillProgressShares: null }),
+        );
+        const ctx = recoveryContext(reader);
 
-      await fireRecovery(ctx);
+        await fireRecovery(ctx);
 
-      expect(ctx.orders).toHaveLength(1);
-      expect(String(ctx.orders[0]!.signalId)).toMatch(/_retry1$/);
-      expect(ctx.orders[0]!.clientOrderId).not.toBe(reader.blockedId());
-    });
+        expect(ctx.orders).toHaveLength(0);
+        expect(ctx.counters).toContainEqual({
+          name: "profile_ladder_clientorderid_retry_blocked",
+          value: 1,
+          labels: '{"band":"medium_high","reason":"live_or_filled"}',
+        });
+      },
+    );
 
     it("still fails closed (no order, no cancel) when BBO is invalid even though the base clientOrderId is now retry-skippable", async () => {
       const reader = blockFirstClientOrderId(
@@ -1926,9 +1928,10 @@ describe("ProfileLadderModule", () => {
 
     // Fill progress is fail-closed: any non-zero / unknown fill (positive,
     // negative, or NaN) on the base clientOrderId blocks the retry probe — it must
-    // never step over a row that may have moved shares. Only an exact null/0 fill
+    // never step over a row that may have moved shares. Only an exact zero fill
     // is treated as no-fill.
     it.each([
+      { name: "null", fill: null },
       { name: "positive", fill: 5 },
       { name: "negative", fill: -5 },
       { name: "NaN", fill: NaN },

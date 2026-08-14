@@ -36,6 +36,7 @@ import { FetchParseError, type FetchResult } from "../fetch-result.js";
 import { redactSensitive, sanitizeLogArg } from "../redaction.js";
 import {
   mapOpenOrder,
+  mapExactOrder,
   mapTrade,
   mapTradeToPersonalFills,
   mapBalance,
@@ -598,10 +599,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   async cancelOrder(params: CancelOrderParams): Promise<CancelOrderResult> {
     try {
-      await timeDepCall(this.depHealthRecorder, "clob", () =>
+      const raw = await timeDepCall(this.depHealthRecorder, "clob", () =>
         this.client.cancelOrder({ orderID: params.orderId }),
       );
-      return { success: true };
+      return cancelAcknowledged(raw, params.orderId) ? { success: true } : { success: false };
     } catch (err) {
       const { code, message } = classifyError(err);
       return { success: false, errorCode: code, errorMessage: message };
@@ -640,6 +641,26 @@ export class LiveExchangeGateway implements ExchangeGateway {
     );
   }
 
+  private async fetchExactOrder(orderId: string): Promise<ExchangeOrder | null> {
+    try {
+      const raw = await this.client.getOrder(orderId);
+      if (raw === null || raw === undefined || isReturnedNotFound(raw)) return null;
+      throwIfReturnedError(raw);
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        throw new FetchParseError("expected exact order object");
+      }
+      try {
+        return mapExactOrder(raw as Record<string, unknown>, orderId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "invalid exact order";
+        throw new FetchParseError(message);
+      }
+    } catch (err) {
+      if (isNotFoundError(err)) return null;
+      throw err;
+    }
+  }
+
   async getOpenOrders(): Promise<ExchangeOrder[]> {
     try {
       return await this.fetchOpenOrders();
@@ -663,6 +684,23 @@ export class LiveExchangeGateway implements ExchangeGateway {
           backoffMs: this.fetchBackoffMs,
           sleep: this.fetchSleep,
           source: "open_orders",
+          log: this.fetchRetryLog,
+        }),
+      { isOk: fetchResultOk },
+    );
+  }
+
+  async getOrderResult(orderId: string): Promise<FetchResult<ExchangeOrder | null>> {
+    if (orderId.trim().length === 0) return { ok: false, reason: "parse", attempts: 1 };
+    return timeDepCall(
+      this.depHealthRecorder,
+      "clob",
+      () =>
+        executeWithRetry(() => this.fetchExactOrder(orderId), classifyFetchError, {
+          retries: this.fetchRetries,
+          backoffMs: this.fetchBackoffMs,
+          sleep: this.fetchSleep,
+          source: "exact_order",
           log: this.fetchRetryLog,
         }),
       { isOk: fetchResultOk },
@@ -1908,6 +1946,31 @@ function throwIfReturnedError(raw: unknown): void {
     if (typeof r.status === "number") Object.assign(err, { status: r.status });
     throw err;
   }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const response = Reflect.get(error, "response");
+  const status =
+    response && typeof response === "object"
+      ? Reflect.get(response, "status")
+      : Reflect.get(error, "status");
+  return status === 404 || status === "404";
+}
+
+function isReturnedNotFound(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const status = Reflect.get(raw, "status");
+  return (status === 404 || status === "404") && Reflect.get(raw, "error") != null;
+}
+
+function cancelAcknowledged(raw: unknown, orderId: string): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const canceled = Reflect.get(raw, "canceled");
+  return (
+    Array.isArray(canceled) &&
+    canceled.some((candidate) => typeof candidate === "string" && candidate === orderId)
+  );
 }
 
 /**

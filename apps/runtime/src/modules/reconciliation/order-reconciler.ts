@@ -28,6 +28,7 @@ import type {
   OrderRepository,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import { applyOrderVerdict, resolveOrderStatusVerdict } from "./order-status-resolver.js";
 
 export interface OrderReconcilerDeps {
   gateway: ExchangeGateway;
@@ -55,6 +56,11 @@ export interface OrderReconcilerDeps {
    * counter never accumulates beyond a single pass.
    */
   consecutiveMissCounts?: Map<string, number>;
+  /** Exchange SELLs whose prior stale-cancel attempt lacks exact terminal proof. */
+  unresolvedStaleOrders?: Map<string, ExchangeOrder>;
+  bus?: import("@krabs/domain").EventBus;
+  /** Relative completion tolerance shared by every exact order verdict. */
+  fillCompletionTolerance?: number | undefined;
 }
 
 export type ReconcileSkipReason = "unreliable_snapshot" | "suspicious_empty";
@@ -73,7 +79,7 @@ export interface OrderReconcileResult {
   /** Epoch ms when the exchange snapshot was captured. */
   capturedAtMs: number;
   details: string[];
-  /** Set when the pass bailed out before mutating any order. */
+  /** Set when the open snapshot was withheld from downstream consumers. */
   skipReason?: ReconcileSkipReason;
   /** Fetch classification when {@link skipReason} is `unreliable_snapshot`. */
   fetchReason?: FetchReason;
@@ -111,6 +117,15 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   }
 
   const exchangeOrders = snapshot.data;
+  const unresolvedStaleOrders = deps.unresolvedStaleOrders ?? new Map<string, ExchangeOrder>();
+  await resolveUnresolvedStaleOrders({
+    orders: unresolvedStaleOrders,
+    gateway,
+    orderRepo,
+    fillRepo: deps.fillRepo ?? EMPTY_FILL_READER,
+    log,
+    fillCompletionTolerance: deps.fillCompletionTolerance,
+  });
   const exchangeOrderIds = new Set(exchangeOrders.map((o) => o.orderId));
   const localExchangeIds = new Set(
     localOrders.filter((o) => o.exchangeOrderId !== null).map((o) => o.exchangeOrderId!),
@@ -120,16 +135,15 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   pruneMissMap(missMap, localExchangeIds);
 
   const suspiciousEmptyThreshold = deps.suspiciousEmptyThreshold ?? 3;
-  if (
+  const suspiciousEmpty =
     suspiciousEmptyThreshold > 0 &&
     exchangeOrders.length === 0 &&
-    localOpenCount >= suspiciousEmptyThreshold
-  ) {
+    localOpenCount >= suspiciousEmptyThreshold;
+  if (suspiciousEmpty) {
     log.warn(
       { localOpenCount, threshold: suspiciousEmptyThreshold },
-      "reconcile skipped — suspicious empty snapshot",
+      "suspicious empty snapshot withheld — exact order recovery remains active",
     );
-    return skipResult("suspicious_empty", localOpenCount, capturedAtMs);
   }
 
   const unresolved = reconcileMissingOrders({
@@ -141,19 +155,43 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     log,
   });
 
+  const fillRepo = deps.fillRepo ?? EMPTY_FILL_READER;
+  await resolveExactCandidates({
+    candidates: unresolved.exactCandidates,
+    gateway,
+    orderRepo,
+    fillRepo,
+    log,
+    fillCompletionTolerance: deps.fillCompletionTolerance,
+    ...(deps.bus ? { bus: deps.bus } : {}),
+  });
+
+  if (suspiciousEmpty) {
+    return skipResult("suspicious_empty", localOpenCount, capturedAtMs, {
+      phantomsSkippedGrace: unresolved.phantomsSkippedGrace,
+      details: unresolved.details,
+      consecutiveMissTracked: unresolved.consecutiveMissTracked,
+      unresolvedMissingOnExchange: unresolved.unresolvedMissingOnExchange,
+    });
+  }
+
   const cascade = await reconcileStaleExchangeOrders({
     exchangeOrders,
     localExchangeIds,
     orderRepo,
+    fillRepo,
     gateway,
     log,
     snapshotReliable: true,
+    fillCompletionTolerance: deps.fillCompletionTolerance,
+    unresolvedStaleOrders,
   });
 
-  const survivingExchangeOrders =
-    cascade.cancelledStaleOrderIds.size === 0
-      ? exchangeOrders
-      : exchangeOrders.filter((o) => !cascade.cancelledStaleOrderIds.has(o.orderId));
+  const survivingExchangeOrders = [...exchangeOrders, ...unresolvedStaleOrders.values()].filter(
+    (order, index, orders) =>
+      !cascade.cancelledStaleOrderIds.has(order.orderId) &&
+      orders.findIndex((candidate) => candidate.orderId === order.orderId) === index,
+  );
 
   return {
     exchangeOpenCount: exchangeOrders.length,
@@ -172,6 +210,67 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     cascadeCancelled: cascade.cascadeCancelled,
     cascadeSkipped: cascade.cascadeSkipped,
   };
+}
+
+const EMPTY_FILL_READER: Pick<FillRepository, "findByOrderId"> = {
+  findByOrderId: () => [],
+};
+
+async function resolveExactCandidates(deps: {
+  candidates: readonly Order[];
+  gateway: ExchangeGateway;
+  orderRepo: OrderRepository;
+  fillRepo: Pick<FillRepository, "findByOrderId">;
+  log: Logger;
+  bus?: import("@krabs/domain").EventBus;
+  fillCompletionTolerance?: number | undefined;
+}): Promise<void> {
+  if (!deps.gateway.getOrderResult) return;
+  for (const local of deps.candidates) {
+    const exact = await deps.gateway.getOrderResult(local.exchangeOrderId!);
+    if (!exact.ok) continue;
+    await applyOrderVerdict({
+      orderRepo: deps.orderRepo,
+      fillRepo: deps.fillRepo,
+      log: deps.log,
+      orderId: local.orderId,
+      exchange: exact.data,
+      publish: true,
+      fillCompletionTolerance: deps.fillCompletionTolerance,
+      ...(deps.bus ? { bus: deps.bus } : {}),
+    });
+  }
+}
+
+async function resolveUnresolvedStaleOrders(deps: {
+  orders: Map<string, ExchangeOrder>;
+  gateway: ExchangeGateway;
+  orderRepo: OrderRepository;
+  fillRepo: Pick<FillRepository, "findByOrderId">;
+  log: Logger;
+  fillCompletionTolerance?: number | undefined;
+}): Promise<ExchangeOrder[]> {
+  const retained: ExchangeOrder[] = [];
+  for (const [exchangeOrderId, exchangeOrder] of deps.orders) {
+    const localOrder = deps.orderRepo.findByExchangeOrderId(exchangeOrderId);
+    if (
+      !localOrder ||
+      !(await confirmStaleTerminal({
+        exchangeOrder,
+        localOrder,
+        gateway: deps.gateway,
+        orderRepo: deps.orderRepo,
+        fillRepo: deps.fillRepo,
+        log: deps.log,
+        fillCompletionTolerance: deps.fillCompletionTolerance,
+      }))
+    ) {
+      retained.push(exchangeOrder);
+      continue;
+    }
+    deps.orders.delete(exchangeOrderId);
+  }
+  return retained;
 }
 
 /**
@@ -231,6 +330,7 @@ interface MissingOrderResult {
   consecutiveMissTracked: number;
   unresolvedMissingOnExchange: number;
   details: string[];
+  exactCandidates: Order[];
 }
 
 function reconcileMissingOrders(deps: MissingOrderDeps): MissingOrderResult {
@@ -239,6 +339,7 @@ function reconcileMissingOrders(deps: MissingOrderDeps): MissingOrderResult {
   let phantomsSkippedGrace = 0;
   let consecutiveMissTracked = 0;
   let unresolvedMissingOnExchange = 0;
+  const exactCandidates: Order[] = [];
 
   for (const local of localOrders) {
     const exId = local.exchangeOrderId;
@@ -268,6 +369,7 @@ function reconcileMissingOrders(deps: MissingOrderDeps): MissingOrderResult {
     }
 
     if (misses >= consecutiveMissThreshold) {
+      exactCandidates.push(local);
       unresolvedMissingOnExchange++;
       if (details.length < MAX_UNRESOLVED_DETAILS) {
         details.push(`unresolved missing order: ${local.orderId} (exchange: ${exId})`);
@@ -280,13 +382,20 @@ function reconcileMissingOrders(deps: MissingOrderDeps): MissingOrderResult {
     missMap.set(exId, misses);
   }
 
-  return { phantomsSkippedGrace, consecutiveMissTracked, unresolvedMissingOnExchange, details };
+  return {
+    phantomsSkippedGrace,
+    consecutiveMissTracked,
+    unresolvedMissingOnExchange,
+    details,
+    exactCandidates,
+  };
 }
 
 export interface ReconcileStaleDeps {
   exchangeOrders: readonly ExchangeOrder[];
   localExchangeIds: Set<string>;
   orderRepo: OrderRepository;
+  fillRepo?: Pick<FillRepository, "findByOrderId">;
   gateway: ExchangeGateway;
   log: Logger;
   /**
@@ -296,6 +405,8 @@ export interface ReconcileStaleDeps {
    * regardless, so a future caller cannot mass-cancel off a bad snapshot.
    */
   snapshotReliable: boolean;
+  fillCompletionTolerance?: number | undefined;
+  unresolvedStaleOrders?: Map<string, ExchangeOrder>;
 }
 
 export interface ReconcileStaleResult {
@@ -313,6 +424,7 @@ export async function reconcileStaleExchangeOrders(
   deps: ReconcileStaleDeps,
 ): Promise<ReconcileStaleResult> {
   const { exchangeOrders, localExchangeIds, orderRepo, gateway, log, snapshotReliable } = deps;
+  const fillRepo = deps.fillRepo ?? EMPTY_FILL_READER;
   const cancelledStaleOrderIds = new Set<string>();
   const details: string[] = [];
 
@@ -343,13 +455,31 @@ export async function reconcileStaleExchangeOrders(
     cascadeEvaluated++;
     const result = await gateway.cancelOrder({ orderId: ex.orderId });
     if (result.success) {
-      staleCancelled++;
-      cascadeCancelled++;
-      cancelledStaleOrderIds.add(ex.orderId);
-      const msg = `stale exchange order cancelled: ${ex.orderId} (local: ${localOrder.status})`;
-      details.push(msg);
-      log.info({ exchangeOrderId: ex.orderId, localStatus: localOrder.status }, msg);
+      const terminalConfirmed = await confirmStaleTerminal({
+        exchangeOrder: ex,
+        localOrder,
+        gateway,
+        orderRepo,
+        fillRepo,
+        log,
+        fillCompletionTolerance: deps.fillCompletionTolerance,
+      });
+      if (terminalConfirmed) {
+        deps.unresolvedStaleOrders?.delete(ex.orderId);
+        staleCancelled++;
+        cascadeCancelled++;
+        cancelledStaleOrderIds.add(ex.orderId);
+        const msg = `stale exchange order terminal confirmed: ${ex.orderId} (local: ${localOrder.status})`;
+        details.push(msg);
+        log.info({ exchangeOrderId: ex.orderId, localStatus: localOrder.status }, msg);
+      } else {
+        deps.unresolvedStaleOrders?.set(ex.orderId, ex);
+        const msg = `stale exchange order cancel acknowledged but unconfirmed: ${ex.orderId} (local: ${localOrder.status})`;
+        details.push(msg);
+        log.warn({ exchangeOrderId: ex.orderId, localStatus: localOrder.status }, msg);
+      }
     } else {
+      deps.unresolvedStaleOrders?.set(ex.orderId, ex);
       staleCancelFailed++;
       const msg = `stale exchange order cancel failed: ${ex.orderId} (${result.errorCode})`;
       details.push(msg);
@@ -374,6 +504,44 @@ export async function reconcileStaleExchangeOrders(
     cancelledStaleOrderIds,
     details,
   };
+}
+
+async function confirmStaleTerminal(deps: {
+  exchangeOrder: ExchangeOrder;
+  localOrder: Order;
+  gateway: ExchangeGateway;
+  orderRepo: OrderRepository;
+  fillRepo: Pick<FillRepository, "findByOrderId">;
+  log: Logger;
+  fillCompletionTolerance?: number | undefined;
+}): Promise<boolean> {
+  if (!deps.gateway.getOrderResult) return false;
+  const exact = await deps.gateway.getOrderResult(deps.exchangeOrder.orderId);
+  if (!exact.ok || exact.data === null) return false;
+  if (exact.data.orderId !== deps.exchangeOrder.orderId) return false;
+  if (!isTerminalExchangeStatus(exact.data.status)) return false;
+
+  const verdict = await applyOrderVerdict({
+    orderRepo: deps.orderRepo,
+    fillRepo: deps.fillRepo,
+    log: deps.log,
+    orderId: deps.localOrder.orderId,
+    exchange: exact.data,
+    fillCompletionTolerance: deps.fillCompletionTolerance,
+  });
+  return isTerminalVerdict(verdict.status);
+}
+
+function isTerminalExchangeStatus(status: ExchangeOrder["status"]): boolean {
+  return (
+    status === "FILLED" || status === "CANCELLED" || status === "EXPIRED" || status === "REJECTED"
+  );
+}
+
+function isTerminalVerdict(
+  status: ReturnType<typeof resolveOrderStatusVerdict>["status"],
+): boolean {
+  return status === "filled" || status === "cancelled" || status === "rejected";
 }
 
 function emptyStaleResult(overrides: Partial<ReconcileStaleResult> = {}): ReconcileStaleResult {

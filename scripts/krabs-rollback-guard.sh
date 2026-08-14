@@ -313,13 +313,13 @@ EOF
 }
 deploy_watch() {
   [[ -e "$DEPLOY_RECOVERY" ]] || return 0
-  local phase owner ticks state target worker_pgid disposition
+  local phase owner ticks state target worker_pgid disposition watchdog_pgid
   read -r phase owner ticks state target worker_pgid disposition < <(python3 - "$DEPLOY_RECOVERY" "$DEPLOY_META" "$DEPLOY_SENTINEL" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1])); required={'schemaVersion','recoveryStateId','phase','deliveryMode','targetSha','controllerPid','controllerStartTicks','tradingCutoverInvoked','prePaused','preRunId','preInstanceId','previousVersion','baselineCapturedUnderLock','baselineCommandHighWater','finalCommandHighWater','targetRuntimeId','targetManagerId','targetNetworkIds','restartPolicies','candidateHash','receipt','runtimeEnvPath','runtimeEnvSha256'}
 assert d.get('schemaVersion')==1 and required <= set(d) and d['deliveryMode'] in ('release','rollback')
 assert isinstance(d['controllerPid'],int) and d['controllerPid']>0 and isinstance(d['controllerStartTicks'],str)
-assert d['phase'] in ('rollback_bound','rollback_bound_owner_dead','prepared','baseline_captured','fenced','cutover_paused','target_started','arbitration_boundary','commit_ready','committed_unacknowledged','target_stopped_rearbitrate')
+assert d['phase'] in ('rollback_bound','rollback_bound_owner_dead','prepared','baseline_captured','fenced','cutover_paused','migration_gate_pre','target_started','arbitration_boundary','commit_ready','committed_unacknowledged','target_stopped_rearbitrate')
 pgid=d.get('workerPgid',0); assert isinstance(pgid,int) and pgid>=0
 advanced=False
 if d['phase'] in ('commit_ready','committed_unacknowledged') and d['receipt']:
@@ -330,7 +330,7 @@ if d['phase'] in ('commit_ready','committed_unacknowledged') and d['receipt']:
 if advanced: c='committed-unacknowledged'
 elif d['phase']=='commit_ready': c='commit_ready@previous'
 elif d['phase']=='target_stopped_rearbitrate': c='target_stopped_rearbitrate'
-elif d['phase'] in ('baseline_captured','fenced','cutover_paused'): c='early_recovery'
+elif d['phase'] in ('baseline_captured','fenced','cutover_paused','migration_gate_pre'): c='early_recovery'
 elif d['phase'] in ('target_started','arbitration_boundary'): c='arbitration_boundary'
 elif d['phase'] in ('rollback_bound','rollback_bound_owner_dead'): c=d['phase']
 elif open(sys.argv[3]).read().strip()==d['recoveryStateId'] if __import__('os').path.exists(sys.argv[3]) else False: c='already-fenced'
@@ -341,7 +341,8 @@ PY
   [[ -r "/proc/$owner/stat" && "$(awk '{print $22}' "/proc/$owner/stat" 2>/dev/null)" == "$ticks" ]] && return 0
   atomic_write "$DEPLOY_SENTINEL" "$state"; chmod 600 "$DEPLOY_SENTINEL"
   exec {fail_fd}>"$FAILSTOP_LOCK"; "$FLOCK" --exclusive --nonblock "$fail_fd" || return 1
-  if [[ "$worker_pgid" != 0 && "$worker_pgid" != "$$" ]]; then kill -TERM -- "-$worker_pgid" 2>/dev/null || true; sleep 1; kill -KILL -- "-$worker_pgid" 2>/dev/null || true; fi
+  watchdog_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+  if [[ -n "$watchdog_pgid" && "$worker_pgid" != 0 && "$worker_pgid" != "$watchdog_pgid" ]]; then kill -TERM -- "-$worker_pgid" 2>/dev/null || true; sleep 1; kill -KILL -- "-$worker_pgid" 2>/dev/null || true; fi
   if [[ "$disposition" == rollback_bound || "$disposition" == rollback_bound_owner_dead ]]; then
     read_state_or_die
     [[ "$(state_field phase)" == prepared && "$(state_field rollbackStateId)" == "$state" && "$(state_field targetSha)" == "$target" ]] || die "rollback binding is not exact"

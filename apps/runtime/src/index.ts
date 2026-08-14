@@ -2881,10 +2881,17 @@ async function main(): Promise<void> {
   if (!getOpenOrdersResult) {
     throw new Error("exchange gateway missing getOpenOrdersResult — cannot fail-closed on startup");
   }
+  const getOrderResult = exchangeGateway.getOrderResult?.bind(exchangeGateway);
+  if (!getOrderResult) {
+    throw new Error(
+      "exchange gateway missing getOrderResult — cannot resolve pending orders at startup",
+    );
+  }
   const startupAdoptionDeps = {
     gateway: {
       getFillsResult,
       getOpenOrdersResult,
+      getOrderResult,
       ...(exchangeGateway.getMarketFeeInfo
         ? { getMarketFeeInfo: exchangeGateway.getMarketFeeInfo.bind(exchangeGateway) }
         : {}),

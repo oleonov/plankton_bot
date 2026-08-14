@@ -28,6 +28,7 @@ import {
   importExchangeFills,
 } from "./modules/reconciliation/fill-reconciler.js";
 import { updateLegStateForFill } from "./modules/leg-state/update-leg-state-for-fill.js";
+import { applyOrderVerdict } from "./modules/reconciliation/order-status-resolver.js";
 
 /**
  * Thrown when the authoritative exchange fill snapshot cannot be read reliably at
@@ -59,6 +60,7 @@ export interface StartupPositionAdoptionDeps {
      * skipped classification on a missing method would defeat the fence.
      */
     getOpenOrdersResult(): Promise<FetchResult<ExchangeOrder[]>>;
+    getOrderResult?(orderId: string): Promise<FetchResult<ExchangeOrder | null>>;
   };
   marketRepo: MarketRepository;
   orderRepo: OrderRepository;
@@ -145,6 +147,10 @@ export async function runStartupPositionAdoption(
 ): Promise<StartupPositionAdoptionResult> {
   const log = deps.log.child({ module: "startup-position-adoption" });
   const inventory = new InventoryHandler(deps.positionRepo, deps.inventoryLotRepo, log, deps.db);
+  const pendingOrderIds = deps.orderRepo
+    .findOpen()
+    .filter((order) => order.status === "pending")
+    .map((order) => order.orderId);
 
   // FAIL CLOSED (Gap 2): use the reliable result-returning API that distinguishes
   // an authoritative empty snapshot (ok:true, data:[]) from a transport/parse
@@ -353,6 +359,36 @@ export async function runStartupPositionAdoption(
   }
 
   result.syntheticOrdersCreated = syntheticOrders.size;
+
+  for (const orderId of pendingOrderIds) {
+    const order = deps.orderRepo.findById(orderId);
+    if (!order?.exchangeOrderId || !deps.gateway.getOrderResult) {
+      throw new Error(
+        `startup aborted — pending order ${String(orderId)} lacks exact terminal proof`,
+      );
+    }
+    const exact = await deps.gateway.getOrderResult(order.exchangeOrderId);
+    if (!exact.ok)
+      throw new Error(
+        `startup aborted — exact lookup unreliable for pending order ${String(orderId)}`,
+      );
+    if (exact.data === null) {
+      throw new Error(
+        `startup aborted — pending order ${String(orderId)} lacks exact terminal proof`,
+      );
+    }
+    const verdict = await applyOrderVerdict({
+      orderRepo: deps.orderRepo,
+      fillRepo: deps.fillRepo,
+      log,
+      orderId,
+      exchange: exact.data,
+      publish: false,
+      fillCompletionTolerance: deps.fillCompletionTolerance,
+    });
+    if (verdict.status === "unresolved")
+      throw new Error(`startup aborted — pending order ${String(orderId)} unresolved`);
+  }
 
   rebuildLegStatesFromLedger(deps, result, log);
 
@@ -1118,7 +1154,7 @@ function buildOrphanGroupKey(fill: ExchangeFill): string {
     return `exchange:${orderId}`;
   }
 
-  const clientOrderId = fill.clientOrderId.trim();
+  const clientOrderId = fill.clientOrderId?.trim() ?? "";
   if (clientOrderId.length > 0) {
     return `client:${clientOrderId}`;
   }
@@ -1140,7 +1176,7 @@ function resolveSyntheticExchangeOrderId(fill: ExchangeFill): string | null {
 }
 
 function resolveSyntheticClientOrderId(fill: ExchangeFill, orphanGroupKey: string): ClientOrderId {
-  const clientOrderId = fill.clientOrderId.trim();
+  const clientOrderId = fill.clientOrderId?.trim() ?? "";
   if (clientOrderId.length > 0) {
     return clientOrderId as ClientOrderId;
   }

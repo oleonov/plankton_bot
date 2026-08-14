@@ -174,4 +174,18 @@ describe("executeWithRetry", () => {
     expect(calls).toBe(1);
     expect(slept).toEqual([]);
   });
+
+  it("keeps exact-order retries separately labeled", async () => {
+    const { config, retried } = makeConfig({ retries: 1 });
+    const exactConfig = { ...config, source: "exact_order" as const };
+    const result = await executeWithRetry(
+      async () => {
+        throw statusError(503);
+      },
+      classifyFetchError,
+      exactConfig,
+    );
+    expect(result).toEqual({ ok: false, reason: "server", attempts: 2 });
+    expect(retried).toEqual(["server"]);
+  });
 });

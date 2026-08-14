@@ -81,7 +81,7 @@ function sameAddress(left: unknown, right: string): boolean {
 function buildExchangeFill(input: {
   fillId: string;
   orderId: string;
-  clientOrderId?: string;
+  clientOrderId?: string | null;
   tokenId: string;
   side: string;
   price: unknown;
@@ -106,7 +106,7 @@ function buildExchangeFill(input: {
   return {
     fillId: input.fillId,
     orderId: input.orderId,
-    clientOrderId: input.clientOrderId ?? "",
+    clientOrderId: nonEmptyText(input.clientOrderId),
     tokenId: createTokenId(input.tokenId),
     side,
     price,
@@ -145,9 +145,54 @@ export function mapExchangeOrderStatus(sdkStatus: string): ExchangeOrder["status
       return "CANCELLED";
     case "EXPIRED":
       return "EXPIRED";
+    case "INVALID":
+    case "REJECTED":
+      return "REJECTED";
     default:
       return "OPEN";
   }
+}
+
+/** Strict status mapper for a single exact-order lookup. */
+function mapExactExchangeOrderStatus(sdkStatus: unknown): ExchangeOrder["status"] {
+  if (typeof sdkStatus !== "string") throw new Error("exact order has no status");
+  const normalized = sdkStatus
+    .trim()
+    .toUpperCase()
+    .replace(/^ORDER_STATUS_/, "");
+  switch (normalized) {
+    case "LIVE":
+    case "OPEN":
+      return "OPEN";
+    case "MATCHED":
+    case "FILLED":
+      return "FILLED";
+    case "PARTIALLY_FILLED":
+      return "PARTIALLY_FILLED";
+    case "CANCELLED":
+    case "CANCELED":
+    case "CANCELED_MARKET_RESOLVED":
+      return "CANCELLED";
+    case "EXPIRED":
+      return "EXPIRED";
+    case "INVALID":
+      return "REJECTED";
+    default:
+      throw new Error(`unknown exact order status: "${sdkStatus}"`);
+  }
+}
+
+function nonEmptyText(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function exactFiniteNonNegative(raw: Record<string, unknown>, names: readonly string[]): number {
+  const value = names.map((name) => raw[name]).find((candidate) => candidate != null);
+  const parsed = typeof value === "string" && value.trim().length === 0 ? NaN : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`exact order has invalid ${names[0]}`);
+  }
+  return parsed;
 }
 
 export function mapOpenOrder(raw: Record<string, unknown>): ExchangeOrder {
@@ -156,7 +201,7 @@ export function mapOpenOrder(raw: Record<string, unknown>): ExchangeOrder {
 
   return {
     orderId: String(raw.id ?? ""),
-    clientOrderId: String(raw.client_order_id ?? raw.id ?? ""),
+    clientOrderId: nonEmptyText(raw.client_order_id),
     tokenId: createTokenId(String(raw.asset_id ?? "")),
     side: toDomainSide(String(raw.side ?? "BUY")),
     price: Number(raw.price ?? 0),
@@ -168,13 +213,55 @@ export function mapOpenOrder(raw: Record<string, unknown>): ExchangeOrder {
   };
 }
 
+/**
+ * Maps the SDK's `getOrder(hash)` response. Unlike open-list mapping this is
+ * proof-bearing: every identity, number, and status is validated fail-closed.
+ */
+export function mapExactOrder(
+  raw: Record<string, unknown>,
+  requestedOrderId: string,
+): ExchangeOrder {
+  const requestedId = nonEmptyText(requestedOrderId);
+  const orderId = nonEmptyText(raw.id ?? raw.order_id ?? raw.orderID);
+  if (!requestedId || orderId !== requestedId) {
+    throw new Error("exact order ID does not echo requested order ID");
+  }
+
+  const tokenId = nonEmptyText(raw.asset_id);
+  if (!tokenId) throw new Error("exact order has no asset ID");
+  const sideRaw = nonEmptyText(raw.side);
+  if (!sideRaw) throw new Error("exact order has no side");
+
+  const sizeTotal = exactFiniteNonNegative(raw, ["original_size", "size"]);
+  const sizeFilled = exactFiniteNonNegative(raw, ["size_matched"]);
+  if (sizeFilled > sizeTotal) throw new Error("exact order matched size exceeds original size");
+  const price = exactFiniteNonNegative(raw, ["price"]);
+  const status = mapExactExchangeOrderStatus(raw.status);
+  if (status === "FILLED" && sizeFilled < sizeTotal) {
+    throw new Error("exact order filled status has unmatched size");
+  }
+
+  return {
+    orderId,
+    clientOrderId: nonEmptyText(raw.client_order_id),
+    tokenId: createTokenId(tokenId),
+    side: toDomainSide(sideRaw),
+    price,
+    sizeTotal,
+    sizeFilled,
+    sizeRemaining: sizeTotal - sizeFilled,
+    status,
+    createdAt: toUnixMs(raw.created_at),
+  };
+}
+
 // ─── Fill / Trade mapping ────────────────────────────────────────────────
 
 export function mapTrade(raw: Record<string, unknown>): ExchangeFill {
   return buildExchangeFill({
     fillId: String(raw.id ?? ""),
     orderId: String(raw.taker_order_id ?? ""),
-    clientOrderId: String(raw.client_order_id ?? ""),
+    clientOrderId: nonEmptyText(raw.client_order_id),
     tokenId: String(raw.asset_id ?? ""),
     side: String(raw.side ?? "BUY"),
     price: raw.price,

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createOrderId, createConditionId } from "@krabs/domain";
+import { createTokenId, createOrderId, createConditionId, createFillId } from "@krabs/domain";
 import type {
   ExchangeGateway,
   ExchangeOrder,
@@ -100,6 +100,7 @@ function createMarketRepo(): MarketRepository {
 interface GatewayOverrides {
   openOrders?: ExchangeOrder[];
   openOrdersResult?: FetchResult<ExchangeOrder[]>;
+  exactResult?: FetchResult<ExchangeOrder | null>;
   cancelSuccess?: boolean;
 }
 
@@ -112,6 +113,9 @@ function createGateway(o: GatewayOverrides = {}): ExchangeGateway {
     gw.getOpenOrdersResult = vi.fn().mockResolvedValue(o.openOrdersResult);
   } else if (o.openOrders !== undefined) {
     gw.getOpenOrdersResult = vi.fn().mockResolvedValue({ ok: true, data: o.openOrders });
+  }
+  if (o.exactResult !== undefined) {
+    gw.getOrderResult = vi.fn().mockResolvedValue(o.exactResult);
   }
   return gw as unknown as ExchangeGateway;
 }
@@ -199,6 +203,31 @@ describe("reconcileOrders — Fix 2: suspicious empty snapshot", () => {
     expect(orderRepo.updateStatus).not.toHaveBeenCalled();
   });
 
+  it("withholds the default suspicious-empty snapshot but still exact-resolves mature orders", async () => {
+    const orderRepo = createOrderRepo();
+    const orders = localOrders(3).map((order) => ({ ...order, status: "pending" as const }));
+    orderRepo.findOpen = vi.fn().mockReturnValue(orders);
+    orderRepo.findById = vi
+      .fn()
+      .mockImplementation((orderId) => orders.find((order) => order.orderId === orderId) ?? null);
+    const gateway = createGateway({ openOrders: [] });
+    gateway.getOrderResult = vi.fn().mockImplementation(async (exchangeOrderId: string) => ({
+      ok: true,
+      data: makeExchangeOrder({ orderId: exchangeOrderId, status: "OPEN" }),
+    }));
+
+    const result = await reconcileOrders(baseDeps(gateway, orderRepo));
+
+    expect(result.skipReason).toBe("suspicious_empty");
+    expect(result.exchangeOpenOrders).toEqual([]);
+    expect(result.unresolvedMissingOnExchange).toBe(3);
+    expect(gateway.getOrderResult).toHaveBeenCalledTimes(3);
+    for (const order of orders) {
+      expect(gateway.getOrderResult).toHaveBeenCalledWith(order.exchangeOrderId);
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(order.orderId, "open");
+    }
+  });
+
   it("reports unresolved orders when local open is below the suspicious-empty threshold", async () => {
     const orderRepo = createOrderRepo();
     orderRepo.findOpen = vi.fn().mockReturnValue(localOrders(2));
@@ -264,6 +293,95 @@ describe("reconcileOrders — Fix 2: suspicious empty snapshot", () => {
 });
 
 describe("reconcileOrders — missing-order evidence", () => {
+  it("exact-resolves a mature missing order but leaves null, errors, and coverage gaps fenced", async () => {
+    const orderRepo = createOrderRepo();
+    const order = makeLocalOrder({ exchangeOrderId: "ex-mature" });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    orderRepo.findById = vi.fn().mockReturnValue(order);
+    const fillRepo = createFillRepo();
+
+    for (const exactResult of [
+      { ok: true as const, data: null },
+      { ok: false as const, reason: "server" as const, attempts: 1 },
+      {
+        ok: true as const,
+        data: makeExchangeOrder({ orderId: "ex-mature", status: "CANCELLED", sizeFilled: 1 }),
+      },
+    ]) {
+      const gateway = createGateway({ openOrders: [], exactResult });
+      await reconcileOrders({
+        ...baseDeps(gateway, orderRepo),
+        fillRepo,
+        suspiciousEmptyThreshold: 0,
+        consecutiveMissThreshold: 1,
+      });
+    }
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+  });
+
+  it("promotes a mature missing order from exact working evidence", async () => {
+    const orderRepo = createOrderRepo();
+    const order = makeLocalOrder({ exchangeOrderId: "ex-mature", status: "pending" });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    orderRepo.findById = vi.fn().mockReturnValue(order);
+    const gateway = createGateway({
+      openOrders: [],
+      exactResult: { ok: true, data: makeExchangeOrder({ orderId: "ex-mature", status: "OPEN" }) },
+    });
+
+    await reconcileOrders({
+      ...baseDeps(gateway, orderRepo),
+      suspiciousEmptyThreshold: 0,
+      consecutiveMissThreshold: 1,
+    });
+
+    expect(gateway.getOrderResult).toHaveBeenCalledWith("ex-mature");
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(order.orderId, "open");
+  });
+
+  it("forwards fillCompletionTolerance=0 through mature exact resolution", async () => {
+    const orderRepo = createOrderRepo();
+    const order = makeLocalOrder({ exchangeOrderId: "ex-mature", status: "open" });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    orderRepo.findById = vi.fn().mockReturnValue(order);
+    const fillRepo = createFillRepo();
+    fillRepo.findByOrderId = vi
+      .fn()
+      .mockReturnValue([{ side: "buy", price: 0.5, size: 9.97, liquidityRole: "maker" }]);
+    const gateway = createGateway({
+      openOrders: [],
+      exactResult: {
+        ok: true,
+        data: makeExchangeOrder({
+          orderId: "ex-mature",
+          status: "CANCELLED",
+          sizeFilled: 9.97,
+        }),
+      },
+    });
+
+    await reconcileOrders({
+      ...baseDeps(gateway, orderRepo),
+      fillRepo,
+      suspiciousEmptyThreshold: 0,
+      consecutiveMissThreshold: 1,
+      fillCompletionTolerance: 0,
+    });
+
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+      order.orderId,
+      "cancelled",
+      undefined,
+      "exchange-exact-cancelled",
+      {
+        cancelAgeMs: null,
+        cancelAgeBucket: null,
+        fillProgressShares: 9.97,
+        marketHorizon: null,
+      },
+    );
+  });
+
   it("reports unresolved evidence only after the consecutive-miss threshold", async () => {
     const orderRepo = createOrderRepo();
     const order = makeLocalOrder({ exchangeOrderId: "ex-miss" });
@@ -383,11 +501,22 @@ describe("reconcileStaleExchangeOrders — Fix 5: cascade guard", () => {
     const orderRepo = createOrderRepo();
     const cancelledLocal = makeLocalOrder({ exchangeOrderId: "ex-stale", status: "cancelled" });
     orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
-    const gateway = createGateway({ cancelSuccess: true });
+    orderRepo.findById = vi.fn().mockReturnValue(cancelledLocal);
+    const gateway = createGateway({
+      cancelSuccess: true,
+      exactResult: {
+        ok: true,
+        data: makeExchangeOrder({
+          orderId: "ex-stale",
+          status: "CANCELLED",
+          sizeFilled: 0,
+        }),
+      },
+    });
     return { orderRepo, gateway, candidate: makeExchangeOrder({ orderId: "ex-stale" }) };
   }
 
-  it("executes a real cancel on a reliable snapshot", async () => {
+  it("counts a reliable cancel only after exact covered terminal proof", async () => {
     const { orderRepo, gateway, candidate } = staleSetup();
 
     const result = await reconcileStaleExchangeOrders({
@@ -403,6 +532,137 @@ describe("reconcileStaleExchangeOrders — Fix 5: cascade guard", () => {
     expect(result.cascadeCancelled).toBe(1);
     expect(result.staleCancelled).toBe(1);
     expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "ex-stale" });
+    expect(gateway.getOrderResult).toHaveBeenCalledWith("ex-stale");
+  });
+
+  it("retains cancel-acknowledged stale rows without exact covered terminal proof", async () => {
+    const cases: Array<{
+      label: string;
+      exactResult: FetchResult<ExchangeOrder | null>;
+    }> = [
+      {
+        label: "still open",
+        exactResult: {
+          ok: true,
+          data: makeExchangeOrder({ orderId: "ex-stale", status: "OPEN" }),
+        },
+      },
+      { label: "not found", exactResult: { ok: true, data: null } },
+      {
+        label: "unreliable",
+        exactResult: { ok: false, reason: "server", attempts: 4 },
+      },
+      {
+        label: "fill coverage gap",
+        exactResult: {
+          ok: true,
+          data: makeExchangeOrder({
+            orderId: "ex-stale",
+            status: "CANCELLED",
+            sizeFilled: 1,
+          }),
+        },
+      },
+    ];
+
+    for (const { label, exactResult } of cases) {
+      const orderRepo = createOrderRepo();
+      const cancelledLocal = makeLocalOrder({
+        exchangeOrderId: "ex-stale",
+        status: "cancelled",
+      });
+      orderRepo.findOpen = vi.fn().mockReturnValue([]);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
+      orderRepo.findById = vi.fn().mockReturnValue(cancelledLocal);
+      const candidate = makeExchangeOrder({ orderId: "ex-stale", side: "sell" });
+      const gateway = createGateway({
+        openOrders: [candidate],
+        cancelSuccess: true,
+        exactResult,
+      });
+
+      const result = await reconcileOrders(baseDeps(gateway, orderRepo));
+
+      expect(result.exchangeOpenOrders, label).toEqual([candidate]);
+      expect(result.staleCancelled, label).toBe(0);
+      expect(result.cascadeCancelled, label).toBe(0);
+      expect(gateway.cancelOrder, label).toHaveBeenCalledWith({ orderId: "ex-stale" });
+      expect(gateway.getOrderResult, label).toHaveBeenCalledWith("ex-stale");
+    }
+  });
+
+  it("removes a stale row from the open snapshot after exact covered terminal proof", async () => {
+    const orderRepo = createOrderRepo();
+    const cancelledLocal = makeLocalOrder({ exchangeOrderId: "ex-stale", status: "cancelled" });
+    orderRepo.findOpen = vi.fn().mockReturnValue([]);
+    orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
+    orderRepo.findById = vi.fn().mockReturnValue(cancelledLocal);
+    const fillRepo = createFillRepo();
+    fillRepo.findByOrderId = vi.fn().mockReturnValue([
+      {
+        fillId: createFillId("fill-stale-covered"),
+        orderId: cancelledLocal.orderId,
+        tokenId: cancelledLocal.tokenId,
+        conditionId: cancelledLocal.conditionId,
+        side: "buy",
+        price: 0.5,
+        size: 1,
+        sizeUsdc: 0.5,
+        liquidityRole: "maker",
+        fee: 0,
+        feeRateBps: 0,
+        filledAt: OLD,
+      },
+    ]);
+    const gateway = createGateway({
+      openOrders: [makeExchangeOrder({ orderId: "ex-stale", side: "sell" })],
+      cancelSuccess: true,
+      exactResult: {
+        ok: true,
+        data: makeExchangeOrder({
+          orderId: "ex-stale",
+          status: "CANCELLED",
+          sizeFilled: 1,
+        }),
+      },
+    });
+
+    const result = await reconcileOrders({ ...baseDeps(gateway, orderRepo), fillRepo });
+
+    expect(result.exchangeOpenOrders).toEqual([]);
+    expect(result.staleCancelled).toBe(1);
+    expect(result.cascadeCancelled).toBe(1);
+  });
+
+  it("forwards fillCompletionTolerance=0 through stale exact coverage checks", async () => {
+    const orderRepo = createOrderRepo();
+    const cancelledLocal = makeLocalOrder({ exchangeOrderId: "ex-stale", status: "cancelled" });
+    orderRepo.findOpen = vi.fn().mockReturnValue([]);
+    orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
+    orderRepo.findById = vi.fn().mockReturnValue(cancelledLocal);
+    const fillRepo = createFillRepo();
+    fillRepo.findByOrderId = vi
+      .fn()
+      .mockReturnValue([{ side: "buy", price: 0.5, size: 9.97, liquidityRole: "maker" }]);
+    const candidate = makeExchangeOrder({ orderId: "ex-stale", side: "sell" });
+    const gateway = createGateway({
+      openOrders: [candidate],
+      cancelSuccess: true,
+      exactResult: {
+        ok: true,
+        data: makeExchangeOrder({ orderId: "ex-stale", status: "FILLED", sizeFilled: 10 }),
+      },
+    });
+
+    const result = await reconcileOrders({
+      ...baseDeps(gateway, orderRepo),
+      fillRepo,
+      fillCompletionTolerance: 0,
+    });
+
+    expect(result.exchangeOpenOrders).toEqual([candidate]);
+    expect(result.staleCancelled).toBe(0);
+    expect(result.cascadeCancelled).toBe(0);
   });
 
   it("skips the cascade and does NOT cancel on an unreliable snapshot", async () => {

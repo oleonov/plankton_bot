@@ -2354,11 +2354,11 @@ function recoveryCandidateSignature(state: LadderState): string {
 
 // A terminal PL SELL row is "retry-skippable" only when it can never become a
 // live sell again and provably took no shares: a ProfileLadder SELL in a terminal
-// cancelled/rejected state with a fill progress of exactly null or 0. Such a row
+// cancelled/rejected state with a fill progress of exactly 0. Such a row
 // can be stepped over with a fresh deterministic clientOrderId without risking a
 // duplicate live SELL or an oversell — even if it touched the exchange (has an
 // exchange order id). The fill check is fail-closed: any non-zero, negative, or
-// NaN fill progress is treated as "may have moved shares" and keeps the slot
+// null, non-zero, negative, or NaN fill progress is treated as "may have moved shares" and keeps the slot
 // blocked, as does anything open/pending/partially-filled, anything filled, and
 // any non-ProfileLadder or BUY row.
 function isRetrySkippableTerminalPlSellOrder(order: Order): boolean {
@@ -2367,7 +2367,7 @@ function isRetrySkippableTerminalPlSellOrder(order: Order): boolean {
     return false;
   }
   const fills = order.fillProgressShares;
-  return fills == null || fills === 0;
+  return fills === 0;
 }
 
 function resolvePostRefillFollowThroughConfig(

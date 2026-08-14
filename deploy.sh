@@ -5,7 +5,7 @@ readonly DEPLOY_SECONDS=2640
 readonly REMOTE_SECONDS=2580
 readonly SERVER_USER=root SERVER_HOST=your.server.ip SERVER_PATH=/opt/krabs
 readonly IMAGE=ghcr.io/oleonov/krabs
-readonly RETAINED=(deploy.sh scripts/krabs-rollback-guard.sh apps/api/src/routes/actions.ts packages/db/src/repositories/operator-command-repository.ts scripts/__tests__/krabs-rollback-guard.test.ts apps/api/src/__tests__/api.test.ts packages/db/src/__tests__/operator-repository.test.ts CHANGELOG.md docs/ROADMAP.md docs/plans/2026-08-11-swallowed-fill-recovery-and-multirow-token.md docs/runbooks/live_lite_rollout.md)
+readonly RETAINED=(deploy.sh scripts/krabs-rollback-guard.sh scripts/krabs-order-status-migration-gate.sh apps/api/src/routes/actions.ts packages/db/src/repositories/operator-command-repository.ts scripts/__tests__/krabs-rollback-guard.test.ts apps/api/src/__tests__/api.test.ts packages/db/src/__tests__/operator-repository.test.ts CHANGELOG.md docs/ROADMAP.md docs/plans/2026-08-11-swallowed-fill-recovery-and-multirow-token.md docs/runbooks/live_lite_rollout.md)
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
@@ -143,6 +143,7 @@ deploy_paths() {
     DOCKER=/usr/bin/docker; FLOCK=/usr/bin/flock; TIMEOUT=/usr/bin/timeout
   fi
   RECOVERY="$CONFIG_DIR/deploy-recovery.json"; META="$CONFIG_DIR/deploy-meta.json"; MARKER="$CONFIG_DIR/deploy-in-progress.json"
+  ORDER_STATUS_GATE="${KRABS_ORDER_STATUS_GATE:-scripts/krabs-order-status-migration-gate.sh}"; ORDER_STATUS_GATE_SHA256="${KRABS_ORDER_STATUS_GATE_SHA256:-$(sha256sum "$ORDER_STATUS_GATE" | awk '{print $1}')}"; ORDER_STATUS_SNAPSHOT="$CONFIG_DIR/order-status-migration-101-${KRABS_REMOTE_SHA:-$(git rev-parse HEAD)}.json"
   ROLLBACK_OPERATION_LOCK="$(dirname "${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}")/operation.lock"
   SENTINEL="$CONFIG_DIR/deploy-failstop-requested"; FAILSTOP_LOCK=/var/lock/krabs-deploy-failstop.lock
 }
@@ -159,9 +160,10 @@ publish_image() {
 }
 
 stage_remote_controller() {
-  local mode="$1" key="$2" full="$3" digest="$4" env_hash="$5" root stage guard compose env runtime_env ssh_cmd
+  local mode="$1" key="$2" full="$3" digest="$4" env_hash="$5" root stage guard order_gate compose env runtime_env ssh_cmd order_gate_hash
   root="$(remote_root)"; ssh_cmd="${KRABS_DEPLOY_SSH:-ssh}"; stage="${root}/config/deploy-controller-${full}.sh"
   guard="${root}/config/krabs-rollback-guard-${full}.sh"
+  order_gate="${root}/config/krabs-order-status-migration-gate-${full}.sh"; order_gate_hash="$(sha256sum scripts/krabs-order-status-migration-gate.sh | awk '{print $1}')"
   compose="${root}/docker-compose-deploy-${full}.yml"; env="${root}/config/deploy-env-${full}"; runtime_env="${root}/config/deploy-runtime-env-${full}-${env_hash}"
   "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
     "test -f '${runtime_env}' && test \"\$(stat -c '%U %G %a' '${runtime_env}')\" = 'root root 600' && test \"\$(sha256sum '${runtime_env}' | awk '{print \$1}')\" = '${env_hash}'"
@@ -169,12 +171,14 @@ stage_remote_controller() {
     "install -d -m 711 '${root}/config' && cat > '${stage}.tmp' && chmod 700 '${stage}.tmp' && mv -f '${stage}.tmp' '${stage}'" < "$0"
   "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
     "cat > '${guard}.tmp' && chmod 700 '${guard}.tmp' && mv -f '${guard}.tmp' '${guard}'" < scripts/krabs-rollback-guard.sh
+  "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
+    "cat > '${order_gate}.tmp' && chmod 700 '${order_gate}.tmp' && mv -f '${order_gate}.tmp' '${order_gate}' && test \"\$(sha256sum '${order_gate}' | awk '{print \$1}')\" = '${order_gate_hash}'" < scripts/krabs-order-status-migration-gate.sh
   sed -e "s|image: ${IMAGE}:latest|image: \${KRABS_IMAGE:?}|g" -e "s|env_file: .env.production|env_file: ${runtime_env}|g" docker-compose.yml | "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
     "cat > '${compose}.tmp' && chmod 600 '${compose}.tmp' && mv -f '${compose}.tmp' '${compose}'"
   printf 'KRABS_IMAGE=%s:krabs-%s\n' "$IMAGE" "$full" | "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
     "cat > '${env}.tmp' && chmod 600 '${env}.tmp' && mv -f '${env}.tmp' '${env}'"
   "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
-    "cd '${root}' && grep -Fc 'env_file: ${runtime_env}' '${compose}' | grep -qx 3 && exec /usr/bin/timeout --signal=TERM --kill-after=60s ${REMOTE_SECONDS}s env KRABS_REMOTE_CONTROLLER=1 KRABS_REMOTE_SHA='${full}' KRABS_REMOTE_DIGEST='${digest}' KRABS_REMOTE_GUARD='${guard}' KRABS_REMOTE_COMPOSE='${compose}' KRABS_REMOTE_ENV='${env}' KRABS_RUNTIME_ENV_PATH='${runtime_env}' KRABS_RUNTIME_ENV_SHA256='${env_hash}' '${stage}' --internal '${mode}' '${key}'"
+    "cd '${root}' && grep -Fc 'env_file: ${runtime_env}' '${compose}' | grep -qx 3 && exec /usr/bin/timeout --signal=TERM --kill-after=60s ${REMOTE_SECONDS}s env KRABS_REMOTE_CONTROLLER=1 KRABS_REMOTE_SHA='${full}' KRABS_REMOTE_DIGEST='${digest}' KRABS_REMOTE_GUARD='${guard}' KRABS_ORDER_STATUS_GATE='${order_gate}' KRABS_ORDER_STATUS_GATE_SHA256='${order_gate_hash}' KRABS_REMOTE_COMPOSE='${compose}' KRABS_REMOTE_ENV='${env}' KRABS_RUNTIME_ENV_PATH='${runtime_env}' KRABS_RUNTIME_ENV_SHA256='${env_hash}' '${stage}' --internal '${mode}' '${key}'"
 }
 
 preflight_recovery_env() {
@@ -208,6 +212,31 @@ stage_runtime_env() {
 stage_and_publish() { stage_runtime_env "$1" "$2" "$3"; publish_image "$1"; }
 
 recovery() { atomic "$RECOVERY" "$1"; }
+migration_gate() {
+  local mode="$1" full="$2" proof
+  [[ "$(sha256sum "$ORDER_STATUS_GATE" | awk '{print $1}')" == "$ORDER_STATUS_GATE_SHA256" ]] || die 'staged order-status migration gate hash is invalid'
+  proof="$("$ORDER_STATUS_GATE" "$mode" "$full" "$ORDER_STATUS_SNAPSHOT")" || die "order-status migration gate ${mode} failed"
+  recovery "$(python3 - "$RECOVERY" "$mode" "$ORDER_STATUS_SNAPSHOT" "$proof" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); proof=json.loads(sys.argv[4]); d['migrationGate']={'mode':sys.argv[2],'snapshotPath':sys.argv[3],**proof}; print(json.dumps(d,separators=(',',':')))
+PY
+)"
+}
+migration_receipt() { python3 - "$RECOVERY" "$ORDER_STATUS_SNAPSHOT" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); mode=d['deliveryMode']; gate=d.get('migrationGate')
+if mode == 'rollback':
+    assert gate is None or isinstance(gate,dict)
+    print(json.dumps(gate or {},separators=(',',':')))
+else:
+    assert mode == 'release' and isinstance(gate,dict)
+    assert gate.get('mode') == 'post' and gate.get('snapshotPath') == sys.argv[2]
+    assert isinstance(gate.get('candidateCount'),int) and gate['candidateCount'] >= 0
+    assert all(isinstance(gate.get(k),str) and len(gate[k]) == 64 for k in ('candidateHash','rowsHash'))
+    assert isinstance(gate.get('markerWasPresent'),bool)
+    print(json.dumps(gate,separators=(',',':')))
+PY
+}
 advance_recovery() { recovery "$(python3 - "$RECOVERY" "$1" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1])); d['phase']=sys.argv[2]; print(json.dumps(d,separators=(',',':')))
@@ -265,8 +294,18 @@ ordinary_preflight() {
 }
 rollback_preflight() { [[ -z "$(git status --porcelain)" && "$(git branch --show-current)" == master && "$(git rev-parse HEAD)" == "$(git rev-parse origin/master)" ]] || die 'rollback requires tracked, indexed, and untracked clean master at origin'; ordinary_preflight; pnpm run typecheck; pnpm run test; pnpm run lint; }
 api_healthy() {
-  local api; api="$(service_ids krabs-api)"; [[ -n "$api" ]] || return 1
+  local api running revision
+  api="$(service_ids krabs-api)"; [[ -n "$api" && "$api" != *$'\n'* ]] || return 1
+  read -r running revision < <(run "$DOCKER" inspect --format '{{.State.Running}} {{index .Config.Labels "org.opencontainers.image.revision"}}' "$api") || return 1
+  [[ "$running" == true && "$revision" == "${KRABS_REMOTE_SHA:?}" ]] || return 1
   if test_mode; then run "$DOCKER" health "${KRABS_REMOTE_SHA:?}"; else [[ "$(run "$DOCKER" inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$api")" == healthy ]]; fi
+}
+start_and_prove_target_api() {
+  local deadline interval
+  compose up -d --no-deps --pull never krabs-api
+  deadline=$((SECONDS + ${KRABS_DEPLOY_HEALTH_SECONDS:-90})); interval="${KRABS_DEPLOY_HEALTH_INTERVAL_SECONDS:-5}"
+  while (( SECONDS <= deadline )); do api_healthy && return 0; sleep "$interval"; done
+  return 1
 }
 
 fence_runtime_network() {
@@ -298,6 +337,9 @@ import json,os,sys
 d=json.load(open(sys.argv[1])); target=sys.argv[3]
 required={'schemaVersion','recoveryStateId','phase','deliveryMode','targetSha','digest','imageId','prePaused','previousVersion','baselineCommandHighWater','finalCommandHighWater','targetRuntimeId','targetManagerId','targetNetworkIds','candidateHash','receipt','runtimeEnvPath','runtimeEnvSha256'}
 assert required <= set(d) and d.get('schemaVersion')==1 and d.get('targetSha')==target
+assert d['deliveryMode'] in ('release','rollback')
+if d['deliveryMode']=='release': assert isinstance(d.get('migrationGate'),dict)
+elif 'migrationGate' in d: assert isinstance(d['migrationGate'],dict)
 assert isinstance(d['previousVersion'],int) and d['previousVersion'] >= 0
 assert isinstance(d['targetNetworkIds'],list) and len(d['targetNetworkIds']) <= 1
 phase=d['phase']; meta=None
@@ -321,7 +363,7 @@ elif phase == 'target_stopped_rearbitrate':
 elif phase == 'arbitration_boundary':
  assert not d['receipt'] and (meta is None or meta.get('deployVersion')==d['previousVersion'])
  print('arbitration_boundary')
-elif phase in ('baseline_captured','fenced','cutover_paused'): print('early_recovery')
+elif phase in ('baseline_captured','fenced','cutover_paused','migration_gate_pre'): print('early_recovery')
 elif phase in ('rollback_bound','rollback_bound_owner_dead','prepared','target_started'): print(phase)
 else: raise SystemExit(2)
 PY
@@ -356,15 +398,17 @@ PY
     census="$(run "$DOCKER" inspect --format '{{json .NetworkSettings.Networks}}' "$runtime")"
   fi
   printf '%s' "$census" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,dict) and list(d)==[sys.argv[1]]' "$network" || die 're-entry runtime network is not the saved default'
+  start_and_prove_target_api || die 're-entry target API health was not proven; deploy remains fail-stopped'
   KRABS_RUNTIME_ENV_PATH="$(recovery_field runtimeEnvPath)" KRABS_RUNTIME_ENV_SHA256="$(recovery_field runtimeEnvSha256)" "$GUARD" deploy-cutoff-probe "$state_id" || die 're-entry bound runtime environment is invalid'
+  [[ "$(recovery_field deliveryMode)" != release ]] || migration_gate post "$full"
   run "$DOCKER" start "$runtime"; run "$DOCKER" start "$manager"
   arbitration="$("$GUARD" deploy-arbitrate "$state_id" "$pre" "$baseline")" || die 're-entry final command arbitration was not proven'
   effective="$(printf '%s' "$arbitration" | json_field effectivePaused)" || die 're-entry command receipt is malformed'
-  recovery "$(python3 - "$RECOVERY" "$arbitration" <<'PY'
+  recovery "$(python3 - "$RECOVERY" "$arbitration" "$(migration_receipt)" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1])); a=json.loads(sys.argv[2]); r={'baselineCapturedUnderLock':d['baselineCapturedUnderLock'],'prePaused':d['prePaused'],'preRunId':d['preRunId'],'preInstanceId':d['preInstanceId'],'previousVersion':d['previousVersion'],'deployVersion':d['previousVersion']+1,'sha':d['targetSha'],'digest':d['digest'],'recoveryStateId':d['recoveryStateId'],**a}; d.update(phase='commit_ready',finalCommandHighWater=a['finalOperatorCommandHighWater'],receipt=json.dumps(r,separators=(',',':'))); print(json.dumps(d,separators=(',',':')))
+d=json.load(open(sys.argv[1])); a=json.loads(sys.argv[2]); r={'baselineCapturedUnderLock':d['baselineCapturedUnderLock'],'prePaused':d['prePaused'],'preRunId':d['preRunId'],'preInstanceId':d['preInstanceId'],'previousVersion':d['previousVersion'],'deployVersion':d['previousVersion']+1,'sha':d['targetSha'],'digest':d['digest'],'recoveryStateId':d['recoveryStateId'],'migration101':json.loads(sys.argv[3]),**a}; d.update(phase='commit_ready',finalCommandHighWater=a['finalOperatorCommandHighWater'],receipt=json.dumps(r,separators=(',',':'))); print(json.dumps(d,separators=(',',':')))
 PY
-)"
+ )"
   printf '%s\n' "$effective"
 }
 
@@ -472,7 +516,7 @@ PY
     recovery "$(python3 - "$state_id" "$mode" "$full" "$digest" "$image_id" "$pre" "$version" "$$" "$(owner_ticks $$)" "$(worker_pgid)" "$baseline" "$KRABS_RUNTIME_ENV_PATH" "$KRABS_RUNTIME_ENV_SHA256" <<'PY'
 import json,sys
 baseline=json.loads(sys.argv[11])
-print(json.dumps({'schemaVersion':1,'recoveryStateId':sys.argv[1],'deliveryMode':sys.argv[2],'phase':'rollback_bound' if sys.argv[2]=='rollback' else 'baseline_captured','targetSha':sys.argv[3],'digest':sys.argv[4],'imageId':sys.argv[5],'prePaused':sys.argv[6]=='true','previousVersion':int(sys.argv[7]),'baselineCapturedUnderLock':True,'baselineCommandHighWater':baseline['baselineCommandHighWater'],'finalCommandHighWater':0,'preRunId':baseline['preRunId'],'preInstanceId':baseline['preInstanceId'],'preRuntimeId':baseline['preRuntimeId'],'preApiId':baseline['preApiId'],'preManagerId':baseline['preManagerId'],'controllerPid':int(sys.argv[8]),'controllerStartTicks':sys.argv[9],'workerPgid':int(sys.argv[10]),'tradingCutoverInvoked':False,'targetRuntimeId':'','targetManagerId':'','targetNetworkIds':[],'restartPolicies':{'runtime':'unless-stopped','manager':'unless-stopped'},'candidateHash':'','receipt':'','runtimeEnvPath':sys.argv[12],'runtimeEnvSha256':sys.argv[13]},separators=(',',':')))
+print(json.dumps({'schemaVersion':1,'recoveryStateId':sys.argv[1],'deliveryMode':sys.argv[2],'phase':'rollback_bound' if sys.argv[2]=='rollback' else 'baseline_captured','targetSha':sys.argv[3],'digest':sys.argv[4],'imageId':sys.argv[5],'prePaused':sys.argv[6]=='true','previousVersion':int(sys.argv[7]),'baselineCapturedUnderLock':True,'baselineCommandHighWater':baseline['baselineCommandHighWater'],'finalCommandHighWater':0,'preRunId':baseline['preRunId'],'preInstanceId':baseline['preInstanceId'],'preRuntimeId':baseline['preRuntimeId'],'preApiId':baseline['preApiId'],'preManagerId':baseline['preManagerId'],'controllerPid':int(sys.argv[8]),'controllerStartTicks':sys.argv[9],'workerPgid':int(sys.argv[10]),'tradingCutoverInvoked':False,'targetRuntimeId':'','targetManagerId':'','targetNetworkIds':[],'restartPolicies':{'runtime':'unless-stopped','manager':'unless-stopped'},'candidateHash':'','receipt':'','migrationGate':{},'runtimeEnvPath':sys.argv[12],'runtimeEnvSha256':sys.argv[13]},separators=(',',':')))
 PY
 )"
     barrier baseline-pre-boundary
@@ -505,6 +549,12 @@ import json,sys
 d=json.load(open(sys.argv[1])); c=json.loads(sys.argv[2]); d.update(phase='cutover_paused',baselineCommandHighWater=c['cutoverCommandHighWater'],tradingCutoverInvoked=True); print(json.dumps(d,separators=(',',':')))
 PY
 )"; fi
+  if [[ "$mode" == release ]]; then
+    migration_gate pre "$full"
+    advance_recovery migration_gate_pre
+    phase=migration_gate_pre
+    barrier migration_gate_pre
+  fi
   [[ "$marker_aware" == true ]] || write_marker "$state_id"
   compose create --pull never krabs-runtime krabs-runtime-manager
   runtime="$(service_ids krabs-runtime)"; manager="$(service_ids krabs-runtime-manager)"
@@ -515,27 +565,25 @@ import json,sys
 d=json.load(open(sys.argv[1])); d.update(phase='target_started',targetRuntimeId=sys.argv[2],targetManagerId=sys.argv[3]); print(json.dumps(d,separators=(',',':')))
 PY
 )"
-  compose up -d --no-deps --pull never krabs-api
-  local healthy=false deadline now interval
-  deadline=$((SECONDS + ${KRABS_DEPLOY_HEALTH_SECONDS:-90})); interval="${KRABS_DEPLOY_HEALTH_INTERVAL_SECONDS:-5}"
-  while (( SECONDS <= deadline )); do api_healthy && { healthy=true; break; }; sleep "$interval"; done
-  if [[ "$healthy" != true ]]; then
+  barrier after-target-started-before-api
+  if ! start_and_prove_target_api; then
     set_trading_restart no || true
     runtime="$(service_ids krabs-runtime || true)"; manager="$(service_ids krabs-runtime-manager || true)"
     [[ -z "$manager" ]] || run "$DOCKER" stop "$manager" || true; [[ -z "$runtime" ]] || run "$DOCKER" stop "$runtime" || true
     die 'target health was not proven; deploy remains fail-stopped'
   fi
   KRABS_RUNTIME_ENV_PATH="$(recovery_field runtimeEnvPath)" KRABS_RUNTIME_ENV_SHA256="$(recovery_field runtimeEnvSha256)" "$GUARD" deploy-cutoff-probe "$state_id" || die 'marker-aware Resume cutoff was not proven'
+  [[ "$mode" != release ]] || migration_gate post "$full"
   run "$DOCKER" start "$runtime"; run "$DOCKER" start "$manager"
   advance_recovery arbitration_boundary
   barrier arbitration_boundary
   arbitration="$($GUARD deploy-arbitrate "$state_id" "$pre" "$(recovery_field baselineCommandHighWater)")" || die 'final command arbitration was not proven'
   effective="$(printf '%s' "$arbitration" | json_field effectivePaused)" || die 'final command receipt is malformed'
-  recovery "$(python3 - "$RECOVERY" "$arbitration" <<'PY'
+  recovery "$(python3 - "$RECOVERY" "$arbitration" "$(migration_receipt)" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1])); a=json.loads(sys.argv[2]); r={'baselineCapturedUnderLock':d['baselineCapturedUnderLock'],'prePaused':d['prePaused'],'preRunId':d['preRunId'],'preInstanceId':d['preInstanceId'],'previousVersion':d['previousVersion'],'deployVersion':d['previousVersion']+1,'sha':d['targetSha'],'digest':d['digest'],'recoveryStateId':d['recoveryStateId'],**a}; d.update(phase='commit_ready',finalCommandHighWater=a['finalOperatorCommandHighWater'],receipt=json.dumps(r,separators=(',',':')));print(json.dumps(d,separators=(',',':')))
+d=json.load(open(sys.argv[1])); a=json.loads(sys.argv[2]); r={'baselineCapturedUnderLock':d['baselineCapturedUnderLock'],'prePaused':d['prePaused'],'preRunId':d['preRunId'],'preInstanceId':d['preInstanceId'],'previousVersion':d['previousVersion'],'deployVersion':d['previousVersion']+1,'sha':d['targetSha'],'digest':d['digest'],'recoveryStateId':d['recoveryStateId'],'migration101':json.loads(sys.argv[3]),**a}; d.update(phase='commit_ready',finalCommandHighWater=a['finalOperatorCommandHighWater'],receipt=json.dumps(r,separators=(',',':')));print(json.dumps(d,separators=(',',':')))
 PY
-)"
+ )"
   barrier commit_ready
   commit_metadata "$full" "$digest" "$state_id" "$effective"
 }

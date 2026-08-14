@@ -260,6 +260,7 @@ export class ReconciliationModule implements RuntimeModule {
    * reset on restart is an accepted risk (covered by age-grace + Fix 1/2).
    */
   private readonly consecutiveMissCounts = new Map<string, number>();
+  private readonly unresolvedStaleOrders = new Map<string, import("@krabs/domain").ExchangeOrder>();
   private readonly staleBackoffMap = new Map<string, number>();
   private readonly sellDownpriceRepriceMap: SellDownpriceRepriceStateMap = new Map();
   /**
@@ -397,6 +398,8 @@ export class ReconciliationModule implements RuntimeModule {
       // prove a terminal local status whereas open-snapshot absence cannot.
       const sinceMs = this.lastRunAt ?? 0;
       const stageFillsStart = Date.now();
+      const fillCompletionTolerance =
+        this.deps.fillCompletionTolerance ?? DEFAULT_FILL_COMPLETION_TOLERANCE;
       const fillResult = await reconcileFills(
         {
           gateway: this.deps.gateway,
@@ -404,8 +407,7 @@ export class ReconciliationModule implements RuntimeModule {
           orderRepo: this.deps.orderRepo,
           bus: this.deps.bus,
           log: this.log,
-          fillCompletionTolerance:
-            this.deps.fillCompletionTolerance ?? DEFAULT_FILL_COMPLETION_TOLERANCE,
+          fillCompletionTolerance,
         },
         sinceMs,
       );
@@ -419,11 +421,15 @@ export class ReconciliationModule implements RuntimeModule {
       const orderResult = await reconcileOrders({
         gateway: this.deps.gateway,
         orderRepo: this.deps.orderRepo,
+        fillRepo: this.deps.fillRepo,
+        bus: this.deps.bus,
         log: this.log,
         phantomGraceMs: graceMs,
         suspiciousEmptyThreshold: this.deps.suspiciousEmptyThreshold ?? 3,
         consecutiveMissThreshold: this.deps.consecutiveMissThreshold ?? 3,
         consecutiveMissCounts: this.consecutiveMissCounts,
+        unresolvedStaleOrders: this.unresolvedStaleOrders,
+        fillCompletionTolerance,
       });
       stageTimingsMs.orders = Date.now() - stageOrdersStart;
       allDetails.push(...orderResult.details);
@@ -565,6 +571,7 @@ export class ReconciliationModule implements RuntimeModule {
         fillResult.missingFillsImported === 0 &&
         orderResult.staleCancelled === 0 &&
         orderResult.staleCancelFailed === 0 &&
+        (orderResult.cascadeEvaluated ?? 0) === (orderResult.cascadeCancelled ?? 0) &&
         staleResult.staleTtlCancelled === 0 &&
         staleResult.staleEndDateCancelled === 0 &&
         staleResult.staleExitTtlCancelled === 0 &&

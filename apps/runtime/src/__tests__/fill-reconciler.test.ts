@@ -9,6 +9,7 @@ import type {
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import {
+  findLocalOrderForExchangeFill,
   reconcileFills,
   updateOrderStatusFromPersistedFills,
 } from "../modules/reconciliation/fill-reconciler.js";
@@ -210,5 +211,33 @@ describe("updateOrderStatusFromPersistedFills — Fix 4: completion tolerance", 
     updateOrderStatusFromPersistedFills(orderRepo, fillRepo, oid, 0);
 
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(oid, "partially-filled");
+  });
+});
+
+describe("findLocalOrderForExchangeFill — exact identity", () => {
+  it("uses the exact exchange ID before a nullable or conflicting client ID", () => {
+    const orderRepo = createOrderRepo();
+    const exact = { orderId: createOrderId("exact") };
+    const clientMatch = { orderId: createOrderId("client") };
+    orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(exact);
+    orderRepo.findByClientOrderId = vi.fn().mockReturnValue(clientMatch);
+
+    expect(
+      findLocalOrderForExchangeFill(
+        orderRepo,
+        makeExchangeFill({ clientOrderId: null }),
+        silentLog,
+      ),
+    ).toBe(exact);
+    expect(orderRepo.findByClientOrderId).not.toHaveBeenCalled();
+
+    expect(
+      findLocalOrderForExchangeFill(
+        orderRepo,
+        makeExchangeFill({ clientOrderId: "foreign-client" }),
+        silentLog,
+      ),
+    ).toBe(exact);
+    expect(orderRepo.findByClientOrderId).not.toHaveBeenCalled();
   });
 });

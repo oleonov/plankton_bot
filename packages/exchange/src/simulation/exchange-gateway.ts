@@ -180,6 +180,10 @@ export class SimulationExchangeGateway implements ExchangeGateway {
     return { ok: true, data: await this.getOpenOrders() };
   }
 
+  async getOrderResult(orderId: string): Promise<FetchResult<ExchangeOrder | null>> {
+    return { ok: true, data: this.orders.get(orderId) ?? null };
+  }
+
   async getOpenOrdersForToken(tokenId: TokenId): Promise<ExchangeOrder[]> {
     return (await this.getOpenOrders()).filter((o) => o.tokenId === tokenId);
   }

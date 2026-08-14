@@ -21,7 +21,6 @@ import type {
   FetchResult,
   MarketFeeInfo,
   OrderId,
-  ClientOrderId,
   Order,
 } from "@krabs/domain";
 import {
@@ -31,6 +30,12 @@ import {
   resolvePolymarketTakerFeeRate,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import {
+  applyOrderVerdict,
+  DEFAULT_FILL_COMPLETION_TOLERANCE,
+  hasLocalFullCoverage,
+  persistedGrossShares,
+} from "./order-status-resolver.js";
 
 // Bounded FIFO cache that dedupes orphan-fill log warnings. Without a cap
 // the Set grew unbounded over uptime (prod crash loop exposed this). 5000
@@ -100,17 +105,21 @@ export function findLocalOrderForExchangeFill(
   fill: ExchangeFill,
   log: Logger,
 ): Order | null {
-  let localOrder = orderRepo.findByClientOrderId(fill.clientOrderId);
-  if (!localOrder && fill.orderId) {
-    localOrder = orderRepo.findByExchangeOrderId(fill.orderId);
+  if (fill.orderId) {
+    const localOrder = orderRepo.findByExchangeOrderId(fill.orderId);
+    if (localOrder) return localOrder;
+  }
+  if (fill.clientOrderId) {
+    const localOrder = orderRepo.findByClientOrderId(fill.clientOrderId);
     if (localOrder) {
       log.info(
-        { fillId: fill.fillId, exchangeOrderId: fill.orderId },
-        "fill matched via exchangeOrderId fallback",
+        { fillId: fill.fillId, clientOrderId: fill.clientOrderId },
+        "fill matched via clientOrderId fallback",
       );
+      return localOrder;
     }
   }
-  return localOrder;
+  return null;
 }
 
 export function buildLocalFillFromExchangeFill(
@@ -180,49 +189,7 @@ export function buildLocalFillFromExchangeFill(
   };
 }
 
-// Sub-share rounding tolerance when comparing cumulative filled against
-// `order.size`. Polymarket prices come at tick=0.01 / 0.001 / 0.0001 and the
-// share-fee model multiplies through tiny rates, so direct equality on
-// JS doubles can leave us ~1e-12 short of the gross target on a perfectly
-// filled BUY. 1e-9 shares is well below the per-fill min and avoids spurious
-// `partially-filled`.
-const FILL_GROSS_EPSILON = 1e-9;
-
-/**
- * Default relative fill-completion tolerance (0.5% of order size). Single source
- * of truth shared by every hot path that imports fills (#36). `0` collapses the
- * effective tolerance to {@link FILL_GROSS_EPSILON} — the full pre-#36 rollback.
- */
-export const DEFAULT_FILL_COMPLETION_TOLERANCE = 0.005;
-
-/**
- * Recover gross shares from legacy taker-BUY fill rows that were persisted
- * before 2026-05-11 with the fee deducted from `fill.size`. New rows store
- * exchange/wallet shares directly, so this path becomes a harmless no-op.
- *
- * Without this, `cumulativeFilled >= localOrder.size` is never true for a
- * fully-executed taker BUY: the order stays `partially-filled` forever, and
- * `OrderRepository.sumOpenBuyNotional()` keeps reserving its full notional
- * — silently strangling new BUY budget over uptime.
- */
-function grossFillSize(fill: {
-  readonly side: "buy" | "sell";
-  readonly size: number;
-  readonly price: number;
-  readonly sizeUsdc?: number;
-  readonly liquidityRole?: string;
-}): number {
-  if (
-    fill.side === "buy" &&
-    fill.liquidityRole === "taker" &&
-    typeof fill.sizeUsdc === "number" &&
-    fill.sizeUsdc > 0 &&
-    fill.price > 0
-  ) {
-    return fill.sizeUsdc / fill.price;
-  }
-  return fill.size;
-}
+export { DEFAULT_FILL_COMPLETION_TOLERANCE } from "./order-status-resolver.js";
 
 export function updateOrderStatusFromPersistedFills(
   orderRepo: Pick<OrderRepository, "findById" | "updateStatus">,
@@ -230,21 +197,11 @@ export function updateOrderStatusFromPersistedFills(
   orderId: OrderId,
   completionTolerance = DEFAULT_FILL_COMPLETION_TOLERANCE,
 ): void {
-  const allFills = fillRepo.findByOrderId(orderId);
-  const cumulativeFilled = allFills.reduce((sum, fill) => sum + grossFillSize(fill), 0);
   const localOrder = orderRepo.findById(orderId);
   if (!localOrder) return;
+  const cumulativeFilled = persistedGrossShares(fillRepo, localOrder);
 
-  // `order.size` is the local target (notional/price, non-integer); the exchange
-  // fills in tick-rounded shares, so a fully-executed order routinely lands a few
-  // hundredths short. A flat 1e-9 epsilon never closed that gap, leaving the order
-  // `partially-filled` forever (#36, 57% of phantom candidates). Treat it filled
-  // when the shortfall is within the relative tolerance (default 0.5%), still far
-  // below any genuine partial. `completionTolerance = 0` falls back to 1e-9.
-  const shortfall = localOrder.size - cumulativeFilled;
-  const tolerance = Math.max(localOrder.size * completionTolerance, FILL_GROSS_EPSILON);
-
-  if (cumulativeFilled > 0 && shortfall <= tolerance) {
+  if (hasLocalFullCoverage(localOrder, cumulativeFilled, completionTolerance)) {
     orderRepo.updateStatus(orderId, "filled");
   } else if (cumulativeFilled > 0) {
     orderRepo.updateStatus(orderId, "partially-filled");
@@ -292,6 +249,7 @@ export async function importExchangeFills(
     signalId: string | null;
     decisionRuleId: string | null;
     signalTimestamp: string | null;
+    clientOrderId: Order["clientOrderId"];
   }> = [];
 
   // Phase 1: Save fills to DB
@@ -355,6 +313,7 @@ export async function importExchangeFills(
       signalId: localOrder.signalId ?? null,
       decisionRuleId: localOrder.decisionRuleId ?? null,
       signalTimestamp: localOrder.signalTimestamp ?? null,
+      clientOrderId: localOrder.clientOrderId,
     });
 
     const msg = `fill imported: ${ef.fillId} (order: ${ef.orderId}, side: ${ef.side}, size: ${ef.size}, role: ${ef.liquidityRole}, fee: ${resolved.fill.fee.toFixed(6)})`;
@@ -364,24 +323,26 @@ export async function importExchangeFills(
 
   // Phase 2: Update order statuses (before publishing events so handlers see terminal status)
   for (const oid of ordersWithNewFills) {
-    updateOrderStatusFromPersistedFills(
+    await applyOrderVerdict({
       orderRepo,
       fillRepo,
-      createOrderId(oid),
-      deps.fillCompletionTolerance,
-    );
+      log,
+      orderId: createOrderId(oid),
+      exchange: null,
+      fillCompletionTolerance: deps.fillCompletionTolerance,
+    });
   }
 
   // Phase 3: Publish FillReceived events (handlers now see correct order status)
   for (const saved of savedFills) {
-    const { ef, fillId, orderId, conditionId, sizeUsdc, signalReason } = saved;
+    const { ef, fillId, orderId, conditionId, sizeUsdc, signalReason, clientOrderId } = saved;
     const feeInfo = feeInfoByCondition.get(String(conditionId)) ?? null;
     const resolved = buildLocalFillFromExchangeFill(ef, saved, undefined, feeInfo);
 
     await bus.publish("FillReceived", {
       fillId,
       orderId,
-      clientOrderId: ef.clientOrderId as ClientOrderId,
+      clientOrderId,
       tokenId: ef.tokenId,
       conditionId,
       side: ef.side,

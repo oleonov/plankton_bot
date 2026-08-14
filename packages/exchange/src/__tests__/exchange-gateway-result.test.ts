@@ -5,6 +5,7 @@ function createMockClient() {
   return {
     getOpenOrders: vi.fn(),
     getTrades: vi.fn(),
+    getOrder: vi.fn(),
   };
 }
 
@@ -101,6 +102,107 @@ describe("LiveExchangeGateway.getOpenOrdersResult", () => {
     expect(orders).toEqual([]);
     // Old path must NOT retry — one call only.
     expect(client.getOpenOrders).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("LiveExchangeGateway.getOrderResult", () => {
+  let client: ReturnType<typeof createMockClient>;
+  let gw: LiveExchangeGateway;
+
+  beforeEach(() => {
+    client = createMockClient();
+    gw = new LiveExchangeGateway({ client, fetchRetry: FAST_RETRY });
+  });
+
+  it("returns an exact mapped record and retries only transient failures", async () => {
+    client.getOrder.mockRejectedValueOnce(statusError("unavailable", 503)).mockResolvedValueOnce({
+      id: "ord-1",
+      asset_id: "tok-1",
+      side: "BUY",
+      original_size: "100",
+      size_matched: "0",
+      price: "0.5",
+      status: "ORDER_STATUS_LIVE",
+      created_at: 1700000000000,
+    });
+    expect(await gw.getOrderResult("ord-1")).toMatchObject({
+      ok: true,
+      data: { orderId: "ord-1" },
+    });
+    expect(client.getOrder).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats literal, returned, and thrown 404 as authoritative null", async () => {
+    client.getOrder
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ error: "not found", status: 404 })
+      .mockRejectedValueOnce(statusError("not found", 404));
+    expect(await gw.getOrderResult("ord-1")).toEqual({ ok: true, data: null });
+    expect(await gw.getOrderResult("ord-2")).toEqual({ ok: true, data: null });
+    expect(await gw.getOrderResult("ord-3")).toEqual({ ok: true, data: null });
+  });
+
+  it("fails closed for malformed or mismatched exact records", async () => {
+    client.getOrder.mockResolvedValue({
+      id: "other-order",
+      asset_id: "tok-1",
+      side: "BUY",
+      original_size: "100",
+      size_matched: "0",
+      price: "0.5",
+      status: "LIVE",
+    });
+    expect(await gw.getOrderResult("ord-1")).toEqual({ ok: false, reason: "parse", attempts: 1 });
+  });
+
+  it("fails closed when exact terminal fill status contradicts matched size", async () => {
+    client.getOrder
+      .mockResolvedValueOnce({
+        id: "ord-partial",
+        asset_id: "tok-1",
+        side: "BUY",
+        original_size: "100",
+        size_matched: "99",
+        price: "0.5",
+        status: "MATCHED",
+      })
+      .mockResolvedValueOnce({
+        id: "ord-zero",
+        asset_id: "tok-1",
+        side: "BUY",
+        original_size: "100",
+        size_matched: "0",
+        price: "0.5",
+        status: "FILLED",
+      });
+
+    expect(await gw.getOrderResult("ord-partial")).toEqual({
+      ok: false,
+      reason: "parse",
+      attempts: 1,
+    });
+    expect(await gw.getOrderResult("ord-zero")).toEqual({
+      ok: false,
+      reason: "parse",
+      attempts: 1,
+    });
+  });
+
+  it("accepts exact terminal fill status when matched size equals original size", async () => {
+    client.getOrder.mockResolvedValue({
+      id: "ord-filled",
+      asset_id: "tok-1",
+      side: "BUY",
+      original_size: "100",
+      size_matched: "100",
+      price: "0.5",
+      status: "MATCHED",
+    });
+
+    expect(await gw.getOrderResult("ord-filled")).toMatchObject({
+      ok: true,
+      data: { orderId: "ord-filled", status: "FILLED", sizeRemaining: 0 },
+    });
   });
 });
 

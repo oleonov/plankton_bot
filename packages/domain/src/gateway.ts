@@ -128,14 +128,15 @@ export interface DepositActivationResult {
 
 export interface ExchangeOrder {
   readonly orderId: string;
-  readonly clientOrderId: string;
+  /** Exchange-provided client ID, absent on some historical/order responses. */
+  readonly clientOrderId: string | null;
   readonly tokenId: TokenId;
   readonly side: OrderSide;
   readonly price: number;
   readonly sizeTotal: number;
   readonly sizeFilled: number;
   readonly sizeRemaining: number;
-  readonly status: "OPEN" | "FILLED" | "PARTIALLY_FILLED" | "CANCELLED" | "EXPIRED";
+  readonly status: "OPEN" | "FILLED" | "PARTIALLY_FILLED" | "CANCELLED" | "EXPIRED" | "REJECTED";
   /** Unix milliseconds. */
   readonly createdAt: number;
 }
@@ -143,7 +144,8 @@ export interface ExchangeOrder {
 export interface ExchangeFill {
   readonly fillId: string;
   readonly orderId: string;
-  readonly clientOrderId: string;
+  /** Exchange-provided client ID, absent on some historical/trade responses. */
+  readonly clientOrderId: string | null;
   readonly tokenId: TokenId;
   readonly side: OrderSide;
   readonly price: number;
@@ -632,6 +634,13 @@ export interface ExchangeGateway {
    * fall back to the legacy `catch → []` path.
    */
   getOpenOrdersResult?(): Promise<FetchResult<ExchangeOrder[]>>;
+
+  /**
+   * Reliably fetch one exact exchange order by its non-empty exchange ID.
+   * An authoritative not-found is `ok: true, data: null`; transport and
+   * malformed-response failures are `ok: false` and never terminal proof.
+   */
+  getOrderResult?(orderId: string): Promise<FetchResult<ExchangeOrder | null>>;
 
   /** Fetch open orders for a specific token. */
   getOpenOrdersForToken(tokenId: TokenId): Promise<ExchangeOrder[]>;

@@ -25,6 +25,7 @@ function createMockClient() {
     createOrder: vi.fn(),
     postOrder: vi.fn(),
     cancelOrder: vi.fn(),
+    getOrder: vi.fn(),
     cancelAll: vi.fn(),
     getOpenOrders: vi.fn(),
     getTrades: vi.fn(),
@@ -338,12 +339,17 @@ describe("LiveExchangeGateway", () => {
     expect(calls).toEqual([{ dep: "clob", ok: true }]);
   });
 
-  it("cancelOrder calls SDK cancelOrder", async () => {
-    client.cancelOrder.mockResolvedValue({});
+  it("cancelOrder accepts only an ACK that names the requested order", async () => {
+    client.cancelOrder.mockResolvedValue({ canceled: ["ord-1"], not_canceled: [] });
 
     const result = await gw.cancelOrder({ orderId: "ord-1" });
     expect(result.success).toBe(true);
     expect(client.cancelOrder).toHaveBeenCalledWith({ orderID: "ord-1" });
+  });
+
+  it("cancelOrder treats empty or ambiguous responses as no acknowledgement", async () => {
+    client.cancelOrder.mockResolvedValue({ canceled: [], not_canceled: ["ord-1"] });
+    expect((await gw.cancelOrder({ orderId: "ord-1" })).success).toBe(false);
   });
 
   it("cancelOrder returns error on failure", async () => {

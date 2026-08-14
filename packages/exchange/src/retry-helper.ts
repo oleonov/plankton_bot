@@ -23,10 +23,10 @@ export interface ExecuteWithRetryConfig {
   backoffMs: number[];
   /** Injected so tests don't actually wait. */
   sleep: (ms: number) => Promise<void>;
-  /** Distinguishes open-orders vs fills in metric labels. */
-  source: "open_orders" | "fills";
+  /** Distinguishes reliable read paths in diagnostics and metric labels. */
+  source: "open_orders" | "fills" | "exact_order";
   /** Invoked once per retry — used to increment the retry counter. */
-  onRetry?: (reason: FetchReason, source: "open_orders" | "fills") => void;
+  onRetry?: (reason: FetchReason, source: "open_orders" | "fills" | "exact_order") => void;
   /**
    * Optional diagnostic sink. When an error classifies as `unknown` (the
    * conservative catch-all), the raw status/code/message are logged so the

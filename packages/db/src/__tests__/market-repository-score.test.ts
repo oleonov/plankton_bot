@@ -185,6 +185,9 @@ describe("ledger schema — score columns (audit §F3)", () => {
         client_order_id TEXT,
         token_id TEXT,
         side TEXT,
+        -- size has been NOT NULL since 001_initial.sql. Migration 101 reads it when repairing
+        -- covered phantom orders, so the pre-043 fixture must preserve that reachable column.
+        size REAL NOT NULL,
         status TEXT,
         signal_reason TEXT,
         exchange_order_id TEXT,

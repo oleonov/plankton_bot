@@ -1039,6 +1039,7 @@ describe("ExecutionModule", () => {
     // Rejected order should still be persisted
     const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Order;
     expect(savedOrder.status).toBe("rejected");
+    expect(savedOrder.fillProgressShares).toBe(0);
     expect(savedOrder.decisionRuleId).toBe("D5");
     expect(savedOrder.exchangeErrorCode).toBe("INSUFFICIENT_BALANCE");
     expect(savedOrder.exchangeErrorPayload).toContain("no funds");
@@ -1713,6 +1714,11 @@ describe("ExecutionModule", () => {
       updatedAt: new Date().toISOString(),
     };
     (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue(savedOrder);
+    (gateway as any).getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+    (gateway as any).getOrderResult = vi.fn().mockResolvedValue({
+      ok: true,
+      data: { orderId: "sim-ord-1", status: "CANCELLED", sizeFilled: 0 },
+    });
 
     await mod.start();
 
@@ -1727,6 +1733,7 @@ describe("ExecutionModule", () => {
     });
 
     expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+    expect((gateway as any).getFillsResult).toHaveBeenCalledWith(Date.parse(savedOrder.createdAt));
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(
       createOrderId("sim-ord-1"),
       "cancelled",
@@ -1742,6 +1749,56 @@ describe("ExecutionModule", () => {
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].reason).toBe("operator");
 
+    await mod.stop();
+  });
+
+  it("does not prove cancellation from an unbounded fill query when createdAt is malformed", async () => {
+    const savedOrder = openSellAt(0.5, {
+      orderId: createOrderId("sim-ord-1"),
+      exchangeOrderId: "sim-ord-1",
+      createdAt: "not-a-date",
+    });
+    (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue(savedOrder);
+    (gateway as any).getFillsResult = vi.fn();
+    (gateway as any).getOrderResult = vi.fn();
+    await mod.start();
+
+    await bus.publish("CancelOrderRequested", { command: makeCancelCmd(), timestamp: Date.now() });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledOnce();
+    expect((gateway as any).getFillsResult).not.toHaveBeenCalled();
+    expect((gateway as any).getOrderResult).not.toHaveBeenCalled();
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+    await mod.stop();
+  });
+
+  it.each([
+    ["found working", { ok: true, data: { orderId: "sim-ord-1", status: "OPEN", sizeFilled: 0 } }],
+    ["authoritative null", { ok: true, data: null }],
+    ["lookup error", { ok: false, reason: "server", attempts: 1 }],
+    [
+      "coverage gap",
+      { ok: true, data: { orderId: "sim-ord-1", status: "CANCELLED", sizeFilled: 1 } },
+    ],
+  ])("treats cancel ACK plus exact %s as non-terminal", async (_label, exact) => {
+    const savedOrder = openSellAt(0.5, {
+      orderId: createOrderId("sim-ord-1"),
+      exchangeOrderId: "sim-ord-1",
+    });
+    (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue(savedOrder);
+    (gateway as any).getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+    (gateway as any).getOrderResult = vi.fn().mockResolvedValue(exact);
+    const cancelled: unknown[] = [];
+    bus.subscribe("OrderCancelled", async (event) => {
+      cancelled.push(event);
+    });
+    await mod.start();
+
+    await bus.publish("CancelOrderRequested", { command: makeCancelCmd(), timestamp: Date.now() });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledOnce();
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+    expect(cancelled).toEqual([]);
     await mod.stop();
   });
 
@@ -1792,6 +1849,11 @@ describe("ExecutionModule", () => {
     expect(cancelled).toEqual([]);
 
     savedOrder.status = "open";
+    (gateway as any).getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+    (gateway as any).getOrderResult = vi.fn().mockResolvedValue({
+      ok: true,
+      data: { orderId: "sim-ord-1", status: "CANCELLED", sizeFilled: 0 },
+    });
     await bus.publish("CancelOrderRequested", {
       command: makeCancelCmd({ commandId: createCommandId("cancel-confirmed-open") }),
       timestamp: Date.now(),
@@ -1843,6 +1905,30 @@ describe("ExecutionModule", () => {
     expect(cancelled).toHaveLength(0);
     expect(orderRepo.updateStatus).not.toHaveBeenCalled();
 
+    await mod.stop();
+  });
+
+  it("releases a pending SELL replacement after exact cancellation rejection", async () => {
+    const savedOrder = openSellAt(0.5, {
+      orderId: createOrderId("sim-ord-1"),
+      exchangeOrderId: "sim-ord-1",
+    });
+    (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue(savedOrder);
+    (gateway as any).getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+    (gateway as any).getOrderResult = vi.fn().mockResolvedValue({
+      ok: true,
+      data: { orderId: "sim-ord-1", status: "REJECTED", sizeFilled: 0 },
+    });
+    (mod as any).sellReplaceLocks.set(String(savedOrder.tokenId), {
+      orderId: savedOrder.orderId,
+      command: makePlaceCmd({ side: "sell" }),
+      createdAt: Date.now(),
+    });
+    await mod.start();
+
+    await (mod as any).executeCancel(makeCancelCmd());
+
+    expect((mod as any).sellReplaceLocks.size).toBe(0);
     await mod.stop();
   });
 
@@ -3355,6 +3441,96 @@ describe("ExecutionModule", () => {
       expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
 
       await mod.stop();
+    });
+
+    it("keeps a startup exchange-live/local-terminal mismatch fenced through duplicate cancel ACKs", async () => {
+      const staleSell = openSellAt(0.35, {
+        orderId: createOrderId("startup-local-terminal"),
+        exchangeOrderId: "startup-local-terminal",
+        positionId: createPositionId("pos-old-startup-cycle"),
+        status: "cancelled",
+        cancelReason: "operator",
+      });
+      orderRepo.findById = vi.fn().mockReturnValue(staleSell);
+      (gateway as any).getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+      (gateway as any).getOrderResult = vi.fn().mockResolvedValue({
+        ok: true,
+        data: { orderId: "startup-local-terminal", status: "OPEN", sizeFilled: 0 },
+      });
+      const liveMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeMode: "live-lite",
+        runtimeControl: { isPaused: () => false },
+      });
+      await liveMod.start();
+
+      await liveMod.seedStartupTransitions([
+        { tokenId: staleSell.tokenId, activePositionId: null, orders: [staleSell] },
+      ]);
+      expect(liveMod.hasTransitionTarget(staleSell.orderId)).toBe(true);
+
+      for (const suffix of ["one", "two"]) {
+        await bus.publish("CancelOrderRequested", {
+          command: makeCancelCmd({
+            commandId: createCommandId(`duplicate-terminal-${suffix}`),
+            orderId: staleSell.orderId,
+          }),
+          timestamp: Date.now(),
+        });
+      }
+
+      expect(gateway.cancelOrder).toHaveBeenCalledTimes(3);
+      expect(liveMod.hasTransitionTarget(staleSell.orderId)).toBe(true);
+      expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+      await liveMod.stop();
+    });
+
+    it("autonomous reconciliation retries but does not prune a locally terminal drain target", async () => {
+      vi.useFakeTimers();
+      try {
+        const staleSell = openSellAt(0.35, {
+          orderId: createOrderId("autonomous-local-terminal"),
+          exchangeOrderId: "autonomous-local-terminal",
+          positionId: createPositionId("pos-old-autonomous-cycle"),
+          status: "cancelled",
+          cancelReason: "operator",
+        });
+        orderRepo.findById = vi.fn().mockReturnValue(staleSell);
+        (gateway as any).getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+        (gateway as any).getOrderResult = vi.fn().mockResolvedValue({
+          ok: true,
+          data: { orderId: "autonomous-local-terminal", status: "OPEN", sizeFilled: 0 },
+        });
+        const liveMod = new ExecutionModule({
+          gateway,
+          bus,
+          marketRepo: marketRepo as any,
+          orderRepo,
+          fillRepo,
+          log: silentLog,
+          botRunId: BOT_RUN_ID,
+          runtimeMode: "live-lite",
+          runtimeControl: { isPaused: () => false },
+        });
+        await liveMod.start();
+        await liveMod.seedStartupTransitions([
+          { tokenId: staleSell.tokenId, activePositionId: null, orders: [staleSell] },
+        ]);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+
+        expect(gateway.cancelOrder).toHaveBeenCalledTimes(2);
+        expect(liveMod.hasTransitionTarget(staleSell.orderId)).toBe(true);
+        await liveMod.stop();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("cancel-side lookups only act on positionId-matching orders — a cross-cycle resting SELL is never picked as the replacement target", async () => {

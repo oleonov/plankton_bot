@@ -137,6 +137,81 @@ describe("runStartupPositionAdoption", () => {
     expect(position?.costBasisUsdc).toBe(4);
   });
 
+  it("uses the immutable pending snapshot after fill import and fails closed for every unresolved exact result", async () => {
+    for (const exactResult of [
+      { ok: true as const, data: null },
+      { ok: false as const, reason: "server" as const, attempts: 1 },
+      {
+        ok: true as const,
+        data: {
+          orderId: "ex-pending",
+          clientOrderId: null,
+          tokenId: TOKEN_ID,
+          side: "buy" as const,
+          price: 0.4,
+          sizeTotal: 10,
+          sizeFilled: 6,
+          sizeRemaining: 4,
+          status: "CANCELLED" as const,
+          createdAt: Date.now(),
+        },
+      },
+    ]) {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const marketRepo = new SqliteMarketRepository(conn.db);
+      const orderRepo = new SqliteOrderRepository(conn.db);
+      const fillRepo = new SqliteFillRepository(conn.db);
+      const positionRepo = new SqlitePositionRepository(conn.db);
+      const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+      const legStateRepo = new SqliteLegStateRepository(conn.db);
+      seedMarket(marketRepo);
+      orderRepo.save({
+        orderId: createOrderId(`pending-${connections.length}`),
+        clientOrderId: `plk_pending_${connections.length}` as ClientOrderId,
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        side: "buy",
+        orderType: "GTC",
+        price: 0.4,
+        size: 10,
+        sizeUsdc: 4,
+        status: "pending",
+        exchangeOrderId: "ex-pending",
+        signalId: null,
+        signalReason: null,
+        botRunId: createBotRunId("run-1"),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      await expect(
+        runStartupPositionAdoption({
+          gateway: {
+            getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+            getFillsResult: vi.fn().mockResolvedValue({
+              ok: true,
+              data: [makeExchangeFill({ orderId: "ex-pending", clientOrderId: null, size: 5 })],
+            }),
+            getOrderResult: vi.fn().mockResolvedValue(exactResult),
+          },
+          marketRepo,
+          orderRepo,
+          fillRepo,
+          positionRepo,
+          inventoryLotRepo,
+          legStateRepo,
+          log: silentLog,
+          db: conn.db,
+          botRunId: createBotRunId("run-1"),
+        }),
+      ).rejects.toThrow("pending order");
+      expect(fillRepo.findByOrderId(createOrderId(`pending-${connections.length}`))).toHaveLength(
+        1,
+      );
+    }
+  });
+
   it("Release A Phase 3 (P6): startup fence quarantines mismatched/NULL-positionId working SELLs as drain targets before servicing resumes", async () => {
     const conn = bootstrapLedgerDb(":memory:");
     connections.push(conn);
@@ -149,9 +224,10 @@ describe("runStartupPositionAdoption", () => {
     const legStateRepo = new SqliteLegStateRepository(conn.db);
     seedMarket(marketRepo);
 
-    // Two resting SELLs left over from a prior cycle: one with a NULL/legacy
+    // Three exchange-live SELLs left over from a prior cycle: one with a NULL/legacy
     // positionId (pre-migration order), one whose positionId points at a
-    // cycle that is no longer active. Both must fail-closed as stale per
+    // cycle that is no longer active, and one whose local row is already cancelled.
+    // All three must fail-closed as stale per
     // isStaleOrReopeningWorkingOrder's SELL branch, since neither matches the
     // active position the fill replay below is about to (re)create.
     const staleSellNullId = createOrderId("ord-stale-sell-null");
@@ -194,6 +270,27 @@ describe("runStartupPositionAdoption", () => {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
+    const staleSellLocallyCancelledId = createOrderId("ord-stale-sell-local-cancelled");
+    orderRepo.save({
+      orderId: staleSellLocallyCancelledId,
+      clientOrderId: "plk_stale_sell_local_cancelled" as ClientOrderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
+      side: "sell",
+      orderType: "GTC",
+      price: 0.64,
+      size: 10,
+      sizeUsdc: 6.4,
+      status: "cancelled",
+      cancelReason: "operator",
+      exchangeOrderId: "ex-stale-sell-local-cancelled",
+      signalId: null,
+      signalReason: "bounce-exit",
+      positionId: createPositionId("pos-prior-local-terminal-cycle"),
+      botRunId: createBotRunId("run-1"),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
 
     const result = await runStartupPositionAdoption({
       gateway: {
@@ -224,6 +321,18 @@ describe("runStartupPositionAdoption", () => {
               status: "OPEN",
               createdAt: Date.now(),
             },
+            {
+              orderId: "ex-stale-sell-local-cancelled",
+              clientOrderId: "plk_stale_sell_local_cancelled",
+              tokenId: TOKEN_ID,
+              side: "sell",
+              price: 0.64,
+              sizeTotal: 10,
+              sizeFilled: 0,
+              sizeRemaining: 10,
+              status: "OPEN",
+              createdAt: Date.now(),
+            },
           ],
         }),
         getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [makeExchangeFill()] }),
@@ -240,16 +349,20 @@ describe("runStartupPositionAdoption", () => {
     });
 
     // The BUY fill replay above (re)establishes the token's ONLY active
-    // position, so both resting SELLs are cross-cycle relative to it —
-    // neither carries that position's id.
-    expect(result.quarantinedStaleSells).toBe(2);
+    // position, so all three resting SELLs are cross-cycle relative to it —
+    // none carries that position's id.
+    expect(result.quarantinedStaleSells).toBe(3);
     expect(result.quarantinedReopeningBuys).toBe(0);
     expect(result.drainTargets).toHaveLength(1);
     const target = result.drainTargets[0]!;
     expect(target.tokenId).toBe(TOKEN_ID);
     expect(target.activePositionId).not.toBeNull();
     expect(new Set(target.orders.map((o) => String(o.orderId)))).toEqual(
-      new Set([String(staleSellNullId), String(staleSellMismatchId)]),
+      new Set([
+        String(staleSellNullId),
+        String(staleSellMismatchId),
+        String(staleSellLocallyCancelledId),
+      ]),
     );
   });
 
@@ -291,7 +404,7 @@ describe("runStartupPositionAdoption", () => {
     expect(getFillsResult).toHaveBeenCalledOnce();
   });
 
-  it("forwards fillCompletionTolerance=0 → near-complete fill leaves local order partially-filled (#36)", async () => {
+  it("forwards fillCompletionTolerance=0 through import and startup exact resolution", async () => {
     const conn = bootstrapLedgerDb(":memory:");
     connections.push(conn);
 
@@ -314,7 +427,7 @@ describe("runStartupPositionAdoption", () => {
       price: 0.4,
       size: 10, // fill below is 9.97 → 0.3% short
       sizeUsdc: 4,
-      status: "open",
+      status: "pending",
       exchangeOrderId: "ex-known",
       signalId: null,
       signalReason: "probe-entry",
@@ -337,6 +450,21 @@ describe("runStartupPositionAdoption", () => {
             }),
           ],
         }),
+        getOrderResult: vi.fn().mockResolvedValue({
+          ok: true,
+          data: {
+            orderId: "ex-known",
+            clientOrderId: "plk_known",
+            tokenId: TOKEN_ID,
+            side: "buy",
+            price: 0.4,
+            sizeTotal: 10,
+            sizeFilled: 9.97,
+            sizeRemaining: 0.03,
+            status: "CANCELLED",
+            createdAt: Date.now(),
+          },
+        }),
       },
       marketRepo,
       orderRepo,
@@ -350,7 +478,9 @@ describe("runStartupPositionAdoption", () => {
       fillCompletionTolerance: 0,
     });
 
-    expect(orderRepo.findById(orderId)?.status).toBe("partially-filled");
+    // With the default 0.5% heuristic this exact path would normalize 9.97/10 to
+    // filled. The explicit rollback value 0 must preserve the exact cancelled-partial.
+    expect(orderRepo.findById(orderId)?.status).toBe("cancelled");
   });
 
   it("rebuilds the same startup-adopted state across repeated startups", async () => {

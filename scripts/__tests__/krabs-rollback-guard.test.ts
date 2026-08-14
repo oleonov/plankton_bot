@@ -139,7 +139,7 @@ case "$1" in
   network) [[ "$2" == connect && "\${NETWORK_MODE:-}" != zero-after-connect ]] && rm -f "$NETWORK_FENCED" || : > "$NETWORK_FENCED"; exit 0 ;;
   push) echo "digest: \${DEPLOY_DIGEST:-sha256:${digest}}"; exit 0 ;;
   image) [[ "$*" == *revision* ]] && echo '${deployTarget}' || echo 'sha256:${digest}'; exit 0 ;;
-  inspect) [[ "$*" == *NetworkSettings.Networks* ]] && { [[ "\${NETWORK_MODE:-}" == multi ]] && echo '{"krabs_default":{},"unexpected":{}}' || [[ "\${NETWORK_MODE:-}" == wrong ]] && echo '{"unexpected":{}}' || { [[ -e "$NETWORK_FENCED" ]] && echo '{}' || echo '{"krabs_default":{"EndpointID":"endpoint","Gateway":"172.20.0.1","IPAddress":"172.20.0.2","NetworkID":"network"}}'; }; } || { [[ -e "$STOPPED" ]] && echo 'false ${deployTarget}' || echo 'true ${deployTarget}'; }; exit 0 ;;
+  inspect) [[ "$*" == *NetworkSettings.Networks* ]] && { [[ "\${NETWORK_MODE:-}" == multi ]] && echo '{"krabs_default":{},"unexpected":{}}' || [[ "\${NETWORK_MODE:-}" == wrong ]] && echo '{"unexpected":{}}' || { [[ -e "$NETWORK_FENCED" ]] && echo '{}' || echo '{"krabs_default":{"EndpointID":"endpoint","Gateway":"172.20.0.1","IPAddress":"172.20.0.2","NetworkID":"network"}}'; }; } || { [[ "$*" == *id-krabs-api* ]] && { [[ -e "$API_AVAILABLE" ]] && echo 'true ${deployTarget}' || echo 'false ${deployTarget}'; } || { [[ -e "$STOPPED" ]] && echo 'false ${deployTarget}' || echo 'true ${deployTarget}'; }; }; exit 0 ;;
   health) exit "\${DEPLOY_HEALTH_EXIT:-0}" ;;
 esac`,
     );
@@ -317,6 +317,7 @@ esac`,
           state.rollbackStateId,
         ],
         {
+          cwd: root,
           env: {
             ...env,
             DEPLOY_DIGEST: `sha256:${digest}`,
@@ -504,7 +505,7 @@ esac`,
     const retry = spawnSync(deploy, ["--rollback-state-id", state.rollbackStateId], { cwd: root, env: { ...env, DEPLOY_DIGEST: `sha256:${digest}`, DEPLOY_HEALTH_EXIT: "0" }, encoding: "utf8", timeout: 20_000 });
     expect(retry.status, retry.stderr).toBe(0);
     const reentryCalls = readFileSync(fixture.calls, "utf8").slice(beforeRetry);
-    expect(reentryCalls).not.toContain("pull");
+    expect(reentryCalls).not.toMatch(/(?:^|\n)docker pull /);
     expect(reentryCalls).not.toContain(
       " compose --env-file .env.production -f docker-compose.yml up",
     );
@@ -581,16 +582,180 @@ esac`,
     ).not.toBe(0);
     expect(metadata.resumeCutoffAware).toBe(true);
     reached.add("legacy-guard");
+    rmSync(statePath, { force: true });
+    rmSync(fixture.marker, { force: true });
+    sql(fixture.control, "UPDATE runtime_control_state SET paused=1 WHERE id=1");
+    writeFileSync(fixture.api, "true\n");
+    writeFileSync(fixture.available, "yes\n");
+    rmSync(fixture.env.NETWORK_FENCED, { force: true });
+    rmSync(fixture.env.STOPPED, { force: true });
+    const orderGate = join(fixture.dir, "order-status-gate"),
+      orderGateCalls = join(fixture.dir, "order-status-gate-calls"),
+      migrationRecoveryPath = join(config, "deploy-recovery.json"),
+      migrationMarkerPath = join(config, "deploy-in-progress.json"),
+      sentinelPath = join(config, "deploy-failstop-requested");
+    writeFileSync(orderGateCalls, "");
+    executable(
+      orderGate,
+      `echo "$1" >> "$ORDER_GATE_CALLS"
+echo "order-gate $1" >> "$CALLS"
+[[ "\${ORDER_GATE_FAIL:-}" == "$1" ]] && exit 41
+[[ "$1" == post && ! -e "$API_AVAILABLE" ]] && exit 42
+[[ "$1" == post ]] && marker=true || marker=false
+printf '{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s","markerWasPresent":%s}\\n' '${"a".repeat(64)}' '${"b".repeat(64)}' "$marker"`,
+    );
+    const releaseEnv = {
+        ...env,
+        KRABS_REMOTE_CONTROLLER: "1",
+        KRABS_REMOTE_SHA: deployTarget,
+        KRABS_REMOTE_DIGEST: `sha256:${digest}`,
+        KRABS_REMOTE_COMPOSE: compose,
+        KRABS_REMOTE_ENV: runtimeEnv,
+        KRABS_ORDER_STATUS_GATE: orderGate,
+        ORDER_GATE_CALLS: orderGateCalls,
+        DEPLOY_HEALTH_EXIT: "0",
+      },
+      runRelease = (extra: Record<string, string> = {}) =>
+        spawnSync(
+          "timeout",
+          ["--signal=TERM", "--kill-after=2s", "20s", deploy, "--internal", "release", "test"],
+          {
+            cwd: root,
+            env: { ...releaseEnv, ...extra },
+            encoding: "utf8",
+            timeout: 25_000,
+          },
+        ),
+      watchDeploy = () =>
+        spawnSync(guard, ["deploy-watch"], {
+          env: {
+            ...fixture.env,
+            KRABS_DEPLOY_RECOVERY_PATH: migrationRecoveryPath,
+            KRABS_DEPLOY_METADATA_PATH: metadataPath,
+            KRABS_DEPLOY_FAILSTOP_PATH: sentinelPath,
+            KRABS_DEPLOY_FAILSTOP_LOCK_PATH: join(fixture.dir, "deploy-failstop.lock"),
+            KRABS_DEPLOY_LOCK_PATH: join(fixture.dir, "deploy-controller.lock"),
+          },
+          encoding: "utf8",
+          timeout: 20_000,
+        }),
+      hardDeathRelease = (point: string) => {
+        const barriers = join(fixture.dir, `barriers-${point}`);
+        mkdirSync(barriers);
+        return spawnSync(
+          "timeout",
+          [
+            "--signal=TERM",
+            "--kill-after=2s",
+            "20s",
+            "/bin/bash",
+            "-c",
+            '"$@" & child=$!; wait "$child"; code=$?; exit "$code"',
+            "bash",
+            deploy,
+            "--internal",
+            "release",
+            "test",
+          ],
+          {
+            cwd: root,
+            env: {
+              ...releaseEnv,
+              KRABS_DEPLOY_TEST_BARRIER_DIR: barriers,
+              KRABS_DEPLOY_TEST_HARD_DEATH: point,
+            },
+            encoding: "utf8",
+            timeout: 25_000,
+          },
+        );
+      };
+
+    const failedPre = runRelease({ ORDER_GATE_FAIL: "pre" });
+    expect(failedPre.status, failedPre.stderr).not.toBe(0);
+    expect(JSON.parse(readFileSync(migrationRecoveryPath, "utf8")).phase).toBe("cutover_paused");
+    expect(existsSync(fixture.available)).toBe(false);
+    const watchedPre = watchDeploy();
+    expect(
+      watchedPre.status,
+      `${watchedPre.stderr} signal=${watchedPre.signal} error=${watchedPre.error?.message}\n${readFileSync(fixture.calls, "utf8").slice(-3000)}`,
+    ).toBe(0);
+    const preRetry = runRelease();
+    expect(
+      preRetry.status,
+      `${preRetry.stderr}\n${readFileSync(fixture.calls, "utf8").slice(-6000)}`,
+    ).toBe(0);
+    expect(preRetry.stdout).toContain("DEPLOY_RECEIPT");
+
+    writeFileSync(orderGateCalls, "");
+    const killedPre = hardDeathRelease("migration_gate_pre");
+    expect(killedPre.status).toBe(137);
+    expect(JSON.parse(readFileSync(migrationRecoveryPath, "utf8")).phase).toBe(
+      "migration_gate_pre",
+    );
+    expect(watchDeploy().status).toBe(0);
+    expect(JSON.parse(readFileSync(migrationRecoveryPath, "utf8")).phase).toBe(
+      "migration_gate_pre",
+    );
+    expect(existsSync(sentinelPath)).toBe(true);
+    const preDeathRetry = runRelease();
+    expect(preDeathRetry.status, preDeathRetry.stderr).toBe(0);
+    expect(readFileSync(orderGateCalls, "utf8").trim().split("\n")).toEqual(["pre", "pre", "post"]);
+    expect(existsSync(migrationRecoveryPath)).toBe(false);
+    expect(existsSync(sentinelPath)).toBe(false);
+
+    writeFileSync(orderGateCalls, "");
+    const killedBeforeApi = hardDeathRelease("after-target-started-before-api");
+    expect(killedBeforeApi.status).toBe(137);
+    expect(JSON.parse(readFileSync(migrationRecoveryPath, "utf8")).phase).toBe("target_started");
+    expect(existsSync(fixture.available)).toBe(false);
+    const beforeTargetStartedWatch = readFileSync(fixture.calls, "utf8").length;
+    const watchedBeforeApi = watchDeploy();
+    expect(watchedBeforeApi.status, watchedBeforeApi.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(migrationRecoveryPath, "utf8")).phase).toBe(
+      "target_stopped_rearbitrate",
+    );
+    const targetStartedRetry = runRelease();
+    expect(targetStartedRetry.status, targetStartedRetry.stderr).toBe(0);
+    expect(targetStartedRetry.stdout).toContain("DEPLOY_RECEIPT");
+    const targetStartedCalls = readFileSync(fixture.calls, "utf8").slice(beforeTargetStartedWatch);
+    expect(targetStartedCalls.indexOf("up -d --no-deps --pull never krabs-api")).toBeLessThan(
+      targetStartedCalls.indexOf("order-gate post"),
+    );
+    expect(targetStartedCalls.indexOf("order-gate post")).toBeLessThan(
+      targetStartedCalls.indexOf("start id-krabs-runtime"),
+    );
+    expect(readFileSync(fixture.api, "utf8").trim()).toBe("true");
+    expect(existsSync(migrationRecoveryPath)).toBe(false);
+    reached.add("target-started-recovery");
+
+    const failedPost = runRelease({ ORDER_GATE_FAIL: "post" });
+    expect(failedPost.status, failedPost.stderr).not.toBe(0);
+    expect(JSON.parse(readFileSync(migrationRecoveryPath, "utf8")).phase).toBe("target_started");
+    expect(readFileSync(fixture.api, "utf8").trim()).toBe("true");
+    const watchedPost = watchDeploy();
+    expect(watchedPost.status, watchedPost.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(migrationRecoveryPath, "utf8")).phase).toBe(
+      "target_stopped_rearbitrate",
+    );
+    expect(existsSync(fixture.env.STOPPED)).toBe(true);
+    const postRetry = runRelease();
+    expect(postRetry.status, postRetry.stderr).toBe(0);
+    expect(postRetry.stdout).toContain("DEPLOY_RECEIPT");
+    expect(existsSync(migrationRecoveryPath)).toBe(false);
+    expect(existsSync(migrationMarkerPath)).toBe(false);
+    reached.add("migration-gate-recovery");
     expect([...reached].sort()).toEqual([
       "attached-exact",
       "env-mismatch",
       "legacy-guard",
+      "migration-gate-recovery",
       "negatives",
       "outer-preflight",
+      "target-started-recovery",
       "zero-connect",
     ]);
     console.log(
-      "T28F_V24 legacy-guard outer-preflight env-mismatch zero-connect attached-exact negatives",
+      "T28F_V25 legacy-guard outer-preflight env-mismatch zero-connect attached-exact negatives migration-gate-recovery",
     );
   };
   it("T28i — selective rollback Git-object boundary", () => {

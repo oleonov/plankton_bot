@@ -57,6 +57,13 @@ describe("SimulationExchangeGateway (immediate fill)", () => {
     expect(missingFills).toHaveLength(0);
   });
 
+  it("returns exact orders, including terminal simulation orders", async () => {
+    const placed = await gw.placeOrder(makeParams());
+    const result = await gw.getOrderResult(placed.orderId!);
+    expect(result).toMatchObject({ ok: true, data: { status: "FILLED" } });
+    expect(await gw.getOrderResult("missing")).toEqual({ ok: true, data: null });
+  });
+
   it("deducts balance on buy", async () => {
     await gw.placeOrder(makeParams({ size: 100, price: 0.5 }));
     const balances = await gw.getBalances();

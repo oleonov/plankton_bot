@@ -68,6 +68,10 @@ function createMockGateway(stream: FakeUserEventStream): ExchangeGateway {
       .fn<(tokenId: TokenId) => Promise<ExchangeOrder[]>>()
       .mockResolvedValue([]),
     getFills: vi.fn<(sinceMs: number) => Promise<ExchangeFill[]>>().mockResolvedValue([]),
+    getOrderResult: vi.fn().mockResolvedValue({
+      ok: true,
+      data: { orderId: "ord-exch-1", status: "CANCELLED", sizeFilled: 0 },
+    }),
     getBalances: vi.fn<() => Promise<ExchangeBalance[]>>().mockResolvedValue([]),
     getPositionBalance: vi.fn<(tokenId: TokenId) => Promise<number>>().mockResolvedValue(0),
     getOutcomeTokenBalance: vi.fn<(tokenId: TokenId) => Promise<bigint>>().mockResolvedValue(0n),
@@ -339,6 +343,84 @@ describe("UserOrderStreamModule", () => {
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(order.orderId, "partially-filled");
   });
 
+  it("forwards fillCompletionTolerance=0 through exact websocket order resolution", async () => {
+    mod = new UserOrderStreamModule({
+      gateway,
+      fillRepo,
+      marketRepo,
+      orderRepo,
+      bus,
+      log: silentLog,
+      now: () => 1_700_000_000_000,
+      fillCompletionTolerance: 0,
+    });
+    await mod.start();
+    (fillRepo.findByOrderId as any).mockReturnValue([
+      { side: "buy", price: 0.5, size: 9.97, liquidityRole: "unknown" },
+    ]);
+    (gateway.getOrderResult as any).mockResolvedValue({
+      ok: true,
+      data: { orderId: "ord-exch-1", status: "CANCELLED", sizeFilled: 9.97 },
+    });
+
+    await stream.emitOrder({
+      type: "order",
+      event: "CANCELLATION",
+      orderId: "ord-exch-1",
+      clientOrderId: order.clientOrderId,
+      tokenId: order.tokenId,
+      side: "buy",
+      sizeTotal: 10,
+      sizeFilled: 9.97,
+      sizeRemaining: 0.03,
+      status: "CANCELLED",
+      timestamp: 1_700_000_000_000,
+    });
+
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+      order.orderId,
+      "cancelled",
+      undefined,
+      "exchange-exact-cancelled",
+      {
+        cancelAgeMs: null,
+        cancelAgeBucket: null,
+        fillProgressShares: 9.97,
+        marketHorizon: null,
+      },
+    );
+  });
+
+  it("exact-resolves a rejected websocket order instead of reopening it", async () => {
+    await mod.start();
+    (gateway.getOrderResult as any).mockResolvedValue({
+      ok: true,
+      data: { orderId: "ord-exch-1", status: "REJECTED", sizeFilled: 0 },
+    });
+
+    await stream.emitOrder({
+      type: "order",
+      event: "UPDATE",
+      orderId: "ord-exch-1",
+      clientOrderId: order.clientOrderId,
+      tokenId: order.tokenId,
+      side: "buy",
+      sizeTotal: 10,
+      sizeFilled: 0,
+      sizeRemaining: 10,
+      status: "REJECTED",
+      timestamp: 1_700_000_000_000,
+    });
+
+    expect(gateway.getOrderResult).toHaveBeenCalledWith("ord-exch-1");
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+      order.orderId,
+      "rejected",
+      undefined,
+      "exchange-exact-invalid",
+    );
+  });
+
   it("buffers orphan websocket trades and flushes them after local order placement", async () => {
     (orderRepo.findByClientOrderId as any).mockReturnValue(null);
     (orderRepo.findByExchangeOrderId as any).mockReturnValue(null);
@@ -464,9 +546,8 @@ describe("UserOrderStreamModule", () => {
       timestamp: Date.now(),
     });
 
-    expect(events[0]).toBe("placed");
-    expect(events).toContain("cancelled");
-    expect(events).toContain("fill");
+    expect(events).toEqual(["placed", "fill"]);
+    expect(events).not.toContain("cancelled");
     expect(fillRepo.save).toHaveBeenCalledTimes(1);
   });
 
@@ -514,7 +595,8 @@ describe("UserOrderStreamModule", () => {
       timestamp: Date.now(),
     });
 
-    expect(events).toEqual(["placed-later", "cancelled"]);
+    expect(events).toEqual(["placed-later"]);
+    expect(events).not.toContain("cancelled");
   });
 
   it("applies cancellation order updates once and publishes OrderCancelled once", async () => {
@@ -544,17 +626,57 @@ describe("UserOrderStreamModule", () => {
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(
       order.orderId,
       "cancelled",
-      "ord-exch-1",
-      "exchange-user-ws-cancelled",
-      expect.objectContaining({
-        cancelAgeMs: expect.anything(),
-        cancelAgeBucket: expect.anything(),
-        fillProgressShares: expect.anything(),
-        marketHorizon: expect.anything(),
-      }),
+      undefined,
+      "exchange-exact-cancelled",
+      {
+        cancelAgeMs: null,
+        cancelAgeBucket: null,
+        fillProgressShares: 0,
+        marketHorizon: null,
+      },
     );
     expect(cancelled).toHaveLength(1);
     expect(mod.getMetricsSnapshot().dedupeHits).toBe(1);
+  });
+
+  it("serializes a websocket cancellation with a registered execution reason and publishes one event", async () => {
+    const { registerCancelIntent } =
+      await import("../modules/reconciliation/order-status-resolver.js");
+    registerCancelIntent(String(order.orderId), "reprice-threshold");
+    const cancelled: Array<{ reason: string }> = [];
+    bus.subscribe("OrderCancelled", async (payload) => {
+      cancelled.push(payload);
+    });
+    await mod.start();
+
+    await stream.emitOrder({
+      type: "order",
+      event: "CANCELLATION",
+      orderId: "ord-exch-1",
+      clientOrderId: order.clientOrderId,
+      tokenId: order.tokenId,
+      side: order.side,
+      sizeTotal: 10,
+      sizeFilled: 0,
+      sizeRemaining: 10,
+      status: "CANCELLED",
+      timestamp: 1_699_999_999_500,
+    });
+
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+      order.orderId,
+      "cancelled",
+      undefined,
+      "reprice-threshold",
+      {
+        cancelAgeMs: null,
+        cancelAgeBucket: null,
+        fillProgressShares: 0,
+        marketHorizon: null,
+      },
+    );
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0]?.reason).toBe("reprice-threshold");
   });
 
   it("does not regress a terminal local order back to open on stale websocket placement", async () => {

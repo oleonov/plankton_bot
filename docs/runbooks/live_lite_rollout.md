@@ -116,6 +116,13 @@ do not start T+0. Any other nonzero is fail-closed. `arming`, `prepared`, `deplo
 are marker-fenced: Resume is rejected; Pause remains available. Never remove a marker, state, or
 system-owned command manually.
 
+For #137b release mode, the controller stops API/runtime-manager/runtime, takes a root-only,
+read-only migration-101 snapshot, starts the target API so it runs migrations, then proves the
+snapshot before either runtime service starts. Accept its `migration101` receipt field only when the
+marker is exactly once, candidate count/hash match the snapshot, every candidate is now `filled`
+with its audit fields preserved, and no noncandidate order changed. A failed pre/post proof is
+fail-stopped; do not start or manually repair the runtime or ledger.
+
 For either mode, accept `DEPLOY_RECEIPT` only when its embedded receipt exactly matches the durable
 metadata: SHA, immutable digest, recovery state ID, previous/deploy versions, pre-pause provenance,
 locked run/API identity, final command high-water, and operator-pause override. `effectivePaused`

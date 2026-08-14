@@ -4,6 +4,7 @@ import {
   toSdkSide,
   toSdkTickSize,
   mapOpenOrder,
+  mapExactOrder,
   mapTrade,
   mapTradeToPersonalFills,
   mapMarket,
@@ -11,6 +12,7 @@ import {
   mapBalance,
   mapGammaMarket,
   mapGammaPricing,
+  mapExchangeOrderStatus,
 } from "../mappers.js";
 import { createTokenId } from "@krabs/domain";
 
@@ -41,6 +43,10 @@ describe("toSdkTickSize", () => {
 });
 
 describe("mapOpenOrder", () => {
+  it("maps INVALID open-order status to REJECTED", () => {
+    expect(mapExchangeOrderStatus("INVALID")).toBe("REJECTED");
+  });
+
   it("maps SDK order to domain ExchangeOrder", () => {
     const order = mapOpenOrder({
       id: "ord-123",
@@ -73,6 +79,85 @@ describe("mapOpenOrder", () => {
     const order = mapOpenOrder({ status: "CANCELED" });
     expect(order.status).toBe("CANCELLED");
   });
+
+  it("maps a strict exact order with documented prefixed status", () => {
+    const order = mapExactOrder(
+      {
+        id: "0xexact",
+        asset_id: "tok-abc",
+        side: "BUY",
+        original_size: "100",
+        size_matched: "30",
+        price: "0.55",
+        status: "ORDER_STATUS_CANCELED_MARKET_RESOLVED",
+        created_at: 1700000000000,
+      },
+      "0xexact",
+    );
+    expect(order.status).toBe("CANCELLED");
+    expect(order.clientOrderId).toBeNull();
+  });
+
+  it("rejects exact orders with mismatched identity, invalid numbers, or unknown status", () => {
+    const valid = {
+      id: "0xexact",
+      asset_id: "tok-abc",
+      side: "BUY",
+      original_size: "100",
+      size_matched: "0",
+      price: "0.55",
+      status: "LIVE",
+    };
+    expect(() => mapExactOrder(valid, "0xother")).toThrow("does not echo");
+    expect(() => mapExactOrder({ ...valid, size_matched: "NaN" }, "0xexact")).toThrow(
+      "invalid size_matched",
+    );
+    expect(() => mapExactOrder({ ...valid, status: "MYSTERY" }, "0xexact")).toThrow(
+      "unknown exact order status",
+    );
+  });
+
+  it.each(["MATCHED", "FILLED"])(
+    "rejects exact %s status when matched size is partial or zero",
+    (status) => {
+      const exact = {
+        id: "0xexact",
+        asset_id: "tok-abc",
+        side: "BUY",
+        original_size: "100",
+        price: "0.55",
+        status,
+      };
+
+      expect(() => mapExactOrder({ ...exact, size_matched: "99" }, "0xexact")).toThrow(
+        "filled status has unmatched size",
+      );
+      expect(() => mapExactOrder({ ...exact, size_matched: "0" }, "0xexact")).toThrow(
+        "filled status has unmatched size",
+      );
+    },
+  );
+
+  it.each(["MATCHED", "FILLED"])(
+    "accepts exact %s status when matched size equals original size",
+    (status) => {
+      const order = mapExactOrder(
+        {
+          id: "0xexact",
+          asset_id: "tok-abc",
+          side: "BUY",
+          original_size: "100",
+          size_matched: "100",
+          price: "0.55",
+          status,
+        },
+        "0xexact",
+      );
+
+      expect(order.status).toBe("FILLED");
+      expect(order.sizeRemaining).toBe(0);
+    },
+  );
 });
 
 describe("mapTrade", () => {
@@ -103,14 +188,14 @@ describe("mapTrade", () => {
     expect(fill.fee).toBeCloseTo(0.24);
   });
 
-  it("clientOrderId defaults to empty when SDK omits it", () => {
+  it("clientOrderId is null when SDK omits it", () => {
     const fill = mapTrade({
       id: "fill-2",
       taker_order_id: "ord-2",
       side: "BUY",
     });
     expect(fill.orderId).toBe("ord-2");
-    expect(fill.clientOrderId).toBe("");
+    expect(fill.clientOrderId).toBeNull();
     expect(fill.liquidityRole).toBe("unknown");
   });
 

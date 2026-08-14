@@ -9,7 +9,6 @@ import type {
   OrderRepository,
   RuntimeModule,
 } from "@krabs/domain";
-import { createCommandId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import {
   findLocalOrderForExchangeFill,
@@ -17,7 +16,7 @@ import {
   reconcileFills,
 } from "./fill-reconciler.js";
 import { reconcileOrders } from "./order-reconciler.js";
-import { buildCancelTelemetry } from "./cancel-telemetry.js";
+import { applyOrderVerdict } from "./order-status-resolver.js";
 
 const METRICS_WINDOW_MS = 10 * 60 * 1000;
 const ORPHAN_TTL_MS = 60 * 1000;
@@ -305,50 +304,33 @@ export class UserOrderStreamModule implements RuntimeModule {
 
     const nextStatus = resolveLocalOrderStatus(event);
     const currentStatus = localOrder.status;
+    if (nextStatus === "cancelled" || nextStatus === "filled" || nextStatus === "rejected") {
+      const exact = this.deps.gateway.getOrderResult
+        ? await this.deps.gateway.getOrderResult(event.orderId)
+        : null;
+      if (!exact || !exact.ok) return;
+      await applyOrderVerdict({
+        orderRepo: this.deps.orderRepo,
+        fillRepo: this.deps.fillRepo,
+        bus: this.deps.bus,
+        log: this.log,
+        orderId: localOrder.orderId,
+        exchange: exact.data,
+        publish: true,
+        timestamp: event.timestamp,
+        fillCompletionTolerance: this.deps.fillCompletionTolerance,
+      });
+      return;
+    }
     if (!shouldApplyOrderStatusTransition(currentStatus, nextStatus)) {
       return;
     }
-    const shouldPublishCancel =
-      nextStatus === "cancelled" && currentStatus !== "cancelled" && currentStatus !== "filled";
-
     if (nextStatus != null || localOrder.exchangeOrderId !== event.orderId) {
-      // Only stamp cancel reason + telemetry on the FIRST transition into
-      // `cancelled`. WS echoes for already-cancelled orders must not
-      // overwrite a prior cancel reason (e.g. `stale_entry_ttl`) or
-      // telemetry payload written by ExecutionModule / Reconciler.
-      if (shouldPublishCancel) {
-        const telemetry = buildCancelTelemetry({
-          order: localOrder,
-          nowMs: Date.now(),
-          fillRepo: this.deps.fillRepo,
-          marketRepo: this.deps.marketRepo,
-        });
-        this.deps.orderRepo.updateStatus(
-          localOrder.orderId,
-          nextStatus ?? currentStatus,
-          event.orderId,
-          "exchange-user-ws-cancelled",
-          telemetry,
-        );
-      } else {
-        this.deps.orderRepo.updateStatus(
-          localOrder.orderId,
-          nextStatus ?? currentStatus,
-          event.orderId,
-        );
-      }
-    }
-
-    if (shouldPublishCancel) {
-      await this.deps.bus.publish("OrderCancelled", {
-        commandId: createCommandId(`user-ws-cancel-${event.orderId}-${event.timestamp}`),
-        orderId: localOrder.orderId,
-        tokenId: localOrder.tokenId,
-        conditionId: localOrder.conditionId,
-        reason: "exchange-user-ws-cancelled",
-        signalReason: localOrder.signalReason ?? null,
-        timestamp: event.timestamp,
-      });
+      this.deps.orderRepo.updateStatus(
+        localOrder.orderId,
+        nextStatus ?? currentStatus,
+        event.orderId,
+      );
     }
   }
 
@@ -402,9 +384,11 @@ export class UserOrderStreamModule implements RuntimeModule {
         gateway: this.deps.gateway,
         orderRepo: this.deps.orderRepo,
         fillRepo: this.deps.fillRepo,
+        bus: this.deps.bus,
         marketRepo: this.deps.marketRepo,
         log: this.log,
         phantomGraceMs: PHANTOM_GRACE_MS,
+        fillCompletionTolerance: this.deps.fillCompletionTolerance,
       });
       this.refreshSubscribedConditions();
       await this.flushOrphanBuffer();
@@ -532,7 +516,7 @@ function buildOrderDedupeKey(event: ExchangeUserOrderEvent): string {
 
 function resolveLocalOrderStatus(
   event: ExchangeUserOrderEvent,
-): "open" | "partially-filled" | "filled" | "cancelled" | null {
+): "open" | "partially-filled" | "filled" | "cancelled" | "rejected" | null {
   if (
     event.event === "CANCELLATION" ||
     event.status === "CANCELLED" ||
@@ -543,6 +527,7 @@ function resolveLocalOrderStatus(
   if (event.status === "FILLED") {
     return "filled";
   }
+  if (event.status === "REJECTED") return "rejected";
   if (event.status === "PARTIALLY_FILLED") {
     return "partially-filled";
   }

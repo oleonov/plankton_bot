@@ -238,6 +238,17 @@ describe("ReconciliationModule", () => {
     });
   }
 
+  function mockExactCancelled(exchangeOrderId: string): void {
+    gateway.getOrderResult = vi.fn().mockResolvedValue({
+      ok: true,
+      data: makeExchangeOrder({
+        orderId: exchangeOrderId,
+        status: "CANCELLED",
+        sizeFilled: 0,
+      }),
+    });
+  }
+
   // ─── Lifecycle ──────────────────────────────────────────────────────
 
   describe("lifecycle", () => {
@@ -618,7 +629,9 @@ describe("ReconciliationModule", () => {
         .fn()
         .mockResolvedValue([makeExchangeOrder({ orderId: "ex-stale-regression" })]);
       orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
+      orderRepo.findById = vi.fn().mockReturnValue(cancelledLocal);
       gateway.cancelOrder = vi.fn().mockResolvedValue({ success: true });
+      mockExactCancelled("ex-stale-regression");
 
       const result = await reconcileOrders({
         gateway,
@@ -771,12 +784,16 @@ describe("ReconciliationModule", () => {
         .fn()
         .mockResolvedValue([makeExchangeOrder({ orderId: "ex-stale-1" })]);
       orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
+      orderRepo.findById = vi.fn().mockReturnValue(cancelledLocal);
       gateway.cancelOrder = vi.fn().mockResolvedValue({ success: true });
+      mockExactCancelled("ex-stale-1");
 
       const result = await mod.runReconciliation();
 
       expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "ex-stale-1" });
-      expect(result.details.some((d) => d.includes("stale exchange order cancelled"))).toBe(true);
+      expect(
+        result.details.some((d) => d.includes("stale exchange order terminal confirmed")),
+      ).toBe(true);
       expect(result.details.some((d) => d.includes("unknown"))).toBe(false);
       expect(result.clean).toBe(false);
     });
@@ -827,12 +844,16 @@ describe("ReconciliationModule", () => {
         .fn()
         .mockResolvedValue([makeExchangeOrder({ orderId: "ex-stale-filled" })]);
       orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(filledLocal);
+      orderRepo.findById = vi.fn().mockReturnValue(filledLocal);
       gateway.cancelOrder = vi.fn().mockResolvedValue({ success: true });
+      mockExactCancelled("ex-stale-filled");
 
       const result = await mod.runReconciliation();
 
       expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "ex-stale-filled" });
-      expect(result.details.some((d) => d.includes("stale exchange order cancelled"))).toBe(true);
+      expect(
+        result.details.some((d) => d.includes("stale exchange order terminal confirmed")),
+      ).toBe(true);
       expect(result.clean).toBe(false);
     });
 
@@ -848,7 +869,9 @@ describe("ReconciliationModule", () => {
         .fn()
         .mockResolvedValue([makeExchangeOrder({ orderId: "ex-stale-2pass" })]);
       orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
+      orderRepo.findById = vi.fn().mockReturnValue(cancelledLocal);
       gateway.cancelOrder = vi.fn().mockResolvedValue({ success: true });
+      mockExactCancelled("ex-stale-2pass");
 
       const result1 = await mod.runReconciliation();
       expect(result1.clean).toBe(false);
@@ -870,16 +893,91 @@ describe("ReconciliationModule", () => {
         .fn()
         .mockResolvedValue([makeExchangeOrder({ orderId: "ex-stale-detail" })]);
       orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
+      orderRepo.findById = vi.fn().mockReturnValue(cancelledLocal);
       gateway.cancelOrder = vi.fn().mockResolvedValue({ success: true });
+      mockExactCancelled("ex-stale-detail");
 
       const result = await mod.runReconciliation();
 
       expect(result.details).toEqual(
         expect.arrayContaining([
-          expect.stringContaining("stale exchange order cancelled: ex-stale-detail"),
+          expect.stringContaining("stale exchange order terminal confirmed: ex-stale-detail"),
           expect.stringContaining("local: cancelled"),
         ]),
       );
+    });
+
+    it("keeps an ACK+OPEN stale SELL reserved and reports the pass dirty", async () => {
+      const cancelledLocal = makeLocalOrder({
+        exchangeOrderId: "ex-stale-open",
+        status: "cancelled",
+      });
+      orderRepo.findOpen = vi.fn().mockReturnValue([]);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
+      gateway.getOpenOrders = vi.fn().mockResolvedValue([
+        makeExchangeOrder({
+          orderId: "ex-stale-open",
+          side: "sell",
+          sizeRemaining: 10,
+        }),
+      ]);
+      gateway.cancelOrder = vi.fn().mockResolvedValue({ success: true });
+      gateway.getOrderResult = vi.fn().mockResolvedValue({
+        ok: true,
+        data: makeExchangeOrder({ orderId: "ex-stale-open", status: "OPEN" }),
+      });
+      const store = new ExchangeStateStore();
+      mod = buildModule({ exchangeStateStore: store });
+
+      const result = await mod.runReconciliation();
+
+      expect(result.clean).toBe(false);
+      expect(result.details).toContain(
+        "stale exchange order cancel acknowledged but unconfirmed: ex-stale-open (local: cancelled)",
+      );
+      expect(store.getOpenSellSizeForToken(TOK)).toBe(10);
+    });
+
+    it("retains an unresolved stale SELL reservation across snapshot omission until exact proof", async () => {
+      const cancelledLocal = makeLocalOrder({
+        exchangeOrderId: "ex-stale-retained",
+        status: "cancelled",
+      });
+      const staleSell = makeExchangeOrder({
+        orderId: "ex-stale-retained",
+        side: "sell",
+        sizeRemaining: 10,
+      });
+      orderRepo.findOpen = vi.fn().mockReturnValue([]);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
+      orderRepo.findById = vi.fn().mockReturnValue(cancelledLocal);
+      gateway.getOpenOrders = vi
+        .fn()
+        .mockResolvedValueOnce([staleSell])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
+      gateway.cancelOrder = vi.fn().mockResolvedValue({ success: false, errorCode: "server" });
+      gateway.getOrderResult = vi.fn().mockResolvedValue({
+        ok: true,
+        data: makeExchangeOrder({ orderId: "ex-stale-retained", status: "OPEN" }),
+      });
+      const store = new ExchangeStateStore();
+      mod = buildModule({ exchangeStateStore: store });
+
+      await mod.runReconciliation();
+      expect(store.getOpenSellSizeForToken(TOK)).toBe(10);
+      await mod.runReconciliation();
+      expect(store.getOpenSellSizeForToken(TOK)).toBe(10);
+      (gateway.getOrderResult as any).mockResolvedValue({
+        ok: true,
+        data: makeExchangeOrder({
+          orderId: "ex-stale-retained",
+          status: "CANCELLED",
+          sizeFilled: 0,
+        }),
+      });
+      await mod.runReconciliation();
+      expect(store.getOpenSellSizeForToken(TOK)).toBeNull();
     });
   });
 
@@ -936,38 +1034,39 @@ describe("ReconciliationModule", () => {
       expect(result.details.some((d) => d.includes("no matching local order"))).toBe(true);
     });
 
-    it("matches fill via exchangeOrderId fallback when clientOrderId misses", async () => {
+    it("falls back to clientOrderId when exact exchangeOrderId misses", async () => {
       const exFill = makeExchangeFill({
         fillId: "fill-fallback",
-        clientOrderId: "",
         orderId: "ex-ord-1",
       });
       gateway.getFills = vi.fn().mockResolvedValue([exFill]);
       fillRepo.exists = vi.fn().mockReturnValue(false);
 
       const local = makeLocalOrder();
-      orderRepo.findByClientOrderId = vi.fn().mockReturnValue(null);
-      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(local);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(null);
+      orderRepo.findByClientOrderId = vi.fn().mockReturnValue(local);
 
       const result = await mod.runReconciliation();
 
       expect(result.missingFills).toBe(1);
       expect(fillRepo.save).toHaveBeenCalledTimes(1);
       expect(orderRepo.findByExchangeOrderId).toHaveBeenCalledWith("ex-ord-1");
+      expect(orderRepo.findByClientOrderId).toHaveBeenCalledWith("plk_abc");
     });
 
-    it("uses primary clientOrderId path when it matches (regression)", async () => {
+    it("matches a fill by exact exchangeOrderId before clientOrderId", async () => {
       const exFill = makeExchangeFill({ fillId: "fill-primary" });
       gateway.getFills = vi.fn().mockResolvedValue([exFill]);
       fillRepo.exists = vi.fn().mockReturnValue(false);
 
       const local = makeLocalOrder();
-      orderRepo.findByClientOrderId = vi.fn().mockReturnValue(local);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(local);
 
       const result = await mod.runReconciliation();
 
       expect(result.missingFills).toBe(1);
-      expect(orderRepo.findByExchangeOrderId).not.toHaveBeenCalled();
+      expect(orderRepo.findByExchangeOrderId).toHaveBeenCalledWith("ex-ord-1");
+      expect(orderRepo.findByClientOrderId).not.toHaveBeenCalled();
     });
 
     it("skips fill when both clientOrderId and exchangeOrderId miss", async () => {
@@ -1089,12 +1188,17 @@ describe("ReconciliationModule", () => {
           ]);
         gateway.getOpenOrders = vi.fn().mockResolvedValue([]); // reliable but suspicious
 
-        // threshold=1 would cancel immediately — the suspicious-empty guard fires first.
-        mod = buildModule({ consecutiveMissThreshold: 1 });
+        const store = new ExchangeStateStore();
+        store.updateExchangeSellOrders(
+          [{ orderId: "ex-prior", tokenId: TOK, sizeRemaining: 7 }],
+          Date.now(),
+        );
+        mod = buildModule({ consecutiveMissThreshold: 1, exchangeStateStore: store });
         const result = await mod.runReconciliation();
 
         expect(result.phantomOrders).toBe(0);
         expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+        expect(store.getOpenSellSizeForToken(TOK)).toBe(7);
       });
     });
 

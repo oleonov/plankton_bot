@@ -64,6 +64,11 @@ import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from
 import { randomUUID } from "node:crypto";
 import { buildClientOrderId } from "@krabs/domain/node";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
+import {
+  applyOrderVerdict,
+  registerCancelIntent,
+} from "../reconciliation/order-status-resolver.js";
+import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
 import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import type { Logger } from "../../logger.js";
 import type { LifecycleToken } from "../../lifecycle-chain.js";
@@ -127,7 +132,6 @@ import {
   ExchangeStateStore,
   isExchangeBalanceRejection,
 } from "./exchange-state-store.js";
-import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
 import {
   orderMatchesOrderId,
   validateProfileLadderReplacementSellTarget,
@@ -169,7 +173,7 @@ function boundedMetricLabel(value: string | null | undefined): string {
 // No "pending-cancel" status exists on OrderStatus (packages/domain/src/enums.ts) —
 // terminal means the order can never be cancelled again.
 function isTerminalOrderStatus(status: Order["status"]): boolean {
-  return status === "cancelled" || status === "filled";
+  return status === "cancelled" || status === "filled" || status === "rejected";
 }
 
 // Finding 5: autonomous transition-reconcile cadence + the minimum interval between
@@ -536,6 +540,10 @@ export class ExecutionModule implements RuntimeModule {
       this.deps.bus.subscribe("OrderCancelled", async (p) =>
         this.removeTransitionTargetIfTerminal(p.tokenId, p.orderId),
       ),
+      this.deps.bus.subscribe("OrderRejected", async (p) => {
+        const order = this.deps.orderRepo.findByClientOrderId(p.clientOrderId);
+        if (order) this.removeTransitionTargetIfTerminal(order.tokenId, order.orderId);
+      }),
       this.deps.bus.subscribe("FillReceived", async (p) =>
         this.removeTransitionTargetIfTerminal(p.tokenId, p.orderId),
       ),
@@ -1135,6 +1143,7 @@ export class ExecutionModule implements RuntimeModule {
     tokenId: TokenId,
     activePositionId: string | null,
     staleOrders: readonly Order[],
+    knownExchangeLive = false,
   ): Promise<void> {
     const key = String(tokenId);
     const transition = this.tokenTransitions.get(key) ?? {
@@ -1145,9 +1154,10 @@ export class ExecutionModule implements RuntimeModule {
     for (const order of staleOrders) {
       const orderKey = String(order.orderId);
       if (transition.targets.has(orderKey)) continue;
-      // Never target an already-terminal order (finding-4 prune-at-open) — it would
-      // strand the barrier with a target that can never reach OrderCancelled/FillReceived.
-      if (isTerminalOrderStatus(order.status)) continue;
+      // Runtime discovery only sees local working orders, but startup may prove that a
+      // locally terminal row is still exchange-live. That inconsistency must stay fenced
+      // until the normal exact cancel/fill lane supplies terminal proof.
+      if (isTerminalOrderStatus(order.status) && !knownExchangeLive) continue;
       transition.targets.add(orderKey);
       newlyTargeted.push(order);
     }
@@ -1190,7 +1200,7 @@ export class ExecutionModule implements RuntimeModule {
   ): Promise<void> {
     for (const target of targets) {
       if (target.orders.length === 0) continue;
-      await this.openTokenTransition(target.tokenId, target.activePositionId, target.orders);
+      await this.openTokenTransition(target.tokenId, target.activePositionId, target.orders, true);
     }
   }
 
@@ -1260,11 +1270,10 @@ export class ExecutionModule implements RuntimeModule {
     const now = Date.now();
     for (const orderKey of [...transition.targets]) {
       const order = this.deps.orderRepo.findById(createOrderId(orderKey));
-      if (!order || isTerminalOrderStatus(order.status)) {
-        transition.targets.delete(orderKey);
-        this.transitionCancelRetryAt.delete(orderKey);
-        continue;
-      }
+      // A target is released only by an exchange-terminal/fill event or the exact
+      // resolver path in executeCancel. Local terminal state (or a missing local row)
+      // is not sufficient proof and must leave the token fail-closed.
+      if (!order) continue;
       // Finding 5 backoff: retry a stuck cancel at most once per backoff window, so a
       // token whose cancel keeps failing cannot cancel-storm on every reconcile tick.
       const lastRetry = this.transitionCancelRetryAt.get(orderKey) ?? 0;
@@ -2990,20 +2999,17 @@ export class ExecutionModule implements RuntimeModule {
   private async executeCancel(cmd: CancelOrderCommand): Promise<void> {
     const orderKey = String(cmd.orderId);
 
-    // Idempotency (docs/plans/2026-07-20-exit-loss-floor.md §Phase 6, finding
-    // #5). Terminal-status guard first: once a prior cancel (or a fill) has
-    // already been persisted, that alone is authoritative and permanent —
-    // checked ahead of the in-flight reservation so it also covers duplicates
-    // that arrive well after the reservation below would have been cleared.
+    // Idempotency (docs/plans/2026-07-20-exit-loss-floor.md §Phase 6, finding #5).
+    // An ordinary terminal order needs no duplicate cancel. A transition target is
+    // different: startup or another consumer may have observed it exchange-live despite
+    // the local terminal row, so only the exact resolver may release that fence.
     const existingOrder = this.deps.orderRepo.findById(cmd.orderId);
-    if (existingOrder && isTerminalOrderStatus(existingOrder.status)) {
+    const isTransitionTarget = this.hasTransitionTarget(cmd.orderId);
+    if (existingOrder && isTerminalOrderStatus(existingOrder.status) && !isTransitionTarget) {
       this.log.debug(
         { commandId: cmd.commandId, orderId: cmd.orderId, status: existingOrder.status },
         "cancel skipped — order already in a terminal status",
       );
-      // Finding 4: a target that is already terminal must still be pruned from any
-      // open drain — otherwise this early-return leaves the barrier stuck.
-      this.removeTransitionTargetIfTerminal(existingOrder.tokenId, cmd.orderId);
       return;
     }
     if (this.deps.runtimeMode === "live-lite" && existingOrder?.status === "pending") {
@@ -3022,6 +3028,7 @@ export class ExecutionModule implements RuntimeModule {
     }
     this.cancelReservations.add(orderKey);
     this.pruneCancelReservations();
+    registerCancelIntent(orderKey, cmd.reason);
 
     // Retain the reservation ONLY when the cancel AND its terminal persistence
     // both complete; clear it on ANY non-success — a {success:false} result OR a
@@ -3033,51 +3040,78 @@ export class ExecutionModule implements RuntimeModule {
         orderId: orderKey,
       });
 
-      const now = Date.now();
-
       if (!result.success) {
         this.log.warn(
           { commandId: cmd.commandId, orderId: cmd.orderId, errorCode: result.errorCode },
           "cancel rejected by gateway",
         );
+      }
+      const createdAtMs = existingOrder ? Date.parse(existingOrder.createdAt) : NaN;
+      if (!Number.isFinite(createdAtMs)) {
+        this.log.warn(
+          { commandId: cmd.commandId, orderId: cmd.orderId },
+          "cancel terminal proof blocked — order creation time is invalid",
+        );
         return;
       }
-
+      const fillsResult = this.deps.gateway.getFillsResult
+        ? await this.deps.gateway.getFillsResult(createdAtMs)
+        : { ok: true as const, data: await this.deps.gateway.getFills(createdAtMs) };
+      if (fillsResult.ok)
+        await importExchangeFills(
+          fillsResult.data.filter((fill) => fill.orderId === orderKey),
+          {
+            fillRepo: this.deps.fillRepo,
+            orderRepo: this.deps.orderRepo,
+            bus: this.deps.bus,
+            log: this.log,
+            gateway: this.deps.gateway,
+            fillCompletionTolerance: this.deps.fillCompletionTolerance,
+          },
+        );
+      const exact = this.deps.gateway.getOrderResult
+        ? await this.deps.gateway.getOrderResult(orderKey)
+        : result.success && this.deps.runtimeMode !== "live-lite"
+          ? {
+              ok: true as const,
+              data: { orderId: orderKey, status: "CANCELLED" as const, sizeFilled: 0 },
+            }
+          : null;
+      if (!exact || !exact.ok) return;
       const orderForTelemetry = this.deps.orderRepo.findById(cmd.orderId);
-      const telemetry = orderForTelemetry
+      const cancelTelemetry = orderForTelemetry
         ? buildCancelTelemetry({
             order: orderForTelemetry,
-            nowMs: now,
+            nowMs: Date.now(),
             fillRepo: this.deps.fillRepo,
             marketRepo: this.deps.marketRepo,
           })
         : undefined;
-
-      this.deps.orderRepo.updateStatus(cmd.orderId, "cancelled", undefined, cmd.reason, telemetry);
-
-      this.log.info({ commandId: cmd.commandId, orderId: cmd.orderId }, "order cancelled");
-
-      if (!orderForTelemetry) {
-        this.log.warn(
-          { commandId: cmd.commandId, orderId: cmd.orderId },
-          "cancel succeeded but local order not found — skipping OrderCancelled event",
-        );
-      } else {
-        await this.deps.bus.publish("OrderCancelled", {
-          commandId: cmd.commandId,
-          orderId: cmd.orderId,
-          tokenId: orderForTelemetry.tokenId,
-          conditionId: orderForTelemetry.conditionId,
-          reason: cmd.reason,
-          signalReason: orderForTelemetry.signalReason,
-          timestamp: now,
-        });
-        await this.releasePendingSellReplacement(cmd.orderId);
-        // Release A Phase 3 (P6): this order may be a transition-barrier target —
-        // the OrderCancelled subscription above would catch it too, but checking
-        // directly here means the barrier closes within THIS call, not on the next
-        // microtask tick, which matters for tests that assert immediately after.
-        this.removeTransitionTargetIfTerminal(orderForTelemetry.tokenId, cmd.orderId);
+      const verdict = await applyOrderVerdict({
+        orderRepo: this.deps.orderRepo,
+        fillRepo: this.deps.fillRepo,
+        bus: this.deps.bus,
+        log: this.log,
+        orderId: cmd.orderId,
+        exchange: exact.data,
+        publish: true,
+        ...(this.deps.fillCompletionTolerance === undefined
+          ? {}
+          : { fillCompletionTolerance: this.deps.fillCompletionTolerance }),
+        ...(cancelTelemetry === undefined ? {} : { cancelTelemetry }),
+      });
+      if (
+        verdict.status !== "cancelled" &&
+        verdict.status !== "filled" &&
+        verdict.status !== "rejected"
+      )
+        return;
+      const settledOrder = this.deps.orderRepo.findById(cmd.orderId);
+      if (settledOrder) {
+        if (verdict.status === "cancelled" || verdict.status === "rejected") {
+          await this.releasePendingSellReplacement(cmd.orderId);
+        }
+        this.removeTransitionTargetIfTerminal(settledOrder.tokenId, cmd.orderId);
       }
       cancelPersisted = true;
     } finally {
@@ -4049,6 +4083,7 @@ export class ExecutionModule implements RuntimeModule {
       size: params.size,
       sizeUsdc: params.size * params.price,
       status,
+      fillProgressShares: status === "rejected" ? 0 : null,
       exchangeOrderId: exactOrderId,
       signalId: cmd.signalId ?? null,
       signalReason: cmd.signalReason ?? null,
@@ -4861,6 +4896,7 @@ export class ExecutionModule implements RuntimeModule {
       size: cmd.size,
       sizeUsdc: cmd.size * cmd.price,
       status,
+      fillProgressShares: status === "rejected" ? 0 : null,
       exchangeOrderId,
       signalId: cmd.signalId ?? null,
       signalReason: cmd.signalReason ?? null,
