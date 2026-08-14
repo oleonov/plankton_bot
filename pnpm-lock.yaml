@@ -287,6 +287,9 @@ importers:
 
   scripts:
     dependencies:
+      "@krabs/db":
+        specifier: workspace:*
+        version: link:../packages/db
       "@krabs/domain":
         specifier: workspace:*
         version: link:../packages/domain

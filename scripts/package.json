@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@krabs/db": "workspace:*",
     "@krabs/domain": "workspace:*",
     "better-sqlite3": "^12.8.0"
   },
