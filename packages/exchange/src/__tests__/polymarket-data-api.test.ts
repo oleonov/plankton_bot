@@ -133,7 +133,7 @@ describe("polymarket-data-api", () => {
     expect(positions?.at(-1)?.tokenId).toBe("tok-502");
   });
 
-  it("T27 rejects invalid production rows instead of returning a partial wallet snapshot", async () => {
+  it("T27 — rejects invalid production rows instead of returning a partial wallet snapshot", async () => {
     const validRow = { asset: "tok-valid", size: "1", currentValue: "0.5", initialValue: "0.4" };
     const invalidCases: Array<{ name: string; row: unknown }> = [
       ...["size", "currentValue", "initialValue"].flatMap((field) => [

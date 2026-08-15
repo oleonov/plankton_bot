@@ -2508,7 +2508,7 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     expect(healthOnReadFailure.detail).toContain("fenced_conditions=unknown");
   });
 
-  it("settles the recorded position even when another current row exists for the same token", async () => {
+  it("T10b — settles the recorded position even when another current row exists for the same token", async () => {
     const { positionRepo, lotRepo } = makeMergeableFixtures();
     const duplicateYes = {
       ...(positionRepo.findByTokenId(createTokenId(YES_TOKEN)) as Position),
