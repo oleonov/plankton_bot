@@ -300,9 +300,7 @@ describe("SignalToOrderBridge", () => {
 
     const placed: unknown[] = [];
     const skipped: Array<{ reasons: readonly string[]; diagnostics: Record<string, unknown> }> = [];
-    bus.subscribe("PlaceOrderRequested", async (payload) => {
-      placed.push(payload);
-    });
+    bus.subscribe("PlaceOrderRequested", async (payload) => void placed.push(payload));
     bus.subscribe("SignalConversionSkipped", async (payload) => {
       skipped.push(payload);
     });
@@ -417,6 +415,53 @@ describe("SignalToOrderBridge", () => {
         signalReason: "probe-entry",
       }),
     );
+  });
+
+  it("merges only a relationally proven fresh-edge attribution without changing order terms", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+    const placed: Array<{ command: import("@krabs/domain").PlaceOrderCommand }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => void placed.push(payload));
+    const attribution = {
+      version: 1 as const,
+      originSignalId: "sig-r23",
+      originDecisionRuleId: "R23_DIP_TRIGGER" as const,
+      entryKind: "first_entry" as const,
+      shadowClass: "FALLING_WITHOUT_RECOVERY" as const,
+    };
+
+    const attributedSignal = { ...makeSignal(), entryFreshEdgeAttribution: attribution };
+    for (const signal of [
+      { ...attributedSignal, signalId: "sig-r23", decisionRuleId: "R23_DIP_TRIGGER" },
+      { ...attributedSignal, signalId: "sig-outbid", decisionRuleId: "OUTBID_REPRICE" },
+      { ...attributedSignal, signalId: "sig-mismatch", decisionRuleId: "R23_DIP_TRIGGER" },
+      {
+        ...attributedSignal,
+        signalId: "sig-r23",
+        side: "sell" as const,
+        decisionRuleId: "R23_DIP_TRIGGER",
+      },
+    ]) {
+      await bus.publish("SignalApproved", { signal, market: makeMarket(), approvedAt: NOW });
+    }
+
+    expect(placed).toHaveLength(4);
+    expect(placed[0]!.command.metadata?.entryFreshEdgeAttribution).toEqual(attribution);
+    expect(placed[1]!.command.metadata?.entryFreshEdgeAttribution).toEqual(attribution);
+    expect(placed[2]!.command.metadata).not.toHaveProperty("entryFreshEdgeAttribution");
+    expect(placed[3]!.command.metadata).not.toHaveProperty("entryFreshEdgeAttribution");
+    expect(placed.map(({ command }) => [command.price, command.size, command.postOnly])).toEqual([
+      [0.09, 4 / 0.09, false],
+      [0.09, 4 / 0.09, false],
+      [0.09, 4 / 0.09, false],
+      [0.09, 100, false],
+    ]);
   });
 
   it("skips BUY conversion when position concentration headroom is below executable minimum", async () => {

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createConditionId, createTokenId, type NormalizedMarket } from "@krabs/domain";
+import {
+  createConditionId,
+  createEntryFreshEdgeAttribution,
+  createTokenId,
+  parseEntryFreshEdgeAttribution,
+  type NormalizedMarket,
+} from "@krabs/domain";
 import {
   computeEntryFreshEdgeSignalFields,
   type EntryFreshEdgeInputs,
@@ -66,6 +72,37 @@ function makeInputs(overrides: Partial<EntryFreshEdgeInputs> = {}): EntryFreshEd
 }
 
 describe("entry fresh-edge telemetry", () => {
+  it("constructs and strictly parses only the stable v1 initial-R23 contract", () => {
+    const attribution = createEntryFreshEdgeAttribution({
+      signalId: "sig-r23",
+      side: "buy",
+      decisionRuleId: "R23_DIP_TRIGGER",
+      entryKind: "first_entry",
+      shadowClass: "FALLING_WITHOUT_RECOVERY",
+    });
+
+    expect(attribution).toEqual({
+      version: 1,
+      originSignalId: "sig-r23",
+      originDecisionRuleId: "R23_DIP_TRIGGER",
+      entryKind: "first_entry",
+      shadowClass: "FALLING_WITHOUT_RECOVERY",
+    });
+    expect(parseEntryFreshEdgeAttribution(attribution)).toEqual(attribution);
+    expect(parseEntryFreshEdgeAttribution({ ...attribution, version: 2 })).toBeNull();
+    expect(parseEntryFreshEdgeAttribution({ ...attribution, extra: true })).toBeNull();
+    expect(parseEntryFreshEdgeAttribution({ ...attribution, originSignalId: "   " })).toBeNull();
+    expect(
+      createEntryFreshEdgeAttribution({
+        signalId: "sig-add",
+        side: "buy",
+        decisionRuleId: "R23_DIP_TRIGGER",
+        entryKind: "ladder_or_scale_in",
+        shadowClass: "PLAUSIBLE_DIP",
+      }),
+    ).toBeNull();
+  });
+
   it("computes percentile and tags first-entry BUY diagnostics without changing signal data", () => {
     const fields = computeEntryFreshEdgeSignalFields(makeInputs());
     const payload = JSON.parse(fields.entryFreshEdgePayloadJson ?? "{}");

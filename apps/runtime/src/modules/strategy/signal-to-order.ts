@@ -56,6 +56,7 @@ import {
   BOUNCE_EXIT_TARGET_RULE_ID,
   isBounceForceExit,
   isGateWhitelisted,
+  parseEntryFreshEdgeAttribution,
   resolveSellableShareFloor,
 } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
@@ -1687,6 +1688,13 @@ export class SignalToOrderBridge {
               side: signal.side,
             });
 
+      const parsedAttribution = parseEntryFreshEdgeAttribution(signal.entryFreshEdgeAttribution);
+      const attributionRuleValid =
+        signal.decisionRuleId === "OUTBID_REPRICE" ||
+        (signal.decisionRuleId === "R23_DIP_TRIGGER" &&
+          parsedAttribution?.originSignalId === signal.signalId);
+      const entryFreshEdgeAttribution =
+        signal.side === "buy" && attributionRuleValid ? parsedAttribution : null;
       const cmd: PlaceOrderCommand = {
         type: "PlaceOrderCommand",
         commandId: createCommandId(randomUUID()),
@@ -1729,6 +1737,7 @@ export class SignalToOrderBridge {
           ...(positionConcentrationMetadata
             ? { positionConcentration: positionConcentrationMetadata }
             : {}),
+          ...(entryFreshEdgeAttribution ? { entryFreshEdgeAttribution } : {}),
           // Bounce-exit ladder rung identity (docs/plans/2026-07-16-bounce-
           // exit-ladder-redesign.md), persisted on the order so the next
           // planning cycle's placedBounceRungIndices lookup can tell rungs

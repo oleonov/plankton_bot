@@ -68,6 +68,7 @@ import {
   S1_LADDER_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
   BOUNCE_EXIT_BACKSTOP_RULE_ID,
+  createEntryFreshEdgeAttribution,
   isGateWhitelisted,
 } from "@krabs/domain";
 import {
@@ -3299,6 +3300,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       signal.side === "buy"
         ? this.computeEntryFreshEdgeTelemetry(draft.market, now, signal, draft.logDraft.buyCount)
         : null;
+    attachEntryFreshEdgeAttribution(signal, entryFreshEdgeTelemetry);
     const entryCategoryTelemetry =
       signal.side === "buy"
         ? this.computeEntryCategoryGateTelemetry(draft.market, now, signal, draft.logDraft.buyCount)
@@ -4250,6 +4252,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     const exitTelemetry = computeExitTelemetry(side, ctx.price, now, emissionFacts);
     const entryFreshEdgeTelemetry =
       side === "buy" ? this.computeEntryFreshEdgeTelemetry(market, now, signal, buyCount) : null;
+    attachEntryFreshEdgeAttribution(signal, entryFreshEdgeTelemetry);
     const entryCategoryTelemetry =
       side === "buy" ? this.computeEntryCategoryGateTelemetry(market, now, signal, buyCount) : null;
 
@@ -4802,6 +4805,21 @@ export class AlgoDecisionModule implements RuntimeModule {
       orderId: null,
     });
   }
+}
+
+function attachEntryFreshEdgeAttribution(
+  signal: import("@krabs/domain").Signal,
+  telemetry: EntryFreshEdgeSignalFields | null,
+): void {
+  if (!telemetry?.entryFreshEdgeKind || !telemetry.entryFreshEdgeShadowClass) return;
+  const attribution = createEntryFreshEdgeAttribution({
+    signalId: signal.signalId,
+    side: signal.side,
+    decisionRuleId: signal.decisionRuleId,
+    entryKind: telemetry.entryFreshEdgeKind,
+    shadowClass: telemetry.entryFreshEdgeShadowClass,
+  });
+  if (attribution) signal.entryFreshEdgeAttribution = attribution;
 }
 
 function resolveDaysToResolve(endDate: string | null, nowMs: number): number | null {

@@ -109,6 +109,60 @@ describe("EntryLifecycleModule", () => {
     await module.stop();
   });
 
+  it("copies exact R23 attribution through a relationally proven outbid chain", async () => {
+    const bus = new InProcessEventBus();
+    const attribution = freshEdgeAttribution();
+    const origin = makeOrder({
+      orderId: createOrderId("ord-origin"),
+      signalId: attribution.originSignalId,
+      decisionRuleId: "R23_DIP_TRIGGER",
+      metadata: { entryFreshEdgeAttribution: attribution },
+    });
+    const repriced = makeOrder({
+      orderId: createOrderId("ord-repriced"),
+      signalId: "outbid-reprice:1:x",
+      decisionRuleId: "OUTBID_REPRICE",
+      metadata: { entryFreshEdgeAttribution: attribution },
+    });
+    const repo = makeOrderRepo(repriced);
+    vi.mocked(repo.findByTokenId).mockReturnValue([origin, repriced]);
+    const module = buildModule({ bus, orderRepo: repo });
+    const signals: Signal[] = [];
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+
+    await module.start();
+    await publishMarket(bus, makeMarket());
+    await publishOutbidCancel(bus, repriced);
+    await bus.drain();
+
+    expect(signals[0]?.entryFreshEdgeAttribution).toEqual(attribution);
+    await module.stop();
+  });
+
+  it("omits malformed or unproven attribution without blocking outbid reprice", async () => {
+    const bus = new InProcessEventBus();
+    const order = makeOrder({
+      decisionRuleId: "OUTBID_REPRICE",
+      metadata: { entryFreshEdgeAttribution: { ...freshEdgeAttribution(), version: 2 } },
+    });
+    const module = buildModule({ bus, orderRepo: makeOrderRepo(order) });
+    const signals: Signal[] = [];
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+
+    await module.start();
+    await publishMarket(bus, makeMarket());
+    await publishOutbidCancel(bus, order);
+    await bus.drain();
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.entryFreshEdgeAttribution).toBeUndefined();
+    await module.stop();
+  });
+
   it("does not reissue an outbid BUY when the residual is below min order size", async () => {
     const bus = new InProcessEventBus();
     const order = makeOrder({ signalId: "sig-original", price: 0.3, size: 10, sizeUsdc: 3 });
@@ -878,6 +932,28 @@ function makeRulesRepo(): AlgoRulesRepository {
       },
     ]),
   };
+}
+
+function freshEdgeAttribution() {
+  return {
+    version: 1 as const,
+    originSignalId: "sig-r23-origin",
+    originDecisionRuleId: "R23_DIP_TRIGGER" as const,
+    entryKind: "first_entry" as const,
+    shadowClass: "FALLING_WITHOUT_RECOVERY" as const,
+  };
+}
+
+async function publishOutbidCancel(bus: InProcessEventBus, order: Order): Promise<void> {
+  await bus.publish("OrderCancelled", {
+    commandId: "cmd-outbid" as never,
+    orderId: order.orderId,
+    tokenId: order.tokenId,
+    conditionId: order.conditionId,
+    reason: "outbid_repriced",
+    signalReason: order.signalReason,
+    timestamp: 1_000,
+  });
 }
 
 function makeOrder(overrides: Partial<Order> = {}): Order {

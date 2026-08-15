@@ -1254,6 +1254,7 @@ describe("AlgoDecisionModule", () => {
     expect(signal.side).toBe("buy");
     expect(signal.suggestedPrice).toBe(0.45);
     expect(signal.suggestedSizeUsdc).toBeCloseTo(0.99, 5);
+    expect(signal.entryFreshEdgeAttribution).toBeUndefined();
 
     const logged = vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]?.[0];
     expect(logged).toMatchObject({
@@ -1311,8 +1312,16 @@ describe("AlgoDecisionModule", () => {
     });
     await mod.start();
 
+    const market = makeMarket(tokenId, null, 0.3);
+    (mod as any).marketCache.set(tokenId, market);
+    const direct = await (mod as any).evaluateToken(createTokenId(tokenId), Date.now(), () => 0);
+    expect(direct.signal.entryFreshEdgeAttribution).toMatchObject({
+      originSignalId: direct.signal.signalId,
+      originDecisionRuleId: "R23_DIP_TRIGGER",
+      entryKind: "first_entry",
+    });
     await (bus as any).emit("NormalizedMarketUpdated", {
-      markets: [makeMarket(tokenId, null, 0.3)],
+      markets: [market],
       timestamp: Date.now(),
     });
 
@@ -1323,6 +1332,13 @@ describe("AlgoDecisionModule", () => {
     const signal = signalCalls[0]![1].signal as import("@krabs/domain").Signal;
     expect(signal.side).toBe("buy");
     expect(signal.decisionRuleId).toBe("R23_DIP_TRIGGER");
+    expect(signal.entryFreshEdgeAttribution).toEqual({
+      version: 1,
+      originSignalId: signal.signalId,
+      originDecisionRuleId: "R23_DIP_TRIGGER",
+      entryKind: "first_entry",
+      shadowClass: expect.any(String),
+    });
     expect(priceHistoryProvider.maxMidpointInWindow).toHaveBeenCalledWith(
       createTokenId(tokenId),
       86_400_000,
@@ -1342,7 +1358,6 @@ describe("AlgoDecisionModule", () => {
         }),
       }),
     );
-
     await mod.stop();
   });
 
@@ -2279,6 +2294,7 @@ describe("AlgoDecisionModule", () => {
     expect(signalCalls).toHaveLength(1);
     const signal = signalCalls[0]![1].signal as import("@krabs/domain").Signal;
     expect(signal.side).toBe("sell");
+    expect(signal.entryFreshEdgeAttribution).toBeUndefined();
     expect(signal.suggestedSize).toBeLessThan(5);
     expect(signal.decisionRuleId).toBe("D7-SELL-S1");
 

@@ -46,6 +46,15 @@ import { resnapPriceToTick } from "../executable-price.js";
 const BOT_RUN_ID = createBotRunId("test-phase2-retry");
 const TOKEN_ID = createTokenId("tok-yes");
 const CONDITION_ID = createConditionId("cond-1");
+const FRESH_EDGE_METADATA = {
+  entryFreshEdgeAttribution: {
+    version: 1,
+    originSignalId: "sig-r23",
+    originDecisionRuleId: "R23_DIP_TRIGGER",
+    entryKind: "first_entry",
+    shadowClass: "PLAUSIBLE_DIP",
+  },
+} as const;
 
 const silentLog = {
   info: vi.fn(),
@@ -239,7 +248,13 @@ describe("ExecutionModule — Phase 2 in-attempt invalid-tick retry", () => {
 
     await mod.start();
     await bus.publish("PlaceOrderRequested", {
-      command: makeCmd({ price: 0.155, tickSize: 0.001, side: "buy", negRisk: true }),
+      command: makeCmd({
+        price: 0.155,
+        tickSize: 0.001,
+        side: "buy",
+        negRisk: true,
+        metadata: FRESH_EDGE_METADATA,
+      }),
       timestamp: Date.now(),
     });
 
@@ -258,6 +273,7 @@ describe("ExecutionModule — Phase 2 in-attempt invalid-tick retry", () => {
     const saved = orderRepo.save.mock.calls[0]![0];
     expect(saved.status).toBe("open");
     expect(saved.price).toBeCloseTo(0.15, 10);
+    expect(saved.metadata).toEqual(FRESH_EDGE_METADATA);
 
     // OrderPlaced published with retry price; no OrderRejected.
     expect(placed).toHaveLength(1);
@@ -524,7 +540,10 @@ describe("ExecutionModule — Phase 2 in-attempt invalid-tick retry", () => {
     });
 
     await mod.start();
-    await bus.publish("PlaceOrderRequested", { command: makeCmd(), timestamp: Date.now() });
+    await bus.publish("PlaceOrderRequested", {
+      command: makeCmd({ metadata: FRESH_EDGE_METADATA }),
+      timestamp: Date.now(),
+    });
 
     expect(gateway.prepareOrder).toHaveBeenCalledTimes(2);
     expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(2);
@@ -532,7 +551,11 @@ describe("ExecutionModule — Phase 2 in-attempt invalid-tick retry", () => {
       "0xold",
       expect.anything(),
     );
-    expect(row).toMatchObject({ orderId: "0xnew", status: "open" });
+    expect(row).toMatchObject({
+      orderId: "0xnew",
+      status: "open",
+      metadata: { ...FRESH_EDGE_METADATA, orderSource: "strategy" },
+    });
     await mod.stop();
   });
 

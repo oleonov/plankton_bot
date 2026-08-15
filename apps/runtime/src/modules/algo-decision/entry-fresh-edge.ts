@@ -1,14 +1,9 @@
-import type { NormalizedMarket } from "@krabs/domain";
+import type {
+  EntryFreshEdgeKind,
+  EntryFreshEdgeShadowClass,
+  NormalizedMarket,
+} from "@krabs/domain";
 import type { MidpointWindowStats } from "./market-snapshot-price-history.js";
-
-export type EntryFreshEdgeKind = "first_entry" | "ladder_or_scale_in";
-
-export type EntryFreshEdgeShadowClass =
-  | "FRESH_EDGE_UNKNOWN"
-  | "PLAUSIBLE_DIP"
-  | "AFTER_PUMP_EXPENSIVE"
-  | "FALLING_WITHOUT_RECOVERY"
-  | "RANGE_DATA_UNAVAILABLE";
 
 export interface EntryFreshEdgeWindowPayload {
   windowMs: number;

@@ -210,6 +210,23 @@ export interface BounceRungMetadata {
   isCleanupRung?: boolean;
 }
 
+export type EntryFreshEdgeKind = "first_entry" | "ladder_or_scale_in";
+
+export type EntryFreshEdgeShadowClass =
+  | "FRESH_EDGE_UNKNOWN"
+  | "PLAUSIBLE_DIP"
+  | "AFTER_PUMP_EXPENSIVE"
+  | "FALLING_WITHOUT_RECOVERY"
+  | "RANGE_DATA_UNAVAILABLE";
+
+export interface EntryFreshEdgeAttribution {
+  readonly version: 1;
+  readonly originSignalId: string;
+  readonly originDecisionRuleId: "R23_DIP_TRIGGER";
+  readonly entryKind: "first_entry";
+  readonly shadowClass: EntryFreshEdgeShadowClass;
+}
+
 export interface Signal {
   signalId: string;
   tokenId: TokenId;
@@ -225,6 +242,7 @@ export interface Signal {
   decisionRuleId: string | null;
   sizingRuleId: string | null;
   generatedAt: string; // ISO timestamp
+  entryFreshEdgeAttribution?: EntryFreshEdgeAttribution;
   bounceRung?: BounceRungMetadata;
   /**
    * Release A Phase 3: exact originating position identity, carried from the
@@ -265,18 +283,76 @@ export interface DecisionSignalLog {
   exitPnlBucket: ExitPnlBucket | null;
   soldBoughtRatio: number | null;
   soldBoughtRatioBucket: SoldBoughtRatioBucket | null;
-  entryFreshEdgeKind?: "first_entry" | "ladder_or_scale_in" | null;
-  entryFreshEdgeShadowClass?:
-    | "FRESH_EDGE_UNKNOWN"
-    | "PLAUSIBLE_DIP"
-    | "AFTER_PUMP_EXPENSIVE"
-    | "FALLING_WITHOUT_RECOVERY"
-    | "RANGE_DATA_UNAVAILABLE"
-    | null;
+  entryFreshEdgeKind?: EntryFreshEdgeKind | null;
+  entryFreshEdgeShadowClass?: EntryFreshEdgeShadowClass | null;
   entryFreshEdgePayloadJson?: string | null;
   entryCategory?: V4SelectionCategory | null;
   entryCategoryGateClass?: EntryCategoryGateClass | null;
   entryCategoryPayloadJson?: string | null;
+}
+
+const ENTRY_FRESH_EDGE_CLASSES = new Set<EntryFreshEdgeShadowClass>([
+  "FRESH_EDGE_UNKNOWN",
+  "PLAUSIBLE_DIP",
+  "AFTER_PUMP_EXPENSIVE",
+  "FALLING_WITHOUT_RECOVERY",
+  "RANGE_DATA_UNAVAILABLE",
+]);
+
+const ENTRY_FRESH_EDGE_ATTRIBUTION_KEYS = new Set([
+  "version",
+  "originSignalId",
+  "originDecisionRuleId",
+  "entryKind",
+  "shadowClass",
+]);
+
+export function createEntryFreshEdgeAttribution(input: {
+  signalId: string;
+  side: OrderSide;
+  decisionRuleId: string | null;
+  entryKind: EntryFreshEdgeKind;
+  shadowClass: EntryFreshEdgeShadowClass;
+}): EntryFreshEdgeAttribution | null {
+  if (
+    input.side !== "buy" ||
+    input.decisionRuleId !== "R23_DIP_TRIGGER" ||
+    input.entryKind !== "first_entry"
+  ) {
+    return null;
+  }
+  return {
+    version: 1,
+    originSignalId: input.signalId,
+    originDecisionRuleId: "R23_DIP_TRIGGER",
+    entryKind: "first_entry",
+    shadowClass: input.shadowClass,
+  };
+}
+
+export function parseEntryFreshEdgeAttribution(value: unknown): EntryFreshEdgeAttribution | null {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== ENTRY_FRESH_EDGE_ATTRIBUTION_KEYS.size ||
+    keys.some((key) => !ENTRY_FRESH_EDGE_ATTRIBUTION_KEYS.has(key)) ||
+    record.version !== 1 ||
+    typeof record.originSignalId !== "string" ||
+    record.originSignalId.trim().length === 0 ||
+    record.originDecisionRuleId !== "R23_DIP_TRIGGER" ||
+    record.entryKind !== "first_entry" ||
+    !ENTRY_FRESH_EDGE_CLASSES.has(record.shadowClass as EntryFreshEdgeShadowClass)
+  ) {
+    return null;
+  }
+  return {
+    version: 1,
+    originSignalId: record.originSignalId,
+    originDecisionRuleId: "R23_DIP_TRIGGER",
+    entryKind: "first_entry",
+    shadowClass: record.shadowClass as EntryFreshEdgeShadowClass,
+  };
 }
 
 /**

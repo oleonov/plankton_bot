@@ -23,6 +23,7 @@ import {
   createConditionId,
   deriveState,
   evaluateSize,
+  parseEntryFreshEdgeAttribution,
   resolveSignalReason,
 } from "@krabs/domain";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
@@ -398,6 +399,7 @@ export class EntryLifecycleModule implements RuntimeModule {
       return null;
     }
     const suggestedSizeUsdc = remainingSize * price;
+    const entryFreshEdgeAttribution = this.resolveRepriceAttribution(order);
     return {
       signalId: buildRepriceSignalId(repriceCount),
       tokenId: order.tokenId,
@@ -415,7 +417,28 @@ export class EntryLifecycleModule implements RuntimeModule {
       decisionRuleId: "OUTBID_REPRICE",
       sizingRuleId: null,
       generatedAt: new Date(nowMs).toISOString(),
+      ...(entryFreshEdgeAttribution ? { entryFreshEdgeAttribution } : {}),
     };
+  }
+
+  private resolveRepriceAttribution(order: Order) {
+    const attribution = parseEntryFreshEdgeAttribution(order.metadata?.entryFreshEdgeAttribution);
+    if (!attribution) return null;
+    if (order.decisionRuleId === "R23_DIP_TRIGGER") {
+      return order.signalId === attribution.originSignalId ? attribution : null;
+    }
+    if (order.decisionRuleId !== "OUTBID_REPRICE") return null;
+    const origins = this.deps.orderRepo.findByTokenId(order.tokenId).filter((candidate) => {
+      const parsed = parseEntryFreshEdgeAttribution(candidate.metadata?.entryFreshEdgeAttribution);
+      return (
+        candidate.side === "buy" &&
+        candidate.conditionId === order.conditionId &&
+        candidate.decisionRuleId === "R23_DIP_TRIGGER" &&
+        candidate.signalId === attribution.originSignalId &&
+        JSON.stringify(parsed) === JSON.stringify(attribution)
+      );
+    });
+    return origins.length === 1 ? attribution : null;
   }
 
   private async publishSignal(signal: Signal, market: NormalizedMarket): Promise<void> {
