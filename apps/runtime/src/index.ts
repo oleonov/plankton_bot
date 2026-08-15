@@ -167,7 +167,12 @@ import { ReconciliationModule } from "./modules/reconciliation/reconciliation-mo
 import { ResolutionModule } from "./modules/resolution/resolution-module.js";
 import { UserOrderStreamModule } from "./modules/reconciliation/user-order-stream-module.js";
 import { InventoryManagerModule } from "./modules/inventory-auto-merge/inventory-manager-module.js";
-import { recoverConfirmedOnchainMerges } from "./modules/inventory-auto-merge/recover-onchain-merges.js";
+import {
+  recoverConfirmedOnchainMerges,
+  resolveAppliedMergeReplacementRepairs,
+  resolveCurrentMergeRecoveryReplayPosition,
+  resolveMergeRecoveryReplayPositions,
+} from "./modules/inventory-auto-merge/recover-onchain-merges.js";
 import { FillPollerModule } from "./modules/fill-poller/fill-poller-module.js";
 import { LedgerRetentionModule } from "./modules/retention/ledger-retention-module.js";
 import { DbSizeGuardModule } from "./modules/db-size-guard/db-size-guard-module.js";
@@ -200,7 +205,10 @@ import { findActivePositionRows } from "./active-positions.js";
 import { calculateTotalExposure } from "./exposure-calculator.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
 import { resolveActiveProfile } from "./profile-boot.js";
-import { runStartupPositionAdoption } from "./startup-position-adoption.js";
+import {
+  rebuildLegStatesFromLedger,
+  runStartupPositionAdoption,
+} from "./startup-position-adoption.js";
 import {
   DrainedOrderUnfencedError,
   reportAbandonedDrainWaiver,
@@ -2887,6 +2895,29 @@ async function main(): Promise<void> {
       "exchange gateway missing getOrderResult — cannot resolve pending orders at startup",
     );
   }
+
+  // An on-chain merge is already irreversible. Recover it before adoption, the first startup
+  // operation that can delete and recreate its recorded position identities. Their current rows are
+  // resolved immediately before replay after supervisor.start(), while the startup fence is latched.
+  let onchainMergeRecovery: Awaited<ReturnType<typeof recoverConfirmedOnchainMerges>>;
+  try {
+    onchainMergeRecovery = await recoverConfirmedOnchainMerges({
+      bus,
+      positionRepo: repos.position,
+      orderRepo: repos.order,
+      marketRepo: repos.market,
+      fillRepo: repos.fill,
+      lotRepo: repos.inventoryLot,
+      mergeLedgerRepo: repos.mergeLedger,
+      db: ledgerConn.db,
+      log,
+      runtimeMetrics,
+    });
+  } catch (err) {
+    persistFailedStartupState(controlConn.db, log, "on-chain merge recovery abort");
+    throw err;
+  }
+
   const startupAdoptionDeps = {
     gateway: {
       getFillsResult,
@@ -2944,54 +2975,6 @@ async function main(): Promise<void> {
   if (liveLiteConfig) {
     log.info("running pre-supervisor reconciliation for live-lite preflight");
     await reconciliationModule.runReconciliation();
-  }
-
-  // Settle merges a previous process left provably on chain but locally unapplied.
-  //
-  // UNCONDITIONAL on purpose — it is NOT gated on ENABLE_INVENTORY_AUTO_MERGE. Restoring local
-  // state needs no relayer and no settlement client: the chain already moved, and this only
-  // consumes the FIFO lots, books the spread P&L and closes the positions the merge consumed.
-  // Gating it on the flag made the repair disappear exactly when it was needed — an operator who
-  // disables auto-merge (as the INVENTORY_AUTO_MERGE_REQUIRES_RELAYER preflight blocker tells them
-  // to) would leave an 'onchain' row fenced forever. Only NEW submissions stay feature-gated.
-  //
-  // BEFORE the ownership gate and the preflight on purpose: BOTH of them judge the runtime by the
-  // positions table, and an unapplied merge leaves both legs open with their full cost basis still
-  // booked. An operator who lowers `maxOpenValueUsdc` after such a crash would trip
-  // EXPOSURE_EXCEEDS_CAP on phantom exposure, `process.exit(1)` at the preflight, and never reach
-  // the repair — every restart repeating it. The repair must run before anything is allowed to
-  // refuse to boot over the state it repairs. It stays after startup adoption and reconciliation,
-  // which is where the positions it reads are hydrated from.
-  //
-  // Still before supervisor.start(): every module hydrates afterwards, so none of them can be left
-  // holding a pre-repair view of a position this closed. The two PositionUpdated publishes inside
-  // the helper DO have no subscribers this early — that was the r12-P2 defect, not a harmless
-  // no-op: a merge settled here is lost to every event-driven cache unless something replays it
-  // once subscribers exist. That replay is what the `settled` field captured below is for — see
-  // the publish loop right after `supervisor.start()`.
-  //
-  // The abort persist mirrors the startup-adoption one above, and is what moving this call earlier
-  // costs: an error that escapes the per-row catch (a repository/DB failure in the candidate scan)
-  // now reaches only the top-level handler, which exits WITHOUT recording the boot as failed —
-  // and it happens before the preflight report and before `publishFailed()` exists. Without this,
-  // an aborted boot would leave `running, paused=0` for a deploy's resume-intent to act on.
-  let onchainMergeRecovery: Awaited<ReturnType<typeof recoverConfirmedOnchainMerges>>;
-  try {
-    onchainMergeRecovery = await recoverConfirmedOnchainMerges({
-      bus,
-      positionRepo: repos.position,
-      orderRepo: repos.order,
-      marketRepo: repos.market,
-      fillRepo: repos.fill,
-      lotRepo: repos.inventoryLot,
-      mergeLedgerRepo: repos.mergeLedger,
-      db: ledgerConn.db,
-      log,
-      runtimeMetrics,
-    });
-  } catch (err) {
-    persistFailedStartupState(controlConn.db, log, "on-chain merge recovery abort");
-    throw err;
   }
 
   // Read active switch request ID (if this boot is part of a profile switch)
@@ -3156,33 +3139,44 @@ async function main(): Promise<void> {
 
     await supervisor.start();
 
-    // r12-P2: replay the merges `recoverConfirmedOnchainMerges` already settled BEFORE
-    // supervisor.start() — its own publishes landed on a bus nobody had subscribed to yet, so
-    // every event-driven cache (leg state, S1/profile ownership, exposure) missed them. Every
-    // module has now hydrated via `supervisor.start()`, so replaying here is the first point a
-    // publish actually reaches a subscriber. Still safely BEFORE `seedStartupTransitions` and
-    // `endStartupFence`: the startup fence is still latched, so nothing downstream can act on
-    // these positions by placing a competing order before the barrier is seeded. A publish
-    // failure here must not abort the boot — the merge itself already settled successfully; a
-    // stale cache is a degraded-but-running state, not a reason to crash-loop the process.
-    for (const position of onchainMergeRecovery.settled) {
+    await executionModule.seedStartupTransitions(startupAdoption.drainTargets);
+
+    const replacementRepairs = resolveAppliedMergeReplacementRepairs(ledgerConn.db, repos.position);
+    const replacementTokens = new Set(replacementRepairs.map((position) => position.tokenId));
+    for (const position of replacementRepairs) repos.legState.delete(position.tokenId);
+    const rebuiltLegStates = rebuildLegStatesFromLedger(
+      startupAdoptionDeps,
+      {
+        ...startupAdoption,
+        seededLegStates: 0,
+        alreadyPresentLegStates: 0,
+        positionsWithoutFills: [],
+      },
+      log,
+      replacementTokens,
+    );
+    for (const legState of rebuiltLegStates) {
+      await bus.publish("LegStateUpdated", { legState, timestamp: Date.now() });
+    }
+    for (const position of [
+      ...resolveMergeRecoveryReplayPositions(
+        repos.position,
+        onchainMergeRecovery.settled,
+        replacementTokens,
+      ),
+      ...replacementRepairs,
+    ]) {
+      const currentPosition = resolveCurrentMergeRecoveryReplayPosition(repos.position, position);
+      if (!currentPosition) continue;
       try {
-        await bus.publish("PositionUpdated", { position });
+        await bus.publish("PositionUpdated", { position: currentPosition });
       } catch (err) {
         log.error(
-          { positionId: position.positionId, err: String(err) },
+          { positionId: currentPosition.positionId, err: String(err) },
           "failed to replay a startup merge-recovery position update — event-driven caches may hold pre-merge state",
         );
       }
     }
-
-    // Release A Phase 3 (P6): drain any stale/reopening-risk working order the
-    // startup fence classified, via the SAME barrier machinery the live gate
-    // uses. Must run AFTER supervisor.start() — ExecutionModule's OrderCancelled/
-    // FillReceived subscriptions (wired in its own start()) are what actually
-    // consume the cancel-confirmation, and must run BEFORE any other module gets
-    // a chance to place a competing order for a still-draining token.
-    await executionModule.seedStartupTransitions(startupAdoption.drainTargets);
 
     // `bounceAppliesToAllMarkets` was read before `supervisor.start()`, and the policy is NOT a boot
     // constant: `currentExecutionPolicy()` re-reads control.db on every call with no throttle, so an

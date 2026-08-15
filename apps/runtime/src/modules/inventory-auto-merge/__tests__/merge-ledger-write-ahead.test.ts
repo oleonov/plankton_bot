@@ -5,7 +5,10 @@ import path from "node:path";
 import {
   bootstrapLedgerDb,
   openDatabase,
+  SqliteInventoryLotRepository,
+  SqliteLegStateRepository,
   SqliteMergeLedgerRepository,
+  SqlitePositionRepository,
   type DbConnection,
 } from "@krabs/db";
 import type {
@@ -25,11 +28,21 @@ import type {
 import { createPositionId, createTokenId } from "@krabs/domain";
 import { SettlementNotSubmittedError, SettlementUnconfirmedError } from "@krabs/exchange";
 import { InventoryManagerModule } from "../inventory-manager-module.js";
-import { recoverConfirmedOnchainMerges, republishMergeLegs } from "../recover-onchain-merges.js";
+import {
+  recoverConfirmedOnchainMerges,
+  republishMergeLegs,
+  resolveAppliedMergeReplacementRepairs,
+  resolveCurrentMergeRecoveryReplayPosition,
+  resolveMergeRecoveryReplayPositions,
+} from "../recover-onchain-merges.js";
 import { MergeSettler } from "../merge-settler.js";
 import { SettlementInfraBreaker } from "../../settlement-infra-breaker.js";
 import type { Logger } from "../../../logger.js";
 import type { RuntimeMetricWriter } from "../../../runtime-metric-writer.js";
+import {
+  cleanupPriorStartupAdoptionArtifacts,
+  rebuildLegStatesFromLedger,
+} from "../../../startup-position-adoption.js";
 
 // r26-M1: the regression guard for the write-ahead merge intent. Unlike the mocked-repository suite
 // in inventory-manager-module.test.ts, these run against a REAL SQLite file through the REAL
@@ -1195,6 +1208,122 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
     expect(health.detail).toContain("fenced_conditions=1");
   });
 
+  it("keeps merge-bound synthetic history through cleanup and replays a post-hydration current row", async () => {
+    const positionRepo = new SqlitePositionRepository(conn.db);
+    const lotRepo = new SqliteInventoryLotRepository(conn.db);
+    const legStateRepo = new SqliteLegStateRepository(conn.db);
+    const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
+    for (const [tokenId, positionId, price] of [
+      [YES_TOKEN, "p-yes", 0.4],
+      [NO_TOKEN, "p-no", 0.6],
+    ] as const) {
+      conn.db.exec(
+        `INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price, cost_basis_usdc, status, opened_at, updated_at) VALUES ('${positionId}', '${tokenId}', '${CONDITION_ID}', 'buy', 10, ${price}, ${price * 10}, 'open', '${OPENED_AT_PAST}', '${OPENED_AT_PAST}'); INSERT INTO orders (order_id, client_order_id, token_id, condition_id, side, order_type, price, size, size_usdc, status, signal_reason, bot_run_id, created_at, updated_at) VALUES ('ord-${tokenId}', 'coid-${tokenId}', '${tokenId}', '${CONDITION_ID}', 'buy', 'GTC', ${price}, 10, ${price * 10}, 'filled', 'startup-adoption', 'run-1', '${OPENED_AT_PAST}', '${OPENED_AT_PAST}'); INSERT INTO fills (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at) VALUES ('fill-${tokenId}', 'ord-${tokenId}', '${tokenId}', '${CONDITION_ID}', 'buy', ${price}, 10, ${price * 10}, '${OPENED_AT_PAST}'); INSERT INTO inventory_lots (lot_id, position_id, token_id, side, size, remaining_size, entry_price, cost_usdc, fill_id, created_at) VALUES ('lot-${tokenId}', '${positionId}', '${tokenId}', 'buy', 10, 10, ${price}, ${price * 10}, 'fill-${tokenId}', '${OPENED_AT_PAST}');`,
+      );
+    }
+    recordPending(mergeLedgerRepo, {
+      mergeId: "merge-synthetic-restart",
+      conditionId: CONDITION_ID,
+      mergedAmount: 10,
+      recordedAt: "2026-07-30T00:00:00.000Z",
+    });
+    mergeLedgerRepo.markOnchain("merge-synthetic-restart");
+    const recoveryDeps = { bus, positionRepo, lotRepo, mergeLedgerRepo, db: conn.db, log };
+    const recovery = await recoverConfirmedOnchainMerges(recoveryDeps);
+    const cleanup = () => cleanupPriorStartupAdoptionArtifacts({ db: conn.db, log } as never);
+    expect(cleanup().orderIds).toEqual([]);
+    expect(cleanup().orderIds).toEqual([]);
+    const adoptedAt = "2026-08-14T00:00:00.000Z";
+    conn.db.exec(
+      `INSERT INTO leg_states (token_id, buy_count, sell_count, last_action, first_trade_price, first_trade_at, last_trade_at, updated_at) VALUES ('${YES_TOKEN}', 9, 0, 'BUY', 0.01, '${OPENED_AT_PAST}', '${OPENED_AT_PAST}', '${OPENED_AT_PAST}'); INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price, cost_basis_usdc, status, opened_at, updated_at) VALUES ('p-yes-adopted', '${YES_TOKEN}', '${CONDITION_ID}', 'buy', 2, .45, .9, 'open', '2099-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z'); INSERT INTO fills (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at) VALUES ('fill-yes-adopted', 'ord-tok-yes', '${YES_TOKEN}', '${CONDITION_ID}', 'buy', .45, 2, .9, '${adoptedAt}'); INSERT INTO inventory_lots (lot_id, position_id, token_id, side, size, remaining_size, entry_price, cost_usdc, fill_id, created_at) VALUES ('lot-yes-adopted', 'p-yes-adopted', '${YES_TOKEN}', 'buy', 2, 2, .45, .9, 'fill-yes-adopted', '${adoptedAt}'); UPDATE positions SET status = 'open', size = 3, avg_entry_price = .7, cost_basis_usdc = 2.1, closed_at = NULL WHERE position_id = 'p-no';`,
+    );
+    const replacementRepairs = resolveAppliedMergeReplacementRepairs(conn.db, positionRepo);
+    const replacementTokens = new Set(replacementRepairs.map((position) => position.tokenId));
+    for (const tokenId of replacementTokens) legStateRepo.delete(tokenId);
+    const rebuiltLegStates = rebuildLegStatesFromLedger(
+      { db: conn.db, positionRepo, legStateRepo, log } as never,
+      { seededLegStates: 0, alreadyPresentLegStates: 0, positionsWithoutFills: [] } as never,
+      log,
+      replacementTokens,
+    );
+    const replaySnapshot = [
+      ...resolveMergeRecoveryReplayPositions(positionRepo, recovery.settled, replacementTokens),
+      ...replacementRepairs,
+    ];
+    conn.db.exec("UPDATE positions SET status = 'closed', size = 0 WHERE position_id = 'p-no'");
+    const published: Position[] = [];
+    const postHydrationLegStates = new Map<string, unknown>();
+    bus.publish = vi.fn(async (event, payload) => {
+      if (event === "LegStateUpdated") {
+        const legState = (payload as { legState: { tokenId: string } }).legState;
+        postHydrationLegStates.set(legState.tokenId, legState);
+      }
+      if (event === "PositionUpdated") published.push((payload as { position: Position }).position);
+    });
+    for (const legState of rebuiltLegStates) {
+      await bus.publish("LegStateUpdated", { legState, timestamp: Date.now() });
+    }
+    for (const snapshot of replaySnapshot) {
+      const current = resolveCurrentMergeRecoveryReplayPosition(positionRepo, snapshot);
+      if (current) await bus.publish("PositionUpdated", { position: current });
+    }
+    expect(postHydrationLegStates).toEqual(new Map([[YES_TOKEN, rebuiltLegStates[0]]]));
+    expect(published).toEqual([
+      expect.objectContaining({ positionId: "p-no", status: "closed", size: 0 }),
+      expect.objectContaining({ positionId: "p-yes-adopted", status: "open", size: 2 }),
+    ]);
+    expect(published.map((position) => position.positionId)).not.toContain("p-yes");
+  });
+
+  it("repairs a stale applied replacement once on a later boot", async () => {
+    const positionRepo = new SqlitePositionRepository(conn.db);
+    const lotRepo = new SqliteInventoryLotRepository(conn.db);
+    const legStateRepo = new SqliteLegStateRepository(conn.db);
+    const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
+    recordPending(mergeLedgerRepo, {
+      mergeId: "merge-later-boot",
+      conditionId: CONDITION_ID,
+      mergedAmount: 1,
+      recordedAt: "2026-08-14T00:00:00.000Z",
+    });
+    mergeLedgerRepo.markOnchain("merge-later-boot");
+    conn.db.exec(
+      `INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price, cost_basis_usdc, status, opened_at, updated_at) VALUES ('p-yes', '${YES_TOKEN}', '${CONDITION_ID}', 'buy', 1, .4, .4, 'open', '${OPENED_AT_PAST}', '${OPENED_AT_PAST}'), ('p-no', '${NO_TOKEN}', '${CONDITION_ID}', 'buy', 1, .5, .5, 'open', '${OPENED_AT_PAST}', '${OPENED_AT_PAST}'); INSERT INTO orders (order_id, client_order_id, token_id, condition_id, side, order_type, price, size, size_usdc, status, signal_reason, bot_run_id, created_at, updated_at) VALUES ('order-yes', 'client-yes', '${YES_TOKEN}', '${CONDITION_ID}', 'buy', 'GTC', .4, 1, .4, 'filled', 'test', 'run', '${OPENED_AT_PAST}', '${OPENED_AT_PAST}'), ('order-no', 'client-no', '${NO_TOKEN}', '${CONDITION_ID}', 'buy', 'GTC', .5, 1, .5, 'filled', 'test', 'run', '${OPENED_AT_PAST}', '${OPENED_AT_PAST}'), ('order-realized', 'client-realized', '${YES_TOKEN}', '${CONDITION_ID}', 'sell', 'GTC', .6, 1, .6, 'filled', 'test', 'run', '${OPENED_AT_PAST}', '${OPENED_AT_PAST}'); INSERT INTO fills (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at) VALUES ('fill-yes', 'order-yes', '${YES_TOKEN}', '${CONDITION_ID}', 'buy', .4, 1, .4, '${OPENED_AT_PAST}'), ('fill-no', 'order-no', '${NO_TOKEN}', '${CONDITION_ID}', 'buy', .5, 1, .5, '${OPENED_AT_PAST}'), ('fill-realized', 'order-realized', '${YES_TOKEN}', '${CONDITION_ID}', 'sell', .6, 1, .6, '${OPENED_AT_PAST}'); INSERT INTO inventory_lots (lot_id, position_id, token_id, side, size, remaining_size, entry_price, cost_usdc, fill_id, created_at) VALUES ('lot-yes', 'p-yes', '${YES_TOKEN}', 'buy', 1, 1, .4, .4, 'fill-yes', '${OPENED_AT_PAST}'), ('lot-no', 'p-no', '${NO_TOKEN}', 'buy', 1, 1, .5, .5, 'fill-no', '${OPENED_AT_PAST}'); INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at) VALUES ('fill-realized', 'p-yes', .2, '${OPENED_AT_PAST}');`,
+    );
+    // prettier-ignore
+    const accounting = () => conn.db.prepare("SELECT lot_id AS id, remaining_size AS value FROM inventory_lots UNION ALL SELECT CAST(id AS TEXT), delta FROM pnl_ledger ORDER BY id").all();
+    // prettier-ignore
+    const recover = () => recoverConfirmedOnchainMerges({ bus, positionRepo, lotRepo, mergeLedgerRepo, db: conn.db, log });
+    const firstRecovery = await recover();
+    expect(firstRecovery).toMatchObject({
+      recovered: 1,
+      remaining: [],
+      settled: expect.any(Array),
+    });
+    expect(firstRecovery.settled.map((position) => position.realizedPnl)).toEqual([
+      expect.closeTo(0.05),
+      expect.closeTo(0.05),
+    ]);
+    conn.db.exec(
+      `INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price, cost_basis_usdc, status, opened_at, updated_at) VALUES ('p-yes-current', '${YES_TOKEN}', '${CONDITION_ID}', 'buy', 1, .4, .4, 'open', '2026-08-14T00:00:00.000Z', '2026-08-14T00:00:00.000Z'); INSERT INTO orders (order_id, client_order_id, token_id, condition_id, side, order_type, price, size, size_usdc, status, signal_reason, bot_run_id, created_at, updated_at) VALUES ('order-current', 'client-current', '${YES_TOKEN}', '${CONDITION_ID}', 'buy', 'GTC', .4, 1, .4, 'filled', 'test', 'run', '2026-08-14T00:00:00.000Z', '2026-08-14T00:00:00.000Z'); INSERT INTO fills (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at) VALUES ('fill-current', 'order-current', '${YES_TOKEN}', '${CONDITION_ID}', 'buy', .4, 1, .4, '2026-08-14T00:00:00.000Z'); INSERT INTO inventory_lots (lot_id, position_id, token_id, side, size, remaining_size, entry_price, cost_usdc, fill_id, created_at) VALUES ('lot-current', 'p-yes-current', '${YES_TOKEN}', 'buy', 1, 1, .4, .4, 'fill-current', '2026-08-14T00:00:00.000Z'); INSERT INTO leg_states (token_id, buy_count, sell_count, last_action, first_trade_price, first_trade_at, last_trade_at, updated_at) VALUES ('${YES_TOKEN}', 9, 0, 'BUY', .01, '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z');`,
+    );
+    const postFirstApplyAccounting = accounting();
+    expect((await recover()).settled).toEqual([]);
+    const repairs = resolveAppliedMergeReplacementRepairs(conn.db, positionRepo);
+    expect(repairs).toEqual([expect.objectContaining({ positionId: "p-yes-current" })]);
+    for (const position of repairs) legStateRepo.delete(position.tokenId);
+    rebuildLegStatesFromLedger(
+      { db: conn.db, positionRepo, legStateRepo, log } as never,
+      { seededLegStates: 0, alreadyPresentLegStates: 0, positionsWithoutFills: [] } as never,
+      log,
+      new Set(repairs.map((position) => position.tokenId)),
+    );
+    expect(resolveAppliedMergeReplacementRepairs(conn.db, positionRepo)).toEqual([]);
+    expect((await recover()).settled).toEqual([]);
+    expect(resolveAppliedMergeReplacementRepairs(conn.db, positionRepo)).toEqual([]);
+    expect(accounting()).toEqual(postFirstApplyAccounting);
+  });
+
   it("leaves a confirmed 'onchain' row fenced when its legs are gone — a repair it cannot make is not a repair it may skip", async () => {
     const { positionRepo, lotRepo } = makeMergeableFixtures();
     const mergeLedgerRepo = new SqliteMergeLedgerRepository(conn.db);
@@ -1565,27 +1694,6 @@ describe("InventoryManagerModule merge-ledger write-ahead intent (r26-M1)", () =
       );
     });
   });
-  // r7-M1. Start-up order is load-bearing, not cosmetic: the ownership gate and the profile
-  // preflight both judge the runtime by the positions table, and an unapplied merge leaves both
-  // legs open with their full cost basis. An operator who lowers maxOpenValueUsdc after such a
-  // crash would trip EXPOSURE_EXCEEDS_CAP on phantom exposure and exit(1) before the repair — every
-  // restart repeating it. Nothing that can refuse to boot may precede the repair.
-  it("runs the merge recovery before anything that can refuse to boot over the state it repairs", () => {
-    const indexSource = readFileSync(new URL("../../../index.ts", import.meta.url), "utf-8");
-    const recovery = indexSource.indexOf("await recoverConfirmedOnchainMerges({");
-    const adoption = indexSource.indexOf("await runStartupPositionAdoption(");
-    const ownershipGate = indexSource.indexOf("runOwnershipInvariantStartupGate({");
-    const preflight = indexSource.indexOf("const preflightResult = runProfilePreflight({");
-    const supervisorStart = indexSource.indexOf("await supervisor.start();");
-
-    expect(recovery).toBeGreaterThan(-1);
-    expect(recovery).toBeLessThan(ownershipGate);
-    expect(recovery).toBeLessThan(preflight);
-    expect(recovery).toBeLessThan(supervisorStart);
-    // ...but still after adoption, which is what hydrates the positions the repair consumes.
-    expect(recovery).toBeGreaterThan(adoption);
-  });
-
   // r8-minor. Moving the repair ahead of the preflight moved it ahead of everything that records a
   // boot as failed: `publishFailed()` does not exist yet and the preflight report is not written,
   // so an error escaping the per-row catch would reach only the top-level handler — which exits

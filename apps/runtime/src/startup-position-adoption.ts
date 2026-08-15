@@ -536,11 +536,12 @@ function isStaleOrReopeningWorkingOrder(
  * — a token with coexisting open + dust rows must not have its fills counted
  * twice.
  */
-function rebuildLegStatesFromLedger(
+export function rebuildLegStatesFromLedger(
   deps: StartupPositionAdoptionDeps,
   result: StartupPositionAdoptionResult,
   log: Logger,
-): void {
+  replacementTokens?: ReadonlySet<TokenId>,
+): import("@krabs/domain").LegState[] {
   const activeTokens = deps.db
     .prepare(
       `SELECT DISTINCT token_id FROM positions
@@ -562,7 +563,10 @@ function rebuildLegStatesFromLedger(
     .get() as { c: number };
   result.alreadyPresentLegStates = existingLegStateCount.c;
 
-  if (activeTokens.length === 0) return;
+  const tokensToRebuild = replacementTokens
+    ? activeTokens.filter(({ token_id }) => replacementTokens.has(createTokenId(token_id)))
+    : activeTokens;
+  if (tokensToRebuild.length === 0) return [];
 
   // ADR-027 §D-B — scope replay so that fills from prior closed legs on the
   // same token don't bleed into the active leg's cumulative_*, buy/sell
@@ -607,10 +611,17 @@ function rebuildLegStatesFromLedger(
         AND ${ledgerInstant("filled_at")} > ${ledgerInstant("?")}
       ORDER BY filled_at ASC, fill_id ASC`,
   );
+  const selectFillsForPosition = deps.db.prepare(
+    `SELECT f.fill_id, f.token_id, f.condition_id, f.side, f.price, f.size, f.size_usdc, f.filled_at
+       FROM fills f JOIN (SELECT fill_id FROM inventory_lots WHERE position_id = ?
+                          UNION SELECT fill_id FROM pnl_ledger WHERE position_id = ?) p USING (fill_id)
+      ORDER BY f.filled_at ASC, f.fill_id ASC`,
+  );
 
   const now = new Date().toISOString();
+  const rebuilt = [] as import("@krabs/domain").LegState[];
 
-  for (const { token_id } of activeTokens) {
+  for (const { token_id } of tokensToRebuild) {
     const tokenId = createTokenId(token_id);
     const activePosition = deps.positionRepo.findByTokenId(tokenId);
     const activeOpenedAt = activePosition?.openedAt ?? "9999-12-31T23:59:59.999Z";
@@ -618,7 +629,11 @@ function rebuildLegStatesFromLedger(
       | { max_closed_at: string | null }
       | undefined;
     const replayLowerBound = priorClose?.max_closed_at ?? "1970-01-01T00:00:00.000Z";
-    const fills = selectFillsScoped.all(token_id, replayLowerBound) as Array<{
+    const fills = (
+      replacementTokens?.has(tokenId) && activePosition
+        ? selectFillsForPosition.all(activePosition.positionId, activePosition.positionId)
+        : selectFillsScoped.all(token_id, replayLowerBound)
+    ) as Array<{
       fill_id: string;
       token_id: string;
       condition_id: string | null;
@@ -673,10 +688,13 @@ function rebuildLegStatesFromLedger(
       }
     }
 
-    if (deps.legStateRepo.get(tokenId)) {
+    const rebuiltState = deps.legStateRepo.get(tokenId);
+    if (rebuiltState) {
       result.seededLegStates += 1;
+      rebuilt.push(rebuiltState);
     }
   }
+  return rebuilt;
 }
 
 /**
@@ -705,6 +723,23 @@ export function isTerminalReconciledOrphan(db: Database.Database, fillId: string
   return legState !== undefined;
 }
 
+function isMergeBoundSyntheticFill(db: Database.Database, fillId: string | null): boolean {
+  if (!fillId) return false;
+  return (
+    db
+      .prepare(
+        `SELECT 1
+           WHERE EXISTS (SELECT 1 FROM inventory_lots l JOIN merge_ledger m
+                           ON l.position_id IN (m.yes_position_id, m.no_position_id)
+                          WHERE l.fill_id = ?)
+              OR EXISTS (SELECT 1 FROM pnl_ledger p JOIN merge_ledger m
+                           ON p.position_id IN (m.yes_position_id, m.no_position_id)
+                          WHERE p.fill_id = ?)`,
+      )
+      .get(fillId, fillId) !== undefined
+  );
+}
+
 export function cleanupPriorStartupAdoptionArtifacts(
   deps: StartupPositionAdoptionDeps,
 ): StartupAdoptionCleanupResult {
@@ -724,12 +759,14 @@ export function cleanupPriorStartupAdoptionArtifacts(
     token_id: string | null;
   }>;
 
-  // Never remove artifacts whose fill is a terminal reconciled orphan — doing so
-  // restarts the over-consumption loop. Preserve the whole order if any of its
-  // fills is terminal (conservative: errs toward not re-adopting).
+  // Preserve the whole order: removing a sibling of a terminal/merge-bound fill recreates it.
   const skipOrderIds = new Set(
     rows
-      .filter((row) => isTerminalReconciledOrphan(deps.db, row.fill_id))
+      .filter(
+        (row) =>
+          isTerminalReconciledOrphan(deps.db, row.fill_id) ||
+          isMergeBoundSyntheticFill(deps.db, row.fill_id),
+      )
       .map((row) => row.order_id),
   );
   const removableRows = rows.filter((row) => !skipOrderIds.has(row.order_id));

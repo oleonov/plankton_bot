@@ -9,8 +9,11 @@ import type {
   InventoryLotRepository,
   MergeLedgerRepository,
   MergeRecord,
+  TokenId,
 } from "@krabs/domain";
 import type Database from "better-sqlite3";
+import { ledgerInstant, parseLedgerInstantMs } from "@krabs/db";
+import { createTokenId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { MergeCandidate } from "./merge-candidate-service.js";
@@ -119,6 +122,83 @@ export async function republishMergeLegs(
       "failed to republish merge legs after a failed apply — event-driven caches may hold pre-merge state",
     );
   }
+}
+
+// Suppress stale settled identities; current replacements are emitted once and last.
+export function resolveMergeRecoveryReplayPositions(
+  positionRepo: PositionRepository,
+  settled: readonly Position[],
+  replacementTokens: ReadonlySet<TokenId> = new Set(),
+): Position[] {
+  const exactPositions = new Map<string, Position>();
+  const activePositions = new Map<string, Position>();
+  for (const position of settled) {
+    if (replacementTokens.has(position.tokenId)) continue;
+    const exact = positionRepo.findById(position.positionId);
+    if (exact) exactPositions.set(exact.positionId, exact);
+  }
+  for (const position of settled) {
+    if (replacementTokens.has(position.tokenId)) continue;
+    const active = positionRepo.findByTokenId(position.tokenId);
+    if (!active) continue;
+    exactPositions.delete(position.positionId);
+    activePositions.set(active.positionId, active);
+  }
+  return [...exactPositions.values(), ...activePositions.values()];
+}
+
+export function resolveCurrentMergeRecoveryReplayPosition(
+  positionRepo: PositionRepository,
+  snapshot: Position,
+): Position | null {
+  return positionRepo.findByTokenId(snapshot.tokenId) ?? positionRepo.findById(snapshot.positionId);
+}
+
+export function resolveAppliedMergeReplacementRepairs(
+  db: Database.Database,
+  positionRepo: PositionRepository,
+): Position[] {
+  const recorded = db
+    .prepare(
+      `SELECT yes_token_id AS token_id, yes_position_id AS position_id FROM merge_ledger
+        WHERE status = 'applied' AND yes_token_id IS NOT NULL AND yes_position_id IS NOT NULL
+       UNION ALL
+       SELECT no_token_id AS token_id, no_position_id AS position_id FROM merge_ledger
+        WHERE status = 'applied' AND no_token_id IS NOT NULL AND no_position_id IS NOT NULL`,
+    )
+    .all() as Array<{ token_id: string; position_id: string }>;
+  const recordedIdsByToken = new Map<string, Set<string>>();
+  for (const row of recorded) {
+    const ids = recordedIdsByToken.get(row.token_id) ?? new Set<string>();
+    ids.add(row.position_id);
+    recordedIdsByToken.set(row.token_id, ids);
+  }
+  const firstBuyStmt = db.prepare(
+    `SELECT f.filled_at FROM fills f JOIN (
+       SELECT fill_id FROM inventory_lots WHERE position_id = ?
+       UNION SELECT fill_id FROM pnl_ledger WHERE position_id = ?
+     ) provenance USING (fill_id)
+     WHERE f.side = 'buy'
+     ORDER BY ${ledgerInstant("f.filled_at")} ASC, f.fill_id ASC LIMIT 1`,
+  );
+  const legStateStmt = db.prepare("SELECT first_trade_at FROM leg_states WHERE token_id = ?");
+  const repairs: Position[] = [];
+  for (const [tokenId, recordedIds] of recordedIdsByToken) {
+    const active = positionRepo.findByTokenId(createTokenId(tokenId));
+    if (!active || recordedIds.has(active.positionId)) continue;
+    const firstBuy = firstBuyStmt.get(active.positionId, active.positionId) as
+      | { filled_at: string }
+      | undefined;
+    if (!firstBuy || !Number.isFinite(parseLedgerInstantMs(firstBuy.filled_at))) continue;
+    const state = legStateStmt.get(tokenId) as { first_trade_at: string } | undefined;
+    if (
+      !state ||
+      parseLedgerInstantMs(state.first_trade_at) !== parseLedgerInstantMs(firstBuy.filled_at)
+    ) {
+      repairs.push(active);
+    }
+  }
+  return repairs;
 }
 
 export interface OnchainMergeRecoveryDeps {

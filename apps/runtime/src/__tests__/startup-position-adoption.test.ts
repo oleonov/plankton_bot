@@ -1679,6 +1679,20 @@ describe("cleanupPriorStartupAdoptionArtifacts — orphan-loop guard", () => {
     }
   }
 
+  function bindMergeLeg(
+    db: LedgerDb,
+    status: "pending" | "onchain" | "applied",
+    positionId: string,
+  ): void {
+    db.prepare(
+      `INSERT INTO merge_ledger
+         (merge_id, condition_id, merged_amount, spread_pnl, merged_at, status,
+          yes_token_id, no_token_id, yes_position_id, no_position_id)
+       VALUES (?, 'cond-merge', 1, 0, '2026-06-06T00:00:00.000Z', ?,
+               'tok-merge-yes', 'tok-merge-no', ?, 'pos-other-leg')`,
+    ).run(`merge-${status}-${positionId}`, status, positionId);
+  }
+
   it("preserves a reconciled orphan adoption order already reflected in leg state (loop fix → NOT re-adopted)", () => {
     const conn = bootstrapLedgerDb(":memory:");
     connections.push(conn);
@@ -1699,6 +1713,79 @@ describe("cleanupPriorStartupAdoptionArtifacts — orphan-loop guard", () => {
     expect(rowExists(conn.db, "fills", "fill_id", "fill-loop")).toBe(true);
     expect(rowExists(conn.db, "inventory_lots", "lot_id", "lot-loop")).toBe(true);
     expect(rowExists(conn.db, "positions", "position_id", "pos-loop")).toBe(true);
+  });
+
+  it.each([
+    ["pending", "inventory_lots"],
+    ["onchain", "inventory_lots"],
+    ["applied", "inventory_lots"],
+    ["pending", "pnl_ledger"],
+    ["onchain", "pnl_ledger"],
+    ["applied", "pnl_ledger"],
+  ] as const)("preserves a whole merge-bound order for %s via %s", (status, attribution) => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    seedSyntheticArtifact(conn.db, {
+      token: "tok-bound",
+      orderId: "ord-bound",
+      fillId: "fill-bound",
+      positionId: "pos-bound",
+      lotId: "lot-bound",
+      reconciled: 0,
+      withLegStateTransition: false,
+    });
+    conn.db
+      .prepare(
+        `INSERT INTO fills
+           (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at)
+         VALUES ('fill-bound-sibling', 'ord-bound', 'tok-bound', 'cond-1', 'sell', 0.02, 1, 0.02,
+                 '2026-06-05T03:49:00.000Z')`,
+      )
+      .run();
+    if (attribution === "pnl_ledger") {
+      conn.db.prepare("DELETE FROM inventory_lots WHERE lot_id = 'lot-bound'").run();
+      conn.db
+        .prepare(
+          `INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at)
+           VALUES ('fill-bound', 'pos-bound', 0.01, '2026-06-05T03:48:51.000Z')`,
+        )
+        .run();
+    }
+    bindMergeLeg(conn.db, status, "pos-bound");
+
+    expect(cleanupPriorStartupAdoptionArtifacts(makeDeps(conn.db)).orderIds).toEqual([]);
+    expect(rowExists(conn.db, "orders", "order_id", "ord-bound")).toBe(true);
+    expect(rowExists(conn.db, "fills", "fill_id", "fill-bound-sibling")).toBe(true);
+  });
+
+  it("still removes unrelated synthetic artifacts beside a merge-bound order", () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    seedSyntheticArtifact(conn.db, {
+      token: "tok-protected",
+      orderId: "ord-protected",
+      fillId: "fill-protected",
+      positionId: "pos-protected",
+      lotId: "lot-protected",
+      reconciled: 0,
+      withLegStateTransition: false,
+    });
+    bindMergeLeg(conn.db, "onchain", "pos-protected");
+    seedSyntheticArtifact(conn.db, {
+      token: "tok-unrelated",
+      orderId: "ord-unrelated",
+      fillId: "fill-unrelated",
+      positionId: "pos-unrelated",
+      lotId: "lot-unrelated",
+      reconciled: 0,
+      withLegStateTransition: false,
+    });
+
+    expect(cleanupPriorStartupAdoptionArtifacts(makeDeps(conn.db)).orderIds).toEqual([
+      "ord-unrelated",
+    ]);
+    expect(rowExists(conn.db, "orders", "order_id", "ord-protected")).toBe(true);
+    expect(rowExists(conn.db, "orders", "order_id", "ord-unrelated")).toBe(false);
   });
 
   it("removes an unreconciled orphan adoption order, and one with no fill (backward compat → existing behavior)", () => {
