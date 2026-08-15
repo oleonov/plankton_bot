@@ -133,6 +133,7 @@ import {
 } from "./modules/soft-ranking/score-distribution-snapshot.js";
 import { softRankingDisabledCleanup } from "./soft-ranking-disabled-cleanup.js";
 import { ExecutionModule } from "./modules/execution/execution-module.js";
+import { MakerBuyFastCancel } from "./modules/execution/maker-buy-fast-cancel.js";
 import { AuthoritativeTickResolver } from "./modules/execution/authoritative-tick-resolver.js";
 import { ExchangeStateStore } from "./modules/execution/exchange-state-store.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
@@ -1030,6 +1031,14 @@ async function main(): Promise<void> {
     recomputeScoreDistribution,
   });
 
+  let executionModule: ExecutionModule | null = null;
+  const makerBuyFastCancel = new MakerBuyFastCancel({
+    orderRepo: repos.order,
+    bus,
+    isMakerModeOff: () => currentExecutionPolicy().makerEntry.mode === "off",
+    inFlightMakerBuys: () => executionModule?.makerBuyInFlightCount() ?? 0,
+  });
+
   // 7e2. Command poller (created here so normalizationModule is available)
   const commandPoller = new CommandPoller({
     commandRepo: repos.operatorCommand,
@@ -1040,6 +1049,7 @@ async function main(): Promise<void> {
     setPaused: setPausedAndPersist,
     pollIntervalMs: 5_000,
     stateTransitionRepo: repos.stateTransition,
+    makerBuyFastCancel,
   });
 
   // 7f. Execution module
@@ -1188,7 +1198,7 @@ async function main(): Promise<void> {
           });
       }
     : undefined;
-  const executionModule = new ExecutionModule({
+  executionModule = new ExecutionModule({
     gateway: exchangeGateway,
     bus,
     marketRepo: repos.market,
@@ -1225,6 +1235,7 @@ async function main(): Promise<void> {
     riskEventRepo: repos.riskEvent,
     positionConcentration,
     tickResolver,
+    makerBuyFastCancel,
   });
 
   // 7g. Risk + Inventory module

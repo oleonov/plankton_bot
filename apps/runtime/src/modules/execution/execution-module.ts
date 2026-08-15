@@ -137,6 +137,7 @@ import {
   validateProfileLadderReplacementSellTarget,
 } from "../profile-ladder-order-helpers.js";
 import type { PositionConcentrationService } from "../../position-concentration-service.js";
+import type { MakerBuyFastCancel } from "./maker-buy-fast-cancel.js";
 
 /**
  * How long `stop()` waits for commands already dispatched to finish, on either path — the queue's
@@ -355,6 +356,7 @@ export interface ExecutionModuleDeps {
    * absent the existing cmd.tickSize is used unchanged (legacy / test default).
    */
   tickResolver?: AuthoritativeTickResolver | undefined;
+  makerBuyFastCancel?: MakerBuyFastCancel | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -578,6 +580,7 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
     this.started = true;
+    this.deps.makerBuyFastCancel?.setReady(true);
     this.log.info("execution module started");
   }
 
@@ -664,6 +667,7 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   private async executeStop(): Promise<void> {
+    this.deps.makerBuyFastCancel?.setReady(false);
     if (this.reconcileTimer) {
       clearInterval(this.reconcileTimer);
       this.reconcileTimer = null;
@@ -1637,6 +1641,10 @@ export class ExecutionModule implements RuntimeModule {
   ): { reason: string; code: ExchangeErrorCode } | null {
     if (!(cmd.entryStyle === "maker" && cmd.side === "buy")) return null;
 
+    if (this.deps.makerBuyFastCancel?.isLatched()) {
+      return { reason: "maker-fast-cancel-active", code: ExchangeErrorCode.LivePolicyBlocked };
+    }
+
     const makerPolicy = this.deps.executionPolicy?.()?.makerEntry;
     if (!makerPolicy || makerPolicy.mode !== "micro_live") {
       return { reason: "maker-mode-inactive", code: ExchangeErrorCode.LivePolicyBlocked };
@@ -2135,6 +2143,19 @@ export class ExecutionModule implements RuntimeModule {
       effectiveCmd = clampedCmd;
     }
 
+    const reserveMakerRejection = this.makerBuyLiveRejection(
+      effectiveCmd,
+      effectiveCmd.price * effectiveCmd.size,
+    );
+    if (reserveMakerRejection) {
+      await this.rejectOrder(
+        effectiveCmd,
+        reserveMakerRejection.reason,
+        reserveMakerRejection.code,
+      );
+      return;
+    }
+
     this.pendingReservations.set(String(effectiveCmd.commandId), {
       tokenId: effectiveCmd.tokenId,
       side: effectiveCmd.side,
@@ -2163,6 +2184,12 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     await this.dispatchCommand(effectiveCmd);
+  }
+
+  makerBuyInFlightCount(): number {
+    return [...this.pendingReservations.values()].filter(
+      (reservation) => reservation.side === "buy" && reservation.entryStyle === "maker",
+    ).length;
   }
 
   // ─── Cancel order handler ─────────────────────────────────────────────

@@ -10,9 +10,10 @@ import {
   SqliteOperatorActionRepository,
 } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
-import type { OperatorActionType } from "@krabs/domain";
+import { createOrderId, type OperatorActionType, type Order } from "@krabs/domain";
 import { CommandPoller } from "../supervisor/command-poller.js";
 import type { PatternRebuilder, ReloadableRules } from "../supervisor/command-poller.js";
+import { MakerBuyFastCancel } from "../modules/execution/maker-buy-fast-cancel.js";
 
 const log = pino({ level: "silent" });
 
@@ -185,6 +186,146 @@ describe("CommandPoller", () => {
       expect(cmdRepo.getPending()).toHaveLength(0);
       const actions = actionRepo.findRecent(10);
       expect(actions).toHaveLength(0); // rejected commands don't write audit
+    });
+  });
+
+  describe("cancel_maker_buys", () => {
+    const activationTs = "2026-08-15T00:00:00.000Z";
+
+    function insertRawTarget(targetId: string | null): number {
+      return Number(
+        conn.db
+          .prepare(
+            `INSERT INTO operator_commands
+               (action, target_id, reason, status, created_at, initiator_type, initiator)
+             VALUES ('cancel_maker_buys', ?, 'emergency', 'pending', ?, 'operator', 'test')`,
+          )
+          .run(targetId, new Date().toISOString()).lastInsertRowid,
+      );
+    }
+
+    it.each([null, "not-a-date", "2026-02-30T00:00:00.000Z", "2026-08-15T00:00:00Z"])(
+      "rejects malformed durable target %s without cancel, audit, applied event, or latch change",
+      async (targetId) => {
+        const id = insertRawTarget(targetId);
+        const cancelSince = vi.fn();
+        const coordinator = {
+          cancelSince,
+          isLatched: () => false,
+        } as unknown as MakerBuyFastCancel;
+        const events: unknown[] = [];
+        bus.subscribe("OperatorCommandApplied", async (event) => {
+          events.push(event);
+        });
+
+        await createPoller({ makerBuyFastCancel: coordinator }).poll();
+
+        const row = conn.db
+          .prepare("SELECT status FROM operator_commands WHERE id = ?")
+          .get(id) as { status: string };
+        expect(row.status).toBe("rejected");
+        expect(cancelSince).not.toHaveBeenCalled();
+        expect(actionRepo.findRecent(10)).toHaveLength(0);
+        expect(events).toHaveLength(0);
+        expect(coordinator.isLatched()).toBe(false);
+      },
+    );
+
+    it("keeps not-ready work pending without audit or event", async () => {
+      const id = insertCommand("cancel_maker_buys", activationTs, "emergency");
+      const coordinator = new MakerBuyFastCancel({
+        orderRepo: { findOpen: () => [] },
+        bus,
+        isMakerModeOff: () => true,
+        inFlightMakerBuys: () => 0,
+      });
+      const events: unknown[] = [];
+      bus.subscribe("OperatorCommandApplied", async (event) => {
+        events.push(event);
+      });
+
+      await createPoller({ makerBuyFastCancel: coordinator }).poll();
+
+      expect(cmdRepo.getPending().map((command) => command.id)).toEqual([id]);
+      expect(actionRepo.findRecent(10)).toHaveLength(0);
+      expect(events).toHaveLength(0);
+      expect(coordinator.isLatched()).toBe(false);
+    });
+
+    it("writes proof timestamp audit and status before event, then releases the latch", async () => {
+      const completedAt = "2026-08-15T00:00:00.007Z";
+      const id = insertCommand("cancel_maker_buys", activationTs, "emergency");
+      const coordinator = new MakerBuyFastCancel({
+        orderRepo: { findOpen: () => [] },
+        bus,
+        isMakerModeOff: () => true,
+        inFlightMakerBuys: () => 0,
+        now: () => Date.parse(completedAt),
+      });
+      coordinator.setReady(true);
+      const eventProof: Array<{ status: string; audits: number; latched: boolean }> = [];
+      bus.subscribe("OperatorCommandApplied", async () => {
+        const row = conn.db
+          .prepare("SELECT status FROM operator_commands WHERE id = ?")
+          .get(id) as { status: string };
+        eventProof.push({
+          status: row.status,
+          audits: actionRepo.findRecent(10).length,
+          latched: coordinator.isLatched(),
+        });
+      });
+
+      await createPoller({ makerBuyFastCancel: coordinator }).poll();
+
+      const row = conn.db
+        .prepare("SELECT status, applied_at FROM operator_commands WHERE id = ?")
+        .get(id) as { status: string; applied_at: string };
+      expect(row).toEqual({ status: "applied", applied_at: completedAt });
+      expect(actionRepo.findRecent(10)[0]).toMatchObject({
+        action: "cancel_maker_buys",
+        targetType: "bot",
+        targetId: activationTs,
+        performedAt: completedAt,
+      });
+      expect(eventProof).toEqual([{ status: "applied", audits: 1, latched: true }]);
+      expect(coordinator.isLatched()).toBe(false);
+    });
+
+    it("retains the latch on timeout and still processes the next queued command", async () => {
+      insertCommand("cancel_maker_buys", activationTs, "emergency");
+      insertCommand("pause", undefined, "after failed drain");
+      const stuck = {
+        orderId: createOrderId("stuck-maker"),
+        side: "buy",
+        entryStyle: "maker",
+        createdAt: activationTs,
+      } as unknown as Order;
+      const cancels: unknown[] = [];
+      bus.subscribe("CancelOrderRequested", async (event) => {
+        cancels.push(event);
+      });
+      const coordinator = new MakerBuyFastCancel({
+        orderRepo: { findOpen: () => [stuck] },
+        bus,
+        isMakerModeOff: () => true,
+        inFlightMakerBuys: () => 0,
+        deadlineMs: 0,
+      });
+      coordinator.setReady(true);
+
+      await createPoller({ makerBuyFastCancel: coordinator }).poll();
+
+      const rows = conn.db
+        .prepare("SELECT action, status FROM operator_commands ORDER BY id")
+        .all() as Array<{ action: string; status: string }>;
+      expect(rows).toEqual([
+        { action: "cancel_maker_buys", status: "rejected" },
+        { action: "pause", status: "applied" },
+      ]);
+      expect(cancels).toHaveLength(1);
+      expect(coordinator.isLatched()).toBe(true);
+      expect(paused).toBe(true);
+      expect(actionRepo.findRecent(10).map((action) => action.action)).toEqual(["pause"]);
     });
   });
 

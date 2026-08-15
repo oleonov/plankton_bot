@@ -42,6 +42,7 @@ import type {
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
+import type { MakerBuyFastCancel } from "../modules/execution/maker-buy-fast-cancel.js";
 import { LIFECYCLE_STOP_WAIT_MS } from "../lifecycle-chain.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
@@ -6095,6 +6096,48 @@ describe("ExecutionModule", () => {
   // ─── Maker micro-cap (Bug 3) ───────────────────────────────────────────────
 
   describe("maker micro-cap enforcement", () => {
+    it("blocks maker BUY admission while fast-cancel is latched and owns readiness lifecycle", async () => {
+      const setReady = vi.fn();
+      const makerBuyFastCancel = {
+        isLatched: () => true,
+        setReady,
+      } as unknown as MakerBuyFastCancel;
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        makerBuyFastCancel,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live" as const,
+            whitelistConditionIds: ["cond-1"],
+          },
+        }),
+      });
+      const rejected: Array<{ reason: string }> = [];
+      bus.subscribe("OrderRejected", async (event) => {
+        rejected.push(event);
+      });
+
+      await microMod.start();
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({ entryStyle: "maker", side: "buy" }),
+        timestamp: Date.now(),
+      });
+
+      expect(rejected[0]?.reason).toBe("maker-fast-cancel-active");
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      await microMod.stop();
+      expect(setReady.mock.calls).toEqual([[true], [false]]);
+    });
+
     it("maker BUY over microMaxOrderUsdc is rejected", async () => {
       const microMod = new ExecutionModule({
         gateway,
@@ -6207,6 +6250,66 @@ describe("ExecutionModule", () => {
       expect(rejected[0].reason).toBe("maker-micro-open-cap-exceeded");
 
       resolvePlace!();
+      await microMod.stop();
+    });
+
+    it("atomically check-before-reserves simultaneous Promise.all maker BUY admissions", async () => {
+      let finishPlace!: () => void;
+      (gateway.placeOrder as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishPlace = () => resolve({ success: true, orderId: "maker-atomic" });
+          }),
+      );
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live" as const,
+            whitelistConditionIds: ["cond-1"],
+            microMaxOrderUsdc: 10,
+            microMaxOpenUsdc: 10,
+          },
+        }),
+      });
+      await microMod.start();
+      const rejected: Array<{ reason: string }> = [];
+      bus.subscribe("OrderRejected", async (event) => {
+        rejected.push(event);
+      });
+      const commands = ["atomic-a", "atomic-b"].map((id) =>
+        makePlaceCmd({
+          commandId: createCommandId(id),
+          clientOrderId: `plk_${id}` as ClientOrderId,
+          entryStyle: "maker",
+          side: "buy",
+          price: 0.6,
+          size: 10,
+        }),
+      );
+
+      const simultaneous = Promise.all(
+        commands.map((command) =>
+          bus.publish("PlaceOrderRequested", { command, timestamp: Date.now() }),
+        ),
+      );
+      await vi.waitFor(() => expect(rejected).toHaveLength(1));
+      expect(rejected[0]?.reason).toBe("maker-micro-open-cap-exceeded");
+      expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+      expect(microMod.makerBuyInFlightCount()).toBe(1);
+
+      finishPlace();
+      await simultaneous;
+      expect(microMod.makerBuyInFlightCount()).toBe(0);
       await microMod.stop();
     });
 

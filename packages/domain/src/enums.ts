@@ -186,6 +186,7 @@ export const OperatorActionType = {
   Pause: "pause",
   Resume: "resume",
   RulesReload: "rules_reload",
+  CancelMakerBuys: "cancel_maker_buys",
 } as const;
 export type OperatorActionType = (typeof OperatorActionType)[keyof typeof OperatorActionType];
 

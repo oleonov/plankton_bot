@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { isSupportedRuntimeProfile, SUPPORTED_RUNTIME_PROFILE } from "@krabs/domain";
+import {
+  isSupportedRuntimeProfile,
+  parseExecutionPolicyJson,
+  SUPPORTED_RUNTIME_PROFILE,
+} from "@krabs/domain";
 import type { LedgerPool } from "../ledger-pool.js";
 import { ok, ApiError } from "../errors.js";
 import { getActor } from "../auth.js";
@@ -86,6 +90,57 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
     const id = enqueueResume(controlDb, body.reason ?? null, actor);
     return ok({ commandId: id, status: "enqueued" });
   });
+
+  app.post<{ Body: { reason?: string; activationTs?: string } }>(
+    "/actions/cancel-maker-buys",
+    async (request) => {
+      const body = (request.body ?? {}) as { reason?: string; activationTs?: string };
+      if (typeof body.reason !== "string" || body.reason.trim() === "") {
+        throw new ApiError(400, "reason is required", "MISSING_FIELD");
+      }
+      if (typeof body.activationTs !== "string") {
+        throw new ApiError(400, "activationTs is required", "MISSING_FIELD");
+      }
+      const date = new Date(body.activationTs);
+      if (!Number.isFinite(date.getTime()) || date.toISOString() !== body.activationTs) {
+        throw new ApiError(400, "activationTs must be a canonical ISO instant", "INVALID_FIELD");
+      }
+      let profileId: string | null = null;
+      try {
+        const state = controlDb
+          .prepare(
+            "SELECT current_profile, desired_profile FROM runtime_control_state WHERE id = 1",
+          )
+          .get() as { current_profile: string | null; desired_profile: string | null } | undefined;
+        profileId = state?.current_profile ?? state?.desired_profile ?? null;
+      } catch (error) {
+        if (
+          (error as { code?: string }).code !== "SQLITE_ERROR" ||
+          !(error as Error).message.includes("no such table: runtime_control_state")
+        ) {
+          throw error;
+        }
+        profileId = "simulation";
+      }
+      const settings = profileId
+        ? (controlDb
+            .prepare("SELECT execution_policy_json FROM profile_settings WHERE profile_id = ?")
+            .get(profileId) as { execution_policy_json: string | null } | undefined)
+        : undefined;
+      const parsed = parseExecutionPolicyJson(settings?.execution_policy_json ?? null);
+      if (parsed.issues.length > 0 || parsed.policy.makerEntry.mode !== "off") {
+        throw new ApiError(409, "maker entry mode must be off", "MAKER_MODE_NOT_OFF");
+      }
+      const id = insertCommand(
+        controlDb,
+        "cancel_maker_buys",
+        date.toISOString(),
+        body.reason,
+        getActor(request),
+      );
+      return ok({ commandId: id, status: "enqueued" });
+    },
+  );
 
   // ── POST /actions/switch-profile ──────────────────────────────────
   app.post<{ Body: { toProfile: string; ledgerResetPolicy?: string; reason?: string } }>(

@@ -473,6 +473,89 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled[0].command.reason).toBe("outbid_repriced");
   });
 
+  it("never outbid-reprices maker BUY while an identical probe BUY still reprices", async () => {
+    const createdAt = new Date(Date.now() - 60_000).toISOString();
+    const maker = makeOrder({
+      orderId: createOrderId("maker-outbid"),
+      clientOrderId: "plk_maker_outbid" as ClientOrderId,
+      price: 0.3,
+      signalId: "maker-signal",
+      signalReason: "confirm-scale",
+      entryStyle: "maker",
+      createdAt,
+    });
+    const probe = makeOrder({
+      orderId: createOrderId("probe-outbid"),
+      clientOrderId: "plk_probe_outbid" as ClientOrderId,
+      price: 0.3,
+      signalId: "probe-signal",
+      signalReason: "confirm-scale",
+      entryStyle: "probe",
+      createdAt,
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([maker, probe]);
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (event) => {
+      cancelled.push(event);
+    });
+
+    const result = await cleanStaleEntryOrders(
+      {
+        orderRepo,
+        marketRepo,
+        bus,
+        log: silentLog,
+        entryRepriceOnOutbid: {
+          policy: () => ({ enabled: true, maxRepriceCount: 5 }),
+          getRepriceCount: () => 0,
+          getMarket: () => makePricing({ bestBid: 0.31, tickSize: 0.01 }),
+        },
+      },
+      backoffMap,
+    );
+    await bus.drain();
+
+    expect(result.outbidRepriceCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command).toMatchObject({
+      orderId: probe.orderId,
+      reason: "outbid_repriced",
+    });
+  });
+
+  it("keeps maker BUY TTL and end-date safety cancellation active", async () => {
+    const ttlOrder = makeOrder({
+      orderId: createOrderId("maker-ttl"),
+      clientOrderId: "plk_maker_ttl" as ClientOrderId,
+      entryStyle: "maker",
+      createdAt: new Date(Date.now() - 7 * 60 * 60_000).toISOString(),
+    });
+    const endDateOrder = makeOrder({
+      orderId: createOrderId("maker-enddate"),
+      clientOrderId: "plk_maker_enddate" as ClientOrderId,
+      entryStyle: "maker",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([ttlOrder, endDateOrder]);
+    marketRepo.findByTokenId = vi
+      .fn()
+      .mockReturnValue(makeMarket({ endDate: new Date(Date.now() + 30 * 60_000).toISOString() }));
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (event) => {
+      cancelled.push(event);
+    });
+
+    const result = await run();
+    await bus.drain();
+
+    expect(result.staleTtlCancelled).toBe(1);
+    expect(result.staleEndDateCancelled).toBe(1);
+    expect(cancelled.map((event) => event.command.reason).sort()).toEqual([
+      "stale_entry_enddate",
+      "stale_entry_ttl",
+    ]);
+  });
+
   it("keeps endDate safety ahead of outbid reprice near resolution", async () => {
     const order = makeOrder({
       price: 0.3,

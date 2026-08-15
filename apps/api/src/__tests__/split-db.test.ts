@@ -274,6 +274,50 @@ describe("API against real split schemas", () => {
     expect(res.statusCode).toBe(200);
   });
 
+  it("POST /actions/cancel-maker-buys routes to control DB and preserves actor", async () => {
+    const previous = controlConn.db
+      .prepare("SELECT execution_policy_json FROM profile_settings WHERE profile_id = 'simulation'")
+      .get() as { execution_policy_json: string | null };
+    controlConn.db
+      .prepare(
+        `INSERT INTO profile_settings (profile_id, execution_policy_json, updated_at)
+         VALUES ('simulation', ?, datetime('now'))
+         ON CONFLICT(profile_id) DO UPDATE SET execution_policy_json = excluded.execution_policy_json`,
+      )
+      .run(JSON.stringify({ makerEntry: { mode: "off" } }));
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/actions/cancel-maker-buys",
+        headers: { ...auth(), "content-type": "application/json" },
+        payload: { reason: "split-db emergency", activationTs: "2026-08-15T00:00:00.000Z" },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const row = controlConn.db
+        .prepare("SELECT * FROM operator_commands WHERE id = ?")
+        .get(res.json().data.commandId) as Record<string, unknown>;
+      expect(row).toMatchObject({
+        action: "cancel_maker_buys",
+        target_id: "2026-08-15T00:00:00.000Z",
+        reason: "split-db emergency",
+        initiator_type: "operator",
+        initiator: "api_key",
+      });
+      expect(() =>
+        ledgerConn.db
+          .prepare("SELECT * FROM operator_commands WHERE id = ?")
+          .get(res.json().data.commandId),
+      ).toThrow(/no such table/);
+    } finally {
+      controlConn.db
+        .prepare(
+          "UPDATE profile_settings SET execution_policy_json = ? WHERE profile_id = 'simulation'",
+        )
+        .run(previous.execution_policy_json);
+    }
+  });
+
   it("GET /status reads from active profile's ledger after switch (not startup ledger)", async () => {
     // Create a paper ledger with different data
     const paperConn = bootstrapLedgerDb(path.join(tmpDir, "ledger-paper.db"));

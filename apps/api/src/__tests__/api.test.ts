@@ -1853,6 +1853,79 @@ describe("metrics", () => {
 // ─── Operator actions ───────────────────────────────────────────────
 
 describe("operator actions", () => {
+  it("POST /actions/cancel-maker-buys enqueues canonical activation boundary only while off", async () => {
+    await withRollback(async () => {
+      seedExecutionPolicy({ makerEntry: { mode: "off" } });
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/actions/cancel-maker-buys",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        payload: { reason: "emergency", activationTs: "2026-08-15T00:00:00.000Z" },
+      });
+      expect(res.statusCode).toBe(200);
+      const row = conn.db
+        .prepare("SELECT * FROM operator_commands WHERE id = ?")
+        .get(json(res).data.commandId) as Record<string, unknown>;
+      expect(row).toMatchObject({
+        action: "cancel_maker_buys",
+        target_id: "2026-08-15T00:00:00.000Z",
+        reason: "emergency",
+        initiator_type: "operator",
+        initiator: "api_key",
+      });
+    });
+  });
+
+  it.each([
+    [{ activationTs: "2026-08-15T00:00:00.000Z" }, "missing reason"],
+    [{ reason: "emergency" }, "missing activationTs"],
+    [{ reason: "emergency", activationTs: "not-a-date" }, "malformed activationTs"],
+    [{ reason: "emergency", activationTs: "2026-02-30T00:00:00.000Z" }, "impossible activationTs"],
+    [{ reason: "emergency", activationTs: "2026-08-15T00:00:00Z" }, "noncanonical activationTs"],
+  ])("POST /actions/cancel-maker-buys rejects %s (%s)", async (payload, _case) => {
+    await withRollback(async () => {
+      seedExecutionPolicy({ makerEntry: { mode: "off" } });
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/actions/cancel-maker-buys",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        payload,
+      });
+      expect(res.statusCode).toBe(400);
+      const rows = conn.db
+        .prepare(
+          "SELECT count(*) AS count FROM operator_commands WHERE action = 'cancel_maker_buys'",
+        )
+        .get() as { count: number };
+      expect(rows.count).toBe(0);
+    });
+  });
+
+  it.each(["shadow", "micro_live"])(
+    "POST /actions/cancel-maker-buys refuses maker mode %s",
+    async (mode) => {
+      await withRollback(async () => {
+        seedExecutionPolicy({ makerEntry: { mode } });
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/v1/actions/cancel-maker-buys",
+          headers: { ...authHeaders(), "content-type": "application/json" },
+          payload: { reason: "emergency", activationTs: "2026-08-15T00:00:00.000Z" },
+        });
+        expect(res.statusCode).toBe(409);
+        expect(
+          (
+            conn.db
+              .prepare(
+                "SELECT count(*) AS count FROM operator_commands WHERE action = 'cancel_maker_buys'",
+              )
+              .get() as { count: number }
+          ).count,
+        ).toBe(0);
+      });
+    },
+  );
+
   it("POST /actions/pause inserts command", async () => {
     const res = await app.inject({
       method: "POST",

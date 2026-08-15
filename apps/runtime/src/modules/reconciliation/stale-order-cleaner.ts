@@ -302,6 +302,7 @@ export async function cleanStaleEntryOrders(
       }
     }
 
+    if (order.entryStyle === "maker") continue;
     const repriceMarket = deps.entryRepriceOnOutbid?.getMarket(order.tokenId) ?? null;
     const repriceDecision = shouldRepriceOutbid(order, repriceMarket, deps.entryRepriceOnOutbid);
 

@@ -7,6 +7,10 @@ import type {
   OperatorCommand,
 } from "@krabs/domain";
 import type { Logger } from "../logger.js";
+import {
+  canonicalInstant,
+  type MakerBuyFastCancel,
+} from "../modules/execution/maker-buy-fast-cancel.js";
 
 export interface ReloadableRules {
   reload(): void;
@@ -28,6 +32,7 @@ export interface CommandPollerDeps {
   rulesManager?: ReloadableRules;
   normalizationModule?: PatternRebuilder;
   stateTransitionRepo?: StateTransitionRepository;
+  makerBuyFastCancel?: MakerBuyFastCancel;
 }
 
 export class CommandPoller implements RuntimeModule {
@@ -97,6 +102,33 @@ export class CommandPoller implements RuntimeModule {
           this.writeAudit(cmd, "bot", "runtime", now);
           break;
 
+        case "cancel_maker_buys": {
+          const targetId = cmd.targetId;
+          if (
+            targetId == null ||
+            canonicalInstant(targetId) == null ||
+            !this.deps.makerBuyFastCancel
+          ) {
+            this.deps.commandRepo.updateStatus(cmd.id, "rejected", now);
+            return;
+          }
+          const result = await this.deps.makerBuyFastCancel.cancelSince(
+            targetId,
+            async (completedAt) => {
+              this.writeAudit(cmd, "bot", targetId, completedAt);
+              this.deps.commandRepo.updateStatus(cmd.id, "applied", completedAt);
+              await this.publishApplied(cmd, completedAt);
+            },
+          );
+          if (result === "deferred") return;
+          if (result === "rejected") {
+            this.deps.commandRepo.updateStatus(cmd.id, "rejected", new Date().toISOString());
+            return;
+          }
+          this.log.info({ id: cmd.id, action: cmd.action }, "command applied");
+          return;
+        }
+
         default:
           this.log.warn({ action: cmd.action }, "unknown command action -- rejecting");
           this.deps.commandRepo.updateStatus(cmd.id, "rejected", now);
@@ -106,18 +138,22 @@ export class CommandPoller implements RuntimeModule {
       this.deps.commandRepo.updateStatus(cmd.id, "applied", now);
       this.log.info({ id: cmd.id, action: cmd.action }, "command applied");
 
-      await this.deps.bus.publish("OperatorCommandApplied", {
-        commandDbId: cmd.id,
-        action: cmd.action,
-        reason: cmd.reason,
-        initiatorType: cmd.initiatorType,
-        initiator: cmd.initiator,
-        appliedAt: Date.now(),
-      });
+      await this.publishApplied(cmd, now);
     } catch (err) {
       this.log.error({ id: cmd.id, action: cmd.action, err }, "command failed -- rejecting");
-      this.deps.commandRepo.updateStatus(cmd.id, "rejected", now);
+      this.deps.commandRepo.updateStatus(cmd.id, "rejected", new Date().toISOString());
     }
+  }
+
+  private async publishApplied(cmd: OperatorCommand, appliedAt: string): Promise<void> {
+    await this.deps.bus.publish("OperatorCommandApplied", {
+      commandDbId: cmd.id,
+      action: cmd.action,
+      reason: cmd.reason,
+      initiatorType: cmd.initiatorType,
+      initiator: cmd.initiator,
+      appliedAt: new Date(appliedAt).getTime(),
+    });
   }
 
   private applyRulesReload(_now: string): void {
