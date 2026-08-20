@@ -2156,6 +2156,12 @@ export interface MakerMicroLiveWindow {
   expiresAtUtc: string;
   /** Cumulative accepted-or-pending maker BUY notional allowed inside this window. */
   maxCumulativeAcceptedPendingUsdc: number;
+  /** Lifetime committed maker BUY notional allowed for one condition. */
+  maxCumulativeAcceptedPendingUsdcPerCondition?: number;
+  /** Lifetime number of distinct conditions allowed inside this activation. */
+  maxDistinctAcceptedConditions?: number;
+  /** Cumulative actual maker BUY fills allowed inside this activation. */
+  maxCumulativeFilledUsdc?: number;
   /** Allows exact strategy R23 maker commands without a static condition whitelist. */
   captureNextR23?: boolean;
 }
@@ -2188,6 +2194,28 @@ export interface MakerMicroLiveAuthorizationInput {
   signalTimestamp: string | null | undefined;
 }
 
+export function isMakerCaptureNextR23OrderAuthorized(
+  makerEntry: Pick<MakerEntryPolicy, "mode" | "microLiveWindow">,
+  input: MakerMicroLiveAuthorizationInput,
+  nowMs: number,
+): boolean {
+  if (makerEntry.mode !== "micro_live") return false;
+  const window = makerEntry.microLiveWindow;
+  if (window?.captureNextR23 !== true || !isMakerMicroLiveWindowActive(window, nowMs)) return false;
+  const signalTimestampMs = Date.parse(input.signalTimestamp ?? "");
+  return (
+    Number.isFinite(signalTimestampMs) &&
+    signalTimestampMs >= Date.parse(window.activatedAtUtc) &&
+    signalTimestampMs < Date.parse(window.expiresAtUtc) &&
+    input.source === "strategy" &&
+    input.side === "buy" &&
+    input.entryStyle === "maker" &&
+    input.postOnly === true &&
+    input.decisionRuleId === "R23_DIP_TRIGGER" &&
+    input.signalReason === "probe-entry"
+  );
+}
+
 /**
  * The static whitelist is the legacy maker authorization. `captureNextR23` is
  * its deliberately narrower alternative for one timestamp-bound R23 signal.
@@ -2206,20 +2234,7 @@ export function isMakerMicroLiveOrderAuthorized(
   ) {
     return true;
   }
-  const window = makerEntry.microLiveWindow;
-  const signalTimestampMs = Date.parse(input.signalTimestamp ?? "");
-  return (
-    window?.captureNextR23 === true &&
-    Number.isFinite(signalTimestampMs) &&
-    signalTimestampMs >= Date.parse(window.activatedAtUtc) &&
-    signalTimestampMs < Date.parse(window.expiresAtUtc) &&
-    input.source === "strategy" &&
-    input.side === "buy" &&
-    input.entryStyle === "maker" &&
-    input.postOnly === true &&
-    input.decisionRuleId === "R23_DIP_TRIGGER" &&
-    input.signalReason === "probe-entry"
-  );
+  return isMakerCaptureNextR23OrderAuthorized(makerEntry, input, nowMs);
 }
 
 /**

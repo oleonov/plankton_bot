@@ -46,7 +46,10 @@ import {
   shouldBlockRepriceChain,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
-import { resolveEntryBuyOrderTtlMs } from "../../buy-order-lifecycle.js";
+import {
+  resolveEntryBuyOrderTtlMs,
+  resolveMakerMicroLiveFillDeadlineMs,
+} from "../../buy-order-lifecycle.js";
 import { resolveMidpointAnchoredSellPrice } from "../strategy/signal-to-order.js";
 import type { ExitOrderLifetimeDecision } from "../order-lifetime/order-lifetime-ttl.js";
 import {
@@ -270,9 +273,13 @@ export async function cleanStaleEntryOrders(
     const backoffMs = CANCEL_BACKOFF_MS;
     const lastAttempt = backoffMap.get(ordKey);
     if (lastAttempt != null && now - lastAttempt < backoffMs) continue;
-    const ttlMs = resolveOrderTtlMs(order, market);
+    const captureDeadlineMs = resolveMakerMicroLiveFillDeadlineMs(order);
+    const ttlMs =
+      captureDeadlineMs == null
+        ? resolveOrderTtlMs(order, market)
+        : captureDeadlineMs - Date.parse(order.createdAt);
 
-    if (ageMs > ttlMs) {
+    if (captureDeadlineMs != null ? now >= captureDeadlineMs : ageMs > ttlMs) {
       await publishCancel(bus, order, "stale_entry_ttl");
       backoffMap.set(ordKey, now);
       staleTtlCancelled++;

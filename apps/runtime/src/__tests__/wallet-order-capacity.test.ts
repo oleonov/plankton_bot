@@ -5,13 +5,16 @@ import {
   evaluateWalletBuyCapacity,
   evaluateWalletSellCapacity,
   readWalletBalanceUsdc,
+  resolveProtectedWalletBuyRequirement,
   resolveEntriesBlocked,
 } from "../wallet-buy-budget.js";
-import type {
-  BuyCapacityPolicy,
-  OrderCapacityPolicy,
-  ProfileId,
-  SellCapacityPolicy,
+import {
+  DEFAULT_EXECUTION_POLICY,
+  type BuyCapacityPolicy,
+  type ExecutionPolicy,
+  type OrderCapacityPolicy,
+  type ProfileId,
+  type SellCapacityPolicy,
 } from "@krabs/domain";
 
 const buyPolicy: BuyCapacityPolicy = {
@@ -40,6 +43,51 @@ const orderPolicy: OrderCapacityPolicy = {
 };
 
 describe("order capacity policy evaluators", () => {
+  it("protects one capture slot from ordinary BUYs and caps the exact capture before pending", () => {
+    const nowMs = Date.parse("2026-08-20T11:00:00.000Z");
+    const makerEntry: ExecutionPolicy["makerEntry"] = {
+      ...DEFAULT_EXECUTION_POLICY.makerEntry,
+      mode: "micro_live",
+      microMaxOrderUsdc: 1,
+      microLiveWindow: {
+        activatedAtUtc: "2026-08-20T10:00:00.000Z",
+        expiresAtUtc: "2026-08-20T12:00:00.000Z",
+        maxCumulativeAcceptedPendingUsdc: 44,
+        captureNextR23: true,
+      },
+    };
+    const ordinary = resolveProtectedWalletBuyRequirement({
+      makerEntry,
+      authorization: null,
+      proposedNotionalUsdc: 2,
+      pendingBuyNotionalUsdc: 3,
+      nowMs,
+    });
+    const capture = resolveProtectedWalletBuyRequirement({
+      makerEntry,
+      authorization: {
+        conditionId: "cond",
+        source: "strategy",
+        side: "buy",
+        entryStyle: "maker",
+        postOnly: true,
+        decisionRuleId: "R23_DIP_TRIGGER",
+        signalReason: "probe-entry",
+        signalTimestamp: new Date(nowMs).toISOString(),
+      },
+      proposedNotionalUsdc: 7,
+      pendingBuyNotionalUsdc: 3,
+      nowMs,
+    });
+
+    expect(ordinary).toMatchObject({ requiredNotionalUsdc: 6, protectedHeadroomUsdc: 1 });
+    expect(capture).toMatchObject({
+      requiredNotionalUsdc: 4,
+      protectedHeadroomUsdc: 0,
+      exactCaptureNextR23: true,
+    });
+  });
+
   it.each([
     [24, true],
     [25, false],

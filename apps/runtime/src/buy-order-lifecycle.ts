@@ -35,6 +35,56 @@ export const ADAPTIVE_ENTRY_TTL_CAP_MS = 12 * 60 * 60_000;
 // Operational (not from plankton): bound GATE's share of the shared 25-slot buy pool (protect R23).
 export const MAX_OPEN_GATE_BUYS = 6;
 
+const R23_CAPTURE_LIFECYCLE_KEYS = [
+  "activatedAtUtc",
+  "expiresAtUtc",
+  "fillWaitMs",
+  "kind",
+] as const;
+
+/** Deadline frozen onto one exact capture order; malformed or legacy metadata never changes TTL. */
+export function resolveMakerMicroLiveFillDeadlineMs(order: Order): number | null {
+  if (
+    order.side !== "buy" ||
+    order.entryStyle !== "maker" ||
+    order.postOnly !== true ||
+    order.decisionRuleId !== "R23_DIP_TRIGGER" ||
+    order.signalReason !== SignalReason.ProbeEntry
+  ) {
+    return null;
+  }
+  const raw = order.metadata?.makerMicroLiveLifecycle;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const marker = raw as Record<string, unknown>;
+  const keys = Object.keys(marker).sort();
+  if (
+    keys.length !== R23_CAPTURE_LIFECYCLE_KEYS.length ||
+    keys.some((key, index) => key !== R23_CAPTURE_LIFECYCLE_KEYS[index]) ||
+    marker.kind !== "r23_capture" ||
+    typeof marker.activatedAtUtc !== "string" ||
+    typeof marker.expiresAtUtc !== "string" ||
+    typeof marker.fillWaitMs !== "number" ||
+    !Number.isSafeInteger(marker.fillWaitMs) ||
+    marker.fillWaitMs <= 0
+  ) {
+    return null;
+  }
+  const createdAtMs = Date.parse(order.createdAt);
+  const activatedAtMs = Date.parse(marker.activatedAtUtc);
+  const expiresAtMs = Date.parse(marker.expiresAtUtc);
+  if (
+    !Number.isFinite(createdAtMs) ||
+    !Number.isFinite(activatedAtMs) ||
+    !Number.isFinite(expiresAtMs) ||
+    activatedAtMs >= expiresAtMs ||
+    createdAtMs < activatedAtMs ||
+    createdAtMs >= expiresAtMs
+  ) {
+    return null;
+  }
+  return createdAtMs + marker.fillWaitMs;
+}
+
 /**
  * Adaptive TTL (ms) for a first-entry maker bid given the market's trailing-3h public trade count.
  * `clamp(580 / tradeCount3h minutes, floor, cap)`; unknown/dead market (null/≤0) → cap (max patience).

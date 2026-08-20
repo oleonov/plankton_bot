@@ -286,24 +286,51 @@ export class SqliteOrderRepository implements OrderRepository {
     return row.total;
   }
 
-  sumMakerBuyCommittedNotionalInWindow(
+  getMakerBuyWindowUsage(
     activatedAtUtc: string,
     expiresAtUtc: string,
+    conditionId: string,
     excludeClientOrderId: string,
-  ): number {
+  ): import("@krabs/domain").MakerBuyWindowUsage {
     const row = this.db
       .prepare(
-        `SELECT COALESCE(SUM(size_usdc), 0) AS total
-           FROM orders
-          WHERE side = 'buy'
-            AND entry_style = 'maker'
-            AND status <> 'rejected'
-            AND created_at >= ?
-            AND created_at < ?
-            AND client_order_id <> ?`,
+        `WITH committed AS (
+           SELECT order_id, condition_id, size_usdc
+             FROM orders
+            WHERE side = 'buy'
+              AND entry_style = 'maker'
+              AND status <> 'rejected'
+              AND created_at >= ?
+              AND created_at < ?
+              AND client_order_id <> ?
+         )
+         SELECT COALESCE(SUM(size_usdc), 0) AS committed_usdc,
+                COALESCE(SUM(CASE WHEN condition_id = ? THEN size_usdc ELSE 0 END), 0)
+                  AS condition_committed_usdc,
+                COUNT(DISTINCT condition_id) AS distinct_accepted_conditions,
+                COALESCE(json_group_array(DISTINCT condition_id), '[]') AS condition_ids_json,
+                COALESCE((SELECT SUM(f.size_usdc)
+                            FROM fills f JOIN committed c ON c.order_id = f.order_id
+                           WHERE f.side = 'buy'), 0) AS filled_usdc
+           FROM committed`,
       )
-      .get(activatedAtUtc, expiresAtUtc, excludeClientOrderId) as { total: number };
-    return row.total;
+      .get(activatedAtUtc, expiresAtUtc, excludeClientOrderId, conditionId) as {
+      committed_usdc: number;
+      condition_committed_usdc: number;
+      distinct_accepted_conditions: number;
+      condition_ids_json: string;
+      filled_usdc: number;
+    };
+    const conditionIds = JSON.parse(row.condition_ids_json) as unknown[];
+    return {
+      committedUsdc: row.committed_usdc,
+      conditionCommittedUsdc: row.condition_committed_usdc,
+      distinctAcceptedConditions: row.distinct_accepted_conditions,
+      committedConditionIds: conditionIds.filter(
+        (value): value is string => typeof value === "string",
+      ),
+      filledUsdc: row.filled_usdc,
+    };
   }
 
   private runMetadataUpdate(id: OrderId, metadata: Readonly<Record<string, unknown>>): void {

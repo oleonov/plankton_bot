@@ -1,4 +1,11 @@
-import type { ClientOrderId, FillRepository, Order, Position, TokenId } from "@krabs/domain";
+import type {
+  ClientOrderId,
+  ConditionId,
+  FillRepository,
+  Order,
+  Position,
+  TokenId,
+} from "@krabs/domain";
 import { GATE_ENTRY_RULE_ID } from "@krabs/domain";
 import { classifySellCapacitySource } from "../../wallet-buy-budget.js";
 
@@ -6,7 +13,10 @@ const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
 type ReservationFillLookup = Pick<FillRepository, "findByOrderId" | "findByOrderIds">;
 
 export interface PendingReservation {
+  /** Always supplied by Execution; optional only for backward-compatible test/adapter callers. */
   clientOrderId?: ClientOrderId;
+  /** Always supplied by Execution; missing external values are counted conservatively as unknown. */
+  conditionId?: ConditionId;
   tokenId: TokenId;
   side: "buy" | "sell";
   size: number;
@@ -53,6 +63,8 @@ export function buildReservationSnapshot(
 
   for (const order of activeOpenOrders) {
     addReservation(snapshot, {
+      clientOrderId: order.clientOrderId,
+      conditionId: order.conditionId,
       tokenId: order.tokenId,
       side: order.side,
       size: getRemainingOrderSize(order, filledSizeByOrderId),

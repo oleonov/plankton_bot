@@ -2859,7 +2859,10 @@ describe("makerEntry.microLiveWindow", () => {
           microLiveWindow: {
             activatedAtUtc: "2026-08-20 10:00:00",
             expiresAtUtc: "2026-08-20T12:00:00Z",
-            maxCumulativeAcceptedPendingUsdc: 1,
+            maxCumulativeAcceptedPendingUsdc: 44,
+            maxCumulativeAcceptedPendingUsdcPerCondition: 1,
+            maxDistinctAcceptedConditions: 44,
+            maxCumulativeFilledUsdc: 5,
             captureNextR23: true,
           },
         },
@@ -2869,7 +2872,10 @@ describe("makerEntry.microLiveWindow", () => {
     expect(parsed.policy.makerEntry.microLiveWindow).toEqual({
       activatedAtUtc: "2026-08-20T10:00:00.000Z",
       expiresAtUtc: "2026-08-20T12:00:00.000Z",
-      maxCumulativeAcceptedPendingUsdc: 1,
+      maxCumulativeAcceptedPendingUsdc: 44,
+      maxCumulativeAcceptedPendingUsdcPerCondition: 1,
+      maxDistinctAcceptedConditions: 44,
+      maxCumulativeFilledUsdc: 5,
       captureNextR23: true,
     });
   });
@@ -2887,6 +2893,59 @@ describe("makerEntry.microLiveWindow", () => {
       JSON.stringify({ makerEntry: { microLiveWindow: { captureNextR23: "yes" } } }),
     );
     expect(parsed.issues).toContain("makerEntry.microLiveWindow.captureNextR23 must be a boolean");
+  });
+
+  it.each([
+    "maxCumulativeAcceptedPendingUsdcPerCondition",
+    "maxDistinctAcceptedConditions",
+    "maxCumulativeFilledUsdc",
+  ] as const)("fails closed when captureNextR23 omits %s", (missingField) => {
+    const microLiveWindow: Record<string, unknown> = {
+      activatedAtUtc: "2026-08-20T10:00:00Z",
+      expiresAtUtc: "2026-08-20T12:00:00Z",
+      maxCumulativeAcceptedPendingUsdc: 44,
+      maxCumulativeAcceptedPendingUsdcPerCondition: 1,
+      maxDistinctAcceptedConditions: 44,
+      maxCumulativeFilledUsdc: 5,
+      captureNextR23: true,
+    };
+    delete microLiveWindow[missingField];
+
+    const parsed = parseExecutionPolicyJson(JSON.stringify({ makerEntry: { microLiveWindow } }));
+
+    expect(parsed.issues).toContain(
+      `makerEntry.microLiveWindow.${missingField} is required for captureNextR23`,
+    );
+    expect(parsed.policy.makerEntry.microLiveWindow?.captureNextR23).toBeUndefined();
+  });
+
+  it("fails capture closed for invalid series rails without changing the total cap", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        makerEntry: {
+          microLiveWindow: {
+            activatedAtUtc: "2026-08-20T10:00:00Z",
+            expiresAtUtc: "2026-08-20T12:00:00Z",
+            maxCumulativeAcceptedPendingUsdc: 5,
+            maxCumulativeAcceptedPendingUsdcPerCondition: 6,
+            maxDistinctAcceptedConditions: 1.5,
+            maxCumulativeFilledUsdc: 0,
+            captureNextR23: true,
+          },
+        },
+      }),
+    );
+    expect(parsed.issues).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("maxCumulativeAcceptedPendingUsdcPerCondition must be <="),
+        expect.stringContaining("maxDistinctAcceptedConditions must be a positive integer"),
+        expect.stringContaining("maxCumulativeFilledUsdc must be > 0"),
+      ]),
+    );
+    expect(parsed.policy.makerEntry.microLiveWindow).toMatchObject({
+      maxCumulativeAcceptedPendingUsdc: 5,
+    });
+    expect(parsed.policy.makerEntry.microLiveWindow?.captureNextR23).toBeUndefined();
   });
 
   it.each([

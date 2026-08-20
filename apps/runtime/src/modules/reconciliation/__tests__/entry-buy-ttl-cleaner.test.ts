@@ -33,6 +33,52 @@ const TOKEN_SHORT = createTokenId("tok-entry-ttl-short-horizon-probe");
 const TOKEN_SCALE = createTokenId("tok-entry-ttl-scale-in");
 
 describe("stale-order-cleaner — first-entry adaptive TTL (2026-07-19-first-entry-adaptive-ttl)", () => {
+  it("cancels an exact capture at its frozen fillWait deadline but ignores malformed markers", async () => {
+    const activatedAtUtc = new Date(NOW - 3 * H).toISOString();
+    const exact = makeBuyOrder({
+      tokenId: TOKEN_R23,
+      createdAt: new Date(NOW - 2 * H).toISOString(),
+      postOnly: true,
+      entryStyle: "maker",
+      decisionRuleId: "R23_DIP_TRIGGER",
+      metadata: {
+        makerMicroLiveLifecycle: {
+          kind: "r23_capture",
+          activatedAtUtc,
+          expiresAtUtc: new Date(NOW + H).toISOString(),
+          fillWaitMs: 2 * H,
+        },
+      },
+    });
+    const malformed = makeBuyOrder({
+      ...exact,
+      orderId: createOrderId("ord-malformed-capture"),
+      tokenId: createTokenId("tok-malformed-capture"),
+      metadata: {
+        makerMicroLiveLifecycle: {
+          kind: "r23_capture",
+          activatedAtUtc,
+          expiresAtUtc: new Date(NOW + H).toISOString(),
+          fillWaitMs: 2 * H,
+          extra: true,
+        },
+      },
+    });
+    const env = makeEnv({
+      orders: [exact, malformed],
+      markets: new Map([
+        [String(exact.tokenId), makeMarket({ tokenId: exact.tokenId, horizon: null })],
+        [String(malformed.tokenId), makeMarket({ tokenId: malformed.tokenId, horizon: null })],
+      ]),
+    });
+
+    const result = await env.run();
+    await env.bus.drain();
+
+    expect(result.staleTtlCancelled).toBe(1);
+    expect(env.cancelled.map((event) => event.command.orderId)).toEqual([exact.orderId]);
+  });
+
   it("does NOT cancel an 11-min-old R23 first-entry BUY on a long-lived (null-horizon) market", async () => {
     const order = makeBuyOrder({
       tokenId: TOKEN_R23,

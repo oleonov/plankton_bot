@@ -648,13 +648,25 @@ describe("SqliteOrderRepository", () => {
           updatedAt: createdAt,
           entryStyle,
           side,
+          ...(index === 4 ? { conditionId: createConditionId("cond-2") } : {}),
         }),
       );
     });
+    const insertFill = conn.db.prepare(
+      `INSERT INTO fills
+       (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc)
+       VALUES (?, ?, 'tok-1', 'cond-1', 'buy', 0.5, 1, ?)`,
+    );
+    insertFill.run("fill-window", "window-3", 0.25);
+    insertFill.run("fill-excluded", "window-1", 0.2);
 
-    expect(
-      repo.sumMakerBuyCommittedNotionalInWindow(activatedAtUtc, expiresAtUtc, "c-open"),
-    ).toBeCloseTo(1.3);
+    expect(repo.getMakerBuyWindowUsage(activatedAtUtc, expiresAtUtc, "cond-1", "c-open")).toEqual({
+      committedUsdc: 1.3,
+      conditionCommittedUsdc: 0.8,
+      distinctAcceptedConditions: 2,
+      committedConditionIds: expect.arrayContaining(["cond-1", "cond-2"]),
+      filledUsdc: 0.25,
+    });
   });
 
   it("persists positionId round-trip and defaults to null when absent (Release A Phase 3)", () => {

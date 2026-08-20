@@ -70,6 +70,7 @@ import {
   BOUNCE_EXIT_BACKSTOP_RULE_ID,
   createEntryFreshEdgeAttribution,
   isGateWhitelisted,
+  isMakerCaptureNextR23OrderAuthorized,
 } from "@krabs/domain";
 import {
   isWorkingSellOrderStatus,
@@ -4635,6 +4636,10 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
 
     if (this.buyBudgetCooldownUntilMs > now) {
+      if (this.isExactMakerCaptureSignal(signal, now)) {
+        const captureAttempt = this.canAttemptBuyNotional(signal.suggestedSizeUsdc, signal);
+        if (captureAttempt?.allowed === true) return false;
+      }
       this.buyBudgetSuppressedSignals++;
       return true;
     }
@@ -4645,7 +4650,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
 
     if (canAttempt?.allowed === false) {
-      if (canAttempt.activateCooldown) {
+      if (canAttempt.activateCooldown && !this.isExactMakerCaptureSignal(signal, now)) {
         this.activateBuyBudgetCooldown(signal, now, "decision_preflight", canAttempt.reasonCode);
       }
       this.buyBudgetSuppressedSignals++;
@@ -4663,7 +4668,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     try {
       const pending = this.pendingPreOpenBuy(signal.tokenId);
-      const result = circuitBreaker.canAttemptBuy(requiredNotionalUsdc + pending.notional, signal, {
+      const result = circuitBreaker.canAttemptBuy(requiredNotionalUsdc, signal, {
         pendingPreOpenBuyCount: pending.count,
         pendingPreOpenBuyCountForToken: pending.countForToken,
         pendingPreOpenBuyNotionalUsdc: pending.notional,
@@ -4685,6 +4690,26 @@ export class AlgoDecisionModule implements RuntimeModule {
       );
       return { allowed: true, reasonCode: "", activateCooldown: false };
     }
+  }
+
+  private isExactMakerCaptureSignal(signal: import("@krabs/domain").Signal, now: number): boolean {
+    const makerEntry = this.deps.executionPolicy?.().makerEntry;
+    return makerEntry
+      ? isMakerCaptureNextR23OrderAuthorized(
+          makerEntry,
+          {
+            conditionId: signal.conditionId,
+            source: "strategy",
+            side: signal.side,
+            entryStyle: "maker",
+            postOnly: true,
+            decisionRuleId: signal.decisionRuleId,
+            signalReason: signal.reason,
+            signalTimestamp: signal.generatedAt,
+          },
+          now,
+        )
+      : false;
   }
 
   private activateBuyBudgetCooldown(

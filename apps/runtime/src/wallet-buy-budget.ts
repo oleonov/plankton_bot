@@ -7,10 +7,14 @@ import {
   S1_LADDER_RULE_ID,
   SignalReason,
   type BuyCapacityPolicy,
+  type MakerEntryPolicy,
+  type MakerMicroLiveAuthorizationInput,
   type OrderCapacityPolicy,
   type OrderSide,
   type ProfileId,
   type SellCapacityPolicy,
+  isMakerCaptureNextR23OrderAuthorized,
+  isMakerMicroLiveWindowActive,
 } from "@krabs/domain";
 
 const BUDGET_EPSILON_USDC = 1e-9;
@@ -76,6 +80,41 @@ export interface WalletBuyCapacityDecision {
   maxOpenBuyOrders: number;
   maxOpenBuyOrdersPerToken: number;
   capacityEnabled: boolean;
+}
+
+export interface ProtectedWalletBuyRequirement {
+  requiredNotionalUsdc: number;
+  exactCaptureNextR23: boolean;
+  protectedHeadroomUsdc: number;
+}
+
+/** Apply the active capture reserve once, consistently at every BUY budget checkpoint. */
+export function resolveProtectedWalletBuyRequirement(args: {
+  makerEntry: Pick<MakerEntryPolicy, "mode" | "microMaxOrderUsdc" | "microLiveWindow"> | null;
+  authorization: MakerMicroLiveAuthorizationInput | null;
+  proposedNotionalUsdc: number;
+  pendingBuyNotionalUsdc: number;
+  nowMs: number;
+}): ProtectedWalletBuyRequirement {
+  const activeCapture =
+    args.makerEntry?.mode === "micro_live" &&
+    args.makerEntry.microLiveWindow?.captureNextR23 === true &&
+    isMakerMicroLiveWindowActive(args.makerEntry.microLiveWindow, args.nowMs);
+  const exactCaptureNextR23 =
+    activeCapture &&
+    args.authorization != null &&
+    isMakerCaptureNextR23OrderAuthorized(args.makerEntry!, args.authorization, args.nowMs);
+  const proposedNotionalUsdc = exactCaptureNextR23
+    ? Math.min(args.proposedNotionalUsdc, args.makerEntry!.microMaxOrderUsdc)
+    : args.proposedNotionalUsdc;
+  const protectedHeadroomUsdc =
+    activeCapture && !exactCaptureNextR23 ? args.makerEntry!.microMaxOrderUsdc : 0;
+  return {
+    requiredNotionalUsdc:
+      proposedNotionalUsdc + args.pendingBuyNotionalUsdc + protectedHeadroomUsdc,
+    exactCaptureNextR23,
+    protectedHeadroomUsdc,
+  };
 }
 
 export interface WalletSellCapacityDecision {

@@ -20,12 +20,14 @@ import type {
 import {
   ENTRY_REASONS,
   canPlaceBuyOrderForMarket,
+  createCommandId,
   createConditionId,
   deriveState,
   evaluateSize,
   parseEntryFreshEdgeAttribution,
   resolveSignalReason,
 } from "@krabs/domain";
+import { resolveMakerMicroLiveFillDeadlineMs } from "../../buy-order-lifecycle.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { Logger } from "../../logger.js";
 
@@ -121,7 +123,25 @@ export class EntryLifecycleModule implements RuntimeModule {
       this.deps.bus.subscribe("MarketResolvedHint", (event) => this.handleMarketResolved(event)),
     );
     this.started = true;
+    await this.cancelExpiredMakerCaptures();
     this.log.info("entry lifecycle module started");
+  }
+
+  private async cancelExpiredMakerCaptures(): Promise<void> {
+    const now = this.now();
+    for (const order of this.deps.orderRepo.findOpen()) {
+      const deadlineMs = resolveMakerMicroLiveFillDeadlineMs(order);
+      if (deadlineMs == null || now < deadlineMs) continue;
+      await this.deps.bus.publish("CancelOrderRequested", {
+        command: {
+          type: "CancelOrderCommand",
+          commandId: createCommandId(`maker-capture-startup-${String(order.orderId)}-${now}`),
+          orderId: order.orderId,
+          reason: "stale_entry_ttl",
+        },
+        timestamp: now,
+      });
+    }
   }
 
   async stop(): Promise<void> {

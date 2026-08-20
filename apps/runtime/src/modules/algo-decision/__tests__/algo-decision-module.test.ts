@@ -5374,6 +5374,54 @@ describe("AlgoDecisionModule", () => {
   });
 
   describe("wallet buy budget ownership", () => {
+    it("admits an exact capture through ordinary cooldown without clearing that cooldown", () => {
+      const now = Date.parse("2026-08-20T11:00:00.000Z");
+      const canAttemptBuy = vi
+        .fn()
+        .mockReturnValueOnce({ canAttempt: false })
+        .mockReturnValueOnce({ canAttempt: true });
+      const mod = buildModule({
+        buySignalBudgetCircuitBreaker: { canAttemptBuy },
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live",
+            microLiveWindow: {
+              activatedAtUtc: new Date(now - 60_000).toISOString(),
+              expiresAtUtc: new Date(now + 60_000).toISOString(),
+              maxCumulativeAcceptedPendingUsdc: 44,
+              captureNextR23: true,
+            },
+          },
+        }),
+        buySignalBudgetCooldownMs: 60_000,
+      });
+      const ordinary = {
+        signalId: "ordinary",
+        tokenId: createTokenId("ordinary-token"),
+        conditionId: "ordinary-condition",
+        side: "buy",
+        suggestedSizeUsdc: 1,
+        reason: "probe-entry",
+        decisionRuleId: "OTHER",
+        generatedAt: new Date(now).toISOString(),
+      } as any;
+      const capture = {
+        ...ordinary,
+        signalId: "capture",
+        tokenId: createTokenId("capture-token"),
+        conditionId: "capture-condition",
+        decisionRuleId: "R23_DIP_TRIGGER",
+      };
+
+      expect((mod as any).shouldSuppressBuyForBudget(ordinary, now)).toBe(true);
+      expect((mod as any).shouldSuppressBuyForBudget(capture, now + 1)).toBe(false);
+      expect((mod as any).shouldSuppressBuyForBudget(ordinary, now + 2)).toBe(true);
+      expect(canAttemptBuy).toHaveBeenCalledTimes(2);
+      expect((mod as any).buyBudgetCooldownUntilMs).toBe(now + 60_000);
+    });
+
     it("does not apply wallet-budget gating before SignalProduced", async () => {
       const tokenId = "token-budget-owned-by-risk";
       selectedMarketCache = createMockSelectedMarketCache([tokenId]);
@@ -5406,8 +5454,8 @@ describe("AlgoDecisionModule", () => {
       selectedMarketCache = createMockSelectedMarketCache(tokenIds);
       const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
       const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
-      const canAttemptBuy = vi.fn((requiredNotionalUsdc: number) => ({
-        canAttempt: requiredNotionalUsdc <= 2,
+      const canAttemptBuy = vi.fn((requiredNotionalUsdc: number, _signal, context) => ({
+        canAttempt: requiredNotionalUsdc + (context?.pendingPreOpenBuyNotionalUsdc ?? 0) <= 2,
       }));
 
       const mod = buildModule({
@@ -5428,7 +5476,7 @@ describe("AlgoDecisionModule", () => {
       expect(signalCalls.length).toBe(2);
       expect(signalCalls.every(([, payload]) => payload.signal.side === "buy")).toBe(true);
       expect(canAttemptBuy.mock.calls.map(([required]) => Number(required.toFixed(2)))).toEqual([
-        0.99, 1.98, 2.97,
+        0.99, 0.99, 0.99,
       ]);
       const suppressionCalls = vi
         .mocked(riskEventRepo.insert)

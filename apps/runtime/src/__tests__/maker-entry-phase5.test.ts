@@ -324,6 +324,12 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
 
     expect(placed[0]?.entryStyle).toBe("maker");
     expect(placed[0]?.postOnly).toBe(true);
+    expect(placed[0]?.metadata?.makerMicroLiveLifecycle).toEqual({
+      kind: "r23_capture",
+      activatedAtUtc: new Date(NOW).toISOString(),
+      expiresAtUtc: new Date(NOW + 60_000).toISOString(),
+      fillWaitMs: makerEntry.fillWaitMs,
+    });
   });
 
   it.each([

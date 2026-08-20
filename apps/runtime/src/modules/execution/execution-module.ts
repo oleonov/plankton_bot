@@ -97,6 +97,7 @@ import {
   type OrderCapacityMetricsSample,
   type WalletSellCapacityDecision,
   resolveWalletBuyBudget,
+  resolveProtectedWalletBuyRequirement,
   WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
   WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
 } from "../../wallet-buy-budget.js";
@@ -117,6 +118,7 @@ import {
   findNearDuplicateOpenBuy,
   findOldestStaleOpenBuy,
   MAX_OPEN_GATE_BUYS,
+  resolveMakerMicroLiveFillDeadlineMs,
 } from "../../buy-order-lifecycle.js";
 import { ExecutionQueue, drainGenerations } from "./execution-queue.js";
 import { AuthoritativeTickResolver } from "./authoritative-tick-resolver.js";
@@ -1735,7 +1737,7 @@ export class ExecutionModule implements RuntimeModule {
     window: MakerMicroLiveWindow | undefined,
   ): { reason: string; code: ExchangeErrorCode } | null {
     if (window === undefined) return null;
-    if (!this.deps.orderRepo.sumMakerBuyCommittedNotionalInWindow) {
+    if (!this.deps.orderRepo.getMakerBuyWindowUsage) {
       return {
         reason: "maker-micro-cumulative-cap-unavailable",
         code: ExchangeErrorCode.LivePolicyBlocked,
@@ -1744,21 +1746,59 @@ export class ExecutionModule implements RuntimeModule {
     const persistedOpenOrders = this.deps.orderRepo
       .findOpen()
       .filter((order) => order.clientOrderId !== cmd.clientOrderId);
-    const pendingUsdc = computeMakerPendingReservationUsdc(
-      this.otherUnpersistedReservations(cmd, persistedOpenOrders),
+    const otherReservations = this.otherUnpersistedReservations(cmd, persistedOpenOrders);
+    const makerReservations = otherReservations.filter(
+      (reservation) => reservation.side === "buy" && reservation.entryStyle === "maker",
     );
-    const committedUsdc = this.deps.orderRepo.sumMakerBuyCommittedNotionalInWindow(
+    const pendingUsdc = computeMakerPendingReservationUsdc(makerReservations);
+    const usage = this.deps.orderRepo.getMakerBuyWindowUsage(
       window.activatedAtUtc,
       window.expiresAtUtc,
+      String(cmd.conditionId),
       String(cmd.clientOrderId),
     );
-    if (committedUsdc + pendingUsdc + notional <= window.maxCumulativeAcceptedPendingUsdc) {
-      return null;
+    if (usage.committedUsdc + pendingUsdc + notional > window.maxCumulativeAcceptedPendingUsdc) {
+      return this.makerCapRejection("maker-micro-cumulative-cap-exceeded");
     }
-    return {
-      reason: "maker-micro-cumulative-cap-exceeded",
-      code: ExchangeErrorCode.LivePolicyBlocked,
-    };
+
+    const conditionPendingUsdc = computeMakerPendingReservationUsdc(
+      makerReservations.filter(
+        (reservation) => String(reservation.conditionId) === String(cmd.conditionId),
+      ),
+    );
+    if (
+      window.maxCumulativeAcceptedPendingUsdcPerCondition !== undefined &&
+      usage.conditionCommittedUsdc + conditionPendingUsdc + notional >
+        window.maxCumulativeAcceptedPendingUsdcPerCondition
+    ) {
+      return this.makerCapRejection("maker-micro-condition-cap-exceeded");
+    }
+
+    if (window.maxDistinctAcceptedConditions !== undefined) {
+      const conditions = new Set(usage.committedConditionIds);
+      for (const reservation of makerReservations) conditions.add(String(reservation.conditionId));
+      conditions.add(String(cmd.conditionId));
+      if (conditions.size > window.maxDistinctAcceptedConditions) {
+        return this.makerCapRejection("maker-micro-distinct-condition-cap-exceeded");
+      }
+    }
+
+    const remainingOtherOpenUsdc = computeMakerOpenOrderUsdc(
+      persistedOpenOrders,
+      this.deps.fillRepo,
+    );
+    if (
+      window.maxCumulativeFilledUsdc !== undefined &&
+      usage.filledUsdc + remainingOtherOpenUsdc + pendingUsdc + notional >
+        window.maxCumulativeFilledUsdc
+    ) {
+      return this.makerCapRejection("maker-micro-filled-cap-exceeded");
+    }
+    return null;
+  }
+
+  private makerCapRejection(reason: string): { reason: string; code: ExchangeErrorCode } {
+    return { reason, code: ExchangeErrorCode.LivePolicyBlocked };
   }
 
   private otherUnpersistedReservations(
@@ -1773,7 +1813,7 @@ export class ExecutionModule implements RuntimeModule {
       .map(([, reservation]) => reservation)
       .filter(
         (reservation) =>
-          reservation.clientOrderId == null ||
+          String(reservation.clientOrderId) !== String(cmd.clientOrderId) &&
           !persistedClientOrderIds.has(String(reservation.clientOrderId)),
       );
   }
@@ -2229,6 +2269,7 @@ export class ExecutionModule implements RuntimeModule {
 
     this.pendingReservations.set(String(effectiveCmd.commandId), {
       clientOrderId: effectiveCmd.clientOrderId,
+      conditionId: effectiveCmd.conditionId,
       tokenId: effectiveCmd.tokenId,
       side: effectiveCmd.side,
       size: effectiveCmd.size,
@@ -3112,11 +3153,22 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
     if (this.deps.runtimeMode === "live-lite" && existingOrder?.status === "pending") {
-      this.log.warn(
-        { commandId: cmd.commandId, orderId: cmd.orderId },
-        "cancel blocked — live order submission is still pending",
+      const captureDeadlineMs = resolveMakerMicroLiveFillDeadlineMs(existingOrder);
+      const hasMatchingReservation = [...this.pendingReservations.values()].some(
+        (reservation) => reservation.clientOrderId === existingOrder.clientOrderId,
       );
-      return;
+      if (
+        cmd.reason !== "stale_entry_ttl" ||
+        captureDeadlineMs == null ||
+        Date.now() < captureDeadlineMs ||
+        hasMatchingReservation
+      ) {
+        this.log.warn(
+          { commandId: cmd.commandId, orderId: cmd.orderId },
+          "cancel blocked — live order submission is still pending",
+        );
+        return;
+      }
     }
     if (this.cancelReservations.has(orderKey)) {
       this.log.debug(
@@ -3435,10 +3487,26 @@ export class ExecutionModule implements RuntimeModule {
         },
         reservations.reservedBuyUsdc,
       );
+      const protectedRequirement = resolveProtectedWalletBuyRequirement({
+        makerEntry: this.deps.executionPolicy?.()?.makerEntry ?? null,
+        authorization: {
+          conditionId: cmd.conditionId,
+          source: cmd.source,
+          side: cmd.side,
+          entryStyle: cmd.entryStyle,
+          postOnly: cmd.postOnly,
+          decisionRuleId: cmd.decisionRuleId,
+          signalReason: cmd.signalReason,
+          signalTimestamp: cmd.signalTimestamp,
+        },
+        proposedNotionalUsdc: notional,
+        pendingBuyNotionalUsdc: 0,
+        nowMs: Date.now(),
+      });
       const buyCapacity = evaluateWalletBuyCapacity({
         policy: buyPolicy,
         snapshot: walletBudget,
-        requiredNotionalUsdc: notional,
+        requiredNotionalUsdc: protectedRequirement.requiredNotionalUsdc,
         signalReason: cmd.signalReason,
         openBuyOrderCount: reservations.openBuyOrderCount,
       });
@@ -3470,7 +3538,9 @@ export class ExecutionModule implements RuntimeModule {
           },
         };
       }
-      if (hasWalletBuyBudget(walletBudget, notional)) return { kind: "accept" };
+      if (hasWalletBuyBudget(walletBudget, protectedRequirement.requiredNotionalUsdc)) {
+        return { kind: "accept" };
+      }
 
       return {
         kind: "reject",

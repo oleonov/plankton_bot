@@ -32,6 +32,43 @@ const ENABLED_ENTRY_LIFECYCLE_POLICY = {
 };
 
 describe("EntryLifecycleModule", () => {
+  it("publishes startup cancellation for an expired frozen maker capture", async () => {
+    const bus = new InProcessEventBus();
+    const order = makeOrder({
+      signalReason: "probe-entry",
+      decisionRuleId: "R23_DIP_TRIGGER",
+      entryStyle: "maker",
+      createdAt: new Date(1_000).toISOString(),
+      metadata: {
+        makerMicroLiveLifecycle: {
+          kind: "r23_capture",
+          activatedAtUtc: new Date(0).toISOString(),
+          expiresAtUtc: new Date(20_000).toISOString(),
+          fillWaitMs: 5_000,
+        },
+      },
+    });
+    const cancellations: RuntimeEventMap["CancelOrderRequested"][] = [];
+    bus.subscribe("CancelOrderRequested", async (event) => {
+      cancellations.push(event);
+    });
+    const module = buildModule({
+      bus,
+      orderRepo: makeOrderRepo(order),
+      now: () => 10_000,
+    });
+
+    await module.start();
+    await bus.drain();
+
+    expect(cancellations).toHaveLength(1);
+    expect(cancellations[0]?.command).toMatchObject({
+      orderId: order.orderId,
+      reason: "stale_entry_ttl",
+    });
+    await module.stop();
+  });
+
   it("reissues BUY signal after an outbid cancel using the current best bid", async () => {
     const bus = new InProcessEventBus();
     const order = makeOrder({ signalId: "sig-original", price: 0.3, sizeUsdc: 0.99 });
@@ -874,7 +911,7 @@ function makeOrderRepo(order: Order | null): OrderRepository {
     findById: vi.fn(() => order),
     findByClientOrderId: vi.fn(() => null),
     findByExchangeOrderId: vi.fn(() => null),
-    findOpen: vi.fn(() => []),
+    findOpen: vi.fn(() => (order ? [order] : [])),
     findByTokenId: vi.fn(() => []),
     updateStatus: vi.fn(),
     sumOpenBuyNotional: vi.fn(() => 0),

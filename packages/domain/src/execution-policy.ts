@@ -5472,6 +5472,9 @@ function parseMakerMicroLiveWindow(
   const activatedAtUtc = toCanonicalIso(obj.activatedAtUtc);
   const expiresAtUtc = toCanonicalIso(obj.expiresAtUtc);
   const cap = obj.maxCumulativeAcceptedPendingUsdc;
+  const perConditionCap = obj.maxCumulativeAcceptedPendingUsdcPerCondition;
+  const distinctConditionsCap = obj.maxDistinctAcceptedConditions;
+  const filledCap = obj.maxCumulativeFilledUsdc;
   const captureNextR23 = obj.captureNextR23;
   if (activatedAtUtc == null) {
     issues.push("makerEntry.microLiveWindow.activatedAtUtc must be a valid timestamp");
@@ -5484,6 +5487,59 @@ function parseMakerMicroLiveWindow(
   }
   if (captureNextR23 !== undefined && typeof captureNextR23 !== "boolean") {
     issues.push("makerEntry.microLiveWindow.captureNextR23 must be a boolean");
+  }
+  for (const [field, value] of [
+    ["maxCumulativeAcceptedPendingUsdcPerCondition", perConditionCap],
+    ["maxCumulativeFilledUsdc", filledCap],
+  ] as const) {
+    if (
+      value !== undefined &&
+      (typeof value !== "number" || !Number.isFinite(value) || value <= 0)
+    ) {
+      issues.push(`makerEntry.microLiveWindow.${field} must be > 0`);
+    }
+    if (typeof value === "number" && typeof cap === "number" && value > cap) {
+      issues.push(
+        `makerEntry.microLiveWindow.${field} must be <= maxCumulativeAcceptedPendingUsdc`,
+      );
+    }
+  }
+  if (
+    distinctConditionsCap !== undefined &&
+    (typeof distinctConditionsCap !== "number" ||
+      !Number.isSafeInteger(distinctConditionsCap) ||
+      distinctConditionsCap <= 0)
+  ) {
+    issues.push(
+      "makerEntry.microLiveWindow.maxDistinctAcceptedConditions must be a positive integer",
+    );
+  }
+  const validPerConditionCap =
+    typeof perConditionCap === "number" &&
+    Number.isFinite(perConditionCap) &&
+    perConditionCap > 0 &&
+    typeof cap === "number" &&
+    perConditionCap <= cap;
+  const validDistinctConditionsCap =
+    typeof distinctConditionsCap === "number" &&
+    Number.isSafeInteger(distinctConditionsCap) &&
+    distinctConditionsCap > 0;
+  const validFilledCap =
+    typeof filledCap === "number" &&
+    Number.isFinite(filledCap) &&
+    filledCap > 0 &&
+    typeof cap === "number" &&
+    filledCap <= cap;
+  if (captureNextR23 === true) {
+    for (const [field, valid] of [
+      ["maxCumulativeAcceptedPendingUsdcPerCondition", validPerConditionCap],
+      ["maxDistinctAcceptedConditions", validDistinctConditionsCap],
+      ["maxCumulativeFilledUsdc", validFilledCap],
+    ] as const) {
+      if (!valid) {
+        issues.push(`makerEntry.microLiveWindow.${field} is required for captureNextR23`);
+      }
+    }
   }
   if (whitelistConditionIds.length > BOUND_MAKER_MICRO_LIVE_WHITELIST_MAX) {
     issues.push(
@@ -5510,7 +5566,17 @@ function parseMakerMicroLiveWindow(
     activatedAtUtc,
     expiresAtUtc,
     maxCumulativeAcceptedPendingUsdc: cap,
-    ...(captureNextR23 === true ? { captureNextR23: true } : {}),
+    ...(validPerConditionCap
+      ? { maxCumulativeAcceptedPendingUsdcPerCondition: perConditionCap }
+      : {}),
+    ...(validDistinctConditionsCap ? { maxDistinctAcceptedConditions: distinctConditionsCap } : {}),
+    ...(validFilledCap ? { maxCumulativeFilledUsdc: filledCap } : {}),
+    ...(captureNextR23 === true &&
+    validPerConditionCap &&
+    validDistinctConditionsCap &&
+    validFilledCap
+      ? { captureNextR23: true }
+      : {}),
   };
 }
 

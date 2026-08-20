@@ -49,6 +49,7 @@ import {
   isAlive,
   isSellTimeoutReplacement,
   isMakerMicroLiveOrderAuthorized,
+  isMakerCaptureNextR23OrderAuthorized,
   recordStageDuration,
   resolveTrackS3SpreadCap,
   shouldSkipSellPriceCap,
@@ -1709,6 +1710,29 @@ export class SignalToOrderBridge {
           parsedAttribution?.originSignalId === signal.signalId);
       const entryFreshEdgeAttribution =
         signal.side === "buy" && attributionRuleValid ? parsedAttribution : null;
+      const makerMicroLiveLifecycle =
+        makerOverride != null &&
+        isMakerCaptureNextR23OrderAuthorized(
+          policy.makerEntry,
+          {
+            conditionId: signal.conditionId,
+            source: "strategy",
+            side: signal.side,
+            entryStyle: "maker",
+            postOnly: true,
+            decisionRuleId: signal.decisionRuleId,
+            signalReason: signal.reason,
+            signalTimestamp: signal.generatedAt,
+          },
+          nowMs,
+        )
+          ? {
+              kind: "r23_capture",
+              activatedAtUtc: policy.makerEntry.microLiveWindow!.activatedAtUtc,
+              expiresAtUtc: policy.makerEntry.microLiveWindow!.expiresAtUtc,
+              fillWaitMs: policy.makerEntry.fillWaitMs,
+            }
+          : null;
       const cmd: PlaceOrderCommand = {
         type: "PlaceOrderCommand",
         commandId: createCommandId(randomUUID()),
@@ -1752,6 +1776,7 @@ export class SignalToOrderBridge {
             ? { positionConcentration: positionConcentrationMetadata }
             : {}),
           ...(entryFreshEdgeAttribution ? { entryFreshEdgeAttribution } : {}),
+          ...(makerMicroLiveLifecycle ? { makerMicroLiveLifecycle } : {}),
           // Bounce-exit ladder rung identity (docs/plans/2026-07-16-bounce-
           // exit-ladder-redesign.md), persisted on the order so the next
           // planning cycle's placedBounceRungIndices lookup can tell rungs

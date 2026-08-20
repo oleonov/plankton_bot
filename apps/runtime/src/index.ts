@@ -106,6 +106,7 @@ import {
   normalizeOrderCapacityPolicy,
   type OrderCapacityMetricsSample,
   PER_TOKEN_BUY_LIMIT_REASON,
+  resolveProtectedWalletBuyRequirement,
   resolveWalletBuyBudget,
   TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
   WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
@@ -1539,10 +1540,26 @@ async function main(): Promise<void> {
           },
           repos.order.sumOpenBuyNotional(),
         );
+        const protectedRequirement = resolveProtectedWalletBuyRequirement({
+          makerEntry: policy.makerEntry,
+          authorization: {
+            conditionId: signal.conditionId,
+            source: "strategy",
+            side: signal.side,
+            entryStyle: "maker",
+            postOnly: true,
+            decisionRuleId: signal.decisionRuleId,
+            signalReason: signal.reason,
+            signalTimestamp: signal.generatedAt,
+          },
+          proposedNotionalUsdc: requiredNotionalUsdc,
+          pendingBuyNotionalUsdc: context?.pendingPreOpenBuyNotionalUsdc ?? 0,
+          nowMs: Date.now(),
+        });
         const buyCapacity = evaluateWalletBuyCapacity({
           policy: buyPolicy,
           snapshot: walletBudget,
-          requiredNotionalUsdc,
+          requiredNotionalUsdc: protectedRequirement.requiredNotionalUsdc,
           signalReason: signal.reason,
           openBuyOrderCount,
         });
@@ -1565,7 +1582,7 @@ async function main(): Promise<void> {
           };
         }
         return {
-          canAttempt: hasWalletBuyBudget(walletBudget, requiredNotionalUsdc),
+          canAttempt: hasWalletBuyBudget(walletBudget, protectedRequirement.requiredNotionalUsdc),
         };
       },
     },

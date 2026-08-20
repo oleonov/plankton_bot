@@ -50,6 +50,17 @@ import { LIFECYCLE_STOP_WAIT_MS } from "../lifecycle-chain.js";
 const PHASE_ONE_ACTIVE_MARKET_CAP = 250;
 const BOT_RUN_ID = createBotRunId("test-run-1");
 
+function makerWindowUsage(overrides: Partial<import("@krabs/domain").MakerBuyWindowUsage> = {}) {
+  return {
+    committedUsdc: 0,
+    conditionCommittedUsdc: 0,
+    distinctAcceptedConditions: 0,
+    committedConditionIds: [],
+    filledUsdc: 0,
+    ...overrides,
+  };
+}
+
 function makePlaceCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand {
   return {
     type: "PlaceOrderCommand",
@@ -1869,6 +1880,73 @@ describe("ExecutionModule", () => {
       expect.anything(),
     );
     expect(cancelled).toHaveLength(1);
+    await liveMod.stop();
+  });
+
+  it("allows only an expired frozen capture pending row to cancel in live-lite", async () => {
+    const now = Date.now();
+    const savedOrder = {
+      ...openSellAt(0.5, { side: "buy" }),
+      status: "pending" as const,
+      postOnly: true,
+      entryStyle: "maker" as const,
+      decisionRuleId: "R23_DIP_TRIGGER",
+      signalReason: "probe-entry",
+      createdAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+      metadata: {
+        makerMicroLiveLifecycle: {
+          kind: "r23_capture",
+          activatedAtUtc: new Date(now - 3 * 60 * 60_000).toISOString(),
+          expiresAtUtc: new Date(now + 60_000).toISOString(),
+          fillWaitMs: 2 * 60 * 60_000,
+        },
+      },
+    } satisfies Order;
+    vi.mocked(orderRepo.findById).mockReturnValue(savedOrder);
+    (gateway as any).getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+    (gateway as any).getOrderResult = vi.fn().mockResolvedValue({
+      ok: true,
+      data: { orderId: String(savedOrder.orderId), status: "CANCELLED", sizeFilled: 0 },
+    });
+    const liveMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+    });
+    await liveMod.start();
+
+    (liveMod as any).pendingReservations.set("matching-submit", {
+      clientOrderId: savedOrder.clientOrderId,
+      conditionId: savedOrder.conditionId,
+      tokenId: savedOrder.tokenId,
+      side: "buy",
+      size: savedOrder.size,
+      price: savedOrder.price,
+      entryStyle: "maker",
+    });
+    await bus.publish("CancelOrderRequested", {
+      command: makeCancelCmd({ reason: "stale_entry_ttl", orderId: savedOrder.orderId }),
+      timestamp: now,
+    });
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    (liveMod as any).pendingReservations.delete("matching-submit");
+
+    await bus.publish("CancelOrderRequested", {
+      command: makeCancelCmd({
+        commandId: createCommandId("expired-capture-cancel"),
+        reason: "stale_entry_ttl",
+        orderId: savedOrder.orderId,
+      }),
+      timestamp: now,
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledOnce();
     await liveMod.stop();
   });
 
@@ -6098,7 +6176,7 @@ describe("ExecutionModule", () => {
   describe("maker micro-cap enforcement", () => {
     it("authorizes only an exact captureNextR23 command at the execution boundary", () => {
       const now = Date.now();
-      orderRepo.sumMakerBuyCommittedNotionalInWindow = vi.fn().mockReturnValue(0);
+      orderRepo.getMakerBuyWindowUsage = vi.fn().mockReturnValue(makerWindowUsage());
       const microMod = new ExecutionModule({
         gateway,
         bus,
@@ -6363,7 +6441,9 @@ describe("ExecutionModule", () => {
     });
 
     it("rejects when durable committed notional plus the candidate exceeds the window cap", async () => {
-      orderRepo.sumMakerBuyCommittedNotionalInWindow = vi.fn().mockReturnValue(0.6);
+      orderRepo.getMakerBuyWindowUsage = vi
+        .fn()
+        .mockReturnValue(makerWindowUsage({ committedUsdc: 0.6, conditionCommittedUsdc: 0.6 }));
       const now = Date.now();
       const microMod = new ExecutionModule({
         gateway,
@@ -6403,12 +6483,116 @@ describe("ExecutionModule", () => {
 
       expect(gateway.placeOrder).not.toHaveBeenCalled();
       expect(rejected[0]?.reason).toBe("maker-micro-cumulative-cap-exceeded");
-      expect(orderRepo.sumMakerBuyCommittedNotionalInWindow).toHaveBeenCalledWith(
+      expect(orderRepo.getMakerBuyWindowUsage).toHaveBeenCalledWith(
         expect.any(String),
         expect.any(String),
+        "cond-1",
         "plk_abc123",
       );
       await microMod.stop();
+    });
+
+    it.each([
+      [
+        "per-condition lifetime",
+        makerWindowUsage({ committedUsdc: 0.6, conditionCommittedUsdc: 0.6 }),
+        "maker-micro-condition-cap-exceeded",
+      ],
+      [
+        "distinct-condition lifetime",
+        makerWindowUsage({
+          committedUsdc: 40,
+          distinctAcceptedConditions: 44,
+          committedConditionIds: Array.from({ length: 44 }, (_, index) => `other-${index}`),
+        }),
+        "maker-micro-distinct-condition-cap-exceeded",
+      ],
+      [
+        "filled plus conservatively committed",
+        makerWindowUsage({ committedUsdc: 4.5, conditionCommittedUsdc: 0, filledUsdc: 4.5 }),
+        "maker-micro-filled-cap-exceeded",
+      ],
+    ])("enforces the %s series rail", (_label, usage, expectedReason) => {
+      const now = Date.now();
+      orderRepo.getMakerBuyWindowUsage = vi.fn().mockReturnValue(usage);
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live",
+            whitelistConditionIds: ["cond-1"],
+            microMaxOrderUsdc: 1,
+            microMaxOpenUsdc: 5,
+            microLiveWindow: {
+              activatedAtUtc: new Date(now - 60_000).toISOString(),
+              expiresAtUtc: new Date(now + 60_000).toISOString(),
+              maxCumulativeAcceptedPendingUsdc: 44,
+              maxCumulativeAcceptedPendingUsdcPerCondition: 1,
+              maxDistinctAcceptedConditions: 44,
+              maxCumulativeFilledUsdc: 5,
+            },
+          },
+        }),
+      });
+
+      const rejection = (microMod as any).makerBuyLiveRejection(
+        makePlaceCmd({ entryStyle: "maker", price: 0.6, size: 1 }),
+        0.6,
+      );
+      expect(rejection?.reason).toBe(expectedReason);
+    });
+
+    it("counts a complementary-token in-flight reservation against the same condition", () => {
+      const now = Date.now();
+      orderRepo.getMakerBuyWindowUsage = vi.fn().mockReturnValue(makerWindowUsage());
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live",
+            whitelistConditionIds: ["cond-1"],
+            microMaxOrderUsdc: 1,
+            microMaxOpenUsdc: 5,
+            microLiveWindow: {
+              activatedAtUtc: new Date(now - 60_000).toISOString(),
+              expiresAtUtc: new Date(now + 60_000).toISOString(),
+              maxCumulativeAcceptedPendingUsdc: 44,
+              maxCumulativeAcceptedPendingUsdcPerCondition: 1,
+            },
+          },
+        }),
+      });
+      (microMod as any).pendingReservations.set("other-command", {
+        clientOrderId: "plk_complement" as ClientOrderId,
+        conditionId: createConditionId("cond-1"),
+        tokenId: createTokenId("tok-no"),
+        side: "buy",
+        size: 1,
+        price: 0.6,
+        entryStyle: "maker",
+      });
+
+      const rejection = (microMod as any).makerBuyLiveRejection(
+        makePlaceCmd({ entryStyle: "maker", price: 0.5, size: 1 }),
+        0.5,
+      );
+      expect(rejection?.reason).toBe("maker-micro-condition-cap-exceeded");
     });
 
     it("deduplicates an in-memory reservation already represented by a prepared pending row", () => {
@@ -6435,7 +6619,9 @@ describe("ExecutionModule", () => {
           updatedAt: new Date(now).toISOString(),
         } as Order,
       ]);
-      orderRepo.sumMakerBuyCommittedNotionalInWindow = vi.fn().mockReturnValue(0.4);
+      orderRepo.getMakerBuyWindowUsage = vi
+        .fn()
+        .mockReturnValue(makerWindowUsage({ committedUsdc: 0.4, conditionCommittedUsdc: 0.4 }));
       const microMod = new ExecutionModule({
         gateway,
         bus,
@@ -6462,6 +6648,7 @@ describe("ExecutionModule", () => {
       });
       (microMod as any).pendingReservations.set("other-command", {
         clientOrderId: otherClientOrderId,
+        conditionId: createConditionId("cond-1"),
         tokenId: createTokenId("tok-other"),
         side: "buy",
         size: 1,
@@ -6480,7 +6667,7 @@ describe("ExecutionModule", () => {
     it("rechecks expiry after prepared pending persistence and before the live POST", async () => {
       let expired = false;
       const now = Date.now();
-      orderRepo.sumMakerBuyCommittedNotionalInWindow = vi.fn().mockReturnValue(0);
+      orderRepo.getMakerBuyWindowUsage = vi.fn().mockReturnValue(makerWindowUsage());
       vi.mocked(gateway.prepareOrder!).mockImplementationOnce(async () => {
         expired = true;
         return { orderId: "prepared-expiry", __preparedOrderBrand: "PreparedOrder" as const };

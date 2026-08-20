@@ -32,6 +32,7 @@ import {
   normalizeSellCapacityPolicy,
   resolveEffectiveMaxOpenSellOrdersPerToken,
   resolveWalletBuyBudget,
+  resolveProtectedWalletBuyRequirement,
   PER_TOKEN_BUY_LIMIT_REASON,
   PER_TOKEN_SELL_LIMIT_REASON,
   TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
@@ -390,10 +391,26 @@ export class AlgoRiskGateImpl implements RiskGate {
       this.walletBudget ?? {},
       this.orderRepo.sumOpenBuyNotional(),
     );
+    const protectedRequirement = resolveProtectedWalletBuyRequirement({
+      makerEntry: policy?.makerEntry ?? null,
+      authorization: {
+        conditionId: signal.conditionId,
+        source: "strategy",
+        side: signal.side,
+        entryStyle: "maker",
+        postOnly: true,
+        decisionRuleId: signal.decisionRuleId,
+        signalReason: signal.reason,
+        signalTimestamp: signal.generatedAt,
+      },
+      proposedNotionalUsdc: signal.suggestedSizeUsdc,
+      pendingBuyNotionalUsdc: 0,
+      nowMs: Date.now(),
+    });
     const buyCapacity = evaluateWalletBuyCapacity({
       policy: buyPolicy,
       snapshot: walletBudget,
-      requiredNotionalUsdc: signal.suggestedSizeUsdc,
+      requiredNotionalUsdc: protectedRequirement.requiredNotionalUsdc,
       signalReason: signal.reason,
       openBuyOrderCount: counts.openBuyOrderCount,
     });
@@ -413,7 +430,7 @@ export class AlgoRiskGateImpl implements RiskGate {
     }
     passed.push("total_order_capacity_ok");
 
-    if (!hasWalletBuyBudget(walletBudget, signal.suggestedSizeUsdc)) {
+    if (!hasWalletBuyBudget(walletBudget, protectedRequirement.requiredNotionalUsdc)) {
       rejected.push("wallet_buy_budget_exhausted");
       return finish(false, "wallet_buy_budget_exhausted");
     }
