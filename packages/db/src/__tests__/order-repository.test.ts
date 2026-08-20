@@ -622,6 +622,41 @@ describe("SqliteOrderRepository", () => {
     expect(repo.sumOpenBuyNotional()).toBe(10);
   });
 
+  it("sums durable maker BUY commitments in a half-open window", () => {
+    const activatedAtUtc = "2026-08-20T10:00:00.000Z";
+    const expiresAtUtc = "2026-08-20T12:00:00.000Z";
+    const rows = [
+      ["pending", 0.1, activatedAtUtc, "c-pending", "maker", "buy"],
+      ["open", 0.2, "2026-08-20T10:30:00.000Z", "c-open", "maker", "buy"],
+      ["partially-filled", 0.3, "2026-08-20T11:00:00.000Z", "c-partial", "maker", "buy"],
+      ["filled", 0.4, "2026-08-20T11:10:00.000Z", "c-filled", "maker", "buy"],
+      ["cancelled", 0.5, "2026-08-20T11:20:00.000Z", "c-cancelled", "maker", "buy"],
+      ["rejected", 9, "2026-08-20T11:30:00.000Z", "c-rejected", "maker", "buy"],
+      ["open", 9, "2026-08-20T09:59:59.999Z", "c-before", "maker", "buy"],
+      ["open", 9, expiresAtUtc, "c-expiry", "maker", "buy"],
+      ["open", 9, "2026-08-20T11:40:00.000Z", "c-probe", "probe", "buy"],
+      ["open", 9, "2026-08-20T11:50:00.000Z", "c-sell", "maker", "sell"],
+    ] as const;
+    rows.forEach(([status, sizeUsdc, createdAt, clientOrderId, entryStyle, side], index) => {
+      repo.save(
+        makeOrder({
+          orderId: createOrderId(`window-${index}`),
+          clientOrderId: clientOrderId as ClientOrderId,
+          status,
+          sizeUsdc,
+          createdAt,
+          updatedAt: createdAt,
+          entryStyle,
+          side,
+        }),
+      );
+    });
+
+    expect(
+      repo.sumMakerBuyCommittedNotionalInWindow(activatedAtUtc, expiresAtUtc, "c-open"),
+    ).toBeCloseTo(1.3);
+  });
+
   it("persists positionId round-trip and defaults to null when absent (Release A Phase 3)", () => {
     repo.save(
       makeOrder({

@@ -6096,6 +6096,55 @@ describe("ExecutionModule", () => {
   // ─── Maker micro-cap (Bug 3) ───────────────────────────────────────────────
 
   describe("maker micro-cap enforcement", () => {
+    it("authorizes only an exact captureNextR23 command at the execution boundary", () => {
+      const now = Date.now();
+      orderRepo.sumMakerBuyCommittedNotionalInWindow = vi.fn().mockReturnValue(0);
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live" as const,
+            whitelistConditionIds: [],
+            microLiveWindow: {
+              activatedAtUtc: new Date(now - 60_000).toISOString(),
+              expiresAtUtc: new Date(now + 60_000).toISOString(),
+              maxCumulativeAcceptedPendingUsdc: 1,
+              captureNextR23: true,
+            },
+          },
+        }),
+      });
+      const command = makePlaceCmd({
+        entryStyle: "maker",
+        postOnly: true,
+        decisionRuleId: "R23_DIP_TRIGGER",
+        signalReason: "probe-entry",
+        signalTimestamp: new Date(now).toISOString(),
+      });
+
+      expect((microMod as any).makerBuyLiveRejection(command, 0.5)).toBeNull();
+      for (const forged of [
+        { source: "operator" as const },
+        { postOnly: false },
+        { decisionRuleId: "OTHER_RULE" },
+        { signalReason: "confirm-scale" },
+        { signalTimestamp: new Date(now - 120_000).toISOString() },
+        { signalTimestamp: new Date(now + 60_000).toISOString() },
+      ]) {
+        expect(
+          (microMod as any).makerBuyLiveRejection({ ...command, ...forged }, 0.5)?.reason,
+        ).toBe("maker-mode-inactive");
+      }
+    });
+
     it("blocks maker BUY admission while fast-cancel is latched and owns readiness lifecycle", async () => {
       const setReady = vi.fn();
       const makerBuyFastCancel = {
@@ -6310,6 +6359,175 @@ describe("ExecutionModule", () => {
       finishPlace();
       await simultaneous;
       expect(microMod.makerBuyInFlightCount()).toBe(0);
+      await microMod.stop();
+    });
+
+    it("rejects when durable committed notional plus the candidate exceeds the window cap", async () => {
+      orderRepo.sumMakerBuyCommittedNotionalInWindow = vi.fn().mockReturnValue(0.6);
+      const now = Date.now();
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live" as const,
+            whitelistConditionIds: ["cond-1"],
+            microMaxOrderUsdc: 10,
+            microMaxOpenUsdc: 10,
+            microLiveWindow: {
+              activatedAtUtc: new Date(now - 60_000).toISOString(),
+              expiresAtUtc: new Date(now + 60_000).toISOString(),
+              maxCumulativeAcceptedPendingUsdc: 1,
+            },
+          },
+        }),
+      });
+      const rejected: Array<{ reason: string }> = [];
+      bus.subscribe("OrderRejected", async (event) => {
+        rejected.push(event);
+      });
+      await microMod.start();
+
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({ entryStyle: "maker", side: "buy", price: 0.5, size: 1 }),
+        timestamp: now,
+      });
+
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      expect(rejected[0]?.reason).toBe("maker-micro-cumulative-cap-exceeded");
+      expect(orderRepo.sumMakerBuyCommittedNotionalInWindow).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        "plk_abc123",
+      );
+      await microMod.stop();
+    });
+
+    it("deduplicates an in-memory reservation already represented by a prepared pending row", () => {
+      const now = Date.now();
+      const otherClientOrderId = "plk_other_pending" as ClientOrderId;
+      orderRepo.findOpen = vi.fn().mockReturnValue([
+        {
+          orderId: createOrderId("prepared-other"),
+          clientOrderId: otherClientOrderId,
+          tokenId: createTokenId("tok-other"),
+          conditionId: createConditionId("cond-1"),
+          side: "buy",
+          orderType: "GTC",
+          price: 0.4,
+          size: 1,
+          sizeUsdc: 0.4,
+          status: "pending",
+          exchangeOrderId: "prepared-other",
+          signalId: null,
+          signalReason: "probe-entry",
+          entryStyle: "maker",
+          botRunId: BOT_RUN_ID,
+          createdAt: new Date(now).toISOString(),
+          updatedAt: new Date(now).toISOString(),
+        } as Order,
+      ]);
+      orderRepo.sumMakerBuyCommittedNotionalInWindow = vi.fn().mockReturnValue(0.4);
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live" as const,
+            whitelistConditionIds: ["cond-1"],
+            microMaxOrderUsdc: 10,
+            microMaxOpenUsdc: 10,
+            microLiveWindow: {
+              activatedAtUtc: new Date(now - 60_000).toISOString(),
+              expiresAtUtc: new Date(now + 60_000).toISOString(),
+              maxCumulativeAcceptedPendingUsdc: 1,
+            },
+          },
+        }),
+      });
+      (microMod as any).pendingReservations.set("other-command", {
+        clientOrderId: otherClientOrderId,
+        tokenId: createTokenId("tok-other"),
+        side: "buy",
+        size: 1,
+        price: 0.4,
+        entryStyle: "maker",
+      });
+
+      const rejection = (microMod as any).makerBuyLiveRejection(
+        makePlaceCmd({ entryStyle: "maker", side: "buy", price: 0.5, size: 1 }),
+        0.5,
+      );
+
+      expect(rejection).toBeNull();
+    });
+
+    it("rechecks expiry after prepared pending persistence and before the live POST", async () => {
+      let expired = false;
+      const now = Date.now();
+      orderRepo.sumMakerBuyCommittedNotionalInWindow = vi.fn().mockReturnValue(0);
+      vi.mocked(gateway.prepareOrder!).mockImplementationOnce(async () => {
+        expired = true;
+        return { orderId: "prepared-expiry", __preparedOrderBrand: "PreparedOrder" as const };
+      });
+      const policy = () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: {
+          ...DEFAULT_EXECUTION_POLICY.makerEntry,
+          mode: "micro_live" as const,
+          whitelistConditionIds: ["cond-1"],
+          microMaxOrderUsdc: 10,
+          microMaxOpenUsdc: 10,
+          microLiveWindow: {
+            activatedAtUtc: new Date(now - 60_000).toISOString(),
+            expiresAtUtc: new Date(expired ? now - 1 : now + 60_000).toISOString(),
+            maxCumulativeAcceptedPendingUsdc: 1,
+          },
+        },
+      });
+      const microMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeMode: "live-lite",
+        runtimeControl: { isPaused: () => false },
+        executionPolicy: policy,
+      });
+      const rejected: Array<{ reason: string }> = [];
+      bus.subscribe("OrderRejected", async (event) => {
+        rejected.push(event);
+      });
+      await microMod.start();
+
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({ entryStyle: "maker", side: "buy", price: 0.5, size: 2 }),
+        timestamp: now,
+      });
+
+      expect(gateway.prepareOrder).toHaveBeenCalledTimes(1);
+      expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+      expect(rejected[0]?.reason).toBe("maker-micro-window-inactive");
+      expect(orderRepo.save).toHaveBeenCalledWith(expect.objectContaining({ status: "pending" }));
+      expect(orderRepo.save).toHaveBeenCalledWith(expect.objectContaining({ status: "rejected" }));
       await microMod.stop();
     });
 

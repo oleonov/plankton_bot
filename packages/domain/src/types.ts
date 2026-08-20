@@ -2149,6 +2149,79 @@ export interface TrackAAddThrottlePolicy {
   enforce: boolean;
 }
 
+export interface MakerMicroLiveWindow {
+  /** Inclusive UTC boundary for this durable micro-live activation. */
+  activatedAtUtc: string;
+  /** Exclusive UTC boundary; maker submissions fail closed at and after this instant. */
+  expiresAtUtc: string;
+  /** Cumulative accepted-or-pending maker BUY notional allowed inside this window. */
+  maxCumulativeAcceptedPendingUsdc: number;
+  /** Allows exact strategy R23 maker commands without a static condition whitelist. */
+  captureNextR23?: boolean;
+}
+
+/** Missing window preserves the legacy maker-entry behavior exactly. */
+export function isMakerMicroLiveWindowActive(
+  window: MakerMicroLiveWindow | undefined,
+  nowMs: number,
+): boolean {
+  if (window === undefined) return true;
+  const activatedAtMs = Date.parse(window.activatedAtUtc);
+  const expiresAtMs = Date.parse(window.expiresAtUtc);
+  return (
+    Number.isFinite(nowMs) &&
+    Number.isFinite(activatedAtMs) &&
+    Number.isFinite(expiresAtMs) &&
+    nowMs >= activatedAtMs &&
+    nowMs < expiresAtMs
+  );
+}
+
+export interface MakerMicroLiveAuthorizationInput {
+  conditionId: string | null | undefined;
+  source: "strategy" | "operator" | "reconciliation";
+  side: OrderSide;
+  entryStyle: "probe" | "maker" | null | undefined;
+  postOnly: boolean | undefined;
+  decisionRuleId: string | null | undefined;
+  signalReason: string | null | undefined;
+  signalTimestamp: string | null | undefined;
+}
+
+/**
+ * The static whitelist is the legacy maker authorization. `captureNextR23` is
+ * its deliberately narrower alternative for one timestamp-bound R23 signal.
+ */
+export function isMakerMicroLiveOrderAuthorized(
+  makerEntry: Pick<MakerEntryPolicy, "mode" | "whitelistConditionIds" | "microLiveWindow">,
+  input: MakerMicroLiveAuthorizationInput,
+  nowMs: number,
+): boolean {
+  if (makerEntry.mode !== "micro_live") return false;
+  if (!isMakerMicroLiveWindowActive(makerEntry.microLiveWindow, nowMs)) return false;
+  if (
+    Array.isArray(makerEntry.whitelistConditionIds) &&
+    input.conditionId != null &&
+    makerEntry.whitelistConditionIds.includes(String(input.conditionId))
+  ) {
+    return true;
+  }
+  const window = makerEntry.microLiveWindow;
+  const signalTimestampMs = Date.parse(input.signalTimestamp ?? "");
+  return (
+    window?.captureNextR23 === true &&
+    Number.isFinite(signalTimestampMs) &&
+    signalTimestampMs >= Date.parse(window.activatedAtUtc) &&
+    signalTimestampMs < Date.parse(window.expiresAtUtc) &&
+    input.source === "strategy" &&
+    input.side === "buy" &&
+    input.entryStyle === "maker" &&
+    input.postOnly === true &&
+    input.decisionRuleId === "R23_DIP_TRIGGER" &&
+    input.signalReason === "probe-entry"
+  );
+}
+
 /**
  * R23 maker-entry policy (Phase 0 — config only, no runtime effect until Phase 5).
  * Default mode "off" and empty whitelist ensure zero live-order changes.
@@ -2175,6 +2248,8 @@ export interface MakerEntryPolicy {
   microMaxOrderUsdc: number;
   /** Hard cap on total open maker BUY exposure in USDC across all tokens (micro-live only). */
   microMaxOpenUsdc: number;
+  /** Optional durable activation/cumulative-cap contract for bounded micro-live canaries. */
+  microLiveWindow?: MakerMicroLiveWindow;
   /**
    * avg-down tail guard: collapse scale-ins on maker positions when mark price
    * falls below this level. null = guard off (default — non-maker scale-ins

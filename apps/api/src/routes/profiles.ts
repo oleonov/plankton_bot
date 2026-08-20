@@ -474,13 +474,35 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
   // change; here we bump it inline to stay consistent.
   app.patch<{
     Params: { profileId: string };
-    Body: Partial<ExecutionPolicy> & { reason?: string };
+    Body: Partial<ExecutionPolicy> & { reason?: string; expectedVersion?: number };
   }>("/profiles/:profileId/execution-policy", async (request) => {
     const { profileId } = request.params;
     const rawBody = (request.body ?? {}) as Record<string, unknown>;
     const reason = typeof rawBody.reason === "string" ? rawBody.reason : null;
-    const { reason: _omitReason, ...patch } = rawBody;
+    const expectedVersion = rawBody.expectedVersion;
+    if (
+      expectedVersion !== undefined &&
+      (typeof expectedVersion !== "number" ||
+        !Number.isInteger(expectedVersion) ||
+        expectedVersion < 0)
+    ) {
+      throw new ApiError(
+        400,
+        "expectedVersion must be a non-negative integer",
+        "INVALID_EXECUTION_POLICY_VERSION",
+      );
+    }
+    const { reason: _omitReason, expectedVersion: _omitExpectedVersion, ...patch } = rawBody;
     void _omitReason;
+    void _omitExpectedVersion;
+    const assertExpectedVersion = (currentVersion: number) => {
+      if (expectedVersion === undefined || expectedVersion === currentVersion) return;
+      throw new ApiError(
+        409,
+        `execution policy version conflict: expected ${expectedVersion}, current ${currentVersion}`,
+        "EXECUTION_POLICY_VERSION_CONFLICT",
+      );
+    };
 
     const existsRow = controlDb
       .prepare("SELECT 1 FROM profile_settings WHERE profile_id = ?")
@@ -488,6 +510,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     if (!existsRow) {
       throw new ApiError(404, `profile ${profileId} not found`, "PROFILE_NOT_FOUND");
     }
+    assertExpectedVersion(readExecutionPolicyVersion(controlDb));
 
     const currentRow = controlDb
       .prepare("SELECT execution_policy_json FROM profile_settings WHERE profile_id = ?")
@@ -498,7 +521,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     // field-by-field so a PATCH touching only `deadSideGuard.mode` preserves
     // `askCeiling` and `maxTimeToEndMs`. Unrelated top-level fields carry over
     // from `current`.
-    const candidate: ExecutionPolicy = {
+    const mergePolicy = (current: ExecutionPolicy): ExecutionPolicy => ({
       ...DEFAULT_EXECUTION_POLICY,
       ...current,
       ...(patch as Partial<ExecutionPolicy>),
@@ -632,16 +655,18 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
         ...(current.bounceExit ?? DEFAULT_BOUNCE_EXIT),
         ...((patch.bounceExit as Partial<ExecutionPolicy["bounceExit"]> | undefined) ?? {}),
       },
-    };
+    });
 
-    const parsed = parseExecutionPolicyJson(serializeExecutionPolicy(candidate));
-    if (parsed.issues.length > 0) {
+    const parsePatchedPolicy = (base: ExecutionPolicy) => {
+      const result = parseExecutionPolicyJson(serializeExecutionPolicy(mergePolicy(base)));
+      if (result.issues.length === 0) return result;
       throw new ApiError(
         400,
-        `invalid execution policy: ${parsed.issues.join("; ")}`,
+        `invalid execution policy: ${result.issues.join("; ")}`,
         "INVALID_EXECUTION_POLICY",
       );
-    }
+    };
+    const preparedPolicy = parsePatchedPolicy(current);
 
     // Release A Phase 5 — bounce-for-all gate. Broadening `applyToAllMarkets`
     // false→true is only safe once every existing position has an assigned owner
@@ -654,7 +679,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     // a violation in between the check and activation.
     const broadeningToAll =
       current.bounceExit?.applyToAllMarkets !== true &&
-      parsed.policy.bounceExit.applyToAllMarkets === true;
+      preparedPolicy.policy.bounceExit.applyToAllMarkets === true;
     const gateLedger = broadeningToAll ? opts.ledgerPool.get(profileId) : null;
     if (broadeningToAll && !gateLedger) {
       throw new ApiError(
@@ -664,11 +689,29 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       );
     }
 
-    const nextJson = serializeExecutionPolicy(parsed.policy);
-    const prevJson = currentRow?.execution_policy_json ?? null;
-
     const actor = getActor(request);
     const applyWrite = controlDb.transaction(() => {
+      const currentVersion = readExecutionPolicyVersion(controlDb);
+      assertExpectedVersion(currentVersion);
+      const transactionRow = controlDb
+        .prepare("SELECT execution_policy_json FROM profile_settings WHERE profile_id = ?")
+        .get(profileId) as { execution_policy_json: string | null } | undefined;
+      const transactionCurrent = parseExecutionPolicyJson(
+        transactionRow?.execution_policy_json ?? null,
+      ).policy;
+      const parsed = parsePatchedPolicy(transactionCurrent);
+      const transactionBroadens =
+        transactionCurrent.bounceExit?.applyToAllMarkets !== true &&
+        parsed.policy.bounceExit.applyToAllMarkets === true;
+      if (transactionBroadens && !gateLedger) {
+        throw new ApiError(
+          409,
+          "execution policy changed while preparing the ownership gate; retry the PATCH",
+          "EXECUTION_POLICY_VERSION_CONFLICT",
+        );
+      }
+      const nextJson = serializeExecutionPolicy(parsed.policy);
+      const prevJson = transactionRow?.execution_policy_json ?? null;
       controlDb
         .prepare(
           `UPDATE profile_settings
@@ -696,7 +739,9 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
           },
         ]);
       }
+      return { parsed, version: readExecutionPolicyVersion(controlDb) };
     });
+    let writeResult: ReturnType<typeof applyWrite>;
     if (broadeningToAll && gateLedger) {
       // Hold the ledger write-barrier across the control-policy commit: evaluate the ownership
       // invariants AND activate the flag in the same transaction, so a concurrent first-fill
@@ -705,7 +750,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       // competing writer could commit a violating row inside the window. A violation throws
       // (409) and rolls back both. No projection is passed: no run is projecting an owner here,
       // so the invariants are evaluated against the ledger exactly as it stands.
-      gateLedger
+      writeResult = gateLedger
         .transaction(() => {
           const violations = readOwnershipInvariantViolations(gateLedger);
           const nullOwners = violations.counts.nullOwners;
@@ -723,14 +768,13 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
               "APPLY_TO_ALL_MARKETS_INVARIANT_VIOLATION",
             );
           }
-          applyWrite();
+          return applyWrite.immediate();
         })
         .immediate();
     } else {
-      applyWrite();
+      writeResult = applyWrite.immediate();
     }
-
-    const version = readExecutionPolicyVersion(controlDb);
+    const { parsed, version } = writeResult;
 
     // Release A Phase 3 (P8 — owner-liveness drain reporting). Disabling bounce only
     // stops NEW bounce-owner assignment; EXISTING bounce owners keep being serviced

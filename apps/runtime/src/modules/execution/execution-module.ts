@@ -41,6 +41,7 @@ import type {
   NormalizedMarket,
   RuntimeEventMap,
   ExitLossFloorVerdict,
+  MakerMicroLiveWindow,
 } from "@krabs/domain";
 import {
   createCommandId,
@@ -59,6 +60,8 @@ import {
   evaluateExitLossFloor,
   computePolymarketPlatformFeeRate,
   POLYMARKET_CRYPTO_TAKER_FEE_RATE,
+  isMakerMicroLiveOrderAuthorized,
+  isMakerMicroLiveWindowActive,
 } from "@krabs/domain";
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
 import { randomUUID } from "node:crypto";
@@ -1650,15 +1653,26 @@ export class ExecutionModule implements RuntimeModule {
       return { reason: "maker-mode-inactive", code: ExchangeErrorCode.LivePolicyBlocked };
     }
 
-    // Whitelist semantics mirror tryMakerEntryOverride (signal-to-order.ts) but
-    // fully fail-closed at the execution boundary: a missing/non-array/EMPTY
-    // whitelist rejects (never throws, never opens), and a missing conditionId
-    // rejects too (a command with no market cannot be on any whitelist).
-    const whitelist = makerPolicy.whitelistConditionIds;
-    if (!Array.isArray(whitelist) || whitelist.length === 0) {
-      return { reason: "maker-mode-inactive", code: ExchangeErrorCode.LivePolicyBlocked };
+    if (!isMakerMicroLiveWindowActive(makerPolicy.microLiveWindow, Date.now())) {
+      return { reason: "maker-micro-window-inactive", code: ExchangeErrorCode.LivePolicyBlocked };
     }
-    if (cmd.conditionId == null || !whitelist.includes(String(cmd.conditionId))) {
+
+    if (
+      !isMakerMicroLiveOrderAuthorized(
+        makerPolicy,
+        {
+          conditionId: cmd.conditionId,
+          source: cmd.source,
+          side: cmd.side,
+          entryStyle: cmd.entryStyle,
+          postOnly: cmd.postOnly,
+          decisionRuleId: cmd.decisionRuleId,
+          signalReason: cmd.signalReason,
+          signalTimestamp: cmd.signalTimestamp,
+        },
+        Date.now(),
+      )
+    ) {
       return { reason: "maker-mode-inactive", code: ExchangeErrorCode.LivePolicyBlocked };
     }
 
@@ -1687,12 +1701,13 @@ export class ExecutionModule implements RuntimeModule {
       // Exclude THIS command's own reservation (if already reserved at a submit
       // site) and always add its CURRENT `notional` — so a post-admission upward
       // tick re-snap counts at the final notional, not the stale reserved one.
-      const otherReservations = [...this.pendingReservations]
-        .filter(([id]) => id !== String(cmd.commandId))
-        .map(([, reservation]) => reservation);
+      const persistedOpenOrders = this.deps.orderRepo
+        .findOpen()
+        .filter((order) => order.clientOrderId !== cmd.clientOrderId);
+      const otherReservations = this.otherUnpersistedReservations(cmd, persistedOpenOrders);
       const pendingUsdc = computeMakerPendingReservationUsdc(otherReservations);
       const makerOpenUsdc =
-        computeMakerOpenOrderUsdc(this.deps.orderRepo.findOpen(), this.deps.fillRepo) +
+        computeMakerOpenOrderUsdc(persistedOpenOrders, this.deps.fillRepo) +
         openPositionUsdc +
         pendingUsdc +
         notional;
@@ -1704,7 +1719,63 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
 
+    const cumulativeRejection = this.makerCumulativeCapRejection(
+      cmd,
+      notional,
+      makerPolicy.microLiveWindow,
+    );
+    if (cumulativeRejection) return cumulativeRejection;
+
     return null;
+  }
+
+  private makerCumulativeCapRejection(
+    cmd: PlaceOrderCommand,
+    notional: number,
+    window: MakerMicroLiveWindow | undefined,
+  ): { reason: string; code: ExchangeErrorCode } | null {
+    if (window === undefined) return null;
+    if (!this.deps.orderRepo.sumMakerBuyCommittedNotionalInWindow) {
+      return {
+        reason: "maker-micro-cumulative-cap-unavailable",
+        code: ExchangeErrorCode.LivePolicyBlocked,
+      };
+    }
+    const persistedOpenOrders = this.deps.orderRepo
+      .findOpen()
+      .filter((order) => order.clientOrderId !== cmd.clientOrderId);
+    const pendingUsdc = computeMakerPendingReservationUsdc(
+      this.otherUnpersistedReservations(cmd, persistedOpenOrders),
+    );
+    const committedUsdc = this.deps.orderRepo.sumMakerBuyCommittedNotionalInWindow(
+      window.activatedAtUtc,
+      window.expiresAtUtc,
+      String(cmd.clientOrderId),
+    );
+    if (committedUsdc + pendingUsdc + notional <= window.maxCumulativeAcceptedPendingUsdc) {
+      return null;
+    }
+    return {
+      reason: "maker-micro-cumulative-cap-exceeded",
+      code: ExchangeErrorCode.LivePolicyBlocked,
+    };
+  }
+
+  private otherUnpersistedReservations(
+    cmd: PlaceOrderCommand,
+    persistedOpenOrders: readonly Order[],
+  ): PendingReservation[] {
+    const persistedClientOrderIds = new Set(
+      persistedOpenOrders.map((order) => String(order.clientOrderId)),
+    );
+    return [...this.pendingReservations]
+      .filter(([commandId]) => commandId !== String(cmd.commandId))
+      .map(([, reservation]) => reservation)
+      .filter(
+        (reservation) =>
+          reservation.clientOrderId == null ||
+          !persistedClientOrderIds.has(String(reservation.clientOrderId)),
+      );
   }
 
   // ─── Place order handler ──────────────────────────────────────────────
@@ -2157,6 +2228,7 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     this.pendingReservations.set(String(effectiveCmd.commandId), {
+      clientOrderId: effectiveCmd.clientOrderId,
       tokenId: effectiveCmd.tokenId,
       side: effectiveCmd.side,
       size: effectiveCmd.size,
@@ -4070,6 +4142,15 @@ export class ExecutionModule implements RuntimeModule {
     const submit = await withinLiveSubmissionLane(async () => {
       if (liveSubmissionLatched) {
         throw new Error("live submission latch is closed");
+      }
+      const makerRejection = this.makerBuyLiveRejection(cmd, params.price * params.size);
+      if (makerRejection) {
+        return {
+          kind: "rejected" as const,
+          errorCode: makerRejection.code,
+          errorMessage: makerRejection.reason,
+          errorDetails: null,
+        };
       }
       const outcome = await gateway.submitPreparedOrder!(prepared);
       if (outcome.kind === "accepted" && outcome.orderId !== prepared.orderId) {

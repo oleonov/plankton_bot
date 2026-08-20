@@ -286,6 +286,26 @@ export class SqliteOrderRepository implements OrderRepository {
     return row.total;
   }
 
+  sumMakerBuyCommittedNotionalInWindow(
+    activatedAtUtc: string,
+    expiresAtUtc: string,
+    excludeClientOrderId: string,
+  ): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(size_usdc), 0) AS total
+           FROM orders
+          WHERE side = 'buy'
+            AND entry_style = 'maker'
+            AND status <> 'rejected'
+            AND created_at >= ?
+            AND created_at < ?
+            AND client_order_id <> ?`,
+      )
+      .get(activatedAtUtc, expiresAtUtc, excludeClientOrderId) as { total: number };
+    return row.total;
+  }
+
   private runMetadataUpdate(id: OrderId, metadata: Readonly<Record<string, unknown>>): void {
     const result = this.db
       .prepare(

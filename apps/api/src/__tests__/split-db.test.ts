@@ -124,6 +124,16 @@ function auth() {
   return { authorization: `Bearer ${TEST_API_KEY}` };
 }
 
+function executionPolicyHistoryCount(): number {
+  return (
+    controlConn.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM profile_settings_history WHERE profile_id = 'simulation' AND field = 'execution_policy_json'",
+      )
+      .get() as { n: number }
+  ).n;
+}
+
 describe("API against real split schemas", () => {
   it("GET /status succeeds (ledger: runtime_metrics, positions, bot_runs)", async () => {
     const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: auth() });
@@ -524,6 +534,148 @@ describe("API against real split schemas", () => {
       maxLadderFillsPerToken: 4,
     });
     expect(body.data.policy.repriceOnOutbid).toEqual(DEFAULT_EXECUTION_POLICY.repriceOnOutbid);
+  });
+
+  it("PATCH /execution-policy applies expectedVersion as an atomic optional CAS", async () => {
+    const readPolicy = async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/profiles/simulation/execution-policy",
+        headers: auth(),
+      });
+      expect(response.statusCode).toBe(200);
+      return response.json().data as { policy: Record<string, unknown>; version: number };
+    };
+    const rawPolicy = () =>
+      (
+        controlConn.db
+          .prepare(
+            "SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = 'simulation'",
+          )
+          .get() as { json: string }
+      ).json;
+
+    const baseline = await readPolicy();
+    const historyBefore = executionPolicyHistoryCount();
+    const matching = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: {
+        expectedVersion: baseline.version,
+        marketSelection: { maxMidPrice: 0.43 },
+      },
+    });
+    expect(matching.statusCode).toBe(200);
+    const matched = matching.json().data;
+    expect(matched.version).toBe(baseline.version + 1);
+    expect(matched.policy.marketSelection.maxMidPrice).toBe(0.43);
+    expect(matched.policy).not.toHaveProperty("expectedVersion");
+    expect(rawPolicy()).not.toContain("expectedVersion");
+    expect(executionPolicyHistoryCount()).toBe(historyBefore + 1);
+
+    const noOp = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: { expectedVersion: matched.version, marketSelection: { maxMidPrice: 0.43 } },
+    });
+    expect(noOp.statusCode).toBe(200);
+    expect(noOp.json().data.version).toBe(matched.version);
+    expect(executionPolicyHistoryCount()).toBe(historyBefore + 1);
+
+    const beforeConflictJson = rawPolicy();
+    const stale = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: { expectedVersion: baseline.version, marketSelection: { maxMidPrice: 0.42 } },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().error.code).toBe("EXECUTION_POLICY_VERSION_CONFLICT");
+    expect(rawPolicy()).toBe(beforeConflictJson);
+    expect((await readPolicy()).version).toBe(matched.version);
+    expect(executionPolicyHistoryCount()).toBe(historyBefore + 1);
+
+    const invalid = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: { expectedVersion: 1.5, marketSelection: { maxMidPrice: 0.41 } },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json().error.code).toBe("INVALID_EXECUTION_POLICY_VERSION");
+
+    const omitted = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: { marketSelection: { maxMidPrice: 0.44 } },
+    });
+    expect(omitted.statusCode).toBe(200);
+    const omittedData = omitted.json().data;
+    expect(omittedData.version).toBe(matched.version + 1);
+
+    const armed = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: {
+        expectedVersion: omittedData.version,
+        makerEntry: {
+          whitelistConditionIds: ["condition-1"],
+          microLiveWindow: {
+            activatedAtUtc: "2026-08-20T10:00:00.000Z",
+            expiresAtUtc: "2026-08-20T12:00:00.000Z",
+            maxCumulativeAcceptedPendingUsdc: 1,
+          },
+        },
+      },
+    });
+    expect(armed.statusCode).toBe(200);
+    expect(armed.json().data.policy.makerEntry.microLiveWindow).toBeDefined();
+
+    const removed = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: {
+        expectedVersion: armed.json().data.version,
+        makerEntry: { microLiveWindow: null },
+      },
+    });
+    expect(removed.statusCode).toBe(200);
+    expect(removed.json().data.policy.makerEntry.microLiveWindow).toBeUndefined();
+    expect(rawPolicy()).not.toContain("microLiveWindow");
+  });
+
+  it("PATCH /execution-policy allows only one writer for an expected version", async () => {
+    const baseline = await app.inject({
+      method: "GET",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+    });
+    const version = baseline.json().data.version as number;
+    const historyBefore = executionPolicyHistoryCount();
+
+    const responses = await Promise.all(
+      [2, 3].map((microMaxOrderUsdc) =>
+        app.inject({
+          method: "PATCH",
+          url: "/api/v1/profiles/simulation/execution-policy",
+          headers: auth(),
+          payload: { expectedVersion: version, makerEntry: { microMaxOrderUsdc } },
+        }),
+      ),
+    );
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+    const current = await app.inject({
+      method: "GET",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+    });
+    expect(current.json().data.version).toBe(version + 1);
+    expect(executionPolicyHistoryCount()).toBe(historyBefore + 1);
   });
 
   it("PATCH /execution-policy: partial makerEntry patch preserves holdWindowMs, maxScaleInLevels, scaleInStepPct", async () => {

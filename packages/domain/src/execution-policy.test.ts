@@ -2843,6 +2843,101 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
   });
 });
 
+describe("makerEntry.microLiveWindow", () => {
+  it("keeps the optional block absent and serialization unchanged when disabled", () => {
+    const parsed = parseExecutionPolicyJson("{}");
+    expect(parsed.issues).toHaveLength(0);
+    expect("microLiveWindow" in parsed.policy.makerEntry).toBe(false);
+    expect(serializeExecutionPolicy(parsed.policy)).not.toContain("microLiveWindow");
+  });
+
+  it("accepts and canonicalizes one complete bounded window", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        makerEntry: {
+          whitelistConditionIds: ["c1", "c2", "c3", "c4", "c5"],
+          microLiveWindow: {
+            activatedAtUtc: "2026-08-20 10:00:00",
+            expiresAtUtc: "2026-08-20T12:00:00Z",
+            maxCumulativeAcceptedPendingUsdc: 1,
+            captureNextR23: true,
+          },
+        },
+      }),
+    );
+    expect(parsed.issues).toHaveLength(0);
+    expect(parsed.policy.makerEntry.microLiveWindow).toEqual({
+      activatedAtUtc: "2026-08-20T10:00:00.000Z",
+      expiresAtUtc: "2026-08-20T12:00:00.000Z",
+      maxCumulativeAcceptedPendingUsdc: 1,
+      captureNextR23: true,
+    });
+  });
+
+  it("treats null as an explicit window removal", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({ makerEntry: { microLiveWindow: null } }),
+    );
+    expect(parsed.issues).toHaveLength(0);
+    expect(parsed.policy.makerEntry.microLiveWindow).toBeUndefined();
+  });
+
+  it("rejects a non-boolean captureNextR23 flag", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({ makerEntry: { microLiveWindow: { captureNextR23: "yes" } } }),
+    );
+    expect(parsed.issues).toContain("makerEntry.microLiveWindow.captureNextR23 must be a boolean");
+  });
+
+  it.each([
+    [
+      {
+        activatedAtUtc: "bad",
+        expiresAtUtc: "2026-08-20T12:00:00Z",
+        maxCumulativeAcceptedPendingUsdc: 1,
+      },
+      "activatedAtUtc",
+    ],
+    [
+      {
+        activatedAtUtc: "2026-08-20T12:00:00Z",
+        expiresAtUtc: "2026-08-20T12:00:00Z",
+        maxCumulativeAcceptedPendingUsdc: 1,
+      },
+      "must start before",
+    ],
+    [
+      {
+        activatedAtUtc: "2026-08-20T10:00:00Z",
+        expiresAtUtc: "2026-08-20T12:00:00Z",
+        maxCumulativeAcceptedPendingUsdc: 0,
+      },
+      "must be > 0",
+    ],
+  ])("rejects an invalid atomic window %#", (microLiveWindow, issue) => {
+    const parsed = parseExecutionPolicyJson(JSON.stringify({ makerEntry: { microLiveWindow } }));
+    expect(parsed.issues.some((value) => value.includes(issue))).toBe(true);
+  });
+
+  it("rejects more than five whitelisted conditions with a durable window", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        makerEntry: {
+          whitelistConditionIds: ["c1", "c2", "c3", "c4", "c5", "c6"],
+          microLiveWindow: {
+            activatedAtUtc: "2026-08-20T10:00:00Z",
+            expiresAtUtc: "2026-08-20T12:00:00Z",
+            maxCumulativeAcceptedPendingUsdc: 1,
+          },
+        },
+      }),
+    );
+    expect(parsed.issues).toContain(
+      "makerEntry.whitelistConditionIds exceeds micro-live window maximum 5",
+    );
+  });
+});
+
 describe("maxExitLossFraction (exit-loss-floor safety envelope, docs/plans/2026-07-20-exit-loss-floor.md)", () => {
   it("defaults to 0.50 when absent", () => {
     const { policy, issues } = parseExecutionPolicyJson(null);

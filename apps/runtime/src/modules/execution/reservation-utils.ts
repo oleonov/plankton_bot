@@ -1,4 +1,4 @@
-import type { FillRepository, Order, Position, TokenId } from "@krabs/domain";
+import type { ClientOrderId, FillRepository, Order, Position, TokenId } from "@krabs/domain";
 import { GATE_ENTRY_RULE_ID } from "@krabs/domain";
 import { classifySellCapacitySource } from "../../wallet-buy-budget.js";
 
@@ -6,6 +6,7 @@ const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
 type ReservationFillLookup = Pick<FillRepository, "findByOrderId" | "findByOrderIds">;
 
 export interface PendingReservation {
+  clientOrderId?: ClientOrderId;
   tokenId: TokenId;
   side: "buy" | "sell";
   size: number;

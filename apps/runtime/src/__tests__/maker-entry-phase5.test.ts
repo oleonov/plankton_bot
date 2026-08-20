@@ -309,6 +309,75 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
     expect(placed).toHaveLength(1);
     expect(placed[0]?.entryStyle).not.toBe("maker");
   });
+
+  it("allows an exact timestamp-bound R23 capture with an empty whitelist", async () => {
+    const makerEntry = makeMakerEntryPolicy({
+      whitelistConditionIds: [],
+      microLiveWindow: {
+        activatedAtUtc: new Date(NOW).toISOString(),
+        expiresAtUtc: new Date(NOW + 60_000).toISOString(),
+        maxCumulativeAcceptedPendingUsdc: 1,
+        captureNextR23: true,
+      },
+    });
+    const { placed } = await runBridge(makeSignal(), { makerEntry });
+
+    expect(placed[0]?.entryStyle).toBe("maker");
+    expect(placed[0]?.postOnly).toBe(true);
+  });
+
+  it.each([
+    ["preactivation", NOW - 1],
+    ["at expiry", NOW + 60_000],
+  ])("rejects an empty-whitelist capture signal from %s", async (_label, signalTimestamp) => {
+    const makerEntry = makeMakerEntryPolicy({
+      whitelistConditionIds: [],
+      microLiveWindow: {
+        activatedAtUtc: new Date(NOW).toISOString(),
+        expiresAtUtc: new Date(NOW + 60_000).toISOString(),
+        maxCumulativeAcceptedPendingUsdc: 1,
+        captureNextR23: true,
+      },
+    });
+    const { placed } = await runBridge(
+      makeSignal({ generatedAt: new Date(signalTimestamp).toISOString() }),
+      { makerEntry },
+    );
+
+    expect(placed[0]?.entryStyle).not.toBe("maker");
+  });
+
+  it.each([
+    ["before activation", NOW + 1, NOW + 60_000],
+    ["at exclusive expiry", NOW - 60_000, NOW],
+  ])("durable window is inactive %s", async (_label, activatedAtMs, expiresAtMs) => {
+    const makerEntry = makeMakerEntryPolicy({
+      microLiveWindow: {
+        activatedAtUtc: new Date(activatedAtMs).toISOString(),
+        expiresAtUtc: new Date(expiresAtMs).toISOString(),
+        maxCumulativeAcceptedPendingUsdc: 1,
+      },
+    });
+    const { placed } = await runBridge(makeSignal(), { makerEntry });
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]?.entryStyle).not.toBe("maker");
+    expect(placed[0]?.postOnly).not.toBe(true);
+  });
+
+  it("durable window is active at its inclusive activation boundary", async () => {
+    const makerEntry = makeMakerEntryPolicy({
+      microLiveWindow: {
+        activatedAtUtc: new Date(NOW).toISOString(),
+        expiresAtUtc: new Date(NOW + 60_000).toISOString(),
+        maxCumulativeAcceptedPendingUsdc: 1,
+      },
+    });
+    const { placed } = await runBridge(makeSignal(), { makerEntry });
+
+    expect(placed[0]?.entryStyle).toBe("maker");
+    expect(placed[0]?.postOnly).toBe(true);
+  });
 });
 
 // ─── 5–6: ExecutionModule post-only cross BUY guard ──────────────────────

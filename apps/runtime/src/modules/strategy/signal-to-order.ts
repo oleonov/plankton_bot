@@ -48,7 +48,7 @@ import {
   createCommandId,
   isAlive,
   isSellTimeoutReplacement,
-  R23_DIP_TRIGGER_RULE_ID,
+  isMakerMicroLiveOrderAuthorized,
   recordStageDuration,
   resolveTrackS3SpreadCap,
   shouldSkipSellPriceCap,
@@ -632,13 +632,26 @@ export class SignalToOrderBridge {
     policy: ExecutionPolicy,
     orderSize: number,
     executionTerms: { tickSize: number },
+    nowMs: number,
   ): { price: number; size: number; postOnly: true; entryStyle: "maker" } | null {
-    if (signal.side !== "buy") return null;
-    if (signal.decisionRuleId !== R23_DIP_TRIGGER_RULE_ID) return null;
-    if (signal.reason !== "probe-entry") return null;
-    if (policy.makerEntry.mode !== "micro_live") return null;
-    if (policy.makerEntry.whitelistConditionIds.length === 0) return null;
-    if (!policy.makerEntry.whitelistConditionIds.includes(String(signal.conditionId))) return null;
+    if (
+      !isMakerMicroLiveOrderAuthorized(
+        policy.makerEntry,
+        {
+          conditionId: String(signal.conditionId),
+          source: "strategy",
+          side: signal.side,
+          entryStyle: "maker",
+          postOnly: true,
+          decisionRuleId: signal.decisionRuleId,
+          signalReason: signal.reason,
+          signalTimestamp: signal.generatedAt,
+        },
+        nowMs,
+      )
+    ) {
+      return null;
+    }
 
     const bestBid = market.bestBid;
     if (bestBid == null || !Number.isFinite(bestBid) || bestBid <= 0) {
@@ -1565,6 +1578,7 @@ export class SignalToOrderBridge {
         policy,
         orderSize,
         executionTerms,
+        nowMs,
       );
       const cooldownPrice = makerOverride?.price ?? executionTerms.price;
 

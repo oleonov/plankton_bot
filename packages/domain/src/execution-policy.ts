@@ -56,6 +56,7 @@ import type {
   TakerAtProfitPolicy,
   TrackAAddThrottlePolicy,
   MakerEntryPolicy,
+  MakerMicroLiveWindow,
   GateEntryPolicy,
   BounceExitPolicy,
   SellableFlowPolicy,
@@ -84,6 +85,7 @@ import type { D9LossExitPolicy } from "./d9-loss-exit.js";
 import { DEFAULT_TRACK_S1_WALKING_LADDER_POLICY } from "./ladder-construction.js";
 import { DEFAULT_TRACK_S3_BASE_CAP, DEFAULT_TRACK_S3_TIERS } from "./track-s3-cap.js";
 import { DEFAULT_FEE_SCHEDULE_CONFIG, validateFeeSchedulePeriods } from "./fee-schedule.js";
+import { toCanonicalIso } from "./timestamp.js";
 export { DEFAULT_FEE_SCHEDULE_CONFIG } from "./fee-schedule.js";
 
 export const DEFAULT_DEAD_SIDE_GUARD: DeadSideGuardPolicy = {
@@ -1031,6 +1033,7 @@ const BOUND_MAKER_MICRO_MAX_ORDER_USDC_MIN = 1;
 const BOUND_MAKER_MICRO_MAX_ORDER_USDC_MAX = 10_000;
 const BOUND_MAKER_MICRO_MAX_OPEN_USDC_MIN = 1;
 const BOUND_MAKER_MICRO_MAX_OPEN_USDC_MAX = 100_000;
+const BOUND_MAKER_MICRO_LIVE_WHITELIST_MAX = 5;
 const BOUND_MAKER_COLLAPSE_FLOOR_MIN = 0.001;
 const BOUND_MAKER_COLLAPSE_FLOOR_MAX = 0.99;
 const BOUND_MAKER_HOLD_WINDOW_MS_MIN = 1;
@@ -5396,6 +5399,11 @@ function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
     issues,
     "makerEntry.microMaxOpenUsdc",
   );
+  const microLiveWindow = parseMakerMicroLiveWindow(
+    obj.microLiveWindow,
+    whitelistConditionIds,
+    issues,
+  );
   const collapseFloorPrice = nullableClampedNumber(
     obj.collapseFloorPrice,
     DEFAULT_MAKER_ENTRY.collapseFloorPrice,
@@ -5439,10 +5447,70 @@ function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
     whitelistConditionIds,
     microMaxOrderUsdc,
     microMaxOpenUsdc,
+    ...(microLiveWindow === undefined ? {} : { microLiveWindow }),
     collapseFloorPrice,
     holdWindowMs,
     maxScaleInLevels,
     scaleInStepPct,
+  };
+}
+
+function parseMakerMicroLiveWindow(
+  raw: unknown,
+  whitelistConditionIds: readonly string[],
+  issues: string[],
+): MakerMicroLiveWindow | undefined {
+  // `null` is the PATCH deletion sentinel. Parsing omits the property again,
+  // which lets an operator restore the exact legacy/default policy shape.
+  if (raw == null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    issues.push("makerEntry.microLiveWindow must be an object");
+    return undefined;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const activatedAtUtc = toCanonicalIso(obj.activatedAtUtc);
+  const expiresAtUtc = toCanonicalIso(obj.expiresAtUtc);
+  const cap = obj.maxCumulativeAcceptedPendingUsdc;
+  const captureNextR23 = obj.captureNextR23;
+  if (activatedAtUtc == null) {
+    issues.push("makerEntry.microLiveWindow.activatedAtUtc must be a valid timestamp");
+  }
+  if (expiresAtUtc == null) {
+    issues.push("makerEntry.microLiveWindow.expiresAtUtc must be a valid timestamp");
+  }
+  if (typeof cap !== "number" || !Number.isFinite(cap) || cap <= 0) {
+    issues.push("makerEntry.microLiveWindow.maxCumulativeAcceptedPendingUsdc must be > 0");
+  }
+  if (captureNextR23 !== undefined && typeof captureNextR23 !== "boolean") {
+    issues.push("makerEntry.microLiveWindow.captureNextR23 must be a boolean");
+  }
+  if (whitelistConditionIds.length > BOUND_MAKER_MICRO_LIVE_WHITELIST_MAX) {
+    issues.push(
+      `makerEntry.whitelistConditionIds exceeds micro-live window maximum ${BOUND_MAKER_MICRO_LIVE_WHITELIST_MAX}`,
+    );
+  }
+  if (
+    activatedAtUtc != null &&
+    expiresAtUtc != null &&
+    Date.parse(activatedAtUtc) >= Date.parse(expiresAtUtc)
+  ) {
+    issues.push("makerEntry.microLiveWindow must start before it expires");
+  }
+  if (
+    activatedAtUtc == null ||
+    expiresAtUtc == null ||
+    typeof cap !== "number" ||
+    !Number.isFinite(cap) ||
+    cap <= 0
+  ) {
+    return undefined;
+  }
+  return {
+    activatedAtUtc,
+    expiresAtUtc,
+    maxCumulativeAcceptedPendingUsdc: cap,
+    ...(captureNextR23 === true ? { captureNextR23: true } : {}),
   };
 }
 

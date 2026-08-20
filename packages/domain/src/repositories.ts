@@ -323,6 +323,16 @@ export interface OrderRepository {
 
   /** Sum the notional (size_usdc) of all open buy orders. */
   sumOpenBuyNotional(): number;
+
+  /**
+   * Sum durable maker BUY notional committed inside one activation window.
+   * Rejected rows never reached an accepted-or-unknown exchange state and do not consume the cap.
+   */
+  sumMakerBuyCommittedNotionalInWindow?(
+    activatedAtUtc: string,
+    expiresAtUtc: string,
+    excludeClientOrderId: string,
+  ): number;
 }
 
 export interface DecisionSignalLogRepository {
