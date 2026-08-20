@@ -781,6 +781,11 @@ printf '{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s","markerWasPrese
     expect(deploySource).not.toContain('Labels \\"org.opencontainers.image.revision');
     expect(deploySource).not.toContain("datetime.UTC");
     expect(guardSource).not.toContain("datetime.UTC");
+    expect(deploySource).toContain(
+      'resolved="$(command -v "${KRABS_DEPLOY_TIMEOUT:-timeout}" || true)"',
+    );
+    expect(deploySource.match(/TIMEOUT="\$\(local_timeout\)"/g)).toHaveLength(2);
+    expect(deploySource).not.toContain("KRABS_DEPLOY_TIMEOUT:-/usr/bin/timeout");
     expect(deploySource).toContain("compose create --pull never");
     expect(deploySource).toContain("compose up -d --no-deps --pull never");
     expect(deploySource).not.toContain("install -d -m 700 '${root}/config'");
@@ -816,6 +821,12 @@ printf '{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s","markerWasPrese
     const base = git("rev-parse", "HEAD");
     const gateHash = () =>
       spawnSync(deploy, ["--print-gate-input-hash"], { cwd: repo, encoding: "utf8" });
+    const hashWithoutTimeout = spawnSync(deploy, ["--print-gate-input-hash"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, KRABS_DEPLOY_TIMEOUT: join(repo, "missing-timeout") },
+    });
+    expect(hashWithoutTimeout.status, hashWithoutTimeout.stderr).toBe(0);
     git("branch", "-M", "master");
     git("update-ref", "refs/remotes/origin/master", base);
     const gateEvidence = () => {

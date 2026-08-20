@@ -589,14 +589,19 @@ PY
 }
 
 real_deploy() { controller "$@"; }
+local_timeout() {
+  local resolved
+  resolved="$(command -v "${KRABS_DEPLOY_TIMEOUT:-timeout}" || true)"
+  [[ -x "$resolved" ]] || die 'GNU timeout is required'
+  printf '%s\n' "$resolved"
+}
 main() {
-  TIMEOUT="${KRABS_DEPLOY_TIMEOUT:-/usr/bin/timeout}"
   case "${1:-}" in
     --print-gate-input-hash) gate_hash ;;
     --verify-gate-evidence-only) [[ $# == 2 ]] || die 'usage'; verify_gate "$2" ;;
     --verify-rollback-boundary) [[ $# == 3 ]] || die 'usage'; verify_rollback_boundary "$2" "$3" ;;
-    --gate-evidence) [[ $# == 2 ]] || die 'release requires exactly --gate-evidence'; exec "$TIMEOUT" --signal=TERM --kill-after=60s "${DEPLOY_SECONDS}s" "$0" --deadline release "$2" ;;
-    --rollback-state-id) [[ $# == 2 ]] || die 'rollback requires exactly --rollback-state-id'; exec "$TIMEOUT" --signal=TERM --kill-after=60s "${DEPLOY_SECONDS}s" "$0" --deadline rollback "$2" ;;
+    --gate-evidence) [[ $# == 2 ]] || die 'release requires exactly --gate-evidence'; TIMEOUT="$(local_timeout)"; exec "$TIMEOUT" --signal=TERM --kill-after=60s "${DEPLOY_SECONDS}s" "$0" --deadline release "$2" ;;
+    --rollback-state-id) [[ $# == 2 ]] || die 'rollback requires exactly --rollback-state-id'; TIMEOUT="$(local_timeout)"; exec "$TIMEOUT" --signal=TERM --kill-after=60s "${DEPLOY_SECONDS}s" "$0" --deadline rollback "$2" ;;
     --deadline) [[ $# == 3 ]] || die 'deadline invocation'; if [[ "$2" == release ]]; then verify_gate "$3"; test_mode || ordinary_preflight; else test_mode || rollback_preflight; fi; full="$(git rev-parse HEAD)"; sha "$full" || die 'HEAD must be a full SHA'; source="${KRABS_DEPLOY_LOCAL_ENV_PATH:-.env.production}"; test_mode || [[ "$source" == .env.production ]] || die 'production runtime environment path is invalid'; env_hash="$(sha256sum "$source" | awk '{print $1}')"; if test_mode; then KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"; KRABS_REMOTE_SHA="$full" KRABS_REMOTE_DIGEST="$(publish_image "$full")" KRABS_REMOTE_COMPOSE="${KRABS_DEPLOY_COMPOSE:-docker-compose.yml}" KRABS_REMOTE_ENV="${KRABS_DEPLOY_ENV:-.env.production}" KRABS_RUNTIME_ENV_PATH="${KRABS_RUNTIME_ENV_PATH:-.env.production}" KRABS_RUNTIME_ENV_SHA256="${KRABS_RUNTIME_ENV_SHA256:-$env_hash}" real_deploy "$2" "$3"; elif [[ "${KRABS_REMOTE_CONTROLLER:-}" == 1 ]]; then KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"; real_deploy "$2" "$3"; else preflight_recovery_env "$full" "$env_hash"; digest="$(stage_and_publish "$full" "$env_hash" "$source")"; stage_remote_controller "$2" "$3" "$full" "$digest" "$env_hash"; fi ;;
     --test-local-release) [[ $# == 1 ]] && test_mode || die 'test local release only'; full="$(git rev-parse HEAD)"; source="${KRABS_DEPLOY_LOCAL_ENV_PATH:?}"; env_hash="$(sha256sum "$source" | awk '{print $1}')"; preflight_recovery_env "$full" "$env_hash"; digest="$(stage_and_publish "$full" "$env_hash" "$source")"; stage_remote_controller release test "$full" "$digest" "$env_hash" ;;
     --internal) [[ $# == 3 && "${KRABS_REMOTE_CONTROLLER:-}" == 1 ]] || die 'internal invocation is remote-controller only'; deploy_paths; KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"; real_deploy "$2" "$3" ;;
