@@ -223,11 +223,13 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
     marketOverrides?: Partial<NormalizedMarket>,
   ) {
     const bus = new InProcessEventBus();
+    const resolvedPolicy = { ...DEFAULT_EXECUTION_POLICY, ...policy };
     const bridge = new SignalToOrderBridge({
       bus,
       log: makeLogger(),
       liveLiteGuard: { getWalletMode: () => "eoa" } as never,
-      policy: () => ({ ...DEFAULT_EXECUTION_POLICY, ...policy }),
+      policy: () => resolvedPolicy,
+      policySnapshot: () => ({ policy: resolvedPolicy, controlRevision: 77 }),
       now: () => NOW,
     });
     bridge.subscribe();
@@ -330,6 +332,25 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
       expiresAtUtc: new Date(NOW + 60_000).toISOString(),
       fillWaitMs: makerEntry.fillWaitMs,
     });
+    expect(placed[0]?.metadata?.quoteMotionV1).toMatchObject({
+      version: 1,
+      kind: "r23_capture",
+      cohortId: new Date(NOW).toISOString(),
+      originalSuggestedPrice: 0.09,
+      entryPriceCeiling: DEFAULT_EXECUTION_POLICY.entryPriceCeiling,
+      policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+      policyControlRevision: 77,
+      initialBook: { depthStatus: "unavailable", tickSize: 0.01, source: "disabled" },
+    });
+  });
+
+  it("does not mark an ordinary static-whitelist maker order for quote-motion", async () => {
+    const { placed } = await runBridge(makeSignal(), {
+      makerEntry: makeMakerEntryPolicy(),
+    });
+
+    expect(placed[0]?.entryStyle).toBe("maker");
+    expect(placed[0]?.metadata?.quoteMotionV1).toBeUndefined();
   });
 
   it.each([

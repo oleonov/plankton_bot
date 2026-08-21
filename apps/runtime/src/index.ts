@@ -244,6 +244,7 @@ import { buildRuntimeDiagnosticsSnapshot } from "./runtime-diagnostics.js";
 import { isGatewayOrderReject } from "./order-rejection-classification.js";
 import {
   buildRiskEventVolumeSnapshot,
+  NON_OPERATIONAL_DIAGNOSTIC_RISK_EVENT_TYPES,
   SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
 } from "./risk-event-volume.js";
 
@@ -839,15 +840,16 @@ async function main(): Promise<void> {
     log,
     profileId: activeProfile as import("@krabs/domain").ProfileId,
   });
-  const currentExecutionPolicy = () => {
+  const currentExecutionPolicySnapshot = () => {
     executionPolicyProvider.refreshIfStale();
     const snapshot = executionPolicyProvider.snapshot();
     const withSellTimeout =
       config.sellTimeoutMs == null
         ? snapshot
         : { ...snapshot, sellTimeoutMs: config.sellTimeoutMs };
-    return withSellTimeout;
+    return { policy: withSellTimeout, controlRevision: executionPolicyProvider.version() };
   };
+  const currentExecutionPolicy = () => currentExecutionPolicySnapshot().policy;
 
   // ADR-016 — market-wide trade-count provider for the post-entry continuation
   // gate. Also supplies D9's rolling 24h public trade count enrichment.
@@ -1700,6 +1702,7 @@ async function main(): Promise<void> {
     exitBookFetcher: { getOrderBook: marketDataGateway.getOrderBook.bind(marketDataGateway) },
     trackRFeeProvider,
     policy: currentExecutionPolicy,
+    policySnapshot: currentExecutionPolicySnapshot,
     observations: executionPolicyObservationRepo,
     profileId: activeProfile as import("@krabs/domain").ProfileId,
     runtimeMetrics,
@@ -1754,6 +1757,29 @@ async function main(): Promise<void> {
     legStateRepo: repos.legState,
     repriceChainPolicy: () => currentExecutionPolicy().repriceChain,
     riskEventRepo: repos.riskEvent,
+    quoteMotionShadow: {
+      orderRepo: repos.order,
+      fillRepo: repos.fill,
+      positionRepo: repos.position,
+      inventoryLotRepo: repos.inventoryLot,
+      riskEventRepo: repos.riskEvent,
+      maxBookAgeMs: 3_000,
+      getFreshBook: async (tokenId, nowMs) => {
+        if (!candidateBookCache) return null;
+        const entry = candidateBookCache.getFreshEntry(tokenId, nowMs);
+        const tickSize = entryLifecycleModule.getMarket(tokenId as TokenId)?.tickSize;
+        if (!entry || tickSize == null || !Number.isFinite(tickSize) || tickSize <= 0) return null;
+        return {
+          book: entry.book,
+          cachedAtMs: entry.cachedAtMs,
+          snapshotTs: entry.snapshotTs,
+          tickSize,
+          source: `${entry.bookSource}:${entry.sourceKind}`,
+        };
+      },
+      onWriteError: (err, order) =>
+        log.warn({ err, orderId: String(order.orderId) }, "quote-motion shadow event write failed"),
+    },
     trackCExit: {
       positionRepo: repos.position,
       legStateRepo: repos.legState,
@@ -2164,6 +2190,15 @@ async function main(): Promise<void> {
      WHERE created_at >= datetime(?)
        AND event_type IN (${signalTelemetryRiskEventPlaceholders})`,
   );
+  const diagnosticRiskEventPlaceholders = NON_OPERATIONAL_DIAGNOSTIC_RISK_EVENT_TYPES.map(
+    () => "?",
+  ).join(", ");
+  const countDiagnosticRiskEventsSince = ledgerConn.db.prepare(
+    `SELECT COUNT(*) as c
+     FROM risk_events
+     WHERE created_at >= datetime(?)
+       AND event_type IN (${diagnosticRiskEventPlaceholders})`,
+  );
   const deleteUserOrderStreamActivity = ledgerConn.db.prepare(
     "DELETE FROM runtime_metrics WHERE metric_name = 'user_order_stream_activity'",
   );
@@ -2553,11 +2588,23 @@ async function main(): Promise<void> {
         riskEventSince24h,
         SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
       );
+      const diagnosticTelemetryLast1h = readRiskEventCount(
+        countDiagnosticRiskEventsSince,
+        riskEventSince1h,
+        NON_OPERATIONAL_DIAGNOSTIC_RISK_EVENT_TYPES,
+      );
+      const diagnosticTelemetryLast24h = readRiskEventCount(
+        countDiagnosticRiskEventsSince,
+        riskEventSince24h,
+        NON_OPERATIONAL_DIAGNOSTIC_RISK_EVENT_TYPES,
+      );
       const riskEventVolume = buildRiskEventVolumeSnapshot({
         last1h: riskEventsLast1h,
         last24h: riskEventsLast24h,
         signalTelemetryLast1h: signalTelemetryRiskEventsLast1h,
         signalTelemetryLast24h: signalTelemetryRiskEventsLast24h,
+        diagnosticTelemetryLast1h,
+        diagnosticTelemetryLast24h,
         thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,
         windowStartMs: now - 24 * 60 * 60 * 1000,
       });
@@ -2575,6 +2622,8 @@ async function main(): Promise<void> {
             riskEventsLast24h: riskEventVolume.last24h,
             signalTelemetryRiskEventsLast1h: riskEventVolume.signalTelemetryLast1h,
             signalTelemetryRiskEventsLast24h: riskEventVolume.signalTelemetryLast24h,
+            diagnosticTelemetryRiskEventsLast1h: riskEventVolume.diagnosticTelemetryLast1h,
+            diagnosticTelemetryRiskEventsLast24h: riskEventVolume.diagnosticTelemetryLast24h,
             operationalRiskEventsLast1h: riskEventVolume.operationalLast1h,
             operationalRiskEventsLast24h: riskEventVolume.operationalLast24h,
             thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,

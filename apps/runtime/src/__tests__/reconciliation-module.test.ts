@@ -273,6 +273,29 @@ describe("ReconciliationModule", () => {
       expect(hc.ok).toBe(false);
     });
 
+    it("keeps reconciliation healthy when the quote-motion shadow read fails", async () => {
+      const shadow = {
+        orderRepo: {
+          findOpen: () => {
+            throw new Error("shadow read failed");
+          },
+        },
+        fillRepo,
+        positionRepo: { findById: vi.fn() },
+        inventoryLotRepo: { findOpen: vi.fn() },
+        riskEventRepo: { insert: vi.fn() },
+        getFreshBook: vi.fn(),
+        maxBookAgeMs: 3_000,
+      } as ConstructorParameters<typeof ReconciliationModule>[0]["quoteMotionShadow"];
+      const isolated = buildModule({ quoteMotionShadow: shadow! });
+
+      await expect(isolated.runReconciliation()).resolves.toMatchObject({ clean: true });
+      expect(silentLog.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        "quote-motion shadow pass failed",
+      );
+    });
+
     it("skips overlapping reconciliation passes when the 15s timer fires during a slow pass", async () => {
       let releaseOpenOrders!: () => void;
       const openOrdersStarted = new Promise<void>((resolve) => {

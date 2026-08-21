@@ -65,6 +65,7 @@ import { buildClientOrderId, buildPartialExitClientOrderId } from "@krabs/domain
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { Logger } from "../../logger.js";
+import { buildQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
@@ -198,6 +199,8 @@ export interface SignalToOrderBridgeDeps {
    * and one-shot scripts still work.
    */
   policy?: () => ExecutionPolicy;
+  /** Coherent policy + mutable control revision for durable shadow provenance. */
+  policySnapshot?: () => { policy: ExecutionPolicy; controlRevision: number | null };
   /**
    * ADR-015 observability — append-only writer for every BUY/SELL signal
    * that reaches execution-term resolution (or is dead-side-enforce-skipped).
@@ -292,7 +295,15 @@ export class SignalToOrderBridge {
   }
 
   private getPolicy(): ExecutionPolicy {
-    return this.deps.policy ? this.deps.policy() : DEFAULT_EXECUTION_POLICY;
+    return this.getPolicySnapshot().policy;
+  }
+
+  private getPolicySnapshot(): { policy: ExecutionPolicy; controlRevision: number | null } {
+    if (this.deps.policySnapshot) return this.deps.policySnapshot();
+    return {
+      policy: this.deps.policy ? this.deps.policy() : DEFAULT_EXECUTION_POLICY,
+      controlRevision: null,
+    };
   }
 
   private getTakerAtProfitPolicy(policy: ExecutionPolicy): ExecutionPolicy["takerAtProfit"] {
@@ -724,7 +735,8 @@ export class SignalToOrderBridge {
       // even if the provider hot-reloads mid-decision. The S5 ownership guard may
       // return a policy with the Track S5 exit extensions forced off for an
       // S1-owned SELL (belt-and-suspenders for a planner-suppression regression).
-      const policy = this.applyS5OwnershipGuard(signal, this.getPolicy());
+      const policyRead = this.getPolicySnapshot();
+      const policy = this.applyS5OwnershipGuard(signal, policyRead.policy);
 
       // Primary source: the NormalizedMarket snapshot captured at signal-generation
       // time in algo-decision-module. This is the same snapshot the pre-entry
@@ -1733,6 +1745,34 @@ export class SignalToOrderBridge {
               fillWaitMs: policy.makerEntry.fillWaitMs,
             }
           : null;
+      const quoteMotionV1 =
+        makerMicroLiveLifecycle != null
+          ? buildQuoteMotionOrigin({
+              signal,
+              policy,
+              policyControlRevision: policyRead.controlRevision,
+              market,
+              book: pricing.book ?? null,
+              source: pricing.cacheStatus,
+              kind: "r23_capture",
+              cohortId: makerMicroLiveLifecycle.activatedAtUtc,
+            })
+          : signal.side === "sell" &&
+              signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+              effectiveBounceRung != null &&
+              effectiveBounceRung.isCleanupRung !== true
+            ? buildQuoteMotionOrigin({
+                signal,
+                policy,
+                policyControlRevision: policyRead.controlRevision,
+                market,
+                book: pricing.book ?? null,
+                source: pricing.cacheStatus,
+                kind: "bounce_exit_target",
+                cohortId: effectiveBounceRung.ladderId,
+                originalTargetPrice: signal.suggestedPrice,
+              })
+            : null;
       const cmd: PlaceOrderCommand = {
         type: "PlaceOrderCommand",
         commandId: createCommandId(randomUUID()),
@@ -1777,6 +1817,7 @@ export class SignalToOrderBridge {
             : {}),
           ...(entryFreshEdgeAttribution ? { entryFreshEdgeAttribution } : {}),
           ...(makerMicroLiveLifecycle ? { makerMicroLiveLifecycle } : {}),
+          ...(quoteMotionV1 ? { quoteMotionV1 } : {}),
           // Bounce-exit ladder rung identity (docs/plans/2026-07-16-bounce-
           // exit-ladder-redesign.md), persisted on the order so the next
           // planning cycle's placedBounceRungIndices lookup can tell rungs

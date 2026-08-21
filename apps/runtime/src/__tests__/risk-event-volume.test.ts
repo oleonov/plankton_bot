@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  NON_OPERATIONAL_DIAGNOSTIC_RISK_EVENT_TYPES,
   SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
   buildRiskEventVolumeSnapshot,
 } from "../risk-event-volume.js";
@@ -19,7 +20,28 @@ describe("buildRiskEventVolumeSnapshot", () => {
       operationalLast1h: 2,
       operationalLast24h: 500,
       warning: false,
-      warningScope: "operational_non_signal_telemetry",
+      warningScope: "operational_excluding_telemetry",
+    });
+  });
+
+  it("excludes quote-motion diagnostics from operational warnings", () => {
+    expect(NON_OPERATIONAL_DIAGNOSTIC_RISK_EVENT_TYPES).toContain("quote_motion_shadow_sample");
+    expect(
+      buildRiskEventVolumeSnapshot({
+        last1h: 1400,
+        last24h: 4000,
+        signalTelemetryLast1h: 100,
+        signalTelemetryLast24h: 500,
+        diagnosticTelemetryLast1h: 1200,
+        diagnosticTelemetryLast24h: 3000,
+        thresholdPerHour: 1000,
+        windowStartMs: 1,
+      }),
+    ).toMatchObject({
+      diagnosticTelemetryLast1h: 1200,
+      operationalLast1h: 100,
+      operationalLast24h: 500,
+      warning: false,
     });
   });
 

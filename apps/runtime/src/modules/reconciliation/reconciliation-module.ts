@@ -67,6 +67,11 @@ import {
 import type { ExchangeStateStore } from "../execution/exchange-state-store.js";
 import { buildReservationSnapshot } from "../execution/reservation-utils.js";
 import type { PolymarketDataPosition } from "@krabs/exchange";
+import {
+  runQuoteMotionShadowPass,
+  type QuoteMotionShadowDeps,
+  type QuoteMotionState,
+} from "../../quote-motion-shadow.js";
 
 const DRIFT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_DRIFT_INTERVAL_MS = 5 * 60 * 1000;
@@ -239,6 +244,8 @@ export interface ReconciliationModuleDeps {
   repriceChainPolicy?: () => RepriceChainPolicyConfig;
   riskEventRepo?: RiskEventRepository;
   trackCExit?: TrackCExitCleanerDeps;
+  /** Behavior-neutral BID+1 / ASK-1 quote-motion measurement. */
+  quoteMotionShadow?: QuoteMotionShadowDeps;
 }
 
 export class ReconciliationModule implements RuntimeModule {
@@ -263,6 +270,7 @@ export class ReconciliationModule implements RuntimeModule {
   private readonly unresolvedStaleOrders = new Map<string, import("@krabs/domain").ExchangeOrder>();
   private readonly staleBackoffMap = new Map<string, number>();
   private readonly sellDownpriceRepriceMap: SellDownpriceRepriceStateMap = new Map();
+  private readonly quoteMotionStates = new Map<string, QuoteMotionState>();
   /**
    * Consecutive "missing-remote AND on-chain-zero" observations per tokenId.
    * Drives the sentinel auto-close path: after the count reaches
@@ -435,6 +443,10 @@ export class ReconciliationModule implements RuntimeModule {
       allDetails.push(...orderResult.details);
 
       this.emitReconciliationMetrics(orderResult, fillResult, ranAt);
+
+      // This diagnostic is cache-only, and its freshness boundary begins here rather than at the
+      // start of fill/order reconciliation so slow exchange reads cannot backdate the sample.
+      await this.runQuoteMotionShadow(Date.now(), stageTimingsMs);
 
       // 3. Stale entry order cleanup
       const repriceChainGate =
@@ -647,6 +659,21 @@ export class ReconciliationModule implements RuntimeModule {
       return result;
     } finally {
       this.reconciling = false;
+    }
+  }
+
+  private async runQuoteMotionShadow(
+    nowMs: number,
+    stageTimingsMs: Record<string, number>,
+  ): Promise<void> {
+    if (!this.deps.quoteMotionShadow) return;
+    const startedAt = Date.now();
+    try {
+      await runQuoteMotionShadowPass(this.deps.quoteMotionShadow, this.quoteMotionStates, nowMs);
+    } catch (err) {
+      this.log.warn({ err }, "quote-motion shadow pass failed");
+    } finally {
+      stageTimingsMs.quoteMotionShadow = Date.now() - startedAt;
     }
   }
 

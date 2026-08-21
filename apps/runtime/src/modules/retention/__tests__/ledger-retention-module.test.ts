@@ -304,6 +304,23 @@ describe("LedgerRetentionModule", () => {
     expect(rows).toEqual([{ event_type: "signal_rejected" }]);
   });
 
+  it("keeps quote-motion diagnostics for the regular 90-day evidence window", async () => {
+    insertRiskEvent("quote_motion_shadow_sample", "{}", "2026-04-23T00:00:00.000Z");
+    insertRiskEvent("quote_motion_shadow_sample", "{}", "2026-01-01T00:00:00.000Z");
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    expect(
+      db.prepare("SELECT event_type FROM risk_events").all() as Array<{ event_type: string }>,
+    ).toEqual([{ event_type: "quote_motion_shadow_sample" }]);
+  });
+
   it("deletes planner suppression rollups with the signal telemetry TTL", async () => {
     insertRiskEvent(
       "planner_suppressed_rollup",

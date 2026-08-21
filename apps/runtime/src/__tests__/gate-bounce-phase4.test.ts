@@ -229,11 +229,13 @@ async function runBridge(
   },
 ) {
   const bus = new InProcessEventBus();
+  const policy = { ...DEFAULT_EXECUTION_POLICY, ...policyOverrides };
   const bridge = new SignalToOrderBridge({
     bus,
     log: makeLogger(),
     liveLiteGuard: { getWalletMode: () => "eoa" } as never,
-    policy: () => ({ ...DEFAULT_EXECUTION_POLICY, ...policyOverrides }),
+    policy: () => policy,
+    policySnapshot: () => ({ policy, controlRevision: 55 }),
     orderRepo: options?.orderRepo as unknown as OrderRepository | undefined,
     positionRepo: options?.positionRepo as unknown as PositionRepository | undefined,
     inventoryLotRepo: options?.inventoryLotRepo,
@@ -325,6 +327,14 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TARGET maker command", () => {
       suggestedPrice: targetPrice,
       suggestedSize: 50,
       suggestedSizeUsdc: 50 * targetPrice,
+      bounceRung: {
+        ladderId: "bounce-ladder",
+        rungIndex: 0,
+        anchorPrice: avgEntry,
+        fraction: 0.3,
+        originalPositionSize: 50,
+        remainingPositionSize: 50,
+      },
     });
     const bounceExit = { ...DEFAULT_EXECUTION_POLICY.bounceExit, mode: "micro_live" as const };
     const { placed, skipped } = await runBridge(
@@ -342,6 +352,13 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TARGET maker command", () => {
     expect(placed[0]!.price).toBeCloseTo(targetPrice, 5);
     // above the would-be 1.17x tier cap: floorToTick(0.15 * 1.17, 0.01) = 0.17
     expect(placed[0]!.price).toBeGreaterThan(0.17);
+    expect(placed[0]!.metadata?.quoteMotionV1).toMatchObject({
+      version: 1,
+      kind: "bounce_exit_target",
+      cohortId: "bounce-ladder",
+      originalTargetPrice: targetPrice,
+      policyControlRevision: 55,
+    });
   });
 });
 
@@ -486,6 +503,7 @@ describe("SignalToOrderBridge — bounce rung duplicate guard scoped to ladderId
     expect(
       (placed[0]!.metadata?.bounceRung as { isCleanupRung?: boolean } | undefined)?.isCleanupRung,
     ).toBe(true);
+    expect(placed[0]!.metadata?.quoteMotionV1).toBeUndefined();
   });
 
   // A cleanup rung is still a duplicate of ANOTHER already-resting cleanup
