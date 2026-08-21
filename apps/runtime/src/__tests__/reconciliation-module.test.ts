@@ -284,7 +284,7 @@ describe("ReconciliationModule", () => {
         positionRepo: { findById: vi.fn() },
         inventoryLotRepo: { findOpen: vi.fn() },
         riskEventRepo: { insert: vi.fn() },
-        getFreshBook: vi.fn(),
+        getFreshBooks: vi.fn(),
         maxBookAgeMs: 3_000,
       } as ConstructorParameters<typeof ReconciliationModule>[0]["quoteMotionShadow"];
       const isolated = buildModule({ quoteMotionShadow: shadow! });

@@ -59,10 +59,10 @@ export interface QuoteMotionShadowDeps {
   readonly positionRepo: Pick<PositionRepository, "findById">;
   readonly inventoryLotRepo: Pick<InventoryLotRepository, "findOpen">;
   readonly riskEventRepo: Pick<RiskEventRepository, "insert">;
-  readonly getFreshBook: (
-    tokenId: string,
+  readonly getFreshBooks: (
+    tokenIds: readonly string[],
     nowMs: number,
-  ) => Promise<QuoteMotionBookObservation | null>;
+  ) => Promise<ReadonlyMap<string, QuoteMotionBookObservation | null>>;
   readonly maxBookAgeMs: number;
   readonly onWriteError?: (error: unknown, order: Order) => void;
 }
@@ -435,16 +435,12 @@ async function loadBooks(
   nowMs: number,
 ): Promise<Map<string, QuoteMotionBookObservation | null>> {
   const tokens = [...new Set(eligible.map(({ order }) => String(order.tokenId)))];
-  const rows = await Promise.all(
-    tokens.map(async (tokenId) => {
-      try {
-        return [tokenId, await deps.getFreshBook(tokenId, nowMs)] as const;
-      } catch {
-        return [tokenId, null] as const;
-      }
-    }),
-  );
-  return new Map(rows);
+  try {
+    const books = await deps.getFreshBooks(tokens, nowMs);
+    return new Map(tokens.map((tokenId) => [tokenId, books.get(tokenId) ?? null]));
+  } catch {
+    return new Map(tokens.map((tokenId) => [tokenId, null]));
+  }
 }
 
 function buildEventPayload(

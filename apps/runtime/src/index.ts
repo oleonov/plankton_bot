@@ -1764,18 +1764,39 @@ async function main(): Promise<void> {
       inventoryLotRepo: repos.inventoryLot,
       riskEventRepo: repos.riskEvent,
       maxBookAgeMs: 3_000,
-      getFreshBook: async (tokenId, nowMs) => {
-        if (!candidateBookCache) return null;
-        const entry = candidateBookCache.getFreshEntry(tokenId, nowMs);
-        const tickSize = entryLifecycleModule.getMarket(tokenId as TokenId)?.tickSize;
-        if (!entry || tickSize == null || !Number.isFinite(tickSize) || tickSize <= 0) return null;
-        return {
-          book: entry.book,
-          cachedAtMs: entry.cachedAtMs,
-          snapshotTs: entry.snapshotTs,
-          tickSize,
-          source: `${entry.bookSource}:${entry.sourceKind}`,
-        };
+      getFreshBooks: async (tokenIds, nowMs) => {
+        const result = new Map();
+        const missing: string[] = [];
+        for (const tokenId of tokenIds) {
+          const entry = candidateBookCache?.getFreshEntry(tokenId, nowMs);
+          const tickSize = entryLifecycleModule.getMarket(tokenId as TokenId)?.tickSize;
+          if (!entry || tickSize == null || !Number.isFinite(tickSize) || tickSize <= 0) {
+            missing.push(tokenId);
+            continue;
+          }
+          result.set(tokenId, {
+            book: entry.book,
+            cachedAtMs: entry.cachedAtMs,
+            snapshotTs: entry.snapshotTs,
+            tickSize,
+            source: `${entry.bookSource}:${entry.sourceKind}`,
+          });
+        }
+        if (missing.length === 0 || !marketDataGateway.getOrderBooks) return result;
+        const fetched = await marketDataGateway.getOrderBooks(missing);
+        for (const tokenId of missing) {
+          const book = fetched.get(tokenId);
+          const tickSize = entryLifecycleModule.getMarket(tokenId as TokenId)?.tickSize;
+          if (!book || tickSize == null || !Number.isFinite(tickSize) || tickSize <= 0) continue;
+          result.set(tokenId, {
+            book,
+            cachedAtMs: nowMs,
+            snapshotTs: book.timestamp,
+            tickSize,
+            source: "clob:rest-shadow",
+          });
+        }
+        return result;
       },
       onWriteError: (err, order) =>
         log.warn({ err, orderId: String(order.orderId) }, "quote-motion shadow event write failed"),

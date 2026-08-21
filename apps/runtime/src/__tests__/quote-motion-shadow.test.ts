@@ -149,16 +149,22 @@ function harness(
     positionRepo: { findById: () => position() },
     inventoryLotRepo: { findOpen: () => [lot()] },
     riskEventRepo: { insert: vi.fn((event) => events.push(event)) },
-    getFreshBook: vi.fn(async (_tokenId: string, sampledAtMs: number) =>
-      currentBook
-        ? {
-            book: currentBook,
-            cachedAtMs: sampledAtMs,
-            snapshotTs: sampledAtMs,
-            tickSize: currentTickSize,
-            source: "clob:ws",
-          }
-        : null,
+    getFreshBooks: vi.fn(
+      async (tokenIds: readonly string[], sampledAtMs: number) =>
+        new Map(
+          tokenIds.map((tokenId) => [
+            tokenId,
+            currentBook
+              ? {
+                  book: currentBook,
+                  cachedAtMs: sampledAtMs,
+                  snapshotTs: sampledAtMs,
+                  tickSize: currentTickSize,
+                  source: "clob:ws",
+                }
+              : null,
+          ]),
+        ),
     ),
     maxBookAgeMs: 3_000,
   };
@@ -252,6 +258,24 @@ describe("quote-motion shadow", () => {
     expect(h.events).toHaveLength(2);
   });
 
+  it("loads all eligible token books in one bounded batch", async () => {
+    const otherToken = createTokenId("quote-token-2");
+    const h = harness([
+      order("r23_capture", { orderId: createOrderId("first-order"), size: 2 }),
+      order("r23_capture", {
+        orderId: createOrderId("second-order"),
+        tokenId: otherToken,
+        size: 2,
+      }),
+    ]);
+
+    await runQuoteMotionShadowPass(h.deps, h.states, NOW);
+
+    expect(h.deps.getFreshBooks).toHaveBeenCalledOnce();
+    expect(h.deps.getFreshBooks).toHaveBeenCalledWith([String(TOKEN), String(otherToken)], NOW);
+    expect(h.events).toHaveLength(2);
+  });
+
   it("ignores forged provenance and does not fetch a book for it", async () => {
     const forged = order("bounce_exit_target", { postOnly: false });
     const h = harness([forged]);
@@ -259,6 +283,6 @@ describe("quote-motion shadow", () => {
       eligible: 0,
       emitted: 0,
     });
-    expect(h.deps.getFreshBook).not.toHaveBeenCalled();
+    expect(h.deps.getFreshBooks).not.toHaveBeenCalled();
   });
 });
