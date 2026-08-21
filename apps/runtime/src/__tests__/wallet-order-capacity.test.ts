@@ -42,6 +42,21 @@ const orderPolicy: OrderCapacityPolicy = {
   maxOpenOrdersTotal: 22,
 };
 
+function evaluateBuyOrderSlots(
+  maxOpenBuyOrders: number,
+  openBuyOrderCount: number,
+  protectedOpenBuySlots = 0,
+) {
+  return evaluateWalletBuyCapacity({
+    policy: { ...buyPolicy, maxOpenBuyOrders },
+    snapshot: null,
+    requiredNotionalUsdc: 1,
+    signalReason: "probe-entry",
+    openBuyOrderCount,
+    protectedOpenBuySlots,
+  });
+}
+
 describe("order capacity policy evaluators", () => {
   it("protects one capture slot from ordinary BUYs and caps the exact capture before pending", () => {
     const nowMs = Date.parse("2026-08-20T11:00:00.000Z");
@@ -80,12 +95,56 @@ describe("order capacity policy evaluators", () => {
       nowMs,
     });
 
-    expect(ordinary).toMatchObject({ requiredNotionalUsdc: 6, protectedHeadroomUsdc: 1 });
+    expect(ordinary).toMatchObject({
+      requiredNotionalUsdc: 6,
+      protectedHeadroomUsdc: 1,
+      protectedOpenBuySlots: 1,
+    });
     expect(capture).toMatchObject({
       requiredNotionalUsdc: 4,
       protectedHeadroomUsdc: 0,
+      protectedOpenBuySlots: 0,
       exactCaptureNextR23: true,
     });
+
+    const ordinaryAt24 = evaluateBuyOrderSlots(25, 24, ordinary.protectedOpenBuySlots);
+    const captureAt24 = evaluateBuyOrderSlots(25, 24, capture.protectedOpenBuySlots);
+    expect(ordinaryAt24).toMatchObject({
+      allowed: false,
+      maxOpenBuyOrders: 25,
+      protectedOpenBuySlots: 1,
+      effectiveMaxOpenBuyOrders: 24,
+    });
+    expect(captureAt24).toMatchObject({ allowed: true, effectiveMaxOpenBuyOrders: 25 });
+    expect(evaluateBuyOrderSlots(25, 25, capture.protectedOpenBuySlots).allowed).toBe(false);
+  });
+
+  it("keeps inactive capture and configured unlimited/one-slot policies unambiguous", () => {
+    const inactive = resolveProtectedWalletBuyRequirement({
+      makerEntry: {
+        ...DEFAULT_EXECUTION_POLICY.makerEntry,
+        mode: "micro_live",
+        microLiveWindow: {
+          activatedAtUtc: "2026-08-20T10:00:00.000Z",
+          expiresAtUtc: "2026-08-20T12:00:00.000Z",
+          maxCumulativeAcceptedPendingUsdc: 44,
+          captureNextR23: true,
+        },
+      },
+      authorization: null,
+      proposedNotionalUsdc: 1,
+      pendingBuyNotionalUsdc: 0,
+      nowMs: Date.parse("2026-08-20T12:00:00.000Z"),
+    });
+    expect(inactive.protectedOpenBuySlots).toBe(0);
+    expect(evaluateBuyOrderSlots(25, 24, inactive.protectedOpenBuySlots).allowed).toBe(true);
+
+    const unlimited = evaluateBuyOrderSlots(0, 999, 1);
+    const oneSlotReserved = evaluateBuyOrderSlots(1, 0, 1);
+    const oneSlotCapture = evaluateBuyOrderSlots(1, 0);
+    expect(unlimited).toMatchObject({ allowed: true, effectiveMaxOpenBuyOrders: 0 });
+    expect(oneSlotReserved).toMatchObject({ allowed: false, effectiveMaxOpenBuyOrders: 0 });
+    expect(oneSlotCapture).toMatchObject({ allowed: true, effectiveMaxOpenBuyOrders: 1 });
   });
 
   it.each([
@@ -93,15 +152,26 @@ describe("order capacity policy evaluators", () => {
     [25, false],
     [26, false],
   ])("evaluates BUY global cap at open count %i", (openBuyOrderCount, allowed) => {
-    const decision = evaluateWalletBuyCapacity({
-      policy: buyPolicy,
-      snapshot: null,
-      requiredNotionalUsdc: 1,
-      signalReason: "probe-entry",
-      openBuyOrderCount,
-    });
+    const decision = evaluateBuyOrderSlots(25, openBuyOrderCount);
 
     expect(decision.allowed).toBe(allowed);
+  });
+
+  it("reserves the final shared order slot without changing the unlimited sentinel", () => {
+    expect(
+      evaluateTotalOrdersCapacity({
+        policy: orderPolicy,
+        openOrdersTotal: 21,
+        protectedOpenOrderSlots: 1,
+      }),
+    ).toMatchObject({ allowed: false, effectiveMaxOpenOrdersTotal: 21 });
+    expect(
+      evaluateTotalOrdersCapacity({
+        policy: { ...orderPolicy, maxOpenOrdersTotal: 0 },
+        openOrdersTotal: 999,
+        protectedOpenOrderSlots: 1,
+      }).allowed,
+    ).toBe(true);
   });
 
   it.each([

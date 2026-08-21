@@ -804,6 +804,8 @@ export class ExecutionModule implements RuntimeModule {
       minAddWalletHeadroomUsdc: number;
       minViableEntryUsdc: number;
       maxOpenBuyOrders: number;
+      protectedOpenBuySlots: number;
+      effectiveMaxOpenBuyOrders: number;
       maxOpenBuyOrdersPerToken: number;
       openBuyOrderCount: number;
       newEntryCapacityUsdc: number | null;
@@ -830,6 +832,8 @@ export class ExecutionModule implements RuntimeModule {
     orderCapacity?: {
       enabled: boolean;
       maxOpenOrdersTotal: number;
+      protectedOpenOrderSlots: number;
+      effectiveMaxOpenOrdersTotal: number;
       openOrdersTotal: number;
       blocked: boolean;
     };
@@ -851,10 +855,18 @@ export class ExecutionModule implements RuntimeModule {
       },
       reservations.reservedBuyUsdc,
     );
-    const buyCapacity = normalizeBuyCapacityPolicy(this.currentBuyCapacityPolicy());
-    const sellCapacity = normalizeSellCapacityPolicy(this.currentSellCapacityPolicy());
-    const orderCapacity = normalizeOrderCapacityPolicy(this.currentOrderCapacityPolicy());
+    const executionPolicy = this.deps.executionPolicy?.();
+    const buyCapacity = normalizeBuyCapacityPolicy(executionPolicy?.buyCapacity);
+    const sellCapacity = normalizeSellCapacityPolicy(executionPolicy?.sellCapacity);
+    const orderCapacity = normalizeOrderCapacityPolicy(executionPolicy?.orderCapacity);
     const profileOwnedOpenPositionCount = this.currentProfileOwnedOpenPositionCount();
+    const protectedRequirement = resolveProtectedWalletBuyRequirement({
+      makerEntry: executionPolicy?.makerEntry ?? null,
+      authorization: null,
+      proposedNotionalUsdc: 0,
+      pendingBuyNotionalUsdc: 0,
+      nowMs: Date.now(),
+    });
     const sellCapacityDiagnostic = evaluateWalletSellCapacity({
       policy: sellCapacity,
       source: "other",
@@ -866,16 +878,23 @@ export class ExecutionModule implements RuntimeModule {
     const newEntryDecision = evaluateWalletBuyCapacity({
       policy: buyCapacity,
       snapshot: walletBudget,
-      requiredNotionalUsdc: 0,
+      requiredNotionalUsdc: protectedRequirement.requiredNotionalUsdc,
       signalReason: "probe-entry",
       openBuyOrderCount: reservations.openBuyOrderCount,
+      protectedOpenBuySlots: protectedRequirement.protectedOpenBuySlots,
     });
     const addDecision = evaluateWalletBuyCapacity({
       policy: buyCapacity,
       snapshot: walletBudget,
-      requiredNotionalUsdc: 0,
+      requiredNotionalUsdc: protectedRequirement.requiredNotionalUsdc,
       signalReason: "scale-in",
       openBuyOrderCount: reservations.openBuyOrderCount,
+      protectedOpenBuySlots: protectedRequirement.protectedOpenBuySlots,
+    });
+    const orderCapacityDecision = evaluateTotalOrdersCapacity({
+      policy: orderCapacity,
+      openOrdersTotal: reservations.openOrdersTotal,
+      protectedOpenOrderSlots: protectedRequirement.protectedOpenBuySlots,
     });
     const newEntryCapacityUsdc =
       newEntryDecision.availableAfterOrderUsdc == null
@@ -910,6 +929,8 @@ export class ExecutionModule implements RuntimeModule {
         minAddWalletHeadroomUsdc: buyCapacity.minAddWalletHeadroomUsdc,
         minViableEntryUsdc: buyCapacity.minViableEntryUsdc,
         maxOpenBuyOrders: buyCapacity.maxOpenBuyOrders,
+        protectedOpenBuySlots: newEntryDecision.protectedOpenBuySlots,
+        effectiveMaxOpenBuyOrders: newEntryDecision.effectiveMaxOpenBuyOrders,
         maxOpenBuyOrdersPerToken: buyCapacity.maxOpenBuyOrdersPerToken,
         openBuyOrderCount: reservations.openBuyOrderCount,
         newEntryCapacityUsdc,
@@ -954,11 +975,10 @@ export class ExecutionModule implements RuntimeModule {
       orderCapacity: {
         enabled: orderCapacity.enabled,
         maxOpenOrdersTotal: orderCapacity.maxOpenOrdersTotal,
+        protectedOpenOrderSlots: orderCapacityDecision.protectedOpenOrderSlots,
+        effectiveMaxOpenOrdersTotal: orderCapacityDecision.effectiveMaxOpenOrdersTotal,
         openOrdersTotal: reservations.openOrdersTotal,
-        blocked:
-          orderCapacity.enabled &&
-          orderCapacity.maxOpenOrdersTotal > 0 &&
-          reservations.openOrdersTotal >= orderCapacity.maxOpenOrdersTotal,
+        blocked: !orderCapacityDecision.allowed,
       },
       reservedSellTokenCount: reservations.reservedSellByToken.size,
       cancelReplacePendingCount: this.sellReplaceLocks.size,
@@ -3443,7 +3463,7 @@ export class ExecutionModule implements RuntimeModule {
         details: Record<string, unknown>;
       } {
     const reservations = this.getReservationSnapshot(cmd);
-    const orderCapacity = evaluateTotalOrdersCapacity({
+    let orderCapacity = evaluateTotalOrdersCapacity({
       policy: this.currentOrderCapacityPolicy(),
       openOrdersTotal: reservations.openOrdersTotal,
     });
@@ -3458,7 +3478,8 @@ export class ExecutionModule implements RuntimeModule {
     });
 
     if (cmd.side === "buy") {
-      const buyPolicy = normalizeBuyCapacityPolicy(this.currentBuyCapacityPolicy());
+      const executionPolicy = this.deps.executionPolicy?.();
+      const buyPolicy = normalizeBuyCapacityPolicy(executionPolicy?.buyCapacity);
       const perTokenBuy = evaluatePerTokenOrderCapacity({
         side: "buy",
         maxOpenOrdersPerToken: buyPolicy.maxOpenBuyOrdersPerToken,
@@ -3488,7 +3509,7 @@ export class ExecutionModule implements RuntimeModule {
         reservations.reservedBuyUsdc,
       );
       const protectedRequirement = resolveProtectedWalletBuyRequirement({
-        makerEntry: this.deps.executionPolicy?.()?.makerEntry ?? null,
+        makerEntry: executionPolicy?.makerEntry ?? null,
         authorization: {
           conditionId: cmd.conditionId,
           source: cmd.source,
@@ -3509,6 +3530,12 @@ export class ExecutionModule implements RuntimeModule {
         requiredNotionalUsdc: protectedRequirement.requiredNotionalUsdc,
         signalReason: cmd.signalReason,
         openBuyOrderCount: reservations.openBuyOrderCount,
+        protectedOpenBuySlots: protectedRequirement.protectedOpenBuySlots,
+      });
+      orderCapacity = evaluateTotalOrdersCapacity({
+        policy: executionPolicy?.orderCapacity,
+        openOrdersTotal: reservations.openOrdersTotal,
+        protectedOpenOrderSlots: protectedRequirement.protectedOpenBuySlots,
       });
       if (!buyCapacity.allowed) {
         return {
@@ -3524,6 +3551,8 @@ export class ExecutionModule implements RuntimeModule {
             requiredHeadroomUsdc: buyCapacity.requiredHeadroomUsdc,
             availableAfterOrderUsdc: buyCapacity.availableAfterOrderUsdc,
             maxOpenBuyOrders: buyCapacity.maxOpenBuyOrders,
+            protectedOpenBuySlots: buyCapacity.protectedOpenBuySlots,
+            effectiveMaxOpenBuyOrders: buyCapacity.effectiveMaxOpenBuyOrders,
           },
         };
       }

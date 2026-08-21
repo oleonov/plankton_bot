@@ -413,6 +413,7 @@ export class AlgoRiskGateImpl implements RiskGate {
       requiredNotionalUsdc: protectedRequirement.requiredNotionalUsdc,
       signalReason: signal.reason,
       openBuyOrderCount: counts.openBuyOrderCount,
+      protectedOpenBuySlots: protectedRequirement.protectedOpenBuySlots,
     });
     if (!buyCapacity.allowed) {
       rejected.push(WALLET_BUY_CAPACITY_EXHAUSTED_REASON);
@@ -423,6 +424,7 @@ export class AlgoRiskGateImpl implements RiskGate {
     const totalCapacity = evaluateTotalOrdersCapacity({
       policy: orderPolicy,
       openOrdersTotal: counts.openOrdersTotal,
+      protectedOpenOrderSlots: protectedRequirement.protectedOpenBuySlots,
     });
     if (!totalCapacity.allowed) {
       rejected.push(TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON);

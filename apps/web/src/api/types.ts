@@ -402,6 +402,8 @@ export interface StatusData {
       minAddWalletHeadroomUsdc: number;
       minViableEntryUsdc: number;
       maxOpenBuyOrders: number;
+      protectedOpenBuySlots?: number;
+      effectiveMaxOpenBuyOrders?: number;
       maxOpenBuyOrdersPerToken: number;
       openBuyOrderCount: number;
       newEntryCapacityUsdc: number | null;
@@ -419,6 +421,8 @@ export interface StatusData {
     orderCapacity?: {
       enabled: boolean;
       maxOpenOrdersTotal: number;
+      protectedOpenOrderSlots?: number;
+      effectiveMaxOpenOrdersTotal?: number;
       openOrdersTotal: number;
       blocked: boolean;
     };

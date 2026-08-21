@@ -78,6 +78,8 @@ export interface WalletBuyCapacityDecision {
   availableAfterOrderUsdc: number | null;
   openBuyOrderCount: number;
   maxOpenBuyOrders: number;
+  protectedOpenBuySlots: number;
+  effectiveMaxOpenBuyOrders: number;
   maxOpenBuyOrdersPerToken: number;
   capacityEnabled: boolean;
 }
@@ -86,6 +88,7 @@ export interface ProtectedWalletBuyRequirement {
   requiredNotionalUsdc: number;
   exactCaptureNextR23: boolean;
   protectedHeadroomUsdc: number;
+  protectedOpenBuySlots: number;
 }
 
 /** Apply the active capture reserve once, consistently at every BUY budget checkpoint. */
@@ -109,11 +112,13 @@ export function resolveProtectedWalletBuyRequirement(args: {
     : args.proposedNotionalUsdc;
   const protectedHeadroomUsdc =
     activeCapture && !exactCaptureNextR23 ? args.makerEntry!.microMaxOrderUsdc : 0;
+  const protectedOpenBuySlots = activeCapture && !exactCaptureNextR23 ? 1 : 0;
   return {
     requiredNotionalUsdc:
       proposedNotionalUsdc + args.pendingBuyNotionalUsdc + protectedHeadroomUsdc,
     exactCaptureNextR23,
     protectedHeadroomUsdc,
+    protectedOpenBuySlots,
   };
 }
 
@@ -137,6 +142,8 @@ export interface TotalOrdersCapacityDecision {
   reason: typeof TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON | null;
   openOrdersTotal: number;
   maxOpenOrdersTotal: number;
+  protectedOpenOrderSlots: number;
+  effectiveMaxOpenOrdersTotal: number;
   capacityEnabled: boolean;
 }
 
@@ -256,16 +263,22 @@ export function evaluateWalletBuyCapacity(args: {
   requiredNotionalUsdc: number;
   signalReason: string | null | undefined;
   openBuyOrderCount: number;
+  protectedOpenBuySlots?: number;
 }): WalletBuyCapacityDecision {
   const policy = normalizeBuyCapacityPolicy(args.policy);
   const kind = classifyBuyCapacityKind(args.signalReason);
   const requiredHeadroomUsdc =
     kind === "new-entry" ? policy.minNewEntryWalletHeadroomUsdc : policy.minAddWalletHeadroomUsdc;
+  const protectedOpenBuySlots = Math.max(0, Math.trunc(args.protectedOpenBuySlots ?? 0));
+  const effectiveMaxOpenBuyOrders =
+    policy.maxOpenBuyOrders > 0 ? Math.max(0, policy.maxOpenBuyOrders - protectedOpenBuySlots) : 0;
   const base = {
     kind,
     requiredHeadroomUsdc,
     openBuyOrderCount: args.openBuyOrderCount,
     maxOpenBuyOrders: policy.maxOpenBuyOrders,
+    protectedOpenBuySlots,
+    effectiveMaxOpenBuyOrders,
     maxOpenBuyOrdersPerToken: policy.maxOpenBuyOrdersPerToken,
     capacityEnabled: policy.enabled,
   };
@@ -274,7 +287,10 @@ export function evaluateWalletBuyCapacity(args: {
     return { ...base, allowed: true, reason: null, availableAfterOrderUsdc: null };
   }
 
-  if (policy.maxOpenBuyOrders > 0 && args.openBuyOrderCount >= policy.maxOpenBuyOrders) {
+  if (
+    policy.maxOpenBuyOrders > 0 &&
+    (effectiveMaxOpenBuyOrders === 0 || args.openBuyOrderCount >= effectiveMaxOpenBuyOrders)
+  ) {
     return {
       ...base,
       allowed: false,
@@ -455,18 +471,26 @@ export function classifySellCapacitySource(input: {
 export function evaluateTotalOrdersCapacity(args: {
   policy: OrderCapacityPolicy | null | undefined;
   openOrdersTotal: number;
+  protectedOpenOrderSlots?: number;
 }): TotalOrdersCapacityDecision {
   const policy = normalizeOrderCapacityPolicy(args.policy);
+  const protectedOpenOrderSlots = Math.max(0, Math.trunc(args.protectedOpenOrderSlots ?? 0));
+  const effectiveMaxOpenOrdersTotal =
+    policy.maxOpenOrdersTotal > 0
+      ? Math.max(0, policy.maxOpenOrdersTotal - protectedOpenOrderSlots)
+      : 0;
   const base = {
     openOrdersTotal: args.openOrdersTotal,
     maxOpenOrdersTotal: policy.maxOpenOrdersTotal,
+    protectedOpenOrderSlots,
+    effectiveMaxOpenOrdersTotal,
     capacityEnabled: policy.enabled,
   };
 
   if (
     policy.enabled &&
     policy.maxOpenOrdersTotal > 0 &&
-    args.openOrdersTotal >= policy.maxOpenOrdersTotal
+    (effectiveMaxOpenOrdersTotal === 0 || args.openOrdersTotal >= effectiveMaxOpenOrdersTotal)
   ) {
     return { ...base, allowed: false, reason: TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON };
   }

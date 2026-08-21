@@ -491,6 +491,56 @@ describe("AlgoRiskGateImpl", () => {
     expect(decision.rejectionReasons).toContain("wallet_buy_capacity_exhausted");
   });
 
+  it("reserves the final shared order slot for the exact active R23 capture", async () => {
+    const now = Date.now();
+    const orders = Array.from({ length: 24 }, (_, index) =>
+      makeOpenBuyOrder({
+        orderId: `reserve-buy-${index}` as any,
+        clientOrderId: `reserve-client-${index}` as any,
+        tokenId: createTokenId(`reserve-token-${index}`),
+      }),
+    );
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      { controlDb: createMockControlDb(100), activeProfile: "paper" as any },
+      () => makeBuyCapacityPolicy({ maxOpenBuyOrders: 100 }),
+      () =>
+        makeExecutionPolicy({
+          orderCapacity: {
+            ...DEFAULT_EXECUTION_POLICY.orderCapacity,
+            maxOpenOrdersTotal: 25,
+          },
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "micro_live",
+            microLiveWindow: {
+              activatedAtUtc: new Date(now - 60_000).toISOString(),
+              expiresAtUtc: new Date(now + 60_000).toISOString(),
+              maxCumulativeAcceptedPendingUsdc: 44,
+              maxCumulativeAcceptedPendingUsdcPerCondition: 1,
+              maxDistinctAcceptedConditions: 44,
+              maxCumulativeFilledUsdc: 5,
+              captureNextR23: true,
+            },
+          },
+        }),
+    );
+
+    const ordinary = await gate.evaluate(makeSignal({ generatedAt: new Date(now).toISOString() }));
+    const capture = await gate.evaluate(
+      makeSignal({
+        decisionRuleId: "R23_DIP_TRIGGER",
+        generatedAt: new Date(now).toISOString(),
+      }),
+    );
+
+    expect(ordinary.rejectionReasons).toContain("total_orders_capacity_exhausted");
+    expect(capture.approved).toBe(true);
+  });
+
   it.each([
     [1, true],
     [2, false],

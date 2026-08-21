@@ -168,6 +168,26 @@ function executionPolicy(overrides?: Partial<ExecutionPolicy>): ExecutionPolicy 
   };
 }
 
+function activeCapturePolicy(now: number): ExecutionPolicy {
+  return executionPolicy({
+    buyCapacity: { ...DEFAULT_BUY_CAPACITY_POLICY, maxOpenBuyOrders: 100 },
+    orderCapacity: { ...DEFAULT_EXECUTION_POLICY.orderCapacity, maxOpenOrdersTotal: 24 },
+    makerEntry: {
+      ...DEFAULT_EXECUTION_POLICY.makerEntry,
+      mode: "micro_live",
+      microLiveWindow: {
+        activatedAtUtc: new Date(now - 60_000).toISOString(),
+        expiresAtUtc: new Date(now + 60_000).toISOString(),
+        maxCumulativeAcceptedPendingUsdc: 44,
+        maxCumulativeAcceptedPendingUsdcPerCondition: 1,
+        maxDistinctAcceptedConditions: 44,
+        maxCumulativeFilledUsdc: 5,
+        captureNextR23: true,
+      },
+    },
+  });
+}
+
 function openOrderFromCommand(command: PlaceOrderCommand, orderId: string) {
   return {
     ...command,
@@ -636,6 +656,81 @@ describe("ExecutionModule — wallet reservation rejection", () => {
     expect(rejected).toHaveLength(1);
     expect(rejected[0]!.reason).toBe("wallet_buy_capacity_exhausted");
 
+    await mod.stop();
+  });
+
+  it("keeps one physical BUY slot reserved across an in-flight ordinary admission", async () => {
+    const now = Date.now();
+    let finishFirst!: () => void;
+    vi.mocked(gateway.placeOrder).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishFirst = () => resolve({ success: true, orderId: "reserved-slot-first" });
+        }),
+    );
+    orderRepo.findOpen = vi.fn().mockReturnValue(
+      Array.from({ length: 22 }, (_, index) =>
+        openOrderFromCommand(
+          makeBuyCmd({
+            commandId: createCommandId(`reserved-slot-existing-${index}`),
+            clientOrderId: `plk_reserved_slot_${index}` as ClientOrderId,
+            tokenId: createTokenId(`reserved-slot-token-${index}`),
+          }),
+          `reserved-slot-order-${index}`,
+        ),
+      ),
+    );
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb: createMockControlDb(1_000),
+      activeProfile: "paper" as any,
+      executionPolicy: () => activeCapturePolicy(now),
+      maxConcurrency: 1,
+    });
+    const rejected = collectRejections(bus);
+    await mod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("reserved-slot-first"),
+        clientOrderId: "plk_reserved_slot_first" as ClientOrderId,
+        tokenId: createTokenId("reserved-slot-first-token"),
+      }),
+      timestamp: now,
+    });
+    await vi.waitFor(() => expect(gateway.placeOrder).toHaveBeenCalledTimes(1));
+    expect(mod.getDiagnostics().buyCapacity).toMatchObject({
+      openBuyOrderCount: 23,
+      maxOpenBuyOrders: 100,
+      protectedOpenBuySlots: 1,
+      effectiveMaxOpenBuyOrders: 99,
+      entriesBlocked: false,
+    });
+    expect(mod.getDiagnostics().orderCapacity).toMatchObject({
+      protectedOpenOrderSlots: 1,
+      effectiveMaxOpenOrdersTotal: 23,
+      blocked: true,
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("reserved-slot-second"),
+        clientOrderId: "plk_reserved_slot_second" as ClientOrderId,
+        tokenId: createTokenId("reserved-slot-second-token"),
+      }),
+      timestamp: now,
+    });
+    expect(rejected.map((item) => item.reason)).toEqual(["total_orders_capacity_exhausted"]);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    finishFirst();
     await mod.stop();
   });
 

@@ -1562,6 +1562,7 @@ async function main(): Promise<void> {
           requiredNotionalUsdc: protectedRequirement.requiredNotionalUsdc,
           signalReason: signal.reason,
           openBuyOrderCount,
+          protectedOpenBuySlots: protectedRequirement.protectedOpenBuySlots,
         });
         if (!buyCapacity.allowed) {
           return {
@@ -1573,6 +1574,7 @@ async function main(): Promise<void> {
         const totalCapacity = evaluateTotalOrdersCapacity({
           policy: normalizeOrderCapacityPolicy(policy.orderCapacity),
           openOrdersTotal,
+          protectedOpenOrderSlots: protectedRequirement.protectedOpenBuySlots,
         });
         if (!totalCapacity.allowed) {
           return {
