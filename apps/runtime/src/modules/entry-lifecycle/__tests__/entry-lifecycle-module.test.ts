@@ -1058,7 +1058,7 @@ describe("EntryLifecycleModule", () => {
     ]);
     intent = null;
     current = { ...root, price: 0.4 };
-    vi.mocked(repo.claimMakerCaptureRepriceIntent!).mockClear();
+    vi.mocked(repo.claimMakerCaptureRepriceIntent).mockClear();
     cancels.length = 0;
     await publishMarket(bus, makeMarket({ bestBid: 0.41, bestAsk: 0.43 }));
     expect(repo.claimMakerCaptureRepriceIntent).not.toHaveBeenCalled();
