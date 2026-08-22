@@ -553,6 +553,8 @@ esac`,
     reached.add("attached-exact");
     const metadataPath = join(config, "deploy-meta.json");
     const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+    expect(metadata.receipt).toHaveProperty("migration101");
+    expect(metadata.receipt).not.toHaveProperty("migration102");
     writeFileSync(
       join(config, "deploy-recovery.json"),
       JSON.stringify({
@@ -605,7 +607,7 @@ echo "order-gate $1" >> "$CALLS"
 [[ "\${ORDER_GATE_FAIL:-}" == "$1" ]] && exit 41
 [[ "$1" == post && ! -e "$API_AVAILABLE" ]] && exit 42
 [[ "$1" == post ]] && marker=true || marker=false
-printf '{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s","markerWasPresent":%s}\\n' '${"a".repeat(64)}' '${"b".repeat(64)}' "$marker"`,
+printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s","markerWasPresent":%s},"migration102":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"}}\\n' '${"a".repeat(64)}' '${"b".repeat(64)}' "$marker" '${"c".repeat(64)}' '${"d".repeat(64)}'`,
     );
     const releaseEnv = {
         ...env,
@@ -688,6 +690,19 @@ printf '{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s","markerWasPrese
       `${preRetry.stderr}\n${readFileSync(fixture.calls, "utf8").slice(-6000)}`,
     ).toBe(0);
     expect(preRetry.stdout).toContain("DEPLOY_RECEIPT");
+    const releaseReceipt = JSON.parse(
+      preRetry.stdout
+        .split("\n")
+        .find((line) => line.startsWith("DEPLOY_RECEIPT "))!
+        .replace("DEPLOY_RECEIPT ", ""),
+    );
+    expect(
+      Object.keys(releaseReceipt)
+        .filter((key) => key.startsWith("migration"))
+        .sort(),
+    ).toEqual(["migration101", "migration102"]);
+    expect(releaseReceipt.migration101).toMatchObject({ candidateCount: 1 });
+    expect(releaseReceipt.migration102).toMatchObject({ rowCount: 0, tableWasPresent: false });
 
     writeFileSync(orderGateCalls, "");
     const killedPre = hardDeathRelease("migration_gate_pre");

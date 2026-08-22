@@ -7,13 +7,17 @@ import { spawnSync } from "node:child_process";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const gate = join(root, "scripts", "krabs-order-status-migration-gate.sh");
-const migration = join(root, "packages/db/src/migrations/101_repair_filled_phantom_orders.sql");
+const migration101 = join(root, "packages/db/src/migrations/101_repair_filled_phantom_orders.sql");
+const migration102 = join(root, "packages/db/src/migrations/102_maker_capture_reprice_intents.sql");
+const marker101 = "101_repair_filled_phantom_orders.sql";
+const marker102 = "102_maker_capture_reprice_intents.sql";
 const sha = "a".repeat(40);
 const dirs: string[] = [];
 
-function sql(db: string, statement: string): void {
+function sql(db: string, statement: string): string {
   const result = spawnSync("/usr/bin/sqlite3", [db], { encoding: "utf8", input: statement });
   if (result.status) throw new Error(result.stderr);
+  return result.stdout.trim();
 }
 
 function fixture() {
@@ -34,19 +38,63 @@ function run(db: string, ...args: string[]) {
   });
 }
 
+function apply(db: string, migration: string, marker: string): void {
+  sql(db, readFileSync(migration, "utf8"));
+  sql(db, `INSERT INTO schema_migrations VALUES('${marker}')`);
+}
+
+function insertIntent(db: string, intentId = "intent-1"): void {
+  sql(
+    db,
+    `INSERT INTO maker_capture_reprice_intents VALUES('${intentId}','predecessor-${intentId}','signal-${intentId}','root-1','token-1','condition-1',1,'ready',0.1,1,NULL,NULL,'2026-08-21T00:00:00.000Z','2026-08-21T00:00:00.000Z')`,
+  );
+}
+
+function expectPreRejected(createIntentTable: string): void {
+  const { db, snapshot } = fixture();
+  sql(db, createIntentTable);
+  expect(run(db, "pre", sha, snapshot).status).not.toBe(0);
+}
+
 afterEach(() => {
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
 });
 
 describe("krabs order-status migration gate", () => {
-  it("snapshots the exact pre-census and proves only candidates changed after migration", () => {
+  it("proves first apply with an absent migration 102 table and preserves migration 101 proof", () => {
     const { db, snapshot } = fixture();
+    const pre = run(db, "pre", sha, snapshot);
+    expect(pre.status, pre.stderr).toBe(0);
     expect(run(db, "pre", sha, snapshot).status).toBe(0);
-    expect(run(db, "pre", sha, snapshot).status).toBe(0);
-    expect(JSON.parse(readFileSync(snapshot, "utf8"))).toMatchObject({ candidateCount: 1 });
-    sql(db, readFileSync(migration, "utf8"));
-    sql(db, "INSERT INTO schema_migrations VALUES('101_repair_filled_phantom_orders.sql')");
-    expect(run(db, "post", sha, snapshot).status).toBe(0);
+    expect(JSON.parse(pre.stdout)).toMatchObject({
+      migration101: { candidateCount: 1, markerWasPresent: false },
+      migration102: { markerWasPresent: false, tableWasPresent: false, rowCount: 0 },
+    });
+    expect(JSON.parse(readFileSync(snapshot, "utf8"))).toMatchObject({
+      schemaVersion: 2,
+      migration101: { candidateCount: 1 },
+      migration102: { tableWasPresent: false, rowCount: 0, rows: [] },
+    });
+    apply(db, migration101, marker101);
+    apply(db, migration102, marker102);
+    const post = run(db, "post", sha, snapshot);
+    expect(post.status, post.stderr).toBe(0);
+    const proof = JSON.parse(post.stdout);
+    expect(Object.keys(proof).sort()).toEqual(["migration101", "migration102"]);
+    expect(Object.keys(proof.migration101).sort()).toEqual([
+      "candidateCount",
+      "candidateHash",
+      "markerWasPresent",
+      "rowsHash",
+    ]);
+    expect(Object.keys(proof.migration102).sort()).toEqual([
+      "markerWasPresent",
+      "rowCount",
+      "rowsHash",
+      "schemaHash",
+      "tableWasPresent",
+    ]);
+    expect(sql(db, "SELECT count(*) FROM maker_capture_reprice_intents")).toBe("0");
     expect(run(db, "pre", sha, snapshot).status).not.toBe(0);
   });
 
@@ -55,14 +103,89 @@ describe("krabs order-status migration gate", () => {
     expect(run(db, "pre", sha, snapshot).status).toBe(0);
     sql(
       db,
-      "UPDATE orders SET status='filled' WHERE order_id='legacy-candidate'; UPDATE orders SET status='open' WHERE order_id='other'; INSERT INTO schema_migrations VALUES('101_repair_filled_phantom_orders.sql')",
+      `UPDATE orders SET status='filled' WHERE order_id='legacy-candidate'; UPDATE orders SET status='open' WHERE order_id='other'; INSERT INTO schema_migrations VALUES('${marker101}');`,
     );
+    apply(db, migration102, marker102);
     expect(run(db, "post", sha, snapshot).status).not.toBe(0);
     expect(
       spawnSync("/usr/bin/sqlite3", [db, "SELECT status FROM orders WHERE order_id='other'"], {
         encoding: "utf8",
       }).stdout.trim(),
     ).toBe("open");
+  });
+
+  it("accepts interrupted empty bootstrap and preserves rows on a future redeploy", () => {
+    const interrupted = fixture();
+    sql(interrupted.db, readFileSync(migration102, "utf8"));
+    const interruptedPre = run(interrupted.db, "pre", sha, interrupted.snapshot);
+    expect(interruptedPre.status, interruptedPre.stderr).toBe(0);
+    expect(JSON.parse(interruptedPre.stdout).migration102).toMatchObject({
+      markerWasPresent: false,
+      tableWasPresent: true,
+      rowCount: 0,
+    });
+    apply(interrupted.db, migration101, marker101);
+    sql(interrupted.db, `INSERT INTO schema_migrations VALUES('${marker102}')`);
+    expect(run(interrupted.db, "post", sha, interrupted.snapshot).status).toBe(0);
+
+    const redeploy = fixture();
+    apply(redeploy.db, migration101, marker101);
+    apply(redeploy.db, migration102, marker102);
+    insertIntent(redeploy.db);
+    const pre = run(redeploy.db, "pre", sha, redeploy.snapshot);
+    expect(pre.status, pre.stderr).toBe(0);
+    expect(JSON.parse(pre.stdout).migration102).toMatchObject({
+      markerWasPresent: true,
+      tableWasPresent: true,
+      rowCount: 1,
+    });
+    expect(run(redeploy.db, "post", sha, redeploy.snapshot).status).toBe(0);
+    expect(sql(redeploy.db, "SELECT status FROM maker_capture_reprice_intents")).toBe("ready");
+  });
+
+  it("rejects marker/table mismatches, duplicate markers, and unmarked rows", () => {
+    const absent = fixture();
+    sql(absent.db, `INSERT INTO schema_migrations VALUES('${marker102}')`);
+    expect(run(absent.db, "pre", sha, absent.snapshot).status).not.toBe(0);
+
+    const duplicate = fixture();
+    sql(duplicate.db, readFileSync(migration102, "utf8"));
+    sql(duplicate.db, `INSERT INTO schema_migrations VALUES('${marker102}'),('${marker102}')`);
+    expect(run(duplicate.db, "pre", sha, duplicate.snapshot).status).not.toBe(0);
+
+    const unmarked = fixture();
+    sql(unmarked.db, readFileSync(migration102, "utf8"));
+    insertIntent(unmarked.db);
+    expect(run(unmarked.db, "pre", sha, unmarked.snapshot).status).not.toBe(0);
+  });
+
+  it("rejects noncanonical columns, CHECKs, UNIQUE constraints, and named indexes", () => {
+    const canonical = readFileSync(migration102, "utf8");
+    for (const corrupt of [
+      canonical.replace("candidate_price       REAL", "candidate_price       TEXT"),
+      canonical.replace("BETWEEN 1 AND 5", "BETWEEN 1 AND 6"),
+      canonical.replace("child_order_id        TEXT UNIQUE", "child_order_id        TEXT"),
+      canonical.replace(
+        "ON maker_capture_reprice_intents(status);",
+        "ON maker_capture_reprice_intents(token_id);",
+      ),
+      canonical.replace(
+        "ON maker_capture_reprice_intents(root_order_id, replacement_index);",
+        "ON maker_capture_reprice_intents(root_order_id);",
+      ),
+    ]) {
+      expectPreRejected(corrupt);
+    }
+  });
+
+  it("rejects any migration 102 row mutation between the stopped-ledger snapshots", () => {
+    const { db, snapshot } = fixture();
+    apply(db, migration101, marker101);
+    apply(db, migration102, marker102);
+    insertIntent(db);
+    expect(run(db, "pre", sha, snapshot).status).toBe(0);
+    sql(db, "UPDATE maker_capture_reprice_intents SET status='failed',failure='changed'");
+    expect(run(db, "post", sha, snapshot).status).not.toBe(0);
   });
 
   it("binds the staged helper in deploy order before target runtime start", () => {

@@ -5,7 +5,7 @@ readonly DEPLOY_SECONDS=2640
 readonly REMOTE_SECONDS=2580
 readonly SERVER_USER=root SERVER_HOST=your.server.ip SERVER_PATH=/opt/krabs
 readonly IMAGE=ghcr.io/oleonov/krabs
-readonly RETAINED=(deploy.sh scripts/krabs-rollback-guard.sh scripts/krabs-order-status-migration-gate.sh apps/api/src/routes/actions.ts packages/db/src/repositories/operator-command-repository.ts scripts/__tests__/krabs-rollback-guard.test.ts apps/api/src/__tests__/api.test.ts packages/db/src/__tests__/operator-repository.test.ts CHANGELOG.md docs/ROADMAP.md docs/plans/2026-08-11-swallowed-fill-recovery-and-multirow-token.md docs/runbooks/live_lite_rollout.md)
+readonly RETAINED=(deploy.sh scripts/krabs-rollback-guard.sh scripts/krabs-order-status-migration-gate.sh scripts/__tests__/krabs-order-status-migration-gate.test.ts apps/api/src/routes/actions.ts packages/db/src/repositories/operator-command-repository.ts scripts/__tests__/krabs-rollback-guard.test.ts apps/api/src/__tests__/api.test.ts packages/db/src/__tests__/operator-repository.test.ts CHANGELOG.md docs/ROADMAP.md docs/plans/2026-08-11-swallowed-fill-recovery-and-multirow-token.md docs/runbooks/live_lite_rollout.md)
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
@@ -223,18 +223,25 @@ PY
 )"
 }
 migration_receipt() { python3 - "$RECOVERY" "$ORDER_STATUS_SNAPSHOT" <<'PY'
-import json,sys
+import json,re,sys
 d=json.load(open(sys.argv[1])); mode=d['deliveryMode']; gate=d.get('migrationGate')
 if mode == 'rollback':
     assert gate is None or isinstance(gate,dict)
-    print(json.dumps(gate or {},separators=(',',':')))
+    print(json.dumps({'migration101':gate or {}},separators=(',',':')))
 else:
     assert mode == 'release' and isinstance(gate,dict)
-    assert gate.get('mode') == 'post' and gate.get('snapshotPath') == sys.argv[2]
-    assert isinstance(gate.get('candidateCount'),int) and gate['candidateCount'] >= 0
-    assert all(isinstance(gate.get(k),str) and len(gate[k]) == 64 for k in ('candidateHash','rowsHash'))
-    assert isinstance(gate.get('markerWasPresent'),bool)
-    print(json.dumps(gate,separators=(',',':')))
+    assert set(gate)=={'mode','snapshotPath','migration101','migration102'}
+    assert gate['mode'] == 'post' and gate['snapshotPath'] == sys.argv[2]
+    migration101=gate['migration101']; migration102=gate['migration102']
+    assert set(migration101)=={'candidateCount','candidateHash','rowsHash','markerWasPresent'}
+    assert type(migration101['candidateCount']) is int and migration101['candidateCount'] >= 0
+    assert all(isinstance(migration101[k],str) and re.fullmatch(r'[0-9a-f]{64}',migration101[k]) for k in ('candidateHash','rowsHash'))
+    assert isinstance(migration101['markerWasPresent'],bool)
+    assert set(migration102)=={'markerWasPresent','tableWasPresent','rowCount','rowsHash','schemaHash'}
+    assert type(migration102['rowCount']) is int and migration102['rowCount'] >= 0
+    assert all(isinstance(migration102[k],str) and re.fullmatch(r'[0-9a-f]{64}',migration102[k]) for k in ('rowsHash','schemaHash'))
+    assert all(isinstance(migration102[k],bool) for k in ('markerWasPresent','tableWasPresent'))
+    print(json.dumps({'migration101':migration101,'migration102':migration102},separators=(',',':')))
 PY
 }
 advance_recovery() { recovery "$(python3 - "$RECOVERY" "$1" <<'PY'
@@ -406,7 +413,7 @@ PY
   effective="$(printf '%s' "$arbitration" | json_field effectivePaused)" || die 're-entry command receipt is malformed'
   recovery "$(python3 - "$RECOVERY" "$arbitration" "$(migration_receipt)" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1])); a=json.loads(sys.argv[2]); r={'baselineCapturedUnderLock':d['baselineCapturedUnderLock'],'prePaused':d['prePaused'],'preRunId':d['preRunId'],'preInstanceId':d['preInstanceId'],'previousVersion':d['previousVersion'],'deployVersion':d['previousVersion']+1,'sha':d['targetSha'],'digest':d['digest'],'recoveryStateId':d['recoveryStateId'],'migration101':json.loads(sys.argv[3]),**a}; d.update(phase='commit_ready',finalCommandHighWater=a['finalOperatorCommandHighWater'],receipt=json.dumps(r,separators=(',',':'))); print(json.dumps(d,separators=(',',':')))
+d=json.load(open(sys.argv[1])); a=json.loads(sys.argv[2]); migrations=json.loads(sys.argv[3]); r={'baselineCapturedUnderLock':d['baselineCapturedUnderLock'],'prePaused':d['prePaused'],'preRunId':d['preRunId'],'preInstanceId':d['preInstanceId'],'previousVersion':d['previousVersion'],'deployVersion':d['previousVersion']+1,'sha':d['targetSha'],'digest':d['digest'],'recoveryStateId':d['recoveryStateId'],**migrations,**a}; d.update(phase='commit_ready',finalCommandHighWater=a['finalOperatorCommandHighWater'],receipt=json.dumps(r,separators=(',',':'))); print(json.dumps(d,separators=(',',':')))
 PY
  )"
   printf '%s\n' "$effective"
@@ -581,7 +588,7 @@ PY
   effective="$(printf '%s' "$arbitration" | json_field effectivePaused)" || die 'final command receipt is malformed'
   recovery "$(python3 - "$RECOVERY" "$arbitration" "$(migration_receipt)" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1])); a=json.loads(sys.argv[2]); r={'baselineCapturedUnderLock':d['baselineCapturedUnderLock'],'prePaused':d['prePaused'],'preRunId':d['preRunId'],'preInstanceId':d['preInstanceId'],'previousVersion':d['previousVersion'],'deployVersion':d['previousVersion']+1,'sha':d['targetSha'],'digest':d['digest'],'recoveryStateId':d['recoveryStateId'],'migration101':json.loads(sys.argv[3]),**a}; d.update(phase='commit_ready',finalCommandHighWater=a['finalOperatorCommandHighWater'],receipt=json.dumps(r,separators=(',',':')));print(json.dumps(d,separators=(',',':')))
+d=json.load(open(sys.argv[1])); a=json.loads(sys.argv[2]); migrations=json.loads(sys.argv[3]); r={'baselineCapturedUnderLock':d['baselineCapturedUnderLock'],'prePaused':d['prePaused'],'preRunId':d['preRunId'],'preInstanceId':d['preInstanceId'],'previousVersion':d['previousVersion'],'deployVersion':d['previousVersion']+1,'sha':d['targetSha'],'digest':d['digest'],'recoveryStateId':d['recoveryStateId'],**migrations,**a}; d.update(phase='commit_ready',finalCommandHighWater=a['finalOperatorCommandHighWater'],receipt=json.dumps(r,separators=(',',':')));print(json.dumps(d,separators=(',',':')))
 PY
  )"
   barrier commit_ready
