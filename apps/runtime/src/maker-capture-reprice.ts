@@ -3,6 +3,7 @@ import type {
   MakerCaptureLineageV1,
   MakerCaptureRepriceIntent,
   MakerCaptureRepriceSignalV1,
+  MakerCaptureBookDecisionProofV1,
   Order,
   OrderBookSnapshot,
   OrderId,
@@ -30,6 +31,9 @@ export type MakerCaptureCandidate =
       readonly price: number;
       readonly bestBid: number;
       readonly bestAsk: number;
+      readonly predecessorLevelBookShares: number | null;
+      readonly predecessorSharesSubtracted: number;
+      readonly predecessorLevelExternalShares: number | null;
     }
   | { readonly ok: false; readonly reason: string };
 
@@ -155,11 +159,15 @@ export function computeMakerCaptureCandidate(input: {
   if (!bids || !asks) return { ok: false, reason: "malformed-book" };
   const predecessorTick = Math.round(input.predecessorPrice / tickSize);
   const visible = bids.get(predecessorTick);
+  let predecessorSharesSubtracted = 0;
+  let predecessorLevelExternalShares = visible ?? null;
   if (visible !== undefined && input.predecessorVisibleShares > EPSILON) {
     if (input.predecessorVisibleShares > visible + 1e-7) {
       return { ok: false, reason: "self-book-ambiguous" };
     }
     const residual = visible - input.predecessorVisibleShares;
+    predecessorSharesSubtracted = input.predecessorVisibleShares;
+    predecessorLevelExternalShares = Math.max(0, residual);
     if (residual <= 1e-7) bids.delete(predecessorTick);
     else bids.set(predecessorTick, residual);
   }
@@ -186,7 +194,63 @@ export function computeMakerCaptureCandidate(input: {
   ) {
     return { ok: false, reason: "no-valid-move" };
   }
-  return { ok: true, price: candidate, bestBid, bestAsk };
+  return {
+    ok: true,
+    price: candidate,
+    bestBid,
+    bestAsk,
+    predecessorLevelBookShares: visible ?? null,
+    predecessorSharesSubtracted,
+    predecessorLevelExternalShares,
+  };
+}
+
+export function buildMakerCaptureBookDecisionProof(input: {
+  readonly evaluatedAtMs: number;
+  readonly entry: CandidateBookCacheEntry;
+  readonly tickSize: number;
+  readonly predecessorPrice: number;
+  readonly predecessorRemainingShares: number;
+  readonly rootNotionalUsdc: number;
+  readonly chainFilledUsdc: number;
+  readonly originalSuggestedPrice: number;
+  readonly entryPriceCeiling: number;
+  readonly candidate: Extract<MakerCaptureCandidate, { ok: true }>;
+  readonly replacementSize: number;
+  readonly minOrderSize: number | null;
+  readonly policySchemaVersion: number;
+  readonly policyControlRevision: number;
+  readonly activatedAtUtc: string;
+  readonly expiresAtUtc: string;
+}): MakerCaptureBookDecisionProofV1 {
+  return {
+    evaluatedAtMs: input.evaluatedAtMs,
+    snapshotTs: input.entry.snapshotTs,
+    cachedAtMs: input.entry.cachedAtMs,
+    sourcePolledAtMs: input.entry.sourcePolledAtMs,
+    sourceKind: "rest",
+    bookSource: input.entry.bookSource,
+    tickSize: input.tickSize,
+    predecessorPrice: input.predecessorPrice,
+    predecessorRemainingShares: input.predecessorRemainingShares,
+    predecessorLevelBookShares: input.candidate.predecessorLevelBookShares,
+    predecessorSharesSubtracted: input.candidate.predecessorSharesSubtracted,
+    predecessorLevelExternalShares: input.candidate.predecessorLevelExternalShares,
+    externalBestBid: input.candidate.bestBid,
+    externalBestAsk: input.candidate.bestAsk,
+    originalSuggestedPrice: input.originalSuggestedPrice,
+    entryPriceCeiling: input.entryPriceCeiling,
+    rootNotionalUsdc: input.rootNotionalUsdc,
+    chainFilledUsdc: input.chainFilledUsdc,
+    rootRemainingUsdc: Math.max(0, input.rootNotionalUsdc - input.chainFilledUsdc),
+    candidatePrice: input.candidate.price,
+    replacementSize: input.replacementSize,
+    minOrderSize: input.minOrderSize,
+    policySchemaVersion: input.policySchemaVersion,
+    policyControlRevision: input.policyControlRevision,
+    activatedAtUtc: input.activatedAtUtc,
+    expiresAtUtc: input.expiresAtUtc,
+  };
 }
 
 export function rootMakerCaptureLineage(

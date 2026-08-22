@@ -44,6 +44,8 @@ import type {
   MakerMicroLiveWindow,
   MakerCaptureRepriceIntent,
   MakerCaptureChainUsage,
+  MakerCaptureRepriceProofV1,
+  MakerCaptureSubmitProofV1,
 } from "@krabs/domain";
 import {
   createCommandId,
@@ -64,6 +66,7 @@ import {
   POLYMARKET_CRYPTO_TAKER_FEE_RATE,
   isMakerMicroLiveOrderAuthorized,
   isMakerMicroLiveWindowActive,
+  parseMakerCaptureRepriceProofV1,
 } from "@krabs/domain";
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
 import { randomUUID } from "node:crypto";
@@ -147,6 +150,7 @@ import type { PositionConcentrationService } from "../../position-concentration-
 import type { MakerBuyFastCancel } from "./maker-buy-fast-cancel.js";
 import type { MakerCaptureBookCache } from "../../maker-capture-reprice.js";
 import {
+  buildMakerCaptureBookDecisionProof,
   computeMakerCaptureCandidate,
   matchesMakerCaptureIntent,
   parseMakerCaptureLineage,
@@ -185,7 +189,16 @@ interface MakerCaptureExecutionContext {
   readonly root: Order;
   readonly usage: MakerCaptureChainUsage;
   readonly origin: QuoteMotionOriginV1;
+  readonly proof: MakerCaptureRepriceProofV1;
+  readonly policySchemaVersion: number;
+  readonly policyControlRevision: number;
+  readonly activatedAtUtc: string;
+  readonly expiresAtUtc: string;
 }
+
+type MakerCaptureFinalBookResult =
+  | { readonly ok: true; readonly proof: MakerCaptureSubmitProofV1 }
+  | { readonly ok: false; readonly reason: string; readonly code: ExchangeErrorCode };
 
 function resolvePriceFromCmd(cmd: PlaceOrderCommand): number {
   return cmd.price;
@@ -1716,6 +1729,7 @@ export class ExecutionModule implements RuntimeModule {
     const makerPolicy = snapshot?.policy.makerEntry;
     const window = makerPolicy?.microLiveWindow;
     const deadline = root ? resolveMakerMicroLiveFillDeadlineMs(root) : null;
+    const proof = parseMakerCaptureRepriceProofV1(intent.proof);
     const expectedClientOrderId = buildClientOrderId({
       signalId: intent.lifecycleSignalId,
       tokenId: intent.tokenId,
@@ -1735,6 +1749,8 @@ export class ExecutionModule implements RuntimeModule {
       !origin ||
       !predecessorLineage ||
       !rootLineage ||
+      !proof?.prepared ||
+      (intent.status === "ready" && proof.submit !== null) ||
       !snapshot ||
       snapshot.controlRevision === null ||
       !makerPolicy?.captureBookReprice.enabled ||
@@ -1758,6 +1774,10 @@ export class ExecutionModule implements RuntimeModule {
       intent.candidatePrice == null ||
       Math.abs(cmd.price - intent.candidatePrice) > ExecutionModule.PRICE_EPSILON ||
       intent.replacementSize == null ||
+      Math.abs(proof.prepared.candidatePrice - intent.candidatePrice) >
+        ExecutionModule.PRICE_EPSILON ||
+      Math.abs(proof.prepared.replacementSize - intent.replacementSize) >
+        ExecutionModule.SIZE_EPSILON_SHARES ||
       Math.abs(cmd.size - intent.replacementSize) > ExecutionModule.SIZE_EPSILON_SHARES ||
       usage.replacementIndex + 1 !== intent.replacementIndex ||
       String(usage.rootOrderId) !== String(intent.rootOrderId) ||
@@ -1778,7 +1798,18 @@ export class ExecutionModule implements RuntimeModule {
     ) {
       return null;
     }
-    return { intent, predecessor, root, usage, origin };
+    return {
+      intent,
+      predecessor,
+      root,
+      usage,
+      origin,
+      proof,
+      policySchemaVersion: snapshot.policy.version,
+      policyControlRevision: snapshot.controlRevision,
+      activatedAtUtc: window.activatedAtUtc,
+      expiresAtUtc: window.expiresAtUtc,
+    };
   }
 
   private makerCaptureRepriceRejection(
@@ -1792,10 +1823,9 @@ export class ExecutionModule implements RuntimeModule {
 
   private async makerCaptureFreshBookRejection(
     cmd: PlaceOrderCommand,
-  ): Promise<{ reason: string; code: ExchangeErrorCode } | null> {
-    if (!this.isMakerCaptureReplacement(cmd)) return null;
+  ): Promise<MakerCaptureFinalBookResult> {
     let context = this.makerCaptureExecutionContext(cmd);
-    if (!context) return this.makerCapRejection("maker-capture-reprice-invalid");
+    if (!context) return { ok: false, ...this.makerCapRejection("maker-capture-reprice-invalid") };
     let entry;
     try {
       entry = await primeFreshMakerCaptureBook(
@@ -1806,9 +1836,9 @@ export class ExecutionModule implements RuntimeModule {
     } catch {
       entry = null;
     }
-    if (!entry) return this.makerCapRejection("maker-capture-book-unavailable");
+    if (!entry) return { ok: false, ...this.makerCapRejection("maker-capture-book-unavailable") };
     context = this.makerCaptureExecutionContext(cmd);
-    if (!context) return this.makerCapRejection("maker-capture-reprice-invalid");
+    if (!context) return { ok: false, ...this.makerCapRejection("maker-capture-reprice-invalid") };
     const candidate = computeMakerCaptureCandidate({
       book: entry.book,
       tickSize: cmd.tickSize,
@@ -1818,11 +1848,38 @@ export class ExecutionModule implements RuntimeModule {
       entryPriceCeiling: context.origin.entryPriceCeiling!,
     });
     if (!candidate.ok || Math.abs(candidate.price - cmd.price) > ExecutionModule.PRICE_EPSILON) {
-      return this.makerCapRejection(
-        candidate.ok ? "maker-capture-book-drift" : `maker-capture-${candidate.reason}`,
-      );
+      return {
+        ok: false,
+        ...this.makerCapRejection(
+          candidate.ok ? "maker-capture-book-drift" : `maker-capture-${candidate.reason}`,
+        ),
+      };
     }
-    return null;
+    return {
+      ok: true,
+      proof: {
+        ...buildMakerCaptureBookDecisionProof({
+          evaluatedAtMs: Date.now(),
+          entry,
+          tickSize: cmd.tickSize,
+          predecessorPrice: context.predecessor.price,
+          predecessorRemainingShares: context.usage.predecessorRemainingShares,
+          rootNotionalUsdc: context.usage.rootNotionalUsdc,
+          chainFilledUsdc: context.usage.chainFilledUsdc,
+          originalSuggestedPrice: context.origin.originalSuggestedPrice,
+          entryPriceCeiling: context.origin.entryPriceCeiling!,
+          candidate,
+          replacementSize: cmd.size,
+          minOrderSize: entry.book.minOrderSize ?? null,
+          policySchemaVersion: context.policySchemaVersion,
+          policyControlRevision: context.policyControlRevision,
+          activatedAtUtc: context.activatedAtUtc,
+          expiresAtUtc: context.expiresAtUtc,
+        }),
+        childOrderId: String(context.intent.childOrderId),
+        clientOrderId: String(cmd.clientOrderId),
+      },
+    };
   }
 
   private captureRootWindowMatches(
@@ -3199,16 +3256,12 @@ export class ExecutionModule implements RuntimeModule {
       result = this.preparedSubmitResultToPlaceOrderResult(preparedLive.submit);
     } else {
       if (this.isMakerCaptureReplacement(effectiveCmd)) {
-        const captureBookRejection = await this.makerCaptureFreshBookRejection(effectiveCmd);
-        if (captureBookRejection) {
-          await this.rejectOrder(
-            effectiveCmd,
-            captureBookRejection.reason,
-            captureBookRejection.code,
-          );
-          return;
-        }
-        this.makerCaptureGatewayAttempts.add(String(effectiveCmd.commandId));
+        await this.rejectOrder(
+          effectiveCmd,
+          "maker-capture-prepared-submit-required",
+          ExchangeErrorCode.LivePolicyBlocked,
+        );
+        return;
       }
       result = await this.deps.gateway.placeOrder(placeParams);
     }
@@ -4511,12 +4564,29 @@ export class ExecutionModule implements RuntimeModule {
         };
       }
       if (this.isMakerCaptureReplacement(cmd)) {
-        const captureBookRejection = await this.makerCaptureFreshBookRejection(cmd);
-        if (captureBookRejection) {
+        const finalBook = await this.makerCaptureFreshBookRejection(cmd);
+        if (!finalBook.ok) {
           return {
             kind: "rejected" as const,
-            errorCode: captureBookRejection.code,
-            errorMessage: captureBookRejection.reason,
+            errorCode: finalBook.code,
+            errorMessage: finalBook.reason,
+            errorDetails: null,
+          };
+        }
+        const context = this.makerCaptureExecutionContext(cmd);
+        if (
+          !context?.intent.childOrderId ||
+          !this.deps.orderRepo.markMakerCaptureRepriceSubmitProof?.(
+            context.intent.intentId,
+            context.intent.childOrderId,
+            String(cmd.clientOrderId),
+            finalBook.proof,
+          )
+        ) {
+          return {
+            kind: "rejected" as const,
+            errorCode: ExchangeErrorCode.LivePolicyBlocked,
+            errorMessage: "maker-capture-submit-proof-cas-failed",
             errorDetails: null,
           };
         }

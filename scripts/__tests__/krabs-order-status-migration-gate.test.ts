@@ -46,7 +46,7 @@ function apply(db: string, migration: string, marker: string): void {
 function insertIntent(db: string, intentId = "intent-1"): void {
   sql(
     db,
-    `INSERT INTO maker_capture_reprice_intents VALUES('${intentId}','predecessor-${intentId}','signal-${intentId}','root-1','token-1','condition-1',1,'ready',0.1,1,NULL,NULL,'2026-08-21T00:00:00.000Z','2026-08-21T00:00:00.000Z')`,
+    `INSERT INTO maker_capture_reprice_intents VALUES('${intentId}','predecessor-${intentId}','signal-${intentId}','root-1','token-1','condition-1',1,'ready',0.1,1,NULL,NULL,'{"version":1}','2026-08-21T00:00:00.000Z','2026-08-21T00:00:00.000Z')`,
   );
 }
 
@@ -163,6 +163,10 @@ describe("krabs order-status migration gate", () => {
     const canonical = readFileSync(migration102, "utf8");
     for (const corrupt of [
       canonical.replace("candidate_price       REAL", "candidate_price       TEXT"),
+      canonical.replace(
+        "  proof_json            TEXT NOT NULL CHECK (json_valid(proof_json)),\n",
+        "",
+      ),
       canonical.replace("BETWEEN 1 AND 5", "BETWEEN 1 AND 6"),
       canonical.replace("child_order_id        TEXT UNIQUE", "child_order_id        TEXT"),
       canonical.replace(

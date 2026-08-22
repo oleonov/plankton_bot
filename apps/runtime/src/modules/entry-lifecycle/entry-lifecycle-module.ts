@@ -6,6 +6,7 @@ import type {
   FillRepository,
   LegStateRepository,
   MakerCaptureRepriceIntent,
+  MakerCaptureTriggerProofV1,
   MultiBuyLadderPolicy,
   NormalizedMarket,
   Order,
@@ -27,10 +28,12 @@ import {
   evaluateSize,
   parseEntryFreshEdgeAttribution,
   resolveSignalReason,
+  parseMakerCaptureRepriceProofV1,
 } from "@krabs/domain";
 import { resolveMakerMicroLiveFillDeadlineMs } from "../../buy-order-lifecycle.js";
 import {
   buildMakerCaptureRepriceIdentity,
+  buildMakerCaptureBookDecisionProof,
   computeMakerCaptureCandidate,
   parseMakerCaptureLineage,
   primeFreshMakerCaptureBook,
@@ -272,7 +275,9 @@ export class EntryLifecycleModule implements RuntimeModule {
     await this.recoverMakerCaptureReprices(false, new Set(markets.keys()));
     for (const order of this.deps.orderRepo.findOpen()) {
       const market = markets.get(String(order.tokenId));
-      if (!market || !this.captureOrderEligible(order, market, now)) continue;
+      if (!market) continue;
+      const trigger = this.captureOrderTriggerProof(order, market, event.timestamp, now);
+      if (!trigger) continue;
       const lineage = parseMakerCaptureLineage(order);
       if (!lineage) continue;
       const identity = buildMakerCaptureRepriceIdentity(
@@ -296,15 +301,21 @@ export class EntryLifecycleModule implements RuntimeModule {
         createdAt: nowIso,
         updatedAt: nowIso,
         failure: null,
+        proof: { version: 1, trigger, prepared: null, submit: null },
       };
       if (!this.deps.orderRepo.claimMakerCaptureRepriceIntent?.(intent)) continue;
       await this.publishCaptureCancel(intent, order);
     }
   }
 
-  private captureOrderEligible(order: Order, market: NormalizedMarket, now: number): boolean {
-    if (order.status !== "open" && order.status !== "partially-filled") return false;
-    if (!canPlaceBuyOrderForMarket(market, now).allowed) return false;
+  private captureOrderTriggerProof(
+    order: Order,
+    market: NormalizedMarket,
+    eventTimestampMs: number,
+    now: number,
+  ): MakerCaptureTriggerProofV1 | null {
+    if (order.status !== "open" && order.status !== "partially-filled") return null;
+    if (!canPlaceBuyOrderForMarket(market, now).allowed) return null;
     if (
       order.side !== "buy" ||
       order.entryStyle !== "maker" ||
@@ -312,7 +323,7 @@ export class EntryLifecycleModule implements RuntimeModule {
       order.decisionRuleId !== "R23_DIP_TRIGGER" ||
       order.signalReason !== "probe-entry"
     ) {
-      return false;
+      return null;
     }
     const snapshot = this.capturePolicySnapshot();
     const reprice = snapshot?.policy.makerEntry.captureBookReprice;
@@ -325,7 +336,7 @@ export class EntryLifecycleModule implements RuntimeModule {
       window?.captureNextR23 !== true ||
       !activeWindow(window.activatedAtUtc, window.expiresAtUtc, now)
     ) {
-      return false;
+      return null;
     }
     const lineage = parseMakerCaptureLineage(order);
     const usage = this.deps.orderRepo.getMakerCaptureChainUsage?.(order.orderId);
@@ -356,9 +367,25 @@ export class EntryLifecycleModule implements RuntimeModule {
       market.bestBid == null ||
       market.bestBid + EPSILON < order.price + market.tickSize
     ) {
-      return false;
+      return null;
     }
-    return true;
+    return {
+      eventTimestampMs,
+      evaluatedAtMs: now,
+      bestBid: market.bestBid,
+      bestAsk: market.bestAsk,
+      tickSize: market.tickSize,
+      bookSource: market.bookSource ?? null,
+      policySchemaVersion: snapshot.policy.version,
+      policyControlRevision: snapshot.controlRevision,
+      activatedAtUtc: window.activatedAtUtc,
+      expiresAtUtc: window.expiresAtUtc,
+      originalSuggestedPrice: origin.originalSuggestedPrice,
+      entryPriceCeiling: origin.entryPriceCeiling,
+      rootNotionalUsdc: usage.rootNotionalUsdc,
+      chainFilledUsdc: usage.chainFilledUsdc,
+      predecessorRemainingShares: usage.predecessorRemainingShares,
+    };
   }
 
   private async recoverMakerCaptureRepricesAtStartup(): Promise<void> {
@@ -371,6 +398,10 @@ export class EntryLifecycleModule implements RuntimeModule {
   ): Promise<void> {
     const intents = this.deps.orderRepo.findRecoverableMakerCaptureRepriceIntents?.() ?? [];
     for (const intent of intents) {
+      if (!this.captureIntentProofValid(intent)) {
+        this.failCaptureIntent(intent, "proof-invalid-or-incomplete");
+        continue;
+      }
       if (!tokenIds || tokenIds.has(String(intent.tokenId))) {
         await this.advanceCaptureIntent(intent, startup);
       }
@@ -402,7 +433,8 @@ export class EntryLifecycleModule implements RuntimeModule {
         }),
       );
       if (child) {
-        this.deps.orderRepo.markMakerCaptureRepriceSubmitted?.(intent.intentId, child.orderId);
+        this.failCaptureIntent(intent, "child-before-submit-proof");
+        return;
       }
     }
     if (child) {
@@ -438,13 +470,15 @@ export class EntryLifecycleModule implements RuntimeModule {
     predecessor: Order,
   ): Promise<MakerCaptureRepriceIntent | null> {
     const now = this.now();
-    const state = this.captureIntentState(intent, predecessor, now);
+    if (!this.captureIntentProofValid(intent)) {
+      this.failCaptureIntent(intent, "proof-invalid-or-incomplete");
+      return null;
+    }
     const market = this.getMarket(intent.tokenId);
-    if (!state || !market) {
+    if (!market) {
       this.failCaptureIntent(intent, "policy-or-lineage-drift");
       return null;
     }
-    const { origin, usage } = state;
     const entry = await primeFreshMakerCaptureBook(
       this.deps.candidateBookCache,
       String(intent.tokenId),
@@ -455,6 +489,12 @@ export class EntryLifecycleModule implements RuntimeModule {
       this.failCaptureIntent(intent, "fresh-book-or-minimum-unavailable");
       return null;
     }
+    const state = this.captureIntentState(intent, predecessor, this.now());
+    if (!state) {
+      this.failCaptureIntent(intent, "policy-or-lineage-drift");
+      return null;
+    }
+    const { origin, usage, snapshot, window } = state;
     this.marketCache.set(String(intent.tokenId), applyOrderBookToMarket(market, entry));
     const candidate = computeMakerCaptureCandidate({
       book: entry.book,
@@ -477,15 +517,44 @@ export class EntryLifecycleModule implements RuntimeModule {
       this.failCaptureIntent(intent, "replacement-below-minimum");
       return null;
     }
+    const preparedProof = buildMakerCaptureBookDecisionProof({
+      evaluatedAtMs: this.now(),
+      entry,
+      tickSize: market.tickSize,
+      predecessorPrice: predecessor.price,
+      predecessorRemainingShares: usage.predecessorRemainingShares,
+      rootNotionalUsdc: usage.rootNotionalUsdc,
+      chainFilledUsdc: usage.chainFilledUsdc,
+      originalSuggestedPrice: origin.originalSuggestedPrice,
+      entryPriceCeiling: origin.entryPriceCeiling!,
+      candidate,
+      replacementSize: size,
+      minOrderSize,
+      policySchemaVersion: snapshot.policy.version,
+      policyControlRevision: snapshot.controlRevision!,
+      activatedAtUtc: window.activatedAtUtc,
+      expiresAtUtc: window.expiresAtUtc,
+    });
     if (
-      !this.deps.orderRepo.markMakerCaptureRepriceReady?.(intent.intentId, candidate.price, size)
+      !this.deps.orderRepo.markMakerCaptureRepriceReady?.(
+        intent.intentId,
+        candidate.price,
+        size,
+        preparedProof,
+      )
     ) {
       return (
         this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(intent.lifecycleSignalId) ??
         null
       );
     }
-    return { ...intent, status: "ready", candidatePrice: candidate.price, replacementSize: size };
+    return {
+      ...intent,
+      status: "ready",
+      candidatePrice: candidate.price,
+      replacementSize: size,
+      proof: { ...intent.proof!, prepared: preparedProof },
+    };
   }
 
   private captureIntentState(intent: MakerCaptureRepriceIntent, predecessor: Order, now: number) {
@@ -526,13 +595,17 @@ export class EntryLifecycleModule implements RuntimeModule {
       !frozenWindowMatches(root, window.activatedAtUtc, window.expiresAtUtc)
     )
       return null;
-    return { origin, usage };
+    return { origin, usage, snapshot, window };
   }
 
   private async publishCaptureSignal(
     intent: MakerCaptureRepriceIntent,
     predecessor: Order,
   ): Promise<void> {
+    if (!this.captureIntentProofValid(intent)) {
+      this.failCaptureIntent(intent, "proof-invalid-or-incomplete");
+      return;
+    }
     if (
       intent.candidatePrice == null ||
       intent.replacementSize == null ||
@@ -605,6 +678,10 @@ export class EntryLifecycleModule implements RuntimeModule {
     intent: MakerCaptureRepriceIntent,
     predecessor: Order,
   ): Promise<void> {
+    if (!this.captureIntentProofValid(intent)) {
+      this.failCaptureIntent(intent, "proof-invalid-or-incomplete");
+      return;
+    }
     if (!this.captureIntentState(intent, predecessor, this.now())) {
       this.failCaptureIntent(intent, "policy-or-lineage-drift");
       return;
@@ -682,6 +759,26 @@ export class EntryLifecycleModule implements RuntimeModule {
   private completeCaptureIntent(intent: MakerCaptureRepriceIntent): void {
     this.deps.orderRepo.markMakerCaptureRepriceTerminal?.(intent.intentId, "completed");
     this.captureSignalsPublished.delete(intent.lifecycleSignalId);
+  }
+
+  private captureIntentProofValid(intent: MakerCaptureRepriceIntent): boolean {
+    const proof = parseMakerCaptureRepriceProofV1(intent.proof);
+    if (!proof) return false;
+    if (intent.status === "cancel_pending") return proof.prepared === null && proof.submit === null;
+    if (intent.status === "ready") return proof.prepared !== null && proof.submit === null;
+    if (intent.status === "submitted" || intent.status === "completed") {
+      const expectedClientOrderId = buildClientOrderId({
+        signalId: intent.lifecycleSignalId,
+        tokenId: intent.tokenId,
+        side: "buy",
+      });
+      return (
+        proof.prepared !== null &&
+        proof.submit?.childOrderId === String(intent.childOrderId) &&
+        proof.submit.clientOrderId === String(expectedClientOrderId)
+      );
+    }
+    return true;
   }
 
   private capturePolicySnapshot() {

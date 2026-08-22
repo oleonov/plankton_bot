@@ -500,6 +500,40 @@ describe("ExecutionModule", () => {
         (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls.map(([order]) => order.orderId),
       ).size,
     ).toBe(1);
+
+    const effects: string[] = [];
+    internal.makerCaptureFreshBookRejection = vi.fn(async () => ({ ok: true, proof: {} }));
+    orderRepo.markMakerCaptureRepriceSubmitProof = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        effects.push("proof");
+        return true;
+      })
+      .mockImplementationOnce(() => {
+        effects.push("proof-rejected");
+        return false;
+      });
+    (gateway.submitPreparedOrder as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      effects.push("gateway");
+      return { kind: "accepted", orderId: "prepared-ord-1" };
+    });
+    const retry = (suffix: string) => ({
+      ...command,
+      commandId: createCommandId(`maker-capture-place:${suffix}`),
+      clientOrderId: `maker-capture-client-${suffix}` as ClientOrderId,
+    });
+    predecessorRemainingShares = 2;
+    child = null;
+    intent = { ...intent, status: "ready", childOrderId: null };
+    await bus.publish("PlaceOrderRequested", { command: retry("proof-ok"), timestamp: Date.now() });
+    child = null;
+    intent = { ...intent, status: "ready", childOrderId: null };
+    await bus.publish("PlaceOrderRequested", {
+      command: retry("proof-cas-fail"),
+      timestamp: Date.now(),
+    });
+    expect(effects).toEqual(["proof", "gateway", "proof-rejected"]);
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(1);
     await mod.stop();
   });
 

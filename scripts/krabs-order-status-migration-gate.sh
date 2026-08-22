@@ -31,12 +31,14 @@ expected_columns=[
     [9,'replacement_size','REAL',0,None,0],
     [10,'child_order_id','TEXT',0,None,0],
     [11,'failure','TEXT',0,None,0],
-    [12,'created_at','TEXT',1,None,0],
-    [13,'updated_at','TEXT',1,None,0],
+    [12,'proof_json','TEXT',1,None,0],
+    [13,'created_at','TEXT',1,None,0],
+    [14,'updated_at','TEXT',1,None,0],
 ]
 expected_checks=sorted([
     "replacement_indexbetween1and5",
     "statusin('cancel_pending','ready','submitted','completed','failed')",
+    "json_valid(proof_json)",
 ])
 expected_indexes=[
     {'name':None,'unique':True,'origin':'pk','partial':False,'keys':[['intent_id',0,'BINARY']]},

@@ -8,6 +8,8 @@ import type {
   MakerCaptureRepriceIntentStatus,
   MakerCaptureChainUsage,
   MakerCaptureLineageV1,
+  MakerCaptureBookDecisionProofV1,
+  MakerCaptureSubmitProofV1,
 } from "@krabs/domain";
 import { nowIso } from "../db-timestamp.js";
 import type {
@@ -24,6 +26,7 @@ import {
   createConditionId,
   createPositionId,
   createBotRunId,
+  parseMakerCaptureRepriceProofV1,
 } from "@krabs/domain";
 
 export class SqliteOrderRepository implements OrderRepository {
@@ -296,13 +299,16 @@ export class SqliteOrderRepository implements OrderRepository {
   }
 
   claimMakerCaptureRepriceIntent(intent: MakerCaptureRepriceIntent): boolean {
+    const proof = parseMakerCaptureRepriceProofV1(intent.proof);
+    if (!proof || proof.prepared !== null || proof.submit !== null) return false;
+    const proofJson = JSON.stringify(proof);
     const result = this.db
       .prepare(
         `INSERT OR IGNORE INTO maker_capture_reprice_intents
          (intent_id, predecessor_order_id, lifecycle_signal_id, root_order_id, token_id,
           condition_id, replacement_index, status, candidate_price, replacement_size,
-          child_order_id, failure, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'cancel_pending', NULL, NULL, NULL, NULL, ?, ?)`,
+          child_order_id, failure, proof_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'cancel_pending', NULL, NULL, NULL, NULL, ?, ?, ?)`,
       )
       .run(
         intent.intentId,
@@ -312,6 +318,7 @@ export class SqliteOrderRepository implements OrderRepository {
         intent.tokenId,
         intent.conditionId,
         intent.replacementIndex,
+        proofJson,
         intent.createdAt,
         intent.updatedAt,
       );
@@ -348,28 +355,90 @@ export class SqliteOrderRepository implements OrderRepository {
     intentId: string,
     candidatePrice: number,
     replacementSize: number,
+    preparedProof: MakerCaptureBookDecisionProofV1,
   ): boolean {
+    const current = this.readMakerCaptureProofRow(intentId);
+    const proof = parseMakerCaptureRepriceProofJson(current?.proof_json);
+    const nextProof = parseMakerCaptureRepriceProofV1({
+      ...proof,
+      prepared: preparedProof,
+    });
+    if (
+      !current ||
+      current.status !== "cancel_pending" ||
+      !proof ||
+      proof.prepared !== null ||
+      proof.submit !== null ||
+      !nextProof?.prepared ||
+      nextProof.prepared.candidatePrice !== candidatePrice ||
+      nextProof.prepared.replacementSize !== replacementSize
+    )
+      return false;
+    const nextProofJson = JSON.stringify(nextProof);
     return (
       this.db
         .prepare(
           `UPDATE maker_capture_reprice_intents
-           SET status = 'ready', candidate_price = ?, replacement_size = ?, updated_at = ?
-           WHERE intent_id = ? AND status = 'cancel_pending'`,
+           SET status = 'ready', candidate_price = ?, replacement_size = ?, proof_json = ?,
+               updated_at = ?
+           WHERE intent_id = ? AND status = 'cancel_pending' AND candidate_price IS NULL
+             AND replacement_size IS NULL AND child_order_id IS NULL AND proof_json = ?`,
         )
-        .run(candidatePrice, replacementSize, nowIso(), intentId).changes === 1
+        .run(candidatePrice, replacementSize, nextProofJson, nowIso(), intentId, current.proof_json)
+        .changes === 1
     );
   }
 
   markMakerCaptureRepriceSubmitted(intentId: string, childOrderId: OrderId): boolean {
+    const current = this.readMakerCaptureProofRow(intentId);
+    const proof = parseMakerCaptureRepriceProofJson(current?.proof_json);
+    if (!current || current.status !== "ready" || !proof?.prepared || proof.submit !== null)
+      return false;
     return (
       this.db
         .prepare(
           `UPDATE maker_capture_reprice_intents
            SET status = 'submitted', child_order_id = ?, updated_at = ?
-           WHERE intent_id = ? AND status IN ('ready', 'submitted')
-             AND (child_order_id IS NULL OR child_order_id = ?)`,
+           WHERE intent_id = ? AND status = 'ready' AND child_order_id IS NULL AND proof_json = ?`,
         )
-        .run(childOrderId, nowIso(), intentId, childOrderId).changes === 1
+        .run(childOrderId, nowIso(), intentId, current.proof_json).changes === 1
+    );
+  }
+
+  markMakerCaptureRepriceSubmitProof(
+    intentId: string,
+    childOrderId: OrderId,
+    clientOrderId: string,
+    submitProof: MakerCaptureSubmitProofV1,
+  ): boolean {
+    const current = this.readMakerCaptureProofRow(intentId);
+    const proof = parseMakerCaptureRepriceProofJson(current?.proof_json);
+    const nextProof = parseMakerCaptureRepriceProofV1({ ...proof, submit: submitProof });
+    const submit = nextProof?.submit;
+    if (
+      !current ||
+      current.status !== "submitted" ||
+      current.child_order_id !== String(childOrderId) ||
+      current.child_client_order_id !== clientOrderId ||
+      !proof?.prepared ||
+      proof.submit !== null ||
+      !submit ||
+      submit.childOrderId !== String(childOrderId) ||
+      submit.clientOrderId !== clientOrderId ||
+      submit.candidatePrice !== current.candidate_price ||
+      submit.replacementSize !== current.replacement_size
+    )
+      return false;
+    const nextProofJson = JSON.stringify(nextProof);
+    return (
+      this.db
+        .prepare(
+          `UPDATE maker_capture_reprice_intents
+           SET proof_json = ?, updated_at = ?
+           WHERE intent_id = ? AND status = 'submitted' AND child_order_id = ?
+             AND proof_json = ?`,
+        )
+        .run(nextProofJson, nowIso(), intentId, childOrderId, current.proof_json).changes === 1
     );
   }
 
@@ -497,6 +566,26 @@ export class SqliteOrderRepository implements OrderRepository {
     return row ? rowToMakerCaptureIntent(row) : null;
   }
 
+  private readMakerCaptureProofRow(intentId: string):
+    | {
+        status: string;
+        candidate_price: number | null;
+        replacement_size: number | null;
+        child_order_id: string | null;
+        child_client_order_id: string | null;
+        proof_json: string;
+      }
+    | undefined {
+    return this.db
+      .prepare(
+        `SELECT i.status, i.candidate_price, i.replacement_size, i.child_order_id, i.proof_json,
+                o.client_order_id AS child_client_order_id
+         FROM maker_capture_reprice_intents AS i
+         LEFT JOIN orders AS o ON o.order_id = i.child_order_id WHERE i.intent_id = ?`,
+      )
+      .get(intentId) as ReturnType<SqliteOrderRepository["readMakerCaptureProofRow"]>;
+  }
+
   private findMakerCaptureIntentsForToken(tokenId: TokenId): MakerCaptureRepriceIntent[] {
     return (
       this.db
@@ -568,9 +657,19 @@ function rowToMakerCaptureIntent(row: Record<string, unknown>): MakerCaptureRepr
     replacementSize: (row.replacement_size as number | null) ?? null,
     childOrderId: row.child_order_id ? createOrderId(row.child_order_id as string) : null,
     failure: (row.failure as string | null) ?? null,
+    proof: parseMakerCaptureRepriceProofJson(row.proof_json),
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
+}
+
+function parseMakerCaptureRepriceProofJson(raw: unknown) {
+  if (typeof raw !== "string") return null;
+  try {
+    return parseMakerCaptureRepriceProofV1(JSON.parse(raw));
+  } catch {
+    return null;
+  }
 }
 
 function parseMakerCaptureLineage(order: Order): MakerCaptureLineageV1 | null {

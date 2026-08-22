@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS maker_capture_reprice_intents (
   replacement_size      REAL,
   child_order_id        TEXT UNIQUE,
   failure               TEXT,
+  proof_json            TEXT NOT NULL CHECK (json_valid(proof_json)),
   created_at            TEXT NOT NULL,
   updated_at            TEXT NOT NULL
 );

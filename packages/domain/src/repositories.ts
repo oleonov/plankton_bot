@@ -38,6 +38,7 @@ import type {
   AlgoTokenModeState,
   OrderPriceCooldown,
   SettlementRecord,
+  MarketBookSource,
 } from "./types.js";
 import type { TradingCalendarException, TradingCalendarMetadata } from "./effective-resolution.js";
 
@@ -344,8 +345,15 @@ export interface OrderRepository {
     intentId: string,
     candidatePrice: number,
     replacementSize: number,
+    proof: MakerCaptureBookDecisionProofV1,
   ): boolean;
   markMakerCaptureRepriceSubmitted?(intentId: string, childOrderId: OrderId): boolean;
+  markMakerCaptureRepriceSubmitProof?(
+    intentId: string,
+    childOrderId: OrderId,
+    clientOrderId: string,
+    proof: MakerCaptureSubmitProofV1,
+  ): boolean;
   markMakerCaptureRepriceTerminal?(
     intentId: string,
     status: "completed" | "failed",
@@ -377,6 +385,201 @@ export interface MakerCaptureRepriceIntent {
   createdAt: string;
   updatedAt: string;
   failure: string | null;
+  proof: MakerCaptureRepriceProofV1 | null;
+}
+
+export interface MakerCaptureRepriceProofV1 {
+  readonly version: 1;
+  readonly trigger: MakerCaptureTriggerProofV1;
+  readonly prepared: MakerCaptureBookDecisionProofV1 | null;
+  readonly submit: MakerCaptureSubmitProofV1 | null;
+}
+
+export interface MakerCaptureTriggerProofV1 {
+  readonly eventTimestampMs: number;
+  readonly evaluatedAtMs: number;
+  readonly bestBid: number;
+  readonly bestAsk: number | null;
+  readonly tickSize: number;
+  readonly bookSource: MarketBookSource | null;
+  readonly policySchemaVersion: number;
+  readonly policyControlRevision: number;
+  readonly activatedAtUtc: string;
+  readonly expiresAtUtc: string;
+  readonly originalSuggestedPrice: number;
+  readonly entryPriceCeiling: number;
+  readonly rootNotionalUsdc: number;
+  readonly chainFilledUsdc: number;
+  readonly predecessorRemainingShares: number;
+}
+
+export interface MakerCaptureBookDecisionProofV1 {
+  readonly evaluatedAtMs: number;
+  readonly snapshotTs: number;
+  readonly cachedAtMs: number;
+  readonly sourcePolledAtMs: number;
+  readonly sourceKind: "rest";
+  readonly bookSource: "clob";
+  readonly tickSize: number;
+  readonly predecessorPrice: number;
+  readonly predecessorRemainingShares: number;
+  readonly predecessorLevelBookShares: number | null;
+  readonly predecessorSharesSubtracted: number;
+  readonly predecessorLevelExternalShares: number | null;
+  readonly externalBestBid: number;
+  readonly externalBestAsk: number;
+  readonly originalSuggestedPrice: number;
+  readonly entryPriceCeiling: number;
+  readonly rootNotionalUsdc: number;
+  readonly chainFilledUsdc: number;
+  readonly rootRemainingUsdc: number;
+  readonly candidatePrice: number;
+  readonly replacementSize: number;
+  readonly minOrderSize: number | null;
+  readonly policySchemaVersion: number;
+  readonly policyControlRevision: number;
+  readonly activatedAtUtc: string;
+  readonly expiresAtUtc: string;
+}
+
+export interface MakerCaptureSubmitProofV1 extends MakerCaptureBookDecisionProofV1 {
+  readonly childOrderId: string;
+  readonly clientOrderId: string;
+}
+
+export function parseMakerCaptureRepriceProofV1(value: unknown): MakerCaptureRepriceProofV1 | null {
+  if (!exactRecord(value, ["prepared", "submit", "trigger", "version"]) || value.version !== 1)
+    return null;
+  const trigger = parseMakerCaptureTriggerProofV1(value.trigger);
+  const prepared =
+    value.prepared === null ? null : parseMakerCaptureBookProof(value.prepared, false);
+  const submit = value.submit === null ? null : parseMakerCaptureBookProof(value.submit, true);
+  if (!trigger || (value.prepared !== null && !prepared) || (value.submit !== null && !submit))
+    return null;
+  return { version: 1, trigger, prepared, submit };
+}
+
+function parseMakerCaptureBookProof(
+  value: unknown,
+  submit: false,
+): MakerCaptureBookDecisionProofV1 | null;
+function parseMakerCaptureBookProof(value: unknown, submit: true): MakerCaptureSubmitProofV1 | null;
+function parseMakerCaptureBookProof(
+  value: unknown,
+  submit: boolean,
+): MakerCaptureBookDecisionProofV1 | MakerCaptureSubmitProofV1 | null {
+  const keys = submit
+    ? [...MAKER_CAPTURE_BOOK_PROOF_KEYS, "childOrderId", "clientOrderId"]
+    : MAKER_CAPTURE_BOOK_PROOF_KEYS;
+  if (!exactRecord(value, keys)) return null;
+  if (
+    (submit && (!nonempty(value.childOrderId) || !nonempty(value.clientOrderId))) ||
+    value.sourceKind !== "rest" ||
+    value.bookSource !== "clob" ||
+    !allFinite(value, MAKER_CAPTURE_BOOK_FINITE_KEYS) ||
+    !allPositive(value, MAKER_CAPTURE_BOOK_POSITIVE_KEYS) ||
+    !allNonnegative(value, MAKER_CAPTURE_BOOK_NONNEGATIVE_KEYS) ||
+    !nullableNonnegative(value.predecessorLevelBookShares) ||
+    !nullableNonnegative(value.predecessorLevelExternalShares) ||
+    !(value.minOrderSize === null || positive(value.minOrderSize)) ||
+    !safeNonnegativeInteger(value.policyControlRevision) ||
+    !safePositiveInteger(value.policySchemaVersion) ||
+    !isoTimestamp(value.activatedAtUtc) ||
+    !isoTimestamp(value.expiresAtUtc) ||
+    Number(value.chainFilledUsdc) > Number(value.rootNotionalUsdc) + 1e-7 ||
+    Math.abs(
+      Number(value.rootRemainingUsdc) -
+        Math.max(0, Number(value.rootNotionalUsdc) - Number(value.chainFilledUsdc)),
+    ) > 1e-7 ||
+    Number(value.candidatePrice) + 1e-9 < Number(value.predecessorPrice) + Number(value.tickSize) ||
+    Number(value.candidatePrice) >= Number(value.externalBestAsk) - 1e-9 ||
+    Number(value.replacementSize) > Number(value.predecessorRemainingShares) + 1e-7 ||
+    Number(value.replacementSize) * Number(value.candidatePrice) >
+      Number(value.rootRemainingUsdc) + 1e-7
+  )
+    return null;
+  return value as unknown as MakerCaptureBookDecisionProofV1 | MakerCaptureSubmitProofV1;
+}
+
+function parseMakerCaptureTriggerProofV1(value: unknown): MakerCaptureTriggerProofV1 | null {
+  if (!exactRecord(value, MAKER_CAPTURE_TRIGGER_KEYS)) return null;
+  const validSources: readonly (MarketBookSource | null)[] = [
+    "clob",
+    "gamma",
+    "gamma-fallback",
+    "simulation",
+    "unknown",
+    null,
+  ];
+  if (
+    !allFinite(value, PROOF_TRIGGER_FINITE_KEYS) ||
+    !allPositive(value, PROOF_TRIGGER_POSITIVE_KEYS) ||
+    !(value.bestAsk === null || positive(value.bestAsk)) ||
+    !allNonnegative(value, PROOF_TRIGGER_NONNEGATIVE_KEYS) ||
+    !safePositiveInteger(value.policySchemaVersion) ||
+    !safeNonnegativeInteger(value.policyControlRevision) ||
+    !validSources.includes(value.bookSource as MarketBookSource | null) ||
+    !isoTimestamp(value.activatedAtUtc) ||
+    !isoTimestamp(value.expiresAtUtc)
+  )
+    return null;
+  return value as unknown as MakerCaptureTriggerProofV1;
+}
+
+const proofKeys = (value: string) => value.split(" ");
+const MAKER_CAPTURE_TRIGGER_KEYS = proofKeys(
+  "activatedAtUtc bestAsk bestBid bookSource chainFilledUsdc entryPriceCeiling evaluatedAtMs eventTimestampMs expiresAtUtc originalSuggestedPrice policyControlRevision policySchemaVersion predecessorRemainingShares rootNotionalUsdc tickSize",
+);
+const MAKER_CAPTURE_BOOK_PROOF_KEYS = proofKeys(
+  "activatedAtUtc bookSource cachedAtMs candidatePrice chainFilledUsdc entryPriceCeiling evaluatedAtMs expiresAtUtc externalBestAsk externalBestBid minOrderSize originalSuggestedPrice policyControlRevision policySchemaVersion predecessorLevelBookShares predecessorLevelExternalShares predecessorPrice predecessorRemainingShares predecessorSharesSubtracted replacementSize rootNotionalUsdc rootRemainingUsdc snapshotTs sourceKind sourcePolledAtMs tickSize",
+);
+const MAKER_CAPTURE_BOOK_FINITE_KEYS = proofKeys(
+  "evaluatedAtMs snapshotTs cachedAtMs sourcePolledAtMs",
+);
+const MAKER_CAPTURE_BOOK_POSITIVE_KEYS = proofKeys(
+  "tickSize predecessorPrice externalBestBid externalBestAsk originalSuggestedPrice entryPriceCeiling rootNotionalUsdc candidatePrice replacementSize",
+);
+const MAKER_CAPTURE_BOOK_NONNEGATIVE_KEYS = proofKeys(
+  "predecessorRemainingShares predecessorSharesSubtracted chainFilledUsdc rootRemainingUsdc",
+);
+const PROOF_TRIGGER_FINITE_KEYS = proofKeys("eventTimestampMs evaluatedAtMs");
+const PROOF_TRIGGER_POSITIVE_KEYS = proofKeys(
+  "bestBid tickSize originalSuggestedPrice entryPriceCeiling rootNotionalUsdc",
+);
+const PROOF_TRIGGER_NONNEGATIVE_KEYS = proofKeys("chainFilledUsdc predecessorRemainingShares");
+
+function exactRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+function positive(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+function nullableNonnegative(value: unknown): boolean {
+  return value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0);
+}
+function allFinite(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every((key) => typeof value[key] === "number" && Number.isFinite(value[key]));
+}
+function allPositive(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every((key) => positive(value[key]));
+}
+function allNonnegative(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every((key) => nullableNonnegative(value[key]) && value[key] !== null);
+}
+function safePositiveInteger(value: unknown): boolean {
+  return Number.isSafeInteger(value) && Number(value) > 0;
+}
+function safeNonnegativeInteger(value: unknown): boolean {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+function nonempty(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+function isoTimestamp(value: unknown): value is string {
+  return nonempty(value) && Number.isFinite(Date.parse(value));
 }
 
 export interface MakerCaptureChainUsage {

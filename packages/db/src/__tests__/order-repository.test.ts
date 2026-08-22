@@ -12,7 +12,62 @@ import {
   createPositionId,
   createBotRunId,
 } from "@krabs/domain";
-import type { Order, ClientOrderId, MakerCaptureRepriceIntent } from "@krabs/domain";
+import type {
+  Order,
+  ClientOrderId,
+  MakerCaptureBookDecisionProofV1,
+  MakerCaptureRepriceIntent,
+} from "@krabs/domain";
+
+const triggerProof = {
+  eventTimestampMs: 1,
+  evaluatedAtMs: 1,
+  bestBid: 0.1,
+  bestAsk: 0.2,
+  tickSize: 0.01,
+  bookSource: "clob" as const,
+  policySchemaVersion: 1,
+  policyControlRevision: 7,
+  activatedAtUtc: "2026-08-20T10:00:00.000Z",
+  expiresAtUtc: "2026-08-21T10:00:00.000Z",
+  originalSuggestedPrice: 0.2,
+  entryPriceCeiling: 0.2,
+  rootNotionalUsdc: 1,
+  chainFilledUsdc: 0,
+  predecessorRemainingShares: 10,
+};
+
+function bookProof(overrides: Partial<MakerCaptureBookDecisionProofV1> = {}) {
+  return {
+    evaluatedAtMs: 2,
+    snapshotTs: 2,
+    cachedAtMs: 2,
+    sourcePolledAtMs: 2,
+    sourceKind: "rest" as const,
+    bookSource: "clob" as const,
+    tickSize: 0.01,
+    predecessorPrice: 0.1,
+    predecessorRemainingShares: 10,
+    predecessorLevelBookShares: 12,
+    predecessorSharesSubtracted: 10,
+    predecessorLevelExternalShares: 2,
+    externalBestBid: 0.1,
+    externalBestAsk: 0.2,
+    originalSuggestedPrice: 0.2,
+    entryPriceCeiling: 0.2,
+    rootNotionalUsdc: 1,
+    chainFilledUsdc: 0,
+    rootRemainingUsdc: 1,
+    candidatePrice: 0.11,
+    replacementSize: 8,
+    minOrderSize: 1,
+    policySchemaVersion: 1,
+    policyControlRevision: 7,
+    activatedAtUtc: triggerProof.activatedAtUtc,
+    expiresAtUtc: triggerProof.expiresAtUtc,
+    ...overrides,
+  } satisfies MakerCaptureBookDecisionProofV1;
+}
 
 let conn: DbConnection;
 let tmpDir: string;
@@ -56,6 +111,7 @@ function makeIntent(overrides: Partial<MakerCaptureRepriceIntent> = {}): MakerCa
     replacementSize: null,
     childOrderId: null,
     failure: null,
+    proof: { version: 1, trigger: triggerProof, prepared: null, submit: null },
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -698,11 +754,43 @@ describe("SqliteOrderRepository", () => {
       intentId: intent.intentId,
       status: "cancel_pending",
     });
-    expect(repo.markMakerCaptureRepriceReady(intent.intentId, 0.11, 8)).toBe(true);
-    expect(repo.markMakerCaptureRepriceReady(intent.intentId, 0.12, 7)).toBe(false);
+    expect(repo.markMakerCaptureRepriceReady(intent.intentId, 0.11, 8, bookProof())).toBe(true);
+    expect(repo.markMakerCaptureRepriceReady(intent.intentId, 0.12, 7, bookProof())).toBe(false);
     expect(
       repo.markMakerCaptureRepriceSubmitted(intent.intentId, createOrderId("capture-child")),
     ).toBe(true);
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("capture-child"),
+        clientOrderId: "capture-child-client" as ClientOrderId,
+      }),
+    );
+    expect(
+      repo.markMakerCaptureRepriceSubmitProof(
+        intent.intentId,
+        createOrderId("capture-child"),
+        "capture-child-client",
+        {
+          ...bookProof(),
+          childOrderId: "capture-child",
+          clientOrderId: "capture-child-client",
+        },
+      ),
+    ).toBe(true);
+    expect(
+      repo.markMakerCaptureRepriceSubmitProof(
+        intent.intentId,
+        createOrderId("capture-child"),
+        "capture-child-client",
+        { ...bookProof(), childOrderId: "capture-child", clientOrderId: "capture-child-client" },
+      ),
+    ).toBe(false);
+    conn.close();
+    conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
+    repo = new SqliteOrderRepository(conn.db);
+    expect(
+      repo.findMakerCaptureRepriceIntentBySignal(intent.lifecycleSignalId)?.proof?.submit,
+    ).toMatchObject({ childOrderId: "capture-child", clientOrderId: "capture-child-client" });
     expect(repo.markMakerCaptureRepriceTerminal(intent.intentId, "completed")).toBe(true);
     expect(repo.markMakerCaptureRepriceTerminal(intent.intentId, "failed", "late")).toBe(false);
     expect(repo.findRecoverableMakerCaptureRepriceIntents()).toEqual([]);
@@ -766,7 +854,7 @@ describe("SqliteOrderRepository", () => {
     );
     const intent = makeIntent();
     repo.claimMakerCaptureRepriceIntent(intent);
-    repo.markMakerCaptureRepriceReady(intent.intentId, 0.11, 8);
+    repo.markMakerCaptureRepriceReady(intent.intentId, 0.11, 8, bookProof());
     repo.markMakerCaptureRepriceSubmitted(intent.intentId, createOrderId("capture-child"));
     const insertFill = conn.db.prepare(
       `INSERT INTO fills

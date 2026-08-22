@@ -82,7 +82,7 @@ describe("maker capture reprice helper", () => {
     });
 
     expect(held).toEqual({ ok: false, reason: "no-valid-move" });
-    expect(moved).toEqual({ ok: true, price: 0.32, bestBid: 0.31, bestAsk: 0.34 });
+    expect(moved).toMatchObject({ ok: true, price: 0.32, bestBid: 0.31, bestAsk: 0.34 });
   });
 
   it("fails closed for missing or stale REST books", async () => {
