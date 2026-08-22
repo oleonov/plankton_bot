@@ -244,11 +244,62 @@ describe("SqliteOrderRepository", () => {
     });
   });
 
-  it("refuses identity replacement unless the rejected order is unfilled and client-stable", () => {
-    repo.save(makeOrder({ status: "pending" }));
-    expect(() => repo.replacePendingIdentity(createOrderId("ord-1"), makeOrder())).toThrow(
-      "requires rejected order",
+  it("replaces only pending or rejected unfilled orders with a stable client identity", () => {
+    repo.save(makeOrder());
+    repo.replacePendingIdentity(
+      createOrderId("ord-1"),
+      makeOrder({ orderId: createOrderId("ord-2"), exchangeOrderId: "ord-2" }),
     );
+    expect(repo.findById(createOrderId("ord-1"))).toBeNull();
+    expect(repo.findById(createOrderId("ord-2"))).toMatchObject({ status: "pending" });
+
+    repo.updateStatus(createOrderId("ord-2"), "open");
+    expect(() =>
+      repo.replacePendingIdentity(
+        createOrderId("ord-2"),
+        makeOrder({ orderId: createOrderId("ord-3") }),
+      ),
+    ).toThrow("requires pending/rejected order");
+
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("client-source"),
+        clientOrderId: "client-stable" as ClientOrderId,
+      }),
+    );
+    expect(() =>
+      repo.replacePendingIdentity(
+        createOrderId("client-source"),
+        makeOrder({
+          orderId: createOrderId("client-target"),
+          clientOrderId: "different-client" as ClientOrderId,
+        }),
+      ),
+    ).toThrow("cannot change client order identity");
+
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("filled-source"),
+        clientOrderId: "filled-stable" as ClientOrderId,
+        status: "rejected",
+      }),
+    );
+    conn.db
+      .prepare(
+        `INSERT INTO fills
+         (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc)
+         VALUES ('filled-source-fill', 'filled-source', 'tok-1', 'cond-1', 'buy', 0.55, 1, 0.55)`,
+      )
+      .run();
+    expect(() =>
+      repo.replacePendingIdentity(
+        createOrderId("filled-source"),
+        makeOrder({
+          orderId: createOrderId("filled-target"),
+          clientOrderId: "filled-stable" as ClientOrderId,
+        }),
+      ),
+    ).toThrow("refused for filled order");
   });
 
   it("updates metadata by order_id and returns the persisted order", () => {
