@@ -82,6 +82,7 @@ import {
 import type { EvalContext } from "@krabs/domain";
 import type { RuntimeControl } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import { isExitRecoveryFencedPredecessor } from "../execution/reservation-utils.js";
 import {
   classifyAddAgeBucket,
   classifyAddPriceChangeBucket,
@@ -2276,6 +2277,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     for (const order of repo.findByTokenId(tokenId)) {
       if (order.side !== "sell") continue;
       if (order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID) continue;
+      if (isExitRecoveryFencedPredecessor(order)) continue;
       if (order.status === "rejected") continue;
       const bounceRung = order.metadata?.bounceRung as
         | {

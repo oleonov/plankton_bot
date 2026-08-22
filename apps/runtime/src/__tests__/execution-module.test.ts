@@ -9,6 +9,7 @@ import {
   createLotId,
   createFillId,
   DEFAULT_EXECUTION_POLICY,
+  BOUNCE_EXIT_TARGET_RULE_ID,
   ExchangeErrorCode,
   GATE_ENTRY_RULE_ID,
   S1_LADDER_RULE_ID,
@@ -41,8 +42,11 @@ import type {
   RiskEventRepository,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
+import { bootstrapDatabase, SqliteFillRepository, SqliteOrderRepository } from "@krabs/db";
 import { buildClientOrderId } from "@krabs/domain/node";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
+import { ExchangeStateStore } from "../modules/execution/exchange-state-store.js";
+import { buildReservationSnapshot } from "../modules/execution/reservation-utils.js";
 import { buildMakerCaptureRepriceIdentity } from "../maker-capture-reprice.js";
 import type { MakerBuyFastCancel } from "../modules/execution/maker-buy-fast-cancel.js";
 import { LIFECYCLE_STOP_WAIT_MS } from "../lifecycle-chain.js";
@@ -7058,5 +7062,445 @@ describe("ExecutionModule", () => {
       // order-2 admitted (not falsely rejected by a double-counted order-1).
       expect(rejected).toHaveLength(0);
     });
+  });
+
+  describe("targeted missing bounce-exit recovery", () => {
+    type RecoveryFault =
+      | "asset-order"
+      | "exchange-fill"
+      | "post-fence-reappearance"
+      | "prepared-transient"
+      | "metadata-cas"
+      | "child-reject"
+      | "wrong-child-price"
+      | "runtime-active"
+      | "maker-active"
+      | "predecessor-oversize"
+      | "fifo-mismatch"
+      | "wallet-absent"
+      | "wallet-stale"
+      | "wallet-mismatch"
+      | "newer-token-fill"
+      | "older-token-fill"
+      | "newer-other-token-fill"
+      | "lane-newer-token-fill";
+
+    async function fixture(fault?: RecoveryFault, predecessorFraction = 1) {
+      const conn = bootstrapDatabase(":memory:");
+      const orders = new SqliteOrderRepository(conn.db);
+      const fills = new SqliteFillRepository(conn.db);
+      const position = makePosition({
+        size: 5,
+        avgEntryPrice: 0.2,
+        costBasisUsdc: 1,
+        currentValueUsdc: 3,
+        exitOwner: "bounce",
+      });
+      const predecessor = openSellAt(0.3, {
+        orderId: createOrderId("missing-bounce"),
+        exchangeOrderId: "missing-exchange-order",
+        clientOrderId: "plk_missing_bounce" as ClientOrderId,
+        positionId: position.positionId,
+        size: fault === "predecessor-oversize" ? 5.1 : 5 * predecessorFraction,
+        sizeUsdc: fault === "predecessor-oversize" ? 1.53 : 1.5 * predecessorFraction,
+        postOnly: true,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        signalId: "bounce-signal",
+        metadata: {
+          bounceRung: { ladderId: "ladder-1", rungIndex: 0, originalPositionSize: 5 },
+          marketData: { minOrderSize: 1 },
+        },
+      });
+      orders.save(predecessor);
+      const positionRepo = createMockPositionRepo(position);
+      positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([position]);
+      const inventoryLots = createMockInventoryLotRepo(position);
+      const market = makeNormalizedMarket({ bestBid: 0.2, bestAsk: 0.31, minOrderSize: 1 });
+      const recoveryGateway = createMockGateway();
+      let placed = false;
+      let childCancelled = false;
+      let openReads = 0;
+      let predecessorReads = 0;
+      let submitAttempts = 0;
+      let fillReads = 0;
+      const exchangeOrder = (orderId: string, clientOrderId: string | null): ExchangeOrder => ({
+        orderId,
+        clientOrderId,
+        tokenId: predecessor.tokenId,
+        side: "sell",
+        price: 0.3,
+        sizeTotal: 5,
+        sizeFilled: 0,
+        sizeRemaining: 5,
+        status: "OPEN",
+        createdAt: Date.now(),
+      });
+      (recoveryGateway as any).getOpenOrdersResult = vi.fn(async () => {
+        openReads += 1;
+        if (fault === "prepared-transient" && openReads === 2) {
+          return { ok: false, reason: "transport" };
+        }
+        return {
+          ok: true,
+          data:
+            placed && !childCancelled
+              ? [
+                  exchangeOrder(
+                    "recovery-child-exchange",
+                    orders.findByExchangeOrderId("recovery-child-exchange")?.clientOrderId ?? null,
+                  ),
+                ]
+              : fault === "asset-order"
+                ? [exchangeOrder("foreign-open", null)]
+                : [],
+        };
+      });
+      (recoveryGateway as any).getFillsResult = vi.fn(async () => {
+        fillReads += 1;
+        return {
+          ok: true,
+          data:
+            fault === "exchange-fill"
+              ? [
+                  {
+                    fillId: "predecessor-fill",
+                    orderId: predecessor.exchangeOrderId!,
+                    clientOrderId: predecessor.clientOrderId,
+                    tokenId: predecessor.tokenId,
+                    side: "sell",
+                    price: 0.3,
+                    size: 1,
+                    liquidityRole: "maker",
+                    fee: 0,
+                    feeRateBps: 0,
+                    timestamp: Date.now(),
+                  } satisfies ExchangeFill,
+                ]
+              : (fault === "lane-newer-token-fill" && fillReads >= 6) ||
+                  fault === "newer-token-fill" ||
+                  fault === "older-token-fill" ||
+                  fault === "newer-other-token-fill"
+                ? [
+                    {
+                      fillId: "unrelated-fill",
+                      orderId: "unrelated-order",
+                      clientOrderId: null,
+                      tokenId:
+                        fault === "newer-other-token-fill"
+                          ? createTokenId("other-token")
+                          : predecessor.tokenId,
+                      side: "sell",
+                      price: 0.3,
+                      size: 1,
+                      liquidityRole: "maker",
+                      fee: 0,
+                      feeRateBps: 0,
+                      timestamp:
+                        fault === "older-token-fill" ? Date.now() - 60_000 : Date.now() + 60_000,
+                    } satisfies ExchangeFill,
+                  ]
+                : [],
+        };
+      });
+      (recoveryGateway as any).getOrderResult = vi.fn(async (orderId: string) => {
+        if (orderId === predecessor.exchangeOrderId) {
+          predecessorReads += 1;
+          return {
+            ok: true,
+            data:
+              fault === "post-fence-reappearance" && predecessorReads >= 2
+                ? exchangeOrder(orderId, predecessor.clientOrderId)
+                : null,
+          };
+        }
+        const exact = exchangeOrder(
+          orderId,
+          orders.findByExchangeOrderId(orderId)?.clientOrderId ?? null,
+        );
+        return {
+          ok: true,
+          data: childCancelled
+            ? { ...exact, status: "CANCELLED" as const }
+            : placed
+              ? { ...exact, price: fault === "wrong-child-price" ? 0.31 : exact.price }
+              : null,
+        };
+      });
+      vi.mocked(recoveryGateway.cancelOrder).mockImplementation(async () => {
+        childCancelled = true;
+        return { success: true };
+      });
+      vi.mocked(recoveryGateway.prepareOrder!).mockResolvedValue({
+        orderId: "recovery-child-exchange",
+        __preparedOrderBrand: "PreparedOrder",
+      });
+      vi.mocked(recoveryGateway.submitPreparedOrder!).mockImplementation(async () => {
+        submitAttempts += 1;
+        if (fault === "child-reject" && submitAttempts === 1) {
+          return {
+            kind: "rejected",
+            errorCode: ExchangeErrorCode.Unknown,
+            errorMessage: "rejected",
+            errorDetails: null,
+          };
+        }
+        childCancelled = false;
+        placed = true;
+        return { kind: "accepted", orderId: "recovery-child-exchange" };
+      });
+      if (fault === "metadata-cas") {
+        vi.spyOn(orders, "updateMetadataIfUnchanged").mockReturnValue(null);
+      }
+      const state = new ExchangeStateStore({
+        now: () => Date.now(),
+        snapshotMaxAgeMs: fault === "wallet-stale" ? 1 : 300_000,
+      });
+      if (fault !== "wallet-absent") {
+        state.updateWalletPosition(
+          predecessor.tokenId,
+          fault === "wallet-mismatch" ? 4 : 5,
+          fault === "wallet-stale" ? 1 : Date.now(),
+        );
+      }
+      const recovery = new ExecutionModule({
+        gateway: recoveryGateway,
+        bus: new InProcessEventBus(),
+        marketRepo: { ...createMockMarketRepo(), findByTokenId: vi.fn(() => market) } as any,
+        orderRepo: orders,
+        fillRepo: fills,
+        positionRepo,
+        inventoryLotRepo: inventoryLots,
+        exchangeStateStore: state,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeMode: "live-lite",
+        maxConcurrency: 1,
+        runtimeControl: { isPaused: () => fault !== "runtime-active" },
+        controlDb: {
+          prepare: () => ({
+            get: () =>
+              fault === "runtime-active"
+                ? { runtime_status: "running", paused: 0 }
+                : { runtime_status: "ready_paused", paused: 1 },
+          }),
+        },
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: fault === "maker-active" ? "shadow" : "off",
+          },
+        }),
+      });
+      await recovery.start();
+      if (fault === "fifo-mismatch") {
+        inventoryLots.findOpen = vi
+          .fn()
+          .mockReturnValue(
+            inventoryLots
+              .findByTokenId(position.tokenId)
+              .map((lot) => ({ ...lot, remainingSize: 4 })),
+          );
+      }
+      return { conn, recovery, orders, fills, predecessor, recoveryGateway, state };
+    }
+
+    it("converges through real SQLite, preserves predecessor, and never creates a sibling", async () => {
+      const f = await fixture();
+      try {
+        const result = await f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 7);
+        const recoveryError = `${String(silentLog.error.mock.calls.at(-1)?.[0]?.err ?? "")} ${JSON.stringify(silentLog.warn.mock.calls.slice(-4))}`;
+        expect(result, recoveryError).toEqual({
+          status: "applied",
+          completedAt: expect.any(String),
+        });
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 7),
+        ).resolves.toMatchObject({
+          status: "applied",
+        });
+        const rows = f.orders.findByTokenId(f.predecessor.tokenId);
+        expect(rows).toHaveLength(2);
+        expect(vi.mocked(f.recoveryGateway.submitPreparedOrder!)).toHaveBeenCalledOnce();
+        expect(rows.find((order) => order.orderId === f.predecessor.orderId)).toMatchObject({
+          status: "open",
+          cancelReason: null,
+          metadata: { exitRecoveryFenceV1: { phase: "complete" } },
+        });
+        expect(buildReservationSnapshot(f.orders.findOpen(), f.fills).openSellOrderCount).toBe(1);
+        const invalidFence = {
+          ...f.predecessor,
+          metadata: { exitRecoveryFenceV1: { version: 1 } },
+        };
+        expect(buildReservationSnapshot([invalidFence], f.fills).openSellOrderCount).toBe(1);
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it("keeps the same command pending and restarts from a prepared fence", async () => {
+      const f = await fixture("prepared-transient");
+      try {
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 8),
+        ).resolves.toEqual({
+          status: "deferred",
+        });
+        expect(f.orders.findById(f.predecessor.orderId)?.metadata).toMatchObject({
+          exitRecoveryFenceV1: { phase: "prepared" },
+        });
+
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 8),
+        ).resolves.toMatchObject({
+          status: "applied",
+        });
+        expect(f.orders.findByTokenId(f.predecessor.tokenId)).toHaveLength(2);
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it.each([0.3, 0.4])(
+      "replaces a %s fractional predecessor with the full proven residual",
+      async (fraction) => {
+        const f = await fixture(undefined, fraction);
+        try {
+          await expect(
+            f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 10),
+          ).resolves.toMatchObject({ status: "applied" });
+          const child = f.orders
+            .findByTokenId(f.predecessor.tokenId)
+            .find((order) => order.orderId !== f.predecessor.orderId);
+          expect(child).toMatchObject({
+            size: 5,
+            metadata: {
+              exitRecoveryChildV1: {
+                coverage: "full_active_residual",
+                predecessorShares: 5 * fraction,
+                residualShares: 5,
+              },
+            },
+          });
+        } finally {
+          await f.recovery.stop();
+          f.conn.close();
+        }
+      },
+    );
+
+    it.each([
+      "asset-order",
+      "exchange-fill",
+      "metadata-cas",
+      "runtime-active",
+      "maker-active",
+      "predecessor-oversize",
+      "fifo-mismatch",
+      "wallet-absent",
+      "wallet-stale",
+      "wallet-mismatch",
+      "newer-token-fill",
+    ] as const)("fails closed on %s without mutating predecessor status", async (fault) => {
+      const f = await fixture(fault);
+      try {
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 9),
+        ).resolves.toEqual({
+          status: "rejected",
+        });
+        expect(f.orders.findById(f.predecessor.orderId)).toMatchObject({
+          status: "open",
+          cancelReason: null,
+        });
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it.each(["older-token-fill", "newer-other-token-fill"] as const)(
+      "accepts a fresh wallet despite %s",
+      async (fault) => {
+        const f = await fixture(fault);
+        try {
+          await expect(
+            f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 13),
+          ).resolves.toMatchObject({ status: "applied" });
+        } finally {
+          await f.recovery.stop();
+          f.conn.close();
+        }
+      },
+    );
+
+    it("does not cancel a complete child for transient retry evidence failures", async () => {
+      const f = await fixture();
+      try {
+        await f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 14);
+        f.state.replaceWalletPositionsBatch([]);
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 14),
+        ).resolves.toEqual({ status: "deferred" });
+        f.state.updateWalletPosition(f.predecessor.tokenId, 5);
+        vi.mocked((f.recoveryGateway as any).getOpenOrdersResult).mockResolvedValueOnce({
+          ok: false,
+          reason: "transport",
+        });
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 14),
+        ).resolves.toEqual({ status: "deferred" });
+        expect(f.recoveryGateway.cancelOrder).not.toHaveBeenCalled();
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 14),
+        ).resolves.toMatchObject({ status: "applied" });
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it("blocks a newer same-token fill at the final serialized submit boundary", async () => {
+      const f = await fixture("lane-newer-token-fill");
+      try {
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 15),
+        ).resolves.toEqual({ status: "deferred" });
+        expect(f.recoveryGateway.submitPreparedOrder).not.toHaveBeenCalled();
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it.each(["post-fence-reappearance", "child-reject", "wrong-child-price"] as const)(
+      "defers durable %s failures and cleans up only an exchange child",
+      async (fault) => {
+        const f = await fixture(fault);
+        try {
+          await expect(
+            f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 11),
+          ).resolves.toEqual({ status: "deferred" });
+          if (fault === "wrong-child-price") {
+            expect(f.recoveryGateway.cancelOrder).toHaveBeenCalledWith({
+              orderId: "recovery-child-exchange",
+            });
+            expect(f.recoveryGateway.cancelOrder).toHaveBeenCalledTimes(1);
+            expect(f.recoveryGateway.cancelAllOrders).not.toHaveBeenCalled();
+          }
+          if (fault === "child-reject") {
+            await expect(
+              f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 12),
+            ).resolves.toMatchObject({ status: "applied" });
+            expect(f.recoveryGateway.submitPreparedOrder).toHaveBeenCalledTimes(2);
+          }
+        } finally {
+          await f.recovery.stop();
+          f.conn.close();
+        }
+      },
+    );
   });
 });

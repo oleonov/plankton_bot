@@ -632,7 +632,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
   private async fetchOpenOrders(): Promise<ExchangeOrder[]> {
     const raw = await this.client.getOpenOrders();
     throwIfReturnedError(raw);
-    return extractArrayOrThrow(raw).map((o: Record<string, unknown>) => mapOpenOrder(o));
+    return extractArrayOrThrow(raw).map((row) => {
+      assertReliableOpenOrderRow(row);
+      return mapOpenOrder(row);
+    });
   }
 
   private async fetchFills(sinceMs: number): Promise<ExchangeFill[]> {
@@ -640,9 +643,14 @@ export class LiveExchangeGateway implements ExchangeGateway {
       after: Math.floor(sinceMs / 1000).toString(),
     });
     throwIfReturnedError(raw);
-    return extractArrayOrThrow(raw).flatMap((trade: Record<string, unknown>) =>
-      this.traderAddress ? mapTradeToPersonalFills(trade, this.traderAddress) : [mapTrade(trade)],
-    );
+    return extractArrayOrThrow(raw).flatMap((trade) => {
+      const fills = this.traderAddress
+        ? mapTradeToPersonalFills(trade, this.traderAddress)
+        : [mapTrade(trade)];
+      assertReliableFillRow(trade, fills);
+      if (this.traderAddress) assertAuthenticatedFillRow(trade, fills);
+      return fills;
+    });
   }
 
   private async fetchExactOrder(orderId: string): Promise<ExchangeOrder | null> {
@@ -1975,6 +1983,107 @@ function cancelAcknowledged(raw: unknown, orderId: string): boolean {
     Array.isArray(canceled) &&
     canceled.some((candidate) => typeof candidate === "string" && candidate === orderId)
   );
+}
+
+function requiredText(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function requiredNumber(value: unknown, allowZero = false): boolean {
+  if (typeof value === "string" && value.trim().length === 0) return false;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && (allowZero ? parsed >= 0 : parsed > 0);
+}
+
+function requiredTimestamp(value: unknown): boolean {
+  if (typeof value === "number") return Number.isFinite(value) && value > 0;
+  if (!requiredText(value)) return false;
+  const text = String(value).trim();
+  return (Number.isFinite(Number(text)) && Number(text) > 0) || Number.isFinite(Date.parse(text));
+}
+
+function assertReliableOpenOrderRow(row: Record<string, unknown>): void {
+  const total = Number(row.original_size ?? row.size);
+  const filled = Number(row.size_matched);
+  const side = typeof row.side === "string" ? row.side.toUpperCase() : "";
+  const status = typeof row.status === "string" ? row.status.toUpperCase() : "";
+  if (
+    !requiredText(row.id) ||
+    !requiredText(row.asset_id) ||
+    (side !== "BUY" && side !== "SELL") ||
+    ![
+      "LIVE",
+      "OPEN",
+      "MATCHED",
+      "FILLED",
+      "PARTIALLY_FILLED",
+      "CANCELLED",
+      "CANCELED",
+      "EXPIRED",
+      "INVALID",
+      "REJECTED",
+    ].includes(status) ||
+    !requiredNumber(row.price) ||
+    !requiredNumber(total) ||
+    !requiredNumber(filled, true) ||
+    filled > total ||
+    !requiredTimestamp(row.created_at)
+  ) {
+    throw new FetchParseError("malformed open-order row");
+  }
+}
+
+function assertReliableFillRow(raw: Record<string, unknown>, fills: readonly ExchangeFill[]): void {
+  const rawSide = typeof raw.side === "string" ? raw.side.toUpperCase() : "";
+  if (
+    !requiredText(raw.id) ||
+    !requiredText(raw.asset_id) ||
+    (rawSide !== "BUY" && rawSide !== "SELL") ||
+    !requiredNumber(raw.price) ||
+    !requiredNumber(raw.size) ||
+    !requiredTimestamp(raw.match_time)
+  ) {
+    throw new FetchParseError("malformed fill row");
+  }
+  const makerOrders = Array.isArray(raw.maker_orders)
+    ? (raw.maker_orders as Array<Record<string, unknown>>)
+    : [];
+  for (const fill of fills) {
+    const source =
+      fill.orderId === raw.taker_order_id
+        ? raw
+        : makerOrders.find((order) => order.order_id === fill.orderId);
+    const side = typeof source?.side === "string" ? source.side.toUpperCase() : "";
+    if (
+      !requiredText(fill.fillId) ||
+      !requiredText(fill.orderId) ||
+      !requiredText(String(fill.tokenId)) ||
+      (side !== "BUY" && side !== "SELL") ||
+      !requiredNumber(fill.price) ||
+      !requiredNumber(fill.size) ||
+      !requiredTimestamp(fill.timestamp)
+    ) {
+      throw new FetchParseError("malformed fill row");
+    }
+  }
+}
+
+function assertAuthenticatedFillRow(
+  raw: Record<string, unknown>,
+  fills: readonly ExchangeFill[],
+): void {
+  const traderSide = typeof raw.trader_side === "string" ? raw.trader_side.toUpperCase() : "";
+  if (
+    (traderSide !== "MAKER" && traderSide !== "TAKER") ||
+    (traderSide === "MAKER" &&
+      (!Array.isArray(raw.maker_orders) ||
+        raw.maker_orders.some(
+          (order) => !order || typeof order !== "object" || Array.isArray(order),
+        ))) ||
+    fills.length === 0
+  ) {
+    throw new FetchParseError("malformed authenticated fill row");
+  }
 }
 
 /**

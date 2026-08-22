@@ -141,6 +141,27 @@ function seedExecutionPolicy(policy: Record<string, unknown>): void {
     .run("simulation", JSON.stringify(policy));
 }
 
+function seedRuntimeState(runtimeStatus: string, paused: boolean): void {
+  conn.db.exec(`
+    CREATE TABLE IF NOT EXISTS runtime_control_state (
+      id INTEGER PRIMARY KEY,
+      current_profile TEXT,
+      desired_profile TEXT,
+      runtime_status TEXT NOT NULL,
+      paused INTEGER NOT NULL
+    );
+  `);
+  conn.db
+    .prepare(
+      `INSERT INTO runtime_control_state
+         (id, current_profile, desired_profile, runtime_status, paused)
+       VALUES (1, 'simulation', 'simulation', ?, ?)
+       ON CONFLICT(id) DO UPDATE SET runtime_status = excluded.runtime_status,
+         paused = excluded.paused`,
+    )
+    .run(runtimeStatus, paused ? 1 : 0);
+}
+
 function seedProfileOwnedPosition(suffix: string | number, status: "open" | "dust"): void {
   const now = "2026-03-14T00:00:00Z";
   const insertPosition = conn.db.prepare(
@@ -1853,6 +1874,84 @@ describe("metrics", () => {
 // ─── Operator actions ───────────────────────────────────────────────
 
 describe("operator actions", () => {
+  it("enqueues one audited missing-bounce predecessor only at READY_PAUSED with maker closed", async () => {
+    await withRollback(async () => {
+      seedRuntimeState("ready_paused", true);
+      seedExecutionPolicy({ makerEntry: { mode: "off" } });
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/actions/recover-missing-bounce-exit",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        payload: { orderId: "local-bounce-1", reason: "exchange order is missing" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(
+        conn.db
+          .prepare("SELECT * FROM operator_commands WHERE id = ?")
+          .get(json(res).data.commandId),
+      ).toMatchObject({
+        action: "recover_missing_bounce_exit",
+        target_id: "local-bounce-1",
+        reason: "exchange order is missing",
+        initiator_type: "operator",
+        initiator: "api_key",
+        status: "pending",
+      });
+    });
+  });
+
+  it.each([
+    [{ reason: "repair" }, "missing order"],
+    [{ orderId: " local-bounce-1", reason: "repair" }, "non-exact order"],
+    [{ orderId: "local-bounce-1" }, "missing reason"],
+  ])("rejects invalid missing-bounce recovery input (%s, %s)", async (payload, _case) => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/actions/recover-missing-bounce-exit",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload,
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("rejects missing-bounce recovery outside READY_PAUSED", async () => {
+    await withRollback(async () => {
+      seedRuntimeState("running", false);
+      seedExecutionPolicy({ makerEntry: { mode: "off" } });
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/actions/recover-missing-bounce-exit",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        payload: { orderId: "local-bounce-1", reason: "repair" },
+      });
+      expect(res.statusCode).toBe(409);
+    });
+  });
+
+  it.each([
+    { mode: "shadow" },
+    {
+      mode: "micro_live",
+      microLiveWindow: {
+        activatedAtUtc: "2026-08-01T00:00:00.000Z",
+        expiresAtUtc: "2026-08-02T00:00:00.000Z",
+        maxCumulativeAcceptedPendingUsdc: 1,
+      },
+    },
+  ])("rejects recovery unless maker mode is literally off ($mode)", async (makerEntry) => {
+    await withRollback(async () => {
+      seedRuntimeState("ready_paused", true);
+      seedExecutionPolicy({ makerEntry });
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/actions/recover-missing-bounce-exit",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        payload: { orderId: "local-bounce-1", reason: "repair" },
+      });
+      expect(res.statusCode).toBe(409);
+    });
+  });
+
   it("POST /actions/cancel-maker-buys enqueues canonical activation boundary only while off", async () => {
     await withRollback(async () => {
       seedExecutionPolicy({ makerEntry: { mode: "off" } });

@@ -329,6 +329,56 @@ describe("CommandPoller", () => {
     });
   });
 
+  describe("recover_missing_bounce_exit", () => {
+    it("awaits proof before status, audit, and event become applied", async () => {
+      const id = insertCommand("recover_missing_bounce_exit", "predecessor-1", "operator repair");
+      let finish!: (value: { status: "applied"; completedAt: string }) => void;
+      const recovery = vi.fn(
+        () =>
+          new Promise<{ status: "applied"; completedAt: string }>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const events: unknown[] = [];
+      bus.subscribe("OperatorCommandApplied", async (event) => {
+        events.push(event);
+      });
+
+      const polling = createPoller({ recoverMissingBounceExit: recovery }).poll();
+      await Promise.resolve();
+      expect(cmdRepo.getPending().map((command) => command.id)).toEqual([id]);
+      expect(actionRepo.findRecent(10)).toEqual([]);
+
+      finish({ status: "applied", completedAt: "2026-08-22T00:00:00.000Z" });
+      await polling;
+      expect(recovery).toHaveBeenCalledWith("predecessor-1", id);
+      expect(actionRepo.findRecent(10)[0]).toMatchObject({
+        action: "recover_missing_bounce_exit",
+        targetType: "order",
+        targetId: "predecessor-1",
+        performedAt: "2026-08-22T00:00:00.000Z",
+      });
+      expect(events).toHaveLength(1);
+    });
+
+    it.each(["deferred", "rejected"] as const)(
+      "handles %s without an applied audit",
+      async (status) => {
+        const id = insertCommand("recover_missing_bounce_exit", "predecessor-1", "repair");
+        await createPoller({
+          recoverMissingBounceExit: vi.fn().mockResolvedValue({ status }),
+        }).poll();
+        const row = conn.db
+          .prepare("SELECT status FROM operator_commands WHERE id = ?")
+          .get(id) as {
+          status: string;
+        };
+        expect(row.status).toBe(status === "deferred" ? "pending" : "rejected");
+        expect(actionRepo.findRecent(10)).toEqual([]);
+      },
+    );
+  });
+
   // ── Unknown / legacy actions ─────────────────────────────────────────────
 
   describe("unknown action", () => {

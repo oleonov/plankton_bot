@@ -41,6 +41,100 @@ export interface ReservationSnapshot {
   reservedSellByToken: Map<string, number>;
 }
 
+export interface ExitRecoveryFenceV1 {
+  readonly version: 1;
+  readonly action: "recover_missing_bounce_exit";
+  readonly operatorCommandId: number;
+  readonly predecessorOrderId: string;
+  readonly tokenId: string;
+  readonly conditionId: string;
+  readonly positionId: string;
+  readonly decisionRuleId: string;
+  readonly bounceRungJson: string;
+  readonly createdAt: string;
+  readonly preOpenSnapshotHash: string;
+  readonly preFillSnapshotHash: string;
+  readonly preFillWatermark: string;
+  readonly residualShares: number;
+  readonly childClientOrderId: string;
+  readonly phase: "prepared" | "fenced" | "child_pending" | "complete";
+  readonly fenceCompletedAt?: string;
+  readonly postFenceOpenSnapshotHash?: string;
+  readonly postFenceFillSnapshotHash?: string;
+  readonly postFenceFillWatermark?: string;
+  readonly completedAt?: string;
+  readonly childOrderId?: string;
+}
+
+export function parseExitRecoveryFenceV1(order: Order): ExitRecoveryFenceV1 | null {
+  const value = order.metadata?.exitRecoveryFenceV1;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const fence = value as Record<string, unknown>;
+  const phase = fence.phase;
+  if (
+    fence.version !== 1 ||
+    fence.action !== "recover_missing_bounce_exit" ||
+    !Number.isInteger(fence.operatorCommandId) ||
+    (fence.operatorCommandId as number) <= 0 ||
+    fence.predecessorOrderId !== String(order.orderId) ||
+    fence.tokenId !== String(order.tokenId) ||
+    fence.conditionId !== String(order.conditionId) ||
+    fence.positionId !== String(order.positionId) ||
+    fence.decisionRuleId !== order.decisionRuleId ||
+    fence.bounceRungJson !== canonicalRecoveryMetadata(order.metadata?.bounceRung) ||
+    !isCanonicalInstant(fence.createdAt) ||
+    !isSha256(fence.preOpenSnapshotHash) ||
+    !isSha256(fence.preFillSnapshotHash) ||
+    typeof fence.preFillWatermark !== "string" ||
+    !Number.isFinite(fence.residualShares) ||
+    (fence.residualShares as number) <= 0 ||
+    typeof fence.childClientOrderId !== "string" ||
+    fence.childClientOrderId.length === 0 ||
+    (phase !== "prepared" &&
+      phase !== "fenced" &&
+      phase !== "child_pending" &&
+      phase !== "complete")
+  ) {
+    return null;
+  }
+  if (phase !== "prepared") {
+    if (
+      !isCanonicalInstant(fence.fenceCompletedAt) ||
+      !isSha256(fence.postFenceOpenSnapshotHash) ||
+      !isSha256(fence.postFenceFillSnapshotHash) ||
+      typeof fence.postFenceFillWatermark !== "string"
+    ) {
+      return null;
+    }
+  }
+  if (
+    phase === "complete" &&
+    (!isCanonicalInstant(fence.completedAt) ||
+      typeof fence.childOrderId !== "string" ||
+      fence.childOrderId.length === 0)
+  ) {
+    return null;
+  }
+  return fence as unknown as ExitRecoveryFenceV1;
+}
+
+export function canonicalRecoveryMetadata(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalRecoveryMetadata).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalRecoveryMetadata(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function isExitRecoveryFencedPredecessor(order: Order): boolean {
+  const phase = parseExitRecoveryFenceV1(order)?.phase;
+  return phase === "fenced" || phase === "child_pending" || phase === "complete";
+}
+
 export function buildReservationSnapshot(
   openOrders: Order[],
   fillRepo: ReservationFillLookup,
@@ -58,7 +152,9 @@ export function buildReservationSnapshot(
     openSellOrdersByToken: new Map(),
     reservedSellByToken: new Map(),
   };
-  const activeOpenOrders = openOrders.filter((order) => OPEN_ORDER_STATUSES.has(order.status));
+  const activeOpenOrders = openOrders.filter(
+    (order) => OPEN_ORDER_STATUSES.has(order.status) && !isExitRecoveryFencedPredecessor(order),
+  );
   const filledSizeByOrderId = getFilledSizeByOrderId(activeOpenOrders, fillRepo);
 
   for (const order of activeOpenOrders) {
@@ -80,6 +176,16 @@ export function buildReservationSnapshot(
   }
 
   return snapshot;
+}
+
+function isSha256(value: unknown): boolean {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isCanonicalInstant(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
 }
 
 export function getReservedSellSize(snapshot: ReservationSnapshot, tokenId: TokenId): number {

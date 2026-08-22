@@ -32,6 +32,7 @@ import type {
   PositionRepository,
   InventoryLotRepository,
   ExchangeFill,
+  ExchangeOrder,
   PreparedOrder,
   PreparedOrderSubmitResult,
   ExecutionPolicy,
@@ -69,7 +70,7 @@ import {
   parseMakerCaptureRepriceProofV1,
 } from "@krabs/domain";
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { buildClientOrderId } from "@krabs/domain/node";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import {
@@ -134,6 +135,10 @@ import {
   computeMakerPendingReservationUsdc,
   getOpenOrderCountForToken,
   getReservedSellSize,
+  canonicalRecoveryMetadata,
+  isExitRecoveryFencedPredecessor,
+  parseExitRecoveryFenceV1,
+  type ExitRecoveryFenceV1,
   type PendingReservation,
   type ReservationSnapshot,
 } from "./reservation-utils.js";
@@ -183,6 +188,22 @@ type PostOnlyCrossPreSubmitSkip = {
   snapshotTs: number | null;
 };
 
+type ExitRecoverySnapshot = {
+  readonly openOrders: readonly ExchangeOrder[];
+  readonly fills: readonly ExchangeFill[];
+  readonly exactPredecessor: ExchangeOrder | null;
+  readonly openHash: string;
+  readonly fillHash: string;
+  readonly fillWatermark: string;
+};
+
+export type MissingBounceExitRecoveryResult =
+  | { readonly status: "applied"; readonly completedAt: string }
+  | { readonly status: "deferred" }
+  | { readonly status: "rejected" };
+
+class UnsafeRecoveryChildError extends Error {}
+
 interface MakerCaptureExecutionContext {
   readonly intent: MakerCaptureRepriceIntent;
   readonly predecessor: Order;
@@ -207,6 +228,50 @@ function resolvePriceFromCmd(cmd: PlaceOrderCommand): number {
 function boundedMetricLabel(value: string | null | undefined): string {
   if (value == null || value.trim().length === 0) return "unknown";
   return value.length <= 64 ? value : "other";
+}
+
+function recoverySnapshotHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function hashOpenOrders(orders: readonly ExchangeOrder[]): string {
+  return recoverySnapshotHash(
+    [...orders]
+      .sort((a, b) => a.orderId.localeCompare(b.orderId))
+      .map((order) => [
+        order.orderId,
+        String(order.tokenId),
+        order.side,
+        order.price,
+        order.sizeTotal,
+        order.sizeFilled,
+        order.sizeRemaining,
+        order.status,
+      ]),
+  );
+}
+
+function hashFills(fills: readonly ExchangeFill[]): string {
+  return recoverySnapshotHash(
+    [...fills]
+      .sort((a, b) => a.fillId.localeCompare(b.fillId))
+      .map((fill) => [
+        fill.fillId,
+        fill.orderId,
+        String(fill.tokenId),
+        fill.side,
+        fill.price,
+        fill.size,
+        fill.timestamp,
+      ]),
+  );
+}
+
+function fillWatermark(fills: readonly ExchangeFill[]): string {
+  const latest = [...fills].sort(
+    (a, b) => b.timestamp - a.timestamp || b.fillId.localeCompare(a.fillId),
+  )[0];
+  return latest ? `${latest.timestamp}:${latest.fillId}:${fills.length}` : `0:none:${fills.length}`;
 }
 
 // No "pending-cancel" status exists on OrderStatus (packages/domain/src/enums.ts) —
@@ -534,6 +599,10 @@ export class ExecutionModule implements RuntimeModule {
   // (closes the publish→submit double window a bare timestamp grace can't). Maps
   // tokenId → the in-flight commandId.
   private readonly pendingDeferredSubmit = new Map<string, string>();
+  private readonly activeExitRecoveryClientIds = new Set<string>();
+  private readonly recoveryPendingReplacements = new Map<string, Order>();
+  private readonly recoverySubmissionAttempts = new Set<string>();
+  private readonly exitRecoveriesInFlight = new Set<string>();
 
   /**
    * In-flight commands on the queue-less path (`maxConcurrency` unset), settled-successfully so
@@ -1386,6 +1455,7 @@ export class ExecutionModule implements RuntimeModule {
             order.status === "pending" ||
             order.status === "partially-filled") &&
           order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+          !isExitRecoveryFencedPredecessor(order) &&
           this.matchesPositionCycle(order.positionId, cmd.positionId ?? null),
       );
   }
@@ -2081,8 +2151,10 @@ export class ExecutionModule implements RuntimeModule {
 
   // ─── Place order handler ──────────────────────────────────────────────
 
-  private async handlePlace(cmd: PlaceOrderCommand): Promise<void> {
-    if (this.deps.runtimeControl?.isPaused()) {
+  private async handlePlace(cmd: PlaceOrderCommand, recoveryOnly = false): Promise<void> {
+    const recoveryAuthorized =
+      recoveryOnly && this.activeExitRecoveryClientIds.has(String(cmd.clientOrderId));
+    if (this.deps.runtimeControl?.isPaused() && !recoveryAuthorized) {
       this.log.warn({ commandId: cmd.commandId }, "order rejected — runtime paused");
       await this.rejectOrder(cmd, "runtime-paused", ExchangeErrorCode.RuntimePaused);
       return;
@@ -2563,13 +2635,681 @@ export class ExecutionModule implements RuntimeModule {
       });
     }
 
-    await this.dispatchCommand(effectiveCmd);
+    await this.dispatchCommand(effectiveCmd, recoveryAuthorized);
   }
 
   makerBuyInFlightCount(): number {
     return [...this.pendingReservations.values()].filter(
       (reservation) => reservation.side === "buy" && reservation.entryStyle === "maker",
     ).length;
+  }
+
+  async recoverMissingBounceExit(
+    predecessorOrderId: OrderId,
+    operatorCommandId: number,
+  ): Promise<MissingBounceExitRecoveryResult> {
+    if (!this.started) return { status: "deferred" };
+    const key = String(predecessorOrderId);
+    if (this.exitRecoveriesInFlight.has(key)) return { status: "deferred" };
+    this.exitRecoveriesInFlight.add(key);
+    try {
+      return await this.runMissingBounceExitRecovery(predecessorOrderId, operatorCommandId);
+    } catch (err) {
+      this.deps.pauseLiveTrading?.();
+      const predecessor = this.deps.orderRepo.findById(predecessorOrderId);
+      const fence = predecessor ? parseExitRecoveryFenceV1(predecessor) : null;
+      this.log.error(
+        { err, predecessorOrderId: key, operatorCommandId },
+        "missing bounce-exit recovery failed — runtime remains paused",
+      );
+      return { status: fence ? "deferred" : "rejected" };
+    } finally {
+      this.exitRecoveriesInFlight.delete(key);
+    }
+  }
+
+  private async runMissingBounceExitRecovery(
+    predecessorOrderId: OrderId,
+    operatorCommandId: number,
+  ): Promise<MissingBounceExitRecoveryResult> {
+    this.assertRecoveryRuntimeClosed();
+    let predecessor = this.deps.orderRepo.findById(predecessorOrderId);
+    if (!predecessor) throw new Error("recovery predecessor not found");
+    let fence = parseExitRecoveryFenceV1(predecessor);
+    if (predecessor.metadata?.exitRecoveryFenceV1 !== undefined && !fence) {
+      throw new Error("invalid existing exitRecoveryFenceV1");
+    }
+    predecessor = this.requireRecoveryPredecessor(predecessor, fence !== null);
+
+    const initialProof = await this.readRecoverySnapshot(predecessor);
+    const residualShares = this.resolveRecoveryResidual(predecessor, initialProof.fills);
+    if (fence && !this.sameShares(fence.residualShares, residualShares)) {
+      throw new Error("recovery residual changed after fence creation");
+    }
+    const childClientOrderId = buildClientOrderId({
+      signalId: `exit-recovery:${String(predecessor.orderId)}`,
+      tokenId: predecessor.tokenId,
+      side: "sell",
+    });
+    if (fence && fence.childClientOrderId !== String(childClientOrderId)) {
+      throw new Error("recovery child client id mismatch");
+    }
+    if (!fence) {
+      this.assertRecoveryCommandSafe(
+        this.buildRecoveryCommand(predecessor, residualShares, childClientOrderId),
+      );
+      this.assertPredecessorAbsent(initialProof, predecessor);
+      this.assertAssetOpenOrders(initialProof, predecessor.tokenId, null);
+      fence = this.newRecoveryFence(
+        predecessor,
+        operatorCommandId,
+        residualShares,
+        String(childClientOrderId),
+        initialProof,
+      );
+      predecessor = this.casRecoveryFence(predecessor, fence);
+    }
+
+    if (fence.phase === "prepared") {
+      const repeatedProof = await this.readRecoverySnapshot(predecessor);
+      this.assertPredecessorAbsent(repeatedProof, predecessor);
+      this.assertAssetOpenOrders(repeatedProof, predecessor.tokenId, null);
+      const postFence = await this.readRecoverySnapshot(predecessor);
+      this.assertPredecessorAbsent(postFence, predecessor);
+      this.assertAssetOpenOrders(postFence, predecessor.tokenId, null);
+      fence = {
+        ...fence,
+        phase: "fenced",
+        fenceCompletedAt: new Date().toISOString(),
+        postFenceOpenSnapshotHash: postFence.openHash,
+        postFenceFillSnapshotHash: postFence.fillHash,
+        postFenceFillWatermark: postFence.fillWatermark,
+      };
+      predecessor = this.casRecoveryFence(predecessor, fence);
+      this.refreshExchangeSellSnapshot(postFence.openOrders);
+    }
+
+    if (fence.phase === "fenced") {
+      const postFence = await this.readRecoverySnapshot(predecessor);
+      this.assertPredecessorAbsent(postFence, predecessor);
+      this.assertAssetOpenOrders(postFence, predecessor.tokenId, null);
+      fence = { ...fence, phase: "child_pending" };
+      predecessor = this.casRecoveryFence(predecessor, fence);
+    }
+
+    this.assertRecoveryRuntimeClosed();
+    let child = this.deps.orderRepo.findByClientOrderId(fence.childClientOrderId);
+    const command = this.buildRecoveryCommand(predecessor, residualShares, childClientOrderId);
+    try {
+      if (!child) {
+        const beforeChild = await this.readRecoverySnapshot(predecessor);
+        this.assertPredecessorAbsent(beforeChild, predecessor);
+        this.assertAssetOpenOrders(beforeChild, predecessor.tokenId, null);
+        if (
+          !this.sameShares(
+            this.resolveRecoveryResidual(predecessor, beforeChild.fills),
+            residualShares,
+          )
+        ) {
+          throw new Error("recovery residual changed before placement");
+        }
+        this.assertRecoveryCommandSafe(command);
+        this.activeExitRecoveryClientIds.add(fence.childClientOrderId);
+        try {
+          await this.handlePlace(command, true);
+        } finally {
+          this.activeExitRecoveryClientIds.delete(fence.childClientOrderId);
+        }
+        child = this.deps.orderRepo.findByClientOrderId(fence.childClientOrderId);
+      } else if (child.status === "pending" || child.status === "rejected") {
+        child = await this.resumeAmbiguousRecoveryChild(predecessor, child, fence, command);
+      }
+      if (!child) throw new Error("recovery child did not persist");
+
+      const completedAt = await this.verifyRecoveryChild(predecessor, child, fence);
+      if (fence.phase !== "complete") {
+        fence = { ...fence, phase: "complete", completedAt, childOrderId: String(child.orderId) };
+        this.casRecoveryFence(predecessor, fence);
+      }
+      return { status: "applied", completedAt };
+    } catch (error) {
+      const submitted = this.recoverySubmissionAttempts.has(fence.childClientOrderId);
+      child ??= this.deps.orderRepo.findByClientOrderId(fence.childClientOrderId);
+      if (child && (submitted || error instanceof UnsafeRecoveryChildError)) {
+        await this.cleanupRecoveryChild(predecessor, fence);
+      }
+      throw error;
+    } finally {
+      this.recoverySubmissionAttempts.delete(fence.childClientOrderId);
+    }
+  }
+
+  private assertRecoveryRuntimeClosed(): void {
+    if (this.deps.runtimeMode !== "live-lite") {
+      throw new Error("missing bounce-exit recovery is live-lite only");
+    }
+    const runtimeState = this.deps.controlDb
+      ?.prepare("SELECT runtime_status, paused FROM runtime_control_state WHERE id = 1")
+      .get() as { runtime_status?: unknown; paused?: unknown } | undefined;
+    if (
+      !this.deps.runtimeControl?.isPaused() ||
+      runtimeState?.runtime_status !== "ready_paused" ||
+      runtimeState.paused !== 1
+    ) {
+      throw new Error("runtime is not READY_PAUSED");
+    }
+    if ((this.deps.executionPolicy?.() ?? DEFAULT_EXECUTION_POLICY).makerEntry.mode !== "off") {
+      throw new Error("maker entry mode is not off");
+    }
+    if (!this.deps.gateway.getOpenOrdersResult || !this.deps.gateway.getFillsResult) {
+      throw new Error("reliable exchange snapshots are unavailable");
+    }
+    if (!this.deps.gateway.getOrderResult) {
+      throw new Error("exact order capability is unavailable");
+    }
+    if (!this.deps.orderRepo.updateMetadataIfUnchanged) {
+      throw new Error("order metadata CAS is unavailable");
+    }
+  }
+
+  private requireRecoveryPredecessor(order: Order, fenced: boolean): Order {
+    const working =
+      order.status === "pending" || order.status === "open" || order.status === "partially-filled";
+    if (
+      order.side !== "sell" ||
+      order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
+      order.postOnly !== true ||
+      (!working && !(fenced && order.status === "cancelled")) ||
+      !order.exchangeOrderId ||
+      !order.positionId ||
+      !order.metadata?.bounceRung
+    ) {
+      throw new Error("recovery predecessor is not a working post-only bounce rung");
+    }
+    return order;
+  }
+
+  private resolveRecoveryResidual(
+    predecessor: Order,
+    exchangeFills: readonly ExchangeFill[],
+  ): number {
+    const positions = this.deps.positionRepo?.findActiveByTokenId(predecessor.tokenId) ?? [];
+    if (
+      positions.length !== 1 ||
+      String(positions[0]!.positionId) !== String(predecessor.positionId) ||
+      String(positions[0]!.conditionId) !== String(predecessor.conditionId)
+    ) {
+      throw new Error("recovery predecessor has no single matching active position");
+    }
+    if (this.deps.fillRepo.findByOrderId(predecessor.orderId).length !== 0) {
+      throw new Error("recovery predecessor has linked local fills");
+    }
+    const lots = this.deps.inventoryLotRepo?.findOpen(positions[0]!.positionId) ?? [];
+    const lotResidual = lots.reduce((sum, lot) => sum + lot.remainingSize, 0);
+    const walletResidual = this.deps.exchangeStateStore?.getWalletPositionSize(predecessor.tokenId);
+    const walletCapturedAt = this.deps.exchangeStateStore?.getWalletPositionCapturedAt(
+      predecessor.tokenId,
+    );
+    if (
+      walletResidual === null ||
+      walletResidual === undefined ||
+      walletCapturedAt === null ||
+      walletCapturedAt === undefined
+    ) {
+      throw new Error("fresh recovery wallet snapshot is unavailable");
+    }
+    const latestTokenFillAt = exchangeFills
+      .filter((fill) => String(fill.tokenId) === String(predecessor.tokenId))
+      .reduce((latest, fill) => Math.max(latest, fill.timestamp), 0);
+    if (walletCapturedAt < latestTokenFillAt) {
+      throw new Error("recovery wallet snapshot predates the latest token fill");
+    }
+    const values = [positions[0]!.size, lotResidual, walletResidual];
+    if (values.some((value) => !Number.isFinite(value) || value <= 0)) {
+      throw new Error("recovery residual evidence is unavailable");
+    }
+    if (values.some((value) => !this.sameShares(value, values[0]!))) {
+      throw new Error("position/FIFO/wallet residual mismatch");
+    }
+    if (
+      !Number.isFinite(predecessor.size) ||
+      predecessor.size <= 0 ||
+      predecessor.size - values[0]! > ExecutionModule.SIZE_EPSILON_SHARES
+    ) {
+      throw new Error("recovery predecessor size exceeds active residual");
+    }
+    return values[0]!;
+  }
+
+  private buildRecoveryCommand(
+    predecessor: Order,
+    size: number,
+    clientOrderId: PlaceOrderCommand["clientOrderId"],
+  ): PlaceOrderCommand {
+    const market = this.deps.marketRepo.findByTokenId(predecessor.tokenId);
+    if (
+      !market ||
+      !market.active ||
+      String(market.conditionId) !== String(predecessor.conditionId)
+    ) {
+      throw new Error("recovery market is not active or does not match predecessor");
+    }
+    const metadata = { ...(predecessor.metadata ?? {}) } as Record<string, unknown>;
+    delete metadata.exitRecoveryFenceV1;
+    return {
+      type: "PlaceOrderCommand",
+      commandId: createCommandId(`exit-recovery:${String(predecessor.orderId)}`),
+      clientOrderId,
+      source: "operator",
+      tokenId: predecessor.tokenId,
+      conditionId: predecessor.conditionId,
+      positionId: predecessor.positionId ?? null,
+      side: "sell",
+      size,
+      price: predecessor.price,
+      postOnly: true,
+      orderType: predecessor.orderType,
+      tickSize: market.tickSize,
+      negRisk: market.negRisk,
+      sequenceInTick: 0,
+      signalReason: predecessor.signalReason,
+      signalId: predecessor.signalId ?? null,
+      decisionRuleId: predecessor.decisionRuleId ?? null,
+      signalTimestamp: predecessor.signalTimestamp ?? null,
+      metadata: {
+        ...metadata,
+        exitRecoveryChildV1: {
+          version: 1,
+          predecessorOrderId: String(predecessor.orderId),
+          childClientOrderId: String(clientOrderId),
+          coverage: "full_active_residual",
+          predecessorShares: predecessor.size,
+          residualShares: size,
+        },
+      },
+    };
+  }
+
+  private assertRecoveryCommandSafe(cmd: PlaceOrderCommand): void {
+    if (this.getInvalidPriceRejection(cmd)) throw new Error("recovery price is not executable");
+    if (this.getSellPreSubmitMinOrderBlock(cmd))
+      throw new Error("recovery residual is below minimum");
+    if (this.exitOwnerIdentityRejection(cmd))
+      throw new Error("recovery position ownership mismatch");
+    if (this.isBalanceBlocked(cmd)) throw new Error("recovery token is balance-blocked");
+    if (this.getNotAcceptingOrdersSkip(cmd))
+      throw new Error("recovery market is not accepting orders");
+    if (this.getPostOnlyCrossPreSubmitSkip(cmd)) throw new Error("recovery price would cross");
+    if (this.evaluateSellExitLossFloor(cmd, cmd.price).block) {
+      throw new Error("recovery price is below exit loss floor");
+    }
+    const maxNotional = (this.deps.executionPolicy?.() ?? DEFAULT_EXECUTION_POLICY).bounceExit
+      .microMaxOrderUsdc;
+    if (maxNotional > 0 && cmd.price * cmd.size > maxNotional) {
+      throw new Error("recovery residual exceeds bounce micro order cap");
+    }
+    if (
+      this.deps.liveLiteGuard?.isActive &&
+      !this.deps.liveLiteGuard.isOrderWithinCap(cmd.price * cmd.size)
+    ) {
+      throw new Error("recovery residual exceeds live-lite order cap");
+    }
+  }
+
+  private async assertRecoverySubmitBoundary(cmd: PlaceOrderCommand): Promise<void> {
+    const marker = cmd.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
+    if (marker?.version !== 1 || typeof marker.predecessorOrderId !== "string") {
+      throw new Error("recovery submit marker is invalid");
+    }
+    const predecessor = this.deps.orderRepo.findById(createOrderId(marker.predecessorOrderId));
+    if (!predecessor) throw new Error("recovery submit predecessor is missing");
+    const fence = parseExitRecoveryFenceV1(predecessor);
+    if (!fence || fence.phase === "complete") throw new Error("recovery submit fence is invalid");
+    this.requireRecoveryPredecessor(predecessor, true);
+    this.assertRecoveryRuntimeClosed();
+    const snapshot = await this.readRecoverySnapshot(predecessor);
+    this.assertPredecessorAbsent(snapshot, predecessor);
+    this.assertAssetOpenOrders(snapshot, predecessor.tokenId, null);
+    const residual = this.resolveRecoveryResidual(predecessor, snapshot.fills);
+    if (
+      fence.childClientOrderId !== String(cmd.clientOrderId) ||
+      fence.residualShares !== cmd.size ||
+      marker.childClientOrderId !== fence.childClientOrderId ||
+      marker.coverage !== "full_active_residual" ||
+      marker.predecessorShares !== predecessor.size ||
+      marker.residualShares !== fence.residualShares ||
+      !this.sameShares(residual, cmd.size) ||
+      String(cmd.tokenId) !== fence.tokenId ||
+      String(cmd.conditionId) !== fence.conditionId ||
+      String(cmd.positionId) !== fence.positionId ||
+      cmd.decisionRuleId !== fence.decisionRuleId ||
+      cmd.side !== "sell" ||
+      cmd.postOnly !== true ||
+      cmd.orderType !== predecessor.orderType ||
+      cmd.price !== predecessor.price ||
+      canonicalRecoveryMetadata(cmd.metadata?.bounceRung) !== fence.bounceRungJson
+    ) {
+      throw new Error("recovery submit command identity mismatch");
+    }
+    this.assertRecoveryCommandSafe(cmd);
+  }
+
+  private async readRecoverySnapshot(predecessor: Order): Promise<ExitRecoverySnapshot> {
+    const [openResult, fillResult, exactResult] = await Promise.all([
+      this.deps.gateway.getOpenOrdersResult!(),
+      this.deps.gateway.getFillsResult!(0),
+      this.deps.gateway.getOrderResult!(predecessor.exchangeOrderId!),
+    ]);
+    if (!openResult.ok || !fillResult.ok || !exactResult.ok) {
+      throw new Error("reliable recovery snapshot failed");
+    }
+    return {
+      openOrders: openResult.data,
+      fills: fillResult.data,
+      exactPredecessor: exactResult.data,
+      openHash: hashOpenOrders(openResult.data),
+      fillHash: hashFills(fillResult.data),
+      fillWatermark: fillWatermark(fillResult.data),
+    };
+  }
+
+  private assertPredecessorAbsent(snapshot: ExitRecoverySnapshot, predecessor: Order): void {
+    if (snapshot.exactPredecessor !== null) throw new Error("predecessor exact order reappeared");
+    if (snapshot.openOrders.some((order) => order.orderId === predecessor.exchangeOrderId)) {
+      throw new Error("predecessor is present in open orders");
+    }
+    if (
+      snapshot.fills.some(
+        (fill) =>
+          fill.orderId === predecessor.exchangeOrderId ||
+          fill.clientOrderId === String(predecessor.clientOrderId),
+      )
+    ) {
+      throw new Error("predecessor has linked exchange fills");
+    }
+    if (this.deps.fillRepo.findByOrderId(predecessor.orderId).length !== 0) {
+      throw new Error("predecessor gained linked local fills");
+    }
+  }
+
+  private assertAssetOpenOrders(
+    snapshot: ExitRecoverySnapshot,
+    tokenId: TokenId,
+    allowedOrderId: string | null,
+  ): void {
+    const assetOrders = snapshot.openOrders.filter(
+      (order) => String(order.tokenId) === String(tokenId),
+    );
+    if (allowedOrderId === null && assetOrders.length !== 0) {
+      throw new Error("asset has another exact-open order");
+    }
+    if (
+      allowedOrderId !== null &&
+      (assetOrders.length !== 1 || assetOrders[0]!.orderId !== allowedOrderId)
+    ) {
+      throw new Error("asset open-order set does not contain exactly the recovery child");
+    }
+  }
+
+  private newRecoveryFence(
+    predecessor: Order,
+    operatorCommandId: number,
+    residualShares: number,
+    childClientOrderId: string,
+    snapshot: ExitRecoverySnapshot,
+  ): ExitRecoveryFenceV1 {
+    return {
+      version: 1,
+      action: "recover_missing_bounce_exit",
+      operatorCommandId,
+      predecessorOrderId: String(predecessor.orderId),
+      tokenId: String(predecessor.tokenId),
+      conditionId: String(predecessor.conditionId),
+      positionId: String(predecessor.positionId),
+      decisionRuleId: predecessor.decisionRuleId!,
+      bounceRungJson: canonicalRecoveryMetadata(predecessor.metadata?.bounceRung),
+      createdAt: new Date().toISOString(),
+      preOpenSnapshotHash: snapshot.openHash,
+      preFillSnapshotHash: snapshot.fillHash,
+      preFillWatermark: snapshot.fillWatermark,
+      residualShares,
+      childClientOrderId,
+      phase: "prepared",
+    };
+  }
+
+  private casRecoveryFence(predecessor: Order, fence: ExitRecoveryFenceV1): Order {
+    const updated = this.deps.orderRepo.updateMetadataIfUnchanged!(
+      predecessor.orderId,
+      predecessor.metadata ?? null,
+      { ...(predecessor.metadata ?? {}), exitRecoveryFenceV1: fence },
+    );
+    if (!updated) throw new Error("exit recovery metadata CAS failed");
+    return updated;
+  }
+
+  private refreshExchangeSellSnapshot(openOrders: readonly ExchangeOrder[]): void {
+    this.deps.exchangeStateStore?.updateExchangeSellOrders(
+      openOrders
+        .filter((order) => order.side === "sell")
+        .map((order) => ({
+          orderId: order.orderId,
+          tokenId: order.tokenId,
+          sizeRemaining: order.sizeRemaining,
+        })),
+    );
+  }
+
+  private async resumeAmbiguousRecoveryChild(
+    predecessor: Order,
+    child: Order,
+    fence: ExitRecoveryFenceV1,
+    command: PlaceOrderCommand,
+  ): Promise<Order> {
+    if (!child.exchangeOrderId) throw new Error("recovery child has no exact exchange identity");
+    const [snapshot, exact] = await Promise.all([
+      this.readRecoverySnapshot(predecessor),
+      this.deps.gateway.getOrderResult!(child.exchangeOrderId),
+    ]);
+    if (!exact.ok) throw new Error("recovery child exact state is unreliable");
+    this.assertRecoveryChildLocalIdentity(predecessor, child, fence, false);
+    try {
+      this.assertPredecessorAbsent(snapshot, predecessor);
+    } catch (error) {
+      throw new UnsafeRecoveryChildError(
+        error instanceof Error ? error.message : "unsafe recovery predecessor snapshot",
+      );
+    }
+    if (
+      snapshot.fills.some(
+        (fill) =>
+          fill.orderId === child.exchangeOrderId ||
+          fill.clientOrderId === String(child.clientOrderId),
+      ) ||
+      this.deps.fillRepo.findByOrderId(child.orderId).length !== 0
+    ) {
+      throw new UnsafeRecoveryChildError("ambiguous recovery child has linked fills");
+    }
+    if (exact.data?.status === "OPEN") {
+      this.assertRecoveryChildSnapshotSafe(snapshot, predecessor, child.exchangeOrderId);
+      if (child.status !== "open") {
+        this.deps.orderRepo.updateStatus(child.orderId, "open", child.exchangeOrderId);
+      }
+      return this.deps.orderRepo.findByClientOrderId(fence.childClientOrderId)!;
+    }
+    if (exact.data?.status === "PARTIALLY_FILLED" || exact.data?.status === "FILLED") {
+      throw new UnsafeRecoveryChildError("ambiguous recovery child may have filled");
+    }
+    if (exact.data && !this.sameShares(exact.data.sizeFilled, 0)) {
+      throw new UnsafeRecoveryChildError("ambiguous recovery child has exact fill evidence");
+    }
+    this.assertRecoveryChildSnapshotSafe(snapshot, predecessor, null);
+    if (
+      !this.sameShares(
+        this.resolveRecoveryResidual(predecessor, snapshot.fills),
+        fence.residualShares,
+      )
+    ) {
+      throw new Error("recovery residual changed before re-submission");
+    }
+    this.assertRecoveryCommandSafe(command);
+    this.recoveryPendingReplacements.set(fence.childClientOrderId, child);
+    this.activeExitRecoveryClientIds.add(fence.childClientOrderId);
+    try {
+      await this.dispatchCommand(command, true);
+    } finally {
+      this.activeExitRecoveryClientIds.delete(fence.childClientOrderId);
+      this.recoveryPendingReplacements.delete(fence.childClientOrderId);
+    }
+    const replacement = this.deps.orderRepo.findByClientOrderId(fence.childClientOrderId);
+    if (!replacement) throw new Error("recovery child replacement did not persist");
+    return replacement;
+  }
+
+  private async cleanupRecoveryChild(
+    predecessor: Order,
+    fence: ExitRecoveryFenceV1,
+  ): Promise<void> {
+    const child = this.deps.orderRepo.findByClientOrderId(fence.childClientOrderId);
+    if (!child?.exchangeOrderId) return;
+    await this.deps.gateway.cancelOrder({ orderId: child.exchangeOrderId });
+    const [open, fills, exact] = await Promise.all([
+      this.deps.gateway.getOpenOrdersResult!(),
+      this.deps.gateway.getFillsResult!(0),
+      this.deps.gateway.getOrderResult!(child.exchangeOrderId),
+    ]);
+    if (!open.ok || !fills.ok || !exact.ok) throw new Error("recovery cleanup proof failed");
+    await importExchangeFills(
+      fills.data.filter(
+        (fill) =>
+          fill.orderId === child.exchangeOrderId ||
+          fill.clientOrderId === String(child.clientOrderId),
+      ),
+      {
+        fillRepo: this.deps.fillRepo,
+        orderRepo: this.deps.orderRepo,
+        bus: this.deps.bus,
+        log: this.log,
+        gateway: this.deps.gateway,
+        fillCompletionTolerance: this.deps.fillCompletionTolerance,
+      },
+    );
+    if (
+      open.data.some((order) => order.orderId === child.exchangeOrderId) ||
+      exact.data?.status === "OPEN" ||
+      exact.data?.status === "PARTIALLY_FILLED"
+    ) {
+      throw new Error("recovery child remains exchange-open after cleanup");
+    }
+    if (this.deps.fillRepo.findByOrderId(child.orderId).length === 0) {
+      this.deps.orderRepo.updateStatus(child.orderId, "rejected", child.exchangeOrderId);
+    } else {
+      await applyOrderVerdict({
+        orderRepo: this.deps.orderRepo,
+        fillRepo: this.deps.fillRepo,
+        log: this.log,
+        orderId: child.orderId,
+        exchange: exact.data,
+        fillCompletionTolerance: this.deps.fillCompletionTolerance,
+      });
+    }
+    this.refreshExchangeSellSnapshot(open.data);
+  }
+
+  private assertRecoveryChildLocalIdentity(
+    predecessor: Order,
+    child: Order,
+    fence: ExitRecoveryFenceV1,
+    requireWorking: boolean,
+  ): void {
+    const marker = child.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
+    const working =
+      child.status === "pending" || child.status === "open" || child.status === "partially-filled";
+    if (
+      (requireWorking && !working) ||
+      marker?.version !== 1 ||
+      marker.predecessorOrderId !== String(predecessor.orderId) ||
+      marker.childClientOrderId !== fence.childClientOrderId ||
+      marker.coverage !== "full_active_residual" ||
+      marker.predecessorShares !== predecessor.size ||
+      marker.residualShares !== fence.residualShares ||
+      String(child.clientOrderId) !== fence.childClientOrderId ||
+      String(child.tokenId) !== fence.tokenId ||
+      String(child.conditionId) !== fence.conditionId ||
+      String(child.positionId) !== fence.positionId ||
+      child.side !== "sell" ||
+      child.postOnly !== true ||
+      child.orderType !== predecessor.orderType ||
+      child.price !== predecessor.price ||
+      !this.sameShares(child.size, fence.residualShares) ||
+      child.decisionRuleId !== fence.decisionRuleId ||
+      canonicalRecoveryMetadata(child.metadata?.bounceRung) !== fence.bounceRungJson ||
+      !child.exchangeOrderId
+    ) {
+      throw new UnsafeRecoveryChildError("recovery child identity mismatch");
+    }
+  }
+
+  private assertRecoveryChildSnapshotSafe(
+    snapshot: ExitRecoverySnapshot,
+    predecessor: Order,
+    allowedChildOrderId: string | null,
+  ): void {
+    try {
+      this.assertPredecessorAbsent(snapshot, predecessor);
+      this.assertAssetOpenOrders(snapshot, predecessor.tokenId, allowedChildOrderId);
+    } catch (error) {
+      throw new UnsafeRecoveryChildError(
+        error instanceof Error ? error.message : "unsafe recovery child snapshot",
+      );
+    }
+  }
+
+  private async verifyRecoveryChild(
+    predecessor: Order,
+    child: Order,
+    fence: ExitRecoveryFenceV1,
+  ): Promise<string> {
+    if (!child.exchangeOrderId) throw new Error("recovery child has no exact exchange identity");
+    const [snapshot, exactChild] = await Promise.all([
+      this.readRecoverySnapshot(predecessor),
+      this.deps.gateway.getOrderResult!(child.exchangeOrderId),
+    ]);
+    if (!exactChild.ok) throw new Error("recovery child exact state is unreliable");
+    this.assertRecoveryChildLocalIdentity(predecessor, child, fence, true);
+    const siblings = this.deps.orderRepo.findByTokenId(predecessor.tokenId).filter((order) => {
+      const marker = order.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
+      return marker?.predecessorOrderId === String(predecessor.orderId);
+    });
+    if (siblings.length !== 1 || siblings[0]!.orderId !== child.orderId) {
+      throw new UnsafeRecoveryChildError("recovery sibling prevention failed");
+    }
+    this.assertRecoveryChildSnapshotSafe(snapshot, predecessor, child.exchangeOrderId);
+    if (
+      exactChild.data === null ||
+      exactChild.data.orderId !== child.exchangeOrderId ||
+      String(exactChild.data.tokenId) !== String(child.tokenId) ||
+      exactChild.data.side !== "sell" ||
+      exactChild.data.status !== "OPEN" ||
+      !this.sameShares(exactChild.data.price, predecessor.price) ||
+      !this.sameShares(exactChild.data.sizeTotal, fence.residualShares) ||
+      !this.sameShares(exactChild.data.sizeFilled, 0) ||
+      !this.sameShares(exactChild.data.sizeRemaining, fence.residualShares) ||
+      snapshot.fills.some(
+        (fill) =>
+          fill.orderId === child.exchangeOrderId ||
+          fill.clientOrderId === String(child.clientOrderId),
+      ) ||
+      this.deps.fillRepo.findByOrderId(child.orderId).length !== 0
+    ) {
+      throw new UnsafeRecoveryChildError("recovery child is not exact-open with full fill parity");
+    }
+    this.refreshExchangeSellSnapshot(snapshot.openOrders);
+    return fence.completedAt ?? new Date().toISOString();
+  }
+
+  private sameShares(left: number, right: number): boolean {
+    return Math.abs(left - right) <= ExecutionModule.SIZE_EPSILON_SHARES;
   }
 
   // ─── Cancel order handler ─────────────────────────────────────────────
@@ -2590,9 +3330,17 @@ export class ExecutionModule implements RuntimeModule {
   // ─── Command dispatcher ───────────────────────────────────────────────
 
   /** Shared enqueue-or-execute path for both PlaceOrderCommand and CancelOrderCommand. */
-  private dispatchCommand(cmd: PlaceOrderCommand | CancelOrderCommand): Promise<void> {
+  private dispatchCommand(
+    cmd: PlaceOrderCommand | CancelOrderCommand,
+    awaitCompletion = false,
+  ): Promise<void> {
     this.incrementTokenInFlight(cmd);
     if (this.queue) {
+      if (awaitCompletion) {
+        return this.queue.enqueueAndWait(cmd).then((accepted) => {
+          if (!accepted) this.unwindRefusedDispatch(cmd);
+        });
+      }
       if (!this.queue.enqueue(cmd)) this.unwindRefusedDispatch(cmd);
       return Promise.resolve();
     }
@@ -3028,6 +3776,14 @@ export class ExecutionModule implements RuntimeModule {
     let effectivePrice = cmd.price;
 
     if (authTick !== cmd.tickSize) {
+      if (cmd.metadata?.exitRecoveryChildV1 !== undefined) {
+        await this.rejectOrder(
+          cmd,
+          "exit-recovery-tick-drift",
+          ExchangeErrorCode.LivePolicyBlocked,
+        );
+        return;
+      }
       if (this.isMakerCaptureReplacement(cmd)) {
         await this.rejectOrder(
           cmd,
@@ -3249,7 +4005,11 @@ export class ExecutionModule implements RuntimeModule {
       this.deferredBackstopRetries.set(tk, (this.deferredBackstopRetries.get(tk) ?? 0) + 1);
     }
 
-    const preparedLive = await this.submitPreparedLiveOrder(effectiveCmd, placeParams);
+    const preparedLive = await this.submitPreparedLiveOrder(
+      effectiveCmd,
+      placeParams,
+      this.recoveryPendingReplacements.get(String(effectiveCmd.clientOrderId)),
+    );
     if (preparedLive?.submit.kind === "unknown") return;
     let result: import("@krabs/domain").PlaceOrderResult;
     if (preparedLive) {
@@ -4119,6 +4879,7 @@ export class ExecutionModule implements RuntimeModule {
     for (const order of this.deps.orderRepo.findOpen()) {
       if (order.side !== "sell") continue;
       if (String(order.tokenId) !== String(tokenId)) continue;
+      if (isExitRecoveryFencedPredecessor(order)) continue;
       if (order.exchangeOrderId) known.add(order.exchangeOrderId);
     }
     return known;
@@ -4591,6 +5352,10 @@ export class ExecutionModule implements RuntimeModule {
           };
         }
         this.makerCaptureGatewayAttempts.add(String(cmd.commandId));
+      }
+      if (this.activeExitRecoveryClientIds.has(String(cmd.clientOrderId))) {
+        await this.assertRecoverySubmitBoundary(cmd);
+        this.recoverySubmissionAttempts.add(String(cmd.clientOrderId));
       }
       const outcome = await gateway.submitPreparedOrder!(prepared);
       if (outcome.kind === "accepted" && outcome.orderId !== prepared.orderId) {
@@ -5175,6 +5940,7 @@ export class ExecutionModule implements RuntimeModule {
           (order.status === "pending" ||
             order.status === "open" ||
             order.status === "partially-filled") &&
+          !isExitRecoveryFencedPredecessor(order) &&
           this.matchesPositionCycle(order.positionId, positionId),
       );
   }

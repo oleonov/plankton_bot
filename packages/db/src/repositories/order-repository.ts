@@ -215,9 +215,9 @@ export class SqliteOrderRepository implements OrderRepository {
   replacePendingIdentity(currentOrderId: OrderId, replacement: Order): void {
     const replace = this.db.transaction(() => {
       const current = this.findById(currentOrderId);
-      if (!current || current.status !== "rejected") {
+      if (!current || (current.status !== "pending" && current.status !== "rejected")) {
         throw new Error(
-          `Pending identity replacement requires rejected order: ${String(currentOrderId)}`,
+          `Pending identity replacement requires pending/rejected order: ${String(currentOrderId)}`,
         );
       }
       if (current.clientOrderId !== replacement.clientOrderId) {
@@ -240,7 +240,7 @@ export class SqliteOrderRepository implements OrderRepository {
                fill_progress_shares = NULL, market_horizon = NULL, exchange_error_code = NULL,
                exchange_error_message = NULL, exchange_error_payload = NULL,
                exchange_rejection_reason = NULL, updated_at = ?
-           WHERE order_id = ? AND status = 'rejected' AND client_order_id = ?
+           WHERE order_id = ? AND status IN ('pending', 'rejected') AND client_order_id = ?
              AND NOT EXISTS (SELECT 1 FROM fills WHERE order_id = orders.order_id)`,
         )
         .run(
@@ -268,6 +268,26 @@ export class SqliteOrderRepository implements OrderRepository {
       throw new Error(`Order not found after metadata update: ${String(id)}`);
     }
     return updated;
+  }
+
+  updateMetadataIfUnchanged(
+    id: OrderId,
+    expectedMetadata: Readonly<Record<string, unknown>> | null,
+    metadata: Readonly<Record<string, unknown>>,
+  ): Order | null {
+    const result = this.db
+      .prepare(
+        `UPDATE orders
+         SET metadata_json = ?, updated_at = ?
+         WHERE order_id = ? AND metadata_json IS ?`,
+      )
+      .run(
+        JSON.stringify(metadata),
+        nowIso(),
+        id,
+        expectedMetadata === null ? null : JSON.stringify(expectedMetadata),
+      );
+    return result.changes === 1 ? this.findById(id) : null;
   }
 
   updateMetadataBulk(

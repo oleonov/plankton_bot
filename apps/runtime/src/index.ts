@@ -1053,6 +1053,9 @@ async function main(): Promise<void> {
     pollIntervalMs: 5_000,
     stateTransitionRepo: repos.stateTransition,
     makerBuyFastCancel,
+    recoverMissingBounceExit: (predecessorOrderId, operatorCommandId) =>
+      executionModule?.recoverMissingBounceExit(predecessorOrderId as OrderId, operatorCommandId) ??
+      Promise.resolve({ status: "deferred" as const }),
   });
 
   // 7f. Execution module

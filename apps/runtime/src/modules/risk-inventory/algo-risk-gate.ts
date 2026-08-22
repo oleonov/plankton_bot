@@ -14,6 +14,7 @@ import {
   isBounceForceExit,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import { isExitRecoveryFencedPredecessor } from "../execution/reservation-utils.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import {
@@ -90,6 +91,7 @@ function getOpenOrderCounts(
   const openOrders = orderRepo
     .findOpen()
     .filter(isOpenOrder)
+    .filter((order) => !isExitRecoveryFencedPredecessor(order))
     .filter(
       (order) =>
         !excludeBounceTargetRungsForToken ||

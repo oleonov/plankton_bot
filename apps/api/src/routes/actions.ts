@@ -73,6 +73,47 @@ function enqueueResume(db: Database.Database, reason: string | null, actor: stri
     .immediate();
 }
 
+function currentExecutionPolicy(db: Database.Database) {
+  let profileId: string | null = null;
+  try {
+    const state = db
+      .prepare("SELECT current_profile, desired_profile FROM runtime_control_state WHERE id = 1")
+      .get() as { current_profile: string | null; desired_profile: string | null } | undefined;
+    profileId = state?.current_profile ?? state?.desired_profile ?? null;
+  } catch (error) {
+    if (
+      (error as { code?: string }).code !== "SQLITE_ERROR" ||
+      !(error as Error).message.includes("no such table: runtime_control_state")
+    ) {
+      throw error;
+    }
+    profileId = "simulation";
+  }
+  const settings = profileId
+    ? (db
+        .prepare("SELECT execution_policy_json FROM profile_settings WHERE profile_id = ?")
+        .get(profileId) as { execution_policy_json: string | null } | undefined)
+    : undefined;
+  return parseExecutionPolicyJson(settings?.execution_policy_json ?? null);
+}
+
+function runtimeReadyPaused(db: Database.Database): boolean {
+  try {
+    const state = db
+      .prepare("SELECT runtime_status, paused FROM runtime_control_state WHERE id = 1")
+      .get() as { runtime_status: string | null; paused: number } | undefined;
+    return state?.runtime_status === "ready_paused" && state.paused === 1;
+  } catch (error) {
+    if (
+      (error as { code?: string }).code === "SQLITE_ERROR" &&
+      (error as Error).message.includes("no such table: runtime_control_state")
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) => {
   const controlDb = opts.controlDb ?? opts.db;
 
@@ -105,29 +146,7 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
       if (!Number.isFinite(date.getTime()) || date.toISOString() !== body.activationTs) {
         throw new ApiError(400, "activationTs must be a canonical ISO instant", "INVALID_FIELD");
       }
-      let profileId: string | null = null;
-      try {
-        const state = controlDb
-          .prepare(
-            "SELECT current_profile, desired_profile FROM runtime_control_state WHERE id = 1",
-          )
-          .get() as { current_profile: string | null; desired_profile: string | null } | undefined;
-        profileId = state?.current_profile ?? state?.desired_profile ?? null;
-      } catch (error) {
-        if (
-          (error as { code?: string }).code !== "SQLITE_ERROR" ||
-          !(error as Error).message.includes("no such table: runtime_control_state")
-        ) {
-          throw error;
-        }
-        profileId = "simulation";
-      }
-      const settings = profileId
-        ? (controlDb
-            .prepare("SELECT execution_policy_json FROM profile_settings WHERE profile_id = ?")
-            .get(profileId) as { execution_policy_json: string | null } | undefined)
-        : undefined;
-      const parsed = parseExecutionPolicyJson(settings?.execution_policy_json ?? null);
+      const parsed = currentExecutionPolicy(controlDb);
       if (parsed.issues.length > 0 || parsed.policy.makerEntry.mode !== "off") {
         throw new ApiError(409, "maker entry mode must be off", "MAKER_MODE_NOT_OFF");
       }
@@ -135,6 +154,49 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
         controlDb,
         "cancel_maker_buys",
         date.toISOString(),
+        body.reason,
+        getActor(request),
+      );
+      return ok({ commandId: id, status: "enqueued" });
+    },
+  );
+
+  app.post<{ Body: { orderId?: string; reason?: string } }>(
+    "/actions/recover-missing-bounce-exit",
+    async (request) => {
+      const body = (request.body ?? {}) as { orderId?: string; reason?: string };
+      if (
+        typeof body.orderId !== "string" ||
+        body.orderId.length === 0 ||
+        body.orderId !== body.orderId.trim() ||
+        body.orderId.length > 256
+      ) {
+        throw new ApiError(400, "orderId must be a non-empty local order ID", "INVALID_FIELD");
+      }
+      if (typeof body.reason !== "string" || body.reason.trim() === "") {
+        throw new ApiError(400, "reason is required", "MISSING_FIELD");
+      }
+      if (!runtimeReadyPaused(controlDb)) {
+        throw new ApiError(409, "runtime must be READY_PAUSED", "RUNTIME_NOT_READY_PAUSED");
+      }
+      const policy = currentExecutionPolicy(controlDb);
+      if (policy.issues.length > 0 || policy.policy.makerEntry.mode !== "off") {
+        throw new ApiError(409, "maker entry mode must be off", "MAKER_MODE_NOT_OFF");
+      }
+      const duplicate = controlDb
+        .prepare(
+          `SELECT id FROM operator_commands
+           WHERE action = 'recover_missing_bounce_exit' AND target_id = ? AND status = 'pending'
+           LIMIT 1`,
+        )
+        .get(body.orderId);
+      if (duplicate) {
+        throw new ApiError(409, "recovery is already pending for this order", "ACTION_PENDING");
+      }
+      const id = insertCommand(
+        controlDb,
+        "recover_missing_bounce_exit",
+        body.orderId,
         body.reason,
         getActor(request),
       );

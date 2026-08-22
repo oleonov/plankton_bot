@@ -294,6 +294,13 @@ export interface OrderRepository {
   /** Replace metadata_json for a single order identified by local order_id. */
   updateMetadata?(id: OrderId, metadata: Readonly<Record<string, unknown>>): Order;
 
+  /** Replace metadata only when its current JSON value still matches `expectedMetadata`. */
+  updateMetadataIfUnchanged?(
+    id: OrderId,
+    expectedMetadata: Readonly<Record<string, unknown>> | null,
+    metadata: Readonly<Record<string, unknown>>,
+  ): Order | null;
+
   /** Atomically replace metadata_json for multiple local order_id values. */
   updateMetadataBulk?(
     updates: readonly { orderId: OrderId; metadata: Readonly<Record<string, unknown>> }[],
@@ -316,7 +323,7 @@ export interface OrderRepository {
   ): void;
 
   /**
-   * Replace a definitively-rejected live order's exact exchange identity with a
+   * Replace a definitively-absent pending/rejected live order's exact exchange identity with a
    * newly prepared pending identity. The implementation must reject stale rows,
    * client-identity changes, and any row already linked to a fill.
    */

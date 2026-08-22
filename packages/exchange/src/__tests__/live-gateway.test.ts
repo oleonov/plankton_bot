@@ -408,6 +408,37 @@ describe("LiveExchangeGateway", () => {
     expect(fills[0]!.fee).toBeCloseTo(0.12375);
   });
 
+  it("fails the reliable open snapshot when any required row field is malformed", async () => {
+    client.getOpenOrders.mockResolvedValue([
+      {
+        id: "ord-1",
+        asset_id: "",
+        side: "BUY",
+        original_size: "5",
+        size_matched: "0",
+        price: "0.5",
+        status: "LIVE",
+        created_at: Date.now(),
+      },
+    ]);
+    await expect(gw.getOpenOrdersResult()).resolves.toMatchObject({ ok: false, reason: "parse" });
+  });
+
+  it("fails the reliable fill snapshot when any required row field is malformed", async () => {
+    client.getTrades.mockResolvedValue([
+      {
+        id: "trade-1",
+        taker_order_id: "ord-1",
+        asset_id: "tok-1",
+        side: "SELL",
+        size: "0",
+        price: "0.5",
+        match_time: "2026-01-15T12:00:00Z",
+      },
+    ]);
+    await expect(gw.getFillsResult(0)).resolves.toMatchObject({ ok: false, reason: "parse" });
+  });
+
   it("getFills extracts only personal legs when traderAddress is configured", async () => {
     gw = new LiveExchangeGateway({ client, traderAddress: "0xours" });
     client.getTrades.mockResolvedValue([
@@ -453,6 +484,41 @@ describe("LiveExchangeGateway", () => {
     expect(fills).toHaveLength(2);
     expect(fills.map((fill) => fill.orderId)).toEqual(["ord-ours", "ord-taker"]);
     expect(fills.map((fill) => fill.tokenId)).toEqual(["tok-our-yes", "tok-our-no"]);
+  });
+
+  it.each([
+    { trader_side: "UNKNOWN", maker_orders: [] },
+    { trader_side: "MAKER" },
+    { trader_side: "MAKER", maker_orders: "malformed" },
+    {
+      trader_side: "MAKER",
+      maker_orders: [
+        {
+          order_id: "foreign-order",
+          maker_address: "0xforeign",
+          asset_id: "tok-1",
+          side: "SELL",
+          matched_amount: "1",
+          price: "0.5",
+        },
+      ],
+    },
+  ])("fails authenticated fill snapshots for ambiguous personal rows %#", async (shape) => {
+    gw = new LiveExchangeGateway({ client, traderAddress: "0xours" });
+    client.getTrades.mockResolvedValue([
+      {
+        id: "trade-ambiguous",
+        taker_order_id: "ord-1",
+        asset_id: "tok-1",
+        side: "SELL",
+        size: "1",
+        price: "0.5",
+        match_time: "2026-04-05T00:00:00Z",
+        maker_address: "0xforeign",
+        ...shape,
+      },
+    ]);
+    await expect(gw.getFillsResult(0)).resolves.toMatchObject({ ok: false, reason: "parse" });
   });
 
   it("getBalances normalizes atomic units to human-readable USDC", async () => {

@@ -12,6 +12,11 @@ import type { PlaceOrderCommand, CancelOrderCommand, TokenId } from "@krabs/doma
 import type { Logger } from "../../logger.js";
 
 type Command = PlaceOrderCommand | CancelOrderCommand;
+type QueueItem = {
+  readonly command: Command;
+  readonly resolve?: () => void;
+  readonly reject?: (error: unknown) => void;
+};
 
 /**
  * One deadline shared by every generation a shutdown awaits — a per-generation timeout would let
@@ -69,7 +74,7 @@ export interface ExecutionQueueConfig {
 }
 
 export class ExecutionQueue {
-  private readonly queue: Command[] = [];
+  private readonly queue: QueueItem[] = [];
   private readonly tokenLocks = new Map<string, Promise<void>>();
   private activeCount = 0;
   private accepting = true;
@@ -98,12 +103,21 @@ export class ExecutionQueue {
       this.config.log.warn({ type: cmd.type }, "queue not accepting — command dropped");
       return false;
     }
-    this.queue.push(cmd);
+    this.queue.push({ command: cmd });
     if (this.queue.length > 100) {
       this.config.log.warn({ depth: this.queue.length }, "execution queue depth exceeds 100");
     }
     this.drain();
     return true;
+  }
+
+  /** Recovery-only path: resolves only after this command's executor has fully settled. */
+  enqueueAndWait(cmd: Command): Promise<boolean> {
+    if (!this.accepting) return Promise.resolve(false);
+    return new Promise<boolean>((resolve, reject) => {
+      this.queue.push({ command: cmd, resolve: () => resolve(true), reject });
+      this.drain();
+    });
   }
 
   /**
@@ -194,7 +208,8 @@ export class ExecutionQueue {
     if (this.frozen) return;
     let i = 0;
     while (i < this.queue.length && this.activeCount < this.config.maxConcurrency) {
-      const cmd = this.queue[i]!;
+      const item = this.queue[i]!;
+      const cmd = item.command;
       const tokenId = String(this.config.resolveTokenId(cmd));
 
       // Token already has an in-flight operation — skip (don't waste a concurrency slot)
@@ -219,7 +234,10 @@ export class ExecutionQueue {
       this.inFlight.add(claim);
 
       void this.invokeExecute(cmd)
-        .catch((err) => this.config.log.error({ err, type: cmd.type }, "queue worker error"))
+        .then(item.resolve, (err) => {
+          item.reject?.(err);
+          this.config.log.error({ err, type: cmd.type }, "queue worker error");
+        })
         .finally(() => {
           this.activeCount--;
           this.tokenLocks.delete(tokenId);

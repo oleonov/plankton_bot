@@ -66,6 +66,7 @@ import { buildClientOrderId, buildPartialExitClientOrderId } from "@krabs/domain
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { Logger } from "../../logger.js";
+import { isExitRecoveryFencedPredecessor } from "../execution/reservation-utils.js";
 import { buildQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
@@ -3442,6 +3443,7 @@ export class SignalToOrderBridge {
     const orders = this.deps.orderRepo.findByTokenId(tokenId);
     return (
       orders.find((order) => {
+        if (isExitRecoveryFencedPredecessor(order)) return false;
         if (order.side !== "sell") return false;
         if (order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID) return false;
         if (order.status === "cancelled" || order.status === "rejected") return false;

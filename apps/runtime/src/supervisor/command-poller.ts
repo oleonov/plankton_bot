@@ -11,6 +11,7 @@ import {
   canonicalInstant,
   type MakerBuyFastCancel,
 } from "../modules/execution/maker-buy-fast-cancel.js";
+import type { MissingBounceExitRecoveryResult } from "../modules/execution/execution-module.js";
 
 export interface ReloadableRules {
   reload(): void;
@@ -33,6 +34,10 @@ export interface CommandPollerDeps {
   normalizationModule?: PatternRebuilder;
   stateTransitionRepo?: StateTransitionRepository;
   makerBuyFastCancel?: MakerBuyFastCancel;
+  recoverMissingBounceExit?: (
+    predecessorOrderId: string,
+    operatorCommandId: number,
+  ) => Promise<MissingBounceExitRecoveryResult>;
 }
 
 export class CommandPoller implements RuntimeModule {
@@ -125,6 +130,25 @@ export class CommandPoller implements RuntimeModule {
             this.deps.commandRepo.updateStatus(cmd.id, "rejected", new Date().toISOString());
             return;
           }
+          this.log.info({ id: cmd.id, action: cmd.action }, "command applied");
+          return;
+        }
+
+        case "recover_missing_bounce_exit": {
+          const targetId = cmd.targetId;
+          if (!targetId || !this.deps.recoverMissingBounceExit) {
+            this.deps.commandRepo.updateStatus(cmd.id, "rejected", now);
+            return;
+          }
+          const result = await this.deps.recoverMissingBounceExit(targetId, cmd.id);
+          if (result.status === "deferred") return;
+          if (result.status === "rejected") {
+            this.deps.commandRepo.updateStatus(cmd.id, "rejected", new Date().toISOString());
+            return;
+          }
+          this.writeAudit(cmd, "order", targetId, result.completedAt);
+          this.deps.commandRepo.updateStatus(cmd.id, "applied", result.completedAt);
+          await this.publishApplied(cmd, result.completedAt);
           this.log.info({ id: cmd.id, action: cmd.action }, "command applied");
           return;
         }
