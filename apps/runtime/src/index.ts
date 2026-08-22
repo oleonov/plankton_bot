@@ -1035,6 +1035,8 @@ async function main(): Promise<void> {
   });
 
   let executionModule: ExecutionModule | null = null;
+  const authorizeResume = () =>
+    executionModule?.authorizeResumeAfterStartupExitRecovery() ?? Promise.resolve(false);
   const makerBuyFastCancel = new MakerBuyFastCancel({
     orderRepo: repos.order,
     bus,
@@ -1056,6 +1058,7 @@ async function main(): Promise<void> {
     recoverMissingBounceExit: (predecessorOrderId, operatorCommandId) =>
       executionModule?.recoverMissingBounceExit(predecessorOrderId as OrderId, operatorCommandId) ??
       Promise.resolve({ status: "deferred" as const }),
+    authorizeResume,
   });
 
   // 7f. Execution module
@@ -3044,6 +3047,8 @@ async function main(): Promise<void> {
     db: ledgerConn.db,
     botRunId,
     fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
+    allowMissingBounceExitRecovery: () =>
+      runtimeMode === "live-lite" && currentExecutionPolicy().makerEntry.mode === "off",
   };
   let startupAdoption: Awaited<ReturnType<typeof runStartupPositionAdoption>>;
   try {
@@ -3336,9 +3341,6 @@ async function main(): Promise<void> {
       phase: "pre-fence-release",
     });
 
-    // Barrier seeded — release the hard fence (normal pause/resume state now governs).
-    executionModule.endStartupFence();
-
     // Publish runtime state to control.db for cross-service visibility
     const instanceId = randomUUID();
     const statePublisher = new RuntimeStatePublisher(controlConn.db, {
@@ -3349,6 +3351,7 @@ async function main(): Promise<void> {
     });
     statePublisherRef.current = statePublisher;
     statePublisher.publishStartup();
+    executionModule.endStartupFence();
     // publishStartup hardcodes paused=1; reconcile to the supervisor's actual
     // state so a resume applied by the command-poller during start() survives
     // in runtime_control_state as well.
@@ -3367,8 +3370,12 @@ async function main(): Promise<void> {
     });
 
     if (intentResult.action === "resume") {
-      log.info({ ageMs: intentResult.ageMs }, "resume intent found — auto-resuming");
-      setPausedAndPersist(false);
+      if (await authorizeResume()) {
+        log.info({ ageMs: intentResult.ageMs }, "resume intent found — auto-resuming");
+        setPausedAndPersist(false);
+      } else {
+        log.warn("resume intent blocked by startup missing-bounce recovery fence");
+      }
     } else if (intentResult.action === "stay_paused") {
       log.warn(
         { reason: intentResult.reason, ageMs: intentResult.ageMs },

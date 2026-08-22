@@ -38,6 +38,7 @@ export interface CommandPollerDeps {
     predecessorOrderId: string,
     operatorCommandId: number,
   ) => Promise<MissingBounceExitRecoveryResult>;
+  authorizeResume?: () => Promise<boolean>;
 }
 
 export class CommandPoller implements RuntimeModule {
@@ -98,6 +99,10 @@ export class CommandPoller implements RuntimeModule {
           break;
 
         case "resume":
+          if (this.deps.authorizeResume && !(await this.deps.authorizeResume())) {
+            this.deps.commandRepo.updateStatus(cmd.id, "rejected", now);
+            return;
+          }
           this.deps.setPaused(false);
           this.writeAudit(cmd, "bot", "runtime", now);
           break;

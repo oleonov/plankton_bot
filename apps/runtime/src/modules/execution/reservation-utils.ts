@@ -66,6 +66,51 @@ export interface ExitRecoveryFenceV1 {
   readonly childOrderId?: string;
 }
 
+export interface StartupExitRecoveryBlockV1 {
+  readonly version: 1;
+  readonly action: "recover_missing_bounce_exit";
+  readonly predecessorOrderId: string;
+  readonly predecessorClientOrderId: string;
+  readonly predecessorExchangeOrderId: string;
+  readonly tokenId: string;
+  readonly conditionId: string;
+  readonly positionId: string;
+  readonly decisionRuleId: string;
+  readonly orderType: string;
+  readonly price: number;
+  readonly predecessorShares: number;
+  readonly positionShares: number;
+  readonly bounceRungJson: string;
+  readonly detectedAt: string;
+}
+
+export function parseStartupExitRecoveryBlockV1(order: Order): StartupExitRecoveryBlockV1 | null {
+  const value = order.metadata?.startupExitRecoveryBlockV1;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const block = value as Record<string, unknown>;
+  if (
+    block.version !== 1 ||
+    block.action !== "recover_missing_bounce_exit" ||
+    block.predecessorOrderId !== String(order.orderId) ||
+    block.predecessorClientOrderId !== String(order.clientOrderId) ||
+    block.predecessorExchangeOrderId !== order.exchangeOrderId ||
+    block.tokenId !== String(order.tokenId) ||
+    block.conditionId !== String(order.conditionId) ||
+    block.positionId !== String(order.positionId) ||
+    block.decisionRuleId !== order.decisionRuleId ||
+    block.orderType !== order.orderType ||
+    block.price !== order.price ||
+    block.predecessorShares !== order.size ||
+    block.bounceRungJson !== canonicalRecoveryMetadata(order.metadata?.bounceRung) ||
+    !Number.isFinite(block.positionShares) ||
+    (block.positionShares as number) <= 0 ||
+    !isCanonicalInstant(block.detectedAt)
+  ) {
+    return null;
+  }
+  return block as unknown as StartupExitRecoveryBlockV1;
+}
+
 export function parseExitRecoveryFenceV1(order: Order): ExitRecoveryFenceV1 | null {
   const value = order.metadata?.exitRecoveryFenceV1;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -116,6 +161,39 @@ export function parseExitRecoveryFenceV1(order: Order): ExitRecoveryFenceV1 | nu
     return null;
   }
   return fence as unknown as ExitRecoveryFenceV1;
+}
+
+export function isRecoveryChildLocalIdentity(
+  predecessor: Order,
+  child: Order,
+  fence: ExitRecoveryFenceV1,
+  requireWorking: boolean,
+): boolean {
+  const marker = child.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
+  const working =
+    child.status === "pending" || child.status === "open" || child.status === "partially-filled";
+  return (
+    (!requireWorking || working) &&
+    marker?.version === 1 &&
+    marker.predecessorOrderId === String(predecessor.orderId) &&
+    marker.childClientOrderId === fence.childClientOrderId &&
+    marker.coverage === "full_active_residual" &&
+    marker.predecessorShares === predecessor.size &&
+    marker.residualShares === fence.residualShares &&
+    child.metadata?.startupExitRecoveryBlockV1 === undefined &&
+    String(child.clientOrderId) === fence.childClientOrderId &&
+    String(child.tokenId) === fence.tokenId &&
+    String(child.conditionId) === fence.conditionId &&
+    String(child.positionId) === fence.positionId &&
+    child.side === "sell" &&
+    child.postOnly === true &&
+    child.orderType === predecessor.orderType &&
+    child.price === predecessor.price &&
+    Math.abs(child.size - fence.residualShares) <= 1e-9 &&
+    child.decisionRuleId === fence.decisionRuleId &&
+    canonicalRecoveryMetadata(child.metadata?.bounceRung) === fence.bounceRungJson &&
+    Boolean(child.exchangeOrderId)
+  );
 }
 
 export function canonicalRecoveryMetadata(value: unknown): string {

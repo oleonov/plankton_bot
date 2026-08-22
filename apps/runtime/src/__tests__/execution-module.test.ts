@@ -46,7 +46,10 @@ import { bootstrapDatabase, SqliteFillRepository, SqliteOrderRepository } from "
 import { buildClientOrderId } from "@krabs/domain/node";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 import { ExchangeStateStore } from "../modules/execution/exchange-state-store.js";
-import { buildReservationSnapshot } from "../modules/execution/reservation-utils.js";
+import {
+  buildReservationSnapshot,
+  canonicalRecoveryMetadata,
+} from "../modules/execution/reservation-utils.js";
 import { buildMakerCaptureRepriceIdentity } from "../maker-capture-reprice.js";
 import type { MakerBuyFastCancel } from "../modules/execution/maker-buy-fast-cancel.js";
 import { LIFECYCLE_STOP_WAIT_MS } from "../lifecycle-chain.js";
@@ -7302,7 +7305,17 @@ describe("ExecutionModule", () => {
               .map((lot) => ({ ...lot, remainingSize: 4 })),
           );
       }
-      return { conn, recovery, orders, fills, predecessor, recoveryGateway, state };
+      return {
+        conn,
+        recovery,
+        orders,
+        fills,
+        predecessor,
+        recoveryGateway,
+        state,
+        positionRepo,
+        inventoryLots,
+      };
     }
 
     it("converges through real SQLite, preserves predecessor, and never creates a sibling", async () => {
@@ -7333,6 +7346,176 @@ describe("ExecutionModule", () => {
           metadata: { exitRecoveryFenceV1: { version: 1 } },
         };
         expect(buildReservationSnapshot([invalidFence], f.fills).openSellOrderCount).toBe(1);
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it("keeps recovery deferred until the startup readiness fence releases", async () => {
+      const f = await fixture();
+      try {
+        f.recovery.beginStartupFence();
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 16),
+        ).resolves.toEqual({ status: "deferred" });
+        expect(f.recoveryGateway.submitPreparedOrder).not.toHaveBeenCalled();
+        f.recovery.endStartupFence();
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 16),
+        ).resolves.toMatchObject({ status: "applied" });
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it("recovers a marked zero-fill terminal predecessor and blocks resume until fresh child coverage", async () => {
+      const f = await fixture();
+      try {
+        const predecessor = f.orders.findById(f.predecessor.orderId)!;
+        f.orders.updateMetadata(predecessor.orderId, {
+          ...predecessor.metadata,
+          startupExitRecoveryBlockV1: {
+            version: 1,
+            action: "recover_missing_bounce_exit",
+            predecessorOrderId: String(predecessor.orderId),
+            predecessorClientOrderId: String(predecessor.clientOrderId),
+            predecessorExchangeOrderId: predecessor.exchangeOrderId,
+            tokenId: String(predecessor.tokenId),
+            conditionId: String(predecessor.conditionId),
+            positionId: String(predecessor.positionId),
+            decisionRuleId: predecessor.decisionRuleId,
+            orderType: predecessor.orderType,
+            price: predecessor.price,
+            predecessorShares: predecessor.size,
+            positionShares: 5,
+            bounceRungJson: canonicalRecoveryMetadata(predecessor.metadata?.bounceRung),
+            detectedAt: new Date().toISOString(),
+          },
+        });
+
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(false);
+        f.orders.updateStatus(predecessor.orderId, "cancelled", predecessor.exchangeOrderId!);
+        const exactLookup = vi.mocked(f.recoveryGateway.getOrderResult!);
+        const exactOrder = (
+          order: Order,
+          status: ExchangeOrder["status"],
+          sizeFilled = 0,
+        ): ExchangeOrder => ({
+          orderId: order.exchangeOrderId!,
+          clientOrderId: order.clientOrderId,
+          tokenId: order.tokenId,
+          side: "sell",
+          price: order.price,
+          sizeTotal: order.size,
+          sizeFilled,
+          sizeRemaining: order.size - sizeFilled,
+          status,
+          createdAt: Date.now(),
+        });
+        const priorExactLookup = exactLookup.getMockImplementation()!;
+        exactLookup.mockImplementation(async (orderId) =>
+          orderId === predecessor.exchangeOrderId
+            ? { ok: true, data: exactOrder(predecessor, "CANCELLED") }
+            : priorExactLookup(orderId),
+        );
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 17),
+        ).resolves.toMatchObject({ status: "applied" });
+        const child = f.orders
+          .findByTokenId(predecessor.tokenId)
+          .find((order) => order.orderId !== predecessor.orderId)!;
+        expect(child.metadata?.startupExitRecoveryBlockV1).toBeUndefined();
+        expect(
+          f.orders.findById(predecessor.orderId)?.metadata?.startupExitRecoveryBlockV1,
+        ).toBeUndefined();
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(true);
+        expect(f.orders.findById(predecessor.orderId)?.status).toBe("cancelled");
+        const fillTimestamp = Date.now();
+        const activePosition = f.positionRepo.findActiveByTokenId(child.tokenId)[0]!;
+        const activeLot = f.inventoryLots.findOpen(activePosition.positionId)[0]!;
+        const saveChildFill = (fillId: string, size: number, timestamp: number) => {
+          f.fills.save({
+            fillId: createFillId(fillId),
+            orderId: child.orderId,
+            tokenId: child.tokenId,
+            conditionId: child.conditionId,
+            side: "sell",
+            price: child.price,
+            size,
+            sizeUsdc: size * child.price,
+            liquidityRole: "maker",
+            fee: 0,
+            feeRateBps: 0,
+            filledAt: new Date(timestamp).toISOString(),
+          });
+          return {
+            fillId,
+            orderId: child.exchangeOrderId!,
+            clientOrderId: child.clientOrderId,
+            tokenId: child.tokenId,
+            side: "sell" as const,
+            price: child.price,
+            size,
+            liquidityRole: "maker" as const,
+            fee: 0,
+            feeRateBps: 0,
+            timestamp,
+          };
+        };
+        const setSnapshots = (exactChild: ExchangeOrder, fills: ExchangeFill[]) => {
+          vi.mocked((f.recoveryGateway as any).getOpenOrdersResult).mockResolvedValue({
+            ok: true,
+            data: exactChild.status === "PARTIALLY_FILLED" ? [exactChild] : [],
+          });
+          vi.mocked((f.recoveryGateway as any).getFillsResult).mockResolvedValue({
+            ok: true,
+            data: fills,
+          });
+          exactLookup.mockImplementation(async (orderId) => ({
+            ok: true,
+            data:
+              orderId === predecessor.exchangeOrderId
+                ? exactOrder(predecessor, "CANCELLED")
+                : exactChild,
+          }));
+        };
+        f.positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([]);
+        f.inventoryLots.findOpen = vi.fn().mockReturnValue([]);
+        f.state.updateWalletPosition(child.tokenId, 0, fillTimestamp + 1);
+        f.orders.updateStatus(child.orderId, "cancelled", child.exchangeOrderId!);
+        setSnapshots(exactOrder(child, "CANCELLED"), []);
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(false);
+
+        const partialFill = saveChildFill("recovery-child-fill-1", 1, fillTimestamp);
+        const partialExact = exactOrder(child, "PARTIALLY_FILLED", 1);
+        f.positionRepo.findActiveByTokenId = vi
+          .fn()
+          .mockReturnValue([{ ...activePosition, size: 4 }]);
+        f.inventoryLots.findOpen = vi.fn().mockReturnValue([{ ...activeLot, remainingSize: 4 }]);
+        f.state.updateWalletPosition(child.tokenId, 4, fillTimestamp + 1);
+        f.orders.updateStatus(child.orderId, "partially-filled", child.exchangeOrderId!);
+        setSnapshots(partialExact, [partialFill]);
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(false);
+        expect(f.fills.claimForReconciliation(createFillId(partialFill.fillId))).toBe(true);
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(true);
+
+        const terminalFill = saveChildFill("recovery-child-fill-2", 4, fillTimestamp + 1);
+        expect(f.fills.claimForReconciliation(createFillId(terminalFill.fillId))).toBe(true);
+        f.orders.updateStatus(child.orderId, "filled", child.exchangeOrderId!);
+        f.positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([]);
+        f.inventoryLots.findOpen = vi.fn().mockReturnValue([]);
+        f.state.replaceWalletPositionsBatch([], fillTimestamp + 2);
+        setSnapshots(exactOrder(child, "FILLED", child.size), [partialFill, terminalFill]);
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(true);
+        vi.mocked((f.recoveryGateway as any).getOpenOrdersResult).mockResolvedValueOnce({
+          ok: false,
+          reason: "transport",
+          attempts: 1,
+        });
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(false);
+        expect(f.recoveryGateway.cancelOrder).not.toHaveBeenCalled();
       } finally {
         await f.recovery.stop();
         f.conn.close();

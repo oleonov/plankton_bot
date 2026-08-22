@@ -18,7 +18,12 @@ import type {
   ClientOrderId,
   TokenId,
 } from "@krabs/domain";
-import { createFillId, createOrderId, createTokenId } from "@krabs/domain";
+import {
+  BOUNCE_EXIT_TARGET_RULE_ID,
+  createFillId,
+  createOrderId,
+  createTokenId,
+} from "@krabs/domain";
 import { ledgerInstant, parseLedgerInstantMs, withImmediate } from "@krabs/db";
 import type { Logger } from "./logger.js";
 import { resolveOpenPositionStatus } from "./position-status.js";
@@ -29,6 +34,13 @@ import {
 } from "./modules/reconciliation/fill-reconciler.js";
 import { updateLegStateForFill } from "./modules/leg-state/update-leg-state-for-fill.js";
 import { applyOrderVerdict } from "./modules/reconciliation/order-status-resolver.js";
+import {
+  canonicalRecoveryMetadata,
+  isRecoveryChildLocalIdentity,
+  parseExitRecoveryFenceV1,
+  parseStartupExitRecoveryBlockV1,
+  type StartupExitRecoveryBlockV1,
+} from "./modules/execution/reservation-utils.js";
 
 /**
  * Thrown when the authoritative exchange fill snapshot cannot be read reliably at
@@ -73,6 +85,8 @@ export interface StartupPositionAdoptionDeps {
   botRunId: BotRunId;
   /** Relative fill-completion tolerance forwarded to importExchangeFills (#36). */
   fillCompletionTolerance?: number | undefined;
+  /** Exceptional live-lite escape hatch; absent/false preserves the normal fatal startup path. */
+  allowMissingBounceExitRecovery?: (() => boolean) | undefined;
 }
 
 /**
@@ -373,9 +387,12 @@ export async function runStartupPositionAdoption(
         `startup aborted — exact lookup unreliable for pending order ${String(orderId)}`,
       );
     if (exact.data === null) {
-      throw new Error(
-        `startup aborted — pending order ${String(orderId)} lacks exact terminal proof`,
-      );
+      if (!(await allowMissingBounceExitRecoveryStartup(deps, order, rawFills))) {
+        throw new Error(
+          `startup aborted — pending order ${String(orderId)} lacks exact terminal proof`,
+        );
+      }
+      continue;
     }
     const verdict = await applyOrderVerdict({
       orderRepo: deps.orderRepo,
@@ -395,6 +412,159 @@ export async function runStartupPositionAdoption(
   result.drainTargets = await classifyStartupTransitionTargets(deps, result, log);
 
   return result;
+}
+
+async function allowMissingBounceExitRecoveryStartup(
+  deps: StartupPositionAdoptionDeps,
+  order: Order,
+  exchangeFills: readonly ExchangeFill[],
+): Promise<boolean> {
+  if (deps.allowMissingBounceExitRecovery?.() !== true) return false;
+  const childMarker = order.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
+  if (childMarker?.version === 1 && typeof childMarker.predecessorOrderId === "string") {
+    const predecessor = deps.orderRepo.findById(createOrderId(childMarker.predecessorOrderId));
+    return Boolean(predecessor && isStrictRecoveryChildAtStartup(deps, predecessor, order));
+  }
+  return persistMissingBounceExitRecoveryBlock(deps, order, exchangeFills);
+}
+
+async function persistMissingBounceExitRecoveryBlock(
+  deps: StartupPositionAdoptionDeps,
+  order: Order,
+  exchangeFills: readonly ExchangeFill[],
+): Promise<boolean> {
+  if (deps.allowMissingBounceExitRecovery?.() !== true) return false;
+  if (
+    order.status !== "pending" ||
+    order.side !== "sell" ||
+    order.entryStyle !== "maker" ||
+    order.postOnly !== true ||
+    order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
+    !order.exchangeOrderId ||
+    !order.positionId ||
+    !order.metadata?.bounceRung ||
+    typeof order.metadata.bounceRung !== "object" ||
+    Array.isArray(order.metadata.bounceRung) ||
+    !Number.isFinite(order.price) ||
+    order.price <= 0 ||
+    !Number.isFinite(order.size) ||
+    order.size <= 0
+  ) {
+    return false;
+  }
+  const existing = parseStartupExitRecoveryBlockV1(order);
+  if (order.metadata.startupExitRecoveryBlockV1 !== undefined && !existing) {
+    throw new Error("startup missing-bounce recovery marker is invalid");
+  }
+  if (existing) return true;
+  const existingFence = parseExitRecoveryFenceV1(order);
+  if (order.metadata.exitRecoveryFenceV1 !== undefined && !existingFence) {
+    throw new Error("startup missing-bounce recovery fence is invalid");
+  }
+  if (existingFence) return existingFence.phase === "complete";
+  const positions = deps.positionRepo.findActiveByTokenId(order.tokenId);
+  if (
+    positions.length !== 1 ||
+    String(positions[0]!.positionId) !== String(order.positionId) ||
+    String(positions[0]!.conditionId) !== String(order.conditionId) ||
+    positions[0]!.exitOwner !== "bounce" ||
+    !Number.isFinite(positions[0]!.size) ||
+    positions[0]!.size <= 0
+  ) {
+    return false;
+  }
+  const market = deps.marketRepo.findByTokenId(order.tokenId);
+  if (!market?.active || String(market.conditionId) !== String(order.conditionId)) return false;
+  const fifoShares = deps.inventoryLotRepo
+    .findOpen(positions[0]!.positionId)
+    .reduce((sum, lot) => sum + lot.remainingSize, 0);
+  if (
+    !Number.isFinite(fifoShares) ||
+    Math.abs(fifoShares - positions[0]!.size) > 1e-7 ||
+    order.size - positions[0]!.size > 1e-7 ||
+    deps.fillRepo.findByOrderId(order.orderId).length !== 0 ||
+    exchangeFills.some(
+      (fill) =>
+        fill.orderId === order.exchangeOrderId ||
+        fill.clientOrderId === String(order.clientOrderId),
+    )
+  ) {
+    return false;
+  }
+  const alternatives = deps.orderRepo
+    .findByTokenId(order.tokenId)
+    .filter(
+      (candidate) =>
+        candidate.orderId !== order.orderId &&
+        candidate.side === "sell" &&
+        (candidate.status === "pending" ||
+          candidate.status === "open" ||
+          candidate.status === "partially-filled"),
+    );
+  if (alternatives.length !== 0) return false;
+  const open = await deps.gateway.getOpenOrdersResult();
+  if (!open.ok) {
+    throw new StartupSnapshotUnreliableError(open.reason, open.attempts);
+  }
+  if (
+    open.data.some(
+      (candidate) =>
+        candidate.orderId === order.exchangeOrderId ||
+        String(candidate.tokenId) === String(order.tokenId),
+    )
+  ) {
+    return false;
+  }
+  if (!deps.orderRepo.updateMetadataIfUnchanged) {
+    throw new Error("startup missing-bounce recovery metadata CAS is unavailable");
+  }
+  const marker: StartupExitRecoveryBlockV1 = {
+    version: 1,
+    action: "recover_missing_bounce_exit",
+    predecessorOrderId: String(order.orderId),
+    predecessorClientOrderId: String(order.clientOrderId),
+    predecessorExchangeOrderId: order.exchangeOrderId,
+    tokenId: String(order.tokenId),
+    conditionId: String(order.conditionId),
+    positionId: String(order.positionId),
+    decisionRuleId: order.decisionRuleId,
+    orderType: order.orderType,
+    price: order.price,
+    predecessorShares: order.size,
+    positionShares: positions[0]!.size,
+    bounceRungJson: canonicalRecoveryMetadata(order.metadata.bounceRung),
+    detectedAt: new Date().toISOString(),
+  };
+  const updated = deps.orderRepo.updateMetadataIfUnchanged(order.orderId, order.metadata ?? null, {
+    ...(order.metadata ?? {}),
+    startupExitRecoveryBlockV1: marker,
+  });
+  if (!updated || !parseStartupExitRecoveryBlockV1(updated)) {
+    throw new Error("startup missing-bounce recovery metadata CAS failed");
+  }
+  return true;
+}
+
+function isStrictRecoveryChildAtStartup(
+  deps: StartupPositionAdoptionDeps,
+  predecessor: Order,
+  child: Order,
+): boolean {
+  const fence = parseExitRecoveryFenceV1(predecessor);
+  if (
+    !fence ||
+    (!parseStartupExitRecoveryBlockV1(predecessor) && fence.phase !== "complete") ||
+    !isRecoveryChildLocalIdentity(predecessor, child, fence, false)
+  ) {
+    return false;
+  }
+  const siblings = deps.orderRepo.findByTokenId(predecessor.tokenId).filter((candidate) => {
+    const candidateMarker = candidate.metadata?.exitRecoveryChildV1 as
+      | Record<string, unknown>
+      | undefined;
+    return candidateMarker?.predecessorOrderId === String(predecessor.orderId);
+  });
+  return siblings.length === 1 && siblings[0]!.orderId === child.orderId;
 }
 
 /**

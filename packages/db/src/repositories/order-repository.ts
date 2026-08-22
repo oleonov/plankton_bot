@@ -131,6 +131,23 @@ export class SqliteOrderRepository implements OrderRepository {
     return rows.map((r) => this.rowToOrder(r));
   }
 
+  findStartupExitRecoveryBlocked(): Order[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM orders
+         WHERE metadata_json IS NOT NULL
+           AND ((json_valid(metadata_json)
+                 AND (json_type(metadata_json, '$.startupExitRecoveryBlockV1') IS NOT NULL
+                   OR json_type(metadata_json, '$.exitRecoveryFenceV1') IS NOT NULL))
+             OR (NOT json_valid(metadata_json)
+                 AND (instr(metadata_json, '"startupExitRecoveryBlockV1"') > 0
+                   OR instr(metadata_json, '"exitRecoveryFenceV1"') > 0)))
+         ORDER BY created_at ASC, order_id ASC`,
+      )
+      .all() as Record<string, unknown>[];
+    return rows.map((row) => this.rowToOrder(row));
+  }
+
   findByTokenId(tokenId: TokenId): Order[] {
     const rows = this.db.prepare("SELECT * FROM orders WHERE token_id = ?").all(tokenId) as Record<
       string,

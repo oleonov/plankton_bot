@@ -137,7 +137,9 @@ import {
   getReservedSellSize,
   canonicalRecoveryMetadata,
   isExitRecoveryFencedPredecessor,
+  isRecoveryChildLocalIdentity,
   parseExitRecoveryFenceV1,
+  parseStartupExitRecoveryBlockV1,
   type ExitRecoveryFenceV1,
   type PendingReservation,
   type ReservationSnapshot,
@@ -355,7 +357,9 @@ export interface ExecutionModuleDeps {
   gateway: ExchangeGateway;
   bus: EventBus;
   marketRepo: MarketRepository;
-  orderRepo: OrderRepository;
+  orderRepo: OrderRepository & {
+    findStartupExitRecoveryBlocked?(): Order[];
+  };
   fillRepo: FillRepository;
   positionRepo?: PositionRepository | undefined;
   /**
@@ -829,8 +833,8 @@ export class ExecutionModule implements RuntimeModule {
 
   /**
    * Finding 6: latch/unlatch the hard startup fence. `begin` is called BEFORE the
-   * supervisor starts and `end` right AFTER the startup transitions are seeded, so no
-   * placement can slip through the resume-before-seed window regardless of pause state.
+   * supervisor starts and `end` only after READY_PAUSED is durably published, so no
+   * placement or recovery can slip through the pre-readiness window.
    */
   beginStartupFence(): void {
     this.startupFenceActive = true;
@@ -2644,11 +2648,44 @@ export class ExecutionModule implements RuntimeModule {
     ).length;
   }
 
+  async authorizeResumeAfterStartupExitRecovery(): Promise<boolean> {
+    let predecessors: Order[] = [];
+    try {
+      if (!this.deps.orderRepo.findStartupExitRecoveryBlocked) {
+        throw new Error("startup exit-recovery blocker lookup is unavailable");
+      }
+      predecessors = this.deps.orderRepo.findStartupExitRecoveryBlocked();
+      for (const predecessor of predecessors) {
+        if (
+          predecessor.metadata?.startupExitRecoveryBlockV1 !== undefined &&
+          !parseStartupExitRecoveryBlockV1(predecessor)
+        ) {
+          throw new Error("startup exit-recovery marker is invalid");
+        }
+        const fence = parseExitRecoveryFenceV1(predecessor);
+        if (fence?.phase !== "complete") {
+          throw new Error("startup exit-recovery fence is incomplete");
+        }
+        this.requireRecoveryPredecessor(predecessor, true);
+        const child = this.deps.orderRepo.findByClientOrderId(fence.childClientOrderId);
+        if (!child) throw new Error("startup exit-recovery child is missing");
+        await this.verifyRecoveryChild(predecessor, child, fence, true);
+      }
+      return true;
+    } catch (err) {
+      this.log.warn(
+        { err, blockerCount: predecessors.length },
+        "resume blocked — startup missing-bounce recovery coverage is not proven",
+      );
+      return false;
+    }
+  }
+
   async recoverMissingBounceExit(
     predecessorOrderId: OrderId,
     operatorCommandId: number,
   ): Promise<MissingBounceExitRecoveryResult> {
-    if (!this.started) return { status: "deferred" };
+    if (!this.started || this.startupFenceActive) return { status: "deferred" };
     const key = String(predecessorOrderId);
     if (this.exitRecoveriesInFlight.has(key)) return { status: "deferred" };
     this.exitRecoveriesInFlight.add(key);
@@ -2769,7 +2806,7 @@ export class ExecutionModule implements RuntimeModule {
       const completedAt = await this.verifyRecoveryChild(predecessor, child, fence);
       if (fence.phase !== "complete") {
         fence = { ...fence, phase: "complete", completedAt, childOrderId: String(child.orderId) };
-        this.casRecoveryFence(predecessor, fence);
+        this.casRecoveryFence(predecessor, fence, true);
       }
       return { status: "applied", completedAt };
     } catch (error) {
@@ -2815,11 +2852,15 @@ export class ExecutionModule implements RuntimeModule {
   private requireRecoveryPredecessor(order: Order, fenced: boolean): Order {
     const working =
       order.status === "pending" || order.status === "open" || order.status === "partially-filled";
+    const markerBackedTerminal =
+      parseStartupExitRecoveryBlockV1(order) !== null &&
+      (order.status === "cancelled" || order.status === "rejected");
+    const fencedTerminal = fenced && (order.status === "cancelled" || order.status === "rejected");
     if (
       order.side !== "sell" ||
       order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
       order.postOnly !== true ||
-      (!working && !(fenced && order.status === "cancelled")) ||
+      (!working && !fencedTerminal && !markerBackedTerminal) ||
       !order.exchangeOrderId ||
       !order.positionId ||
       !order.metadata?.bounceRung
@@ -2896,6 +2937,7 @@ export class ExecutionModule implements RuntimeModule {
     }
     const metadata = { ...(predecessor.metadata ?? {}) } as Record<string, unknown>;
     delete metadata.exitRecoveryFenceV1;
+    delete metadata.startupExitRecoveryBlockV1;
     return {
       type: "PlaceOrderCommand",
       commandId: createCommandId(`exit-recovery:${String(predecessor.orderId)}`),
@@ -3014,7 +3056,22 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   private assertPredecessorAbsent(snapshot: ExitRecoverySnapshot, predecessor: Order): void {
-    if (snapshot.exactPredecessor !== null) throw new Error("predecessor exact order reappeared");
+    const exact = snapshot.exactPredecessor;
+    if (
+      exact !== null &&
+      !(
+        exact.orderId === predecessor.exchangeOrderId &&
+        String(exact.tokenId) === String(predecessor.tokenId) &&
+        exact.side === "sell" &&
+        this.sameShares(exact.price, predecessor.price) &&
+        this.sameShares(exact.sizeTotal, predecessor.size) &&
+        this.sameShares(exact.sizeFilled, 0) &&
+        this.sameShares(exact.sizeRemaining, predecessor.size) &&
+        (exact.status === "CANCELLED" || exact.status === "EXPIRED" || exact.status === "REJECTED")
+      )
+    ) {
+      throw new Error("predecessor exact order reappeared or is not safely terminal");
+    }
     if (snapshot.openOrders.some((order) => order.orderId === predecessor.exchangeOrderId)) {
       throw new Error("predecessor is present in open orders");
     }
@@ -3078,11 +3135,20 @@ export class ExecutionModule implements RuntimeModule {
     };
   }
 
-  private casRecoveryFence(predecessor: Order, fence: ExitRecoveryFenceV1): Order {
+  private casRecoveryFence(
+    predecessor: Order,
+    fence: ExitRecoveryFenceV1,
+    clearStartupBlock = false,
+  ): Order {
+    const metadata: Record<string, unknown> = {
+      ...(predecessor.metadata ?? {}),
+      exitRecoveryFenceV1: fence,
+    };
+    if (clearStartupBlock) delete metadata.startupExitRecoveryBlockV1;
     const updated = this.deps.orderRepo.updateMetadataIfUnchanged!(
       predecessor.orderId,
       predecessor.metadata ?? null,
-      { ...(predecessor.metadata ?? {}), exitRecoveryFenceV1: fence },
+      metadata,
     );
     if (!updated) throw new Error("exit recovery metadata CAS failed");
     return updated;
@@ -3222,30 +3288,7 @@ export class ExecutionModule implements RuntimeModule {
     fence: ExitRecoveryFenceV1,
     requireWorking: boolean,
   ): void {
-    const marker = child.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
-    const working =
-      child.status === "pending" || child.status === "open" || child.status === "partially-filled";
-    if (
-      (requireWorking && !working) ||
-      marker?.version !== 1 ||
-      marker.predecessorOrderId !== String(predecessor.orderId) ||
-      marker.childClientOrderId !== fence.childClientOrderId ||
-      marker.coverage !== "full_active_residual" ||
-      marker.predecessorShares !== predecessor.size ||
-      marker.residualShares !== fence.residualShares ||
-      String(child.clientOrderId) !== fence.childClientOrderId ||
-      String(child.tokenId) !== fence.tokenId ||
-      String(child.conditionId) !== fence.conditionId ||
-      String(child.positionId) !== fence.positionId ||
-      child.side !== "sell" ||
-      child.postOnly !== true ||
-      child.orderType !== predecessor.orderType ||
-      child.price !== predecessor.price ||
-      !this.sameShares(child.size, fence.residualShares) ||
-      child.decisionRuleId !== fence.decisionRuleId ||
-      canonicalRecoveryMetadata(child.metadata?.bounceRung) !== fence.bounceRungJson ||
-      !child.exchangeOrderId
-    ) {
+    if (!isRecoveryChildLocalIdentity(predecessor, child, fence, requireWorking)) {
       throw new UnsafeRecoveryChildError("recovery child identity mismatch");
     }
   }
@@ -3269,6 +3312,7 @@ export class ExecutionModule implements RuntimeModule {
     predecessor: Order,
     child: Order,
     fence: ExitRecoveryFenceV1,
+    allowReconciledTerminal = false,
   ): Promise<string> {
     if (!child.exchangeOrderId) throw new Error("recovery child has no exact exchange identity");
     const [snapshot, exactChild] = await Promise.all([
@@ -3276,13 +3320,35 @@ export class ExecutionModule implements RuntimeModule {
       this.deps.gateway.getOrderResult!(child.exchangeOrderId),
     ]);
     if (!exactChild.ok) throw new Error("recovery child exact state is unreliable");
-    this.assertRecoveryChildLocalIdentity(predecessor, child, fence, true);
+    this.assertRecoveryChildLocalIdentity(predecessor, child, fence, false);
     const siblings = this.deps.orderRepo.findByTokenId(predecessor.tokenId).filter((order) => {
       const marker = order.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
       return marker?.predecessorOrderId === String(predecessor.orderId);
     });
     if (siblings.length !== 1 || siblings[0]!.orderId !== child.orderId) {
       throw new UnsafeRecoveryChildError("recovery sibling prevention failed");
+    }
+    const reconciledCoverage = allowReconciledTerminal
+      ? this.reconciledRecoveryCoverage(predecessor, child, fence, snapshot, exactChild.data)
+      : null;
+    if (reconciledCoverage) {
+      this.assertPredecessorAbsent(snapshot, predecessor);
+      this.assertAssetOpenOrders(
+        snapshot,
+        predecessor.tokenId,
+        reconciledCoverage === "partial" ? child.exchangeOrderId : null,
+      );
+      this.refreshExchangeSellSnapshot(snapshot.openOrders);
+      return fence.completedAt ?? new Date().toISOString();
+    }
+    this.assertRecoveryChildLocalIdentity(predecessor, child, fence, true);
+    if (
+      !this.sameShares(
+        this.resolveRecoveryResidual(predecessor, snapshot.fills),
+        fence.residualShares,
+      )
+    ) {
+      throw new UnsafeRecoveryChildError("recovery child no longer covers the active residual");
     }
     this.assertRecoveryChildSnapshotSafe(snapshot, predecessor, child.exchangeOrderId);
     if (
@@ -3306,6 +3372,91 @@ export class ExecutionModule implements RuntimeModule {
     }
     this.refreshExchangeSellSnapshot(snapshot.openOrders);
     return fence.completedAt ?? new Date().toISOString();
+  }
+
+  private reconciledRecoveryCoverage(
+    predecessor: Order,
+    child: Order,
+    fence: ExitRecoveryFenceV1,
+    snapshot: ExitRecoverySnapshot,
+    exactChild: ExchangeOrder | null,
+  ): "partial" | "terminal" | null {
+    if (
+      !exactChild ||
+      exactChild.orderId !== child.exchangeOrderId ||
+      String(exactChild.tokenId) !== String(child.tokenId) ||
+      exactChild.side !== "sell" ||
+      !this.sameShares(exactChild.price, predecessor.price) ||
+      !this.sameShares(exactChild.sizeTotal, fence.residualShares)
+    ) {
+      return null;
+    }
+    const positions = this.deps.positionRepo?.findActiveByTokenId(predecessor.tokenId) ?? [];
+    const lots = this.deps.inventoryLotRepo?.findOpen(predecessor.positionId!) ?? [];
+    const walletShares = this.deps.exchangeStateStore?.getWalletPositionSize(predecessor.tokenId);
+    const walletCapturedAt = this.deps.exchangeStateStore?.getWalletPositionCapturedAt(
+      predecessor.tokenId,
+    );
+    const authoritativeZero =
+      walletShares == null
+        ? this.deps.exchangeStateStore?.getAuthoritativeWalletZero(predecessor.tokenId)
+        : null;
+    const effectiveWalletShares = walletShares ?? authoritativeZero?.size;
+    const effectiveWalletCapturedAt = walletCapturedAt ?? authoritativeZero?.capturedAt;
+    const exchangeFills = snapshot.fills.filter(
+      (fill) =>
+        fill.orderId === child.exchangeOrderId ||
+        fill.clientOrderId === String(child.clientOrderId),
+    );
+    const localFills = this.deps.fillRepo.findByOrderId(child.orderId);
+    const unreconciledIds = new Set(
+      this.deps.fillRepo.findUnreconciled().map((fill) => String(fill.fillId)),
+    );
+    const latestTokenFillAt = snapshot.fills
+      .filter((fill) => String(fill.tokenId) === String(predecessor.tokenId))
+      .reduce((latest, fill) => Math.max(latest, fill.timestamp), 0);
+    const exchangeShares = exchangeFills.reduce((sum, fill) => sum + fill.size, 0);
+    const localShares = localFills.reduce((sum, fill) => sum + fill.size, 0);
+    const fillIds = (fills: readonly { fillId: string }[]) =>
+      fills
+        .map((fill) => String(fill.fillId))
+        .sort()
+        .join("\0");
+    if (
+      exchangeShares <= 0 ||
+      !this.sameShares(exchangeShares, localShares) ||
+      !this.sameShares(exchangeShares, exactChild.sizeFilled) ||
+      !this.sameShares(exactChild.sizeRemaining, fence.residualShares - exchangeShares) ||
+      fillIds(exchangeFills) !== fillIds(localFills) ||
+      localFills.some((fill) => unreconciledIds.has(String(fill.fillId))) ||
+      effectiveWalletShares == null ||
+      effectiveWalletCapturedAt == null ||
+      effectiveWalletCapturedAt < latestTokenFillAt
+    ) {
+      return null;
+    }
+    const fifoShares = lots.reduce((sum, lot) => sum + lot.remainingSize, 0);
+    if (exactChild.status === "PARTIALLY_FILLED" && child.status === "partially-filled") {
+      const position = positions[0];
+      return positions.length === 1 &&
+        String(position?.positionId) === String(predecessor.positionId) &&
+        String(position?.conditionId) === String(predecessor.conditionId) &&
+        this.sameShares(position?.size ?? NaN, exactChild.sizeRemaining) &&
+        this.sameShares(fifoShares, exactChild.sizeRemaining) &&
+        this.sameShares(effectiveWalletShares, exactChild.sizeRemaining)
+        ? "partial"
+        : null;
+    }
+    return child.status === "filled" &&
+      (exactChild.status === "FILLED" ||
+        exactChild.status === "CANCELLED" ||
+        exactChild.status === "EXPIRED") &&
+      this.sameShares(exactChild.sizeFilled, fence.residualShares) &&
+      positions.length === 0 &&
+      this.sameShares(fifoShares, 0) &&
+      this.sameShares(effectiveWalletShares, 0)
+      ? "terminal"
+      : null;
   }
 
   private sameShares(left: number, right: number): boolean {

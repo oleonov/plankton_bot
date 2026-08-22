@@ -106,6 +106,19 @@ describe("CommandPoller", () => {
     expect(paused).toBe(false);
   });
 
+  it("rejects a queued resume when durable recovery coverage is not authorized", async () => {
+    paused = true;
+    insertCommand("resume");
+    const authorizeResume = vi.fn().mockResolvedValue(false);
+
+    await createPoller({ authorizeResume }).poll();
+
+    expect(authorizeResume).toHaveBeenCalledOnce();
+    expect(paused).toBe(true);
+    expect(cmdRepo.getPending()).toHaveLength(0);
+    expect(actionRepo.findRecent(10)).toHaveLength(0);
+  });
+
   // ── Event publishing ────────────────────────────────────────────────────
 
   it("publishes OperatorCommandApplied event on success", async () => {
@@ -362,18 +375,26 @@ describe("CommandPoller", () => {
     });
 
     it.each(["deferred", "rejected"] as const)(
-      "handles %s without an applied audit",
+      "keeps deferred pending for retry and handles %s safely",
       async (status) => {
         const id = insertCommand("recover_missing_bounce_exit", "predecessor-1", "repair");
-        await createPoller({
-          recoverMissingBounceExit: vi.fn().mockResolvedValue({ status }),
-        }).poll();
-        const row = conn.db
-          .prepare("SELECT status FROM operator_commands WHERE id = ?")
-          .get(id) as {
-          status: string;
-        };
-        expect(row.status).toBe(status === "deferred" ? "pending" : "rejected");
+        const recovery = vi
+          .fn()
+          .mockResolvedValueOnce({ status })
+          .mockResolvedValue({ status: "applied", completedAt: "2026-08-22T00:00:00.000Z" });
+        const poller = createPoller({ recoverMissingBounceExit: recovery });
+        await poller.poll();
+        const readStatus = () =>
+          conn.db.prepare("SELECT status FROM operator_commands WHERE id = ?").get(id) as {
+            status: string;
+          };
+        expect(readStatus().status).toBe(status === "deferred" ? "pending" : "rejected");
+        if (status === "deferred") {
+          await poller.poll();
+          expect(readStatus().status).toBe("applied");
+          expect(recovery).toHaveBeenCalledTimes(2);
+          return;
+        }
         expect(actionRepo.findRecent(10)).toEqual([]);
       },
     );

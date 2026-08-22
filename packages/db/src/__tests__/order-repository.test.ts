@@ -302,6 +302,41 @@ describe("SqliteOrderRepository", () => {
     ).toThrow("refused for filled order");
   });
 
+  it("finds durable startup exit-recovery blockers regardless of local terminal status", () => {
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("blocked-cancelled"),
+        clientOrderId: "blocked-cancelled" as ClientOrderId,
+        status: "cancelled",
+        metadata: { startupExitRecoveryBlockV1: { version: 1 } },
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("fenced-filled"),
+        clientOrderId: "fenced-filled" as ClientOrderId,
+        status: "filled",
+        metadata: { exitRecoveryFenceV1: { version: 1, phase: "complete" } },
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("ordinary-open"),
+        clientOrderId: "ordinary-open" as ClientOrderId,
+        status: "open",
+        metadata: { bounceRung: { rungIndex: 0 } },
+      }),
+    );
+    conn.db
+      .prepare("UPDATE orders SET metadata_json = ? WHERE order_id = 'ordinary-open'")
+      .run('{"unrelatedLegacy":');
+
+    expect(repo.findStartupExitRecoveryBlocked().map((order) => order.orderId)).toEqual([
+      createOrderId("blocked-cancelled"),
+      createOrderId("fenced-filled"),
+    ]);
+  });
+
   it("updates metadata by order_id and returns the persisted order", () => {
     repo.save(
       makeOrder({

@@ -78,6 +78,7 @@ export class ExchangeStateStore {
   private readonly now: () => number;
   private lastExchangeOrdersCaptureMs: number | null = null;
   private lastWalletCaptureMs: number | null = null;
+  private lastCompleteWalletCaptureMs: number | null = null;
 
   constructor(opts: ExchangeStateStoreOptions = {}) {
     this.balanceRejectBlockMs = opts.balanceRejectBlockMs ?? DEFAULT_BALANCE_REJECT_BLOCK_MS;
@@ -182,6 +183,7 @@ export class ExchangeStateStore {
     this.walletByToken.clear();
     this.updateWalletPositionsBatch(rows, capturedAtMs);
     this.lastWalletCaptureMs = capturedAtMs;
+    this.lastCompleteWalletCaptureMs = capturedAtMs;
   }
 
   /**
@@ -242,6 +244,15 @@ export class ExchangeStateStore {
     if (!entry) return null;
     if (this.now() - entry.capturedAtMs > this.snapshotMaxAgeMs) return null;
     return entry.capturedAtMs;
+  }
+
+  getAuthoritativeWalletZero(
+    tokenId: TokenId | string,
+  ): { readonly size: 0; readonly capturedAt: number } | null {
+    if (this.walletByToken.has(String(tokenId))) return null;
+    const capturedAt = this.lastCompleteWalletCaptureMs;
+    if (capturedAt === null || this.now() - capturedAt > this.snapshotMaxAgeMs) return null;
+    return { size: 0, capturedAt };
   }
 
   /** Mark a token as blocked from new SELLs for the configured TTL. */

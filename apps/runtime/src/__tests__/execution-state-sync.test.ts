@@ -408,6 +408,21 @@ describe("ExchangeStateStore — drift metrics", () => {
     expect(metrics.walletPositionRemoteOnlyRedeemableAbs).toBe(4);
   });
 
+  it("proves an absent token as zero only from a fresh complete wallet snapshot", () => {
+    let now = 1_000;
+    const store = new ExchangeStateStore({ snapshotMaxAgeMs: 1_000, now: () => now });
+    expect(store.getAuthoritativeWalletZero("tok-absent")).toBeNull();
+    store.updateWalletPositionsBatch([{ tokenId: "tok-other", size: 2 }], 1_000);
+    expect(store.getAuthoritativeWalletZero("tok-absent")).toBeNull();
+    store.replaceWalletPositionsBatch([], 1_100);
+    expect(store.getAuthoritativeWalletZero("tok-absent")).toEqual({ size: 0, capturedAt: 1_100 });
+    store.updateWalletPosition("tok-absent", 1, 1_200);
+    expect(store.getAuthoritativeWalletZero("tok-absent")).toBeNull();
+    store.replaceWalletPositionsBatch([], 1_300);
+    now = 2_301;
+    expect(store.getAuthoritativeWalletZero("tok-absent")).toBeNull();
+  });
+
   it("classifies local active drift separately from remote-only redeemable drift", () => {
     const store = new ExchangeStateStore({ now: () => 1_000_000 });
     store.replaceWalletPositionsBatch(

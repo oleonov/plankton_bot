@@ -18,6 +18,7 @@ import {
   createOrderId,
   createPositionId,
   createTokenId,
+  BOUNCE_EXIT_TARGET_RULE_ID,
   GATE_ENTRY_RULE_ID,
   R23_DIP_TRIGGER_RULE_ID,
   type ClientOrderId,
@@ -34,6 +35,7 @@ import {
   runDrainedOrderFenceGate,
   runOwnershipInvariantStartupGate,
 } from "../modules/exit-ownership/assert-bounce-for-all-invariant.js";
+import { canonicalRecoveryMetadata } from "../modules/execution/reservation-utils.js";
 
 const TOKEN_ID = createTokenId("tok-btc-yes");
 
@@ -83,6 +85,73 @@ function seedMarket(repo: SqliteMarketRepository): void {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   });
+}
+
+function seedMissingBounceCandidate(
+  conn: ReturnType<typeof bootstrapLedgerDb>,
+  opts: { postOnly?: boolean } = {},
+) {
+  const orderRepo = new SqliteOrderRepository(conn.db);
+  const positionId = createPositionId("pos-missing-bounce");
+  const sourceOrderId = createOrderId("ord-missing-bounce-source");
+  const predecessorId = createOrderId("ord-missing-bounce-predecessor");
+  const now = new Date().toISOString();
+  conn.db
+    .prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price, cost_basis_usdc,
+          status, entry_style, entry_lane, exit_owner, opened_at, updated_at)
+       VALUES (?, ?, 'cond-1', 'buy', 5, 0.2, 1, 'open', 'maker', 'R23', 'bounce', ?, ?)`,
+    )
+    .run(positionId, TOKEN_ID, now, now);
+  conn.db
+    .prepare(
+      `INSERT INTO orders
+         (order_id, client_order_id, token_id, condition_id, side, order_type, post_only,
+          price, size, size_usdc, status, bot_run_id, created_at, updated_at)
+       VALUES (?, 'coid-source', ?, 'cond-1', 'buy', 'GTC', 0, 0.2, 5, 1,
+               'filled', 'run-1', ?, ?)`,
+    )
+    .run(sourceOrderId, TOKEN_ID, now, now);
+  conn.db
+    .prepare(
+      `INSERT INTO fills
+         (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at)
+       VALUES ('fill-source', ?, ?, 'cond-1', 'buy', 0.2, 5, 1, ?)`,
+    )
+    .run(sourceOrderId, TOKEN_ID, now);
+  conn.db
+    .prepare(
+      `INSERT INTO inventory_lots
+         (lot_id, position_id, token_id, side, size, remaining_size, entry_price,
+          cost_usdc, fill_id, created_at)
+       VALUES ('lot-source', ?, ?, 'buy', 5, 5, 0.2, 1, 'fill-source', ?)`,
+    )
+    .run(positionId, TOKEN_ID, now);
+  orderRepo.save({
+    orderId: predecessorId,
+    clientOrderId: "coid-missing-bounce" as ClientOrderId,
+    exchangeOrderId: "ex-missing-bounce",
+    tokenId: TOKEN_ID,
+    conditionId: createConditionId("cond-1"),
+    positionId,
+    side: "sell",
+    orderType: "GTC",
+    postOnly: opts.postOnly ?? true,
+    price: 0.3,
+    size: 1.5,
+    sizeUsdc: 0.45,
+    status: "pending",
+    signalId: null,
+    signalReason: "bounce-exit",
+    decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+    entryStyle: "maker",
+    metadata: { bounceRung: { ladderId: "ladder-1", rungIndex: 0 } },
+    botRunId: createBotRunId("run-1"),
+    createdAt: now,
+    updatedAt: now,
+  });
+  return { orderRepo, predecessorId };
 }
 
 describe("runStartupPositionAdoption", () => {
@@ -210,6 +279,167 @@ describe("runStartupPositionAdoption", () => {
         1,
       );
     }
+  });
+
+  it("restarts through marked missing-bounce child ambiguity and complete exact coverage", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const marketRepo = new SqliteMarketRepository(conn.db);
+    seedMarket(marketRepo);
+    const { orderRepo, predecessorId } = seedMissingBounceCandidate(conn);
+    const deps = {
+      gateway: {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
+      },
+      marketRepo,
+      orderRepo,
+      fillRepo: new SqliteFillRepository(conn.db),
+      positionRepo: new SqlitePositionRepository(conn.db),
+      inventoryLotRepo: new SqliteInventoryLotRepository(conn.db),
+      legStateRepo: new SqliteLegStateRepository(conn.db),
+      log: silentLog,
+      db: conn.db,
+      botRunId: createBotRunId("run-1"),
+      allowMissingBounceExitRecovery: () => true,
+    };
+
+    await runStartupPositionAdoption(deps);
+    const marker = orderRepo.findById(predecessorId)?.metadata?.startupExitRecoveryBlockV1;
+    expect(marker).toMatchObject({
+      predecessorOrderId: String(predecessorId),
+      positionShares: 5,
+    });
+
+    await runStartupPositionAdoption(deps);
+    expect(orderRepo.findById(predecessorId)?.metadata?.startupExitRecoveryBlockV1).toEqual(marker);
+
+    const predecessor = orderRepo.findById(predecessorId)!;
+    const childOrderId = createOrderId("ord-missing-bounce-recovery");
+    const childClientOrderId = "plk_missing_bounce_recovery" as ClientOrderId;
+    const now = new Date().toISOString();
+    const hash = "a".repeat(64);
+    const incompleteFence = {
+      version: 1 as const,
+      action: "recover_missing_bounce_exit" as const,
+      operatorCommandId: 7,
+      predecessorOrderId: String(predecessorId),
+      tokenId: String(predecessor.tokenId),
+      conditionId: String(predecessor.conditionId),
+      positionId: String(predecessor.positionId),
+      decisionRuleId: predecessor.decisionRuleId!,
+      bounceRungJson: canonicalRecoveryMetadata(predecessor.metadata?.bounceRung),
+      createdAt: now,
+      preOpenSnapshotHash: hash,
+      preFillSnapshotHash: hash,
+      preFillWatermark: "0:none:0",
+      residualShares: 5,
+      childClientOrderId: String(childClientOrderId),
+      phase: "child_pending" as const,
+      fenceCompletedAt: now,
+      postFenceOpenSnapshotHash: hash,
+      postFenceFillSnapshotHash: hash,
+      postFenceFillWatermark: "0:none:0",
+    };
+    orderRepo.updateMetadata(predecessorId, {
+      ...predecessor.metadata,
+      exitRecoveryFenceV1: incompleteFence,
+    });
+    orderRepo.save({
+      ...predecessor,
+      orderId: childOrderId,
+      clientOrderId: childClientOrderId,
+      exchangeOrderId: "ex-missing-bounce-recovery",
+      size: 5,
+      sizeUsdc: 1.5,
+      status: "pending",
+      metadata: {
+        bounceRung: predecessor.metadata?.bounceRung,
+        exitRecoveryChildV1: {
+          version: 1,
+          predecessorOrderId: String(predecessorId),
+          childClientOrderId: String(childClientOrderId),
+          coverage: "full_active_residual",
+          predecessorShares: predecessor.size,
+          residualShares: 5,
+        },
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await runStartupPositionAdoption(deps);
+
+    const exactChild = {
+      orderId: "ex-missing-bounce-recovery",
+      clientOrderId: String(childClientOrderId),
+      tokenId: predecessor.tokenId,
+      side: "sell" as const,
+      price: predecessor.price,
+      sizeTotal: 5,
+      sizeFilled: 1,
+      sizeRemaining: 4,
+      status: "PARTIALLY_FILLED" as const,
+      createdAt: Date.now(),
+    };
+    const completedMetadata = { ...orderRepo.findById(predecessorId)!.metadata };
+    delete completedMetadata.startupExitRecoveryBlockV1;
+    orderRepo.updateMetadata(predecessorId, {
+      ...completedMetadata,
+      exitRecoveryFenceV1: {
+        ...incompleteFence,
+        phase: "complete",
+        completedAt: now,
+        childOrderId: String(childOrderId),
+      },
+    });
+    vi.mocked(deps.gateway.getOpenOrdersResult).mockResolvedValue({
+      ok: true,
+      data: [exactChild],
+    });
+    vi.mocked(deps.gateway.getOrderResult).mockImplementation(async (orderId) => ({
+      ok: true,
+      data: orderId === exactChild.orderId ? exactChild : null,
+    }));
+    await runStartupPositionAdoption(deps);
+
+    orderRepo.updateMetadata(predecessorId, {
+      ...orderRepo.findById(predecessorId)!.metadata,
+      startupExitRecoveryBlockV1: { version: 99 },
+    });
+    await expect(runStartupPositionAdoption(deps)).rejects.toThrow("marker is invalid");
+  });
+
+  it("keeps an ineligible exact-notFound pending order on the fatal startup path", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const marketRepo = new SqliteMarketRepository(conn.db);
+    seedMarket(marketRepo);
+    const { orderRepo, predecessorId } = seedMissingBounceCandidate(conn, { postOnly: false });
+
+    await expect(
+      runStartupPositionAdoption({
+        gateway: {
+          getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+          getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+          getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
+        },
+        marketRepo,
+        orderRepo,
+        fillRepo: new SqliteFillRepository(conn.db),
+        positionRepo: new SqlitePositionRepository(conn.db),
+        inventoryLotRepo: new SqliteInventoryLotRepository(conn.db),
+        legStateRepo: new SqliteLegStateRepository(conn.db),
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-1"),
+        allowMissingBounceExitRecovery: () => true,
+      }),
+    ).rejects.toThrow("pending order");
+    expect(orderRepo.findById(predecessorId)?.metadata).toEqual({
+      bounceRung: { ladderId: "ladder-1", rungIndex: 0 },
+    });
   });
 
   it("Release A Phase 3 (P6): startup fence quarantines mismatched/NULL-positionId working SELLs as drain targets before servicing resumes", async () => {
