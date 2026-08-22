@@ -138,6 +138,7 @@ function makeMakerEntryPolicy(overrides?: Partial<MakerEntryPolicy>): MakerEntry
     whitelistConditionIds: [String(COND_ID)],
     microMaxOrderUsdc: 10,
     microMaxOpenUsdc: 50,
+    captureBookReprice: { enabled: false, maxRepricesPerRoot: 5 },
     collapseFloorPrice: null,
     ...overrides,
   };

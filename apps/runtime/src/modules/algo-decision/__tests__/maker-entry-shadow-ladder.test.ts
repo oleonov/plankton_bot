@@ -26,6 +26,7 @@ function makePolicy(overrides: Partial<MakerEntryPolicy> = {}): MakerEntryPolicy
     whitelistConditionIds: [],
     microMaxOrderUsdc: 5,
     microMaxOpenUsdc: 25,
+    captureBookReprice: { enabled: false, maxRepricesPerRoot: 5 },
     collapseFloorPrice: null,
     ...overrides,
   };

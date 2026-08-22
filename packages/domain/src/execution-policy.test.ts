@@ -2843,6 +2843,34 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
   });
 });
 
+describe("makerEntry.captureBookReprice", () => {
+  it("defaults off and accepts only an enabled integer cap from 1 through 5", () => {
+    expect(parseExecutionPolicyJson("{}").policy.makerEntry.captureBookReprice).toEqual({
+      enabled: false,
+      maxRepricesPerRoot: 5,
+    });
+    expect(
+      parseExecutionPolicyJson(
+        JSON.stringify({
+          makerEntry: { captureBookReprice: { enabled: true, maxRepricesPerRoot: 3 } },
+        }),
+      ).policy.makerEntry.captureBookReprice,
+    ).toEqual({ enabled: true, maxRepricesPerRoot: 3 });
+  });
+
+  it.each([undefined, 0, 6, 1.5, "5"])("fails closed for invalid enabled cap %s", (cap) => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        makerEntry: { captureBookReprice: { enabled: true, maxRepricesPerRoot: cap } },
+      }),
+    );
+    expect(parsed.policy.makerEntry.captureBookReprice.enabled).toBe(false);
+    expect(parsed.issues).toContain(
+      "makerEntry.captureBookReprice.maxRepricesPerRoot must be an integer from 1 to 5",
+    );
+  });
+});
+
 describe("makerEntry.microLiveWindow", () => {
   it("keeps the optional block absent and serialization unchanged when disabled", () => {
     const parsed = parseExecutionPolicyJson("{}");

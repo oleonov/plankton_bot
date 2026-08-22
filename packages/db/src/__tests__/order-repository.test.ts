@@ -12,7 +12,7 @@ import {
   createPositionId,
   createBotRunId,
 } from "@krabs/domain";
-import type { Order, ClientOrderId } from "@krabs/domain";
+import type { Order, ClientOrderId, MakerCaptureRepriceIntent } from "@krabs/domain";
 
 let conn: DbConnection;
 let tmpDir: string;
@@ -35,6 +35,27 @@ function makeOrder(overrides?: Partial<Order>): Order {
     signalId: null,
     signalReason: null,
     botRunId: createBotRunId("run-1"),
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function makeIntent(overrides: Partial<MakerCaptureRepriceIntent> = {}): MakerCaptureRepriceIntent {
+  const now = "2026-08-20T10:05:00.000Z";
+  return {
+    intentId: "capture-intent-1",
+    predecessorOrderId: createOrderId("capture-root"),
+    lifecycleSignalId: "capture-reprice-signal-1",
+    rootOrderId: createOrderId("capture-root"),
+    tokenId: createTokenId("tok-1"),
+    conditionId: createConditionId("cond-1"),
+    replacementIndex: 1,
+    status: "cancel_pending",
+    candidatePrice: null,
+    replacementSize: null,
+    childOrderId: null,
+    failure: null,
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -667,6 +688,123 @@ describe("SqliteOrderRepository", () => {
       committedConditionIds: expect.arrayContaining(["cond-1", "cond-2"]),
       filledUsdc: 0.25,
     });
+  });
+
+  it("persists one deterministic reprice intent and applies status changes with CAS", () => {
+    const intent = makeIntent();
+    expect(repo.claimMakerCaptureRepriceIntent(intent)).toBe(true);
+    expect(repo.claimMakerCaptureRepriceIntent(intent)).toBe(false);
+    expect(repo.findMakerCaptureRepriceIntentBySignal(intent.lifecycleSignalId)).toMatchObject({
+      intentId: intent.intentId,
+      status: "cancel_pending",
+    });
+    expect(repo.markMakerCaptureRepriceReady(intent.intentId, 0.11, 8)).toBe(true);
+    expect(repo.markMakerCaptureRepriceReady(intent.intentId, 0.12, 7)).toBe(false);
+    expect(
+      repo.markMakerCaptureRepriceSubmitted(intent.intentId, createOrderId("capture-child")),
+    ).toBe(true);
+    expect(repo.markMakerCaptureRepriceTerminal(intent.intentId, "completed")).toBe(true);
+    expect(repo.markMakerCaptureRepriceTerminal(intent.intentId, "failed", "late")).toBe(false);
+    expect(repo.findRecoverableMakerCaptureRepriceIntents()).toEqual([]);
+    expect(
+      conn.db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get("maker_capture_reprice_intents"),
+    ).toBeTruthy();
+  });
+
+  it("counts a trusted root once, all chain fills, and invalid siblings conservatively", () => {
+    const createdAt = "2026-08-20T10:00:00.000Z";
+    const rootLineage = {
+      version: 1,
+      rootOrderId: "capture-root",
+      predecessorOrderId: null,
+      replacementIndex: 0,
+      rootNotionalUsdc: 1,
+    } as const;
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("capture-root"),
+        clientOrderId: "capture-root-client" as ClientOrderId,
+        status: "cancelled",
+        price: 0.1,
+        size: 10,
+        sizeUsdc: 1,
+        entryStyle: "maker",
+        postOnly: true,
+        signalId: "root-signal",
+        signalReason: "probe-entry",
+        decisionRuleId: "R23_DIP_TRIGGER",
+        metadata: { makerCaptureLineageV1: rootLineage },
+        createdAt,
+        updatedAt: createdAt,
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("capture-child"),
+        clientOrderId: "capture-child-client" as ClientOrderId,
+        status: "open",
+        price: 0.11,
+        size: 8,
+        sizeUsdc: 0.88,
+        entryStyle: "maker",
+        postOnly: true,
+        signalId: "capture-reprice-signal-1",
+        signalReason: "probe-entry",
+        decisionRuleId: "R23_DIP_TRIGGER",
+        metadata: {
+          makerCaptureLineageV1: {
+            ...rootLineage,
+            predecessorOrderId: "capture-root",
+            replacementIndex: 1,
+          },
+        },
+        createdAt: "2026-08-20T12:00:00.000Z",
+        updatedAt: "2026-08-20T12:00:00.000Z",
+      }),
+    );
+    const intent = makeIntent();
+    repo.claimMakerCaptureRepriceIntent(intent);
+    repo.markMakerCaptureRepriceReady(intent.intentId, 0.11, 8);
+    repo.markMakerCaptureRepriceSubmitted(intent.intentId, createOrderId("capture-child"));
+    const insertFill = conn.db.prepare(
+      `INSERT INTO fills
+       (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc)
+       VALUES (?, ?, 'tok-1', 'cond-1', 'buy', ?, ?, ?)`,
+    );
+    insertFill.run("capture-root-fill", "capture-root", 0.1, 2, 0.2);
+    insertFill.run("capture-child-fill", "capture-child", 0.11, 1, 0.11);
+
+    expect(
+      repo.getMakerBuyWindowUsage(
+        "2026-08-20T09:00:00.000Z",
+        "2026-08-20T12:00:00.000Z",
+        "cond-1",
+        "unused",
+      ),
+    ).toMatchObject({ committedUsdc: 1, conditionCommittedUsdc: 1, filledUsdc: 0.31 });
+    expect(repo.getMakerCaptureChainUsage(createOrderId("capture-child"))).toMatchObject({
+      trusted: true,
+      rootNotionalUsdc: 1,
+      chainFilledUsdc: 0.31,
+      predecessorRemainingShares: 7,
+      replacementIndex: 1,
+    });
+
+    conn.db
+      .prepare("UPDATE orders SET created_at = ? WHERE order_id = 'capture-child'")
+      .run("2026-08-20T11:59:00.000Z");
+    repo.updateStatus(createOrderId("capture-root"), "open");
+    expect(
+      repo.getMakerBuyWindowUsage(
+        "2026-08-20T09:00:00.000Z",
+        "2026-08-20T12:00:00.000Z",
+        "cond-1",
+        "unused",
+      ).committedUsdc,
+    ).toBeCloseTo(1.88);
+    expect(repo.getMakerCaptureChainUsage(createOrderId("capture-child")).trusted).toBe(false);
   });
 
   it("persists positionId round-trip and defaults to null when absent (Release A Phase 3)", () => {

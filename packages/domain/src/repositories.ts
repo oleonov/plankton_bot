@@ -331,6 +331,62 @@ export interface OrderRepository {
     conditionId: string,
     excludeClientOrderId: string,
   ): MakerBuyWindowUsage;
+
+  /** Atomically claim one deterministic predecessor replacement. */
+  claimMakerCaptureRepriceIntent?(intent: MakerCaptureRepriceIntent): boolean;
+  findRecoverableMakerCaptureRepriceIntents?(): MakerCaptureRepriceIntent[];
+  findMakerCaptureRepriceIntentBySignal?(signalId: string): MakerCaptureRepriceIntent | null;
+  findMakerCaptureRepriceIntentByChild?(childOrderId: OrderId): MakerCaptureRepriceIntent | null;
+  findMakerCaptureRepriceIntentByPredecessor?(
+    predecessorOrderId: OrderId,
+  ): MakerCaptureRepriceIntent | null;
+  markMakerCaptureRepriceReady?(
+    intentId: string,
+    candidatePrice: number,
+    replacementSize: number,
+  ): boolean;
+  markMakerCaptureRepriceSubmitted?(intentId: string, childOrderId: OrderId): boolean;
+  markMakerCaptureRepriceTerminal?(
+    intentId: string,
+    status: "completed" | "failed",
+    failure?: string | null,
+  ): boolean;
+  /** Conservative, fully validated accounting for one persisted capture chain. */
+  getMakerCaptureChainUsage?(orderId: OrderId): MakerCaptureChainUsage;
+}
+
+export type MakerCaptureRepriceIntentStatus =
+  | "cancel_pending"
+  | "ready"
+  | "submitted"
+  | "completed"
+  | "failed";
+
+export interface MakerCaptureRepriceIntent {
+  intentId: string;
+  predecessorOrderId: OrderId;
+  lifecycleSignalId: string;
+  rootOrderId: OrderId;
+  tokenId: TokenId;
+  conditionId: ConditionId;
+  replacementIndex: number;
+  status: MakerCaptureRepriceIntentStatus;
+  candidatePrice: number | null;
+  replacementSize: number | null;
+  childOrderId: OrderId | null;
+  createdAt: string;
+  updatedAt: string;
+  failure: string | null;
+}
+
+export interface MakerCaptureChainUsage {
+  trusted: boolean;
+  rootOrderId: OrderId | null;
+  rootNotionalUsdc: number;
+  chainFilledUsdc: number;
+  predecessorRemainingShares: number;
+  replacementIndex: number;
+  orderIds: readonly OrderId[];
 }
 
 export interface MakerBuyWindowUsage {

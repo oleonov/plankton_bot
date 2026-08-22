@@ -251,6 +251,8 @@ export interface Signal {
    * existing position; absent on an initial-entry BUY that opens a new cycle.
    */
   positionId?: PositionId | null;
+  /** Durable identity for an event-driven R23 maker-capture replacement. */
+  makerCaptureReprice?: MakerCaptureRepriceSignalV1;
 }
 
 export interface DecisionSignalLog {
@@ -2149,6 +2151,29 @@ export interface TrackAAddThrottlePolicy {
   enforce: boolean;
 }
 
+export interface MakerCaptureBookRepricePolicy {
+  /** Default false; malformed enabled configuration is parsed back to false. */
+  enabled: boolean;
+  /** Hard lifetime cap for one root replacement chain. */
+  maxRepricesPerRoot: number;
+}
+
+export interface MakerCaptureRepriceSignalV1 {
+  readonly version: 1;
+  readonly intentId: string;
+  readonly rootOrderId: OrderId;
+  readonly predecessorOrderId: OrderId;
+  readonly replacementIndex: number;
+}
+
+export interface MakerCaptureLineageV1 {
+  readonly version: 1;
+  readonly rootOrderId: OrderId;
+  readonly predecessorOrderId: OrderId | null;
+  readonly replacementIndex: number;
+  readonly rootNotionalUsdc: number;
+}
+
 export interface MakerMicroLiveWindow {
   /** Inclusive UTC boundary for this durable micro-live activation. */
   activatedAtUtc: string;
@@ -2265,6 +2290,8 @@ export interface MakerEntryPolicy {
   microMaxOpenUsdc: number;
   /** Optional durable activation/cumulative-cap contract for bounded micro-live canaries. */
   microLiveWindow?: MakerMicroLiveWindow;
+  /** Event-driven BUY-only capture repricing; default OFF. */
+  captureBookReprice: MakerCaptureBookRepricePolicy;
   /**
    * avg-down tail guard: collapse scale-ins on maker positions when mark price
    * falls below this level. null = guard off (default — non-maker scale-ins

@@ -38,6 +38,7 @@ const BASE_POLICY: MakerEntryPolicy = {
   whitelistConditionIds: [],
   microMaxOrderUsdc: 10,
   microMaxOpenUsdc: 20,
+  captureBookReprice: { enabled: false, maxRepricesPerRoot: 5 },
   collapseFloorPrice: 0.05,
 };
 

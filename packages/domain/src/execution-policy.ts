@@ -606,6 +606,10 @@ export const DEFAULT_MAKER_ENTRY: MakerEntryPolicy = {
   // These are defaults only; operators must set meaningful values before micro_live.
   microMaxOrderUsdc: 10,
   microMaxOpenUsdc: 50,
+  captureBookReprice: {
+    enabled: false,
+    maxRepricesPerRoot: 5,
+  },
   // null = guard off; 0.02 is a representative operator rollout value for Phase 4.
   collapseFloorPrice: null,
   // 3 hours — plankton post-fill hold horizon (p50 ~2.7h)
@@ -5404,6 +5408,7 @@ function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
     whitelistConditionIds,
     issues,
   );
+  const captureBookReprice = parseMakerCaptureBookReprice(obj.captureBookReprice, issues);
   const collapseFloorPrice = nullableClampedNumber(
     obj.collapseFloorPrice,
     DEFAULT_MAKER_ENTRY.collapseFloorPrice,
@@ -5448,11 +5453,40 @@ function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
     microMaxOrderUsdc,
     microMaxOpenUsdc,
     ...(microLiveWindow === undefined ? {} : { microLiveWindow }),
+    captureBookReprice,
     collapseFloorPrice,
     holdWindowMs,
     maxScaleInLevels,
     scaleInStepPct,
   };
+}
+
+function parseMakerCaptureBookReprice(
+  raw: unknown,
+  issues: string[],
+): MakerEntryPolicy["captureBookReprice"] {
+  const fallback = DEFAULT_MAKER_ENTRY.captureBookReprice;
+  if (raw === undefined) return fallback;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    issues.push("makerEntry.captureBookReprice must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.enabled !== "boolean") {
+    issues.push("makerEntry.captureBookReprice.enabled must be a boolean");
+    return fallback;
+  }
+  if (obj.enabled !== true) return fallback;
+  if (
+    typeof obj.maxRepricesPerRoot !== "number" ||
+    !Number.isSafeInteger(obj.maxRepricesPerRoot) ||
+    obj.maxRepricesPerRoot < 1 ||
+    obj.maxRepricesPerRoot > 5
+  ) {
+    issues.push("makerEntry.captureBookReprice.maxRepricesPerRoot must be an integer from 1 to 5");
+    return fallback;
+  }
+  return { enabled: true, maxRepricesPerRoot: obj.maxRepricesPerRoot };
 }
 
 function parseMakerMicroLiveWindow(

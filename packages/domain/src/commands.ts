@@ -90,6 +90,7 @@ export type CancelOrderReason =
   | "s1_handoff_to_qd"
   | "operator"
   | "maker_fast_cancel"
+  | "maker_capture_reprice"
   | "phantom_missing_on_exchange"
   | "exit_loss_floor";
 

@@ -332,6 +332,7 @@ describe("makerEntry — serialize ��� parse round-trip", () => {
         whitelistConditionIds: ["0xabc123", "0xdef456"],
         microMaxOrderUsdc: 25,
         microMaxOpenUsdc: 100,
+        captureBookReprice: { enabled: false, maxRepricesPerRoot: 5 },
         collapseFloorPrice: 0.02,
         holdWindowMs: 10_800_000,
         maxScaleInLevels: 4,

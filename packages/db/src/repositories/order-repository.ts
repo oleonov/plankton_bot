@@ -1,5 +1,14 @@
 import type Database from "better-sqlite3";
-import type { OrderRepository, Order, OrderCancelTelemetry, CancelAgeBucket } from "@krabs/domain";
+import type {
+  OrderRepository,
+  Order,
+  OrderCancelTelemetry,
+  CancelAgeBucket,
+  MakerCaptureRepriceIntent,
+  MakerCaptureRepriceIntentStatus,
+  MakerCaptureChainUsage,
+  MakerCaptureLineageV1,
+} from "@krabs/domain";
 import { nowIso } from "../db-timestamp.js";
 import type {
   OrderId,
@@ -286,51 +295,186 @@ export class SqliteOrderRepository implements OrderRepository {
     return row.total;
   }
 
+  claimMakerCaptureRepriceIntent(intent: MakerCaptureRepriceIntent): boolean {
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO maker_capture_reprice_intents
+         (intent_id, predecessor_order_id, lifecycle_signal_id, root_order_id, token_id,
+          condition_id, replacement_index, status, candidate_price, replacement_size,
+          child_order_id, failure, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'cancel_pending', NULL, NULL, NULL, NULL, ?, ?)`,
+      )
+      .run(
+        intent.intentId,
+        intent.predecessorOrderId,
+        intent.lifecycleSignalId,
+        intent.rootOrderId,
+        intent.tokenId,
+        intent.conditionId,
+        intent.replacementIndex,
+        intent.createdAt,
+        intent.updatedAt,
+      );
+    return result.changes === 1;
+  }
+
+  findRecoverableMakerCaptureRepriceIntents(): MakerCaptureRepriceIntent[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM maker_capture_reprice_intents
+           WHERE status IN ('cancel_pending', 'ready', 'submitted')
+           ORDER BY created_at, intent_id`,
+        )
+        .all() as Record<string, unknown>[]
+    ).map(rowToMakerCaptureIntent);
+  }
+
+  findMakerCaptureRepriceIntentBySignal(signalId: string): MakerCaptureRepriceIntent | null {
+    return this.findMakerCaptureIntent("lifecycle_signal_id", signalId);
+  }
+
+  findMakerCaptureRepriceIntentByChild(childOrderId: OrderId): MakerCaptureRepriceIntent | null {
+    return this.findMakerCaptureIntent("child_order_id", childOrderId);
+  }
+
+  findMakerCaptureRepriceIntentByPredecessor(
+    predecessorOrderId: OrderId,
+  ): MakerCaptureRepriceIntent | null {
+    return this.findMakerCaptureIntent("predecessor_order_id", predecessorOrderId);
+  }
+
+  markMakerCaptureRepriceReady(
+    intentId: string,
+    candidatePrice: number,
+    replacementSize: number,
+  ): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE maker_capture_reprice_intents
+           SET status = 'ready', candidate_price = ?, replacement_size = ?, updated_at = ?
+           WHERE intent_id = ? AND status = 'cancel_pending'`,
+        )
+        .run(candidatePrice, replacementSize, nowIso(), intentId).changes === 1
+    );
+  }
+
+  markMakerCaptureRepriceSubmitted(intentId: string, childOrderId: OrderId): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE maker_capture_reprice_intents
+           SET status = 'submitted', child_order_id = ?, updated_at = ?
+           WHERE intent_id = ? AND status IN ('ready', 'submitted')
+             AND (child_order_id IS NULL OR child_order_id = ?)`,
+        )
+        .run(childOrderId, nowIso(), intentId, childOrderId).changes === 1
+    );
+  }
+
+  markMakerCaptureRepriceTerminal(
+    intentId: string,
+    status: "completed" | "failed",
+    failure: string | null = null,
+  ): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE maker_capture_reprice_intents
+           SET status = ?, failure = ?, updated_at = ?
+           WHERE intent_id = ? AND status IN ('cancel_pending', 'ready', 'submitted')`,
+        )
+        .run(status, status === "failed" ? failure : null, nowIso(), intentId).changes === 1
+    );
+  }
+
   getMakerBuyWindowUsage(
     activatedAtUtc: string,
     expiresAtUtc: string,
     conditionId: string,
     excludeClientOrderId: string,
   ): import("@krabs/domain").MakerBuyWindowUsage {
-    const row = this.db
-      .prepare(
-        `WITH committed AS (
-           SELECT order_id, condition_id, size_usdc
-             FROM orders
-            WHERE side = 'buy'
-              AND entry_style = 'maker'
-              AND status <> 'rejected'
-              AND created_at >= ?
-              AND created_at < ?
-              AND client_order_id <> ?
-         )
-         SELECT COALESCE(SUM(size_usdc), 0) AS committed_usdc,
-                COALESCE(SUM(CASE WHEN condition_id = ? THEN size_usdc ELSE 0 END), 0)
-                  AS condition_committed_usdc,
-                COUNT(DISTINCT condition_id) AS distinct_accepted_conditions,
-                COALESCE(json_group_array(DISTINCT condition_id), '[]') AS condition_ids_json,
-                COALESCE((SELECT SUM(f.size_usdc)
-                            FROM fills f JOIN committed c ON c.order_id = f.order_id
-                           WHERE f.side = 'buy'), 0) AS filled_usdc
-           FROM committed`,
-      )
-      .get(activatedAtUtc, expiresAtUtc, excludeClientOrderId, conditionId) as {
-      committed_usdc: number;
-      condition_committed_usdc: number;
-      distinct_accepted_conditions: number;
-      condition_ids_json: string;
-      filled_usdc: number;
-    };
-    const conditionIds = JSON.parse(row.condition_ids_json) as unknown[];
+    const windowOrders = (
+      this.db
+        .prepare(
+          `SELECT * FROM orders
+           WHERE side = 'buy' AND entry_style = 'maker'
+             AND created_at >= ? AND created_at < ?`,
+        )
+        .all(activatedAtUtc, expiresAtUtc) as Record<string, unknown>[]
+    ).map((row) => this.rowToOrder(row));
+    const accepted = windowOrders.filter((order) => order.status !== "rejected");
+    const allByToken = new Map<string, Order[]>();
+    const intentsByToken = new Map<string, MakerCaptureRepriceIntent[]>();
+    const commitments = new Map<string, { notional: number; conditionId: string }>();
+    const fillOrderIds = new Set<string>();
+    for (const order of accepted) {
+      const tokenKey = String(order.tokenId);
+      const allOrders = allByToken.get(tokenKey) ?? this.findByTokenId(order.tokenId);
+      const intents =
+        intentsByToken.get(tokenKey) ?? this.findMakerCaptureIntentsForToken(order.tokenId);
+      allByToken.set(tokenKey, allOrders);
+      intentsByToken.set(tokenKey, intents);
+      const chain = resolveMakerCaptureChainUsage(this.db, order, allOrders, intents);
+      const lineage = parseMakerCaptureLineage(order);
+      const isExcluded = String(order.clientOrderId) === excludeClientOrderId;
+      const root = chain.rootOrderId
+        ? allOrders.find((candidate) => String(candidate.orderId) === String(chain.rootOrderId))
+        : null;
+      const trustedWindowRoot =
+        chain.trusted &&
+        root != null &&
+        root.createdAt >= activatedAtUtc &&
+        root.createdAt < expiresAtUtc;
+      if (!isExcluded || (lineage?.replacementIndex ?? 0) > 0) {
+        const ids = trustedWindowRoot ? chain.orderIds : [order.orderId];
+        for (const id of ids) fillOrderIds.add(String(id));
+      }
+      if (isExcluded) {
+        if (lineage != null && lineage.replacementIndex > 0 && !chain.trusted) {
+          commitments.set(`order:${order.orderId}`, {
+            notional: order.sizeUsdc,
+            conditionId: String(order.conditionId),
+          });
+        }
+        continue;
+      }
+      if (chain.trusted && chain.rootOrderId) {
+        commitments.set(`root:${chain.rootOrderId}`, {
+          notional: chain.rootNotionalUsdc,
+          conditionId: String(order.conditionId),
+        });
+      } else {
+        commitments.set(`order:${order.orderId}`, {
+          notional: order.sizeUsdc,
+          conditionId: String(order.conditionId),
+        });
+      }
+    }
+    const values = [...commitments.values()];
+    const conditionIds = [...new Set(values.map((value) => value.conditionId))];
+    const filledUsdc = [...fillOrderIds].reduce(
+      (sum, orderId) => sum + sumOrderFillField(this.db, createOrderId(orderId), "size_usdc"),
+      0,
+    );
     return {
-      committedUsdc: row.committed_usdc,
-      conditionCommittedUsdc: row.condition_committed_usdc,
-      distinctAcceptedConditions: row.distinct_accepted_conditions,
-      committedConditionIds: conditionIds.filter(
-        (value): value is string => typeof value === "string",
-      ),
-      filledUsdc: row.filled_usdc,
+      committedUsdc: values.reduce((sum, value) => sum + value.notional, 0),
+      conditionCommittedUsdc: values
+        .filter((value) => value.conditionId === conditionId)
+        .reduce((sum, value) => sum + value.notional, 0),
+      distinctAcceptedConditions: conditionIds.length,
+      committedConditionIds: conditionIds,
+      filledUsdc,
     };
+  }
+
+  getMakerCaptureChainUsage(orderId: OrderId): MakerCaptureChainUsage {
+    const target = this.findById(orderId);
+    if (!target) return untrustedMakerCaptureChain();
+    const orders = this.findByTokenId(target.tokenId);
+    const intents = this.findMakerCaptureIntentsForToken(target.tokenId);
+    return resolveMakerCaptureChainUsage(this.db, target, orders, intents);
   }
 
   private runMetadataUpdate(id: OrderId, metadata: Readonly<Record<string, unknown>>): void {
@@ -344,6 +488,21 @@ export class SqliteOrderRepository implements OrderRepository {
     if (result.changes !== 1) {
       throw new Error(`Order metadata update expected one row for order_id=${String(id)}`);
     }
+  }
+
+  private findMakerCaptureIntent(column: string, value: unknown): MakerCaptureRepriceIntent | null {
+    const row = this.db
+      .prepare(`SELECT * FROM maker_capture_reprice_intents WHERE ${column} = ?`)
+      .get(value) as Record<string, unknown> | undefined;
+    return row ? rowToMakerCaptureIntent(row) : null;
+  }
+
+  private findMakerCaptureIntentsForToken(tokenId: TokenId): MakerCaptureRepriceIntent[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM maker_capture_reprice_intents WHERE token_id = ?")
+        .all(tokenId) as Record<string, unknown>[]
+    ).map(rowToMakerCaptureIntent);
   }
 
   private rowToOrder(row: Record<string, unknown>): Order {
@@ -393,4 +552,175 @@ function parseMetadata(raw: unknown): Readonly<Record<string, unknown>> | null {
   } catch {
     return null;
   }
+}
+
+function rowToMakerCaptureIntent(row: Record<string, unknown>): MakerCaptureRepriceIntent {
+  return {
+    intentId: row.intent_id as string,
+    predecessorOrderId: createOrderId(row.predecessor_order_id as string),
+    lifecycleSignalId: row.lifecycle_signal_id as string,
+    rootOrderId: createOrderId(row.root_order_id as string),
+    tokenId: createTokenId(row.token_id as string),
+    conditionId: createConditionId(row.condition_id as string),
+    replacementIndex: row.replacement_index as number,
+    status: row.status as MakerCaptureRepriceIntentStatus,
+    candidatePrice: (row.candidate_price as number | null) ?? null,
+    replacementSize: (row.replacement_size as number | null) ?? null,
+    childOrderId: row.child_order_id ? createOrderId(row.child_order_id as string) : null,
+    failure: (row.failure as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function parseMakerCaptureLineage(order: Order): MakerCaptureLineageV1 | null {
+  const raw = order.metadata?.makerCaptureLineageV1;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  const keys = Object.keys(value).sort();
+  if (
+    keys.join("|") !== "predecessorOrderId|replacementIndex|rootNotionalUsdc|rootOrderId|version" ||
+    value.version !== 1 ||
+    typeof value.rootOrderId !== "string" ||
+    (value.predecessorOrderId !== null && typeof value.predecessorOrderId !== "string") ||
+    !Number.isSafeInteger(value.replacementIndex) ||
+    Number(value.replacementIndex) < 0 ||
+    Number(value.replacementIndex) > 5 ||
+    typeof value.rootNotionalUsdc !== "number" ||
+    !Number.isFinite(value.rootNotionalUsdc) ||
+    value.rootNotionalUsdc <= 0
+  ) {
+    return null;
+  }
+  return value as unknown as MakerCaptureLineageV1;
+}
+
+function resolveMakerCaptureChainUsage(
+  db: Database.Database,
+  target: Order,
+  orders: readonly Order[],
+  intents: readonly MakerCaptureRepriceIntent[],
+): MakerCaptureChainUsage {
+  const targetLineage = parseMakerCaptureLineage(target);
+  if (!targetLineage) return untrustedMakerCaptureChain(target);
+  const rootId = String(targetLineage.rootOrderId);
+  const chain = orders
+    .map((order) => ({ order, lineage: parseMakerCaptureLineage(order) }))
+    .filter(
+      (item): item is { order: Order; lineage: MakerCaptureLineageV1 } =>
+        item.lineage != null && String(item.lineage.rootOrderId) === rootId,
+    )
+    .sort((a, b) => a.lineage.replacementIndex - b.lineage.replacementIndex);
+  if (!validMakerCaptureChain(chain, intents, target)) return untrustedMakerCaptureChain(target);
+  const root = chain[0]!.order;
+  const targetFilledShares = sumOrderFillField(db, target.orderId, "size");
+  return {
+    trusted: true,
+    rootOrderId: root.orderId,
+    rootNotionalUsdc: chain[0]!.lineage.rootNotionalUsdc,
+    chainFilledUsdc: chain.reduce(
+      (sum, item) => sum + sumOrderFillField(db, item.order.orderId, "size_usdc"),
+      0,
+    ),
+    predecessorRemainingShares: Math.max(0, target.size - targetFilledShares),
+    replacementIndex: targetLineage.replacementIndex,
+    orderIds: chain.map((item) => item.order.orderId),
+  };
+}
+
+function validMakerCaptureChain(
+  chain: readonly { order: Order; lineage: MakerCaptureLineageV1 }[],
+  intents: readonly MakerCaptureRepriceIntent[],
+  target: Order,
+): boolean {
+  if (
+    chain.length === 0 ||
+    !chain.some((item) => String(item.order.orderId) === String(target.orderId))
+  ) {
+    return false;
+  }
+  const root = chain[0]!;
+  if (
+    root.lineage.replacementIndex !== 0 ||
+    root.lineage.predecessorOrderId !== null ||
+    String(root.lineage.rootOrderId) !== String(root.order.orderId) ||
+    Math.abs(root.lineage.rootNotionalUsdc - root.order.sizeUsdc) > 1e-9
+  ) {
+    return false;
+  }
+  const seen = new Set<string>();
+  for (let index = 0; index < chain.length; index++) {
+    const item = chain[index]!;
+    const orderId = String(item.order.orderId);
+    if (seen.has(orderId) || item.lineage.replacementIndex !== index) return false;
+    seen.add(orderId);
+    if (
+      !isCaptureOrderForRoot(item.order, root.order) ||
+      Math.abs(item.lineage.rootNotionalUsdc - root.lineage.rootNotionalUsdc) > 1e-9
+    ) {
+      return false;
+    }
+    if (index === 0) continue;
+    const predecessor = chain[index - 1]!.order;
+    const intent = intents.find(
+      (candidate) => String(candidate.childOrderId) === String(item.order.orderId),
+    );
+    if (
+      !intent ||
+      (intent.status !== "submitted" && intent.status !== "completed") ||
+      predecessor.status !== "cancelled" ||
+      String(intent.predecessorOrderId) !== String(predecessor.orderId) ||
+      String(intent.rootOrderId) !== String(root.order.orderId) ||
+      intent.lifecycleSignalId !== item.order.signalId ||
+      String(intent.tokenId) !== String(item.order.tokenId) ||
+      String(intent.conditionId) !== String(item.order.conditionId) ||
+      intent.replacementIndex !== index ||
+      String(item.lineage.predecessorOrderId) !== String(predecessor.orderId) ||
+      intent.candidatePrice == null ||
+      Math.abs(intent.candidatePrice - item.order.price) > 1e-9 ||
+      intent.replacementSize == null ||
+      Math.abs(intent.replacementSize - item.order.size) > 1e-9
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isCaptureOrderForRoot(order: Order, root: Order): boolean {
+  return (
+    order.side === "buy" &&
+    order.entryStyle === "maker" &&
+    order.postOnly === true &&
+    order.decisionRuleId === "R23_DIP_TRIGGER" &&
+    order.signalReason === "probe-entry" &&
+    String(order.tokenId) === String(root.tokenId) &&
+    String(order.conditionId) === String(root.conditionId) &&
+    order.status !== "rejected"
+  );
+}
+
+function sumOrderFillField(
+  db: Database.Database,
+  orderId: OrderId,
+  field: "size" | "size_usdc",
+): number {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(${field}), 0) AS total FROM fills WHERE order_id = ? AND side = 'buy'`,
+    )
+    .get(orderId) as { total: number };
+  return row.total;
+}
+
+function untrustedMakerCaptureChain(target?: Order): MakerCaptureChainUsage {
+  return {
+    trusted: false,
+    rootOrderId: null,
+    rootNotionalUsdc: 0,
+    chainFilledUsdc: 0,
+    predecessorRemainingShares: target?.size ?? 0,
+    replacementIndex: -1,
+    orderIds: target ? [target.orderId] : [],
+  };
 }
