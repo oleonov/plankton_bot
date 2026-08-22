@@ -5,6 +5,7 @@ import type {
   Fill,
   FillRepository,
   LegStateRepository,
+  MakerCaptureRepriceIntent,
   MultiBuyLadderPolicy,
   NormalizedMarket,
   Order,
@@ -28,6 +29,16 @@ import {
   resolveSignalReason,
 } from "@krabs/domain";
 import { resolveMakerMicroLiveFillDeadlineMs } from "../../buy-order-lifecycle.js";
+import {
+  buildMakerCaptureRepriceIdentity,
+  computeMakerCaptureCandidate,
+  parseMakerCaptureLineage,
+  primeFreshMakerCaptureBook,
+  type MakerCaptureBookCache,
+} from "../../maker-capture-reprice.js";
+import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
+import { applyOrderBookToMarket } from "../strategy/candidate-book-cache.js";
+import { buildClientOrderId } from "@krabs/domain/node";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { Logger } from "../../logger.js";
 
@@ -71,6 +82,8 @@ export interface EntryLifecycleModuleDeps {
   legStateRepo: LegStateRepository;
   algoRulesRepo: AlgoRulesRepository;
   policy: () => ExecutionPolicy;
+  policySnapshot?: () => { policy: ExecutionPolicy; controlRevision: number | null };
+  candidateBookCache?: MakerCaptureBookCache | undefined;
   runtimeMetrics?: RuntimeMetricWriter | undefined;
   log: Logger;
   now?: () => number;
@@ -89,6 +102,7 @@ export class EntryLifecycleModule implements RuntimeModule {
   private readonly ladderTimers = new Map<string, TimerHandle>();
   private readonly marketCache = new Map<string, NormalizedMarket>();
   private readonly unsubs: Array<() => void> = [];
+  private readonly captureSignalsPublished = new Set<string>();
   private started = false;
   private lastStateGcAt = 0;
   private metrics: EntryLifecycleMetrics = createMetrics();
@@ -119,11 +133,26 @@ export class EntryLifecycleModule implements RuntimeModule {
       this.deps.bus.subscribe("SignalConversionSkipped", (event) =>
         this.handleSignalConversionSkipped(event),
       ),
+      this.deps.bus.subscribe("SignalRejected", (event) =>
+        this.safeCaptureReprice(() => this.handleCaptureTerminalSignal(event.signal, event.reason)),
+      ),
+      this.deps.bus.subscribe("OrderSkipped", (event) =>
+        this.safeCaptureReprice(() =>
+          this.handleCaptureTerminalBySignal(event.signalId, event.reasonCode),
+        ),
+      ),
+      this.deps.bus.subscribe("OrderRejected", (event) =>
+        this.safeCaptureReprice(() => this.handleCaptureOrderRejected(event)),
+      ),
+      this.deps.bus.subscribe("OrderPlaced", (event) =>
+        this.safeCaptureReprice(() => this.handleCaptureOrderPlaced(event)),
+      ),
       this.deps.bus.subscribe("PositionUpdated", (event) => this.handlePositionUpdated(event)),
       this.deps.bus.subscribe("MarketResolvedHint", (event) => this.handleMarketResolved(event)),
     );
     this.started = true;
     await this.cancelExpiredMakerCaptures();
+    await this.recoverMakerCaptureRepricesAtStartup();
     this.log.info("entry lifecycle module started");
   }
 
@@ -161,6 +190,7 @@ export class EntryLifecycleModule implements RuntimeModule {
   }
 
   private async handleOrderCancelled(event: RuntimeEventMap["OrderCancelled"]): Promise<void> {
+    await this.safeCaptureReprice(() => this.advanceCaptureByPredecessor(event.orderId, false));
     if (event.reason !== OUTBID_REPRICED_REASON) return;
     this.metrics.outbidRepriceCancels++;
     const order = this.deps.orderRepo.findById(event.orderId);
@@ -182,6 +212,7 @@ export class EntryLifecycleModule implements RuntimeModule {
   }
 
   private async handleFillReceived(event: RuntimeEventMap["FillReceived"]): Promise<void> {
+    await this.safeCaptureReprice(() => this.advanceCaptureByPredecessor(event.orderId, false));
     if (event.side !== "buy") return;
     if (event.signalId && this.repricedSignalIds.has(event.signalId)) {
       this.metrics.outbidRepriceFills++;
@@ -208,6 +239,9 @@ export class EntryLifecycleModule implements RuntimeModule {
   private async handleSignalConversionSkipped(
     event: RuntimeEventMap["SignalConversionSkipped"],
   ): Promise<void> {
+    await this.safeCaptureReprice(() =>
+      this.handleCaptureTerminalSignal(event.signal, event.reasons.join(",")),
+    );
     if (!this.ladderSignalSteps.has(event.signal.signalId)) return;
     if (!event.reasons.includes("same-price-cooldown")) return;
     this.metrics.ladderCooldownPaused++;
@@ -225,6 +259,440 @@ export class EntryLifecycleModule implements RuntimeModule {
       } else {
         this.marketCache.delete(key);
       }
+    }
+    await this.safeCaptureReprice(() => this.handleCaptureMarketEvent(event));
+  }
+
+  private async handleCaptureMarketEvent(
+    event: RuntimeEventMap["NormalizedMarketUpdated"],
+  ): Promise<void> {
+    const now = this.now();
+    if (!freshEvent(event.timestamp, now)) return;
+    const markets = new Map(event.markets.map((market) => [String(market.tokenId), market]));
+    await this.recoverMakerCaptureReprices(false, new Set(markets.keys()));
+    for (const order of this.deps.orderRepo.findOpen()) {
+      const market = markets.get(String(order.tokenId));
+      if (!market || !this.captureOrderEligible(order, market, now)) continue;
+      const lineage = parseMakerCaptureLineage(order);
+      if (!lineage) continue;
+      const identity = buildMakerCaptureRepriceIdentity(
+        lineage.rootOrderId,
+        order.orderId,
+        lineage.replacementIndex + 1,
+      );
+      const nowIso = new Date(now).toISOString();
+      const intent: MakerCaptureRepriceIntent = {
+        intentId: identity.intentId,
+        predecessorOrderId: order.orderId,
+        lifecycleSignalId: identity.lifecycleSignalId,
+        rootOrderId: lineage.rootOrderId,
+        tokenId: order.tokenId,
+        conditionId: order.conditionId,
+        replacementIndex: lineage.replacementIndex + 1,
+        status: "cancel_pending",
+        candidatePrice: null,
+        replacementSize: null,
+        childOrderId: null,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        failure: null,
+      };
+      if (!this.deps.orderRepo.claimMakerCaptureRepriceIntent?.(intent)) continue;
+      await this.publishCaptureCancel(intent, order);
+    }
+  }
+
+  private captureOrderEligible(order: Order, market: NormalizedMarket, now: number): boolean {
+    if (order.status !== "open" && order.status !== "partially-filled") return false;
+    if (!canPlaceBuyOrderForMarket(market, now).allowed) return false;
+    if (
+      order.side !== "buy" ||
+      order.entryStyle !== "maker" ||
+      order.postOnly !== true ||
+      order.decisionRuleId !== "R23_DIP_TRIGGER" ||
+      order.signalReason !== "probe-entry"
+    ) {
+      return false;
+    }
+    const snapshot = this.capturePolicySnapshot();
+    const reprice = snapshot?.policy.makerEntry.captureBookReprice;
+    const window = snapshot?.policy.makerEntry.microLiveWindow;
+    if (
+      !snapshot ||
+      !reprice?.enabled ||
+      snapshot.controlRevision === null ||
+      snapshot.policy.makerEntry.mode !== "micro_live" ||
+      window?.captureNextR23 !== true ||
+      !activeWindow(window.activatedAtUtc, window.expiresAtUtc, now)
+    ) {
+      return false;
+    }
+    const lineage = parseMakerCaptureLineage(order);
+    const usage = this.deps.orderRepo.getMakerCaptureChainUsage?.(order.orderId);
+    const root = lineage ? this.deps.orderRepo.findById(lineage.rootOrderId) : null;
+    const origin = root ? parseQuoteMotionOrigin(root) : null;
+    const deadline = root ? resolveMakerMicroLiveFillDeadlineMs(root) : null;
+    if (
+      !lineage ||
+      !usage?.trusted ||
+      String(usage.rootOrderId) !== String(lineage.rootOrderId) ||
+      usage.replacementIndex !== lineage.replacementIndex ||
+      lineage.replacementIndex >= reprice.maxRepricesPerRoot ||
+      !root ||
+      deadline === null ||
+      now >= deadline ||
+      origin?.kind !== "r23_capture" ||
+      origin.policySchemaVersion !== snapshot.policy.version ||
+      origin.policyControlRevision !== snapshot.controlRevision ||
+      origin.cohortId !== window.activatedAtUtc ||
+      origin.entryPriceCeiling !== snapshot.policy.entryPriceCeiling ||
+      origin.entryPriceCeiling === null ||
+      Math.min(origin.originalSuggestedPrice, origin.entryPriceCeiling) + EPSILON <
+        order.price + market.tickSize ||
+      !frozenWindowMatches(root, window.activatedAtUtc, window.expiresAtUtc) ||
+      market.conditionId !== String(order.conditionId) ||
+      !Number.isFinite(market.tickSize) ||
+      market.tickSize <= 0 ||
+      market.bestBid == null ||
+      market.bestBid + EPSILON < order.price + market.tickSize
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  private async recoverMakerCaptureRepricesAtStartup(): Promise<void> {
+    await this.safeCaptureReprice(() => this.recoverMakerCaptureReprices(true));
+  }
+
+  private async recoverMakerCaptureReprices(
+    startup: boolean,
+    tokenIds?: ReadonlySet<string>,
+  ): Promise<void> {
+    const intents = this.deps.orderRepo.findRecoverableMakerCaptureRepriceIntents?.() ?? [];
+    for (const intent of intents) {
+      if (!tokenIds || tokenIds.has(String(intent.tokenId))) {
+        await this.advanceCaptureIntent(intent, startup);
+      }
+    }
+  }
+
+  private async advanceCaptureByPredecessor(orderId: Order["orderId"], startup: boolean) {
+    const childIntent = this.deps.orderRepo.findMakerCaptureRepriceIntentByChild?.(orderId);
+    if (childIntent) {
+      const child = this.deps.orderRepo.findById(orderId);
+      if (child?.status === "rejected") this.failCaptureIntent(childIntent, "child-rejected");
+      else if (child && child.status !== "pending") this.completeCaptureIntent(childIntent);
+    }
+    const intent = this.deps.orderRepo.findMakerCaptureRepriceIntentByPredecessor?.(orderId);
+    if (intent) await this.advanceCaptureIntent(intent, startup);
+  }
+
+  private async advanceCaptureIntent(
+    intent: MakerCaptureRepriceIntent,
+    startup: boolean,
+  ): Promise<void> {
+    let child = intent.childOrderId ? this.deps.orderRepo.findById(intent.childOrderId) : null;
+    if (!child && intent.status === "ready") {
+      child = this.deps.orderRepo.findByClientOrderId(
+        buildClientOrderId({
+          signalId: intent.lifecycleSignalId,
+          tokenId: intent.tokenId,
+          side: "buy",
+        }),
+      );
+      if (child) {
+        this.deps.orderRepo.markMakerCaptureRepriceSubmitted?.(intent.intentId, child.orderId);
+      }
+    }
+    if (child) {
+      if (child.status === "rejected") this.failCaptureIntent(intent, "child-rejected");
+      else if (child.status !== "pending") this.completeCaptureIntent(intent);
+      return;
+    }
+    if (intent.status === "submitted") {
+      this.failCaptureIntent(intent, "submitted-child-missing");
+      return;
+    }
+    const predecessor = this.deps.orderRepo.findById(intent.predecessorOrderId);
+    if (!predecessor) return;
+    if (predecessor.status === "filled" || predecessor.status === "rejected") {
+      this.failCaptureIntent(intent, `predecessor-${predecessor.status}`);
+      return;
+    }
+    if (intent.status === "cancel_pending" && isWorking(predecessor)) {
+      await this.publishCaptureCancel(intent, predecessor);
+      return;
+    }
+    if (predecessor.status !== "cancelled" || startup) return;
+    if (intent.status === "cancel_pending") {
+      const ready = await this.prepareCaptureReplacement(intent, predecessor);
+      if (!ready) return;
+      intent = ready;
+    }
+    if (intent.status === "ready") await this.publishCaptureSignal(intent, predecessor);
+  }
+
+  private async prepareCaptureReplacement(
+    intent: MakerCaptureRepriceIntent,
+    predecessor: Order,
+  ): Promise<MakerCaptureRepriceIntent | null> {
+    const now = this.now();
+    const state = this.captureIntentState(intent, predecessor, now);
+    const market = this.getMarket(intent.tokenId);
+    if (!state || !market) {
+      this.failCaptureIntent(intent, "policy-or-lineage-drift");
+      return null;
+    }
+    const { origin, usage } = state;
+    const entry = await primeFreshMakerCaptureBook(
+      this.deps.candidateBookCache,
+      String(intent.tokenId),
+      now,
+    );
+    const minOrderSize = entry?.book.minOrderSize;
+    if (!entry || minOrderSize == null || !Number.isFinite(minOrderSize) || minOrderSize <= 0) {
+      this.failCaptureIntent(intent, "fresh-book-or-minimum-unavailable");
+      return null;
+    }
+    this.marketCache.set(String(intent.tokenId), applyOrderBookToMarket(market, entry));
+    const candidate = computeMakerCaptureCandidate({
+      book: entry.book,
+      tickSize: market.tickSize,
+      predecessorPrice: predecessor.price,
+      predecessorVisibleShares: usage.predecessorRemainingShares,
+      originalSuggestedPrice: origin.originalSuggestedPrice,
+      entryPriceCeiling: origin.entryPriceCeiling!,
+    });
+    if (!candidate.ok) {
+      this.failCaptureIntent(intent, candidate.reason);
+      return null;
+    }
+    const rootResidualShares = Math.max(
+      0,
+      (usage.rootNotionalUsdc - usage.chainFilledUsdc) / candidate.price,
+    );
+    const size = Math.min(usage.predecessorRemainingShares, rootResidualShares);
+    if (!Number.isFinite(size) || size + EPSILON < minOrderSize) {
+      this.failCaptureIntent(intent, "replacement-below-minimum");
+      return null;
+    }
+    if (
+      !this.deps.orderRepo.markMakerCaptureRepriceReady?.(intent.intentId, candidate.price, size)
+    ) {
+      return (
+        this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(intent.lifecycleSignalId) ??
+        null
+      );
+    }
+    return { ...intent, status: "ready", candidatePrice: candidate.price, replacementSize: size };
+  }
+
+  private captureIntentState(intent: MakerCaptureRepriceIntent, predecessor: Order, now: number) {
+    const snapshot = this.capturePolicySnapshot();
+    const maker = snapshot?.policy.makerEntry;
+    const window = maker?.microLiveWindow;
+    const root = this.deps.orderRepo.findById(intent.rootOrderId);
+    const lineage = parseMakerCaptureLineage(predecessor);
+    const origin = root ? parseQuoteMotionOrigin(root) : null;
+    const usage = this.deps.orderRepo.getMakerCaptureChainUsage?.(predecessor.orderId);
+    const deadline = root ? resolveMakerMicroLiveFillDeadlineMs(root) : null;
+    if (
+      !snapshot ||
+      snapshot.controlRevision === null ||
+      maker?.mode !== "micro_live" ||
+      !maker.captureBookReprice.enabled ||
+      intent.replacementIndex > maker.captureBookReprice.maxRepricesPerRoot ||
+      window?.captureNextR23 !== true ||
+      !activeWindow(window.activatedAtUtc, window.expiresAtUtc, now) ||
+      !root ||
+      String(root.orderId) !== String(intent.rootOrderId) ||
+      !lineage ||
+      String(predecessor.orderId) !== String(intent.predecessorOrderId) ||
+      String(predecessor.tokenId) !== String(intent.tokenId) ||
+      String(predecessor.conditionId) !== String(intent.conditionId) ||
+      String(lineage.rootOrderId) !== String(intent.rootOrderId) ||
+      lineage.replacementIndex + 1 !== intent.replacementIndex ||
+      !usage?.trusted ||
+      usage.replacementIndex + 1 !== intent.replacementIndex ||
+      String(usage.rootOrderId) !== String(intent.rootOrderId) ||
+      deadline === null ||
+      now >= deadline ||
+      origin?.kind !== "r23_capture" ||
+      origin.policySchemaVersion !== snapshot.policy.version ||
+      origin.policyControlRevision !== snapshot.controlRevision ||
+      origin.cohortId !== window.activatedAtUtc ||
+      origin.entryPriceCeiling !== snapshot.policy.entryPriceCeiling ||
+      !frozenWindowMatches(root, window.activatedAtUtc, window.expiresAtUtc)
+    )
+      return null;
+    return { origin, usage };
+  }
+
+  private async publishCaptureSignal(
+    intent: MakerCaptureRepriceIntent,
+    predecessor: Order,
+  ): Promise<void> {
+    if (
+      intent.candidatePrice == null ||
+      intent.replacementSize == null ||
+      this.captureSignalsPublished.has(intent.lifecycleSignalId)
+    ) {
+      return;
+    }
+    const identity = buildMakerCaptureRepriceIdentity(
+      intent.rootOrderId,
+      intent.predecessorOrderId,
+      intent.replacementIndex,
+    );
+    if (
+      identity.intentId !== intent.intentId ||
+      identity.lifecycleSignalId !== intent.lifecycleSignalId
+    ) {
+      this.failCaptureIntent(intent, "identity-drift");
+      return;
+    }
+    const market = this.getMarket(intent.tokenId);
+    if (!market) return;
+    const signal: Signal = {
+      signalId: intent.lifecycleSignalId,
+      tokenId: intent.tokenId,
+      conditionId: intent.conditionId,
+      positionId: predecessor.positionId ?? null,
+      side: "buy",
+      suggestedPrice: intent.candidatePrice,
+      suggestedSize: intent.replacementSize,
+      suggestedSizeUsdc: intent.candidatePrice * intent.replacementSize,
+      reason: "probe-entry",
+      strategyTick: this.now(),
+      sequenceInTick: intent.replacementIndex,
+      decisionRuleId: "R23_DIP_TRIGGER",
+      sizingRuleId: null,
+      generatedAt: new Date(this.now()).toISOString(),
+      makerCaptureReprice: {
+        version: 1,
+        intentId: intent.intentId,
+        rootOrderId: intent.rootOrderId,
+        predecessorOrderId: intent.predecessorOrderId,
+        replacementIndex: intent.replacementIndex,
+      },
+      ...(parseEntryFreshEdgeAttribution(predecessor.metadata?.entryFreshEdgeAttribution)
+        ? {
+            entryFreshEdgeAttribution: parseEntryFreshEdgeAttribution(
+              predecessor.metadata?.entryFreshEdgeAttribution,
+            )!,
+          }
+        : {}),
+    };
+    this.captureSignalsPublished.add(intent.lifecycleSignalId);
+    let keepPublished = false;
+    try {
+      await this.publishSignal(signal, market);
+    } finally {
+      try {
+        const current = this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(
+          intent.lifecycleSignalId,
+        );
+        keepPublished =
+          current != null && (current.status !== "ready" || current.childOrderId !== null);
+      } finally {
+        if (!keepPublished) this.captureSignalsPublished.delete(intent.lifecycleSignalId);
+      }
+    }
+  }
+
+  private async publishCaptureCancel(
+    intent: MakerCaptureRepriceIntent,
+    predecessor: Order,
+  ): Promise<void> {
+    if (!this.captureIntentState(intent, predecessor, this.now())) {
+      this.failCaptureIntent(intent, "policy-or-lineage-drift");
+      return;
+    }
+    const identity = buildMakerCaptureRepriceIdentity(
+      intent.rootOrderId,
+      intent.predecessorOrderId,
+      intent.replacementIndex,
+    );
+    if (
+      identity.intentId !== intent.intentId ||
+      identity.lifecycleSignalId !== intent.lifecycleSignalId
+    )
+      return;
+    await this.deps.bus.publish("CancelOrderRequested", {
+      command: {
+        type: "CancelOrderCommand",
+        commandId: createCommandId(identity.cancelCommandId),
+        orderId: intent.predecessorOrderId,
+        reason: "maker_capture_reprice",
+      },
+      timestamp: this.now(),
+    });
+  }
+
+  private async handleCaptureTerminalSignal(signal: Signal, reason: string): Promise<void> {
+    if (!signal.makerCaptureReprice) return;
+    await this.handleCaptureTerminalBySignal(signal.signalId, reason);
+  }
+
+  private async handleCaptureTerminalBySignal(
+    signalId: string | null | undefined,
+    reason: string,
+  ): Promise<void> {
+    if (!signalId) return;
+    const intent = this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(signalId);
+    if (!intent) return;
+    const child = this.deps.orderRepo.findByClientOrderId(
+      buildClientOrderId({ signalId, tokenId: intent.tokenId, side: "buy" }),
+    );
+    if (child && child.status !== "rejected") {
+      this.deps.orderRepo.markMakerCaptureRepriceSubmitted?.(intent.intentId, child.orderId);
+      this.completeCaptureIntent(intent);
+    } else {
+      this.failCaptureIntent(intent, reason);
+    }
+  }
+
+  private async handleCaptureOrderRejected(event: RuntimeEventMap["OrderRejected"]): Promise<void> {
+    const intent = event.signalId
+      ? this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(event.signalId)
+      : (() => {
+          const child = this.deps.orderRepo.findByClientOrderId(event.clientOrderId);
+          return child
+            ? this.deps.orderRepo.findMakerCaptureRepriceIntentByChild?.(child.orderId)
+            : null;
+        })();
+    if (!intent) return;
+    const child = this.deps.orderRepo.findByClientOrderId(event.clientOrderId);
+    if (child && child.status !== "rejected") this.completeCaptureIntent(intent);
+    else this.failCaptureIntent(intent, event.reason);
+  }
+
+  private async handleCaptureOrderPlaced(event: RuntimeEventMap["OrderPlaced"]): Promise<void> {
+    const intent = this.deps.orderRepo.findMakerCaptureRepriceIntentByChild?.(event.orderId);
+    const child = intent ? this.deps.orderRepo.findById(event.orderId) : null;
+    if (intent && child && isWorking(child)) this.completeCaptureIntent(intent);
+  }
+
+  private failCaptureIntent(intent: MakerCaptureRepriceIntent, reason: string): void {
+    this.deps.orderRepo.markMakerCaptureRepriceTerminal?.(intent.intentId, "failed", reason);
+    this.captureSignalsPublished.delete(intent.lifecycleSignalId);
+  }
+
+  private completeCaptureIntent(intent: MakerCaptureRepriceIntent): void {
+    this.deps.orderRepo.markMakerCaptureRepriceTerminal?.(intent.intentId, "completed");
+    this.captureSignalsPublished.delete(intent.lifecycleSignalId);
+  }
+
+  private capturePolicySnapshot() {
+    return this.deps.policySnapshot?.() ?? null;
+  }
+
+  private async safeCaptureReprice(operation: () => Promise<void>): Promise<void> {
+    try {
+      await operation();
+    } catch (err) {
+      this.log.error({ err }, "maker capture reprice handler failed; durable intent retained");
     }
   }
 
@@ -638,4 +1106,36 @@ function increment(target: Record<string, number>, key: string): void {
 
 function numericDiagnostic(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function isWorking(order: Order): boolean {
+  return (
+    order.status === "pending" || order.status === "open" || order.status === "partially-filled"
+  );
+}
+
+function freshEvent(timestamp: number, nowMs: number): boolean {
+  return Number.isFinite(timestamp) && timestamp <= nowMs + 1_000 && nowMs - timestamp <= 3_000;
+}
+
+function activeWindow(activatedAtUtc: string, expiresAtUtc: string, nowMs: number): boolean {
+  const activatedAtMs = Date.parse(activatedAtUtc);
+  const expiresAtMs = Date.parse(expiresAtUtc);
+  return (
+    Number.isFinite(activatedAtMs) &&
+    Number.isFinite(expiresAtMs) &&
+    nowMs >= activatedAtMs &&
+    nowMs < expiresAtMs
+  );
+}
+
+function frozenWindowMatches(order: Order, activatedAtUtc: string, expiresAtUtc: string): boolean {
+  const value = order.metadata?.makerMicroLiveLifecycle;
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).activatedAtUtc === activatedAtUtc &&
+    (value as Record<string, unknown>).expiresAtUtc === expiresAtUtc
+  );
 }

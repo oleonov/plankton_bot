@@ -1221,6 +1221,8 @@ async function main(): Promise<void> {
     walletBufferPct: config.executionWalletBufferPct,
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     executionPolicy: currentExecutionPolicy,
+    executionPolicySnapshot: currentExecutionPolicySnapshot,
+    candidateBookCache,
     allowSellSizeClamp: config.allowSellSizeClamp,
     capacityMetricsSink: recordOrderCapacitySample,
     profileOwnedOpenPositionCount: countProfileOwnedOpenPositions,
@@ -1680,6 +1682,8 @@ async function main(): Promise<void> {
     legStateRepo: repos.legState,
     algoRulesRepo: repos.algoRules,
     policy: currentExecutionPolicy,
+    policySnapshot: currentExecutionPolicySnapshot,
+    candidateBookCache,
     runtimeMetrics,
     log,
   });

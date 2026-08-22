@@ -41,7 +41,9 @@ import type {
   RiskEventRepository,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
+import { buildClientOrderId } from "@krabs/domain/node";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
+import { buildMakerCaptureRepriceIdentity } from "../maker-capture-reprice.js";
 import type { MakerBuyFastCancel } from "../modules/execution/maker-buy-fast-cancel.js";
 import { LIFECYCLE_STOP_WAIT_MS } from "../lifecycle-chain.js";
 
@@ -403,6 +405,102 @@ describe("ExecutionModule", () => {
     const h = await mod.healthCheck();
     expect(h.ok).toBe(false);
     expect(h.detail).toContain("not started");
+  });
+
+  it("releases a failed pre-child capture command only until its child persists", async () => {
+    const rootOrderId = createOrderId("capture-root");
+    const predecessorOrderId = createOrderId("capture-predecessor");
+    const identity = buildMakerCaptureRepriceIdentity(rootOrderId, predecessorOrderId, 1);
+    const tokenId = createTokenId("tok-yes");
+    let child: Order | null = null;
+    let intent: any = {
+      ...identity,
+      predecessorOrderId,
+      rootOrderId,
+      tokenId,
+      conditionId: createConditionId("cond-1"),
+      replacementIndex: 1,
+      status: "ready",
+      candidatePrice: 0.33,
+      replacementSize: 2,
+      childOrderId: null,
+    };
+    const clientOrderId = buildClientOrderId({
+      signalId: identity.lifecycleSignalId,
+      tokenId,
+      side: "buy",
+    });
+    const command = makePlaceCmd({
+      commandId: createCommandId(`maker-capture-place:${identity.intentId}`),
+      clientOrderId,
+      tokenId,
+      price: 0.33,
+      size: 2,
+      entryStyle: "maker",
+      postOnly: true,
+      decisionRuleId: "R23_DIP_TRIGGER",
+      signalReason: "probe-entry",
+      signalId: identity.lifecycleSignalId,
+      metadata: {
+        makerCaptureRepriceV1: {
+          version: 1,
+          intentId: identity.intentId,
+          rootOrderId,
+          predecessorOrderId,
+          replacementIndex: 1,
+        },
+      },
+    });
+    orderRepo.findMakerCaptureRepriceIntentBySignal = vi.fn(() => intent);
+    orderRepo.findByClientOrderId = vi.fn(() => child);
+    orderRepo.markMakerCaptureRepriceSubmitted = vi.fn((_id, childOrderId) => {
+      intent = { ...intent, status: "submitted", childOrderId };
+      return true;
+    });
+    orderRepo.save = vi.fn((order) => (child = order));
+    (gateway.prepareOrder as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("prepare"));
+    const internal = mod as any;
+    let predecessorRemainingShares = 2;
+    internal.deps.runtimeMode = "live-lite";
+    internal.deps.candidateBookCache = {
+      prime: vi.fn(async () => {
+        await Promise.resolve();
+        predecessorRemainingShares = 1;
+        const now = Date.now();
+        return new Map([
+          [
+            String(tokenId),
+            {
+              tokenId: String(tokenId),
+              sourceKind: "rest",
+              cachedAtMs: now,
+              sourcePolledAtMs: now,
+              snapshotTs: now,
+              book: { tokenId },
+            },
+          ],
+        ]);
+      }),
+    };
+    internal.makerCaptureExecutionContext = () =>
+      predecessorRemainingShares >= command.size
+        ? { intent, predecessor: { price: 0.3 }, usage: { predecessorRemainingShares } }
+        : null;
+    internal.makerCaptureRepriceRejection = () => null;
+    internal.makerBuyLiveRejection = () => null;
+    internal.stampMakerCaptureLineage = (order: Order) => order;
+    await mod.start();
+    await bus.publish("PlaceOrderRequested", { command, timestamp: Date.now() });
+    await bus.publish("PlaceOrderRequested", { command, timestamp: Date.now() });
+    await bus.publish("PlaceOrderRequested", { command, timestamp: Date.now() });
+    expect(gateway.prepareOrder).toHaveBeenCalledTimes(2);
+    expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+    expect(
+      new Set(
+        (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls.map(([order]) => order.orderId),
+      ).size,
+    ).toBe(1);
+    await mod.stop();
   });
 
   it("healthCheck returns ok after start (gateway healthy)", async () => {

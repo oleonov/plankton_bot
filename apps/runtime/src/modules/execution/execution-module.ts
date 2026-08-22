@@ -42,6 +42,8 @@ import type {
   RuntimeEventMap,
   ExitLossFloorVerdict,
   MakerMicroLiveWindow,
+  MakerCaptureRepriceIntent,
+  MakerCaptureChainUsage,
 } from "@krabs/domain";
 import {
   createCommandId,
@@ -143,6 +145,16 @@ import {
 } from "../profile-ladder-order-helpers.js";
 import type { PositionConcentrationService } from "../../position-concentration-service.js";
 import type { MakerBuyFastCancel } from "./maker-buy-fast-cancel.js";
+import type { MakerCaptureBookCache } from "../../maker-capture-reprice.js";
+import {
+  computeMakerCaptureCandidate,
+  matchesMakerCaptureIntent,
+  parseMakerCaptureLineage,
+  parseMakerCaptureRepriceSignal,
+  primeFreshMakerCaptureBook,
+  rootMakerCaptureLineage,
+} from "../../maker-capture-reprice.js";
+import { parseQuoteMotionOrigin, type QuoteMotionOriginV1 } from "../../quote-motion-shadow.js";
 
 /**
  * How long `stop()` waits for commands already dispatched to finish, on either path — the queue's
@@ -166,6 +178,14 @@ type PostOnlyCrossPreSubmitSkip = {
   bookSource: string | null;
   snapshotTs: number | null;
 };
+
+interface MakerCaptureExecutionContext {
+  readonly intent: MakerCaptureRepriceIntent;
+  readonly predecessor: Order;
+  readonly root: Order;
+  readonly usage: MakerCaptureChainUsage;
+  readonly origin: QuoteMotionOriginV1;
+}
 
 function resolvePriceFromCmd(cmd: PlaceOrderCommand): number {
   return cmd.price;
@@ -296,6 +316,10 @@ export interface ExecutionModuleDeps {
   walletBufferPct?: number | undefined;
   walletBufferMinUsdc?: number | undefined;
   executionPolicy?: (() => ExecutionPolicy) | undefined;
+  executionPolicySnapshot?:
+    | (() => { policy: ExecutionPolicy; controlRevision: number | null })
+    | undefined;
+  candidateBookCache?: MakerCaptureBookCache | undefined;
   allowSellSizeClamp?: boolean | undefined;
   capacityMetricsSink?: ((sample: OrderCapacityMetricsSample) => void) | undefined;
   profileOwnedOpenPositionCount?: (() => number) | undefined;
@@ -373,6 +397,7 @@ export class ExecutionModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly processedCommandIds = new Set<string>();
   private readonly processedCommandOrder: string[] = [];
+  private readonly makerCaptureGatewayAttempts = new Set<string>();
   private readonly pendingReservations = new Map<string, PendingReservation>();
   /**
    * Command ids whose idempotency mark must be dropped once `executeCommand`'s
@@ -1660,6 +1685,161 @@ export class ExecutionModule implements RuntimeModule {
     return (this.tokenInFlightCount.get(String(tokenId)) ?? 0) > 0;
   }
 
+  private isMakerCaptureReplacement(cmd: PlaceOrderCommand): boolean {
+    return cmd.metadata?.makerCaptureRepriceV1 !== undefined;
+  }
+
+  private makerCaptureExecutionContext(
+    cmd: PlaceOrderCommand,
+  ): MakerCaptureExecutionContext | null {
+    const metadata = parseMakerCaptureRepriceSignal(cmd.metadata?.makerCaptureRepriceV1);
+    const intent = cmd.signalId
+      ? this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(cmd.signalId)
+      : null;
+    if (
+      !metadata ||
+      !intent ||
+      !cmd.signalId ||
+      !matchesMakerCaptureIntent(cmd.signalId, metadata, intent)
+    ) {
+      return null;
+    }
+    const predecessor = this.deps.orderRepo.findById(intent.predecessorOrderId);
+    const root = this.deps.orderRepo.findById(intent.rootOrderId);
+    const usage = predecessor
+      ? this.deps.orderRepo.getMakerCaptureChainUsage?.(predecessor.orderId)
+      : null;
+    const origin = root ? parseQuoteMotionOrigin(root) : null;
+    const predecessorLineage = predecessor ? parseMakerCaptureLineage(predecessor) : null;
+    const rootLineage = root ? parseMakerCaptureLineage(root) : null;
+    const snapshot = this.deps.executionPolicySnapshot?.();
+    const makerPolicy = snapshot?.policy.makerEntry;
+    const window = makerPolicy?.microLiveWindow;
+    const deadline = root ? resolveMakerMicroLiveFillDeadlineMs(root) : null;
+    const expectedClientOrderId = buildClientOrderId({
+      signalId: intent.lifecycleSignalId,
+      tokenId: intent.tokenId,
+      side: "buy",
+    });
+    const submittedChild = intent.childOrderId
+      ? this.deps.orderRepo.findById(intent.childOrderId)
+      : null;
+    const remainingRootShares =
+      usage && intent.candidatePrice
+        ? Math.max(0, (usage.rootNotionalUsdc - usage.chainFilledUsdc) / intent.candidatePrice)
+        : 0;
+    if (
+      !predecessor ||
+      !root ||
+      !usage?.trusted ||
+      !origin ||
+      !predecessorLineage ||
+      !rootLineage ||
+      !snapshot ||
+      snapshot.controlRevision === null ||
+      !makerPolicy?.captureBookReprice.enabled ||
+      makerPolicy.mode !== "micro_live" ||
+      window?.captureNextR23 !== true ||
+      !isMakerMicroLiveWindowActive(window, Date.now()) ||
+      intent.replacementIndex > makerPolicy.captureBookReprice.maxRepricesPerRoot ||
+      (intent.status !== "ready" && intent.status !== "submitted") ||
+      (intent.status === "submitted" &&
+        (!submittedChild ||
+          String(submittedChild.clientOrderId) !== String(expectedClientOrderId))) ||
+      predecessor.status !== "cancelled" ||
+      cmd.side !== "buy" ||
+      cmd.entryStyle !== "maker" ||
+      cmd.postOnly !== true ||
+      cmd.decisionRuleId !== "R23_DIP_TRIGGER" ||
+      cmd.signalReason !== "probe-entry" ||
+      String(cmd.tokenId) !== String(intent.tokenId) ||
+      String(cmd.conditionId) !== String(intent.conditionId) ||
+      String(cmd.clientOrderId) !== String(expectedClientOrderId) ||
+      intent.candidatePrice == null ||
+      Math.abs(cmd.price - intent.candidatePrice) > ExecutionModule.PRICE_EPSILON ||
+      intent.replacementSize == null ||
+      Math.abs(cmd.size - intent.replacementSize) > ExecutionModule.SIZE_EPSILON_SHARES ||
+      usage.replacementIndex + 1 !== intent.replacementIndex ||
+      String(usage.rootOrderId) !== String(intent.rootOrderId) ||
+      String(predecessorLineage.rootOrderId) !== String(intent.rootOrderId) ||
+      predecessorLineage.replacementIndex + 1 !== intent.replacementIndex ||
+      rootLineage.replacementIndex !== 0 ||
+      String(rootLineage.rootOrderId) !== String(root.orderId) ||
+      origin.kind !== "r23_capture" ||
+      origin.policySchemaVersion !== snapshot.policy.version ||
+      origin.policyControlRevision !== snapshot.controlRevision ||
+      origin.cohortId !== window.activatedAtUtc ||
+      origin.entryPriceCeiling !== snapshot.policy.entryPriceCeiling ||
+      !this.captureRootWindowMatches(root, window.activatedAtUtc, window.expiresAtUtc) ||
+      deadline === null ||
+      Date.now() >= deadline ||
+      cmd.size > usage.predecessorRemainingShares + ExecutionModule.SIZE_EPSILON_SHARES ||
+      cmd.size > remainingRootShares + ExecutionModule.SIZE_EPSILON_SHARES
+    ) {
+      return null;
+    }
+    return { intent, predecessor, root, usage, origin };
+  }
+
+  private makerCaptureRepriceRejection(
+    cmd: PlaceOrderCommand,
+  ): { reason: string; code: ExchangeErrorCode } | null {
+    if (!this.isMakerCaptureReplacement(cmd)) return null;
+    return this.makerCaptureExecutionContext(cmd)
+      ? null
+      : { reason: "maker-capture-reprice-invalid", code: ExchangeErrorCode.LivePolicyBlocked };
+  }
+
+  private async makerCaptureFreshBookRejection(
+    cmd: PlaceOrderCommand,
+  ): Promise<{ reason: string; code: ExchangeErrorCode } | null> {
+    if (!this.isMakerCaptureReplacement(cmd)) return null;
+    let context = this.makerCaptureExecutionContext(cmd);
+    if (!context) return this.makerCapRejection("maker-capture-reprice-invalid");
+    let entry;
+    try {
+      entry = await primeFreshMakerCaptureBook(
+        this.deps.candidateBookCache,
+        String(cmd.tokenId),
+        Date.now(),
+      );
+    } catch {
+      entry = null;
+    }
+    if (!entry) return this.makerCapRejection("maker-capture-book-unavailable");
+    context = this.makerCaptureExecutionContext(cmd);
+    if (!context) return this.makerCapRejection("maker-capture-reprice-invalid");
+    const candidate = computeMakerCaptureCandidate({
+      book: entry.book,
+      tickSize: cmd.tickSize,
+      predecessorPrice: context.predecessor.price,
+      predecessorVisibleShares: context.usage.predecessorRemainingShares,
+      originalSuggestedPrice: context.origin.originalSuggestedPrice,
+      entryPriceCeiling: context.origin.entryPriceCeiling!,
+    });
+    if (!candidate.ok || Math.abs(candidate.price - cmd.price) > ExecutionModule.PRICE_EPSILON) {
+      return this.makerCapRejection(
+        candidate.ok ? "maker-capture-book-drift" : `maker-capture-${candidate.reason}`,
+      );
+    }
+    return null;
+  }
+
+  private captureRootWindowMatches(
+    root: Order,
+    activatedAtUtc: string,
+    expiresAtUtc: string,
+  ): boolean {
+    const value = root.metadata?.makerMicroLiveLifecycle;
+    return (
+      value !== null &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      (value as Record<string, unknown>).activatedAtUtc === activatedAtUtc &&
+      (value as Record<string, unknown>).expiresAtUtc === expiresAtUtc
+    );
+  }
+
   private makerBuyLiveRejection(
     cmd: PlaceOrderCommand,
     notional: number,
@@ -1777,7 +1957,11 @@ export class ExecutionModule implements RuntimeModule {
       String(cmd.conditionId),
       String(cmd.clientOrderId),
     );
-    if (usage.committedUsdc + pendingUsdc + notional > window.maxCumulativeAcceptedPendingUsdc) {
+    const commitmentIncrement = this.isMakerCaptureReplacement(cmd) ? 0 : notional;
+    if (
+      usage.committedUsdc + pendingUsdc + commitmentIncrement >
+      window.maxCumulativeAcceptedPendingUsdc
+    ) {
       return this.makerCapRejection("maker-micro-cumulative-cap-exceeded");
     }
 
@@ -1788,7 +1972,7 @@ export class ExecutionModule implements RuntimeModule {
     );
     if (
       window.maxCumulativeAcceptedPendingUsdcPerCondition !== undefined &&
-      usage.conditionCommittedUsdc + conditionPendingUsdc + notional >
+      usage.conditionCommittedUsdc + conditionPendingUsdc + commitmentIncrement >
         window.maxCumulativeAcceptedPendingUsdcPerCondition
     ) {
       return this.makerCapRejection("maker-micro-condition-cap-exceeded");
@@ -1883,6 +2067,12 @@ export class ExecutionModule implements RuntimeModule {
         "order rejected — invalid execution price",
       );
       await this.rejectOrder(cmd, "invalid-order-price", ExchangeErrorCode.InvalidPrice);
+      return;
+    }
+
+    const captureRejection = this.makerCaptureRepriceRejection(cmd);
+    if (captureRejection) {
+      await this.rejectOrder(cmd, captureRejection.reason, captureRejection.code);
       return;
     }
 
@@ -2405,12 +2595,14 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   private async executeCommand(cmd: PlaceOrderCommand | CancelOrderCommand): Promise<void> {
+    let failed = true;
     try {
       if (cmd.type === "PlaceOrderCommand") {
         await this.executePlace(cmd);
       } else {
         await this.executeCancel(cmd);
       }
+      failed = false;
     } finally {
       if (cmd.type === "PlaceOrderCommand") {
         this.pendingReservations.delete(String(cmd.commandId));
@@ -2448,6 +2640,10 @@ export class ExecutionModule implements RuntimeModule {
         this.commandIdsPendingRelease.delete(String(cmd.commandId))
       ) {
         this.releaseProcessedCommandId(String(cmd.commandId));
+      }
+      const attempted = this.makerCaptureGatewayAttempts.delete(String(cmd.commandId));
+      if (failed && cmd.type === "PlaceOrderCommand" && !attempted) {
+        this.releaseFailedMakerCaptureCommand(cmd);
       }
     }
   }
@@ -2775,6 +2971,14 @@ export class ExecutionModule implements RuntimeModule {
     let effectivePrice = cmd.price;
 
     if (authTick !== cmd.tickSize) {
+      if (this.isMakerCaptureReplacement(cmd)) {
+        await this.rejectOrder(
+          cmd,
+          "maker-capture-tick-drift",
+          ExchangeErrorCode.LivePolicyBlocked,
+        );
+        return;
+      }
       // Re-snap the price to the corrected tick grid (side-aware) before validating.
       // If re-snap fails we fall back to the original cmd tick/price — the order
       // may still get an exchange reject, but we never place a knowingly invalid one.
@@ -2990,9 +3194,24 @@ export class ExecutionModule implements RuntimeModule {
 
     const preparedLive = await this.submitPreparedLiveOrder(effectiveCmd, placeParams);
     if (preparedLive?.submit.kind === "unknown") return;
-    const result = preparedLive
-      ? this.preparedSubmitResultToPlaceOrderResult(preparedLive.submit)
-      : await this.deps.gateway.placeOrder(placeParams);
+    let result: import("@krabs/domain").PlaceOrderResult;
+    if (preparedLive) {
+      result = this.preparedSubmitResultToPlaceOrderResult(preparedLive.submit);
+    } else {
+      if (this.isMakerCaptureReplacement(effectiveCmd)) {
+        const captureBookRejection = await this.makerCaptureFreshBookRejection(effectiveCmd);
+        if (captureBookRejection) {
+          await this.rejectOrder(
+            effectiveCmd,
+            captureBookRejection.reason,
+            captureBookRejection.code,
+          );
+          return;
+        }
+        this.makerCaptureGatewayAttempts.add(String(effectiveCmd.commandId));
+      }
+      result = await this.deps.gateway.placeOrder(placeParams);
+    }
 
     const now = Date.now();
 
@@ -3033,7 +3252,10 @@ export class ExecutionModule implements RuntimeModule {
       // with a corrected tick/price if the CLOB told us the tick was wrong.
       // Hard cap = 1: retryAfterInvalidTick handles both success and failure
       // persistence paths and returns true so we exit immediately.
-      if (exchangeRejectionReason === "rejection_invalid_tick") {
+      if (
+        exchangeRejectionReason === "rejection_invalid_tick" &&
+        !this.isMakerCaptureReplacement(effectiveCmd)
+      ) {
         const firstRejected = preparedLive
           ? this.buildPreparedOrder(
               effectiveCmd,
@@ -3124,6 +3346,7 @@ export class ExecutionModule implements RuntimeModule {
       this.persistPreparedAcceptedOrder(effectiveCmd, preparedLive.pending, result.orderId);
     } else {
       const order = this.buildOrder(effectiveCmd, "open", result.orderId);
+      this.markMakerCaptureSubmittedOrThrow(effectiveCmd, order.orderId);
       this.persistAcceptedOrderOrThrow(effectiveCmd, order, result.orderId);
     }
 
@@ -3286,7 +3509,12 @@ export class ExecutionModule implements RuntimeModule {
       }
       cancelPersisted = true;
     } finally {
-      if (!cancelPersisted) this.cancelReservations.delete(orderKey);
+      if (!cancelPersisted) {
+        this.cancelReservations.delete(orderKey);
+        if (cmd.reason === "maker_capture_reprice") {
+          this.releaseProcessedCommandId(String(cmd.commandId));
+        }
+      }
     }
   }
 
@@ -3944,6 +4172,36 @@ export class ExecutionModule implements RuntimeModule {
     if (index >= 0) this.processedCommandOrder.splice(index, 1);
   }
 
+  private releaseFailedMakerCaptureCommand(cmd: PlaceOrderCommand): void {
+    try {
+      const metadata = parseMakerCaptureRepriceSignal(cmd.metadata?.makerCaptureRepriceV1);
+      const intent = cmd.signalId
+        ? this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(cmd.signalId)
+        : null;
+      const clientOrderId = intent
+        ? buildClientOrderId({
+            signalId: intent.lifecycleSignalId,
+            tokenId: intent.tokenId,
+            side: "buy",
+          })
+        : null;
+      if (
+        !metadata ||
+        !intent ||
+        intent.status !== "ready" ||
+        intent.childOrderId !== null ||
+        !clientOrderId ||
+        String(cmd.clientOrderId) !== String(clientOrderId) ||
+        !matchesMakerCaptureIntent(cmd.signalId!, metadata, intent) ||
+        this.deps.orderRepo.findByClientOrderId(clientOrderId)
+      )
+        return;
+      this.releaseProcessedCommandId(String(cmd.commandId));
+    } catch {
+      // Fail closed: repository uncertainty must retain the idempotency fence.
+    }
+  }
+
   private getPostOnlyCrossPreSubmitSkip(cmd: PlaceOrderCommand): PostOnlyCrossPreSubmitSkip | null {
     if (cmd.postOnly !== true) return null;
     const market = this.marketCache.get(String(cmd.tokenId));
@@ -4229,6 +4487,7 @@ export class ExecutionModule implements RuntimeModule {
 
     const prepared = await gateway.prepareOrder(params);
     const pending = this.buildPreparedOrder(cmd, params, prepared.orderId, "pending");
+    this.markMakerCaptureSubmittedOrThrow(cmd, pending.orderId);
     if (replacement) {
       if (!this.deps.orderRepo.replacePendingIdentity) {
         throw new Error("order repository does not support prepared identity replacement");
@@ -4250,6 +4509,18 @@ export class ExecutionModule implements RuntimeModule {
           errorMessage: makerRejection.reason,
           errorDetails: null,
         };
+      }
+      if (this.isMakerCaptureReplacement(cmd)) {
+        const captureBookRejection = await this.makerCaptureFreshBookRejection(cmd);
+        if (captureBookRejection) {
+          return {
+            kind: "rejected" as const,
+            errorCode: captureBookRejection.code,
+            errorMessage: captureBookRejection.reason,
+            errorDetails: null,
+          };
+        }
+        this.makerCaptureGatewayAttempts.add(String(cmd.commandId));
       }
       const outcome = await gateway.submitPreparedOrder!(prepared);
       if (outcome.kind === "accepted" && outcome.orderId !== prepared.orderId) {
@@ -4277,7 +4548,7 @@ export class ExecutionModule implements RuntimeModule {
     },
   ): Order {
     const now = new Date().toISOString();
-    return {
+    const order: Order = {
       orderId: createOrderId(exactOrderId),
       clientOrderId: cmd.clientOrderId,
       tokenId: cmd.tokenId,
@@ -4306,6 +4577,60 @@ export class ExecutionModule implements RuntimeModule {
       createdAt: now,
       updatedAt: now,
     };
+    return this.stampMakerCaptureLineage(order, cmd, status);
+  }
+
+  private stampMakerCaptureLineage(
+    order: Order,
+    cmd: PlaceOrderCommand,
+    status: "pending" | "open" | "rejected",
+  ): Order {
+    if (status === "rejected") return order;
+    if (this.isMakerCaptureReplacement(cmd)) {
+      const context = this.makerCaptureExecutionContext(cmd);
+      const rootLineage = context ? parseMakerCaptureLineage(context.root) : null;
+      const deadline = context ? resolveMakerMicroLiveFillDeadlineMs(context.root) : null;
+      const remainingFillWaitMs =
+        deadline == null ? 0 : Math.floor(deadline - Date.parse(order.createdAt));
+      if (!context || !rootLineage || remainingFillWaitMs <= 0) {
+        throw new Error("maker capture child lineage validation failed");
+      }
+      const lifecycle = context.root.metadata?.makerMicroLiveLifecycle as Record<string, unknown>;
+      return {
+        ...order,
+        metadata: {
+          ...(order.metadata ?? {}),
+          makerMicroLiveLifecycle: { ...lifecycle, fillWaitMs: remainingFillWaitMs },
+          makerCaptureLineageV1: {
+            version: 1,
+            rootOrderId: context.intent.rootOrderId,
+            predecessorOrderId: context.intent.predecessorOrderId,
+            replacementIndex: context.intent.replacementIndex,
+            rootNotionalUsdc: rootLineage.rootNotionalUsdc,
+          },
+        },
+      };
+    }
+    if (parseQuoteMotionOrigin(order)?.kind !== "r23_capture") return order;
+    if (resolveMakerMicroLiveFillDeadlineMs(order) === null) return order;
+    return {
+      ...order,
+      metadata: {
+        ...(order.metadata ?? {}),
+        makerCaptureLineageV1: rootMakerCaptureLineage(order.orderId, order.sizeUsdc),
+      },
+    };
+  }
+
+  private markMakerCaptureSubmittedOrThrow(cmd: PlaceOrderCommand, childOrderId: OrderId): void {
+    if (!this.isMakerCaptureReplacement(cmd)) return;
+    const context = this.makerCaptureExecutionContext(cmd);
+    if (
+      !context ||
+      !this.deps.orderRepo.markMakerCaptureRepriceSubmitted?.(context.intent.intentId, childOrderId)
+    ) {
+      throw new Error("maker capture child intent submission claim failed");
+    }
   }
 
   private preparedSubmitResultToPlaceOrderResult(
@@ -5088,7 +5413,7 @@ export class ExecutionModule implements RuntimeModule {
     },
   ): Order {
     const now = new Date().toISOString();
-    return {
+    const order: Order = {
       orderId: exchangeOrderId
         ? createOrderId(exchangeOrderId)
         : createOrderId(`rej-${cmd.commandId}`),
@@ -5119,6 +5444,7 @@ export class ExecutionModule implements RuntimeModule {
       createdAt: now,
       updatedAt: now,
     };
+    return this.stampMakerCaptureLineage(order, cmd, status);
   }
 
   /**

@@ -49,6 +49,7 @@ import {
   isAlive,
   isSellTimeoutReplacement,
   isMakerMicroLiveOrderAuthorized,
+  isMakerMicroLiveWindowActive,
   isMakerCaptureNextR23OrderAuthorized,
   recordStageDuration,
   resolveTrackS3SpreadCap,
@@ -116,6 +117,11 @@ import { computeMakerEntryPrice } from "../algo-decision/maker-entry.js";
 import type { SignalPathTelemetry } from "./signal-path-telemetry.js";
 import type { EffectiveResolutionGate } from "../../effective-resolution-service.js";
 import type { PositionConcentrationService } from "../../position-concentration-service.js";
+import {
+  matchesMakerCaptureIntent,
+  parseMakerCaptureRepriceSignal,
+} from "../../maker-capture-reprice.js";
+import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 25;
 const MIN_SIZE_EPSILON = 1e-9;
@@ -755,6 +761,11 @@ export class SignalToOrderBridge {
         await this.publishConversionSkipped(signal, "market-cache-miss", ["market-cache-miss"], {
           cacheStatus: "disabled",
         });
+        return;
+      }
+
+      if (signal.makerCaptureReprice !== undefined) {
+        await this.handleMakerCaptureReprice(signal, baseMarket, policyRead);
         return;
       }
 
@@ -1884,6 +1895,94 @@ export class SignalToOrderBridge {
     } finally {
       recordStageDuration("signal_to_order_bridge", performance.now() - bridgeStartMs);
     }
+  }
+
+  private async handleMakerCaptureReprice(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    policyRead: { policy: ExecutionPolicy; controlRevision: number | null },
+  ): Promise<void> {
+    const metadata = parseMakerCaptureRepriceSignal(signal.makerCaptureReprice);
+    const intent = metadata
+      ? (this.deps.orderRepo?.findMakerCaptureRepriceIntentBySignal?.(signal.signalId) ?? null)
+      : null;
+    const predecessor = intent ? this.deps.orderRepo?.findById(intent.predecessorOrderId) : null;
+    const root = intent ? this.deps.orderRepo?.findById(intent.rootOrderId) : null;
+    const origin = root ? parseQuoteMotionOrigin(root) : null;
+    const makerPolicy = policyRead.policy.makerEntry;
+    const window = makerPolicy.microLiveWindow;
+    const valid =
+      metadata !== null &&
+      intent !== null &&
+      intent.status === "ready" &&
+      matchesMakerCaptureIntent(signal.signalId, metadata, intent) &&
+      predecessor?.status === "cancelled" &&
+      String(predecessor.tokenId) === String(signal.tokenId) &&
+      String(predecessor.conditionId) === String(signal.conditionId) &&
+      signal.side === "buy" &&
+      signal.reason === "probe-entry" &&
+      signal.decisionRuleId === "R23_DIP_TRIGGER" &&
+      intent.candidatePrice === signal.suggestedPrice &&
+      intent.replacementSize === signal.suggestedSize &&
+      makerPolicy.mode === "micro_live" &&
+      makerPolicy.captureBookReprice.enabled &&
+      window?.captureNextR23 === true &&
+      isMakerMicroLiveWindowActive(window, this.now()) &&
+      policyRead.controlRevision !== null &&
+      origin?.kind === "r23_capture" &&
+      origin.policySchemaVersion === policyRead.policy.version &&
+      origin.policyControlRevision === policyRead.controlRevision &&
+      origin.cohortId === window.activatedAtUtc &&
+      origin.entryPriceCeiling === policyRead.policy.entryPriceCeiling;
+    if (!valid || !metadata || !intent || !predecessor || !root) {
+      await this.publishConversionSkipped(signal, "execution-terms", ["capture-reprice-invalid"], {
+        intentStatus: intent?.status ?? null,
+      });
+      return;
+    }
+    const clientOrderId = buildClientOrderId({
+      signalId: signal.signalId,
+      tokenId: signal.tokenId,
+      side: "buy",
+    });
+    const cmd: PlaceOrderCommand = {
+      type: "PlaceOrderCommand",
+      commandId: createCommandId(`maker-capture-place:${intent.intentId}`),
+      clientOrderId,
+      source: "strategy",
+      tokenId: signal.tokenId,
+      conditionId: signal.conditionId,
+      side: "buy",
+      size: signal.suggestedSize,
+      price: signal.suggestedPrice,
+      postOnly: true,
+      entryStyle: "maker",
+      orderType: "GTC",
+      tickSize: market.tickSize,
+      negRisk: market.negRisk,
+      sequenceInTick: signal.sequenceInTick,
+      signalReason: signal.reason,
+      signalId: signal.signalId,
+      decisionRuleId: signal.decisionRuleId,
+      signalTimestamp: signal.generatedAt,
+      positionId: predecessor.positionId ?? null,
+      metadata: {
+        executionPricingMode: "maker",
+        cacheStatus: "maker-capture-reprice",
+        marketData: {
+          bookSource: market.bookSource ?? "unknown",
+          minOrderSize: market.minOrderSize ?? null,
+          effectiveMinOrderSize: market.minOrderSize ?? null,
+        },
+        makerCaptureRepriceV1: metadata,
+        makerMicroLiveLifecycle: root.metadata?.makerMicroLiveLifecycle,
+        quoteMotionV1: root.metadata?.quoteMotionV1,
+        ...(signal.entryFreshEdgeAttribution
+          ? { entryFreshEdgeAttribution: signal.entryFreshEdgeAttribution }
+          : {}),
+      },
+    };
+    await this.deps.bus.publish("PlaceOrderRequested", { command: cmd, timestamp: this.now() });
   }
 
   /**

@@ -9,6 +9,7 @@ import type {
   OrderRepository,
   RuntimeEventMap,
   Signal,
+  MakerCaptureRepriceIntent,
 } from "@krabs/domain";
 import {
   DEFAULT_EXECUTION_POLICY,
@@ -22,6 +23,7 @@ import {
 import { InProcessEventBus } from "@krabs/event-bus";
 import { EntryLifecycleModule } from "../entry-lifecycle-module.js";
 import type { Logger } from "../../../logger.js";
+import { buildMakerCaptureRepriceIdentity } from "../../../maker-capture-reprice.js";
 
 const TOKEN = createTokenId("tok-entry-life");
 const CONDITION = createConditionId("cond-entry-life");
@@ -884,6 +886,292 @@ describe("EntryLifecycleModule", () => {
 
     expect(scheduled).toHaveLength(1);
 
+    await module.stop();
+  });
+  it("claims before cancel and emits one fill-aware deterministic capture replacement", async () => {
+    const now = 1_000;
+    const window = {
+      activatedAtUtc: new Date(0).toISOString(),
+      expiresAtUtc: new Date(10_000).toISOString(),
+      maxCumulativeAcceptedPendingUsdc: 1,
+      captureNextR23: true,
+    };
+    const root = makeOrder({
+      signalReason: "probe-entry",
+      decisionRuleId: "R23_DIP_TRIGGER",
+      entryStyle: "maker",
+      price: 0.3,
+      size: 3,
+      sizeUsdc: 0.9,
+      createdAt: new Date(0).toISOString(),
+      metadata: {
+        makerMicroLiveLifecycle: {
+          kind: "r23_capture",
+          activatedAtUtc: window.activatedAtUtc,
+          expiresAtUtc: window.expiresAtUtc,
+          fillWaitMs: 7_200_000,
+        },
+        makerCaptureLineageV1: {
+          version: 1,
+          rootOrderId: createOrderId("ord-entry-life"),
+          predecessorOrderId: null,
+          replacementIndex: 0,
+          rootNotionalUsdc: 0.9,
+        },
+        quoteMotionV1: {
+          version: 1,
+          kind: "r23_capture",
+          cohortId: window.activatedAtUtc,
+          originalSuggestedPrice: 0.4,
+          originalTargetPrice: null,
+          entryPriceCeiling: 0.45,
+          policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+          policyControlRevision: 7,
+          initialBook: {
+            depthStatus: "full",
+            bestBid: 0.3,
+            bestAsk: 0.36,
+            tickSize: 0.01,
+            snapshotTs: now,
+            source: "test",
+          },
+        },
+      },
+    });
+    let current = root;
+    let intent: MakerCaptureRepriceIntent | null = null;
+    const repo = makeOrderRepo(root);
+    vi.mocked(repo.findById).mockImplementation(() => current);
+    vi.mocked(repo.findOpen).mockImplementation(() =>
+      current.status === "open" || current.status === "partially-filled" ? [current] : [],
+    );
+    repo.getMakerCaptureChainUsage = vi.fn(() => ({
+      trusted: true,
+      rootOrderId: root.orderId,
+      rootNotionalUsdc: 0.9,
+      chainFilledUsdc: 0.2,
+      predecessorRemainingShares: 2.3,
+      replacementIndex: 0,
+      orderIds: [root.orderId],
+    }));
+    repo.claimMakerCaptureRepriceIntent = vi.fn((claimed) => {
+      intent = claimed;
+      return true;
+    });
+    repo.findRecoverableMakerCaptureRepriceIntents = vi.fn(() => (intent ? [intent] : []));
+    repo.findMakerCaptureRepriceIntentByPredecessor = vi.fn(() => intent);
+    repo.findMakerCaptureRepriceIntentBySignal = vi.fn(() => intent);
+    repo.markMakerCaptureRepriceReady = vi.fn((_id, price, size) => {
+      intent = { ...intent!, status: "ready", candidatePrice: price, replacementSize: size };
+      return true;
+    });
+    const book = {
+      tokenId: TOKEN,
+      bids: [
+        { price: 0.32, size: 10 },
+        { price: 0.3, size: 2.3 },
+      ],
+      asks: [{ price: 0.36, size: 10 }],
+      bestBid: 0.32,
+      bestAsk: 0.36,
+      midPrice: 0.34,
+      spread: 0.04,
+      minOrderSize: 1,
+      timestamp: now,
+    };
+    const bus = new InProcessEventBus();
+    const cancels: RuntimeEventMap["CancelOrderRequested"][] = [];
+    const signals: Signal[] = [];
+    let downstreamFails = true;
+    bus.subscribe("CancelOrderRequested", async (event) => {
+      cancels.push(event);
+    });
+    bus.subscribe("SignalProduced", async () => {
+      if (downstreamFails) throw new Error("downstream failed");
+    });
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+    const policy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      makerEntry: {
+        ...DEFAULT_EXECUTION_POLICY.makerEntry,
+        mode: "micro_live" as const,
+        microLiveWindow: window,
+        captureBookReprice: { enabled: true, maxRepricesPerRoot: 5 },
+      },
+    };
+    const module = buildModule({
+      bus,
+      orderRepo: repo,
+      now: () => now,
+      policy: () => policy,
+      policySnapshot: () => ({ policy, controlRevision: 7 }),
+      candidateBookCache: {
+        prime: vi.fn().mockResolvedValue(
+          new Map([
+            [
+              String(TOKEN),
+              {
+                tokenId: String(TOKEN),
+                snapshotTs: now,
+                cachedAtMs: now,
+                sourcePolledAtMs: now,
+                bookSource: "clob",
+                sourceKind: "rest",
+                book,
+              },
+            ],
+          ]),
+        ),
+      },
+    });
+
+    await module.start();
+    await publishMarket(bus, makeMarket({ bestBid: 0.31 }));
+    expect(cancels[0]?.command.commandId).toBe(
+      buildMakerCaptureRepriceIdentity(root.orderId, root.orderId, 1).cancelCommandId,
+    );
+    current = { ...root, status: "cancelled" };
+    await bus.publish("OrderCancelled", {
+      commandId: cancels[0]!.command.commandId,
+      orderId: root.orderId,
+      tokenId: TOKEN,
+      conditionId: CONDITION,
+      reason: "maker_capture_reprice",
+      signalReason: "probe-entry",
+      timestamp: now,
+    });
+    await bus.drain();
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      suggestedPrice: 0.33,
+      makerCaptureReprice: { replacementIndex: 1 },
+    });
+    expect(signals[0]!.suggestedSize).toBeCloseTo(0.7 / 0.33);
+    downstreamFails = false;
+    await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
+    expect(signals.map((signal) => signal.signalId)).toEqual([
+      intent!.lifecycleSignalId,
+      intent!.lifecycleSignalId,
+    ]);
+    intent = null;
+    current = { ...root, price: 0.4 };
+    vi.mocked(repo.claimMakerCaptureRepriceIntent!).mockClear();
+    cancels.length = 0;
+    await publishMarket(bus, makeMarket({ bestBid: 0.41, bestAsk: 0.43 }));
+    expect(repo.claimMakerCaptureRepriceIntent).not.toHaveBeenCalled();
+    expect(cancels).toEqual([]);
+    await module.stop();
+  });
+
+  it("fails a submitted intent whose deterministic child row is missing at restart", async () => {
+    const root = makeOrder();
+    const intent: MakerCaptureRepriceIntent = {
+      intentId: "intent-missing-child",
+      predecessorOrderId: root.orderId,
+      lifecycleSignalId: "signal-missing-child",
+      rootOrderId: root.orderId,
+      tokenId: TOKEN,
+      conditionId: CONDITION,
+      replacementIndex: 1,
+      status: "submitted",
+      candidatePrice: 0.31,
+      replacementSize: 2,
+      childOrderId: createOrderId("missing-child"),
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      failure: null,
+    };
+    const repo = makeOrderRepo(root);
+    vi.mocked(repo.findById).mockImplementation((id) => (id === root.orderId ? root : null));
+    repo.findRecoverableMakerCaptureRepriceIntents = vi.fn(() => [intent]);
+    repo.markMakerCaptureRepriceTerminal = vi.fn(() => true);
+
+    const module = buildModule({ orderRepo: repo });
+    await module.start();
+
+    expect(repo.markMakerCaptureRepriceTerminal).toHaveBeenCalledWith(
+      intent.intentId,
+      "failed",
+      "submitted-child-missing",
+    );
+    await module.stop();
+  });
+
+  it("fails a disabled recoverable capture intent without re-cancelling", async () => {
+    const predecessor = makeOrder();
+    const identity = buildMakerCaptureRepriceIdentity(predecessor.orderId, predecessor.orderId, 1);
+    const intent: MakerCaptureRepriceIntent = {
+      ...identity,
+      predecessorOrderId: predecessor.orderId,
+      rootOrderId: predecessor.orderId,
+      tokenId: TOKEN,
+      conditionId: CONDITION,
+      replacementIndex: 1,
+      status: "cancel_pending",
+      candidatePrice: null,
+      replacementSize: null,
+      childOrderId: null,
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      failure: null,
+    };
+    const repo = makeOrderRepo(predecessor);
+    repo.findRecoverableMakerCaptureRepriceIntents = vi.fn(() => [intent]);
+    repo.markMakerCaptureRepriceTerminal = vi.fn(() => true);
+    const bus = new InProcessEventBus();
+    const cancels = vi.fn();
+    bus.subscribe("CancelOrderRequested", cancels);
+    const module = buildModule({
+      bus,
+      orderRepo: repo,
+      policySnapshot: () => ({ policy: DEFAULT_EXECUTION_POLICY, controlRevision: 7 }),
+    });
+    await module.start();
+    expect(cancels).not.toHaveBeenCalled();
+    expect(repo.markMakerCaptureRepriceTerminal).toHaveBeenCalledWith(
+      intent.intentId,
+      "failed",
+      "policy-or-lineage-drift",
+    );
+    await module.stop();
+  });
+
+  it("adopts a ready intent's deterministically identified child after restart", async () => {
+    const root = makeOrder();
+    const child = makeOrder({ orderId: createOrderId("recovered-child"), status: "open" });
+    const intent: MakerCaptureRepriceIntent = {
+      intentId: "ready-intent",
+      predecessorOrderId: root.orderId,
+      lifecycleSignalId: "ready-signal",
+      rootOrderId: root.orderId,
+      tokenId: TOKEN,
+      conditionId: CONDITION,
+      replacementIndex: 1,
+      status: "ready",
+      candidatePrice: 0.31,
+      replacementSize: 2,
+      childOrderId: null,
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      failure: null,
+    };
+    const repo = makeOrderRepo(root);
+    repo.findRecoverableMakerCaptureRepriceIntents = vi.fn(() => [intent]);
+    vi.mocked(repo.findByClientOrderId).mockReturnValue(child);
+    repo.markMakerCaptureRepriceSubmitted = vi.fn(() => true);
+    repo.markMakerCaptureRepriceTerminal = vi.fn(() => true);
+
+    const module = buildModule({ orderRepo: repo });
+    await module.start();
+
+    expect(repo.markMakerCaptureRepriceSubmitted).toHaveBeenCalledWith(
+      intent.intentId,
+      child.orderId,
+    );
+    expect(repo.markMakerCaptureRepriceTerminal).toHaveBeenCalledWith(intent.intentId, "completed");
     await module.stop();
   });
 });

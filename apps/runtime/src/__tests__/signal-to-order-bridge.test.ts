@@ -277,6 +277,38 @@ afterEach(() => {
 });
 
 describe("SignalToOrderBridge", () => {
+  it("does not convert capture metadata without its exact durable ready intent", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({ bus, log: makeLogger(), now: () => NOW });
+    const placed: unknown[] = [];
+    const skipped: string[][] = [];
+    bridge.subscribe();
+    bus.subscribe("PlaceOrderRequested", async (event) => void placed.push(event));
+    bus.subscribe("SignalConversionSkipped", async (event) => {
+      skipped.push([...event.reasons]);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        decisionRuleId: "R23_DIP_TRIGGER",
+        makerCaptureReprice: {
+          version: 1,
+          intentId: "missing",
+          rootOrderId: createOrderId("root"),
+          predecessorOrderId: createOrderId("predecessor"),
+          replacementIndex: 1,
+        },
+      },
+      market: makeMarket(),
+      approvedAt: NOW,
+    });
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toEqual([["capture-reprice-invalid"]]);
+    bridge.unsubscribe();
+  });
+
   it("skips placement when persistent same-price cooldown is active", async () => {
     const bus = new InProcessEventBus();
     const canPlaceOrder = vi.fn(() => ({
