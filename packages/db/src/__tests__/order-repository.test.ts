@@ -383,12 +383,16 @@ describe("SqliteOrderRepository", () => {
         clientOrderId: "recovery-stable" as ClientOrderId,
         status: "cancelled",
         metadata,
+        createdAt: "2026-08-22T20:05:28.671Z",
+        updatedAt: "2026-08-22T20:35:28.671Z",
       }),
     );
     const replacement = makeOrder({
       orderId: createOrderId("rearmed-recovery"),
       clientOrderId: "recovery-stable" as ClientOrderId,
       exchangeOrderId: "rearmed-recovery",
+      createdAt: "2026-08-23T05:09:22.749Z",
+      updatedAt: "2026-08-23T05:09:22.749Z",
     });
     expect(() =>
       repo.replaceCancelledRecoveryIdentity(createOrderId("cancelled-recovery"), replacement, {
@@ -406,6 +410,7 @@ describe("SqliteOrderRepository", () => {
       status: "pending",
       clientOrderId: "recovery-stable",
       exchangeOrderId: "rearmed-recovery",
+      createdAt: "2026-08-23T05:09:22.749Z",
     });
     expect(() =>
       repo.replaceCancelledRecoveryIdentity(

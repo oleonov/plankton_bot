@@ -243,7 +243,13 @@ export class SqliteOrderRepository implements OrderRepository {
     replacement: Order,
     expectedMetadata: Readonly<Record<string, unknown>>,
   ): void {
-    this.replacePreparedIdentity(currentOrderId, replacement, ["cancelled"], expectedMetadata);
+    this.replacePreparedIdentity(
+      currentOrderId,
+      replacement,
+      ["cancelled"],
+      expectedMetadata,
+      true,
+    );
   }
 
   private replacePreparedIdentity(
@@ -251,6 +257,7 @@ export class SqliteOrderRepository implements OrderRepository {
     replacement: Order,
     allowedStatuses: readonly OrderStatus[],
     expectedMetadata?: Readonly<Record<string, unknown>>,
+    restartLifetime = false,
   ): void {
     const replace = this.db.transaction(() => {
       const current = this.findById(currentOrderId);
@@ -286,7 +293,8 @@ export class SqliteOrderRepository implements OrderRepository {
                status = 'pending', cancel_reason = NULL, cancel_age_ms = NULL, cancel_age_bucket = NULL,
                fill_progress_shares = NULL, market_horizon = NULL, exchange_error_code = NULL,
                exchange_error_message = NULL, exchange_error_payload = NULL,
-               exchange_rejection_reason = NULL, updated_at = ?
+               exchange_rejection_reason = NULL,
+               created_at = CASE WHEN ? THEN ? ELSE created_at END, updated_at = ?
            WHERE order_id = ? AND status IN (${statusPlaceholders}) AND client_order_id = ?
              ${metadataPredicate}
              AND NOT EXISTS (SELECT 1 FROM fills WHERE order_id = orders.order_id)`,
@@ -298,6 +306,8 @@ export class SqliteOrderRepository implements OrderRepository {
           replacement.price,
           replacement.size,
           replacement.sizeUsdc,
+          restartLifetime ? 1 : 0,
+          replacement.createdAt,
           replacement.updatedAt,
           currentOrderId,
           ...allowedStatuses,
