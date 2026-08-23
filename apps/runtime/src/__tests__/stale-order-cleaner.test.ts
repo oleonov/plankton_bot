@@ -930,16 +930,16 @@ describe("cleanStaleEntryOrders", () => {
   });
 
   it.each([
-    ["valid complete recovery coverage", "valid", 10, 0, false, "open", 0],
-    ["forged recovery marker", "forged", 10, 0, false, "open", 1],
-    ["ordinary exit", "ordinary", 10, 0, false, "open", 1],
-    ["changed residual", "valid", 9, 0, false, "open", 1],
-    ["reconciled partial recovery coverage", "valid", 7, 3, false, "partially-filled", 0],
-    ["unreconciled partial recovery coverage", "valid", 7, 3, true, "partially-filled", 1],
-    ["partial status without a local fill", "valid", 10, 0, false, "partially-filled", 1],
+    ["valid complete recovery coverage", "valid", 10, 0, false, "open", 0, 0.23],
+    ["forged recovery marker", "forged", 10, 0, false, "open", 1, null],
+    ["ordinary exit", "ordinary", 10, 0, false, "open", 1, null],
+    ["changed residual", "valid", 9, 0, false, "open", 1, null],
+    ["reconciled partial recovery coverage", "valid", 7, 3, false, "partially-filled", 0, null],
+    ["unreconciled partial recovery coverage", "valid", 7, 3, true, "partially-filled", 1, null],
+    ["partial status without a local fill", "valid", 10, 0, false, "partially-filled", 1, null],
   ] as const)(
-    "applies the TTL exemption only to %s",
-    async (_label, kind, wallet, filled, unreconciled, childStatus, cancels) => {
+    "applies the generic exit-cleaner exemption only to %s",
+    async (_label, kind, wallet, filled, unreconciled, childStatus, cancels, bestBid) => {
       const bounceRung = { rungIndex: 0, fraction: 0.3 };
       const predecessor = makeOrder({
         orderId: createOrderId("recovery-predecessor"),
@@ -1044,12 +1044,27 @@ describe("cleanStaleEntryOrders", () => {
             },
             exchangeStateStore: { getWalletPositionSize: () => wallet },
           },
+          ...(bestBid == null
+            ? {}
+            : {
+                exitRepriceOnDownprice: {
+                  snapshot: () => ({
+                    policy: {
+                      ...DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice,
+                      enabled: true,
+                    },
+                    anchorTicks: DEFAULT_EXECUTION_POLICY.exitMidpointAnchorTicks,
+                  }),
+                  getMarket: () => makePricing({ bestBid }),
+                },
+              }),
         },
         backoffMap,
       );
       await bus.drain();
 
       expect(result.staleExitTtlCancelled).toBe(cancels);
+      expect(result.downpriceRepriceCancelled).toBe(0);
       expect(cancelled).toHaveLength(cancels);
     },
   );

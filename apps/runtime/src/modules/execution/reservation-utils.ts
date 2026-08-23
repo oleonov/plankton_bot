@@ -208,7 +208,7 @@ export interface RecoveryTtlCoverageDeps {
   };
 }
 
-export function isRecoveryChildTtlProtected(
+export function isRecoveryChildCleanerProtected(
   child: Order,
   orderRepo: Pick<OrderRepository, "findById">,
   deps: RecoveryTtlCoverageDeps,

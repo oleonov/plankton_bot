@@ -53,7 +53,7 @@ import {
 import { resolveMidpointAnchoredSellPrice } from "../strategy/signal-to-order.js";
 import type { ExitOrderLifetimeDecision } from "../order-lifetime/order-lifetime-ttl.js";
 import {
-  isRecoveryChildTtlProtected,
+  isRecoveryChildCleanerProtected,
   type RecoveryTtlCoverageDeps,
 } from "../execution/reservation-utils.js";
 import {
@@ -344,6 +344,12 @@ export async function cleanStaleEntryOrders(
     const lastAttempt = backoffMap.get(ordKey);
     if (lastAttempt != null && now - lastAttempt < CANCEL_BACKOFF_MS) continue;
     if (orderRepo.isOrderManagedByNonterminalBounceAskCaptureIntent?.(order.orderId)) continue;
+    if (
+      deps.recoveryTtlCoverage &&
+      isRecoveryChildCleanerProtected(order, orderRepo, deps.recoveryTtlCoverage)
+    ) {
+      continue;
+    }
 
     const market = marketRepo.findByTokenId(order.tokenId);
     const ageMs = now - new Date(order.createdAt).getTime();
@@ -592,13 +598,6 @@ export async function cleanStaleEntryOrders(
     }
     if (repriceDecision.stateChanged) {
       sellDownpriceRepriceMap.set(repriceKey, repriceDecision.nextState);
-    }
-
-    if (
-      deps.recoveryTtlCoverage &&
-      isRecoveryChildTtlProtected(order, orderRepo, deps.recoveryTtlCoverage)
-    ) {
-      continue;
     }
 
     const resolvedExitTtl = resolveExitTtlByMarket(repriceMarket, {
