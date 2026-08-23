@@ -126,6 +126,8 @@ export interface StartupPositionAdoptionResult {
   unknownExchangeOrders: number;
   /** Per-token drain targets to hand to `ExecutionModule.seedStartupTransitions`. */
   drainTargets: StartupDrainTarget[];
+  /** Exact-null complete recovery predecessors backed by one strict working child. */
+  recoveryPredecessorOrderIds: string[];
   details: string[];
 }
 
@@ -200,6 +202,7 @@ export async function runStartupPositionAdoption(
     quarantinedReopeningBuys: 0,
     unknownExchangeOrders: 0,
     drainTargets: [],
+    recoveryPredecessorOrderIds: [],
     details: [],
   };
   const cleanup = cleanupPriorStartupAdoptionArtifacts(deps);
@@ -387,6 +390,10 @@ export async function runStartupPositionAdoption(
         `startup aborted — exact lookup unreliable for pending order ${String(orderId)}`,
       );
     if (exact.data === null) {
+      if (hasStrictCompletedRecoveryChildAtStartup(deps, order)) {
+        result.recoveryPredecessorOrderIds.push(String(order.orderId));
+        continue;
+      }
       if (!(await allowMissingBounceExitRecoveryStartup(deps, order, rawFills))) {
         throw new Error(
           `startup aborted — pending order ${String(orderId)} lacks exact terminal proof`,
@@ -419,7 +426,6 @@ async function allowMissingBounceExitRecoveryStartup(
   order: Order,
   exchangeFills: readonly ExchangeFill[],
 ): Promise<boolean> {
-  if (hasStrictCompletedRecoveryChildAtStartup(deps, order)) return true;
   if (deps.allowMissingBounceExitRecovery?.() !== true) return false;
   const childMarker = order.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
   if (childMarker?.version === 1 && typeof childMarker.predecessorOrderId === "string") {

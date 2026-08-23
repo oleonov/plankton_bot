@@ -106,6 +106,8 @@ export interface OwnershipInvariantStartupGate {
    * seeding that the barrier actually holds it before the startup fence is released.
    */
   drainedOrderIds?: ReadonlySet<string>;
+  /** Proven exact-null recovery predecessors; excluded without creating a drain obligation. */
+  recoveryPredecessorOrderIds?: ReadonlySet<string>;
 }
 
 /**
@@ -128,7 +130,7 @@ export function runOwnershipInvariantStartupGate(gate: OwnershipInvariantStartup
     assertBounceForAllOwnershipInvariant(
       gate.ledgerDb,
       gate.applyToAllMarkets,
-      gate.drainedOrderIds,
+      startupExcludedOrderIds(gate),
     );
     logDeferredDrainViolations(gate, phase);
   } catch (err) {
@@ -145,6 +147,13 @@ export function runOwnershipInvariantStartupGate(gate: OwnershipInvariantStartup
   }
 }
 
+function startupExcludedOrderIds(
+  gate: OwnershipInvariantStartupGate,
+): ReadonlySet<string> | undefined {
+  if (!gate.recoveryPredecessorOrderIds?.size) return gate.drainedOrderIds;
+  return new Set([...(gate.drainedOrderIds ?? []), ...gate.recoveryPredecessorOrderIds]);
+}
+
 /**
  * Names what the projected gate DEFERRED, so a boot that passed on a ledger the census would still
  * call broken is visible in the log rather than silent. Runs only when something was actually
@@ -159,7 +168,11 @@ function logDeferredDrainViolations(
   // the barrier does not cancel them" would describe an obligation that is already discharged.
   if (phase !== "pre-start") return;
   if (gate.applyToAllMarkets !== true || !gate.drainedOrderIds?.size) return;
-  const raw = readOwnershipInvariantViolations(gate.ledgerDb);
+  const raw = readOwnershipInvariantViolations(
+    gate.ledgerDb,
+    undefined,
+    gate.recoveryPredecessorOrderIds,
+  );
   if (!hasOwnershipInvariantViolation(raw)) return;
   gate.log.warn(
     { ...raw.counts, drainedOrderIds: [...gate.drainedOrderIds] },

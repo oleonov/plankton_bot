@@ -404,7 +404,8 @@ describe("runStartupPositionAdoption", () => {
       data: orderId === exactChild.orderId ? exactChild : null,
     }));
     allowRecovery = false;
-    await runStartupPositionAdoption(deps);
+    const completedRecovery = await runStartupPositionAdoption(deps);
+    expect(completedRecovery.recoveryPredecessorOrderIds).toEqual([String(predecessorId)]);
 
     const completedPredecessorMetadata = orderRepo.findById(predecessorId)!.metadata!;
     orderRepo.updateMetadata(predecessorId, {

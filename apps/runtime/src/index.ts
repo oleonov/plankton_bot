@@ -3238,12 +3238,14 @@ async function main(): Promise<void> {
         .map((order) => String(order.orderId)),
     ),
   );
+  const recoveryPredecessorOrderIds = new Set(startupAdoption.recoveryPredecessorOrderIds);
   runOwnershipInvariantStartupGate({
     ledgerDb: ledgerConn.db,
     controlDb: controlConn.db,
     applyToAllMarkets: bounceAppliesToAllMarkets,
     log,
     drainedOrderIds,
+    recoveryPredecessorOrderIds,
   });
   // The drain is `await`ed work that can itself reject, so no statement order can buy
   // "waiver ⇒ drain ran". What the ordering above DOES buy is "waiver ⇒ drain ran OR the process
@@ -3357,6 +3359,7 @@ async function main(): Promise<void> {
       applyToAllMarkets: bounceAppliesAtFenceRelease,
       log,
       drainedOrderIds,
+      recoveryPredecessorOrderIds,
       phase: "pre-fence-release",
     });
 

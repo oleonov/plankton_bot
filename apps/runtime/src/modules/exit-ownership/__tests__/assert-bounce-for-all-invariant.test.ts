@@ -336,6 +336,52 @@ describe("runOwnershipInvariantStartupGate", () => {
     expect(log.fatals).toHaveLength(0);
   });
 
+  it("excludes only proven recovery predecessors at both startup checkpoints", () => {
+    seedCleanBaseline();
+    seedPosition({
+      positionId: "p-recovery",
+      tokenId: "tok-recovery",
+      exitOwner: "bounce",
+      size: 5,
+    });
+    seedSell({
+      orderId: "o-recovery-predecessor",
+      tokenId: "tok-recovery",
+      positionId: "p-recovery",
+      size: 5,
+      ruleId: "BOUNCE_EXIT_TARGET",
+    });
+    seedSell({
+      orderId: "o-recovery-child",
+      tokenId: "tok-recovery",
+      positionId: "p-recovery",
+      size: 5,
+      ruleId: "BOUNCE_EXIT_TARGET",
+    });
+    const recoveryPredecessorOrderIds = new Set(["o-recovery-predecessor"]);
+
+    for (const phase of ["pre-start", "pre-fence-release"] as const) {
+      expect(() =>
+        runOwnershipInvariantStartupGate({
+          ledgerDb: db,
+          controlDb: control.db,
+          applyToAllMarkets: true,
+          log: makeLogger(),
+          recoveryPredecessorOrderIds,
+          phase,
+        }),
+      ).not.toThrow();
+    }
+    expect(() =>
+      runOwnershipInvariantStartupGate({
+        ledgerDb: db,
+        controlDb: control.db,
+        applyToAllMarkets: true,
+        log: makeLogger(),
+      }),
+    ).toThrow(BounceForAllNullOwnerError);
+  });
+
   it("(c) reader failure (not a BounceForAllNullOwnerError) STILL persists failed/paused", () => {
     // The pre-Phase-6 typed catch let this class escape to the top-level handler, which exits
     // without persisting — leaving control.db saying `running`.
@@ -616,6 +662,11 @@ describe("boot ordering — the deferral's excuse cannot outlive its remedy", ()
   it("re-proves the waiver after the drain is seeded and before the fence is released", () => {
     expect(at("seedStartupTransitions(")).toBeLessThan(at("runDrainedOrderFenceGate({"));
     expect(at("runDrainedOrderFenceGate({")).toBeLessThan(at("endStartupFence()"));
+    const drainFence = src.slice(
+      at("runDrainedOrderFenceGate({"),
+      at("drainWaiverOutstanding = false"),
+    );
+    expect(drainFence).not.toContain("recoveryPredecessorOrderIds");
   });
 
   /**
@@ -633,6 +684,7 @@ describe("boot ordering — the deferral's excuse cannot outlive its remedy", ()
     // Same projection as the pre-start read — the drain targets it excused must stay excused, since
     // their cancels are in flight; only violations module startup CREATED may trip this one.
     expect(src.slice(gates[1], at("endStartupFence()"))).toContain("drainedOrderIds,");
+    expect(src.slice(gates[1], at("endStartupFence()"))).toContain("recoveryPredecessorOrderIds,");
     expect(src.slice(gates[1], at("endStartupFence()"))).toContain('phase: "pre-fence-release"');
   });
 
