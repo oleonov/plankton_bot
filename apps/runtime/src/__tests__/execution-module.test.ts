@@ -8094,6 +8094,27 @@ describe("ExecutionModule", () => {
           firstChild.exchangeOrderId!,
           "stale_exit_ttl",
         );
+        const exactLookup = vi.mocked((f.recoveryGateway as any).getOrderResult);
+        const stableExactLookup = exactLookup.getMockImplementation()!;
+        exactLookup.mockImplementation(async (orderId: string) =>
+          orderId === firstChild.exchangeOrderId
+            ? {
+                ok: true,
+                data: {
+                  orderId,
+                  clientOrderId: null,
+                  tokenId: firstChild.tokenId,
+                  side: "sell",
+                  price: firstChild.price,
+                  sizeTotal: firstChild.size,
+                  sizeFilled: 0,
+                  sizeRemaining: firstChild.size,
+                  status: "CANCELLED",
+                  createdAt: Date.now(),
+                },
+              }
+            : stableExactLookup(orderId),
+        );
         const openLookup = vi.mocked((f.recoveryGateway as any).getOpenOrdersResult);
         const stableOpenLookup = openLookup.getMockImplementation()!;
         let retryReads = 0;

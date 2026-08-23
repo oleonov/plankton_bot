@@ -3499,7 +3499,11 @@ export class ExecutionModule implements RuntimeModule {
     if (!exact.ok) throw new Error("recovery child exact state is unreliable");
     this.assertRecoveryChildLocalIdentity(predecessor, child, fence, false);
     this.assertSingleRecoveryChild(predecessor, child);
-    if (child.status === "cancelled" && exact.data !== null) {
+    if (
+      child.status === "cancelled" &&
+      exact.data !== null &&
+      !this.isSafeTerminalRecoveryOrder(exact.data, child)
+    ) {
       throw new Error("cancelled recovery child is not authoritatively absent");
     }
     try {
@@ -3553,6 +3557,19 @@ export class ExecutionModule implements RuntimeModule {
     const replacement = this.deps.orderRepo.findByClientOrderId(fence.childClientOrderId);
     if (!replacement) throw new Error("recovery child replacement did not persist");
     return replacement;
+  }
+
+  private isSafeTerminalRecoveryOrder(exact: ExchangeOrder, local: Order): boolean {
+    return (
+      exact.orderId === local.exchangeOrderId &&
+      String(exact.tokenId) === String(local.tokenId) &&
+      exact.side === "sell" &&
+      (exact.status === "CANCELLED" || exact.status === "EXPIRED" || exact.status === "REJECTED") &&
+      this.sameShares(exact.price, local.price) &&
+      this.sameShares(exact.sizeTotal, local.size) &&
+      this.sameShares(exact.sizeFilled, 0) &&
+      this.sameShares(exact.sizeRemaining, local.size)
+    );
   }
 
   private async cleanupRecoveryChild(
