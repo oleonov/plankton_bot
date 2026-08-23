@@ -10,6 +10,7 @@ import {
   createFillId,
   DEFAULT_EXECUTION_POLICY,
   BOUNCE_EXIT_TARGET_RULE_ID,
+  R23_DIP_TRIGGER_RULE_ID,
   ExchangeErrorCode,
   GATE_ENTRY_RULE_ID,
   S1_LADDER_RULE_ID,
@@ -40,17 +41,20 @@ import type {
   LegStateRepository,
   NormalizedMarket,
   RiskEventRepository,
+  Signal,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { bootstrapDatabase, SqliteFillRepository, SqliteOrderRepository } from "@krabs/db";
 import { buildClientOrderId } from "@krabs/domain/node";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
+import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
 import { ExchangeStateStore } from "../modules/execution/exchange-state-store.js";
 import {
   buildReservationSnapshot,
   canonicalRecoveryMetadata,
 } from "../modules/execution/reservation-utils.js";
 import { buildMakerCaptureRepriceIdentity } from "../maker-capture-reprice.js";
+import { buildBounceAskCaptureIdentity } from "../bounce-ask-capture.js";
 import type { MakerBuyFastCancel } from "../modules/execution/maker-buy-fast-cancel.js";
 import { LIFECYCLE_STOP_WAIT_MS } from "../lifecycle-chain.js";
 
@@ -542,6 +546,413 @@ describe("ExecutionModule", () => {
     expect(effects).toEqual(["proof", "gateway", "proof-rejected"]);
     expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(1);
     await mod.stop();
+  });
+
+  it.each([
+    "open",
+    "absent",
+    "fill",
+    "foreign",
+    "identity",
+    "lineage",
+    "side",
+    "price",
+    "sizeTotal",
+    "valid",
+  ] as const)("routes a submitted ASK signal through bridge recovery: %s", async (mode) => {
+    const rootOrderId = createOrderId("ask-root");
+    const predecessorOrderId = createOrderId("ask-predecessor");
+    const buyRootOrderId = createOrderId("ask-buy-root");
+    const positionId = createPositionId("pos-1");
+    const identity = buildBounceAskCaptureIdentity(rootOrderId, predecessorOrderId, 2);
+    const clientOrderId = buildClientOrderId({
+      signalId: identity.lifecycleSignalId,
+      tokenId: createTokenId("tok-yes"),
+      side: "sell",
+    });
+    const rootLineage = {
+      version: 1,
+      rootOrderId,
+      predecessorOrderId: null,
+      replacementIndex: 0,
+      positionId,
+      originalTargetPrice: 0.3,
+      sourceBuyRootOrderIds: [buyRootOrderId],
+      sourceCohortActivatedAtUtc: "2026-08-01T00:00:00.000Z",
+    } as const;
+    const lineage = {
+      ...rootLineage,
+      predecessorOrderId: rootOrderId,
+      replacementIndex: 1,
+      originalTargetPrice: mode === "lineage" ? 0.29 : 0.3,
+    } as const;
+    const root = openSellAt(0.4, {
+      orderId: rootOrderId,
+      positionId,
+      status: "cancelled",
+      metadata: { bounceAskCaptureLineageV1: rootLineage },
+    });
+    const predecessor = openSellAt(0.36, {
+      orderId: predecessorOrderId,
+      exchangeOrderId: "ask-predecessor-exchange",
+      positionId,
+      status: "cancelled",
+      metadata: { bounceAskCaptureLineageV1: lineage },
+    });
+    const buyRoot = openSellAt(0.2, {
+      orderId: buyRootOrderId,
+      side: "buy",
+      postOnly: true,
+      entryStyle: "maker",
+      signalReason: "probe-entry",
+      decisionRuleId: R23_DIP_TRIGGER_RULE_ID,
+      metadata: {
+        makerCaptureLineageV1: {
+          version: 1,
+          rootOrderId: buyRootOrderId,
+          predecessorOrderId: null,
+          replacementIndex: 0,
+          rootNotionalUsdc: 1,
+        },
+        quoteMotionV1: {
+          version: 1,
+          kind: "r23_capture",
+          cohortId: rootLineage.sourceCohortActivatedAtUtc,
+          originalSuggestedPrice: 0.2,
+          originalTargetPrice: null,
+          entryPriceCeiling: 0.25,
+          policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+          policyControlRevision: 7,
+          initialBook: {
+            depthStatus: "full",
+            bestBid: 0.19,
+            bestAsk: 0.21,
+            tickSize: 0.01,
+            snapshotTs: Date.now(),
+            source: "clob",
+          },
+        },
+      },
+    });
+    const existing = openSellAt(0.35, {
+      orderId: createOrderId("ask-pending"),
+      clientOrderId,
+      exchangeOrderId: "ask-exchange",
+      positionId,
+      status: "pending",
+    });
+    const now = Date.now();
+    const trigger = {
+      eventTimestampMs: now,
+      evaluatedAtMs: now,
+      policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+      policyControlRevision: 7,
+      sourceCohortActivatedAtUtc: rootLineage.sourceCohortActivatedAtUtc,
+      originalTargetPrice: 0.3,
+      candidatePrice: 0.35,
+      externalBestBid: 0.34,
+      externalBestAsk: 0.36,
+      tickSize: 0.01,
+      positionResidualShares: 5,
+      sourceBuyRootOrderIds: [buyRootOrderId],
+    } as const;
+    const prepared = {
+      ...trigger,
+      snapshotTs: now,
+      cachedAtMs: now,
+      sourcePolledAtMs: now,
+      minOrderSize: 1,
+      replacementSize: 5,
+    } as const;
+    let child: Order | null = existing;
+    let intent: any = {
+      ...identity,
+      rootOrderId,
+      predecessorOrderId,
+      positionId,
+      tokenId: existing.tokenId,
+      conditionId: existing.conditionId,
+      replacementIndex: 2,
+      status: "submitted",
+      candidatePrice: 0.35,
+      replacementSize: 5,
+      childOrderId: existing.orderId,
+      proof: {
+        version: 1,
+        trigger,
+        prepared,
+        submit: {
+          ...prepared,
+          childOrderId: String(existing.orderId),
+          clientOrderId: String(clientOrderId),
+          authoritativeStateCapturedAtMs: now,
+          authoritativeOpenOrderCount: 0,
+          authoritativeFilledShares: 0,
+          authoritativeWalletShares: 5,
+          authoritativeStateHash: "prior-proof",
+        },
+      },
+    };
+    const signal = {
+      ...makePlaceCmd(),
+      signalId: identity.lifecycleSignalId,
+      tokenId: existing.tokenId,
+      conditionId: existing.conditionId,
+      side: "sell",
+      suggestedPrice: 0.35,
+      suggestedSize: 5,
+      suggestedSizeUsdc: 1.75,
+      reason: "repricing-exit",
+      strategyTick: Date.now(),
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      generatedAt: new Date().toISOString(),
+      bounceAskCaptureReprice: {
+        version: 1,
+        intentId: identity.intentId,
+        rootOrderId,
+        predecessorOrderId,
+        replacementIndex: 2,
+      },
+    } as unknown as Signal;
+    const remote = {
+      ...existing,
+      orderId: existing.exchangeOrderId,
+      sizeTotal: existing.size,
+      sizeFilled: 0,
+      sizeRemaining: existing.size,
+      status: mode === "open" ? "OPEN" : "CANCELLED",
+    } as unknown as ExchangeOrder;
+    const foreign = { ...remote, orderId: "foreign-open", status: "OPEN" } as ExchangeOrder;
+    const fill = {
+      fillId: "ask-fill",
+      orderId: existing.exchangeOrderId,
+      clientOrderId: String(clientOrderId),
+      tokenId: existing.tokenId,
+      side: "sell",
+      price: existing.price,
+      size: 1,
+      liquidityRole: "maker",
+      fee: 0,
+      feeRateBps: 0,
+      timestamp: Date.now(),
+    } as ExchangeFill;
+    const parityLocal = openSellAt(0.4, {
+      orderId: createOrderId("ask-parity-local"),
+      clientOrderId: "ask-parity-client" as ClientOrderId,
+      exchangeOrderId: "ask-parity-exchange",
+      positionId,
+      size: 2,
+      sizeUsdc: 0.8,
+    });
+    const parityRemote = {
+      ...parityLocal,
+      orderId: parityLocal.exchangeOrderId,
+      sizeTotal: parityLocal.size,
+      sizeFilled: 0,
+      sizeRemaining: parityLocal.size,
+      status: "OPEN",
+      ...(mode === "side" ? { side: "buy" } : {}),
+      ...(mode === "price" ? { price: 0.39 } : {}),
+      ...(mode === "sizeTotal" ? { sizeTotal: 3 } : {}),
+    } as unknown as ExchangeOrder;
+    let preparedOrder = false;
+    orderRepo.findById = vi.fn((id) =>
+      id === rootOrderId
+        ? root
+        : id === predecessorOrderId
+          ? predecessor
+          : id === buyRootOrderId
+            ? buyRoot
+            : id === child?.orderId
+              ? child
+              : null,
+    );
+    orderRepo.findByClientOrderId = vi.fn(() => child);
+    orderRepo.findByExchangeOrderId = vi.fn(() => child);
+    orderRepo.findOpen = vi.fn(() =>
+      preparedOrder && ["valid", "side", "price", "sizeTotal"].includes(mode) ? [parityLocal] : [],
+    );
+    orderRepo.getMakerCaptureChainUsage = vi.fn(() => ({
+      trusted: true,
+      rootOrderId: buyRootOrderId,
+    }));
+    orderRepo.findBounceAskCaptureIntentBySignal = vi.fn(() => intent);
+    orderRepo.resetBounceAskCaptureSubmitted = vi.fn(() => {
+      intent = {
+        ...intent,
+        status: "ready",
+        childOrderId: null,
+        proof: { ...intent.proof, submit: null },
+      };
+      return true;
+    });
+    orderRepo.markBounceAskCaptureSubmitted = vi.fn((_id, childOrderId) => {
+      intent = { ...intent, status: "submitted", childOrderId };
+      return true;
+    });
+    orderRepo.markBounceAskCaptureSubmitProof = vi.fn().mockReturnValue(true);
+    orderRepo.markBounceAskCaptureTerminal = vi.fn();
+    orderRepo.replacePendingIdentity = vi.fn((_id, replacement) => (child = replacement));
+    gateway.prepareOrder = vi.fn(async () => {
+      preparedOrder = true;
+      return { orderId: "prepared-ord-1", __preparedOrderBrand: "PreparedOrder" as const };
+    });
+    gateway.getOpenOrdersResult = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      data: preparedOrder
+        ? mode === "valid" || mode === "side" || mode === "price" || mode === "sizeTotal"
+          ? [parityRemote]
+          : []
+        : mode === "open"
+          ? [remote]
+          : mode === "foreign"
+            ? [foreign]
+            : [],
+    }));
+    gateway.getFillsResult = vi.fn().mockResolvedValue({
+      ok: true,
+      data: mode === "fill" ? [fill] : [],
+    });
+    gateway.getOrderResult = vi.fn(async (exchangeOrderId) => ({
+      ok: true,
+      data:
+        exchangeOrderId === predecessor.exchangeOrderId
+          ? {
+              ...predecessor,
+              orderId: predecessor.exchangeOrderId,
+              sizeTotal: predecessor.size,
+              sizeFilled: 0,
+              sizeRemaining: predecessor.size,
+              status: "CANCELLED",
+            }
+          : mode === "identity"
+            ? { ...remote, price: 0.34 }
+            : mode === "open"
+              ? remote
+              : null,
+    }));
+    const currentPosition = makePosition({
+      positionId,
+      size: 5,
+      avgEntryPrice: 0.2,
+      costBasisUsdc: 1,
+    });
+    const buyFill = {
+      fillId: createFillId(`fill-${positionId}`),
+      orderId: buyRootOrderId,
+      tokenId: existing.tokenId,
+      side: "buy",
+      size: 5,
+    } as Fill;
+    fillRepo.findByTokenId = vi.fn(() => [buyFill]);
+    const internal = mod as any;
+    internal.deps.runtimeMode = "live-lite";
+    internal.deps.positionRepo = createMockPositionRepo(currentPosition);
+    internal.deps.positionRepo.findById = vi.fn(() => currentPosition);
+    internal.deps.positionRepo.findActiveByTokenId = vi.fn(() => [currentPosition]);
+    internal.deps.inventoryLotRepo = createMockInventoryLotRepo(currentPosition);
+    internal.deps.resolutionTracker = { healthy: () => true, isResolved: () => false };
+    internal.deps.executionPolicySnapshot = () => ({
+      policy: {
+        ...DEFAULT_EXECUTION_POLICY,
+        bounceAskCapture: {
+          enabled: true,
+          sourceCohortActivatedAtUtc: rootLineage.sourceCohortActivatedAtUtc,
+          maxRepricesPerRoot: 2,
+        },
+      },
+      controlRevision: 7,
+    });
+    internal.deps.candidateBookCache = {
+      prime: vi.fn(async () => {
+        const capturedAt = Date.now();
+        return new Map([
+          [
+            String(existing.tokenId),
+            {
+              tokenId: String(existing.tokenId),
+              sourceKind: "rest",
+              bookSource: "clob",
+              cachedAtMs: capturedAt,
+              sourcePolledAtMs: capturedAt,
+              snapshotTs: capturedAt,
+              book: {
+                tokenId: existing.tokenId,
+                bids: [{ price: 0.34, size: 20 }],
+                asks: [
+                  { price: 0.36, size: 10 },
+                  { price: 0.4, size: 10 },
+                ],
+                bestBid: 0.34,
+                bestAsk: 0.36,
+                midPrice: 0.35,
+                spread: 0.02,
+                minOrderSize: 1,
+                timestamp: capturedAt,
+              },
+            },
+          ],
+        ]);
+      }),
+    };
+    gateway.getPositionBalance = vi.fn().mockResolvedValue(5);
+    marketRepo.findByTokenId.mockReturnValue({ active: true, tradable: true });
+    internal.exitOwnerIdentityRejection = () => null;
+    internal.getSellPreSubmitMinOrderBlock = () => null;
+    internal.getNotAcceptingOrdersSkip = () => false;
+    internal.getPostOnlyCrossPreSubmitSkip = () => null;
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: silentLog,
+      orderRepo,
+      policySnapshot: () => ({
+        policy: {
+          ...DEFAULT_EXECUTION_POLICY,
+          bounceAskCapture: {
+            enabled: true,
+            sourceCohortActivatedAtUtc: rootLineage.sourceCohortActivatedAtUtc,
+            maxRepricesPerRoot: 2,
+          },
+        },
+        controlRevision: 7,
+      }),
+    });
+    await mod.start();
+    bridge.subscribe();
+    const market = makeNormalizedMarket({
+      bestBid: 0.34,
+      bestAsk: 0.36,
+      minOrderSize: 1,
+      endDate: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: Date.now() });
+    await bus.publish("SignalApproved", {
+      signal,
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+    bridge.unsubscribe();
+    await mod.stop();
+
+    if (mode === "open") {
+      expect(gateway.getOrderResult).toHaveBeenCalledWith(existing.exchangeOrderId);
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(existing.orderId, "open", remote.orderId);
+    } else if (mode === "absent" || mode === "valid") {
+      expect(orderRepo.resetBounceAskCaptureSubmitted).toHaveBeenCalledOnce();
+      expect(orderRepo.replacePendingIdentity).toHaveBeenCalledWith(
+        existing.orderId,
+        expect.objectContaining({ clientOrderId }),
+      );
+      expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    } else if (mode === "side" || mode === "price" || mode === "sizeTotal") {
+      expect(gateway.prepareOrder).toHaveBeenCalledOnce();
+      expect(orderRepo.markBounceAskCaptureSubmitProof).not.toHaveBeenCalled();
+      expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+    } else {
+      expect(orderRepo.resetBounceAskCaptureSubmitted).not.toHaveBeenCalled();
+      expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+    }
   });
 
   it("healthCheck returns ok after start (gateway healthy)", async () => {

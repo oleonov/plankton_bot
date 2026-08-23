@@ -40,6 +40,7 @@ describe("ledger.db schema", () => {
     expect(names).toContain("risk_events");
     expect(names).toContain("decision_signal_log");
     expect(names).toContain("algo_token_mode_state");
+    expect(names).toContain("bounce_ask_capture_reprice_intents");
     // family_runtime_state and family_profile_runtime_state dropped by migration 035
     expect(names).not.toContain("family_runtime_state");
     expect(names).not.toContain("family_profile_runtime_state");

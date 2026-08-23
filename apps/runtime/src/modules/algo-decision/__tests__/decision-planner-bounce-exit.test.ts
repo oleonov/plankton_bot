@@ -581,6 +581,23 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
     expect(result.type).toBe("none");
     expect(result.suppressions.map((item) => item.reasonCode)).toContain(SELL_LOOP_GUARD_REASON);
   });
+
+  it("lets a nonterminal ASK intent own ordinary planning but keeps the backstop senior", () => {
+    const managed = evaluateDecisionPlan(input({ hasNonterminalBounceAskCaptureIntent: true }));
+    expect(managed.type).toBe("none");
+    expect(managed.suppressions.map((item) => item.reasonCode)).toContain(
+      "bounce-ask-capture-intent-active",
+    );
+    const senior = evaluateDecisionPlan(
+      input({
+        hasNonterminalBounceAskCaptureIntent: true,
+        market: market({ endDate: new Date(now + 3_600_000).toISOString(), bestBid: 0.1 }),
+      }),
+    );
+    expect(senior.type === "signal" && senior.signal.decisionRuleId).toBe(
+      BOUNCE_EXIT_BACKSTOP_RULE_ID,
+    );
+  });
 });
 
 describe("bounce-exit BACKSTOP branch (decision-planner) — Phase 3 GATE-scoped wrapper", () => {

@@ -117,7 +117,7 @@ are marker-fenced: Resume is rejected; Pause remains available. Never remove a m
 system-owned command manually.
 
 For release mode, the controller stops API/runtime-manager/runtime and takes one root-only,
-read-only snapshot for migrations 101 and 102. It then starts the target API so it runs migrations
+read-only snapshot for migrations 101 through 103. It then starts the target API so it runs migrations
 and proves the same snapshot before either runtime service starts. Accept `migration101` only when
 its marker is exactly once, candidate count/hash match, every candidate is now `filled` with audit
 fields preserved, and no noncandidate order changed.
@@ -129,6 +129,15 @@ table may be absent or canonical and empty; a previously applied marker requires
 but permits preserved rows. Marker/table mismatches, an unmarked nonempty table, schema drift, or row
 mutation are fail-stopped. Selective rollback retains this additive table and emits no fabricated
 `migration102` proof; do not drop or manually repair the table, marker, runtime, or ledger.
+
+Accept sibling field `migration103` under the same stopped-ledger rules. Its marker must appear
+exactly once after bootstrap, and `bounce_ask_capture_reprice_intents` must retain the canonical
+ordered columns, replacement/status/JSON CHECKs, primary and UNIQUE constraints, named status/root
+indexes, and the UNIQUE partial nonterminal-position index. Its ordered row count/hash must not
+change. Before first apply the table may be absent or canonical and empty; a previous marker requires
+the canonical table and permits preserved rows. Old shapes, malformed proof constraints,
+marker/table mismatches, unmarked rows, or row mutation are fail-stopped. Selective rollback retains
+the additive table and emits no fabricated `migration103` proof.
 
 For either mode, accept `DEPLOY_RECEIPT` only when its embedded receipt exactly matches the durable
 metadata: SHA, immutable digest, recovery state ID, previous/deploy versions, pre-pause provenance,

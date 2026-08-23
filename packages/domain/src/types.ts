@@ -253,6 +253,7 @@ export interface Signal {
   positionId?: PositionId | null;
   /** Durable identity for an event-driven R23 maker-capture replacement. */
   makerCaptureReprice?: MakerCaptureRepriceSignalV1;
+  bounceAskCaptureReprice?: BounceAskCaptureRepriceSignalV1;
 }
 
 export interface DecisionSignalLog {
@@ -2105,6 +2106,7 @@ export interface ExecutionPolicy {
   gateEntry: GateEntryPolicy;
   /** GATE-scoped bounce-exit target/timeout (live experiment) — default mode off; empty whitelist ⇒ no live orders. */
   bounceExit: BounceExitPolicy;
+  bounceAskCapture: BounceAskCapturePolicy;
   /** Sellable-sizing + bounce-exit-for-all-lanes (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md) — default OFF. */
   sellableFlow: SellableFlowPolicy;
   /**
@@ -2172,6 +2174,31 @@ export interface MakerCaptureLineageV1 {
   readonly predecessorOrderId: OrderId | null;
   readonly replacementIndex: number;
   readonly rootNotionalUsdc: number;
+}
+
+export interface BounceAskCapturePolicy {
+  enabled: boolean;
+  sourceCohortActivatedAtUtc: string;
+  maxRepricesPerRoot: number;
+}
+
+export interface BounceAskCaptureRepriceSignalV1 {
+  readonly version: 1;
+  readonly intentId: string;
+  readonly rootOrderId: OrderId;
+  readonly predecessorOrderId: OrderId;
+  readonly replacementIndex: number;
+}
+
+export interface BounceAskCaptureLineageV1 {
+  readonly version: 1;
+  readonly rootOrderId: OrderId;
+  readonly predecessorOrderId: OrderId | null;
+  readonly replacementIndex: number;
+  readonly positionId: PositionId;
+  readonly sourceCohortActivatedAtUtc: string;
+  readonly originalTargetPrice: number;
+  readonly sourceBuyRootOrderIds: readonly OrderId[];
 }
 
 export interface MakerMicroLiveWindow {

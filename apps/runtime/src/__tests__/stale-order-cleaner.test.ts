@@ -914,6 +914,21 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
   });
 
+  it("does not TTL-cancel a SELL owned by a nonterminal ASK intent", async () => {
+    const order = makeOrder({
+      side: "sell",
+      createdAt: new Date(Date.now() - EXIT_ORDER_TTL_MS - 60_000).toISOString(),
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    orderRepo.isOrderManagedByNonterminalBounceAskCaptureIntent = vi.fn().mockReturnValue(true);
+    const cancelled = vi.fn();
+    bus.subscribe("CancelOrderRequested", cancelled);
+
+    expect((await run()).staleExitTtlCancelled).toBe(0);
+    await bus.drain();
+    expect(cancelled).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["valid complete recovery coverage", "valid", 10, 0, false, "open", 0],
     ["forged recovery marker", "forged", 10, 0, false, "open", 1],

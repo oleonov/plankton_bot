@@ -163,6 +163,7 @@ import { S1LadderModule } from "./modules/s1-ladder/s1-ladder-module.js";
 import { MarketSnapshotPriceHistoryProvider } from "./modules/algo-decision/market-snapshot-price-history.js";
 import { MarketSelectionCache } from "./modules/algo-decision/market-selection-cache.js";
 import { EntryLifecycleModule } from "./modules/entry-lifecycle/entry-lifecycle-module.js";
+import { BounceAskCaptureLifecycleModule } from "./modules/bounce-ask-capture/bounce-ask-capture-lifecycle-module.js";
 import { LegStateTrackerModule } from "./modules/leg-state/leg-state-tracker-module.js";
 import { HoldResolutionCleanupModule } from "./modules/reconciliation/hold-resolution-cleanup.js";
 import { ReconciliationModule } from "./modules/reconciliation/reconciliation-module.js";
@@ -1228,7 +1229,8 @@ async function main(): Promise<void> {
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     executionPolicy: currentExecutionPolicy,
     executionPolicySnapshot: currentExecutionPolicySnapshot,
-    candidateBookCache,
+    resolutionTracker: marketResolutionTracker,
+    ...(candidateBookCache ? { candidateBookCache } : {}),
     allowSellSizeClamp: config.allowSellSizeClamp,
     capacityMetricsSink: recordOrderCapacitySample,
     profileOwnedOpenPositionCount: countProfileOwnedOpenPositions,
@@ -1693,6 +1695,16 @@ async function main(): Promise<void> {
     runtimeMetrics,
     log,
   });
+  const bounceAskCaptureLifecycleModule = new BounceAskCaptureLifecycleModule({
+    bus,
+    orderRepo: repos.order,
+    fillRepo: repos.fill,
+    positionRepo: repos.position,
+    inventoryLotRepo: repos.inventoryLot,
+    policySnapshot: currentExecutionPolicySnapshot,
+    ...(candidateBookCache ? { candidateBookCache } : {}),
+    log,
+  });
 
   // Standalone SignalToOrderBridge — wired here so it is active when AlgoDecisionModule
   // is used. bridge.subscribe() is called after all modules are wired (below).
@@ -2068,6 +2080,7 @@ async function main(): Promise<void> {
       ? [["fill-poller", fillPollerModule] as [string, import("@krabs/domain").RuntimeModule]]
       : []),
     ["execution", executionModule],
+    ["bounce-ask-capture-lifecycle", bounceAskCaptureLifecycleModule],
     ["entry-lifecycle", entryLifecycleModule],
     // inventory-manager MUST start LAST: its start() re-runs the merge-fence repair, and every
     // merge it settles publishes PositionUpdated. profile-ladder answers that event by publishing

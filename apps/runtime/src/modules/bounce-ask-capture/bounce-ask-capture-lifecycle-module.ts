@@ -1,0 +1,490 @@
+import type {
+  BounceAskCaptureBookDecisionProofV1,
+  BounceAskCaptureIntent,
+  BounceAskCaptureLineageV1,
+  BounceAskCaptureTriggerProofV1,
+  EventBus,
+  ExecutionPolicy,
+  FillRepository,
+  InventoryLotRepository,
+  NormalizedMarket,
+  Order,
+  OrderRepository,
+  PositionRepository,
+  RuntimeEventMap,
+  RuntimeModule,
+  Signal,
+} from "@krabs/domain";
+import {
+  BOUNCE_EXIT_TARGET_RULE_ID,
+  createCommandId,
+  parseBounceAskCaptureProofV1,
+} from "@krabs/domain";
+import {
+  buildBounceAskCaptureIdentity,
+  computeBounceAskCaptureCandidate,
+  isOrdinaryBounceAskRoot,
+  loadBounceAskFills,
+  parseBounceAskCaptureLineage,
+  resolveProvenBounceAskOrigin,
+  sameBounceAskRoots,
+} from "../../bounce-ask-capture.js";
+import {
+  MAKER_CAPTURE_BOOK_MAX_AGE_MS,
+  primeFreshMakerCaptureBook,
+  type MakerCaptureBookCache,
+} from "../../maker-capture-reprice.js";
+import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
+import type { Logger } from "../../logger.js";
+
+const EPSILON = 1e-9;
+
+export interface BounceAskCaptureLifecycleDeps {
+  readonly bus: EventBus;
+  readonly orderRepo: OrderRepository;
+  readonly fillRepo: Pick<FillRepository, "findByOrderId" | "findByOrderIds" | "findByTokenId">;
+  readonly positionRepo: Pick<PositionRepository, "findById">;
+  readonly inventoryLotRepo: Pick<InventoryLotRepository, "findOpen">;
+  readonly policySnapshot: () => { policy: ExecutionPolicy; controlRevision: number | null };
+  readonly candidateBookCache?: MakerCaptureBookCache;
+  readonly log: Logger;
+  readonly now?: () => number;
+}
+
+export class BounceAskCaptureLifecycleModule implements RuntimeModule {
+  private readonly markets = new Map<string, NormalizedMarket>();
+  private readonly publishing = new Set<string>();
+  private readonly unsubs: Array<() => void> = [];
+  private readonly log: Logger;
+  private started = false;
+
+  constructor(private readonly deps: BounceAskCaptureLifecycleDeps) {
+    this.log = deps.log.child({ module: "bounce-ask-capture-lifecycle" });
+  }
+
+  async start(): Promise<void> {
+    this.listen("NormalizedMarketUpdated", (event) => this.onMarket(event));
+    this.listen("OrderCancelled", (event) => this.onCancelled(event));
+    this.listen("OrderPlaced", (event) => this.onPlaced(event));
+    this.listen("OrderRejected", (event) => this.failBySignal(event.signalId, event.reason));
+    this.listen("OrderSkipped", (event) => this.failBySignal(event.signalId, event.reasonCode));
+    this.listen("SignalRejected", (event) =>
+      this.failBySignal(event.signal.signalId, event.reason),
+    );
+    this.listen("SignalConversionSkipped", (event) =>
+      this.failBySignal(event.signal.signalId, event.reasons.join(",")),
+    );
+    this.listen("MarketResolvedHint", (event) => this.failResolved(event));
+    this.started = true;
+    await this.safe(() => this.recover());
+    this.log.info("bounce ASK capture lifecycle started");
+  }
+
+  async stop(): Promise<void> {
+    for (const unsub of this.unsubs) unsub();
+    this.unsubs.length = 0;
+    this.started = false;
+  }
+
+  async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
+    return { ok: this.started, detail: `markets=${this.markets.size}` };
+  }
+
+  private async onMarket(event: RuntimeEventMap["NormalizedMarketUpdated"]): Promise<void> {
+    for (const market of event.markets) {
+      if (market.active) this.markets.set(String(market.tokenId), market);
+      else this.markets.delete(String(market.tokenId));
+    }
+    const now = this.now();
+    if (!fresh(event.timestamp, now)) return;
+    const tokenIds = new Set(event.markets.map((market) => String(market.tokenId)));
+    await this.recover(tokenIds);
+    const snapshot = this.deps.policySnapshot();
+    const policy = snapshot.policy.bounceAskCapture;
+    if (!policy.enabled || snapshot.controlRevision === null) return;
+    for (const order of this.deps.orderRepo.findOpen()) {
+      if (!tokenIds.has(String(order.tokenId))) continue;
+      await this.tryClaim(order, event.timestamp, snapshot);
+    }
+  }
+
+  private async tryClaim(
+    order: Order,
+    eventTimestampMs: number,
+    snapshot: { policy: ExecutionPolicy; controlRevision: number | null },
+  ): Promise<void> {
+    const policy = snapshot.policy.bounceAskCapture;
+    if (this.deps.orderRepo.isOrderManagedByNonterminalBounceAskCaptureIntent?.(order.orderId))
+      return;
+    let lineage = parseBounceAskCaptureLineage(order);
+    if (!lineage) lineage = this.stampRootLineage(order, policy.sourceCohortActivatedAtUtc);
+    if (!lineage || lineage.replacementIndex >= policy.maxRepricesPerRoot) return;
+    const state = this.validateState(order, lineage, snapshot);
+    if (!state) return;
+    const entry = await primeFreshMakerCaptureBook(
+      this.deps.candidateBookCache,
+      String(order.tokenId),
+      this.now(),
+    );
+    if (!entry) return;
+    const candidate = this.candidate(order, lineage, entry.book, state.market.tickSize);
+    if (!candidate.ok) return;
+    const identity = buildBounceAskCaptureIdentity(
+      lineage.rootOrderId,
+      order.orderId,
+      lineage.replacementIndex + 1,
+    );
+    const trigger: BounceAskCaptureTriggerProofV1 = {
+      eventTimestampMs,
+      evaluatedAtMs: this.now(),
+      policySchemaVersion: snapshot.policy.version,
+      policyControlRevision: snapshot.controlRevision!,
+      sourceCohortActivatedAtUtc: lineage.sourceCohortActivatedAtUtc,
+      originalTargetPrice: lineage.originalTargetPrice,
+      candidatePrice: candidate.price,
+      externalBestBid: candidate.externalBestBid,
+      externalBestAsk: candidate.externalBestAsk,
+      tickSize: state.market.tickSize,
+      positionResidualShares: state.positionResidualShares,
+      sourceBuyRootOrderIds: lineage.sourceBuyRootOrderIds,
+    };
+    const nowIso = new Date(this.now()).toISOString();
+    const intent: BounceAskCaptureIntent = {
+      intentId: identity.intentId,
+      predecessorOrderId: order.orderId,
+      lifecycleSignalId: identity.lifecycleSignalId,
+      rootOrderId: lineage.rootOrderId,
+      positionId: state.position.positionId,
+      tokenId: order.tokenId,
+      conditionId: order.conditionId,
+      replacementIndex: lineage.replacementIndex + 1,
+      status: "cancel_pending",
+      candidatePrice: null,
+      replacementSize: null,
+      childOrderId: null,
+      failure: null,
+      proof: { version: 1, trigger, prepared: null, submit: null },
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    if (!this.deps.orderRepo.claimBounceAskCaptureIntent?.(intent)) return;
+    await this.publishCancel(intent);
+  }
+
+  private stampRootLineage(order: Order, sourceCohort: string): BounceAskCaptureLineageV1 | null {
+    if (!isOrdinaryBounceAskRoot(order) || !order.positionId) return null;
+    const origin = parseQuoteMotionOrigin(order);
+    const proven = resolveProvenBounceAskOrigin(order, sourceCohort, this.deps);
+    if (origin?.originalTargetPrice == null || !proven) return null;
+    const lineage: BounceAskCaptureLineageV1 = {
+      version: 1,
+      rootOrderId: order.orderId,
+      predecessorOrderId: null,
+      replacementIndex: 0,
+      positionId: proven.position.positionId,
+      sourceCohortActivatedAtUtc: sourceCohort,
+      originalTargetPrice: origin.originalTargetPrice,
+      sourceBuyRootOrderIds: proven.sourceBuyRootOrderIds,
+    };
+    const updated = this.deps.orderRepo.updateMetadataIfUnchanged?.(
+      order.orderId,
+      order.metadata ?? null,
+      { ...(order.metadata ?? {}), bounceAskCaptureLineageV1: lineage },
+    );
+    return updated ? parseBounceAskCaptureLineage(updated) : null;
+  }
+
+  private validateState(
+    order: Order,
+    lineage: BounceAskCaptureLineageV1,
+    snapshot: { policy: ExecutionPolicy; controlRevision: number | null },
+  ) {
+    const market = this.markets.get(String(order.tokenId));
+    const policy = snapshot.policy.bounceAskCapture;
+    const proven = resolveProvenBounceAskOrigin(
+      order,
+      policy.sourceCohortActivatedAtUtc,
+      this.deps,
+    );
+    const sameRoots =
+      proven && sameBounceAskRoots(proven.sourceBuyRootOrderIds, lineage.sourceBuyRootOrderIds);
+    if (
+      !policy.enabled ||
+      snapshot.controlRevision === null ||
+      lineage.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc ||
+      String(lineage.positionId) !== String(order.positionId) ||
+      !sameRoots ||
+      !market ||
+      !market.active ||
+      !market.tradable ||
+      !market.acceptingOrders ||
+      !market.enableOrderBook ||
+      !fresh(market.snapshotTs, this.now()) ||
+      market.conditionId !== String(order.conditionId) ||
+      !Number.isFinite(market.tickSize) ||
+      market.tickSize <= 0
+    )
+      return null;
+    return { market, position: proven.position, positionResidualShares: proven.position.size };
+  }
+
+  private candidate(
+    order: Order,
+    lineage: BounceAskCaptureLineageV1,
+    book: Parameters<typeof computeBounceAskCaptureCandidate>[0]["book"],
+    tickSize: number,
+  ) {
+    const own = this.deps.orderRepo
+      .findOpen()
+      .filter(
+        (candidate) =>
+          String(candidate.tokenId) === String(order.tokenId) && candidate.side === "sell",
+      );
+    return computeBounceAskCaptureCandidate({
+      book,
+      tickSize,
+      ownSellOrders: own,
+      fillsByOrder: loadBounceAskFills(this.deps.fillRepo, own),
+      predecessorPrice: order.price,
+      originalTargetPrice: lineage.originalTargetPrice,
+    });
+  }
+
+  private async onCancelled(event: RuntimeEventMap["OrderCancelled"]): Promise<void> {
+    const intent = this.deps.orderRepo.findBounceAskCaptureIntentByPredecessor?.(event.orderId);
+    if (!intent) return;
+    if (event.reason !== "bounce_ask_capture_reprice") {
+      this.terminal(intent, "failed", `senior-cancel:${event.reason}`);
+      return;
+    }
+    await this.advance(intent);
+  }
+
+  private async recover(tokenIds?: ReadonlySet<string>): Promise<void> {
+    for (const intent of this.deps.orderRepo.findRecoverableBounceAskCaptureIntents?.() ?? []) {
+      if (!tokenIds || tokenIds.has(String(intent.tokenId))) await this.advance(intent);
+    }
+  }
+
+  private async advance(intent: BounceAskCaptureIntent): Promise<void> {
+    const child = intent.childOrderId ? this.deps.orderRepo.findById(intent.childOrderId) : null;
+    if (child) {
+      if (child.status === "rejected") this.terminal(intent, "failed", "child-rejected");
+      else if (child.status === "pending") {
+        const predecessor = this.deps.orderRepo.findById(intent.predecessorOrderId);
+        if (predecessor) await this.publishSignal(intent, predecessor);
+      } else this.terminal(intent, "completed");
+      return;
+    }
+    if (intent.status === "submitted") {
+      this.terminal(intent, "failed", "submitted-child-missing");
+      return;
+    }
+    const predecessor = this.deps.orderRepo.findById(intent.predecessorOrderId);
+    if (!predecessor) return;
+    if (predecessor.status === "open" || predecessor.status === "partially-filled") {
+      if (!this.markets.has(String(intent.tokenId))) return;
+      const lineage = parseBounceAskCaptureLineage(predecessor);
+      if (!lineage || !this.validateState(predecessor, lineage, this.deps.policySnapshot())) {
+        this.terminal(intent, "failed", "policy-cohort-lineage-drift");
+        return;
+      }
+      if (intent.status === "cancel_pending") await this.publishCancel(intent);
+      return;
+    }
+    if (predecessor.status !== "cancelled") {
+      this.terminal(intent, "failed", `predecessor-${predecessor.status}`);
+      return;
+    }
+    let current = intent;
+    if (intent.status === "cancel_pending") {
+      const ready = await this.prepare(intent, predecessor);
+      if (!ready) return;
+      current = ready;
+    }
+    if (current.status === "ready") await this.publishSignal(current, predecessor);
+  }
+
+  private async prepare(
+    intent: BounceAskCaptureIntent,
+    predecessor: Order,
+  ): Promise<BounceAskCaptureIntent | null> {
+    const proof = parseBounceAskCaptureProofV1(intent.proof);
+    if (!proof) {
+      this.terminal(intent, "failed", "malformed-proof");
+      return null;
+    }
+    const lineage = parseBounceAskCaptureLineage(predecessor);
+    const snapshot = this.deps.policySnapshot();
+    if (!this.markets.has(String(intent.tokenId))) return null;
+    const state = lineage ? this.validateState(predecessor, lineage, snapshot) : null;
+    if (!lineage || !state) {
+      this.terminal(intent, "failed", "policy-cohort-lineage-drift");
+      return null;
+    }
+    const entry = await primeFreshMakerCaptureBook(
+      this.deps.candidateBookCache,
+      String(intent.tokenId),
+      this.now(),
+    );
+    const minOrderSize = entry?.book.minOrderSize;
+    if (!entry || minOrderSize == null || !Number.isFinite(minOrderSize) || minOrderSize <= 0)
+      return null;
+    const candidate = this.candidate(predecessor, lineage, entry.book, state.market.tickSize);
+    if (!candidate.ok) {
+      this.terminal(intent, "failed", candidate.reason);
+      return null;
+    }
+    const filled = this.deps.fillRepo
+      .findByOrderId(predecessor.orderId)
+      .reduce((sum, fill) => sum + fill.size, 0);
+    const replacementSize = Math.min(Math.max(0, predecessor.size - filled), state.position.size);
+    if (replacementSize + EPSILON < minOrderSize) {
+      this.terminal(intent, "dust", "replacement-below-minimum");
+      return null;
+    }
+    const trigger = proof.trigger;
+    const prepared: BounceAskCaptureBookDecisionProofV1 = {
+      ...trigger,
+      evaluatedAtMs: this.now(),
+      candidatePrice: candidate.price,
+      externalBestBid: candidate.externalBestBid,
+      externalBestAsk: candidate.externalBestAsk,
+      positionResidualShares: state.position.size,
+      snapshotTs: entry.snapshotTs,
+      cachedAtMs: entry.cachedAtMs,
+      sourcePolledAtMs: entry.sourcePolledAtMs,
+      minOrderSize,
+      replacementSize,
+    };
+    if (
+      !this.deps.orderRepo.markBounceAskCaptureReady?.(
+        intent.intentId,
+        candidate.price,
+        replacementSize,
+        prepared,
+      )
+    )
+      return null;
+    return {
+      ...intent,
+      status: "ready",
+      candidatePrice: candidate.price,
+      replacementSize,
+      proof: { ...proof, prepared },
+    };
+  }
+
+  private async publishSignal(intent: BounceAskCaptureIntent, predecessor: Order): Promise<void> {
+    if (
+      intent.candidatePrice == null ||
+      intent.replacementSize == null ||
+      this.publishing.has(intent.lifecycleSignalId)
+    )
+      return;
+    const market = this.markets.get(String(intent.tokenId));
+    if (!market) return;
+    const signal: Signal = {
+      signalId: intent.lifecycleSignalId,
+      tokenId: intent.tokenId,
+      conditionId: intent.conditionId,
+      positionId: intent.positionId,
+      side: "sell",
+      suggestedPrice: intent.candidatePrice,
+      suggestedSize: intent.replacementSize,
+      suggestedSizeUsdc: intent.candidatePrice * intent.replacementSize,
+      reason: predecessor.signalReason as Signal["reason"],
+      strategyTick: this.now(),
+      sequenceInTick: intent.replacementIndex,
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      sizingRuleId: null,
+      generatedAt: new Date(this.now()).toISOString(),
+      bounceAskCaptureReprice: {
+        version: 1,
+        intentId: intent.intentId,
+        rootOrderId: intent.rootOrderId,
+        predecessorOrderId: intent.predecessorOrderId,
+        replacementIndex: intent.replacementIndex,
+      },
+    };
+    this.publishing.add(intent.lifecycleSignalId);
+    try {
+      await this.deps.bus.publish("SignalProduced", { signal, market });
+    } finally {
+      this.publishing.delete(intent.lifecycleSignalId);
+    }
+  }
+
+  private async publishCancel(intent: BounceAskCaptureIntent): Promise<void> {
+    const identity = buildBounceAskCaptureIdentity(
+      intent.rootOrderId,
+      intent.predecessorOrderId,
+      intent.replacementIndex,
+    );
+    await this.deps.bus.publish("CancelOrderRequested", {
+      command: {
+        type: "CancelOrderCommand",
+        commandId: createCommandId(identity.cancelCommandId),
+        orderId: intent.predecessorOrderId,
+        reason: "bounce_ask_capture_reprice",
+      },
+      timestamp: this.now(),
+    });
+  }
+
+  private async onPlaced(event: RuntimeEventMap["OrderPlaced"]): Promise<void> {
+    const intent = this.deps.orderRepo.findBounceAskCaptureIntentByChild?.(event.orderId);
+    if (intent) this.terminal(intent, "completed");
+  }
+
+  private async failBySignal(signalId: string | null | undefined, reason: string): Promise<void> {
+    if (!signalId) return;
+    const intent = this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(signalId);
+    if (intent) this.terminal(intent, "failed", reason);
+  }
+
+  private async failResolved(event: RuntimeEventMap["MarketResolvedHint"]): Promise<void> {
+    const tokens = new Set(event.tokenIds.map(String));
+    for (const intent of this.deps.orderRepo.findRecoverableBounceAskCaptureIntents?.() ?? []) {
+      if (tokens.has(String(intent.tokenId))) this.terminal(intent, "failed", "market-resolved");
+    }
+  }
+
+  private terminal(
+    intent: BounceAskCaptureIntent,
+    status: "completed" | "failed" | "dust",
+    failure?: string,
+  ): void {
+    this.deps.orderRepo.markBounceAskCaptureTerminal?.(intent.intentId, status, failure ?? null);
+    this.publishing.delete(intent.lifecycleSignalId);
+  }
+
+  private now(): number {
+    return this.deps.now?.() ?? Date.now();
+  }
+
+  private async safe(operation: () => Promise<void>): Promise<void> {
+    try {
+      await operation();
+    } catch (err) {
+      this.log.error({ err }, "bounce ASK capture handler failed; durable state retained");
+    }
+  }
+
+  private listen<K extends keyof RuntimeEventMap>(
+    event: K,
+    handler: (payload: RuntimeEventMap[K]) => Promise<void>,
+  ): void {
+    this.unsubs.push(
+      this.deps.bus.subscribe(event, (payload) => this.safe(() => handler(payload))),
+    );
+  }
+}
+
+function fresh(timestamp: number, now: number): boolean {
+  return (
+    Number.isFinite(timestamp) &&
+    timestamp <= now + 1_000 &&
+    now - timestamp <= MAKER_CAPTURE_BOOK_MAX_AGE_MS
+  );
+}

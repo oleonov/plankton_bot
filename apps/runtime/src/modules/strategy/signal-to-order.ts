@@ -122,6 +122,11 @@ import {
   matchesMakerCaptureIntent,
   parseMakerCaptureRepriceSignal,
 } from "../../maker-capture-reprice.js";
+import {
+  buildBounceAskCaptureIdentity,
+  parseBounceAskCaptureLineage,
+  parseBounceAskCaptureSignal,
+} from "../../bounce-ask-capture.js";
 import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 25;
@@ -767,6 +772,10 @@ export class SignalToOrderBridge {
 
       if (signal.makerCaptureReprice !== undefined) {
         await this.handleMakerCaptureReprice(signal, baseMarket, policyRead);
+        return;
+      }
+      if (signal.bounceAskCaptureReprice !== undefined) {
+        await this.handleBounceAskCaptureReprice(signal, baseMarket, policyRead);
         return;
       }
 
@@ -1915,7 +1924,7 @@ export class SignalToOrderBridge {
     const valid =
       metadata !== null &&
       intent !== null &&
-      intent.status === "ready" &&
+      (intent.status === "ready" || intent.status === "submitted") &&
       matchesMakerCaptureIntent(signal.signalId, metadata, intent) &&
       predecessor?.status === "cancelled" &&
       String(predecessor.tokenId) === String(signal.tokenId) &&
@@ -1984,6 +1993,98 @@ export class SignalToOrderBridge {
       },
     };
     await this.deps.bus.publish("PlaceOrderRequested", { command: cmd, timestamp: this.now() });
+  }
+
+  private async handleBounceAskCaptureReprice(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    policyRead: { policy: ExecutionPolicy; controlRevision: number | null },
+  ): Promise<void> {
+    const metadata = parseBounceAskCaptureSignal(signal.bounceAskCaptureReprice);
+    const intent = metadata
+      ? (this.deps.orderRepo?.findBounceAskCaptureIntentBySignal?.(signal.signalId) ?? null)
+      : null;
+    const predecessor = intent ? this.deps.orderRepo?.findById(intent.predecessorOrderId) : null;
+    const lineage = predecessor ? parseBounceAskCaptureLineage(predecessor) : null;
+    const identity = intent
+      ? buildBounceAskCaptureIdentity(
+          intent.rootOrderId,
+          intent.predecessorOrderId,
+          intent.replacementIndex,
+        )
+      : null;
+    const policy = policyRead.policy.bounceAskCapture;
+    const valid =
+      metadata !== null &&
+      intent !== null &&
+      predecessor != null &&
+      lineage !== null &&
+      identity?.intentId === intent.intentId &&
+      identity.lifecycleSignalId === signal.signalId &&
+      metadata.intentId === intent.intentId &&
+      String(metadata.rootOrderId) === String(intent.rootOrderId) &&
+      String(metadata.predecessorOrderId) === String(intent.predecessorOrderId) &&
+      metadata.replacementIndex === intent.replacementIndex &&
+      (intent.status === "ready" || intent.status === "submitted") &&
+      predecessor.status === "cancelled" &&
+      signal.side === "sell" &&
+      signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+      signal.suggestedPrice === intent.candidatePrice &&
+      signal.suggestedSize === intent.replacementSize &&
+      policy.enabled &&
+      policyRead.controlRevision !== null &&
+      lineage.sourceCohortActivatedAtUtc === policy.sourceCohortActivatedAtUtc &&
+      intent.replacementIndex <= policy.maxRepricesPerRoot;
+    if (!valid || !intent || !predecessor || !metadata) {
+      await this.publishConversionSkipped(
+        signal,
+        "execution-terms",
+        ["bounce-ask-capture-invalid"],
+        {
+          intentStatus: intent?.status ?? null,
+        },
+      );
+      return;
+    }
+    const clientOrderId = buildClientOrderId({
+      signalId: signal.signalId,
+      tokenId: signal.tokenId,
+      side: "sell",
+    });
+    const command: PlaceOrderCommand = {
+      type: "PlaceOrderCommand",
+      commandId: createCommandId(`bounce-ask-capture-place:${intent.intentId}`),
+      clientOrderId,
+      source: "strategy",
+      tokenId: signal.tokenId,
+      conditionId: signal.conditionId,
+      side: "sell",
+      size: signal.suggestedSize,
+      price: signal.suggestedPrice,
+      postOnly: true,
+      entryStyle: "maker",
+      orderType: "GTC",
+      tickSize: market.tickSize,
+      negRisk: market.negRisk,
+      sequenceInTick: signal.sequenceInTick,
+      signalReason: signal.reason,
+      signalId: signal.signalId,
+      decisionRuleId: signal.decisionRuleId,
+      signalTimestamp: signal.generatedAt,
+      positionId: intent.positionId,
+      metadata: {
+        executionPricingMode: "maker",
+        cacheStatus: "bounce-ask-capture-reprice",
+        marketData: {
+          bookSource: market.bookSource ?? "unknown",
+          minOrderSize: market.minOrderSize ?? null,
+          effectiveMinOrderSize: market.minOrderSize ?? null,
+        },
+        bounceAskCaptureRepriceV1: metadata,
+        bounceRung: predecessor.metadata?.bounceRung,
+      },
+    };
+    await this.deps.bus.publish("PlaceOrderRequested", { command, timestamp: this.now() });
   }
 
   /**

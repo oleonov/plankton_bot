@@ -59,6 +59,7 @@ import type {
   MakerMicroLiveWindow,
   GateEntryPolicy,
   BounceExitPolicy,
+  BounceAskCapturePolicy,
   SellableFlowPolicy,
   BounceExitTargetTier,
   TrackRHonestPricingPolicy,
@@ -583,6 +584,12 @@ export const DEFAULT_TRACK_A_ADD_THROTTLE_POLICY: TrackAAddThrottlePolicy = {
   enforce: false,
 };
 
+export const DEFAULT_BOUNCE_ASK_CAPTURE_POLICY: BounceAskCapturePolicy = {
+  enabled: false,
+  sourceCohortActivatedAtUtc: "",
+  maxRepricesPerRoot: 5,
+};
+
 // Maker-entry prototype defaults (plankton-derived, Phase 0 rev 2).
 // mode="off" + empty whitelist ⇒ zero live-order changes until an operator sets
 // mode=shadow or micro_live with a non-empty whitelist (config-only rollout).
@@ -860,6 +867,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   makerEntry: DEFAULT_MAKER_ENTRY,
   gateEntry: DEFAULT_GATE_ENTRY,
   bounceExit: DEFAULT_BOUNCE_EXIT,
+  bounceAskCapture: DEFAULT_BOUNCE_ASK_CAPTURE_POLICY,
   sellableFlow: DEFAULT_SELLABLE_FLOW,
   // docs/plans/2026-07-20-exit-loss-floor.md: only 1.1% of plankton's
   // realized sells are ≤ -50% (p1 ≈ -53%) — 0.50 isolates the true-dump
@@ -1211,6 +1219,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const makerEntry = parseMakerEntry(obj.makerEntry, issues);
   const gateEntry = parseGateEntry(obj.gateEntry, issues);
   const bounceExit = parseBounceExit(obj.bounceExit, issues);
+  const bounceAskCapture = parseBounceAskCapture(obj.bounceAskCapture, issues);
   const sellableFlow = parseSellableFlow(obj.sellableFlow, issues);
   const maxExitLossFraction = positiveClampedNumber(
     obj.maxExitLossFraction,
@@ -1271,6 +1280,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       makerEntry,
       gateEntry,
       bounceExit,
+      bounceAskCapture,
       sellableFlow,
       maxExitLossFraction,
     },
@@ -5487,6 +5497,44 @@ function parseMakerCaptureBookReprice(
     return fallback;
   }
   return { enabled: true, maxRepricesPerRoot: obj.maxRepricesPerRoot };
+}
+
+function parseBounceAskCapture(raw: unknown, issues: string[]): BounceAskCapturePolicy {
+  const fallback = DEFAULT_BOUNCE_ASK_CAPTURE_POLICY;
+  if (raw === undefined) return fallback;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    issues.push("bounceAskCapture must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.enabled !== "boolean") {
+    issues.push("bounceAskCapture.enabled must be a boolean");
+    return fallback;
+  }
+  if (obj.enabled !== true) return fallback;
+
+  const sourceCohortActivatedAtUtc = toCanonicalIso(obj.sourceCohortActivatedAtUtc);
+  if (
+    sourceCohortActivatedAtUtc === null ||
+    sourceCohortActivatedAtUtc !== obj.sourceCohortActivatedAtUtc
+  ) {
+    issues.push("bounceAskCapture.sourceCohortActivatedAtUtc must be an exact ISO UTC timestamp");
+    return fallback;
+  }
+  if (
+    typeof obj.maxRepricesPerRoot !== "number" ||
+    !Number.isSafeInteger(obj.maxRepricesPerRoot) ||
+    obj.maxRepricesPerRoot < 1 ||
+    obj.maxRepricesPerRoot > 5
+  ) {
+    issues.push("bounceAskCapture.maxRepricesPerRoot must be an integer from 1 to 5");
+    return fallback;
+  }
+  return {
+    enabled: true,
+    sourceCohortActivatedAtUtc,
+    maxRepricesPerRoot: obj.maxRepricesPerRoot,
+  };
 }
 
 function parseMakerMicroLiveWindow(

@@ -91,6 +91,7 @@ export type CancelOrderReason =
   | "operator"
   | "maker_fast_cancel"
   | "maker_capture_reprice"
+  | "bounce_ask_capture_reprice"
   | "phantom_missing_on_exchange"
   | "exit_loss_floor";
 

@@ -441,6 +441,8 @@ export type DecisionPlanningInput = {
    * defaults to `false` (no active sell), the safe default.
    */
   hasActiveSellOrderForBounceBackstop?: boolean;
+  /** Durable ASK replacement owns ordinary bounce planning until terminal. */
+  hasNonterminalBounceAskCaptureIntent?: boolean;
   sellLoopGuard: SellLoopGuardSnapshot | null;
   s1Ownership?: S1OwnershipSnapshot | null;
   profileLadderOwned?: boolean;
@@ -1216,6 +1218,22 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
           metrics,
           nowIso,
         });
+      }
+      if (input.hasNonterminalBounceAskCaptureIntent === true) {
+        suppressions.push({
+          tokenId: market.tokenId,
+          conditionId: market.conditionId,
+          reasonCode: "bounce-ask-capture-intent-active",
+          side: "SELL",
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          state,
+          price: d8EvalPrice,
+          buyCount,
+          timeSinceLastSeconds,
+          emissionFacts,
+          timestamp: nowIso,
+        });
+        return none(metrics, suppressions, sideEffects);
       }
       if (bounceDecision.intent === "maker_rung") {
         return buildSignalOrSuppression({

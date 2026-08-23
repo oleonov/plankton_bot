@@ -41,6 +41,7 @@ import type {
   MarketBookSource,
 } from "./types.js";
 import type { TradingCalendarException, TradingCalendarMetadata } from "./effective-resolution.js";
+import { toCanonicalIso } from "./timestamp.js";
 
 /**
  * ADR-025 §D-B telemetry payload, persisted on transition into
@@ -375,6 +376,35 @@ export interface OrderRepository {
   ): boolean;
   /** Conservative, fully validated accounting for one persisted capture chain. */
   getMakerCaptureChainUsage?(orderId: OrderId): MakerCaptureChainUsage;
+
+  claimBounceAskCaptureIntent?(intent: BounceAskCaptureIntent): boolean;
+  findRecoverableBounceAskCaptureIntents?(): BounceAskCaptureIntent[];
+  findBounceAskCaptureIntentBySignal?(signalId: string): BounceAskCaptureIntent | null;
+  findBounceAskCaptureIntentByChild?(childOrderId: OrderId): BounceAskCaptureIntent | null;
+  findBounceAskCaptureIntentByPredecessor?(
+    predecessorOrderId: OrderId,
+  ): BounceAskCaptureIntent | null;
+  hasNonterminalBounceAskCaptureIntentForPosition?(positionId: PositionId): boolean;
+  isOrderManagedByNonterminalBounceAskCaptureIntent?(orderId: OrderId): boolean;
+  markBounceAskCaptureReady?(
+    intentId: string,
+    candidatePrice: number,
+    replacementSize: number,
+    proof: BounceAskCaptureBookDecisionProofV1,
+  ): boolean;
+  markBounceAskCaptureSubmitted?(intentId: string, childOrderId: OrderId): boolean;
+  resetBounceAskCaptureSubmitted?(intentId: string, childOrderId: OrderId): boolean;
+  markBounceAskCaptureSubmitProof?(
+    intentId: string,
+    childOrderId: OrderId,
+    clientOrderId: string,
+    proof: BounceAskCaptureSubmitProofV1,
+  ): boolean;
+  markBounceAskCaptureTerminal?(
+    intentId: string,
+    status: "completed" | "failed" | "dust",
+    failure?: string | null,
+  ): boolean;
 }
 
 export type MakerCaptureRepriceIntentStatus =
@@ -400,6 +430,73 @@ export interface MakerCaptureRepriceIntent {
   updatedAt: string;
   failure: string | null;
   proof: MakerCaptureRepriceProofV1 | null;
+}
+
+export type BounceAskCaptureIntentStatus =
+  | "cancel_pending"
+  | "ready"
+  | "submitted"
+  | "completed"
+  | "failed"
+  | "dust";
+
+export interface BounceAskCaptureIntent {
+  intentId: string;
+  predecessorOrderId: OrderId;
+  lifecycleSignalId: string;
+  rootOrderId: OrderId;
+  positionId: PositionId;
+  tokenId: TokenId;
+  conditionId: ConditionId;
+  replacementIndex: number;
+  status: BounceAskCaptureIntentStatus;
+  candidatePrice: number | null;
+  replacementSize: number | null;
+  childOrderId: OrderId | null;
+  createdAt: string;
+  updatedAt: string;
+  failure: string | null;
+  proof: BounceAskCaptureRepriceProofV1 | null;
+}
+
+export interface BounceAskCaptureRepriceProofV1 {
+  readonly version: 1;
+  readonly trigger: BounceAskCaptureTriggerProofV1;
+  readonly prepared: BounceAskCaptureBookDecisionProofV1 | null;
+  readonly submit: BounceAskCaptureSubmitProofV1 | null;
+}
+
+export interface BounceAskCaptureTriggerProofV1 {
+  readonly eventTimestampMs: number;
+  readonly evaluatedAtMs: number;
+  readonly policySchemaVersion: number;
+  readonly policyControlRevision: number;
+  readonly sourceCohortActivatedAtUtc: string;
+  readonly originalTargetPrice: number;
+  readonly candidatePrice: number;
+  readonly externalBestBid: number;
+  readonly externalBestAsk: number;
+  readonly tickSize: number;
+  readonly positionResidualShares: number;
+  readonly sourceBuyRootOrderIds: readonly OrderId[];
+}
+
+export interface BounceAskCaptureBookDecisionProofV1 extends BounceAskCaptureTriggerProofV1 {
+  readonly snapshotTs: number;
+  readonly cachedAtMs: number;
+  readonly sourcePolledAtMs: number;
+  readonly minOrderSize: number;
+  readonly replacementSize: number;
+}
+
+export interface BounceAskCaptureSubmitProofV1 extends BounceAskCaptureBookDecisionProofV1 {
+  readonly childOrderId: string;
+  readonly clientOrderId: string;
+  readonly authoritativeStateCapturedAtMs: number;
+  readonly authoritativeOpenOrderCount: number;
+  readonly authoritativeFilledShares: number;
+  readonly authoritativeWalletShares: number;
+  readonly authoritativeStateHash: string;
 }
 
 export interface MakerCaptureRepriceProofV1 {
@@ -471,6 +568,117 @@ export function parseMakerCaptureRepriceProofV1(value: unknown): MakerCaptureRep
   if (!trigger || (value.prepared !== null && !prepared) || (value.submit !== null && !submit))
     return null;
   return { version: 1, trigger, prepared, submit };
+}
+
+export function parseBounceAskCaptureProofV1(
+  value: unknown,
+): BounceAskCaptureRepriceProofV1 | null {
+  if (!exactRecord(value, ["prepared", "submit", "trigger", "version"]) || value.version !== 1)
+    return null;
+  const trigger = parseBounceAskCaptureTriggerProof(value.trigger);
+  const prepared =
+    value.prepared === null ? null : parseBounceAskCapturePreparedProof(value.prepared, false);
+  const submit =
+    value.submit === null ? null : parseBounceAskCapturePreparedProof(value.submit, true);
+  if (
+    !trigger ||
+    (value.prepared !== null && !prepared) ||
+    (value.submit !== null && !submit) ||
+    (prepared !== null &&
+      !sameBounceAskCaptureFields(trigger, prepared, BOUNCE_ASK_STABLE_PROVENANCE_KEYS)) ||
+    (submit !== null &&
+      (prepared === null ||
+        !sameBounceAskCaptureFields(prepared, submit, BOUNCE_ASK_STABLE_PROVENANCE_KEYS)))
+  )
+    return null;
+  return { version: 1, trigger, prepared, submit };
+}
+
+function parseBounceAskCaptureTriggerProof(value: unknown): BounceAskCaptureTriggerProofV1 | null {
+  if (!exactRecord(value, BOUNCE_ASK_TRIGGER_KEYS)) return null;
+  if (
+    !allFinite(value, BOUNCE_ASK_TRIGGER_FINITE_KEYS) ||
+    !allPositive(value, BOUNCE_ASK_TRIGGER_POSITIVE_KEYS) ||
+    !allNonnegative(value, ["positionResidualShares"]) ||
+    !safePositiveInteger(value.policySchemaVersion) ||
+    !safeNonnegativeInteger(value.policyControlRevision) ||
+    !exactIsoTimestamp(value.sourceCohortActivatedAtUtc) ||
+    !validOrderIdList(value.sourceBuyRootOrderIds) ||
+    Number(value.externalBestBid) >= Number(value.externalBestAsk) ||
+    Number(value.candidatePrice) <= Number(value.externalBestBid) ||
+    Number(value.candidatePrice) > Number(value.externalBestAsk)
+  )
+    return null;
+  return value as unknown as BounceAskCaptureTriggerProofV1;
+}
+
+function parseBounceAskCapturePreparedProof(
+  value: unknown,
+  submit: false,
+): BounceAskCaptureBookDecisionProofV1 | null;
+function parseBounceAskCapturePreparedProof(
+  value: unknown,
+  submit: true,
+): BounceAskCaptureSubmitProofV1 | null;
+function parseBounceAskCapturePreparedProof(
+  value: unknown,
+  submit: boolean,
+): BounceAskCaptureBookDecisionProofV1 | BounceAskCaptureSubmitProofV1 | null {
+  const keys = submit
+    ? [...BOUNCE_ASK_PREPARED_KEYS, ...BOUNCE_ASK_SUBMIT_ONLY_KEYS]
+    : BOUNCE_ASK_PREPARED_KEYS;
+  if (
+    !exactRecord(value, keys) ||
+    !parseBounceAskCaptureTriggerProof(pickRecord(value, BOUNCE_ASK_TRIGGER_KEYS))
+  )
+    return null;
+  if (
+    !allFinite(value, BOUNCE_ASK_PREPARED_FINITE_KEYS) ||
+    !allPositive(value, ["minOrderSize", "replacementSize"]) ||
+    Number(value.replacementSize) + 1e-7 < Number(value.minOrderSize) ||
+    Number(value.replacementSize) > Number(value.positionResidualShares) + 1e-7
+  )
+    return null;
+  if (
+    submit &&
+    (!nonempty(value.childOrderId) ||
+      !nonempty(value.clientOrderId) ||
+      !nonempty(value.authoritativeStateHash) ||
+      !allFinite(value, ["authoritativeStateCapturedAtMs"]) ||
+      !safeNonnegativeInteger(value.authoritativeOpenOrderCount) ||
+      !allNonnegative(value, ["authoritativeFilledShares", "authoritativeWalletShares"]))
+  )
+    return null;
+  return value as unknown as BounceAskCaptureBookDecisionProofV1 | BounceAskCaptureSubmitProofV1;
+}
+
+function sameBounceAskCaptureFields(left: object, right: object, keys: readonly string[]): boolean {
+  const leftRecord = left as unknown as Record<string, unknown>;
+  const rightRecord = right as unknown as Record<string, unknown>;
+  return keys.every((key) => {
+    const leftValue = leftRecord[key];
+    const rightValue = rightRecord[key];
+    return Array.isArray(leftValue) && Array.isArray(rightValue)
+      ? leftValue.length === rightValue.length &&
+          leftValue.every((item, i) => item === rightValue[i])
+      : leftValue === rightValue;
+  });
+}
+
+function pickRecord(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, unknown> {
+  return Object.fromEntries(keys.map((key) => [key, value[key]]));
+}
+
+function validOrderIdList(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(nonempty) &&
+    new Set(value).size === value.length
+  );
 }
 
 function parseMakerCaptureBookProof(
@@ -556,6 +764,24 @@ const MAKER_CAPTURE_BOOK_POSITIVE_KEYS = proofKeys(
 const MAKER_CAPTURE_BOOK_NONNEGATIVE_KEYS = proofKeys(
   "predecessorRemainingShares predecessorSharesSubtracted chainFilledUsdc rootRemainingUsdc",
 );
+const BOUNCE_ASK_TRIGGER_KEYS = proofKeys(
+  "candidatePrice evaluatedAtMs eventTimestampMs externalBestAsk externalBestBid originalTargetPrice policyControlRevision policySchemaVersion positionResidualShares sourceBuyRootOrderIds sourceCohortActivatedAtUtc tickSize",
+);
+const BOUNCE_ASK_STABLE_PROVENANCE_KEYS = proofKeys(
+  "eventTimestampMs originalTargetPrice policyControlRevision policySchemaVersion sourceBuyRootOrderIds sourceCohortActivatedAtUtc tickSize",
+);
+const BOUNCE_ASK_PREPARED_KEYS = [
+  ...BOUNCE_ASK_TRIGGER_KEYS,
+  ...proofKeys("cachedAtMs minOrderSize replacementSize snapshotTs sourcePolledAtMs"),
+];
+const BOUNCE_ASK_SUBMIT_ONLY_KEYS = proofKeys(
+  "authoritativeFilledShares authoritativeOpenOrderCount authoritativeStateCapturedAtMs authoritativeStateHash authoritativeWalletShares childOrderId clientOrderId",
+);
+const BOUNCE_ASK_TRIGGER_FINITE_KEYS = proofKeys("evaluatedAtMs eventTimestampMs");
+const BOUNCE_ASK_TRIGGER_POSITIVE_KEYS = proofKeys(
+  "candidatePrice externalBestAsk externalBestBid originalTargetPrice tickSize",
+);
+const BOUNCE_ASK_PREPARED_FINITE_KEYS = proofKeys("cachedAtMs snapshotTs sourcePolledAtMs");
 const PROOF_TRIGGER_FINITE_KEYS = proofKeys("eventTimestampMs evaluatedAtMs");
 const PROOF_TRIGGER_POSITIVE_KEYS = proofKeys(
   "bestBid tickSize originalSuggestedPrice entryPriceCeiling rootNotionalUsdc",
@@ -594,6 +820,9 @@ function nonempty(value: unknown): value is string {
 }
 function isoTimestamp(value: unknown): value is string {
   return nonempty(value) && Number.isFinite(Date.parse(value));
+}
+function exactIsoTimestamp(value: unknown): value is string {
+  return typeof value === "string" && toCanonicalIso(value) === value;
 }
 
 export interface MakerCaptureChainUsage {

@@ -47,6 +47,7 @@ import type {
   MakerCaptureChainUsage,
   MakerCaptureRepriceProofV1,
   MakerCaptureSubmitProofV1,
+  BounceAskCaptureSubmitProofV1,
 } from "@krabs/domain";
 import {
   createCommandId,
@@ -68,6 +69,7 @@ import {
   isMakerMicroLiveOrderAuthorized,
   isMakerMicroLiveWindowActive,
   parseMakerCaptureRepriceProofV1,
+  parseBounceAskCaptureProofV1,
 } from "@krabs/domain";
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
 import { createHash, randomUUID } from "node:crypto";
@@ -165,6 +167,15 @@ import {
   primeFreshMakerCaptureBook,
   rootMakerCaptureLineage,
 } from "../../maker-capture-reprice.js";
+import {
+  computeBounceAskCaptureCandidate,
+  loadBounceAskFills,
+  parseBounceAskCaptureLineage,
+  parseBounceAskCaptureSignal,
+  resolveProvenBounceAskOrigin,
+  sameBounceAskOrigin,
+  sameBounceAskRoots,
+} from "../../bounce-ask-capture.js";
 import { parseQuoteMotionOrigin, type QuoteMotionOriginV1 } from "../../quote-motion-shadow.js";
 
 /**
@@ -280,6 +291,27 @@ function fillWatermark(fills: readonly ExchangeFill[]): string {
 // terminal means the order can never be cancelled again.
 function isTerminalOrderStatus(status: Order["status"]): boolean {
   return status === "cancelled" || status === "filled" || status === "rejected";
+}
+
+function sellParity(
+  local: readonly Order[],
+  exchange: readonly ExchangeOrder[],
+  fillRepo: Pick<FillRepository, "findByOrderId">,
+): boolean {
+  if (local.length !== exchange.length) return false;
+  const exchangeById = new Map(exchange.map((order) => [order.orderId, order]));
+  return local.every((order) => {
+    if (!order.exchangeOrderId) return false;
+    const remote = exchangeById.get(order.exchangeOrderId);
+    const filled = fillRepo.findByOrderId(order.orderId).reduce((sum, fill) => sum + fill.size, 0);
+    return (
+      remote?.side === "sell" &&
+      String(remote.tokenId) === String(order.tokenId) &&
+      Math.abs(remote.price - order.price) <= 1e-9 &&
+      Math.abs(remote.sizeTotal - order.size) <= 1e-9 &&
+      Math.abs(remote.sizeRemaining - Math.max(0, order.size - filled)) <= 1e-9
+    );
+  });
 }
 
 // Finding 5: autonomous transition-reconcile cadence + the minimum interval between
@@ -401,6 +433,7 @@ export interface ExecutionModuleDeps {
   executionPolicySnapshot?:
     | (() => { policy: ExecutionPolicy; controlRevision: number | null })
     | undefined;
+  resolutionTracker?: { healthy(): boolean; isResolved(conditionId: string): boolean } | undefined;
   candidateBookCache?: MakerCaptureBookCache | undefined;
   allowSellSizeClamp?: boolean | undefined;
   capacityMetricsSink?: ((sample: OrderCapacityMetricsSample) => void) | undefined;
@@ -1776,6 +1809,103 @@ export class ExecutionModule implements RuntimeModule {
     return cmd.metadata?.makerCaptureRepriceV1 !== undefined;
   }
 
+  private isBounceAskCaptureReplacement(cmd: PlaceOrderCommand): boolean {
+    return cmd.metadata?.bounceAskCaptureRepriceV1 !== undefined;
+  }
+
+  private bounceAskCaptureContext(cmd: PlaceOrderCommand) {
+    const metadata = parseBounceAskCaptureSignal(cmd.metadata?.bounceAskCaptureRepriceV1);
+    const intent = cmd.signalId
+      ? this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(cmd.signalId)
+      : null;
+    if (!metadata || !intent || !cmd.signalId) return null;
+    const predecessor = this.deps.orderRepo.findById(intent.predecessorOrderId);
+    const root = this.deps.orderRepo.findById(intent.rootOrderId);
+    const lineage = predecessor ? parseBounceAskCaptureLineage(predecessor) : null;
+    const rootLineage = root ? parseBounceAskCaptureLineage(root) : null;
+    const proof = parseBounceAskCaptureProofV1(intent.proof);
+    const snapshot = this.deps.executionPolicySnapshot?.();
+    const position = this.deps.positionRepo?.findById(intent.positionId) ?? null;
+    const policy = snapshot?.policy.bounceAskCapture;
+    const expectedClientOrderId = buildClientOrderId({
+      signalId: intent.lifecycleSignalId,
+      tokenId: intent.tokenId,
+      side: "sell",
+    });
+    const submittedChild = intent.childOrderId
+      ? this.deps.orderRepo.findById(intent.childOrderId)
+      : null;
+    const proven =
+      predecessor && this.deps.positionRepo && this.deps.inventoryLotRepo
+        ? resolveProvenBounceAskOrigin(predecessor, policy?.sourceCohortActivatedAtUtc ?? "", {
+            orderRepo: this.deps.orderRepo,
+            fillRepo: this.deps.fillRepo,
+            positionRepo: this.deps.positionRepo,
+            inventoryLotRepo: this.deps.inventoryLotRepo,
+          })
+        : null;
+    if (
+      !predecessor ||
+      !root ||
+      !lineage ||
+      !rootLineage ||
+      !proof?.prepared ||
+      !snapshot ||
+      snapshot.controlRevision === null ||
+      !policy?.enabled ||
+      !position ||
+      !proven ||
+      (intent.status !== "ready" && intent.status !== "submitted") ||
+      (intent.status === "ready" && proof.submit !== null) ||
+      (intent.status === "submitted" &&
+        (!submittedChild ||
+          String(submittedChild.clientOrderId) !== String(expectedClientOrderId))) ||
+      predecessor.status !== "cancelled" ||
+      cmd.side !== "sell" ||
+      cmd.postOnly !== true ||
+      cmd.entryStyle !== "maker" ||
+      cmd.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
+      String(cmd.tokenId) !== String(intent.tokenId) ||
+      String(cmd.conditionId) !== String(intent.conditionId) ||
+      String(cmd.positionId) !== String(intent.positionId) ||
+      String(cmd.clientOrderId) !== String(expectedClientOrderId) ||
+      metadata.intentId !== intent.intentId ||
+      metadata.replacementIndex !== intent.replacementIndex ||
+      String(metadata.rootOrderId) !== String(intent.rootOrderId) ||
+      String(metadata.predecessorOrderId) !== String(intent.predecessorOrderId) ||
+      intent.replacementIndex > policy.maxRepricesPerRoot ||
+      lineage.replacementIndex + 1 !== intent.replacementIndex ||
+      String(lineage.rootOrderId) !== String(intent.rootOrderId) ||
+      rootLineage.replacementIndex !== 0 ||
+      String(rootLineage.rootOrderId) !== String(root.orderId) ||
+      !sameBounceAskOrigin(lineage, rootLineage) ||
+      lineage.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc ||
+      rootLineage.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc ||
+      proof.trigger.policySchemaVersion !== snapshot.policy.version ||
+      proof.trigger.policyControlRevision !== snapshot.controlRevision ||
+      proof.trigger.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc ||
+      proof.trigger.originalTargetPrice !== rootLineage.originalTargetPrice ||
+      intent.candidatePrice == null ||
+      Math.abs(cmd.price - intent.candidatePrice) > ExecutionModule.PRICE_EPSILON ||
+      intent.replacementSize == null ||
+      Math.abs(cmd.size - intent.replacementSize) > ExecutionModule.SIZE_EPSILON_SHARES ||
+      Math.abs(proof.prepared.candidatePrice - cmd.price) > ExecutionModule.PRICE_EPSILON ||
+      Math.abs(proof.prepared.replacementSize - cmd.size) > ExecutionModule.SIZE_EPSILON_SHARES ||
+      !sameBounceAskRoots(proven.sourceBuyRootOrderIds, lineage.sourceBuyRootOrderIds)
+    )
+      return null;
+    return { intent, predecessor, root, lineage, proof, snapshot, position, proven };
+  }
+
+  private bounceAskCaptureRejection(
+    cmd: PlaceOrderCommand,
+  ): { reason: string; code: ExchangeErrorCode } | null {
+    if (!this.isBounceAskCaptureReplacement(cmd)) return null;
+    return this.bounceAskCaptureContext(cmd)
+      ? null
+      : { reason: "bounce-ask-capture-invalid", code: ExchangeErrorCode.LivePolicyBlocked };
+  }
+
   private makerCaptureExecutionContext(
     cmd: PlaceOrderCommand,
   ): MakerCaptureExecutionContext | null {
@@ -1954,6 +2084,168 @@ export class ExecutionModule implements RuntimeModule {
         clientOrderId: String(cmd.clientOrderId),
       },
     };
+  }
+
+  private async bounceAskCaptureFinalProof(
+    cmd: PlaceOrderCommand,
+  ): Promise<{ ok: true; proof: BounceAskCaptureSubmitProofV1 } | { ok: false; reason: string }> {
+    let context = this.bounceAskCaptureContext(cmd);
+    if (
+      !context ||
+      !this.deps.gateway.getOpenOrdersResult ||
+      !this.deps.gateway.getFillsResult ||
+      !this.deps.gateway.getOrderResult ||
+      !this.deps.positionRepo ||
+      !this.deps.inventoryLotRepo
+    )
+      return { ok: false, reason: "bounce-ask-authoritative-input-unavailable" };
+    const rootCreatedAt = Date.parse(context.root.createdAt);
+    if (!Number.isFinite(rootCreatedAt) || !context.predecessor.exchangeOrderId) {
+      return { ok: false, reason: "bounce-ask-predecessor-identity-invalid" };
+    }
+    let entry;
+    try {
+      const [openResult, fillsResult, exactResult, walletShares, freshEntry] = await Promise.all([
+        this.deps.gateway.getOpenOrdersResult(),
+        this.deps.gateway.getFillsResult(rootCreatedAt),
+        this.deps.gateway.getOrderResult(context.predecessor.exchangeOrderId),
+        this.deps.gateway.getPositionBalance(cmd.tokenId),
+        primeFreshMakerCaptureBook(this.deps.candidateBookCache, String(cmd.tokenId), Date.now()),
+      ]);
+      if (
+        !openResult.ok ||
+        !fillsResult.ok ||
+        !exactResult.ok ||
+        !exactResult.data ||
+        !freshEntry
+      ) {
+        return { ok: false, reason: "bounce-ask-authoritative-fetch-failed" };
+      }
+      entry = freshEntry;
+      const tokenFills = fillsResult.data.filter(
+        (fill) => String(fill.tokenId) === String(cmd.tokenId),
+      );
+      await importExchangeFills(tokenFills, {
+        fillRepo: this.deps.fillRepo,
+        orderRepo: this.deps.orderRepo,
+        bus: this.deps.bus,
+        log: this.log,
+        gateway: this.deps.gateway,
+        fillCompletionTolerance: this.deps.fillCompletionTolerance,
+      });
+      context = this.bounceAskCaptureContext(cmd);
+      if (!context) return { ok: false, reason: "bounce-ask-policy-cohort-lineage-drift" };
+      const preparedProof = context.proof.prepared;
+      if (!preparedProof) return { ok: false, reason: "bounce-ask-prepared-proof-missing" };
+      const market = this.marketCache.get(String(cmd.tokenId));
+      const persistedMarket = this.deps.marketRepo.findByTokenId(cmd.tokenId);
+      const endMs = Date.parse(market?.endDate ?? "");
+      if (
+        !this.deps.resolutionTracker?.healthy() ||
+        this.deps.resolutionTracker.isResolved(String(cmd.conditionId)) ||
+        !market ||
+        !persistedMarket?.active ||
+        !persistedMarket.tradable ||
+        !market.active ||
+        !market.tradable ||
+        !market.acceptingOrders ||
+        !market.enableOrderBook ||
+        !Number.isFinite(endMs) ||
+        endMs <= Date.now()
+      )
+        return { ok: false, reason: "bounce-ask-market-not-positive" };
+      const exact = exactResult.data;
+      const predecessorExchangeFills = tokenFills.filter(
+        (fill) => fill.orderId === context!.predecessor.exchangeOrderId,
+      );
+      const authoritativeFilledShares = predecessorExchangeFills.reduce(
+        (sum, fill) => sum + fill.size,
+        0,
+      );
+      const localPredecessorFilled = this.deps.fillRepo
+        .findByOrderId(context.predecessor.orderId)
+        .reduce((sum, fill) => sum + fill.size, 0);
+      if (
+        exact.status !== "CANCELLED" ||
+        Math.abs(exact.sizeFilled - authoritativeFilledShares) >
+          ExecutionModule.SIZE_EPSILON_SHARES ||
+        Math.abs(localPredecessorFilled - authoritativeFilledShares) >
+          ExecutionModule.SIZE_EPSILON_SHARES
+      )
+        return { ok: false, reason: "bounce-ask-predecessor-state-drift" };
+      const exchangeSells = openResult.data.filter(
+        (order) => String(order.tokenId) === String(cmd.tokenId) && order.side === "sell",
+      );
+      const localSells = this.deps.orderRepo
+        .findOpen()
+        .filter(
+          (order) =>
+            String(order.tokenId) === String(cmd.tokenId) &&
+            order.side === "sell" &&
+            String(order.clientOrderId) !== String(cmd.clientOrderId),
+        );
+      if (!sellParity(localSells, exchangeSells, this.deps.fillRepo)) {
+        return { ok: false, reason: "bounce-ask-open-sell-parity-drift" };
+      }
+      const lots = this.deps.inventoryLotRepo.findOpen(context.position.positionId);
+      const fifoResidual = lots.reduce((sum, lot) => sum + lot.remainingSize, 0);
+      if (
+        !Number.isFinite(walletShares) ||
+        walletShares <= 0 ||
+        Math.abs(walletShares - context.position.size) > ExecutionModule.SIZE_EPSILON_SHARES ||
+        Math.abs(fifoResidual - context.position.size) > ExecutionModule.SIZE_EPSILON_SHARES
+      )
+        return { ok: false, reason: "bounce-ask-wallet-position-fifo-drift" };
+      const candidate = computeBounceAskCaptureCandidate({
+        book: entry.book,
+        tickSize: cmd.tickSize,
+        ownSellOrders: localSells,
+        fillsByOrder: loadBounceAskFills(this.deps.fillRepo, localSells),
+        predecessorPrice: context.predecessor.price,
+        originalTargetPrice: context.lineage.originalTargetPrice,
+      });
+      if (
+        !candidate.ok ||
+        Math.abs(candidate.price - cmd.price) > ExecutionModule.PRICE_EPSILON ||
+        entry.book.minOrderSize == null ||
+        cmd.size + ExecutionModule.SIZE_EPSILON_SHARES < entry.book.minOrderSize ||
+        cmd.size > context.position.size + ExecutionModule.SIZE_EPSILON_SHARES
+      )
+        return { ok: false, reason: "bounce-ask-book-size-drift" };
+      const capturedAt = Date.now();
+      const stateHash = createHash("sha256")
+        .update(
+          JSON.stringify({
+            open: exchangeSells.map((order) => [order.orderId, order.sizeRemaining]).sort(),
+            predecessor: [exact.orderId, exact.status, exact.sizeFilled],
+            walletShares,
+            candidate: candidate.price,
+            tickSize: cmd.tickSize,
+          }),
+        )
+        .digest("hex");
+      return {
+        ok: true,
+        proof: {
+          ...preparedProof,
+          evaluatedAtMs: capturedAt,
+          snapshotTs: entry.snapshotTs,
+          cachedAtMs: entry.cachedAtMs,
+          sourcePolledAtMs: entry.sourcePolledAtMs,
+          externalBestBid: candidate.externalBestBid,
+          externalBestAsk: candidate.externalBestAsk,
+          childOrderId: String(context.intent.childOrderId),
+          clientOrderId: String(cmd.clientOrderId),
+          authoritativeStateCapturedAtMs: capturedAt,
+          authoritativeOpenOrderCount: exchangeSells.length,
+          authoritativeFilledShares,
+          authoritativeWalletShares: walletShares,
+          authoritativeStateHash: stateHash,
+        },
+      };
+    } catch {
+      return { ok: false, reason: "bounce-ask-authoritative-reproof-threw" };
+    }
   }
 
   private captureRootWindowMatches(
@@ -2206,6 +2498,11 @@ export class ExecutionModule implements RuntimeModule {
     const captureRejection = this.makerCaptureRepriceRejection(cmd);
     if (captureRejection) {
       await this.rejectOrder(cmd, captureRejection.reason, captureRejection.code);
+      return;
+    }
+    const askCaptureRejection = this.bounceAskCaptureRejection(cmd);
+    if (askCaptureRejection) {
+      await this.rejectOrder(cmd, askCaptureRejection.reason, askCaptureRejection.code);
       return;
     }
 
@@ -2495,9 +2792,14 @@ export class ExecutionModule implements RuntimeModule {
     // CLOB may accept the resend while SQLite rejects the duplicate client ID.
     const existing = this.deps.orderRepo.findByClientOrderId(cmd.clientOrderId);
     if (existing) {
-      await this.skipDuplicateClientOrderIdPreSubmit(cmd, existing);
-      this.processedCommandIds.add(cmd.commandId);
-      return;
+      const recovery = await this.recoverBounceAskPending(cmd, existing);
+      if (recovery !== "retry") {
+        if (recovery === "not-applicable") {
+          await this.skipDuplicateClientOrderIdPreSubmit(cmd, existing);
+          this.processedCommandIds.add(cmd.commandId);
+        }
+        return;
+      }
     }
 
     this.processedCommandIds.add(cmd.commandId);
@@ -3587,6 +3889,7 @@ export class ExecutionModule implements RuntimeModule {
     } finally {
       if (cmd.type === "PlaceOrderCommand") {
         this.pendingReservations.delete(String(cmd.commandId));
+        this.recoveryPendingReplacements.delete(String(cmd.clientOrderId));
         const wasBounceRung = this.inFlightBounceRungs.delete(String(cmd.commandId));
         // Finding 3: a just-finished in-flight rung connects to any deferred backstop
         // waiting on its cycle (opens the drain, or fires the backstop if it failed).
@@ -3968,6 +4271,14 @@ export class ExecutionModule implements RuntimeModule {
         );
         return;
       }
+      if (this.isBounceAskCaptureReplacement(cmd)) {
+        await this.rejectOrder(
+          cmd,
+          "bounce-ask-capture-tick-drift",
+          ExchangeErrorCode.LivePolicyBlocked,
+        );
+        return;
+      }
       // Re-snap the price to the corrected tick grid (side-aware) before validating.
       // If re-snap fails we fall back to the original cmd tick/price — the order
       // may still get an exchange reject, but we never place a knowingly invalid one.
@@ -4195,6 +4506,14 @@ export class ExecutionModule implements RuntimeModule {
         await this.rejectOrder(
           effectiveCmd,
           "maker-capture-prepared-submit-required",
+          ExchangeErrorCode.LivePolicyBlocked,
+        );
+        return;
+      }
+      if (this.isBounceAskCaptureReplacement(effectiveCmd)) {
+        await this.rejectOrder(
+          effectiveCmd,
+          "bounce-ask-capture-prepared-submit-required",
           ExchangeErrorCode.LivePolicyBlocked,
         );
         return;
@@ -4500,7 +4819,7 @@ export class ExecutionModule implements RuntimeModule {
     } finally {
       if (!cancelPersisted) {
         this.cancelReservations.delete(orderKey);
-        if (cmd.reason === "maker_capture_reprice") {
+        if (cmd.reason === "maker_capture_reprice" || cmd.reason === "bounce_ask_capture_reprice") {
           this.releaseProcessedCommandId(String(cmd.commandId));
         }
       }
@@ -5439,6 +5758,112 @@ export class ExecutionModule implements RuntimeModule {
     await this.publishOrderSkipped(cmd, "duplicate_client_order_id_pre_submit", details);
   }
 
+  private async recoverBounceAskPending(
+    cmd: PlaceOrderCommand,
+    existing: Order,
+  ): Promise<"not-applicable" | "retry" | "stop"> {
+    if (
+      !this.isBounceAskCaptureReplacement(cmd) ||
+      (existing.status !== "pending" && existing.status !== "rejected")
+    )
+      return "not-applicable";
+    const intent = cmd.signalId
+      ? this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(cmd.signalId)
+      : null;
+    if (
+      !intent ||
+      !existing.exchangeOrderId ||
+      (intent.status !== "ready" &&
+        (intent.status !== "submitted" || intent.childOrderId !== existing.orderId)) ||
+      !this.deps.gateway.getOpenOrdersResult ||
+      !this.deps.gateway.getFillsResult ||
+      !this.deps.gateway.getOrderResult
+    )
+      return "stop";
+    try {
+      const [open, fills, exact] = await Promise.all([
+        this.deps.gateway.getOpenOrdersResult(),
+        this.deps.gateway.getFillsResult(0),
+        this.deps.gateway.getOrderResult(existing.exchangeOrderId),
+      ]);
+      if (!open.ok || !fills.ok || !exact.ok) return "stop";
+      const linkedFills = fills.data.filter(
+        (fill) =>
+          fill.orderId === existing.exchangeOrderId ||
+          fill.clientOrderId === String(existing.clientOrderId),
+      );
+      await importExchangeFills(linkedFills, {
+        fillRepo: this.deps.fillRepo,
+        orderRepo: this.deps.orderRepo,
+        bus: this.deps.bus,
+        log: this.log,
+        gateway: this.deps.gateway,
+        fillCompletionTolerance: this.deps.fillCompletionTolerance,
+      });
+      if (linkedFills.length > 0) {
+        this.deps.orderRepo.markBounceAskCaptureTerminal?.(intent.intentId, "completed", null);
+        return "stop";
+      }
+      const remote = exact.data;
+      const openSells = open.data.filter(
+        (order) => String(order.tokenId) === String(existing.tokenId) && order.side === "sell",
+      );
+      const openRemote = openSells.find((order) => order.orderId === existing.exchangeOrderId);
+      if (remote?.status === "OPEN" || remote?.status === "PARTIALLY_FILLED" || openRemote) {
+        if (
+          openSells.length !== 1 ||
+          !openRemote ||
+          !remote ||
+          remote.orderId !== openRemote.orderId ||
+          remote.side !== existing.side ||
+          String(remote.tokenId) !== String(existing.tokenId) ||
+          Math.abs(remote.price - existing.price) > ExecutionModule.PRICE_EPSILON ||
+          Math.abs(remote.sizeTotal - existing.size) > ExecutionModule.SIZE_EPSILON_SHARES
+        )
+          return "stop";
+        this.deps.orderRepo.updateStatus(
+          existing.orderId,
+          remote.status === "PARTIALLY_FILLED" ? "partially-filled" : "open",
+          remote.orderId,
+        );
+        this.deps.orderRepo.markBounceAskCaptureTerminal?.(intent.intentId, "completed", null);
+        return "stop";
+      }
+      if (
+        openSells.length > 0 ||
+        (remote &&
+          (remote.status !== "CANCELLED" ||
+            remote.orderId !== existing.exchangeOrderId ||
+            remote.side !== existing.side ||
+            String(remote.tokenId) !== String(existing.tokenId) ||
+            Math.abs(remote.price - existing.price) > ExecutionModule.PRICE_EPSILON ||
+            Math.abs(remote.sizeTotal - existing.size) > ExecutionModule.SIZE_EPSILON_SHARES ||
+            remote.sizeFilled > ExecutionModule.SIZE_EPSILON_SHARES))
+      )
+        return "stop";
+      const current = this.bounceAskCaptureContext(cmd);
+      if (!current) {
+        this.deps.orderRepo.updateStatus(existing.orderId, "rejected");
+        this.deps.orderRepo.markBounceAskCaptureTerminal?.(
+          intent.intentId,
+          "failed",
+          "pending-child-policy-drift",
+        );
+        return "stop";
+      }
+      if (
+        intent.status === "submitted" &&
+        !this.deps.orderRepo.resetBounceAskCaptureSubmitted?.(intent.intentId, existing.orderId)
+      )
+        return "stop";
+      this.deps.orderRepo.updateStatus(existing.orderId, "rejected");
+      this.recoveryPendingReplacements.set(String(cmd.clientOrderId), existing);
+      return "retry";
+    } catch {
+      return "stop";
+    }
+  }
+
   private async publishOrderSkipped(
     cmd: PlaceOrderCommand,
     reasonCode: string,
@@ -5478,6 +5903,7 @@ export class ExecutionModule implements RuntimeModule {
     const prepared = await gateway.prepareOrder(params);
     const pending = this.buildPreparedOrder(cmd, params, prepared.orderId, "pending");
     this.markMakerCaptureSubmittedOrThrow(cmd, pending.orderId);
+    this.markBounceAskCaptureSubmittedOrThrow(cmd, pending.orderId);
     if (replacement) {
       if (replacement.status === "cancelled") {
         if (!this.deps.orderRepo.replaceCancelledRecoveryIdentity || !replacement.metadata) {
@@ -5540,6 +5966,27 @@ export class ExecutionModule implements RuntimeModule {
         }
         this.makerCaptureGatewayAttempts.add(String(cmd.commandId));
       }
+      if (this.isBounceAskCaptureReplacement(cmd)) {
+        const final = await this.bounceAskCaptureFinalProof(cmd);
+        const context = this.bounceAskCaptureContext(cmd);
+        const persisted =
+          final.ok && context?.intent.childOrderId
+            ? this.deps.orderRepo.markBounceAskCaptureSubmitProof?.(
+                context.intent.intentId,
+                context.intent.childOrderId,
+                String(cmd.clientOrderId),
+                final.proof,
+              ) === true
+            : false;
+        if (!persisted) {
+          return {
+            kind: "rejected" as const,
+            errorCode: ExchangeErrorCode.LivePolicyBlocked,
+            errorMessage: final.ok ? "bounce-ask-submit-proof-cas-failed" : final.reason,
+            errorDetails: null,
+          };
+        }
+      }
       if (this.activeExitRecoveryClientIds.has(String(cmd.clientOrderId))) {
         await this.assertRecoverySubmitBoundary(cmd);
         this.recoverySubmissionAttempts.add(String(cmd.clientOrderId));
@@ -5599,7 +6046,11 @@ export class ExecutionModule implements RuntimeModule {
       createdAt: now,
       updatedAt: now,
     };
-    return this.stampMakerCaptureLineage(order, cmd, status);
+    return this.stampBounceAskCaptureLineage(
+      this.stampMakerCaptureLineage(order, cmd, status),
+      cmd,
+      status,
+    );
   }
 
   private stampMakerCaptureLineage(
@@ -5653,6 +6104,41 @@ export class ExecutionModule implements RuntimeModule {
     ) {
       throw new Error("maker capture child intent submission claim failed");
     }
+  }
+
+  private stampBounceAskCaptureLineage(
+    order: Order,
+    cmd: PlaceOrderCommand,
+    status: "pending" | "open" | "rejected",
+  ): Order {
+    if (status === "rejected" || !this.isBounceAskCaptureReplacement(cmd)) return order;
+    const context = this.bounceAskCaptureContext(cmd);
+    if (!context) throw new Error("bounce ASK capture child lineage validation failed");
+    return {
+      ...order,
+      metadata: {
+        ...(order.metadata ?? {}),
+        bounceAskCaptureLineageV1: {
+          ...context.lineage,
+          rootOrderId: context.intent.rootOrderId,
+          predecessorOrderId: context.intent.predecessorOrderId,
+          replacementIndex: context.intent.replacementIndex,
+        },
+      },
+    };
+  }
+
+  private markBounceAskCaptureSubmittedOrThrow(
+    cmd: PlaceOrderCommand,
+    childOrderId: OrderId,
+  ): void {
+    if (!this.isBounceAskCaptureReplacement(cmd)) return;
+    const context = this.bounceAskCaptureContext(cmd);
+    if (
+      !context ||
+      !this.deps.orderRepo.markBounceAskCaptureSubmitted?.(context.intent.intentId, childOrderId)
+    )
+      throw new Error("bounce ASK capture child intent submission claim failed");
   }
 
   private preparedSubmitResultToPlaceOrderResult(

@@ -522,7 +522,13 @@ export interface AlgoDecisionModuleDeps {
    */
   positionRepo?: Pick<PositionRepository, "findByTokenId" | "findOpen"> | undefined;
   orderRepo?:
-    | Pick<OrderRepository, "findByTokenId" | "findRecentByTokenId" | "findOpen">
+    | Pick<
+        OrderRepository,
+        | "findByTokenId"
+        | "findRecentByTokenId"
+        | "findOpen"
+        | "hasNonterminalBounceAskCaptureIntentForPosition"
+      >
     | undefined;
   /**
    * Phase 3 fill-aware bounce-ladder accounting (docs/plans/2026-07-19-
@@ -1988,6 +1994,11 @@ export class AlgoDecisionModule implements RuntimeModule {
       hasActiveSellOrderForBounceBackstop: bounceLadderEligible
         ? this.hasActiveSellOrderForBounceBackstop(tokenId)
         : false,
+      hasNonterminalBounceAskCaptureIntent:
+        position != null &&
+        this.deps.orderRepo?.hasNonterminalBounceAskCaptureIntentForPosition?.(
+          position.positionId,
+        ) === true,
       sellLoopGuard: this.deps.sellLoopGuard?.getSnapshot(tokenId, now) ?? null,
       // Release A Phase 3: MASK stale non-bounce ownership for a bounce owner — its
       // exit is exclusively the bounce ladder, so a stale s1/profile ownership flag

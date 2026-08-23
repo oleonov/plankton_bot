@@ -343,6 +343,7 @@ export async function cleanStaleEntryOrders(
     const ordKey = String(order.orderId);
     const lastAttempt = backoffMap.get(ordKey);
     if (lastAttempt != null && now - lastAttempt < CANCEL_BACKOFF_MS) continue;
+    if (orderRepo.isOrderManagedByNonterminalBounceAskCaptureIntent?.(order.orderId)) continue;
 
     const market = marketRepo.findByTokenId(order.tokenId);
     const ageMs = now - new Date(order.createdAt).getTime();

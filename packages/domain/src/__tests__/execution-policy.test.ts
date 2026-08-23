@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_EXECUTION_PROFILE_POLICY, parseExecutionPolicyJson } from "../execution-policy.js";
+import { parseBounceAskCaptureProofV1 } from "../repositories.js";
 
 describe("sellableFlow policy", () => {
   it("defaults to OFF (byte-identical behaviour when off)", () => {
@@ -538,5 +539,132 @@ describe("track A add-throttle live enforcement policy", () => {
 
     expect(parsed.issues).toContain("trackAAddThrottle.enforce must be boolean");
     expect(parsed.policy.trackAAddThrottle).toEqual({ enforce: false });
+  });
+});
+
+describe("bounce ask-capture policy and proof", () => {
+  const sourceCohortActivatedAtUtc = "2026-08-20T10:00:00.000Z";
+  const trigger = {
+    eventTimestampMs: 1,
+    evaluatedAtMs: 2,
+    policySchemaVersion: 1,
+    policyControlRevision: 7,
+    sourceCohortActivatedAtUtc,
+    originalTargetPrice: 0.25,
+    candidatePrice: 0.19,
+    externalBestBid: 0.1,
+    externalBestAsk: 0.2,
+    tickSize: 0.01,
+    positionResidualShares: 10,
+    sourceBuyRootOrderIds: ["buy-root-1"],
+  };
+  const prepared = {
+    ...trigger,
+    evaluatedAtMs: 3,
+    candidatePrice: 0.18,
+    externalBestBid: 0.11,
+    externalBestAsk: 0.19,
+    positionResidualShares: 9,
+    snapshotTs: 4,
+    cachedAtMs: 5,
+    sourcePolledAtMs: 6,
+    minOrderSize: 5,
+    replacementSize: 8,
+  };
+  const submit = {
+    ...prepared,
+    evaluatedAtMs: 7,
+    candidatePrice: 0.17,
+    externalBestBid: 0.12,
+    externalBestAsk: 0.18,
+    snapshotTs: 8,
+    cachedAtMs: 9,
+    sourcePolledAtMs: 10,
+    childOrderId: "ask-child-1",
+    clientOrderId: "ask-child-client-1",
+    authoritativeStateCapturedAtMs: 11,
+    authoritativeOpenOrderCount: 1,
+    authoritativeFilledShares: 2,
+    authoritativeWalletShares: 10,
+    authoritativeStateHash: "sha256:authoritative-state",
+  };
+
+  it("defaults OFF and enables only with a canonical source cohort plus bounded cap", () => {
+    expect(parseExecutionPolicyJson(null).policy.bounceAskCapture).toEqual({
+      enabled: false,
+      sourceCohortActivatedAtUtc: "",
+      maxRepricesPerRoot: 5,
+    });
+
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({
+        bounceAskCapture: {
+          enabled: true,
+          sourceCohortActivatedAtUtc,
+          maxRepricesPerRoot: 3,
+        },
+      }),
+    );
+    expect(parsed.issues).toEqual([]);
+    expect(parsed.policy.bounceAskCapture).toEqual({
+      enabled: true,
+      sourceCohortActivatedAtUtc,
+      maxRepricesPerRoot: 3,
+    });
+  });
+
+  it.each([
+    ["missing cohort", { enabled: true, maxRepricesPerRoot: 3 }],
+    [
+      "non-canonical cohort",
+      {
+        enabled: true,
+        sourceCohortActivatedAtUtc: "2026-08-20T10:00:00Z",
+        maxRepricesPerRoot: 3,
+      },
+    ],
+    [
+      "impossible cohort",
+      {
+        enabled: true,
+        sourceCohortActivatedAtUtc: "2026-02-30T10:00:00.000Z",
+        maxRepricesPerRoot: 3,
+      },
+    ],
+    ["zero cap", { enabled: true, sourceCohortActivatedAtUtc, maxRepricesPerRoot: 0 }],
+    ["oversized cap", { enabled: true, sourceCohortActivatedAtUtc, maxRepricesPerRoot: 6 }],
+  ])("fails closed for %s", (_label, bounceAskCapture) => {
+    const parsed = parseExecutionPolicyJson(JSON.stringify({ bounceAskCapture }));
+
+    expect(parsed.policy.bounceAskCapture.enabled).toBe(false);
+    expect(parsed.policy.bounceAskCapture.sourceCohortActivatedAtUtc).toBe("");
+    expect(parsed.issues.length).toBeGreaterThan(0);
+  });
+
+  it("strictly parses complete, internally consistent trigger/prepared/submit proof", () => {
+    const proof = { version: 1, trigger, prepared, submit };
+
+    expect(parseBounceAskCaptureProofV1(proof)).toEqual(proof);
+    expect(parseBounceAskCaptureProofV1({ ...proof, prepared: null })).toBeNull();
+    expect(
+      parseBounceAskCaptureProofV1({
+        version: 1,
+        trigger,
+        prepared: { ...prepared, replacementSize: 4 },
+        submit: null,
+      }),
+    ).toBeNull();
+    expect(
+      parseBounceAskCaptureProofV1({
+        ...proof,
+        prepared: { ...prepared, sourceBuyRootOrderIds: ["different-root"] },
+      }),
+    ).toBeNull();
+    expect(
+      parseBounceAskCaptureProofV1({
+        ...proof,
+        trigger: { ...trigger, unexpected: true },
+      }),
+    ).toBeNull();
   });
 });

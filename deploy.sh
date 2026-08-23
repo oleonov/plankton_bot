@@ -143,7 +143,7 @@ deploy_paths() {
     DOCKER=/usr/bin/docker; FLOCK=/usr/bin/flock; TIMEOUT=/usr/bin/timeout
   fi
   RECOVERY="$CONFIG_DIR/deploy-recovery.json"; META="$CONFIG_DIR/deploy-meta.json"; MARKER="$CONFIG_DIR/deploy-in-progress.json"
-  ORDER_STATUS_GATE="${KRABS_ORDER_STATUS_GATE:-scripts/krabs-order-status-migration-gate.sh}"; ORDER_STATUS_GATE_SHA256="${KRABS_ORDER_STATUS_GATE_SHA256:-$(sha256sum "$ORDER_STATUS_GATE" | awk '{print $1}')}"; ORDER_STATUS_SNAPSHOT="$CONFIG_DIR/order-status-migration-101-${KRABS_REMOTE_SHA:-$(git rev-parse HEAD)}.json"
+  ORDER_STATUS_GATE="${KRABS_ORDER_STATUS_GATE:-scripts/krabs-order-status-migration-gate.sh}"; ORDER_STATUS_GATE_SHA256="${KRABS_ORDER_STATUS_GATE_SHA256:-$(sha256sum "$ORDER_STATUS_GATE" | awk '{print $1}')}"; ORDER_STATUS_SNAPSHOT="$CONFIG_DIR/order-status-migrations-101-103-${KRABS_REMOTE_SHA:-$(git rev-parse HEAD)}.json"
   ROLLBACK_OPERATION_LOCK="$(dirname "${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}")/operation.lock"
   SENTINEL="$CONFIG_DIR/deploy-failstop-requested"; FAILSTOP_LOCK=/var/lock/krabs-deploy-failstop.lock
 }
@@ -230,9 +230,9 @@ if mode == 'rollback':
     print(json.dumps({'migration101':gate or {}},separators=(',',':')))
 else:
     assert mode == 'release' and isinstance(gate,dict)
-    assert set(gate)=={'mode','snapshotPath','migration101','migration102'}
+    assert set(gate)=={'mode','snapshotPath','migration101','migration102','migration103'}
     assert gate['mode'] == 'post' and gate['snapshotPath'] == sys.argv[2]
-    migration101=gate['migration101']; migration102=gate['migration102']
+    migration101=gate['migration101']; migration102=gate['migration102']; migration103=gate['migration103']
     assert set(migration101)=={'candidateCount','candidateHash','rowsHash','markerWasPresent'}
     assert type(migration101['candidateCount']) is int and migration101['candidateCount'] >= 0
     assert all(isinstance(migration101[k],str) and re.fullmatch(r'[0-9a-f]{64}',migration101[k]) for k in ('candidateHash','rowsHash'))
@@ -241,8 +241,22 @@ else:
     assert type(migration102['rowCount']) is int and migration102['rowCount'] >= 0
     assert all(isinstance(migration102[k],str) and re.fullmatch(r'[0-9a-f]{64}',migration102[k]) for k in ('rowsHash','schemaHash'))
     assert all(isinstance(migration102[k],bool) for k in ('markerWasPresent','tableWasPresent'))
-    print(json.dumps({'migration101':migration101,'migration102':migration102},separators=(',',':')))
+    assert set(migration103)=={'markerWasPresent','tableWasPresent','rowCount','rowsHash','schemaHash'}
+    assert type(migration103['rowCount']) is int and migration103['rowCount'] >= 0
+    assert all(isinstance(migration103[k],str) and re.fullmatch(r'[0-9a-f]{64}',migration103[k]) for k in ('rowsHash','schemaHash'))
+    assert all(isinstance(migration103[k],bool) for k in ('markerWasPresent','tableWasPresent'))
+    print(json.dumps({'migration101':migration101,'migration102':migration102,'migration103':migration103},separators=(',',':')))
 PY
+}
+mark_commit_ready() {
+  local arbitration="$1" migrations updated
+  migrations="$(migration_receipt)" || die 'migration receipt is malformed'
+  updated="$(python3 - "$RECOVERY" "$arbitration" "$migrations" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); a=json.loads(sys.argv[2]); migrations=json.loads(sys.argv[3]); r={'baselineCapturedUnderLock':d['baselineCapturedUnderLock'],'prePaused':d['prePaused'],'preRunId':d['preRunId'],'preInstanceId':d['preInstanceId'],'previousVersion':d['previousVersion'],'deployVersion':d['previousVersion']+1,'sha':d['targetSha'],'digest':d['digest'],'recoveryStateId':d['recoveryStateId'],**migrations,**a}; d.update(phase='commit_ready',finalCommandHighWater=a['finalOperatorCommandHighWater'],receipt=json.dumps(r,separators=(',',':'))); print(json.dumps(d,separators=(',',':')))
+PY
+)" || die 'commit-ready receipt is malformed'
+  recovery "$updated"
 }
 advance_recovery() { recovery "$(python3 - "$RECOVERY" "$1" <<'PY'
 import json,sys
@@ -411,11 +425,7 @@ PY
   run "$DOCKER" start "$runtime"; run "$DOCKER" start "$manager"
   arbitration="$("$GUARD" deploy-arbitrate "$state_id" "$pre" "$baseline")" || die 're-entry final command arbitration was not proven'
   effective="$(printf '%s' "$arbitration" | json_field effectivePaused)" || die 're-entry command receipt is malformed'
-  recovery "$(python3 - "$RECOVERY" "$arbitration" "$(migration_receipt)" <<'PY'
-import json,sys
-d=json.load(open(sys.argv[1])); a=json.loads(sys.argv[2]); migrations=json.loads(sys.argv[3]); r={'baselineCapturedUnderLock':d['baselineCapturedUnderLock'],'prePaused':d['prePaused'],'preRunId':d['preRunId'],'preInstanceId':d['preInstanceId'],'previousVersion':d['previousVersion'],'deployVersion':d['previousVersion']+1,'sha':d['targetSha'],'digest':d['digest'],'recoveryStateId':d['recoveryStateId'],**migrations,**a}; d.update(phase='commit_ready',finalCommandHighWater=a['finalOperatorCommandHighWater'],receipt=json.dumps(r,separators=(',',':'))); print(json.dumps(d,separators=(',',':')))
-PY
- )"
+  mark_commit_ready "$arbitration"
   printf '%s\n' "$effective"
 }
 
@@ -586,11 +596,7 @@ PY
   barrier arbitration_boundary
   arbitration="$($GUARD deploy-arbitrate "$state_id" "$pre" "$(recovery_field baselineCommandHighWater)")" || die 'final command arbitration was not proven'
   effective="$(printf '%s' "$arbitration" | json_field effectivePaused)" || die 'final command receipt is malformed'
-  recovery "$(python3 - "$RECOVERY" "$arbitration" "$(migration_receipt)" <<'PY'
-import json,sys
-d=json.load(open(sys.argv[1])); a=json.loads(sys.argv[2]); migrations=json.loads(sys.argv[3]); r={'baselineCapturedUnderLock':d['baselineCapturedUnderLock'],'prePaused':d['prePaused'],'preRunId':d['preRunId'],'preInstanceId':d['preInstanceId'],'previousVersion':d['previousVersion'],'deployVersion':d['previousVersion']+1,'sha':d['targetSha'],'digest':d['digest'],'recoveryStateId':d['recoveryStateId'],**migrations,**a}; d.update(phase='commit_ready',finalCommandHighWater=a['finalOperatorCommandHighWater'],receipt=json.dumps(r,separators=(',',':')));print(json.dumps(d,separators=(',',':')))
-PY
- )"
+  mark_commit_ready "$arbitration"
   barrier commit_ready
   commit_metadata "$full" "$digest" "$state_id" "$effective"
 }

@@ -607,7 +607,8 @@ echo "order-gate $1" >> "$CALLS"
 [[ "\${ORDER_GATE_FAIL:-}" == "$1" ]] && exit 41
 [[ "$1" == post && ! -e "$API_AVAILABLE" ]] && exit 42
 [[ "$1" == post ]] && marker=true || marker=false
-printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s","markerWasPresent":%s},"migration102":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"}}\\n' '${"a".repeat(64)}' '${"b".repeat(64)}' "$marker" '${"c".repeat(64)}' '${"d".repeat(64)}'`,
+[[ "\${ORDER_GATE_MALFORMED:-}" == "$1" ]] && rows103=bad || rows103='${"e".repeat(64)}'
+printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s","markerWasPresent":%s},"migration102":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"},"migration103":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"}}\\n' '${"a".repeat(64)}' '${"b".repeat(64)}' "$marker" '${"c".repeat(64)}' '${"d".repeat(64)}' "$rows103" '${"f".repeat(64)}'`,
     );
     const releaseEnv = {
         ...env,
@@ -700,9 +701,10 @@ printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s"
       Object.keys(releaseReceipt)
         .filter((key) => key.startsWith("migration"))
         .sort(),
-    ).toEqual(["migration101", "migration102"]);
+    ).toEqual(["migration101", "migration102", "migration103"]);
     expect(releaseReceipt.migration101).toMatchObject({ candidateCount: 1 });
     expect(releaseReceipt.migration102).toMatchObject({ rowCount: 0, tableWasPresent: false });
+    expect(releaseReceipt.migration103).toMatchObject({ rowCount: 0, tableWasPresent: false });
 
     writeFileSync(orderGateCalls, "");
     const killedPre = hardDeathRelease("migration_gate_pre");
@@ -773,6 +775,13 @@ printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s"
       "target-started-recovery",
       "zero-connect",
     ]);
+    const malformedProof = runRelease({ ORDER_GATE_MALFORMED: "post" });
+    expect(malformedProof.status).not.toBe(0);
+    expect(malformedProof.stdout).not.toContain("DEPLOY_RECEIPT");
+    expect(JSON.parse(readFileSync(migrationRecoveryPath, "utf8"))).toMatchObject({
+      phase: "arbitration_boundary",
+      migrationGate: { mode: "post", migration103: { rowsHash: "bad" } },
+    });
     console.log(
       "T28F_V25 legacy-guard outer-preflight env-mismatch zero-connect attached-exact negatives migration-gate-recovery",
     );

@@ -17,6 +17,9 @@ import type {
   ClientOrderId,
   MakerCaptureBookDecisionProofV1,
   MakerCaptureRepriceIntent,
+  BounceAskCaptureBookDecisionProofV1,
+  BounceAskCaptureIntent,
+  BounceAskCaptureSubmitProofV1,
 } from "@krabs/domain";
 
 const triggerProof = {
@@ -112,6 +115,76 @@ function makeIntent(overrides: Partial<MakerCaptureRepriceIntent> = {}): MakerCa
     childOrderId: null,
     failure: null,
     proof: { version: 1, trigger: triggerProof, prepared: null, submit: null },
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+const bounceAskTriggerProof = {
+  eventTimestampMs: 1,
+  evaluatedAtMs: 2,
+  policySchemaVersion: 1,
+  policyControlRevision: 7,
+  sourceCohortActivatedAtUtc: "2026-08-20T10:00:00.000Z",
+  originalTargetPrice: 0.25,
+  candidatePrice: 0.19,
+  externalBestBid: 0.1,
+  externalBestAsk: 0.2,
+  tickSize: 0.01,
+  positionResidualShares: 10,
+  sourceBuyRootOrderIds: [createOrderId("source-buy-root")],
+};
+
+function bounceAskPreparedProof(
+  overrides: Partial<BounceAskCaptureBookDecisionProofV1> = {},
+): BounceAskCaptureBookDecisionProofV1 {
+  return {
+    ...bounceAskTriggerProof,
+    snapshotTs: 3,
+    cachedAtMs: 4,
+    sourcePolledAtMs: 5,
+    minOrderSize: 5,
+    replacementSize: 8,
+    ...overrides,
+  };
+}
+
+function bounceAskSubmitProof(
+  overrides: Partial<BounceAskCaptureSubmitProofV1> = {},
+): BounceAskCaptureSubmitProofV1 {
+  return {
+    ...bounceAskPreparedProof(),
+    childOrderId: "bounce-ask-child",
+    clientOrderId: "bounce-ask-child-client",
+    authoritativeStateCapturedAtMs: 6,
+    authoritativeOpenOrderCount: 1,
+    authoritativeFilledShares: 2,
+    authoritativeWalletShares: 10,
+    authoritativeStateHash: "sha256:authoritative-state",
+    ...overrides,
+  };
+}
+
+function makeBounceAskIntent(
+  overrides: Partial<BounceAskCaptureIntent> = {},
+): BounceAskCaptureIntent {
+  const now = "2026-08-20T10:05:00.000Z";
+  return {
+    intentId: "bounce-ask-intent-1",
+    predecessorOrderId: createOrderId("bounce-ask-root"),
+    lifecycleSignalId: "bounce-ask-reprice-signal-1",
+    rootOrderId: createOrderId("bounce-ask-root"),
+    positionId: createPositionId("bounce-position-1"),
+    tokenId: createTokenId("tok-1"),
+    conditionId: createConditionId("cond-1"),
+    replacementIndex: 1,
+    status: "cancel_pending",
+    candidatePrice: null,
+    replacementSize: null,
+    childOrderId: null,
+    failure: null,
+    proof: { version: 1, trigger: bounceAskTriggerProof, prepared: null, submit: null },
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -929,6 +1002,99 @@ describe("SqliteOrderRepository", () => {
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
         .get("maker_capture_reprice_intents"),
     ).toBeTruthy();
+  });
+
+  it("persists bounce ask-capture proof and fences one nonterminal intent per position", () => {
+    const intent = makeBounceAskIntent();
+    const competing = makeBounceAskIntent({
+      intentId: "bounce-ask-intent-2",
+      predecessorOrderId: createOrderId("bounce-ask-other-predecessor"),
+      lifecycleSignalId: "bounce-ask-reprice-signal-2",
+      rootOrderId: createOrderId("bounce-ask-other-root"),
+    });
+
+    expect(repo.claimBounceAskCaptureIntent(intent)).toBe(true);
+    expect(repo.claimBounceAskCaptureIntent(intent)).toBe(false);
+    expect(repo.claimBounceAskCaptureIntent(competing)).toBe(false);
+    expect(repo.hasNonterminalBounceAskCaptureIntentForPosition(intent.positionId)).toBe(true);
+    expect(repo.isOrderManagedByNonterminalBounceAskCaptureIntent(intent.predecessorOrderId)).toBe(
+      true,
+    );
+    expect(repo.findBounceAskCaptureIntentBySignal(intent.lifecycleSignalId)).toMatchObject({
+      intentId: intent.intentId,
+      positionId: intent.positionId,
+      status: "cancel_pending",
+    });
+
+    expect(repo.markBounceAskCaptureReady(intent.intentId, 0.18, 8, bounceAskPreparedProof())).toBe(
+      false,
+    );
+    expect(repo.markBounceAskCaptureReady(intent.intentId, 0.19, 8, bounceAskPreparedProof())).toBe(
+      true,
+    );
+    expect(
+      repo.markBounceAskCaptureSubmitted(intent.intentId, createOrderId("bounce-ask-child")),
+    ).toBe(true);
+    expect(
+      repo.isOrderManagedByNonterminalBounceAskCaptureIntent(createOrderId("bounce-ask-child")),
+    ).toBe(true);
+    expect(
+      repo.markBounceAskCaptureSubmitProof(
+        intent.intentId,
+        createOrderId("bounce-ask-child"),
+        "bounce-ask-child-client",
+        bounceAskSubmitProof(),
+      ),
+    ).toBe(false);
+
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("bounce-ask-child"),
+        clientOrderId: "bounce-ask-child-client" as ClientOrderId,
+        positionId: intent.positionId,
+      }),
+    );
+    expect(
+      repo.markBounceAskCaptureSubmitProof(
+        intent.intentId,
+        createOrderId("bounce-ask-child"),
+        "bounce-ask-child-client",
+        bounceAskSubmitProof(),
+      ),
+    ).toBe(true);
+    expect(
+      repo.findBounceAskCaptureIntentByChild(createOrderId("bounce-ask-child"))?.proof?.submit,
+    ).toMatchObject({
+      authoritativeStateHash: "sha256:authoritative-state",
+      clientOrderId: "bounce-ask-child-client",
+    });
+    expect(
+      repo.resetBounceAskCaptureSubmitted(intent.intentId, createOrderId("bounce-ask-child")),
+    ).toBe(true);
+    expect(repo.findBounceAskCaptureIntentBySignal(intent.lifecycleSignalId)).toMatchObject({
+      status: "ready",
+      childOrderId: null,
+      proof: { trigger: intent.proof?.trigger, prepared: bounceAskPreparedProof(), submit: null },
+    });
+    expect(
+      repo.markBounceAskCaptureSubmitted(intent.intentId, createOrderId("bounce-ask-child")),
+    ).toBe(true);
+    expect(repo.findBounceAskCaptureIntentByPredecessor(intent.predecessorOrderId)?.intentId).toBe(
+      intent.intentId,
+    );
+
+    conn.close();
+    conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
+    repo = new SqliteOrderRepository(conn.db);
+    expect(repo.findRecoverableBounceAskCaptureIntents()).toHaveLength(1);
+    expect(repo.markBounceAskCaptureTerminal(intent.intentId, "dust")).toBe(true);
+    expect(repo.hasNonterminalBounceAskCaptureIntentForPosition(intent.positionId)).toBe(false);
+    expect(repo.isOrderManagedByNonterminalBounceAskCaptureIntent(intent.predecessorOrderId)).toBe(
+      false,
+    );
+    expect(repo.claimBounceAskCaptureIntent(competing)).toBe(true);
+    expect(repo.markBounceAskCaptureTerminal(competing.intentId, "failed", "test")).toBe(true);
+    expect(repo.findRecoverableBounceAskCaptureIntents()).toEqual([]);
   });
 
   it("counts a trusted root once, all chain fills, and invalid siblings conservatively", () => {

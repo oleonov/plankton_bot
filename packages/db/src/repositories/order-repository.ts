@@ -10,6 +10,10 @@ import type {
   MakerCaptureLineageV1,
   MakerCaptureBookDecisionProofV1,
   MakerCaptureSubmitProofV1,
+  BounceAskCaptureIntent,
+  BounceAskCaptureIntentStatus,
+  BounceAskCaptureBookDecisionProofV1,
+  BounceAskCaptureSubmitProofV1,
 } from "@krabs/domain";
 import { nowIso } from "../db-timestamp.js";
 import type {
@@ -27,6 +31,7 @@ import {
   createPositionId,
   createBotRunId,
   parseMakerCaptureRepriceProofV1,
+  parseBounceAskCaptureProofV1,
 } from "@krabs/domain";
 
 export class SqliteOrderRepository implements OrderRepository {
@@ -525,6 +530,218 @@ export class SqliteOrderRepository implements OrderRepository {
     );
   }
 
+  claimBounceAskCaptureIntent(intent: BounceAskCaptureIntent): boolean {
+    const proof = parseBounceAskCaptureProofV1(intent.proof);
+    if (!proof || proof.prepared !== null || proof.submit !== null) return false;
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO bounce_ask_capture_reprice_intents
+         (intent_id, predecessor_order_id, lifecycle_signal_id, root_order_id, position_id,
+          token_id, condition_id, replacement_index, status, candidate_price, replacement_size,
+          child_order_id, failure, proof_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'cancel_pending', NULL, NULL, NULL, NULL, ?, ?, ?)`,
+      )
+      .run(
+        intent.intentId,
+        intent.predecessorOrderId,
+        intent.lifecycleSignalId,
+        intent.rootOrderId,
+        intent.positionId,
+        intent.tokenId,
+        intent.conditionId,
+        intent.replacementIndex,
+        JSON.stringify(proof),
+        intent.createdAt,
+        intent.updatedAt,
+      );
+    return result.changes === 1;
+  }
+
+  findRecoverableBounceAskCaptureIntents(): BounceAskCaptureIntent[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM bounce_ask_capture_reprice_intents
+           WHERE status IN ('cancel_pending', 'ready', 'submitted')
+           ORDER BY created_at, intent_id`,
+        )
+        .all() as Record<string, unknown>[]
+    ).map(rowToBounceAskCaptureIntent);
+  }
+
+  findBounceAskCaptureIntentBySignal(signalId: string): BounceAskCaptureIntent | null {
+    return this.findBounceAskCaptureIntent("lifecycle_signal_id", signalId);
+  }
+
+  findBounceAskCaptureIntentByChild(childOrderId: OrderId): BounceAskCaptureIntent | null {
+    return this.findBounceAskCaptureIntent("child_order_id", childOrderId);
+  }
+
+  findBounceAskCaptureIntentByPredecessor(
+    predecessorOrderId: OrderId,
+  ): BounceAskCaptureIntent | null {
+    return this.findBounceAskCaptureIntent("predecessor_order_id", predecessorOrderId);
+  }
+
+  hasNonterminalBounceAskCaptureIntentForPosition(
+    positionId: import("@krabs/domain").PositionId,
+  ): boolean {
+    return Boolean(
+      this.db
+        .prepare(
+          `SELECT 1 FROM bounce_ask_capture_reprice_intents
+           WHERE position_id = ? AND status IN ('cancel_pending', 'ready', 'submitted') LIMIT 1`,
+        )
+        .get(positionId),
+    );
+  }
+
+  isOrderManagedByNonterminalBounceAskCaptureIntent(orderId: OrderId): boolean {
+    return Boolean(
+      this.db
+        .prepare(
+          `SELECT 1 FROM bounce_ask_capture_reprice_intents
+           WHERE (predecessor_order_id = ? OR child_order_id = ?)
+             AND status IN ('cancel_pending', 'ready', 'submitted') LIMIT 1`,
+        )
+        .get(orderId, orderId),
+    );
+  }
+
+  markBounceAskCaptureReady(
+    intentId: string,
+    candidatePrice: number,
+    replacementSize: number,
+    preparedProof: BounceAskCaptureBookDecisionProofV1,
+  ): boolean {
+    const current = this.readBounceAskCaptureProofRow(intentId);
+    const proof = parseBounceAskCaptureProofJson(current?.proof_json);
+    const nextProof = parseBounceAskCaptureProofV1({ ...proof, prepared: preparedProof });
+    if (
+      !current ||
+      current.status !== "cancel_pending" ||
+      !proof ||
+      proof.prepared !== null ||
+      proof.submit !== null ||
+      !nextProof?.prepared ||
+      nextProof.prepared.candidatePrice !== candidatePrice ||
+      nextProof.prepared.replacementSize !== replacementSize
+    )
+      return false;
+    return (
+      this.db
+        .prepare(
+          `UPDATE bounce_ask_capture_reprice_intents
+           SET status = 'ready', candidate_price = ?, replacement_size = ?, proof_json = ?,
+               updated_at = ?
+           WHERE intent_id = ? AND status = 'cancel_pending' AND candidate_price IS NULL
+             AND replacement_size IS NULL AND child_order_id IS NULL AND proof_json = ?`,
+        )
+        .run(
+          candidatePrice,
+          replacementSize,
+          JSON.stringify(nextProof),
+          nowIso(),
+          intentId,
+          current.proof_json,
+        ).changes === 1
+    );
+  }
+
+  markBounceAskCaptureSubmitted(intentId: string, childOrderId: OrderId): boolean {
+    const current = this.readBounceAskCaptureProofRow(intentId);
+    const proof = parseBounceAskCaptureProofJson(current?.proof_json);
+    if (!current || current.status !== "ready" || !proof?.prepared || proof.submit !== null)
+      return false;
+    return (
+      this.db
+        .prepare(
+          `UPDATE bounce_ask_capture_reprice_intents
+           SET status = 'submitted', child_order_id = ?, updated_at = ?
+           WHERE intent_id = ? AND status = 'ready' AND child_order_id IS NULL AND proof_json = ?`,
+        )
+        .run(childOrderId, nowIso(), intentId, current.proof_json).changes === 1
+    );
+  }
+
+  resetBounceAskCaptureSubmitted(intentId: string, childOrderId: OrderId): boolean {
+    const current = this.readBounceAskCaptureProofRow(intentId);
+    const proof = parseBounceAskCaptureProofJson(current?.proof_json);
+    const resetProof = parseBounceAskCaptureProofV1({ ...proof, submit: null });
+    if (
+      !current ||
+      current.status !== "submitted" ||
+      current.child_order_id !== String(childOrderId) ||
+      !proof?.prepared ||
+      !resetProof?.prepared
+    )
+      return false;
+    const resetProofJson = JSON.stringify(resetProof);
+    return (
+      this.db
+        .prepare(
+          `UPDATE bounce_ask_capture_reprice_intents
+           SET status = 'ready', child_order_id = NULL, proof_json = ?, updated_at = ?
+           WHERE intent_id = ? AND status = 'submitted' AND child_order_id = ?
+             AND proof_json = ?`,
+        )
+        .run(resetProofJson, nowIso(), intentId, childOrderId, current.proof_json).changes === 1
+    );
+  }
+
+  markBounceAskCaptureSubmitProof(
+    intentId: string,
+    childOrderId: OrderId,
+    clientOrderId: string,
+    submitProof: BounceAskCaptureSubmitProofV1,
+  ): boolean {
+    const current = this.readBounceAskCaptureProofRow(intentId);
+    const proof = parseBounceAskCaptureProofJson(current?.proof_json);
+    const nextProof = parseBounceAskCaptureProofV1({ ...proof, submit: submitProof });
+    const submit = nextProof?.submit;
+    if (
+      !current ||
+      current.status !== "submitted" ||
+      current.child_order_id !== String(childOrderId) ||
+      current.child_client_order_id !== clientOrderId ||
+      !proof?.prepared ||
+      proof.submit !== null ||
+      !submit ||
+      submit.childOrderId !== String(childOrderId) ||
+      submit.clientOrderId !== clientOrderId ||
+      submit.candidatePrice !== current.candidate_price ||
+      submit.replacementSize !== current.replacement_size
+    )
+      return false;
+    return (
+      this.db
+        .prepare(
+          `UPDATE bounce_ask_capture_reprice_intents
+           SET proof_json = ?, updated_at = ?
+           WHERE intent_id = ? AND status = 'submitted' AND child_order_id = ?
+             AND proof_json = ?`,
+        )
+        .run(JSON.stringify(nextProof), nowIso(), intentId, childOrderId, current.proof_json)
+        .changes === 1
+    );
+  }
+
+  markBounceAskCaptureTerminal(
+    intentId: string,
+    status: "completed" | "failed" | "dust",
+    failure: string | null = null,
+  ): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE bounce_ask_capture_reprice_intents
+           SET status = ?, failure = ?, updated_at = ?
+           WHERE intent_id = ? AND status IN ('cancel_pending', 'ready', 'submitted')`,
+        )
+        .run(status, status === "failed" ? failure : null, nowIso(), intentId).changes === 1
+    );
+  }
+
   getMakerBuyWindowUsage(
     activatedAtUtc: string,
     expiresAtUtc: string,
@@ -633,6 +850,16 @@ export class SqliteOrderRepository implements OrderRepository {
     return row ? rowToMakerCaptureIntent(row) : null;
   }
 
+  private findBounceAskCaptureIntent(
+    column: string,
+    value: unknown,
+  ): BounceAskCaptureIntent | null {
+    const row = this.db
+      .prepare(`SELECT * FROM bounce_ask_capture_reprice_intents WHERE ${column} = ?`)
+      .get(value) as Record<string, unknown> | undefined;
+    return row ? rowToBounceAskCaptureIntent(row) : null;
+  }
+
   private readMakerCaptureProofRow(intentId: string):
     | {
         status: string;
@@ -651,6 +878,26 @@ export class SqliteOrderRepository implements OrderRepository {
          LEFT JOIN orders AS o ON o.order_id = i.child_order_id WHERE i.intent_id = ?`,
       )
       .get(intentId) as ReturnType<SqliteOrderRepository["readMakerCaptureProofRow"]>;
+  }
+
+  private readBounceAskCaptureProofRow(intentId: string):
+    | {
+        status: string;
+        candidate_price: number | null;
+        replacement_size: number | null;
+        child_order_id: string | null;
+        child_client_order_id: string | null;
+        proof_json: string;
+      }
+    | undefined {
+    return this.db
+      .prepare(
+        `SELECT i.status, i.candidate_price, i.replacement_size, i.child_order_id, i.proof_json,
+                o.client_order_id AS child_client_order_id
+         FROM bounce_ask_capture_reprice_intents AS i
+         LEFT JOIN orders AS o ON o.order_id = i.child_order_id WHERE i.intent_id = ?`,
+      )
+      .get(intentId) as ReturnType<SqliteOrderRepository["readBounceAskCaptureProofRow"]>;
   }
 
   private findMakerCaptureIntentsForToken(tokenId: TokenId): MakerCaptureRepriceIntent[] {
@@ -734,6 +981,36 @@ function parseMakerCaptureRepriceProofJson(raw: unknown) {
   if (typeof raw !== "string") return null;
   try {
     return parseMakerCaptureRepriceProofV1(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function rowToBounceAskCaptureIntent(row: Record<string, unknown>): BounceAskCaptureIntent {
+  return {
+    intentId: row.intent_id as string,
+    predecessorOrderId: createOrderId(row.predecessor_order_id as string),
+    lifecycleSignalId: row.lifecycle_signal_id as string,
+    rootOrderId: createOrderId(row.root_order_id as string),
+    positionId: createPositionId(row.position_id as string),
+    tokenId: createTokenId(row.token_id as string),
+    conditionId: createConditionId(row.condition_id as string),
+    replacementIndex: row.replacement_index as number,
+    status: row.status as BounceAskCaptureIntentStatus,
+    candidatePrice: (row.candidate_price as number | null) ?? null,
+    replacementSize: (row.replacement_size as number | null) ?? null,
+    childOrderId: row.child_order_id ? createOrderId(row.child_order_id as string) : null,
+    failure: (row.failure as string | null) ?? null,
+    proof: parseBounceAskCaptureProofJson(row.proof_json),
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function parseBounceAskCaptureProofJson(raw: unknown) {
+  if (typeof raw !== "string") return null;
+  try {
+    return parseBounceAskCaptureProofV1(JSON.parse(raw));
   } catch {
     return null;
   }
