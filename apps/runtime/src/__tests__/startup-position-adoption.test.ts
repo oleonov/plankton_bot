@@ -287,6 +287,7 @@ describe("runStartupPositionAdoption", () => {
     const marketRepo = new SqliteMarketRepository(conn.db);
     seedMarket(marketRepo);
     const { orderRepo, predecessorId } = seedMissingBounceCandidate(conn);
+    let allowRecovery = true;
     const deps = {
       gateway: {
         getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
@@ -302,7 +303,7 @@ describe("runStartupPositionAdoption", () => {
       log: silentLog,
       db: conn.db,
       botRunId: createBotRunId("run-1"),
-      allowMissingBounceExitRecovery: () => true,
+      allowMissingBounceExitRecovery: () => allowRecovery,
     };
 
     await runStartupPositionAdoption(deps);
@@ -402,13 +403,48 @@ describe("runStartupPositionAdoption", () => {
       ok: true,
       data: orderId === exactChild.orderId ? exactChild : null,
     }));
+    allowRecovery = false;
     await runStartupPositionAdoption(deps);
 
+    const completedPredecessorMetadata = orderRepo.findById(predecessorId)!.metadata!;
+    orderRepo.updateMetadata(predecessorId, {
+      ...completedPredecessorMetadata,
+      exitRecoveryFenceV1: {
+        ...(completedPredecessorMetadata.exitRecoveryFenceV1 as Record<string, unknown>),
+        childOrderId: "forged-child",
+      },
+    });
+    await expect(runStartupPositionAdoption(deps)).rejects.toThrow("pending order");
+    orderRepo.updateMetadata(predecessorId, completedPredecessorMetadata);
+
+    const childMetadata = orderRepo.findById(childOrderId)!.metadata!;
+    orderRepo.updateMetadata(childOrderId, {
+      ...childMetadata,
+      exitRecoveryChildV1: {
+        ...(childMetadata.exitRecoveryChildV1 as Record<string, unknown>),
+        predecessorOrderId: "forged-predecessor",
+      },
+    });
+    await expect(runStartupPositionAdoption(deps)).rejects.toThrow("pending order");
+    orderRepo.updateMetadata(childOrderId, childMetadata);
+
+    allowRecovery = true;
     orderRepo.updateMetadata(predecessorId, {
       ...orderRepo.findById(predecessorId)!.metadata,
       startupExitRecoveryBlockV1: { version: 99 },
     });
     await expect(runStartupPositionAdoption(deps)).rejects.toThrow("marker is invalid");
+    orderRepo.updateMetadata(predecessorId, completedPredecessorMetadata);
+
+    allowRecovery = false;
+    orderRepo.save({
+      ...orderRepo.findById(childOrderId)!,
+      orderId: createOrderId("ord-missing-bounce-recovery-sibling"),
+      clientOrderId: "plk_missing_bounce_recovery_sibling" as ClientOrderId,
+      exchangeOrderId: "ex-missing-bounce-recovery-sibling",
+      status: "rejected",
+    });
+    await expect(runStartupPositionAdoption(deps)).rejects.toThrow("pending order");
   });
 
   it("keeps an ineligible exact-notFound pending order on the fatal startup path", async () => {

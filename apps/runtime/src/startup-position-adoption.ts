@@ -419,6 +419,7 @@ async function allowMissingBounceExitRecoveryStartup(
   order: Order,
   exchangeFills: readonly ExchangeFill[],
 ): Promise<boolean> {
+  if (hasStrictCompletedRecoveryChildAtStartup(deps, order)) return true;
   if (deps.allowMissingBounceExitRecovery?.() !== true) return false;
   const childMarker = order.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
   if (childMarker?.version === 1 && typeof childMarker.predecessorOrderId === "string") {
@@ -426,6 +427,16 @@ async function allowMissingBounceExitRecoveryStartup(
     return Boolean(predecessor && isStrictRecoveryChildAtStartup(deps, predecessor, order));
   }
   return persistMissingBounceExitRecoveryBlock(deps, order, exchangeFills);
+}
+
+function hasStrictCompletedRecoveryChildAtStartup(
+  deps: StartupPositionAdoptionDeps,
+  predecessor: Order,
+): boolean {
+  const fence = parseExitRecoveryFenceV1(predecessor);
+  if (fence?.phase !== "complete" || !fence.childOrderId) return false;
+  const child = deps.orderRepo.findById(createOrderId(fence.childOrderId));
+  return Boolean(child && isStrictRecoveryChildAtStartup(deps, predecessor, child));
 }
 
 async function persistMissingBounceExitRecoveryBlock(
@@ -551,10 +562,13 @@ function isStrictRecoveryChildAtStartup(
   child: Order,
 ): boolean {
   const fence = parseExitRecoveryFenceV1(predecessor);
+  const startupBlock = parseStartupExitRecoveryBlockV1(predecessor);
   if (
     !fence ||
-    (!parseStartupExitRecoveryBlockV1(predecessor) && fence.phase !== "complete") ||
-    !isRecoveryChildLocalIdentity(predecessor, child, fence, false)
+    (predecessor.metadata?.startupExitRecoveryBlockV1 !== undefined && !startupBlock) ||
+    (!startupBlock && fence.phase !== "complete") ||
+    (fence.phase === "complete" && fence.childOrderId !== String(child.orderId)) ||
+    !isRecoveryChildLocalIdentity(predecessor, child, fence, true)
   ) {
     return false;
   }
