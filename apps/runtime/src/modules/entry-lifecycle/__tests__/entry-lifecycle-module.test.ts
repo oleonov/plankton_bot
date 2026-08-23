@@ -1157,6 +1157,60 @@ describe("EntryLifecycleModule", () => {
     await module.stop();
   });
 
+  it.each([
+    ["complete write-ahead", "ready", true, null],
+    ["missing child identity", "ready", false, "proof-invalid-or-incomplete"],
+    ["missing prepared proof", "cancel_pending", true, "proof-invalid-or-incomplete"],
+  ] as const)(
+    "handles a submitted capture intent with %s on a fresh market event",
+    async (_label, proofStage, hasChildIdentity, failure) => {
+      const child = makeOrder({ orderId: createOrderId("pending-child"), status: "pending" });
+      const intent: MakerCaptureRepriceIntent = {
+        intentId: "submitted-write-ahead",
+        predecessorOrderId: createOrderId("cancelled-predecessor"),
+        lifecycleSignalId: "submitted-write-ahead-signal",
+        rootOrderId: createOrderId("capture-root"),
+        tokenId: TOKEN,
+        conditionId: CONDITION,
+        replacementIndex: 1,
+        status: "submitted",
+        candidatePrice: 0.31,
+        replacementSize: 2,
+        childOrderId: hasChildIdentity ? child.orderId : null,
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+        failure: null,
+        proof: captureProof(proofStage),
+      };
+      let recover = false;
+      const repo = makeOrderRepo(child);
+      repo.findRecoverableMakerCaptureRepriceIntents = vi.fn(() => (recover ? [intent] : []));
+      vi.mocked(repo.findById).mockImplementation((id) => (id === child.orderId ? child : null));
+      repo.markMakerCaptureRepriceTerminal = vi.fn(() => true);
+      const bus = new InProcessEventBus();
+      const sideEffect = vi.fn();
+      bus.subscribe("CancelOrderRequested", sideEffect);
+      bus.subscribe("SignalProduced", sideEffect);
+      const module = buildModule({ bus, orderRepo: repo });
+      await module.start();
+      recover = true;
+
+      await publishMarket(bus, makeMarket());
+
+      if (failure) {
+        expect(repo.markMakerCaptureRepriceTerminal).toHaveBeenCalledWith(
+          intent.intentId,
+          "failed",
+          failure,
+        );
+      } else {
+        expect(repo.markMakerCaptureRepriceTerminal).not.toHaveBeenCalled();
+      }
+      expect(sideEffect).not.toHaveBeenCalled();
+      await module.stop();
+    },
+  );
+
   it("fails a disabled recoverable capture intent without re-cancelling", async () => {
     const predecessor = makeOrder();
     const identity = buildMakerCaptureRepriceIdentity(predecessor.orderId, predecessor.orderId, 1);

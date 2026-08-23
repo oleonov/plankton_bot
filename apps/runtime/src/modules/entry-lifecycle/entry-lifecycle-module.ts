@@ -766,6 +766,10 @@ export class EntryLifecycleModule implements RuntimeModule {
     if (!proof) return false;
     if (intent.status === "cancel_pending") return proof.prepared === null && proof.submit === null;
     if (intent.status === "ready") return proof.prepared !== null && proof.submit === null;
+    if (intent.status === "submitted") {
+      if (proof.prepared === null || intent.childOrderId === null) return false;
+      if (proof.submit === null) return true;
+    }
     if (intent.status === "submitted" || intent.status === "completed") {
       const expectedClientOrderId = buildClientOrderId({
         signalId: intent.lifecycleSignalId,
