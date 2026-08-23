@@ -775,6 +775,11 @@ describe("ExecutionModule", () => {
     orderRepo.getMakerCaptureChainUsage = vi.fn(() => ({
       trusted: true,
       rootOrderId: buyRootOrderId,
+      rootNotionalUsdc: 1,
+      chainFilledUsdc: 1,
+      predecessorRemainingShares: 0,
+      replacementIndex: 0,
+      orderIds: [buyRootOrderId],
     }));
     orderRepo.findBounceAskCaptureIntentBySignal = vi.fn(() => intent);
     orderRepo.resetBounceAskCaptureSubmitted = vi.fn(() => {
@@ -813,24 +818,28 @@ describe("ExecutionModule", () => {
       ok: true,
       data: mode === "fill" ? [fill] : [],
     });
-    gateway.getOrderResult = vi.fn(async (exchangeOrderId) => ({
-      ok: true,
-      data:
-        exchangeOrderId === predecessor.exchangeOrderId
-          ? {
-              ...predecessor,
-              orderId: predecessor.exchangeOrderId,
-              sizeTotal: predecessor.size,
-              sizeFilled: 0,
-              sizeRemaining: predecessor.size,
-              status: "CANCELLED",
-            }
-          : mode === "identity"
-            ? { ...remote, price: 0.34 }
-            : mode === "open"
-              ? remote
-              : null,
-    }));
+    gateway.getOrderResult = vi.fn(
+      async (
+        exchangeOrderId,
+      ): Promise<{ readonly ok: true; readonly data: ExchangeOrder | null }> => ({
+        ok: true,
+        data:
+          exchangeOrderId === predecessor.exchangeOrderId
+            ? ({
+                ...predecessor,
+                orderId: predecessor.exchangeOrderId,
+                sizeTotal: predecessor.size,
+                sizeFilled: 0,
+                sizeRemaining: predecessor.size,
+                status: "CANCELLED",
+              } as unknown as ExchangeOrder)
+            : mode === "identity"
+              ? { ...remote, price: 0.34 }
+              : mode === "open"
+                ? remote
+                : null,
+      }),
+    );
     const currentPosition = makePosition({
       positionId,
       size: 5,
