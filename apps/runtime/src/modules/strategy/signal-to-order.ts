@@ -656,26 +656,10 @@ export class SignalToOrderBridge {
     policy: ExecutionPolicy,
     orderSize: number,
     executionTerms: { tickSize: number },
-    nowMs: number,
+    authorized: boolean,
+    bidImproveTicks: number,
   ): { price: number; size: number; postOnly: true; entryStyle: "maker" } | null {
-    if (
-      !isMakerMicroLiveOrderAuthorized(
-        policy.makerEntry,
-        {
-          conditionId: String(signal.conditionId),
-          source: "strategy",
-          side: signal.side,
-          entryStyle: "maker",
-          postOnly: true,
-          decisionRuleId: signal.decisionRuleId,
-          signalReason: signal.reason,
-          signalTimestamp: signal.generatedAt,
-        },
-        nowMs,
-      )
-    ) {
-      return null;
-    }
+    if (!authorized) return null;
 
     const bestBid = market.bestBid;
     if (bestBid == null || !Number.isFinite(bestBid) || bestBid <= 0) {
@@ -696,7 +680,7 @@ export class SignalToOrderBridge {
     }
 
     const tickSize = executionTerms.tickSize;
-    const makerPrice = computeMakerEntryPrice(bestBid, tickSize, policy.makerEntry.bidImproveTicks);
+    const makerPrice = computeMakerEntryPrice(bestBid, tickSize, bidImproveTicks);
 
     if (makerPrice >= bestAsk) {
       this.log.warn(
@@ -1606,14 +1590,56 @@ export class SignalToOrderBridge {
       // overwhelming majority of signals, and every non-BUY / non-R23 signal),
       // cooldownPrice === executionTerms.price and this block is byte-identical to
       // the prior behavior.
+      const makerAuthorization = {
+        conditionId: String(signal.conditionId),
+        source: "strategy" as const,
+        side: signal.side,
+        entryStyle: "maker" as const,
+        postOnly: true as const,
+        decisionRuleId: signal.decisionRuleId,
+        signalReason: signal.reason,
+        signalTimestamp: signal.generatedAt,
+      };
+      const makerAuthorized = isMakerMicroLiveOrderAuthorized(
+        policy.makerEntry,
+        makerAuthorization,
+        nowMs,
+      );
+      const makerCaptureAuthorized = isMakerCaptureNextR23OrderAuthorized(
+        policy.makerEntry,
+        makerAuthorization,
+        nowMs,
+      );
+      const makerBidImproveTicks = makerCaptureAuthorized ? 1 : policy.makerEntry.bidImproveTicks;
       const makerOverride = this.tryMakerEntryOverride(
         signal,
         market,
         policy,
         orderSize,
         executionTerms,
-        nowMs,
+        makerAuthorized,
+        makerBidImproveTicks,
       );
+      if (makerCaptureAuthorized && makerOverride == null) {
+        const reason = "maker-capture-no-valid-bid-plus-one";
+        await this.publishConversionSkipped(signal, "execution-terms", [reason], {
+          bestBid: market.bestBid,
+          bestAsk: market.bestAsk,
+          tickSize: executionTerms.tickSize,
+          bidImproveTicks: makerBidImproveTicks,
+        });
+        this.writeObservation({
+          signal,
+          clientOrderId: null,
+          market,
+          policy,
+          executionTerms,
+          canary,
+          sellPricingShadow,
+          skippedReason: reason,
+        });
+        return;
+      }
       const cooldownPrice = makerOverride?.price ?? executionTerms.price;
 
       if (!isBounceExitForceExit && this.deps.samePriceCooldown) {
@@ -1744,21 +1770,7 @@ export class SignalToOrderBridge {
       const entryFreshEdgeAttribution =
         signal.side === "buy" && attributionRuleValid ? parsedAttribution : null;
       const makerMicroLiveLifecycle =
-        makerOverride != null &&
-        isMakerCaptureNextR23OrderAuthorized(
-          policy.makerEntry,
-          {
-            conditionId: signal.conditionId,
-            source: "strategy",
-            side: signal.side,
-            entryStyle: "maker",
-            postOnly: true,
-            decisionRuleId: signal.decisionRuleId,
-            signalReason: signal.reason,
-            signalTimestamp: signal.generatedAt,
-          },
-          nowMs,
-        )
+        makerOverride != null && makerCaptureAuthorized
           ? {
               kind: "r23_capture",
               activatedAtUtc: policy.makerEntry.microLiveWindow!.activatedAtUtc,

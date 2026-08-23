@@ -315,6 +315,7 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
 
   it("allows an exact timestamp-bound R23 capture with an empty whitelist", async () => {
     const makerEntry = makeMakerEntryPolicy({
+      bidImproveTicks: 2,
       whitelistConditionIds: [],
       microLiveWindow: {
         activatedAtUtc: new Date(NOW).toISOString(),
@@ -326,6 +327,7 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
     const { placed } = await runBridge(makeSignal(), { makerEntry });
 
     expect(placed[0]?.entryStyle).toBe("maker");
+    expect(placed[0]?.price).toBe(0.1);
     expect(placed[0]?.postOnly).toBe(true);
     expect(placed[0]?.metadata?.makerMicroLiveLifecycle).toEqual({
       kind: "r23_capture",
@@ -343,6 +345,28 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
       policyControlRevision: 77,
       initialBook: { depthStatus: "unavailable", tickSize: 0.01, source: "disabled" },
     });
+  });
+
+  it("holds an exact capture when bid+1 meets ask instead of placing an ordinary fallback", async () => {
+    const makerEntry = makeMakerEntryPolicy({
+      whitelistConditionIds: [],
+      microLiveWindow: {
+        activatedAtUtc: new Date(NOW).toISOString(),
+        expiresAtUtc: new Date(NOW + 60_000).toISOString(),
+        maxCumulativeAcceptedPendingUsdc: 1,
+        captureNextR23: true,
+      },
+    });
+    const { placed, skipped } = await runBridge(makeSignal(), { makerEntry }, { bestAsk: 0.1 });
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toMatchObject([
+      {
+        stage: "execution-terms",
+        reasons: ["maker-capture-no-valid-bid-plus-one"],
+        diagnostics: { bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01, bidImproveTicks: 1 },
+      },
+    ]);
   });
 
   it("does not mark an ordinary static-whitelist maker order for quote-motion", async () => {
