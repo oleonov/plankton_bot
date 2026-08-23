@@ -2798,13 +2798,19 @@ export class ExecutionModule implements RuntimeModule {
           this.activeExitRecoveryClientIds.delete(fence.childClientOrderId);
         }
         child = this.deps.orderRepo.findByClientOrderId(fence.childClientOrderId);
-      } else if (child.status === "pending" || child.status === "rejected") {
+      } else if (
+        child.status === "pending" ||
+        child.status === "rejected" ||
+        (child.status === "cancelled" && fence.phase === "complete")
+      ) {
         child = await this.resumeAmbiguousRecoveryChild(predecessor, child, fence, command);
+      } else if (child.status === "cancelled") {
+        throw new Error("cancelled recovery child requires a complete fence");
       }
       if (!child) throw new Error("recovery child did not persist");
 
       const completedAt = await this.verifyRecoveryChild(predecessor, child, fence);
-      if (fence.phase !== "complete") {
+      if (fence.phase !== "complete" || fence.childOrderId !== String(child.orderId)) {
         fence = { ...fence, phase: "complete", completedAt, childOrderId: String(child.orderId) };
         this.casRecoveryFence(predecessor, fence, true);
       }
@@ -3006,8 +3012,19 @@ export class ExecutionModule implements RuntimeModule {
     const predecessor = this.deps.orderRepo.findById(createOrderId(marker.predecessorOrderId));
     if (!predecessor) throw new Error("recovery submit predecessor is missing");
     const fence = parseExitRecoveryFenceV1(predecessor);
-    if (!fence || fence.phase === "complete") throw new Error("recovery submit fence is invalid");
+    if (!fence) throw new Error("recovery submit fence is invalid");
     this.requireRecoveryPredecessor(predecessor, true);
+    if (fence.phase === "complete") {
+      const child = this.deps.orderRepo.findByClientOrderId(fence.childClientOrderId);
+      if (
+        !child ||
+        child.status !== "pending" ||
+        fence.childOrderId === String(child.orderId) ||
+        !isRecoveryChildLocalIdentity(predecessor, child, fence, false)
+      ) {
+        throw new Error("complete recovery fence is not a durable rearm");
+      }
+    }
     this.assertRecoveryRuntimeClosed();
     const snapshot = await this.readRecoverySnapshot(predecessor);
     this.assertPredecessorAbsent(snapshot, predecessor);
@@ -3179,6 +3196,10 @@ export class ExecutionModule implements RuntimeModule {
     ]);
     if (!exact.ok) throw new Error("recovery child exact state is unreliable");
     this.assertRecoveryChildLocalIdentity(predecessor, child, fence, false);
+    this.assertSingleRecoveryChild(predecessor, child);
+    if (child.status === "cancelled" && exact.data !== null) {
+      throw new Error("cancelled recovery child is not authoritatively absent");
+    }
     try {
       this.assertPredecessorAbsent(snapshot, predecessor);
     } catch (error) {
@@ -3308,6 +3329,16 @@ export class ExecutionModule implements RuntimeModule {
     }
   }
 
+  private assertSingleRecoveryChild(predecessor: Order, child: Order): void {
+    const siblings = this.deps.orderRepo.findByTokenId(predecessor.tokenId).filter((order) => {
+      const marker = order.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
+      return marker?.predecessorOrderId === String(predecessor.orderId);
+    });
+    if (siblings.length !== 1 || siblings[0]!.orderId !== child.orderId) {
+      throw new UnsafeRecoveryChildError("recovery sibling prevention failed");
+    }
+  }
+
   private async verifyRecoveryChild(
     predecessor: Order,
     child: Order,
@@ -3321,13 +3352,7 @@ export class ExecutionModule implements RuntimeModule {
     ]);
     if (!exactChild.ok) throw new Error("recovery child exact state is unreliable");
     this.assertRecoveryChildLocalIdentity(predecessor, child, fence, false);
-    const siblings = this.deps.orderRepo.findByTokenId(predecessor.tokenId).filter((order) => {
-      const marker = order.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
-      return marker?.predecessorOrderId === String(predecessor.orderId);
-    });
-    if (siblings.length !== 1 || siblings[0]!.orderId !== child.orderId) {
-      throw new UnsafeRecoveryChildError("recovery sibling prevention failed");
-    }
+    this.assertSingleRecoveryChild(predecessor, child);
     const reconciledCoverage = allowReconciledTerminal
       ? this.reconciledRecoveryCoverage(predecessor, child, fence, snapshot, exactChild.data)
       : null;
@@ -5454,10 +5479,21 @@ export class ExecutionModule implements RuntimeModule {
     const pending = this.buildPreparedOrder(cmd, params, prepared.orderId, "pending");
     this.markMakerCaptureSubmittedOrThrow(cmd, pending.orderId);
     if (replacement) {
-      if (!this.deps.orderRepo.replacePendingIdentity) {
-        throw new Error("order repository does not support prepared identity replacement");
+      if (replacement.status === "cancelled") {
+        if (!this.deps.orderRepo.replaceCancelledRecoveryIdentity || !replacement.metadata) {
+          throw new Error("order repository does not support cancelled recovery rearm");
+        }
+        this.deps.orderRepo.replaceCancelledRecoveryIdentity(
+          replacement.orderId,
+          pending,
+          replacement.metadata,
+        );
+      } else {
+        if (!this.deps.orderRepo.replacePendingIdentity) {
+          throw new Error("order repository does not support prepared identity replacement");
+        }
+        this.deps.orderRepo.replacePendingIdentity(replacement.orderId, pending);
       }
-      this.deps.orderRepo.replacePendingIdentity(replacement.orderId, pending);
     } else {
       this.deps.orderRepo.save(pending);
     }

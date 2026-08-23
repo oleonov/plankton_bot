@@ -329,6 +329,13 @@ export interface OrderRepository {
    */
   replacePendingIdentity?(currentOrderId: OrderId, replacement: Order): void;
 
+  /** CAS-rearm one proven absent, zero-fill cancelled recovery child. */
+  replaceCancelledRecoveryIdentity?(
+    currentOrderId: OrderId,
+    replacement: Order,
+    expectedMetadata: Readonly<Record<string, unknown>>,
+  ): void;
+
   /** Sum the notional (size_usdc) of all open buy orders. */
   sumOpenBuyNotional(): number;
 

@@ -65,7 +65,10 @@ import {
   type WalletPositionSentinelResult,
 } from "./wallet-position-sentinel.js";
 import type { ExchangeStateStore } from "../execution/exchange-state-store.js";
-import { buildReservationSnapshot } from "../execution/reservation-utils.js";
+import {
+  buildReservationSnapshot,
+  type RecoveryTtlCoverageDeps,
+} from "../execution/reservation-utils.js";
 import type { PolymarketDataPosition } from "@krabs/exchange";
 import {
   runQuoteMotionShadowPass,
@@ -223,6 +226,7 @@ export interface ReconciliationModuleDeps {
    * against. Optional — when omitted, Execution falls back to local state.
    */
   exchangeStateStore?: ExchangeStateStore;
+  recoveryTtlCoverage?: RecoveryTtlCoverageDeps;
   /**
    * Optional reader for wallet positions in non-live-lite modes (or when the
    * sentinel is disabled). When provided, periodic reconciliation pulls
@@ -481,6 +485,9 @@ export class ReconciliationModule implements RuntimeModule {
             : {}),
           ...(repriceChainGate ? { repriceChainGate } : {}),
           ...(this.deps.trackCExit ? { trackCExit: this.deps.trackCExit } : {}),
+          ...(this.deps.recoveryTtlCoverage
+            ? { recoveryTtlCoverage: this.deps.recoveryTtlCoverage }
+            : {}),
         },
         this.staleBackoffMap,
         this.sellDownpriceRepriceMap,

@@ -7126,6 +7126,9 @@ describe("ExecutionModule", () => {
       let predecessorReads = 0;
       let submitAttempts = 0;
       let fillReads = 0;
+      let preparedOrderId = "recovery-child-exchange";
+      let liveChildOrderId = "recovery-child-exchange";
+      let makerMode: "off" | "shadow" = fault === "maker-active" ? "shadow" : "off";
       const exchangeOrder = (orderId: string, clientOrderId: string | null): ExchangeOrder => ({
         orderId,
         clientOrderId,
@@ -7149,8 +7152,8 @@ describe("ExecutionModule", () => {
             placed && !childCancelled
               ? [
                   exchangeOrder(
-                    "recovery-child-exchange",
-                    orders.findByExchangeOrderId("recovery-child-exchange")?.clientOrderId ?? null,
+                    liveChildOrderId,
+                    orders.findByExchangeOrderId(liveChildOrderId)?.clientOrderId ?? null,
                   ),
                 ]
               : fault === "asset-order"
@@ -7223,7 +7226,7 @@ describe("ExecutionModule", () => {
         return {
           ok: true,
           data: childCancelled
-            ? { ...exact, status: "CANCELLED" as const }
+            ? null
             : placed
               ? { ...exact, price: fault === "wrong-child-price" ? 0.31 : exact.price }
               : null,
@@ -7233,9 +7236,15 @@ describe("ExecutionModule", () => {
         childCancelled = true;
         return { success: true };
       });
-      vi.mocked(recoveryGateway.prepareOrder!).mockResolvedValue({
-        orderId: "recovery-child-exchange",
-        __preparedOrderBrand: "PreparedOrder",
+      vi.mocked(recoveryGateway.prepareOrder!).mockImplementation(async () => {
+        preparedOrderId =
+          submitAttempts === 0
+            ? "recovery-child-exchange"
+            : `recovery-child-exchange-${submitAttempts + 1}`;
+        return {
+          orderId: preparedOrderId,
+          __preparedOrderBrand: "PreparedOrder",
+        };
       });
       vi.mocked(recoveryGateway.submitPreparedOrder!).mockImplementation(async () => {
         submitAttempts += 1;
@@ -7247,9 +7256,10 @@ describe("ExecutionModule", () => {
             errorDetails: null,
           };
         }
+        liveChildOrderId = preparedOrderId;
         childCancelled = false;
         placed = true;
-        return { kind: "accepted", orderId: "recovery-child-exchange" };
+        return { kind: "accepted", orderId: preparedOrderId };
       });
       if (fault === "metadata-cas") {
         vi.spyOn(orders, "updateMetadataIfUnchanged").mockReturnValue(null);
@@ -7291,7 +7301,7 @@ describe("ExecutionModule", () => {
           ...DEFAULT_EXECUTION_POLICY,
           makerEntry: {
             ...DEFAULT_EXECUTION_POLICY.makerEntry,
-            mode: fault === "maker-active" ? "shadow" : "off",
+            mode: makerMode,
           },
         }),
       });
@@ -7315,6 +7325,9 @@ describe("ExecutionModule", () => {
         state,
         positionRepo,
         inventoryLots,
+        setMakerMode: (mode: "off" | "shadow") => {
+          makerMode = mode;
+        },
       };
     }
 
@@ -7644,6 +7657,126 @@ describe("ExecutionModule", () => {
         f.conn.close();
       }
     });
+
+    it("CAS-rearms an exact cancelled zero-fill child and converges after a lane crash", async () => {
+      const f = await fixture();
+      try {
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 18),
+        ).resolves.toMatchObject({ status: "applied" });
+        const firstChild = f.orders
+          .findByTokenId(f.predecessor.tokenId)
+          .find((order) => order.metadata?.exitRecoveryChildV1)!;
+        await f.recoveryGateway.cancelOrder({ orderId: firstChild.exchangeOrderId! });
+        f.orders.updateStatus(
+          firstChild.orderId,
+          "cancelled",
+          firstChild.exchangeOrderId!,
+          "stale_exit_ttl",
+        );
+        const openLookup = vi.mocked((f.recoveryGateway as any).getOpenOrdersResult);
+        const stableOpenLookup = openLookup.getMockImplementation()!;
+        let retryReads = 0;
+        openLookup.mockImplementation(async () => {
+          retryReads += 1;
+          return retryReads === 3 ? { ok: false, reason: "transport" } : stableOpenLookup();
+        });
+
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 19),
+        ).resolves.toEqual({ status: "deferred" });
+        expect(f.recoveryGateway.submitPreparedOrder).toHaveBeenCalledTimes(1);
+        expect(f.orders.findByTokenId(f.predecessor.tokenId)).toHaveLength(2);
+        expect(
+          f.orders.findByClientOrderId(firstChild.clientOrderId),
+          String(silentLog.error.mock.calls.at(-1)?.[0]?.err ?? ""),
+        ).toMatchObject({ status: "pending", exchangeOrderId: "recovery-child-exchange-2" });
+
+        await f.recovery.stop();
+        await f.recovery.start();
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 19),
+        ).resolves.toMatchObject({ status: "applied" });
+        const rows = f.orders.findByTokenId(f.predecessor.tokenId);
+        expect(rows).toHaveLength(2);
+        expect(rows.filter((order) => order.metadata?.exitRecoveryChildV1)).toHaveLength(1);
+        expect(f.recoveryGateway.submitPreparedOrder).toHaveBeenCalledTimes(2);
+        expect(f.orders.findById(f.predecessor.orderId)?.metadata).toMatchObject({
+          exitRecoveryFenceV1: {
+            phase: "complete",
+            childOrderId: "recovery-child-exchange-2",
+          },
+        });
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it.each(["linked-fill", "asset-open", "residual", "policy"] as const)(
+      "refuses cancelled recovery rearm on %s drift",
+      async (drift) => {
+        const f = await fixture();
+        try {
+          await f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 20);
+          const child = f.orders
+            .findByTokenId(f.predecessor.tokenId)
+            .find((order) => order.orderId !== f.predecessor.orderId)!;
+          await f.recoveryGateway.cancelOrder({ orderId: child.exchangeOrderId! });
+          f.orders.updateStatus(child.orderId, "cancelled", child.exchangeOrderId!);
+          if (drift === "linked-fill") {
+            vi.mocked((f.recoveryGateway as any).getFillsResult).mockResolvedValue({
+              ok: true,
+              data: [
+                {
+                  fillId: "late-child-fill",
+                  orderId: child.exchangeOrderId!,
+                  clientOrderId: child.clientOrderId,
+                  tokenId: child.tokenId,
+                  side: "sell",
+                  price: child.price,
+                  size: 1,
+                  liquidityRole: "maker",
+                  fee: 0,
+                  feeRateBps: 0,
+                  timestamp: Date.now() + 1,
+                },
+              ],
+            });
+          } else if (drift === "asset-open") {
+            vi.mocked((f.recoveryGateway as any).getOpenOrdersResult).mockResolvedValue({
+              ok: true,
+              data: [
+                {
+                  orderId: "foreign-open",
+                  clientOrderId: null,
+                  tokenId: child.tokenId,
+                  side: "buy",
+                  price: 0.2,
+                  sizeTotal: 1,
+                  sizeFilled: 0,
+                  sizeRemaining: 1,
+                  status: "OPEN",
+                  createdAt: Date.now(),
+                },
+              ],
+            });
+          } else if (drift === "residual") {
+            f.state.updateWalletPosition(child.tokenId, 4);
+          } else {
+            f.setMakerMode("shadow");
+          }
+
+          await expect(
+            f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 21),
+          ).resolves.toEqual({ status: "deferred" });
+          expect(f.recoveryGateway.submitPreparedOrder).toHaveBeenCalledTimes(1);
+        } finally {
+          await f.recovery.stop();
+          f.conn.close();
+        }
+      },
+    );
 
     it("blocks a newer same-token fill at the final serialized submit boundary", async () => {
       const f = await fixture("lane-newer-token-fill");

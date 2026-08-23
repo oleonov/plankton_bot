@@ -230,15 +230,38 @@ export class SqliteOrderRepository implements OrderRepository {
   }
 
   replacePendingIdentity(currentOrderId: OrderId, replacement: Order): void {
+    this.replacePreparedIdentity(currentOrderId, replacement, ["pending", "rejected"]);
+  }
+
+  replaceCancelledRecoveryIdentity(
+    currentOrderId: OrderId,
+    replacement: Order,
+    expectedMetadata: Readonly<Record<string, unknown>>,
+  ): void {
+    this.replacePreparedIdentity(currentOrderId, replacement, ["cancelled"], expectedMetadata);
+  }
+
+  private replacePreparedIdentity(
+    currentOrderId: OrderId,
+    replacement: Order,
+    allowedStatuses: readonly OrderStatus[],
+    expectedMetadata?: Readonly<Record<string, unknown>>,
+  ): void {
     const replace = this.db.transaction(() => {
       const current = this.findById(currentOrderId);
-      if (!current || (current.status !== "pending" && current.status !== "rejected")) {
+      if (!current || !allowedStatuses.includes(current.status)) {
         throw new Error(
-          `Pending identity replacement requires pending/rejected order: ${String(currentOrderId)}`,
+          `Prepared identity replacement requires ${allowedStatuses.join("/")} order: ${String(currentOrderId)}`,
         );
       }
+      if (
+        expectedMetadata &&
+        JSON.stringify(current.metadata) !== JSON.stringify(expectedMetadata)
+      ) {
+        throw new Error("Prepared identity replacement metadata CAS failed");
+      }
       if (current.clientOrderId !== replacement.clientOrderId) {
-        throw new Error("Pending identity replacement cannot change client order identity");
+        throw new Error("Prepared identity replacement cannot change client order identity");
       }
       const hasFill = this.db
         .prepare("SELECT 1 FROM fills WHERE order_id = ? LIMIT 1")
@@ -249,6 +272,8 @@ export class SqliteOrderRepository implements OrderRepository {
         );
       }
 
+      const statusPlaceholders = allowedStatuses.map(() => "?").join(", ");
+      const metadataPredicate = expectedMetadata ? " AND metadata_json IS ?" : "";
       const result = this.db
         .prepare(
           `UPDATE orders
@@ -257,7 +282,8 @@ export class SqliteOrderRepository implements OrderRepository {
                fill_progress_shares = NULL, market_horizon = NULL, exchange_error_code = NULL,
                exchange_error_message = NULL, exchange_error_payload = NULL,
                exchange_rejection_reason = NULL, updated_at = ?
-           WHERE order_id = ? AND status IN ('pending', 'rejected') AND client_order_id = ?
+           WHERE order_id = ? AND status IN (${statusPlaceholders}) AND client_order_id = ?
+             ${metadataPredicate}
              AND NOT EXISTS (SELECT 1 FROM fills WHERE order_id = orders.order_id)`,
         )
         .run(
@@ -269,10 +295,14 @@ export class SqliteOrderRepository implements OrderRepository {
           replacement.sizeUsdc,
           replacement.updatedAt,
           currentOrderId,
+          ...allowedStatuses,
           replacement.clientOrderId,
+          ...(expectedMetadata ? [JSON.stringify(expectedMetadata)] : []),
         );
       if (result.changes !== 1) {
-        throw new Error(`Pending identity replacement failed for order: ${String(currentOrderId)}`);
+        throw new Error(
+          `Prepared identity replacement failed for order: ${String(currentOrderId)}`,
+        );
       }
     });
     replace();

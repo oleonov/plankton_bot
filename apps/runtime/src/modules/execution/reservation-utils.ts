@@ -2,8 +2,11 @@ import type {
   ClientOrderId,
   ConditionId,
   FillRepository,
+  InventoryLotRepository,
   Order,
+  OrderRepository,
   Position,
+  PositionRepository,
   TokenId,
 } from "@krabs/domain";
 import { GATE_ENTRY_RULE_ID } from "@krabs/domain";
@@ -193,6 +196,75 @@ export function isRecoveryChildLocalIdentity(
     child.decisionRuleId === fence.decisionRuleId &&
     canonicalRecoveryMetadata(child.metadata?.bounceRung) === fence.bounceRungJson &&
     Boolean(child.exchangeOrderId)
+  );
+}
+
+export interface RecoveryTtlCoverageDeps {
+  readonly positionRepo: Pick<PositionRepository, "findActiveByTokenId">;
+  readonly inventoryLotRepo: Pick<InventoryLotRepository, "findOpen">;
+  readonly fillRepo: Pick<FillRepository, "findByOrderId" | "findUnreconciled">;
+  readonly exchangeStateStore: {
+    getWalletPositionSize(tokenId: TokenId | string): number | null;
+  };
+}
+
+export function isRecoveryChildTtlProtected(
+  child: Order,
+  orderRepo: Pick<OrderRepository, "findById">,
+  deps: RecoveryTtlCoverageDeps,
+): boolean {
+  const marker = child.metadata?.exitRecoveryChildV1 as Record<string, unknown> | undefined;
+  if (marker?.version !== 1 || typeof marker.predecessorOrderId !== "string") return false;
+  const predecessor = orderRepo.findById(marker.predecessorOrderId as Order["orderId"]);
+  if (!predecessor) return false;
+  const fence = parseExitRecoveryFenceV1(predecessor);
+  if (
+    fence?.phase !== "complete" ||
+    fence.childOrderId !== String(child.orderId) ||
+    !isRecoveryChildLocalIdentity(predecessor, child, fence, true)
+  ) {
+    return false;
+  }
+  const positions = deps.positionRepo.findActiveByTokenId(child.tokenId);
+  const position = positions[0];
+  if (
+    positions.length !== 1 ||
+    String(position?.positionId) !== fence.positionId ||
+    String(position?.conditionId) !== fence.conditionId
+  ) {
+    return false;
+  }
+  const fifoShares = deps.inventoryLotRepo
+    .findOpen(position!.positionId)
+    .reduce((sum, lot) => sum + lot.remainingSize, 0);
+  const childFills = deps.fillRepo.findByOrderId(child.orderId);
+  const unreconciledIds = new Set(
+    deps.fillRepo.findUnreconciled().map((fill) => String(fill.fillId)),
+  );
+  if (
+    childFills.some(
+      (fill) =>
+        !Number.isFinite(fill.size) || fill.size <= 0 || unreconciledIds.has(String(fill.fillId)),
+    )
+  ) {
+    return false;
+  }
+  const filledShares = childFills.reduce((sum, fill) => sum + fill.size, 0);
+  if (
+    (child.status === "open" && filledShares > 1e-9) ||
+    (child.status === "partially-filled" && filledShares <= 1e-9) ||
+    (child.status !== "open" && child.status !== "partially-filled")
+  ) {
+    return false;
+  }
+  const remainingShares = fence.residualShares - filledShares;
+  const walletShares = deps.exchangeStateStore.getWalletPositionSize(child.tokenId);
+  return (
+    remainingShares > 1e-9 &&
+    walletShares !== null &&
+    Math.abs(position!.size - remainingShares) <= 1e-9 &&
+    Math.abs(fifoShares - remainingShares) <= 1e-9 &&
+    Math.abs(walletShares - remainingShares) <= 1e-9
   );
 }
 

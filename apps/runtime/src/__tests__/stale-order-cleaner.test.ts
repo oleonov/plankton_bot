@@ -2,10 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   DEFAULT_EXECUTION_POLICY,
   DEFAULT_REPRICE_CHAIN_POLICY,
+  BOUNCE_EXIT_TARGET_RULE_ID,
   GATE_ENTRY_RULE_ID,
   createTokenId,
   createOrderId,
   createConditionId,
+  createPositionId,
 } from "@krabs/domain";
 import type {
   OrderRepository,
@@ -28,6 +30,7 @@ import {
   recordSellDownpriceCancelSucceeded,
   type SellDownpriceRepriceStateMap,
 } from "../modules/reconciliation/stale-order-cleaner.js";
+import { canonicalRecoveryMetadata } from "../modules/execution/reservation-utils.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -910,6 +913,131 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
   });
+
+  it.each([
+    ["valid complete recovery coverage", "valid", 10, 0, false, "open", 0],
+    ["forged recovery marker", "forged", 10, 0, false, "open", 1],
+    ["ordinary exit", "ordinary", 10, 0, false, "open", 1],
+    ["changed residual", "valid", 9, 0, false, "open", 1],
+    ["reconciled partial recovery coverage", "valid", 7, 3, false, "partially-filled", 0],
+    ["unreconciled partial recovery coverage", "valid", 7, 3, true, "partially-filled", 1],
+    ["partial status without a local fill", "valid", 10, 0, false, "partially-filled", 1],
+  ] as const)(
+    "applies the TTL exemption only to %s",
+    async (_label, kind, wallet, filled, unreconciled, childStatus, cancels) => {
+      const bounceRung = { rungIndex: 0, fraction: 0.3 };
+      const predecessor = makeOrder({
+        orderId: createOrderId("recovery-predecessor"),
+        clientOrderId: "recovery-predecessor-client" as ClientOrderId,
+        exchangeOrderId: "recovery-predecessor-exchange",
+        side: "sell",
+        postOnly: true,
+        positionId: createPositionId("recovery-position"),
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        signalReason: "repricing-exit",
+        size: 3,
+        metadata: { bounceRung },
+      });
+      const child = makeOrder({
+        orderId: createOrderId("recovery-child"),
+        clientOrderId: "recovery-child-client" as ClientOrderId,
+        exchangeOrderId: "recovery-child-exchange",
+        side: "sell",
+        postOnly: true,
+        positionId: createPositionId("recovery-position"),
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        signalReason: "repricing-exit",
+        price: predecessor.price,
+        size: 10,
+        sizeUsdc: 3,
+        status: childStatus,
+        createdAt: new Date(Date.now() - EXIT_ORDER_TTL_MS - 60_000).toISOString(),
+        metadata:
+          kind === "ordinary"
+            ? { bounceRung }
+            : {
+                bounceRung,
+                exitRecoveryChildV1: {
+                  version: 1,
+                  predecessorOrderId:
+                    kind === "forged" ? "different-predecessor" : String(predecessor.orderId),
+                  childClientOrderId: "recovery-child-client",
+                  coverage: "full_active_residual",
+                  predecessorShares: 3,
+                  residualShares: 10,
+                },
+              },
+      });
+      predecessor.metadata = {
+        ...predecessor.metadata,
+        exitRecoveryFenceV1: {
+          version: 1,
+          action: "recover_missing_bounce_exit",
+          operatorCommandId: 574,
+          predecessorOrderId: String(predecessor.orderId),
+          tokenId: String(predecessor.tokenId),
+          conditionId: String(predecessor.conditionId),
+          positionId: String(predecessor.positionId),
+          decisionRuleId: predecessor.decisionRuleId,
+          bounceRungJson: canonicalRecoveryMetadata(predecessor.metadata?.bounceRung),
+          createdAt: new Date().toISOString(),
+          preOpenSnapshotHash: "a".repeat(64),
+          preFillSnapshotHash: "b".repeat(64),
+          preFillWatermark: "",
+          residualShares: 10,
+          childClientOrderId: String(child.clientOrderId),
+          phase: "complete",
+          fenceCompletedAt: new Date().toISOString(),
+          postFenceOpenSnapshotHash: "c".repeat(64),
+          postFenceFillSnapshotHash: "d".repeat(64),
+          postFenceFillWatermark: "",
+          completedAt: new Date().toISOString(),
+          childOrderId: String(child.orderId),
+        },
+      };
+      orderRepo.findOpen = vi.fn().mockReturnValue([child]);
+      orderRepo.findById = vi.fn((id) => (id === predecessor.orderId ? predecessor : null));
+      marketRepo.findByTokenId = vi.fn().mockReturnValue(makeMarket());
+      const cancelled: any[] = [];
+      bus.subscribe("CancelOrderRequested", async (event) => {
+        cancelled.push(event);
+      });
+
+      const result = await cleanStaleEntryOrders(
+        {
+          orderRepo,
+          marketRepo,
+          bus,
+          log: silentLog,
+          recoveryTtlCoverage: {
+            positionRepo: {
+              findActiveByTokenId: () =>
+                [
+                  {
+                    positionId: predecessor.positionId,
+                    conditionId: predecessor.conditionId,
+                    size: wallet,
+                  },
+                ] as any,
+            },
+            inventoryLotRepo: { findOpen: () => [{ remainingSize: wallet }] as any },
+            fillRepo: {
+              findByOrderId: () =>
+                filled > 0 ? ([{ fillId: "recovery-fill", size: filled }] as any) : [],
+              findUnreconciled: () =>
+                unreconciled ? ([{ fillId: "recovery-fill", size: filled }] as any) : [],
+            },
+            exchangeStateStore: { getWalletPositionSize: () => wallet },
+          },
+        },
+        backoffMap,
+      );
+      await bus.drain();
+
+      expect(result.staleExitTtlCancelled).toBe(cancels);
+      expect(cancelled).toHaveLength(cancels);
+    },
+  );
 
   it("uses mode-aware exit TTL when enforcement is enabled", async () => {
     const sixMinutesAgo = new Date(Date.now() - 6 * 60_000).toISOString();

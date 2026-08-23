@@ -302,6 +302,50 @@ describe("SqliteOrderRepository", () => {
     ).toThrow("refused for filled order");
   });
 
+  it("CAS-rearms only the exact unfilled cancelled recovery identity", () => {
+    const metadata = { exitRecoveryChildV1: { version: 1, predecessorOrderId: "predecessor" } };
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("cancelled-recovery"),
+        clientOrderId: "recovery-stable" as ClientOrderId,
+        status: "cancelled",
+        metadata,
+      }),
+    );
+    const replacement = makeOrder({
+      orderId: createOrderId("rearmed-recovery"),
+      clientOrderId: "recovery-stable" as ClientOrderId,
+      exchangeOrderId: "rearmed-recovery",
+    });
+    expect(() =>
+      repo.replaceCancelledRecoveryIdentity(createOrderId("cancelled-recovery"), replacement, {
+        exitRecoveryChildV1: { version: 1, predecessorOrderId: "drift" },
+      }),
+    ).toThrow("metadata CAS failed");
+
+    repo.replaceCancelledRecoveryIdentity(
+      createOrderId("cancelled-recovery"),
+      replacement,
+      metadata,
+    );
+    expect(repo.findById(createOrderId("cancelled-recovery"))).toBeNull();
+    expect(repo.findById(createOrderId("rearmed-recovery"))).toMatchObject({
+      status: "pending",
+      clientOrderId: "recovery-stable",
+      exchangeOrderId: "rearmed-recovery",
+    });
+    expect(() =>
+      repo.replaceCancelledRecoveryIdentity(
+        createOrderId("rearmed-recovery"),
+        makeOrder({
+          orderId: createOrderId("unexpected-third"),
+          clientOrderId: "recovery-stable" as ClientOrderId,
+        }),
+        metadata,
+      ),
+    ).toThrow("requires cancelled order");
+  });
+
   it("finds durable startup exit-recovery blockers regardless of local terminal status", () => {
     repo.save(
       makeOrder({

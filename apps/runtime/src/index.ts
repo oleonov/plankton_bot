@@ -1764,6 +1764,12 @@ async function main(): Promise<void> {
     },
     runtimeMetrics,
     exchangeStateStore,
+    recoveryTtlCoverage: {
+      positionRepo: repos.position,
+      inventoryLotRepo: repos.inventoryLot,
+      fillRepo: repos.fill,
+      exchangeStateStore,
+    },
     legStateRepo: repos.legState,
     repriceChainPolicy: () => currentExecutionPolicy().repriceChain,
     riskEventRepo: repos.riskEvent,
