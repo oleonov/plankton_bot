@@ -91,7 +91,10 @@ import {
   classifyNotionalBucket,
   classifySoldBoughtRatioBucket,
 } from "../../executable-price.js";
-import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
+import {
+  SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+  isMakerEntryInputsUnchangedReason,
+} from "../../internal-order-reasons.js";
 import { SAME_PRICE_COOLDOWN_REASON } from "../same-price-cooldown/same-price-cooldown-module.js";
 import { TRACK_A_ADD_THROTTLE_REASON } from "../dead-market-shadow/track-a-add-throttle-shadow.js";
 import {
@@ -746,7 +749,11 @@ export function conversionSkipReEvalDelayMs(reasons: readonly string[]): number 
 
 export function isInputsUnchangedConversionSkip(reasons: readonly string[]): boolean {
   if (reasons.length === 0) return false;
-  return reasons.every((reason) => INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS.has(reason));
+  return reasons.every(
+    (reason) =>
+      INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS.has(reason) ||
+      isMakerEntryInputsUnchangedReason(reason),
+  );
 }
 const NOISY_SUPPRESSION_DEDUPE_MS = 10 * 60 * 1000;
 const D9_PROFILE_OWNED_RISK_EVENT_DEDUPE_MS = 5 * 60 * 1000;
@@ -1510,6 +1517,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     const tokenId = this.clientOrderToToken.get(clientOrderId);
     if (tokenId) {
       this.clearPendingByTokenId(tokenId);
+      if (isMakerEntryInputsUnchangedReason(payload.reason)) return;
       this.markDirty(tokenId as TokenId);
       this.scheduleDirtyEvaluation(0);
     }

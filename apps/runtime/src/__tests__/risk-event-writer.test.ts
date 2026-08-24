@@ -202,6 +202,44 @@ describe("RiskEventWriter", () => {
       expect(repo.insert).toHaveBeenCalledTimes(1);
     });
 
+    it.each([
+      "maker-micro-order-cap-exceeded",
+      "maker-micro-open-cap-exceeded",
+      "maker-micro-cumulative-cap-unavailable",
+      "maker-micro-cumulative-cap-exceeded",
+      "maker-micro-condition-cap-exceeded",
+      "maker-micro-distinct-condition-cap-exceeded",
+      "maker-micro-filled-cap-exceeded",
+    ])("deduplicates repeated %s rejects with fresh command identities", (reason) => {
+      const event = {
+        commandId: "cmd-maker-1",
+        clientOrderId: "cloid-maker-1",
+        tokenId: "tok-maker",
+        conditionId: "cond-maker",
+        reason,
+        errorCode: "LIVE_POLICY_BLOCKED",
+        signalReason: "probe-entry",
+        side: "buy",
+        signalId: "sig-maker-1",
+        decisionRuleId: "R23_DIP_TRIGGER",
+        signalTimestamp: "2026-08-24T04:00:00.000Z",
+        exchangeErrorMessage: null,
+        exchangeErrorDetails: null,
+        timestamp: 1000,
+      };
+
+      writer.onOrderRejected(event);
+      writer.onOrderRejected({
+        ...event,
+        commandId: "cmd-maker-2",
+        clientOrderId: "cloid-maker-2",
+        signalId: "sig-maker-2",
+        timestamp: 2000,
+      });
+
+      expect(repo.insert).toHaveBeenCalledTimes(1);
+    });
+
     it("deduplicates exchange order rejects by (tokenId, side, errorCode) within cooldown", () => {
       const event = {
         commandId: "cmd-1",

@@ -118,6 +118,13 @@ import {
   isExecutableOrderSize,
 } from "../../min-order-size.js";
 import {
+  MAKER_MICRO_CONDITION_CAP_EXCEEDED_REASON,
+  MAKER_MICRO_CUMULATIVE_CAP_EXCEEDED_REASON,
+  MAKER_MICRO_CUMULATIVE_CAP_UNAVAILABLE_REASON,
+  MAKER_MICRO_DISTINCT_CONDITION_CAP_EXCEEDED_REASON,
+  MAKER_MICRO_FILLED_CAP_EXCEEDED_REASON,
+  MAKER_MICRO_OPEN_CAP_EXCEEDED_REASON,
+  MAKER_MICRO_ORDER_CAP_EXCEEDED_REASON,
   SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
   SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON,
 } from "../../internal-order-reasons.js";
@@ -2305,7 +2312,7 @@ export class ExecutionModule implements RuntimeModule {
 
     if (makerPolicy.microMaxOrderUsdc > 0 && notional > makerPolicy.microMaxOrderUsdc) {
       return {
-        reason: "maker-micro-order-cap-exceeded",
+        reason: MAKER_MICRO_ORDER_CAP_EXCEEDED_REASON,
         code: ExchangeErrorCode.LivePolicyBlocked,
       };
     }
@@ -2334,7 +2341,7 @@ export class ExecutionModule implements RuntimeModule {
         notional;
       if (makerOpenUsdc > makerPolicy.microMaxOpenUsdc) {
         return {
-          reason: "maker-micro-open-cap-exceeded",
+          reason: MAKER_MICRO_OPEN_CAP_EXCEEDED_REASON,
           code: ExchangeErrorCode.LivePolicyBlocked,
         };
       }
@@ -2358,7 +2365,7 @@ export class ExecutionModule implements RuntimeModule {
     if (window === undefined) return null;
     if (!this.deps.orderRepo.getMakerBuyWindowUsage) {
       return {
-        reason: "maker-micro-cumulative-cap-unavailable",
+        reason: MAKER_MICRO_CUMULATIVE_CAP_UNAVAILABLE_REASON,
         code: ExchangeErrorCode.LivePolicyBlocked,
       };
     }
@@ -2381,7 +2388,7 @@ export class ExecutionModule implements RuntimeModule {
       usage.committedUsdc + pendingUsdc + commitmentIncrement >
       window.maxCumulativeAcceptedPendingUsdc
     ) {
-      return this.makerCapRejection("maker-micro-cumulative-cap-exceeded");
+      return this.makerCapRejection(MAKER_MICRO_CUMULATIVE_CAP_EXCEEDED_REASON);
     }
 
     const conditionPendingUsdc = computeMakerPendingReservationUsdc(
@@ -2394,7 +2401,7 @@ export class ExecutionModule implements RuntimeModule {
       usage.conditionCommittedUsdc + conditionPendingUsdc + commitmentIncrement >
         window.maxCumulativeAcceptedPendingUsdcPerCondition
     ) {
-      return this.makerCapRejection("maker-micro-condition-cap-exceeded");
+      return this.makerCapRejection(MAKER_MICRO_CONDITION_CAP_EXCEEDED_REASON);
     }
 
     if (window.maxDistinctAcceptedConditions !== undefined) {
@@ -2402,7 +2409,7 @@ export class ExecutionModule implements RuntimeModule {
       for (const reservation of makerReservations) conditions.add(String(reservation.conditionId));
       conditions.add(String(cmd.conditionId));
       if (conditions.size > window.maxDistinctAcceptedConditions) {
-        return this.makerCapRejection("maker-micro-distinct-condition-cap-exceeded");
+        return this.makerCapRejection(MAKER_MICRO_DISTINCT_CONDITION_CAP_EXCEEDED_REASON);
       }
     }
 
@@ -2415,7 +2422,7 @@ export class ExecutionModule implements RuntimeModule {
       usage.filledUsdc + remainingOtherOpenUsdc + pendingUsdc + notional >
         window.maxCumulativeFilledUsdc
     ) {
-      return this.makerCapRejection("maker-micro-filled-cap-exceeded");
+      return this.makerCapRejection(MAKER_MICRO_FILLED_CAP_EXCEEDED_REASON);
     }
     return null;
   }

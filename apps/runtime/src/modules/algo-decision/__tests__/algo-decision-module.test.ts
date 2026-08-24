@@ -6739,11 +6739,14 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
-    // Faithful closed-loop reproduction: every produced SELL bounces back as a
-    // same-price-cooldown skip (as RiskInventory does on a frozen tick). With
-    // the 250 ms debounce the loop is capped at ~4 re-evals/sec; the pre-fix
-    // 0 ms path emitted ~220/sec (and would blow vitest's timer-recursion cap).
-    it("caps a stuck same-price-cooldown leg to <10 re-evals per virtual second", async () => {
+    // Faithful closed-loop reproduction: every produced SELL bounces back as an
+    // inputs-unchanged skip. A feedback reason missing from the stable set spins
+    // at 0 ms and produces hundreds of identical signals per second.
+    it.each([
+      "same-price-cooldown",
+      "maker-capture-no-valid-bid-plus-one",
+      "maker-capture-open-cap-saturated",
+    ])("does not spin on an unchanged %s conversion skip", async (reason) => {
       vi.useFakeTimers();
       try {
         const tokenId = "token-stuck-dust";
@@ -6763,7 +6766,7 @@ describe("AlgoDecisionModule", () => {
               type: "SignalConversionSkipped",
               signal: p.signal,
               stage: "execution-terms",
-              reasons: ["same-price-cooldown"],
+              reasons: [reason],
               diagnostics: {},
               skippedAt: Date.now(),
             });
@@ -6779,6 +6782,79 @@ describe("AlgoDecisionModule", () => {
 
         expect(emitted).toBeGreaterThan(0);
         expect(emitted).toBeLessThan(10);
+        const beforeFreshEvent = emitted;
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(tokenId, null, 0.66)],
+          timestamp: Date.now(),
+        });
+        expect(emitted).toBe(beforeFreshEvent + 1);
+        await mod.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not spin after an unchanged maker open-cap rejection", async () => {
+      vi.useFakeTimers();
+      try {
+        const tokenId = "token-maker-open-cap";
+        selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+        algoRulesRepo = {
+          getDecisionRules: vi.fn(() =>
+            SEED_DECISION_RULES.map((rule) =>
+              rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+            ),
+          ),
+          getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+            actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+          ),
+        };
+        const mod = buildModule({
+          priceHistoryProvider: {
+            findReferencePrice: vi.fn(() => null),
+            maxMidpointInWindow: vi.fn(() => 0.6),
+          },
+          executionPolicy: () => ({
+            ...DEFAULT_EXECUTION_POLICY,
+            entryMinMarketAgeSeconds: 0,
+            r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+          }),
+        });
+        await mod.start();
+
+        let emitted = 0;
+        (bus as any).subscribe(
+          "SignalProduced",
+          async (p: { signal: import("@krabs/domain").Signal }) => {
+            emitted += 1;
+            const clientOrderId = `client-maker-cap-${emitted}` as any;
+            await (bus as any).emit("PlaceOrderRequested", {
+              command: { side: "buy", tokenId: p.signal.tokenId, clientOrderId },
+              timestamp: Date.now(),
+            });
+            await (bus as any).emit(
+              "OrderRejected",
+              makeR23NoOrderIdRejected(tokenId, Date.now(), {
+                clientOrderId,
+                reason: "maker-micro-open-cap-exceeded",
+                exchangeErrorMessage: null,
+              }),
+            );
+          },
+        );
+
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(tokenId, null, 0.3)],
+          timestamp: Date.now(),
+        });
+        await vi.advanceTimersByTimeAsync(1000);
+
+        expect(emitted).toBe(1);
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(tokenId, null, 0.31)],
+          timestamp: Date.now(),
+        });
+        expect(emitted).toBe(2);
         await mod.stop();
       } finally {
         vi.useRealTimers();

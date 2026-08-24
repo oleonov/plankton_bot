@@ -136,6 +136,10 @@ import {
   resolveProvenBounceAskPositionOrigin,
 } from "../../bounce-ask-capture.js";
 import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
+import {
+  MAKER_CAPTURE_NO_VALID_BID_PLUS_ONE_REASON,
+  MAKER_CAPTURE_OPEN_CAP_SATURATED_REASON,
+} from "../../internal-order-reasons.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 25;
 const MIN_SIZE_EPSILON = 1e-9;
@@ -1684,7 +1688,7 @@ export class SignalToOrderBridge {
         makerBidImproveTicks,
       );
       if (makerCaptureAuthorized && makerOverride == null) {
-        const reason = "maker-capture-no-valid-bid-plus-one";
+        const reason = MAKER_CAPTURE_NO_VALID_BID_PLUS_ONE_REASON;
         await this.publishConversionSkipped(signal, "execution-terms", [reason], {
           bestBid: market.bestBid,
           bestAsk: market.bestAsk,
@@ -1720,7 +1724,7 @@ export class SignalToOrderBridge {
           await this.publishConversionSkipped(
             signal,
             "execution-terms",
-            ["maker-capture-open-cap-saturated"],
+            [MAKER_CAPTURE_OPEN_CAP_SATURATED_REASON],
             {
               persistedOpenUsdc,
               requestedUsdc,
