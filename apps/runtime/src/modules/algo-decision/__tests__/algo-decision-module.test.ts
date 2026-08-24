@@ -8374,6 +8374,118 @@ describe("AlgoDecisionModule", () => {
   // cancel, so it must never veto its own force-exit, while the general Q.D
   // shadow's own handoff behavior must stay unchanged.
   describe("GATE-scoped bounce-exit backstop active-sell wiring (Phase 3)", () => {
+    it("immediately rearms an owner-authoritative bounce target after its stale TTL cancel", async () => {
+      vi.useFakeTimers();
+      try {
+        const tokenId = "token-bounce-stale-ttl-rearm";
+        const legState = makeSellReadyLegState(tokenId, {
+          firstTradePrice: 0.008,
+          cumulativeBuySize: 31.85,
+          cumulativeBuyNotional: 0.2548,
+        });
+        legStateRepo = createMockLegStateRepo([legState]);
+        const position = makeOpenPosition(tokenId, {
+          size: 31.85,
+          avgEntryPrice: 0.008,
+          costBasisUsdc: 0.2548,
+          exitOwner: "bounce",
+        });
+        const positionRepo = createPositionRepoForOpenPositions([position]);
+        const cancelled = makeOrder(tokenId, {
+          orderId: createOrderId("cancelled-bounce-rung"),
+          status: "cancelled",
+          cancelReason: "stale_exit_ttl",
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          positionId: position.positionId,
+          price: 0.011,
+          size: 9.555,
+          metadata: {
+            bounceRung: {
+              ladderId: `${tokenId}:${legState.firstTradeAt}`,
+              rungIndex: 0,
+              anchorPrice: 0.008,
+              fraction: 0.3,
+              originalPositionSize: 31.85,
+              remainingPositionSize: 31.85,
+            },
+          },
+        });
+        const ordinaryCancelledSell = makeOrder(tokenId, {
+          orderId: createOrderId("cancelled-ordinary-sell"),
+          status: "cancelled",
+          cancelReason: "stale_exit_ttl",
+          decisionRuleId: "STATIC_SELL",
+          positionId: position.positionId,
+        });
+        const orderRepo: Partial<OrderRepository> = {
+          findByTokenId: vi.fn().mockReturnValue([cancelled, ordinaryCancelledSell]),
+          findRecentByTokenId: vi.fn().mockReturnValue([cancelled, ordinaryCancelledSell]),
+          findOpen: vi.fn().mockReturnValue([]),
+          hasNonterminalBounceAskCaptureIntentForPosition: vi.fn().mockReturnValue(false),
+        };
+        const fillRepo = {
+          findByOrderId: vi.fn().mockReturnValue([]),
+          findByOrderIds: vi.fn().mockReturnValue([]),
+        };
+        const mod = buildModule({
+          positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+          orderRepo: orderRepo as OrderRepository,
+          fillRepo: fillRepo as unknown as import("@krabs/domain").FillRepository,
+          executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        });
+        await mod.start();
+        (mod as any).marketCache.set(tokenId, {
+          ...makeMarket(tokenId, null, 0.0275),
+          tickSize: 0.001,
+          minOrderSize: 5,
+          bestBid: 0.005,
+          bestAsk: 0.05,
+          spread: 0.045,
+        });
+
+        const signals: import("@krabs/domain").Signal[] = [];
+        (bus as any).subscribe(
+          "SignalProduced",
+          async ({ signal }: { signal: import("@krabs/domain").Signal }) => {
+            signals.push(signal);
+          },
+        );
+
+        await (bus as any).emit("OrderCancelled", {
+          commandId: createCommandId("stale-bounce-cancel"),
+          orderId: cancelled.orderId,
+          tokenId: cancelled.tokenId,
+          conditionId: cancelled.conditionId,
+          reason: "stale_exit_ttl",
+          signalReason: cancelled.signalReason,
+          timestamp: Date.now(),
+        });
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect(signals).toHaveLength(1);
+        expect(signals[0]).toMatchObject({
+          side: "sell",
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          bounceRung: { rungIndex: 0 },
+        });
+
+        await (bus as any).emit("OrderCancelled", {
+          commandId: createCommandId("stale-ordinary-sell-cancel"),
+          orderId: ordinaryCancelledSell.orderId,
+          tokenId: ordinaryCancelledSell.tokenId,
+          conditionId: ordinaryCancelledSell.conditionId,
+          reason: "stale_exit_ttl",
+          signalReason: ordinaryCancelledSell.signalReason,
+          timestamp: Date.now(),
+        });
+        await vi.advanceTimersByTimeAsync(1);
+        expect(signals).toHaveLength(1);
+        await mod.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("excludes a resting bounce ladder rung while the general Q.D shadow check still counts it as active", async () => {
       const tokenId = createTokenId("token-bounce-backstop-divergence");
       const orderRepo: Partial<OrderRepository> = {

@@ -1515,6 +1515,11 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async handleOrderCancelled(payload: RuntimeEventMap["OrderCancelled"]): Promise<void> {
+    if (this.isCurrentBounceTargetStaleTtlCancellation(payload)) {
+      this.markDirty(payload.tokenId);
+      this.scheduleDirtyEvaluation(0);
+    }
+
     const orderId = String(payload.orderId);
     const tokenId = this.orderIdToToken.get(orderId);
     if (tokenId) {
@@ -1522,6 +1527,30 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.markDirty(tokenId as TokenId);
       this.scheduleDirtyEvaluation(0);
     }
+  }
+
+  private isCurrentBounceTargetStaleTtlCancellation(
+    payload: RuntimeEventMap["OrderCancelled"],
+  ): boolean {
+    if (payload.reason !== "stale_exit_ttl") return false;
+    const order = this.deps.orderRepo
+      ?.findByTokenId(payload.tokenId)
+      .find(
+        (candidate) =>
+          String(candidate.orderId) === String(payload.orderId) &&
+          String(candidate.tokenId) === String(payload.tokenId) &&
+          String(candidate.conditionId) === String(payload.conditionId),
+      );
+    if (
+      order?.status !== "cancelled" ||
+      order.side !== "sell" ||
+      order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID
+    ) {
+      return false;
+    }
+    const position = this.findOpenPositionByTokenId(payload.tokenId);
+    if (!position || !isBounceOwned(position)) return false;
+    return String(order.positionId ?? "") === String(position.positionId);
   }
 
   private async handleOrderRejected(payload: RuntimeEventMap["OrderRejected"]): Promise<void> {
