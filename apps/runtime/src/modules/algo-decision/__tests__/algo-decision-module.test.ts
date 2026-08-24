@@ -6862,6 +6862,101 @@ describe("AlgoDecisionModule", () => {
         vi.useRealTimers();
       }
     });
+
+    it.each(["maker-micro-condition-cap-exceeded", "maker-micro-distinct-condition-cap-exceeded"])(
+      "does not retry an R23 probe while %s policy inputs are unchanged",
+      async (reason) => {
+        const tokenId = `token-${reason}`;
+        const activatedAtUtc = new Date(Date.now() - 60_000).toISOString();
+        const expiresAtUtc = new Date(Date.now() + 60 * 60_000).toISOString();
+        let capLimit = 1;
+        selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+        algoRulesRepo = {
+          getDecisionRules: vi.fn(() =>
+            SEED_DECISION_RULES.map((rule) =>
+              rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+            ),
+          ),
+          getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+            actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+          ),
+        };
+        const mod = buildModule({
+          priceHistoryProvider: {
+            findReferencePrice: vi.fn(() => null),
+            maxMidpointInWindow: vi.fn(() => 0.6),
+          },
+          executionPolicy: () => ({
+            ...DEFAULT_EXECUTION_POLICY,
+            entryMinMarketAgeSeconds: 0,
+            r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+            makerEntry: {
+              ...DEFAULT_EXECUTION_POLICY.makerEntry,
+              mode: "micro_live",
+              microLiveWindow: {
+                activatedAtUtc,
+                expiresAtUtc,
+                maxCumulativeAcceptedPendingUsdc: 10,
+                maxCumulativeAcceptedPendingUsdcPerCondition: capLimit,
+                maxDistinctAcceptedConditions: capLimit,
+              },
+            },
+          }),
+        });
+        await mod.start();
+
+        let emitted = 0;
+        (bus as any).subscribe(
+          "SignalProduced",
+          async (p: { signal: import("@krabs/domain").Signal }) => {
+            emitted += 1;
+            const clientOrderId = `client-maker-cap-${emitted}` as any;
+            await (bus as any).emit("PlaceOrderRequested", {
+              command: { side: "buy", tokenId: p.signal.tokenId, clientOrderId },
+              timestamp: Date.now(),
+            });
+            await (bus as any).emit(
+              "OrderRejected",
+              makeR23NoOrderIdRejected(tokenId, Date.now(), {
+                clientOrderId,
+                reason,
+                exchangeErrorMessage: null,
+              }),
+            );
+          },
+        );
+
+        for (let update = 0; update < 10; update += 1) {
+          await (bus as any).emit("NormalizedMarketUpdated", {
+            markets: [makeMarket(tokenId, null, 0.3 + update / 1000)],
+            timestamp: Date.now(),
+          });
+        }
+
+        expect(emitted).toBe(1);
+        await mod.sweep();
+        expect(emitted).toBe(1);
+
+        capLimit = 2;
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(tokenId, null, 0.32)],
+          timestamp: Date.now(),
+        });
+        expect(emitted).toBe(2);
+
+        vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 15 * 60_000 + 1 });
+        try {
+          await (bus as any).emit("NormalizedMarketUpdated", {
+            markets: [makeMarket(tokenId, null, 0.33)],
+            timestamp: Date.now(),
+          });
+          expect(emitted).toBe(3);
+        } finally {
+          vi.useRealTimers();
+        }
+        await mod.stop();
+      },
+    );
   });
 
   // ─── Track Q shadow telemetry ────────────────────────────────────────────

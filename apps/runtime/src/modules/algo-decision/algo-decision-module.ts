@@ -93,6 +93,8 @@ import {
 } from "../../executable-price.js";
 import {
   ENTRY_NOT_SELLABLE_REASON,
+  MAKER_MICRO_CONDITION_CAP_EXCEEDED_REASON,
+  MAKER_MICRO_DISTINCT_CONDITION_CAP_EXCEEDED_REASON,
   SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
   isMakerEntryInputsUnchangedReason,
 } from "../../internal-order-reasons.js";
@@ -689,8 +691,14 @@ const R23_PROBE_CAP_FULL_SKIP_METRIC = "r23_probe_skipped_active_market_cap_full
 const R23_PROBE_NO_ORDER_ID_COOLDOWN_REASON = "r23_probe_no_order_id_cooldown";
 const R23_PROBE_NO_ORDER_ID_COOLDOWN_METRIC = "r23_probe_no_order_id_cooldown_suppressed_total";
 const R23_PROBE_NO_ORDER_ID_RECOVERED_METRIC = "r23_probe_no_order_id_cooldown_recovered_total";
+const R23_PROBE_MAKER_WINDOW_CAP_COOLDOWN_METRIC =
+  "r23_probe_maker_window_cap_cooldown_suppressed_total";
 const R23_PROBE_NO_ORDER_ID_COOLDOWN_MS = 15 * 60 * 1000;
 const OPEN_POSITION_STALE_EVALUATION_WARN_MS = 24 * 60 * 60_000;
+const MAKER_WINDOW_CAP_MARKET_INVARIANT_REASONS: ReadonlySet<string> = new Set([
+  MAKER_MICRO_CONDITION_CAP_EXCEEDED_REASON,
+  MAKER_MICRO_DISTINCT_CONDITION_CAP_EXCEEDED_REASON,
+]);
 
 /**
  * Conversion-skip reasons that are pure functions of the cached
@@ -1018,6 +1026,10 @@ export class AlgoDecisionModule implements RuntimeModule {
   private minOrderSizeRearmTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly lastBuyFillByWallet = new Map<string, number>();
   private readonly r23ProbeNoOrderIdCooldownUntilMs = new Map<string, number>();
+  private readonly r23ProbeMakerWindowCapCooldowns = new Map<
+    string,
+    { blockedUntilMs: number; policyFingerprint: string; reason: string }
+  >();
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
   private buyBudgetRecoveryNotionalUsdc = 0;
@@ -1155,6 +1167,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.minOrderSizeRearmTimer = null;
     }
     this.minOrderSizeRearmTokenIds.clear();
+    this.r23ProbeMakerWindowCapCooldowns.clear();
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     await this.plannerRollup.stop();
@@ -1514,6 +1527,9 @@ export class AlgoDecisionModule implements RuntimeModule {
   private async handleOrderRejected(payload: RuntimeEventMap["OrderRejected"]): Promise<void> {
     if (this.isR23ProbeNoOrderIdBuyRejection(payload)) {
       this.activateR23ProbeNoOrderIdCooldown(payload.tokenId, payload.timestamp);
+    }
+    if (this.isR23ProbeMakerWindowCapRejection(payload)) {
+      this.activateR23ProbeMakerWindowCapCooldown(payload);
     }
 
     const clientOrderId = String(payload.clientOrderId);
@@ -1901,15 +1917,16 @@ export class AlgoDecisionModule implements RuntimeModule {
       return null;
     }
     if (
-      this.shouldSkipFlatProbeForR23NoOrderIdCooldown(
+      this.shouldSkipFlatProbeForR23RejectionCooldown(
         tokenId,
         legState,
         openPosition,
         selectedForEntry,
         now,
+        executionPolicy,
       )
     ) {
-      this.recordR23ProbeNoOrderIdCooldownSuppressed();
+      this.recordR23ProbeRejectionCooldownSuppressed(tokenId);
       return null;
     }
 
@@ -2067,20 +2084,48 @@ export class AlgoDecisionModule implements RuntimeModule {
     );
   }
 
-  private shouldSkipFlatProbeForR23NoOrderIdCooldown(
+  private shouldSkipFlatProbeForR23RejectionCooldown(
     tokenId: TokenId,
     legState: LegState | null,
     openPosition: Position | null,
     selectedForEntry: boolean,
     now: number,
+    executionPolicy: ExecutionPolicy | null,
   ): boolean {
     if (!selectedForEntry) return false;
     if (legState || openPosition) return false;
-    const blockedUntilMs = this.r23ProbeNoOrderIdCooldownUntilMs.get(String(tokenId));
+    const key = String(tokenId);
+    const makerCap = this.r23ProbeMakerWindowCapCooldowns.get(key);
+    if (makerCap) {
+      const policyFingerprint = this.makerWindowCapPolicyFingerprint(executionPolicy);
+      if (now < makerCap.blockedUntilMs && policyFingerprint === makerCap.policyFingerprint) {
+        return true;
+      }
+      this.r23ProbeMakerWindowCapCooldowns.delete(key);
+    }
+    const blockedUntilMs = this.r23ProbeNoOrderIdCooldownUntilMs.get(key);
     if (blockedUntilMs == null) return false;
     if (now < blockedUntilMs) return true;
-    this.r23ProbeNoOrderIdCooldownUntilMs.delete(String(tokenId));
+    this.r23ProbeNoOrderIdCooldownUntilMs.delete(key);
     return false;
+  }
+
+  private recordR23ProbeRejectionCooldownSuppressed(tokenId: TokenId): void {
+    const makerCap = this.r23ProbeMakerWindowCapCooldowns.get(String(tokenId));
+    if (!makerCap) {
+      this.recordR23ProbeNoOrderIdCooldownSuppressed();
+      return;
+    }
+    this.deps.runtimeMetrics?.writeCounter(
+      R23_PROBE_MAKER_WINDOW_CAP_COOLDOWN_METRIC,
+      1,
+      JSON.stringify({
+        reason: makerCap.reason,
+        rule: R23_DIP_TRIGGER_RULE_ID,
+        source: "probe-entry",
+        action: "skip",
+      }),
+    );
   }
 
   private recordR23ProbeNoOrderIdCooldownSuppressed(): void {
@@ -2103,6 +2148,39 @@ export class AlgoDecisionModule implements RuntimeModule {
     return isNoOrderIdRejectText([event.reason, event.exchangeErrorMessage]);
   }
 
+  private isR23ProbeMakerWindowCapRejection(event: RuntimeEventMap["OrderRejected"]): boolean {
+    return (
+      event.side === "buy" &&
+      event.decisionRuleId === R23_DIP_TRIGGER_RULE_ID &&
+      event.signalReason === "probe-entry" &&
+      MAKER_WINDOW_CAP_MARKET_INVARIANT_REASONS.has(event.reason)
+    );
+  }
+
+  private activateR23ProbeMakerWindowCapCooldown(event: RuntimeEventMap["OrderRejected"]): void {
+    const eventAt =
+      Number.isFinite(event.timestamp) && event.timestamp > 0 ? event.timestamp : Date.now();
+    const executionPolicy = this.deps.executionPolicy?.() ?? null;
+    const expiresAtMs = Date.parse(executionPolicy?.makerEntry.microLiveWindow?.expiresAtUtc ?? "");
+    const retryAt = eventAt + R23_PROBE_NO_ORDER_ID_COOLDOWN_MS;
+    const blockedUntilMs =
+      Number.isFinite(expiresAtMs) && expiresAtMs > eventAt
+        ? Math.min(retryAt, expiresAtMs)
+        : retryAt;
+    this.r23ProbeMakerWindowCapCooldowns.set(String(event.tokenId), {
+      blockedUntilMs,
+      policyFingerprint: this.makerWindowCapPolicyFingerprint(executionPolicy),
+      reason: event.reason,
+    });
+  }
+
+  private makerWindowCapPolicyFingerprint(executionPolicy: ExecutionPolicy | null): string {
+    return JSON.stringify([
+      executionPolicy?.makerEntry.mode ?? null,
+      executionPolicy?.makerEntry.microLiveWindow ?? null,
+    ]);
+  }
+
   private activateR23ProbeNoOrderIdCooldown(tokenId: TokenId, timestampMs: number): void {
     const eventAt = Number.isFinite(timestampMs) && timestampMs > 0 ? timestampMs : Date.now();
     const blockedUntilMs = eventAt + R23_PROBE_NO_ORDER_ID_COOLDOWN_MS;
@@ -2116,6 +2194,11 @@ export class AlgoDecisionModule implements RuntimeModule {
   private pruneR23ProbeNoOrderIdCooldowns(nowMs: number): void {
     for (const [tokenId, blockedUntilMs] of this.r23ProbeNoOrderIdCooldownUntilMs) {
       if (nowMs >= blockedUntilMs) this.r23ProbeNoOrderIdCooldownUntilMs.delete(tokenId);
+    }
+    for (const [tokenId, cooldown] of this.r23ProbeMakerWindowCapCooldowns) {
+      if (nowMs >= cooldown.blockedUntilMs) {
+        this.r23ProbeMakerWindowCapCooldowns.delete(tokenId);
+      }
     }
   }
 
