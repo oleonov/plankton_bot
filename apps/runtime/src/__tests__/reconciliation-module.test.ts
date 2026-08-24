@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createOrderId, createConditionId, createPositionId } from "@krabs/domain";
+import {
+  createTokenId,
+  createOrderId,
+  createConditionId,
+  createPositionId,
+  createCommandId,
+} from "@krabs/domain";
 import type {
   ExchangeGateway,
   ExchangeOrder,
@@ -1223,6 +1229,79 @@ describe("ReconciliationModule", () => {
         expect(orderRepo.updateStatus).not.toHaveBeenCalled();
         expect(store.getOpenSellSizeForToken(TOK)).toBe(7);
       });
+    });
+
+    it("does not republish 3 confirmed stale exits from its own 25-cancel pass", async () => {
+      const store = new ExchangeStateStore();
+      mod = buildModule({ exchangeStateStore: store });
+      const conditionId = createConditionId("cond-recovery");
+      const oldCreatedAt = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+      const recoveryOrders = [9.555, 12.74, 9.555].map((size, index) =>
+        makeLocalOrder({
+          orderId: createOrderId(`recovery-rung-${index}`),
+          exchangeOrderId: `recovery-rung-${index}`,
+          tokenId: TOK,
+          conditionId,
+          side: "sell",
+          size,
+          signalReason: "reduce-only",
+          createdAt: oldCreatedAt,
+        }),
+      );
+      const entryOrders = Array.from({ length: 22 }, (_, index) =>
+        makeLocalOrder({
+          orderId: createOrderId(`stale-entry-${index}`),
+          exchangeOrderId: `stale-entry-${index}`,
+          tokenId: createTokenId(`stale-entry-token-${index}`),
+          conditionId: createConditionId(`stale-entry-condition-${index}`),
+          side: "buy",
+          signalReason: "probe-entry",
+          createdAt: oldCreatedAt,
+        }),
+      );
+      const localOrders = [...recoveryOrders, ...entryOrders];
+      const byId = new Map(localOrders.map((order) => [String(order.orderId), order]));
+      orderRepo.findOpen = vi.fn(() => localOrders.filter((order) => order.status === "open"));
+      orderRepo.findById = vi.fn((orderId) => byId.get(String(orderId)) ?? null);
+      orderRepo.findByExchangeOrderId = vi.fn((orderId) => byId.get(String(orderId)) ?? null);
+      gateway.getOpenOrders = vi.fn().mockResolvedValue(
+        localOrders.map((order) =>
+          makeExchangeOrder({
+            orderId: String(order.orderId),
+            clientOrderId: String(order.clientOrderId),
+            tokenId: order.tokenId,
+            side: order.side,
+            price: order.price,
+            sizeTotal: order.size,
+            sizeRemaining: order.size,
+          }),
+        ),
+      );
+      const cancelReasons: string[] = [];
+      const reservedAfterCancel: Array<number | null> = [];
+      bus.subscribe("CancelOrderRequested", async ({ command }) => {
+        const order = byId.get(String(command.orderId))!;
+        order.status = "cancelled";
+        cancelReasons.push(command.reason);
+        await bus.publish("OrderCancelled", {
+          commandId: createCommandId(`confirmed-${String(command.orderId)}`),
+          orderId: order.orderId,
+          tokenId: order.tokenId,
+          conditionId: order.conditionId,
+          reason: command.reason,
+          signalReason: order.signalReason,
+          timestamp: Date.now(),
+        });
+        reservedAfterCancel.push(store.getOpenSellSizeForToken(TOK));
+      });
+
+      await mod.start();
+
+      expect(cancelReasons).toHaveLength(25);
+      expect(cancelReasons.filter((reason) => reason === "stale_exit_ttl")).toHaveLength(3);
+      expect(reservedAfterCancel.slice(-3)).toEqual([22.295, 9.555, null]);
+      expect(store.getOpenSellSizeForToken(TOK)).toBeNull();
+      await mod.stop();
     });
 
     // ─── Fix 1.5: unreliable fills snapshot ─────────────────────────

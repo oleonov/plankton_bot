@@ -32,6 +32,7 @@ import type {
   LegStateRepository,
   RepriceChainPolicyConfig,
   RiskEventRepository,
+  RuntimeEventMap,
 } from "@krabs/domain";
 import {
   createTokenId,
@@ -292,6 +293,7 @@ export class ReconciliationModule implements RuntimeModule {
   async start(): Promise<void> {
     this.unsubs.push(
       this.deps.bus.subscribe("OrderCancelled", async (event) => {
+        this.removeConfirmedStaleExitReservation(event);
         if (event.reason === "downpriced_reprice") {
           recordSellDownpriceCancelSucceeded(
             this.sellDownpriceRepriceMap,
@@ -383,6 +385,21 @@ export class ReconciliationModule implements RuntimeModule {
     this.log.info("reconciliation module stopped");
   }
 
+  private removeConfirmedStaleExitReservation(event: RuntimeEventMap["OrderCancelled"]): void {
+    if (event.reason !== "stale_exit_ttl") return;
+    const order = this.deps.orderRepo.findById(event.orderId);
+    if (
+      order?.status !== "cancelled" ||
+      order.side !== "sell" ||
+      String(order.tokenId) !== String(event.tokenId) ||
+      String(order.conditionId) !== String(event.conditionId) ||
+      !order.exchangeOrderId
+    ) {
+      return;
+    }
+    this.deps.exchangeStateStore?.removeExchangeSellOrder(event.tokenId, order.exchangeOrderId);
+  }
+
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
     if (!this.started) {
       return { ok: false, detail: "not started" };
@@ -447,6 +464,13 @@ export class ReconciliationModule implements RuntimeModule {
       allDetails.push(...orderResult.details);
 
       this.emitReconciliationMetrics(orderResult, fillResult, ranAt);
+
+      // Publish the captured exchange snapshot before this pass requests any stale-order cancels.
+      // Exact terminal events below then remove their own rows instead of being overwritten by the
+      // older pre-cancel snapshot at the end of the pass.
+      const stagePublishOrdersStart = Date.now();
+      this.publishExchangeSellState(orderResult);
+      stageTimingsMs.publishExchangeSellState = Date.now() - stagePublishOrdersStart;
 
       // This diagnostic is cache-only, and its freshness boundary begins here rather than at the
       // start of fill/order reconciliation so slow exchange reads cannot backdate the sample.
@@ -571,15 +595,10 @@ export class ReconciliationModule implements RuntimeModule {
         );
       }
 
-      // 4b. Push exchange snapshot + wallet snapshot into ExchangeStateStore.
+      // 4b. Push the wallet snapshot into ExchangeStateStore.
       // Best-effort: a sentinel failure must not abort the reconciliation pass.
       const stagePublishStart = Date.now();
-      await this.publishExchangeState(
-        orderResult,
-        ranAt,
-        walletPositions,
-        walletResult.driftCount > 0,
-      );
+      await this.publishWalletState(ranAt, walletPositions, walletResult.driftCount > 0);
       stageTimingsMs.publishExchangeState = Date.now() - stagePublishStart;
 
       // 5. Build result
@@ -1028,15 +1047,12 @@ export class ReconciliationModule implements RuntimeModule {
     }
   }
 
-  private async publishExchangeState(
+  private publishExchangeSellState(
     orderResult: Pick<
       Awaited<ReturnType<typeof reconcileOrders>>,
       "exchangeOpenOrders" | "capturedAtMs" | "skipReason"
     >,
-    ranAt: number,
-    walletPositions: readonly PolymarketDataPosition[] | null | undefined,
-    warnOnWalletActionableDrift: boolean,
-  ): Promise<void> {
+  ): void {
     const store = this.deps.exchangeStateStore;
     if (!store) return;
 
@@ -1060,6 +1076,15 @@ export class ReconciliationModule implements RuntimeModule {
         "exchange SELL snapshot not refreshed — pass skipped on unreliable snapshot",
       );
     }
+  }
+
+  private async publishWalletState(
+    ranAt: number,
+    walletPositions: readonly PolymarketDataPosition[] | null | undefined,
+    warnOnWalletActionableDrift: boolean,
+  ): Promise<void> {
+    const store = this.deps.exchangeStateStore;
+    if (!store) return;
 
     if (walletPositions) {
       try {

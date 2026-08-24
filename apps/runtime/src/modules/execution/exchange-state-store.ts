@@ -128,6 +128,29 @@ export class ExchangeStateStore {
     this.lastExchangeOrdersCaptureMs = capturedAtMs;
   }
 
+  /** Apply exact terminal proof for one exchange SELL without discarding sibling reservations. */
+  removeExchangeSellOrder(tokenId: TokenId | string, orderId: string): boolean {
+    const tokenKey = String(tokenId);
+    const current = this.openSellByToken.get(tokenKey);
+    if (!current?.orders.has(orderId)) return false;
+
+    const orders = new Map(current.orders);
+    orders.delete(orderId);
+    if (orders.size === 0) {
+      this.openSellByToken.delete(tokenKey);
+      return true;
+    }
+    let openSellSize = 0;
+    for (const sizeRemaining of orders.values()) openSellSize += sizeRemaining;
+    this.openSellByToken.set(tokenKey, {
+      openSellSize,
+      openSellCount: orders.size,
+      orders,
+      capturedAtMs: current.capturedAtMs,
+    });
+    return true;
+  }
+
   /** Replace the wallet snapshot for a single token. */
   updateWalletPosition(
     tokenId: TokenId | string,
