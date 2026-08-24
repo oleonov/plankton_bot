@@ -6744,6 +6744,7 @@ describe("AlgoDecisionModule", () => {
     // at 0 ms and produces hundreds of identical signals per second.
     it.each([
       "same-price-cooldown",
+      "entry_not_sellable",
       "maker-capture-no-valid-bid-plus-one",
       "maker-capture-open-cap-saturated",
     ])("does not spin on an unchanged %s conversion skip", async (reason) => {

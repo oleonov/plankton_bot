@@ -137,6 +137,7 @@ import {
 } from "../../bounce-ask-capture.js";
 import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 import {
+  ENTRY_NOT_SELLABLE_REASON,
   MAKER_CAPTURE_NO_VALID_BID_PLUS_ONE_REASON,
   MAKER_CAPTURE_OPEN_CAP_SATURATED_REASON,
 } from "../../internal-order-reasons.js";
@@ -1337,12 +1338,17 @@ export class SignalToOrderBridge {
             },
             "approved BUY skipped — sellable-sizing floor exceeds max entry notional",
           );
-          await this.publishConversionSkipped(signal, "execution-terms", ["entry_not_sellable"], {
-            cacheStatus: pricing.cacheStatus,
-            sellableShareFloor,
-            sellableFloorNotionalUsdc,
-            maxEntryUsdc: policy.sellableFlow.maxEntryUsdc,
-          });
+          await this.publishConversionSkipped(
+            signal,
+            "execution-terms",
+            [ENTRY_NOT_SELLABLE_REASON],
+            {
+              cacheStatus: pricing.cacheStatus,
+              sellableShareFloor,
+              sellableFloorNotionalUsdc,
+              maxEntryUsdc: policy.sellableFlow.maxEntryUsdc,
+            },
+          );
           this.writeObservation({
             signal,
             clientOrderId: null,
@@ -1351,7 +1357,7 @@ export class SignalToOrderBridge {
             executionTerms,
             canary,
             sellPricingShadow,
-            skippedReason: "entry_not_sellable",
+            skippedReason: ENTRY_NOT_SELLABLE_REASON,
           });
           return;
         }
@@ -1824,13 +1830,18 @@ export class SignalToOrderBridge {
           },
           "approved BUY skipped — sellable-sizing invariant broken after maker-entry override",
         );
-        await this.publishConversionSkipped(signal, "execution-terms", ["entry_not_sellable"], {
-          cacheStatus: pricing.cacheStatus,
-          orderSize,
-          sellableShareFloor,
-          finalNotionalUsdc: orderSize * finalEntryPrice,
-          maxEntryUsdc: policy.sellableFlow.maxEntryUsdc,
-        });
+        await this.publishConversionSkipped(
+          signal,
+          "execution-terms",
+          [ENTRY_NOT_SELLABLE_REASON],
+          {
+            cacheStatus: pricing.cacheStatus,
+            orderSize,
+            sellableShareFloor,
+            finalNotionalUsdc: orderSize * finalEntryPrice,
+            maxEntryUsdc: policy.sellableFlow.maxEntryUsdc,
+          },
+        );
         this.writeObservation({
           signal,
           clientOrderId: null,
@@ -1839,7 +1850,7 @@ export class SignalToOrderBridge {
           executionTerms,
           canary,
           sellPricingShadow,
-          skippedReason: "entry_not_sellable",
+          skippedReason: ENTRY_NOT_SELLABLE_REASON,
         });
         return;
       }
