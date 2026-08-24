@@ -103,20 +103,32 @@ export function isOrdinaryBounceAskRoot(order: Order): boolean {
 export function resolveProvenBounceAskOrigin(
   order: Order,
   sourceCohortActivatedAtUtc: string,
-  deps: {
-    readonly orderRepo: Pick<OrderRepository, "findById" | "getMakerCaptureChainUsage">;
-    readonly fillRepo: Pick<FillRepository, "findByTokenId">;
-    readonly positionRepo: Pick<PositionRepository, "findById">;
-    readonly inventoryLotRepo: Pick<InventoryLotRepository, "findOpen">;
-  },
+  deps: BounceAskOriginDeps,
 ) {
   if (!order.positionId) return null;
-  const position = deps.positionRepo.findById(order.positionId);
-  if (
-    !position ||
-    position.status === "closed" ||
-    String(position.tokenId) !== String(order.tokenId)
-  ) {
+  return resolveProvenBounceAskPositionOrigin(
+    order.positionId,
+    order.tokenId,
+    sourceCohortActivatedAtUtc,
+    deps,
+  );
+}
+
+type BounceAskOriginDeps = {
+  readonly orderRepo: Pick<OrderRepository, "findById" | "getMakerCaptureChainUsage">;
+  readonly fillRepo: Pick<FillRepository, "findByTokenId">;
+  readonly positionRepo: Pick<PositionRepository, "findById">;
+  readonly inventoryLotRepo: Pick<InventoryLotRepository, "findOpen">;
+};
+
+export function resolveProvenBounceAskPositionOrigin(
+  positionId: Position["positionId"],
+  tokenId: Order["tokenId"],
+  sourceCohortActivatedAtUtc: string,
+  deps: BounceAskOriginDeps,
+) {
+  const position = deps.positionRepo.findById(positionId);
+  if (!position || position.status === "closed" || String(position.tokenId) !== String(tokenId)) {
     return null;
   }
   const lots = deps.inventoryLotRepo.findOpen(position.positionId);
@@ -146,12 +158,22 @@ export function resolveProvenBounceAskOrigin(
   };
 }
 
+export function computeBounceAskCaptureInitialPrice(input: {
+  readonly book: OrderBookSnapshot;
+  readonly tickSize: number;
+  readonly ownSellOrders: readonly Order[];
+  readonly fillsByOrder: ReadonlyMap<string, readonly Fill[]>;
+  readonly originalTargetPrice: number;
+}) {
+  return computeBounceAskCaptureCandidate(input);
+}
+
 export function computeBounceAskCaptureCandidate(input: {
   readonly book: OrderBookSnapshot;
   readonly tickSize: number;
   readonly ownSellOrders: readonly Order[];
   readonly fillsByOrder: ReadonlyMap<string, readonly Fill[]>;
-  readonly predecessorPrice: number;
+  readonly predecessorPrice?: number;
   readonly originalTargetPrice: number;
 }) {
   const { tickSize } = input;
@@ -185,13 +207,16 @@ export function computeBounceAskCaptureCandidate(input: {
   const externalBestBid = bidTick * tickSize;
   const externalBestAsk = askTick * tickSize;
   const candidate = floorToTick(externalBestAsk - tickSize, tickSize);
+  const predecessorPrice = input.predecessorPrice;
   if (
     !validateExecutablePrice(candidate, tickSize).ok ||
     candidate + EPSILON < input.originalTargetPrice ||
-    candidate > input.predecessorPrice - tickSize + EPSILON ||
+    (predecessorPrice === undefined
+      ? candidate <= input.originalTargetPrice + EPSILON
+      : candidate > predecessorPrice - tickSize + EPSILON ||
+        candidate >= predecessorPrice - EPSILON) ||
     candidate <= externalBestBid + EPSILON ||
-    candidate >= externalBestAsk - EPSILON ||
-    candidate >= input.predecessorPrice - EPSILON
+    candidate >= externalBestAsk - EPSILON
   ) {
     return { ok: false, reason: "no-valid-move" } as const;
   }

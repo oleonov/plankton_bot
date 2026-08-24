@@ -19,6 +19,7 @@ import {
 import { InProcessEventBus } from "@krabs/event-bus";
 import {
   computeBounceAskCaptureCandidate,
+  computeBounceAskCaptureInitialPrice,
   resolveProvenBounceAskOrigin,
 } from "../bounce-ask-capture.js";
 import { BounceAskCaptureLifecycleModule } from "../modules/bounce-ask-capture/bounce-ask-capture-lifecycle-module.js";
@@ -148,6 +149,11 @@ describe("bounce ASK capture", () => {
     };
 
     expect(computeBounceAskCaptureCandidate(input)).toMatchObject({ ok: true, price: 0.39 });
+    expect(computeBounceAskCaptureInitialPrice(input)).toMatchObject({ ok: true, price: 0.39 });
+    expect(computeBounceAskCaptureInitialPrice({ ...input, originalTargetPrice: 0.4 })).toEqual({
+      ok: false,
+      reason: "no-valid-move",
+    });
     expect(computeBounceAskCaptureCandidate({ ...input, originalTargetPrice: 0.4 })).toEqual({
       ok: false,
       reason: "no-valid-move",

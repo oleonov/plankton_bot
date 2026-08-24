@@ -223,9 +223,12 @@ async function runBridge(
   policyOverrides: Partial<ExecutionPolicy>,
   options?: {
     marketOverrides?: Partial<NormalizedMarket>;
-    orderRepo?: Pick<OrderRepository, "findByTokenId">;
-    positionRepo?: Pick<PositionRepository, "findByTokenId">;
+    orderRepo?: Pick<OrderRepository, "findByTokenId"> &
+      Partial<Pick<OrderRepository, "findById" | "getMakerCaptureChainUsage">>;
+    fillRepo?: Pick<FillRepository, "findByOrderId" | "findByOrderIds" | "findByTokenId">;
+    positionRepo?: Partial<Pick<PositionRepository, "findById" | "findByTokenId">>;
     inventoryLotRepo?: InventoryLotRepository;
+    candidateBookCache?: unknown;
   },
 ) {
   const bus = new InProcessEventBus();
@@ -237,8 +240,10 @@ async function runBridge(
     policy: () => policy,
     policySnapshot: () => ({ policy, controlRevision: 55 }),
     orderRepo: options?.orderRepo as unknown as OrderRepository | undefined,
+    fillRepo: options?.fillRepo as FillRepository | undefined,
     positionRepo: options?.positionRepo as unknown as PositionRepository | undefined,
     inventoryLotRepo: options?.inventoryLotRepo,
+    candidateBookCache: options?.candidateBookCache as never,
     now: () => NOW,
   });
   bridge.subscribe();
@@ -359,6 +364,145 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TARGET maker command", () => {
       originalTargetPrice: targetPrice,
       policyControlRevision: 55,
     });
+  });
+
+  it("places a proven BID+1 cohort exit one tick below the external ask above its target floor", async () => {
+    const cohort = "2026-08-23T06:01:10.000Z";
+    const position = makeGatePosition({
+      positionId: createPositionId("pos-bounce-ask-initial"),
+      size: 10,
+      avgEntryPrice: 0.15,
+      costBasisUsdc: 1.5,
+    });
+    const inventoryLotRepo = makeInventoryLotRepoForPosition(position);
+    const lot = inventoryLotRepo.findOpen(position.positionId)[0]!;
+    const rootOrderId = createOrderId("buy-capture-root");
+    const root = makeOrder({
+      orderId: rootOrderId,
+      tokenId: position.tokenId,
+      side: "buy",
+      postOnly: true,
+      status: "cancelled",
+      decisionRuleId: "R23_DIP_TRIGGER",
+      metadata: {
+        quoteMotionV1: {
+          version: 1,
+          kind: "r23_capture",
+          cohortId: cohort,
+          originalSuggestedPrice: 0.15,
+          originalTargetPrice: null,
+          entryPriceCeiling: 0.45,
+          policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+          policyControlRevision: 55,
+          initialBook: {
+            depthStatus: "full",
+            bestBid: 0.14,
+            bestAsk: 0.16,
+            tickSize: 0.01,
+            snapshotTs: NOW,
+            source: "clob",
+          },
+        },
+        makerCaptureLineageV1: {
+          version: 1,
+          rootOrderId,
+          predecessorOrderId: null,
+          replacementIndex: 0,
+          rootNotionalUsdc: 1.5,
+        },
+      },
+    });
+    const orderRepo = {
+      findByTokenId: vi.fn(() => [root]),
+      findById: vi.fn(() => root),
+      getMakerCaptureChainUsage: vi.fn(() => ({
+        trusted: true,
+        rootOrderId,
+        rootNotionalUsdc: 1.5,
+        chainFilledUsdc: 1.5,
+        predecessorRemainingShares: 0,
+        replacementIndex: 0,
+        orderIds: [rootOrderId],
+      })),
+    };
+    const fillRepo = {
+      findByOrderId: vi.fn(() => []),
+      findByOrderIds: vi.fn(() => []),
+      findByTokenId: vi.fn(() => [
+        {
+          fillId: lot.fillId,
+          orderId: rootOrderId,
+          tokenId: position.tokenId,
+          conditionId: position.conditionId,
+          side: "buy" as const,
+          price: 0.15,
+          size: position.size,
+          sizeUsdc: position.costBasisUsdc,
+          liquidityRole: "maker" as const,
+          fee: 0,
+          feeRateBps: 0,
+          filledAt: new Date(NOW).toISOString(),
+        },
+      ]),
+    };
+    const candidateBookCache = {
+      getFreshEntry: vi.fn(() => ({
+        tokenId: String(TOKEN_ID),
+        snapshotTs: NOW,
+        cachedAtMs: NOW,
+        sourcePolledAtMs: NOW,
+        bookSource: "clob" as const,
+        sourceKind: "rest" as const,
+        book: {
+          tokenId: TOKEN_ID,
+          bids: [{ price: 0.15, size: 100 }],
+          asks: [{ price: 0.3, size: 100 }],
+          minOrderSize: 5,
+          timestamp: NOW,
+        },
+      })),
+    };
+    const signal = makeSignal({
+      side: "sell",
+      positionId: position.positionId,
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: 0.19,
+      suggestedSize: 10,
+      suggestedSizeUsdc: 1.9,
+      bounceRung: {
+        ladderId: "bounce-ask-initial",
+        rungIndex: 0,
+        anchorPrice: 0.15,
+        fraction: 1,
+        originalPositionSize: 10,
+        remainingPositionSize: 10,
+      },
+    });
+    const { placed, skipped } = await runBridge(
+      signal,
+      {
+        bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, mode: "micro_live" },
+        bounceAskCapture: {
+          enabled: true,
+          sourceCohortActivatedAtUtc: cohort,
+          maxRepricesPerRoot: 5,
+        },
+      },
+      {
+        marketOverrides: { bestBid: 0.15, bestAsk: 0.3, tickSize: 0.01 },
+        orderRepo,
+        fillRepo,
+        positionRepo: { findById: vi.fn(() => position) },
+        inventoryLotRepo,
+        candidateBookCache,
+      },
+    );
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]).toMatchObject({ price: 0.29, postOnly: true });
+    expect(placed[0]!.price * placed[0]!.size).toBeCloseTo(2, 6);
+    expect(placed[0]!.metadata?.quoteMotionV1).toMatchObject({ originalTargetPrice: 0.19 });
   });
 });
 

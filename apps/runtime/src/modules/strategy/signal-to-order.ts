@@ -20,6 +20,7 @@ import type {
   ExecutionPolicy,
   ExecutionPolicyObservation,
   ExecutionPolicyObservationRepository,
+  FillRepository,
   InventoryLotRepository,
   NormalizedMarket,
   OrderRepository,
@@ -124,8 +125,11 @@ import {
 } from "../../maker-capture-reprice.js";
 import {
   buildBounceAskCaptureIdentity,
+  computeBounceAskCaptureInitialPrice,
+  loadBounceAskFills,
   parseBounceAskCaptureLineage,
   parseBounceAskCaptureSignal,
+  resolveProvenBounceAskPositionOrigin,
 } from "../../bounce-ask-capture.js";
 import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 
@@ -186,6 +190,7 @@ export interface SignalToOrderBridgeDeps {
   bus: EventBus;
   log: Logger;
   orderRepo?: OrderRepository | undefined;
+  fillRepo?: FillRepository | undefined;
   positionRepo?: PositionRepository | undefined;
   /**
    * FIFO lot read access for the bounce-exit backstop's exit-loss-floor
@@ -328,6 +333,47 @@ export class SignalToOrderBridge {
 
   private getTrackS3Policy(policy: ExecutionPolicy): TrackS3MarginAwareSpreadPolicy {
     return policy.trackS3 ?? DEFAULT_EXECUTION_POLICY.trackS3;
+  }
+
+  private resolveInitialBounceAskPrice(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    terms: Extract<ExecutionTermsResolution, { kind: "ok" }>,
+    book: OrderBookSnapshot | null,
+    policy: ExecutionPolicy,
+  ): number | null {
+    const cfg = policy.bounceAskCapture;
+    const { orderRepo, fillRepo, positionRepo, inventoryLotRepo } = this.deps;
+    if (
+      !cfg.enabled ||
+      signal.side !== "sell" ||
+      signal.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
+      !signal.positionId ||
+      terms.pricedMode !== "bounce-exit-target" ||
+      !book ||
+      !orderRepo ||
+      !fillRepo ||
+      !positionRepo ||
+      !inventoryLotRepo ||
+      !resolveProvenBounceAskPositionOrigin(
+        signal.positionId,
+        signal.tokenId,
+        cfg.sourceCohortActivatedAtUtc,
+        { orderRepo, fillRepo, positionRepo, inventoryLotRepo },
+      )
+    ) {
+      return null;
+    }
+    const ownSellOrders = orderRepo
+      .findByTokenId(signal.tokenId)
+      .filter((order) => order.side === "sell");
+    const candidate = computeBounceAskCaptureInitialPrice({
+      book,
+      tickSize: terms.tickSize,
+      ownSellOrders,
+      fillsByOrder: loadBounceAskFills(fillRepo, ownSellOrders),
+      originalTargetPrice: signal.suggestedPrice,
+    });
+    return candidate.ok ? candidate.price : null;
   }
 
   private isTrackRActive(policy: ExecutionPolicy): boolean {
@@ -867,7 +913,20 @@ export class SignalToOrderBridge {
       // F2: shadow telemetry measures the raw (pre-cap) anchor; the cap only
       // governs the price that is actually placed.
       const sellPricingShadow = this.computeSellPricingShadow(signal, rawExecutionTerms, policy);
-      const executionTerms = this.applySellPriceCap(rawExecutionTerms, signal, policy);
+      const cappedExecutionTerms = this.applySellPriceCap(rawExecutionTerms, signal, policy);
+      const initialBounceAskPrice =
+        cappedExecutionTerms.kind === "ok"
+          ? this.resolveInitialBounceAskPrice(
+              signal,
+              cappedExecutionTerms,
+              pricing.book ?? null,
+              policy,
+            )
+          : null;
+      const executionTerms =
+        initialBounceAskPrice == null
+          ? cappedExecutionTerms
+          : { ...cappedExecutionTerms, price: initialBounceAskPrice };
 
       if (executionTerms.kind === "unavailable") {
         this.log.warn(

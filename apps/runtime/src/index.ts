@@ -1715,6 +1715,7 @@ async function main(): Promise<void> {
     bus,
     log,
     orderRepo: repos.order,
+    fillRepo: repos.fill,
     positionRepo: repos.position,
     inventoryLotRepo: repos.inventoryLot,
     liveLiteGuard,
