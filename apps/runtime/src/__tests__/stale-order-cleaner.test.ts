@@ -138,6 +138,8 @@ function makePricing(
       | "askDepthExcludingOurs"
       | "tickSize"
       | "publicTradeCount24h"
+      | "acceptingOrders"
+      | "enableOrderBook"
     >
   >,
 ) {
@@ -148,6 +150,8 @@ function makePricing(
     askDepthExcludingOurs: null,
     tickSize: 0.01,
     publicTradeCount24h: null,
+    acceptingOrders: true,
+    enableOrderBook: true,
     ...overrides,
   };
 }
@@ -242,6 +246,9 @@ describe("cleanStaleEntryOrders", () => {
       snapshotCalls?: { n: number };
       tickSize?: number;
       metrics?: { writeCounter: ReturnType<typeof vi.fn> };
+      marketAvailable?: boolean;
+      acceptingOrders?: boolean;
+      enableOrderBook?: boolean;
     } = {},
   ) {
     orderRepo.findOpen = vi.fn().mockReturnValue([order, ...(opts.extraOpenOrders ?? [])]);
@@ -273,14 +280,18 @@ describe("cleanStaleEntryOrders", () => {
             };
           },
           getMarket: () =>
-            makePricing({
-              bestBid,
-              bestAsk: opts.bestAsk ?? null,
-              bestAskSize: opts.bestAskSize ?? null,
-              askDepthExcludingOurs: opts.askDepthExcludingOurs ?? null,
-              tickSize: opts.tickSize ?? 0.01,
-              publicTradeCount24h: opts.publicTradeCount24h ?? null,
-            }),
+            opts.marketAvailable === false
+              ? null
+              : makePricing({
+                  bestBid,
+                  bestAsk: opts.bestAsk ?? null,
+                  bestAskSize: opts.bestAskSize ?? null,
+                  askDepthExcludingOurs: opts.askDepthExcludingOurs ?? null,
+                  tickSize: opts.tickSize ?? 0.01,
+                  publicTradeCount24h: opts.publicTradeCount24h ?? null,
+                  acceptingOrders: opts.acceptingOrders ?? true,
+                  enableOrderBook: opts.enableOrderBook ?? true,
+                }),
         },
         ...(opts.repriceChainEvents24h != null
           ? {
@@ -1795,6 +1806,29 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.staleExitTtlCancelled).toBe(1);
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
+  });
+
+  it.each([
+    ["replacement market is not cached", { marketAvailable: false }],
+    ["replacement market is not live", { acceptingOrders: false, enableOrderBook: false }],
+  ])("keeps stale exit coverage while %s", async (_case, options) => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - EXIT_ORDER_TTL_MS - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (event) => {
+      cancelled.push(event);
+    });
+
+    const result = await runWithDownprice(order, 0.28, new Map(), options);
+    await bus.drain();
+
+    expect(result.staleExitTtlCancelled).toBe(0);
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
   });
 
   it("resets the downprice reprice counter after a three-tick best-bid recovery", async () => {

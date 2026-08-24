@@ -50,6 +50,7 @@ import {
 import {
   cleanStaleEntryOrders,
   recordSellDownpriceCancelSucceeded,
+  type ExitRepriceMarket,
   type SellDownpriceRepriceStateMap,
   type TrackCExitCleanerDeps,
 } from "./stale-order-cleaner.js";
@@ -192,17 +193,7 @@ export interface ReconciliationModuleDeps {
   };
   exitRepriceOnDownprice?: {
     snapshot: () => { policy: ExitRepriceOnDownpricePolicy; anchorTicks: number };
-    getMarket: (
-      tokenId: import("@krabs/domain").TokenId,
-    ) => Pick<
-      import("@krabs/domain").NormalizedMarket,
-      | "bestBid"
-      | "bestAsk"
-      | "bestAskSize"
-      | "askDepthExcludingOurs"
-      | "tickSize"
-      | "publicTradeCount24h"
-    > | null;
+    getMarket: (tokenId: import("@krabs/domain").TokenId) => ExitRepriceMarket | null;
   };
   runtimeMetrics?: {
     writeEvent: (

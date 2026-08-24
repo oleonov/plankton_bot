@@ -39,6 +39,7 @@ import {
   ENTRY_REASONS,
   EXIT_REASONS,
   S1_LADDER_RULE_ID,
+  isAlive,
   isLiveBook,
   isStaleSell,
   resolveDynamicChainCapDetails,
@@ -147,6 +148,17 @@ export interface SellDownpriceRepriceState {
 
 export type SellDownpriceRepriceStateMap = Map<string, SellDownpriceRepriceState>;
 
+export type ExitRepriceMarket = Pick<
+  NormalizedMarket,
+  | "bestBid"
+  | "bestAsk"
+  | "bestAskSize"
+  | "askDepthExcludingOurs"
+  | "tickSize"
+  | "publicTradeCount24h"
+> &
+  Partial<Pick<NormalizedMarket, "acceptingOrders" | "enableOrderBook">>;
+
 export interface StaleOrderCleanerDeps {
   orderRepo: OrderRepository;
   marketRepo: MarketRepository;
@@ -182,17 +194,7 @@ export interface StaleOrderCleanerDeps {
      *  (thin gate) both consume this one snapshot so a hot config PATCH cannot tear the read mid-order
      *  — the predictor must use the SAME anchor the real replacement pricing uses. */
     snapshot: () => { policy: ExitRepriceOnDownpricePolicy; anchorTicks: number };
-    getMarket: (
-      tokenId: TokenId,
-    ) => Pick<
-      NormalizedMarket,
-      | "bestBid"
-      | "bestAsk"
-      | "bestAskSize"
-      | "askDepthExcludingOurs"
-      | "tickSize"
-      | "publicTradeCount24h"
-    > | null;
+    getMarket: (tokenId: TokenId) => ExitRepriceMarket | null;
   };
   /**
    * CHANGE C — R65 p90 = 13 reprice events per token per 24h cap. Gates the
@@ -410,6 +412,22 @@ export async function cleanStaleEntryOrders(
         },
         "stuck_sell_detected",
       );
+    }
+
+    const replacementUnavailableReasons = resolveReplacementUnavailableReasons(
+      deps.exitRepriceOnDownprice,
+      repriceMarket,
+    );
+    if (replacementUnavailableReasons) {
+      log.info(
+        {
+          orderId: ordKey,
+          tokenId: String(order.tokenId),
+          reasons: replacementUnavailableReasons,
+        },
+        "stale exit order held — replacement market unavailable",
+      );
+      continue;
     }
 
     const repriceDecision = shouldRepriceDownprice(
@@ -650,6 +668,17 @@ export async function cleanStaleEntryOrders(
     stuckSellWarnings,
     repriceChainCapBlocked,
   };
+}
+
+function resolveReplacementUnavailableReasons(
+  provider: StaleOrderCleanerDeps["exitRepriceOnDownprice"],
+  market: ExitRepriceMarket | null,
+): readonly string[] | null {
+  if (!provider) return null;
+  if (!market) return ["market-cache-miss"];
+  if (market.acceptingOrders === undefined || market.enableOrderBook === undefined) return null;
+  const liveness = isAlive(market);
+  return liveness.healthy ? null : liveness.reasons;
 }
 
 export function recordSellDownpriceCancelSucceeded(
