@@ -369,6 +369,63 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
     ]);
   });
 
+  it("stops repeated initial captures while persisted maker exposure saturates the open cap", async () => {
+    const bus = new InProcessEventBus();
+    const openOrders = [makeOrder({ entryStyle: "maker", price: 0.1, size: 45, sizeUsdc: 4.5 })];
+    const makerEntry = makeMakerEntryPolicy({
+      whitelistConditionIds: [],
+      microMaxOrderUsdc: 1,
+      microMaxOpenUsdc: 5,
+      microLiveWindow: {
+        activatedAtUtc: new Date(NOW).toISOString(),
+        expiresAtUtc: new Date(NOW + 60_000).toISOString(),
+        maxCumulativeAcceptedPendingUsdc: 40,
+        captureNextR23: true,
+      },
+    });
+    const policy = { ...DEFAULT_EXECUTION_POLICY, makerEntry };
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "eoa" } as never,
+      policySnapshot: () => ({ policy, controlRevision: 77 }),
+      orderRepo: { findOpen: () => openOrders } as never,
+      fillRepo: makeFillRepo() as FillRepository,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+    const placed: PlaceOrderCommand[] = [];
+    const skipped: Array<{ reasons: readonly string[] }> = [];
+    bus.subscribe("PlaceOrderRequested", async ({ command }) => {
+      placed.push(command);
+    });
+    bus.subscribe("SignalConversionSkipped", async (event) => {
+      skipped.push(event);
+    });
+
+    for (let i = 0; i < 3; i++) {
+      await bus.publish("SignalApproved", {
+        signal: makeSignal({ signalId: `saturated-${i}` }),
+        market: makeMarket(),
+        approvedAt: NOW,
+      });
+    }
+    expect(placed).toHaveLength(0);
+    expect(skipped.map(({ reasons }) => reasons)).toEqual([
+      ["maker-capture-open-cap-saturated"],
+      ["maker-capture-open-cap-saturated"],
+      ["maker-capture-open-cap-saturated"],
+    ]);
+
+    openOrders.splice(0);
+    await bus.publish("SignalApproved", {
+      signal: makeSignal({ signalId: "capacity-freed" }),
+      market: makeMarket(),
+      approvedAt: NOW,
+    });
+    expect(placed).toHaveLength(1);
+  });
+
   it("does not mark an ordinary static-whitelist maker order for quote-motion", async () => {
     const { placed } = await runBridge(makeSignal(), {
       makerEntry: makeMakerEntryPolicy(),

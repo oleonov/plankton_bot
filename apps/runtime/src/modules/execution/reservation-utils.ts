@@ -436,6 +436,20 @@ export function computeMakerOpenPositionUsdc(
     .reduce((sum, p) => sum + p.costBasisUsdc, 0);
 }
 
+export function computeMakerPersistedOpenUsdc(
+  openOrders: Order[],
+  fillRepo: ReservationFillLookup,
+  positionRepo?: Pick<PositionRepository, "findDust" | "findOpenByEntryStyle">,
+): number {
+  const positions = positionRepo
+    ? [
+        ...positionRepo.findOpenByEntryStyle("maker"),
+        ...positionRepo.findDust().filter((position) => position.entryStyle === "maker"),
+      ]
+    : [];
+  return computeMakerOpenOrderUsdc(openOrders, fillRepo) + computeMakerOpenPositionUsdc(positions);
+}
+
 /**
  * Compute the total USDC notional of pending (in-flight, not yet persisted)
  * maker BUY reservations. Used alongside computeMakerOpenOrderUsdc for the

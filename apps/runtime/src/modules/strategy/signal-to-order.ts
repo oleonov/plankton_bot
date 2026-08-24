@@ -67,7 +67,10 @@ import { buildClientOrderId, buildPartialExitClientOrderId } from "@krabs/domain
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { Logger } from "../../logger.js";
-import { isExitRecoveryFencedPredecessor } from "../execution/reservation-utils.js";
+import {
+  computeMakerPersistedOpenUsdc,
+  isExitRecoveryFencedPredecessor,
+} from "../execution/reservation-utils.js";
 import { buildQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
@@ -1698,6 +1701,33 @@ export class SignalToOrderBridge {
           skippedReason: reason,
         });
         return;
+      }
+      if (
+        makerCaptureAuthorized &&
+        makerOverride &&
+        this.deps.orderRepo &&
+        this.deps.fillRepo &&
+        policy.makerEntry.microMaxOpenUsdc > 0
+      ) {
+        const persistedOpenUsdc = computeMakerPersistedOpenUsdc(
+          this.deps.orderRepo.findOpen(),
+          this.deps.fillRepo,
+          this.deps.positionRepo,
+        );
+        const requestedUsdc = makerOverride.price * makerOverride.size;
+        if (persistedOpenUsdc + requestedUsdc > policy.makerEntry.microMaxOpenUsdc) {
+          await this.publishConversionSkipped(
+            signal,
+            "execution-terms",
+            ["maker-capture-open-cap-saturated"],
+            {
+              persistedOpenUsdc,
+              requestedUsdc,
+              maxOpenUsdc: policy.makerEntry.microMaxOpenUsdc,
+            },
+          );
+          return;
+        }
       }
       const cooldownPrice = makerOverride?.price ?? executionTerms.price;
 

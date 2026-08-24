@@ -133,7 +133,7 @@ import { AuthoritativeTickResolver } from "./authoritative-tick-resolver.js";
 import {
   buildReservationSnapshot,
   computeMakerOpenOrderUsdc,
-  computeMakerOpenPositionUsdc,
+  computeMakerPersistedOpenUsdc,
   computeMakerPendingReservationUsdc,
   getOpenOrderCountForToken,
   getReservedSellSize,
@@ -2314,15 +2314,6 @@ export class ExecutionModule implements RuntimeModule {
       // still real, unrealized maker exposure and must count toward the cap.
       // findDust() and findOpenByEntryStyle() are disjoint by status, so no
       // dedup is needed when concatenating them.
-      const makerPositions = this.deps.positionRepo
-        ? [
-            ...this.deps.positionRepo.findOpenByEntryStyle("maker"),
-            ...this.deps.positionRepo.findDust().filter((p) => p.entryStyle === "maker"),
-          ]
-        : [];
-      const openPositionUsdc = this.deps.positionRepo
-        ? computeMakerOpenPositionUsdc(makerPositions)
-        : 0;
       // Exclude THIS command's own reservation (if already reserved at a submit
       // site) and always add its CURRENT `notional` — so a post-admission upward
       // tick re-snap counts at the final notional, not the stale reserved one.
@@ -2332,8 +2323,11 @@ export class ExecutionModule implements RuntimeModule {
       const otherReservations = this.otherUnpersistedReservations(cmd, persistedOpenOrders);
       const pendingUsdc = computeMakerPendingReservationUsdc(otherReservations);
       const makerOpenUsdc =
-        computeMakerOpenOrderUsdc(persistedOpenOrders, this.deps.fillRepo) +
-        openPositionUsdc +
+        computeMakerPersistedOpenUsdc(
+          persistedOpenOrders,
+          this.deps.fillRepo,
+          this.deps.positionRepo,
+        ) +
         pendingUsdc +
         notional;
       if (makerOpenUsdc > makerPolicy.microMaxOpenUsdc) {
