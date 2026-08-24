@@ -225,6 +225,7 @@ describe("LiveExchangeGateway.getFillsResult", () => {
         size: "50",
         price: "0.55",
         fee_rate_bps: "100",
+        status: "CONFIRMED",
         match_time: "2026-01-15T12:00:00Z",
       },
     ]);

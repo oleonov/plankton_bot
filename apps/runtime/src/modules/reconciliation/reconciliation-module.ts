@@ -610,7 +610,7 @@ export class ReconciliationModule implements RuntimeModule {
       };
 
       this.runCount++;
-      this.lastRunAt = ranAt;
+      if (fillResult.skipReason !== "unreliable_fills") this.lastRunAt = ranAt;
       this.lastResult = result;
 
       // 6. Publish events

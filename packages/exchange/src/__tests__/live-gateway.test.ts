@@ -396,6 +396,7 @@ describe("LiveExchangeGateway", () => {
         size: "50",
         price: "0.55",
         fee_rate_bps: "100",
+        status: "CONFIRMED",
         match_time: "2026-01-15T12:00:00Z",
       },
     ]);
@@ -406,6 +407,94 @@ describe("LiveExchangeGateway", () => {
     expect(fills[0]!.price).toBe(0.55);
     // fee = 50 * (100 / 10000) * 0.55 * (1 - 0.55) = 50 * 0.01 * 0.55 * 0.45 = 0.5 * 0.2475 = 0.12375
     expect(fills[0]!.fee).toBeCloseTo(0.12375);
+  });
+
+  it("imports only final successful trades and excludes reproduced FAILED maker fills", async () => {
+    gw = new LiveExchangeGateway({ client, traderAddress: "0xours" });
+    const makerTrade = (id: string, status: string, size: string) => ({
+      id,
+      taker_order_id: "ord-foreign",
+      asset_id: "tok-opposite",
+      side: "BUY",
+      size,
+      price: "0.988",
+      status,
+      match_time: "2026-08-22T12:55:01Z",
+      trader_side: "MAKER",
+      maker_orders: [
+        {
+          order_id: "ord-ours",
+          maker_address: "0xours",
+          asset_id: "tok-ours",
+          side: "BUY",
+          matched_amount: size,
+          price: "0.012",
+        },
+      ],
+    });
+    client.getTrades.mockResolvedValue([
+      makerTrade("failed-1", "FAILED", "10.121416"),
+      makerTrade("failed-2", "TRADE_STATUS_FAILED", "10.020166"),
+      makerTrade("confirmed", "CONFIRMED", "5"),
+      makerTrade("confirmed-prefixed", "TRADE_STATUS_CONFIRMED", "6"),
+    ]);
+
+    const result = await gw.getFillsResult(0);
+
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) {
+      expect(result.data.map((fill) => [fill.fillId, fill.size])).toEqual([
+        ["confirmed#maker:0", 5],
+        ["confirmed-prefixed#maker:0", 6],
+      ]);
+    }
+  });
+
+  it.each(["MATCHED", "MINED", "RETRYING"])(
+    "holds the REST cursor until a %s trade becomes CONFIRMED",
+    async (pendingStatus) => {
+      gw = new LiveExchangeGateway({ client, traderAddress: "0xours" });
+      const trade = (status: string) => ({
+        id: "trade-late-finality",
+        taker_order_id: "ord-ours",
+        asset_id: "tok-ours",
+        side: "BUY",
+        size: "5",
+        price: "0.2",
+        status,
+        match_time: "2026-08-24T01:00:00Z",
+        maker_address: "0xours",
+        trader_side: "TAKER",
+      });
+      client.getTrades
+        .mockResolvedValueOnce([trade(pendingStatus)])
+        .mockResolvedValueOnce([trade("CONFIRMED")]);
+
+      await expect(gw.getFillsResult(0)).resolves.toMatchObject({ ok: false, reason: "parse" });
+      const confirmed = await gw.getFillsResult(0);
+
+      expect(confirmed).toMatchObject({ ok: true });
+      if (confirmed.ok) {
+        expect(confirmed.data.map((fill) => fill.fillId)).toEqual(["trade-late-finality"]);
+      }
+    },
+  );
+
+  it("fails a reliable fill snapshot for an unknown trade status", async () => {
+    client.getTrades.mockResolvedValue([
+      {
+        id: "trade-unknown",
+        taker_order_id: "ord-1",
+        asset_id: "tok-1",
+        side: "BUY",
+        size: "1",
+        price: "0.5",
+        status: "SETTLED_SOMEDAY",
+        match_time: "2026-08-22T12:55:01Z",
+      },
+    ]);
+
+    await expect(gw.getFillsResult(0)).resolves.toMatchObject({ ok: false, reason: "parse" });
   });
 
   it("fails the reliable open snapshot when any required row field is malformed", async () => {
@@ -433,6 +522,7 @@ describe("LiveExchangeGateway", () => {
         side: "SELL",
         size: "0",
         price: "0.5",
+        status: "CONFIRMED",
         match_time: "2026-01-15T12:00:00Z",
       },
     ]);
@@ -450,6 +540,7 @@ describe("LiveExchangeGateway", () => {
         size: "334.37",
         price: "0.90",
         fee_rate_bps: "1000",
+        status: "CONFIRMED",
         match_time: "2026-04-05T00:00:00Z",
         maker_address: "0xforeign",
         trader_side: "MAKER",
@@ -473,6 +564,7 @@ describe("LiveExchangeGateway", () => {
         size: "5",
         price: "0.25",
         fee_rate_bps: "1000",
+        status: "CONFIRMED",
         match_time: "2026-04-05T00:00:00Z",
         maker_address: "0xours",
         trader_side: "TAKER",
@@ -513,6 +605,7 @@ describe("LiveExchangeGateway", () => {
         side: "SELL",
         size: "1",
         price: "0.5",
+        status: "CONFIRMED",
         match_time: "2026-04-05T00:00:00Z",
         maker_address: "0xforeign",
         ...shape,

@@ -35,6 +35,7 @@ import { classifyFetchError } from "../clob-error-classifier.js";
 import { FetchParseError, type FetchResult } from "../fetch-result.js";
 import { redactSensitive, sanitizeLogArg } from "../redaction.js";
 import {
+  classifyTradeConfirmation,
   mapOpenOrder,
   mapExactOrder,
   mapTrade,
@@ -644,6 +645,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
     });
     throwIfReturnedError(raw);
     return extractArrayOrThrow(raw).flatMap((trade) => {
+      const confirmation = classifyTradeConfirmation(trade.status);
+      if (confirmation === "invalid") throw new FetchParseError("malformed trade status");
+      if (confirmation === "pending") throw new FetchParseError("trade status is not final");
+      if (confirmation === "failed") return [];
       const fills = this.traderAddress
         ? mapTradeToPersonalFills(trade, this.traderAddress)
         : [mapTrade(trade)];

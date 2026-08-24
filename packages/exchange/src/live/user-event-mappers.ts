@@ -1,6 +1,7 @@
 import type { ExchangeUserOrderEvent, ExchangeUserTradeEvent } from "@krabs/domain";
 import { createTokenId } from "@krabs/domain";
 import {
+  classifyTradeConfirmation,
   mapExchangeOrderStatus,
   mapTrade,
   mapTradeToPersonalFills,
@@ -45,6 +46,7 @@ export function mapUserTradeEvent(
   traderAddress: string | null,
 ): ExchangeUserTradeEvent | null {
   if (String(raw.event_type ?? "").toLowerCase() !== "trade") return null;
+  if (classifyTradeConfirmation(raw.status) !== "confirmed") return null;
 
   const fills =
     traderAddress != null ? mapTradeToPersonalFills(raw, traderAddress) : [mapTrade(raw)];

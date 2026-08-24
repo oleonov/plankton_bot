@@ -1990,6 +1990,21 @@ describe("ReconciliationModule", () => {
       const secondCallSince = (gateway.getFills as any).mock.calls[1][0];
       expect(secondCallSince).toBeGreaterThan(0);
     });
+
+    it("does not advance the recovery cursor after an unreliable fills snapshot", async () => {
+      gateway.getFillsResult = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, reason: "parse", attempts: 1 })
+        .mockResolvedValue({ ok: true, data: [] });
+
+      await mod.runReconciliation();
+      await mod.runReconciliation();
+      await mod.runReconciliation();
+
+      expect(gateway.getFillsResult).toHaveBeenNthCalledWith(1, 0);
+      expect(gateway.getFillsResult).toHaveBeenNthCalledWith(2, 0);
+      expect((gateway.getFillsResult as any).mock.calls[2][0]).toBeGreaterThan(0);
+    });
   });
 });
 

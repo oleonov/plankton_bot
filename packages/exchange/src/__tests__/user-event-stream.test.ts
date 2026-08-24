@@ -96,6 +96,19 @@ describe("LiveUserEventStream", () => {
     sockets[0]!.emitOpen();
     sockets[0]!.emitJson({
       event_type: "trade",
+      id: "trade-failed",
+      taker_order_id: "ord-failed",
+      asset_id: "tok-1",
+      side: "BUY",
+      size: "20.141582",
+      price: "0.012",
+      status: "FAILED",
+      timestamp: "1672290700",
+      maker_address: "0xours",
+      trader_side: "TAKER",
+    });
+    sockets[0]!.emitJson({
+      event_type: "trade",
       id: "trade-1",
       taker_order_id: "ord-1",
       asset_id: "tok-1",
@@ -103,7 +116,7 @@ describe("LiveUserEventStream", () => {
       size: "10",
       price: "0.57",
       fee_rate_bps: "0",
-      status: "MATCHED",
+      status: "CONFIRMED",
       timestamp: "1672290701",
       maker_address: "0xours",
       trader_side: "TAKER",
@@ -238,7 +251,7 @@ describe("LiveUserEventStream", () => {
       size: "10",
       price: "0.57",
       fee_rate_bps: "0",
-      status: "MATCHED",
+      status: "CONFIRMED",
       timestamp: "1672290701",
       maker_address: "0xours",
       trader_side: "TAKER",

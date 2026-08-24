@@ -257,6 +257,22 @@ export function mapExactOrder(
 
 // ─── Fill / Trade mapping ────────────────────────────────────────────────
 
+export type TradeConfirmation = "confirmed" | "pending" | "failed" | "invalid";
+
+export function classifyTradeConfirmation(value: unknown): TradeConfirmation {
+  const normalized =
+    typeof value === "string"
+      ? value
+          .trim()
+          .toUpperCase()
+          .replace(/^TRADE_STATUS_/, "")
+      : "";
+  if (normalized === "CONFIRMED") return "confirmed";
+  if (["MATCHED", "MINED", "RETRYING"].includes(normalized)) return "pending";
+  if (normalized === "FAILED") return "failed";
+  return "invalid";
+}
+
 export function mapTrade(raw: Record<string, unknown>): ExchangeFill {
   return buildExchangeFill({
     fillId: String(raw.id ?? ""),

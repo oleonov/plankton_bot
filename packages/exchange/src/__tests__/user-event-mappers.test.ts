@@ -13,7 +13,7 @@ describe("user event mappers", () => {
         size: "10",
         price: "0.57",
         fee_rate_bps: "0",
-        status: "MATCHED",
+        status: "CONFIRMED",
         timestamp: "1672290701",
         maker_address: "0xours",
         trader_side: "TAKER",
@@ -23,7 +23,7 @@ describe("user event mappers", () => {
 
     expect(event).not.toBeNull();
     expect(event!.tradeId).toBe("trade-1");
-    expect(event!.status).toBe("MATCHED");
+    expect(event!.status).toBe("CONFIRMED");
     expect(event!.fills).toHaveLength(1);
     expect(event!.fills[0]!.orderId).toBe("ord-1");
     expect(event!.timestamp).toBe(1672290701000);
@@ -34,6 +34,7 @@ describe("user event mappers", () => {
       {
         event_type: "trade",
         id: "trade-2",
+        status: "CONFIRMED",
         trader_side: "MAKER",
         maker_orders: [{ maker_address: "0xother" }],
       },
@@ -42,6 +43,30 @@ describe("user event mappers", () => {
 
     expect(event).toBeNull();
   });
+
+  it.each(["MATCHED", "MINED", "RETRYING", "FAILED", "UNKNOWN"])(
+    "does not publish %s trades as fills before successful finality",
+    (status) => {
+      const event = mapUserTradeEvent(
+        {
+          event_type: "trade",
+          id: "trade-not-confirmed",
+          taker_order_id: "ord-1",
+          asset_id: "tok-1",
+          side: "BUY",
+          size: "10",
+          price: "0.57",
+          status,
+          timestamp: "1672290701",
+          maker_address: "0xours",
+          trader_side: "TAKER",
+        },
+        "0xours",
+      );
+
+      expect(event).toBeNull();
+    },
+  );
 
   it("maps order event into ExchangeUserOrderEvent", () => {
     const event = mapUserOrderEvent({
