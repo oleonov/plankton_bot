@@ -714,6 +714,7 @@ const OPEN_POSITION_STALE_EVALUATION_WARN_MS = 24 * 60 * 60_000;
 const INPUTS_UNCHANGED_CONVERSION_SKIP_REASONS: ReadonlySet<string> = new Set([
   SAME_PRICE_COOLDOWN_REASON,
   ENTRY_NOT_SELLABLE_REASON,
+  "position-concentration-below_min_after_clamp",
   "sell-order-acceptable-price-already-open",
   "order-size-below-minimum",
   "not_accepting_orders",

@@ -6745,6 +6745,7 @@ describe("AlgoDecisionModule", () => {
     it.each([
       "same-price-cooldown",
       "entry_not_sellable",
+      "position-concentration-below_min_after_clamp",
       "maker-capture-no-valid-bid-plus-one",
       "maker-capture-open-cap-saturated",
     ])("does not spin on an unchanged %s conversion skip", async (reason) => {
