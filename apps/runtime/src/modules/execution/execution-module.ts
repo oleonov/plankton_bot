@@ -48,6 +48,7 @@ import type {
   MakerCaptureRepriceProofV1,
   MakerCaptureSubmitProofV1,
   BounceAskCaptureSubmitProofV1,
+  BounceRungMetadata,
 } from "@krabs/domain";
 import {
   createCommandId,
@@ -85,6 +86,7 @@ import type { Logger } from "../../logger.js";
 import type { LifecycleToken } from "../../lifecycle-chain.js";
 import { LifecycleChain, LIFECYCLE_STOP_WAIT_MS } from "../../lifecycle-chain.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
+import { bounceRungsConflict } from "../../bounce-rung-identity.js";
 import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-calculator.js";
 import { resnapPriceToTick, validateExecutablePrice } from "../../executable-price.js";
 import {
@@ -2439,6 +2441,40 @@ export class ExecutionModule implements RuntimeModule {
       );
   }
 
+  private hasDuplicateBounceRung(cmd: PlaceOrderCommand): boolean {
+    if (cmd.side !== "sell" || cmd.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID) return false;
+    const candidate = cmd.metadata?.bounceRung as BounceRungMetadata | undefined;
+    if (!candidate) return false;
+    const conflicts = (metadata: Order["metadata"], working: boolean): boolean => {
+      const existing = metadata?.bounceRung as BounceRungMetadata | undefined;
+      return existing ? bounceRungsConflict(candidate, existing, working) : false;
+    };
+    const persisted = this.deps.orderRepo
+      .findByTokenId(cmd.tokenId)
+      .some(
+        (order) =>
+          order.side === "sell" &&
+          order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+          order.status !== "cancelled" &&
+          order.status !== "rejected" &&
+          !isExitRecoveryFencedPredecessor(order) &&
+          conflicts(
+            order.metadata,
+            order.status === "open" ||
+              order.status === "pending" ||
+              order.status === "partially-filled",
+          ),
+      );
+    if (persisted) return true;
+    return [...this.pendingReservations.values()].some(
+      (reservation) =>
+        String(reservation.tokenId) === String(cmd.tokenId) &&
+        reservation.side === "sell" &&
+        reservation.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+        conflicts(reservation.metadata, true),
+    );
+  }
+
   // ─── Place order handler ──────────────────────────────────────────────
 
   private async handlePlace(cmd: PlaceOrderCommand, recoveryOnly = false): Promise<void> {
@@ -2902,6 +2938,15 @@ export class ExecutionModule implements RuntimeModule {
         effectiveCmd,
         reserveMakerRejection.reason,
         reserveMakerRejection.code,
+      );
+      return;
+    }
+
+    if (this.hasDuplicateBounceRung(effectiveCmd)) {
+      await this.rejectOrder(
+        effectiveCmd,
+        "bounce-rung-already-working",
+        ExchangeErrorCode.LivePolicyBlocked,
       );
       return;
     }

@@ -418,6 +418,75 @@ describe("ExecutionModule", () => {
     expect(h.detail).toContain("not started");
   });
 
+  it("submits only one concurrently admitted bounce rung with the same ladder identity", async () => {
+    const position = makePosition({ size: 50, costBasisUsdc: 0.1, exitOwner: "bounce" });
+    const positionRepo = createMockPositionRepo(position);
+    positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([position]);
+    const execution = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(position),
+    });
+    let finishFirst!: (result: PlaceOrderResult) => void;
+    (gateway.placeOrder as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(
+        () => new Promise<PlaceOrderResult>((resolve) => (finishFirst = resolve)),
+      )
+      .mockResolvedValueOnce({ success: true, orderId: "different-rung" });
+    const rejected: Array<{ reason: string }> = [];
+    bus.subscribe("OrderRejected", async (event) => {
+      rejected.push({ reason: event.reason });
+    });
+    await execution.start();
+
+    const command = (suffix: string, rungIndex: number): PlaceOrderCommand =>
+      makePlaceCmd({
+        commandId: createCommandId(`bounce-${suffix}`),
+        clientOrderId: `bounce-${suffix}` as ClientOrderId,
+        side: "sell",
+        size: 10,
+        price: 0.1,
+        postOnly: true,
+        positionId: position.positionId,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: {
+          bounceRung: {
+            ladderId: "same-ladder",
+            rungIndex,
+            originalPositionSize: position.size,
+          },
+        },
+      });
+
+    const first = bus.publish("PlaceOrderRequested", {
+      command: command("first", 0),
+      timestamp: Date.now(),
+    });
+    await vi.waitFor(() => expect(gateway.placeOrder).toHaveBeenCalledTimes(1));
+    await bus.publish("PlaceOrderRequested", {
+      command: command("duplicate", 0),
+      timestamp: Date.now(),
+    });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(rejected.map((event) => event.reason)).toContain("bounce-rung-already-working");
+
+    finishFirst({ success: true, orderId: "first-rung" });
+    await first;
+    await bus.publish("PlaceOrderRequested", {
+      command: command("different", 1),
+      timestamp: Date.now(),
+    });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
+    await execution.stop();
+  });
+
   it("releases a failed pre-child capture command only until its child persists", async () => {
     const rootOrderId = createOrderId("capture-root");
     const predecessorOrderId = createOrderId("capture-predecessor");

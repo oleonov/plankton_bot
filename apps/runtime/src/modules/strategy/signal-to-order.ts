@@ -75,6 +75,7 @@ import { buildQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
+import { bounceRungsConflict } from "../../bounce-rung-identity.js";
 import {
   classifyNotionalBucket,
   classifyRoundLevel,
@@ -3637,11 +3638,6 @@ export class SignalToOrderBridge {
     bounceRung: BounceRungMetadata,
   ): Order | null {
     if (!this.deps.orderRepo) return null;
-    const targetIndices = new Set<number>(
-      bounceRung.rungIndicesCovered && bounceRung.rungIndicesCovered.length > 0
-        ? bounceRung.rungIndicesCovered
-        : [bounceRung.rungIndex],
-    );
     const orders = this.deps.orderRepo.findByTokenId(tokenId);
     return (
       orders.find((order) => {
@@ -3658,28 +3654,7 @@ export class SignalToOrderBridge {
             }
           | undefined;
         if (!existingRung || existingRung.ladderId !== bounceRung.ladderId) return false;
-        // Codex C2 fix: a cleanup rung deliberately reuses the LAST
-        // configured rung's own index (docs/plans/2026-07-19-sellable-
-        // sizing-bounce-for-all.md, Phase 3), which the ordinary ladder
-        // already marks "placed" — matching by index would make the
-        // duplicate check always collide with that earlier, unrelated
-        // order and the cleanup rung would never place. A cleanup rung is
-        // only a duplicate of ANOTHER already-resting cleanup rung, which
-        // still enforces "only one cleanup rung open at a time".
-        // Codex r2 fix: only a still-OPEN cleanup rung is a duplicate. A
-        // TERMINAL (filled) cleanup can carry a within-tolerance shortfall
-        // leaving a real >=min residual; the planner must be able to emit a
-        // fresh cleanup for it rather than have the bridge suppress it as a
-        // "duplicate" of the filled one and strand the residual.
-        if (bounceRung.isCleanupRung === true) {
-          return existingRung.isCleanupRung === true && isOpenOrderStatus(order.status);
-        }
-        const existingIndices = Array.isArray(existingRung.rungIndicesCovered)
-          ? existingRung.rungIndicesCovered
-          : typeof existingRung.rungIndex === "number"
-            ? [existingRung.rungIndex]
-            : [];
-        return existingIndices.some((idx) => targetIndices.has(idx));
+        return bounceRungsConflict(bounceRung, existingRung, isOpenOrderStatus(order.status));
       }) ?? null
     );
   }
