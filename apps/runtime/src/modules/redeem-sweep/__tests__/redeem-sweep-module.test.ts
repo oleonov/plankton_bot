@@ -586,34 +586,50 @@ describe("RedeemSweepModule", () => {
     );
   });
 
-  it("records overflow when wallet-event async queue is saturated", async () => {
+  it("keeps one pending wallet-event sweep while a multi-batch sweep is paused", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const h = makeHarness({ positions: [] });
+    const positions = manyRedeemablePositions(12);
+    const h = makeHarness({
+      positions,
+      redeemImpl: vi.fn(async (conditionIds: string[]) => ({
+        status: "confirmed",
+        conditionIds,
+      })),
+      policy: { intervalMs: 60 * 60_000, postRedeemVerifyDelayMs: 60 * 60_000 },
+    });
     await h.module.start();
     await h.bus.drain();
-    h.reader.read.mockClear();
-    const pendingRead = deferred<any[] | null>();
-    h.reader.read.mockReturnValueOnce(pendingRead.promise);
 
-    const publishes = Array.from({ length: 18 }, (_, index) =>
-      h.bus.publish(
-        "PolymarketWalletUpdated",
-        walletUpdateEvent(`tok-overflow-${index}`, CONDITION),
+    await h.bus.publish("PolymarketWalletUpdated", walletUpdateEvent());
+    await flushMicrotasks();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect((h.gateway.redeemPositions.mock.calls as any[])[0]?.[0]).toHaveLength(9);
+
+    await Promise.all(
+      Array.from({ length: 18 }, (_, index) =>
+        h.bus.publish(
+          "PolymarketWalletUpdated",
+          walletUpdateEvent(`tok-overflow-${index}`, CONDITION),
+        ),
       ),
     );
     await flushMicrotasks();
 
-    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
-      "redeem_sweep_async_queue_overflow_total",
-      1,
-      JSON.stringify({ reason: "wallet-event", max_depth: 16 }),
-      expect.any(String),
-    );
+    expect((h.module as unknown as { asyncSweepQueue: unknown[] }).asyncSweepQueue).toHaveLength(1);
+    expect(
+      h.runtimeMetrics.writeEvent.mock.calls.some(
+        ([metric]) => metric === "redeem_sweep_async_queue_overflow_total",
+      ),
+    ).toBe(false);
 
-    pendingRead.resolve([]);
-    await Promise.all(publishes);
+    h.reader.read.mockResolvedValue([]);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
     await flushMicrotasks();
+
+    expect(h.reader.read).toHaveBeenCalledTimes(3);
+    expect((h.module as unknown as { asyncSweepQueue: unknown[] }).asyncSweepQueue).toHaveLength(0);
   });
 
   it("keeps Track D quarantine gating on async wallet-event sweeps", async () => {

@@ -250,6 +250,7 @@ export class RedeemSweepModule implements RuntimeModule {
       this.recordHardPausedAsyncTrigger(reason);
       return;
     }
+    if (this.asyncSweepQueue.some((request) => request.reason === reason)) return;
     if (this.asyncSweepQueue.length >= ASYNC_SWEEP_QUEUE_MAX_DEPTH) {
       this.deps.log.warn(
         { reason, depth: this.asyncSweepQueue.length, maxDepth: ASYNC_SWEEP_QUEUE_MAX_DEPTH },
