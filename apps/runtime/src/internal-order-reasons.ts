@@ -14,6 +14,7 @@ export const SELL_REPLACE_PENDING_REASON = "sell-replace-pending";
 export const SELL_REPLACE_LOCK_ACTIVE_REASON = "sell-replace-lock-active";
 export const LIVE_LITE_ACTIVE_MARKETS_CAP_EXCEEDED_REASON = "live-lite-active-markets-cap-exceeded";
 export const ENTRY_NOT_SELLABLE_REASON = "entry_not_sellable";
+export const OPEN_POSITION_EXISTS_REASON = "open_position_exists";
 export const MAKER_CAPTURE_NO_VALID_BID_PLUS_ONE_REASON = "maker-capture-no-valid-bid-plus-one";
 export const MAKER_CAPTURE_OPEN_CAP_SATURATED_REASON = "maker-capture-open-cap-saturated";
 export const MAKER_MICRO_ORDER_CAP_EXCEEDED_REASON = "maker-micro-order-cap-exceeded";

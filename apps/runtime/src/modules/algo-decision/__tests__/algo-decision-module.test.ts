@@ -6957,6 +6957,90 @@ describe("AlgoDecisionModule", () => {
         await mod.stop();
       },
     );
+
+    it("holds an R23 probe after open-position rejection until authoritative position clears", async () => {
+      vi.useFakeTimers();
+      try {
+        const tokenId = "token-r23-dust-position-block";
+        selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+        algoRulesRepo = {
+          getDecisionRules: vi.fn(() =>
+            SEED_DECISION_RULES.map((rule) =>
+              rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+            ),
+          ),
+          getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+            actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+          ),
+        };
+        let position = makeOpenPosition(tokenId, {
+          status: "dust",
+          size: 1,
+          currentValueUsdc: 0.01,
+        });
+        const positionRepo = {
+          findByTokenId: vi.fn(() => position),
+          findOpen: vi.fn(() => (position.status === "open" ? [position] : [])),
+        };
+        const mod = buildModule({
+          positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+          priceHistoryProvider: {
+            findReferencePrice: vi.fn(() => null),
+            maxMidpointInWindow: vi.fn(() => 0.6),
+          },
+          executionPolicy: () => ({
+            ...DEFAULT_EXECUTION_POLICY,
+            entryMinMarketAgeSeconds: 0,
+            r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+          }),
+        });
+        await mod.start();
+
+        let emitted = 0;
+        (bus as any).subscribe(
+          "SignalProduced",
+          async (payload: { signal: import("@krabs/domain").Signal; market: NormalizedMarket }) => {
+            emitted += 1;
+            if (position.status === "closed") return;
+            await (bus as any).emit("SignalRejected", {
+              signal: payload.signal,
+              market: payload.market,
+              reason: "open_position_exists",
+              rejectedAt: Date.now(),
+            });
+          },
+        );
+
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(tokenId, null, 0.3)],
+          timestamp: Date.now(),
+        });
+        expect(emitted).toBe(1);
+
+        await (mod as any).evaluateDirtyTokens();
+        expect(emitted).toBe(1);
+        for (let update = 0; update < 10; update += 1) {
+          await (bus as any).emit("NormalizedMarketUpdated", {
+            markets: [makeMarket(tokenId, null, 0.3 + update / 1000)],
+            timestamp: Date.now(),
+          });
+        }
+        await mod.sweep();
+        expect(emitted).toBe(1);
+
+        position = { ...position, status: "closed", size: 0 };
+        await (bus as any).emit("PositionUpdated", { position });
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(tokenId, null, 0.31)],
+          timestamp: Date.now(),
+        });
+        expect(emitted).toBe(2);
+
+        await mod.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // ─── Track Q shadow telemetry ────────────────────────────────────────────

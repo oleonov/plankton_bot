@@ -95,6 +95,7 @@ import {
   ENTRY_NOT_SELLABLE_REASON,
   MAKER_MICRO_CONDITION_CAP_EXCEEDED_REASON,
   MAKER_MICRO_DISTINCT_CONDITION_CAP_EXCEEDED_REASON,
+  OPEN_POSITION_EXISTS_REASON,
   SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
   isMakerEntryInputsUnchangedReason,
 } from "../../internal-order-reasons.js";
@@ -1030,6 +1031,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     string,
     { blockedUntilMs: number; policyFingerprint: string; reason: string }
   >();
+  private readonly r23ProbeOpenPositionBlocks = new Map<string, string>();
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
   private buyBudgetRecoveryNotionalUsdc = 0;
@@ -1168,6 +1170,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
     this.minOrderSizeRearmTokenIds.clear();
     this.r23ProbeMakerWindowCapCooldowns.clear();
+    this.r23ProbeOpenPositionBlocks.clear();
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     await this.plannerRollup.stop();
@@ -1335,6 +1338,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       const tokenIdStr = String(tokenId);
       this.marketCache.delete(tokenIdStr);
       this.prevMidPrices.delete(tokenIdStr);
+      this.r23ProbeOpenPositionBlocks.delete(tokenIdStr);
       this.releaseMinOrderSizeHydration(tokenIdStr);
       const openPosition = this.findOpenPositionByTokenId(tokenId);
       if (openPosition) {
@@ -1456,6 +1460,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async handleSignalRejected(payload: RuntimeEventMap["SignalRejected"]): Promise<void> {
+    const openPositionBlocked = this.blockR23ProbeForOpenPosition(payload);
     const reasonCode = findBuyBudgetCooldownReason(payload.reason);
     if (payload.signal.side === "buy" && reasonCode) {
       this.activateBuyBudgetCooldown(
@@ -1466,6 +1471,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       );
     }
     this.clearPendingByTokenId(String(payload.signal.tokenId));
+    if (openPositionBlocked) return;
     this.markDirty(payload.signal.tokenId);
     this.scheduleDirtyEvaluation(0);
   }
@@ -1933,6 +1939,9 @@ export class AlgoDecisionModule implements RuntimeModule {
       isGateWhitelisted(executionPolicy?.gateEntry, market.conditionId) &&
       (this.deps.selectedMarketCache.isGateBypassEligible?.(tokenId) ?? false);
     if (!legState && !selectedForEntry && !openPosition && !gateBypass) return null;
+    if (this.shouldSkipR23ProbeForUnchangedOpenPosition(tokenId, legState, selectedForEntry)) {
+      return null;
+    }
     if (
       this.shouldSkipFlatProbeForActiveMarketCap(
         tokenId,
@@ -2168,6 +2177,42 @@ export class AlgoDecisionModule implements RuntimeModule {
         action: "skip",
       }),
     );
+  }
+
+  private blockR23ProbeForOpenPosition(event: RuntimeEventMap["SignalRejected"]): boolean {
+    if (
+      event.reason !== OPEN_POSITION_EXISTS_REASON ||
+      event.signal.side !== "buy" ||
+      event.signal.decisionRuleId !== R23_DIP_TRIGGER_RULE_ID ||
+      event.signal.reason !== "probe-entry"
+    ) {
+      return false;
+    }
+    const position = this.deps.positionRepo?.findByTokenId(event.signal.tokenId) ?? null;
+    const fingerprint = this.entryBlockingPositionFingerprint(position);
+    if (!fingerprint) return false;
+    this.r23ProbeOpenPositionBlocks.set(String(event.signal.tokenId), fingerprint);
+    return true;
+  }
+
+  private shouldSkipR23ProbeForUnchangedOpenPosition(
+    tokenId: TokenId,
+    legState: LegState | null,
+    selectedForEntry: boolean,
+  ): boolean {
+    if (!selectedForEntry || legState) return false;
+    const key = String(tokenId);
+    const blockedFingerprint = this.r23ProbeOpenPositionBlocks.get(key);
+    if (!blockedFingerprint) return false;
+    const position = this.deps.positionRepo?.findByTokenId(tokenId) ?? null;
+    if (this.entryBlockingPositionFingerprint(position) === blockedFingerprint) return true;
+    this.r23ProbeOpenPositionBlocks.delete(key);
+    return false;
+  }
+
+  private entryBlockingPositionFingerprint(position: Position | null): string | null {
+    if (!position || position.status === "closed" || position.size <= 0) return null;
+    return JSON.stringify([String(position.positionId), position.status]);
   }
 
   private isR23ProbeNoOrderIdBuyRejection(event: RuntimeEventMap["OrderRejected"]): boolean {

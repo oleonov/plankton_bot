@@ -15,7 +15,10 @@ import {
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { isExitRecoveryFencedPredecessor } from "../execution/reservation-utils.js";
-import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
+import {
+  OPEN_POSITION_EXISTS_REASON,
+  SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+} from "../../internal-order-reasons.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import {
   BUY_DUPLICATE_DEDUPED_REASON,
@@ -375,8 +378,8 @@ export class AlgoRiskGateImpl implements RiskGate {
           },
           "entry rejected — open position already exists for token",
         );
-        rejected.push("open_position_exists");
-        return finish(false, "open_position_exists");
+        rejected.push(OPEN_POSITION_EXISTS_REASON);
+        return finish(false, OPEN_POSITION_EXISTS_REASON);
       }
     }
     passed.push("no_open_position_or_scale_in");
