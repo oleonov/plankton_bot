@@ -1742,7 +1742,12 @@ export class SignalToOrderBridge {
       }
       const cooldownPrice = makerOverride?.price ?? executionTerms.price;
 
-      if (!isBounceExitForceExit && this.deps.samePriceCooldown) {
+      // A bounce owner's immutable target must remain covered after its resting order expires.
+      if (
+        !isBounceExitForceExit &&
+        !(signal.side === "sell" && signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID) &&
+        this.deps.samePriceCooldown
+      ) {
         const placementDecision = this.deps.samePriceCooldown.canPlaceOrder({
           tokenId: signal.tokenId,
           side: signal.side,

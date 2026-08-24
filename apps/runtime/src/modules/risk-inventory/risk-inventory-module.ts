@@ -41,6 +41,7 @@ import {
   recordStageDuration,
   roundToTick,
   isGateWhitelisted,
+  BOUNCE_EXIT_TARGET_RULE_ID,
   GATE_ENTRY_RULE_ID,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -859,7 +860,9 @@ export class RiskInventoryModule implements RuntimeModule {
     signal: RuntimeEventMap["SignalProduced"]["signal"],
     market: RuntimeEventMap["SignalProduced"]["market"],
   ): boolean {
-    if (signal.side !== "sell") return false;
+    // A bounce owner's immutable target is its exit coverage, not a fresh same-price decision.
+    if (signal.side !== "sell" || signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID)
+      return false;
     const registry = this.deps.cooldownRegistry;
     if (!registry) return false;
     const tickRoundedPrice = roundToTick(signal.suggestedPrice, market.tickSize);

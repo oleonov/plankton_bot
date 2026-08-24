@@ -4,6 +4,7 @@ import {
   createConditionId,
   createOrderId,
   createTokenId,
+  BOUNCE_EXIT_TARGET_RULE_ID,
   SignalReason,
   GATE_ENTRY_RULE_ID,
   type ConditionId,
@@ -16,6 +17,7 @@ import {
   type PositionRepository,
   type ProfileId,
   type RiskEventRepository,
+  type RuntimeEventMap,
   type S1OwnershipSnapshot,
   type Signal,
   type TokenId,
@@ -349,6 +351,73 @@ describe("SignalToOrderBridge", () => {
     );
     expect(skipped[0]?.reasons).toEqual(["same-price-cooldown"]);
     expect(skipped[0]?.diagnostics["staleCancelCount"]).toBe(3);
+  });
+
+  it("keeps immutable bounce targets resting through SELL cooldowns while ordinary SELL stays blocked", async () => {
+    const bus = new InProcessEventBus();
+    const canPlaceOrder = vi.fn(() => ({
+      allowed: false,
+      reason: "same-price-cooldown" as const,
+      staleCancelCount: 1,
+      cooldownUntilTsUtc: NOW + 60 * 60_000,
+    }));
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      samePriceCooldown: { canPlaceOrder },
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: RuntimeEventMap["PlaceOrderRequested"][] = [];
+    const skipped: RuntimeEventMap["SignalConversionSkipped"][] = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => void placed.push(payload));
+    bus.subscribe("SignalConversionSkipped", async (payload) => void skipped.push(payload));
+    const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, midPrice: 0.095 });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        signalId: "sig-ordinary-sell",
+        side: "sell",
+        suggestedPrice: 0.1,
+        suggestedSize: 10,
+        suggestedSizeUsdc: 1,
+        reason: "repricing-exit",
+      },
+      market,
+      approvedAt: NOW,
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        signalId: "sig-bounce-target",
+        side: "sell",
+        suggestedPrice: 0.12,
+        suggestedSize: 10,
+        suggestedSizeUsdc: 1.2,
+        reason: "repricing-exit",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        bounceRung: {
+          ladderId: "bounce-ladder",
+          rungIndex: 0,
+          anchorPrice: 0.08,
+          fraction: 1,
+          originalPositionSize: 10,
+          remainingPositionSize: 10,
+        },
+      },
+      market,
+      approvedAt: NOW,
+    });
+
+    expect(canPlaceOrder).toHaveBeenCalledTimes(1);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]?.signal.signalId).toBe("sig-ordinary-sell");
+    expect(skipped[0]?.reasons).toEqual(["same-price-cooldown"]);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]?.command.decisionRuleId).toBe(BOUNCE_EXIT_TARGET_RULE_ID);
   });
 
   it("places when persistent same-price cooldown allows the execution price", async () => {

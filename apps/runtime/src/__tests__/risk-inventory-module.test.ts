@@ -7,6 +7,7 @@ import {
   createLotId,
   createConditionId,
   createBotRunId,
+  BOUNCE_EXIT_TARGET_RULE_ID,
   DEFAULT_EXECUTION_POLICY,
   GATE_ENTRY_RULE_ID,
 } from "@krabs/domain";
@@ -373,6 +374,54 @@ describe("RiskInventoryModule", () => {
 
     expect(approved).toHaveLength(1);
     expect(approved[0].signal.signalId).toBe("sig-1");
+
+    await mod.stop();
+  });
+
+  it("lets an immutable bounce target through the early SELL cooldown gate", async () => {
+    const cooldownRegistry = {
+      get: vi.fn().mockReturnValue({
+        tokenId: TOK_ID,
+        side: "sell",
+        priceX10000: 1200,
+        staleCancelCount: 1,
+        cooldownUntilTsUtc: Date.now() + 60 * 60_000,
+        activatedAtMs: Date.now(),
+      }),
+      recordEarlySuppression: vi.fn(),
+    };
+    mod = createModule(undefined, { cooldownRegistry: cooldownRegistry as never });
+    await mod.start();
+
+    const approved: Signal[] = [];
+    const skipped: Signal[] = [];
+    bus.subscribe("SignalApproved", async ({ signal }) => void approved.push(signal));
+    bus.subscribe("SignalConversionSkipped", async ({ signal }) => void skipped.push(signal));
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({
+        signalId: "sig-ordinary-sell-cooldown",
+        side: "sell",
+        suggestedPrice: 0.12,
+        reason: "repricing-exit",
+      }),
+      market: makeMarket(),
+    });
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({
+        signalId: "sig-bounce-target-cooldown",
+        side: "sell",
+        suggestedPrice: 0.12,
+        reason: "repricing-exit",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      }),
+      market: makeMarket(),
+    });
+
+    expect(skipped.map((signal) => signal.signalId)).toEqual(["sig-ordinary-sell-cooldown"]);
+    expect(approved.map((signal) => signal.signalId)).toEqual(["sig-bounce-target-cooldown"]);
+    expect(cooldownRegistry.get).toHaveBeenCalledTimes(1);
+    expect(cooldownRegistry.recordEarlySuppression).toHaveBeenCalledTimes(1);
 
     await mod.stop();
   });
