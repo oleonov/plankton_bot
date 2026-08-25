@@ -51,6 +51,7 @@ import {
   resolveEntryBuyOrderTtlMs,
   resolveMakerMicroLiveFillDeadlineMs,
 } from "../../buy-order-lifecycle.js";
+import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 import { resolveMidpointAnchoredSellPrice } from "../strategy/signal-to-order.js";
 import type { ExitOrderLifetimeDecision } from "../order-lifetime/order-lifetime-ttl.js";
 import {
@@ -1102,7 +1103,7 @@ function shouldRepriceDownprice(
 }
 
 function evaluateTrackLNoopDownpriceGuard(
-  order: Pick<Order, "tokenId" | "price">,
+  order: Order,
   market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "tickSize"> | null,
   // Live snapshot (2026-07-21): the predictor MUST use the same anchor the real
   // replacement pricing uses (signal-to-order.ts) instead of the default, and the
@@ -1111,21 +1112,21 @@ function evaluateTrackLNoopDownpriceGuard(
   minImprovementTicks: number,
 ): {
   blocked: boolean;
-  mode: "midpoint-anchored";
+  mode: "bounce-exit-target" | "midpoint-anchored";
   predictedPrice: number | null;
   midpoint: number | null;
 } {
-  const mode = "midpoint-anchored" as const;
+  const bounceOrigin = parseQuoteMotionOrigin(order);
+  const canonicalBounceTarget =
+    bounceOrigin?.kind === "bounce_exit_target" ? bounceOrigin.originalTargetPrice : null;
+  const mode = canonicalBounceTarget == null ? "midpoint-anchored" : "bounce-exit-target";
   if (!market || !Number.isFinite(market.tickSize) || market.tickSize <= 0) {
     return { blocked: false, mode, predictedPrice: null, midpoint: null };
   }
 
-  const predictedPrice = resolveMidpointAnchoredSellPrice(
-    market.bestBid,
-    market.bestAsk,
-    market.tickSize,
-    anchorTicks,
-  );
+  const predictedPrice =
+    canonicalBounceTarget ??
+    resolveMidpointAnchoredSellPrice(market.bestBid, market.bestAsk, market.tickSize, anchorTicks);
   const midpoint =
     market.bestBid != null &&
     market.bestAsk != null &&

@@ -105,6 +105,37 @@ function makeOrder(overrides?: Partial<Order>): Order {
   };
 }
 
+function makeBounceTargetOrder(price: number, originalTargetPrice: number): Order {
+  return makeOrder({
+    side: "sell",
+    price,
+    postOnly: true,
+    entryStyle: "maker",
+    decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+    signalReason: "repricing-exit",
+    metadata: {
+      quoteMotionV1: {
+        version: 1,
+        kind: "bounce_exit_target",
+        cohortId: "tok-yes:2026-08-21T19:53:36.000Z",
+        originalSuggestedPrice: originalTargetPrice,
+        originalTargetPrice,
+        entryPriceCeiling: null,
+        policySchemaVersion: 1,
+        policyControlRevision: 120,
+        initialBook: {
+          depthStatus: "full",
+          bestBid: 0.005,
+          bestAsk: 0.007,
+          tickSize: 0.001,
+          snapshotTs: Date.now() - 60_000,
+          source: "exit-book-fallback",
+        },
+      },
+    },
+  });
+}
+
 function makeMarket(overrides?: Partial<Market>): Market {
   return {
     tokenId: TOK,
@@ -1398,6 +1429,29 @@ describe("cleanStaleEntryOrders", () => {
       expect.any(Number),
       expect.any(String),
     );
+  });
+
+  it("blocks repeated downprice cancels when a bounce order already rests at its canonical target", async () => {
+    const order = makeBounceTargetOrder(0.023, 0.023);
+    const metrics = { writeCounter: vi.fn() };
+    const bounceMode = '{"mode":"bounce-exit-target"}';
+    const pricing = { bestAsk: 0.011, tickSize: 0.001, metrics };
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (event) => void cancelled.push(event));
+
+    const first = await runWithDownprice(order, 0.01, new Map(), pricing);
+    const second = await runWithDownprice(order, 0.01, new Map(), pricing);
+    await bus.drain();
+
+    expect([first.downpriceRepriceCancelled, second.downpriceRepriceCancelled]).toEqual([0, 0]);
+    expect(cancelled).toHaveLength(0);
+    expect(metrics.writeCounter).toHaveBeenCalledWith("track_l_noop_guard_total", 1, bounceMode);
+
+    order.price = 0.024;
+    const result = await runWithDownprice(order, 0.01, new Map(), pricing);
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(1);
   });
 
   it("Stage 2: HOLDS a downprice reprice on a THIN market when skipDownpriceWhenThin is on", async () => {
