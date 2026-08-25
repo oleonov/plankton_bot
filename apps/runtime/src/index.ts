@@ -1692,6 +1692,9 @@ async function main(): Promise<void> {
     policy: currentExecutionPolicy,
     policySnapshot: currentExecutionPolicySnapshot,
     candidateBookCache,
+    ...(exchangeGateway.getOrderResult
+      ? { getOrderResult: exchangeGateway.getOrderResult.bind(exchangeGateway) }
+      : {}),
     runtimeMetrics,
     log,
   });

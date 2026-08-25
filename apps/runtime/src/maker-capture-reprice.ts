@@ -4,6 +4,7 @@ import type {
   MakerCaptureRepriceIntent,
   MakerCaptureRepriceSignalV1,
   MakerCaptureBookDecisionProofV1,
+  ExchangeOrder,
   Order,
   OrderBookSnapshot,
   OrderId,
@@ -14,6 +15,7 @@ import type { CandidateBookCacheEntry } from "./modules/strategy/candidate-book-
 
 export const MAKER_CAPTURE_BOOK_MAX_AGE_MS = 3_000;
 const EPSILON = 1e-9;
+const EXACT_SIZE_EPSILON = 1e-7;
 
 export interface MakerCaptureBookCache {
   prime(tokenIds: readonly string[]): Promise<Map<string, CandidateBookCacheEntry>>;
@@ -140,6 +142,53 @@ export async function primeFreshMakerCaptureBook(
     return null;
   }
   return entry;
+}
+
+export function isMakerCaptureBookAfterCancellation(
+  observation: Pick<CandidateBookCacheEntry, "snapshotTs" | "sourcePolledAtMs">,
+  cancelledAtMs: number,
+): boolean {
+  return (
+    Number.isFinite(cancelledAtMs) &&
+    observation.snapshotTs >= cancelledAtMs &&
+    observation.sourcePolledAtMs >= cancelledAtMs
+  );
+}
+
+export function isMakerCaptureCancellationReason(reason: string | null | undefined): boolean {
+  return reason === "maker_capture_reprice" || reason === "exchange-exact-cancelled";
+}
+
+export function isMakerCaptureExactCancellation(
+  predecessor: Pick<
+    Order,
+    "cancelReason" | "exchangeOrderId" | "price" | "side" | "size" | "status" | "tokenId"
+  >,
+  predecessorRemainingShares: number,
+  exact: ExchangeOrder | null,
+): boolean {
+  if (
+    !predecessor.exchangeOrderId ||
+    predecessor.status !== "cancelled" ||
+    !isMakerCaptureCancellationReason(predecessor.cancelReason) ||
+    predecessor.side !== "buy" ||
+    !exact ||
+    exact.status !== "CANCELLED" ||
+    exact.orderId !== predecessor.exchangeOrderId ||
+    String(exact.tokenId) !== String(predecessor.tokenId) ||
+    exact.side !== predecessor.side
+  ) {
+    return false;
+  }
+  const expectedFilledShares = predecessor.size - predecessorRemainingShares;
+  return (
+    Number.isFinite(expectedFilledShares) &&
+    expectedFilledShares >= -EPSILON &&
+    Math.abs(exact.price - predecessor.price) <= EPSILON &&
+    Math.abs(exact.sizeTotal - predecessor.size) <= EXACT_SIZE_EPSILON &&
+    Math.abs(exact.sizeFilled - expectedFilledShares) <= EXACT_SIZE_EPSILON &&
+    Math.abs(exact.sizeRemaining - predecessorRemainingShares) <= EXACT_SIZE_EPSILON
+  );
 }
 
 export function computeMakerCaptureCandidate(input: {

@@ -617,6 +617,135 @@ describe("ExecutionModule", () => {
     await mod.stop();
   });
 
+  it("revalidates an exact-cancelled maker capture without subtracting the predecessor", async () => {
+    const now = Date.now();
+    const command = makePlaceCmd({
+      price: 0.33,
+      size: 0.7 / 0.33,
+      tickSize: 0.01,
+      side: "buy",
+    });
+    const entry = {
+      tokenId: String(command.tokenId),
+      snapshotTs: now,
+      cachedAtMs: now,
+      sourcePolledAtMs: now,
+      bookSource: "clob" as const,
+      sourceKind: "rest" as const,
+      book: {
+        tokenId: command.tokenId,
+        bids: [
+          { price: 0.32, size: 10 },
+          { price: 0.3, size: 1 },
+        ],
+        asks: [{ price: 0.36, size: 10 }],
+        bestBid: 0.32,
+        bestAsk: 0.36,
+        midPrice: 0.34,
+        spread: 0.04,
+        minOrderSize: 1,
+        timestamp: now,
+      },
+    };
+    const internal = mod as any;
+    const predecessor = {
+      exchangeOrderId: "capture-predecessor-exchange",
+      tokenId: command.tokenId,
+      side: "buy" as const,
+      price: 0.3,
+      size: 3,
+      status: "cancelled" as const,
+      cancelReason: "maker_capture_reprice",
+      updatedAt: new Date(now - 3).toISOString(),
+    };
+    let exactStatus: ExchangeOrder["status"] | null = "CANCELLED";
+    let exactAvailable = true;
+    gateway.getOrderResult = vi.fn(async () =>
+      exactAvailable
+        ? {
+            ok: true as const,
+            data:
+              exactStatus === null
+                ? null
+                : {
+                    orderId: predecessor.exchangeOrderId,
+                    clientOrderId: null,
+                    tokenId: command.tokenId,
+                    side: "buy" as const,
+                    price: 0.3,
+                    sizeTotal: 3,
+                    sizeFilled: 0.7,
+                    sizeRemaining: 2.3,
+                    status: exactStatus,
+                    createdAt: now - 10_000,
+                  },
+          }
+        : { ok: false as const, reason: "timeout" as const, attempts: 1 },
+    );
+    internal.deps.candidateBookCache = {
+      prime: vi.fn().mockResolvedValue(new Map([[String(command.tokenId), entry]])),
+    };
+    internal.makerCaptureExecutionContext = vi.fn(() => ({
+      intent: { childOrderId: createOrderId("capture-child") },
+      predecessor,
+      usage: { predecessorRemainingShares: 2.3, rootNotionalUsdc: 0.9, chainFilledUsdc: 0.2 },
+      origin: { originalSuggestedPrice: 0.4, entryPriceCeiling: 0.45 },
+      proof: {
+        prepared: {
+          predecessorSharesSubtracted: 0,
+          snapshotTs: now - 1,
+          sourcePolledAtMs: now - 1,
+        },
+      },
+      policySchemaVersion: 1,
+      policyControlRevision: 7,
+      activatedAtUtc: new Date(0).toISOString(),
+      expiresAtUtc: new Date(now + 60_000).toISOString(),
+    }));
+
+    await expect(internal.makerCaptureFreshBookRejection(command)).resolves.toMatchObject({
+      ok: true,
+      proof: {
+        predecessorLevelBookShares: 1,
+        predecessorSharesSubtracted: 0,
+        predecessorLevelExternalShares: 1,
+        candidatePrice: 0.33,
+      },
+    });
+
+    entry.snapshotTs = now - 4;
+    await expect(internal.makerCaptureFreshBookRejection(command)).resolves.toMatchObject({
+      ok: false,
+      reason: "maker-capture-post-cancel-book-not-converged",
+    });
+
+    entry.snapshotTs = now;
+    entry.sourcePolledAtMs = now - 2;
+    await expect(internal.makerCaptureFreshBookRejection(command)).resolves.toMatchObject({
+      ok: false,
+      reason: "maker-capture-final-book-regressed",
+    });
+
+    entry.sourcePolledAtMs = now;
+    exactStatus = "OPEN";
+    await expect(internal.makerCaptureFreshBookRejection(command)).resolves.toMatchObject({
+      ok: false,
+      reason: "maker-capture-predecessor-not-exact-cancelled",
+    });
+
+    exactStatus = null;
+    await expect(internal.makerCaptureFreshBookRejection(command)).resolves.toMatchObject({
+      ok: false,
+      reason: "maker-capture-predecessor-not-exact-cancelled",
+    });
+
+    exactAvailable = false;
+    await expect(internal.makerCaptureFreshBookRejection(command)).resolves.toMatchObject({
+      ok: false,
+      reason: "maker-capture-predecessor-not-exact-cancelled",
+    });
+  });
+
   it.each([
     "open",
     "absent",

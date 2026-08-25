@@ -928,7 +928,7 @@ describe("EntryLifecycleModule", () => {
     await module.stop();
   });
   it("claims before cancel and emits one fill-aware deterministic capture replacement", async () => {
-    const now = 1_000;
+    let now = 1_000;
     const window = {
       activatedAtUtc: new Date(0).toISOString(),
       expiresAtUtc: new Date(10_000).toISOString(),
@@ -1014,7 +1014,7 @@ describe("EntryLifecycleModule", () => {
       tokenId: TOKEN,
       bids: [
         { price: 0.32, size: 10 },
-        { price: 0.3, size: 2.3 },
+        { price: 0.3, size: 1 },
       ],
       asks: [{ price: 0.36, size: 10 }],
       bestBid: 0.32,
@@ -1046,15 +1046,49 @@ describe("EntryLifecycleModule", () => {
         captureBookReprice: { enabled: true, maxRepricesPerRoot: 5 },
       },
     };
+    let bookPolls = 0;
+    let startRetry!: () => void;
+    let releaseRetry!: () => void;
+    const retryStarted = new Promise<void>((resolve) => (startRetry = resolve));
+    const retryGate = new Promise<void>((resolve) => (releaseRetry = resolve));
+    const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
+    const getOrderResult = vi.fn(async () => {
+      if (getOrderResult.mock.calls.length === 1) now = 2_500;
+      return {
+        ok: true as const,
+        data: {
+          orderId: root.exchangeOrderId!,
+          clientOrderId: String(root.clientOrderId),
+          tokenId: root.tokenId,
+          side: root.side,
+          price: root.price,
+          sizeTotal: root.size,
+          sizeFilled: 0.7,
+          sizeRemaining: 2.3,
+          status: "CANCELLED" as const,
+          createdAt: 0,
+        },
+      };
+    });
     const module = buildModule({
       bus,
       orderRepo: repo,
       now: () => now,
       policy: () => policy,
       policySnapshot: () => ({ policy, controlRevision: 7 }),
+      setTimer: (fn, delayMs) => {
+        scheduled.push({ fn, delayMs });
+        return scheduled.length as never;
+      },
+      getOrderResult,
       candidateBookCache: {
-        prime: vi.fn().mockResolvedValue(
-          new Map([
+        prime: vi.fn(async () => {
+          bookPolls++;
+          if (bookPolls === 2) {
+            startRetry();
+            await retryGate;
+          }
+          return new Map([
             [
               String(TOKEN),
               {
@@ -1062,13 +1096,13 @@ describe("EntryLifecycleModule", () => {
                 snapshotTs: now,
                 cachedAtMs: now,
                 sourcePolledAtMs: now,
-                bookSource: "clob",
-                sourceKind: "rest",
+                bookSource: "clob" as const,
+                sourceKind: "rest" as const,
                 book,
               },
             ],
-          ]),
-        ),
+          ]);
+        }),
       },
     });
 
@@ -1082,7 +1116,12 @@ describe("EntryLifecycleModule", () => {
       bestBid: 0.31,
       predecessorRemainingShares: 2.3,
     });
-    current = { ...root, status: "cancelled" };
+    current = {
+      ...root,
+      status: "cancelled",
+      cancelReason: "maker_capture_reprice",
+      updatedAt: new Date(now).toISOString(),
+    };
     await bus.publish("OrderCancelled", {
       commandId: cancels[0]!.command.commandId,
       orderId: root.orderId,
@@ -1094,6 +1133,23 @@ describe("EntryLifecycleModule", () => {
     });
     await bus.drain();
 
+    expect(signals).toHaveLength(0);
+    expect(bookPolls).toBe(1);
+    expect(getOrderResult).toHaveBeenCalledTimes(1);
+    expect(scheduled).toEqual([{ fn: expect.any(Function), delayMs: 1_500 }]);
+    for (let i = 0; i < 10; i++) await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
+    expect(bookPolls).toBe(1);
+    expect(getOrderResult).toHaveBeenCalledTimes(1);
+
+    now = 4_000;
+    book.timestamp = now;
+    scheduled[0]!.fn();
+    await retryStarted;
+    await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
+    expect(bookPolls).toBe(2);
+    expect(getOrderResult).toHaveBeenCalledTimes(2);
+    releaseRetry();
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
     expect(signals).toHaveLength(1);
     expect(signals[0]).toMatchObject({
       suggestedPrice: 0.33,
@@ -1101,11 +1157,12 @@ describe("EntryLifecycleModule", () => {
     });
     expect(signals[0]!.suggestedSize).toBeCloseTo(0.7 / 0.33);
     expect(intent!.proof?.prepared).toMatchObject({
-      predecessorLevelBookShares: 2.3,
-      predecessorSharesSubtracted: 2.3,
-      predecessorLevelExternalShares: 0,
+      predecessorLevelBookShares: 1,
+      predecessorSharesSubtracted: 0,
+      predecessorLevelExternalShares: 1,
       candidatePrice: 0.33,
     });
+    expect(bookPolls).toBe(2);
     downstreamFails = false;
     await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
     expect(signals.map((signal) => signal.signalId)).toEqual([
@@ -1120,6 +1177,46 @@ describe("EntryLifecycleModule", () => {
     expect(repo.claimMakerCaptureRepriceIntent).not.toHaveBeenCalled();
     expect(cancels).toEqual([]);
     await module.stop();
+  });
+
+  it("terminal-fails a post-cancel book that misses the convergence bound", () => {
+    const predecessor = makeOrder({
+      status: "cancelled",
+      updatedAt: new Date(1_000).toISOString(),
+    });
+    const intent: MakerCaptureRepriceIntent = {
+      intentId: "capture-convergence-timeout",
+      predecessorOrderId: predecessor.orderId,
+      lifecycleSignalId: "capture-convergence-timeout-signal",
+      rootOrderId: predecessor.orderId,
+      tokenId: predecessor.tokenId,
+      conditionId: predecessor.conditionId,
+      replacementIndex: 1,
+      status: "cancel_pending",
+      candidatePrice: null,
+      replacementSize: null,
+      childOrderId: null,
+      createdAt: new Date(1_000).toISOString(),
+      updatedAt: new Date(1_000).toISOString(),
+      failure: null,
+      proof: captureProof("cancel_pending"),
+    };
+    const repo = makeOrderRepo(predecessor);
+    repo.markMakerCaptureRepriceTerminal = vi.fn(() => true);
+    const module = buildModule({ orderRepo: repo, now: () => 4_000 });
+
+    (module as any).deferCaptureBookConvergence(
+      intent,
+      predecessor,
+      { snapshotTs: 999, sourcePolledAtMs: 4_000 },
+      1_000,
+    );
+
+    expect(repo.markMakerCaptureRepriceTerminal).toHaveBeenCalledWith(
+      intent.intentId,
+      "failed",
+      "post-cancel-book-convergence-timeout",
+    );
   });
 
   it("fails a proved submitted intent whose deterministic child is missing at restart", async () => {

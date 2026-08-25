@@ -18,6 +18,8 @@ import type {
   SignalReason as SignalReasonType,
   TokenId,
   ExecutionPolicy,
+  ExchangeOrder,
+  FetchResult,
 } from "@krabs/domain";
 import {
   ENTRY_REASONS,
@@ -35,6 +37,10 @@ import {
   buildMakerCaptureRepriceIdentity,
   buildMakerCaptureBookDecisionProof,
   computeMakerCaptureCandidate,
+  isMakerCaptureCancellationReason,
+  isMakerCaptureBookAfterCancellation,
+  isMakerCaptureExactCancellation,
+  MAKER_CAPTURE_BOOK_MAX_AGE_MS,
   parseMakerCaptureLineage,
   primeFreshMakerCaptureBook,
   type MakerCaptureBookCache,
@@ -87,6 +93,7 @@ export interface EntryLifecycleModuleDeps {
   policy: () => ExecutionPolicy;
   policySnapshot?: () => { policy: ExecutionPolicy; controlRevision: number | null };
   candidateBookCache?: MakerCaptureBookCache | undefined;
+  getOrderResult?: (orderId: string) => Promise<FetchResult<ExchangeOrder | null>>;
   runtimeMetrics?: RuntimeMetricWriter | undefined;
   log: Logger;
   now?: () => number;
@@ -103,6 +110,8 @@ export class EntryLifecycleModule implements RuntimeModule {
   private readonly ladderStateByToken = new Map<string, LadderState>();
   private readonly ladderResetAnchorByToken = new Map<string, number>();
   private readonly ladderTimers = new Map<string, TimerHandle>();
+  private readonly captureConvergenceTimers = new Map<string, TimerHandle>();
+  private readonly captureConvergenceInFlight = new Set<string>();
   private readonly marketCache = new Map<string, NormalizedMarket>();
   private readonly unsubs: Array<() => void> = [];
   private readonly captureSignalsPublished = new Set<string>();
@@ -181,6 +190,9 @@ export class EntryLifecycleModule implements RuntimeModule {
     this.unsubs.length = 0;
     for (const timer of this.ladderTimers.values()) this.clearTimer(timer);
     this.ladderTimers.clear();
+    for (const timer of this.captureConvergenceTimers.values()) this.clearTimer(timer);
+    this.captureConvergenceTimers.clear();
+    this.captureConvergenceInFlight.clear();
     this.started = false;
     this.log.info("entry lifecycle module stopped");
   }
@@ -422,6 +434,7 @@ export class EntryLifecycleModule implements RuntimeModule {
   private async advanceCaptureIntent(
     intent: MakerCaptureRepriceIntent,
     startup: boolean,
+    convergenceRetry = false,
   ): Promise<void> {
     let child = intent.childOrderId ? this.deps.orderRepo.findById(intent.childOrderId) : null;
     if (!child && intent.status === "ready") {
@@ -457,10 +470,26 @@ export class EntryLifecycleModule implements RuntimeModule {
       return;
     }
     if (predecessor.status !== "cancelled" || startup) return;
+    if (!isMakerCaptureCancellationReason(predecessor.cancelReason)) {
+      this.failCaptureIntent(intent, "predecessor-cancel-reason-mismatch");
+      return;
+    }
     if (intent.status === "cancel_pending") {
-      const ready = await this.prepareCaptureReplacement(intent, predecessor);
-      if (!ready) return;
-      intent = ready;
+      if (
+        !convergenceRetry &&
+        (this.captureConvergenceTimers.has(intent.intentId) ||
+          this.captureConvergenceInFlight.has(intent.intentId))
+      ) {
+        return;
+      }
+      if (!convergenceRetry) this.captureConvergenceInFlight.add(intent.intentId);
+      try {
+        const ready = await this.prepareCaptureReplacement(intent, predecessor);
+        if (!ready) return;
+        intent = ready;
+      } finally {
+        if (!convergenceRetry) this.captureConvergenceInFlight.delete(intent.intentId);
+      }
     }
     if (intent.status === "ready") await this.publishCaptureSignal(intent, predecessor);
   }
@@ -469,7 +498,6 @@ export class EntryLifecycleModule implements RuntimeModule {
     intent: MakerCaptureRepriceIntent,
     predecessor: Order,
   ): Promise<MakerCaptureRepriceIntent | null> {
-    const now = this.now();
     if (!this.captureIntentProofValid(intent)) {
       this.failCaptureIntent(intent, "proof-invalid-or-incomplete");
       return null;
@@ -479,24 +507,39 @@ export class EntryLifecycleModule implements RuntimeModule {
       this.failCaptureIntent(intent, "policy-or-lineage-drift");
       return null;
     }
-    const entry = await primeFreshMakerCaptureBook(
-      this.deps.candidateBookCache,
-      String(intent.tokenId),
-      now,
-    );
-    const minOrderSize = entry?.book.minOrderSize;
-    if (!entry || minOrderSize == null || !Number.isFinite(minOrderSize) || minOrderSize <= 0) {
-      this.failCaptureIntent(intent, "fresh-book-or-minimum-unavailable");
-      return null;
-    }
     const state = this.captureIntentState(intent, predecessor, this.now());
     if (!state) {
       this.failCaptureIntent(intent, "policy-or-lineage-drift");
       return null;
     }
     const { origin, usage, snapshot, window } = state;
+    const exactCancellation = await this.hasExactCaptureCancellation(
+      predecessor,
+      usage.predecessorRemainingShares,
+    );
+    if (!this.started) return null;
+    if (!exactCancellation) {
+      this.failCaptureIntent(intent, "predecessor-not-exact-cancelled");
+      return null;
+    }
+    const entry = await primeFreshMakerCaptureBook(
+      this.deps.candidateBookCache,
+      String(intent.tokenId),
+      this.now(),
+    );
+    if (!this.started) return null;
+    const minOrderSize = entry?.book.minOrderSize;
+    if (!entry || minOrderSize == null || !Number.isFinite(minOrderSize) || minOrderSize <= 0) {
+      this.failCaptureIntent(intent, "fresh-book-or-minimum-unavailable");
+      return null;
+    }
+    const cancelledAtMs = Date.parse(predecessor.updatedAt);
+    if (!isMakerCaptureBookAfterCancellation(entry, cancelledAtMs)) {
+      this.deferCaptureBookConvergence(intent, predecessor, entry, cancelledAtMs);
+      return null;
+    }
     this.marketCache.set(String(intent.tokenId), applyOrderBookToMarket(market, entry));
-    const candidate = computeMakerCaptureCandidate({
+    let candidate = computeMakerCaptureCandidate({
       book: entry.book,
       tickSize: market.tickSize,
       predecessorPrice: predecessor.price,
@@ -504,10 +547,26 @@ export class EntryLifecycleModule implements RuntimeModule {
       originalSuggestedPrice: origin.originalSuggestedPrice,
       entryPriceCeiling: origin.entryPriceCeiling!,
     });
+    if (!candidate.ok && candidate.reason === "self-book-ambiguous") {
+      const convergenceDeadlineMs = cancelledAtMs + MAKER_CAPTURE_BOOK_MAX_AGE_MS;
+      if (this.now() < convergenceDeadlineMs || entry.sourcePolledAtMs < convergenceDeadlineMs) {
+        this.deferCaptureBookConvergence(intent, predecessor, entry, cancelledAtMs);
+        return null;
+      }
+      candidate = computeMakerCaptureCandidate({
+        book: entry.book,
+        tickSize: market.tickSize,
+        predecessorPrice: predecessor.price,
+        predecessorVisibleShares: 0,
+        originalSuggestedPrice: origin.originalSuggestedPrice,
+        entryPriceCeiling: origin.entryPriceCeiling!,
+      });
+    }
     if (!candidate.ok) {
       this.failCaptureIntent(intent, candidate.reason);
       return null;
     }
+    this.clearCaptureConvergenceTimer(intent.intentId);
     const rootResidualShares = Math.max(
       0,
       (usage.rootNotionalUsdc - usage.chainFilledUsdc) / candidate.price,
@@ -555,6 +614,75 @@ export class EntryLifecycleModule implements RuntimeModule {
       replacementSize: size,
       proof: { ...intent.proof!, prepared: preparedProof },
     };
+  }
+
+  private async hasExactCaptureCancellation(
+    predecessor: Order,
+    predecessorRemainingShares: number,
+  ): Promise<boolean> {
+    if (!this.deps.getOrderResult || !predecessor.exchangeOrderId) return false;
+    try {
+      const result = await this.deps.getOrderResult(predecessor.exchangeOrderId);
+      return (
+        result.ok &&
+        isMakerCaptureExactCancellation(predecessor, predecessorRemainingShares, result.data)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private deferCaptureBookConvergence(
+    intent: MakerCaptureRepriceIntent,
+    predecessor: Order,
+    entry: { readonly snapshotTs: number; readonly sourcePolledAtMs: number },
+    cancelledAtMs: number,
+  ): void {
+    const now = this.now();
+    const deadlineMs = cancelledAtMs + MAKER_CAPTURE_BOOK_MAX_AGE_MS;
+    if (!Number.isFinite(deadlineMs) || now >= deadlineMs) {
+      this.log.warn(
+        {
+          intentId: intent.intentId,
+          predecessorOrderId: predecessor.orderId,
+          predecessorStatus: predecessor.status,
+          cancelledAtMs,
+          snapshotTs: entry.snapshotTs,
+          sourcePolledAtMs: entry.sourcePolledAtMs,
+          predecessorSharesSubtracted: 0,
+        },
+        "maker capture post-cancel book convergence timed out",
+      );
+      this.failCaptureIntent(intent, "post-cancel-book-convergence-timeout");
+      return;
+    }
+    if (this.captureConvergenceTimers.has(intent.intentId)) return;
+    const timer = this.setTimer(
+      () => {
+        this.captureConvergenceTimers.delete(intent.intentId);
+        if (!this.started) return;
+        this.captureConvergenceInFlight.add(intent.intentId);
+        void this.safeCaptureReprice(async () => {
+          try {
+            const current = this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(
+              intent.lifecycleSignalId,
+            );
+            if (current) await this.advanceCaptureIntent(current, false, true);
+          } finally {
+            this.captureConvergenceInFlight.delete(intent.intentId);
+          }
+        });
+      },
+      Math.max(1, deadlineMs - now),
+    );
+    this.captureConvergenceTimers.set(intent.intentId, timer);
+  }
+
+  private clearCaptureConvergenceTimer(intentId: string): void {
+    const timer = this.captureConvergenceTimers.get(intentId);
+    if (!timer) return;
+    this.clearTimer(timer);
+    this.captureConvergenceTimers.delete(intentId);
   }
 
   private captureIntentState(intent: MakerCaptureRepriceIntent, predecessor: Order, now: number) {
@@ -752,11 +880,13 @@ export class EntryLifecycleModule implements RuntimeModule {
   }
 
   private failCaptureIntent(intent: MakerCaptureRepriceIntent, reason: string): void {
+    this.clearCaptureConvergenceTimer(intent.intentId);
     this.deps.orderRepo.markMakerCaptureRepriceTerminal?.(intent.intentId, "failed", reason);
     this.captureSignalsPublished.delete(intent.lifecycleSignalId);
   }
 
   private completeCaptureIntent(intent: MakerCaptureRepriceIntent): void {
+    this.clearCaptureConvergenceTimer(intent.intentId);
     this.deps.orderRepo.markMakerCaptureRepriceTerminal?.(intent.intentId, "completed");
     this.captureSignalsPublished.delete(intent.lifecycleSignalId);
   }

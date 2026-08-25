@@ -170,6 +170,9 @@ import type { MakerCaptureBookCache } from "../../maker-capture-reprice.js";
 import {
   buildMakerCaptureBookDecisionProof,
   computeMakerCaptureCandidate,
+  isMakerCaptureCancellationReason,
+  isMakerCaptureBookAfterCancellation,
+  isMakerCaptureExactCancellation,
   matchesMakerCaptureIntent,
   parseMakerCaptureLineage,
   parseMakerCaptureRepriceSignal,
@@ -1943,6 +1946,7 @@ export class ExecutionModule implements RuntimeModule {
     const window = makerPolicy?.microLiveWindow;
     const deadline = root ? resolveMakerMicroLiveFillDeadlineMs(root) : null;
     const proof = parseMakerCaptureRepriceProofV1(intent.proof);
+    const predecessorCancelledAtMs = predecessor ? Date.parse(predecessor.updatedAt) : NaN;
     const expectedClientOrderId = buildClientOrderId({
       signalId: intent.lifecycleSignalId,
       tokenId: intent.tokenId,
@@ -1963,6 +1967,11 @@ export class ExecutionModule implements RuntimeModule {
       !predecessorLineage ||
       !rootLineage ||
       !proof?.prepared ||
+      !isMakerCaptureCancellationReason(predecessor.cancelReason) ||
+      !isMakerCaptureBookAfterCancellation(proof.prepared, predecessorCancelledAtMs) ||
+      (Math.abs(proof.prepared.predecessorSharesSubtracted) > ExecutionModule.SIZE_EPSILON_SHARES &&
+        Math.abs(proof.prepared.predecessorSharesSubtracted - usage.predecessorRemainingShares) >
+          ExecutionModule.SIZE_EPSILON_SHARES) ||
       (intent.status === "ready" && proof.submit !== null) ||
       !snapshot ||
       snapshot.controlRevision === null ||
@@ -2039,24 +2048,63 @@ export class ExecutionModule implements RuntimeModule {
   ): Promise<MakerCaptureFinalBookResult> {
     let context = this.makerCaptureExecutionContext(cmd);
     if (!context) return { ok: false, ...this.makerCapRejection("maker-capture-reprice-invalid") };
+    if (!this.deps.gateway.getOrderResult || !context.predecessor.exchangeOrderId) {
+      return {
+        ok: false,
+        ...this.makerCapRejection("maker-capture-predecessor-exact-unavailable"),
+      };
+    }
     let entry;
+    let exactResult;
     try {
-      entry = await primeFreshMakerCaptureBook(
-        this.deps.candidateBookCache,
-        String(cmd.tokenId),
-        Date.now(),
-      );
+      [entry, exactResult] = await Promise.all([
+        primeFreshMakerCaptureBook(this.deps.candidateBookCache, String(cmd.tokenId), Date.now()),
+        this.deps.gateway.getOrderResult(context.predecessor.exchangeOrderId),
+      ]);
     } catch {
       entry = null;
+      exactResult = null;
     }
     if (!entry) return { ok: false, ...this.makerCapRejection("maker-capture-book-unavailable") };
     context = this.makerCaptureExecutionContext(cmd);
     if (!context) return { ok: false, ...this.makerCapRejection("maker-capture-reprice-invalid") };
+    if (
+      !exactResult?.ok ||
+      !isMakerCaptureExactCancellation(
+        context.predecessor,
+        context.usage.predecessorRemainingShares,
+        exactResult.data,
+      )
+    ) {
+      return {
+        ok: false,
+        ...this.makerCapRejection("maker-capture-predecessor-not-exact-cancelled"),
+      };
+    }
+    const cancelledAtMs = Date.parse(context.predecessor.updatedAt);
+    if (!isMakerCaptureBookAfterCancellation(entry, cancelledAtMs)) {
+      return {
+        ok: false,
+        ...this.makerCapRejection("maker-capture-post-cancel-book-not-converged"),
+      };
+    }
+    if (
+      entry.snapshotTs < context.proof.prepared!.snapshotTs ||
+      entry.sourcePolledAtMs < context.proof.prepared!.sourcePolledAtMs
+    ) {
+      return {
+        ok: false,
+        ...this.makerCapRejection("maker-capture-final-book-regressed"),
+      };
+    }
     const candidate = computeMakerCaptureCandidate({
       book: entry.book,
       tickSize: cmd.tickSize,
       predecessorPrice: context.predecessor.price,
-      predecessorVisibleShares: context.usage.predecessorRemainingShares,
+      predecessorVisibleShares:
+        context.proof.prepared!.predecessorSharesSubtracted === 0
+          ? 0
+          : context.usage.predecessorRemainingShares,
       originalSuggestedPrice: context.origin.originalSuggestedPrice,
       entryPriceCeiling: context.origin.entryPriceCeiling!,
     });

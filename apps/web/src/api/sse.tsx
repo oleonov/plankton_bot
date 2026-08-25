@@ -28,26 +28,49 @@ export function SSEProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const url = "/api/v1/events";
-    const es = new EventSource(url);
-    esRef.current = es;
+    const connect = () => {
+      const current = esRef.current;
+      if (current && current.readyState !== EventSource.CLOSED) return;
 
-    es.onopen = () => setState("connected");
-    es.onerror = () =>
-      setState(es.readyState === EventSource.CONNECTING ? "reconnecting" : "disconnected");
+      current?.close();
+      const es = new EventSource(url);
+      esRef.current = es;
+      setState("reconnecting");
 
-    for (const eventType of Object.keys(SSE_INVALIDATION_MAP)) {
-      es.addEventListener(eventType, () => {
-        const keys = SSE_INVALIDATION_MAP[eventType];
-        if (keys) {
-          for (const key of keys) {
-            void queryClient.invalidateQueries({ queryKey: key });
+      es.onopen = () => {
+        if (esRef.current === es) setState("connected");
+      };
+      es.onerror = () => {
+        if (esRef.current !== es) return;
+        setState(es.readyState === EventSource.CONNECTING ? "reconnecting" : "disconnected");
+      };
+
+      for (const eventType of Object.keys(SSE_INVALIDATION_MAP)) {
+        es.addEventListener(eventType, () => {
+          const keys = SSE_INVALIDATION_MAP[eventType];
+          if (keys) {
+            for (const key of keys) {
+              void queryClient.invalidateQueries({ queryKey: key });
+            }
           }
-        }
-      });
-    }
+        });
+      }
+    };
+
+    const reconnectWhenActive = () => {
+      if (document.visibilityState !== "hidden") connect();
+    };
+
+    connect();
+    document.addEventListener("visibilitychange", reconnectWhenActive);
+    window.addEventListener("pageshow", reconnectWhenActive);
+    window.addEventListener("online", reconnectWhenActive);
 
     return () => {
-      es.close();
+      document.removeEventListener("visibilitychange", reconnectWhenActive);
+      window.removeEventListener("pageshow", reconnectWhenActive);
+      window.removeEventListener("online", reconnectWhenActive);
+      esRef.current?.close();
       esRef.current = null;
       setState("disconnected");
     };
