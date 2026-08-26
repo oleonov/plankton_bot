@@ -32,7 +32,7 @@ import { encodeFunctionData, parseAbi, zeroHash } from "viem";
 import { classifyError } from "../errors.js";
 import { executeWithRetry, type RetryDiagnosticLogger } from "../retry-helper.js";
 import { classifyFetchError, hasFetchStatus } from "../clob-error-classifier.js";
-import { FetchParseError, type FetchResult } from "../fetch-result.js";
+import { FetchParseError, type FetchReason, type FetchResult } from "../fetch-result.js";
 import { redactSensitive, sanitizeLogArg } from "../redaction.js";
 import {
   classifyTradeConfirmation,
@@ -429,6 +429,18 @@ type PaginatedTradesClient = {
   getTradesPaginated?: (params: Readonly<{ after: string }>, cursor: string) => Promise<unknown>;
 };
 
+type TradePageLoader = (params: Readonly<{ after: string }>, cursor: string) => Promise<unknown>;
+
+class TradePageFetchFailure extends Error {
+  constructor(
+    readonly reason: FetchReason,
+    readonly attempts: number,
+  ) {
+    super(`trade page fetch failed: ${reason}`);
+    this.name = "TradePageFetchFailure";
+  }
+}
+
 export class LiveExchangeGateway implements ExchangeGateway {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly client: any;
@@ -645,11 +657,55 @@ export class LiveExchangeGateway implements ExchangeGateway {
     });
   }
 
-  private async fetchTradeRows(sinceMs: number): Promise<Array<Record<string, unknown>>> {
+  private tradePageLoader(): TradePageLoader {
     const client = this.client as PaginatedTradesClient;
     if (typeof client.getTradesPaginated !== "function") {
       throw new FetchParseError("paginated trades API is unavailable");
     }
+    return async (params, cursor) => {
+      const page = await client.getTradesPaginated!(params, cursor);
+      throwIfReturnedError(page);
+      return page;
+    };
+  }
+
+  private fillRetryConfig() {
+    return {
+      retries: this.fetchRetries,
+      backoffMs: this.fetchBackoffMs,
+      sleep: this.fetchSleep,
+      source: "fills" as const,
+      log: this.fetchRetryLog,
+    };
+  }
+
+  private async fetchTradePageWithRetry(
+    loadPage: TradePageLoader,
+    params: Readonly<{ after: string }>,
+    cursor: string,
+  ): Promise<unknown> {
+    let lastError: unknown;
+    const result = await executeWithRetry(
+      async () => {
+        try {
+          return await loadPage(params, cursor);
+        } catch (error) {
+          lastError = error;
+          throw error;
+        }
+      },
+      classifyFetchError,
+      this.fillRetryConfig(),
+    );
+    if (result.ok) return result.data;
+    if (result.reason === "client" && hasFetchStatus(lastError, 401)) throw lastError;
+    throw new TradePageFetchFailure(result.reason, result.attempts);
+  }
+
+  private async fetchTradeRows(
+    sinceMs: number,
+    loadPage: TradePageLoader,
+  ): Promise<Array<Record<string, unknown>>> {
     const params = { after: Math.floor(sinceMs / 1000).toString() };
     const trades: Array<Record<string, unknown>> = [];
     const seen = new Set<string>();
@@ -657,8 +713,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
     while (cursor !== END_TRADES_CURSOR) {
       if (seen.has(cursor)) throw new FetchParseError("trade cursor cycle");
       seen.add(cursor);
-      const page = await client.getTradesPaginated(params, cursor);
-      throwIfReturnedError(page);
+      const page = await loadPage(params, cursor);
       if (!page || typeof page !== "object" || Array.isArray(page)) {
         throw new FetchParseError("expected paginated trade payload");
       }
@@ -682,8 +737,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
     return trades;
   }
 
-  private async fetchFills(sinceMs: number): Promise<ExchangeFill[]> {
-    const trades = await this.fetchTradeRows(sinceMs);
+  private async fetchFills(sinceMs: number, loadPage: TradePageLoader): Promise<ExchangeFill[]> {
+    const trades = await this.fetchTradeRows(sinceMs, loadPage);
     return trades.flatMap((trade) => {
       const confirmation = classifyTradeConfirmation(trade.status);
       if (confirmation === "invalid") throw new FetchParseError("malformed trade status");
@@ -696,6 +751,32 @@ export class LiveExchangeGateway implements ExchangeGateway {
       if (this.traderAddress) assertAuthenticatedFillRow(trade, fills);
       return fills;
     });
+  }
+
+  private async fetchFillsSnapshot(sinceMs: number): Promise<FetchResult<ExchangeFill[]>> {
+    try {
+      const directLoad = this.tradePageLoader();
+      const reliableLoad: TradePageLoader = (params, cursor) =>
+        this.fetchTradePageWithRetry(directLoad, params, cursor);
+      return { ok: true, data: await this.fetchFills(sinceMs, reliableLoad) };
+    } catch (error) {
+      if (error instanceof TradePageFetchFailure) {
+        return { ok: false, reason: error.reason, attempts: error.attempts };
+      }
+      throw error;
+    }
+  }
+
+  private async fetchFillsResultWithRetry(sinceMs: number): Promise<FetchResult<ExchangeFill[]>> {
+    const result = await executeWithRetry(
+      () => this.fetchFillsSnapshot(sinceMs),
+      classifyFetchError,
+      {
+        ...this.fillRetryConfig(),
+        retryClientError: (error) => hasFetchStatus(error, 401),
+      },
+    );
+    return result.ok ? result.data : result;
   }
 
   private async fetchExactOrder(orderId: string): Promise<ExchangeOrder | null> {
@@ -777,7 +858,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   async getFills(sinceMs: number): Promise<ExchangeFill[]> {
     try {
-      return await this.fetchFills(sinceMs);
+      return await this.fetchFills(sinceMs, this.tradePageLoader());
     } catch {
       return [];
     }
@@ -788,15 +869,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
     return timeDepCall(
       this.depHealthRecorder,
       "clob",
-      () =>
-        executeWithRetry(() => this.fetchFills(sinceMs), classifyFetchError, {
-          retries: this.fetchRetries,
-          backoffMs: this.fetchBackoffMs,
-          sleep: this.fetchSleep,
-          source: "fills",
-          retryClientError: (error) => hasFetchStatus(error, 401),
-          log: this.fetchRetryLog,
-        }),
+      () => this.fetchFillsResultWithRetry(sinceMs),
       { isOk: fetchResultOk },
     );
   }

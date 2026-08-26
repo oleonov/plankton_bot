@@ -262,6 +262,96 @@ describe("LiveExchangeGateway.getFillsResult", () => {
     expect(client.getTradesPaginated).toHaveBeenCalledTimes(4);
   });
 
+  it.each([
+    ["HTTP 500", () => statusError("500", 500)],
+    ["timeout", () => Object.assign(new Error("timed out"), { code: "ETIMEDOUT" })],
+  ])("retries a transient %s on the same fill page", async (_label, failure) => {
+    const firstFill = {
+      id: "trade-page-1",
+      taker_order_id: "ord-1",
+      asset_id: "tok-1",
+      side: "BUY",
+      size: "1",
+      price: "0.5",
+      status: "CONFIRMED",
+      match_time: "2026-01-15T12:00:00Z",
+    };
+    const secondFill = { ...firstFill, id: "trade-page-2", taker_order_id: "ord-2" };
+    client.getTradesPaginated
+      .mockResolvedValueOnce(tradePage([firstFill], "page-2"))
+      .mockRejectedValueOnce(failure())
+      .mockResolvedValueOnce(tradePage([secondFill]));
+
+    const result = await gw.getFillsResult(0);
+    expect(result.ok).toBe(true);
+    if (result.ok)
+      expect(result.data.map((fill) => fill.fillId)).toEqual(["trade-page-1", "trade-page-2"]);
+    expect(client.getTradesPaginated.mock.calls.map((call) => call[1])).toEqual([
+      "MA==",
+      "page-2",
+      "page-2",
+    ]);
+  });
+
+  it("retries a returned page error on the same fill cursor", async () => {
+    const firstFill = {
+      id: "trade-page-1",
+      taker_order_id: "ord-1",
+      asset_id: "tok-1",
+      side: "BUY",
+      size: "1",
+      price: "0.5",
+      status: "CONFIRMED",
+      match_time: "2026-01-15T12:00:00Z",
+    };
+    const secondFill = { ...firstFill, id: "trade-page-2", taker_order_id: "ord-2" };
+    client.getTradesPaginated
+      .mockResolvedValueOnce(tradePage([firstFill], "page-2"))
+      .mockResolvedValueOnce({ trades: [], error: "no healthy upstream", status: 500 })
+      .mockResolvedValueOnce(tradePage([secondFill]));
+
+    const result = await gw.getFillsResult(0);
+    expect(result.ok).toBe(true);
+    if (result.ok)
+      expect(result.data.map((fill) => fill.fillId)).toEqual(["trade-page-1", "trade-page-2"]);
+    expect(client.getTradesPaginated.mock.calls.map((call) => call[1])).toEqual([
+      "MA==",
+      "page-2",
+      "page-2",
+    ]);
+  });
+
+  it("does not restart the fill snapshot after page-scoped retries are exhausted", async () => {
+    const firstPage = tradePage(
+      [
+        {
+          id: "trade-page-1",
+          taker_order_id: "ord-1",
+          asset_id: "tok-1",
+          side: "BUY",
+          size: "1",
+          price: "0.5",
+          status: "CONFIRMED",
+          match_time: "2026-01-15T12:00:00Z",
+        },
+      ],
+      "page-2",
+    );
+    client.getTradesPaginated.mockImplementation(async (_params, cursor) => {
+      if (cursor === "MA==") return firstPage;
+      throw statusError("500", 500);
+    });
+
+    expect(await gw.getFillsResult(0)).toEqual({ ok: false, reason: "server", attempts: 4 });
+    expect(client.getTradesPaginated.mock.calls.map((call) => call[1])).toEqual([
+      "MA==",
+      "page-2",
+      "page-2",
+      "page-2",
+      "page-2",
+    ]);
+  });
+
   it("retries a persistently unauthorized fill snapshot without exposing page-one fills", async () => {
     const firstPage = tradePage(
       [
