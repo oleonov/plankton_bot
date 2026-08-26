@@ -196,6 +196,8 @@ import { parseQuoteMotionOrigin, type QuoteMotionOriginV1 } from "../../quote-mo
  * may wait on the gateway), and two would drift.
  */
 const EXECUTION_SHUTDOWN_TIMEOUT_MS = 10_000;
+const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
+const D8_EXIT_ALREADY_WORKING_REASON = "d8-exit-already-working";
 
 type OrderFillLookupGateway = ExchangeGateway & {
   getFillsForOrder?: (orderId: string) => Promise<ExchangeFill[]>;
@@ -2530,6 +2532,32 @@ export class ExecutionModule implements RuntimeModule {
     );
   }
 
+  private hasWorkingD8Exit(cmd: PlaceOrderCommand): boolean {
+    if (
+      cmd.side !== "sell" ||
+      cmd.decisionRuleId !== D8_PROFIT_RATIO_RULE_ID ||
+      cmd.positionId == null
+    ) {
+      return false;
+    }
+    const matchesIdentity = (candidate: PendingReservation | Order): boolean =>
+      candidate.side === "sell" &&
+      candidate.decisionRuleId === D8_PROFIT_RATIO_RULE_ID &&
+      String(candidate.tokenId) === String(cmd.tokenId) &&
+      String(candidate.conditionId) === String(cmd.conditionId) &&
+      String(candidate.positionId) === String(cmd.positionId);
+    if ([...this.pendingReservations.values()].some(matchesIdentity)) return true;
+    return this.deps.orderRepo
+      .findByTokenId(cmd.tokenId)
+      .some(
+        (order) =>
+          (order.status === "pending" ||
+            order.status === "open" ||
+            order.status === "partially-filled") &&
+          matchesIdentity(order),
+      );
+  }
+
   // ─── Place order handler ──────────────────────────────────────────────
 
   private async handlePlace(cmd: PlaceOrderCommand, recoveryOnly = false): Promise<void> {
@@ -2929,6 +2957,15 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    if (this.hasWorkingD8Exit(cmd)) {
+      await this.rejectOrder(
+        cmd,
+        D8_EXIT_ALREADY_WORKING_REASON,
+        ExchangeErrorCode.LivePolicyBlocked,
+      );
+      return;
+    }
+
     if (await this.blockSellReplacementBelowExitLossFloor(cmd)) {
       return;
     }
@@ -3006,9 +3043,19 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    if (this.hasWorkingD8Exit(effectiveCmd)) {
+      await this.rejectOrder(
+        effectiveCmd,
+        D8_EXIT_ALREADY_WORKING_REASON,
+        ExchangeErrorCode.LivePolicyBlocked,
+      );
+      return;
+    }
+
     this.pendingReservations.set(String(effectiveCmd.commandId), {
       clientOrderId: effectiveCmd.clientOrderId,
       conditionId: effectiveCmd.conditionId,
+      positionId: effectiveCmd.positionId ?? null,
       tokenId: effectiveCmd.tokenId,
       side: effectiveCmd.side,
       size: effectiveCmd.size,

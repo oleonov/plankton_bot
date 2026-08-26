@@ -487,6 +487,81 @@ describe("ExecutionModule", () => {
     await execution.stop();
   });
 
+  it("dedupes concurrent D8 exits for the same position and releases the guard after failure", async () => {
+    const position = makePosition({ size: 10, avgEntryPrice: 0.05, costBasisUsdc: 0.5 });
+    const positionRepo = createMockPositionRepo(position);
+    positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([position]);
+    const persisted: Order[] = [];
+    orderRepo.findByTokenId = vi.fn().mockImplementation(() => persisted);
+    orderRepo.findOpen = vi
+      .fn()
+      .mockImplementation(() => persisted.filter((order) => order.status === "open"));
+    orderRepo.save = vi.fn().mockImplementation((order: Order) => persisted.push(order));
+    const execution = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(position),
+    });
+    let finishFirst!: (result: PlaceOrderResult) => void;
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<PlaceOrderResult>((resolve) => (finishFirst = resolve)),
+    );
+    const rejected: Array<{ reason: string }> = [];
+    bus.subscribe("OrderRejected", async (event) => {
+      rejected.push({ reason: event.reason });
+    });
+    await execution.start();
+
+    const command = (suffix: string, price = 0.1): PlaceOrderCommand =>
+      makePlaceCmd({
+        commandId: createCommandId(`d8-${suffix}`),
+        clientOrderId: `d8-${suffix}` as ClientOrderId,
+        signalId: `signal-d8-${suffix}`,
+        side: "sell",
+        size: 5,
+        price,
+        postOnly: true,
+        positionId: position.positionId,
+        decisionRuleId: "D8_PROFIT_RATIO",
+      });
+
+    const first = bus.publish("PlaceOrderRequested", {
+      command: command("first"),
+      timestamp: Date.now(),
+    });
+    await vi.waitFor(() => expect(gateway.placeOrder).toHaveBeenCalledTimes(1));
+    await bus.publish("PlaceOrderRequested", {
+      command: command("duplicate"),
+      timestamp: Date.now(),
+    });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(rejected.filter((event) => event.reason === "d8-exit-already-working")).toHaveLength(1);
+
+    finishFirst({ success: false, errorCode: ExchangeErrorCode.NetworkError });
+    await first;
+    await bus.publish("PlaceOrderRequested", {
+      command: command("retry"),
+      timestamp: Date.now(),
+    });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: command("persisted-duplicate", 0.2),
+      timestamp: Date.now(),
+    });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(rejected.filter((event) => event.reason === "d8-exit-already-working")).toHaveLength(2);
+    await execution.stop();
+  });
+
   it("releases a failed pre-child capture command only until its child persists", async () => {
     const rootOrderId = createOrderId("capture-root");
     const predecessorOrderId = createOrderId("capture-predecessor");

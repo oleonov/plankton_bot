@@ -6,6 +6,7 @@ import type {
   Order,
   OrderRepository,
   Position,
+  PositionId,
   PositionRepository,
   TokenId,
 } from "@krabs/domain";
@@ -20,6 +21,7 @@ export interface PendingReservation {
   clientOrderId?: ClientOrderId;
   /** Always supplied by Execution; missing external values are counted conservatively as unknown. */
   conditionId?: ConditionId;
+  positionId?: PositionId | null;
   tokenId: TokenId;
   side: "buy" | "sell";
   size: number;
