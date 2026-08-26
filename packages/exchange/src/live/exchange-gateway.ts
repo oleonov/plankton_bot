@@ -31,7 +31,7 @@ import type {
 import { encodeFunctionData, parseAbi, zeroHash } from "viem";
 import { classifyError } from "../errors.js";
 import { executeWithRetry, type RetryDiagnosticLogger } from "../retry-helper.js";
-import { classifyFetchError } from "../clob-error-classifier.js";
+import { classifyFetchError, hasFetchStatus } from "../clob-error-classifier.js";
 import { FetchParseError, type FetchResult } from "../fetch-result.js";
 import { redactSensitive, sanitizeLogArg } from "../redaction.js";
 import {
@@ -794,6 +794,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
           backoffMs: this.fetchBackoffMs,
           sleep: this.fetchSleep,
           source: "fills",
+          retryClientError: (error) => hasFetchStatus(error, 401),
           log: this.fetchRetryLog,
         }),
       { isOk: fetchResultOk },

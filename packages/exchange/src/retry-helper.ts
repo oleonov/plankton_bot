@@ -27,6 +27,8 @@ export interface ExecuteWithRetryConfig {
   source: "open_orders" | "fills" | "exact_order";
   /** Invoked once per retry — used to increment the retry counter. */
   onRetry?: (reason: FetchReason, source: "open_orders" | "fills" | "exact_order") => void;
+  /** Allows one read path to retry a specifically recognized client error. */
+  retryClientError?: (error: unknown) => boolean;
   /**
    * Optional diagnostic sink. When an error classifies as `unknown` (the
    * conservative catch-all), the raw status/code/message are logged so the
@@ -56,7 +58,10 @@ export async function executeWithRetry<T>(
           "exchange fetch error classified as unknown — review classifier heuristics",
         );
       }
-      if (!isRetryableReason(reason) || i === config.retries) {
+      const retryable =
+        isRetryableReason(reason) ||
+        (reason === "client" && config.retryClientError?.(err) === true);
+      if (!retryable || i === config.retries) {
         return { ok: false, reason, attempts };
       }
       config.onRetry?.(reason, config.source);

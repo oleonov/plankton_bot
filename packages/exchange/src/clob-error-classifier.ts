@@ -45,6 +45,10 @@ function extractStatus(err: unknown): number | undefined {
   return undefined;
 }
 
+export function hasFetchStatus(err: unknown, expectedStatus: number): boolean {
+  return extractStatus(err) === expectedStatus;
+}
+
 function extractCode(err: unknown): string | undefined {
   if (typeof err !== "object" || err === null) return undefined;
   const code = (err as Record<string, unknown>).code;

@@ -80,8 +80,8 @@ describe("LiveExchangeGateway.getOpenOrdersResult", () => {
     expect(client.getOpenOrders).toHaveBeenCalledTimes(4);
   });
 
-  it("does NOT retry a 4xx client error", async () => {
-    client.getOpenOrders.mockRejectedValue(statusError("Bad Request", 400));
+  it("does NOT retry an unauthorized open-orders request", async () => {
+    client.getOpenOrders.mockRejectedValue(statusError("Unauthorized", 401));
     const result = await gw.getOpenOrdersResult();
     expect(result).toEqual({ ok: false, reason: "client", attempts: 1 });
     expect(client.getOpenOrders).toHaveBeenCalledTimes(1);
@@ -262,46 +262,70 @@ describe("LiveExchangeGateway.getFillsResult", () => {
     expect(client.getTradesPaginated).toHaveBeenCalledTimes(4);
   });
 
-  it("fails closed without returning page-one fills when page two is unauthorized", async () => {
-    client.getTradesPaginated
-      .mockResolvedValueOnce(
-        tradePage(
-          [
-            {
-              id: "trade-page-1",
-              taker_order_id: "ord-1",
-              asset_id: "tok-1",
-              side: "BUY",
-              size: "1",
-              price: "0.5",
-              status: "CONFIRMED",
-              match_time: "2026-01-15T12:00:00Z",
-            },
-          ],
-          "page-2",
-        ),
-      )
-      .mockResolvedValueOnce({
-        trades: [],
-        error: "Invalid API key",
-        status: 401,
-        next_cursor: "LTE=",
-        limit: 0,
-        count: 0,
-      });
+  it("retries a persistently unauthorized fill snapshot without exposing page-one fills", async () => {
+    const firstPage = tradePage(
+      [
+        {
+          id: "trade-page-1",
+          taker_order_id: "ord-1",
+          asset_id: "tok-1",
+          side: "BUY",
+          size: "1",
+          price: "0.5",
+          status: "CONFIRMED",
+          match_time: "2026-01-15T12:00:00Z",
+        },
+      ],
+      "page-2",
+    );
+    const unauthorizedPage = {
+      trades: [],
+      error: "Invalid API key",
+      status: 401,
+      next_cursor: "LTE=",
+      limit: 0,
+      count: 0,
+    };
+    client.getTradesPaginated.mockImplementation(async (_params, cursor) =>
+      cursor === "MA==" ? firstPage : unauthorizedPage,
+    );
 
-    expect(await gw.getFillsResult(0)).toEqual({ ok: false, reason: "client", attempts: 1 });
+    expect(await gw.getFillsResult(0)).toEqual({ ok: false, reason: "client", attempts: 4 });
+    expect(client.getTradesPaginated.mock.calls.map((call) => call[1])).toEqual([
+      "MA==",
+      "page-2",
+      "MA==",
+      "page-2",
+      "MA==",
+      "page-2",
+      "MA==",
+      "page-2",
+    ]);
   });
 
-  it("restarts a transiently failed paginated fill snapshot from page one", async () => {
-    const firstPage = tradePage([], "page-2");
+  it("restarts a transiently unauthorized fill snapshot from page one without duplicates", async () => {
+    const firstFill = {
+      id: "trade-page-1",
+      taker_order_id: "ord-1",
+      asset_id: "tok-1",
+      side: "BUY",
+      size: "1",
+      price: "0.5",
+      status: "CONFIRMED",
+      match_time: "2026-01-15T12:00:00Z",
+    };
+    const secondFill = { ...firstFill, id: "trade-page-2", taker_order_id: "ord-2" };
+    const firstPage = tradePage([firstFill], "page-2");
     client.getTradesPaginated
       .mockResolvedValueOnce(firstPage)
-      .mockRejectedValueOnce(statusError("502", 502))
+      .mockResolvedValueOnce({ trades: [], error: "Invalid API key", status: 401 })
       .mockResolvedValueOnce(firstPage)
-      .mockResolvedValueOnce(tradePage([]));
+      .mockResolvedValueOnce(tradePage([secondFill]));
 
-    expect(await gw.getFillsResult(0)).toEqual({ ok: true, data: [] });
+    const result = await gw.getFillsResult(0);
+    expect(result.ok).toBe(true);
+    if (result.ok)
+      expect(result.data.map((fill) => fill.fillId)).toEqual(["trade-page-1", "trade-page-2"]);
     expect(client.getTradesPaginated.mock.calls.map((call) => call[1])).toEqual([
       "MA==",
       "page-2",

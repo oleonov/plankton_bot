@@ -99,6 +99,25 @@ describe("executeWithRetry", () => {
     expect(retried).toEqual([]);
   });
 
+  it("retries only an explicitly approved client error", async () => {
+    const { config, slept, retried } = makeConfig({ retries: 1 });
+    let calls = 0;
+    const result = await executeWithRetry(
+      async () => {
+        calls++;
+        if (calls === 1) throw statusError(401);
+        return "ok";
+      },
+      classifyFetchError,
+      { ...config, retryClientError: (error: unknown) => error instanceof Error },
+    );
+
+    expect(result).toEqual({ ok: true, data: "ok" });
+    expect(calls).toBe(2);
+    expect(slept).toEqual([10]);
+    expect(retried).toEqual(["client"]);
+  });
+
   it("does NOT retry a parse error", async () => {
     const { config } = makeConfig();
     let calls = 0;
@@ -108,7 +127,7 @@ describe("executeWithRetry", () => {
         throw new FetchParseError("not an array");
       },
       classifyFetchError,
-      config,
+      { ...config, retryClientError: () => true },
     );
     expect(result).toEqual({ ok: false, reason: "parse", attempts: 1 });
     expect(calls).toBe(1);
