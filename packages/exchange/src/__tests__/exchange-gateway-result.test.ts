@@ -5,8 +5,13 @@ function createMockClient() {
   return {
     getOpenOrders: vi.fn(),
     getTrades: vi.fn(),
+    getTradesPaginated: vi.fn(),
     getOrder: vi.fn(),
   };
+}
+
+function tradePage(trades: unknown[], nextCursor = "LTE=") {
+  return { trades, next_cursor: nextCursor, limit: trades.length, count: trades.length };
 }
 
 function statusError(message: string, status: number): Error {
@@ -216,19 +221,21 @@ describe("LiveExchangeGateway.getFillsResult", () => {
   });
 
   it("returns ok:true with mapped fills", async () => {
-    client.getTrades.mockResolvedValue([
-      {
-        id: "trade-1",
-        taker_order_id: "ord-1",
-        asset_id: "tok-1",
-        side: "BUY",
-        size: "50",
-        price: "0.55",
-        fee_rate_bps: "100",
-        status: "CONFIRMED",
-        match_time: "2026-01-15T12:00:00Z",
-      },
-    ]);
+    client.getTradesPaginated.mockResolvedValue(
+      tradePage([
+        {
+          id: "trade-1",
+          taker_order_id: "ord-1",
+          asset_id: "tok-1",
+          side: "BUY",
+          size: "50",
+          price: "0.55",
+          fee_rate_bps: "100",
+          status: "CONFIRMED",
+          match_time: "2026-01-15T12:00:00Z",
+        },
+      ]),
+    );
 
     const result = await gw.getFillsResult(0);
     expect(result.ok).toBe(true);
@@ -239,26 +246,74 @@ describe("LiveExchangeGateway.getFillsResult", () => {
   });
 
   it("treats empty trades as ok:true (NOT failure)", async () => {
-    client.getTrades.mockResolvedValue([]);
+    client.getTradesPaginated.mockResolvedValue(tradePage([]));
     const result = await gw.getFillsResult(0);
     expect(result).toEqual({ ok: true, data: [] });
   });
 
   it("retries transient failures and reports ok:false on exhaustion", async () => {
-    client.getTrades.mockRejectedValue(statusError("502", 502));
+    client.getTradesPaginated.mockRejectedValue(statusError("502", 502));
     const result = await gw.getFillsResult(0);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toBe("server");
       expect(result.attempts).toBe(4);
     }
-    expect(client.getTrades).toHaveBeenCalledTimes(4);
+    expect(client.getTradesPaginated).toHaveBeenCalledTimes(4);
+  });
+
+  it("fails closed without returning page-one fills when page two is unauthorized", async () => {
+    client.getTradesPaginated
+      .mockResolvedValueOnce(
+        tradePage(
+          [
+            {
+              id: "trade-page-1",
+              taker_order_id: "ord-1",
+              asset_id: "tok-1",
+              side: "BUY",
+              size: "1",
+              price: "0.5",
+              status: "CONFIRMED",
+              match_time: "2026-01-15T12:00:00Z",
+            },
+          ],
+          "page-2",
+        ),
+      )
+      .mockResolvedValueOnce({
+        trades: [],
+        error: "Invalid API key",
+        status: 401,
+        next_cursor: "LTE=",
+        limit: 0,
+        count: 0,
+      });
+
+    expect(await gw.getFillsResult(0)).toEqual({ ok: false, reason: "client", attempts: 1 });
+  });
+
+  it("restarts a transiently failed paginated fill snapshot from page one", async () => {
+    const firstPage = tradePage([], "page-2");
+    client.getTradesPaginated
+      .mockResolvedValueOnce(firstPage)
+      .mockRejectedValueOnce(statusError("502", 502))
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce(tradePage([]));
+
+    expect(await gw.getFillsResult(0)).toEqual({ ok: true, data: [] });
+    expect(client.getTradesPaginated.mock.calls.map((call) => call[1])).toEqual([
+      "MA==",
+      "page-2",
+      "MA==",
+      "page-2",
+    ]);
   });
 
   it("old getFills still returns [] on failure (backward compat)", async () => {
-    client.getTrades.mockRejectedValue(new Error("fetch failed"));
+    client.getTradesPaginated.mockRejectedValue(new Error("fetch failed"));
     const fills = await gw.getFills(0);
     expect(fills).toEqual([]);
-    expect(client.getTrades).toHaveBeenCalledTimes(1);
+    expect(client.getTradesPaginated).toHaveBeenCalledTimes(1);
   });
 });

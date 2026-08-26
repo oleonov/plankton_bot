@@ -19,6 +19,7 @@ const NEG_RISK_REDEEM_ABI = parseAbi([
 // ─── Mock ClobClient ─────────────────────────────────────────────────────
 
 function createMockClient() {
+  const getTrades = vi.fn();
   return {
     chainId: 137,
     createAndPostOrder: vi.fn(),
@@ -28,7 +29,16 @@ function createMockClient() {
     getOrder: vi.fn(),
     cancelAll: vi.fn(),
     getOpenOrders: vi.fn(),
-    getTrades: vi.fn(),
+    getTrades,
+    getTradesPaginated: vi.fn(async (params: unknown): Promise<unknown> => {
+      const trades = await getTrades(params);
+      return {
+        trades,
+        next_cursor: "LTE=",
+        limit: Array.isArray(trades) ? trades.length : 0,
+        count: Array.isArray(trades) ? trades.length : 0,
+      };
+    }),
     getBalanceAllowance: vi.fn(),
     getOk: vi.fn(),
     getMarkets: vi.fn(),
@@ -407,6 +417,76 @@ describe("LiveExchangeGateway", () => {
     expect(fills[0]!.price).toBe(0.55);
     // fee = 50 * (100 / 10000) * 0.55 * (1 - 0.55) = 50 * 0.01 * 0.55 * 0.45 = 0.5 * 0.2475 = 0.12375
     expect(fills[0]!.fee).toBeCloseTo(0.12375);
+  });
+
+  it("getFills refreshes authentication by fetching each trade page separately", async () => {
+    const trade = (id: string) => ({
+      id,
+      taker_order_id: `ord-${id}`,
+      asset_id: "tok-1",
+      side: "BUY",
+      size: "1",
+      price: "0.5",
+      status: "CONFIRMED",
+      match_time: "2026-01-15T12:00:00Z",
+    });
+    client.getTradesPaginated
+      .mockResolvedValueOnce({
+        trades: [trade("trade-page-1")],
+        next_cursor: "page-2",
+        limit: 1,
+        count: 1,
+      })
+      .mockResolvedValueOnce({
+        trades: [trade("trade-page-2")],
+        next_cursor: "LTE=",
+        limit: 1,
+        count: 1,
+      });
+
+    const result = await gw.getFillsResult(0);
+
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) {
+      expect(result.data.map((fill) => fill.fillId)).toEqual(["trade-page-1", "trade-page-2"]);
+    }
+    expect(client.getTradesPaginated).toHaveBeenNthCalledWith(1, { after: "0" }, "MA==");
+    expect(client.getTradesPaginated).toHaveBeenNthCalledWith(2, { after: "0" }, "page-2");
+    expect(client.getTrades).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when paginated trades omit or repeat a cursor", async () => {
+    client.getTradesPaginated.mockResolvedValueOnce({
+      trades: [],
+      limit: 0,
+      count: 0,
+    });
+    await expect(gw.getFillsResult(0)).resolves.toMatchObject({
+      ok: false,
+      reason: "parse",
+      attempts: 1,
+    });
+
+    client.getTradesPaginated
+      .mockResolvedValueOnce({ trades: [], next_cursor: "page-2", limit: 0, count: 0 })
+      .mockResolvedValueOnce({ trades: [], next_cursor: "MA==", limit: 0, count: 0 });
+    await expect(gw.getFillsResult(0)).resolves.toMatchObject({
+      ok: false,
+      reason: "parse",
+      attempts: 1,
+    });
+
+    client.getTradesPaginated.mockResolvedValueOnce({
+      trades: [],
+      next_cursor: "LTE=",
+      limit: 1,
+      count: 1,
+    });
+    await expect(gw.getFillsResult(0)).resolves.toMatchObject({
+      ok: false,
+      reason: "parse",
+      attempts: 1,
+    });
   });
 
   it("imports only final successful trades and excludes reproduced FAILED maker fills", async () => {

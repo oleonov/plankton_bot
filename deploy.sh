@@ -101,7 +101,7 @@ for log in (clean(logs[name]) for name in focused):
 for name,count in (('typecheck.log',15),('build.log',9),('post-test.log',15),('baseline-lint.log',9),('post-lint.log',9)):
  assert re.search(rf'Tasks:\s+{count} successful, {count} total',clean(logs[name])) and 'error TS' not in logs[name]
 assert clean(logs['prettier.log']).rstrip().endswith('All matched files use Prettier code style!')
-tags=('T1 T2 T3 T4 T5 T6 T7 T8 T9 T10a T10b T11 T12 T13 T13b T13d T14 T14b T15 T16 T17 T18a T18b-core T18b-log T18c T19 T20 T21a T21b T21c T22 T23 T24 T25 T26 T27 T28a T28b T28c T28d T28e T28f T28g T28h T28i').split()
+tags=('T1 T2 T3 T4 T5 T6 T7 T8 T9 T10a T10b T11 T12 T13 T13b T13d T14 T14b T15 T16 T17 T18a T18b-core T18b-log T18c T19 T20 T21a T21b T21c T22 T23 T24 T25 T26 T27 T28a T28b T28c T28d T28e T28f T28g T28h T28i T28j').split()
 assert all(len(re.findall(rf'(?m){re.escape(tag)} — ',logs['gate-cases.txt']))==1 for tag in tags)
 summary=json.loads(logs['gate-summary.json']); assert summary=={'schemaVersion':1,'status':'passed','gateCompletedAtEpoch':d['gateCompletedAtEpoch'],'repoInputHash':sys.argv[4],'requiredSteps':d['requiredSteps']}
 census=json.loads(logs['test-census.json']); assert set(census)=={'baseline','post'} and set(census['baseline'])==set(census['post'])
@@ -200,6 +200,13 @@ PY
   "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
     "test -f '${path}' && test \"\$(stat -c '%u %g %a' '${path}')\" = '0 0 600' && test \"\$(sha256sum '${path}' | awk '{print \$1}')\" = '${recorded_hash}'" || die 'existing recovery environment is corrupt'
   [[ "$recorded_hash" == "$hash" ]] || die 'local runtime environment differs from same-SHA recovery'
+}
+
+preflight_supersede_recovery() {
+  local expected_old="$1" full="$2" hash="$3" ssh_cmd
+  ssh_cmd="${KRABS_DEPLOY_SSH:-ssh}"
+  "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
+    "cd '${SERVER_PATH}' && KRABS_REMOTE_PREFLIGHT=1 exec /bin/bash -s -- --internal-supersede-preflight '${expected_old}' '${full}' '${hash}'" < "$0"
 }
 
 stage_runtime_env() {
@@ -335,6 +342,86 @@ fence_runtime_network() {
   if printf '%s' "$census" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert list(d)==[sys.argv[1]]' "$network"; then run "$DOCKER" network disconnect -f "$network" "$runtime" || die 'old runtime network disconnect failed'; fi
   census="$(run "$DOCKER" inspect --format '{{json .NetworkSettings.Networks}}' "$runtime")" || die 'old runtime network post-census failed'
   [[ "$census" == '{}' ]] || die 'old runtime remains network connected'
+}
+
+validate_stopped_supersede_container() {
+  local container="$1" expected_old="$2" expected_image="$3" network="$4" role="$5" running restart revision image census
+  read -r running restart revision image < <(run "$DOCKER" inspect --format '{{.State.Running}} {{.HostConfig.RestartPolicy.Name}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{.Image}}' "$container") || die "supersede ${role} identity inspection failed"
+  [[ "$running" == false && "$restart" == no && "$revision" == "$expected_old" && "$image" == "$expected_image" ]] || die "supersede ${role} is not the exact stopped target"
+  census="$(run "$DOCKER" inspect --format '{{json .NetworkSettings.Networks}}' "$container")" || die "supersede ${role} network census failed"
+  printf '%s' "$census" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,dict) and list(d) in ([],[sys.argv[1]])' "$network" || die "supersede ${role} network is not empty or the saved default"
+}
+
+assert_no_rollback_ownership() {
+  local state="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"
+  local marker="${KRABS_ROLLBACK_MARKER_PATH:-/opt/krabs/config/rollback-in-progress.json}"
+  [[ ! -e "$state" && ! -e "$marker" ]] || die 'rollback ownership is active'
+}
+
+validate_supersede_api() {
+  local expected_old="$1" expected_image="$2" network="$3" runtime="$4" manager="$5" api running revision image census
+  api="$(run "$DOCKER" ps --all --quiet --filter label=com.docker.compose.project=krabs --filter label=com.docker.compose.service=krabs-api | sed '/^$/d')"
+  [[ -n "$api" && "$api" != *$'\n'* && "$api" != "$runtime" && "$api" != "$manager" ]] || die 'supersede API identity is ambiguous'
+  read -r running revision image < <(run "$DOCKER" inspect --format '{{.State.Running}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{.Image}}' "$api") || die 'supersede API identity inspection failed'
+  [[ "$running" == true && "$revision" == "$expected_old" && "$image" == "$expected_image" ]] || die 'supersede API is not the running failed target'
+  census="$(run "$DOCKER" inspect --format '{{json .NetworkSettings.Networks}}' "$api")" || die 'supersede API network census failed'
+  printf '%s' "$census" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,dict) and list(d)==[sys.argv[1]]' "$network" || die 'supersede API network is not the saved default'
+}
+
+validate_supersede_recovery() {
+  local expected_old="$1" full="$2" expected_hash="$3" runtime manager network path actual image_id
+  sha "$expected_old" && sha "$full" && [[ "$expected_old" != "$full" ]] || die 'supersede SHA binding is invalid'
+  assert_no_rollback_ownership
+  [[ -e "$RECOVERY" && -e "$META" && -e "$MARKER" ]] || die 'supersede state, metadata, and marker are required'
+  python3 - "$RECOVERY" "$META" "$MARKER" "$expected_old" "$full" "$expected_hash" <<'PY'
+import json,re,sys
+recovery_path,meta_path,marker_path,expected_old,new_sha,expected_hash=sys.argv[1:]
+d=json.load(open(recovery_path)); meta=json.load(open(meta_path)); marker=json.load(open(marker_path))
+required={'schemaVersion','recoveryStateId','phase','deliveryMode','targetSha','digest','imageId','prePaused','previousVersion','baselineCapturedUnderLock','baselineCommandHighWater','finalCommandHighWater','preRunId','preInstanceId','preRuntimeId','preApiId','preManagerId','tradingCutoverInvoked','targetRuntimeId','targetManagerId','targetNetworkIds','candidateHash','receipt','migrationGate','runtimeEnvPath','runtimeEnvSha256'}
+assert required <= set(d) and d['schemaVersion']==1 and d['phase']=='target_stopped_rearbitrate'
+assert d['deliveryMode']=='release' and d['targetSha']==expected_old and expected_old!=new_sha
+assert isinstance(d['recoveryStateId'],str) and d['recoveryStateId']
+assert isinstance(d['prePaused'],bool) and d['baselineCapturedUnderLock'] is True and d['tradingCutoverInvoked'] is True
+assert isinstance(d['previousVersion'],int) and d['previousVersion']>=0
+assert isinstance(d['baselineCommandHighWater'],int) and d['baselineCommandHighWater']>=0
+assert d['finalCommandHighWater']==0 and d['candidateHash']=='' and d['receipt']==''
+assert isinstance(d['migrationGate'],dict)
+assert re.fullmatch(r'sha256:[0-9a-f]{64}',d['digest']) and re.fullmatch(r'sha256:[0-9a-f]{64}',d['imageId'])
+assert isinstance(d['targetRuntimeId'],str) and d['targetRuntimeId']
+assert isinstance(d['targetManagerId'],str) and d['targetManagerId'] and d['targetManagerId']!=d['targetRuntimeId']
+assert isinstance(d['targetNetworkIds'],list) and len(d['targetNetworkIds'])==1 and isinstance(d['targetNetworkIds'][0],str) and d['targetNetworkIds'][0]
+assert d['runtimeEnvSha256']==expected_hash and re.fullmatch(r'[0-9a-f]{64}',expected_hash)
+assert isinstance(d['runtimeEnvPath'],str) and d['runtimeEnvPath']
+assert isinstance(meta,dict) and meta.get('deployVersion')==d['previousVersion']
+assert isinstance(meta.get('sha'),str) and re.fullmatch(r'[0-9a-f]{40}',meta['sha'])
+assert meta['sha'] not in (expected_old,new_sha)
+assert isinstance(marker,dict) and marker.get('schemaVersion')==1 and marker.get('deploymentId')==d['recoveryStateId']
+PY
+  path="$(recovery_field runtimeEnvPath)"; actual="$(sha256sum "$path" 2>/dev/null | awk '{print $1}')"
+  [[ "$actual" == "$expected_hash" ]] || die 'supersede recorded runtime environment is missing or corrupt'
+  if ! test_mode; then
+    [[ "$path" == "$CONFIG_DIR/deploy-runtime-env-${expected_old}-${expected_hash}" ]] || die 'supersede recorded runtime environment path is foreign'
+    [[ "$(stat -c '%U %G %a' "$path")" == 'root root 600' ]] || die 'supersede recorded runtime environment permissions are invalid'
+  fi
+  runtime="$(recovery_field targetRuntimeId)"; manager="$(recovery_field targetManagerId)"; image_id="$(recovery_field imageId)"; network="$(python3 - "$RECOVERY" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))['targetNetworkIds'][0])
+PY
+)"
+  validate_stopped_supersede_container "$runtime" "$expected_old" "$image_id" "$network" runtime
+  validate_stopped_supersede_container "$manager" "$expected_old" "$image_id" "$network" manager
+  validate_supersede_api "$expected_old" "$image_id" "$network" "$runtime" "$manager"
+}
+
+rebind_supersede_recovery() {
+  local full="$1" digest="$2" image_id="$3"
+  recovery "$(python3 - "$RECOVERY" "$full" "$digest" "$image_id" "${KRABS_RUNTIME_ENV_PATH:?}" "${KRABS_RUNTIME_ENV_SHA256:?}" "$$" "$(owner_ticks $$)" "$(worker_pgid)" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+d.update(deliveryMode='release',phase='cutover_paused',targetSha=sys.argv[2],digest=sys.argv[3],imageId=sys.argv[4],runtimeEnvPath=sys.argv[5],runtimeEnvSha256=sys.argv[6],controllerPid=int(sys.argv[7]),controllerStartTicks=sys.argv[8],workerPgid=int(sys.argv[9]),finalCommandHighWater=0,targetRuntimeId='',targetManagerId='',candidateHash='',receipt='',migrationGate={})
+print(json.dumps(d,separators=(',',':')))
+PY
+)"
 }
 
 bound_runtime_env() {
@@ -481,32 +568,51 @@ controller() {
   deploy_paths; full="${KRABS_REMOTE_SHA:-$(git rev-parse HEAD)}"; sha "$full" || die 'HEAD must be a full SHA'
   mkdir -p "$CONFIG_DIR" "$(dirname "$ROLLBACK_OPERATION_LOCK")"; chmod 700 "$(dirname "$ROLLBACK_OPERATION_LOCK")"; take "$LOCK" || die 'deploy operation in progress'; take "$ROLLBACK_OPERATION_LOCK" || die 'rollback operation is in progress'; export KRABS_DEPLOY_OPERATION_OWNER=1
   RECOVERY_DISPOSITION=normal
-  if [[ -e "$RECOVERY" ]]; then
-    [[ "$(recovery_field runtimeEnvSha256)" == "${KRABS_RUNTIME_ENV_SHA256:-}" ]] || die 'same-SHA retry runtime environment differs from recovery'
-    KRABS_RUNTIME_ENV_PATH="$(recovery_field runtimeEnvPath)"; KRABS_RUNTIME_ENV_SHA256="$(recovery_field runtimeEnvSha256)"
-    recovery "$(python3 - "$RECOVERY" "$$" "$(owner_ticks $$)" "$(worker_pgid)" <<'PY'
+  if [[ "$mode" == supersede ]]; then
+    bound_runtime_env || die 'supersede target runtime environment is missing or corrupt'
+    validate_supersede_recovery "$key" "$full" "${KRABS_RUNTIME_ENV_SHA256:?}"
+    state_id="$(recovery_field recoveryStateId)"; pre="$(recovery_field prePaused)"; version="$(recovery_field previousVersion)"; baseline="$(recovery_field baselineCommandHighWater)"
+    runtime="$(recovery_field targetRuntimeId)"; manager="$(recovery_field targetManagerId)"; network="$(python3 - "$RECOVERY" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))['targetNetworkIds'][0])
+PY
+)"
+    digest=''; image_id=''; read -r digest image_id < <(immutable_image "$full")
+    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ && "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die 'supersede immutable image result is malformed'
+    fence_runtime_network "$runtime" "$network"; barrier supersede-after-first-fence
+    fence_runtime_network "$manager" "$network"
+    compose stop krabs-api krabs-runtime-manager krabs-runtime
+    rebind_supersede_recovery "$full" "$digest" "$image_id"
+    barrier supersede-after-rebind
+    phase=cutover_paused; marker_aware=true; mode=release
+  else
+    if [[ -e "$RECOVERY" ]]; then
+      [[ "$(recovery_field runtimeEnvSha256)" == "${KRABS_RUNTIME_ENV_SHA256:-}" ]] || die 'same-SHA retry runtime environment differs from recovery'
+      KRABS_RUNTIME_ENV_PATH="$(recovery_field runtimeEnvPath)"; KRABS_RUNTIME_ENV_SHA256="$(recovery_field runtimeEnvSha256)"
+      recovery "$(python3 - "$RECOVERY" "$$" "$(owner_ticks $$)" "$(worker_pgid)" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1])); d.update(controllerPid=int(sys.argv[2]),controllerStartTicks=sys.argv[3],workerPgid=int(sys.argv[4])); print(json.dumps(d,separators=(',',':')))
 PY
 )"
-  fi
-  bound_runtime_env || die 'bound runtime environment is missing or corrupt'
-  classify_recovery "$full" && return 0
-  if [[ "$RECOVERY_DISPOSITION" == arbitration_boundary ]]; then
-    "$GUARD" deploy-watch || die 'arbitration-boundary fail-stop was not proven'
-  fi
-  if [[ "$RECOVERY_DISPOSITION" == early_recovery ]]; then phase="$(recovery_field phase)"; state_id="$(recovery_field recoveryStateId)"; pre="$(recovery_field prePaused)"; runtime="$(recovery_field preRuntimeId)"; digest="$(recovery_field digest)"; version="$(recovery_field previousVersion)"; image_id="$(recovery_field imageId)"; baseline="$(python3 - "$RECOVERY" <<'PY'
+    fi
+    bound_runtime_env || die 'bound runtime environment is missing or corrupt'
+    classify_recovery "$full" && return 0
+    if [[ "$RECOVERY_DISPOSITION" == arbitration_boundary ]]; then
+      "$GUARD" deploy-watch || die 'arbitration-boundary fail-stop was not proven'
+    fi
+    if [[ "$RECOVERY_DISPOSITION" == early_recovery ]]; then phase="$(recovery_field phase)"; state_id="$(recovery_field recoveryStateId)"; pre="$(recovery_field prePaused)"; runtime="$(recovery_field preRuntimeId)"; digest="$(recovery_field digest)"; version="$(recovery_field previousVersion)"; image_id="$(recovery_field imageId)"; baseline="$(python3 - "$RECOVERY" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1]));print(json.dumps({k:d[k] for k in ('prePaused','preRunId','preInstanceId','preRuntimeId','preApiId','preManagerId','baselineCommandHighWater')},separators=(',',':')))
 PY
 )"; RECOVERY_DISPOSITION=normal; else phase=normal; fi
-  if [[ "$RECOVERY_DISPOSITION" == target_stopped_rearbitrate || "$RECOVERY_DISPOSITION" == commit_ready || "$RECOVERY_DISPOSITION" == arbitration_boundary ]]; then
-    pre="$(recovery_field prePaused)"; baseline="$(recovery_field baselineCommandHighWater)"
-    effective="$(reenter_stopped_target '' "$full" "$pre" "$baseline")"
-    commit_metadata "$full" "$(recovery_field digest)" "$(recovery_field recoveryStateId)" "$effective"
-    return 0
+    if [[ "$RECOVERY_DISPOSITION" == target_stopped_rearbitrate || "$RECOVERY_DISPOSITION" == commit_ready || "$RECOVERY_DISPOSITION" == arbitration_boundary ]]; then
+      pre="$(recovery_field prePaused)"; baseline="$(recovery_field baselineCommandHighWater)"
+      effective="$(reenter_stopped_target '' "$full" "$pre" "$baseline")"
+      commit_metadata "$full" "$(recovery_field digest)" "$(recovery_field recoveryStateId)" "$effective"
+      return 0
+    fi
+    [[ "$RECOVERY_DISPOSITION" == normal ]] || die "recovery classifier requires deploy-watch: $RECOVERY_DISPOSITION"
   fi
-  [[ "$RECOVERY_DISPOSITION" == normal ]] || die "recovery classifier requires deploy-watch: $RECOVERY_DISPOSITION"
   if [[ "$phase" == normal && "$mode" == release ]]; then
     [[ ! -e "$KRABS_ROLLBACK_STATE" && ! -e "${KRABS_ROLLBACK_MARKER_PATH:-/opt/krabs/config/rollback-in-progress.json}" ]] || die 'rollback ownership is active'
   fi
@@ -608,17 +714,36 @@ local_timeout() {
   [[ -x "$resolved" ]] || die 'GNU timeout is required'
   printf '%s\n' "$resolved"
 }
+deadline_supersede() {
+  local expected_old="$1" evidence="$2" full source env_hash digest
+  verify_gate "$evidence"; test_mode || ordinary_preflight
+  full="$(git rev-parse HEAD)"; sha "$full" || die 'HEAD must be a full SHA'; sha "$expected_old" || die 'expected old recovery SHA must be full'
+  source="${KRABS_DEPLOY_LOCAL_ENV_PATH:-.env.production}"
+  test_mode || [[ "$source" == .env.production ]] || die 'production runtime environment path is invalid'
+  env_hash="$(sha256sum "$source" | awk '{print $1}')"
+  if test_mode; then
+    KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"
+    KRABS_REMOTE_SHA="$full" KRABS_REMOTE_DIGEST="$(publish_image "$full")" KRABS_REMOTE_COMPOSE="${KRABS_DEPLOY_COMPOSE:-docker-compose.yml}" KRABS_REMOTE_ENV="${KRABS_DEPLOY_ENV:-.env.production}" KRABS_RUNTIME_ENV_PATH="${KRABS_RUNTIME_ENV_PATH:-.env.production}" KRABS_RUNTIME_ENV_SHA256="${KRABS_RUNTIME_ENV_SHA256:-$env_hash}" real_deploy supersede "$expected_old"
+  else
+    preflight_supersede_recovery "$expected_old" "$full" "$env_hash"
+    digest="$(stage_and_publish "$full" "$env_hash" "$source")"
+    stage_remote_controller supersede "$expected_old" "$full" "$digest" "$env_hash"
+  fi
+}
 main() {
   case "${1:-}" in
     --print-gate-input-hash) gate_hash ;;
     --verify-gate-evidence-only) [[ $# == 2 ]] || die 'usage'; verify_gate "$2" ;;
     --verify-rollback-boundary) [[ $# == 3 ]] || die 'usage'; verify_rollback_boundary "$2" "$3" ;;
     --gate-evidence) [[ $# == 2 ]] || die 'release requires exactly --gate-evidence'; TIMEOUT="$(local_timeout)"; exec "$TIMEOUT" --signal=TERM --kill-after=60s "${DEPLOY_SECONDS}s" "$0" --deadline release "$2" ;;
+    --supersede-stopped-recovery) [[ $# == 4 && "$3" == --gate-evidence ]] || die 'supersede requires --supersede-stopped-recovery <expected-old-full-sha> --gate-evidence <evidence>'; sha "$2" || die 'expected old recovery SHA must be full'; TIMEOUT="$(local_timeout)"; exec "$TIMEOUT" --signal=TERM --kill-after=60s "${DEPLOY_SECONDS}s" "$0" --deadline-supersede "$2" "$4" ;;
     --rollback-state-id) [[ $# == 2 ]] || die 'rollback requires exactly --rollback-state-id'; TIMEOUT="$(local_timeout)"; exec "$TIMEOUT" --signal=TERM --kill-after=60s "${DEPLOY_SECONDS}s" "$0" --deadline rollback "$2" ;;
+    --deadline-supersede) [[ $# == 3 ]] || die 'supersede deadline invocation'; deadline_supersede "$2" "$3" ;;
     --deadline) [[ $# == 3 ]] || die 'deadline invocation'; if [[ "$2" == release ]]; then verify_gate "$3"; test_mode || ordinary_preflight; else test_mode || rollback_preflight; fi; full="$(git rev-parse HEAD)"; sha "$full" || die 'HEAD must be a full SHA'; source="${KRABS_DEPLOY_LOCAL_ENV_PATH:-.env.production}"; test_mode || [[ "$source" == .env.production ]] || die 'production runtime environment path is invalid'; env_hash="$(sha256sum "$source" | awk '{print $1}')"; if test_mode; then KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"; KRABS_REMOTE_SHA="$full" KRABS_REMOTE_DIGEST="$(publish_image "$full")" KRABS_REMOTE_COMPOSE="${KRABS_DEPLOY_COMPOSE:-docker-compose.yml}" KRABS_REMOTE_ENV="${KRABS_DEPLOY_ENV:-.env.production}" KRABS_RUNTIME_ENV_PATH="${KRABS_RUNTIME_ENV_PATH:-.env.production}" KRABS_RUNTIME_ENV_SHA256="${KRABS_RUNTIME_ENV_SHA256:-$env_hash}" real_deploy "$2" "$3"; elif [[ "${KRABS_REMOTE_CONTROLLER:-}" == 1 ]]; then KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"; real_deploy "$2" "$3"; else preflight_recovery_env "$full" "$env_hash"; digest="$(stage_and_publish "$full" "$env_hash" "$source")"; stage_remote_controller "$2" "$3" "$full" "$digest" "$env_hash"; fi ;;
     --test-local-release) [[ $# == 1 ]] && test_mode || die 'test local release only'; full="$(git rev-parse HEAD)"; source="${KRABS_DEPLOY_LOCAL_ENV_PATH:?}"; env_hash="$(sha256sum "$source" | awk '{print $1}')"; preflight_recovery_env "$full" "$env_hash"; digest="$(stage_and_publish "$full" "$env_hash" "$source")"; stage_remote_controller release test "$full" "$digest" "$env_hash" ;;
+    --internal-supersede-preflight) [[ $# == 4 && "${KRABS_REMOTE_PREFLIGHT:-}" == 1 ]] || die 'supersede preflight is remote-only'; deploy_paths; validate_supersede_recovery "$2" "$3" "$4" ;;
     --internal) [[ $# == 3 && "${KRABS_REMOTE_CONTROLLER:-}" == 1 ]] || die 'internal invocation is remote-controller only'; deploy_paths; KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"; real_deploy "$2" "$3" ;;
-    *) die 'choose exactly one deploy mode: --gate-evidence or --rollback-state-id' ;;
+    *) die 'choose exactly one deploy mode: --gate-evidence, --supersede-stopped-recovery, or --rollback-state-id' ;;
   esac
 }
 main "$@"

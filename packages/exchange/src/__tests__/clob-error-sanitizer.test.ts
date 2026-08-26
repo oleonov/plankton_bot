@@ -25,6 +25,11 @@ function buildCircularConfig(): Record<string, unknown> {
   return {
     method: "post",
     url: "https://clob.polymarket.com/order",
+    headers: {
+      POLY_API_KEY: "secret-api-key",
+      POLY_SIGNATURE: "secret-signature",
+      POLY_PASSPHRASE: "secret-passphrase",
+    },
     httpsAgent: agent,
     transformRequest: [() => null],
     transformResponse: [() => null],
@@ -59,6 +64,8 @@ describe("sanitizeAxiosError", () => {
     expect(err.response.data.error).toContain("not enough balance");
     expect(err.response.config).not.toHaveProperty("httpsAgent");
     expect(err.config).not.toHaveProperty("httpsAgent");
+    expect(err.response.config).not.toHaveProperty("headers");
+    expect(err.config).not.toHaveProperty("headers");
   });
 
   it("is a no-op on non-object inputs", () => {

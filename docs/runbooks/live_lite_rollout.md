@@ -87,6 +87,32 @@ test "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)"
 ./deploy.sh --gate-evidence "$GATE_EVIDENCE"
 ```
 
+If a release is fail-stopped in `target_stopped_rearbitrate` and the stopped target itself must be
+replaced by a newer fix, use the explicit supersede mode. Bind the command to the exact failed
+target SHA from `deploy-recovery.json`; the new checkout still requires its own exact-HEAD gate
+evidence:
+
+```bash
+FAILED_TARGET_SHA="${FAILED_TARGET_SHA:?}"
+test "$(git branch --show-current)" = master
+test -z "$(git status --porcelain)"
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)"
+./deploy.sh --verify-gate-evidence-only "$GATE_EVIDENCE"
+./deploy.sh --supersede-stopped-recovery "$FAILED_TARGET_SHA" --gate-evidence "$GATE_EVIDENCE"
+```
+
+Supersede is release-only and fails before pulling or changing deployment state unless recovery is
+exactly `target_stopped_rearbitrate`, metadata is still at the previous deploy version, the marker
+owns the same recovery ID, the runtime environment hash is unchanged, and both saved trading
+containers are stopped with restart `no`, the failed SHA/image, and either no network or only the
+saved default network. No rollback state or marker may coexist. The single running `krabs-api`
+container must have the same failed SHA/image and saved network. It preserves the recovery ID,
+baseline, pre-deploy pause intent, previous version, and saved network; then it fences the stopped
+targets, replaces the API, reruns the migration gates, health/cutoff proof, final command
+arbitration, and normal metadata commit for the new SHA. Never edit or remove recovery, marker, or
+metadata files manually. If the supersede process stops after the recovery has been rebound to the
+new SHA, resume it with the ordinary exact-SHA `--gate-evidence` command.
+
 Selective rollback is strict: make a new rollback commit from a clean `master`, apply the aggregate
 reverse patch, then restore exactly the nine protected operational paths and four delivery docs
 from the release. Push it, wait for CI on its exact SHA, and prove the boundary before ownership:

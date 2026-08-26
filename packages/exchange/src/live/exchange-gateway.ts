@@ -131,6 +131,8 @@ const RECENT_SETTLEMENT_SUBMISSION_TTL_MS = 10 * 60 * 1000;
 const SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS = 15 * 1000;
 const SETTLEMENT_SUBMIT_LANE_BACKSTOP_MS = 60_000;
 const SETTLEMENT_SUBMIT_LANE_TASK_TIMEOUT_MS = 90_000;
+const INITIAL_TRADES_CURSOR = "MA==";
+const END_TRADES_CURSOR = "LTE=";
 // Polymarket relayer validates the `metadata` field server-side and rejects
 // free-form strings (colon, spaces, hex digests) with 400 `invalid metadata
 // field`. Use short alphanumeric slugs — the relayer accepts these and the
@@ -423,6 +425,10 @@ function settlementLaneReleaseForStatus(
   return status === "submitted" || status === "pending" ? "released_ttl" : "released_confirmed";
 }
 
+type PaginatedTradesClient = {
+  getTradesPaginated?: (params: Readonly<{ after: string }>, cursor: string) => Promise<unknown>;
+};
+
 export class LiveExchangeGateway implements ExchangeGateway {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly client: any;
@@ -639,12 +645,46 @@ export class LiveExchangeGateway implements ExchangeGateway {
     });
   }
 
+  private async fetchTradeRows(sinceMs: number): Promise<Array<Record<string, unknown>>> {
+    const client = this.client as PaginatedTradesClient;
+    if (typeof client.getTradesPaginated !== "function") {
+      throw new FetchParseError("paginated trades API is unavailable");
+    }
+    const params = { after: Math.floor(sinceMs / 1000).toString() };
+    const trades: Array<Record<string, unknown>> = [];
+    const seen = new Set<string>();
+    let cursor = INITIAL_TRADES_CURSOR;
+    while (cursor !== END_TRADES_CURSOR) {
+      if (seen.has(cursor)) throw new FetchParseError("trade cursor cycle");
+      seen.add(cursor);
+      const page = await client.getTradesPaginated(params, cursor);
+      throwIfReturnedError(page);
+      if (!page || typeof page !== "object" || Array.isArray(page)) {
+        throw new FetchParseError("expected paginated trade payload");
+      }
+      const pageRecord = page as Record<string, unknown>;
+      const pageTrades = pageRecord["trades"];
+      const nextCursor = pageRecord["next_cursor"];
+      const count = pageRecord["count"];
+      if (!Array.isArray(pageTrades)) throw new FetchParseError("missing trade page rows");
+      if (typeof nextCursor !== "string" || nextCursor.length === 0) {
+        throw new FetchParseError("missing trade cursor");
+      }
+      if (!Number.isInteger(count) || (count as number) < 0 || count !== pageTrades.length) {
+        throw new FetchParseError("invalid trade page count");
+      }
+      if (nextCursor !== END_TRADES_CURSOR && seen.has(nextCursor)) {
+        throw new FetchParseError("trade cursor cycle");
+      }
+      trades.push(...(pageTrades as Array<Record<string, unknown>>));
+      cursor = nextCursor;
+    }
+    return trades;
+  }
+
   private async fetchFills(sinceMs: number): Promise<ExchangeFill[]> {
-    const raw = await this.client.getTrades({
-      after: Math.floor(sinceMs / 1000).toString(),
-    });
-    throwIfReturnedError(raw);
-    return extractArrayOrThrow(raw).flatMap((trade) => {
+    const trades = await this.fetchTradeRows(sinceMs);
+    return trades.flatMap((trade) => {
       const confirmation = classifyTradeConfirmation(trade.status);
       if (confirmation === "invalid") throw new FetchParseError("malformed trade status");
       if (confirmation === "pending") throw new FetchParseError("trade status is not final");

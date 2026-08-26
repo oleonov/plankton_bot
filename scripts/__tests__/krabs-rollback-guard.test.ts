@@ -112,10 +112,13 @@ describe("krabs rollback guard", () => {
   // prettier-ignore
   const t28eTimeout = () => { const fixture=makeFixture(false); begin(fixture); const before=readFileSync(join(fixture.stateDir,"state.json"),"utf8"); const timed=spawnSync(guard,["watch"],{env:{...fixture.env,DOCKER_HANG:"1",KRABS_ROLLBACK_COMMAND_TIMEOUT_SECONDS:"1"},encoding:"utf8",timeout:10_000}); expect(timed.status).toBe(124); expect(readFileSync(join(fixture.stateDir,"state.json"),"utf8")).toBe(before); expect(readFileSync(fixture.api,"utf8").trim()).toBe("true"); expect(run(fixture,"status").status).toBe(0); };
   // prettier-ignore
-  it("T28f — controller failure, intent arbitration, and API cutover", async () => { t28fIntent(); await t28fController(); },150_000);
+  it("T28f — controller failure, intent arbitration, and API cutover", async () => { t28fIntent(); await t28fController(false); },150_000);
+  it("T28j — stopped recovery supersede is exact and fail-closed", async () => {
+    await t28fController(true);
+  }, 40_000);
   // prettier-ignore
   const t28fIntent = () => { const cases = [{ stage: "precommit", commands: [] as string[], expected: "resume" }, { stage: "commit_ready pause dominates", commands: ["pause"], expected: "pause" }, { stage: "after receipt pause then resume folds", commands: ["pause", "resume"], expected: "resume" }]; for (const row of cases) { const fixture = makeFixture(false); sql(fixture.control, "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2000-01-01T00:00:00.000Z')"); for (const [index, action] of row.commands.entries()) sql(fixture.control, `INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('${action}','operator','applied','2026-01-01T00:00:0${index}.000Z')`); const receipt = run(fixture, "deploy-arbitrate", "state", "false", "1"); expect(receipt.status, row.stage).toBe(0); expect(JSON.parse(receipt.stdout).finalAction, row.stage).toBe(row.expected); expect(readFileSync(fixture.api, "utf8").trim(), row.stage).toBe(String(row.expected === "pause")); } };
-  const t28fController = async () => {
+  const t28fController = async (supersedeOnly: boolean) => {
     const reached = new Set<string>(),
       fixture = makeFixture(true),
       deployTarget = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim(),
@@ -131,15 +134,16 @@ describe("krabs rollback guard", () => {
       adapter,
       `echo "$*" >> "$CALLS"; shift
 case "$1" in
-  compose) [[ "$*" == *" stop krabs-api"* ]] && rm -f "$API_AVAILABLE"; [[ "$*" == *" create "* ]] && rm -f "$NETWORK_FENCED"; [[ "$*" == *" up -d --no-deps"* ]] && : > "$API_AVAILABLE"; [[ "$*" == *" ps --all -q "* ]] && echo "id-\${@: -1}"; exit 0 ;;
+  compose) [[ "$*" == *" stop krabs-api"* ]] && { rm -f "$API_AVAILABLE"; : > "$OLD_API_REPLACED"; }; [[ "$*" == *" create "* ]] && rm -f "$NETWORK_FENCED"; [[ "$*" == *" up -d --no-deps"* ]] && : > "$API_AVAILABLE"; [[ "$*" == *" ps --all -q "* ]] && echo "id-\${@: -1}"; exit 0 ;;
   build|tag|update) exit 0 ;;
+  ps) [[ "\${API_DISCOVERY_MODE:-}" == none ]] || { echo id-krabs-api; [[ "\${API_DISCOVERY_MODE:-}" == multi ]] && echo foreign-api; }; exit 0 ;;
   pull) echo 'fake pull progress'; exit 0 ;;
   stop) : > "$STOPPED"; exit 0 ;;
   start) rm -f "$STOPPED"; exit 0 ;;
   network) [[ "$2" == connect && "\${NETWORK_MODE:-}" != zero-after-connect ]] && rm -f "$NETWORK_FENCED" || : > "$NETWORK_FENCED"; exit 0 ;;
   push) echo "digest: \${DEPLOY_DIGEST:-sha256:${digest}}"; exit 0 ;;
   image) [[ "$*" == *revision* ]] && echo '${deployTarget}' || echo 'sha256:${digest}'; exit 0 ;;
-  inspect) [[ "$*" == *NetworkSettings.Networks* ]] && { [[ "\${NETWORK_MODE:-}" == multi ]] && echo '{"krabs_default":{},"unexpected":{}}' || [[ "\${NETWORK_MODE:-}" == wrong ]] && echo '{"unexpected":{}}' || { [[ -e "$NETWORK_FENCED" ]] && echo '{}' || echo '{"krabs_default":{"EndpointID":"endpoint","Gateway":"172.20.0.1","IPAddress":"172.20.0.2","NetworkID":"network"}}'; }; } || { [[ "$*" == *id-krabs-api* ]] && { [[ -e "$API_AVAILABLE" ]] && echo 'true ${deployTarget}' || echo 'false ${deployTarget}'; } || { [[ -e "$STOPPED" ]] && echo 'false ${deployTarget}' || echo 'true ${deployTarget}'; }; }; exit 0 ;;
+  inspect) if [[ "\${SUPERSEDE_TEST:-}" == 1 && "$*" == *id-krabs-api* && ! -e "$OLD_API_REPLACED" && "$*" == *NetworkSettings.Networks* ]]; then [[ "\${API_NETWORK_MODE:-}" == wrong ]] && echo '{"unexpected":{}}' || echo '{"krabs_default":{}}'; elif [[ "\${SUPERSEDE_TEST:-}" == 1 && "$*" == *id-krabs-api* && ! -e "$OLD_API_REPLACED" ]]; then echo "\${OLD_API_RUNNING:-true} \${OLD_API_SHA:-${target}} \${OLD_API_IMAGE:-sha256:${"a".repeat(64)}}"; elif [[ "\${SUPERSEDE_TEST:-}" == 1 && ( "$*" == *target-runtime* || "$*" == *target-manager* ) && "$*" == *RestartPolicy.Name* ]]; then echo "\${OLD_TARGET_RUNNING:-false} \${OLD_TARGET_RESTART:-no} \${OLD_TARGET_SHA:-${target}} \${OLD_TARGET_IMAGE:-sha256:${"a".repeat(64)}}"; elif [[ "\${SUPERSEDE_TEST:-}" == 1 && ( "$*" == *target-runtime* || "$*" == *target-manager* ) && "$*" != *NetworkSettings.Networks* ]]; then echo "\${OLD_TARGET_RUNNING:-false} \${OLD_TARGET_SHA:-${target}}"; elif [[ "$*" == *NetworkSettings.Networks* ]]; then [[ "\${NETWORK_MODE:-}" == multi ]] && echo '{"krabs_default":{},"unexpected":{}}' || [[ "\${NETWORK_MODE:-}" == wrong ]] && echo '{"unexpected":{}}' || { [[ -e "$NETWORK_FENCED" ]] && echo '{}' || echo '{"krabs_default":{"EndpointID":"endpoint","Gateway":"172.20.0.1","IPAddress":"172.20.0.2","NetworkID":"network"}}'; }; elif [[ "$*" == *id-krabs-api* ]]; then [[ -e "$API_AVAILABLE" ]] && echo 'true ${deployTarget}' || echo 'false ${deployTarget}'; else [[ -e "$STOPPED" ]] && echo 'false ${deployTarget}' || echo 'true ${deployTarget}'; fi; exit 0 ;;
   health) exit "\${DEPLOY_HEALTH_EXIT:-0}" ;;
 esac`,
     );
@@ -192,6 +196,275 @@ esac`,
       ssh,
       `echo "ssh $*" >> "$CALLS"\n[[ "\${@: -1}" == *"exec /usr/bin/timeout"* ]] && exit 0\nPATH="$REMOTE_BIN:$PATH" bash -c "\${@: -1}"`,
     );
+    if (supersedeOnly) {
+      const metadataPath = join(config, "deploy-meta.json"),
+        recoveryPath = join(config, "deploy-recovery.json"),
+        markerPath = join(config, "deploy-in-progress.json"),
+        oldRuntimeEnv = join(config, `deploy-runtime-env-${target}-${runtimeEnvSha}`),
+        oldApiReplaced = join(fixture.dir, "old-api-replaced"),
+        orderGate = join(fixture.dir, "supersede-order-status-gate"),
+        orderGateCalls = join(fixture.dir, "supersede-order-status-gate-calls"),
+        oldDigest = `sha256:${"a".repeat(64)}`,
+        recoveryStateId = state.rollbackStateId,
+        supersedeMeta = JSON.stringify({
+          deployVersion: 0,
+          sha: original,
+          digest: `sha256:${"c".repeat(64)}`,
+          resumeCutoffAware: true,
+          apiId: "id-krabs-api",
+          runtimeEnvSha256: runtimeEnvSha,
+        }),
+        supersedeMarker = JSON.stringify({
+          schemaVersion: 1,
+          deploymentId: recoveryStateId,
+          updatedAt: "2026-08-26T00:00:00Z",
+        }),
+        supersedeState = {
+          schemaVersion: 1,
+          recoveryStateId,
+          deliveryMode: "release",
+          phase: "target_stopped_rearbitrate",
+          targetSha: target,
+          digest: oldDigest,
+          imageId: oldDigest,
+          prePaused: false,
+          previousVersion: 0,
+          baselineCapturedUnderLock: true,
+          baselineCommandHighWater: state.baselineCommandHighWater,
+          finalCommandHighWater: 0,
+          preRunId: "run-before",
+          preInstanceId: "instance-before",
+          preRuntimeId: "id-krabs-runtime",
+          preApiId: "id-krabs-api",
+          preManagerId: "id-krabs-runtime-manager",
+          controllerPid: 1,
+          controllerStartTicks: "1",
+          workerPgid: 1,
+          tradingCutoverInvoked: true,
+          targetRuntimeId: "target-runtime",
+          targetManagerId: "target-manager",
+          targetNetworkIds: ["krabs_default"],
+          restartPolicies: { runtime: "no", manager: "no" },
+          candidateHash: "",
+          receipt: "",
+          migrationGate: { mode: "post", stale: true },
+          runtimeEnvPath: oldRuntimeEnv,
+          runtimeEnvSha256: runtimeEnvSha,
+        },
+        supersedeEnv = {
+          ...env,
+          KRABS_REMOTE_CONTROLLER: "1",
+          KRABS_REMOTE_SHA: deployTarget,
+          KRABS_REMOTE_DIGEST: `sha256:${digest}`,
+          KRABS_REMOTE_COMPOSE: compose,
+          KRABS_REMOTE_ENV: runtimeEnv,
+          KRABS_ORDER_STATUS_GATE: orderGate,
+          ORDER_GATE_CALLS: orderGateCalls,
+          DEPLOY_HEALTH_EXIT: "0",
+        },
+        runSupersede = (expectedOld = target, extra: Record<string, string> = {}) =>
+          spawnSync(deploy, ["--internal", "supersede", expectedOld], {
+            cwd: root,
+            env: {
+              ...supersedeEnv,
+              SUPERSEDE_TEST: "1",
+              OLD_TARGET_SHA: target,
+              OLD_TARGET_RUNNING: "false",
+              OLD_TARGET_RESTART: "no",
+              OLD_TARGET_IMAGE: oldDigest,
+              OLD_API_SHA: target,
+              OLD_API_RUNNING: "true",
+              OLD_API_IMAGE: oldDigest,
+              OLD_API_REPLACED: oldApiReplaced,
+              ...extra,
+            },
+            encoding: "utf8",
+            timeout: 25_000,
+          }),
+        seedSupersede = (
+          recoveryPatch: Record<string, unknown> = {},
+          metadata = supersedeMeta,
+          marker = supersedeMarker,
+        ) => {
+          writeFileSync(oldRuntimeEnv, "KRABS_API_KEY=rotated\n");
+          writeFileSync(recoveryPath, JSON.stringify({ ...supersedeState, ...recoveryPatch }));
+          writeFileSync(metadataPath, metadata);
+          writeFileSync(markerPath, marker);
+          writeFileSync(fixture.env.STOPPED, "stopped\n");
+          writeFileSync(fixture.available, "yes\n");
+          rmSync(statePath, { force: true });
+          rmSync(fixture.marker, { force: true });
+          rmSync(oldApiReplaced, { force: true });
+          rmSync(fixture.env.NETWORK_FENCED, { force: true });
+        };
+      writeFileSync(orderGateCalls, "");
+      executable(
+        orderGate,
+        `echo "$1" >> "$ORDER_GATE_CALLS"
+echo "order-gate $1" >> "$CALLS"
+[[ "$1" == post ]] && marker=true || marker=false
+printf '{"migration101":{"candidateCount":0,"candidateHash":"%s","rowsHash":"%s","markerWasPresent":%s},"migration102":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"},"migration103":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"}}\\n' '${"a".repeat(64)}' '${"b".repeat(64)}' "$marker" '${"c".repeat(64)}' '${"d".repeat(64)}' '${"e".repeat(64)}' '${"f".repeat(64)}'`,
+      );
+      seedSupersede();
+      writeFileSync(statePath, "active rollback\n");
+      writeFileSync(fixture.marker, "active rollback\n");
+      const recoveryBeforeRollbackConflict = readFileSync(recoveryPath, "utf8"),
+        callsBeforeRollbackConflict = readFileSync(fixture.calls, "utf8").length,
+        rollbackConflict = runSupersede(),
+        rollbackConflictCalls = readFileSync(fixture.calls, "utf8").slice(
+          callsBeforeRollbackConflict,
+        );
+      expect(rollbackConflict.status).not.toBe(0);
+      expect(rollbackConflictCalls).not.toMatch(
+        /(?:^|\n)(?:pull |network disconnect|compose .* (?:stop|create|up)|start )/,
+      );
+      expect(readFileSync(recoveryPath, "utf8")).toBe(recoveryBeforeRollbackConflict);
+      for (const row of [
+        { name: "wrong expected old SHA", expected: original },
+        { name: "wrong phase", patch: { phase: "target_started" } },
+        { name: "changed environment", patch: { runtimeEnvSha256: "0".repeat(64) } },
+        { name: "advanced metadata", metadata: JSON.stringify({ deployVersion: 1, sha: target }) },
+        {
+          name: "foreign marker",
+          marker: JSON.stringify({ schemaVersion: 1, deploymentId: "foreign" }),
+        },
+        { name: "wrong runtime identity", extra: { OLD_TARGET_SHA: original } },
+        { name: "running runtime", extra: { OLD_TARGET_RUNNING: "true" } },
+        { name: "restart-enabled runtime", extra: { OLD_TARGET_RESTART: "unless-stopped" } },
+        { name: "wrong runtime image", extra: { OLD_TARGET_IMAGE: oldDigest.replace(/a/g, "b") } },
+        { name: "stopped API", extra: { OLD_API_RUNNING: "false" } },
+        { name: "wrong API identity", extra: { OLD_API_SHA: original } },
+        { name: "wrong API image", extra: { OLD_API_IMAGE: oldDigest.replace(/a/g, "b") } },
+        { name: "foreign API network", extra: { API_NETWORK_MODE: "wrong" } },
+        { name: "ambiguous API discovery", extra: { API_DISCOVERY_MODE: "multi" } },
+        { name: "foreign network", extra: { NETWORK_MODE: "wrong" } },
+        { name: "multiple networks", extra: { NETWORK_MODE: "multi" } },
+      ]) {
+        seedSupersede(row.patch, row.metadata, row.marker);
+        const recoveryBefore = readFileSync(recoveryPath, "utf8"),
+          metadataBefore = readFileSync(metadataPath, "utf8"),
+          markerBefore = readFileSync(markerPath, "utf8"),
+          callsBefore = readFileSync(fixture.calls, "utf8").length,
+          rejectedSupersede = runSupersede(row.expected, row.extra),
+          calls = readFileSync(fixture.calls, "utf8").slice(callsBefore);
+        expect(rejectedSupersede.status, row.name).not.toBe(0);
+        expect(calls, row.name).not.toMatch(
+          /(?:^|\n)(?:pull |network disconnect|compose .* (?:stop|create|up)|start )/,
+        );
+        expect(readFileSync(recoveryPath, "utf8"), row.name).toBe(recoveryBefore);
+        expect(readFileSync(metadataPath, "utf8"), row.name).toBe(metadataBefore);
+        expect(readFileSync(markerPath, "utf8"), row.name).toBe(markerBefore);
+      }
+      seedSupersede();
+      const preflightCallsStart = readFileSync(fixture.calls, "utf8").length,
+        exactPreflight = spawnSync(
+          deploy,
+          ["--internal-supersede-preflight", target, deployTarget, runtimeEnvSha!],
+          {
+            cwd: root,
+            env: {
+              ...supersedeEnv,
+              KRABS_REMOTE_PREFLIGHT: "1",
+              SUPERSEDE_TEST: "1",
+              OLD_TARGET_SHA: target,
+              OLD_TARGET_IMAGE: oldDigest,
+              OLD_API_SHA: target,
+              OLD_API_IMAGE: oldDigest,
+              OLD_API_REPLACED: oldApiReplaced,
+            },
+            encoding: "utf8",
+          },
+        ),
+        preflightCalls = readFileSync(fixture.calls, "utf8").slice(preflightCallsStart);
+      expect(exactPreflight.status, exactPreflight.stderr).toBe(0);
+      expect(preflightCalls).not.toMatch(/(?:^|\n)(?:pull |network disconnect|compose |start )/);
+
+      const barrierDir = join(fixture.dir, "supersede-barriers");
+      mkdirSync(barrierDir);
+      seedSupersede();
+      const recoveryBeforeFenceDeath = readFileSync(recoveryPath, "utf8"),
+        fenceDeath = runSupersede(target, {
+          KRABS_DEPLOY_TEST_BARRIER_DIR: barrierDir,
+          KRABS_DEPLOY_TEST_HARD_DEATH: "supersede-after-first-fence",
+        });
+      expect(fenceDeath.status).not.toBe(0);
+      expect(readFileSync(recoveryPath, "utf8")).toBe(recoveryBeforeFenceDeath);
+      expect(runSupersede().status).toBe(0);
+
+      seedSupersede();
+      const rebindDeath = runSupersede(target, {
+        KRABS_DEPLOY_TEST_BARRIER_DIR: barrierDir,
+        KRABS_DEPLOY_TEST_HARD_DEATH: "supersede-after-rebind",
+      });
+      expect(rebindDeath.status).not.toBe(0);
+      expect(JSON.parse(readFileSync(recoveryPath, "utf8"))).toMatchObject({
+        recoveryStateId,
+        targetSha: deployTarget,
+        phase: "cutover_paused",
+        prePaused: false,
+        previousVersion: 0,
+        targetRuntimeId: "",
+        targetManagerId: "",
+      });
+      const exactRetry = spawnSync(deploy, ["--internal", "release", "retry"], {
+        cwd: root,
+        env: { ...supersedeEnv, SUPERSEDE_TEST: "1", OLD_API_REPLACED: oldApiReplaced },
+        encoding: "utf8",
+        timeout: 25_000,
+      });
+      expect(exactRetry.status, exactRetry.stderr).toBe(0);
+      expect(exactRetry.stdout).toContain("DEPLOY_RECEIPT");
+      expect(JSON.parse(readFileSync(metadataPath, "utf8"))).toMatchObject({
+        sha: deployTarget,
+        recoveryStateId,
+        receipt: { prePaused: false, effectivePaused: false },
+      });
+      expect(readFileSync(fixture.api, "utf8").trim()).toBe("false");
+      seedSupersede();
+      writeFileSync(fixture.env.NETWORK_FENCED, "fenced\n");
+      const detachedSupersede = runSupersede();
+      expect(detachedSupersede.status, detachedSupersede.stderr).toBe(0);
+      expect(detachedSupersede.stdout).toContain("DEPLOY_RECEIPT");
+      expect(JSON.parse(readFileSync(metadataPath, "utf8"))).toMatchObject({
+        deployVersion: 1,
+        sha: deployTarget,
+        recoveryStateId,
+        runtimeEnvSha256: runtimeEnvSha,
+      });
+      seedSupersede();
+      const callsBeforeSupersede = readFileSync(fixture.calls, "utf8").length,
+        superseded = runSupersede(),
+        supersedeCalls = readFileSync(fixture.calls, "utf8").slice(callsBeforeSupersede);
+      expect(superseded.status, superseded.stderr).toBe(0);
+      expect(superseded.stdout).toContain("DEPLOY_RECEIPT");
+      expect(supersedeCalls.indexOf("pull ")).toBeLessThan(
+        supersedeCalls.indexOf("network disconnect"),
+      );
+      expect(supersedeCalls.indexOf("network disconnect")).toBeLessThan(
+        supersedeCalls.indexOf(" stop krabs-api"),
+      );
+      expect(supersedeCalls.indexOf(" stop krabs-api")).toBeLessThan(
+        supersedeCalls.indexOf(" create --pull never"),
+      );
+      expect(supersedeCalls).toContain("order-gate pre");
+      expect(supersedeCalls).toContain("order-gate post");
+      expect(existsSync(recoveryPath)).toBe(false);
+      expect(existsSync(markerPath)).toBe(false);
+      expect(JSON.parse(readFileSync(metadataPath, "utf8"))).toMatchObject({
+        deployVersion: 1,
+        sha: deployTarget,
+        recoveryStateId,
+      });
+      expect(
+        spawnSync(
+          deploy,
+          ["--supersede-stopped-recovery", target, "--gate-evidence", "x", "extra"],
+          { cwd: root, env, encoding: "utf8" },
+        ).status,
+      ).not.toBe(0);
+      console.log("T28J_SUPERSEDE_STOPPED_RECOVERY");
+      return;
+    }
     const stageBefore = readFileSync(fixture.calls, "utf8").length,
       staged = spawnSync(deploy, ["--test-local-release"], {
         cwd: root,
@@ -765,6 +1038,7 @@ printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s"
     expect(existsSync(migrationRecoveryPath)).toBe(false);
     expect(existsSync(migrationMarkerPath)).toBe(false);
     reached.add("migration-gate-recovery");
+
     expect([...reached].sort()).toEqual([
       "attached-exact",
       "env-mismatch",
@@ -808,7 +1082,15 @@ printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s"
     expect(deploySource).toContain(
       'resolved="$(command -v "${KRABS_DEPLOY_TIMEOUT:-timeout}" || true)"',
     );
-    expect(deploySource.match(/TIMEOUT="\$\(local_timeout\)"/g)).toHaveLength(2);
+    expect(deploySource.match(/TIMEOUT="\$\(local_timeout\)"/g)).toHaveLength(3);
+    const supersedeDeadline = deploySource.slice(
+      deploySource.indexOf("deadline_supersede()"),
+      deploySource.indexOf("main()"),
+    );
+    expect(supersedeDeadline.indexOf("preflight_supersede_recovery")).toBeGreaterThan(-1);
+    expect(supersedeDeadline.indexOf("preflight_supersede_recovery")).toBeLessThan(
+      supersedeDeadline.indexOf("stage_and_publish"),
+    );
     expect(deploySource).not.toContain("KRABS_DEPLOY_TIMEOUT:-/usr/bin/timeout");
     expect(deploySource).toContain("compose create --pull never");
     expect(deploySource).toContain("compose up -d --no-deps --pull never");
@@ -887,7 +1169,7 @@ printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s"
       writeFileSync(join(dir, "build.log"), "Tasks: 9 successful, 9 total\n");
       writeFileSync(join(dir, "prettier.log"), "All matched files use Prettier code style!\n");
       // prettier-ignore
-      writeFileSync(join(dir,"gate-cases.txt"),"T1 T2 T3 T4 T5 T6 T7 T8 T9 T10a T10b T11 T12 T13 T13b T13d T14 T14b T15 T16 T17 T18a T18b-core T18b-log T18c T19 T20 T21a T21b T21c T22 T23 T24 T25 T26 T27 T28a T28b T28c T28d T28e T28f T28g T28h T28i".split(" ").map(tag=>`${tag} — ok`).join("\n"));
+      writeFileSync(join(dir,"gate-cases.txt"),"T1 T2 T3 T4 T5 T6 T7 T8 T9 T10a T10b T11 T12 T13 T13b T13d T14 T14b T15 T16 T17 T18a T18b-core T18b-log T18c T19 T20 T21a T21b T21c T22 T23 T24 T25 T26 T27 T28a T28b T28c T28d T28e T28f T28g T28h T28i T28j".split(" ").map(tag=>`${tag} — ok`).join("\n"));
       const input = gateHash();
       if (input.status !== 0) throw new Error(input.stderr);
       const head = git("rev-parse", "HEAD");

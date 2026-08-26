@@ -18,9 +18,11 @@
  * trap applies — sanitizer is reused unchanged.
  *
  * The interceptor mutates the live error object (axios reuses references),
- * dropping the agent fields. Functions on `transform*`/`adapter` are also
- * cleared because the SDK serializer keeps array slots for them as nulls
- * but third-party axios plugins occasionally store circular state there.
+ * dropping the agent fields. Request headers are removed as well because the
+ * SDK serializes the sanitized config to stderr and L2 auth headers contain
+ * credentials. Functions on `transform*`/`adapter` are also cleared because
+ * the SDK serializer keeps array slots for them as nulls but third-party axios
+ * plugins occasionally store circular state there.
  */
 interface AxiosLikeInstance {
   interceptors: {
@@ -64,6 +66,7 @@ function cleanConfig(config: unknown): void {
   const target = config as Record<string, unknown>;
   delete target["httpsAgent"];
   delete target["httpAgent"];
+  delete target["headers"];
   delete target["transformRequest"];
   delete target["transformResponse"];
   delete target["adapter"];
