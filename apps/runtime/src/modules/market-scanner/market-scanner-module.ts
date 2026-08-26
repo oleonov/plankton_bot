@@ -368,6 +368,7 @@ export class MarketScannerModule implements RuntimeModule {
       // Refresh selection rules if the DB version has advanced since last tick.
       this.deps.selectionRuleEngine.refreshIfStale();
       const engine = this.deps.selectionRuleEngine.current;
+      const marketSelectionPolicy = this.deps.marketSelectionPolicy?.();
 
       let discoveredMarkets = 0;
       let includedMarkets = 0;
@@ -419,7 +420,6 @@ export class MarketScannerModule implements RuntimeModule {
         pendingStep2Delta.eventsMultiMarketTotal += eventStats.multiMarket;
         const pageBatch: Market[] = [];
         for (const clobMarket of pageMarkets) {
-          const marketSelectionPolicy = this.deps.marketSelectionPolicy?.();
           const tokenEvalResults = clobMarket.tokens.map((token) =>
             evaluatePreEntry(
               engine,

@@ -694,6 +694,76 @@ describe("MarketScannerModule", () => {
     expect(slugs).toContain("bitcoin-above-110k");
   });
 
+  it("snapshots market-selection policy once per multi-page scan", async () => {
+    const discoveryGateway = createMockDiscoveryGateway();
+    const positionRepo = createMockPositionRepo();
+    (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+      { tokenId: createTokenId("tok-policy-excluded"), status: "open" },
+    ]);
+    const marketSelectionPolicy = vi.fn(
+      (): MarketSelectionPolicy => ({
+        maxMidPrice: 0.4,
+        minLiquidity: 100,
+        shortLifetime: { enabled: false, thresholdHours: 1 },
+      }),
+    );
+    const { mod, marketRepo } = buildModule({
+      discoveryGateway,
+      marketSelectionPolicy,
+      positionRepo,
+    });
+    const page1 = [
+      makeClobMarket({
+        conditionId: "cond-policy-included-1",
+        tokens: [{ tokenId: "tok-policy-included-1", outcome: "Yes", midPrice: 0.32 }],
+      }),
+      makeClobMarket({
+        conditionId: "cond-policy-excluded",
+        tokens: [{ tokenId: "tok-policy-excluded", outcome: "Yes", midPrice: 0.45 }],
+      }),
+    ];
+    const page2 = [
+      makeClobMarket({
+        conditionId: "cond-policy-included-2",
+        tokens: [{ tokenId: "tok-policy-included-2", outcome: "Yes", midPrice: 0.25 }],
+      }),
+    ];
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cb: ForEachMarketPageCallback) => {
+        cb(page1, eventStatsFromMarkets(page1));
+        cb(page2, eventStatsFromMarkets(page2));
+        return { totalMarkets: 3 };
+      },
+    );
+
+    await mod.scan();
+
+    expect(marketSelectionPolicy).toHaveBeenCalledTimes(1);
+    const persisted = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls
+      .map((call) => call[0] as Market)
+      .map(({ tokenId, selectionStatus, tradable }) => ({ tokenId, selectionStatus, tradable }));
+    expect(persisted).toEqual([
+      {
+        tokenId: "tok-policy-included-1",
+        selectionStatus: "matched_include",
+        tradable: true,
+      },
+      {
+        tokenId: "tok-policy-excluded",
+        selectionStatus: "fallback_exclude",
+        tradable: false,
+      },
+      {
+        tokenId: "tok-policy-included-2",
+        selectionStatus: "matched_include",
+        tradable: true,
+      },
+    ]);
+
+    await mod.scan();
+    expect(marketSelectionPolicy).toHaveBeenCalledTimes(2);
+  });
+
   // ── Batched writes (saveBatch contract) ───────────────────────────────────
   // These tests pin the scanner's write pattern so regressions like
   // "reverted to per-token save()" or "flushes once per scan instead of once
