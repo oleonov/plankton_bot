@@ -1098,6 +1098,7 @@ printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s"
     expect(supersedePreflight).toContain(
       "KRABS_ORDER_STATUS_GATE='${SERVER_PATH}/config/krabs-order-status-migration-gate-${expected_old}.sh'",
     );
+    expect(supersedePreflight).toContain("KRABS_REMOTE_SHA='${full}' KRABS_REMOTE_PREFLIGHT=1");
     expect(deploySource).not.toContain("KRABS_DEPLOY_TIMEOUT:-/usr/bin/timeout");
     expect(deploySource).toContain("compose create --pull never");
     expect(deploySource).toContain("compose up -d --no-deps --pull never");
