@@ -193,7 +193,7 @@ deploy_cutoff_probe() {
 }
 deploy_arbitrate() {
   local state_id="$1" pre="$2" baseline="$3" latest action effective high override=false
-  local POLL_ATTEMPTS="${KRABS_DEPLOY_ARBITRATION_POLL_ATTEMPTS:-60}"
+  local POLL_ATTEMPTS="${KRABS_DEPLOY_ARBITRATION_POLL_ATTEMPTS:-300}"
   latest="$(sql "SELECT action FROM operator_commands WHERE initiator_type='operator' AND id > $baseline ORDER BY created_at ASC, id ASC;" | tail -n 1)"
   action=pause; [[ "$pre" == false ]] && action=resume
   [[ "$pre" == false && ( "$latest" == pause || "$latest" == resume ) ]] && action="$latest"; [[ "$latest" == pause ]] && override=true
@@ -406,7 +406,7 @@ main() {
   [[ -n "$command" ]] || die "usage: $0 {begin|finalize|watch|abort|status|install-service|deploy-baseline|deploy-cutover|deploy-arbitrate|deploy-cutoff-probe|deploy-watch}"
   if [[ "$command" == deploy-watch ]]; then [[ "${KRABS_DEPLOY_WATCH_INTERNAL:-}" == 1 ]] || exec env KRABS_DEPLOY_WATCH_INTERNAL=1 "$TIMEOUT_BIN" --signal=TERM --kill-after=2s 15s "$0" "$@"; deploy_watch; return; fi
   local command_timeout="$COMMAND_TIMEOUT"
-  [[ "$command" != deploy-arbitrate ]] || command_timeout="${KRABS_DEPLOY_ARBITRATION_TIMEOUT_SECONDS:-150}"
+  [[ "$command" != deploy-arbitrate ]] || command_timeout="${KRABS_DEPLOY_ARBITRATION_TIMEOUT_SECONDS:-630}"
   [[ "${KRABS_ROLLBACK_INTERNAL:-}" == 1 ]] || exec env KRABS_ROLLBACK_INTERNAL=1 "$TIMEOUT_BIN" --signal=TERM --kill-after=5s "${command_timeout}s" "$0" "$@"
   ordinary "$@"
 }

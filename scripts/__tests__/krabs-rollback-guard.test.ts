@@ -42,7 +42,7 @@ function makeFixture(paused = false) {
   const dir = mkdtempSync(join(tmpdir(), "krabs-rollback-guard-"));
   dirs.push(dir);
   // prettier-ignore
-  const stateDir=join(dir,"state"), marker=join(dir,"rollback.json"), control=join(dir,"control.db"), data=join(dir,"data"), ledger=join(data,"ledger-live-lite.db"), api=join(dir,"api-state"), available=join(dir,"api-available"), identity=join(dir,"identity"), health=join(dir,"health-identity"), calls=join(dir,"calls"), sqlite=join(dir,"sqlite"), curl=join(dir,"curl"), docker=join(dir,"docker"), flock=join(dir,"flock"), systemctl=join(dir,"systemctl"), installBin=join(dir,"install","guard"), units=join(dir,"units"), fenced=join(dir,"network-fenced");
+  const stateDir=join(dir,"state"), marker=join(dir,"rollback.json"), control=join(dir,"control.db"), data=join(dir,"data"), ledger=join(data,"ledger-live-lite.db"), api=join(dir,"api-state"), available=join(dir,"api-available"), identity=join(dir,"identity"), health=join(dir,"health-identity"), calls=join(dir,"calls"), arbitrationPolls=join(dir,"arbitration-polls"), sqlite=join(dir,"sqlite"), curl=join(dir,"curl"), docker=join(dir,"docker"), flock=join(dir,"flock"), systemctl=join(dir,"systemctl"), installBin=join(dir,"install","guard"), units=join(dir,"units"), fenced=join(dir,"network-fenced");
   mkdirSync(data);
   sql(
     control,
@@ -59,7 +59,7 @@ function makeFixture(paused = false) {
   writeFileSync(calls, "");
   executable(
     sqlite,
-    `echo "sqlite $*" >> "$CALLS"\n[[ "\${CUTOFF_WRITER:-}" == 1 && "\${2:-}" == *"BEGIN IMMEDIATE; SELECT coalesce(max(id),0) FROM operator_commands; COMMIT;"* ]] && /usr/bin/sqlite3 "$1" "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2026-01-01T00:00:00.000Z');"\n[[ "\${ARBITRATION_PAUSE:-}" == 1 && "\${2:-}" == *"SELECT action || '|' || status"* && "$(/usr/bin/sqlite3 "$1" "SELECT count(*) FROM operator_commands WHERE initiator LIKE 'rollback:%:resume';")" == 1 ]] && { /usr/bin/sqlite3 "$1" "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2026-01-01T00:00:01.000Z');"; echo true > "$API_STATE"; }\n/usr/bin/sqlite3 "$@"\nif [[ "\${2:-}" == *"INSERT INTO operator_commands"* ]]; then action=$(/usr/bin/sqlite3 "$1" "SELECT action FROM operator_commands WHERE status='pending' ORDER BY id DESC LIMIT 1;"); /usr/bin/sqlite3 "$1" "UPDATE operator_commands SET status='applied' WHERE status='pending';"; [[ "$action" == pause ]] && echo true > "$API_STATE"; [[ "$action" == resume ]] && echo false > "$API_STATE"; fi\ntrue`,
+    `echo "sqlite $*" >> "$CALLS"\n[[ "\${CUTOFF_WRITER:-}" == 1 && "\${2:-}" == *"BEGIN IMMEDIATE; SELECT coalesce(max(id),0) FROM operator_commands; COMMIT;"* ]] && /usr/bin/sqlite3 "$1" "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2026-01-01T00:00:00.000Z');"\n[[ "\${ARBITRATION_PAUSE:-}" == 1 && "\${2:-}" == *"SELECT action || '|' || status"* && "$(/usr/bin/sqlite3 "$1" "SELECT count(*) FROM operator_commands WHERE initiator LIKE 'rollback:%:resume';")" == 1 ]] && { /usr/bin/sqlite3 "$1" "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2026-01-01T00:00:01.000Z');"; echo true > "$API_STATE"; }\n/usr/bin/sqlite3 "$@"\nif [[ -n "\${ARBITRATION_APPLY_AFTER_POLLS:-}" && "\${2:-}" == *"SELECT status FROM operator_commands WHERE initiator="* ]]; then polls=0; [[ ! -f "$ARBITRATION_POLL_COUNTER" ]] || polls=$(cat "$ARBITRATION_POLL_COUNTER"); polls=$((polls+1)); printf '%s\n' "$polls" > "$ARBITRATION_POLL_COUNTER"; if (( polls >= ARBITRATION_APPLY_AFTER_POLLS )); then action=$(/usr/bin/sqlite3 "$1" "SELECT action FROM operator_commands WHERE status='pending' ORDER BY id DESC LIMIT 1;"); /usr/bin/sqlite3 "$1" "UPDATE operator_commands SET status='applied' WHERE status='pending';"; [[ "$action" == pause ]] && echo true > "$API_STATE"; [[ "$action" == resume ]] && echo false > "$API_STATE"; fi; fi\nif [[ "\${2:-}" == *"INSERT INTO operator_commands"* && -z "\${ARBITRATION_APPLY_AFTER_POLLS:-}" ]]; then action=$(/usr/bin/sqlite3 "$1" "SELECT action FROM operator_commands WHERE status='pending' ORDER BY id DESC LIMIT 1;"); /usr/bin/sqlite3 "$1" "UPDATE operator_commands SET status='applied' WHERE status='pending';"; [[ "$action" == pause ]] && echo true > "$API_STATE"; [[ "$action" == resume ]] && echo false > "$API_STATE"; fi\ntrue`,
   );
   executable(
     curl,
@@ -75,7 +75,7 @@ function makeFixture(paused = false) {
   );
   executable(systemctl, `echo "systemctl $*" >> "$CALLS"`);
   // prettier-ignore
-  const env = { ...process.env, KRABS_ROLLBACK_TEST_MODE: "1", KRABS_ROLLBACK_STATE_DIR: stateDir, KRABS_ROLLBACK_MARKER_PATH: marker, KRABS_ROLLBACK_CONTROL_DB_PATH: control, KRABS_ROLLBACK_DATA_DIR: data, KRABS_ROLLBACK_SQLITE: sqlite, KRABS_ROLLBACK_CURL: curl, KRABS_ROLLBACK_DOCKER: docker, KRABS_ROLLBACK_FLOCK: flock, KRABS_ROLLBACK_SYSTEMCTL: systemctl, KRABS_ROLLBACK_INSTALL_BIN: installBin, KRABS_ROLLBACK_UNIT_DIR: units, KRABS_ROLLBACK_TIMEOUT_BIN: "timeout", KRABS_ROLLBACK_POLL_ATTEMPTS: "2", KRABS_ROLLBACK_POLL_INTERVAL_SECONDS: "0", KRABS_DEPLOY_LOCK_PATH: join(dir, "deploy.lock"), CALLS: calls, API_STATE: api, API_AVAILABLE: available, IDENTITY: identity, HEALTH_IDENTITY: health, NETWORK_FENCED: fenced, STOPPED: join(dir, "stopped") };
+  const env = { ...process.env, KRABS_ROLLBACK_TEST_MODE: "1", KRABS_ROLLBACK_STATE_DIR: stateDir, KRABS_ROLLBACK_MARKER_PATH: marker, KRABS_ROLLBACK_CONTROL_DB_PATH: control, KRABS_ROLLBACK_DATA_DIR: data, KRABS_ROLLBACK_SQLITE: sqlite, KRABS_ROLLBACK_CURL: curl, KRABS_ROLLBACK_DOCKER: docker, KRABS_ROLLBACK_FLOCK: flock, KRABS_ROLLBACK_SYSTEMCTL: systemctl, KRABS_ROLLBACK_INSTALL_BIN: installBin, KRABS_ROLLBACK_UNIT_DIR: units, KRABS_ROLLBACK_TIMEOUT_BIN: "timeout", KRABS_ROLLBACK_POLL_ATTEMPTS: "2", KRABS_ROLLBACK_POLL_INTERVAL_SECONDS: "0", KRABS_DEPLOY_LOCK_PATH: join(dir, "deploy.lock"), CALLS: calls, API_STATE: api, API_AVAILABLE: available, IDENTITY: identity, HEALTH_IDENTITY: health, NETWORK_FENCED: fenced, STOPPED: join(dir, "stopped"), ARBITRATION_POLL_COUNTER: arbitrationPolls };
   // prettier-ignore
   return { dir, stateDir, marker, control, data, ledger, api, available, identity, health, calls, installBin, units, env };
 }
@@ -112,12 +112,31 @@ describe("krabs rollback guard", () => {
   // prettier-ignore
   const t28eTimeout = () => { const fixture=makeFixture(false); begin(fixture); const before=readFileSync(join(fixture.stateDir,"state.json"),"utf8"); const timed=spawnSync(guard,["watch"],{env:{...fixture.env,DOCKER_HANG:"1",KRABS_ROLLBACK_COMMAND_TIMEOUT_SECONDS:"1"},encoding:"utf8",timeout:10_000}); expect(timed.status).toBe(124); expect(readFileSync(join(fixture.stateDir,"state.json"),"utf8")).toBe(before); expect(readFileSync(fixture.api,"utf8").trim()).toBe("true"); expect(run(fixture,"status").status).toBe(0); };
   // prettier-ignore
-  it("T28f — controller failure, intent arbitration, and API cutover", async () => { t28fIntent(); await t28fController(false); },150_000);
+  it("T28f — controller failure, intent arbitration, and API cutover", async () => { t28fIntent(); t28fDelayedStartup(); await t28fController(false); },150_000);
   it("T28j — stopped recovery supersede is exact and fail-closed", async () => {
     await t28fController(true);
   }, 40_000);
   // prettier-ignore
   const t28fIntent = () => { const cases = [{ stage: "precommit", commands: [] as string[], expected: "resume" }, { stage: "commit_ready pause dominates", commands: ["pause"], expected: "pause" }, { stage: "after receipt pause then resume folds", commands: ["pause", "resume"], expected: "resume" }]; for (const row of cases) { const fixture = makeFixture(false); sql(fixture.control, "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2000-01-01T00:00:00.000Z')"); for (const [index, action] of row.commands.entries()) sql(fixture.control, `INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('${action}','operator','applied','2026-01-01T00:00:0${index}.000Z')`); const receipt = run(fixture, "deploy-arbitrate", "state", "false", "1"); expect(receipt.status, row.stage).toBe(0); expect(JSON.parse(receipt.stdout).finalAction, row.stage).toBe(row.expected); expect(readFileSync(fixture.api, "utf8").trim(), row.stage).toBe(String(row.expected === "pause")); } };
+  const t28fDelayedStartup = () => {
+    const fixture = makeFixture(true);
+    const result = spawnSync(guard, ["deploy-arbitrate", "slow-startup", "false", "0"], {
+      env: { ...fixture.env, ARBITRATION_APPLY_AFTER_POLLS: "61" },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(Number(readFileSync(fixture.env.ARBITRATION_POLL_COUNTER, "utf8"))).toBeGreaterThan(60);
+    expect(rows(fixture)).toEqual([
+      {
+        action: "resume",
+        initiator_type: "system",
+        initiator: "deploy:slow-startup:resume",
+        status: "applied",
+      },
+    ]);
+    expect(readFileSync(fixture.api, "utf8").trim()).toBe("false");
+  };
   const t28fController = async (supersedeOnly: boolean) => {
     const reached = new Set<string>(),
       fixture = makeFixture(true),
@@ -1115,10 +1134,10 @@ printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s"
     expect(deploySource.match(/install -d -m 711 '\$\{root\}\/config'/g)).toHaveLength(2);
     expect(guardSource).toContain('auth=(-H "Authorization: Bearer $key")');
     expect(guardSource).toContain(
-      'local POLL_ATTEMPTS="${KRABS_DEPLOY_ARBITRATION_POLL_ATTEMPTS:-60}"',
+      'local POLL_ATTEMPTS="${KRABS_DEPLOY_ARBITRATION_POLL_ATTEMPTS:-300}"',
     );
     expect(guardSource).toContain(
-      'command_timeout="${KRABS_DEPLOY_ARBITRATION_TIMEOUT_SECONDS:-150}"',
+      'command_timeout="${KRABS_DEPLOY_ARBITRATION_TIMEOUT_SECONDS:-630}"',
     );
     const retryOwnershipRefresh = deploySource.indexOf(
       "d.update(controllerPid=int(sys.argv[2]),controllerStartTicks=sys.argv[3],workerPgid=int(sys.argv[4]))",

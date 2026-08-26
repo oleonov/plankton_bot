@@ -171,6 +171,9 @@ For either mode, accept `DEPLOY_RECEIPT` only when its embedded receipt exactly 
 metadata: SHA, immutable digest, recovery state ID, previous/deploy versions, pre-pause provenance,
 locked run/API identity, final command high-water, and operator-pause override. `effectivePaused`
 must equal the recorded arbitration result. A pre-deploy or newer operator pause remains authoritative.
+Final command arbitration may wait for up to ten minutes while the paused runtime completes its
+blocking market scan and full authenticated fill snapshot; the shell backstop is 630 seconds. The
+fail-stop marker and trading fence remain authoritative for the whole wait.
 
 Start the observation epoch only after the new runtime is ready. Run the plan §9.2 evidence probe at
 T+0, T+10, T+20, and T+30: its markers must be `T0`, `T10`, `T20`, and `T30`; T10/T20/T30 must land
