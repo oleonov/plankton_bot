@@ -694,6 +694,124 @@ describe("MarketScannerModule", () => {
     expect(slugs).toContain("bitcoin-above-110k");
   });
 
+  it("attributes multi-page scan time to bounded phases in the completion log", async () => {
+    let monotonicMs = 0;
+    const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => monotonicMs);
+    silentLog.info.mockClear();
+
+    try {
+      const discoveryGateway = createMockDiscoveryGateway();
+      const marketRepo = createMockMarketRepo();
+      const positionRepo = createMockPositionRepo();
+      const orderRepo = createMockOrderRepo();
+      const selectionRuleEngine = makeEngine([]);
+      const resolve = selectionRuleEngine.current.resolve.bind(selectionRuleEngine.current);
+      let resolveCall = 0;
+      vi.spyOn(selectionRuleEngine.current, "resolve").mockImplementation((...args) => {
+        monotonicMs += resolveCall++ === 0 ? 23 : 29;
+        return resolve(...args);
+      });
+      (selectionRuleEngine.refreshIfStale as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        monotonicMs += 1;
+      });
+      (marketRepo.iterateAllTokenIds as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        monotonicMs += 3;
+        return [][Symbol.iterator]();
+      });
+      (positionRepo.findDust as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        monotonicMs += 4;
+        return [];
+      });
+      (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        monotonicMs += 5;
+        return [];
+      });
+      (orderRepo.findOpen as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        monotonicMs += 6;
+        return [];
+      });
+      let writePlanCall = 0;
+      (marketRepo.findByTokenIds as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        monotonicMs += writePlanCall++ === 0 ? 11 : 13;
+        return [];
+      });
+      let saveCall = 0;
+      (marketRepo.saveBatch as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        monotonicMs += saveCall++ === 0 ? 17 : 19;
+      });
+      (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        monotonicMs += 31;
+        return 0;
+      });
+
+      const page1 = [
+        makeClobMarket({
+          conditionId: "cond-timing-1",
+          tokens: [{ tokenId: "tok-timing-1", outcome: "Yes" }],
+        }),
+      ];
+      const page2 = [
+        makeClobMarket({
+          conditionId: "cond-timing-2",
+          tokens: [{ tokenId: "tok-timing-2", outcome: "Yes" }],
+        }),
+      ];
+      (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+        async (cb: ForEachMarketPageCallback) => {
+          monotonicMs += 6;
+          cb(page1, eventStatsFromMarkets(page1));
+          monotonicMs += 7;
+          cb(page2, eventStatsFromMarkets(page2));
+          monotonicMs += 17;
+          return { totalMarkets: 2 };
+        },
+      );
+
+      const { mod } = buildModule({
+        discoveryGateway,
+        marketRepo,
+        positionRepo,
+        orderRepo,
+        selectionRuleEngine,
+        marketSelectionPolicy: () => {
+          monotonicMs += 2;
+          return { maxMidPrice: 0.5, minLiquidity: 100 };
+        },
+      });
+
+      await mod.scan();
+
+      const completeLog = silentLog.info.mock.calls.find(
+        (call: unknown[]) => call[1] === "scan cycle complete",
+      );
+      expect(completeLog?.[0]).toMatchObject({
+        scanPages: 2,
+        scanPhasesMs: {
+          prepare: 21,
+          gamma: 30,
+          evaluation: 52,
+          writePlan: 24,
+          sqliteSave: 36,
+          deactivate: 31,
+          other: 0,
+        },
+      });
+      expect(
+        Object.values((completeLog?.[0] as { scanPhasesMs: Record<string, number> }).scanPhasesMs),
+      ).toSatisfy((phases: number[]) => phases.every(Number.isInteger));
+      expect(
+        Object.values((completeLog?.[0] as { scanPhasesMs: Record<string, number> }).scanPhasesMs),
+      ).toSatisfy((phases: number[]) => phases.every((value) => value >= 0));
+      expect(
+        Object.values(
+          (completeLog?.[0] as { scanPhasesMs: Record<string, number> }).scanPhasesMs,
+        ).reduce((sum, value) => sum + value, 0),
+      ).toBe(194);
+    } finally {
+      performanceNow.mockRestore();
+    }
+  });
+
   it("snapshots market-selection policy once per multi-page scan", async () => {
     const discoveryGateway = createMockDiscoveryGateway();
     const positionRepo = createMockPositionRepo();

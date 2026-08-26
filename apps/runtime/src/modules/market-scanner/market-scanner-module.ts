@@ -69,6 +69,11 @@ function computeLatencyAggregates(samples: readonly number[]): {
   };
 }
 
+function roundedNonNegativeMs(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.round(value));
+}
+
 export interface MarketScannerModuleDeps {
   discoveryGateway: MarketDiscoveryGateway;
   marketRepo: MarketRepository;
@@ -361,6 +366,13 @@ export class MarketScannerModule implements RuntimeModule {
     }
     this.scanning = true;
     const startMs = Date.now();
+    const scanStartedAtMs = performance.now();
+    let gammaCallbackMs = 0;
+    let evaluationMs = 0;
+    let writePlanMs = 0;
+    let sqliteSaveMs = 0;
+    let deactivateMs = 0;
+    let scanPages = 0;
 
     try {
       this.log.debug("scan cycle starting");
@@ -413,7 +425,11 @@ export class MarketScannerModule implements RuntimeModule {
       // full scan completes successfully.
       const pendingStep2Delta: Step2BreakdownSnapshot = createEmptyStep2Breakdown();
 
+      const gammaStartedAtMs = performance.now();
+      const prepareMs = gammaStartedAtMs - scanStartedAtMs;
       await this.deps.discoveryGateway.forEachMarketPage((pageMarkets, eventStats) => {
+        const pageStartedAtMs = performance.now();
+        scanPages++;
         discoveredMarkets += pageMarkets.length;
         pendingStep2Delta.scannedEventsTotal += eventStats.events;
         pendingStep2Delta.eventsSingleMarketTotal += eventStats.singleMarket;
@@ -560,25 +576,35 @@ export class MarketScannerModule implements RuntimeModule {
             });
           }
         }
+        const evaluationFinishedAtMs = performance.now();
+        evaluationMs += evaluationFinishedAtMs - pageStartedAtMs;
         if (pageBatch.length > 0) {
+          const writePlanStartedAtMs = performance.now();
           const writePlan = this.planPageWrites(pageBatch);
+          writePlanMs += performance.now() - writePlanStartedAtMs;
           skippedUnchangedTokens += writePlan.skippedUnchanged;
           skippedCoalesceNoopTokens += writePlan.skippedCoalesceNoop;
           if (writePlan.changedMarkets.length > 0) {
+            const sqliteSaveStartedAtMs = performance.now();
             this.deps.marketRepo.saveBatch(writePlan.changedMarkets);
+            sqliteSaveMs += performance.now() - sqliteSaveStartedAtMs;
             savedTokens += writePlan.changedMarkets.length;
           }
         }
+        gammaCallbackMs += performance.now() - pageStartedAtMs;
       });
+      const gammaMs = performance.now() - gammaStartedAtMs - gammaCallbackMs;
 
       // Deactivate tracked markets not in latest scan AND without open positions/orders.
       // Uses repo-side cursor + batch update to avoid materialising the full active
       // Market slice (~75 MB peak under full universe) alongside discoveredTokenIds.
+      const deactivateStartedAtMs = performance.now();
       const deactivatedCount = this.deps.marketRepo.deactivateMissing(
         discoveredTokenIds,
         activeTokenIds,
         now,
       );
+      deactivateMs = performance.now() - deactivateStartedAtMs;
 
       // ADR-021 §D-F #3 — D-B1 observability. Count preserved tokens (open
       // position/order legs) that were fully absent from this Gamma scan.
@@ -647,6 +673,24 @@ export class MarketScannerModule implements RuntimeModule {
       };
       this.lastScanResult = result;
 
+      const scanPhasesMs = {
+        prepare: roundedNonNegativeMs(prepareMs),
+        gamma: roundedNonNegativeMs(gammaMs),
+        evaluation: roundedNonNegativeMs(evaluationMs),
+        writePlan: roundedNonNegativeMs(writePlanMs),
+        sqliteSave: roundedNonNegativeMs(sqliteSaveMs),
+        deactivate: roundedNonNegativeMs(deactivateMs),
+        other: 0,
+      };
+      const accountedPhaseMs = Object.values(scanPhasesMs).reduce(
+        (sum, phaseMs) => sum + phaseMs,
+        0,
+      );
+      scanPhasesMs.other = Math.max(
+        0,
+        roundedNonNegativeMs(performance.now() - scanStartedAtMs) - accountedPhaseMs,
+      );
+
       this.log.info(
         {
           discoveredMarkets,
@@ -662,6 +706,8 @@ export class MarketScannerModule implements RuntimeModule {
           discoveryLatencyP90Ms: latencyAggregates.p90,
           discoveryLatencyMaxMs: latencyAggregates.max,
           scanTrigger: trigger,
+          scanPages,
+          scanPhasesMs,
           durationMs,
         },
         "scan cycle complete",
