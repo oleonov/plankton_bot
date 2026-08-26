@@ -140,10 +140,10 @@ case "$1" in
   pull) echo 'fake pull progress'; exit 0 ;;
   stop) : > "$STOPPED"; exit 0 ;;
   start) rm -f "$STOPPED"; exit 0 ;;
-  network) [[ "$2" == connect && "\${NETWORK_MODE:-}" != zero-after-connect ]] && rm -f "$NETWORK_FENCED" || : > "$NETWORK_FENCED"; exit 0 ;;
+  network) if [[ "$2" == disconnect && "$*" == *target-manager* ]]; then : > "$MANAGER_NETWORK_FENCED"; elif [[ "$2" == connect && "\${NETWORK_MODE:-}" != zero-after-connect ]]; then rm -f "$NETWORK_FENCED"; else : > "$NETWORK_FENCED"; fi; exit 0 ;;
   push) echo "digest: \${DEPLOY_DIGEST:-sha256:${digest}}"; exit 0 ;;
   image) [[ "$*" == *revision* ]] && echo '${deployTarget}' || echo 'sha256:${digest}'; exit 0 ;;
-  inspect) if [[ "\${SUPERSEDE_TEST:-}" == 1 && "$*" == *id-krabs-api* && ! -e "$OLD_API_REPLACED" && "$*" == *NetworkSettings.Networks* ]]; then [[ "\${API_NETWORK_MODE:-}" == wrong ]] && echo '{"unexpected":{}}' || echo '{"krabs_default":{}}'; elif [[ "\${SUPERSEDE_TEST:-}" == 1 && "$*" == *id-krabs-api* && ! -e "$OLD_API_REPLACED" ]]; then echo "\${OLD_API_RUNNING:-true} \${OLD_API_SHA:-${target}} \${OLD_API_IMAGE:-sha256:${"a".repeat(64)}}"; elif [[ "\${SUPERSEDE_TEST:-}" == 1 && ( "$*" == *target-runtime* || "$*" == *target-manager* ) && "$*" == *RestartPolicy.Name* ]]; then echo "\${OLD_TARGET_RUNNING:-false} \${OLD_TARGET_RESTART:-no} \${OLD_TARGET_SHA:-${target}} \${OLD_TARGET_IMAGE:-sha256:${"a".repeat(64)}}"; elif [[ "\${SUPERSEDE_TEST:-}" == 1 && ( "$*" == *target-runtime* || "$*" == *target-manager* ) && "$*" != *NetworkSettings.Networks* ]]; then echo "\${OLD_TARGET_RUNNING:-false} \${OLD_TARGET_SHA:-${target}}"; elif [[ "$*" == *NetworkSettings.Networks* ]]; then [[ "\${NETWORK_MODE:-}" == multi ]] && echo '{"krabs_default":{},"unexpected":{}}' || [[ "\${NETWORK_MODE:-}" == wrong ]] && echo '{"unexpected":{}}' || { [[ -e "$NETWORK_FENCED" ]] && echo '{}' || echo '{"krabs_default":{"EndpointID":"endpoint","Gateway":"172.20.0.1","IPAddress":"172.20.0.2","NetworkID":"network"}}'; }; elif [[ "$*" == *id-krabs-api* ]]; then [[ -e "$API_AVAILABLE" ]] && echo 'true ${deployTarget}' || echo 'false ${deployTarget}'; else [[ -e "$STOPPED" ]] && echo 'false ${deployTarget}' || echo 'true ${deployTarget}'; fi; exit 0 ;;
+  inspect) if [[ "\${SUPERSEDE_TEST:-}" == 1 && "$*" == *id-krabs-api* && ! -e "$OLD_API_REPLACED" && "$*" == *NetworkSettings.Networks* ]]; then [[ "\${API_NETWORK_MODE:-}" == wrong ]] && echo '{"unexpected":{}}' || echo '{"krabs_default":{}}'; elif [[ "\${SUPERSEDE_TEST:-}" == 1 && "$*" == *id-krabs-api* && ! -e "$OLD_API_REPLACED" ]]; then echo "\${OLD_API_RUNNING:-true} \${OLD_API_SHA:-${target}} \${OLD_API_IMAGE:-sha256:${"a".repeat(64)}}"; elif [[ "\${SUPERSEDE_TEST:-}" == 1 && ( "$*" == *target-runtime* || "$*" == *target-manager* ) && "$*" == *RestartPolicy.Name* ]]; then echo "\${OLD_TARGET_RUNNING:-false} \${OLD_TARGET_RESTART:-no} \${OLD_TARGET_SHA:-${target}} \${OLD_TARGET_IMAGE:-sha256:${"a".repeat(64)}}"; elif [[ "\${SUPERSEDE_TEST:-}" == 1 && "$*" == *target-manager* && "$*" == *NetworkSettings.Networks* ]]; then [[ -e "$MANAGER_NETWORK_FENCED" ]] && echo '{}' || { [[ "\${MANAGER_NETWORK_MODE:-}" == foreign ]] && echo '{"krabs_default":{},"krabs_manager-net":{},"unexpected":{}}' || echo '{"krabs_default":{},"krabs_manager-net":{}}'; }; elif [[ "\${SUPERSEDE_TEST:-}" == 1 && ( "$*" == *target-runtime* || "$*" == *target-manager* ) && "$*" != *NetworkSettings.Networks* ]]; then echo "\${OLD_TARGET_RUNNING:-false} \${OLD_TARGET_SHA:-${target}}"; elif [[ "$*" == *NetworkSettings.Networks* ]]; then [[ "\${NETWORK_MODE:-}" == multi ]] && echo '{"krabs_default":{},"unexpected":{}}' || [[ "\${NETWORK_MODE:-}" == wrong ]] && echo '{"unexpected":{}}' || { [[ -e "$NETWORK_FENCED" ]] && echo '{}' || echo '{"krabs_default":{"EndpointID":"endpoint","Gateway":"172.20.0.1","IPAddress":"172.20.0.2","NetworkID":"network"}}'; }; elif [[ "$*" == *id-krabs-api* ]]; then [[ -e "$API_AVAILABLE" ]] && echo 'true ${deployTarget}' || echo 'false ${deployTarget}'; else [[ -e "$STOPPED" ]] && echo 'false ${deployTarget}' || echo 'true ${deployTarget}'; fi; exit 0 ;;
   health) exit "\${DEPLOY_HEALTH_EXIT:-0}" ;;
 esac`,
     );
@@ -202,6 +202,7 @@ esac`,
         markerPath = join(config, "deploy-in-progress.json"),
         oldRuntimeEnv = join(config, `deploy-runtime-env-${target}-${runtimeEnvSha}`),
         oldApiReplaced = join(fixture.dir, "old-api-replaced"),
+        managerNetworkFenced = join(fixture.dir, "manager-network-fenced"),
         orderGate = join(fixture.dir, "supersede-order-status-gate"),
         orderGateCalls = join(fixture.dir, "supersede-order-status-gate-calls"),
         oldDigest = `sha256:${"a".repeat(64)}`,
@@ -276,6 +277,7 @@ esac`,
               OLD_API_RUNNING: "true",
               OLD_API_IMAGE: oldDigest,
               OLD_API_REPLACED: oldApiReplaced,
+              MANAGER_NETWORK_FENCED: managerNetworkFenced,
               ...extra,
             },
             encoding: "utf8",
@@ -295,6 +297,7 @@ esac`,
           rmSync(statePath, { force: true });
           rmSync(fixture.marker, { force: true });
           rmSync(oldApiReplaced, { force: true });
+          rmSync(managerNetworkFenced, { force: true });
           rmSync(fixture.env.NETWORK_FENCED, { force: true });
         };
       writeFileSync(orderGateCalls, "");
@@ -339,6 +342,7 @@ printf '{"migration101":{"candidateCount":0,"candidateHash":"%s","rowsHash":"%s"
         { name: "ambiguous API discovery", extra: { API_DISCOVERY_MODE: "multi" } },
         { name: "foreign network", extra: { NETWORK_MODE: "wrong" } },
         { name: "multiple networks", extra: { NETWORK_MODE: "multi" } },
+        { name: "foreign manager network", extra: { MANAGER_NETWORK_MODE: "foreign" } },
       ]) {
         seedSupersede(row.patch, row.metadata, row.marker);
         const recoveryBefore = readFileSync(recoveryPath, "utf8"),
@@ -371,6 +375,7 @@ printf '{"migration101":{"candidateCount":0,"candidateHash":"%s","rowsHash":"%s"
               OLD_API_SHA: target,
               OLD_API_IMAGE: oldDigest,
               OLD_API_REPLACED: oldApiReplaced,
+              MANAGER_NETWORK_FENCED: managerNetworkFenced,
             },
             encoding: "utf8",
           },
@@ -389,7 +394,11 @@ printf '{"migration101":{"candidateCount":0,"candidateHash":"%s","rowsHash":"%s"
         });
       expect(fenceDeath.status).not.toBe(0);
       expect(readFileSync(recoveryPath, "utf8")).toBe(recoveryBeforeFenceDeath);
+      const recoveredCallsStart = readFileSync(fixture.calls, "utf8").length;
       expect(runSupersede().status).toBe(0);
+      expect(readFileSync(fixture.calls, "utf8").slice(recoveredCallsStart)).toContain(
+        "network disconnect -f krabs_manager-net target-manager",
+      );
 
       seedSupersede();
       const rebindDeath = runSupersede(target, {

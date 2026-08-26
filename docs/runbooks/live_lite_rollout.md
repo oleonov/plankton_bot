@@ -104,9 +104,11 @@ test "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)"
 Supersede is release-only and fails before pulling or changing deployment state unless recovery is
 exactly `target_stopped_rearbitrate`, metadata is still at the previous deploy version, the marker
 owns the same recovery ID, the runtime environment hash is unchanged, and both saved trading
-containers are stopped with restart `no`, the failed SHA/image, and either no network or only the
-saved default network. No rollback state or marker may coexist. The single running `krabs-api`
-container must have the same failed SHA/image and saved network. It preserves the recovery ID,
+containers are stopped with restart `no` and the failed SHA/image. The runtime may have no network
+or only the saved default; the manager may retain any recovery-time subset of that default plus its
+Compose-owned internal `manager-net`. Any foreign network fails closed, and every retained approved
+network is fenced before rebinding. No rollback state or marker may coexist. The single running
+`krabs-api` container must have the same failed SHA/image and saved network. It preserves the recovery ID,
 baseline, pre-deploy pause intent, previous version, and saved network; then it fences the stopped
 targets, replaces the API, reruns the migration gates, health/cutoff proof, final command
 arbitration, and normal metadata commit for the new SHA. Never edit or remove recovery, marker, or

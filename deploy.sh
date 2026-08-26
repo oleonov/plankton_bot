@@ -349,7 +349,24 @@ validate_stopped_supersede_container() {
   read -r running restart revision image < <(run "$DOCKER" inspect --format '{{.State.Running}} {{.HostConfig.RestartPolicy.Name}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{.Image}}' "$container") || die "supersede ${role} identity inspection failed"
   [[ "$running" == false && "$restart" == no && "$revision" == "$expected_old" && "$image" == "$expected_image" ]] || die "supersede ${role} is not the exact stopped target"
   census="$(run "$DOCKER" inspect --format '{{json .NetworkSettings.Networks}}' "$container")" || die "supersede ${role} network census failed"
-  printf '%s' "$census" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,dict) and list(d) in ([],[sys.argv[1]])' "$network" || die "supersede ${role} network is not empty or the saved default"
+  approved_supersede_networks "$census" "$network" "$role" >/dev/null || die "supersede ${role} has a foreign network"
+}
+
+approved_supersede_networks() {
+  local census="$1" network="$2" role="$3"
+  printf '%s' "$census" | python3 -c 'import json,sys; d=json.load(sys.stdin); default,role=sys.argv[1:]; assert isinstance(d,dict) and role in ("runtime","manager"); allowed={default}; assert role!="manager" or default.endswith("_default"); allowed.add(default[:-8]+"_manager-net") if role=="manager" else None; assert set(d)<=allowed; print("\n".join(d))' "$network" "$role"
+}
+
+fence_supersede_networks() {
+  local container="$1" network="$2" role="$3" census attached
+  census="$(run "$DOCKER" inspect --format '{{json .NetworkSettings.Networks}}' "$container")" || die "supersede ${role} network census failed"
+  attached="$(approved_supersede_networks "$census" "$network" "$role")" || die "supersede ${role} has a foreign network"
+  while IFS= read -r network; do
+    [[ -n "$network" ]] || continue
+    run "$DOCKER" network disconnect -f "$network" "$container" || die "supersede ${role} network disconnect failed"
+  done <<< "$attached"
+  census="$(run "$DOCKER" inspect --format '{{json .NetworkSettings.Networks}}' "$container")" || die "supersede ${role} network post-census failed"
+  [[ "$census" == '{}' ]] || die "supersede ${role} remains network connected"
 }
 
 assert_no_rollback_ownership() {
@@ -579,8 +596,8 @@ PY
 )"
     digest=''; image_id=''; read -r digest image_id < <(immutable_image "$full")
     [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ && "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die 'supersede immutable image result is malformed'
-    fence_runtime_network "$runtime" "$network"; barrier supersede-after-first-fence
-    fence_runtime_network "$manager" "$network"
+    fence_supersede_networks "$runtime" "$network" runtime; barrier supersede-after-first-fence
+    fence_supersede_networks "$manager" "$network" manager
     compose stop krabs-api krabs-runtime-manager krabs-runtime
     rebind_supersede_recovery "$full" "$digest" "$image_id"
     barrier supersede-after-rebind
