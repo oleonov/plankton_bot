@@ -136,7 +136,7 @@ import {
 } from "./two-lane-entry-shadow.js";
 import type { PriceHistoryProvider } from "./market-snapshot-price-history.js";
 import type { SellLoopGuardReader } from "../sell-loop-guard/sell-loop-guard-module.js";
-import type { WindowMaxCacheMetrics } from "./market-snapshot-price-history.js";
+import type { R23MemoryMetrics, WindowMaxCacheMetrics } from "./market-snapshot-price-history.js";
 import {
   ENTRY_FRESH_EDGE_WINDOW_MS,
   computeEntryFreshEdgeSignalFields,
@@ -249,6 +249,7 @@ export interface DecisionEvalMetricsSnapshot {
   wouldMatchRule: Record<string, number>;
   decisionTickLatency: LatencySnapshot;
   r23Cache: WindowMaxCacheMetrics | null;
+  r23Memory: R23MemoryMetrics | null;
   capturedAt: string;
 }
 
@@ -1346,6 +1347,9 @@ export class AlgoDecisionModule implements RuntimeModule {
         this.legStateCache.delete(tokenIdStr);
         this.markDirty(tokenId);
         continue;
+      }
+      if (!this.pendingEntries.has(tokenIdStr)) {
+        this.deps.priceHistoryProvider?.evictToken?.(tokenId);
       }
       this.dirtyTokenIds.delete(tokenIdStr);
       this.legStateCache.delete(tokenIdStr);
@@ -3537,6 +3541,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       wouldMatchRule: Object.fromEntries(this.lastEvalMetrics.wouldMatchRule),
       decisionTickLatency: this.decisionLatency.snapshot(),
       r23Cache: this.deps.priceHistoryProvider?.getWindowMaxCacheMetrics?.() ?? null,
+      r23Memory: this.deps.priceHistoryProvider?.snapshotMemoryMetrics?.(now) ?? null,
       capturedAt: new Date(now).toISOString(),
     });
   }

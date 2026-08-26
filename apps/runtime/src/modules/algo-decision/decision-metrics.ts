@@ -63,7 +63,7 @@ export class SustainedThresholdAlert {
   }
 }
 
-function percentile(sorted: readonly number[], pct: number): number {
+export function percentile(sorted: readonly number[], pct: number): number {
   const index = Math.ceil((pct / 100) * sorted.length) - 1;
   const clamped = Math.min(Math.max(index, 0), sorted.length - 1);
   return roundMs(sorted[clamped] ?? 0);

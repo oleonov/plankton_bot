@@ -5152,6 +5152,20 @@ describe("AlgoDecisionModule", () => {
             ttlMs: 60_000,
             maxEntries: 10_000,
           })),
+          snapshotMemoryMetrics: vi.fn(() => ({
+            tokenCount: 2,
+            sampleCount: 3,
+            samplesPerTokenP50: 1,
+            samplesPerTokenP95: 2,
+            samplesPerTokenMax: 2,
+            observedSamples: 4,
+            agePrunedSamples: 1,
+            capacityPrunedSamples: 0,
+            evictedTokens: 0,
+            evictedSamples: 0,
+            maxAgeMs: 86_400_000,
+            maxSamplesPerToken: 2_000,
+          })),
         },
       });
       await mod.start();
@@ -5177,6 +5191,11 @@ describe("AlgoDecisionModule", () => {
           hits: 1,
           misses: 3,
           hitRate: 0.25,
+        },
+        r23Memory: {
+          tokenCount: 2,
+          sampleCount: 3,
+          observedSamples: 4,
         },
       });
       expect(sink.mock.calls[0]?.[0].decisionTickLatency.p95Ms).toEqual(expect.any(Number));
@@ -6180,6 +6199,84 @@ describe("AlgoDecisionModule", () => {
 
     expect((await mod.healthCheck()).detail).toContain("markets=1");
 
+    await mod.stop();
+  });
+
+  it("evicts R23 history only for removed tokens without open or pending exposure", async () => {
+    const flatToken = "token-history-flat";
+    const openToken = "token-history-open";
+    const pendingToken = "token-history-pending";
+    selectedMarketCache = createMockSelectedMarketCache([flatToken, openToken, pendingToken]);
+    const openPosition = makeOpenPosition(openToken);
+    const positionRepo = createPositionRepoForOpenPositions([openPosition]);
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      observeMarket: vi.fn(),
+      evictToken: vi.fn(),
+    };
+    const mod = buildModule({
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+      priceHistoryProvider,
+    });
+    await mod.start();
+    (mod as any).pendingEntries.set(pendingToken, {
+      tokenId: pendingToken,
+      signalId: "signal-pending",
+      suggestedSizeUsdc: 1,
+      reservedAt: Date.now(),
+      clientOrderId: null,
+      orderId: null,
+    });
+
+    await (bus as any).emit("TrackedMarketsChanged", {
+      addedTokenIds: [],
+      removedTokenIds: [
+        createTokenId(flatToken),
+        createTokenId(openToken),
+        createTokenId(pendingToken),
+      ],
+      timestamp: Date.now(),
+    });
+
+    expect(priceHistoryProvider.evictToken).toHaveBeenCalledTimes(1);
+    expect(priceHistoryProvider.evictToken).toHaveBeenCalledWith(createTokenId(flatToken));
+    await mod.stop();
+  });
+
+  it("re-added flat tokens start with cold R23 history", async () => {
+    const tokenId = "token-history-readd";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    const history = new Map<string, number[]>();
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      observeMarket: vi.fn((market: NormalizedMarket) => {
+        const samples = history.get(String(market.tokenId)) ?? [];
+        if (market.midPrice != null) samples.push(market.midPrice);
+        history.set(String(market.tokenId), samples);
+      }),
+      evictToken: vi.fn((removedTokenId: import("@krabs/domain").TokenId) => {
+        history.delete(String(removedTokenId));
+      }),
+    };
+    const mod = buildModule({ priceHistoryProvider });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.4)],
+      timestamp: Date.now(),
+    });
+    (mod as any).pendingEntries.delete(tokenId);
+    await (bus as any).emit("TrackedMarketsChanged", {
+      addedTokenIds: [],
+      removedTokenIds: [createTokenId(tokenId)],
+      timestamp: Date.now(),
+    });
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.1)],
+      timestamp: Date.now(),
+    });
+
+    expect(history.get(tokenId)).toEqual([0.1]);
     await mod.stop();
   });
 

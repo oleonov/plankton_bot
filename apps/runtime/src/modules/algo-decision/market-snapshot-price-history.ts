@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { NormalizedMarket, TokenId } from "@krabs/domain";
+import { percentile } from "./decision-metrics.js";
 
 export interface PriceHistoryProvider {
   findReferencePrice(tokenId: TokenId, targetMs: number, maxAgeMs: number): number | null;
@@ -11,6 +12,8 @@ export interface PriceHistoryProvider {
   ): MidpointWindowStats | null;
   observeMarket?(market: NormalizedMarket, observedAtMs?: number): void;
   getWindowMaxCacheMetrics?(): WindowMaxCacheMetrics;
+  evictToken?(tokenId: TokenId): void;
+  snapshotMemoryMetrics?(nowMs?: number): R23MemoryMetrics;
 }
 
 export interface MidpointWindowStats {
@@ -31,6 +34,21 @@ export interface WindowMaxCacheMetrics {
   entries: number;
   ttlMs: number;
   maxEntries: number;
+}
+
+export interface R23MemoryMetrics {
+  tokenCount: number;
+  sampleCount: number;
+  samplesPerTokenP50: number | null;
+  samplesPerTokenP95: number | null;
+  samplesPerTokenMax: number | null;
+  observedSamples: number;
+  agePrunedSamples: number;
+  capacityPrunedSamples: number;
+  evictedTokens: number;
+  evictedSamples: number;
+  maxAgeMs: number;
+  maxSamplesPerToken: number;
 }
 
 const WINDOW_MAX_CACHE_TTL_MS = 60_000;
@@ -59,6 +77,11 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
   private windowMaxInvocations = 0;
   private windowMaxHits = 0;
   private windowMaxMisses = 0;
+  private observedSamples = 0;
+  private agePrunedSamples = 0;
+  private capacityPrunedSamples = 0;
+  private evictedTokens = 0;
+  private evictedSamples = 0;
 
   constructor(db: Database.Database, opts: MarketSnapshotPriceHistoryProviderOptions = {}) {
     this.syncMissLookup = opts.syncMissLookup ?? true;
@@ -187,9 +210,42 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
     const tokenKey = String(market.tokenId);
     const samples = this.memorySamplesByToken.get(tokenKey) ?? [];
     samples.push({ ts: observedAtMs, price });
-    this.pruneSamples(samples, observedAtMs);
+    this.observedSamples++;
+    this.recordPrunedSamples(this.pruneSamples(samples, observedAtMs));
     this.memorySamplesByToken.set(tokenKey, samples);
     this.evictWindowCacheForToken(tokenKey);
+  }
+
+  evictToken(tokenId: TokenId): void {
+    const tokenKey = String(tokenId);
+    const samples = this.memorySamplesByToken.get(tokenKey);
+    if (samples) {
+      this.evictedTokens++;
+      this.evictedSamples += samples.length;
+      this.memorySamplesByToken.delete(tokenKey);
+    }
+    this.evictWindowCacheForToken(tokenKey);
+  }
+
+  snapshotMemoryMetrics(nowMs = Date.now()): R23MemoryMetrics {
+    this.pruneAllSamples(nowMs);
+    const sampleCounts = [...this.memorySamplesByToken.values()]
+      .map((samples) => samples.length)
+      .sort((a, b) => a - b);
+    return {
+      tokenCount: sampleCounts.length,
+      sampleCount: sampleCounts.reduce((total, count) => total + count, 0),
+      samplesPerTokenP50: sampleCounts.length > 0 ? percentile(sampleCounts, 50) : null,
+      samplesPerTokenP95: sampleCounts.length > 0 ? percentile(sampleCounts, 95) : null,
+      samplesPerTokenMax: sampleCounts.at(-1) ?? null,
+      observedSamples: this.observedSamples,
+      agePrunedSamples: this.agePrunedSamples,
+      capacityPrunedSamples: this.capacityPrunedSamples,
+      evictedTokens: this.evictedTokens,
+      evictedSamples: this.evictedSamples,
+      maxAgeMs: this.memorySampleMaxAgeMs,
+      maxSamplesPerToken: this.memorySampleMaxPerToken,
+    };
   }
 
   getWindowMaxCacheMetrics(): WindowMaxCacheMetrics {
@@ -257,15 +313,33 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
     );
   }
 
-  private pruneSamples(samples: Array<{ ts: number; price: number }>, nowMs: number): void {
-    const oldestMs = nowMs - this.memorySampleMaxAgeMs;
-    let deleteCount = 0;
-    while (deleteCount < samples.length && samples[deleteCount]!.ts < oldestMs) {
-      deleteCount++;
+  private pruneAllSamples(nowMs: number): void {
+    for (const [tokenKey, samples] of this.memorySamplesByToken) {
+      const pruned = this.pruneSamples(samples, nowMs);
+      this.recordPrunedSamples(pruned);
+      if (pruned.age + pruned.capacity > 0) this.evictWindowCacheForToken(tokenKey);
+      if (samples.length === 0) this.memorySamplesByToken.delete(tokenKey);
     }
-    const overflow = Math.max(0, samples.length - deleteCount - this.memorySampleMaxPerToken);
-    deleteCount += overflow;
+  }
+
+  private pruneSamples(
+    samples: Array<{ ts: number; price: number }>,
+    nowMs: number,
+  ): { age: number; capacity: number } {
+    const oldestMs = nowMs - this.memorySampleMaxAgeMs;
+    let age = 0;
+    while (age < samples.length && samples[age]!.ts < oldestMs) {
+      age++;
+    }
+    const capacity = Math.max(0, samples.length - age - this.memorySampleMaxPerToken);
+    const deleteCount = age + capacity;
     if (deleteCount > 0) samples.splice(0, deleteCount);
+    return { age, capacity };
+  }
+
+  private recordPrunedSamples(pruned: { age: number; capacity: number }): void {
+    this.agePrunedSamples += pruned.age;
+    this.capacityPrunedSamples += pruned.capacity;
   }
 
   private evictWindowCacheForToken(tokenKey: string): void {

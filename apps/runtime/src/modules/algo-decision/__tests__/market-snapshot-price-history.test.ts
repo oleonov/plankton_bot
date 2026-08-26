@@ -206,4 +206,82 @@ describe("MarketSnapshotPriceHistoryProvider", () => {
       8,
     );
   });
+
+  it("globally prunes expired samples and invalidates cached maxima immediately", () => {
+    const conn = setupDb();
+    const now = Date.parse("2026-05-18T12:00:00.000Z");
+    const provider = new MarketSnapshotPriceHistoryProvider(conn, {
+      syncMissLookup: false,
+      memorySampleMaxAgeMs: 1_000,
+    });
+
+    provider.observeMarket(makeMarket("stale", { mid: 0.4 }, now - 2_000));
+    expect(provider.maxMidpointInWindow(createTokenId("stale"), 60_000, now - 1_500)).toBe(0.4);
+
+    provider.observeMarket(makeMarket("fresh", { mid: 0.2 }, now));
+
+    const metrics = provider.snapshotMemoryMetrics(now);
+    expect(provider.maxMidpointInWindow(createTokenId("stale"), 60_000, now)).toBeNull();
+    expect(metrics).toEqual({
+      tokenCount: 1,
+      sampleCount: 1,
+      samplesPerTokenP50: 1,
+      samplesPerTokenP95: 1,
+      samplesPerTokenMax: 1,
+      observedSamples: 2,
+      agePrunedSamples: 1,
+      capacityPrunedSamples: 0,
+      evictedTokens: 0,
+      evictedSamples: 0,
+      maxAgeMs: 1_000,
+      maxSamplesPerToken: 2_000,
+    });
+  });
+
+  it("distinguishes capacity pruning and reports samples-per-token percentiles", () => {
+    const conn = setupDb();
+    const now = Date.parse("2026-05-18T12:00:00.000Z");
+    const provider = new MarketSnapshotPriceHistoryProvider(conn, {
+      syncMissLookup: false,
+      memorySampleMaxPerToken: 2,
+    });
+
+    provider.observeMarket(makeMarket("two", { mid: 0.1 }, now - 2));
+    provider.observeMarket(makeMarket("two", { mid: 0.2 }, now - 1));
+    provider.observeMarket(makeMarket("two", { mid: 0.3 }, now));
+    provider.observeMarket(makeMarket("one", { mid: 0.4 }, now));
+
+    expect(provider.snapshotMemoryMetrics(now)).toMatchObject({
+      tokenCount: 2,
+      sampleCount: 3,
+      samplesPerTokenP50: 1,
+      samplesPerTokenP95: 2,
+      samplesPerTokenMax: 2,
+      observedSamples: 4,
+      agePrunedSamples: 0,
+      capacityPrunedSamples: 1,
+    });
+  });
+
+  it("explicitly evicts a token's samples and window cache", () => {
+    const conn = setupDb();
+    const now = Date.parse("2026-05-18T12:00:00.000Z");
+    const provider = new MarketSnapshotPriceHistoryProvider(conn, { syncMissLookup: false });
+
+    provider.observeMarket(makeMarket("tok", { mid: 0.4 }, now));
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 60_000, now)).toBe(0.4);
+
+    provider.evictToken(createTokenId("tok"));
+
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 60_000, now + 1)).toBeNull();
+    expect(provider.snapshotMemoryMetrics(now + 1)).toMatchObject({
+      tokenCount: 0,
+      sampleCount: 0,
+      samplesPerTokenP50: null,
+      samplesPerTokenP95: null,
+      samplesPerTokenMax: null,
+      evictedTokens: 1,
+      evictedSamples: 1,
+    });
+  });
 });

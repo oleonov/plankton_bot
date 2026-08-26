@@ -1145,7 +1145,7 @@ describe("GET /status", () => {
     conn.db.exec(`
       DELETE FROM runtime_metrics WHERE metric_name = 'algo_decision_eval_counters';
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
-      VALUES ('algo_decision_eval_counters', 10, '{"r23DipChecked":10,"r23DipFired":2,"r23NoHistory":3,"r23NoDip":5,"r23Cache":{"hitRate":0.25,"hits":1,"misses":3,"invocations":4},"decisionTickLatency":{"p95Ms":99,"p99Ms":120}}', '${eventIso}');
+      VALUES ('algo_decision_eval_counters', 10, '{"r23DipChecked":10,"r23DipFired":2,"r23NoHistory":3,"r23NoDip":5,"r23Cache":{"hitRate":0.25,"hits":1,"misses":3,"invocations":4},"r23Memory":{"tokenCount":2,"sampleCount":3,"samplesPerTokenP50":1,"samplesPerTokenP95":2,"samplesPerTokenMax":2,"observedSamples":4,"agePrunedSamples":5,"capacityPrunedSamples":6,"evictedTokens":7,"evictedSamples":8,"maxAgeMs":86400000,"maxSamplesPerToken":2000},"decisionTickLatency":{"p95Ms":99,"p99Ms":120}}', '${eventIso}');
       INSERT INTO decision_signal_log
         (signal_id, token_id, condition_id, side, decision_rule_id, state, price, buy_count, signal_timestamp)
       VALUES
@@ -1186,6 +1186,18 @@ describe("GET /status", () => {
       cache_hits: 1,
       cache_misses: 3,
       cache_invocations: 4,
+      history_token_count: 2,
+      history_sample_count: 3,
+      history_samples_per_token_p50: 1,
+      history_samples_per_token_p95: 2,
+      history_samples_per_token_max: 2,
+      history_observed_samples: 4,
+      history_age_pruned_samples: 5,
+      history_capacity_pruned_samples: 6,
+      history_evicted_tokens: 7,
+      history_evicted_samples: 8,
+      history_max_age_ms: 86_400_000,
+      history_max_samples_per_token: 2_000,
       decision_tick_latency_p95_ms: 99,
       decision_tick_latency_p99_ms: 120,
     });
@@ -1207,6 +1219,28 @@ describe("GET /status", () => {
       DELETE FROM fills WHERE fill_id = 'fill-r23';
       DELETE FROM orders WHERE order_id = 'ord-r23';
     `);
+
+    const empty = json(
+      await app.inject({
+        method: "GET",
+        url: "/api/v1/metrics/r23",
+        headers: authHeaders(),
+      }),
+    );
+    expect(empty.data.current).toMatchObject({
+      history_token_count: 0,
+      history_sample_count: 0,
+      history_observed_samples: 0,
+      history_age_pruned_samples: 0,
+      history_capacity_pruned_samples: 0,
+      history_evicted_tokens: 0,
+      history_evicted_samples: 0,
+      history_samples_per_token_p50: null,
+      history_samples_per_token_p95: null,
+      history_samples_per_token_max: null,
+      history_max_age_ms: null,
+      history_max_samples_per_token: null,
+    });
   });
 
   it("GET /dashboard/kpi exposes operator KPI fields", async () => {

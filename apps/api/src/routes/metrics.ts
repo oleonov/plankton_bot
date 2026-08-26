@@ -419,6 +419,7 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       .get() as { labels: string | null; captured_at: string } | undefined;
     const latestEval = parseJsonObject(latestEvalRow?.labels);
     const latestCache = readObject(latestEval, "r23Cache");
+    const latestMemory = readObject(latestEval, "r23Memory");
     const latestLatency = readObject(latestEval, "decisionTickLatency");
     const fireRows = db
       .prepare(
@@ -481,6 +482,18 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
         cache_hits: readNumber(latestCache, "hits") ?? 0,
         cache_misses: readNumber(latestCache, "misses") ?? 0,
         cache_invocations: readNumber(latestCache, "invocations") ?? 0,
+        history_token_count: readNumber(latestMemory, "tokenCount") ?? 0,
+        history_sample_count: readNumber(latestMemory, "sampleCount") ?? 0,
+        history_samples_per_token_p50: readNumber(latestMemory, "samplesPerTokenP50"),
+        history_samples_per_token_p95: readNumber(latestMemory, "samplesPerTokenP95"),
+        history_samples_per_token_max: readNumber(latestMemory, "samplesPerTokenMax"),
+        history_observed_samples: readNumber(latestMemory, "observedSamples") ?? 0,
+        history_age_pruned_samples: readNumber(latestMemory, "agePrunedSamples") ?? 0,
+        history_capacity_pruned_samples: readNumber(latestMemory, "capacityPrunedSamples") ?? 0,
+        history_evicted_tokens: readNumber(latestMemory, "evictedTokens") ?? 0,
+        history_evicted_samples: readNumber(latestMemory, "evictedSamples") ?? 0,
+        history_max_age_ms: readNumber(latestMemory, "maxAgeMs"),
+        history_max_samples_per_token: readNumber(latestMemory, "maxSamplesPerToken"),
         decision_tick_latency_p95_ms: readNumber(latestLatency, "p95Ms"),
         decision_tick_latency_p99_ms: readNumber(latestLatency, "p99Ms"),
         captured_at: latestEvalRow?.captured_at ?? null,

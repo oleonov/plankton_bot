@@ -699,6 +699,18 @@ export interface R23MetricsData {
     cache_hits: number;
     cache_misses: number;
     cache_invocations: number;
+    history_token_count: number;
+    history_sample_count: number;
+    history_samples_per_token_p50: number | null;
+    history_samples_per_token_p95: number | null;
+    history_samples_per_token_max: number | null;
+    history_observed_samples: number;
+    history_age_pruned_samples: number;
+    history_capacity_pruned_samples: number;
+    history_evicted_tokens: number;
+    history_evicted_samples: number;
+    history_max_age_ms: number | null;
+    history_max_samples_per_token: number | null;
     decision_tick_latency_p95_ms: number | null;
     decision_tick_latency_p99_ms: number | null;
     captured_at: string | null;
