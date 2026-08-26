@@ -206,7 +206,7 @@ preflight_supersede_recovery() {
   local expected_old="$1" full="$2" hash="$3" ssh_cmd
   ssh_cmd="${KRABS_DEPLOY_SSH:-ssh}"
   "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" \
-    "cd '${SERVER_PATH}' && KRABS_REMOTE_PREFLIGHT=1 exec /bin/bash -s -- --internal-supersede-preflight '${expected_old}' '${full}' '${hash}'" < "$0"
+    "cd '${SERVER_PATH}' && KRABS_ORDER_STATUS_GATE='${SERVER_PATH}/config/krabs-order-status-migration-gate-${expected_old}.sh' KRABS_REMOTE_PREFLIGHT=1 exec /bin/bash -s -- --internal-supersede-preflight '${expected_old}' '${full}' '${hash}'" < "$0"
 }
 
 stage_runtime_env() {

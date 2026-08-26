@@ -1091,6 +1091,13 @@ printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s"
     expect(supersedeDeadline.indexOf("preflight_supersede_recovery")).toBeLessThan(
       supersedeDeadline.indexOf("stage_and_publish"),
     );
+    const supersedePreflight = deploySource.slice(
+      deploySource.indexOf("preflight_supersede_recovery()"),
+      deploySource.indexOf("stage_runtime_env()"),
+    );
+    expect(supersedePreflight).toContain(
+      "KRABS_ORDER_STATUS_GATE='${SERVER_PATH}/config/krabs-order-status-migration-gate-${expected_old}.sh'",
+    );
     expect(deploySource).not.toContain("KRABS_DEPLOY_TIMEOUT:-/usr/bin/timeout");
     expect(deploySource).toContain("compose create --pull never");
     expect(deploySource).toContain("compose up -d --no-deps --pull never");
