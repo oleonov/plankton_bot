@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type {
   MarketRepository,
   Market,
+  MarketSignatureUpdate,
   MarketScoreUpdate,
   SignatureThresholds,
   TrackedForPricing,
@@ -69,6 +70,8 @@ type PricingCandidate = {
   market: Market;
   features: SelectionFeatures;
 };
+type MarketBatch = readonly Market[];
+type SignatureBatch = readonly MarketSignatureUpdate[];
 
 // Reserved plankton-signature tier (spec 2026-07-01 §4.1/§4.2): fresh markets
 // have no market_snapshots to rank from, so they carry their own Gamma-at-
@@ -160,13 +163,15 @@ const UPSERT_MARKET_SQL = `INSERT INTO markets
            sig_features_at = excluded.sig_features_at,
            updated_at = excluded.updated_at`;
 
+const UPDATE_SIGNATURE_SQL = `UPDATE markets SET
+  sig_mid = ?, sig_cheap_mid = ?, sig_liquidity = ?, sig_vol24h = ?,
+  sig_features_at = ?, updated_at = ? WHERE token_id = ?`;
+
 export class SqliteMarketRepository implements MarketRepository {
   private upsertStmt: Database.Statement | null = null;
-  private upsertManyTx:
-    | ((
-        markets: readonly Market[],
-        bind: (stmt: Database.Statement, market: Market) => void,
-      ) => void)
+  private signatureUpdateStmt: Database.Statement | null = null;
+  private writeBatchTx:
+    | ((fullUpserts: MarketBatch, signatureUpdates: SignatureBatch) => void)
     | null = null;
   private v4AdmissionTelemetry = createV4AdmissionTelemetrySnapshot();
 
@@ -219,16 +224,34 @@ export class SqliteMarketRepository implements MarketRepository {
   }
 
   saveBatch(markets: readonly Market[]): void {
-    if (markets.length === 0) return;
-    const stmt = this.getUpsertStmt();
-    if (!this.upsertManyTx) {
-      this.upsertManyTx = this.db.transaction(
-        (batch: readonly Market[], bind: (stmt: Database.Statement, market: Market) => void) => {
-          for (const m of batch) bind(stmt, m);
-        },
-      );
+    this.saveBatchWithSignatureUpdates(markets, []);
+  }
+
+  saveBatchWithSignatureUpdates(
+    fullUpserts: readonly Market[],
+    signatureUpdates: readonly MarketSignatureUpdate[],
+  ): void {
+    if (fullUpserts.length === 0 && signatureUpdates.length === 0) return;
+    if (!this.signatureUpdateStmt) this.signatureUpdateStmt = this.db.prepare(UPDATE_SIGNATURE_SQL);
+    const signatureStmt = this.signatureUpdateStmt;
+    const upsertStmt = this.getUpsertStmt();
+    if (!this.writeBatchTx) {
+      this.writeBatchTx = this.db.transaction((full: MarketBatch, signatures: SignatureBatch) => {
+        for (const update of signatures) {
+          signatureStmt.run(
+            update.sigMid,
+            update.sigCheapMid,
+            update.sigLiquidity,
+            update.sigVol24h,
+            update.sigFeaturesAt,
+            update.updatedAt,
+            update.tokenId,
+          );
+        }
+        for (const market of full) this.bindUpsert(upsertStmt, market);
+      });
     }
-    this.upsertManyTx(markets, this.bindUpsert.bind(this));
+    this.writeBatchTx(fullUpserts, signatureUpdates);
   }
 
   findByTokenId(tokenId: TokenId): Market | null {

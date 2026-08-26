@@ -4,7 +4,6 @@ import type {
   SelectionRule,
   MarketDiscoveryGateway,
   ClobMarket,
-  MarketRepository,
   Market,
   EventBus,
   PositionRepository,
@@ -12,7 +11,10 @@ import type {
   MarketSelectionPolicy,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
-import { MarketScannerModule } from "../modules/market-scanner/market-scanner-module.js";
+import {
+  MarketScannerModule,
+  type MarketScannerModuleDeps,
+} from "../modules/market-scanner/market-scanner-module.js";
 import type { RefreshableSelectionRuleEngine } from "../selection-rule-engine-factory.js";
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -147,16 +149,15 @@ function createMockDiscoveryGateway(): MarketDiscoveryGateway {
   };
 }
 
-function createMockMarketRepo(): MarketRepository {
+function createMockMarketRepo(): MarketScannerModuleDeps["marketRepo"] {
   const save = vi.fn();
+  const saveBatch = vi.fn((markets: readonly Market[]) => {
+    for (const m of markets) save(m);
+  });
   return {
     save,
-    // Scanner now writes via saveBatch; trampoline to save() so existing
-    // per-market assertions continue to work while still exercising the
-    // batched code path in production.
-    saveBatch: vi.fn((markets: readonly Market[]) => {
-      for (const m of markets) save(m);
-    }),
+    saveBatch,
+    saveBatchWithSignatureUpdates: vi.fn((fullUpserts) => saveBatch(fullUpserts)),
     findByTokenId: vi.fn().mockReturnValue(null),
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
@@ -224,7 +225,7 @@ function createMockOrderRepo(): OrderRepository {
 function buildModule(
   opts: {
     discoveryGateway?: MarketDiscoveryGateway;
-    marketRepo?: MarketRepository;
+    marketRepo?: MarketScannerModuleDeps["marketRepo"];
     bus?: EventBus;
     positionRepo?: PositionRepository;
     orderRepo?: OrderRepository;
@@ -786,6 +787,10 @@ describe("MarketScannerModule", () => {
       );
       expect(completeLog?.[0]).toMatchObject({
         scanPages: 2,
+        fullUpsertedTokens: 2,
+        signatureUpdatedTokens: 0,
+        sqliteWriteBatches: 2,
+        sqliteMaxBatchMs: 19,
         scanPhasesMs: {
           prepare: 21,
           gamma: 30,
@@ -882,12 +887,7 @@ describe("MarketScannerModule", () => {
     expect(marketSelectionPolicy).toHaveBeenCalledTimes(2);
   });
 
-  // ── Batched writes (saveBatch contract) ───────────────────────────────────
-  // These tests pin the scanner's write pattern so regressions like
-  // "reverted to per-token save()" or "flushes once per scan instead of once
-  // per page" fail fast instead of silently slipping past the trampoline mock.
-
-  it("scan() calls saveBatch exactly once per non-empty page with full batch", async () => {
+  it("scan() calls one combined transaction per non-empty page", async () => {
     const discoveryGateway = createMockDiscoveryGateway();
     const { mod, marketRepo } = buildModule({ discoveryGateway });
 
@@ -927,11 +927,11 @@ describe("MarketScannerModule", () => {
 
     await mod.scan();
 
-    const saveBatchMock = marketRepo.saveBatch as ReturnType<typeof vi.fn>;
-    expect(saveBatchMock).toHaveBeenCalledTimes(2);
+    const combined = marketRepo.saveBatchWithSignatureUpdates as ReturnType<typeof vi.fn>;
+    expect(combined).toHaveBeenCalledTimes(2);
 
-    const firstBatch = saveBatchMock.mock.calls[0]![0] as readonly Market[];
-    const secondBatch = saveBatchMock.mock.calls[1]![0] as readonly Market[];
+    const firstBatch = combined.mock.calls[0]![0] as readonly Market[];
+    const secondBatch = combined.mock.calls[1]![0] as readonly Market[];
 
     // Page 1 produced 3 token rows (2 markets, one with YES+NO).
     expect(firstBatch.map((m) => m.tokenId).sort()).toEqual(
@@ -939,6 +939,7 @@ describe("MarketScannerModule", () => {
     );
     // Page 2 produced 1 token row.
     expect(secondBatch.map((m) => m.tokenId)).toEqual(["tok-p2"]);
+    expect(combined.mock.calls.map((call) => call[1])).toEqual([[], []]);
   });
 
   it("scan() skips saveBatch entirely for an empty page", async () => {
@@ -954,6 +955,7 @@ describe("MarketScannerModule", () => {
 
     await mod.scan();
 
+    expect(marketRepo.saveBatchWithSignatureUpdates).not.toHaveBeenCalled();
     expect(marketRepo.saveBatch).not.toHaveBeenCalled();
     expect(marketRepo.save).not.toHaveBeenCalled();
   });
@@ -1060,11 +1062,11 @@ describe("MarketScannerModule", () => {
     expect(result.skippedCoalesceNoopTokens).toBe(1);
   });
 
-  it("scan() still writes existing rows when a scanner-owned field changes", async () => {
+  it("scan() routes full and signature changes through one page transaction", async () => {
     const discoveryGateway = createMockDiscoveryGateway();
     const { mod, marketRepo } = buildModule({ discoveryGateway });
     const existing: Market = {
-      tokenId: createTokenId("tok-changed"),
+      tokenId: createTokenId("tok-full"),
       conditionId: "cond-old",
       slug: "bitcoin-above-100k",
       eventSlug: "bitcoin-above-100k",
@@ -1082,6 +1084,11 @@ describe("MarketScannerModule", () => {
       selectionStatus: "matched_include",
       selectionWinningRuleId: null,
       gammaCreatedAt: null,
+      sigMid: 0.32,
+      sigCheapMid: 0.32,
+      sigLiquidity: 250,
+      sigVol24h: null,
+      sigFeaturesAt: new Date().toISOString(),
       createdAt: "2026-05-01T00:00:00.000Z",
       updatedAt: "2026-05-01T00:00:00.000Z",
     };
@@ -1091,13 +1098,24 @@ describe("MarketScannerModule", () => {
         slug: "bitcoin-above-100k",
         eventSlug: "bitcoin-above-100k",
         endDate: existing.endDate!,
-        tokens: [{ tokenId: "tok-changed", outcome: "Yes", outcomeIndex: 0 }],
+        tokens: [
+          { tokenId: "tok-full", outcome: "Yes", outcomeIndex: 0 },
+          { tokenId: "tok-signature", outcome: "Yes", outcomeIndex: 0 },
+        ],
         eventMarketCount: 1,
       }),
     ];
-    (marketRepo.findByTokenIds as ReturnType<typeof vi.fn>).mockReturnValue([existing]);
+    (marketRepo.findByTokenIds as ReturnType<typeof vi.fn>).mockReturnValue([
+      existing,
+      {
+        ...existing,
+        tokenId: createTokenId("tok-signature"),
+        conditionId: "cond-new",
+        sigLiquidity: 100,
+      },
+    ]);
     (marketRepo.iterateAllTokenIds as ReturnType<typeof vi.fn>).mockReturnValue(
-      [createTokenId("tok-changed")][Symbol.iterator](),
+      [createTokenId("tok-full"), createTokenId("tok-signature")][Symbol.iterator](),
     );
     (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
       async (cb: ForEachMarketPageCallback) => {
@@ -1106,10 +1124,16 @@ describe("MarketScannerModule", () => {
       },
     );
 
-    const result = await mod.scanOrThrow();
+    await mod.scanOrThrow();
 
-    expect(marketRepo.saveBatch).toHaveBeenCalledTimes(1);
-    expect(result.savedTokens).toBe(1);
+    const combined = marketRepo.saveBatchWithSignatureUpdates as ReturnType<typeof vi.fn>;
+    expect(combined).toHaveBeenCalledTimes(1);
+    expect(combined.mock.calls[0]![0].map((m: Market) => m.tokenId)).toEqual(["tok-full"]);
+    expect(combined.mock.calls[0]![1].map((m: Market) => m.tokenId)).toEqual(["tok-signature"]);
+    expect(silentLog.info).toHaveBeenLastCalledWith(
+      expect.objectContaining({ savedTokens: 2, fullUpsertedTokens: 1, signatureUpdatedTokens: 1 }),
+      "scan cycle complete",
+    );
   });
 
   // Step 0 §P1.9: scanner must forward ClobMarket.gammaCreatedAt into every
@@ -1300,14 +1324,12 @@ describe("MarketScannerModule", () => {
     expect(result.discoveryLatencyMaxMs).toBe(result.discoveryLatencyP90Ms);
   });
 
-  it("scan() uses saveBatch, not per-token save(), for the write path", async () => {
-    // Bypass the trampoline mock used elsewhere so we can prove the module
-    // never calls repo.save() directly — if a future refactor reverts the
-    // batched write path, this test fails regardless of the mock shape.
+  it("scan() uses the combined batch API, not legacy write APIs", async () => {
     const discoveryGateway = createMockDiscoveryGateway();
-    const marketRepo: MarketRepository = {
+    const marketRepo: MarketScannerModuleDeps["marketRepo"] = {
       save: vi.fn(),
       saveBatch: vi.fn(),
+      saveBatchWithSignatureUpdates: vi.fn(),
       findByTokenId: vi.fn().mockReturnValue(null),
       findByTokenIds: vi.fn().mockReturnValue([]),
       findByConditionId: vi.fn().mockReturnValue([]),
@@ -1340,8 +1362,9 @@ describe("MarketScannerModule", () => {
     await mod.scan();
 
     expect(marketRepo.save).not.toHaveBeenCalled();
-    expect(marketRepo.saveBatch).toHaveBeenCalledTimes(1);
-    const batch = (marketRepo.saveBatch as ReturnType<typeof vi.fn>).mock
+    expect(marketRepo.saveBatch).not.toHaveBeenCalled();
+    expect(marketRepo.saveBatchWithSignatureUpdates).toHaveBeenCalledTimes(1);
+    const batch = (marketRepo.saveBatchWithSignatureUpdates as ReturnType<typeof vi.fn>).mock
       .calls[0]![0] as readonly Market[];
     expect(batch.map((m) => m.tokenId)).toEqual(["tok-x"]);
   });

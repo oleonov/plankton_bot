@@ -17,6 +17,7 @@ import type {
   MarketDiscoveryGateway,
   MarketRepository,
   Market,
+  MarketSignatureUpdate,
   PositionRepository,
   OrderRepository,
   MarketSelectionPolicy,
@@ -43,7 +44,9 @@ export const SIGNATURE_FEATURE_TTL_MS = 24 * 60 * 60 * 1000;
 
 type MarketScanTrigger = "startup" | "periodic" | "hint" | "manual";
 
-type MarketWriteDecision = "changed" | "unchanged" | "coalesce_noop";
+type MarketWriteDecision = "full_upsert" | "signature_update" | "unchanged" | "coalesce_noop";
+type ScannerMarketRepository = MarketRepository &
+  Required<Pick<MarketRepository, "saveBatchWithSignatureUpdates">>;
 
 /**
  * Nearest-rank percentile (no interpolation). Stable for tiny samples and
@@ -76,7 +79,7 @@ function roundedNonNegativeMs(value: number): number {
 
 export interface MarketScannerModuleDeps {
   discoveryGateway: MarketDiscoveryGateway;
-  marketRepo: MarketRepository;
+  marketRepo: ScannerMarketRepository;
   bus: EventBus;
   log: Logger;
   scanIntervalMs: number;
@@ -385,6 +388,10 @@ export class MarketScannerModule implements RuntimeModule {
       let discoveredMarkets = 0;
       let includedMarkets = 0;
       let savedTokens = 0;
+      let fullUpsertedTokens = 0;
+      let signatureUpdatedTokens = 0;
+      let sqliteWriteBatches = 0;
+      let sqliteMaxBatchMs = 0;
       let skippedUnchangedTokens = 0;
       let skippedCoalesceNoopTokens = 0;
       const now = new Date().toISOString();
@@ -584,11 +591,20 @@ export class MarketScannerModule implements RuntimeModule {
           writePlanMs += performance.now() - writePlanStartedAtMs;
           skippedUnchangedTokens += writePlan.skippedUnchanged;
           skippedCoalesceNoopTokens += writePlan.skippedCoalesceNoop;
-          if (writePlan.changedMarkets.length > 0) {
+          const writes = writePlan.fullUpserts.length + writePlan.signatureUpdates.length;
+          if (writes > 0) {
             const sqliteSaveStartedAtMs = performance.now();
-            this.deps.marketRepo.saveBatch(writePlan.changedMarkets);
-            sqliteSaveMs += performance.now() - sqliteSaveStartedAtMs;
-            savedTokens += writePlan.changedMarkets.length;
+            this.deps.marketRepo.saveBatchWithSignatureUpdates(
+              writePlan.fullUpserts,
+              writePlan.signatureUpdates,
+            );
+            const batchMs = performance.now() - sqliteSaveStartedAtMs;
+            sqliteSaveMs += batchMs;
+            sqliteMaxBatchMs = Math.max(sqliteMaxBatchMs, batchMs);
+            sqliteWriteBatches++;
+            fullUpsertedTokens += writePlan.fullUpserts.length;
+            signatureUpdatedTokens += writePlan.signatureUpdates.length;
+            savedTokens += writes;
           }
         }
         gammaCallbackMs += performance.now() - pageStartedAtMs;
@@ -696,6 +712,10 @@ export class MarketScannerModule implements RuntimeModule {
           discoveredMarkets,
           includedMarkets,
           savedTokens,
+          fullUpsertedTokens,
+          signatureUpdatedTokens,
+          sqliteWriteBatches,
+          sqliteMaxBatchMs: roundedNonNegativeMs(sqliteMaxBatchMs),
           skippedUnchangedTokens,
           skippedCoalesceNoopTokens,
           preservedTokens: activeTokenIds.size,
@@ -760,13 +780,15 @@ export class MarketScannerModule implements RuntimeModule {
   }
 
   private planPageWrites(markets: readonly Market[]): {
-    changedMarkets: Market[];
+    fullUpserts: Market[];
+    signatureUpdates: MarketSignatureUpdate[];
     skippedUnchanged: number;
     skippedCoalesceNoop: number;
   } {
     const existingRows = this.deps.marketRepo.findByTokenIds(markets.map((m) => m.tokenId));
     const existingByTokenId = new Map(existingRows.map((m) => [String(m.tokenId), m]));
-    const changedMarkets: Market[] = [];
+    const fullUpserts: Market[] = [];
+    const signatureUpdates: MarketSignatureUpdate[] = [];
     let skippedUnchanged = 0;
     let skippedCoalesceNoop = 0;
     const nowMs = Date.now();
@@ -774,8 +796,18 @@ export class MarketScannerModule implements RuntimeModule {
     for (const market of markets) {
       const existing = existingByTokenId.get(String(market.tokenId));
       const decision = classifyMarketWrite(market, existing ?? null, nowMs);
-      if (decision === "changed") {
-        changedMarkets.push(market);
+      if (decision === "full_upsert") {
+        fullUpserts.push(market);
+      } else if (decision === "signature_update") {
+        signatureUpdates.push({
+          tokenId: market.tokenId,
+          sigMid: market.sigMid ?? null,
+          sigCheapMid: market.sigCheapMid ?? null,
+          sigLiquidity: market.sigLiquidity ?? null,
+          sigVol24h: market.sigVol24h ?? null,
+          sigFeaturesAt: market.sigFeaturesAt ?? null,
+          updatedAt: market.updatedAt,
+        });
       } else if (decision === "coalesce_noop") {
         skippedCoalesceNoop++;
       } else {
@@ -783,7 +815,7 @@ export class MarketScannerModule implements RuntimeModule {
       }
     }
 
-    return { changedMarkets, skippedUnchanged, skippedCoalesceNoop };
+    return { fullUpserts, signatureUpdates, skippedUnchanged, skippedCoalesceNoop };
   }
 
   private hasFreshSuccessfulScan(nowMs = Date.now()): boolean {
@@ -847,7 +879,7 @@ export function classifyMarketWrite(
   existing: Market | null,
   nowMs: number,
 ): MarketWriteDecision {
-  if (existing === null) return "changed";
+  if (existing === null) return "full_upsert";
 
   const coalesceNoop =
     next.eventSlug == null && existing.eventSlug != null
@@ -859,11 +891,7 @@ export function classifyMarketWrite(
   const effectiveNextEventSlug = next.eventSlug == null ? existing.eventSlug : next.eventSlug;
   const effectiveNextGammaCreatedAt = existing.gammaCreatedAt ?? next.gammaCreatedAt ?? null;
 
-  // Plankton-signature features (spec 2026-07-01 §4.3): a write is forced
-  // when the captured features differ from the stored row, or when the
-  // stored capture has gone stale (TTL) even if the values themselves match
-  // — this keeps `sig_features_at` refreshing so the tier's TTL gate stays
-  // meaningful.
+  // Refresh changed features and stale capture timestamps so the signature TTL remains meaningful.
   const sigStale =
     existing.sigFeaturesAt == null ||
     !Number.isFinite(Date.parse(existing.sigFeaturesAt)) ||
@@ -874,7 +902,7 @@ export function classifyMarketWrite(
     (next.sigLiquidity ?? null) === (existing.sigLiquidity ?? null) &&
     (next.sigVol24h ?? null) === (existing.sigVol24h ?? null);
 
-  const unchanged =
+  const metadataEqual =
     String(next.conditionId) === String(existing.conditionId) &&
     next.slug === existing.slug &&
     effectiveNextEventSlug === existing.eventSlug &&
@@ -896,11 +924,10 @@ export function classifyMarketWrite(
     // market's life but included for correctness (cost is negligible).
     (next.groupItemTitle ?? null) === (existing.groupItemTitle ?? null) &&
     (next.groupItemThreshold ?? null) === (existing.groupItemThreshold ?? null) &&
-    tagsEqual(next.tags ?? null, existing.tags ?? null) &&
-    sigEqual &&
-    !sigStale;
+    tagsEqual(next.tags ?? null, existing.tags ?? null);
 
-  if (!unchanged) return "changed";
+  if (!metadataEqual) return "full_upsert";
+  if (!sigEqual || sigStale) return "signature_update";
   return coalesceNoop === null ? "unchanged" : "coalesce_noop";
 }
 

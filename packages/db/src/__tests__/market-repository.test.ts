@@ -162,6 +162,56 @@ describe("SqliteMarketRepository", () => {
     expect(repo.findAll()).toHaveLength(0);
   });
 
+  it("atomically mixes full upserts with narrow signature-only updates", () => {
+    repo.save(makeMarket({ tokenId: createTokenId("sig-existing"), sigLiquidity: 100 }));
+    db.prepare(
+      "UPDATE markets SET score = 0.42, score_model_version = 'v1' WHERE token_id = 'sig-existing'",
+    ).run();
+    db.exec(`CREATE TABLE broad_update_audit (hits INTEGER NOT NULL DEFAULT 0);
+      INSERT INTO broad_update_audit DEFAULT VALUES;
+      CREATE TRIGGER audit_broad_market_update AFTER UPDATE OF condition_id, slug, event_slug,
+        question, outcome, outcome_index, regime, horizon, end_date, active, tradable, tick_size,
+        neg_risk, event_market_count, selection_status, selection_winning_rule_id, gamma_created_at,
+        group_item_title, group_item_threshold, tags_json, score, score_model_version ON markets
+      BEGIN UPDATE broad_update_audit SET hits = hits + 1; END;`);
+
+    const signatureUpdate = {
+      tokenId: createTokenId("sig-existing"),
+      sigMid: 0.2,
+      sigCheapMid: 0.1,
+      sigLiquidity: 900,
+      sigVol24h: 300,
+      sigFeaturesAt: "2026-08-26T00:00:00.000Z",
+      updatedAt: "2026-08-26T00:00:01.000Z",
+    };
+    repo.saveBatchWithSignatureUpdates(
+      [makeMarket({ tokenId: createTokenId("full-new"), question: "full path" })],
+      [signatureUpdate],
+    );
+
+    expect(repo.findByTokenId(createTokenId("full-new"))!.question).toBe("full path");
+    expect(repo.findByTokenId(createTokenId("sig-existing"))).toMatchObject({
+      question: "Will it rain?",
+      score: 0.42,
+      scoreModelVersion: "v1",
+      sigMid: 0.2,
+      sigCheapMid: 0.1,
+      sigLiquidity: 900,
+      sigVol24h: 300,
+      sigFeaturesAt: "2026-08-26T00:00:00.000Z",
+      updatedAt: "2026-08-26T00:00:01.000Z",
+    });
+    expect(db.prepare("SELECT hits FROM broad_update_audit").pluck().get()).toBe(0);
+
+    expect(() =>
+      repo.saveBatchWithSignatureUpdates(
+        [makeMarket({ tokenId: createTokenId("invalid"), conditionId: null as never })],
+        [{ ...signatureUpdate, sigLiquidity: 1_000, updatedAt: "2026-08-26T00:00:02.000Z" }],
+      ),
+    ).toThrow();
+    expect(repo.findByTokenId(createTokenId("sig-existing"))!.sigLiquidity).toBe(900);
+  });
+
   // Step 0 §P1.7: when a later scan returns gammaCreatedAt=null (e.g. CLOB-only path
   // or transient Gamma omission), we MUST NOT overwrite the previously captured
   // ISO timestamp. The upsert uses COALESCE(markets.col, excluded.col).

@@ -98,6 +98,9 @@ export interface SignatureThresholds {
   featureTtlMs: number;
 }
 
+export type MarketSignatureUpdate = Pick<Market, "tokenId" | "updatedAt"> &
+  Required<Pick<Market, "sigMid" | "sigCheapMid" | "sigLiquidity" | "sigVol24h" | "sigFeaturesAt">>;
+
 export interface MarketRepository {
   /** Insert or update a market record. tokenId is the primary key. */
   save(market: Market): void;
@@ -108,6 +111,12 @@ export interface MarketRepository {
    * page to reduce commit count and allocation churn during the scan cycle.
    */
   saveBatch(markets: readonly Market[]): void;
+
+  /** Atomically persist full rows and scanner-owned signature columns. */
+  saveBatchWithSignatureUpdates?(
+    fullUpserts: readonly Market[],
+    signatureUpdates: readonly MarketSignatureUpdate[],
+  ): void;
 
   /** Find a market by its CLOB token ID (primary key). */
   findByTokenId(tokenId: TokenId): Market | null;
