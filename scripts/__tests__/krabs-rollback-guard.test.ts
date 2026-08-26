@@ -134,7 +134,7 @@ describe("krabs rollback guard", () => {
       adapter,
       `echo "$*" >> "$CALLS"; shift
 case "$1" in
-  compose) [[ "$*" == *" stop krabs-api"* ]] && { rm -f "$API_AVAILABLE"; : > "$OLD_API_REPLACED"; }; [[ "$*" == *" create "* ]] && rm -f "$NETWORK_FENCED"; [[ "$*" == *" up -d --no-deps"* ]] && : > "$API_AVAILABLE"; [[ "$*" == *" ps --all -q "* ]] && echo "id-\${@: -1}"; exit 0 ;;
+  compose) [[ "$*" == *" stop krabs-api"* ]] && { rm -f "$API_AVAILABLE"; [[ -z "\${OLD_API_REPLACED:-}" ]] || : > "$OLD_API_REPLACED"; }; [[ "$*" == *" create "* ]] && rm -f "$NETWORK_FENCED"; [[ "$*" == *" up -d --no-deps"* ]] && : > "$API_AVAILABLE"; [[ "$*" == *" ps --all -q "* ]] && echo "id-\${@: -1}"; exit 0 ;;
   build|tag|update) exit 0 ;;
   ps) [[ "\${API_DISCOVERY_MODE:-}" == none ]] || { echo id-krabs-api; [[ "\${API_DISCOVERY_MODE:-}" == multi ]] && echo foreign-api; }; exit 0 ;;
   pull) echo 'fake pull progress'; exit 0 ;;
