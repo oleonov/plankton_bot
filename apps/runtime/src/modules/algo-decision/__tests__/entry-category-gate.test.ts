@@ -49,86 +49,49 @@ function makeInputs(overrides: Partial<EntryCategoryGateInputs> = {}): EntryCate
 }
 
 describe("entry category-gate telemetry", () => {
-  it("geopolitics tag -> PRIORITIZE, categorySource gamma_tag", () => {
+  it("keeps category attribution without constructing a payload", () => {
     const fields = computeEntryCategoryGateSignalFields(
       makeInputs({ market: makeMarket({ tags: ["geopolitics"] }) }),
     );
-    const payload = JSON.parse(fields.entryCategoryPayloadJson ?? "{}");
 
     expect(fields.entryCategory).toBe("geopolitics");
     expect(fields.entryCategoryGateClass).toBe("PRIORITIZE");
-    expect(payload.categorySource).toBe("gamma_tag");
-    expect(payload.gammaCategory).toBe("geopolitics");
+    expect(fields.entryCategoryPayloadJson).toBeNull();
   });
 
-  it("crypto-btc slug with no matching tag -> derivedCategory crypto-btc, categorySource derived", () => {
+  it("keeps derived category attribution without constructing a payload", () => {
     const fields = computeEntryCategoryGateSignalFields(
       makeInputs({
         market: makeMarket({ slug: "bitcoin-150k", tags: [] }),
       }),
     );
-    const payload = JSON.parse(fields.entryCategoryPayloadJson ?? "{}");
 
     expect(fields.entryCategory).toBe("crypto-btc");
     expect(fields.entryCategoryGateClass).toBe("PRIORITIZE");
-    expect(payload.derivedCategory).toBe("crypto-btc");
-    expect(payload.categorySource).toBe("derived");
+    expect(fields.entryCategoryPayloadJson).toBeNull();
   });
 
-  it("geopolitics tag on a politics-derived slug -> agreement disagree, category geopolitics", () => {
+  it("preserves gamma-tag precedence over a derived category", () => {
     const fields = computeEntryCategoryGateSignalFields(
       makeInputs({
         market: makeMarket({ slug: "trump-wins-2026", tags: ["geopolitics"] }),
       }),
     );
-    const payload = JSON.parse(fields.entryCategoryPayloadJson ?? "{}");
 
     expect(fields.entryCategory).toBe("geopolitics");
-    expect(payload.agreement).toBe("disagree");
-    expect(payload.derivedCategory).toBe("politics");
-    expect(payload.gammaCategory).toBe("geopolitics");
+    expect(fields.entryCategoryGateClass).toBe("PRIORITIZE");
+    expect(fields.entryCategoryPayloadJson).toBeNull();
   });
 
-  it("uncategorizable slug + no tags -> null, UNKNOWN, categorySource none, agreement none", () => {
+  it("keeps UNKNOWN attribution for an uncategorizable market", () => {
     const fields = computeEntryCategoryGateSignalFields(
       makeInputs({
         market: makeMarket({ slug: "totally-unclassifiable-market-xyz", tags: null }),
       }),
     );
-    const payload = JSON.parse(fields.entryCategoryPayloadJson ?? "{}");
 
     expect(fields.entryCategory).toBeNull();
     expect(fields.entryCategoryGateClass).toBe("UNKNOWN");
-    expect(payload.categorySource).toBe("none");
-    expect(payload.agreement).toBe("none");
-  });
-
-  it("buyCount 0 -> first_entry; buyCount 2 -> ladder_or_scale_in", () => {
-    const first = JSON.parse(
-      computeEntryCategoryGateSignalFields(makeInputs({ buyCount: 0 })).entryCategoryPayloadJson ??
-        "{}",
-    );
-    const ladder = JSON.parse(
-      computeEntryCategoryGateSignalFields(makeInputs({ buyCount: 2 })).entryCategoryPayloadJson ??
-        "{}",
-    );
-
-    expect(first.entryKind).toBe("first_entry");
-    expect(ladder.entryKind).toBe("ladder_or_scale_in");
-  });
-
-  it("entryCategoryPayloadJson round-trips as valid JSON", () => {
-    const fields = computeEntryCategoryGateSignalFields(
-      makeInputs({ market: makeMarket({ tags: ["politics"] }) }),
-    );
-
-    expect(() => JSON.parse(fields.entryCategoryPayloadJson ?? "")).not.toThrow();
-    const payload = JSON.parse(fields.entryCategoryPayloadJson ?? "{}");
-    expect(payload).toMatchObject({
-      tokenId: expect.any(String),
-      conditionId: expect.any(String),
-      timestamp: expect.any(String),
-      gateClass: expect.any(String),
-    });
+    expect(fields.entryCategoryPayloadJson).toBeNull();
   });
 });

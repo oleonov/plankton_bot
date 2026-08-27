@@ -549,10 +549,19 @@ describe("LedgerRetentionModule", () => {
   });
 
   it("deletes high-volume runtime metrics past the 1-day TTL", async () => {
-    insertMetric("fee_schedule_active_period", "2026-04-23T23:00:00.000Z");
-    insertMetric("fee_schedule_active_period", "2026-04-24T01:00:00.000Z");
-    insertMetric("redeem_sweep_skipped_total", "2026-04-23T23:00:00.000Z");
-    insertMetric("redeem_quarantine_skipped_total", "2026-04-24T01:00:00.000Z");
+    const newlyBoundedMetrics = [
+      "entry_lane_shadow_evaluated_total",
+      "entry_lane_shadow_gate_component_total",
+      "entry_lane_shadow_missing_component_total",
+      "taker_disabled_min_size_total",
+      "trade_count_fetch_ok",
+      "trade_count_fetch_err",
+    ];
+    for (const metricName of newlyBoundedMetrics) {
+      insertMetric(metricName, "2026-04-23T23:00:00.000Z");
+      insertMetric(metricName, "2026-04-24T01:00:00.000Z");
+    }
+    insertMetric("unrelated_generic_metric", "2026-04-23T23:00:00.000Z");
 
     const mod = new LedgerRetentionModule({
       db,
@@ -568,13 +577,41 @@ describe("LedgerRetentionModule", () => {
       )
       .all() as Array<{ metric_name: string; captured_at: string }>;
     expect(rows).toEqual([
-      {
-        metric_name: "fee_schedule_active_period",
+      ...newlyBoundedMetrics.sort().map((metricName) => ({
+        metric_name: metricName,
         captured_at: "2026-04-24T01:00:00.000Z",
+      })),
+      {
+        metric_name: "unrelated_generic_metric",
+        captured_at: "2026-04-23T23:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("keeps the retired entry-lane event on the historical 1-day retention boundary", async () => {
+    insertRiskEvent("entry_lane_shadow", "{}", "2026-04-23T23:00:00.000Z");
+    insertRiskEvent("entry_lane_shadow", "{}", "2026-04-24T01:00:00.000Z");
+    insertRiskEvent("profile_health_check", "{}", "2026-04-23T23:00:00.000Z");
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    const rows = db
+      .prepare("SELECT event_type, created_at FROM risk_events ORDER BY event_type, created_at")
+      .all() as Array<{ event_type: string; created_at: string }>;
+    expect(rows).toEqual([
+      {
+        event_type: "entry_lane_shadow",
+        created_at: sqliteSpace("2026-04-24T01:00:00.000Z"),
       },
       {
-        metric_name: "redeem_quarantine_skipped_total",
-        captured_at: "2026-04-24T01:00:00.000Z",
+        event_type: "profile_health_check",
+        created_at: sqliteSpace("2026-04-23T23:00:00.000Z"),
       },
     ]);
   });

@@ -121,6 +121,7 @@ import {
   ENTRY_MIN_ORDER_SIZE_UNKNOWN_REASON,
   STATIC_RULE_SELL_BELOW_AVG_ENTRY_GUARD_REASON,
   isOpenPosition,
+  resolveMakerEntryR23Policy,
 } from "./decision-planner.js";
 import type {
   DecisionMetricsDelta,
@@ -128,12 +129,6 @@ import type {
   DecisionPlanSideEffect,
   DecisionSignalDraft,
 } from "./decision-planner.js";
-import {
-  GATE_COMPONENT_KEYS,
-  TWO_LANE_SAMPLED_CLASSES,
-  gateComponentLabel,
-  resolveShadowR23Policy,
-} from "./two-lane-entry-shadow.js";
 import type { PriceHistoryProvider } from "./market-snapshot-price-history.js";
 import type { SellLoopGuardReader } from "../sell-loop-guard/sell-loop-guard-module.js";
 import type { R23MemoryMetrics, WindowMaxCacheMetrics } from "./market-snapshot-price-history.js";
@@ -991,11 +986,6 @@ export class AlgoDecisionModule implements RuntimeModule {
     byReason: new Map<string, number>(),
     tokens: new Set<string>(),
   };
-  // Two-lane entry shadow telemetry (observe-only). `twoLaneShadowDedupe`
-  // rate-controls per-(token, laneClass) `entry_lane_shadow` risk_event rows;
-  // the per-eval counters are summable runtime_metrics, not in-memory state.
-  // See research_plankton/two_lane_entry_shadow_spec_2026-06-30.md.
-  private readonly twoLaneShadowDedupe = new Map<string, number>();
   // Phase 3 — maker-entry shadow tracker.
   // makerShadowOpen: open (pending/filled) levels keyed by shadowOrderId —
   //   fast iteration for the per-tick advance loop.
@@ -1978,15 +1968,13 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (openPosition) this.openPositionLastEvaluatedAt.set(String(tokenId), now);
     const continuationFacts =
       legState && market ? await this.resolveContinuationFactsForPlanner(market, legState) : null;
-    // Load R23 history for every first-entry candidate, independent of the live
-    // R23 toggle, so the two-lane shadow can classify R23 even when live R23 is
-    // off. The live R23 evaluation stays gated on `enabled` (decision-planner),
-    // so this never changes live decisions; the window mirrors the shadow policy.
+    // Maker-entry observation evaluates R23 independently of the live R23 toggle.
+    // The live R23 decision remains gated on `enabled` in decision-planner.
     const r23MaxMidpoint =
       !legState && market?.midPrice != null && this.deps.priceHistoryProvider?.maxMidpointInWindow
         ? this.deps.priceHistoryProvider.maxMidpointInWindow(
             tokenId,
-            resolveShadowR23Policy(executionPolicy).windowMs,
+            resolveMakerEntryR23Policy(executionPolicy).windowMs,
             now,
           )
         : null;
@@ -2656,9 +2644,6 @@ export class AlgoDecisionModule implements RuntimeModule {
       if (sideEffect.kind === "track_q_d") {
         this.recordQdShadowSideEffect(sideEffect);
       }
-      if (sideEffect.kind === "two_lane_entry_shadow") {
-        this.recordTwoLaneEntryShadowSideEffect(sideEffect);
-      }
       if (sideEffect.kind === "maker_entry_shadow_open") {
         this.openMakerShadow(sideEffect, executionPolicy);
       }
@@ -2991,84 +2976,6 @@ export class AlgoDecisionModule implements RuntimeModule {
         bidAnchoredPrice: projection.bidAnchoredPrice,
         f2Cap: projection.f2Cap,
         candidatePrice: projection.candidatePrice,
-        signalTimestamp: sideEffect.timestamp,
-      },
-    });
-  }
-
-  /**
-   * Two-lane entry shadow telemetry sink (observe-only). Writes summable
-   * per-eval lane and gate-component counters to runtime_metrics, then enqueues
-   * a deduped, structured `entry_lane_shadow` risk event for the sampled lanes
-   * (GATE_ONLY / BOTH / NEITHER) so the R23-vs-GATE split can be sized offline
-   * on live first-entry flow. Never touches the signal, suppressions, the price,
-   * or the order path. See research_plankton/two_lane_entry_shadow_spec_2026-06-30.md.
-   */
-  private recordTwoLaneEntryShadowSideEffect(
-    sideEffect: Extract<DecisionPlanSideEffect, { kind: "two_lane_entry_shadow" }>,
-  ): void {
-    const { projection } = sideEffect;
-    const metrics = this.deps.runtimeMetrics;
-    if (metrics) {
-      metrics.writeCounter(
-        "entry_lane_shadow_evaluated_total",
-        1,
-        JSON.stringify({
-          laneClass: projection.laneClass,
-          sourceGroup: projection.sourceGroup,
-          decisionType: "entry",
-        }),
-      );
-      for (const component of GATE_COMPONENT_KEYS) {
-        const result = gateComponentLabel(projection.gateComponents[component]);
-        metrics.writeCounter(
-          "entry_lane_shadow_gate_component_total",
-          1,
-          JSON.stringify({ component, result }),
-        );
-        if (result === "unknown") {
-          metrics.writeCounter(
-            "entry_lane_shadow_missing_component_total",
-            1,
-            JSON.stringify({ component }),
-          );
-        }
-      }
-    }
-
-    // R23_ONLY (already-instrumented baseline) and UNKNOWN (no lane signal) are
-    // metrics-only; only the sampled lanes get a structured risk event.
-    if (!TWO_LANE_SAMPLED_CLASSES.has(projection.laneClass)) return;
-
-    const eventAt = Date.parse(sideEffect.timestamp);
-    const now = Number.isFinite(eventAt) ? eventAt : Date.now();
-    const key = `entry_lane_shadow|${String(sideEffect.tokenId)}|${projection.laneClass}`;
-    if (!this.dedupeAllows(this.twoLaneShadowDedupe, key, now)) return;
-
-    this.persistence.enqueueRiskEvent({
-      eventType: "entry_lane_shadow",
-      payload: {
-        tokenId: String(sideEffect.tokenId),
-        conditionId: sideEffect.conditionId,
-        title: projection.title,
-        price: projection.price,
-        proposedNotional: projection.proposedNotional,
-        lifespanDays: projection.lifespanDays,
-        category: projection.category,
-        tags: projection.tags,
-        sourceGroup: projection.sourceGroup,
-        r23Match: projection.r23Match,
-        gateMatch: projection.gateMatch,
-        laneClass: projection.laneClass,
-        gateComponents: projection.gateComponents,
-        missingComponents: projection.missingComponents,
-        r23Ratio: projection.r23Ratio,
-        r23MaxMidpoint: projection.r23MaxMidpoint,
-        r23NoHistory: projection.r23NoHistory,
-        deadScore: projection.deadScore,
-        deadClassification: projection.deadClassification,
-        scoreVersion: projection.scoreVersion,
-        featureSet: projection.featureSet,
         signalTimestamp: sideEffect.timestamp,
       },
     });

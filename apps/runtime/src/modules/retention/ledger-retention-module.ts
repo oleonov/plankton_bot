@@ -229,6 +229,12 @@ const HIGH_VOLUME_RUNTIME_METRICS = [
   "fee_schedule_active_period",
   "redeem_sweep_skipped_total",
   "redeem_quarantine_skipped_total",
+  "entry_lane_shadow_evaluated_total",
+  "entry_lane_shadow_gate_component_total",
+  "entry_lane_shadow_missing_component_total",
+  "taker_disabled_min_size_total",
+  "trade_count_fetch_ok",
+  "trade_count_fetch_err",
 ] as const;
 
 const HIGH_VOLUME_RISK_EVENTS = [

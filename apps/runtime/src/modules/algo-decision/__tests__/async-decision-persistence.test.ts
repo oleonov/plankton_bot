@@ -148,9 +148,7 @@ describe("DecisionPersistenceBuffer", () => {
       });
       expect(signalRow?.entry_category).toBe("geopolitics");
       expect(signalRow?.entry_category_gate_class).toBe("PRIORITIZE");
-      expect(JSON.parse(signalRow?.entry_category_payload_json ?? "{}")).toMatchObject({
-        gateClass: "PRIORITIZE",
-      });
+      expect(signalRow?.entry_category_payload_json).toBeNull();
       expect(JSON.parse(riskRow?.payload ?? "{}")).toMatchObject({ tokenId: "tok-worker" });
       expect(buffer.getStats().workerFailedWrites).toBe(0);
       expect(buffer.getStats().workerPersistedWrites).toBe(2);

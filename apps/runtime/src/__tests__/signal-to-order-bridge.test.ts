@@ -2569,22 +2569,11 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.09);
     expect(placed[0]!.command.postOnly).toBe(true);
-    expect(metrics.writeCounter).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).not.toHaveBeenCalledWith(
       "taker_disabled_min_size_total",
-      1,
-      expect.stringContaining('"requested_size_usdc":0.99'),
+      expect.anything(),
+      expect.anything(),
     );
-    const minSizeCall = metrics.writeCounter.mock.calls.find(
-      (call) => call[0] === "taker_disabled_min_size_total",
-    );
-    expect(JSON.parse(minSizeCall![2] as string)).toMatchObject({
-      side: "buy",
-      reason: "notional_min_size",
-      min_notional_usdc: 1,
-      requested_size_usdc: 0.99,
-      required_notional_usdc: 1.05,
-      safety_buffer: 1.05,
-    });
     expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_disabled_fraction_over_threshold",
       1,
@@ -2642,104 +2631,21 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(0);
-    expect(metrics.writeCounter).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).not.toHaveBeenCalledWith(
       "taker_disabled_min_size_total",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "taker_attempt_total",
       1,
-      expect.stringContaining('"side":"sell"'),
+      JSON.stringify({ side: "sell", mode: "rejected", reason: "min_size" }),
     );
-  });
-
-  it("records all enriched taker min-size metric fields", async () => {
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
-    const { bus } = makeBridgeWithPricing(undefined, {
-      runtimeMetrics: metrics as never,
-      policyOverrides: {
-        opportunisticTaker: allowSellTakerPolicy(),
-      },
-    });
-    const market = makeMarket({ bestBid: 0.08, bestAsk: 0.1, tickSize: 0.01, minOrderSize: 5 });
-
-    await bus.publish("SignalApproved", {
-      signal: {
-        ...makeSignal(),
-        side: "sell",
-        suggestedPrice: 0.1,
-        suggestedSize: 4.9,
-        suggestedSizeUsdc: 0.49,
-        reason: "repricing-exit",
-      },
-      market,
-      approvedAt: Date.now(),
-    });
-    await bus.drain();
-
-    const minSizeCall = metrics.writeCounter.mock.calls.find(
-      (call) => call[0] === "taker_disabled_min_size_total",
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "taker_disabled_fraction_over_threshold",
+      1,
+      JSON.stringify({ side: "sell", bucket: "0.8-0.95" }),
     );
-    expect(minSizeCall).toBeTruthy();
-    expect(JSON.parse(minSizeCall![2] as string)).toEqual({
-      side: "sell",
-      token_id: "tok-yes",
-      reason: "share_min_size",
-      market_min_order_size: 5,
-      min_notional_usdc: null,
-      requested_size_shares: 4.9,
-      requested_size_usdc: 0.49,
-      required_size_shares: 5.25,
-      required_notional_usdc: null,
-      safety_buffer: 1.05,
-    });
-  });
-
-  it("LOW 1 — min-size forensic reports the partial override size, not the full signal size", async () => {
-    // A partial exit caps the order to the available top-of-book liquidity. When
-    // that capped size still trips the min-size gate, the forensic must report the
-    // capped (override) shares — reporting the full signal size mis-attributes the
-    // rejection (requested_size_shares 290 instead of the 5 it actually tried).
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
-    const { bus } = makeBridgeWithPricing(undefined, {
-      positionRepo: positionRepo(0.04, 290),
-      runtimeMetrics: metrics as never,
-      candidateBookCache: makeCachedBook({
-        bestBid: 0.046,
-        bestAsk: 0.05,
-        bids: [{ price: 0.046, size: 5 }],
-        asks: [{ price: 0.05, size: 500 }],
-      }),
-      trackRFeeProvider: liveFeeProvider(0.07),
-      policyOverrides: {
-        opportunisticTaker: allowSellTakerPolicy(),
-        takerAtProfit: profitTakerPolicy(),
-        trackR: trackRPolicy({
-          allowPartialExit: true,
-          takerCapSkip: true,
-          partialExitMinFraction: 0.001, // keep the partial floor at the 5-share market min
-        }),
-      },
-    });
-    const market = makeMarket({ bestBid: 0.046, bestAsk: 0.05, tickSize: 0.001, minOrderSize: 5 });
-
-    await bus.publish("SignalApproved", {
-      signal: {
-        ...makeSignal(),
-        side: "sell",
-        suggestedPrice: 0.07,
-        suggestedSize: 290,
-        suggestedSizeUsdc: 13.34,
-        reason: "repricing-exit",
-        decisionRuleId: "D8",
-      },
-      market,
-      approvedAt: Date.now(),
-    });
-    await bus.drain();
-
-    const minSizeCalls = metrics.writeCounter.mock.calls.filter(
-      (call) => call[0] === "taker_disabled_min_size_total",
-    );
-    expect(minSizeCalls).toHaveLength(1);
-    // partialSizeCap floors 5 available shares to the 5-share step → 5, below 5 × 1.05.
-    expect(JSON.parse(minSizeCalls[0]![2] as string).requested_size_shares).toBe(5);
   });
 
   it("buckets near-threshold taker min-size blocks", async () => {
@@ -2832,9 +2738,9 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed[0]!.command.postOnly).toBeUndefined();
     expect(placed[0]!.command.price).toBe(0.14);
     expect(metrics.writeCounter).toHaveBeenCalledWith(
-      "taker_disabled_min_size_total",
+      "taker_attempt_total",
       1,
-      expect.stringContaining('"safety_buffer":2'),
+      JSON.stringify({ side: "sell", mode: "rejected", reason: "min_size" }),
     );
   });
 
@@ -4404,10 +4310,15 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(0);
-    expect(metrics.writeCounter).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).not.toHaveBeenCalledWith(
       "taker_disabled_min_size_total",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
+      "taker_attempt_total",
       1,
-      expect.stringContaining('"side":"sell"'),
+      JSON.stringify({ side: "sell", mode: "rejected", reason: "min_size" }),
     );
   });
 

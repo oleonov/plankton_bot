@@ -41,8 +41,9 @@ describe("Status page", () => {
     expect(screen.getByText("Database & storage")).toBeInTheDocument();
 
     // shadow registry — name + added date only
-    expect(screen.getByText("Two-lane entry shadow")).toBeInTheDocument();
-    expect(screen.getByText("added Jun 18")).toBeInTheDocument();
+    expect(screen.getByText("Entry fresh-edge shadow")).toBeInTheDocument();
+    expect(screen.getByText("added Jun 21")).toBeInTheDocument();
+    expect(screen.queryByText("Two-lane entry shadow")).not.toBeInTheDocument();
     expect(screen.getByText(`${mockSystemHealth.shadow.length} registered`)).toBeInTheDocument();
   });
 
@@ -80,7 +81,7 @@ describe("Status page", () => {
 
   it("shadow section carries no verdict text or status/lane badges", async () => {
     const { container } = renderWithProviders(<Status />);
-    await screen.findByText("Two-lane entry shadow");
+    await screen.findByText("Entry fresh-edge shadow");
     const exps = container.querySelector(".exps")!;
     const text = exps.textContent ?? "";
     for (const badge of ["SHADOW", "LIVE", "RESEARCH", "SCHEDULED REMOVAL"]) {

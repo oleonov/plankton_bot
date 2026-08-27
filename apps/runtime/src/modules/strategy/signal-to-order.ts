@@ -4040,25 +4040,6 @@ export class SignalToOrderBridge {
     block: TakerMinSizeBlock,
   ): void {
     try {
-      const labels = {
-        side: signal.side,
-        token_id: String(signal.tokenId),
-        reason: block.reason,
-        market_min_order_size: block.marketMinOrderSize,
-        min_notional_usdc: block.minNotionalUsdc,
-        requested_size_shares: block.requestedSizeShares,
-        requested_size_usdc: block.notionalUsdc,
-        required_size_shares:
-          block.marketMinOrderSize === null ? null : block.marketMinOrderSize * block.safetyBuffer,
-        required_notional_usdc:
-          block.minNotionalUsdc === null ? null : block.minNotionalUsdc * block.safetyBuffer,
-        safety_buffer: block.safetyBuffer,
-      };
-      this.deps.runtimeMetrics?.writeCounter(
-        "taker_disabled_min_size_total",
-        1,
-        JSON.stringify(labels),
-      );
       this.deps.runtimeMetrics?.writeCounter(
         "taker_attempt_total",
         1,

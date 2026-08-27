@@ -8,6 +8,7 @@ import type {
   NormalizedMarket,
   Position,
   PositionId,
+  R23DipTriggerPolicy,
   S1OwnershipSnapshot,
   SellLoopGuardSnapshot,
   SellOrderSizingContext,
@@ -31,6 +32,7 @@ import {
   computeSellSizingPlan,
   BOUNCE_EXIT_TARGET_RULE_ID,
   BOUNCE_EXIT_BACKSTOP_RULE_ID,
+  DEFAULT_R23_DIP_TRIGGER_POLICY,
   isBounceForceExit,
   GATE_ENTRY_RULE_ID,
   H5_WIDE_COHORT_GUARD_REASON,
@@ -69,16 +71,10 @@ import {
   type QdShadowProjection,
   type QdShadowReason,
 } from "./qd-pre-resolution-exit.js";
-import {
-  evaluateTwoLaneEntryShadow,
-  resolveShadowR23Policy,
-  type TwoLaneEntryShadowProjection,
-} from "./two-lane-entry-shadow.js";
 import { evaluateMakerEntry } from "./maker-entry.js";
 import { isMakerUniverse } from "./maker-entry-shadow.js";
 
 export type { QdShadowProjection, QdShadowReason } from "./qd-pre-resolution-exit.js";
-export type { TwoLaneEntryShadowProjection } from "./two-lane-entry-shadow.js";
 
 export type TradeCountSource = "market_wide" | "leg_local_fallback" | "leg_local";
 
@@ -241,13 +237,6 @@ export type DecisionPlanSideEffect =
       confidence: string;
       thresholdBucket: string;
       timestamp: string;
-    }
-  | {
-      kind: "two_lane_entry_shadow";
-      tokenId: TokenId;
-      conditionId: string;
-      timestamp: string;
-      projection: TwoLaneEntryShadowProjection;
     }
   | {
       /** Phase 3 — open a new maker-entry shadow pending order. */
@@ -822,41 +811,15 @@ function recordQdShadow(
   });
 }
 
-/**
- * Two-lane entry shadow: observe-only projection for first-entry candidates only
- * (`!legState`, the inverse of the Track Q recorders). Recomputes the R23 dip
- * trigger and the Plankton GATE off market data already in hand and pushes a side
- * effect; never alters price, suppressions, or the signal. See
- * research_plankton/two_lane_entry_shadow_spec_2026-06-30.md.
- */
 export function isOpenPosition(position: Position | null | undefined): position is Position {
   return position?.status === "open" && position.size > 0;
 }
 
-function recordTwoLaneEntryShadow(
-  input: DecisionPlanningInput,
-  market: NormalizedMarket,
-  nowIso: string,
-  sideEffects: DecisionPlanSideEffect[],
-): void {
-  // Flat first-entry only: a non-null position with open shares (even without a
-  // leg) is an existing holding, not a first entry, so the entry-lane shadow skips it.
-  if (input.legState || isOpenPosition(input.position)) return;
-  const projection = evaluateTwoLaneEntryShadow({
-    market,
-    r23MaxMidpoint: input.r23MaxMidpoint,
-    executionPolicy: input.executionPolicy,
-    buySizeRules: input.buySizeRules,
-    decisionRules: input.decisionRules,
-    gateEntryPolicy: input.executionPolicy?.gateEntry ?? null,
-  });
-  sideEffects.push({
-    kind: "two_lane_entry_shadow",
-    tokenId: input.tokenId,
-    conditionId: market.conditionId,
-    timestamp: nowIso,
-    projection,
-  });
+export function resolveMakerEntryR23Policy(
+  executionPolicy: ExecutionPolicy | null,
+): R23DipTriggerPolicy {
+  const live = executionPolicy?.r23DipTrigger;
+  return live && live.enabled ? live : DEFAULT_R23_DIP_TRIGGER_POLICY;
 }
 
 /**
@@ -870,14 +833,14 @@ function recordMakerEntryShadow(
   nowIso: string,
   sideEffects: DecisionPlanSideEffect[],
 ): void {
-  // Flat first-entry only (mirror of recordTwoLaneEntryShadow gate)
+  // Flat first-entry only.
   if (input.legState || isOpenPosition(input.position)) return;
 
   const policy = input.executionPolicy?.makerEntry;
   if (!policy || policy.mode === "off") return;
 
-  // Evaluate R23 via shadow policy (works even when live R23 toggle is off)
-  const r23Policy = resolveShadowR23Policy(input.executionPolicy);
+  // Maker observation remains active even when the live R23 toggle is off.
+  const r23Policy = resolveMakerEntryR23Policy(input.executionPolicy);
   const r23 = evaluateR23DipTrigger(
     {
       state: "OTHER",
@@ -977,7 +940,6 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
   const d8EvalPrice = midPrice;
   recordTrackQShadow(input, market, price, nowIso, sideEffects);
   recordQdShadow(input, market, d8EvalPrice, price, nowIso, sideEffects);
-  recordTwoLaneEntryShadow(input, market, nowIso, sideEffects);
   recordMakerEntryShadow(input, market, nowIso, sideEffects);
 
   if (legState && isAbandoned(legState) && input.executionPolicy?.dustAbandonment.enabled) {

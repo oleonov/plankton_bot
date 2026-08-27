@@ -11,13 +11,7 @@ import type {
   DecisionPlanSideEffect,
   QdShadowProjection,
   TrackQShadowProjection,
-  TwoLaneEntryShadowProjection,
 } from "../decision-planner.js";
-import {
-  GATE_COMPONENT_KEYS,
-  GATE_RULE_VERSION,
-  LIVE_FEATURE_SET,
-} from "../two-lane-entry-shadow.js";
 import type {
   EventBus,
   LegStateRepository,
@@ -7364,79 +7358,33 @@ describe("AlgoDecisionModule", () => {
     });
   });
 
-  // Two-lane entry shadow (observe-only). The planner emits a
-  // `two_lane_entry_shadow` side effect for first-entry candidates; the module
-  // sink converts it to bounded metrics + a deduped, sampled risk event without
-  // touching the order path. See research_plankton/two_lane_entry_shadow_spec_2026-06-30.md.
-  describe("two-lane entry shadow telemetry", () => {
-    function baseProjection(
-      overrides: Partial<TwoLaneEntryShadowProjection> = {},
-    ): TwoLaneEntryShadowProjection {
-      return {
-        title: "Two lane?",
-        price: 0.12,
-        proposedNotional: 1,
-        lifespanDays: 40,
-        category: null,
-        tags: ["sports"],
-        sourceGroup: "fallback",
-        r23Match: false,
-        gateMatch: true,
-        laneClass: "GATE_ONLY",
-        gateComponents: {
-          size_le_13: true,
-          price_gt_0_01: true,
-          cheap_side_le_055: true,
-          lifespan_gt_21d: true,
-          own_token_readd: false,
-          category_not_blocked: "unknown",
-        },
-        missingComponents: ["category_not_blocked"],
-        r23Ratio: 0.9,
-        r23MaxMidpoint: 0.13,
-        r23NoHistory: false,
-        deadScore: 1,
-        deadClassification: "shadow_allow",
-        scoreVersion: GATE_RULE_VERSION,
-        featureSet: LIVE_FEATURE_SET,
-        ...overrides,
-      };
-    }
-
-    function twoLaneSideEffect(
-      overrides: {
-        tokenId?: string;
-        conditionId?: string;
-        timestamp?: string;
-        projection?: Partial<TwoLaneEntryShadowProjection>;
-      } = {},
-    ): DecisionPlanSideEffect {
-      return {
-        kind: "two_lane_entry_shadow",
-        tokenId: createTokenId(overrides.tokenId ?? "token-two-lane"),
-        conditionId: overrides.conditionId ?? "cond-two-lane",
-        timestamp: overrides.timestamp ?? "2026-06-30T00:00:00.000Z",
-        projection: baseProjection(overrides.projection),
-      };
-    }
-
-    it("classifies shadow R23 from history even when live R23 is disabled (Finding 1)", async () => {
-      const tokenId = "token-two-lane-r23-disabled";
+  describe("maker-entry R23 history", () => {
+    it("keeps maker-entry observation active when live R23 is disabled", async () => {
+      const tokenId = "token-maker-r23-disabled";
       selectedMarketCache = createMockSelectedMarketCache([tokenId]);
-      const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
       const priceHistoryProvider = {
         findReferencePrice: vi.fn(() => null),
-        // mid 0.3 vs 24h max 0.6 → ratio 0.5 ≤ 0.683 → shadow R23 fires.
         maxMidpointInWindow: vi.fn(() => 0.6),
       };
+      const makerShadowOrderRepo = {
+        upsert: vi.fn(),
+        findOpen: vi.fn().mockReturnValue([]),
+        findOpenByToken: vi.fn().mockReturnValue([]),
+        findLadder: vi.fn().mockReturnValue([]),
+        updateStage: vi.fn(),
+        pruneExpired: vi.fn().mockReturnValue(0),
+      };
       const mod = buildModule({
-        runtimeMetrics,
         priceHistoryProvider,
-        riskEventRepo: { insert: vi.fn(), countSince: vi.fn() },
+        makerShadowOrderRepo,
         executionPolicy: () => ({
           ...DEFAULT_EXECUTION_POLICY,
           entryMinMarketAgeSeconds: 0,
           r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: false },
+          makerEntry: {
+            ...DEFAULT_EXECUTION_POLICY.makerEntry,
+            mode: "shadow",
+          },
         }),
       });
       await mod.start();
@@ -7445,199 +7393,25 @@ describe("AlgoDecisionModule", () => {
         markets: [
           {
             ...makeMarket(tokenId, null, 0.3),
-            gammaCreatedAt: new Date(Date.now() - 40 * 86_400_000).toISOString(),
-            endDate: new Date(Date.now() + 40 * 86_400_000).toISOString(),
+            bestBid: 0.29,
+            bestAsk: 0.31,
+            liquidity: 10_000,
+            volume24hr: 2_000,
           },
         ],
         timestamp: Date.now(),
       });
 
-      // Shadow must load R23 history with the DEFAULT 24h window despite live R23 off.
       expect(priceHistoryProvider.maxMidpointInWindow).toHaveBeenCalledWith(
         createTokenId(tokenId),
         86_400_000,
         expect.any(Number),
       );
-
-      const evalCall = (runtimeMetrics.writeCounter as ReturnType<typeof vi.fn>).mock.calls.find(
-        ([name]) => name === "entry_lane_shadow_evaluated_total",
-      );
-      expect(evalCall).toBeDefined();
-      const laneClass = JSON.parse(evalCall![2] as string).laneClass as string;
-      // Real R23 history → R23 matched, not no-history (NEITHER/GATE_ONLY/UNKNOWN).
-      expect(["R23_ONLY", "BOTH"]).toContain(laneClass);
-
-      await mod.stop();
-    });
-
-    it("emits evaluated + gate component metrics for a side effect (test 10)", async () => {
-      const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
-      const mod = buildModule({
-        runtimeMetrics,
-        riskEventRepo: { insert: vi.fn(), countSince: vi.fn() },
-      });
-      await mod.start();
-
-      (mod as any).applyDecisionPlanSideEffects([twoLaneSideEffect()], DEFAULT_EXECUTION_POLICY);
-
-      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
-        "entry_lane_shadow_evaluated_total",
-        1,
-        JSON.stringify({ laneClass: "GATE_ONLY", sourceGroup: "fallback", decisionType: "entry" }),
-      );
-      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
-        "entry_lane_shadow_gate_component_total",
-        1,
-        JSON.stringify({ component: "size_le_13", result: "pass" }),
-      );
-      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
-        "entry_lane_shadow_gate_component_total",
-        1,
-        JSON.stringify({ component: "own_token_readd", result: "fail" }),
-      );
-      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
-        "entry_lane_shadow_gate_component_total",
-        1,
-        JSON.stringify({ component: "category_not_blocked", result: "unknown" }),
-      );
-      // The unknown component also bumps the dedicated missing-component counter.
-      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
-        "entry_lane_shadow_missing_component_total",
-        1,
-        JSON.stringify({ component: "category_not_blocked" }),
-      );
-
-      await mod.stop();
-    });
-
-    it("enqueues a deduped risk event for sampled lanes only (test 11)", async () => {
-      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
-      const mod = buildModule({ riskEventRepo });
-      await mod.start();
-
-      const gateOnly = twoLaneSideEffect({ tokenId: "tok-gate", conditionId: "c-gate" });
-      // Two identical evals within the cooldown → one persisted row.
-      (mod as any).applyDecisionPlanSideEffects([gateOnly], DEFAULT_EXECUTION_POLICY);
-      (mod as any).applyDecisionPlanSideEffects([gateOnly], DEFAULT_EXECUTION_POLICY);
-
-      // R23_ONLY is the already-instrumented baseline → no shadow row.
-      (mod as any).applyDecisionPlanSideEffects(
-        [
-          twoLaneSideEffect({
-            tokenId: "tok-r23",
-            conditionId: "c-r23",
-            projection: { laneClass: "R23_ONLY", r23Match: true },
-          }),
-        ],
-        DEFAULT_EXECUTION_POLICY,
-      );
-      // UNKNOWN carries no lane signal → metrics only, no shadow row.
-      (mod as any).applyDecisionPlanSideEffects(
-        [
-          twoLaneSideEffect({
-            tokenId: "tok-unk",
-            conditionId: "c-unk",
-            projection: { laneClass: "UNKNOWN", gateMatch: false },
-          }),
-        ],
-        DEFAULT_EXECUTION_POLICY,
-      );
-
-      const inserts = vi
-        .mocked(riskEventRepo.insert)
-        .mock.calls.filter(([e]) => e.eventType === "entry_lane_shadow");
-      expect(inserts).toHaveLength(1);
-      const payload = inserts[0]![0].payload;
-      expect(payload.tokenId).toBe("tok-gate");
-      expect(payload.conditionId).toBe("c-gate");
-      expect(payload.laneClass).toBe("GATE_ONLY");
-      expect(payload.title).toBe("Two lane?");
-      expect(payload.scoreVersion).toBe(GATE_RULE_VERSION);
-      expect(payload.featureSet).toBe(LIVE_FEATURE_SET);
-
-      await mod.stop();
-    });
-
-    it("keeps all emitted metric labels bounded and free of token/condition/title (test 12)", async () => {
-      const runtimeMetrics = { writeCounter: vi.fn() } as unknown as RuntimeMetricWriter;
-      const mod = buildModule({
-        runtimeMetrics,
-        riskEventRepo: { insert: vi.fn(), countSince: vi.fn() },
-      });
-      await mod.start();
-
-      (mod as any).applyDecisionPlanSideEffects(
-        [twoLaneSideEffect({ tokenId: "tok-bound", conditionId: "cond-bound" })],
-        DEFAULT_EXECUTION_POLICY,
-      );
-
-      const LANE_CLASSES = new Set(["R23_ONLY", "GATE_ONLY", "BOTH", "NEITHER", "UNKNOWN"]);
-      const SOURCE_GROUPS = new Set([
-        "r23",
-        "fallback",
-        "scale_in",
-        "ladder",
-        "d1_d3",
-        "other",
-        "none",
-        "unknown",
-      ]);
-      const RESULTS = new Set(["pass", "fail", "unknown"]);
-      const COMPONENTS = new Set<string>(GATE_COMPONENT_KEYS);
-      const forbidden = ["tok-bound", "cond-bound", "Two lane?"];
-
-      const calls = vi
-        .mocked(runtimeMetrics.writeCounter)
-        .mock.calls.filter(([name]) => name.startsWith("entry_lane_shadow_"));
-      expect(calls.length).toBeGreaterThan(0);
-      for (const [name, , rawLabels] of calls) {
-        expect(typeof rawLabels).toBe("string");
-        for (const f of forbidden) expect(rawLabels as string).not.toContain(f);
-        const labels = JSON.parse(rawLabels as string) as Record<string, string>;
-        if (name === "entry_lane_shadow_evaluated_total") {
-          expect(new Set(Object.keys(labels))).toEqual(
-            new Set(["laneClass", "sourceGroup", "decisionType"]),
-          );
-          expect(LANE_CLASSES.has(labels.laneClass ?? "")).toBe(true);
-          expect(SOURCE_GROUPS.has(labels.sourceGroup ?? "")).toBe(true);
-          expect(labels.decisionType).toBe("entry");
-        } else if (name === "entry_lane_shadow_gate_component_total") {
-          expect(new Set(Object.keys(labels))).toEqual(new Set(["component", "result"]));
-          expect(COMPONENTS.has(labels.component ?? "")).toBe(true);
-          expect(RESULTS.has(labels.result ?? "")).toBe(true);
-        } else if (name === "entry_lane_shadow_missing_component_total") {
-          expect(new Set(Object.keys(labels))).toEqual(new Set(["component"]));
-          expect(COMPONENTS.has(labels.component ?? "")).toBe(true);
-        } else {
-          throw new Error(`unexpected two-lane metric: ${name}`);
-        }
-      }
-
-      await mod.stop();
-    });
-
-    it("is observe-only: applying the side effect publishes nothing on the bus (test 13)", async () => {
-      const mod = buildModule({ riskEventRepo: { insert: vi.fn(), countSince: vi.fn() } });
-      await mod.start();
-      vi.mocked(bus.publish as ReturnType<typeof vi.fn>).mockClear();
-
-      (mod as any).applyDecisionPlanSideEffects(
-        [
-          twoLaneSideEffect(),
-          twoLaneSideEffect({
-            tokenId: "tok-both",
-            projection: { laneClass: "BOTH", r23Match: true },
-          }),
-        ],
-        DEFAULT_EXECUTION_POLICY,
-      );
-
-      expect(bus.publish).not.toHaveBeenCalled();
+      expect(makerShadowOrderRepo.upsert).toHaveBeenCalledTimes(1);
 
       await mod.stop();
     });
   });
-
   describe("sell loop guard suppression telemetry", () => {
     it("writes track_q_loop_guard_suppressed_total when applying the suppression side effect", async () => {
       const db = new Database(":memory:");

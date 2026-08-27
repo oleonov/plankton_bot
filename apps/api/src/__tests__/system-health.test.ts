@@ -157,6 +157,9 @@ describe("GET /api/v1/system-health", () => {
     });
     const body = res.json<{ data: { shadow: Record<string, unknown>[] } }>();
     expect(body.data.shadow.length).toBeGreaterThan(0);
+    expect(body.data.shadow).not.toContainEqual(
+      expect.objectContaining({ nm: "Two-lane entry shadow" }),
+    );
     for (const item of body.data.shadow) {
       expect(Object.keys(item).sort()).toEqual(["added", "nm"]);
       expect(typeof item.nm).toBe("string");

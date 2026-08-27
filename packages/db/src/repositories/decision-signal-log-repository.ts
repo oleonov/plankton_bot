@@ -52,7 +52,7 @@ export class SqliteDecisionSignalLogRepository implements DecisionSignalLogRepos
       signal.entryFreshEdgePayloadJson ?? null,
       signal.entryCategory ?? null,
       signal.entryCategoryGateClass ?? null,
-      signal.entryCategoryPayloadJson ?? null,
+      null,
     );
   }
 }

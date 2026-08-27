@@ -6,6 +6,8 @@ export const SIGNAL_TELEMETRY_RISK_EVENT_TYPES = [
   "signal_suppressed",
   "planner_suppressed_rollup",
   "execution_profile_decision_chain_rollup",
+  // Historical retention tombstone: the writer is retired, but existing rows
+  // must keep the signal-telemetry TTL instead of falling into operational retention.
   "entry_lane_shadow",
 ] as const;
 

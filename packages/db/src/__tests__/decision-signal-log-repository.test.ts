@@ -138,7 +138,7 @@ describe("SqliteDecisionSignalLogRepository", () => {
     });
   });
 
-  it("persists observe-only entry fresh-edge telemetry payloads", () => {
+  it("persists entry attribution but discards a synthetic category payload", () => {
     const payload = {
       tokenId: "tok-3",
       shadowClassification: "AFTER_PUMP_EXPENSIVE",
@@ -191,9 +191,7 @@ describe("SqliteDecisionSignalLogRepository", () => {
       entry_fresh_edge_payload_json: JSON.stringify(payload),
       entry_category: "geopolitics",
       entry_category_gate_class: "PRIORITIZE",
-    });
-    expect(JSON.parse((row?.entry_category_payload_json as string | null) ?? "{}")).toMatchObject({
-      gateClass: "PRIORITIZE",
+      entry_category_payload_json: null,
     });
   });
 });

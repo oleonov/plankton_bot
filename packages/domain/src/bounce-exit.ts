@@ -1,11 +1,4 @@
-// GATE-lane entry eligibility (live experiment).
-// See docs/plans/2026-07-15-gate-bounce-live-experiment.md — Phase 1: pure,
-// config-driven eligibility check, no runtime wiring yet (decision-planner
-// integration is Phase 2). Kept separate from the observe-only two-lane-entry
-// shadow (apps/runtime/src/modules/algo-decision/two-lane-entry-shadow.ts):
-// the shadow's GATE lane bakes in a notional proxy and looser, exploratory
-// thresholds for classification/measurement and must not be conflated with
-// this live, policy-driven gate.
+// GATE-lane entry eligibility for the live, policy-driven decision-planner branch.
 import type { BounceExitPolicy, GateEntryPolicy } from "./types.js";
 import { computeHarvestTarget } from "./tick-math.js";
 
@@ -26,10 +19,6 @@ export interface GateEntryMarketInput {
   midPrice: number | null;
 }
 
-// Duplicated from two-lane-entry-shadow.ts's `computeLifespanDays` rather than
-// imported: packages/domain must never depend on apps/runtime (dependency
-// direction), and this is a 6-line pure date-diff helper, not worth a shared
-// package for two call sites.
 function computeLifespanDays(endDate: string | null, gammaCreatedAt: string | null): number | null {
   if (endDate == null || gammaCreatedAt == null) return null;
   const end = Date.parse(endDate);
@@ -39,9 +28,8 @@ function computeLifespanDays(endDate: string | null, gammaCreatedAt: string | nu
 }
 
 /**
- * GATE-lane entry eligibility: inclusive lifespan/price bounds, no notional
- * component (unlike the two-lane shadow's exploratory GATE lane). Fails
- * closed (returns false) when lifespan or mid-price can't be derived.
+ * GATE-lane entry eligibility: inclusive lifespan/price bounds. Fails closed
+ * (returns false) when lifespan or mid-price can't be derived.
  */
 export function evaluateGateEntryEligibility(
   policy: GateEntryPolicy,
