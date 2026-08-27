@@ -63,6 +63,19 @@ CREATE INDEX IF NOT EXISTS idx_markets_score ON markets(score) WHERE score IS NO
 CREATE INDEX IF NOT EXISTS idx_markets_signature
   ON markets(tradable, selection_status, sig_liquidity, tick_size);
 
+-- High-churn exact Gamma signature values live separately so their 15-minute
+-- refresh does not rewrite the wide markets row and its secondary indexes.
+-- Legacy markets.sig_* columns remain for rollback compatibility.
+CREATE TABLE IF NOT EXISTS market_signature_features (
+  token_id        TEXT PRIMARY KEY,
+  sig_mid         REAL,
+  sig_cheap_mid   REAL,
+  sig_liquidity   REAL,
+  sig_vol24h      REAL,
+  sig_features_at TEXT,
+  updated_at      TEXT NOT NULL
+) WITHOUT ROWID;
+
 -- ═══════════ MARKET SNAPSHOTS ═══════════
 -- From 001_initial.sql
 

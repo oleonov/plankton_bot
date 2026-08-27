@@ -73,6 +73,21 @@ type PricingCandidate = {
 type MarketBatch = readonly Market[];
 type SignatureBatch = readonly MarketSignatureUpdate[];
 
+const MARKET_SIGNATURE_JOIN = "LEFT JOIN market_signature_features sf ON sf.token_id = m.token_id";
+const MARKET_ROW_PROJECTION = `m.*,
+  sf.sig_mid AS side_sig_mid,
+  sf.sig_cheap_mid AS side_sig_cheap_mid,
+  sf.sig_liquidity AS side_sig_liquidity,
+  sf.sig_vol24h AS side_sig_vol24h,
+  sf.sig_features_at AS side_sig_features_at,
+  CASE WHEN sf.token_id IS NOT NULL AND (
+    m.sig_features_at IS NULL OR (
+      sf.sig_features_at IS NOT NULL AND sf.sig_features_at >= m.sig_features_at
+    )
+  ) THEN 1 ELSE 0 END AS use_side_signature,
+  CASE WHEN sf.updated_at > m.updated_at THEN sf.updated_at ELSE m.updated_at END
+    AS resolved_updated_at`;
+
 // Reserved plankton-signature tier (spec 2026-07-01 §4.1/§4.2): fresh markets
 // have no market_snapshots to rank from, so they carry their own Gamma-at-
 // discovery features (`sig_*`) and get a live slot ahead of the V4 split.
@@ -156,16 +171,18 @@ const UPSERT_MARKET_SQL = `INSERT INTO markets
            group_item_title = excluded.group_item_title,
            group_item_threshold = excluded.group_item_threshold,
            tags_json = excluded.tags_json,
-           sig_mid = excluded.sig_mid,
-           sig_cheap_mid = excluded.sig_cheap_mid,
-           sig_liquidity = excluded.sig_liquidity,
-           sig_vol24h = excluded.sig_vol24h,
-           sig_features_at = excluded.sig_features_at,
            updated_at = excluded.updated_at`;
 
-const UPDATE_SIGNATURE_SQL = `UPDATE markets SET
-  sig_mid = ?, sig_cheap_mid = ?, sig_liquidity = ?, sig_vol24h = ?,
-  sig_features_at = ?, updated_at = ? WHERE token_id = ?`;
+const UPSERT_SIGNATURE_SQL = `INSERT INTO market_signature_features
+  (token_id, sig_mid, sig_cheap_mid, sig_liquidity, sig_vol24h, sig_features_at, updated_at)
+SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM markets WHERE token_id = ?)
+ON CONFLICT(token_id) DO UPDATE SET
+  sig_mid = excluded.sig_mid,
+  sig_cheap_mid = excluded.sig_cheap_mid,
+  sig_liquidity = excluded.sig_liquidity,
+  sig_vol24h = excluded.sig_vol24h,
+  sig_features_at = excluded.sig_features_at,
+  updated_at = excluded.updated_at`;
 
 export class SqliteMarketRepository implements MarketRepository {
   private upsertStmt: Database.Statement | null = null;
@@ -184,6 +201,22 @@ export class SqliteMarketRepository implements MarketRepository {
   private getUpsertStmt(): Database.Statement {
     if (!this.upsertStmt) this.upsertStmt = this.db.prepare(UPSERT_MARKET_SQL);
     return this.upsertStmt;
+  }
+
+  private bindSignatureUpsert(
+    stmt: Database.Statement,
+    update: Market | MarketSignatureUpdate,
+  ): void {
+    stmt.run(
+      update.tokenId,
+      update.sigMid ?? null,
+      update.sigCheapMid ?? null,
+      update.sigLiquidity ?? null,
+      update.sigVol24h ?? null,
+      update.sigFeaturesAt ?? null,
+      update.updatedAt,
+      update.tokenId,
+    );
   }
 
   private bindUpsert(stmt: Database.Statement, market: Market): void {
@@ -220,7 +253,7 @@ export class SqliteMarketRepository implements MarketRepository {
   }
 
   save(market: Market): void {
-    this.bindUpsert(this.getUpsertStmt(), market);
+    this.saveBatch([market]);
   }
 
   saveBatch(markets: readonly Market[]): void {
@@ -232,32 +265,28 @@ export class SqliteMarketRepository implements MarketRepository {
     signatureUpdates: readonly MarketSignatureUpdate[],
   ): void {
     if (fullUpserts.length === 0 && signatureUpdates.length === 0) return;
-    if (!this.signatureUpdateStmt) this.signatureUpdateStmt = this.db.prepare(UPDATE_SIGNATURE_SQL);
+    if (!this.signatureUpdateStmt) this.signatureUpdateStmt = this.db.prepare(UPSERT_SIGNATURE_SQL);
     const signatureStmt = this.signatureUpdateStmt;
     const upsertStmt = this.getUpsertStmt();
     if (!this.writeBatchTx) {
       this.writeBatchTx = this.db.transaction((full: MarketBatch, signatures: SignatureBatch) => {
-        for (const update of signatures) {
-          signatureStmt.run(
-            update.sigMid,
-            update.sigCheapMid,
-            update.sigLiquidity,
-            update.sigVol24h,
-            update.sigFeaturesAt,
-            update.updatedAt,
-            update.tokenId,
-          );
+        for (const update of signatures) this.bindSignatureUpsert(signatureStmt, update);
+        for (const market of full) {
+          this.bindUpsert(upsertStmt, market);
+          this.bindSignatureUpsert(signatureStmt, market);
         }
-        for (const market of full) this.bindUpsert(upsertStmt, market);
       });
     }
     this.writeBatchTx(fullUpserts, signatureUpdates);
   }
 
   findByTokenId(tokenId: TokenId): Market | null {
-    const row = this.db.prepare("SELECT * FROM markets WHERE token_id = ?").get(tokenId) as
-      | Record<string, unknown>
-      | undefined;
+    const row = this.db
+      .prepare(
+        `SELECT ${MARKET_ROW_PROJECTION} FROM markets m ${MARKET_SIGNATURE_JOIN}
+          WHERE m.token_id = ?`,
+      )
+      .get(tokenId) as Record<string, unknown> | undefined;
     return row ? this.rowToMarket(row) : null;
   }
 
@@ -265,23 +294,31 @@ export class SqliteMarketRepository implements MarketRepository {
     if (tokenIds.length === 0) return [];
     const placeholders = tokenIds.map(() => "?").join(",");
     const rows = this.db
-      .prepare(`SELECT * FROM markets WHERE token_id IN (${placeholders})`)
+      .prepare(
+        `SELECT ${MARKET_ROW_PROJECTION} FROM markets m ${MARKET_SIGNATURE_JOIN}
+          WHERE m.token_id IN (${placeholders})`,
+      )
       .all(...tokenIds) as Record<string, unknown>[];
     return rows.map((r) => this.rowToMarket(r));
   }
 
   findByConditionId(conditionId: string): Market[] {
     const rows = this.db
-      .prepare("SELECT * FROM markets WHERE condition_id = ?")
+      .prepare(
+        `SELECT ${MARKET_ROW_PROJECTION} FROM markets m ${MARKET_SIGNATURE_JOIN}
+          WHERE m.condition_id = ?`,
+      )
       .all(conditionId) as Record<string, unknown>[];
     return rows.map((r) => this.rowToMarket(r));
   }
 
   findActive(): Market[] {
-    const rows = this.db.prepare("SELECT * FROM markets WHERE active = 1").all() as Record<
-      string,
-      unknown
-    >[];
+    const rows = this.db
+      .prepare(
+        `SELECT ${MARKET_ROW_PROJECTION} FROM markets m ${MARKET_SIGNATURE_JOIN}
+          WHERE m.active = 1`,
+      )
+      .all() as Record<string, unknown>[];
     return rows.map((r) => this.rowToMarket(r));
   }
 
@@ -300,7 +337,9 @@ export class SqliteMarketRepository implements MarketRepository {
   }
 
   findAll(): Market[] {
-    const rows = this.db.prepare("SELECT * FROM markets").all() as Record<string, unknown>[];
+    const rows = this.db
+      .prepare(`SELECT ${MARKET_ROW_PROJECTION} FROM markets m ${MARKET_SIGNATURE_JOIN}`)
+      .all() as Record<string, unknown>[];
     return rows.map((r) => this.rowToMarket(r));
   }
 
@@ -339,18 +378,18 @@ export class SqliteMarketRepository implements MarketRepository {
   findTrackedForPricing(): Market[] {
     const rows = this.db
       .prepare(
-        `SELECT * FROM markets
-         WHERE active = 1
+        `SELECT ${MARKET_ROW_PROJECTION} FROM markets m ${MARKET_SIGNATURE_JOIN}
+         WHERE m.active = 1
            AND (
-             tradable = 1
+             m.tradable = 1
              OR EXISTS (SELECT 1 FROM positions
-                        WHERE positions.token_id = markets.token_id
+                        WHERE positions.token_id = m.token_id
                           AND positions.status IN ('open','dust'))
              OR EXISTS (SELECT 1 FROM orders
-                        WHERE orders.token_id = markets.token_id
+                        WHERE orders.token_id = m.token_id
                           AND orders.status IN ('pending','open'))
            )
-         ORDER BY markets.token_id`,
+         ORDER BY m.token_id`,
       )
       .all() as Record<string, unknown>[];
     return rows.map((r) => this.rowToMarket(r));
@@ -370,7 +409,7 @@ export class SqliteMarketRepository implements MarketRepository {
     // budget.
     const rows = this.db
       .prepare(
-        `SELECT m.*,
+        `SELECT ${MARKET_ROW_PROJECTION},
                 latest.liquidity AS latest_liquidity,
                 latest.volume_24h AS latest_volume_24h,
                 latest.best_bid AS latest_best_bid,
@@ -384,6 +423,7 @@ export class SqliteMarketRepository implements MarketRepository {
                                AND orders.status IN ('pending','open'))
                 ) THEN 1 ELSE 0 END AS is_critical
          FROM markets m
+         ${MARKET_SIGNATURE_JOIN}
          LEFT JOIN market_snapshots latest
            ON latest.id = (
              SELECT ms.id
@@ -598,13 +638,25 @@ export class SqliteMarketRepository implements MarketRepository {
       scoreModelVersion: (row.score_model_version as string | null) ?? null,
       scoredAt: (row.scored_at as string | null) ?? null,
       featuresCapturedAt: (row.features_captured_at as string | null) ?? null,
-      sigMid: (row.sig_mid as number | null) ?? null,
-      sigCheapMid: (row.sig_cheap_mid as number | null) ?? null,
-      sigLiquidity: (row.sig_liquidity as number | null) ?? null,
-      sigVol24h: (row.sig_vol24h as number | null) ?? null,
-      sigFeaturesAt: (row.sig_features_at as string | null) ?? null,
+      sigMid:
+        (row[row.use_side_signature === 1 ? "side_sig_mid" : "sig_mid"] as number | null) ?? null,
+      sigCheapMid:
+        (row[row.use_side_signature === 1 ? "side_sig_cheap_mid" : "sig_cheap_mid"] as
+          | number
+          | null) ?? null,
+      sigLiquidity:
+        (row[row.use_side_signature === 1 ? "side_sig_liquidity" : "sig_liquidity"] as
+          | number
+          | null) ?? null,
+      sigVol24h:
+        (row[row.use_side_signature === 1 ? "side_sig_vol24h" : "sig_vol24h"] as number | null) ??
+        null,
+      sigFeaturesAt:
+        (row[row.use_side_signature === 1 ? "side_sig_features_at" : "sig_features_at"] as
+          | string
+          | null) ?? null,
       createdAt: row.created_at as string,
-      updatedAt: row.updated_at as string,
+      updatedAt: (row.resolved_updated_at as string | undefined) ?? (row.updated_at as string),
     };
   }
 

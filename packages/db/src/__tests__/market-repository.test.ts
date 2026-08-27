@@ -163,7 +163,13 @@ describe("SqliteMarketRepository", () => {
   });
 
   it("atomically mixes full upserts with narrow signature-only updates", () => {
-    repo.save(makeMarket({ tokenId: createTokenId("sig-existing"), sigLiquidity: 100 }));
+    repo.save(
+      makeMarket({
+        tokenId: createTokenId("sig-existing"),
+        sigLiquidity: 100,
+        updatedAt: "2026-08-25T00:00:00.000Z",
+      }),
+    );
     db.prepare(
       "UPDATE markets SET score = 0.42, score_model_version = 'v1' WHERE token_id = 'sig-existing'",
     ).run();
@@ -185,11 +191,37 @@ describe("SqliteMarketRepository", () => {
       updatedAt: "2026-08-26T00:00:01.000Z",
     };
     repo.saveBatchWithSignatureUpdates(
-      [makeMarket({ tokenId: createTokenId("full-new"), question: "full path" })],
+      [
+        makeMarket({
+          tokenId: createTokenId("full-new"),
+          question: "full path",
+          sigMid: 0.31,
+          sigCheapMid: 0.32,
+          sigLiquidity: 1_301,
+          sigVol24h: 1_302,
+          sigFeaturesAt: "2026-08-26T00:00:02.000Z",
+          updatedAt: "2026-08-26T00:00:03.000Z",
+        }),
+      ],
       [signatureUpdate],
     );
 
     expect(repo.findByTokenId(createTokenId("full-new"))!.question).toBe("full path");
+    expect(
+      db
+        .prepare(
+          `SELECT sig_mid, sig_cheap_mid, sig_liquidity, sig_vol24h, sig_features_at, updated_at
+             FROM market_signature_features WHERE token_id = ?`,
+        )
+        .get("full-new"),
+    ).toEqual({
+      sig_mid: 0.31,
+      sig_cheap_mid: 0.32,
+      sig_liquidity: 1_301,
+      sig_vol24h: 1_302,
+      sig_features_at: "2026-08-26T00:00:02.000Z",
+      updated_at: "2026-08-26T00:00:03.000Z",
+    });
     expect(repo.findByTokenId(createTokenId("sig-existing"))).toMatchObject({
       question: "Will it rain?",
       score: 0.42,
@@ -201,6 +233,19 @@ describe("SqliteMarketRepository", () => {
       sigFeaturesAt: "2026-08-26T00:00:00.000Z",
       updatedAt: "2026-08-26T00:00:01.000Z",
     });
+    expect(
+      db
+        .prepare(
+          "SELECT sig_liquidity, updated_at FROM market_signature_features WHERE token_id = ?",
+        )
+        .get("sig-existing"),
+    ).toEqual({ sig_liquidity: 900, updated_at: "2026-08-26T00:00:01.000Z" });
+    expect(
+      db
+        .prepare("SELECT sig_liquidity FROM markets WHERE token_id = ?")
+        .pluck()
+        .get("sig-existing"),
+    ).toBe(100);
     expect(db.prepare("SELECT hits FROM broad_update_audit").pluck().get()).toBe(0);
 
     expect(() =>
@@ -210,6 +255,120 @@ describe("SqliteMarketRepository", () => {
       ),
     ).toThrow();
     expect(repo.findByTokenId(createTokenId("sig-existing"))!.sigLiquidity).toBe(900);
+  });
+
+  it("resolves one authoritative signature tuple and latest updatedAt in every market reader", () => {
+    const tokenId = createTokenId("sig-authority");
+    repo.save(
+      makeMarket({
+        tokenId,
+        conditionId: "sig-condition",
+        sigMid: 0.11,
+        sigCheapMid: 0.12,
+        sigLiquidity: 111,
+        sigVol24h: 112,
+        sigFeaturesAt: "2026-08-26T02:00:00.000Z",
+        updatedAt: "2026-08-26T02:00:01.000Z",
+      }),
+    );
+    db.prepare(
+      `UPDATE market_signature_features SET sig_mid = NULL, sig_cheap_mid = 0.22,
+         sig_liquidity = 222, sig_vol24h = 223,
+         sig_features_at = '2026-08-26T01:00:00.000Z',
+         updated_at = '2026-08-26T03:00:00.000Z' WHERE token_id = ?`,
+    ).run(tokenId);
+
+    const readEverywhere = (): Market[] => {
+      const tiered = repo.findTrackedForPricingTiered({ maxTokens: 10 });
+      const tieredMarket = [
+        ...tiered.executionCritical,
+        ...tiered.planktonSignature,
+        ...tiered.entryCandidates,
+        ...tiered.discoveryOnly,
+      ].find((market) => market.tokenId === tokenId)!;
+      return [
+        repo.findByTokenId(tokenId)!,
+        repo.findByTokenIds([tokenId])[0]!,
+        repo.findByConditionId("sig-condition")[0]!,
+        repo.findActive().find((market) => market.tokenId === tokenId)!,
+        repo.findAll().find((market) => market.tokenId === tokenId)!,
+        repo.findTrackedForPricing().find((market) => market.tokenId === tokenId)!,
+        tieredMarket,
+      ];
+    };
+
+    for (const market of readEverywhere()) {
+      expect(market).toMatchObject({
+        sigMid: 0.11,
+        sigCheapMid: 0.12,
+        sigLiquidity: 111,
+        sigVol24h: 112,
+        sigFeaturesAt: "2026-08-26T02:00:00.000Z",
+        updatedAt: "2026-08-26T03:00:00.000Z",
+      });
+    }
+
+    db.prepare(
+      `UPDATE market_signature_features SET sig_mid = NULL, sig_cheap_mid = 0.22,
+         sig_liquidity = 222, sig_vol24h = 223,
+         sig_features_at = '2026-08-26T02:00:00.000Z',
+         updated_at = '2026-08-26T04:00:00.000Z' WHERE token_id = ?`,
+    ).run(tokenId);
+    for (const market of readEverywhere()) {
+      expect(market).toMatchObject({
+        sigMid: null,
+        sigCheapMid: 0.22,
+        sigLiquidity: 222,
+        sigVol24h: 223,
+        sigFeaturesAt: "2026-08-26T02:00:00.000Z",
+        updatedAt: "2026-08-26T04:00:00.000Z",
+      });
+    }
+
+    db.prepare(
+      `UPDATE markets SET question = 'Metadata newer', updated_at = '2026-08-26T05:00:00.000Z'
+        WHERE token_id = ?`,
+    ).run(tokenId);
+    for (const market of readEverywhere()) {
+      expect(market).toMatchObject({
+        question: "Metadata newer",
+        sigMid: null,
+        sigCheapMid: 0.22,
+        sigLiquidity: 222,
+        sigVol24h: 223,
+        sigFeaturesAt: "2026-08-26T02:00:00.000Z",
+        updatedAt: "2026-08-26T05:00:00.000Z",
+      });
+    }
+  });
+
+  it("guarded signature upsert restores missing side rows but ignores unknown tokens", () => {
+    const tokenId = createTokenId("rollback-created");
+    repo.save(makeMarket({ tokenId, sigLiquidity: 100 }));
+    db.prepare("DELETE FROM market_signature_features WHERE token_id = ?").run(tokenId);
+    const update = {
+      tokenId,
+      sigMid: 0.2,
+      sigCheapMid: null,
+      sigLiquidity: 900,
+      sigVol24h: 300,
+      sigFeaturesAt: "2026-08-27T00:00:00.000Z",
+      updatedAt: "2026-08-27T00:00:01.000Z",
+    };
+
+    repo.saveBatchWithSignatureUpdates([], [update]);
+    repo.saveBatchWithSignatureUpdates(
+      [],
+      [{ ...update, tokenId: createTokenId("unknown-token") }],
+    );
+
+    expect(repo.findByTokenId(tokenId)).toMatchObject({ sigLiquidity: 900, sigCheapMid: null });
+    expect(
+      db
+        .prepare("SELECT COUNT(*) FROM market_signature_features WHERE token_id = ?")
+        .pluck()
+        .get("unknown-token"),
+    ).toBe(0);
   });
 
   // Step 0 §P1.7: when a later scan returns gammaCreatedAt=null (e.g. CLOB-only path
