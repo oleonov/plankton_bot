@@ -20,6 +20,7 @@ import { InProcessEventBus } from "@krabs/event-bus";
 import {
   computeBounceAskCaptureCandidate,
   computeBounceAskCaptureInitialPrice,
+  resolveBounceAskPolicyOrigin,
   resolveProvenBounceAskOrigin,
 } from "../bounce-ask-capture.js";
 import { BounceAskCaptureLifecycleModule } from "../modules/bounce-ask-capture/bounce-ask-capture-lifecycle-module.js";
@@ -49,7 +50,11 @@ function order(id: string, overrides: Partial<Order> = {}): Order {
   } as Order;
 }
 
-function quoteMotion(kind: "r23_capture" | "bounce_exit_target", cohort = COHORT) {
+function quoteMotion(
+  kind: "r23_capture" | "bounce_exit_target",
+  cohort = COHORT,
+  permanentR23ActivationId: string | null = null,
+) {
   return {
     version: 1,
     kind,
@@ -59,6 +64,8 @@ function quoteMotion(kind: "r23_capture" | "bounce_exit_target", cohort = COHORT
     entryPriceCeiling: kind === "r23_capture" ? 0.25 : null,
     policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
     policyControlRevision: 7,
+    permanentR23ActivationId,
+    permanentR23ActivatedAtUtc: permanentR23ActivationId ? cohort : null,
     initialBook: {
       depthStatus: "full",
       bestBid: 0.34,
@@ -83,7 +90,11 @@ function book(): OrderBookSnapshot {
   } as OrderBookSnapshot;
 }
 
-function buyRoot(id: string, cohort = COHORT): Order {
+function buyRoot(
+  id: string,
+  cohort = COHORT,
+  permanentR23ActivationId: string | null = null,
+): Order {
   const rootOrderId = createOrderId(id);
   return order(id, {
     orderId: rootOrderId,
@@ -91,7 +102,7 @@ function buyRoot(id: string, cohort = COHORT): Order {
     signalReason: "probe-entry",
     decisionRuleId: R23_DIP_TRIGGER_RULE_ID,
     metadata: {
-      quoteMotionV1: quoteMotion("r23_capture", cohort),
+      quoteMotionV1: quoteMotion("r23_capture", cohort, permanentR23ActivationId),
       makerCaptureLineageV1: {
         version: 1,
         rootOrderId,
@@ -187,9 +198,71 @@ describe("bounce ASK capture", () => {
     expect(resolveProvenBounceAskOrigin(sell, COHORT, deps)).toBeNull();
   });
 
-  it("claims durably before cancel, prevents a sibling, and terminalizes dust", async () => {
+  it("proves permanent ASK ownership only when every FIFO lot has the same permanent activation", () => {
+    const activationId = "permanent-r23-activation-1";
+    const source = {
+      sourceCohortActivatedAtUtc: COHORT,
+      permanentR23ActivationId: activationId,
+      permanentR23ActivatedAtUtc: COHORT,
+    };
+    const roots = [
+      buyRoot("permanent-a", COHORT, activationId),
+      buyRoot("permanent-b", COHORT, activationId),
+    ];
+    const fills = roots.map((root, index) => fillFor(root, `permanent-fill-${index}`));
+    const lots = fills.map((fill, index) => lotFor(fill, `permanent-lot-${index}`));
+    const byId = new Map(roots.map((root) => [String(root.orderId), root]));
+    const deps = {
+      orderRepo: {
+        findById: (id: Order["orderId"]) => byId.get(String(id)) ?? null,
+        getMakerCaptureChainUsage: chainUsage,
+      },
+      fillRepo: { findByTokenId: () => fills },
+      positionRepo: { findById: () => position() },
+      inventoryLotRepo: { findOpen: () => lots },
+    };
+
+    expect(
+      resolveProvenBounceAskOrigin(order("permanent-sell"), source, deps)?.sourceBuyRootOrderIds,
+    ).toEqual(roots.map((root) => root.orderId));
+    expect(
+      resolveBounceAskPolicyOrigin(
+        positionId,
+        tokenId,
+        {
+          enabled: true,
+          ...source,
+          sourceCohortActivatedAtUtc: "",
+          maxRepricesPerRoot: 5,
+        },
+        deps,
+      )?.sourceCohortActivatedAtUtc,
+    ).toBe(COHORT);
+
+    byId.set(String(roots[1]!.orderId), buyRoot("permanent-b", COHORT, null));
+    expect(resolveProvenBounceAskOrigin(order("permanent-sell"), source, deps)).toBeNull();
+    byId.set(String(roots[0]!.orderId), buyRoot("permanent-a", COHORT, null));
+    expect(
+      resolveBounceAskPolicyOrigin(
+        positionId,
+        tokenId,
+        {
+          enabled: true,
+          ...source,
+          sourceCohortActivatedAtUtc: COHORT,
+          maxRepricesPerRoot: 5,
+        },
+        deps,
+      )?.permanentR23ActivationId,
+    ).toBeNull();
+  });
+
+  it.each([
+    ["v120", null],
+    ["permanent recovery after disabled cancel", "permanent-r23-activation-1"],
+  ])("claims durably before cancel and preserves %s coverage", async (_, activationId) => {
     const bus = new InProcessEventBus();
-    const buy = buyRoot("buy-root");
+    const buy = buyRoot("buy-root", COHORT, activationId);
     const fill = fillFor(buy, "buy-fill", 10);
     const lot = lotFor(fill, "buy-lot", 10);
     const currentPosition = position();
@@ -219,6 +292,16 @@ describe("bounce ASK capture", () => {
       },
       findRecoverableBounceAskCaptureIntents: () => [],
       findBounceAskCaptureIntentByPredecessor: () => intent,
+      markBounceAskCaptureReady: (_id: unknown, price: number, size: number, prepared: unknown) => {
+        intent = {
+          ...intent,
+          status: "ready",
+          candidatePrice: price,
+          replacementSize: size,
+          proof: { ...intent.proof, prepared },
+        };
+        return true;
+      },
       markBounceAskCaptureTerminal: terminal,
     };
     const module = new BounceAskCaptureLifecycleModule({
@@ -231,8 +314,11 @@ describe("bounce ASK capture", () => {
         policy: {
           ...DEFAULT_EXECUTION_POLICY,
           bounceAskCapture: {
+            ...DEFAULT_EXECUTION_POLICY.bounceAskCapture,
             enabled: policyEnabled,
-            sourceCohortActivatedAtUtc: COHORT,
+            sourceCohortActivatedAtUtc: activationId ? "" : COHORT,
+            permanentR23ActivationId: activationId,
+            permanentR23ActivatedAtUtc: activationId ? COHORT : null,
             maxRepricesPerRoot: 1,
           },
         },
@@ -261,6 +347,9 @@ describe("bounce ASK capture", () => {
     bus.subscribe("CancelOrderRequested", async () => {
       effects.push(intent ? "cancel-after-claim" : "cancel-before-claim");
     });
+    bus.subscribe("SignalProduced", async () => {
+      effects.push("replacement-signal");
+    });
     await module.start();
     const market = {
       tokenId,
@@ -276,6 +365,22 @@ describe("bounce ASK capture", () => {
     await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: NOW });
     expect(effects).toEqual(["claim", "cancel-after-claim"]);
     policyEnabled = false;
+    if (activationId) {
+      sell = { ...sell, status: "cancelled" };
+      await bus.publish("OrderCancelled", {
+        commandId: "ask-cancel" as any,
+        orderId: sell.orderId,
+        tokenId,
+        conditionId,
+        reason: "bounce_ask_capture_reprice",
+        signalReason: sell.signalReason,
+        timestamp: NOW,
+      });
+      expect(effects).toEqual(["claim", "cancel-after-claim", "replacement-signal"]);
+      expect(terminal).not.toHaveBeenCalled();
+      await module.stop();
+      return;
+    }
     await (module as any).advance(intent);
     expect(terminal).toHaveBeenCalledWith(intent.intentId, "failed", "policy-cohort-lineage-drift");
     expect(effects).toEqual(["claim", "cancel-after-claim"]);

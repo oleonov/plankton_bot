@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
   BounceAskCaptureLineageV1,
+  BounceAskCapturePolicy,
   BounceAskCaptureRepriceSignalV1,
   Fill,
   FillRepository,
@@ -59,12 +60,14 @@ export function parseBounceAskCaptureLineage(order: Order): BounceAskCaptureLine
   const value = order.metadata?.bounceAskCaptureLineageV1;
   if (!isRecord(value) || value.version !== 1) return null;
   if (
-    !hasExactKeys(
-      value,
-      "originalTargetPrice positionId predecessorOrderId replacementIndex rootOrderId sourceBuyRootOrderIds sourceCohortActivatedAtUtc version".split(
+    !hasExactKeys(value, [
+      ..."originalTargetPrice positionId predecessorOrderId replacementIndex rootOrderId sourceBuyRootOrderIds sourceCohortActivatedAtUtc version".split(
         " ",
       ),
-    ) ||
+      ...(value.permanentR23ActivationId === undefined
+        ? []
+        : ["permanentR23ActivationId", "permanentR23ActivatedAtUtc"]),
+    ]) ||
     !nonempty(value.rootOrderId) ||
     !(value.predecessorOrderId === null || nonempty(value.predecessorOrderId)) ||
     !nonempty(value.positionId) ||
@@ -79,6 +82,14 @@ export function parseBounceAskCaptureLineage(order: Order): BounceAskCaptureLine
   ) {
     return null;
   }
+  if (
+    value.permanentR23ActivationId !== undefined &&
+    !(
+      (value.permanentR23ActivationId === null && value.permanentR23ActivatedAtUtc === null) ||
+      (nonempty(value.permanentR23ActivationId) && nonempty(value.permanentR23ActivatedAtUtc))
+    )
+  )
+    return null;
   return value as unknown as BounceAskCaptureLineageV1;
 }
 
@@ -102,16 +113,11 @@ export function isOrdinaryBounceAskRoot(order: Order): boolean {
 
 export function resolveProvenBounceAskOrigin(
   order: Order,
-  sourceCohortActivatedAtUtc: string,
+  source: BounceAskOriginSource,
   deps: BounceAskOriginDeps,
 ) {
   if (!order.positionId) return null;
-  return resolveProvenBounceAskPositionOrigin(
-    order.positionId,
-    order.tokenId,
-    sourceCohortActivatedAtUtc,
-    deps,
-  );
+  return resolveProvenBounceAskPositionOrigin(order.positionId, order.tokenId, source, deps);
 }
 
 type BounceAskOriginDeps = {
@@ -124,7 +130,7 @@ type BounceAskOriginDeps = {
 export function resolveProvenBounceAskPositionOrigin(
   positionId: Position["positionId"],
   tokenId: Order["tokenId"],
-  sourceCohortActivatedAtUtc: string,
+  source: BounceAskOriginSource,
   deps: BounceAskOriginDeps,
 ) {
   const position = deps.positionRepo.findById(positionId);
@@ -140,13 +146,19 @@ export function resolveProvenBounceAskPositionOrigin(
     const fill = fillsById.get(String(lot.fillId));
     const root = fill ? resolveValidatedBuyRoot(fill, deps.orderRepo) : null;
     const origin = root ? parseQuoteMotionOrigin(root) : null;
+    const permanent = typeof source === "string" ? null : source.permanentR23ActivationId;
+    const permanentAt = typeof source === "string" ? null : source.permanentR23ActivatedAtUtc;
+    const cohort = typeof source === "string" ? source : source.sourceCohortActivatedAtUtc;
     if (
       !fill ||
       fill.side !== "buy" ||
       String(fill.tokenId) !== String(position.tokenId) ||
       !root ||
       origin?.kind !== "r23_capture" ||
-      origin.cohortId !== sourceCohortActivatedAtUtc
+      (permanent
+        ? origin.permanentR23ActivationId !== permanent ||
+          origin.permanentR23ActivatedAtUtc !== permanentAt
+        : origin.cohortId !== cohort || origin.permanentR23ActivationId != null)
     ) {
       return null;
     }
@@ -157,6 +169,47 @@ export function resolveProvenBounceAskPositionOrigin(
     sourceBuyRootOrderIds: [...roots.values()].sort((a, b) => String(a).localeCompare(String(b))),
   };
 }
+
+export function resolveBounceAskPolicyOrigin(
+  positionId: Position["positionId"],
+  tokenId: Order["tokenId"],
+  policy: BounceAskCapturePolicy,
+  deps: BounceAskOriginDeps,
+) {
+  const activationId = policy.permanentR23ActivationId ?? null;
+  const activatedAt = policy.permanentR23ActivatedAtUtc ?? null;
+  if (activationId && activatedAt) {
+    const source = {
+      sourceCohortActivatedAtUtc: activatedAt,
+      permanentR23ActivationId: activationId,
+      permanentR23ActivatedAtUtc: activatedAt,
+    };
+    const proven = resolveProvenBounceAskPositionOrigin(positionId, tokenId, source, deps);
+    if (proven) return { ...proven, ...source };
+  }
+  const proven = resolveProvenBounceAskPositionOrigin(
+    positionId,
+    tokenId,
+    policy.sourceCohortActivatedAtUtc,
+    deps,
+  );
+  return proven
+    ? {
+        ...proven,
+        sourceCohortActivatedAtUtc: policy.sourceCohortActivatedAtUtc,
+        permanentR23ActivationId: null,
+        permanentR23ActivatedAtUtc: null,
+      }
+    : null;
+}
+
+type BounceAskOriginSource =
+  | string
+  | {
+      readonly sourceCohortActivatedAtUtc: string;
+      readonly permanentR23ActivationId?: string | null;
+      readonly permanentR23ActivatedAtUtc?: string | null;
+    };
 
 export function computeBounceAskCaptureInitialPrice(input: {
   readonly book: OrderBookSnapshot;
@@ -249,6 +302,8 @@ export function sameBounceAskOrigin(
   return (
     String(current.positionId) === String(root.positionId) &&
     current.originalTargetPrice === root.originalTargetPrice &&
+    current.permanentR23ActivationId === root.permanentR23ActivationId &&
+    current.permanentR23ActivatedAtUtc === root.permanentR23ActivatedAtUtc &&
     sameBounceAskRoots(current.sourceBuyRootOrderIds, root.sourceBuyRootOrderIds)
   );
 }

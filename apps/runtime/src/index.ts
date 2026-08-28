@@ -135,6 +135,7 @@ import {
 import { softRankingDisabledCleanup } from "./soft-ranking-disabled-cleanup.js";
 import { ExecutionModule } from "./modules/execution/execution-module.js";
 import { MakerBuyFastCancel } from "./modules/execution/maker-buy-fast-cancel.js";
+import { PermanentR23ActivationCoordinator } from "./permanent-r23-activation.js";
 import { AuthoritativeTickResolver } from "./modules/execution/authoritative-tick-resolver.js";
 import { ExchangeStateStore } from "./modules/execution/exchange-state-store.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
@@ -1043,6 +1044,14 @@ async function main(): Promise<void> {
     bus,
     isMakerModeOff: () => currentExecutionPolicy().makerEntry.mode === "off",
     inFlightMakerBuys: () => executionModule?.makerBuyInFlightCount() ?? 0,
+    inFlightPermanentR23: (activationId) =>
+      executionModule?.permanentR23InFlightCount(activationId) ?? 0,
+  });
+  const permanentR23Activation = new PermanentR23ActivationCoordinator({
+    controlDb: controlConn.db,
+    ledgerDb: ledgerConn.db,
+    profileId: activeProfile,
+    inFlightMakerBuys: () => executionModule?.makerBuyInFlightCount() ?? 0,
   });
 
   // 7e2. Command poller (created here so normalizationModule is available)
@@ -1060,6 +1069,12 @@ async function main(): Promise<void> {
       executionModule?.recoverMissingBounceExit(predecessorOrderId as OrderId, operatorCommandId) ??
       Promise.resolve({ status: "deferred" as const }),
     authorizeResume,
+    activatePermanentR23: (command, expectedVersion) =>
+      permanentR23Activation.activate(command, expectedVersion),
+    fencePermanentR23Deactivation: (command, expectedVersion, activationId) =>
+      permanentR23Activation.fenceDeactivation(command, expectedVersion, activationId),
+    finalizePermanentR23Deactivation: (command, activationId, completedAt) =>
+      permanentR23Activation.finalizeDeactivation(command, activationId, completedAt),
   });
 
   // 7f. Execution module

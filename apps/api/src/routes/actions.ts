@@ -132,6 +132,54 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
     return ok({ commandId: id, status: "enqueued" });
   });
 
+  app.post<{ Body: { reason?: string; expectedVersion?: number } }>(
+    "/actions/activate-permanent-r23",
+    async (request) => {
+      const body = (request.body ?? {}) as { reason?: string; expectedVersion?: number };
+      if (typeof body.reason !== "string" || body.reason.trim() === "") {
+        throw new ApiError(400, "reason is required", "MISSING_FIELD");
+      }
+      if (!Number.isSafeInteger(body.expectedVersion) || Number(body.expectedVersion) < 0) {
+        throw new ApiError(400, "expectedVersion is required", "INVALID_FIELD");
+      }
+      const id = insertCommand(
+        controlDb,
+        "activate_permanent_r23",
+        JSON.stringify({ expectedVersion: body.expectedVersion }),
+        body.reason,
+        getActor(request),
+      );
+      return ok({ commandId: id, status: "enqueued" });
+    },
+  );
+
+  app.post<{ Body: { reason?: string; expectedVersion?: number; activationId?: string } }>(
+    "/actions/deactivate-permanent-r23",
+    async (request) => {
+      const body = request.body ?? {};
+      if (typeof body.reason !== "string" || body.reason.trim() === "")
+        throw new ApiError(400, "reason is required", "MISSING_FIELD");
+      if (!Number.isSafeInteger(body.expectedVersion) || Number(body.expectedVersion) < 0)
+        throw new ApiError(400, "expectedVersion is required", "INVALID_FIELD");
+      if (
+        typeof body.activationId !== "string" ||
+        body.activationId.trim() !== body.activationId ||
+        body.activationId.length === 0
+      )
+        throw new ApiError(400, "activationId is required", "INVALID_FIELD");
+      if (!runtimeReadyPaused(controlDb))
+        throw new ApiError(409, "runtime must be READY_PAUSED", "RUNTIME_NOT_READY_PAUSED");
+      const id = insertCommand(
+        controlDb,
+        "deactivate_permanent_r23",
+        JSON.stringify({ expectedVersion: body.expectedVersion, activationId: body.activationId }),
+        body.reason,
+        getActor(request),
+      );
+      return ok({ commandId: id, status: "enqueued" });
+    },
+  );
+
   app.post<{ Body: { reason?: string; activationTs?: string } }>(
     "/actions/cancel-maker-buys",
     async (request) => {

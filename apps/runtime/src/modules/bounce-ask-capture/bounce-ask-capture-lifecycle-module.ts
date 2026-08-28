@@ -26,6 +26,7 @@ import {
   isOrdinaryBounceAskRoot,
   loadBounceAskFills,
   parseBounceAskCaptureLineage,
+  resolveBounceAskPolicyOrigin,
   resolveProvenBounceAskOrigin,
   sameBounceAskRoots,
 } from "../../bounce-ask-capture.js";
@@ -117,7 +118,7 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     if (this.deps.orderRepo.isOrderManagedByNonterminalBounceAskCaptureIntent?.(order.orderId))
       return;
     let lineage = parseBounceAskCaptureLineage(order);
-    if (!lineage) lineage = this.stampRootLineage(order, policy.sourceCohortActivatedAtUtc);
+    if (!lineage) lineage = this.stampRootLineage(order, policy);
     if (!lineage || lineage.replacementIndex >= policy.maxRepricesPerRoot) return;
     const state = this.validateState(order, lineage, snapshot);
     if (!state) return;
@@ -171,10 +172,13 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     await this.publishCancel(intent);
   }
 
-  private stampRootLineage(order: Order, sourceCohort: string): BounceAskCaptureLineageV1 | null {
+  private stampRootLineage(
+    order: Order,
+    source: ExecutionPolicy["bounceAskCapture"],
+  ): BounceAskCaptureLineageV1 | null {
     if (!isOrdinaryBounceAskRoot(order) || !order.positionId) return null;
     const origin = parseQuoteMotionOrigin(order);
-    const proven = resolveProvenBounceAskOrigin(order, sourceCohort, this.deps);
+    const proven = resolveBounceAskPolicyOrigin(order.positionId, order.tokenId, source, this.deps);
     if (origin?.originalTargetPrice == null || !proven) return null;
     const lineage: BounceAskCaptureLineageV1 = {
       version: 1,
@@ -182,7 +186,9 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       predecessorOrderId: null,
       replacementIndex: 0,
       positionId: proven.position.positionId,
-      sourceCohortActivatedAtUtc: sourceCohort,
+      sourceCohortActivatedAtUtc: proven.sourceCohortActivatedAtUtc,
+      permanentR23ActivationId: proven.permanentR23ActivationId,
+      permanentR23ActivatedAtUtc: proven.permanentR23ActivatedAtUtc,
       originalTargetPrice: origin.originalTargetPrice,
       sourceBuyRootOrderIds: proven.sourceBuyRootOrderIds,
     };
@@ -198,20 +204,29 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     order: Order,
     lineage: BounceAskCaptureLineageV1,
     snapshot: { policy: ExecutionPolicy; controlRevision: number | null },
+    recovering = false,
   ) {
     const market = this.markets.get(String(order.tokenId));
     const policy = snapshot.policy.bounceAskCapture;
-    const proven = resolveProvenBounceAskOrigin(
-      order,
-      policy.sourceCohortActivatedAtUtc,
-      this.deps,
-    );
+    const permanent = lineage.permanentR23ActivationId != null;
+    const lineageSource = permanent
+      ? {
+          sourceCohortActivatedAtUtc: lineage.sourceCohortActivatedAtUtc,
+          permanentR23ActivationId: lineage.permanentR23ActivationId,
+          permanentR23ActivatedAtUtc: lineage.permanentR23ActivatedAtUtc!,
+        }
+      : lineage.sourceCohortActivatedAtUtc;
+    const proven = resolveProvenBounceAskOrigin(order, lineageSource, this.deps);
     const sameRoots =
       proven && sameBounceAskRoots(proven.sourceBuyRootOrderIds, lineage.sourceBuyRootOrderIds);
     if (
-      !policy.enabled ||
+      (!policy.enabled && !(recovering && permanent)) ||
       snapshot.controlRevision === null ||
-      lineage.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc ||
+      (!recovering &&
+        (permanent
+          ? lineage.permanentR23ActivationId !== policy.permanentR23ActivationId ||
+            lineage.permanentR23ActivatedAtUtc !== policy.permanentR23ActivatedAtUtc
+          : lineage.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc)) ||
       String(lineage.positionId) !== String(order.positionId) ||
       !sameRoots ||
       !market ||
@@ -317,7 +332,7 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     const lineage = parseBounceAskCaptureLineage(predecessor);
     const snapshot = this.deps.policySnapshot();
     if (!this.markets.has(String(intent.tokenId))) return null;
-    const state = lineage ? this.validateState(predecessor, lineage, snapshot) : null;
+    const state = lineage ? this.validateState(predecessor, lineage, snapshot, true) : null;
     if (!lineage || !state) {
       this.terminal(intent, "failed", "policy-cohort-lineage-drift");
       return null;

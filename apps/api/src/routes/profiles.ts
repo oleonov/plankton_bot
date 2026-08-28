@@ -40,6 +40,32 @@ interface ProfilesOpts {
   ledgerPool: LedgerPool;
 }
 
+function assertPermanentR23PatchAllowed(
+  current: ExecutionPolicy,
+  makerPatch?: Record<string, unknown>,
+  bouncePatch?: Record<string, unknown>,
+): void {
+  const writesTuple =
+    makerPatch?.permanentR23ActivationId !== undefined ||
+    makerPatch?.permanentR23ActivatedAtUtc !== undefined ||
+    bouncePatch?.permanentR23ActivationId !== undefined ||
+    bouncePatch?.permanentR23ActivatedAtUtc !== undefined;
+  const writesTransition =
+    makerPatch?.mode !== undefined ||
+    makerPatch?.captureBookReprice !== undefined ||
+    bouncePatch?.enabled !== undefined ||
+    bouncePatch?.maxRepricesPerRoot !== undefined;
+  const hasPermanentTuple =
+    current.makerEntry.permanentR23ActivationId != null ||
+    current.bounceAskCapture.permanentR23ActivationId != null;
+  if (!writesTuple && !(hasPermanentTuple && writesTransition)) return;
+  throw new ApiError(
+    409,
+    "permanent R23 transition fields require a dedicated runtime command",
+    "PERMANENT_R23_COMMAND_REQUIRED",
+  );
+}
+
 export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts) => {
   const { controlDb } = opts;
 
@@ -495,6 +521,8 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     const { reason: _omitReason, expectedVersion: _omitExpectedVersion, ...patch } = rawBody;
     void _omitReason;
     void _omitExpectedVersion;
+    const makerPatch = patch.makerEntry as Record<string, unknown> | undefined;
+    const bouncePatch = patch.bounceAskCapture as Record<string, unknown> | undefined;
     const assertExpectedVersion = (currentVersion: number) => {
       if (expectedVersion === undefined || expectedVersion === currentVersion) return;
       throw new ApiError(
@@ -516,6 +544,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       .prepare("SELECT execution_policy_json FROM profile_settings WHERE profile_id = ?")
       .get(profileId) as { execution_policy_json: string | null } | undefined;
     const current = parseExecutionPolicyJson(currentRow?.execution_policy_json ?? null).policy;
+    assertPermanentR23PatchAllowed(current, makerPatch, bouncePatch);
 
     // Deep-merge: nested objects (deadSideGuard/pricing/telemetry) merge
     // field-by-field so a PATCH touching only `deadSideGuard.mode` preserves
@@ -699,6 +728,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       const transactionCurrent = parseExecutionPolicyJson(
         transactionRow?.execution_policy_json ?? null,
       ).policy;
+      assertPermanentR23PatchAllowed(transactionCurrent, makerPatch, bouncePatch);
       const parsed = parsePatchedPolicy(transactionCurrent);
       const transactionBroadens =
         transactionCurrent.bounceExit?.applyToAllMarkets !== true &&

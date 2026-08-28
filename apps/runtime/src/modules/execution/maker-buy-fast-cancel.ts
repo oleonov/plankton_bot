@@ -5,10 +5,17 @@ export type MakerBuyFastCancelResult = "applied" | "deferred" | "rejected";
 export type MakerBuyFastCancelCommit = (completedAt: string) => Promise<void>;
 
 export interface MakerBuyFastCancelDeps {
-  orderRepo: Pick<OrderRepository, "findOpen">;
+  orderRepo: Pick<OrderRepository, "findOpen"> &
+    Partial<
+      Pick<
+        OrderRepository,
+        "findById" | "findRecoverableMakerCaptureRepriceIntents" | "markMakerCaptureRepriceTerminal"
+      >
+    >;
   bus: EventBus;
   isMakerModeOff: () => boolean;
   inFlightMakerBuys: () => number;
+  inFlightPermanentR23?: (activationId: string) => number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   rescanMs?: number;
@@ -19,6 +26,7 @@ export interface MakerBuyFastCancelDeps {
 export class MakerBuyFastCancel {
   private ready = false;
   private latched = false;
+  private readonly permanentLatches = new Set<string>();
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly rescanMs: number;
@@ -37,6 +45,49 @@ export class MakerBuyFastCancel {
 
   isLatched(): boolean {
     return this.latched;
+  }
+
+  isPermanentLatched(activationId: string): boolean {
+    return this.permanentLatches.has(activationId);
+  }
+
+  async cancelPermanentActivation(
+    activationId: string,
+    commit: MakerBuyFastCancelCommit,
+  ): Promise<MakerBuyFastCancelResult> {
+    if (!activationId || !this.ready) return this.ready ? "rejected" : "deferred";
+    this.permanentLatches.add(activationId);
+    const deadline = this.now() + this.deadlineMs;
+    for (;;) {
+      const intents = this.drainPermanentIntents(activationId);
+      const targets = this.findPermanentTargets(activationId);
+      for (const order of targets) {
+        await this.deps.bus.publish("CancelOrderRequested", {
+          command: {
+            type: "CancelOrderCommand",
+            commandId: createCommandId(
+              `permanent-r23-cancel-${activationId}-${String(order.orderId)}`,
+            ),
+            orderId: order.orderId,
+            reason: "maker_fast_cancel",
+          },
+          timestamp: this.now(),
+        });
+      }
+      if (
+        targets.length === 0 &&
+        intents === 0 &&
+        (this.deps.inFlightPermanentR23?.(activationId) ?? 0) === 0 &&
+        this.findPermanentTargets(activationId).length === 0 &&
+        this.drainPermanentIntents(activationId) === 0
+      ) {
+        await commit(new Date(this.now()).toISOString());
+        this.permanentLatches.delete(activationId);
+        return "applied";
+      }
+      if (this.now() >= deadline) return "rejected";
+      await this.sleep(this.rescanMs);
+    }
   }
 
   async cancelSince(
@@ -91,6 +142,28 @@ export class MakerBuyFastCancel {
           order.entryStyle === "maker" &&
           new Date(order.createdAt).getTime() >= activationMs,
       );
+  }
+
+  private findPermanentTargets(activationId: string) {
+    return this.deps.orderRepo.findOpen().filter((order) => {
+      const origin = order.metadata?.quoteMotionV1 as Record<string, unknown> | undefined;
+      return origin?.permanentR23ActivationId === activationId;
+    });
+  }
+
+  private drainPermanentIntents(activationId: string): number {
+    const find = this.deps.orderRepo.findRecoverableMakerCaptureRepriceIntents;
+    const mark = this.deps.orderRepo.markMakerCaptureRepriceTerminal;
+    if (!find) return 0;
+    const matching = () =>
+      find.call(this.deps.orderRepo).filter((intent) => {
+        const root = this.deps.orderRepo.findById?.(intent.rootOrderId);
+        const origin = root?.metadata?.quoteMotionV1 as Record<string, unknown> | undefined;
+        return origin?.permanentR23ActivationId === activationId;
+      });
+    for (const intent of matching())
+      mark?.call(this.deps.orderRepo, intent.intentId, "failed", "permanent-r23-deactivated");
+    return matching().length;
   }
 }
 

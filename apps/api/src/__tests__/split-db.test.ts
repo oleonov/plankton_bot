@@ -1,8 +1,3 @@
-/**
- * Integration test that boots the API against REAL split schemas
- * (bootstrapControlDb + bootstrapLedgerDb) to catch "no such table" errors
- * that the legacy monolithic-DB tests cannot detect.
- */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -62,11 +57,9 @@ beforeAll(async () => {
   controlConn = bootstrapControlDb(path.join(tmpDir, "control.db"));
   ledgerConn = bootstrapLedgerDb(path.join(tmpDir, "ledger-sim.db"));
 
-  // Seed minimal data in the CORRECT databases
   const cdb = controlConn.db;
   const ldb = ledgerConn.db;
 
-  // Control: profiles + runtime state
   cdb.exec(`
     INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation');
     INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
@@ -79,7 +72,6 @@ beforeAll(async () => {
       paused = excluded.paused;
   `);
 
-  // Ledger: runtime state, positions, orders, bot_runs, metrics, markets
   ldb.exec(`
     INSERT INTO bot_runs (run_id, mode, started_at)
     VALUES ('run-1', 'simulation', '2026-03-14T00:00:00Z');
@@ -284,6 +276,31 @@ describe("API against real split schemas", () => {
     expect(res.statusCode).toBe(200);
   });
 
+  it("POST /actions/deactivate-permanent-r23 enqueues an exact target while READY_PAUSED", async () => {
+    controlConn.db
+      .prepare(
+        "UPDATE runtime_control_state SET runtime_status='ready_paused', paused=1 WHERE id=1",
+      )
+      .run();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/actions/deactivate-permanent-r23",
+      headers: auth(),
+      payload: { reason: "stop", expectedVersion: 7, activationId: "permanent-1" },
+    });
+    controlConn.db
+      .prepare("UPDATE runtime_control_state SET runtime_status='running', paused=0 WHERE id=1")
+      .run();
+    const row = controlConn.db
+      .prepare("SELECT action,target_id FROM operator_commands WHERE id=?")
+      .get(res.json().data.commandId);
+    expect(res.statusCode).toBe(200);
+    expect(row).toEqual({
+      action: "deactivate_permanent_r23",
+      target_id: '{"expectedVersion":7,"activationId":"permanent-1"}',
+    });
+  });
+
   it("POST /actions/cancel-maker-buys routes to control DB and preserves actor", async () => {
     const previous = controlConn.db
       .prepare("SELECT execution_policy_json FROM profile_settings WHERE profile_id = 'simulation'")
@@ -329,7 +346,6 @@ describe("API against real split schemas", () => {
   });
 
   it("GET /status reads from active profile's ledger after switch (not startup ledger)", async () => {
-    // Create a paper ledger with different data
     const paperConn = bootstrapLedgerDb(path.join(tmpDir, "ledger-paper.db"));
     paperConn.db.exec(`
       INSERT INTO bot_runs (run_id, mode, started_at)
@@ -344,18 +360,15 @@ describe("API against real split schemas", () => {
         '2026-03-15T00:00:00Z', '2026-03-15T00:00:00Z');
     `);
 
-    // Update control.db to point to paper as current profile
     controlConn.db
       .prepare(
         "UPDATE runtime_control_state SET current_profile = 'paper', updated_at = datetime('now') WHERE id = 1",
       )
       .run();
 
-    // Create a real LedgerPool that finds the paper ledger
     const { LedgerPool } = await import("../ledger-pool.js");
     const pool = new LedgerPool(path.join(tmpDir, "control.db"));
 
-    // Build a fresh server with the pool
     const freshApp = await buildServer({
       config: testConfig(),
       controlDb: controlConn.db,
@@ -367,7 +380,6 @@ describe("API against real split schemas", () => {
     const body = res.json();
 
     expect(body.ok).toBe(true);
-    // Should read from paper ledger, not simulation
     expect(body.data.runtimeMode).toBe("paper");
     expect(body.data.paused).toBe(false); // paper ledger has runtime_paused=0
     expect(body.data.totalOpenValueUsdc).toBe(100.0); // paper ledger has 100, sim has 50
@@ -377,7 +389,6 @@ describe("API against real split schemas", () => {
     pool.closeAll();
     paperConn.close();
 
-    // Restore control state for other tests
     controlConn.db
       .prepare(
         "UPDATE runtime_control_state SET current_profile = 'simulation', updated_at = datetime('now') WHERE id = 1",
@@ -386,7 +397,6 @@ describe("API against real split schemas", () => {
   });
 
   it("SSE /events reads from active profile's ledger after switch", async () => {
-    // Create a paper ledger with a distinct position
     const paperConn = bootstrapLedgerDb(path.join(tmpDir, "ledger-paper.db"));
     paperConn.db.exec(`
       INSERT INTO bot_runs (run_id, mode, started_at) VALUES ('run-paper-sse', 'paper', '2026-03-15T00:00:00Z');
@@ -397,7 +407,6 @@ describe("API against real split schemas", () => {
       VALUES ('pos-sse', 'tok-sse', 'cond-sse', 'buy', 50, 0.4, 20, 200.0, 0, 'open', '2026-03-15T00:00:00Z', '2026-03-15T01:00:00Z');
     `);
 
-    // Switch to paper
     controlConn.db
       .prepare(
         "UPDATE runtime_control_state SET current_profile = 'paper', updated_at = datetime('now') WHERE id = 1",
@@ -414,15 +423,11 @@ describe("API against real split schemas", () => {
       ledgerPool: pool,
     });
 
-    // Connect to SSE and read the first status event triggered by metrics tick
-    // We can't easily test SSE streaming in inject, so test the underlying
-    // buildStatusSnapshot with resolveActiveLedger instead
     const { buildStatusSnapshot, resolveActiveLedger } = await import("../routes/status.js");
     const active = resolveActiveLedger(ledgerConn.db, controlConn.db, pool);
     const snapshot = buildStatusSnapshot(active.db, 120_000, active.profile);
 
     expect(snapshot.runtimeMode).toBe("paper");
-    // Paper ledger has data from both this test and previous test (shared file)
     expect(snapshot.totalOpenValueUsdc).toBeGreaterThanOrEqual(200.0);
     expect(snapshot.openConditionCount).toBeGreaterThanOrEqual(1);
 
@@ -430,7 +435,6 @@ describe("API against real split schemas", () => {
     pool.closeAll();
     paperConn.close();
 
-    // Restore
     controlConn.db
       .prepare(
         "UPDATE runtime_control_state SET current_profile = 'simulation', updated_at = datetime('now') WHERE id = 1",
@@ -439,13 +443,6 @@ describe("API against real split schemas", () => {
   });
 
   // ── ADR-015 — GET /profiles/:id/execution-policy ─────────────────────────
-  //
-  // Regression: the handler used to 404 when `profile_settings` had no row,
-  // even though the profile existed in `profiles`. On a fresh control.db the
-  // seed helper fills the rows, so a baseline GET must return the seeded
-  // policy. And if an operator ever deletes the settings row, the handler
-  // must still return DEFAULT_EXECUTION_POLICY rather than 404.
-
   it("GET /execution-policy returns seeded policy on fresh control.db", async () => {
     const res = await app.inject({
       method: "GET",
@@ -460,8 +457,6 @@ describe("API against real split schemas", () => {
   });
 
   it("GET /execution-policy falls back to defaults when profile_settings row is missing", async () => {
-    // Wipe the settings row for paper but keep the profile — mimics a broken
-    // upgrade that skipped the seed. Handler must return defaults, not 404.
     controlConn.db.prepare("DELETE FROM profile_settings WHERE profile_id = 'paper'").run();
     try {
       const res = await app.inject({
@@ -474,7 +469,6 @@ describe("API against real split schemas", () => {
       expect(body.ok).toBe(true);
       expect(body.data.policy.deadSideGuard.mode).toBe("observe");
     } finally {
-      // Re-seed so later tests don't see a NULL row.
       controlConn.db
         .prepare(
           `INSERT OR IGNORE INTO profile_settings (profile_id, execution_policy_json, updated_at)
@@ -678,8 +672,70 @@ describe("API against real split schemas", () => {
     expect(executionPolicyHistoryCount()).toBe(historyBefore + 1);
   });
 
+  it("generic PATCH cannot activate the permanent R23 tuple", async () => {
+    const version = (
+      controlConn.db
+        .prepare("SELECT execution_policy_version AS v FROM runtime_control_state WHERE id=1")
+        .get() as { v: number }
+    ).v;
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: {
+        expectedVersion: version,
+        makerEntry: {
+          permanentR23ActivationId: "forged-activation",
+          permanentR23ActivatedAtUtc: "2026-08-28T00:00:00.000Z",
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("PERMANENT_R23_COMMAND_REQUIRED");
+  });
+
+  it("rechecks the permanent transition guard inside the policy write transaction", async () => {
+    const statement = controlConn.db.prepare(
+      "SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id='simulation'",
+    );
+    const update = controlConn.db.prepare(
+      "UPDATE profile_settings SET execution_policy_json=? WHERE profile_id='simulation'",
+    );
+    const before = (statement.get() as { json: string }).json;
+    const base = JSON.parse(before) as typeof DEFAULT_EXECUTION_POLICY;
+    const activation = {
+      permanentR23ActivationId: "permanent-race",
+      permanentR23ActivatedAtUtc: "2026-08-28T00:00:00.000Z",
+    };
+    const permanent = JSON.stringify({
+      ...base,
+      makerEntry: { ...base.makerEntry, mode: "off", ...activation },
+      bounceAskCapture: { ...base.bounceAskCapture, enabled: true, ...activation },
+    });
+    const original = controlConn.db.transaction.bind(controlConn.db);
+    const transaction = vi.spyOn(controlConn.db, "transaction");
+    transaction.mockImplementationOnce(((fn) => {
+      update.run(permanent);
+      return original(fn);
+    }) as typeof controlConn.db.transaction);
+    try {
+      const response = await app.inject({
+        method: "PATCH",
+        url: "/api/v1/profiles/simulation/execution-policy",
+        headers: auth(),
+        payload: { makerEntry: { mode: "micro_live" } },
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error.code).toBe("PERMANENT_R23_COMMAND_REQUIRED");
+      expect((statement.get() as { json: string }).json).toBe(permanent);
+    } finally {
+      transaction.mockRestore();
+      update.run(before);
+    }
+  });
+
   it("PATCH /execution-policy: partial makerEntry patch preserves holdWindowMs, maxScaleInLevels, scaleInStepPct", async () => {
-    // Patch ONLY mode — the three scale-in fields must survive unchanged.
     const res = await app.inject({
       method: "PATCH",
       url: "/api/v1/profiles/simulation/execution-policy",
@@ -695,15 +751,12 @@ describe("API against real split schemas", () => {
 
     const { makerEntry } = body.data.policy as { makerEntry: Record<string, unknown> };
     expect(makerEntry.mode).toBe("shadow");
-    // Scale-in fields must not be wiped by a partial patch.
     expect(makerEntry.holdWindowMs).toBe(DEFAULT_EXECUTION_POLICY.makerEntry.holdWindowMs);
     expect(makerEntry.maxScaleInLevels).toBe(DEFAULT_EXECUTION_POLICY.makerEntry.maxScaleInLevels);
     expect(makerEntry.scaleInStepPct).toBe(DEFAULT_EXECUTION_POLICY.makerEntry.scaleInStepPct);
   });
 
   it("PATCH /execution-policy: partial exitRepriceOnDownprice patch preserves every sibling field (enable + rollback)", async () => {
-    // Seed NON-DEFAULT siblings FIRST — a broken (wholesale-replace) merge would revert these to
-    // defaults, so surviving non-default values are what actually proves the deep-merge works.
     const seed = await app.inject({
       method: "PATCH",
       url: "/api/v1/profiles/simulation/execution-policy",
@@ -718,7 +771,6 @@ describe("API against real split schemas", () => {
       DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice.thresholdTicks,
     );
 
-    // Enable the Stage-2 thin gate + set a threshold; the seeded non-default siblings must survive.
     const enable = await app.inject({
       method: "PATCH",
       url: "/api/v1/profiles/simulation/execution-policy",
@@ -731,7 +783,6 @@ describe("API against real split schemas", () => {
     const enabled = enable.json().data.policy.exitRepriceOnDownprice;
     expect(enabled.skipDownpriceWhenThin).toBe(true);
     expect(enabled.thinTradeCountThreshold).toBe(15);
-    // Seeded NON-DEFAULT siblings survived the partial PATCH → deep-merge is real, not a replace.
     expect(enabled.thresholdTicks).toBe(9);
     expect(enabled.maxRepricesPerOrder).toBe(7);
     expect(enabled.enabled).toBe(DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice.enabled);
@@ -739,7 +790,6 @@ describe("API against real split schemas", () => {
       DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice.minReplacementImprovementTicks,
     );
 
-    // Rollback — turn the gate back off; the just-set threshold and seeded siblings stay intact.
     const rollback = await app.inject({
       method: "PATCH",
       url: "/api/v1/profiles/simulation/execution-policy",
@@ -814,7 +864,6 @@ describe("PATCH /execution-policy — bounceExit.applyToAllMarkets (Phase 5)", (
     expect(res.statusCode).toBe(200);
     const { bounceExit } = res.json().data.policy as { bounceExit: Record<string, unknown> };
     expect(bounceExit.microMaxOrderUsdc).toBe(7);
-    // A wholesale-replace merge would have wiped these back to defaults / fail-closed.
     expect(bounceExit.applyToAllMarkets).toBe(false);
     expect(Array.isArray(bounceExit.targetTiers)).toBe(true);
     expect(bounceExit.ladderFractions).toEqual(DEFAULT_EXECUTION_POLICY.bounceExit.ladderFractions);
@@ -830,7 +879,6 @@ describe("PATCH /execution-policy — bounceExit.applyToAllMarkets (Phase 5)", (
     });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe("APPLY_TO_ALL_MARKETS_REQUIRES_CENSUS");
-    // And it must NOT have committed the flag.
     const check = await phaseApp.inject({
       method: "GET",
       url: "/api/v1/profiles/simulation/execution-policy",
@@ -867,7 +915,6 @@ describe("PATCH /execution-policy — bounceExit.applyToAllMarkets (Phase 5)", (
   });
 
   it("FAIL-CLOSED: refuses when the target ledger is unavailable (cannot verify the invariant)", async () => {
-    // First force the flag back to false so this is a genuine false→true transition.
     setPositions([{ id: "p-owned2", status: "open", exitOwner: "bounce" }]);
     await phaseApp.inject({
       method: "PATCH",

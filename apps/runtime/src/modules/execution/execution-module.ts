@@ -68,6 +68,7 @@ import {
   computePolymarketPlatformFeeRate,
   POLYMARKET_CRYPTO_TAKER_FEE_RATE,
   isMakerMicroLiveOrderAuthorized,
+  isPermanentR23OrderAuthorized,
   isMakerMicroLiveWindowActive,
   parseMakerCaptureRepriceProofV1,
   parseBounceAskCaptureProofV1,
@@ -1841,6 +1842,7 @@ export class ExecutionModule implements RuntimeModule {
     const snapshot = this.deps.executionPolicySnapshot?.();
     const position = this.deps.positionRepo?.findById(intent.positionId) ?? null;
     const policy = snapshot?.policy.bounceAskCapture;
+    const permanent = lineage?.permanentR23ActivationId != null;
     const expectedClientOrderId = buildClientOrderId({
       signalId: intent.lifecycleSignalId,
       tokenId: intent.tokenId,
@@ -1849,9 +1851,17 @@ export class ExecutionModule implements RuntimeModule {
     const submittedChild = intent.childOrderId
       ? this.deps.orderRepo.findById(intent.childOrderId)
       : null;
+    const source =
+      permanent && lineage
+        ? {
+            sourceCohortActivatedAtUtc: lineage.sourceCohortActivatedAtUtc,
+            permanentR23ActivationId: lineage.permanentR23ActivationId,
+            permanentR23ActivatedAtUtc: lineage.permanentR23ActivatedAtUtc ?? null,
+          }
+        : (policy?.sourceCohortActivatedAtUtc ?? "");
     const proven =
       predecessor && this.deps.positionRepo && this.deps.inventoryLotRepo
-        ? resolveProvenBounceAskOrigin(predecessor, policy?.sourceCohortActivatedAtUtc ?? "", {
+        ? resolveProvenBounceAskOrigin(predecessor, source, {
             orderRepo: this.deps.orderRepo,
             fillRepo: this.deps.fillRepo,
             positionRepo: this.deps.positionRepo,
@@ -1866,7 +1876,8 @@ export class ExecutionModule implements RuntimeModule {
       !proof?.prepared ||
       !snapshot ||
       snapshot.controlRevision === null ||
-      !policy?.enabled ||
+      !policy ||
+      (!policy.enabled && !permanent) ||
       !position ||
       !proven ||
       (intent.status !== "ready" && intent.status !== "submitted") ||
@@ -1893,11 +1904,13 @@ export class ExecutionModule implements RuntimeModule {
       rootLineage.replacementIndex !== 0 ||
       String(rootLineage.rootOrderId) !== String(root.orderId) ||
       !sameBounceAskOrigin(lineage, rootLineage) ||
-      lineage.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc ||
-      rootLineage.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc ||
+      (!permanent && lineage.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc) ||
+      (!permanent &&
+        rootLineage.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc) ||
       proof.trigger.policySchemaVersion !== snapshot.policy.version ||
-      proof.trigger.policyControlRevision !== snapshot.controlRevision ||
-      proof.trigger.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc ||
+      (!permanent && proof.trigger.policyControlRevision !== snapshot.controlRevision) ||
+      (!permanent &&
+        proof.trigger.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc) ||
       proof.trigger.originalTargetPrice !== rootLineage.originalTargetPrice ||
       intent.candidatePrice == null ||
       Math.abs(cmd.price - intent.candidatePrice) > ExecutionModule.PRICE_EPSILON ||
@@ -1961,6 +1974,13 @@ export class ExecutionModule implements RuntimeModule {
       usage && intent.candidatePrice
         ? Math.max(0, (usage.rootNotionalUsdc - usage.chainFilledUsdc) / intent.candidatePrice)
         : 0;
+    const permanent =
+      origin?.permanentR23ActivationId != null &&
+      origin.permanentR23ActivationId === makerPolicy?.permanentR23ActivationId &&
+      origin.permanentR23ActivatedAtUtc === makerPolicy?.permanentR23ActivatedAtUtc;
+    const activatedAtUtc = permanent ? origin.permanentR23ActivatedAtUtc : window?.activatedAtUtc;
+    const expiresAtUtc =
+      permanent && deadline !== null ? new Date(deadline).toISOString() : window?.expiresAtUtc;
     if (
       !predecessor ||
       !root ||
@@ -1979,8 +1999,8 @@ export class ExecutionModule implements RuntimeModule {
       snapshot.controlRevision === null ||
       !makerPolicy?.captureBookReprice.enabled ||
       makerPolicy.mode !== "micro_live" ||
-      window?.captureNextR23 !== true ||
-      !isMakerMicroLiveWindowActive(window, Date.now()) ||
+      (!permanent && window?.captureNextR23 !== true) ||
+      (!permanent && !isMakerMicroLiveWindowActive(window, Date.now())) ||
       intent.replacementIndex > makerPolicy.captureBookReprice.maxRepricesPerRoot ||
       (intent.status !== "ready" && intent.status !== "submitted") ||
       (intent.status === "submitted" &&
@@ -2011,10 +2031,14 @@ export class ExecutionModule implements RuntimeModule {
       String(rootLineage.rootOrderId) !== String(root.orderId) ||
       origin.kind !== "r23_capture" ||
       origin.policySchemaVersion !== snapshot.policy.version ||
-      origin.policyControlRevision !== snapshot.controlRevision ||
-      origin.cohortId !== window.activatedAtUtc ||
-      origin.entryPriceCeiling !== snapshot.policy.entryPriceCeiling ||
-      !this.captureRootWindowMatches(root, window.activatedAtUtc, window.expiresAtUtc) ||
+      (!permanent && origin.policyControlRevision !== snapshot.controlRevision) ||
+      (!permanent && origin.cohortId !== window!.activatedAtUtc) ||
+      (!permanent && origin.entryPriceCeiling !== snapshot.policy.entryPriceCeiling) ||
+      (permanent
+        ? !this.captureRootActivationMatches(root, origin)
+        : !this.captureRootWindowMatches(root, window!.activatedAtUtc, window!.expiresAtUtc)) ||
+      !activatedAtUtc ||
+      !expiresAtUtc ||
       deadline === null ||
       Date.now() >= deadline ||
       cmd.size > usage.predecessorRemainingShares + ExecutionModule.SIZE_EPSILON_SHARES ||
@@ -2031,8 +2055,8 @@ export class ExecutionModule implements RuntimeModule {
       proof,
       policySchemaVersion: snapshot.policy.version,
       policyControlRevision: snapshot.controlRevision,
-      activatedAtUtc: window.activatedAtUtc,
-      expiresAtUtc: window.expiresAtUtc,
+      activatedAtUtc,
+      expiresAtUtc,
     };
   }
 
@@ -2322,6 +2346,15 @@ export class ExecutionModule implements RuntimeModule {
     );
   }
 
+  private captureRootActivationMatches(root: Order, origin: QuoteMotionOriginV1): boolean {
+    const value = root.metadata?.makerMicroLiveLifecycle as Record<string, unknown> | undefined;
+    return (
+      value?.kind === "permanent_r23" &&
+      value.activationId === origin.permanentR23ActivationId &&
+      value.activatedAtUtc === origin.permanentR23ActivatedAtUtc
+    );
+  }
+
   private makerBuyLiveRejection(
     cmd: PlaceOrderCommand,
     notional: number,
@@ -2337,37 +2370,48 @@ export class ExecutionModule implements RuntimeModule {
       return { reason: "maker-mode-inactive", code: ExchangeErrorCode.LivePolicyBlocked };
     }
 
-    if (!isMakerMicroLiveWindowActive(makerPolicy.microLiveWindow, Date.now())) {
+    const authInput = {
+      conditionId: cmd.conditionId,
+      source: cmd.source,
+      side: cmd.side,
+      entryStyle: cmd.entryStyle,
+      postOnly: cmd.postOnly,
+      decisionRuleId: cmd.decisionRuleId,
+      signalReason: cmd.signalReason,
+      signalTimestamp: cmd.signalTimestamp,
+    };
+    const permanentOrigin = cmd.metadata?.quoteMotionV1 as Record<string, unknown> | undefined;
+    const permanent =
+      isPermanentR23OrderAuthorized(makerPolicy, authInput) &&
+      permanentOrigin?.permanentR23ActivationId === makerPolicy.permanentR23ActivationId &&
+      permanentOrigin?.permanentR23ActivatedAtUtc === makerPolicy.permanentR23ActivatedAtUtc;
+    if (
+      permanent &&
+      this.deps.makerBuyFastCancel?.isPermanentLatched(makerPolicy.permanentR23ActivationId!)
+    ) {
+      return { reason: "maker-fast-cancel-active", code: ExchangeErrorCode.LivePolicyBlocked };
+    }
+
+    if (!permanent && !isMakerMicroLiveWindowActive(makerPolicy.microLiveWindow, Date.now())) {
       return { reason: "maker-micro-window-inactive", code: ExchangeErrorCode.LivePolicyBlocked };
     }
 
-    if (
-      !isMakerMicroLiveOrderAuthorized(
-        makerPolicy,
-        {
-          conditionId: cmd.conditionId,
-          source: cmd.source,
-          side: cmd.side,
-          entryStyle: cmd.entryStyle,
-          postOnly: cmd.postOnly,
-          decisionRuleId: cmd.decisionRuleId,
-          signalReason: cmd.signalReason,
-          signalTimestamp: cmd.signalTimestamp,
-        },
-        Date.now(),
-      )
-    ) {
+    if (!isMakerMicroLiveOrderAuthorized(makerPolicy, authInput, Date.now())) {
       return { reason: "maker-mode-inactive", code: ExchangeErrorCode.LivePolicyBlocked };
     }
 
-    if (makerPolicy.microMaxOrderUsdc > 0 && notional > makerPolicy.microMaxOrderUsdc) {
+    if (
+      !permanent &&
+      makerPolicy.microMaxOrderUsdc > 0 &&
+      notional > makerPolicy.microMaxOrderUsdc
+    ) {
       return {
         reason: MAKER_MICRO_ORDER_CAP_EXCEEDED_REASON,
         code: ExchangeErrorCode.LivePolicyBlocked,
       };
     }
 
-    if (makerPolicy.microMaxOpenUsdc > 0) {
+    if (!permanent && makerPolicy.microMaxOpenUsdc > 0) {
       // Dust-inclusive maker exposure (Fix #4): a maker BUY that fills and then
       // drops below the sellable minimum becomes "dust", not "closed" — it is
       // still real, unrealized maker exposure and must count toward the cap.
@@ -2397,11 +2441,9 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
 
-    const cumulativeRejection = this.makerCumulativeCapRejection(
-      cmd,
-      notional,
-      makerPolicy.microLiveWindow,
-    );
+    const cumulativeRejection = permanent
+      ? null
+      : this.makerCumulativeCapRejection(cmd, notional, makerPolicy.microLiveWindow);
     if (cumulativeRejection) return cumulativeRejection;
 
     return null;
@@ -3089,6 +3131,18 @@ export class ExecutionModule implements RuntimeModule {
     return [...this.pendingReservations.values()].filter(
       (reservation) => reservation.side === "buy" && reservation.entryStyle === "maker",
     ).length;
+  }
+
+  permanentR23InFlightCount(activationId?: string): number {
+    return [...this.pendingReservations.values()].filter((reservation) => {
+      const origin = reservation.metadata?.quoteMotionV1 as Record<string, unknown> | undefined;
+      return (
+        reservation.side === "buy" &&
+        reservation.entryStyle === "maker" &&
+        typeof origin?.permanentR23ActivationId === "string" &&
+        (activationId === undefined || origin.permanentR23ActivationId === activationId)
+      );
+    }).length;
   }
 
   async authorizeResumeAfterStartupExitRecovery(): Promise<boolean> {

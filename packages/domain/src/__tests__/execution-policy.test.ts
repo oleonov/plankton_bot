@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { DEFAULT_EXECUTION_PROFILE_POLICY, parseExecutionPolicyJson } from "../execution-policy.js";
 import { parseBounceAskCaptureProofV1 } from "../repositories.js";
+import { isMakerMicroLiveOrderAuthorized, isPermanentR23OrderAuthorized } from "../types.js";
 
 describe("sellableFlow policy", () => {
   it("defaults to OFF (byte-identical behaviour when off)", () => {
@@ -593,6 +594,8 @@ describe("bounce ask-capture policy and proof", () => {
     expect(parseExecutionPolicyJson(null).policy.bounceAskCapture).toEqual({
       enabled: false,
       sourceCohortActivatedAtUtc: "",
+      permanentR23ActivationId: null,
+      permanentR23ActivatedAtUtc: null,
       maxRepricesPerRoot: 5,
     });
 
@@ -606,11 +609,59 @@ describe("bounce ask-capture policy and proof", () => {
       }),
     );
     expect(parsed.issues).toEqual([]);
-    expect(parsed.policy.bounceAskCapture).toEqual({
+    expect(parsed.policy.bounceAskCapture).toMatchObject({
       enabled: true,
       sourceCohortActivatedAtUtc,
       maxRepricesPerRoot: 3,
     });
+  });
+
+  it("isolates permanent R23 roots from a coexisting legacy window and whitelist", () => {
+    const makerEntry = {
+      mode: "micro_live" as const,
+      whitelistConditionIds: ["condition-1"],
+      microLiveWindow: {
+        activatedAtUtc: sourceCohortActivatedAtUtc,
+        expiresAtUtc: "2026-08-20T11:00:00.000Z",
+        maxCumulativeAcceptedPendingUsdc: 1,
+        captureNextR23: true,
+      },
+      permanentR23ActivationId: "permanent-r23-activation-1",
+      permanentR23ActivatedAtUtc: sourceCohortActivatedAtUtc,
+    };
+    const exact = {
+      conditionId: "condition-1",
+      source: "strategy" as const,
+      side: "buy" as const,
+      entryStyle: "maker" as const,
+      postOnly: true,
+      decisionRuleId: "R23_DIP_TRIGGER",
+      signalReason: "probe-entry",
+      signalTimestamp: sourceCohortActivatedAtUtc,
+    };
+
+    const now = Date.parse(sourceCohortActivatedAtUtc);
+    const forged = [
+      { decisionRuleId: "GATE" },
+      { signalReason: "scale-in" },
+      { source: "operator" as const },
+      { source: "reconciliation" as const },
+      { signalTimestamp: "2026-08-20T09:59:59.999Z" },
+    ];
+    expect(isPermanentR23OrderAuthorized(makerEntry, exact)).toBe(true);
+    expect(isMakerMicroLiveOrderAuthorized(makerEntry, exact, now)).toBe(true);
+    expect(
+      forged.map((value) =>
+        isMakerMicroLiveOrderAuthorized(makerEntry, { ...exact, ...value }, now),
+      ),
+    ).toEqual([false, false, false, false, false]);
+    expect(
+      isMakerMicroLiveOrderAuthorized(
+        { ...makerEntry, permanentR23ActivationId: null, permanentR23ActivatedAtUtc: null },
+        { ...exact, decisionRuleId: "GATE" },
+        now,
+      ),
+    ).toBe(true);
   });
 
   it.each([

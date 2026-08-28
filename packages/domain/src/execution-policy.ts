@@ -587,6 +587,8 @@ export const DEFAULT_TRACK_A_ADD_THROTTLE_POLICY: TrackAAddThrottlePolicy = {
 export const DEFAULT_BOUNCE_ASK_CAPTURE_POLICY: BounceAskCapturePolicy = {
   enabled: false,
   sourceCohortActivatedAtUtc: "",
+  permanentR23ActivationId: null,
+  permanentR23ActivatedAtUtc: null,
   maxRepricesPerRoot: 5,
 };
 
@@ -613,6 +615,8 @@ export const DEFAULT_MAKER_ENTRY: MakerEntryPolicy = {
   // These are defaults only; operators must set meaningful values before micro_live.
   microMaxOrderUsdc: 10,
   microMaxOpenUsdc: 50,
+  permanentR23ActivationId: null,
+  permanentR23ActivatedAtUtc: null,
   captureBookReprice: {
     enabled: false,
     maxRepricesPerRoot: 5,
@@ -5418,6 +5422,7 @@ function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
     whitelistConditionIds,
     issues,
   );
+  const permanent = parsePermanentR23Activation(obj, issues, "makerEntry");
   const captureBookReprice = parseMakerCaptureBookReprice(obj.captureBookReprice, issues);
   const collapseFloorPrice = nullableClampedNumber(
     obj.collapseFloorPrice,
@@ -5463,6 +5468,7 @@ function parseMakerEntry(raw: unknown, issues: string[]): MakerEntryPolicy {
     microMaxOrderUsdc,
     microMaxOpenUsdc,
     ...(microLiveWindow === undefined ? {} : { microLiveWindow }),
+    ...permanent,
     captureBookReprice,
     collapseFloorPrice,
     holdWindowMs,
@@ -5511,12 +5517,14 @@ function parseBounceAskCapture(raw: unknown, issues: string[]): BounceAskCapture
     issues.push("bounceAskCapture.enabled must be a boolean");
     return fallback;
   }
-  if (obj.enabled !== true) return fallback;
+  const permanent = parsePermanentR23Activation(obj, issues, "bounceAskCapture");
+  if (obj.enabled !== true) return { ...fallback, ...permanent };
 
   const sourceCohortActivatedAtUtc = toCanonicalIso(obj.sourceCohortActivatedAtUtc);
   if (
-    sourceCohortActivatedAtUtc === null ||
-    sourceCohortActivatedAtUtc !== obj.sourceCohortActivatedAtUtc
+    permanent.permanentR23ActivationId === null &&
+    (sourceCohortActivatedAtUtc === null ||
+      sourceCohortActivatedAtUtc !== obj.sourceCohortActivatedAtUtc)
   ) {
     issues.push("bounceAskCapture.sourceCohortActivatedAtUtc must be an exact ISO UTC timestamp");
     return fallback;
@@ -5532,9 +5540,28 @@ function parseBounceAskCapture(raw: unknown, issues: string[]): BounceAskCapture
   }
   return {
     enabled: true,
-    sourceCohortActivatedAtUtc,
+    sourceCohortActivatedAtUtc: sourceCohortActivatedAtUtc ?? fallback.sourceCohortActivatedAtUtc,
+    ...permanent,
     maxRepricesPerRoot: obj.maxRepricesPerRoot,
   };
+}
+
+function parsePermanentR23Activation(
+  obj: Record<string, unknown>,
+  issues: string[],
+  name: string,
+): Required<Pick<MakerEntryPolicy, "permanentR23ActivationId" | "permanentR23ActivatedAtUtc">> {
+  const id = obj.permanentR23ActivationId;
+  const at = obj.permanentR23ActivatedAtUtc;
+  if (id == null && at == null) {
+    return { permanentR23ActivationId: null, permanentR23ActivatedAtUtc: null };
+  }
+  const canonicalAt = toCanonicalIso(at);
+  if (typeof id !== "string" || id.trim() !== id || id.length === 0 || canonicalAt !== at) {
+    issues.push(`${name} permanent R23 activation id and timestamp must be set together`);
+    return { permanentR23ActivationId: null, permanentR23ActivatedAtUtc: null };
+  }
+  return { permanentR23ActivationId: id, permanentR23ActivatedAtUtc: canonicalAt };
 }
 
 function parseMakerMicroLiveWindow(

@@ -831,12 +831,15 @@ describe("ExecutionModule", () => {
     "side",
     "price",
     "sizeTotal",
+    "permanent-disabled",
     "valid",
   ] as const)("routes a submitted ASK signal through bridge recovery: %s", async (mode) => {
     const rootOrderId = createOrderId("ask-root");
     const predecessorOrderId = createOrderId("ask-predecessor");
     const buyRootOrderId = createOrderId("ask-buy-root");
     const positionId = createPositionId("pos-1");
+    const permanent = mode === "permanent-disabled";
+    const permanentActivationId = "permanent-r23-activation-1";
     const identity = buildBounceAskCaptureIdentity(rootOrderId, predecessorOrderId, 2);
     const clientOrderId = buildClientOrderId({
       signalId: identity.lifecycleSignalId,
@@ -852,6 +855,12 @@ describe("ExecutionModule", () => {
       originalTargetPrice: 0.3,
       sourceBuyRootOrderIds: [buyRootOrderId],
       sourceCohortActivatedAtUtc: "2026-08-01T00:00:00.000Z",
+      ...(permanent
+        ? {
+            permanentR23ActivationId: permanentActivationId,
+            permanentR23ActivatedAtUtc: "2026-08-01T00:00:00.000Z",
+          }
+        : {}),
     } as const;
     const lineage = {
       ...rootLineage,
@@ -896,6 +905,8 @@ describe("ExecutionModule", () => {
           entryPriceCeiling: 0.25,
           policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
           policyControlRevision: 7,
+          permanentR23ActivationId: permanent ? permanentActivationId : null,
+          permanentR23ActivatedAtUtc: permanent ? rootLineage.sourceCohortActivatedAtUtc : null,
           initialBook: {
             depthStatus: "full",
             bestBid: 0.19,
@@ -1138,12 +1149,14 @@ describe("ExecutionModule", () => {
       policy: {
         ...DEFAULT_EXECUTION_POLICY,
         bounceAskCapture: {
-          enabled: true,
+          enabled: !permanent,
           sourceCohortActivatedAtUtc: rootLineage.sourceCohortActivatedAtUtc,
+          permanentR23ActivationId: permanent ? permanentActivationId : null,
+          permanentR23ActivatedAtUtc: permanent ? rootLineage.sourceCohortActivatedAtUtc : null,
           maxRepricesPerRoot: 2,
         },
       },
-      controlRevision: 7,
+      controlRevision: permanent ? 8 : 7,
     });
     internal.deps.candidateBookCache = {
       prime: vi.fn(async () => {
@@ -1191,12 +1204,14 @@ describe("ExecutionModule", () => {
         policy: {
           ...DEFAULT_EXECUTION_POLICY,
           bounceAskCapture: {
-            enabled: true,
+            enabled: !permanent,
             sourceCohortActivatedAtUtc: rootLineage.sourceCohortActivatedAtUtc,
+            permanentR23ActivationId: permanent ? permanentActivationId : null,
+            permanentR23ActivatedAtUtc: permanent ? rootLineage.sourceCohortActivatedAtUtc : null,
             maxRepricesPerRoot: 2,
           },
         },
-        controlRevision: 7,
+        controlRevision: permanent ? 8 : 7,
       }),
     });
     await mod.start();
@@ -1220,7 +1235,7 @@ describe("ExecutionModule", () => {
     if (mode === "open") {
       expect(gateway.getOrderResult).toHaveBeenCalledWith(existing.exchangeOrderId);
       expect(orderRepo.updateStatus).toHaveBeenCalledWith(existing.orderId, "open", remote.orderId);
-    } else if (mode === "absent" || mode === "valid") {
+    } else if (mode === "absent" || mode === "valid" || mode === "permanent-disabled") {
       expect(orderRepo.resetBounceAskCaptureSubmitted).toHaveBeenCalledOnce();
       expect(orderRepo.replacePendingIdentity).toHaveBeenCalledWith(
         existing.orderId,
@@ -7006,6 +7021,42 @@ describe("ExecutionModule", () => {
   // ─── Maker micro-cap (Bug 3) ───────────────────────────────────────────────
 
   describe("maker micro-cap enforcement", () => {
+    it("keeps permanent R23 behind exact authorization but outside legacy micro/cumulative rails", () => {
+      const now = Date.now();
+      const activationId = "permanent-r23-activation-1";
+      const internal = mod as any;
+      internal.deps.executionPolicy = () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: {
+          ...DEFAULT_EXECUTION_POLICY.makerEntry,
+          mode: "micro_live",
+          whitelistConditionIds: [],
+          microMaxOrderUsdc: 0.1,
+          microMaxOpenUsdc: 0.1,
+          permanentR23ActivationId: activationId,
+          permanentR23ActivatedAtUtc: new Date(now - 1_000).toISOString(),
+        },
+      });
+      const command = makePlaceCmd({
+        entryStyle: "maker",
+        postOnly: true,
+        decisionRuleId: "R23_DIP_TRIGGER",
+        signalReason: "probe-entry",
+        signalTimestamp: new Date(now).toISOString(),
+        metadata: {
+          quoteMotionV1: {
+            permanentR23ActivationId: activationId,
+            permanentR23ActivatedAtUtc: new Date(now - 1_000).toISOString(),
+          },
+        },
+      });
+
+      expect(internal.makerBuyLiveRejection(command, 10)).toBeNull();
+      expect(internal.makerBuyLiveRejection({ ...command, source: "operator" }, 10)?.reason).toBe(
+        "maker-mode-inactive",
+      );
+    });
+
     it("authorizes only an exact captureNextR23 command at the execution boundary", () => {
       const now = Date.now();
       orderRepo.getMakerBuyWindowUsage = vi.fn().mockReturnValue(makerWindowUsage());

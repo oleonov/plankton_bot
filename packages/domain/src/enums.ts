@@ -188,6 +188,8 @@ export const OperatorActionType = {
   RulesReload: "rules_reload",
   CancelMakerBuys: "cancel_maker_buys",
   RecoverMissingBounceExit: "recover_missing_bounce_exit",
+  ActivatePermanentR23: "activate_permanent_r23",
+  DeactivatePermanentR23: "deactivate_permanent_r23",
 } as const;
 export type OperatorActionType = (typeof OperatorActionType)[keyof typeof OperatorActionType];
 

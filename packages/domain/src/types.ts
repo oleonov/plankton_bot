@@ -2179,6 +2179,8 @@ export interface MakerCaptureLineageV1 {
 export interface BounceAskCapturePolicy {
   enabled: boolean;
   sourceCohortActivatedAtUtc: string;
+  permanentR23ActivationId?: string | null;
+  permanentR23ActivatedAtUtc?: string | null;
   maxRepricesPerRoot: number;
 }
 
@@ -2197,6 +2199,8 @@ export interface BounceAskCaptureLineageV1 {
   readonly replacementIndex: number;
   readonly positionId: PositionId;
   readonly sourceCohortActivatedAtUtc: string;
+  readonly permanentR23ActivationId?: string | null;
+  readonly permanentR23ActivatedAtUtc?: string | null;
   readonly originalTargetPrice: number;
   readonly sourceBuyRootOrderIds: readonly OrderId[];
 }
@@ -2246,6 +2250,32 @@ export interface MakerMicroLiveAuthorizationInput {
   signalTimestamp: string | null | undefined;
 }
 
+type PermanentR23Policy = Pick<
+  MakerEntryPolicy,
+  "mode" | "permanentR23ActivationId" | "permanentR23ActivatedAtUtc"
+>;
+
+export function isPermanentR23OrderAuthorized(
+  makerEntry: PermanentR23Policy,
+  input: MakerMicroLiveAuthorizationInput,
+): boolean {
+  const activatedAtMs = Date.parse(makerEntry.permanentR23ActivatedAtUtc ?? "");
+  const signalTimestampMs = Date.parse(input.signalTimestamp ?? "");
+  return (
+    makerEntry.mode === "micro_live" &&
+    makerEntry.permanentR23ActivationId !== null &&
+    Number.isFinite(activatedAtMs) &&
+    Number.isFinite(signalTimestampMs) &&
+    signalTimestampMs >= activatedAtMs &&
+    input.source === "strategy" &&
+    input.side === "buy" &&
+    input.entryStyle === "maker" &&
+    input.postOnly === true &&
+    input.decisionRuleId === "R23_DIP_TRIGGER" &&
+    input.signalReason === "probe-entry"
+  );
+}
+
 export function isMakerCaptureNextR23OrderAuthorized(
   makerEntry: Pick<MakerEntryPolicy, "mode" | "microLiveWindow">,
   input: MakerMicroLiveAuthorizationInput,
@@ -2273,11 +2303,20 @@ export function isMakerCaptureNextR23OrderAuthorized(
  * its deliberately narrower alternative for one timestamp-bound R23 signal.
  */
 export function isMakerMicroLiveOrderAuthorized(
-  makerEntry: Pick<MakerEntryPolicy, "mode" | "whitelistConditionIds" | "microLiveWindow">,
+  makerEntry: Pick<
+    MakerEntryPolicy,
+    | "mode"
+    | "whitelistConditionIds"
+    | "microLiveWindow"
+    | "permanentR23ActivationId"
+    | "permanentR23ActivatedAtUtc"
+  >,
   input: MakerMicroLiveAuthorizationInput,
   nowMs: number,
 ): boolean {
   if (makerEntry.mode !== "micro_live") return false;
+  if (makerEntry.permanentR23ActivationId != null)
+    return isPermanentR23OrderAuthorized(makerEntry, input);
   if (!isMakerMicroLiveWindowActive(makerEntry.microLiveWindow, nowMs)) return false;
   if (
     Array.isArray(makerEntry.whitelistConditionIds) &&
@@ -2317,6 +2356,9 @@ export interface MakerEntryPolicy {
   microMaxOpenUsdc: number;
   /** Optional durable activation/cumulative-cap contract for bounded micro-live canaries. */
   microLiveWindow?: MakerMicroLiveWindow;
+  /** Runtime-command-owned durable activation; both fields are null or both immutable strings. */
+  permanentR23ActivationId?: string | null;
+  permanentR23ActivatedAtUtc?: string | null;
   /** Event-driven BUY-only capture repricing; default OFF. */
   captureBookReprice: MakerCaptureBookRepricePolicy;
   /**

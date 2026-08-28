@@ -30,6 +30,8 @@ export interface QuoteMotionOriginV1 {
   readonly entryPriceCeiling: number | null;
   readonly policySchemaVersion: number;
   readonly policyControlRevision: number | null;
+  readonly permanentR23ActivationId?: string | null;
+  readonly permanentR23ActivatedAtUtc?: string | null;
   readonly initialBook: {
     readonly depthStatus: "full" | "unavailable";
     readonly bestBid: number | null;
@@ -77,6 +79,8 @@ export interface BuildQuoteMotionOriginInput {
   readonly kind: QuoteMotionOriginV1["kind"];
   readonly cohortId: string;
   readonly originalTargetPrice?: number | null;
+  readonly permanentR23ActivationId?: string | null;
+  readonly permanentR23ActivatedAtUtc?: string | null;
 }
 
 type QuoteMotionClassification =
@@ -130,6 +134,8 @@ export function buildQuoteMotionOrigin(input: BuildQuoteMotionOriginInput): Quot
     entryPriceCeiling: input.kind === "r23_capture" ? input.policy.entryPriceCeiling : null,
     policySchemaVersion: input.policy.version,
     policyControlRevision: input.policyControlRevision,
+    permanentR23ActivationId: input.permanentR23ActivationId ?? null,
+    permanentR23ActivatedAtUtc: input.permanentR23ActivatedAtUtc ?? null,
     initialBook: {
       depthStatus: input.book ? "full" : "unavailable",
       bestBid: finiteOrNull(input.market.bestBid),
@@ -153,6 +159,19 @@ export function parseQuoteMotionOrigin(order: Order): QuoteMotionOriginV1 | null
     return null;
   }
   if (!nullableNonNegativeInteger(raw.policyControlRevision)) return null;
+  const permanentId = raw.permanentR23ActivationId ?? null;
+  const permanentAt = raw.permanentR23ActivatedAtUtc ?? null;
+  const permanentAtMs = Date.parse(typeof permanentAt === "string" ? permanentAt : "");
+  if (
+    !(
+      (permanentId === null && permanentAt === null) ||
+      (nonEmptyString(permanentId) &&
+        typeof permanentAt === "string" &&
+        Number.isFinite(permanentAtMs) &&
+        new Date(permanentAtMs).toISOString() === permanentAt)
+    )
+  )
+    return null;
   const initialBook = raw.initialBook;
   if (!isRecord(initialBook)) return null;
   if (initialBook.depthStatus !== "full" && initialBook.depthStatus !== "unavailable") return null;
@@ -165,7 +184,11 @@ export function parseQuoteMotionOrigin(order: Order): QuoteMotionOriginV1 | null
   ) {
     return null;
   }
-  const origin = raw as unknown as QuoteMotionOriginV1;
+  const origin = {
+    ...raw,
+    permanentR23ActivationId: permanentId,
+    permanentR23ActivatedAtUtc: permanentAt,
+  } as unknown as QuoteMotionOriginV1;
   return matchesOriginOrder(order, origin) ? origin : null;
 }
 

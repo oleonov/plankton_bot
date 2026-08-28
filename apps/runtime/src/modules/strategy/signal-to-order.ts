@@ -52,6 +52,7 @@ import {
   isMakerMicroLiveOrderAuthorized,
   isMakerMicroLiveWindowActive,
   isMakerCaptureNextR23OrderAuthorized,
+  isPermanentR23OrderAuthorized,
   recordStageDuration,
   resolveTrackS3SpreadCap,
   shouldSkipSellPriceCap,
@@ -133,7 +134,7 @@ import {
   loadBounceAskFills,
   parseBounceAskCaptureLineage,
   parseBounceAskCaptureSignal,
-  resolveProvenBounceAskPositionOrigin,
+  resolveBounceAskPolicyOrigin,
 } from "../../bounce-ask-capture.js";
 import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 import {
@@ -363,12 +364,12 @@ export class SignalToOrderBridge {
       !fillRepo ||
       !positionRepo ||
       !inventoryLotRepo ||
-      !resolveProvenBounceAskPositionOrigin(
-        signal.positionId,
-        signal.tokenId,
-        cfg.sourceCohortActivatedAtUtc,
-        { orderRepo, fillRepo, positionRepo, inventoryLotRepo },
-      )
+      !resolveBounceAskPolicyOrigin(signal.positionId, signal.tokenId, cfg, {
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+      })
     ) {
       return null;
     }
@@ -713,6 +714,7 @@ export class SignalToOrderBridge {
     executionTerms: { tickSize: number },
     authorized: boolean,
     bidImproveTicks: number,
+    applyMicroCap: boolean,
   ): { price: number; size: number; postOnly: true; entryStyle: "maker" } | null {
     if (!authorized) return null;
 
@@ -750,7 +752,9 @@ export class SignalToOrderBridge {
       return null;
     }
 
-    const cappedSize = Math.min(orderSize, policy.makerEntry.microMaxOrderUsdc / makerPrice);
+    const cappedSize = applyMicroCap
+      ? Math.min(orderSize, policy.makerEntry.microMaxOrderUsdc / makerPrice)
+      : orderSize;
     return {
       price: makerPrice,
       size: cappedSize,
@@ -1678,10 +1682,12 @@ export class SignalToOrderBridge {
         makerAuthorization,
         nowMs,
       );
-      const makerCaptureAuthorized = isMakerCaptureNextR23OrderAuthorized(
+      const makerCaptureAuthorized =
+        isMakerCaptureNextR23OrderAuthorized(policy.makerEntry, makerAuthorization, nowMs) ||
+        isPermanentR23OrderAuthorized(policy.makerEntry, makerAuthorization);
+      const permanentR23Authorized = isPermanentR23OrderAuthorized(
         policy.makerEntry,
         makerAuthorization,
-        nowMs,
       );
       const makerBidImproveTicks = makerCaptureAuthorized ? 1 : policy.makerEntry.bidImproveTicks;
       const makerOverride = this.tryMakerEntryOverride(
@@ -1692,8 +1698,13 @@ export class SignalToOrderBridge {
         executionTerms,
         makerAuthorized,
         makerBidImproveTicks,
+        !permanentR23Authorized,
       );
-      if (makerCaptureAuthorized && makerOverride == null) {
+      const permanentRootCapExceeded =
+        permanentR23Authorized &&
+        makerOverride != null &&
+        makerOverride.price > Math.min(signal.suggestedPrice, policy.entryPriceCeiling) + 1e-9;
+      if (makerCaptureAuthorized && (makerOverride == null || permanentRootCapExceeded)) {
         const reason = MAKER_CAPTURE_NO_VALID_BID_PLUS_ONE_REASON;
         await this.publishConversionSkipped(signal, "execution-terms", [reason], {
           bestBid: market.bestBid,
@@ -1715,6 +1726,7 @@ export class SignalToOrderBridge {
       }
       if (
         makerCaptureAuthorized &&
+        !permanentR23Authorized &&
         makerOverride &&
         this.deps.orderRepo &&
         this.deps.fillRepo &&
@@ -1881,12 +1893,19 @@ export class SignalToOrderBridge {
         signal.side === "buy" && attributionRuleValid ? parsedAttribution : null;
       const makerMicroLiveLifecycle =
         makerOverride != null && makerCaptureAuthorized
-          ? {
-              kind: "r23_capture",
-              activatedAtUtc: policy.makerEntry.microLiveWindow!.activatedAtUtc,
-              expiresAtUtc: policy.makerEntry.microLiveWindow!.expiresAtUtc,
-              fillWaitMs: policy.makerEntry.fillWaitMs,
-            }
+          ? permanentR23Authorized
+            ? {
+                kind: "permanent_r23",
+                activationId: policy.makerEntry.permanentR23ActivationId!,
+                activatedAtUtc: policy.makerEntry.permanentR23ActivatedAtUtc!,
+                fillWaitMs: policy.makerEntry.fillWaitMs,
+              }
+            : {
+                kind: "r23_capture",
+                activatedAtUtc: policy.makerEntry.microLiveWindow!.activatedAtUtc,
+                expiresAtUtc: policy.makerEntry.microLiveWindow!.expiresAtUtc,
+                fillWaitMs: policy.makerEntry.fillWaitMs,
+              }
           : null;
       const quoteMotionV1 =
         makerMicroLiveLifecycle != null
@@ -1899,6 +1918,12 @@ export class SignalToOrderBridge {
               source: pricing.cacheStatus,
               kind: "r23_capture",
               cohortId: makerMicroLiveLifecycle.activatedAtUtc,
+              permanentR23ActivationId: permanentR23Authorized
+                ? (policy.makerEntry.permanentR23ActivationId ?? null)
+                : null,
+              permanentR23ActivatedAtUtc: permanentR23Authorized
+                ? (policy.makerEntry.permanentR23ActivatedAtUtc ?? null)
+                : null,
             })
           : signal.side === "sell" &&
               signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
@@ -2043,6 +2068,10 @@ export class SignalToOrderBridge {
     const origin = root ? parseQuoteMotionOrigin(root) : null;
     const makerPolicy = policyRead.policy.makerEntry;
     const window = makerPolicy.microLiveWindow;
+    const permanent =
+      origin?.permanentR23ActivationId != null &&
+      origin?.permanentR23ActivationId === makerPolicy.permanentR23ActivationId &&
+      origin?.permanentR23ActivatedAtUtc === makerPolicy.permanentR23ActivatedAtUtc;
     const valid =
       metadata !== null &&
       intent !== null &&
@@ -2058,14 +2087,14 @@ export class SignalToOrderBridge {
       intent.replacementSize === signal.suggestedSize &&
       makerPolicy.mode === "micro_live" &&
       makerPolicy.captureBookReprice.enabled &&
-      window?.captureNextR23 === true &&
-      isMakerMicroLiveWindowActive(window, this.now()) &&
+      (permanent ||
+        (window?.captureNextR23 === true && isMakerMicroLiveWindowActive(window, this.now()))) &&
       policyRead.controlRevision !== null &&
       origin?.kind === "r23_capture" &&
       origin.policySchemaVersion === policyRead.policy.version &&
-      origin.policyControlRevision === policyRead.controlRevision &&
-      origin.cohortId === window.activatedAtUtc &&
-      origin.entryPriceCeiling === policyRead.policy.entryPriceCeiling;
+      (permanent || origin.policyControlRevision === policyRead.controlRevision) &&
+      (permanent || origin.cohortId === window?.activatedAtUtc) &&
+      (permanent || origin.entryPriceCeiling === policyRead.policy.entryPriceCeiling);
     if (!valid || !metadata || !intent || !predecessor || !root) {
       await this.publishConversionSkipped(signal, "execution-terms", ["capture-reprice-invalid"], {
         intentStatus: intent?.status ?? null,
@@ -2136,6 +2165,7 @@ export class SignalToOrderBridge {
         )
       : null;
     const policy = policyRead.policy.bounceAskCapture;
+    const permanent = lineage?.permanentR23ActivationId != null;
     const valid =
       metadata !== null &&
       intent !== null &&
@@ -2153,9 +2183,9 @@ export class SignalToOrderBridge {
       signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
       signal.suggestedPrice === intent.candidatePrice &&
       signal.suggestedSize === intent.replacementSize &&
-      policy.enabled &&
+      (policy.enabled || permanent) &&
       policyRead.controlRevision !== null &&
-      lineage.sourceCohortActivatedAtUtc === policy.sourceCohortActivatedAtUtc &&
+      (permanent || lineage.sourceCohortActivatedAtUtc === policy.sourceCohortActivatedAtUtc) &&
       intent.replacementIndex <= policy.maxRepricesPerRoot;
     if (!valid || !intent || !predecessor || !metadata) {
       await this.publishConversionSkipped(

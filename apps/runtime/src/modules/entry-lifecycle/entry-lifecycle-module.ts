@@ -339,14 +339,11 @@ export class EntryLifecycleModule implements RuntimeModule {
     }
     const snapshot = this.capturePolicySnapshot();
     const reprice = snapshot?.policy.makerEntry.captureBookReprice;
-    const window = snapshot?.policy.makerEntry.microLiveWindow;
     if (
       !snapshot ||
       !reprice?.enabled ||
       snapshot.controlRevision === null ||
-      snapshot.policy.makerEntry.mode !== "micro_live" ||
-      window?.captureNextR23 !== true ||
-      !activeWindow(window.activatedAtUtc, window.expiresAtUtc, now)
+      snapshot.policy.makerEntry.mode !== "micro_live"
     ) {
       return null;
     }
@@ -355,6 +352,7 @@ export class EntryLifecycleModule implements RuntimeModule {
     const root = lineage ? this.deps.orderRepo.findById(lineage.rootOrderId) : null;
     const origin = root ? parseQuoteMotionOrigin(root) : null;
     const deadline = root ? resolveMakerMicroLiveFillDeadlineMs(root) : null;
+    const window = resolveCaptureWindow(root, origin, snapshot.policy.makerEntry, deadline, now);
     if (
       !lineage ||
       !usage?.trusted ||
@@ -364,15 +362,14 @@ export class EntryLifecycleModule implements RuntimeModule {
       !root ||
       deadline === null ||
       now >= deadline ||
+      !window ||
       origin?.kind !== "r23_capture" ||
       origin.policySchemaVersion !== snapshot.policy.version ||
-      origin.policyControlRevision !== snapshot.controlRevision ||
-      origin.cohortId !== window.activatedAtUtc ||
-      origin.entryPriceCeiling !== snapshot.policy.entryPriceCeiling ||
+      (!window.permanent && origin.policyControlRevision !== snapshot.controlRevision) ||
+      (!window.permanent && origin.entryPriceCeiling !== snapshot.policy.entryPriceCeiling) ||
       origin.entryPriceCeiling === null ||
       Math.min(origin.originalSuggestedPrice, origin.entryPriceCeiling) + EPSILON <
         order.price + market.tickSize ||
-      !frozenWindowMatches(root, window.activatedAtUtc, window.expiresAtUtc) ||
       market.conditionId !== String(order.conditionId) ||
       !Number.isFinite(market.tickSize) ||
       market.tickSize <= 0 ||
@@ -688,20 +685,19 @@ export class EntryLifecycleModule implements RuntimeModule {
   private captureIntentState(intent: MakerCaptureRepriceIntent, predecessor: Order, now: number) {
     const snapshot = this.capturePolicySnapshot();
     const maker = snapshot?.policy.makerEntry;
-    const window = maker?.microLiveWindow;
     const root = this.deps.orderRepo.findById(intent.rootOrderId);
     const lineage = parseMakerCaptureLineage(predecessor);
     const origin = root ? parseQuoteMotionOrigin(root) : null;
     const usage = this.deps.orderRepo.getMakerCaptureChainUsage?.(predecessor.orderId);
     const deadline = root ? resolveMakerMicroLiveFillDeadlineMs(root) : null;
+    const window = maker ? resolveCaptureWindow(root, origin, maker, deadline, now) : null;
     if (
       !snapshot ||
       snapshot.controlRevision === null ||
       maker?.mode !== "micro_live" ||
       !maker.captureBookReprice.enabled ||
       intent.replacementIndex > maker.captureBookReprice.maxRepricesPerRoot ||
-      window?.captureNextR23 !== true ||
-      !activeWindow(window.activatedAtUtc, window.expiresAtUtc, now) ||
+      !window ||
       !root ||
       String(root.orderId) !== String(intent.rootOrderId) ||
       !lineage ||
@@ -717,10 +713,8 @@ export class EntryLifecycleModule implements RuntimeModule {
       now >= deadline ||
       origin?.kind !== "r23_capture" ||
       origin.policySchemaVersion !== snapshot.policy.version ||
-      origin.policyControlRevision !== snapshot.controlRevision ||
-      origin.cohortId !== window.activatedAtUtc ||
-      origin.entryPriceCeiling !== snapshot.policy.entryPriceCeiling ||
-      !frozenWindowMatches(root, window.activatedAtUtc, window.expiresAtUtc)
+      (!window.permanent && origin.policyControlRevision !== snapshot.controlRevision) ||
+      (!window.permanent && origin.entryPriceCeiling !== snapshot.policy.entryPriceCeiling)
     )
       return null;
     return { origin, usage, snapshot, window };
@@ -1369,4 +1363,39 @@ function frozenWindowMatches(order: Order, activatedAtUtc: string, expiresAtUtc:
     (value as Record<string, unknown>).activatedAtUtc === activatedAtUtc &&
     (value as Record<string, unknown>).expiresAtUtc === expiresAtUtc
   );
+}
+
+function resolveCaptureWindow(
+  root: Order | null,
+  origin: ReturnType<typeof parseQuoteMotionOrigin>,
+  maker: ExecutionPolicy["makerEntry"],
+  deadline: number | null,
+  now: number,
+): { activatedAtUtc: string; expiresAtUtc: string; permanent: boolean } | null {
+  if (!root || !origin || deadline === null) return null;
+  if (origin.permanentR23ActivationId !== null) {
+    const lifecycle = root.metadata?.makerMicroLiveLifecycle as Record<string, unknown> | undefined;
+    if (
+      origin.permanentR23ActivationId !== maker.permanentR23ActivationId ||
+      origin.permanentR23ActivatedAtUtc !== maker.permanentR23ActivatedAtUtc ||
+      lifecycle?.kind !== "permanent_r23" ||
+      lifecycle.activationId !== origin.permanentR23ActivationId ||
+      lifecycle.activatedAtUtc !== origin.permanentR23ActivatedAtUtc
+    )
+      return null;
+    return {
+      activatedAtUtc: origin.permanentR23ActivatedAtUtc!,
+      expiresAtUtc: new Date(deadline).toISOString(),
+      permanent: true,
+    };
+  }
+  const window = maker.microLiveWindow;
+  if (
+    window?.captureNextR23 !== true ||
+    !activeWindow(window.activatedAtUtc, window.expiresAtUtc, now) ||
+    origin.cohortId !== window.activatedAtUtc ||
+    !frozenWindowMatches(root, window.activatedAtUtc, window.expiresAtUtc)
+  )
+    return null;
+  return { ...window, permanent: false };
 }

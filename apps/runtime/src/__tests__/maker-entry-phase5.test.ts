@@ -1,18 +1,3 @@
-/**
- * Phase 5 maker-entry tests: micro-live post-only BUY limit orders.
- *
- * Covers:
- *  1. Whitelisted R23 BUY in micro_live → bridge emits maker order (price = bid+1tick, postOnly, entryStyle=maker, size capped)
- *  2. Non-whitelisted condition → bridge emits standard taker order
- *  3. mode="shadow" → bridge emits standard taker order
- *  4. Empty whitelist → bridge emits standard taker order
- *  5. Post-only BUY would cross ask → ExecutionModule skips with OrderSkipped
- *  6. Non-post-only BUY at ask price → ExecutionModule passes through
- *  7. computeMakerOpenOrderUsdc + computeMakerOpenPositionUsdc pure functions
- *  8. validateMicroMaxOrderCap throws when cap < EOA min
- *  9. handleFill propagates entryStyle="maker" from origOrder to applyFill
- */
-
 import { describe, expect, it, vi } from "vitest";
 import { InProcessEventBus } from "@krabs/event-bus";
 import {
@@ -46,14 +31,10 @@ import {
   computeMakerOpenPositionUsdc,
 } from "../modules/execution/reservation-utils.js";
 
-// ─── Shared constants ─────────────────────────────────────────────────────
-
 const TOKEN_ID = createTokenId("tok-yes");
 const COND_ID = createConditionId("cond-maker-1");
 const BOT_RUN_ID = createBotRunId("test-run-maker");
 const NOW = Date.parse("2026-07-04T10:00:00.000Z");
-
-// ─── Helpers ──────────────────────────────────────────────────────────────
 
 function makeLogger() {
   return {
@@ -215,8 +196,6 @@ function makeFillRepo(
   };
 }
 
-// ─── 1–4: SignalToOrderBridge maker override ──────────────────────────────
-
 describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
   async function runBridge(
     signal: Signal,
@@ -255,8 +234,6 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
 
   it("1. whitelisted R23 probe-entry in micro_live → post-only maker order with capped size", async () => {
     const makerEntry = makeMakerEntryPolicy({ microMaxOrderUsdc: 5 });
-    // bid=0.09, tick=0.01, bidImproveTicks=1 → makerPrice = floor(0.09 + 1*0.01, 0.01) = 0.10
-    // cappedSize = min(suggestedSize=100, 5 / 0.10) = min(100, 50) = 50
     const { placed, skipped } = await runBridge(makeSignal(), { makerEntry });
 
     expect(skipped).toHaveLength(0);
@@ -265,16 +242,11 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
     expect(placed[0]?.entryStyle).toBe("maker");
     expect(placed[0]?.price).toBeCloseTo(0.1);
     expect(placed[0]?.size).toBeCloseTo(50);
-    // 2026-07-19 taker-residual guard: a makerOverride-converted order persists the EFFECTIVE mode
-    // "maker" (never the raw resolver mode), so the first-entry adaptive TTL keeps applying to it.
     expect(placed[0]?.metadata?.executionPricingMode).toBe("maker");
   });
 
   it("1b. opportunistic-taker base + makerOverride → persists effective mode 'maker', not 'taker'", async () => {
     const makerEntry = makeMakerEntryPolicy({ microMaxOrderUsdc: 5 });
-    // Tight 2-tick spread (bid=0.09, ask=0.11) makes the opportunistic-taker resolver fire first
-    // (pricedMode="taker", price=ask). The R23 whitelist then applies makerOverride → non-crossing
-    // maker price 0.10, postOnly:true. The persisted executionPricingMode must reflect the override.
     const { placed, skipped } = await runBridge(makeSignal(), { makerEntry }, { bestAsk: 0.11 });
 
     expect(skipped).toHaveLength(0);
@@ -345,6 +317,54 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
       policyControlRevision: 77,
       initialBook: { depthStatus: "unavailable", tickSize: 0.01, source: "disabled" },
     });
+  });
+
+  it("keeps exact R23 probe BID+1 live permanently without the v120 date or cumulative rails", async () => {
+    const activationId = "permanent-r23-activation-1";
+    const makerEntry = makeMakerEntryPolicy({
+      bidImproveTicks: 4,
+      whitelistConditionIds: [],
+      microMaxOrderUsdc: 0.1,
+      microMaxOpenUsdc: 0.1,
+      permanentR23ActivationId: activationId,
+      permanentR23ActivatedAtUtc: new Date(NOW - 86_400_000).toISOString(),
+    });
+    const { placed } = await runBridge(makeSignal({ suggestedPrice: 0.1 }), { makerEntry });
+
+    const command = placed[0]!;
+    expect([command.entryStyle, command.postOnly, command.price, command.size]).toEqual([
+      "maker",
+      true,
+      0.1,
+      100,
+    ]);
+    expect(command.metadata?.makerMicroLiveLifecycle).toMatchObject({
+      kind: "permanent_r23",
+      activationId,
+      fillWaitMs: makerEntry.fillWaitMs,
+    });
+    expect(command.metadata?.quoteMotionV1).toMatchObject({
+      permanentR23ActivationId: activationId,
+    });
+    const blocked = await runBridge(makeSignal(), { makerEntry });
+    expect(blocked).toMatchObject({
+      placed: [],
+      skipped: [{ reasons: ["maker-capture-no-valid-bid-plus-one"] }],
+    });
+  });
+
+  it.each([
+    ["GATE", { decisionRuleId: "GATE", reason: "probe-entry" }],
+    ["generic R23 add", { decisionRuleId: R23_DIP_TRIGGER_RULE_ID, reason: "scale-in" }],
+  ])("does not broaden permanent BID+1 to %s", async (_label, overrides) => {
+    const makerEntry = makeMakerEntryPolicy({
+      whitelistConditionIds: [],
+      permanentR23ActivationId: "permanent-r23-activation-1",
+      permanentR23ActivatedAtUtc: new Date(NOW - 1).toISOString(),
+    });
+    const { placed } = await runBridge(makeSignal(overrides as Partial<Signal>), { makerEntry });
+
+    expect(placed[0]?.entryStyle).not.toBe("maker");
   });
 
   it("holds an exact capture when bid+1 meets ask instead of placing an ordinary fallback", async () => {
@@ -489,8 +509,6 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
   });
 });
 
-// ─── 5–6: ExecutionModule post-only cross BUY guard ──────────────────────
-
 describe("ExecutionModule — getPostOnlyCrossPreSubmitSkip for BUY", () => {
   function makeExecModule(options: {
     placeOrderResult?: { success: boolean; orderId?: string };
@@ -573,7 +591,6 @@ describe("ExecutionModule — getPostOnlyCrossPreSubmitSkip for BUY", () => {
     const { bus, gateway, mod } = makeExecModule({ marketBestAsk: 0.1 });
     await mod.start();
 
-    // Inject a market snapshot with bestAsk=0.10
     await bus.publish("NormalizedMarketUpdated", {
       markets: [makeMarket({ bestAsk: 0.1 })],
       timestamp: NOW,
@@ -641,7 +658,6 @@ describe("ExecutionModule — getPostOnlyCrossPreSubmitSkip for BUY", () => {
         side: "buy",
         size: 10,
         price: 0.1,
-        // postOnly NOT set
         orderType: "GTC",
         tickSize: 0.01,
         negRisk: false,
@@ -657,8 +673,6 @@ describe("ExecutionModule — getPostOnlyCrossPreSubmitSkip for BUY", () => {
     await mod.stop();
   });
 });
-
-// ─── 7: Pure functions ────────────────────────────────────────────────────
 
 describe("computeMakerOpenOrderUsdc", () => {
   it("sums remaining USDC exposure for open maker BUY orders", () => {
@@ -682,7 +696,6 @@ describe("computeMakerOpenOrderUsdc", () => {
 
     const result = computeMakerOpenOrderUsdc([makerBuy, probeBuy], fillRepo);
 
-    // maker: (50 - 10) * 0.1 = 4.0; probe: excluded
     expect(result).toBeCloseTo(4.0);
   });
 
@@ -723,8 +736,6 @@ describe("computeMakerOpenPositionUsdc", () => {
   });
 });
 
-// ─── 8: LiveLiteGuard.validateMicroMaxOrderCap ───────────────────────────
-
 describe("LiveLiteGuard.validateMicroMaxOrderCap", () => {
   it("throws when microMaxOrderUsdc is below EOA minimum entry notional", () => {
     const guard = new LiveLiteGuard({
@@ -732,9 +743,7 @@ describe("LiveLiteGuard.validateMicroMaxOrderCap", () => {
       maxOrderUsdc: 25,
       maxActiveMarkets: 250,
       walletMode: "eoa",
-      // fallback EOA min = $3
     });
-    // guard.getMinEntryNotionalUsdc() returns 3 (EOA default)
     expect(() => LiveLiteGuard.validateMicroMaxOrderCap(2, guard)).toThrow(
       /below the EOA minimum entry notional/,
     );
@@ -752,7 +761,6 @@ describe("LiveLiteGuard.validateMicroMaxOrderCap", () => {
 
   it("does not throw when guard is inactive (no config)", () => {
     const guard = new LiveLiteGuard(undefined);
-    // minEntry is null → no throw
     expect(() => LiveLiteGuard.validateMicroMaxOrderCap(0.5, guard)).not.toThrow();
   });
 
@@ -769,15 +777,10 @@ describe("LiveLiteGuard.validateMicroMaxOrderCap", () => {
   });
 });
 
-// ─── 9: entryStyle propagation to fill/position ──────────────────────────
-
 describe("maker fill entryStyle propagation", () => {
   it("entryStyle=maker on the order is passed to applyFill via origOrder lookup", async () => {
-    // Test that the InventoryHandler receives entryStyle="maker" from origOrder
-    // We test this via the RiskInventoryModule's handleFill path.
     const { InventoryHandler } = await import("../modules/risk-inventory/inventory-handler.js");
 
-    // Mock position and lot repos
     const positions = new Map<string, Position>();
     const positionRepo: PositionRepository = {
       save: vi.fn((p) => {
@@ -799,7 +802,6 @@ describe("maker fill entryStyle propagation", () => {
       findByFillId: vi.fn(() => null),
     };
 
-    // transaction must return a callable with an `.immediate` method (mirrors withImmediate usage)
     function immediateTransaction<T extends (...args: unknown[]) => unknown>(
       fn: T,
     ): T & { immediate: T } {
@@ -819,7 +821,6 @@ describe("maker fill entryStyle propagation", () => {
 
     const handler = new InventoryHandler(positionRepo, lotRepo as any, makeLogger(), dbStub);
 
-    // Apply a fill with entryStyle="maker"
     const fillId = createFillId("fill-maker-1");
     handler.applyFill({
       fillId,

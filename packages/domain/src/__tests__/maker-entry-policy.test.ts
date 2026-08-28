@@ -323,6 +323,7 @@ describe("makerEntry — serialize ��� parse round-trip", () => {
     const policy = {
       ...DEFAULT_EXECUTION_POLICY,
       makerEntry: {
+        ...DEFAULT_MAKER_ENTRY,
         mode: "shadow" as const,
         bidImproveTicks: 2,
         harvestGainPct: 0.2,

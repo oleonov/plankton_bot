@@ -6,6 +6,8 @@ import pino from "pino";
 import { InProcessEventBus } from "@krabs/event-bus";
 import {
   bootstrapDatabase,
+  bootstrapControlDb,
+  bootstrapLedgerDb,
   SqliteOperatorCommandRepository,
   SqliteOperatorActionRepository,
 } from "@krabs/db";
@@ -14,6 +16,7 @@ import { createOrderId, type OperatorActionType, type Order } from "@krabs/domai
 import { CommandPoller } from "../supervisor/command-poller.js";
 import type { PatternRebuilder, ReloadableRules } from "../supervisor/command-poller.js";
 import { MakerBuyFastCancel } from "../modules/execution/maker-buy-fast-cancel.js";
+import { PermanentR23ActivationCoordinator } from "../permanent-r23-activation.js";
 
 const log = pino({ level: "silent" });
 
@@ -78,8 +81,6 @@ describe("CommandPoller", () => {
     });
   }
 
-  // ── Global pause/resume ─────────────────────────────────────────────────
-
   it("applies pause command and writes audit", async () => {
     insertCommand("pause", undefined, "maintenance");
     const poller = createPoller();
@@ -119,8 +120,6 @@ describe("CommandPoller", () => {
     expect(actionRepo.findRecent(10)).toHaveLength(0);
   });
 
-  // ── Event publishing ────────────────────────────────────────────────────
-
   it("publishes OperatorCommandApplied event on success", async () => {
     const events: unknown[] = [];
     bus.subscribe("OperatorCommandApplied", async (payload) => {
@@ -134,8 +133,6 @@ describe("CommandPoller", () => {
 
     expect(events).toHaveLength(1);
   });
-
-  // ── Multi-command processing ────────────────────────────────────────────
 
   it("processes multiple commands in one poll", async () => {
     insertCommand("pause");
@@ -171,8 +168,6 @@ describe("CommandPoller", () => {
     await poller.stop();
   });
 
-  // ── rules_reload ────────────────────────────────────────────────────────
-
   describe("rules_reload", () => {
     it("calls reload + rebuildPatterns", async () => {
       const rulesManager: ReloadableRules = { reload: vi.fn() };
@@ -199,6 +194,269 @@ describe("CommandPoller", () => {
       expect(cmdRepo.getPending()).toHaveLength(0);
       const actions = actionRepo.findRecent(10);
       expect(actions).toHaveLength(0); // rejected commands don't write audit
+    });
+  });
+
+  it("keeps durable permanent lifecycle applied when its event fails", async () => {
+    const id = insertCommand(
+      "activate_permanent_r23" as OperatorActionType,
+      JSON.stringify({ expectedVersion: 17 }),
+    );
+    const applied = {
+      status: "applied" as const,
+      activationId: "permanent-r23-activation-1",
+      completedAt: "2026-08-28T00:00:00.000Z",
+    };
+    const activatePermanentR23 = vi.fn(async (command) => {
+      cmdRepo.updateStatus(command.id, "applied", applied.completedAt);
+      return applied;
+    });
+    bus.subscribe("OperatorCommandApplied", async () => {
+      throw new Error("event failed");
+    });
+    const poller = createPoller({ activatePermanentR23 });
+    await poller.poll();
+    await poller.poll();
+    expect(activatePermanentR23).toHaveBeenCalledWith(expect.objectContaining({ id }), 17);
+    expect(cmdRepo.getPending()).toEqual([]);
+
+    insertCommand(
+      "deactivate_permanent_r23" as OperatorActionType,
+      JSON.stringify({ expectedVersion: 18, activationId: applied.activationId }),
+    );
+    const finalizePermanentR23Deactivation = vi.fn(async (command) => {
+      cmdRepo.updateStatus(command.id, "applied", applied.completedAt);
+      return applied;
+    });
+    const fencePermanentR23Deactivation = vi.fn(async () => ({
+      status: "fenced" as const,
+      activationId: applied.activationId,
+    }));
+    const cancelPermanentActivation = vi.fn(async (_id, commit) => {
+      await commit(applied.completedAt);
+      return "applied" as const;
+    });
+    await createPoller({
+      fencePermanentR23Deactivation,
+      finalizePermanentR23Deactivation,
+      makerBuyFastCancel: { cancelPermanentActivation } as unknown as MakerBuyFastCancel,
+    }).poll();
+    expect(cancelPermanentActivation).toHaveBeenCalledWith(
+      applied.activationId,
+      expect.any(Function),
+    );
+  });
+
+  it("rejects deactivation before drain when a preceding resume leaves READY_PAUSED", async () => {
+    paused = true;
+    insertCommand("resume");
+    insertCommand(
+      "deactivate_permanent_r23" as OperatorActionType,
+      JSON.stringify({ expectedVersion: 18, activationId: "permanent-1" }),
+    );
+    const cancelPermanentActivation = vi.fn(async () => "applied" as const);
+    const fencePermanentR23Deactivation = vi.fn(async () => ({
+      status: "rejected" as const,
+      reason: "runtime-not-ready-paused",
+    }));
+    const finalizePermanentR23Deactivation = vi.fn();
+    const cancels: unknown[] = [];
+    bus.subscribe("CancelOrderRequested", async (event) => void cancels.push(event));
+
+    await createPoller({
+      fencePermanentR23Deactivation,
+      finalizePermanentR23Deactivation,
+      makerBuyFastCancel: { cancelPermanentActivation } as unknown as MakerBuyFastCancel,
+    }).poll();
+
+    expect([paused, cancelPermanentActivation.mock.calls.length, cancels.length]).toEqual([
+      false,
+      0,
+      0,
+    ]);
+    expect(fencePermanentR23Deactivation).toHaveBeenCalledOnce();
+    expect(finalizePermanentR23Deactivation).not.toHaveBeenCalled();
+  });
+
+  it("keeps a fenced deactivation pending when its scoped drain times out", async () => {
+    insertCommand(
+      "deactivate_permanent_r23" as OperatorActionType,
+      JSON.stringify({ expectedVersion: 18, activationId: "permanent-1" }),
+    );
+    const fencePermanentR23Deactivation = vi.fn(async () => ({
+      status: "fenced" as const,
+      activationId: "permanent-1",
+    }));
+    const finalizePermanentR23Deactivation = vi.fn();
+    const cancelPermanentActivation = vi.fn(async () => "rejected" as const);
+    await createPoller({
+      fencePermanentR23Deactivation,
+      finalizePermanentR23Deactivation,
+      makerBuyFastCancel: { cancelPermanentActivation } as unknown as MakerBuyFastCancel,
+    }).poll();
+    expect(fencePermanentR23Deactivation).toHaveBeenCalledOnce();
+    expect(cancelPermanentActivation).toHaveBeenCalledOnce();
+    expect(finalizePermanentR23Deactivation).not.toHaveBeenCalled();
+    expect(cmdRepo.getPending()).toHaveLength(1);
+  });
+
+  describe("permanent R23 guarded activation", () => {
+    it("guards activation and resumes a fenced deactivation after restart", async () => {
+      const control = bootstrapControlDb(path.join(tmpDir, "permanent-control.db"));
+      const ledger = bootstrapLedgerDb(path.join(tmpDir, "permanent-ledger.db"));
+      control.db.exec("INSERT INTO runtime_control_state (id) VALUES (1)");
+      const coordinator = (inFlightMakerBuys = 0) =>
+        new PermanentR23ActivationCoordinator({
+          controlDb: control.db,
+          ledgerDb: ledger.db,
+          profileId: "live-lite",
+          inFlightMakerBuys: () => inFlightMakerBuys,
+          now: () => Date.parse("2026-08-28T00:00:00.000Z"),
+          activationId: () => "permanent-r23-activation-1",
+        });
+      const version = (
+        control.db
+          .prepare(
+            "SELECT execution_policy_version AS version FROM runtime_control_state WHERE id=1",
+          )
+          .get() as { version: number }
+      ).version;
+      const commands = new SqliteOperatorCommandRepository(control.db);
+      const actions = new SqliteOperatorActionRepository(control.db);
+      const enqueue = (action: OperatorActionType, targetId: string) => {
+        commands.insert({ action, targetId, reason: action, createdAt: new Date().toISOString() });
+        return commands.getPending()[0]!;
+      };
+      const command = enqueue(
+        "activate_permanent_r23" as OperatorActionType,
+        JSON.stringify({ expectedVersion: version }),
+      );
+
+      expect(coordinator().activate(command, version)).toMatchObject({
+        status: "rejected",
+        reason: "runtime-not-ready-paused",
+      });
+      control.db
+        .prepare(
+          "UPDATE runtime_control_state SET runtime_status='ready_paused', paused=1 WHERE id=1",
+        )
+        .run();
+      ledger.db
+        .prepare(
+          `INSERT INTO orders
+          (order_id, client_order_id, token_id, side, order_type, price, size, size_usdc,
+           status, bot_run_id, entry_style, decision_rule_id, signal_reason, metadata_json,
+           created_at, updated_at)
+         VALUES ('old-r23', 'old-r23-client', 'token', 'buy', 'GTC', .1, 10, 1,
+           'open', 'run', 'maker', 'R23_DIP_TRIGGER', 'probe-entry', '{}', ?, ?)`,
+        )
+        .run(new Date().toISOString(), new Date().toISOString());
+      expect(coordinator().activate(command, version)).toMatchObject({
+        status: "rejected",
+        reason: "old-bid-lineage-active",
+      });
+      ledger.db.prepare("DELETE FROM orders WHERE order_id='old-r23'").run();
+      expect(coordinator(1).activate(command, version)).toMatchObject({
+        status: "rejected",
+        reason: "maker-reservation-active",
+      });
+      const applied = coordinator().activate(command, version);
+      if (applied.status !== "applied") throw new Error(applied.reason);
+      expect(applied.activationId).toBe("permanent-r23-activation-1");
+      expect(coordinator().activate(command, version).status).toBe("applied");
+      const readPolicy = control.db.prepare(
+        "SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id='live-lite'",
+      );
+      const pollDeactivation = (
+        owner: PermanentR23ActivationCoordinator,
+        makerBuyFastCancel: MakerBuyFastCancel,
+      ) =>
+        new CommandPoller({
+          commandRepo: commands,
+          actionRepo: actions,
+          bus: new InProcessEventBus(),
+          log,
+          getPaused: () => true,
+          setPaused: () => {},
+          makerBuyFastCancel,
+          fencePermanentR23Deactivation: (cmd, expectedVersion, activationId) =>
+            owner.fenceDeactivation(cmd, expectedVersion, activationId),
+          finalizePermanentR23Deactivation: (cmd, activationId, completedAt) =>
+            owner.finalizeDeactivation(cmd, activationId, completedAt),
+        }).poll();
+      const policy = JSON.parse((readPolicy.get() as { json: string }).json);
+      expect([
+        policy.makerEntry.mode,
+        policy.makerEntry.captureBookReprice,
+        policy.bounceAskCapture.enabled,
+        policy.bounceAskCapture.maxRepricesPerRoot,
+      ]).toEqual(["micro_live", { enabled: true, maxRepricesPerRoot: 5 }, true, 5]);
+      expect(policy.makerEntry.permanentR23ActivationId).toBe(
+        policy.bounceAskCapture.permanentR23ActivationId,
+      );
+      const activeJson = (readPolicy.get() as { json: string }).json;
+      const stale = enqueue(
+        "deactivate_permanent_r23" as OperatorActionType,
+        JSON.stringify({ expectedVersion: version, activationId: applied.activationId }),
+      );
+      const staleDrain = vi.fn(async () => "rejected" as const);
+      await pollDeactivation(coordinator(), {
+        cancelPermanentActivation: staleDrain,
+      } as unknown as MakerBuyFastCancel);
+      expect(
+        control.db.prepare("SELECT status FROM operator_commands WHERE id=?").get(stale.id),
+      ).toEqual({ status: "rejected" });
+      expect(staleDrain).not.toHaveBeenCalled();
+      expect((readPolicy.get() as { json: string }).json).toBe(activeJson);
+      const stop = enqueue(
+        "deactivate_permanent_r23" as OperatorActionType,
+        JSON.stringify({
+          expectedVersion: version + 1,
+          activationId: applied.activationId,
+        }),
+      );
+      expect(coordinator().fenceDeactivation(stop, version + 1, applied.activationId).status).toBe(
+        "fenced",
+      );
+      expect(commands.getPending().map((pending) => pending.id)).toEqual([stop.id]);
+      const disabled = JSON.parse((readPolicy.get() as { json: string }).json);
+      expect(disabled.makerEntry.mode).toBe("off");
+      disabled.entryPriceCeiling = 0.44;
+      control.db
+        .transaction(() => {
+          control.db
+            .prepare(
+              "UPDATE profile_settings SET execution_policy_json=? WHERE profile_id='live-lite'",
+            )
+            .run(JSON.stringify(disabled));
+          control.db
+            .prepare(
+              "UPDATE runtime_control_state SET execution_policy_version=execution_policy_version+1 WHERE id=1",
+            )
+            .run();
+        })
+        .immediate();
+      const drain = vi.fn(async (_id, commit: (completedAt: string) => Promise<void>) => {
+        await commit(applied.completedAt);
+        return "applied" as const;
+      });
+      await pollDeactivation(coordinator(), {
+        cancelPermanentActivation: drain,
+      } as unknown as MakerBuyFastCancel);
+      const finalized = JSON.parse((readPolicy.get() as { json: string }).json);
+      expect([
+        commands.getPending().length,
+        actions.findRecent(10).length,
+        drain.mock.calls.length,
+        finalized.entryPriceCeiling,
+        finalized.makerEntry.mode,
+        finalized.makerEntry.permanentR23ActivationId,
+        finalized.bounceAskCapture.enabled,
+        finalized.bounceAskCapture.permanentR23ActivationId,
+        finalized.bounceAskCapture.maxRepricesPerRoot,
+      ]).toEqual([0, 2, 1, 0.44, "off", applied.activationId, true, applied.activationId, 5]);
+      control.close();
+      ledger.close();
     });
   });
 
@@ -340,6 +598,50 @@ describe("CommandPoller", () => {
       expect(paused).toBe(true);
       expect(actionRepo.findRecent(10).map((action) => action.action)).toEqual(["pause"]);
     });
+
+    it("scoped permanent drain cancels only its roots and children", async () => {
+      const activationId = "permanent-r23-activation-1";
+      const makeOpen = (id: string, origin: Record<string, unknown>) =>
+        ({ orderId: createOrderId(id), metadata: { quoteMotionV1: origin } }) as unknown as Order;
+      const permanent = { permanentR23ActivationId: activationId };
+      let open = [
+        makeOpen("permanent-root", permanent),
+        makeOpen("permanent-child", permanent),
+        makeOpen("v120-root", { kind: "r23_capture", cohortId: activationTs }),
+        makeOpen("gate-maker", {}),
+        makeOpen("unrelated-maker", {}),
+      ];
+      let intents = [{ intentId: "permanent-intent", rootOrderId: open[0]!.orderId }];
+      const cancelled: string[] = [];
+      bus.subscribe("CancelOrderRequested", async ({ command }) => {
+        cancelled.push(String(command.orderId));
+        open = open.filter((candidate) => candidate.orderId !== command.orderId);
+      });
+      const coordinator = new MakerBuyFastCancel({
+        orderRepo: {
+          findOpen: () => open,
+          findById: (id) => open.find((order) => order.orderId === id) ?? null,
+          findRecoverableMakerCaptureRepriceIntents: () => intents as never[],
+          markMakerCaptureRepriceTerminal: () => ((intents = []), true),
+        },
+        bus,
+        isMakerModeOff: () => false,
+        inFlightMakerBuys: () => 0,
+        inFlightPermanentR23: () => 0,
+      });
+      coordinator.setReady(true);
+
+      expect(await coordinator.cancelPermanentActivation(activationId, async () => {})).toBe(
+        "applied",
+      );
+      expect(cancelled.sort()).toEqual(["permanent-child", "permanent-root"]);
+      expect(intents).toEqual([]);
+      expect(open.map((candidate) => String(candidate.orderId)).sort()).toEqual([
+        "gate-maker",
+        "unrelated-maker",
+        "v120-root",
+      ]);
+    });
   });
 
   describe("recover_missing_bounce_exit", () => {
@@ -400,8 +702,6 @@ describe("CommandPoller", () => {
     );
   });
 
-  // ── Unknown / legacy actions ─────────────────────────────────────────────
-
   describe("unknown action", () => {
     it("rejects unrecognized action strings, marks status=rejected, no audit, no OperatorCommandApplied", async () => {
       const events: Array<{ action: string }> = [];
@@ -409,10 +709,6 @@ describe("CommandPoller", () => {
         events.push({ action: payload.action });
       });
 
-      // Simulate a stale row whose action string is not in the current enum
-      // (e.g. from an older schema or operator typo). The cast is deliberate —
-      // the whole point of the test is that the poller rejects unrecognized
-      // strings the type system would normally block.
       const id = cmdRepo.insert({
         action: "legacy_unknown_action" as unknown as OperatorActionType,
         targetId: null,

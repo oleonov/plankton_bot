@@ -927,257 +927,275 @@ describe("EntryLifecycleModule", () => {
 
     await module.stop();
   });
-  it("claims before cancel and emits one fill-aware deterministic capture replacement", async () => {
-    let now = 1_000;
-    const window = {
-      activatedAtUtc: new Date(0).toISOString(),
-      expiresAtUtc: new Date(10_000).toISOString(),
-      maxCumulativeAcceptedPendingUsdc: 1,
-      captureNextR23: true,
-    };
-    const root = makeOrder({
-      signalReason: "probe-entry",
-      decisionRuleId: "R23_DIP_TRIGGER",
-      entryStyle: "maker",
-      price: 0.3,
-      size: 3,
-      sizeUsdc: 0.9,
-      createdAt: new Date(0).toISOString(),
-      metadata: {
-        makerMicroLiveLifecycle: {
-          kind: "r23_capture",
-          activatedAtUtc: window.activatedAtUtc,
-          expiresAtUtc: window.expiresAtUtc,
-          fillWaitMs: 7_200_000,
-        },
-        makerCaptureLineageV1: {
-          version: 1,
-          rootOrderId: createOrderId("ord-entry-life"),
-          predecessorOrderId: null,
-          replacementIndex: 0,
-          rootNotionalUsdc: 0.9,
-        },
-        quoteMotionV1: {
-          version: 1,
-          kind: "r23_capture",
-          cohortId: window.activatedAtUtc,
-          originalSuggestedPrice: 0.4,
-          originalTargetPrice: null,
-          entryPriceCeiling: 0.45,
-          policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
-          policyControlRevision: 7,
-          initialBook: {
-            depthStatus: "full",
-            bestBid: 0.3,
-            bestAsk: 0.36,
-            tickSize: 0.01,
-            snapshotTs: now,
-            source: "test",
+  it.each([
+    ["v120 window", null],
+    ["permanent activation after revision change and restart", "permanent-r23-activation-1"],
+  ])(
+    "claims before cancel and emits one fill-aware deterministic %s replacement",
+    async (_, activationId) => {
+      let now = 1_000;
+      let controlRevision = 7;
+      const window = {
+        activatedAtUtc: new Date(0).toISOString(),
+        expiresAtUtc: new Date(activationId ? 500 : 10_000).toISOString(),
+        maxCumulativeAcceptedPendingUsdc: 1,
+        captureNextR23: true,
+      };
+      const root = makeOrder({
+        signalReason: "probe-entry",
+        decisionRuleId: "R23_DIP_TRIGGER",
+        entryStyle: "maker",
+        price: 0.3,
+        size: 3,
+        sizeUsdc: 0.9,
+        createdAt: new Date(0).toISOString(),
+        metadata: {
+          makerMicroLiveLifecycle: {
+            kind: activationId ? "permanent_r23" : "r23_capture",
+            ...(activationId ? { activationId } : { expiresAtUtc: window.expiresAtUtc }),
+            activatedAtUtc: window.activatedAtUtc,
+            fillWaitMs: 7_200_000,
+          },
+          makerCaptureLineageV1: {
+            version: 1,
+            rootOrderId: createOrderId("ord-entry-life"),
+            predecessorOrderId: null,
+            replacementIndex: 0,
+            rootNotionalUsdc: 0.9,
+          },
+          quoteMotionV1: {
+            version: 1,
+            kind: "r23_capture",
+            cohortId: window.activatedAtUtc,
+            originalSuggestedPrice: 0.4,
+            originalTargetPrice: null,
+            entryPriceCeiling: 0.45,
+            policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+            policyControlRevision: 7,
+            permanentR23ActivationId: activationId,
+            permanentR23ActivatedAtUtc: activationId ? window.activatedAtUtc : null,
+            initialBook: {
+              depthStatus: "full",
+              bestBid: 0.3,
+              bestAsk: 0.36,
+              tickSize: 0.01,
+              snapshotTs: now,
+              source: "test",
+            },
           },
         },
-      },
-    });
-    let current = root;
-    let intent: MakerCaptureRepriceIntent | null = null;
-    const repo = makeOrderRepo(root);
-    vi.mocked(repo.findById).mockImplementation(() => current);
-    vi.mocked(repo.findOpen).mockImplementation(() =>
-      current.status === "open" || current.status === "partially-filled" ? [current] : [],
-    );
-    repo.getMakerCaptureChainUsage = vi.fn(() => ({
-      trusted: true,
-      rootOrderId: root.orderId,
-      rootNotionalUsdc: 0.9,
-      chainFilledUsdc: 0.2,
-      predecessorRemainingShares: 2.3,
-      replacementIndex: 0,
-      orderIds: [root.orderId],
-    }));
-    repo.claimMakerCaptureRepriceIntent = vi.fn((claimed) => {
-      intent = claimed;
-      return true;
-    });
-    repo.findRecoverableMakerCaptureRepriceIntents = vi.fn(() => (intent ? [intent] : []));
-    repo.findMakerCaptureRepriceIntentByPredecessor = vi.fn(() => intent);
-    repo.findMakerCaptureRepriceIntentBySignal = vi.fn(() => intent);
-    repo.markMakerCaptureRepriceReady = vi.fn((_id, price, size, prepared) => {
-      intent = {
-        ...intent!,
-        status: "ready",
-        candidatePrice: price,
-        replacementSize: size,
-        proof: { ...intent!.proof!, prepared },
+      });
+      let current = root;
+      let intent: MakerCaptureRepriceIntent | null = null;
+      const repo = makeOrderRepo(root);
+      vi.mocked(repo.findById).mockImplementation(() => current);
+      vi.mocked(repo.findOpen).mockImplementation(() =>
+        current.status === "open" || current.status === "partially-filled" ? [current] : [],
+      );
+      repo.getMakerCaptureChainUsage = vi.fn(() => ({
+        trusted: true,
+        rootOrderId: root.orderId,
+        rootNotionalUsdc: 0.9,
+        chainFilledUsdc: 0.2,
+        predecessorRemainingShares: 2.3,
+        replacementIndex: 0,
+        orderIds: [root.orderId],
+      }));
+      repo.claimMakerCaptureRepriceIntent = vi.fn((claimed) => {
+        intent = claimed;
+        return true;
+      });
+      repo.findRecoverableMakerCaptureRepriceIntents = vi.fn(() => (intent ? [intent] : []));
+      repo.findMakerCaptureRepriceIntentByPredecessor = vi.fn(() => intent);
+      repo.findMakerCaptureRepriceIntentBySignal = vi.fn(() => intent);
+      repo.markMakerCaptureRepriceReady = vi.fn((_id, price, size, prepared) => {
+        intent = {
+          ...intent!,
+          status: "ready",
+          candidatePrice: price,
+          replacementSize: size,
+          proof: { ...intent!.proof!, prepared },
+        };
+        return true;
+      });
+      const book = {
+        tokenId: TOKEN,
+        bids: [
+          { price: 0.32, size: 10 },
+          { price: 0.3, size: 1 },
+        ],
+        asks: [{ price: 0.36, size: 10 }],
+        bestBid: 0.32,
+        bestAsk: 0.36,
+        midPrice: 0.34,
+        spread: 0.04,
+        minOrderSize: 1,
+        timestamp: now,
       };
-      return true;
-    });
-    const book = {
-      tokenId: TOKEN,
-      bids: [
-        { price: 0.32, size: 10 },
-        { price: 0.3, size: 1 },
-      ],
-      asks: [{ price: 0.36, size: 10 }],
-      bestBid: 0.32,
-      bestAsk: 0.36,
-      midPrice: 0.34,
-      spread: 0.04,
-      minOrderSize: 1,
-      timestamp: now,
-    };
-    const bus = new InProcessEventBus();
-    const cancels: RuntimeEventMap["CancelOrderRequested"][] = [];
-    const signals: Signal[] = [];
-    let downstreamFails = true;
-    bus.subscribe("CancelOrderRequested", async (event) => {
-      cancels.push(event);
-    });
-    bus.subscribe("SignalProduced", async () => {
-      if (downstreamFails) throw new Error("downstream failed");
-    });
-    bus.subscribe("SignalProduced", async ({ signal }) => {
-      signals.push(signal);
-    });
-    const policy = {
-      ...DEFAULT_EXECUTION_POLICY,
-      makerEntry: {
-        ...DEFAULT_EXECUTION_POLICY.makerEntry,
-        mode: "micro_live" as const,
-        microLiveWindow: window,
-        captureBookReprice: { enabled: true, maxRepricesPerRoot: 5 },
-      },
-    };
-    let bookPolls = 0;
-    let startRetry!: () => void;
-    let releaseRetry!: () => void;
-    const retryStarted = new Promise<void>((resolve) => (startRetry = resolve));
-    const retryGate = new Promise<void>((resolve) => (releaseRetry = resolve));
-    const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
-    const getOrderResult = vi.fn(async () => {
-      if (getOrderResult.mock.calls.length === 1) now = 2_500;
-      return {
-        ok: true as const,
-        data: {
-          orderId: root.exchangeOrderId!,
-          clientOrderId: String(root.clientOrderId),
-          tokenId: root.tokenId,
-          side: root.side,
-          price: root.price,
-          sizeTotal: root.size,
-          sizeFilled: 0.7,
-          sizeRemaining: 2.3,
-          status: "CANCELLED" as const,
-          createdAt: 0,
+      const bus = new InProcessEventBus();
+      const cancels: RuntimeEventMap["CancelOrderRequested"][] = [];
+      const signals: Signal[] = [];
+      let downstreamFails = true;
+      bus.subscribe("CancelOrderRequested", async (event) => {
+        cancels.push(event);
+      });
+      bus.subscribe("SignalProduced", async () => {
+        if (downstreamFails) throw new Error("downstream failed");
+      });
+      bus.subscribe("SignalProduced", async ({ signal }) => {
+        signals.push(signal);
+      });
+      const policy = {
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: {
+          ...DEFAULT_EXECUTION_POLICY.makerEntry,
+          mode: "micro_live" as const,
+          permanentR23ActivationId: activationId,
+          permanentR23ActivatedAtUtc: activationId ? window.activatedAtUtc : null,
+          microLiveWindow: window,
+          captureBookReprice: { enabled: true, maxRepricesPerRoot: 5 },
         },
       };
-    });
-    const module = buildModule({
-      bus,
-      orderRepo: repo,
-      now: () => now,
-      policy: () => policy,
-      policySnapshot: () => ({ policy, controlRevision: 7 }),
-      setTimer: (fn, delayMs) => {
-        scheduled.push({ fn, delayMs });
-        return scheduled.length as never;
-      },
-      getOrderResult,
-      candidateBookCache: {
-        prime: vi.fn(async () => {
-          bookPolls++;
-          if (bookPolls === 2) {
-            startRetry();
-            await retryGate;
-          }
-          return new Map([
-            [
-              String(TOKEN),
-              {
-                tokenId: String(TOKEN),
-                snapshotTs: now,
-                cachedAtMs: now,
-                sourcePolledAtMs: now,
-                bookSource: "clob" as const,
-                sourceKind: "rest" as const,
-                book,
-              },
-            ],
-          ]);
-        }),
-      },
-    });
+      let bookPolls = 0;
+      let startRetry!: () => void;
+      let releaseRetry!: () => void;
+      const retryStarted = new Promise<void>((resolve) => (startRetry = resolve));
+      const retryGate = new Promise<void>((resolve) => (releaseRetry = resolve));
+      const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
+      const getOrderResult = vi.fn(async () => {
+        if (getOrderResult.mock.calls.length === 1) now = 2_500;
+        return {
+          ok: true as const,
+          data: {
+            orderId: root.exchangeOrderId!,
+            clientOrderId: String(root.clientOrderId),
+            tokenId: root.tokenId,
+            side: root.side,
+            price: root.price,
+            sizeTotal: root.size,
+            sizeFilled: 0.7,
+            sizeRemaining: 2.3,
+            status: "CANCELLED" as const,
+            createdAt: 0,
+          },
+        };
+      });
+      const module = buildModule({
+        bus,
+        orderRepo: repo,
+        now: () => now,
+        policy: () => policy,
+        policySnapshot: () => ({ policy, controlRevision }),
+        setTimer: (fn, delayMs) => {
+          scheduled.push({ fn, delayMs });
+          return scheduled.length as never;
+        },
+        getOrderResult,
+        candidateBookCache: {
+          prime: vi.fn(async () => {
+            bookPolls++;
+            if (bookPolls === 2) {
+              startRetry();
+              await retryGate;
+            }
+            return new Map([
+              [
+                String(TOKEN),
+                {
+                  tokenId: String(TOKEN),
+                  snapshotTs: now,
+                  cachedAtMs: now,
+                  sourcePolledAtMs: now,
+                  bookSource: "clob" as const,
+                  sourceKind: "rest" as const,
+                  book,
+                },
+              ],
+            ]);
+          }),
+        },
+      });
 
-    await module.start();
-    await publishMarket(bus, makeMarket({ bestBid: 0.31 }));
-    expect(cancels[0]?.command.commandId).toBe(
-      buildMakerCaptureRepriceIdentity(root.orderId, root.orderId, 1).cancelCommandId,
-    );
-    expect(intent!.proof?.trigger).toMatchObject({
-      eventTimestampMs: now,
-      bestBid: 0.31,
-      predecessorRemainingShares: 2.3,
-    });
-    current = {
-      ...root,
-      status: "cancelled",
-      cancelReason: "maker_capture_reprice",
-      updatedAt: new Date(now).toISOString(),
-    };
-    await bus.publish("OrderCancelled", {
-      commandId: cancels[0]!.command.commandId,
-      orderId: root.orderId,
-      tokenId: TOKEN,
-      conditionId: CONDITION,
-      reason: "maker_capture_reprice",
-      signalReason: "probe-entry",
-      timestamp: now,
-    });
-    await bus.drain();
+      await module.start();
+      await publishMarket(bus, makeMarket({ bestBid: 0.31 }));
+      expect(cancels[0]?.command.commandId).toBe(
+        buildMakerCaptureRepriceIdentity(root.orderId, root.orderId, 1).cancelCommandId,
+      );
+      expect(intent!.proof?.trigger).toMatchObject({
+        eventTimestampMs: now,
+        bestBid: 0.31,
+        predecessorRemainingShares: 2.3,
+      });
+      current = {
+        ...root,
+        status: "cancelled",
+        cancelReason: "maker_capture_reprice",
+        updatedAt: new Date(now).toISOString(),
+      };
+      if (activationId) {
+        controlRevision = 8;
+        await module.stop();
+        await module.start();
+        await publishMarket(bus, makeMarket({ bestBid: 0.31 }));
+      } else {
+        await bus.publish("OrderCancelled", {
+          commandId: cancels[0]!.command.commandId,
+          orderId: root.orderId,
+          tokenId: TOKEN,
+          conditionId: CONDITION,
+          reason: "maker_capture_reprice",
+          signalReason: "probe-entry",
+          timestamp: now,
+        });
+      }
+      await bus.drain();
 
-    expect(signals).toHaveLength(0);
-    expect(bookPolls).toBe(1);
-    expect(getOrderResult).toHaveBeenCalledTimes(1);
-    expect(scheduled).toEqual([{ fn: expect.any(Function), delayMs: 1_500 }]);
-    for (let i = 0; i < 10; i++) await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
-    expect(bookPolls).toBe(1);
-    expect(getOrderResult).toHaveBeenCalledTimes(1);
+      expect(signals).toHaveLength(0);
+      expect(bookPolls).toBe(1);
+      expect(getOrderResult).toHaveBeenCalledTimes(1);
+      expect(scheduled).toEqual([{ fn: expect.any(Function), delayMs: 1_500 }]);
+      for (let i = 0; i < 10; i++) await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
+      expect(bookPolls).toBe(1);
+      expect(getOrderResult).toHaveBeenCalledTimes(1);
 
-    now = 4_000;
-    book.timestamp = now;
-    scheduled[0]!.fn();
-    await retryStarted;
-    await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
-    expect(bookPolls).toBe(2);
-    expect(getOrderResult).toHaveBeenCalledTimes(2);
-    releaseRetry();
-    await vi.waitFor(() => expect(signals).toHaveLength(1));
-    expect(signals).toHaveLength(1);
-    expect(signals[0]).toMatchObject({
-      suggestedPrice: 0.33,
-      makerCaptureReprice: { replacementIndex: 1 },
-    });
-    expect(signals[0]!.suggestedSize).toBeCloseTo(0.7 / 0.33);
-    expect(intent!.proof?.prepared).toMatchObject({
-      predecessorLevelBookShares: 1,
-      predecessorSharesSubtracted: 0,
-      predecessorLevelExternalShares: 1,
-      candidatePrice: 0.33,
-    });
-    expect(bookPolls).toBe(2);
-    downstreamFails = false;
-    await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
-    expect(signals.map((signal) => signal.signalId)).toEqual([
-      intent!.lifecycleSignalId,
-      intent!.lifecycleSignalId,
-    ]);
-    intent = null;
-    current = { ...root, price: 0.4 };
-    vi.mocked(repo.claimMakerCaptureRepriceIntent).mockClear();
-    cancels.length = 0;
-    await publishMarket(bus, makeMarket({ bestBid: 0.41, bestAsk: 0.43 }));
-    expect(repo.claimMakerCaptureRepriceIntent).not.toHaveBeenCalled();
-    expect(cancels).toEqual([]);
-    await module.stop();
-  });
+      now = 4_000;
+      book.timestamp = now;
+      scheduled[0]!.fn();
+      await retryStarted;
+      await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
+      expect(bookPolls).toBe(2);
+      expect(getOrderResult).toHaveBeenCalledTimes(2);
+      releaseRetry();
+      await vi.waitFor(() => expect(signals).toHaveLength(1));
+      expect(signals).toHaveLength(1);
+      expect(signals[0]).toMatchObject({
+        suggestedPrice: 0.33,
+        makerCaptureReprice: { replacementIndex: 1 },
+      });
+      expect(signals[0]!.suggestedSize).toBeCloseTo(0.7 / 0.33);
+      expect(intent!.proof?.prepared).toMatchObject({
+        predecessorLevelBookShares: 1,
+        predecessorSharesSubtracted: 0,
+        predecessorLevelExternalShares: 1,
+        candidatePrice: 0.33,
+      });
+      expect(bookPolls).toBe(2);
+      downstreamFails = false;
+      await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
+      expect(signals.map((signal) => signal.signalId)).toEqual([
+        intent!.lifecycleSignalId,
+        intent!.lifecycleSignalId,
+      ]);
+      intent = null;
+      current = { ...root, price: 0.4 };
+      vi.mocked(repo.claimMakerCaptureRepriceIntent).mockClear();
+      cancels.length = 0;
+      await publishMarket(bus, makeMarket({ bestBid: 0.41, bestAsk: 0.43 }));
+      expect(repo.claimMakerCaptureRepriceIntent).not.toHaveBeenCalled();
+      expect(cancels).toEqual([]);
+      await module.stop();
+    },
+  );
 
   it("terminal-fails a post-cancel book that misses the convergence bound", () => {
     const predecessor = makeOrder({

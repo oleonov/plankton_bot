@@ -41,6 +41,7 @@ const R23_CAPTURE_LIFECYCLE_KEYS = [
   "fillWaitMs",
   "kind",
 ] as const;
+const PERMANENT_R23_LIFECYCLE_KEYS = ["activatedAtUtc", "activationId", "fillWaitMs", "kind"];
 
 /** Deadline frozen onto one exact capture order; malformed or legacy metadata never changes TTL. */
 export function resolveMakerMicroLiveFillDeadlineMs(order: Order): number | null {
@@ -57,6 +58,23 @@ export function resolveMakerMicroLiveFillDeadlineMs(order: Order): number | null
   if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const marker = raw as Record<string, unknown>;
   const keys = Object.keys(marker).sort();
+  if (
+    keys.length === PERMANENT_R23_LIFECYCLE_KEYS.length &&
+    keys.every((key, index) => key === PERMANENT_R23_LIFECYCLE_KEYS[index]) &&
+    marker.kind === "permanent_r23" &&
+    typeof marker.activationId === "string" &&
+    marker.activationId.length > 0 &&
+    typeof marker.activatedAtUtc === "string" &&
+    typeof marker.fillWaitMs === "number" &&
+    Number.isSafeInteger(marker.fillWaitMs) &&
+    marker.fillWaitMs > 0
+  ) {
+    const createdAtMs = Date.parse(order.createdAt);
+    const activatedAtMs = Date.parse(marker.activatedAtUtc);
+    return Number.isFinite(createdAtMs) && createdAtMs >= activatedAtMs
+      ? createdAtMs + marker.fillWaitMs
+      : null;
+  }
   if (
     keys.length !== R23_CAPTURE_LIFECYCLE_KEYS.length ||
     keys.some((key, index) => key !== R23_CAPTURE_LIFECYCLE_KEYS[index]) ||
