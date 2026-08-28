@@ -255,6 +255,41 @@ describe("ReconciliationModule", () => {
     });
   }
 
+  it("marks a pass non-clean when Track A requests a resting-add cancel", async () => {
+    vi.useFakeTimers();
+    const now = Date.parse("2026-08-28T12:00:00.000Z");
+    vi.setSystemTime(now);
+    const firstTradeAt = new Date(now - 104 * 60_000).toISOString();
+    vi.mocked(orderRepo.findOpen).mockReturnValue([
+      makeLocalOrder({
+        signalReason: "confirm-scale",
+        createdAt: new Date(now - 103 * 60_000).toISOString(),
+      }),
+    ]);
+    vi.mocked(gateway.getOpenOrders).mockResolvedValue([makeExchangeOrder()]);
+    const trackAModule = buildModule({
+      legStateRepo: {
+        get: () => ({
+          tokenId: TOK,
+          buyCount: 1,
+          sellCount: 0,
+          lastAction: "BUY",
+          firstTradePrice: 0.5,
+          firstTradeAt,
+          lastTradeAt: firstTradeAt,
+          updatedAt: firstTradeAt,
+        }),
+      } as never,
+      trackAAddThrottlePolicy: () => ({ enforce: true }),
+    });
+
+    const result = await trackAModule.runReconciliation();
+
+    expect(result.clean).toBe(false);
+    expect(result.details).toContain("Track A resting add cancel requests: 1");
+    vi.useRealTimers();
+  });
+
   // ─── Lifecycle ──────────────────────────────────────────────────────
 
   describe("lifecycle", () => {

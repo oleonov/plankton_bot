@@ -1063,7 +1063,7 @@ describe("EntryLifecycleModule", () => {
       const retryGate = new Promise<void>((resolve) => (releaseRetry = resolve));
       const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
       const getOrderResult = vi.fn(async () => {
-        if (getOrderResult.mock.calls.length === 1) now = 2_500;
+        if (!activationId && getOrderResult.mock.calls.length === 1) now = 2_500;
         return {
           ok: true as const,
           data: {
@@ -1130,6 +1130,7 @@ describe("EntryLifecycleModule", () => {
         ...root,
         status: "cancelled",
         cancelReason: "maker_capture_reprice",
+        cancelAgeMs: now - Date.parse(root.createdAt),
         updatedAt: new Date(now).toISOString(),
       };
       if (activationId) {
@@ -1151,21 +1152,29 @@ describe("EntryLifecycleModule", () => {
       await bus.drain();
 
       expect(signals).toHaveLength(0);
-      expect(bookPolls).toBe(1);
-      expect(getOrderResult).toHaveBeenCalledTimes(1);
-      expect(scheduled).toEqual([{ fn: expect.any(Function), delayMs: 1_500 }]);
+      expect(bookPolls).toBe(activationId ? 0 : 1);
+      expect(getOrderResult).toHaveBeenCalledTimes(activationId ? 0 : 1);
+      expect(scheduled).toEqual([
+        { fn: expect.any(Function), delayMs: activationId ? 3_000 : 1_500 },
+      ]);
       for (let i = 0; i < 10; i++) await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
-      expect(bookPolls).toBe(1);
-      expect(getOrderResult).toHaveBeenCalledTimes(1);
+      expect(bookPolls).toBe(activationId ? 0 : 1);
+      expect(getOrderResult).toHaveBeenCalledTimes(activationId ? 0 : 1);
 
       now = 4_000;
       book.timestamp = now;
       scheduled[0]!.fn();
-      await retryStarted;
-      await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
-      expect(bookPolls).toBe(2);
-      expect(getOrderResult).toHaveBeenCalledTimes(2);
-      releaseRetry();
+      if (activationId) {
+        await vi.waitFor(() => expect(signals).toHaveLength(1));
+        expect(bookPolls).toBe(1);
+        expect(getOrderResult).toHaveBeenCalledTimes(1);
+      } else {
+        await retryStarted;
+        await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
+        expect(bookPolls).toBe(2);
+        expect(getOrderResult).toHaveBeenCalledTimes(2);
+        releaseRetry();
+      }
       await vi.waitFor(() => expect(signals).toHaveLength(1));
       expect(signals).toHaveLength(1);
       expect(signals[0]).toMatchObject({
@@ -1179,7 +1188,7 @@ describe("EntryLifecycleModule", () => {
         predecessorLevelExternalShares: 1,
         candidatePrice: 0.33,
       });
-      expect(bookPolls).toBe(2);
+      expect(bookPolls).toBe(activationId ? 1 : 2);
       downstreamFails = false;
       await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
       expect(signals.map((signal) => signal.signalId)).toEqual([

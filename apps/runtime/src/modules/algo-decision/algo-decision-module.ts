@@ -71,6 +71,7 @@ import {
   createEntryFreshEdgeAttribution,
   isGateWhitelisted,
   isMakerCaptureNextR23OrderAuthorized,
+  isPermanentR23OrderAuthorized,
 } from "@krabs/domain";
 import {
   isWorkingSellOrderStatus,
@@ -99,6 +100,7 @@ import {
   SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
   isMakerEntryInputsUnchangedReason,
 } from "../../internal-order-reasons.js";
+import { findPermanentR23LineageBlocker } from "../../maker-capture-reprice.js";
 import { SAME_PRICE_COOLDOWN_REASON } from "../same-price-cooldown/same-price-cooldown-module.js";
 import { TRACK_A_ADD_THROTTLE_REASON } from "../dead-market-shadow/track-a-add-throttle-shadow.js";
 import {
@@ -528,8 +530,13 @@ export interface AlgoDecisionModuleDeps {
     | Pick<
         OrderRepository,
         | "findByTokenId"
+        | "findById"
         | "findRecentByTokenId"
         | "findOpen"
+        | "findRecoverableMakerCaptureRepriceIntents"
+        | "findMakerCaptureRepriceIntentByPredecessor"
+        | "findMakerCaptureRepriceIntentBySignal"
+        | "getMakerCaptureChainUsage"
         | "hasNonterminalBounceAskCaptureIntentForPosition"
       >
     | undefined;
@@ -1819,6 +1826,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       if (plan.type !== "signal") continue;
       const result = this.materializeSignalDraft(plan.signal, now, nextSeq);
       if (result.signal.side === "buy") {
+        if (this.hasActivePermanentR23Lineage(result.signal, executionPolicy, now)) continue;
         if (this.shouldSuppressBuyForBudget(result.signal, now)) continue;
         if (this.isPaused()) return;
         this.reservePendingSignal(result.signal, now);
@@ -1844,6 +1852,38 @@ export class AlgoDecisionModule implements RuntimeModule {
     // immediately reflects this sweep, not the previous one.
     this.lastTickRuleMix = this.currentTickRuleMix;
     this.lastEvalMetrics = this.currentEvalMetrics;
+  }
+
+  private hasActivePermanentR23Lineage(
+    signal: RuntimeEventMap["SignalProduced"]["signal"],
+    policy: ExecutionPolicy | null,
+    nowMs: number,
+  ): boolean {
+    if (
+      !policy ||
+      signal.makerCaptureReprice !== undefined ||
+      !isPermanentR23OrderAuthorized(policy.makerEntry, {
+        conditionId: signal.conditionId,
+        source: "strategy",
+        side: signal.side,
+        entryStyle: "maker",
+        postOnly: true,
+        decisionRuleId: signal.decisionRuleId,
+        signalReason: signal.reason,
+        signalTimestamp: signal.generatedAt,
+      })
+    ) {
+      return false;
+    }
+    if (!this.deps.orderRepo) return true;
+    return (
+      findPermanentR23LineageBlocker({
+        tokenId: signal.tokenId,
+        policy,
+        orderRepo: this.deps.orderRepo,
+        nowMs,
+      }) !== null
+    );
   }
 
   /**

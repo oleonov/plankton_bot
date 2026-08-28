@@ -79,6 +79,7 @@ export interface PlaceOrderCommand {
 export type CancelOrderReason =
   | "market_resolved"
   | "stale_entry_ttl"
+  | "track_a_resting_add_expired"
   | "outbid_repriced"
   | "stale_entry_enddate"
   | "stale_exit_ttl"

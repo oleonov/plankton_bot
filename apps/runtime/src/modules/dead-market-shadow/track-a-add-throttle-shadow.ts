@@ -110,7 +110,7 @@ export interface TrackASignalEvaluation {
 // unparseable leg start fails open to `unknown` (never a throttle_candidate).
 export function evaluateSignalTrackAAddThrottle(
   signal: TrackASignalInput,
-  legStateRepo: LegStateRepository | undefined,
+  legStateRepo: Pick<LegStateRepository, "get"> | undefined,
   now: number,
 ): TrackASignalEvaluation {
   const decisionType = deriveDecisionType(signal.reason);

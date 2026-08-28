@@ -171,6 +171,9 @@ import type { MakerCaptureBookCache } from "../../maker-capture-reprice.js";
 import {
   buildMakerCaptureBookDecisionProof,
   computeMakerCaptureCandidate,
+  classifyMakerCaptureExactCancellation,
+  isPermanentR23CapacityCandidateDurablyPersisted,
+  isPermanentR23CapacityCandidateOwned,
   isMakerCaptureCancellationReason,
   isMakerCaptureBookAfterCancellation,
   isMakerCaptureExactCancellation,
@@ -178,6 +181,8 @@ import {
   parseMakerCaptureLineage,
   parseMakerCaptureRepriceSignal,
   primeFreshMakerCaptureBook,
+  resolveMakerCaptureCancellationAnchorMs,
+  resolvePermanentR23CapacityCarriers,
   rootMakerCaptureLineage,
 } from "../../maker-capture-reprice.js";
 import {
@@ -1961,7 +1966,6 @@ export class ExecutionModule implements RuntimeModule {
     const window = makerPolicy?.microLiveWindow;
     const deadline = root ? resolveMakerMicroLiveFillDeadlineMs(root) : null;
     const proof = parseMakerCaptureRepriceProofV1(intent.proof);
-    const predecessorCancelledAtMs = predecessor ? Date.parse(predecessor.updatedAt) : NaN;
     const expectedClientOrderId = buildClientOrderId({
       signalId: intent.lifecycleSignalId,
       tokenId: intent.tokenId,
@@ -1978,6 +1982,11 @@ export class ExecutionModule implements RuntimeModule {
       origin?.permanentR23ActivationId != null &&
       origin.permanentR23ActivationId === makerPolicy?.permanentR23ActivationId &&
       origin.permanentR23ActivatedAtUtc === makerPolicy?.permanentR23ActivatedAtUtc;
+    const predecessorCancelledAtMs = predecessor
+      ? permanent
+        ? (resolveMakerCaptureCancellationAnchorMs(predecessor) ?? NaN)
+        : Date.parse(predecessor.updatedAt)
+      : NaN;
     const activatedAtUtc = permanent ? origin.permanentR23ActivatedAtUtc : window?.activatedAtUtc;
     const expiresAtUtc =
       permanent && deadline !== null ? new Date(deadline).toISOString() : window?.expiresAtUtc;
@@ -2094,20 +2103,41 @@ export class ExecutionModule implements RuntimeModule {
     if (!entry) return { ok: false, ...this.makerCapRejection("maker-capture-book-unavailable") };
     context = this.makerCaptureExecutionContext(cmd);
     if (!context) return { ok: false, ...this.makerCapRejection("maker-capture-reprice-invalid") };
-    if (
-      !exactResult?.ok ||
-      !isMakerCaptureExactCancellation(
-        context.predecessor,
-        context.usage.predecessorRemainingShares,
-        exactResult.data,
-      )
-    ) {
+    const permanent = context.origin.permanentR23ActivationId !== null;
+    const exactCancellation = permanent
+      ? classifyMakerCaptureExactCancellation(
+          context.predecessor,
+          context.usage.predecessorRemainingShares,
+          exactResult?.ok ? exactResult.data : null,
+        )
+      : null;
+    const exactCancellationProven = permanent
+      ? exactCancellation?.kind === "proven"
+      : exactResult?.ok &&
+        isMakerCaptureExactCancellation(
+          context.predecessor,
+          context.usage.predecessorRemainingShares,
+          exactResult.data,
+        );
+    if (!exactCancellationProven) {
       return {
         ok: false,
-        ...this.makerCapRejection("maker-capture-predecessor-not-exact-cancelled"),
+        ...this.makerCapRejection(
+          permanent && exactCancellation?.kind === "conflict"
+            ? "maker-capture-predecessor-exact-cancel-conflict"
+            : "maker-capture-predecessor-not-exact-cancelled",
+        ),
       };
     }
-    const cancelledAtMs = Date.parse(context.predecessor.updatedAt);
+    const cancelledAtMs = context.origin.permanentR23ActivationId
+      ? resolveMakerCaptureCancellationAnchorMs(context.predecessor)
+      : Date.parse(context.predecessor.updatedAt);
+    if (cancelledAtMs === null) {
+      return {
+        ok: false,
+        ...this.makerCapRejection("maker-capture-predecessor-cancel-anchor-invalid"),
+      };
+    }
     if (!isMakerCaptureBookAfterCancellation(entry, cancelledAtMs)) {
       return {
         ok: false,
@@ -2787,7 +2817,7 @@ export class ExecutionModule implements RuntimeModule {
         const totalExposureAfter = calculateTotalExposure(
           this.deps.positionRepo,
           this.deps.orderRepo,
-          notional,
+          notional + this.permanentR23UnpersistedNotional(cmd),
         );
         if (this.deps.liveLiteGuard.wouldExceedOpenValueCap(totalExposureAfter, 0)) {
           this.log.warn(
@@ -5062,11 +5092,51 @@ export class ExecutionModule implements RuntimeModule {
 
   private getReservationSnapshot(cmd?: PlaceOrderCommand) {
     const openOrders = this.excludeBounceTargetBeingReplaced(this.deps.orderRepo.findOpen(), cmd);
-    return buildReservationSnapshot(
-      openOrders,
-      this.deps.fillRepo,
-      this.pendingReservations.values(),
+    return buildReservationSnapshot(openOrders, this.deps.fillRepo, this.capacityReservations(cmd));
+  }
+
+  private capacityReservations(cmd?: PlaceOrderCommand): PendingReservation[] {
+    const pending = [...this.pendingReservations.values()];
+    const policy = this.deps.executionPolicy?.();
+    if (!policy) return pending;
+    const nowMs = Date.now();
+    const durableFiltered = pending.filter(
+      (candidate) =>
+        !isPermanentR23CapacityCandidateDurablyPersisted({
+          candidate,
+          policy,
+          orderRepo: this.deps.orderRepo,
+          nowMs,
+        }),
     );
+    const virtual = resolvePermanentR23CapacityCarriers({
+      policy,
+      orderRepo: this.deps.orderRepo,
+      pendingReservations: durableFiltered,
+      ...(cmd ? { ownCandidate: cmd } : {}),
+      nowMs,
+    });
+    return [...durableFiltered, ...virtual];
+  }
+
+  private permanentR23UnpersistedNotional(cmd: PlaceOrderCommand): number {
+    const policy = this.deps.executionPolicy?.();
+    if (!policy) return 0;
+    const nowMs = Date.now();
+    return this.capacityReservations(cmd).reduce((total, candidate) => {
+      if (
+        "kind" in candidate ||
+        isPermanentR23CapacityCandidateOwned({
+          candidate,
+          policy,
+          orderRepo: this.deps.orderRepo,
+          nowMs,
+        })
+      ) {
+        return total + candidate.price * candidate.size;
+      }
+      return total;
+    }, 0);
   }
 
   /**

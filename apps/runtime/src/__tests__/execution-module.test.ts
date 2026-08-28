@@ -764,7 +764,11 @@ describe("ExecutionModule", () => {
       intent: { childOrderId: createOrderId("capture-child") },
       predecessor,
       usage: { predecessorRemainingShares: 2.3, rootNotionalUsdc: 0.9, chainFilledUsdc: 0.2 },
-      origin: { originalSuggestedPrice: 0.4, entryPriceCeiling: 0.45 },
+      origin: {
+        originalSuggestedPrice: 0.4,
+        entryPriceCeiling: 0.45,
+        permanentR23ActivationId: null,
+      },
       proof: {
         prepared: {
           predecessorSharesSubtracted: 0,
@@ -2800,7 +2804,7 @@ describe("ExecutionModule", () => {
   it("skips duplicate cancel commandId", async () => {
     await mod.start();
 
-    const cmd = makeCancelCmd();
+    const cmd = makeCancelCmd({ reason: "track_a_resting_add_expired" });
     await bus.publish("CancelOrderRequested", { command: cmd, timestamp: Date.now() });
     await bus.publish("CancelOrderRequested", { command: cmd, timestamp: Date.now() });
 

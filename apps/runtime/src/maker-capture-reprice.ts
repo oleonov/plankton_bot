@@ -5,13 +5,23 @@ import type {
   MakerCaptureRepriceSignalV1,
   MakerCaptureBookDecisionProofV1,
   ExchangeOrder,
+  ExecutionPolicy,
   Order,
   OrderBookSnapshot,
   OrderId,
+  OrderRepository,
+  PlaceOrderCommand,
 } from "@krabs/domain";
-import { createOrderId } from "@krabs/domain";
+import {
+  createOrderId,
+  isPermanentR23OrderAuthorized,
+  parseMakerCaptureRepriceProofV1,
+} from "@krabs/domain";
+import { buildClientOrderId } from "@krabs/domain/node";
+import { resolveMakerMicroLiveFillDeadlineMs } from "./buy-order-lifecycle.js";
 import { floorToTick, validateExecutablePrice } from "./executable-price.js";
 import type { CandidateBookCacheEntry } from "./modules/strategy/candidate-book-cache.js";
+import { parseQuoteMotionOrigin } from "./quote-motion-shadow.js";
 
 export const MAKER_CAPTURE_BOOK_MAX_AGE_MS = 3_000;
 const EPSILON = 1e-9;
@@ -26,6 +36,58 @@ export interface MakerCaptureRepriceIdentity {
   readonly lifecycleSignalId: string;
   readonly cancelCommandId: string;
 }
+
+type PermanentR23OrderRepo = Pick<OrderRepository, "findById" | "findByTokenId"> &
+  Pick<
+    OrderRepository,
+    | "findRecoverableMakerCaptureRepriceIntents"
+    | "findMakerCaptureRepriceIntentByPredecessor"
+    | "findMakerCaptureRepriceIntentBySignal"
+    | "getMakerCaptureChainUsage"
+  >;
+
+interface CapacityCandidate {
+  readonly clientOrderId?: Order["clientOrderId"] | undefined;
+  readonly conditionId?: Order["conditionId"] | undefined;
+  readonly tokenId: Order["tokenId"];
+  readonly side: "buy" | "sell";
+  readonly size: number;
+  readonly price: number;
+  readonly decisionRuleId?: string | null | undefined;
+  readonly signalReason?: string | null | undefined;
+  readonly metadata?: Readonly<Record<string, unknown>> | null | undefined;
+  readonly entryStyle?: "probe" | "maker" | null | undefined;
+}
+
+interface PermanentRootContext {
+  readonly root: Order;
+  readonly deadlineMs: number;
+  readonly residualNotionalUsdc: number;
+}
+
+export interface PermanentR23LineageBlocker {
+  readonly rootOrderId: OrderId;
+  readonly tokenId: Order["tokenId"];
+  readonly conditionId: Order["conditionId"];
+  readonly deadlineMs: number;
+  readonly residualNotionalUsdc: number;
+}
+
+export interface PermanentR23CapacityCarrier extends CapacityCandidate {
+  readonly kind: "virtual-cancelled-gap";
+  readonly rootOrderId: OrderId;
+  readonly notionalUsdc: number;
+  readonly clientOrderId: Order["clientOrderId"];
+  readonly conditionId: Order["conditionId"];
+}
+
+export type MakerCaptureExactCancellation =
+  | { readonly kind: "proven" }
+  | { readonly kind: "retryable"; readonly reason: "unavailable" | "still-working" }
+  | {
+      readonly kind: "conflict";
+      readonly reason: "identity-or-parity-drift" | "terminal-status-conflict";
+    };
 
 export type MakerCaptureCandidate =
   | {
@@ -191,6 +253,114 @@ export function isMakerCaptureExactCancellation(
   );
 }
 
+export function classifyMakerCaptureExactCancellation(
+  predecessor: Pick<
+    Order,
+    | "cancelReason"
+    | "clientOrderId"
+    | "exchangeOrderId"
+    | "price"
+    | "side"
+    | "size"
+    | "status"
+    | "tokenId"
+  >,
+  predecessorRemainingShares: number,
+  exact: ExchangeOrder | null,
+): MakerCaptureExactCancellation {
+  if (!exact) return { kind: "retryable", reason: "unavailable" };
+  if (!makerCaptureExactParity(predecessor, predecessorRemainingShares, exact)) {
+    return { kind: "conflict", reason: "identity-or-parity-drift" };
+  }
+  if (exact.status === "CANCELLED") return { kind: "proven" };
+  if (exact.status === "OPEN" || exact.status === "PARTIALLY_FILLED") {
+    return { kind: "retryable", reason: "still-working" };
+  }
+  return { kind: "conflict", reason: "terminal-status-conflict" };
+}
+
+export function resolveMakerCaptureCancellationAnchorMs(
+  order: Pick<Order, "cancelAgeMs" | "createdAt">,
+): number | null {
+  const createdAtMs = Date.parse(order.createdAt);
+  const cancelAgeMs = order.cancelAgeMs;
+  if (
+    !Number.isFinite(createdAtMs) ||
+    new Date(createdAtMs).toISOString() !== order.createdAt ||
+    typeof cancelAgeMs !== "number" ||
+    !Number.isSafeInteger(cancelAgeMs) ||
+    cancelAgeMs < 0
+  ) {
+    return null;
+  }
+  const anchorMs = createdAtMs + cancelAgeMs;
+  return Number.isSafeInteger(anchorMs) ? anchorMs : null;
+}
+
+export function findPermanentR23LineageBlocker(input: {
+  readonly tokenId: Order["tokenId"];
+  readonly policy: ExecutionPolicy;
+  readonly orderRepo: PermanentR23OrderRepo;
+  readonly nowMs: number;
+}): PermanentR23LineageBlocker | null {
+  const orders = input.orderRepo.findByTokenId(input.tokenId);
+  for (const root of orders) {
+    const context = currentPermanentRootContext(root, input.policy, input.orderRepo, input.nowMs);
+    if (!context || !hasActivePermanentLineage(context.root, orders)) continue;
+    return {
+      rootOrderId: root.orderId,
+      tokenId: root.tokenId,
+      conditionId: root.conditionId,
+      deadlineMs: context.deadlineMs,
+      residualNotionalUsdc: context.residualNotionalUsdc,
+    };
+  }
+  return null;
+}
+
+export function resolvePermanentR23CapacityCarriers(input: {
+  readonly policy: ExecutionPolicy;
+  readonly orderRepo: PermanentR23OrderRepo;
+  readonly pendingReservations: readonly CapacityCandidate[];
+  readonly ownCandidate?: PlaceOrderCommand;
+  readonly nowMs: number;
+}): PermanentR23CapacityCarrier[] {
+  const intents = input.orderRepo.findRecoverableMakerCaptureRepriceIntents?.() ?? [];
+  const carriers = new Map<string, PermanentR23CapacityCarrier>();
+  for (const intent of intents) {
+    const context = permanentIntentContext(intent, input.policy, input.orderRepo, input.nowMs);
+    if (!context || context.residualNotionalUsdc <= EPSILON) continue;
+    if (hasAcceptedCarrierSuccessor(intent, input.orderRepo, input.pendingReservations)) continue;
+    if (input.ownCandidate && candidateMatchesPermanentIntent(input.ownCandidate, intent)) continue;
+    const predecessor = input.orderRepo.findById(intent.predecessorOrderId);
+    if (!predecessor || !isCancelledCapturePredecessor(predecessor)) continue;
+    carriers.set(String(context.root.orderId), buildPermanentCarrier(context));
+  }
+  return [...carriers.values()];
+}
+
+export function isPermanentR23CapacityCandidateDurablyPersisted(input: {
+  readonly candidate: CapacityCandidate;
+  readonly policy: ExecutionPolicy;
+  readonly orderRepo: PermanentR23OrderRepo;
+  readonly nowMs: number;
+}): boolean {
+  const intent = permanentCapacityCandidateIntent(input);
+  const child = intent?.childOrderId ? input.orderRepo.findById(intent.childOrderId) : null;
+  return Boolean(
+    intent && child && isWorkingOrder(child) && orderMatchesPermanentIntent(child, intent),
+  );
+}
+
+export function isPermanentR23CapacityCandidateOwned(input: {
+  readonly candidate: CapacityCandidate;
+  readonly policy: ExecutionPolicy;
+  readonly orderRepo: PermanentR23OrderRepo;
+  readonly nowMs: number;
+}): boolean {
+  return permanentCapacityCandidateIntent(input) !== null;
+}
+
 export function computeMakerCaptureCandidate(input: {
   readonly book: OrderBookSnapshot;
   readonly tickSize: number;
@@ -313,6 +483,272 @@ export function rootMakerCaptureLineage(
     replacementIndex: 0,
     rootNotionalUsdc,
   };
+}
+
+function makerCaptureExactParity(
+  predecessor: Pick<
+    Order,
+    | "cancelReason"
+    | "clientOrderId"
+    | "exchangeOrderId"
+    | "price"
+    | "side"
+    | "size"
+    | "status"
+    | "tokenId"
+  >,
+  predecessorRemainingShares: number,
+  exact: ExchangeOrder,
+): boolean {
+  const expectedFilledShares = predecessor.size - predecessorRemainingShares;
+  return (
+    Boolean(predecessor.exchangeOrderId) &&
+    predecessor.status === "cancelled" &&
+    isMakerCaptureCancellationReason(predecessor.cancelReason) &&
+    predecessor.side === "buy" &&
+    exact.orderId === predecessor.exchangeOrderId &&
+    exact.clientOrderId !== null &&
+    String(exact.clientOrderId) === String(predecessor.clientOrderId) &&
+    String(exact.tokenId) === String(predecessor.tokenId) &&
+    exact.side === predecessor.side &&
+    Number.isFinite(expectedFilledShares) &&
+    expectedFilledShares >= -EPSILON &&
+    Math.abs(exact.price - predecessor.price) <= EPSILON &&
+    Math.abs(exact.sizeTotal - predecessor.size) <= EXACT_SIZE_EPSILON &&
+    Math.abs(exact.sizeFilled - expectedFilledShares) <= EXACT_SIZE_EPSILON &&
+    Math.abs(exact.sizeRemaining - predecessorRemainingShares) <= EXACT_SIZE_EPSILON
+  );
+}
+
+function currentPermanentRootContext(
+  root: Order,
+  policy: ExecutionPolicy,
+  orderRepo: PermanentR23OrderRepo,
+  nowMs: number,
+): PermanentRootContext | null {
+  const origin = parseQuoteMotionOrigin(root);
+  const lineage = parseMakerCaptureLineage(root);
+  const usage = orderRepo.getMakerCaptureChainUsage?.(root.orderId);
+  const lifecycle = root.metadata?.makerMicroLiveLifecycle as Record<string, unknown> | undefined;
+  const deadlineMs = resolveMakerMicroLiveFillDeadlineMs(root);
+  const activationId = policy.makerEntry.permanentR23ActivationId;
+  const activatedAtUtc = policy.makerEntry.permanentR23ActivatedAtUtc;
+  if (
+    !isPermanentR23OrderAuthorized(policy.makerEntry, {
+      conditionId: root.conditionId,
+      source: "strategy",
+      side: root.side,
+      entryStyle: root.entryStyle,
+      postOnly: root.postOnly,
+      decisionRuleId: root.decisionRuleId,
+      signalReason: root.signalReason,
+      signalTimestamp: root.signalTimestamp,
+    }) ||
+    !origin ||
+    !lineage ||
+    !usage?.trusted ||
+    !activationId ||
+    !activatedAtUtc ||
+    origin.kind !== "r23_capture" ||
+    origin.policySchemaVersion !== policy.version ||
+    origin.cohortId !== activatedAtUtc ||
+    origin.permanentR23ActivationId !== activationId ||
+    origin.permanentR23ActivatedAtUtc !== activatedAtUtc ||
+    lifecycle?.kind !== "permanent_r23" ||
+    lifecycle.activationId !== activationId ||
+    lifecycle.activatedAtUtc !== activatedAtUtc ||
+    lineage.replacementIndex !== 0 ||
+    lineage.predecessorOrderId !== null ||
+    String(lineage.rootOrderId) !== String(root.orderId) ||
+    Math.abs(lineage.rootNotionalUsdc - root.sizeUsdc) > EPSILON ||
+    String(usage.rootOrderId) !== String(root.orderId) ||
+    usage.replacementIndex !== 0 ||
+    Math.abs(usage.rootNotionalUsdc - lineage.rootNotionalUsdc) > EPSILON ||
+    deadlineMs === null ||
+    nowMs >= deadlineMs
+  ) {
+    return null;
+  }
+  return {
+    root,
+    deadlineMs,
+    residualNotionalUsdc: Math.max(0, usage.rootNotionalUsdc - usage.chainFilledUsdc),
+  };
+}
+
+function hasActivePermanentLineage(root: Order, tokenOrders: readonly Order[]): boolean {
+  return tokenOrders.some((order) => {
+    const lineage = parseMakerCaptureLineage(order);
+    if (!lineage || String(lineage.rootOrderId) !== String(root.orderId)) return false;
+    return isWorkingOrder(order) || isCancelledCapturePredecessor(order);
+  });
+}
+
+function permanentIntentContext(
+  intent: MakerCaptureRepriceIntent,
+  policy: ExecutionPolicy,
+  orderRepo: PermanentR23OrderRepo,
+  nowMs: number,
+  allowCompleted = false,
+): PermanentRootContext | null {
+  if (
+    (!isNonterminalCaptureIntent(intent) && !(allowCompleted && intent.status === "completed")) ||
+    !captureIntentIdentityValid(intent)
+  )
+    return null;
+  const root = orderRepo.findById(intent.rootOrderId);
+  const predecessor = orderRepo.findById(intent.predecessorOrderId);
+  const context = root ? currentPermanentRootContext(root, policy, orderRepo, nowMs) : null;
+  const lineage = predecessor ? parseMakerCaptureLineage(predecessor) : null;
+  if (
+    !context ||
+    !predecessor ||
+    !lineage ||
+    String(predecessor.tokenId) !== String(intent.tokenId) ||
+    String(predecessor.conditionId) !== String(intent.conditionId) ||
+    String(lineage.rootOrderId) !== String(root!.orderId) ||
+    lineage.replacementIndex + 1 !== intent.replacementIndex
+  ) {
+    return null;
+  }
+  return context;
+}
+
+function permanentCapacityCandidateIntent(input: {
+  readonly candidate: CapacityCandidate;
+  readonly policy: ExecutionPolicy;
+  readonly orderRepo: PermanentR23OrderRepo;
+  readonly nowMs: number;
+}): MakerCaptureRepriceIntent | null {
+  const metadata = parseMakerCaptureRepriceSignal(input.candidate.metadata?.makerCaptureRepriceV1);
+  if (!metadata) return null;
+  const identity = buildMakerCaptureRepriceIdentity(
+    metadata.rootOrderId,
+    metadata.predecessorOrderId,
+    metadata.replacementIndex,
+  );
+  const intent = input.orderRepo.findMakerCaptureRepriceIntentBySignal?.(
+    identity.lifecycleSignalId,
+  );
+  if (
+    !intent ||
+    !permanentIntentContext(intent, input.policy, input.orderRepo, input.nowMs, true) ||
+    !candidateMatchesPermanentIntent(input.candidate, intent)
+  ) {
+    return null;
+  }
+  return intent;
+}
+
+function captureIntentIdentityValid(intent: MakerCaptureRepriceIntent): boolean {
+  const identity = buildMakerCaptureRepriceIdentity(
+    intent.rootOrderId,
+    intent.predecessorOrderId,
+    intent.replacementIndex,
+  );
+  const proof = parseMakerCaptureRepriceProofV1(intent.proof);
+  return (
+    identity.intentId === intent.intentId &&
+    identity.lifecycleSignalId === intent.lifecycleSignalId &&
+    proof !== null &&
+    ((intent.status === "cancel_pending" && proof.prepared === null && proof.submit === null) ||
+      (intent.status === "ready" && proof.prepared !== null && proof.submit === null) ||
+      (intent.status === "submitted" && proof.prepared !== null) ||
+      (intent.status === "completed" &&
+        intent.childOrderId !== null &&
+        proof.prepared !== null &&
+        proof.submit?.childOrderId === String(intent.childOrderId) &&
+        proof.submit.clientOrderId ===
+          String(
+            buildClientOrderId({
+              signalId: intent.lifecycleSignalId,
+              tokenId: intent.tokenId,
+              side: "buy",
+            }),
+          )))
+  );
+}
+
+function hasAcceptedCarrierSuccessor(
+  intent: MakerCaptureRepriceIntent,
+  orderRepo: PermanentR23OrderRepo,
+  pendingReservations: readonly CapacityCandidate[],
+): boolean {
+  const predecessor = orderRepo.findById(intent.predecessorOrderId);
+  if (predecessor && isWorkingOrder(predecessor)) return true;
+  const child = intent.childOrderId ? orderRepo.findById(intent.childOrderId) : null;
+  if (child && isWorkingOrder(child) && orderMatchesPermanentIntent(child, intent)) return true;
+  return pendingReservations.some((reservation) =>
+    candidateMatchesPermanentIntent(reservation, intent),
+  );
+}
+
+function candidateMatchesPermanentIntent(
+  candidate: CapacityCandidate,
+  intent: MakerCaptureRepriceIntent,
+): boolean {
+  const metadata = parseMakerCaptureRepriceSignal(candidate.metadata?.makerCaptureRepriceV1);
+  const expectedClientOrderId = buildClientOrderId({
+    signalId: intent.lifecycleSignalId,
+    tokenId: intent.tokenId,
+    side: "buy",
+  });
+  return (
+    metadata !== null &&
+    matchesMakerCaptureIntent(intent.lifecycleSignalId, metadata, intent) &&
+    String(candidate.clientOrderId) === String(expectedClientOrderId) &&
+    String(candidate.tokenId) === String(intent.tokenId) &&
+    String(candidate.conditionId) === String(intent.conditionId) &&
+    candidate.side === "buy" &&
+    candidate.entryStyle === "maker" &&
+    candidate.decisionRuleId === "R23_DIP_TRIGGER" &&
+    candidate.signalReason === "probe-entry" &&
+    intent.candidatePrice !== null &&
+    intent.replacementSize !== null &&
+    Math.abs(candidate.price - intent.candidatePrice) <= EPSILON &&
+    Math.abs(candidate.size - intent.replacementSize) <= EXACT_SIZE_EPSILON
+  );
+}
+
+function orderMatchesPermanentIntent(order: Order, intent: MakerCaptureRepriceIntent): boolean {
+  return (
+    candidateMatchesPermanentIntent(order, intent) &&
+    String(order.signalId) === intent.lifecycleSignalId
+  );
+}
+
+function buildPermanentCarrier(context: PermanentRootContext): PermanentR23CapacityCarrier {
+  return {
+    kind: "virtual-cancelled-gap",
+    rootOrderId: context.root.orderId,
+    clientOrderId:
+      `permanent-r23-carrier:${String(context.root.orderId)}` as Order["clientOrderId"],
+    conditionId: context.root.conditionId,
+    tokenId: context.root.tokenId,
+    side: "buy",
+    size: context.residualNotionalUsdc / context.root.price,
+    price: context.root.price,
+    decisionRuleId: "R23_DIP_TRIGGER",
+    signalReason: "probe-entry",
+    entryStyle: "maker",
+    notionalUsdc: context.residualNotionalUsdc,
+  };
+}
+
+function isNonterminalCaptureIntent(intent: MakerCaptureRepriceIntent): boolean {
+  return (
+    intent.status === "cancel_pending" || intent.status === "ready" || intent.status === "submitted"
+  );
+}
+
+function isWorkingOrder(order: Order): boolean {
+  return (
+    order.status === "pending" || order.status === "open" || order.status === "partially-filled"
+  );
+}
+
+function isCancelledCapturePredecessor(order: Order): boolean {
+  return order.status === "cancelled" && isMakerCaptureCancellationReason(order.cancelReason);
 }
 
 function aggregateLevels(

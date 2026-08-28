@@ -1355,6 +1355,124 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("does not emit or persist a second permanent R23 root while its cancelled lineage is active", async () => {
+    const tokenId = "token-r23-permanent-lineage-red";
+    const now = Date.now();
+    const activatedAtUtc = new Date(now - 60_000).toISOString();
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const root = makeOrder(tokenId, {
+      orderId: createOrderId("root-r23-permanent-lineage-red"),
+      side: "buy",
+      status: "cancelled",
+      cancelReason: "maker_capture_reprice",
+      price: 0.3,
+      size: 3,
+      sizeUsdc: 0.9,
+      entryStyle: "maker",
+      signalReason: "probe-entry",
+      decisionRuleId: "R23_DIP_TRIGGER",
+      createdAt: new Date(now - 10_000).toISOString(),
+      signalTimestamp: new Date(now - 10_000).toISOString(),
+    });
+    root.metadata = {
+      makerMicroLiveLifecycle: {
+        kind: "permanent_r23",
+        activationId: "activation-lineage-red",
+        activatedAtUtc,
+        fillWaitMs: 120_000,
+      },
+      makerCaptureLineageV1: {
+        version: 1,
+        rootOrderId: root.orderId,
+        predecessorOrderId: null,
+        replacementIndex: 0,
+        rootNotionalUsdc: root.sizeUsdc,
+      },
+      quoteMotionV1: {
+        version: 1,
+        kind: "r23_capture",
+        cohortId: activatedAtUtc,
+        originalSuggestedPrice: 0.4,
+        originalTargetPrice: null,
+        entryPriceCeiling: 0.45,
+        policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+        policyControlRevision: 7,
+        permanentR23ActivationId: "activation-lineage-red",
+        permanentR23ActivatedAtUtc: activatedAtUtc,
+        initialBook: {
+          depthStatus: "full",
+          bestBid: 0.29,
+          bestAsk: 0.35,
+          tickSize: 0.01,
+          snapshotTs: now - 10_000,
+          source: "test",
+        },
+      },
+    };
+    const orderRepo = {
+      findByTokenId: vi.fn(() => [root]),
+      findRecentByTokenId: vi.fn(() => [root]),
+      findOpen: vi.fn(() => []),
+      findById: vi.fn(() => root),
+      findRecoverableMakerCaptureRepriceIntents: vi.fn(() => []),
+      findMakerCaptureRepriceIntentByPredecessor: vi.fn(() => null),
+      getMakerCaptureChainUsage: vi.fn(() => ({
+        trusted: true,
+        rootOrderId: root.orderId,
+        rootNotionalUsdc: 0.9,
+        chainFilledUsdc: 0,
+        predecessorRemainingShares: 3,
+        replacementIndex: 0,
+        orderIds: [root.orderId],
+      })),
+    };
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const mod = buildModule({
+      orderRepo: orderRepo as unknown as OrderRepository,
+      decisionSignalLogRepo,
+      priceHistoryProvider: {
+        findReferencePrice: vi.fn(() => null),
+        maxMidpointInWindow: vi.fn(() => 0.6),
+      },
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+        makerEntry: {
+          ...DEFAULT_EXECUTION_POLICY.makerEntry,
+          mode: "micro_live",
+          permanentR23ActivationId: "activation-lineage-red",
+          permanentR23ActivatedAtUtc: activatedAtUtc,
+          captureBookReprice: { enabled: true, maxRepricesPerRoot: 5 },
+        },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.3)],
+      timestamp: now,
+    });
+
+    expect(
+      (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([event]) => event === "SignalProduced",
+      ),
+    ).toHaveLength(0);
+    expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+    await mod.stop();
+  });
+
   it("skips flat R23 probe candidates upstream when live-lite active market cap is full", async () => {
     const tokenId = "token-r23-cap-full";
     selectedMarketCache = createMockSelectedMarketCache([tokenId]);

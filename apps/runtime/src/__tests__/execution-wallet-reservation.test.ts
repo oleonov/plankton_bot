@@ -36,10 +36,13 @@ import type {
   Position,
   PositionRepository,
   InventoryLotRepository,
+  MakerCaptureRepriceIntent,
+  Order,
   TokenId,
   ClientOrderId,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
+import { buildMakerCaptureRepriceIdentity } from "../maker-capture-reprice.js";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 
 // ─── Shared fixtures ──────────────────────────────────────────────────────
@@ -339,6 +342,154 @@ describe("ExecutionModule — wallet reservation rejection", () => {
     });
     return cancels;
   }
+
+  it("keeps wallet/global/token/total capacity occupied during a permanent R23 cancel gap", () => {
+    const now = Date.now();
+    const activatedAtUtc = new Date(now - 60_000).toISOString();
+    const rootId = "permanent-gap-root" as Order["orderId"];
+    const root = openOrderFromCommand(
+      makeBuyCmd({
+        commandId: createCommandId("permanent-gap-root"),
+        clientOrderId: "permanent-gap-root" as ClientOrderId,
+        tokenId: createTokenId("permanent-gap-token"),
+        conditionId: createConditionId("permanent-gap-condition"),
+        decisionRuleId: "R23_DIP_TRIGGER",
+        signalReason: "probe-entry",
+        signalTimestamp: new Date(now - 10_000).toISOString(),
+        entryStyle: "maker",
+        postOnly: true,
+        price: 0.3,
+        size: 3,
+      }),
+      rootId,
+    ) as unknown as Order;
+    root.status = "cancelled";
+    root.cancelReason = "maker_capture_reprice";
+    root.sizeUsdc = 0.9;
+    root.metadata = {
+      makerMicroLiveLifecycle: {
+        kind: "permanent_r23",
+        activationId: "activation-capacity-red",
+        activatedAtUtc,
+        fillWaitMs: 120_000,
+      },
+      makerCaptureLineageV1: {
+        version: 1,
+        rootOrderId: root.orderId,
+        predecessorOrderId: null,
+        replacementIndex: 0,
+        rootNotionalUsdc: 0.9,
+      },
+      quoteMotionV1: {
+        version: 1,
+        kind: "r23_capture",
+        cohortId: activatedAtUtc,
+        originalSuggestedPrice: 0.4,
+        originalTargetPrice: null,
+        entryPriceCeiling: 0.45,
+        policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+        policyControlRevision: 7,
+        permanentR23ActivationId: "activation-capacity-red",
+        permanentR23ActivatedAtUtc: activatedAtUtc,
+        initialBook: {
+          depthStatus: "full",
+          bestBid: 0.29,
+          bestAsk: 0.35,
+          tickSize: 0.01,
+          snapshotTs: now - 10_000,
+          source: "test",
+        },
+      },
+    };
+    const identity = buildMakerCaptureRepriceIdentity(root.orderId, root.orderId, 1);
+    const intent: MakerCaptureRepriceIntent = {
+      ...identity,
+      predecessorOrderId: root.orderId,
+      rootOrderId: root.orderId,
+      tokenId: root.tokenId,
+      conditionId: root.conditionId,
+      replacementIndex: 1,
+      status: "cancel_pending",
+      candidatePrice: null,
+      replacementSize: null,
+      childOrderId: null,
+      createdAt: new Date(now - 1_000).toISOString(),
+      updatedAt: new Date(now - 1_000).toISOString(),
+      failure: null,
+      proof: {
+        version: 1,
+        trigger: {
+          eventTimestampMs: now - 1_000,
+          evaluatedAtMs: now - 1_000,
+          bestBid: 0.31,
+          bestAsk: 0.35,
+          tickSize: 0.01,
+          bookSource: "clob",
+          policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+          policyControlRevision: 7,
+          activatedAtUtc,
+          expiresAtUtc: new Date(now + 110_000).toISOString(),
+          originalSuggestedPrice: 0.4,
+          entryPriceCeiling: 0.45,
+          rootNotionalUsdc: 0.9,
+          chainFilledUsdc: 0.2,
+          predecessorRemainingShares: 2.3,
+        },
+        prepared: null,
+        submit: null,
+      },
+    };
+    orderRepo.findOpen = vi.fn(() => []);
+    orderRepo.findByTokenId = vi.fn(() => [root]);
+    orderRepo.findById = vi.fn(() => root);
+    orderRepo.findRecoverableMakerCaptureRepriceIntents = vi.fn(() => [intent]);
+    orderRepo.findMakerCaptureRepriceIntentBySignal = vi.fn(() => intent);
+    orderRepo.getMakerCaptureChainUsage = vi.fn(() => ({
+      trusted: true,
+      rootOrderId: root.orderId,
+      rootNotionalUsdc: 0.9,
+      chainFilledUsdc: 0.2,
+      predecessorRemainingShares: 2.3,
+      replacementIndex: 0,
+      orderIds: [root.orderId],
+    }));
+    const policy = executionPolicy({
+      makerEntry: {
+        ...DEFAULT_EXECUTION_POLICY.makerEntry,
+        mode: "micro_live",
+        permanentR23ActivationId: "activation-capacity-red",
+        permanentR23ActivatedAtUtc: activatedAtUtc,
+        captureBookReprice: { enabled: true, maxRepricesPerRoot: 5 },
+      },
+    });
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      executionPolicy: () => policy,
+      executionPolicySnapshot: () => ({ policy, controlRevision: 7 }),
+    });
+
+    const snapshot = (mod as any).getReservationSnapshot(
+      makeBuyCmd({ tokenId: createTokenId("competitor-token") }),
+    );
+    expect(snapshot).toMatchObject({
+      openBuyOrderCount: 1,
+      openGateBuyOrderCount: 0,
+      openOrdersTotal: 1,
+    });
+    expect(snapshot.reservedBuyUsdc).toBeCloseTo(0.7);
+    expect(snapshot.openBuyOrdersByToken.get(String(root.tokenId))).toBe(1);
+    expect(
+      (mod as any).permanentR23UnpersistedNotional(
+        makeBuyCmd({ tokenId: createTokenId("competitor-token") }),
+      ),
+    ).toBeCloseTo(0.7);
+  });
 
   // ── Case 1: 3% buffer ($0.30) > floor ($0.25); notional $9.80 → reject ──
 

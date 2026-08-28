@@ -73,6 +73,8 @@ import {
   isExitRecoveryFencedPredecessor,
 } from "../execution/reservation-utils.js";
 import { buildQuoteMotionOrigin } from "../../quote-motion-shadow.js";
+import { findPermanentR23LineageBlocker } from "../../maker-capture-reprice.js";
+import { PERMANENT_R23_LINEAGE_ACTIVE_REASON } from "../../internal-order-reasons.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
@@ -821,6 +823,7 @@ export class SignalToOrderBridge {
         await this.handleBounceAskCaptureReprice(signal, baseMarket, policyRead);
         return;
       }
+      if (await this.blockDuplicatePermanentR23Root(signal, policy)) return;
 
       // GATE-whitelist liveness override (docs/plans/2026-07-17-gate-isalive-plankton-
       // whitelist.md): a GATE_ENTRY first-entry BUY on a whitelisted market with a live
@@ -2052,6 +2055,42 @@ export class SignalToOrderBridge {
     } finally {
       recordStageDuration("signal_to_order_bridge", performance.now() - bridgeStartMs);
     }
+  }
+
+  private async blockDuplicatePermanentR23Root(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    policy: ExecutionPolicy,
+  ): Promise<boolean> {
+    if (
+      !isPermanentR23OrderAuthorized(policy.makerEntry, {
+        conditionId: signal.conditionId,
+        source: "strategy",
+        side: signal.side,
+        entryStyle: "maker",
+        postOnly: true,
+        decisionRuleId: signal.decisionRuleId,
+        signalReason: signal.reason,
+        signalTimestamp: signal.generatedAt,
+      })
+    ) {
+      return false;
+    }
+    const blocker = this.deps.orderRepo
+      ? findPermanentR23LineageBlocker({
+          tokenId: signal.tokenId,
+          policy,
+          orderRepo: this.deps.orderRepo,
+          nowMs: this.now(),
+        })
+      : null;
+    if (!blocker && this.deps.orderRepo) return false;
+    await this.publishConversionSkipped(
+      signal,
+      "execution-terms",
+      [PERMANENT_R23_LINEAGE_ACTIVE_REASON],
+      { rootOrderId: blocker ? String(blocker.rootOrderId) : null },
+    );
+    return true;
   }
 
   private async handleMakerCaptureReprice(

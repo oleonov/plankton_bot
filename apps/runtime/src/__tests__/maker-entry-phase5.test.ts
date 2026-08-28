@@ -207,6 +207,7 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
     const bridge = new SignalToOrderBridge({
       bus,
       log: makeLogger(),
+      orderRepo: { findByTokenId: vi.fn(() => []) } as never,
       liveLiteGuard: { getWalletMode: () => "eoa" } as never,
       policy: () => resolvedPolicy,
       policySnapshot: () => ({ policy: resolvedPolicy, controlRevision: 77 }),

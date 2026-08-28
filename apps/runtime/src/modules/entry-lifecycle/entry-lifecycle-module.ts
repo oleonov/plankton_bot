@@ -37,12 +37,14 @@ import {
   buildMakerCaptureRepriceIdentity,
   buildMakerCaptureBookDecisionProof,
   computeMakerCaptureCandidate,
+  classifyMakerCaptureExactCancellation,
   isMakerCaptureCancellationReason,
   isMakerCaptureBookAfterCancellation,
   isMakerCaptureExactCancellation,
   MAKER_CAPTURE_BOOK_MAX_AGE_MS,
   parseMakerCaptureLineage,
   primeFreshMakerCaptureBook,
+  resolveMakerCaptureCancellationAnchorMs,
   type MakerCaptureBookCache,
 } from "../../maker-capture-reprice.js";
 import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
@@ -466,9 +468,16 @@ export class EntryLifecycleModule implements RuntimeModule {
       await this.publishCaptureCancel(intent, predecessor);
       return;
     }
-    if (predecessor.status !== "cancelled" || startup) return;
+    if (predecessor.status !== "cancelled") return;
     if (!isMakerCaptureCancellationReason(predecessor.cancelReason)) {
       this.failCaptureIntent(intent, "predecessor-cancel-reason-mismatch");
+      return;
+    }
+    const state = this.captureIntentState(intent, predecessor, this.now());
+    if (startup) {
+      if (state?.window.permanent && intent.status === "cancel_pending") {
+        this.deferPermanentExactCancelConvergence(intent, predecessor);
+      }
       return;
     }
     if (intent.status === "cancel_pending") {
@@ -481,7 +490,7 @@ export class EntryLifecycleModule implements RuntimeModule {
       }
       if (!convergenceRetry) this.captureConvergenceInFlight.add(intent.intentId);
       try {
-        const ready = await this.prepareCaptureReplacement(intent, predecessor);
+        const ready = await this.prepareCaptureReplacement(intent, predecessor, convergenceRetry);
         if (!ready) return;
         intent = ready;
       } finally {
@@ -494,6 +503,7 @@ export class EntryLifecycleModule implements RuntimeModule {
   private async prepareCaptureReplacement(
     intent: MakerCaptureRepriceIntent,
     predecessor: Order,
+    convergenceRetry: boolean,
   ): Promise<MakerCaptureRepriceIntent | null> {
     if (!this.captureIntentProofValid(intent)) {
       this.failCaptureIntent(intent, "proof-invalid-or-incomplete");
@@ -510,12 +520,41 @@ export class EntryLifecycleModule implements RuntimeModule {
       return null;
     }
     const { origin, usage, snapshot, window } = state;
-    const exactCancellation = await this.hasExactCaptureCancellation(
-      predecessor,
-      usage.predecessorRemainingShares,
-    );
+    const permanentCancelAnchorMs = window.permanent
+      ? resolveMakerCaptureCancellationAnchorMs(predecessor)
+      : null;
+    if (window.permanent && permanentCancelAnchorMs === null) {
+      this.failCaptureIntent(intent, "predecessor-exact-cancel-anchor-invalid");
+      return null;
+    }
+    if (
+      window.permanent &&
+      !convergenceRetry &&
+      this.now() >= permanentCancelAnchorMs! + MAKER_CAPTURE_BOOK_MAX_AGE_MS
+    ) {
+      this.failCaptureIntent(intent, "predecessor-exact-cancel-convergence-timeout");
+      return null;
+    }
+    const exactCancellation = window.permanent
+      ? await this.classifyExactCaptureCancellation(predecessor, usage.predecessorRemainingShares)
+      : null;
     if (!this.started) return null;
-    if (!exactCancellation) {
+    if (window.permanent) {
+      if (exactCancellation!.kind === "conflict") {
+        this.failCaptureIntent(intent, "predecessor-exact-cancel-conflict");
+        return null;
+      }
+      if (exactCancellation!.kind === "retryable") {
+        if (this.now() >= permanentCancelAnchorMs! + MAKER_CAPTURE_BOOK_MAX_AGE_MS) {
+          this.failCaptureIntent(intent, "predecessor-exact-cancel-convergence-timeout");
+        } else {
+          this.deferPermanentExactCancelConvergence(intent, predecessor);
+        }
+        return null;
+      }
+    } else if (
+      !(await this.hasExactCaptureCancellation(predecessor, usage.predecessorRemainingShares))
+    ) {
       this.failCaptureIntent(intent, "predecessor-not-exact-cancelled");
       return null;
     }
@@ -530,7 +569,9 @@ export class EntryLifecycleModule implements RuntimeModule {
       this.failCaptureIntent(intent, "fresh-book-or-minimum-unavailable");
       return null;
     }
-    const cancelledAtMs = Date.parse(predecessor.updatedAt);
+    const cancelledAtMs = window.permanent
+      ? permanentCancelAnchorMs!
+      : Date.parse(predecessor.updatedAt);
     if (!isMakerCaptureBookAfterCancellation(entry, cancelledAtMs)) {
       this.deferCaptureBookConvergence(intent, predecessor, entry, cancelledAtMs);
       return null;
@@ -613,6 +654,25 @@ export class EntryLifecycleModule implements RuntimeModule {
     };
   }
 
+  private async classifyExactCaptureCancellation(
+    predecessor: Order,
+    predecessorRemainingShares: number,
+  ) {
+    if (!this.deps.getOrderResult || !predecessor.exchangeOrderId) {
+      return classifyMakerCaptureExactCancellation(predecessor, predecessorRemainingShares, null);
+    }
+    try {
+      const result = await this.deps.getOrderResult(predecessor.exchangeOrderId);
+      return classifyMakerCaptureExactCancellation(
+        predecessor,
+        predecessorRemainingShares,
+        result.ok ? result.data : null,
+      );
+    } catch {
+      return classifyMakerCaptureExactCancellation(predecessor, predecessorRemainingShares, null);
+    }
+  }
+
   private async hasExactCaptureCancellation(
     predecessor: Order,
     predecessorRemainingShares: number,
@@ -627,6 +687,23 @@ export class EntryLifecycleModule implements RuntimeModule {
     } catch {
       return false;
     }
+  }
+
+  private deferPermanentExactCancelConvergence(
+    intent: MakerCaptureRepriceIntent,
+    predecessor: Order,
+  ): void {
+    const anchorMs = resolveMakerCaptureCancellationAnchorMs(predecessor);
+    if (anchorMs === null) {
+      this.failCaptureIntent(intent, "predecessor-exact-cancel-anchor-invalid");
+      return;
+    }
+    const deadlineMs = anchorMs + MAKER_CAPTURE_BOOK_MAX_AGE_MS;
+    if (this.now() >= deadlineMs) {
+      this.failCaptureIntent(intent, "predecessor-exact-cancel-convergence-timeout");
+      return;
+    }
+    this.scheduleCaptureConvergence(intent, deadlineMs);
   }
 
   private deferCaptureBookConvergence(
@@ -653,6 +730,10 @@ export class EntryLifecycleModule implements RuntimeModule {
       this.failCaptureIntent(intent, "post-cancel-book-convergence-timeout");
       return;
     }
+    this.scheduleCaptureConvergence(intent, deadlineMs);
+  }
+
+  private scheduleCaptureConvergence(intent: MakerCaptureRepriceIntent, deadlineMs: number): void {
     if (this.captureConvergenceTimers.has(intent.intentId)) return;
     const timer = this.setTimer(
       () => {
@@ -670,7 +751,7 @@ export class EntryLifecycleModule implements RuntimeModule {
           }
         });
       },
-      Math.max(1, deadlineMs - now),
+      Math.max(1, deadlineMs - this.now()),
     );
     this.captureConvergenceTimers.set(intent.intentId, timer);
   }

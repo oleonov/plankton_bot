@@ -1802,6 +1802,7 @@ async function main(): Promise<void> {
       exchangeStateStore,
     },
     legStateRepo: repos.legState,
+    trackAAddThrottlePolicy: () => currentExecutionPolicy().trackAAddThrottle,
     repriceChainPolicy: () => currentExecutionPolicy().repriceChain,
     riskEventRepo: repos.riskEvent,
     quoteMotionShadow: {
@@ -2463,6 +2464,9 @@ async function main(): Promise<void> {
   });
 
   bus.subscribe("OrderCancelled", async ({ orderId, signalReason, tokenId, reason, timestamp }) => {
+    if (reason === "track_a_resting_add_expired") {
+      runtimeMetrics.writeCounter("track_a_resting_add_cancel_confirmed_total");
+    }
     if (reason === "stale_exit_ttl") {
       runtimeMetrics.writeCounter("exit_order_ttl_cancel_total");
       const market = repos.market.findByTokenId(tokenId);

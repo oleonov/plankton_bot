@@ -279,6 +279,112 @@ afterEach(() => {
 });
 
 describe("SignalToOrderBridge", () => {
+  it("defends the bridge against a second generic permanent R23 root", async () => {
+    const bus = new InProcessEventBus();
+    const activatedAtUtc = new Date(NOW - 60_000).toISOString();
+    const root = {
+      ...makeEntryOrder(),
+      status: "cancelled" as const,
+      cancelReason: "maker_capture_reprice",
+      decisionRuleId: "R23_DIP_TRIGGER",
+      entryStyle: "maker" as const,
+      createdAt: new Date(NOW - 10_000).toISOString(),
+      signalTimestamp: new Date(NOW - 10_000).toISOString(),
+      metadata: {
+        makerMicroLiveLifecycle: {
+          kind: "permanent_r23",
+          activationId: "activation-bridge-red",
+          activatedAtUtc,
+          fillWaitMs: 120_000,
+        },
+        makerCaptureLineageV1: {
+          version: 1,
+          rootOrderId: createOrderId("ord-1"),
+          predecessorOrderId: null,
+          replacementIndex: 0,
+          rootNotionalUsdc: 4,
+        },
+        quoteMotionV1: {
+          version: 1,
+          kind: "r23_capture",
+          cohortId: activatedAtUtc,
+          originalSuggestedPrice: 0.08,
+          originalTargetPrice: null,
+          entryPriceCeiling: 0.5,
+          policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+          policyControlRevision: 7,
+          permanentR23ActivationId: "activation-bridge-red",
+          permanentR23ActivatedAtUtc: activatedAtUtc,
+          initialBook: {
+            depthStatus: "full",
+            bestBid: 0.04,
+            bestAsk: 0.09,
+            tickSize: 0.01,
+            snapshotTs: NOW - 10_000,
+            source: "test",
+          },
+        },
+      },
+    };
+    const orderRepo = {
+      findByTokenId: vi.fn(() => [root]),
+      findById: vi.fn(() => root),
+      findRecoverableMakerCaptureRepriceIntents: vi.fn(() => []),
+      findMakerCaptureRepriceIntentByPredecessor: vi.fn(() => null),
+      getMakerCaptureChainUsage: vi.fn(() => ({
+        trusted: true,
+        rootOrderId: root.orderId,
+        rootNotionalUsdc: 4,
+        chainFilledUsdc: 0,
+        predecessorRemainingShares: root.size,
+        replacementIndex: 0,
+        orderIds: [root.orderId],
+      })),
+    };
+    const policy: ExecutionPolicy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      entryPriceCeiling: 0.5,
+      opportunisticTaker: { ...DEFAULT_EXECUTION_POLICY.opportunisticTaker, enabled: false },
+      makerEntry: {
+        ...DEFAULT_EXECUTION_POLICY.makerEntry,
+        mode: "micro_live",
+        permanentR23ActivationId: "activation-bridge-red",
+        permanentR23ActivatedAtUtc: activatedAtUtc,
+        captureBookReprice: { enabled: true, maxRepricesPerRoot: 5 },
+      },
+    };
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      orderRepo: orderRepo as unknown as OrderRepository,
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => policy,
+      now: () => NOW,
+    });
+    const placed: RuntimeEventMap["PlaceOrderRequested"][] = [];
+    const skipped: RuntimeEventMap["SignalConversionSkipped"][] = [];
+    bridge.subscribe();
+    bus.subscribe("PlaceOrderRequested", async (event) => void placed.push(event));
+    bus.subscribe("SignalConversionSkipped", async (event) => void skipped.push(event));
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        decisionRuleId: "R23_DIP_TRIGGER",
+        reason: "probe-entry",
+        generatedAt: new Date(NOW).toISOString(),
+        suggestedPrice: 0.08,
+      },
+      market: makeMarket({ bestBid: 0.04, bestAsk: 0.09, midPrice: 0.065 }),
+      approvedAt: NOW,
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped.map((event) => event.reasons)).toContainEqual(["permanent-r23-lineage-active"]);
+    bridge.unsubscribe();
+  });
+
   it("does not convert capture metadata without its exact durable ready intent", async () => {
     const bus = new InProcessEventBus();
     const bridge = new SignalToOrderBridge({ bus, log: makeLogger(), now: () => NOW });

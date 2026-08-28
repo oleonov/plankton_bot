@@ -215,6 +215,7 @@ export interface ReconciliationModuleDeps {
    */
   exchangeStateStore?: ExchangeStateStore;
   recoveryTtlCoverage?: RecoveryTtlCoverageDeps;
+  trackAAddThrottlePolicy?: () => import("@krabs/domain").TrackAAddThrottlePolicy;
   /**
    * Optional reader for wallet positions in non-live-lite modes (or when the
    * sentinel is disabled). When provided, periodic reconciliation pulls
@@ -485,6 +486,14 @@ export class ReconciliationModule implements RuntimeModule {
             ? { exitRepriceOnDownprice: this.deps.exitRepriceOnDownprice }
             : {}),
           ...(repriceChainGate ? { repriceChainGate } : {}),
+          ...(this.deps.legStateRepo && this.deps.trackAAddThrottlePolicy
+            ? {
+                trackAAddThrottle: {
+                  policy: this.deps.trackAAddThrottlePolicy,
+                  legStateRepo: this.deps.legStateRepo,
+                },
+              }
+            : {}),
           ...(this.deps.trackCExit ? { trackCExit: this.deps.trackCExit } : {}),
           ...(this.deps.recoveryTtlCoverage
             ? { recoveryTtlCoverage: this.deps.recoveryTtlCoverage }
@@ -505,6 +514,11 @@ export class ReconciliationModule implements RuntimeModule {
       }
       if (staleResult.outbidRepriceCancelled > 0) {
         allDetails.push(`outbid reprice cancels: ${staleResult.outbidRepriceCancelled}`);
+      }
+      if (staleResult.trackARestingAddCancelRequested > 0) {
+        allDetails.push(
+          `Track A resting add cancel requests: ${staleResult.trackARestingAddCancelRequested}`,
+        );
       }
       if (staleResult.downpriceRepriceCancelled > 0) {
         allDetails.push(`downprice reprice cancels: ${staleResult.downpriceRepriceCancelled}`);
@@ -580,6 +594,7 @@ export class ReconciliationModule implements RuntimeModule {
         staleResult.staleEndDateCancelled === 0 &&
         staleResult.staleExitTtlCancelled === 0 &&
         staleResult.outbidRepriceCancelled === 0 &&
+        staleResult.trackARestingAddCancelRequested === 0 &&
         staleResult.downpriceRepriceCancelled === 0 &&
         walletResult.driftCount === 0;
 
@@ -637,6 +652,7 @@ export class ReconciliationModule implements RuntimeModule {
           staleEntryEndDate: staleResult.staleEndDateCancelled,
           staleExitTtl: staleResult.staleExitTtlCancelled,
           outbidRepriceCancelled: staleResult.outbidRepriceCancelled,
+          trackARestingAddCancelRequested: staleResult.trackARestingAddCancelRequested,
           downpriceRepriceCancelled: staleResult.downpriceRepriceCancelled,
           stuckSellWarnings: staleResult.stuckSellWarnings,
           walletPositionDrifts: walletResult.driftCount,

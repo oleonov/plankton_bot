@@ -113,6 +113,15 @@ describe("SamePriceCooldownModule", () => {
     expect(partialFixture.repo.findAll()).toEqual([]);
   });
 
+  it("does not create a same-price cooldown for a Track A resting-add cancel", async () => {
+    const fixture = buildFixture(order({ side: "buy", price: 0.49 }));
+    await fixture.module.start();
+
+    await fixture.cancel("track_a_resting_add_expired", NOW);
+
+    expect(fixture.repo.findAll()).toEqual([]);
+  });
+
   it("allows placement after an expired cooldown while preserving stale metadata", async () => {
     const fixture = buildFixture(order({ side: "buy", price: 0.49 }));
     fixture.repo.upsert({

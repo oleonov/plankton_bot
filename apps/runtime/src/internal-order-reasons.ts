@@ -17,6 +17,7 @@ export const ENTRY_NOT_SELLABLE_REASON = "entry_not_sellable";
 export const OPEN_POSITION_EXISTS_REASON = "open_position_exists";
 export const MAKER_CAPTURE_NO_VALID_BID_PLUS_ONE_REASON = "maker-capture-no-valid-bid-plus-one";
 export const MAKER_CAPTURE_OPEN_CAP_SATURATED_REASON = "maker-capture-open-cap-saturated";
+export const PERMANENT_R23_LINEAGE_ACTIVE_REASON = "permanent-r23-lineage-active";
 export const MAKER_MICRO_ORDER_CAP_EXCEEDED_REASON = "maker-micro-order-cap-exceeded";
 export const MAKER_MICRO_OPEN_CAP_EXCEEDED_REASON = "maker-micro-open-cap-exceeded";
 export const MAKER_MICRO_CUMULATIVE_CAP_UNAVAILABLE_REASON =
@@ -40,6 +41,7 @@ export const MAKER_MICRO_CAP_REJECTION_REASONS: ReadonlySet<string> = new Set([
 const MAKER_ENTRY_INPUTS_UNCHANGED_REASONS: ReadonlySet<string> = new Set([
   MAKER_CAPTURE_NO_VALID_BID_PLUS_ONE_REASON,
   MAKER_CAPTURE_OPEN_CAP_SATURATED_REASON,
+  PERMANENT_R23_LINEAGE_ACTIVE_REASON,
   ...MAKER_MICRO_CAP_REJECTION_REASONS,
 ]);
 

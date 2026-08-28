@@ -29,6 +29,7 @@ import type {
   RepriceThresholdDecision,
   ExitActionDecision,
   StaleVerdict,
+  TrackAAddThrottlePolicy,
 } from "@krabs/domain";
 import {
   classifyMarketRegime,
@@ -52,6 +53,10 @@ import {
   resolveMakerMicroLiveFillDeadlineMs,
 } from "../../buy-order-lifecycle.js";
 import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
+import {
+  evaluateSignalTrackAAddThrottle,
+  type TrackASignalEvaluation,
+} from "../dead-market-shadow/track-a-add-throttle-shadow.js";
 import { resolveMidpointAnchoredSellPrice } from "../strategy/signal-to-order.js";
 import type { ExitOrderLifetimeDecision } from "../order-lifetime/order-lifetime-ttl.js";
 import {
@@ -215,6 +220,10 @@ export interface StaleOrderCleanerDeps {
   };
   trackCExit?: TrackCExitCleanerDeps;
   recoveryTtlCoverage?: RecoveryTtlCoverageDeps;
+  trackAAddThrottle?: {
+    policy: () => TrackAAddThrottlePolicy;
+    legStateRepo: Pick<LegStateRepository, "get">;
+  };
 }
 
 export interface StaleCleanResult {
@@ -226,6 +235,7 @@ export interface StaleCleanResult {
   downpriceRepriceHeld: number;
   stuckSellWarnings: number;
   repriceChainCapBlocked: number;
+  trackARestingAddCancelRequested: number;
 }
 
 /**
@@ -240,6 +250,13 @@ export async function cleanStaleEntryOrders(
   const { orderRepo, marketRepo, bus, log } = deps;
   const exitTtlMs = deps.exitOrderTtlMs ?? EXIT_ORDER_TTL_MS;
   const now = Date.now();
+  const trackAAddThrottle = deps.trackAAddThrottle
+    ? {
+        ...deps.trackAAddThrottle,
+        policy: deps.trackAAddThrottle.policy(),
+        legStates: new Map<string, ReturnType<LegStateRepository["get"]>>(),
+      }
+    : null;
 
   const openOrders = orderRepo.findOpen();
 
@@ -273,6 +290,7 @@ export async function cleanStaleEntryOrders(
   let downpriceRepriceHeld = 0;
   let stuckSellWarnings = 0;
   let repriceChainCapBlocked = 0;
+  let trackARestingAddCancelRequested = 0;
 
   for (const order of entryBuys) {
     const ordKey = String(order.orderId);
@@ -281,6 +299,27 @@ export async function cleanStaleEntryOrders(
     const backoffMs = CANCEL_BACKOFF_MS;
     const lastAttempt = backoffMap.get(ordKey);
     if (lastAttempt != null && now - lastAttempt < backoffMs) continue;
+    const trackA = evaluateTrackARestingAdd(order, trackAAddThrottle, now);
+    if (trackA) {
+      await publishCancel(bus, order, "track_a_resting_add_expired");
+      backoffMap.set(ordKey, now);
+      trackARestingAddCancelRequested++;
+      deps.metrics?.writeCounter?.(
+        "track_a_resting_add_cancel_requested_total",
+        1,
+        JSON.stringify({ signalReason: order.signalReason, status: order.status }),
+      );
+      log.info(
+        {
+          orderId: ordKey,
+          signalReason: order.signalReason,
+          status: order.status,
+          legAgeMinutes: trackA.result.legAgeMinutes,
+        },
+        "Track A resting add expired — requesting residual cancel",
+      );
+      continue;
+    }
     const captureDeadlineMs = resolveMakerMicroLiveFillDeadlineMs(order);
     const ttlMs =
       captureDeadlineMs == null
@@ -668,7 +707,42 @@ export async function cleanStaleEntryOrders(
     downpriceRepriceHeld,
     stuckSellWarnings,
     repriceChainCapBlocked,
+    trackARestingAddCancelRequested,
   };
+}
+
+function evaluateTrackARestingAdd(
+  order: Order,
+  snapshot: {
+    policy: TrackAAddThrottlePolicy;
+    legStateRepo: Pick<LegStateRepository, "get">;
+    legStates: Map<string, ReturnType<LegStateRepository["get"]>>;
+  } | null,
+  now: number,
+): TrackASignalEvaluation | null {
+  if (!snapshot?.policy.enforce) return null;
+  if (order.side !== "buy") return null;
+  if (order.status !== "open" && order.status !== "partially-filled") return null;
+
+  const tokenKey = String(order.tokenId);
+  if (!snapshot.legStates.has(tokenKey)) {
+    snapshot.legStates.set(tokenKey, snapshot.legStateRepo.get(order.tokenId));
+  }
+  const legState = snapshot.legStates.get(tokenKey) ?? null;
+  const evaluation = evaluateSignalTrackAAddThrottle(
+    {
+      reason: order.signalReason,
+      decisionRuleId: order.decisionRuleId,
+      tokenId: order.tokenId,
+    },
+    { get: () => legState },
+    now,
+  );
+  const orderCreatedAt = Date.parse(order.createdAt);
+  if (legState?.sellCount !== 0) return null;
+  if (!Number.isFinite(orderCreatedAt) || evaluation.firstBuyTs == null) return null;
+  if (orderCreatedAt < evaluation.firstBuyTs) return null;
+  return evaluation.result.classification === "throttle_candidate" ? evaluation : null;
 }
 
 function resolveReplacementUnavailableReasons(
@@ -1271,6 +1345,7 @@ async function publishCancel(
   reason: Extract<
     CancelOrderReason,
     | "stale_entry_ttl"
+    | "track_a_resting_add_expired"
     | "stale_entry_enddate"
     | "stale_exit_ttl"
     | "outbid_repriced"
