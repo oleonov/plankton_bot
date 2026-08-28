@@ -1775,9 +1775,9 @@ describe("ReconciliationModule", () => {
     });
   });
 
-  // ─── Wallet sentinel auto-close (2B) ───────────────────────────────
+  // ─── Wallet sentinel accounting fence ───────────────────────────
 
-  describe("wallet sentinel missing-remote auto-close", () => {
+  describe("wallet sentinel missing-remote accounting fence", () => {
     const futureEndDate = () => new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
     function makeOpenPosition(overrides: Partial<Position> = {}): Position {
@@ -1835,7 +1835,7 @@ describe("ReconciliationModule", () => {
       });
     }
 
-    it("first observation seeds the stability counter and does not close", async () => {
+    it("keeps a confirmed missing-remote position visible without closing it", async () => {
       gateway.getPositionBalance = vi.fn().mockResolvedValue(0);
       const saveSpy = vi.fn();
       const drifts: Array<{ details: string }> = [];
@@ -1853,7 +1853,7 @@ describe("ReconciliationModule", () => {
       expect(drifts.at(-1)!.details).not.toContain("wallet-local-position-auto-closed");
     });
 
-    it("closes the position once stability=2 with on-chain balance ≤ epsilon", async () => {
+    it("never bypasses settlement accounting after repeated on-chain zero confirmation", async () => {
       gateway.getPositionBalance = vi.fn().mockResolvedValue(0);
       const saveSpy = vi.fn();
       const localLog = {
@@ -1895,47 +1895,28 @@ describe("ReconciliationModule", () => {
       const second = await driftMod.runReconciliation();
       await bus.drain();
 
-      expect(saveSpy).toHaveBeenCalledTimes(1);
-      const saved = saveSpy.mock.calls[0]![0] as Position;
-      expect(saved.size).toBe(0);
-      expect(saved.currentValueUsdc).toBe(0);
-      expect(saved.status).toBe("closed");
-      expect(saved.closedAt).not.toBeNull();
-      // The auto-close becomes a fresh detail; raw drift no longer surfaces.
-      expect(second.details.some((d) => d.includes("wallet-local-position-auto-closed"))).toBe(
+      expect(saveSpy).not.toHaveBeenCalled();
+      expect(second.positionDriftCount).toBe(1);
+      expect(second.details.some((d) => d.includes("wallet-local-position-missing-remote"))).toBe(
         true,
       );
-      expect(localLog.warn).toHaveBeenCalledWith(
-        expect.objectContaining({
-          autoClosed: expect.arrayContaining([
-            expect.objectContaining({
-              positionId: "pos-missing-remote",
-              prevStatus: "open",
-              prevSize: 50,
-              consecutiveObservations: 2,
-            }),
-          ]),
-        }),
-        "wallet position sentinel auto-closed missing-remote positions",
+      expect(second.details.some((d) => d.includes("wallet-local-position-auto-closed"))).toBe(
+        false,
       );
     });
 
-    it("does not increment the counter when on-chain balance exceeds epsilon", async () => {
+    it("treats a positive on-chain balance as transient data-api lag", async () => {
       gateway.getPositionBalance = vi.fn().mockResolvedValue(12);
       const saveSpy = vi.fn();
       const driftMod = wireSentinel(saveSpy, [makeOpenPosition()]);
 
-      await driftMod.runReconciliation();
-      await driftMod.runReconciliation();
-      await driftMod.runReconciliation();
+      const result = await driftMod.runReconciliation();
 
       expect(saveSpy).not.toHaveBeenCalled();
-      // Confirmed-drift filter swallows the missing-remote drift entirely
-      // (balance > epsilon == data-api lag rather than a real desync), so
-      // nothing escalates to auto-close.
+      expect(result.positionDriftCount).toBe(0);
     });
 
-    it("resets the counter when the token reappears in the wallet (recovery)", async () => {
+    it("remains report-only across wallet disappearance and recovery", async () => {
       gateway.getPositionBalance = vi.fn().mockResolvedValue(0);
       const saveSpy = vi.fn();
       const firstReader = emptyWalletReader();
@@ -1964,12 +1945,11 @@ describe("ReconciliationModule", () => {
         },
       });
 
-      // 1st pass: empty wallet → counter=1.
+      // Empty wallet: preserve the local inventory and surface the drift.
       await driftMod.runReconciliation();
       expect(saveSpy).not.toHaveBeenCalled();
 
-      // 2nd pass: wallet returns the position with real size → counter prunes.
-      // Local mark gets updated to match remote (status: open, size: 50).
+      // The token returns with real size; a normal mark update is allowed.
       firstReader.read = vi.fn().mockResolvedValue([
         {
           tokenId: String(TOK),
@@ -1987,10 +1967,9 @@ describe("ReconciliationModule", () => {
       await driftMod.runReconciliation();
       expect(saveSpy).not.toHaveBeenCalledWith(expect.objectContaining({ status: "closed" }));
 
-      // 3rd pass: wallet drops the token again → counter starts from 1, not 2.
+      // If it disappears again, reconciliation still must not close it.
       firstReader.read = vi.fn().mockResolvedValue([]);
       await driftMod.runReconciliation();
-      // Still only mark-updates, no close — the recovery in pass 2 reset the counter.
       expect(saveSpy).not.toHaveBeenCalledWith(expect.objectContaining({ status: "closed" }));
     });
 
@@ -2012,7 +1991,7 @@ describe("ReconciliationModule", () => {
       expect(result.clean).toBe(true);
     });
 
-    it("dust-status positions are also closed once stability hits 2", async () => {
+    it("does not silently discard dust inventory either", async () => {
       gateway.getPositionBalance = vi.fn().mockResolvedValue(0);
       const saveSpy = vi.fn();
       const driftMod = wireSentinel(saveSpy, [
@@ -2022,10 +2001,7 @@ describe("ReconciliationModule", () => {
       await driftMod.runReconciliation();
       await driftMod.runReconciliation();
 
-      expect(saveSpy).toHaveBeenCalledTimes(1);
-      const saved = saveSpy.mock.calls[0]![0] as Position;
-      expect(saved.status).toBe("closed");
-      expect(saved.size).toBe(0);
+      expect(saveSpy).not.toHaveBeenCalled();
     });
   });
 

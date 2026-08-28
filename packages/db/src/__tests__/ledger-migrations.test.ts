@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
@@ -2001,5 +2001,306 @@ describe("migration 089 — exit_owner allowed-values enforcement (upgrade path)
     expect(() =>
       db.prepare("UPDATE positions SET exit_owner = 'garbage' WHERE position_id = 'p-u'").run(),
     ).toThrow(/exit_owner must be bounce, profile, or NULL/);
+  });
+});
+
+describe("migration 105 — reconciliation zero-return redeem accounting backfill", () => {
+  const AFFECTED_TOKEN =
+    "38539668128569069835478639370767890108348737523231666617419226629008841766041";
+  const AFFECTED_CONDITION = "0x9045ba87d887e476131d6ad4e35030af41af2b30d3a822804d5797fdb915bff0";
+  const AFFECTED_POSITION = `pos-${AFFECTED_TOKEN}-1782913490613`;
+  const AFFECTED_COST = 2.71974;
+  const AFFECTED_SHARES = 93.47;
+  const AFFECTED_SETTLEMENT = `reconciliation-backfill-105-${AFFECTED_TOKEN}`;
+  const MIGRATION = "105_reconciliation_zero_return_pnl_backfill_20260828.sql";
+
+  type CandidateOverrides = Partial<{
+    positionId: string;
+    tokenId: string;
+    conditionId: string;
+    positionSize: number;
+    positionCost: number;
+    currentValueUsdc: number | null;
+    realizedPnl: number;
+    lotSize: number;
+    remainingSize: number;
+    lotCost: number;
+    lotTokenId: string;
+    redeemStatus: string | null;
+    txHash: string | null;
+    redeemTokenId: string;
+  }>;
+
+  beforeEach(() => {
+    db.pragma("foreign_keys = ON");
+    db.exec(`
+      CREATE TABLE market_resolutions (
+        condition_id TEXT PRIMARY KEY,
+        resolution   TEXT NOT NULL,
+        resolved_at  TEXT NOT NULL,
+        detected_at  TEXT NOT NULL,
+        source       TEXT NOT NULL,
+        raw_response TEXT,
+        status       TEXT NOT NULL DEFAULT 'settled'
+      );
+      CREATE TABLE settlement_ledger (
+        settlement_id    TEXT PRIMARY KEY,
+        condition_id     TEXT NOT NULL REFERENCES market_resolutions(condition_id),
+        position_id      TEXT NOT NULL REFERENCES positions(position_id),
+        token_id         TEXT NOT NULL,
+        resolution       TEXT NOT NULL,
+        settlement_price REAL NOT NULL,
+        size             REAL NOT NULL,
+        delta            REAL NOT NULL,
+        settled_at       TEXT NOT NULL,
+        created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE pnl_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fill_id TEXT NOT NULL,
+        position_id TEXT NOT NULL,
+        delta REAL NOT NULL,
+        filled_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE inventory_lots (
+        lot_id TEXT PRIMARY KEY,
+        position_id TEXT NOT NULL REFERENCES positions(position_id),
+        token_id TEXT NOT NULL,
+        size REAL NOT NULL,
+        remaining_size REAL NOT NULL,
+        entry_price REAL NOT NULL,
+        cost_usdc REAL NOT NULL,
+        fill_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE redeem_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        condition_id TEXT NOT NULL,
+        token_ids TEXT NOT NULL,
+        attempt_ts INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        tx_hash TEXT
+      );
+    `);
+  });
+
+  function seedCandidate(overrides: CandidateOverrides = {}): string {
+    const positionId = overrides.positionId ?? AFFECTED_POSITION;
+    const tokenId = overrides.tokenId ?? AFFECTED_TOKEN;
+    const conditionId = overrides.conditionId ?? AFFECTED_CONDITION;
+    const positionSize = overrides.positionSize ?? 0;
+    const positionCost = overrides.positionCost ?? AFFECTED_COST;
+    const currentValueUsdc =
+      overrides.currentValueUsdc === undefined ? 0 : overrides.currentValueUsdc;
+    const realizedPnl = overrides.realizedPnl ?? 0;
+    const lotSize = overrides.lotSize ?? AFFECTED_SHARES;
+    const remainingSize = overrides.remainingSize ?? lotSize;
+    const lotCost = overrides.lotCost ?? AFFECTED_COST;
+    const lotTokenId = overrides.lotTokenId ?? tokenId;
+    const redeemStatus = overrides.redeemStatus === undefined ? "success" : overrides.redeemStatus;
+    const txHash = overrides.txHash === undefined ? "0xconfirmed" : overrides.txHash;
+
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, realized_pnl, status,
+          opened_at, closed_at, updated_at)
+       VALUES (?, ?, ?, 'buy', ?, ?, ?, ?, ?, 'closed',
+               '2026-07-02T18:00:00.000Z', '2026-07-02T20:39:33.842Z',
+               '2026-07-02T20:39:33.842Z')`,
+    ).run(
+      positionId,
+      tokenId,
+      conditionId,
+      positionSize,
+      AFFECTED_COST / AFFECTED_SHARES,
+      positionCost,
+      currentValueUsdc,
+      realizedPnl,
+    );
+    db.prepare(
+      `INSERT INTO inventory_lots
+         (lot_id, position_id, token_id, size, remaining_size, entry_price,
+          cost_usdc, fill_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, '2026-07-02T18:00:00.000Z')`,
+    ).run(
+      `lot-${positionId}`,
+      positionId,
+      lotTokenId,
+      lotSize,
+      remainingSize,
+      lotCost / lotSize,
+      lotCost,
+      `fill-${positionId}`,
+    );
+    if (redeemStatus !== null) {
+      db.prepare(
+        `INSERT INTO redeem_log
+           (condition_id, token_ids, attempt_ts, status, tx_hash)
+         VALUES (?, ?, 1782913490000, ?, ?)`,
+      ).run(
+        conditionId,
+        JSON.stringify([overrides.redeemTokenId ?? tokenId]),
+        redeemStatus,
+        txHash,
+      );
+    }
+    return positionId;
+  }
+
+  function settlementCount(): number {
+    return (
+      db.prepare("SELECT COUNT(*) AS count FROM settlement_ledger").get() as { count: number }
+    ).count;
+  }
+
+  it("books the verified loss, settles open lots, and is idempotent", () => {
+    seedCandidate();
+    const sql = readMigration(MIGRATION);
+
+    db.exec(sql);
+    db.exec(sql);
+
+    expect(db.prepare("SELECT source, status, resolution FROM market_resolutions").get()).toEqual({
+      source: "reconciliation-backfill",
+      status: "settled",
+      resolution: "redeem-zero-return",
+    });
+    expect(
+      db
+        .prepare(
+          `SELECT settlement_price, size, delta, resolution
+             FROM settlement_ledger WHERE settlement_id = ?`,
+        )
+        .get(AFFECTED_SETTLEMENT),
+    ).toEqual({
+      settlement_price: 0,
+      size: AFFECTED_SHARES,
+      delta: -AFFECTED_COST,
+      resolution: "redeem-zero-return",
+    });
+    expect(
+      db
+        .prepare("SELECT remaining_size FROM inventory_lots WHERE position_id = ?")
+        .pluck()
+        .get(AFFECTED_POSITION),
+    ).toBe(0);
+    expect(
+      db
+        .prepare("SELECT realized_pnl, status, size FROM positions WHERE position_id = ?")
+        .get(AFFECTED_POSITION),
+    ).toEqual({ realized_pnl: -AFFECTED_COST, status: "closed", size: 0 });
+    expect(settlementCount()).toBe(1);
+  });
+
+  const guardedCases: Array<[string, CandidateOverrides]> = [
+    ["has no successful redeem", { redeemStatus: "failed" }],
+    ["has no redeem transaction", { txHash: null }],
+    ["redeem evidence names another token", { redeemTokenId: "not-the-held-token" }],
+    ["has a different position token", { tokenId: "not-the-held-token" }],
+    ["has a different condition", { conditionId: "0xnot-the-condition" }],
+    ["has a mismatching-token lot", { lotTokenId: "not-the-held-token" }],
+    ["has a partial lot", { remainingSize: AFFECTED_SHARES - 1 }],
+    ["has a different aggregate lot size", { lotSize: AFFECTED_SHARES - 1 }],
+    ["has a different lot cost", { lotCost: AFFECTED_COST - 0.1 }],
+    ["has a different position cost", { positionCost: AFFECTED_COST - 0.1 }],
+    ["has a nonzero position size", { positionSize: 1 }],
+    ["has a null current value", { currentValueUsdc: null }],
+    ["has a microscopic nonzero current value", { currentValueUsdc: 0.0000005 }],
+    ["has a nonzero current value", { currentValueUsdc: 0.1 }],
+    ["already has realized PnL", { realizedPnl: -1 }],
+    ["is not the exact allow-listed position", { positionId: `${AFFECTED_POSITION}-other` }],
+  ];
+
+  it.each(guardedCases)("leaves a candidate untouched when it %s", (_label, overrides) => {
+    const positionId = seedCandidate(overrides);
+
+    db.exec(readMigration(MIGRATION));
+
+    expect(settlementCount()).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) FROM market_resolutions").pluck().get()).toBe(0);
+    expect(
+      db
+        .prepare("SELECT realized_pnl FROM positions WHERE position_id = ?")
+        .pluck()
+        .get(positionId),
+    ).toBe(overrides.realizedPnl ?? 0);
+    expect(
+      db
+        .prepare("SELECT remaining_size FROM inventory_lots WHERE position_id = ?")
+        .pluck()
+        .get(positionId),
+    ).toBe(overrides.remainingSize ?? overrides.lotSize ?? AFFECTED_SHARES);
+  });
+
+  it("does not overwrite existing accounting", () => {
+    seedCandidate();
+    db.prepare(
+      `INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at)
+       VALUES ('existing-sell', ?, 0.5, '2026-07-02T19:00:00.000Z')`,
+    ).run(AFFECTED_POSITION);
+
+    db.exec(readMigration(MIGRATION));
+
+    expect(settlementCount()).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) FROM market_resolutions").pluck().get()).toBe(0);
+    expect(db.prepare("SELECT remaining_size FROM inventory_lots").pluck().get()).toBe(
+      AFFECTED_SHARES,
+    );
+    expect(db.prepare("SELECT realized_pnl FROM positions").pluck().get()).toBe(0);
+  });
+
+  it("does not overwrite an existing settlement", () => {
+    seedCandidate();
+    db.prepare(
+      `INSERT INTO market_resolutions
+         (condition_id, resolution, resolved_at, detected_at, source, status)
+       VALUES (?, 'No', '2026-07-02T20:00:00.000Z', '2026-07-02T20:00:00.000Z',
+               'gamma-api', 'settled')`,
+    ).run(AFFECTED_CONDITION);
+    db.prepare(
+      `INSERT INTO settlement_ledger
+         (settlement_id, condition_id, position_id, token_id, resolution,
+          settlement_price, size, delta, settled_at)
+       VALUES ('existing-settlement', ?, ?, ?, 'No', 0, ?, -1,
+               '2026-07-02T20:00:00.000Z')`,
+    ).run(AFFECTED_CONDITION, AFFECTED_POSITION, AFFECTED_TOKEN, AFFECTED_SHARES);
+
+    db.exec(readMigration(MIGRATION));
+
+    expect(settlementCount()).toBe(1);
+    expect(db.prepare("SELECT source FROM market_resolutions").pluck().get()).toBe("gamma-api");
+    expect(db.prepare("SELECT remaining_size FROM inventory_lots").pluck().get()).toBe(
+      AFFECTED_SHARES,
+    );
+    expect(db.prepare("SELECT realized_pnl FROM positions").pluck().get()).toBe(0);
+  });
+
+  it("rolls every accounting write back when the runner encounters a final-step failure", () => {
+    seedCandidate();
+    db.exec(`
+      CREATE TRIGGER fail_reconciliation_backfill_105
+      BEFORE UPDATE OF realized_pnl ON positions
+      FOR EACH ROW WHEN NEW.position_id = '${AFFECTED_POSITION}'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced migration 105 failure');
+      END;
+    `);
+    const migrationDir = path.join(tmpDir, "migration-105-only");
+    mkdirSync(migrationDir);
+    writeFileSync(path.join(migrationDir, MIGRATION), readMigration(MIGRATION));
+
+    expect(() => runMigrations(db, migrationDir)).toThrow(/forced migration 105 failure/);
+
+    expect(settlementCount()).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) FROM market_resolutions").pluck().get()).toBe(0);
+    expect(db.prepare("SELECT remaining_size FROM inventory_lots").pluck().get()).toBe(
+      AFFECTED_SHARES,
+    );
+    expect(db.prepare("SELECT realized_pnl FROM positions").pluck().get()).toBe(0);
+    expect(
+      db.prepare("SELECT COUNT(*) FROM schema_migrations WHERE name = ?").pluck().get(MIGRATION),
+    ).toBe(0);
   });
 });
