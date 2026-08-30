@@ -115,11 +115,13 @@ function makePositionRepo(rows: Position[]): PositionRepository {
       (id) => rows.find((row) => row.tokenId === id && row.status === PositionStatus.Open) ?? null,
     ),
     findOpen: vi.fn(() => rows.filter((row) => row.status === PositionStatus.Open)),
-    findDust: vi.fn(() => []),
+    findDust: vi.fn(() => rows.filter((row) => row.status === PositionStatus.Dust)),
     findAll: vi.fn(() => rows),
     findOpenByEntryStyle: vi.fn(() => []),
     findById: vi.fn(() => null),
-    findActiveByTokenId: vi.fn(() => []),
+    findActiveByTokenId: vi.fn((id) =>
+      rows.filter((row) => row.tokenId === id && row.status !== PositionStatus.Closed),
+    ),
   } as unknown as PositionRepository;
 }
 

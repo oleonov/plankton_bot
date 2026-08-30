@@ -37,6 +37,7 @@ import {
   type ProfileLadderBookCache,
   type ProfileLadderModeCandidate,
   type ProfileLadderModeReaderConfig,
+  type ProfileLadderPositionReader,
 } from "../profile-ladder-module.js";
 import type { ProfileLadderRepository } from "../profile-ladder-repository.js";
 import type { ExecutionProfilePolicy, ProfileState } from "../types.js";
@@ -485,7 +486,7 @@ function setup(
       ) => ProfileLadderModeCandidate | null;
     };
     isDormant?: (token: TokenId) => boolean;
-    positionRepo?: { findOpen: () => Position[] };
+    positionRepo?: Partial<ProfileLadderPositionReader>;
     orderRepo?: {
       findByTokenId: (token: TokenId) => Order[];
       findByClientOrderId?: (clientOrderId: string) => Order | null;
@@ -508,17 +509,38 @@ function setup(
   // Policy is read through a mutable holder so tests can simulate a live policy
   // reload (e.g. adoptExisting hot-enabled) between calls.
   const policyRef = { current: profilePolicy };
+  const suppliedPositionRepo = overrides.positionRepo;
+  const normalizedPositionRepo: ProfileLadderPositionReader | undefined =
+    suppliedPositionRepo == null
+      ? undefined
+      : {
+          findOpen: suppliedPositionRepo.findOpen ?? (() => []),
+          findDust: suppliedPositionRepo.findDust ?? (() => []),
+          findActiveByTokenId:
+            suppliedPositionRepo.findActiveByTokenId ??
+            ((id) =>
+              [
+                ...(suppliedPositionRepo.findOpen?.() ?? []),
+                ...(suppliedPositionRepo.findDust?.() ?? []),
+              ].filter((candidate) => candidate.tokenId === id)),
+        };
   bus.subscribe("PlaceOrderRequested", async ({ command }) => {
     orders.push(command);
   });
   bus.subscribe("CancelOrderRequested", async ({ command }) => {
     cancels.push(String(command.orderId));
   });
+  const {
+    isDormant: _removedDormantGate,
+    positionRepo: _positionRepo,
+    ...moduleOverrides
+  } = overrides;
   const module = new ProfileLadderModule({
     bus,
     repository: repo,
     policy: () => policyRef.current,
-    ...overrides,
+    ...moduleOverrides,
+    ...(normalizedPositionRepo == null ? {} : { positionRepo: normalizedPositionRepo }),
     runtimeMetrics: {
       writeCounter: (name, value, labels) => {
         counters.push({
@@ -864,7 +886,7 @@ describe("ProfileLadderModule", () => {
     });
   });
 
-  it("skips dormant position rebuilds without cancelling existing ladder", async () => {
+  it("keeps SELL coverage active for a dormant position", async () => {
     const ctx = setup(policy(), { isDormant: () => true });
     ctx.repo.upsertLadder(ladderState());
     await ctx.module.start();
@@ -881,12 +903,11 @@ describe("ProfileLadderModule", () => {
     expect(ctx.cancels).toHaveLength(0);
     expect(ctx.repo.getLadder(tokenId)).toMatchObject({
       status: "active",
-      lastCostBasisUsdc: 25,
+      lastCostBasisUsdc: 35,
     });
-    expect(ctx.counters).toContainEqual({
-      name: "ladder_rebuild_skipped_dormant",
-      value: 1,
-    });
+    expect(ctx.counters.some((counter) => counter.name === "ladder_rebuild_skipped_dormant")).toBe(
+      false,
+    );
   });
 
   it("rebuilds on BBO move and respects the 30-minute cooldown", async () => {
@@ -2274,9 +2295,11 @@ describe("ProfileLadderModule", () => {
     function staleProfileLadderOrder(overrides: Partial<Order> = {}): Order {
       return openSellOrder({
         orderId: staleOrderId,
+        exchangeOrderId: "stale-profile-ladder-exchange-order",
         price: 0.063,
         size: 108.275484,
         sizeUsdc: 6.82,
+        fillProgressShares: 0,
         status: OrderStatus.Cancelled,
         decisionRuleId: "PROFILE_LADDER",
         signalReason: "profile-ladder-exit",
@@ -2340,9 +2363,10 @@ describe("ProfileLadderModule", () => {
       expect(ctx.orders).toHaveLength(0);
       expect(ctx.cancels).toHaveLength(0);
       expect(ctx.repo.getLadder(tokenId)?.activeRungs[2]).toMatchObject({
-        lifecycle: "cancelled",
+        lifecycle: "planned",
         orderId: null,
         filledSizeShares: 0,
+        terminalRetryKey: "stale-profile-ladder-exchange-order",
       });
       expect(ctx.counters).toContainEqual({
         name: "profile_ladder_stale_live_rung_reconciled",
@@ -2357,7 +2381,7 @@ describe("ProfileLadderModule", () => {
       expect(ctx.orders).toHaveLength(0);
     });
 
-    it("treats a missing order row as dead unless rung fill progress says otherwise", async () => {
+    it("fails closed when a live rung's local order row is missing", async () => {
       const ctx = staleContext([]);
       ctx.repo.upsertLadder(focusShapeState());
 
@@ -2366,11 +2390,11 @@ describe("ProfileLadderModule", () => {
         market({ bestBid: 0.08, bestAsk: 0.1, midPrice: 0.09, minOrderSize: 1 }),
       );
 
-      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.orders).toHaveLength(0);
       expect(ctx.counters).toContainEqual({
-        name: "profile_ladder_stale_live_rung_reconciled",
+        name: "profile_ladder_terminal_rearm_blocked",
         value: 1,
-        labels: '{"band":"medium_low","reason":"missing_no_fill"}',
+        labels: '{"band":"medium_low","reason":"missing_order"}',
       });
     });
 
@@ -2406,9 +2430,10 @@ describe("ProfileLadderModule", () => {
 
       expect(ctx.orders).toHaveLength(0);
       expect(ctx.repo.getLadder(tokenId)?.activeRungs[2]).toMatchObject({
-        lifecycle: "cancelled",
+        lifecycle: "planned",
         orderId: null,
         filledSizeShares: 25,
+        terminalRetryKey: "stale-profile-ladder-exchange-order",
       });
       expect(ctx.counters).toContainEqual({
         name: "profile_ladder_stale_live_rung_reconciled",
@@ -2639,7 +2664,7 @@ describe("ProfileLadderModule", () => {
       expect(skippedAbandonedLabels(ctx)).toHaveLength(3);
     });
 
-    it("resets the consecutive zero-placed streak once a recovery rebuild places a live rung", async () => {
+    it("moves an exchanged pre-submit failure onto persisted bounded retry", async () => {
       let blocked = true;
       const { ctx, clock } = abandonmentHarness(() => (blocked ? cancelled() : null));
       await ctx.module.start();
@@ -2655,8 +2680,8 @@ describe("ProfileLadderModule", () => {
       blocked = false;
       await fireRecoveryPass(ctx, clock);
       expect(ctx.orders).toHaveLength(1);
-      // Reject the placement so the rung reverts to planned/null (clears the
-      // in-flight pending rung) and a fresh recovery streak can begin.
+      // A pre-exchange rejection is now persisted and takes precedence over the
+      // legacy in-memory abandonment tracker.
       await ctx.bus.publish("OrderRejected", orderRejected(ctx.orders[0]!));
       blocked = true;
 
@@ -2666,11 +2691,10 @@ describe("ProfileLadderModule", () => {
       }
       expect(abandonedLabels(ctx)).toHaveLength(0);
 
-      // Only after a full fresh K consecutive zero-placed rebuilds does it abandon.
+      // The durable retry cannot be abandoned by the legacy zero-placement path.
       await fireRecoveryPass(ctx, clock);
-      expect(abandonedLabels(ctx)).toEqual([
-        { band: "medium_high", reason: "client_order_id_blocked_zero_placed" },
-      ]);
+      expect(abandonedLabels(ctx)).toEqual([]);
+      expect(ctx.orders.some((order) => String(order.signalId).endsWith("_pre_retry1"))).toBe(true);
     });
 
     it("reopens recovery after abandonment once the planned/null rung disappears", async () => {
@@ -2992,7 +3016,7 @@ describe("ProfileLadderModule", () => {
     });
   });
 
-  it("reopens with a fresh ladder after a stale no-position ladder is closed", async () => {
+  it("reopens the stored ladder for a returned dust residual", async () => {
     let openPositions: Position[] = [];
     const ctx = setup(mediumHighPolicy(), {
       modeReader: { getMode: () => "flat" },
@@ -3008,17 +3032,24 @@ describe("ProfileLadderModule", () => {
     });
     expect(ctx.repo.getLadder(tokenId)?.status).toBe("closed");
 
-    openPositions = [stalePlannedNoLivePosition({ size: 8, costBasisUsdc: 2.07956 })];
+    openPositions = [
+      stalePlannedNoLivePosition({
+        status: PositionStatus.Dust,
+        size: 8,
+        costBasisUsdc: 2.07956,
+      }),
+    ];
     await ctx.bus.publish("PositionUpdated", { position: openPositions[0]! });
 
     const reopened = ctx.repo.getLadder(tokenId);
     expect(ctx.orders).toHaveLength(1);
     expect(reopened).toMatchObject({
       status: "active",
-      lastCostBasisUsdc: 2.07956,
+      ladderId: "profile_ladder_existing",
+      activeRungs: [{ price: 0.26 }],
     });
     expect(JSON.parse(reopened?.metadataJson ?? "{}")).toMatchObject({
-      eventType: "ladder_placed",
+      closeReason: "stale_no_open_position",
     });
   });
 
@@ -3381,14 +3412,15 @@ describe("ProfileLadderModule", () => {
 
     expect(ctx.orders).toHaveLength(1);
 
-    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
+    nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1_001;
     await ctx.bus.publish("NormalizedMarketUpdated", {
       markets: [market({ bestBid: 0.09, bestAsk: 0.11, minOrderSize: 5 })],
       timestamp: nowMs,
     });
 
     expect(ctx.orders).toHaveLength(2);
-    expect(ctx.orders[1]?.clientOrderId).toBe(first.clientOrderId);
+    expect(ctx.orders[1]?.clientOrderId).not.toBe(first.clientOrderId);
+    expect(String(ctx.orders[1]?.signalId)).toMatch(/_pre_retry1$/);
   });
 
   it("does not retry a planned rung while cap is occupied by a live rung", async () => {
@@ -5280,26 +5312,32 @@ describe("ProfileLadderModule", () => {
       ).toHaveLength(2);
     });
 
-    it("continues normal rebuild placement once a pending rung is rejected", async () => {
+    it("preserves the pending rung target after a pre-exchange rejection", async () => {
       const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
       const pending = await placePendingRung(ctx);
 
       await ctx.bus.publish("OrderRejected", orderRejected(pending));
       await ctx.module.rebuildLadder(position({ avgEntryPrice: 0.12 }), market(), "scale_in");
 
-      expect(ctx.orders).toHaveLength(2);
-      expect(ctx.orders[1]).toMatchObject({ price: 0.132, side: "sell" });
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        price: pending.price,
+        preExchangeRetryCount: 1,
+      });
     });
 
-    it("continues normal rebuild placement once a pending rung is skipped", async () => {
+    it("preserves the pending rung target after a pre-exchange skip", async () => {
       const ctx = setup(policy(), { modeReader: { getMode: () => "flat" } });
       const pending = await placePendingRung(ctx);
 
       await ctx.bus.publish("OrderSkipped", orderSkipped(pending));
       await ctx.module.rebuildLadder(position({ avgEntryPrice: 0.12 }), market(), "scale_in");
 
-      expect(ctx.orders).toHaveLength(2);
-      expect(ctx.orders[1]).toMatchObject({ price: 0.132, side: "sell" });
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        price: pending.price,
+        preExchangeRetryCount: 1,
+      });
     });
 
     it("does not count non-profile legacy pending orders as profile-ladder occupancy", async () => {
@@ -6154,7 +6192,7 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
     ).toHaveLength(1);
   });
 
-  it("counts and skips dormant positions during adoption", async () => {
+  it("adopts dormant positions for SELL coverage", async () => {
     const ctx = setup(adoptionPolicy(), {
       positionRepo: { findOpen: () => [position()] },
       isProfileOwned: () => true,
@@ -6163,12 +6201,11 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
 
     await warmAndAdopt(ctx);
 
-    expect(ctx.orders).toHaveLength(0);
-    expect(ctx.repo.getLadder(tokenId)).toBeNull();
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.repo.getLadder(tokenId)).not.toBeNull();
     expect(summaryOf(ctx)).toMatchObject({
-      eligible_count: 0,
-      adopted_count: 0,
-      skipped_dormant: 1,
+      eligible_count: 1,
+      adopted_count: 1,
     });
   });
 
@@ -6316,6 +6353,497 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe("Stage B1 durable terminal recovery", () => {
+    function positionReader(rows: Position[]) {
+      return {
+        findOpen: () => rows.filter((row) => row.status === PositionStatus.Open),
+        findDust: () => rows.filter((row) => row.status === PositionStatus.Dust),
+        findActiveByTokenId: (id: TokenId) =>
+          rows.filter((row) => row.tokenId === id && row.status !== PositionStatus.Closed),
+      };
+    }
+
+    function terminalOrder(overrides: Partial<Order> = {}): Order {
+      return openSellOrder({
+        orderId: createOrderId("stage-b-terminal-order"),
+        exchangeOrderId: "stage-b-exchange-order",
+        status: OrderStatus.Cancelled,
+        fillProgressShares: 3,
+        price: 0.11,
+        size: 8,
+        sizeUsdc: 0.88,
+        decisionRuleId: "PROFILE_LADDER",
+        signalReason: "profile-ladder-exit",
+        metadata: { source: "profile_ladder" },
+        ...overrides,
+      });
+    }
+
+    function persistedRecoveryState(overrides: Partial<LadderRung> = {}): LadderState {
+      return ladderState({
+        activeRungs: [
+          rung({
+            sizeShares: 10,
+            filledSizeShares: 2,
+            terminalRetryKey: "prior-terminal",
+            attemptFilledBaseShares: 2,
+            attemptSubmittedShares: 8,
+            ...overrides,
+          }),
+        ],
+      });
+    }
+
+    function persistedAttemptOrder(state: LadderState, overrides: Partial<Order> = {}): Order {
+      const attempt = state.activeRungs[0]!;
+      const signalId = `profile_ladder_${String(tokenId)}_${state.ladderId}_0_terminal_retry_${attempt.terminalRetryKey}`;
+      return terminalOrder({
+        orderId: createOrderId("accepted-retry-order"),
+        exchangeOrderId: "accepted-retry-exchange",
+        clientOrderId: buildClientOrderId({ signalId, tokenId, side: "sell" }),
+        signalId,
+        status: OrderStatus.Open,
+        fillProgressShares: null,
+        size: attempt.attemptSubmittedShares!,
+        metadata: {
+          source: "profile_ladder",
+          profileLadder: {
+            ladderId: state.ladderId,
+            rungIndex: 0,
+            attemptFilledBaseShares: attempt.attemptFilledBaseShares,
+            attemptSubmittedShares: attempt.attemptSubmittedShares,
+          },
+        },
+        ...overrides,
+      });
+    }
+
+    it("deduplicates the same adoption position across open and dust scans", async () => {
+      const candidate = position();
+      const ctx = setup(adoptionPolicy(), {
+        positionRepo: {
+          findOpen: () => [candidate],
+          findDust: () => [candidate],
+          findActiveByTokenId: () => [candidate],
+        },
+        orderRepo: { findByTokenId: () => [] },
+        isProfileOwned: () => true,
+      });
+      await ctx.module.start();
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+      await ctx.module.adoptExistingLadders();
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(
+        ctx.riskEvents.find((event) => event.eventType === "ladder_adoption_summary")?.payload,
+      ).toMatchObject({ eligible_count: 1, adopted_count: 1 });
+    });
+
+    it("re-arms an exchange-backed partial terminal attempt for only the cumulative residual", async () => {
+      let nowMs = NOW;
+      const livePosition = position({ size: 10, costBasisUsdc: 1 });
+      let terminal = terminalOrder();
+      const ctx = setup(policy(), {
+        positionRepo: positionReader([livePosition]) as any,
+        orderRepo: {
+          findByTokenId: () => [terminal],
+          findByClientOrderId: () => null,
+        },
+        profileStateReader: { getProfileState: () => "ABANDONED_DORMANT" },
+        now: () => nowMs,
+      });
+      ctx.repo.upsertLadder(
+        ladderState({
+          activeRungs: [
+            rung({
+              sizeShares: 10,
+              notionalUsd: 1.1,
+              lifecycle: "partially_filled",
+              orderId: String(terminal.orderId),
+              filledSizeShares: 2,
+              ...({ attemptFilledBaseShares: 2, attemptSubmittedShares: 8 } as any),
+            }),
+          ],
+        }),
+      );
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: nowMs });
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.orders[0]).toMatchObject({ price: 0.11, size: 5 });
+      expect(ctx.orders[0]?.metadata).toMatchObject({
+        profileLadder: {
+          attemptFilledBaseShares: 5,
+          attemptSubmittedShares: 5,
+        },
+      });
+      const firstClientOrderId = ctx.orders[0]!.clientOrderId;
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        price: 0.11,
+        sizeShares: 10,
+        filledSizeShares: 5,
+        lifecycle: "planned",
+        orderId: null,
+        terminalRetryKey: "stage-b-exchange-order",
+        attemptFilledBaseShares: 5,
+        attemptSubmittedShares: 5,
+      });
+
+      await ctx.module.stop();
+      nowMs += PLANNED_RUNG_RETRY_MS + 1;
+      await ctx.module.start();
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: nowMs });
+
+      expect(ctx.orders).toHaveLength(2);
+      expect(ctx.orders[1]).toMatchObject({ size: 5, clientOrderId: firstClientOrderId });
+
+      const filledOrderId = createOrderId("stage-b-filled-retry-order");
+      await ctx.bus.publish("OrderPlaced", orderPlaced(ctx.orders[1]!, filledOrderId));
+      terminal = terminalOrder({
+        orderId: filledOrderId,
+        exchangeOrderId: "stage-b-filled-retry-exchange",
+        status: OrderStatus.Filled,
+        fillProgressShares: null,
+        size: 5,
+      });
+      nowMs += PLANNED_RUNG_RETRY_MS + 1;
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: nowMs });
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "filled",
+        orderId: null,
+        filledSizeShares: 10,
+      });
+    });
+
+    it("keeps a live rung occupied when its local order row is missing", async () => {
+      const livePosition = position({ size: 10, costBasisUsdc: 1 });
+      const ctx = setup(policy(), {
+        positionRepo: positionReader([livePosition]) as any,
+        orderRepo: { findByTokenId: () => [], findByClientOrderId: () => null },
+      });
+      ctx.repo.upsertLadder(
+        ladderState({
+          activeRungs: [
+            rung({
+              sizeShares: 10,
+              lifecycle: "placed",
+              orderId: "missing-local-order",
+            }),
+          ],
+        }),
+      );
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "placed",
+        orderId: "missing-local-order",
+      });
+      expect(counterLabels(ctx.counters, "profile_ladder_terminal_rearm_blocked")).toContainEqual({
+        band: "medium_low",
+        reason: "missing_order",
+      });
+    });
+
+    it("adopts an accepted retry after restart and ignores its duplicate pre-submit skip", async () => {
+      const livePosition = position({ size: 10, costBasisUsdc: 1 });
+      const state = persistedRecoveryState();
+      let exchangeOrders = [persistedAttemptOrder(state)];
+      const acceptedSignalId = exchangeOrders[0]!.signalId;
+      const ctx = setup(policy(), {
+        positionRepo: positionReader([livePosition]),
+        orderRepo: {
+          findByTokenId: () => exchangeOrders,
+          findByClientOrderId: (id) =>
+            exchangeOrders.find((order) => String(order.clientOrderId) === id) ?? null,
+        },
+      });
+      ctx.repo.upsertLadder(state);
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "placed",
+        orderId: "accepted-retry-order",
+        attemptFilledBaseShares: 2,
+        attemptSubmittedShares: 8,
+      });
+
+      exchangeOrders = [
+        { ...exchangeOrders[0]!, status: OrderStatus.Cancelled, fillProgressShares: 3 },
+      ];
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW + 1 });
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.orders[0]).toMatchObject({ size: 5 });
+      expect(ctx.orders[0]?.signalId).not.toBe(acceptedSignalId);
+
+      const retry = ctx.orders[0]!;
+      exchangeOrders = [
+        persistedAttemptOrder(ctx.repo.getLadder(tokenId)!, {
+          orderId: createOrderId("accepted-residual-order"),
+          exchangeOrderId: "accepted-residual-exchange",
+          status: OrderStatus.Cancelled,
+          fillProgressShares: 1,
+        }),
+      ];
+      expect(exchangeOrders[0]?.clientOrderId).toBe(retry.clientOrderId);
+      await ctx.bus.publish("OrderSkipped", {
+        ...orderSkipped(retry),
+        reasonCode: "duplicate_client_order_id_pre_submit",
+      });
+
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "planned",
+        orderId: null,
+        filledSizeShares: 6,
+        terminalRetryKey: "accepted-residual-exchange",
+        attemptFilledBaseShares: 6,
+        attemptSubmittedShares: 0,
+        preExchangeRetryCount: 0,
+      });
+    });
+
+    it("consumes a cancelled accepted retry that became terminal before restart", async () => {
+      const state = persistedRecoveryState();
+      const terminal = persistedAttemptOrder(state, {
+        status: OrderStatus.Cancelled,
+        fillProgressShares: 3,
+      });
+      const ctx = setup(policy(), {
+        positionRepo: positionReader([position({ size: 10, costBasisUsdc: 1 })]),
+        orderRepo: { findByTokenId: () => [terminal] },
+      });
+      ctx.repo.upsertLadder(state);
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.orders[0]).toMatchObject({ size: 5 });
+      expect(ctx.orders[0]?.clientOrderId).not.toBe(terminal.clientOrderId);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        filledSizeShares: 5,
+        terminalRetryKey: "accepted-retry-exchange",
+        attemptFilledBaseShares: 5,
+        attemptSubmittedShares: 5,
+        preExchangeRetryCount: 0,
+      });
+    });
+
+    it("consumes a filled accepted retry with null progress before restart", async () => {
+      const state = persistedRecoveryState();
+      const filled = persistedAttemptOrder(state, { status: OrderStatus.Filled });
+      const ctx = setup(policy(), {
+        positionRepo: positionReader([position({ size: 10, costBasisUsdc: 1 })]),
+        orderRepo: { findByTokenId: () => [filled] },
+      });
+      ctx.repo.upsertLadder(state);
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "filled",
+        orderId: null,
+        filledSizeShares: 10,
+      });
+    });
+
+    it("fails closed when persisted attempt evidence has the wrong deterministic client id", async () => {
+      const state = persistedRecoveryState();
+      const spoof = persistedAttemptOrder(state, {
+        clientOrderId: "wrong-client-order-id" as ClientOrderId,
+      });
+      const ctx = setup(policy(), {
+        positionRepo: positionReader([position({ size: 10, costBasisUsdc: 1 })]),
+        orderRepo: { findByTokenId: () => [spoof] },
+      });
+      ctx.repo.upsertLadder(state);
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+
+      expect(ctx.orders).toHaveLength(0);
+      const preserved = ctx.repo.getLadder(tokenId)?.activeRungs[0];
+      expect(preserved).toMatchObject({
+        lifecycle: "planned",
+        orderId: null,
+      });
+      expect(preserved?.preExchangeRetryCount).toBeUndefined();
+    });
+
+    it("keeps an exact exchange-less rejection on bounded pre-exchange retry", async () => {
+      const state = persistedRecoveryState();
+      const rejected = persistedAttemptOrder(state, {
+        exchangeOrderId: null,
+        status: OrderStatus.Rejected,
+        fillProgressShares: 0,
+      });
+      const ctx = setup(policy(), {
+        positionRepo: positionReader([position({ size: 10, costBasisUsdc: 1 })]),
+        orderRepo: { findByTokenId: () => [rejected] },
+      });
+      ctx.repo.upsertLadder(state);
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "planned",
+        orderId: null,
+        preExchangeRetryCount: 1,
+        attemptSubmittedShares: 0,
+      });
+    });
+
+    it("persists and bounds pre-exchange retries across OrderRejected and OrderSkipped", async () => {
+      let nowMs = NOW;
+      const livePosition = position({ size: 10, costBasisUsdc: 1 });
+      const ctx = setup(policy(), {
+        positionRepo: positionReader([livePosition]) as any,
+        orderRepo: { findByTokenId: () => [], findByClientOrderId: () => null },
+        now: () => nowMs,
+      });
+      ctx.repo.upsertLadder(
+        ladderState({ activeRungs: [rung({ sizeShares: 10, notionalUsd: 1.1 })] }),
+      );
+      await ctx.module.start();
+
+      for (let failure = 0; failure <= 3; failure += 1) {
+        await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: nowMs });
+        const command = ctx.orders.at(-1)!;
+        expect(String(command.signalId)).toMatch(
+          failure === 0 ? /_0$/ : new RegExp(`_pre_retry${failure}$`),
+        );
+        await ctx.bus.publish(
+          failure === 1 ? "OrderSkipped" : "OrderRejected",
+          failure === 1
+            ? { ...orderSkipped(command), timestamp: nowMs }
+            : { ...orderRejected(command), timestamp: nowMs },
+        );
+        expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+          preExchangeRetryCount: failure + 1,
+          lifecycle: "planned",
+          orderId: null,
+        });
+        nowMs += PLANNED_RUNG_RETRY_MS + 1;
+      }
+
+      await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: nowMs });
+
+      expect(ctx.orders).toHaveLength(4);
+      expect(counterLabels(ctx.counters, "profile_ladder_pre_exchange_retry_exhausted")).toEqual([
+        { band: "medium_low" },
+      ]);
+    });
+
+    it("services dormant dust, but fails closed for ambiguous and QD-owned positions", async () => {
+      const dust = position({ status: PositionStatus.Dust, size: 10, costBasisUsdc: 1 });
+      const recoverable = ladderState({
+        activeRungs: [
+          rung({
+            sizeShares: 10,
+            notionalUsd: 1.1,
+            ...({ terminalRetryKey: "prior-terminal", attemptFilledBaseShares: 0 } as any),
+          }),
+        ],
+      });
+      const dormant = setup(policy(), {
+        positionRepo: positionReader([dust]) as any,
+        orderRepo: { findByTokenId: () => [], findByClientOrderId: () => null },
+        isDormant: () => true,
+        profileStateReader: { getProfileState: () => "ABANDONED_DORMANT" },
+      });
+      dormant.repo.upsertLadder(recoverable);
+      await dormant.module.start();
+      await dormant.bus.publish("NormalizedMarketUpdated", {
+        markets: [market()],
+        timestamp: NOW,
+      });
+      expect(dormant.orders).toHaveLength(1);
+
+      for (const [name, rows, profileState] of [
+        ["ambiguous", [dust, position({ positionId: createPositionId("duplicate-active") })], null],
+        ["qd", [dust], "QD_HANDOFF"],
+        ["closed", [dust], "CLOSED"],
+      ] as const) {
+        const blocked = setup(policy(), {
+          positionRepo: positionReader([...rows]) as any,
+          orderRepo: { findByTokenId: () => [], findByClientOrderId: () => null },
+          profileStateReader: { getProfileState: () => profileState as ProfileState | null },
+        });
+        blocked.repo.upsertLadder(recoverable);
+        await blocked.module.start();
+        await blocked.bus.publish("NormalizedMarketUpdated", {
+          markets: [market()],
+          timestamp: NOW,
+        });
+        expect(blocked.orders, name).toHaveLength(0);
+      }
+    });
+
+    it("reopens only stale-no-position dust and suppresses a stable sub-min residual", async () => {
+      const dust = position({ status: PositionStatus.Dust, size: 2, costBasisUsdc: 0.2 });
+      const ctx = setup(policy(), {
+        positionRepo: positionReader([dust]) as any,
+        orderRepo: { findByTokenId: () => [], findByClientOrderId: () => null },
+        isProfileOwned: () => true,
+        profileStateReader: { getProfileState: () => "ABANDONED_DORMANT" },
+      });
+      ctx.repo.upsertLadder(
+        ladderState({
+          status: "closed",
+          closedAtMs: NOW - 1,
+          metadataJson: JSON.stringify({ closeReason: "stale_no_open_position" }),
+          activeRungs: [
+            rung({
+              price: 0.11,
+              sizeShares: 5,
+              notionalUsd: 0.55,
+              filledSizeShares: 3,
+              ...({ terminalRetryKey: "legacy-terminal" } as any),
+            }),
+          ],
+        }),
+      );
+      await ctx.module.start();
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ minOrderSize: 5 })],
+        timestamp: NOW,
+      });
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ minOrderSize: 5 })],
+        timestamp: NOW + 1,
+      });
+
+      expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+        status: "active",
+        closedAtMs: null,
+        activeRungs: [{ price: 0.11, sizeShares: 5, filledSizeShares: 3 }],
+      });
+      expect(ctx.orders).toHaveLength(0);
+      expect(counterLabels(ctx.counters, "profile_ladder_residual_below_min_order")).toEqual([
+        { band: "medium_low" },
+      ]);
+
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ minOrderSize: 1 })],
+        timestamp: NOW + 2,
+      });
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.orders[0]).toMatchObject({ price: 0.11, size: 2 });
     });
   });
 

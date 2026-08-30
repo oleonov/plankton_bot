@@ -80,7 +80,16 @@ describe("SqliteProfileLadderRepository", () => {
     repo.upsertLadder(
       state({
         ladderId: "profile_ladder_updated",
-        activeRungs: [rung({ price: 0.13, multiplier: 1.3 })],
+        activeRungs: [
+          rung({
+            price: 0.13,
+            multiplier: 1.3,
+            terminalRetryKey: "exchange-order-1",
+            attemptFilledBaseShares: 3,
+            attemptSubmittedShares: 7,
+            preExchangeRetryCount: 2,
+          }),
+        ],
         lastCostBasisUsdc: 30,
         updatedAtMs: 1_797_376_500_000,
       }),
@@ -91,7 +100,16 @@ describe("SqliteProfileLadderRepository", () => {
       conditionId,
       ladderId: "profile_ladder_updated",
       band: "medium_low",
-      activeRungs: [{ price: 0.13, multiplier: 1.3 }],
+      activeRungs: [
+        {
+          price: 0.13,
+          multiplier: 1.3,
+          terminalRetryKey: "exchange-order-1",
+          attemptFilledBaseShares: 3,
+          attemptSubmittedShares: 7,
+          preExchangeRetryCount: 2,
+        },
+      ],
       lastCostBasisUsdc: 30,
       updatedAtMs: 1_797_376_500_000,
     });

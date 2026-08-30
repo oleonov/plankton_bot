@@ -1201,6 +1201,14 @@ export interface LadderRung {
   lifecycle: RungLifecycle;
   orderId: string | null;
   filledSizeShares: number;
+  /** Exchange-backed terminal lineage used to deterministically re-arm this exact rung. */
+  terminalRetryKey?: string;
+  /** Cumulative rung fills already accounted for before the current placement attempt. */
+  attemptFilledBaseShares?: number;
+  /** Residual shares submitted by the current placement attempt. */
+  attemptSubmittedShares?: number;
+  /** Persisted count of bounded failures before an order reached the exchange. */
+  preExchangeRetryCount?: number;
   // GAP-2: set when the raw ladder price fell below the avg-entry tick floor and
   // was clamped up to it. Observability only; absent when no clamp occurred.
   floored?: true;
