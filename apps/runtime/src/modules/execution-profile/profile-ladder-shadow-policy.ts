@@ -8,7 +8,7 @@ import type {
 
 import { ceilToTick, resolvePositiveSellFloor } from "../../executable-price.js";
 import {
-  fitRungsToMinNotional,
+  fitRungsToMinOrderSize,
   wouldCrossProfileLadderPostOnly,
 } from "./profile-ladder-builder.js";
 
@@ -228,7 +228,7 @@ function computeCandidateResult(
       },
     ];
   });
-  const collapsed = fitRungsToMinNotional(rawRungs, input.positionSizeShares, input.minOrderSize);
+  const collapsed = fitRungsToMinOrderSize(rawRungs, input.positionSizeShares, input.minOrderSize);
   const candidateRungs = collapsed.map((rung): ProfileLadderShadowCandidateRung => {
     const targetKind = resolveTargetKindForMultiplier(
       rung.multiplier,

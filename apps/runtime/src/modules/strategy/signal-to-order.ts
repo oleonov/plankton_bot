@@ -909,6 +909,10 @@ export class SignalToOrderBridge {
         });
         return;
       }
+      const bounceTargetSatisfiedAtSignal = isBounceTargetSatisfiedAtBook(
+        signal,
+        baseMarket.bestBid,
+      );
 
       // Pricing: optionally fold in a fresher candidate book on top of the
       // embedded base so the order price reflects the newest observed top of
@@ -924,6 +928,7 @@ export class SignalToOrderBridge {
         policy,
         pricing.book ?? null,
         trackRFeeQuote,
+        bounceTargetSatisfiedAtSignal,
       );
       const canary = this.buildDeadSideCanary(signal, market, policy);
       // F2: shadow telemetry measures the raw (pre-cap) anchor; the cap only
@@ -1958,11 +1963,13 @@ export class SignalToOrderBridge {
         // same provenance marker as tryMakerEntryOverride's BUY-side maker
         // entries — makerOverride is BUY-only (R23_DIP_TRIGGER_RULE_ID), so
         // this SELL case is handled as its own branch here.
-        ...(makerOverride != null || executionTerms.pricedMode === "bounce-exit-target"
+        ...(makerOverride != null
           ? { postOnly: true as const, entryStyle: "maker" as const }
-          : executionTerms.postOnly !== undefined
-            ? { postOnly: executionTerms.postOnly }
-            : {}),
+          : executionTerms.pricedMode === "bounce-exit-target"
+            ? { postOnly: true as const, entryStyle: "maker" as const }
+            : executionTerms.postOnly !== undefined
+              ? { postOnly: executionTerms.postOnly }
+              : {}),
         orderType: "GTC",
         tickSize: executionTerms.tickSize,
         negRisk: market.negRisk,
@@ -2780,6 +2787,7 @@ export class SignalToOrderBridge {
     policy: ExecutionPolicy,
     book: OrderBookSnapshot | null,
     trackRFeeQuote: TrackRFeeQuote | null,
+    bounceTargetSatisfiedAtSignal: boolean,
   ): ExecutionTermsResolution {
     const isRelayer = this.deps.liveLiteGuard?.getWalletMode() === "relayer";
     const pricing = policy.pricing;
@@ -2844,12 +2852,9 @@ export class SignalToOrderBridge {
     // Bounce-exit resting rung (docs/plans/2026-07-16-bounce-exit-ladder-
     // redesign.md): the rung's price is the ladder target computed upstream
     // by decision-planner.ts (evaluateBounceExit) and carried verbatim as
-    // signal.suggestedPrice — unconditional (no config gating), same
-    // rationale as the ladder-price branch above. Only tick-bounds validation
-    // applies; the plankton sell-cap is bypassed separately in
-    // applySellPriceCap. A post-only price that would cross the live bid is
-    // caught downstream by execution-module.ts's generic
-    // getPostOnlyCrossPreSubmitSkip (reprice next tick), not here.
+    // signal.suggestedPrice. Once the live bid satisfies that floor, submit a
+    // non-postOnly GTC limit at the same target; it can fill now or rest if the
+    // book moves, but it can never execute below the immutable target.
     if (signal.side === "sell" && signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID) {
       const targetPrice = signal.suggestedPrice;
       if (!Number.isFinite(targetPrice) || targetPrice <= 0 || !Number.isFinite(pricingTickSize)) {
@@ -2870,8 +2875,10 @@ export class SignalToOrderBridge {
         kind: "ok",
         price: targetPrice,
         tickSize: effectiveTick.tickSize,
-        postOnly: true,
-        pricedMode: "bounce-exit-target",
+        postOnly: !bounceTargetSatisfiedAtSignal,
+        pricedMode: bounceTargetSatisfiedAtSignal
+          ? "bounce-exit-target-satisfied"
+          : "bounce-exit-target",
       };
       return normalizeExecutionTerms(ok, signal, effectiveTick);
     }
@@ -4581,7 +4588,22 @@ type OrderPricedMode =
   | "bounded-midpoint"
   | "taker"
   | "ladder"
-  | "bounce-exit-target";
+  | "bounce-exit-target"
+  | "bounce-exit-target-satisfied";
+
+function isBounceTargetSatisfiedAtBook(
+  signal: RuntimeEventMap["SignalApproved"]["signal"],
+  bestBid: number | null,
+): boolean {
+  return (
+    signal.side === "sell" &&
+    signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+    Number.isFinite(signal.suggestedPrice) &&
+    typeof bestBid === "number" &&
+    Number.isFinite(bestBid) &&
+    bestBid >= signal.suggestedPrice
+  );
+}
 
 export type DeadSideBucket = "<0" | "<1m" | "1-5m" | "5-15m" | "15-60m" | "1-4h" | ">4h";
 

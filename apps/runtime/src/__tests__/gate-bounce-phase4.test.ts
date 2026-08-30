@@ -229,6 +229,7 @@ async function runBridge(
     positionRepo?: Partial<Pick<PositionRepository, "findById" | "findByTokenId">>;
     inventoryLotRepo?: InventoryLotRepository;
     candidateBookCache?: unknown;
+    runtimeMetrics?: unknown;
   },
 ) {
   const bus = new InProcessEventBus();
@@ -244,6 +245,7 @@ async function runBridge(
     positionRepo: options?.positionRepo as unknown as PositionRepository | undefined,
     inventoryLotRepo: options?.inventoryLotRepo,
     candidateBookCache: options?.candidateBookCache as never,
+    runtimeMetrics: options?.runtimeMetrics as never,
     now: () => NOW,
   });
   bridge.subscribe();
@@ -364,6 +366,77 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TARGET maker command", () => {
       originalTargetPrice: targetPrice,
       policyControlRevision: 55,
     });
+    expect(placed[0]!.metadata?.executionPricingMode).toBe("bounce-exit-target");
+  });
+
+  it("submits the immutable target as a non-postOnly GTC limit once bestBid reaches it", async () => {
+    const targetPrice = 0.19;
+    const runtimeMetrics = { writeCounter: vi.fn() };
+    const candidateBookCache = {
+      getFreshEntry: vi.fn(() => ({
+        tokenId: String(TOKEN_ID),
+        snapshotTs: NOW,
+        cachedAtMs: NOW,
+        sourcePolledAtMs: NOW,
+        bookSource: "clob" as const,
+        sourceKind: "ws" as const,
+        book: {
+          tokenId: TOKEN_ID,
+          bids: [{ price: 0.18, size: 100 }],
+          asks: [{ price: 0.3, size: 100 }],
+          minOrderSize: 5,
+          timestamp: NOW,
+        },
+      })),
+    };
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: targetPrice,
+      suggestedSize: 10,
+      suggestedSizeUsdc: 1.9,
+      bounceRung: {
+        ladderId: "bounce-target-satisfied",
+        rungIndex: 0,
+        anchorPrice: 0.15,
+        fraction: 1,
+        originalPositionSize: 10,
+        remainingPositionSize: 10,
+      },
+    });
+    const { placed, skipped } = await runBridge(
+      signal,
+      {
+        bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, mode: "micro_live" },
+        bounceAskCapture: {
+          enabled: true,
+          sourceCohortActivatedAtUtc: "2026-08-23T06:01:10.000Z",
+          maxRepricesPerRoot: 5,
+        },
+      },
+      {
+        marketOverrides: { bestBid: targetPrice, bestAsk: 0.3, tickSize: 0.01 },
+        candidateBookCache,
+        runtimeMetrics,
+      },
+    );
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]).toMatchObject({
+      price: targetPrice,
+      postOnly: false,
+      orderType: "GTC",
+    });
+    expect(placed[0]!.entryStyle).not.toBe("maker");
+    expect(placed[0]!.metadata?.executionPricingMode).toBe("bounce-exit-target-satisfied");
+    expect(placed[0]!.metadata?.cacheStatus).toBe("fresh-cache");
+    expect(candidateBookCache.getFreshEntry).toHaveBeenCalled();
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "order_priced_mode_total",
+      1,
+      JSON.stringify({ mode: "bounce-exit-target-satisfied", side: "sell" }),
+    );
   });
 
   it("places a proven BID+1 cohort exit one tick below the external ask above its target floor", async () => {
@@ -1530,6 +1603,50 @@ describe("ExecutionModule — BOUNCE_EXIT_TARGET / BOUNCE_EXIT_BACKSTOP executio
     expect(gateway.placeOrder).not.toHaveBeenCalled();
     expect(skipped).toHaveLength(1);
     expect(placed).toHaveLength(0);
+
+    await mod.stop();
+  });
+
+  it("places a target-satisfied non-postOnly GTC limit instead of applying the maker crossing skip", async () => {
+    const { bus, gateway, mod } = makeExecModule();
+    await mod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket({ bestBid: 0.19, bestAsk: 0.2 })],
+      timestamp: NOW,
+    });
+
+    const skipped: unknown[] = [];
+    const placed: unknown[] = [];
+    bus.subscribe("OrderSkipped", async (payload) => void skipped.push(payload));
+    bus.subscribe("OrderPlaced", async (payload) => void placed.push(payload));
+
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("cmd-bounce-target-satisfied"),
+        clientOrderId: "plk_bounce_target_satisfied" as ClientOrderId,
+        source: "strategy",
+        tokenId: TOKEN_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        size: 50,
+        price: 0.19,
+        postOnly: false,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+        sequenceInTick: 0,
+        signalReason: "probe-entry",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      } satisfies PlaceOrderCommand,
+      timestamp: NOW,
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ price: 0.19, postOnly: false, orderType: "GTC" }),
+    );
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
 
     await mod.stop();
   });

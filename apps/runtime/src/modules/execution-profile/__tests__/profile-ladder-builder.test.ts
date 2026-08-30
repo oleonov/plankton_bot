@@ -10,7 +10,7 @@ import {
 } from "@krabs/domain";
 import { describe, expect, it, vi } from "vitest";
 
-import { computeProfileLadder, fitRungsToMinNotional } from "../profile-ladder-builder.js";
+import { computeProfileLadder, fitRungsToMinOrderSize } from "../profile-ladder-builder.js";
 import {
   computeProfileLadderShadowEvaluation,
   resolveProfileLadderShadowEntryBand,
@@ -214,25 +214,32 @@ describe("computeProfileLadder", () => {
     ).toMatchObject({ ok: false, reason: "band_disabled", band: "medium_low" });
   });
 
-  it("skips rungs that cannot satisfy Polymarket min order size", () => {
-    expect(
-      computeProfileLadder(
-        input({ avgEntryPrice: 0.1, costBasisUsd: 25, positionSizeShares: 10, minOrderSize: 5 }),
-      ),
-    ).toMatchObject({ ok: false, reason: "below_min_order_size", band: "medium_low" });
+  it("accepts exactly five low-price shares because minOrderSize is denominated in shares", () => {
+    const result = computeProfileLadder(
+      input({ avgEntryPrice: 0.04, costBasisUsd: 0.2, positionSizeShares: 5, minOrderSize: 5 }),
+    );
+
+    expect(result).toMatchObject({ ok: true, activeRungCount: 1 });
+    if (!result.ok) throw new Error("expected ladder");
+    expect(result.rungs[0]).toMatchObject({ sizeShares: 5 });
   });
 
-  it("skips placement when even one merged rung cannot satisfy min order notional", () => {
+  it("rejects 4.999 shares against a five-share exchange minimum", () => {
     expect(
       computeProfileLadder(
-        input({ avgEntryPrice: 0.1, costBasisUsd: 1.5, positionSizeShares: 15, minOrderSize: 2 }),
+        input({
+          avgEntryPrice: 0.04,
+          costBasisUsd: 0.2,
+          positionSizeShares: 4.999,
+          minOrderSize: 5,
+        }),
       ),
-    ).toMatchObject({ ok: false, reason: "below_min_order_size", band: "medium_low" });
+    ).toMatchObject({ ok: false, reason: "below_min_order_size", band: "cheap" });
   });
 
   it("merges undersized rungs into the largest neighbor before reducing rung count", () => {
     const result = computeProfileLadder(
-      input({ avgEntryPrice: 0.1, costBasisUsd: 5, positionSizeShares: 50, minOrderSize: 4 }),
+      input({ avgEntryPrice: 0.1, costBasisUsd: 5, positionSizeShares: 10, minOrderSize: 5 }),
     );
 
     expect(result).toMatchObject({ ok: true, band: "medium_low", activeRungCount: 1 });
@@ -240,15 +247,15 @@ describe("computeProfileLadder", () => {
     expect(result.rungs).toHaveLength(1);
     expect(result.rungs[0]).toMatchObject({
       rungIndex: 0,
-      multiplier: 1.3,
-      price: 0.13,
-      sizeShares: 50,
+      multiplier: 1.1,
+      price: 0.11,
+      sizeShares: 10,
       sizingFraction: 1,
-      notionalUsd: 6.5,
+      notionalUsd: 1.1,
     });
   });
 
-  it("keeps four rungs when every rung satisfies min order notional", () => {
+  it("keeps four rungs when every rung satisfies min order size", () => {
     const result = computeProfileLadder(
       input({ avgEntryPrice: 0.1, costBasisUsd: 50, positionSizeShares: 500, minOrderSize: 1 }),
     );
@@ -256,7 +263,7 @@ describe("computeProfileLadder", () => {
     expect(result).toMatchObject({ ok: true, activeRungCount: 4 });
     if (!result.ok) throw new Error("expected ladder");
     expect(result.rungs).toHaveLength(4);
-    expect(result.rungs.every((rung) => rung.notionalUsd >= 1)).toBe(true);
+    expect(result.rungs.every((rung) => rung.sizeShares >= 1)).toBe(true);
   });
 
   it("fails closed on invalid BBO or tick size", () => {
@@ -604,7 +611,7 @@ describe("ProfileLadder Plankton shadow policy", () => {
       rungForTest({ rungIndex: 0, price: 0.01, sizeShares: 35, notionalUsd: 0.35 }),
       rungForTest({ rungIndex: 1, price: 0.018, sizeShares: 15, notionalUsd: 0.27 }),
     ];
-    const expected = fitRungsToMinNotional(rawRungs, 50, 0.5);
+    const expected = fitRungsToMinOrderSize(rawRungs, 50, 20);
     const evaluation = computeProfileLadderShadowEvaluation({
       avgEntryPrice: 0.004,
       costBasisUsd: 0.62,
@@ -613,7 +620,7 @@ describe("ProfileLadder Plankton shadow policy", () => {
       bestBid: 0.001,
       bestAsk: 0.5,
       tickSize: 0.001,
-      minOrderSize: 0.5,
+      minOrderSize: 20,
       config: { ...config.shadowPlanktonPolicy, variants: ["cheap_tail"] },
       currentRungs: [rungForTest({ sizingFraction: 0.7 }), rungForTest({ sizingFraction: 0.3 })],
     });

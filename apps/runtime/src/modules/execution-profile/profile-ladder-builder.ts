@@ -64,7 +64,7 @@ export function computeProfileLadder(input: LadderBuilderInput): LadderBuilderOu
     };
   });
 
-  const rungs = fitRungsToMinNotional(initialRungs, input.positionSizeShares, input.minOrderSize);
+  const rungs = fitRungsToMinOrderSize(initialRungs, input.positionSizeShares, input.minOrderSize);
   if (rungs.length === 0) {
     return { ok: false, reason: "below_min_order_size", band };
   }
@@ -129,16 +129,16 @@ function normalizeActiveSizing(raw: readonly number[], count: number): number[] 
   return active.map((value) => roundRatio(value / sum));
 }
 
-export function fitRungsToMinNotional(
+export function fitRungsToMinOrderSize(
   rawRungs: readonly LadderRung[],
   positionSizeShares: number,
-  minOrderNotionalUsd: number,
+  minOrderSize: number,
 ): LadderRung[] {
   let rungs = [...rawRungs];
-  while (rungs.some((rung) => rung.notionalUsd + 1e-9 < minOrderNotionalUsd)) {
+  while (rungs.some((rung) => rung.sizeShares + 1e-9 < minOrderSize)) {
     if (rungs.length <= 1) return [];
 
-    const violatingIndex = rungs.findIndex((rung) => rung.notionalUsd + 1e-9 < minOrderNotionalUsd);
+    const violatingIndex = rungs.findIndex((rung) => rung.sizeShares + 1e-9 < minOrderSize);
     const neighborIndex = chooseLargestNeighborIndex(rungs, violatingIndex);
     const violating = rungs[violatingIndex]!;
     const neighbor = rungs[neighborIndex]!;
@@ -166,7 +166,7 @@ function chooseLargestNeighborIndex(rungs: readonly LadderRung[], index: number)
   if (left == null && right == null) return index;
   if (left == null) return right!;
   if (right == null) return left;
-  return rungs[left]!.notionalUsd >= rungs[right]!.notionalUsd ? left : right;
+  return rungs[left]!.sizeShares >= rungs[right]!.sizeShares ? left : right;
 }
 
 function isValidBbo(bestBid: number | null, bestAsk: number | null): boolean {

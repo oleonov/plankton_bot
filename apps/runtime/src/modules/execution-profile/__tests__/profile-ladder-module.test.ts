@@ -1263,7 +1263,7 @@ describe("ProfileLadderModule", () => {
     });
   });
 
-  it("does not place a planned rung whose notional is below the live-lite fallback floor", async () => {
+  it("places five low-price shares even when their notional is below the live-lite fallback size", async () => {
     let nowMs = NOW;
     const ctx = setup(policy(), {
       modeReader: { getMode: () => "flat" },
@@ -1278,9 +1278,9 @@ describe("ProfileLadderModule", () => {
           rung({
             lifecycle: "planned",
             orderId: null,
-            price: 0.2,
-            sizeShares: 2.5,
-            notionalUsd: 0.5,
+            price: 0.04,
+            sizeShares: 5,
+            notionalUsd: 0.2,
           }),
         ],
       }),
@@ -1288,21 +1288,17 @@ describe("ProfileLadderModule", () => {
     nowMs = NOW + PLANNED_RUNG_RETRY_MS + 1;
 
     await ctx.bus.publish("NormalizedMarketUpdated", {
-      markets: [market({ minOrderSize: null })],
+      markets: [market({ bestBid: 0.03, bestAsk: 0.05, midPrice: 0.04, minOrderSize: null })],
       timestamp: nowMs,
     });
 
-    expect(ctx.orders).toHaveLength(0);
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]).toMatchObject({ price: 0.04, size: 5 });
     expect(ctx.counters).toContainEqual({
       name: "profile_ladder_min_order_fallback_total",
       value: 1,
-      labels: '{"band":"medium_low","result":"below_fallback_min_order"}',
+      labels: '{"band":"medium_low","result":"fallback_used"}',
     });
-    expect(
-      counterLabels(ctx.counters, "profile_ladder_min_order_fallback_total").filter(
-        (labels) => labels.result === "fallback_used",
-      ),
-    ).toHaveLength(0);
   });
 
   it("skips a crossing planned rung before consulting the live-lite fallback", async () => {
@@ -2862,18 +2858,18 @@ describe("ProfileLadderModule", () => {
     });
 
     it("does not abandon a candidate whose rung is below the min order size, and places once the size grows valid", async () => {
-      // A position too small to clear the min order notional yields a rejected
+      // A position too small to clear the min order size yields a rejected
       // plan (no placement, no abandon-streak increment). Regression guard: a
       // below-min condition must never latch off exit coverage, and recovery must
       // resume the moment the position size grows enough to clear the floor.
       const { ctx, clock, positionRef } = abandonmentHarness(() => null);
       await ctx.module.start();
 
-      // 3 shares * 0.26 ≈ 0.78 notional < the 1.0 min order size → plan rejected.
+      // 0.999 shares < the 1-share min order size → plan rejected.
       positionRef.current = position({
         avgEntryPrice: 0.259945,
-        costBasisUsdc: 0.78,
-        size: 3,
+        costBasisUsdc: 0.259685,
+        size: 0.999,
       });
       for (let pass = 0; pass < MAX_RECOVERY_ZERO_PLACED_RECOVERIES + 2; pass += 1) {
         await fireRecoveryPass(ctx, clock);

@@ -1955,11 +1955,13 @@ function buildSignalOrSuppression(args: {
   // cooldown, regardless of which rule produced the SELL. BUY is never gated here.
   // BOUNCE_EXIT_BACKSTOP is the near-resolution force-exit
   // (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md) and must bypass this
-  // guard — the resting BOUNCE_EXIT_TARGET rungs still respect it.
+  // guard. A target rung bypasses it only when this live bid already satisfies
+  // its immutable explicit target; below-target rungs keep the guard unchanged.
   if (
     decision.action === "SELL" &&
     input.sellLoopGuard?.blocked &&
-    !isBounceForceExit({ side: decision.action, decisionRuleId: decision.ruleId })
+    !isBounceForceExit({ side: decision.action, decisionRuleId: decision.ruleId }) &&
+    !isBounceTargetSatisfiedByLiveBid(decision, market)
   ) {
     const guard = input.sellLoopGuard;
     args.sideEffects.push({
@@ -2042,6 +2044,25 @@ function buildSignalOrSuppression(args: {
     sideEffects: args.sideEffects,
     signal: signalDraft,
   };
+}
+
+function isBounceTargetSatisfiedByLiveBid(
+  decision: {
+    action: TradeDecisionAction;
+    ruleId: string;
+    explicitPrice?: number;
+  },
+  market: NormalizedMarket,
+): boolean {
+  return (
+    decision.action === "SELL" &&
+    decision.ruleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+    typeof decision.explicitPrice === "number" &&
+    Number.isFinite(decision.explicitPrice) &&
+    typeof market.bestBid === "number" &&
+    Number.isFinite(market.bestBid) &&
+    market.bestBid >= decision.explicitPrice
+  );
 }
 
 function pushLegacyGuardFiredOnProfileOwned(args: {

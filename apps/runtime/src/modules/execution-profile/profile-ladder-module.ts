@@ -1799,7 +1799,7 @@ export class ProfileLadderModule implements RuntimeModule {
   }
 
   // Defends the conservative fallback floor at the placement source: a planned
-  // rung whose notional is below the fallback min order size never goes live.
+  // rung whose share quantity is below the fallback min order size never goes live.
   // Non-fallback hydration (base market / book cache) already carries an
   // authoritative min order size, so it clears unconditionally.
   private clearsFallbackMinOrder(
@@ -1808,7 +1808,7 @@ export class ProfileLadderModule implements RuntimeModule {
     rung: LadderRung,
   ): boolean {
     if (marketData.minOrderSource !== "fallback") return true;
-    if (!isExecutableOrderSize(rung.notionalUsd, marketData.effectiveMinOrderSize)) {
+    if (!isExecutableOrderSize(rung.sizeShares, marketData.effectiveMinOrderSize)) {
       this.writeCounter("profile_ladder_min_order_fallback_total", 1, {
         band,
         result: "below_fallback_min_order",

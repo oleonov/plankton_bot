@@ -573,11 +573,26 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
     };
   }
 
-  // A resting BOUNCE_EXIT_TARGET rung still respects the sell-loop guard —
-  // only a BOUNCE_EXIT_BACKSTOP force-exit gets a carve-out (unreachable in
-  // this phase; see isBounceForceExit's own coverage in bounce-exit.test.ts).
-  it("is suppressed by a blocked sellLoopGuard", () => {
-    const result = evaluateDecisionPlan(input({ sellLoopGuard: guardSnapshot() }));
+  it("bypasses a blocked sellLoopGuard when the live best bid satisfies the immutable target", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        market: market({ bestBid: 0.12, bestAsk: 0.13, midPrice: 0.125 }),
+        sellLoopGuard: guardSnapshot(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.decisionRuleId).toBe(BOUNCE_EXIT_TARGET_RULE_ID);
+    expect(result.signal.suggestedPrice).toBeCloseTo(0.12, 10);
+  });
+
+  it("keeps a below-target BOUNCE_EXIT_TARGET suppressed by the sellLoopGuard", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        market: market({ bestBid: 0.11, bestAsk: 0.13, midPrice: 0.12 }),
+        sellLoopGuard: guardSnapshot(),
+      }),
+    );
     expect(result.type).toBe("none");
     expect(result.suppressions.map((item) => item.reasonCode)).toContain(SELL_LOOP_GUARD_REASON);
   });
