@@ -237,6 +237,9 @@ interface BuildAndPlaceOptions {
   ladderIdSuffix?: string;
 }
 
+type LadderRebuildReason = "scale_in" | "profile_reclass" | "bbo_major" | "bbo_strong";
+type PostRefillReplacementTrigger = "low_coverage" | "scale_in_stale_price";
+
 type PendingProfileLadderRung = {
   tokenId: TokenId;
   ladderId: string;
@@ -261,6 +264,7 @@ export interface PostRefillStaleLiveRungDecision {
   priceDistanceImprovementPct: number;
   coverageBucket: string;
   priceDistanceBucket: string;
+  trigger: PostRefillReplacementTrigger;
 }
 
 export interface PostRefillLiveRungEvaluation {
@@ -576,7 +580,7 @@ export class ProfileLadderModule implements RuntimeModule {
   async rebuildLadder(
     position: Position,
     market: NormalizedMarket,
-    reason: "scale_in" | "profile_reclass" | "bbo_major" | "bbo_strong",
+    reason: LadderRebuildReason,
   ): Promise<void> {
     if (isBboReason(reason) && this.isBboCooldownActive(position.tokenId)) return;
     const existing = this.reconcileRungLiveness(this.deps.repository.getLadder(position.tokenId));
@@ -596,6 +600,11 @@ export class ProfileLadderModule implements RuntimeModule {
       return;
     }
 
+    const allowHealthyCoverageReplacement = isCausalScaleInBasisIncrease(
+      existing,
+      position,
+      reason,
+    );
     const result = await this.buildAndPlace(position, market, "ladder_rebuilt");
     if (result == null) return;
     const { state } = result;
@@ -614,7 +623,12 @@ export class ProfileLadderModule implements RuntimeModule {
       rungCount: state.activeRungs.length,
       ladderId: state.ladderId,
     });
-    await this.recordPostRefillFollowThrough(position, market, state);
+    await this.recordPostRefillFollowThrough(
+      position,
+      market,
+      state,
+      allowHealthyCoverageReplacement,
+    );
   }
 
   async cancelLadder(tokenId: TokenId, reason: "position_closed" | "operator"): Promise<void> {
@@ -2325,6 +2339,7 @@ export class ProfileLadderModule implements RuntimeModule {
     position: Position,
     market: NormalizedMarket,
     state: LadderState,
+    allowHealthyCoverageReplacement: boolean,
   ): Promise<void> {
     const config = resolvePostRefillFollowThroughConfig(this.policy());
     if (!config.enabled) return;
@@ -2335,6 +2350,7 @@ export class ProfileLadderModule implements RuntimeModule {
       position,
       market,
       config,
+      allowHealthyCoverageReplacement,
     });
     if (evaluation == null) return;
 
@@ -2354,6 +2370,13 @@ export class ProfileLadderModule implements RuntimeModule {
     if (decision == null) return;
 
     this.writeCounter("profile_ladder_stale_live_rung_detected_total", 1, labels);
+    this.writeCounter("profile_ladder_replacement_trigger_total", 1, {
+      action: labels.action,
+      band: labels.band,
+      mode: labels.mode,
+      state: labels.state,
+      trigger: decision.trigger,
+    });
     this.writeCounter("profile_ladder_replacement_candidate_total", 1, {
       action: labels.action,
       band: labels.band,
@@ -2377,6 +2400,7 @@ export class ProfileLadderModule implements RuntimeModule {
         mode: state.lastMode,
         profileState,
         reason: "intended_active_blocked",
+        trigger: decision.trigger,
         liveCoverageRatio: decision.liveCoverageRatio,
         liveProfileLadderSellShares: decision.liveProfileLadderSellShares,
         positionSizeShares: position.size,
@@ -2486,6 +2510,7 @@ export class ProfileLadderModule implements RuntimeModule {
       band: state.band,
       mode: state.lastMode,
       profileState,
+      trigger: decision.trigger,
     });
   }
 
@@ -2748,8 +2773,9 @@ export function evaluatePostRefillLiveRung(input: {
   position: Position;
   market: NormalizedMarket;
   config: ExecutionProfilePolicy["sellLadder"]["postRefillFollowThrough"];
+  allowHealthyCoverageReplacement?: boolean;
 }): PostRefillLiveRungEvaluation | null {
-  const { config, market, position, state } = input;
+  const { allowHealthyCoverageReplacement = false, config, market, position, state } = input;
   if (position.status !== PositionStatus.Open) return null;
   if (position.size < config.minMaterialPositionSizeShares) return null;
 
@@ -2767,7 +2793,11 @@ export function evaluatePostRefillLiveRung(input: {
     coverageBucket: coverageBucket(liveCoverageRatio),
     decision: null,
   };
-  if (liveCoverageRatio >= config.minCoverageRatio) return evaluation;
+  const hasLowCoverage = liveCoverageRatio < config.minCoverageRatio;
+  if (!hasLowCoverage && !allowHealthyCoverageReplacement) return evaluation;
+  const trigger: PostRefillReplacementTrigger = hasLowCoverage
+    ? "low_coverage"
+    : "scale_in_stale_price";
 
   const intendedRung = state.activeRungs.find((rung) =>
     isSubmittablePostRefillPlannedRung(rung, market),
@@ -2802,6 +2832,7 @@ export function evaluatePostRefillLiveRung(input: {
     priceDistanceImprovementPct,
     coverageBucket: coverageBucket(liveCoverageRatio),
     priceDistanceBucket: priceDistanceBucket(priceDistanceImprovementPct),
+    trigger,
   };
   return evaluation;
 }
@@ -3003,10 +3034,27 @@ function parseBboReference(
   }
 }
 
+const POSITION_AVG_ENTRY_TOLERANCE = 1e-9;
+const POSITION_COST_BASIS_TOLERANCE_USDC = 1e-6;
+
 function hasPositionBasisChanged(state: LadderState, position: Position): boolean {
   return (
-    Math.abs(state.lastAvgEntry - position.avgEntryPrice) > 1e-9 ||
-    Math.abs(state.lastCostBasisUsdc - position.costBasisUsdc) > 1e-6
+    Math.abs(state.lastAvgEntry - position.avgEntryPrice) > POSITION_AVG_ENTRY_TOLERANCE ||
+    Math.abs(state.lastCostBasisUsdc - position.costBasisUsdc) > POSITION_COST_BASIS_TOLERANCE_USDC
+  );
+}
+
+function isCausalScaleInBasisIncrease(
+  state: LadderState | null,
+  position: Position,
+  reason: LadderRebuildReason,
+): boolean {
+  return (
+    reason === "scale_in" &&
+    state != null &&
+    Number.isFinite(state.lastCostBasisUsdc) &&
+    Number.isFinite(position.costBasisUsdc) &&
+    position.costBasisUsdc > state.lastCostBasisUsdc + POSITION_COST_BASIS_TOLERANCE_USDC
   );
 }
 

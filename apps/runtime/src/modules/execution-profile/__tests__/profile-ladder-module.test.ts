@@ -3926,6 +3926,36 @@ describe("ProfileLadderModule", () => {
       });
     }
 
+    function healthyCoverageStalePriceState(oldOrderId: string): LadderState {
+      return staleLowerPriorityState({
+        band: "cheap",
+        activeRungs: [
+          rung({
+            price: 0.03,
+            sizeShares: 100,
+            notionalUsd: 3,
+            lifecycle: "placed",
+            orderId: oldOrderId,
+          }),
+        ],
+        lastAvgEntry: 0.02,
+        lastCostBasisUsdc: 1.6,
+      });
+    }
+
+    function healthyCoverageScaledPosition(overrides: Partial<Position> = {}): Position {
+      return position({
+        avgEntryPrice: 0.0245,
+        costBasisUsdc: 2.45,
+        size: 100,
+        ...overrides,
+      });
+    }
+
+    function healthyCoverageMarket(): NormalizedMarket {
+      return market({ bestBid: 0.02, bestAsk: 0.04, midPrice: 0.03 });
+    }
+
     async function rebuildWithPostRefillContext(
       ctx: ReturnType<typeof setup>,
       overrides: Partial<Position> = {},
@@ -3948,6 +3978,125 @@ describe("ProfileLadderModule", () => {
         "scale_in",
       );
     }
+
+    it("authorizes healthy-coverage replacement from the causal nested scale-in basis increase", async () => {
+      const oldOrderId = createOrderId("healthy-scale-in-stale-price");
+      const scaledPosition = healthyCoverageScaledPosition();
+      const ctx = setup(cheapPostRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+        modeReader: { getMode: () => "flat" },
+        isProfileOwned: () => true,
+        orderRepo: {
+          findByTokenId: () => [
+            openSellOrder({
+              orderId: oldOrderId,
+              exchangeOrderId: String(oldOrderId),
+              signalReason: "profile-ladder-exit",
+              decisionRuleId: "PROFILE_LADDER",
+              metadata: { source: "profile_ladder" },
+              price: 0.03,
+              size: 100,
+              sizeUsdc: 3,
+            }),
+          ],
+        },
+      });
+      ctx.repo.upsertLadder(healthyCoverageStalePriceState(String(oldOrderId)));
+      ctx.bus.subscribe("FillReceived", async (event) => {
+        if (event.side !== "buy") return;
+        await ctx.bus.publish("PositionUpdated", { position: scaledPosition });
+      });
+      await ctx.module.start();
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [healthyCoverageMarket()],
+        timestamp: NOW,
+      });
+
+      await ctx.bus.publish("FillReceived", fill({ side: "buy", price: 0.03, size: 20 }));
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.orders[0]).toMatchObject({
+        side: "sell",
+        price: 0.027,
+        metadata: {
+          profileLadderReplacement: {
+            oldOrderId: String(oldOrderId),
+            oldLiveSellPrice: 0.03,
+            selectedPlannedPrice: 0.027,
+            liveCoverageRatio: 1,
+          },
+        },
+      });
+      expect(
+        ctx.riskEvents.find(
+          (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+        )?.payload,
+      ).toMatchObject({ trigger: "scale_in_stale_price" });
+      expect(counterLabels(ctx.counters, "profile_ladder_replacement_trigger_total")).toEqual([
+        expect.objectContaining({ trigger: "scale_in_stale_price" }),
+      ]);
+    });
+
+    it.each([
+      ["unchanged", 1.6],
+      ["decreased", 1.5],
+    ])(
+      "does not let the BUY-fill hint bypass healthy coverage when cost basis is %s",
+      async (_label, costBasisUsdc) => {
+        const oldOrderId = createOrderId(`healthy-no-bypass-${costBasisUsdc}`);
+        const ctx = setup(cheapPostRefillPolicy(), {
+          modeReader: { getMode: () => "flat" },
+          isProfileOwned: () => true,
+        });
+        ctx.repo.upsertLadder(healthyCoverageStalePriceState(String(oldOrderId)));
+        await ctx.module.start();
+        await ctx.bus.publish("NormalizedMarketUpdated", {
+          markets: [healthyCoverageMarket()],
+          timestamp: NOW,
+        });
+        await ctx.bus.publish("FillReceived", fill({ side: "buy", price: 0.03, size: 20 }));
+
+        await ctx.bus.publish("PositionUpdated", {
+          position: healthyCoverageScaledPosition({ costBasisUsdc }),
+        });
+
+        expect(ctx.orders).toHaveLength(0);
+        expect(ctx.counters).toContainEqual({
+          name: "profile_ladder_rebuilt",
+          value: 1,
+          labels: '{"band":"cheap","reason":"scale_in"}',
+        });
+        expect(
+          ctx.riskEvents.some(
+            (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it.each(["profile_reclass", "bbo_major", "bbo_strong"] as const)(
+      "does not bypass healthy coverage for a %s rebuild",
+      async (reason) => {
+        const oldOrderId = createOrderId(`healthy-no-bypass-${reason}`);
+        const ctx = setup(cheapPostRefillPolicy(), {
+          modeReader: { getMode: () => "flat" },
+          isProfileOwned: () => true,
+        });
+        ctx.repo.upsertLadder(healthyCoverageStalePriceState(String(oldOrderId)));
+
+        await ctx.module.rebuildLadder(
+          healthyCoverageScaledPosition(),
+          healthyCoverageMarket(),
+          reason,
+        );
+
+        expect(ctx.orders).toHaveLength(0);
+        expect(
+          ctx.riskEvents.some(
+            (event) => event.eventType === "profile_ladder_stale_live_rung_detected",
+          ),
+        ).toBe(false);
+      },
+    );
 
     it("detects lower-priority price match without cancel/place side effects", async () => {
       const ctx = setup(postRefillPolicy(), {
@@ -3976,6 +4125,7 @@ describe("ProfileLadderModule", () => {
           eventType: "profile_ladder_stale_live_rung_detected",
           payload: expect.objectContaining({
             action: "dry_run",
+            trigger: "low_coverage",
             liveCoverageRatio: 0.16,
             liveRungIndex: 1,
             intendedRungIndex: 0,
@@ -3984,6 +4134,9 @@ describe("ProfileLadderModule", () => {
           }),
         }),
       );
+      expect(counterLabels(ctx.counters, "profile_ladder_replacement_trigger_total")).toEqual([
+        expect.objectContaining({ trigger: "low_coverage" }),
+      ]);
       const state = ctx.repo.getLadder(tokenId)!;
       expect(state.activeRungs.some((activeRung) => activeRung.price === 0.104)).toBe(true);
       expect(state.activeRungs.some((activeRung) => activeRung.price === 0.088)).toBe(true);
