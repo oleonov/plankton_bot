@@ -245,14 +245,20 @@ describe("ReconciliationModule", () => {
   }
 
   function mockExactCancelled(exchangeOrderId: string): void {
-    gateway.getOrderResult = vi.fn().mockResolvedValue({
-      ok: true,
-      data: makeExchangeOrder({
-        orderId: exchangeOrderId,
-        status: "CANCELLED",
-        sizeFilled: 0,
-      }),
-    });
+    gateway.getOrderResult = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        data: makeExchangeOrder({ orderId: exchangeOrderId, status: "OPEN" }),
+      })
+      .mockResolvedValue({
+        ok: true,
+        data: makeExchangeOrder({
+          orderId: exchangeOrderId,
+          status: "CANCELLED",
+          sizeFilled: 0,
+        }),
+      });
   }
 
   it("marks a pass non-clean when Track A requests a resting-add cancel", async () => {
@@ -921,6 +927,49 @@ describe("ReconciliationModule", () => {
       expect(result.clean).toBe(false);
     });
 
+    it("keeps a two-pass exact-terminal SELL ghost clean and out of the reservation store", async () => {
+      const local = makeLocalOrder({
+        exchangeOrderId: "ex-terminal-ghost",
+        status: "cancelled",
+        side: "sell",
+      });
+      const ghost = makeExchangeOrder({
+        orderId: "ex-terminal-ghost",
+        side: "sell",
+        sizeRemaining: 10,
+      });
+      orderRepo.findOpen = vi.fn().mockReturnValue([]);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(local);
+      orderRepo.findById = vi.fn().mockReturnValue(local);
+      gateway.getOpenOrders = vi.fn().mockResolvedValue([ghost]);
+      gateway.getOrderResult = vi.fn().mockResolvedValue({
+        ok: true,
+        data: { ...ghost, status: "CANCELLED" },
+      });
+      const writeEvent = vi.fn();
+      const store = new ExchangeStateStore();
+      const drifts: unknown[] = [];
+      bus.subscribe("ReconciliationDriftDetected", async (event) => {
+        drifts.push(event);
+      });
+      mod = buildModule({ exchangeStateStore: store, runtimeMetrics: { writeEvent } as any });
+
+      const first = await mod.runReconciliation();
+      const second = await mod.runReconciliation();
+
+      expect(first.clean).toBe(true);
+      expect(second.clean).toBe(true);
+      expect(first.details).toEqual([]);
+      expect(second.details).toEqual([]);
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+      expect(gateway.getOrderResult).toHaveBeenCalledTimes(2);
+      expect(store.getOpenSellSizeForToken(TOK)).toBeNull();
+      expect(drifts).toEqual([]);
+      expect(writeEvent.mock.calls.filter(([name]) => String(name).includes("cascade"))).toEqual(
+        [],
+      );
+    });
+
     it("two-pass: stale found → dirty, then order gone → clean", async () => {
       const cancelledLocal = makeLocalOrder({
         exchangeOrderId: "ex-stale-2pass",
@@ -1336,6 +1385,67 @@ describe("ReconciliationModule", () => {
       expect(cancelReasons.filter((reason) => reason === "stale_exit_ttl")).toHaveLength(3);
       expect(reservedAfterCancel.slice(-3)).toEqual([22.295, 9.555, null]);
       expect(store.getOpenSellSizeForToken(TOK)).toBeNull();
+      await mod.stop();
+    });
+
+    it("removes a non-TTL exact-identity cancelled SELL reservation", async () => {
+      const store = new ExchangeStateStore();
+      const local = makeLocalOrder({ status: "cancelled", side: "sell" });
+      orderRepo.findById = vi.fn().mockReturnValue(local);
+      mod = buildModule({ exchangeStateStore: store });
+      await mod.start();
+      store.updateExchangeSellOrders(
+        [{ orderId: local.exchangeOrderId!, tokenId: local.tokenId, sizeRemaining: local.size }],
+        Date.now(),
+      );
+
+      await bus.publish("OrderCancelled", {
+        commandId: createCommandId("confirmed-non-ttl"),
+        orderId: local.orderId,
+        tokenId: local.tokenId,
+        conditionId: local.conditionId,
+        reason: "sell_replace_reprice",
+        signalReason: local.signalReason,
+        timestamp: Date.now(),
+      });
+
+      expect(store.getOpenSellSizeForToken(local.tokenId)).toBeNull();
+      await mod.stop();
+    });
+
+    it("retains cancelled SELL reservations when an OrderCancelled identity fence fails", async () => {
+      const store = new ExchangeStateStore();
+      const matching = makeLocalOrder({ status: "cancelled", side: "sell" });
+      let local: Order | null = matching;
+      orderRepo.findById = vi.fn(() => local);
+      mod = buildModule({ exchangeStateStore: store });
+      await mod.start();
+
+      for (const mismatch of [
+        null,
+        { ...matching, status: "open" as const },
+        { ...matching, side: "buy" as const },
+        { ...matching, tokenId: createTokenId("other-token") },
+        { ...matching, conditionId: createConditionId("other-condition") },
+        { ...matching, exchangeOrderId: null },
+      ]) {
+        local = mismatch;
+        store.updateExchangeSellOrders(
+          [{ orderId: matching.exchangeOrderId!, tokenId: matching.tokenId, sizeRemaining: 10 }],
+          Date.now(),
+        );
+        await bus.publish("OrderCancelled", {
+          commandId: createCommandId(`mismatch-${String(mismatch?.status ?? "missing")}`),
+          orderId: matching.orderId,
+          tokenId: matching.tokenId,
+          conditionId: matching.conditionId,
+          reason: "sell_replace_reprice",
+          signalReason: matching.signalReason,
+          timestamp: Date.now(),
+        });
+        expect(store.getOpenSellSizeForToken(matching.tokenId)).toBe(10);
+      }
+
       await mod.stop();
     });
 

@@ -118,7 +118,7 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
 
   const exchangeOrders = snapshot.data;
   const unresolvedStaleOrders = deps.unresolvedStaleOrders ?? new Map<string, ExchangeOrder>();
-  await resolveUnresolvedStaleOrders({
+  const unresolvedPrecheck = await resolveUnresolvedStaleOrders({
     orders: unresolvedStaleOrders,
     gateway,
     orderRepo,
@@ -185,11 +185,13 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     snapshotReliable: true,
     fillCompletionTolerance: deps.fillCompletionTolerance,
     unresolvedStaleOrders,
+    precheckedStaleOrderIds: unresolvedPrecheck.checkedOrderIds,
+    preconfirmedTerminalOrderIds: unresolvedPrecheck.terminalOrderIds,
   });
 
   const survivingExchangeOrders = [...exchangeOrders, ...unresolvedStaleOrders.values()].filter(
     (order, index, orders) =>
-      !cascade.cancelledStaleOrderIds.has(order.orderId) &&
+      !cascade.terminalStaleOrderIds.has(order.orderId) &&
       orders.findIndex((candidate) => candidate.orderId === order.orderId) === index,
   );
 
@@ -249,13 +251,15 @@ async function resolveUnresolvedStaleOrders(deps: {
   fillRepo: Pick<FillRepository, "findByOrderId">;
   log: Logger;
   fillCompletionTolerance?: number | undefined;
-}): Promise<ExchangeOrder[]> {
-  const retained: ExchangeOrder[] = [];
+}): Promise<{ checkedOrderIds: Set<string>; terminalOrderIds: Set<string> }> {
+  const checkedOrderIds = new Set<string>();
+  const terminalOrderIds = new Set<string>();
   for (const [exchangeOrderId, exchangeOrder] of deps.orders) {
     const localOrder = deps.orderRepo.findByExchangeOrderId(exchangeOrderId);
+    if (!localOrder) continue;
+    checkedOrderIds.add(exchangeOrderId);
     if (
-      !localOrder ||
-      !(await confirmStaleTerminal({
+      await confirmStaleTerminal({
         exchangeOrder,
         localOrder,
         gateway: deps.gateway,
@@ -263,14 +267,13 @@ async function resolveUnresolvedStaleOrders(deps: {
         fillRepo: deps.fillRepo,
         log: deps.log,
         fillCompletionTolerance: deps.fillCompletionTolerance,
-      }))
+      })
     ) {
-      retained.push(exchangeOrder);
-      continue;
+      terminalOrderIds.add(exchangeOrderId);
+      deps.orders.delete(exchangeOrderId);
     }
-    deps.orders.delete(exchangeOrderId);
   }
-  return retained;
+  return { checkedOrderIds, terminalOrderIds };
 }
 
 /**
@@ -407,6 +410,8 @@ export interface ReconcileStaleDeps {
   snapshotReliable: boolean;
   fillCompletionTolerance?: number | undefined;
   unresolvedStaleOrders?: Map<string, ExchangeOrder>;
+  precheckedStaleOrderIds?: ReadonlySet<string>;
+  preconfirmedTerminalOrderIds?: ReadonlySet<string>;
 }
 
 export interface ReconcileStaleResult {
@@ -416,7 +421,7 @@ export interface ReconcileStaleResult {
   cascadeEvaluated: number;
   cascadeCancelled: number;
   cascadeSkipped: number;
-  cancelledStaleOrderIds: Set<string>;
+  terminalStaleOrderIds: Set<string>;
   details: string[];
 }
 
@@ -425,7 +430,7 @@ export async function reconcileStaleExchangeOrders(
 ): Promise<ReconcileStaleResult> {
   const { exchangeOrders, localExchangeIds, orderRepo, gateway, log, snapshotReliable } = deps;
   const fillRepo = deps.fillRepo ?? EMPTY_FILL_READER;
-  const cancelledStaleOrderIds = new Set<string>();
+  const terminalStaleOrderIds = new Set(deps.preconfirmedTerminalOrderIds ?? []);
   const details: string[] = [];
 
   if (!snapshotReliable) {
@@ -441,6 +446,7 @@ export async function reconcileStaleExchangeOrders(
 
   for (const ex of exchangeOrders) {
     if (localExchangeIds.has(ex.orderId)) continue; // locally open — normal
+    if (terminalStaleOrderIds.has(ex.orderId)) continue;
 
     const localOrder = orderRepo.findByExchangeOrderId(ex.orderId);
     if (!localOrder) {
@@ -451,11 +457,9 @@ export async function reconcileStaleExchangeOrders(
       continue;
     }
 
-    // Locally cancelled/filled but still on exchange — stale. Cancel it.
-    cascadeEvaluated++;
-    const result = await gateway.cancelOrder({ orderId: ex.orderId });
-    if (result.success) {
-      const terminalConfirmed = await confirmStaleTerminal({
+    if (
+      !deps.precheckedStaleOrderIds?.has(ex.orderId) &&
+      (await confirmStaleTerminal({
         exchangeOrder: ex,
         localOrder,
         gateway,
@@ -463,23 +467,45 @@ export async function reconcileStaleExchangeOrders(
         fillRepo,
         log,
         fillCompletionTolerance: deps.fillCompletionTolerance,
-      });
-      if (terminalConfirmed) {
-        deps.unresolvedStaleOrders?.delete(ex.orderId);
-        staleCancelled++;
+      }))
+    ) {
+      deps.unresolvedStaleOrders?.delete(ex.orderId);
+      terminalStaleOrderIds.add(ex.orderId);
+      continue;
+    }
+
+    // Locally cancelled/filled and still exactly working — request cancellation.
+    const result = await gateway.cancelOrder({ orderId: ex.orderId });
+    const terminalConfirmed = await confirmStaleTerminal({
+      exchangeOrder: ex,
+      localOrder,
+      gateway,
+      orderRepo,
+      fillRepo,
+      log,
+      fillCompletionTolerance: deps.fillCompletionTolerance,
+    });
+    if (terminalConfirmed) {
+      deps.unresolvedStaleOrders?.delete(ex.orderId);
+      terminalStaleOrderIds.add(ex.orderId);
+      if (result.success) {
+        cascadeEvaluated++;
         cascadeCancelled++;
-        cancelledStaleOrderIds.add(ex.orderId);
+        staleCancelled++;
         const msg = `stale exchange order terminal confirmed: ${ex.orderId} (local: ${localOrder.status})`;
         details.push(msg);
         log.info({ exchangeOrderId: ex.orderId, localStatus: localOrder.status }, msg);
-      } else {
-        deps.unresolvedStaleOrders?.set(ex.orderId, ex);
-        const msg = `stale exchange order cancel acknowledged but unconfirmed: ${ex.orderId} (local: ${localOrder.status})`;
-        details.push(msg);
-        log.warn({ exchangeOrderId: ex.orderId, localStatus: localOrder.status }, msg);
       }
+      continue;
+    }
+
+    deps.unresolvedStaleOrders?.set(ex.orderId, ex);
+    cascadeEvaluated++;
+    if (result.success) {
+      const msg = `stale exchange order cancel acknowledged but unconfirmed: ${ex.orderId} (local: ${localOrder.status})`;
+      details.push(msg);
+      log.warn({ exchangeOrderId: ex.orderId, localStatus: localOrder.status }, msg);
     } else {
-      deps.unresolvedStaleOrders?.set(ex.orderId, ex);
       staleCancelFailed++;
       const msg = `stale exchange order cancel failed: ${ex.orderId} (${result.errorCode})`;
       details.push(msg);
@@ -501,7 +527,7 @@ export async function reconcileStaleExchangeOrders(
     cascadeEvaluated,
     cascadeCancelled,
     cascadeSkipped: 0,
-    cancelledStaleOrderIds,
+    terminalStaleOrderIds,
     details,
   };
 }
@@ -552,7 +578,7 @@ function emptyStaleResult(overrides: Partial<ReconcileStaleResult> = {}): Reconc
     cascadeEvaluated: 0,
     cascadeCancelled: 0,
     cascadeSkipped: 0,
-    cancelledStaleOrderIds: new Set<string>(),
+    terminalStaleOrderIds: new Set<string>(),
     details: [],
     ...overrides,
   };

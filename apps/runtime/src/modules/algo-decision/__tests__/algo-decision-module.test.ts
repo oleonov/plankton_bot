@@ -7250,6 +7250,151 @@ describe("AlgoDecisionModule", () => {
         vi.useRealTimers();
       }
     });
+
+    it("holds a selected GATE probe across updates and tracking churn until position identity changes", async () => {
+      vi.useFakeTimers();
+      try {
+        const tokenId = "token-gate-dust-position-block";
+        selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+        let position = makeOpenPosition(tokenId, {
+          status: "dust",
+          size: 1,
+          currentValueUsdc: 0.01,
+        });
+        const positionRepo = {
+          findByTokenId: vi.fn(() => position),
+          findOpen: vi.fn(() => []),
+        };
+        const mod = buildModule({
+          positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+          executionPolicy: gateBypassPolicy,
+        });
+        await mod.start();
+
+        const emittedRules: string[] = [];
+        (bus as any).subscribe(
+          "SignalProduced",
+          async (payload: { signal: import("@krabs/domain").Signal; market: NormalizedMarket }) => {
+            emittedRules.push(payload.signal.decisionRuleId ?? "");
+            if (position.status === "closed") return;
+            await (bus as any).emit("SignalRejected", {
+              signal: payload.signal,
+              market: payload.market,
+              reason: "open_position_exists",
+              rejectedAt: Date.now(),
+            });
+          },
+        );
+
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [gateBypassMarket(tokenId)],
+          timestamp: Date.now(),
+        });
+        expect(emittedRules).toEqual([GATE_ENTRY_RULE_ID]);
+
+        await (mod as any).evaluateDirtyTokens();
+        for (let update = 0; update < 10; update += 1) {
+          await (bus as any).emit("NormalizedMarketUpdated", {
+            markets: [gateBypassMarket(tokenId)],
+            timestamp: Date.now(),
+          });
+        }
+        await mod.sweep();
+        expect(emittedRules).toHaveLength(1);
+
+        await (bus as any).emit("TrackedMarketsChanged", {
+          addedTokenIds: [],
+          removedTokenIds: [createTokenId(tokenId)],
+          timestamp: Date.now(),
+        });
+        await (bus as any).emit("TrackedMarketsChanged", {
+          addedTokenIds: [createTokenId(tokenId)],
+          removedTokenIds: [],
+          timestamp: Date.now(),
+        });
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [gateBypassMarket(tokenId)],
+          timestamp: Date.now(),
+        });
+        expect(emittedRules).toHaveLength(1);
+
+        position = { ...position, positionId: createPositionId("pos-gate-dust-reopened") };
+        await (bus as any).emit("PositionUpdated", { position });
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [gateBypassMarket(tokenId)],
+          timestamp: Date.now(),
+        });
+        expect(emittedRules).toHaveLength(2);
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [gateBypassMarket(tokenId)],
+          timestamp: Date.now(),
+        });
+        expect(emittedRules).toHaveLength(2);
+
+        position = { ...position, status: "closed", size: 0 };
+        await (bus as any).emit("PositionUpdated", { position });
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [gateBypassMarket(tokenId)],
+          timestamp: Date.now(),
+        });
+        expect(emittedRules).toHaveLength(3);
+
+        await mod.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("holds a bypass GATE probe for an authoritative zero-size nonclosed position", async () => {
+      vi.useFakeTimers();
+      try {
+        const tokenId = "token-gate-bypass-zero-size-block";
+        selectedMarketCache = createMockSelectedMarketCache([], [tokenId]);
+        const position = makeOpenPosition(tokenId, {
+          status: "dust",
+          size: 0,
+          currentValueUsdc: 0,
+        });
+        const mod = buildModule({
+          positionRepo: {
+            findByTokenId: vi.fn(() => position),
+            findOpen: vi.fn(() => []),
+          } as unknown as import("@krabs/domain").PositionRepository,
+          executionPolicy: gateBypassPolicy,
+        });
+        await mod.start();
+
+        let emitted = 0;
+        (bus as any).subscribe(
+          "SignalProduced",
+          async (payload: { signal: import("@krabs/domain").Signal; market: NormalizedMarket }) => {
+            emitted += 1;
+            expect(payload.signal.decisionRuleId).toBe(GATE_ENTRY_RULE_ID);
+            await (bus as any).emit("SignalRejected", {
+              signal: payload.signal,
+              market: payload.market,
+              reason: "open_position_exists",
+              rejectedAt: Date.now(),
+            });
+          },
+        );
+
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [gateBypassMarket(tokenId)],
+          timestamp: Date.now(),
+        });
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [gateBypassMarket(tokenId)],
+          timestamp: Date.now(),
+        });
+        await mod.sweep();
+        expect(emitted).toBe(1);
+
+        await mod.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // ─── Track Q shadow telemetry ────────────────────────────────────────────

@@ -518,6 +518,16 @@ describe("reconcileStaleExchangeOrders — Fix 5: cascade guard", () => {
 
   it("counts a reliable cancel only after exact covered terminal proof", async () => {
     const { orderRepo, gateway, candidate } = staleSetup();
+    vi.mocked(gateway.getOrderResult!).mockReset();
+    vi.mocked(gateway.getOrderResult!)
+      .mockResolvedValueOnce({
+        ok: true,
+        data: makeExchangeOrder({ orderId: "ex-stale", status: "OPEN" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: makeExchangeOrder({ orderId: "ex-stale", status: "CANCELLED", sizeFilled: 0 }),
+      });
 
     const result = await reconcileStaleExchangeOrders({
       exchangeOrders: [candidate],
@@ -532,7 +542,7 @@ describe("reconcileStaleExchangeOrders — Fix 5: cascade guard", () => {
     expect(result.cascadeCancelled).toBe(1);
     expect(result.staleCancelled).toBe(1);
     expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "ex-stale" });
-    expect(gateway.getOrderResult).toHaveBeenCalledWith("ex-stale");
+    expect(gateway.getOrderResult).toHaveBeenCalledTimes(2);
   });
 
   it("retains cancel-acknowledged stale rows without exact covered terminal proof", async () => {
@@ -591,47 +601,158 @@ describe("reconcileStaleExchangeOrders — Fix 5: cascade guard", () => {
     }
   });
 
-  it("removes a stale row from the open snapshot after exact covered terminal proof", async () => {
+  it.each([
+    { localStatus: "cancelled" as const, exactStatus: "CANCELLED" as const, fillSize: 0 },
+    { localStatus: "filled" as const, exactStatus: "FILLED" as const, fillSize: 10 },
+  ])(
+    "excludes a local $localStatus ghost before cancel when exact status is $exactStatus",
+    async ({ localStatus, exactStatus, fillSize }) => {
+      const orderRepo = createOrderRepo();
+      const local = makeLocalOrder({ exchangeOrderId: "ex-stale", status: localStatus });
+      orderRepo.findOpen = vi.fn().mockReturnValue([]);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(local);
+      orderRepo.findById = vi.fn().mockReturnValue(local);
+      const fillRepo = createFillRepo();
+      const warn = vi.fn();
+      const log = { ...(silentLog as unknown as object), warn } as never;
+      fillRepo.findByOrderId = vi.fn().mockReturnValue(
+        fillSize === 0
+          ? []
+          : [
+              {
+                fillId: createFillId("fill-stale-covered"),
+                orderId: local.orderId,
+                tokenId: local.tokenId,
+                conditionId: local.conditionId,
+                side: "buy",
+                price: 0.5,
+                size: fillSize,
+                sizeUsdc: fillSize * 0.5,
+                liquidityRole: "maker",
+                fee: 0,
+                feeRateBps: 0,
+                filledAt: OLD,
+              },
+            ],
+      );
+      const gateway = createGateway({
+        openOrders: [makeExchangeOrder({ orderId: "ex-stale", side: "sell" })],
+        cancelSuccess: true,
+        exactResult: {
+          ok: true,
+          data: makeExchangeOrder({
+            orderId: "ex-stale",
+            status: exactStatus,
+            sizeFilled: fillSize,
+          }),
+        },
+      });
+
+      const first = await reconcileOrders({ ...baseDeps(gateway, orderRepo), fillRepo, log });
+      const second = await reconcileOrders({ ...baseDeps(gateway, orderRepo), fillRepo, log });
+
+      for (const result of [first, second]) {
+        expect(result.exchangeOpenOrders).toEqual([]);
+        expect(result.staleCancelled).toBe(0);
+        expect(result.staleCancelFailed).toBe(0);
+        expect(result.cascadeEvaluated).toBe(0);
+        expect(result.cascadeCancelled).toBe(0);
+      }
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+      expect(gateway.getOrderResult).toHaveBeenCalledTimes(2);
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not exact-check or cancel again after the unresolved pre-pass confirms terminal", async () => {
     const orderRepo = createOrderRepo();
-    const cancelledLocal = makeLocalOrder({ exchangeOrderId: "ex-stale", status: "cancelled" });
+    const local = makeLocalOrder({ exchangeOrderId: "ex-preconfirmed", status: "cancelled" });
+    const candidate = makeExchangeOrder({ orderId: "ex-preconfirmed", side: "sell" });
     orderRepo.findOpen = vi.fn().mockReturnValue([]);
-    orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
-    orderRepo.findById = vi.fn().mockReturnValue(cancelledLocal);
-    const fillRepo = createFillRepo();
-    fillRepo.findByOrderId = vi.fn().mockReturnValue([
-      {
-        fillId: createFillId("fill-stale-covered"),
-        orderId: cancelledLocal.orderId,
-        tokenId: cancelledLocal.tokenId,
-        conditionId: cancelledLocal.conditionId,
-        side: "buy",
-        price: 0.5,
-        size: 1,
-        sizeUsdc: 0.5,
-        liquidityRole: "maker",
-        fee: 0,
-        feeRateBps: 0,
-        filledAt: OLD,
-      },
-    ]);
+    orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(local);
+    orderRepo.findById = vi.fn().mockReturnValue(local);
+    const unresolved = new Map([[candidate.orderId, candidate]]);
     const gateway = createGateway({
-      openOrders: [makeExchangeOrder({ orderId: "ex-stale", side: "sell" })],
-      cancelSuccess: true,
+      openOrders: [candidate],
       exactResult: {
         ok: true,
-        data: makeExchangeOrder({
-          orderId: "ex-stale",
-          status: "CANCELLED",
-          sizeFilled: 1,
-        }),
+        data: makeExchangeOrder({ orderId: candidate.orderId, status: "CANCELLED" }),
       },
     });
 
-    const result = await reconcileOrders({ ...baseDeps(gateway, orderRepo), fillRepo });
+    const result = await reconcileOrders({
+      ...baseDeps(gateway, orderRepo),
+      unresolvedStaleOrders: unresolved,
+    });
 
     expect(result.exchangeOpenOrders).toEqual([]);
-    expect(result.staleCancelled).toBe(1);
-    expect(result.cascadeCancelled).toBe(1);
+    expect(result.cascadeEvaluated).toBe(0);
+    expect(gateway.getOrderResult).toHaveBeenCalledTimes(1);
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(unresolved).toEqual(new Map());
+  });
+
+  it.each([
+    [
+      "OPEN",
+      { ok: true as const, data: makeExchangeOrder({ orderId: "ex-failed", status: "OPEN" }) },
+    ],
+    ["null", { ok: true as const, data: null }],
+    ["unreliable", { ok: false as const, reason: "server" as const, attempts: 4 }],
+  ])(
+    "retains and warns after failed cancel with %s exact evidence",
+    async (_label, exactResult) => {
+      const orderRepo = createOrderRepo();
+      const local = makeLocalOrder({ exchangeOrderId: "ex-failed", status: "cancelled" });
+      const candidate = makeExchangeOrder({ orderId: "ex-failed", side: "sell" });
+      orderRepo.findOpen = vi.fn().mockReturnValue([]);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(local);
+      orderRepo.findById = vi.fn().mockReturnValue(local);
+      const unresolved = new Map<string, ExchangeOrder>();
+      const warn = vi.fn();
+      const log = { ...(silentLog as unknown as object), warn } as never;
+      const gateway = createGateway({ openOrders: [candidate], cancelSuccess: false, exactResult });
+
+      const result = await reconcileOrders({
+        ...baseDeps(gateway, orderRepo),
+        log,
+        unresolvedStaleOrders: unresolved,
+      });
+
+      expect(result.exchangeOpenOrders).toEqual([candidate]);
+      expect(result.staleCancelFailed).toBe(1);
+      expect(result.cascadeEvaluated).toBe(1);
+      expect(result.cascadeCancelled).toBe(0);
+      expect(unresolved.get(candidate.orderId)).toBe(candidate);
+      expect(gateway.getOrderResult).toHaveBeenCalledTimes(2);
+      expect(warn).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.stringContaining("cancel failed"),
+      );
+    },
+  );
+
+  it("excludes a stale row when exact terminal evidence wins a failed-cancel race", async () => {
+    const orderRepo = createOrderRepo();
+    const local = makeLocalOrder({ exchangeOrderId: "ex-race", status: "cancelled" });
+    const candidate = makeExchangeOrder({ orderId: "ex-race", side: "sell" });
+    orderRepo.findOpen = vi.fn().mockReturnValue([]);
+    orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(local);
+    orderRepo.findById = vi.fn().mockReturnValue(local);
+    const warn = vi.fn();
+    const log = { ...(silentLog as unknown as object), warn } as never;
+    const gateway = createGateway({ openOrders: [candidate], cancelSuccess: false });
+    gateway.getOrderResult = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, data: { ...candidate, status: "OPEN" } })
+      .mockResolvedValueOnce({ ok: true, data: { ...candidate, status: "CANCELLED" } });
+
+    const result = await reconcileOrders({ ...baseDeps(gateway, orderRepo), log });
+
+    expect(result.exchangeOpenOrders).toEqual([]);
+    expect(result.staleCancelFailed).toBe(0);
+    expect(result.cascadeEvaluated).toBe(result.cascadeCancelled);
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("forwards fillCompletionTolerance=0 through stale exact coverage checks", async () => {

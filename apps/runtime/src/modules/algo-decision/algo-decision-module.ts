@@ -1029,7 +1029,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     string,
     { blockedUntilMs: number; policyFingerprint: string; reason: string }
   >();
-  private readonly r23ProbeOpenPositionBlocks = new Map<string, string>();
+  private readonly probeOpenPositionBlocks = new Map<string, string>();
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
   private buyBudgetRecoveryNotionalUsdc = 0;
@@ -1168,7 +1168,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
     this.minOrderSizeRearmTokenIds.clear();
     this.r23ProbeMakerWindowCapCooldowns.clear();
-    this.r23ProbeOpenPositionBlocks.clear();
+    this.probeOpenPositionBlocks.clear();
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     await this.plannerRollup.stop();
@@ -1336,7 +1336,10 @@ export class AlgoDecisionModule implements RuntimeModule {
       const tokenIdStr = String(tokenId);
       this.marketCache.delete(tokenIdStr);
       this.prevMidPrices.delete(tokenIdStr);
-      this.r23ProbeOpenPositionBlocks.delete(tokenIdStr);
+      const authoritativePosition = this.deps.positionRepo?.findByTokenId(tokenId) ?? null;
+      if (!this.entryBlockingPositionFingerprint(authoritativePosition)) {
+        this.probeOpenPositionBlocks.delete(tokenIdStr);
+      }
       this.releaseMinOrderSizeHydration(tokenIdStr);
       const openPosition = this.findOpenPositionByTokenId(tokenId);
       if (openPosition) {
@@ -1461,7 +1464,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async handleSignalRejected(payload: RuntimeEventMap["SignalRejected"]): Promise<void> {
-    const openPositionBlocked = this.blockR23ProbeForOpenPosition(payload);
+    const openPositionBlocked = this.blockProbeForOpenPosition(payload);
     const reasonCode = findBuyBudgetCooldownReason(payload.reason);
     if (payload.signal.side === "buy" && reasonCode) {
       this.activateBuyBudgetCooldown(
@@ -1973,7 +1976,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       isGateWhitelisted(executionPolicy?.gateEntry, market.conditionId) &&
       (this.deps.selectedMarketCache.isGateBypassEligible?.(tokenId) ?? false);
     if (!legState && !selectedForEntry && !openPosition && !gateBypass) return null;
-    if (this.shouldSkipR23ProbeForUnchangedOpenPosition(tokenId, legState, selectedForEntry)) {
+    if (this.shouldSkipProbeForUnchangedOpenPosition(tokenId, legState)) {
       return null;
     }
     if (
@@ -2211,11 +2214,10 @@ export class AlgoDecisionModule implements RuntimeModule {
     );
   }
 
-  private blockR23ProbeForOpenPosition(event: RuntimeEventMap["SignalRejected"]): boolean {
+  private blockProbeForOpenPosition(event: RuntimeEventMap["SignalRejected"]): boolean {
     if (
       event.reason !== OPEN_POSITION_EXISTS_REASON ||
       event.signal.side !== "buy" ||
-      event.signal.decisionRuleId !== R23_DIP_TRIGGER_RULE_ID ||
       event.signal.reason !== "probe-entry"
     ) {
       return false;
@@ -2223,27 +2225,26 @@ export class AlgoDecisionModule implements RuntimeModule {
     const position = this.deps.positionRepo?.findByTokenId(event.signal.tokenId) ?? null;
     const fingerprint = this.entryBlockingPositionFingerprint(position);
     if (!fingerprint) return false;
-    this.r23ProbeOpenPositionBlocks.set(String(event.signal.tokenId), fingerprint);
+    this.probeOpenPositionBlocks.set(String(event.signal.tokenId), fingerprint);
     return true;
   }
 
-  private shouldSkipR23ProbeForUnchangedOpenPosition(
+  private shouldSkipProbeForUnchangedOpenPosition(
     tokenId: TokenId,
     legState: LegState | null,
-    selectedForEntry: boolean,
   ): boolean {
-    if (!selectedForEntry || legState) return false;
+    if (legState) return false;
     const key = String(tokenId);
-    const blockedFingerprint = this.r23ProbeOpenPositionBlocks.get(key);
+    const blockedFingerprint = this.probeOpenPositionBlocks.get(key);
     if (!blockedFingerprint) return false;
     const position = this.deps.positionRepo?.findByTokenId(tokenId) ?? null;
     if (this.entryBlockingPositionFingerprint(position) === blockedFingerprint) return true;
-    this.r23ProbeOpenPositionBlocks.delete(key);
+    this.probeOpenPositionBlocks.delete(key);
     return false;
   }
 
   private entryBlockingPositionFingerprint(position: Position | null): string | null {
-    if (!position || position.status === "closed" || position.size <= 0) return null;
+    if (!position || position.status === "closed") return null;
     return JSON.stringify([String(position.positionId), position.status]);
   }
 

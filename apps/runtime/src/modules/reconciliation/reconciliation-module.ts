@@ -271,7 +271,7 @@ export class ReconciliationModule implements RuntimeModule {
   async start(): Promise<void> {
     this.unsubs.push(
       this.deps.bus.subscribe("OrderCancelled", async (event) => {
-        this.removeConfirmedStaleExitReservation(event);
+        this.removeConfirmedSellReservation(event);
         if (event.reason === "downpriced_reprice") {
           recordSellDownpriceCancelSucceeded(
             this.sellDownpriceRepriceMap,
@@ -363,8 +363,7 @@ export class ReconciliationModule implements RuntimeModule {
     this.log.info("reconciliation module stopped");
   }
 
-  private removeConfirmedStaleExitReservation(event: RuntimeEventMap["OrderCancelled"]): void {
-    if (event.reason !== "stale_exit_ttl") return;
+  private removeConfirmedSellReservation(event: RuntimeEventMap["OrderCancelled"]): void {
     const order = this.deps.orderRepo.findById(event.orderId);
     if (
       order?.status !== "cancelled" ||
