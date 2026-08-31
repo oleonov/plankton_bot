@@ -122,9 +122,16 @@ describe("classifyExchangeRejectionReason", () => {
     { status: "503", error: "trading is disabled" },
     { status: 503, error: "trading is disabled right now" },
     { status: 503, error: "service unavailable" },
-    Object.assign(new Error("trading is disabled"), { status: 503 }),
     { errorDetails: { responseBody: { status: 503, error: "generic outage" } } },
-  ])("keeps near, thrown, and generic 503 outcomes unknown", (payload) => {
+  ])("keeps near and generic 503 outcomes unknown", (payload) => {
     expect(classifyExchangeRejectionReason(payload)).toBe("rejection_unknown");
+  });
+
+  it("preserves direct thrown errors as no-payload classifier input", () => {
+    expect(
+      classifyExchangeRejectionReason(
+        Object.assign(new Error("trading is disabled"), { status: 503 }),
+      ),
+    ).toBe("rejection_no_payload");
   });
 });

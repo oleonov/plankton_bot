@@ -45,10 +45,6 @@ export function classifyExchangeRejectionReason(payload: unknown): ExchangeRejec
 
 export function getExchangeRejectionPayloadText(payload: unknown): string | null {
   if (payload == null) return null;
-  if (payload instanceof Error) {
-    const trimmed = payload.message.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  }
   if (typeof payload === "string") {
     const trimmed = payload.trim();
     return trimmed.length > 0 ? trimmed : null;
