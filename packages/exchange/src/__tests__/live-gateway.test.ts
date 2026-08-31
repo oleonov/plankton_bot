@@ -262,6 +262,23 @@ describe("LiveExchangeGateway", () => {
       errorCode: "INVALID_PRICE",
     });
 
+    client.postOrder.mockResolvedValue({ status: 503, error: " Trading Is Disabled " });
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toEqual({
+      kind: "rejected",
+      errorCode: "UNKNOWN",
+      errorMessage: "trading is disabled",
+      errorDetails: {
+        responseBody: { status: 503, error: " Trading Is Disabled " },
+      },
+    });
+
+    client.postOrder.mockResolvedValue({ status: 503, message: "trading is disabled" });
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
+      kind: "rejected",
+      errorCode: "UNKNOWN",
+      errorMessage: "trading is disabled",
+    });
+
     client.postOrder.mockRejectedValue(
       Object.assign(new Error("request timeout"), { status: 408 }),
     );
@@ -270,6 +287,24 @@ describe("LiveExchangeGateway", () => {
     });
 
     client.postOrder.mockResolvedValue({ status: 429, error: "rate limit" });
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
+      kind: "unknown",
+    });
+
+    for (const response of [
+      { status: "503", error: "trading is disabled" },
+      { status: 503, error: "trading is disabled right now" },
+      { status: 503, error: "service unavailable" },
+    ]) {
+      client.postOrder.mockResolvedValue(response);
+      await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
+        kind: "unknown",
+      });
+    }
+
+    client.postOrder.mockRejectedValue(
+      Object.assign(new Error("trading is disabled"), { status: 503 }),
+    );
     await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
       kind: "unknown",
     });

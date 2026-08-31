@@ -654,6 +654,35 @@ function cheapPostRefillPolicy(
 }
 
 describe("ProfileLadderModule", () => {
+  it("bounds its market cache across tracked removal and restart", async () => {
+    const ctx = setup();
+    const retainedTokenId = createTokenId("profile-ladder-retained-token");
+    const cache = (ctx.module as any).marketByToken as Map<string, NormalizedMarket>;
+    await ctx.module.start();
+
+    await ctx.bus.publish("NormalizedMarketUpdated", {
+      markets: [market(), market({ tokenId: retainedTokenId })],
+      timestamp: NOW,
+    });
+    await ctx.bus.publish("TrackedMarketsChanged", {
+      addedTokenIds: [],
+      removedTokenIds: [tokenId],
+      activeTokenIds: [retainedTokenId],
+      timestamp: NOW,
+    });
+
+    expect.soft([...cache.keys()]).toEqual([String(retainedTokenId)]);
+    await ctx.module.stop();
+    expect.soft(cache.size).toBe(0);
+    await ctx.module.start();
+    expect.soft(cache.size).toBe(0);
+
+    const refreshed = market();
+    await ctx.bus.publish("NormalizedMarketUpdated", { markets: [refreshed], timestamp: NOW });
+    expect(cache.get(String(tokenId))).toBe(refreshed);
+    await ctx.module.stop();
+  });
+
   it("start is a no-op when sell ladder is disabled", async () => {
     const ctx = setup({ ...policy(), sellLadder: { ...policy().sellLadder, enabled: false } });
     await ctx.module.start();

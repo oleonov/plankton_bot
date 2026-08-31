@@ -556,12 +556,11 @@ export function buildStatusSnapshot(
     )
     .get() as { captured_at: string } | undefined;
   const openDriftCount = readOpenDriftCount(db);
+  const unresolvedMetricDrift = lastDrift
+    ? !lastCleanRecon || new Date(lastDrift.captured_at) > new Date(lastCleanRecon.captured_at)
+    : false;
   const reconciliationDriftDetected =
-    openDriftCount !== null
-      ? openDriftCount > 0
-      : lastDrift
-        ? !lastCleanRecon || new Date(lastDrift.captured_at) > new Date(lastCleanRecon.captured_at)
-        : false;
+    openDriftCount === null ? unresolvedMetricDrift : openDriftCount > 0 || unresolvedMetricDrift;
 
   const paused = pausedMetric?.value === 1;
 

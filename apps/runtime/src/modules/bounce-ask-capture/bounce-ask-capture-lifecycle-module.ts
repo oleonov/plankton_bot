@@ -65,6 +65,7 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.listen("NormalizedMarketUpdated", (event) => this.onMarket(event));
+    this.listen("TrackedMarketsChanged", (event) => this.onTrackedMarketsChanged(event));
     this.listen("OrderCancelled", (event) => this.onCancelled(event));
     this.listen("OrderPlaced", (event) => this.onPlaced(event));
     this.listen("OrderRejected", (event) => this.failBySignal(event.signalId, event.reason));
@@ -84,6 +85,7 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
   async stop(): Promise<void> {
     for (const unsub of this.unsubs) unsub();
     this.unsubs.length = 0;
+    this.markets.clear();
     this.started = false;
   }
 
@@ -107,6 +109,12 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       if (!tokenIds.has(String(order.tokenId))) continue;
       await this.tryClaim(order, event.timestamp, snapshot);
     }
+  }
+
+  private async onTrackedMarketsChanged(
+    event: RuntimeEventMap["TrackedMarketsChanged"],
+  ): Promise<void> {
+    for (const tokenId of event.removedTokenIds) this.markets.delete(String(tokenId));
   }
 
   private async tryClaim(

@@ -235,6 +235,14 @@ function isResolvedSubmissionRejection(response: unknown): boolean {
   return isDefinitiveSubmissionRejection(response);
 }
 
+function isResolvedTradingDisabledRejection(response: unknown): boolean {
+  if (!response || typeof response !== "object") return false;
+  if (Reflect.get(response, "status") !== 503) return false;
+  return [Reflect.get(response, "error"), Reflect.get(response, "message")].some(
+    (value) => typeof value === "string" && value.trim().toLowerCase() === "trading is disabled",
+  );
+}
+
 class SettlementTransactionFailedError extends Error {
   constructor() {
     super("Settlement transaction reached failed state before balances cleared");
@@ -585,6 +593,14 @@ export class LiveExchangeGateway implements ExchangeGateway {
       );
       const orderId = extractOrderId(response);
       if (!orderId) {
+        if (isResolvedTradingDisabledRejection(response)) {
+          return {
+            kind: "rejected",
+            errorCode: "UNKNOWN",
+            errorMessage: "trading is disabled",
+            errorDetails: { responseBody: redactSensitive(response) },
+          };
+        }
         if (isResolvedSubmissionRejection(response)) {
           const { code, message, details } = classifyError(response);
           return {

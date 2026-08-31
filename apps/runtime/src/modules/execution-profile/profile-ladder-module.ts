@@ -329,6 +329,9 @@ export class ProfileLadderModule implements RuntimeModule {
       this.deps.bus.subscribe("NormalizedMarketUpdated", async (event) => {
         await this.handleMarketUpdate(event);
       }),
+      this.deps.bus.subscribe("TrackedMarketsChanged", async (event) => {
+        this.handleTrackedMarketsChanged(event);
+      }),
       this.deps.bus.subscribe("PositionUpdated", async ({ position }) => {
         await this.handlePositionUpdated(position);
       }),
@@ -371,6 +374,7 @@ export class ProfileLadderModule implements RuntimeModule {
     this.missingLadderRecoveryCooldownUntilByToken.clear();
     this.pendingRebuildDeferCooldownUntilByToken.clear();
     this.pendingRungByClientOrderId.clear();
+    this.marketByToken.clear();
     this.replacementCooldownUntilByToken.clear();
     this.subMinResidualSignatureByToken.clear();
     this.exhaustedRetrySignatureByToken.clear();
@@ -698,6 +702,10 @@ export class ProfileLadderModule implements RuntimeModule {
       if (reason === "bbo_major" && position.entryStyle === "maker") continue;
       await this.rebuildLadder(position, market, reason);
     }
+  }
+
+  private handleTrackedMarketsChanged(event: RuntimeEventMap["TrackedMarketsChanged"]): void {
+    for (const tokenId of event.removedTokenIds) this.marketByToken.delete(String(tokenId));
   }
 
   private async handlePositionUpdated(position: Position): Promise<void> {

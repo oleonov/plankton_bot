@@ -2304,3 +2304,160 @@ describe("migration 105 — reconciliation zero-return redeem accounting backfil
     ).toBe(0);
   });
 });
+
+describe("migration 106 — repair trading-disabled pending orders", () => {
+  const MIGRATION = "106_repair_trading_disabled_pending_orders.sql";
+
+  type CandidateOverrides = Partial<{
+    status: string;
+    exchangeOrderId: string | null;
+    eventType: string;
+    eventOrderId: string;
+    eventClientOrderId: string;
+    responseBody: unknown;
+    payloadRaw: string;
+    metadata: string | null;
+    withFill: boolean;
+  }>;
+
+  beforeEach(() => {
+    db.exec(`
+      CREATE TABLE orders (
+        order_id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL,
+        status TEXT NOT NULL, exchange_order_id TEXT, fill_progress_shares NUMERIC,
+        exchange_error_code TEXT, exchange_error_message TEXT,
+        exchange_error_payload TEXT, exchange_rejection_reason TEXT,
+        metadata_json TEXT, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE fills (fill_id TEXT PRIMARY KEY, order_id TEXT NOT NULL);
+      CREATE TABLE risk_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, payload TEXT NOT NULL
+      );
+    `);
+  });
+
+  function seedCandidate(id: string, overrides: CandidateOverrides = {}): void {
+    const clientOrderId = `client-${id}`;
+    const exchangeOrderId =
+      overrides.exchangeOrderId === undefined ? id : overrides.exchangeOrderId;
+    db.prepare(
+      `INSERT INTO orders
+         (order_id, client_order_id, status, exchange_order_id, fill_progress_shares,
+          metadata_json, updated_at)
+       VALUES (?, ?, ?, ?, 7, ?, '2026-08-30T00:00:00.000Z')`,
+    ).run(
+      id,
+      clientOrderId,
+      overrides.status ?? "pending",
+      exchangeOrderId,
+      overrides.metadata === undefined
+        ? JSON.stringify({
+            orderSource: "signal",
+            makerCaptureLineageV1: { rootOrderId: "maker-root" },
+            bounceAskCaptureLineageV1: { rootOrderId: "bounce-root" },
+          })
+        : overrides.metadata,
+    );
+    const payload =
+      overrides.payloadRaw ??
+      JSON.stringify({
+        orderId: overrides.eventOrderId ?? id,
+        clientOrderId: overrides.eventClientOrderId ?? clientOrderId,
+        errorDetails: {
+          responseBody: overrides.responseBody ?? { status: 503, error: "trading is disabled" },
+        },
+      });
+    db.prepare("INSERT INTO risk_events (event_type, payload) VALUES (?, ?)").run(
+      overrides.eventType ?? "live_order_submit_unknown",
+      payload,
+    );
+    if (overrides.withFill) {
+      db.prepare("INSERT INTO fills (fill_id, order_id) VALUES (?, ?)").run(`fill-${id}`, id);
+    }
+  }
+
+  it("repairs only exact error/message evidence, preserves its body, and removes lineage", () => {
+    seedCandidate("eligible-error", {
+      responseBody: { status: 503, error: " Trading Is Disabled ", requestId: "req-1" },
+    });
+    seedCandidate("eligible-message", {
+      responseBody: { status: 503, message: "trading is disabled" },
+      metadata: "not-json",
+    });
+
+    db.exec(readMigration(MIGRATION));
+
+    const rows = db.prepare("SELECT * FROM orders ORDER BY order_id").all() as Array<
+      Record<string, unknown>
+    >;
+    for (const row of rows) {
+      expect(row).toMatchObject({
+        status: "rejected",
+        fill_progress_shares: 0,
+        exchange_error_code: "UNKNOWN",
+        exchange_error_message: "trading is disabled",
+        exchange_rejection_reason: "rejection_unknown",
+      });
+      expect(row.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    }
+    expect(JSON.parse(rows[0]!.exchange_error_payload as string)).toEqual({
+      responseBody: { status: 503, error: " Trading Is Disabled ", requestId: "req-1" },
+    });
+    expect(JSON.parse(rows[1]!.exchange_error_payload as string)).toEqual({
+      responseBody: { status: 503, message: "trading is disabled" },
+    });
+    expect(JSON.parse(rows[0]!.metadata_json as string)).toEqual({ orderSource: "signal" });
+    expect(rows[1]!.metadata_json).toBe("not-json");
+
+    db.prepare("UPDATE orders SET updated_at = 'idempotency-sentinel'").run();
+    db.exec(readMigration(MIGRATION));
+    expect(db.prepare("SELECT DISTINCT updated_at FROM orders").pluck().all()).toEqual([
+      "idempotency-sentinel",
+    ]);
+  });
+
+  const guardedCases: Array<[string, CandidateOverrides]> = [
+    ["is not pending", { status: "open" }],
+    ["has a different exchange id", { exchangeOrderId: "other" }],
+    ["has an empty exchange id", { exchangeOrderId: "" }],
+    ["already has a fill", { withFill: true }],
+    ["has malformed evidence", { payloadRaw: "{" }],
+    ["has another event type", { eventType: "order_rejected" }],
+    ["has another order id", { eventOrderId: "other" }],
+    ["has another client order id", { eventClientOrderId: "other" }],
+    ["has a string status", { responseBody: { status: "503", error: "trading is disabled" } }],
+    [
+      "has a near-match message",
+      { responseBody: { status: 503, error: "trading is disabled right now" } },
+    ],
+    ["has a generic 503", { responseBody: { status: 503, error: "service unavailable" } }],
+  ];
+
+  it.each(guardedCases)("leaves a pending row untouched when it %s", (_label, overrides) => {
+    seedCandidate("guarded", overrides);
+
+    db.exec(readMigration(MIGRATION));
+
+    expect(db.prepare("SELECT status, fill_progress_shares FROM orders").get()).toEqual({
+      status: overrides.status ?? "pending",
+      fill_progress_shares: 7,
+    });
+  });
+
+  it("rolls the repair and migration marker back together", () => {
+    seedCandidate("rollback");
+    db.exec(`
+      CREATE TRIGGER fail_repair_106 BEFORE UPDATE OF status ON orders
+      BEGIN SELECT RAISE(ABORT, 'forced migration 106 failure'); END;
+    `);
+    const migrationDir = path.join(tmpDir, "migration-106-only");
+    mkdirSync(migrationDir);
+    writeFileSync(path.join(migrationDir, MIGRATION), readMigration(MIGRATION));
+
+    expect(() => runMigrations(db, migrationDir)).toThrow(/forced migration 106 failure/);
+    expect(db.prepare("SELECT status FROM orders").pluck().get()).toBe("pending");
+    expect(
+      db.prepare("SELECT COUNT(*) FROM schema_migrations WHERE name = ?").pluck().get(MIGRATION),
+    ).toBe(0);
+  });
+});

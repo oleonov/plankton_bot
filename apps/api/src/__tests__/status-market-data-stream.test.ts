@@ -13,7 +13,12 @@ function jsonMetric(labels: Record<string, unknown>): { labels: string } {
 
 function createFakeDb(
   runtimeMetrics: Record<string, Record<string, unknown>>,
-  options?: { openDriftCount?: number; driftTableMissing?: boolean },
+  options?: {
+    openDriftCount?: number;
+    driftTableMissing?: boolean;
+    driftCapturedAt?: string;
+    cleanCapturedAt?: string;
+  },
 ): Database.Database {
   const lastMarketDataIso = new Date().toISOString();
 
@@ -45,12 +50,12 @@ function createFakeDb(
           if (sql.includes("metric_name = 'execution_mode'")) return undefined;
           if (sql.includes("metric_name = 'reconciliation_drift'")) {
             return runtimeMetrics.reconciliation_drift
-              ? { captured_at: "2026-04-24T10:00:00Z" }
+              ? { captured_at: options?.driftCapturedAt ?? "2026-04-24T10:00:00Z" }
               : undefined;
           }
           if (sql.includes("metric_name = 'reconciliation_clean'")) {
             return runtimeMetrics.reconciliation_clean
-              ? { captured_at: "2026-04-24T09:00:00Z" }
+              ? { captured_at: options?.cleanCapturedAt ?? "2026-04-24T09:00:00Z" }
               : undefined;
           }
           if (sql.includes("FROM position_drifts WHERE status = 'open'")) {
@@ -233,7 +238,7 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
     });
   });
 
-  it("derives reconciliationDriftDetected from open drift rows instead of stale metrics", () => {
+  it("keeps a newer unresolved reconciliation metric visible without open position drift", () => {
     const snapshot = buildStatusSnapshot(
       createFakeDb(
         {
@@ -245,7 +250,45 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
       120_000,
     );
 
+    expect(snapshot.reconciliationDriftDetected).toBe(true);
+  });
+
+  it("clears reconciliationDriftDetected after a newer clean metric", () => {
+    const snapshot = buildStatusSnapshot(
+      createFakeDb(
+        {
+          reconciliation_drift: {},
+          reconciliation_clean: {},
+        },
+        {
+          openDriftCount: 0,
+          driftCapturedAt: "2026-04-24T09:00:00Z",
+          cleanCapturedAt: "2026-04-24T10:00:00Z",
+        },
+      ),
+      120_000,
+    );
+
     expect(snapshot.reconciliationDriftDetected).toBe(false);
+  });
+
+  it("keeps open position drift visible after a newer clean metric", () => {
+    const snapshot = buildStatusSnapshot(
+      createFakeDb(
+        {
+          reconciliation_drift: {},
+          reconciliation_clean: {},
+        },
+        {
+          openDriftCount: 1,
+          driftCapturedAt: "2026-04-24T09:00:00Z",
+          cleanCapturedAt: "2026-04-24T10:00:00Z",
+        },
+      ),
+      120_000,
+    );
+
+    expect(snapshot.reconciliationDriftDetected).toBe(true);
   });
 
   it("falls back to metric chronology when the drift table is unavailable", () => {

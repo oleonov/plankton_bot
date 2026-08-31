@@ -149,6 +149,53 @@ function chainUsage(id: Order["orderId"]) {
 }
 
 describe("bounce ASK capture", () => {
+  it("bounds its market cache across tracked removal and restart", async () => {
+    const bus = new InProcessEventBus();
+    const module = new BounceAskCaptureLifecycleModule({
+      bus,
+      orderRepo: { findOpen: () => [] } as any,
+      fillRepo: {} as any,
+      positionRepo: {} as any,
+      inventoryLotRepo: {} as any,
+      policySnapshot: () => ({
+        policy: {
+          ...DEFAULT_EXECUTION_POLICY,
+          bounceAskCapture: { ...DEFAULT_EXECUTION_POLICY.bounceAskCapture, enabled: false },
+        },
+        controlRevision: 7,
+      }),
+      log: { child: () => ({ info: vi.fn(), error: vi.fn() }) } as any,
+      now: () => NOW,
+    });
+    const retainedTokenId = createTokenId("ask-retained-token");
+    const cache = (module as any).markets as Map<string, NormalizedMarket>;
+    const normalizedMarket = (id: typeof tokenId) =>
+      ({ tokenId: id, active: true, snapshotTs: NOW }) as NormalizedMarket;
+    await module.start();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [normalizedMarket(tokenId), normalizedMarket(retainedTokenId)],
+      timestamp: NOW,
+    });
+    await bus.publish("TrackedMarketsChanged", {
+      addedTokenIds: [],
+      removedTokenIds: [tokenId],
+      activeTokenIds: [retainedTokenId],
+      timestamp: NOW,
+    });
+
+    expect.soft([...cache.keys()]).toEqual([String(retainedTokenId)]);
+    await module.stop();
+    expect.soft(cache.size).toBe(0);
+    await module.start();
+    expect.soft(cache.size).toBe(0);
+
+    const refreshed = normalizedMarket(tokenId);
+    await bus.publish("NormalizedMarketUpdated", { markets: [refreshed], timestamp: NOW });
+    expect(cache.get(String(tokenId))).toBe(refreshed);
+    await module.stop();
+  });
+
   it("subtracts our confirmed SELL and enforces target and downward bounds", () => {
     const input = {
       book: book(),
