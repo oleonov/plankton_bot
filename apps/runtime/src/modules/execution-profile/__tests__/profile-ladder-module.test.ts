@@ -1671,6 +1671,60 @@ describe("ProfileLadderModule", () => {
     }
   });
 
+  it("serializes concurrent persisted recovery and releases its fence after failure", async () => {
+    vi.useFakeTimers();
+    try {
+      let reject!: (reason: Error) => void;
+      const deferred = new Promise<
+        Awaited<ReturnType<ProfileLadderBookCache["getFreshOrRefresh"]>>
+      >((_resolve, rejectPromise) => (reject = rejectPromise));
+      const bookCache = { getFreshOrRefresh: vi.fn(() => deferred) };
+      const livePosition = position({ size: 95, costBasisUsdc: 9.5 });
+      const ctx = setup(policy(), {
+        bookCache,
+        positionRepo: { findOpen: () => [livePosition] },
+      });
+      ctx.repo.upsertLadder(
+        ladderState({
+          lastCostBasisUsdc: livePosition.costBasisUsdc,
+          activeRungs: [rung({ terminalRetryKey: "persisted-terminal" })],
+        }),
+      );
+      await ctx.module.start();
+
+      const update = ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ minOrderSize: null })],
+        timestamp: NOW,
+      });
+      await Promise.resolve();
+      const positionUpdate = ctx.bus.publish("PositionUpdated", { position: livePosition });
+      vi.advanceTimersByTime(PLANNED_RUNG_RETRY_MS);
+      await Promise.resolve();
+
+      expect(bookCache.getFreshOrRefresh).toHaveBeenCalledTimes(1);
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      reject(new Error("book refresh failed"));
+      await Promise.all([update, positionUpdate]);
+      consoleError.mockRestore();
+      bookCache.getFreshOrRefresh.mockResolvedValue({
+        entry: {
+          bookSource: "clob",
+          sourceKind: "rest",
+          book: orderBook(),
+        },
+        status: "refreshed",
+      });
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ minOrderSize: null })],
+        timestamp: NOW + 1,
+      });
+
+      expect(ctx.orders).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rebuilds a stale planned-only ladder with no live profile-ladder order", async () => {
     const openPosition = position({
       avgEntryPrice: 0.259945,
@@ -2147,6 +2201,221 @@ describe("ProfileLadderModule", () => {
         value: 1,
         labels: '{"band":"medium_high","reason":"live_or_filled"}',
       });
+    });
+  });
+
+  describe("exact legacy cancelled-rung recovery", () => {
+    const recoveryLadderId = "profile_ladder_cancelled_prod_planned_no_live_recovery";
+    const recoverySignalId = `profile_ladder_${String(tokenId)}_${recoveryLadderId}_0`;
+
+    function cancelledRecoveryOrder(overrides: Partial<Order> = {}): Order {
+      const exchangeOrderId = "legacy-cancelled-prod-exchange";
+      return openSellOrder({
+        orderId: createOrderId(exchangeOrderId),
+        clientOrderId: buildClientOrderId({ signalId: recoverySignalId, tokenId, side: "sell" }),
+        positionId: null,
+        price: 0.116,
+        size: 28.99,
+        sizeUsdc: 3.36284,
+        status: OrderStatus.Cancelled,
+        cancelReason: "operator",
+        fillProgressShares: 0,
+        exchangeOrderId,
+        signalId: recoverySignalId,
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: {
+          source: "profile_ladder",
+          profileLadder: { ladderId: recoveryLadderId, rungIndex: 0 },
+        },
+        ...overrides,
+      });
+    }
+
+    function cancelledRecoveryContext(
+      options: {
+        state?: LadderState;
+        candidate?: Order;
+        extraOrders?: Order[];
+        positions?: Position[];
+      } = {},
+    ) {
+      const openPosition = position({ size: 28.99, avgEntryPrice: 0.07, costBasisUsdc: 2.03 });
+      const candidate = options.candidate ?? cancelledRecoveryOrder();
+      const tokenOrders = [candidate, ...(options.extraOrders ?? [])];
+      const positions = options.positions ?? [openPosition];
+      const ctx = setup(policy(), {
+        runtimeMode: "live-lite",
+        isProfileOwned: () => true,
+        profileStateReader: { getProfileState: () => "EXITING" },
+        positionRepo: {
+          findOpen: () => positions,
+          findActiveByTokenId: () => positions,
+        },
+        orderRepo: {
+          findByTokenId: () => tokenOrders,
+          findByClientOrderId: (id) =>
+            tokenOrders.find((order) => String(order.clientOrderId) === id) ?? null,
+        },
+      });
+      ctx.repo.upsertLadder(
+        options.state ??
+          ladderState({
+            ladderId: "profile_ladder_cancelled_prod",
+            activeRungs: [
+              rung({
+                price: 0.116,
+                sizeShares: 28.99,
+                notionalUsd: 3.36284,
+                sizingFraction: 1,
+                lifecycle: "cancelled",
+                orderId: null,
+                filledSizeShares: 0,
+              }),
+            ],
+            lastAvgEntry: 0.07,
+            lastCostBasisUsdc: 2.03,
+          }),
+      );
+      return ctx;
+    }
+
+    async function fireCancelledRecovery(
+      ctx: ReturnType<typeof cancelledRecoveryContext>,
+      overrides: Partial<NormalizedMarket> = {},
+    ) {
+      await ctx.module.start();
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          market({
+            bestBid: null,
+            bestAsk: 0.001,
+            midPrice: null,
+            spread: null,
+            minOrderSize: 0,
+            ...overrides,
+          }),
+        ],
+        timestamp: NOW,
+      });
+    }
+
+    it("rearms the exact prod-shape cancellation once and binds its fresh terminal retry", async () => {
+      const ctx = cancelledRecoveryContext();
+
+      await fireCancelledRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.orders[0]).toMatchObject({
+        side: "sell",
+        price: 0.116,
+        size: 28.99,
+        postOnly: true,
+        orderType: "GTC",
+      });
+      expect(ctx.orders[0]?.signalId).toContain(
+        "_planned_no_live_recovery_0_terminal_retry_legacy-cancelled-prod-exchange",
+      );
+      expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+        ladderId: recoveryLadderId,
+        activeRungs: [
+          {
+            lifecycle: "planned",
+            orderId: null,
+            terminalRetryKey: "legacy-cancelled-prod-exchange",
+            attemptFilledBaseShares: 0,
+            attemptSubmittedShares: 28.99,
+            preExchangeRetryCount: 0,
+          },
+        ],
+      });
+
+      await fireCancelledRecovery(ctx);
+      expect(ctx.orders).toHaveLength(1);
+      await ctx.bus.publish("OrderPlaced", orderPlaced(ctx.orders[0]!));
+      await fireCancelledRecovery(ctx);
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "placed",
+        orderId: "profile-ladder-backfilled-order",
+      });
+    });
+
+    it("fails closed unless the exact legacy order, state, basis, and market are unchanged", async () => {
+      const cases = [
+        cancelledRecoveryContext({
+          state: ladderState({
+            ladderId: "profile_ladder_cancelled_prod",
+            activeRungs: [
+              rung({
+                lifecycle: "cancelled",
+                price: 0.116,
+                sizeShares: 28.99,
+                terminalRetryKey: "x",
+              }),
+            ],
+          }),
+        }),
+        cancelledRecoveryContext({
+          extraOrders: [
+            cancelledRecoveryOrder({
+              orderId: createOrderId("second"),
+              exchangeOrderId: "second",
+            }),
+          ],
+        }),
+        cancelledRecoveryContext({
+          extraOrders: [openSellOrder({ status: OrderStatus.Open, exchangeOrderId: "other" })],
+        }),
+        cancelledRecoveryContext({
+          state: ladderState({
+            ladderId: "profile_ladder_cancelled_prod",
+            activeRungs: [
+              rung({ lifecycle: "cancelled", price: 0.116, sizeShares: 28.99 }),
+              rung({ rungIndex: 1, lifecycle: "cancelled", orderId: null }),
+            ],
+          }),
+        }),
+        cancelledRecoveryContext({
+          state: ladderState({ conditionId: createConditionId("other-condition") }),
+        }),
+        cancelledRecoveryContext({
+          candidate: cancelledRecoveryOrder({
+            positionId: createPositionId("profile-ladder-position"),
+          }),
+        }),
+        cancelledRecoveryContext({
+          positions: [position({ size: 28.99, avgEntryPrice: 0.071, costBasisUsdc: 2.03 })],
+        }),
+        cancelledRecoveryContext({
+          positions: [position({ size: 28.99, avgEntryPrice: 0.07, costBasisUsdc: 2.04 })],
+        }),
+      ];
+      for (const ctx of cases) {
+        await fireCancelledRecovery(ctx);
+        expect(ctx.orders).toHaveLength(0);
+      }
+
+      for (const bbo of [
+        { bestBid: null, bestAsk: null },
+        { bestBid: 0.001, bestAsk: null },
+        { bestBid: 0.001, bestAsk: 0.001 },
+      ]) {
+        const invalidBbo = cancelledRecoveryContext();
+        await fireCancelledRecovery(invalidBbo, bbo);
+        expect(invalidBbo.orders).toHaveLength(0);
+      }
+
+      const smallPosition = position({ size: 4, avgEntryPrice: 0.07, costBasisUsdc: 0.28 });
+      const subMin = cancelledRecoveryContext({ positions: [smallPosition] });
+      await fireCancelledRecovery(subMin);
+      expect(subMin.orders).toHaveLength(0);
+
+      const inFlightScaleIn = cancelledRecoveryContext();
+      await inFlightScaleIn.module.start();
+      await inFlightScaleIn.bus.publish("FillReceived", fill({ side: "buy" }));
+      await fireCancelledRecovery(inFlightScaleIn);
+      expect(inFlightScaleIn.orders).toHaveLength(0);
     });
   });
 

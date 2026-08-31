@@ -6,6 +6,7 @@ import {
   OrderType,
   PositionStatus,
   createBotRunId,
+  createCommandId,
   createConditionId,
   createFillId,
   createOrderId,
@@ -18,6 +19,7 @@ import {
   type OrderRepository,
   type Position,
   type PositionRepository,
+  type RuntimeEventMap,
   type ScaleInMarketSignals,
   type SignalSnapshot,
   type Signal,
@@ -184,7 +186,11 @@ function makePositionRepo(rows: Position[]): PositionRepository {
 function makeOrderRepo(rows: Order[]): OrderRepository {
   return {
     save: vi.fn(),
-    findById: vi.fn(),
+    findById: vi.fn((id) => rows.find((row) => row.orderId === id) ?? null),
+    findByClientOrderId: vi.fn(
+      (id) => rows.find((row) => String(row.clientOrderId) === id) ?? null,
+    ),
+    findByExchangeOrderId: vi.fn((id) => rows.find((row) => row.exchangeOrderId === id) ?? null),
     findOpen: vi.fn(() =>
       rows.filter((row) => ["pending", "open", "partially-filled"].includes(row.status)),
     ),
@@ -194,6 +200,15 @@ function makeOrderRepo(rows: Order[]): OrderRepository {
     updateStatus: vi.fn(),
     sumOpenBuyNotional: vi.fn(() => 0),
   } as unknown as OrderRepository;
+}
+
+async function heartbeat(bus: InProcessEventBus, timestamp = NOW): Promise<void> {
+  await bus.publish("MarketSnapshotHeartbeat", {
+    markets: [market({ bestAsk: 0.106, midPrice: 0.1, lastTradePrice: 0.1 })],
+    timestamp,
+    reason: "full_lifetime_active_position",
+    source: "market-data",
+  });
 }
 
 function state(overrides: Partial<ExecutionProfileStateRecord> = {}): ExecutionProfileStateRecord {
@@ -383,6 +398,90 @@ function makeRollup(
   });
 }
 
+async function pendingScaleInFixture(
+  orders: Order[] = [],
+  onSignal?: (
+    event: RuntimeEventMap["SignalProduced"],
+    bus: InProcessEventBus,
+    orders: Order[],
+  ) => Promise<void>,
+) {
+  const bus = new InProcessEventBus();
+  const signals: Signal[] = [];
+  bus.subscribe("SignalProduced", async (event) => {
+    const { signal } = event;
+    signals.push(signal);
+    await onSignal?.(event, bus, orders);
+  });
+  const repo = new InMemoryExecutionProfileStateRepository([
+    state({ lastBuyAtMs: NOW - 2_000_000 }),
+  ]);
+  const manager = makeManager({
+    bus,
+    repo,
+    orders,
+    signalSnapshot: zeroSignals(),
+    profilePolicy: policy({
+      enabled: true,
+      scaleIn: { enabled: true, useRealFeed: false },
+      costCaps: { enabled: false },
+    }),
+    positions: [position({ avgEntryPrice: 0.1, costBasisUsdc: 8 })],
+  });
+  await manager.start();
+  await heartbeat(bus);
+  return { bus, manager, orders, repo, signals };
+}
+
+function scaleInOrder(signal: Signal, overrides: Partial<Order> = {}): Order {
+  return order({
+    orderId: createOrderId("scale-in-order"),
+    clientOrderId: "scale-in-client" as ClientOrderId,
+    side: "buy",
+    status: "open",
+    signalId: signal.signalId,
+    signalReason: signal.reason,
+    decisionRuleId: signal.decisionRuleId,
+    exchangeOrderId: "scale-in-exchange",
+    ...overrides,
+  });
+}
+
+async function publishScaleInTerminal(
+  bus: InProcessEventBus,
+  eventName: "OrderRejected" | "OrderSkipped",
+  signal: Signal,
+  signalId: string,
+) {
+  const base = {
+    commandId: createCommandId("scale-in-terminal"),
+    clientOrderId: "scale-in-client" as ClientOrderId,
+    tokenId,
+    conditionId,
+    signalReason: signal.reason,
+    side: "buy" as const,
+    signalId,
+    decisionRuleId: signal.decisionRuleId,
+    signalTimestamp: signal.generatedAt,
+    timestamp: NOW,
+  };
+  if (eventName === "OrderRejected") {
+    await bus.publish(eventName, {
+      ...base,
+      reason: "test",
+      errorCode: "LIVE_POLICY_BLOCKED",
+    } as RuntimeEventMap["OrderRejected"]);
+    return;
+  }
+  await bus.publish(eventName, {
+    ...base,
+    reasonCode: "test",
+    price: signal.suggestedPrice,
+    size: signal.suggestedSize,
+    details: {},
+  });
+}
+
 describe("ExecutionProfileManager", () => {
   it("hydrates existing active state into the ownership cache", async () => {
     const repo = new InMemoryExecutionProfileStateRepository();
@@ -531,6 +630,90 @@ describe("ExecutionProfileManager", () => {
       reason: "scale-in",
       decisionRuleId: "EXECUTION_PROFILE_SCALE_IN",
       suggestedPrice: 0.106,
+    });
+  });
+
+  describe("pending scale-in lifecycle", () => {
+    it.each(["SignalRejected", "SignalConversionSkipped"] as const)(
+      "clears the exact pending add on %s and permits the next heartbeat",
+      async (eventName) => {
+        const ctx = await pendingScaleInFixture([], async ({ signal, market }, bus) => {
+          if (eventName === "SignalRejected") {
+            await bus.publish(eventName, {
+              signal,
+              market,
+              reason: "market_not_alive",
+              rejectedAt: NOW,
+            });
+          } else {
+            await bus.publish(eventName, {
+              signal,
+              stage: "track-a-add-throttle",
+              reasons: ["age_60m_no_sell"],
+              diagnostics: {},
+              skippedAt: NOW,
+            });
+          }
+        });
+        await heartbeat(ctx.bus, NOW + 1);
+        expect(ctx.signals).toHaveLength(2);
+      },
+    );
+
+    it.each(["OrderRejected", "OrderSkipped"] as const)(
+      "clears the exact pending add on %s but ignores a mismatched signal",
+      async (eventName) => {
+        const ctx = await pendingScaleInFixture([], async ({ signal }, _bus, orders) => {
+          if (orders.length === 0) {
+            orders.push(scaleInOrder(signal, { status: "pending" }));
+          }
+        });
+        const signal = ctx.signals[0]!;
+        await publishScaleInTerminal(ctx.bus, eventName, signal, "other-signal");
+        expect(ctx.manager.getPendingScaleIns()).toHaveLength(1);
+        ctx.orders[0]!.status = "cancelled";
+        await publishScaleInTerminal(ctx.bus, eventName, signal, signal.signalId);
+        await heartbeat(ctx.bus, NOW + 1);
+        expect(ctx.signals).toHaveLength(2);
+      },
+    );
+
+    it("drops ephemeral state after an ambiguous handoff but honors the authoritative pending BUY", async () => {
+      const ambiguous = order({
+        orderId: createOrderId("ambiguous-pending-buy"),
+        side: "buy",
+        status: "pending",
+        signalId: null,
+        signalReason: "scale-in",
+      });
+      const ctx = await pendingScaleInFixture([], async (_event, _bus, orders) => {
+        if (orders.length === 0) orders.push(ambiguous);
+      });
+      expect(ctx.manager.getPendingScaleIns()).toHaveLength(0);
+      await heartbeat(ctx.bus, NOW + 1);
+      expect(ctx.signals).toHaveLength(1);
+    });
+
+    it.each(["settled", "stop"] as const)("clears exact pending state when %s", async (end) => {
+      const ctx = await pendingScaleInFixture([], async ({ signal }, _bus, orders) => {
+        orders.push(scaleInOrder(signal, { status: "pending" }));
+      });
+      expect(ctx.manager.getPendingScaleIns()).toHaveLength(1);
+      if (end === "stop") {
+        await ctx.manager.stop();
+      } else {
+        await ctx.bus.publish("PositionSettled", {
+          positionId: createPositionId("manager-position"),
+          tokenId,
+          resolution: "NO",
+          settlementPrice: 0,
+          realizedPnl: -8,
+          size: 100,
+          avgEntryPrice: 0.1,
+          timestamp: NOW,
+        });
+      }
+      expect(ctx.manager.getPendingScaleIns()).toHaveLength(0);
     });
   });
 
@@ -784,7 +967,7 @@ describe("ExecutionProfileManager", () => {
         labels: expect.stringContaining("stock_close_tail_damp_below_min_order"),
       }),
     );
-    expect(manager.getPendingScaleIns()).toHaveLength(1);
+    expect(manager.getPendingScaleIns()).toHaveLength(0);
   });
 
   it("blocks profile D3 near-death scale-in inside effective runway", async () => {

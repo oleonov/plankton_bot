@@ -93,7 +93,10 @@ export class ExecutionProfileManager implements RuntimeModule {
   private readonly ownership = new InMemoryProfileOwnershipReader();
   private readonly scaleInSignalSource: ScaleInSignalSource;
   private readonly abandonmentManager: AbandonmentManager;
-  private readonly pendingScaleIn = new Map<string, { profile: Profile; createdAtMs: number }>();
+  private readonly pendingScaleIn = new Map<
+    string,
+    { profile: Profile; createdAtMs: number; signalId: string }
+  >();
   private readonly unsubscribers: Array<() => void> = [];
   private started = false;
 
@@ -128,6 +131,7 @@ export class ExecutionProfileManager implements RuntimeModule {
 
   async stop(): Promise<void> {
     this.abandonmentManager.stop();
+    this.pendingScaleIn.clear();
     while (this.unsubscribers.length > 0) {
       const unsub = this.unsubscribers.pop();
       unsub?.();
@@ -167,6 +171,29 @@ export class ExecutionProfileManager implements RuntimeModule {
       }),
       this.deps.bus.subscribe("FillReceived", async (fill) => {
         this.handleFillReceived(fill);
+      }),
+      this.deps.bus.subscribe("SignalRejected", async ({ signal }) => {
+        this.clearPendingScaleIn(signal.tokenId, signal.signalId);
+      }),
+      this.deps.bus.subscribe("SignalConversionSkipped", async ({ signal }) => {
+        this.clearPendingScaleIn(signal.tokenId, signal.signalId);
+      }),
+      this.deps.bus.subscribe("OrderRejected", async (event) => {
+        this.clearPendingScaleIn(event.tokenId, event.signalId);
+      }),
+      this.deps.bus.subscribe("OrderSkipped", async (event) => {
+        this.clearPendingScaleIn(event.tokenId, event.signalId);
+      }),
+      this.deps.bus.subscribe("OrderPlaced", async (event) => {
+        this.clearPendingFromOrder(
+          this.deps.orderRepo.findByClientOrderId(String(event.clientOrderId)),
+        );
+      }),
+      this.deps.bus.subscribe("OrderCancelled", async (event) => {
+        this.clearPendingFromOrder(
+          this.deps.orderRepo.findById(event.orderId) ??
+            this.deps.orderRepo.findByExchangeOrderId(String(event.orderId)),
+        );
       }),
       this.deps.bus.subscribe("MarketSnapshotHeartbeat", async ({ markets, timestamp }) => {
         await this.evaluateScaleIn(markets, timestamp);
@@ -303,6 +330,7 @@ export class ExecutionProfileManager implements RuntimeModule {
   }
 
   private closeToken(tokenId: TokenId): void {
+    this.pendingScaleIn.delete(String(tokenId));
     const current = this.deps.stateRepo.getState(tokenId);
     if (current == null || current.state === "CLOSED") return;
     const nowIso = new Date(this.now()).toISOString();
@@ -562,28 +590,32 @@ export class ExecutionProfileManager implements RuntimeModule {
         this.recordManagerScaleInSkip(tokenId, state.profile, "add_in_flight", decision.mode);
         continue;
       }
-      this.pendingScaleIn.set(String(tokenId), { profile: state.profile, createdAtMs: timestamp });
+      const signal = {
+        signalId: `execution-profile:${String(tokenId)}:${timestamp}:${state.addCount + 1}`,
+        tokenId,
+        conditionId: position.conditionId,
+        positionId: position.positionId,
+        side: "buy" as const,
+        suggestedPrice: currentMarkPrice,
+        suggestedSize: proposedAddSizeUsd / currentMarkPrice,
+        suggestedSizeUsdc: proposedAddSizeUsd,
+        reason: SignalReason.ScaleIn,
+        strategyTick: timestamp,
+        sequenceInTick: state.addCount,
+        decisionRuleId: EXECUTION_PROFILE_SCALE_IN_RULE_ID,
+        sizingRuleId: `profile:${state.profile}:add:${state.addCount + 1}`,
+        generatedAt: new Date(timestamp).toISOString(),
+      };
+      this.pendingScaleIn.set(String(tokenId), {
+        profile: state.profile,
+        createdAtMs: timestamp,
+        signalId: signal.signalId,
+      });
       await this.deps.bus.publish("SignalProduced", {
         market,
-        signal: {
-          signalId: `execution-profile:${String(tokenId)}:${timestamp}:${state.addCount + 1}`,
-          tokenId,
-          conditionId: position.conditionId,
-          // Release A Phase 3: a scale-in add is bound to THIS exact position cycle —
-          // carry its id so the executor rejects it if the cycle has since closed.
-          positionId: position.positionId,
-          side: "buy",
-          suggestedPrice: currentMarkPrice,
-          suggestedSize: proposedAddSizeUsd / currentMarkPrice,
-          suggestedSizeUsdc: proposedAddSizeUsd,
-          reason: SignalReason.ScaleIn,
-          strategyTick: timestamp,
-          sequenceInTick: state.addCount,
-          decisionRuleId: EXECUTION_PROFILE_SCALE_IN_RULE_ID,
-          sizingRuleId: `profile:${state.profile}:add:${state.addCount + 1}`,
-          generatedAt: new Date(timestamp).toISOString(),
-        },
+        signal,
       });
+      this.reconcilePendingScaleIn(tokenId, signal.signalId);
       this.recordCounter(EXECUTION_PROFILE_METRICS.scaleInEmitted, { profile: state.profile });
       this.recordRollup({
         kind: "scale_in",
@@ -693,7 +725,13 @@ export class ExecutionProfileManager implements RuntimeModule {
   }
 
   private handleFillReceived(fill: RuntimeEventMap["FillReceived"]): void {
-    this.pendingScaleIn.delete(String(fill.tokenId));
+    if (fill.side === "buy") {
+      const exactSignalId =
+        fill.signalId ??
+        this.deps.orderRepo.findById(fill.orderId)?.signalId ??
+        this.deps.orderRepo.findByExchangeOrderId(String(fill.orderId))?.signalId;
+      this.clearPendingScaleIn(fill.tokenId, exactSignalId);
+    }
     this.reclassifyFromPosition(fill.tokenId);
     if (fill.side === "sell") {
       this.handleSellFillReceived(fill);
@@ -829,6 +867,28 @@ export class ExecutionProfileManager implements RuntimeModule {
     return this.deps.orderRepo
       .findOpen()
       .some((order) => order.tokenId === tokenId && order.side === "buy");
+  }
+
+  private clearPendingScaleIn(tokenId: TokenId, signalId: string | null | undefined): void {
+    if (signalId == null) return;
+    const key = String(tokenId);
+    if (this.pendingScaleIn.get(key)?.signalId === signalId) this.pendingScaleIn.delete(key);
+  }
+
+  private clearPendingFromOrder(order: Order | null): void {
+    if (order?.side !== "buy") return;
+    this.clearPendingScaleIn(order.tokenId, order.signalId);
+  }
+
+  private reconcilePendingScaleIn(tokenId: TokenId, signalId: string): void {
+    const pending = this.pendingScaleIn.get(String(tokenId));
+    if (pending?.signalId !== signalId) return;
+    const handedOff = this.deps.orderRepo
+      .findOpen()
+      .some(
+        (order) => order.tokenId === tokenId && order.side === "buy" && order.signalId === signalId,
+      );
+    if (!handedOff) this.pendingScaleIn.delete(String(tokenId));
   }
 
   private buildMarketSignals(tokenId: TokenId, timestamp: number): ScaleInMarketSignals {

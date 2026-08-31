@@ -297,6 +297,7 @@ export class ProfileLadderModule implements RuntimeModule {
   private readonly bboCooldownUntilByToken = new Map<string, number>();
   private readonly marketByToken = new Map<string, NormalizedMarket>();
   private readonly scaleInBuyPendingByToken = new Set<string>();
+  private readonly persistedRecoveryInFlightByToken = new Set<string>();
   private readonly pendingRungByClientOrderId = new Map<string, PendingProfileLadderRung>();
   private readonly plannedRungRetryCooldownUntilByToken = new Map<string, number>();
   // Per-token tracker of consecutive recovery rebuilds that placed zero live rungs
@@ -381,6 +382,7 @@ export class ProfileLadderModule implements RuntimeModule {
     this.missingLadderRecoveryCooldownUntilByToken.clear();
     this.pendingRebuildDeferCooldownUntilByToken.clear();
     this.pendingRungByClientOrderId.clear();
+    this.persistedRecoveryInFlightByToken.clear();
     this.marketByToken.clear();
     this.replacementCooldownUntilByToken.clear();
     this.subMinResidualSignatureByToken.clear();
@@ -686,6 +688,11 @@ export class ProfileLadderModule implements RuntimeModule {
         continue;
       }
       if (state.status !== "active") continue;
+      const legacyRearmed = this.rearmExactLegacyCancelledRung(state, market);
+      if (legacyRearmed !== state) {
+        await this.retryPersistedRecoveryAttempt(legacyRearmed, market);
+        continue;
+      }
       if (this.bindExactPlannedNoLiveRecoveryOrder(state) !== "absent") continue;
       state = this.reconcileRungLiveness(state);
 
@@ -992,6 +999,11 @@ export class ProfileLadderModule implements RuntimeModule {
       if (this.postFillTimerByToken.has(String(state.tokenId))) continue;
       const market = this.marketByToken.get(String(state.tokenId));
       if (market == null) continue;
+      const legacyRearmed = this.rearmExactLegacyCancelledRung(state, market);
+      if (legacyRearmed !== state) {
+        await this.retryPersistedRecoveryAttempt(legacyRearmed, market);
+        continue;
+      }
       if (this.bindExactPlannedNoLiveRecoveryOrder(state) !== "absent") continue;
       const reconciled = this.reconcileRungLiveness(state);
       if (hasPersistedRecoveryAttempt(reconciled)) {
@@ -1008,61 +1020,145 @@ export class ProfileLadderModule implements RuntimeModule {
     market: NormalizedMarket,
   ): Promise<boolean> {
     if (state.status !== "active" || !hasPlannedNoLiveRung(state)) return false;
-    if (this.postFillTimerByToken.has(String(state.tokenId))) return true;
-    if (
-      this.isPlannedRungRetryCooldownActive(state.tokenId) &&
-      !this.hasSubMinInputsChanged(state, market)
-    ) {
-      return true;
-    }
-    if (this.hasPendingRungForToken(state.tokenId)) return true;
-    if (!isValidLadderBbo(market.bestBid, market.bestAsk)) {
-      this.armPlannedRungRetryCooldown(state.tokenId, this.now());
-      return true;
-    }
-    const position = this.resolveSingleActivePosition(state.tokenId);
-    if (position == null || !this.isPositionEligibleForProfileExit(position)) return true;
-    const tokenOrders = this.deps.orderRepo?.findByTokenId(state.tokenId) ?? [];
-    const evidence = findPersistedAttemptEvidence(state, tokenOrders);
-    if (evidence.length > 0) {
-      const match = resolveSingleAdoptableRungMatch(state, evidence, true);
-      if (match == null) return true;
-      if (match.order.status === OrderStatus.Rejected && !match.order.exchangeOrderId) {
-        this.persistPreExchangeFailure(
-          {
-            tokenId: state.tokenId,
-            ladderId: state.ladderId,
-            rungIndex: state.activeRungs[match.index]!.rungIndex,
-            kind: "standard",
-            attemptFilledBaseShares: match.attemptFilledBaseShares,
-            attemptSubmittedShares: match.attemptSubmittedShares,
-          },
-          this.now(),
-        );
+    const tokenKey = String(state.tokenId);
+    if (this.persistedRecoveryInFlightByToken.has(tokenKey)) return true;
+    this.persistedRecoveryInFlightByToken.add(tokenKey);
+    try {
+      if (this.postFillTimerByToken.has(tokenKey)) return true;
+      if (
+        this.isPlannedRungRetryCooldownActive(state.tokenId) &&
+        !this.hasSubMinInputsChanged(state, market)
+      ) {
         return true;
       }
-      if (!this.adoptRecoveryOrderIntoState(state, evidence, true)) return true;
-      const reconciled = this.reconcileRungLiveness(this.deps.repository.getLadder(state.tokenId));
-      if (reconciled == null) return true;
-      state = reconciled;
-      if (!hasPersistedRecoveryAttempt(state) || !hasPlannedNoLiveRung(state)) return true;
-    }
-    const openSellOrders = tokenOrders.filter(
-      (order) => order.side === "sell" && OPEN_ORDER_STATUSES.has(order.status),
-    );
-    if (openSellOrders.length > 0) {
-      const adopted = this.adoptRecoveryOrderIntoState(
-        state,
-        openSellOrders.filter(isProfileLadderOrder),
-        true,
+      if (this.hasPendingRungForToken(state.tokenId)) return true;
+      if (!isValidLadderBbo(market.bestBid, market.bestAsk)) {
+        this.armPlannedRungRetryCooldown(state.tokenId, this.now());
+        return true;
+      }
+      const position = this.resolveSingleActivePosition(state.tokenId);
+      if (position == null || !this.isPositionEligibleForProfileExit(position)) return true;
+      const tokenOrders = this.deps.orderRepo?.findByTokenId(state.tokenId) ?? [];
+      const evidence = findPersistedAttemptEvidence(state, tokenOrders);
+      if (evidence.length > 0) {
+        const match = resolveSingleAdoptableRungMatch(state, evidence, true);
+        if (match == null) return true;
+        if (match.order.status === OrderStatus.Rejected && !match.order.exchangeOrderId) {
+          this.persistPreExchangeFailure(
+            {
+              tokenId: state.tokenId,
+              ladderId: state.ladderId,
+              rungIndex: state.activeRungs[match.index]!.rungIndex,
+              kind: "standard",
+              attemptFilledBaseShares: match.attemptFilledBaseShares,
+              attemptSubmittedShares: match.attemptSubmittedShares,
+            },
+            this.now(),
+          );
+          return true;
+        }
+        if (!this.adoptRecoveryOrderIntoState(state, evidence, true)) return true;
+        const reconciled = this.reconcileRungLiveness(
+          this.deps.repository.getLadder(state.tokenId),
+        );
+        if (reconciled == null) return true;
+        state = reconciled;
+        if (!hasPersistedRecoveryAttempt(state) || !hasPlannedNoLiveRung(state)) return true;
+      }
+      const openSellOrders = tokenOrders.filter(
+        (order) => order.side === "sell" && OPEN_ORDER_STATUSES.has(order.status),
       );
-      if (adopted) return true;
-      this.armPlannedRungRetryCooldown(state.tokenId, this.now());
+      if (openSellOrders.length > 0) {
+        const adopted = this.adoptRecoveryOrderIntoState(
+          state,
+          openSellOrders.filter(isProfileLadderOrder),
+          true,
+        );
+        if (adopted) return true;
+        this.armPlannedRungRetryCooldown(state.tokenId, this.now());
+        return true;
+      }
+      const result = await this.advanceLiveRungs(state, market, this.now(), position);
+      if (result.attempted) this.armPlannedRungRetryCooldown(state.tokenId, this.now());
       return true;
+    } finally {
+      this.persistedRecoveryInFlightByToken.delete(tokenKey);
     }
-    const result = await this.advanceLiveRungs(state, market, this.now(), position);
-    if (result.attempted) this.armPlannedRungRetryCooldown(state.tokenId, this.now());
-    return true;
+  }
+
+  private rearmExactLegacyCancelledRung(state: LadderState, market: NormalizedMarket): LadderState {
+    const rung = state.activeRungs[0];
+    if (
+      rung == null ||
+      !isExactLegacyCancelledState(state, rung) ||
+      !isUsableTerminalRetryMarket(market) ||
+      this.deps.positionRepo == null ||
+      this.deps.orderRepo == null ||
+      this.hasPendingRungForToken(state.tokenId) ||
+      this.scaleInBuyPendingByToken.has(String(state.tokenId)) ||
+      !this.isExitStateAllowed(state.tokenId)
+    ) {
+      return state;
+    }
+    const position = this.resolveSingleActivePosition(state.tokenId);
+    if (
+      position == null ||
+      !this.isPositionEligibleForProfileExit(position) ||
+      String(state.conditionId) !== String(position.conditionId) ||
+      hasPositionBasisChanged(state, position) ||
+      !sameNumber(position.size, rung.sizeShares)
+    ) {
+      return state;
+    }
+    const tokenOrders = this.deps.orderRepo.findByTokenId(state.tokenId);
+    if (
+      tokenOrders.some((order) => order.side === "sell" && OPEN_ORDER_STATUSES.has(order.status))
+    ) {
+      return state;
+    }
+    const minOrderSize = resolveLegacyCancelledMinOrderSize(market, this.isLiveLite());
+    if (minOrderSize == null || !isExecutableOrderSize(position.size, minOrderSize)) return state;
+    const ladderId = `${state.ladderId}_planned_no_live_recovery`;
+    const plannedRung = { ...rung, lifecycle: "planned" as const };
+    const signalId = persistedAttemptSignalId(state.tokenId, ladderId, plannedRung);
+    const expected = {
+      position,
+      ladderId,
+      rung: plannedRung,
+      signalId,
+      clientOrderId: String(buildClientOrderId({ signalId, tokenId: state.tokenId, side: "sell" })),
+      candidateIndex: 0,
+    } satisfies LegacyRetryCandidateIdentity;
+    const matches = tokenOrders.filter((order) =>
+      matchesLegacyAcceptedCancellation(order, expected),
+    );
+    if (matches.length !== 1) return state;
+    const terminalRetryKey = matches[0]!.exchangeOrderId!.trim();
+    const next: LadderState = {
+      ...state,
+      ladderId,
+      activeRungs: [
+        {
+          ...plannedRung,
+          orderId: null,
+          terminalRetryKey,
+          attemptFilledBaseShares: 0,
+          attemptSubmittedShares: 0,
+          preExchangeRetryCount: 0,
+        },
+      ],
+      updatedAtMs: this.now(),
+    };
+    this.deps.repository.upsertLadder(next);
+    this.writeCounter("profile_ladder_legacy_cancelled_rearmed", 1, { band: state.band });
+    this.insertRiskEvent("profile_ladder_legacy_cancelled_rearmed", {
+      tokenId: String(state.tokenId),
+      conditionId: String(state.conditionId),
+      ladderId,
+      rungIndex: 0,
+      terminalRetryKey,
+    });
+    return next;
   }
 
   private hasSubMinInputsChanged(state: LadderState, market: NormalizedMarket): boolean {
@@ -2809,6 +2905,40 @@ function hasPersistedRecoveryRung(rung: LadderRung): boolean {
   );
 }
 
+function isExactLegacyCancelledState(state: LadderState, rung: LadderRung): boolean {
+  return (
+    state.status === "active" &&
+    state.activeRungs.length === 1 &&
+    rung.rungIndex === 0 &&
+    rung.lifecycle === "cancelled" &&
+    rung.orderId == null &&
+    sameNumber(rung.filledSizeShares, 0) &&
+    !Object.hasOwn(rung, "terminalRetryKey") &&
+    !Object.hasOwn(rung, "preExchangeRetryCount") &&
+    !Object.hasOwn(rung, "attemptFilledBaseShares") &&
+    !Object.hasOwn(rung, "attemptSubmittedShares")
+  );
+}
+
+function isUsableTerminalRetryMarket(market: NormalizedMarket): boolean {
+  return (
+    market.active &&
+    market.tradable &&
+    market.acceptingOrders &&
+    market.enableOrderBook &&
+    isPositiveFinite(market.tickSize) &&
+    isValidLadderBbo(market.bestBid, market.bestAsk)
+  );
+}
+
+function resolveLegacyCancelledMinOrderSize(
+  market: NormalizedMarket,
+  liveLite: boolean,
+): number | null {
+  if (isPositiveFinite(market.minOrderSize)) return market.minOrderSize;
+  return liveLite ? resolveEffectiveMinOrderSize(undefined) : null;
+}
+
 function persistedAttemptSignalId(tokenId: TokenId, ladderId: string, rung: LadderRung): string {
   const base = `profile_ladder_${String(tokenId)}_${ladderId}_${rung.rungIndex}`;
   const terminal =
@@ -2867,8 +2997,7 @@ function matchesLegacyAcceptedCancellation(
     metadata?.["source"] === "profile_ladder" &&
     String(order.tokenId) === String(expected.position.tokenId) &&
     String(order.conditionId) === String(expected.position.conditionId) &&
-    (order.positionId == null ||
-      String(order.positionId) === String(expected.position.positionId)) &&
+    order.positionId == null &&
     ladder?.["ladderId"] === expected.ladderId &&
     ladder["rungIndex"] === expected.rung.rungIndex &&
     !Object.hasOwn(ladder, "attemptFilledBaseShares") &&
