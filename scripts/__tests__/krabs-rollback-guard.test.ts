@@ -325,7 +325,7 @@ esac`,
         `echo "$1" >> "$ORDER_GATE_CALLS"
 echo "order-gate $1" >> "$CALLS"
 [[ "$1" == post ]] && marker=true || marker=false
-printf '{"migration101":{"candidateCount":0,"candidateHash":"%s","rowsHash":"%s","markerWasPresent":%s},"migration102":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"},"migration103":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"}}\\n' '${"a".repeat(64)}' '${"b".repeat(64)}' "$marker" '${"c".repeat(64)}' '${"d".repeat(64)}' '${"e".repeat(64)}' '${"f".repeat(64)}'`,
+printf '{"migration101":{"candidateCount":0,"candidateHash":"%s","rowsHash":"%s","markerWasPresent":%s},"migration102":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"},"migration103":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"},"migration106":{"candidateCount":0,"candidateHash":"%s","markerWasPresent":%s}}\\n' '${"a".repeat(64)}' '${"b".repeat(64)}' "$marker" '${"c".repeat(64)}' '${"d".repeat(64)}' '${"e".repeat(64)}' '${"f".repeat(64)}' '${"9".repeat(64)}' "$marker"`,
       );
       seedSupersede();
       writeFileSync(statePath, "active rollback\n");
@@ -909,7 +909,7 @@ echo "order-gate $1" >> "$CALLS"
 [[ "$1" == post && ! -e "$API_AVAILABLE" ]] && exit 42
 [[ "$1" == post ]] && marker=true || marker=false
 [[ "\${ORDER_GATE_MALFORMED:-}" == "$1" ]] && rows103=bad || rows103='${"e".repeat(64)}'
-printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s","markerWasPresent":%s},"migration102":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"},"migration103":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"}}\\n' '${"a".repeat(64)}' '${"b".repeat(64)}' "$marker" '${"c".repeat(64)}' '${"d".repeat(64)}' "$rows103" '${"f".repeat(64)}'`,
+printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s","markerWasPresent":%s},"migration102":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"},"migration103":{"markerWasPresent":false,"tableWasPresent":false,"rowCount":0,"rowsHash":"%s","schemaHash":"%s"},"migration106":{"candidateCount":4,"candidateHash":"%s","markerWasPresent":%s}}\\n' '${"a".repeat(64)}' '${"b".repeat(64)}' "$marker" '${"c".repeat(64)}' '${"d".repeat(64)}' "$rows103" '${"f".repeat(64)}' '${"9".repeat(64)}' "$marker"`,
     );
     const releaseEnv = {
         ...env,
@@ -1002,10 +1002,11 @@ printf '{"migration101":{"candidateCount":1,"candidateHash":"%s","rowsHash":"%s"
       Object.keys(releaseReceipt)
         .filter((key) => key.startsWith("migration"))
         .sort(),
-    ).toEqual(["migration101", "migration102", "migration103"]);
+    ).toEqual(["migration101", "migration102", "migration103", "migration106"]);
     expect(releaseReceipt.migration101).toMatchObject({ candidateCount: 1 });
     expect(releaseReceipt.migration102).toMatchObject({ rowCount: 0, tableWasPresent: false });
     expect(releaseReceipt.migration103).toMatchObject({ rowCount: 0, tableWasPresent: false });
+    expect(releaseReceipt.migration106).toMatchObject({ candidateCount: 4 });
 
     writeFileSync(orderGateCalls, "");
     const killedPre = hardDeathRelease("migration_gate_pre");

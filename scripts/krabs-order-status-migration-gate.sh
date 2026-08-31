@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # The API owns migration writes. This helper only freezes and proves the
-# stopped-ledger census around migrations 101 through 103.
+# stopped-ledger census around migrations 101 through 103 and 106.
 readonly MARKER_101='101_repair_filled_phantom_orders.sql'
 readonly MARKER_102='102_maker_capture_reprice_intents.sql'
 readonly MARKER_103='103_bounce_ask_capture_reprice_intents.sql'
+readonly MARKER_106='106_repair_trading_disabled_pending_orders.sql'
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 main() {
@@ -14,9 +15,9 @@ main() {
   local db="${KRABS_ORDER_STATUS_LEDGER_PATH:-/var/lib/docker/volumes/krabs-data/_data/ledger-live-lite.db}"
   [[ "$mode" == pre || "$mode" == post ]] || die 'mode must be pre or post'
   [[ "$sha" =~ ^[0-9a-f]{40}$ && -f "$db" ]] || die 'target SHA or ledger is invalid'
-  python3 - "$mode" "$db" "$snapshot" "$sha" "$MARKER_101" "$MARKER_102" "$MARKER_103" <<'PY'
-import hashlib,json,os,sqlite3,sys
-mode,db,snapshot,sha,marker101,marker102,marker103=sys.argv[1:]
+  python3 - "$mode" "$db" "$snapshot" "$sha" "$MARKER_101" "$MARKER_102" "$MARKER_103" "$MARKER_106" <<'PY'
+import datetime,hashlib,json,os,sqlite3,sys
+mode,db,snapshot,sha,marker101,marker102,marker103,marker106=sys.argv[1:]
 table102='maker_capture_reprice_intents'
 table103='bounce_ask_capture_reprice_intents'
 
@@ -169,10 +170,19 @@ uri='file:'+os.path.abspath(db)+'?mode=ro'
 con=sqlite3.connect(uri,uri=True)
 con.execute('PRAGMA query_only=ON')
 try:
-    rows=[list(row) for row in con.execute('SELECT order_id,status,cancel_reason,metadata_json FROM orders ORDER BY order_id')]
+    order_columns=[
+        'order_id','status','cancel_reason','metadata_json','client_order_id','exchange_order_id',
+        'fill_progress_shares','exchange_error_code','exchange_error_message',
+        'exchange_error_payload','exchange_rejection_reason','updated_at',
+    ]
+    available_order_columns={row[1] for row in con.execute("PRAGMA table_info('orders')")}
+    if not set(order_columns) <= available_order_columns: raise SystemExit('orders migration proof columns are missing')
+    order_id_index=order_columns.index('order_id')
+    rows=[list(row) for row in con.execute(f"SELECT {','.join(order_columns)} FROM orders ORDER BY order_id")]
     marker101_count=con.execute('SELECT count(*) FROM schema_migrations WHERE name=?',(marker101,)).fetchone()[0]
     marker102_count=con.execute('SELECT count(*) FROM schema_migrations WHERE name=?',(marker102,)).fetchone()[0]
     marker103_count=con.execute('SELECT count(*) FROM schema_migrations WHERE name=?',(marker103,)).fetchone()[0]
+    marker106_count=con.execute('SELECT count(*) FROM schema_migrations WHERE name=?',(marker106,)).fetchone()[0]
     invalid_identity=con.execute("""
       SELECT count(*) FROM orders
        WHERE status='cancelled' AND cancel_reason='phantom_missing_on_exchange'
@@ -189,6 +199,41 @@ try:
                                   END)
                         FROM fills AS f WHERE f.order_id=o.order_id),0)>=o.size*0.995
        ORDER BY o.order_id""")]
+    candidates106=[list(row) for row in con.execute("""
+      WITH valid_evidence AS MATERIALIZED (
+        SELECT id,payload,
+               CASE WHEN json_valid(payload)
+                    THEN json_extract(payload,'$.errorDetails.responseBody')
+                    ELSE NULL END AS response_body
+          FROM risk_events
+         WHERE event_type='live_order_submit_unknown' AND json_valid(payload)
+      ), candidates AS MATERIALIZED (
+        SELECT o.order_id,
+               (SELECT evidence.response_body
+                  FROM valid_evidence AS evidence
+                 WHERE json_extract(evidence.payload,'$.orderId')=o.order_id
+                   AND json_extract(evidence.payload,'$.clientOrderId')=o.client_order_id
+                   AND json_type(evidence.payload,'$.errorDetails.responseBody')='object'
+                   AND json_type(evidence.payload,'$.errorDetails.responseBody.status')='integer'
+                   AND json_extract(evidence.payload,'$.errorDetails.responseBody.status')=503
+                   AND ((json_type(evidence.payload,'$.errorDetails.responseBody.error')='text'
+                         AND lower(trim(json_extract(evidence.payload,'$.errorDetails.responseBody.error')))='trading is disabled')
+                     OR (json_type(evidence.payload,'$.errorDetails.responseBody.message')='text'
+                         AND lower(trim(json_extract(evidence.payload,'$.errorDetails.responseBody.message')))='trading is disabled'))
+                 ORDER BY evidence.id DESC LIMIT 1) AS response_body
+          FROM orders AS o
+         WHERE o.status='pending' AND o.order_id=o.exchange_order_id
+           AND o.exchange_order_id IS NOT NULL AND o.exchange_order_id<>''
+           AND NOT EXISTS (SELECT 1 FROM fills AS f WHERE f.order_id=o.order_id)
+      )
+      SELECT o.order_id,
+             json_object('responseBody',json(c.response_body)) AS expected_error_payload,
+             CASE WHEN json_valid(o.metadata_json)
+                  THEN json_remove(o.metadata_json,'$.makerCaptureLineageV1','$.bounceAskCaptureLineageV1')
+                  ELSE o.metadata_json END AS expected_metadata
+        FROM candidates AS c JOIN orders AS o ON o.order_id=c.order_id
+       WHERE c.response_body IS NOT NULL
+       ORDER BY o.order_id""")]
     table102_present,rows102,schema102_hash=inspect_intents(con,table102,expected_shape102,'migration 102')
     table103_present,rows103,schema103_hash=inspect_intents(con,table103,expected_shape103,'migration 103')
 except sqlite3.Error as error:
@@ -198,6 +243,7 @@ finally:
 if marker101_count not in (0,1): raise SystemExit('migration 101 marker is not unique')
 if marker102_count not in (0,1): raise SystemExit('migration 102 marker is not unique')
 if marker103_count not in (0,1): raise SystemExit('migration 103 marker is not unique')
+if marker106_count not in (0,1): raise SystemExit('migration 106 marker is not unique')
 if invalid_identity: raise SystemExit('phantom repair identity is not exact')
 if marker102_count and not table102_present: raise SystemExit('migration 102 marker/table state is invalid')
 if not marker102_count and rows102: raise SystemExit('unmarked migration 102 table is not empty')
@@ -205,6 +251,7 @@ if marker103_count and not table103_present: raise SystemExit('migration 103 mar
 if not marker103_count and rows103: raise SystemExit('unmarked migration 103 table is not empty')
 if mode=='pre':
     if marker101_count and candidates: raise SystemExit('applied migration retains repair candidates')
+    if marker106_count and candidates106: raise SystemExit('applied migration 106 retains repair candidates')
     migration101={'markerWasPresent':bool(marker101_count),'rows':rows,'candidates':candidates}
     migration101['rowsHash']=digest(rows)
     migration101['candidateHash']=digest(candidates)
@@ -217,7 +264,10 @@ if mode=='pre':
     migration103['rowsHash']=digest(rows103)
     migration103['rowCount']=len(rows103)
     migration103['schemaHash']=schema103_hash
-    payload={'schemaVersion':3,'targetSha':sha,'migration101':migration101,'migration102':migration102,'migration103':migration103}
+    migration106={'markerWasPresent':bool(marker106_count),'candidates':candidates106}
+    migration106['candidateHash']=digest(candidates106)
+    migration106['candidateCount']=len(candidates106)
+    payload={'schemaVersion':4,'targetSha':sha,'orderColumns':order_columns,'migration101':migration101,'migration102':migration102,'migration103':migration103,'migration106':migration106}
     if os.path.exists(snapshot):
         if json.load(open(snapshot)) != payload: raise SystemExit('same-SHA migration snapshot differs')
     else:
@@ -228,19 +278,49 @@ if mode=='pre':
 elif mode=='post':
     try: payload=json.load(open(snapshot))
     except Exception as error: raise SystemExit('migration snapshot is unavailable: '+str(error))
-    if payload.get('schemaVersion')!=3 or payload.get('targetSha')!=sha: raise SystemExit('migration snapshot binding is invalid')
-    before101=payload['migration101']; before102=payload['migration102']; before103=payload['migration103']
+    if payload.get('schemaVersion')!=4 or payload.get('targetSha')!=sha: raise SystemExit('migration snapshot binding is invalid')
+    if payload.get('orderColumns')!=order_columns: raise SystemExit('orders schema changed during migration gate')
+    before101=payload['migration101']; before102=payload['migration102']; before103=payload['migration103']; before106=payload['migration106']
     if marker101_count!=1: raise SystemExit('migration 101 marker was not applied exactly once')
     if marker102_count!=1 or not table102_present: raise SystemExit('migration 102 was not applied exactly once')
     if marker103_count!=1 or not table103_present: raise SystemExit('migration 103 was not applied exactly once')
-    before={row[0]:row[1:] for row in before101['rows']}; after={row[0]:row[1:] for row in rows}
+    if marker106_count!=1: raise SystemExit('migration 106 marker was not applied exactly once')
+    before={row[order_id_index]:row for row in before101['rows']}; after={row[order_id_index]:row for row in rows}
     if set(before)!=set(after): raise SystemExit('order population changed during migration gate')
     candidate_ids={row[0] for row in before101['candidates']}
+    candidates106_by_id={row[0]:row[1:] for row in before106['candidates']}
+    if candidate_ids & set(candidates106_by_id): raise SystemExit('migration repair candidate sets overlap')
+    indexes={name:order_columns.index(name) for name in order_columns}
+    allowed106={indexes[name] for name in (
+        'status','fill_progress_shares','exchange_error_code','exchange_error_message',
+        'exchange_error_payload','exchange_rejection_reason','metadata_json','updated_at',
+    )}
     for order_id,before_row in before.items():
-        status,reason,metadata=after[order_id]
+        after_row=after[order_id]
         if order_id in candidate_ids:
-            if status!='filled' or (reason,metadata)!=tuple(before_row[1:]): raise SystemExit('candidate repair/audit proof failed')
-        elif (status,reason,metadata)!=tuple(before_row):
+            if after_row[indexes['status']]!='filled': raise SystemExit('candidate repair/audit proof failed')
+            if any(before_row[i]!=after_row[i] for i in range(len(before_row)) if i!=indexes['status']):
+                raise SystemExit('candidate repair/audit proof failed')
+        elif order_id in candidates106_by_id:
+            expected_payload,expected_metadata=candidates106_by_id[order_id]
+            expected={
+                'status':'rejected','fill_progress_shares':0,'exchange_error_code':'UNKNOWN',
+                'exchange_error_message':'trading is disabled','exchange_error_payload':expected_payload,
+                'exchange_rejection_reason':'rejection_unknown','metadata_json':expected_metadata,
+            }
+            if any(after_row[indexes[name]]!=value for name,value in expected.items()):
+                raise SystemExit('migration 106 candidate canonical repair proof failed')
+            updated_at=after_row[indexes['updated_at']]
+            try:
+                parsed_updated_at=datetime.datetime.strptime(updated_at,'%Y-%m-%dT%H:%M:%S.%fZ')
+                previous_updated_at=datetime.datetime.strptime(before_row[indexes['updated_at']],'%Y-%m-%dT%H:%M:%S.%fZ')
+            except (TypeError,ValueError):
+                raise SystemExit('migration 106 candidate updated_at proof failed')
+            if not previous_updated_at<parsed_updated_at<=datetime.datetime.utcnow()+datetime.timedelta(seconds=1):
+                raise SystemExit('migration 106 candidate updated_at proof failed')
+            if any(before_row[i]!=after_row[i] for i in range(len(before_row)) if i not in allowed106):
+                raise SystemExit('migration 106 candidate changed an unrelated order column')
+        elif after_row!=before_row:
             raise SystemExit('noncandidate order changed during migration gate')
     if before101['markerWasPresent'] and candidate_ids: raise SystemExit('applied-marker snapshot is not a no-op')
     if len(rows102)!=before102['rowCount'] or digest(rows102)!=before102['rowsHash'] or rows102!=before102['rows']:
@@ -251,13 +331,15 @@ elif mode=='post':
         raise SystemExit('migration 103 intent rows changed during migration gate')
     if not before103['markerWasPresent'] and rows103: raise SystemExit('first migration 103 apply did not remain empty')
     if schema103_hash!=before103['schemaHash']: raise SystemExit('migration 103 schema proof changed')
+    if before106['markerWasPresent'] and candidates106_by_id: raise SystemExit('applied migration 106 snapshot is not a no-op')
 else:
     raise SystemExit('mode must be pre or post')
-migration101=payload['migration101']; migration102=payload['migration102']; migration103=payload['migration103']
+migration101=payload['migration101']; migration102=payload['migration102']; migration103=payload['migration103']; migration106=payload['migration106']
 print(json.dumps({
     'migration101':{key:migration101[key] for key in ('candidateCount','candidateHash','rowsHash','markerWasPresent')},
     'migration102':{key:migration102[key] for key in ('markerWasPresent','tableWasPresent','rowCount','rowsHash','schemaHash')},
     'migration103':{key:migration103[key] for key in ('markerWasPresent','tableWasPresent','rowCount','rowsHash','schemaHash')},
+    'migration106':{key:migration106[key] for key in ('candidateCount','candidateHash','markerWasPresent')},
 },separators=(',',':')))
 PY
 }

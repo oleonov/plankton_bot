@@ -237,9 +237,9 @@ if mode == 'rollback':
     print(json.dumps({'migration101':gate or {}},separators=(',',':')))
 else:
     assert mode == 'release' and isinstance(gate,dict)
-    assert set(gate)=={'mode','snapshotPath','migration101','migration102','migration103'}
+    assert set(gate)=={'mode','snapshotPath','migration101','migration102','migration103','migration106'}
     assert gate['mode'] == 'post' and gate['snapshotPath'] == sys.argv[2]
-    migration101=gate['migration101']; migration102=gate['migration102']; migration103=gate['migration103']
+    migration101=gate['migration101']; migration102=gate['migration102']; migration103=gate['migration103']; migration106=gate['migration106']
     assert set(migration101)=={'candidateCount','candidateHash','rowsHash','markerWasPresent'}
     assert type(migration101['candidateCount']) is int and migration101['candidateCount'] >= 0
     assert all(isinstance(migration101[k],str) and re.fullmatch(r'[0-9a-f]{64}',migration101[k]) for k in ('candidateHash','rowsHash'))
@@ -252,7 +252,11 @@ else:
     assert type(migration103['rowCount']) is int and migration103['rowCount'] >= 0
     assert all(isinstance(migration103[k],str) and re.fullmatch(r'[0-9a-f]{64}',migration103[k]) for k in ('rowsHash','schemaHash'))
     assert all(isinstance(migration103[k],bool) for k in ('markerWasPresent','tableWasPresent'))
-    print(json.dumps({'migration101':migration101,'migration102':migration102,'migration103':migration103},separators=(',',':')))
+    assert set(migration106)=={'candidateCount','candidateHash','markerWasPresent'}
+    assert type(migration106['candidateCount']) is int and migration106['candidateCount'] >= 0
+    assert isinstance(migration106['candidateHash'],str) and re.fullmatch(r'[0-9a-f]{64}',migration106['candidateHash'])
+    assert isinstance(migration106['markerWasPresent'],bool)
+    print(json.dumps({'migration101':migration101,'migration102':migration102,'migration103':migration103,'migration106':migration106},separators=(',',':')))
 PY
 }
 mark_commit_ready() {

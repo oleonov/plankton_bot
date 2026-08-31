@@ -13,9 +13,14 @@ const migration103 = join(
   root,
   "packages/db/src/migrations/103_bounce_ask_capture_reprice_intents.sql",
 );
+const migration106 = join(
+  root,
+  "packages/db/src/migrations/106_repair_trading_disabled_pending_orders.sql",
+);
 const marker101 = "101_repair_filled_phantom_orders.sql";
 const marker102 = "102_maker_capture_reprice_intents.sql";
 const marker103 = "103_bounce_ask_capture_reprice_intents.sql";
+const marker106 = "106_repair_trading_disabled_pending_orders.sql";
 const sha = "a".repeat(40);
 const dirs: string[] = [];
 
@@ -31,7 +36,7 @@ function fixture() {
   const db = join(dir, "ledger.db");
   sql(
     db,
-    "CREATE TABLE orders(order_id TEXT PRIMARY KEY,status TEXT,cancel_reason TEXT,metadata_json TEXT,exchange_order_id TEXT,size REAL); CREATE TABLE fills(fill_id TEXT PRIMARY KEY,order_id TEXT,side TEXT,price REAL,size REAL,size_usdc REAL,liquidity_role TEXT); CREATE TABLE schema_migrations(name TEXT); INSERT INTO orders VALUES('legacy-candidate','cancelled','phantom_missing_on_exchange','{\"audit\":1}','legacy-candidate',100),('partial','cancelled','phantom_missing_on_exchange','{}','partial',100),('legacy-maker','cancelled','phantom_missing_on_exchange','{}','legacy-maker',100),('other','cancelled','operator_cancelled','{}','other',100); INSERT INTO fills VALUES('f1','legacy-candidate','buy',0.95,99.4,95,'taker'),('f2','partial','buy',1,99,99,'maker'),('f3','legacy-maker','buy',0.95,99.4,95,'maker');",
+    "CREATE TABLE orders(order_id TEXT PRIMARY KEY,status TEXT,cancel_reason TEXT,metadata_json TEXT,exchange_order_id TEXT,size REAL,client_order_id TEXT,fill_progress_shares NUMERIC,exchange_error_code TEXT,exchange_error_message TEXT,exchange_error_payload TEXT,exchange_rejection_reason TEXT,updated_at TEXT); CREATE TABLE fills(fill_id TEXT PRIMARY KEY,order_id TEXT,side TEXT,price REAL,size REAL,size_usdc REAL,liquidity_role TEXT); CREATE TABLE risk_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_type TEXT,payload TEXT); CREATE TABLE schema_migrations(name TEXT); INSERT INTO orders VALUES('legacy-candidate','cancelled','phantom_missing_on_exchange','{\"audit\":1}','legacy-candidate',100,'legacy-candidate',NULL,NULL,NULL,NULL,NULL,'2026-08-21T00:00:00.000Z'),('partial','cancelled','phantom_missing_on_exchange','{}','partial',100,'partial',NULL,NULL,NULL,NULL,NULL,'2026-08-21T00:00:00.000Z'),('legacy-maker','cancelled','phantom_missing_on_exchange','{}','legacy-maker',100,'legacy-maker',NULL,NULL,NULL,NULL,NULL,'2026-08-21T00:00:00.000Z'),('other','cancelled','operator_cancelled','{}','other',100,'other',NULL,NULL,NULL,NULL,NULL,'2026-08-21T00:00:00.000Z'); INSERT INTO fills VALUES('f1','legacy-candidate','buy',0.95,99.4,95,'taker'),('f2','partial','buy',1,99,99,'maker'),('f3','legacy-maker','buy',0.95,99.4,95,'maker');",
   );
   return { db, snapshot: join(dir, "snapshot.json") };
 }
@@ -62,6 +67,13 @@ function insertAskIntent(db: string, intentId = "ask-intent-1"): void {
   );
 }
 
+function insertTradingDisabledCandidate(db: string): void {
+  sql(
+    db,
+    `INSERT INTO orders VALUES('disabled','pending',NULL,'{"keep":1,"makerCaptureLineageV1":{"version":1},"bounceAskCaptureLineageV1":{"version":1}}','disabled',10,'disabled-client',7,'BEFORE','before','{"before":true}','before','2026-08-21T00:00:00.000Z'); INSERT INTO risk_events(event_type,payload) VALUES('live_order_submit_unknown','{"orderId":"disabled","clientOrderId":"disabled-client","errorDetails":{"responseBody":{"status":503,"error":" Trading Is Disabled ","requestId":"request-1"}}}');`,
+  );
+}
+
 function expectPreRejected(createIntentTable: string): void {
   const { db, snapshot } = fixture();
   sql(db, createIntentTable);
@@ -73,6 +85,50 @@ afterEach(() => {
 });
 
 describe("krabs order-status migration gate", () => {
+  it("accepts migration 106 exact candidates repaired to the canonical rejected state", () => {
+    const { db, snapshot } = fixture();
+    insertTradingDisabledCandidate(db);
+    const pre = run(db, "pre", sha, snapshot);
+    expect(pre.status, pre.stderr).toBe(0);
+    expect(JSON.parse(pre.stdout).migration106).toMatchObject({
+      candidateCount: 1,
+      markerWasPresent: false,
+    });
+    apply(db, migration101, marker101);
+    apply(db, migration102, marker102);
+    apply(db, migration103, marker103);
+    apply(db, migration106, marker106);
+    const post = run(db, "post", sha, snapshot);
+    expect(post.status, post.stderr).toBe(0);
+    expect(JSON.parse(post.stdout).migration106).toMatchObject({ candidateCount: 1 });
+  });
+
+  it("rejects every noncanonical migration 106 candidate result", () => {
+    for (const mutation of [
+      "status='pending'",
+      "fill_progress_shares=1",
+      "exchange_error_code='OTHER'",
+      "exchange_error_message='other'",
+      `exchange_error_payload='{"responseBody":{"status":503}}'`,
+      "exchange_rejection_reason='other'",
+      `metadata_json='{"keep":1,"makerCaptureLineageV1":{"version":1}}'`,
+      "updated_at='not-an-iso-timestamp'",
+      "updated_at='2026-08-21T00:00:00.000Z'",
+      "updated_at='2099-08-21T00:00:00.000Z'",
+      "cancel_reason='changed'",
+    ]) {
+      const { db, snapshot } = fixture();
+      insertTradingDisabledCandidate(db);
+      expect(run(db, "pre", sha, snapshot).status).toBe(0);
+      apply(db, migration101, marker101);
+      apply(db, migration102, marker102);
+      apply(db, migration103, marker103);
+      apply(db, migration106, marker106);
+      sql(db, `UPDATE orders SET ${mutation} WHERE order_id='disabled'`);
+      expect(run(db, "post", sha, snapshot).status, mutation).not.toBe(0);
+    }
+  });
+
   it("proves first apply with absent intent tables and preserves migration 101 proof", () => {
     const { db, snapshot } = fixture();
     const pre = run(db, "pre", sha, snapshot);
@@ -82,20 +138,28 @@ describe("krabs order-status migration gate", () => {
       migration101: { candidateCount: 1, markerWasPresent: false },
       migration102: { markerWasPresent: false, tableWasPresent: false, rowCount: 0 },
       migration103: { markerWasPresent: false, tableWasPresent: false, rowCount: 0 },
+      migration106: { candidateCount: 0, markerWasPresent: false },
     });
     expect(JSON.parse(readFileSync(snapshot, "utf8"))).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       migration101: { candidateCount: 1 },
       migration102: { tableWasPresent: false, rowCount: 0, rows: [] },
       migration103: { tableWasPresent: false, rowCount: 0, rows: [] },
+      migration106: { candidateCount: 0, candidates: [] },
     });
     apply(db, migration101, marker101);
     apply(db, migration102, marker102);
     apply(db, migration103, marker103);
+    apply(db, migration106, marker106);
     const post = run(db, "post", sha, snapshot);
     expect(post.status, post.stderr).toBe(0);
     const proof = JSON.parse(post.stdout);
-    expect(Object.keys(proof).sort()).toEqual(["migration101", "migration102", "migration103"]);
+    expect(Object.keys(proof).sort()).toEqual([
+      "migration101",
+      "migration102",
+      "migration103",
+      "migration106",
+    ]);
     expect(Object.keys(proof.migration101).sort()).toEqual([
       "candidateCount",
       "candidateHash",
@@ -116,6 +180,11 @@ describe("krabs order-status migration gate", () => {
       "schemaHash",
       "tableWasPresent",
     ]);
+    expect(Object.keys(proof.migration106).sort()).toEqual([
+      "candidateCount",
+      "candidateHash",
+      "markerWasPresent",
+    ]);
     expect(sql(db, "SELECT count(*) FROM maker_capture_reprice_intents")).toBe("0");
     expect(sql(db, "SELECT count(*) FROM bounce_ask_capture_reprice_intents")).toBe("0");
     expect(run(db, "pre", sha, snapshot).status).not.toBe(0);
@@ -130,6 +199,7 @@ describe("krabs order-status migration gate", () => {
     );
     apply(db, migration102, marker102);
     apply(db, migration103, marker103);
+    apply(db, migration106, marker106);
     expect(run(db, "post", sha, snapshot).status).not.toBe(0);
     expect(
       spawnSync("/usr/bin/sqlite3", [db, "SELECT status FROM orders WHERE order_id='other'"], {
@@ -157,12 +227,14 @@ describe("krabs order-status migration gate", () => {
     apply(interrupted.db, migration101, marker101);
     sql(interrupted.db, `INSERT INTO schema_migrations VALUES('${marker102}')`);
     sql(interrupted.db, `INSERT INTO schema_migrations VALUES('${marker103}')`);
+    apply(interrupted.db, migration106, marker106);
     expect(run(interrupted.db, "post", sha, interrupted.snapshot).status).toBe(0);
 
     const redeploy = fixture();
     apply(redeploy.db, migration101, marker101);
     apply(redeploy.db, migration102, marker102);
     apply(redeploy.db, migration103, marker103);
+    apply(redeploy.db, migration106, marker106);
     insertIntent(redeploy.db);
     insertAskIntent(redeploy.db);
     const pre = run(redeploy.db, "pre", sha, redeploy.snapshot);
@@ -213,6 +285,15 @@ describe("krabs order-status migration gate", () => {
     sql(unmarked103.db, readFileSync(migration103, "utf8"));
     insertAskIntent(unmarked103.db);
     expect(run(unmarked103.db, "pre", sha, unmarked103.snapshot).status).not.toBe(0);
+
+    const duplicate106 = fixture();
+    sql(duplicate106.db, `INSERT INTO schema_migrations VALUES('${marker106}'),('${marker106}')`);
+    expect(run(duplicate106.db, "pre", sha, duplicate106.snapshot).status).not.toBe(0);
+
+    const stale106 = fixture();
+    insertTradingDisabledCandidate(stale106.db);
+    sql(stale106.db, `INSERT INTO schema_migrations VALUES('${marker106}')`);
+    expect(run(stale106.db, "pre", sha, stale106.snapshot).status).not.toBe(0);
   });
 
   it("rejects noncanonical columns, CHECKs, UNIQUE constraints, and named indexes", () => {
@@ -274,6 +355,7 @@ describe("krabs order-status migration gate", () => {
     apply(db, migration101, marker101);
     apply(db, migration102, marker102);
     apply(db, migration103, marker103);
+    apply(db, migration106, marker106);
     insertIntent(db);
     expect(run(db, "pre", sha, snapshot).status).toBe(0);
     sql(db, "UPDATE maker_capture_reprice_intents SET status='failed',failure='changed'");
@@ -285,6 +367,7 @@ describe("krabs order-status migration gate", () => {
     apply(db, migration101, marker101);
     apply(db, migration102, marker102);
     apply(db, migration103, marker103);
+    apply(db, migration106, marker106);
     insertAskIntent(db);
     expect(run(db, "pre", sha, snapshot).status).toBe(0);
     sql(db, "UPDATE bounce_ask_capture_reprice_intents SET status='failed',failure='changed'");
