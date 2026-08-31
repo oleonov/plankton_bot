@@ -62,6 +62,7 @@ import type { RpcRotator } from "./rpc-rotation.js";
 import type { DepHealthRecorder } from "@krabs/domain";
 import { timeDepCall, fetchResultOk } from "../dep-health.js";
 import { hashSignedOrderV2 } from "./order-hash.js";
+import { classifyExchangeRejectionReason } from "../exchange-rejection-classifier.js";
 
 export interface LiveExchangeConfig {
   /** ClobClient instance — typed as unknown to avoid SDK type leakage. */
@@ -100,6 +101,9 @@ export interface LiveExchangeConfig {
   __settlementLaneBackstopMs?: number;
   /** Test-only override for the relayer settlement submit lane task watchdog. */
   __settlementLaneTaskTimeoutMs?: number;
+  /** Test-only clock/cooldown seam for the prepared-order trading-disabled breaker. */
+  __now?: () => number;
+  __tradingDisabledCooldownMs?: number;
   /** Override for balance reads — for testing without a live RPC. */
   __readErc20Balance?: typeof readErc20Balance;
   /** Override for allowance reads — for testing without a live RPC. */
@@ -183,6 +187,7 @@ type PreparedOrderRecord = {
   readonly signedOrder: object;
   readonly orderType: string;
   readonly postOnly: boolean;
+  readonly side: PlaceOrderParams["side"];
 };
 
 type PreparedOrderClient = {
@@ -233,14 +238,6 @@ function isResolvedSubmissionRejection(response: unknown): boolean {
   if (!response || typeof response !== "object") return false;
   if (Reflect.get(response, "error") == null) return false;
   return isDefinitiveSubmissionRejection(response);
-}
-
-function isResolvedTradingDisabledRejection(response: unknown): boolean {
-  if (!response || typeof response !== "object") return false;
-  if (Reflect.get(response, "status") !== 503) return false;
-  return [Reflect.get(response, "error"), Reflect.get(response, "message")].some(
-    (value) => typeof value === "string" && value.trim().toLowerCase() === "trading is disabled",
-  );
 }
 
 class SettlementTransactionFailedError extends Error {
@@ -450,6 +447,7 @@ class TradePageFetchFailure extends Error {
 }
 
 export class LiveExchangeGateway implements ExchangeGateway {
+  private static readonly TRADING_DISABLED_COOLDOWN_MS = 5 * 60_000;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly client: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -477,7 +475,11 @@ export class LiveExchangeGateway implements ExchangeGateway {
   private readonly fetchRetryLog: RetryDiagnosticLogger | undefined;
   private readonly settlementLaneBackstopMs: number;
   private readonly settlementLaneTaskTimeoutMs: number;
+  private readonly now: () => number;
+  private readonly tradingDisabledCooldownMs: number;
   private settlementSubmitTail: Promise<void> = Promise.resolve();
+  private tradingDisabledUntilMs = 0;
+  private tradingDisabledSellProbeInFlight = false;
   private readonly warnedCollateralFallback = new Set<string>();
   private warnedRedeemUnsupported = false;
   private warnedMergeUnsupported = false;
@@ -514,6 +516,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
       config.__settlementLaneBackstopMs ?? SETTLEMENT_SUBMIT_LANE_BACKSTOP_MS;
     this.settlementLaneTaskTimeoutMs =
       config.__settlementLaneTaskTimeoutMs ?? SETTLEMENT_SUBMIT_LANE_TASK_TIMEOUT_MS;
+    this.now = config.__now ?? Date.now;
+    this.tradingDisabledCooldownMs =
+      config.__tradingDisabledCooldownMs ?? LiveExchangeGateway.TRADING_DISABLED_COOLDOWN_MS;
   }
 
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
@@ -569,6 +574,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       signedOrder,
       orderType: params.orderType,
       postOnly: params.postOnly ?? false,
+      side: params.side,
     });
     return prepared;
   }
@@ -583,6 +589,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
       };
     }
 
+    const halfOpenProbe = this.claimTradingDisabledSubmission(record.side);
+    if (halfOpenProbe === "blocked") return this.tradingDisabledCooldownRejection();
+
     try {
       const response = await timeDepCall(this.depHealthRecorder, "clob", () =>
         (this.client as PreparedOrderClient).postOrder(
@@ -593,7 +602,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
       );
       const orderId = extractOrderId(response);
       if (!orderId) {
-        if (isResolvedTradingDisabledRejection(response)) {
+        if (classifyExchangeRejectionReason(response) === "rejection_trading_disabled") {
+          this.rearmTradingDisabledBreaker();
           return {
             kind: "rejected",
             errorCode: "UNKNOWN",
@@ -602,6 +612,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
           };
         }
         if (isResolvedSubmissionRejection(response)) {
+          if (halfOpenProbe) this.closeTradingDisabledBreaker();
           const { code, message, details } = classifyError(response);
           return {
             kind: "rejected",
@@ -610,20 +621,55 @@ export class LiveExchangeGateway implements ExchangeGateway {
             errorDetails: details,
           };
         }
+        if (halfOpenProbe) this.rearmTradingDisabledBreaker();
         return {
           kind: "unknown",
           errorMessage: "exchange returned no order id",
           errorDetails: { responseBody: redactSensitive(response) },
         };
       }
+      if (halfOpenProbe) this.closeTradingDisabledBreaker();
       return { kind: "accepted", orderId };
     } catch (err) {
       const { code, message, details } = classifyError(err);
       if (isDefinitiveSubmissionRejection(err)) {
+        if (halfOpenProbe) this.closeTradingDisabledBreaker();
         return { kind: "rejected", errorCode: code, errorMessage: message, errorDetails: details };
       }
+      if (halfOpenProbe) this.rearmTradingDisabledBreaker();
       return { kind: "unknown", errorMessage: message, errorDetails: details };
+    } finally {
+      if (halfOpenProbe) this.tradingDisabledSellProbeInFlight = false;
     }
+  }
+
+  private claimTradingDisabledSubmission(side: PlaceOrderParams["side"]): boolean | "blocked" {
+    if (this.tradingDisabledUntilMs === 0) return false;
+    if (this.now() < this.tradingDisabledUntilMs || side !== "sell") return "blocked";
+    if (this.tradingDisabledSellProbeInFlight) return "blocked";
+    this.tradingDisabledSellProbeInFlight = true;
+    return true;
+  }
+
+  private tradingDisabledCooldownRejection(): PreparedOrderSubmitResult {
+    return {
+      kind: "rejected",
+      errorCode: "UNKNOWN",
+      errorMessage: "trading is disabled",
+      errorDetails: {
+        responseBody: { status: 503, error: "trading is disabled" },
+        synthetic: "trading-disabled-cooldown",
+        retryAt: this.tradingDisabledUntilMs,
+      },
+    };
+  }
+
+  private rearmTradingDisabledBreaker(): void {
+    this.tradingDisabledUntilMs = this.now() + this.tradingDisabledCooldownMs;
+  }
+
+  private closeTradingDisabledBreaker(): void {
+    this.tradingDisabledUntilMs = 0;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

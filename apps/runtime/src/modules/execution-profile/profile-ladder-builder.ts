@@ -170,7 +170,8 @@ function chooseLargestNeighborIndex(rungs: readonly LadderRung[], index: number)
 }
 
 function isValidBbo(bestBid: number | null, bestAsk: number | null): boolean {
-  return isPositiveFinite(bestBid) && isPositiveFinite(bestAsk) && bestBid < bestAsk;
+  if (!isPositiveFinite(bestAsk)) return false;
+  return bestBid == null || (isPositiveFinite(bestBid) && bestBid < bestAsk);
 }
 
 function isPositiveFinite(value: number | null | undefined): value is number {

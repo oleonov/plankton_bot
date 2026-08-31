@@ -272,6 +272,7 @@ describe("LiveExchangeGateway", () => {
       },
     });
 
+    gw = new LiveExchangeGateway({ client });
     client.postOrder.mockResolvedValue({ status: 503, message: "trading is disabled" });
     await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
       kind: "rejected",
@@ -279,6 +280,7 @@ describe("LiveExchangeGateway", () => {
       errorMessage: "trading is disabled",
     });
 
+    gw = new LiveExchangeGateway({ client });
     client.postOrder.mockRejectedValue(
       Object.assign(new Error("request timeout"), { status: 408 }),
     );
@@ -313,6 +315,138 @@ describe("LiveExchangeGateway", () => {
     await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
       kind: "unknown",
     });
+  });
+
+  it("admits exactly one SELL half-open probe while BUYs and concurrent SELLs stay synthetic", async () => {
+    let nowMs = 1_000;
+    gw = new LiveExchangeGateway({
+      client,
+      __now: () => nowMs,
+      __tradingDisabledCooldownMs: 300_000,
+    } as any);
+    client.createOrder.mockResolvedValue(signedV2Order());
+    const prepare = (side: "buy" | "sell") =>
+      gw.prepareOrder({
+        clientOrderId: `cloid-breaker-${side}-${nowMs}`,
+        tokenId: createTokenId("tok-1"),
+        side,
+        size: 10,
+        price: 0.5,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+      });
+
+    client.postOrder.mockResolvedValueOnce({ status: 503, error: " Trading Is Disabled " });
+    await expect(gw.submitPreparedOrder(await prepare("sell"))).resolves.toMatchObject({
+      kind: "rejected",
+      errorMessage: "trading is disabled",
+    });
+    expect(client.postOrder).toHaveBeenCalledTimes(1);
+
+    await expect(gw.submitPreparedOrder(await prepare("sell"))).resolves.toMatchObject({
+      kind: "rejected",
+      errorDetails: expect.objectContaining({
+        synthetic: "trading-disabled-cooldown",
+        retryAt: 301_000,
+      }),
+    });
+    expect(client.postOrder).toHaveBeenCalledTimes(1);
+
+    nowMs = 301_000;
+    await expect(gw.submitPreparedOrder(await prepare("buy"))).resolves.toMatchObject({
+      kind: "rejected",
+      errorDetails: expect.objectContaining({ synthetic: "trading-disabled-cooldown" }),
+    });
+    expect(client.postOrder).toHaveBeenCalledTimes(1);
+
+    const probe = deferred<unknown>();
+    client.postOrder.mockImplementationOnce(() => probe.promise);
+    const [sellOne, sellTwo] = await Promise.all([prepare("sell"), prepare("sell")]);
+    const submissions = Promise.all([
+      gw.submitPreparedOrder(sellOne),
+      gw.submitPreparedOrder(sellTwo),
+    ]);
+    await flushMicrotasks();
+    expect(client.postOrder).toHaveBeenCalledTimes(2);
+    probe.resolve({ status: 503, message: "trading is disabled" });
+
+    const results = await submissions;
+    expect(results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "rejected", errorMessage: "trading is disabled" }),
+        expect.objectContaining({
+          kind: "rejected",
+          errorDetails: expect.objectContaining({ synthetic: "trading-disabled-cooldown" }),
+        }),
+      ]),
+    );
+    nowMs = 600_999;
+    await gw.submitPreparedOrder(await prepare("sell"));
+    expect(client.postOrder).toHaveBeenCalledTimes(2);
+  });
+
+  it("rearms an unknown half-open POST and closes the breaker on a definitive response", async () => {
+    let nowMs = 10_000;
+    gw = new LiveExchangeGateway({
+      client,
+      __now: () => nowMs,
+      __tradingDisabledCooldownMs: 300_000,
+    } as any);
+    client.createOrder.mockResolvedValue(signedV2Order());
+    const prepare = (side: "buy" | "sell" = "sell") =>
+      gw.prepareOrder({
+        clientOrderId: `cloid-breaker-${nowMs}`,
+        tokenId: createTokenId("tok-1"),
+        side,
+        size: 10,
+        price: 0.5,
+        orderType: "GTC",
+        tickSize: 0.01,
+        negRisk: false,
+      });
+
+    client.postOrder.mockResolvedValueOnce({ status: 503, error: "trading is disabled" });
+    await gw.submitPreparedOrder(await prepare());
+
+    nowMs = 310_000;
+    client.postOrder.mockResolvedValueOnce({ status: 503, error: "service unavailable" });
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
+      kind: "unknown",
+    });
+    expect(client.postOrder).toHaveBeenCalledTimes(2);
+
+    nowMs = 609_999;
+    await gw.submitPreparedOrder(await prepare());
+    expect(client.postOrder).toHaveBeenCalledTimes(2);
+
+    nowMs = 610_000;
+    client.postOrder.mockResolvedValueOnce({ status: 422, error: "invalid price" });
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
+      kind: "rejected",
+      errorCode: "INVALID_PRICE",
+    });
+    client.postOrder.mockResolvedValueOnce({ orderID: "accepted-after-close" });
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toEqual({
+      kind: "accepted",
+      orderId: "accepted-after-close",
+    });
+    expect(client.postOrder).toHaveBeenCalledTimes(4);
+
+    client.postOrder.mockResolvedValueOnce({ status: 503, error: "trading is disabled" });
+    await gw.submitPreparedOrder(await prepare());
+    nowMs = 910_000;
+    client.postOrder.mockResolvedValueOnce({ orderID: "accepted-half-open" });
+    await expect(gw.submitPreparedOrder(await prepare())).resolves.toEqual({
+      kind: "accepted",
+      orderId: "accepted-half-open",
+    });
+    client.postOrder.mockResolvedValueOnce({ orderID: "buy-after-accepted-probe" });
+    await expect(gw.submitPreparedOrder(await prepare("buy"))).resolves.toEqual({
+      kind: "accepted",
+      orderId: "buy-after-accepted-probe",
+    });
+    expect(client.postOrder).toHaveBeenCalledTimes(7);
   });
 
   it("placeOrder returns error result on SDK failure", async () => {

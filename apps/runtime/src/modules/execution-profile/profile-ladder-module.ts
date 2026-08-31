@@ -17,8 +17,14 @@ import type {
   RuntimeModule,
   TokenId,
 } from "@krabs/domain";
-import { OrderStatus, PositionStatus, createCommandId } from "@krabs/domain";
+import {
+  OrderStatus,
+  PositionStatus,
+  classifySellLoopGuardReject,
+  createCommandId,
+} from "@krabs/domain";
 import { buildClientOrderId } from "@krabs/domain/node";
+import { classifyExchangeRejectionReason } from "@krabs/exchange";
 
 import {
   computeProfileLadder,
@@ -192,10 +198,11 @@ const DEFAULT_POST_REFILL_FOLLOW_THROUGH = {
 
 const STALE_LIVE_RUNG_RISK_EVENT_DEDUPE_MS = 5 * 60_000;
 
-// Bounded number of `_retry<n>` clientOrderId candidates probed when the base
-// recovery clientOrderId is occupied by a terminal cancelled/rejected no-fill PL
-// SELL row. Keeps the recovery deterministic and prevents an unbounded probe loop.
-const PROFILE_LADDER_CLIENT_ORDER_ID_MAX_RETRIES = 3;
+// Legacy no-order-id rows predate the prepared-hash recovery lane. Probe a fixed
+// identity set for those rows only; current pre-exchange retries retain their
+// separately persisted three-retry bound.
+const PROFILE_LADDER_LEGACY_CLIENT_ORDER_ID_MAX_RETRIES = 4;
+const PROFILE_LADDER_PRE_EXCHANGE_MAX_RETRIES = 3;
 
 interface LadderAdoptionSummary {
   attempt: number;
@@ -1829,7 +1836,11 @@ export class ProfileLadderModule implements RuntimeModule {
     const baseSignalId = `profile_ladder_${String(position.tokenId)}_${ladderId}_${rung.rungIndex}`;
     const probe = this.deps.orderRepo?.findByClientOrderId?.bind(this.deps.orderRepo);
     if (!hasPersistedRecoveryRung(rung) && probe != null) {
-      for (let attempt = 0; attempt <= PROFILE_LADDER_CLIENT_ORDER_ID_MAX_RETRIES; attempt += 1) {
+      for (
+        let attempt = 0;
+        attempt <= PROFILE_LADDER_LEGACY_CLIENT_ORDER_ID_MAX_RETRIES;
+        attempt += 1
+      ) {
         const signalId = attempt === 0 ? baseSignalId : `${baseSignalId}_retry${attempt}`;
         const existing = probe(
           String(buildClientOrderId({ signalId, tokenId: position.tokenId, side: "sell" })),
@@ -1858,7 +1869,7 @@ export class ProfileLadderModule implements RuntimeModule {
       return null;
     }
     const preExchangeRetryCount = normalizeRetryCount(rung.preExchangeRetryCount);
-    if (preExchangeRetryCount > PROFILE_LADDER_CLIENT_ORDER_ID_MAX_RETRIES) {
+    if (preExchangeRetryCount > PROFILE_LADDER_PRE_EXCHANGE_MAX_RETRIES) {
       const signature = `${ladderId}|${rung.rungIndex}|${preExchangeRetryCount}`;
       if (this.exhaustedRetrySignatureByToken.get(String(position.tokenId)) !== signature) {
         this.exhaustedRetrySignatureByToken.set(String(position.tokenId), signature);
@@ -2170,6 +2181,16 @@ export class ProfileLadderModule implements RuntimeModule {
       return;
     }
 
+    if (
+      "exchangeErrorDetails" in event &&
+      pending.kind === "standard" &&
+      this.persistTradingDisabledTerminalRetry(pending, event)
+    ) {
+      this.pendingRungByClientOrderId.delete(String(event.clientOrderId));
+      this.plannedRungRetryCooldownUntilByToken.delete(String(pending.tokenId));
+      return;
+    }
+
     this.pendingRungByClientOrderId.delete(String(event.clientOrderId));
     if (pending.kind === "standard") {
       if (
@@ -2237,6 +2258,40 @@ export class ProfileLadderModule implements RuntimeModule {
     if (!matched) return;
     this.deps.repository.upsertLadder({ ...state, activeRungs, updatedAtMs: timestamp });
     this.armPlannedRungRetryCooldown(pending.tokenId, timestamp);
+  }
+
+  private persistTradingDisabledTerminalRetry(
+    pending: PendingProfileLadderRung,
+    event: RuntimeEventMap["OrderRejected"],
+  ): boolean {
+    if (
+      classifyExchangeRejectionReason(event.exchangeErrorDetails) !== "rejection_trading_disabled"
+    ) {
+      return false;
+    }
+    const state = this.deps.repository.getLadder(pending.tokenId);
+    const rung = state?.activeRungs.find((candidate) => candidate.rungIndex === pending.rungIndex);
+    const order = this.deps.orderRepo?.findByClientOrderId?.(String(event.clientOrderId));
+    const preparedHash = exactTradingDisabledPreparedHash(state, rung, pending, order, event);
+    if (state == null || rung == null || preparedHash == null) return false;
+
+    const activeRungs = state.activeRungs.map((candidate) =>
+      candidate.rungIndex === rung.rungIndex
+        ? {
+            ...candidate,
+            lifecycle: "planned" as const,
+            orderId: null,
+            terminalRetryKey: preparedHash,
+            attemptFilledBaseShares: normalizeCumulativeShares(
+              candidate.filledSizeShares,
+              candidate.sizeShares,
+            ),
+            attemptSubmittedShares: 0,
+          }
+        : candidate,
+    );
+    this.deps.repository.upsertLadder({ ...state, activeRungs, updatedAtMs: event.timestamp });
+    return true;
   }
 
   private handleFillReceived(event: RuntimeEventMap["FillReceived"]): void {
@@ -2699,9 +2754,112 @@ function persistedAttemptSignalId(tokenId: TokenId, ladderId: string, rung: Ladd
 function isLegacyRetrySkippableTerminalOrder(order: Order): boolean {
   return (
     isProfileLadderSellOrder(order) &&
-    (order.status === OrderStatus.Cancelled || order.status === OrderStatus.Rejected) &&
-    order.fillProgressShares === 0
+    order.status === OrderStatus.Rejected &&
+    order.exchangeOrderId == null &&
+    order.fillProgressShares == null &&
+    classifySellLoopGuardReject({
+      side: order.side,
+      reason: order.exchangeErrorMessage ?? null,
+      exchangeErrorMessage: order.exchangeErrorPayload ?? null,
+      decisionRuleId: order.decisionRuleId ?? null,
+    }) === "exchange_no_order_id"
   );
+}
+
+function exactTradingDisabledPreparedHash(
+  state: LadderState | null | undefined,
+  rung: LadderRung | undefined,
+  pending: PendingProfileLadderRung,
+  order: Order | null | undefined,
+  event: RuntimeEventMap["OrderRejected"],
+): string | null {
+  if (state == null || rung == null || order == null) return null;
+  if (!matchesTradingDisabledOrderIdentity(state, rung, pending, order, event)) return null;
+  const preparedHash = order.exchangeOrderId?.trim();
+  if (preparedHash == null || preparedHash.length === 0 || String(order.orderId) !== preparedHash) {
+    return null;
+  }
+  if (
+    classifyPersistedExchangePayload(order.exchangeErrorPayload) !== "rejection_trading_disabled"
+  ) {
+    return null;
+  }
+
+  const metadata = asUnknownRecord(order.metadata?.["profileLadder"]);
+  const baseline = normalizeCumulativeShares(
+    pending.attemptFilledBaseShares ?? rung.filledSizeShares,
+    rung.sizeShares,
+  );
+  const submitted = normalizeSubmittedShares(
+    pending.attemptSubmittedShares ?? remainingRungShares(rung),
+    rung.sizeShares - baseline,
+  );
+  return matchesTradingDisabledAttempt(metadata, order, state, rung, baseline, submitted)
+    ? preparedHash
+    : null;
+}
+
+function matchesTradingDisabledOrderIdentity(
+  state: LadderState,
+  rung: LadderRung,
+  pending: PendingProfileLadderRung,
+  order: Order,
+  event: RuntimeEventMap["OrderRejected"],
+): boolean {
+  return (
+    state.ladderId === pending.ladderId &&
+    rung.lifecycle === "planned" &&
+    rung.orderId == null &&
+    order.status === OrderStatus.Rejected &&
+    order.side === "sell" &&
+    event.side === "sell" &&
+    order.decisionRuleId === "PROFILE_LADDER" &&
+    event.decisionRuleId === "PROFILE_LADDER" &&
+    order.fillProgressShares === 0 &&
+    String(order.clientOrderId) === String(event.clientOrderId) &&
+    String(order.tokenId) === String(state.tokenId) &&
+    String(event.tokenId) === String(state.tokenId) &&
+    String(order.conditionId) === String(state.conditionId) &&
+    String(event.conditionId) === String(state.conditionId) &&
+    order.exchangeRejectionReason === "rejection_trading_disabled"
+  );
+}
+
+function matchesTradingDisabledAttempt(
+  metadata: Readonly<Record<string, unknown>> | null,
+  order: Order,
+  state: LadderState,
+  rung: LadderRung,
+  baseline: number,
+  submitted: number,
+): boolean {
+  return (
+    metadata?.["ladderId"] === state.ladderId &&
+    metadata["rungIndex"] === rung.rungIndex &&
+    sameNumber(metadata["attemptFilledBaseShares"], baseline) &&
+    sameNumber(metadata["attemptSubmittedShares"], submitted) &&
+    sameNumber(order.price, rung.price) &&
+    sameNumber(order.size, submitted)
+  );
+}
+
+function classifyPersistedExchangePayload(payload: string | null | undefined): string | null {
+  if (payload == null) return null;
+  try {
+    return classifyExchangeRejectionReason(JSON.parse(payload));
+  } catch {
+    return null;
+  }
+}
+
+function asUnknownRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return value != null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : null;
+}
+
+function sameNumber(value: unknown, expected: number): boolean {
+  return typeof value === "number" && Number.isFinite(value) && Math.abs(value - expected) < 1e-9;
 }
 
 function normalizeRetryCount(value: number | undefined): number {

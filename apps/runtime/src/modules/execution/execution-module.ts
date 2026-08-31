@@ -202,6 +202,7 @@ import { parseQuoteMotionOrigin, type QuoteMotionOriginV1 } from "../../quote-mo
  * may wait on the gateway), and two would drift.
  */
 const EXECUTION_SHUTDOWN_TIMEOUT_MS = 10_000;
+const TRADING_DISABLED_WARN_INTERVAL_MS = 5 * 60_000;
 const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
 const D8_EXIT_ALREADY_WORKING_REASON = "d8-exit-already-working";
 
@@ -546,6 +547,7 @@ export class ExecutionModule implements RuntimeModule {
     { orderId: OrderId; command: PlaceOrderCommand; createdAt: number }
   >();
   private readonly gatewayRejects: Array<{ ts: number; code: string }> = [];
+  private tradingDisabledWarnUntilMs = 0;
   private readonly internalReservationRejects: Array<{ ts: number; reason: string }> = [];
   /**
    * In-flight cancel dedup (docs/plans/2026-07-20-exit-loss-floor.md §Phase 6,
@@ -4769,10 +4771,12 @@ export class ExecutionModule implements RuntimeModule {
       const errorCode = result.errorCode ?? ExchangeErrorCode.Unknown;
       this.recordGatewayReject(errorCode);
       const reason = this.gatewayRejectReason(result.errorCode, result.errorMessage);
-      this.log.warn(
-        { commandId: cmd.commandId, errorCode, exchangeErrorDetails: result.errorDetails ?? null },
-        "order rejected by gateway",
+      const exchangeErrorDetails = result.errorDetails ?? null;
+      const exchangeRejectionReason = this.classifyExchangeRejection(
+        exchangeErrorDetails,
+        cmd.commandId,
       );
+      this.logGatewayRejection(cmd, errorCode, exchangeErrorDetails, exchangeRejectionReason);
 
       this.handleExchangeBalanceRejection(cmd, {
         errorCode: result.errorCode ?? null,
@@ -4791,12 +4795,6 @@ export class ExecutionModule implements RuntimeModule {
           );
         }
       }
-
-      const exchangeErrorDetails = result.errorDetails ?? null;
-      const exchangeRejectionReason = this.classifyExchangeRejection(
-        exchangeErrorDetails,
-        cmd.commandId,
-      );
 
       // Phase 2: before persisting the first-attempt rejection, try once more
       // with a corrected tick/price if the CLOB told us the tick was wrong.
@@ -7526,6 +7524,34 @@ export class ExecutionModule implements RuntimeModule {
       );
     }
     return reason;
+  }
+
+  private logGatewayRejection(
+    cmd: PlaceOrderCommand,
+    errorCode: string,
+    exchangeErrorDetails: Readonly<Record<string, unknown>> | null,
+    rejectionReason: string,
+  ): void {
+    const context = { commandId: cmd.commandId, errorCode, exchangeErrorDetails };
+    if (rejectionReason !== "rejection_trading_disabled") {
+      this.log.warn(context, "order rejected by gateway");
+      return;
+    }
+    this.deps.runtimeMetrics?.writeCounter?.(
+      "exchange_trading_disabled_rejection_total",
+      1,
+      JSON.stringify({ side: cmd.side, source: boundedMetricLabel(cmd.source) }),
+    );
+    const now = Date.now();
+    if (now >= this.tradingDisabledWarnUntilMs) {
+      this.tradingDisabledWarnUntilMs = now + TRADING_DISABLED_WARN_INTERVAL_MS;
+      this.log.warn(context, "order rejected by gateway");
+      return;
+    }
+    this.log.debug(
+      { commandId: cmd.commandId, errorCode },
+      "trading-disabled rejection suppressed inside bounded warning window",
+    );
   }
 }
 

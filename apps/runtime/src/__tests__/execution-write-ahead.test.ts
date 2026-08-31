@@ -7,9 +7,11 @@ import {
   createCommandId,
   createConditionId,
   createTokenId,
+  ExchangeErrorCode,
   type ClientOrderId,
   type PlaceOrderCommand,
   type PreparedOrderSubmitResult,
+  type RuntimeEventMap,
 } from "@krabs/domain";
 import { bootstrapDatabase, SqliteFillRepository, SqliteOrderRepository } from "@krabs/db";
 import { InProcessEventBus } from "@krabs/event-bus";
@@ -70,10 +72,13 @@ function gateway(outcomes: PreparedOrderSubmitResult[], inspectPost?: (hash: str
     return outcomes[index++]!;
   });
   return {
-    prepareOrder: vi.fn(async () => ({
-      orderId: "0xwriteaheadhash",
-      __preparedOrderBrand: "PreparedOrder" as const,
-    })),
+    prepareOrder: vi.fn(async (params: { clientOrderId: string }) => {
+      const suffix = params.clientOrderId.replace("write_ahead_client", "");
+      return {
+        orderId: `0xwriteaheadhash${suffix}`,
+        __preparedOrderBrand: "PreparedOrder" as const,
+      };
+    }),
     submitPreparedOrder,
     placeOrder: vi.fn(),
     cancelOrder: vi.fn(),
@@ -171,6 +176,85 @@ describe("ExecutionModule live write-ahead", () => {
     await mod.stop();
     reader.close();
     writer.close();
+  });
+
+  it("persists semantic trading-disabled rejections while bounding repeated WARN telemetry", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-write-ahead-"));
+    dirs.push(dir);
+    const conn = bootstrapDatabase(path.join(dir, "ledger.db"));
+    const orders = new SqliteOrderRepository(conn.db);
+    const fills = new SqliteFillRepository(conn.db);
+    const actualDetails = {
+      responseBody: { status: 503, error: "trading is disabled" },
+    };
+    const syntheticDetails = {
+      ...actualDetails,
+      synthetic: "trading-disabled-cooldown",
+      retryAt: Date.now() + 300_000,
+    };
+    const liveGateway = gateway([
+      {
+        kind: "rejected",
+        errorCode: ExchangeErrorCode.Unknown,
+        errorMessage: "trading is disabled",
+        errorDetails: actualDetails,
+      },
+      {
+        kind: "rejected",
+        errorCode: ExchangeErrorCode.Unknown,
+        errorMessage: "trading is disabled",
+        errorDetails: syntheticDetails,
+      },
+      {
+        kind: "rejected",
+        errorCode: ExchangeErrorCode.Unknown,
+        errorMessage: "trading is disabled",
+        errorDetails: syntheticDetails,
+      },
+    ]);
+    const bus = new InProcessEventBus();
+    const rejected: RuntimeEventMap["OrderRejected"][] = [];
+    bus.subscribe("OrderRejected", async (event) => {
+      rejected.push(event);
+    });
+    const writeCounter = vi.fn();
+    log.warn.mockClear();
+    const mod = new ExecutionModule({
+      gateway: liveGateway as any,
+      bus,
+      marketRepo: marketRepo() as any,
+      orderRepo: orders,
+      fillRepo: fills,
+      log,
+      botRunId: createBotRunId("write-ahead-run"),
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+      runtimeMetrics: { writeEvent: vi.fn(), writeCounter },
+    });
+    await mod.start();
+
+    for (const suffix of ["-disabled-one", "-disabled-two", "-disabled-three"]) {
+      await bus.publish("PlaceOrderRequested", { command: command(suffix), timestamp: Date.now() });
+    }
+
+    expect(rejected).toHaveLength(3);
+    for (const suffix of ["-disabled-one", "-disabled-two", "-disabled-three"]) {
+      expect(orders.findByClientOrderId(`write_ahead_client${suffix}`)).toMatchObject({
+        status: "rejected",
+        exchangeRejectionReason: "rejection_trading_disabled",
+      });
+    }
+    expect(
+      log.warn.mock.calls.filter((call: unknown[]) => call[1] === "order rejected by gateway"),
+    ).toHaveLength(1);
+    expect(
+      writeCounter.mock.calls.filter(
+        (call: unknown[]) => call[0] === "exchange_trading_disabled_rejection_total",
+      ),
+    ).toHaveLength(3);
+
+    await mod.stop();
+    conn.close();
   });
 
   it("does not re-sign or repost unknown and accepted-before-open pending rows after fresh delivery", async () => {

@@ -266,8 +266,23 @@ describe("computeProfileLadder", () => {
     expect(result.rungs.every((rung) => rung.sizeShares >= 1)).toBe(true);
   });
 
-  it("fails closed on invalid BBO or tick size", () => {
-    expect(computeProfileLadder(input({ bestBid: null }))).toMatchObject({
+  it("accepts an ask-only SELL book without inventing a bid", () => {
+    expect(computeProfileLadder(input({ bestBid: null, bestAsk: 0.11 }))).toMatchObject({
+      ok: true,
+      band: "medium_low",
+    });
+  });
+
+  it("fails closed on an invalid SELL book or tick size", () => {
+    expect(computeProfileLadder(input({ bestAsk: null }))).toMatchObject({
+      ok: false,
+      reason: "invalid_bbo",
+    });
+    expect(computeProfileLadder(input({ bestBid: 0.11, bestAsk: 0.11 }))).toMatchObject({
+      ok: false,
+      reason: "invalid_bbo",
+    });
+    expect(computeProfileLadder(input({ bestBid: 0, bestAsk: 0.11 }))).toMatchObject({
       ok: false,
       reason: "invalid_bbo",
     });

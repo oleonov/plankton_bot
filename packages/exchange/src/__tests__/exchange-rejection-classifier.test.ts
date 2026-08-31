@@ -108,4 +108,23 @@ describe("classifyExchangeRejectionReason", () => {
   it("classifies invalid tick size as plain string payload", () => {
     expect(classifyExchangeRejectionReason("invalid tick size")).toBe("rejection_invalid_tick");
   });
+
+  it.each([
+    { status: 503, error: " Trading Is Disabled " },
+    { status: 503, message: "trading is disabled" },
+    { responseBody: { status: 503, error: "trading is disabled" } },
+    { errorDetails: { responseBody: { status: 503, message: "TRADING IS DISABLED" } } },
+  ])("classifies only structurally exact trading-disabled responses", (payload) => {
+    expect(classifyExchangeRejectionReason(payload)).toBe("rejection_trading_disabled");
+  });
+
+  it.each([
+    { status: "503", error: "trading is disabled" },
+    { status: 503, error: "trading is disabled right now" },
+    { status: 503, error: "service unavailable" },
+    Object.assign(new Error("trading is disabled"), { status: 503 }),
+    { errorDetails: { responseBody: { status: 503, error: "generic outage" } } },
+  ])("keeps near, thrown, and generic 503 outcomes unknown", (payload) => {
+    expect(classifyExchangeRejectionReason(payload)).toBe("rejection_unknown");
+  });
 });

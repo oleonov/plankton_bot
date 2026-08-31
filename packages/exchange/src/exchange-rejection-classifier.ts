@@ -3,11 +3,13 @@ export type ExchangeRejectionReason =
   | "rejection_min_size"
   | "rejection_post_only_cross"
   | "rejection_invalid_tick"
+  | "rejection_trading_disabled"
   | "rejection_missing_order_id"
   | "rejection_unknown"
   | "rejection_no_payload";
 
 export function classifyExchangeRejectionReason(payload: unknown): ExchangeRejectionReason {
+  if (isExactTradingDisabledRejection(payload)) return "rejection_trading_disabled";
   const text = getExchangeRejectionPayloadText(payload);
   if (text == null) return "rejection_no_payload";
 
@@ -43,6 +45,10 @@ export function classifyExchangeRejectionReason(payload: unknown): ExchangeRejec
 
 export function getExchangeRejectionPayloadText(payload: unknown): string | null {
   if (payload == null) return null;
+  if (payload instanceof Error) {
+    const trimmed = payload.message.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
   if (typeof payload === "string") {
     const trimmed = payload.trim();
     return trimmed.length > 0 ? trimmed : null;
@@ -56,6 +62,26 @@ export function getExchangeRejectionPayloadText(payload: unknown): string | null
   collectPayloadStrings(payload, parts);
   const text = parts.join(" ").trim();
   return text.length > 0 ? text : null;
+}
+
+function isExactTradingDisabledRejection(payload: unknown): boolean {
+  if (payload instanceof Error) return false;
+  const root = asRecord(payload);
+  if (root == null) return false;
+  const details = asRecord(root["errorDetails"]);
+  const candidates = [root, asRecord(root["responseBody"]), asRecord(details?.["responseBody"])];
+  return candidates.some((candidate) => {
+    if (candidate?.["status"] !== 503) return false;
+    return [candidate["error"], candidate["message"]].some(
+      (value) => typeof value === "string" && value.trim().toLowerCase() === "trading is disabled",
+    );
+  });
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 function collectPayloadStrings(value: unknown, parts: string[], depth = 0): void {

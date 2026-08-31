@@ -875,6 +875,15 @@ describe("ProfileLadderModule", () => {
     });
   });
 
+  it("places SELL coverage from an ask-only book without synthesizing a bid", async () => {
+    const ctx = setup();
+
+    await ctx.module.placeLadder(position(), market({ bestBid: null, bestAsk: 0.11 }));
+
+    expect(ctx.orders).toHaveLength(1);
+    expect(ctx.orders[0]).toMatchObject({ side: "sell", postOnly: true });
+  });
+
   it("rebuilds after a scale-in BUY fill when PositionUpdated carries the new basis", async () => {
     const ctx = setup();
     const seeded = ladderState();
@@ -1748,9 +1757,10 @@ describe("ProfileLadderModule", () => {
         orderId: createOrderId("dead-rejected-profile-ladder-order"),
         status: OrderStatus.Rejected,
         exchangeOrderId: null,
-        fillProgressShares: 0,
+        fillProgressShares: null,
         decisionRuleId: "PROFILE_LADDER",
         signalReason: "profile-ladder-exit",
+        exchangeErrorMessage: "exchange returned no order id",
         metadata: { source: "profile_ladder" },
         ...overrides,
       });
@@ -1820,7 +1830,7 @@ describe("ProfileLadderModule", () => {
       });
     }
 
-    it("places a fresh PL SELL with a distinct deterministic clientOrderId when the recovery rung's base clientOrderId has an exact-zero terminal rejected order", async () => {
+    it("places a fresh PL SELL when the base identity is a known legacy no-order-id rejection", async () => {
       const reader = blockFirstClientOrderId(deadRejectedProfileLadderSell());
       const ctx = recoveryContext(reader);
 
@@ -1864,6 +1874,14 @@ describe("ProfileLadderModule", () => {
         name: "rejected-with-fills",
         order: () => deadRejectedProfileLadderSell({ fillProgressShares: 3 }),
       },
+      {
+        name: "ambiguous-rejected",
+        order: () =>
+          deadRejectedProfileLadderSell({
+            fillProgressShares: 0,
+            exchangeErrorMessage: null,
+          }),
+      },
     ])(
       "does not reuse or retry a clientOrderId whose existing row is $name — no duplicate live SELL",
       async ({ order }) => {
@@ -1902,10 +1920,20 @@ describe("ProfileLadderModule", () => {
       ).toBe(true);
     });
 
-    // v154: a terminal cancelled/rejected PL SELL with no fill progress can no
-    // longer permanently block recovery even when it touched the exchange. The
-    // probe skips it and advances to the next deterministic retry suffix.
-    it("retries past a terminal cancelled exchange-backed no-fill PL SELL on the base clientOrderId", async () => {
+    it("selects legacy retry4 once base through retry3 are known no-order-id rejections", async () => {
+      let probes = 0;
+      const ctx = recoveryContext({
+        findByTokenId: () => [],
+        findByClientOrderId: () => (probes++ < 4 ? deadRejectedProfileLadderSell() : null),
+      });
+
+      await fireRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(String(ctx.orders[0]?.signalId)).toMatch(/_retry4$/);
+    });
+
+    it("does not step past an exchange-backed cancelled identity", async () => {
       const reader = blockFirstClientOrderId(
         deadRejectedProfileLadderSell({
           status: OrderStatus.Cancelled,
@@ -1917,27 +1945,23 @@ describe("ProfileLadderModule", () => {
 
       await fireRecovery(ctx);
 
-      expect(ctx.orders).toHaveLength(1);
-      const published = ctx.orders[0]!;
-      expect(String(published.signalId)).toMatch(/_retry1$/);
-      expect(published.clientOrderId).toBe(
-        buildClientOrderId({ signalId: String(published.signalId), tokenId, side: "sell" }),
-      );
-      expect(published.clientOrderId).not.toBe(reader.blockedId());
-      expect(
-        ctx.counters.some(
-          (counter) =>
-            counter.name === "profile_ladder_clientorderid_retry_used" &&
-            counter.labels?.includes('"attempt":"1"'),
-        ),
-      ).toBe(true);
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.counters).toContainEqual({
+        name: "profile_ladder_clientorderid_retry_blocked",
+        value: 1,
+        labels: '{"band":"medium_high","reason":"live_or_filled"}',
+      });
     });
 
     it.each([OrderStatus.Cancelled, OrderStatus.Rejected])(
       "does not retry past a terminal %s PL SELL with unknown fill progress",
       async (status) => {
         const reader = blockFirstClientOrderId(
-          deadRejectedProfileLadderSell({ status, fillProgressShares: null }),
+          deadRejectedProfileLadderSell({
+            status,
+            fillProgressShares: null,
+            ...(status === OrderStatus.Rejected ? { exchangeErrorMessage: null } : {}),
+          }),
         );
         const ctx = recoveryContext(reader);
 
@@ -6603,6 +6627,52 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
       });
     }
 
+    function tradingDisabledRejectedOrder(
+      command: PlaceOrderCommand,
+      overrides: Partial<Order> = {},
+    ): Order {
+      const preparedHash = "0xprofile-trading-disabled";
+      return openSellOrder({
+        orderId: createOrderId(preparedHash),
+        exchangeOrderId: preparedHash,
+        clientOrderId: command.clientOrderId,
+        tokenId: command.tokenId,
+        conditionId: command.conditionId,
+        side: "sell",
+        price: command.price,
+        size: command.size,
+        sizeUsdc: command.price * command.size,
+        status: OrderStatus.Rejected,
+        fillProgressShares: 0,
+        signalId: command.signalId ?? null,
+        signalReason: command.signalReason ?? null,
+        decisionRuleId: "PROFILE_LADDER",
+        exchangeErrorMessage: "trading is disabled",
+        exchangeErrorPayload: JSON.stringify({
+          responseBody: { status: 503, error: "trading is disabled" },
+        }),
+        exchangeRejectionReason: "rejection_trading_disabled",
+        ...(command.metadata === undefined ? {} : { metadata: command.metadata }),
+        ...overrides,
+      });
+    }
+
+    function tradingDisabledRejectedEvent(
+      command: PlaceOrderCommand,
+      synthetic: boolean,
+    ): RuntimeEventMap["OrderRejected"] {
+      return {
+        ...orderRejected(command),
+        reason: "trading is disabled",
+        errorCode: ExchangeErrorCode.Unknown,
+        exchangeErrorMessage: "trading is disabled",
+        exchangeErrorDetails: {
+          responseBody: { status: 503, error: "trading is disabled" },
+          ...(synthetic ? { synthetic: "trading-disabled-cooldown", retryAt: NOW + 300_000 } : {}),
+        },
+      };
+    }
+
     it("deduplicates the same adoption position across open and dust scans", async () => {
       const candidate = position();
       const ctx = setup(adoptionPolicy(), {
@@ -6887,6 +6957,79 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
         preExchangeRetryCount: 1,
         attemptSubmittedShares: 0,
       });
+    });
+
+    it.each([
+      { name: "actual", synthetic: false, restart: false },
+      { name: "synthetic", synthetic: true, restart: true },
+    ])(
+      "moves an exact $name trading-disabled rejection onto durable terminal retry",
+      async ({ synthetic, restart }) => {
+        const livePosition = position({ size: 10, costBasisUsdc: 1 });
+        let saved: Order | null = null;
+        const ctx = setup(policy(), {
+          positionRepo: positionReader([livePosition]),
+          orderRepo: {
+            findByTokenId: () => (saved == null ? [] : [saved]),
+            findByClientOrderId: (id) =>
+              saved != null && String(saved.clientOrderId) === id ? saved : null,
+          },
+        });
+        await ctx.module.start();
+        await ctx.module.placeLadder(livePosition, market());
+        const command = ctx.orders[0]!;
+        saved = tradingDisabledRejectedOrder(command);
+
+        await ctx.bus.publish("OrderRejected", tradingDisabledRejectedEvent(command, synthetic));
+
+        const rearmed = ctx.repo.getLadder(tokenId)?.activeRungs[0];
+        expect(rearmed).toMatchObject({
+          lifecycle: "planned",
+          orderId: null,
+          terminalRetryKey: "0xprofile-trading-disabled",
+          attemptFilledBaseShares: 0,
+          attemptSubmittedShares: 0,
+        });
+        expect(rearmed?.preExchangeRetryCount).toBeUndefined();
+
+        if (restart) {
+          await ctx.module.stop();
+          await ctx.module.start();
+        }
+        await ctx.bus.publish("NormalizedMarketUpdated", { markets: [market()], timestamp: NOW });
+
+        expect(ctx.orders).toHaveLength(2);
+        expect(String(ctx.orders[1]?.signalId)).toContain(
+          "_terminal_retry_0xprofile-trading-disabled",
+        );
+        expect(String(ctx.orders[1]?.signalId)).not.toContain("_pre_retry");
+      },
+    );
+
+    it("keeps a trading-disabled event on the fail-closed lane when exact saved proof mismatches", async () => {
+      const livePosition = position({ size: 10, costBasisUsdc: 1 });
+      let saved: Order | null = null;
+      const ctx = setup(policy(), {
+        positionRepo: positionReader([livePosition]),
+        orderRepo: {
+          findByTokenId: () => (saved == null ? [] : [saved]),
+          findByClientOrderId: () => saved,
+        },
+      });
+      await ctx.module.start();
+      await ctx.module.placeLadder(livePosition, market());
+      const command = ctx.orders[0]!;
+      saved = tradingDisabledRejectedOrder(command, { price: command.price + 0.01 });
+
+      await ctx.bus.publish("OrderRejected", tradingDisabledRejectedEvent(command, false));
+
+      const preserved = ctx.repo.getLadder(tokenId)?.activeRungs[0];
+      expect(preserved).toMatchObject({
+        lifecycle: "planned",
+        orderId: null,
+        preExchangeRetryCount: 1,
+      });
+      expect(preserved?.terminalRetryKey).toBeUndefined();
     });
 
     it("persists and bounds pre-exchange retries across OrderRejected and OrderSkipped", async () => {
