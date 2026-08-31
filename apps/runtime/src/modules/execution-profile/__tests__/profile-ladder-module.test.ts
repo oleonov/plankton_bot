@@ -1830,6 +1830,49 @@ describe("ProfileLadderModule", () => {
       });
     }
 
+    async function freeRecoveryCommand(): Promise<PlaceOrderCommand> {
+      const ctx = recoveryContext({ findByTokenId: () => [], findByClientOrderId: () => null });
+      await fireRecovery(ctx);
+      return ctx.orders[0]!;
+    }
+
+    function legacyCancelledCandidate(command: PlaceOrderCommand, overrides: Partial<Order> = {}) {
+      const exchangeOrderId = "legacy-cancelled-exchange-id";
+      const profileLadder = {
+        ...(command.metadata?.profileLadder as Readonly<Record<string, unknown>>),
+      };
+      delete profileLadder.attemptFilledBaseShares;
+      delete profileLadder.attemptSubmittedShares;
+      return openSellOrder({
+        orderId: createOrderId(exchangeOrderId),
+        clientOrderId: command.clientOrderId,
+        tokenId: command.tokenId,
+        conditionId: command.conditionId,
+        positionId: null,
+        price: command.price,
+        size: command.size,
+        sizeUsdc: command.price * command.size,
+        status: OrderStatus.Cancelled,
+        cancelReason: "operator",
+        fillProgressShares: 0,
+        exchangeOrderId,
+        signalId: command.signalId ?? null,
+        signalReason: command.signalReason,
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: { source: "profile_ladder", profileLadder },
+        ...overrides,
+      });
+    }
+
+    function retryCommand(command: PlaceOrderCommand, attempt: number): PlaceOrderCommand {
+      const signalId = attempt === 0 ? command.signalId! : `${command.signalId!}_retry${attempt}`;
+      return {
+        ...command,
+        signalId,
+        clientOrderId: buildClientOrderId({ signalId, tokenId, side: "sell" }),
+      };
+    }
+
     it("places a fresh PL SELL when the base identity is a known legacy no-order-id rejection", async () => {
       const reader = blockFirstClientOrderId(deadRejectedProfileLadderSell());
       const ctx = recoveryContext(reader);
@@ -1933,15 +1976,129 @@ describe("ProfileLadderModule", () => {
       expect(String(ctx.orders[0]?.signalId)).toMatch(/_retry4$/);
     });
 
-    it("does not step past an exchange-backed cancelled identity", async () => {
-      const reader = blockFirstClientOrderId(
-        deadRejectedProfileLadderSell({
-          status: OrderStatus.Cancelled,
-          exchangeOrderId: String(createOrderId("exchange-rested-cancelled")),
-          fillProgressShares: 0,
+    it("steps over the exact base cancellation and three legacy no-ID rejects, then binds retry4 after restart", async () => {
+      const base = await freeRecoveryCommand();
+      let tokenOrders: Order[] = [];
+      const knownByClientId = new Map(
+        [0, 1, 2, 3].map((attempt) => {
+          const candidate = retryCommand(base, attempt);
+          const existing =
+            attempt === 0
+              ? legacyCancelledCandidate(candidate)
+              : deadRejectedProfileLadderSell({
+                  clientOrderId: candidate.clientOrderId,
+                  signalId: candidate.signalId ?? null,
+                });
+          return [String(candidate.clientOrderId), existing] as const;
         }),
       );
-      const ctx = recoveryContext(reader);
+      const ctx = recoveryContext({
+        findByTokenId: () => tokenOrders,
+        findByClientOrderId: (id) =>
+          tokenOrders.find((order) => String(order.clientOrderId) === id) ??
+          knownByClientId.get(id) ??
+          null,
+      });
+
+      await fireRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(String(ctx.orders[0]?.signalId)).toMatch(/_retry4$/);
+      const accepted = ctx.orders[0]!;
+      const acceptedExchangeId = "accepted-retry4-exchange-id";
+      tokenOrders = [
+        openSellOrder({
+          orderId: createOrderId(acceptedExchangeId),
+          clientOrderId: accepted.clientOrderId,
+          tokenId: accepted.tokenId,
+          conditionId: accepted.conditionId,
+          positionId: accepted.positionId ?? null,
+          price: accepted.price,
+          size: accepted.size,
+          sizeUsdc: accepted.price * accepted.size,
+          status: OrderStatus.Open,
+          fillProgressShares: 0,
+          exchangeOrderId: acceptedExchangeId,
+          signalId: accepted.signalId ?? null,
+          signalReason: accepted.signalReason,
+          decisionRuleId: "PROFILE_LADDER",
+          metadata: accepted.metadata ?? null,
+        }),
+      ];
+      await ctx.module.stop();
+      await ctx.module.start();
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [stalePlannedNoLiveMarket()],
+        timestamp: NOW + 1,
+      });
+
+      expect(ctx.orders).toHaveLength(1);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]?.orderId).toBe(acceptedExchangeId);
+    });
+
+    it("does not skip an accepted cancellation found in a retry lane", async () => {
+      const base = await freeRecoveryCommand();
+      const baseCandidate = retryCommand(base, 0);
+      const retry1 = retryCommand(base, 1);
+      const known = new Map<string, Order>([
+        [String(baseCandidate.clientOrderId), deadRejectedProfileLadderSell()],
+        [String(retry1.clientOrderId), legacyCancelledCandidate(retry1)],
+      ]);
+      const ctx = recoveryContext({
+        findByTokenId: () => [],
+        findByClientOrderId: (id) => known.get(id) ?? null,
+      });
+
+      await fireRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+    });
+
+    it.each([
+      [
+        "order/exchange identity",
+        (order: Order) => ({ ...order, orderId: createOrderId("other") }),
+      ],
+      ["signal identity", (order: Order) => ({ ...order, signalId: "other" })],
+      ["signal reason", (order: Order) => ({ ...order, signalReason: "other" })],
+      ["decision identity", (order: Order) => ({ ...order, decisionRuleId: "OTHER" })],
+      ["operator reason", (order: Order) => ({ ...order, cancelReason: "expired" })],
+      [
+        "position identity",
+        (order: Order) => ({ ...order, positionId: createPositionId("other-position") }),
+      ],
+      ["price", (order: Order) => ({ ...order, price: order.price + 0.01 })],
+      ["full size", (order: Order) => ({ ...order, size: order.size - 1 })],
+      ["zero fill", (order: Order) => ({ ...order, fillProgressShares: 0.1 })],
+      ["known fill", (order: Order) => ({ ...order, fillProgressShares: null })],
+      ["nonnegative fill", (order: Order) => ({ ...order, fillProgressShares: -1 })],
+      ["finite fill", (order: Order) => ({ ...order, fillProgressShares: NaN })],
+      [
+        "ladder metadata",
+        (order: Order) => ({
+          ...order,
+          metadata: {
+            ...order.metadata,
+            profileLadder: { ...(order.metadata?.profileLadder as object), rungIndex: 1 },
+          },
+        }),
+      ],
+      [
+        "absent attempt metadata",
+        (order: Order) => ({
+          ...order,
+          metadata: {
+            ...order.metadata,
+            profileLadder: {
+              ...(order.metadata?.profileLadder as object),
+              attemptFilledBaseShares: 0,
+            },
+          },
+        }),
+      ],
+    ])("keeps a legacy cancelled candidate blocking when %s mismatches", async (_name, mutate) => {
+      const base = await freeRecoveryCommand();
+      const ctx = recoveryContext(blockFirstClientOrderId(mutate(legacyCancelledCandidate(base))));
 
       await fireRecovery(ctx);
 
@@ -1976,62 +2133,6 @@ describe("ProfileLadderModule", () => {
       },
     );
 
-    it("still fails closed (no order, no cancel) when BBO is invalid even though the base clientOrderId is now retry-skippable", async () => {
-      const reader = blockFirstClientOrderId(
-        deadRejectedProfileLadderSell({
-          status: OrderStatus.Cancelled,
-          exchangeOrderId: String(createOrderId("exchange-rested-cancelled")),
-          fillProgressShares: 0,
-        }),
-      );
-      const ctx = recoveryContext(reader);
-      await ctx.module.start();
-
-      await ctx.bus.publish("NormalizedMarketUpdated", {
-        markets: [market({ bestBid: null, bestAsk: null, midPrice: null, minOrderSize: 1 })],
-        timestamp: NOW,
-      });
-
-      expect(ctx.orders).toHaveLength(0);
-      expect(ctx.cancels).toHaveLength(0);
-    });
-
-    // Fill progress is fail-closed: any non-zero / unknown fill (positive,
-    // negative, or NaN) on the base clientOrderId blocks the retry probe — it must
-    // never step over a row that may have moved shares. Only an exact zero fill
-    // is treated as no-fill.
-    it.each([
-      { name: "null", fill: null },
-      { name: "positive", fill: 5 },
-      { name: "negative", fill: -5 },
-      { name: "NaN", fill: NaN },
-    ])(
-      "blocks retry (no order, no retry_used) when the base clientOrderId's terminal cancelled PL SELL has $name fill progress",
-      async ({ fill }) => {
-        const reader = blockFirstClientOrderId(
-          deadRejectedProfileLadderSell({
-            status: OrderStatus.Cancelled,
-            fillProgressShares: fill,
-          }),
-        );
-        const ctx = recoveryContext(reader);
-
-        await fireRecovery(ctx);
-
-        expect(ctx.orders).toHaveLength(0);
-        expect(
-          ctx.counters.some(
-            (counter) => counter.name === "profile_ladder_clientorderid_retry_used",
-          ),
-        ).toBe(false);
-        expect(ctx.counters).toContainEqual({
-          name: "profile_ladder_clientorderid_retry_blocked",
-          value: 1,
-          labels: '{"band":"medium_high","reason":"live_or_filled"}',
-        });
-      },
-    );
-
     it("does not retry-skip a terminal cancelled NON-ProfileLadder SELL row (PL gate keeps it blocking)", async () => {
       const ctx = recoveryContext({
         findByTokenId: () => [],
@@ -2047,6 +2148,247 @@ describe("ProfileLadderModule", () => {
         labels: '{"band":"medium_high","reason":"live_or_filled"}',
       });
     });
+  });
+
+  describe("exact planned-no-live recovery binder", () => {
+    const recoveryLadderId = "profile_ladder_existing_planned_no_live_recovery";
+    const recoverySignalId = `profile_ladder_${String(tokenId)}_${recoveryLadderId}_0`;
+
+    function exactRecoveryOrder(currentPosition: Position, overrides: Partial<Order> = {}): Order {
+      const exchangeOrderId = "exact-recovery-exchange-order";
+      return openSellOrder({
+        orderId: createOrderId("exact-recovery-prepared-hash"),
+        exchangeOrderId,
+        clientOrderId: buildClientOrderId({ signalId: recoverySignalId, tokenId, side: "sell" }),
+        tokenId: currentPosition.tokenId,
+        conditionId: currentPosition.conditionId,
+        positionId: currentPosition.positionId,
+        price: 0.27,
+        size: 5.9282,
+        sizeUsdc: 1.600614,
+        status: OrderStatus.Open,
+        fillProgressShares: 0,
+        signalId: recoverySignalId,
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: {
+          source: "profile_ladder",
+          profileLadder: {
+            ladderId: recoveryLadderId,
+            rungIndex: 0,
+            attemptFilledBaseShares: 0,
+            attemptSubmittedShares: 5.9282,
+          },
+        },
+        ...overrides,
+      });
+    }
+
+    function exactRecoveryContext(
+      currentPosition: Position,
+      orders: Order[],
+      stateOverrides: Partial<LadderState> = {},
+    ) {
+      const ctx = setup(mediumHighPolicy(), {
+        modeReader: { getMode: () => "flat" },
+        positionRepo: { findOpen: () => [currentPosition] },
+        orderRepo: { findByTokenId: () => orders, findByClientOrderId: () => null },
+      });
+      ctx.repo.upsertLadder(
+        stalePlannedNoLiveState({
+          activeRungs: [
+            rung({
+              price: 0.26,
+              sizeShares: 5.9282,
+              notionalUsd: 1.54,
+              attemptFilledBaseShares: 0,
+              attemptSubmittedShares: 5.9282,
+              preExchangeRetryCount: 0,
+            }),
+          ],
+          ...stateOverrides,
+        }),
+      );
+      return ctx;
+    }
+
+    async function fireExactRecovery(ctx: ReturnType<typeof exactRecoveryContext>) {
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [stalePlannedNoLiveMarket({ bestBid: null, bestAsk: null, midPrice: null })],
+        timestamp: NOW,
+      });
+    }
+
+    it("binds the exact exchange-backed orphan before BBO/retry gates and survives restart/fill", async () => {
+      const currentPosition = stalePlannedNoLivePosition({ size: 5.92825 });
+      const order = exactRecoveryOrder(currentPosition);
+      const ctx = exactRecoveryContext(currentPosition, [order]);
+      await ctx.module.start();
+
+      await fireExactRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)).toMatchObject({
+        ladderId: recoveryLadderId,
+        activeRungs: [
+          {
+            orderId: order.exchangeOrderId,
+            lifecycle: "placed",
+            price: 0.27,
+            filledSizeShares: 0,
+          },
+        ],
+      });
+      const bound = ctx.repo.getLadder(tokenId)?.activeRungs[0];
+      expect(bound?.terminalRetryKey).toBeUndefined();
+      expect(bound?.attemptFilledBaseShares).toBeUndefined();
+      expect(bound?.attemptSubmittedShares).toBeUndefined();
+      expect(bound?.preExchangeRetryCount).toBeUndefined();
+
+      await ctx.module.stop();
+      await ctx.module.start();
+      await fireExactRecovery(ctx);
+      expect(ctx.orders).toHaveLength(0);
+
+      await ctx.bus.publish(
+        "FillReceived",
+        fill({
+          orderId: createOrderId(order.exchangeOrderId!),
+          clientOrderId: order.clientOrderId,
+          price: order.price,
+          size: order.size,
+          sizeUsdc: order.sizeUsdc,
+        }),
+      );
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "filled",
+        filledSizeShares: 5.9282,
+      });
+    });
+
+    it("binds a partially-filled orphan only when remaining coverage equals current inventory", async () => {
+      const currentPosition = stalePlannedNoLivePosition({ size: 3.9282 });
+      const order = exactRecoveryOrder(currentPosition, {
+        status: OrderStatus.PartiallyFilled,
+        fillProgressShares: 2,
+      });
+      const ctx = exactRecoveryContext(currentPosition, [order]);
+      await ctx.module.start();
+
+      await fireExactRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        orderId: order.exchangeOrderId,
+        lifecycle: "partially_filled",
+        price: 0.27,
+        filledSizeShares: 2,
+      });
+      await ctx.module.cancelLadder(tokenId, "operator");
+      expect(ctx.cancels).toEqual([order.exchangeOrderId]);
+    });
+
+    it.each([
+      ["non-full coverage", (order: Order) => order, { size: 5.92 }],
+      [
+        "wrong ladder metadata",
+        (order: Order) => ({
+          ...order,
+          metadata: {
+            ...order.metadata,
+            profileLadder: { ...(order.metadata?.profileLadder as object), ladderId: "wrong" },
+          },
+        }),
+        {},
+      ],
+      [
+        "wrong position identity",
+        (order: Order) => ({ ...order, positionId: createPositionId("wrong-position") }),
+        {},
+      ],
+      [
+        "same-price wrong signal",
+        (order: Order) => ({ ...order, price: 0.26, signalId: "wrong-signal" }),
+        {},
+      ],
+      [
+        "same-price wrong client",
+        (order: Order) => ({
+          ...order,
+          price: 0.26,
+          clientOrderId: "wrong-client" as ClientOrderId,
+        }),
+        {},
+      ],
+      [
+        "same-price wrong reason",
+        (order: Order) => ({ ...order, price: 0.26, signalReason: "wrong-reason" }),
+        {},
+      ],
+      ["unknown fill arithmetic", (order: Order) => ({ ...order, fillProgressShares: null }), {}],
+    ])("fails closed for %s", async (_name, mutate, positionOverrides) => {
+      const currentPosition = stalePlannedNoLivePosition(positionOverrides);
+      const ctx = exactRecoveryContext(currentPosition, [
+        mutate(exactRecoveryOrder(currentPosition)),
+      ]);
+      await ctx.module.start();
+
+      await fireExactRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "planned",
+        orderId: null,
+      });
+    });
+
+    it("fails closed when more than one live SELL makes the orphan evidence ambiguous", async () => {
+      const currentPosition = stalePlannedNoLivePosition();
+      const first = exactRecoveryOrder(currentPosition);
+      const second = exactRecoveryOrder(currentPosition, {
+        orderId: createOrderId("second-exact-order"),
+        exchangeOrderId: "second-exact-order",
+      });
+      const ctx = exactRecoveryContext(currentPosition, [first, second]);
+      await ctx.module.start();
+
+      await fireExactRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "planned",
+        orderId: null,
+      });
+    });
+
+    it.each([OrderStatus.Pending, OrderStatus.Open])(
+      "fails closed when an exact OPEN has a distinct-lineage %s PL SELL",
+      async (status) => {
+        const currentPosition = stalePlannedNoLivePosition();
+        const open = exactRecoveryOrder(currentPosition);
+        const distinct = exactRecoveryOrder(currentPosition, {
+          orderId: createOrderId("distinct-prepared-hash"),
+          exchangeOrderId: status === OrderStatus.Pending ? null : "distinct-exchange-order",
+          clientOrderId: "distinct-client" as ClientOrderId,
+          signalId: "distinct-signal",
+          status,
+          metadata: {
+            source: "profile_ladder",
+            profileLadder: { ladderId: "profile_ladder_existing", rungIndex: 0 },
+          },
+        });
+        const ctx = exactRecoveryContext(currentPosition, [open, distinct]);
+        await ctx.module.start();
+
+        await fireExactRecovery(ctx);
+
+        expect(ctx.orders).toHaveLength(0);
+        expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+          lifecycle: "planned",
+          orderId: null,
+        });
+      },
+    );
   });
 
   describe("planned-no-live recovery adopts an existing open PL SELL (re-link, no churn)", () => {
