@@ -181,11 +181,10 @@ export interface BounceRungMetadata {
    * computed against — fixed for the ladder's whole lifetime (GATE-lane
    * positions have exactly one entry fill, no scale-in). */
   originalPositionSize: number;
-  /** Position size still available to sell at the moment this rung's signal
-   * was generated (cumulativeBuySize - cumulativeSellSize). Every rung (and
-   * any rolled-forward merge of rungs) is capped to this value so the ladder
-   * never oversells, even once the residual has shrunk below what the
-   * fraction math alone would imply. */
+  /** Leg-accounting position size at signal time
+   * (cumulativeBuySize - cumulativeSellSize). This remains the legacy
+   * rollover ceiling when conservative `uncommittedRemainder` metadata is
+   * absent. */
   remainingPositionSize: number;
   /** Set only when signal-to-order.ts rolled one or more too-small rungs
    * forward into this order (docs/plans/2026-07-16-bounce-exit-ladder-
@@ -193,20 +192,19 @@ export interface BounceRungMetadata {
    * this single placed order, including `rungIndex` itself. Absent when the
    * rung was placed on its own. */
   rungIndicesCovered?: readonly number[];
-  /** Fill-aware uncommitted residual (originalPositionSize - soldShares -
-   * openCommitment) at signal time — set ONLY when
+  /** Conservative uncommitted residual at signal time: the minimum sellable
+   * balance observed by bounce fills, leg accounting, and the active position,
+   * minus open ladder commitment — set ONLY when
    * `executionPolicy.sellableFlow.enabled` is true (docs/plans/2026-07-19-
    * sellable-sizing-bounce-for-all.md, Codex H4 fix). signal-to-order.ts's
    * min-order rollover prefers this over `remainingPositionSize` so a merge
    * never expands past what is genuinely still uncommitted. Absent when the
    * flag is off, keeping the metadata shape byte-identical to pre-Phase-3. */
   uncommittedRemainder?: number;
-  /** Set only on the residual-driven "cleanup" SELL emitted after every
-   * configured rung is already placed but a fill-aware uncommitted residual
-   * still clears the exchange minimum (docs/plans/2026-07-19-sellable-sizing-
-   * bounce-for-all.md, Phase 3) — signal-to-order.ts's bounce micro-cap must
-   * never fragment this order back below the size it was deliberately sized
-   * to clear. Absent for every ordinary ladder rung. */
+  /** Marks an exact-residual cleanup SELL, either after every configured rung
+   * is placed or when all remaining fractional rungs are below a known CLOB
+   * minimum but the exact residual clears it. The bounce micro-cap must not
+   * fragment this order below the size it was deliberately sized to clear. */
   isCleanupRung?: boolean;
 }
 

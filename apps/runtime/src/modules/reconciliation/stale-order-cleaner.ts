@@ -39,6 +39,8 @@ import {
   DEFAULT_EXECUTION_POLICY,
   ENTRY_REASONS,
   EXIT_REASONS,
+  BOUNCE_EXIT_BACKSTOP_RULE_ID,
+  BOUNCE_EXIT_TARGET_RULE_ID,
   S1_LADDER_RULE_ID,
   isAlive,
   isLiveBook,
@@ -89,6 +91,14 @@ const PRICE_EPSILON = 1e-9;
 const DOWNPRICE_RECOVERY_RESET_TICKS = 3;
 const DOWNPRICE_CANCEL_PENDING_RETRY_MS = 5 * 60_000;
 const STUCK_SELL_WARNING_INTERVAL_MS = 60 * 60_000;
+const PATIENT_SELL_DECISION_RULE_LABELS = new Set([
+  BOUNCE_EXIT_BACKSTOP_RULE_ID,
+  BOUNCE_EXIT_TARGET_RULE_ID,
+  "D8_PROFIT_RATIO",
+  "D9_LOSS_EXIT",
+  "PROFILE_LADDER",
+  S1_LADDER_RULE_ID,
+]);
 const FLAT_EXIT_TTL_BY_LIQUIDITY_DISABLED: ExitTtlByLiquidityPolicyConfig = {
   enabled: false,
   thinMs: EXIT_ORDER_TTL_MS,
@@ -150,6 +160,7 @@ export interface SellDownpriceRepriceState {
   pendingOrderId: string | null;
   pendingSinceMs: number | null;
   lastWarningAtMs: number | null;
+  lastPatientReportAtMs?: number | null;
 }
 
 export type SellDownpriceRepriceStateMap = Map<string, SellDownpriceRepriceState>;
@@ -429,7 +440,7 @@ export async function cleanStaleEntryOrders(
     const downpriceProvider = downpriceSnapshot
       ? { policy: () => downpriceSnapshot.policy }
       : undefined;
-    const stuckSell = shouldWarnStuckSell(
+    const farSellTarget = evaluateFarSellTarget(
       order,
       repriceMarket,
       downpriceProvider,
@@ -437,21 +448,29 @@ export async function cleanStaleEntryOrders(
       now,
       sellDownpriceRepriceMap,
     );
-    if (stuckSell.shouldWarn) {
-      stuckSellWarnings++;
-      log.warn(
-        {
-          orderId: ordKey,
-          tokenId: String(order.tokenId),
-          slug: market?.slug ?? null,
-          ageMs,
-          ageHours: ageMs / 60 / 60_000,
-          gapPct: stuckSell.gapPct,
-          orderPrice: order.price,
-          currentBestBid: repriceMarket?.bestBid ?? null,
-        },
-        "stuck_sell_detected",
-      );
+    if (farSellTarget.shouldReport) {
+      const context = {
+        orderId: ordKey,
+        tokenId: String(order.tokenId),
+        slug: market?.slug ?? null,
+        ageMs,
+        ageHours: ageMs / 60 / 60_000,
+        gapPct: farSellTarget.gapPct,
+        orderPrice: order.price,
+        currentBestBid: repriceMarket?.bestBid ?? null,
+      };
+      if (farSellTarget.acceptedPatient) {
+        const rule = patientSellDecisionRuleLabel(order.decisionRuleId);
+        log.info({ ...context, rule }, "patient_sell_target_far_from_bid");
+        deps.metrics?.writeCounter?.(
+          "patient_sell_target_far_from_bid_total",
+          1,
+          JSON.stringify({ rule }),
+        );
+      } else {
+        stuckSellWarnings++;
+        log.warn(context, "stuck_sell_detected");
+      }
     }
 
     const replacementUnavailableReasons = resolveReplacementUnavailableReasons(
@@ -1282,8 +1301,8 @@ function remainingOrderShares(order: Pick<Order, "size" | "fillProgressShares">)
   return Math.max(0, order.size - filled);
 }
 
-function shouldWarnStuckSell(
-  order: Pick<Order, "tokenId" | "price">,
+function evaluateFarSellTarget(
+  order: Pick<Order, "tokenId" | "price" | "status" | "exchangeOrderId">,
   market: Pick<NormalizedMarket, "bestBid"> | null,
   reprice:
     | {
@@ -1293,8 +1312,10 @@ function shouldWarnStuckSell(
   ageMs: number,
   nowMs: number,
   stateMap: SellDownpriceRepriceStateMap,
-): { shouldWarn: boolean; gapPct: number | null } {
-  if (!reprice || !market) return { shouldWarn: false, gapPct: null };
+): { shouldReport: boolean; acceptedPatient: boolean; gapPct: number | null } {
+  if (!reprice || !market) {
+    return { shouldReport: false, acceptedPatient: false, gapPct: null };
+  }
   const policy = reprice.policy();
   const bestBid = market.bestBid;
   if (
@@ -1305,10 +1326,12 @@ function shouldWarnStuckSell(
     order.price <= 0 ||
     ageMs < policy.stuckWarningAgeMs
   ) {
-    return { shouldWarn: false, gapPct: null };
+    return { shouldReport: false, acceptedPatient: false, gapPct: null };
   }
   const gapPct = (order.price - bestBid) / order.price;
-  if (gapPct <= policy.stuckWarningGapPct) return { shouldWarn: false, gapPct };
+  if (gapPct <= policy.stuckWarningGapPct) {
+    return { shouldReport: false, acceptedPatient: false, gapPct };
+  }
 
   const key = String(order.tokenId);
   const state = stateMap.get(key) ?? {
@@ -1318,14 +1341,34 @@ function shouldWarnStuckSell(
     pendingSinceMs: null,
     lastWarningAtMs: null,
   };
-  if (
-    state.lastWarningAtMs != null &&
-    nowMs - state.lastWarningAtMs < STUCK_SELL_WARNING_INTERVAL_MS
-  ) {
-    return { shouldWarn: false, gapPct };
+  const acceptedPatient = isAcceptedPatientSell(order);
+  const lastReportAtMs = acceptedPatient
+    ? (state.lastPatientReportAtMs ?? null)
+    : state.lastWarningAtMs;
+  if (lastReportAtMs != null && nowMs - lastReportAtMs < STUCK_SELL_WARNING_INTERVAL_MS) {
+    return { shouldReport: false, acceptedPatient: false, gapPct };
   }
-  stateMap.set(key, { ...state, lastWarningAtMs: nowMs });
-  return { shouldWarn: true, gapPct };
+  stateMap.set(
+    key,
+    acceptedPatient
+      ? { ...state, lastPatientReportAtMs: nowMs }
+      : { ...state, lastWarningAtMs: nowMs },
+  );
+  return { shouldReport: true, acceptedPatient, gapPct };
+}
+
+function isAcceptedPatientSell(order: Pick<Order, "status" | "exchangeOrderId">): boolean {
+  return (
+    (order.status === "open" || order.status === "partially-filled") &&
+    typeof order.exchangeOrderId === "string" &&
+    order.exchangeOrderId.trim().length > 0
+  );
+}
+
+function patientSellDecisionRuleLabel(decisionRuleId: string | null | undefined): string {
+  const normalized = decisionRuleId?.trim();
+  if (!normalized) return "none";
+  return PATIENT_SELL_DECISION_RULE_LABELS.has(normalized) ? normalized : "other";
 }
 
 function resolveOrderTtlMs(

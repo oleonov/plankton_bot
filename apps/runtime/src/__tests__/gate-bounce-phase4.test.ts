@@ -874,6 +874,162 @@ describe("SignalToOrderBridge — bounce rung duplicate guard scoped to ladderId
 });
 
 describe("SignalToOrderBridge — bounce ladder rollover re-checked against the micro cap (FIX 4)", () => {
+  it.each([
+    ["below target", 0.1, true],
+    ["target satisfied", 0.15, false],
+  ] as const)(
+    "places the exact cleanup residual at the selected target when the book is %s",
+    async (_bookState, bestBid, expectedPostOnly) => {
+      const ladderId = `tok-gate-bounce:cleanup-${expectedPostOnly}`;
+      const targetPrice = 0.15;
+      const restingOrdinaryRung = makeOrder({
+        orderId: createOrderId(`ord-ordinary-${expectedPostOnly}`),
+        price: targetPrice,
+        status: "open",
+        metadata: {
+          bounceRung: { ladderId, rungIndex: 1, anchorPrice: 0.1, fraction: 0.4 },
+        },
+      });
+      const signal = makeSignal({
+        side: "sell",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        suggestedPrice: targetPrice,
+        suggestedSize: 40,
+        suggestedSizeUsdc: 40 * targetPrice,
+        bounceRung: {
+          ladderId,
+          rungIndex: 1,
+          anchorPrice: 0.1,
+          fraction: 0.4,
+          originalPositionSize: 100,
+          remainingPositionSize: 80,
+          uncommittedRemainder: 80,
+        },
+      });
+      const bounceExit = {
+        ...DEFAULT_EXECUTION_POLICY.bounceExit,
+        mode: "micro_live" as const,
+        microMaxOrderUsdc: 2,
+        ladderFractions: [0.3, 0.4, 0.3],
+      };
+
+      const { placed, skipped } = await runBridge(
+        signal,
+        { bounceExit },
+        {
+          marketOverrides: {
+            bestBid,
+            bestAsk: 0.2,
+            tickSize: 0.01,
+            minOrderSize: 75,
+          },
+          orderRepo: { findByTokenId: vi.fn(() => [restingOrdinaryRung]) },
+        },
+      );
+
+      expect(skipped).toHaveLength(0);
+      expect(placed).toHaveLength(1);
+      expect(placed[0]).toMatchObject({
+        size: 80,
+        price: targetPrice,
+        postOnly: expectedPostOnly,
+      });
+      expect(placed[0]!.metadata?.bounceRung).toMatchObject({
+        ladderId,
+        rungIndex: 1,
+        fraction: 0.7,
+        rungIndicesCovered: [1, 2],
+        isCleanupRung: true,
+      });
+    },
+  );
+
+  it("deduplicates a rollover cleanup against another working cleanup on the same ladder", async () => {
+    const ladderId = "tok-gate-bounce:cleanup-duplicate";
+    const restingCleanup = makeOrder({
+      status: "open",
+      metadata: {
+        bounceRung: {
+          ladderId,
+          rungIndex: 2,
+          anchorPrice: 0.1,
+          fraction: 0.3,
+          isCleanupRung: true,
+        },
+      },
+    });
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: 0.15,
+      suggestedSize: 40,
+      suggestedSizeUsdc: 6,
+      bounceRung: {
+        ladderId,
+        rungIndex: 1,
+        anchorPrice: 0.1,
+        fraction: 0.4,
+        originalPositionSize: 100,
+        remainingPositionSize: 80,
+        uncommittedRemainder: 80,
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 2,
+      ladderFractions: [0.3, 0.4, 0.3],
+    };
+
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      {
+        marketOverrides: { bestBid: 0.1, bestAsk: 0.2, minOrderSize: 75 },
+        orderRepo: { findByTokenId: vi.fn(() => [restingCleanup]) },
+      },
+    );
+
+    expect(placed).toHaveLength(0);
+    expect((skipped[0] as { reasons: string[] }).reasons).toContain(
+      "sell-order-acceptable-price-already-open",
+    );
+  });
+
+  it("does not synthesize an exact-residual cleanup when the CLOB minimum is unknown", async () => {
+    const signal = makeSignal({
+      side: "sell",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      suggestedPrice: 0.15,
+      suggestedSize: 0.4,
+      suggestedSizeUsdc: 0.06,
+      bounceRung: {
+        ladderId: "tok-gate-bounce:cleanup-unknown-min",
+        rungIndex: 1,
+        anchorPrice: 0.1,
+        fraction: 0.4,
+        originalPositionSize: 1,
+        remainingPositionSize: 2,
+        uncommittedRemainder: 2,
+      },
+    });
+    const bounceExit = {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      mode: "micro_live" as const,
+      microMaxOrderUsdc: 20,
+      ladderFractions: [0.3, 0.4, 0.3],
+    };
+
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit },
+      { marketOverrides: { bestBid: 0.1, bestAsk: 0.2, minOrderSize: null } },
+    );
+
+    expect(placed).toHaveLength(0);
+    expect((skipped[0] as { reasons: string[] }).reasons).toContain("order-size-below-minimum");
+  });
+
   it("skips a min-order rollover merge whose notional still exceeds bounceExit.microMaxOrderUsdc", async () => {
     const ladderId = "tok-gate-bounce:2000";
     const price = 0.15;

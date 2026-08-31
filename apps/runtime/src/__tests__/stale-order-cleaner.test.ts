@@ -2110,28 +2110,148 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled).toHaveLength(0);
   });
 
-  it("logs a stuck SELL warning for old wide-gap exit orders", async () => {
+  it.each([
+    ["open", " exchange-1 ", BOUNCE_EXIT_TARGET_RULE_ID, BOUNCE_EXIT_TARGET_RULE_ID],
+    ["partially-filled", "exchange-1", "UNKNOWN_EXIT", "other"],
+    ["open", "exchange-1", null, "none"],
+  ] as const)(
+    "reports an accepted %s patient SELL (exchange %s, rule %s) with bounded label %s",
+    async (status, exchangeOrderId, decisionRuleId, expectedRuleLabel) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-10T00:00:00Z"));
+      const metrics = { writeCounter: vi.fn() };
+      const order = makeOrder({
+        side: "sell",
+        status,
+        exchangeOrderId,
+        decisionRuleId,
+        price: 0.29,
+        createdAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
+        signalReason: "repricing-exit",
+      });
+
+      const result = await runWithDownprice(order, 0.25, new Map(), { metrics });
+
+      expect(result.stuckSellWarnings).toBe(0);
+      expect(silentLog.warn).not.toHaveBeenCalledWith(expect.anything(), "stuck_sell_detected");
+      expect(silentLog.info).toHaveBeenCalledWith(
+        expect.objectContaining({ orderId: String(order.orderId), orderPrice: order.price }),
+        "patient_sell_target_far_from_bid",
+      );
+      expect(metrics.writeCounter).toHaveBeenCalledWith(
+        "patient_sell_target_far_from_bid_total",
+        1,
+        JSON.stringify({ rule: expectedRuleLabel }),
+      );
+    },
+  );
+
+  it.each([
+    ["pending", "exchange-1"],
+    ["open", "   "],
+  ] as const)(
+    "logs a stuck SELL warning for an unaccepted %s order",
+    async (status, exchangeOrderId) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-10T00:00:00Z"));
+      const order = makeOrder({
+        side: "sell",
+        status,
+        exchangeOrderId,
+        price: 0.29,
+        createdAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
+        signalReason: "repricing-exit",
+      });
+
+      const result = await runWithDownprice(order, 0.25);
+
+      expect(result.stuckSellWarnings).toBe(1);
+      expect(silentLog.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orderId: String(order.orderId),
+          tokenId: String(order.tokenId),
+          slug: "test-market",
+          orderPrice: order.price,
+        }),
+        "stuck_sell_detected",
+      );
+    },
+  );
+
+  it("rate-limits accepted patient SELL info and metrics to once per token per hour", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-10T00:00:00Z"));
+    const metrics = { writeCounter: vi.fn() };
     const order = makeOrder({
       side: "sell",
+      status: "open",
+      exchangeOrderId: "exchange-1",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
       price: 0.29,
       createdAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
       signalReason: "repricing-exit",
     });
+    const stateMap: SellDownpriceRepriceStateMap = new Map();
 
-    const result = await runWithDownprice(order, 0.25);
+    await runWithDownprice(order, 0.25, stateMap, { metrics });
+    await runWithDownprice(order, 0.25, stateMap, { metrics });
+
+    expect(
+      silentLog.info.mock.calls.filter(
+        (call: unknown[]) => call[1] === "patient_sell_target_far_from_bid",
+      ),
+    ).toHaveLength(1);
+    expect(
+      metrics.writeCounter.mock.calls.filter(
+        (call) => call[0] === "patient_sell_target_far_from_bid_total",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not let a patient report suppress a later unaccepted stuck warning for the same token", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-10T00:00:00Z"));
+    const metrics = { writeCounter: vi.fn() };
+    const createdAt = new Date(Date.now() - 5 * 60 * 60_000).toISOString();
+    const accepted = makeOrder({
+      orderId: createOrderId("ord-patient-first"),
+      side: "sell",
+      status: "open",
+      exchangeOrderId: "exchange-accepted",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      price: 0.29,
+      createdAt,
+      signalReason: "repricing-exit",
+    });
+    const pending = makeOrder({
+      orderId: createOrderId("ord-pending-second"),
+      side: "sell",
+      status: "pending",
+      exchangeOrderId: "exchange-pending",
+      price: 0.29,
+      createdAt,
+      signalReason: "repricing-exit",
+    });
+
+    const result = await runWithDownprice(accepted, 0.25, new Map(), {
+      extraOpenOrders: [pending],
+      metrics,
+    });
 
     expect(result.stuckSellWarnings).toBe(1);
-    expect(silentLog.warn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        orderId: String(order.orderId),
-        tokenId: String(order.tokenId),
-        slug: "test-market",
-        orderPrice: order.price,
-      }),
-      "stuck_sell_detected",
-    );
+    expect(
+      silentLog.info.mock.calls.filter(
+        (call: unknown[]) => call[1] === "patient_sell_target_far_from_bid",
+      ),
+    ).toHaveLength(1);
+    expect(
+      metrics.writeCounter.mock.calls.filter(
+        (call) => call[0] === "patient_sell_target_far_from_bid_total",
+      ),
+    ).toHaveLength(1);
+    expect(
+      silentLog.warn.mock.calls.filter((call: unknown[]) => call[1] === "stuck_sell_detected"),
+    ).toHaveLength(1);
   });
 
   it("rate-limits stuck SELL warnings to once per token per hour", async () => {
@@ -2139,6 +2259,7 @@ describe("cleanStaleEntryOrders", () => {
     vi.setSystemTime(new Date("2026-05-10T00:00:00Z"));
     const order = makeOrder({
       side: "sell",
+      status: "pending",
       price: 0.29,
       createdAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
       signalReason: "repricing-exit",

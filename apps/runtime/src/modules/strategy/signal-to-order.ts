@@ -1248,10 +1248,9 @@ export class SignalToOrderBridge {
       // Codex H4 fix: when sellableFlow is on, decision-planner.ts carries the
       // fill-aware `uncommittedRemainder` on the rung metadata — prefer it as
       // the rollover's oversell ceiling so a merge never expands past what is
-      // genuinely still uncommitted (soldShares + openCommitment already
-      // account for actual fills/resting orders the leg-level
-      // remainingPositionSize can't see). Absent when the flag is off, so the
-      // rollover falls back to the original leg-level basis unchanged.
+      // genuinely still uncommitted after the bounce-fill, leg-accounting,
+      // active-position, and resting-order bounds. Absent when the flag is
+      // off, so the rollover falls back to the original leg-level basis.
       const bounceRolloverCeiling =
         signal.bounceRung?.uncommittedRemainder ?? bounceRemainingPositionSize;
       // Micro cap enforcement, sizing side (docs/plans/2026-07-15-gate-bounce-
@@ -1465,6 +1464,7 @@ export class SignalToOrderBridge {
           rollover && executionTerms.price > 0 ? rollover.size * executionTerms.price : null;
         const rolloverOverCap =
           rollover != null &&
+          rollover.metadata.isCleanupRung !== true &&
           signal.side === "sell" &&
           signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
           policy.bounceExit.microMaxOrderUsdc > 0 &&
@@ -4391,9 +4391,10 @@ function resolveOrderSize(
  * however many of the NEXT rungs' fractions are needed to clear the minimum,
  * place one order at the current (lowest reachable) rung's price, and mark
  * every absorbed index as placed via `rungIndicesCovered` so the next
- * planning cycle resumes at the rung after the last one covered. Returns null
- * when no forward combination clears the minimum (exhausted the ladder) —
- * callers fall through to the existing generic below-minimum skip.
+ * planning cycle resumes at the rung after the last one covered. When every
+ * remaining fraction is sub-minimum but the exact residual clears a KNOWN
+ * CLOB minimum, that residual becomes one cleanup order covering every
+ * remaining index. Otherwise callers keep the generic below-minimum skip.
  *
  * Fractions are computed against `originalPositionSize` (fixed at first
  * entry, Codex Phase-2 fix — see decision-planner.ts) so a merge of several
@@ -4424,6 +4425,21 @@ function resolveBounceRungRollover(
         metadata: { ...bounceRung, fraction: cumulativeFraction, rungIndicesCovered },
       };
     }
+  }
+  if (
+    isKnownMinOrderSize(minOrderSize) &&
+    Number.isFinite(oversellCeiling) &&
+    isExecutableOrderSize(oversellCeiling, minOrderSize)
+  ) {
+    return {
+      size: oversellCeiling,
+      metadata: {
+        ...bounceRung,
+        fraction: cumulativeFraction,
+        rungIndicesCovered,
+        isCleanupRung: true,
+      },
+    };
   }
   return null;
 }

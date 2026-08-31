@@ -1114,18 +1114,18 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
         0,
         (emissionFacts.cumulativeBuySize ?? 0) - (emissionFacts.cumulativeSellSize ?? 0),
       );
-      // Phase 3 fill-aware residual (docs/plans/2026-07-19-sellable-sizing-
-      // bounce-for-all.md): the binding constraint on every rung's SIZE is now
-      // ACTUAL committed shares (filled, plus still-resting on this ladder),
-      // not the leg-level cumulativeBuySize/cumulativeSellSize delta above —
-      // `remainingPositionSize` stays exactly as computed above; it is still
-      // the oversell ceiling signal-to-order.ts's separate min-order ROLLOVER
-      // mechanism reads from the `bounceRung` metadata, which this plan does
-      // not touch. Never oversells: soldShares + openCommitment can only grow
-      // toward originalPositionSize, and the subtraction is clamped at 0.
+      // Bound the current sellable balance by every authoritative view that
+      // can independently observe a sell: bounce fills, leg accounting, and
+      // the active position. The original ladder size remains pinned above;
+      // only the live oversell ceiling uses these conservative bounds.
       const soldShares = input.bounceLadderSoldShares ?? 0;
       const openCommitment = input.bounceLadderOpenCommitment ?? 0;
-      const uncommittedRemainder = Math.max(0, originalPositionSize - soldShares - openCommitment);
+      const currentSellableRemaining = Math.min(
+        Math.max(0, (emissionFacts.cumulativeBuySize ?? 0) - soldShares),
+        remainingPositionSize,
+        Math.max(0, input.position?.size ?? 0),
+      );
+      const uncommittedRemainder = Math.max(0, currentSellableRemaining - openCommitment);
       // Codex C1 fix (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md):
       // GATE-lane positions are unconditionally eligible for this branch —
       // that eligibility predicate is unrelated to the sellableFlow flag and

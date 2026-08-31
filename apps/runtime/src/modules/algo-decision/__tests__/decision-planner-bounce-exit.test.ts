@@ -400,6 +400,36 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
     expect(result.signal.bounceRung?.remainingPositionSize).toBeCloseTo(100, 10);
   });
 
+  it("caps by cumulativeSellSize when bounce sold-fill accounting is stale (sellableFlow on)", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        legState: leg({ cumulativeSellSize: 85 }),
+        placedBounceRungIndices: [0],
+        bounceLadderSoldShares: 0,
+        executionPolicy: sellableFlowOnPolicy(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedSize).toBeCloseTo(15, 10);
+    expect(result.signal.bounceRung?.uncommittedRemainder).toBeCloseTo(15, 10);
+  });
+
+  it("caps by the active position size when both fill counters overstate sellable shares (sellableFlow on)", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        position: position({ size: 15, costBasisUsdc: 1.5 }),
+        placedBounceRungIndices: [0],
+        bounceLadderSoldShares: 0,
+        executionPolicy: sellableFlowOnPolicy(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedSize).toBeCloseTo(15, 10);
+    expect(result.signal.bounceRung?.uncommittedRemainder).toBeCloseTo(15, 10);
+  });
+
   // A resting (not-yet-filled) rung counts against the residual too, via
   // bounceLadderOpenCommitment — otherwise the next cycle could double-place
   // it. Requires sellableFlow.enabled (Codex C1 fix).
