@@ -2219,6 +2219,109 @@ describe("ProfileLadderModule", () => {
       });
     }
 
+    const prodRequestedShares = 69.690125;
+    const prodAcceptedShares = 69.6901;
+
+    function prodShapeContext(
+      orderOverrides: Partial<Order> = {},
+      rungOverrides: Partial<LadderRung> = {},
+    ) {
+      const currentPosition = stalePlannedNoLivePosition({ size: prodRequestedShares });
+      const order = exactRecoveryOrder(currentPosition, {
+        size: prodAcceptedShares,
+        sizeUsdc: prodAcceptedShares * 0.27,
+        fillProgressShares: null,
+        metadata: {
+          source: "profile_ladder",
+          profileLadder: {
+            ladderId: recoveryLadderId,
+            rungIndex: 0,
+            attemptFilledBaseShares: 0,
+            attemptSubmittedShares: prodRequestedShares,
+          },
+        },
+        ...orderOverrides,
+      });
+      const ctx = exactRecoveryContext(currentPosition, [order], {
+        activeRungs: [
+          rung({
+            price: 0.26,
+            sizeShares: prodRequestedShares,
+            notionalUsd: 18.12,
+            attemptFilledBaseShares: 0,
+            attemptSubmittedShares: prodRequestedShares,
+            preExchangeRetryCount: 1,
+            ...rungOverrides,
+          }),
+        ],
+      });
+      return { ctx, order };
+    }
+
+    it("binds the clamped prod OPEN under its original pre-retry identity and follows exchange-id fills", async () => {
+      const { ctx, order } = prodShapeContext();
+      await ctx.module.start();
+
+      await fireExactRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        orderId: order.exchangeOrderId,
+        lifecycle: "placed",
+        sizeShares: prodRequestedShares,
+        filledSizeShares: 0,
+      });
+      await ctx.module.stop();
+      await ctx.module.start();
+      await fireExactRecovery(ctx);
+      expect(ctx.orders).toHaveLength(0);
+
+      await ctx.bus.publish(
+        "FillReceived",
+        fill({
+          orderId: createOrderId(order.exchangeOrderId!),
+          clientOrderId: order.clientOrderId,
+          size: prodAcceptedShares,
+        }),
+      );
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "partially_filled",
+        filledSizeShares: prodAcceptedShares,
+      });
+    });
+
+    it.each([
+      ["terminal lineage", {}, { terminalRetryKey: "terminal-proof" }],
+      [
+        "arbitrary pre-retry identity",
+        {
+          size: prodRequestedShares,
+          fillProgressShares: 0,
+          signalId: `${recoverySignalId}_pre_retry1`,
+          clientOrderId: buildClientOrderId({
+            signalId: `${recoverySignalId}_pre_retry1`,
+            tokenId,
+            side: "sell",
+          }),
+        },
+        {},
+      ],
+      ["clamp above tolerance", { size: prodRequestedShares - 0.0002 }, {}],
+      ["upward size", { size: prodRequestedShares + 0.000001 }, {}],
+      ["partial with unknown fill", { status: OrderStatus.PartiallyFilled }, {}],
+    ])("keeps prod-shape %s blocked", async (_name, orderOverrides, rungOverrides) => {
+      const { ctx } = prodShapeContext(orderOverrides, rungOverrides);
+      await ctx.module.start();
+
+      await fireExactRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "planned",
+        orderId: null,
+      });
+    });
+
     it("binds the exact exchange-backed orphan before BBO/retry gates and survives restart/fill", async () => {
       const currentPosition = stalePlannedNoLivePosition({ size: 5.92825 });
       const order = exactRecoveryOrder(currentPosition);
@@ -2325,7 +2428,14 @@ describe("ProfileLadderModule", () => {
         (order: Order) => ({ ...order, price: 0.26, signalReason: "wrong-reason" }),
         {},
       ],
-      ["unknown fill arithmetic", (order: Order) => ({ ...order, fillProgressShares: null }), {}],
+      [
+        "missing fill arithmetic",
+        (order: Order) => {
+          const { fillProgressShares: _fillProgressShares, ...withoutProgress } = order;
+          return withoutProgress;
+        },
+        {},
+      ],
     ])("fails closed for %s", async (_name, mutate, positionOverrides) => {
       const currentPosition = stalePlannedNoLivePosition(positionOverrides);
       const ctx = exactRecoveryContext(currentPosition, [
@@ -2350,6 +2460,28 @@ describe("ProfileLadderModule", () => {
         exchangeOrderId: "second-exact-order",
       });
       const ctx = exactRecoveryContext(currentPosition, [first, second]);
+      await ctx.module.start();
+
+      await fireExactRecovery(ctx);
+
+      expect(ctx.orders).toHaveLength(0);
+      expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]).toMatchObject({
+        lifecycle: "planned",
+        orderId: null,
+      });
+    });
+
+    it("fails closed when an exact orphan coexists with an active non-PL SELL", async () => {
+      const currentPosition = stalePlannedNoLivePosition();
+      const ctx = exactRecoveryContext(currentPosition, [
+        exactRecoveryOrder(currentPosition),
+        openSellOrder({
+          orderId: createOrderId("legacy-active-sell"),
+          exchangeOrderId: "legacy-active-sell",
+          decisionRuleId: "LEGACY_SELL",
+          metadata: { source: "s1" },
+        }),
+      ]);
       await ctx.module.start();
 
       await fireExactRecovery(ctx);

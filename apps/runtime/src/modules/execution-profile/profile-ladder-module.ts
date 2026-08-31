@@ -1247,21 +1247,20 @@ export class ProfileLadderModule implements RuntimeModule {
 
   private bindExactPlannedNoLiveRecoveryOrder(state: LadderState): ExactRecoveryBindResult {
     if (!isSinglePlannedNoLiveState(state) || this.deps.orderRepo == null) return "absent";
-    const activeProfileSells = this.deps.orderRepo
+    const activeSells = this.deps.orderRepo
       .findByTokenId(state.tokenId)
       .filter(
         (order) =>
           order.side === "sell" &&
           (order.status === OrderStatus.Pending ||
             order.status === OrderStatus.Open ||
-            order.status === OrderStatus.PartiallyFilled) &&
-          isProfileLadderSellOrder(order),
+            order.status === OrderStatus.PartiallyFilled),
       );
-    const sellEvidence = activeProfileSells.filter((order) =>
+    const sellEvidence = activeSells.filter((order) =>
       isExactPlannedNoLiveRecoveryEvidence(state, order),
     );
     if (sellEvidence.length === 0) return "absent";
-    if (activeProfileSells.length !== 1 || sellEvidence[0]!.status === OrderStatus.Pending)
+    if (activeSells.length !== 1 || sellEvidence[0]!.status === OrderStatus.Pending)
       return "blocked";
     const position = this.resolveSingleActivePosition(state.tokenId);
     if (position == null) return "blocked";
@@ -1269,7 +1268,7 @@ export class ProfileLadderModule implements RuntimeModule {
     if (match == null) return "blocked";
 
     const activeRungs = [
-      withoutRecoveryAttempt({
+      withoutPreExchangeRecoveryAttempt({
         ...state.activeRungs[0]!,
         price: match.order.price,
         notionalUsd: Math.round(match.order.price * match.order.size * 100) / 100,
@@ -2904,10 +2903,7 @@ function isSinglePlannedNoLiveState(state: LadderState): boolean {
 }
 
 function isExactPlannedNoLiveRecoveryEvidence(state: LadderState, order: Order): boolean {
-  const rung = state.activeRungs[0]!;
-  const ladderId = `${state.ladderId}_planned_no_live_recovery`;
-  const signalId = persistedAttemptSignalId(state.tokenId, ladderId, rung);
-  const clientOrderId = buildClientOrderId({ signalId, tokenId: state.tokenId, side: "sell" });
+  const { clientOrderId, signalId } = originalPlannedNoLiveRecoveryIdentity(state);
   const metadataLadderId = asUnknownRecord(order.metadata?.["profileLadder"])?.["ladderId"];
   return (
     (metadataLadderId !== undefined && metadataLadderId !== state.ladderId) ||
@@ -2926,11 +2922,10 @@ function resolveExactPlannedNoLiveRecovery(
   const ladder = asUnknownRecord(metadata?.["profileLadder"]);
   const exchangeOrderId = order.exchangeOrderId?.trim();
   const fill = exactLiveOrderFill(order);
-  const ladderId = `${state.ladderId}_planned_no_live_recovery`;
-  const signalId = persistedAttemptSignalId(state.tokenId, ladderId, rung);
-  const clientOrderId = buildClientOrderId({ signalId, tokenId: state.tokenId, side: "sell" });
+  const { clientOrderId, ladderId, signalId } = originalPlannedNoLiveRecoveryIdentity(state);
   if (
     fill == null ||
+    rung.terminalRetryKey !== undefined ||
     !isProfileLadderSellOrder(order) ||
     order.decisionRuleId !== "PROFILE_LADDER" ||
     order.signalId !== signalId ||
@@ -2947,9 +2942,9 @@ function resolveExactPlannedNoLiveRecovery(
     ladder?.["ladderId"] !== ladderId ||
     ladder["rungIndex"] !== 0 ||
     !sameNumber(ladder["attemptFilledBaseShares"], 0) ||
-    !sameNumber(ladder["attemptSubmittedShares"], order.size) ||
+    !sameNumber(ladder["attemptSubmittedShares"], rung.sizeShares) ||
     !sameNumber(rung.filledSizeShares, 0) ||
-    !sameNumber(order.size, rung.sizeShares) ||
+    !isAllowedExecutorSizeClamp(rung.sizeShares, order.size) ||
     !hasExactRecoveryCoverage(order.size - fill, position.size)
   ) {
     return null;
@@ -2965,7 +2960,7 @@ function resolveExactPlannedNoLiveRecovery(
 
 function exactLiveOrderFill(order: Order): number | null {
   const fill = order.fillProgressShares;
-  if (order.status === OrderStatus.Open) return fill === 0 ? 0 : null;
+  if (order.status === OrderStatus.Open) return fill === null || fill === 0 ? 0 : null;
   return order.status === OrderStatus.PartiallyFilled &&
     typeof fill === "number" &&
     Number.isFinite(fill) &&
@@ -2973,6 +2968,26 @@ function exactLiveOrderFill(order: Order): number | null {
     fill < order.size
     ? fill
     : null;
+}
+
+function originalPlannedNoLiveRecoveryIdentity(state: LadderState): {
+  ladderId: string;
+  signalId: string;
+  clientOrderId: string;
+} {
+  const ladderId = `${state.ladderId}_planned_no_live_recovery`;
+  const rung = { ...state.activeRungs[0]!, preExchangeRetryCount: 0 };
+  const signalId = persistedAttemptSignalId(state.tokenId, ladderId, rung);
+  const clientOrderId = String(
+    buildClientOrderId({ signalId, tokenId: state.tokenId, side: "sell" }),
+  );
+  return { ladderId, signalId, clientOrderId };
+}
+
+function isAllowedExecutorSizeClamp(plannedShares: number, acceptedShares: number): boolean {
+  if (!isPositiveFinite(plannedShares) || !isPositiveFinite(acceptedShares)) return false;
+  const clampedShares = plannedShares - acceptedShares;
+  return clampedShares >= 0 && clampedShares <= EXECUTOR_SIZE_CLAMP_TOLERANCE_SHARES + 1e-9;
 }
 
 function hasExactRecoveryCoverage(remainingShares: number, positionShares: number): boolean {
@@ -3094,6 +3109,14 @@ function normalizeSubmittedShares(value: number, maximum: number): number {
 function withoutRecoveryAttempt(rung: LadderRung): LadderRung {
   const cleared = { ...rung };
   delete cleared.terminalRetryKey;
+  delete cleared.attemptFilledBaseShares;
+  delete cleared.attemptSubmittedShares;
+  delete cleared.preExchangeRetryCount;
+  return cleared;
+}
+
+function withoutPreExchangeRecoveryAttempt(rung: LadderRung): LadderRung {
+  const cleared = { ...rung };
   delete cleared.attemptFilledBaseShares;
   delete cleared.attemptSubmittedShares;
   delete cleared.preExchangeRetryCount;
