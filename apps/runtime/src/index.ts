@@ -1503,6 +1503,7 @@ async function main(): Promise<void> {
     fillRepo: repos.fill,
     policy: () => currentExecutionPolicy().trackS1,
     runtimeMetrics,
+    candidateBookCache,
     riskEventRepo: repos.riskEvent,
     log: log.child({ module: "s1-ladder" }),
   });
@@ -1522,6 +1523,7 @@ async function main(): Promise<void> {
     riskEventRepo: repos.riskEvent,
     runtimeMetrics,
     liveLiteGuard,
+    marketLivenessReader: { getMarket: marketDataGateway.getMarket.bind(marketDataGateway) },
     sellLoopGuard: sellLoopGuardModule,
     s1Ownership: s1LadderModule,
     profileLadderOwnership: {

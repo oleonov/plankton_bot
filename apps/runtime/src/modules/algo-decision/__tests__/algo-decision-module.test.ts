@@ -346,6 +346,25 @@ function makeMarket(
   };
 }
 
+function liveClobMarket(tokenId: string, conditionId = "cond-1") {
+  return {
+    conditionId,
+    tokens: [{ tokenId, outcome: "Yes" }],
+    question: "Test?",
+    slug: "test-market",
+    endDate: "",
+    active: true,
+    closed: false,
+    acceptingOrders: true,
+    enableOrderBook: true,
+    negRisk: false,
+    tickSize: 0.001,
+    volume24h: null,
+    eventMarketCount: 1,
+    gammaCreatedAt: null,
+  };
+}
+
 function makeSellReadyLegState(tokenId: string, overrides: Partial<LegState> = {}): LegState {
   const nowIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
   return {
@@ -696,6 +715,7 @@ describe("AlgoDecisionModule", () => {
       );
       const runtimeMetrics = { writeCounter: vi.fn(), writeLatest: vi.fn() };
       const observeMarket = vi.fn();
+      const getMarket = vi.fn(async () => liveClobMarket(tokenId));
       const mod = buildModule({
         positionRepo: {
           findOpen: vi.fn(() => []),
@@ -713,7 +733,8 @@ describe("AlgoDecisionModule", () => {
         executionPolicy: () => DEFAULT_EXECUTION_POLICY,
         runtimeMetrics: runtimeMetrics as unknown as RuntimeMetricWriter,
         priceHistoryProvider: { observeMarket, findReferencePrice: vi.fn(() => null) },
-      });
+        marketLivenessReader: { getMarket },
+      } as any);
       await mod.start();
       (bus.publish as ReturnType<typeof vi.fn>).mockClear();
       const market = {
@@ -723,6 +744,8 @@ describe("AlgoDecisionModule", () => {
         bestBid: 0.005,
         bestAsk: 0.05,
         spread: 0.045,
+        acceptingOrders: false,
+        enableOrderBook: false,
       };
 
       await (bus as any).emit("MarketSnapshotHeartbeat", {
@@ -732,7 +755,11 @@ describe("AlgoDecisionModule", () => {
         source: "market-data",
       });
 
-      expect((mod as any).marketCache.get(tokenId)).toBe(market);
+      expect(getMarket).toHaveBeenCalledOnce();
+      expect((mod as any).marketCache.get(tokenId)).toMatchObject({
+        acceptingOrders: true,
+        enableOrderBook: true,
+      });
       expect((mod as any).positionCache.has(tokenId)).toBe(false);
       expect(observeMarket).not.toHaveBeenCalled();
       expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
@@ -761,6 +788,146 @@ describe("AlgoDecisionModule", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("leaves false flags uncached without a reader, then retries and coalesces heartbeats", async () => {
+    vi.useFakeTimers();
+    try {
+      const now = Date.parse("2026-09-01T00:00:00.000Z");
+      vi.setSystemTime(now);
+      const tokenId = "token-bounce-heartbeat-liveness-retry";
+      const legState = makeSellReadyLegState(tokenId, {
+        firstTradePrice: 0.008,
+        cumulativeBuySize: 120,
+        cumulativeBuyNotional: 0.96,
+      });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const position = makeOpenPosition(tokenId, {
+        size: 120,
+        avgEntryPrice: 0.008,
+        costBasisUsdc: 0.96,
+        exitOwner: "bounce",
+      });
+      const ladderId = `${tokenId}:${legState.firstTradeAt}`;
+      const orders = [9, 12, 9].map((size, rungIndex) =>
+        makeOrder(tokenId, {
+          orderId: createOrderId(`heartbeat-retry-rung-${rungIndex}`),
+          positionId: position.positionId,
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          size,
+          metadata: { bounceRung: { ladderId, rungIndex, originalPositionSize: 30 } },
+        }),
+      );
+      let releaseLive!: (value: any) => void;
+      const liveResult = new Promise<any>((resolve) => {
+        releaseLive = resolve;
+      });
+      const getMarket = vi.fn().mockImplementationOnce(() => liveResult);
+      const mod = buildModule({
+        positionRepo: {
+          findOpen: vi.fn(() => []),
+          findByTokenId: vi.fn(() => position),
+        } as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: {
+          findByTokenId: vi.fn(() => orders),
+          findRecentByTokenId: vi.fn(() => orders),
+          hasNonterminalBounceAskCaptureIntentForPosition: vi.fn(() => false),
+        } as unknown as OrderRepository,
+        fillRepo: {
+          findByOrderIds: vi.fn(() => []),
+          findByOrderId: vi.fn(() => []),
+        },
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      } as any);
+      await mod.start();
+      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+      const heartbeat = {
+        markets: [
+          {
+            ...makeMarket(tokenId, null, 0.0275),
+            tickSize: 0.001,
+            minOrderSize: 5,
+            bestBid: 0.005,
+            bestAsk: 0.05,
+            spread: 0.045,
+            acceptingOrders: false,
+            enableOrderBook: false,
+          },
+        ],
+        timestamp: now,
+        reason: "full_lifetime_active_position" as const,
+        source: "market-data" as const,
+      };
+
+      await (bus as any).emit("MarketSnapshotHeartbeat", heartbeat);
+      expect((mod as any).marketCache.has(tokenId)).toBe(false);
+      (mod as any).deps.marketLivenessReader = { getMarket };
+
+      const retryA = (bus as any).emit("MarketSnapshotHeartbeat", heartbeat);
+      const retryB = (bus as any).emit("MarketSnapshotHeartbeat", heartbeat);
+      await vi.waitFor(() => expect(getMarket).toHaveBeenCalledOnce());
+      releaseLive(liveClobMarket(tokenId));
+      await Promise.all([retryA, retryB]);
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(getMarket).toHaveBeenCalledOnce();
+      expect(
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+          ([event]) => event === "SignalProduced",
+        ),
+      ).toHaveLength(1);
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not continue a multi-market heartbeat after stop invalidates its epoch", async () => {
+    const firstToken = "heartbeat-stop-first";
+    const secondToken = "heartbeat-stop-second";
+    const positions = new Map([
+      [firstToken, makeOpenPosition(firstToken)],
+      [secondToken, makeOpenPosition(secondToken)],
+    ]);
+    let releaseFirst!: (value: ReturnType<typeof liveClobMarket>) => void;
+    const firstResult = new Promise<ReturnType<typeof liveClobMarket>>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const getMarket = vi.fn(() => firstResult);
+    const mod = buildModule({
+      positionRepo: {
+        findOpen: vi.fn(() => [...positions.values()]),
+        findByTokenId: vi.fn((id) => positions.get(String(id)) ?? null),
+      } as unknown as import("@krabs/domain").PositionRepository,
+      marketLivenessReader: { getMarket },
+    } as any);
+    await mod.start();
+    (mod as any).dirtyTokenIds.clear();
+    (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+    const pending = (bus as any).emit("MarketSnapshotHeartbeat", {
+      markets: [firstToken, secondToken].map((id) => ({
+        ...makeMarket(id, null, 0.2),
+        acceptingOrders: false,
+        enableOrderBook: false,
+      })),
+      timestamp: Date.now(),
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await vi.waitFor(() => expect(getMarket).toHaveBeenCalledOnce());
+
+    await mod.stop();
+    releaseFirst(liveClobMarket(firstToken));
+    await pending;
+
+    expect(getMarket).toHaveBeenCalledOnce();
+    expect((mod as any).marketCache.size).toBe(0);
+    expect((mod as any).dirtyTokenIds.size).toBe(0);
+    expect(
+      (bus.publish as ReturnType<typeof vi.fn>).mock.calls.some(
+        ([event]) => event === "SignalProduced",
+      ),
+    ).toBe(false);
   });
 
   it("keeps cache-present, inactive, closed, dust, and flat heartbeats fully inert", async () => {

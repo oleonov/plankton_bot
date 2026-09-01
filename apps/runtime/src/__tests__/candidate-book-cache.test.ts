@@ -84,6 +84,46 @@ describe("CandidateBookCache", () => {
     expect(cache.getFreshEntry("tok-b")).not.toBeNull();
   });
 
+  it("force-refreshes a fresh-but-source-stale entry and coalesces same-token callers", async () => {
+    const refreshed = makeBook("tok-a", { timestamp: Date.now() });
+    const gateway: CandidateBookGateway = {
+      getOrderBooks: vi.fn(async () => new Map([["tok-a", refreshed]])),
+    };
+    const cache = new CandidateBookCache({
+      gateway,
+      log: makeLogger(),
+      refreshBatchWindowMs: 1,
+    });
+    cache.upsertBooks(
+      new Map([["tok-a", makeBook("tok-a", { timestamp: Date.now() - 10_000 })]]),
+      Date.now(),
+      "rest",
+    );
+
+    const [first, second] = await Promise.all([
+      (cache as any).forceRefresh("tok-a"),
+      (cache as any).forceRefresh("tok-a"),
+    ]);
+
+    expect(gateway.getOrderBooks).toHaveBeenCalledOnce();
+    expect(first.entry?.book).toBe(refreshed);
+    expect(second.entry?.book).toBe(refreshed);
+
+    const omitted = new CandidateBookCache({
+      gateway: { getOrderBooks: vi.fn(async () => new Map()) },
+      log: makeLogger(),
+      refreshBatchWindowMs: 1,
+    });
+    omitted.upsertBooks(
+      new Map([["tok-a", makeBook("tok-a", { timestamp: Date.now() - 10_000 })]]),
+      Date.now(),
+      "rest",
+    );
+    const missing = await (omitted as any).forceRefresh("tok-a");
+    expect(missing.entry).toBeNull();
+    expect(missing.status).not.toBe("refreshed");
+  });
+
   it("reports refresh attempts and failures through the observer hook", async () => {
     const observed: string[] = [];
     const cache = new CandidateBookCache({

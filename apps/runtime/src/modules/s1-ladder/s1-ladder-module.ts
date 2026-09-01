@@ -38,6 +38,7 @@ import { validateExecutablePrice } from "../../executable-price.js";
 import { buildReservationSnapshot, getReservedSellSize } from "../execution/reservation-utils.js";
 import type { Logger } from "../../logger.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
+import type { CandidateBookCache } from "../strategy/candidate-book-cache.js";
 
 export { S1_LADDER_RULE_ID };
 
@@ -50,6 +51,7 @@ export interface S1LadderModuleDeps {
   fillRepo?: Pick<FillRepository, "findByOrderId" | "findByOrderIds"> | undefined;
   policy: () => TrackS1WalkingLadderPolicy;
   runtimeMetrics?: Pick<RuntimeMetricWriter, "writeCounter"> | undefined;
+  candidateBookCache?: Pick<CandidateBookCache, "getFreshEntry" | "forceRefresh"> | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
   log: Logger;
   now?: () => number;
@@ -93,11 +95,14 @@ export class S1LadderModule implements RuntimeModule {
   private readonly activeLadders = new Map<string, ActiveLadder>();
   private readonly placementHistoryByToken = new Map<string, number[]>();
   private readonly handoffStartedTokens = new Set<string>();
+  private readonly cleanupInFlight = new Map<string, number>();
+  private lifecycleEpoch = 0;
   private unsubs: Array<() => void> = [];
 
   constructor(private readonly deps: S1LadderModuleDeps) {}
 
   async start(): Promise<void> {
+    this.lifecycleEpoch++;
     this.recoverActiveLadders();
     this.recoverPhantomOwnerships();
     this.unsubs.push(
@@ -115,6 +120,8 @@ export class S1LadderModule implements RuntimeModule {
   }
 
   async stop(): Promise<void> {
+    this.lifecycleEpoch++;
+    this.cleanupInFlight.clear();
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     this.activePlacements.clear();
@@ -140,9 +147,11 @@ export class S1LadderModule implements RuntimeModule {
   }
 
   private async onHeartbeat(payload: RuntimeEventMap["MarketSnapshotHeartbeat"]): Promise<void> {
+    const epoch = this.lifecycleEpoch;
     const policy = this.policy();
     this.pruneExpiredPlacements();
     for (const market of payload.markets) {
+      if (epoch !== this.lifecycleEpoch) return;
       const position = this.findOpenPosition(market.tokenId);
       if (!position) continue;
       const activeOrders = this.findActiveS1Orders(market.tokenId);
@@ -156,10 +165,12 @@ export class S1LadderModule implements RuntimeModule {
         }
         if (this.isHandoffTimedOut(market.tokenId, payload.timestamp, policy)) {
           await this.forceHandoffTimeout(position, market, activeOrders, payload.timestamp);
+          if (epoch !== this.lifecycleEpoch) return;
           continue;
         }
         if (this.shouldHandoff(market, payload.timestamp, policy)) {
           await this.initiateHandoff(position, market, activeOrders, payload.timestamp, policy);
+          if (epoch !== this.lifecycleEpoch) return;
           continue;
         }
         await this.placeCoverageCleanup(
@@ -168,7 +179,9 @@ export class S1LadderModule implements RuntimeModule {
           this.resolveBook(payload.booksByToken, market),
           payload.timestamp,
           policy,
+          epoch,
         );
+        if (epoch !== this.lifecycleEpoch) return;
         continue;
       }
       const active = this.activeLadders.get(String(market.tokenId));
@@ -226,6 +239,7 @@ export class S1LadderModule implements RuntimeModule {
         continue;
       }
       await this.placeLadder(position, market, plan, payload.timestamp);
+      if (epoch !== this.lifecycleEpoch) return;
     }
   }
 
@@ -260,50 +274,121 @@ export class S1LadderModule implements RuntimeModule {
     book: OrderBookSnapshot,
     timestamp: number,
     policy: TrackS1WalkingLadderPolicy,
+    epoch: number,
   ): Promise<void> {
-    if (isBounceOwned(position) || !this.deps.fillRepo) return;
-    const allOrders = this.deps.orderRepo.findByTokenId(market.tokenId);
-    const fills = this.readFills(allOrders);
-    if (!fills) return;
-    const working = findS1CoverageWorkingSells(allOrders, position);
+    if (epoch !== this.lifecycleEpoch || isBounceOwned(position) || !this.deps.fillRepo) return;
+    const tokenKey = String(market.tokenId);
+    if (this.cleanupInFlight.has(tokenKey)) return;
+    this.cleanupInFlight.set(tokenKey, epoch);
+    try {
+      let placementPosition = position;
+      let proof = this.resolveCleanupProof(position, policy, timestamp);
+      if (!proof) return;
+      let effectiveBook = book;
+      let proofAt = timestamp;
+      let skipReason = resolveCleanupSkipReason(
+        proof.residualSize,
+        proof.targetPrice,
+        effectiveBook,
+        market,
+        proofAt,
+      );
+      if (skipReason === "stale_book" && this.deps.candidateBookCache) {
+        const cached = this.deps.candidateBookCache.getFreshEntry(tokenKey, this.now());
+        let refreshed = cached?.book ?? null;
+        let status = "fresh-cache";
+        if (!refreshed || isBookStale(refreshed, this.now())) {
+          let resolution: Awaited<ReturnType<CandidateBookCache["forceRefresh"]>>;
+          try {
+            resolution = await this.deps.candidateBookCache.forceRefresh(tokenKey);
+          } catch {
+            if (epoch === this.lifecycleEpoch) {
+              this.deps.runtimeMetrics?.writeCounter(
+                "track_s1_coverage_cleanup_book_refresh_total",
+                1,
+                "refresh-failed",
+              );
+              this.countCleanupSkip("stale_book");
+            }
+            return;
+          }
+          if (epoch !== this.lifecycleEpoch) return;
+          refreshed = resolution.entry?.book ?? null;
+          status = resolution.status;
+        }
+        this.deps.runtimeMetrics?.writeCounter(
+          "track_s1_coverage_cleanup_book_refresh_total",
+          1,
+          status,
+        );
+        const currentPosition = this.findOpenPosition(market.tokenId);
+        if (!refreshed) {
+          this.countCleanupSkip("stale_book");
+          return;
+        }
+        if (currentPosition?.positionId !== position.positionId) return;
+        placementPosition = currentPosition;
+        proofAt = this.now();
+        proof = this.resolveCleanupProof(currentPosition, policy, proofAt);
+        if (!proof) return;
+        effectiveBook = this.resolveBook(new Map([[tokenKey, refreshed]]), market);
+        skipReason = resolveCleanupSkipReason(
+          proof.residualSize,
+          proof.targetPrice,
+          effectiveBook,
+          market,
+          proofAt,
+        );
+      }
+      if (epoch !== this.lifecycleEpoch) return;
+      if (skipReason) {
+        this.countCleanupSkip(skipReason);
+        return;
+      }
+      if (!this.acquirePlacement(market.tokenId, proofAt)) return;
+      if (epoch !== this.lifecycleEpoch) return;
+      await this.publishCoverageCleanup(
+        placementPosition,
+        market,
+        proof,
+        proof.residualSize,
+        effectiveBook.minOrderSize!,
+        proof.attempt,
+        proofAt,
+      );
+      if (epoch !== this.lifecycleEpoch) return;
+      this.deps.runtimeMetrics?.writeCounter("track_s1_coverage_cleanup_placed", 1);
+    } finally {
+      if (this.cleanupInFlight.get(tokenKey) === epoch) this.cleanupInFlight.delete(tokenKey);
+    }
+  }
+
+  private countCleanupSkip(reason: string): void {
+    this.deps.runtimeMetrics?.writeCounter("track_s1_coverage_cleanup_skipped_total", 1, reason);
+  }
+
+  private resolveCleanupProof(
+    position: Position,
+    policy: TrackS1WalkingLadderPolicy,
+    nowMs: number,
+  ): NonNullable<ReturnType<typeof resolveExactS1CoverageCleanupState>> | null {
+    const orders = this.deps.orderRepo.findByTokenId(position.tokenId);
+    const fills = this.readFills(orders);
+    if (!fills) return null;
+    const working = findS1CoverageWorkingSells(orders, position);
     const reservedSellSize = getReservedSellSize(
       buildReservationSnapshot([...working], s1CoverageFillLookup(fills)),
       position.tokenId,
     );
     const state = resolveExactS1CoverageCleanupState({
       position,
-      orders: allOrders,
+      orders,
       fills,
       reservedSellSize,
       numTiers: policy.numTiers,
-      nowMs: timestamp,
+      nowMs,
     });
-    if (!state || state.residualSize <= SIZE_EPSILON) return;
-    const skipReason = resolveCleanupSkipReason(
-      state.residualSize,
-      state.targetPrice,
-      book,
-      market,
-      timestamp,
-    );
-    if (skipReason) {
-      this.deps.runtimeMetrics?.writeCounter(
-        "track_s1_coverage_cleanup_skipped_total",
-        1,
-        skipReason,
-      );
-      return;
-    }
-    if (!this.acquirePlacement(market.tokenId, timestamp)) return;
-    await this.publishCoverageCleanup(
-      position,
-      market,
-      state,
-      state.residualSize,
-      book.minOrderSize!,
-      state.attempt,
-      timestamp,
-    );
+    return state && state.residualSize > SIZE_EPSILON ? state : null;
   }
 
   private readFills(orders: readonly Order[]): Fill[] | null {
@@ -341,7 +426,6 @@ export class S1LadderModule implements RuntimeModule {
         attempt,
       },
     });
-    this.deps.runtimeMetrics?.writeCounter("track_s1_coverage_cleanup_placed", 1);
   }
 
   private onFill(payload: RuntimeEventMap["FillReceived"]): void {
@@ -861,17 +945,19 @@ function resolveCleanupSkipReason(
   ) {
     return "invalid_book";
   }
-  if (
-    !Number.isFinite(book.timestamp) ||
-    book.timestamp > nowMs + 1_000 ||
-    nowMs - book.timestamp > MAKER_CAPTURE_BOOK_MAX_AGE_MS
-  ) {
-    return "stale_book";
-  }
+  if (isBookStale(book, nowMs)) return "stale_book";
   if (!validateExecutablePrice(targetPrice, market.tickSize).ok) return "off_tick_target";
   if (targetPrice <= book.bestBid + SIZE_EPSILON || targetPrice >= 1) return "crossing_target";
   if (!isPositiveNumber(book.minOrderSize)) return "unknown_min_order_size";
   return residual + SIZE_EPSILON >= book.minOrderSize ? null : "below_min_order_size";
+}
+
+function isBookStale(book: Pick<OrderBookSnapshot, "timestamp">, nowMs: number): boolean {
+  return (
+    !Number.isFinite(book.timestamp) ||
+    book.timestamp > nowMs + 1_000 ||
+    nowMs - book.timestamp > MAKER_CAPTURE_BOOK_MAX_AGE_MS
+  );
 }
 
 function isPositiveNumber(value: unknown): value is number {

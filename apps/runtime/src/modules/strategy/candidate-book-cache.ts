@@ -78,6 +78,7 @@ export class CandidateBookCache {
     string,
     {
       fallbackStatus: "cache-miss" | "cache-stale";
+      force: boolean;
       resolvers: Array<(resolution: CandidateBookResolution) => void>;
     }
   >();
@@ -266,6 +267,12 @@ export class CandidateBookCache {
     return resolution;
   }
 
+  forceRefresh(tokenId: string): Promise<CandidateBookResolution> {
+    const fallbackStatus = this.entries.has(tokenId) ? "cache-stale" : "cache-miss";
+    this.deps.onUsageObserved?.({ type: "rest-fallback", tokenId });
+    return this.enqueueRefresh(tokenId, fallbackStatus, true);
+  }
+
   private async fetchAndStore(
     tokenIds: readonly string[],
     source: "prime" | "bridge-refresh",
@@ -348,14 +355,17 @@ export class CandidateBookCache {
   private enqueueRefresh(
     tokenId: string,
     fallbackStatus: "cache-miss" | "cache-stale",
+    force = false,
   ): Promise<CandidateBookResolution> {
     return new Promise((resolve) => {
       const pending = this.pendingRefreshes.get(tokenId);
       if (pending) {
+        pending.force ||= force;
         pending.resolvers.push(resolve);
       } else {
         this.pendingRefreshes.set(tokenId, {
           fallbackStatus,
+          force,
           resolvers: [resolve],
         });
       }
@@ -395,11 +405,12 @@ export class CandidateBookCache {
     try {
       const entries = await this.fetchAndStore(tokenIds, "bridge-refresh");
       for (const tokenId of tokenIds) {
-        const entry = entries.get(tokenId) ?? this.getFreshEntry(tokenId);
+        const request = pending.get(tokenId);
+        const entry = entries.get(tokenId) ?? (request?.force ? null : this.getFreshEntry(tokenId));
         const resolution: CandidateBookResolution = entry
           ? { entry, status: "refreshed" }
-          : { entry: null, status: pending.get(tokenId)?.fallbackStatus ?? "cache-miss" };
-        for (const resolve of pending.get(tokenId)?.resolvers ?? []) {
+          : { entry: null, status: request?.fallbackStatus ?? "cache-miss" };
+        for (const resolve of request?.resolvers ?? []) {
           resolve(resolution);
         }
       }

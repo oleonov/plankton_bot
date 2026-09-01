@@ -266,6 +266,8 @@ async function runS1Cleanup(
   overrides: {
     market?: Partial<NormalizedMarket>;
     book?: Partial<OrderBookSnapshot>;
+    candidateBookCache?: unknown;
+    concurrentHeartbeats?: boolean;
   } = {},
 ): Promise<{
   placed: PlaceOrderCommand[];
@@ -287,16 +289,21 @@ async function runS1Cleanup(
     runtimeMetrics,
     log: silentLog,
     now: () => now,
-  });
+    ...(overrides.candidateBookCache ? { candidateBookCache: overrides.candidateBookCache } : {}),
+  } as any);
   await module.start();
-  for (let index = 0; index < 2; index++) {
-    await bus.publish("MarketSnapshotHeartbeat", {
+  const heartbeat = (index: number) =>
+    bus.publish("MarketSnapshotHeartbeat", {
       markets: [market(overrides.market)],
       booksByToken: new Map([[String(tokenId), book({ timestamp: now, ...overrides.book })]]),
       timestamp: now + index,
       reason: "full_lifetime_active_position",
       source: "market-data",
     });
+  if (overrides.concurrentHeartbeats) {
+    await Promise.all([heartbeat(0), heartbeat(1)]);
+  } else {
+    for (let index = 0; index < 2; index++) await heartbeat(index);
   }
   await module.stop();
   return { placed, cancels, runtimeMetrics };
@@ -1464,5 +1471,163 @@ describe("S1LadderModule", () => {
       market: { tickSize: 0.01 },
     });
     expect(invalidTick.placed).toEqual([]);
+  });
+
+  it("refreshes only stale exact cleanup books and serializes concurrent heartbeats", async () => {
+    const positionValue = position({ size: 110, costBasisUsdc: 1.54 });
+    const refreshedBook = book({
+      bestBid: 0.003,
+      bestAsk: 0.009,
+      minOrderSize: 5,
+      timestamp: NOW,
+    });
+    const candidateBookCache = {
+      getFreshEntry: vi.fn(() => null),
+      forceRefresh: vi.fn(async () => ({
+        status: "refreshed",
+        entry: { tokenId: String(tokenId), book: refreshedBook },
+      })),
+    };
+
+    const result = await runS1Cleanup(
+      positionValue,
+      exactOrdinaryS1Orders(positionValue),
+      makeFillRepo(),
+      NOW,
+      {
+        book: { timestamp: NOW - 3_001 },
+        candidateBookCache,
+        concurrentHeartbeats: true,
+      },
+    );
+
+    expect(candidateBookCache.forceRefresh).toHaveBeenCalledOnce();
+    expect(result.placed).toHaveLength(1);
+    expect(result.placed[0]).toMatchObject({ size: 26.42, price: 0.08 });
+
+    const failed = await runS1Cleanup(
+      positionValue,
+      exactOrdinaryS1Orders(positionValue),
+      makeFillRepo(),
+      NOW,
+      {
+        book: { timestamp: NOW - 3_001 },
+        candidateBookCache: {
+          getFreshEntry: vi.fn(() => null),
+          forceRefresh: vi.fn(async () => ({ status: "refresh-failed", entry: null })),
+        },
+      },
+    );
+    expect(failed.placed).toEqual([]);
+    expect(failed.runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "track_s1_coverage_cleanup_skipped_total",
+      1,
+      "stale_book",
+    );
+  });
+
+  it("re-proves the position after a stale-book refresh before placing cleanup", async () => {
+    const positionValue = position({ size: 110, costBasisUsdc: 1.54 });
+    const candidateBookCache = {
+      getFreshEntry: vi.fn(() => null),
+      forceRefresh: vi.fn(async () => {
+        positionValue.status = PositionStatus.Closed;
+        positionValue.size = 0;
+        return {
+          status: "refreshed",
+          entry: { tokenId: String(tokenId), book: book({ minOrderSize: 5, timestamp: NOW }) },
+        };
+      }),
+    };
+
+    const result = await runS1Cleanup(
+      positionValue,
+      exactOrdinaryS1Orders(positionValue),
+      makeFillRepo(),
+      NOW,
+      {
+        book: { timestamp: NOW - 3_001 },
+        candidateBookCache,
+      },
+    );
+
+    expect(candidateBookCache.forceRefresh).toHaveBeenCalledOnce();
+    expect(result.placed).toEqual([]);
+  });
+
+  it("does not continue a multi-market heartbeat after stop invalidates its epoch", async () => {
+    const secondToken = createTokenId("s1-stop-token-2");
+    const secondCondition = createConditionId("s1-stop-condition-2");
+    const positions = [
+      position({ size: 110, costBasisUsdc: 1.54 }),
+      position({
+        positionId: createPositionId("s1-stop-pos-2"),
+        tokenId: secondToken,
+        conditionId: secondCondition,
+        size: 110,
+        costBasisUsdc: 1.54,
+      }),
+    ];
+    const secondOrders = exactOrdinaryS1Orders(positions[1]!).map((value, index) => ({
+      ...value,
+      orderId: createOrderId(`s1-stop-order-2-${index}`),
+      clientOrderId: `s1-stop-client-2-${index}` as ClientOrderId,
+      tokenId: secondToken,
+      conditionId: secondCondition,
+      metadata: {
+        s1: { ...(value.metadata!.s1 as object), ladderId: "s1-stop-ladder-2" },
+      },
+    }));
+    const bus = new InProcessEventBus();
+    const placed: PlaceOrderCommand[] = [];
+    bus.subscribe("PlaceOrderRequested", async ({ command }) => void placed.push(command));
+    let stopped = false;
+    const forceRefresh = vi.fn(async (requestedToken: string) => {
+      if (!stopped) {
+        stopped = true;
+        await module.stop();
+      }
+      return {
+        status: "refreshed" as const,
+        entry: {
+          tokenId: requestedToken,
+          snapshotTs: NOW,
+          cachedAtMs: NOW,
+          sourcePolledAtMs: NOW,
+          bookSource: "clob" as const,
+          sourceKind: "rest" as const,
+          book: book({
+            tokenId: createTokenId(requestedToken),
+            minOrderSize: 5,
+            timestamp: NOW,
+          }),
+        },
+      };
+    });
+    const module = new S1LadderModule({
+      bus,
+      positionRepo: makePositionRepo(positions),
+      orderRepo: makeOrderRepo([...exactOrdinaryS1Orders(positions[0]!), ...secondOrders]),
+      fillRepo: makeFillRepo(),
+      policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+      candidateBookCache: { getFreshEntry: vi.fn(() => null), forceRefresh },
+      log: silentLog,
+      now: () => NOW,
+    });
+    await module.start();
+
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market(), market({ tokenId: secondToken, conditionId: secondCondition })],
+      booksByToken: new Map([
+        [String(tokenId), book({ timestamp: NOW - 3_001 })],
+        [String(secondToken), book({ tokenId: secondToken, timestamp: NOW - 3_001 })],
+      ]),
+      timestamp: NOW,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(forceRefresh).toHaveBeenCalledOnce();
+    expect(placed).toEqual([]);
   });
 });
