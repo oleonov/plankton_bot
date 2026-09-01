@@ -6,6 +6,7 @@ import {
   computeHarvestTarget,
   normalizeDistribution,
   type Fill,
+  type FillRepository,
   type Order,
   type Position,
   type BounceExitPolicy,
@@ -43,6 +44,38 @@ export interface ExitCoverageCleanupCandidate {
 }
 
 export type ExitCoverageCleanupKind = "bounce" | "s1";
+
+export type ExitCoverageFillReader = Partial<
+  Pick<FillRepository, "findByOrderId" | "findByOrderIds">
+>;
+
+export function loadExitCoverageFillTotals(
+  orders: readonly Order[],
+  reader: ExitCoverageFillReader | undefined,
+): ReadonlyMap<string, number> | null {
+  if (typeof reader?.findByOrderId !== "function") return null;
+  const ids = orders.map((order) => String(order.orderId));
+  if (ids.some((id) => id.length === 0) || new Set(ids).size !== ids.length) return null;
+  try {
+    const fills =
+      typeof reader.findByOrderIds === "function"
+        ? reader.findByOrderIds(orders.map((order) => order.orderId))
+        : orders.flatMap((order) => reader.findByOrderId!(order.orderId));
+    if (!Array.isArray(fills)) return null;
+    const totals = new Map(ids.map((id) => [id, 0]));
+    for (const fill of fills) {
+      const id = String(fill?.orderId);
+      const total = totals.get(id);
+      if (total === undefined || !isPositive(fill?.size) || !Number.isFinite(total + fill.size)) {
+        return null;
+      }
+      totals.set(id, total + fill.size);
+    }
+    return totals;
+  } catch {
+    return null;
+  }
+}
 
 export function matchesExactBounceSupplementalCoverage(input: {
   readonly candidate: ExitCoverageCleanupCandidate;

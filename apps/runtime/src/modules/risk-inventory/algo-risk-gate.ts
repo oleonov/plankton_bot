@@ -16,7 +16,9 @@ import {
 import type { Logger } from "../../logger.js";
 import {
   classifyExitCoverageCleanup,
+  loadExitCoverageFillTotals,
   matchesExactBounceSupplementalCoverage,
+  type ExitCoverageFillReader,
 } from "../../exit-coverage-cleanup.js";
 import { isExitRecoveryFencedPredecessor } from "../execution/reservation-utils.js";
 import {
@@ -208,6 +210,7 @@ export class AlgoRiskGateImpl implements RiskGate {
       | ((sample: { side: "buy" | "sell"; conditionId: string }) => void)
       | undefined,
     private readonly profileOwnedOpenPositionCount?: (() => number) | undefined,
+    private readonly fillReader?: ExitCoverageFillReader,
   ) {}
 
   async evaluate(signal: Signal): Promise<RiskDecision> {
@@ -472,10 +475,23 @@ export class AlgoRiskGateImpl implements RiskGate {
     policy: ExecutionPolicy | undefined,
     market: ReturnType<MarketRepository["findByTokenId"]> | undefined,
   ): boolean {
+    const rung = signal.bounceRung;
+    if (
+      signal.side !== "sell" ||
+      signal.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
+      signal.reason !== "repricing-exit" ||
+      !rung ||
+      rung.isCleanupRung === true
+    ) {
+      return false;
+    }
     try {
       const positions = this.positionRepo.findActiveByTokenId(signal.tokenId);
+      const orders = this.orderRepo.findByTokenId(signal.tokenId);
+      const filled = loadExitCoverageFillTotals(orders, this.fillReader);
       return (
         positions.length === 1 &&
+        filled !== null &&
         matchesExactBounceSupplementalCoverage({
           candidate: {
             tokenId: signal.tokenId,
@@ -490,13 +506,9 @@ export class AlgoRiskGateImpl implements RiskGate {
             bounceRung: signal.bounceRung,
           },
           position: positions[0] ?? null,
-          orders: this.orderRepo.findByTokenId(signal.tokenId),
+          orders,
           policy: policy?.bounceExit,
-          filledSize: (order) =>
-            typeof order.fillProgressShares === "number" &&
-            Number.isFinite(order.fillProgressShares)
-              ? order.fillProgressShares
-              : null,
+          filledSize: (order) => filled.get(String(order.orderId)) ?? null,
         })
       );
     } catch {

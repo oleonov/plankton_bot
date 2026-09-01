@@ -78,7 +78,8 @@ export interface RiskInventoryModuleDeps {
   inventoryLotRepo: InventoryLotRepository;
   orderRepo: OrderRepository;
   marketRepo?: Pick<MarketRepository, "findByTokenId"> | undefined;
-  fillRepo: Pick<FillRepository, "findUnreconciled" | "claimForReconciliation">;
+  fillRepo: Pick<FillRepository, "findUnreconciled" | "claimForReconciliation"> &
+    Partial<Pick<FillRepository, "findByOrderId" | "findByOrderIds">>;
   log: Logger;
   db: Database.Database;
   liveLiteGuard?: LiveLiteGuard | undefined;
@@ -194,6 +195,7 @@ export class RiskInventoryModule implements RuntimeModule {
           new Date(deps.now?.() ?? Date.now()).toISOString(),
         ),
       deps.profileOwnedOpenPositionCount,
+      deps.fillRepo,
     );
     this.inventory = new InventoryHandler(
       deps.positionRepo,

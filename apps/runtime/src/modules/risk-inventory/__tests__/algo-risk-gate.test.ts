@@ -14,7 +14,12 @@ import {
   type Position,
   type ExecutionPolicy,
 } from "@krabs/domain";
-import type { MarketRepository, OrderRepository, PositionRepository } from "@krabs/domain";
+import type {
+  FillRepository,
+  MarketRepository,
+  OrderRepository,
+  PositionRepository,
+} from "@krabs/domain";
 import { AlgoRiskGateImpl, CONDITION_REDEEM_IN_FLIGHT_REASON } from "../algo-risk-gate.js";
 import type { Logger } from "../../../logger.js";
 
@@ -130,6 +135,28 @@ function makeMarketRepo(conditionId = COND_ID): Pick<MarketRepository, "findByTo
   };
 }
 
+type FillReader = Partial<Pick<FillRepository, "findByOrderId" | "findByOrderIds">>;
+type FindByOrderIds = NonNullable<FillRepository["findByOrderIds"]>;
+
+function makeFillReader(
+  fills: Array<{ orderId: Order["orderId"]; size: number }> = [],
+  bulk = true,
+): FillReader {
+  const findByOrderId = vi.fn((orderId: Order["orderId"]) =>
+    fills.filter((fill) => fill.orderId === orderId),
+  );
+  return {
+    findByOrderId: findByOrderId as unknown as FillRepository["findByOrderId"],
+    ...(bulk
+      ? {
+          findByOrderIds: vi.fn((orderIds: Order["orderId"][]) =>
+            fills.filter((fill) => orderIds.includes(fill.orderId)),
+          ) as unknown as FindByOrderIds,
+        }
+      : {}),
+  };
+}
+
 function createMockControlDb(walletBalance: number | null) {
   return {
     prepare: vi.fn().mockReturnValue({
@@ -216,7 +243,7 @@ function makeBounceSupplementalFixture() {
       signalReason: "repricing-exit",
       postOnly: true,
       exchangeOrderId: `exchange-${rungIndex}-${cleanup}`,
-      fillProgressShares: 0,
+      fillProgressShares: null,
       price: price(rungIndex),
       size,
       metadata: {
@@ -839,7 +866,12 @@ describe("AlgoRiskGateImpl", () => {
 
   it("admits only the exact missing ordinary rung beside a working cleanup", async () => {
     const fixture = makeBounceSupplementalFixture();
-    const evaluate = (orders: Order[], signal = fixture.signal, position = fixture.position) => {
+    const evaluate = (
+      orders: Order[],
+      signal = fixture.signal,
+      position = fixture.position,
+      fillReader: FillReader | null = makeFillReader(),
+    ) => {
       const positions = makePositionRepo(position);
       positions.findActiveByTokenId = vi.fn(() => [position]);
       return new AlgoRiskGateImpl(
@@ -852,6 +884,10 @@ describe("AlgoRiskGateImpl", () => {
         () => fixture.policy,
         undefined,
         { findByTokenId: vi.fn(() => ({ tickSize: 0.001 })) } as any,
+        undefined,
+        undefined,
+        undefined,
+        fillReader ?? undefined,
       ).evaluate(signal);
     };
 
@@ -867,6 +903,47 @@ describe("AlgoRiskGateImpl", () => {
     ])) {
       expect(decision.approved).toBe(false);
     }
+
+    const actualFill = makeFillReader([{ orderId: fixture.orders[0]!.orderId, size: 1 }]);
+    const zeroTelemetry = fixture.orders.map((order) => ({ ...order, fillProgressShares: 0 }));
+    const throwingReader: FillReader = {
+      findByOrderId: vi.fn(() => {
+        throw new Error("fill lookup unavailable");
+      }),
+    };
+    expect(
+      (await evaluate(zeroTelemetry, fixture.signal, fixture.position, actualFill)).approved,
+    ).toBe(false);
+    expect((await evaluate(fixture.orders, fixture.signal, fixture.position, null)).approved).toBe(
+      false,
+    );
+    expect(
+      (await evaluate(fixture.orders, fixture.signal, fixture.position, throwingReader)).approved,
+    ).toBe(false);
+    const malformedReaders: FillReader[] = [
+      makeFillReader([{ orderId: fixture.orders[0]!.orderId, size: 0 }]),
+      makeFillReader([{ orderId: fixture.orders[0]!.orderId, size: Number.NaN }]),
+      {
+        findByOrderId: vi.fn(() => []),
+        findByOrderIds: vi.fn(() => [
+          { orderId: "unrequested-order", size: 1 },
+        ]) as unknown as FindByOrderIds,
+      },
+      {
+        findByOrderId: vi.fn(() => []),
+        findByOrderIds: vi.fn(() => null) as unknown as FindByOrderIds,
+      },
+    ];
+    for (const reader of malformedReaders) {
+      expect(
+        (await evaluate(fixture.orders, fixture.signal, fixture.position, reader)).approved,
+      ).toBe(false);
+    }
+    const perOrderReader = makeFillReader([], false);
+    expect(
+      (await evaluate(fixture.orders, fixture.signal, fixture.position, perOrderReader)).approved,
+    ).toBe(true);
+    expect(perOrderReader.findByOrderId).toHaveBeenCalledTimes(3);
   });
 
   it("also grants the BOUNCE_EXIT_BACKSTOP taker signal the same ladder-sized carve-out (N rungs + backstop coexist)", async () => {

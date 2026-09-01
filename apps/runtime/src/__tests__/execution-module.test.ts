@@ -431,7 +431,7 @@ function createBounceSupplementalFixture() {
       size,
       postOnly: true,
       exchangeOrderId: `exchange-${rungIndex}-${cleanup}`,
-      fillProgressShares: 0,
+      fillProgressShares: null,
       decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
       metadata: {
         bounceRung: {

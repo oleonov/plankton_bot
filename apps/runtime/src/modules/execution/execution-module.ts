@@ -94,6 +94,7 @@ import {
   classifyExitCoverageCleanup,
   findS1CoverageWorkingSells,
   hasS1CoverageCleanupMarker,
+  loadExitCoverageFillTotals,
   matchesExactBounceSupplementalCoverage,
   parseS1CoverageCleanup,
   resolveExactS1CoverageCleanupState,
@@ -5271,16 +5272,10 @@ export class ExecutionModule implements RuntimeModule {
     try {
       const positions = positionRepo.findActiveByTokenId(cmd.tokenId);
       const orders = this.deps.orderRepo.findByTokenId(cmd.tokenId);
-      const fills =
-        this.deps.fillRepo.findByOrderIds?.(orders.map((order) => order.orderId)) ??
-        orders.flatMap((order) => this.deps.fillRepo.findByOrderId(order.orderId));
-      const filled = new Map(orders.map((order) => [String(order.orderId), 0]));
-      for (const fill of fills) {
-        const id = String(fill.orderId);
-        if (filled.has(id)) filled.set(id, filled.get(id)! + fill.size);
-      }
+      const filled = loadExitCoverageFillTotals(orders, this.deps.fillRepo);
       return (
         positions.length === 1 &&
+        filled !== null &&
         matchesExactBounceSupplementalCoverage({
           candidate: {
             ...cmd,
