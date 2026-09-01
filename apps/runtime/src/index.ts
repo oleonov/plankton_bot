@@ -1769,6 +1769,7 @@ async function main(): Promise<void> {
     orderRepo: repos.order,
     fillRepo: repos.fill,
     marketRepo: repos.market,
+    marketResolutionRepo,
     log,
     reconcileIntervalMs: config.reconciliationIntervalMs,
     suspiciousEmptyThreshold: config.reconciliationSuspiciousEmptyThreshold,

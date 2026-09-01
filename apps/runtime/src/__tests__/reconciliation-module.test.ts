@@ -19,6 +19,7 @@ import type {
   OrderRepository,
   FillRepository,
   MarketRepository,
+  MarketResolutionRepository,
   TokenId,
   ClientOrderId,
   ReconciliationResult,
@@ -1734,7 +1735,6 @@ describe("ReconciliationModule", () => {
     });
 
     it("warns twice before publishing critical drift for confirmed wallet sentinel mismatches", async () => {
-      const futureEndDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
       const closedPosition: Position = {
         positionId: createPositionId("pos-wallet-drift"),
         tokenId: TOK,
@@ -1769,7 +1769,7 @@ describe("ReconciliationModule", () => {
         tokenId: TOK,
         conditionId: "cond-1",
         slug: "wallet-drift-market",
-        endDate: futureEndDate,
+        endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       });
       const localLog = {
         ...silentLog,
@@ -1832,6 +1832,156 @@ describe("ReconciliationModule", () => {
         "wallet position sentinel detected drift",
       );
     });
+
+    it("suppresses an exact settled zero-value loser without an on-chain balance read", async () => {
+      const futureEndDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const closedPosition: Position = {
+        positionId: createPositionId("pos-settled-loser"),
+        tokenId: TOK,
+        conditionId: createConditionId("cond-1"),
+        side: "buy",
+        size: 0,
+        avgEntryPrice: 0.1,
+        costBasisUsdc: 0,
+        currentValueUsdc: 0,
+        realizedPnl: -1,
+        status: "closed",
+        entryStyle: "probe",
+        openedAt: new Date(Date.now() - 60_000).toISOString(),
+        closedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const walletReader: PolymarketPositionReader = {
+        read: vi.fn().mockResolvedValue([
+          {
+            tokenId: String(TOK),
+            conditionId: "cond-1",
+            size: 10,
+            currentValueUsdc: 0,
+            initialValueUsdc: 1,
+            slug: null,
+            marketSlug: null,
+            outcome: "Yes",
+            raw: {},
+          },
+        ]),
+      };
+      marketRepo.findByTokenId = vi.fn().mockReturnValue({
+        tokenId: TOK,
+        conditionId: "cond-1",
+        slug: "settled-loser",
+        outcome: " Yes ",
+        endDate: futureEndDate,
+      });
+      const marketResolutionRepo = {
+        findByConditionId: vi.fn().mockReturnValue({
+          conditionId: "cond-1",
+          resolution: " no ",
+          resolvedAt: new Date().toISOString(),
+          detectedAt: new Date().toISOString(),
+          source: "gamma-api",
+          rawResponse: null,
+          status: "settled",
+        }),
+      } as unknown as MarketResolutionRepository;
+      gateway.getPositionBalance = vi.fn().mockResolvedValue(10);
+
+      const result = await new ReconciliationModule({
+        gateway,
+        bus,
+        orderRepo,
+        fillRepo,
+        marketRepo,
+        marketResolutionRepo,
+        log: silentLog,
+        reconcileIntervalMs: 60_000,
+        walletPositionSentinel: {
+          reader: walletReader,
+          positionRepo: {
+            findAll: vi.fn().mockReturnValue([closedPosition]),
+          } as unknown as import("@krabs/domain").PositionRepository,
+          marketRepo,
+          log: silentLog,
+        },
+      }).runReconciliation();
+
+      expect(result.clean).toBe(true);
+      expect(result.positionDriftCount).toBe(0);
+      expect(gateway.getPositionBalance).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["winning outcome", 0, "settled", "Yes", "cond-1", "cond-1"],
+      ["detected resolution", 0, "detected", "No", "cond-1", "cond-1"],
+      ["positive remote value", 0.01, "settled", "No", "cond-1", "cond-1"],
+      ["condition mismatch", 0, "settled", "No", "other-condition", "cond-1"],
+      ["unknown resolution", 0, "settled", "unknown", "cond-1", "cond-1"],
+      ["trimmed condition alias", 0, "settled", "No", "cond-1", " cond-1 "],
+    ] as const)(
+      "keeps %s on the existing on-chain drift check",
+      async (_, value, status, outcome, resolvedConditionId, marketConditionId) => {
+        const closedPosition = {
+          positionId: createPositionId("pos-settled-boundary"),
+          tokenId: TOK,
+          conditionId: createConditionId("cond-1"),
+          side: "buy",
+          size: 0,
+          avgEntryPrice: 0.1,
+          costBasisUsdc: 0,
+          currentValueUsdc: 0,
+          realizedPnl: -1,
+          status: "closed",
+          entryStyle: "probe",
+          openedAt: new Date(Date.now() - 60_000).toISOString(),
+          closedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        } as Position;
+        marketRepo.findByTokenId = vi.fn().mockReturnValue({
+          tokenId: TOK,
+          conditionId: marketConditionId,
+          slug: "settled-boundary",
+          outcome: "Yes",
+          endDate: new Date(Date.now() + 60_000).toISOString(),
+        });
+        const marketResolutionRepo = {
+          findByConditionId: vi.fn().mockReturnValue({
+            conditionId: resolvedConditionId,
+            resolution: outcome,
+            status,
+          }),
+        } as unknown as MarketResolutionRepository;
+        gateway.getPositionBalance = vi.fn().mockResolvedValue(10);
+
+        const result = await new ReconciliationModule({
+          gateway,
+          bus,
+          orderRepo,
+          fillRepo,
+          marketRepo,
+          marketResolutionRepo,
+          log: silentLog,
+          reconcileIntervalMs: 60_000,
+          walletPositionSentinel: {
+            reader: {
+              read: vi
+                .fn()
+                .mockResolvedValue([
+                  { tokenId: String(TOK), size: 10, currentValueUsdc: value, outcome: "Yes" },
+                ]),
+            } as unknown as PolymarketPositionReader,
+            positionRepo: {
+              findAll: vi.fn().mockReturnValue([closedPosition]),
+            } as unknown as import("@krabs/domain").PositionRepository,
+            marketRepo,
+            log: silentLog,
+          },
+        }).runReconciliation();
+
+        expect(result.clean).toBe(false);
+        expect(result.positionDriftCount).toBe(1);
+        expect(gateway.getPositionBalance).toHaveBeenCalledOnce();
+      },
+    );
 
     it("confirms wallet sentinel balance drifts in parallel instead of K serial RPCs", async () => {
       const tokenIds = [

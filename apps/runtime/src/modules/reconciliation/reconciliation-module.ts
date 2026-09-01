@@ -22,6 +22,7 @@ import type {
   OrderRepository,
   FillRepository,
   MarketRepository,
+  MarketResolutionRepository,
   ReconciliationResult,
   SettlementLedgerRepository,
   PositionDriftRepository,
@@ -150,6 +151,7 @@ export interface ReconciliationModuleDeps {
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
   marketRepo: MarketRepository;
+  marketResolutionRepo?: MarketResolutionRepository;
   log: Logger;
   reconcileIntervalMs: number;
   /**
@@ -732,12 +734,37 @@ export class ReconciliationModule implements RuntimeModule {
   ): Promise<ClosedLivePositionDrift[]> {
     const confirmed = await Promise.all(
       drifts.map(async (drift): Promise<ClosedLivePositionDrift | null> => {
+        if (this.isSettledZeroValueLoser(drift)) return null;
         const balance = await this.readWalletSentinelCrossCheckBalance(drift.tokenId);
         if (balance === null) return null;
         return balance > WALLET_SENTINEL_BALANCE_EPSILON ? drift : null;
       }),
     );
     return confirmed.filter((drift): drift is ClosedLivePositionDrift => drift !== null);
+  }
+
+  private isSettledZeroValueLoser(drift: ClosedLivePositionDrift): boolean {
+    if (!Number.isFinite(drift.remoteCurrentValueUsdc) || drift.remoteCurrentValueUsdc !== 0) {
+      return false;
+    }
+    const resolutionRepo = this.deps.marketResolutionRepo;
+    if (!resolutionRepo) return false;
+    const market = this.deps.marketRepo.findByTokenId(drift.tokenId);
+    if (!market || String(market.tokenId) !== String(drift.tokenId)) return false;
+    const conditionId = market.conditionId;
+    if (!conditionId.trim()) return false;
+    const resolution = resolutionRepo.findByConditionId(conditionId);
+    if (!resolution || resolution.conditionId !== conditionId || resolution.status !== "settled") {
+      return false;
+    }
+    const marketOutcome = market.outcome.trim().toLowerCase();
+    const resolvedOutcome = resolution.resolution.trim().toLowerCase();
+    return (
+      marketOutcome.length > 0 &&
+      resolvedOutcome.length > 0 &&
+      resolvedOutcome !== "unknown" &&
+      marketOutcome !== resolvedOutcome
+    );
   }
 
   private async filterConfirmedActiveDrifts(
