@@ -94,6 +94,13 @@ type AsyncResolutionJob =
       readonly enqueuedAt: number;
     };
 
+type PendingResolutionTrigger =
+  | { readonly kind: "catalog-missing" }
+  | {
+      readonly kind: "market-resolved-hint";
+      readonly tokenIds: readonly TokenId[];
+    };
+
 interface ResolutionRuntimeMetrics {
   writeEvent: (
     metricName: string,
@@ -162,7 +169,7 @@ export interface ResolutionModuleDeps {
 export class ResolutionModule implements RuntimeModule {
   private intervalHandle: NodeJS.Timeout | null = null;
   private unsubs: Array<() => void> = [];
-  private readonly pendingHintConditionIds = new Set<string>();
+  private readonly pendingResolutionTriggers = new Map<string, PendingResolutionTrigger>();
   private readonly hintedCancelledOrderIds = new Set<string>();
   private readonly redeemFailures = new Map<string, RedeemFailureEntry>();
   private running = false;
@@ -190,6 +197,11 @@ export class ResolutionModule implements RuntimeModule {
           conditionIds: [...payload.conditionIds],
           enqueuedAt: Date.now(),
         });
+      }),
+    );
+    this.unsubs.push(
+      this.deps.bus.subscribe("MarketCatalogMissingSnapshot", async (snapshot) => {
+        this.handleCatalogMissingSnapshot(snapshot);
       }),
     );
     // Run once at startup (non-blocking)
@@ -224,6 +236,8 @@ export class ResolutionModule implements RuntimeModule {
     }
     this.unsubs = [];
     this.asyncResolutionQueue.length = 0;
+    this.pendingResolutionTriggers.clear();
+    this.hintedCancelledOrderIds.clear();
   }
 
   private enqueueAsyncResolutionJob(job: AsyncResolutionJob): void {
@@ -811,74 +825,130 @@ export class ResolutionModule implements RuntimeModule {
     } finally {
       this.running = false;
       if (!this.deps.runtimeControl?.isPaused()) {
-        void this.flushPendingHintConditions();
+        void this.flushPendingResolutionTriggers();
       }
     }
+  }
+
+  notifyRuntimeResumed(): void {
+    if (!this.deps.runtimeControl?.isPaused()) void this.flushPendingResolutionTriggers();
+  }
+
+  private handleCatalogMissingSnapshot(
+    snapshot: RuntimeEventMap["MarketCatalogMissingSnapshot"],
+  ): void {
+    const conditionIds = new Set(snapshot.conditionIds);
+    for (const [conditionId, trigger] of this.pendingResolutionTriggers) {
+      if (trigger.kind === "catalog-missing" && !conditionIds.has(conditionId)) {
+        this.pendingResolutionTriggers.delete(conditionId);
+      }
+    }
+    for (const conditionId of conditionIds) {
+      if (!conditionId || this.pendingResolutionTriggers.has(conditionId)) continue;
+      this.pendingResolutionTriggers.set(conditionId, { kind: "catalog-missing" });
+    }
+    this.notifyRuntimeResumed();
   }
 
   private async handleMarketResolvedHint(
     hint: import("@krabs/domain").RuntimeEventMap["MarketResolvedHint"],
   ): Promise<void> {
+    this.wsHintConsumed++;
     if (this.deps.runtimeControl?.isPaused()) {
-      this.deps.log.debug(
-        { conditionId: hint.conditionId },
-        "resolution hint skipped while runtime is paused",
-      );
+      this.queueStrongResolutionHint(hint.conditionId, hint.tokenIds);
+      this.deps.log.debug({ conditionId: hint.conditionId }, "resolution hint queued while paused");
       return;
     }
-    this.wsHintConsumed++;
-    for (const tokenId of hint.tokenIds) {
-      await this.cancelOpenOrders(tokenId, {
-        rememberCancelledOrderIds: this.hintedCancelledOrderIds,
-      });
-    }
-    this.pendingHintConditionIds.add(hint.conditionId);
-    if (!this.running) {
-      await this.flushPendingHintConditions();
-    }
+    this.queueStrongResolutionHint(hint.conditionId, hint.tokenIds);
+    await this.flushPendingResolutionTriggers();
   }
 
-  private async flushPendingHintConditions(): Promise<void> {
-    if (this.running || this.pendingHintConditionIds.size === 0) return;
+  private queueStrongResolutionHint(conditionId: string, tokenIds: readonly TokenId[]): void {
+    const existing = this.pendingResolutionTriggers.get(conditionId);
+    const existingTokenIds = existing?.kind === "market-resolved-hint" ? existing.tokenIds : [];
+    const mergedTokenIds = new Map(
+      [...existingTokenIds, ...tokenIds].map((tokenId) => [String(tokenId), tokenId]),
+    );
+    if (
+      existing?.kind === "market-resolved-hint" &&
+      mergedTokenIds.size === existingTokenIds.length
+    ) {
+      return;
+    }
+    this.pendingResolutionTriggers.set(conditionId, {
+      kind: "market-resolved-hint",
+      tokenIds: [...mergedTokenIds.values()].sort((left, right) =>
+        String(left).localeCompare(String(right)),
+      ),
+    });
+  }
+
+  private async flushPendingResolutionTriggers(): Promise<void> {
+    if (this.running || this.pendingResolutionTriggers.size === 0) return;
     if (this.deps.runtimeControl?.isPaused()) {
       this.deps.log.debug(
-        { queued: this.pendingHintConditionIds.size },
-        "resolution hint flush deferred while runtime is paused",
+        { queued: this.pendingResolutionTriggers.size },
+        "resolution trigger flush deferred while runtime is paused",
       );
       return;
     }
     this.running = true;
     try {
-      const conditionIds = [...this.pendingHintConditionIds];
-      this.pendingHintConditionIds.clear();
-      const resolutions: DetectedResolution[] = [];
-      for (const conditionId of conditionIds) {
-        const detected = await this.deps.detector.detectCondition(conditionId);
-        if (detected) {
-          resolutions.push(detected);
-        }
-      }
-      if (this.deps.runtimeControl?.isPaused()) {
-        // Pause flipped mid-detection: re-queue any conditions we already
-        // detected (they were drained above) so the next non-paused flush picks
-        // them up. Avoid losing work silently.
-        for (const detected of resolutions) {
-          this.pendingHintConditionIds.add(detected.conditionId);
-        }
-        this.deps.log.debug(
-          { queued: this.pendingHintConditionIds.size },
-          "resolution hint flush aborted after pause flip mid-await",
-        );
-        return;
-      }
-      await this.processDetectedResolutions(resolutions);
+      await this.drainPendingResolutionTriggers();
     } finally {
-      this.hintedCancelledOrderIds.clear();
       this.running = false;
-      if (this.pendingHintConditionIds.size > 0 && !this.deps.runtimeControl?.isPaused()) {
-        void this.flushPendingHintConditions();
+      const strongPending = [...this.pendingResolutionTriggers.values()].some(
+        (trigger) => trigger.kind === "market-resolved-hint",
+      );
+      if (!strongPending) this.hintedCancelledOrderIds.clear();
+      if (this.pendingResolutionTriggers.size > 0 && !this.deps.runtimeControl?.isPaused()) {
+        void this.flushPendingResolutionTriggers();
       }
     }
+  }
+
+  private async drainPendingResolutionTriggers(): Promise<void> {
+    const pending = [...this.pendingResolutionTriggers].sort(([left], [right]) =>
+      left.localeCompare(right),
+    );
+    for (const [conditionId, trigger] of pending) {
+      if (this.deps.runtimeControl?.isPaused()) return;
+      try {
+        await this.processPendingResolutionTrigger(conditionId, trigger);
+      } catch (err) {
+        this.deps.log.error({ conditionId, err }, "resolution trigger processing failed");
+      }
+      if (this.deps.runtimeControl?.isPaused()) return;
+      if (this.pendingResolutionTriggers.get(conditionId) === trigger) {
+        this.pendingResolutionTriggers.delete(conditionId);
+      }
+    }
+  }
+
+  private async processPendingResolutionTrigger(
+    conditionId: string,
+    trigger: PendingResolutionTrigger,
+  ): Promise<void> {
+    if (trigger.kind === "market-resolved-hint") {
+      for (const tokenId of trigger.tokenIds) {
+        await this.cancelOpenOrders(tokenId, {
+          rememberCancelledOrderIds: this.hintedCancelledOrderIds,
+        });
+      }
+    }
+    if (this.deps.runtimeControl?.isPaused()) return;
+    const detected =
+      trigger.kind === "market-resolved-hint"
+        ? await this.deps.detector.detectCondition(conditionId)
+        : await this.deps.detector.detectCatalogMissingCondition(conditionId);
+    if (
+      !detected ||
+      this.deps.runtimeControl?.isPaused() ||
+      this.pendingResolutionTriggers.get(conditionId) !== trigger
+    ) {
+      return;
+    }
+    await this.processDetectedResolutions([detected]);
   }
 
   private async processDetectedResolutions(

@@ -97,6 +97,7 @@ function createMockPositionRepo(): PositionRepository {
 function createMockMarketRepo(): MarketRepository {
   return {
     findByTokenIds: vi.fn().mockReturnValue([makeMarket()]),
+    findByConditionId: vi.fn().mockReturnValue([makeMarket()]),
     deactivate: vi.fn(),
     iterateActiveTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
     iterateAllTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
@@ -405,6 +406,66 @@ describe("ResolutionDetector", () => {
 
     await expect(detector.detect(0)).resolves.toEqual([]);
     expect(gammaClient.getMarketBySlug as any).not.toHaveBeenCalled();
+  });
+
+  describe("catalog-missing active-position proof", () => {
+    beforeEach(() => {
+      (marketRepo.findByConditionId as any).mockReturnValue([
+        makeMarket({ tradable: true, endDate: "2099-01-01T00:00:00Z" }),
+      ]);
+    });
+
+    it("accepts an exact known Gamma resolution for a future tradable local market", async () => {
+      (gammaClient.getMarketBySlug as any).mockResolvedValue(makeGammaInfo());
+
+      const detected = await (detector as any).detectCatalogMissingCondition(CONDITION);
+
+      expect(detected).toMatchObject({
+        conditionId: CONDITION,
+        resolution: "Yes",
+        source: "gamma-api",
+      });
+    });
+
+    it("accepts strict CLOB winner proof when both Gamma lookups miss", async () => {
+      (gammaClient.getMarketBySlug as any).mockResolvedValue(null);
+      (gammaClient.getMarketById as any).mockResolvedValue(null);
+      (clobGateway.getMarket as any).mockResolvedValue(makeClobMarket());
+
+      const detected = await (detector as any).detectCatalogMissingCondition(CONDITION);
+
+      expect(detected).toMatchObject({
+        conditionId: CONDITION,
+        resolution: "No",
+        source: "clob-api",
+      });
+    });
+
+    it.each(["unknown", "open", "transport", "mismatch"] as const)(
+      "rejects %s Gamma evidence without any resolution side effect",
+      async (kind) => {
+        if (kind === "unknown") {
+          (gammaClient.getMarketBySlug as any).mockResolvedValue(
+            makeGammaInfo({ umaResolutionStatus: null, rawPayload: {} }),
+          );
+        } else if (kind === "open") {
+          (gammaClient.getMarketBySlug as any).mockResolvedValue(makeGammaInfo({ closed: false }));
+        } else if (kind === "transport") {
+          (gammaClient.getMarketBySlug as any).mockRejectedValue(new Error("ECONNRESET"));
+        } else {
+          (gammaClient.getMarketBySlug as any).mockResolvedValue(
+            makeGammaInfo({ conditionId: "wrong-condition" }),
+          );
+          (gammaClient.getMarketById as any).mockResolvedValue(
+            makeGammaInfo({ conditionId: "also-wrong" }),
+          );
+        }
+
+        await expect(
+          (detector as any).detectCatalogMissingCondition(CONDITION),
+        ).resolves.toBeNull();
+      },
+    );
   });
 
   it("keeps delisted handling when an early candidate shares a condition with an expired one", async () => {

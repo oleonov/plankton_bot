@@ -646,6 +646,7 @@ async function main(): Promise<void> {
   // supervisorRef is set before any closure that uses it is actually called
   const supervisorRef = { current: null as unknown as Supervisor };
   const statePublisherRef = { current: null as RuntimeStatePublisher | null };
+  const resolutionModuleRef = { current: null as ResolutionModule | null };
   const runtimeControl = { isPaused: () => supervisorRef.current.isPaused() };
 
   // Persist pause state to runtime_metrics so the API can read it
@@ -654,12 +655,14 @@ async function main(): Promise<void> {
   };
 
   function setPausedAndPersist(paused: boolean): void {
+    const wasPaused = supervisorRef.current.isPaused();
     supervisorRef.current.setPaused(paused);
     persistPauseState(paused);
     if (paused) {
       statePublisherRef.current?.publishPaused();
     } else {
       statePublisherRef.current?.publishRunning();
+      if (wasPaused) resolutionModuleRef.current?.notifyRuntimeResumed();
     }
   }
 
@@ -1938,6 +1941,7 @@ async function main(): Promise<void> {
     // In simulation/paper modes, no gateway is needed (no on-chain state).
     ...(runtimeMode === "live-lite" && exchangeGateway ? { gateway: exchangeGateway } : {}),
   });
+  resolutionModuleRef.current = resolutionModule;
 
   redeemSweepModule =
     runtimeMode === "live-lite" && traderAddress
@@ -3433,6 +3437,8 @@ async function main(): Promise<void> {
     } else {
       log.info({ mode: runtimeMode }, "runtime started PAUSED — no resume intent");
     }
+
+    await marketScannerModule.replayLastCatalogMissingSnapshot();
 
     log.info({ phase: supervisor.getPhase(), paused: supervisor.isPaused() }, "runtime ready");
   } catch (err) {

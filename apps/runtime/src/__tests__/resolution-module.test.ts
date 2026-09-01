@@ -75,6 +75,9 @@ function createMockDetector(): ResolutionDetector {
     detectCondition: vi
       .fn<(conditionId: string) => Promise<DetectedResolution | null>>()
       .mockResolvedValue(null),
+    detectCatalogMissingCondition: vi
+      .fn<(conditionId: string) => Promise<DetectedResolution | null>>()
+      .mockResolvedValue(null),
   } as unknown as ResolutionDetector;
 }
 
@@ -304,6 +307,7 @@ describe("ResolutionModule", () => {
     settlementInfraBreaker?: SettlementInfraBreaker;
     redeemQuarantineRepo?: ReturnType<typeof createMockRedeemQuarantineRepo>["repo"];
     runtimeMetrics?: RuntimeMetricsMock;
+    runtimeControl?: { isPaused(): boolean };
   }) {
     return new ResolutionModule({
       detector: detector as unknown as ResolutionDetector,
@@ -328,6 +332,7 @@ describe("ResolutionModule", () => {
         ? { redeemQuarantineRepo: overrides.redeemQuarantineRepo }
         : {}),
       ...(overrides?.runtimeMetrics ? { runtimeMetrics: overrides.runtimeMetrics } : {}),
+      ...(overrides?.runtimeControl ? { runtimeControl: overrides.runtimeControl } : {}),
     });
   }
 
@@ -752,6 +757,84 @@ describe("ResolutionModule", () => {
     await mod.stop();
 
     expect(detector.detectCondition as any).toHaveBeenCalledWith(CONDITION);
+  });
+
+  it("serializes a weak catalog-missing trigger and performs no side effect before exact proof", async () => {
+    const periodicDetection = deferred<DetectedResolution[]>();
+    const weakProof = deferred<DetectedResolution | null>();
+    (detector.detect as any).mockReturnValueOnce(periodicDetection.promise);
+    (detector.detectCatalogMissingCondition as any).mockReturnValueOnce(weakProof.promise);
+    (orderRepo.findByTokenId as any).mockReturnValue([{ orderId: "ord-weak", status: "open" }]);
+
+    await mod.start();
+    await delay(0);
+    await bus.publish(
+      "MarketCatalogMissingSnapshot" as any,
+      {
+        conditionIds: [CONDITION],
+        timestamp: Date.now(),
+      } as any,
+    );
+    await delay(0);
+
+    expect(detector.detectCatalogMissingCondition as any).not.toHaveBeenCalled();
+    periodicDetection.resolve([]);
+    await delay(0);
+    expect(detector.detectCatalogMissingCondition as any).toHaveBeenCalledWith(CONDITION);
+    expect(orderRepo.findByTokenId as any).not.toHaveBeenCalled();
+    expect(resolutionRepo.save as any).not.toHaveBeenCalled();
+    expect(settler.settle as any).not.toHaveBeenCalled();
+
+    weakProof.resolve(null);
+    await delay(0);
+    expect(orderRepo.findByTokenId as any).not.toHaveBeenCalled();
+    expect(resolutionRepo.save as any).not.toHaveBeenCalled();
+    expect(settler.settle as any).not.toHaveBeenCalled();
+    await mod.stop();
+  });
+
+  it("deduplicates weak triggers and lets a strong resolution hint dominate in-flight weak work", async () => {
+    const weakProof = deferred<DetectedResolution | null>();
+    (detector.detectCatalogMissingCondition as any).mockReturnValueOnce(weakProof.promise);
+    (detector.detectCondition as any).mockResolvedValue(makeDetectedResolution());
+
+    await mod.start();
+    await delay(0);
+    await bus.publish(
+      "MarketCatalogMissingSnapshot" as any,
+      {
+        conditionIds: [CONDITION, CONDITION],
+        timestamp: Date.now(),
+      } as any,
+    );
+    await delay(0);
+    await bus.publish("MarketResolvedHint", {
+      conditionId: CONDITION,
+      marketId: "market-1",
+      slug: "will-x-happen",
+      tokenIds: [TOK_YES],
+      winningTokenId: TOK_YES,
+      timestamp: Date.now(),
+    });
+    await bus.publish("MarketResolvedHint", {
+      conditionId: CONDITION,
+      marketId: "market-1",
+      slug: "will-x-happen",
+      tokenIds: [TOK_YES],
+      winningTokenId: TOK_YES,
+      timestamp: Date.now(),
+    });
+    await delay(0);
+
+    weakProof.resolve(makeDetectedResolution());
+    await delay(20);
+    expect(detector.detectCatalogMissingCondition as any).toHaveBeenCalledTimes(1);
+    expect(detector.detectCondition as any).toHaveBeenCalledTimes(1);
+    expect(settler.settle as any).toHaveBeenCalledTimes(1);
+    expect(settler.settle as any).toHaveBeenCalledWith(
+      expect.objectContaining({ conditionId: CONDITION }),
+    );
+    await mod.stop();
   });
 
   it("full cancel chain: MarketResolved triggers CancelOrderRequested with correct command shape", async () => {
@@ -2830,6 +2913,66 @@ describe("ResolutionModule", () => {
       expect(detector.detect as any).not.toHaveBeenCalled();
 
       await paused.stop();
+    });
+
+    it("retains a weak trigger across a mid-proof pause and wakes it on resume", async () => {
+      const firstProof = deferred<DetectedResolution | null>();
+      (detector.detectCatalogMissingCondition as any)
+        .mockReturnValueOnce(firstProof.promise)
+        .mockResolvedValueOnce(makeDetectedResolution());
+      let pausedState = false;
+      const gated = createModule({ runtimeControl: { isPaused: () => pausedState } });
+      await gated.start();
+      await delay(0);
+
+      await bus.publish(
+        "MarketCatalogMissingSnapshot" as any,
+        {
+          conditionIds: [CONDITION],
+          timestamp: Date.now(),
+        } as any,
+      );
+      await delay(0);
+      pausedState = true;
+      firstProof.resolve(makeDetectedResolution());
+      await delay(0);
+      expect(resolutionRepo.save as any).not.toHaveBeenCalled();
+
+      pausedState = false;
+      (gated as any).notifyRuntimeResumed();
+      await delay(20);
+      expect(detector.detectCatalogMissingCondition as any).toHaveBeenCalledTimes(2);
+      expect(resolutionRepo.save as any).toHaveBeenCalledWith(
+        expect.objectContaining({ conditionId: CONDITION, resolution: "YES" }),
+      );
+      await gated.stop();
+    });
+
+    it("lets an empty full-scan snapshot clear queued weak work before resume", async () => {
+      let pausedState = true;
+      const gated = createModule({ runtimeControl: { isPaused: () => pausedState } });
+      await gated.start();
+
+      await bus.publish(
+        "MarketCatalogMissingSnapshot" as any,
+        {
+          conditionIds: [CONDITION],
+          timestamp: Date.now(),
+        } as any,
+      );
+      await bus.publish(
+        "MarketCatalogMissingSnapshot" as any,
+        {
+          conditionIds: [],
+          timestamp: Date.now(),
+        } as any,
+      );
+      pausedState = false;
+      (gated as any).notifyRuntimeResumed();
+      await delay(20);
+
+      expect(detector.detectCatalogMissingCondition as any).not.toHaveBeenCalled();
+      await gated.stop();
     });
 
     it("defers recoverUnresolved while paused and runs it on first runCheck after resume", async () => {

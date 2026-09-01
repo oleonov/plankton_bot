@@ -408,6 +408,12 @@ export class ResolutionDetector {
     return this.queryResolution(conditionId, markets[0]!.slug, candidates);
   }
 
+  async detectCatalogMissingCondition(conditionId: string): Promise<DetectedResolution | null> {
+    const detected = await this.detectCondition(conditionId);
+    if (!detected || detected.resolution === "unknown") return null;
+    return detected.source === "gamma-api" || detected.source === "clob-api" ? detected : null;
+  }
+
   private async queryResolution(
     conditionId: string,
     slug: string,

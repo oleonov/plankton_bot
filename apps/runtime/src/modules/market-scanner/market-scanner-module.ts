@@ -22,6 +22,7 @@ import type {
   OrderRepository,
   MarketSelectionPolicy,
   RuntimeControl,
+  RuntimeEventMap,
 } from "@krabs/domain";
 import { evaluatePreEntry, createTokenId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -216,6 +217,7 @@ export class MarketScannerModule implements RuntimeModule {
    * Null until the first successful scan.
    */
   private lastScanResult: MarketScanResult | null = null;
+  private lastCatalogMissingSnapshot: RuntimeEventMap["MarketCatalogMissingSnapshot"] | null = null;
   /**
    * v5.11 admission breakdown — cumulative counters across all scan cycles
    * (mutated incrementally to keep memory flat). See Step2BreakdownSnapshot.
@@ -358,6 +360,11 @@ export class MarketScannerModule implements RuntimeModule {
     return result;
   }
 
+  async replayLastCatalogMissingSnapshot(): Promise<void> {
+    if (!this.lastCatalogMissingSnapshot) return;
+    await this.publishCatalogMissingSnapshot(this.lastCatalogMissingSnapshot);
+  }
+
   private async runScan(
     throwOnError: boolean,
     trigger: MarketScanTrigger,
@@ -414,9 +421,21 @@ export class MarketScannerModule implements RuntimeModule {
 
       // Build set of tokens with open positions/orders for preservation
       const activeTokenIds = new Set<string>();
+      const activePositions = this.deps.positionRepo
+        ? findActivePositions(this.deps.positionRepo)
+        : [];
+      const activePositionConditionByToken = new Map<string, string>();
       if (this.deps.positionRepo) {
-        for (const pos of findActivePositions(this.deps.positionRepo)) {
+        for (const pos of activePositions) {
           activeTokenIds.add(String(pos.tokenId));
+        }
+        if (activePositions.length > 0) {
+          const positionMarkets = this.deps.marketRepo.findByTokenIds(
+            activePositions.map((position) => position.tokenId),
+          );
+          for (const market of positionMarkets) {
+            activePositionConditionByToken.set(String(market.tokenId), market.conditionId);
+          }
         }
       }
       if (this.deps.orderRepo) {
@@ -688,6 +707,18 @@ export class MarketScannerModule implements RuntimeModule {
         durationMs,
       };
       this.lastScanResult = result;
+      const missingConditionIds = new Set<string>();
+      for (const position of activePositions) {
+        const tokenId = String(position.tokenId);
+        const conditionId = activePositionConditionByToken.get(tokenId);
+        if (!discoveredTokenIds.has(tokenId) && conditionId) missingConditionIds.add(conditionId);
+      }
+      const catalogMissingSnapshot: RuntimeEventMap["MarketCatalogMissingSnapshot"] = {
+        conditionIds: [...missingConditionIds].sort((left, right) => left.localeCompare(right)),
+        timestamp: Date.now(),
+      };
+      this.lastCatalogMissingSnapshot = catalogMissingSnapshot;
+      await this.publishCatalogMissingSnapshot(catalogMissingSnapshot);
 
       const scanPhasesMs = {
         prepare: roundedNonNegativeMs(prepareMs),
@@ -747,6 +778,16 @@ export class MarketScannerModule implements RuntimeModule {
       return null;
     } finally {
       this.scanning = false;
+    }
+  }
+
+  private async publishCatalogMissingSnapshot(
+    snapshot: RuntimeEventMap["MarketCatalogMissingSnapshot"],
+  ): Promise<void> {
+    try {
+      await this.deps.bus.publish("MarketCatalogMissingSnapshot", snapshot);
+    } catch (err) {
+      this.log.warn({ err }, "catalog-missing snapshot publish failed — retaining for replay");
     }
   }
 

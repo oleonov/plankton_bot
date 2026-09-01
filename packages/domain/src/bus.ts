@@ -108,6 +108,11 @@ export interface RuntimeEventMap {
     readonly timestamp: number;
   };
 
+  MarketCatalogMissingSnapshot: {
+    readonly conditionIds: readonly string[];
+    readonly timestamp: number;
+  };
+
   SignalProduced: {
     readonly signal: Signal;
     readonly market: NormalizedMarket;

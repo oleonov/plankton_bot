@@ -222,6 +222,17 @@ function createMockOrderRepo(): OrderRepository {
   };
 }
 
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value?: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value?: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res as (value?: T | PromiseLike<T>) => void;
+  });
+  return { promise, resolve };
+}
+
 function buildModule(
   opts: {
     discoveryGateway?: MarketDiscoveryGateway;
@@ -2046,6 +2057,114 @@ describe("MarketScannerModule", () => {
 
   // ── ADR-021 §D-F watch-set telemetry ──────────────────────────────────────
   describe("watch-set telemetry (ADR-021 §D-F)", () => {
+    it("publishes only sorted missing active-position conditions and replays the latest full-scan snapshot", async () => {
+      const positionRepo = createMockPositionRepo();
+      (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        { tokenId: createTokenId("tok-z-1"), status: "open" },
+        { tokenId: createTokenId("tok-a"), status: "open" },
+        { tokenId: createTokenId("tok-z-2"), status: "open" },
+        { tokenId: createTokenId("tok-found"), status: "open" },
+      ]);
+      const orderRepo = createMockOrderRepo();
+      (orderRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        { tokenId: createTokenId("tok-order-only"), status: "open" },
+      ]);
+      const marketRepo = createMockMarketRepo();
+      (marketRepo.findByTokenIds as ReturnType<typeof vi.fn>).mockReturnValue([
+        { tokenId: createTokenId("tok-z-1"), conditionId: "cond-z" },
+        { tokenId: createTokenId("tok-a"), conditionId: "cond-a" },
+        { tokenId: createTokenId("tok-z-2"), conditionId: "cond-z" },
+        { tokenId: createTokenId("tok-found"), conditionId: "cond-found" },
+        { tokenId: createTokenId("tok-order-only"), conditionId: "cond-order" },
+      ]);
+      const { mod, discoveryGateway, bus } = buildModule({
+        marketRepo,
+        positionRepo,
+        orderRepo,
+      });
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          conditionId: "cond-found",
+          tokens: [{ tokenId: "tok-found", outcome: "Yes" }],
+        }),
+      ]);
+
+      await mod.scanOrThrow();
+
+      expect(bus.publish).toHaveBeenCalledWith("MarketCatalogMissingSnapshot", {
+        conditionIds: ["cond-a", "cond-z"],
+        timestamp: expect.any(Number),
+      });
+
+      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          conditionId: "cond-all",
+          tokens: [
+            { tokenId: "tok-z-1", outcome: "A" },
+            { tokenId: "tok-a", outcome: "B" },
+            { tokenId: "tok-z-2", outcome: "C" },
+            { tokenId: "tok-found", outcome: "D" },
+          ],
+        }),
+      ]);
+      await mod.scanOrThrow();
+      expect(bus.publish).toHaveBeenLastCalledWith("MarketCatalogMissingSnapshot", {
+        conditionIds: [],
+        timestamp: expect.any(Number),
+      });
+
+      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+      await (mod as any).replayLastCatalogMissingSnapshot();
+      expect(bus.publish).toHaveBeenCalledWith("MarketCatalogMissingSnapshot", {
+        conditionIds: [],
+        timestamp: expect.any(Number),
+      });
+    });
+
+    it("uses the scan-start active-position snapshot and emits nothing for a failed scan", async () => {
+      const releaseScan = deferred<void>();
+      const scanStarted = deferred<void>();
+      const positionRepo = createMockPositionRepo();
+      (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        { tokenId: createTokenId("tok-before"), status: "open" },
+      ]);
+      const marketRepo = createMockMarketRepo();
+      (marketRepo.findByTokenIds as ReturnType<typeof vi.fn>).mockImplementation(
+        (tokenIds: readonly string[]) =>
+          tokenIds.map((tokenId) => ({ tokenId, conditionId: `cond-${String(tokenId)}` })),
+      );
+      const discoveryGateway = createMockDiscoveryGateway();
+      (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          scanStarted.resolve();
+          await releaseScan.promise;
+          return { totalMarkets: 0 };
+        },
+      );
+      const { mod, bus } = buildModule({ discoveryGateway, marketRepo, positionRepo });
+
+      const scan = mod.scanOrThrow();
+      await scanStarted.promise;
+      (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        { tokenId: createTokenId("tok-after"), status: "open" },
+      ]);
+      releaseScan.resolve();
+      await scan;
+
+      expect(bus.publish).toHaveBeenCalledWith("MarketCatalogMissingSnapshot", {
+        conditionIds: ["cond-tok-before"],
+        timestamp: expect.any(Number),
+      });
+
+      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+      (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("partial catalog failed"),
+      );
+      await mod.scan();
+      expect(bus.publish).not.toHaveBeenCalled();
+    });
+
     it("scan() reports preservedDisappearedTokens=0 when every preserved token is rediscovered", async () => {
       const positionRepo = createMockPositionRepo();
       (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
