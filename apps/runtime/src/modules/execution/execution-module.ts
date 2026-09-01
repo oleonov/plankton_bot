@@ -94,6 +94,7 @@ import {
   classifyExitCoverageCleanup,
   findS1CoverageWorkingSells,
   hasS1CoverageCleanupMarker,
+  matchesExactBounceSupplementalCoverage,
   parseS1CoverageCleanup,
   resolveExactS1CoverageCleanupState,
   s1CoverageFillLookup,
@@ -218,6 +219,7 @@ const EXECUTION_SHUTDOWN_TIMEOUT_MS = 10_000;
 const TRADING_DISABLED_WARN_INTERVAL_MS = 5 * 60_000;
 const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
 const D8_EXIT_ALREADY_WORKING_REASON = "d8-exit-already-working";
+type ExitCoverageAdmissionKind = ExitCoverageCleanupKind | "bounce-supplemental";
 
 type OrderFillLookupGateway = ExchangeGateway & {
   getFillsForOrder?: (orderId: string) => Promise<ExchangeFill[]>;
@@ -675,6 +677,7 @@ export class ExecutionModule implements RuntimeModule {
   private readonly recoverySubmissionAttempts = new Set<string>();
   private readonly exitRecoveriesInFlight = new Set<string>();
   private readonly cleanupAdmissionClaims = new Set<string>();
+  private readonly activeBounceSupplementalClientIds = new Set<string>();
 
   /**
    * In-flight commands on the queue-less path (`maxConcurrency` unset), settled-successfully so
@@ -2648,12 +2651,24 @@ export class ExecutionModule implements RuntimeModule {
   // ─── Place order handler ──────────────────────────────────────────────
 
   private async handlePlace(cmd: PlaceOrderCommand, recoveryOnly = false): Promise<void> {
-    const cleanupKind = this.exitCoverageCleanupKind(cmd);
+    const staticCleanupKind = this.exitCoverageCleanupKind(cmd);
+    const supplementalShape = this.isBounceSupplementalCandidateShape(cmd);
+    const supplemental = supplementalShape && this.matchesCurrentBounceSupplementalState(cmd);
+    const cleanupKind: ExitCoverageAdmissionKind | null =
+      staticCleanupKind ?? (supplemental ? "bounce-supplemental" : null);
     const tokenKey = String(cmd.tokenId);
     if (cleanupKind != null && this.cleanupAdmissionClaims.has(tokenKey)) {
       await this.rejectOrder(
         cmd,
         "exit-coverage-cleanup-in-flight",
+        ExchangeErrorCode.LivePolicyBlocked,
+      );
+      return;
+    }
+    if (supplementalShape && !supplemental) {
+      await this.rejectOrder(
+        cmd,
+        "invalid-exit-coverage-cleanup",
         ExchangeErrorCode.LivePolicyBlocked,
       );
       return;
@@ -2674,9 +2689,14 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
     this.cleanupAdmissionClaims.add(tokenKey);
+    if (cleanupKind === "bounce-supplemental") {
+      this.activeBounceSupplementalClientIds.add(String(cmd.clientOrderId));
+      this.deps.runtimeMetrics?.writeCounter?.("track_bounce_supplemental_admitted_total", 1);
+    }
     try {
       await this.handlePlaceWithCleanupClaim(cmd, recoveryOnly, cleanupKind);
     } finally {
+      this.activeBounceSupplementalClientIds.delete(String(cmd.clientOrderId));
       this.cleanupAdmissionClaims.delete(tokenKey);
     }
   }
@@ -2684,7 +2704,7 @@ export class ExecutionModule implements RuntimeModule {
   private async handlePlaceWithCleanupClaim(
     cmd: PlaceOrderCommand,
     recoveryOnly: boolean,
-    cleanupKind: ExitCoverageCleanupKind | null,
+    cleanupKind: ExitCoverageAdmissionKind | null,
   ): Promise<void> {
     const recoveryAuthorized =
       recoveryOnly && this.activeExitRecoveryClientIds.has(String(cmd.clientOrderId));
@@ -3103,7 +3123,7 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
-    const decision = this.getReservationDecision(cmd, notional);
+    const decision = this.getReservationDecision(cmd, notional, cleanupKind != null);
     if (decision.kind === "reject") {
       this.recordInternalReservationReject(decision.reason);
       if (!decision.capacitySampleRecorded) {
@@ -4825,7 +4845,7 @@ export class ExecutionModule implements RuntimeModule {
         );
         return;
       }
-      if (this.s1CoverageChanged(effectiveCmd)) {
+      if (this.exitCoverageChanged(effectiveCmd)) {
         await this.rejectOrder(
           effectiveCmd,
           "exit-coverage-cleanup-state-changed",
@@ -5225,6 +5245,58 @@ export class ExecutionModule implements RuntimeModule {
     );
   }
 
+  private isBounceSupplementalCandidateShape(cmd: PlaceOrderCommand): boolean {
+    const rung = cmd.metadata?.bounceRung as { isCleanupRung?: boolean } | undefined;
+    return (
+      cmd.side === "sell" &&
+      cmd.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+      !!rung &&
+      rung.isCleanupRung !== true &&
+      this.deps.orderRepo
+        .findByTokenId(cmd.tokenId)
+        .some(
+          (order) =>
+            (order.status === "pending" ||
+              order.status === "open" ||
+              order.status === "partially-filled") &&
+            (order.metadata?.bounceRung as { isCleanupRung?: boolean } | undefined)
+              ?.isCleanupRung === true,
+        )
+    );
+  }
+
+  private matchesCurrentBounceSupplementalState(cmd: PlaceOrderCommand): boolean {
+    const positionRepo = this.deps.positionRepo;
+    if (!positionRepo || cmd.postOnly !== true) return false;
+    try {
+      const positions = positionRepo.findActiveByTokenId(cmd.tokenId);
+      const orders = this.deps.orderRepo.findByTokenId(cmd.tokenId);
+      const fills =
+        this.deps.fillRepo.findByOrderIds?.(orders.map((order) => order.orderId)) ??
+        orders.flatMap((order) => this.deps.fillRepo.findByOrderId(order.orderId));
+      const filled = new Map(orders.map((order) => [String(order.orderId), 0]));
+      for (const fill of fills) {
+        const id = String(fill.orderId);
+        if (filled.has(id)) filled.set(id, filled.get(id)! + fill.size);
+      }
+      return (
+        positions.length === 1 &&
+        matchesExactBounceSupplementalCoverage({
+          candidate: {
+            ...cmd,
+            bounceRung: cmd.metadata?.bounceRung,
+          },
+          position: positions[0] ?? null,
+          orders,
+          policy: this.currentBounceExitPolicy(),
+          filledSize: (order) => filled.get(String(order.orderId)) ?? null,
+        })
+      );
+    } catch {
+      return false;
+    }
+  }
+
   private matchesCurrentS1CoverageState(cmd: PlaceOrderCommand, retryPredecessor?: Order): boolean {
     const positionRepo = this.deps.positionRepo;
     if (!positionRepo || this.exitCoverageCleanupKind(cmd) !== "s1") return false;
@@ -5317,7 +5389,10 @@ export class ExecutionModule implements RuntimeModule {
     return current;
   }
 
-  private s1CoverageChanged(cmd: PlaceOrderCommand, retryPredecessor?: Order): boolean {
+  private exitCoverageChanged(cmd: PlaceOrderCommand, retryPredecessor?: Order): boolean {
+    if (this.activeBounceSupplementalClientIds.has(String(cmd.clientOrderId))) {
+      return !this.matchesCurrentBounceSupplementalState(cmd);
+    }
     return (
       hasS1CoverageCleanupMarker(cmd.metadata) &&
       !this.matchesCurrentS1CoverageState(cmd, retryPredecessor)
@@ -5421,6 +5496,7 @@ export class ExecutionModule implements RuntimeModule {
   private getReservationDecision(
     cmd: PlaceOrderCommand,
     notional: number,
+    isExitCoverageCleanup = false,
   ):
     | { kind: "accept" }
     | {
@@ -5596,7 +5672,11 @@ export class ExecutionModule implements RuntimeModule {
     }
     const perTokenSell = evaluatePerTokenOrderCapacity({
       side: "sell",
-      maxOpenOrdersPerToken: this.resolveMaxOpenSellOrdersPerToken(cmd, sellPolicy),
+      maxOpenOrdersPerToken: this.resolveMaxOpenSellOrdersPerToken(
+        cmd,
+        sellPolicy,
+        isExitCoverageCleanup,
+      ),
       openOrdersForToken: getOpenOrderCountForToken(reservations, cmd.tokenId, "sell"),
       enabled: sellPolicy.enabled,
     });
@@ -5760,13 +5840,14 @@ export class ExecutionModule implements RuntimeModule {
   private resolveMaxOpenSellOrdersPerToken(
     cmd: PlaceOrderCommand,
     sellPolicy: ReturnType<typeof normalizeSellCapacityPolicy>,
+    isExitCoverageCleanup = this.exitCoverageCleanupKind(cmd) != null,
   ): number {
     return resolveEffectiveMaxOpenSellOrdersPerToken({
       decisionRuleId: cmd.decisionRuleId ?? null,
       sellPolicy,
       s1MaxOrdersPerToken: this.currentTrackS1Policy()?.s1MaxOrdersPerToken,
       bounceLadderRungCount: this.currentBounceExitPolicy()?.ladderFractions.length,
-      isExitCoverageCleanup: this.exitCoverageCleanupKind(cmd) != null,
+      isExitCoverageCleanup,
     });
   }
 
@@ -6363,7 +6444,9 @@ export class ExecutionModule implements RuntimeModule {
       }
       pendingPersisted = true;
     };
-    const cleanupPending = hasS1CoverageCleanupMarker(cmd.metadata);
+    const cleanupPending =
+      hasS1CoverageCleanupMarker(cmd.metadata) ||
+      this.activeBounceSupplementalClientIds.has(String(cmd.clientOrderId));
     if (!cleanupPending) persistPending();
 
     const submit = await withinLiveSubmissionLane(async () => {
@@ -6433,7 +6516,7 @@ export class ExecutionModule implements RuntimeModule {
         await this.assertRecoverySubmitBoundary(cmd);
         this.recoverySubmissionAttempts.add(String(cmd.clientOrderId));
       }
-      if (this.s1CoverageChanged(cmd, replacement)) {
+      if (this.exitCoverageChanged(cmd, replacement)) {
         return {
           kind: "rejected" as const,
           errorCode: ExchangeErrorCode.LivePolicyBlocked,
@@ -7453,7 +7536,7 @@ export class ExecutionModule implements RuntimeModule {
     if (
       rejectedPreparedOrder &&
       hasS1CoverageCleanupMarker(retryCmd.metadata) &&
-      this.s1CoverageChanged(retryCmd, rejectedPreparedOrder)
+      this.exitCoverageChanged(retryCmd, rejectedPreparedOrder)
     ) {
       return false;
     }
@@ -7590,7 +7673,7 @@ export class ExecutionModule implements RuntimeModule {
     ) {
       return false;
     }
-    if (!retryPreparedLive && this.s1CoverageChanged(retryCmd)) {
+    if (!retryPreparedLive && this.exitCoverageChanged(retryCmd)) {
       await this.rejectOrder(
         retryCmd,
         "exit-coverage-cleanup-state-changed",

@@ -18,6 +18,7 @@ export function bounceRungsConflict(
   if (candidate.isCleanupRung === true) {
     return existing.isCleanupRung === true && existingWorking;
   }
+  if (existing.isCleanupRung === true) return false;
   const candidateIndices = new Set(rungIndices(candidate));
   return rungIndices(existing).some((index) => candidateIndices.has(index));
 }

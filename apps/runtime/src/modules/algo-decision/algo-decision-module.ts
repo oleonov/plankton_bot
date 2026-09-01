@@ -1387,26 +1387,31 @@ export class AlgoDecisionModule implements RuntimeModule {
   ): Promise<NormalizedMarket | null> {
     const tokenId = String(market.tokenId);
     if (epoch !== this.lifecycleEpoch) return null;
-    if (!market.active || this.marketCache.has(tokenId)) return null;
+    if (!market.active) return null;
+    const cached = this.marketCache.get(tokenId);
+    if (cached?.acceptingOrders && cached.enableOrderBook) return null;
     if (!isOpenPosition(this.deps.positionRepo?.findByTokenId(market.tokenId))) return null;
+    const candidate = cached ?? market;
     const reader = this.deps.marketLivenessReader;
-    if (market.acceptingOrders && market.enableOrderBook) return market;
+    if (candidate.acceptingOrders && candidate.enableOrderBook) return candidate;
     if (!reader) return null;
     if (this.heartbeatLivenessFetches.has(tokenId)) return null;
 
     this.heartbeatLivenessFetches.set(tokenId, epoch);
     try {
       const current = await reader.getMarket(String(market.conditionId));
-      if (epoch !== this.lifecycleEpoch || this.marketCache.has(tokenId)) return null;
+      if (epoch !== this.lifecycleEpoch) return null;
+      const latest = this.marketCache.get(tokenId);
+      if (latest?.acceptingOrders && latest.enableOrderBook) return null;
       if (!isOpenPosition(this.deps.positionRepo?.findByTokenId(market.tokenId))) return null;
-      const outcome = classifyHeartbeatLivenessProof(market, current);
+      const outcome = classifyHeartbeatLivenessProof(candidate, current);
       this.deps.runtimeMetrics?.writeCounter(
         "track_algo_market_liveness_refresh_total",
         1,
         JSON.stringify({ outcome }),
       );
       return outcome === "live"
-        ? { ...market, acceptingOrders: true, enableOrderBook: true }
+        ? { ...candidate, acceptingOrders: true, enableOrderBook: true }
         : null;
     } catch {
       if (epoch === this.lifecycleEpoch) {
@@ -1655,9 +1660,18 @@ export class AlgoDecisionModule implements RuntimeModule {
     ) {
       return false;
     }
-    const position = this.findOpenPositionByTokenId(payload.tokenId);
-    if (!position || !isBounceOwned(position)) return false;
-    return String(order.positionId ?? "") === String(position.positionId);
+    const position = this.deps.positionRepo?.findByTokenId(payload.tokenId);
+    if (
+      !isOpenPosition(position) ||
+      !isBounceOwned(position) ||
+      String(position.tokenId) !== String(payload.tokenId) ||
+      String(position.conditionId) !== String(payload.conditionId) ||
+      String(order.positionId ?? "") !== String(position.positionId)
+    ) {
+      return false;
+    }
+    this.positionCache.set(String(payload.tokenId), position);
+    return true;
   }
 
   private async handleOrderRejected(payload: RuntimeEventMap["OrderRejected"]): Promise<void> {
@@ -2619,13 +2633,14 @@ export class AlgoDecisionModule implements RuntimeModule {
             rungIndex?: number;
             rungIndicesCovered?: number[];
             originalPositionSize?: number;
+            isCleanupRung?: boolean;
           }
         | undefined;
       if (!bounceRung || bounceRung.ladderId !== ladderId) continue;
       // Cancelled rungs are NOT "placed" — they get retried (unchanged from
       // pre-Phase-3 behavior) — but they still flow into `ladderOrders` below
       // so any partial fill they carry counts toward soldShares.
-      if (order.status !== "cancelled") {
+      if (order.status !== "cancelled" && bounceRung.isCleanupRung !== true) {
         // rungIndicesCovered (min-order rollover) marks every absorbed index
         // as placed, not just the order's own rungIndex.
         if (Array.isArray(bounceRung.rungIndicesCovered)) {

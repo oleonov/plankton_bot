@@ -27,6 +27,8 @@ export interface S1CoverageCleanupV1 {
 }
 
 export interface ExitCoverageCleanupCandidate {
+  readonly tokenId?: string | undefined;
+  readonly conditionId?: string | undefined;
   readonly source?: string | undefined;
   readonly side: string;
   readonly decisionRuleId?: string | null | undefined;
@@ -41,6 +43,162 @@ export interface ExitCoverageCleanupCandidate {
 }
 
 export type ExitCoverageCleanupKind = "bounce" | "s1";
+
+export function matchesExactBounceSupplementalCoverage(input: {
+  readonly candidate: ExitCoverageCleanupCandidate;
+  readonly position: Position | null;
+  readonly orders: readonly Order[];
+  readonly policy: BounceExitPolicy | undefined;
+  readonly filledSize: (order: Order) => number | null;
+}): boolean {
+  const { candidate, position, policy } = input;
+  const rung = isRecord(candidate.bounceRung) ? candidate.bounceRung : null;
+  if (
+    !position ||
+    position.status !== "open" ||
+    position.exitOwner !== "bounce" ||
+    !policy ||
+    candidate.side !== "sell" ||
+    candidate.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
+    candidate.signalReason !== "repricing-exit" ||
+    candidate.postOnly === false ||
+    candidate.positionId !== position.positionId ||
+    candidate.tokenId !== position.tokenId ||
+    candidate.conditionId !== position.conditionId ||
+    !isPositive(candidate.tickSize) ||
+    !rung ||
+    rung.isCleanupRung === true ||
+    typeof rung.ladderId !== "string" ||
+    !Number.isInteger(rung.rungIndex) ||
+    !isPositive(rung.anchorPrice) ||
+    !isPositive(rung.fraction) ||
+    !isPositive(rung.originalPositionSize) ||
+    !isPositive(rung.remainingPositionSize) ||
+    !isPositive(rung.uncommittedRemainder)
+  ) {
+    return false;
+  }
+  const rungIndex = rung.rungIndex as number;
+  if (
+    rungIndex < 0 ||
+    rungIndex >= policy.ladderFractions.length ||
+    !sameNumber(rung.fraction, policy.ladderFractions[rungIndex]!) ||
+    !sameNumber(candidate.size, rung.originalPositionSize * rung.fraction) ||
+    !sameNumber(rung.remainingPositionSize, position.size) ||
+    !sameNumber(rung.uncommittedRemainder, candidate.size) ||
+    !sameNumber(
+      candidate.price,
+      bounceTarget(policy, rung.anchorPrice, rungIndex, candidate.tickSize),
+    )
+  ) {
+    return false;
+  }
+
+  const working = input.orders.filter(
+    (order) =>
+      order.side === "sell" &&
+      order.tokenId === position.tokenId &&
+      WORKING_STATUSES.has(order.status),
+  );
+  const cleanup = working.filter((order) => bounceRungMetadata(order)?.isCleanupRung === true);
+  const ordinary = working.filter((order) => bounceRungMetadata(order)?.isCleanupRung !== true);
+  if (
+    cleanup.length !== 1 ||
+    ordinary.length !== policy.ladderFractions.length - 1 ||
+    working.some(
+      (order) =>
+        order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
+        order.conditionId !== position.conditionId ||
+        order.positionId !== position.positionId ||
+        !order.exchangeOrderId,
+    ) ||
+    !matchesBounceLineage(cleanup[0]!, rung, candidate, policy, true)
+  ) {
+    return false;
+  }
+
+  const indices = new Set<number>();
+  for (const order of ordinary) {
+    const orderRung = bounceRungMetadata(order);
+    if (
+      !orderRung ||
+      orderRung.rungIndex === rungIndex ||
+      indices.has(orderRung.rungIndex) ||
+      !matchesBounceLineage(order, rung, candidate, policy, false)
+    ) {
+      return false;
+    }
+    indices.add(orderRung.rungIndex);
+  }
+  const remaining = working.reduce((total, order) => {
+    const filled = input.filledSize(order);
+    return filled == null || filled < 0 || filled > order.size + EPSILON
+      ? Number.NaN
+      : total + Math.max(0, order.size - filled);
+  }, 0);
+  return (
+    Number.isFinite(remaining) &&
+    sameNumber(position.size - remaining, candidate.size) &&
+    sameNumber(remaining + candidate.size, position.size)
+  );
+}
+
+function matchesBounceLineage(
+  order: Order,
+  candidateRung: Record<string, unknown>,
+  candidate: ExitCoverageCleanupCandidate,
+  policy: BounceExitPolicy,
+  cleanup: boolean,
+): boolean {
+  const rung = bounceRungMetadata(order);
+  if (
+    !rung ||
+    order.postOnly !== true ||
+    rung.ladderId !== candidateRung.ladderId ||
+    !sameNumber(rung.anchorPrice, candidateRung.anchorPrice as number) ||
+    !sameNumber(rung.originalPositionSize, candidateRung.originalPositionSize as number)
+  ) {
+    return false;
+  }
+  if (cleanup) {
+    return (
+      classifyExitCoverageCleanup(
+        { ...order, tickSize: candidate.tickSize, bounceRung: rung },
+        policy,
+      ) === "bounce" &&
+      sameNumber(rung.remainingPositionSize, candidateRung.remainingPositionSize as number)
+    );
+  }
+  const index = rung.rungIndex;
+  const fraction = policy.ladderFractions[index];
+  return (
+    Number.isInteger(index) &&
+    fraction !== undefined &&
+    rung.isCleanupRung !== true &&
+    (!rung.rungIndicesCovered ||
+      (rung.rungIndicesCovered.length === 1 && rung.rungIndicesCovered[0] === index)) &&
+    sameNumber(rung.fraction, fraction) &&
+    sameNumber(order.size, rung.originalPositionSize * fraction) &&
+    sameNumber(order.price, bounceTarget(policy, rung.anchorPrice, index, candidate.tickSize!))
+  );
+}
+
+function bounceTarget(
+  policy: BounceExitPolicy,
+  anchorPrice: number,
+  rungIndex: number,
+  tickSize: number,
+): number {
+  const gain =
+    (1 + bounceExitTierGain(policy, anchorPrice)) * Math.pow(1 + policy.ladderStepPct, rungIndex) -
+    1;
+  return computeHarvestTarget(anchorPrice, gain, tickSize);
+}
+
+function bounceRungMetadata(order: Order): BounceRungMetadata | null {
+  const value = order.metadata?.bounceRung;
+  return isRecord(value) ? (value as unknown as BounceRungMetadata) : null;
+}
 
 export interface ExactS1CoverageCleanupState {
   readonly ladderId: string;

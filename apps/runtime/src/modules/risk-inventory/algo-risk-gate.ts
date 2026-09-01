@@ -14,7 +14,10 @@ import {
   isBounceForceExit,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
-import { classifyExitCoverageCleanup } from "../../exit-coverage-cleanup.js";
+import {
+  classifyExitCoverageCleanup,
+  matchesExactBounceSupplementalCoverage,
+} from "../../exit-coverage-cleanup.js";
 import { isExitRecoveryFencedPredecessor } from "../execution/reservation-utils.js";
 import {
   OPEN_POSITION_EXISTS_REASON,
@@ -232,6 +235,7 @@ export class AlgoRiskGateImpl implements RiskGate {
         },
         policy?.bounceExit,
       ) === "bounce";
+    const isBounceSupplementalSignal = this.matchesBounceSupplemental(signal, policy, market);
     const buyPolicy = normalizeBuyCapacityPolicy(this.buyCapacityPolicy?.() ?? policy?.buyCapacity);
     const sellPolicy = normalizeSellCapacityPolicy(policy?.sellCapacity);
     const orderPolicy = normalizeOrderCapacityPolicy(policy?.orderCapacity);
@@ -310,7 +314,7 @@ export class AlgoRiskGateImpl implements RiskGate {
           decisionRuleId: signal.decisionRuleId ?? null,
           sellPolicy,
           bounceLadderRungCount: policy?.bounceExit.ladderFractions.length,
-          isExitCoverageCleanup: isBounceCleanupSignal,
+          isExitCoverageCleanup: isBounceCleanupSignal || isBounceSupplementalSignal,
         }),
         openOrdersForToken: sellCounts.perTokenOpenSellOrderCount,
         enabled: sellPolicy.enabled,
@@ -461,6 +465,43 @@ export class AlgoRiskGateImpl implements RiskGate {
     passed.push("wallet_buy_budget_ok");
 
     return finish(true);
+  }
+
+  private matchesBounceSupplemental(
+    signal: Signal,
+    policy: ExecutionPolicy | undefined,
+    market: ReturnType<MarketRepository["findByTokenId"]> | undefined,
+  ): boolean {
+    try {
+      const positions = this.positionRepo.findActiveByTokenId(signal.tokenId);
+      return (
+        positions.length === 1 &&
+        matchesExactBounceSupplementalCoverage({
+          candidate: {
+            tokenId: signal.tokenId,
+            conditionId: signal.conditionId,
+            side: signal.side,
+            decisionRuleId: signal.decisionRuleId,
+            signalReason: signal.reason,
+            positionId: signal.positionId,
+            size: signal.suggestedSize,
+            price: signal.suggestedPrice,
+            tickSize: market?.tickSize ?? Number.NaN,
+            bounceRung: signal.bounceRung,
+          },
+          position: positions[0] ?? null,
+          orders: this.orderRepo.findByTokenId(signal.tokenId),
+          policy: policy?.bounceExit,
+          filledSize: (order) =>
+            typeof order.fillProgressShares === "number" &&
+            Number.isFinite(order.fillProgressShares)
+              ? order.fillProgressShares
+              : null,
+        })
+      );
+    } catch {
+      return false;
+    }
   }
 
   private decision(

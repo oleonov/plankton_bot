@@ -193,6 +193,67 @@ function makeOpenSellOrder(overrides?: Partial<Order>): Order {
   });
 }
 
+function makeBounceSupplementalFixture() {
+  const policy = makeExecutionPolicy();
+  const position = makeOpenPosition({ size: 120, exitOwner: "bounce" });
+  const ladderId = "prod-bounce-supplemental";
+  const anchorPrice = 0.002;
+  const price = (rungIndex: number) =>
+    computeHarvestTarget(
+      anchorPrice,
+      (1 + bounceExitTierGain(policy.bounceExit, anchorPrice)) *
+        Math.pow(1 + policy.bounceExit.ladderStepPct, rungIndex) -
+        1,
+      0.001,
+    );
+  const rung = (rungIndex: number, size: number, cleanup = false) =>
+    makeOpenSellOrder({
+      orderId: `supplemental-${rungIndex}-${cleanup}` as any,
+      clientOrderId: `supplemental-cl-${rungIndex}-${cleanup}` as any,
+      conditionId: position.conditionId,
+      positionId: position.positionId,
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      signalReason: "repricing-exit",
+      postOnly: true,
+      exchangeOrderId: `exchange-${rungIndex}-${cleanup}`,
+      fillProgressShares: 0,
+      price: price(rungIndex),
+      size,
+      metadata: {
+        bounceRung: {
+          ladderId,
+          rungIndex,
+          anchorPrice,
+          fraction: cleanup ? 3 : policy.bounceExit.ladderFractions[rungIndex],
+          originalPositionSize: 30,
+          remainingPositionSize: cleanup ? 120 : 30,
+          uncommittedRemainder: cleanup ? 90 : 120 - 90 - 9 - 12,
+          ...(cleanup ? { isCleanupRung: true } : {}),
+        },
+      },
+    });
+  const orders = [rung(0, 9), rung(1, 12), rung(2, 90, true)];
+  const signal = makeSignal({
+    side: "sell",
+    reason: "repricing-exit",
+    decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+    positionId: position.positionId,
+    suggestedPrice: price(2),
+    suggestedSize: 9,
+    suggestedSizeUsdc: price(2) * 9,
+    bounceRung: {
+      ladderId,
+      rungIndex: 2,
+      anchorPrice,
+      fraction: 0.3,
+      originalPositionSize: 30,
+      remainingPositionSize: 120,
+      uncommittedRemainder: 9,
+    },
+  });
+  return { policy, position, orders, signal };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("AlgoRiskGateImpl", () => {
@@ -774,6 +835,38 @@ describe("AlgoRiskGateImpl", () => {
 
     expect(approved.approved).toBe(true);
     expect(malformed.rejectionReasons).toContain("per_token_sell_limit");
+  });
+
+  it("admits only the exact missing ordinary rung beside a working cleanup", async () => {
+    const fixture = makeBounceSupplementalFixture();
+    const evaluate = (orders: Order[], signal = fixture.signal, position = fixture.position) => {
+      const positions = makePositionRepo(position);
+      positions.findActiveByTokenId = vi.fn(() => [position]);
+      return new AlgoRiskGateImpl(
+        makeOrderRepo(orders),
+        positions,
+        makeLogger(),
+        undefined,
+        undefined,
+        undefined,
+        () => fixture.policy,
+        undefined,
+        { findByTokenId: vi.fn(() => ({ tickSize: 0.001 })) } as any,
+      ).evaluate(signal);
+    };
+
+    expect((await evaluate(fixture.orders)).approved).toBe(true);
+    const wrongCycle = { ...fixture.orders[0]!, positionId: createPositionId("old-cycle") };
+    const conflict = makeOpenSellOrder({ orderId: "conflict" as any, conditionId: COND_ID });
+    for (const decision of await Promise.all([
+      evaluate(fixture.orders, { ...fixture.signal, suggestedSize: 8 }),
+      evaluate([wrongCycle, ...fixture.orders.slice(1)]),
+      evaluate([...fixture.orders, conflict]),
+      evaluate(fixture.orders, fixture.signal, { ...fixture.position, size: 111 }),
+      evaluate(fixture.orders, { ...fixture.signal, suggestedSize: 4, suggestedSizeUsdc: 0.02 }),
+    ])) {
+      expect(decision.approved).toBe(false);
+    }
   });
 
   it("also grants the BOUNCE_EXIT_BACKSTOP taker signal the same ladder-sized carve-out (N rungs + backstop coexist)", async () => {

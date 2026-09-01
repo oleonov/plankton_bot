@@ -685,7 +685,7 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
-  it("hydrates a missing held BOUNCE market from heartbeat and emits its exact cleanup after debounce", async () => {
+  it("refreshes cached false liveness and emits the exact missing rung beside cleanup", async () => {
     vi.useFakeTimers();
     try {
       const now = Date.parse("2026-09-01T00:00:00.000Z");
@@ -704,18 +704,28 @@ describe("AlgoDecisionModule", () => {
         exitOwner: "bounce",
       });
       const ladderId = `${tokenId}:${legState.firstTradeAt}`;
-      const orders = [9, 12, 9].map((size, rungIndex) =>
+      const orders = [9, 12, 90].map((size, rungIndex) =>
         makeOrder(tokenId, {
           orderId: createOrderId(`heartbeat-rung-${rungIndex}`),
           positionId: position.positionId,
           decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
           size,
-          metadata: { bounceRung: { ladderId, rungIndex, originalPositionSize: 30 } },
+          metadata: {
+            bounceRung: {
+              ladderId,
+              rungIndex,
+              originalPositionSize: 30,
+              ...(rungIndex === 2 ? { isCleanupRung: true } : {}),
+            },
+          },
         }),
       );
       const runtimeMetrics = { writeCounter: vi.fn(), writeLatest: vi.fn() };
       const observeMarket = vi.fn();
-      const getMarket = vi.fn(async () => liveClobMarket(tokenId));
+      const getMarket = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("temporary"))
+        .mockResolvedValue(liveClobMarket(tokenId));
       const mod = buildModule({
         positionRepo: {
           findOpen: vi.fn(() => []),
@@ -747,6 +757,8 @@ describe("AlgoDecisionModule", () => {
         acceptingOrders: false,
         enableOrderBook: false,
       };
+      (mod as any).marketCache.set(tokenId, market);
+      (mod as any).dirtyTokenIds.clear();
 
       await (bus as any).emit("MarketSnapshotHeartbeat", {
         markets: [market],
@@ -754,8 +766,22 @@ describe("AlgoDecisionModule", () => {
         reason: "full_lifetime_active_position",
         source: "market-data",
       });
+      await Promise.all([
+        (bus as any).emit("MarketSnapshotHeartbeat", {
+          markets: [market],
+          timestamp: now,
+          reason: "full_lifetime_active_position",
+          source: "market-data",
+        }),
+        (bus as any).emit("MarketSnapshotHeartbeat", {
+          markets: [market],
+          timestamp: now,
+          reason: "full_lifetime_active_position",
+          source: "market-data",
+        }),
+      ]);
 
-      expect(getMarket).toHaveBeenCalledOnce();
+      expect(getMarket).toHaveBeenCalledTimes(2);
       expect((mod as any).marketCache.get(tokenId)).toMatchObject({
         acceptingOrders: true,
         enableOrderBook: true,
@@ -781,9 +807,10 @@ describe("AlgoDecisionModule", () => {
       expect(signalCalls[0]![1].signal).toMatchObject({
         side: "sell",
         decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
-        suggestedSize: 90,
-        bounceRung: { rungIndex: 2, isCleanupRung: true, uncommittedRemainder: 90 },
+        suggestedSize: 9,
+        bounceRung: { rungIndex: 2 },
       });
+      expect(signalCalls[0]![1].signal.bounceRung).not.toHaveProperty("isCleanupRung");
       await mod.stop();
     } finally {
       vi.useRealTimers();
@@ -9179,6 +9206,13 @@ describe("AlgoDecisionModule", () => {
           executionPolicy: () => DEFAULT_EXECUTION_POLICY,
         });
         await mod.start();
+        (mod as any).positionCache.set(
+          tokenId,
+          makeOpenPosition(tokenId, {
+            positionId: createPositionId("stale-prior-cycle"),
+            exitOwner: "profile",
+          }),
+        );
         (mod as any).marketCache.set(tokenId, {
           ...makeMarket(tokenId, null, 0.0275),
           tickSize: 0.001,
@@ -9213,6 +9247,7 @@ describe("AlgoDecisionModule", () => {
           decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
           bounceRung: { rungIndex: 0 },
         });
+        expect((mod as any).positionCache.get(tokenId)?.positionId).toBe(position.positionId);
 
         await (bus as any).emit("OrderCancelled", {
           commandId: createCommandId("stale-ordinary-sell-cancel"),

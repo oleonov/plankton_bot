@@ -415,6 +415,65 @@ function createSparseS1HandoffFixture() {
   return { position, profile, top, command };
 }
 
+function createBounceSupplementalFixture() {
+  const position = makePosition({
+    size: 120,
+    avgEntryPrice: 0.002,
+    costBasisUsdc: 0.24,
+    exitOwner: "bounce",
+  });
+  const ladderId = "prod-bounce-supplemental";
+  const order = (rungIndex: number, size: number, cleanup = false) =>
+    openSellAt(0.003 + rungIndex * 0.001, {
+      orderId: createOrderId(`supplemental-${rungIndex}-${cleanup}`),
+      clientOrderId: `supplemental-${rungIndex}-${cleanup}` as ClientOrderId,
+      positionId: position.positionId,
+      size,
+      postOnly: true,
+      exchangeOrderId: `exchange-${rungIndex}-${cleanup}`,
+      fillProgressShares: 0,
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      metadata: {
+        bounceRung: {
+          ladderId,
+          rungIndex,
+          anchorPrice: 0.002,
+          fraction: cleanup ? 3 : [0.3, 0.4][rungIndex],
+          originalPositionSize: 30,
+          remainingPositionSize: cleanup ? 120 : 30,
+          uncommittedRemainder: cleanup ? 90 : 9,
+          ...(cleanup ? { isCleanupRung: true } : {}),
+        },
+      },
+    });
+  const orders = [order(0, 9), order(1, 12), order(2, 90, true)];
+  const command = makePlaceCmd({
+    commandId: createCommandId("bounce-supplemental"),
+    clientOrderId: "bounce-supplemental" as ClientOrderId,
+    side: "sell",
+    size: 9,
+    price: 0.005,
+    tickSize: 0.001,
+    postOnly: true,
+    positionId: position.positionId,
+    signalReason: "repricing-exit",
+    decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+    metadata: {
+      marketData: { minOrderSize: 5 },
+      bounceRung: {
+        ladderId,
+        rungIndex: 2,
+        anchorPrice: 0.002,
+        fraction: 0.3,
+        originalPositionSize: 30,
+        remainingPositionSize: 120,
+        uncommittedRemainder: 9,
+      },
+    },
+  });
+  return { position, orders, command };
+}
+
 function trackPreparedRows(orderRepo: ReturnType<typeof createMockOrderRepo>, initial: Order[]) {
   const rows = [...initial];
   orderRepo.findByTokenId = vi.fn(() => rows);
@@ -642,6 +701,119 @@ describe("ExecutionModule", () => {
       timestamp: Date.now(),
     });
     expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
+    await execution.stop();
+  });
+
+  it("places one exact missing bounce rung beside cleanup and remains restart-idempotent", async () => {
+    const fixture = createBounceSupplementalFixture();
+    const rows = [...fixture.orders];
+    orderRepo.findOpen = vi.fn(() => rows.filter((order) => order.status === "open"));
+    orderRepo.findByTokenId = vi.fn(() => rows);
+    orderRepo.save = vi.fn((order) => rows.push(order));
+    const positionRepo = createMockPositionRepo(fixture.position);
+    positionRepo.findActiveByTokenId = vi.fn(() => [fixture.position]);
+    let finish!: (result: PlaceOrderResult) => void;
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<PlaceOrderResult>((resolve) => (finish = resolve)),
+    );
+    const rejected: string[] = [];
+    bus.subscribe("OrderRejected", async (event) => void rejected.push(event.reason));
+    const makeModule = () =>
+      new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        positionRepo,
+        inventoryLotRepo: createMockInventoryLotRepo(fixture.position),
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      });
+    const firstModule = makeModule();
+    await firstModule.start();
+    const first = bus.publish("PlaceOrderRequested", {
+      command: fixture.command,
+      timestamp: Date.now(),
+    });
+    await vi.waitFor(() => expect(gateway.placeOrder).toHaveBeenCalledOnce());
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        ...fixture.command,
+        commandId: createCommandId("bounce-supplemental-race"),
+        clientOrderId: "bounce-supplemental-race" as ClientOrderId,
+      },
+      timestamp: Date.now(),
+    });
+    expect(gateway.placeOrder).toHaveBeenCalledOnce();
+    finish({ success: true, orderId: "supplemental-live" });
+    await first;
+    await firstModule.stop();
+
+    const restarted = makeModule();
+    await restarted.start();
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        ...fixture.command,
+        commandId: createCommandId("bounce-supplemental-restart"),
+        clientOrderId: "bounce-supplemental-restart" as ClientOrderId,
+      },
+      timestamp: Date.now(),
+    });
+    expect(gateway.placeOrder).toHaveBeenCalledOnce();
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(rejected).toContain("exit-coverage-cleanup-in-flight");
+    await restarted.stop();
+  });
+
+  it("re-proves exact bounce supplemental coverage after live preparation", async () => {
+    const fixture = createBounceSupplementalFixture();
+    const rejected: string[] = [];
+    bus.subscribe("OrderRejected", async (event) => void rejected.push(event.reason));
+    let currentPosition = fixture.position;
+    const positionRepo = createMockPositionRepo(fixture.position);
+    positionRepo.findByTokenId = vi.fn(() => currentPosition);
+    positionRepo.findActiveByTokenId = vi.fn(() => [currentPosition]);
+    orderRepo.findOpen = vi.fn(() => fixture.orders);
+    orderRepo.findByTokenId = vi.fn(() => fixture.orders);
+    (gateway.prepareOrder as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      currentPosition = { ...fixture.position, size: 119 };
+      return { orderId: "supplemental-drift", __preparedOrderBrand: "PreparedOrder" };
+    });
+    const execution = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(fixture.position),
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+    await execution.start();
+    const notPostOnly = { ...fixture.command };
+    delete notPostOnly.postOnly;
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        ...notPostOnly,
+        commandId: createCommandId("bounce-supplemental-not-post-only"),
+        clientOrderId: "bounce-supplemental-not-post-only" as ClientOrderId,
+      },
+      timestamp: Date.now(),
+    });
+    expect(gateway.prepareOrder).not.toHaveBeenCalled();
+    expect(rejected).toContain("invalid-exit-coverage-cleanup");
+    await bus.publish("PlaceOrderRequested", { command: fixture.command, timestamp: Date.now() });
+
+    expect(gateway.prepareOrder).toHaveBeenCalledOnce();
+    expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
     await execution.stop();
   });
 
