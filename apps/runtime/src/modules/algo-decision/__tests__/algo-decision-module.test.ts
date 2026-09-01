@@ -666,6 +666,161 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("hydrates a missing held BOUNCE market from heartbeat and emits its exact cleanup after debounce", async () => {
+    vi.useFakeTimers();
+    try {
+      const now = Date.parse("2026-09-01T00:00:00.000Z");
+      vi.setSystemTime(now);
+      const tokenId = "token-bounce-heartbeat-recovery";
+      const legState = makeSellReadyLegState(tokenId, {
+        firstTradePrice: 0.008,
+        cumulativeBuySize: 120,
+        cumulativeBuyNotional: 0.96,
+      });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const position = makeOpenPosition(tokenId, {
+        size: 120,
+        avgEntryPrice: 0.008,
+        costBasisUsdc: 0.96,
+        exitOwner: "bounce",
+      });
+      const ladderId = `${tokenId}:${legState.firstTradeAt}`;
+      const orders = [9, 12, 9].map((size, rungIndex) =>
+        makeOrder(tokenId, {
+          orderId: createOrderId(`heartbeat-rung-${rungIndex}`),
+          positionId: position.positionId,
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          size,
+          metadata: { bounceRung: { ladderId, rungIndex, originalPositionSize: 30 } },
+        }),
+      );
+      const runtimeMetrics = { writeCounter: vi.fn(), writeLatest: vi.fn() };
+      const observeMarket = vi.fn();
+      const mod = buildModule({
+        positionRepo: {
+          findOpen: vi.fn(() => []),
+          findByTokenId: vi.fn(() => position),
+        } as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: {
+          findByTokenId: vi.fn(() => orders),
+          findRecentByTokenId: vi.fn(() => orders),
+          hasNonterminalBounceAskCaptureIntentForPosition: vi.fn(() => false),
+        } as unknown as OrderRepository,
+        fillRepo: {
+          findByOrderIds: vi.fn(() => []),
+          findByOrderId: vi.fn(() => []),
+        },
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        runtimeMetrics: runtimeMetrics as unknown as RuntimeMetricWriter,
+        priceHistoryProvider: { observeMarket, findReferencePrice: vi.fn(() => null) },
+      });
+      await mod.start();
+      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+      const market = {
+        ...makeMarket(tokenId, null, 0.0275),
+        tickSize: 0.001,
+        minOrderSize: 5,
+        bestBid: 0.005,
+        bestAsk: 0.05,
+        spread: 0.045,
+      };
+
+      await (bus as any).emit("MarketSnapshotHeartbeat", {
+        markets: [market],
+        timestamp: now,
+        reason: "full_lifetime_active_position",
+        source: "market-data",
+      });
+
+      expect((mod as any).marketCache.get(tokenId)).toBe(market);
+      expect((mod as any).positionCache.has(tokenId)).toBe(false);
+      expect(observeMarket).not.toHaveBeenCalled();
+      expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+        "track_algo_market_cache_hydrated_total",
+        1,
+        JSON.stringify({ source: "full_lifetime_heartbeat" }),
+      );
+      expect(
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+          ([event]) => event === "SignalProduced",
+        ),
+      ).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(250);
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([event]) => event === "SignalProduced",
+      );
+      expect(signalCalls).toHaveLength(1);
+      expect(signalCalls[0]![1].signal).toMatchObject({
+        side: "sell",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        suggestedSize: 90,
+        bounceRung: { rungIndex: 2, isCleanupRung: true, uncommittedRemainder: 90 },
+      });
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps cache-present, inactive, closed, dust, and flat heartbeats fully inert", async () => {
+    vi.useFakeTimers();
+    try {
+      const tokenIds = ["cached", "inactive", "closed", "dust", "flat"].map(
+        (suffix) => `heartbeat-${suffix}`,
+      );
+      const positions = new Map<string, Position | null>([
+        [tokenIds[0]!, makeOpenPosition(tokenIds[0]!)],
+        [tokenIds[1]!, makeOpenPosition(tokenIds[1]!)],
+        [tokenIds[2]!, makeOpenPosition(tokenIds[2]!, { status: "closed" })],
+        [tokenIds[3]!, makeOpenPosition(tokenIds[3]!, { status: "dust" })],
+        [tokenIds[4]!, null],
+      ]);
+      const runtimeMetrics = { writeCounter: vi.fn(), writeLatest: vi.fn() };
+      const observeMarket = vi.fn();
+      const mod = buildModule({
+        positionRepo: {
+          findOpen: vi.fn(() => []),
+          findByTokenId: vi.fn((tokenId) => positions.get(String(tokenId)) ?? null),
+        } as unknown as import("@krabs/domain").PositionRepository,
+        runtimeMetrics: runtimeMetrics as unknown as RuntimeMetricWriter,
+        priceHistoryProvider: { observeMarket, findReferencePrice: vi.fn(() => null) },
+      });
+      await mod.start();
+      const cached = makeMarket(tokenIds[0]!, null, 0.2);
+      (mod as any).marketCache.set(tokenIds[0], cached);
+      (mod as any).dirtyTokenIds.clear();
+      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+      const heartbeats = tokenIds.map((tokenId) => makeMarket(tokenId, null, 0.3));
+      heartbeats[1] = { ...heartbeats[1]!, active: false };
+
+      await (bus as any).emit("MarketSnapshotHeartbeat", {
+        markets: heartbeats,
+        timestamp: Date.now(),
+        reason: "full_lifetime_active_position",
+        source: "market-data",
+      });
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect((mod as any).marketCache.get(tokenIds[0])).toBe(cached);
+      expect(tokenIds.slice(1).every((tokenId) => !(mod as any).marketCache.has(tokenId))).toBe(
+        true,
+      );
+      expect((mod as any).dirtyTokenIds.size).toBe(0);
+      expect((mod as any).positionCache.size).toBe(0);
+      expect(observeMarket).not.toHaveBeenCalled();
+      expect(runtimeMetrics.writeCounter).not.toHaveBeenCalled();
+      expect(
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.some(
+          ([event]) => event === "SignalProduced",
+        ),
+      ).toBe(false);
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rolls up sell-spread suppression rows at the recordDecisionSuppressed chokepoint", () => {
     const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
     const runtimeMetrics = {

@@ -267,10 +267,15 @@ async function runS1Cleanup(
     market?: Partial<NormalizedMarket>;
     book?: Partial<OrderBookSnapshot>;
   } = {},
-): Promise<{ placed: PlaceOrderCommand[]; cancels: unknown[] }> {
+): Promise<{
+  placed: PlaceOrderCommand[];
+  cancels: unknown[];
+  runtimeMetrics: { writeCounter: ReturnType<typeof vi.fn> };
+}> {
   const bus = new InProcessEventBus();
   const placed: PlaceOrderCommand[] = [];
   const cancels: unknown[] = [];
+  const runtimeMetrics = { writeCounter: vi.fn() };
   bus.subscribe("PlaceOrderRequested", async ({ command }) => void placed.push(command));
   bus.subscribe("CancelOrderRequested", async (event) => void cancels.push(event));
   const module = new S1LadderModule({
@@ -279,6 +284,7 @@ async function runS1Cleanup(
     orderRepo: makeOrderRepo(orders),
     fillRepo,
     policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+    runtimeMetrics,
     log: silentLog,
     now: () => now,
   });
@@ -293,7 +299,7 @@ async function runS1Cleanup(
     });
   }
   await module.stop();
-  return { placed, cancels };
+  return { placed, cancels, runtimeMetrics };
 }
 
 function persistedCleanup(command: PlaceOrderCommand, status: Order["status"]): Order {
@@ -474,7 +480,7 @@ describe("S1LadderModule", () => {
 
     await module.start();
     await bus.publish("MarketSnapshotHeartbeat", {
-      markets: [market()],
+      markets: [market({ minOrderSize: null })],
       booksByToken: new Map([[String(tokenId), book({ minOrderSize: null })]]),
       timestamp: NOW,
       reason: "full_lifetime_active_position",
@@ -1333,12 +1339,16 @@ describe("S1LadderModule", () => {
   it("places one exact cleanup for the reproduced 110 versus 83.58 S1 residual and blocks overlap", async () => {
     const positionValue = position({ size: 110, costBasisUsdc: 1.54 });
     const orders = exactOrdinaryS1Orders(positionValue);
-    const { placed, cancels } = await runS1Cleanup(positionValue, orders, makeFillRepo());
+    const { placed, cancels } = await runS1Cleanup(positionValue, orders, makeFillRepo(), NOW, {
+      market: { minOrderSize: 5 },
+      book: { bestBid: 0.003, bestAsk: 0.009, minOrderSize: null },
+    });
     expect(placed).toHaveLength(1);
     expect(placed[0]).toMatchObject({
       size: 26.42,
       price: 0.08,
       metadata: {
+        marketData: { minOrderSize: 5 },
         s1: {
           ladderId: "legacy-s1-residual-ladder",
           coverageCleanupV1: { version: 1, residualSize: 26.42, attempt: 1 },
@@ -1351,6 +1361,28 @@ describe("S1LadderModule", () => {
     expect(
       (await runS1Cleanup(positionValue, orders, makeFillRepo(), NOW + 61_000)).placed,
     ).toEqual([]);
+  });
+
+  it("fails closed with an observable unknown minimum and preserves a positive raw-book minimum", async () => {
+    const positionValue = position({ size: 110, costBasisUsdc: 1.54 });
+    const orders = exactOrdinaryS1Orders(positionValue);
+    const unknown = await runS1Cleanup(positionValue, orders, makeFillRepo(), NOW, {
+      market: { minOrderSize: null },
+      book: { minOrderSize: null },
+    });
+    expect(unknown.placed).toEqual([]);
+    expect(unknown.runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "track_s1_coverage_cleanup_skipped_total",
+      1,
+      "unknown_min_order_size",
+    );
+
+    const raw = await runS1Cleanup(positionValue, orders, makeFillRepo(), NOW, {
+      market: { minOrderSize: 5 },
+      book: { minOrderSize: 7 },
+    });
+    expect(raw.placed).toHaveLength(1);
+    expect(raw.placed[0]?.metadata).toMatchObject({ marketData: { minOrderSize: 7 } });
   });
 
   it("uses partial-fill remaining size and retries only exact zero-fill terminal cleanup", async () => {

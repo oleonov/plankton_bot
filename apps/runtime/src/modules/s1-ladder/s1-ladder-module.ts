@@ -278,10 +278,20 @@ export class S1LadderModule implements RuntimeModule {
       numTiers: policy.numTiers,
       nowMs: timestamp,
     });
-    if (
-      !state ||
-      !isExecutableCleanup(state.residualSize, state.targetPrice, book, market, timestamp)
-    ) {
+    if (!state || state.residualSize <= SIZE_EPSILON) return;
+    const skipReason = resolveCleanupSkipReason(
+      state.residualSize,
+      state.targetPrice,
+      book,
+      market,
+      timestamp,
+    );
+    if (skipReason) {
+      this.deps.runtimeMetrics?.writeCounter(
+        "track_s1_coverage_cleanup_skipped_total",
+        1,
+        skipReason,
+      );
       return;
     }
     if (!this.acquirePlacement(market.tokenId, timestamp)) return;
@@ -758,8 +768,9 @@ export class S1LadderModule implements RuntimeModule {
     booksByToken: ReadonlyMap<string, OrderBookSnapshot> | undefined,
     market: NormalizedMarket,
   ): OrderBookSnapshot {
-    return (
-      booksByToken?.get(String(market.tokenId)) ?? {
+    const raw = booksByToken?.get(String(market.tokenId));
+    if (!raw) {
+      return {
         tokenId: market.tokenId,
         bids:
           market.bestBid != null ? [{ price: market.bestBid, size: market.bestBidSize ?? 0 }] : [],
@@ -771,8 +782,14 @@ export class S1LadderModule implements RuntimeModule {
         spread: market.spread,
         minOrderSize: market.minOrderSize ?? null,
         timestamp: market.snapshotTs,
-      }
-    );
+      };
+    }
+    const minOrderSize = isPositiveNumber(raw.minOrderSize)
+      ? raw.minOrderSize
+      : isPositiveNumber(market.minOrderSize)
+        ? market.minOrderSize
+        : null;
+    return raw.minOrderSize === minOrderSize ? raw : { ...raw, minOrderSize };
   }
 
   private countEligibilitySkip(reason: string): void {
@@ -828,30 +845,33 @@ export class S1LadderModule implements RuntimeModule {
   }
 }
 
-function isExecutableCleanup(
+function resolveCleanupSkipReason(
   residual: number,
   targetPrice: number,
   book: OrderBookSnapshot,
   market: NormalizedMarket,
   nowMs: number,
-): boolean {
-  return (
-    market.active &&
-    market.tradable &&
-    market.acceptingOrders &&
-    isPositiveNumber(market.tickSize) &&
-    isPositiveNumber(book.bestBid) &&
-    isPositiveNumber(book.bestAsk) &&
-    book.bestBid < book.bestAsk &&
-    Number.isFinite(book.timestamp) &&
-    book.timestamp <= nowMs + 1_000 &&
-    nowMs - book.timestamp <= MAKER_CAPTURE_BOOK_MAX_AGE_MS &&
-    validateExecutablePrice(targetPrice, market.tickSize).ok &&
-    targetPrice > book.bestBid + SIZE_EPSILON &&
-    targetPrice < 1 &&
-    isPositiveNumber(book.minOrderSize) &&
-    residual + SIZE_EPSILON >= book.minOrderSize
-  );
+): string | null {
+  if (!market.active || !market.tradable || !market.acceptingOrders) return "market_not_live";
+  if (!isPositiveNumber(market.tickSize)) return "invalid_tick_size";
+  if (
+    !isPositiveNumber(book.bestBid) ||
+    !isPositiveNumber(book.bestAsk) ||
+    book.bestBid >= book.bestAsk
+  ) {
+    return "invalid_book";
+  }
+  if (
+    !Number.isFinite(book.timestamp) ||
+    book.timestamp > nowMs + 1_000 ||
+    nowMs - book.timestamp > MAKER_CAPTURE_BOOK_MAX_AGE_MS
+  ) {
+    return "stale_book";
+  }
+  if (!validateExecutablePrice(targetPrice, market.tickSize).ok) return "off_tick_target";
+  if (targetPrice <= book.bestBid + SIZE_EPSILON || targetPrice >= 1) return "crossing_target";
+  if (!isPositiveNumber(book.minOrderSize)) return "unknown_min_order_size";
+  return residual + SIZE_EPSILON >= book.minOrderSize ? null : "below_min_order_size";
 }
 
 function isPositiveNumber(value: unknown): value is number {

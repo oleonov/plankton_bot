@@ -1127,6 +1127,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
+      this.deps.bus.subscribe("MarketSnapshotHeartbeat", (p) => this.handleMarketHeartbeat(p)),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
       this.deps.bus.subscribe("SignalRejected", (p) => this.handleSignalRejected(p)),
       this.deps.bus.subscribe("SignalConversionSkipped", (p) =>
@@ -1328,6 +1329,27 @@ export class AlgoDecisionModule implements RuntimeModule {
     } else {
       await this.evaluateDirtyTokens();
     }
+  }
+
+  private async handleMarketHeartbeat(
+    payload: RuntimeEventMap["MarketSnapshotHeartbeat"],
+  ): Promise<void> {
+    let hydrated = false;
+    for (const market of payload.markets) {
+      const tokenId = String(market.tokenId);
+      if (!market.active || this.marketCache.has(tokenId)) continue;
+      const position = this.deps.positionRepo?.findByTokenId(market.tokenId) ?? null;
+      if (!isOpenPosition(position)) continue;
+      this.marketCache.set(tokenId, market);
+      this.deps.runtimeMetrics?.writeCounter(
+        "track_algo_market_cache_hydrated_total",
+        1,
+        JSON.stringify({ source: "full_lifetime_heartbeat" }),
+      );
+      this.markDirty(market.tokenId);
+      hydrated = true;
+    }
+    if (hydrated) this.scheduleDirtyEvaluation();
   }
 
   private async handleTrackedMarketsChanged(
