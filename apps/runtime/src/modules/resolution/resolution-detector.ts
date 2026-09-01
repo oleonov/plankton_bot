@@ -10,6 +10,8 @@ import {
   type MarketResolutionRepository,
   type TokenId,
   type PositionId,
+  type MarketDataGateway,
+  type ClobMarket,
 } from "@krabs/domain";
 import type { GammaResolutionClient } from "@krabs/exchange";
 import type { Logger } from "../../logger.js";
@@ -28,7 +30,7 @@ export interface DetectedResolution {
   resolution: string;
   winnerTokenId: TokenId | null;
   resolvedAt: string;
-  source: "gamma-api" | "gamma-delisted";
+  source: "gamma-api" | "gamma-delisted" | "clob-api";
   rawResponse: string | null;
   candidates: ResolutionCandidate[];
 }
@@ -46,6 +48,134 @@ function parseOutcomes(rawPayload: Record<string, unknown>): string[] {
 
 function sameConditionId(left: string, right: string): boolean {
   return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+function buildClobResolution(
+  conditionId: string,
+  market: ClobMarket,
+  candidates: ResolutionCandidate[],
+): DetectedResolution | null {
+  if (
+    !sameConditionId(market.conditionId, conditionId) ||
+    market.closed !== true ||
+    market.acceptingOrders !== false ||
+    market.enableOrderBook !== false ||
+    market.tokens.length !== 2
+  ) {
+    return null;
+  }
+  if (
+    market.tokens.some(
+      (token) =>
+        typeof token.tokenId !== "string" ||
+        !token.tokenId ||
+        token.tokenId !== token.tokenId.trim() ||
+        typeof token.outcome !== "string" ||
+        !token.outcome ||
+        token.outcome !== token.outcome.trim() ||
+        typeof token.winner !== "boolean",
+    )
+  ) {
+    return null;
+  }
+  const tokens = market.tokens.map((token) => ({
+    tokenId: token.tokenId,
+    outcome: token.outcome,
+    winner: token.winner,
+  }));
+  if (new Set(tokens.map((token) => token.tokenId)).size !== tokens.length) {
+    return null;
+  }
+  const winners = tokens.filter((token) => token.winner);
+  const candidateTokenIds = candidates.map((candidate) => String(candidate.tokenId));
+  const candidatePositionIds = candidates.map((candidate) => String(candidate.positionId));
+  if (
+    winners.length !== 1 ||
+    new Set(candidateTokenIds).size !== candidates.length ||
+    new Set(candidatePositionIds).size !== candidates.length ||
+    candidates.some(
+      (candidate) =>
+        !sameConditionId(candidate.conditionId, conditionId) ||
+        !candidate.outcome.trim() ||
+        tokens.filter(
+          (token) =>
+            token.tokenId === String(candidate.tokenId) &&
+            normalizeOutcome(token.outcome) === normalizeOutcome(candidate.outcome),
+        ).length !== 1,
+    )
+  ) {
+    return null;
+  }
+  const proof = {
+    conditionId,
+    closed: true,
+    acceptingOrders: false,
+    enableOrderBook: false,
+    tokens: tokens.sort((left, right) => left.tokenId.localeCompare(right.tokenId)),
+  };
+  return {
+    conditionId,
+    resolution: winners[0]!.outcome,
+    winnerTokenId: createTokenId(winners[0]!.tokenId),
+    resolvedAt: new Date().toISOString(),
+    source: "clob-api",
+    rawResponse: JSON.stringify(proof),
+    candidates,
+  };
+}
+
+function normalizeOutcome(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+export function isStableClobResolutionProof(
+  rawResponse: string | null,
+  conditionId: string,
+  resolution: string,
+): boolean {
+  try {
+    const proof = JSON.parse(rawResponse ?? "") as Record<string, unknown>;
+    const tokens = proof.tokens as Array<Record<string, unknown>>;
+    if (
+      !sameConditionId(String(proof.conditionId ?? ""), conditionId) ||
+      proof.closed !== true ||
+      proof.acceptingOrders !== false ||
+      proof.enableOrderBook !== false ||
+      !Array.isArray(tokens) ||
+      tokens.length !== 2
+    ) {
+      return false;
+    }
+    const canonicalTokens = tokens.map((token) => ({
+      tokenId: token.tokenId,
+      outcome: token.outcome,
+      winner: token.winner,
+    }));
+    return (
+      JSON.stringify(proof) ===
+        JSON.stringify({
+          conditionId: proof.conditionId,
+          closed: true,
+          acceptingOrders: false,
+          enableOrderBook: false,
+          tokens: canonicalTokens,
+        }) &&
+      canonicalTokens.every(
+        (token) =>
+          typeof token.tokenId === "string" &&
+          token.tokenId.trim() === token.tokenId &&
+          typeof token.outcome === "string" &&
+          token.outcome.trim() === token.outcome &&
+          typeof token.winner === "boolean",
+      ) &&
+      (canonicalTokens[0]!.tokenId as string) < (canonicalTokens[1]!.tokenId as string) &&
+      canonicalTokens.filter((token) => token.winner).length === 1 &&
+      normalizeOutcome(canonicalTokens.find((token) => token.winner)!.outcome as string) ===
+        normalizeOutcome(resolution)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Exported for use by resolution recovery path. */
@@ -177,6 +307,7 @@ export class ResolutionDetector {
     private readonly resolutionRepo: MarketResolutionRepository,
     private readonly gammaClient: GammaResolutionClient,
     private readonly log: Logger,
+    private readonly clobGateway?: Pick<MarketDataGateway, "getMarket">,
   ) {}
 
   async detect(graceMinutes: number): Promise<DetectedResolution[]> {
@@ -310,7 +441,10 @@ export class ResolutionDetector {
           return null;
         }
 
-        return buildGammaResolution(conditionId, info, candidates);
+        const gammaResolution = buildGammaResolution(conditionId, info, candidates);
+        return gammaResolution.resolution === "unknown"
+          ? ((await this.queryClobResolution(conditionId, candidates)) ?? gammaResolution)
+          : gammaResolution;
       }
     }
 
@@ -338,9 +472,14 @@ export class ResolutionDetector {
         return null;
       }
 
-      return buildGammaResolution(conditionId, idInfo, candidates);
+      const gammaResolution = buildGammaResolution(conditionId, idInfo, candidates);
+      return gammaResolution.resolution === "unknown"
+        ? ((await this.queryClobResolution(conditionId, candidates)) ?? gammaResolution)
+        : gammaResolution;
     }
 
+    const clobResolution = await this.queryClobResolution(conditionId, candidates);
+    if (clobResolution) return clobResolution;
     if (slugConditionMismatch) return null;
 
     if (!allowGammaDelisted) {
@@ -366,5 +505,19 @@ export class ResolutionDetector {
       rawResponse: null,
       candidates,
     };
+  }
+
+  private async queryClobResolution(
+    conditionId: string,
+    candidates: ResolutionCandidate[],
+  ): Promise<DetectedResolution | null> {
+    if (!this.clobGateway) return null;
+    try {
+      const market = await this.clobGateway.getMarket(conditionId);
+      return market ? buildClobResolution(conditionId, market, candidates) : null;
+    } catch (err) {
+      this.log.warn({ conditionId, err }, "CLOB resolution lookup failed — skipping");
+      return null;
+    }
   }
 }

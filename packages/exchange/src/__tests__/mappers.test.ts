@@ -380,6 +380,28 @@ describe("mapMarket", () => {
     });
     expect(market.gammaCreatedAt).toBeNull();
   });
+
+  it("retains only literal CLOB resolution booleans", () => {
+    const market = mapMarket({
+      condition_id: "cond-1",
+      closed: true,
+      accepting_orders: false,
+      enable_order_book: false,
+      tokens: [
+        { token_id: "tok-yes", outcome: "Yes", winner: true },
+        { token_id: "tok-no", outcome: "No", winner: false },
+      ],
+    });
+    expect([market.closed, market.acceptingOrders, market.enableOrderBook]).toEqual([
+      true,
+      false,
+      false,
+    ]);
+    expect(market.tokens.map(({ tokenId, winner }) => ({ tokenId, winner }))).toEqual([
+      { tokenId: "tok-yes", winner: true },
+      { tokenId: "tok-no", winner: false },
+    ]);
+  });
 });
 
 describe("mapOrderBook", () => {

@@ -28,6 +28,8 @@ const TOK_NO = createTokenId("tok-no");
 const POS = createPositionId("pos-1");
 const POS2 = createPositionId("pos-2");
 const CONDITION = "condition-abc";
+const CLOB_RAW =
+  '{"conditionId":"condition-abc","closed":true,"acceptingOrders":false,"enableOrderBook":false,"tokens":[{"tokenId":"tok-no","outcome":"No","winner":false},{"tokenId":"tok-yes","outcome":"YES","winner":true}]}';
 
 // ─── Mock factories ────────────────────────────────────────────────────────
 
@@ -132,6 +134,7 @@ function createMockResolutionRepo(): MarketResolutionRepository {
     findAll: vi.fn().mockReturnValue([]),
     markSettled: vi.fn(),
     updateResolution: vi.fn(),
+    promoteUnknownResolution: vi.fn().mockReturnValue(false),
   } as unknown as MarketResolutionRepository;
 }
 
@@ -562,6 +565,81 @@ describe("ResolutionModule", () => {
         status: "detected",
       }),
     );
+  });
+
+  it("promotes an existing unknown row from exact CLOB proof before settling", async () => {
+    const rawResponse = CLOB_RAW;
+    (resolutionRepo.findByConditionId as any).mockReturnValue({
+      resolution: "unknown",
+      status: "detected",
+    });
+    (resolutionRepo.promoteUnknownResolution as any).mockReturnValue(true);
+    (detector.detect as any).mockResolvedValue([
+      makeDetectedResolution({
+        source: "clob-api",
+        rawResponse,
+      }),
+    ]);
+    (settler.settle as any).mockReturnValue([makeSettledPosition()]);
+    await expect(mod.runCheck()).resolves.toBe(1);
+    expect(resolutionRepo.promoteUnknownResolution as any).toHaveBeenCalledWith(
+      CONDITION,
+      "YES",
+      "2026-01-15T00:00:00Z",
+      "clob-api",
+      rawResponse,
+    );
+    expect(settler.settle as any).toHaveBeenCalledOnce();
+    (resolutionRepo.promoteUnknownResolution as any).mockClear();
+    (detector.detect as any).mockResolvedValue([makeDetectedResolution()]);
+    await mod.runCheck();
+    expect((resolutionRepo.promoteUnknownResolution as any).mock.calls[0][3]).toBe("gamma-api");
+  });
+
+  it("replays a matching persisted CLOB proof with the original resolvedAt", async () => {
+    const rawResponse = CLOB_RAW;
+    (resolutionRepo.findByConditionId as any).mockReturnValue({
+      resolution: "YES",
+      resolvedAt: "2026-01-10T00:00:00.000Z",
+      source: "clob-api",
+      rawResponse,
+      status: "detected",
+    });
+    (detector.detect as any).mockResolvedValue([
+      makeDetectedResolution({
+        source: "clob-api",
+        rawResponse,
+        resolvedAt: "2026-01-20T00:00:00.000Z",
+      }),
+    ]);
+
+    await mod.runCheck();
+
+    expect(settler.settle as any).toHaveBeenCalledWith(
+      expect.objectContaining({ resolvedAt: "2026-01-10T00:00:00.000Z" }),
+    );
+    vi.mocked(settler.settle as any).mockClear();
+    (detector.detect as any).mockResolvedValue([
+      makeDetectedResolution({
+        source: "clob-api",
+        rawResponse: CLOB_RAW.replace("true", "false"),
+      }),
+    ]);
+    await mod.runCheck();
+    expect(settler.settle as any).not.toHaveBeenCalled();
+
+    for (const existing of [
+      { resolution: "unknown", status: "detected", source: "gamma-delisted" },
+      { resolution: "YES", status: "detected", source: "gamma-api", rawResponse },
+    ]) {
+      (resolutionRepo.findByConditionId as any).mockReturnValue(existing);
+      (resolutionRepo.promoteUnknownResolution as any).mockReturnValue(false);
+      (detector.detect as any).mockResolvedValue([
+        makeDetectedResolution({ source: "clob-api", rawResponse }),
+      ]);
+      await mod.runCheck();
+      expect(settler.settle as any).not.toHaveBeenCalled();
+    }
   });
 
   // ─── Order cancellation on resolved markets ─────────────────────────────
@@ -1490,6 +1568,42 @@ describe("ResolutionModule", () => {
     expect(count1).toBe(0);
   });
 
+  it("holds the re-entrancy guard while awaited legacy recovery is running", async () => {
+    const gamma = deferred<any>();
+    (resolutionRepo.findAll as any).mockReturnValue([
+      {
+        conditionId: CONDITION,
+        resolution: "unknown",
+        status: "detected",
+      },
+    ]);
+    (marketRepo.findByConditionId as any).mockReturnValue([
+      { tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x-happen", outcome: "YES" },
+    ]);
+    (positionRepo.findAll as any).mockReturnValue([
+      { positionId: POS, tokenId: TOK_YES, status: "closed", size: 0, avgEntryPrice: 0.3 },
+    ]);
+    (lotRepo.findOpen as any).mockReturnValue([{ remainingSize: 10 }]);
+    (gammaClient.getMarketBySlug as any).mockReturnValue(gamma.promise);
+
+    const first = mod.runCheck();
+    await Promise.resolve();
+    await expect(mod.runCheck()).resolves.toBe(0);
+    expect(detector.detect as any).not.toHaveBeenCalled();
+
+    (positionRepo.findActiveByTokenId as any).mockReturnValue([makeSettledPosition()]);
+    (lotRepo.findOpen as any).mockReturnValue([]);
+    gamma.resolve({
+      closed: true,
+      umaResolutionStatus: null,
+      rawPayload: { outcomes: '["YES"]', outcomePrices: '["1"]' },
+    });
+    await first;
+    expect(detector.detect as any).toHaveBeenCalledOnce();
+    expect(resolutionRepo.updateResolution as any).not.toHaveBeenCalled();
+    expect(lotRepo.settleAll as any).not.toHaveBeenCalled();
+  });
+
   // ─── Lifecycle ─────────────────────────────────────────────────────────
 
   it("stop clears interval", async () => {
@@ -1744,6 +1858,10 @@ describe("ResolutionModule", () => {
         outcome: "YES",
       },
     ]);
+    (positionRepo.findAll as any).mockReturnValue([
+      { positionId: POS, tokenId: TOK_YES, status: "closed" },
+    ]);
+    (lotRepo.findOpen as any).mockReturnValue([{ remainingSize: 1 }]);
 
     (gammaClient.getMarketBySlug as any).mockRejectedValue(new Error("Network error"));
 
@@ -2729,6 +2847,10 @@ describe("ResolutionModule", () => {
       (marketRepo.findByConditionId as any).mockReturnValue([
         { tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x-happen", outcome: "YES" },
       ]);
+      (positionRepo.findAll as any).mockReturnValue([
+        { positionId: POS, tokenId: TOK_YES, status: "closed" },
+      ]);
+      (lotRepo.findOpen as any).mockReturnValue([{ remainingSize: 1 }]);
       (gammaClient.getMarketBySlug as any).mockResolvedValue(null);
 
       let paused = true;

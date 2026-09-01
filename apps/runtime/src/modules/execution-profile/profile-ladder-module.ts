@@ -93,6 +93,7 @@ export interface ProfileLadderProfileStateReader {
 export interface ProfileLadderPositionReader {
   findOpen(): Position[];
   findDust(): Position[];
+  findById(positionId: Position["positionId"]): Position | null;
   findActiveByTokenId(tokenId: TokenId): Position[];
 }
 
@@ -351,12 +352,23 @@ export class ProfileLadderModule implements RuntimeModule {
       }),
       this.deps.bus.subscribe("OrderRejected", async (event) => {
         this.handlePendingOrderResolved(event);
+        this.closeTerminalLadder(event.tokenId);
       }),
       this.deps.bus.subscribe("OrderSkipped", async (event) => {
         this.handlePendingOrderResolved(event);
+        this.closeTerminalLadder(event.tokenId);
+      }),
+      this.deps.bus.subscribe("OrderCancelled", async (event) => {
+        this.closeTerminalLadder(event.tokenId);
+      }),
+      this.deps.bus.subscribe("PositionSettled", async (event) => {
+        this.closeTerminalLadder(event.tokenId, event.positionId);
       }),
     );
     this.started = true;
+    for (const state of this.deps.repository.findActive()) {
+      this.closeTerminalLadder(state.tokenId);
+    }
     this.adoptExistingEnabled = this.policy().adoptExisting.enabled;
     this.ensurePolicyReloadSubscription();
     this.startPlannedRungRecoveryTimer();
@@ -553,6 +565,37 @@ export class ProfileLadderModule implements RuntimeModule {
     return (this.deps.orderRepo?.findByTokenId(tokenId) ?? []).filter(
       (order) => order.side === "sell" && OPEN_ORDER_STATUSES.has(order.status),
     );
+  }
+
+  private closeTerminalLadder(tokenId: TokenId, expectedPositionId?: Position["positionId"]): void {
+    const state = this.deps.repository.getLadder(tokenId);
+    const { positionRepo, orderRepo, profileStateReader } = this.deps;
+    if (state?.status !== "active" || !positionRepo || !orderRepo || !profileStateReader) {
+      return;
+    }
+    try {
+      if (expectedPositionId) {
+        const position = positionRepo.findById(expectedPositionId);
+        if (
+          position?.positionId !== expectedPositionId ||
+          position.tokenId !== tokenId ||
+          position.status !== PositionStatus.Closed ||
+          position.size !== 0
+        ) {
+          return;
+        }
+      }
+      if (
+        positionRepo.findActiveByTokenId(tokenId).length !== 0 ||
+        profileStateReader.getProfileState(tokenId) !== "CLOSED" ||
+        this.findOpenSellOrders(tokenId).length !== 0
+      ) {
+        return;
+      }
+    } catch {
+      return;
+    }
+    this.deps.repository.markClosed(tokenId, "terminal_position_closed", this.now());
   }
 
   private scheduleAdoption(delayMs: number = ADOPTION_WARMUP_MS): void {

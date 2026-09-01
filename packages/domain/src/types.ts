@@ -739,7 +739,7 @@ export interface MarketResolution {
   resolution: string;
   resolvedAt: string; // ISO timestamp
   detectedAt: string; // ISO timestamp
-  source: "gamma-api" | "gamma-delisted" | "manual" | "algo";
+  source: "gamma-api" | "gamma-delisted" | "clob-api" | "manual" | "algo";
   rawResponse: string | null; // JSON for debugging
   status: "detected" | "settled";
 }

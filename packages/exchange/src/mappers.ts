@@ -345,6 +345,7 @@ export function mapMarket(raw: Record<string, unknown>): ClobMarket {
         tokenId: String(t.token_id ?? ""),
         outcome: String(t.outcome ?? ""),
         outcomeIndex: i,
+        ...(typeof t.winner === "boolean" ? { winner: t.winner } : {}),
       }))
     : [];
 
@@ -355,6 +356,11 @@ export function mapMarket(raw: Record<string, unknown>): ClobMarket {
     slug: String(raw.slug ?? raw.market_slug ?? ""),
     endDate: String(raw.end_date_iso ?? raw.end_date ?? ""),
     active: Boolean(raw.active),
+    ...(typeof raw.closed === "boolean" ? { closed: raw.closed } : {}),
+    ...(typeof raw.accepting_orders === "boolean" ? { acceptingOrders: raw.accepting_orders } : {}),
+    ...(typeof raw.enable_order_book === "boolean"
+      ? { enableOrderBook: raw.enable_order_book }
+      : {}),
     negRisk: Boolean(raw.neg_risk),
     tickSize: Number(raw.minimum_tick_size ?? raw.tick_size ?? 0.01),
     volume24h: raw.volume_num != null ? Number(raw.volume_num) : null,

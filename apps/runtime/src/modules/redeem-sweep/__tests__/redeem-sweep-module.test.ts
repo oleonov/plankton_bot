@@ -2320,6 +2320,27 @@ describe("RedeemSweepModule", () => {
 // losses on winners, and leaves the position open for the normal settler when no
 // resolution is known.
 
+it("preserves clob-api provenance when redeem sweep delegates local settlement", () => {
+  const settle = vi.fn().mockReturnValue([]);
+  const h = makeHarness({
+    settler: { settle },
+    marketRows: [
+      { tokenId: createTokenId(TOKEN), conditionId: CONDITION, slug: "resolved", outcome: "Yes" },
+    ],
+    marketResolutionRepo: {
+      findByConditionId: vi.fn(() => ({ ...DEFAULT_RESOLUTION, source: "clob-api" })),
+    },
+  });
+
+  (h.module as unknown as { closeLocalPositions(group: unknown): void }).closeLocalPositions({
+    conditionId: CONDITION,
+    includedTokenIds: [TOKEN],
+    excludedTokenIds: [],
+  });
+
+  expect(settle).toHaveBeenCalledWith(expect.objectContaining({ source: "clob-api" }));
+});
+
 const PAST_END = new Date(NOW - 60_000).toISOString();
 
 interface LedgerSeed {

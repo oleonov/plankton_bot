@@ -516,6 +516,13 @@ function setup(
       : {
           findOpen: suppliedPositionRepo.findOpen ?? (() => []),
           findDust: suppliedPositionRepo.findDust ?? (() => []),
+          findById:
+            suppliedPositionRepo.findById ??
+            ((id) =>
+              [
+                ...(suppliedPositionRepo.findOpen?.() ?? []),
+                ...(suppliedPositionRepo.findDust?.() ?? []),
+              ].find((candidate) => candidate.positionId === id) ?? null),
           findActiveByTokenId:
             suppliedPositionRepo.findActiveByTokenId ??
             ((id) =>
@@ -7940,6 +7947,70 @@ describe("ProfileLadderModule.adoptExistingLadders", () => {
       );
 
       expect(counterLabels(ctx.counters, "profile_ladder_rung_price_floored")).toHaveLength(0);
+    });
+  });
+
+  describe("terminal ladder closure", () => {
+    const closedPosition = () => position({ status: PositionStatus.Closed, size: 0 });
+    const settledEvent = (): RuntimeEventMap["PositionSettled"] => ({
+      positionId: closedPosition().positionId,
+      tokenId,
+      resolution: "No",
+      settlementPrice: 0,
+      realizedPnl: -25,
+      size: 250,
+      avgEntryPrice: 0.1,
+      timestamp: NOW,
+    });
+
+    it("closes idempotently on settlement and re-evaluates after each terminal order event", async () => {
+      let sellOrders: Order[] = [];
+      const closed = closedPosition();
+      const ctx = setup(policy(), {
+        positionRepo: {
+          findById: (id) => (id === closed.positionId ? closed : null),
+          findActiveByTokenId: () => [],
+        },
+        orderRepo: { findByTokenId: () => sellOrders },
+        profileStateReader: { getProfileState: () => "CLOSED" },
+      });
+      await ctx.module.start();
+
+      ctx.repo.upsertLadder(ladderState());
+      await ctx.bus.publish("PositionSettled", settledEvent());
+      expect(ctx.repo.getLadder(tokenId)?.status).toBe("closed");
+      await ctx.bus.publish("PositionSettled", settledEvent());
+
+      ctx.repo.upsertLadder(ladderState());
+      sellOrders = [openSellOrder()];
+      await ctx.bus.publish("PositionSettled", settledEvent());
+      expect(ctx.repo.getLadder(tokenId)?.status).toBe("active");
+      sellOrders = [{ ...openSellOrder(), status: OrderStatus.Cancelled }];
+      await ctx.bus.publish("OrderCancelled", {
+        commandId: createCommandId("cancel"),
+        orderId: createOrderId("profile-ladder-order"),
+        tokenId,
+        conditionId,
+        reason: "market_resolved",
+        signalReason: "profile-ladder-exit",
+        timestamp: NOW,
+      });
+      expect(ctx.repo.getLadder(tokenId)?.status).toBe("closed");
+
+      await ctx.module.stop();
+    });
+
+    it("applies the same fail-closed predicate to active ladders at startup", async () => {
+      const closed = closedPosition();
+      const ctx = setup(policy(), {
+        positionRepo: { findById: () => closed, findActiveByTokenId: () => [] },
+        orderRepo: { findByTokenId: () => [] },
+        profileStateReader: { getProfileState: () => "CLOSED" },
+      });
+      ctx.repo.upsertLadder(ladderState());
+      await ctx.module.start();
+      expect(ctx.repo.getLadder(tokenId)?.status).toBe("closed");
+      await ctx.module.stop();
     });
   });
 });

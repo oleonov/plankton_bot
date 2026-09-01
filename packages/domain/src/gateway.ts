@@ -24,6 +24,7 @@ export interface ClobMarket {
     /** "Yes" | "No" as returned by the Polymarket API. */
     readonly outcome: string;
     readonly outcomeIndex?: number;
+    readonly winner?: boolean;
     readonly bestBid?: number | null;
     readonly bestAsk?: number | null;
     readonly midPrice?: number | null;
@@ -34,6 +35,9 @@ export interface ClobMarket {
   readonly eventSlug?: string;
   readonly endDate: string;
   readonly active: boolean;
+  readonly closed?: boolean;
+  readonly acceptingOrders?: boolean;
+  readonly enableOrderBook?: boolean;
   readonly negRisk: boolean;
   /** Minimum price increment (e.g., 0.01). */
   readonly tickSize: number;

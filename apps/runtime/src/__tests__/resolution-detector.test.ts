@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createTokenId, createPositionId } from "@krabs/domain";
 import type {
+  ClobMarket,
+  MarketDataGateway,
   PositionRepository,
   MarketRepository,
   MarketResolutionRepository,
@@ -16,6 +18,8 @@ const POS = createPositionId("pos-1");
 const CONDITION = "condition-abc";
 const SLUG = "will-x-happen";
 const PAST_END_DATE = "2026-01-01T00:00:00Z"; // well in the past
+const CLOB_NO = { tokenId: "tok-no", outcome: "No", outcomeIndex: 1, winner: true } as const;
+const CLOB_YES = { tokenId: "tok-yes", outcome: "YES", outcomeIndex: 0, winner: false } as const;
 
 const log = {
   info: vi.fn(),
@@ -119,6 +123,26 @@ function createMockGammaClient(): GammaResolutionClient {
   } as unknown as GammaResolutionClient;
 }
 
+function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
+  return {
+    conditionId: CONDITION,
+    tokens: [CLOB_NO, CLOB_YES],
+    question: "Will X happen?",
+    slug: SLUG,
+    endDate: PAST_END_DATE,
+    active: false,
+    closed: true,
+    acceptingOrders: false,
+    enableOrderBook: false,
+    negRisk: false,
+    tickSize: 0.01,
+    volume24h: null,
+    eventMarketCount: 1,
+    gammaCreatedAt: null,
+    ...overrides,
+  };
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe("ResolutionDetector", () => {
@@ -126,6 +150,7 @@ describe("ResolutionDetector", () => {
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let resolutionRepo: ReturnType<typeof createMockResolutionRepo>;
   let gammaClient: ReturnType<typeof createMockGammaClient>;
+  let clobGateway: Pick<MarketDataGateway, "getMarket">;
   let detector: ResolutionDetector;
 
   beforeEach(() => {
@@ -134,12 +159,14 @@ describe("ResolutionDetector", () => {
     marketRepo = createMockMarketRepo();
     resolutionRepo = createMockResolutionRepo();
     gammaClient = createMockGammaClient();
+    clobGateway = { getMarket: vi.fn().mockResolvedValue(null) };
     detector = new ResolutionDetector(
       positionRepo as unknown as PositionRepository,
       marketRepo as unknown as MarketRepository,
       resolutionRepo as unknown as MarketResolutionRepository,
       gammaClient as unknown as GammaResolutionClient,
       log as any,
+      clobGateway,
     );
   });
 
@@ -249,6 +276,59 @@ describe("ResolutionDetector", () => {
     expect(results[0]!.source).toBe("gamma-delisted");
     expect(results[0]!.resolution).toBe("unknown");
     expect(results[0]!.winnerTokenId).toBeNull();
+  });
+
+  it("uses strict CLOB winner proof after both Gamma lookups genuinely miss", async () => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(null);
+    (gammaClient.getMarketById as any).mockResolvedValue(null);
+    (clobGateway.getMarket as any).mockResolvedValue(makeClobMarket());
+    const [result] = await detector.detect(0);
+
+    expect([result?.resolution, result?.winnerTokenId, result?.source]).toEqual([
+      "No",
+      "tok-no",
+      "clob-api",
+    ]);
+    expect(result!.rawResponse).not.toContain("price");
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({ umaResolutionStatus: null, rawPayload: {} }),
+    );
+    expect((await detector.detect(0))[0]?.source).toBe("clob-api");
+  });
+
+  it.each([
+    ["condition", { conditionId: "wrong" }, false],
+    ["token whitespace", { tokens: [{ ...CLOB_NO, tokenId: " tok-no " }, CLOB_YES] }, false],
+    ["outcome whitespace", { tokens: [{ ...CLOB_NO, outcome: " No " }, CLOB_YES] }, false],
+    ["token identity", { tokens: [CLOB_NO, { ...CLOB_YES, tokenId: "other" }] }, false],
+    ["outcome identity", { tokens: [CLOB_NO, { ...CLOB_YES, outcome: "Wrong" }] }, false],
+    ["missing flag", { closed: undefined }, false],
+    ["nonliteral flag", { acceptingOrders: "false" as never }, false],
+    ["token count", { tokens: [CLOB_NO] }, false],
+    ["duplicate tokens", { tokens: [CLOB_NO, { ...CLOB_YES, tokenId: "tok-no" }] }, false],
+    ["zero winner", { tokens: [{ ...CLOB_NO, winner: false }, CLOB_YES] }, false],
+    ["multiple winners", { tokens: [CLOB_NO, { ...CLOB_YES, winner: true }] }, false],
+    ["duplicate candidates", {}, true],
+  ] as const)("rejects inexact CLOB proof: %s", async (_name, override, duplicateCandidates) => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(null);
+    (gammaClient.getMarketById as any).mockResolvedValue(null);
+    (clobGateway.getMarket as any).mockResolvedValue(
+      makeClobMarket(override as Partial<ClobMarket>),
+    );
+    if (duplicateCandidates) {
+      (positionRepo.findOpen as any).mockReturnValue([makePosition(), makePosition()]);
+    }
+    expect((await detector.detect(0))[0]?.source).toBe("gamma-delisted");
+  });
+
+  it.each(["open", "transport"] as const)("does not query CLOB after Gamma %s", async (kind) => {
+    if (kind === "open") {
+      (gammaClient.getMarketBySlug as any).mockResolvedValue(makeGammaInfo({ closed: false }));
+    } else {
+      (gammaClient.getMarketBySlug as any).mockRejectedValue(new Error("transport"));
+    }
+    await detector.detect(0);
+    expect(clobGateway.getMarket).not.toHaveBeenCalled();
   });
 
   // ─── Normal resolution flow ─────────────────────────────────────────────

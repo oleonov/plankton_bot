@@ -20,7 +20,9 @@ import type {
   MarketResolutionRepository,
   OrderRepository,
   InventoryLotRepository,
+  Market,
   PositionRepository,
+  Position,
   TokenId,
 } from "@krabs/domain";
 import { createCommandId } from "@krabs/domain";
@@ -30,7 +32,11 @@ import type {
   ResolutionCandidate,
   DetectedResolution,
 } from "./resolution-detector.js";
-import { inferResolution, parseTokenIds } from "./resolution-detector.js";
+import {
+  inferResolution,
+  isStableClobResolutionProof,
+  parseTokenIds,
+} from "./resolution-detector.js";
 import type { PositionSettler } from "./position-settler.js";
 import type { Logger } from "../../logger.js";
 import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
@@ -188,24 +194,24 @@ export class ResolutionModule implements RuntimeModule {
     );
     // Run once at startup (non-blocking)
     this.runCheck().catch((err) => this.deps.log.error(err, "startup resolution check failed"));
-    this.tryRecoverUnresolved("startup");
-
     this.intervalHandle = setInterval(() => {
       this.runCheck().catch((err) => this.deps.log.error(err, "resolution check failed"));
     }, this.deps.checkIntervalMs);
   }
 
-  private tryRecoverUnresolved(source: string): void {
+  private async tryRecoverUnresolved(source: string): Promise<void> {
     if (!this.recoveryPending) return;
     if (this.deps.runtimeControl?.isPaused()) {
       this.deps.log.debug({ source }, "resolution recovery deferred while runtime is paused");
       return;
     }
     this.recoveryPending = false;
-    this.recoverUnresolved().catch((err) => {
+    try {
+      await this.recoverUnresolved();
+    } catch (err) {
       this.recoveryPending = true;
       this.deps.log.error(err, "resolution recovery failed");
-    });
+    }
   }
 
   async stop(): Promise<void> {
@@ -789,12 +795,10 @@ export class ResolutionModule implements RuntimeModule {
       this.deps.log.debug("resolution check skipped while runtime is paused");
       return 0;
     }
-    if (this.recoveryPending) {
-      this.tryRecoverUnresolved("runCheck");
-    }
     this.running = true;
 
     try {
+      if (this.recoveryPending) await this.tryRecoverUnresolved("runCheck");
       const resolutions = await this.deps.detector.detect(this.deps.graceMinutes);
       if (this.deps.runtimeControl?.isPaused()) {
         this.deps.log.debug(
@@ -882,7 +886,8 @@ export class ResolutionModule implements RuntimeModule {
   ): Promise<number> {
     let totalSettled = 0;
 
-    for (const resolution of resolutions) {
+    for (const detectedResolution of resolutions) {
+      let resolution = detectedResolution;
       if (this.deps.runtimeControl?.isPaused()) {
         this.deps.log.debug(
           { conditionId: resolution.conditionId },
@@ -890,7 +895,55 @@ export class ResolutionModule implements RuntimeModule {
         );
         return totalSettled;
       }
-      const isRetry = !!this.deps.resolutionRepo.findByConditionId(resolution.conditionId);
+      const existing = this.deps.resolutionRepo.findByConditionId(resolution.conditionId);
+      const isRetry = existing != null;
+      if (existing?.status === "settled") continue;
+      if (
+        resolution.source === "clob-api" &&
+        !isStableClobResolutionProof(
+          resolution.rawResponse,
+          resolution.conditionId,
+          resolution.resolution,
+        )
+      ) {
+        continue;
+      }
+      if (existing?.resolution === "unknown" && resolution.resolution !== "unknown") {
+        if (
+          !resolution.rawResponse ||
+          !this.deps.resolutionRepo.promoteUnknownResolution ||
+          !this.deps.resolutionRepo.promoteUnknownResolution(
+            resolution.conditionId,
+            resolution.resolution,
+            resolution.resolvedAt,
+            resolution.source,
+            resolution.rawResponse,
+          )
+        ) {
+          continue;
+        }
+      } else if (
+        existing != null &&
+        existing.resolution !== "unknown" &&
+        existing.source != null &&
+        existing.source !== resolution.source
+      ) {
+        continue;
+      } else if (existing?.source === "clob-api") {
+        if (
+          resolution.source !== "clob-api" ||
+          normalizeOutcomeLabel(existing.resolution) !==
+            normalizeOutcomeLabel(resolution.resolution) ||
+          existing.rawResponse !== resolution.rawResponse
+        ) {
+          continue;
+        }
+        resolution = {
+          ...resolution,
+          resolution: existing.resolution,
+          resolvedAt: existing.resolvedAt,
+        };
+      }
 
       if (!isRetry) {
         this.deps.resolutionRepo.save({
@@ -1302,6 +1355,29 @@ export class ResolutionModule implements RuntimeModule {
     }
   }
 
+  private findLegacyRecoveryCandidates(
+    markets: readonly Market[],
+  ): Array<{ market: Market; position: Position }> {
+    if (
+      markets.some(
+        (market) => this.deps.positionRepo.findActiveByTokenId(market.tokenId).length > 0,
+      )
+    ) {
+      return [];
+    }
+    const positions = this.deps.positionRepo.findAll();
+    return markets.flatMap((market) =>
+      positions
+        .filter(
+          (position) =>
+            position.status === "closed" &&
+            String(position.tokenId) === String(market.tokenId) &&
+            this.deps.lotRepo.findOpen(position.positionId).length > 0,
+        )
+        .map((position) => ({ market, position })),
+    );
+  }
+
   /** Re-resolve market_resolutions stuck in detected/unknown status. */
   private async recoverUnresolved(): Promise<number> {
     const allResolutions = this.deps.resolutionRepo.findAll();
@@ -1329,6 +1405,7 @@ export class ResolutionModule implements RuntimeModule {
       }
       const markets = this.deps.marketRepo.findByConditionId(mr.conditionId);
       if (markets.length === 0) continue;
+      if (this.findLegacyRecoveryCandidates(markets).length === 0) continue;
 
       const slug = markets[0]!.slug;
       let info;
@@ -1349,6 +1426,9 @@ export class ResolutionModule implements RuntimeModule {
         );
         return recovered;
       }
+      const freshMarkets = this.deps.marketRepo.findByConditionId(mr.conditionId);
+      const closedWithLots = this.findLegacyRecoveryCandidates(freshMarkets);
+      if (closedWithLots.length === 0) continue;
       if (!info?.closed) continue;
 
       const inferred = inferResolution(info.umaResolutionStatus, info.rawPayload);
@@ -1373,66 +1453,54 @@ export class ResolutionModule implements RuntimeModule {
           "gamma-api",
         );
 
-        for (const market of markets) {
-          // Find closed positions with orphaned lots for this token
-          const allPositions = this.deps.positionRepo
-            .findAll()
-            .filter((p) => String(p.tokenId) === String(market.tokenId));
-          const closedWithLots = allPositions.filter((p) => {
-            if (p.status !== "closed") return false;
-            const lots = this.deps.lotRepo.findOpen(p.positionId);
-            return lots.length > 0;
-          });
+        for (const { market, position: pos } of closedWithLots) {
+          const openLots = this.deps.lotRepo.findOpen(pos.positionId);
+          const remainingSize = openLots.reduce((sum, l) => sum + l.remainingSize, 0);
+          const isWinner = winnerTokenId
+            ? String(market.tokenId) === winnerTokenId
+            : normalizeOutcomeLabel(market.outcome) === normalizeOutcomeLabel(resolution);
+          const settlementPrice = isWinner ? 1.0 : 0.0;
+          const settlementPnl = (settlementPrice - pos.avgEntryPrice) * remainingSize;
 
-          for (const pos of closedWithLots) {
-            const openLots = this.deps.lotRepo.findOpen(pos.positionId);
-            const remainingSize = openLots.reduce((sum, l) => sum + l.remainingSize, 0);
-            const isWinner = winnerTokenId
-              ? String(market.tokenId) === winnerTokenId
-              : normalizeOutcomeLabel(market.outcome) === normalizeOutcomeLabel(resolution);
-            const settlementPrice = isWinner ? 1.0 : 0.0;
-            const settlementPnl = (settlementPrice - pos.avgEntryPrice) * remainingSize;
+          this.deps.lotRepo.settleAll(pos.positionId);
 
-            this.deps.lotRepo.settleAll(pos.positionId);
-
-            const settlementId = `recovery-${mr.conditionId}-${String(market.tokenId)}`;
-            this.deps.db
-              .prepare(
-                `INSERT OR IGNORE INTO settlement_ledger
+          const settlementId = `recovery-${mr.conditionId}-${String(market.tokenId)}`;
+          this.deps.db
+            .prepare(
+              `INSERT OR IGNORE INTO settlement_ledger
                    (settlement_id, condition_id, position_id, token_id,
                     resolution, settlement_price, size, delta, settled_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              )
-              .run(
-                settlementId,
-                mr.conditionId,
-                String(pos.positionId),
-                String(market.tokenId),
-                resolution,
-                settlementPrice,
-                remainingSize,
-                settlementPnl,
-                resolvedAt,
-              );
-
-            this.deps.positionRepo.save({
-              ...pos,
-              size: 0,
-              realizedPnl: pos.realizedPnl + settlementPnl,
-              currentValueUsdc: 0,
-              closedAt: resolvedAt,
-              updatedAt: new Date().toISOString(),
-            });
-
-            this.deps.log.info(
-              {
-                positionId: String(pos.positionId),
-                resolution,
-                settlementPnl: settlementPnl.toFixed(4),
-              },
-              "recovery: settled orphaned closed position",
+            )
+            .run(
+              settlementId,
+              mr.conditionId,
+              String(pos.positionId),
+              String(market.tokenId),
+              resolution,
+              settlementPrice,
+              remainingSize,
+              settlementPnl,
+              resolvedAt,
             );
-          }
+
+          this.deps.positionRepo.save({
+            ...pos,
+            size: 0,
+            realizedPnl: pos.realizedPnl + settlementPnl,
+            currentValueUsdc: 0,
+            closedAt: resolvedAt,
+            updatedAt: new Date().toISOString(),
+          });
+
+          this.deps.log.info(
+            {
+              positionId: String(pos.positionId),
+              resolution,
+              settlementPnl: settlementPnl.toFixed(4),
+            },
+            "recovery: settled orphaned closed position",
+          );
         }
       });
       runSettlement();

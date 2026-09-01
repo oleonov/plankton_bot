@@ -1351,7 +1351,12 @@ export class RedeemSweepModule implements RuntimeModule {
       resolution: resolution.resolution,
       winnerTokenId: null,
       resolvedAt: resolution.resolvedAt,
-      source: resolution.source === "gamma-delisted" ? "gamma-delisted" : "gamma-api",
+      source:
+        resolution.source === "clob-api"
+          ? "clob-api"
+          : resolution.source === "gamma-delisted"
+            ? "gamma-delisted"
+            : "gamma-api",
       rawResponse: resolution.rawResponse,
       candidates,
     });

@@ -1907,6 +1907,7 @@ async function main(): Promise<void> {
     marketResolutionRepo,
     gammaResolutionClient,
     log,
+    marketDataGateway,
   );
   const positionSettler = new PositionSettler(
     repos.position,

@@ -93,4 +93,25 @@ describe("SqliteMarketResolutionRepository", () => {
     const result = repo.findByConditionId("cond-1");
     expect(result?.resolvedAt).toBe("2026-01-02T00:00:00.000Z");
   });
+
+  it("atomically promotes only a detected unknown row and preserves detected status", () => {
+    repo.save(makeResolution({ source: "gamma-delisted" }));
+
+    expect(
+      repo.promoteUnknownResolution(
+        "cond-1",
+        "No",
+        "2026-01-02T00:00:00Z",
+        "clob-api",
+        '{"proof":"exact"}',
+      ),
+    ).toBe(true);
+    expect(repo.findByConditionId("cond-1")).toMatchObject({
+      resolution: "No",
+      resolvedAt: "2026-01-02T00:00:00.000Z",
+      source: "clob-api",
+      rawResponse: '{"proof":"exact"}',
+      status: "detected",
+    });
+  });
 });

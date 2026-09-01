@@ -75,6 +75,23 @@ export class SqliteMarketResolutionRepository implements MarketResolutionReposit
       .run(resolution, canonicalResolvedAt(resolvedAt), source, conditionId);
   }
 
+  promoteUnknownResolution(
+    conditionId: string,
+    resolution: string,
+    resolvedAt: string,
+    source: MarketResolution["source"],
+    rawResponse: string,
+  ): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE market_resolutions
+         SET resolution = ?, resolved_at = ?, source = ?, raw_response = ?
+         WHERE condition_id = ? AND status = 'detected' AND resolution = 'unknown'`,
+      )
+      .run(resolution, canonicalResolvedAt(resolvedAt), source, rawResponse, conditionId);
+    return result.changes === 1;
+  }
+
   markSettled(conditionId: string): void {
     this.db
       .prepare("UPDATE market_resolutions SET status = 'settled' WHERE condition_id = ?")

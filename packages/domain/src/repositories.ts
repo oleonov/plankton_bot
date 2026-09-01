@@ -973,6 +973,15 @@ export interface MarketResolutionRepository {
     source: string,
   ): void;
 
+  /** Atomically promote a detected unknown row while retaining detected status. */
+  promoteUnknownResolution?(
+    conditionId: string,
+    resolution: string,
+    resolvedAt: string,
+    source: MarketResolution["source"],
+    rawResponse: string,
+  ): boolean;
+
   /** Mark a resolution as fully settled (all positions processed). */
   markSettled(conditionId: string): void;
 }
