@@ -1,14 +1,20 @@
 import {
   BOUNCE_EXIT_TARGET_RULE_ID,
   S1_LADDER_RULE_ID,
+  buildS1LadderId,
   bounceExitTierGain,
   computeHarvestTarget,
+  normalizeDistribution,
   type Fill,
   type Order,
   type Position,
   type BounceExitPolicy,
   type BounceRungMetadata,
 } from "@krabs/domain";
+import {
+  SELL_REPLACEMENT_CANCELLED_ORDER_ID_METADATA_KEY,
+  isProfileLadderSellOrder,
+} from "./modules/profile-ladder-order-helpers.js";
 
 const EPSILON = 1e-9;
 const WORKING_STATUSES = new Set(["pending", "open", "partially-filled"]);
@@ -67,14 +73,17 @@ export function resolveExactS1CoverageCleanupState(input: {
   readonly fills: readonly Fill[];
   readonly reservedSellSize: number;
   readonly numTiers: number;
+  readonly volumeDistribution: readonly number[];
   readonly nowMs: number;
 }): ExactS1CoverageCleanupState | null {
   if (input.position.status !== "open" || !isPositive(input.position.size)) return null;
   const working = findS1CoverageWorkingSells(input.orders, input.position);
   const ordinary = working.filter((order) => order.decisionRuleId === S1_LADDER_RULE_ID);
   if (working.length !== ordinary.length) return null;
-  const ladder = resolveExactS1Ladder(ordinary, input.position, input.numTiers);
   const filled = sumFills(input.fills);
+  const ladder =
+    resolveExactS1Ladder(ordinary, input.position, input.numTiers) ??
+    resolveExactSparseProfileHandoff(ordinary, input, filled);
   if (
     !ladder ||
     !filled ||
@@ -95,6 +104,81 @@ export function resolveExactS1CoverageCleanupState(input: {
     residualSize: roundShares(Math.max(0, input.position.size - input.reservedSellSize)),
     attempt,
   };
+}
+
+function resolveExactSparseProfileHandoff(
+  workingS1: readonly Order[],
+  input: {
+    readonly position: Position;
+    readonly orders: readonly Order[];
+    readonly numTiers: number;
+    readonly volumeDistribution: readonly number[];
+  },
+  filled: ReadonlyMap<string, number> | null,
+): Omit<ExactS1CoverageCleanupState, "residualSize" | "attempt"> | null {
+  const top = resolveExactSparseS1Top(workingS1, input, filled);
+  const profile = resolveExactCancelledProfile(input, filled);
+  if (
+    !top ||
+    !profile ||
+    top.order.metadata?.[SELL_REPLACEMENT_CANCELLED_ORDER_ID_METADATA_KEY] !==
+      String(profile.orderId)
+  ) {
+    return null;
+  }
+  return top.ladder;
+}
+
+function resolveExactSparseS1Top(
+  workingS1: readonly Order[],
+  input: {
+    readonly position: Position;
+    readonly numTiers: number;
+    readonly volumeDistribution: readonly number[];
+  },
+  filled: ReadonlyMap<string, number> | null,
+) {
+  const top = workingS1[0];
+  const parsed = top ? parseOrdinaryS1Order(top, input.position) : null;
+  const fractions = normalizeDistribution(input.volumeDistribution, input.numTiers);
+  if (
+    workingS1.length !== 1 ||
+    !top ||
+    !parsed ||
+    !filled ||
+    top.status !== "open" ||
+    !top.exchangeOrderId ||
+    (filled.get(String(top.orderId)) ?? 0) > EPSILON ||
+    parsed.tierIndex !== input.numTiers - 1 ||
+    parsed.ladderId !== buildS1LadderId(input.position) ||
+    !sameNumber(parsed.positionSizeTotal, input.position.size) ||
+    !sameNumber(top.size, roundTierSize(input.position.size * fractions.at(-1)!))
+  ) {
+    return null;
+  }
+  return { order: top, ladder: parsed };
+}
+
+function resolveExactCancelledProfile(
+  input: { readonly position: Position; readonly orders: readonly Order[] },
+  filled: ReadonlyMap<string, number> | null,
+): Order | null {
+  if (!filled) return null;
+  const profiles = input.orders.filter(
+    (order) =>
+      order.tokenId === input.position.tokenId &&
+      order.conditionId === input.position.conditionId &&
+      order.positionId === input.position.positionId &&
+      order.status === "cancelled" &&
+      order.cancelReason === "sell_timeout_escalation" &&
+      order.fillProgressShares === 0 &&
+      order.postOnly === true &&
+      !!order.exchangeOrderId &&
+      sameNumber(order.size, input.position.size) &&
+      (filled.get(String(order.orderId)) ?? 0) <= EPSILON &&
+      isProfileLadderSellOrder(order),
+  );
+  return profiles.length === 1 ? profiles[0]! : null;
 }
 
 export function classifyExitCoverageCleanup(
@@ -315,6 +399,10 @@ function sumFills(fills: readonly Fill[]): Map<string, number> | null {
 
 function roundShares(value: number): number {
   return Math.round(value * 1e9) / 1e9;
+}
+
+function roundTierSize(value: number): number {
+  return Math.floor((value + 1e-12) * 1_000_000) / 1_000_000;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

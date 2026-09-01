@@ -4,6 +4,7 @@ import {
   DEFAULT_SELL_LOOP_GUARD_POLICY,
   OrderType,
   PositionStatus,
+  buildS1LadderId,
   createCommandId,
   createConditionId,
   createFillId,
@@ -237,6 +238,44 @@ function exactOrdinaryS1Orders(positionValue: Position): Order[] {
   );
 }
 
+function sparseProfileToS1Fixture() {
+  const positionValue = position({ size: 95.49, costBasisUsdc: 1.4 });
+  const profile = order({
+    orderId: createOrderId("profile-s1-handoff"),
+    clientOrderId: "profile-s1-handoff" as ClientOrderId,
+    positionId: positionValue.positionId,
+    decisionRuleId: "PROFILE_LADDER",
+    signalReason: "profile-ladder-exit",
+    price: 0.035,
+    size: positionValue.size,
+    sizeUsdc: positionValue.size * 0.035,
+    status: "cancelled",
+    cancelReason: "sell_timeout_escalation",
+    fillProgressShares: 0,
+    metadata: { source: "profile_ladder" },
+  });
+  const ladderId = buildS1LadderId(positionValue);
+  const top = order({
+    orderId: createOrderId("profile-s1-top"),
+    clientOrderId: "profile-s1-top" as ClientOrderId,
+    positionId: positionValue.positionId,
+    price: 0.022,
+    size: 38.196,
+    sizeUsdc: 38.196 * 0.022,
+    metadata: {
+      sellReplacementCancelledOrderId: String(profile.orderId),
+      s1: {
+        ladderId,
+        tierIndex: 3,
+        targetPrice: 0.022,
+        positionSizeTotal: positionValue.size,
+        handoffStartedAt: null,
+      },
+    },
+  });
+  return { positionValue, profile, top };
+}
+
 function makeFillRepo(fills: Fill[] = [], error: Error | null = null): FillRepository {
   const read = (ids: readonly string[]) => {
     if (error) throw error;
@@ -272,6 +311,7 @@ async function runS1Cleanup(
 ): Promise<{
   placed: PlaceOrderCommand[];
   cancels: unknown[];
+  owned: boolean;
   runtimeMetrics: { writeCounter: ReturnType<typeof vi.fn> };
 }> {
   const bus = new InProcessEventBus();
@@ -305,8 +345,9 @@ async function runS1Cleanup(
   } else {
     for (let index = 0; index < 2; index++) await heartbeat(index);
   }
+  const owned = module.isS1OwnedToken(positionValue.tokenId);
   await module.stop();
-  return { placed, cancels, runtimeMetrics };
+  return { placed, cancels, owned, runtimeMetrics };
 }
 
 function persistedCleanup(command: PlaceOrderCommand, status: Order["status"]): Order {
@@ -1341,6 +1382,100 @@ describe("S1LadderModule", () => {
 
     expect(placed).toHaveLength(4);
     await module.stop();
+  });
+
+  it("preserves working same-cycle PROFILE coverage instead of starting S1", async () => {
+    const positionValue = position({ size: 95.49, costBasisUsdc: 1.4 });
+    const profile = order({
+      positionId: positionValue.positionId,
+      decisionRuleId: "PROFILE_LADDER",
+      signalReason: "profile-ladder-exit",
+      size: positionValue.size,
+      metadata: { source: "profile_ladder" },
+    });
+    const result = await runS1Cleanup(positionValue, [profile], makeFillRepo(), NOW, {
+      market: { minOrderSize: 5 },
+      book: { minOrderSize: 5 },
+    });
+
+    expect(result.placed).toEqual([]);
+    expect(result.cancels).toEqual([]);
+    expect(result.owned).toBe(false);
+    expect(result.runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "track_s1_skipped_profile_coverage_total",
+      1,
+    );
+  });
+
+  it("repairs only the exact linked sparse PROFILE-to-S1 handoff and survives restart", async () => {
+    const fixture = sparseProfileToS1Fixture();
+    const orders = [fixture.profile, fixture.top];
+    const options = {
+      market: { minOrderSize: 5, bestBid: 0.003, bestAsk: 0.009 },
+      book: { minOrderSize: 5, bestBid: 0.003, bestAsk: 0.009 },
+      concurrentHeartbeats: true,
+    };
+    const first = await runS1Cleanup(fixture.positionValue, orders, makeFillRepo(), NOW, options);
+
+    expect(first.placed).toHaveLength(1);
+    expect(first.placed[0]).toMatchObject({
+      size: 57.294,
+      price: 0.022,
+      metadata: { s1: { coverageCleanupV1: { residualSize: 57.294, attempt: 1 } } },
+    });
+    orders.push(persistedCleanup(first.placed[0]!, "open"));
+    expect(
+      (await runS1Cleanup(fixture.positionValue, orders, makeFillRepo(), NOW + 61_000, options))
+        .placed,
+    ).toEqual([]);
+  });
+
+  it.each([
+    "reason",
+    "fill",
+    "cycle",
+    "size",
+    "top",
+    "metadata",
+    "partial",
+    "conflict",
+    "link-missing",
+    "link-mismatch",
+  ] as const)("fails sparse PROFILE-to-S1 cleanup closed on %s", async (fault) => {
+    const fixture = sparseProfileToS1Fixture();
+    const orders = [fixture.profile, fixture.top];
+    let fills: Fill[] = [];
+    if (fault === "reason") fixture.profile.cancelReason = "sell_replace_reprice";
+    if (fault === "fill") fills = [s1Fill(fixture.profile, 1)];
+    if (fault === "cycle") fixture.profile.positionId = createPositionId("other-cycle");
+    if (fault === "size") fixture.profile.size -= 1;
+    if (fault === "top") (fixture.top.metadata!.s1 as { tierIndex: number }).tierIndex = 2;
+    if (fault === "metadata") {
+      (fixture.top.metadata!.s1 as { positionSizeTotal: number }).positionSizeTotal -= 1;
+    }
+    if (fault === "partial") fixture.top.status = "partially-filled";
+    if (fault === "conflict") {
+      orders.push(
+        order({
+          orderId: createOrderId("conflicting-exit"),
+          positionId: fixture.positionValue.positionId,
+          decisionRuleId: "D8_PROFIT_RATIO",
+        }),
+      );
+    }
+    if (fault === "link-missing") fixture.top.metadata = { s1: fixture.top.metadata!.s1 };
+    if (fault === "link-mismatch") {
+      fixture.top.metadata = {
+        ...fixture.top.metadata,
+        sellReplacementCancelledOrderId: "other-profile",
+      };
+    }
+
+    const result = await runS1Cleanup(fixture.positionValue, orders, makeFillRepo(fills), NOW, {
+      market: { minOrderSize: 5 },
+      book: { minOrderSize: 5, bestBid: 0.003, bestAsk: 0.009 },
+    });
+    expect(result.placed).toEqual([]);
   });
 
   it("places one exact cleanup for the reproduced 110 versus 83.58 S1 residual and blocks overlap", async () => {

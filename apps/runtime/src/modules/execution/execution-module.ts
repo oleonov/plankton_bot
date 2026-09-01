@@ -64,6 +64,7 @@ import {
   shouldBlockRepriceChain,
   GATE_ENTRY_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
+  S1_LADDER_RULE_ID,
   isBounceForceExit,
   evaluateExitLossFloor,
   computePolymarketPlatformFeeRate,
@@ -172,6 +173,8 @@ import {
   isExchangeBalanceRejection,
 } from "./exchange-state-store.js";
 import {
+  SELL_REPLACEMENT_CANCELLED_ORDER_ID_METADATA_KEY,
+  hasWorkingProfileLadderSell,
   orderMatchesOrderId,
   validateProfileLadderReplacementSellTarget,
 } from "../profile-ladder-order-helpers.js";
@@ -538,7 +541,6 @@ export class ExecutionModule implements RuntimeModule {
   private static readonly SELL_REPLACE_LOCK_TIMEOUT_MS = 2 * 60 * 1000;
   private static readonly SIZE_EPSILON_SHARES = 1e-9;
   private static readonly PRICE_EPSILON = 1e-9;
-  private static readonly SELL_REPLACEMENT_CANCELLED_ORDER_ID = "sellReplacementCancelledOrderId";
 
   private readonly log: Logger;
   private readonly processedCommandIds = new Set<string>();
@@ -3089,6 +3091,10 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    if (cleanupKind == null && (await this.blockS1ProfileReplacement(cmd))) {
+      return;
+    }
+
     if (cleanupKind == null && (await this.blockSellReplacementBelowExitLossFloor(cmd))) {
       return;
     }
@@ -5246,6 +5252,7 @@ export class ExecutionModule implements RuntimeModule {
         ? orders.filter((order) => order.orderId !== predecessor.orderId)
         : orders;
       const working = findS1CoverageWorkingSells(stateOrders, position);
+      const policy = this.currentTrackS1Policy() ?? DEFAULT_EXECUTION_POLICY.trackS1;
       const state = resolveExactS1CoverageCleanupState({
         position,
         orders: stateOrders,
@@ -5254,7 +5261,8 @@ export class ExecutionModule implements RuntimeModule {
           buildReservationSnapshot([...working], s1CoverageFillLookup(fills)),
           position.tokenId,
         ),
-        numTiers: (this.currentTrackS1Policy() ?? DEFAULT_EXECUTION_POLICY.trackS1).numTiers,
+        numTiers: policy.numTiers,
+        volumeDistribution: policy.volumeDistribution,
         nowMs: Date.now(),
       });
       const s1 = cmd.metadata?.s1;
@@ -6870,12 +6878,13 @@ export class ExecutionModule implements RuntimeModule {
     ) {
       return false;
     }
-    if (this.isSellReplacementSubmit(cmd)) return false;
-
     // Normal exit management keeps one live price per token and replaces it
     // when strategy moves. The per-token SELL cap is a race/legacy-state
     // ceiling, not permission to stack multiple independent exit prices.
     const existingSells = this.findOpenSellOrdersForToken(cmd.tokenId, cmd.positionId ?? null);
+    if (await this.blockS1ProfileReplacement(cmd, existingSells)) return true;
+    if (this.isSellReplacementSubmit(cmd)) return false;
+
     const key = String(cmd.tokenId);
     const profileLadderOldOrderId = this.getProfileLadderReplacementOldOrderId(cmd);
     if (profileLadderOldOrderId != null) {
@@ -7018,6 +7027,20 @@ export class ExecutionModule implements RuntimeModule {
     return true;
   }
 
+  private async blockS1ProfileReplacement(
+    cmd: PlaceOrderCommand,
+    sells = this.findOpenSellOrdersForToken(cmd.tokenId, cmd.positionId ?? null),
+  ): Promise<boolean> {
+    if (cmd.side !== "sell" || cmd.decisionRuleId !== S1_LADDER_RULE_ID) return false;
+    if (!hasWorkingProfileLadderSell(sells, cmd)) return false;
+    await this.rejectOrder(
+      cmd,
+      "s1-profile-coverage-conflict",
+      ExchangeErrorCode.LivePolicyBlocked,
+    );
+    return true;
+  }
+
   /**
    * `positionId` omitted (not even `null`) = unscoped — every working SELL for
    * the token, regardless of cycle. Passing `cmd.positionId ?? null` (even
@@ -7045,7 +7068,7 @@ export class ExecutionModule implements RuntimeModule {
   private isSellReplacementSubmit(cmd: PlaceOrderCommand): boolean {
     return (
       cmd.side === "sell" &&
-      typeof cmd.metadata?.[ExecutionModule.SELL_REPLACEMENT_CANCELLED_ORDER_ID] === "string"
+      typeof cmd.metadata?.[SELL_REPLACEMENT_CANCELLED_ORDER_ID_METADATA_KEY] === "string"
     );
   }
 
@@ -7074,7 +7097,7 @@ export class ExecutionModule implements RuntimeModule {
         commandId: createCommandId(`sell-replace-submit-${String(cancelledOrderId)}-${Date.now()}`),
         metadata: {
           ...(lock.command.metadata ?? {}),
-          [ExecutionModule.SELL_REPLACEMENT_CANCELLED_ORDER_ID]: String(cancelledOrderId),
+          [SELL_REPLACEMENT_CANCELLED_ORDER_ID_METADATA_KEY]: String(cancelledOrderId),
         },
       };
       await this.deps.bus.publish("PlaceOrderRequested", {

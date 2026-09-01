@@ -1,5 +1,9 @@
 import type { Order } from "@krabs/domain";
 
+export const SELL_REPLACEMENT_CANCELLED_ORDER_ID_METADATA_KEY = "sellReplacementCancelledOrderId";
+
+const WORKING_STATUSES = new Set(["pending", "open", "partially-filled"]);
+
 export type ProfileLadderReplacementTargetValidation =
   | { ok: true; target: Order }
   | {
@@ -25,6 +29,20 @@ export function isProfileLadderOrder(order: Order): boolean {
 
 export function isProfileLadderSellOrder(order: Order): boolean {
   return order.side === "sell" && isProfileLadderOrder(order);
+}
+
+export function hasWorkingProfileLadderSell(
+  orders: readonly Order[],
+  cycle: Pick<Order, "tokenId" | "conditionId" | "positionId">,
+): boolean {
+  return orders.some(
+    (order) =>
+      order.tokenId === cycle.tokenId &&
+      order.conditionId === cycle.conditionId &&
+      order.positionId === cycle.positionId &&
+      WORKING_STATUSES.has(order.status) &&
+      isProfileLadderSellOrder(order),
+  );
 }
 
 export function validateProfileLadderReplacementSellTarget(

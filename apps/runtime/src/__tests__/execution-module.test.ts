@@ -343,6 +343,78 @@ function createS1CoverageCleanupFixture(targetPrice: number) {
   return { position, orders, command };
 }
 
+function createSparseS1HandoffFixture() {
+  const position = makePosition({
+    size: 95.49,
+    avgEntryPrice: 0.014,
+    costBasisUsdc: 1.4,
+    openedAt: "2026-06-12T09:00:00.000Z",
+  });
+  const profile = openSellAt(0.035, {
+    orderId: createOrderId("sparse-profile"),
+    clientOrderId: "sparse-profile" as ClientOrderId,
+    positionId: position.positionId,
+    size: position.size,
+    sizeUsdc: position.size * 0.035,
+    status: "cancelled",
+    cancelReason: "sell_timeout_escalation",
+    fillProgressShares: 0,
+    postOnly: true,
+    signalReason: "profile-ladder-exit",
+    decisionRuleId: "PROFILE_LADDER",
+    metadata: { source: "profile_ladder" },
+  });
+  const ladderId = buildS1LadderId(position);
+  const top = openSellAt(0.022, {
+    orderId: createOrderId("sparse-s1-top"),
+    clientOrderId: "sparse-s1-top" as ClientOrderId,
+    positionId: position.positionId,
+    size: 38.196,
+    sizeUsdc: 38.196 * 0.022,
+    postOnly: true,
+    decisionRuleId: S1_LADDER_RULE_ID,
+    metadata: {
+      sellReplacementCancelledOrderId: String(profile.orderId),
+      s1: {
+        ladderId,
+        tierIndex: 3,
+        targetPrice: 0.022,
+        positionSizeTotal: position.size,
+        handoffStartedAt: null,
+      },
+    },
+  });
+  const command = makePlaceCmd({
+    commandId: createCommandId("sparse-s1-cleanup"),
+    clientOrderId: "sparse-s1-cleanup" as ClientOrderId,
+    signalReason: "repricing-exit",
+    side: "sell",
+    size: 57.294,
+    price: 0.022,
+    tickSize: 0.001,
+    postOnly: true,
+    positionId: position.positionId,
+    decisionRuleId: S1_LADDER_RULE_ID,
+    metadata: {
+      marketData: { minOrderSize: 5 },
+      s1: {
+        ladderId,
+        tierIndex: 3,
+        targetPrice: 0.022,
+        positionSizeTotal: position.size,
+        handoffStartedAt: null,
+        coverageCleanupV1: {
+          version: 1,
+          positionId: String(position.positionId),
+          residualSize: 57.294,
+          attempt: 1,
+        },
+      },
+    },
+  });
+  return { position, profile, top, command };
+}
+
 function trackPreparedRows(orderRepo: ReturnType<typeof createMockOrderRepo>, initial: Order[]) {
   const rows = [...initial];
   orderRepo.findByTokenId = vi.fn(() => rows);
@@ -570,6 +642,151 @@ describe("ExecutionModule", () => {
       timestamp: Date.now(),
     });
     expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
+    await execution.stop();
+  });
+
+  it.each(["present", "late-linked"] as const)(
+    "does not let ordinary S1 cancel %s same-cycle PROFILE coverage",
+    async (timing) => {
+      const position = makePosition({ size: 95.49, avgEntryPrice: 0.014, costBasisUsdc: 1.4 });
+      const profile = openSellAt(0.035, {
+        positionId: position.positionId,
+        size: position.size,
+        createdAt: new Date(Date.now() - 7 * 60 * 60_000).toISOString(),
+        signalReason: "profile-ladder-exit",
+        decisionRuleId: "PROFILE_LADDER",
+        metadata: { source: "profile_ladder" },
+      });
+      orderRepo.findOpen = vi.fn().mockReturnValue(timing === "present" ? [profile] : []);
+      orderRepo.findByTokenId =
+        timing === "present"
+          ? vi.fn().mockReturnValue([profile])
+          : vi.fn().mockReturnValueOnce([]).mockReturnValue([profile]);
+      const positionRepo = createMockPositionRepo(position);
+      positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([position]);
+      const execution = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        positionRepo,
+        inventoryLotRepo: createMockInventoryLotRepo(position),
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      });
+      const rejected: string[] = [];
+      bus.subscribe("OrderRejected", async (event) => void rejected.push(event.reason));
+      await execution.start();
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId("profile-to-s1-top"),
+          clientOrderId: "profile-to-s1-top" as ClientOrderId,
+          side: "sell",
+          size: 38.196,
+          price: 0.022,
+          tickSize: 0.001,
+          postOnly: true,
+          positionId: position.positionId,
+          signalReason: "repricing-exit",
+          decisionRuleId: S1_LADDER_RULE_ID,
+          metadata: {
+            ...(timing === "late-linked"
+              ? { sellReplacementCancelledOrderId: String(profile.orderId) }
+              : {}),
+            s1: {
+              ladderId: buildS1LadderId(position),
+              tierIndex: 3,
+              targetPrice: 0.022,
+              positionSizeTotal: position.size,
+              handoffStartedAt: null,
+            },
+          },
+        }),
+        timestamp: Date.now(),
+      });
+
+      expect(rejected).toContain("s1-profile-coverage-conflict");
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      expect(execution.getDiagnostics().cancelReplacePendingCount).toBe(0);
+      await execution.stop();
+    },
+  );
+
+  it("submits exact linked sparse S1 cleanup without clamping", async () => {
+    const fixture = createSparseS1HandoffFixture();
+    const positionRepo = createMockPositionRepo(fixture.position);
+    positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([fixture.position]);
+    orderRepo.findOpen = vi.fn().mockReturnValue([fixture.top]);
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([fixture.profile, fixture.top]);
+    const execution = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(fixture.position),
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      allowSellSizeClamp: true,
+    });
+    await execution.start();
+    await bus.publish("PlaceOrderRequested", { command: fixture.command, timestamp: Date.now() });
+
+    expect(gateway.placeOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ size: 57.294, price: 0.022 }),
+    );
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    await execution.stop();
+  });
+
+  it("re-proves sparse S1 cleanup at submit and keeps its loss floor", async () => {
+    const fixture = createSparseS1HandoffFixture();
+    const skipped: string[] = [];
+    bus.subscribe("OrderSkipped", async (event) => void skipped.push(event.reasonCode));
+    const rows = [fixture.profile, fixture.top];
+    const positionRepo = createMockPositionRepo(fixture.position);
+    positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([fixture.position]);
+    orderRepo.findOpen = vi.fn(() => rows.filter((order) => order.status === "open"));
+    orderRepo.findByTokenId = vi.fn(() => rows);
+    (gateway.prepareOrder as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      fixture.top.status = "partially-filled";
+      return { orderId: "sparse-drift", __preparedOrderBrand: "PreparedOrder" };
+    });
+    const execution = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(fixture.position),
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+    await execution.start();
+    await bus.publish("PlaceOrderRequested", { command: fixture.command, timestamp: Date.now() });
+    expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+
+    fixture.top.status = "open";
+    const belowFloor = { ...fixture.position, costBasisUsdc: fixture.position.size * 0.05 };
+    positionRepo.findByTokenId = vi.fn().mockReturnValue(belowFloor);
+    positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([belowFloor]);
+    await bus.publish("PlaceOrderRequested", {
+      command: { ...fixture.command, commandId: createCommandId("sparse-below-floor") },
+      timestamp: Date.now(),
+    });
+    expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+    expect(skipped).toContain("exit_loss_floor_blocked");
     await execution.stop();
   });
 

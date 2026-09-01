@@ -39,6 +39,7 @@ import { buildReservationSnapshot, getReservedSellSize } from "../execution/rese
 import type { Logger } from "../../logger.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { CandidateBookCache } from "../strategy/candidate-book-cache.js";
+import { hasWorkingProfileLadderSell } from "../profile-ladder-order-helpers.js";
 
 export { S1_LADDER_RULE_ID };
 
@@ -198,6 +199,12 @@ export class S1LadderModule implements RuntimeModule {
         continue;
       }
       if (!policy.enabled) continue;
+      if (
+        hasWorkingProfileLadderSell(this.deps.orderRepo.findByTokenId(market.tokenId), position)
+      ) {
+        this.deps.runtimeMetrics?.writeCounter("track_s1_skipped_profile_coverage_total", 1);
+        continue;
+      }
       if (this.activeLadders.size >= policy.maxOpenLadderTokens) {
         this.deps.runtimeMetrics?.writeCounter("track_s1_skipped_capacity_total", 1);
         continue;
@@ -386,6 +393,7 @@ export class S1LadderModule implements RuntimeModule {
       fills,
       reservedSellSize,
       numTiers: policy.numTiers,
+      volumeDistribution: policy.volumeDistribution,
       nowMs,
     });
     return state && state.residualSize > SIZE_EPSILON ? state : null;
