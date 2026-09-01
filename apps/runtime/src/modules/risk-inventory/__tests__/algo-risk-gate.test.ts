@@ -5,6 +5,8 @@ import {
   createConditionId,
   BOUNCE_EXIT_BACKSTOP_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
+  bounceExitTierGain,
+  computeHarvestTarget,
   DEFAULT_BUY_CAPACITY_POLICY,
   DEFAULT_EXECUTION_POLICY,
   type Signal,
@@ -123,6 +125,7 @@ function makeMarketRepo(conditionId = COND_ID): Pick<MarketRepository, "findByTo
     findByTokenId: vi.fn(() => ({
       tokenId: TOK_ID,
       conditionId,
+      tickSize: 0.01,
     })) as unknown as MarketRepository["findByTokenId"],
   };
 }
@@ -714,6 +717,64 @@ describe("AlgoRiskGateImpl", () => {
       if (!approved) expect(decision.rejectionReasons).toContain("per_token_sell_limit");
     },
   );
+
+  it("allows only an exact bounce residual cleanup to use the one extra ladder slot", async () => {
+    const position = makeOpenPosition({ size: 120, exitOwner: "bounce" });
+    const orders = Array.from({ length: 3 }, () =>
+      makeOpenSellOrder({
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      }),
+    );
+    const policy = makeExecutionPolicy();
+    const lastRungIndex = policy.bounceExit.ladderFractions.length - 1;
+    const anchorPrice = 0.1;
+    const suggestedPrice = computeHarvestTarget(
+      anchorPrice,
+      (1 + bounceExitTierGain(policy.bounceExit, anchorPrice)) *
+        Math.pow(1 + policy.bounceExit.ladderStepPct, lastRungIndex) -
+        1,
+      0.01,
+    );
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(position),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => policy,
+      undefined,
+      makeMarketRepo(),
+    );
+    const exact = makeSignal({
+      side: "sell",
+      reason: "repricing-exit",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      positionId: position.positionId,
+      suggestedPrice,
+      suggestedSize: 90,
+      suggestedSizeUsdc: suggestedPrice * 90,
+      bounceRung: {
+        ladderId: "bounce-cleanup-ladder",
+        rungIndex: lastRungIndex,
+        anchorPrice,
+        fraction: 3,
+        originalPositionSize: 30,
+        remainingPositionSize: 120,
+        uncommittedRemainder: 90,
+        isCleanupRung: true,
+      },
+    });
+
+    const approved = await gate.evaluate(exact);
+    const malformed = await gate.evaluate({
+      ...exact,
+      bounceRung: { ...exact.bounceRung!, rungIndex: lastRungIndex - 1 },
+    });
+
+    expect(approved.approved).toBe(true);
+    expect(malformed.rejectionReasons).toContain("per_token_sell_limit");
+  });
 
   it("also grants the BOUNCE_EXIT_BACKSTOP taker signal the same ladder-sized carve-out (N rungs + backstop coexist)", async () => {
     const orders = Array.from({ length: 3 }, (_, index) =>

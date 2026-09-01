@@ -14,6 +14,7 @@ import {
   isBounceForceExit,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import { classifyExitCoverageCleanup } from "../../exit-coverage-cleanup.js";
 import { isExitRecoveryFencedPredecessor } from "../execution/reservation-utils.js";
 import {
   OPEN_POSITION_EXISTS_REASON,
@@ -216,6 +217,21 @@ export class AlgoRiskGateImpl implements RiskGate {
     });
     const counts = getOpenOrderCounts(this.orderRepo, signal.tokenId, isBounceBackstopSignal);
     const policy = this.executionPolicy?.();
+    const market = this.marketRepo?.findByTokenId(signal.tokenId);
+    const isBounceCleanupSignal =
+      classifyExitCoverageCleanup(
+        {
+          side: signal.side,
+          decisionRuleId: signal.decisionRuleId,
+          signalReason: signal.reason,
+          positionId: signal.positionId,
+          size: signal.suggestedSize,
+          price: signal.suggestedPrice,
+          tickSize: market?.tickSize ?? Number.NaN,
+          bounceRung: signal.bounceRung,
+        },
+        policy?.bounceExit,
+      ) === "bounce";
     const buyPolicy = normalizeBuyCapacityPolicy(this.buyCapacityPolicy?.() ?? policy?.buyCapacity);
     const sellPolicy = normalizeSellCapacityPolicy(policy?.sellCapacity);
     const orderPolicy = normalizeOrderCapacityPolicy(policy?.orderCapacity);
@@ -294,6 +310,7 @@ export class AlgoRiskGateImpl implements RiskGate {
           decisionRuleId: signal.decisionRuleId ?? null,
           sellPolicy,
           bounceLadderRungCount: policy?.bounceExit.ladderFractions.length,
+          isExitCoverageCleanup: isBounceCleanupSignal,
         }),
         openOrdersForToken: sellCounts.perTokenOpenSellOrderCount,
         enabled: sellPolicy.enabled,

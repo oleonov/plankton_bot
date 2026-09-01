@@ -13,6 +13,8 @@ import {
   type AlgoDecisionRule,
   type AlgoSizeRule,
   type ClientOrderId,
+  type Fill,
+  type FillRepository,
   type LegState,
   type NormalizedMarket,
   type Order,
@@ -20,6 +22,7 @@ import {
   type OrderRepository,
   type Position,
   type PositionRepository,
+  type PlaceOrderCommand,
   type RiskEventRepository,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
@@ -207,6 +210,103 @@ function makeRiskEvents(
     countSince: () => 0,
     findOrphanS1Ownerships: () => orphans,
   };
+}
+
+function exactOrdinaryS1Orders(positionValue: Position): Order[] {
+  const ladderId = "legacy-s1-residual-ladder";
+  const sizes = [8.358, 16.716, 25.074, 33.432];
+  const prices = [0.05, 0.06, 0.07, 0.08];
+  return sizes.map((size, tierIndex) =>
+    order({
+      orderId: createOrderId(`legacy-s1-${tierIndex}`),
+      clientOrderId: `legacy-s1-${tierIndex}` as ClientOrderId,
+      positionId: positionValue.positionId,
+      size,
+      sizeUsdc: size * prices[tierIndex]!,
+      price: prices[tierIndex]!,
+      metadata: {
+        s1: {
+          ladderId,
+          tierIndex,
+          targetPrice: prices[tierIndex]!,
+          positionSizeTotal: 83.58,
+          handoffStartedAt: null,
+        },
+      },
+    }),
+  );
+}
+
+function makeFillRepo(fills: Fill[] = [], error: Error | null = null): FillRepository {
+  const read = (ids: readonly string[]) => {
+    if (error) throw error;
+    return fills.filter((fill) => ids.includes(String(fill.orderId)));
+  };
+  return {
+    findByOrderId: vi.fn((id) => read([String(id)])),
+    findByOrderIds: vi.fn((ids) => read(ids.map(String))),
+  } as unknown as FillRepository;
+}
+
+function s1Fill(orderValue: Order, size: number): Fill {
+  return {
+    fillId: createFillId(`fill-${String(orderValue.orderId)}`),
+    orderId: orderValue.orderId,
+    tokenId: orderValue.tokenId,
+    conditionId: orderValue.conditionId,
+    size,
+  } as Fill;
+}
+
+async function runS1Cleanup(
+  positionValue: Position,
+  orders: Order[],
+  fillRepo: FillRepository,
+  now = NOW,
+  overrides: {
+    market?: Partial<NormalizedMarket>;
+    book?: Partial<OrderBookSnapshot>;
+  } = {},
+): Promise<{ placed: PlaceOrderCommand[]; cancels: unknown[] }> {
+  const bus = new InProcessEventBus();
+  const placed: PlaceOrderCommand[] = [];
+  const cancels: unknown[] = [];
+  bus.subscribe("PlaceOrderRequested", async ({ command }) => void placed.push(command));
+  bus.subscribe("CancelOrderRequested", async (event) => void cancels.push(event));
+  const module = new S1LadderModule({
+    bus,
+    positionRepo: makePositionRepo([positionValue]),
+    orderRepo: makeOrderRepo(orders),
+    fillRepo,
+    policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+    log: silentLog,
+    now: () => now,
+  });
+  await module.start();
+  for (let index = 0; index < 2; index++) {
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market(overrides.market)],
+      booksByToken: new Map([[String(tokenId), book({ timestamp: now, ...overrides.book })]]),
+      timestamp: now + index,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+  }
+  await module.stop();
+  return { placed, cancels };
+}
+
+function persistedCleanup(command: PlaceOrderCommand, status: Order["status"]): Order {
+  return order({
+    orderId: createOrderId(`s1-cleanup-${status}`),
+    clientOrderId: command.clientOrderId,
+    positionId: command.positionId!,
+    price: command.price,
+    size: command.size,
+    sizeUsdc: command.price * command.size,
+    status,
+    metadata: command.metadata!,
+  });
 }
 
 const decisionRules: AlgoDecisionRule[] = [
@@ -1228,5 +1328,109 @@ describe("S1LadderModule", () => {
 
     expect(placed).toHaveLength(4);
     await module.stop();
+  });
+
+  it("places one exact cleanup for the reproduced 110 versus 83.58 S1 residual and blocks overlap", async () => {
+    const positionValue = position({ size: 110, costBasisUsdc: 1.54 });
+    const orders = exactOrdinaryS1Orders(positionValue);
+    const { placed, cancels } = await runS1Cleanup(positionValue, orders, makeFillRepo());
+    expect(placed).toHaveLength(1);
+    expect(placed[0]).toMatchObject({
+      size: 26.42,
+      price: 0.08,
+      metadata: {
+        s1: {
+          ladderId: "legacy-s1-residual-ladder",
+          coverageCleanupV1: { version: 1, residualSize: 26.42, attempt: 1 },
+        },
+      },
+    });
+    expect(cancels).toEqual([]);
+
+    orders.push(persistedCleanup(placed[0]!, "open"));
+    expect(
+      (await runS1Cleanup(positionValue, orders, makeFillRepo(), NOW + 61_000)).placed,
+    ).toEqual([]);
+  });
+
+  it("uses partial-fill remaining size and retries only exact zero-fill terminal cleanup", async () => {
+    const positionValue = position({ size: 110, costBasisUsdc: 1.54 });
+    const orders = exactOrdinaryS1Orders(positionValue);
+    orders[0] = { ...orders[0]!, status: "partially-filled" };
+    const ordinaryFill = s1Fill(orders[0], 3.58);
+    const { placed } = await runS1Cleanup(positionValue, orders, makeFillRepo([ordinaryFill]));
+    expect(placed[0]?.size).toBeCloseTo(30, 8);
+
+    const terminal = persistedCleanup(placed[0]!, "rejected");
+    orders.push(terminal);
+    const { placed: retries } = await runS1Cleanup(
+      positionValue,
+      orders,
+      makeFillRepo([ordinaryFill]),
+      NOW + 60_000,
+    );
+    expect(retries).toHaveLength(1);
+    expect(retries[0]?.metadata?.s1).toMatchObject({ coverageCleanupV1: { attempt: 2 } });
+    const filled = await runS1Cleanup(
+      positionValue,
+      orders,
+      makeFillRepo([ordinaryFill, s1Fill(terminal, 1)]),
+      NOW + 120_000,
+    );
+    expect(filled.placed).toEqual([]);
+  });
+
+  it("fails cleanup closed on unknown fills or handoff and keeps all-terminal ladders on the normal path", async () => {
+    const positionValue = position({ size: 110, costBasisUsdc: 1.54 });
+    const unknown = await runS1Cleanup(
+      positionValue,
+      exactOrdinaryS1Orders(positionValue),
+      makeFillRepo([], new Error("fills down")),
+    );
+    expect(unknown.placed).toEqual([]);
+    const handoff = exactOrdinaryS1Orders(positionValue);
+    (handoff[0]!.metadata!.s1 as { handoffStartedAt: string | null }).handoffStartedAt = new Date(
+      NOW,
+    ).toISOString();
+    expect((await runS1Cleanup(positionValue, handoff, makeFillRepo())).placed).toEqual([]);
+
+    const terminal = exactOrdinaryS1Orders(positionValue).map((value) => ({
+      ...value,
+      status: "filled" as const,
+    }));
+    const normal = (
+      await runS1Cleanup(
+        positionValue,
+        terminal,
+        makeFillRepo(terminal.map((value) => s1Fill(value, value.size))),
+      )
+    ).placed;
+    expect(normal).toHaveLength(4);
+    expect(normal[0]?.metadata?.s1).not.toHaveProperty("coverageCleanupV1");
+  });
+
+  it("fails cleanup closed on a stale book or an off-tick highest target", async () => {
+    const positionValue = position({ size: 110, costBasisUsdc: 1.54 });
+    const stale = await runS1Cleanup(
+      positionValue,
+      exactOrdinaryS1Orders(positionValue),
+      makeFillRepo(),
+      NOW,
+      { book: { timestamp: NOW - 3_001 } },
+    );
+    expect(stale.placed).toEqual([]);
+
+    const offTick = exactOrdinaryS1Orders(positionValue);
+    offTick[3] = {
+      ...offTick[3]!,
+      price: 0.085,
+      metadata: {
+        s1: { ...(offTick[3]!.metadata!.s1 as object), targetPrice: 0.085 },
+      },
+    };
+    const invalidTick = await runS1Cleanup(positionValue, offTick, makeFillRepo(), NOW, {
+      market: { tickSize: 0.01 },
+    });
+    expect(invalidTick.placed).toEqual([]);
   });
 });

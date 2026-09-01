@@ -1500,6 +1500,7 @@ async function main(): Promise<void> {
     bus,
     positionRepo: repos.position,
     orderRepo: repos.order,
+    fillRepo: repos.fill,
     policy: () => currentExecutionPolicy().trackS1,
     runtimeMetrics,
     riskEventRepo: repos.riskEvent,

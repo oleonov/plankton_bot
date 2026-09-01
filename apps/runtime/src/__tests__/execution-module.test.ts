@@ -287,6 +287,92 @@ function createMockPositionRepo(position: Position | null = null): PositionRepos
   };
 }
 
+function createS1CoverageCleanupFixture(targetPrice: number) {
+  const position = makePosition({ size: 10, avgEntryPrice: 0.01, costBasisUsdc: 0.1 });
+  const ladderId = `s1-live-retry-${targetPrice}`;
+  const sizes = [0.8, 1.6, 2.4, 3.2];
+  const prices = [0.05, 0.06, 0.07, targetPrice];
+  const orders = sizes.map((size, tierIndex) =>
+    openSellAt(prices[tierIndex]!, {
+      orderId: createOrderId(`${ladderId}-${tierIndex}`),
+      clientOrderId: `${ladderId}-${tierIndex}` as ClientOrderId,
+      positionId: position.positionId,
+      size,
+      sizeUsdc: size * prices[tierIndex]!,
+      postOnly: true,
+      decisionRuleId: S1_LADDER_RULE_ID,
+      metadata: {
+        s1: {
+          ladderId,
+          tierIndex,
+          targetPrice: prices[tierIndex],
+          positionSizeTotal: 8,
+          handoffStartedAt: null,
+        },
+      },
+    }),
+  );
+  const command = makePlaceCmd({
+    commandId: createCommandId(`${ladderId}-cleanup`),
+    clientOrderId: `${ladderId}-cleanup` as ClientOrderId,
+    signalReason: "repricing-exit",
+    side: "sell",
+    size: 2,
+    price: targetPrice,
+    tickSize: 0.001,
+    postOnly: true,
+    positionId: position.positionId,
+    decisionRuleId: S1_LADDER_RULE_ID,
+    metadata: {
+      marketData: { minOrderSize: 1 },
+      s1: {
+        ladderId,
+        tierIndex: 3,
+        targetPrice,
+        positionSizeTotal: position.size,
+        handoffStartedAt: null,
+        coverageCleanupV1: {
+          version: 1,
+          positionId: String(position.positionId),
+          residualSize: 2,
+          attempt: 1,
+        },
+      },
+    },
+  });
+  return { position, orders, command };
+}
+
+function trackPreparedRows(orderRepo: ReturnType<typeof createMockOrderRepo>, initial: Order[]) {
+  const rows = [...initial];
+  orderRepo.findByTokenId = vi.fn(() => rows);
+  orderRepo.findOpen = vi.fn(() =>
+    rows.filter((order) => ["pending", "open", "partially-filled"].includes(order.status)),
+  );
+  orderRepo.findById = vi.fn((orderId) => rows.find((order) => order.orderId === orderId) ?? null);
+  orderRepo.save = vi.fn((order) => {
+    const index = rows.findIndex((row) => row.orderId === order.orderId);
+    if (
+      index < 0 &&
+      rows.some((row) => row.clientOrderId === order.clientOrderId && row.orderId !== order.orderId)
+    ) {
+      throw new Error("duplicate client order id");
+    }
+    if (index < 0) rows.push(order);
+    else rows[index] = order;
+  });
+  orderRepo.replacePendingIdentity = vi.fn((orderId, replacement) => {
+    const index = rows.findIndex((row) => row.orderId === orderId);
+    if (index < 0 || rows[index]!.status !== "rejected") throw new Error("invalid replacement");
+    rows[index] = replacement;
+  });
+  orderRepo.updateStatus = vi.fn((orderId, status, exchangeOrderId) => {
+    const index = rows.findIndex((row) => row.orderId === orderId);
+    if (index >= 0) rows[index] = { ...rows[index]!, status, exchangeOrderId };
+  });
+  return rows;
+}
+
 // Exit-loss-floor gate (docs/plans/2026-07-20-exit-loss-floor.md) fails closed
 // on a missing/inconsistent inventoryLotRepo. A single lot spanning the whole
 // position — remainingSize=position.size, entryPrice=costBasisUsdc/size — is
@@ -484,6 +570,273 @@ describe("ExecutionModule", () => {
       timestamp: Date.now(),
     });
     expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
+    await execution.stop();
+  });
+
+  it("serializes exact S1 cleanup admission and rejects a cleanup larger than the uncovered residual", async () => {
+    const position = makePosition({ size: 10, avgEntryPrice: 0.01, costBasisUsdc: 0.1 });
+    const positionRepo = createMockPositionRepo(position);
+    positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([position]);
+    const ladderId = "s1-cleanup-race-ladder";
+    const sizes = [0.8, 1.6, 2.4, 3.2];
+    const prices = [0.05, 0.06, 0.07, 0.08];
+    const orders = sizes.map((size, tierIndex) =>
+      openSellAt(prices[tierIndex]!, {
+        orderId: createOrderId(`s1-cleanup-race-${tierIndex}`),
+        clientOrderId: `s1-cleanup-race-${tierIndex}` as ClientOrderId,
+        positionId: position.positionId,
+        size,
+        sizeUsdc: size * prices[tierIndex]!,
+        postOnly: true,
+        decisionRuleId: S1_LADDER_RULE_ID,
+        metadata: {
+          s1: {
+            ladderId,
+            tierIndex,
+            targetPrice: prices[tierIndex],
+            positionSizeTotal: 8,
+            handoffStartedAt: null,
+          },
+        },
+      }),
+    );
+    orderRepo.findOpen = vi.fn(() => orders);
+    orderRepo.findByTokenId = vi.fn(() => orders);
+    let finishFirst!: (result: PlaceOrderResult) => void;
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<PlaceOrderResult>((resolve) => (finishFirst = resolve)),
+    );
+    const rejected: string[] = [];
+    bus.subscribe("OrderRejected", async (event) => void rejected.push(event.reason));
+    const execution = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(position),
+      allowSellSizeClamp: true,
+      maxConcurrency: 1,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+    const cleanup = (suffix: string, size: number): PlaceOrderCommand =>
+      makePlaceCmd({
+        commandId: createCommandId(`s1-cleanup-${suffix}`),
+        clientOrderId: `s1-cleanup-${suffix}` as ClientOrderId,
+        signalReason: "repricing-exit",
+        side: "sell",
+        size,
+        price: 0.08,
+        postOnly: true,
+        positionId: position.positionId,
+        decisionRuleId: S1_LADDER_RULE_ID,
+        metadata: {
+          marketData: { minOrderSize: 1 },
+          s1: {
+            ladderId,
+            tierIndex: 3,
+            targetPrice: 0.08,
+            positionSizeTotal: 10,
+            handoffStartedAt: null,
+            coverageCleanupV1: {
+              version: 1,
+              positionId: String(position.positionId),
+              residualSize: size,
+              attempt: 1,
+            },
+          },
+        },
+      });
+    const publish = (command: PlaceOrderCommand) =>
+      bus.publish("PlaceOrderRequested", { command, timestamp: Date.now() });
+
+    await execution.start();
+    const first = publish(cleanup("first", 2));
+    await vi.waitFor(() => expect(gateway.placeOrder).toHaveBeenCalledTimes(1));
+    await publish(cleanup("second", 2));
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    finishFirst({ success: false, errorCode: ExchangeErrorCode.NetworkError });
+    await first;
+
+    const forged = cleanup("forged-ladder", 2);
+    await publish({
+      ...forged,
+      metadata: {
+        ...forged.metadata,
+        s1: { ...(forged.metadata!.s1 as object), ladderId: "forged-ladder" },
+      },
+    });
+
+    const reduced = { ...position, size: 9 };
+    positionRepo.findByTokenId = vi.fn().mockReturnValue(reduced);
+    await publish(cleanup("changed-availability", 2));
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(rejected).toContain("exit-coverage-cleanup-in-flight");
+    expect(rejected).toContain("invalid-exit-coverage-cleanup");
+    expect(rejected).toContain("exit-coverage-cleanup-state-changed");
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    await execution.stop();
+  });
+
+  it("atomically replaces an exact rejected live S1 cleanup before its invalid-tick retry", async () => {
+    const fixture = createS1CoverageCleanupFixture(0.08);
+    const positionRepo = createMockPositionRepo(fixture.position);
+    positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([fixture.position]);
+    const rows = trackPreparedRows(orderRepo, fixture.orders);
+    const tickResolver = {
+      resolve: vi.fn().mockResolvedValueOnce(0.001).mockResolvedValueOnce(0.01),
+      invalidate: vi.fn(),
+    };
+    (gateway.prepareOrder as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ orderId: "s1-first", __preparedOrderBrand: "PreparedOrder" })
+      .mockResolvedValueOnce({ orderId: "s1-retry", __preparedOrderBrand: "PreparedOrder" });
+    (gateway.submitPreparedOrder as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        kind: "rejected",
+        errorCode: "INVALID_PRICE",
+        errorMessage: "invalid tick size",
+        errorDetails: { responseBody: { error: "invalid tick size" } },
+      })
+      .mockResolvedValueOnce({ kind: "accepted", orderId: "s1-retry" });
+    const execution = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+      tickResolver: tickResolver as any,
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(fixture.position),
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+
+    await execution.start();
+    await bus.publish("PlaceOrderRequested", { command: fixture.command, timestamp: Date.now() });
+
+    expect(gateway.prepareOrder).toHaveBeenCalledTimes(2);
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(2);
+    expect(orderRepo.replacePendingIdentity).toHaveBeenCalledWith(
+      createOrderId("s1-first"),
+      expect.objectContaining({ orderId: createOrderId("s1-retry"), status: "pending" }),
+    );
+    expect(rows.filter((order) => order.clientOrderId === fixture.command.clientOrderId)).toEqual([
+      expect.objectContaining({ orderId: createOrderId("s1-retry"), status: "open", price: 0.08 }),
+    ]);
+    await execution.stop();
+  });
+
+  it("retains one original S1 rejection when invalid-tick correction changes its exact target", async () => {
+    const fixture = createS1CoverageCleanupFixture(0.085);
+    const positionRepo = createMockPositionRepo(fixture.position);
+    positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([fixture.position]);
+    const rows = trackPreparedRows(orderRepo, fixture.orders);
+    const tickResolver = {
+      resolve: vi.fn().mockResolvedValueOnce(0.001).mockResolvedValueOnce(0.01),
+      invalidate: vi.fn(),
+    };
+    (gateway.prepareOrder as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      orderId: "s1-changed-first",
+      __preparedOrderBrand: "PreparedOrder",
+    });
+    (gateway.submitPreparedOrder as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: "rejected",
+      errorCode: "INVALID_PRICE",
+      errorMessage: "invalid tick size",
+      errorDetails: { responseBody: { error: "invalid tick size" } },
+    });
+    const execution = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+      tickResolver: tickResolver as any,
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(fixture.position),
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+
+    await execution.start();
+    await expect(
+      bus.publish("PlaceOrderRequested", { command: fixture.command, timestamp: Date.now() }),
+    ).resolves.toBeUndefined();
+
+    expect(gateway.prepareOrder).toHaveBeenCalledOnce();
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    expect(orderRepo.replacePendingIdentity).not.toHaveBeenCalled();
+    expect(rows.filter((order) => order.clientOrderId === fixture.command.clientOrderId)).toEqual([
+      expect.objectContaining({ orderId: createOrderId("s1-changed-first"), status: "rejected" }),
+    ]);
+    await execution.stop();
+  });
+
+  it("retains the original S1 rejection when cleanup state changes during retry preparation", async () => {
+    const fixture = createS1CoverageCleanupFixture(0.08);
+    let currentPosition = fixture.position;
+    const positionRepo = createMockPositionRepo(fixture.position);
+    positionRepo.findByTokenId = vi.fn(() => currentPosition);
+    positionRepo.findActiveByTokenId = vi.fn(() => [currentPosition]);
+    const rows = trackPreparedRows(orderRepo, fixture.orders);
+    const tickResolver = {
+      resolve: vi.fn().mockResolvedValueOnce(0.001).mockResolvedValueOnce(0.01),
+      invalidate: vi.fn(),
+    };
+    (gateway.prepareOrder as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ orderId: "s1-drift-first", __preparedOrderBrand: "PreparedOrder" })
+      .mockImplementationOnce(async () => {
+        currentPosition = { ...fixture.position, size: 9 };
+        return { orderId: "s1-drift-retry", __preparedOrderBrand: "PreparedOrder" };
+      });
+    (gateway.submitPreparedOrder as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: "rejected",
+      errorCode: "INVALID_PRICE",
+      errorMessage: "invalid tick size",
+      errorDetails: { responseBody: { error: "invalid tick size" } },
+    });
+    const execution = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+      tickResolver: tickResolver as any,
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(fixture.position),
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+
+    await execution.start();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(
+      bus.publish("PlaceOrderRequested", { command: fixture.command, timestamp: Date.now() }),
+    ).resolves.toBeUndefined();
+
+    expect(gateway.prepareOrder).toHaveBeenCalledTimes(2);
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    expect(orderRepo.replacePendingIdentity).not.toHaveBeenCalled();
+    expect(rows.filter((order) => order.clientOrderId === fixture.command.clientOrderId)).toEqual([
+      expect.objectContaining({ orderId: createOrderId("s1-drift-first"), status: "rejected" }),
+    ]);
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
     await execution.stop();
   });
 

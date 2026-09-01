@@ -18,6 +18,7 @@ import type {
   MarketRepository,
   OrderRepository,
   FillRepository,
+  Fill,
   Order,
   PlaceOrderCommand,
   PlaceOrderParams,
@@ -88,6 +89,15 @@ import type { LifecycleToken } from "../../lifecycle-chain.js";
 import { LifecycleChain, LIFECYCLE_STOP_WAIT_MS } from "../../lifecycle-chain.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { bounceRungsConflict } from "../../bounce-rung-identity.js";
+import {
+  classifyExitCoverageCleanup,
+  findS1CoverageWorkingSells,
+  hasS1CoverageCleanupMarker,
+  parseS1CoverageCleanup,
+  resolveExactS1CoverageCleanupState,
+  s1CoverageFillLookup,
+  type ExitCoverageCleanupKind,
+} from "../../exit-coverage-cleanup.js";
 import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-calculator.js";
 import { resnapPriceToTick, validateExecutablePrice } from "../../executable-price.js";
 import {
@@ -662,6 +672,7 @@ export class ExecutionModule implements RuntimeModule {
   private readonly recoveryPendingReplacements = new Map<string, Order>();
   private readonly recoverySubmissionAttempts = new Set<string>();
   private readonly exitRecoveriesInFlight = new Set<string>();
+  private readonly cleanupAdmissionClaims = new Set<string>();
 
   /**
    * In-flight commands on the queue-less path (`maxConcurrency` unset), settled-successfully so
@@ -2635,6 +2646,44 @@ export class ExecutionModule implements RuntimeModule {
   // ─── Place order handler ──────────────────────────────────────────────
 
   private async handlePlace(cmd: PlaceOrderCommand, recoveryOnly = false): Promise<void> {
+    const cleanupKind = this.exitCoverageCleanupKind(cmd);
+    const tokenKey = String(cmd.tokenId);
+    if (cleanupKind != null && this.cleanupAdmissionClaims.has(tokenKey)) {
+      await this.rejectOrder(
+        cmd,
+        "exit-coverage-cleanup-in-flight",
+        ExchangeErrorCode.LivePolicyBlocked,
+      );
+      return;
+    }
+    if (
+      hasS1CoverageCleanupMarker(cmd.metadata) &&
+      (cleanupKind !== "s1" || !this.matchesCurrentS1CoverageState(cmd))
+    ) {
+      await this.rejectOrder(
+        cmd,
+        "invalid-exit-coverage-cleanup",
+        ExchangeErrorCode.LivePolicyBlocked,
+      );
+      return;
+    }
+    if (cleanupKind == null) {
+      await this.handlePlaceWithCleanupClaim(cmd, recoveryOnly, null);
+      return;
+    }
+    this.cleanupAdmissionClaims.add(tokenKey);
+    try {
+      await this.handlePlaceWithCleanupClaim(cmd, recoveryOnly, cleanupKind);
+    } finally {
+      this.cleanupAdmissionClaims.delete(tokenKey);
+    }
+  }
+
+  private async handlePlaceWithCleanupClaim(
+    cmd: PlaceOrderCommand,
+    recoveryOnly: boolean,
+    cleanupKind: ExitCoverageCleanupKind | null,
+  ): Promise<void> {
     const recoveryAuthorized =
       recoveryOnly && this.activeExitRecoveryClientIds.has(String(cmd.clientOrderId));
     if (this.deps.runtimeControl?.isPaused() && !recoveryAuthorized) {
@@ -3040,11 +3089,11 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
-    if (await this.blockSellReplacementBelowExitLossFloor(cmd)) {
+    if (cleanupKind == null && (await this.blockSellReplacementBelowExitLossFloor(cmd))) {
       return;
     }
 
-    if (await this.deferSellReplacementIfNeeded(cmd)) {
+    if (cleanupKind == null && (await this.deferSellReplacementIfNeeded(cmd))) {
       return;
     }
 
@@ -3065,6 +3114,14 @@ export class ExecutionModule implements RuntimeModule {
 
     let effectiveCmd = cmd;
     if (decision.kind === "clamp") {
+      if (cleanupKind != null) {
+        await this.rejectOrder(
+          cmd,
+          "exit-coverage-cleanup-state-changed",
+          ExchangeErrorCode.LivePolicyBlocked,
+        );
+        return;
+      }
       const clampedCmd: PlaceOrderCommand = { ...cmd, size: decision.newSize };
       const postClampMinCheck = this.getMinOrderSizeRejection(clampedCmd);
       if (postClampMinCheck) {
@@ -3156,7 +3213,7 @@ export class ExecutionModule implements RuntimeModule {
       });
     }
 
-    await this.dispatchCommand(effectiveCmd, recoveryAuthorized);
+    await this.dispatchCommand(effectiveCmd, recoveryAuthorized || cleanupKind != null);
   }
 
   makerBuyInFlightCount(): number {
@@ -4762,6 +4819,14 @@ export class ExecutionModule implements RuntimeModule {
         );
         return;
       }
+      if (this.s1CoverageChanged(effectiveCmd)) {
+        await this.rejectOrder(
+          effectiveCmd,
+          "exit-coverage-cleanup-state-changed",
+          ExchangeErrorCode.LivePolicyBlocked,
+        );
+        return;
+      }
       result = await this.deps.gateway.placeOrder(placeParams);
     }
 
@@ -5137,33 +5202,118 @@ export class ExecutionModule implements RuntimeModule {
     }, 0);
   }
 
-  /**
-   * A BOUNCE_EXIT_BACKSTOP force-exit cancels the resting BOUNCE_EXIT_TARGET maker
-   * SELL (see signal-to-order.ts) then immediately places its own taker SELL for
-   * the full remaining position. The CancelOrderRequested is processed
-   * asynchronously, so the target order can still show as "open" in orderRepo
-   * when this reservation check runs. Left uncorrected, the target's reserved
-   * size double-counts against the backstop's own full-position SELL and can
-   * trip reserved-token-limit, defeating the guaranteed force-exit. Excluding it
-   * only applies when the incoming command IS that same-token backstop force-exit,
-   * so reservation accounting for every other order is unchanged.
-   *
-   * Ladder redesign (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md
-   * Phase 3): `.filter` below drops every matching resting rung for this
-   * token, not just one — the ladder can rest multiple rungs simultaneously
-   * (see the `resolveMaxOpenSellOrdersPerToken` carve-out above), and the
-   * backstop cancels all of them, so all of them must be excluded here too.
-   */
-  /**
-   * Codex C2 fix (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md,
-   * Phase 3): identifies the residual-driven "cleanup" bounce rung so the
-   * microMaxOrderUsdc cap check above can exempt it — mirrors the same
-   * `isCleanupRung` flag signal-to-order.ts's own cap-exemption reads off
-   * `signal.bounceRung`, here read off the command's persisted metadata.
-   */
+  /** Preserve the legacy micro-notional exemption; extra admission still requires exact proof. */
   private isCleanupBounceRungCommand(cmd: PlaceOrderCommand): boolean {
     const bounceRung = cmd.metadata?.bounceRung as { isCleanupRung?: boolean } | undefined;
     return bounceRung?.isCleanupRung === true;
+  }
+
+  private exitCoverageCleanupKind(cmd: PlaceOrderCommand): ExitCoverageCleanupKind | null {
+    return classifyExitCoverageCleanup(
+      {
+        ...cmd,
+        bounceRung: cmd.metadata?.bounceRung,
+        s1: cmd.metadata?.s1,
+      },
+      this.currentBounceExitPolicy(),
+    );
+  }
+
+  private matchesCurrentS1CoverageState(cmd: PlaceOrderCommand, retryPredecessor?: Order): boolean {
+    const positionRepo = this.deps.positionRepo;
+    if (!positionRepo || this.exitCoverageCleanupKind(cmd) !== "s1") return false;
+    const positions = positionRepo.findActiveByTokenId(cmd.tokenId);
+    const position = positions[0];
+    if (
+      positions.length !== 1 ||
+      !position ||
+      isBounceOwned(position) ||
+      position.positionId !== cmd.positionId ||
+      position.conditionId !== cmd.conditionId
+    ) {
+      return false;
+    }
+    try {
+      const orders = this.deps.orderRepo.findByTokenId(cmd.tokenId);
+      const fills =
+        this.deps.fillRepo.findByOrderIds?.(orders.map((order) => order.orderId)) ??
+        orders.flatMap((order) => this.deps.fillRepo.findByOrderId(order.orderId));
+      const predecessor = retryPredecessor
+        ? this.exactS1InvalidTickPredecessor(cmd, retryPredecessor, orders, fills)
+        : null;
+      if (retryPredecessor && !predecessor) return false;
+      const stateOrders = predecessor
+        ? orders.filter((order) => order.orderId !== predecessor.orderId)
+        : orders;
+      const working = findS1CoverageWorkingSells(stateOrders, position);
+      const state = resolveExactS1CoverageCleanupState({
+        position,
+        orders: stateOrders,
+        fills,
+        reservedSellSize: getReservedSellSize(
+          buildReservationSnapshot([...working], s1CoverageFillLookup(fills)),
+          position.tokenId,
+        ),
+        numTiers: (this.currentTrackS1Policy() ?? DEFAULT_EXECUTION_POLICY.trackS1).numTiers,
+        nowMs: Date.now(),
+      });
+      const s1 = cmd.metadata?.s1;
+      const metadata = s1 && typeof s1 === "object" ? (s1 as Record<string, unknown>) : null;
+      const cleanup = parseS1CoverageCleanup(metadata?.coverageCleanupV1);
+      return !!(
+        state &&
+        cleanup &&
+        metadata?.ladderId === state.ladderId &&
+        metadata.tierIndex === state.tierIndex &&
+        this.sameShares(metadata.targetPrice as number, state.targetPrice) &&
+        this.sameShares(metadata.positionSizeTotal as number, position.size) &&
+        cleanup.attempt === state.attempt &&
+        this.sameShares(cmd.size, state.residualSize)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private exactS1InvalidTickPredecessor(
+    cmd: PlaceOrderCommand,
+    expected: Order,
+    orders: readonly Order[],
+    fills: readonly Fill[],
+  ): Order | null {
+    const current = orders.find((order) => order.orderId === expected.orderId);
+    if (
+      !current ||
+      expected.status !== "rejected" ||
+      expected.exchangeRejectionReason !== "rejection_invalid_tick" ||
+      expected.fillProgressShares !== 0 ||
+      current.status !== "rejected" ||
+      current.exchangeRejectionReason !== "rejection_invalid_tick" ||
+      current.fillProgressShares !== 0 ||
+      current.exchangeErrorCode !== expected.exchangeErrorCode ||
+      current.exchangeErrorPayload !== expected.exchangeErrorPayload ||
+      current.clientOrderId !== cmd.clientOrderId ||
+      current.tokenId !== cmd.tokenId ||
+      current.conditionId !== cmd.conditionId ||
+      current.positionId !== cmd.positionId ||
+      current.decisionRuleId !== cmd.decisionRuleId ||
+      !this.sameShares(current.size, cmd.size) ||
+      !this.sameShares(current.price, cmd.price) ||
+      JSON.stringify(current.metadata?.s1) !== JSON.stringify(cmd.metadata?.s1) ||
+      JSON.stringify(current.metadata) !== JSON.stringify(expected.metadata) ||
+      fills.some((fill) => fill.orderId === current.orderId) ||
+      classifyExitCoverageCleanup({ ...current, s1: current.metadata?.s1 }) !== "s1"
+    ) {
+      return null;
+    }
+    return current;
+  }
+
+  private s1CoverageChanged(cmd: PlaceOrderCommand, retryPredecessor?: Order): boolean {
+    return (
+      hasS1CoverageCleanupMarker(cmd.metadata) &&
+      !this.matchesCurrentS1CoverageState(cmd, retryPredecessor)
+    );
   }
 
   private excludeBounceTargetBeingReplaced(
@@ -5598,14 +5748,7 @@ export class ExecutionModule implements RuntimeModule {
     };
   }
 
-  /**
-   * GATE-lane bounce-exit ladder carve-out (docs/plans/2026-07-16-bounce-
-   * exit-ladder-redesign.md Phase 3): a resting rung or the near-resolution
-   * backstop must not trip the generic per-token SELL cap (default 2) once
-   * `bounceExit.ladderFractions` configures more than 2 simultaneous rungs.
-   * Delegates to the shared resolver (also used by algo-risk-gate.ts, which
-   * enforces this same cap earlier in the pipeline) so both call sites agree.
-   */
+  /** Keep early risk and final execution on the same per-token SELL cap. */
   private resolveMaxOpenSellOrdersPerToken(
     cmd: PlaceOrderCommand,
     sellPolicy: ReturnType<typeof normalizeSellCapacityPolicy>,
@@ -5615,6 +5758,7 @@ export class ExecutionModule implements RuntimeModule {
       sellPolicy,
       s1MaxOrdersPerToken: this.currentTrackS1Policy()?.s1MaxOrdersPerToken,
       bounceLadderRungCount: this.currentBounceExitPolicy()?.ladderFractions.length,
+      isExitCoverageCleanup: this.exitCoverageCleanupKind(cmd) != null,
     });
   }
 
@@ -6173,7 +6317,11 @@ export class ExecutionModule implements RuntimeModule {
     cmd: PlaceOrderCommand,
     params: PlaceOrderParams,
     replacement?: Order,
-  ): Promise<{ pending: Order; submit: PreparedOrderSubmitResult } | null> {
+  ): Promise<{
+    pending: Order;
+    submit: PreparedOrderSubmitResult;
+    pendingPersisted: boolean;
+  } | null> {
     if (this.deps.runtimeMode !== "live-lite") return null;
     const gateway = this.deps.gateway as PreparedLiveGateway;
     if (!gateway.prepareOrder || !gateway.submitPreparedOrder) {
@@ -6184,25 +6332,31 @@ export class ExecutionModule implements RuntimeModule {
     const pending = this.buildPreparedOrder(cmd, params, prepared.orderId, "pending");
     this.markMakerCaptureSubmittedOrThrow(cmd, pending.orderId);
     this.markBounceAskCaptureSubmittedOrThrow(cmd, pending.orderId);
-    if (replacement) {
-      if (replacement.status === "cancelled") {
-        if (!this.deps.orderRepo.replaceCancelledRecoveryIdentity || !replacement.metadata) {
-          throw new Error("order repository does not support cancelled recovery rearm");
+    let pendingPersisted = false;
+    const persistPending = () => {
+      if (replacement) {
+        if (replacement.status === "cancelled") {
+          if (!this.deps.orderRepo.replaceCancelledRecoveryIdentity || !replacement.metadata) {
+            throw new Error("order repository does not support cancelled recovery rearm");
+          }
+          this.deps.orderRepo.replaceCancelledRecoveryIdentity(
+            replacement.orderId,
+            pending,
+            replacement.metadata,
+          );
+        } else {
+          if (!this.deps.orderRepo.replacePendingIdentity) {
+            throw new Error("order repository does not support prepared identity replacement");
+          }
+          this.deps.orderRepo.replacePendingIdentity(replacement.orderId, pending);
         }
-        this.deps.orderRepo.replaceCancelledRecoveryIdentity(
-          replacement.orderId,
-          pending,
-          replacement.metadata,
-        );
       } else {
-        if (!this.deps.orderRepo.replacePendingIdentity) {
-          throw new Error("order repository does not support prepared identity replacement");
-        }
-        this.deps.orderRepo.replacePendingIdentity(replacement.orderId, pending);
+        this.deps.orderRepo.save(pending);
       }
-    } else {
-      this.deps.orderRepo.save(pending);
-    }
+      pendingPersisted = true;
+    };
+    const cleanupPending = hasS1CoverageCleanupMarker(cmd.metadata);
+    if (!cleanupPending) persistPending();
 
     const submit = await withinLiveSubmissionLane(async () => {
       if (liveSubmissionLatched) {
@@ -6271,6 +6425,15 @@ export class ExecutionModule implements RuntimeModule {
         await this.assertRecoverySubmitBoundary(cmd);
         this.recoverySubmissionAttempts.add(String(cmd.clientOrderId));
       }
+      if (this.s1CoverageChanged(cmd, replacement)) {
+        return {
+          kind: "rejected" as const,
+          errorCode: ExchangeErrorCode.LivePolicyBlocked,
+          errorMessage: "exit-coverage-cleanup-state-changed",
+          errorDetails: null,
+        };
+      }
+      if (cleanupPending) persistPending();
       const outcome = await gateway.submitPreparedOrder!(prepared);
       if (outcome.kind === "accepted" && outcome.orderId !== prepared.orderId) {
         this.closeLiveSubmissionLatch(prepared.orderId, outcome.orderId, cmd);
@@ -6281,7 +6444,7 @@ export class ExecutionModule implements RuntimeModule {
     if (submit.kind === "unknown") {
       this.recordPreparedSubmitUnknown(cmd, pending, submit);
     }
-    return { pending, submit };
+    return { pending, submit, pendingPersisted };
   }
 
   private buildPreparedOrder(
@@ -6699,27 +6862,8 @@ export class ExecutionModule implements RuntimeModule {
 
   private async deferSellReplacementIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
     if (cmd.side !== "sell") return false;
-    // Bounce-exit backstop force-exit (docs/plans/2026-07-16-bounce-exit-ladder-
-    // redesign.md) bypasses the generic reprice-threshold/lock/chain-cap gating
-    // below entirely — signal-to-order.ts already explicitly cancels the resting
-    // BOUNCE_EXIT_TARGET order before submitting this taker command, and the
-    // ExecutionQueue's per-token mutex (execution-queue.ts) independently
-    // guarantees the cancel executes before this place does, regardless of
-    // whether orderRepo has caught up with the cancel by the time this runs.
-    //
-    // A regular (non-backstop) bounce ladder rung bypasses this gate too: this
-    // method's "keep one live price per token" model was built for the old
-    // single-resting-SELL exit and would otherwise treat a second/third rung
-    // as a "replacement" of whichever rung is already open (existingSells[0]),
-    // cancelling it before the multi-rung capacity carve-out
-    // (resolveMaxOpenSellOrdersPerToken) ever runs — defeating N-rung
-    // coexistence entirely. Each BOUNCE_EXIT_TARGET command reaching here is,
-    // by construction, a brand-new rung at a rung-specific price, never a
-    // reprice of an already-placed one — signal-to-order.ts's
-    // findDuplicateBounceRungOrder already scopes duplicate detection to the
-    // same ladderId+rungIndex (a different rung is never treated as a
-    // duplicate there), and the exchange-level deterministic clientOrderId
-    // hash independently guards against a true resubmit of the same rung.
+    // Multi-rung bounce and bounded cleanup orders coexist by identity. Treating one as a generic
+    // replacement would cancel valid coverage; backstop cancellation is ordered upstream.
     if (
       isBounceForceExit({ side: cmd.side, decisionRuleId: cmd.decisionRuleId ?? null }) ||
       cmd.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID
@@ -7283,6 +7427,13 @@ export class ExecutionModule implements RuntimeModule {
 
     // Re-run all price/tick-dependent pre-submit guards on the corrected values.
     const retryCmd = { ...cmd, price: retryResnap.price, tickSize: retryTick } as PlaceOrderCommand;
+    if (
+      rejectedPreparedOrder &&
+      hasS1CoverageCleanupMarker(retryCmd.metadata) &&
+      this.s1CoverageChanged(retryCmd, rejectedPreparedOrder)
+    ) {
+      return false;
+    }
     const retryPostOnlyCross = this.getPostOnlyCrossPreSubmitSkip(retryCmd);
     const retryDuplicate =
       cmd.side === "buy"
@@ -7408,6 +7559,22 @@ export class ExecutionModule implements RuntimeModule {
       rejectedPreparedOrder,
     );
     if (retryPreparedLive?.submit.kind === "unknown") return true;
+    if (
+      rejectedPreparedOrder &&
+      hasS1CoverageCleanupMarker(retryCmd.metadata) &&
+      retryPreparedLive &&
+      !retryPreparedLive.pendingPersisted
+    ) {
+      return false;
+    }
+    if (!retryPreparedLive && this.s1CoverageChanged(retryCmd)) {
+      await this.rejectOrder(
+        retryCmd,
+        "exit-coverage-cleanup-state-changed",
+        ExchangeErrorCode.LivePolicyBlocked,
+      );
+      return true;
+    }
     const retryResult = retryPreparedLive
       ? this.preparedSubmitResultToPlaceOrderResult(retryPreparedLive.submit)
       : await this.deps.gateway.placeOrder(retryParams);

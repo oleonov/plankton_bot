@@ -1,5 +1,7 @@
 import type {
   EventBus,
+  Fill,
+  FillRepository,
   RuntimeEventMap,
   RuntimeModule,
   NormalizedMarket,
@@ -25,6 +27,15 @@ import {
 } from "@krabs/domain";
 import { buildClientOrderId } from "@krabs/domain/node";
 import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
+import {
+  findS1CoverageWorkingSells,
+  parseS1CoverageCleanup,
+  resolveExactS1CoverageCleanupState,
+  s1CoverageFillLookup,
+} from "../../exit-coverage-cleanup.js";
+import { MAKER_CAPTURE_BOOK_MAX_AGE_MS } from "../../maker-capture-reprice.js";
+import { validateExecutablePrice } from "../../executable-price.js";
+import { buildReservationSnapshot, getReservedSellSize } from "../execution/reservation-utils.js";
 import type { Logger } from "../../logger.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 
@@ -36,6 +47,7 @@ export interface S1LadderModuleDeps {
   orderRepo: Pick<OrderRepository, "findOpen" | "findByTokenId"> & {
     updateMetadataBulk: NonNullable<OrderRepository["updateMetadataBulk"]>;
   };
+  fillRepo?: Pick<FillRepository, "findByOrderId" | "findByOrderIds"> | undefined;
   policy: () => TrackS1WalkingLadderPolicy;
   runtimeMetrics?: Pick<RuntimeMetricWriter, "writeCounter"> | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
@@ -58,7 +70,21 @@ interface ActiveLadder {
 
 const ACTIVE_PLACEMENT_TTL_MS = 60_000;
 const ONE_HOUR_MS = 60 * 60 * 1000;
+const SIZE_EPSILON = 1e-9;
 const WORKING_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
+
+interface ExactS1Ladder {
+  ladderId: string;
+  tierIndex: number;
+  targetPrice: number;
+}
+
+interface S1OrderPlacement extends ExactS1Ladder {
+  signalId: string;
+  size: number;
+  minOrderSize?: number;
+  cleanup?: ReturnType<typeof parseS1CoverageCleanup>;
+}
 
 export class S1LadderModule implements RuntimeModule {
   readonly name = "s1-ladder";
@@ -134,7 +160,15 @@ export class S1LadderModule implements RuntimeModule {
         }
         if (this.shouldHandoff(market, payload.timestamp, policy)) {
           await this.initiateHandoff(position, market, activeOrders, payload.timestamp, policy);
+          continue;
         }
+        await this.placeCoverageCleanup(
+          position,
+          market,
+          this.resolveBook(payload.booksByToken, market),
+          payload.timestamp,
+          policy,
+        );
         continue;
       }
       const active = this.activeLadders.get(String(market.tokenId));
@@ -218,6 +252,86 @@ export class S1LadderModule implements RuntimeModule {
           order.decisionRuleId === S1_LADDER_RULE_ID &&
           WORKING_ORDER_STATUSES.has(order.status),
       );
+  }
+
+  private async placeCoverageCleanup(
+    position: Position,
+    market: NormalizedMarket,
+    book: OrderBookSnapshot,
+    timestamp: number,
+    policy: TrackS1WalkingLadderPolicy,
+  ): Promise<void> {
+    if (isBounceOwned(position) || !this.deps.fillRepo) return;
+    const allOrders = this.deps.orderRepo.findByTokenId(market.tokenId);
+    const fills = this.readFills(allOrders);
+    if (!fills) return;
+    const working = findS1CoverageWorkingSells(allOrders, position);
+    const reservedSellSize = getReservedSellSize(
+      buildReservationSnapshot([...working], s1CoverageFillLookup(fills)),
+      position.tokenId,
+    );
+    const state = resolveExactS1CoverageCleanupState({
+      position,
+      orders: allOrders,
+      fills,
+      reservedSellSize,
+      numTiers: policy.numTiers,
+      nowMs: timestamp,
+    });
+    if (
+      !state ||
+      !isExecutableCleanup(state.residualSize, state.targetPrice, book, market, timestamp)
+    ) {
+      return;
+    }
+    if (!this.acquirePlacement(market.tokenId, timestamp)) return;
+    await this.publishCoverageCleanup(
+      position,
+      market,
+      state,
+      state.residualSize,
+      book.minOrderSize!,
+      state.attempt,
+      timestamp,
+    );
+  }
+
+  private readFills(orders: readonly Order[]): Fill[] | null {
+    const unique = [...new Map(orders.map((order) => [String(order.orderId), order])).values()];
+    try {
+      return (
+        this.deps.fillRepo?.findByOrderIds?.(unique.map((order) => order.orderId)) ??
+        unique.flatMap((order) => this.deps.fillRepo?.findByOrderId(order.orderId) ?? [])
+      );
+    } catch (error) {
+      this.deps.log.warn({ err: error }, "S1 cleanup fill evidence unavailable");
+      return null;
+    }
+  }
+
+  private async publishCoverageCleanup(
+    position: Position,
+    market: NormalizedMarket,
+    ladder: ExactS1Ladder,
+    residual: number,
+    minOrderSize: number,
+    attempt: number,
+    timestamp: number,
+  ): Promise<void> {
+    const signalId = `s1_cleanup_${String(market.tokenId)}_${ladder.ladderId}_${attempt}`;
+    await this.publishS1Order(position, market, timestamp, {
+      ...ladder,
+      signalId,
+      size: residual,
+      minOrderSize,
+      cleanup: {
+        version: 1,
+        positionId: String(position.positionId),
+        residualSize: residual,
+        attempt,
+      },
+    });
+    this.deps.runtimeMetrics?.writeCounter("track_s1_coverage_cleanup_placed", 1);
   }
 
   private onFill(payload: RuntimeEventMap["FillReceived"]): void {
@@ -323,44 +437,12 @@ export class S1LadderModule implements RuntimeModule {
 
     for (const tier of plan.tiers) {
       const signalId = buildS1SignalId(market.tokenId, plan.ladderId, tier.tierIndex);
-      await this.deps.bus.publish("PlaceOrderRequested", {
-        command: {
-          type: "PlaceOrderCommand",
-          commandId: createCommandId(
-            `s1_${String(market.tokenId)}_${plan.ladderId}_${tier.tierIndex}`,
-          ),
-          clientOrderId: buildClientOrderId({
-            signalId,
-            tokenId: market.tokenId,
-            side: "sell",
-          }),
-          source: "strategy",
-          tokenId: market.tokenId,
-          conditionId: position.conditionId,
-          side: "sell",
-          size: tier.size,
-          price: tier.price,
-          postOnly: true,
-          orderType: "GTC",
-          tickSize: market.tickSize,
-          negRisk: market.negRisk,
-          sequenceInTick: tier.tierIndex,
-          signalReason: "repricing-exit",
-          signalId,
-          decisionRuleId: S1_LADDER_RULE_ID,
-          signalTimestamp: new Date(timestamp).toISOString(),
-          positionId: position.positionId,
-          metadata: {
-            s1: {
-              ladderId: plan.ladderId,
-              tierIndex: tier.tierIndex,
-              targetPrice: tier.price,
-              positionSizeTotal: position.size,
-              handoffStartedAt: null,
-            },
-          },
-        },
-        timestamp,
+      await this.publishS1Order(position, market, timestamp, {
+        ladderId: plan.ladderId,
+        tierIndex: tier.tierIndex,
+        targetPrice: tier.price,
+        signalId,
+        size: tier.size,
       });
     }
 
@@ -378,6 +460,54 @@ export class S1LadderModule implements RuntimeModule {
         })),
         signalTimestamp: new Date(timestamp).toISOString(),
       },
+    });
+  }
+
+  private async publishS1Order(
+    position: Position,
+    market: NormalizedMarket,
+    timestamp: number,
+    placement: S1OrderPlacement,
+  ): Promise<void> {
+    const metadata = {
+      ...(placement.minOrderSize ? { marketData: { minOrderSize: placement.minOrderSize } } : {}),
+      s1: {
+        ladderId: placement.ladderId,
+        tierIndex: placement.tierIndex,
+        targetPrice: placement.targetPrice,
+        positionSizeTotal: position.size,
+        handoffStartedAt: null,
+        ...(placement.cleanup ? { coverageCleanupV1: placement.cleanup } : {}),
+      },
+    };
+    await this.deps.bus.publish("PlaceOrderRequested", {
+      command: {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId(placement.signalId),
+        clientOrderId: buildClientOrderId({
+          signalId: placement.signalId,
+          tokenId: market.tokenId,
+          side: "sell",
+        }),
+        source: "strategy",
+        tokenId: market.tokenId,
+        conditionId: position.conditionId,
+        side: "sell",
+        size: placement.size,
+        price: placement.targetPrice,
+        postOnly: true,
+        orderType: "GTC",
+        tickSize: market.tickSize,
+        negRisk: market.negRisk,
+        sequenceInTick: placement.tierIndex,
+        signalReason: "repricing-exit",
+        signalId: placement.signalId,
+        decisionRuleId: S1_LADDER_RULE_ID,
+        signalTimestamp: new Date(timestamp).toISOString(),
+        positionId: position.positionId,
+        metadata,
+      },
+      timestamp,
     });
   }
 
@@ -696,6 +826,36 @@ export class S1LadderModule implements RuntimeModule {
   private now(): number {
     return this.deps.now ? this.deps.now() : Date.now();
   }
+}
+
+function isExecutableCleanup(
+  residual: number,
+  targetPrice: number,
+  book: OrderBookSnapshot,
+  market: NormalizedMarket,
+  nowMs: number,
+): boolean {
+  return (
+    market.active &&
+    market.tradable &&
+    market.acceptingOrders &&
+    isPositiveNumber(market.tickSize) &&
+    isPositiveNumber(book.bestBid) &&
+    isPositiveNumber(book.bestAsk) &&
+    book.bestBid < book.bestAsk &&
+    Number.isFinite(book.timestamp) &&
+    book.timestamp <= nowMs + 1_000 &&
+    nowMs - book.timestamp <= MAKER_CAPTURE_BOOK_MAX_AGE_MS &&
+    validateExecutablePrice(targetPrice, market.tickSize).ok &&
+    targetPrice > book.bestBid + SIZE_EPSILON &&
+    targetPrice < 1 &&
+    isPositiveNumber(book.minOrderSize) &&
+    residual + SIZE_EPSILON >= book.minOrderSize
+  );
+}
+
+function isPositiveNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 function withS1HandoffStartedAt(
