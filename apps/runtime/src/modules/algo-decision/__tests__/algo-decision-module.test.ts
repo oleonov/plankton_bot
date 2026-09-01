@@ -468,6 +468,35 @@ function makeR23NoOrderIdRejected(
   };
 }
 
+function makeBounceTradingDisabledRejected(
+  tokenId: string,
+  timestamp: number,
+  retryAt: number,
+  overrides: Partial<RuntimeEventMap["OrderRejected"]> = {},
+): RuntimeEventMap["OrderRejected"] {
+  return {
+    commandId: createCommandId(`cmd-bounce-disabled-${tokenId}-${timestamp}`),
+    clientOrderId:
+      `client-bounce-disabled-${tokenId}-${timestamp}` as RuntimeEventMap["OrderRejected"]["clientOrderId"],
+    tokenId: createTokenId(tokenId),
+    conditionId: "cond-1" as ConditionId,
+    reason: "trading is disabled",
+    errorCode: "UNKNOWN",
+    signalReason: "bounce-exit-target",
+    side: "sell",
+    signalId: `signal-bounce-disabled-${tokenId}-${timestamp}`,
+    decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+    signalTimestamp: new Date(timestamp).toISOString(),
+    exchangeErrorMessage: "trading is disabled",
+    exchangeErrorDetails: {
+      responseBody: { status: 503, error: "trading is disabled" },
+      retryAt,
+    },
+    timestamp,
+    ...overrides,
+  };
+}
+
 function makeSuppressionFacts(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const tokenId = String(overrides.tokenId ?? "token-rollup");
   return {
@@ -8581,6 +8610,182 @@ describe("AlgoDecisionModule", () => {
       expect(byReason).toBe(3);
 
       db.close();
+    });
+  });
+
+  describe("bounce trading-disabled cooldown", () => {
+    const bounceMarket = (tokenId: string) => ({
+      ...makeMarket(tokenId, null, 0.0275),
+      tickSize: 0.001,
+      minOrderSize: 5,
+      bestBid: 0.005,
+      bestAsk: 0.05,
+      spread: 0.045,
+    });
+
+    it("globally suppresses fresh bounce targets until the latest authoritative retryAt", async () => {
+      vi.useFakeTimers();
+      try {
+        const now = Date.parse("2026-09-01T00:00:00.000Z");
+        vi.setSystemTime(now);
+        const tokenIds = ["token-bounce-disabled-a", "token-bounce-disabled-b"];
+        const legStates = tokenIds.map((tokenId) =>
+          makeSellReadyLegState(tokenId, {
+            firstTradePrice: 0.008,
+            cumulativeBuySize: 31.85,
+            cumulativeBuyNotional: 0.2548,
+          }),
+        );
+        legStateRepo = createMockLegStateRepo(legStates);
+        const positions = tokenIds.map((tokenId) =>
+          makeOpenPosition(tokenId, {
+            size: 31.85,
+            avgEntryPrice: 0.008,
+            costBasisUsdc: 0.2548,
+            exitOwner: "bounce",
+          }),
+        );
+        const decisionSignalLogRepo = { insert: vi.fn() } as unknown as DecisionSignalLogRepository;
+        const riskEventRepo = { insert: vi.fn(), countSince: vi.fn() } as RiskEventRepository;
+        const orderRepo = {
+          findByTokenId: vi.fn().mockReturnValue([]),
+          findRecentByTokenId: vi.fn().mockReturnValue([]),
+        } as unknown as OrderRepository;
+        const mod = buildModule({
+          positionRepo: createPositionRepoForOpenPositions(
+            positions,
+          ) as unknown as import("@krabs/domain").PositionRepository,
+          orderRepo,
+          decisionSignalLogRepo,
+          riskEventRepo,
+          executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        });
+        await mod.start();
+        (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+
+        const firstDeadline = now + 300_000;
+        await (bus as any).emit(
+          "OrderRejected",
+          makeBounceTradingDisabledRejected(tokenIds[0]!, now, firstDeadline),
+        );
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: tokenIds.map(bounceMarket),
+          timestamp: now,
+        });
+        await mod.evaluateTokens(tokenIds.map(createTokenId));
+        await mod.sweep();
+
+        expect(
+          (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+            ([event]) => event === "SignalProduced",
+          ),
+        ).toHaveLength(0);
+        expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+        expect(riskEventRepo.insert).not.toHaveBeenCalled();
+
+        vi.setSystemTime(firstDeadline);
+        (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: tokenIds.map(bounceMarket),
+          timestamp: firstDeadline,
+        });
+        expect(
+          (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+            ([event]) => event === "SignalProduced",
+          ),
+        ).toHaveLength(2);
+
+        const secondDeadline = firstDeadline + 300_000;
+        const extendedDeadline = firstDeadline + 600_000;
+        await (bus as any).emit(
+          "OrderRejected",
+          makeBounceTradingDisabledRejected(tokenIds[0]!, firstDeadline, secondDeadline),
+        );
+        await (bus as any).emit(
+          "OrderRejected",
+          makeBounceTradingDisabledRejected(tokenIds[1]!, firstDeadline, extendedDeadline),
+        );
+        vi.setSystemTime(secondDeadline);
+        (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+        await mod.evaluateTokens(tokenIds.map(createTokenId));
+        expect(
+          (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+            ([event]) => event === "SignalProduced",
+          ),
+        ).toHaveLength(0);
+
+        vi.setSystemTime(extendedDeadline);
+        await mod.evaluateTokens(tokenIds.map(createTokenId));
+        expect(
+          (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+            ([event]) => event === "SignalProduced",
+          ),
+        ).toHaveLength(2);
+
+        await mod.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("accepts exact synthetic deadlines, ignores ineligible rejects, and resets on stop", async () => {
+      vi.useFakeTimers();
+      try {
+        const now = Date.parse("2026-09-01T01:00:00.000Z");
+        vi.setSystemTime(now);
+        const mod = buildModule();
+        await mod.start();
+        const validDeadline = now + 300_000;
+        await (bus as any).emit(
+          "OrderRejected",
+          makeBounceTradingDisabledRejected("token-valid", now, validDeadline, {
+            exchangeErrorDetails: {
+              responseBody: { status: 503, error: "trading is disabled" },
+              synthetic: "trading-disabled-cooldown",
+              retryAt: validDeadline,
+            },
+          }),
+        );
+        expect((mod as any).bounceTradingDisabledUntilMs).toBe(validDeadline);
+
+        await mod.stop();
+        expect((mod as any).bounceTradingDisabledUntilMs).toBe(0);
+        await mod.start();
+
+        const ignored = [
+          makeBounceTradingDisabledRejected("token-missing", now, validDeadline, {
+            exchangeErrorDetails: {
+              responseBody: { status: 503, error: "trading is disabled" },
+            },
+          }),
+          makeBounceTradingDisabledRejected("token-past", now, now - 1, {
+            exchangeErrorDetails: {
+              responseBody: { status: 503, error: "trading is disabled" },
+              synthetic: "trading-disabled-cooldown",
+              retryAt: now - 1,
+            },
+          }),
+          makeBounceTradingDisabledRejected("token-nonexact", now, validDeadline, {
+            exchangeErrorDetails: {
+              responseBody: { status: 503, error: "trading is disabled right now" },
+              retryAt: validDeadline,
+            },
+          }),
+          makeBounceTradingDisabledRejected("token-target", now, validDeadline, {
+            decisionRuleId: "D7-SELL-S1",
+          }),
+          makeBounceTradingDisabledRejected("token-backstop", now, validDeadline, {
+            decisionRuleId: "BOUNCE_EXIT_BACKSTOP",
+          }),
+          makeBounceTradingDisabledRejected("token-buy", now, validDeadline, { side: "buy" }),
+        ];
+        for (const event of ignored) await (bus as any).emit("OrderRejected", event);
+        expect((mod as any).bounceTradingDisabledUntilMs).toBe(0);
+
+        await mod.stop();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

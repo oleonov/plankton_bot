@@ -80,6 +80,7 @@ import {
   readContinuationMode,
   readContinuationModeVersion,
 } from "@krabs/db";
+import { classifyExchangeRejectionReason } from "@krabs/exchange";
 import type { EvalContext } from "@krabs/domain";
 import type { RuntimeControl } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -1030,6 +1031,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     { blockedUntilMs: number; policyFingerprint: string; reason: string }
   >();
   private readonly probeOpenPositionBlocks = new Map<string, string>();
+  private bounceTradingDisabledUntilMs = 0;
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
   private buyBudgetRecoveryNotionalUsdc = 0;
@@ -1169,6 +1171,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.minOrderSizeRearmTokenIds.clear();
     this.r23ProbeMakerWindowCapCooldowns.clear();
     this.probeOpenPositionBlocks.clear();
+    this.bounceTradingDisabledUntilMs = 0;
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     await this.plannerRollup.stop();
@@ -1564,6 +1567,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async handleOrderRejected(payload: RuntimeEventMap["OrderRejected"]): Promise<void> {
+    this.activateBounceTradingDisabledCooldown(payload);
     if (this.isR23ProbeNoOrderIdBuyRejection(payload)) {
       this.activateR23ProbeNoOrderIdCooldown(payload.tokenId, payload.timestamp);
     }
@@ -1579,6 +1583,22 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.markDirty(tokenId as TokenId);
       this.scheduleDirtyEvaluation(0);
     }
+  }
+
+  private activateBounceTradingDisabledCooldown(payload: RuntimeEventMap["OrderRejected"]): void {
+    if (payload.side !== "sell" || payload.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID) return;
+    if (
+      classifyExchangeRejectionReason({ errorDetails: payload.exchangeErrorDetails }) !==
+      "rejection_trading_disabled"
+    ) {
+      return;
+    }
+    const retryAt = payload.exchangeErrorDetails?.["retryAt"];
+    if (typeof retryAt !== "number" || !Number.isFinite(retryAt)) return;
+    const eventAt =
+      Number.isFinite(payload.timestamp) && payload.timestamp > 0 ? payload.timestamp : Date.now();
+    if (retryAt <= Math.max(eventAt, Date.now())) return;
+    this.bounceTradingDisabledUntilMs = Math.max(this.bounceTradingDisabledUntilMs, retryAt);
   }
 
   private async handleOperatorCommandApplied(
@@ -1815,8 +1835,16 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
 
     const plans = await this.decisionWorkerPool.evaluate(inputs);
+    if (this.bounceTradingDisabledUntilMs <= now) this.bounceTradingDisabledUntilMs = 0;
     for (const plan of plans) {
       if (this.isPaused()) return;
+      if (
+        plan.type === "signal" &&
+        plan.signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+        now < this.bounceTradingDisabledUntilMs
+      ) {
+        continue;
+      }
       this.applyDecisionMetricsDelta(plan.metrics);
       this.applyDecisionPlanSideEffects(plan.sideEffects, executionPolicy);
       for (const suppression of plan.suppressions) {

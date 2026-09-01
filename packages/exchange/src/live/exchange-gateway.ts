@@ -608,7 +608,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
             kind: "rejected",
             errorCode: "UNKNOWN",
             errorMessage: "trading is disabled",
-            errorDetails: { responseBody: redactSensitive(response) },
+            errorDetails: {
+              responseBody: redactSensitive(response),
+              retryAt: this.tradingDisabledUntilMs,
+            },
           };
         }
         if (isResolvedSubmissionRejection(response)) {

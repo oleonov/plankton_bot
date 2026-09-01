@@ -263,14 +263,17 @@ describe("LiveExchangeGateway", () => {
     });
 
     client.postOrder.mockResolvedValue({ status: 503, error: " Trading Is Disabled " });
-    await expect(gw.submitPreparedOrder(await prepare())).resolves.toEqual({
+    const tradingDisabled = await gw.submitPreparedOrder(await prepare());
+    expect(tradingDisabled).toMatchObject({
       kind: "rejected",
       errorCode: "UNKNOWN",
       errorMessage: "trading is disabled",
       errorDetails: {
         responseBody: { status: 503, error: " Trading Is Disabled " },
+        retryAt: expect.any(Number),
       },
     });
+    expect((tradingDisabled as any).errorDetails).not.toHaveProperty("synthetic");
 
     gw = new LiveExchangeGateway({ client });
     client.postOrder.mockResolvedValue({ status: 503, message: "trading is disabled" });
@@ -338,10 +341,16 @@ describe("LiveExchangeGateway", () => {
       });
 
     client.postOrder.mockResolvedValueOnce({ status: 503, error: " Trading Is Disabled " });
-    await expect(gw.submitPreparedOrder(await prepare("sell"))).resolves.toMatchObject({
+    const initial = await gw.submitPreparedOrder(await prepare("sell"));
+    expect(initial).toMatchObject({
       kind: "rejected",
       errorMessage: "trading is disabled",
+      errorDetails: {
+        responseBody: { status: 503, error: " Trading Is Disabled " },
+        retryAt: 301_000,
+      },
     });
+    expect((initial as any).errorDetails).not.toHaveProperty("synthetic");
     expect(client.postOrder).toHaveBeenCalledTimes(1);
 
     await expect(gw.submitPreparedOrder(await prepare("sell"))).resolves.toMatchObject({
@@ -381,6 +390,16 @@ describe("LiveExchangeGateway", () => {
         }),
       ]),
     );
+    const actualProbeResult = results.find(
+      (result) => (result as any).errorDetails?.synthetic === undefined,
+    );
+    expect(actualProbeResult).toMatchObject({
+      kind: "rejected",
+      errorDetails: {
+        responseBody: { status: 503, message: "trading is disabled" },
+        retryAt: 601_000,
+      },
+    });
     nowMs = 600_999;
     await gw.submitPreparedOrder(await prepare("sell"));
     expect(client.postOrder).toHaveBeenCalledTimes(2);

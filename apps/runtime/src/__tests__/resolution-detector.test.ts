@@ -166,6 +166,47 @@ describe("ResolutionDetector", () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]!.source).toBe("gamma-api");
+    expect(gammaClient.getMarketById as any).toHaveBeenCalledWith(CONDITION);
+  });
+
+  it("ignores a closed stale-slug match for an early non-tradable condition", async () => {
+    (marketRepo.findByTokenIds as any).mockReturnValue([
+      makeMarket({ tradable: false, endDate: "2099-01-01T00:00:00Z" }),
+    ]);
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({ conditionId: "wrong-condition" }),
+    );
+    (gammaClient.getMarketById as any).mockResolvedValue(null);
+
+    await expect(detector.detect(0)).resolves.toEqual([]);
+    expect(gammaClient.getMarketById as any).toHaveBeenCalledWith(CONDITION);
+  });
+
+  it("falls back from a stale slug to an exact canonical condition ID match", async () => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({ conditionId: "wrong-condition" }),
+    );
+    (gammaClient.getMarketById as any).mockResolvedValue(
+      makeGammaInfo({ conditionId: ` ${CONDITION.toUpperCase()} ` }),
+    );
+
+    const results = await detector.detect(0);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.source).toBe("gamma-api");
+    expect(gammaClient.getMarketById as any).toHaveBeenCalledWith(CONDITION);
+  });
+
+  it.each([
+    ["missing", null],
+    ["mismatched", makeGammaInfo({ conditionId: "another-wrong-condition" })],
+  ])("does not infer delisted after a stale slug and %s ID fallback", async (_label, idInfo) => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({ conditionId: "wrong-condition" }),
+    );
+    (gammaClient.getMarketById as any).mockResolvedValue(idInfo);
+
+    await expect(detector.detect(0)).resolves.toEqual([]);
   });
 
   it("skips when ID lookup finds open market", async () => {
@@ -229,6 +270,81 @@ describe("ResolutionDetector", () => {
 
     const results = await detector.detect(0);
     expect(results).toHaveLength(0);
+  });
+
+  it.each([
+    ["future", "2099-01-01T00:00:00Z"],
+    ["missing", null],
+  ])("detects a closed non-tradable market with a %s end date", async (_label, endDate) => {
+    (marketRepo.findByTokenIds as any).mockReturnValue([makeMarket({ tradable: false, endDate })]);
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(makeGammaInfo());
+
+    const results = await detector.detect(0);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.source).toBe("gamma-api");
+  });
+
+  it.each([
+    ["future", "2099-01-01T00:00:00Z"],
+    ["missing", null],
+  ])(
+    "queries but does not resolve an open non-tradable market with a %s end date",
+    async (_label, endDate) => {
+      (marketRepo.findByTokenIds as any).mockReturnValue([
+        makeMarket({ tradable: false, endDate }),
+      ]);
+      (gammaClient.getMarketBySlug as any).mockResolvedValue(makeGammaInfo({ closed: false }));
+
+      await expect(detector.detect(0)).resolves.toEqual([]);
+      expect(gammaClient.getMarketBySlug as any).toHaveBeenCalledWith(SLUG);
+    },
+  );
+
+  it.each([
+    ["future", "2099-01-01T00:00:00Z"],
+    ["missing", null],
+  ])(
+    "does not call an early non-tradable Gamma miss delisted with a %s end date",
+    async (_label, endDate) => {
+      (marketRepo.findByTokenIds as any).mockReturnValue([
+        makeMarket({ tradable: false, endDate }),
+      ]);
+      (gammaClient.getMarketBySlug as any).mockResolvedValue(null);
+      (gammaClient.getMarketById as any).mockResolvedValue(null);
+
+      await expect(detector.detect(0)).resolves.toEqual([]);
+      expect(gammaClient.getMarketById as any).toHaveBeenCalledWith(CONDITION);
+    },
+  );
+
+  it("does not query a future tradable market", async () => {
+    (marketRepo.findByTokenIds as any).mockReturnValue([
+      makeMarket({ tradable: true, endDate: "2099-01-01T00:00:00Z" }),
+    ]);
+
+    await expect(detector.detect(0)).resolves.toEqual([]);
+    expect(gammaClient.getMarketBySlug as any).not.toHaveBeenCalled();
+  });
+
+  it("keeps delisted handling when an early candidate shares a condition with an expired one", async () => {
+    const secondToken = createTokenId("tok-no");
+    (positionRepo.findOpen as any).mockReturnValue([
+      makePosition(),
+      makePosition({ tokenId: secondToken, positionId: createPositionId("pos-2") }),
+    ]);
+    (marketRepo.findByTokenIds as any).mockReturnValue([
+      makeMarket({ tradable: false, endDate: "2099-01-01T00:00:00Z" }),
+      makeMarket({ tokenId: secondToken, outcome: "NO", endDate: PAST_END_DATE }),
+    ]);
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(null);
+    (gammaClient.getMarketById as any).mockResolvedValue(null);
+
+    const results = await detector.detect(0);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.source).toBe("gamma-delisted");
+    expect(results[0]!.candidates).toHaveLength(2);
   });
 
   it("skips settled conditionId", async () => {

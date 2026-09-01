@@ -44,6 +44,10 @@ function parseOutcomes(rawPayload: Record<string, unknown>): string[] {
   }
 }
 
+function sameConditionId(left: string, right: string): boolean {
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
 /** Exported for use by resolution recovery path. */
 export function inferResolution(
   umaStatus: string | null,
@@ -188,24 +192,28 @@ export class ResolutionDetector {
     const markets = this.marketRepo.findByTokenIds(tokenIds);
     const marketByToken = new Map(markets.map((m) => [String(m.tokenId), m]));
 
-    // 3. Filter for expired markets (endDate < now - graceMinutes)
+    // 3. Query expired markets plus locally non-tradable markets whose stored
+    // end date may be absent or stale. Gamma still owns resolution proof.
     const now = Date.now();
     const graceMs = graceMinutes * 60_000;
     const candidates: ResolutionCandidate[] = [];
+    const expiredConditionIds = new Set<string>();
 
     for (const pos of allPositions) {
       const market = marketByToken.get(String(pos.tokenId));
-      if (!market?.endDate) continue;
+      if (!market) continue;
 
-      const endMs = new Date(market.endDate).getTime();
-      if (isNaN(endMs) || endMs > now - graceMs) continue;
+      const endMs = market.endDate ? new Date(market.endDate).getTime() : NaN;
+      const expired = Number.isFinite(endMs) && endMs <= now - graceMs;
+      if (!expired && market.tradable !== false) continue;
+      if (expired) expiredConditionIds.add(market.conditionId);
 
       candidates.push({
         tokenId: pos.tokenId,
         conditionId: market.conditionId,
         slug: market.slug,
         outcome: market.outcome,
-        endDate: market.endDate,
+        endDate: market.endDate ?? new Date(now).toISOString(),
         positionId: pos.positionId,
       });
     }
@@ -227,7 +235,12 @@ export class ResolutionDetector {
 
     for (const [conditionId, group] of byCondition) {
       const slug = group[0]!.slug;
-      const detected = await this.queryResolution(conditionId, slug, group);
+      const detected = await this.queryResolution(
+        conditionId,
+        slug,
+        group,
+        expiredConditionIds.has(conditionId),
+      );
       if (detected) results.push(detected);
     }
 
@@ -268,10 +281,12 @@ export class ResolutionDetector {
     conditionId: string,
     slug: string,
     candidates: ResolutionCandidate[],
+    allowGammaDelisted = true,
   ): Promise<DetectedResolution | null> {
     // Try slug lookup first (more readable in logs).
     // Gamma client returns null for genuine not-found and throws on errors.
     let info;
+    let slugConditionMismatch = false;
     try {
       info = await this.gammaClient.getMarketBySlug(slug);
     } catch (err) {
@@ -283,12 +298,20 @@ export class ResolutionDetector {
     }
 
     if (info) {
-      if (!info.closed) {
-        this.log.debug({ conditionId, slug }, "market not yet closed on Gamma");
-        return null;
-      }
+      if (!sameConditionId(info.conditionId, conditionId)) {
+        slugConditionMismatch = true;
+        this.log.warn(
+          { conditionId, slug, returnedConditionId: info.conditionId },
+          "Gamma slug lookup returned a different condition — trying ID fallback",
+        );
+      } else {
+        if (!info.closed) {
+          this.log.debug({ conditionId, slug }, "market not yet closed on Gamma");
+          return null;
+        }
 
-      return buildGammaResolution(conditionId, info, candidates);
+        return buildGammaResolution(conditionId, info, candidates);
+      }
     }
 
     // Slug not found — try conditionId as fallback before declaring delisted.
@@ -303,12 +326,29 @@ export class ResolutionDetector {
     }
 
     if (idInfo) {
+      if (!sameConditionId(idInfo.conditionId, conditionId)) {
+        this.log.warn(
+          { conditionId, returnedConditionId: idInfo.conditionId },
+          "Gamma ID fallback returned a different condition — skipping",
+        );
+        return null;
+      }
       if (!idInfo.closed) {
         this.log.debug({ conditionId, slug }, "market found by ID but not yet closed on Gamma");
         return null;
       }
 
       return buildGammaResolution(conditionId, idInfo, candidates);
+    }
+
+    if (slugConditionMismatch) return null;
+
+    if (!allowGammaDelisted) {
+      this.log.debug(
+        { conditionId, slug },
+        "early non-tradable market not found on Gamma — skipping delisted inference",
+      );
+      return null;
     }
 
     // Both slug and ID lookups returned not-found — market genuinely delisted.
