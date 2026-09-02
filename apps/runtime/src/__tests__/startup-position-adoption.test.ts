@@ -23,6 +23,8 @@ import {
   R23_DIP_TRIGGER_RULE_ID,
   type ClientOrderId,
   type ExchangeFill,
+  type ExchangeOrder,
+  type Order,
 } from "@krabs/domain";
 import {
   cleanupPriorStartupAdoptionArtifacts,
@@ -152,6 +154,78 @@ function seedMissingBounceCandidate(
     updatedAt: now,
   });
   return { orderRepo, predecessorId };
+}
+
+function expiredPreparedMakerOrder(overrides: Partial<Order> = {}): Order {
+  const createdAtMs = Date.now() - 120_000;
+  const orderId = createOrderId("prepared-expired-maker");
+  return {
+    orderId,
+    clientOrderId: "prepared_expired_maker" as ClientOrderId,
+    exchangeOrderId: String(orderId),
+    tokenId: TOKEN_ID,
+    conditionId: createConditionId("cond-1"),
+    positionId: null,
+    side: "buy",
+    orderType: "GTC",
+    postOnly: true,
+    price: 0.01,
+    size: 110,
+    sizeUsdc: 1.1,
+    status: "pending",
+    signalId: null,
+    signalReason: "probe-entry",
+    decisionRuleId: R23_DIP_TRIGGER_RULE_ID,
+    entryStyle: "maker",
+    metadata: {
+      makerMicroLiveLifecycle: {
+        kind: "permanent_r23",
+        activationId: "permanent-r23",
+        activatedAtUtc: new Date(createdAtMs - 1_000).toISOString(),
+        fillWaitMs: 60_000,
+      },
+    },
+    botRunId: createBotRunId("run-1"),
+    createdAt: new Date(createdAtMs).toISOString(),
+    updatedAt: new Date(createdAtMs).toISOString(),
+    ...overrides,
+  };
+}
+
+function asExchangeOrder(order: Order, overrides: Partial<ExchangeOrder> = {}): ExchangeOrder {
+  return {
+    orderId: String(order.exchangeOrderId),
+    clientOrderId: String(order.clientOrderId),
+    tokenId: order.tokenId,
+    side: order.side,
+    price: order.price,
+    sizeTotal: order.size,
+    sizeFilled: 0,
+    sizeRemaining: order.size,
+    status: "OPEN",
+    createdAt: Date.parse(order.createdAt),
+    ...overrides,
+  };
+}
+
+function adoptionDeps(
+  conn: ReturnType<typeof bootstrapLedgerDb>,
+  gateway: Parameters<typeof runStartupPositionAdoption>[0]["gateway"],
+) {
+  const marketRepo = new SqliteMarketRepository(conn.db);
+  seedMarket(marketRepo);
+  return {
+    gateway,
+    marketRepo,
+    orderRepo: new SqliteOrderRepository(conn.db),
+    fillRepo: new SqliteFillRepository(conn.db),
+    positionRepo: new SqlitePositionRepository(conn.db),
+    inventoryLotRepo: new SqliteInventoryLotRepository(conn.db),
+    legStateRepo: new SqliteLegStateRepository(conn.db),
+    log: silentLog,
+    db: conn.db,
+    botRunId: createBotRunId("run-1"),
+  };
 }
 
 describe("runStartupPositionAdoption", () => {
@@ -478,6 +552,99 @@ describe("runStartupPositionAdoption", () => {
       bounceRung: { ladderId: "ladder-1", rungIndex: 0 },
     });
   });
+
+  it.each(["pending", "open", "partially-filled"] as const)(
+    "quarantines a %s expired prepared maker BUY with exact-null and empty snapshots",
+    async (status) => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const order = expiredPreparedMakerOrder({ status });
+      const otherTokenOrder = expiredPreparedMakerOrder({
+        orderId: createOrderId("other-token-order"),
+        exchangeOrderId: "other-token-order",
+        tokenId: createTokenId("other-token"),
+        side: "sell",
+      });
+      const deps = adoptionDeps(conn, {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({
+          ok: true,
+          data: [asExchangeOrder(otherTokenOrder)],
+        }),
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
+      });
+      deps.orderRepo.save(order);
+
+      const result = await runStartupPositionAdoption(deps);
+
+      expect(result.drainTargets[0]?.provenanceByOrderId.get(String(order.orderId))).toBe(
+        "exact-null-expired-maker",
+      );
+    },
+  );
+
+  it.each(["active-position", "other-buy", "other-sell", "remote-sell"] as const)(
+    "fails closed for an exact-null maker with %s on the same token",
+    async (conflict) => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const order = expiredPreparedMakerOrder();
+      const sibling = expiredPreparedMakerOrder({
+        orderId: createOrderId(`other-${conflict}`),
+        clientOrderId: `other_${conflict}` as ClientOrderId,
+        exchangeOrderId: `other-${conflict}`,
+        side: conflict.endsWith("sell") ? "sell" : "buy",
+        status: "open",
+      });
+      const deps = adoptionDeps(conn, {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({
+          ok: true,
+          data: conflict === "remote-sell" ? [asExchangeOrder(sibling)] : [],
+        }),
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
+      });
+      deps.orderRepo.save(order);
+      if (conflict === "active-position") {
+        conn.db
+          .prepare(
+            `INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price, cost_basis_usdc, status, opened_at, updated_at) VALUES ('active-conflict', ?, 'cond-1', 'buy', 1, 0.01, 0.01, 'open', ?, ?)`,
+          )
+          .run(TOKEN_ID, order.createdAt, order.createdAt);
+      } else if (conflict !== "remote-sell") {
+        deps.orderRepo.save(sibling);
+      }
+
+      await expect(runStartupPositionAdoption(deps)).rejects.toThrow();
+    },
+  );
+
+  it.each(["token", "side"] as const)(
+    "fails closed when a matched exchange-live order has a remote/local %s mismatch",
+    async (mismatch) => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const order = expiredPreparedMakerOrder({ status: "open" });
+      const deps = adoptionDeps(conn, {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({
+          ok: true,
+          data: [
+            asExchangeOrder(order, {
+              tokenId: mismatch === "token" ? createTokenId("remote-other-token") : order.tokenId,
+              side: mismatch === "side" ? "sell" : order.side,
+            }),
+          ],
+        }),
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
+      });
+      deps.orderRepo.save(order);
+
+      await expect(runStartupPositionAdoption(deps)).rejects.toBeInstanceOf(
+        StartupSnapshotUnreliableError,
+      );
+    },
+  );
 
   it("Release A Phase 3 (P6): startup fence quarantines mismatched/NULL-positionId working SELLs as drain targets before servicing resumes", async () => {
     const conn = bootstrapLedgerDb(":memory:");

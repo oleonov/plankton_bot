@@ -274,6 +274,49 @@ function openSellAt(price: number, overrides?: Partial<Order>): Order {
   };
 }
 
+function expiredStartupMaker(): Order {
+  const createdAtMs = Date.now() - 120_000;
+  return openSellAt(0.01, {
+    orderId: createOrderId("prepared-expired-maker"),
+    exchangeOrderId: "prepared-expired-maker",
+    positionId: null,
+    side: "buy",
+    size: 110,
+    sizeUsdc: 1.1,
+    status: "pending",
+    signalReason: "probe-entry",
+    decisionRuleId: R23_DIP_TRIGGER_RULE_ID,
+    entryStyle: "maker",
+    postOnly: true,
+    metadata: {
+      makerMicroLiveLifecycle: {
+        kind: "permanent_r23",
+        activationId: "permanent-r23",
+        activatedAtUtc: new Date(createdAtMs - 1_000).toISOString(),
+        fillWaitMs: 60_000,
+      },
+    },
+    createdAt: new Date(createdAtMs).toISOString(),
+    updatedAt: new Date(createdAtMs).toISOString(),
+  });
+}
+
+function drainTarget(
+  order: Order,
+  provenance: "exchange-working" | "exact-null-expired-maker" = "exact-null-expired-maker",
+  sibling?: Order,
+) {
+  return {
+    tokenId: order.tokenId,
+    activePositionId: null,
+    orders: sibling ? [order, sibling] : [order],
+    provenanceByOrderId: new Map([
+      [String(order.orderId), provenance],
+      ...(sibling ? ([[String(sibling.orderId), "exchange-working" as const]] as const) : []),
+    ]),
+  };
+}
+
 function createMockPositionRepo(position: Position | null = null): PositionRepository {
   return {
     save: vi.fn(),
@@ -627,6 +670,19 @@ describe("ExecutionModule", () => {
       inventoryLotRepo: createMockInventoryLotRepo(position),
     });
   });
+
+  const startupModule = (positionRepo = createMockPositionRepo(null)) =>
+    new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+    });
 
   // ─── Lifecycle ──────────────────────────────────────────────────────
 
@@ -5156,9 +5212,7 @@ describe("ExecutionModule", () => {
       });
       await liveMod.start();
 
-      await liveMod.seedStartupTransitions([
-        { tokenId: staleSell.tokenId, activePositionId: null, orders: [staleSell] },
-      ]);
+      await liveMod.seedStartupTransitions([drainTarget(staleSell, "exchange-working")]);
       expect(liveMod.hasTransitionTarget(staleSell.orderId)).toBe(true);
 
       for (const suffix of ["one", "two"]) {
@@ -5205,9 +5259,7 @@ describe("ExecutionModule", () => {
           runtimeControl: { isPaused: () => false },
         });
         await liveMod.start();
-        await liveMod.seedStartupTransitions([
-          { tokenId: staleSell.tokenId, activePositionId: null, orders: [staleSell] },
-        ]);
+        await liveMod.seedStartupTransitions([drainTarget(staleSell, "exchange-working")]);
 
         await vi.advanceTimersByTimeAsync(5_000);
 
@@ -5218,6 +5270,85 @@ describe("ExecutionModule", () => {
         vi.useRealTimers();
       }
     });
+
+    it.each([
+      ["open", { ok: true, data: null }],
+      ["partially-filled", { ok: false, reason: "http_503", attempts: 3 }],
+    ] as const)(
+      "fences exact-null maker after local %s transition and keeps uncertain exact proof retryable",
+      async (status, exact) => {
+        const pending = expiredStartupMaker();
+        const current = { ...pending, status };
+        orderRepo.findById = vi.fn().mockReturnValue(current);
+        orderRepo.findByTokenId = vi.fn().mockReturnValue([current]);
+        (gateway as any).getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+        (gateway as any).getOrderResult = vi.fn().mockResolvedValue(exact);
+        const reasons: string[] = [];
+        bus.subscribe(
+          "CancelOrderRequested",
+          async ({ command }) => void reasons.push(command.reason),
+        );
+        const liveMod = startupModule();
+        await liveMod.start();
+
+        await liveMod.seedStartupTransitions([drainTarget(pending)]);
+
+        expect(reasons).toEqual(["stale_entry_ttl"]);
+        expect(gateway.cancelOrder).toHaveBeenCalledOnce();
+        expect(liveMod.hasTransitionTarget(pending.orderId)).toBe(true);
+        await liveMod.stop();
+      },
+    );
+
+    it.each(["filled", "cancelled", "rejected"] as const)(
+      "does not revive a proof-bearing %s exact-null target before seeding",
+      async (status) => {
+        const pending = expiredStartupMaker();
+        orderRepo.findById = vi.fn().mockReturnValue({ ...pending, status });
+        const liveMod = startupModule();
+        await liveMod.start();
+
+        await liveMod.seedStartupTransitions([drainTarget(pending)]);
+
+        expect(liveMod.hasTransitionTarget(pending.orderId)).toBe(false);
+        expect(gateway.cancelOrder).not.toHaveBeenCalled();
+        await liveMod.stop();
+      },
+    );
+
+    it.each(["position", "order", "mixed-provenance"] as const)(
+      "refuses exact-null startup seed with same-token %s conflict",
+      async (conflict) => {
+        const pending = expiredStartupMaker();
+        const sibling = openSellAt(0.02, {
+          orderId: createOrderId("startup-conflict"),
+          exchangeOrderId: "startup-conflict",
+          tokenId: pending.tokenId,
+          positionId: null,
+        });
+        orderRepo.findById = vi.fn((id) =>
+          String(id) === String(pending.orderId) ? pending : sibling,
+        );
+        orderRepo.findByTokenId = vi
+          .fn()
+          .mockReturnValue(conflict === "order" ? [pending, sibling] : [pending]);
+        const positionRepo = createMockPositionRepo(null);
+        positionRepo.findActiveByTokenId = vi
+          .fn()
+          .mockReturnValue(
+            conflict === "position" ? [makePosition({ tokenId: pending.tokenId })] : [],
+          );
+        const liveMod = startupModule(positionRepo);
+        await liveMod.start();
+        const extra = conflict === "mixed-provenance" ? sibling : undefined;
+
+        await expect(
+          liveMod.seedStartupTransitions([drainTarget(pending, "exact-null-expired-maker", extra)]),
+        ).rejects.toThrow();
+        expect(gateway.cancelOrder).not.toHaveBeenCalled();
+        await liveMod.stop();
+      },
+    );
 
     it("cancel-side lookups only act on positionId-matching orders — a cross-cycle resting SELL is never picked as the replacement target", async () => {
       const currentCyclePosition = makePosition({ positionId: createPositionId("pos-1") });

@@ -26,6 +26,7 @@ import {
 } from "@krabs/domain";
 import { ledgerInstant, parseLedgerInstantMs, withImmediate } from "@krabs/db";
 import type { Logger } from "./logger.js";
+import { resolveMakerMicroLiveFillDeadlineMs } from "./buy-order-lifecycle.js";
 import { resolveOpenPositionStatus } from "./position-status.js";
 import { InventoryHandler } from "./modules/risk-inventory/inventory-handler.js";
 import {
@@ -100,6 +101,7 @@ export interface StartupDrainTarget {
   tokenId: TokenId;
   activePositionId: PositionId | null;
   orders: Order[];
+  provenanceByOrderId: Map<string, "exchange-working" | "exact-null-expired-maker">;
 }
 
 export interface StartupPositionAdoptionResult {
@@ -376,6 +378,14 @@ export async function runStartupPositionAdoption(
   }
 
   result.syntheticOrdersCreated = syntheticOrders.size;
+  const exactNullExpiredMakers: Order[] = [];
+  for (const order of deps.orderRepo.findOpen()) {
+    if (
+      order.status !== "pending" &&
+      isExactNullExpiredMakerDrainCandidate(order, deps, rawFills, Date.now())
+    )
+      pendingOrderIds.push(order.orderId);
+  }
 
   for (const orderId of pendingOrderIds) {
     const order = deps.orderRepo.findById(orderId);
@@ -394,12 +404,14 @@ export async function runStartupPositionAdoption(
         result.recoveryPredecessorOrderIds.push(String(order.orderId));
         continue;
       }
-      if (!(await allowMissingBounceExitRecoveryStartup(deps, order, rawFills))) {
-        throw new Error(
-          `startup aborted — pending order ${String(orderId)} lacks exact terminal proof`,
-        );
+      if (await allowMissingBounceExitRecoveryStartup(deps, order, rawFills)) continue;
+      if (isExactNullExpiredMakerDrainCandidate(order, deps, rawFills, Date.now())) {
+        exactNullExpiredMakers.push(order);
+        continue;
       }
-      continue;
+      throw new Error(
+        `startup aborted — pending order ${String(orderId)} lacks exact terminal proof`,
+      );
     }
     const verdict = await applyOrderVerdict({
       orderRepo: deps.orderRepo,
@@ -416,9 +428,60 @@ export async function runStartupPositionAdoption(
 
   rebuildLegStatesFromLedger(deps, result, log);
 
-  result.drainTargets = await classifyStartupTransitionTargets(deps, result, log);
+  result.drainTargets = await classifyStartupTransitionTargets(
+    deps,
+    result,
+    log,
+    exactNullExpiredMakers,
+  );
 
   return result;
+}
+
+export function isExactNullExpiredMakerDrainCandidate(
+  order: Order,
+  deps: Pick<StartupPositionAdoptionDeps, "fillRepo" | "orderRepo" | "positionRepo">,
+  exchangeFills: readonly ExchangeFill[],
+  nowMs: number,
+): boolean {
+  const deadlineMs = resolveMakerMicroLiveFillDeadlineMs(order);
+  const lifecycle = order.metadata?.makerMicroLiveLifecycle as Record<string, unknown> | undefined;
+  const working = deps.orderRepo
+    .findByTokenId(order.tokenId)
+    .filter(
+      ({ status }) => status === "pending" || status === "open" || status === "partially-filled",
+    );
+  return (
+    working.length === 1 &&
+    working[0]?.orderId === order.orderId &&
+    deps.positionRepo.findActiveByTokenId(order.tokenId).length === 0 &&
+    order.orderType === "GTC" &&
+    order.positionId === null &&
+    order.exchangeOrderId === String(order.orderId) &&
+    Number.isFinite(order.price) &&
+    order.price > 0 &&
+    Number.isFinite(order.size) &&
+    order.size > 0 &&
+    lifecycle?.kind === "permanent_r23" &&
+    deadlineMs !== null &&
+    nowMs >= deadlineMs &&
+    !hasStartupFillEvidence(deps.fillRepo, order, exchangeFills)
+  );
+}
+
+function hasStartupFillEvidence(
+  fillRepo: Pick<FillRepository, "findByOrderId">,
+  order: Order,
+  exchangeFills: readonly ExchangeFill[],
+): boolean {
+  return (
+    fillRepo.findByOrderId(order.orderId).length > 0 ||
+    exchangeFills.some(
+      (fill) =>
+        fill.orderId === order.exchangeOrderId ||
+        fill.clientOrderId === String(order.clientOrderId),
+    )
+  );
 }
 
 async function allowMissingBounceExitRecoveryStartup(
@@ -499,12 +562,7 @@ async function persistMissingBounceExitRecoveryBlock(
     !Number.isFinite(fifoShares) ||
     Math.abs(fifoShares - positions[0]!.size) > 1e-7 ||
     order.size - positions[0]!.size > 1e-7 ||
-    deps.fillRepo.findByOrderId(order.orderId).length !== 0 ||
-    exchangeFills.some(
-      (fill) =>
-        fill.orderId === order.exchangeOrderId ||
-        fill.clientOrderId === String(order.clientOrderId),
-    )
+    hasStartupFillEvidence(deps.fillRepo, order, exchangeFills)
   ) {
     return false;
   }
@@ -602,6 +660,7 @@ async function classifyStartupTransitionTargets(
   deps: StartupPositionAdoptionDeps,
   result: StartupPositionAdoptionResult,
   log: Logger,
+  exactNullExpiredMakers: readonly Order[],
 ): Promise<StartupDrainTarget[]> {
   const openOrdersResult = await deps.gateway.getOpenOrdersResult();
   if (!openOrdersResult.ok) {
@@ -621,13 +680,27 @@ async function classifyStartupTransitionTargets(
     restingByToken.set(key, bucket);
   }
 
-  const drainTargets: StartupDrainTarget[] = [];
+  const drainTargets = new Map<string, StartupDrainTarget>();
+  const exactByToken = new Map(
+    exactNullExpiredMakers.map((order) => [String(order.tokenId), order]),
+  );
   for (const [tokenKey, exchangeOrders] of restingByToken) {
     const tokenId = exchangeOrders[0]!.tokenId;
     const activePositions = deps.positionRepo.findActiveByTokenId(tokenId);
     const activePositionIds = new Set(activePositions.map((p) => String(p.positionId)));
-    const staleOrders: Order[] = [];
-
+    const exactNull = exactByToken.get(tokenKey);
+    if (exactNull) {
+      const matching = exchangeOrders.filter(
+        ({ orderId }) => orderId === exactNull.exchangeOrderId,
+      );
+      if (matching.length > 1 || exchangeOrders.length !== matching.length) {
+        throw new StartupSnapshotUnreliableError("exact-null startup order conflict", 1);
+      }
+      if (matching[0] && matching[0].side !== exactNull.side) {
+        throw new StartupSnapshotUnreliableError("remote/local open-order identity mismatch", 1);
+      }
+      continue;
+    }
     for (const exchangeOrder of exchangeOrders) {
       const localOrder = deps.orderRepo.findByExchangeOrderId(exchangeOrder.orderId);
       if (!localOrder) {
@@ -663,29 +736,72 @@ async function classifyStartupTransitionTargets(
         );
         continue;
       }
+      if (
+        String(localOrder.tokenId) !== String(exchangeOrder.tokenId) ||
+        localOrder.side !== String(exchangeOrder.side).toLowerCase()
+      ) {
+        log.fatal(
+          { exchangeOrderId: exchangeOrder.orderId },
+          "startup adoption ABORTED — remote/local open-order identity mismatch",
+        );
+        throw new StartupSnapshotUnreliableError("remote/local open-order identity mismatch", 1);
+      }
       if (!isStaleOrReopeningWorkingOrder(localOrder, activePositionIds)) continue;
-      staleOrders.push(localOrder);
+      addStartupDrainOrder(
+        drainTargets,
+        tokenId,
+        activePositions[0]?.positionId ?? null,
+        localOrder,
+        "exchange-working",
+      );
       if (localOrder.side === "sell") result.quarantinedStaleSells++;
       else result.quarantinedReopeningBuys++;
     }
-
-    if (staleOrders.length === 0) continue;
+  }
+  for (const order of exactNullExpiredMakers) {
+    const activePositions = deps.positionRepo.findActiveByTokenId(order.tokenId);
+    const activePositionIds = new Set(
+      activePositions.map((position) => String(position.positionId)),
+    );
+    if (!isStaleOrReopeningWorkingOrder(order, activePositionIds)) continue;
+    addStartupDrainOrder(
+      drainTargets,
+      order.tokenId,
+      activePositions[0]?.positionId ?? null,
+      order,
+      "exact-null-expired-maker",
+    );
+    result.quarantinedReopeningBuys++;
+  }
+  for (const target of drainTargets.values()) {
     log.warn(
       {
-        tokenId: tokenKey,
-        activePositionIds: [...activePositionIds],
-        orderIds: staleOrders.map((o) => String(o.orderId)),
+        tokenId: String(target.tokenId),
+        orderIds: target.orders.map((order) => String(order.orderId)),
       },
       "startup fence — quarantining stale/reopening-risk working order(s)",
     );
-    drainTargets.push({
-      tokenId,
-      activePositionId: activePositions[0]?.positionId ?? null,
-      orders: staleOrders,
-    });
   }
+  return [...drainTargets.values()];
+}
 
-  return drainTargets;
+function addStartupDrainOrder(
+  targets: Map<string, StartupDrainTarget>,
+  tokenId: TokenId,
+  activePositionId: PositionId | null,
+  order: Order,
+  provenance: "exchange-working" | "exact-null-expired-maker",
+): void {
+  const key = String(tokenId);
+  const target: StartupDrainTarget = targets.get(key) ?? {
+    tokenId,
+    activePositionId,
+    orders: [],
+    provenanceByOrderId: new Map(),
+  };
+  target.orders.push(order);
+  target.provenanceByOrderId.set(String(order.orderId), provenance);
+  targets.set(key, target);
 }
 
 /**

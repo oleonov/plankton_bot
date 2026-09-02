@@ -78,6 +78,8 @@ import {
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
 import { createHash, randomUUID } from "node:crypto";
 import { buildClientOrderId } from "@krabs/domain/node";
+import type { StartupDrainTarget } from "../../startup-position-adoption.js";
+import { isExactNullExpiredMakerDrainCandidate } from "../../startup-position-adoption.js";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import {
   applyOrderVerdict,
@@ -587,7 +589,11 @@ export class ExecutionModule implements RuntimeModule {
    */
   private readonly tokenTransitions = new Map<
     string /* tokenId */,
-    { activePositionId: string | null; targets: Set<string /* orderId */> }
+    {
+      activePositionId: string | null;
+      targets: Set<string /* orderId */>;
+      exactNullExpiredMakerTargets: Set<string /* orderId */>;
+    }
   >();
   /**
    * Per-token count of commands accepted for dispatch (queued or executing)
@@ -1356,12 +1362,16 @@ export class ExecutionModule implements RuntimeModule {
     tokenId: TokenId,
     activePositionId: string | null,
     staleOrders: readonly Order[],
-    knownExchangeLive = false,
+    startupProof?: {
+      knownExchangeLiveOrderIds: ReadonlySet<string>;
+      exactNullExpiredMakerOrderIds: ReadonlySet<string>;
+    },
   ): Promise<void> {
     const key = String(tokenId);
     const transition = this.tokenTransitions.get(key) ?? {
       activePositionId,
       targets: new Set<string>(),
+      exactNullExpiredMakerTargets: new Set<string>(),
     };
     const newlyTargeted: Order[] = [];
     for (const order of staleOrders) {
@@ -1370,8 +1380,15 @@ export class ExecutionModule implements RuntimeModule {
       // Runtime discovery only sees local working orders, but startup may prove that a
       // locally terminal row is still exchange-live. That inconsistency must stay fenced
       // until the normal exact cancel/fill lane supplies terminal proof.
-      if (isTerminalOrderStatus(order.status) && !knownExchangeLive) continue;
+      if (
+        isTerminalOrderStatus(order.status) &&
+        !startupProof?.knownExchangeLiveOrderIds.has(orderKey)
+      )
+        continue;
       transition.targets.add(orderKey);
+      if (startupProof?.exactNullExpiredMakerOrderIds.has(orderKey)) {
+        transition.exactNullExpiredMakerTargets.add(orderKey);
+      }
       newlyTargeted.push(order);
     }
     this.tokenTransitions.set(key, transition);
@@ -1390,7 +1407,12 @@ export class ExecutionModule implements RuntimeModule {
         },
         "transition barrier opened — draining stale/cross-cycle working order",
       );
-      await this.publishManagedCancel(order.orderId, "operator");
+      await this.publishManagedCancel(
+        order.orderId,
+        transition.exactNullExpiredMakerTargets.has(String(order.orderId))
+          ? "stale_entry_ttl"
+          : "operator",
+      );
     }
   }
 
@@ -1404,16 +1426,65 @@ export class ExecutionModule implements RuntimeModule {
    * AFTER the module has started (subscriptions wired) so the cancel publish
    * is actually consumed.
    */
-  async seedStartupTransitions(
-    targets: ReadonlyArray<{
-      tokenId: TokenId;
-      activePositionId: string | null;
-      orders: readonly Order[];
-    }>,
-  ): Promise<void> {
+  async seedStartupTransitions(targets: ReadonlyArray<StartupDrainTarget>): Promise<void> {
     for (const target of targets) {
       if (target.orders.length === 0) continue;
-      await this.openTokenTransition(target.tokenId, target.activePositionId, target.orders, true);
+      const currentOrders: Order[] = [];
+      const knownExchangeLiveOrderIds = new Set<string>();
+      const exactNullExpiredMakerOrderIds = new Set<string>();
+      const exactNullCount = [...target.provenanceByOrderId.values()].filter(
+        (value) => value === "exact-null-expired-maker",
+      ).length;
+      if (
+        target.provenanceByOrderId.size !== target.orders.length ||
+        (exactNullCount > 0 && (exactNullCount !== 1 || target.orders.length !== 1))
+      ) {
+        throw new Error("startup drain provenance is incomplete");
+      }
+      for (const snapshot of target.orders) {
+        const orderKey = String(snapshot.orderId);
+        const provenance = target.provenanceByOrderId.get(orderKey);
+        const current = this.deps.orderRepo.findById(snapshot.orderId);
+        if (
+          !current ||
+          currentOrders.some((order) => order.orderId === current.orderId) ||
+          String(current.tokenId) !== String(target.tokenId) ||
+          current.conditionId !== snapshot.conditionId ||
+          current.side !== snapshot.side ||
+          current.clientOrderId !== snapshot.clientOrderId ||
+          current.exchangeOrderId !== snapshot.exchangeOrderId ||
+          (provenance !== "exchange-working" && provenance !== "exact-null-expired-maker")
+        ) {
+          throw new Error("startup drain target changed before seeding");
+        }
+        if (provenance === "exchange-working") knownExchangeLiveOrderIds.add(orderKey);
+        else if (!isTerminalOrderStatus(current.status)) {
+          if (!this.deps.positionRepo) {
+            throw new Error("startup exact-null maker proof dependencies are unavailable");
+          }
+          if (
+            provenance !== "exact-null-expired-maker" ||
+            !isExactNullExpiredMakerDrainCandidate(
+              current,
+              {
+                fillRepo: this.deps.fillRepo,
+                orderRepo: this.deps.orderRepo,
+                positionRepo: this.deps.positionRepo,
+              },
+              [],
+              Date.now(),
+            )
+          ) {
+            throw new Error("startup exact-null maker proof changed before seeding");
+          }
+          exactNullExpiredMakerOrderIds.add(orderKey);
+        }
+        currentOrders.push(current);
+      }
+      await this.openTokenTransition(target.tokenId, target.activePositionId, currentOrders, {
+        knownExchangeLiveOrderIds,
+        exactNullExpiredMakerOrderIds,
+      });
     }
   }
 
@@ -1440,6 +1511,7 @@ export class ExecutionModule implements RuntimeModule {
     if (!order || !isTerminalOrderStatus(order.status)) return;
 
     transition.targets.delete(orderKey);
+    transition.exactNullExpiredMakerTargets.delete(orderKey);
     // Finding 3 (round 3): a target confirmed terminal via OrderCancelled/FillReceived
     // must also drop its backoff entry — otherwise `transitionCancelRetryAt` leaks
     // unboundedly (the transition closes and autonomous reconcile can't reach it).
@@ -1495,7 +1567,10 @@ export class ExecutionModule implements RuntimeModule {
         now - lastRetry >= TRANSITION_CANCEL_RETRY_BACKOFF_MS
       ) {
         this.transitionCancelRetryAt.set(orderKey, now);
-        await this.publishManagedCancel(order.orderId, "operator");
+        await this.publishManagedCancel(
+          order.orderId,
+          transition.exactNullExpiredMakerTargets.has(orderKey) ? "stale_entry_ttl" : "operator",
+        );
       }
     }
     this.maybeCloseTokenTransition(tokenId);
