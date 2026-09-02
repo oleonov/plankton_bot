@@ -1294,6 +1294,16 @@ export class ExecutionModule implements RuntimeModule {
 
   // ─── P6 transition barrier ────────────────────────────────────────────
 
+  isExactNullStartupTransitionDraining(tokenId: TokenId): boolean {
+    const transition = this.tokenTransitions.get(String(tokenId));
+    if (!transition || transition.targets.size === 0) return false;
+    if (transition.targets.size !== transition.exactNullExpiredMakerTargets.size) return false;
+    for (const orderId of transition.targets) {
+      if (!transition.exactNullExpiredMakerTargets.has(orderId)) return false;
+    }
+    return true;
+  }
+
   /**
    * Release A Phase 3 (P6) — reject a command competing with a token's
    * in-progress drain, opening the barrier first if this command is the one

@@ -5316,6 +5316,45 @@ describe("ExecutionModule", () => {
       },
     );
 
+    it("reports only an exact-null-only startup drain without mutating it", async () => {
+      const pending = expiredStartupMaker();
+      let status: Order["status"] = "open";
+      orderRepo.findById = vi.fn(() => ({ ...pending, status }));
+      orderRepo.findByTokenId = vi.fn(() => [{ ...pending, status }]);
+      (gateway as any).getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+      (gateway as any).getOrderResult = vi.fn().mockResolvedValue({ ok: true, data: null });
+      const liveMod = startupModule();
+      await liveMod.start();
+
+      expect(liveMod.isExactNullStartupTransitionDraining(pending.tokenId)).toBe(false);
+      await liveMod.seedStartupTransitions([drainTarget(pending)]);
+      const cancelCalls = vi.mocked(gateway.cancelOrder).mock.calls.length;
+      expect(liveMod.isExactNullStartupTransitionDraining(pending.tokenId)).toBe(true);
+      expect(liveMod.isExactNullStartupTransitionDraining(pending.tokenId)).toBe(true);
+      expect(gateway.cancelOrder).toHaveBeenCalledTimes(cancelCalls);
+
+      const transition = (liveMod as any).tokenTransitions.get(String(pending.tokenId));
+      transition.targets.add("generic-target");
+      expect(liveMod.isExactNullStartupTransitionDraining(pending.tokenId)).toBe(false);
+      transition.targets.delete("generic-target");
+      transition.exactNullExpiredMakerTargets.clear();
+      expect(liveMod.isExactNullStartupTransitionDraining(pending.tokenId)).toBe(false);
+      transition.exactNullExpiredMakerTargets.add(String(pending.orderId));
+
+      status = "cancelled";
+      await bus.publish("OrderCancelled", {
+        commandId: createCommandId("exact-null-terminal"),
+        orderId: pending.orderId,
+        tokenId: pending.tokenId,
+        conditionId: pending.conditionId,
+        reason: "stale_entry_ttl",
+        signalReason: pending.signalReason,
+        timestamp: Date.now(),
+      });
+      expect(liveMod.isExactNullStartupTransitionDraining(pending.tokenId)).toBe(false);
+      await liveMod.stop();
+    });
+
     it.each(["position", "order", "mixed-provenance"] as const)(
       "refuses exact-null startup seed with same-token %s conflict",
       async (conflict) => {

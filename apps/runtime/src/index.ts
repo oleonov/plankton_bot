@@ -1524,6 +1524,9 @@ async function main(): Promise<void> {
     runtimeMetrics,
     liveLiteGuard,
     marketLivenessReader: { getMarket: marketDataGateway.getMarket.bind(marketDataGateway) },
+    exactNullStartupTransition: {
+      isDraining: (tokenId) => executionModule.isExactNullStartupTransitionDraining(tokenId),
+    },
     sellLoopGuard: sellLoopGuardModule,
     s1Ownership: s1LadderModule,
     profileLadderOwnership: {

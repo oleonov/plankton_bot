@@ -618,6 +618,7 @@ export interface AlgoDecisionModuleDeps {
   canHydrateMinOrderSize?: ((tokenId: string) => boolean) | undefined;
   /** Exact CLOB liveness proof for cache-missing held-position heartbeats. */
   marketLivenessReader?: Pick<MarketDataGateway, "getMarket"> | undefined;
+  exactNullStartupTransition?: { isDraining(tokenId: TokenId): boolean } | undefined;
   evalMetricsSink?: ((snapshot: DecisionEvalMetricsSnapshot) => void) | undefined;
   evalMetricsEmitIntervalMs?: number | undefined;
   decisionPersistenceMode?: "sync" | "async" | "worker" | undefined;
@@ -704,6 +705,9 @@ const R23_PROBE_CAP_FULL_SKIP_METRIC = "r23_probe_skipped_active_market_cap_full
 const R23_PROBE_NO_ORDER_ID_COOLDOWN_REASON = "r23_probe_no_order_id_cooldown";
 const R23_PROBE_NO_ORDER_ID_COOLDOWN_METRIC = "r23_probe_no_order_id_cooldown_suppressed_total";
 const R23_PROBE_NO_ORDER_ID_RECOVERED_METRIC = "r23_probe_no_order_id_cooldown_recovered_total";
+const EXACT_NULL_STARTUP_TRANSITION_BUY_SUPPRESSED_METRIC =
+  "exact_null_startup_transition_buy_suppressed_total";
+const EXACT_NULL_STARTUP_TRANSITION_WARN_WINDOW_MS = 5 * 60_000;
 const R23_PROBE_MAKER_WINDOW_CAP_COOLDOWN_METRIC =
   "r23_probe_maker_window_cap_cooldown_suppressed_total";
 const R23_PROBE_NO_ORDER_ID_COOLDOWN_MS = 15 * 60 * 1000;
@@ -1062,6 +1066,8 @@ export class AlgoDecisionModule implements RuntimeModule {
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
   private buyBudgetRecoveryNotionalUsdc = 0;
+  private exactNullStartupTransitionWarnStartedAt = Number.NEGATIVE_INFINITY;
+  private exactNullStartupTransitionSuppressedSinceWarn = 0;
 
   private tickCounter = 0;
   private unsubs: Array<() => void> = [];
@@ -1999,6 +2005,12 @@ export class AlgoDecisionModule implements RuntimeModule {
         this.recordDecisionSuppressed(suppression as SuppressionFacts);
       }
       if (plan.type !== "signal") continue;
+      if (
+        plan.signal.side === "buy" &&
+        this.suppressBuyForExactNullStartupTransition(plan.signal.market.tokenId, now)
+      ) {
+        continue;
+      }
       const result = this.materializeSignalDraft(plan.signal, now, nextSeq);
       if (result.signal.side === "buy") {
         if (this.hasActivePermanentR23Lineage(result.signal, executionPolicy, now)) continue;
@@ -2059,6 +2071,33 @@ export class AlgoDecisionModule implements RuntimeModule {
         nowMs,
       }) !== null
     );
+  }
+
+  private suppressBuyForExactNullStartupTransition(tokenId: TokenId, now: number): boolean {
+    if (!this.deps.exactNullStartupTransition?.isDraining(tokenId)) return false;
+    this.deps.runtimeMetrics?.writeCounter(
+      EXACT_NULL_STARTUP_TRANSITION_BUY_SUPPRESSED_METRIC,
+      1,
+      null,
+    );
+    this.exactNullStartupTransitionSuppressedSinceWarn++;
+    if (
+      now <
+      this.exactNullStartupTransitionWarnStartedAt + EXACT_NULL_STARTUP_TRANSITION_WARN_WINDOW_MS
+    ) {
+      return true;
+    }
+    this.log.warn(
+      {
+        reason: "exact_null_startup_transition_draining",
+        suppressedCount: this.exactNullStartupTransitionSuppressedSinceWarn,
+        windowMs: EXACT_NULL_STARTUP_TRANSITION_WARN_WINDOW_MS,
+      },
+      "BUY signals suppressed while exact-null startup transition drains",
+    );
+    this.exactNullStartupTransitionWarnStartedAt = now;
+    this.exactNullStartupTransitionSuppressedSinceWarn = 0;
+    return true;
   }
 
   /**

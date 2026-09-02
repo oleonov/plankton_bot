@@ -6813,6 +6813,73 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("suppresses exact-null startup-drain BUY churn before materialization", async () => {
+    vi.useFakeTimers();
+    try {
+      const now = Date.parse("2026-09-02T00:00:00.000Z");
+      vi.setSystemTime(now);
+      const tokenId = "token-exact-null-startup-drain";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const runtimeMetrics = { writeCounter: vi.fn(), writeLatest: vi.fn() };
+      let draining = true;
+      const mod = buildModule({
+        decisionSignalLogRepo,
+        riskEventRepo,
+        runtimeMetrics: runtimeMetrics as unknown as RuntimeMetricWriter,
+        executionPolicy: () => ({ ...DEFAULT_EXECUTION_POLICY, entryMinMarketAgeSeconds: 0 }),
+        exactNullStartupTransition: { isDraining: vi.fn(() => draining) },
+      });
+      const sideEffects = vi.spyOn(mod as any, "applyDecisionPlanSideEffects");
+      await mod.start();
+      (mod as any).marketCache.set(tokenId, makeMarket(tokenId, null, 0.12));
+
+      for (let index = 0; index < 3; index++) {
+        await mod.evaluateTokens([createTokenId(tokenId)]);
+      }
+
+      expect(sideEffects).toHaveBeenCalledTimes(3);
+      expect((mod as any).currentEvalMetrics.evalTotal).toBeGreaterThan(0);
+      expect((mod as any).currentEvalMetrics.emitted).toBe(0);
+      expect((mod as any).pendingEntries.size).toBe(0);
+      expect(riskEventRepo.insert).not.toHaveBeenCalledWith(
+        expect.objectContaining({ eventType: "signal_emitted" }),
+      );
+      expect(bus.publish).not.toHaveBeenCalledWith("SignalProduced", expect.anything());
+      const suppressionMetrics = vi
+        .mocked(runtimeMetrics.writeCounter)
+        .mock.calls.filter(
+          ([name, delta, labels]) =>
+            name === "exact_null_startup_transition_buy_suppressed_total" &&
+            delta === 1 &&
+            labels === null,
+        );
+      expect(suppressionMetrics).toHaveLength(3);
+      expect((mod as any).log.warn).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(now + 300_000);
+      await mod.evaluateTokens([createTokenId(tokenId)]);
+      expect((mod as any).log.warn).toHaveBeenLastCalledWith(
+        {
+          reason: "exact_null_startup_transition_draining",
+          suppressedCount: 3,
+          windowMs: 300_000,
+        },
+        "BUY signals suppressed while exact-null startup transition drains",
+      );
+
+      draining = false;
+      await mod.evaluateTokens([createTokenId(tokenId)]);
+      expect(bus.publish).toHaveBeenCalledWith("SignalProduced", expect.anything());
+      expect(decisionSignalLogRepo.insert).toHaveBeenCalledOnce();
+      expect((mod as any).pendingEntries.size).toBe(1);
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("evicts marketCache entries when TrackedMarketsChanged removes tokens", async () => {
     const keptToken = "token-kept";
     const droppedToken = "token-dropped";
