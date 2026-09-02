@@ -447,6 +447,7 @@ function createBounceSupplementalFixture() {
       },
     });
   const orders = [order(0, 9), order(1, 12), order(2, 90, true)];
+  orders[0] = { ...orders[0]!, postOnly: false };
   const command = makePlaceCmd({
     commandId: createCommandId("bounce-supplemental"),
     clientOrderId: "bounce-supplemental" as ClientOrderId,
@@ -454,7 +455,7 @@ function createBounceSupplementalFixture() {
     size: 9,
     price: 0.005,
     tickSize: 0.001,
-    postOnly: true,
+    postOnly: false,
     positionId: position.positionId,
     signalReason: "repricing-exit",
     decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
@@ -739,6 +740,7 @@ describe("ExecutionModule", () => {
       timestamp: Date.now(),
     });
     await vi.waitFor(() => expect(gateway.placeOrder).toHaveBeenCalledOnce());
+    expect(gateway.placeOrder).toHaveBeenCalledWith(expect.objectContaining({ postOnly: false }));
     await bus.publish("PlaceOrderRequested", {
       command: {
         ...fixture.command,
@@ -809,6 +811,18 @@ describe("ExecutionModule", () => {
     });
     expect(gateway.prepareOrder).not.toHaveBeenCalled();
     expect(rejected).toContain("invalid-exit-coverage-cleanup");
+    for (const orderType of ["GTD", "FOK"] as const) {
+      await bus.publish("PlaceOrderRequested", {
+        command: {
+          ...fixture.command,
+          orderType,
+          commandId: createCommandId(`bounce-supplemental-${orderType}`),
+          clientOrderId: `bounce-supplemental-${orderType}` as ClientOrderId,
+        },
+        timestamp: Date.now(),
+      });
+    }
+    expect(gateway.prepareOrder).not.toHaveBeenCalled();
     await bus.publish("PlaceOrderRequested", { command: fixture.command, timestamp: Date.now() });
 
     expect(gateway.prepareOrder).toHaveBeenCalledOnce();

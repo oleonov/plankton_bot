@@ -260,6 +260,7 @@ function makeBounceSupplementalFixture() {
       },
     });
   const orders = [rung(0, 9), rung(1, 12), rung(2, 90, true)];
+  orders[0] = { ...orders[0]!, postOnly: false };
   const signal = makeSignal({
     side: "sell",
     reason: "repricing-exit",
@@ -894,12 +895,16 @@ describe("AlgoRiskGateImpl", () => {
     expect((await evaluate(fixture.orders)).approved).toBe(true);
     const wrongCycle = { ...fixture.orders[0]!, positionId: createPositionId("old-cycle") };
     const conflict = makeOpenSellOrder({ orderId: "conflict" as any, conditionId: COND_ID });
+    const missingPostOnly = { ...fixture.orders[0]! };
+    delete missingPostOnly.postOnly;
     for (const decision of await Promise.all([
       evaluate(fixture.orders, { ...fixture.signal, suggestedSize: 8 }),
       evaluate([wrongCycle, ...fixture.orders.slice(1)]),
       evaluate([...fixture.orders, conflict]),
       evaluate(fixture.orders, fixture.signal, { ...fixture.position, size: 111 }),
       evaluate(fixture.orders, { ...fixture.signal, suggestedSize: 4, suggestedSizeUsdc: 0.02 }),
+      evaluate([{ ...fixture.orders[0]!, orderType: "GTD" }, ...fixture.orders.slice(1)]),
+      evaluate([missingPostOnly, ...fixture.orders.slice(1)]),
     ])) {
       expect(decision.approved).toBe(false);
     }

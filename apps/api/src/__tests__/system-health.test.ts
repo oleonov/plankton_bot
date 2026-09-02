@@ -3,6 +3,7 @@ import { bootstrapDatabase } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
 import type { AppConfig } from "@krabs/config";
 import { buildServer } from "../server.js";
+import { readReconciliationHealth } from "../system-health-snapshot.js";
 import { stubLedgerPool, MARKET_DATA_TEST_DEFAULTS } from "./test-helpers.js";
 
 const TEST_API_KEY = "test-key-sys-health";
@@ -109,6 +110,8 @@ describe("GET /api/v1/system-health", () => {
         dirty: unknown;
         marketDataStale: unknown;
         deps: { err: unknown }[];
+        reconDrift: boolean;
+        modules: { nm: string; s: string }[];
         db: { locked: unknown; acctWarnings: unknown; unknownAcct: unknown };
       };
     }>().data;
@@ -120,6 +123,55 @@ describe("GET /api/v1/system-health", () => {
     for (const dep of d.deps) expect(dep.err).toBeNull();
     // No market_data_last_update metric => freshness is unknown, not "fresh".
     expect(d.marketDataStale).toBeNull();
+    expect(d.reconDrift).toBe(false);
+    expect(d.modules.find((module) => module.nm === "reconciliation")?.s).toBe("warn");
+  });
+
+  it("correlates reconciliation evidence only to the exact latest run", () => {
+    const now = Date.now();
+    const at = new Date(now - 1_000).toISOString();
+    const insert = conn.db.prepare(
+      "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, ?, NULL, ?)",
+    );
+    const reset = () =>
+      conn.db
+        .prepare(
+          "DELETE FROM runtime_metrics WHERE metric_name LIKE 'reconciliation_%' OR metric_name = 'last_reconciliation'",
+        )
+        .run();
+    reset();
+    insert.run(
+      "reconciliation_unresolved_missing_on_exchange",
+      4,
+      new Date(now - 60_000).toISOString(),
+    );
+    insert.run("last_reconciliation", 1, at);
+    insert.run("reconciliation_clean", 1, at);
+    expect(readReconciliationHealth(conn.db, now).kind).toBe("ok");
+
+    insert.run("reconciliation_skipped_unreliable", 1, at);
+    expect(readReconciliationHealth(conn.db, now).kind).toBe("unknown");
+    reset();
+    insert.run("last_reconciliation", 1, at);
+    insert.run("reconciliation_unresolved_missing_on_exchange", 2, at);
+    expect(readReconciliationHealth(conn.db, now).kind).toBe("unresolved_missing");
+    expect(readReconciliationHealth(conn.db, now + 91_000).kind).toBe("unknown");
+
+    reset();
+    insert.run("last_reconciliation", 1, at);
+    insert.run("reconciliation_clean", 1, at);
+    conn.db.exec("PRAGMA foreign_keys = OFF");
+    conn.db
+      .prepare(
+        `INSERT INTO position_drifts
+          (settlement_id, token_id, condition_id, detected_at, on_chain_balance, last_checked_at, status)
+         VALUES ('health-drift', 'health-token', 'health-condition', ?, '1', ?, 'open')`,
+      )
+      .run(at, at);
+    expect(readReconciliationHealth(conn.db, now).kind).toBe("position_drift");
+    conn.db.prepare("DELETE FROM position_drifts WHERE settlement_id = 'health-drift'").run();
+    conn.db.exec("PRAGMA foreign_keys = ON");
+    reset();
   });
 
   it("returns history bars as a bounded window of objects with a numeric uptimePct", async () => {

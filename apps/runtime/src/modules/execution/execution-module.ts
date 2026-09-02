@@ -93,6 +93,7 @@ import { bounceRungsConflict } from "../../bounce-rung-identity.js";
 import {
   classifyExitCoverageCleanup,
   findS1CoverageWorkingSells,
+  hasValidBounceCoverageTransport,
   hasS1CoverageCleanupMarker,
   loadExitCoverageFillTotals,
   matchesExactBounceSupplementalCoverage,
@@ -2654,6 +2655,9 @@ export class ExecutionModule implements RuntimeModule {
   private async handlePlace(cmd: PlaceOrderCommand, recoveryOnly = false): Promise<void> {
     const staticCleanupKind = this.exitCoverageCleanupKind(cmd);
     const supplementalShape = this.isBounceSupplementalCandidateShape(cmd);
+    const invalidBounceTransport =
+      (staticCleanupKind === "bounce" || supplementalShape) &&
+      !hasValidBounceCoverageTransport(cmd);
     const supplemental = supplementalShape && this.matchesCurrentBounceSupplementalState(cmd);
     const cleanupKind: ExitCoverageAdmissionKind | null =
       staticCleanupKind ?? (supplemental ? "bounce-supplemental" : null);
@@ -2666,7 +2670,7 @@ export class ExecutionModule implements RuntimeModule {
       );
       return;
     }
-    if (supplementalShape && !supplemental) {
+    if (invalidBounceTransport || (supplementalShape && !supplemental)) {
       await this.rejectOrder(
         cmd,
         "invalid-exit-coverage-cleanup",
@@ -5268,7 +5272,7 @@ export class ExecutionModule implements RuntimeModule {
 
   private matchesCurrentBounceSupplementalState(cmd: PlaceOrderCommand): boolean {
     const positionRepo = this.deps.positionRepo;
-    if (!positionRepo || cmd.postOnly !== true) return false;
+    if (!positionRepo || !hasValidBounceCoverageTransport(cmd)) return false;
     try {
       const positions = positionRepo.findActiveByTokenId(cmd.tokenId);
       const orders = this.deps.orderRepo.findByTokenId(cmd.tokenId);
@@ -5385,6 +5389,9 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   private exitCoverageChanged(cmd: PlaceOrderCommand, retryPredecessor?: Order): boolean {
+    if (this.exitCoverageCleanupKind(cmd) === "bounce" && !hasValidBounceCoverageTransport(cmd)) {
+      return true;
+    }
     if (this.activeBounceSupplementalClientIds.has(String(cmd.clientOrderId))) {
       return !this.matchesCurrentBounceSupplementalState(cmd);
     }

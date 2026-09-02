@@ -594,6 +594,31 @@ describe("GET /status", () => {
     expect(json(res2).data.lastReconciliationAt).toBe("2026-03-14T01:30:00Z");
   });
 
+  it("reports drift only from exact latest reconciliation evidence", async () => {
+    const at = new Date().toISOString();
+    conn.db
+      .prepare(
+        "DELETE FROM runtime_metrics WHERE metric_name LIKE 'reconciliation_%' OR metric_name = 'last_reconciliation'",
+      )
+      .run();
+    const insert = conn.db.prepare(
+      "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES (?, ?, ?)",
+    );
+    insert.run("reconciliation_unresolved_missing_on_exchange", 3, "2026-01-01T00:00:00Z");
+    insert.run("last_reconciliation", 1, at);
+    insert.run("reconciliation_clean", 1, at);
+    expect(
+      json(await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() })).data
+        .reconciliationDriftDetected,
+    ).toBe(false);
+
+    conn.db.prepare("DELETE FROM runtime_metrics WHERE metric_name = 'reconciliation_clean'").run();
+    expect(
+      json(await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() })).data
+        .reconciliationDriftDetected,
+    ).toBe(true);
+  });
+
   it("marketDataStale is true when no market data metric exists", async () => {
     const res = await app.inject({
       method: "GET",

@@ -957,6 +957,154 @@ describe("AlgoDecisionModule", () => {
     ).toBe(false);
   });
 
+  it("lets a newer false normalized generation supersede delayed heartbeat REST", async () => {
+    const tokenId = "heartbeat-newer-generation";
+    const position = makeOpenPosition(tokenId);
+    let releaseFirst!: (value: ReturnType<typeof liveClobMarket>) => void;
+    const first = new Promise<ReturnType<typeof liveClobMarket>>(
+      (resolve) => (releaseFirst = resolve),
+    );
+    const getMarket = vi
+      .fn()
+      .mockImplementationOnce(() => first)
+      .mockResolvedValueOnce(liveClobMarket(tokenId));
+    const runtimeMetrics = { writeCounter: vi.fn(), writeLatest: vi.fn() };
+    const mod = buildModule({
+      positionRepo: {
+        findOpen: vi.fn(() => [position]),
+        findByTokenId: vi.fn(() => position),
+      } as unknown as import("@krabs/domain").PositionRepository,
+      marketLivenessReader: { getMarket },
+      runtimeMetrics: runtimeMetrics as unknown as RuntimeMetricWriter,
+    } as any);
+    await mod.start();
+    const heartbeatMarket = {
+      ...makeMarket(tokenId, null, 0.2),
+      acceptingOrders: false,
+      enableOrderBook: false,
+    };
+    const emitHeartbeat = () =>
+      (bus as any).emit("MarketSnapshotHeartbeat", {
+        markets: [heartbeatMarket],
+        timestamp: Date.now(),
+        reason: "full_lifetime_active_position",
+        source: "market-data",
+      });
+    const pendingFirst = emitHeartbeat();
+    await vi.waitFor(() => expect(getMarket).toHaveBeenCalledOnce());
+    const newer = {
+      ...heartbeatMarket,
+      bestBid: 0.07,
+      bestAsk: 0.09,
+      midPrice: 0.08,
+      spread: 0.02,
+      minOrderSize: 7,
+      snapshotTs: heartbeatMarket.snapshotTs + 1,
+    };
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [newer],
+      timestamp: Date.now(),
+    });
+    (mod as any).dirtyTokenIds.clear();
+    (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+    runtimeMetrics.writeCounter.mockClear();
+    releaseFirst(liveClobMarket(tokenId));
+    await pendingFirst;
+
+    expect(getMarket).toHaveBeenCalledOnce();
+    expect((mod as any).marketCache.get(tokenId)).toBe(newer);
+    expect((mod as any).marketCache.get(tokenId)).toMatchObject({
+      acceptingOrders: false,
+      enableOrderBook: false,
+    });
+    expect((mod as any).dirtyTokenIds.size).toBe(0);
+    expect(runtimeMetrics.writeCounter).toHaveBeenCalledWith(
+      "track_algo_market_liveness_refresh_total",
+      1,
+      JSON.stringify({ outcome: "superseded" }),
+    );
+    expect(runtimeMetrics.writeCounter).not.toHaveBeenCalledWith(
+      "track_algo_market_cache_hydrated_total",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(
+      (bus.publish as ReturnType<typeof vi.fn>).mock.calls.some(
+        ([event]) => event === "SignalProduced",
+      ),
+    ).toBe(false);
+
+    await emitHeartbeat();
+    expect(getMarket).toHaveBeenCalledTimes(2);
+    expect((mod as any).marketCache.get(tokenId)).toMatchObject({
+      bestBid: newer.bestBid,
+      bestAsk: newer.bestAsk,
+      minOrderSize: newer.minOrderSize,
+      snapshotTs: newer.snapshotTs,
+      acceptingOrders: true,
+      enableOrderBook: true,
+    });
+    await mod.stop();
+  });
+
+  it.each(["inactive", "removed", "live", "mismatch"] as const)(
+    "does not resurrect or overwrite a newer %s market after delayed heartbeat REST",
+    async (scenario) => {
+      const tokenId = `heartbeat-${scenario}-race`;
+      const position = makeOpenPosition(tokenId);
+      let release!: (value: ReturnType<typeof liveClobMarket>) => void;
+      const rest = new Promise<ReturnType<typeof liveClobMarket>>((resolve) => (release = resolve));
+      const mod = buildModule({
+        positionRepo: {
+          findOpen: vi.fn(() => [position]),
+          findByTokenId: vi.fn(() => position),
+        } as unknown as import("@krabs/domain").PositionRepository,
+        marketLivenessReader: { getMarket: vi.fn(() => rest) },
+      } as any);
+      await mod.start();
+      const market = {
+        ...makeMarket(tokenId, null, 0.2),
+        acceptingOrders: false,
+        enableOrderBook: false,
+      };
+      const pending = (bus as any).emit("MarketSnapshotHeartbeat", {
+        markets: [market],
+        timestamp: Date.now(),
+        reason: "full_lifetime_active_position",
+        source: "market-data",
+      });
+      await vi.waitFor(() =>
+        expect((mod as any).deps.marketLivenessReader.getMarket).toHaveBeenCalledOnce(),
+      );
+      const newer = {
+        ...market,
+        active: scenario !== "inactive",
+        acceptingOrders: scenario === "live",
+        enableOrderBook: scenario === "live",
+        bestBid: 0.11,
+        bestAsk: 0.13,
+      };
+      if (scenario === "removed") {
+        await (bus as any).emit("TrackedMarketsChanged", {
+          addedTokenIds: [],
+          removedTokenIds: [market.tokenId],
+          timestamp: Date.now(),
+        });
+      } else if (scenario !== "mismatch") {
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [newer],
+          timestamp: Date.now(),
+        });
+      }
+      release(liveClobMarket(scenario === "mismatch" ? "other-token" : tokenId));
+      await pending;
+
+      if (scenario === "live") expect((mod as any).marketCache.get(tokenId)).toBe(newer);
+      else expect((mod as any).marketCache.has(tokenId)).toBe(false);
+      await mod.stop();
+    },
+  );
+
   it("keeps cache-present, inactive, closed, dust, and flat heartbeats fully inert", async () => {
     vi.useFakeTimers();
     try {

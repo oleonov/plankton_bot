@@ -21,6 +21,7 @@ function createFakeDb(
   },
 ): Database.Database {
   const lastMarketDataIso = new Date().toISOString();
+  const reconciliationRanAt = new Date().toISOString();
 
   return {
     prepare(sql: string): FakeStatement {
@@ -42,7 +43,11 @@ function createFakeDb(
             return { run_id: "run-1", mode: "simulation" };
           }
           if (sql.includes("metric_name = 'runtime_paused'")) return undefined;
-          if (sql.includes("metric_name = 'last_reconciliation'")) return undefined;
+          if (sql.includes("metric_name = 'last_reconciliation'")) {
+            return runtimeMetrics.last_reconciliation
+              ? { value: 1, ts: reconciliationRanAt }
+              : undefined;
+          }
           if (sql.includes("metric_name = 'market_data_last_update'")) {
             return { ts: lastMarketDataIso };
           }
@@ -62,7 +67,8 @@ function createFakeDb(
             if (options?.driftTableMissing) {
               throw new Error("no such table: position_drifts");
             }
-            return { cnt: options?.openDriftCount ?? 0 };
+            const count = options?.openDriftCount ?? 0;
+            return { cnt: count, n: count };
           }
           if (sql.includes("metric_name = 'market_data_poll_progress'")) return undefined;
           if (sql.includes("SUM(realized_pnl)")) return { total: 0 };
@@ -81,9 +87,22 @@ function createFakeDb(
 
           throw new Error(`Unhandled fake DB get() query: ${sql}`);
         },
-        all: () => {
+        all: (capturedAt?: unknown) => {
           if (sql.includes("FROM runtime_metrics") && sql.includes("metric_name = 'infra_alert'")) {
             return [];
+          }
+          if (sql.includes("captured_at = ?") && sql.includes("metric_name IN")) {
+            if (capturedAt !== reconciliationRanAt) return [];
+            return [
+              "reconciliation_clean",
+              "reconciliation_unresolved_missing_on_exchange",
+              "reconciliation_skipped_unreliable",
+              "reconciliation_skipped_suspicious_empty",
+              "reconciliation_fills_skipped_unreliable",
+            ].flatMap((name) => {
+              const metric = runtimeMetrics[name];
+              return metric ? [{ name, value: Number(metric.value ?? 1) }] : [];
+            });
           }
           throw new Error(`Unhandled fake DB all() query: ${sql}`);
         },
@@ -238,12 +257,12 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
     });
   });
 
-  it("keeps a newer unresolved reconciliation metric visible without open position drift", () => {
+  it("reports unresolved evidence from the exact latest reconciliation run", () => {
     const snapshot = buildStatusSnapshot(
       createFakeDb(
         {
-          reconciliation_drift: {},
-          reconciliation_clean: {},
+          last_reconciliation: {},
+          reconciliation_unresolved_missing_on_exchange: { value: 1 },
         },
         { openDriftCount: 0 },
       ),
@@ -272,11 +291,11 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
     expect(snapshot.reconciliationDriftDetected).toBe(false);
   });
 
-  it("keeps open position drift visible after a newer clean metric", () => {
+  it("keeps open position drift visible with exact latest clean evidence", () => {
     const snapshot = buildStatusSnapshot(
       createFakeDb(
         {
-          reconciliation_drift: {},
+          last_reconciliation: {},
           reconciliation_clean: {},
         },
         {
@@ -291,17 +310,18 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
     expect(snapshot.reconciliationDriftDetected).toBe(true);
   });
 
-  it("falls back to metric chronology when the drift table is unavailable", () => {
+  it("reports unknown as no backward-compatible drift when the drift table is unavailable", () => {
     const snapshot = buildStatusSnapshot(
       createFakeDb(
         {
-          reconciliation_drift: {},
+          last_reconciliation: {},
+          reconciliation_clean: {},
         },
         { driftTableMissing: true },
       ),
       120_000,
     );
 
-    expect(snapshot.reconciliationDriftDetected).toBe(true);
+    expect(snapshot.reconciliationDriftDetected).toBe(false);
   });
 });

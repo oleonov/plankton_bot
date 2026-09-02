@@ -19,7 +19,8 @@ beforeEach(() => {
   ledger.exec(
     `CREATE TABLE runtime_metrics (
        id INTEGER PRIMARY KEY AUTOINCREMENT, metric_name TEXT NOT NULL,
-       value REAL NOT NULL, labels TEXT, captured_at TEXT NOT NULL)`,
+       value REAL NOT NULL, labels TEXT, captured_at TEXT NOT NULL);
+     CREATE TABLE position_drifts (status TEXT NOT NULL)`,
   );
 });
 afterEach(() => {
@@ -42,6 +43,17 @@ function seedMarket(atMs: number): void {
       "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('market_data_last_update', 1, NULL, ?)",
     )
     .run(new Date(atMs).toISOString());
+  const at = new Date(atMs).toISOString();
+  ledger
+    .prepare(
+      "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, NULL, ?)",
+    )
+    .run("last_reconciliation", at);
+  ledger
+    .prepare(
+      "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, NULL, ?)",
+    )
+    .run("reconciliation_clean", at);
 }
 function setPaused(paused: boolean): void {
   ctrl.db.prepare("UPDATE runtime_control_state SET paused = ? WHERE id = 1").run(paused ? 1 : 0);
@@ -110,6 +122,19 @@ describe("StatusHistorySampler — deploy warm-up / pause states", () => {
     expect(r.maint).toBe(60); // only the first (warm-up) tick was maintenance
     expect(r.crit).toBe(0);
     expect(r.sev).toBe("ok");
+  });
+
+  it("records unknown reconciliation evidence as a warning", () => {
+    const s = sampler();
+    s.tick(T);
+    seedHeartbeat(T + 30_000);
+    seedMarket(T + 30_000);
+    ledger.prepare("DELETE FROM runtime_metrics WHERE metric_name = 'reconciliation_clean'").run();
+    s.tick(T + 60_000);
+    const row = ctrl.db
+      .prepare("SELECT sev FROM status_history WHERE series = 'module:reconciliation'")
+      .get() as { sev: string };
+    expect(row.sev).toBe("warn");
   });
 
   it("records crit once the warm-up backstop is exceeded without readiness", () => {

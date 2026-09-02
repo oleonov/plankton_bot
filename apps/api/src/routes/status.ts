@@ -11,6 +11,7 @@ import {
   resolveLiveLiteFunderAddress,
 } from "../polymarket-portfolio.js";
 import type { PolymarketPositionPortfolio } from "../polymarket-portfolio.js";
+import { readReconciliationHealth } from "../system-health-snapshot.js";
 
 interface StatusOpts {
   db: Database.Database;
@@ -367,18 +368,6 @@ function readInfraAlerts(db: Database.Database): InfraAlertStatusItem[] {
   return [...deduped.values()];
 }
 
-function readOpenDriftCount(db: Database.Database): number | null {
-  try {
-    const row = db
-      .prepare("SELECT COUNT(*) AS cnt FROM position_drifts WHERE status = 'open'")
-      .get() as { cnt: number } | undefined;
-    return row?.cnt ?? 0;
-  } catch {
-    // Legacy/test DBs may not have the drift table yet.
-    return null;
-  }
-}
-
 function readActiveMarketCount(db: Database.Database): number {
   try {
     const row = db
@@ -544,23 +533,11 @@ export function buildStatusSnapshot(
           .get() as { labels: string } | undefined)
       : undefined;
 
-  // Reconciliation drift: current-state (set on drift, reset on clean)
-  const lastDrift = db
-    .prepare(
-      "SELECT captured_at FROM runtime_metrics WHERE metric_name = 'reconciliation_drift' ORDER BY captured_at DESC LIMIT 1",
-    )
-    .get() as { captured_at: string } | undefined;
-  const lastCleanRecon = db
-    .prepare(
-      "SELECT captured_at FROM runtime_metrics WHERE metric_name = 'reconciliation_clean' ORDER BY captured_at DESC LIMIT 1",
-    )
-    .get() as { captured_at: string } | undefined;
-  const openDriftCount = readOpenDriftCount(db);
-  const unresolvedMetricDrift = lastDrift
-    ? !lastCleanRecon || new Date(lastDrift.captured_at) > new Date(lastCleanRecon.captured_at)
-    : false;
+  const reconciliationKind = readReconciliationHealth(db, Date.now()).kind;
   const reconciliationDriftDetected =
-    openDriftCount === null ? unresolvedMetricDrift : openDriftCount > 0 || unresolvedMetricDrift;
+    reconciliationKind === "position_drift" ||
+    reconciliationKind === "unresolved_missing" ||
+    reconciliationKind === "other_drift";
 
   const paused = pausedMetric?.value === 1;
 

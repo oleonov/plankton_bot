@@ -124,6 +124,7 @@ export class StatusHistorySampler {
         db,
         this.opts.controlDb,
         this.opts.marketDataStaleThresholdMs,
+        nowMs,
       );
 
       const writes = this.buildWrites(nowMs, elapsedSecs, snapshot);
@@ -172,7 +173,7 @@ export class StatusHistorySampler {
     const { uptime, modules } = computeModuleSeverities({
       runtimeAlive: true,
       marketDataStale: marketStale,
-      reconDrift: snapshot.reconDrift,
+      reconciliation: snapshot.reconciliation,
       breakerOpen: snapshot.breakerOpen,
       paused: false,
     });

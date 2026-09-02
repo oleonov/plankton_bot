@@ -201,6 +201,11 @@ interface PendingEntry {
   orderId: string | null;
 }
 
+interface HeartbeatLivenessLease {
+  readonly epoch: number;
+  superseded: boolean;
+}
+
 type TokenEvalResult = {
   type: "signal";
   signal: import("@krabs/domain").Signal;
@@ -1064,7 +1069,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly plannerRollup: PlannerSuppressionRollup;
   private started = false;
   private lifecycleEpoch = 0;
-  private readonly heartbeatLivenessFetches = new Map<string, number>();
+  private readonly heartbeatLivenessFetches = new Map<string, HeartbeatLivenessLease>();
   // Skip-on-overlap guard for evaluateTokens. The same pass can be triggered
   // from `setInterval(sweep)` and from `handleMarketUpdate`/`handleNormalizedMarketUpdated`
   // back-to-back within one tick. Without this gate, market_wide prefetch fan-out
@@ -1183,6 +1188,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   async stop(): Promise<void> {
     this.lifecycleEpoch++;
+    for (const lease of this.heartbeatLivenessFetches.values()) lease.superseded = true;
     this.heartbeatLivenessFetches.clear();
     if (this.sweepHandle) {
       clearInterval(this.sweepHandle);
@@ -1325,6 +1331,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
     for (const market of payload.markets) {
       const tokenIdStr = String(market.tokenId);
+      this.supersedeHeartbeatLiveness(tokenIdStr);
       if (!market.active || isKnownMinOrderSize(market.minOrderSize)) {
         this.releaseMinOrderSizeHydration(tokenIdStr);
       }
@@ -1365,68 +1372,96 @@ export class AlgoDecisionModule implements RuntimeModule {
     let hydrated = false;
     for (const market of payload.markets) {
       if (epoch !== this.lifecycleEpoch) return;
-      const resolved = await this.resolveHeartbeatMarket(market, epoch);
-      if (epoch !== this.lifecycleEpoch) return;
-      if (!resolved) continue;
-      const tokenId = String(resolved.tokenId);
-      this.marketCache.set(tokenId, resolved);
+      hydrated = (await this.hydrateHeartbeatMarket(market, epoch)) || hydrated;
+    }
+    if (epoch === this.lifecycleEpoch && hydrated) this.scheduleDirtyEvaluation();
+  }
+
+  private async hydrateHeartbeatMarket(market: NormalizedMarket, epoch: number): Promise<boolean> {
+    const tokenId = String(market.tokenId);
+    if (epoch !== this.lifecycleEpoch || !market.active) return false;
+    const cached = this.marketCache.get(tokenId);
+    if (cached?.acceptingOrders && cached.enableOrderBook) return false;
+    if (!this.hasCurrentHeartbeatPosition(market)) return false;
+    const candidate = cached ?? market;
+    const reader = this.deps.marketLivenessReader;
+    if (candidate.acceptingOrders && candidate.enableOrderBook) return false;
+    if (!reader) return false;
+    const existing = this.heartbeatLivenessFetches.get(tokenId);
+    if (existing && !existing.superseded) return false;
+
+    const lease: HeartbeatLivenessLease = { epoch, superseded: false };
+    this.heartbeatLivenessFetches.set(tokenId, lease);
+    try {
+      const current = await reader.getMarket(String(market.conditionId));
+      if (epoch !== this.lifecycleEpoch) return false;
+      if (lease.superseded) {
+        const latest = this.marketCache.get(tokenId);
+        if (!this.sameHeartbeatMarket(latest, market) || !latest.active) {
+          this.recordHeartbeatLivenessOutcome("superseded");
+          return false;
+        }
+        if (latest.acceptingOrders && latest.enableOrderBook) return false;
+        this.recordHeartbeatLivenessOutcome("superseded");
+        return false;
+      }
+      if (!this.hasCurrentHeartbeatPosition(candidate)) return false;
+      const outcome = classifyHeartbeatLivenessProof(candidate, current);
+      this.recordHeartbeatLivenessOutcome(outcome);
+      if (outcome !== "live") return false;
+      this.marketCache.set(tokenId, {
+        ...candidate,
+        acceptingOrders: true,
+        enableOrderBook: true,
+      });
       this.deps.runtimeMetrics?.writeCounter(
         "track_algo_market_cache_hydrated_total",
         1,
         JSON.stringify({ source: "full_lifetime_heartbeat" }),
       );
-      this.markDirty(resolved.tokenId);
-      hydrated = true;
-    }
-    if (epoch === this.lifecycleEpoch && hydrated) this.scheduleDirtyEvaluation();
-  }
-
-  private async resolveHeartbeatMarket(
-    market: NormalizedMarket,
-    epoch: number,
-  ): Promise<NormalizedMarket | null> {
-    const tokenId = String(market.tokenId);
-    if (epoch !== this.lifecycleEpoch) return null;
-    if (!market.active) return null;
-    const cached = this.marketCache.get(tokenId);
-    if (cached?.acceptingOrders && cached.enableOrderBook) return null;
-    if (!isOpenPosition(this.deps.positionRepo?.findByTokenId(market.tokenId))) return null;
-    const candidate = cached ?? market;
-    const reader = this.deps.marketLivenessReader;
-    if (candidate.acceptingOrders && candidate.enableOrderBook) return candidate;
-    if (!reader) return null;
-    if (this.heartbeatLivenessFetches.has(tokenId)) return null;
-
-    this.heartbeatLivenessFetches.set(tokenId, epoch);
-    try {
-      const current = await reader.getMarket(String(market.conditionId));
-      if (epoch !== this.lifecycleEpoch) return null;
-      const latest = this.marketCache.get(tokenId);
-      if (latest?.acceptingOrders && latest.enableOrderBook) return null;
-      if (!isOpenPosition(this.deps.positionRepo?.findByTokenId(market.tokenId))) return null;
-      const outcome = classifyHeartbeatLivenessProof(candidate, current);
-      this.deps.runtimeMetrics?.writeCounter(
-        "track_algo_market_liveness_refresh_total",
-        1,
-        JSON.stringify({ outcome }),
-      );
-      return outcome === "live"
-        ? { ...candidate, acceptingOrders: true, enableOrderBook: true }
-        : null;
+      this.markDirty(candidate.tokenId);
+      return true;
     } catch {
       if (epoch === this.lifecycleEpoch) {
-        this.deps.runtimeMetrics?.writeCounter(
-          "track_algo_market_liveness_refresh_total",
-          1,
-          JSON.stringify({ outcome: "unavailable" }),
-        );
+        this.recordHeartbeatLivenessOutcome("unavailable");
       }
-      return null;
+      return false;
     } finally {
-      if (this.heartbeatLivenessFetches.get(tokenId) === epoch) {
+      if (this.heartbeatLivenessFetches.get(tokenId) === lease) {
         this.heartbeatLivenessFetches.delete(tokenId);
       }
     }
+  }
+
+  private supersedeHeartbeatLiveness(tokenId: string): void {
+    const lease = this.heartbeatLivenessFetches.get(tokenId);
+    if (lease) lease.superseded = true;
+  }
+
+  private sameHeartbeatMarket(
+    candidate: NormalizedMarket | undefined,
+    expected: NormalizedMarket,
+  ): candidate is NormalizedMarket {
+    return (
+      candidate?.tokenId === expected.tokenId && candidate.conditionId === expected.conditionId
+    );
+  }
+
+  private hasCurrentHeartbeatPosition(market: NormalizedMarket): boolean {
+    const position = this.deps.positionRepo?.findByTokenId(market.tokenId);
+    return (
+      isOpenPosition(position) &&
+      position.tokenId === market.tokenId &&
+      position.conditionId === market.conditionId
+    );
+  }
+
+  private recordHeartbeatLivenessOutcome(outcome: string): void {
+    this.deps.runtimeMetrics?.writeCounter(
+      "track_algo_market_liveness_refresh_total",
+      1,
+      JSON.stringify({ outcome }),
+    );
   }
 
   private async handleTrackedMarketsChanged(
@@ -1436,6 +1471,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     // delivery, so marketCache would retain them forever. Evict on scanner churn.
     for (const tokenId of payload.removedTokenIds) {
       const tokenIdStr = String(tokenId);
+      this.supersedeHeartbeatLiveness(tokenIdStr);
       this.marketCache.delete(tokenIdStr);
       this.prevMidPrices.delete(tokenIdStr);
       const authoritativePosition = this.deps.positionRepo?.findByTokenId(tokenId) ?? null;

@@ -110,6 +110,91 @@ export function countOpenDrifts(db: Database.Database): number {
   }, 0);
 }
 
+export type ReconciliationHealthKind =
+  | "ok"
+  | "position_drift"
+  | "unresolved_missing"
+  | "other_drift"
+  | "unknown";
+
+export interface ReconciliationHealth {
+  kind: ReconciliationHealthKind;
+  detail: string;
+}
+
+const RECONCILIATION_STALE_MS = 90_000;
+const RECONCILIATION_MARKERS = [
+  "reconciliation_clean",
+  "reconciliation_unresolved_missing_on_exchange",
+  "reconciliation_skipped_unreliable",
+  "reconciliation_skipped_suspicious_empty",
+  "reconciliation_fills_skipped_unreliable",
+] as const;
+
+export function readReconciliationHealth(
+  db: Database.Database,
+  nowMs: number,
+): ReconciliationHealth {
+  const unknown = (detail: string): ReconciliationHealth => ({ kind: "unknown", detail });
+  try {
+    const latest = db
+      .prepare(
+        "SELECT value, captured_at AS ts FROM runtime_metrics WHERE metric_name = 'last_reconciliation' ORDER BY captured_at DESC, id DESC LIMIT 1",
+      )
+      .get() as { value?: number; ts?: string } | undefined;
+    if (latest?.value !== 1 || typeof latest.ts !== "string") {
+      return unknown("reconciliation evidence missing");
+    }
+    const ranAtMs = parseDbTimestampMs(latest.ts);
+    if (!Number.isFinite(ranAtMs) || nowMs < ranAtMs || nowMs - ranAtMs > RECONCILIATION_STALE_MS) {
+      return unknown("reconciliation evidence stale");
+    }
+    const drift = db
+      .prepare("SELECT COUNT(*) AS n FROM position_drifts WHERE status = 'open'")
+      .get() as { n?: number };
+    if (!Number.isInteger(drift.n) || (drift.n ?? -1) < 0) {
+      return unknown("reconciliation drift evidence malformed");
+    }
+    if (drift.n! > 0) return { kind: "position_drift", detail: "position drift detected" };
+
+    const rows = db
+      .prepare(
+        `SELECT metric_name AS name, value FROM runtime_metrics
+          WHERE captured_at = ? AND metric_name IN (${RECONCILIATION_MARKERS.map(() => "?").join(",")})`,
+      )
+      .all(latest.ts, ...RECONCILIATION_MARKERS) as Array<{ name: string; value: number }>;
+    const values = new Map<string, number>(RECONCILIATION_MARKERS.map((name) => [name, 0]));
+    for (const row of rows) {
+      if (!values.has(row.name) || !Number.isFinite(row.value) || row.value < 0) {
+        return unknown("reconciliation marker malformed");
+      }
+      values.set(row.name, values.get(row.name)! + row.value);
+    }
+    const clean = values.get("reconciliation_clean")!;
+    const unresolved = values.get("reconciliation_unresolved_missing_on_exchange")!;
+    const skipped = RECONCILIATION_MARKERS.slice(2).reduce(
+      (sum, name) => sum + values.get(name)!,
+      0,
+    );
+    if ((clean !== 0 && clean !== 1) || (clean === 1 && unresolved + skipped > 0)) {
+      return unknown("reconciliation markers contradictory");
+    }
+    if (unresolved > 0) {
+      return { kind: "unresolved_missing", detail: "unresolved exchange orders" };
+    }
+    if (skipped > 0) return unknown("reconciliation snapshot unreliable");
+    return clean === 1
+      ? { kind: "ok", detail: "clean" }
+      : { kind: "other_drift", detail: "reconciliation not clean" };
+  } catch {
+    return unknown("reconciliation evidence unavailable");
+  }
+}
+
+function reconciliationDrift(kind: ReconciliationHealthKind): boolean {
+  return kind === "position_drift" || kind === "unresolved_missing" || kind === "other_drift";
+}
+
 // Runtime liveness backstop for the live view: a heartbeat older than this counts
 // as "not alive". Should be ~2× the runtime heartbeat interval; the sampler can
 // use a stricter/looser window for its warm-up logic.
@@ -164,7 +249,7 @@ export interface ModuleSeverity {
 export interface ModuleHealthInputs {
   runtimeAlive: boolean;
   marketDataStale: boolean | null;
-  reconDrift: boolean;
+  reconciliation: ReconciliationHealth;
   breakerOpen: boolean;
   paused: boolean;
 }
@@ -185,6 +270,12 @@ export function computeModuleSeverities(inp: ModuleHealthInputs): {
     inp.marketDataStale === true ? "crit" : inp.marketDataStale === false ? live : "warn";
   const mdDetail =
     inp.marketDataStale === true ? "STALE" : inp.marketDataStale === false ? "fresh" : "unknown";
+  const reconSev: Sev =
+    inp.reconciliation.kind === "position_drift"
+      ? "crit"
+      : inp.reconciliation.kind === "ok"
+        ? live
+        : "warn";
 
   const modules: ModuleSeverity[] = [
     {
@@ -210,8 +301,8 @@ export function computeModuleSeverities(inp: ModuleHealthInputs): {
     {
       series: "module:reconciliation",
       nm: "reconciliation",
-      s: inp.reconDrift ? "crit" : live,
-      detail: inp.reconDrift ? "drift detected" : "no drift",
+      s: reconSev,
+      detail: inp.reconciliation.detail,
     },
     { series: "module:redeem", nm: "redeem", s: live, detail: "idle" },
     { series: "module:manager_api", nm: "manager / API", s: "ok", detail: "responding" },
@@ -228,6 +319,7 @@ export interface SystemHealthSnapshot {
   runtimeAlive: boolean;
   marketDataStale: boolean | null;
   reconDrift: boolean;
+  reconciliation: ReconciliationHealth;
   breakerOpen: boolean;
   uptime: Sev;
   modules: ModuleSeverity[];
@@ -245,6 +337,7 @@ export function collectSystemHealthSnapshot(
   ledgerDb: Database.Database,
   controlDb: Database.Database | undefined,
   staleThresholdMs: number,
+  nowMs = Date.now(),
 ): { snapshot: SystemHealthSnapshot; alerts1h: InfraAlertRow[]; alerts24h: InfraAlertRow[] } {
   const control = readControlState(controlDb);
   const paused = control.paused;
@@ -252,19 +345,20 @@ export function collectSystemHealthSnapshot(
   // Liveness from the heartbeat (robust), NOT runtime_status (stale-prone).
   const runtimeHeartbeatAtMs = readRuntimeHeartbeatAtMs(controlDb);
   const runtimeAlive =
-    runtimeHeartbeatAtMs !== null && Date.now() - runtimeHeartbeatAtMs < RUNTIME_HEARTBEAT_STALE_MS;
+    runtimeHeartbeatAtMs !== null && nowMs - runtimeHeartbeatAtMs < RUNTIME_HEARTBEAT_STALE_MS;
   const marketDataUpdatedAtMs = readMarketDataUpdatedAtMs(ledgerDb);
   const marketDataStale = readMarketDataStale(ledgerDb, staleThresholdMs);
 
   const alerts1h = readInfraAlerts(ledgerDb, 3_600_000);
   const alerts24h = readInfraAlerts(ledgerDb, 86_400_000);
   const breakerOpen = countOpenBreakers(alerts24h) > 0;
-  const reconDrift = countOpenDrifts(ledgerDb) > 0;
+  const reconciliation = readReconciliationHealth(ledgerDb, nowMs);
+  const reconDrift = reconciliationDrift(reconciliation.kind);
 
   const { uptime, modules } = computeModuleSeverities({
     runtimeAlive,
     marketDataStale,
-    reconDrift,
+    reconciliation,
     breakerOpen,
     paused,
   });
@@ -275,6 +369,7 @@ export function collectSystemHealthSnapshot(
       runtimeAlive,
       marketDataStale,
       reconDrift,
+      reconciliation,
       breakerOpen,
       uptime,
       modules,

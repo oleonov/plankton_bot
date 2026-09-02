@@ -37,6 +37,7 @@ export interface ExitCoverageCleanupCandidate {
   readonly positionId?: string | null | undefined;
   readonly size: number;
   readonly price: number;
+  readonly orderType?: string | undefined;
   readonly tickSize?: number | undefined;
   readonly postOnly?: boolean | undefined;
   readonly bounceRung?: unknown;
@@ -44,6 +45,12 @@ export interface ExitCoverageCleanupCandidate {
 }
 
 export type ExitCoverageCleanupKind = "bounce" | "s1";
+
+export function hasValidBounceCoverageTransport(
+  candidate: Pick<ExitCoverageCleanupCandidate, "orderType" | "postOnly">,
+): boolean {
+  return candidate.orderType === "GTC" && typeof candidate.postOnly === "boolean";
+}
 
 export type ExitCoverageFillReader = Partial<
   Pick<FillRepository, "findByOrderId" | "findByOrderIds">
@@ -94,7 +101,6 @@ export function matchesExactBounceSupplementalCoverage(input: {
     candidate.side !== "sell" ||
     candidate.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
     candidate.signalReason !== "repricing-exit" ||
-    candidate.postOnly === false ||
     candidate.positionId !== position.positionId ||
     candidate.tokenId !== position.tokenId ||
     candidate.conditionId !== position.conditionId ||
@@ -186,7 +192,7 @@ function matchesBounceLineage(
   const rung = bounceRungMetadata(order);
   if (
     !rung ||
-    order.postOnly !== true ||
+    !hasValidBounceCoverageTransport(order) ||
     rung.ladderId !== candidateRung.ladderId ||
     !sameNumber(rung.anchorPrice, candidateRung.anchorPrice as number) ||
     !sameNumber(rung.originalPositionSize, candidateRung.originalPositionSize as number)
