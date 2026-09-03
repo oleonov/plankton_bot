@@ -296,6 +296,37 @@ describe("MarketDataModule", () => {
     expect(received[0]![1]!.outcome).toBe("NO");
   });
 
+  it("reports a defensive current tracked snapshot on every refresh without changing the bus", async () => {
+    const snapshots: string[][] = [];
+    const observer = vi.fn((tokenIds: readonly string[]) => {
+      snapshots.push([...tokenIds]);
+      (tokenIds as string[]).splice(0);
+      throw new Error("observe-only failure");
+    });
+    const tracked = makeTrackedMarket();
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([tracked]);
+    const events: RuntimeEventMap["TrackedMarketsChanged"][] = [];
+    bus.subscribe("TrackedMarketsChanged", async (event) => {
+      events.push(event);
+    });
+    mod = new MarketDataModule({
+      gateway,
+      marketRepo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      trackedMarketObserver: observer,
+    });
+
+    await mod.poll();
+    await mod.poll();
+
+    expect(snapshots).toEqual([["tok-yes"], ["tok-yes"]]);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.activeTokenIds).toEqual([createTokenId("tok-yes")]);
+  });
+
   it("enriches REST pricing with public trade count once per condition", async () => {
     const yesMarket = makeTrackedMarket({
       tokenId: createTokenId("tok-yes"),

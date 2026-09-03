@@ -917,6 +917,12 @@ async function main(): Promise<void> {
       featureTtlMs: config.signatureFeatureTtlMs,
     },
     signatureTierMode: config.marketDataSignatureTierMode,
+    ...(planktonEntryShadowModule
+      ? {
+          trackedMarketObserver: (tokenIds: readonly string[], observedAt: number) =>
+            planktonEntryShadowModule.observeTrackedMarkets(tokenIds, observedAt),
+        }
+      : {}),
     recordSignatureCoverage: (inLiveTier, count, mode) => {
       runtimeMetrics.writeCounter(
         "entry_coverage_signature_total",

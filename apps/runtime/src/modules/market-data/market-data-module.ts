@@ -284,6 +284,8 @@ export interface MarketDataModuleDeps {
     count: number,
     mode: "shadow" | "live",
   ) => void;
+  /** Observe-only current tracked-set snapshot; failures must not affect pricing. */
+  trackedMarketObserver?: (activeTokenIds: readonly string[], observedAt: number) => void;
   /** Interval in ms between discovery-tier poll batches. Default: 300_000. */
   discoveryPollIntervalMs?: number;
   /** Number of discovery-tier tokens to poll per batch cycle. Default: 50. */
@@ -981,6 +983,7 @@ export class MarketDataModule implements RuntimeModule {
       }
 
       const trackedDiff = this.refreshTrackedMarkets(tracked);
+      this.observeTrackedMarkets(trackedDiff.active);
       this.lastTrackedDiffCounts = {
         added: trackedDiff.added.length,
         removed: trackedDiff.removed.length,
@@ -2022,6 +2025,14 @@ export class MarketDataModule implements RuntimeModule {
       activeTokenIds: diff.active.map((t) => createTokenId(t)),
       timestamp: Date.now(),
     });
+  }
+
+  private observeTrackedMarkets(activeTokenIds: readonly string[]): void {
+    try {
+      this.deps.trackedMarketObserver?.([...activeTokenIds], Date.now());
+    } catch (error) {
+      this.log.warn({ err: error }, "tracked-market shadow observer failed; pricing unaffected");
+    }
   }
 
   private countTrackedGammaFallbackMarkets(): {
