@@ -52,6 +52,7 @@ installClobErrorSanitizer(
 );
 
 import { randomUUID } from "node:crypto";
+import { dirname, resolve } from "node:path";
 import { monitorEventLoopDelay, performance, PerformanceObserver } from "node:perf_hooks";
 import process from "node:process";
 import { loadEnv } from "@krabs/config";
@@ -125,6 +126,7 @@ import { CommandPoller } from "./supervisor/command-poller.js";
 import { MarketDataModule } from "./modules/market-data/market-data-module.js";
 import { TrackCBookSignalsProvider } from "./modules/book-signals/book-signals-provider.js";
 import { MarketScannerModule } from "./modules/market-scanner/index.js";
+import { PlanktonEntryShadowModule } from "./modules/plankton-entry-shadow/plankton-entry-shadow-module.js";
 import { NormalizationModule } from "./modules/normalization/normalization-module.js";
 import { SoftRankingScoreModule } from "./modules/soft-ranking/soft-ranking-score-module.js";
 import { loadSoftRankingModel } from "./modules/soft-ranking/load-soft-ranking-model.js";
@@ -863,6 +865,17 @@ async function main(): Promise<void> {
     observer: buildTradeCountObserver({ log: tradeCountLog, metrics: runtimeMetrics }),
   });
   const trackCBookSignalsProvider = new TrackCBookSignalsProvider();
+  const planktonEntryShadowModule =
+    runtimeMode === "live-lite"
+      ? new PlanktonEntryShadowModule({
+          bus,
+          dbPath: resolve(dirname(ledgerDbPath), "plankton-entry-shadow.db"),
+          log,
+          scanIntervalMs: config.marketScanIntervalMs,
+          marketDataPollIntervalMs: config.marketDataPollIntervalMs,
+          strategyScanIntervalMs: config.strategyScanIntervalMs,
+        })
+      : null;
 
   const marketScannerModule = new MarketScannerModule({
     discoveryGateway,
@@ -878,6 +891,7 @@ async function main(): Promise<void> {
     positionRepo: repos.position,
     orderRepo: repos.order,
     runtimeControl,
+    ...(planktonEntryShadowModule ? { entryShadowObserver: planktonEntryShadowModule } : {}),
   });
 
   let selectedMarketCacheForEnrichment: MarketSelectionCache | null = null;
@@ -1684,6 +1698,7 @@ async function main(): Promise<void> {
     log,
     sweepIntervalMs: config.strategyScanIntervalMs,
     plannerSuppressionRollupWindowMs: config.plannerSuppressionRollupWindowMs,
+    ...(planktonEntryShadowModule ? { decisionShadowObserver: planktonEntryShadowModule } : {}),
   });
 
   const orderLifetimeModule = new OrderLifetimeModule({
@@ -2070,6 +2085,14 @@ async function main(): Promise<void> {
 
   const modules: Array<[string, import("@krabs/domain").RuntimeModule]> = [
     ["command-poller", commandPoller],
+    ...(planktonEntryShadowModule
+      ? [
+          ["plankton-entry-shadow", planktonEntryShadowModule] as [
+            string,
+            import("@krabs/domain").RuntimeModule,
+          ],
+        ]
+      : []),
     ["market-scanner", marketScannerModule],
     ["market-data", marketDataModule],
     ["normalization", normalizationModule],

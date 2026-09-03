@@ -97,6 +97,15 @@ export interface MarketScannerModuleDeps {
   runtimeControl?: RuntimeControl | undefined;
   /** Minimum age of a successful scan before a WS new-market hint may trigger a full rescan. */
   hintScanMinIntervalMs?: number | undefined;
+  entryShadowObserver?:
+    | {
+        isTarget(tokenId: string): boolean;
+        scanStarted(scanId: string, observedAt: number): void;
+        scannerEvaluation(scanId: string, facts: Record<string, unknown>): void;
+        scanCompleted(scanId: string, observedAt: number): void;
+        scanFailed(scanId: string, observedAt: number): void;
+      }
+    | undefined;
 }
 
 export interface MarketScanResult {
@@ -225,6 +234,7 @@ export class MarketScannerModule implements RuntimeModule {
   private readonly step2Breakdown: Step2BreakdownSnapshot = createEmptyStep2Breakdown();
   private readonly log: Logger;
   private readonly scanDegradeWarn: WarnThrottleState = createWarnThrottleState();
+  private shadowScanSeq = 0;
 
   constructor(private readonly deps: MarketScannerModuleDeps) {
     this.log = deps.log.child({ module: "market-scanner" });
@@ -376,6 +386,8 @@ export class MarketScannerModule implements RuntimeModule {
     }
     this.scanning = true;
     const startMs = Date.now();
+    const shadowScanId = `${startMs}:${++this.shadowScanSeq}`;
+    this.observeShadow((observer) => observer.scanStarted(shadowScanId, startMs));
     const scanStartedAtMs = performance.now();
     let gammaCallbackMs = 0;
     let evaluationMs = 0;
@@ -541,6 +553,25 @@ export class MarketScannerModule implements RuntimeModule {
             this.recordBuyGuardReject(tokenEval.rejectReason);
             const tokenId = createTokenId(token.tokenId);
             const tokenIdStr = String(tokenId);
+            this.observeShadow((observer) => {
+              if (!observer.isTarget(tokenIdStr)) return;
+              observer.scannerEvaluation(shadowScanId, {
+                tokenId: tokenIdStr,
+                conditionId: String(clobMarket.conditionId),
+                outcome: token.outcome,
+                outcomeIndex: token.outcomeIndex ?? null,
+                finalStatus: tokenEval.finalStatus,
+                selectionStatus: tokenEval.selectionStatus,
+                winningRuleId: tokenEval.winningRuleId,
+                rejectReason: tokenEval.rejectReason ?? null,
+                midPrice: token.midPrice ?? null,
+                liquidity: clobMarket.liquidity ?? null,
+                endDate: clobMarket.endDate ?? null,
+                hasActivePositionOrOrder: activeTokenIds.has(tokenIdStr),
+                marketSelectionPolicy: marketSelectionPolicy ?? null,
+                observedAt: nowMs,
+              });
+            });
             const isExecutionCriticalLeg = activeTokenIds.has(tokenIdStr);
             const shouldPersistToken =
               tokenEval.finalStatus === "INCLUDE" || isExecutionCriticalLeg;
@@ -763,8 +794,10 @@ export class MarketScannerModule implements RuntimeModule {
         },
         "scan cycle complete",
       );
+      this.observeShadow((observer) => observer.scanCompleted(shadowScanId, Date.now()));
       return result;
     } catch (err) {
+      this.observeShadow((observer) => observer.scanFailed(shadowScanId, Date.now()));
       if (!throwOnError && this.lastSuccessfulScanMs > 0 && isTransientNetworkError(err)) {
         this.logScanDegraded(err);
         return null;
@@ -897,6 +930,18 @@ export class MarketScannerModule implements RuntimeModule {
       "startup scan degraded — using existing catalog until next scanner cycle",
     );
     return result;
+  }
+
+  private observeShadow(
+    action: (observer: NonNullable<MarketScannerModuleDeps["entryShadowObserver"]>) => void,
+  ): void {
+    const observer = this.deps.entryShadowObserver;
+    if (!observer) return;
+    try {
+      action(observer);
+    } catch {
+      // Observe-only telemetry must never alter scanner behavior.
+    }
   }
 
   private countActiveTokens(): number {

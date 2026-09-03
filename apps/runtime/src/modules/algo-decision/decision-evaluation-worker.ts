@@ -10,7 +10,11 @@ parentPort.on("message", (message: unknown) => {
   if (!parsed) return;
   const { requestId, inputs } = parsed;
   try {
-    const results = inputs.map((input) => evaluateDecisionPlan(input));
+    const results = inputs.map((input, inputIndex) => ({
+      inputIndex,
+      tokenId: input.tokenId,
+      result: evaluateDecisionPlan(input),
+    }));
     parentPort!.postMessage({ requestId, results });
   } catch (err) {
     parentPort!.postMessage({

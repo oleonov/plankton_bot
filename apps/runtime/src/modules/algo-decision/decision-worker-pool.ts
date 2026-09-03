@@ -1,5 +1,6 @@
 import { cpus } from "node:os";
 import { Worker } from "node:worker_threads";
+import { isDeepStrictEqual } from "node:util";
 import type { Logger } from "../../logger.js";
 import {
   evaluateDecisionPlan,
@@ -11,6 +12,12 @@ type PendingRequest = {
   resolve: (results: DecisionPlanResult[]) => void;
   reject: (err: Error) => void;
   inputs: readonly DecisionPlanningInput[];
+};
+
+type DecisionEvaluation = {
+  readonly inputIndex: number;
+  readonly tokenId: DecisionPlanningInput["tokenId"];
+  readonly result: DecisionPlanResult;
 };
 
 type DecisionWorkerState = {
@@ -81,7 +88,7 @@ export class DecisionWorkerPool {
     if (!this.started) this.start();
     if (this.workers.length === 0) {
       this.localFallbacks += inputs.length;
-      return inputs.map((input) => evaluateDecisionPlan(input));
+      return inputs.map(evaluateDecisionPlan);
     }
     const chunks = chunk(inputs, this.batchSize);
     const results = await Promise.all(chunks.map((batch) => this.dispatchBatch(batch)));
@@ -92,7 +99,7 @@ export class DecisionWorkerPool {
     const worker = this.pickWorker();
     if (!worker) {
       this.localFallbacks += inputs.length;
-      return Promise.resolve(inputs.map((input) => evaluateDecisionPlan(input)));
+      return Promise.resolve(inputs.map(evaluateDecisionPlan));
     }
     const requestId = ++this.requestSeq;
     worker.inFlight++;
@@ -137,7 +144,7 @@ export class DecisionWorkerPool {
     if (!message || typeof message !== "object") return;
     const typed = message as {
       requestId?: number;
-      results?: DecisionPlanResult[];
+      results?: unknown;
       error?: string;
     };
     if (typeof typed.requestId !== "number") return;
@@ -147,21 +154,81 @@ export class DecisionWorkerPool {
     state.inFlight = Math.max(0, state.inFlight - 1);
     if (typed.error) {
       this.localFallbacks += pending.inputs.length;
-      pending.resolve(pending.inputs.map((input) => evaluateDecisionPlan(input)));
+      pending.resolve(pending.inputs.map(evaluateDecisionPlan));
       this.opts.log.warn({ err: typed.error }, "decision worker batch failed; used local fallback");
       return;
     }
-    pending.resolve(typed.results ?? []);
+    const evaluations = validateWorkerEvaluations(pending.inputs, typed.results);
+    if (evaluations) {
+      pending.resolve(evaluations.map(({ result }) => result));
+      return;
+    }
+    this.localFallbacks += pending.inputs.length;
+    pending.resolve(pending.inputs.map(evaluateDecisionPlan));
+    this.opts.log.warn("decision worker returned mismatched identities; used local fallback");
   }
 
   private rejectWorkerRequests(err: Error): void {
     for (const [requestId, pending] of this.pending) {
       this.pending.delete(requestId);
       this.localFallbacks += pending.inputs.length;
-      pending.resolve(pending.inputs.map((input) => evaluateDecisionPlan(input)));
+      pending.resolve(pending.inputs.map(evaluateDecisionPlan));
     }
     this.opts.log.warn({ err }, "decision worker requests recovered with local fallback");
   }
+}
+
+export function validateWorkerEvaluations(
+  inputs: readonly DecisionPlanningInput[],
+  value: unknown,
+): DecisionEvaluation[] | null {
+  try {
+    if (!Array.isArray(value) || value.length !== inputs.length) return null;
+    return value.every((item, index) => workerEvaluationMatches(item, inputs[index]!, index))
+      ? (value as DecisionEvaluation[])
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function workerEvaluationMatches(
+  item: unknown,
+  input: DecisionPlanningInput,
+  index: number,
+): boolean {
+  if (!isRecord(item) || item["inputIndex"] !== index) return false;
+  const token = String(item["tokenId"] ?? "");
+  if (token !== String(input.tokenId)) return false;
+  const result = item["result"];
+  if (!isRecord(result) || (result["type"] !== "none" && result["type"] !== "signal")) return false;
+  if (!validMetrics(result["metrics"])) return false;
+  const suppressions = result["suppressions"];
+  const sideEffects = result["sideEffects"];
+  if (!tokenRowsMatch(suppressions, token) || !tokenRowsMatch(sideEffects, token)) return false;
+  if (result["type"] === "none" && suppressions.length === 0 && sideEffects.length === 0)
+    return true;
+  return isDeepStrictEqual(result, evaluateDecisionPlan(input));
+}
+
+const METRIC_KEYS = `evalTotal suppressedMarketNotLive dropTriggerChecked dropTriggerPassed
+r23DipChecked r23DipFired r23NoHistory r23NoDip rejectNoDropSignal allowNoDropData
+livenessNotAcceptingOrders livenessOrderBookDisabled livenessBothFlags`.split(/\s+/);
+
+function validMetrics(value: unknown): boolean {
+  if (!isRecord(value) || !METRIC_KEYS.every((key) => Number.isFinite(value[key]))) return false;
+  const matches = value["wouldMatchRule"];
+  return isRecord(matches) && Object.values(matches).every((count) => Number.isFinite(count));
+}
+
+function tokenRowsMatch(value: unknown, token: string): value is Array<Record<string, unknown>> {
+  return (
+    Array.isArray(value) && value.every((row) => isRecord(row) && String(row["tokenId"]) === token)
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function chunk<T>(items: readonly T[], size: number): T[][] {

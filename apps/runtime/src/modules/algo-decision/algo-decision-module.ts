@@ -678,6 +678,24 @@ export interface AlgoDecisionModuleDeps {
     | undefined;
   log: Logger;
   sweepIntervalMs: number;
+  decisionShadowObserver?:
+    | {
+        observeAlgo(
+          tokenId: TokenId,
+          outcome:
+            | "paused"
+            | "overlap"
+            | "not_selected"
+            | "market_cache_missing"
+            | "unchanged_position"
+            | "active_market_cap"
+            | "rejection_cooldown"
+            | "preplanner_error"
+            | "planner_result",
+          payload: Record<string, unknown>,
+        ): void;
+      }
+    | undefined;
 }
 
 // ─── Module ──────────────────────────────────────────────────────────────────
@@ -1906,8 +1924,12 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async evaluateDirtyTokens(): Promise<void> {
-    if (this.isPaused()) return;
+    if (this.isPaused()) {
+      this.observeAlgoBatch(this.dirtyTokenIds, "paused");
+      return;
+    }
     if (this.evaluating) {
+      this.observeAlgoBatch(this.dirtyTokenIds, "overlap");
       this.scheduleDirtyEvaluation();
       return;
     }
@@ -1922,8 +1944,14 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   /** Evaluate a list of token IDs in one pass and emit CLOB trading signals. */
   async evaluateTokens(tokenIds: readonly TokenId[]): Promise<void> {
-    if (this.isPaused()) return;
-    if (this.evaluating) return;
+    if (this.isPaused()) {
+      this.observeAlgoBatch(tokenIds, "paused");
+      return;
+    }
+    if (this.evaluating) {
+      this.observeAlgoBatch(tokenIds, "overlap");
+      return;
+    }
     const startedAt = Date.now();
     this.evaluating = true;
     try {
@@ -1974,19 +2002,32 @@ export class AlgoDecisionModule implements RuntimeModule {
         if (this.isPaused()) return;
       }
       processed++;
-      const input = await this.createDecisionPlanningInput(
-        String(tokenId) as TokenId,
-        now,
-        executionPolicy,
-        postBuyCooldown,
-        activeMarketCapBackpressure,
-      );
+      let input: DecisionPlanningInput | null;
+      try {
+        input = await this.createDecisionPlanningInput(
+          String(tokenId) as TokenId,
+          now,
+          executionPolicy,
+          postBuyCooldown,
+          activeMarketCapBackpressure,
+        );
+      } catch (err) {
+        this.observeAlgo(tokenId, "preplanner_error", { executionPolicy });
+        throw err;
+      }
       if (input) inputs.push(input);
     }
 
-    const plans = await this.decisionWorkerPool.evaluate(inputs);
+    const evaluations = await this.decisionWorkerPool.evaluate(inputs);
     if (this.bounceTradingDisabledUntilMs <= now) this.bounceTradingDisabledUntilMs = 0;
-    for (const plan of plans) {
+    for (const [index, plan] of evaluations.entries()) {
+      this.observeAlgo(inputs[index]!.tokenId, "planner_result", {
+        executionPolicy,
+        type: plan.type,
+        reasons: plan.suppressions.map((row) => row.reasonCode),
+        decisionRuleId: plan.type === "signal" ? plan.signal.decisionRuleId : null,
+        side: plan.type === "signal" ? plan.signal.side : null,
+      });
       if (this.isPaused()) return;
       if (
         plan.type === "signal" &&
@@ -2186,8 +2227,13 @@ export class AlgoDecisionModule implements RuntimeModule {
       market.tradable === true &&
       isGateWhitelisted(executionPolicy?.gateEntry, market.conditionId) &&
       (this.deps.selectedMarketCache.isGateBypassEligible?.(tokenId) ?? false);
-    if (!legState && !selectedForEntry && !openPosition && !gateBypass) return null;
+    if (!legState && !selectedForEntry && !openPosition && !gateBypass) {
+      this.observeAlgo(tokenId, "not_selected", { executionPolicy });
+      return null;
+    }
+    if (!market) this.observeAlgo(tokenId, "market_cache_missing", { executionPolicy });
     if (this.shouldSkipProbeForUnchangedOpenPosition(tokenId, legState)) {
+      this.observeAlgo(tokenId, "unchanged_position", { executionPolicy });
       return null;
     }
     if (
@@ -2200,6 +2246,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       )
     ) {
       this.recordR23ProbeSkippedActiveMarketCapFull();
+      this.observeAlgo(tokenId, "active_market_cap", { executionPolicy });
       return null;
     }
     if (
@@ -2213,6 +2260,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       )
     ) {
       this.recordR23ProbeRejectionCooldownSuppressed(tokenId);
+      this.observeAlgo(tokenId, "rejection_cooldown", { executionPolicy });
       return null;
     }
 
@@ -2339,6 +2387,27 @@ export class AlgoDecisionModule implements RuntimeModule {
       activeTokenIds,
       capFull: guard.wouldExceedActiveMarketsCap(activeTokenIds.size, 1),
     };
+  }
+
+  private observeAlgoBatch(
+    tokenIds: Iterable<TokenId | string>,
+    outcome: "paused" | "overlap",
+  ): void {
+    for (const tokenId of tokenIds) this.observeAlgo(String(tokenId) as TokenId, outcome, {});
+  }
+
+  private observeAlgo(
+    tokenId: TokenId,
+    outcome: Parameters<
+      NonNullable<AlgoDecisionModuleDeps["decisionShadowObserver"]>["observeAlgo"]
+    >[1],
+    payload: Record<string, unknown>,
+  ): void {
+    try {
+      this.deps.decisionShadowObserver?.observeAlgo(tokenId, outcome, payload);
+    } catch {
+      // Observe-only telemetry must never alter decision behavior.
+    }
   }
 
   private shouldSkipFlatProbeForActiveMarketCap(

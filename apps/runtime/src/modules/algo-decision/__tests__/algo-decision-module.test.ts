@@ -640,6 +640,79 @@ describe("AlgoDecisionModule", () => {
     log = createMockLogger();
   });
 
+  it("reports every preplanner terminal outcome and planner result to the exact target observer", async () => {
+    const tokenId = "token-entry-shadow-outcomes";
+    const observeAlgo = vi.fn((_tokenId: unknown, _outcome: unknown, _payload: unknown) => {
+      throw new Error("shadow unavailable");
+    });
+    const position = makeOpenPosition(tokenId);
+    const positionRepo = {
+      findOpen: vi.fn(() => []),
+      findByTokenId: vi.fn(() => null),
+    };
+    let paused = true;
+    const mod = buildModule({
+      positionRepo: positionRepo as never,
+      decisionShadowObserver: { observeAlgo },
+      runtimeControl: { isPaused: () => paused },
+    } as never);
+    await mod.start();
+    await mod.evaluateTokens([createTokenId(tokenId)]);
+    paused = false;
+    (mod as any).evaluating = true;
+    await mod.evaluateTokens([createTokenId(tokenId)]);
+    (mod as any).evaluating = false;
+    const createInput = (cap: unknown = null) =>
+      (mod as any).createDecisionPlanningInput(
+        createTokenId(tokenId),
+        Date.now(),
+        DEFAULT_EXECUTION_POLICY,
+        null,
+        cap,
+      );
+
+    await createInput();
+    (selectedMarketCache.isEligible as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    await createInput();
+    (mod as any).marketCache.set(tokenId, makeMarket(tokenId, null, 0.3));
+    (mod as any).probeOpenPositionBlocks.set(
+      tokenId,
+      JSON.stringify([String(position.positionId), position.status]),
+    );
+    (positionRepo.findByTokenId as ReturnType<typeof vi.fn>).mockReturnValue(position);
+    await createInput();
+    (positionRepo.findByTokenId as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    (mod as any).positionCache.delete(tokenId);
+    await createInput({ capFull: true, activeTokenIds: new Set() });
+    (mod as any).r23ProbeNoOrderIdCooldownUntilMs.set(tokenId, Date.now() + 60_000);
+    await createInput();
+    (mod as any).r23ProbeNoOrderIdCooldownUntilMs.clear();
+    await mod.evaluateTokens([createTokenId(tokenId)]);
+    const failure = new Error("position read failed");
+    (positionRepo.findByTokenId as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw failure;
+    });
+    await expect(mod.evaluateTokens([createTokenId(tokenId)])).rejects.toBe(failure);
+
+    expect(observeAlgo.mock.calls.map((call) => call[1])).toEqual(
+      expect.arrayContaining([
+        "paused",
+        "overlap",
+        "not_selected",
+        "market_cache_missing",
+        "unchanged_position",
+        "active_market_cap",
+        "rejection_cooldown",
+        "preplanner_error",
+        "planner_result",
+      ]),
+    );
+    expect(observeAlgo.mock.calls.find((call) => call[1] === "not_selected")?.[2]).toMatchObject({
+      executionPolicy: DEFAULT_EXECUTION_POLICY,
+    });
+    await mod.stop();
+  });
+
   it("hydrates open DB positions into the evaluation working set on startup", async () => {
     const tokenId = "token-open-working-set";
     const position = makeOpenPosition(tokenId);

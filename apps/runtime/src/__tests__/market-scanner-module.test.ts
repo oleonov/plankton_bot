@@ -245,6 +245,7 @@ function buildModule(
     runtimeMetrics?: { writeCounter: ReturnType<typeof vi.fn> };
     runtimeControl?: { isPaused(): boolean };
     hintScanMinIntervalMs?: number;
+    entryShadowObserver?: MarketScannerModuleDeps["entryShadowObserver"];
   } = {},
 ): {
   mod: MarketScannerModule;
@@ -276,15 +277,92 @@ function buildModule(
     ...(opts.hintScanMinIntervalMs != null
       ? { hintScanMinIntervalMs: opts.hintScanMinIntervalMs }
       : {}),
+    ...(opts.entryShadowObserver ? { entryShadowObserver: opts.entryShadowObserver } : {}),
   };
 
   const mod = new MarketScannerModule(deps);
   return { mod, discoveryGateway, marketRepo, bus, positionRepo, orderRepo };
 }
 
+function shadowObserver(isTarget = vi.fn((_tokenId: string) => true)) {
+  return {
+    isTarget,
+    scanStarted: vi.fn(),
+    scannerEvaluation: vi.fn(),
+    scanCompleted: vi.fn(),
+    scanFailed: vi.fn(),
+  };
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("MarketScannerModule", () => {
+  it("publishes exact target evaluations only after a successful full scan", async () => {
+    const observer = shadowObserver(vi.fn((tokenId: string) => tokenId === "tok-yes"));
+    const policy: MarketSelectionPolicy = {
+      maxMidPrice: 0.4,
+      minLiquidity: 100,
+      shortLifetime: { enabled: false, thresholdHours: 1 },
+    };
+    const { mod, discoveryGateway } = buildModule({
+      entryShadowObserver: observer,
+      marketSelectionPolicy: () => policy,
+    });
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+      makeClobMarket(),
+    ]);
+
+    await mod.scan();
+
+    expect(observer.scanStarted).toHaveBeenCalledTimes(1);
+    expect(observer.scannerEvaluation).toHaveBeenCalledTimes(1);
+    expect(observer.scannerEvaluation).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        tokenId: "tok-yes",
+        conditionId: "cond-1",
+        outcome: "Yes",
+        outcomeIndex: 0,
+        finalStatus: "INCLUDE",
+        hasActivePositionOrOrder: false,
+        marketSelectionPolicy: policy,
+      }),
+    );
+    expect(observer.scanCompleted).toHaveBeenCalledTimes(1);
+    expect(observer.scanFailed).not.toHaveBeenCalled();
+  });
+
+  it("marks failed scans without committing their buffered shadow evidence", async () => {
+    const observer = shadowObserver();
+    const gateway = createMockDiscoveryGateway();
+    (gateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("partial"));
+    const { mod } = buildModule({ discoveryGateway: gateway, entryShadowObserver: observer });
+
+    await mod.scan();
+
+    expect(observer.scanStarted).toHaveBeenCalledTimes(1);
+    expect(observer.scanCompleted).not.toHaveBeenCalled();
+    expect(observer.scanFailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps scan results invariant when the observe-only hook throws", async () => {
+    const fail = () => {
+      throw new Error("shadow unavailable");
+    };
+    const { mod } = buildModule({
+      entryShadowObserver: {
+        isTarget: fail,
+        scanStarted: fail,
+        scannerEvaluation: fail,
+        scanCompleted: fail,
+        scanFailed: fail,
+      },
+    });
+
+    await expect(mod.scan()).resolves.toBeUndefined();
+    await expect(mod.healthCheck()).resolves.toMatchObject({ ok: true });
+  });
+
   // ── Engine integration ────────────────────────────────────────────────────
 
   it("persists market with matched_include when v5.11 hard filters pass", async () => {

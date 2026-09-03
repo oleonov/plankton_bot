@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTokenId, type NormalizedMarket } from "@krabs/domain";
-import { DecisionWorkerPool } from "../decision-worker-pool.js";
+import { DecisionWorkerPool, validateWorkerEvaluations } from "../decision-worker-pool.js";
+import { evaluateDecisionPlan } from "../decision-planner.js";
 import type { DecisionPlanningInput } from "../decision-planner.js";
 
 const log = {
@@ -106,5 +107,68 @@ describe("DecisionWorkerPool", () => {
       "second",
     ]);
     expect(pool.getStats().localFallbacks).toBe(2);
+  });
+
+  it("rejects missing, reordered, or cross-token worker results instead of blind zipping", () => {
+    const inputs = [input("first"), { ...input("second"), market: null }];
+    const valid = inputs.map((value, index) => ({
+      inputIndex: index,
+      tokenId: value.tokenId,
+      result: evaluateDecisionPlan(value),
+    }));
+
+    expect(validateWorkerEvaluations(inputs, valid)).toHaveLength(2);
+    expect(validateWorkerEvaluations(inputs, valid.slice(0, 1))).toBeNull();
+    expect(validateWorkerEvaluations(inputs, [valid[1], valid[0]])).toBeNull();
+    expect(
+      validateWorkerEvaluations(inputs, [
+        { ...valid[0], tokenId: createTokenId("wrong") },
+        valid[1],
+      ]),
+    ).toBeNull();
+  });
+
+  it("falls back locally without throwing for malformed worker result shapes", () => {
+    const pool = new DecisionWorkerPool({ workerCount: 0, log });
+    const source = input("malformed");
+    const metrics = evaluateDecisionPlan(source).metrics;
+    const signal = {
+      ...{ market: source.market, side: "buy" },
+      ...{ suggestedPrice: 0.1, suggestedSize: 10, suggestedSizeUsdc: 1 },
+      ...{ reason: "test", decisionRuleId: "rule", sizingRuleId: "size" },
+      ...{ logDraft: {}, emissionFacts: {}, triggerTelemetry: {} },
+    };
+    const signalResult = (value: unknown) => ({
+      type: "signal",
+      metrics,
+      suppressions: [],
+      sideEffects: [],
+      signal: value,
+    });
+    const malformed = [
+      { type: "none" },
+      { type: "none", metrics: [], suppressions: [], sideEffects: [] },
+      { type: "none", metrics, suppressions: {}, sideEffects: [] },
+      { type: "none", metrics, suppressions: [], sideEffects: null },
+      signalResult({ market: { tokenId: source.tokenId } }),
+      signalResult({ ...signal, market: { ...source.market!, eventMarketCount: "1" } }),
+      signalResult({ ...signal, positionId: {} }),
+      { ...evaluateDecisionPlan(source), sideEffects: [{ tokenId: source.tokenId }] },
+    ];
+    for (const result of malformed)
+      expect(
+        validateWorkerEvaluations([source], [{ inputIndex: 0, tokenId: source.tokenId, result }]),
+      ).toBeNull();
+
+    const resolved = vi.fn();
+    (pool as any).pending.set(1, { inputs: [source], resolve: resolved, reject: vi.fn() });
+    (pool as any).handleWorkerMessage(
+      { inFlight: 1 },
+      {
+        requestId: 1,
+        results: [{ inputIndex: 0, tokenId: source.tokenId, result: malformed.at(-1) }],
+      },
+    );
+    expect(resolved.mock.calls[0]![0][0].type).toBe("none");
   });
 });
