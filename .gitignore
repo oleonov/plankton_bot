@@ -23,6 +23,14 @@ research/data/*.db-shm
 research/data/docs/
 research_plankton/data/
 research_plankton/*.json
+!research_plankton/latest_exact_shared_cycles_2026-09-02.json
+!research_plankton/entry_selection_scalein_deep_research_2026-09-02.json
+!research_plankton/p1_ultra_cheap_exit_research_2026-09-02.json
+!research_plankton/p1_ultra_observer_support_2026-09-02.json
+!research_plankton/p1_later_add_allocation_2026-09-02.json
+!research_plankton/p2_post_harvest_rebuy_2026-09-02.json
+!research_plankton/p4_cancel_reprice_queue_2026-09-02.json
+!research_plankton/p4_current_prod_support_2026-09-02.json
 # Small result-table artifacts for the current delta (see line 83 comment: per CLAUDE.md,
 # research/* scripts, .md reports, and small result tables ARE committed — only large
 # regenerable dumps are ignored). Un-ignore just these two, not the whole *.json rule.
