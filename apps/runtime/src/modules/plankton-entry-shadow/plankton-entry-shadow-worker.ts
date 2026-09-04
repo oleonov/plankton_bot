@@ -259,12 +259,18 @@ export class ShadowStore {
     })();
   }
 
-  maintain(now: number, retentionMs: number): ShadowTarget[] {
+  maintain(
+    now: number,
+    retentionMs: number,
+    activeScanStarts: readonly number[] = [],
+  ): ShadowTarget[] {
     return this.db.transaction(() => {
       const expired = this.readExpiredTargets(now);
-      for (const target of expired) this.closeWithGaps(target);
+      const closed = expired.filter((target) =>
+        this.finalizeExpiredTarget(target, activeScanStarts),
+      );
       this.prune(now - retentionMs);
-      return expired;
+      return closed;
     })();
   }
 
@@ -501,6 +507,7 @@ export class ShadowStore {
         input.observedAt,
       ) as { outcome: string } | undefined;
     if (!target || target.outcome !== input.outcome) return;
+    if (input.stage !== "scanner" && this.hasStageGap(input, input.stage)) return;
     this.upsertObservation(input, this.compactPolicies(input.payload));
   }
 
@@ -550,26 +557,34 @@ export class ShadowStore {
     return rows.map(normalizeTarget);
   }
 
-  private closeWithGaps(target: ShadowTarget): void {
+  private finalizeExpiredTarget(
+    target: ShadowTarget,
+    activeScanStarts: readonly number[],
+  ): boolean {
+    const deferScanner = activeScanStarts.some(
+      (startedAt) => target.coverageStartedAt <= startedAt && startedAt < target.coverageEndsAt,
+    );
     for (const stage of V2_STAGES) {
-      if (this.hasStageEvidence(target, stage)) continue;
-      this.upsertObservation(
-        {
-          ...target,
-          stage,
-          result: "telemetry_gap",
-          observedAt: target.coverageEndsAt,
-          payload: { meaning: "best_effort_post_detection_observation_absent" },
-        },
-        { meaning: "best_effort_post_detection_observation_absent" },
-      );
+      if (stage === "scanner" && deferScanner) continue;
+      this.finalizeStageGap(target, stage);
     }
+    if (deferScanner) return false;
     this.db
       .prepare(
         `UPDATE shadow_targets_v2 SET closed_at=coverage_ends_at,close_reason='window_elapsed'
         WHERE condition_id=? AND token_id=? AND outcome_index=? AND generation=? AND closed_at IS NULL`,
       )
       .run(target.conditionId, target.tokenId, target.outcomeIndex, target.generation);
+    return true;
+  }
+
+  private finalizeStageGap(target: ShadowTarget, stage: string): void {
+    if (this.hasStageEvidence(target, stage) || this.hasStageGap(target, stage)) return;
+    const payload = { meaning: "best_effort_post_detection_observation_absent" };
+    this.upsertObservation(
+      { ...target, stage, result: "telemetry_gap", observedAt: target.coverageEndsAt, payload },
+      payload,
+    );
   }
 
   private hasStageEvidence(target: ShadowTarget, stage: string): boolean {
@@ -580,6 +595,21 @@ export class ShadowStore {
           `SELECT 1 FROM shadow_observations_v2 WHERE condition_id=? AND token_id=?
           AND outcome_index=? AND generation=? AND stage=? AND result!='telemetry_gap'${signalClause}
           LIMIT 1`,
+        )
+        .get(target.conditionId, target.tokenId, target.outcomeIndex, target.generation, stage) !=
+      null
+    );
+  }
+
+  private hasStageGap(
+    target: Pick<ShadowTarget, "conditionId" | "tokenId" | "outcomeIndex" | "generation">,
+    stage: string,
+  ): boolean {
+    return (
+      this.db
+        .prepare(
+          `SELECT 1 FROM shadow_observations_v2 WHERE condition_id=? AND token_id=?
+          AND outcome_index=? AND generation=? AND stage=? AND result='telemetry_gap' LIMIT 1`,
         )
         .get(target.conditionId, target.tokenId, target.outcomeIndex, target.generation, stage) !=
       null
@@ -711,7 +741,10 @@ type ShadowWorkerPort = {
 
 export class ShadowWorkerRuntime {
   private readonly store: ShadowStore;
-  private readonly scans = new Map<string, ShadowObservation[]>();
+  private readonly scans = new Map<
+    string,
+    { startedAt: number; observations: ShadowObservation[] }
+  >();
   private timer: ReturnType<typeof setInterval> | null = null;
   private controller: AbortController | null = null;
   private inFlight: Promise<void> | null = null;
@@ -728,7 +761,7 @@ export class ShadowWorkerRuntime {
   }
 
   start(): void {
-    this.emitClosed(this.store.maintain(Date.now(), this.config.retentionMs));
+    this.maintainTargets(Date.now());
     this.port.on("message", (message) => this.onMessage(message));
     this.port.postMessage({ type: "ready", targets: this.store.readTargets() });
     this.timer = setInterval(() => this.startTick(), this.config.pollMs);
@@ -759,7 +792,7 @@ export class ShadowWorkerRuntime {
 
   private async runTick(signal: AbortSignal): Promise<void> {
     if (!this.saturated) await this.pollSource(signal);
-    this.emitClosed(this.store.maintain(Date.now(), this.config.retentionMs));
+    this.maintainTargets(Date.now());
     if (!this.stopping) this.publishHealth();
   }
 
@@ -796,23 +829,43 @@ export class ShadowWorkerRuntime {
     if (!message || typeof message !== "object") return;
     const value = message as Record<string, unknown>;
     if (value["type"] === "shutdown") void this.shutdown();
-    else if (value["type"] === "scan_started") this.scans.set(String(value["scanId"]), []);
+    else if (value["type"] === "scan_started") this.startScan(value);
     else if (value["type"] === "scan_evaluation") this.addScanEvaluation(value);
-    else if (value["type"] === "scan_completed") this.completeScan(String(value["scanId"]));
-    else if (value["type"] === "scan_failed") this.scans.delete(String(value["scanId"]));
+    else if (value["type"] === "scan_completed") this.completeScan(value);
+    else if (value["type"] === "scan_failed") this.failScan(value);
     else if (value["type"] === "observation")
       this.store.recordObservation(value as unknown as ShadowObservation);
   }
 
   private addScanEvaluation(value: Record<string, unknown>): void {
     const scan = this.scans.get(String(value["scanId"]));
-    if (scan) scan.push(value["observation"] as ShadowObservation);
+    if (scan) scan.observations.push(value["observation"] as ShadowObservation);
   }
 
-  private completeScan(scanId: string): void {
+  private startScan(value: Record<string, unknown>): void {
+    const scanId = value["scanId"];
+    const startedAt = Number(value["observedAt"]);
+    if (typeof scanId !== "string" || scanId.length === 0) return;
+    if (!Number.isSafeInteger(startedAt) || startedAt <= 0) return;
+    this.scans.set(scanId, { startedAt, observations: [] });
+  }
+
+  private completeScan(value: Record<string, unknown>): void {
+    const scanId = String(value["scanId"]);
     const scan = this.scans.get(scanId);
-    if (scan) this.store.recordObservations(scan);
+    if (scan) this.store.recordObservations(scan.observations);
     this.scans.delete(scanId);
+    this.maintainTargets(messageTime(value));
+  }
+
+  private failScan(value: Record<string, unknown>): void {
+    this.scans.delete(String(value["scanId"]));
+    this.maintainTargets(messageTime(value));
+  }
+
+  private maintainTargets(now: number): void {
+    const activeStarts = [...this.scans.values()].map((scan) => scan.startedAt);
+    this.emitClosed(this.store.maintain(now, this.config.retentionMs, activeStarts));
   }
 
   private emitClosed(targets: readonly ShadowTarget[]): void {
@@ -832,6 +885,11 @@ export class ShadowWorkerRuntime {
 
 function coverageWindowMs(timeouts: ShadowWorkerConfig["timeouts"]): number {
   return 2 * timeouts.scannerMs + 2 * timeouts.trackingMs + 2 * timeouts.algoMs;
+}
+
+function messageTime(value: Record<string, unknown>): number {
+  const observedAt = Number(value["observedAt"]);
+  return Number.isSafeInteger(observedAt) && observedAt > 0 ? observedAt : Date.now();
 }
 
 function pollFailureStatus(error: unknown, signal: AbortSignal): Exclude<PollStatus, "ok"> {

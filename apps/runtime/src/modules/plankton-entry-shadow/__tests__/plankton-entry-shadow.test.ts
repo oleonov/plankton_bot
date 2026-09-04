@@ -332,6 +332,139 @@ describe("plankton entry shadow worker", () => {
     await runtime.shutdown();
   });
 
+  it("defers an expired target only for scan starts inside its half-open window", () => {
+    for (const [startedAt, shouldDefer] of [
+      [999, false],
+      [1_000, true],
+      [1_099, true],
+      [1_100, false],
+    ] as const) {
+      const store = new ShadowStore(":memory:");
+      store.commitActivity([buy(`tx-${startedAt}`, 1)], false, 1_000, 100);
+      const closed = store.maintain(1_100, 100_000, [startedAt]);
+      expect(closed.length === 0, `scan start ${startedAt}`).toBe(shouldDefer);
+      expect(store.readTargets().length === 1).toBe(shouldDefer);
+      store.close();
+    }
+  });
+
+  it("waits for every eligible scan and applies its atomic result before closing", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_050);
+    const dir = mkdtempSync(join(tmpdir(), "entry-shadow-scan-"));
+    const path = join(dir, "shadow.db");
+    const seed = new ShadowStore(path);
+    const [first] = seed.commitActivity([buy("tx-first", 1)], false, 1_000, 100);
+    seed.commitActivity([buy("tx-second", 1)], false, 1_005, 100);
+    seed.close();
+    const posted: unknown[] = [];
+    const port = new EventEmitter() as EventEmitter & { postMessage(value: unknown): void };
+    port.postMessage = (value) => posted.push(value);
+    const runtime = new ShadowWorkerRuntime(
+      {
+        dbPath: path,
+        wallet: "wallet",
+        pollMs: 50,
+        retentionMs: 100_000,
+        timeouts: { scannerMs: 10, trackingMs: 10, algoMs: 10 },
+      },
+      port,
+      vi.fn(async () => []),
+    );
+    runtime.start();
+    await vi.advanceTimersByTimeAsync(0);
+    port.emit("message", { type: "scan_started", scanId: "failed", observedAt: 1_050 });
+    port.emit("message", { type: "scan_started", scanId: "successful", observedAt: 1_060 });
+    port.emit("message", {
+      type: "scan_evaluation",
+      scanId: "successful",
+      observation: {
+        ...first!,
+        stage: "scanner",
+        result: "include",
+        observedAt: 1_060,
+        payload: {},
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    let check = new Database(path, { readonly: true });
+    expect(
+      check.prepare("SELECT COUNT(*) count FROM shadow_targets_v2 WHERE closed_at IS NULL").get(),
+    ).toEqual({ count: 2 });
+    expect(
+      check
+        .prepare("SELECT COUNT(*) count FROM shadow_observations_v2 WHERE stage='scanner'")
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      check
+        .prepare(
+          "SELECT COUNT(*) count FROM shadow_observations_v2 WHERE stage!='scanner' AND result='telemetry_gap'",
+        )
+        .get(),
+    ).toEqual({ count: 8 });
+    check.close();
+
+    port.emit("message", {
+      type: "observation",
+      ...first!,
+      stage: "normalized",
+      result: "active",
+      observedAt: 1_099,
+      payload: {},
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    port.emit("message", { type: "scan_completed", scanId: "successful", observedAt: 1_200 });
+    check = new Database(path, { readonly: true });
+    expect(
+      check.prepare("SELECT COUNT(*) count FROM shadow_targets_v2 WHERE closed_at IS NULL").get(),
+    ).toEqual({ count: 2 });
+    expect(
+      check
+        .prepare("SELECT COUNT(*) count FROM shadow_observations_v2 WHERE stage='scanner'")
+        .get(),
+    ).toEqual({ count: 1 });
+    check.close();
+    port.emit("message", { type: "scan_failed", scanId: "failed", observedAt: 1_300 });
+
+    check = new Database(path, { readonly: true });
+    expect(
+      check.prepare("SELECT COUNT(*) count FROM shadow_targets_v2 WHERE closed_at IS NULL").get(),
+    ).toEqual({ count: 0 });
+    expect(
+      check
+        .prepare(
+          "SELECT generation,result FROM shadow_observations_v2 WHERE stage='scanner' ORDER BY generation",
+        )
+        .all(),
+    ).toEqual([
+      { generation: 1, result: "include" },
+      { generation: 2, result: "telemetry_gap" },
+    ]);
+    expect(
+      check
+        .prepare(
+          "SELECT COUNT(*) count FROM shadow_observations_v2 WHERE stage='normalized' AND result='active'",
+        )
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      check
+        .prepare(
+          "SELECT MAX(seen_count) maxSeen FROM shadow_observations_v2 WHERE result='telemetry_gap'",
+        )
+        .get(),
+    ).toEqual({ maxSeen: 1 });
+    check.close();
+    expect(
+      posted.filter((value) => (value as { type?: string }).type === "target_closed"),
+    ).toHaveLength(2);
+    await runtime.shutdown();
+    vi.useRealTimers();
+    rmSync(dir, { recursive: true });
+  });
+
   it("fail-stops instead of skipping a timestamp saturated beyond the API offset cap", async () => {
     const fetchPage = vi.fn(async (_url: URL) =>
       Array.from({ length: 500 }, (_, index) =>
