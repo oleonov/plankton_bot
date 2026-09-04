@@ -89,6 +89,36 @@ interface AreaChartProps {
   hoverLabel?: string | null;
 }
 
+interface ChartMessageProps {
+  label: string;
+  loading?: boolean;
+  onRetry?: () => void;
+}
+
+function ChartMessage({ label, loading = false, onRetry }: ChartMessageProps) {
+  return (
+    <div data-testid="portfolio-chart-shell" style={{ position: "relative", minHeight: HEIGHT }}>
+      {loading && <div className="pnl-skeleton" aria-hidden="true" style={{ height: HEIGHT }} />}
+      <div
+        role={loading ? "status" : "alert"}
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 8,
+          color: "var(--text-dim)",
+        }}
+      >
+        {label}
+        {onRetry && <button onClick={onRetry}>Retry</button>}
+      </div>
+    </div>
+  );
+}
+
 function AreaChart({ points, onHover, hoverLabel }: AreaChartProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -310,8 +340,11 @@ export function PortfolioChart() {
   const [mode, setMode] = useState<ChartMode>("portfolio");
   const [hoveredPoint, setHoveredPoint] = useState<ChartPoint | null>(null);
 
-  const { data: portfolio } = usePortfolioSeries(interval);
-  const { data: pnlData } = usePnlSeries(INTERVAL_TO_DAYS[interval]);
+  const portfolioQuery = usePortfolioSeries(interval);
+  const pnlQuery = usePnlSeries(INTERVAL_TO_DAYS[interval]);
+  const activeQuery = mode === "portfolio" ? portfolioQuery : pnlQuery;
+  const portfolio = portfolioQuery.data;
+  const pnlData = pnlQuery.data;
 
   useEffect(() => {
     safeSetItem("portfolio-interval", interval);
@@ -332,13 +365,21 @@ export function PortfolioChart() {
   const displayPnl = hoveredPoint ? hoveredPoint.value : latestPnl;
   const hoverLabel = hoveredPoint ? hoveredPoint.label : null;
   const subtitle = INTERVAL_LABELS[interval];
+  const isBlocking =
+    activeQuery.isPending ||
+    activeQuery.isPlaceholderData ||
+    (activeQuery.isFetching && activeQuery.data == null);
+  const isHardError = activeQuery.isError && activeQuery.data == null && !isBlocking;
+  const isUpdating =
+    activeQuery.isFetching && activeQuery.data != null && !activeQuery.isPlaceholderData;
+  const hasRefreshError = activeQuery.isRefetchError && activeQuery.data != null;
 
   const handleHover = useCallback((point: ChartPoint | null) => {
     setHoveredPoint(point);
   }, []);
 
   return (
-    <div className="card">
+    <div className="card" data-testid="portfolio-chart-card" aria-busy={isBlocking || isUpdating}>
       {/* Header */}
       <div
         style={{
@@ -353,6 +394,7 @@ export function PortfolioChart() {
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
             <button
               data-testid="mode-portfolio"
+              aria-pressed={mode === "portfolio"}
               onClick={() => {
                 setMode("portfolio");
                 setHoveredPoint(null);
@@ -368,6 +410,7 @@ export function PortfolioChart() {
             </button>
             <button
               data-testid="mode-realized"
+              aria-pressed={mode === "realized"}
               onClick={() => {
                 setMode("realized");
                 setHoveredPoint(null);
@@ -382,21 +425,32 @@ export function PortfolioChart() {
               Realized
             </button>
           </div>
-          <div
-            data-testid="pnl-value"
-            style={{
-              fontSize: 28,
-              fontWeight: 700,
-              color: (displayPnl ?? 0) >= 0 ? "var(--green)" : "var(--red)",
-            }}
-          >
-            {(displayPnl ?? 0) >= 0 ? "+" : "-"}${Math.abs(displayPnl ?? 0).toFixed(2)}
+          <div style={{ minHeight: 34 }}>
+            {!isBlocking && !isHardError && (
+              <div
+                data-testid="pnl-value"
+                style={{
+                  fontSize: 28,
+                  fontWeight: 700,
+                  color: (displayPnl ?? 0) >= 0 ? "var(--green)" : "var(--red)",
+                }}
+              >
+                {(displayPnl ?? 0) >= 0 ? "+" : "-"}${Math.abs(displayPnl ?? 0).toFixed(2)}
+              </div>
+            )}
           </div>
           <div
             data-testid="chart-subtitle"
             style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 4 }}
           >
             {subtitle}
+            {isUpdating && <span role="status"> · Updating…</span>}
+            {hasRefreshError && (
+              <span role="alert">
+                {" · Update failed · "}
+                <button onClick={() => void activeQuery.refetch()}>Retry</button>
+              </span>
+            )}
           </div>
         </div>
 
@@ -406,6 +460,7 @@ export function PortfolioChart() {
             <button
               key={i}
               data-testid={`interval-${i}`}
+              aria-pressed={interval === i}
               onClick={() => {
                 setIntervalState(i);
                 setHoveredPoint(null);
@@ -425,7 +480,16 @@ export function PortfolioChart() {
       </div>
 
       {/* Chart */}
-      <AreaChart points={points} onHover={handleHover} hoverLabel={hoverLabel} />
+      {isBlocking ? (
+        <ChartMessage label={`Loading ${subtitle}…`} loading />
+      ) : isHardError ? (
+        <ChartMessage
+          label={`Couldn't load ${subtitle}`}
+          onRetry={() => void activeQuery.refetch()}
+        />
+      ) : (
+        <AreaChart points={points} onHover={handleHover} hoverLabel={hoverLabel} />
+      )}
     </div>
   );
 }

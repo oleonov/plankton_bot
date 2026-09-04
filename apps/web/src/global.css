@@ -1076,6 +1076,12 @@ button {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .pnl-skeleton {
+    animation: none;
+  }
+}
+
 @media (max-width: 1180px) {
   .pnl-summary {
     grid-template-columns: repeat(2, minmax(180px, 1fr));

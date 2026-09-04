@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { screen, fireEvent, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { delay, http, HttpResponse } from "msw";
 import { PortfolioChart } from "../../components/PortfolioChart.tsx";
 import { renderWithProviders } from "../../test/test-utils.tsx";
@@ -394,13 +395,13 @@ describe("PortfolioChart", () => {
     expect(screen.getByTestId("interval-1m")).toHaveStyle({ fontWeight: 700 });
   });
 
-  it("keeps the previous chart visible while switching intervals", async () => {
+  it("hides data from the previous interval during initial and cross-range loads", async () => {
     server.use(
       http.get("/api/v1/metrics/portfolio-series", async ({ request }) => {
         const url = new URL(request.url);
         const interval = url.searchParams.get("interval");
+        await delay(50);
         if (interval === "1w") {
-          await delay(100);
           return ok({
             ...mockPortfolioSeries,
             items: [
@@ -424,19 +425,111 @@ describe("PortfolioChart", () => {
 
     renderWithProviders(<PortfolioChart />);
 
+    expect(screen.getByTestId("portfolio-chart-card")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("status")).toHaveTextContent("Loading Past Day");
+    expect(screen.queryByTestId("pnl-value")).not.toBeInTheDocument();
+    expect(document.querySelector("svg")).not.toBeInTheDocument();
+
     await waitFor(() => {
       expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$5.42");
     });
 
     fireEvent.click(screen.getByTestId("interval-1w"));
 
-    expect(screen.queryByText("No data yet")).not.toBeInTheDocument();
-    expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$5.42");
+    expect(screen.getByTestId("interval-1w")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("chart-subtitle")).toHaveTextContent("Past Week");
+    expect(screen.getByRole("status")).toHaveTextContent("Loading Past Week");
+    expect(screen.queryByText("+$5.42")).not.toBeInTheDocument();
+    expect(document.querySelector("svg")).not.toBeInTheDocument();
 
     await waitFor(() => {
       expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$10.00");
       expect(screen.getByTestId("chart-subtitle")).toHaveTextContent("Past Week");
+      expect(screen.getByTestId("portfolio-chart-card")).toHaveAttribute("aria-busy", "false");
     });
+  });
+
+  it("shows a selected-range error without stale data and retries it", async () => {
+    let weekAttempts = 0;
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", ({ request }) => {
+        const interval = new URL(request.url).searchParams.get("interval");
+        if (interval === "1w" && weekAttempts++ === 0) {
+          return HttpResponse.json(
+            { ok: false, data: null, error: { message: "temporarily unavailable" } },
+            { status: 503 },
+          );
+        }
+        return ok({
+          ...mockPortfolioSeries,
+          portfolioPnl: interval === "1w" ? 10 : 5.42,
+          interval: interval ?? "1d",
+        });
+      }),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    renderWithProviders(<PortfolioChart />);
+    await screen.findByText("+$5.42");
+    fireEvent.click(screen.getByTestId("interval-1w"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load Past Week");
+    expect(screen.queryByText("+$5.42")).not.toBeInTheDocument();
+    expect(document.querySelector("svg")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("+$10.00")).toBeInTheDocument();
+  });
+
+  it("keeps current-range data visible during a same-key background refresh", async () => {
+    let attempts = 0;
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", async () => {
+        attempts += 1;
+        if (attempts > 1) await delay(80);
+        return ok(mockPortfolioSeries);
+      }),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <PortfolioChart />
+      </QueryClientProvider>,
+    );
+    await screen.findByText("+$5.42");
+
+    void queryClient.invalidateQueries({ queryKey: ["portfolio-series", "1d"] });
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Updating…");
+    expect(screen.getByText("+$5.42")).toBeInTheDocument();
+    expect(screen.getByTestId("portfolio-chart-card")).toHaveAttribute("aria-busy", "true");
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+  });
+
+  it("never paints a late response from an inactive interval", async () => {
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", async ({ request }) => {
+        const interval = new URL(request.url).searchParams.get("interval") ?? "1d";
+        if (interval === "1w") await delay(120);
+        if (interval === "1m") await delay(20);
+        const portfolioPnl = interval === "1w" ? 10 : interval === "1m" ? 30 : 5.42;
+        return ok({ ...mockPortfolioSeries, portfolioPnl, interval });
+      }),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    renderWithProviders(<PortfolioChart />);
+    await screen.findByText("+$5.42");
+    fireEvent.click(screen.getByTestId("interval-1w"));
+    fireEvent.click(screen.getByTestId("interval-1m"));
+
+    expect(await screen.findByText("+$30.00")).toBeInTheDocument();
+    await delay(130);
+    expect(screen.getByText("+$30.00")).toBeInTheDocument();
+    expect(screen.queryByText("+$10.00")).not.toBeInTheDocument();
+    expect(screen.getByTestId("interval-1m")).toHaveAttribute("aria-pressed", "true");
   });
 
   it("keeps a fixed chart shell height while data refetches", async () => {
