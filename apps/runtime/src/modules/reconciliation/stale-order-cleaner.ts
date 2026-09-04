@@ -50,6 +50,7 @@ import {
   shouldBlockRepriceChain,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import type { ExactNullStartupQuarantine } from "../execution/execution-module.js";
 import {
   resolveEntryBuyOrderTtlMs,
   resolveMakerMicroLiveFillDeadlineMs,
@@ -181,6 +182,10 @@ export interface StaleOrderCleanerDeps {
   marketRepo: MarketRepository;
   bus: EventBus;
   log: Logger;
+  exactNullStartupQuarantine?: Pick<
+    ExactNullStartupQuarantine,
+    "isExactNullStartupOrderQuarantined"
+  >;
   /**
    * ADR-015: exit-order TTL is read per-call so operator edits to
    * `execution_policy_json.exitOrderTtlMs` take effect without runtime
@@ -304,6 +309,9 @@ export async function cleanStaleEntryOrders(
   let trackARestingAddCancelRequested = 0;
 
   for (const order of entryBuys) {
+    if (deps.exactNullStartupQuarantine?.isExactNullStartupOrderQuarantined(order) === true) {
+      continue;
+    }
     const ordKey = String(order.orderId);
     const market = marketRepo.findByTokenId(order.tokenId);
     const ageMs = now - new Date(order.createdAt).getTime();

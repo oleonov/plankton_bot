@@ -143,9 +143,43 @@ describe("stale-order-cleaner — first-entry adaptive TTL (2026-07-19-first-ent
     expect(env.cancelled[0]?.command.orderId).toBe(order.orderId);
     expect(env.cancelled[0]?.command.reason).toBe("stale_entry_ttl");
   });
+
+  it("skips an exact startup quarantine before publishing while ordinary TTL stays active", async () => {
+    const quarantined = makeBuyOrder({
+      tokenId: TOKEN_R23,
+      createdAt: new Date(NOW - 13 * H).toISOString(),
+    });
+    const ordinary = makeBuyOrder({
+      tokenId: TOKEN_SCALE,
+      signalReason: SignalReason.ConfirmScale,
+      createdAt: new Date(NOW - 4 * H).toISOString(),
+    });
+    const env = makeEnv({
+      orders: [quarantined, ordinary],
+      markets: new Map([
+        [String(TOKEN_R23), makeMarket({ tokenId: TOKEN_R23, horizon: null })],
+        [String(TOKEN_SCALE), makeMarket({ tokenId: TOKEN_SCALE, horizon: "deadline" })],
+      ]),
+      exactNullStartupQuarantine: {
+        isExactNullStartupOrderQuarantined: (order) => order.orderId === quarantined.orderId,
+      },
+    });
+
+    const result = await env.run();
+    await env.bus.drain();
+
+    expect(result.staleTtlCancelled).toBe(1);
+    expect(env.cancelled.map(({ command }) => command.orderId)).toEqual([ordinary.orderId]);
+  });
 });
 
-function makeEnv(input: { orders: readonly Order[]; markets: ReadonlyMap<string, Market> }) {
+function makeEnv(input: {
+  orders: readonly Order[];
+  markets: ReadonlyMap<string, Market>;
+  exactNullStartupQuarantine?: {
+    isExactNullStartupOrderQuarantined: (order: Order) => boolean;
+  };
+}) {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(NOW));
 
@@ -169,6 +203,9 @@ function makeEnv(input: { orders: readonly Order[]; markets: ReadonlyMap<string,
           marketRepo,
           bus: bus as EventBus,
           log: silentLog,
+          ...(input.exactNullStartupQuarantine
+            ? { exactNullStartupQuarantine: input.exactNullStartupQuarantine }
+            : {}),
           // entryRepriceOnOutbid / exitRepriceOnDownprice / trackCExit intentionally left undefined
           // so only the TTL branch runs (per plan scope for this test).
         },

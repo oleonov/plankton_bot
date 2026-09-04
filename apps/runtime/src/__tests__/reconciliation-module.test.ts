@@ -1734,6 +1734,32 @@ describe("ReconciliationModule", () => {
       expect(drifts[0]!.severity).toBe("warn");
     });
 
+    it("keeps exact startup quarantine non-clean without generic drift events", async () => {
+      const drifts: unknown[] = [];
+      const writeLatest = vi.fn();
+      bus.subscribe("ReconciliationDriftDetected", async (event) => void drifts.push(event));
+      mod = buildModule({
+        runtimeMetrics: { writeEvent: vi.fn(), writeLatest },
+        exactNullStartupQuarantine: {
+          isExactNullStartupOrderQuarantined: vi.fn().mockReturnValue(false),
+          observeExactNullStartupRemoteState: vi.fn(),
+          getExactNullStartupQuarantineCount: vi.fn().mockReturnValue(1),
+        },
+      });
+
+      const result = await mod.runReconciliation();
+      await bus.drain();
+
+      expect(result.clean).toBe(false);
+      expect(drifts).toHaveLength(0);
+      expect(writeLatest).toHaveBeenCalledWith(
+        "reconciliation_acknowledged_external_state_unknown",
+        1,
+        null,
+        new Date(result.ranAt).toISOString(),
+      );
+    });
+
     it("warns twice before publishing critical drift for confirmed wallet sentinel mismatches", async () => {
       const closedPosition: Position = {
         positionId: createPositionId("pos-wallet-drift"),

@@ -543,6 +543,22 @@ export interface ExecutionModuleDeps {
   makerBuyFastCancel?: MakerBuyFastCancel | undefined;
 }
 
+export interface ExactNullStartupQuarantine {
+  isExactNullStartupOrderQuarantined(order: Order): boolean;
+  observeExactNullStartupRemoteState(order: Order, state: "absent" | "working"): Promise<void>;
+  getExactNullStartupQuarantineCount(): number;
+}
+
+interface ExactNullStartupQuarantineState {
+  readonly order: Order;
+  seedAttempted: boolean;
+  phase: "acknowledged" | "publishing" | "suppressed";
+  remoteState: "unknown" | "absent" | "working";
+  remoteVersion: number;
+  attemptedRemoteVersion: number;
+  permittedCommandId: string | null;
+}
+
 export class ExecutionModule implements RuntimeModule {
   private static readonly SELL_REPLACE_LOCK_TIMEOUT_MS = 2 * 60 * 1000;
   private static readonly SIZE_EPSILON_SHARES = 1e-9;
@@ -592,7 +608,6 @@ export class ExecutionModule implements RuntimeModule {
     {
       activePositionId: string | null;
       targets: Set<string /* orderId */>;
-      exactNullExpiredMakerTargets: Set<string /* orderId */>;
     }
   >();
   /**
@@ -662,6 +677,7 @@ export class ExecutionModule implements RuntimeModule {
   // Finding 5: per-target last cancel-retry timestamp — bounds the retry cadence so a
   // stuck token cannot cancel-storm.
   private readonly transitionCancelRetryAt = new Map<string, number>();
+  private readonly exactNullStartupQuarantine = new Map<string, ExactNullStartupQuarantineState>();
   // Finding 1 (round 3): a per-token guard so the barrier-close fire and the autonomous
   // timer can never place two deferred backstops for the same token concurrently.
   private readonly inFlightDeferredBackstop = new Set<string>();
@@ -935,6 +951,123 @@ export class ExecutionModule implements RuntimeModule {
       if (transition.targets.has(key)) return true;
     }
     return false;
+  }
+
+  acknowledgeStartupTransitions(targets: ReadonlyArray<StartupDrainTarget>): void {
+    for (const target of targets) {
+      const exact = target.orders.filter(
+        (order) =>
+          target.provenanceByOrderId.get(String(order.orderId)) === "exact-null-expired-maker",
+      );
+      if (exact.length === 0) continue;
+      if (exact.length !== 1 || target.orders.length !== 1) {
+        throw new Error("startup exact-null quarantine provenance is ambiguous");
+      }
+      this.acknowledgeExactNullStartupOrder(exact[0]!);
+    }
+  }
+
+  private acknowledgeExactNullStartupOrder(snapshot: Order): void {
+    const current = this.deps.orderRepo.findById(snapshot.orderId);
+    if (current && isTerminalOrderStatus(current.status)) return;
+    if (!current) {
+      throw new Error("startup exact-null quarantine changed before acknowledgement");
+    }
+    const key = String(current.orderId);
+    const prior = this.exactNullStartupQuarantine.get(key);
+    if (prior) {
+      if (!this.sameStartupOrderIdentity(prior.order, current)) {
+        throw new Error("startup exact-null quarantine identity changed");
+      }
+      return;
+    }
+    if (!this.matchesExactNullStartupProof(snapshot, current)) {
+      throw new Error("startup exact-null quarantine changed before acknowledgement");
+    }
+    this.exactNullStartupQuarantine.set(key, {
+      order: { ...current },
+      seedAttempted: false,
+      phase: "acknowledged",
+      remoteState: "unknown",
+      remoteVersion: 0,
+      attemptedRemoteVersion: 0,
+      permittedCommandId: null,
+    });
+  }
+
+  isExactNullStartupOrderQuarantined(order: Order): boolean {
+    const state = this.exactNullStartupQuarantine.get(String(order.orderId));
+    const current = this.deps.orderRepo.findById(order.orderId);
+    return Boolean(
+      state &&
+      current &&
+      !isTerminalOrderStatus(current.status) &&
+      this.sameStartupOrderIdentity(state.order, current) &&
+      this.sameStartupOrderIdentity(current, order),
+    );
+  }
+
+  getExactNullStartupQuarantineCount(): number {
+    return this.exactNullStartupQuarantine.size;
+  }
+
+  async observeExactNullStartupRemoteState(
+    order: Order,
+    remoteState: "absent" | "working",
+  ): Promise<void> {
+    const state = this.exactNullStartupQuarantine.get(String(order.orderId));
+    if (!state || !this.isExactNullStartupOrderQuarantined(order)) return;
+    if (state.remoteState === remoteState) return;
+    state.remoteState = remoteState;
+    state.remoteVersion++;
+    if (remoteState !== "working" || !state.seedAttempted || !this.started) return;
+    if (state.attemptedRemoteVersion === state.remoteVersion) return;
+    state.attemptedRemoteVersion = state.remoteVersion;
+    try {
+      await this.publishExactNullStartupCancel(state, "rearm");
+    } catch (err) {
+      this.log.warn({ err }, "startup quarantine rearm publication failed");
+    }
+  }
+
+  private matchesExactNullStartupProof(snapshot: Order, current: Order): boolean {
+    return (
+      this.sameStartupOrderIdentity(snapshot, current) &&
+      Boolean(
+        this.deps.positionRepo &&
+        isExactNullExpiredMakerDrainCandidate(
+          current,
+          {
+            fillRepo: this.deps.fillRepo,
+            orderRepo: this.deps.orderRepo,
+            positionRepo: this.deps.positionRepo,
+          },
+          [],
+          Date.now(),
+        ),
+      )
+    );
+  }
+
+  private sameStartupOrderIdentity(snapshot: Order, current: Order): boolean {
+    return (
+      snapshot.orderId === current.orderId &&
+      String(snapshot.tokenId) === String(current.tokenId) &&
+      String(snapshot.conditionId) === String(current.conditionId) &&
+      snapshot.side === current.side &&
+      snapshot.orderType === current.orderType &&
+      snapshot.clientOrderId === current.clientOrderId &&
+      snapshot.exchangeOrderId === current.exchangeOrderId &&
+      snapshot.positionId === current.positionId &&
+      snapshot.price === current.price &&
+      snapshot.size === current.size &&
+      snapshot.signalReason === current.signalReason &&
+      snapshot.decisionRuleId === current.decisionRuleId &&
+      snapshot.entryStyle === current.entryStyle &&
+      snapshot.postOnly === current.postOnly &&
+      snapshot.createdAt === current.createdAt &&
+      resolveMakerMicroLiveFillDeadlineMs(snapshot) === resolveMakerMicroLiveFillDeadlineMs(current)
+    );
   }
 
   /** Number of queued + in-flight execution tasks. Zero = fully drained. */
@@ -1297,9 +1430,8 @@ export class ExecutionModule implements RuntimeModule {
   isExactNullStartupTransitionDraining(tokenId: TokenId): boolean {
     const transition = this.tokenTransitions.get(String(tokenId));
     if (!transition || transition.targets.size === 0) return false;
-    if (transition.targets.size !== transition.exactNullExpiredMakerTargets.size) return false;
     for (const orderId of transition.targets) {
-      if (!transition.exactNullExpiredMakerTargets.has(orderId)) return false;
+      if (!this.exactNullStartupQuarantine.has(orderId)) return false;
     }
     return true;
   }
@@ -1374,14 +1506,12 @@ export class ExecutionModule implements RuntimeModule {
     staleOrders: readonly Order[],
     startupProof?: {
       knownExchangeLiveOrderIds: ReadonlySet<string>;
-      exactNullExpiredMakerOrderIds: ReadonlySet<string>;
     },
   ): Promise<void> {
     const key = String(tokenId);
     const transition = this.tokenTransitions.get(key) ?? {
       activePositionId,
       targets: new Set<string>(),
-      exactNullExpiredMakerTargets: new Set<string>(),
     };
     const newlyTargeted: Order[] = [];
     for (const order of staleOrders) {
@@ -1396,9 +1526,6 @@ export class ExecutionModule implements RuntimeModule {
       )
         continue;
       transition.targets.add(orderKey);
-      if (startupProof?.exactNullExpiredMakerOrderIds.has(orderKey)) {
-        transition.exactNullExpiredMakerTargets.add(orderKey);
-      }
       newlyTargeted.push(order);
     }
     this.tokenTransitions.set(key, transition);
@@ -1417,12 +1544,9 @@ export class ExecutionModule implements RuntimeModule {
         },
         "transition barrier opened — draining stale/cross-cycle working order",
       );
-      await this.publishManagedCancel(
-        order.orderId,
-        transition.exactNullExpiredMakerTargets.has(String(order.orderId))
-          ? "stale_entry_ttl"
-          : "operator",
-      );
+      const exactState = this.exactNullStartupQuarantine.get(String(order.orderId));
+      if (exactState) await this.publishExactNullStartupCancel(exactState, "seed");
+      else await this.publishManagedCancel(order.orderId, "operator");
     }
   }
 
@@ -1437,11 +1561,11 @@ export class ExecutionModule implements RuntimeModule {
    * is actually consumed.
    */
   async seedStartupTransitions(targets: ReadonlyArray<StartupDrainTarget>): Promise<void> {
+    this.acknowledgeStartupTransitions(targets);
     for (const target of targets) {
       if (target.orders.length === 0) continue;
       const currentOrders: Order[] = [];
       const knownExchangeLiveOrderIds = new Set<string>();
-      const exactNullExpiredMakerOrderIds = new Set<string>();
       const exactNullCount = [...target.provenanceByOrderId.values()].filter(
         (value) => value === "exact-null-expired-maker",
       ).length;
@@ -1469,31 +1593,23 @@ export class ExecutionModule implements RuntimeModule {
         }
         if (provenance === "exchange-working") knownExchangeLiveOrderIds.add(orderKey);
         else if (!isTerminalOrderStatus(current.status)) {
-          if (!this.deps.positionRepo) {
-            throw new Error("startup exact-null maker proof dependencies are unavailable");
-          }
+          const exactState = this.exactNullStartupQuarantine.get(orderKey);
           if (
             provenance !== "exact-null-expired-maker" ||
-            !isExactNullExpiredMakerDrainCandidate(
-              current,
-              {
-                fillRepo: this.deps.fillRepo,
-                orderRepo: this.deps.orderRepo,
-                positionRepo: this.deps.positionRepo,
-              },
-              [],
-              Date.now(),
-            )
+            !exactState ||
+            !this.isExactNullStartupOrderQuarantined(current) ||
+            (!exactState.seedAttempted &&
+              !this.matchesExactNullStartupProof(exactState.order, current))
           ) {
             throw new Error("startup exact-null maker proof changed before seeding");
           }
-          exactNullExpiredMakerOrderIds.add(orderKey);
+        } else {
+          this.exactNullStartupQuarantine.delete(orderKey);
         }
         currentOrders.push(current);
       }
       await this.openTokenTransition(target.tokenId, target.activePositionId, currentOrders, {
         knownExchangeLiveOrderIds,
-        exactNullExpiredMakerOrderIds,
       });
     }
   }
@@ -1521,7 +1637,7 @@ export class ExecutionModule implements RuntimeModule {
     if (!order || !isTerminalOrderStatus(order.status)) return;
 
     transition.targets.delete(orderKey);
-    transition.exactNullExpiredMakerTargets.delete(orderKey);
+    this.exactNullStartupQuarantine.delete(orderKey);
     // Finding 3 (round 3): a target confirmed terminal via OrderCancelled/FillReceived
     // must also drop its backoff entry — otherwise `transitionCancelRetryAt` leaks
     // unboundedly (the transition closes and autonomous reconcile can't reach it).
@@ -1555,9 +1671,8 @@ export class ExecutionModule implements RuntimeModule {
    * placement decision for the token. Prunes any target that is now terminal —
    * regardless of HOW it got terminal (local cancel, reconciliation marking it
    * cancelled WITHOUT an OrderCancelled event, or a fill) — because it re-reads the
-   * status directly. Retries the cancel for any target still working (idempotent:
-   * cancelReservations dedups an in-flight cancel; a terminal order early-returns),
-   * so a failed/lost cancel is re-attempted rather than blocking the token forever.
+   * status directly. Ordinary targets retain their bounded retry; the exact startup
+   * quarantine is state-driven by reliable reconciliation evidence instead.
    */
   private async reconcileTokenTransition(tokenId: TokenId): Promise<void> {
     const transition = this.tokenTransitions.get(String(tokenId));
@@ -1569,6 +1684,7 @@ export class ExecutionModule implements RuntimeModule {
       // resolver path in executeCancel. Local terminal state (or a missing local row)
       // is not sufficient proof and must leave the token fail-closed.
       if (!order) continue;
+      if (this.exactNullStartupQuarantine.has(orderKey)) continue;
       // Finding 5 backoff: retry a stuck cancel at most once per backoff window, so a
       // token whose cancel keeps failing cannot cancel-storm on every reconcile tick.
       const lastRetry = this.transitionCancelRetryAt.get(orderKey) ?? 0;
@@ -1577,10 +1693,7 @@ export class ExecutionModule implements RuntimeModule {
         now - lastRetry >= TRANSITION_CANCEL_RETRY_BACKOFF_MS
       ) {
         this.transitionCancelRetryAt.set(orderKey, now);
-        await this.publishManagedCancel(
-          order.orderId,
-          transition.exactNullExpiredMakerTargets.has(orderKey) ? "stale_entry_ttl" : "operator",
-        );
+        await this.publishManagedCancel(order.orderId, "operator");
       }
     }
     this.maybeCloseTokenTransition(tokenId);
@@ -4210,6 +4323,17 @@ export class ExecutionModule implements RuntimeModule {
   // ─── Cancel order handler ─────────────────────────────────────────────
 
   private async handleCancel(cmd: CancelOrderCommand): Promise<void> {
+    const exactState = this.exactNullStartupQuarantine.get(String(cmd.orderId));
+    if (
+      cmd.reason === "stale_entry_ttl" &&
+      exactState &&
+      exactState.permittedCommandId !== String(cmd.commandId)
+    ) {
+      return;
+    }
+    if (exactState?.permittedCommandId === String(cmd.commandId)) {
+      exactState.permittedCommandId = null;
+    }
     if (this.processedCommandIds.has(cmd.commandId)) {
       this.log.debug({ commandId: cmd.commandId }, "duplicate cancel commandId — skipping");
       return;
@@ -4603,6 +4727,35 @@ export class ExecutionModule implements RuntimeModule {
       },
       timestamp: now,
     });
+  }
+
+  private async publishExactNullStartupCancel(
+    state: ExactNullStartupQuarantineState,
+    source: "seed" | "rearm",
+  ): Promise<void> {
+    if (state.phase === "publishing" || (source === "seed" && state.seedAttempted)) return;
+    if (source === "seed") state.seedAttempted = true;
+    state.phase = "publishing";
+    const now = Date.now();
+    const commandId = createCommandId(
+      `stale_entry_ttl-${String(state.order.orderId)}-${now}-${Math.random().toString(36).slice(2)}`,
+    );
+    state.permittedCommandId = String(commandId);
+    state.attemptedRemoteVersion = state.remoteVersion;
+    try {
+      await this.deps.bus.publish("CancelOrderRequested", {
+        command: {
+          type: "CancelOrderCommand",
+          commandId,
+          orderId: state.order.orderId,
+          reason: "stale_entry_ttl",
+        },
+        timestamp: now,
+      });
+    } finally {
+      state.permittedCommandId = null;
+      state.phase = "suppressed";
+    }
   }
 
   // ─── Place execution (gateway call) ──────────────────────────────────

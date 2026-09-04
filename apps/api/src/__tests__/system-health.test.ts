@@ -3,7 +3,10 @@ import { bootstrapDatabase } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
 import type { AppConfig } from "@krabs/config";
 import { buildServer } from "../server.js";
-import { readReconciliationHealth } from "../system-health-snapshot.js";
+import {
+  collectSystemHealthSnapshot,
+  readReconciliationHealth,
+} from "../system-health-snapshot.js";
 import { stubLedgerPool, MARKET_DATA_TEST_DEFAULTS } from "./test-helpers.js";
 
 const TEST_API_KEY = "test-key-sys-health";
@@ -151,6 +154,16 @@ describe("GET /api/v1/system-health", () => {
 
     insert.run("reconciliation_skipped_unreliable", 1, at);
     expect(readReconciliationHealth(conn.db, now).kind).toBe("unknown");
+    reset();
+    insert.run("last_reconciliation", 1, at);
+    insert.run("reconciliation_acknowledged_external_state_unknown", 1, at);
+    expect(readReconciliationHealth(conn.db, now)).toEqual({
+      kind: "acknowledged_external_state_unknown",
+      detail: "startup quarantine — external state unknown",
+    });
+    expect(collectSystemHealthSnapshot(conn.db, undefined, 120_000, now).snapshot.reconDrift).toBe(
+      false,
+    );
     reset();
     insert.run("last_reconciliation", 1, at);
     insert.run("reconciliation_unresolved_missing_on_exchange", 2, at);

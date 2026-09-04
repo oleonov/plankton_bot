@@ -1793,6 +1793,15 @@ async function main(): Promise<void> {
   });
 
   // 7i. Reconciliation module
+  const exactNullStartupQuarantine = {
+    isExactNullStartupOrderQuarantined: (order: import("@krabs/domain").Order) =>
+      executionModule.isExactNullStartupOrderQuarantined(order),
+    observeExactNullStartupRemoteState: (
+      order: import("@krabs/domain").Order,
+      state: "absent" | "working",
+    ) => executionModule.observeExactNullStartupRemoteState(order, state),
+    getExactNullStartupQuarantineCount: () => executionModule.getExactNullStartupQuarantineCount(),
+  };
   const reconciliationModule = new ReconciliationModule({
     gateway: exchangeGateway,
     bus,
@@ -1825,6 +1834,7 @@ async function main(): Promise<void> {
       getMarket: (tokenId) => entryLifecycleModule.getMarket(tokenId),
     },
     runtimeMetrics,
+    exactNullStartupQuarantine,
     exchangeStateStore,
     recoveryTtlCoverage: {
       positionRepo: repos.position,
@@ -3144,6 +3154,7 @@ async function main(): Promise<void> {
     throw err;
   }
   log.info(startupAdoption, "startup position adoption complete");
+  executionModule.acknowledgeStartupTransitions(startupAdoption.drainTargets);
   ledgerConn.db
     .prepare(
       "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('startup_adoption', ?, ?, ?)",

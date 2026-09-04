@@ -203,7 +203,7 @@ describe("reconcileOrders — Fix 2: suspicious empty snapshot", () => {
     expect(orderRepo.updateStatus).not.toHaveBeenCalled();
   });
 
-  it("withholds the default suspicious-empty snapshot but still exact-resolves mature orders", async () => {
+  it("withholds suspicious-empty before exact resolution or quarantine acknowledgement", async () => {
     const orderRepo = createOrderRepo();
     const orders = localOrders(3).map((order) => ({ ...order, status: "pending" as const }));
     orderRepo.findOpen = vi.fn().mockReturnValue(orders);
@@ -216,16 +216,22 @@ describe("reconcileOrders — Fix 2: suspicious empty snapshot", () => {
       data: makeExchangeOrder({ orderId: exchangeOrderId, status: "OPEN" }),
     }));
 
-    const result = await reconcileOrders(baseDeps(gateway, orderRepo));
+    const exactNullStartupQuarantine = {
+      isExactNullStartupOrderQuarantined: vi.fn().mockReturnValue(true),
+      observeExactNullStartupRemoteState: vi.fn(),
+      getExactNullStartupQuarantineCount: vi.fn().mockReturnValue(1),
+    };
+    const result = await reconcileOrders({
+      ...baseDeps(gateway, orderRepo),
+      exactNullStartupQuarantine,
+    });
 
     expect(result.skipReason).toBe("suspicious_empty");
     expect(result.exchangeOpenOrders).toEqual([]);
-    expect(result.unresolvedMissingOnExchange).toBe(3);
-    expect(gateway.getOrderResult).toHaveBeenCalledTimes(3);
-    for (const order of orders) {
-      expect(gateway.getOrderResult).toHaveBeenCalledWith(order.exchangeOrderId);
-      expect(orderRepo.updateStatus).toHaveBeenCalledWith(order.orderId, "open");
-    }
+    expect(result.unresolvedMissingOnExchange ?? 0).toBe(0);
+    expect(gateway.getOrderResult).not.toHaveBeenCalled();
+    expect(exactNullStartupQuarantine.isExactNullStartupOrderQuarantined).not.toHaveBeenCalled();
+    expect(exactNullStartupQuarantine.observeExactNullStartupRemoteState).not.toHaveBeenCalled();
   });
 
   it("reports unresolved orders when local open is below the suspicious-empty threshold", async () => {
@@ -293,6 +299,41 @@ describe("reconcileOrders — Fix 2: suspicious empty snapshot", () => {
 });
 
 describe("reconcileOrders — missing-order evidence", () => {
+  it("partitions exact startup quarantine and observes only reliable remote state", async () => {
+    const orderRepo = createOrderRepo();
+    const quarantined = makeLocalOrder({ exchangeOrderId: "ex-quarantine" });
+    const ordinary = makeLocalOrder({
+      orderId: createOrderId("ordinary"),
+      exchangeOrderId: "ex-ordinary",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([quarantined, ordinary]);
+    const gateway = createGateway({ openOrders: [] });
+    gateway.getOrderResult = vi.fn().mockResolvedValue({ ok: true, data: null });
+    const exactNullStartupQuarantine = {
+      isExactNullStartupOrderQuarantined: vi.fn(
+        (order: Order) => order.orderId === quarantined.orderId,
+      ),
+      observeExactNullStartupRemoteState: vi.fn(),
+      getExactNullStartupQuarantineCount: vi.fn().mockReturnValue(1),
+    };
+
+    const result = await reconcileOrders({
+      ...baseDeps(gateway, orderRepo),
+      suspiciousEmptyThreshold: 0,
+      consecutiveMissThreshold: 1,
+      exactNullStartupQuarantine,
+    });
+
+    expect(result.acknowledgedExternalStateUnknown).toBe(1);
+    expect(result.unresolvedMissingOnExchange).toBe(1);
+    expect(gateway.getOrderResult).toHaveBeenCalledTimes(1);
+    expect(gateway.getOrderResult).toHaveBeenCalledWith("ex-ordinary");
+    expect(exactNullStartupQuarantine.observeExactNullStartupRemoteState).toHaveBeenCalledWith(
+      quarantined,
+      "absent",
+    );
+  });
+
   it("exact-resolves a mature missing order but leaves null, errors, and coverage gaps fenced", async () => {
     const orderRepo = createOrderRepo();
     const order = makeLocalOrder({ exchangeOrderId: "ex-mature" });

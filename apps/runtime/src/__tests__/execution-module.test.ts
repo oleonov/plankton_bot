@@ -5337,9 +5337,11 @@ describe("ExecutionModule", () => {
       transition.targets.add("generic-target");
       expect(liveMod.isExactNullStartupTransitionDraining(pending.tokenId)).toBe(false);
       transition.targets.delete("generic-target");
-      transition.exactNullExpiredMakerTargets.clear();
+      const quarantine = (liveMod as any).exactNullStartupQuarantine;
+      const state = quarantine.get(String(pending.orderId));
+      quarantine.clear();
       expect(liveMod.isExactNullStartupTransitionDraining(pending.tokenId)).toBe(false);
-      transition.exactNullExpiredMakerTargets.add(String(pending.orderId));
+      quarantine.set(String(pending.orderId), state);
 
       status = "cancelled";
       await bus.publish("OrderCancelled", {
@@ -5352,6 +5354,88 @@ describe("ExecutionModule", () => {
         timestamp: Date.now(),
       });
       expect(liveMod.isExactNullStartupTransitionDraining(pending.tokenId)).toBe(false);
+      await liveMod.stop();
+    });
+
+    it("suppresses exact-null churn, rearms once on remote state change, and does not reseed", async () => {
+      vi.useFakeTimers();
+      try {
+        const pending = expiredStartupMaker();
+        const current = { ...pending, status: "open" as const };
+        orderRepo.findById = vi.fn().mockReturnValue(current);
+        orderRepo.findByTokenId = vi.fn().mockReturnValue([current]);
+        (gateway as any).getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+        (gateway as any).getOrderResult = vi.fn().mockResolvedValue({ ok: true, data: null });
+        const cancelEvents: string[] = [];
+        bus.subscribe("CancelOrderRequested", async ({ command }) => {
+          cancelEvents.push(command.reason);
+        });
+        const liveMod = startupModule();
+
+        liveMod.acknowledgeStartupTransitions([drainTarget(pending)]);
+        expect(liveMod.getExactNullStartupQuarantineCount()).toBe(1);
+        expect(liveMod.isExactNullStartupOrderQuarantined(current)).toBe(true);
+        await liveMod.start();
+        await liveMod.seedStartupTransitions([drainTarget(pending)]);
+        await vi.advanceTimersByTimeAsync(15_000);
+
+        expect(cancelEvents).toEqual(["stale_entry_ttl"]);
+        expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+        expect((gateway as any).getOrderResult).toHaveBeenCalledTimes(1);
+        expect(liveMod.hasTransitionTarget(pending.orderId)).toBe(true);
+
+        await liveMod.observeExactNullStartupRemoteState(current, "absent");
+        const publish = vi.spyOn(bus, "publish").mockRejectedValueOnce(new Error("publish failed"));
+        await liveMod.observeExactNullStartupRemoteState(current, "working");
+        await liveMod.observeExactNullStartupRemoteState(current, "working");
+        expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+        publish.mockRestore();
+        await liveMod.observeExactNullStartupRemoteState(current, "absent");
+        await Promise.all([
+          liveMod.observeExactNullStartupRemoteState(current, "working"),
+          vi.advanceTimersByTimeAsync(5_000),
+        ]);
+        await liveMod.observeExactNullStartupRemoteState(current, "working");
+        expect(cancelEvents).toEqual(["stale_entry_ttl", "stale_entry_ttl"]);
+        expect(gateway.cancelOrder).toHaveBeenCalledTimes(2);
+
+        await bus.publish("CancelOrderRequested", {
+          command: makeCancelCmd({
+            commandId: createCommandId("manual-quarantine-retry"),
+            orderId: pending.orderId,
+            reason: "maker_fast_cancel",
+          }),
+          timestamp: Date.now(),
+        });
+        expect(gateway.cancelOrder).toHaveBeenCalledTimes(3);
+
+        await liveMod.stop();
+        await liveMod.start();
+        await liveMod.seedStartupTransitions([drainTarget(pending)]);
+        expect(gateway.cancelOrder).toHaveBeenCalledTimes(3);
+        expect(liveMod.hasTransitionTarget(pending.orderId)).toBe(true);
+        await liveMod.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("consumes an ambiguous seed publication failure without same-instance replay", async () => {
+      const pending = expiredStartupMaker();
+      orderRepo.findById = vi.fn().mockReturnValue(pending);
+      orderRepo.findByTokenId = vi.fn().mockReturnValue([pending]);
+      const liveMod = startupModule();
+      liveMod.acknowledgeStartupTransitions([drainTarget(pending)]);
+      await liveMod.start();
+      const publish = vi.spyOn(bus, "publish").mockRejectedValueOnce(new Error("publish failed"));
+
+      await expect(liveMod.seedStartupTransitions([drainTarget(pending)])).rejects.toThrow();
+      await liveMod.seedStartupTransitions([drainTarget(pending)]);
+
+      expect(publish).toHaveBeenCalledTimes(1);
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+      expect(liveMod.hasTransitionTarget(pending.orderId)).toBe(true);
+      publish.mockRestore();
       await liveMod.stop();
     });
 

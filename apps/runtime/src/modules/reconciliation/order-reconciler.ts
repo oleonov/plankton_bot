@@ -28,6 +28,7 @@ import type {
   OrderRepository,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import type { ExactNullStartupQuarantine } from "../execution/execution-module.js";
 import { applyOrderVerdict, resolveOrderStatusVerdict } from "./order-status-resolver.js";
 
 export interface OrderReconcilerDeps {
@@ -61,6 +62,7 @@ export interface OrderReconcilerDeps {
   bus?: import("@krabs/domain").EventBus;
   /** Relative completion tolerance shared by every exact order verdict. */
   fillCompletionTolerance?: number | undefined;
+  exactNullStartupQuarantine?: ExactNullStartupQuarantine;
 }
 
 export type ReconcileSkipReason = "unreliable_snapshot" | "suspicious_empty";
@@ -95,6 +97,7 @@ export interface OrderReconcileResult {
   cascadeCancelled?: number;
   /** Set to 1 when the cancel cascade was skipped on an unreliable snapshot. */
   cascadeSkipped?: number;
+  acknowledgedExternalStateUnknown?: number;
 }
 
 export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderReconcileResult> {
@@ -117,6 +120,19 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   }
 
   const exchangeOrders = snapshot.data;
+  const suspiciousEmptyThreshold = deps.suspiciousEmptyThreshold ?? 3;
+  const suspiciousEmpty =
+    suspiciousEmptyThreshold > 0 &&
+    exchangeOrders.length === 0 &&
+    localOpenCount >= suspiciousEmptyThreshold;
+  if (suspiciousEmpty) {
+    log.warn(
+      { localOpenCount, threshold: suspiciousEmptyThreshold },
+      "suspicious empty snapshot withheld before exact order recovery",
+    );
+    return skipResult("suspicious_empty", localOpenCount, capturedAtMs);
+  }
+
   const unresolvedStaleOrders = deps.unresolvedStaleOrders ?? new Map<string, ExchangeOrder>();
   const unresolvedPrecheck = await resolveUnresolvedStaleOrders({
     orders: unresolvedStaleOrders,
@@ -134,20 +150,18 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   const missMap = deps.consecutiveMissCounts ?? new Map<string, number>();
   pruneMissMap(missMap, localExchangeIds);
 
-  const suspiciousEmptyThreshold = deps.suspiciousEmptyThreshold ?? 3;
-  const suspiciousEmpty =
-    suspiciousEmptyThreshold > 0 &&
-    exchangeOrders.length === 0 &&
-    localOpenCount >= suspiciousEmptyThreshold;
-  if (suspiciousEmpty) {
-    log.warn(
-      { localOpenCount, threshold: suspiciousEmptyThreshold },
-      "suspicious empty snapshot withheld — exact order recovery remains active",
-    );
+  const quarantineOrders = localOrders.filter((order) =>
+    deps.exactNullStartupQuarantine?.isExactNullStartupOrderQuarantined(order),
+  );
+  const quarantineIds = new Set(quarantineOrders.map((order) => String(order.orderId)));
+  for (const order of quarantineOrders) {
+    const remoteState = exactRemoteState(order, exchangeOrders);
+    if (!remoteState) continue;
+    await deps.exactNullStartupQuarantine!.observeExactNullStartupRemoteState(order, remoteState);
   }
 
   const unresolved = reconcileMissingOrders({
-    localOrders,
+    localOrders: localOrders.filter((order) => !quarantineIds.has(String(order.orderId))),
     exchangeOrderIds,
     missMap,
     graceMs: deps.phantomGraceMs ?? 90_000,
@@ -165,15 +179,6 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     fillCompletionTolerance: deps.fillCompletionTolerance,
     ...(deps.bus ? { bus: deps.bus } : {}),
   });
-
-  if (suspiciousEmpty) {
-    return skipResult("suspicious_empty", localOpenCount, capturedAtMs, {
-      phantomsSkippedGrace: unresolved.phantomsSkippedGrace,
-      details: unresolved.details,
-      consecutiveMissTracked: unresolved.consecutiveMissTracked,
-      unresolvedMissingOnExchange: unresolved.unresolvedMissingOnExchange,
-    });
-  }
 
   const cascade = await reconcileStaleExchangeOrders({
     exchangeOrders,
@@ -211,12 +216,24 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     cascadeEvaluated: cascade.cascadeEvaluated,
     cascadeCancelled: cascade.cascadeCancelled,
     cascadeSkipped: cascade.cascadeSkipped,
+    acknowledgedExternalStateUnknown: quarantineOrders.length,
   };
 }
 
 const EMPTY_FILL_READER: Pick<FillRepository, "findByOrderId"> = {
   findByOrderId: () => [],
 };
+
+function exactRemoteState(
+  local: Order,
+  exchange: readonly ExchangeOrder[],
+): "absent" | "working" | null {
+  const remote = exchange.find((order) => order.orderId === local.exchangeOrderId);
+  if (!remote) return "absent";
+  return String(remote.tokenId) === String(local.tokenId) && remote.side === local.side
+    ? "working"
+    : null;
+}
 
 async function resolveExactCandidates(deps: {
   candidates: readonly Order[];

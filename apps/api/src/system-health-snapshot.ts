@@ -114,6 +114,7 @@ export type ReconciliationHealthKind =
   | "ok"
   | "position_drift"
   | "unresolved_missing"
+  | "acknowledged_external_state_unknown"
   | "other_drift"
   | "unknown";
 
@@ -126,6 +127,7 @@ const RECONCILIATION_STALE_MS = 90_000;
 const RECONCILIATION_MARKERS = [
   "reconciliation_clean",
   "reconciliation_unresolved_missing_on_exchange",
+  "reconciliation_acknowledged_external_state_unknown",
   "reconciliation_skipped_unreliable",
   "reconciliation_skipped_suspicious_empty",
   "reconciliation_fills_skipped_unreliable",
@@ -172,17 +174,24 @@ export function readReconciliationHealth(
     }
     const clean = values.get("reconciliation_clean")!;
     const unresolved = values.get("reconciliation_unresolved_missing_on_exchange")!;
-    const skipped = RECONCILIATION_MARKERS.slice(2).reduce(
+    const quarantine = values.get("reconciliation_acknowledged_external_state_unknown")!;
+    const skipped = RECONCILIATION_MARKERS.slice(3).reduce(
       (sum, name) => sum + values.get(name)!,
       0,
     );
-    if ((clean !== 0 && clean !== 1) || (clean === 1 && unresolved + skipped > 0)) {
+    if ((clean !== 0 && clean !== 1) || (clean === 1 && unresolved + quarantine + skipped > 0)) {
       return unknown("reconciliation markers contradictory");
     }
     if (unresolved > 0) {
       return { kind: "unresolved_missing", detail: "unresolved exchange orders" };
     }
     if (skipped > 0) return unknown("reconciliation snapshot unreliable");
+    if (quarantine > 0) {
+      return {
+        kind: "acknowledged_external_state_unknown",
+        detail: "startup quarantine — external state unknown",
+      };
+    }
     return clean === 1
       ? { kind: "ok", detail: "clean" }
       : { kind: "other_drift", detail: "reconciliation not clean" };

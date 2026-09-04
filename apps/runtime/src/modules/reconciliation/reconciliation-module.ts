@@ -64,6 +64,7 @@ import {
   type WalletPositionSentinelResult,
 } from "./wallet-position-sentinel.js";
 import type { ExchangeStateStore } from "../execution/exchange-state-store.js";
+import type { ExactNullStartupQuarantine } from "../execution/execution-module.js";
 import {
   buildReservationSnapshot,
   type RecoveryTtlCoverageDeps,
@@ -201,7 +202,14 @@ export interface ReconciliationModuleDeps {
       capturedAt?: string,
     ) => void;
     writeCounter?: (metricName: string, value?: number, labels?: string | null) => void;
+    writeLatest?: (
+      metricName: string,
+      value?: number,
+      labels?: string | null,
+      capturedAt?: string,
+    ) => void;
   };
+  exactNullStartupQuarantine?: ExactNullStartupQuarantine;
   /**
    * Live-lite wallet↔ledger sentinel. Detects impossible local state where
    * Polymarket still reports shares for a token, but the local position is
@@ -438,6 +446,9 @@ export class ReconciliationModule implements RuntimeModule {
         consecutiveMissCounts: this.consecutiveMissCounts,
         unresolvedStaleOrders: this.unresolvedStaleOrders,
         fillCompletionTolerance,
+        ...(this.deps.exactNullStartupQuarantine
+          ? { exactNullStartupQuarantine: this.deps.exactNullStartupQuarantine }
+          : {}),
       });
       stageTimingsMs.orders = Date.now() - stageOrdersStart;
       allDetails.push(...orderResult.details);
@@ -477,6 +488,9 @@ export class ReconciliationModule implements RuntimeModule {
             ? { exitTtlByLiquidity: this.deps.exitTtlByLiquidity() }
             : {}),
           ...(this.deps.runtimeMetrics ? { metrics: this.deps.runtimeMetrics } : {}),
+          ...(this.deps.exactNullStartupQuarantine
+            ? { exactNullStartupQuarantine: this.deps.exactNullStartupQuarantine }
+            : {}),
           ...(this.deps.exitOrderLifetime
             ? { exitOrderLifetime: this.deps.exitOrderLifetime }
             : {}),
@@ -583,7 +597,7 @@ export class ReconciliationModule implements RuntimeModule {
       stageTimingsMs.publishExchangeState = Date.now() - stagePublishStart;
 
       // 5. Build result
-      const clean =
+      const ordinaryClean =
         orderResult.phantomsCancelled === 0 &&
         (orderResult.unresolvedMissingOnExchange ?? 0) === 0 &&
         orderResult.unknownExchangeOrders === 0 &&
@@ -598,6 +612,18 @@ export class ReconciliationModule implements RuntimeModule {
         staleResult.trackARestingAddCancelRequested === 0 &&
         staleResult.downpriceRepriceCancelled === 0 &&
         walletResult.driftCount === 0;
+      const quarantineCount =
+        this.deps.exactNullStartupQuarantine?.getExactNullStartupQuarantineCount() ?? 0;
+      const clean = ordinaryClean && quarantineCount === 0;
+      if (quarantineCount > 0) {
+        allDetails.push(`startup quarantine external state unknown: ${quarantineCount}`);
+      }
+      this.deps.runtimeMetrics?.writeLatest?.(
+        "reconciliation_acknowledged_external_state_unknown",
+        quarantineCount,
+        null,
+        new Date(ranAt).toISOString(),
+      );
 
       const result: ReconciliationResult = {
         ranAt,
@@ -615,7 +641,7 @@ export class ReconciliationModule implements RuntimeModule {
       this.lastResult = result;
 
       // 6. Publish events
-      if (!clean) {
+      if (!ordinaryClean) {
         const severity =
           fillResult.missingFillsImported > 0 || walletSentinelSeverity === "critical"
             ? ("critical" as const)
