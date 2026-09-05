@@ -66,7 +66,16 @@ export function applySafeAddColumnStatements(db: Database.Database, sql: string)
   return sql.replace(
     /^\s*SELECT\s+safe_add_column\('([A-Za-z_][A-Za-z0-9_]*)',\s*'([A-Za-z_][A-Za-z0-9_]*)',\s*'((?:[^']|'')*)'\);\s*$/gm,
     (_match, table: string, column: string, definition: string) => {
-      const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      let columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (columns.length === 0) {
+        const create = sql.match(
+          new RegExp(`CREATE TABLE IF NOT EXISTS\\s+${table}\\s*\\([\\s\\S]*?\\);`, "i"),
+        )?.[0];
+        if (create) {
+          db.exec(create);
+          columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+        }
+      }
       if (!columns.some((c) => c.name === column)) {
         db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition.replace(/''/g, "'")}`);
       }

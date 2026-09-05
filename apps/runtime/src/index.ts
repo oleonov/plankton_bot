@@ -78,7 +78,6 @@ import {
   withShutdownBusyTimeout,
   disableAutoCheckpoint,
   setSynchronousFull,
-  ledgerInstant,
   isWorkingSellOrderStatus,
 } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
@@ -86,7 +85,6 @@ import {
   createBotRunId,
   ENTRY_REASONS,
   recordStageDuration,
-  resolveTradingState,
   snapshotAndResetStageTimers,
 } from "@krabs/domain";
 import type { OrderId, TokenId } from "@krabs/domain";
@@ -114,6 +112,7 @@ import {
 } from "./wallet-buy-budget.js";
 
 import { createLogger } from "./logger.js";
+import { SignalActivityWindow } from "./signal-activity-window.js";
 import {
   acquireLedgerInstanceLock,
   type LedgerInstanceLockHandle,
@@ -260,7 +259,6 @@ const RISK_EVENT_WARNING_COOLDOWN_MS = 10 * 60 * 1000;
 const DECISION_TICK_LATENCY_ALERT_THRESHOLD_MS = 30_000;
 const DECISION_TICK_LATENCY_ALERT_SUSTAINED_MS = 5 * 60 * 1000;
 const DECISION_TICK_LATENCY_ALERT_COOLDOWN_MS = 15 * 60 * 1000;
-const TRADING_STATE_SNAPSHOT_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 
 interface OrderCapacityWindow {
   placeCalls: number;
@@ -2389,6 +2387,7 @@ async function main(): Promise<void> {
     lastReset: Date.now(),
   };
   const SIGNAL_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+  const durableSignalActivity = new SignalActivityWindow(ledgerConn.db);
   const conversionWindow = {
     converted: 0,
     conversionSkippedByReason: new Map<string, number>(),
@@ -2410,10 +2409,12 @@ async function main(): Promise<void> {
 
   bus.subscribe("SignalProduced", async () => {
     signalWindow.produced++;
+    durableSignalActivity.recordSignalProduced();
   });
 
   bus.subscribe("SignalApproved", async ({ signal }) => {
     signalWindow.approved++;
+    durableSignalActivity.recordSignalApproved(ENTRY_REASONS.has(signal.reason));
     if (ENTRY_REASONS.has(signal.reason)) {
       signalWindow.entryApproved++;
       // Persist last entry approval timestamp separately (not cleared by signal_activity upsert)
@@ -2423,8 +2424,9 @@ async function main(): Promise<void> {
     }
   });
 
-  bus.subscribe("SignalRejected", async () => {
+  bus.subscribe("SignalRejected", async ({ reason }) => {
     signalWindow.rejected++;
+    durableSignalActivity.recordSignalRejected(reason);
     runtimeMetrics.replaceLatest("last_signal_rejected");
   });
 
@@ -2463,6 +2465,10 @@ async function main(): Promise<void> {
     }
   });
 
+  bus.subscribe("OrderPlaced", async ({ price, size }) => {
+    durableSignalActivity.recordOrderPlaced(price, size);
+  });
+
   bus.subscribe("OrderPlaced", async ({ orderId, signalReason }) => {
     if (!ENTRY_REASONS.has(signalReason ?? "")) return;
     const order = repos.order.findById(orderId);
@@ -2495,6 +2501,10 @@ async function main(): Promise<void> {
     if (ENTRY_REASONS.has(signalReason ?? "")) {
       conversionWindow.fills++;
     }
+  });
+
+  bus.subscribe("FillReceived", async ({ sizeUsdc }) => {
+    durableSignalActivity.recordFill(sizeUsdc);
   });
 
   bus.subscribe("FillReceived", async ({ orderId, signalReason }) => {
@@ -2577,22 +2587,6 @@ async function main(): Promise<void> {
   const insertOrderCapacityActivity = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('order_capacity_activity', 1, ?, ?)",
   );
-  const insertSnapshot = ledgerConn.db.prepare(
-    `INSERT INTO trading_state_snapshots (trading_state, signals_produced, signals_approved, signals_rejected, captured_at)
-   VALUES (?, ?, ?, ?, ?)`,
-  );
-  // The cutoff is an ISO instant computed in JS, not `datetime('now', ...)`, which renders
-  // space-form and sorts wrong against ISO on the cutoff's own calendar day (' ' < 'T').
-  // The COLUMN is wrapped too: the INSERT above binds ISO explicitly, but
-  // `captured_at TEXT NOT NULL DEFAULT (datetime('now'))` survives on the production table
-  // (SQLite has no `ALTER COLUMN … SET DEFAULT`), so a future writer that omits the column
-  // would re-split the rendering and leave those rows unprunable forever. The wrap costs the
-  // `captured_at` index, affordable on a table this retention itself caps at 14 days.
-  const pruneSnapshots = ledgerConn.db.prepare(
-    `DELETE FROM trading_state_snapshots WHERE ${ledgerInstant("captured_at")} < ${ledgerInstant("?")}`,
-  );
-
-  let lastSnapshotMs = 0;
   let lastRiskEventVolumeWarningAtMs = 0;
 
   // Flush signal + scanner activity to DB every 30 seconds, reset windows every 10 minutes
@@ -2616,6 +2610,7 @@ async function main(): Promise<void> {
     };
     try {
       const now = Date.now();
+      durableSignalActivity.closeIfDue(now, runtimeControl.isPaused());
       if (now - signalWindow.lastReset > SIGNAL_WINDOW_MS) {
         signalWindow.produced = 0;
         signalWindow.approved = 0;
@@ -2651,6 +2646,8 @@ async function main(): Promise<void> {
             entryApproved: signalWindow.entryApproved,
             exitApproved: signalWindow.exitApproved,
             windowStartMs: signalWindow.lastReset,
+            durableWindowStartedAtMs: durableSignalActivity.getStartedAtMs(),
+            botRunId: String(botRunId),
           }),
           new Date().toISOString(),
         ),
@@ -2811,37 +2808,6 @@ async function main(): Promise<void> {
           new Date().toISOString(),
         );
       });
-
-      // Write trading-state snapshot every 10 minutes
-      const SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
-      if (now - lastSnapshotMs >= SNAPSHOT_INTERVAL_MS) {
-        lastSnapshotMs = now;
-
-        const sa = signalWindow;
-        const tradingState = resolveTradingState({
-          signalWindow: {
-            produced: sa.produced,
-            approved: sa.approved,
-            rejected: sa.rejected,
-            entryApproved: sa.entryApproved,
-            exitApproved: sa.exitApproved,
-          },
-        });
-
-        writeMetric(() => {
-          insertSnapshot.run(
-            tradingState,
-            sa.produced,
-            sa.approved,
-            sa.rejected,
-            new Date().toISOString(),
-          );
-          const pruneCutoffIso = new Date(
-            Date.now() - TRADING_STATE_SNAPSHOT_RETENTION_MS,
-          ).toISOString();
-          pruneSnapshots.run(pruneCutoffIso);
-        });
-      }
     } finally {
       recordStageDuration("metrics_flush_total", performance.now() - metricsFlushStartMs);
     }

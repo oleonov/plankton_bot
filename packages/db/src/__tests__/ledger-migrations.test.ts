@@ -79,6 +79,80 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
+describe("migration 107 — truthful trading activity windows", () => {
+  it("adds nullable v2 columns while preserving the v1 rollback insert", () => {
+    db.exec(`
+      CREATE TABLE trading_state_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trading_state TEXT NOT NULL,
+        signals_produced INTEGER NOT NULL,
+        signals_approved INTEGER NOT NULL,
+        signals_rejected INTEGER NOT NULL,
+        captured_at TEXT NOT NULL
+      );
+    `);
+
+    db.exec(applySafeAddColumnStatements(db, readMigration("107_trading_activity_windows.sql")));
+    db.prepare(
+      `INSERT INTO trading_state_snapshots
+         (trading_state, signals_produced, signals_approved, signals_rejected, captured_at)
+       VALUES ('NO_SIGNALS', 0, 0, 0, '2026-09-04T00:00:00.000Z')`,
+    ).run();
+
+    const columns = db.prepare("PRAGMA table_info(trading_state_snapshots)").all() as Array<{
+      name: string;
+      notnull: number;
+    }>;
+    for (const name of [
+      "window_version",
+      "window_started_at",
+      "window_ended_at",
+      "orders_accepted",
+      "order_notional_usdc",
+      "fills_received",
+      "fill_notional_usdc",
+      "rejection_reasons_json",
+    ]) {
+      expect(columns).toContainEqual(expect.objectContaining({ name, notnull: 0 }));
+    }
+    expect(db.prepare("SELECT window_version FROM trading_state_snapshots").get()).toEqual({
+      window_version: null,
+    });
+  });
+
+  it("keeps the canonical fresh schema aligned with migration 107", () => {
+    const fresh = new Database(":memory:");
+    try {
+      fresh.exec(
+        readFileSync(path.join(import.meta.dirname, "..", "schemas", "ledger.sql"), "utf-8"),
+      );
+      const names = (
+        fresh.prepare("PRAGMA table_info(trading_state_snapshots)").all() as Array<{
+          name: string;
+        }>
+      ).map((column) => column.name);
+      expect(names).toEqual(expect.arrayContaining(["window_version", "window_started_at"]));
+    } finally {
+      fresh.close();
+    }
+  });
+
+  it("creates the v1 table before adding v2 columns on a partial split ledger", () => {
+    db.exec(applySafeAddColumnStatements(db, readMigration("107_trading_activity_windows.sql")));
+
+    expect(db.prepare("SELECT window_version FROM trading_state_snapshots").all()).toEqual([]);
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO trading_state_snapshots
+             (trading_state, signals_produced, signals_approved, signals_rejected, captured_at)
+           VALUES ('NO_SIGNALS', 0, 0, 0, '2026-09-04T00:00:00.000Z')`,
+        )
+        .run(),
+    ).not.toThrow();
+  });
+});
+
 describe("migration 099 — unique pnl ledger fill", () => {
   const createPnlLedger = (database: Database.Database, legacy: boolean) => {
     database.exec(`

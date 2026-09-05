@@ -19,7 +19,7 @@ import type {
   AuditEntryDTO,
   SwitchResponse,
   ControlOverviewDTO,
-  TradingActivitySnapshot,
+  TradingActivityResponse,
   SelectionRule,
   SelectionRuleType,
   PreviewBuckets,
@@ -165,12 +165,50 @@ export function usePositionCycles(filters: PositionCycleFilters = {}) {
 export function useTradingActivity(days = 14) {
   return useQuery({
     queryKey: ["trading-activity", days],
-    queryFn: () =>
-      apiFetch<{ items: TradingActivitySnapshot[] }>(
-        `/api/v1/metrics/trading-activity?days=${days}`,
-      ),
+    queryFn: async () => {
+      const data = await apiFetch<unknown>(`/api/v1/metrics/trading-activity?days=${days}`);
+      return normalizeTradingActivity(data, days);
+    },
     refetchInterval: 60_000,
   });
+}
+
+function normalizeTradingActivity(data: unknown, days: number): TradingActivityResponse {
+  if (hasTradingActivityCoverage(data)) return data;
+  const endMs = Date.now();
+  const startMs = endMs - days * 86_400_000;
+  const legacyCount =
+    data && typeof data === "object" && Array.isArray((data as { items?: unknown }).items)
+      ? (data as { items: unknown[] }).items.length
+      : 0;
+  return {
+    items: [],
+    coverage: {
+      requestedStartAt: new Date(startMs).toISOString(),
+      requestedEndAt: new Date(endMs).toISOString(),
+      coveredMs: 0,
+      gapMs: endMs - startMs,
+      gapCount: 1,
+      coveragePercent: 0,
+      gaps: [
+        {
+          startAt: new Date(startMs).toISOString(),
+          endAt: new Date(endMs).toISOString(),
+          durationMs: endMs - startMs,
+          kind: "missing",
+        },
+      ],
+      excludedRows: { legacy: legacyCount, invalid: 0, outsideRange: 0 },
+    },
+  };
+}
+
+function hasTradingActivityCoverage(data: unknown): data is TradingActivityResponse {
+  if (!data || typeof data !== "object") return false;
+  const value = data as { items?: unknown; coverage?: unknown };
+  if (!Array.isArray(value.items) || !value.coverage || typeof value.coverage !== "object")
+    return false;
+  return Array.isArray((value.coverage as { gaps?: unknown }).gaps);
 }
 
 // ─── Positions ──────────────────────────────────────────────────

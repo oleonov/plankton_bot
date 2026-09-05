@@ -1,261 +1,347 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useTradingActivity } from "../api/hooks.ts";
-import { aggregateSnapshots, collapseStates } from "../utils/tradingActivity.ts";
-
-const STATE_COLORS: Record<string, string> = {
-  ACTIVELY_TRADING: "var(--green)",
-  PROBING_ONLY: "var(--blue)",
-  EXITS_ONLY: "#cc8800",
-  ALIVE_BUT_BLOCKED: "var(--orange)",
-  PAUSED: "var(--red)",
-  NO_SIGNALS: "#666",
-};
-
-const STATE_LABELS: Record<string, string> = {
-  ACTIVELY_TRADING: "Trading",
-  PROBING_ONLY: "Probing",
-  EXITS_ONLY: "Exits only",
-  ALIVE_BUT_BLOCKED: "Blocked",
-  PAUSED: "Paused",
-  NO_SIGNALS: "No signals",
-};
+import type { TradingActivityResponse, TradingActivityWindow } from "../api/types.ts";
+import {
+  ACTIVITY_STATE_COLORS,
+  buildActivityTimeline,
+  buildStateMarkerGroups,
+  formatActivityTooltip,
+  formatDuration,
+  formatStateMarkerGroup,
+  type ActivityMode,
+} from "../utils/tradingActivity.ts";
 
 const RANGE_OPTIONS = [
-  { label: "24h", days: 1, bucketMinutes: 10 },
-  { label: "7d", days: 7, bucketMinutes: 30 },
-  { label: "14d", days: 14, bucketMinutes: 120 },
+  { label: "24h", days: 1 },
+  { label: "7d", days: 7 },
+  { label: "14d", days: 14 },
 ] as const;
 
 const WIDTH = 700;
-const BAR_HEIGHT = 140;
-const BAND_HEIGHT = 20;
-const PAD = { top: 10, right: 20, bottom: 25, left: 40 };
+const HEIGHT = 190;
+const PAD = { top: 28, right: 10, bottom: 24, left: 34 };
+const tabStyle: React.CSSProperties = {
+  padding: "3px 9px",
+  fontSize: 11,
+  border: "none",
+  borderRadius: 4,
+  cursor: "pointer",
+};
 
-function StateBand({
-  segments,
-  totalMs,
+function WindowBars({
+  item,
+  mode,
+  x,
+  width,
+  maxValue,
 }: {
-  segments: { state: string; startMs: number; durationMs: number }[];
-  totalMs: number;
+  item: TradingActivityWindow;
+  mode: ActivityMode;
+  x: number;
+  width: number;
+  maxValue: number;
 }) {
-  if (segments.length === 0) return null;
-  const plotW = WIDTH - PAD.left - PAD.right;
-
-  return (
-    <svg width={WIDTH} height={BAND_HEIGHT + 4} style={{ display: "block" }}>
-      {segments.map((seg, i) => {
-        const xStart = PAD.left + (seg.startMs / totalMs) * plotW;
-        const w = Math.max((seg.durationMs / totalMs) * plotW, 1);
-        return (
-          <rect
-            key={i}
-            x={xStart}
-            y={2}
-            width={w}
-            height={BAND_HEIGHT}
-            rx={2}
-            fill={STATE_COLORS[seg.state] ?? "#666"}
-          >
-            <title>{STATE_LABELS[seg.state] ?? seg.state}</title>
-          </rect>
-        );
-      })}
-    </svg>
-  );
-}
-
-function SignalBars({
-  buckets,
-}: {
-  buckets: { signalsProduced: number; signalsApproved: number; signalsRejected: number }[];
-}) {
-  if (buckets.length === 0) return null;
-  const plotW = WIDTH - PAD.left - PAD.right;
-  const plotH = BAR_HEIGHT - PAD.top - PAD.bottom;
-  const maxVal = Math.max(1, ...buckets.map((b) => b.signalsProduced));
-  const barW = Math.max(plotW / buckets.length - 1, 1);
-
-  const yTicks = 4;
-  const yStep = maxVal / yTicks;
-
-  return (
-    <svg width={WIDTH} height={BAR_HEIGHT} style={{ display: "block" }}>
-      {Array.from({ length: yTicks + 1 }, (_, i) => {
-        const val = i * yStep;
-        const yPos = PAD.top + plotH - (val / maxVal) * plotH;
-        return (
-          <g key={i}>
-            <line
-              x1={PAD.left}
-              y1={yPos}
-              x2={WIDTH - PAD.right}
-              y2={yPos}
-              stroke="var(--border)"
-              strokeWidth={0.5}
-            />
-            <text
-              x={PAD.left - 6}
-              y={yPos + 3}
-              textAnchor="end"
-              fill="var(--text-dim)"
-              fontSize={8}
-            >
-              {Math.round(val)}
-            </text>
-          </g>
-        );
-      })}
-
-      {buckets.map((b, i) => {
-        const xPos = PAD.left + i * (plotW / buckets.length) + 0.5;
-        const approvedH = (b.signalsApproved / maxVal) * plotH;
-        const rejectedH = (b.signalsRejected / maxVal) * plotH;
-        return (
-          <g key={i}>
-            <rect
-              x={xPos}
-              y={PAD.top + plotH - approvedH - rejectedH}
-              width={barW}
-              height={rejectedH}
-              fill="var(--red)"
-              opacity={0.7}
-            >
-              <title>{`Rejected: ${b.signalsRejected}`}</title>
-            </rect>
-            <rect
-              x={xPos}
-              y={PAD.top + plotH - approvedH}
-              width={barW}
-              height={approvedH}
-              fill="var(--green)"
-              opacity={0.9}
-            >
-              <title>{`Approved: ${b.signalsApproved}`}</title>
-            </rect>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
-let persistedRangeIdx = 0;
-
-export function TradingActivityPanel() {
-  const [rangeIdx, setRangeIdx] = useState(persistedRangeIdx);
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 60_000);
-    return () => clearInterval(id);
-  }, []);
-  const range = RANGE_OPTIONS[rangeIdx]!;
-  const { data } = useTradingActivity(range.days);
-  const snapshots = data?.items ?? [];
-
-  const segments = collapseStates(snapshots);
-  const buckets = aggregateSnapshots(snapshots, range.bucketMinutes);
-
-  const rangeMs = range.days * 24 * 60 * 60 * 1000;
-  const rangeStart = now - rangeMs;
-  const bandSegments = segments.map((seg) => {
-    const startMs = Math.max(new Date(seg.startAt).getTime() - rangeStart, 0);
-    const endMs = new Date(seg.endAt).getTime() - rangeStart + 10 * 60 * 1000;
-    return { state: seg.state, startMs, durationMs: Math.min(endMs, rangeMs) - startMs };
-  });
-
-  if (snapshots.length === 0) {
+  const plotHeight = HEIGHT - PAD.top - PAD.bottom;
+  const y = (value: number) => PAD.top + plotHeight - (value / maxValue) * plotHeight;
+  const label = formatActivityTooltip(item, mode);
+  if (mode === "execution") {
+    const orderY = y(item.ordersAccepted);
+    const fillY = y(item.fillsReceived);
     return (
-      <div className="card" style={{ textAlign: "center", padding: 40, color: "var(--text-dim)" }}>
-        No activity data yet
-      </div>
+      <g aria-label={label} tabIndex={0}>
+        <title>{label}</title>
+        <rect
+          x={x}
+          y={orderY}
+          width={width}
+          height={PAD.top + plotHeight - orderY}
+          fill="var(--blue)"
+          opacity={0.45}
+        />
+        <rect
+          x={x}
+          y={fillY}
+          width={width}
+          height={PAD.top + plotHeight - fillY}
+          fill="var(--green)"
+          opacity={0.9}
+        />
+      </g>
     );
   }
+  const producedY = y(item.signalsProduced);
+  const approvedHeight = (item.signalsApproved / maxValue) * plotHeight;
+  const rejectedHeight = (item.signalsRejected / maxValue) * plotHeight;
+  return (
+    <g aria-label={label} tabIndex={0}>
+      <title>{label}</title>
+      <rect
+        x={x}
+        y={producedY}
+        width={width}
+        height={PAD.top + plotHeight - producedY}
+        fill="var(--text-dim)"
+        opacity={0.25}
+      />
+      <rect
+        x={x}
+        y={PAD.top + plotHeight - approvedHeight}
+        width={width}
+        height={approvedHeight}
+        fill="var(--green)"
+        opacity={0.9}
+      />
+      <rect
+        x={x}
+        y={PAD.top + plotHeight - approvedHeight - rejectedHeight}
+        width={width}
+        height={rejectedHeight}
+        fill="var(--red)"
+        opacity={0.7}
+      />
+    </g>
+  );
+}
+
+function ActivityChart({ data, mode }: { data: TradingActivityResponse; mode: ActivityMode }) {
+  const timeline = buildActivityTimeline(data);
+  const plotWidth = WIDTH - PAD.left - PAD.right;
+  const windows = timeline.filter((segment) => segment.kind === "window" && segment.item);
+  const values = data.items.flatMap((item) =>
+    mode === "execution"
+      ? [item.ordersAccepted, item.fillsReceived]
+      : [item.signalsProduced, item.signalsApproved + item.signalsRejected],
+  );
+  const maxValue = Math.max(1, ...values);
+  const stateMarkers = buildStateMarkerGroups(
+    data.items,
+    data.coverage.requestedStartAt,
+    data.coverage.requestedEndAt,
+    Math.floor(plotWidth / 12),
+  );
+  return (
+    <svg
+      data-testid="activity-chart"
+      role="img"
+      aria-label={`${mode === "execution" ? "Execution" : "Signal"} activity; ${formatDuration(data.coverage.coveredMs)} verified and ${formatDuration(data.coverage.gapMs)} unavailable`}
+      width="100%"
+      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+      style={{ display: "block", height: HEIGHT }}
+    >
+      {timeline
+        .filter((segment) => segment.kind !== "window")
+        .map((segment, index) => {
+          const x = PAD.left + (segment.leftPct / 100) * plotWidth;
+          const width = (segment.widthPct / 100) * plotWidth;
+          const label =
+            segment.kind === "collecting" ? "Collecting current window" : "No verified data";
+          return (
+            <rect
+              key={`${segment.kind}-${segment.startMs}`}
+              data-testid={
+                index === 0 || segment.kind === "collecting"
+                  ? `activity-gap-${segment.kind}`
+                  : `activity-gap-${segment.kind}-${index}`
+              }
+              x={x}
+              y={PAD.top}
+              width={width}
+              height={HEIGHT - PAD.top - PAD.bottom}
+              fill={segment.kind === "collecting" ? "var(--blue)" : "var(--red)"}
+              opacity={segment.kind === "collecting" ? 0.08 : 0.05}
+              aria-label={`${label}: ${formatDuration(segment.endMs - segment.startMs)}`}
+            >
+              <title>{`${label}: ${formatDuration(segment.endMs - segment.startMs)}`}</title>
+            </rect>
+          );
+        })}
+      {[0, 0.5, 1].map((ratio) => (
+        <line
+          key={ratio}
+          x1={PAD.left}
+          x2={WIDTH - PAD.right}
+          y1={PAD.top + (1 - ratio) * (HEIGHT - PAD.top - PAD.bottom)}
+          y2={PAD.top + (1 - ratio) * (HEIGHT - PAD.top - PAD.bottom)}
+          stroke="var(--border)"
+          strokeWidth={0.5}
+        />
+      ))}
+      {windows.map((segment) => {
+        const item = segment.item!;
+        const x = PAD.left + (segment.leftPct / 100) * plotWidth;
+        const width = (segment.widthPct / 100) * plotWidth;
+        return (
+          <WindowBars
+            key={item.windowStartedAt}
+            item={item}
+            mode={mode}
+            x={x}
+            width={width}
+            maxValue={maxValue}
+          />
+        );
+      })}
+      {stateMarkers.map((marker) => {
+        const x = PAD.left + (marker.leftPct / 100) * plotWidth;
+        const label = formatStateMarkerGroup(marker);
+        return (
+          <g
+            key={`state-${marker.leftPct}`}
+            data-testid="activity-state-marker"
+            tabIndex={0}
+            aria-label={label}
+          >
+            <title>{label}</title>
+            <circle
+              cx={x}
+              cy={12}
+              r={4}
+              fill={ACTIVITY_STATE_COLORS[marker.latestState] ?? "#666"}
+            />
+          </g>
+        );
+      })}
+      <text x={PAD.left} y={HEIGHT - 5} fill="var(--text-dim)" fontSize={9}>
+        {data.coverage.requestedStartAt.slice(5, 16).replace("T", " ")}
+      </text>
+      <text
+        x={WIDTH - PAD.right}
+        y={HEIGHT - 5}
+        textAnchor="end"
+        fill="var(--text-dim)"
+        fontSize={9}
+      >
+        {data.coverage.requestedEndAt.slice(5, 16).replace("T", " ")}
+      </text>
+    </svg>
+  );
+}
+
+function ActivityMessage({
+  label,
+  loading,
+  retry,
+}: {
+  label: string;
+  loading?: boolean;
+  retry?: () => void;
+}) {
+  return (
+    <div data-testid="trading-activity-shell" style={{ position: "relative", minHeight: HEIGHT }}>
+      {loading && <div className="pnl-skeleton" aria-hidden="true" style={{ height: HEIGHT }} />}
+      <div
+        role={loading ? "status" : retry ? "alert" : undefined}
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 8,
+          color: "var(--text-dim)",
+        }}
+      >
+        {label}
+        {retry && <button onClick={retry}>Retry</button>}
+      </div>
+    </div>
+  );
+}
+
+export function TradingActivityPanel() {
+  const [rangeIdx, setRangeIdx] = useState(0);
+  const [mode, setMode] = useState<ActivityMode>("execution");
+  const range = RANGE_OPTIONS[rangeIdx]!;
+  const query = useTradingActivity(range.days);
+  const isBlocking =
+    query.isPending || query.isPlaceholderData || (query.isFetching && query.data == null);
+  const isHardError = query.isError && query.data == null && !isBlocking;
+  const isUpdating = query.isFetching && query.data != null && !query.isPlaceholderData;
+  const hasRefreshError = query.isError && query.data != null;
+  const collecting = query.data?.coverage.gaps.some((gap) => gap.kind === "collecting");
 
   return (
-    <div className="card">
+    <div className="card" data-testid="trading-activity-card" aria-busy={isBlocking || isUpdating}>
       <div
         style={{
           display: "flex",
           justifyContent: "space-between",
-          alignItems: "center",
+          alignItems: "flex-start",
+          gap: 12,
           marginBottom: 8,
         }}
       >
-        <div className="label">Trading Activity</div>
+        <div>
+          <div className="label">Trading Activity</div>
+          <div style={{ display: "flex", gap: 4, marginTop: 5 }}>
+            {(["execution", "signals"] as const).map((value) => (
+              <button
+                key={value}
+                data-testid={`mode-${value}`}
+                aria-pressed={mode === value}
+                onClick={() => setMode(value)}
+                style={{
+                  ...tabStyle,
+                  fontWeight: mode === value ? 700 : 400,
+                  background: mode === value ? "var(--blue)" : "transparent",
+                  color: mode === value ? "#fff" : "var(--text-muted)",
+                }}
+              >
+                {value === "execution" ? "Execution" : "Signals"}
+              </button>
+            ))}
+          </div>
+        </div>
         <div style={{ display: "flex", gap: 4 }}>
-          {RANGE_OPTIONS.map((opt, i) => (
+          {RANGE_OPTIONS.map((option, index) => (
             <button
-              key={opt.label}
-              className={i === rangeIdx ? "btn-success" : "btn-secondary"}
+              key={option.label}
+              aria-pressed={rangeIdx === index}
+              className={rangeIdx === index ? "btn-success" : "btn-secondary"}
               style={{ padding: "2px 8px", fontSize: 10 }}
-              onClick={() => {
-                persistedRangeIdx = i;
-                setRangeIdx(i);
-              }}
+              onClick={() => setRangeIdx(index)}
             >
-              {opt.label}
+              {option.label}
             </button>
           ))}
         </div>
       </div>
-
-      <StateBand segments={bandSegments} totalMs={rangeMs} />
-
-      <div style={{ marginTop: 4 }}>
-        <SignalBars buckets={buckets} />
-      </div>
-
-      <div
-        style={{
-          display: "flex",
-          gap: 12,
-          marginTop: 6,
-          fontSize: 9,
-          color: "var(--text-muted)",
-          flexWrap: "wrap",
-        }}
-      >
-        {Object.entries(STATE_LABELS).map(([key, label]) => (
-          <span key={key} style={{ display: "flex", alignItems: "center", gap: 3 }}>
-            <span
-              style={{
-                display: "inline-block",
-                width: 8,
-                height: 8,
-                borderRadius: 2,
-                background: STATE_COLORS[key],
-              }}
-            />
-            {label}
-          </span>
-        ))}
-        <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
-          <span
-            style={{
-              display: "inline-block",
-              width: 8,
-              height: 8,
-              borderRadius: 2,
-              background: "var(--green)",
-              opacity: 0.9,
-            }}
-          />
-          Approved
-        </span>
-        <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
-          <span
-            style={{
-              display: "inline-block",
-              width: 8,
-              height: 8,
-              borderRadius: 2,
-              background: "var(--red)",
-              opacity: 0.7,
-            }}
-          />
-          Rejected
-        </span>
-      </div>
+      {isBlocking ? (
+        <ActivityMessage label={`Loading ${range.label} activity…`} loading />
+      ) : isHardError ? (
+        <ActivityMessage
+          label={`Couldn't load ${range.label} activity`}
+          retry={() => void query.refetch()}
+        />
+      ) : !query.data ? (
+        <ActivityMessage label="No activity response" />
+      ) : (
+        <div data-testid="trading-activity-shell" style={{ minHeight: HEIGHT }}>
+          <div data-testid="activity-summary" style={{ fontSize: 10, color: "var(--text-dim)" }}>
+            {formatDuration(query.data.coverage.coveredMs)} verified ·{" "}
+            {formatDuration(query.data.coverage.gapMs)} unavailable
+            {collecting ? " · collecting current window" : ""}
+            {isUpdating ? <span role="status"> · Updating…</span> : null}
+            {hasRefreshError ? (
+              <span role="alert">
+                {" "}
+                · Update failed <button onClick={() => void query.refetch()}>Retry</button>
+              </span>
+            ) : null}
+          </div>
+          <ActivityChart data={query.data} mode={mode} />
+          {query.data.items.length === 0 ? (
+            <div style={{ fontSize: 9, color: "var(--text-muted)" }}>
+              No completed verified windows yet.
+            </div>
+          ) : null}
+          <div style={{ fontSize: 9, color: "var(--text-muted)" }}>
+            Bars are completed windows; dots show state at close. Shaded spans are unavailable, not
+            zero activity.
+          </div>
+        </div>
+      )}
     </div>
   );
 }

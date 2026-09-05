@@ -750,13 +750,42 @@ export interface PortfolioSeriesResponse {
   coverageComplete: boolean;
 }
 
-/** GET /metrics/trading-activity item */
-export interface TradingActivitySnapshot {
+/** One validated v2 activity interval from GET /metrics/trading-activity. */
+export interface TradingActivityWindow {
   tradingState: string;
   signalsProduced: number;
   signalsApproved: number;
   signalsRejected: number;
   capturedAt: string;
+  windowVersion: 2;
+  windowStartedAt: string;
+  windowEndedAt: string;
+  ordersAccepted: number;
+  orderNotionalUsdc: number;
+  fillsReceived: number;
+  fillNotionalUsdc: number;
+  rejectionReasons: Record<string, number>;
+}
+
+export interface TradingActivityGap {
+  startAt: string;
+  endAt: string;
+  durationMs: number;
+  kind: "missing" | "collecting";
+}
+
+export interface TradingActivityResponse {
+  items: TradingActivityWindow[];
+  coverage: {
+    requestedStartAt: string;
+    requestedEndAt: string;
+    coveredMs: number;
+    gapMs: number;
+    gapCount: number;
+    coveragePercent: number;
+    gaps: TradingActivityGap[];
+    excludedRows: { legacy: number; invalid: number; outsideRange: number };
+  };
 }
 
 /** S0–S3 phase derived server-side from leg_states + position status. */

@@ -605,11 +605,22 @@ CREATE TABLE IF NOT EXISTS trading_state_snapshots (
   signals_produced  INTEGER NOT NULL,
   signals_approved  INTEGER NOT NULL,
   signals_rejected  INTEGER NOT NULL,
-  captured_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+  captured_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+  window_version    INTEGER,
+  window_started_at TEXT,
+  window_ended_at   TEXT,
+  orders_accepted   INTEGER,
+  order_notional_usdc REAL,
+  fills_received    INTEGER,
+  fill_notional_usdc REAL,
+  rejection_reasons_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_trading_state_snapshots_ts
   ON trading_state_snapshots(captured_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trading_state_snapshots_window_v2
+  ON trading_state_snapshots(window_version, window_started_at, window_ended_at);
 
 -- ═══════════ PORTFOLIO SNAPSHOTS ═══════════
 -- From 018_portfolio_snapshots.sql
