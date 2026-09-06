@@ -314,6 +314,7 @@ describe("cleanStaleEntryOrders", () => {
       riskEventInsertThrows?: boolean;
       riskEventFailures?: { remaining: number };
       thinHoldReportedOrderIds?: Set<string>;
+      replacementUnavailableLogState?: Map<string, string>;
       snapshotCalls?: { n: number };
       tickSize?: number;
       metrics?: { writeCounter: ReturnType<typeof vi.fn> };
@@ -333,6 +334,9 @@ describe("cleanStaleEntryOrders", () => {
         ...(opts.metrics ? { metrics: opts.metrics } : {}),
         ...(opts.thinHoldReportedOrderIds
           ? { thinHoldReportedOrderIds: opts.thinHoldReportedOrderIds }
+          : {}),
+        ...(opts.replacementUnavailableLogState
+          ? { replacementUnavailableLogState: opts.replacementUnavailableLogState }
           : {}),
         exitRepriceOnDownprice: {
           // ONE atomic snapshot: nested policy + top-level anchor from a single read.
@@ -1955,6 +1959,57 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.staleExitTtlCancelled).toBe(0);
     expect(result.downpriceRepriceCancelled).toBe(0);
     expect(cancelled).toHaveLength(0);
+  });
+
+  it("logs replacement unavailability only on transitions and rearms after live recovery", async () => {
+    const order = makeOrder({ side: "sell", signalReason: "repricing-exit" });
+    const state = new Map<string, string>();
+    const unavailable = { marketAvailable: false, replacementUnavailableLogState: state };
+    const cancelled = vi.fn();
+    bus.subscribe("CancelOrderRequested", cancelled);
+
+    await runWithDownprice(order, 0.28, new Map(), unavailable);
+    await runWithDownprice(order, 0.28, new Map(), unavailable);
+    await runWithDownprice(order, 0.28, new Map(), {
+      acceptingOrders: false,
+      replacementUnavailableLogState: state,
+    });
+    await runWithDownprice(order, 0.28, new Map(), { replacementUnavailableLogState: state });
+    await runWithDownprice(order, 0.28, new Map(), unavailable);
+    await bus.drain();
+
+    expect(
+      silentLog.info.mock.calls.filter(
+        ([, message]: unknown[]) =>
+          message === "stale exit order held — replacement market unavailable",
+      ),
+    ).toHaveLength(3);
+    expect(cancelled).not.toHaveBeenCalled();
+  });
+
+  it("tracks distinct orders and prunes replacement-unavailable state when none remain", async () => {
+    const first = makeOrder({ side: "sell", signalReason: "repricing-exit" });
+    const second = makeOrder({
+      ...first,
+      orderId: createOrderId("other-unavailable-sell"),
+      clientOrderId: "other-unavailable-sell-client" as ClientOrderId,
+    });
+    const state = new Map<string, string>();
+
+    await runWithDownprice(first, 0.28, new Map(), {
+      extraOpenOrders: [second],
+      marketAvailable: false,
+      replacementUnavailableLogState: state,
+    });
+    expect(state.size).toBe(2);
+    orderRepo.findOpen = vi.fn().mockReturnValue([]);
+    await cleanStaleEntryOrders(
+      { orderRepo, marketRepo, bus, log: silentLog, replacementUnavailableLogState: state },
+      new Map(),
+    );
+
+    expect(state.size).toBe(0);
+    expect(silentLog.info).toHaveBeenCalledTimes(2);
   });
 
   it("resets the downprice reprice counter after a three-tick best-bid recovery", async () => {

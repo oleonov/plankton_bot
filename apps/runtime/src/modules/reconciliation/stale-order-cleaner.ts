@@ -235,6 +235,7 @@ export interface StaleOrderCleanerDeps {
       | undefined;
   };
   thinHoldReportedOrderIds?: Set<string>;
+  replacementUnavailableLogState?: Map<string, string>;
   trackCExit?: TrackCExitCleanerDeps;
   recoveryTtlCoverage?: RecoveryTtlCoverageDeps;
   trackAAddThrottle?: {
@@ -296,6 +297,9 @@ export async function cleanStaleEntryOrders(
   }
   for (const key of deps.thinHoldReportedOrderIds ?? []) {
     if (!openIds.has(key)) deps.thinHoldReportedOrderIds!.delete(key);
+  }
+  for (const key of deps.replacementUnavailableLogState?.keys() ?? []) {
+    if (!openIds.has(key)) deps.replacementUnavailableLogState!.delete(key);
   }
   const openSellTokenIds = new Set(exitSells.map((o) => String(o.tokenId)));
   for (const key of sellDownpriceRepriceMap.keys()) {
@@ -499,16 +503,21 @@ export async function cleanStaleEntryOrders(
       repriceMarket,
     );
     if (replacementUnavailableReasons) {
-      log.info(
-        {
-          orderId: ordKey,
-          tokenId: String(order.tokenId),
-          reasons: replacementUnavailableReasons,
-        },
-        "stale exit order held — replacement market unavailable",
-      );
+      const reasonKey = JSON.stringify(replacementUnavailableReasons);
+      if (deps.replacementUnavailableLogState?.get(ordKey) !== reasonKey) {
+        deps.replacementUnavailableLogState?.set(ordKey, reasonKey);
+        log.info(
+          {
+            orderId: ordKey,
+            tokenId: String(order.tokenId),
+            reasons: replacementUnavailableReasons,
+          },
+          "stale exit order held — replacement market unavailable",
+        );
+      }
       continue;
     }
+    deps.replacementUnavailableLogState?.delete(ordKey);
 
     const repriceDecision = shouldRepriceDownprice(
       order,

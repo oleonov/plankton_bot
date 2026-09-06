@@ -274,6 +274,7 @@ export class ReconciliationModule implements RuntimeModule {
   private readonly staleBackoffMap = new Map<string, number>();
   private readonly sellDownpriceRepriceMap: SellDownpriceRepriceStateMap = new Map();
   private readonly thinHoldReportedOrderIds = new Set<string>();
+  private readonly replacementUnavailableLogState = new Map<string, string>();
   private readonly quoteMotionStates = new Map<string, QuoteMotionState>();
   constructor(private readonly deps: ReconciliationModuleDeps) {
     this.log = deps.log.child({ module: "reconciliation" });
@@ -503,6 +504,7 @@ export class ReconciliationModule implements RuntimeModule {
             : {}),
           ...(repriceChainGate ? { repriceChainGate } : {}),
           thinHoldReportedOrderIds: this.thinHoldReportedOrderIds,
+          replacementUnavailableLogState: this.replacementUnavailableLogState,
           ...(this.deps.legStateRepo && this.deps.trackAAddThrottlePolicy
             ? {
                 trackAAddThrottle: {
