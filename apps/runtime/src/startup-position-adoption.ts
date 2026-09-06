@@ -1085,8 +1085,11 @@ function remoteOrderMatchesLocal(
   local: Order,
   fillRepo: Pick<FillRepository, "findByOrderId">,
 ): boolean {
-  const remaining = submitUnknownRemainingShares(local, fillRepo, true);
-  if (remaining === null) return false;
+  const localRemaining = submitUnknownRemainingShares(local, fillRepo, true);
+  if (localRemaining === null) return false;
+  const filled = local.size - localRemaining;
+  const sizeTotal = clobSubmittedSize(local.size);
+  const sizeRemaining = sizeTotal - filled;
   return (
     (remote.status === "OPEN" || remote.status === "PARTIALLY_FILLED") &&
     remote.orderId === local.exchangeOrderId &&
@@ -1094,10 +1097,15 @@ function remoteOrderMatchesLocal(
     remote.side === local.side &&
     (remote.clientOrderId == null || remote.clientOrderId === String(local.clientOrderId)) &&
     Math.abs(remote.price - local.price) <= 1e-9 &&
-    Math.abs(remote.sizeTotal - local.size) <= 1e-9 &&
-    Math.abs(remote.sizeFilled - (local.size - remaining)) <= 1e-9 &&
-    Math.abs(remote.sizeRemaining - remaining) <= 1e-9
+    Math.abs(remote.sizeTotal - sizeTotal) <= 1e-9 &&
+    Math.abs(remote.sizeFilled - filled) <= 1e-9 &&
+    Math.abs(remote.sizeRemaining - sizeRemaining) <= 1e-9
   );
+}
+
+function clobSubmittedSize(size: number): number {
+  const decimalPlaces = size.toString().split(".")[1]?.length ?? 0;
+  return decimalPlaces <= 2 ? size : Math.floor(size * 100) / 100;
 }
 
 function persistSubmitUnknownMarker(orderRepo: OrderRepository, snapshot: Order): Order {

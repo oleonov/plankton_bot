@@ -671,6 +671,40 @@ describe("runStartupPositionAdoption", () => {
     await expect(runStartupPositionAdoption(deps)).rejects.toThrow("marker is invalid");
   });
 
+  it("accepts the exact CLOB two-decimal size floor for submit-unknown siblings", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const seeded = seedSubmitUnknownBounceCandidate(conn);
+    const siblingSizes = [1.583690987654, 1.916309012346];
+    seeded.siblings.forEach((sibling, index) => {
+      conn.db
+        .prepare("UPDATE orders SET size = ?, size_usdc = ? WHERE order_id = ?")
+        .run(siblingSizes[index], siblingSizes[index]! * sibling.price, sibling.orderId);
+    });
+    const siblings = seeded.siblings.map((order) => seeded.orderRepo.findById(order.orderId)!);
+    const remote = siblings.map((order, index) =>
+      asExchangeOrder(order, {
+        sizeTotal: index === 0 ? 1.58 : 1.91,
+        sizeRemaining: index === 0 ? 1.58 : 1.91,
+      }),
+    );
+    const deps = adoptionDeps(conn, {
+      getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: remote }),
+      getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+      getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
+    });
+
+    expect((await runStartupPositionAdoption(deps)).drainTargets).toHaveLength(1);
+
+    vi.mocked(deps.gateway.getOpenOrdersResult).mockResolvedValue({
+      ok: true,
+      data: [{ ...remote[0]!, sizeTotal: 1.57, sizeRemaining: 1.57 }, remote[1]!],
+    });
+    await expect(runStartupPositionAdoption(deps)).rejects.toThrow(
+      "submit-unknown sibling parity mismatch",
+    );
+  });
+
   it.each([
     ["OPEN", 0],
     ["PARTIALLY_FILLED", 0.5],
