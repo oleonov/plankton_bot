@@ -99,6 +99,17 @@ describe("SqliteSignalFeedRepository", () => {
     ).toEqual([120_000, 180_000]);
   });
 
+  it("rolls back the whole batch when a later bucket violates a constraint", () => {
+    expect(() =>
+      repo.upsertBuckets(
+        [bucket(), bucket({ bucketStartMs: 120_000, closeMid: null as unknown as number })],
+        1_700_000_000_000,
+      ),
+    ).toThrow();
+
+    expect(repo.selectBucketsForToken({ tokenId, bucketGranularityMs: 60_000 })).toEqual([]);
+  });
+
   it("deletes old buckets by granularity and keeps newer or different granularity rows", () => {
     repo.upsertBuckets(
       [

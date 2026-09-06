@@ -5,6 +5,7 @@ import {
   createConditionId,
   createPositionId,
   createCommandId,
+  DEFAULT_REPRICE_CHAIN_POLICY,
 } from "@krabs/domain";
 import type {
   ExchangeGateway,
@@ -295,6 +296,81 @@ describe("ReconciliationModule", () => {
     expect(result.clean).toBe(false);
     expect(result.details).toContain("Track A resting add cancel requests: 1");
     vi.useRealTimers();
+  });
+
+  it("deduplicates persisted thin-hold reports across passes and rearms after the order closes", async () => {
+    const order = makeLocalOrder({
+      side: "sell",
+      price: 0.29,
+      sizeUsdc: 2.9,
+      signalReason: "repricing-exit",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const exchangeOrder = makeExchangeOrder({
+      side: "sell",
+      price: 0.29,
+      sizeRemaining: 10,
+    });
+    vi.mocked(orderRepo.findOpen).mockReturnValue([order]);
+    vi.mocked(gateway.getOpenOrders).mockResolvedValue([exchangeOrder]);
+    vi.mocked(marketRepo.findByTokenId).mockReturnValue({
+      tokenId: TOK,
+      conditionId: order.conditionId,
+      slug: "thin-market",
+      eventSlug: null,
+      question: "Thin?",
+      outcome: "YES",
+      regime: null,
+      horizon: null,
+      endDate: null,
+      active: true,
+      tradable: true,
+      tickSize: 0.01,
+      negRisk: false,
+      eventMarketCount: 1,
+      gammaCreatedAt: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const insert = vi.fn();
+    const thinModule = buildModule({
+      exitRepriceOnDownprice: {
+        snapshot: () => ({
+          policy: {
+            ...DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice,
+            enabled: true,
+            skipDownpriceWhenThin: true,
+            thinTradeCountThreshold: 10,
+          },
+          anchorTicks: DEFAULT_EXECUTION_POLICY.exitMidpointAnchorTicks,
+        }),
+        getMarket: () => ({
+          bestBid: 0.23,
+          bestAsk: null,
+          bestAskSize: null,
+          askDepthExcludingOurs: null,
+          tickSize: 0.01,
+          publicTradeCount24h: 5,
+          acceptingOrders: true,
+          enableOrderBook: true,
+        }),
+      },
+      repriceChainPolicy: () => DEFAULT_REPRICE_CHAIN_POLICY,
+      legStateRepo: { get: () => null } as never,
+      riskEventRepo: { insert } as never,
+    });
+
+    await thinModule.runReconciliation();
+    await thinModule.runReconciliation();
+    expect(insert).toHaveBeenCalledTimes(1);
+
+    vi.mocked(orderRepo.findOpen).mockReturnValue([]);
+    vi.mocked(gateway.getOpenOrders).mockResolvedValue([]);
+    await thinModule.runReconciliation();
+    vi.mocked(orderRepo.findOpen).mockReturnValue([order]);
+    vi.mocked(gateway.getOpenOrders).mockResolvedValue([exchangeOrder]);
+    await thinModule.runReconciliation();
+    expect(insert).toHaveBeenCalledTimes(2);
   });
 
   // ─── Lifecycle ──────────────────────────────────────────────────────

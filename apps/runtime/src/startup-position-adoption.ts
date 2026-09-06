@@ -101,7 +101,22 @@ export interface StartupDrainTarget {
   tokenId: TokenId;
   activePositionId: PositionId | null;
   orders: Order[];
-  provenanceByOrderId: Map<string, "exchange-working" | "exact-null-expired-maker">;
+  provenanceByOrderId: Map<string, StartupDrainProvenance>;
+}
+
+export type StartupDrainProvenance =
+  | "exchange-working"
+  | "exact-null-expired-maker"
+  | "exact-null-submit-unknown-sell";
+
+interface SubmitUnknownRecoveryV1 {
+  version: 1;
+  orderId: string;
+  clientOrderId: string;
+  exchangeOrderId: string;
+  tokenId: string;
+  conditionId: string;
+  positionId: string;
 }
 
 export interface StartupPositionAdoptionResult {
@@ -379,13 +394,16 @@ export async function runStartupPositionAdoption(
 
   result.syntheticOrdersCreated = syntheticOrders.size;
   const exactNullExpiredMakers: Order[] = [];
+  const exactNullSubmitUnknownSells: Order[] = [];
   for (const order of deps.orderRepo.findOpen()) {
     if (
       order.status !== "pending" &&
-      isExactNullExpiredMakerDrainCandidate(order, deps, rawFills, Date.now())
+      (isExactNullExpiredMakerDrainCandidate(order, deps, rawFills, Date.now()) ||
+        (isSubmitUnknownSellShape(order) && hasSubmitUnknownStartupEvidence(deps.db, order)))
     )
       pendingOrderIds.push(order.orderId);
   }
+  const startupOpenOrders = await readStartupOpenOrders(deps, log);
 
   for (const orderId of pendingOrderIds) {
     const order = deps.orderRepo.findById(orderId);
@@ -409,9 +427,25 @@ export async function runStartupPositionAdoption(
         exactNullExpiredMakers.push(order);
         continue;
       }
+      if (isSubmitUnknownSellShape(order) && hasSubmitUnknownStartupEvidence(deps.db, order)) {
+        exactNullSubmitUnknownSells.push(order);
+        continue;
+      }
       throw new Error(
         `startup aborted — pending order ${String(orderId)} lacks exact terminal proof`,
       );
+    }
+    const authoritativeWorking =
+      exact.data.status === "OPEN" || exact.data.status === "PARTIALLY_FILLED";
+    const submitUnknownEvidence =
+      authoritativeWorking && hasSubmitUnknownStartupEvidence(deps.db, order);
+    if (
+      submitUnknownEvidence &&
+      (!parseSubmitUnknownRecoveryV1(order) ||
+        !matchesSubmitUnknownRecoveryLocalProof(order, deps) ||
+        !submitUnknownWorkingSnapshotMatches(order, exact.data, startupOpenOrders, deps))
+    ) {
+      throw new StartupSnapshotUnreliableError("submit-unknown working proof mismatch", 1);
     }
     const verdict = await applyOrderVerdict({
       orderRepo: deps.orderRepo,
@@ -424,18 +458,198 @@ export async function runStartupPositionAdoption(
     });
     if (verdict.status === "unresolved")
       throw new Error(`startup aborted — pending order ${String(orderId)} unresolved`);
+    if (submitUnknownEvidence) {
+      const current = deps.orderRepo.findById(orderId);
+      if (!current || !isWorkingOrder(current) || !parseSubmitUnknownRecoveryV1(current)) {
+        throw new StartupSnapshotUnreliableError("submit-unknown working proof mismatch", 1);
+      }
+      exactNullSubmitUnknownSells.push(current);
+    }
   }
 
   rebuildLegStatesFromLedger(deps, result, log);
 
-  result.drainTargets = await classifyStartupTransitionTargets(
+  result.drainTargets = classifyStartupTransitionTargets(
     deps,
     result,
     log,
     exactNullExpiredMakers,
+    exactNullSubmitUnknownSells,
+    startupOpenOrders,
   );
 
   return result;
+}
+
+export function parseSubmitUnknownRecoveryV1(order: Order): SubmitUnknownRecoveryV1 | null {
+  const value = order.metadata?.submitUnknownRecoveryV1 as Record<string, unknown> | undefined;
+  if (!value || value.version !== 1) return null;
+  const expected = {
+    orderId: String(order.orderId),
+    clientOrderId: String(order.clientOrderId),
+    exchangeOrderId: String(order.exchangeOrderId),
+    tokenId: String(order.tokenId),
+    conditionId: String(order.conditionId),
+    positionId: String(order.positionId),
+  };
+  return Object.entries(expected).every(([key, expectedValue]) => value[key] === expectedValue)
+    ? (value as unknown as SubmitUnknownRecoveryV1)
+    : null;
+}
+
+function submitUnknownMarker(order: Order): SubmitUnknownRecoveryV1 {
+  return {
+    version: 1,
+    orderId: String(order.orderId),
+    clientOrderId: String(order.clientOrderId),
+    exchangeOrderId: String(order.exchangeOrderId),
+    tokenId: String(order.tokenId),
+    conditionId: String(order.conditionId),
+    positionId: String(order.positionId),
+  };
+}
+
+function isSubmitUnknownSellShape(order: Order): boolean {
+  return (
+    order.side === "sell" &&
+    order.orderType === "GTC" &&
+    order.postOnly === true &&
+    order.entryStyle === "maker" &&
+    order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+    order.signalReason === "repricing-exit" &&
+    order.exchangeOrderId === String(order.orderId) &&
+    order.positionId != null &&
+    Number.isFinite(order.price) &&
+    order.price > 0 &&
+    Number.isFinite(order.size) &&
+    order.size > 0
+  );
+}
+
+function hasSubmitUnknownStartupEvidence(db: Database.Database, order: Order): boolean {
+  const markerPresent = order.metadata?.submitUnknownRecoveryV1 !== undefined;
+  if (markerPresent) {
+    if (!parseSubmitUnknownRecoveryV1(order)) {
+      throw new Error("startup aborted — submit-unknown recovery marker is invalid");
+    }
+    return true;
+  }
+  const rows = db
+    .prepare(
+      `SELECT payload FROM risk_events
+       WHERE event_type = 'live_order_submit_unknown'
+         AND (json_extract(payload, '$.orderId') = ? OR json_extract(payload, '$.clientOrderId') = ?)`,
+    )
+    .all(String(order.orderId), String(order.clientOrderId)) as Array<{ payload: string }>;
+  if (rows.length === 0) return false;
+  if (rows.length !== 1) throw new Error("startup aborted — submit-unknown evidence is ambiguous");
+  const payload = JSON.parse(rows[0]!.payload) as Record<string, unknown>;
+  if (
+    payload.orderId !== String(order.orderId) ||
+    payload.clientOrderId !== String(order.clientOrderId) ||
+    typeof payload.commandId !== "string" ||
+    payload.commandId.length === 0
+  ) {
+    throw new Error("startup aborted — submit-unknown evidence identity mismatch");
+  }
+  return true;
+}
+
+export function matchesSubmitUnknownRecoveryLocalProof(
+  order: Order,
+  deps: Pick<
+    StartupPositionAdoptionDeps,
+    "fillRepo" | "orderRepo" | "positionRepo" | "inventoryLotRepo"
+  >,
+): boolean {
+  const working = deps.orderRepo.findByTokenId(order.tokenId).filter(isWorkingOrder);
+  const allowPostQuarantineFills = parseSubmitUnknownRecoveryV1(order) !== null;
+  const remaining = working.map((candidate) =>
+    submitUnknownRemainingShares(candidate, deps.fillRepo, allowPostQuarantineFills),
+  );
+  const positions = deps.positionRepo.findActiveByTokenId(order.tokenId);
+  const position = positions[0];
+  if (
+    !isWorkingOrder(order) ||
+    !isSubmitUnknownSellShape(order) ||
+    positions.length !== 1 ||
+    !position ||
+    position.status === "closed" ||
+    position.exitOwner !== "bounce" ||
+    String(position.positionId) !== String(order.positionId) ||
+    String(position.conditionId) !== String(order.conditionId) ||
+    !working.some(({ orderId }) => orderId === order.orderId)
+  ) {
+    return false;
+  }
+  const rungs = working.map(bounceRungMetadata);
+  const ladderId = bounceRungMetadata(order)?.ladderId;
+  const fifo = deps.inventoryLotRepo
+    .findOpen(position.positionId)
+    .reduce((sum, lot) => sum + lot.remainingSize, 0);
+  return (
+    working.every(
+      (candidate, index) =>
+        isExactBounceSibling(candidate, order, rungs[index], ladderId) && remaining[index] !== null,
+    ) &&
+    typeof ladderId === "string" &&
+    ladderId.length > 0 &&
+    new Set(rungs.map((rung) => `${String(rung?.ladderId)}:${String(rung?.rungIndex)}`)).size ===
+      working.length &&
+    Number.isFinite(fifo) &&
+    Math.abs(fifo - position.size) <= 1e-9 &&
+    remaining.reduce<number>((sum, shares) => sum + (shares ?? 0), 0) <= fifo + 1e-9
+  );
+}
+
+function submitUnknownRemainingShares(
+  order: Order,
+  fillRepo: Pick<FillRepository, "findByOrderId">,
+  allowFills: boolean,
+): number | null {
+  const fills = fillRepo.findByOrderId(order.orderId);
+  if (!allowFills && fills.length > 0) return null;
+  let filled = 0;
+  for (const fill of fills) {
+    if (
+      fill.orderId !== order.orderId ||
+      fill.tokenId !== order.tokenId ||
+      fill.conditionId !== order.conditionId ||
+      fill.side !== "sell" ||
+      !Number.isFinite(fill.size) ||
+      fill.size <= 0
+    )
+      return null;
+    filled += fill.size;
+  }
+  return Number.isFinite(filled) && filled <= order.size + 1e-9
+    ? Math.max(0, order.size - filled)
+    : null;
+}
+
+function isWorkingOrder(order: Order): boolean {
+  return (
+    order.status === "pending" || order.status === "open" || order.status === "partially-filled"
+  );
+}
+
+function bounceRungMetadata(order: Order): Record<string, unknown> | undefined {
+  return order.metadata?.bounceRung as Record<string, unknown> | undefined;
+}
+
+function isExactBounceSibling(
+  candidate: Order,
+  target: Order,
+  rung: Record<string, unknown> | undefined,
+  ladderId: unknown,
+): boolean {
+  return (
+    isSubmitUnknownSellShape(candidate) &&
+    candidate.positionId === target.positionId &&
+    candidate.conditionId === target.conditionId &&
+    rung?.ladderId === ladderId &&
+    Number.isInteger(rung?.rungIndex)
+  );
 }
 
 export function isExactNullExpiredMakerDrainCandidate(
@@ -645,6 +859,19 @@ function isStrictRecoveryChildAtStartup(
   return siblings.length === 1 && siblings[0]!.orderId === child.orderId;
 }
 
+async function readStartupOpenOrders(
+  deps: StartupPositionAdoptionDeps,
+  log: Logger,
+): Promise<ExchangeOrder[]> {
+  const result = await deps.gateway.getOpenOrdersResult();
+  if (result.ok) return result.data;
+  log.fatal(
+    { reason: result.reason, attempts: result.attempts },
+    "startup adoption ABORTED — exchange open-orders snapshot unreliable (fail-closed)",
+  );
+  throw new StartupSnapshotUnreliableError(result.reason, result.attempts);
+}
+
 /**
  * Release A Phase 3 (P6) startup fence: read-only classification of exchange
  * open orders that could reopen or fill against a stale/closed cycle. Never
@@ -656,23 +883,16 @@ function isStrictRecoveryChildAtStartup(
  * Fail-closed like the fills fetch above: an unreliable open-orders snapshot
  * must abort startup rather than silently skip the fence.
  */
-async function classifyStartupTransitionTargets(
+function classifyStartupTransitionTargets(
   deps: StartupPositionAdoptionDeps,
   result: StartupPositionAdoptionResult,
   log: Logger,
   exactNullExpiredMakers: readonly Order[],
-): Promise<StartupDrainTarget[]> {
-  const openOrdersResult = await deps.gateway.getOpenOrdersResult();
-  if (!openOrdersResult.ok) {
-    log.fatal(
-      { reason: openOrdersResult.reason, attempts: openOrdersResult.attempts },
-      "startup adoption ABORTED — exchange open-orders snapshot unreliable (fail-closed)",
-    );
-    throw new StartupSnapshotUnreliableError(openOrdersResult.reason, openOrdersResult.attempts);
-  }
-
+  exactNullSubmitUnknownSells: readonly Order[],
+  exchangeOpenOrders: readonly ExchangeOrder[],
+): StartupDrainTarget[] {
   const restingByToken = new Map<string, ExchangeOrder[]>();
-  for (const exchangeOrder of openOrdersResult.data) {
+  for (const exchangeOrder of exchangeOpenOrders) {
     if (exchangeOrder.status !== "OPEN" && exchangeOrder.status !== "PARTIALLY_FILLED") continue;
     const key = String(exchangeOrder.tokenId);
     const bucket = restingByToken.get(key) ?? [];
@@ -758,6 +978,13 @@ async function classifyStartupTransitionTargets(
       else result.quarantinedReopeningBuys++;
     }
   }
+  addSubmitUnknownDrainTargets(
+    deps,
+    result,
+    drainTargets,
+    restingByToken,
+    exactNullSubmitUnknownSells,
+  );
   for (const order of exactNullExpiredMakers) {
     const activePositions = deps.positionRepo.findActiveByTokenId(order.tokenId);
     const activePositionIds = new Set(
@@ -785,12 +1012,112 @@ async function classifyStartupTransitionTargets(
   return [...drainTargets.values()];
 }
 
+function addSubmitUnknownDrainTargets(
+  deps: StartupPositionAdoptionDeps,
+  result: StartupPositionAdoptionResult,
+  targets: Map<string, StartupDrainTarget>,
+  remoteByToken: ReadonlyMap<string, readonly ExchangeOrder[]>,
+  candidates: readonly Order[],
+): void {
+  for (const snapshot of candidates) {
+    if (!matchesSubmitUnknownRecoveryLocalProof(snapshot, deps)) {
+      throw new StartupSnapshotUnreliableError("submit-unknown local proof mismatch", 1);
+    }
+    const remote = remoteByToken.get(String(snapshot.tokenId)) ?? [];
+    const siblings = deps.orderRepo
+      .findByTokenId(snapshot.tokenId)
+      .filter((order) => order.orderId !== snapshot.orderId && isWorkingOrder(order));
+    const targetIsRemote = remote.some(({ orderId }) => orderId === snapshot.exchangeOrderId);
+    if (targetIsRemote && !parseSubmitUnknownRecoveryV1(snapshot)) {
+      throw new StartupSnapshotUnreliableError(
+        "unmarked submit-unknown target is exchange-live",
+        1,
+      );
+    }
+    const expected = targetIsRemote ? [snapshot, ...siblings] : siblings;
+    if (!remoteSiblingsMatch(remote, expected, deps.fillRepo)) {
+      throw new StartupSnapshotUnreliableError("submit-unknown sibling parity mismatch", 1);
+    }
+    const current = persistSubmitUnknownMarker(deps.orderRepo, snapshot);
+    addStartupDrainOrder(
+      targets,
+      current.tokenId,
+      current.positionId ?? null,
+      current,
+      "exact-null-submit-unknown-sell",
+    );
+    result.quarantinedStaleSells++;
+  }
+}
+
+function remoteSiblingsMatch(
+  remote: readonly ExchangeOrder[],
+  local: readonly Order[],
+  fillRepo: Pick<FillRepository, "findByOrderId">,
+): boolean {
+  if (remote.length !== local.length) return false;
+  return local.every((order) => {
+    const matches = remote.filter(({ orderId }) => orderId === order.exchangeOrderId);
+    return matches.length === 1 && remoteOrderMatchesLocal(matches[0]!, order, fillRepo);
+  });
+}
+
+function submitUnknownWorkingSnapshotMatches(
+  local: Order,
+  exact: ExchangeOrder,
+  snapshot: readonly ExchangeOrder[],
+  deps: Pick<StartupPositionAdoptionDeps, "fillRepo" | "orderRepo">,
+): boolean {
+  const remote = snapshot.filter(
+    (order) =>
+      String(order.tokenId) === String(local.tokenId) &&
+      (order.status === "OPEN" || order.status === "PARTIALLY_FILLED"),
+  );
+  const lineage = deps.orderRepo.findByTokenId(local.tokenId).filter(isWorkingOrder);
+  return (
+    remoteOrderMatchesLocal(exact, local, deps.fillRepo) &&
+    remoteSiblingsMatch(remote, lineage, deps.fillRepo)
+  );
+}
+
+function remoteOrderMatchesLocal(
+  remote: ExchangeOrder,
+  local: Order,
+  fillRepo: Pick<FillRepository, "findByOrderId">,
+): boolean {
+  const remaining = submitUnknownRemainingShares(local, fillRepo, true);
+  if (remaining === null) return false;
+  return (
+    (remote.status === "OPEN" || remote.status === "PARTIALLY_FILLED") &&
+    remote.orderId === local.exchangeOrderId &&
+    remote.tokenId === local.tokenId &&
+    remote.side === local.side &&
+    (remote.clientOrderId == null || remote.clientOrderId === String(local.clientOrderId)) &&
+    Math.abs(remote.price - local.price) <= 1e-9 &&
+    Math.abs(remote.sizeTotal - local.size) <= 1e-9 &&
+    Math.abs(remote.sizeFilled - (local.size - remaining)) <= 1e-9 &&
+    Math.abs(remote.sizeRemaining - remaining) <= 1e-9
+  );
+}
+
+function persistSubmitUnknownMarker(orderRepo: OrderRepository, snapshot: Order): Order {
+  const current = orderRepo.findById(snapshot.orderId);
+  if (!current) throw new StartupSnapshotUnreliableError("submit-unknown order disappeared", 1);
+  if (parseSubmitUnknownRecoveryV1(current)) return current;
+  const updated = orderRepo.updateMetadataIfUnchanged?.(current.orderId, current.metadata ?? null, {
+    ...(current.metadata ?? {}),
+    submitUnknownRecoveryV1: submitUnknownMarker(current),
+  });
+  if (!updated) throw new StartupSnapshotUnreliableError("submit-unknown metadata CAS failed", 1);
+  return updated;
+}
+
 function addStartupDrainOrder(
   targets: Map<string, StartupDrainTarget>,
   tokenId: TokenId,
   activePositionId: PositionId | null,
   order: Order,
-  provenance: "exchange-working" | "exact-null-expired-maker",
+  provenance: StartupDrainProvenance,
 ): void {
   const key = String(tokenId);
   const target: StartupDrainTarget = targets.get(key) ?? {

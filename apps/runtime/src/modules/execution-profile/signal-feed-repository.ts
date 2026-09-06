@@ -14,42 +14,37 @@ export interface SignalFeedBucketRepository {
 }
 
 export class SqliteSignalFeedRepository implements SignalFeedBucketRepository {
-  constructor(private readonly db: Database.Database) {}
+  private readonly upsertStatement: Database.Statement;
+  private readonly upsertBatch: (buckets: readonly OhlcBucket[], createdAtMs: number) => void;
+
+  constructor(private readonly db: Database.Database) {
+    this.upsertStatement = db.prepare(
+      `INSERT INTO signal_feed_buckets
+       (token_id, bucket_start_ms, bucket_granularity_ms, open_mid, high_mid, low_mid,
+        close_mid, sample_count, trade_count, notional_sum, created_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(token_id, bucket_granularity_ms, bucket_start_ms) DO UPDATE SET
+         open_mid = excluded.open_mid,
+         high_mid = excluded.high_mid,
+         low_mid = excluded.low_mid,
+         close_mid = excluded.close_mid,
+         sample_count = excluded.sample_count,
+         trade_count = excluded.trade_count,
+         notional_sum = excluded.notional_sum,
+         created_at_ms = excluded.created_at_ms`,
+    );
+    this.upsertBatch = db.transaction((buckets: readonly OhlcBucket[], createdAtMs: number) => {
+      for (const bucket of buckets) this.runUpsert(bucket, createdAtMs);
+    });
+  }
 
   upsertBucket(bucket: OhlcBucket, createdAtMs: number): void {
-    this.db
-      .prepare(
-        `INSERT INTO signal_feed_buckets
-         (token_id, bucket_start_ms, bucket_granularity_ms, open_mid, high_mid, low_mid,
-          close_mid, sample_count, trade_count, notional_sum, created_at_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(token_id, bucket_granularity_ms, bucket_start_ms) DO UPDATE SET
-           open_mid = excluded.open_mid,
-           high_mid = excluded.high_mid,
-           low_mid = excluded.low_mid,
-           close_mid = excluded.close_mid,
-           sample_count = excluded.sample_count,
-           trade_count = excluded.trade_count,
-           notional_sum = excluded.notional_sum,
-           created_at_ms = excluded.created_at_ms`,
-      )
-      .run(
-        bucket.tokenId,
-        bucket.bucketStartMs,
-        bucket.bucketGranularityMs,
-        bucket.openMid,
-        bucket.highMid,
-        bucket.lowMid,
-        bucket.closeMid,
-        bucket.sampleCount,
-        bucket.tradeCount,
-        bucket.notionalSum,
-        createdAtMs,
-      );
+    this.runUpsert(bucket, createdAtMs);
   }
 
   upsertBuckets(buckets: readonly OhlcBucket[], createdAtMs: number): void {
-    for (const bucket of buckets) this.upsertBucket(bucket, createdAtMs);
+    if (buckets.length === 0) return;
+    this.upsertBatch(buckets, createdAtMs);
   }
 
   selectBucketsForToken(args: {
@@ -90,6 +85,22 @@ export class SqliteSignalFeedRepository implements SignalFeedBucketRepository {
       )
       .run(bucketGranularityMs, beforeMs);
     return Number(result.changes);
+  }
+
+  private runUpsert(bucket: OhlcBucket, createdAtMs: number): void {
+    this.upsertStatement.run(
+      bucket.tokenId,
+      bucket.bucketStartMs,
+      bucket.bucketGranularityMs,
+      bucket.openMid,
+      bucket.highMid,
+      bucket.lowMid,
+      bucket.closeMid,
+      bucket.sampleCount,
+      bucket.tradeCount,
+      bucket.notionalSum,
+      createdAtMs,
+    );
   }
 }
 

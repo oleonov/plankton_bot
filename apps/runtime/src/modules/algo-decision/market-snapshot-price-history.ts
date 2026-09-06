@@ -56,6 +56,21 @@ const WINDOW_MAX_CACHE_MAX_ENTRIES = 10_000;
 const DEFAULT_MEMORY_SAMPLE_MAX_AGE_MS = 24 * 60 * 60_000;
 const DEFAULT_MEMORY_SAMPLE_MAX_PER_TOKEN = 2_000;
 
+interface MemorySample {
+  ts: number;
+  price: number;
+  seq: number;
+}
+
+interface WindowMaxCacheEntry {
+  computedAtMs: number;
+  queryAtMs: number;
+  value: number | null;
+  source: "memory" | "database";
+  maxSampleSeq: number | null;
+  maxSampleTs: number | null;
+}
+
 export interface MarketSnapshotPriceHistoryProviderOptions {
   readonly syncMissLookup?: boolean;
   readonly memorySampleMaxAgeMs?: number;
@@ -69,11 +84,10 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
   private readonly syncMissLookup: boolean;
   private readonly memorySampleMaxAgeMs: number;
   private readonly memorySampleMaxPerToken: number;
-  private readonly memorySamplesByToken = new Map<string, Array<{ ts: number; price: number }>>();
-  private readonly windowMaxCache = new Map<
-    string,
-    { computedAtMs: number; value: number | null }
-  >();
+  private readonly memorySamplesByToken = new Map<string, MemorySample[]>();
+  private readonly windowMaxCache = new Map<string, WindowMaxCacheEntry>();
+  private readonly windowMaxKeysByToken = new Map<string, Set<string>>();
+  private nextSampleSeq = 0;
   private windowMaxInvocations = 0;
   private windowMaxHits = 0;
   private windowMaxMisses = 0;
@@ -150,14 +164,14 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
     this.windowMaxInvocations++;
     const cacheKey = `${tokenId}:${windowMs}`;
     const cached = this.windowMaxCache.get(cacheKey);
-    if (cached && nowMs - cached.computedAtMs < WINDOW_MAX_CACHE_TTL_MS) {
+    if (cached && this.refreshMemoryWindowMax(cached, tokenId, windowMs, nowMs)) {
       this.windowMaxHits++;
       return cached.value;
     }
     this.windowMaxMisses++;
     const memoryMax = this.maxMidpointInMemory(tokenId, windowMs, nowMs);
     if (memoryMax != null || !this.syncMissLookup) {
-      this.rememberWindowMax(cacheKey, nowMs, memoryMax);
+      this.rememberWindowMax(cacheKey, String(tokenId), windowMs, nowMs, memoryMax);
       return memoryMax;
     }
     const sinceIso = new Date(nowMs - windowMs).toISOString();
@@ -166,7 +180,7 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
       | { max_price: number | null }
       | undefined;
     const max = finitePositive(row?.max_price ?? null);
-    this.rememberWindowMax(cacheKey, nowMs, max);
+    this.rememberWindowMax(cacheKey, String(tokenId), windowMs, nowMs, max, "database");
     return max;
   }
 
@@ -209,11 +223,15 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
 
     const tokenKey = String(market.tokenId);
     const samples = this.memorySamplesByToken.get(tokenKey) ?? [];
-    samples.push({ ts: observedAtMs, price });
+    const sample = { ts: observedAtMs, price, seq: ++this.nextSampleSeq };
+    const orderedAppend = samples.length === 0 || observedAtMs > samples[samples.length - 1]!.ts;
+    if (orderedAppend) samples.push(sample);
+    else samples.splice(findInsertionIndex(samples, sample), 0, sample);
     this.observedSamples++;
-    this.recordPrunedSamples(this.pruneSamples(samples, observedAtMs));
     this.memorySamplesByToken.set(tokenKey, samples);
-    this.evictWindowCacheForToken(tokenKey);
+    if (orderedAppend) this.invalidateCoveredOrDatabaseCache(tokenKey, observedAtMs);
+    else this.evictWindowCacheForToken(tokenKey);
+    this.pruneTokenSamples(tokenKey, samples, Math.max(observedAtMs, samples.at(-1)!.ts));
   }
 
   evictToken(tokenId: TokenId): void {
@@ -261,12 +279,77 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
     };
   }
 
-  private rememberWindowMax(key: string, computedAtMs: number, value: number | null): void {
+  private rememberWindowMax(
+    key: string,
+    tokenKey: string,
+    windowMs: number,
+    computedAtMs: number,
+    value: number | null,
+    source: WindowMaxCacheEntry["source"] = "memory",
+  ): void {
     if (this.windowMaxCache.size >= WINDOW_MAX_CACHE_MAX_ENTRIES) {
       const oldestKey = this.windowMaxCache.keys().next().value;
-      if (oldestKey) this.windowMaxCache.delete(oldestKey);
+      if (oldestKey) this.removeWindowMax(oldestKey);
     }
-    this.windowMaxCache.set(key, { computedAtMs, value });
+    const backing =
+      source === "memory" ? this.findLatestMaxSample(tokenKey, windowMs, computedAtMs) : null;
+    this.windowMaxCache.set(key, {
+      computedAtMs,
+      queryAtMs: computedAtMs,
+      value,
+      source,
+      maxSampleSeq: backing?.seq ?? null,
+      maxSampleTs: backing?.ts ?? null,
+    });
+    const keys = this.windowMaxKeysByToken.get(tokenKey) ?? new Set<string>();
+    keys.add(key);
+    this.windowMaxKeysByToken.set(tokenKey, keys);
+  }
+
+  private refreshMemoryWindowMax(
+    cached: WindowMaxCacheEntry,
+    tokenId: TokenId,
+    windowMs: number,
+    nowMs: number,
+  ): boolean {
+    if (cached.source === "database") {
+      return nowMs - cached.computedAtMs < WINDOW_MAX_CACHE_TTL_MS;
+    }
+    if (
+      nowMs < cached.queryAtMs ||
+      nowMs - cached.computedAtMs >= WINDOW_MAX_CACHE_TTL_MS ||
+      (cached.maxSampleTs != null && cached.maxSampleTs < nowMs - windowMs)
+    ) {
+      return false;
+    }
+    const samples = this.memorySamplesByToken.get(String(tokenId)) ?? [];
+    const oldestMs = nowMs - windowMs;
+    for (let index = firstSampleAfter(samples, cached.queryAtMs); index < samples.length; index++) {
+      const sample = samples[index]!;
+      if (sample.ts > nowMs) break;
+      if (sample.ts < oldestMs) continue;
+      if (cached.value == null || sample.price >= cached.value) {
+        cached.value = sample.price;
+        cached.maxSampleSeq = sample.seq;
+        cached.maxSampleTs = sample.ts;
+      }
+    }
+    cached.queryAtMs = nowMs;
+    return true;
+  }
+
+  private findLatestMaxSample(
+    tokenKey: string,
+    windowMs: number,
+    nowMs: number,
+  ): MemorySample | null {
+    const samples = this.memorySamplesByToken.get(tokenKey) ?? [];
+    let max: MemorySample | null = null;
+    for (const sample of samples) {
+      if (sample.ts < nowMs - windowMs || sample.ts > nowMs) continue;
+      if (max == null || sample.price >= max.price) max = sample;
+    }
+    return max;
   }
 
   private findReferencePriceInMemory(
@@ -315,26 +398,21 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
 
   private pruneAllSamples(nowMs: number): void {
     for (const [tokenKey, samples] of this.memorySamplesByToken) {
-      const pruned = this.pruneSamples(samples, nowMs);
-      this.recordPrunedSamples(pruned);
-      if (pruned.age + pruned.capacity > 0) this.evictWindowCacheForToken(tokenKey);
-      if (samples.length === 0) this.memorySamplesByToken.delete(tokenKey);
+      this.pruneTokenSamples(tokenKey, samples, Math.max(nowMs, samples.at(-1)?.ts ?? nowMs));
     }
   }
 
-  private pruneSamples(
-    samples: Array<{ ts: number; price: number }>,
-    nowMs: number,
-  ): { age: number; capacity: number } {
-    const oldestMs = nowMs - this.memorySampleMaxAgeMs;
+  private pruneSamples(samples: MemorySample[], anchorMs: number): MemorySample[] {
+    const oldestMs = anchorMs - this.memorySampleMaxAgeMs;
     let age = 0;
     while (age < samples.length && samples[age]!.ts < oldestMs) {
       age++;
     }
     const capacity = Math.max(0, samples.length - age - this.memorySampleMaxPerToken);
     const deleteCount = age + capacity;
-    if (deleteCount > 0) samples.splice(0, deleteCount);
-    return { age, capacity };
+    const removed = deleteCount > 0 ? samples.splice(0, deleteCount) : [];
+    this.recordPrunedSamples({ age, capacity });
+    return removed;
   }
 
   private recordPrunedSamples(pruned: { age: number; capacity: number }): void {
@@ -343,11 +421,64 @@ export class MarketSnapshotPriceHistoryProvider implements PriceHistoryProvider 
   }
 
   private evictWindowCacheForToken(tokenKey: string): void {
-    const prefix = `${tokenKey}:`;
-    for (const key of this.windowMaxCache.keys()) {
-      if (key.startsWith(prefix)) this.windowMaxCache.delete(key);
+    for (const key of this.windowMaxKeysByToken.get(tokenKey) ?? []) this.removeWindowMax(key);
+  }
+
+  private invalidateCoveredOrDatabaseCache(tokenKey: string, observedAtMs: number): void {
+    for (const key of this.windowMaxKeysByToken.get(tokenKey) ?? []) {
+      const cached = this.windowMaxCache.get(key);
+      if (cached?.source === "database" || (cached && observedAtMs <= cached.queryAtMs)) {
+        this.removeWindowMax(key);
+      }
     }
   }
+
+  private pruneTokenSamples(tokenKey: string, samples: MemorySample[], anchorMs: number): void {
+    const removed = this.pruneSamples(samples, anchorMs);
+    if (removed.length > 0) {
+      const seqs = new Set(removed.map((sample) => sample.seq));
+      for (const key of this.windowMaxKeysByToken.get(tokenKey) ?? []) {
+        const backingSeq = this.windowMaxCache.get(key)?.maxSampleSeq;
+        if (backingSeq != null && seqs.has(backingSeq)) this.removeWindowMax(key);
+      }
+    }
+    if (samples.length === 0) this.memorySamplesByToken.delete(tokenKey);
+  }
+
+  private removeWindowMax(key: string): void {
+    if (!this.windowMaxCache.delete(key)) return;
+    const splitAt = key.lastIndexOf(":");
+    const tokenKey = key.slice(0, splitAt);
+    const keys = this.windowMaxKeysByToken.get(tokenKey);
+    keys?.delete(key);
+    if (keys?.size === 0) this.windowMaxKeysByToken.delete(tokenKey);
+  }
+}
+
+function findInsertionIndex(samples: MemorySample[], inserted: MemorySample): number {
+  let low = 0;
+  let high = samples.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    const sample = samples[mid]!;
+    if (sample.ts < inserted.ts || (sample.ts === inserted.ts && sample.seq < inserted.seq)) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+}
+
+function firstSampleAfter(samples: MemorySample[], timestampMs: number): number {
+  let low = 0;
+  let high = samples.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (samples[mid]!.ts <= timestampMs) low = mid + 1;
+    else high = mid;
+  }
+  return low;
 }
 
 function midpointStatsFromSamples(

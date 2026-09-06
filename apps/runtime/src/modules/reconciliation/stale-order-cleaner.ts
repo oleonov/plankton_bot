@@ -184,7 +184,7 @@ export interface StaleOrderCleanerDeps {
   log: Logger;
   exactNullStartupQuarantine?: Pick<
     ExactNullStartupQuarantine,
-    "isExactNullStartupOrderQuarantined"
+    "isExactNullStartupOrderQuarantined" | "isExactNullStartupTokenQuarantined"
   >;
   /**
    * ADR-015: exit-order TTL is read per-call so operator edits to
@@ -234,6 +234,7 @@ export interface StaleOrderCleanerDeps {
         }
       | undefined;
   };
+  thinHoldReportedOrderIds?: Set<string>;
   trackCExit?: TrackCExitCleanerDeps;
   recoveryTtlCoverage?: RecoveryTtlCoverageDeps;
   trackAAddThrottle?: {
@@ -293,6 +294,9 @@ export async function cleanStaleEntryOrders(
   for (const key of backoffMap.keys()) {
     if (!openIds.has(key)) backoffMap.delete(key);
   }
+  for (const key of deps.thinHoldReportedOrderIds ?? []) {
+    if (!openIds.has(key)) deps.thinHoldReportedOrderIds!.delete(key);
+  }
   const openSellTokenIds = new Set(exitSells.map((o) => String(o.tokenId)));
   for (const key of sellDownpriceRepriceMap.keys()) {
     if (!openSellTokenIds.has(key)) sellDownpriceRepriceMap.delete(key);
@@ -309,7 +313,11 @@ export async function cleanStaleEntryOrders(
   let trackARestingAddCancelRequested = 0;
 
   for (const order of entryBuys) {
-    if (deps.exactNullStartupQuarantine?.isExactNullStartupOrderQuarantined(order) === true) {
+    if (
+      deps.exactNullStartupQuarantine?.isExactNullStartupTokenQuarantined?.(order.tokenId) ===
+        true ||
+      deps.exactNullStartupQuarantine?.isExactNullStartupOrderQuarantined(order) === true
+    ) {
       continue;
     }
     const ordKey = String(order.orderId);
@@ -401,6 +409,11 @@ export async function cleanStaleEntryOrders(
   let trackCConsecutiveFailures = 0;
   let trackCCircuitOpen = false;
   for (const order of exitSells) {
+    if (
+      deps.exactNullStartupQuarantine?.isExactNullStartupTokenQuarantined?.(order.tokenId) === true
+    ) {
+      continue;
+    }
     const ordKey = String(order.orderId);
     const lastAttempt = backoffMap.get(ordKey);
     if (lastAttempt != null && now - lastAttempt < CANCEL_BACKOFF_MS) continue;
@@ -528,7 +541,7 @@ export async function cleanStaleEntryOrders(
           1,
           JSON.stringify({ reason: "noop" }),
         );
-        log.info(
+        log.debug(
           {
             token_id: String(order.tokenId),
             current_price: order.price,
@@ -577,36 +590,7 @@ export async function cleanStaleEntryOrders(
             1,
             JSON.stringify({ reason: "thin" }),
           );
-          // Durable survivorship event (deduped by MIN(created_at) per orderId at
-          // ANALYSIS time — the cleaner re-scans each pass and has no persistent
-          // per-order dedup; best-effort, never blocks the hold decision).
-          try {
-            deps.repriceChainGate?.riskEventRepo?.insert({
-              eventType: "exit_downprice_reprice_held",
-              payload: {
-                tokenId: String(order.tokenId),
-                orderId: String(order.orderId),
-                orderPrice: order.price,
-                bestBid: repriceMarket?.bestBid ?? null,
-                bestAsk: repriceMarket?.bestAsk ?? null,
-                publicTradeCount24h: tradeCount,
-                thresholdUsed: thinThreshold,
-                heldAt: new Date(now).toISOString(),
-              },
-            });
-          } catch {
-            /* best-effort telemetry — never break the hold */
-          }
-          log.info(
-            {
-              token_id: String(order.tokenId),
-              current_price: order.price,
-              bid: repriceMarket?.bestBid ?? null,
-              public_trade_count_24h: tradeCount,
-              thin_threshold: thinThreshold,
-            },
-            "Track L Stage 2 thin-market downprice reprice held",
-          );
+          reportThinHold(deps, order, repriceMarket, tradeCount, thinThreshold, now);
           continue;
         }
       }
@@ -1388,6 +1372,52 @@ function resolveOrderTtlMs(
   // here instead of a shorter TTL and are not cancelled prematurely; every order the predicate rejects
   // keeps its existing horizon / probe / scale-in TTL.
   return resolveEntryBuyOrderTtlMs(order, market);
+}
+
+function reportThinHold(
+  deps: StaleOrderCleanerDeps,
+  order: Order,
+  market: ExitRepriceMarket | null,
+  publicTradeCount24h: number,
+  threshold: number,
+  nowMs: number,
+): void {
+  const orderId = String(order.orderId);
+  if (deps.thinHoldReportedOrderIds?.has(orderId)) return;
+  let persisted = false;
+  try {
+    if (deps.repriceChainGate?.riskEventRepo) {
+      deps.repriceChainGate.riskEventRepo.insert({
+        eventType: "exit_downprice_reprice_held",
+        payload: {
+          tokenId: String(order.tokenId),
+          orderId,
+          orderPrice: order.price,
+          bestBid: market?.bestBid ?? null,
+          bestAsk: market?.bestAsk ?? null,
+          publicTradeCount24h,
+          thresholdUsed: threshold,
+          heldAt: new Date(nowMs).toISOString(),
+        },
+      });
+      deps.thinHoldReportedOrderIds?.add(orderId);
+      persisted = true;
+    }
+  } catch {
+    // Best-effort telemetry: retry next pass without changing the hold decision.
+  }
+  deps.log.info(
+    {
+      orderId,
+      token_id: String(order.tokenId),
+      current_price: order.price,
+      bid: market?.bestBid ?? null,
+      public_trade_count_24h: publicTradeCount24h,
+      thin_threshold: threshold,
+      report_persisted: persisted,
+    },
+    "Track L Stage 2 thin-market downprice reprice held",
+  );
 }
 
 async function publishCancel(

@@ -91,7 +91,7 @@ function seedMarket(repo: SqliteMarketRepository): void {
 
 function seedMissingBounceCandidate(
   conn: ReturnType<typeof bootstrapLedgerDb>,
-  opts: { postOnly?: boolean } = {},
+  opts: { postOnly?: boolean; exitOwner?: "bounce" | "profile" } = {},
 ) {
   const orderRepo = new SqliteOrderRepository(conn.db);
   const positionId = createPositionId("pos-missing-bounce");
@@ -103,9 +103,9 @@ function seedMissingBounceCandidate(
       `INSERT INTO positions
          (position_id, token_id, condition_id, side, size, avg_entry_price, cost_basis_usdc,
           status, entry_style, entry_lane, exit_owner, opened_at, updated_at)
-       VALUES (?, ?, 'cond-1', 'buy', 5, 0.2, 1, 'open', 'maker', 'R23', 'bounce', ?, ?)`,
+       VALUES (?, ?, 'cond-1', 'buy', 5, 0.2, 1, 'open', 'maker', 'R23', ?, ?, ?)`,
     )
-    .run(positionId, TOKEN_ID, now, now);
+    .run(positionId, TOKEN_ID, opts.exitOwner ?? "bounce", now, now);
   conn.db
     .prepare(
       `INSERT INTO orders
@@ -154,6 +154,42 @@ function seedMissingBounceCandidate(
     updatedAt: now,
   });
   return { orderRepo, predecessorId };
+}
+
+function seedSubmitUnknownBounceCandidate(
+  conn: ReturnType<typeof bootstrapLedgerDb>,
+  exitOwner: "bounce" | "profile" = "bounce",
+) {
+  const { orderRepo, predecessorId } = seedMissingBounceCandidate(conn, { exitOwner });
+  conn.db
+    .prepare(
+      "UPDATE orders SET exchange_order_id = order_id, signal_reason = 'repricing-exit' WHERE order_id = ?",
+    )
+    .run(predecessorId);
+  const candidate = orderRepo.findById(predecessorId)!;
+  const siblings = [
+    { id: "submit-unknown-sibling-1", size: 1.5, rungIndex: 1 },
+    { id: "submit-unknown-sibling-2", size: 2, rungIndex: 2 },
+  ].map(({ id, size, rungIndex }) => ({
+    ...candidate,
+    orderId: createOrderId(id),
+    clientOrderId: `${id}-client` as ClientOrderId,
+    exchangeOrderId: id,
+    size,
+    sizeUsdc: size * candidate.price,
+    status: "open" as const,
+    metadata: { bounceRung: { ladderId: "ladder-1", rungIndex } },
+  }));
+  for (const sibling of siblings) orderRepo.save(sibling);
+  conn.db.prepare("INSERT INTO risk_events (event_type, payload) VALUES (?, ?)").run(
+    "live_order_submit_unknown",
+    JSON.stringify({
+      commandId: "submit-unknown-command",
+      orderId: String(candidate.orderId),
+      clientOrderId: String(candidate.clientOrderId),
+    }),
+  );
+  return { candidate: orderRepo.findById(predecessorId)!, orderRepo, siblings };
 }
 
 function expiredPreparedMakerOrder(overrides: Partial<Order> = {}): Order {
@@ -582,6 +618,233 @@ describe("runStartupPositionAdoption", () => {
       );
     },
   );
+
+  it("quarantines and restarts an exact-null submit-unknown BOUNCE SELL with two exact working siblings", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const seeded = seedSubmitUnknownBounceCandidate(conn);
+    const candidate = seeded.orderRepo.findById(seeded.candidate.orderId)!;
+    const { siblings } = seeded;
+    const deps = adoptionDeps(conn, {
+      getOpenOrdersResult: vi.fn().mockResolvedValue({
+        ok: true,
+        data: siblings.map((order) => asExchangeOrder(order)),
+      }),
+      getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+      getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
+    });
+
+    const result = await runStartupPositionAdoption(deps);
+
+    expect(result.drainTargets).toHaveLength(1);
+    expect(result.drainTargets[0]?.provenanceByOrderId.get(String(candidate.orderId))).toBe(
+      "exact-null-submit-unknown-sell",
+    );
+    expect(deps.orderRepo.findById(candidate.orderId)?.metadata).toEqual(
+      expect.objectContaining({ submitUnknownRecoveryV1: expect.any(Object) }),
+    );
+    conn.db.prepare("DELETE FROM risk_events").run();
+    conn.db
+      .prepare("UPDATE orders SET status = 'partially-filled' WHERE order_id = ?")
+      .run(candidate.orderId);
+    conn.db
+      .prepare(
+        `INSERT INTO fills
+           (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at)
+         VALUES ('submit-partial', ?, ?, 'cond-1', 'sell', .3, .5, .15, ?)`,
+      )
+      .run(candidate.orderId, TOKEN_ID, new Date().toISOString());
+    conn.db.prepare("UPDATE positions SET size = 4.5 WHERE token_id = ?").run(TOKEN_ID);
+    conn.db
+      .prepare("UPDATE inventory_lots SET remaining_size = 4.5 WHERE token_id = ?")
+      .run(TOKEN_ID);
+    expect((await runStartupPositionAdoption(deps)).drainTargets).toHaveLength(1);
+
+    const metadata = deps.orderRepo.findById(candidate.orderId)!.metadata!;
+    deps.orderRepo.updateMetadata(candidate.orderId, {
+      ...metadata,
+      submitUnknownRecoveryV1: {
+        ...(metadata.submitUnknownRecoveryV1 as Record<string, unknown>),
+        tokenId: "forged",
+      },
+    });
+    await expect(runStartupPositionAdoption(deps)).rejects.toThrow("marker is invalid");
+  });
+
+  it.each([
+    ["OPEN", 0],
+    ["PARTIALLY_FILLED", 0.5],
+  ] as const)(
+    "restores a marked submit-unknown SELL from remote %s proof",
+    async (status, filled) => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { candidate, orderRepo, siblings } = seedSubmitUnknownBounceCandidate(conn);
+      const deps = adoptionDeps(conn, {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({
+          ok: true,
+          data: siblings.map((order) => asExchangeOrder(order)),
+        }),
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
+      });
+      await runStartupPositionAdoption(deps);
+      conn.db.prepare("DELETE FROM risk_events").run();
+      if (filled > 0) {
+        conn.db
+          .prepare(
+            `INSERT INTO fills
+             (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at)
+           VALUES ('submit-remote-partial', ?, ?, 'cond-1', 'sell', .3, ?, .15, ?)`,
+          )
+          .run(candidate.orderId, TOKEN_ID, filled, new Date().toISOString());
+        conn.db.prepare("UPDATE positions SET size = 4.5 WHERE token_id = ?").run(TOKEN_ID);
+        conn.db
+          .prepare("UPDATE inventory_lots SET remaining_size = 4.5 WHERE token_id = ?")
+          .run(TOKEN_ID);
+      }
+      const current = orderRepo.findById(candidate.orderId)!;
+      const remote = asExchangeOrder(current, {
+        status,
+        sizeFilled: filled,
+        sizeRemaining: current.size - filled,
+      });
+      vi.mocked(deps.gateway.getOpenOrdersResult).mockResolvedValue({
+        ok: true,
+        data: [remote, ...siblings.map((order) => asExchangeOrder(order))],
+      });
+
+      vi.mocked(deps.gateway.getOrderResult!).mockResolvedValue({
+        ok: true,
+        data: { ...remote, sizeRemaining: remote.sizeRemaining + 1 },
+      });
+      await expect(runStartupPositionAdoption(deps)).rejects.toThrow("working proof mismatch");
+      expect(orderRepo.findById(candidate.orderId)?.status).toBe("pending");
+      vi.mocked(deps.gateway.getOrderResult!).mockResolvedValue({ ok: true, data: remote });
+      expect((await runStartupPositionAdoption(deps)).drainTargets).toHaveLength(1);
+    },
+  );
+
+  it.each(["bad-sibling", "local-bad-sibling", "unmarked", "unmarked-corrupt-shape"] as const)(
+    "aborts remote OPEN submit-unknown %s proof before mutating pending state",
+    async (failure) => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { candidate, orderRepo, siblings } = seedSubmitUnknownBounceCandidate(conn);
+      const deps = adoptionDeps(conn, {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({
+          ok: true,
+          data: siblings.map((order) => asExchangeOrder(order)),
+        }),
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
+      });
+      if (failure === "bad-sibling" || failure === "local-bad-sibling")
+        await runStartupPositionAdoption(deps);
+      if (failure === "local-bad-sibling")
+        conn.db
+          .prepare("UPDATE orders SET post_only = 0 WHERE order_id = ?")
+          .run(siblings[0]!.orderId);
+      if (failure === "unmarked-corrupt-shape")
+        conn.db
+          .prepare("UPDATE orders SET post_only = 0 WHERE order_id = ?")
+          .run(candidate.orderId);
+      const current = orderRepo.findById(candidate.orderId)!;
+      const remote = asExchangeOrder(current);
+      const remoteSiblings = siblings.map((order) =>
+        asExchangeOrder(orderRepo.findById(order.orderId)!),
+      );
+      if (failure === "bad-sibling")
+        remoteSiblings[0] = {
+          ...remoteSiblings[0]!,
+          sizeRemaining: remoteSiblings[0]!.sizeRemaining + 1,
+        };
+      vi.mocked(deps.gateway.getOrderResult!).mockResolvedValue({ ok: true, data: remote });
+      vi.mocked(deps.gateway.getOpenOrdersResult).mockResolvedValue({
+        ok: true,
+        data: [remote, ...remoteSiblings],
+      });
+
+      await expect(runStartupPositionAdoption(deps)).rejects.toThrow();
+      expect(orderRepo.findById(candidate.orderId)?.status).toBe("pending");
+      if (failure === "unmarked" || failure === "unmarked-corrupt-shape")
+        expect(orderRepo.findById(candidate.orderId)?.metadata).not.toHaveProperty(
+          "submitUnknownRecoveryV1",
+        );
+    },
+  );
+
+  it.each([
+    "missing-event",
+    "near-event",
+    "duplicate-event",
+    "fill",
+    "bad-sibling",
+    "wrong-owner",
+    "remote-target",
+    "remote-size",
+    "overcommit",
+    "cas",
+  ] as const)("fails closed for submit-unknown recovery with %s proof", async (failure) => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const seeded = seedSubmitUnknownBounceCandidate(
+      conn,
+      failure === "wrong-owner" ? "profile" : "bounce",
+    );
+    if (failure === "missing-event") conn.db.prepare("DELETE FROM risk_events").run();
+    if (failure === "near-event") {
+      conn.db
+        .prepare("UPDATE risk_events SET payload = json_set(payload, '$.clientOrderId', 'wrong')")
+        .run();
+    }
+    if (failure === "duplicate-event") {
+      conn.db
+        .prepare(
+          "INSERT INTO risk_events (event_type, payload) SELECT event_type, payload FROM risk_events",
+        )
+        .run();
+    }
+    if (failure === "fill") {
+      conn.db
+        .prepare(
+          `INSERT INTO fills
+              (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at)
+             VALUES ('submit-fill', ?, ?, 'cond-1', 'sell', .3, .1, .03, ?)`,
+        )
+        .run(seeded.candidate.orderId, TOKEN_ID, new Date().toISOString());
+    }
+    if (failure === "bad-sibling") {
+      conn.db
+        .prepare("UPDATE orders SET post_only = 0 WHERE order_id = ?")
+        .run(seeded.siblings[0]!.orderId);
+    }
+    if (failure === "overcommit") {
+      conn.db
+        .prepare("UPDATE orders SET size = 9 WHERE order_id = ?")
+        .run(seeded.siblings[0]!.orderId);
+    }
+    const remote = seeded.siblings.map((row) =>
+      asExchangeOrder(seeded.orderRepo.findById(row.orderId)!),
+    );
+    if (failure === "remote-target") remote.push(asExchangeOrder(seeded.candidate));
+    if (failure === "remote-size") remote[0] = { ...remote[0]!, sizeTotal: 999 };
+    const deps = adoptionDeps(conn, {
+      getOpenOrdersResult: vi.fn().mockResolvedValue({
+        ok: true,
+        data: remote,
+      }),
+      getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+      getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
+    });
+    if (failure === "cas")
+      vi.spyOn(deps.orderRepo, "updateMetadataIfUnchanged").mockReturnValue(null);
+
+    await expect(runStartupPositionAdoption(deps)).rejects.toThrow();
+    expect(deps.orderRepo.findById(seeded.candidate.orderId)?.metadata).not.toHaveProperty(
+      "submitUnknownRecoveryV1",
+    );
+  });
 
   it.each(["active-position", "other-buy", "other-sell", "remote-sell"] as const)(
     "fails closed for an exact-null maker with %s on the same token",

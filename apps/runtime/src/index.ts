@@ -1794,6 +1794,8 @@ async function main(): Promise<void> {
   const exactNullStartupQuarantine = {
     isExactNullStartupOrderQuarantined: (order: import("@krabs/domain").Order) =>
       executionModule.isExactNullStartupOrderQuarantined(order),
+    isExactNullStartupTokenQuarantined: (tokenId: import("@krabs/domain").TokenId) =>
+      executionModule.isExactNullStartupTokenQuarantined(tokenId),
     observeExactNullStartupRemoteState: (
       order: import("@krabs/domain").Order,
       state: "absent" | "working",
@@ -3272,13 +3274,26 @@ async function main(): Promise<void> {
   // BUY would raise the waiver latch while deferring nothing (a BUY is not in the active-SELL
   // relation), and the abandoned-waiver fatal would then name it as a "SELL with no owning
   // position", which is simply false.
-  const drainedOrderIds = new Set(
+  const startupFencedOrderIds = new Set(
     startupAdoption.drainTargets.flatMap((target) =>
       target.orders
-        .filter((order) => order.side === "sell" && isWorkingSellOrderStatus(order.status))
+        .filter((order) => isWorkingSellOrderStatus(order.status))
         .map((order) => String(order.orderId)),
     ),
   );
+  const drainedOrderIds = new Set(
+    startupAdoption.drainTargets.flatMap((target) =>
+      target.orders
+        .filter(
+          (order) =>
+            order.side === "sell" &&
+            isWorkingSellOrderStatus(order.status) &&
+            target.provenanceByOrderId.get(String(order.orderId)) === "exchange-working",
+        )
+        .map((order) => String(order.orderId)),
+    ),
+  );
+  const ownershipWaivedOrderIds = drainedOrderIds;
   const recoveryPredecessorOrderIds = new Set(startupAdoption.recoveryPredecessorOrderIds);
   runOwnershipInvariantStartupGate({
     ledgerDb: ledgerConn.db,
@@ -3294,7 +3309,7 @@ async function main(): Promise<void> {
   // trading. This latch covers the second disjunct: it stays true from the waiver until the fence
   // gate proves the drain, and the catch reads it so the abort names the SELL orders left resting
   // instead of burying them under whatever failed first.
-  let drainWaiverOutstanding = bounceAppliesToAllMarkets && drainedOrderIds.size > 0;
+  let drainWaiverOutstanding = bounceAppliesToAllMarkets && ownershipWaivedOrderIds.size > 0;
 
   // 11. Start
   try {
@@ -3361,18 +3376,17 @@ async function main(): Promise<void> {
     // now-enabled flag demands be clean.
     const bounceAppliesAtFenceRelease = currentExecutionPolicy().bounceExit.applyToAllMarkets;
 
-    // The other half of the ownership gate's drain-target deferral: it excused those orders on the
-    // promise that the barrier would drain them, and this is the point that promise is either kept
-    // or the boot dies with the fence still latched. Only runs when the gate actually deferred —
-    // with `applyToAllMarkets` off nothing was excused, so demanding a barrier here would invent a
-    // brand-new hard-stop for a configuration that boots fine today. The second disjunct covers the
-    // mid-start enable: gate #1 ran as a no-op and left no waiver, but the checkpoint below will
-    // excuse these orders under the fresh `true`, and an excuse with no barrier proving it is
-    // exactly what this gate exists to refuse.
+    // Every startup-classified working order must still be terminal or owned by its exact
+    // transition before the startup fence opens. This proof is independent of applyToAllMarkets:
+    // exact-null quarantine is a submission-ambiguity boundary, not an ownership-policy waiver.
+    let startupFenceProofRequired = startupFencedOrderIds.size > 0;
     if (drainWaiverOutstanding || (bounceAppliesAtFenceRelease && drainedOrderIds.size > 0)) {
+      startupFenceProofRequired = true;
+    }
+    if (startupFenceProofRequired) {
       runDrainedOrderFenceGate({
         controlDb: controlConn.db,
-        drainedOrderIds,
+        drainedOrderIds: startupFencedOrderIds,
         readOrderStatus: (orderId) => repos.order.findById(orderId as OrderId)?.status,
         isTransitionTarget: (orderId) => executionModule.hasTransitionTarget(orderId as OrderId),
         log,
@@ -3460,7 +3474,11 @@ async function main(): Promise<void> {
     // gate names the precise subset it could not prove and persists the failed state itself, so
     // re-listing every candidate on top of that would bury an exact diagnosis under a broad one.
     if (drainWaiverOutstanding && !(err instanceof DrainedOrderUnfencedError)) {
-      reportAbandonedDrainWaiver({ controlDb: controlConn.db, drainedOrderIds, log });
+      reportAbandonedDrainWaiver({
+        controlDb: controlConn.db,
+        drainedOrderIds,
+        log,
+      });
     }
     if (err instanceof LifecycleSupersededError) {
       // A signal arrived mid-startup and the shutdown handler took over: it owns the teardown and

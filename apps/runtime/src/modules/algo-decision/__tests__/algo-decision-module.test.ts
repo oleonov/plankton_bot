@@ -8,6 +8,7 @@ import {
 import { RuntimeMetricWriter } from "../../../runtime-metric-writer.js";
 import type { SelectedMarketCache } from "../algo-decision-module.js";
 import type {
+  DecisionPlanResult,
   DecisionPlanSideEffect,
   QdShadowProjection,
   TrackQShadowProjection,
@@ -6912,7 +6913,19 @@ describe("AlgoDecisionModule", () => {
         await mod.evaluateTokens([createTokenId(tokenId)]);
       }
 
-      expect(sideEffects).toHaveBeenCalledTimes(3);
+      const pool = (mod as any).decisionWorkerPool;
+      const evaluate = pool.evaluate.bind(pool);
+      const sellPlan = vi
+        .spyOn(pool, "evaluate")
+        .mockImplementation(async (inputs) =>
+          (await evaluate(inputs)).map((plan: DecisionPlanResult) =>
+            plan.type === "signal" ? { ...plan, signal: { ...plan.signal, side: "sell" } } : plan,
+          ),
+        );
+      await mod.evaluateTokens([createTokenId(tokenId)]);
+      sellPlan.mockRestore();
+
+      expect(sideEffects).toHaveBeenCalledTimes(4);
       expect((mod as any).currentEvalMetrics.evalTotal).toBeGreaterThan(0);
       expect((mod as any).currentEvalMetrics.emitted).toBe(0);
       expect((mod as any).pendingEntries.size).toBe(0);
@@ -6928,7 +6941,7 @@ describe("AlgoDecisionModule", () => {
             delta === 1 &&
             labels === null,
         );
-      expect(suppressionMetrics).toHaveLength(3);
+      expect(suppressionMetrics).toHaveLength(4);
       expect((mod as any).log.warn).toHaveBeenCalledTimes(1);
 
       vi.setSystemTime(now + 300_000);
@@ -6936,10 +6949,10 @@ describe("AlgoDecisionModule", () => {
       expect((mod as any).log.warn).toHaveBeenLastCalledWith(
         {
           reason: "exact_null_startup_transition_draining",
-          suppressedCount: 3,
+          suppressedCount: 4,
           windowMs: 300_000,
         },
-        "BUY signals suppressed while exact-null startup transition drains",
+        "signals suppressed while exact-null startup transition drains",
       );
 
       draining = false;

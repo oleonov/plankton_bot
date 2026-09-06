@@ -190,6 +190,44 @@ function makePricing(
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe("cleanStaleEntryOrders", () => {
+  it("leaves a quarantined token's target and SELL siblings inert while cleaning other tokens", async () => {
+    const target = makeBounceTargetOrder(0.8, 0.8);
+    const sibling = makeBounceTargetOrder(0.8, 0.8);
+    const unrelated = makeBounceTargetOrder(0.8, 0.8);
+    const createdAt = new Date(Date.now() - 60_000).toISOString();
+    target.createdAt = createdAt;
+    sibling.createdAt = createdAt;
+    unrelated.createdAt = createdAt;
+    sibling.orderId = createOrderId("quarantine-sibling");
+    unrelated.orderId = createOrderId("quarantine-unrelated");
+    unrelated.tokenId = createTokenId("other-token");
+    const published: string[] = [];
+    const bus = new InProcessEventBus();
+    bus.subscribe("CancelOrderRequested", async ({ command }) => {
+      published.push(String(command.orderId));
+    });
+    const orderRepo = createMockOrderRepo();
+    orderRepo.findOpen = vi.fn().mockReturnValue([target, sibling, unrelated]);
+
+    await cleanStaleEntryOrders(
+      {
+        orderRepo,
+        marketRepo: createMockMarketRepo(),
+        bus,
+        log: silentLog,
+        exitOrderTtlMs: 0,
+        exactNullStartupQuarantine: {
+          isExactNullStartupOrderQuarantined: vi.fn((order) => order.orderId === target.orderId),
+          isExactNullStartupTokenQuarantined: vi.fn(
+            (tokenId) => String(tokenId) === String(target.tokenId),
+          ),
+        },
+      },
+      new Map(),
+    );
+
+    expect(published).toEqual([String(unrelated.orderId)]);
+  });
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let bus: InProcessEventBus;
@@ -274,6 +312,8 @@ describe("cleanStaleEntryOrders", () => {
       chainPolicy?: typeof DEFAULT_REPRICE_CHAIN_POLICY;
       riskEvents?: unknown[];
       riskEventInsertThrows?: boolean;
+      riskEventFailures?: { remaining: number };
+      thinHoldReportedOrderIds?: Set<string>;
       snapshotCalls?: { n: number };
       tickSize?: number;
       metrics?: { writeCounter: ReturnType<typeof vi.fn> };
@@ -291,6 +331,9 @@ describe("cleanStaleEntryOrders", () => {
         bus,
         log: silentLog,
         ...(opts.metrics ? { metrics: opts.metrics } : {}),
+        ...(opts.thinHoldReportedOrderIds
+          ? { thinHoldReportedOrderIds: opts.thinHoldReportedOrderIds }
+          : {}),
         exitRepriceOnDownprice: {
           // ONE atomic snapshot: nested policy + top-level anchor from a single read.
           snapshot: () => {
@@ -343,11 +386,15 @@ describe("cleanStaleEntryOrders", () => {
                     } as any;
                   },
                 },
-                ...(opts.riskEvents || opts.riskEventInsertThrows
+                ...(opts.riskEvents || opts.riskEventInsertThrows || opts.riskEventFailures
                   ? {
                       riskEventRepo: {
                         insert: (e: unknown) => {
                           if (opts.riskEventInsertThrows) throw new Error("insert boom");
+                          if ((opts.riskEventFailures?.remaining ?? 0) > 0) {
+                            opts.riskEventFailures!.remaining--;
+                            throw new Error("insert boom");
+                          }
                           opts.riskEvents!.push(e);
                         },
                         countSince: () => 0,
@@ -1429,6 +1476,14 @@ describe("cleanStaleEntryOrders", () => {
       expect.any(Number),
       expect.any(String),
     );
+    expect(silentLog.debug).toHaveBeenCalledWith(
+      expect.any(Object),
+      "Track L no-op downprice reprice blocked",
+    );
+    expect(silentLog.info).not.toHaveBeenCalledWith(
+      expect.any(Object),
+      "Track L no-op downprice reprice blocked",
+    );
   });
 
   it("blocks repeated downprice cancels when a bounce order already rests at its canonical target", async () => {
@@ -1454,7 +1509,7 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.downpriceRepriceCancelled).toBe(1);
   });
 
-  it("Stage 2: HOLDS a downprice reprice on a THIN market when skipDownpriceWhenThin is on", async () => {
+  it("Stage 2: reports a thin-market hold once while retaining per-pass metrics", async () => {
     const order = makeOrder({
       side: "sell",
       price: 0.29,
@@ -1471,24 +1526,25 @@ describe("cleanStaleEntryOrders", () => {
     // but the market is THIN (5 trades ≤ threshold 10) and the gate is ON → hold.
     // repriceChainEvents24h:0 wires the repriceChainGate (the liveness source the thin gate needs).
     const riskEvents: any[] = [];
-    const result = await runWithDownprice(order, 0.23, new Map(), {
+    const reported = new Set(["no-longer-open"]);
+    const options = {
       skipDownpriceWhenThin: true,
       publicTradeCount24h: 5,
       thinTradeCountThreshold: 10,
       repriceChainEvents24h: 0,
       riskEvents,
       metrics,
-    });
+      thinHoldReportedOrderIds: reported,
+    };
+    const result = await runWithDownprice(order, 0.23, new Map(), options);
+    const second = await runWithDownprice(order, 0.23, new Map(), options);
     await bus.drain();
 
     expect(result.downpriceRepriceCancelled).toBe(0);
     expect(result.downpriceRepriceHeld).toBe(1);
+    expect(second.downpriceRepriceHeld).toBe(1);
     expect(cancelled).toHaveLength(0);
-    expect(metrics.writeCounter).toHaveBeenCalledWith(
-      "exit_downprice_reprice_held_total",
-      1,
-      JSON.stringify({ reason: "thin" }),
-    );
+    expect(metrics.writeCounter).toHaveBeenCalledTimes(2);
     // Chain NOT advanced — the hold continues BEFORE the chain-cap block, so no cap metric fires.
     expect(metrics.writeCounter).not.toHaveBeenCalledWith(
       "exit_chain_cap_resolved_total",
@@ -1509,9 +1565,15 @@ describe("cleanStaleEntryOrders", () => {
       thresholdUsed: 10,
     });
     expect(typeof riskEvents[0].payload.heldAt).toBe("string");
+    expect(reported).toEqual(new Set([String(order.orderId)]));
+    expect(silentLog.info).toHaveBeenCalledTimes(1);
+    expect(silentLog.info).toHaveBeenCalledWith(
+      expect.objectContaining({ orderId: String(order.orderId) }),
+      "Track L Stage 2 thin-market downprice reprice held",
+    );
   });
 
-  it("Stage 2: a THROWING durable-event insert never breaks the hold (best-effort telemetry)", async () => {
+  it("Stage 2: retries the durable report after an insert failure without breaking the hold", async () => {
     const order = makeOrder({
       side: "sell",
       price: 0.29,
@@ -1523,19 +1585,29 @@ describe("cleanStaleEntryOrders", () => {
       cancelled.push(p);
     });
 
-    // riskEventRepo.insert throws — the order must still be HELD, with no cancel published.
-    const result = await runWithDownprice(order, 0.23, new Map(), {
+    const riskEvents: any[] = [];
+    const failures = { remaining: 1 };
+    const reported = new Set<string>();
+    const options = {
       skipDownpriceWhenThin: true,
       publicTradeCount24h: 5,
       thinTradeCountThreshold: 10,
       repriceChainEvents24h: 0,
-      riskEventInsertThrows: true,
-    });
+      riskEvents,
+      riskEventFailures: failures,
+      thinHoldReportedOrderIds: reported,
+    };
+    const result = await runWithDownprice(order, 0.23, new Map(), options);
+    const retry = await runWithDownprice(order, 0.23, new Map(), options);
     await bus.drain();
 
     expect(result.downpriceRepriceHeld).toBe(1);
+    expect(retry.downpriceRepriceHeld).toBe(1);
     expect(result.downpriceRepriceCancelled).toBe(0);
     expect(cancelled).toHaveLength(0);
+    expect(riskEvents).toHaveLength(1);
+    expect(reported).toEqual(new Set([String(order.orderId)]));
+    expect(silentLog.info).toHaveBeenCalledTimes(2);
   });
 
   it("Stage 2: does NOT hold when publicTradeCount24h is unknown/null (null must not coerce to thin)", async () => {

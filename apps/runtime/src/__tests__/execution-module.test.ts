@@ -303,7 +303,10 @@ function expiredStartupMaker(): Order {
 
 function drainTarget(
   order: Order,
-  provenance: "exchange-working" | "exact-null-expired-maker" = "exact-null-expired-maker",
+  provenance:
+    | "exchange-working"
+    | "exact-null-expired-maker"
+    | "exact-null-submit-unknown-sell" = "exact-null-expired-maker",
   sibling?: Order,
 ) {
   return {
@@ -314,6 +317,37 @@ function drainTarget(
       [String(order.orderId), provenance],
       ...(sibling ? ([[String(sibling.orderId), "exchange-working" as const]] as const) : []),
     ]),
+  };
+}
+
+function submitUnknownStartupSell(position: Position): Order {
+  const order = openSellAt(0.03, {
+    orderId: createOrderId("submit-unknown-sell"),
+    clientOrderId: "submit_unknown_sell" as ClientOrderId,
+    exchangeOrderId: "submit-unknown-sell",
+    tokenId: position.tokenId,
+    conditionId: position.conditionId,
+    positionId: position.positionId,
+    status: "pending",
+    postOnly: true,
+    entryStyle: "maker",
+    decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+    metadata: { bounceRung: { ladderId: "submit-ladder", rungIndex: 0 } },
+  });
+  return {
+    ...order,
+    metadata: {
+      ...order.metadata,
+      submitUnknownRecoveryV1: {
+        version: 1,
+        orderId: String(order.orderId),
+        clientOrderId: String(order.clientOrderId),
+        exchangeOrderId: String(order.exchangeOrderId),
+        tokenId: String(order.tokenId),
+        conditionId: String(order.conditionId),
+        positionId: String(order.positionId),
+      },
+    },
   };
 }
 
@@ -671,7 +705,11 @@ describe("ExecutionModule", () => {
     });
   });
 
-  const startupModule = (positionRepo = createMockPositionRepo(null)) =>
+  const startupModule = (
+    positionRepo = createMockPositionRepo(null),
+    inventoryLotRepo?: InventoryLotRepository,
+    maxConcurrency?: number,
+  ) =>
     new ExecutionModule({
       gateway,
       bus,
@@ -679,6 +717,8 @@ describe("ExecutionModule", () => {
       orderRepo,
       fillRepo,
       positionRepo,
+      inventoryLotRepo,
+      maxConcurrency,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeMode: "live-lite",
@@ -5418,6 +5458,136 @@ describe("ExecutionModule", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("acknowledges a submit-unknown SELL before start and seeds only its exact recovery cancel", async () => {
+      const position = makePosition({ size: 10, costBasisUsdc: 0.1, exitOwner: "bounce" });
+      const pending = submitUnknownStartupSell(position);
+      const siblings = [1, 2].map((rungIndex) =>
+        openSellAt(0.03 + rungIndex * 0.01, {
+          orderId: createOrderId(`submit-sibling-${rungIndex}`),
+          clientOrderId: `submit_sibling_${rungIndex}` as ClientOrderId,
+          exchangeOrderId: `submit-sibling-${rungIndex}`,
+          tokenId: position.tokenId,
+          conditionId: position.conditionId,
+          positionId: position.positionId,
+          size: rungIndex === 1 ? 2 : 3,
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          entryStyle: "maker",
+          postOnly: true,
+          metadata: { bounceRung: { ladderId: "submit-ladder", rungIndex } },
+        }),
+      );
+      const rows = [pending, ...siblings];
+      let targetFill: Fill | null = null;
+      orderRepo.findById = vi.fn((id) => rows.find((row) => row.orderId === id) ?? null);
+      orderRepo.findByTokenId = vi.fn((tokenId) =>
+        rows.filter((row) => String(row.tokenId) === String(tokenId)),
+      );
+      orderRepo.findOpen = vi.fn().mockReturnValue(rows);
+      fillRepo.findByOrderId = vi.fn((orderId) =>
+        orderId === pending.orderId && targetFill ? [targetFill] : [],
+      );
+      (gateway as any).getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+      (gateway as any).getOrderResult = vi.fn().mockResolvedValue({ ok: true, data: null });
+      const positionRepo = createMockPositionRepo(position);
+      positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([position]);
+      const liveMod = startupModule(positionRepo, createMockInventoryLotRepo(position), 1);
+      const target = drainTarget(pending, "exact-null-submit-unknown-sell");
+      const cancelReasons: string[] = [];
+      bus.subscribe("CancelOrderRequested", async ({ command }) => {
+        if (command.orderId === pending.orderId) cancelReasons.push(command.reason);
+      });
+
+      liveMod.acknowledgeStartupTransitions([target]);
+      expect(liveMod.isExactNullStartupTransitionDraining(position.tokenId)).toBe(true);
+      const blocker = openSellAt(0.02, {
+        orderId: createOrderId("queue-blocker"),
+        exchangeOrderId: "queue-blocker",
+        clientOrderId: "queue_blocker" as ClientOrderId,
+        tokenId: createTokenId("queue-blocker-token"),
+        side: "buy",
+      });
+      rows.push(blocker);
+      let releaseBlocker!: () => void;
+      const blocked = new Promise<void>((resolve) => (releaseBlocker = resolve));
+      vi.mocked(gateway.cancelOrder).mockImplementation(async ({ orderId }) => {
+        if (orderId === String(blocker.orderId)) await blocked;
+        return { success: true };
+      });
+      await liveMod.start();
+      await bus.publish("CancelOrderRequested", {
+        command: makeCancelCmd({ orderId: blocker.orderId, reason: "operator" }),
+        timestamp: Date.now(),
+      });
+      await liveMod.seedStartupTransitions([target]);
+
+      expect(cancelReasons).toEqual(["submit_unknown_recovery"]);
+      expect(gateway.cancelOrder).toHaveBeenCalledOnce();
+      releaseBlocker();
+      await vi.waitFor(() => expect(gateway.cancelOrder).toHaveBeenCalledTimes(2));
+      expect((liveMod as any).cancelReservations.size).toBe(0);
+      expect(liveMod.isExactNullStartupTransitionDraining(position.tokenId)).toBe(true);
+
+      for (const [orderId, reason] of [
+        [siblings[0]!.orderId, "submit_unknown_recovery"],
+        [pending.orderId, "operator"],
+      ] as const) {
+        await bus.publish("CancelOrderRequested", {
+          command: makeCancelCmd({
+            commandId: createCommandId(`forged-${String(orderId)}-${reason}`),
+            orderId,
+            reason,
+          }),
+          timestamp: Date.now(),
+        });
+      }
+      expect(gateway.cancelOrder).toHaveBeenCalledTimes(2);
+
+      targetFill = {
+        fillId: createFillId("submit-unknown-partial"),
+        orderId: pending.orderId,
+        tokenId: pending.tokenId,
+        conditionId: pending.conditionId,
+        side: "sell",
+        price: pending.price,
+        size: 1,
+        sizeUsdc: pending.price,
+        liquidityRole: "maker",
+        fee: 0,
+        feeRateBps: 0,
+        filledAt: new Date().toISOString(),
+      };
+      rows[0] = { ...pending, status: "partially-filled" };
+      await liveMod.observeExactNullStartupRemoteState(pending, "absent");
+      await Promise.all([
+        liveMod.observeExactNullStartupRemoteState(pending, "working"),
+        liveMod.observeExactNullStartupRemoteState(pending, "working"),
+      ]);
+      expect(cancelReasons.at(-1)).toBe("submit_unknown_recovery");
+      await vi.waitFor(() => expect(gateway.cancelOrder).toHaveBeenCalledTimes(3));
+
+      await liveMod.stop();
+      await liveMod.start();
+      await liveMod.seedStartupTransitions([target]);
+      expect(gateway.cancelOrder).toHaveBeenCalledTimes(3);
+      const state = (liveMod as any).exactNullStartupQuarantine.get(String(pending.orderId));
+      const command = makeCancelCmd({
+        commandId: createCommandId("claimed-submit-unknown-drift"),
+        orderId: pending.orderId,
+        reason: "submit_unknown_recovery",
+      });
+      state.claimedCommandId = String(command.commandId);
+      rows[0] = { ...pending, postOnly: false }; // submit-boundary identity drift
+      await (liveMod as any).executeCancel(command);
+      expect(gateway.cancelOrder).toHaveBeenCalledTimes(3);
+      rows[0] = { ...pending, status: "filled" };
+      await bus.publish("FillReceived", {
+        orderId: pending.orderId,
+        tokenId: pending.tokenId,
+      } as any);
+      expect(liveMod.isExactNullStartupTransitionDraining(position.tokenId)).toBe(false);
+      await liveMod.stop();
     });
 
     it("consumes an ambiguous seed publication failure without same-instance replay", async () => {

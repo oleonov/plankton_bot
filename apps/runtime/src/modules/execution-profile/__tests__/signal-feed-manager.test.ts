@@ -52,12 +52,14 @@ class RecordingSignalFeedRepository implements SignalFeedBucketRepository {
   deleteArgs: Array<{ granularity: number; beforeMs: number }> = [];
   deleteResult = 0;
   deleteError: Error | null = null;
+  upsertError: Error | null = null;
 
   upsertBucket(bucket: OhlcBucket): void {
     this.upserts.push({ ...bucket });
   }
 
   upsertBuckets(buckets: readonly OhlcBucket[]): void {
+    if (this.upsertError) throw this.upsertError;
     this.upserts.push(...buckets.map((bucket) => ({ ...bucket })));
   }
 
@@ -319,6 +321,40 @@ describe("SignalFeedManager", () => {
       value: 1,
       labels: null,
     });
+    expect(metrics.counters).toContainEqual({
+      name: SIGNAL_FEED_METRICS.bucketsFlushedCold,
+      value: 1,
+      labels: null,
+    });
+  });
+
+  it("retries an unpersisted warm bucket after a transient batch failure", async () => {
+    const bus = new InProcessEventBus();
+    const repo = new RecordingSignalFeedRepository();
+    const metrics = makeMetrics();
+    const manager = new SignalFeedManager({
+      bus,
+      repository: repo,
+      config: { enabled: true, windowShortMs: 60_000, warmBucketMs: 60_000 },
+      metrics,
+    });
+    await manager.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [market(TOKEN, 0.2)],
+      timestamp: 1_000,
+    });
+    manager.flushHotToWarm(61_000);
+
+    repo.upsertError = new Error("transient write failure");
+    expect(() => manager.flushWarmToCold(61_000)).toThrow("transient write failure");
+    expect(repo.upserts).toEqual([]);
+    expect(metrics.counters).not.toContainEqual(
+      expect.objectContaining({ name: SIGNAL_FEED_METRICS.bucketsFlushedCold }),
+    );
+
+    repo.upsertError = null;
+    manager.flushWarmToCold(62_000);
+    expect(repo.upserts).toHaveLength(1);
     expect(metrics.counters).toContainEqual({
       name: SIGNAL_FEED_METRICS.bucketsFlushedCold,
       value: 1,

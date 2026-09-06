@@ -78,8 +78,15 @@ import {
 import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
 import { createHash, randomUUID } from "node:crypto";
 import { buildClientOrderId } from "@krabs/domain/node";
-import type { StartupDrainTarget } from "../../startup-position-adoption.js";
-import { isExactNullExpiredMakerDrainCandidate } from "../../startup-position-adoption.js";
+import type {
+  StartupDrainProvenance,
+  StartupDrainTarget,
+} from "../../startup-position-adoption.js";
+import {
+  isExactNullExpiredMakerDrainCandidate,
+  matchesSubmitUnknownRecoveryLocalProof,
+  parseSubmitUnknownRecoveryV1,
+} from "../../startup-position-adoption.js";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import {
   applyOrderVerdict,
@@ -545,18 +552,21 @@ export interface ExecutionModuleDeps {
 
 export interface ExactNullStartupQuarantine {
   isExactNullStartupOrderQuarantined(order: Order): boolean;
+  isExactNullStartupTokenQuarantined?(tokenId: TokenId): boolean;
   observeExactNullStartupRemoteState(order: Order, state: "absent" | "working"): Promise<void>;
   getExactNullStartupQuarantineCount(): number;
 }
 
 interface ExactNullStartupQuarantineState {
   readonly order: Order;
+  readonly provenance: Exclude<StartupDrainProvenance, "exchange-working">;
   seedAttempted: boolean;
   phase: "acknowledged" | "publishing" | "suppressed";
   remoteState: "unknown" | "absent" | "working";
   remoteVersion: number;
   attemptedRemoteVersion: number;
   permittedCommandId: string | null;
+  claimedCommandId: string | null;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -823,6 +833,7 @@ export class ExecutionModule implements RuntimeModule {
     order: Order,
     phase: "startup-scan" | "position-updated-reeval",
   ): Promise<void> {
+    if (this.isExactNullStartupTokenQuarantined(order.tokenId)) return;
     const remainingShares = this.getRemainingOrderShares(order);
     if (remainingShares <= 0) return;
     const verdict = this.evaluateSellExitLossFloor(order, order.price);
@@ -955,19 +966,31 @@ export class ExecutionModule implements RuntimeModule {
 
   acknowledgeStartupTransitions(targets: ReadonlyArray<StartupDrainTarget>): void {
     for (const target of targets) {
-      const exact = target.orders.filter(
-        (order) =>
-          target.provenanceByOrderId.get(String(order.orderId)) === "exact-null-expired-maker",
-      );
+      const exact = target.orders.filter((order) => {
+        const provenance = target.provenanceByOrderId.get(String(order.orderId));
+        return (
+          provenance === "exact-null-expired-maker" ||
+          provenance === "exact-null-submit-unknown-sell"
+        );
+      });
       if (exact.length === 0) continue;
       if (exact.length !== 1 || target.orders.length !== 1) {
         throw new Error("startup exact-null quarantine provenance is ambiguous");
       }
-      this.acknowledgeExactNullStartupOrder(exact[0]!);
+      this.acknowledgeExactNullStartupOrder(
+        exact[0]!,
+        target.provenanceByOrderId.get(String(exact[0]!.orderId)) as Exclude<
+          StartupDrainProvenance,
+          "exchange-working"
+        >,
+      );
     }
   }
 
-  private acknowledgeExactNullStartupOrder(snapshot: Order): void {
+  private acknowledgeExactNullStartupOrder(
+    snapshot: Order,
+    provenance: Exclude<StartupDrainProvenance, "exchange-working">,
+  ): void {
     const current = this.deps.orderRepo.findById(snapshot.orderId);
     if (current && isTerminalOrderStatus(current.status)) return;
     if (!current) {
@@ -981,18 +1004,26 @@ export class ExecutionModule implements RuntimeModule {
       }
       return;
     }
-    if (!this.matchesExactNullStartupProof(snapshot, current)) {
+    if (!this.matchesExactNullStartupProof(snapshot, current, provenance)) {
       throw new Error("startup exact-null quarantine changed before acknowledgement");
     }
     this.exactNullStartupQuarantine.set(key, {
       order: { ...current },
+      provenance,
       seedAttempted: false,
       phase: "acknowledged",
       remoteState: "unknown",
       remoteVersion: 0,
       attemptedRemoteVersion: 0,
       permittedCommandId: null,
+      claimedCommandId: null,
     });
+    const transition = this.tokenTransitions.get(String(current.tokenId)) ?? {
+      activePositionId: current.positionId != null ? String(current.positionId) : null,
+      targets: new Set<string>(),
+    };
+    transition.targets.add(key);
+    this.tokenTransitions.set(String(current.tokenId), transition);
   }
 
   isExactNullStartupOrderQuarantined(order: Order): boolean {
@@ -1005,6 +1036,10 @@ export class ExecutionModule implements RuntimeModule {
       this.sameStartupOrderIdentity(state.order, current) &&
       this.sameStartupOrderIdentity(current, order),
     );
+  }
+
+  isExactNullStartupTokenQuarantined(tokenId: TokenId): boolean {
+    return this.isExactNullStartupTransitionDraining(tokenId);
   }
 
   getExactNullStartupQuarantineCount(): number {
@@ -1030,22 +1065,33 @@ export class ExecutionModule implements RuntimeModule {
     }
   }
 
-  private matchesExactNullStartupProof(snapshot: Order, current: Order): boolean {
-    return (
-      this.sameStartupOrderIdentity(snapshot, current) &&
-      Boolean(
-        this.deps.positionRepo &&
-        isExactNullExpiredMakerDrainCandidate(
-          current,
-          {
-            fillRepo: this.deps.fillRepo,
-            orderRepo: this.deps.orderRepo,
-            positionRepo: this.deps.positionRepo,
-          },
-          [],
-          Date.now(),
-        ),
-      )
+  private matchesExactNullStartupProof(
+    snapshot: Order,
+    current: Order,
+    provenance: Exclude<StartupDrainProvenance, "exchange-working">,
+  ): boolean {
+    if (!this.sameStartupOrderIdentity(snapshot, current) || !this.deps.positionRepo) return false;
+    if (provenance === "exact-null-expired-maker") {
+      return isExactNullExpiredMakerDrainCandidate(
+        current,
+        {
+          fillRepo: this.deps.fillRepo,
+          orderRepo: this.deps.orderRepo,
+          positionRepo: this.deps.positionRepo,
+        },
+        [],
+        Date.now(),
+      );
+    }
+    return Boolean(
+      this.deps.inventoryLotRepo &&
+      parseSubmitUnknownRecoveryV1(current) &&
+      matchesSubmitUnknownRecoveryLocalProof(current, {
+        fillRepo: this.deps.fillRepo,
+        orderRepo: this.deps.orderRepo,
+        positionRepo: this.deps.positionRepo,
+        inventoryLotRepo: this.deps.inventoryLotRepo,
+      }),
     );
   }
 
@@ -1567,7 +1613,7 @@ export class ExecutionModule implements RuntimeModule {
       const currentOrders: Order[] = [];
       const knownExchangeLiveOrderIds = new Set<string>();
       const exactNullCount = [...target.provenanceByOrderId.values()].filter(
-        (value) => value === "exact-null-expired-maker",
+        (value) => value !== "exchange-working",
       ).length;
       if (
         target.provenanceByOrderId.size !== target.orders.length ||
@@ -1587,7 +1633,9 @@ export class ExecutionModule implements RuntimeModule {
           current.side !== snapshot.side ||
           current.clientOrderId !== snapshot.clientOrderId ||
           current.exchangeOrderId !== snapshot.exchangeOrderId ||
-          (provenance !== "exchange-working" && provenance !== "exact-null-expired-maker")
+          (provenance !== "exchange-working" &&
+            provenance !== "exact-null-expired-maker" &&
+            provenance !== "exact-null-submit-unknown-sell")
         ) {
           throw new Error("startup drain target changed before seeding");
         }
@@ -1595,22 +1643,27 @@ export class ExecutionModule implements RuntimeModule {
         else if (!isTerminalOrderStatus(current.status)) {
           const exactState = this.exactNullStartupQuarantine.get(orderKey);
           if (
-            provenance !== "exact-null-expired-maker" ||
             !exactState ||
+            exactState.provenance !== provenance ||
             !this.isExactNullStartupOrderQuarantined(current) ||
             (!exactState.seedAttempted &&
-              !this.matchesExactNullStartupProof(exactState.order, current))
+              !this.matchesExactNullStartupProof(exactState.order, current, provenance))
           ) {
             throw new Error("startup exact-null maker proof changed before seeding");
           }
         } else {
           this.exactNullStartupQuarantine.delete(orderKey);
+          this.removeTransitionTargetIfTerminal(current.tokenId, current.orderId);
         }
         currentOrders.push(current);
       }
       await this.openTokenTransition(target.tokenId, target.activePositionId, currentOrders, {
         knownExchangeLiveOrderIds,
       });
+      for (const order of currentOrders) {
+        const exactState = this.exactNullStartupQuarantine.get(String(order.orderId));
+        if (exactState) await this.publishExactNullStartupCancel(exactState, "seed");
+      }
     }
   }
 
@@ -4324,15 +4377,18 @@ export class ExecutionModule implements RuntimeModule {
 
   private async handleCancel(cmd: CancelOrderCommand): Promise<void> {
     const exactState = this.exactNullStartupQuarantine.get(String(cmd.orderId));
+    const expectedReason = exactState ? this.exactStartupCancelReason(exactState) : null;
+    if (cmd.reason === "submit_unknown_recovery" && !exactState) return;
     if (
-      cmd.reason === "stale_entry_ttl" &&
-      exactState &&
-      exactState.permittedCommandId !== String(cmd.commandId)
-    ) {
+      exactState?.provenance === "exact-null-submit-unknown-sell" &&
+      cmd.reason !== expectedReason
+    )
       return;
-    }
-    if (exactState?.permittedCommandId === String(cmd.commandId)) {
+    if (cmd.reason === expectedReason && exactState?.permittedCommandId !== String(cmd.commandId))
+      return;
+    if (exactState?.permittedCommandId === String(cmd.commandId) && cmd.reason === expectedReason) {
       exactState.permittedCommandId = null;
+      exactState.claimedCommandId = String(cmd.commandId);
     }
     if (this.processedCommandIds.has(cmd.commandId)) {
       this.log.debug({ commandId: cmd.commandId }, "duplicate cancel commandId — skipping");
@@ -4415,6 +4471,7 @@ export class ExecutionModule implements RuntimeModule {
     this.decrementTokenInFlight(cmd);
     this.commandIdsPendingRelease.delete(commandId);
     this.releaseProcessedCommandId(commandId);
+    if (cmd.type === "CancelOrderCommand") this.releaseExactStartupCancelClaim(cmd);
     this.maybeCloseTokenTransition(this.resolveCommandTokenId(cmd));
   }
 
@@ -4466,6 +4523,7 @@ export class ExecutionModule implements RuntimeModule {
       ) {
         this.releaseProcessedCommandId(String(cmd.commandId));
       }
+      if (cmd.type === "CancelOrderCommand") this.releaseExactStartupCancelClaim(cmd);
       const attempted = this.makerCaptureGatewayAttempts.delete(String(cmd.commandId));
       if (failed && cmd.type === "PlaceOrderCommand" && !attempted) {
         this.releaseFailedMakerCaptureCommand(cmd);
@@ -4737,8 +4795,9 @@ export class ExecutionModule implements RuntimeModule {
     if (source === "seed") state.seedAttempted = true;
     state.phase = "publishing";
     const now = Date.now();
+    const reason = this.exactStartupCancelReason(state);
     const commandId = createCommandId(
-      `stale_entry_ttl-${String(state.order.orderId)}-${now}-${Math.random().toString(36).slice(2)}`,
+      `${reason}-${String(state.order.orderId)}-${now}-${Math.random().toString(36).slice(2)}`,
     );
     state.permittedCommandId = String(commandId);
     state.attemptedRemoteVersion = state.remoteVersion;
@@ -4748,7 +4807,7 @@ export class ExecutionModule implements RuntimeModule {
           type: "CancelOrderCommand",
           commandId,
           orderId: state.order.orderId,
-          reason: "stale_entry_ttl",
+          reason,
         },
         timestamp: now,
       });
@@ -4756,6 +4815,29 @@ export class ExecutionModule implements RuntimeModule {
       state.permittedCommandId = null;
       state.phase = "suppressed";
     }
+  }
+
+  private exactStartupCancelReason(state: ExactNullStartupQuarantineState): CancelOrderReason {
+    return state.provenance === "exact-null-submit-unknown-sell"
+      ? "submit_unknown_recovery"
+      : "stale_entry_ttl";
+  }
+
+  private releaseExactStartupCancelClaim(cmd: CancelOrderCommand): void {
+    const state = this.exactNullStartupQuarantine.get(String(cmd.orderId));
+    if (state?.claimedCommandId === String(cmd.commandId)) state.claimedCommandId = null;
+  }
+
+  private isClaimedExactStartupCancel(cmd: CancelOrderCommand, order: Order | null): boolean {
+    const state = this.exactNullStartupQuarantine.get(String(cmd.orderId));
+    return Boolean(
+      state &&
+      order &&
+      state.claimedCommandId === String(cmd.commandId) &&
+      cmd.reason === this.exactStartupCancelReason(state) &&
+      this.isExactNullStartupOrderQuarantined(order) &&
+      this.matchesExactNullStartupProof(state.order, order, state.provenance),
+    );
   }
 
   // ─── Place execution (gateway call) ──────────────────────────────────
@@ -5269,6 +5351,14 @@ export class ExecutionModule implements RuntimeModule {
     // different: startup or another consumer may have observed it exchange-live despite
     // the local terminal row, so only the exact resolver may release that fence.
     const existingOrder = this.deps.orderRepo.findById(cmd.orderId);
+    const exactStartupCancel = this.isClaimedExactStartupCancel(cmd, existingOrder);
+    if (cmd.reason === "submit_unknown_recovery" && !exactStartupCancel) return;
+    const exactState = this.exactNullStartupQuarantine.get(orderKey);
+    if (
+      exactState?.provenance === "exact-null-submit-unknown-sell" &&
+      cmd.reason !== "submit_unknown_recovery"
+    )
+      return;
     const isTransitionTarget = this.hasTransitionTarget(cmd.orderId);
     if (existingOrder && isTerminalOrderStatus(existingOrder.status) && !isTransitionTarget) {
       this.log.debug(
@@ -5277,7 +5367,11 @@ export class ExecutionModule implements RuntimeModule {
       );
       return;
     }
-    if (this.deps.runtimeMode === "live-lite" && existingOrder?.status === "pending") {
+    if (
+      this.deps.runtimeMode === "live-lite" &&
+      existingOrder?.status === "pending" &&
+      !exactStartupCancel
+    ) {
       const captureDeadlineMs = resolveMakerMicroLiveFillDeadlineMs(existingOrder);
       const hasMatchingReservation = [...this.pendingReservations.values()].some(
         (reservation) => reservation.clientOrderId === existingOrder.clientOrderId,

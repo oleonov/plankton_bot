@@ -145,6 +145,22 @@ describe("MarketSnapshotPriceHistoryProvider", () => {
     ).toBeCloseTo(0.3, 8);
   });
 
+  it("preserves the DB-backed TTL cache when the query clock moves backward", () => {
+    const conn = setupDb();
+    const now = Date.parse("2026-05-18T12:00:00.000Z");
+    const insert = conn.prepare(
+      "INSERT INTO market_snapshots (token_id, best_bid, best_ask, last_price, captured_at) VALUES (?, ?, ?, ?, ?)",
+    );
+    insert.run("tok", 0.09, 0.11, null, "2026-05-18T11:00:00.000Z");
+    const provider = new MarketSnapshotPriceHistoryProvider(conn);
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 60 * 60_000, now)).toBe(0.1);
+
+    insert.run("tok", 0.29, 0.31, null, "2026-05-18T11:30:00.000Z");
+
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 60 * 60_000, now - 1_000)).toBe(0.1);
+    expect(provider.getWindowMaxCacheMetrics()).toMatchObject({ hits: 1, misses: 1 });
+  });
+
   it("tracks window max cache hit rate", () => {
     const conn = setupDb();
     const now = Date.parse("2026-05-18T12:00:00.000Z");
@@ -188,23 +204,116 @@ describe("MarketSnapshotPriceHistoryProvider", () => {
     );
   });
 
-  it("evicts cached window maxima when a fresher market sample is observed", () => {
+  it("incrementally incorporates chronological samples without rescanning the window", () => {
     const conn = setupDb();
     const now = Date.parse("2026-05-18T12:00:00.000Z");
     const provider = new MarketSnapshotPriceHistoryProvider(conn, { syncMissLookup: false });
 
     provider.observeMarket(makeMarket("tok", { bid: 0.09, ask: 0.11 }, now - 10_000));
-    expect(provider.maxMidpointInWindow(createTokenId("tok"), 60 * 60_000, now)).toBeCloseTo(
-      0.1,
-      8,
-    );
+    expect(
+      provider.maxMidpointInWindow(createTokenId("tok"), 60 * 60_000, now - 5_000),
+    ).toBeCloseTo(0.1, 8);
 
+    provider.observeMarket(makeMarket("tok", { bid: 0.04, ask: 0.06 }, now - 3_000));
+    expect(
+      provider.maxMidpointInWindow(createTokenId("tok"), 60 * 60_000, now - 3_000),
+    ).toBeCloseTo(0.1, 8);
+    provider.observeMarket(makeMarket("tok", { bid: 0.09, ask: 0.11 }, now - 2_000));
     provider.observeMarket(makeMarket("tok", { bid: 0.29, ask: 0.31 }, now - 1_000));
 
-    expect(provider.maxMidpointInWindow(createTokenId("tok"), 60 * 60_000, now)).toBeCloseTo(
-      0.3,
-      8,
-    );
+    expect(
+      provider.maxMidpointInWindow(createTokenId("tok"), 60 * 60_000, now - 1_000),
+    ).toBeCloseTo(0.3, 8);
+    expect(provider.getWindowMaxCacheMetrics()).toMatchObject({
+      invocations: 3,
+      hits: 2,
+      misses: 1,
+    });
+  });
+
+  it("does not admit an incremental high that expired before a short-window query", () => {
+    const provider = new MarketSnapshotPriceHistoryProvider(setupDb(), {
+      syncMissLookup: false,
+    });
+    const tokenId = createTokenId("tok");
+
+    expect(provider.maxMidpointInWindow(tokenId, 10, 100)).toBeNull();
+    provider.observeMarket(makeMarket("tok", { mid: 0.8 }, 105));
+    provider.observeMarket(makeMarket("tok", { mid: 0.2 }, 119));
+    expect(provider.maxMidpointInWindow(tokenId, 10, 120)).toBe(0.2);
+
+    provider.observeMarket(makeMarket("tok", { mid: 0.3 }, 110));
+    expect(provider.maxMidpointInWindow(tokenId, 10, 120)).toBe(0.3);
+  });
+
+  it("incorporates an initially future sample and rescans when query time moves backward", () => {
+    const conn = setupDb();
+    const provider = new MarketSnapshotPriceHistoryProvider(conn, { syncMissLookup: false });
+
+    provider.observeMarket(makeMarket("tok", { mid: 0.2 }, 90));
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 20, 100)).toBe(0.2);
+    provider.observeMarket(makeMarket("tok", { mid: 0.8 }, 110));
+
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 20, 100)).toBe(0.2);
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 20, 110)).toBe(0.8);
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 20, 90)).toBe(0.2);
+  });
+
+  it("keeps time-ordered reference and window stats for late and same-timestamp samples", () => {
+    const conn = setupDb();
+    const provider = new MarketSnapshotPriceHistoryProvider(conn, { syncMissLookup: false });
+
+    provider.observeMarket(makeMarket("tok", { mid: 0.2 }, 200));
+    provider.observeMarket(makeMarket("tok", { mid: 0.1 }, 100));
+    provider.observeMarket(makeMarket("tok", { mid: 0.3 }, 100));
+
+    expect(provider.findReferencePrice(createTokenId("tok"), 150, 100)).toBe(0.3);
+    expect(provider.midpointStatsInWindow(createTokenId("tok"), 200, 200)).toMatchObject({
+      firstMidpoint: 0.1,
+      lastMidpoint: 0.2,
+      minMidpoint: 0.1,
+      maxMidpoint: 0.3,
+      sampleCount: 3,
+    });
+  });
+
+  it("keeps independent windows and invalidates only a pruned backing maximum", () => {
+    const conn = setupDb();
+    const provider = new MarketSnapshotPriceHistoryProvider(conn, {
+      syncMissLookup: false,
+      memorySampleMaxPerToken: 3,
+    });
+
+    provider.observeMarket(makeMarket("tok", { mid: 0.1 }, 10));
+    provider.observeMarket(makeMarket("tok", { mid: 0.8 }, 20));
+    provider.observeMarket(makeMarket("tok", { mid: 0.4 }, 30));
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 30, 30)).toBe(0.8);
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 5, 30)).toBe(0.4);
+
+    provider.observeMarket(makeMarket("tok", { mid: 0.3 }, 40));
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 30, 40)).toBe(0.8);
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 5, 40)).toBe(0.3);
+
+    provider.observeMarket(makeMarket("tok", { mid: 0.2 }, 50));
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 30, 50)).toBe(0.4);
+  });
+
+  it("isolates token caches and keeps samples when the global cache evicts an entry", () => {
+    const conn = setupDb();
+    const provider = new MarketSnapshotPriceHistoryProvider(conn, { syncMissLookup: false });
+    provider.observeMarket(makeMarket("a", { mid: 0.2 }, 90));
+    provider.observeMarket(makeMarket("b", { mid: 0.8 }, 90));
+    expect(provider.maxMidpointInWindow(createTokenId("a"), 1_000, 100)).toBe(0.2);
+    expect(provider.maxMidpointInWindow(createTokenId("b"), 1_000, 100)).toBe(0.8);
+
+    provider.observeMarket(makeMarket("a", { mid: 0.3 }, 110));
+    expect(provider.maxMidpointInWindow(createTokenId("b"), 1_000, 110)).toBe(0.8);
+    for (let windowMs = 1; windowMs <= 10_000; windowMs++) {
+      provider.maxMidpointInWindow(createTokenId("a"), windowMs, 110);
+    }
+
+    expect(provider.getWindowMaxCacheMetrics().entries).toBe(10_000);
+    expect(provider.maxMidpointInWindow(createTokenId("b"), 1_000, 110)).toBe(0.8);
   });
 
   it("globally prunes expired samples and invalidates cached maxima immediately", () => {

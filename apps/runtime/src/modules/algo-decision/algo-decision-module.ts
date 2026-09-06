@@ -2046,10 +2046,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         this.recordDecisionSuppressed(suppression as SuppressionFacts);
       }
       if (plan.type !== "signal") continue;
-      if (
-        plan.signal.side === "buy" &&
-        this.suppressBuyForExactNullStartupTransition(plan.signal.market.tokenId, now)
-      ) {
+      if (this.suppressForExactNullStartupTransition(plan.signal.market.tokenId, now)) {
         continue;
       }
       const result = this.materializeSignalDraft(plan.signal, now, nextSeq);
@@ -2114,7 +2111,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     );
   }
 
-  private suppressBuyForExactNullStartupTransition(tokenId: TokenId, now: number): boolean {
+  private suppressForExactNullStartupTransition(tokenId: TokenId, now: number): boolean {
     if (!this.deps.exactNullStartupTransition?.isDraining(tokenId)) return false;
     this.deps.runtimeMetrics?.writeCounter(
       EXACT_NULL_STARTUP_TRANSITION_BUY_SUPPRESSED_METRIC,
@@ -2134,7 +2131,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         suppressedCount: this.exactNullStartupTransitionSuppressedSinceWarn,
         windowMs: EXACT_NULL_STARTUP_TRANSITION_WARN_WINDOW_MS,
       },
-      "BUY signals suppressed while exact-null startup transition drains",
+      "signals suppressed while exact-null startup transition drains",
     );
     this.exactNullStartupTransitionWarnStartedAt = now;
     this.exactNullStartupTransitionSuppressedSinceWarn = 0;
