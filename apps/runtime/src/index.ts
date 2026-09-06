@@ -220,6 +220,7 @@ import {
   runDrainedOrderFenceGate,
   runOwnershipInvariantStartupGate,
 } from "./modules/exit-ownership/assert-bounce-for-all-invariant.js";
+import { resolveNewPositionExitOwner } from "./modules/exit-ownership/resolve-new-position-exit-owner.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { PositionConcentrationService } from "./position-concentration-service.js";
@@ -3089,7 +3090,7 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  const startupAdoptionDeps = {
+  const startupAdoptionDeps: Parameters<typeof runStartupPositionAdoption>[0] = {
     gateway: {
       getFillsResult,
       getOpenOrdersResult,
@@ -3108,6 +3109,16 @@ async function main(): Promise<void> {
     db: ledgerConn.db,
     botRunId,
     fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
+    resolveNewExitOwner: (fill, entryLane, openedAt) =>
+      resolveNewPositionExitOwner(
+        {
+          entryLane,
+          conditionId: String(fill.conditionId),
+          openedAt,
+          firstTradeAt: new Date(fill.timestamp).toISOString(),
+        },
+        currentExecutionPolicy(),
+      ),
     allowMissingBounceExitRecovery: () =>
       runtimeMode === "live-lite" && currentExecutionPolicy().makerEntry.mode === "off",
   };

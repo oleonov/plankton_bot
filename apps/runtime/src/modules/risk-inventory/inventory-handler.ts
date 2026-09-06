@@ -54,6 +54,12 @@ export interface FillEvent {
   timestamp: number;
 }
 
+export type NewPositionExitOwnerResolver = (
+  fill: FillEvent,
+  entryLane: "GATE" | "R23" | null,
+  openedAt: string,
+) => "bounce" | "profile" | null;
+
 /**
  * Durable first-entry lane for a new position, derived once from the first
  * fill's decisionRuleId (docs/plans/2026-07-15-gate-bounce-live-experiment.md,
@@ -78,15 +84,10 @@ export class InventoryHandler {
     private readonly latestMinOrderSize?: (tokenId: TokenId) => number | null,
     /**
      * Release A Phase 2 — decide a NEW position's sticky exit_owner at first fill.
-     * Optional: when absent (e.g. startup adoption), a new position keeps
-     * exit_owner = NULL (routed by today's per-cycle logic until the census
-     * backfills it). Injected by risk-inventory-module from the current policy.
+     * Optional: an absent resolver keeps exit_owner = NULL. Live risk inventory
+     * supplies the current policy; startup supplies it only for exact local provenance.
      */
-    private readonly resolveNewExitOwner?: (
-      fill: FillEvent,
-      entryLane: "GATE" | "R23" | null,
-      openedAt: string,
-    ) => "bounce" | "profile" | null,
+    private readonly resolveNewExitOwner?: NewPositionExitOwnerResolver,
   ) {
     this.pnlLedgerInsert = db.prepare(resolvePnlLedgerInsertSql(db));
   }

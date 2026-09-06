@@ -264,6 +264,49 @@ function adoptionDeps(
   };
 }
 
+function exactR23MakerOrder(overrides: Partial<Order> = {}): Order {
+  return expiredPreparedMakerOrder({
+    orderId: createOrderId("exact-r23-maker"),
+    clientOrderId: "exact_r23_maker" as ClientOrderId,
+    exchangeOrderId: "exact-r23-exchange",
+    price: 0.026,
+    size: 39.6,
+    sizeUsdc: 1.0296,
+    status: "open",
+    ...overrides,
+  });
+}
+
+function exactR23Gateway(rawFill: ExchangeFill, order: Order) {
+  const working = asExchangeOrder(order, {
+    sizeFilled: rawFill.size,
+    sizeRemaining: order.size - rawFill.size,
+    status: "PARTIALLY_FILLED",
+  });
+  return {
+    getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [working] }),
+    getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: working }),
+    getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [rawFill] }),
+  };
+}
+
+async function seedInterruptedOwner(conn: ReturnType<typeof bootstrapLedgerDb>, fillId: string) {
+  const order = exactR23MakerOrder({ orderId: createOrderId(`order-${fillId}`) });
+  const rawFill = makeExchangeFill({
+    fillId,
+    orderId: order.exchangeOrderId!,
+    clientOrderId: order.clientOrderId,
+    price: 0.026,
+    size: 20,
+    sizeUsdc: 0.52,
+    timestamp: Date.parse("2026-09-06T18:48:22.000Z"),
+  });
+  const deps = adoptionDeps(conn, exactR23Gateway(rawFill, order));
+  deps.orderRepo.save(order);
+  await runStartupPositionAdoption({ ...deps, resolveNewExitOwner: () => null });
+  return { deps, order, rawFill, position: deps.positionRepo.findByTokenId(TOKEN_ID)! };
+}
+
 describe("runStartupPositionAdoption", () => {
   const connections: Array<ReturnType<typeof bootstrapLedgerDb>> = [];
 
@@ -314,6 +357,193 @@ describe("runStartupPositionAdoption", () => {
     expect(position).not.toBeNull();
     expect(position?.size).toBe(10);
     expect(position?.costBasisUsdc).toBe(4);
+  });
+
+  it("assigns the canonical owner when an unseen fill has exact direct R23 maker provenance", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const order = exactR23MakerOrder({ status: "filled" });
+    const rawFill = makeExchangeFill({
+      fillId: "future-owner-fill",
+      orderId: order.exchangeOrderId!,
+      clientOrderId: order.clientOrderId,
+      price: 0.026,
+      size: 20,
+      sizeUsdc: 0.52,
+      timestamp: Date.parse("2026-09-06T18:48:22.000Z"),
+    });
+    const deps = adoptionDeps(conn, {
+      getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+      getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [rawFill] }),
+    });
+    deps.orderRepo.save(order);
+    const resolveNewExitOwner = vi.fn(() => "bounce" as const);
+
+    await runStartupPositionAdoption({ ...deps, resolveNewExitOwner });
+
+    expect(deps.positionRepo.findByTokenId(TOKEN_ID)?.exitOwner).toBe("bounce");
+  });
+
+  it("repairs one interrupted exact-local position before the ownership gate", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const { deps, order, position } = await seedInterruptedOwner(conn, "legacy-owner-fill");
+    const i3Token = createTokenId("runtime-i3-control");
+    const i3Position = createPositionId("runtime-i3-position");
+    deps.positionRepo.save({
+      ...position,
+      positionId: i3Position,
+      tokenId: i3Token,
+      conditionId: createConditionId("runtime-i3-condition"),
+      size: 110,
+      costBasisUsdc: 2.86,
+      exitOwner: "bounce",
+    });
+    for (const [index, size] of [8.358, 16.716, 25.074, 26.42, 33.432].entries()) {
+      deps.orderRepo.save({
+        ...order,
+        orderId: createOrderId(`runtime-i3-${index}`),
+        clientOrderId: `runtime_i3_${index}` as ClientOrderId,
+        exchangeOrderId: `runtime-i3-exchange-${index}`,
+        tokenId: i3Token,
+        conditionId: createConditionId("runtime-i3-condition"),
+        positionId: i3Position,
+        side: "sell",
+        size,
+        sizeUsdc: size * 0.05,
+        status: "open",
+        signalReason: "bounce-exit",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      });
+    }
+
+    expect(readOwnershipInvariantViolations(conn.db).counts).toMatchObject({
+      nullOwners: 1,
+      overcommittedTokens: 0,
+    });
+
+    const result = await runStartupPositionAdoption({
+      ...deps,
+      resolveNewExitOwner: () => "bounce",
+    });
+
+    expect(deps.positionRepo.findById(position.positionId)?.exitOwner).toBe("bounce");
+    expect(result.repairedExactLocalExitOwners).toBe(1);
+    expect(readOwnershipInvariantViolations(conn.db).counts).toEqual({
+      nullOwners: 0,
+      unboundSells: 0,
+      stalePointerSells: 0,
+      overcommittedTokens: 0,
+      duplicateNonclosedTokens: 0,
+      wrongOwnerSells: 0,
+    });
+  });
+
+  it.each([
+    ["orphan", null, "orphan-client", "orphan-ex", "cond-1", true],
+    ["client fallback", "local-ex", "shared-client", "raw-ex", "cond-1", true],
+    ["market mismatch", "same-ex", "shared-client", "same-ex", "other-cond", true],
+    ["non-maker transport", "same-ex", "shared-client", "same-ex", "cond-1", false],
+  ])(
+    "leaves %s ownership fail-closed",
+    async (_label, localExchangeId, clientId, rawOrderId, condition, postOnly) => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const rawFill = makeExchangeFill({
+        fillId: `unproved-${connections.length}`,
+        orderId: rawOrderId,
+        clientOrderId: clientId,
+        price: 0.026,
+        timestamp: Date.parse("2026-09-06T18:48:22.000Z"),
+      });
+      const deps = adoptionDeps(conn, {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [rawFill] }),
+      });
+      if (localExchangeId !== null) {
+        deps.orderRepo.save(
+          exactR23MakerOrder({
+            orderId: createOrderId(`unproved-order-${connections.length}`),
+            clientOrderId: clientId as ClientOrderId,
+            exchangeOrderId: localExchangeId,
+            conditionId: createConditionId(condition),
+            postOnly,
+            status: "filled",
+          }),
+        );
+      }
+
+      await runStartupPositionAdoption({ ...deps, resolveNewExitOwner: () => "bounce" });
+      expect(deps.positionRepo.findByTokenId(TOKEN_ID)?.exitOwner).toBeNull();
+    },
+  );
+
+  it("does not repair an interrupted saved fill without its full remaining lot", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const { deps, rawFill } = await seedInterruptedOwner(conn, "interrupted-no-lot");
+    conn.db.prepare("DELETE FROM inventory_lots WHERE fill_id = ?").run(rawFill.fillId);
+
+    await runStartupPositionAdoption({
+      ...deps,
+      resolveNewExitOwner: () => "bounce",
+    });
+
+    expect(deps.positionRepo.findByTokenId(TOKEN_ID)?.exitOwner).toBeNull();
+  });
+
+  it.each([
+    ["mismatched normalized timestamp", "UPDATE fills SET filled_at = '2026-09-06T18:48:23.000Z'"],
+    ["partially consumed lot", "UPDATE inventory_lots SET remaining_size = 19"],
+    ["mismatched lot entry price", "UPDATE inventory_lots SET entry_price = 0.025"],
+    [
+      "same-position lot on another token",
+      `INSERT INTO inventory_lots
+         SELECT 'cross-token-lot', position_id, 'other-token', side, size, 0,
+                entry_price, cost_usdc, fill_id, created_at FROM inventory_lots LIMIT 1`,
+    ],
+    [
+      "extra exhausted lot",
+      `INSERT INTO inventory_lots
+         (lot_id, position_id, token_id, side, size, remaining_size, entry_price,
+          cost_usdc, fill_id, created_at)
+       SELECT 'extra-exhausted', position_id, token_id, side, 1, 0, entry_price,
+              0.026, fill_id, created_at FROM inventory_lots LIMIT 1`,
+    ],
+  ])("does not repair legacy ownership with %s", async (_label, mutation) => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const { deps } = await seedInterruptedOwner(conn, `legacy-mismatch-${connections.length}`);
+    conn.db.exec(mutation);
+
+    await runStartupPositionAdoption({
+      ...deps,
+      resolveNewExitOwner: () => "bounce",
+    });
+
+    expect(deps.positionRepo.findByTokenId(TOKEN_ID)?.exitOwner).toBeNull();
+  });
+
+  it("lets a guarded owner CAS failure escape the per-fill recovery catch", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const { deps, position } = await seedInterruptedOwner(conn, "legacy-owner-cas");
+
+    await expect(
+      runStartupPositionAdoption({
+        ...deps,
+        resolveNewExitOwner: () => {
+          conn.db
+            .prepare("UPDATE positions SET size = size + 1 WHERE position_id = ?")
+            .run(position.positionId);
+          return "bounce";
+        },
+      }),
+    ).rejects.toThrow("exact-local startup owner CAS failed");
+    expect(deps.positionRepo.findById(position.positionId)).toMatchObject({
+      exitOwner: null,
+      size: 20,
+    });
   });
 
   it("uses the immutable pending snapshot after fill import and fails closed for every unresolved exact result", async () => {

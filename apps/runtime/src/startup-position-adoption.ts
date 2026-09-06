@@ -7,11 +7,14 @@ import type {
   ExchangeGateway,
   ExchangeOrder,
   FetchResult,
+  Fill,
   FillRepository,
+  InventoryLot,
   LegStateRepository,
   MarketRepository,
   Order,
   OrderRepository,
+  Position,
   PositionId,
   PositionRepository,
   InventoryLotRepository,
@@ -23,12 +26,17 @@ import {
   createFillId,
   createOrderId,
   createTokenId,
+  R23_DIP_TRIGGER_RULE_ID,
 } from "@krabs/domain";
 import { ledgerInstant, parseLedgerInstantMs, withImmediate } from "@krabs/db";
 import type { Logger } from "./logger.js";
 import { resolveMakerMicroLiveFillDeadlineMs } from "./buy-order-lifecycle.js";
 import { resolveOpenPositionStatus } from "./position-status.js";
-import { InventoryHandler } from "./modules/risk-inventory/inventory-handler.js";
+import {
+  InventoryHandler,
+  type FillEvent,
+  type NewPositionExitOwnerResolver,
+} from "./modules/risk-inventory/inventory-handler.js";
 import {
   findLocalOrderForExchangeFill,
   importExchangeFills,
@@ -88,6 +96,8 @@ export interface StartupPositionAdoptionDeps {
   fillCompletionTolerance?: number | undefined;
   /** Exceptional live-lite escape hatch; absent/false preserves the normal fatal startup path. */
   allowMissingBounceExitRecovery?: (() => boolean) | undefined;
+  /** Canonical sticky-owner resolver; exact-local startup fills are its only admitted callers. */
+  resolveNewExitOwner?: NewPositionExitOwnerResolver | undefined;
 }
 
 /**
@@ -126,6 +136,7 @@ export interface StartupPositionAdoptionResult {
   adoptedOrphanFills: number;
   syntheticOrdersCreated: number;
   positionsCreated: number;
+  repairedExactLocalExitOwners: number;
   cleanedSyntheticOrders: number;
   cleanedSyntheticFills: number;
   cleanedSyntheticTokens: number;
@@ -154,6 +165,12 @@ interface PendingFill {
   orphanGroupKey: string | null;
 }
 
+interface ExactLocalOwnerEvidence {
+  fill: ExchangeFill;
+  order: Order;
+  fillEvent: FillEvent;
+}
+
 interface SyntheticOrderSeed {
   orderId: string;
   exchangeOrderId: string | null;
@@ -175,11 +192,194 @@ interface StartupAdoptionCleanupResult {
 
 const SYNTHETIC_SIGNAL_REASON = "startup-adoption";
 
+function isExactR23MakerOrder(fill: ExchangeFill, order: Order | null): order is Order {
+  return (
+    order !== null &&
+    fill.orderId !== "" &&
+    order.exchangeOrderId === fill.orderId &&
+    order.tokenId === fill.tokenId &&
+    order.side === "buy" &&
+    fill.side === "buy" &&
+    order.positionId === null &&
+    order.orderType === "GTC" &&
+    order.postOnly === true &&
+    order.entryStyle === "maker" &&
+    order.signalReason === "probe-entry" &&
+    order.decisionRuleId === R23_DIP_TRIGGER_RULE_ID &&
+    Number.isFinite(fill.price) &&
+    fill.price > 0 &&
+    fill.price === order.price &&
+    Number.isFinite(fill.size) &&
+    fill.size > 0 &&
+    fill.size <= order.size
+  );
+}
+
+function buildExactLocalOwnerEvidence(
+  deps: StartupPositionAdoptionDeps,
+  fill: ExchangeFill,
+  order: Order | null,
+): ExactLocalOwnerEvidence | null {
+  if (!isExactR23MakerOrder(fill, order)) return null;
+  const market = deps.marketRepo.findByTokenId(fill.tokenId);
+  if (!market || market.conditionId !== order.conditionId) return null;
+  const sizeUsdc = fill.sizeUsdc ?? (fill.grossSize ?? fill.size) * fill.price;
+  if (!Number.isFinite(sizeUsdc) || sizeUsdc <= 0) return null;
+  return {
+    fill,
+    order,
+    fillEvent: {
+      fillId: createFillId(fill.fillId),
+      tokenId: fill.tokenId,
+      conditionId: order.conditionId,
+      side: "buy",
+      price: fill.price,
+      size: fill.size,
+      sizeUsdc,
+      fee: fill.fee ?? 0,
+      signalReason: order.signalReason,
+      entryStyle: "maker",
+      decisionRuleId: R23_DIP_TRIGGER_RULE_ID,
+      timestamp: fill.timestamp,
+    },
+  };
+}
+
+function matchesExactLegacyPosition(
+  deps: StartupPositionAdoptionDeps,
+  evidence: ExactLocalOwnerEvidence,
+  position: Position,
+): boolean {
+  const fills = deps.fillRepo.findByTokenId(position.tokenId);
+  const lotCount = (
+    deps.db
+      .prepare("SELECT COUNT(*) AS count FROM inventory_lots WHERE position_id = ?")
+      .get(position.positionId) as { count: number }
+  ).count;
+  const lots = deps.inventoryLotRepo
+    .findByTokenId(position.tokenId)
+    .filter((lot) => lot.positionId === position.positionId);
+  if (fills.length !== 1 || lotCount !== 1 || lots.length !== 1) return false;
+  const [saved] = fills;
+  const [lot] = lots;
+  if (!saved || !lot) return false;
+  return (
+    position.exitOwner === null &&
+    (position.status === "open" || position.status === "dust") &&
+    position.side === "buy" &&
+    position.entryStyle === "maker" &&
+    position.entryLane === "R23" &&
+    position.conditionId === evidence.order.conditionId &&
+    matchesExactSavedFill(evidence, saved) &&
+    matchesFullRemainingLot(position, saved, lot)
+  );
+}
+
+function matchesExactSavedFill(evidence: ExactLocalOwnerEvidence, saved: Fill): boolean {
+  return (
+    saved.fillId === evidence.fillEvent.fillId &&
+    saved.orderId === evidence.order.orderId &&
+    saved.tokenId === evidence.fill.tokenId &&
+    saved.conditionId === evidence.order.conditionId &&
+    saved.side === "buy" &&
+    saved.price === evidence.fill.price &&
+    saved.size === evidence.fill.size &&
+    saved.sizeUsdc === evidence.fillEvent.sizeUsdc &&
+    saved.filledAt === new Date(evidence.fill.timestamp).toISOString()
+  );
+}
+
+function matchesFullRemainingLot(position: Position, saved: Fill, lot: InventoryLot): boolean {
+  return (
+    lot.fillId === saved.fillId &&
+    lot.positionId === position.positionId &&
+    lot.tokenId === position.tokenId &&
+    lot.side === "buy" &&
+    lot.size === saved.size &&
+    lot.remainingSize === lot.size &&
+    lot.entryPrice === saved.sizeUsdc / saved.size &&
+    lot.costUsdc === saved.sizeUsdc &&
+    position.size === saved.size &&
+    position.avgEntryPrice === saved.sizeUsdc / saved.size &&
+    position.costBasisUsdc === saved.sizeUsdc &&
+    position.realizedPnl === 0
+  );
+}
+
+function assignExactLocalOwner(
+  deps: StartupPositionAdoptionDeps,
+  position: Position,
+  owner: "bounce" | "profile",
+): void {
+  const update = deps.db
+    .prepare(
+      `UPDATE positions SET exit_owner = ?
+        WHERE position_id = ? AND token_id = ? AND condition_id = ?
+          AND status = ? AND entry_style = ? AND entry_lane = ?
+          AND size = ? AND avg_entry_price = ? AND cost_basis_usdc = ?
+          AND realized_pnl = 0 AND exit_owner IS NULL`,
+    )
+    .run(
+      owner,
+      position.positionId,
+      position.tokenId,
+      position.conditionId,
+      position.status,
+      position.entryStyle,
+      position.entryLane,
+      position.size,
+      position.avgEntryPrice,
+      position.costBasisUsdc,
+    );
+  if (update.changes !== 1) throw new Error("exact-local startup owner CAS failed");
+}
+
+function repairExactLocalExitOwner(
+  deps: StartupPositionAdoptionDeps,
+  evidence: ExactLocalOwnerEvidence,
+): boolean {
+  return withImmediate(deps.db, () => {
+    const positions = deps.positionRepo.findActiveByTokenId(evidence.fill.tokenId);
+    if (positions.length !== 1 || !matchesExactLegacyPosition(deps, evidence, positions[0]!)) {
+      return false;
+    }
+    const position = positions[0]!;
+    const owner = deps.resolveNewExitOwner!(evidence.fillEvent, "R23", position.openedAt);
+    if (owner === null) return false;
+    assignExactLocalOwner(deps, position, owner);
+    return true;
+  });
+}
+
+function repairExactLocalExitOwners(
+  deps: StartupPositionAdoptionDeps,
+  evidenceByFillId: ReadonlyMap<string, ExactLocalOwnerEvidence>,
+): number {
+  if (!deps.resolveNewExitOwner) return 0;
+  let repaired = 0;
+  for (const evidence of evidenceByFillId.values()) {
+    if (repairExactLocalExitOwner(deps, evidence)) repaired++;
+  }
+  if (repaired > 0) deps.log.info({ repaired }, "repaired exact-local startup exit ownership");
+  return repaired;
+}
+
 export async function runStartupPositionAdoption(
   deps: StartupPositionAdoptionDeps,
 ): Promise<StartupPositionAdoptionResult> {
   const log = deps.log.child({ module: "startup-position-adoption" });
-  const inventory = new InventoryHandler(deps.positionRepo, deps.inventoryLotRepo, log, deps.db);
+  const ownerEvidence = new Map<string, ExactLocalOwnerEvidence>();
+  const inventory = new InventoryHandler(
+    deps.positionRepo,
+    deps.inventoryLotRepo,
+    log,
+    deps.db,
+    undefined,
+    (fill, entryLane, openedAt) =>
+      ownerEvidence.has(String(fill.fillId))
+        ? (deps.resolveNewExitOwner?.(fill, entryLane, openedAt) ?? null)
+        : null,
+  );
   const pendingOrderIds = deps.orderRepo
     .findOpen()
     .filter((order) => order.status === "pending")
@@ -206,6 +406,7 @@ export async function runStartupPositionAdoption(
     adoptedOrphanFills: 0,
     syntheticOrdersCreated: 0,
     positionsCreated: 0,
+    repairedExactLocalExitOwners: 0,
     cleanedSyntheticOrders: 0,
     cleanedSyntheticFills: 0,
     cleanedSyntheticTokens: 0,
@@ -253,12 +454,15 @@ export async function runStartupPositionAdoption(
   const syntheticOrders = new Map<string, Order>();
 
   for (const fill of fills) {
+    const directOrder = fill.orderId ? deps.orderRepo.findByExchangeOrderId(fill.orderId) : null;
+    const exactEvidence = buildExactLocalOwnerEvidence(deps, fill, directOrder);
+    if (exactEvidence) ownerEvidence.set(String(fill.fillId), exactEvidence);
     if (deps.fillRepo.exists(createFillId(fill.fillId))) {
       result.alreadyKnownFills++;
       continue;
     }
 
-    const localOrder = findLocalOrderForExchangeFill(deps.orderRepo, fill, log);
+    const localOrder = directOrder ?? findLocalOrderForExchangeFill(deps.orderRepo, fill, log);
     if (localOrder) {
       pendingFills.push({ fill, localOrder, orphanGroupKey: null });
       continue;
@@ -391,6 +595,8 @@ export async function runStartupPositionAdoption(
       );
     }
   }
+
+  result.repairedExactLocalExitOwners = repairExactLocalExitOwners(deps, ownerEvidence);
 
   result.syntheticOrdersCreated = syntheticOrders.size;
   const exactNullExpiredMakers: Order[] = [];
