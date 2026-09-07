@@ -320,6 +320,115 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
     expect(repo.findTrackedForPricingTiered).toHaveBeenCalledTimes(1);
   });
 
+  it("captures target routing only on a natural tier-cache refresh", async () => {
+    const capturedAtMs = Date.parse("2026-08-01T12:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(capturedAtMs);
+    const fact = {
+      tokenId: "e1",
+      conditionId: "cond-e1",
+      outcome: "YES",
+      outcomeIndex: 0,
+      capturedAtMs,
+      basis: "post_detection_route_evaluation" as const,
+      route: "entry_candidate" as const,
+      v4Category: "crypto-btc" as const,
+      v4Reason: "admit" as const,
+      admissionRank: 1,
+      capacitySlots: 999,
+      signatureMatched: false,
+    };
+    const tiered = { ...makeTiered([], ["e1"], []), targetRoutes: [fact] };
+    const repo = createMockRepo(tiered);
+    vi.mocked(repo.findTrackedForPricingTiered).mockImplementation((opts) =>
+      opts.targetTokenIds ? tiered : makeTiered([], ["e1"], []),
+    );
+    const routeTargetTokenIds = vi.fn(() => new Set(["e1"]));
+    const observeRouting = vi.fn(() => {
+      throw new Error("shadow unavailable");
+    });
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      tieredPricingCacheTtlMs: 60_000,
+      entryShadowObserver: {
+        routeTargetTokenIds,
+        observeRouting,
+        isTarget: () => false,
+        observeDiscovery: vi.fn(),
+      },
+    });
+
+    await expect(mod.poll()).resolves.toBeUndefined();
+    vi.setSystemTime(capturedAtMs + 10_000);
+    await expect(mod.poll()).resolves.toBeUndefined();
+
+    expect(repo.findTrackedForPricingTiered).toHaveBeenCalledTimes(1);
+    expect(repo.findTrackedForPricingTiered).toHaveBeenCalledWith(
+      expect.objectContaining({ targetTokenIds: new Set(["e1"]) }),
+    );
+    expect(routeTargetTokenIds).toHaveBeenCalledTimes(1);
+    expect(observeRouting).toHaveBeenCalledTimes(1);
+    expect(observeRouting).toHaveBeenCalledWith(fact);
+
+    routeTargetTokenIds.mockImplementation(() => {
+      throw new Error("target snapshot unavailable");
+    });
+    vi.setSystemTime(capturedAtMs + 70_000);
+    await expect(mod.poll()).resolves.toBeUndefined();
+    expect(repo.findTrackedForPricingTiered).toHaveBeenCalledTimes(2);
+    expect(repo.findTrackedForPricingTiered).toHaveBeenLastCalledWith({
+      maxTokens: 1000,
+      reserveSignature: false,
+    });
+    expect(observeRouting).toHaveBeenCalledTimes(1);
+  });
+
+  it("observes discovery request outcomes without changing failures", async () => {
+    const tiered = makeTiered([], [], ["d0"]);
+    const repo = createMockRepo(tiered);
+    const observeDiscovery = vi.fn();
+    const entryShadowObserver = {
+      routeTargetTokenIds: () => new Set<string>(),
+      observeRouting: vi.fn(),
+      isTarget: vi.fn((tokenId: string) => tokenId === "d0"),
+      observeDiscovery,
+    };
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      entryShadowObserver,
+    });
+    await mod.poll();
+
+    gateway.getMarketPricing = vi.fn().mockResolvedValueOnce(new Map([["d0", makePricing()]]));
+    await (mod as any).pollDiscoveryBatch();
+    expect(observeDiscovery.mock.calls.map((call) => call[1])).toEqual(["requested", "returned"]);
+
+    observeDiscovery.mockClear();
+    gateway.getMarketPricing = vi.fn().mockResolvedValueOnce(new Map());
+    await (mod as any).pollDiscoveryBatch();
+    expect(observeDiscovery.mock.calls.map((call) => call[1])).toEqual(["requested", "missing"]);
+
+    observeDiscovery.mockClear();
+    gateway.getMarketPricing = vi.fn().mockRejectedValueOnce(new Error("offline"));
+    await expect((mod as any).pollDiscoveryBatch()).resolves.toBeUndefined();
+    expect(observeDiscovery.mock.calls.map((call) => call[1])).toEqual([
+      "requested",
+      "request_failed",
+    ]);
+  });
+
   it("publishes MarketSnapshotHeartbeat for quiet full-lifetime active tokens", async () => {
     const tiered = makeTiered(["crit-1"], [], []);
     const repo = createMockRepo(tiered);

@@ -6105,6 +6105,128 @@ describe("AlgoDecisionModule", () => {
   });
 
   describe("wallet buy budget ownership", () => {
+    it("attributes reached BUY budget guards without changing breaker call cardinality", async () => {
+      const tokenIds = ["target-budget-first", "target-budget-cooldown"];
+      selectedMarketCache = createMockSelectedMarketCache(tokenIds);
+      const canAttemptBuy = vi.fn(() => ({
+        canAttempt: false,
+        reasonCode: "wallet_buy_capacity_exhausted",
+      }));
+      const observeAlgo = vi.fn();
+      const mod = buildModule({
+        buySignalBudgetCircuitBreaker: { canAttemptBuy },
+        decisionShadowObserver: {
+          isTarget: (tokenId: string) => tokenIds.includes(tokenId),
+          observeAlgo,
+        },
+      } as never);
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: tokenIds.map((tokenId) => makeMarket(tokenId, null, 0.45)),
+        timestamp: Date.now(),
+      });
+
+      const postplanner = observeAlgo.mock.calls.filter((call) => call[1] === "postplanner_guard");
+      expect(postplanner.map((call) => call[2])).toEqual([
+        {
+          side: "buy",
+          decisionRuleId: "FALLBACK",
+          guardReason: "buy_budget",
+          budgetReason: "wallet_buy_capacity_exhausted",
+        },
+        {
+          side: "buy",
+          decisionRuleId: "FALLBACK",
+          guardReason: "buy_budget",
+          budgetReason: "buy_budget_cooldown",
+        },
+      ]);
+      expect(canAttemptBuy).toHaveBeenCalledTimes(1);
+      expect(
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+          ([event]) => event === "SignalProduced",
+        ),
+      ).toHaveLength(0);
+      await mod.stop();
+    });
+
+    it("keeps a BUY denied when the breaker returns an empty reason", async () => {
+      const tokenId = "target-budget-empty-reason";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const canAttemptBuy = vi.fn(() => ({ canAttempt: false, reasonCode: "" }));
+      const observeAlgo = vi.fn();
+      const mod = buildModule({
+        buySignalBudgetCircuitBreaker: { canAttemptBuy },
+        decisionShadowObserver: { isTarget: () => true, observeAlgo },
+      } as never);
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      expect(canAttemptBuy).toHaveBeenCalledTimes(1);
+      expect((mod as any).pendingEntries.size).toBe(0);
+      expect(
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+          ([event]) => event === "SignalProduced",
+        ),
+      ).toHaveLength(0);
+      expect(observeAlgo).toHaveBeenCalledWith(tokenId, "postplanner_guard", {
+        side: "buy",
+        decisionRuleId: "FALLBACK",
+        guardReason: "buy_budget",
+        budgetReason: "",
+      });
+      await mod.stop();
+    });
+
+    it("records only a publish attempt for a target and keeps target-predicate failures fail-open", async () => {
+      const tokenId = "target-publish-attempt";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const observeAlgo = vi.fn();
+      const mod = buildModule({
+        decisionShadowObserver: {
+          isTarget: vi.fn(() => true),
+          observeAlgo,
+        },
+      } as never);
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      expect(observeAlgo).toHaveBeenCalledWith(tokenId, "postplanner_guard", {
+        side: "buy",
+        decisionRuleId: "FALLBACK",
+        guardReason: "publish_attempted",
+      });
+      expect(
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+          ([event]) => event === "SignalProduced",
+        ),
+      ).toHaveLength(1);
+
+      (mod as any).deps.decisionShadowObserver.isTarget = () => {
+        throw new Error("shadow unavailable");
+      };
+      expect(() =>
+        (mod as any).observePostPlannerGuard(
+          {
+            tokenId: createTokenId(tokenId),
+            side: "buy",
+            decisionRuleId: "R23_DIP_TRIGGER",
+          },
+          "publish_attempted",
+        ),
+      ).not.toThrow();
+      await mod.stop();
+    });
+
     it("admits an exact capture through ordinary cooldown without clearing that cooldown", () => {
       const now = Date.parse("2026-08-20T11:00:00.000Z");
       const canAttemptBuy = vi
@@ -6146,9 +6268,13 @@ describe("AlgoDecisionModule", () => {
         decisionRuleId: "R23_DIP_TRIGGER",
       };
 
-      expect((mod as any).shouldSuppressBuyForBudget(ordinary, now)).toBe(true);
-      expect((mod as any).shouldSuppressBuyForBudget(capture, now + 1)).toBe(false);
-      expect((mod as any).shouldSuppressBuyForBudget(ordinary, now + 2)).toBe(true);
+      expect((mod as any).buyBudgetSuppressionReason(ordinary, now)).toBe(
+        "wallet_buy_budget_exhausted",
+      );
+      expect((mod as any).buyBudgetSuppressionReason(capture, now + 1)).toBeNull();
+      expect((mod as any).buyBudgetSuppressionReason(ordinary, now + 2)).toBe(
+        "buy_budget_cooldown",
+      );
       expect(canAttemptBuy).toHaveBeenCalledTimes(2);
       expect((mod as any).buyBudgetCooldownUntilMs).toBe(now + 60_000);
     });

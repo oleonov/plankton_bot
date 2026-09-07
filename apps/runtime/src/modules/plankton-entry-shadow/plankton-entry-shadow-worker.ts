@@ -8,6 +8,9 @@ const OFFSET_CAP = 3_000;
 const OVERLAP_SECONDS = 24 * 60 * 60;
 const INITIAL_SECONDS = 72 * 60 * 60;
 const DATA_API_URL = "https://data-api.polymarket.com/activity";
+const TRANSIENT_IDENTITY_OUTCOME_INDEX = 999;
+const TRANSIENT_IDENTITY_ROWS_STATE = "v2_transient_identity_rows_seen";
+const TRANSIENT_IDENTITY_LAST_SEEN_STATE = "v2_transient_identity_last_seen_at";
 export type ShadowActivityRow = {
   transactionHash: string;
   timestamp: number;
@@ -29,6 +32,8 @@ export type ShadowTarget = {
   detectionLagMs: number;
   coverageStartedAt: number;
   coverageEndsAt: number;
+  downstreamGraceStartedAt: number | null;
+  downstreamGraceEndsAt: number | null;
 };
 export type ShadowObservation = ShadowTarget & {
   stage: string;
@@ -170,6 +175,7 @@ function activityKey(row: ShadowActivityRow): string {
   return [row.transactionHash, row.conditionId, row.asset, row.outcomeIndex].join("\0");
 }
 const V2_STAGES = ["scanner", "tracking", "normalized", "algo", "signal"] as const;
+const GRACE_STAGES = ["grace_tracking", "grace_normalized", "grace_algo", "grace_signal"] as const;
 type PollStatus = "ok" | "unavailable" | "source_saturated" | "interrupted";
 
 export class ShadowStore {
@@ -180,7 +186,7 @@ export class ShadowStore {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     this.createLegacySchema();
-    this.migrateV2(Date.now());
+    this.migrateV3(Date.now());
     this.finalizeInterruptedPolls(Date.now());
     if (path !== ":memory:") chmodSync(path, 0o600);
   }
@@ -226,13 +232,18 @@ export class ShadowStore {
     pollId?: number,
   ): ShadowTarget[] {
     const normalized = rows.map(parseActivityRow);
+    const canonical = normalized.filter(
+      (row) => row.outcomeIndex !== TRANSIENT_IDENTITY_OUTCOME_INDEX,
+    );
+    const transientCount = normalized.length - canonical.length;
     return this.db.transaction(() => {
-      const inserted = this.insertActivity(normalized, baseline, detectedAt);
-      const groups = this.collectUnmapped(normalized);
+      this.recordTransientIdentityRows(transientCount, detectedAt);
+      const inserted = this.insertActivity(canonical, baseline, detectedAt);
+      const groups = this.collectUnmapped(canonical);
       const targets = [...groups.values()].map((group) =>
         this.createTarget(group, baseline, detectedAt, coverageMs),
       );
-      this.advanceCursor(normalized);
+      this.advanceCursor(canonical);
       if (baseline) this.setState("v2_baseline_done", "1");
       this.finishSuccessfulPoll(pollId, detectedAt, normalized.length, inserted, targets.length);
       return targets;
@@ -259,6 +270,28 @@ export class ShadowStore {
     })();
   }
 
+  completeSuccessfulScan(
+    inputs: readonly ShadowObservation[],
+    scanStartedAt: number,
+    completedAt: number,
+    downstreamGraceMs: number,
+  ): ShadowTarget[] {
+    return this.db.transaction(() => {
+      for (const input of inputs) this.recordObservationInner(input);
+      const granted = new Map<string, ShadowTarget>();
+      for (const input of inputs) {
+        const target = this.grantDownstreamGrace(
+          input,
+          scanStartedAt,
+          completedAt,
+          downstreamGraceMs,
+        );
+        if (target) granted.set(targetKey(target), target);
+      }
+      return [...granted.values()];
+    })();
+  }
+
   maintain(
     now: number,
     retentionMs: number,
@@ -267,7 +300,7 @@ export class ShadowStore {
     return this.db.transaction(() => {
       const expired = this.readExpiredTargets(now);
       const closed = expired.filter((target) =>
-        this.finalizeExpiredTarget(target, activeScanStarts),
+        this.finalizeExpiredTarget(target, now, activeScanStarts),
       );
       this.prune(now - retentionMs);
       return closed;
@@ -291,10 +324,17 @@ export class ShadowStore {
     );
   }
 
-  healthState(): { lastSuccessAt: number | null; consecutiveFailures: number } {
+  healthState(): {
+    lastSuccessAt: number | null;
+    consecutiveFailures: number;
+    transientIdentityRowsSeen: number;
+    transientIdentityLastSeenAt: number | null;
+  } {
     return {
       lastSuccessAt: this.readIntegerState("v2_last_success_at"),
       consecutiveFailures: this.failureCount(),
+      transientIdentityRowsSeen: this.readIntegerState(TRANSIENT_IDENTITY_ROWS_STATE) ?? 0,
+      transientIdentityLastSeenAt: this.readIntegerState(TRANSIENT_IDENTITY_LAST_SEEN_STATE),
     };
   }
 
@@ -331,18 +371,30 @@ export class ShadowStore {
       );`);
   }
 
-  private migrateV2(now: number): void {
+  private migrateV3(now: number): void {
     this.db.transaction(() => {
       if (!this.hasActivityColumn("target_generation_v2"))
         this.db.exec("ALTER TABLE plankton_buy_activity ADD COLUMN target_generation_v2 INTEGER");
       this.db.exec(v2SchemaSql());
+      if (!this.hasTargetColumn("downstream_grace_started_at"))
+        this.db.exec(
+          "ALTER TABLE shadow_targets_v2 ADD COLUMN downstream_grace_started_at INTEGER",
+        );
+      if (!this.hasTargetColumn("downstream_grace_ends_at"))
+        this.db.exec("ALTER TABLE shadow_targets_v2 ADD COLUMN downstream_grace_ends_at INTEGER");
       if (this.readState("v2_started_at") == null) this.setState("v2_started_at", String(now));
-      this.db.pragma("user_version = 2");
+      this.db.pragma("user_version = 3");
     })();
   }
 
   private hasActivityColumn(name: string): boolean {
     return (this.db.pragma("table_info(plankton_buy_activity)") as Array<{ name: string }>).some(
+      (column) => column.name === name,
+    );
+  }
+
+  private hasTargetColumn(name: string): boolean {
+    return (this.db.pragma("table_info(shadow_targets_v2)") as Array<{ name: string }>).some(
       (column) => column.name === name,
     );
   }
@@ -412,6 +464,8 @@ export class ShadowStore {
       detectionLagMs: Math.max(0, detectedAt - Math.max(...times) * 1_000),
       coverageStartedAt: detectedAt,
       coverageEndsAt: detectedAt + coverageMs,
+      downstreamGraceStartedAt: null,
+      downstreamGraceEndsAt: null,
     };
     this.insertTarget(target, Math.min(...times), Math.max(...times), detectedAt);
     this.linkActivity(rows, generation);
@@ -473,6 +527,13 @@ export class ShadowStore {
     if (next > 0) this.setState("v2_activity_cursor", String(next));
   }
 
+  private recordTransientIdentityRows(count: number, at: number): void {
+    if (count === 0) return;
+    const seen = this.readIntegerState(TRANSIENT_IDENTITY_ROWS_STATE) ?? 0;
+    this.setState(TRANSIENT_IDENTITY_ROWS_STATE, String(seen + count));
+    this.setState(TRANSIENT_IDENTITY_LAST_SEEN_STATE, String(at));
+  }
+
   private finishSuccessfulPoll(
     pollId: number | undefined,
     at: number,
@@ -492,23 +553,71 @@ export class ShadowStore {
   }
 
   private recordObservationInner(input: ShadowObservation): void {
-    const target = this.db
+    const row = this.db
       .prepare(
-        `SELECT outcome FROM shadow_targets_v2 WHERE condition_id=? AND token_id=?
-        AND outcome_index=? AND generation=? AND closed_at IS NULL
-        AND coverage_started_at<=? AND ?<coverage_ends_at`,
+        `${targetSelect()} FROM shadow_targets_v2 WHERE condition_id=? AND token_id=?
+        AND outcome_index=? AND generation=? AND closed_at IS NULL`,
       )
-      .get(
+      .get(input.conditionId, input.tokenId, input.outcomeIndex, input.generation) as
+      | (Omit<ShadowTarget, "baseline"> & { baseline: number })
+      | undefined;
+    if (!row || row.outcome !== input.outcome) return;
+    const observation = observationForWindow(input, normalizeTarget(row));
+    if (!observation) return;
+    if (observation.stage !== "scanner" && this.hasStageGap(observation, observation.stage)) return;
+    this.upsertObservation(observation, this.compactPolicies(observation.payload));
+  }
+
+  private grantDownstreamGrace(
+    input: ShadowObservation,
+    scanStartedAt: number,
+    completedAt: number,
+    downstreamGraceMs: number,
+  ): ShadowTarget | null {
+    if (input.stage !== "scanner" || input.result !== "include" || downstreamGraceMs <= 0)
+      return null;
+    const downstreamGraceEndsAt = completedAt + downstreamGraceMs;
+    const result = this.db
+      .prepare(
+        `UPDATE shadow_targets_v2 SET
+          downstream_grace_started_at=MAX(coverage_ends_at,?),downstream_grace_ends_at=?
+        WHERE condition_id=? AND token_id=? AND outcome_index=? AND generation=?
+          AND outcome=? AND is_baseline=0 AND closed_at IS NULL
+          AND downstream_grace_ends_at IS NULL
+          AND coverage_started_at<=? AND ?<coverage_ends_at
+          AND coverage_started_at<=? AND ?<coverage_ends_at AND coverage_ends_at<?`,
+      )
+      .run(
+        completedAt,
+        downstreamGraceEndsAt,
         input.conditionId,
         input.tokenId,
         input.outcomeIndex,
         input.generation,
+        input.outcome,
+        scanStartedAt,
+        scanStartedAt,
         input.observedAt,
         input.observedAt,
-      ) as { outcome: string } | undefined;
-    if (!target || target.outcome !== input.outcome) return;
-    if (input.stage !== "scanner" && this.hasStageGap(input, input.stage)) return;
-    this.upsertObservation(input, this.compactPolicies(input.payload));
+        downstreamGraceEndsAt,
+      );
+    if (result.changes === 0) return null;
+    return this.readTarget(input);
+  }
+
+  private readTarget(
+    target: Pick<ShadowTarget, "conditionId" | "tokenId" | "outcomeIndex" | "generation">,
+  ): ShadowTarget {
+    const row = this.db
+      .prepare(
+        `${targetSelect()} FROM shadow_targets_v2 WHERE condition_id=? AND token_id=?
+        AND outcome_index=? AND generation=?`,
+      )
+      .get(target.conditionId, target.tokenId, target.outcomeIndex, target.generation) as Omit<
+      ShadowTarget,
+      "baseline"
+    > & { baseline: number };
+    return normalizeTarget(row);
   }
 
   private compactPolicies(payload: Readonly<Record<string, unknown>>): Record<string, unknown> {
@@ -559,6 +668,7 @@ export class ShadowStore {
 
   private finalizeExpiredTarget(
     target: ShadowTarget,
+    now: number,
     activeScanStarts: readonly number[],
   ): boolean {
     const deferScanner = activeScanStarts.some(
@@ -568,27 +678,58 @@ export class ShadowStore {
       if (stage === "scanner" && deferScanner) continue;
       this.finalizeStageGap(target, stage);
     }
+    if (target.downstreamGraceEndsAt != null) {
+      if (!this.finalizeGrace(target, now) || deferScanner) return false;
+      this.closeTarget(target);
+      return true;
+    }
     if (deferScanner) return false;
-    this.db
-      .prepare(
-        `UPDATE shadow_targets_v2 SET closed_at=coverage_ends_at,close_reason='window_elapsed'
-        WHERE condition_id=? AND token_id=? AND outcome_index=? AND generation=? AND closed_at IS NULL`,
-      )
-      .run(target.conditionId, target.tokenId, target.outcomeIndex, target.generation);
+    this.closeTarget(target);
     return true;
   }
 
-  private finalizeStageGap(target: ShadowTarget, stage: string): void {
+  private finalizeGrace(target: ShadowTarget, now: number): boolean {
+    const endsAt = target.downstreamGraceEndsAt!;
+    if (now < endsAt) return false;
+    for (const stage of GRACE_STAGES) this.finalizeStageGap(target, stage, endsAt);
+    return true;
+  }
+
+  private closeTarget(target: ShadowTarget): void {
+    this.db
+      .prepare(
+        `UPDATE shadow_targets_v2 SET closed_at=?,close_reason=?
+        WHERE condition_id=? AND token_id=? AND outcome_index=? AND generation=? AND closed_at IS NULL`,
+      )
+      .run(
+        target.coverageEndsAt,
+        "window_elapsed",
+        target.conditionId,
+        target.tokenId,
+        target.outcomeIndex,
+        target.generation,
+      );
+  }
+
+  private finalizeStageGap(
+    target: ShadowTarget,
+    stage: string,
+    observedAt = target.coverageEndsAt,
+  ): void {
     if (this.hasStageEvidence(target, stage) || this.hasStageGap(target, stage)) return;
-    const payload = { meaning: "best_effort_post_detection_observation_absent" };
+    const payload = {
+      meaning: stage.startsWith("grace_")
+        ? "best_effort_post_scan_downstream_observation_absent"
+        : "best_effort_post_detection_observation_absent",
+    };
     this.upsertObservation(
-      { ...target, stage, result: "telemetry_gap", observedAt: target.coverageEndsAt, payload },
+      { ...target, stage, result: "telemetry_gap", observedAt, payload },
       payload,
     );
   }
 
   private hasStageEvidence(target: ShadowTarget, stage: string): boolean {
-    const signalClause = stage === "signal" ? " AND result='produced_buy'" : "";
+    const signalClause = stage.endsWith("signal") ? " AND result='produced_buy'" : "";
     return (
       this.db
         .prepare(
@@ -676,7 +817,9 @@ function activitySelect(): string {
 function targetSelect(): string {
   return `SELECT token_id tokenId,condition_id conditionId,outcome,outcome_index outcomeIndex,
     generation,is_baseline baseline,detected_at-last_buy_at*1000 detectionLagMs,
-    coverage_started_at coverageStartedAt,coverage_ends_at coverageEndsAt`;
+    coverage_started_at coverageStartedAt,coverage_ends_at coverageEndsAt,
+    downstream_grace_started_at downstreamGraceStartedAt,
+    downstream_grace_ends_at downstreamGraceEndsAt`;
 }
 
 function normalizeTarget(row: Omit<ShadowTarget, "baseline"> & { baseline: number }): ShadowTarget {
@@ -713,6 +856,39 @@ function v2SchemaSql(): string {
 
 function pairKey(conditionId: string, tokenId: string, outcomeIndex: number): string {
   return `${conditionId}\0${tokenId}\0${outcomeIndex}`;
+}
+
+function targetKey(
+  target: Pick<ShadowTarget, "conditionId" | "tokenId" | "outcomeIndex" | "generation">,
+): string {
+  return `${target.conditionId}\0${target.tokenId}\0${target.outcomeIndex}\0${target.generation}`;
+}
+
+function observationForWindow(
+  observation: ShadowObservation,
+  target: ShadowTarget,
+): ShadowObservation | null {
+  if (observation.stage.startsWith("grace_"))
+    return target.downstreamGraceStartedAt != null &&
+      target.downstreamGraceEndsAt != null &&
+      target.downstreamGraceStartedAt <= observation.observedAt &&
+      observation.observedAt < target.downstreamGraceEndsAt
+      ? observation
+      : null;
+  if (
+    target.coverageStartedAt <= observation.observedAt &&
+    observation.observedAt < target.coverageEndsAt
+  )
+    return observation;
+  if (
+    observation.stage !== "scanner" &&
+    target.downstreamGraceStartedAt != null &&
+    target.downstreamGraceEndsAt != null &&
+    target.downstreamGraceStartedAt <= observation.observedAt &&
+    observation.observedAt < target.downstreamGraceEndsAt
+  )
+    return { ...observation, stage: `grace_${observation.stage}` };
+  return null;
 }
 
 function canonicalJson(value: unknown): string {
@@ -853,9 +1029,18 @@ export class ShadowWorkerRuntime {
   private completeScan(value: Record<string, unknown>): void {
     const scanId = String(value["scanId"]);
     const scan = this.scans.get(scanId);
-    if (scan) this.store.recordObservations(scan.observations);
+    const completedAt = messageTime(value);
+    const granted = scan
+      ? this.store.completeSuccessfulScan(
+          scan.observations,
+          scan.startedAt,
+          completedAt,
+          downstreamGraceWindowMs(this.config.timeouts),
+        )
+      : [];
     this.scans.delete(scanId);
-    this.maintainTargets(messageTime(value));
+    for (const target of granted) this.port.postMessage({ type: "target_grace_started", target });
+    this.maintainTargets(completedAt);
   }
 
   private failScan(value: Record<string, unknown>): void {
@@ -885,6 +1070,10 @@ export class ShadowWorkerRuntime {
 
 function coverageWindowMs(timeouts: ShadowWorkerConfig["timeouts"]): number {
   return 2 * timeouts.scannerMs + 2 * timeouts.trackingMs + 2 * timeouts.algoMs;
+}
+
+function downstreamGraceWindowMs(timeouts: ShadowWorkerConfig["timeouts"]): number {
+  return 2 * timeouts.trackingMs + 2 * timeouts.algoMs;
 }
 
 function messageTime(value: Record<string, unknown>): number {

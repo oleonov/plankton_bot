@@ -27,9 +27,13 @@ const buy = (tx: string, timestamp: number, tokenId = "token-a") => ({
   size: 100,
   usdcSize: 1,
 });
+const transientBuy = (tx: string, timestamp: number) => ({
+  ...buy(tx, timestamp),
+  outcomeIndex: 999,
+});
 
 describe("plankton entry shadow worker", () => {
-  it("adopts rollback-era activity into v2 without changing the v1 insert contract", () => {
+  it("adopts rollback-era activity into v3 without changing the v1 insert contract", () => {
     const dir = mkdtempSync(join(tmpdir(), "entry-shadow-v2-"));
     const path = join(dir, "shadow.db");
     new ShadowStore(path).close();
@@ -60,7 +64,127 @@ describe("plankton entry shadow worker", () => {
       check.prepare("SELECT target_generation_v2 generation FROM plankton_buy_activity").get(),
     ).toEqual({ generation: 1 });
     expect(check.prepare("SELECT COUNT(*) count FROM shadow_targets").get()).toEqual({ count: 0 });
-    expect(check.pragma("user_version", { simple: true })).toBe(2);
+    expect(check.pragma("user_version", { simple: true })).toBe(3);
+    expect(
+      (check.pragma("table_info(shadow_targets_v2)") as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    ).toEqual(expect.arrayContaining(["downstream_grace_started_at", "downstream_grace_ends_at"]));
+    check.close();
+    rmSync(dir, { recursive: true });
+  });
+
+  it("counts transient identities without persisting them or advancing the canonical cursor", () => {
+    const dir = mkdtempSync(join(tmpdir(), "entry-shadow-transient-"));
+    const path = join(dir, "shadow.db");
+    new ShadowStore(path).close();
+    const legacy = new Database(path);
+    legacy.exec(`INSERT INTO plankton_buy_activity
+      (transaction_hash,condition_id,token_id,outcome,outcome_index,occurred_at,price,size,
+       usdc_size,first_seen_at,is_baseline,target_generation,target_generation_v2)
+      VALUES ('legacy-999','condition-a','token-a','Yes',999,1000,0.01,100,1,900000,1,7,8)`);
+    const legacyBefore = legacy.prepare("SELECT * FROM plankton_buy_activity").get();
+    legacy.close();
+    const store = new ShadowStore(path);
+    const sentinel = transientBuy("sentinel", 1_000);
+    const canonical = buy("canonical", 900);
+    const transientState = () => {
+      const state = store.healthState();
+      return [state.transientIdentityRowsSeen, state.transientIdentityLastSeenAt];
+    };
+    const firstPoll = store.beginPoll(1_000_000);
+    expect(store.commitActivity([sentinel], true, 1_000_010, 100, firstPoll)).toEqual([]);
+    expect(store.isBaselineDone()).toBe(true);
+    expect(store.readCursor()).toBeNull();
+    expect(transientState()).toEqual([1, 1_000_010]);
+    const secondPoll = store.beginPoll(1_000_020);
+    const targets = store.commitActivity([canonical], false, 1_000_020, 100, secondPoll);
+    expect(targets).toMatchObject([{ baseline: false, outcomeIndex: 0, generation: 1 }]);
+    expect(store.readCursor()).toBe(900);
+    expect(transientState()).toEqual([1, 1_000_010]);
+    const replayPoll = store.beginPoll(1_000_030);
+    expect(store.commitActivity([sentinel, canonical], false, 1_000_030, 100, replayPoll)).toEqual(
+      [],
+    );
+    expect(store.readCursor()).toBe(900);
+    expect(transientState()).toEqual([2, 1_000_030]);
+    store.close();
+    const check = new Database(path, { readonly: true });
+    expect(
+      check
+        .prepare("SELECT COUNT(*) count FROM plankton_buy_activity WHERE outcome_index=999")
+        .get(),
+    ).toEqual({ count: 1 });
+    expect(
+      check.prepare("SELECT * FROM plankton_buy_activity WHERE outcome_index=999").get(),
+    ).toEqual(legacyBefore);
+    expect(
+      check
+        .prepare(
+          `SELECT group_concat(rows_seen||'/'||rows_inserted||'/'||targets_created, ',') summary
+          FROM (SELECT * FROM shadow_poll_runs_v2 ORDER BY poll_id)`,
+        )
+        .get(),
+    ).toEqual({ summary: "1/0/0,1/1/1,2/0/0" });
+    check.close();
+    rmSync(dir, { recursive: true });
+  });
+
+  it("creates one canonical generation when the same transient fill is corrected and replayed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "entry-shadow-correction-"));
+    const store = new ShadowStore(join(dir, "shadow.db"));
+    const canonical = buy("corrected-fill", 1_000);
+    expect(
+      store.commitActivity([{ ...canonical, outcomeIndex: 999 }], false, 1_000_010, 100),
+    ).toEqual([]);
+    expect(store.commitActivity([canonical], false, 1_000_020, 100)).toMatchObject([
+      { outcomeIndex: 0, generation: 1 },
+    ]);
+    expect(store.commitActivity([canonical], false, 1_000_030, 100)).toEqual([]);
+    expect(store.readTargets()).toHaveLength(1);
+    store.close();
+    rmSync(dir, { recursive: true });
+  });
+
+  it("rolls back transient counters with canonical writes when poll finalization fails", () => {
+    const dir = mkdtempSync(join(tmpdir(), "entry-shadow-transient-rollback-"));
+    const path = join(dir, "shadow.db");
+    new ShadowStore(path).close();
+    const triggerDb = new Database(path);
+    triggerDb.exec(`CREATE TRIGGER force_success_failure BEFORE UPDATE ON shadow_poll_runs_v2
+      WHEN NEW.status='ok' BEGIN SELECT RAISE(ABORT,'forced finish failure'); END;`);
+    triggerDb.close();
+    const store = new ShadowStore(path);
+    const poll = store.beginPoll(1_000_000);
+    expect(() =>
+      store.commitActivity(
+        [buy("canonical", 900), transientBuy("sentinel", 1_000)],
+        true,
+        1_000_010,
+        100,
+        poll,
+      ),
+    ).toThrow("forced finish failure");
+    store.close();
+    const reopened = new ShadowStore(path);
+    expect(reopened.healthState()).toMatchObject({
+      transientIdentityRowsSeen: 0,
+      transientIdentityLastSeenAt: null,
+    });
+    reopened.close();
+    const check = new Database(path, { readonly: true });
+    expect(
+      check
+        .prepare(
+          `SELECT (SELECT COUNT(*) FROM plankton_buy_activity) activity,
+          (SELECT COUNT(*) FROM shadow_targets_v2) targets,
+          (SELECT COUNT(*) FROM shadow_state WHERE key IN
+            ('v2_activity_cursor','v2_baseline_done','v2_transient_identity_rows_seen',
+             'v2_transient_identity_last_seen_at')) changedState,status
+          FROM shadow_poll_runs_v2`,
+        )
+        .get(),
+    ).toEqual({ activity: 0, targets: 0, changedState: 0, status: "interrupted" });
     check.close();
     rmSync(dir, { recursive: true });
   });
@@ -109,7 +233,12 @@ describe("plankton entry shadow worker", () => {
     expect(store.commitActivity([], true, 900_100, 100, emptyPoll)).toEqual([]);
     expect(store.readCursor()).toBeNull();
     expect(store.isBaselineDone()).toBe(true);
-    expect(store.healthState()).toEqual({ lastSuccessAt: 900_100, consecutiveFailures: 0 });
+    expect(store.healthState()).toEqual({
+      lastSuccessAt: 900_100,
+      consecutiveFailures: 0,
+      transientIdentityRowsSeen: 0,
+      transientIdentityLastSeenAt: null,
+    });
     const targetPoll = store.beginPoll(1_000_000);
     const [target] = store.commitActivity(
       [buy("tx-target", 1_000)],
@@ -416,6 +545,11 @@ describe("plankton entry shadow worker", () => {
     });
     await vi.advanceTimersByTimeAsync(50);
     port.emit("message", { type: "scan_completed", scanId: "successful", observedAt: 1_200 });
+    expect(
+      posted.find((value) => (value as { type?: string }).type === "target_grace_started"),
+    ).toMatchObject({
+      target: { downstreamGraceStartedAt: 1_200, downstreamGraceEndsAt: 1_240 },
+    });
     check = new Database(path, { readonly: true });
     expect(
       check.prepare("SELECT COUNT(*) count FROM shadow_targets_v2 WHERE closed_at IS NULL").get(),
@@ -445,6 +579,14 @@ describe("plankton entry shadow worker", () => {
     expect(
       check
         .prepare(
+          `SELECT stage FROM shadow_observations_v2 WHERE generation=1
+           AND result='telemetry_gap' AND stage IN ('normalized','grace_normalized') ORDER BY stage`,
+        )
+        .all(),
+    ).toEqual([{ stage: "grace_normalized" }, { stage: "normalized" }]);
+    expect(
+      check
+        .prepare(
           "SELECT COUNT(*) count FROM shadow_observations_v2 WHERE stage='normalized' AND result='active'",
         )
         .get(),
@@ -463,6 +605,114 @@ describe("plankton entry shadow worker", () => {
     await runtime.shutdown();
     vi.useRealTimers();
     rmSync(dir, { recursive: true });
+  });
+
+  it("grants only the first positive non-baseline downstream window and closes truthfully", () => {
+    const dir = mkdtempSync(join(tmpdir(), "entry-shadow-grace-"));
+    const path = join(dir, "shadow.db");
+    let store = new ShadowStore(path);
+    const [target] = store.commitActivity([buy("tx-grace", 1)], false, 1_000, 100);
+    const scanner = (observedAt: number) => ({
+      ...target!,
+      stage: "scanner",
+      result: "include",
+      observedAt,
+      payload: {},
+    });
+
+    expect(store.completeSuccessfulScan([scanner(1_050)], 1_050, 1_060, 40)).toEqual([]);
+    expect(store.completeSuccessfulScan([scanner(1_080)], 999, 1_090, 40)).toEqual([]);
+    expect(store.completeSuccessfulScan([scanner(1_080)], 1_080, 1_090, 40)).toMatchObject([
+      { downstreamGraceStartedAt: 1_100, downstreamGraceEndsAt: 1_130 },
+    ]);
+    expect(store.completeSuccessfulScan([scanner(1_090)], 1_090, 1_100, 100)).toEqual([]);
+    expect(store.readTargets()).toMatchObject([
+      { downstreamGraceStartedAt: 1_100, downstreamGraceEndsAt: 1_130 },
+    ]);
+    store.close();
+    store = new ShadowStore(path);
+
+    store.recordObservation({
+      ...target!,
+      stage: "normalized",
+      result: "active",
+      observedAt: 1_110,
+      payload: {},
+    });
+    store.recordObservation({
+      ...target!,
+      stage: "signal",
+      result: "produced_sell",
+      observedAt: 1_111,
+      payload: {},
+    });
+    for (const stage of ["routing", "postplanner", "discovery"]) {
+      store.recordObservation({
+        ...target!,
+        stage,
+        result: "diagnostic",
+        observedAt: 1_112,
+        payload: {},
+      });
+    }
+    expect(store.readObservation(target!, "grace_normalized")?.outcome).toBe("active");
+    expect(store.readObservation(target!, "grace_signal")?.outcome).toBe("produced_sell");
+    expect(store.maintain(1_130, 100_000, [1_099])).toEqual([]);
+    expect(store.readTargets()).toHaveLength(1);
+    expect(store.maintain(1_131, 100_000)).toHaveLength(1);
+    store.close();
+
+    const check = new Database(path, { readonly: true });
+    expect(
+      check
+        .prepare(
+          `SELECT closed_at closedAt,close_reason closeReason,downstream_grace_started_at startedAt,
+           downstream_grace_ends_at endsAt FROM shadow_targets_v2`,
+        )
+        .get(),
+    ).toEqual({ closedAt: 1_100, closeReason: "window_elapsed", startedAt: 1_100, endsAt: 1_130 });
+    expect(
+      check
+        .prepare(
+          `SELECT stage,result FROM shadow_observations_v2
+           WHERE stage LIKE 'grace_%' ORDER BY stage,result`,
+        )
+        .all(),
+    ).toEqual([
+      { stage: "grace_algo", result: "telemetry_gap" },
+      { stage: "grace_discovery", result: "diagnostic" },
+      { stage: "grace_normalized", result: "active" },
+      { stage: "grace_postplanner", result: "diagnostic" },
+      { stage: "grace_routing", result: "diagnostic" },
+      { stage: "grace_signal", result: "produced_sell" },
+      { stage: "grace_signal", result: "telemetry_gap" },
+      { stage: "grace_tracking", result: "telemetry_gap" },
+    ]);
+    check.close();
+    rmSync(dir, { recursive: true });
+  });
+
+  it("does not grant supplemental coverage to a baseline target", () => {
+    const store = new ShadowStore(":memory:");
+    const [target] = store.commitActivity([buy("tx-baseline", 1)], true, 1_000, 100);
+    expect(
+      store.completeSuccessfulScan(
+        [
+          {
+            ...target!,
+            stage: "scanner",
+            result: "include",
+            observedAt: 1_090,
+            payload: {},
+          },
+        ],
+        1_090,
+        1_100,
+        40,
+      ),
+    ).toEqual([]);
+    expect(store.readTargets()[0]?.downstreamGraceEndsAt).toBeNull();
+    store.close();
   });
 
   it("fail-stops instead of skipping a timestamp saturated beyond the API offset cap", async () => {
@@ -556,7 +806,7 @@ describe("PlanktonEntryShadowModule routing", () => {
       baseline: false,
       detectionLagMs: 0,
       coverageStartedAt: 1_000,
-      coverageEndsAt: 10_000,
+      coverageEndsAt: Number.MAX_SAFE_INTEGER,
     };
     worker.emit("message", { type: "target_added", target });
     worker.emit("message", { type: "target_added", target: { ...target, generation: 2 } });
@@ -576,7 +826,7 @@ describe("PlanktonEntryShadowModule routing", () => {
       sizingRuleId: "S1",
       strategyTick: 1,
       sequenceInTick: 0,
-      generatedAt: new Date().toISOString(),
+      generatedAt: new Date(2_000).toISOString(),
     };
     const market = {
       tokenId: signal.tokenId,
@@ -635,6 +885,164 @@ describe("PlanktonEntryShadowModule routing", () => {
         )
         .map((row) => (row as { generation: number }).generation),
     ).toEqual([2]);
+    await mod.stop();
+  });
+
+  it("dedupes tracking by observed phase and routes only real grace observations", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_105);
+    const bus = new InProcessEventBus();
+    const worker = new FakeWorker();
+    const mod = shadowModule(() => worker, bus);
+    await mod.start();
+    const target = {
+      tokenId: "token-a",
+      conditionId: createConditionId("condition-a"),
+      outcome: "Yes",
+      outcomeIndex: 0,
+      generation: 1,
+      baseline: false,
+      detectionLagMs: 0,
+      coverageStartedAt: 1_000,
+      coverageEndsAt: 1_100,
+      downstreamGraceStartedAt: null,
+      downstreamGraceEndsAt: null,
+    };
+    worker.emit("message", { type: "target_added", target });
+    mod.observeTrackedMarkets(["token-a"], 1_050);
+    worker.emit("message", {
+      type: "target_grace_started",
+      target: {
+        ...target,
+        downstreamGraceStartedAt: 1_100,
+        downstreamGraceEndsAt: 1_140,
+      },
+    });
+    const routeTargets = mod.routeTargetTokenIds();
+    expect([...routeTargets]).toEqual(["token-a"]);
+    mod.observeTrackedMarkets(["token-a"], 1_090);
+    expect(worker.posted.filter(isTrackingObservation)).toHaveLength(1);
+    mod.observeTrackedMarkets(["token-a"], 1_100);
+    expect(worker.posted.filter(isTrackingObservation)).toMatchObject([
+      { stage: "tracking", observedAt: 1_050 },
+      { stage: "grace_tracking", observedAt: 1_100 },
+    ]);
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        {
+          tokenId: createTokenId("token-a"),
+          conditionId: createConditionId("condition-a"),
+          outcome: "Yes",
+          outcomeIndex: 0,
+          active: true,
+        },
+      ] as never,
+      timestamp: 1_105,
+    });
+    const signal = {
+      signalId: "signal-grace",
+      tokenId: createTokenId("token-a"),
+      conditionId: createConditionId("condition-a"),
+      side: "sell" as const,
+      suggestedPrice: 0.02,
+      suggestedSize: 10,
+      suggestedSizeUsdc: 0.2,
+      reason: "operator" as const,
+      decisionRuleId: "R1",
+      sizingRuleId: "S1",
+      strategyTick: 1,
+      sequenceInTick: 0,
+      generatedAt: new Date(1_105).toISOString(),
+    };
+    const market = {
+      tokenId: signal.tokenId,
+      conditionId: signal.conditionId,
+      outcome: "Yes",
+      outcomeIndex: 0,
+    };
+    await bus.publish("SignalProduced", { signal, market: market as never });
+    await bus.publish("SignalProduced", {
+      signal: { ...signal, signalId: "buy-grace", side: "buy" },
+      market: market as never,
+    });
+    await bus.drain();
+    mod.observeRouting({
+      tokenId: "token-a",
+      conditionId: "condition-a",
+      outcome: "Yes",
+      outcomeIndex: 0,
+      capturedAtMs: 1_105,
+      basis: "post_detection_route_evaluation",
+      route: "entry_candidate",
+      v4Category: null,
+      v4Reason: null,
+      admissionRank: 1,
+      capacitySlots: 2,
+      signatureMatched: false,
+    });
+    mod.observeDiscovery(market as never, "returned", 1_105, { source: "rest" });
+    mod.observeAlgo(signal.tokenId, "planner_result", { type: "none" });
+    mod.observeAlgo(signal.tokenId, "postplanner_guard", {
+      side: "buy",
+      decisionRuleId: "R23",
+      guardReason: "buy_budget",
+      budgetReason: "buy_budget_cooldown",
+    });
+    const grace = worker.posted.filter(
+      (value) =>
+        (value as { type?: string }).type === "observation" &&
+        String((value as { stage?: string }).stage).startsWith("grace_"),
+    );
+    expect(grace.map((value) => (value as { stage: string }).stage)).toEqual(
+      expect.arrayContaining([
+        "grace_tracking",
+        "grace_normalized",
+        "grace_signal",
+        "grace_signal",
+        "grace_routing",
+        "grace_discovery",
+        "grace_algo",
+        "grace_postplanner",
+      ]),
+    );
+    expect(grace).toHaveLength(8);
+    expect(
+      grace.find((value) => (value as { stage?: string }).stage === "grace_postplanner"),
+    ).toMatchObject({ result: "buy_budget", payload: { budgetReason: "buy_budget_cooldown" } });
+    expect(JSON.stringify(grace)).toContain("produced_sell");
+    await mod.stop();
+    vi.useRealTimers();
+  });
+
+  it("forwards every real pending snapshot until durable grace bounds arrive", async () => {
+    const worker = new FakeWorker();
+    const mod = shadowModule(() => worker);
+    await mod.start();
+    worker.emit("message", {
+      type: "target_added",
+      target: {
+        tokenId: "token-a",
+        conditionId: "condition-a",
+        outcome: "Yes",
+        outcomeIndex: 0,
+        generation: 1,
+        baseline: false,
+        detectionLagMs: 0,
+        coverageStartedAt: 1_000,
+        coverageEndsAt: 1_100,
+        downstreamGraceStartedAt: null,
+        downstreamGraceEndsAt: null,
+      },
+    });
+    mod.observeTrackedMarkets(["token-a"], 1_050);
+    mod.observeTrackedMarkets(["token-a"], 1_100);
+    mod.observeTrackedMarkets(["token-a"], 1_201);
+    expect(worker.posted.filter(isTrackingObservation)).toMatchObject([
+      { stage: "tracking", observedAt: 1_050 },
+      { stage: "tracking", observedAt: 1_100 },
+      { stage: "tracking", observedAt: 1_201 },
+    ]);
     await mod.stop();
   });
 
@@ -799,9 +1207,10 @@ describe("PlanktonEntryShadowModule routing", () => {
 });
 
 function isTrackingObservation(value: unknown): boolean {
+  const stage = (value as { stage?: string }).stage;
   return (
     (value as { type?: string; stage?: string }).type === "observation" &&
-    (value as { stage?: string }).stage === "tracking"
+    (stage === "tracking" || stage === "grace_tracking")
   );
 }
 

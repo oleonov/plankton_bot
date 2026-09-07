@@ -177,6 +177,50 @@ describe("findTrackedForPricingTiered", () => {
     expect(result.discoveryOnly.map((m) => String(m.tokenId))).toEqual(["missing-snapshot"]);
   });
 
+  it("attributes exact target routes without changing the trading tiers", () => {
+    repo.save(makeMarket("critical", { tradable: false }));
+    insertPosition("critical", "open");
+    repo.save(makeMarket("admitted-first", { createdAt: "2026-01-03T00:00:00.000Z" }));
+    repo.save(makeMarket("admitted-overflow", { createdAt: "2026-01-02T00:00:00.000Z" }));
+    repo.save(makeMarket("rejected", { slug: "unclassified-market" }));
+    repo.save(makeMarket("not-targeted", { createdAt: "2026-01-04T00:00:00.000Z" }));
+    for (const tokenId of ["admitted-first", "admitted-overflow", "rejected", "not-targeted"]) {
+      insertSnapshot(tokenId);
+    }
+
+    const baseline = repo.findTrackedForPricingTiered({ maxTokens: 3 });
+    const capturedBefore = Date.now();
+    const result = repo.findTrackedForPricingTiered({
+      maxTokens: 3,
+      targetTokenIds: new Set(["critical", "admitted-first", "admitted-overflow", "rejected"]),
+    });
+
+    expect({ ...result, targetRoutes: undefined }).toEqual({
+      ...baseline,
+      targetRoutes: undefined,
+    });
+    expect(result.targetRoutes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ tokenId: "critical", route: "execution_critical" }),
+        expect.objectContaining({
+          tokenId: "admitted-first",
+          route: "entry_candidate",
+          admissionRank: 2,
+          capacitySlots: 2,
+        }),
+        expect.objectContaining({ tokenId: "admitted-overflow", route: "discovery_capacity" }),
+        expect.objectContaining({
+          tokenId: "rejected",
+          route: "discovery_v4_reject",
+          v4Reason: "category_not_hot",
+        }),
+      ]),
+    );
+    expect(result.targetRoutes).toHaveLength(4);
+    expect(result.targetRoutes?.every((fact) => fact.capturedAtMs >= capturedBefore)).toBe(true);
+    expect(result.targetRoutes?.some((fact) => fact.tokenId === "not-targeted")).toBe(false);
+  });
+
   it("V4 priority pool admits null-liquidity markets through the orderbook proxy", () => {
     repo.save(makeMarket("proxy", { slug: "ethereum-orderbook-proxy" }));
     insertSnapshot("proxy", { liquidity: null, volume24h: null, bestBid: 0.4, bestAsk: 0.45 });

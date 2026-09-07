@@ -1,6 +1,14 @@
 import { Worker } from "node:worker_threads";
-import type { EventBus, RuntimeEventMap, RuntimeModule, TokenId } from "@krabs/domain";
+import type {
+  EventBus,
+  Market,
+  RuntimeEventMap,
+  RuntimeModule,
+  TargetPricingRouteFact,
+  TokenId,
+} from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import type { DiscoveryTargetResult } from "../market-data/market-data-module.js";
 import type { ShadowObservation, ShadowTarget } from "./plankton-entry-shadow-worker.js";
 
 const PLANKTON_WALLET = "0x4ffe49ba2a4cae123536a8af4fda48faeb609f71";
@@ -26,7 +34,9 @@ export type AlgoShadowOutcome =
   | "active_market_cap"
   | "rejection_cooldown"
   | "preplanner_error"
+  | "postplanner_guard"
   | "planner_result";
+export type DiscoveryShadowResult = DiscoveryTargetResult;
 
 export interface PlanktonEntryShadowDeps {
   bus: EventBus;
@@ -105,6 +115,31 @@ export class PlanktonEntryShadowModule implements RuntimeModule {
   isTarget(tokenId: string): boolean {
     return (this.targetKeysByToken.get(String(tokenId))?.size ?? 0) > 0;
   }
+  routeTargetTokenIds(): ReadonlySet<string> {
+    return new Set(this.targetKeysByToken.keys());
+  }
+  observeRouting(fact: TargetPricingRouteFact): void {
+    const payload = {
+      basis: fact.basis,
+      route: fact.route,
+      v4Category: fact.v4Category,
+      v4Reason: fact.v4Reason,
+      admissionRank: fact.admissionRank,
+      capacitySlots: fact.capacitySlots,
+      signatureMatched: fact.signatureMatched,
+    };
+    for (const target of this.exactTargets(fact.tokenId, fact))
+      this.observeAt(target, "routing", fact.route, fact.capturedAtMs, payload);
+  }
+  observeDiscovery(
+    market: Market,
+    result: DiscoveryShadowResult,
+    observedAt: number,
+    payload: Record<string, unknown>,
+  ): void {
+    for (const target of this.exactTargets(market.tokenId, market))
+      this.observeAt(target, "discovery", result, observedAt, payload);
+  }
 
   scanStarted(scanId: string, observedAt: number): void {
     this.post({ type: "scan_started", scanId, observedAt });
@@ -140,12 +175,16 @@ export class PlanktonEntryShadowModule implements RuntimeModule {
     outcome: AlgoShadowOutcome,
     payload: Record<string, unknown>,
   ): void {
+    const observedAt = Date.now();
+    const baseStage = outcome === "postplanner_guard" ? "postplanner" : "algo";
     const result =
       outcome === "planner_result" && payload["type"] === "signal" && payload["side"] === "buy"
         ? "planner_buy"
-        : outcome;
+        : outcome === "postplanner_guard" && typeof payload["guardReason"] === "string"
+          ? payload["guardReason"]
+          : outcome;
     for (const target of this.exactTargets(tokenId))
-      this.observe({ ...target, stage: "algo", result, observedAt: Date.now(), payload });
+      this.observeAt(target, baseStage, result, observedAt, payload);
   }
   observeTrackedMarkets(activeTokenIds: readonly string[], observedAt: number): void {
     this.trackedTokenIds = new Set(activeTokenIds.map(String));
@@ -208,6 +247,9 @@ export class PlanktonEntryShadowModule implements RuntimeModule {
     } else if (value["type"] === "target_added") {
       const target = value["target"] as ShadowTarget;
       if (target?.tokenId) this.setTarget(target);
+    } else if (value["type"] === "target_grace_started") {
+      const target = value["target"] as ShadowTarget;
+      if (target?.tokenId) this.updateTarget(target);
     } else if (value["type"] === "health") {
       this.source = String(value["source"] ?? "unknown");
       this.cursor = typeof value["cursor"] === "number" ? value["cursor"] : null;
@@ -218,13 +260,13 @@ export class PlanktonEntryShadowModule implements RuntimeModule {
   private onNormalized(event: RuntimeEventMap["NormalizedMarketUpdated"]): void {
     for (const market of event.markets) {
       for (const target of this.exactTargets(market.tokenId, market)) {
-        this.observe({
-          ...target,
-          stage: "normalized",
-          result: market.active ? "active" : "inactive",
-          observedAt: event.timestamp,
-          payload: {},
-        });
+        this.observeAt(
+          target,
+          "normalized",
+          market.active ? "active" : "inactive",
+          event.timestamp,
+          {},
+        );
       }
     }
   }
@@ -253,10 +295,12 @@ export class PlanktonEntryShadowModule implements RuntimeModule {
       suggestedSizeUsdc: signal.suggestedSizeUsdc,
     };
     for (const target of this.exactTargets(signal.tokenId, market)) {
+      const route = observationRoute(target, "signal", observedAt);
+      if (!route) continue;
       this.observe({
         ...target,
-        stage: "signal",
-        result: signal.side === "buy" ? "produced_buy" : "produced_sell",
+        stage: route.stage,
+        result: `produced_${signal.side}`,
         observedAt,
         payload,
       });
@@ -294,27 +338,52 @@ export class PlanktonEntryShadowModule implements RuntimeModule {
     this.targetKeysByToken.set(target.tokenId, keys);
     if (this.trackedSnapshotAt != null) this.observeTrackedState(target, this.trackedSnapshotAt);
   }
+  private updateTarget(target: ShadowTarget): void {
+    const key = targetKey(target);
+    if (!this.targets.has(key)) {
+      this.targets.set(key, target);
+      const keys = this.targetKeysByToken.get(target.tokenId) ?? new Set<string>();
+      keys.add(key);
+      this.targetKeysByToken.set(target.tokenId, keys);
+      return;
+    }
+    this.targets.set(key, target);
+  }
   private removeTarget(target: ShadowTarget): void {
     const key = targetKey(target);
     if (!this.targets.delete(key)) return;
-    this.trackedStateByTarget.delete(key);
+    for (const phase of ["base", "grace"]) this.trackedStateByTarget.delete(`${key}\0${phase}`);
     const keys = this.targetKeysByToken.get(target.tokenId);
     keys?.delete(key);
     if (keys?.size === 0) this.targetKeysByToken.delete(target.tokenId);
   }
   private observeTrackedState(target: ShadowTarget, observedAt: number): void {
-    if (observedAt < target.coverageStartedAt || observedAt >= target.coverageEndsAt) return;
-    const key = targetKey(target);
+    const route = observationRoute(target, "tracking", observedAt);
+    if (!route) return;
     const tracked = this.trackedTokenIds.has(target.tokenId);
-    if (this.trackedStateByTarget.get(key) === tracked) return;
-    this.trackedStateByTarget.set(key, tracked);
+    // Pending snapshots can straddle the grace start before its bounds arrive.
+    if (route.phase !== "pending_grace") {
+      const key = `${targetKey(target)}\0${route.phase}`;
+      if (this.trackedStateByTarget.get(key) === tracked) return;
+      this.trackedStateByTarget.set(key, tracked);
+    }
     this.observe({
       ...target,
-      stage: "tracking",
+      stage: route.stage,
       result: tracked ? "tracked_snapshot" : "untracked_snapshot",
       observedAt,
       payload: {},
     });
+  }
+  private observeAt(
+    target: ShadowTarget,
+    baseStage: string,
+    result: string,
+    observedAt: number,
+    payload: Record<string, unknown>,
+  ): void {
+    const route = observationRoute(target, baseStage, observedAt);
+    if (route) this.observe({ ...target, stage: route.stage, result, observedAt, payload });
   }
   private observe(observation: ShadowObservation): void {
     this.post({ type: "observation", ...observation });
@@ -338,4 +407,23 @@ function targetKey(
   target: Pick<ShadowTarget, "conditionId" | "tokenId" | "outcomeIndex" | "generation">,
 ): string {
   return `${target.conditionId}\0${target.tokenId}\0${target.outcomeIndex}\0${target.generation}`;
+}
+
+function observationRoute(
+  target: ShadowTarget,
+  baseStage: string,
+  observedAt: number,
+): { stage: string; phase: "base" | "pending_grace" | "grace" } | null {
+  if (target.coverageStartedAt <= observedAt && observedAt < target.coverageEndsAt)
+    return { stage: baseStage, phase: "base" };
+  if (
+    target.downstreamGraceStartedAt != null &&
+    target.downstreamGraceEndsAt != null &&
+    target.downstreamGraceStartedAt <= observedAt &&
+    observedAt < target.downstreamGraceEndsAt
+  )
+    return { stage: `grace_${baseStage}`, phase: "grace" };
+  if (target.downstreamGraceEndsAt == null && observedAt >= target.coverageEndsAt)
+    return { stage: baseStage, phase: "pending_grace" };
+  return null;
 }

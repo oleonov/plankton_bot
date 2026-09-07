@@ -920,6 +920,7 @@ async function main(): Promise<void> {
       ? {
           trackedMarketObserver: (tokenIds: readonly string[], observedAt: number) =>
             planktonEntryShadowModule.observeTrackedMarkets(tokenIds, observedAt),
+          entryShadowObserver: planktonEntryShadowModule,
         }
       : {}),
     recordSignatureCoverage: (inLiveTier, count, mode) => {

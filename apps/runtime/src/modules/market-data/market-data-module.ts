@@ -33,6 +33,7 @@ import type {
   MarketTradeCountProvider,
   V4AdmissionTelemetrySnapshot,
   SignatureThresholds,
+  TargetPricingRouteFact,
 } from "@krabs/domain";
 import {
   PositionStatus,
@@ -84,6 +85,25 @@ const MIN_PENDING_MIN_ORDER_SIZE_HYDRATIONS = 512;
 interface ParkedMinOrderSize {
   minOrderSize: number;
   repolledAt: number;
+}
+
+export type DiscoveryTargetResult =
+  | "requested"
+  | "returned"
+  | "missing"
+  | "request_failed"
+  | "enrichment_or_publish_failed";
+
+export interface EntryShadowMarketDataObserver {
+  routeTargetTokenIds(): ReadonlySet<string>;
+  observeRouting(fact: TargetPricingRouteFact): void;
+  isTarget(tokenId: string): boolean;
+  observeDiscovery(
+    market: Market,
+    result: DiscoveryTargetResult,
+    observedAt: number,
+    payload: Record<string, unknown>,
+  ): void;
 }
 // Step 3 (audit doc §F2): soft-ranking feature inputs (`liquidity`,
 // `volume24hr`) only refresh via REST/Gamma — CLOB stream updates do NOT
@@ -286,6 +306,8 @@ export interface MarketDataModuleDeps {
   ) => void;
   /** Observe-only current tracked-set snapshot; failures must not affect pricing. */
   trackedMarketObserver?: (activeTokenIds: readonly string[], observedAt: number) => void;
+  /** Observe-only exact-target route and discovery attribution. */
+  entryShadowObserver?: EntryShadowMarketDataObserver;
   /** Interval in ms between discovery-tier poll batches. Default: 300_000. */
   discoveryPollIntervalMs?: number;
   /** Number of discovery-tier tokens to poll per batch cycle. Default: 50. */
@@ -1413,9 +1435,11 @@ export class MarketDataModule implements RuntimeModule {
     ) {
       return this.tieredPricingCache.value;
     }
+    const targetTokenIds = this.readRouteTargetTokenIds();
     const value = this.deps.marketRepo.findTrackedForPricingTiered({
       maxTokens,
       reserveSignature,
+      ...(targetTokenIds ? { targetTokenIds } : {}),
       ...(this.deps.signatureReserve != null
         ? { signatureReserve: this.deps.signatureReserve }
         : {}),
@@ -1423,6 +1447,7 @@ export class MarketDataModule implements RuntimeModule {
         ? { signature: this.deps.signatureThresholds }
         : {}),
     });
+    this.observeRouting(value.targetRoutes ?? []);
     const v4Telemetry = readV4AdmissionTelemetry(this.deps.marketRepo);
     if (v4Telemetry) {
       this.log.debug(
@@ -1438,6 +1463,49 @@ export class MarketDataModule implements RuntimeModule {
     }
     this.tieredPricingCache = { maxTokens, reserveSignature, capturedAtMs: nowMs, value };
     return value;
+  }
+
+  private readRouteTargetTokenIds(): ReadonlySet<string> | null {
+    try {
+      const tokenIds = this.deps.entryShadowObserver?.routeTargetTokenIds();
+      return tokenIds ? new Set(tokenIds) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private observeRouting(facts: readonly TargetPricingRouteFact[]): void {
+    for (const fact of facts) {
+      try {
+        this.deps.entryShadowObserver?.observeRouting(fact);
+      } catch {
+        // Observe-only telemetry must never alter pricing behavior.
+      }
+    }
+  }
+
+  private observeDiscoveryBatch(
+    markets: readonly Market[],
+    result: DiscoveryTargetResult,
+    observedAt: number,
+    payload?: Record<string, unknown>,
+  ): void {
+    for (const market of markets) this.observeDiscovery(market, result, observedAt, payload);
+  }
+
+  private observeDiscovery(
+    market: Market,
+    result: DiscoveryTargetResult,
+    observedAt: number,
+    payload?: Record<string, unknown>,
+  ): void {
+    try {
+      const observer = this.deps.entryShadowObserver;
+      if (!observer?.isTarget(String(market.tokenId))) return;
+      observer.observeDiscovery(market, result, observedAt, payload ?? {});
+    } catch {
+      // Observe-only telemetry must never alter discovery behavior.
+    }
   }
 
   private async enrichPricingWithPublicTradeCounts(
@@ -1547,10 +1615,21 @@ export class MarketDataModule implements RuntimeModule {
       marketByToken.set(String(market.tokenId), market);
     }
     this.discoveryCursor = (cursor + batch.length) % this.discoveryTier.length;
+    this.observeDiscoveryBatch(batch, "requested", nowMs);
 
+    let pricingReturned = false;
     try {
       const timeoutMs = resolveMarketPricingTimeoutMs(tokenIds.length);
       const pricingMap = await this.deps.gateway.getMarketPricing(tokenIds, { timeoutMs });
+      pricingReturned = true;
+      const returnedAt = Date.now();
+      for (const market of batch) {
+        this.observeDiscovery(
+          market,
+          pricingMap.has(String(market.tokenId)) ? "returned" : "missing",
+          returnedAt,
+        );
+      }
       if (this.deps.runtimeControl?.isPaused()) {
         this.log.debug(
           { batchSize: batch.length },
@@ -1604,6 +1683,12 @@ export class MarketDataModule implements RuntimeModule {
         cursor,
         discoveryTotal: this.discoveryTier.length,
       });
+      this.observeDiscoveryBatch(
+        batch,
+        pricingReturned ? "enrichment_or_publish_failed" : "request_failed",
+        Date.now(),
+        { errorClass: classifyHttpError(err) },
+      );
     }
   }
 

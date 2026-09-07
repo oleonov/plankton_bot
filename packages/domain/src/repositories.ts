@@ -42,6 +42,7 @@ import type {
 } from "./types.js";
 import type { TradingCalendarException, TradingCalendarMetadata } from "./effective-resolution.js";
 import { toCanonicalIso } from "./timestamp.js";
+import type { V4SelectionCategory, V4SelectionResult } from "./v4-selection.js";
 
 /**
  * ADR-025 §D-B telemetry payload, persisted on transition into
@@ -81,6 +82,30 @@ export interface TrackedForPricing {
   discoveryOnly: Market[];
   /** Count of signature-matching markets that did NOT get a live slot (coverage metric denominator). */
   signatureOverflow: number;
+  /** Observe-only route facts for the explicitly requested target tokens. */
+  targetRoutes?: readonly TargetPricingRouteFact[];
+}
+
+export type TargetPricingRoute =
+  | "execution_critical"
+  | "signature_live"
+  | "entry_candidate"
+  | "discovery_capacity"
+  | "discovery_v4_reject";
+
+export interface TargetPricingRouteFact {
+  tokenId: string;
+  conditionId: string;
+  outcome: string;
+  outcomeIndex: number | null;
+  capturedAtMs: number;
+  basis: "post_detection_route_evaluation";
+  route: TargetPricingRoute;
+  v4Category: V4SelectionCategory | null;
+  v4Reason: V4SelectionResult["reason"] | null;
+  admissionRank: number | null;
+  capacitySlots: number | null;
+  signatureMatched: boolean;
 }
 
 /**
@@ -217,6 +242,7 @@ export interface MarketRepository {
     signatureReserve?: number;
     signature?: SignatureThresholds;
     reserveSignature?: boolean;
+    targetTokenIds?: ReadonlySet<string>;
   }): TrackedForPricing;
 
   /**

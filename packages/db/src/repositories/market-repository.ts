@@ -5,7 +5,9 @@ import type {
   MarketSignatureUpdate,
   MarketScoreUpdate,
   SignatureThresholds,
+  TargetPricingRouteFact,
   TrackedForPricing,
+  V4SelectionResult,
   V4AdmissionTelemetrySnapshot,
 } from "@krabs/domain";
 import type { TokenId } from "@krabs/domain";
@@ -400,6 +402,7 @@ export class SqliteMarketRepository implements MarketRepository {
     signatureReserve?: number;
     signature?: SignatureThresholds;
     reserveSignature?: boolean;
+    targetTokenIds?: ReadonlySet<string>;
   }): TrackedForPricing {
     // Single SQL scan: pull every market that is either execution-critical
     // (open position/order, regardless of selection_status — safety invariant)
@@ -521,6 +524,7 @@ export class SqliteMarketRepository implements MarketRepository {
 
     const admittedCandidates: PricingCandidate[] = [];
     const rejectedCandidates: PricingCandidate[] = [];
+    const v4ResultByToken = new Map<string, V4SelectionResult>();
     let v4AdmissionTelemetry = createV4AdmissionTelemetrySnapshot(new Date(nowMs).toISOString());
     for (const candidate of v4Pool) {
       const result = evaluateV4Selection({
@@ -532,6 +536,7 @@ export class SqliteMarketRepository implements MarketRepository {
         bestBid: candidate.features.bestBid,
         bestAsk: candidate.features.bestAsk,
       });
+      v4ResultByToken.set(String(candidate.market.tokenId), result);
       v4AdmissionTelemetry = recordV4AdmissionTelemetry(v4AdmissionTelemetry, result);
       if (result.admit) admittedCandidates.push(candidate);
       else rejectedCandidates.push(candidate);
@@ -594,13 +599,39 @@ export class SqliteMarketRepository implements MarketRepository {
       signatureOverflow = Math.max(0, sigMatched.length - planktonSignature.length);
     }
 
-    return {
+    const result: TrackedForPricing = {
       executionCritical,
       planktonSignature,
       entryCandidates,
       discoveryOnly,
       signatureOverflow,
     };
+    if (opts.targetTokenIds) {
+      const admittedRankByToken = new Map(
+        admittedCandidates.map((candidate, index) => [String(candidate.market.tokenId), index + 1]),
+      );
+      const signatureMatchedIds = new Set(
+        sigMatched.map((candidate) => String(candidate.market.tokenId)),
+      );
+      result.targetRoutes = [
+        ...executionCritical,
+        ...candidates.map((candidate) => candidate.market),
+      ]
+        .filter((market) => opts.targetTokenIds!.has(String(market.tokenId)))
+        .map((market) =>
+          buildTargetRouteFact(market, {
+            nowMs,
+            remaining,
+            reserveSignature,
+            criticalIds,
+            sigIds,
+            signatureMatchedIds,
+            admittedRankByToken,
+            v4ResultByToken,
+          }),
+        );
+    }
+    return result;
   }
 
   findEventMarketCountBySlug(slug: string): number | null {
@@ -706,6 +737,46 @@ export class SqliteMarketRepository implements MarketRepository {
     const updatedAt = new Date().toISOString();
     this.updateTickSizeStmt.run(tickSize, updatedAt, conditionId);
   }
+}
+
+type TargetRouteContext = Readonly<{
+  nowMs: number;
+  remaining: number;
+  reserveSignature: boolean;
+  criticalIds: ReadonlySet<string>;
+  sigIds: ReadonlySet<string>;
+  signatureMatchedIds: ReadonlySet<string>;
+  admittedRankByToken: ReadonlyMap<string, number>;
+  v4ResultByToken: ReadonlyMap<string, V4SelectionResult>;
+}>;
+
+function buildTargetRouteFact(market: Market, ctx: TargetRouteContext): TargetPricingRouteFact {
+  const tokenId = String(market.tokenId);
+  const selection = ctx.v4ResultByToken.get(tokenId) ?? null;
+  const admissionRank = ctx.admittedRankByToken.get(tokenId) ?? null;
+  const route = ctx.criticalIds.has(tokenId)
+    ? "execution_critical"
+    : ctx.reserveSignature && ctx.sigIds.has(tokenId)
+      ? "signature_live"
+      : selection?.admit === true && admissionRank != null && admissionRank <= ctx.remaining
+        ? "entry_candidate"
+        : selection?.admit === true
+          ? "discovery_capacity"
+          : "discovery_v4_reject";
+  return {
+    tokenId,
+    conditionId: String(market.conditionId),
+    outcome: market.outcome,
+    outcomeIndex: market.outcomeIndex ?? null,
+    capturedAtMs: ctx.nowMs,
+    basis: "post_detection_route_evaluation",
+    route,
+    v4Category: selection?.category ?? null,
+    v4Reason: selection?.reason ?? null,
+    admissionRank,
+    capacitySlots: selection?.admit === true ? ctx.remaining : null,
+    signatureMatched: ctx.signatureMatchedIds.has(tokenId),
+  };
 }
 
 function effectiveScore(market: Market, nowMs: number): number | null {

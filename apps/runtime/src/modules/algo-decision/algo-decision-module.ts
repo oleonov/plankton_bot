@@ -680,6 +680,7 @@ export interface AlgoDecisionModuleDeps {
   sweepIntervalMs: number;
   decisionShadowObserver?:
     | {
+        isTarget?(tokenId: string): boolean;
         observeAlgo(
           tokenId: TokenId,
           outcome:
@@ -691,7 +692,8 @@ export interface AlgoDecisionModuleDeps {
             | "active_market_cap"
             | "rejection_cooldown"
             | "preplanner_error"
-            | "planner_result",
+            | "planner_result"
+            | "postplanner_guard",
           payload: Record<string, unknown>,
         ): void;
       }
@@ -2028,12 +2030,18 @@ export class AlgoDecisionModule implements RuntimeModule {
         decisionRuleId: plan.type === "signal" ? plan.signal.decisionRuleId : null,
         side: plan.type === "signal" ? plan.signal.side : null,
       });
-      if (this.isPaused()) return;
+      if (this.isPaused()) {
+        if (plan.type === "signal") {
+          this.observePostPlannerGuard(plan.signal, "paused_before_processing");
+        }
+        return;
+      }
       if (
         plan.type === "signal" &&
         plan.signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
         now < this.bounceTradingDisabledUntilMs
       ) {
+        this.observePostPlannerGuard(plan.signal, "bounce_trading_disabled");
         continue;
       }
       this.applyDecisionMetricsDelta(plan.metrics);
@@ -2047,13 +2055,24 @@ export class AlgoDecisionModule implements RuntimeModule {
       }
       if (plan.type !== "signal") continue;
       if (this.suppressForExactNullStartupTransition(plan.signal.market.tokenId, now)) {
+        this.observePostPlannerGuard(plan.signal, "exact_null_startup_transition");
         continue;
       }
       const result = this.materializeSignalDraft(plan.signal, now, nextSeq);
       if (result.signal.side === "buy") {
-        if (this.hasActivePermanentR23Lineage(result.signal, executionPolicy, now)) continue;
-        if (this.shouldSuppressBuyForBudget(result.signal, now)) continue;
-        if (this.isPaused()) return;
+        if (this.hasActivePermanentR23Lineage(result.signal, executionPolicy, now)) {
+          this.observePostPlannerGuard(result.signal, "permanent_r23_lineage");
+          continue;
+        }
+        const budgetReason = this.buyBudgetSuppressionReason(result.signal, now);
+        if (budgetReason !== null) {
+          this.observePostPlannerGuard(result.signal, "buy_budget", budgetReason);
+          continue;
+        }
+        if (this.isPaused()) {
+          this.observePostPlannerGuard(result.signal, "paused_before_reservation");
+          return;
+        }
         this.reservePendingSignal(result.signal, now);
       }
       // Persist decision_signal_log / signal_emitted only after the
@@ -2063,7 +2082,11 @@ export class AlgoDecisionModule implements RuntimeModule {
       // the first rejection.
       this.currentEvalMetrics.emitted++;
       result.commitLog();
-      if (this.isPaused()) return;
+      if (this.isPaused()) {
+        this.observePostPlannerGuard(result.signal, "paused_before_publish");
+        return;
+      }
+      this.observePostPlannerGuard(result.signal, "publish_attempted");
       await this.deps.bus.publish("SignalProduced", {
         signal: result.signal,
         market: result.market,
@@ -2402,6 +2425,31 @@ export class AlgoDecisionModule implements RuntimeModule {
   ): void {
     try {
       this.deps.decisionShadowObserver?.observeAlgo(tokenId, outcome, payload);
+    } catch {
+      // Observe-only telemetry must never alter decision behavior.
+    }
+  }
+
+  private observePostPlannerGuard(
+    signal: Readonly<{
+      tokenId?: TokenId;
+      market?: Readonly<{ tokenId: TokenId }>;
+      side: "buy" | "sell";
+      decisionRuleId: string | null;
+    }>,
+    guardReason: string,
+    budgetReason?: string,
+  ): void {
+    try {
+      const observer = this.deps.decisionShadowObserver;
+      const tokenId = signal.tokenId ?? signal.market?.tokenId;
+      if (!tokenId || !signal.decisionRuleId || !observer?.isTarget?.(String(tokenId))) return;
+      observer.observeAlgo(tokenId, "postplanner_guard", {
+        side: signal.side,
+        decisionRuleId: signal.decisionRuleId,
+        guardReason,
+        ...(budgetReason !== undefined ? { budgetReason } : {}),
+      });
     } catch {
       // Observe-only telemetry must never alter decision behavior.
     }
@@ -5040,8 +5088,11 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
   }
 
-  private shouldSuppressBuyForBudget(signal: import("@krabs/domain").Signal, now: number): boolean {
-    if (signal.side !== "buy") return false;
+  private buyBudgetSuppressionReason(
+    signal: import("@krabs/domain").Signal,
+    now: number,
+  ): string | null {
+    if (signal.side !== "buy") return null;
 
     if (this.buyBudgetCooldownUntilMs > 0 && now >= this.buyBudgetCooldownUntilMs) {
       this.clearBuyBudgetCooldown(now, "expired");
@@ -5050,15 +5101,15 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (this.buyBudgetCooldownUntilMs > now) {
       if (this.isExactMakerCaptureSignal(signal, now)) {
         const captureAttempt = this.canAttemptBuyNotional(signal.suggestedSizeUsdc, signal);
-        if (captureAttempt?.allowed === true) return false;
+        if (captureAttempt?.allowed === true) return null;
       }
       this.buyBudgetSuppressedSignals++;
-      return true;
+      return "buy_budget_cooldown";
     }
 
     const canAttempt = this.canAttemptBuyNotional(signal.suggestedSizeUsdc, signal);
     if (canAttempt?.allowed === true) {
-      return false;
+      return null;
     }
 
     if (canAttempt?.allowed === false) {
@@ -5066,9 +5117,9 @@ export class AlgoDecisionModule implements RuntimeModule {
         this.activateBuyBudgetCooldown(signal, now, "decision_preflight", canAttempt.reasonCode);
       }
       this.buyBudgetSuppressedSignals++;
-      return true;
+      return canAttempt.reasonCode;
     }
-    return false;
+    return null;
   }
 
   private canAttemptBuyNotional(
