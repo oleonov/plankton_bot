@@ -98,8 +98,10 @@ import type { Logger } from "../../logger.js";
 import type { LifecycleToken } from "../../lifecycle-chain.js";
 import { LifecycleChain, LIFECYCLE_STOP_WAIT_MS } from "../../lifecycle-chain.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
-import { bounceRungsConflict } from "../../bounce-rung-identity.js";
+import { bounceRungsConflict, coveredBounceRungIndices } from "../../bounce-rung-identity.js";
 import {
+  bounceTarget,
+  bounceRungMetadata,
   classifyExitCoverageCleanup,
   findS1CoverageWorkingSells,
   hasValidBounceCoverageTransport,
@@ -231,6 +233,11 @@ const TRADING_DISABLED_WARN_INTERVAL_MS = 5 * 60_000;
 const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
 const D8_EXIT_ALREADY_WORKING_REASON = "d8-exit-already-working";
 type ExitCoverageAdmissionKind = ExitCoverageCleanupKind | "bounce-supplemental";
+type RecoverySuccessorContext = {
+  readonly policy: ExecutionPolicy["bounceExit"];
+  readonly tickSize: number;
+  readonly lineage: BounceRungMetadata;
+};
 
 type OrderFillLookupGateway = ExchangeGateway & {
   getFillsForOrder?: (orderId: string) => Promise<ExchangeFill[]>;
@@ -359,6 +366,12 @@ function sellParity(
       Math.abs(remote.sizeRemaining - Math.max(0, order.size - filled)) <= 1e-9
     );
   });
+}
+
+function isWorkingOrder(order: Order): boolean {
+  return (
+    order.status === "pending" || order.status === "open" || order.status === "partially-filled"
+  );
 }
 
 // Finding 5: autonomous transition-reconcile cadence + the minimum interval between
@@ -4251,6 +4264,13 @@ export class ExecutionModule implements RuntimeModule {
       this.refreshExchangeSellSnapshot(snapshot.openOrders);
       return fence.completedAt ?? new Date().toISOString();
     }
+    if (
+      allowReconciledTerminal &&
+      this.hasExactRepricedSuccessorCoverage(predecessor, child, fence, snapshot, exactChild.data)
+    ) {
+      this.refreshExchangeSellSnapshot(snapshot.openOrders);
+      return fence.completedAt ?? new Date().toISOString();
+    }
     this.assertRecoveryChildLocalIdentity(predecessor, child, fence, true);
     if (
       !this.sameShares(
@@ -4282,6 +4302,257 @@ export class ExecutionModule implements RuntimeModule {
     }
     this.refreshExchangeSellSnapshot(snapshot.openOrders);
     return fence.completedAt ?? new Date().toISOString();
+  }
+
+  private hasExactRepricedSuccessorCoverage(
+    predecessor: Order,
+    child: Order,
+    fence: ExitRecoveryFenceV1,
+    snapshot: ExitRecoverySnapshot,
+    exactChild: ExchangeOrder | null,
+  ): boolean {
+    const currentChild = this.deps.orderRepo.findById(child.orderId);
+    const tokenOrders = this.deps.orderRepo.findByTokenId(predecessor.tokenId);
+    if (
+      !currentChild ||
+      currentChild.exchangeOrderId !== child.exchangeOrderId ||
+      !this.isSafelyAbsentRepricedChild(predecessor, currentChild, fence, snapshot, exactChild) ||
+      this.hasRecoveryTokenMutationInFlight(predecessor.tokenId, tokenOrders)
+    ) {
+      return false;
+    }
+    this.assertSingleRecoveryChild(predecessor, currentChild);
+    this.assertPredecessorAbsent(snapshot, predecessor);
+    const position = this.exactRecoveryPosition(predecessor);
+    const residual = this.resolveRecoveryResidual(predecessor, snapshot.fills);
+    const successors = tokenOrders.filter(
+      (order) => order.orderId !== predecessor.orderId && isWorkingOrder(order),
+    );
+    return (
+      position !== null &&
+      this.sameShares(residual, fence.residualShares) &&
+      this.matchesCurrentBounceSuccessors(successors, position, predecessor, residual) &&
+      this.matchesExactZeroFillSuccessors(successors, snapshot)
+    );
+  }
+
+  private isSafelyAbsentRepricedChild(
+    predecessor: Order,
+    child: Order,
+    fence: ExitRecoveryFenceV1,
+    snapshot: ExitRecoverySnapshot,
+    exactChild: ExchangeOrder | null,
+  ): boolean {
+    if (
+      fence.phase !== "complete" ||
+      fence.childOrderId !== String(child.orderId) ||
+      child.status !== "cancelled" ||
+      child.cancelReason !== "downpriced_reprice" ||
+      !isRecoveryChildLocalIdentity(predecessor, child, fence, false) ||
+      (exactChild !== null && !this.isSafeTerminalRecoveryOrder(exactChild, child))
+    ) {
+      return false;
+    }
+    const matchesChild = (fill: ExchangeFill) =>
+      fill.orderId === child.exchangeOrderId || fill.clientOrderId === String(child.clientOrderId);
+    return (
+      !snapshot.openOrders.some((order) => order.orderId === child.exchangeOrderId) &&
+      !snapshot.fills.some(matchesChild) &&
+      this.deps.fillRepo.findByOrderId(child.orderId).length === 0
+    );
+  }
+
+  private exactRecoveryPosition(predecessor: Order): Position | null {
+    const positions = this.deps.positionRepo?.findActiveByTokenId(predecessor.tokenId) ?? [];
+    const position = positions[0];
+    return positions.length === 1 &&
+      position?.status === "open" &&
+      position.exitOwner === "bounce" &&
+      String(position.positionId) === String(predecessor.positionId) &&
+      String(position.conditionId) === String(predecessor.conditionId)
+      ? position
+      : null;
+  }
+
+  private hasRecoveryTokenMutationInFlight(tokenId: TokenId, orders: readonly Order[]): boolean {
+    if (
+      this.hasInFlightCommand(tokenId) ||
+      [...this.pendingReservations.values()].some(
+        (reservation) => String(reservation.tokenId) === String(tokenId),
+      ) ||
+      [...this.inFlightBounceRungs.values()].some((rung) => rung.tokenId === String(tokenId)) ||
+      this.pendingBackstops.has(String(tokenId))
+    ) {
+      return true;
+    }
+    const orderIds = new Set(orders.map((order) => String(order.orderId)));
+    return [...this.cancelReservations].some((orderId) => orderIds.has(orderId));
+  }
+
+  private matchesCurrentBounceSuccessors(
+    orders: readonly Order[],
+    position: Position,
+    predecessor: Order,
+    residual: number,
+  ): boolean {
+    const context = this.recoverySuccessorContext(position, predecessor, residual);
+    if (orders.length === 0 || !context) return false;
+    const covered = new Set<number>();
+    if (
+      orders.some(
+        (order) => !this.matchesCurrentBounceSuccessor(order, position, residual, context, covered),
+      )
+    ) {
+      return false;
+    }
+    return (
+      covered.size === context.policy.ladderFractions.length &&
+      context.policy.ladderFractions.every((_, index) => covered.has(index)) &&
+      this.sameShares(
+        orders.reduce((sum, order) => sum + order.size, 0),
+        residual,
+      )
+    );
+  }
+
+  private recoverySuccessorContext(
+    position: Position,
+    predecessor: Order,
+    residual: number,
+  ): RecoverySuccessorContext | null {
+    const policy = this.currentBounceExitPolicy();
+    const market = this.deps.marketRepo.findByTokenId(position.tokenId);
+    const lineage = bounceRungMetadata(predecessor);
+    if (
+      !policy ||
+      !market?.active ||
+      !market.tradable ||
+      String(market.conditionId) !== String(position.conditionId) ||
+      !Number.isFinite(market.tickSize) ||
+      market.tickSize <= 0 ||
+      !lineage ||
+      typeof lineage.ladderId !== "string" ||
+      lineage.ladderId.length === 0 ||
+      !Number.isInteger(lineage.rungIndex) ||
+      !Number.isFinite(lineage.anchorPrice) ||
+      lineage.anchorPrice <= 0 ||
+      !this.sameShares(lineage.originalPositionSize, residual)
+    ) {
+      return null;
+    }
+    return { policy, tickSize: market.tickSize, lineage };
+  }
+
+  private matchesCurrentBounceSuccessor(
+    order: Order,
+    position: Position,
+    residual: number,
+    context: RecoverySuccessorContext,
+    covered: Set<number>,
+  ): boolean {
+    if (!this.matchesBounceSuccessorOrder(order, position)) return false;
+    const rung = bounceRungMetadata(order);
+    const indices = rung ? coveredBounceRungIndices(rung) : [];
+    if (
+      !rung ||
+      !this.matchesBounceSuccessorRung(order, rung, residual, context, indices, covered)
+    ) {
+      return false;
+    }
+    for (const index of indices) covered.add(index);
+    return true;
+  }
+
+  private matchesBounceSuccessorOrder(order: Order, position: Position): boolean {
+    return (
+      order.status === "open" &&
+      order.side === "sell" &&
+      order.entryStyle === "maker" &&
+      order.postOnly === true &&
+      order.orderType === "GTC" &&
+      order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+      order.signalReason === "repricing-exit" &&
+      Boolean(order.exchangeOrderId) &&
+      order.metadata?.exitRecoveryFenceV1 === undefined &&
+      order.metadata?.exitRecoveryChildV1 === undefined &&
+      order.metadata?.startupExitRecoveryBlockV1 === undefined &&
+      String(order.tokenId) === String(position.tokenId) &&
+      String(order.conditionId) === String(position.conditionId) &&
+      String(order.positionId) === String(position.positionId)
+    );
+  }
+
+  private matchesBounceSuccessorRung(
+    order: Order,
+    rung: BounceRungMetadata,
+    residual: number,
+    context: RecoverySuccessorContext,
+    indices: readonly number[],
+    covered: ReadonlySet<number>,
+  ): boolean {
+    const { policy, tickSize, lineage } = context;
+    if (
+      rung.isCleanupRung === true ||
+      rung.ladderId !== lineage.ladderId ||
+      !this.sameShares(rung.anchorPrice, lineage.anchorPrice) ||
+      !this.sameShares(rung.originalPositionSize, residual) ||
+      indices.length === 0 ||
+      indices.some(
+        (index, offset) =>
+          !Number.isInteger(index) ||
+          index !== rung.rungIndex + offset ||
+          index < 0 ||
+          index >= policy.ladderFractions.length ||
+          covered.has(index),
+      )
+    ) {
+      return false;
+    }
+    const fraction = indices.reduce((sum, index) => sum + policy.ladderFractions[index]!, 0);
+    return (
+      this.sameShares(rung.fraction, fraction) &&
+      this.sameShares(order.size, residual * fraction) &&
+      this.sameShares(order.price, bounceTarget(policy, rung.anchorPrice, rung.rungIndex, tickSize))
+    );
+  }
+
+  private matchesExactZeroFillSuccessors(
+    local: readonly Order[],
+    snapshot: ExitRecoverySnapshot,
+  ): boolean {
+    const tokenId = local[0]?.tokenId;
+    if (!tokenId) return false;
+    const remote = snapshot.openOrders.filter((order) => String(order.tokenId) === String(tokenId));
+    const remoteById = new Map(remote.map((order) => [order.orderId, order]));
+    const localExchangeIds = new Set(local.map((order) => order.exchangeOrderId));
+    const localClientIds = new Set(local.map((order) => String(order.clientOrderId)));
+    if (
+      remote.length !== local.length ||
+      remoteById.size !== remote.length ||
+      localExchangeIds.size !== local.length ||
+      localClientIds.size !== local.length
+    ) {
+      return false;
+    }
+    return local.every((order) => {
+      const exact = remoteById.get(order.exchangeOrderId!);
+      const hasExchangeFill = snapshot.fills.some(
+        (fill) =>
+          fill.orderId === order.exchangeOrderId ||
+          fill.clientOrderId === String(order.clientOrderId),
+      );
+      return (
+        this.deps.fillRepo.findByOrderId(order.orderId).length === 0 &&
+        !hasExchangeFill &&
+        exact?.status === "OPEN" &&
+        exact.side === "sell" &&
+        (exact.clientOrderId == null || exact.clientOrderId === String(order.clientOrderId)) &&
+        this.sameShares(exact.price, order.price) &&
+        this.sameShares(exact.sizeTotal, order.size) &&
+        this.sameShares(exact.sizeFilled, 0) &&
+        this.sameShares(exact.sizeRemaining, order.size)
+      );
+    });
   }
 
   private reconciledRecoveryCoverage(

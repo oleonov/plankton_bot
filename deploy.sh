@@ -531,7 +531,7 @@ PY
   KRABS_RUNTIME_ENV_PATH="$(recovery_field runtimeEnvPath)" KRABS_RUNTIME_ENV_SHA256="$(recovery_field runtimeEnvSha256)" "$GUARD" deploy-cutoff-probe "$state_id" || die 're-entry bound runtime environment is invalid'
   [[ "$(recovery_field deliveryMode)" != release ]] || migration_gate post "$full"
   run "$DOCKER" start "$runtime"; run "$DOCKER" start "$manager"
-  arbitration="$("$GUARD" deploy-arbitrate "$state_id" "$pre" "$baseline")" || die 're-entry final command arbitration was not proven'
+  arbitration="$("$GUARD" deploy-arbitrate "$state_id" "$pre" "$baseline" "$full")" || die 're-entry final command arbitration was not proven'
   effective="$(printf '%s' "$arbitration" | json_field effectivePaused)" || die 're-entry command receipt is malformed'
   mark_commit_ready "$arbitration"
   printf '%s\n' "$effective"
@@ -721,7 +721,7 @@ PY
   run "$DOCKER" start "$runtime"; run "$DOCKER" start "$manager"
   advance_recovery arbitration_boundary
   barrier arbitration_boundary
-  arbitration="$($GUARD deploy-arbitrate "$state_id" "$pre" "$(recovery_field baselineCommandHighWater)")" || die 'final command arbitration was not proven'
+  arbitration="$($GUARD deploy-arbitrate "$state_id" "$pre" "$(recovery_field baselineCommandHighWater)" "$full")" || die 'final command arbitration was not proven'
   effective="$(printf '%s' "$arbitration" | json_field effectivePaused)" || die 'final command receipt is malformed'
   mark_commit_ready "$arbitration"
   barrier commit_ready

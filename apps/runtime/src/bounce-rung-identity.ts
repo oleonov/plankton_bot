@@ -4,7 +4,7 @@ type BounceRungIdentity = Partial<
   Pick<BounceRungMetadata, "ladderId" | "rungIndex" | "rungIndicesCovered" | "isCleanupRung">
 >;
 
-function rungIndices(rung: BounceRungIdentity): readonly number[] {
+export function coveredBounceRungIndices(rung: BounceRungIdentity): readonly number[] {
   if (rung.rungIndicesCovered?.length) return rung.rungIndicesCovered;
   return typeof rung.rungIndex === "number" ? [rung.rungIndex] : [];
 }
@@ -19,6 +19,6 @@ export function bounceRungsConflict(
     return existing.isCleanupRung === true && existingWorking;
   }
   if (existing.isCleanupRung === true) return false;
-  const candidateIndices = new Set(rungIndices(candidate));
-  return rungIndices(existing).some((index) => candidateIndices.has(index));
+  const candidateIndices = new Set(coveredBounceRungIndices(candidate));
+  return coveredBounceRungIndices(existing).some((index) => candidateIndices.has(index));
 }

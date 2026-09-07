@@ -157,8 +157,8 @@ print(json.dumps({'prePaused':sys.argv[1]=='true','preRunId':sys.argv[2],'preIns
 PY
 }
 deploy_command() {
-  local action="$1" state_id="$2" expected="$3" initiator status paused attempt
-  initiator="deploy:${state_id}:${action}"
+  local action="$1" state_id="$2" target_sha="$3" expected="$4" initiator status paused attempt
+  initiator="deploy:${state_id}:${target_sha}:${action}"
   sql "BEGIN IMMEDIATE; INSERT INTO operator_commands(action,reason,initiator_type,initiator,status,created_at) SELECT '$action','deploy controller','system','$initiator','pending',strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE NOT EXISTS (SELECT 1 FROM operator_commands WHERE initiator='$initiator'); COMMIT;" >/dev/null
   for ((attempt=0; attempt<POLL_ATTEMPTS; attempt++)); do
     status="$(sql "SELECT status FROM operator_commands WHERE initiator='$initiator';")"
@@ -192,12 +192,13 @@ deploy_cutoff_probe() {
   [[ "$("$CURL" --silent --show-error --output /dev/null --write-out '%{http_code}' --connect-timeout 1 --max-time 2 -X POST -H "Authorization: Bearer $key" -H 'Content-Type: application/json' --data '{"reason":"deploy cutoff probe"}' "$API_BASE/api/v1/actions/resume")" == 409 && "$before" == "$(baseline_high_water)" ]]
 }
 deploy_arbitrate() {
-  local state_id="$1" pre="$2" baseline="$3" latest action effective high override=false
+  local state_id="$1" pre="$2" baseline="$3" target_sha="$4" latest action effective high override=false
   local POLL_ATTEMPTS="${KRABS_DEPLOY_ARBITRATION_POLL_ATTEMPTS:-300}"
+  [[ "$target_sha" =~ ^[0-9a-f]{40}$ ]] && read_identity "$target_sha" || return 1
   latest="$(sql "SELECT action FROM operator_commands WHERE initiator_type='operator' AND id > $baseline ORDER BY created_at ASC, id ASC;" | tail -n 1)"
   action=pause; [[ "$pre" == false ]] && action=resume
   [[ "$pre" == false && ( "$latest" == pause || "$latest" == resume ) ]] && action="$latest"; [[ "$latest" == pause ]] && override=true
-  deploy_command "$action" "$state_id" "$([[ "$action" == pause ]] && printf true || printf false)" || return 1
+  deploy_command "$action" "$state_id" "$target_sha" "$([[ "$action" == pause ]] && printf true || printf false)" || return 1
   effective="$(paused_status)" || return 1; high="$(baseline_high_water)"
   python3 - "$effective" "$high" "$action" "$override" <<'PY'
 import json,sys
@@ -396,7 +397,7 @@ ordinary() {
     install-service) install_service ;;
     deploy-baseline) deploy_baseline ;;
     deploy-cutover) deploy_cutover "$2" ;;
-    deploy-arbitrate) deploy_arbitrate "$2" "$3" "$4" ;;
+    deploy-arbitrate) [[ $# == 5 ]] || die "deploy-arbitrate requires state, pause baseline, command high-water, and full target SHA"; deploy_arbitrate "$2" "$3" "$4" "$5" ;;
     deploy-cutoff-probe) deploy_cutoff_probe "$2" ;;
     *) die "unknown rollback command" ;;
   esac

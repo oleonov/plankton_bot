@@ -222,7 +222,7 @@ function matchesBounceLineage(
   );
 }
 
-function bounceTarget(
+export function bounceTarget(
   policy: BounceExitPolicy,
   anchorPrice: number,
   rungIndex: number,
@@ -234,7 +234,7 @@ function bounceTarget(
   return computeHarvestTarget(anchorPrice, gain, tickSize);
 }
 
-function bounceRungMetadata(order: Order): BounceRungMetadata | null {
+export function bounceRungMetadata(order: Order): BounceRungMetadata | null {
   const value = order.metadata?.bounceRung;
   return isRecord(value) ? (value as unknown as BounceRungMetadata) : null;
 }

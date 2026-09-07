@@ -9016,29 +9016,47 @@ describe("ExecutionModule", () => {
       | "newer-other-token-fill"
       | "lane-newer-token-fill";
 
-    async function fixture(fault?: RecoveryFault, predecessorFraction = 1) {
+    async function fixture(
+      fault?: RecoveryFault,
+      predecessorFraction = 1,
+      positionSize = 5,
+      ladder?: { anchorPrice: number; predecessorPrice: number; tickSize: number },
+    ) {
       const conn = bootstrapDatabase(":memory:");
       const orders = new SqliteOrderRepository(conn.db);
       const fills = new SqliteFillRepository(conn.db);
       const position = makePosition({
-        size: 5,
-        avgEntryPrice: 0.2,
-        costBasisUsdc: 1,
+        size: positionSize,
+        avgEntryPrice: ladder?.anchorPrice ?? 0.2,
+        costBasisUsdc: positionSize * (ladder?.anchorPrice ?? 0.2),
         currentValueUsdc: 3,
         exitOwner: "bounce",
       });
-      const predecessor = openSellAt(0.3, {
+      const predecessorPrice = ladder?.predecessorPrice ?? 0.3;
+      const predecessor = openSellAt(predecessorPrice, {
         orderId: createOrderId("missing-bounce"),
         exchangeOrderId: "missing-exchange-order",
         clientOrderId: "plk_missing_bounce" as ClientOrderId,
         positionId: position.positionId,
-        size: fault === "predecessor-oversize" ? 5.1 : 5 * predecessorFraction,
-        sizeUsdc: fault === "predecessor-oversize" ? 1.53 : 1.5 * predecessorFraction,
+        size:
+          fault === "predecessor-oversize"
+            ? positionSize + 0.1
+            : positionSize * predecessorFraction,
+        sizeUsdc:
+          (fault === "predecessor-oversize"
+            ? positionSize + 0.1
+            : positionSize * predecessorFraction) * predecessorPrice,
         postOnly: true,
         decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
         signalId: "bounce-signal",
         metadata: {
-          bounceRung: { ladderId: "ladder-1", rungIndex: 0, originalPositionSize: 5 },
+          bounceRung: {
+            ladderId: "ladder-1",
+            rungIndex: 0,
+            ...(ladder ? { anchorPrice: ladder.anchorPrice, fraction: predecessorFraction } : {}),
+            originalPositionSize: positionSize,
+            ...(ladder ? { remainingPositionSize: positionSize } : {}),
+          },
           marketData: { minOrderSize: 1 },
         },
       });
@@ -9046,7 +9064,12 @@ describe("ExecutionModule", () => {
       const positionRepo = createMockPositionRepo(position);
       positionRepo.findActiveByTokenId = vi.fn().mockReturnValue([position]);
       const inventoryLots = createMockInventoryLotRepo(position);
-      const market = makeNormalizedMarket({ bestBid: 0.2, bestAsk: 0.31, minOrderSize: 1 });
+      const market = makeNormalizedMarket({
+        bestBid: 0.2,
+        bestAsk: 0.31,
+        minOrderSize: 1,
+        tickSize: ladder?.tickSize ?? 0.01,
+      });
       const recoveryGateway = createMockGateway();
       let placed = false;
       let childCancelled = false;
@@ -9062,10 +9085,10 @@ describe("ExecutionModule", () => {
         clientOrderId,
         tokenId: predecessor.tokenId,
         side: "sell",
-        price: 0.3,
-        sizeTotal: 5,
+        price: predecessorPrice,
+        sizeTotal: positionSize,
         sizeFilled: 0,
-        sizeRemaining: 5,
+        sizeRemaining: positionSize,
         status: "OPEN",
         createdAt: Date.now(),
       });
@@ -9199,13 +9222,14 @@ describe("ExecutionModule", () => {
       if (fault !== "wallet-absent") {
         state.updateWalletPosition(
           predecessor.tokenId,
-          fault === "wallet-mismatch" ? 4 : 5,
+          fault === "wallet-mismatch" ? positionSize - 1 : positionSize,
           fault === "wallet-stale" ? 1 : Date.now(),
         );
       }
+      const recoveryBus = new InProcessEventBus();
       const recovery = new ExecutionModule({
         gateway: recoveryGateway,
-        bus: new InProcessEventBus(),
+        bus: recoveryBus,
         marketRepo: { ...createMockMarketRepo(), findByTokenId: vi.fn(() => market) } as any,
         orderRepo: orders,
         fillRepo: fills,
@@ -9250,6 +9274,7 @@ describe("ExecutionModule", () => {
         fills,
         predecessor,
         recoveryGateway,
+        recoveryBus,
         state,
         positionRepo,
         inventoryLots,
@@ -9257,6 +9282,75 @@ describe("ExecutionModule", () => {
           makerMode = mode;
         },
       };
+    }
+
+    async function seedRepricedRecoverySuccessors(
+      f: Awaited<ReturnType<typeof fixture>>,
+      mutateLocal: (orders: Order[]) => Order[] = (orders) => orders,
+      mutateRemote: (orders: ExchangeOrder[]) => ExchangeOrder[] = (orders) => orders,
+    ) {
+      await expect(
+        f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 21),
+      ).resolves.toMatchObject({ status: "applied" });
+      const child = f.orders
+        .findByTokenId(f.predecessor.tokenId)
+        .find((order) => order.metadata?.exitRecoveryChildV1)!;
+      await f.recoveryGateway.cancelOrder({ orderId: child.exchangeOrderId! });
+      f.orders.updateStatus(
+        child.orderId,
+        "cancelled",
+        child.exchangeOrderId!,
+        "downpriced_reprice",
+      );
+      const successor = (index: number, fraction: number, price: number): Order =>
+        openSellAt(price, {
+          orderId: createOrderId(`recovery-successor-${index}`),
+          clientOrderId: `plk_recovery_successor_${index}` as ClientOrderId,
+          exchangeOrderId: `recovery-successor-${index}`,
+          tokenId: f.predecessor.tokenId,
+          conditionId: f.predecessor.conditionId,
+          positionId: f.predecessor.positionId!,
+          size: 22.5 * fraction,
+          sizeUsdc: 22.5 * fraction * price,
+          entryStyle: "maker",
+          postOnly: true,
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          metadata: {
+            bounceRung: {
+              ladderId: "ladder-1",
+              rungIndex: index,
+              anchorPrice: 0.044,
+              fraction,
+              originalPositionSize: 22.5,
+              remainingPositionSize: 22.5,
+            },
+          },
+        });
+      const successors = mutateLocal([
+        successor(0, 0.3, 0.053),
+        successor(1, 0.4, 0.064),
+        successor(2, 0.3, 0.078),
+      ]);
+      for (const order of successors) f.orders.save(order);
+      const remote = mutateRemote(
+        successors.map((order) => ({
+          orderId: order.exchangeOrderId!,
+          clientOrderId: order.clientOrderId,
+          tokenId: order.tokenId,
+          side: "sell" as const,
+          price: order.price,
+          sizeTotal: order.size,
+          sizeFilled: 0,
+          sizeRemaining: order.size,
+          status: "OPEN" as const,
+          createdAt: Date.now(),
+        })),
+      );
+      vi.mocked((f.recoveryGateway as any).getOpenOrdersResult).mockResolvedValue({
+        ok: true,
+        data: remote,
+      });
+      return { child, successors };
     }
 
     it("converges through real SQLite, preserves predecessor, and never creates a sibling", async () => {
@@ -9458,6 +9552,319 @@ describe("ExecutionModule", () => {
         await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(false);
         expect(f.recoveryGateway.cancelOrder).not.toHaveBeenCalled();
       } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it.each(["open", "rejected"] as const)(
+      "authorizes a reliably absent zero-fill child replaced by exact current BOUNCE coverage with %s fenced predecessor",
+      async (predecessorStatus) => {
+        const f = await fixture(undefined, 0.3, 22.5, {
+          anchorPrice: 0.044,
+          predecessorPrice: 0.053,
+          tickSize: 0.001,
+        });
+        try {
+          await seedRepricedRecoverySuccessors(f);
+          if (predecessorStatus === "rejected") {
+            f.orders.updateStatus(
+              f.predecessor.orderId,
+              "rejected",
+              f.predecessor.exchangeOrderId!,
+            );
+          }
+
+          const authorized = await f.recovery.authorizeResumeAfterStartupExitRecovery();
+          expect(
+            authorized,
+            String(silentLog.warn.mock.calls.at(-1)?.[0]?.err ?? "missing warning"),
+          ).toBe(true);
+          expect(f.recoveryGateway.submitPreparedOrder).toHaveBeenCalledOnce();
+        } finally {
+          await f.recovery.stop();
+          f.conn.close();
+        }
+      },
+    );
+
+    it.each([
+      ["missing rung", (orders: Order[]) => orders.slice(0, 2)],
+      [
+        "wrong current-policy price",
+        (orders: Order[]) =>
+          orders.map((order, index) => (index === 2 ? { ...order, price: 0.077 } : order)),
+      ],
+      [
+        "overlapping covered index",
+        (orders: Order[]) =>
+          orders.map((order, index) =>
+            index === 2
+              ? {
+                  ...order,
+                  metadata: {
+                    ...order.metadata,
+                    bounceRung: { ...(order.metadata?.bounceRung as object), rungIndex: 1 },
+                  },
+                }
+              : order,
+          ),
+      ],
+      [
+        "non-maker transport",
+        (orders: Order[]) =>
+          orders.map((order, index) => (index === 0 ? { ...order, postOnly: false } : order)),
+      ],
+      [
+        "child-marked candidate",
+        (orders: Order[]) =>
+          orders.map((order, index) =>
+            index === 0
+              ? { ...order, metadata: { ...order.metadata, exitRecoveryChildV1: { version: 1 } } }
+              : order,
+          ),
+      ],
+      [
+        "fence-marked candidate",
+        (orders: Order[]) =>
+          orders.map((order, index) =>
+            index === 0
+              ? { ...order, metadata: { ...order.metadata, exitRecoveryFenceV1: { version: 1 } } }
+              : order,
+          ),
+      ],
+      [
+        "startup-blocked candidate",
+        (orders: Order[]) =>
+          orders.map((order, index) =>
+            index === 0
+              ? {
+                  ...order,
+                  metadata: { ...order.metadata, startupExitRecoveryBlockV1: { version: 1 } },
+                }
+              : order,
+          ),
+      ],
+      [
+        "unrelated working BUY",
+        (orders: Order[]) => [
+          ...orders,
+          {
+            ...orders[0]!,
+            orderId: createOrderId("recovery-successor-buy"),
+            clientOrderId: "plk_recovery_successor_buy" as ClientOrderId,
+            exchangeOrderId: "recovery-successor-buy",
+            side: "buy" as const,
+          },
+        ],
+      ],
+      [
+        "wrong original ladder",
+        (orders: Order[]) =>
+          orders.map((order) => ({
+            ...order,
+            metadata: {
+              ...order.metadata,
+              bounceRung: { ...(order.metadata?.bounceRung as object), ladderId: "wrong-ladder" },
+            },
+          })),
+      ],
+      [
+        "duplicate exchange identity",
+        (orders: Order[]) =>
+          orders.map((order, index) =>
+            index === 1 ? { ...order, exchangeOrderId: orders[0]!.exchangeOrderId } : order,
+          ),
+      ],
+    ])("keeps resume blocked for %s in local successor coverage", async (_name, mutate) => {
+      const f = await fixture(undefined, 0.3, 22.5, {
+        anchorPrice: 0.044,
+        predecessorPrice: 0.053,
+        tickSize: 0.001,
+      });
+      try {
+        await seedRepricedRecoverySuccessors(f, mutate);
+        const metadataBefore = f.orders.findById(f.predecessor.orderId)?.metadata;
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(false);
+        expect(f.recoveryGateway.submitPreparedOrder).toHaveBeenCalledOnce();
+        expect(f.recoveryGateway.cancelOrder).toHaveBeenCalledOnce();
+        expect(f.orders.findById(f.predecessor.orderId)?.metadata).toEqual(metadataBefore);
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it.each([
+      ["missing remote rung", (orders: ExchangeOrder[]) => orders.slice(0, 2)],
+      [
+        "remote fill",
+        (orders: ExchangeOrder[]) =>
+          orders.map((order, index) =>
+            index === 1
+              ? { ...order, status: "PARTIALLY_FILLED" as const, sizeFilled: 1, sizeRemaining: 8 }
+              : order,
+          ),
+      ],
+      [
+        "extra remote order",
+        (orders: ExchangeOrder[]) => [
+          ...orders,
+          { ...orders[0]!, orderId: "recovery-successor-extra" },
+        ],
+      ],
+    ])("keeps resume blocked for %s in exchange successor coverage", async (_name, mutate) => {
+      const f = await fixture(undefined, 0.3, 22.5, {
+        anchorPrice: 0.044,
+        predecessorPrice: 0.053,
+        tickSize: 0.001,
+      });
+      try {
+        await seedRepricedRecoverySuccessors(f, undefined, mutate);
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(false);
+        expect(f.recoveryGateway.submitPreparedOrder).toHaveBeenCalledOnce();
+        expect(f.recoveryGateway.cancelOrder).toHaveBeenCalledOnce();
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it.each([
+      "local successor fill",
+      "child fill",
+      "child exact open",
+      "child cancel reason",
+      "wallet residual",
+    ] as const)("keeps resume blocked when %s drifts", async (drift) => {
+      const f = await fixture(undefined, 0.3, 22.5, {
+        anchorPrice: 0.044,
+        predecessorPrice: 0.053,
+        tickSize: 0.001,
+      });
+      try {
+        const { child, successors } = await seedRepricedRecoverySuccessors(f);
+        if (drift === "local successor fill" || drift === "child fill") {
+          const filledOrder = drift === "child fill" ? child : successors[0]!;
+          f.fills.save({
+            fillId: createFillId("recovery-local-fill"),
+            orderId: filledOrder.orderId,
+            tokenId: filledOrder.tokenId,
+            conditionId: filledOrder.conditionId,
+            side: "sell",
+            price: filledOrder.price,
+            size: 1,
+            sizeUsdc: filledOrder.price,
+            liquidityRole: "maker",
+            fee: 0,
+            feeRateBps: 0,
+            filledAt: new Date().toISOString(),
+          });
+        } else if (drift === "child exact open") {
+          const priorLookup = vi.mocked(f.recoveryGateway.getOrderResult!).getMockImplementation()!;
+          vi.mocked(f.recoveryGateway.getOrderResult!).mockImplementation(async (orderId) =>
+            orderId === child.exchangeOrderId
+              ? {
+                  ok: true,
+                  data: {
+                    orderId: child.exchangeOrderId,
+                    clientOrderId: child.clientOrderId,
+                    tokenId: child.tokenId,
+                    side: "sell",
+                    price: child.price,
+                    sizeTotal: child.size,
+                    sizeFilled: 0,
+                    sizeRemaining: child.size,
+                    status: "OPEN",
+                    createdAt: Date.now(),
+                  },
+                }
+              : priorLookup(orderId),
+          );
+        } else if (drift === "child cancel reason") {
+          f.orders.updateStatus(child.orderId, "cancelled", child.exchangeOrderId!, "operator");
+        } else {
+          f.state.updateWalletPosition(child.tokenId, 22, Date.now());
+        }
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(false);
+        expect(f.recoveryGateway.submitPreparedOrder).toHaveBeenCalledOnce();
+        expect(f.recoveryGateway.cancelOrder).toHaveBeenCalledOnce();
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it.each(["late working order", "child identity"] as const)(
+      "re-reads %s after remote awaits before authorizing resume",
+      async (drift) => {
+        const f = await fixture(undefined, 0.3, 22.5, {
+          anchorPrice: 0.044,
+          predecessorPrice: 0.053,
+          tickSize: 0.001,
+        });
+        try {
+          const { child, successors } = await seedRepricedRecoverySuccessors(f);
+          const lookup = vi.mocked(f.recoveryGateway.getOrderResult!);
+          const stableLookup = lookup.getMockImplementation()!;
+          let injected = false;
+          lookup.mockImplementation(async (orderId) => {
+            if (orderId === child.exchangeOrderId && !injected) {
+              injected = true;
+              if (drift === "child identity") {
+                f.orders.updateStatus(
+                  child.orderId,
+                  "cancelled",
+                  "changed-child-exchange-id",
+                  "downpriced_reprice",
+                );
+              } else {
+                f.orders.save({
+                  ...successors[0]!,
+                  orderId: createOrderId("late-recovery-buy"),
+                  clientOrderId: "plk_late_recovery_buy" as ClientOrderId,
+                  exchangeOrderId: "late-recovery-buy",
+                  side: "buy",
+                });
+              }
+            }
+            return stableLookup(orderId);
+          });
+          await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(false);
+        } finally {
+          await f.recovery.stop();
+          f.conn.close();
+        }
+      },
+    );
+
+    it("does not authorize while a same-token cancel is in flight", async () => {
+      const f = await fixture(undefined, 0.3, 22.5, {
+        anchorPrice: 0.044,
+        predecessorPrice: 0.053,
+        tickSize: 0.001,
+      });
+      let releaseCancel!: () => void;
+      try {
+        const { successors } = await seedRepricedRecoverySuccessors(f);
+        vi.mocked(f.recoveryGateway.cancelOrder).mockImplementationOnce(
+          () => new Promise((resolve) => (releaseCancel = () => resolve({ success: false }))),
+        );
+        const cancelling = f.recoveryBus.publish("CancelOrderRequested", {
+          command: {
+            type: "CancelOrderCommand",
+            commandId: createCommandId("recovery-successor-cancel"),
+            orderId: successors[0]!.orderId,
+            reason: "operator",
+          },
+          timestamp: Date.now(),
+        });
+        await vi.waitFor(() => expect(f.recoveryGateway.cancelOrder).toHaveBeenCalledTimes(2));
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(false);
+        releaseCancel();
+        await cancelling;
+      } finally {
+        releaseCancel?.();
         await f.recovery.stop();
         f.conn.close();
       }

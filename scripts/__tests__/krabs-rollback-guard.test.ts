@@ -59,7 +59,7 @@ function makeFixture(paused = false) {
   writeFileSync(calls, "");
   executable(
     sqlite,
-    `echo "sqlite $*" >> "$CALLS"\n[[ "\${CUTOFF_WRITER:-}" == 1 && "\${2:-}" == *"BEGIN IMMEDIATE; SELECT coalesce(max(id),0) FROM operator_commands; COMMIT;"* ]] && /usr/bin/sqlite3 "$1" "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2026-01-01T00:00:00.000Z');"\n[[ "\${ARBITRATION_PAUSE:-}" == 1 && "\${2:-}" == *"SELECT action || '|' || status"* && "$(/usr/bin/sqlite3 "$1" "SELECT count(*) FROM operator_commands WHERE initiator LIKE 'rollback:%:resume';")" == 1 ]] && { /usr/bin/sqlite3 "$1" "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2026-01-01T00:00:01.000Z');"; echo true > "$API_STATE"; }\n/usr/bin/sqlite3 "$@"\nif [[ -n "\${ARBITRATION_APPLY_AFTER_POLLS:-}" && "\${2:-}" == *"SELECT status FROM operator_commands WHERE initiator="* ]]; then polls=0; [[ ! -f "$ARBITRATION_POLL_COUNTER" ]] || polls=$(cat "$ARBITRATION_POLL_COUNTER"); polls=$((polls+1)); printf '%s\n' "$polls" > "$ARBITRATION_POLL_COUNTER"; if (( polls >= ARBITRATION_APPLY_AFTER_POLLS )); then action=$(/usr/bin/sqlite3 "$1" "SELECT action FROM operator_commands WHERE status='pending' ORDER BY id DESC LIMIT 1;"); /usr/bin/sqlite3 "$1" "UPDATE operator_commands SET status='applied' WHERE status='pending';"; [[ "$action" == pause ]] && echo true > "$API_STATE"; [[ "$action" == resume ]] && echo false > "$API_STATE"; fi; fi\nif [[ "\${2:-}" == *"INSERT INTO operator_commands"* && -z "\${ARBITRATION_APPLY_AFTER_POLLS:-}" ]]; then action=$(/usr/bin/sqlite3 "$1" "SELECT action FROM operator_commands WHERE status='pending' ORDER BY id DESC LIMIT 1;"); /usr/bin/sqlite3 "$1" "UPDATE operator_commands SET status='applied' WHERE status='pending';"; [[ "$action" == pause ]] && echo true > "$API_STATE"; [[ "$action" == resume ]] && echo false > "$API_STATE"; fi\ntrue`,
+    `echo "sqlite $*" >> "$CALLS"\n[[ "\${CUTOFF_WRITER:-}" == 1 && "\${2:-}" == *"BEGIN IMMEDIATE; SELECT coalesce(max(id),0) FROM operator_commands; COMMIT;"* ]] && /usr/bin/sqlite3 "$1" "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2026-01-01T00:00:00.000Z');"\n[[ "\${ARBITRATION_PAUSE:-}" == 1 && "\${2:-}" == *"SELECT action || '|' || status"* && "$(/usr/bin/sqlite3 "$1" "SELECT count(*) FROM operator_commands WHERE initiator LIKE 'rollback:%:resume';")" == 1 ]] && { /usr/bin/sqlite3 "$1" "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2026-01-01T00:00:01.000Z');"; echo true > "$API_STATE"; }\n/usr/bin/sqlite3 "$@"\nif [[ "\${DEPLOY_ARBITRATION_LATE_PAUSE:-}" == 1 && "\${2:-}" == *"SELECT status FROM operator_commands WHERE initiator='deploy:"* && ! -e "$ARBITRATION_POLL_COUNTER.late" ]]; then /usr/bin/sqlite3 "$1" "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2026-01-01T00:00:02.000Z');"; echo true > "$API_STATE"; : > "$ARBITRATION_POLL_COUNTER.late"; fi\nif [[ -n "\${ARBITRATION_APPLY_AFTER_POLLS:-}" && "\${2:-}" == *"SELECT status FROM operator_commands WHERE initiator="* ]]; then polls=0; [[ ! -f "$ARBITRATION_POLL_COUNTER" ]] || polls=$(cat "$ARBITRATION_POLL_COUNTER"); polls=$((polls+1)); printf '%s\n' "$polls" > "$ARBITRATION_POLL_COUNTER"; if (( polls >= ARBITRATION_APPLY_AFTER_POLLS )); then action=$(/usr/bin/sqlite3 "$1" "SELECT action FROM operator_commands WHERE status='pending' ORDER BY id DESC LIMIT 1;"); /usr/bin/sqlite3 "$1" "UPDATE operator_commands SET status='applied' WHERE status='pending';"; [[ "$action" == pause ]] && echo true > "$API_STATE"; [[ "$action" == resume ]] && echo false > "$API_STATE"; fi; fi\nif [[ "\${2:-}" == *"INSERT INTO operator_commands"* && -z "\${ARBITRATION_APPLY_AFTER_POLLS:-}" ]]; then action=$(/usr/bin/sqlite3 "$1" "SELECT action FROM operator_commands WHERE status='pending' ORDER BY id DESC LIMIT 1;"); /usr/bin/sqlite3 "$1" "UPDATE operator_commands SET status='applied' WHERE status='pending';"; [[ "$action" == pause ]] && echo true > "$API_STATE"; [[ "$action" == resume ]] && echo false > "$API_STATE"; fi\ntrue`,
   );
   executable(
     curl,
@@ -113,14 +113,95 @@ describe("krabs rollback guard", () => {
   const t28eTimeout = () => { const fixture=makeFixture(false); begin(fixture); const before=readFileSync(join(fixture.stateDir,"state.json"),"utf8"); const timed=spawnSync(guard,["watch"],{env:{...fixture.env,DOCKER_HANG:"1",KRABS_ROLLBACK_COMMAND_TIMEOUT_SECONDS:"1"},encoding:"utf8",timeout:10_000}); expect(timed.status).toBe(124); expect(readFileSync(join(fixture.stateDir,"state.json"),"utf8")).toBe(before); expect(readFileSync(fixture.api,"utf8").trim()).toBe("true"); expect(run(fixture,"status").status).toBe(0); };
   // prettier-ignore
   it("T28f — controller failure, intent arbitration, and API cutover", async () => { t28fIntent(); t28fDelayedStartup(); await t28fController(false); },150_000);
+  it("T28k — deploy arbitration is target-bound across a rejected legacy command", () => {
+    const fixture = makeFixture(true);
+    targetReady(fixture);
+    sql(
+      fixture.control,
+      "INSERT INTO operator_commands(action,initiator_type,initiator,status,created_at) VALUES ('resume','system','deploy:state:resume','rejected','2026-09-07T07:42:48.319Z')",
+    );
+
+    const first = run(fixture, "deploy-arbitrate", "state", "false", "0", target);
+    expect(first.status, first.stderr).toBe(0);
+    expect(rows(fixture)).toEqual([
+      {
+        action: "resume",
+        initiator_type: "system",
+        initiator: "deploy:state:resume",
+        status: "rejected",
+      },
+      {
+        action: "resume",
+        initiator_type: "system",
+        initiator: `deploy:state:${target}:resume`,
+        status: "applied",
+      },
+    ]);
+    expect(run(fixture, "deploy-arbitrate", "state", "false", "0", target).status).toBe(0);
+    expect(rows(fixture)).toHaveLength(2);
+
+    const rejected = makeFixture(true);
+    targetReady(rejected);
+    sql(
+      rejected.control,
+      `INSERT INTO operator_commands(action,initiator_type,initiator,status,created_at) VALUES ('resume','system','deploy:state:${target}:resume','rejected','2026-09-07T07:42:48.319Z')`,
+    );
+    expect(run(rejected, "deploy-arbitrate", "state", "false", "0", target).status).not.toBe(0);
+    expect(rows(rejected)).toHaveLength(1);
+
+    const cutover = makeFixture(true);
+    targetReady(cutover);
+    expect(run(cutover, "deploy-cutover", "state").status).toBe(0);
+    expect(run(cutover, "deploy-arbitrate", "state", "true", "0", target).status).toBe(0);
+    expect(rows(cutover).map((row: { initiator: string }) => row.initiator)).toEqual([
+      "deploy:state:pause",
+      `deploy:state:${target}:pause`,
+    ]);
+
+    for (const args of [
+      ["deploy-arbitrate", "state", "false", "0"],
+      ["deploy-arbitrate", "state", "false", "0", "short"],
+    ]) {
+      const invalid = makeFixture(false);
+      expect(run(invalid, ...args).status).not.toBe(0);
+      expect(rows(invalid)).toEqual([]);
+    }
+    const wrongIdentity = makeFixture(false);
+    expect(run(wrongIdentity, "deploy-arbitrate", "state", "false", "0", target).status).not.toBe(
+      0,
+    );
+    expect(rows(wrongIdentity)).toEqual([]);
+
+    const latePause = makeFixture(true);
+    targetReady(latePause);
+    const lateResult = spawnSync(guard, ["deploy-arbitrate", "state", "false", "0", target], {
+      env: {
+        ...latePause.env,
+        DEPLOY_ARBITRATION_LATE_PAUSE: "1",
+        KRABS_DEPLOY_ARBITRATION_POLL_ATTEMPTS: "2",
+      },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    expect(lateResult.status).not.toBe(0);
+    expect(readFileSync(latePause.api, "utf8").trim()).toBe("true");
+    expect(rows(latePause)).toEqual([
+      expect.objectContaining({
+        action: "resume",
+        initiator: `deploy:state:${target}:resume`,
+        status: "applied",
+      }),
+      expect.objectContaining({ action: "pause", initiator_type: "operator", status: "applied" }),
+    ]);
+  }, 15_000);
   it("T28j — stopped recovery supersede is exact and fail-closed", async () => {
     await t28fController(true);
   }, 40_000);
   // prettier-ignore
-  const t28fIntent = () => { const cases = [{ stage: "precommit", commands: [] as string[], expected: "resume" }, { stage: "commit_ready pause dominates", commands: ["pause"], expected: "pause" }, { stage: "after receipt pause then resume folds", commands: ["pause", "resume"], expected: "resume" }]; for (const row of cases) { const fixture = makeFixture(false); sql(fixture.control, "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2000-01-01T00:00:00.000Z')"); for (const [index, action] of row.commands.entries()) sql(fixture.control, `INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('${action}','operator','applied','2026-01-01T00:00:0${index}.000Z')`); const receipt = run(fixture, "deploy-arbitrate", "state", "false", "1"); expect(receipt.status, row.stage).toBe(0); expect(JSON.parse(receipt.stdout).finalAction, row.stage).toBe(row.expected); expect(readFileSync(fixture.api, "utf8").trim(), row.stage).toBe(String(row.expected === "pause")); } };
+  const t28fIntent = () => { const cases = [{ stage: "precommit", commands: [] as string[], expected: "resume" }, { stage: "commit_ready pause dominates", commands: ["pause"], expected: "pause" }, { stage: "after receipt pause then resume folds", commands: ["pause", "resume"], expected: "resume" }]; for (const row of cases) { const fixture = makeFixture(false); sql(fixture.control, "INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('pause','operator','applied','2000-01-01T00:00:00.000Z')"); for (const [index, action] of row.commands.entries()) sql(fixture.control, `INSERT INTO operator_commands(action,initiator_type,status,created_at) VALUES ('${action}','operator','applied','2026-01-01T00:00:0${index}.000Z')`); const receipt = run(fixture, "deploy-arbitrate", "state", "false", "1", original); expect(receipt.status, row.stage).toBe(0); expect(JSON.parse(receipt.stdout).finalAction, row.stage).toBe(row.expected); expect(readFileSync(fixture.api, "utf8").trim(), row.stage).toBe(String(row.expected === "pause")); } };
   const t28fDelayedStartup = () => {
     const fixture = makeFixture(true);
-    const result = spawnSync(guard, ["deploy-arbitrate", "slow-startup", "false", "0"], {
+    const result = spawnSync(guard, ["deploy-arbitrate", "slow-startup", "false", "0", original], {
       env: { ...fixture.env, ARBITRATION_APPLY_AFTER_POLLS: "61" },
       encoding: "utf8",
       timeout: 10_000,
@@ -131,7 +212,7 @@ describe("krabs rollback guard", () => {
       {
         action: "resume",
         initiator_type: "system",
-        initiator: "deploy:slow-startup:resume",
+        initiator: `deploy:slow-startup:${original}:resume`,
         status: "applied",
       },
     ]);
@@ -153,7 +234,7 @@ describe("krabs rollback guard", () => {
       adapter,
       `echo "$*" >> "$CALLS"; shift
 case "$1" in
-  compose) [[ "$*" == *" stop krabs-api"* ]] && { rm -f "$API_AVAILABLE"; [[ -z "\${OLD_API_REPLACED:-}" ]] || : > "$OLD_API_REPLACED"; }; [[ "$*" == *" create "* ]] && rm -f "$NETWORK_FENCED"; [[ "$*" == *" up -d --no-deps"* ]] && : > "$API_AVAILABLE"; [[ "$*" == *" ps --all -q "* ]] && echo "id-\${@: -1}"; exit 0 ;;
+  compose) [[ "$*" == *" stop krabs-api"* ]] && { rm -f "$API_AVAILABLE"; [[ -z "\${OLD_API_REPLACED:-}" ]] || : > "$OLD_API_REPLACED"; }; [[ "$*" == *" create "* ]] && { rm -f "$NETWORK_FENCED"; printf '%s\n' '${deployTarget}' > "$IDENTITY"; printf '%s\n' '${deployTarget}' > "$HEALTH_IDENTITY"; }; [[ "$*" == *" up -d --no-deps"* ]] && : > "$API_AVAILABLE"; [[ "$*" == *" ps --all -q "* ]] && echo "id-\${@: -1}"; exit 0 ;;
   build|tag|update) exit 0 ;;
   ps) [[ "\${API_DISCOVERY_MODE:-}" == none ]] || { echo id-krabs-api; [[ "\${API_DISCOVERY_MODE:-}" == multi ]] && echo foreign-api; }; exit 0 ;;
   pull) echo 'fake pull progress'; exit 0 ;;
@@ -405,6 +486,10 @@ printf '{"migration101":{"candidateCount":0,"candidateHash":"%s","rowsHash":"%s"
 
       const barrierDir = join(fixture.dir, "supersede-barriers");
       mkdirSync(barrierDir);
+      sql(
+        fixture.control,
+        `INSERT INTO operator_commands(action,initiator_type,initiator,status,created_at) VALUES ('resume','system','deploy:${recoveryStateId}:resume','rejected','2026-09-07T07:42:48.319Z')`,
+      );
       seedSupersede();
       const recoveryBeforeFenceDeath = readFileSync(recoveryPath, "utf8"),
         fenceDeath = runSupersede(target, {
@@ -418,6 +503,21 @@ printf '{"migration101":{"candidateCount":0,"candidateHash":"%s","rowsHash":"%s"
       expect(readFileSync(fixture.calls, "utf8").slice(recoveredCallsStart)).toContain(
         "network disconnect -f krabs_manager-net target-manager",
       );
+      expect(
+        rows(fixture).filter(
+          (row: { action: string; initiator: string }) =>
+            row.action === "resume" && row.initiator.startsWith(`deploy:${recoveryStateId}`),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          initiator: `deploy:${recoveryStateId}:resume`,
+          status: "rejected",
+        }),
+        expect.objectContaining({
+          initiator: `deploy:${recoveryStateId}:${deployTarget}:resume`,
+          status: "applied",
+        }),
+      ]);
 
       seedSupersede();
       const rebindDeath = runSupersede(target, {
