@@ -100,9 +100,11 @@ import {
   MAKER_MICRO_DISTINCT_CONDITION_CAP_EXCEEDED_REASON,
   OPEN_POSITION_EXISTS_REASON,
   SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+  SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON,
   isMakerEntryInputsUnchangedReason,
 } from "../../internal-order-reasons.js";
 import { findPermanentR23LineageBlocker } from "../../maker-capture-reprice.js";
+import { EXECUTION_PROFILE_SCALE_IN_RULE_ID } from "../execution-profile/scale-in-decider.js";
 import { SAME_PRICE_COOLDOWN_REASON } from "../same-price-cooldown/same-price-cooldown-module.js";
 import { TRACK_A_ADD_THROTTLE_REASON } from "../dead-market-shadow/track-a-add-throttle-shadow.js";
 import {
@@ -850,6 +852,7 @@ const PROFILE_LADDER_RULE_ID = "PROFILE_LADDER";
 const PROFILE_LADDER_ORDER_SOURCE = "profile_ladder";
 const POST_BUY_FILL_COOLDOWN_REASON = "post-buy-fill-cooldown";
 export const DEDUPED_SUPPRESSION_REASONS = new Set([
+  SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON,
   "market-cache-miss",
   "mid-price-unavailable",
   "pending-buy-order",
@@ -1664,9 +1667,15 @@ export class AlgoDecisionModule implements RuntimeModule {
     payload: RuntimeEventMap["SignalConversionSkipped"],
   ): Promise<void> {
     const tokenKey = String(payload.signal.tokenId);
-    this.clearPendingByTokenId(tokenKey);
+    const profileScaleIn = payload.signal.decisionRuleId === EXECUTION_PROFILE_SCALE_IN_RULE_ID;
+    if (
+      !profileScaleIn ||
+      this.pendingEntries.get(tokenKey)?.signalId === payload.signal.signalId
+    ) {
+      this.clearPendingByTokenId(tokenKey);
+    }
     if (isInputsUnchangedConversionSkip(payload.reasons)) {
-      if (payload.reasons.includes(ENTRY_UNKNOWN_MIN_SKIP_REASON)) {
+      if (payload.reasons.includes(ENTRY_UNKNOWN_MIN_SKIP_REASON) && !profileScaleIn) {
         this.scheduleMinOrderSizeRearm(tokenKey);
       }
       return;
@@ -2205,7 +2214,11 @@ export class AlgoDecisionModule implements RuntimeModule {
    * tick lands outside its window and the refresh actually fires.
    */
   private requestMinOrderSizeHydrationFor(suppression: SuppressionFacts, now: number): void {
-    if (suppression.reasonCode !== ENTRY_MIN_ORDER_SIZE_UNKNOWN_REASON) return;
+    if (
+      suppression.reasonCode !== ENTRY_MIN_ORDER_SIZE_UNKNOWN_REASON &&
+      suppression.reasonCode !== SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON
+    )
+      return;
     const requestHydration = this.deps.requestMinOrderSizeHydration;
     if (requestHydration == null) return;
     const tokenKey = String(suppression.tokenId);

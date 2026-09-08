@@ -1761,6 +1761,7 @@ async function main(): Promise<void> {
   const signalToOrderBridge = new SignalToOrderBridge({
     bus,
     log,
+    runtimeControl,
     orderRepo: repos.order,
     fillRepo: repos.fill,
     positionRepo: repos.position,

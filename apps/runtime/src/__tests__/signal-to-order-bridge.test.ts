@@ -278,6 +278,243 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("MINFIX live BUY hydration", () => {
+  function book(minOrderSize: number | null | undefined = 5): OrderBookSnapshot {
+    return {
+      tokenId: TOKEN_ID,
+      bids: [{ price: 0.04, size: 100 }],
+      asks: [{ price: 0.04, size: 100 }],
+      bestBid: 0.04,
+      bestAsk: 0.04,
+      midPrice: 0.04,
+      spread: 0,
+      timestamp: Date.now(),
+      minOrderSize,
+    };
+  }
+
+  function harness(
+    options: {
+      refresh?: () => Promise<Map<string, OrderBookSnapshot>>;
+      budget?: number | undefined;
+      noCache?: boolean;
+      deps?: Partial<SignalToOrderBridgeDeps>;
+    } = {},
+  ) {
+    const bus = new InProcessEventBus();
+    const getOrderBooks = vi.fn(options.refresh ?? (async () => new Map([[TOKEN_ID, book()]])));
+    const cache = new CandidateBookCache({
+      gateway: { getOrderBooks },
+      log: makeLogger(),
+      ...(options.budget == null ? {} : { refreshBudgetPerWindow: options.budget }),
+    });
+    cache.upsertBooks(new Map([[TOKEN_ID, book(null)]]), Date.now(), "ws");
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { isActive: true, getWalletMode: () => "relayer" } as never,
+      candidateBookCache: options.noCache ? undefined : cache,
+      policy: () => makerOnlyPolicy(),
+      ...options.deps,
+    });
+    const placed: RuntimeEventMap["PlaceOrderRequested"][] = [];
+    const skipped: RuntimeEventMap["SignalConversionSkipped"][] = [];
+    bus.subscribe("PlaceOrderRequested", async (p) => {
+      placed.push(p);
+    });
+    bus.subscribe("SignalConversionSkipped", async (p) => {
+      skipped.push(p);
+    });
+    bridge.subscribe();
+    const snapshot = makeMarket({
+      bestBid: 0.04,
+      bestAsk: 0.04,
+      midPrice: 0.04,
+      bookSource: "clob",
+      minOrderSize: null,
+    });
+    let signalSequence = 0;
+    const send = (notional = 0.4, overrides: Partial<NormalizedMarket> = {}) =>
+      bus.publish("SignalApproved", {
+        signal: {
+          ...makeSignal(),
+          signalId: `hydration-${++signalSequence}`,
+          reason: "scale-in",
+          decisionRuleId: "EXECUTION_PROFILE_SCALE_IN",
+          suggestedSize: 100,
+          suggestedSizeUsdc: notional,
+        },
+        market: { ...snapshot, ...overrides },
+        approvedAt: Date.now(),
+      });
+    return {
+      bus,
+      bridge,
+      cache,
+      placed,
+      skipped,
+      getOrderBooks,
+      snapshot,
+      send,
+      close: () => {
+        bridge.unsubscribe();
+        cache.dispose();
+      },
+    };
+  }
+
+  it.each([1.22, 1.26, 1.27, 1.3, 5, 6.504])(
+    "checks recomputed %s shares and never inflates scale-ins",
+    async (shares) => {
+      const h = harness();
+      try {
+        await h.send(shares * 0.04);
+        expect(h.getOrderBooks).toHaveBeenCalledTimes(1);
+        if (shares < 5) {
+          expect(h.placed).toHaveLength(0);
+          expect(h.skipped[0]?.reasons).toEqual(["order-size-below-minimum"]);
+        } else {
+          expect(h.skipped).toHaveLength(0);
+          expect(h.placed[0]?.command.size).toBeCloseTo(shares, 10);
+          expect(h.placed[0]?.command.metadata?.marketData).toMatchObject({ minOrderSize: 5 });
+        }
+      } finally {
+        h.close();
+      }
+    },
+  );
+
+  it.each([undefined, null, 0, -1, NaN, Infinity, "failure", "missing", "budget"])(
+    "fails closed for unresolved REST minimum %s",
+    async (value) => {
+      const h = harness({
+        budget: value === "budget" ? 0 : undefined,
+        refresh: async () => {
+          if (value === "failure") throw new Error("fixture REST failure");
+          if (value === "missing") return new Map();
+          return new Map([
+            [TOKEN_ID, { ...book(), minOrderSize: value as number | null | undefined }],
+          ]);
+        },
+      });
+      try {
+        await h.send();
+        expect(h.placed).toHaveLength(0);
+        expect(h.skipped[0]?.reasons).toEqual(["entry_unknown_min"]);
+        expect(h.skipped[0]?.diagnostics).toMatchObject({ minOrderSize: null });
+      } finally {
+        h.close();
+      }
+    },
+  );
+
+  it.each([undefined, null, 0, -1, NaN, Infinity])(
+    "fails closed without cache for %s",
+    async (minOrderSize) => {
+      const h = harness({ noCache: true });
+      try {
+        await h.send(0.4, { minOrderSize } as Partial<NormalizedMarket>);
+        expect(h.placed).toHaveLength(0);
+        expect(h.skipped[0]?.reasons).toEqual(["entry_unknown_min"]);
+      } finally {
+        h.close();
+      }
+    },
+  );
+
+  it.each(["base", "cache"])("accepts known %s minimum without REST", async (source) => {
+    const h = harness();
+    try {
+      if (source === "cache")
+        h.cache.upsertBooks(new Map([[TOKEN_ID, book()]]), Date.now(), "rest");
+      await h.send(0.4, source === "base" ? { minOrderSize: 5 } : {});
+      expect(h.getOrderBooks).not.toHaveBeenCalled();
+      expect(h.placed[0]?.command.size).toBe(10);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("checks final concentration-clamped shares", async () => {
+    const h = harness({
+      deps: {
+        positionConcentration: {
+          evaluateBuy: () => ({
+            action: "clamp",
+            effectiveNotionalUsdc: 0.04,
+            reason: "fixture",
+            metrics: null,
+          }),
+        } as never,
+      },
+    });
+    try {
+      await h.send();
+      expect(h.placed).toHaveLength(0);
+      expect(h.skipped[0]?.reasons).toEqual(["order-size-below-minimum"]);
+    } finally {
+      h.close();
+    }
+  });
+
+  it.each(["unsubscribe", "remove-readd", "pause", "inactive"])(
+    "cancels delayed conversion on %s; a fresh later signal recovers",
+    async (action) => {
+      let resolve!: (books: Map<string, OrderBookSnapshot>) => void;
+      let paused = false;
+      const h = harness({
+        refresh: () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+        deps: { runtimeControl: { isPaused: () => paused } },
+      });
+      try {
+        const pending = h.send();
+        await vi.waitFor(() => expect(h.getOrderBooks).toHaveBeenCalledTimes(1));
+        if (action === "unsubscribe") {
+          h.bridge.unsubscribe();
+          h.bridge.subscribe();
+        }
+        if (action === "remove-readd") {
+          await h.bus.publish("TrackedMarketsChanged", {
+            removedTokenIds: [TOKEN_ID],
+            addedTokenIds: [],
+            timestamp: Date.now(),
+          } as never);
+          await h.bus.publish("TrackedMarketsChanged", {
+            removedTokenIds: [],
+            addedTokenIds: [TOKEN_ID],
+            timestamp: Date.now(),
+          } as never);
+        }
+        if (action === "pause") paused = true;
+        await h.bus.publish("NormalizedMarketUpdated", {
+          markets: [{ ...h.snapshot, active: action !== "inactive" }],
+          timestamp: Date.now(),
+        });
+        resolve(new Map([[TOKEN_ID, book()]]));
+        await pending;
+        expect(h.placed).toHaveLength(0);
+        expect(h.skipped).toHaveLength(1);
+        if (action === "unsubscribe" || action === "remove-readd") {
+          expect(h.skipped[0]?.reasons).toEqual(["conversion-cancelled"]);
+        }
+        paused = false;
+        await h.bus.publish("NormalizedMarketUpdated", {
+          markets: [h.snapshot],
+          timestamp: Date.now(),
+        });
+        await h.send();
+        expect(h.placed).toHaveLength(1);
+        expect(h.getOrderBooks).toHaveBeenCalledTimes(1);
+      } finally {
+        h.close();
+      }
+    },
+  );
+});
+
 describe("SignalToOrderBridge", () => {
   it("defends the bridge against a second generic permanent R23 root", async () => {
     const bus = new InProcessEventBus();

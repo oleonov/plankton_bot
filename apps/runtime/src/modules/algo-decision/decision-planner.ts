@@ -61,7 +61,10 @@ import {
   roundToTick,
   SELL_PRICE_CEILING,
 } from "../../executable-price.js";
-import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
+import {
+  SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+  SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON,
+} from "../../internal-order-reasons.js";
 import { isExecutableOrderSize, isKnownMinOrderSize } from "../../min-order-size.js";
 import { resolveBounceSupplementalRungSizing } from "../../bounce-rung-sizing.js";
 import { isBounceLadderEligible } from "../exit-ownership/bounce-eligibility.js";
@@ -2000,6 +2003,28 @@ function buildSignalOrSuppression(args: {
           guard.blockedUntilMs != null ? new Date(guard.blockedUntilMs).toISOString() : null,
         lastOutcome: guard.lastOutcome,
       },
+    });
+    return none(args.metrics, args.suppressions, args.sideEffects);
+  }
+
+  if (
+    decision.ruleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+    decision.bounceRung &&
+    !decision.bounceRung.isCleanupRung &&
+    input.hasWorkingBounceCleanup &&
+    decision.bounceRung.uncommittedRemainder != null &&
+    input.minOrderSizeHydrationAvailable === true &&
+    !isKnownMinOrderSize(market.minOrderSize)
+  ) {
+    args.suppressions.push({
+      tokenId: market.tokenId,
+      conditionId: market.conditionId,
+      reasonCode: SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON,
+      side: "SELL",
+      decisionRuleId: decision.ruleId,
+      ...ctx,
+      emissionFacts,
+      timestamp: args.nowIso,
     });
     return none(args.metrics, args.suppressions, args.sideEffects);
   }

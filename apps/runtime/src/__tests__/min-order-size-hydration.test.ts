@@ -1168,7 +1168,7 @@ function makeAlgoRulesRepo(): AlgoRulesRepository {
   };
   return {
     getDecisionRules: vi.fn(() => [buyRule]),
-    getSizeRules: vi.fn((actionType: string) => (actionType === "BUY" ? [buySize] : [])),
+    getSizeRules: vi.fn((actionType: string) => [{ ...buySize, actionType }]),
     refresh: vi.fn(),
   } as unknown as AlgoRulesRepository;
 }
@@ -1203,6 +1203,91 @@ function buildAlgoModule(
   } as never);
 }
 
+function supplementalDeps() {
+  const firstTradeAt = new Date(Date.now() - 60_000).toISOString();
+  const leg = {
+    tokenId: createTokenId(TOKEN),
+    buyCount: 2,
+    sellCount: 0,
+    firstTradeAt,
+    lastTradeAt: firstTradeAt,
+    firstTradePrice: 0.013,
+    cumulativeBuySize: 39.13,
+    cumulativeBuyNotional: 39.13 * 0.013,
+    cumulativeSellSize: 0,
+    cumulativeSellNotional: 0,
+  };
+  const position = {
+    tokenId: createTokenId(TOKEN),
+    conditionId: "cond-min-hydration",
+    positionId: "derek",
+    status: "open",
+    side: "buy",
+    entryLane: "GATE",
+    exitOwner: "bounce",
+    size: 39.13,
+    avgEntryPrice: 0.013,
+    openedAt: firstTradeAt,
+  };
+  const orders = [
+    [2, 7.554],
+    [1, 10.072],
+    [2, 15],
+  ].map(([rungIndex, size], i) => ({
+    tokenId: createTokenId(TOKEN),
+    orderId: `derek-${i}`,
+    side: "sell",
+    status: "open",
+    decisionRuleId: "BOUNCE_EXIT_TARGET",
+    size,
+    price: 0.04,
+    createdAt: firstTradeAt,
+    metadata: {
+      bounceRung: {
+        ladderId: `${TOKEN}:${firstTradeAt}`,
+        rungIndex,
+        originalPositionSize: 25.18,
+        isCleanupRung: i === 2,
+      },
+    },
+  }));
+  return {
+    legStateRepo: {
+      getAll: () => [leg],
+      get: (tokenId: string) => ({ ...leg, tokenId }),
+      findOpen: () => [leg],
+    },
+    positionRepo: {
+      findOpen: () => [position],
+      findByTokenId: (tokenId: string) => ({ ...position, tokenId }),
+    },
+    orderRepo: {
+      findOpen: () => orders,
+      findByTokenId: (tokenId: string) =>
+        orders.map((order) => ({
+          ...order,
+          tokenId,
+          metadata: {
+            bounceRung: { ...order.metadata.bounceRung, ladderId: `${tokenId}:${firstTradeAt}` },
+          },
+        })),
+      findRecentByTokenId: () => orders,
+      hasNonterminalBounceAskCaptureIntentForPosition: () => false,
+    },
+    fillRepo: { findByOrderIds: () => [], findByOrderId: () => [] },
+    executionPolicy: () => ({
+      ...sellableFlowPolicy(),
+      entryMinMarketAgeSeconds: 0,
+      bounceExit: {
+        ...DEFAULT_EXECUTION_POLICY.bounceExit,
+        enabled: true,
+        mode: "micro_live",
+        whitelistConditionIds: ["cond-min-hydration"],
+      },
+    }),
+  };
+}
+
 async function emitMarketUpdate(
   bus: EventBus & { publish: ReturnType<typeof vi.fn> },
   market: NormalizedMarket,
@@ -1211,6 +1296,45 @@ async function emitMarketUpdate(
 }
 
 describe("AlgoDecisionModule — unknown minimum pre-filter", () => {
+  it("MINFIX delayed profile skip preserves another Algo pending signal and schedules no rearm", async () => {
+    const bus = new InProcessEventBus();
+    const mod = buildAlgoModule(bus, vi.fn());
+    await mod.start();
+    const produced: RuntimeEventMap["SignalProduced"][] = [];
+    bus.subscribe("SignalProduced", async (event) => {
+      produced.push(event);
+    });
+    const internals = mod as unknown as { scheduleMinOrderSizeRearm: (token: string) => void };
+    const rearm = vi.spyOn(internals, "scheduleMinOrderSizeRearm");
+    try {
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makePricingMarket({ minOrderSize: 5 })],
+        timestamp: Date.now(),
+      });
+      await vi.waitFor(() => expect(produced).toHaveLength(1));
+      await bus.publish("SignalConversionSkipped", {
+        signal: makeSignal({
+          signalId: "older-profile-add",
+          reason: "scale-in",
+          decisionRuleId: "EXECUTION_PROFILE_SCALE_IN",
+        }) as never,
+        stage: "execution-terms",
+        reasons: ["entry_unknown_min"],
+        diagnostics: {},
+        skippedAt: Date.now(),
+      });
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makePricingMarket({ minOrderSize: 5 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      expect(rearm).not.toHaveBeenCalled();
+      expect(produced).toHaveLength(1);
+    } finally {
+      await mod.stop();
+    }
+  });
+
   it("suppresses the probe entry and asks for hydration once per dedupe window", async () => {
     const bus = createMockBus();
     const requestHydration = vi.fn();
@@ -1438,44 +1562,51 @@ describe("AlgoDecisionModule — unknown minimum pre-filter", () => {
     await mod.stop();
   });
 
-  it("keeps re-arming a token the shared timer flushed inside its own backoff", async () => {
-    const bus = createMockBus();
-    const requestHydration = vi.fn();
-    const mod = buildAlgoModule(bus, requestHydration);
-    await mod.start();
-
-    const late = createTokenId("tok-min-hydration-late");
-    vi.useFakeTimers();
-    try {
-      // The first token starts the shared re-arm timer, so its deadline — not
-      // the late token's — is the one both will be flushed on.
-      await emitMarketUpdate(bus, makePricingMarket({ minOrderSize: null }));
-      await vi.advanceTimersByTimeAsync(59_000);
-      await emitMarketUpdate(
+  it.each(["entry", "supplemental"])(
+    "MINFIX %s keeps re-arming a late join inside its own backoff",
+    async (kind) => {
+      const bus = createMockBus();
+      const requestHydration = vi.fn();
+      const mod = buildAlgoModule(
         bus,
-        makePricingMarket({
-          tokenId: late,
-          conditionId: "cond-late" as ConditionId,
-          minOrderSize: null,
-        }),
+        requestHydration,
+        kind === "supplemental" ? supplementalDeps() : {},
       );
-      expect(requestHydration).toHaveBeenCalledWith(String(late));
-      requestHydration.mockClear();
+      await mod.start();
 
-      // t=60s: the flush lands one second into the late token's own 60s backoff,
-      // so its refresh is deduped away. The re-arm must survive that anyway —
-      // a deduped tick that also dropped the re-arm would strand the token.
-      await vi.advanceTimersByTimeAsync(1_500);
-      expect(requestHydration).not.toHaveBeenCalledWith(String(late));
+      const late = createTokenId("tok-min-hydration-late");
+      vi.useFakeTimers();
+      try {
+        // The first token starts the shared re-arm timer, so its deadline — not
+        // the late token's — is the one both will be flushed on.
+        await emitMarketUpdate(bus, makePricingMarket({ minOrderSize: null }));
+        await vi.advanceTimersByTimeAsync(59_000);
+        await emitMarketUpdate(
+          bus,
+          makePricingMarket({
+            tokenId: late,
+            conditionId: "cond-late" as ConditionId,
+            minOrderSize: null,
+          }),
+        );
+        expect(requestHydration).toHaveBeenCalledWith(String(late));
+        requestHydration.mockClear();
 
-      await vi.advanceTimersByTimeAsync(60_000);
-      expect(requestHydration).toHaveBeenCalledWith(String(late));
-    } finally {
-      vi.useRealTimers();
-    }
+        // t=60s: the flush lands one second into the late token's own 60s backoff,
+        // so its refresh is deduped away. The re-arm must survive that anyway —
+        // a deduped tick that also dropped the re-arm would strand the token.
+        await vi.advanceTimersByTimeAsync(1_500);
+        expect(requestHydration).not.toHaveBeenCalledWith(String(late));
 
-    await mod.stop();
-  });
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(requestHydration).toHaveBeenCalledWith(String(late));
+      } finally {
+        vi.useRealTimers();
+      }
+
+      await mod.stop();
+    },
+  );
 
   it("re-requests hydration after the token left and rejoined the tracked set", async () => {
     const bus = createMockBus();
@@ -1544,6 +1675,125 @@ describe("AlgoDecisionModule — unknown minimum pre-filter", () => {
 // ─── F4 — end-to-end self-heal on the real modules, no second poll ───────────
 
 describe("min-order-size self-heal — real cache + market-data + normalization + decision", () => {
+  it.each([
+    "success",
+    "changed-orders",
+    "invalid",
+    "missing",
+    "failure",
+    "pause",
+    "remove",
+    "stop",
+  ])("MINFIX supplemental SELL real hydration chain: %s", async (outcome) => {
+    const bus = new InProcessEventBus();
+    let paused = false;
+    const runtimeControl = { isPaused: () => paused };
+    const marketData = makeMarketDataModule(
+      bus,
+      {
+        bestBid: 0.04,
+        bestAsk: 0.04,
+        bookSource: "clob",
+        acceptingOrders: true,
+        enableOrderBook: true,
+      },
+      runtimeControl,
+    );
+    let finish!: (books: Map<string, OrderBookSnapshot>) => void;
+    let fail!: (error: Error) => void;
+    const getOrderBooks = vi.fn(
+      () =>
+        new Promise<Map<string, OrderBookSnapshot>>((resolve, reject) => {
+          finish = resolve;
+          fail = reject;
+        }),
+    );
+    const cache = new CandidateBookCache({
+      gateway: { getOrderBooks },
+      log: makeLogger(),
+      onMinOrderSizeObserved: (token, minimum) =>
+        marketData.noteMinOrderSizeObserved(token, minimum),
+    });
+    const requests: Promise<unknown>[] = [];
+    const deps = supplementalDeps();
+    const algo = buildAlgoModule(
+      bus,
+      (token) => {
+        requests.push(
+          cache.getFreshOrRefresh(token, Date.now(), { requireKnownMinOrderSize: true }),
+        );
+      },
+      {
+        ...deps,
+        runtimeControl,
+        canHydrateMinOrderSize: (token: string) => marketData.canHydrateMinOrderSize(token),
+      },
+    );
+    const normalization = new NormalizationModule({ bus, log: makeLogger() });
+    const produced: RuntimeEventMap["SignalProduced"][] = [];
+    const effects: string[] = [];
+    bus.subscribe("SignalProduced", async (p) => {
+      produced.push(p);
+    });
+    for (const name of ["PlaceOrderRequested", "CancelOrderRequested"] as const) {
+      bus.subscribe(name, async () => {
+        effects.push(name);
+      });
+    }
+    await normalization.start();
+    await algo.start();
+    if (outcome === "stop") vi.useFakeTimers();
+    try {
+      await marketData.poll();
+      await vi.waitFor(() => expect(getOrderBooks).toHaveBeenCalledTimes(1));
+      expect(produced).toHaveLength(0);
+      expect(effects).toEqual([]);
+      if (outcome === "changed-orders") deps.orderRepo.findOpen()[2]!.size = 16;
+      if (outcome === "pause") paused = true;
+      if (outcome === "stop") await algo.stop();
+      if (outcome === "remove") {
+        marketData.trackedCalls.mockReturnValue([]);
+        await marketData.poll();
+      }
+      if (outcome === "failure") fail(new Error("fixture REST failure"));
+      else
+        finish(
+          outcome === "missing"
+            ? new Map()
+            : new Map([[TOKEN, makeBook(TOKEN, outcome === "invalid" ? 0 : 5)]]),
+        );
+      await Promise.all(requests);
+      await bus.drain();
+      if (outcome === "success" || outcome === "changed-orders") {
+        await vi.waitFor(() => expect(produced).toHaveLength(1));
+        expect(produced[0]?.market?.minOrderSize).toBe(5);
+        expect(produced[0]?.signal.suggestedSize).toBeCloseTo(
+          outcome === "success" ? 6.504 : 5.504,
+          10,
+        );
+        expect(produced[0]?.signal.bounceRung?.rungIndex).toBe(0);
+        expect(marketData.pricingCalls).toHaveBeenCalledTimes(1);
+      } else expect(produced).toHaveLength(0);
+      if (outcome === "pause") {
+        paused = false;
+        await marketData.poll();
+        await vi.waitFor(() => expect(produced).toHaveLength(1));
+        expect(produced[0]?.market?.minOrderSize).toBe(5);
+      }
+      expect(effects).toEqual([]);
+      if (outcome === "stop") {
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(getOrderBooks).toHaveBeenCalledTimes(1);
+        expect(produced).toHaveLength(0);
+      }
+    } finally {
+      cache.dispose();
+      await algo.stop();
+      await normalization.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("hydrates from REST and emits without another poll or book tick", async () => {
     const bus = new InProcessEventBus();
     const marketData = makeMarketDataModule(bus, {

@@ -295,12 +295,14 @@ export interface SignalToOrderBridgeDeps {
   };
   /** Override for tests; defaults to Date.now. */
   now?: () => number;
+  runtimeControl?: { isPaused(): boolean };
 }
 
 export class SignalToOrderBridge {
   private readonly log: Logger;
   private marketCache = new Map<string, NormalizedMarket>();
   private unsubs: Array<() => void> = [];
+  private readonly hydratingBuys = new Set<{ tokenId: string; cancelled: boolean }>();
   private lastTakerInfoLogDay: string | null = null;
   private readonly observationQueue: ExecutionPolicyObservation[] = [];
   private observationFlushScheduled = false;
@@ -670,6 +672,7 @@ export class SignalToOrderBridge {
   }
 
   unsubscribe(): void {
+    for (const conversion of this.hydratingBuys) conversion.cancelled = true;
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     this.flushObservationQueue();
@@ -688,6 +691,9 @@ export class SignalToOrderBridge {
   ): Promise<void> {
     for (const tokenId of payload.removedTokenIds) {
       this.marketCache.delete(String(tokenId));
+      for (const conversion of this.hydratingBuys) {
+        if (conversion.tokenId === String(tokenId)) conversion.cancelled = true;
+      }
     }
   }
 
@@ -768,6 +774,15 @@ export class SignalToOrderBridge {
 
   private async handleApproved(payload: RuntimeEventMap["SignalApproved"]): Promise<void> {
     const bridgeStartMs = performance.now();
+    const hydration =
+      payload.signal.side === "buy" &&
+      this.deps.liveLiteGuard?.isActive === true &&
+      !isKnownMinOrderSize(
+        (payload.market ?? this.marketCache.get(String(payload.signal.tokenId)))?.minOrderSize,
+      )
+        ? { tokenId: String(payload.signal.tokenId), cancelled: false }
+        : null;
+    if (hydration) this.hydratingBuys.add(hydration);
     try {
       const { signal, market: embeddedMarket } = payload;
 
@@ -922,6 +937,30 @@ export class SignalToOrderBridge {
       const pricing = await this.resolvePricingMarket(signal, baseMarket, policy);
       const market = pricing.market;
       const trackRFeeQuote = await this.resolveTrackRFeeQuote(signal, market, policy);
+      const hydrationBlock =
+        hydration && this.hydratedBuyBlock(hydration, market, gateWhitelistOverride);
+      if (hydrationBlock) {
+        await this.publishConversionSkipped(signal, "marketability", [hydrationBlock], {
+          cacheStatus: pricing.cacheStatus,
+        });
+        return;
+      }
+      if (
+        signal.side === "buy" &&
+        this.deps.liveLiteGuard?.isActive === true &&
+        !isKnownMinOrderSize(market.minOrderSize)
+      ) {
+        await this.publishConversionSkipped(
+          signal,
+          "execution-terms",
+          [ENTRY_UNKNOWN_MIN_SKIP_REASON],
+          {
+            cacheStatus: pricing.cacheStatus,
+            minOrderSize: market.minOrderSize ?? null,
+          },
+        );
+        return;
+      }
 
       const rawExecutionTerms = this.resolveExecutionTerms(
         signal,
@@ -2055,14 +2094,36 @@ export class SignalToOrderBridge {
       // depend on the planner re-emitting the signal; the bridge just publishes the
       // backstop command below and the executor's own barrier-close hook takes it
       // from there even across tick/liveness gaps.
+      const finalHydrationBlock =
+        hydration && this.hydratedBuyBlock(hydration, market, gateWhitelistOverride);
+      if (finalHydrationBlock) {
+        await this.publishConversionSkipped(signal, "marketability", [finalHydrationBlock], {
+          cacheStatus: pricing.cacheStatus,
+        });
+        return;
+      }
       this.recordPartialPlacementOnSend(signal, executionTerms, nowMs);
       await this.deps.bus.publish("PlaceOrderRequested", {
         command: cmd,
         timestamp: Date.now(),
       });
     } finally {
+      if (hydration) this.hydratingBuys.delete(hydration);
       recordStageDuration("signal_to_order_bridge", performance.now() - bridgeStartMs);
     }
+  }
+
+  private hydratedBuyBlock(
+    conversion: { tokenId: string; cancelled: boolean },
+    market: NormalizedMarket,
+    gateWhitelistOverride: boolean,
+  ): string | null {
+    if (conversion.cancelled) return "conversion-cancelled";
+    if (this.deps.runtimeControl?.isPaused()) return "runtime-paused";
+    return this.evaluateBuyAdmission(
+      this.marketCache.get(conversion.tokenId) ?? market,
+      gateWhitelistOverride,
+    );
   }
 
   private async blockDuplicatePermanentR23Root(
@@ -4164,7 +4225,8 @@ function needsKnownMinOrderSize(
   liveLite: boolean,
 ): boolean {
   if (isKnownMinOrderSize(market.minOrderSize)) return false;
-  if (signal.side === "sell") return liveLite;
+  if (liveLite) return true;
+  if (signal.side === "sell") return false;
   return policy.sellableFlow.enabled && signal.reason === "probe-entry";
 }
 

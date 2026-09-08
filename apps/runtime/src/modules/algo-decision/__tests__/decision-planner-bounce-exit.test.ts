@@ -229,6 +229,64 @@ function input(overrides: Partial<DecisionPlanningInput> = {}): DecisionPlanning
   };
 }
 
+function derekInput(overrides: Partial<DecisionPlanningInput> = {}): DecisionPlanningInput {
+  return input({
+    legState: leg({
+      firstTradePrice: 0.013,
+      cumulativeBuySize: 39.13,
+      cumulativeBuyNotional: 39.13 * 0.013,
+    }),
+    position: position({ size: 39.13, avgEntryPrice: 0.013 }),
+    market: market({ tickSize: 0.001, minOrderSize: 5 }),
+    placedBounceRungIndices: [1, 2],
+    originalLadderPositionSize: 25.18,
+    bounceLadderOpenCommitment: 32.626,
+    hasWorkingBounceCleanup: true,
+    minOrderSizeHydrationAvailable: true,
+    executionPolicy: sellableFlowOnPolicy(),
+    ...overrides,
+  });
+}
+
+describe("MINFIX SELL supplemental hydration", () => {
+  it.each([null, undefined, 0, -1, NaN, Infinity])(
+    "suppresses unknown minimum %s without dust or cancellation",
+    (minOrderSize) => {
+      const result = evaluateDecisionPlan(
+        derekInput({
+          market: market({ minOrderSize } as Partial<NormalizedMarket>),
+        }),
+      );
+      expect(result.type).toBe("none");
+      expect(result.suppressions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ reasonCode: "sell-residual-unknown-min", side: "SELL" }),
+        ]),
+      );
+      expect(result.sideEffects).toEqual([]);
+    },
+  );
+
+  it.each([1, 5, 6.504, 7])("uses observed minimum %s without adding shares", (minOrderSize) => {
+    const result = evaluateDecisionPlan(
+      derekInput({ market: market({ tickSize: 0.001, minOrderSize }) }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedPrice).toBeCloseTo(0.018, 10);
+    expect(result.signal.suggestedSize).toBeCloseTo(6.504, 10);
+    expect(result.signal.bounceRung?.rungIndex).toBe(0);
+  });
+
+  it.each([false, undefined])("retains fallback when hydration capability is %s", (available) => {
+    const candidate = derekInput({ market: market({ minOrderSize: null }) });
+    if (available === undefined) delete candidate.minOrderSizeHydrationAvailable;
+    else candidate.minOrderSizeHydrationAvailable = available;
+    const result = evaluateDecisionPlan(candidate);
+    expect(result.type).toBe("signal");
+  });
+});
+
 describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
   it("emits rung0 at firstEntryPrice x (1+tierGain), sized by ladderFractions[0], for a fresh GATE fill", () => {
     const result = evaluateDecisionPlan(input());
@@ -478,21 +536,11 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
   });
 
   it("keeps the Derek supplemental at the first missing rung and exact free residual", () => {
-    const result = evaluateDecisionPlan(
-      input({
-        legState: leg({ cumulativeBuySize: 39.13, cumulativeBuyNotional: 39.13 * 0.044 }),
-        position: position({ size: 39.13 }),
-        market: market({ tickSize: 0.001, minOrderSize: 5 }),
-        placedBounceRungIndices: [1, 2],
-        originalLadderPositionSize: 25.18,
-        bounceLadderOpenCommitment: 32.626,
-        hasWorkingBounceCleanup: true,
-        executionPolicy: sellableFlowOnPolicy(),
-      }),
-    );
+    const result = evaluateDecisionPlan(derekInput());
     expect(result.type).toBe("signal");
     if (result.type !== "signal") return;
     expect(result.signal.suggestedSize).toBeCloseTo(6.504, 10);
+    expect(result.signal.suggestedPrice).toBeCloseTo(0.018, 10);
     expect(result.signal.bounceRung).toMatchObject({
       rungIndex: 0,
       fraction: 0.3,

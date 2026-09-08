@@ -36,6 +36,9 @@ import { DEFAULT_PROFILE_HYSTERESIS } from "../profile-resolver.js";
 import { InMemoryExecutionProfileStateRepository } from "../state-repository.js";
 import type { ExecutionProfilePolicy, ExecutionProfileStateRecord } from "../types.js";
 import type { EffectiveResolutionGate } from "../../../effective-resolution-service.js";
+import { SignalToOrderBridge } from "../../strategy/signal-to-order.js";
+import { CandidateBookCache } from "../../strategy/candidate-book-cache.js";
+import { DEFAULT_EXECUTION_POLICY } from "@krabs/domain";
 
 const tokenId = createTokenId("manager-token");
 const conditionId = createConditionId("manager-condition");
@@ -634,6 +637,83 @@ describe("ExecutionProfileManager", () => {
   });
 
   describe("pending scale-in lifecycle", () => {
+    it("MINFIX real bridge REST failure releases matching add and next heartbeat retries", async () => {
+      const log = {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        debug: vi.fn(),
+        child() {
+          return this;
+        },
+      } as never;
+      const getOrderBooks = vi.fn(async () => {
+        throw new Error("fixture REST failure");
+      });
+      const cache = new CandidateBookCache({ gateway: { getOrderBooks }, log });
+      let bridge: SignalToOrderBridge | undefined;
+      const skipped: RuntimeEventMap["SignalConversionSkipped"][] = [];
+      const placed: unknown[] = [];
+      const ctx = await pendingScaleInFixture([], async ({ signal, market: snapshot }, bus) => {
+        if (!bridge) {
+          bridge = new SignalToOrderBridge({
+            bus,
+            log,
+            candidateBookCache: cache,
+            liveLiteGuard: { isActive: true, getWalletMode: () => "relayer" } as never,
+            policy: () => DEFAULT_EXECUTION_POLICY,
+          });
+          bridge.subscribe();
+          bus.subscribe("SignalConversionSkipped", async (event) => {
+            skipped.push(event);
+          });
+          bus.subscribe("PlaceOrderRequested", async (event) => {
+            placed.push(event);
+          });
+        }
+        await bus.publish("SignalApproved", {
+          signal,
+          market: { ...snapshot, minOrderSize: null },
+          approvedAt: NOW,
+        });
+      });
+      try {
+        expect(ctx.manager.getPendingScaleIns()).toHaveLength(0);
+        expect(skipped[0]?.signal.signalId).toBe(ctx.signals[0]?.signalId);
+        expect(skipped[0]?.reasons).toEqual(["entry_unknown_min"]);
+        expect(skipped[0]?.diagnostics.cacheStatus).toBe("refresh-failed");
+        expect(ctx.signals).toHaveLength(1);
+        await heartbeat(ctx.bus, NOW + 1);
+        expect(ctx.signals).toHaveLength(2);
+        expect(getOrderBooks).toHaveBeenCalledTimes(2);
+        expect(ctx.manager.getPendingScaleIns()).toHaveLength(0);
+        expect(placed).toHaveLength(0);
+      } finally {
+        bridge?.unsubscribe();
+        cache.dispose();
+        await ctx.manager.stop();
+      }
+    });
+
+    it("MINFIX mismatched conversion skip cannot release another pending profile signal", async () => {
+      const ctx = await pendingScaleInFixture([], async ({ signal }, _bus, orders) => {
+        orders.push(scaleInOrder(signal, { status: "pending" }));
+      });
+      try {
+        const signal = ctx.signals[0]!;
+        await ctx.bus.publish("SignalConversionSkipped", {
+          signal: { ...signal, signalId: "other" },
+          stage: "execution-terms",
+          reasons: ["entry_unknown_min"],
+          diagnostics: {},
+          skippedAt: NOW,
+        });
+        expect(ctx.manager.getPendingScaleIns()).toHaveLength(1);
+      } finally {
+        await ctx.manager.stop();
+      }
+    });
+
     it.each(["SignalRejected", "SignalConversionSkipped"] as const)(
       "clears the exact pending add on %s and permits the next heartbeat",
       async (eventName) => {
