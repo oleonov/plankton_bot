@@ -111,6 +111,7 @@ describe("order capacity policy evaluators", () => {
     const captureAt24 = evaluateBuyOrderSlots(25, 24, capture.protectedOpenBuySlots);
     expect(ordinaryAt24).toMatchObject({
       allowed: false,
+      reason: "buy_order_count_limit",
       maxOpenBuyOrders: 25,
       protectedOpenBuySlots: 1,
       effectiveMaxOpenBuyOrders: 24,
@@ -155,6 +156,24 @@ describe("order capacity policy evaluators", () => {
     const decision = evaluateBuyOrderSlots(25, openBuyOrderCount);
 
     expect(decision.allowed).toBe(allowed);
+    expect(decision.reason).toBe(allowed ? null : "buy_order_count_limit");
+  });
+
+  it("keeps cash-headroom rejects distinct from available BUY slots", () => {
+    const decision = evaluateWalletBuyCapacity({
+      policy: buyPolicy,
+      snapshot: {
+        walletBalanceUsdc: 10,
+        walletBufferUsdc: 0.3,
+        reservedBuyUsdc: 1,
+        freeUsdcForNewOrders: 8.7,
+      },
+      requiredNotionalUsdc: 2,
+      signalReason: "probe-entry",
+      openBuyOrderCount: 1,
+    });
+    expect(decision).toMatchObject({ allowed: false, reason: "wallet_buy_capacity_exhausted" });
+    expect(decision.availableAfterOrderUsdc).toBeCloseTo(6.7);
   });
 
   it("reserves the final shared order slot without changing the unlimited sentinel", () => {

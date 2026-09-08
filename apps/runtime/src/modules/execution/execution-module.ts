@@ -134,7 +134,6 @@ import {
   type WalletSellCapacityDecision,
   resolveWalletBuyBudget,
   resolveProtectedWalletBuyRequirement,
-  WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
   WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
 } from "../../wallet-buy-budget.js";
 import {
@@ -233,6 +232,11 @@ const TRADING_DISABLED_WARN_INTERVAL_MS = 5 * 60_000;
 const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
 const D8_EXIT_ALREADY_WORKING_REASON = "d8-exit-already-working";
 type ExitCoverageAdmissionKind = ExitCoverageCleanupKind | "bounce-supplemental";
+interface PreciseCleanupAvailability {
+  readonly walletBalance: number;
+  readonly reservations: ReservationSnapshot;
+  readonly fingerprint: string;
+}
 type RecoverySuccessorContext = {
   readonly policy: ExecutionPolicy["bounceExit"];
   readonly tickSize: number;
@@ -725,6 +729,9 @@ export class ExecutionModule implements RuntimeModule {
   private readonly exitRecoveriesInFlight = new Set<string>();
   private readonly cleanupAdmissionClaims = new Set<string>();
   private readonly activeBounceSupplementalClientIds = new Set<string>();
+  private readonly preciseCleanupClientIds = new Set<string>();
+  private cleanupLifecycleRevision = 0;
+  private cleanupStopping = false;
 
   /**
    * In-flight commands on the queue-less path (`maxConcurrency` unset), settled-successfully so
@@ -758,6 +765,8 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   private async executeStart(token: LifecycleToken): Promise<void> {
+    this.cleanupLifecycleRevision++;
+    this.cleanupStopping = false;
     // A previous stop() left the queue refusing everything. Re-open BEFORE subscribing, or
     // the restarted module silently drops every command at `enqueue` — including the S1
     // retry the deferred release exists to admit — for the life of the process.
@@ -891,6 +900,8 @@ export class ExecutionModule implements RuntimeModule {
 
   /** Serialized against every other transition, so the LAST caller decides the final state. */
   stop(): Promise<void> {
+    this.cleanupStopping = true;
+    this.cleanupLifecycleRevision++;
     return this.lifecycle.run(() => this.executeStop(), {
       ms: LIFECYCLE_STOP_WAIT_MS,
       onExpired: () =>
@@ -2965,6 +2976,7 @@ export class ExecutionModule implements RuntimeModule {
     try {
       await this.handlePlaceWithCleanupClaim(cmd, recoveryOnly, cleanupKind);
     } finally {
+      this.preciseCleanupClientIds.delete(String(cmd.clientOrderId));
       this.activeBounceSupplementalClientIds.delete(String(cmd.clientOrderId));
       this.cleanupAdmissionClaims.delete(tokenKey);
     }
@@ -3392,7 +3404,21 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
-    const decision = this.getReservationDecision(cmd, notional, cleanupKind != null);
+    let decision = this.getReservationDecision(cmd, notional, cleanupKind != null);
+    if (cleanupKind === "bounce" && this.isWalletOnlyCleanupClamp(cmd, decision)) {
+      const observed = await this.readPreciseCleanupAvailability(cmd);
+      const precise = this.confirmPreciseCleanupObservation(cmd, observed);
+      if (!precise) {
+        await this.rejectOrder(
+          cmd,
+          "exit-coverage-cleanup-state-changed",
+          ExchangeErrorCode.LivePolicyBlocked,
+        );
+        return;
+      }
+      decision = this.getReservationDecision(cmd, notional, true, precise);
+      if (decision.kind === "accept") this.preciseCleanupClientIds.add(String(cmd.clientOrderId));
+    }
     if (decision.kind === "reject") {
       this.recordInternalReservationReject(decision.reason);
       if (!decision.capacitySampleRecorded) {
@@ -5792,6 +5818,163 @@ export class ExecutionModule implements RuntimeModule {
     return buildReservationSnapshot(openOrders, this.deps.fillRepo, this.capacityReservations(cmd));
   }
 
+  private isWalletOnlyCleanupClamp(
+    cmd: PlaceOrderCommand,
+    decision: ReturnType<ExecutionModule["getReservationDecision"]>,
+  ): boolean {
+    if (decision.kind !== "clamp" || decision.newSize >= cmd.size) return false;
+    const { positionSize, upperBound, reservedSell } = decision.details;
+    return (
+      typeof positionSize === "number" &&
+      typeof upperBound === "number" &&
+      typeof reservedSell === "number" &&
+      upperBound < positionSize &&
+      positionSize - reservedSell + ExecutionModule.SIZE_EPSILON_SHARES >= cmd.size
+    );
+  }
+
+  /** An exact CLOB read can disprove a rounded Data API cap, never an actual shortfall. */
+  private async readPreciseCleanupAvailability(
+    cmd: PlaceOrderCommand,
+    ownPrepared?: Order,
+  ): Promise<PreciseCleanupAvailability | null> {
+    try {
+      const before = this.preciseCleanupState(cmd, ownPrepared);
+      if (!before) return null;
+      const requestedAt = Date.now();
+      const walletBalance = await this.deps.gateway.getPositionBalance(cmd.tokenId);
+      const after = this.preciseCleanupState(cmd, ownPrepared);
+      if (
+        !Number.isFinite(walletBalance) ||
+        walletBalance < 0 ||
+        !after ||
+        before.fingerprint !== after.fingerprint ||
+        (this.getLatestFillMs(cmd.tokenId) ?? 0) > requestedAt ||
+        Date.now() < requestedAt
+      )
+        return null;
+      return { walletBalance, reservations: after.reservations, fingerprint: after.fingerprint };
+    } catch {
+      return null;
+    }
+  }
+
+  private preciseCleanupState(cmd: PlaceOrderCommand, ownPrepared?: Order) {
+    const position = this.preciseCleanupPosition(cmd);
+    const reservations = this.preciseCleanupReservations(cmd, ownPrepared);
+    if (!position || !reservations) return null;
+    const store = this.deps.exchangeStateStore;
+    const fingerprint = JSON.stringify({
+      position: [
+        position.positionId,
+        position.tokenId,
+        position.conditionId,
+        position.status,
+        position.exitOwner,
+        position.size,
+        position.avgEntryPrice,
+        position.costBasisUsdc,
+      ],
+      orders: this.deps.orderRepo.findByTokenId(cmd.tokenId),
+      fills: this.deps.fillRepo.findByTokenId(cmd.tokenId),
+      pending: [...this.pendingReservations.entries()].filter(
+        ([, value]) => value.tokenId === cmd.tokenId,
+      ),
+      walletSize: store?.getWalletPositionSize(cmd.tokenId),
+      walletCapturedAt: store?.getWalletPositionCapturedAt(cmd.tokenId),
+      reservedSell: this.effectiveReservedSell(
+        cmd.tokenId,
+        getReservedSellSize(reservations, cmd.tokenId),
+      ),
+      policy: this.deps.executionPolicy?.(),
+      lifecycle: this.cleanupLifecycleRevision,
+    });
+    return { fingerprint, reservations };
+  }
+
+  private cleanupLifecycleAllows(cmd: PlaceOrderCommand): boolean {
+    return (
+      this.started &&
+      !this.cleanupStopping &&
+      !this.startupFenceActive &&
+      !this.deps.runtimeControl?.isPaused() &&
+      !this.tokenTransitions.has(String(cmd.tokenId))
+    );
+  }
+
+  private preciseCleanupPosition(cmd: PlaceOrderCommand) {
+    const position = this.deps.positionRepo?.findByTokenId(cmd.tokenId);
+    if (
+      !this.cleanupLifecycleAllows(cmd) ||
+      !position ||
+      position.status !== "open" ||
+      position.exitOwner !== "bounce" ||
+      position.tokenId !== cmd.tokenId ||
+      position.positionId !== cmd.positionId ||
+      position.conditionId !== cmd.conditionId ||
+      this.exitCoverageCleanupKind(cmd) !== "bounce" ||
+      !hasValidBounceCoverageTransport(cmd)
+    )
+      return null;
+    if (this.evaluateSellExitLossFloor(cmd, cmd.price).block) return null;
+    return position;
+  }
+
+  private preciseCleanupReservations(cmd: PlaceOrderCommand, ownPrepared?: Order) {
+    const ownReservation = this.pendingReservations.get(String(cmd.commandId));
+    if (ownReservation && !this.matchesPreciseCleanupIdentity(ownReservation, cmd)) return null;
+    if (ownPrepared) {
+      const persisted = this.deps.orderRepo.findById(ownPrepared.orderId);
+      if (
+        !persisted ||
+        persisted.status !== "pending" ||
+        persisted.exchangeOrderId !== ownPrepared.exchangeOrderId ||
+        !this.matchesPreciseCleanupIdentity(persisted, cmd) ||
+        persisted.price !== cmd.price ||
+        this.deps.fillRepo.findByOrderId(persisted.orderId).length > 0
+      )
+        return null;
+    }
+    const open = this.deps.orderRepo
+      .findOpen()
+      .filter((order) => order.orderId !== ownPrepared?.orderId);
+    const pending = this.capacityReservations(cmd).filter(
+      (reservation) => reservation !== ownReservation,
+    );
+    return buildReservationSnapshot(open, this.deps.fillRepo, pending);
+  }
+
+  private matchesPreciseCleanupIdentity(
+    candidate: PendingReservation,
+    cmd: PlaceOrderCommand,
+  ): boolean {
+    return (
+      candidate.clientOrderId === cmd.clientOrderId &&
+      candidate.tokenId === cmd.tokenId &&
+      candidate.conditionId === cmd.conditionId &&
+      candidate.positionId === cmd.positionId &&
+      candidate.side === "sell" &&
+      candidate.size === cmd.size
+    );
+  }
+
+  /** Check again in the caller's synchronous submit frame, after the async result was delivered. */
+  private confirmPreciseCleanupObservation(
+    cmd: PlaceOrderCommand,
+    observed: PreciseCleanupAvailability | null,
+    pending?: Order,
+  ): PreciseCleanupAvailability | null {
+    if (!observed) return null;
+    try {
+      const current = this.preciseCleanupState(cmd, pending);
+      return current?.fingerprint === observed.fingerprint
+        ? { ...observed, reservations: current.reservations }
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
   private capacityReservations(cmd?: PlaceOrderCommand): PendingReservation[] {
     const pending = [...this.pendingReservations.values()];
     const policy = this.deps.executionPolicy?.();
@@ -5891,6 +6074,7 @@ export class ExecutionModule implements RuntimeModule {
           position: positions[0] ?? null,
           orders,
           policy: this.currentBounceExitPolicy(),
+          minOrderSize: this.resolveCommandExplicitMinOrderSize(cmd),
           filledSize: (order) => filled.get(String(order.orderId)) ?? null,
         })
       );
@@ -5996,7 +6180,7 @@ export class ExecutionModule implements RuntimeModule {
       return true;
     }
     if (this.activeBounceSupplementalClientIds.has(String(cmd.clientOrderId))) {
-      return !this.matchesCurrentBounceSupplementalState(cmd);
+      return !this.cleanupLifecycleAllows(cmd) || !this.matchesCurrentBounceSupplementalState(cmd);
     }
     return (
       hasS1CoverageCleanupMarker(cmd.metadata) &&
@@ -6102,6 +6286,7 @@ export class ExecutionModule implements RuntimeModule {
     cmd: PlaceOrderCommand,
     notional: number,
     isExitCoverageCleanup = false,
+    precise?: PreciseCleanupAvailability,
   ):
     | { kind: "accept" }
     | {
@@ -6117,7 +6302,7 @@ export class ExecutionModule implements RuntimeModule {
         newSize: number;
         details: Record<string, unknown>;
       } {
-    const reservations = this.getReservationSnapshot(cmd);
+    const reservations = precise?.reservations ?? this.getReservationSnapshot(cmd);
     let orderCapacity = evaluateTotalOrdersCapacity({
       policy: this.currentOrderCapacityPolicy(),
       openOrdersTotal: reservations.openOrdersTotal,
@@ -6195,7 +6380,7 @@ export class ExecutionModule implements RuntimeModule {
       if (!buyCapacity.allowed) {
         return {
           kind: "reject",
-          reason: WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
+          reason: buyCapacity.reason!,
           message: "order skipped — wallet buy capacity exhausted",
           details: {
             wallet: walletBudget?.walletBalanceUsdc ?? null,
@@ -6327,7 +6512,9 @@ export class ExecutionModule implements RuntimeModule {
 
     const localReservedSell = getReservedSellSize(reservations, cmd.tokenId);
     const reservedSell = this.effectiveReservedSell(cmd.tokenId, localReservedSell);
-    const upperBound = this.computeSellUpperBound(cmd.tokenId, position.size);
+    const upperBound = precise
+      ? Math.min(position.size, precise.walletBalance)
+      : this.computeSellUpperBound(cmd.tokenId, position.size);
     const availableSize = upperBound - reservedSell;
     if (availableSize + ExecutionModule.SIZE_EPSILON_SHARES >= cmd.size) {
       if (cmd.side === "sell") {
@@ -7128,6 +7315,22 @@ export class ExecutionModule implements RuntimeModule {
           errorMessage: "exit-coverage-cleanup-state-changed",
           errorDetails: null,
         };
+      }
+      if (this.preciseCleanupClientIds.has(String(cmd.clientOrderId))) {
+        const observed = await this.readPreciseCleanupAvailability(cmd, pending);
+        const precise = this.confirmPreciseCleanupObservation(cmd, observed, pending);
+        if (
+          !precise ||
+          this.getReservationDecision(cmd, params.price * params.size, true, precise).kind !==
+            "accept"
+        ) {
+          return {
+            kind: "rejected" as const,
+            errorCode: ExchangeErrorCode.LivePolicyBlocked,
+            errorMessage: "exit-coverage-cleanup-state-changed",
+            errorDetails: null,
+          };
+        }
       }
       if (cleanupPending) persistPending();
       const outcome = await gateway.submitPreparedOrder!(prepared);
@@ -8272,7 +8475,8 @@ export class ExecutionModule implements RuntimeModule {
     if (retryPreparedLive?.submit.kind === "unknown") return true;
     if (
       rejectedPreparedOrder &&
-      hasS1CoverageCleanupMarker(retryCmd.metadata) &&
+      (hasS1CoverageCleanupMarker(retryCmd.metadata) ||
+        this.activeBounceSupplementalClientIds.has(String(retryCmd.clientOrderId))) &&
       retryPreparedLive &&
       !retryPreparedLive.pendingPersisted
     ) {

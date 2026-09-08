@@ -377,6 +377,7 @@ describe("RiskEventWriter", () => {
     });
 
     it.each([
+      "buy_order_count_limit",
       "reserved-token-limit",
       "pending-wallet-sync",
       "sell-replace-pending",

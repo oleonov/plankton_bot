@@ -17,6 +17,7 @@ const STATIC_CODES: Record<string, string> = {
   "live-relayer-required-family-rejected": "live_relayer_required_family",
   "reserved-usdc-limit": "reserved_usdc_limit",
   wallet_buy_capacity_exhausted: "wallet_buy_capacity_exhausted",
+  buy_order_count_limit: "buy_order_count_limit",
   wallet_sell_capacity_exhausted: "wallet_sell_capacity_exhausted",
   total_orders_capacity_exhausted: "total_orders_capacity_exhausted",
   per_token_buy_limit: "per_token_buy_limit",

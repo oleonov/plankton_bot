@@ -79,6 +79,7 @@ import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
 import { bounceRungsConflict } from "../../bounce-rung-identity.js";
+import { resolveBounceRungRollover } from "../../bounce-rung-sizing.js";
 import {
   classifyNotionalBucket,
   classifyRoundLevel,
@@ -1446,13 +1447,13 @@ export class SignalToOrderBridge {
       if (!isExecutableOrderSize(orderSize, market.minOrderSize)) {
         const rollover =
           signal.bounceRung && bounceOriginalPositionSize != null && bounceRolloverCeiling != null
-            ? resolveBounceRungRollover(
-                signal.bounceRung,
-                bounceOriginalPositionSize,
-                bounceRolloverCeiling,
-                policy.bounceExit.ladderFractions,
-                market.minOrderSize,
-              )
+            ? resolveBounceRungRollover({
+                bounceRung: signal.bounceRung,
+                originalPositionSize: bounceOriginalPositionSize,
+                availableSize: bounceRolloverCeiling,
+                ladderFractions: policy.bounceExit.ladderFractions,
+                minOrderSize: market.minOrderSize,
+              })
             : null;
         // The $2 bounce micro cap (applied above, pre-rollover) only bounded
         // THIS rung's own size — a merge can grow the size back past it to
@@ -4379,69 +4380,6 @@ function resolveOrderSize(
   if (signal.side !== "buy") return signal.suggestedSize;
   if (!Number.isFinite(executionPrice) || executionPrice <= 0) return signal.suggestedSize;
   return signal.suggestedSizeUsdc / executionPrice;
-}
-
-/**
- * Ladder min-order rollover (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md):
- * a single rung's own fraction of the original position can fall below the
- * exchange's minimum tradable size (this is expected — `microMaxOrderUsdc`
- * caps the whole position at a few dollars, split across up to 3 rungs). Full-
- * position clamping would defeat the point of a ladder, and skipping the rung
- * entirely would silently strand size. Instead, merge this rung forward with
- * however many of the NEXT rungs' fractions are needed to clear the minimum,
- * place one order at the current (lowest reachable) rung's price, and mark
- * every absorbed index as placed via `rungIndicesCovered` so the next
- * planning cycle resumes at the rung after the last one covered. When every
- * remaining fraction is sub-minimum but the exact residual clears a KNOWN
- * CLOB minimum, that residual becomes one cleanup order covering every
- * remaining index. Otherwise callers keep the generic below-minimum skip.
- *
- * Fractions are computed against `originalPositionSize` (fixed at first
- * entry, Codex Phase-2 fix — see decision-planner.ts) so a merge of several
- * rungs' fractions still reflects their true share of the position; the
- * merged size is then capped to `oversellCeiling` so the roll-forward never
- * oversells beyond what is actually still available to sell. The caller
- * passes the fill-aware `uncommittedRemainder` here when sellableFlow is on
- * (Codex H4 fix), and the leg-level `remainingPositionSize` otherwise —
- * this function itself is agnostic to which basis it received.
- */
-function resolveBounceRungRollover(
-  bounceRung: BounceRungMetadata,
-  originalPositionSize: number,
-  oversellCeiling: number,
-  ladderFractions: readonly number[],
-  minOrderSize: number | null | undefined,
-): { size: number; metadata: BounceRungMetadata } | null {
-  if (!(originalPositionSize > 0) || !(oversellCeiling > 0)) return null;
-  let cumulativeFraction = 0;
-  const rungIndicesCovered: number[] = [];
-  for (let idx = bounceRung.rungIndex; idx < ladderFractions.length; idx++) {
-    cumulativeFraction += ladderFractions[idx] ?? 0;
-    rungIndicesCovered.push(idx);
-    const mergedSize = Math.min(cumulativeFraction * originalPositionSize, oversellCeiling);
-    if (isExecutableOrderSize(mergedSize, minOrderSize)) {
-      return {
-        size: mergedSize,
-        metadata: { ...bounceRung, fraction: cumulativeFraction, rungIndicesCovered },
-      };
-    }
-  }
-  if (
-    isKnownMinOrderSize(minOrderSize) &&
-    Number.isFinite(oversellCeiling) &&
-    isExecutableOrderSize(oversellCeiling, minOrderSize)
-  ) {
-    return {
-      size: oversellCeiling,
-      metadata: {
-        ...bounceRung,
-        fraction: cumulativeFraction,
-        rungIndicesCovered,
-        isCleanupRung: true,
-      },
-    };
-  }
-  return null;
 }
 
 function resolveShadowExecutionPrice(executionTerms: ExecutionTermsResolution): number | null {

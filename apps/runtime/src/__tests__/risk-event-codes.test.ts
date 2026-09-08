@@ -3,6 +3,7 @@ import { normalizeReasonCode } from "../risk-event-codes.js";
 
 describe("normalizeReasonCode", () => {
   it("maps static reason strings verbatim", () => {
+    expect(normalizeReasonCode("buy_order_count_limit")).toBe("buy_order_count_limit");
     expect(normalizeReasonCode("live-lite-open-value-cap-exceeded")).toBe(
       "live_lite_open_value_cap",
     );

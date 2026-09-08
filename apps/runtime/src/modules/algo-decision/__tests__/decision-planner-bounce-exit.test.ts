@@ -447,6 +447,62 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
     expect(result.signal.suggestedSize).toBeCloseTo(30, 10);
   });
 
+  it("normalizes the Mario supplemental rung before Risk without changing its target", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        legState: leg({
+          firstTradePrice: 0.044,
+          cumulativeBuySize: 132.975,
+          cumulativeBuyNotional: 132.975 * 0.044,
+        }),
+        position: position({ size: 132.975 }),
+        market: market({ tickSize: 0.001, minOrderSize: 5 }),
+        originalLadderPositionSize: 10,
+        bounceLadderOpenCommitment: 122.975,
+        hasWorkingBounceCleanup: true,
+        executionPolicy: sellableFlowOnPolicy(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedPrice).toBeCloseTo(0.053, 10);
+    expect(result.signal.suggestedSize).toBeCloseTo(10, 10);
+    expect(result.signal.bounceRung).toMatchObject({
+      rungIndex: 0,
+      fraction: 0.7,
+      rungIndicesCovered: [0, 1],
+      originalPositionSize: 10,
+      remainingPositionSize: 132.975,
+      uncommittedRemainder: 10,
+    });
+  });
+
+  it("keeps the Derek supplemental at the first missing rung and exact free residual", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        legState: leg({ cumulativeBuySize: 39.13, cumulativeBuyNotional: 39.13 * 0.044 }),
+        position: position({ size: 39.13 }),
+        market: market({ tickSize: 0.001, minOrderSize: 5 }),
+        placedBounceRungIndices: [1, 2],
+        originalLadderPositionSize: 25.18,
+        bounceLadderOpenCommitment: 32.626,
+        hasWorkingBounceCleanup: true,
+        executionPolicy: sellableFlowOnPolicy(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedSize).toBeCloseTo(6.504, 10);
+    expect(result.signal.bounceRung).toMatchObject({
+      rungIndex: 0,
+      fraction: 0.3,
+      rungIndicesCovered: [0],
+      originalPositionSize: 25.18,
+      remainingPositionSize: 39.13,
+    });
+    expect(result.signal.bounceRung?.uncommittedRemainder).toBeCloseTo(6.504, 10);
+  });
+
   it("SUPPRESSES (no re-emission) once every rung is placed AND fully committed — ladder complete, no backstop yet", () => {
     const result = evaluateDecisionPlan(
       input({ placedBounceRungIndices: [0, 1, 2], bounceLadderSoldShares: 100 }),

@@ -59,6 +59,7 @@ import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 import { ExchangeStateStore } from "../modules/execution/exchange-state-store.js";
 import { LiveLiteGuard } from "../live-lite-guard.js";
+import { resolveBounceRungRollover } from "../bounce-rung-sizing.js";
 
 // ─── Shared constants ─────────────────────────────────────────────────────
 
@@ -439,144 +440,192 @@ describe("SignalToOrderBridge — BOUNCE_EXIT_TARGET maker command", () => {
     );
   });
 
-  it("places a proven BID+1 cohort exit one tick below the external ask above its target floor", async () => {
-    const cohort = "2026-08-23T06:01:10.000Z";
-    const position = makeGatePosition({
-      positionId: createPositionId("pos-bounce-ask-initial"),
-      size: 10,
-      avgEntryPrice: 0.15,
-      costBasisUsdc: 1.5,
-    });
-    const inventoryLotRepo = makeInventoryLotRepoForPosition(position);
-    const lot = inventoryLotRepo.findOpen(position.positionId)[0]!;
-    const rootOrderId = createOrderId("buy-capture-root");
-    const root = makeOrder({
-      orderId: rootOrderId,
-      tokenId: position.tokenId,
-      side: "buy",
-      postOnly: true,
-      status: "cancelled",
-      decisionRuleId: "R23_DIP_TRIGGER",
-      metadata: {
-        quoteMotionV1: {
-          version: 1,
-          kind: "r23_capture",
-          cohortId: cohort,
-          originalSuggestedPrice: 0.15,
-          originalTargetPrice: null,
-          entryPriceCeiling: 0.45,
-          policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
-          policyControlRevision: 55,
-          initialBook: {
-            depthStatus: "full",
-            bestBid: 0.14,
-            bestAsk: 0.16,
-            tickSize: 0.01,
-            snapshotTs: NOW,
-            source: "clob",
+  it.each(["ordinary", "Mario"] as const)(
+    "places a proven %s BID+1 exit below ASK without losing cap or coverage semantics",
+    async (variant) => {
+      const mario = variant === "Mario";
+      const cohort = "2026-08-23T06:01:10.000Z";
+      const position = makeGatePosition({
+        positionId: createPositionId("pos-bounce-ask-initial"),
+        size: mario ? 132.975 : 10,
+        avgEntryPrice: mario ? 0.003 : 0.15,
+        costBasisUsdc: mario ? 132.975 * 0.003 : 1.5,
+      });
+      const inventoryLotRepo = makeInventoryLotRepoForPosition(position);
+      const lot = inventoryLotRepo.findOpen(position.positionId)[0]!;
+      const rootOrderId = createOrderId("buy-capture-root");
+      const root = makeOrder({
+        orderId: rootOrderId,
+        tokenId: position.tokenId,
+        side: "buy",
+        postOnly: true,
+        status: "cancelled",
+        decisionRuleId: "R23_DIP_TRIGGER",
+        metadata: {
+          quoteMotionV1: {
+            version: 1,
+            kind: "r23_capture",
+            cohortId: cohort,
+            originalSuggestedPrice: mario ? 0.003 : 0.15,
+            originalTargetPrice: null,
+            entryPriceCeiling: 0.45,
+            policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+            policyControlRevision: 55,
+            initialBook: {
+              depthStatus: "full",
+              bestBid: 0.14,
+              bestAsk: 0.16,
+              tickSize: 0.01,
+              snapshotTs: NOW,
+              source: "clob",
+            },
+          },
+          makerCaptureLineageV1: {
+            version: 1,
+            rootOrderId,
+            predecessorOrderId: null,
+            replacementIndex: 0,
+            rootNotionalUsdc: position.costBasisUsdc,
           },
         },
-        makerCaptureLineageV1: {
-          version: 1,
+      });
+      const cleanup = mario
+        ? makeOrder({
+            orderId: createOrderId("mario-existing-cleanup"),
+            clientOrderId: "mario_existing_cleanup" as ClientOrderId,
+            positionId: position.positionId,
+            price: 0.046,
+            size: 122.975,
+            signalReason: "repricing-exit",
+            postOnly: true,
+            metadata: {
+              bounceRung: {
+                ladderId: "mario-supplemental",
+                rungIndex: 2,
+                anchorPrice: 0.003,
+                fraction: 12.2975,
+                originalPositionSize: 10,
+                remainingPositionSize: 132.975,
+                uncommittedRemainder: 122.975,
+                isCleanupRung: true,
+              },
+            },
+          })
+        : null;
+      const orderRepo = {
+        findByTokenId: vi.fn(() => (cleanup ? [root, cleanup] : [root])),
+        findById: vi.fn(() => root),
+        getMakerCaptureChainUsage: vi.fn(() => ({
+          trusted: true,
           rootOrderId,
-          predecessorOrderId: null,
+          rootNotionalUsdc: position.costBasisUsdc,
+          chainFilledUsdc: position.costBasisUsdc,
+          predecessorRemainingShares: 0,
           replacementIndex: 0,
-          rootNotionalUsdc: 1.5,
+          orderIds: [rootOrderId],
+        })),
+      };
+      const fillRepo = {
+        findByOrderId: vi.fn(() => []),
+        findByOrderIds: vi.fn(() => []),
+        findByTokenId: vi.fn(() => [
+          {
+            fillId: lot.fillId,
+            orderId: rootOrderId,
+            tokenId: position.tokenId,
+            conditionId: position.conditionId,
+            side: "buy" as const,
+            price: mario ? 0.003 : 0.15,
+            size: position.size,
+            sizeUsdc: position.costBasisUsdc,
+            liquidityRole: "maker" as const,
+            fee: 0,
+            feeRateBps: 0,
+            filledAt: new Date(NOW).toISOString(),
+          },
+        ]),
+      };
+      const candidateBookCache = {
+        getFreshEntry: vi.fn(() => ({
+          tokenId: String(TOKEN_ID),
+          snapshotTs: NOW,
+          cachedAtMs: NOW,
+          sourcePolledAtMs: NOW,
+          bookSource: "clob" as const,
+          sourceKind: "rest" as const,
+          book: {
+            tokenId: TOKEN_ID,
+            bids: [{ price: mario ? 0.001 : 0.15, size: 100 }],
+            asks: [{ price: mario ? 0.016 : 0.3, size: 100 }],
+            minOrderSize: 5,
+            timestamp: NOW,
+          },
+        })),
+      };
+      const signal = makeSignal({
+        side: "sell",
+        positionId: position.positionId,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        suggestedPrice: mario ? 0.005 : 0.19,
+        suggestedSize: 10,
+        suggestedSizeUsdc: mario ? 0.05 : 1.9,
+        bounceRung: {
+          ladderId: mario ? "mario-supplemental" : "bounce-ask-initial",
+          rungIndex: 0,
+          ...(mario ? { rungIndicesCovered: [0, 1] } : {}),
+          anchorPrice: mario ? 0.003 : 0.15,
+          fraction: mario ? 0.7 : 1,
+          originalPositionSize: 10,
+          remainingPositionSize: mario ? 132.975 : 10,
+          ...(mario ? { uncommittedRemainder: 10 } : {}),
         },
-      },
-    });
-    const orderRepo = {
-      findByTokenId: vi.fn(() => [root]),
-      findById: vi.fn(() => root),
-      getMakerCaptureChainUsage: vi.fn(() => ({
-        trusted: true,
-        rootOrderId,
-        rootNotionalUsdc: 1.5,
-        chainFilledUsdc: 1.5,
-        predecessorRemainingShares: 0,
-        replacementIndex: 0,
-        orderIds: [rootOrderId],
-      })),
-    };
-    const fillRepo = {
-      findByOrderId: vi.fn(() => []),
-      findByOrderIds: vi.fn(() => []),
-      findByTokenId: vi.fn(() => [
+      });
+      const { placed, skipped } = await runBridge(
+        signal,
         {
-          fillId: lot.fillId,
-          orderId: rootOrderId,
-          tokenId: position.tokenId,
-          conditionId: position.conditionId,
-          side: "buy" as const,
-          price: 0.15,
-          size: position.size,
-          sizeUsdc: position.costBasisUsdc,
-          liquidityRole: "maker" as const,
-          fee: 0,
-          feeRateBps: 0,
-          filledAt: new Date(NOW).toISOString(),
+          bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, mode: "micro_live" },
+          bounceAskCapture: {
+            enabled: true,
+            sourceCohortActivatedAtUtc: cohort,
+            maxRepricesPerRoot: 5,
+          },
         },
-      ]),
-    };
-    const candidateBookCache = {
-      getFreshEntry: vi.fn(() => ({
-        tokenId: String(TOKEN_ID),
-        snapshotTs: NOW,
-        cachedAtMs: NOW,
-        sourcePolledAtMs: NOW,
-        bookSource: "clob" as const,
-        sourceKind: "rest" as const,
-        book: {
-          tokenId: TOKEN_ID,
-          bids: [{ price: 0.15, size: 100 }],
-          asks: [{ price: 0.3, size: 100 }],
-          minOrderSize: 5,
-          timestamp: NOW,
+        {
+          marketOverrides: {
+            bestBid: mario ? 0.001 : 0.15,
+            bestAsk: mario ? 0.016 : 0.3,
+            tickSize: mario ? 0.001 : 0.01,
+          },
+          orderRepo,
+          fillRepo,
+          positionRepo: { findById: vi.fn(() => position) },
+          inventoryLotRepo,
+          candidateBookCache,
         },
-      })),
-    };
-    const signal = makeSignal({
-      side: "sell",
-      positionId: position.positionId,
-      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
-      suggestedPrice: 0.19,
-      suggestedSize: 10,
-      suggestedSizeUsdc: 1.9,
-      bounceRung: {
-        ladderId: "bounce-ask-initial",
-        rungIndex: 0,
-        anchorPrice: 0.15,
-        fraction: 1,
-        originalPositionSize: 10,
-        remainingPositionSize: 10,
-      },
-    });
-    const { placed, skipped } = await runBridge(
-      signal,
-      {
-        bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, mode: "micro_live" },
-        bounceAskCapture: {
-          enabled: true,
-          sourceCohortActivatedAtUtc: cohort,
-          maxRepricesPerRoot: 5,
-        },
-      },
-      {
-        marketOverrides: { bestBid: 0.15, bestAsk: 0.3, tickSize: 0.01 },
-        orderRepo,
-        fillRepo,
-        positionRepo: { findById: vi.fn(() => position) },
-        inventoryLotRepo,
-        candidateBookCache,
-      },
-    );
+      );
 
-    expect(skipped).toHaveLength(0);
-    expect(placed).toHaveLength(1);
-    expect(placed[0]).toMatchObject({ price: 0.29, postOnly: true });
-    expect(placed[0]!.price * placed[0]!.size).toBeCloseTo(2, 6);
-    expect(placed[0]!.metadata?.quoteMotionV1).toMatchObject({ originalTargetPrice: 0.19 });
-  });
+      expect(skipped).toHaveLength(0);
+      expect(placed).toHaveLength(1);
+      expect(placed[0]).toMatchObject({ price: mario ? 0.015 : 0.29, postOnly: true });
+      if (mario) {
+        expect(placed[0]).toMatchObject({ size: 10 });
+        expect(placed[0]!.metadata?.quoteMotionV1).toMatchObject({
+          cohortId: "mario-supplemental",
+          originalSuggestedPrice: 0.005,
+          originalTargetPrice: 0.005,
+        });
+        expect(placed[0]!.metadata?.bounceRung).toMatchObject({
+          rungIndicesCovered: [0, 1],
+          uncommittedRemainder: 10,
+        });
+      } else {
+        expect(placed[0]!.price * placed[0]!.size).toBeCloseTo(2, 6);
+        expect(placed[0]!.metadata?.quoteMotionV1).toMatchObject({
+          originalTargetPrice: 0.19,
+        });
+      }
+    },
+  );
 });
 
 // ─── 2b: bounce ladder rung identity guard + rollover-vs-cap (Codex Phase-2 fixes) ──
@@ -874,6 +923,83 @@ describe("SignalToOrderBridge — bounce rung duplicate guard scoped to ladderId
 });
 
 describe("SignalToOrderBridge — bounce ladder rollover re-checked against the micro cap (FIX 4)", () => {
+  it("retains the finite-residual guard when rollover reaches the cleanup fallback", () => {
+    const input = {
+      bounceRung: {
+        ladderId: "exhausted-rollover",
+        rungIndex: 3,
+        anchorPrice: 0.003,
+        fraction: 0.3,
+        originalPositionSize: 10,
+        remainingPositionSize: 10,
+      },
+      originalPositionSize: 10,
+      availableSize: 10,
+      ladderFractions: [0.3, 0.4, 0.3],
+      minOrderSize: 5,
+    };
+    expect(resolveBounceRungRollover(input)?.size).toBe(10);
+    expect(resolveBounceRungRollover({ ...input, availableSize: Infinity })).toBeNull();
+  });
+
+  it("preserves the canonical Mario supplemental size and rung metadata", async () => {
+    const ladderId = "tok-gate-bounce:mario-supplemental";
+    const positionId = createPositionId("mario-supplemental-position");
+    const cleanup = makeOrder({
+      positionId,
+      price: 0.006,
+      size: 122.975,
+      signalReason: "repricing-exit",
+      metadata: {
+        bounceRung: {
+          ladderId,
+          rungIndex: 2,
+          anchorPrice: 0.003,
+          fraction: 12.2975,
+          originalPositionSize: 10,
+          remainingPositionSize: 132.975,
+          uncommittedRemainder: 122.975,
+          isCleanupRung: true,
+        },
+      },
+    });
+    const signal = makeSignal({
+      side: "sell",
+      reason: "repricing-exit",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      positionId,
+      suggestedPrice: 0.004,
+      suggestedSize: 10,
+      suggestedSizeUsdc: 0.04,
+      bounceRung: {
+        ladderId,
+        rungIndex: 0,
+        rungIndicesCovered: [0, 1],
+        anchorPrice: 0.003,
+        fraction: 0.7,
+        originalPositionSize: 10,
+        remainingPositionSize: 132.975,
+        uncommittedRemainder: 10,
+      },
+    });
+    const { placed, skipped } = await runBridge(
+      signal,
+      { bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, mode: "micro_live" } },
+      {
+        marketOverrides: { bestBid: 0.002, bestAsk: 0.01, tickSize: 0.001, minOrderSize: 5 },
+        orderRepo: { findByTokenId: vi.fn(() => [cleanup]) },
+      },
+    );
+
+    expect(skipped).toHaveLength(0);
+    expect(placed[0]).toMatchObject({ size: 10, price: 0.004 });
+    expect(placed[0]!.metadata?.bounceRung).toMatchObject({
+      fraction: 0.7,
+      rungIndicesCovered: [0, 1],
+      uncommittedRemainder: 10,
+    });
+  });
+
   it.each([
     ["below target", 0.1, true],
     ["target satisfied", 0.15, false],

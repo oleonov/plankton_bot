@@ -329,6 +329,54 @@ describe("profile settings history endpoints", () => {
     });
   });
 
+  it("raises only SELL hard/total capacity and rejects a stale retry without another write", async () => {
+    controlConn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    const url = "/api/v1/profiles/live-lite/execution-policy";
+    const seeded = await app.inject({
+      method: "PATCH",
+      url,
+      headers: authHeaders(),
+      payload: {
+        buyCapacity: { maxOpenBuyOrders: 25, minNewEntryWalletHeadroomUsdc: 7 },
+        sellCapacity: { mode: "source_aware_dynamic", hardMaxOpenSellOrders: 200 },
+        orderCapacity: { maxOpenOrdersTotal: 200 },
+      },
+    });
+    expect(seeded.statusCode).toBe(200);
+    const before = seeded.json().data;
+    const payload = {
+      expectedVersion: before.version,
+      reason: "operator-approved SELL capacity relief; BUY unchanged",
+      sellCapacity: { hardMaxOpenSellOrders: 300 },
+      orderCapacity: { maxOpenOrdersTotal: 325 },
+    };
+    const changed = await app.inject({ method: "PATCH", url, headers: authHeaders(), payload });
+    expect(changed.statusCode).toBe(200);
+    const after = changed.json().data;
+    expect(after.version).toBe(before.version + 1);
+    expect(after.issues).toEqual([]);
+    expect(after.policy).toEqual({
+      ...before.policy,
+      sellCapacity: { ...before.policy.sellCapacity, hardMaxOpenSellOrders: 300 },
+      orderCapacity: { ...before.policy.orderCapacity, maxOpenOrdersTotal: 325 },
+    });
+
+    const stale = await app.inject({ method: "PATCH", url, headers: authHeaders(), payload });
+    expect(stale.statusCode).toBe(409);
+    const persisted = await app.inject({ method: "GET", url, headers: authHeaders() });
+    expect(persisted.statusCode).toBe(200);
+    expect(persisted.json().data).toMatchObject({ policy: after.policy, version: after.version });
+    const rows = controlConn.db
+      .prepare(
+        "SELECT before_value, after_value, source FROM profile_settings_history WHERE reason = ?",
+      )
+      .all(payload.reason) as Array<{ before_value: string; after_value: string; source: string }>;
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]!.before_value)).toEqual(before.policy);
+    expect(JSON.parse(rows[0]!.after_value)).toEqual(after.policy);
+    expect(rows[0]!.source).toBe("api_patch_execution_policy");
+  });
+
   it("GET /profiles/:id/history returns rows DESC and supports ?field= filter", async () => {
     await app.inject({
       method: "PUT",

@@ -21,6 +21,7 @@ import type {
   PositionRepository,
 } from "@krabs/domain";
 import { AlgoRiskGateImpl, CONDITION_REDEEM_IN_FLIGHT_REASON } from "../algo-risk-gate.js";
+import { matchesExactBounceSupplementalCoverage } from "../../../exit-coverage-cleanup.js";
 import type { Logger } from "../../../logger.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
@@ -254,7 +255,7 @@ function makeBounceSupplementalFixture() {
           fraction: cleanup ? 3 : policy.bounceExit.ladderFractions[rungIndex],
           originalPositionSize: 30,
           remainingPositionSize: cleanup ? 120 : 30,
-          uncommittedRemainder: cleanup ? 90 : 120 - 90 - 9 - 12,
+          uncommittedRemainder: cleanup ? 90 : size,
           ...(cleanup ? { isCleanupRung: true } : {}),
         },
       },
@@ -277,6 +278,74 @@ function makeBounceSupplementalFixture() {
       originalPositionSize: 30,
       remainingPositionSize: 120,
       uncommittedRemainder: 9,
+    },
+  });
+  return { policy, position, orders, signal };
+}
+
+function makeObservedSupplementalFixture(kind: "mario" | "derek") {
+  const policy = makeExecutionPolicy();
+  const mario = kind === "mario";
+  const position = makeOpenPosition({ size: mario ? 132.975 : 39.13, exitOwner: "bounce" });
+  const ladderId = `observed-${kind}-ladder`;
+  const anchorPrice = mario ? 0.003 : 0.013;
+  const target = (index: number) =>
+    computeHarvestTarget(
+      anchorPrice,
+      (1 + bounceExitTierGain(policy.bounceExit, anchorPrice)) *
+        Math.pow(1 + policy.bounceExit.ladderStepPct, index) -
+        1,
+      0.001,
+    );
+  const originalPositionSize = mario ? 10 : 25.18;
+  const order = (index: number, size: number, cleanup = false) =>
+    makeOpenSellOrder({
+      orderId: `${kind}-${index}-${cleanup}` as any,
+      clientOrderId: `${kind}-cl-${index}-${cleanup}` as any,
+      conditionId: position.conditionId,
+      positionId: position.positionId,
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      signalReason: "repricing-exit",
+      postOnly: true,
+      exchangeOrderId: `${kind}-exchange-${index}-${cleanup}`,
+      price: mario && cleanup ? 0.046 : target(index),
+      size,
+      metadata: {
+        bounceRung: {
+          ladderId,
+          rungIndex: index,
+          anchorPrice,
+          fraction: cleanup
+            ? size / originalPositionSize
+            : policy.bounceExit.ladderFractions[index],
+          originalPositionSize,
+          remainingPositionSize: cleanup ? (mario ? 132.975 : 39.77) : position.size,
+          uncommittedRemainder: size,
+          ...(cleanup ? { isCleanupRung: true } : {}),
+        },
+      },
+    });
+  const orders = mario
+    ? [order(2, 122.975, true)]
+    : [order(2, 7.554), order(1, 10.072), order(2, 15, true)];
+  const size = mario ? 10 : 6.504;
+  const signal = makeSignal({
+    side: "sell",
+    reason: "repricing-exit",
+    decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+    positionId: position.positionId,
+    suggestedPrice: target(0),
+    suggestedSize: size,
+    suggestedSizeUsdc: size * target(0),
+    bounceRung: {
+      ladderId,
+      rungIndex: 0,
+      rungIndicesCovered: mario ? [0, 1] : [0],
+      anchorPrice,
+      fraction: mario ? 0.7 : 0.3,
+      originalPositionSize,
+      remainingPositionSize: position.size,
+      uncommittedRemainder: size,
     },
   });
   return { policy, position, orders, signal };
@@ -516,6 +585,7 @@ describe("AlgoRiskGateImpl", () => {
 
     expect(decision.approved).toBe(true);
     expect(decision.checksPassed).toContain("wallet_buy_budget_ok");
+    expect(orderRepo.sumOpenBuyNotional).toHaveBeenCalledWith("remaining");
   });
 
   it("rejects new-entry BUY when capacity headroom would be at the threshold", async () => {
@@ -580,7 +650,7 @@ describe("AlgoRiskGateImpl", () => {
     const decision = await gate.evaluate(makeSignal({ tokenId: createTokenId("other-token") }));
 
     expect(decision.approved).toBe(false);
-    expect(decision.rejectionReasons).toContain("wallet_buy_capacity_exhausted");
+    expect(decision.rejectionReasons).toContain("buy_order_count_limit");
   });
 
   it("reserves the final shared order slot for the exact active R23 capture", async () => {
@@ -879,7 +949,7 @@ describe("AlgoRiskGateImpl", () => {
         makeOrderRepo(orders),
         positions,
         makeLogger(),
-        undefined,
+        () => 5,
         undefined,
         undefined,
         () => fixture.policy,
@@ -949,6 +1019,152 @@ describe("AlgoRiskGateImpl", () => {
       (await evaluate(fixture.orders, fixture.signal, fixture.position, perOrderReader)).approved,
     ).toBe(true);
     expect(perOrderReader.findByOrderId).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["mario", "derek"] as const)(
+    "accepts the observed %s supplemental state only with a known minimum",
+    async (kind) => {
+      const fixture = makeObservedSupplementalFixture(kind);
+      const positions = makePositionRepo(fixture.position);
+      positions.findActiveByTokenId = vi.fn(() => [fixture.position]);
+      const buildGate = (minOrderSize: number | null) =>
+        new AlgoRiskGateImpl(
+          makeOrderRepo(fixture.orders),
+          positions,
+          makeLogger(),
+          () => minOrderSize,
+          undefined,
+          undefined,
+          () => fixture.policy,
+          undefined,
+          { findByTokenId: vi.fn(() => ({ tickSize: 0.001 })) } as any,
+          undefined,
+          undefined,
+          undefined,
+          makeFillReader(),
+        );
+      const filled = new Map(fixture.orders.map((order) => [String(order.orderId), 0]));
+      const matches = (orders: readonly Order[]) =>
+        matchesExactBounceSupplementalCoverage({
+          candidate: {
+            ...fixture.signal,
+            signalReason: fixture.signal.reason,
+            price: fixture.signal.suggestedPrice,
+            size: fixture.signal.suggestedSize,
+            tickSize: 0.001,
+            bounceRung: fixture.signal.bounceRung,
+          },
+          position: fixture.position,
+          orders,
+          policy: fixture.policy.bounceExit,
+          minOrderSize: 5,
+          filledSize: (order) => filled.get(String(order.orderId)) ?? null,
+        });
+      expect(matches(fixture.orders)).toBe(true);
+      await expect(buildGate(5).evaluate(fixture.signal)).resolves.toMatchObject({
+        approved: true,
+      });
+      if (kind === "mario") {
+        const cleanup = fixture.orders[0]!;
+        const canonicalTarget = computeHarvestTarget(
+          0.003,
+          (1 + bounceExitTierGain(fixture.policy.bounceExit, 0.003)) *
+            Math.pow(1 + fixture.policy.bounceExit.ladderStepPct, 2) -
+            1,
+          0.001,
+        );
+        expect(matches([{ ...cleanup, price: canonicalTarget - 0.001 }])).toBe(false);
+        expect(
+          matches([
+            {
+              ...cleanup,
+              metadata: {
+                bounceRung: {
+                  ...(cleanup.metadata!.bounceRung as Record<string, unknown>),
+                  ladderId: "wrong-lineage",
+                },
+              },
+            },
+          ]),
+        ).toBe(false);
+      } else {
+        await expect(buildGate(null).evaluate(fixture.signal)).resolves.toMatchObject({
+          approved: false,
+          rejectionReasons: expect.arrayContaining(["per_token_sell_limit"]),
+        });
+      }
+    },
+  );
+
+  it("rejects a supplemental rollover that overlaps an already placed ordinary rung", () => {
+    const policy = makeExecutionPolicy();
+    const position = makeOpenPosition({ size: 30, exitOwner: "bounce" });
+    const ladderId = "overlapping-rollover";
+    const anchorPrice = 0.1;
+    const target = (rungIndex: number) =>
+      computeHarvestTarget(
+        anchorPrice,
+        (1 + bounceExitTierGain(policy.bounceExit, anchorPrice)) *
+          Math.pow(1 + policy.bounceExit.ladderStepPct, rungIndex) -
+          1,
+        0.001,
+      );
+    const order = (rungIndex: number, size: number, cleanup = false) =>
+      makeOpenSellOrder({
+        orderId: `overlap-${rungIndex}-${cleanup}` as any,
+        clientOrderId: `overlap-${rungIndex}-${cleanup}` as any,
+        exchangeOrderId: `overlap-${rungIndex}-${cleanup}`,
+        conditionId: position.conditionId,
+        positionId: position.positionId,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        signalReason: "repricing-exit",
+        postOnly: true,
+        price: target(rungIndex),
+        size,
+        metadata: {
+          bounceRung: {
+            ladderId,
+            rungIndex,
+            anchorPrice,
+            fraction: cleanup ? 0.9 : policy.bounceExit.ladderFractions[rungIndex],
+            originalPositionSize: 15,
+            remainingPositionSize: 30,
+            uncommittedRemainder: size,
+            ...(cleanup ? { isCleanupRung: true } : {}),
+          },
+        },
+      });
+    const orders = [order(1, 6), order(2, 13.5, true)];
+    expect(
+      matchesExactBounceSupplementalCoverage({
+        candidate: {
+          tokenId: position.tokenId,
+          conditionId: position.conditionId,
+          side: "sell",
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          signalReason: "repricing-exit",
+          positionId: position.positionId,
+          price: target(0),
+          size: 10.5,
+          tickSize: 0.001,
+          bounceRung: {
+            ladderId,
+            rungIndex: 0,
+            rungIndicesCovered: [0, 1],
+            anchorPrice,
+            fraction: 0.7,
+            originalPositionSize: 15,
+            remainingPositionSize: 30,
+            uncommittedRemainder: 10.5,
+          },
+        },
+        position,
+        orders,
+        policy: policy.bounceExit,
+        minOrderSize: 5,
+        filledSize: () => 0,
+      }),
+    ).toBe(false);
   });
 
   it("also grants the BOUNCE_EXIT_BACKSTOP taker signal the same ladder-sized carve-out (N rungs + backstop coexist)", async () => {

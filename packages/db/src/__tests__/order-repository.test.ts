@@ -829,7 +829,56 @@ describe("SqliteOrderRepository", () => {
 
   it("sumOpenBuyNotional returns 0 when no orders exist", () => {
     expect(repo.sumOpenBuyNotional()).toBe(0);
+    expect(repo.sumOpenBuyNotional("remaining")).toBe(0);
   });
+
+  it("reserves remaining shares at the limit price without changing original exposure", () => {
+    repo.save(makeOrder({ price: 0.5, size: 20, sizeUsdc: 10, status: "partially-filled" }));
+    const insert = conn.db.prepare(
+      `INSERT INTO fills
+       (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc)
+       VALUES (?, 'ord-1', 'tok-1', 'cond-1', 'buy', 0.4, ?, ?)`,
+    );
+    insert.run("partial-a", 6, 2.4);
+    insert.run("partial-b", 10, 4);
+
+    expect(repo.sumOpenBuyNotional()).toBe(10);
+    expect(repo.sumOpenBuyNotional("original")).toBe(10);
+    expect(repo.sumOpenBuyNotional("remaining")).toBe(2);
+  });
+
+  it("never lets an overfilled BUY offset another order's reserved funds", () => {
+    repo.save(makeOrder({ price: 0.5, size: 10, sizeUsdc: 5, status: "partially-filled" }));
+    repo.save(
+      makeOrder({ orderId: createOrderId("ord-2"), clientOrderId: "cloid-2" as ClientOrderId }),
+    );
+    conn.db
+      .prepare(
+        `INSERT INTO fills
+       (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc)
+       VALUES ('overfill', 'ord-1', 'tok-1', 'cond-1', 'buy', 0.5, 11, 5.5)`,
+      )
+      .run();
+
+    expect(repo.sumOpenBuyNotional("remaining")).toBeCloseTo(55);
+  });
+
+  it.each(["pending", "open", "partially-filled", "filled", "cancelled", "rejected"] as const)(
+    "reserves unfilled BUY shares only for active status %s and never SELL",
+    (status) => {
+      repo.save(makeOrder({ status }));
+      repo.save(
+        makeOrder({
+          orderId: createOrderId("sell"),
+          clientOrderId: "sell" as ClientOrderId,
+          side: "sell",
+          status,
+        }),
+      );
+      const active = ["pending", "open", "partially-filled"].includes(status);
+      expect(repo.sumOpenBuyNotional("remaining")).toBeCloseTo(active ? 55 : 0);
+    },
+  );
 
   it("sumOpenBuyNotional sums only open buy orders", () => {
     repo.save(

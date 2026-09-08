@@ -371,10 +371,17 @@ export class SqliteOrderRepository implements OrderRepository {
     return apply();
   }
 
-  sumOpenBuyNotional(): number {
+  sumOpenBuyNotional(basis: "original" | "remaining" = "original"): number {
+    const notional =
+      basis === "remaining"
+        ? `MAX(0, o.size - COALESCE((
+            SELECT SUM(f.size) FROM fills f WHERE f.order_id = o.order_id
+          ), 0)) * o.price`
+        : "o.size_usdc";
     const row = this.db
       .prepare(
-        "SELECT COALESCE(SUM(size_usdc), 0) as total FROM orders WHERE status IN ('pending', 'open', 'partially-filled') AND side = 'buy'",
+        `SELECT COALESCE(SUM(${notional}), 0) AS total FROM orders o
+         WHERE o.status IN ('pending', 'open', 'partially-filled') AND o.side = 'buy'`,
       )
       .get() as { total: number };
     return row.total;

@@ -63,6 +63,7 @@ import {
 } from "../../executable-price.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { isExecutableOrderSize, isKnownMinOrderSize } from "../../min-order-size.js";
+import { resolveBounceSupplementalRungSizing } from "../../bounce-rung-sizing.js";
 import { isBounceLadderEligible } from "../exit-ownership/bounce-eligibility.js";
 import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import {
@@ -419,6 +420,8 @@ export type DecisionPlanningInput = {
    * so D8/D9 never race a live order on the same position. Optional; missing
    * defaults to `false`. */
   hasOpenBounceRung?: boolean;
+  /** Enables canonical first-missing-rung sizing beside one working cleanup. */
+  hasWorkingBounceCleanup?: boolean;
   /**
    * Active-sell check for the GATE-scoped bounce-exit backstop (docs/plans/
    * 2026-07-16-bounce-exit-ladder-redesign.md Phase 3, REV3 R2-H1) —
@@ -1198,6 +1201,25 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
         return none(metrics, suppressions, sideEffects);
       }
       if (bounceDecision.intent === "maker_rung") {
+        const bounceRung: BounceRungMetadata = {
+          ladderId,
+          rungIndex: bounceDecision.rungIndex,
+          anchorPrice: firstEntryPrice,
+          fraction: bounceDecision.fraction,
+          originalPositionSize,
+          remainingPositionSize,
+          ...(sellableFlowOn ? { uncommittedRemainder } : {}),
+        };
+        const supplementalSizing =
+          sellableFlowOn && input.hasWorkingBounceCleanup
+            ? resolveBounceSupplementalRungSizing({
+                bounceRung,
+                originalPositionSize,
+                availableSize: uncommittedRemainder,
+                ladderFractions: bounceExit.ladderFractions,
+                minOrderSize: market.minOrderSize,
+              })
+            : null;
         return buildSignalOrSuppression({
           input,
           market,
@@ -1215,25 +1237,10 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
             // can't see. Flag off keeps the ORIGINAL remainingPositionSize
             // cap (Codex C1 fix — byte-identical to pre-Phase-3 GATE sizing).
             explicitPrice: bounceDecision.px,
-            explicitSize: Math.min(
-              bounceDecision.fraction * originalPositionSize,
-              rungSizeCapBasis,
-            ),
-            bounceRung: {
-              ladderId,
-              rungIndex: bounceDecision.rungIndex,
-              anchorPrice: firstEntryPrice,
-              fraction: bounceDecision.fraction,
-              originalPositionSize,
-              remainingPositionSize,
-              // Carried only when sellableFlow is on (Codex H4 fix): lets
-              // signal-to-order.ts's min-order rollover cap its merge to the
-              // fill-aware residual instead of the leg-level
-              // remainingPositionSize — never expanding past what is
-              // genuinely still uncommitted. Omitted entirely when the flag
-              // is off, so the metadata shape stays byte-identical.
-              ...(sellableFlowOn ? { uncommittedRemainder } : {}),
-            },
+            explicitSize:
+              supplementalSizing?.size ??
+              Math.min(bounceDecision.fraction * originalPositionSize, rungSizeCapBasis),
+            bounceRung: supplementalSizing?.metadata ?? bounceRung,
           },
           buyCount,
           emissionFacts,

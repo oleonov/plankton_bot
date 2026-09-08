@@ -23,6 +23,7 @@ const WALLET_BALANCE_READ_CACHE_TTL_MS = 100;
 export const DEFAULT_WALLET_BUFFER_RATIO = 0.03;
 export const DEFAULT_MIN_WALLET_BUFFER_USDC = 0.25;
 export const WALLET_BUY_CAPACITY_EXHAUSTED_REASON = "wallet_buy_capacity_exhausted";
+export const BUY_ORDER_COUNT_LIMIT_REASON = "buy_order_count_limit";
 export const WALLET_SELL_CAPACITY_EXHAUSTED_REASON = "wallet_sell_capacity_exhausted";
 export const TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON = "total_orders_capacity_exhausted";
 export const PER_TOKEN_BUY_LIMIT_REASON = "per_token_buy_limit";
@@ -72,7 +73,7 @@ export type BuyCapacityKind = "new-entry" | "add-buy";
 
 export interface WalletBuyCapacityDecision {
   allowed: boolean;
-  reason: typeof WALLET_BUY_CAPACITY_EXHAUSTED_REASON | null;
+  reason: typeof WALLET_BUY_CAPACITY_EXHAUSTED_REASON | typeof BUY_ORDER_COUNT_LIMIT_REASON | null;
   kind: BuyCapacityKind;
   requiredHeadroomUsdc: number;
   availableAfterOrderUsdc: number | null;
@@ -294,7 +295,7 @@ export function evaluateWalletBuyCapacity(args: {
     return {
       ...base,
       allowed: false,
-      reason: WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
+      reason: BUY_ORDER_COUNT_LIMIT_REASON,
       availableAfterOrderUsdc: null,
     };
   }

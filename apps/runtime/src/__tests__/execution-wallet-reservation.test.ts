@@ -805,7 +805,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
 
     expect(gateway.placeOrder).not.toHaveBeenCalled();
     expect(rejected).toHaveLength(1);
-    expect(rejected[0]!.reason).toBe("wallet_buy_capacity_exhausted");
+    expect(rejected[0]!.reason).toBe("buy_order_count_limit");
 
     await mod.stop();
   });
@@ -1097,7 +1097,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
     expect(gateway.placeOrder).not.toHaveBeenCalled();
     expect(cancels).toHaveLength(0);
     expect(rejected).toHaveLength(1);
-    expect(rejected[0]!.reason).toBe("wallet_buy_capacity_exhausted");
+    expect(rejected[0]!.reason).toBe("buy_order_count_limit");
 
     await mod.stop();
   });

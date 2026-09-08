@@ -16,6 +16,9 @@ import {
   SELL_REPLACEMENT_CANCELLED_ORDER_ID_METADATA_KEY,
   isProfileLadderSellOrder,
 } from "./modules/profile-ladder-order-helpers.js";
+import { coveredBounceRungIndices } from "./bounce-rung-identity.js";
+import { resolveBounceSupplementalRungSizing } from "./bounce-rung-sizing.js";
+import { parseQuoteMotionOrigin } from "./quote-motion-shadow.js";
 
 const EPSILON = 1e-9;
 const WORKING_STATUSES = new Set(["pending", "open", "partially-filled"]);
@@ -40,6 +43,8 @@ export interface ExitCoverageCleanupCandidate {
   readonly orderType?: string | undefined;
   readonly tickSize?: number | undefined;
   readonly postOnly?: boolean | undefined;
+  readonly entryStyle?: Order["entryStyle"];
+  readonly metadata?: Order["metadata"];
   readonly bounceRung?: unknown;
   readonly s1?: unknown;
 }
@@ -89,136 +94,297 @@ export function matchesExactBounceSupplementalCoverage(input: {
   readonly position: Position | null;
   readonly orders: readonly Order[];
   readonly policy: BounceExitPolicy | undefined;
+  readonly minOrderSize: number | null;
   readonly filledSize: (order: Order) => number | null;
 }): boolean {
-  const { candidate, position, policy } = input;
-  const rung = isRecord(candidate.bounceRung) ? candidate.bounceRung : null;
-  if (
-    !position ||
-    position.status !== "open" ||
-    position.exitOwner !== "bounce" ||
-    !policy ||
-    candidate.side !== "sell" ||
-    candidate.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
-    candidate.signalReason !== "repricing-exit" ||
-    candidate.positionId !== position.positionId ||
-    candidate.tokenId !== position.tokenId ||
-    candidate.conditionId !== position.conditionId ||
-    !isPositive(candidate.tickSize) ||
-    !rung ||
-    rung.isCleanupRung === true ||
-    typeof rung.ladderId !== "string" ||
-    !Number.isInteger(rung.rungIndex) ||
-    !isPositive(rung.anchorPrice) ||
-    !isPositive(rung.fraction) ||
-    !isPositive(rung.originalPositionSize) ||
-    !isPositive(rung.remainingPositionSize) ||
-    !isPositive(rung.uncommittedRemainder)
-  ) {
-    return false;
-  }
-  const rungIndex = rung.rungIndex as number;
-  if (
-    rungIndex < 0 ||
-    rungIndex >= policy.ladderFractions.length ||
-    !sameNumber(rung.fraction, policy.ladderFractions[rungIndex]!) ||
-    !sameNumber(candidate.size, rung.originalPositionSize * rung.fraction) ||
-    !sameNumber(rung.remainingPositionSize, position.size) ||
-    !sameNumber(rung.uncommittedRemainder, candidate.size) ||
-    !sameNumber(
-      candidate.price,
-      bounceTarget(policy, rung.anchorPrice, rungIndex, candidate.tickSize),
-    )
-  ) {
-    return false;
-  }
+  const context = bounceSupplementalContext(input);
+  if (!context) return false;
+  const history = currentBounceHistory(input.orders, context);
+  const working = currentWorkingSells(input.orders, context);
+  if (!history || !working || working.some((order) => order.status === "pending")) return false;
+  const cleanup = working.filter((order) => bounceRungMetadata(order)?.isCleanupRung === true);
+  if (cleanup.length !== 1 || !matchesWorkingCleanup(cleanup[0]!, context)) return false;
+  const placed = placedOrdinaryIndices(history, context, input.filledSize);
+  const remaining = sumWorkingRemaining(working, input.filledSize);
+  if (!placed || remaining == null) return false;
+  const freeResidual = context.position.size - remaining;
+  const firstMissing = context.policy.ladderFractions.findIndex((_, index) => !placed.has(index));
+  return (
+    firstMissing >= 0 &&
+    sameNumber(remaining + context.candidate.size, context.position.size) &&
+    matchesCanonicalSupplemental(context, firstMissing, freeResidual, placed)
+  );
+}
 
-  const working = input.orders.filter(
+interface BounceSupplementalContext {
+  readonly candidate: ExitCoverageCleanupCandidate;
+  readonly rung: BounceRungMetadata;
+  readonly position: Position;
+  readonly policy: BounceExitPolicy;
+  readonly tickSize: number;
+  readonly minOrderSize: number;
+}
+
+function bounceSupplementalContext(
+  input: Parameters<typeof matchesExactBounceSupplementalCoverage>[0],
+): BounceSupplementalContext | null {
+  const { candidate, position, policy, minOrderSize } = input;
+  const rung = isRecord(candidate.bounceRung)
+    ? (candidate.bounceRung as unknown as BounceRungMetadata)
+    : null;
+  if (!position || !policy || !rung || !isPositive(minOrderSize)) return null;
+  if (
+    !matchesBounceSupplementalIdentity(candidate, position) ||
+    !matchesBounceSupplementalRung(rung, position)
+  ) {
+    return null;
+  }
+  return { candidate, rung, position, policy, tickSize: candidate.tickSize, minOrderSize };
+}
+
+function matchesBounceSupplementalIdentity(
+  candidate: ExitCoverageCleanupCandidate,
+  position: Position,
+): candidate is ExitCoverageCleanupCandidate & { tickSize: number } {
+  return (
+    position.status === "open" &&
+    position.exitOwner === "bounce" &&
+    candidate.side === "sell" &&
+    candidate.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+    candidate.signalReason === "repricing-exit" &&
+    candidate.positionId === position.positionId &&
+    candidate.tokenId === position.tokenId &&
+    candidate.conditionId === position.conditionId &&
+    isPositive(candidate.tickSize) &&
+    isPositive(candidate.size) &&
+    isPositive(candidate.price)
+  );
+}
+
+function matchesBounceSupplementalRung(rung: BounceRungMetadata, position: Position): boolean {
+  return (
+    rung.isCleanupRung !== true &&
+    typeof rung.ladderId === "string" &&
+    rung.ladderId.length > 0 &&
+    Number.isInteger(rung.rungIndex) &&
+    isPositive(rung.anchorPrice) &&
+    isPositive(rung.fraction) &&
+    isPositive(rung.originalPositionSize) &&
+    isPositive(rung.remainingPositionSize) &&
+    isPositive(rung.uncommittedRemainder) &&
+    sameNumber(rung.remainingPositionSize, position.size)
+  );
+}
+
+function currentWorkingSells(
+  orders: readonly Order[],
+  context: BounceSupplementalContext,
+): readonly Order[] | null {
+  const { position, rung: candidateRung } = context;
+  const working = orders.filter(
     (order) =>
       order.side === "sell" &&
       order.tokenId === position.tokenId &&
       WORKING_STATUSES.has(order.status),
   );
-  const cleanup = working.filter((order) => bounceRungMetadata(order)?.isCleanupRung === true);
-  const ordinary = working.filter((order) => bounceRungMetadata(order)?.isCleanupRung !== true);
-  if (
-    cleanup.length !== 1 ||
-    ordinary.length !== policy.ladderFractions.length - 1 ||
-    working.some(
-      (order) =>
-        order.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
-        order.conditionId !== position.conditionId ||
-        order.positionId !== position.positionId ||
-        !order.exchangeOrderId,
-    ) ||
-    !matchesBounceLineage(cleanup[0]!, rung, candidate, policy, true)
-  ) {
-    return false;
-  }
+  return working.every((order) => {
+    const rung = bounceRungMetadata(order);
+    return (
+      order.conditionId === position.conditionId &&
+      order.positionId === position.positionId &&
+      order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+      Boolean(order.exchangeOrderId) &&
+      hasValidBounceCoverageTransport(order) &&
+      rung?.ladderId === candidateRung.ladderId &&
+      sameNumber(rung.anchorPrice, candidateRung.anchorPrice) &&
+      sameNumber(rung.originalPositionSize, candidateRung.originalPositionSize)
+    );
+  })
+    ? working
+    : null;
+}
 
-  const indices = new Set<number>();
-  for (const order of ordinary) {
-    const orderRung = bounceRungMetadata(order);
-    if (
-      !orderRung ||
-      orderRung.rungIndex === rungIndex ||
-      indices.has(orderRung.rungIndex) ||
-      !matchesBounceLineage(order, rung, candidate, policy, false)
-    ) {
-      return false;
-    }
-    indices.add(orderRung.rungIndex);
+function currentBounceHistory(
+  orders: readonly Order[],
+  context: BounceSupplementalContext,
+): readonly Order[] | null {
+  const ids = new Set<string>();
+  const history = orders.filter((order) => {
+    const rung = bounceRungMetadata(order);
+    return (
+      order.side === "sell" &&
+      order.tokenId === context.position.tokenId &&
+      order.conditionId === context.position.conditionId &&
+      order.positionId === context.position.positionId &&
+      order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+      (order.status === "rejected" || rung?.ladderId === context.rung.ladderId)
+    );
+  });
+  if (history.some((order) => ids.has(String(order.orderId)) || !ids.add(String(order.orderId)))) {
+    return null;
   }
-  const remaining = working.reduce((total, order) => {
-    const filled = input.filledSize(order);
-    return filled == null || filled < 0 || filled > order.size + EPSILON
-      ? Number.NaN
-      : total + Math.max(0, order.size - filled);
-  }, 0);
+  return history.every((order) => {
+    if (order.status === "rejected") return true;
+    const rung = bounceRungMetadata(order);
+    return (
+      rung?.ladderId === context.rung.ladderId &&
+      sameNumber(rung.anchorPrice, context.rung.anchorPrice) &&
+      sameNumber(rung.originalPositionSize, context.rung.originalPositionSize)
+    );
+  })
+    ? history
+    : null;
+}
+
+function matchesWorkingCleanup(order: Order, context: BounceSupplementalContext): boolean {
+  const rung = bounceRungMetadata(order);
+  const target = rung
+    ? bounceTarget(context.policy, rung.anchorPrice, rung.rungIndex, context.tickSize)
+    : Number.NaN;
   return (
-    Number.isFinite(remaining) &&
-    sameNumber(position.size - remaining, candidate.size) &&
-    sameNumber(remaining + candidate.size, position.size)
+    !!rung &&
+    isExistingBouncePrice(order.price, target) &&
+    classifyExitCoverageCleanup(
+      { ...order, price: target, tickSize: context.tickSize, bounceRung: rung },
+      context.policy,
+    ) === "bounce" &&
+    rung.ladderId === context.rung.ladderId &&
+    sameNumber(rung.anchorPrice, context.rung.anchorPrice) &&
+    sameNumber(rung.originalPositionSize, context.rung.originalPositionSize)
   );
 }
 
-function matchesBounceLineage(
+function placedOrdinaryIndices(
+  history: readonly Order[],
+  context: BounceSupplementalContext,
+  filledSize: (order: Order) => number | null,
+): Set<number> | null {
+  const placed = new Set<number>();
+  for (const order of history) {
+    const filled = filledSize(order);
+    if (filled == null || filled < 0 || filled > order.size + EPSILON) return null;
+    if (order.status === "rejected") {
+      if (filled > EPSILON) return null;
+      continue;
+    }
+    const rung = bounceRungMetadata(order);
+    if (!rung) return null;
+    if (rung.isCleanupRung === true || order.status === "cancelled") continue;
+    if (!matchesCanonicalOrdinaryOrder(order, rung, context, placed)) return null;
+    for (const index of coveredBounceRungIndices(rung)) placed.add(index);
+  }
+  return placed;
+}
+
+function matchesCanonicalOrdinaryOrder(
   order: Order,
-  candidateRung: Record<string, unknown>,
-  candidate: ExitCoverageCleanupCandidate,
-  policy: BounceExitPolicy,
-  cleanup: boolean,
+  rung: BounceRungMetadata,
+  context: BounceSupplementalContext,
+  placed: ReadonlySet<number>,
 ): boolean {
-  const rung = bounceRungMetadata(order);
-  if (
-    !rung ||
-    !hasValidBounceCoverageTransport(order) ||
-    rung.ladderId !== candidateRung.ladderId ||
-    !sameNumber(rung.anchorPrice, candidateRung.anchorPrice as number) ||
-    !sameNumber(rung.originalPositionSize, candidateRung.originalPositionSize as number)
-  ) {
-    return false;
-  }
-  if (cleanup) {
-    return (
-      classifyExitCoverageCleanup(
-        { ...order, tickSize: candidate.tickSize, bounceRung: rung },
-        policy,
-      ) === "bounce" &&
-      sameNumber(rung.remainingPositionSize, candidateRung.remainingPositionSize as number)
-    );
-  }
-  const index = rung.rungIndex;
-  const fraction = policy.ladderFractions[index];
+  const indices = coveredBounceRungIndices(rung);
+  const sizing = resolveBounceSupplementalRungSizing({
+    bounceRung: { ...rung, fraction: context.policy.ladderFractions[rung.rungIndex]! },
+    originalPositionSize: context.rung.originalPositionSize,
+    availableSize: rung.uncommittedRemainder ?? Number.NaN,
+    ladderFractions: context.policy.ladderFractions,
+    minOrderSize: context.minOrderSize,
+  });
+  const target = bounceTarget(context.policy, rung.anchorPrice, rung.rungIndex, context.tickSize);
   return (
-    Number.isInteger(index) &&
-    fraction !== undefined &&
-    rung.isCleanupRung !== true &&
-    (!rung.rungIndicesCovered ||
-      (rung.rungIndicesCovered.length === 1 && rung.rungIndicesCovered[0] === index)) &&
-    sameNumber(rung.fraction, fraction) &&
-    sameNumber(order.size, rung.originalPositionSize * fraction) &&
-    sameNumber(order.price, bounceTarget(policy, rung.anchorPrice, index, candidate.tickSize!))
+    !!sizing &&
+    canonicalIndices(indices, sizing.metadata.rungIndicesCovered ?? [], placed) &&
+    sameNumber(rung.fraction, sizing.metadata.fraction) &&
+    sameNumber(order.size, sizing.size) &&
+    isExistingBouncePrice(order.price, target)
+  );
+}
+
+function isExistingBouncePrice(price: number, canonicalTarget: number): boolean {
+  return isPositive(price) && isPositive(canonicalTarget) && price + EPSILON >= canonicalTarget;
+}
+
+function canonicalIndices(
+  actual: readonly number[],
+  expected: readonly number[],
+  placed: ReadonlySet<number>,
+): boolean {
+  return (
+    actual.length === expected.length &&
+    actual.every((index, offset) => index === expected[offset] && !placed.has(index))
+  );
+}
+
+function sumWorkingRemaining(
+  orders: readonly Order[],
+  filledSize: (order: Order) => number | null,
+): number | null {
+  let remaining = 0;
+  for (const order of orders) {
+    const filled = filledSize(order);
+    if (filled == null || filled < 0 || filled > order.size + EPSILON) return null;
+    remaining += Math.max(0, order.size - filled);
+  }
+  return remaining;
+}
+
+function matchesCanonicalSupplemental(
+  context: BounceSupplementalContext,
+  rungIndex: number,
+  freeResidual: number,
+  placed: ReadonlySet<number>,
+): boolean {
+  const bounceRung = {
+    ...context.rung,
+    rungIndex,
+    fraction: context.policy.ladderFractions[rungIndex]!,
+  };
+  delete bounceRung.rungIndicesCovered;
+  delete bounceRung.isCleanupRung;
+  const sizing = resolveBounceSupplementalRungSizing({
+    bounceRung,
+    originalPositionSize: context.rung.originalPositionSize,
+    availableSize: freeResidual,
+    ladderFractions: context.policy.ladderFractions,
+    minOrderSize: context.minOrderSize,
+  });
+  if (!sizing) return false;
+  const actualIndices = coveredBounceRungIndices(context.rung);
+  return (
+    context.rung.rungIndex === rungIndex &&
+    canonicalIndices(actualIndices, sizing.metadata.rungIndicesCovered ?? [], placed) &&
+    sameNumber(context.rung.fraction, sizing.metadata.fraction) &&
+    sameNumber(context.rung.uncommittedRemainder!, freeResidual) &&
+    sameNumber(context.candidate.size, sizing.size) &&
+    matchesSupplementalPrice(
+      context,
+      bounceTarget(context.policy, context.rung.anchorPrice, rungIndex, context.tickSize),
+    )
+  );
+}
+
+function matchesSupplementalPrice(context: BounceSupplementalContext, target: number): boolean {
+  const { candidate, rung } = context;
+  if (sameNumber(candidate.price, target)) return true;
+  if (
+    candidate.postOnly !== true ||
+    candidate.entryStyle !== "maker" ||
+    !isExistingBouncePrice(candidate.price, target)
+  )
+    return false;
+  const origin = parseQuoteMotionOrigin({
+    metadata: candidate.metadata ?? null,
+    side: "sell",
+    entryStyle: "maker",
+    postOnly: true,
+    decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+    signalReason: "repricing-exit",
+  });
+  return (
+    origin?.kind === "bounce_exit_target" &&
+    origin.cohortId === rung.ladderId &&
+    sameNumber(origin.originalSuggestedPrice, target) &&
+    sameNumber(origin.originalTargetPrice ?? Number.NaN, target)
   );
 }
 

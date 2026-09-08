@@ -372,8 +372,8 @@ export interface OrderRepository {
     expectedMetadata: Readonly<Record<string, unknown>>,
   ): void;
 
-  /** Sum the notional (size_usdc) of all open buy orders. */
-  sumOpenBuyNotional(): number;
+  /** Original notional preserves exposure accounting; remaining reserves only unfilled shares. */
+  sumOpenBuyNotional(basis?: "original" | "remaining"): number;
 
   /** Durable maker BUY usage inside one activation window, excluding one retried client identity. */
   getMakerBuyWindowUsage?(

@@ -46,7 +46,6 @@ import {
   PER_TOKEN_BUY_LIMIT_REASON,
   PER_TOKEN_SELL_LIMIT_REASON,
   TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
-  WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
   WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
   type OrderCapacityMetricsSample,
   type SellCapacitySource,
@@ -418,7 +417,7 @@ export class AlgoRiskGateImpl implements RiskGate {
 
     const walletBudget = resolveWalletBuyBudget(
       this.walletBudget ?? {},
-      this.orderRepo.sumOpenBuyNotional(),
+      this.orderRepo.sumOpenBuyNotional("remaining"),
     );
     const protectedRequirement = resolveProtectedWalletBuyRequirement({
       makerEntry: policy?.makerEntry ?? null,
@@ -445,8 +444,8 @@ export class AlgoRiskGateImpl implements RiskGate {
       protectedOpenBuySlots: protectedRequirement.protectedOpenBuySlots,
     });
     if (!buyCapacity.allowed) {
-      rejected.push(WALLET_BUY_CAPACITY_EXHAUSTED_REASON);
-      return finish(false, WALLET_BUY_CAPACITY_EXHAUSTED_REASON);
+      rejected.push(buyCapacity.reason!);
+      return finish(false, buyCapacity.reason);
     }
     passed.push("wallet_buy_capacity_ok");
 
@@ -508,6 +507,7 @@ export class AlgoRiskGateImpl implements RiskGate {
           position: positions[0] ?? null,
           orders,
           policy: policy?.bounceExit,
+          minOrderSize: this.resolveMinOrderSize?.(signal.tokenId) ?? null,
           filledSize: (order) => filled.get(String(order.orderId)) ?? null,
         })
       );

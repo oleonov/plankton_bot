@@ -2371,6 +2371,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       bounceLadderSoldShares: bounceLadderState?.soldShares ?? 0,
       bounceLadderOpenCommitment: bounceLadderState?.openCommitment ?? 0,
       hasOpenBounceRung: bounceLadderState?.hasOpenBounceRung ?? false,
+      hasWorkingBounceCleanup: bounceLadderState?.hasWorkingCleanup ?? false,
       hasActiveSellOrderForBounceBackstop: bounceLadderEligible
         ? this.hasActiveSellOrderForBounceBackstop(tokenId)
         : false,
@@ -2787,6 +2788,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     soldShares: number;
     openCommitment: number;
     hasOpenBounceRung: boolean;
+    hasWorkingCleanup: boolean;
   } {
     const repo = this.deps.orderRepo;
     const emptyState = {
@@ -2795,6 +2797,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       soldShares: 0,
       openCommitment: 0,
       hasOpenBounceRung: false,
+      hasWorkingCleanup: false,
     };
     if (!repo) return emptyState;
     const indices = new Set<number>();
@@ -2804,6 +2807,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     // ever recorded is necessarily the earliest (pre-add) one, regardless of
     // repository iteration order.
     let originalPositionSize: number | null = null;
+    let workingCleanupOriginalSize: number | null = null;
+    let workingCleanupCount = 0;
     // Phase 3 fill-aware accounting (docs/plans/2026-07-19-sellable-sizing-
     // bounce-for-all.md): every non-rejected BOUNCE_EXIT_TARGET order on this
     // ladder, INCLUDING cancelled ones — a cancel-then-repost cycle must not
@@ -2826,6 +2831,16 @@ export class AlgoDecisionModule implements RuntimeModule {
           }
         | undefined;
       if (!bounceRung || bounceRung.ladderId !== ladderId) continue;
+      if (
+        bounceRung.isCleanupRung === true &&
+        isWorkingSellOrderStatus(order.status ?? null) &&
+        typeof bounceRung.originalPositionSize === "number" &&
+        Number.isFinite(bounceRung.originalPositionSize) &&
+        bounceRung.originalPositionSize > 0
+      ) {
+        workingCleanupCount += 1;
+        workingCleanupOriginalSize = bounceRung.originalPositionSize;
+      }
       // Cancelled rungs are NOT "placed" — they get retried (unchanged from
       // pre-Phase-3 behavior) — but they still flow into `ladderOrders` below
       // so any partial fill they carry counts toward soldShares.
@@ -2861,10 +2876,12 @@ export class AlgoDecisionModule implements RuntimeModule {
       : { soldShares: 0, openCommitment: 0, hasOpenBounceRung: false };
     return {
       placedRungIndices: Array.from(indices),
-      originalPositionSize,
+      originalPositionSize:
+        originalPositionSize ?? (workingCleanupCount === 1 ? workingCleanupOriginalSize : null),
       soldShares,
       openCommitment,
       hasOpenBounceRung,
+      hasWorkingCleanup: workingCleanupCount === 1,
     };
   }
 

@@ -22,6 +22,11 @@ describe("humanizeInternalRejectReason", () => {
 });
 
 describe("formatReservationRejects", () => {
+  it("does not merge BUY-slot exhaustion into insufficient cash", () => {
+    expect(
+      formatReservationRejects({ buy_order_count_limit: 2, wallet_buy_capacity_exhausted: 1 }, 3),
+    ).toBe("3 orders blocked pre-exchange: buy-order count limit (2), insufficient buy budget (1)");
+  });
   it("single reason → plain '<n> orders blocked pre-exchange: <reason>'", () => {
     expect(formatReservationRejects({ "clamped-below-min-order-size": 2 }, 2)).toBe(
       "2 orders blocked pre-exchange: below 5-share minimum",

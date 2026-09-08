@@ -108,7 +108,6 @@ import {
   resolveProtectedWalletBuyRequirement,
   resolveWalletBuyBudget,
   TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
-  WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
 } from "./wallet-buy-budget.js";
 
 import { createLogger } from "./logger.js";
@@ -1594,7 +1593,7 @@ async function main(): Promise<void> {
             walletBufferPct: config.executionWalletBufferPct,
             walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
           },
-          repos.order.sumOpenBuyNotional(),
+          repos.order.sumOpenBuyNotional("remaining"),
         );
         const protectedRequirement = resolveProtectedWalletBuyRequirement({
           makerEntry: policy.makerEntry,
@@ -1623,7 +1622,7 @@ async function main(): Promise<void> {
         if (!buyCapacity.allowed) {
           return {
             canAttempt: false,
-            reasonCode: WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
+            reasonCode: buyCapacity.reason!,
             activateCooldown: buyCapacity.availableAfterOrderUsdc != null,
           };
         }

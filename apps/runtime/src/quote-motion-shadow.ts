@@ -147,7 +147,12 @@ export function buildQuoteMotionOrigin(input: BuildQuoteMotionOriginInput): Quot
   };
 }
 
-export function parseQuoteMotionOrigin(order: Order): QuoteMotionOriginV1 | null {
+type QuoteMotionOriginOrder = Pick<
+  Order,
+  "metadata" | "side" | "entryStyle" | "postOnly" | "decisionRuleId" | "signalReason"
+>;
+
+export function parseQuoteMotionOrigin(order: QuoteMotionOriginOrder): QuoteMotionOriginV1 | null {
   const raw = order.metadata?.quoteMotionV1;
   if (!isRecord(raw) || raw.version !== 1) return null;
   if (raw.kind !== "r23_capture" && raw.kind !== "bounce_exit_target") return null;
@@ -558,7 +563,7 @@ function pruneStates(states: Map<string, QuoteMotionState>, active: ReadonlySet<
   for (const key of states.keys()) if (!active.has(key)) states.delete(key);
 }
 
-function matchesOriginOrder(order: Order, origin: QuoteMotionOriginV1): boolean {
+function matchesOriginOrder(order: QuoteMotionOriginOrder, origin: QuoteMotionOriginV1): boolean {
   if (origin.kind === "r23_capture") {
     return (
       order.side === "buy" &&

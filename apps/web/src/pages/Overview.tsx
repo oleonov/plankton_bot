@@ -72,6 +72,7 @@ const INTERNAL_REJECT_REASON_LABELS: Record<string, string> = {
   "sell-residual-unknown-min": "unknown min size",
   "pending-wallet-sync": "wallet sync pending",
   wallet_buy_capacity_exhausted: "insufficient buy budget",
+  buy_order_count_limit: "buy-order count limit",
   wallet_sell_capacity_exhausted: "insufficient sell capacity",
   total_orders_capacity_exhausted: "order-count limit",
   per_token_buy_limit: "per-token buy limit",

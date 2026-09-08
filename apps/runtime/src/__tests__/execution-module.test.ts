@@ -49,6 +49,7 @@ import { buildClientOrderId } from "@krabs/domain/node";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
 import { ExchangeStateStore } from "../modules/execution/exchange-state-store.js";
+import { bounceTarget } from "../exit-coverage-cleanup.js";
 import {
   buildReservationSnapshot,
   canonicalRecoveryMetadata,
@@ -518,7 +519,7 @@ function createBounceSupplementalFixture() {
           fraction: cleanup ? 3 : [0.3, 0.4][rungIndex],
           originalPositionSize: 30,
           remainingPositionSize: cleanup ? 120 : 30,
-          uncommittedRemainder: cleanup ? 90 : 9,
+          uncommittedRemainder: size,
           ...(cleanup ? { isCleanupRung: true } : {}),
         },
       },
@@ -580,6 +581,100 @@ function trackPreparedRows(orderRepo: ReturnType<typeof createMockOrderRepo>, in
     if (index >= 0) rows[index] = { ...rows[index]!, status, exchangeOrderId };
   });
   return rows;
+}
+
+function productionSupplementalFixture(kind: "Mario" | "Derek", anchorOverride?: number) {
+  const mario = kind === "Mario";
+  const policy = {
+    ...DEFAULT_EXECUTION_POLICY,
+    bounceExit: {
+      ...DEFAULT_EXECUTION_POLICY.bounceExit,
+      targetTiers: mario
+        ? [
+            { maxPrice: 0.02, gainPct: 0.36 },
+            ...DEFAULT_EXECUTION_POLICY.bounceExit.targetTiers.slice(1),
+          ]
+        : DEFAULT_EXECUTION_POLICY.bounceExit.targetTiers,
+    },
+  };
+  const size = mario ? 132.975 : 39.13;
+  const original = mario ? 10 : 25.18;
+  const anchor = anchorOverride ?? (mario ? 0.003 : 0.013);
+  const residual = mario ? 10 : 6.504;
+  const position = makePosition({
+    size,
+    avgEntryPrice: anchor,
+    costBasisUsdc: size * anchor,
+    exitOwner: "bounce",
+  });
+  const rung = (rungIndex: number, amount: number, cleanup = false) => ({
+    ladderId: kind,
+    rungIndex,
+    anchorPrice: anchor,
+    fraction: [0.3, 0.4, 0.3][rungIndex]!,
+    originalPositionSize: original,
+    remainingPositionSize: mario ? size : 39.77,
+    uncommittedRemainder: amount,
+    ...(cleanup ? { isCleanupRung: true } : {}),
+  });
+  const order = (index: number, amount: number, cleanup = false) =>
+    openSellAt(mario && cleanup ? 0.046 : bounceTarget(policy.bounceExit, anchor, index, 0.001), {
+      orderId: createOrderId(`${kind}-${index}-${cleanup}`),
+      clientOrderId: `${kind}-${index}-${cleanup}` as ClientOrderId,
+      exchangeOrderId: `${kind}-${index}-${cleanup}`,
+      positionId: position.positionId,
+      size: amount,
+      postOnly: true,
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      metadata: { bounceRung: rung(index, amount, cleanup) },
+    });
+  const orders = mario
+    ? [order(2, 122.975, true)]
+    : [order(2, 7.554), order(1, 10.072), order(2, 15, true)];
+  const canonicalTarget = bounceTarget(policy.bounceExit, anchor, 0, 0.001);
+  const command = makePlaceCmd({
+    side: "sell",
+    size: residual,
+    tickSize: 0.001,
+    postOnly: true,
+    entryStyle: "maker",
+    positionId: position.positionId,
+    signalReason: "repricing-exit",
+    decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+    price: mario ? 0.015 : canonicalTarget,
+    metadata: {
+      marketData: { minOrderSize: 5 },
+      ...(mario
+        ? {
+            quoteMotionV1: {
+              version: 1,
+              kind: "bounce_exit_target",
+              cohortId: kind,
+              originalSuggestedPrice: canonicalTarget,
+              originalTargetPrice: canonicalTarget,
+              entryPriceCeiling: null,
+              policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+              policyControlRevision: 55,
+              initialBook: {
+                depthStatus: "full",
+                bestBid: 0.001,
+                bestAsk: 0.016,
+                tickSize: 0.001,
+                snapshotTs: Date.now(),
+                source: "clob",
+              },
+            },
+          }
+        : {}),
+      bounceRung: {
+        ...rung(0, residual),
+        remainingPositionSize: size,
+        fraction: mario ? 0.7 : 0.3,
+        rungIndicesCovered: mario ? [0, 1] : [0],
+      },
+    },
+  });
+  return { position, orders, command, policy };
 }
 
 // Exit-loss-floor gate (docs/plans/2026-07-20-exit-loss-floor.md) fails closed
@@ -726,6 +821,320 @@ describe("ExecutionModule", () => {
 
   // ─── Lifecycle ──────────────────────────────────────────────────────
 
+  function preciseCleanupFixture(anchorPrice = 0.017) {
+    const size = 96.45058699999998;
+    const position = makePosition({
+      size,
+      avgEntryPrice: 0.01741472,
+      costBasisUsdc: size * 0.01741472,
+      exitOwner: "bounce",
+    });
+    const positionRepo = createMockPositionRepo(position);
+    positionRepo.findActiveByTokenId = vi.fn(() => [position]);
+    const rows = trackPreparedRows(orderRepo, []);
+    orderRepo.findByClientOrderId = vi.fn(
+      (id) => rows.find((row) => row.clientOrderId === id) ?? null,
+    );
+    const store = new ExchangeStateStore();
+    store.updateWalletPosition(position.tokenId, 96.4505);
+    const state = { paused: false };
+    const command = makePlaceCmd({
+      side: "sell",
+      size,
+      tickSize: 0.001,
+      postOnly: true,
+      entryStyle: "maker",
+      signalReason: "repricing-exit",
+      positionId: position.positionId,
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      price: bounceTarget(DEFAULT_EXECUTION_POLICY.bounceExit, anchorPrice, 2, 0.001),
+      metadata: {
+        marketData: { minOrderSize: 5 },
+        bounceRung: {
+          ladderId: "btc-precision",
+          rungIndex: 2,
+          anchorPrice,
+          fraction: 1,
+          originalPositionSize: size,
+          remainingPositionSize: size,
+          uncommittedRemainder: size,
+          isCleanupRung: true,
+        },
+      },
+    });
+    const tickResolver = { resolve: vi.fn().mockResolvedValue(0.001), invalidate: vi.fn() };
+    (gateway.getPositionBalance as ReturnType<typeof vi.fn>).mockResolvedValue(96.450587);
+    const execution = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(position),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => state.paused },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      exchangeStateStore: store,
+      tickResolver: tickResolver as any,
+    });
+    const rejected: string[] = [];
+    bus.subscribe("OrderRejected", async (event) => {
+      rejected.push(event.reason);
+    });
+    const publish = () => bus.publish("PlaceOrderRequested", { command, timestamp: Date.now() });
+    return {
+      execution,
+      command,
+      position,
+      positionRepo,
+      rows,
+      store,
+      state,
+      rejected,
+      publish,
+      tickResolver,
+    };
+  }
+
+  it("precise cleanup posts the full BTC residual and counts its own prepared identity only once", async () => {
+    const f = preciseCleanupFixture();
+    await f.execution.start();
+    await f.publish();
+    expect(f.rejected).toEqual([]);
+    expect(gateway.getPositionBalance).toHaveBeenCalledTimes(2);
+    expect(gateway.prepareOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ size: f.position.size }),
+    );
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    expect(f.rows.filter((order) => order.status === "open")).toHaveLength(1);
+    expect(f.store.getWalletPositionSize(f.position.tokenId)).toBe(96.4505);
+    await f.publish();
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    await f.execution.stop();
+  });
+
+  it.each([96.4505, 0, -1, Number.NaN, "throw"])(
+    "precise cleanup fails closed for CLOB balance %s",
+    async (balance) => {
+      const f = preciseCleanupFixture();
+      (gateway.getPositionBalance as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        if (balance === "throw") throw new Error("unavailable");
+        return balance;
+      });
+      await f.execution.start();
+      await f.publish();
+      expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+      expect(f.rejected).toHaveLength(1);
+      await f.execution.stop();
+    },
+  );
+
+  it.each(["pause", "position", "wallet-snapshot", "competitor", "stop"] as const)(
+    "precise cleanup invalidates an observation when %s changes during its read",
+    async (change) => {
+      const f = preciseCleanupFixture();
+      (gateway.getPositionBalance as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+        if (change === "pause") f.state.paused = true;
+        if (change === "position")
+          f.positionRepo.findByTokenId = vi.fn(() => ({ ...f.position, size: 90 }));
+        if (change === "wallet-snapshot")
+          f.store.updateWalletPosition(f.position.tokenId, 96.4505, Date.now() + 1);
+        if (change === "competitor")
+          f.rows.push(openSellAt(0.1, { size: 5, positionId: f.position.positionId }));
+        if (change === "stop") await f.execution.stop();
+        return 96.450587;
+      });
+      await f.execution.start();
+      await f.publish();
+      expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+      expect(f.rejected).toContain("exit-coverage-cleanup-state-changed");
+      await f.execution.stop();
+    },
+  );
+
+  it.each([
+    "lower-balance",
+    "fetch-failure",
+    "pause",
+    "competitor",
+    "fill",
+    "wallet-snapshot",
+  ] as const)(
+    "precise cleanup rechecks %s after preparation with its pending row durable",
+    async (change) => {
+      const f = preciseCleanupFixture();
+      (gateway.getPositionBalance as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce(async () => 96.450587)
+        .mockImplementationOnce(async () => {
+          expect(f.rows.some((row) => row.status === "pending")).toBe(true);
+          if (change === "fetch-failure") throw new Error("CLOB unavailable at final proof");
+          if (change === "pause") f.state.paused = true;
+          if (change === "wallet-snapshot")
+            f.store.updateWalletPosition(f.position.tokenId, 90, Date.now() + 1);
+          if (change === "competitor")
+            f.rows.push(openSellAt(0.1, { size: 5, positionId: f.position.positionId }));
+          if (change === "fill")
+            f.positionRepo.findByTokenId = vi.fn(() => ({ ...f.position, size: 90 }));
+          return change === "lower-balance" ? 90 : 96.450587;
+        });
+      await f.execution.start();
+      await f.publish();
+      expect(gateway.prepareOrder).toHaveBeenCalledOnce();
+      expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+      expect(f.rows.find((row) => row.clientOrderId === f.command.clientOrderId)?.status).toBe(
+        "rejected",
+      );
+      await f.execution.stop();
+    },
+  );
+
+  it("precise cleanup re-proves the replacement prepared identity on invalid-tick retry", async () => {
+    const f = preciseCleanupFixture();
+    f.tickResolver.resolve.mockResolvedValueOnce(0.001).mockResolvedValueOnce(0.01);
+    (gateway.prepareOrder as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ orderId: "precise-first", __preparedOrderBrand: "PreparedOrder" })
+      .mockResolvedValueOnce({ orderId: "precise-retry", __preparedOrderBrand: "PreparedOrder" });
+    (gateway.submitPreparedOrder as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        kind: "rejected",
+        errorCode: "INVALID_PRICE",
+        errorMessage: "invalid tick size",
+        errorDetails: { responseBody: { error: "invalid tick size" } },
+      })
+      .mockResolvedValueOnce({ kind: "accepted", orderId: "precise-retry" });
+    await f.execution.start();
+    await f.publish();
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(2);
+    expect(gateway.getPositionBalance).toHaveBeenCalledTimes(3);
+    expect(f.rows).toEqual([
+      expect.objectContaining({
+        orderId: "precise-retry",
+        status: "open",
+        price: 0.04,
+        size: f.position.size,
+      }),
+    ]);
+    await f.execution.stop();
+  });
+
+  it("ordinary cleanup with a sufficient snapshot does not add CLOB balance requests", async () => {
+    const f = preciseCleanupFixture();
+    f.store.updateWalletPosition(f.position.tokenId, f.position.size);
+    await f.execution.start();
+    await f.publish();
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    expect(gateway.getPositionBalance).not.toHaveBeenCalled();
+    await f.execution.stop();
+  });
+
+  it("precise cleanup does not mistake a valuation-only update for changed sellable inventory", async () => {
+    const f = preciseCleanupFixture();
+    (gateway.getPositionBalance as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      f.positionRepo.findByTokenId = vi.fn(() => ({
+        ...f.position,
+        currentValueUsdc: 100,
+        updatedAt: new Date(Date.now() + 1).toISOString(),
+      }));
+      return 96.450587;
+    });
+    await f.execution.start();
+    await f.publish();
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    await f.execution.stop();
+  });
+
+  it("precise cleanup keeps a durable unknown submission and never creates a sibling", async () => {
+    const f = preciseCleanupFixture();
+    (gateway.submitPreparedOrder as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kind: "unknown",
+      errorMessage: "transport timeout",
+      errorDetails: null,
+    });
+    await f.execution.start();
+    await f.publish();
+    expect(f.rows).toEqual([expect.objectContaining({ status: "pending" })]);
+    await f.publish();
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    expect(f.rows).toHaveLength(1);
+    await f.execution.stop();
+  });
+
+  it("precise cleanup holds admission against a duplicate while awaiting CLOB", async () => {
+    const f = preciseCleanupFixture();
+    let finish!: (balance: number) => void;
+    (gateway.getPositionBalance as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () =>
+        new Promise<number>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await f.execution.start();
+    const first = f.publish();
+    await vi.waitFor(() => expect(gateway.getPositionBalance).toHaveBeenCalledOnce());
+    await f.publish();
+    expect(gateway.prepareOrder).not.toHaveBeenCalled();
+    finish(96.450587);
+    await first;
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    expect(f.rejected).toContain("exit-coverage-cleanup-in-flight");
+    await f.execution.stop();
+  });
+
+  it("precise cleanup does not discount a competing pending order at final reproof", async () => {
+    const f = preciseCleanupFixture();
+    (gateway.prepareOrder as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      f.rows.push(
+        openSellAt(0.1, {
+          size: 5,
+          positionId: f.position.positionId,
+          status: "pending",
+          orderId: createOrderId("competing-pending"),
+          clientOrderId: "competing-client" as ClientOrderId,
+        }),
+      );
+      return { orderId: "precise-prepared", __preparedOrderBrand: "PreparedOrder" };
+    });
+    await f.execution.start();
+    await f.publish();
+    expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+    expect(f.rows.find((row) => String(row.orderId) === "competing-pending")?.status).toBe(
+      "pending",
+    );
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    await f.execution.stop();
+  });
+
+  it("precise cleanup checks again when async proof delivery yields before the POST", async () => {
+    const f = preciseCleanupFixture();
+    let finalBalanceReturned = false;
+    (gateway.getPositionBalance as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(async () => 96.450587)
+      .mockImplementationOnce(async () => {
+        finalBalanceReturned = true;
+        return 96.450587;
+      });
+    fillRepo.findByTokenId = vi.fn(() => {
+      if (finalBalanceReturned) {
+        finalBalanceReturned = false;
+        queueMicrotask(() => {
+          f.state.paused = true;
+        });
+      }
+      return [];
+    });
+    await f.execution.start();
+    await f.publish();
+    expect(gateway.prepareOrder).toHaveBeenCalledOnce();
+    expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+    expect(f.rejected).toContain("exit-coverage-cleanup-state-changed");
+    await f.execution.stop();
+  });
+
   it("healthCheck returns not-ok before start", async () => {
     const h = await mod.healthCheck();
     expect(h.ok).toBe(false);
@@ -800,6 +1209,209 @@ describe("ExecutionModule", () => {
     expect(gateway.placeOrder).toHaveBeenCalledTimes(2);
     await execution.stop();
   });
+
+  it.each([
+    [false, "pause"],
+    [false, "stop"],
+    [false, "startup"],
+    [false, "transition"],
+    [true, "pause"],
+    [true, "stop"],
+    [true, "startup"],
+    [true, "transition"],
+    [true, "none"],
+    [true, "unknown"],
+  ] as const)(
+    "supplemental submit lifecycle recheck (retry=%s, change=%s)",
+    async (retry, change) => {
+      const fixture = productionSupplementalFixture("Derek", 0.0344);
+      const rows = trackPreparedRows(orderRepo, fixture.orders);
+      const positionRepo = createMockPositionRepo(fixture.position);
+      positionRepo.findActiveByTokenId = vi.fn(() => [fixture.position]);
+      const state = { paused: false };
+      const tickResolver = {
+        resolve: vi.fn().mockResolvedValueOnce(0.001).mockResolvedValue(0.0001),
+        invalidate: vi.fn(),
+      };
+      const rejected: string[] = [];
+      bus.subscribe("OrderRejected", async (event) => {
+        rejected.push(event.reason);
+      });
+      const execution = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo: createMockInventoryLotRepo(fixture.position),
+        runtimeMode: "live-lite",
+        runtimeControl: { isPaused: () => state.paused },
+        executionPolicy: () => fixture.policy,
+        tickResolver: tickResolver as any,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+      });
+      let stopped: Promise<void> | undefined;
+      let preparedCount = 0;
+      (gateway.prepareOrder as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        if (++preparedCount === (retry ? 2 : 1)) {
+          if (change === "pause") state.paused = true;
+          if (change === "stop") stopped = execution.stop();
+          if (change === "startup") execution.beginStartupFence();
+          if (change === "transition") {
+            (
+              execution as unknown as { tokenTransitions: Map<string, unknown> }
+            ).tokenTransitions.set(String(fixture.command.tokenId), {
+              targets: new Set(),
+              activePositionId: fixture.position.positionId,
+            });
+          }
+        }
+        return {
+          orderId: `supplemental-lifecycle-${preparedCount}`,
+          __preparedOrderBrand: "PreparedOrder",
+        };
+      });
+      const post = gateway.submitPreparedOrder as ReturnType<typeof vi.fn>;
+      if (retry)
+        post.mockResolvedValueOnce({
+          kind: "rejected",
+          errorCode: "INVALID_PRICE",
+          errorMessage: "invalid tick size",
+          errorDetails: { responseBody: { error: "invalid tick size" } },
+        });
+      post.mockImplementation(async () =>
+        change === "unknown"
+          ? { kind: "unknown", errorMessage: "transport timeout", errorDetails: null }
+          : { kind: "accepted", orderId: `supplemental-lifecycle-${preparedCount}` },
+      );
+      await execution.start();
+      await bus.publish("PlaceOrderRequested", { command: fixture.command, timestamp: Date.now() });
+      expect(gateway.prepareOrder).toHaveBeenCalledTimes(retry ? 2 : 1);
+      const allowed = change === "none" || change === "unknown";
+      expect(post).toHaveBeenCalledTimes(allowed ? 2 : retry ? 1 : 0);
+      expect(rejected).toHaveLength(allowed ? 0 : 1);
+      expect(
+        rows.filter((row) => row.clientOrderId === fixture.command.clientOrderId),
+      ).toHaveLength(1);
+      if (allowed) {
+        expect(orderRepo.replacePendingIdentity).toHaveBeenCalledWith(
+          createOrderId("supplemental-lifecycle-1"),
+          expect.objectContaining({ orderId: "supplemental-lifecycle-2", status: "pending" }),
+        );
+        expect(rows.find((row) => String(row.orderId) === "supplemental-lifecycle-2")?.status).toBe(
+          change === "unknown" ? "pending" : "open",
+        );
+      } else if (retry) {
+        expect(orderRepo.replacePendingIdentity).not.toHaveBeenCalled();
+        expect(rows.find((row) => String(row.orderId) === "supplemental-lifecycle-1")?.status).toBe(
+          "rejected",
+        );
+      }
+      expect(gateway.getPositionBalance).not.toHaveBeenCalled();
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+      for (const healthy of fixture.orders)
+        expect(rows.find((row) => row.orderId === healthy.orderId)).toEqual(healthy);
+      await (stopped ?? execution.stop());
+    },
+  );
+
+  it.each(["Mario", "Derek"] as const)(
+    "posts %s's canonical uncovered residual without cancelling healthy SELL coverage",
+    async (kind) => {
+      const fixture = productionSupplementalFixture(kind);
+      const historicalReject = openSellAt(0.5, {
+        orderId: createOrderId("stale-rejected-rung"),
+        clientOrderId: "stale-rejected-rung" as ClientOrderId,
+        status: "rejected",
+        positionId: fixture.position.positionId,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        metadata: { bounceRung: { ladderId: "obsolete" } },
+      });
+      const rows = trackPreparedRows(orderRepo, [...fixture.orders, historicalReject]);
+      const positionRepo = createMockPositionRepo(fixture.position);
+      positionRepo.findActiveByTokenId = vi.fn(() => [fixture.position]);
+      const execution = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo: createMockInventoryLotRepo(fixture.position),
+        runtimeMode: "live-lite",
+        runtimeControl: { isPaused: () => false },
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+      });
+      await execution.start();
+      if (kind === "Mario") {
+        const metadataWithoutQuote = { ...fixture.command.metadata };
+        delete metadataWithoutQuote.quoteMotionV1;
+        const quoteMotion = fixture.command.metadata!.quoteMotionV1 as Record<string, unknown>;
+        const invalidAskCommands: Array<Partial<PlaceOrderCommand>> = [
+          { metadata: metadataWithoutQuote },
+          {
+            metadata: {
+              ...fixture.command.metadata,
+              quoteMotionV1: { ...quoteMotion, originalTargetPrice: 0.006 },
+            },
+          },
+          {
+            metadata: {
+              ...fixture.command.metadata,
+              quoteMotionV1: { ...quoteMotion, cohortId: "wrong-ladder" },
+            },
+          },
+          { postOnly: false },
+          { price: 0.004 },
+        ];
+        for (const [index, overrides] of invalidAskCommands.entries()) {
+          await bus.publish("PlaceOrderRequested", {
+            command: {
+              ...fixture.command,
+              commandId: createCommandId(`mario-invalid-ask-${index}`),
+              clientOrderId: `mario_invalid_ask_${index}` as ClientOrderId,
+              ...overrides,
+            },
+            timestamp: Date.now(),
+          });
+        }
+        expect(gateway.prepareOrder).not.toHaveBeenCalled();
+      }
+      if (kind === "Derek") {
+        const unexplained = { orderId: historicalReject.orderId, size: 0.1 } as Fill;
+        fillRepo.findByOrderId = vi.fn((id) =>
+          id === historicalReject.orderId ? [unexplained] : [],
+        );
+        fillRepo.findByOrderIds = vi.fn(() => [unexplained]);
+        await bus.publish("PlaceOrderRequested", {
+          command: fixture.command,
+          timestamp: Date.now(),
+        });
+        expect(gateway.prepareOrder).not.toHaveBeenCalled();
+        fillRepo.findByOrderId = vi.fn(() => []);
+        fillRepo.findByOrderIds = vi.fn(() => []);
+      }
+      await bus.publish("PlaceOrderRequested", { command: fixture.command, timestamp: Date.now() });
+      expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+      expect(gateway.prepareOrder).toHaveBeenCalledWith(
+        expect.objectContaining({
+          size: fixture.command.size,
+          price: fixture.command.price,
+        }),
+      );
+      expect(
+        rows.filter((row) => row.status === "open").reduce((sum, row) => sum + row.size, 0),
+      ).toBeCloseTo(fixture.position.size, 8);
+      for (const healthy of fixture.orders)
+        expect(rows.find((row) => row.orderId === healthy.orderId)).toEqual(healthy);
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+      await execution.stop();
+    },
+  );
 
   it("places one exact missing bounce rung beside cleanup and remains restart-idempotent", async () => {
     const fixture = createBounceSupplementalFixture();
