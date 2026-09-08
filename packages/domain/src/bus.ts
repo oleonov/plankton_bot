@@ -40,6 +40,7 @@ import type {
   RiskDecision,
 } from "./types.js";
 import type { PlaceOrderCommand, CancelOrderCommand } from "./commands.js";
+import type { MarketLivenessConfirmed } from "./events.js";
 
 // ─── RuntimeEventMap ──────────────────────────────────────────────────────
 
@@ -71,6 +72,8 @@ export interface RuntimeEventMap {
     readonly reason: "full_lifetime_active_position";
     readonly source: "market-data";
   };
+
+  MarketLivenessConfirmed: Omit<MarketLivenessConfirmed, "type">;
 
   NormalizedMarketUpdated: {
     readonly markets: readonly NormalizedMarket[];

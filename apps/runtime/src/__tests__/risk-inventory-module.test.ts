@@ -36,6 +36,7 @@ import {
   W4_STALENESS_FALLBACK_MS,
 } from "../modules/risk-inventory/risk-inventory-module.js";
 import { discardStrandedFillAlert } from "../stranded-fill-alert.js";
+import { bounceTarget } from "../exit-coverage-cleanup.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
 
@@ -344,6 +345,148 @@ describe("RiskInventoryModule", () => {
       findUnreconciled: vi.fn().mockReturnValue([]),
     };
     mod = createModule();
+  });
+
+  function supplementalSignalFixture() {
+    const position = makeMtmPosition({ size: 39.13, exitOwner: "bounce", avgEntryPrice: 0.013 });
+    const policy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      bounceExit: {
+        ...DEFAULT_EXECUTION_POLICY.bounceExit,
+        targetTiers: [
+          { maxPrice: 0.02, gainPct: 0.36 },
+          ...DEFAULT_EXECUTION_POLICY.bounceExit.targetTiers.slice(1),
+        ],
+      },
+    };
+    const rung = (rungIndex: number, amount: number, cleanup = false) => ({
+      ladderId: "Derek",
+      rungIndex,
+      anchorPrice: 0.013,
+      fraction: [0.3, 0.4, 0.3][rungIndex]!,
+      originalPositionSize: 25.18,
+      remainingPositionSize: 39.77,
+      uncommittedRemainder: amount,
+      ...(cleanup ? { isCleanupRung: true } : {}),
+    });
+    const orders: Order[] = [
+      [2, 7.554],
+      [1, 10.072],
+      [2, 15],
+    ].map(([index, size], i) => ({
+      orderId: createOrderId(`derek-${i}`),
+      clientOrderId: `derek-${i}` as ClientOrderId,
+      tokenId: TOK_ID,
+      conditionId: COND_ID,
+      positionId: position.positionId,
+      side: "sell",
+      orderType: "GTC",
+      status: "open",
+      postOnly: true,
+      price: bounceTarget(policy.bounceExit, 0.013, index!, 0.001),
+      size: size!,
+      sizeUsdc: 1,
+      exchangeOrderId: `derek-${i}`,
+      signalId: null,
+      signalReason: "repricing-exit",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      botRunId: createBotRunId("test"),
+      createdAt: position.openedAt,
+      updatedAt: position.updatedAt,
+      metadata: { bounceRung: rung(index!, size!, i === 2) },
+    }));
+    const market = makeMarket({ tickSize: 0.001, minOrderSize: 5 });
+    vi.mocked(orderRepo.findOpen).mockReturnValue(orders);
+    orderRepo.findByTokenId = vi.fn(() => orders);
+    positionRepo = createMockPositionRepo(position);
+    positionRepo.findActiveByTokenId = vi.fn(() => [position]);
+    mod = createModule(undefined, {
+      executionPolicy: () => policy,
+      markToMarketEnabled: false,
+      marketRepo: { findByTokenId: () => market } as any,
+      fillRepo: { ...fillRepo, findByOrderId: vi.fn(() => []) },
+    });
+    const signal = makeSignal({
+      side: "sell",
+      reason: "repricing-exit",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      positionId: position.positionId,
+      suggestedPrice: 0.018,
+      suggestedSize: 6.504,
+      suggestedSizeUsdc: 6.504 * 0.018,
+      bounceRung: { ...rung(0, 6.504), remainingPositionSize: 39.13, rungIndicesCovered: [0] },
+    });
+    return { signal, market };
+  }
+
+  it.each([
+    { minOrderSize: null },
+    { minOrderSize: 0 },
+    { minOrderSize: -1 },
+    { minOrderSize: Number.NaN },
+    { minOrderSize: Number.POSITIVE_INFINITY },
+    { minOrderSize: "5" as unknown as number },
+    { tokenId: createTokenId("wrong-token") },
+    { conditionId: "wrong-condition" },
+  ])(
+    "seeds missing signal-time book minimum only from matching valid market %j",
+    async (firstMarket) => {
+      const { signal, market } = supplementalSignalFixture();
+      const approved: unknown[] = [],
+        rejected: string[] = [];
+      bus.subscribe("SignalApproved", async (event) => {
+        approved.push(event);
+      });
+      bus.subscribe("SignalRejected", async (event) => {
+        rejected.push(event.reason);
+      });
+      await mod.start();
+      try {
+        await bus.publish("SignalProduced", { signal, market: { ...market, ...firstMarket } });
+        expect(rejected).toEqual(["per_token_sell_limit"]);
+        expect(approved).toHaveLength(0);
+        await bus.publish("SignalProduced", { signal, market });
+        expect(approved).toHaveLength(1);
+        expect(positionRepo.save).not.toHaveBeenCalled();
+      } finally {
+        await mod.stop();
+      }
+    },
+  );
+
+  it("preserves known minimum, accepts normalized changes, and clears it on tracked removal", async () => {
+    const { signal, market } = supplementalSignalFixture();
+    const approved: unknown[] = [],
+      rejected: string[] = [];
+    bus.subscribe("SignalApproved", async (event) => {
+      approved.push(event);
+    });
+    bus.subscribe("SignalRejected", async (event) => {
+      rejected.push(event.reason);
+    });
+    await mod.start();
+    try {
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [{ ...market, minOrderSize: 10 }],
+        timestamp: Date.now(),
+      });
+      await bus.publish("SignalProduced", { signal, market });
+      expect(approved).toHaveLength(0);
+      await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: Date.now() });
+      await bus.publish("SignalProduced", { signal, market: { ...market, minOrderSize: 10 } });
+      expect(approved).toHaveLength(1);
+      await bus.publish("TrackedMarketsChanged", {
+        addedTokenIds: [],
+        removedTokenIds: [TOK_ID],
+        activeTokenIds: [],
+        timestamp: Date.now(),
+      });
+      await bus.publish("SignalProduced", { signal, market: { ...market, minOrderSize: null } });
+      expect(approved).toHaveLength(1);
+      expect(rejected.at(-1)).toBe("per_token_sell_limit");
+    } finally {
+      await mod.stop();
+    }
   });
 
   // ─── Lifecycle ──────────────────────────────────────────────────────

@@ -42,6 +42,14 @@ export interface MarketSnapshotHeartbeat {
   readonly source: "market-data";
 }
 
+export interface MarketLivenessConfirmed {
+  readonly type: "MarketLivenessConfirmed";
+  readonly tokenId: TokenId;
+  readonly conditionId: string;
+  readonly acceptingOrders: true;
+  readonly enableOrderBook: true;
+}
+
 export interface NormalizedMarketUpdated {
   readonly type: "NormalizedMarketUpdated";
   readonly markets: readonly NormalizedMarket[];
@@ -376,6 +384,7 @@ export interface OperatorCommandApplied {
 export type DomainEvent =
   | MarketSnapshotReceived
   | MarketSnapshotHeartbeat
+  | MarketLivenessConfirmed
   | NormalizedMarketUpdated
   | TrackedMarketsChanged
   | HotQuoteUpdated

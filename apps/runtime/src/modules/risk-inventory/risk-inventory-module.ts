@@ -804,6 +804,13 @@ export class RiskInventoryModule implements RuntimeModule {
       }
 
       try {
+        if (
+          signal.tokenId === market.tokenId &&
+          signal.conditionId === market.conditionId &&
+          !this.tokenMinOrderSize.has(String(signal.tokenId))
+        ) {
+          this.rememberMinOrderSize(signal.tokenId, market.minOrderSize);
+        }
         const decision = await this.riskGate.evaluate(signal);
 
         if (decision.approved) {
@@ -938,18 +945,18 @@ export class RiskInventoryModule implements RuntimeModule {
 
   // ─── Mark-to-market ───────────────────────────────────────────────
 
+  private rememberMinOrderSize(tokenId: TokenId, minOrderSize: unknown): void {
+    if (typeof minOrderSize === "number" && Number.isFinite(minOrderSize) && minOrderSize > 0) {
+      this.tokenMinOrderSize.set(String(tokenId), minOrderSize);
+    }
+  }
+
   private async handleMarketUpdate(
     payload: RuntimeEventMap["NormalizedMarketUpdated"],
   ): Promise<void> {
     const markPriceByToken = new Map<string, number>();
     for (const m of payload.markets) {
-      if (
-        typeof m.minOrderSize === "number" &&
-        Number.isFinite(m.minOrderSize) &&
-        m.minOrderSize > 0
-      ) {
-        this.tokenMinOrderSize.set(String(m.tokenId), m.minOrderSize);
-      }
+      this.rememberMinOrderSize(m.tokenId, m.minOrderSize);
       if (typeof m.midPrice === "number" && Number.isFinite(m.midPrice)) {
         markPriceByToken.set(String(m.tokenId), m.midPrice);
       }

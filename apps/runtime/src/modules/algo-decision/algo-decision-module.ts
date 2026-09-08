@@ -1433,13 +1433,29 @@ export class AlgoDecisionModule implements RuntimeModule {
       }
       if (!this.hasCurrentHeartbeatPosition(candidate)) return false;
       const outcome = classifyHeartbeatLivenessProof(candidate, current);
-      this.recordHeartbeatLivenessOutcome(outcome);
-      if (outcome !== "live") return false;
+      if (outcome !== "live") {
+        this.recordHeartbeatLivenessOutcome(outcome);
+        return false;
+      }
       this.marketCache.set(tokenId, {
         ...candidate,
         acceptingOrders: true,
         enableOrderBook: true,
       });
+      await this.deps.bus.publish("MarketLivenessConfirmed", {
+        tokenId: candidate.tokenId,
+        conditionId: String(candidate.conditionId),
+        acceptingOrders: true,
+        enableOrderBook: true,
+      });
+      if (
+        epoch !== this.lifecycleEpoch ||
+        lease.superseded ||
+        !this.hasCurrentHeartbeatPosition(candidate)
+      ) {
+        return false;
+      }
+      this.recordHeartbeatLivenessOutcome("live");
       this.deps.runtimeMetrics?.writeCounter(
         "track_algo_market_cache_hydrated_total",
         1,

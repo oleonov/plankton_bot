@@ -917,6 +917,132 @@ describe("ExecutionModule", () => {
     await f.execution.stop();
   });
 
+  it("market liveness proof unblocks the BTC cleanup without refreshing its quote", async () => {
+    const f = preciseCleanupFixture();
+    const market = makeNormalizedMarket({
+      acceptingOrders: false,
+      enableOrderBook: false,
+      bestBid: 0.015,
+      bestAsk: 0.018,
+      tickSize: 0.001,
+      minOrderSize: 5,
+    });
+    const skipped: string[] = [];
+    bus.subscribe("OrderSkipped", async (event) => {
+      skipped.push(event.reasonCode);
+    });
+    await f.execution.start();
+    await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: Date.now() });
+    await f.publish();
+    expect(skipped).toEqual(["not_accepting_orders"]);
+    expect(gateway.prepareOrder).not.toHaveBeenCalled();
+    const balanceReadsBeforeProof = vi.mocked(gateway.getPositionBalance).mock.calls.length;
+
+    const proof = bus.publish("MarketLivenessConfirmed", {
+      tokenId: market.tokenId,
+      conditionId: String(market.conditionId),
+      acceptingOrders: true,
+      enableOrderBook: true,
+    });
+    const cache = (f.execution as unknown as { marketCache: Map<string, NormalizedMarket> })
+      .marketCache;
+    // Listener must merge before publish returns, not in a later microtask.
+    expect(cache.get(String(market.tokenId))).toEqual({
+      ...market,
+      acceptingOrders: true,
+      enableOrderBook: true,
+    });
+    await proof;
+    expect(gateway.getPositionBalance).toHaveBeenCalledTimes(balanceReadsBeforeProof);
+    await bus.publish("PlaceOrderRequested", {
+      command: {
+        ...f.command,
+        commandId: createCommandId("proof-retry"),
+        clientOrderId: "plk_proof_retry" as ClientOrderId,
+      },
+      timestamp: Date.now(),
+    });
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    expect(gateway.prepareOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ size: f.position.size }),
+    );
+    expect(gateway.getPositionBalance).toHaveBeenCalledTimes(balanceReadsBeforeProof + 2);
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    await f.execution.stop();
+  });
+
+  it.each([
+    "older-inactive",
+    "wrong-condition",
+    "false-accepting",
+    "false-book",
+    "false-truthy-flags",
+    "missing",
+    "removed",
+    "later-update",
+  ])("market liveness proof preserves cache boundaries: %s", async (scenario) => {
+    await mod.start();
+    const market = makeNormalizedMarket({
+      acceptingOrders: false,
+      enableOrderBook: false,
+      active: scenario !== "older-inactive",
+      snapshotTs: 1,
+      bestBid: 0.013,
+      bestAsk: 0.019,
+      minOrderSize: 5,
+    });
+    if (scenario !== "missing") {
+      await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: Date.now() });
+    }
+    if (scenario === "removed") {
+      await bus.publish("TrackedMarketsChanged", {
+        addedTokenIds: [],
+        removedTokenIds: [market.tokenId],
+        activeTokenIds: [],
+        timestamp: Date.now(),
+      });
+    }
+    await bus.publish("MarketLivenessConfirmed", {
+      tokenId: market.tokenId,
+      conditionId: scenario === "wrong-condition" ? "other-condition" : String(market.conditionId),
+      acceptingOrders: scenario === "false-truthy-flags" ? "true" : scenario !== "false-accepting",
+      enableOrderBook: scenario === "false-truthy-flags" ? 1 : scenario !== "false-book",
+    } as any);
+    const cache = (mod as unknown as { marketCache: Map<string, NormalizedMarket> }).marketCache;
+    const accepted = scenario === "older-inactive" || scenario === "later-update";
+    expect(cache.get(String(market.tokenId))).toEqual(
+      scenario === "missing" || scenario === "removed"
+        ? undefined
+        : accepted
+          ? { ...market, acceptingOrders: true, enableOrderBook: true }
+          : market,
+    );
+    if (scenario === "later-update") {
+      await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: Date.now() });
+      expect(cache.get(String(market.tokenId))).toEqual(market);
+    }
+    if (
+      scenario === "wrong-condition" ||
+      scenario.startsWith("false-") ||
+      scenario === "later-update"
+    ) {
+      const skipped: string[] = [];
+      bus.subscribe("OrderSkipped", async (event) => {
+        skipped.push(event.reasonCode);
+      });
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({ side: "sell", size: 5, price: 0.12 }),
+        timestamp: Date.now(),
+      });
+      expect(skipped).toEqual(["not_accepting_orders"]);
+    }
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+    expect(gateway.getPositionBalance).not.toHaveBeenCalled();
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    await mod.stop();
+  });
+
   it.each([96.4505, 0, -1, Number.NaN, "throw"])(
     "precise cleanup fails closed for CLOB balance %s",
     async (balance) => {

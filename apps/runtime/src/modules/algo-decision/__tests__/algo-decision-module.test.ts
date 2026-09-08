@@ -869,6 +869,26 @@ describe("AlgoDecisionModule", () => {
       );
       expect(
         (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+          ([event]) => event === "MarketLivenessConfirmed",
+        ),
+      ).toEqual([
+        [
+          "MarketLivenessConfirmed",
+          {
+            tokenId: market.tokenId,
+            conditionId: market.conditionId,
+            acceptingOrders: true,
+            enableOrderBook: true,
+          },
+        ],
+      ]);
+      expect(
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.some(
+          ([event]) => event === "NormalizedMarketUpdated",
+        ),
+      ).toBe(false);
+      expect(
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
           ([event]) => event === "SignalProduced",
         ),
       ).toHaveLength(0);
@@ -1026,7 +1046,7 @@ describe("AlgoDecisionModule", () => {
     expect((mod as any).dirtyTokenIds.size).toBe(0);
     expect(
       (bus.publish as ReturnType<typeof vi.fn>).mock.calls.some(
-        ([event]) => event === "SignalProduced",
+        ([event]) => event === "SignalProduced" || event === "MarketLivenessConfirmed",
       ),
     ).toBe(false);
   });
@@ -1104,6 +1124,11 @@ describe("AlgoDecisionModule", () => {
     );
     expect(
       (bus.publish as ReturnType<typeof vi.fn>).mock.calls.some(
+        ([event]) => event === "MarketLivenessConfirmed",
+      ),
+    ).toBe(false);
+    expect(
+      (bus.publish as ReturnType<typeof vi.fn>).mock.calls.some(
         ([event]) => event === "SignalProduced",
       ),
     ).toBe(false);
@@ -1175,9 +1200,65 @@ describe("AlgoDecisionModule", () => {
 
       if (scenario === "live") expect((mod as any).marketCache.get(tokenId)).toBe(newer);
       else expect((mod as any).marketCache.has(tokenId)).toBe(false);
+      expect(
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.some(
+          ([event]) => event === "MarketLivenessConfirmed",
+        ),
+      ).toBe(false);
       await mod.stop();
     },
   );
+
+  it("reproves the held position after publishing confirmed liveness", async () => {
+    const tokenId = "heartbeat-position-reproof";
+    let position: Position | null = makeOpenPosition(tokenId);
+    const runtimeMetrics = { writeCounter: vi.fn(), writeLatest: vi.fn() };
+    bus.subscribe("MarketLivenessConfirmed", async () => {
+      position = null;
+    });
+    const mod = buildModule({
+      positionRepo: {
+        findOpen: vi.fn(() => (position ? [position] : [])),
+        findByTokenId: vi.fn(() => position),
+      } as unknown as import("@krabs/domain").PositionRepository,
+      marketLivenessReader: { getMarket: vi.fn(() => liveClobMarket(tokenId)) },
+      runtimeMetrics: runtimeMetrics as unknown as RuntimeMetricWriter,
+    } as any);
+    await mod.start();
+    const market = {
+      ...makeMarket(tokenId, null, 0.2),
+      acceptingOrders: false,
+      enableOrderBook: false,
+    };
+    (mod as any).marketCache.set(tokenId, market);
+    (mod as any).dirtyTokenIds.clear();
+    (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+
+    await (bus as any).emit("MarketSnapshotHeartbeat", {
+      markets: [market],
+      timestamp: Date.now(),
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+
+    expect(
+      (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([event]) => event === "MarketLivenessConfirmed",
+      ),
+    ).toHaveLength(1);
+    expect((mod as any).dirtyTokenIds.size).toBe(0);
+    expect(runtimeMetrics.writeCounter).not.toHaveBeenCalledWith(
+      "track_algo_market_cache_hydrated_total",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(runtimeMetrics.writeCounter).not.toHaveBeenCalledWith(
+      "track_algo_market_liveness_refresh_total",
+      1,
+      JSON.stringify({ outcome: "live" }),
+    );
+    await mod.stop();
+  });
 
   it("keeps cache-present, inactive, closed, dust, and flat heartbeats fully inert", async () => {
     vi.useFakeTimers();
@@ -1228,7 +1309,7 @@ describe("AlgoDecisionModule", () => {
       expect(runtimeMetrics.writeCounter).not.toHaveBeenCalled();
       expect(
         (bus.publish as ReturnType<typeof vi.fn>).mock.calls.some(
-          ([event]) => event === "SignalProduced",
+          ([event]) => event === "SignalProduced" || event === "MarketLivenessConfirmed",
         ),
       ).toBe(false);
       await mod.stop();

@@ -775,6 +775,9 @@ export class ExecutionModule implements RuntimeModule {
       this.deps.bus.subscribe("PlaceOrderRequested", (p) => this.handlePlace(p.command)),
       this.deps.bus.subscribe("CancelOrderRequested", (p) => this.handleCancel(p.command)),
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
+      this.deps.bus.subscribe("MarketLivenessConfirmed", async (p) =>
+        this.handleMarketLivenessConfirmed(p),
+      ),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
       this.deps.bus.subscribe("PositionUpdated", (p) => this.handlePositionUpdated(p)),
       // Release A Phase 3 (P6) — terminal confirmation for the transition barrier.
@@ -888,6 +891,20 @@ export class ExecutionModule implements RuntimeModule {
     for (const market of payload.markets) {
       this.marketCache.set(String(market.tokenId), market);
     }
+  }
+
+  private handleMarketLivenessConfirmed(payload: RuntimeEventMap["MarketLivenessConfirmed"]): void {
+    const tokenId = String(payload.tokenId);
+    const market = this.marketCache.get(tokenId);
+    if (
+      !market ||
+      market.conditionId !== payload.conditionId ||
+      payload.acceptingOrders !== true ||
+      payload.enableOrderBook !== true
+    )
+      return;
+    // Authoritative metadata proof is not a fresh quote and must not revive a removed row.
+    this.marketCache.set(tokenId, { ...market, acceptingOrders: true, enableOrderBook: true });
   }
 
   private async handleTrackedMarketsChanged(
