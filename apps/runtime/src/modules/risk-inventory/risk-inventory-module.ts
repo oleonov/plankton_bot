@@ -54,7 +54,11 @@ import { AlgoRiskGateImpl } from "./algo-risk-gate.js";
 import { InventoryHandler } from "./inventory-handler.js";
 import { resolveNewPositionExitOwner } from "../exit-ownership/resolve-new-position-exit-owner.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
-import type { OrderCapacityMetricsSample, WalletBudgetControlDb } from "../../wallet-buy-budget.js";
+import {
+  PER_TOKEN_SELL_LIMIT_REASON,
+  type OrderCapacityMetricsSample,
+  type WalletBudgetControlDb,
+} from "../../wallet-buy-budget.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import { countActiveOpenMarkets } from "../../exposure-calculator.js";
 import {
@@ -71,6 +75,15 @@ import type { StrandedFillAlertEmitter } from "../../stranded-fill-alert.js";
 
 const EXECUTION_PROFILE_SCALE_IN_RULE_ID = "EXECUTION_PROFILE_SCALE_IN";
 const LIVE_LITE_ACTIVE_MARKETS_CAP_FULL_REASON = "live_lite_active_markets_cap_full";
+
+type SellCoverageInputs = {
+  suggestedSize: RuntimeEventMap["SignalProduced"]["signal"]["suggestedSize"];
+  suggestedPrice: RuntimeEventMap["SignalProduced"]["signal"]["suggestedPrice"];
+  positionId: RuntimeEventMap["SignalProduced"]["signal"]["positionId"];
+  bounceRung: RuntimeEventMap["SignalProduced"]["signal"]["bounceRung"];
+  signalMarketMinOrderSize: RuntimeEventMap["SignalProduced"]["market"]["minOrderSize"];
+  riskMinOrderSizeAtEvaluation: number | null;
+};
 
 export interface RiskInventoryModuleDeps {
   bus: EventBus;
@@ -509,7 +522,12 @@ export class RiskInventoryModule implements RuntimeModule {
   }
 
   private logRejectedSignal(
-    details: { signalId: string; tokenId: string; reasons: readonly string[] },
+    details: {
+      signalId: string;
+      tokenId: string;
+      reasons: readonly string[];
+      sellCoverageInputs?: SellCoverageInputs;
+    },
     message: string,
   ): void {
     const now = this.now();
@@ -811,6 +829,7 @@ export class RiskInventoryModule implements RuntimeModule {
         ) {
           this.rememberMinOrderSize(signal.tokenId, market.minOrderSize);
         }
+        const riskMinOrderSizeAtEvaluation = this.getLatestMinOrderSize(signal.tokenId);
         const decision = await this.riskGate.evaluate(signal);
 
         if (decision.approved) {
@@ -830,12 +849,26 @@ export class RiskInventoryModule implements RuntimeModule {
         } else {
           this.signalsRejectedCount++;
           const reason = decision.rejectionReasons.join("; ");
+          const sellCoverageInputs =
+            signal.side === "sell" &&
+            signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+            decision.rejectionReasons.includes(PER_TOKEN_SELL_LIMIT_REASON)
+              ? {
+                  suggestedSize: signal.suggestedSize,
+                  suggestedPrice: signal.suggestedPrice,
+                  positionId: signal.positionId,
+                  bounceRung: signal.bounceRung,
+                  signalMarketMinOrderSize: market.minOrderSize,
+                  riskMinOrderSizeAtEvaluation,
+                }
+              : undefined;
           this.deps.signalPathTelemetry?.recordRejected(signal.signalId, reason);
           this.logRejectedSignal(
             {
               signalId: signal.signalId,
               tokenId: String(signal.tokenId),
               reasons: decision.rejectionReasons,
+              ...(sellCoverageInputs ? { sellCoverageInputs } : {}),
             },
             "signal rejected",
           );

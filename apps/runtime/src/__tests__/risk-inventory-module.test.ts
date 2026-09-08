@@ -454,6 +454,49 @@ describe("RiskInventoryModule", () => {
     },
   );
 
+  it("logs deduped bounce sell coverage inputs from the exact evaluation snapshot", async () => {
+    const { signal, market } = supplementalSignalFixture();
+    const approved: unknown[] = [];
+    const rejected: unknown[] = [];
+    bus.subscribe("SignalApproved", async (event) => {
+      approved.push(event);
+    });
+    bus.subscribe("SignalRejected", async (event) => {
+      rejected.push(event);
+    });
+    await mod.start();
+    silentLog.info.mockClear();
+
+    const unknownMinimumMarket = { ...market, minOrderSize: null };
+    const firstRejection = bus.publish("SignalProduced", { signal, market: unknownMinimumMarket });
+    const duplicateRejection = bus.publish("SignalProduced", {
+      signal,
+      market: unknownMinimumMarket,
+    });
+    await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: Date.now() });
+    await Promise.all([firstRejection, duplicateRejection]);
+
+    const rejectionLogs = silentLog.info.mock.calls.filter(
+      (call: readonly unknown[]) => call[1] === "signal rejected",
+    );
+    expect(rejected).toHaveLength(2);
+    expect(rejectionLogs).toHaveLength(1);
+    expect(rejectionLogs[0]![0]).toMatchObject({
+      sellCoverageInputs: {
+        suggestedSize: 6.504,
+        suggestedPrice: 0.018,
+        positionId: signal.positionId,
+        bounceRung: signal.bounceRung,
+        signalMarketMinOrderSize: null,
+        riskMinOrderSizeAtEvaluation: null,
+      },
+    });
+
+    await bus.publish("SignalProduced", { signal, market });
+    expect(approved).toHaveLength(1);
+    await mod.stop();
+  });
+
   it("preserves known minimum, accepts normalized changes, and clears it on tracked removal", async () => {
     const { signal, market } = supplementalSignalFixture();
     const approved: unknown[] = [],
@@ -986,6 +1029,7 @@ describe("RiskInventoryModule", () => {
       call[1] === "signal rejected";
     let rejectionLogs = silentLog.info.mock.calls.filter(isSignalRejectedLog);
     expect(rejectionLogs).toHaveLength(1);
+    expect(rejectionLogs[0]![0]).not.toHaveProperty("sellCoverageInputs");
 
     now += 60 * 60 * 1000 + 1;
     await bus.publish("SignalProduced", {
