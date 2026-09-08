@@ -16,7 +16,10 @@ import {
   S1_LADDER_RULE_ID,
   buildS1LadderId,
   buildS1SignalId,
+  TokenMinimumAuthority,
 } from "@krabs/domain";
+import { LiveExchangeGateway } from "@krabs/exchange";
+import { OrderBuilder } from "@polymarket/clob-client-v2";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
   ExchangeGateway,
@@ -111,9 +114,9 @@ function createMockGateway(): ExchangeGateway {
       orderId: "prepared-ord-1",
       __preparedOrderBrand: "PreparedOrder" as const,
     }),
-    submitPreparedOrder: vi.fn().mockResolvedValue({
-      kind: "accepted" as const,
-      orderId: "prepared-ord-1",
+    submitPreparedOrder: vi.fn(async (_prepared, beforeInvoke) => {
+      beforeInvoke?.();
+      return { kind: "accepted" as const, orderId: "prepared-ord-1" };
     }),
     placeOrder: vi
       .fn<(params: PlaceOrderParams) => Promise<PlaceOrderResult>>()
@@ -147,7 +150,9 @@ function createMockMarketRepo() {
   return {
     save: vi.fn(),
     saveBatch: vi.fn(),
-    findByTokenId: vi.fn().mockReturnValue({ active: true }),
+    findByTokenId: vi
+      .fn()
+      .mockReturnValue({ active: true, conditionId: createConditionId("cond-1") }),
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),
@@ -2203,6 +2208,13 @@ describe("ExecutionModule", () => {
       return true;
     });
     orderRepo.save = vi.fn((order) => (child = order));
+    orderRepo.updateMetadata = vi.fn<NonNullable<OrderRepository["updateMetadata"]>>(
+      (orderId, metadata) => {
+        if (!child || child.orderId !== orderId) throw new Error("capture child not found");
+        child = { ...child, metadata };
+        return child;
+      },
+    );
     (gateway.prepareOrder as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("prepare"));
     const internal = mod as any;
     let predecessorRemainingShares = 2;
@@ -2258,10 +2270,13 @@ describe("ExecutionModule", () => {
         effects.push("proof-rejected");
         return false;
       });
-    (gateway.submitPreparedOrder as ReturnType<typeof vi.fn>).mockImplementation(async () => {
-      effects.push("gateway");
-      return { kind: "accepted", orderId: "prepared-ord-1" };
-    });
+    (gateway.submitPreparedOrder as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_prepared, beforeInvoke) => {
+        beforeInvoke?.();
+        effects.push("gateway");
+        return { kind: "accepted", orderId: "prepared-ord-1" };
+      },
+    );
     const retry = (suffix: string) => ({
       ...command,
       commandId: createCommandId(`maker-capture-place:${suffix}`),
@@ -2278,7 +2293,7 @@ describe("ExecutionModule", () => {
       timestamp: Date.now(),
     });
     expect(effects).toEqual(["proof", "gateway", "proof-rejected"]);
-    expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(2);
     await mod.stop();
   });
 
@@ -2785,7 +2800,11 @@ describe("ExecutionModule", () => {
       }),
     };
     gateway.getPositionBalance = vi.fn().mockResolvedValue(5);
-    marketRepo.findByTokenId.mockReturnValue({ active: true, tradable: true });
+    marketRepo.findByTokenId.mockReturnValue({
+      active: true,
+      tradable: true,
+      conditionId: existing.conditionId,
+    });
     internal.exitOwnerIdentityRejection = () => null;
     internal.getSellPreSubmitMinOrderBlock = () => null;
     internal.getNotAcceptingOrdersSkip = () => false;
@@ -9759,11 +9778,13 @@ describe("ExecutionModule", () => {
       predecessorFraction = 1,
       positionSize = 5,
       ladder?: { anchorPrice: number; predecessorPrice: number; tickSize: number },
+      sdkToken?: TokenId,
     ) {
       const conn = bootstrapDatabase(":memory:");
       const orders = new SqliteOrderRepository(conn.db);
       const fills = new SqliteFillRepository(conn.db);
       const position = makePosition({
+        ...(sdkToken ? { tokenId: sdkToken } : {}),
         size: positionSize,
         avgEntryPrice: ladder?.anchorPrice ?? 0.2,
         costBasisUsdc: positionSize * (ladder?.anchorPrice ?? 0.2),
@@ -9772,6 +9793,7 @@ describe("ExecutionModule", () => {
       });
       const predecessorPrice = ladder?.predecessorPrice ?? 0.3;
       const predecessor = openSellAt(predecessorPrice, {
+        tokenId: position.tokenId,
         orderId: createOrderId("missing-bounce"),
         exchangeOrderId: "missing-exchange-order",
         clientOrderId: "plk_missing_bounce" as ClientOrderId,
@@ -10725,6 +10747,112 @@ describe("ExecutionModule", () => {
         await expect(
           f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 14),
         ).resolves.toMatchObject({ status: "applied" });
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
+
+    it("completes cancelled SQLite recovery with the new SDK hash and rounded shares before POST", async () => {
+      const f = await fixture(
+        undefined,
+        1,
+        6.504,
+        {
+          anchorPrice: 0.014,
+          predecessorPrice: 0.018,
+          tickSize: 0.001,
+        },
+        createTokenId("123456789"),
+      );
+      const remote = new Map<string, ExchangeOrder>();
+      const builder = new OrderBuilder(
+        {
+          getAddress: async () => "0x1111111111111111111111111111111111111111",
+          _signTypedData: async () => `0x${"11".repeat(65)}`,
+        },
+        137,
+      );
+      const client = {
+        chainId: 137,
+        createOrder: (
+          order: Parameters<OrderBuilder["buildOrder"]>[0],
+          options: Parameters<OrderBuilder["buildOrder"]>[1],
+        ) => builder.buildOrder(order, options, 2),
+        postOrder: vi.fn(async () => {
+          const child = f.orders.findOpen().find((order) => order.metadata?.exitRecoveryChildV1)!;
+          expect(child.metadata?.signedOrderFactsV1).toMatchObject({
+            orderId: child.orderId,
+            logicalSize: 6.504,
+            shares: 6.5,
+          });
+          remote.set(child.orderId, {
+            orderId: child.orderId,
+            clientOrderId: child.clientOrderId,
+            tokenId: child.tokenId,
+            side: "sell",
+            price: 0.018,
+            sizeTotal: 6.5,
+            sizeRemaining: 6.5,
+            sizeFilled: 0,
+            status: "OPEN",
+            createdAt: Date.now(),
+          });
+          return { orderID: child.orderId };
+        }),
+      };
+      const sdk = new LiveExchangeGateway({ client });
+      const minimum = new TokenMinimumAuthority(
+        async (id) => {
+          minimum.complete(minimum.begin([id]), new Map([[id, 5]]));
+          return true;
+        },
+        () => {},
+      );
+      sdk.setTokenMinimumSource(minimum);
+      vi.mocked(f.recoveryGateway.prepareOrder!).mockImplementation((params) =>
+        sdk.prepareOrder(params),
+      );
+      vi.mocked(f.recoveryGateway.submitPreparedOrder!).mockImplementation(
+        (prepared, beforeInvoke) => sdk.submitPreparedOrder(prepared, beforeInvoke),
+      );
+      vi.mocked(f.recoveryGateway.getOpenOrdersResult!).mockImplementation(async () => ({
+        ok: true,
+        data: [...remote.values()].filter((order) => order.status === "OPEN"),
+      }));
+      vi.mocked(f.recoveryGateway.getOrderResult!).mockImplementation(async (id) => ({
+        ok: true,
+        data: remote.get(id) ?? null,
+      }));
+      try {
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 22),
+        ).resolves.toMatchObject({ status: "applied" });
+        const first = f.orders
+          .findByTokenId(f.predecessor.tokenId)
+          .find((order) => order.metadata?.exitRecoveryChildV1)!;
+        remote.set(first.orderId, { ...remote.get(first.orderId)!, status: "CANCELLED" });
+        f.orders.updateStatus(first.orderId, "cancelled", first.exchangeOrderId!, "stale_exit_ttl");
+        await expect(
+          f.recovery.recoverMissingBounceExit(f.predecessor.orderId, 23),
+        ).resolves.toMatchObject({ status: "applied" });
+        const child = f.orders.findByClientOrderId(first.clientOrderId)!;
+        expect(child.orderId).not.toBe(first.orderId);
+        expect(child).toMatchObject({
+          status: "open",
+          size: 6.504,
+          metadata: {
+            exitRecoveryChildV1: first.metadata!.exitRecoveryChildV1,
+            bounceRung: first.metadata!.bounceRung,
+            signedOrderFactsV1: { orderId: child.orderId, logicalSize: 6.504, shares: 6.5 },
+          },
+        });
+        expect(f.orders.findById(f.predecessor.orderId)?.metadata).toMatchObject({
+          exitRecoveryFenceV1: { phase: "complete", childOrderId: child.orderId },
+        });
+        expect(f.orders.findByTokenId(child.tokenId)).toHaveLength(2);
+        expect(client.postOrder).toHaveBeenCalledTimes(2);
+        expect(f.recoveryGateway.cancelOrder).not.toHaveBeenCalled();
       } finally {
         await f.recovery.stop();
         f.conn.close();

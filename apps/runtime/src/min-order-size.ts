@@ -4,6 +4,33 @@ import {
 } from "./internal-order-reasons.js";
 
 const MIN_ORDER_SIZE_EPSILON = 1e-9;
+import { isKnownTokenMinimum } from "@krabs/domain";
+import { TokenMinimumBlocked, type ExchangeGateway, type PlaceOrderParams } from "@krabs/domain";
+
+export async function prepareSuccessorMinimum(
+  gateway: ExchangeGateway,
+  current: () => { params: PlaceOrderParams; state: string } | null,
+): Promise<(() => boolean) | null> {
+  const initial = current();
+  if (!initial || !gateway.prepareOrder || !gateway.validatePreparedMinimum) return null;
+  try {
+    const prepared = await gateway.prepareOrder(initial.params);
+    return () => {
+      try {
+        const latest = current();
+        if (!latest || JSON.stringify(latest) !== JSON.stringify(initial)) return false;
+        gateway.validatePreparedMinimum!(prepared);
+        return true;
+      } catch (error) {
+        if (error instanceof TokenMinimumBlocked) return false;
+        throw error;
+      }
+    };
+  } catch (error) {
+    if (error instanceof TokenMinimumBlocked) return null;
+    throw error;
+  }
+}
 
 export type SellPreSubmitGuardResult =
   | { proceed: true; minOrderSize: number }
@@ -59,7 +86,7 @@ export const MIN_ORDER_SIZE_HYDRATION_RETRY_MS = 60 * 1000;
 export function isKnownMinOrderSize(
   minOrderSize: number | null | undefined,
 ): minOrderSize is number {
-  return typeof minOrderSize === "number" && Number.isFinite(minOrderSize) && minOrderSize > 0;
+  return isKnownTokenMinimum(minOrderSize);
 }
 
 export function resolveEffectiveMinOrderSize(

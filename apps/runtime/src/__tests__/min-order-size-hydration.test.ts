@@ -12,6 +12,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createTokenId,
+  type TokenMinimumAuthority,
   DEFAULT_EXECUTION_POLICY,
   type AlgoDecisionRule,
   type AlgoRulesRepository,
@@ -26,8 +27,25 @@ import {
   type NormalizedMarket,
   type OrderBookSnapshot,
   type RuntimeEventMap,
+  type Order,
+  type Fill,
+  type Position,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
+import {
+  bootstrapDatabase,
+  SqliteOrderRepository,
+  SqliteFillRepository,
+  SqlitePositionRepository,
+} from "@krabs/db";
+import { LiveExchangeGateway, LiveMarketDataGateway } from "@krabs/exchange";
+import {
+  OrderBuilder,
+  type UserOrderV2,
+  type CreateOrderOptions,
+} from "@polymarket/clob-client-v2";
+import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
+import { ExecutionModule } from "../modules/execution/execution-module.js";
 import {
   AlgoDecisionModule,
   conversionSkipReEvalDelayMs,
@@ -49,7 +67,317 @@ import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
 import type { CandidateBookCacheEntry } from "../modules/strategy/candidate-book-cache.js";
 import type { Logger } from "../logger.js";
 
+function createObservedCache(deps: ConstructorParameters<typeof CandidateBookCache>[0]) {
+  let authority: TokenMinimumAuthority;
+  const gateway = deps.gateway;
+  return new CandidateBookCache({
+    ...deps,
+    gateway: {
+      setTokenMinimumAuthority: (source) => {
+        authority = source;
+      },
+      getOrderBooks: async (tokens) => {
+        const request = authority.begin(tokens);
+        let books = new Map<string, OrderBookSnapshot>();
+        try {
+          books = await gateway.getOrderBooks(tokens);
+          return books;
+        } finally {
+          authority.complete(
+            request,
+            new Map(tokens.map((id) => [id, books.get(id)?.minOrderSize ?? null])),
+          );
+        }
+      },
+    },
+  });
+}
+
 const TOKEN = "tok-min-hydration";
+
+function capturedDerekFixture() {
+  const tokenId = "25440768084173492596124660289664772112753850137373593713699019611407231160558";
+  const conditionId = "0xd961ab66c35dac3003e9c85dfdcf46433e6822de6a58a20569643990af941da9";
+  const positionId = `pos-${tokenId}-1788556600272`;
+  const ladderId = `${tokenId}:2026-09-04T21:16:30.000Z`;
+  const sourceBuyRootOrderIds = [
+    "0xa795341667ae50892bfe65777e50a8305df69272b27f35e04255652cb2917953",
+  ];
+  const position = {
+    positionId,
+    tokenId,
+    conditionId,
+    side: "buy",
+    size: 39.129999999999995,
+    avgEntryPrice: 0.011849987222080246,
+    costBasisUsdc: 0.46368999999999994,
+    currentValueUsdc: 0.5869499999999999,
+    liquidationValueUsdc: 0.20651999999999995,
+    liquidationPrice: 0.005277791975466394,
+    liquidationDepthExhausted: false,
+    liquidationValueUpdatedAt: "2026-09-08T08:33:12.434Z",
+    realizedPnl: 0.0052499999999999995,
+    status: "open",
+    entryStyle: "maker",
+    entryLane: "R23",
+    exitOwner: "bounce",
+    openedAt: "2026-09-04T21:16:40.272Z",
+    closedAt: null,
+    updatedAt: "2026-09-08T08:33:12.434Z",
+  } as Position;
+  const rows = [
+    {
+      orderId: "0x937128b78edd2f42d18e69254d48b28556b7a732c7e2e66aff431ebf1f34bc9e",
+      clientOrderId: "krb_505c2a4860b32b12",
+      price: 0.018,
+      size: 7.553999999999999,
+      sizeUsdc: 0.13597199999999998,
+      status: "cancelled",
+      fillProgressShares: 0.41,
+      signalId: "b3a731a6-ad6f-4aca-9879-c16f58803058",
+      signalTimestamp: "2026-09-04T22:26:00.235Z",
+      createdAt: "2026-09-04T22:26:00.318Z",
+      updatedAt: "2026-09-05T14:07:16.199Z",
+      botRunId: "run-1788533217099",
+      rungIndex: 0,
+      fraction: 0.3,
+      remaining: 25.18,
+      uncommitted: 15.107999999999999,
+      cacheStatus: "fresh-cache",
+      bestBid: 0.013,
+      bestAsk: 0.038,
+      snapshotTs: 1788560758073,
+    },
+    {
+      orderId: "0x62dd70504dac7ee990ff055aac787d848bd717710a29339600871b7b158136cb",
+      clientOrderId: "krb_87c52cd57cdf8fe3",
+      price: 0.018,
+      size: 7.144000000000002,
+      sizeUsdc: 0.128592,
+      status: "cancelled",
+      fillProgressShares: 0.64,
+      signalId: "952c154a-f44b-45c3-b600-08785f676d65",
+      signalTimestamp: "2026-09-05T14:11:25.286Z",
+      createdAt: "2026-09-05T14:11:36.368Z",
+      updatedAt: "2026-09-06T16:12:37.037Z",
+      botRunId: "run-1788568103620",
+      rungIndex: 0,
+      fraction: 0.3,
+      remaining: 24.77,
+      uncommitted: 7.144000000000002,
+      cacheStatus: "exit-book-fallback",
+      bestBid: 0.012,
+      bestAsk: 0.021,
+      snapshotTs: 1788617412540,
+    },
+    {
+      orderId: "0xc6cc590845306fd602eaef7ba7bcb8e4b4e7287ab91c93f4ea9d628af33a264d",
+      clientOrderId: "krb_f01c2aa98046ab36",
+      price: 0.027,
+      size: 7.5539999999999985,
+      sizeUsdc: 0.20395799999999994,
+      status: "open",
+      fillProgressShares: null,
+      signalId: "bb1fcef6-401c-4b25-a51b-fc47cd251425",
+      signalTimestamp: "2026-09-04T22:26:02.569Z",
+      createdAt: "2026-09-04T22:26:02.899Z",
+      updatedAt: "2026-09-04T23:12:56.311Z",
+      botRunId: "run-1788533217099",
+      rungIndex: 2,
+      fraction: 0.3,
+      remaining: 25.18,
+      uncommitted: 7.5539999999999985,
+      cacheStatus: "fresh-cache",
+      bestBid: 0.013,
+      bestAsk: 0.018,
+      snapshotTs: 1788560760402,
+    },
+    {
+      orderId: "0x87974dc8ba6121dbdf0d21d819a6e37462c4097b7844202dd7667d6ebba1551d",
+      clientOrderId: "krb_945cf1e2718f4ee7",
+      price: 0.022,
+      size: 10.072000000000001,
+      sizeUsdc: 0.221584,
+      status: "open",
+      fillProgressShares: null,
+      signalId: "6ce6220e-f2ef-485c-a21a-9401a10473aa",
+      signalTimestamp: "2026-09-04T22:43:12.168Z",
+      createdAt: "2026-09-04T22:43:30.178Z",
+      updatedAt: "2026-09-04T23:12:56.733Z",
+      botRunId: "run-1788533217099",
+      rungIndex: 1,
+      fraction: 0.4,
+      remaining: 25.18,
+      uncommitted: 10.072000000000003,
+      cacheStatus: "exit-book-fallback",
+      bestBid: 0.013,
+      bestAsk: 0.018,
+      snapshotTs: 1788561626894,
+    },
+    {
+      orderId: "0x6dbdd9cddbf0583351fb4bfeab888d51db7142a228a0cdebb00bedf99d47d04f",
+      clientOrderId: "krb_11d6448d5dfa4a7c",
+      price: 0.027,
+      size: 14.999999999999996,
+      sizeUsdc: 0.4049999999999999,
+      status: "open",
+      fillProgressShares: null,
+      signalId: "4d1940b7-cbd0-420b-8689-7072c3c689e2",
+      signalTimestamp: "2026-09-05T22:16:28.730Z",
+      createdAt: "2026-09-05T22:16:40.025Z",
+      updatedAt: "2026-09-05T22:16:40.944Z",
+      botRunId: "run-1788568103620",
+      rungIndex: 2,
+      fraction: 0.5957108816521047,
+      remaining: 39.77,
+      uncommitted: 14.999999999999996,
+      cacheStatus: "exit-book-fallback",
+      bestBid: null,
+      bestAsk: null,
+      snapshotTs: null,
+    },
+  ];
+  const orders = rows.map((row, i) => ({
+    orderId: row.orderId,
+    clientOrderId: row.clientOrderId,
+    tokenId,
+    conditionId,
+    positionId,
+    side: "sell",
+    orderType: "GTC",
+    postOnly: true,
+    price: row.price,
+    size: row.size,
+    sizeUsdc: row.sizeUsdc,
+    status: row.status,
+    cancelReason: row.status === "cancelled" ? "stale_exit_ttl" : null,
+    cancelAgeMs: null,
+    cancelAgeBucket: null,
+    fillProgressShares: row.fillProgressShares,
+    marketHorizon: null,
+    exchangeOrderId: row.orderId,
+    signalId: row.signalId,
+    signalReason: "repricing-exit",
+    decisionRuleId: "BOUNCE_EXIT_TARGET",
+    signalTimestamp: row.signalTimestamp,
+    entryStyle: "maker",
+    exchangeErrorCode: null,
+    exchangeErrorMessage: null,
+    exchangeErrorPayload: null,
+    exchangeRejectionReason: null,
+    botRunId: row.botRunId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    metadata: {
+      executionPricingMode: "bounce-exit-target",
+      cacheStatus: row.cacheStatus,
+      marketData: { bookSource: "clob", minOrderSize: 5, effectiveMinOrderSize: 5 },
+      bounceRung: {
+        ladderId,
+        rungIndex: row.rungIndex,
+        anchorPrice: 0.013,
+        fraction: row.fraction,
+        originalPositionSize: 25.18,
+        remainingPositionSize: row.remaining,
+        uncommittedRemainder: row.uncommitted,
+        ...(i === 4 ? { isCleanupRung: true } : {}),
+      },
+      orderSource: "strategy",
+      ...(i === 4
+        ? {}
+        : {
+            quoteMotionV1: {
+              version: 1,
+              kind: "bounce_exit_target",
+              cohortId: ladderId,
+              originalSuggestedPrice: row.price,
+              originalTargetPrice: row.price,
+              entryPriceCeiling: null,
+              policySchemaVersion: 1,
+              policyControlRevision: 121,
+              permanentR23ActivationId: null,
+              permanentR23ActivatedAtUtc: null,
+              initialBook: {
+                depthStatus: "full",
+                bestBid: row.bestBid,
+                bestAsk: row.bestAsk,
+                tickSize: 0.001,
+                snapshotTs: row.snapshotTs,
+                source: row.cacheStatus,
+              },
+            },
+            bounceAskCaptureLineageV1: {
+              version: 1,
+              rootOrderId: row.orderId,
+              predecessorOrderId: null,
+              replacementIndex: 0,
+              positionId,
+              sourceCohortActivatedAtUtc: "2026-08-28T09:16:57.368Z",
+              permanentR23ActivationId: "9ba3259e-29de-4394-8233-8f5e4eb05cbd",
+              permanentR23ActivatedAtUtc: "2026-08-28T09:16:57.368Z",
+              originalTargetPrice: row.price,
+              sourceBuyRootOrderIds,
+            },
+          }),
+    },
+  })) as unknown as Order[];
+  const fills = [
+    {
+      fillId: "85f6bd14-173f-423b-9057-316c0a9cc4da#maker:0",
+      size: 0.41,
+      sizeUsdc: 0.007379999999999999,
+      filledAt: "2026-09-05T14:06:37.000Z",
+    },
+    {
+      fillId: "1cbb641b-6233-4c31-a589-1ab709d7d6a9#maker:0",
+      size: 0.64,
+      sizeUsdc: 0.011519999999999999,
+      filledAt: "2026-09-06T16:11:42.000Z",
+    },
+  ].map((fill, i) => ({
+    ...fill,
+    orderId: rows[i]!.orderId,
+    tokenId,
+    conditionId,
+    side: "sell",
+    price: 0.018,
+    liquidityRole: "maker",
+    fee: 0,
+    feeRateBps: 0,
+    signalId: rows[i]!.signalId,
+    decisionRuleId: "BOUNCE_EXIT_TARGET",
+    signalTimestamp: rows[i]!.signalTimestamp,
+  })) as Fill[];
+  return {
+    capturedAt: "2026-09-08T08:37:52.997Z",
+    position,
+    orders,
+    fills,
+    candidate: {
+      at: "2026-09-08T08:18:17.828Z",
+      signalId: "8856e7b6-3689-46a7-af4f-f802f8a49e45",
+      reasonCode: "per_token_sell_limit",
+      suppressedSinceLast: 0,
+      inputs: {
+        suggestedSize: 6.504000000000005,
+        suggestedPrice: 0.018,
+        positionId,
+        bounceRung: {
+          ladderId,
+          rungIndex: 0,
+          anchorPrice: 0.013,
+          fraction: 0.3,
+          originalPositionSize: 25.18,
+          remainingPositionSize: 39.13,
+          uncommittedRemainder: 6.504000000000005,
+          rungIndicesCovered: [0],
+        },
+        signalMarketMinOrderSize: null,
+        riskMinOrderSizeAtEvaluation: null,
+      },
+    },
+  };
+}
 
 function makeLogger(): Logger {
   const log: Record<string, unknown> = {
@@ -91,7 +419,7 @@ describe("CandidateBookCache → onMinOrderSizeObserved", () => {
           new Map(tokenIds.map((tokenId) => [tokenId, makeBook(tokenId, 5)])),
       ),
     };
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway,
       log: makeLogger(),
       onMinOrderSizeObserved: (tokenId, minOrderSize) => observed.push([tokenId, minOrderSize]),
@@ -110,7 +438,7 @@ describe("CandidateBookCache → onMinOrderSizeObserved", () => {
           new Map(tokenIds.map((tokenId) => [tokenId, makeBook(tokenId, null)])),
       ),
     };
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway,
       log: makeLogger(),
       onMinOrderSizeObserved: (tokenId, minOrderSize) => observed.push([tokenId, minOrderSize]),
@@ -122,9 +450,9 @@ describe("CandidateBookCache → onMinOrderSizeObserved", () => {
     expect(observed).toEqual([]);
   });
 
-  it("reports the minimum from the upsert write path too", () => {
+  it("does not create authority or announce metadata from cache insertion", () => {
     const observed: Array<[string, number]> = [];
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway: { getOrderBooks: vi.fn(async () => new Map()) },
       log: makeLogger(),
       onMinOrderSizeObserved: (tokenId, minOrderSize) => observed.push([tokenId, minOrderSize]),
@@ -132,7 +460,8 @@ describe("CandidateBookCache → onMinOrderSizeObserved", () => {
 
     cache.upsertBooks(new Map([[TOKEN, makeBook(TOKEN, 5)]]), Date.now(), "rest");
 
-    expect(observed).toEqual([[TOKEN, 5]]);
+    expect(observed).toEqual([]);
+    expect(cache.tokenMinimum.read(TOKEN)).toEqual({ remembered: null, latest: null });
   });
 });
 
@@ -969,7 +1298,7 @@ describe("CandidateBookCache.getFreshOrRefresh — requireKnownMinOrderSize", ()
       async (tokenIds: string[]) =>
         new Map(tokenIds.map((tokenId) => [tokenId, makeBook(tokenId, 5)])),
     );
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway: { getOrderBooks } as unknown as CandidateBookGateway,
       log: makeLogger(),
     });
@@ -1008,7 +1337,7 @@ describe("CandidateBookCache.getFreshOrRefresh — requireKnownMinOrderSize", ()
       async (tokenIds: string[]) =>
         new Map(tokenIds.map((tokenId) => [tokenId, makeBook(tokenId, null)])),
     );
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway: { getOrderBooks } as unknown as CandidateBookGateway,
       log: makeLogger(),
     });
@@ -1024,17 +1353,13 @@ describe("CandidateBookCache.getFreshOrRefresh — requireKnownMinOrderSize", ()
     cache.dispose();
   });
 
-  it("re-announces the minimum when a fresh known entry short-circuits the lookup", async () => {
-    // The first observation can be dropped downstream (the token was not in
-    // MarketData's cache at the time) while the book cache keeps the value. The
-    // refresh request is then deduped for ten minutes, so a silent cache hit
-    // would leave the suppression alive with nothing left to clear it.
+  it("does not re-announce a REST observation on a fresh cache read", async () => {
     const observed: Array<[string, number]> = [];
     const getOrderBooks = vi.fn(
       async (tokenIds: string[]) =>
         new Map(tokenIds.map((tokenId) => [tokenId, makeBook(tokenId, 5)])),
     );
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway: { getOrderBooks } as unknown as CandidateBookGateway,
       log: makeLogger(),
       onMinOrderSizeObserved: (tokenId, minOrderSize) => observed.push([tokenId, minOrderSize]),
@@ -1049,7 +1374,7 @@ describe("CandidateBookCache.getFreshOrRefresh — requireKnownMinOrderSize", ()
 
     expect(resolution.status).toBe("fresh-cache");
     expect(getOrderBooks).toHaveBeenCalledTimes(1);
-    expect(observed).toEqual([[TOKEN, 5]]);
+    expect(observed).toEqual([]);
     cache.dispose();
   });
 
@@ -1064,7 +1389,7 @@ describe("CandidateBookCache.getFreshOrRefresh — requireKnownMinOrderSize", ()
     const getOrderBooks = vi.fn(
       () => new Promise<Map<string, OrderBookSnapshot>>((resolve) => resolvers.push(resolve)),
     );
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway: { getOrderBooks } as unknown as CandidateBookGateway,
       log: makeLogger(),
       onMinOrderSizeObserved: (tokenId, minOrderSize) => observed.push([tokenId, minOrderSize]),
@@ -1086,7 +1411,7 @@ describe("CandidateBookCache.getFreshOrRefresh — requireKnownMinOrderSize", ()
     cache.dispose();
   });
 
-  it("still announces the older response's minimum when the newer one omits it", async () => {
+  it("remembers older valid knowledge without overriding newer unavailable authority", async () => {
     // A /books payload can omit `min_order_size` while the previous one carried
     // it. Skipping the superseded response wholesale — correct for the BOOK —
     // then throws away the only minimum anyone observed, and the refresh is
@@ -1096,7 +1421,7 @@ describe("CandidateBookCache.getFreshOrRefresh — requireKnownMinOrderSize", ()
     const getOrderBooks = vi.fn(
       () => new Promise<Map<string, OrderBookSnapshot>>((resolve) => resolvers.push(resolve)),
     );
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway: { getOrderBooks } as unknown as CandidateBookGateway,
       log: makeLogger(),
       onMinOrderSizeObserved: (tokenId, minOrderSize) => observed.push([tokenId, minOrderSize]),
@@ -1115,7 +1440,11 @@ describe("CandidateBookCache.getFreshOrRefresh — requireKnownMinOrderSize", ()
     // The newer book still wins the cache — announcing the minimum must not
     // regress the book the ordering guard exists to protect.
     expect(cache.getEntry(TOKEN)?.book.minOrderSize ?? null).toBeNull();
-    expect(observed).toEqual([[TOKEN, 5]]);
+    expect(observed).toEqual([]);
+    expect(cache.tokenMinimum.read(TOKEN)).toMatchObject({
+      remembered: 5,
+      latest: { minimum: null },
+    });
     cache.dispose();
   });
 });
@@ -1675,6 +2004,251 @@ describe("AlgoDecisionModule — unknown minimum pre-filter", () => {
 // ─── F4 — end-to-end self-heal on the real modules, no second poll ───────────
 
 describe("min-order-size self-heal — real cache + market-data + normalization + decision", () => {
+  it("admits the captured Derek residual through planning, Risk, Execution and SDK signing without price delivery", async () => {
+    const captured = capturedDerekFixture();
+    const { position, orders, fills, candidate } = captured;
+    const bus = new InProcessEventBus();
+    const db = bootstrapDatabase(":memory:");
+    const orderRepo = new SqliteOrderRepository(db.db);
+    const fillRepo = new SqliteFillRepository(db.db);
+    const positionRepo = new SqlitePositionRepository(db.db);
+    orders.forEach((order) => orderRepo.save(order));
+    fills.forEach((fill) => fillRepo.save(fill));
+    fillRepo.markReconciled(fills.map((fill) => fill.fillId));
+    positionRepo.save(position);
+    const beforeOrders = orders.map((order) => orderRepo.findById(order.orderId));
+    const beforeFills = fillRepo.findByTokenId(position.tokenId);
+    const builder = new OrderBuilder(
+      {
+        getAddress: async () => "0x1111111111111111111111111111111111111111",
+        _signTypedData: async () => `0x${"11".repeat(65)}`,
+      },
+      137,
+    );
+    const client = {
+      chainId: 137,
+      createOrder: vi.fn((order: UserOrderV2, options: CreateOrderOptions) =>
+        builder.buildOrder(order, options, 2),
+      ),
+      postOrder: vi.fn(async () => ({
+        orderID: orderRepo.findOpen().find((order) => order.status === "pending")!.orderId,
+      })),
+    };
+    const marketData = new LiveMarketDataGateway({ client });
+    const exchange = new LiveExchangeGateway({ client });
+    const cache = new CandidateBookCache({
+      gateway: marketData,
+      log: makeLogger(),
+      onMinimumChanged: (tokenId, minimum) => {
+        void bus.publish("TokenMinimumChanged", { tokenId, minimum });
+      },
+    });
+    exchange.setTokenMinimumSource(cache.tokenMinimum);
+    const rawBook = {
+      asset_id: String(position.tokenId),
+      min_order_size: "5",
+      bids: [{ price: "0.013", size: "100" }],
+      asks: [{ price: "0.018", size: "100" }],
+      timestamp: String(Date.now()),
+    };
+    let finish!: (response: Response) => void;
+    const response = () => new Response(JSON.stringify([rawBook]), { status: 200 });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockImplementation(async () => response())
+        .mockImplementationOnce(
+          () =>
+            new Promise<Response>((resolve) => {
+              finish = resolve;
+            }),
+        ),
+    );
+    const policy = {
+      ...supplementalDeps().executionPolicy(),
+      bounceExit: {
+        ...supplementalDeps().executionPolicy().bounceExit,
+        mode: "micro_live" as const,
+        whitelistConditionIds: [String(position.conditionId)],
+      },
+    };
+    const leg = {
+      ...supplementalDeps().legStateRepo.getAll()[0]!,
+      tokenId: position.tokenId,
+      firstTradeAt: "2026-09-04T21:16:30.000Z",
+      lastTradeAt: position.openedAt,
+      cumulativeBuySize: 40.18,
+      cumulativeSellSize: 1.05,
+    };
+    // These price and FIFO inputs exercise execution; they are not a claimed 08:18 heap capture.
+    const executableMarket = makePricingMarket({
+      tokenId: position.tokenId,
+      conditionId: position.conditionId,
+      tickSize: 0.001,
+      bestBid: 0.013,
+      bestAsk: 0.018,
+      midPrice: 0.0155,
+      spread: 0.005,
+      minOrderSize: null,
+      snapshotTs: Date.now(),
+    });
+    const lots = {
+      findOpen: () => [
+        {
+          positionId: position.positionId,
+          tokenId: position.tokenId,
+          remainingSize: position.size,
+          entryPrice: position.avgEntryPrice,
+          createdAt: position.openedAt,
+        },
+      ],
+      findByTokenId: () => [],
+    };
+    const markets = {
+      findByTokenId: () => ({
+        ...makeTrackedMarket(),
+        tokenId: position.tokenId,
+        conditionId: position.conditionId,
+        tickSize: 0.001,
+      }),
+    };
+    const runtimeControl = { isPaused: () => false };
+    const delivery = makeMarketDataModule(bus, {});
+    expect(delivery.canHydrateMinOrderSize(String(position.tokenId))).toBe(false);
+    const requests: Promise<unknown>[] = [];
+    const algo = buildAlgoModule(
+      bus,
+      (id) => {
+        requests.push(cache.forceRefresh(id));
+      },
+      {
+        tokenMinimum: cache.tokenMinimum,
+        canHydrateMinOrderSize: () => true,
+        runtimeControl,
+        positionRepo,
+        orderRepo,
+        fillRepo,
+        executionPolicy: () => policy,
+        selectedMarketCache: {
+          isEligible: () => true,
+          getEligibleTokenIds: () => [position.tokenId],
+        },
+        legStateRepo: { getAll: () => [leg], get: () => leg, findOpen: () => [leg] },
+      },
+    );
+    const risk = new RiskInventoryModule({
+      bus,
+      positionRepo,
+      inventoryLotRepo: lots as never,
+      orderRepo,
+      fillRepo,
+      marketRepo: markets,
+      db: db.db,
+      log: makeLogger(),
+      runtimeControl,
+      tokenMinimum: cache.tokenMinimum,
+      executionPolicy: () => policy,
+      markToMarketEnabled: false,
+      emitStrandedFillAlert: () => {},
+    });
+    const execution = new ExecutionModule({
+      bus,
+      gateway: exchange,
+      marketRepo: markets as never,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo: lots as never,
+      log: makeLogger(),
+      runtimeMode: "live-lite",
+      runtimeControl,
+      tokenMinimum: cache.tokenMinimum,
+      executionPolicy: () => policy,
+      botRunId: "incident-regression" as never,
+    });
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      candidateBookCache: cache,
+      positionRepo,
+      orderRepo,
+      policy: () => policy,
+    });
+    const produced: RuntimeEventMap["SignalProduced"][] = [];
+    const approved: RuntimeEventMap["SignalApproved"][] = [];
+    const cancelled = vi.fn();
+    const priceEvents = vi.fn();
+    bus.subscribe("SignalProduced", async (event) => {
+      produced.push(event);
+    });
+    bus.subscribe("SignalApproved", async (event) => {
+      approved.push(event);
+    });
+    bus.subscribe("CancelOrderRequested", cancelled);
+    bus.subscribe("NormalizedMarketUpdated", priceEvents);
+    const bounded = async (label: string, work: Promise<unknown>) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          work,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(label)), 1_500);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    try {
+      await bounded("Risk startup stalled", risk.start());
+      await bounded("Execution startup stalled", execution.start());
+      bridge.subscribe();
+      await bounded("Algo startup stalled", algo.start());
+      expect(cache.tokenMinimum.read(String(position.tokenId)).remembered).toBeNull();
+      expect(risk.getLatestMinOrderSize(position.tokenId)).toBeNull();
+      const publishing = bus.publish("NormalizedMarketUpdated", {
+        markets: [executableMarket],
+        timestamp: Date.now(),
+      });
+      await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+      finish(response());
+      await bounded("initial market delivery stalled", publishing);
+      await bounded("minimum hydration stalled", Promise.all(requests));
+      await vi.waitFor(() => expect(client.postOrder).toHaveBeenCalledOnce());
+      await bus.drain();
+      expect(produced[0]?.signal.suggestedSize).toBe(candidate.inputs.suggestedSize);
+      expect(produced[0]?.signal.suggestedPrice).toBe(candidate.inputs.suggestedPrice);
+      expect(produced[0]?.market.minOrderSize).toBe(5);
+      expect(approved[0]?.market.minOrderSize).toBe(5);
+      expect(risk.getLatestMinOrderSize(position.tokenId)).toBe(5);
+      const signed = await client.createOrder.mock.results[0]!.value;
+      expect(signed.makerAmount).toBe("6500000");
+      expect(client.createOrder.mock.calls[0]?.[0].size).toBe(candidate.inputs.suggestedSize);
+      expect(cancelled).not.toHaveBeenCalled();
+      expect(priceEvents).toHaveBeenCalledOnce();
+      expect(orderRepo.findOpen()).toHaveLength(4);
+      expect(
+        orderRepo.findOpen().find((order) => !orders.some((old) => old.orderId === order.orderId)),
+      ).toMatchObject({ status: "open", size: candidate.inputs.suggestedSize, price: 0.018 });
+      expect(orders.map((order) => orderRepo.findById(order.orderId))).toEqual(beforeOrders);
+      expect(fillRepo.findByTokenId(position.tokenId)).toEqual(beforeFills);
+      expect(captured.capturedAt).toBe("2026-09-08T08:37:52.997Z");
+      expect(position.updatedAt).toBe("2026-09-08T08:33:12.434Z");
+    } finally {
+      finish?.(response());
+      cache.dispose();
+      bridge.unsubscribe();
+      await Promise.allSettled([
+        bounded("Algo shutdown stalled", algo.stop()),
+        bounded("Execution shutdown stalled", execution.stop()),
+        bounded("Risk shutdown stalled", risk.stop()),
+      ]);
+      db.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it.each([
     "success",
     "changed-orders",
@@ -1708,7 +2282,7 @@ describe("min-order-size self-heal — real cache + market-data + normalization 
           fail = reject;
         }),
     );
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway: { getOrderBooks },
       log: makeLogger(),
       onMinOrderSizeObserved: (token, minimum) =>
@@ -1812,7 +2386,7 @@ describe("min-order-size self-heal — real cache + market-data + normalization 
       async (tokenIds: string[]) =>
         new Map(tokenIds.map((tokenId) => [tokenId, makeBook(tokenId, 5)])),
     );
-    const candidateBookCache = new CandidateBookCache({
+    const candidateBookCache = createObservedCache({
       gateway: { getOrderBooks } as unknown as CandidateBookGateway,
       log: makeLogger(),
       onMinOrderSizeObserved: (tokenId, minOrderSize) =>

@@ -16,6 +16,7 @@ import {
   type OrderBookSnapshot,
   type TokenId,
   type DepHealthRecorder,
+  type TokenMinimumAuthority,
 } from "@krabs/domain";
 import { timeDepCall } from "../dep-health.js";
 import { mapMarket, mapOrderBook, parseStringOrArray } from "../mappers.js";
@@ -33,6 +34,13 @@ const GAMMA_PRICING_BASE_URL = "https://gamma-api.polymarket.com/markets";
 const DEFAULT_CLOB_HOST = "https://clob.polymarket.com";
 const BOOKS_PATH = "/books";
 const BOOKS_BATCH_SIZE = 200;
+
+function validBookIdentity(raw: unknown, tokenId: string, allowAbsent: boolean): boolean {
+  if (!raw || typeof raw !== "object") return false;
+  const book = raw as Record<string, unknown>;
+  const supplied = ["asset_id", "token_id"].filter((key) => key in book);
+  return supplied.length === 0 ? allowAbsent : supplied.every((key) => book[key] === tokenId);
+}
 
 // Transport-safety threshold to avoid 414 URI Too Large.
 // Most HTTP servers/proxies accept up to 8KB; 3500 is conservative.
@@ -169,6 +177,10 @@ function chunkItems<T>(items: readonly T[], chunkSize: number): T[][] {
 const END_CURSOR = "LTE=";
 
 export class LiveMarketDataGateway implements MarketDataGateway {
+  private tokenMinimum: TokenMinimumAuthority | undefined;
+  setTokenMinimumAuthority(authority: TokenMinimumAuthority): void {
+    this.tokenMinimum = authority;
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly client: any;
   private readonly clobHost: string;
@@ -277,13 +289,20 @@ export class LiveMarketDataGateway implements MarketDataGateway {
   }
 
   async getOrderBook(tokenId: TokenId): Promise<OrderBookSnapshot> {
+    const request = this.tokenMinimum?.begin([String(tokenId)]);
+    let minimum: number | null = null;
     try {
       const raw = await timeDepCall(this.depHealthRecorder, "clob", () =>
         this.client.getOrderBook(String(tokenId)),
       );
-      return mapOrderBook(tokenId, raw as Record<string, unknown>);
+      const valid = validBookIdentity(raw, String(tokenId), true);
+      const book = mapOrderBook(tokenId, valid ? (raw as Record<string, unknown>) : {});
+      minimum = book.minOrderSize ?? null;
+      return book;
     } catch {
       return mapOrderBook(tokenId, {});
+    } finally {
+      if (request) this.tokenMinimum?.complete(request, new Map([[String(tokenId), minimum]]));
     }
   }
 
@@ -292,25 +311,54 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     const batches = chunkItems(tokenIds, BOOKS_BATCH_SIZE);
     const url = `${this.clobHost}${BOOKS_PATH}`;
     for (const batch of batches) {
-      const response = await this.fetchWithRetry(
-        url,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(batch.map((tokenId) => ({ token_id: tokenId }))),
-        },
-        15_000,
-      );
-      if (!response.ok) {
-        await drainResponseBody(response);
-        throw new Error(`CLOB books request failed: ${response.status} ${response.statusText}`);
-      }
+      const request = this.tokenMinimum?.begin(batch);
+      const outcomes = new Map<string, number | null>(batch.map((id) => [id, null]));
+      try {
+        const response = await this.fetchWithRetry(
+          url,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(batch.map((tokenId) => ({ token_id: tokenId }))),
+          },
+          15_000,
+        );
+        if (!response.ok) {
+          await drainResponseBody(response);
+          throw new Error(`CLOB books request failed: ${response.status} ${response.statusText}`);
+        }
 
-      const books = (await response.json()) as Array<Record<string, unknown>>;
-      for (const raw of books) {
-        const tokenId = extractBookTokenId(raw);
-        if (!tokenId) continue;
-        result.set(tokenId, mapOrderBook(createTokenId(tokenId), raw));
+        const books = (await response.json()) as Array<Record<string, unknown>>;
+        const seen = new Set<string>();
+        for (const raw of books) {
+          const tokenId = extractBookTokenId(raw);
+          const aliases = [raw.asset_id, raw.token_id].filter(
+            (id): id is string => typeof id === "string" && batch.includes(id),
+          );
+          if (!tokenId || !batch.includes(tokenId) || !validBookIdentity(raw, tokenId, false)) {
+            for (const id of aliases) {
+              seen.add(id);
+              outcomes.set(id, null);
+              result.delete(id);
+            }
+            continue;
+          }
+          const book = mapOrderBook(createTokenId(tokenId), raw);
+          const minimum = book.minOrderSize ?? null;
+          if (seen.has(tokenId) && outcomes.get(tokenId) !== minimum) {
+            outcomes.set(tokenId, null);
+            result.delete(tokenId);
+            continue;
+          }
+          seen.add(tokenId);
+          outcomes.set(tokenId, minimum);
+          result.set(tokenId, book);
+        }
+      } catch (error) {
+        for (const id of batch) outcomes.set(id, null);
+        throw error;
+      } finally {
+        if (request) this.tokenMinimum?.complete(request, outcomes);
       }
     }
     return result;

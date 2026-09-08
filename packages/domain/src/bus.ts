@@ -50,6 +50,7 @@ import type { MarketLivenessConfirmed } from "./events.js";
  * giving compile-time safety on both the publish side and the handler side.
  */
 export interface RuntimeEventMap {
+  TokenMinimumChanged: { readonly tokenId: string; readonly minimum: number | null };
   PlaceOrderRequested: {
     readonly command: PlaceOrderCommand;
     readonly timestamp: number;
@@ -57,6 +58,7 @@ export interface RuntimeEventMap {
 
   CancelOrderRequested: {
     readonly command: CancelOrderCommand;
+    readonly successorMinimum?: (() => Promise<(() => boolean) | null>) | undefined;
     readonly timestamp: number;
   };
 

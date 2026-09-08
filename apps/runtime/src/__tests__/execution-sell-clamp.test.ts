@@ -106,7 +106,7 @@ function createMockMarketRepo() {
   return {
     save: vi.fn(),
     saveBatch: vi.fn(),
-    findByTokenId: vi.fn().mockReturnValue({ active: true }),
+    findByTokenId: vi.fn().mockReturnValue({ active: true, conditionId: SELL_COND }),
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),
@@ -176,6 +176,7 @@ function createMockPositionRepo(
     findByTokenId: vi.fn().mockReturnValue(pos),
     findByConditionId: vi.fn().mockReturnValue([]),
     findAllOpen: vi.fn().mockReturnValue([pos]),
+    findOpen: vi.fn().mockReturnValue([pos]),
     updateSize: vi.fn(),
     close: vi.fn(),
   } as unknown as PositionRepository;
@@ -238,6 +239,7 @@ function createMockPositionRepoWithBasis(
     findByTokenId: vi.fn().mockReturnValue(pos),
     findByConditionId: vi.fn().mockReturnValue([]),
     findAllOpen: vi.fn().mockReturnValue([pos]),
+    findOpen: vi.fn().mockReturnValue([pos]),
     updateSize: vi.fn(),
     close: vi.fn(),
   } as unknown as PositionRepository;
@@ -455,7 +457,10 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
       tickSize: 0.01,
       negRisk: false,
     });
-    expect(gateway.submitPreparedOrder).toHaveBeenCalledExactlyOnceWith(prepared);
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledExactlyOnceWith(
+      prepared,
+      expect.any(Function),
+    );
     expect(gateway.placeOrder).not.toHaveBeenCalled();
 
     await mod.stop();

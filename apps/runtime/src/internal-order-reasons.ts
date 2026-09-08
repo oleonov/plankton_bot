@@ -9,6 +9,14 @@ import {
 
 export const SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON = "sell-residual-below-min-order-size";
 export const SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON = "sell-residual-unknown-min";
+export function isLocalMinimumReason(reason: string): boolean {
+  return (
+    reason === "token-minimum-unavailable" ||
+    reason === "token-minimum-below" ||
+    reason === SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON ||
+    reason === SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON
+  );
+}
 export const RESERVED_TOKEN_LIMIT_REASON = "reserved-token-limit";
 export const PENDING_WALLET_SYNC_REASON = "pending-wallet-sync";
 export const SELL_REPLACE_PENDING_REASON = "sell-replace-pending";

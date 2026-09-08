@@ -1,3 +1,6 @@
+import { isLocalMinimumReason } from "../../internal-order-reasons.js";
+import { hasNeverPostedMinimumEvidence } from "@krabs/domain";
+import { MIN_ORDER_SIZE_HYDRATION_RETRY_MS } from "../../min-order-size.js";
 import type {
   EventBus,
   LadderBuilderOutput,
@@ -8,6 +11,7 @@ import type {
   Order,
   OrderBookSnapshot,
   OrderId,
+  PlaceOrderCommand,
   Position,
   ProfileLadderBand,
   ProfileLadderMode,
@@ -131,6 +135,8 @@ export interface ProfileLadderBookCache {
 }
 
 export interface ProfileLadderModuleDeps {
+  runtimeControl?: { isPaused(): boolean } | undefined;
+  tokenMinimum?: import("@krabs/domain").TokenMinimumSource | undefined;
   bus: EventBus;
   repository: ProfileLadderRepository;
   policy: () => ExecutionProfilePolicy;
@@ -335,6 +341,26 @@ export class ProfileLadderModule implements RuntimeModule {
     // can subscribe on a subsequent start() instead of being permanently poisoned.
     if (!this.policy().enabled) return;
     this.unsubscribers.push(
+      this.deps.bus.subscribe("TokenMinimumChanged", async ({ tokenId }) => {
+        const market = this.marketByToken.get(tokenId);
+        const state = market && this.deps.repository.getLadder(market.tokenId);
+        if (
+          !this.started ||
+          !market ||
+          state?.status !== "active" ||
+          this.deps.runtimeControl?.isPaused()
+        )
+          return;
+        const updated = {
+          ...market,
+          minOrderSize: this.deps.tokenMinimum?.read(tokenId).remembered ?? null,
+        };
+        this.marketByToken.set(tokenId, updated);
+        this.plannedRungRetryCooldownUntilByToken.delete(tokenId);
+        if (hasPersistedRecoveryAttempt(state))
+          await this.retryPersistedRecoveryAttempt(state, updated);
+        else await this.retryPlannedLiveRungsIfReady(state, updated);
+      }),
       this.deps.bus.subscribe("NormalizedMarketUpdated", async (event) => {
         await this.handleMarketUpdate(event);
       }),
@@ -368,6 +394,7 @@ export class ProfileLadderModule implements RuntimeModule {
     this.started = true;
     for (const state of this.deps.repository.findActive()) {
       this.closeTerminalLadder(state.tokenId);
+      this.restoreMinimumReplacement(state);
     }
     this.adoptExistingEnabled = this.policy().adoptExisting.enabled;
     this.ensurePolicyReloadSubscription();
@@ -717,7 +744,13 @@ export class ProfileLadderModule implements RuntimeModule {
   private async handleMarketUpdate(
     event: RuntimeEventMap["NormalizedMarketUpdated"],
   ): Promise<void> {
-    for (const market of event.markets) {
+    for (const original of event.markets) {
+      const market = this.deps.tokenMinimum
+        ? {
+            ...original,
+            minOrderSize: this.deps.tokenMinimum.read(String(original.tokenId)).remembered,
+          }
+        : original;
       this.marketByToken.set(String(market.tokenId), market);
       let state = this.deps.repository.getLadder(market.tokenId);
       if (state == null) {
@@ -2041,7 +2074,7 @@ export class ProfileLadderModule implements RuntimeModule {
           side: "sell",
         });
         const existing = probe(String(clientOrderId));
-        if (existing == null) {
+        if (existing == null || hasNeverPostedMinimumEvidence(existing)) {
           if (attempt > 0) {
             this.writeCounter("profile_ladder_clientorderid_retry_used", 1, {
               band,
@@ -2314,6 +2347,53 @@ export class ProfileLadderModule implements RuntimeModule {
     });
   }
 
+  private restoreMinimumReplacement(state: LadderState): void {
+    if (
+      !this.deps.tokenMinimum ||
+      this.deps.repository.getLadder(state.tokenId)?.status !== "active"
+    )
+      return;
+    const position = this.resolveSingleActivePosition(state.tokenId);
+    if (!position || !this.isPositionEligibleForProfileExit(position)) return;
+    for (const order of this.deps.orderRepo?.findByTokenId(state.tokenId) ?? []) {
+      const command = order.metadata?.minimumSuccessorV1 as PlaceOrderCommand | undefined;
+      const rung = command?.metadata?.profileLadder as Record<string, unknown> | undefined;
+      const replacement = command?.metadata?.profileLadderReplacement as
+        | Record<string, unknown>
+        | undefined;
+      if (
+        !command ||
+        command.type !== "PlaceOrderCommand" ||
+        command.side !== "sell" ||
+        command.tokenId !== state.tokenId ||
+        command.conditionId !== order.conditionId ||
+        command.positionId !== position.positionId ||
+        replacement?.oldOrderId !== order.orderId ||
+        rung?.ladderId !== state.ladderId ||
+        !state.activeRungs.some((item) => item.rungIndex === rung.rungIndex)
+      )
+        continue;
+      this.pendingRungByClientOrderId.set(String(command.clientOrderId), {
+        tokenId: state.tokenId,
+        ladderId: state.ladderId,
+        rungIndex: rung.rungIndex as number,
+        kind: "post_refill_replacement",
+        oldOrderId: String(order.orderId),
+      });
+      const child = this.deps.orderRepo
+        ?.findByTokenId(state.tokenId)
+        .find((item) => item.clientOrderId === command.clientOrderId);
+      if (child && ["open", "partially-filled", "filled"].includes(child.status)) {
+        this.handleOrderPlaced({
+          ...command,
+          orderId: child.orderId,
+          signalReason: command.signalReason ?? null,
+          timestamp: Date.parse(child.updatedAt),
+        });
+      }
+    }
+  }
+
   private handleOrderPlaced(event: RuntimeEventMap["OrderPlaced"]): void {
     const pending = this.pendingRungByClientOrderId.get(String(event.clientOrderId));
     if (pending == null) return;
@@ -2379,6 +2459,31 @@ export class ProfileLadderModule implements RuntimeModule {
     const pending = this.pendingRungByClientOrderId.get(String(event.clientOrderId));
     if (pending == null) return;
     const reason = "reason" in event ? event.reason : event.reasonCode;
+    if (isLocalMinimumReason(reason)) {
+      if (pending.kind === "post_refill_replacement") {
+        const owned = this.deps.orderRepo?.findByTokenId(pending.tokenId).some((order) => {
+          const successor = order.metadata?.minimumSuccessorV1 as PlaceOrderCommand | undefined;
+          return (
+            order.orderId === pending.oldOrderId && successor?.clientOrderId === event.clientOrderId
+          );
+        });
+        if (owned) delete pending.deadlineAtMs;
+        else {
+          this.pendingRungByClientOrderId.delete(String(event.clientOrderId));
+          this.replacementCooldownUntilByToken.set(
+            String(pending.tokenId),
+            event.timestamp + MIN_ORDER_SIZE_HYDRATION_RETRY_MS,
+          );
+        }
+        return;
+      }
+      this.pendingRungByClientOrderId.delete(String(event.clientOrderId));
+      this.plannedRungRetryCooldownUntilByToken.set(
+        String(pending.tokenId),
+        event.timestamp + MIN_ORDER_SIZE_HYDRATION_RETRY_MS,
+      );
+      return;
+    }
     if (
       pending.kind === "post_refill_replacement" &&
       (reason === "sell-replace-pending" || reason === "sell-replace-lock-retry")

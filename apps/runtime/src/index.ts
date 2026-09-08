@@ -1221,15 +1221,21 @@ async function main(): Promise<void> {
   // and execution is constructed first.
   const candidateBookCache = marketDataGateway.getOrderBooks
     ? new CandidateBookCache({
-        gateway: { getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway) },
+        gateway: {
+          getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway),
+          setTokenMinimumAuthority: (authority) =>
+            marketDataGateway.setTokenMinimumAuthority?.(authority),
+        },
         log: log.child({ module: "candidate-book-cache" }),
         // The REST `/books` payload is the only place `min_order_size` ever
         // appears — Gamma pricing and the WSS `book` event both omit it. Feed it
         // back so the market cache keeps it and sellable sizing can size an entry.
-        onMinOrderSizeObserved: (tokenId, minOrderSize) =>
-          marketDataModule.noteMinOrderSizeObserved(tokenId, minOrderSize),
+        onMinimumChanged: (tokenId, minimum) => {
+          void bus.publish("TokenMinimumChanged", { tokenId, minimum });
+        },
       })
     : undefined;
+  if (candidateBookCache) exchangeGateway.setTokenMinimumSource?.(candidateBookCache.tokenMinimum);
   // Closes the self-heal loop for every consumer that can be blocked by an
   // unknown exchange minimum: the REST book fetched here is what teaches the
   // market its `min_order_size` (via `onMinOrderSizeObserved` above). Left
@@ -1238,14 +1244,13 @@ async function main(): Promise<void> {
   // `MIN_ORDER_SIZE_HYDRATION_RETRY_MS` throttle around this call.
   const requestMinOrderSizeHydration = candidateBookCache
     ? (tokenId: string) => {
-        void candidateBookCache
-          .getFreshOrRefresh(tokenId, Date.now(), { requireKnownMinOrderSize: true })
-          .catch((error: unknown) => {
-            log.debug({ err: error, tokenId }, "min order size hydration refresh failed");
-          });
+        void candidateBookCache.forceRefresh(tokenId).catch((error: unknown) => {
+          log.debug({ err: error, tokenId }, "min order size hydration refresh failed");
+        });
       }
     : undefined;
   executionModule = new ExecutionModule({
+    tokenMinimum: candidateBookCache?.tokenMinimum,
     gateway: exchangeGateway,
     bus,
     marketRepo: repos.market,
@@ -1292,6 +1297,7 @@ async function main(): Promise<void> {
   const signalPathTelemetry = new SignalPathTelemetry();
   const cooldownRegistry = new CooldownRegistry(log.child({ component: "cooldown-registry" }));
   const riskInventoryModule = new RiskInventoryModule({
+    tokenMinimum: candidateBookCache?.tokenMinimum,
     bus,
     positionRepo: repos.position,
     inventoryLotRepo: repos.inventoryLot,
@@ -1472,6 +1478,8 @@ async function main(): Promise<void> {
     },
   };
   const profileLadderModule = new ProfileLadderModule({
+    runtimeControl,
+    tokenMinimum: candidateBookCache?.tokenMinimum,
     bus,
     repository: profileLadderRepo,
     policy: () => currentExecutionPolicy().executionProfile,
@@ -1516,6 +1524,8 @@ async function main(): Promise<void> {
     now: () => Date.now(),
   });
   const s1LadderModule = new S1LadderModule({
+    runtimeControl,
+    tokenMinimum: candidateBookCache?.tokenMinimum,
     bus,
     positionRepo: repos.position,
     orderRepo: repos.order,
@@ -1528,6 +1538,7 @@ async function main(): Promise<void> {
   });
 
   const algoDecisionModule = new AlgoDecisionModule({
+    tokenMinimum: candidateBookCache?.tokenMinimum,
     bus,
     legStateRepo: repos.legState,
     algoRulesRepo: repos.algoRules,
@@ -1649,11 +1660,7 @@ async function main(): Promise<void> {
     ...(requestMinOrderSizeHydration
       ? {
           requestMinOrderSizeHydration,
-          // Per token, because the capability above is module-wide: MarketData
-          // can only republish what it caches, and the discovery tier is
-          // deliberately outside those caches.
-          canHydrateMinOrderSize: (tokenId: string) =>
-            marketDataModule.canHydrateMinOrderSize(tokenId),
+          canHydrateMinOrderSize: () => candidateBookCache !== undefined,
         }
       : {}),
     evalMetricsSink: (snapshot) => {
@@ -1727,6 +1734,10 @@ async function main(): Promise<void> {
     cooldownRegistry,
   });
   const entryLifecycleModule = new EntryLifecycleModule({
+    runtimeControl,
+    gateway: exchangeGateway,
+    isOrderSubmissionActive: (clientOrderId) =>
+      executionModule?.isOrderSubmissionActive(clientOrderId) ?? false,
     bus,
     orderRepo: repos.order,
     positionRepo: repos.position,
@@ -1743,6 +1754,8 @@ async function main(): Promise<void> {
     log,
   });
   const bounceAskCaptureLifecycleModule = new BounceAskCaptureLifecycleModule({
+    runtimeControl,
+    gateway: exchangeGateway,
     bus,
     orderRepo: repos.order,
     fillRepo: repos.fill,

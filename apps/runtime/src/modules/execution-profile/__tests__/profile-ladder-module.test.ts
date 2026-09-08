@@ -1,5 +1,8 @@
 import {
   DEFAULT_EXECUTION_PROFILE_POLICY,
+  DEFAULT_EXECUTION_POLICY,
+  TokenMinimumAuthority,
+  hasNeverPostedMinimumEvidence,
   ExchangeErrorCode,
   LiquidityRole,
   OrderStatus,
@@ -25,6 +28,19 @@ import {
 } from "@krabs/domain";
 import { buildClientOrderId } from "@krabs/domain/node";
 import { InProcessEventBus } from "@krabs/event-bus";
+import {
+  bootstrapDatabase,
+  SqliteOrderRepository,
+  SqliteFillRepository,
+  SqlitePositionRepository,
+} from "@krabs/db";
+import { LiveExchangeGateway, LiveMarketDataGateway } from "@krabs/exchange";
+import {
+  OrderBuilder,
+  type UserOrderV2,
+  type CreateOrderOptions,
+} from "@polymarket/clob-client-v2";
+import { ExecutionModule } from "../../execution/execution-module.js";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -42,7 +58,7 @@ import {
 import type { ProfileLadderRepository } from "../profile-ladder-repository.js";
 import type { ExecutionProfilePolicy, ProfileState } from "../types.js";
 
-const tokenId = createTokenId("profile-ladder-token");
+const tokenId = createTokenId("444444444");
 const conditionId = createConditionId("profile-ladder-condition");
 const NOW = Date.parse("2026-06-15T00:00:00.000Z");
 const SHADOW_PLANKTON_POLICY = {
@@ -478,6 +494,7 @@ function stalePlannedNoLiveState(overrides: Partial<LadderState> = {}): LadderSt
 function setup(
   profilePolicy = policy(),
   overrides: {
+    tokenMinimum?: TokenMinimumAuthority;
     modeReader?: { getMode: (token: TokenId) => "up" | "flat" | "avg_down" | null };
     modeCandidateReader?: {
       getCandidate: (
@@ -660,7 +677,206 @@ function cheapPostRefillPolicy(
   });
 }
 
+async function sdkLedger(current: Position, refreshAllowed = () => true) {
+  const db = bootstrapDatabase(":memory:");
+  const orders = new SqliteOrderRepository(db.db);
+  const fills = new SqliteFillRepository(db.db);
+  const positions = new SqlitePositionRepository(db.db);
+  positions.save(current);
+  const builder = new OrderBuilder(
+    {
+      getAddress: async () => "0x1111111111111111111111111111111111111111",
+      _signTypedData: async () => `0x${"11".repeat(65)}`,
+    },
+    137,
+  );
+  const client = {
+    chainId: 137,
+    createOrder: vi.fn((order: UserOrderV2, options: CreateOrderOptions) =>
+      builder.buildOrder(order, options, 2),
+    ),
+    getOrderBook: vi.fn().mockResolvedValue({ min_order_size: "5" }),
+    postOrder: vi.fn(async () => ({
+      orderID: orders.findOpen().find((order) => order.status === "pending")!.orderId,
+    })),
+  };
+  const gateway = new LiveExchangeGateway({ client });
+  const marketData = new LiveMarketDataGateway({ client });
+  const source = new TokenMinimumAuthority(
+    async (id) => {
+      if (!refreshAllowed()) return false;
+      await marketData.getOrderBook(createTokenId(id));
+      return true;
+    },
+    () => {},
+  );
+  marketData.setTokenMinimumAuthority(source);
+  gateway.setTokenMinimumSource(source);
+  await marketData.getOrderBook(tokenId);
+  return { db, orders, fills, positions, client, gateway, marketData, source };
+}
+
 describe("ProfileLadderModule", () => {
+  it.each([false, true])(
+    "restores a deferred replacement after restart, accepted before restart: %s",
+    async (accepted) => {
+      const current = position({ exitOwner: "profile" });
+      const state = ladderState();
+      const oldOrderId = createOrderId(state.activeRungs[0]!.orderId!);
+      const command: PlaceOrderCommand = {
+        type: "PlaceOrderCommand",
+        commandId: createCommandId("restored-minimum"),
+        clientOrderId: "restored-minimum" as ClientOrderId,
+        tokenId,
+        conditionId,
+        positionId: current.positionId,
+        side: "sell",
+        size: 100,
+        price: 0.11,
+        orderType: "GTC",
+        tickSize: 0.001,
+        negRisk: false,
+        source: "strategy",
+        sequenceInTick: 0,
+        signalReason: "profile-ladder-exit",
+        metadata: {
+          profileLadder: { ladderId: state.ladderId, rungIndex: 0 },
+          profileLadderReplacement: { oldOrderId: String(oldOrderId) },
+        },
+      };
+      const child = openSellOrder({
+        ...command,
+        orderId: createOrderId("restored-child"),
+        exchangeOrderId: "restored-child",
+      });
+      const predecessor = openSellOrder({
+        orderId: oldOrderId,
+        status: "cancelled",
+        metadata: { minimumSuccessorV1: command },
+      });
+      const ctx = setup(policy(), {
+        tokenMinimum: new TokenMinimumAuthority(
+          async () => false,
+          () => {},
+        ),
+        positionRepo: { findOpen: () => [current] },
+        orderRepo: { findByTokenId: () => (accepted ? [predecessor, child] : [predecessor]) },
+      });
+      ctx.repo.upsertLadder(state);
+      try {
+        await ctx.module.start();
+        if (!accepted) {
+          expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]?.orderId).toBe(String(oldOrderId));
+          await ctx.bus.publish("OrderSkipped", {
+            ...command,
+            signalReason: command.signalReason ?? null,
+            signalId: null,
+            signalTimestamp: null,
+            decisionRuleId: null,
+            reasonCode: "token-minimum-below",
+            details: {},
+            timestamp: NOW,
+          });
+          await ctx.bus.publish("OrderPlaced", {
+            ...command,
+            orderId: child.orderId,
+            signalReason: command.signalReason ?? null,
+            timestamp: NOW,
+          });
+        }
+        expect(ctx.repo.getLadder(tokenId)?.activeRungs[0]?.orderId).toBe(String(child.orderId));
+        expect(ctx.orders).toHaveLength(0);
+        expect(ctx.cancels).toHaveLength(0);
+      } finally {
+        await ctx.module.stop();
+      }
+    },
+  );
+
+  it("does not exhaust profile retry identities on seven local blocks before an actual SDK acceptance", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    const current = position({ exitOwner: "profile" });
+    const { db, orders, fills, positions, client, gateway, marketData, source } =
+      await sdkLedger(current);
+    const ctx = setup(policy(), {
+      tokenMinimum: source,
+      runtimeMode: "live-lite",
+      positionRepo: {
+        findOpen: () => positions.findOpen(),
+        findActiveByTokenId: (id) => positions.findActiveByTokenId(id),
+      },
+      orderRepo: {
+        findByTokenId: (id) => orders.findByTokenId(id),
+        findByClientOrderId: (id) => orders.findByClientOrderId(id as ClientOrderId),
+      },
+    });
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), child: () => log };
+    const execution = new ExecutionModule({
+      bus: ctx.bus,
+      gateway,
+      orderRepo: orders,
+      fillRepo: fills,
+      positionRepo: positions,
+      inventoryLotRepo: {
+        findOpen: () => [{ remainingSize: current.size, entryPrice: current.avgEntryPrice }],
+      } as never,
+      marketRepo: { findByTokenId: () => market() } as never,
+      tokenMinimum: source,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+      botRunId: "profile-minimum" as never,
+      log: log as never,
+      executionPolicy: () => ({ ...DEFAULT_EXECUTION_POLICY, executionProfile: policy() }),
+    });
+    let blocking = true;
+    const block = () => {
+      if (blocking) source.complete(source.begin([tokenId]), new Map([[tokenId, 500]]));
+    };
+    const save = orders.save.bind(orders);
+    vi.spyOn(orders, "save").mockImplementation((order) => {
+      save(order);
+      if (order.status === "pending") block();
+    });
+    const replace = orders.replacePendingIdentity.bind(orders);
+    vi.spyOn(orders, "replacePendingIdentity").mockImplementation((...args) => {
+      replace(...args);
+      block();
+    });
+    const rearm = async () => {
+      await marketData.getOrderBook(tokenId);
+      await ctx.bus.publish("TokenMinimumChanged", { tokenId, minimum: 5 });
+      await ctx.bus.drain();
+    };
+    try {
+      await execution.start();
+      await ctx.module.start();
+      await ctx.bus.publish("NormalizedMarketUpdated", {
+        markets: [market({ minOrderSize: 5 })],
+        timestamp: NOW,
+      });
+      await ctx.bus.publish("PositionUpdated", { position: current });
+      await ctx.bus.drain();
+      for (let i = 1; i < 7; i++) await rearm();
+      expect(client.postOrder).not.toHaveBeenCalled();
+      const rejected = orders.findByTokenId(tokenId).find(hasNeverPostedMinimumEvidence)!;
+      expect(rejected).toBeDefined();
+      expect(new Set(ctx.orders.map((command) => command.clientOrderId)).size).toBe(1);
+      expect(ctx.orders).toHaveLength(7);
+      expect(ctx.repo.getLadder(tokenId)?.status).toBe("active");
+      blocking = false;
+      await rearm();
+      expect(client.postOrder).toHaveBeenCalledOnce();
+      expect(orders.findByClientOrderId(rejected.clientOrderId)?.status).toBe("open");
+      expect(ctx.orders.every((command) => command.size === rejected.size)).toBe(true);
+    } finally {
+      await ctx.module.stop();
+      await execution.stop();
+      db.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("bounds its market cache across tracked removal and restart", async () => {
     const ctx = setup();
     const retainedTokenId = createTokenId("profile-ladder-retained-token");
@@ -4709,6 +4925,155 @@ describe("ProfileLadderModule", () => {
   });
 
   describe("post-refill stale live rung dry-run follow-through", () => {
+    it.each([false, true])(
+      "recovers a budget-deferred profile replacement, cancelled first: %s",
+      async (cancelledFirst) => {
+        vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+        vi.setSystemTime(NOW);
+        const current = position({
+          exitOwner: "profile",
+          avgEntryPrice: 0.08,
+          costBasisUsdc: 20,
+          size: 250,
+        });
+        let budgetAvailable = cancelledFirst;
+        const { db, orders, fills, positions, client, gateway, source } = await sdkLedger(
+          current,
+          () => budgetAvailable,
+        );
+        const state = staleLowerPriorityState();
+        const predecessor = openSellOrder({
+          orderId: createOrderId(state.activeRungs[0]!.orderId!),
+          exchangeOrderId: state.activeRungs[0]!.orderId!,
+          positionId: current.positionId,
+          price: 0.104,
+          size: 40,
+          sizeUsdc: 4.16,
+          signalReason: "profile-ladder-exit",
+          decisionRuleId: "PROFILE_LADDER",
+          metadata: { source: "profile_ladder" },
+        });
+        orders.save(predecessor);
+        const cancelOrder = vi.fn(async ({ orderID }: { orderID: string }) => {
+          budgetAvailable = false;
+          return { canceled: [orderID], not_canceled: {} };
+        });
+        Object.assign(client, {
+          cancelOrder,
+          getTradesPaginated: vi.fn().mockResolvedValue({ data: [], next_cursor: "LTE=" }),
+          getOrder: vi.fn(async () => ({
+            id: predecessor.exchangeOrderId,
+            asset_id: tokenId,
+            side: "SELL",
+            price: String(predecessor.price),
+            original_size: "40",
+            size_matched: "0",
+            status: "CANCELLED",
+            created_at: Date.parse(predecessor.createdAt) / 1000,
+          })),
+        });
+        const ctx = setup(postRefillPolicy({ dryRun: false, replacementEnabled: true }), {
+          tokenMinimum: source,
+          runtimeMode: "live-lite",
+          now: () => Date.now(),
+          modeReader: { getMode: () => "flat" },
+          isProfileOwned: () => true,
+          positionRepo: { findOpen: () => positions.findOpen() },
+          orderRepo: { findByTokenId: (id) => orders.findByTokenId(id) },
+        });
+        ctx.repo.upsertLadder(state);
+        const log = {
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+          debug: vi.fn(),
+          child: () => log,
+        };
+        const execution = new ExecutionModule({
+          bus: ctx.bus,
+          gateway,
+          orderRepo: orders,
+          fillRepo: fills,
+          positionRepo: positions,
+          inventoryLotRepo: {
+            findOpen: () => [{ remainingSize: current.size, entryPrice: current.avgEntryPrice }],
+          } as never,
+          marketRepo: { findByTokenId: () => market() } as never,
+          tokenMinimum: source,
+          runtimeMode: "live-lite",
+          runtimeControl: { isPaused: () => false },
+          botRunId: "profile-replacement-budget" as never,
+          log: log as never,
+          executionPolicy: () => ({ ...DEFAULT_EXECUTION_POLICY, enabled: true }),
+        });
+        const pending = () =>
+          (ctx.module as any).pendingRungByClientOrderId as Map<string, { deadlineAtMs?: number }>;
+        const refresh = async () => {
+          await ctx.bus.publish("PositionUpdated", { position: current });
+          await ctx.bus.drain();
+        };
+        try {
+          await execution.start();
+          await ctx.module.start();
+          await rebuildWithPostRefillContext(ctx, current, { minOrderSize: 5 });
+          await ctx.bus.drain();
+          expect(ctx.orders.length).toBeGreaterThan(0);
+          const replacement = ctx.orders[0]!;
+          expect(client.postOrder).not.toHaveBeenCalled();
+          expect(cancelOrder).toHaveBeenCalledTimes(cancelledFirst ? 1 : 0);
+          expect(orders.findById(predecessor.orderId)?.status).toBe(
+            cancelledFirst ? "cancelled" : "open",
+          );
+          expect(Boolean(orders.findById(predecessor.orderId)?.metadata?.minimumSuccessorV1)).toBe(
+            cancelledFirst,
+          );
+          expect(pending().size).toBe(cancelledFirst ? 1 : 0);
+          const attempts = ctx.repo
+            .getLadder(tokenId)
+            ?.activeRungs.map((rung) => rung.preExchangeRetryCount ?? 0);
+          budgetAvailable = true;
+          const requests = ctx.orders.length;
+          await refresh();
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(ctx.orders).toHaveLength(requests);
+          expect(client.postOrder).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(120_001);
+          if (!cancelledFirst) {
+            cancelOrder.mockImplementation(async ({ orderID }) => ({
+              canceled: [orderID],
+              not_canceled: {},
+            }));
+            await rebuildWithPostRefillContext(ctx, current, { minOrderSize: 5 });
+          } else await refresh();
+          await ctx.bus.drain();
+          expect(source.read(tokenId).latest?.minimum).toBe(5);
+          expect(cancelOrder).toHaveBeenCalledOnce();
+          expect(client.postOrder).toHaveBeenCalledOnce();
+          const child = orders.findByClientOrderId(replacement.clientOrderId)!;
+          expect(child).toMatchObject({
+            status: "open",
+            price: replacement.price,
+            size: replacement.size,
+          });
+          expect(child.metadata?.signedOrderFactsV1).toMatchObject({
+            orderId: child.orderId,
+            logicalSize: replacement.size,
+          });
+          expect(pending().size).toBe(0);
+          expect(
+            ctx.repo.getLadder(tokenId)?.activeRungs.map((rung) => rung.preExchangeRetryCount ?? 0),
+          ).toEqual(attempts);
+          await refresh();
+          expect(client.postOrder).toHaveBeenCalledOnce();
+        } finally {
+          await ctx.module.stop();
+          await execution.stop();
+          db.close();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     function staleLowerPriorityState(overrides: Partial<LadderState> = {}): LadderState {
       return ladderState({
         activeRungs: [

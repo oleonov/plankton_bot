@@ -20,14 +20,24 @@ import {
   createOrderId,
   createPositionId,
   createTokenId,
+  TokenMinimumAuthority,
+  hasNeverPostedMinimumEvidence,
 } from "@krabs/domain";
+import { bootstrapDatabase, SqliteOrderRepository, SqliteFillRepository } from "@krabs/db";
+import { LiveExchangeGateway, LiveMarketDataGateway } from "@krabs/exchange";
+import {
+  OrderBuilder,
+  type UserOrderV2,
+  type CreateOrderOptions,
+} from "@polymarket/clob-client-v2";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { buildClientOrderId } from "@krabs/domain/node";
 import { EntryLifecycleModule } from "../entry-lifecycle-module.js";
+import { ExecutionModule } from "../../execution/execution-module.js";
 import type { Logger } from "../../../logger.js";
 import { buildMakerCaptureRepriceIdentity } from "../../../maker-capture-reprice.js";
 
-const TOKEN = createTokenId("tok-entry-life");
+const TOKEN = createTokenId("987654321");
 const CONDITION = createConditionId("cond-entry-life");
 const ENABLED_ENTRY_LIFECYCLE_POLICY = {
   ...DEFAULT_EXECUTION_POLICY,
@@ -73,6 +83,291 @@ function captureProof(stage: "cancel_pending" | "ready" | "submitted", signalId 
 }
 
 describe("EntryLifecycleModule", () => {
+  it.each(["accepted", "unknown", "minimum"])(
+    "preserves an active capture during final proof with SDK outcome: %s",
+    async (outcome) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(1_000);
+      const db = bootstrapDatabase(":memory:");
+      const orders = new SqliteOrderRepository(db.db);
+      const fills = new SqliteFillRepository(db.db);
+      const window = {
+        activatedAtUtc: new Date(0).toISOString(),
+        expiresAtUtc: new Date(10_000).toISOString(),
+        captureNextR23: true,
+        maxCumulativeAcceptedPendingUsdc: 1,
+      };
+      const policy = {
+        ...DEFAULT_EXECUTION_POLICY,
+        entryPriceCeiling: 0.45,
+        makerEntry: {
+          ...DEFAULT_EXECUTION_POLICY.makerEntry,
+          mode: "micro_live" as const,
+          microLiveWindow: window,
+          captureBookReprice: { enabled: true, maxRepricesPerRoot: 5 },
+        },
+      };
+      const root = makeOrder({
+        status: "cancelled",
+        cancelReason: "maker_capture_reprice",
+        sizeUsdc: 0.9,
+        signalReason: "probe-entry",
+        decisionRuleId: "R23_DIP_TRIGGER",
+        entryStyle: "maker",
+        metadata: {
+          makerMicroLiveLifecycle: {
+            kind: "r23_capture",
+            activatedAtUtc: window.activatedAtUtc,
+            expiresAtUtc: window.expiresAtUtc,
+            fillWaitMs: 10_000,
+          },
+          makerCaptureLineageV1: {
+            version: 1,
+            rootOrderId: "ord-entry-life",
+            predecessorOrderId: null,
+            replacementIndex: 0,
+            rootNotionalUsdc: 0.9,
+          },
+          quoteMotionV1: {
+            version: 1,
+            kind: "r23_capture",
+            cohortId: window.activatedAtUtc,
+            originalSuggestedPrice: 0.4,
+            originalTargetPrice: null,
+            entryPriceCeiling: 0.45,
+            policySchemaVersion: policy.version,
+            policyControlRevision: 7,
+            permanentR23ActivationId: null,
+            permanentR23ActivatedAtUtc: null,
+            initialBook: {
+              depthStatus: "full",
+              bestBid: 0.3,
+              bestAsk: 0.36,
+              tickSize: 0.01,
+              snapshotTs: 0,
+              source: "clob",
+            },
+          },
+        },
+      });
+      orders.save(root);
+      const identity = buildMakerCaptureRepriceIdentity(root.orderId, root.orderId, 1);
+      const proof = captureProof("ready", identity.lifecycleSignalId);
+      proof.prepared = {
+        ...proof.prepared!,
+        predecessorRemainingShares: 3,
+        predecessorSharesSubtracted: 3,
+      };
+      const intent: MakerCaptureRepriceIntent = {
+        ...identity,
+        predecessorOrderId: root.orderId,
+        rootOrderId: root.orderId,
+        tokenId: TOKEN,
+        conditionId: CONDITION,
+        replacementIndex: 1,
+        status: "cancel_pending",
+        candidatePrice: null,
+        replacementSize: null,
+        childOrderId: null,
+        failure: null,
+        createdAt: root.createdAt,
+        updatedAt: root.updatedAt,
+        proof: { ...proof, prepared: null },
+      };
+      expect(orders.claimMakerCaptureRepriceIntent(intent)).toBe(true);
+      expect(orders.markMakerCaptureRepriceReady(intent.intentId, 0.31, 2, proof.prepared)).toBe(
+        true,
+      );
+      const clientOrderId = buildClientOrderId({
+        signalId: intent.lifecycleSignalId,
+        tokenId: TOKEN,
+        side: "buy",
+      });
+      const postOrder = vi.fn(async () => {
+        const child = orders.findByClientOrderId(clientOrderId)!;
+        expect(child.status).toBe("pending");
+        expect(
+          orders.findMakerCaptureRepriceIntentBySignal(intent.lifecycleSignalId),
+        ).toMatchObject({
+          status: "submitted",
+          childOrderId: child.orderId,
+          proof: { submit: { childOrderId: child.orderId } },
+        });
+        if (outcome === "unknown") throw new Error("socket timeout");
+        return { orderID: child.orderId };
+      });
+      const getOrderBook = vi.fn().mockResolvedValue({ min_order_size: "1" });
+      const { gateway, source, marketData } = prospectiveGateway({
+        postOrder,
+        getOrderBook,
+        getTradesPaginated: async () => ({ data: [], next_cursor: "LTE=" }),
+        getOrder: async () => ({
+          id: root.exchangeOrderId,
+          asset_id: TOKEN,
+          side: "BUY",
+          price: "0.3",
+          original_size: "3",
+          size_matched: "0",
+          status: "CANCELLED",
+          created_at: 0,
+        }),
+      });
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const candidateBookCache = {
+        prime: vi.fn(async () => {
+          await held;
+          return new Map([
+            [
+              String(TOKEN),
+              {
+                tokenId: String(TOKEN),
+                snapshotTs: 1_000,
+                cachedAtMs: 1_000,
+                sourcePolledAtMs: 1_000,
+                sourceKind: "rest" as const,
+                bookSource: "clob" as const,
+                book: {
+                  tokenId: TOKEN,
+                  bids: [{ price: 0.3, size: 10 }],
+                  asks: [{ price: 0.36, size: 10 }],
+                  bestBid: 0.3,
+                  bestAsk: 0.36,
+                  midPrice: 0.33,
+                  spread: 0.06,
+                  timestamp: 1_000,
+                  minOrderSize: 1,
+                },
+              },
+            ],
+          ]);
+        }),
+      };
+      const bus = new InProcessEventBus();
+      const market = makeMarket({ bestBid: 0.3, bestAsk: 0.36, midPrice: 0.33, spread: 0.06 });
+      const rejected: string[] = [];
+      bus.subscribe("OrderRejected", async (event) => {
+        rejected.push(event.reason);
+      });
+      bus.subscribe("OrderSkipped", async (event) => {
+        rejected.push(event.reasonCode);
+      });
+      const execution = new ExecutionModule({
+        bus,
+        gateway,
+        tokenMinimum: source,
+        orderRepo: orders,
+        fillRepo: fills,
+        marketRepo: { findByTokenId: () => market } as never,
+        runtimeMode: "live-lite",
+        runtimeControl: { isPaused: () => false },
+        log: makeLog(),
+        botRunId: createBotRunId("capture-active"),
+        executionPolicy: () => policy,
+        executionPolicySnapshot: () => ({ policy, controlRevision: 7 }),
+        candidateBookCache,
+      });
+      const module = buildModule({
+        bus,
+        gateway,
+        orderRepo: orders,
+        fillRepo: fills,
+        policy: () => policy,
+        policySnapshot: () => ({ policy, controlRevision: 7 }),
+        isOrderSubmissionActive: (id) => execution.isOrderSubmissionActive(id),
+      });
+      const command = {
+        type: "PlaceOrderCommand" as const,
+        commandId: "capture-active" as never,
+        clientOrderId,
+        tokenId: TOKEN,
+        conditionId: CONDITION,
+        source: "strategy" as const,
+        side: "buy" as const,
+        size: 2,
+        price: 0.31,
+        tickSize: 0.01,
+        negRisk: false,
+        orderType: "GTC" as const,
+        postOnly: true,
+        entryStyle: "maker" as const,
+        sequenceInTick: 1,
+        signalId: intent.lifecycleSignalId,
+        signalReason: "probe-entry" as const,
+        decisionRuleId: "R23_DIP_TRIGGER",
+        signalTimestamp: new Date(1_000).toISOString(),
+        metadata: {
+          makerCaptureRepriceV1: {
+            version: 1,
+            intentId: intent.intentId,
+            rootOrderId: root.orderId,
+            predecessorOrderId: root.orderId,
+            replacementIndex: 1,
+          },
+        },
+      };
+      try {
+        await execution.start();
+        await module.start();
+        const placing = bus.publish("PlaceOrderRequested", { command, timestamp: 1_000 });
+        await vi.waitFor(() =>
+          expect({ rejected, status: orders.findByClientOrderId(clientOrderId)?.status }).toEqual({
+            rejected: [],
+            status: "pending",
+          }),
+        );
+        expect(candidateBookCache.prime).toHaveBeenCalledOnce();
+        await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: 1_000 });
+        await bus.publish("TokenMinimumChanged", { tokenId: TOKEN, minimum: 1 });
+        expect(
+          orders.findMakerCaptureRepriceIntentBySignal(intent.lifecycleSignalId),
+        ).toMatchObject({ status: "ready", childOrderId: null, proof: { submit: null } });
+        expect(postOrder).not.toHaveBeenCalled();
+        if (outcome === "minimum") {
+          getOrderBook.mockResolvedValue({ min_order_size: "3" });
+          await marketData.getOrderBook(TOKEN);
+        }
+        release();
+        await placing;
+        if (outcome === "minimum") {
+          expect(postOrder).not.toHaveBeenCalled();
+          const blocked = orders.findByClientOrderId(clientOrderId)!;
+          expect(hasNeverPostedMinimumEvidence(blocked)).toBe(true);
+          expect(
+            orders.findMakerCaptureRepriceIntentBySignal(intent.lifecycleSignalId),
+          ).toMatchObject({ status: "ready", childOrderId: null, proof: { submit: null } });
+          getOrderBook.mockResolvedValue({ min_order_size: "1" });
+          await marketData.getOrderBook(TOKEN);
+          await bus.publish("PlaceOrderRequested", { command, timestamp: 1_000 });
+          expect(rejected).toEqual(["token-minimum-below"]);
+        }
+        const child = orders.findByClientOrderId(clientOrderId)!;
+        expect(postOrder).toHaveBeenCalledOnce();
+        expect(child.status).toBe(outcome === "unknown" ? "pending" : "open");
+        expect(child.metadata?.makerCaptureLineageV1).toMatchObject({
+          predecessorOrderId: root.orderId,
+          replacementIndex: 1,
+        });
+        expect(hasNeverPostedMinimumEvidence(child)).toBe(false);
+        expect(execution.isOrderSubmissionActive(clientOrderId)).toBe(false);
+        await publishMarket(bus, market);
+        await bus.publish("PlaceOrderRequested", { command, timestamp: 1_000 });
+        expect(postOrder).toHaveBeenCalledOnce();
+        expect(orders.findMakerCaptureRepriceIntentBySignal(intent.lifecycleSignalId)?.status).toBe(
+          outcome === "unknown" ? "submitted" : "completed",
+        );
+      } finally {
+        release();
+        await module.stop();
+        await execution.stop();
+        db.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("publishes startup cancellation for an expired frozen maker capture", async () => {
     const bus = new InProcessEventBus();
     const order = makeOrder({
@@ -1022,7 +1317,7 @@ describe("EntryLifecycleModule", () => {
         tokenId: TOKEN,
         bids: [
           { price: 0.32, size: 10 },
-          { price: 0.3, size: 1 },
+          { price: 0.3, size: 2.3 },
         ],
         asks: [{ price: 0.36, size: 10 }],
         bestBid: 0.32,
@@ -1094,7 +1389,7 @@ describe("EntryLifecycleModule", () => {
         candidateBookCache: {
           prime: vi.fn(async () => {
             bookPolls++;
-            if (bookPolls === 2) {
+            if (bookPolls === 3) {
               startRetry();
               await retryGate;
             }
@@ -1133,6 +1428,7 @@ describe("EntryLifecycleModule", () => {
         cancelAgeMs: now - Date.parse(root.createdAt),
         updatedAt: new Date(now).toISOString(),
       };
+      book.bids[1]!.size = 1;
       if (activationId) {
         controlRevision = 8;
         await module.stop();
@@ -1152,13 +1448,13 @@ describe("EntryLifecycleModule", () => {
       await bus.drain();
 
       expect(signals).toHaveLength(0);
-      expect(bookPolls).toBe(activationId ? 0 : 1);
+      expect(bookPolls).toBe(activationId ? 1 : 2);
       expect(getOrderResult).toHaveBeenCalledTimes(activationId ? 0 : 1);
       expect(scheduled).toEqual([
         { fn: expect.any(Function), delayMs: activationId ? 3_000 : 1_500 },
       ]);
       for (let i = 0; i < 10; i++) await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
-      expect(bookPolls).toBe(activationId ? 0 : 1);
+      expect(bookPolls).toBe(activationId ? 1 : 2);
       expect(getOrderResult).toHaveBeenCalledTimes(activationId ? 0 : 1);
 
       now = 4_000;
@@ -1166,12 +1462,12 @@ describe("EntryLifecycleModule", () => {
       scheduled[0]!.fn();
       if (activationId) {
         await vi.waitFor(() => expect(signals).toHaveLength(1));
-        expect(bookPolls).toBe(1);
+        expect(bookPolls).toBe(2);
         expect(getOrderResult).toHaveBeenCalledTimes(1);
       } else {
         await retryStarted;
         await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
-        expect(bookPolls).toBe(2);
+        expect(bookPolls).toBe(3);
         expect(getOrderResult).toHaveBeenCalledTimes(2);
         releaseRetry();
       }
@@ -1188,7 +1484,7 @@ describe("EntryLifecycleModule", () => {
         predecessorLevelExternalShares: 1,
         candidatePrice: 0.33,
       });
-      expect(bookPolls).toBe(activationId ? 1 : 2);
+      expect(bookPolls).toBe(activationId ? 2 : 3);
       downstreamFails = false;
       await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
       expect(signals.map((signal) => signal.signalId)).toEqual([
@@ -1412,49 +1708,103 @@ describe("EntryLifecycleModule", () => {
     await module.stop();
   });
 
-  it("fails a ready child persisted before its required submit proof", async () => {
-    const root = makeOrder();
-    const child = makeOrder({ orderId: createOrderId("recovered-child"), status: "open" });
-    const intent: MakerCaptureRepriceIntent = {
-      intentId: "ready-intent",
-      predecessorOrderId: root.orderId,
-      lifecycleSignalId: "ready-signal",
-      rootOrderId: root.orderId,
-      tokenId: TOKEN,
-      conditionId: CONDITION,
-      replacementIndex: 1,
-      status: "ready",
-      candidatePrice: 0.31,
-      replacementSize: 2,
-      childOrderId: null,
-      createdAt: new Date(0).toISOString(),
-      updatedAt: new Date(0).toISOString(),
-      failure: null,
-      proof: captureProof("ready"),
-    };
-    const repo = makeOrderRepo(root);
-    repo.findRecoverableMakerCaptureRepriceIntents = vi.fn(() => [intent]);
-    vi.mocked(repo.findByClientOrderId).mockReturnValue(child);
-    repo.markMakerCaptureRepriceSubmitted = vi.fn(() => true);
-    repo.markMakerCaptureRepriceTerminal = vi.fn(() => true);
-
-    const module = buildModule({ orderRepo: repo });
-    await module.start();
-
-    expect(repo.markMakerCaptureRepriceSubmitted).not.toHaveBeenCalled();
-    expect(repo.markMakerCaptureRepriceTerminal).toHaveBeenCalledWith(
-      intent.intentId,
-      "failed",
-      "child-before-submit-proof",
-    );
-    await module.stop();
-  });
+  it.each(["open", "pending"] as const)(
+    "fails an orphaned %s child without submit proof at startup",
+    async (status) => {
+      const root = makeOrder();
+      const child = makeOrder({
+        orderId: createOrderId("recovered-child"),
+        exchangeOrderId: "recovered-child",
+        status,
+        clientOrderId: buildClientOrderId({
+          signalId: "ready-signal",
+          tokenId: TOKEN,
+          side: "buy",
+        }),
+      });
+      const intent: MakerCaptureRepriceIntent = {
+        intentId: "ready-intent",
+        predecessorOrderId: root.orderId,
+        lifecycleSignalId: "ready-signal",
+        rootOrderId: root.orderId,
+        tokenId: TOKEN,
+        conditionId: CONDITION,
+        replacementIndex: 1,
+        status: "ready",
+        candidatePrice: 0.31,
+        replacementSize: 2,
+        childOrderId: null,
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+        failure: null,
+        proof: captureProof("ready"),
+      };
+      const db = bootstrapDatabase(":memory:");
+      const repo = new SqliteOrderRepository(db.db);
+      repo.save(root);
+      repo.save(child);
+      expect(
+        repo.claimMakerCaptureRepriceIntent({ ...intent, proof: captureProof("cancel_pending") }),
+      ).toBe(true);
+      expect(
+        repo.markMakerCaptureRepriceReady(intent.intentId, 0.31, 2, intent.proof!.prepared!),
+      ).toBe(true);
+      const submitted = vi.spyOn(repo, "markMakerCaptureRepriceSubmitted");
+      const module = buildModule({ orderRepo: repo, isOrderSubmissionActive: () => true });
+      try {
+        await module.start();
+        expect(submitted).not.toHaveBeenCalled();
+        expect(repo.findMakerCaptureRepriceIntentBySignal(intent.lifecycleSignalId)).toMatchObject({
+          status: "failed",
+          failure: "child-before-submit-proof",
+          childOrderId: null,
+        });
+        expect(repo.findById(child.orderId)?.status).toBe(status);
+        expect(hasNeverPostedMinimumEvidence(repo.findById(child.orderId)!)).toBe(false);
+      } finally {
+        await module.stop();
+        db.close();
+      }
+    },
+  );
 });
+
+function prospectiveGateway(overrides: Record<string, unknown> = {}) {
+  const builder = new OrderBuilder(
+    {
+      getAddress: async () => "0x1111111111111111111111111111111111111111",
+      _signTypedData: async () => `0x${"11".repeat(65)}`,
+    },
+    137,
+  );
+  const client = {
+    chainId: 137,
+    createOrder: vi.fn((order: UserOrderV2, options: CreateOrderOptions) =>
+      builder.buildOrder(order, options, 2),
+    ),
+    postOrder: vi.fn(),
+    getOrderBook: vi.fn().mockResolvedValue({ min_order_size: "1" }),
+    ...overrides,
+  };
+  const gateway = new LiveExchangeGateway({ client });
+  const marketData = new LiveMarketDataGateway({ client });
+  const source = new TokenMinimumAuthority(
+    async (id) => {
+      await marketData.getOrderBook(createTokenId(id));
+      return true;
+    },
+    () => {},
+  );
+  marketData.setTokenMinimumAuthority(source);
+  gateway.setTokenMinimumSource(source);
+  return { gateway, source, marketData };
+}
 
 function buildModule(
   overrides: Partial<ConstructorParameters<typeof EntryLifecycleModule>[0]> = {},
 ): EntryLifecycleModule {
   return new EntryLifecycleModule({
+    gateway: prospectiveGateway().gateway,
     bus: new InProcessEventBus(),
     orderRepo: makeOrderRepo(null),
     positionRepo: { findByTokenId: vi.fn(() => null) },

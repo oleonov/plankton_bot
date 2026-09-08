@@ -1,9 +1,11 @@
 import type { Logger } from "../../logger.js";
 import type { NormalizedMarket, OrderBookSnapshot } from "@krabs/domain";
+import { TokenMinimumAuthority } from "@krabs/domain";
 import { deriveExecutableTopOfBook } from "../../executable-price.js";
 import { isKnownMinOrderSize } from "../../min-order-size.js";
 
 export interface CandidateBookGateway {
+  setTokenMinimumAuthority?(authority: TokenMinimumAuthority): void;
   getOrderBooks(tokenIds: string[]): Promise<Map<string, OrderBookSnapshot>>;
 }
 
@@ -42,6 +44,7 @@ export interface CandidateBookResolution {
 }
 
 interface CandidateBookCacheDeps {
+  readonly onMinimumChanged?: (tokenId: string, minimum: number | null) => void;
   readonly gateway: CandidateBookGateway;
   readonly log: Logger;
   readonly maxAgeMs?: number;
@@ -69,6 +72,9 @@ const DEFAULT_REFRESH_BUDGET_WINDOW_MS = 1_000;
 const DEFAULT_PRUNE_INTERVAL_MS = 60_000;
 
 export class CandidateBookCache {
+  readonly tokenMinimum: TokenMinimumAuthority;
+  private disposed = false;
+  private readonly refreshing = new Set<string>();
   private entries = new Map<string, CandidateBookCacheEntry>();
   private readonly waitersByToken = new Map<
     string,
@@ -94,6 +100,14 @@ export class CandidateBookCache {
   private readonly pruneMaxAgeMs: number;
 
   constructor(private readonly deps: CandidateBookCacheDeps) {
+    this.tokenMinimum = new TokenMinimumAuthority(
+      async (tokenId) => (await this.forceRefresh(tokenId)).status === "refreshed",
+      (tokenId, minimum) => {
+        deps.onMinimumChanged?.(tokenId, minimum);
+        if (minimum !== null) deps.onMinOrderSizeObserved?.(tokenId, minimum);
+      },
+    );
+    deps.gateway.setTokenMinimumAuthority?.(this.tokenMinimum);
     this.maxAgeMs = deps.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
     this.refreshBatchWindowMs = deps.refreshBatchWindowMs ?? DEFAULT_REFRESH_BATCH_WINDOW_MS;
     this.refreshBudgetPerWindow = deps.refreshBudgetPerWindow ?? DEFAULT_REFRESH_BUDGET_PER_WINDOW;
@@ -106,6 +120,8 @@ export class CandidateBookCache {
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.tokenMinimum.dispose();
     if (this.pruneTimer) {
       clearInterval(this.pruneTimer);
       this.pruneTimer = null;
@@ -219,7 +235,6 @@ export class CandidateBookCache {
       };
       nextEntries.set(tokenId, entry);
       nextMap.set(tokenId, entry);
-      this.notifyMinOrderSize(tokenId, book);
       this.resolveWaiters(tokenId, entry);
     }
 
@@ -240,13 +255,6 @@ export class CandidateBookCache {
     if (fresh && (options?.requireKnownMinOrderSize !== true || hasKnownMinOrderSize(fresh))) {
       if (fresh.sourceKind === "ws") {
         this.deps.onUsageObserved?.({ type: "ws-hit", tokenId });
-      }
-      // The original observation may have been dropped downstream (token not
-      // tracked at the time), while the cache kept the value. A caller asking
-      // for the minimum is exactly the caller whose suppression depends on it,
-      // so re-announce instead of silently serving from cache.
-      if (options?.requireKnownMinOrderSize === true) {
-        this.notifyMinOrderSize(tokenId, fresh.book);
       }
       return { entry: fresh, status: "fresh-cache" };
     }
@@ -288,27 +296,17 @@ export class CandidateBookCache {
     const startedAtMs = Date.now();
     const sourcePolledAtMs = Date.now();
     const books = await this.deps.gateway.getOrderBooks(uniqueTokenIds);
+    if (this.disposed) return new Map();
     const nextEntries = new Map<string, CandidateBookCacheEntry>();
     const nextMap = new Map(this.entries);
 
     for (const tokenId of uniqueTokenIds) {
       const book = books.get(tokenId);
       if (!book) continue;
-      // Two `/books` refreshes for the same token can be open at once: the flush
-      // window is 10 ms and `flushQueuedRefreshes` clears `pendingRefreshes`
-      // BEFORE awaiting, so a second batch starts while the first is still in
-      // flight. Responses may land out of order, and applying the older one
-      // regresses the cached book AND re-announces a superseded minimum.
-      // Compared against REST polls only: a WS entry is always newer by clock but
-      // never carries `min_order_size`, so REST must still enrich it.
+      // Direct refreshes can overlap; preserve price ordering independently of
+      // minimum observations, which the REST gateway has already ingested.
       const known = nextMap.get(tokenId);
       if (known?.sourceKind === "rest" && known.sourcePolledAtMs > sourcePolledAtMs) {
-        // The newer entry wins for the BOOK — but skipping this response wholesale
-        // would drop its `min_order_size` too, and a `/books` payload can omit the
-        // field the older response carries. Announcing it here keeps the only known
-        // minimum without regressing the cached book: `notifyMinOrderSize` ignores
-        // an absent or invalid value, so a min-less older response is still a no-op.
-        if (!hasKnownMinOrderSize(known)) this.notifyMinOrderSize(tokenId, book);
         continue;
       }
       const entry: CandidateBookCacheEntry = {
@@ -322,7 +320,6 @@ export class CandidateBookCache {
       };
       nextEntries.set(tokenId, entry);
       nextMap.set(tokenId, entry);
-      this.notifyMinOrderSize(tokenId, book);
       this.resolveWaiters(tokenId, entry);
     }
 
@@ -345,23 +342,18 @@ export class CandidateBookCache {
     return nextEntries;
   }
 
-  /** Only a REST `/books` payload ever carries `min_order_size`; the WS book omits
-   *  it, so an absent/zero value here is the norm and must stay silent. */
-  private notifyMinOrderSize(tokenId: string, book: OrderBookSnapshot): void {
-    if (!isKnownMinOrderSize(book.minOrderSize)) return;
-    this.deps.onMinOrderSizeObserved?.(tokenId, book.minOrderSize);
-  }
-
   private enqueueRefresh(
     tokenId: string,
     fallbackStatus: "cache-miss" | "cache-stale",
     force = false,
   ): Promise<CandidateBookResolution> {
+    if (this.disposed) return Promise.resolve({ entry: null, status: "refresh-failed" });
     return new Promise((resolve) => {
       const pending = this.pendingRefreshes.get(tokenId);
       if (pending) {
         pending.force ||= force;
         pending.resolvers.push(resolve);
+        if (this.refreshing.has(tokenId)) return;
       } else {
         this.pendingRefreshes.set(tokenId, {
           fallbackStatus,
@@ -378,9 +370,9 @@ export class CandidateBookCache {
   }
 
   private async flushQueuedRefreshes(): Promise<void> {
-    const tokenIds = [...this.pendingRefreshes.keys()];
-    const pending = new Map(this.pendingRefreshes);
-    this.pendingRefreshes.clear();
+    const tokenIds = [...this.pendingRefreshes.keys()].filter((id) => !this.refreshing.has(id));
+    const pending = new Map(tokenIds.map((id) => [id, this.pendingRefreshes.get(id)!]));
+    for (const id of tokenIds) this.refreshing.add(id);
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
@@ -398,6 +390,8 @@ export class CandidateBookCache {
           resolve({ entry: null, status: "refresh-budget-exhausted" });
         }
         this.resolveWaiters(tokenId, null);
+        this.pendingRefreshes.delete(tokenId);
+        this.refreshing.delete(tokenId);
       }
       return;
     }
@@ -426,6 +420,11 @@ export class CandidateBookCache {
           resolve({ entry: null, status: "refresh-failed" });
         }
         this.resolveWaiters(tokenId, null);
+      }
+    } finally {
+      for (const id of tokenIds) {
+        this.pendingRefreshes.delete(id);
+        this.refreshing.delete(id);
       }
     }
   }

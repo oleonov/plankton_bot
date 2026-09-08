@@ -5,7 +5,13 @@
  * to prevent SDK types from leaking into @krabs/domain consumers.
  */
 
-import { getContractConfig } from "@polymarket/clob-client-v2";
+import { getContractConfig, CONDITIONAL_TOKEN_DECIMALS } from "@polymarket/clob-client-v2";
+import {
+  TokenMinimumBlocked,
+  type TokenMinimumSource,
+  type TokenMinimumReceipt,
+  type SignedOrderFacts,
+} from "@krabs/domain";
 import type {
   ExchangeGateway,
   PlaceOrderParams,
@@ -184,6 +190,10 @@ type MarketTokenEntry = {
 };
 
 type PreparedOrderRecord = {
+  readonly params: PlaceOrderParams;
+  readonly facts: SignedOrderFacts;
+  receipt: TokenMinimumReceipt | null;
+  invoked: boolean;
   readonly signedOrder: object;
   readonly orderType: string;
   readonly postOnly: boolean;
@@ -192,6 +202,8 @@ type PreparedOrderRecord = {
 
 type PreparedOrderClient = {
   readonly chainId: unknown;
+  readonly cachedVersion: unknown;
+  resolveVersion(): Promise<unknown>;
   createOrder(
     userOrder: ReturnType<typeof toSdkUserOrder>,
     options: ReturnType<typeof toSdkOrderOptions>,
@@ -237,6 +249,7 @@ function isDefinitiveSubmissionRejection(error: unknown): boolean {
 function isResolvedSubmissionRejection(response: unknown): boolean {
   if (!response || typeof response !== "object") return false;
   if (Reflect.get(response, "error") == null) return false;
+  if (Reflect.get(response, "error") === "order_version_mismatch") return true;
   return isDefinitiveSubmissionRejection(response);
 }
 
@@ -447,6 +460,10 @@ class TradePageFetchFailure extends Error {
 }
 
 export class LiveExchangeGateway implements ExchangeGateway {
+  private tokenMinimum: TokenMinimumSource | undefined;
+  setTokenMinimumSource(source: TokenMinimumSource): void {
+    this.tokenMinimum = source;
+  }
   private static readonly TRADING_DISABLED_COOLDOWN_MS = 5 * 60_000;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly client: any;
@@ -523,32 +540,31 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
     try {
-      const userOrder = toSdkUserOrder(params);
-      const options = toSdkOrderOptions(params);
-
-      const result = await timeDepCall(
-        this.depHealthRecorder,
-        "clob",
-        () =>
-          params.postOnly
-            ? this.postMakerOnlyOrder(userOrder, options, params.orderType)
-            : this.client.createAndPostOrder(userOrder, options, params.orderType),
-        // A resolved SDK payload with no order id is a FAILED placement (see the
-        // no-order-id branch below) — classify it as such so the most
-        // safety-critical CLOB call isn't recorded as healthy on failure.
-        { isOk: (r) => Boolean(extractOrderId(r)) },
-      );
-      const orderId = extractOrderId(result);
-      if (!orderId) {
-        return {
-          success: false,
-          errorCode: "UNKNOWN",
-          errorMessage: "exchange returned no order id",
-          errorDetails: { responseBody: redactSensitive(result) },
-        };
+      const prepared = await this.preparePostingOrder(params, false);
+      const version = (this.client as PreparedOrderClient).cachedVersion;
+      let result = await this.submitPreparedOrder(prepared);
+      if (
+        !params.postOnly &&
+        result.kind === "rejected" &&
+        JSON.stringify(result.errorDetails).includes("order_version_mismatch")
+      ) {
+        const refreshed = await (this.client as PreparedOrderClient).resolveVersion();
+        if (typeof version === "number" && typeof refreshed === "number" && refreshed !== version) {
+          result = await this.submitPreparedOrder(await this.preparePostingOrder(params, false));
+        }
       }
-
-      return { success: true, orderId };
+      if (result.kind === "accepted") return { success: true, orderId: result.orderId };
+      if (result.kind === "local-minimum")
+        throw new TokenMinimumBlocked(result.reason, result.minimum);
+      return {
+        success: false,
+        errorCode:
+          result.kind === "rejected"
+            ? result.errorCode
+            : classifyError(result.errorDetails ?? { message: result.errorMessage }).code,
+        errorMessage: result.errorMessage,
+        errorDetails: result.errorDetails,
+      };
     } catch (err) {
       const { code, message, details } = classifyError(err);
       return { success: false, errorCode: code, errorMessage: message, errorDetails: details };
@@ -556,6 +572,15 @@ export class LiveExchangeGateway implements ExchangeGateway {
   }
 
   async prepareOrder(params: PlaceOrderParams): Promise<PreparedOrder> {
+    return this.preparePostingOrder(params, true);
+  }
+
+  private async preparePostingOrder(
+    params: PlaceOrderParams,
+    exact: boolean,
+  ): Promise<PreparedOrder> {
+    if (!this.tokenMinimum) throw new TokenMinimumBlocked("token-minimum-unavailable", null);
+    const receipt = await this.tokenMinimum.resolve(String(params.tokenId));
     const signedOrder: unknown = await (this.client as PreparedOrderClient).createOrder(
       toSdkUserOrder(params),
       toSdkOrderOptions(params),
@@ -566,20 +591,65 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
     const chainId: unknown = (this.client as PreparedOrderClient).chainId;
     if (typeof chainId !== "number") throw new Error("exchange client has no chain ID");
+    const facts = this.signedFacts(params, signedOrder, "");
+    const orderId = exact
+      ? hashSignedOrderV2(signedOrder, chainId, params.negRisk)
+      : `direct:${params.clientOrderId}`;
     const prepared = Object.freeze({
-      orderId: hashSignedOrderV2(signedOrder, chainId, params.negRisk),
+      orderId,
+      signedFacts: { ...facts, orderId },
       __preparedOrderBrand: "PreparedOrder" as const,
     });
     this.preparedOrders.set(prepared, {
+      params: { ...params },
+      facts: prepared.signedFacts,
+      receipt,
+      invoked: false,
       signedOrder,
       orderType: params.orderType,
       postOnly: params.postOnly ?? false,
       side: params.side,
     });
+    this.tokenMinimum.validate(receipt, String(params.tokenId), prepared.signedFacts.shares);
     return prepared;
   }
 
-  async submitPreparedOrder(prepared: PreparedOrder): Promise<PreparedOrderSubmitResult> {
+  private signedFacts(params: PlaceOrderParams, signed: object, orderId: string): SignedOrderFacts {
+    const raw = signed as Record<string, unknown>;
+    const amount = params.side === "buy" ? raw.takerAmount : raw.makerAmount;
+    if (
+      raw.tokenId !== String(params.tokenId) ||
+      raw.side !== toSdkSide(params.side) ||
+      typeof amount !== "string" ||
+      !/^\d+$/.test(amount) ||
+      !Number.isSafeInteger(Number(amount))
+    ) {
+      throw new TokenMinimumBlocked("token-minimum-unavailable", null);
+    }
+    const shares = Number(amount) / 10 ** CONDITIONAL_TOKEN_DECIMALS;
+    if (shares <= 0 || shares > params.size + 1e-9)
+      throw new TokenMinimumBlocked("token-minimum-unavailable", null);
+    return {
+      version: 1,
+      orderId,
+      tokenId: String(params.tokenId),
+      side: params.side,
+      logicalSize: params.size,
+      shares,
+    };
+  }
+
+  validatePreparedMinimum(prepared: PreparedOrder): void {
+    const record = this.preparedOrders.get(prepared);
+    if (!record?.receipt || !this.tokenMinimum)
+      throw new TokenMinimumBlocked("token-minimum-unavailable", null);
+    this.tokenMinimum.validate(record.receipt, String(record.params.tokenId), record.facts.shares);
+  }
+
+  async submitPreparedOrder(
+    prepared: PreparedOrder,
+    beforeInvoke?: () => void,
+  ): Promise<PreparedOrderSubmitResult> {
     const record = this.preparedOrders.get(prepared);
     if (!record) {
       return {
@@ -589,16 +659,50 @@ export class LiveExchangeGateway implements ExchangeGateway {
       };
     }
 
+    try {
+      if (!this.tokenMinimum) throw new TokenMinimumBlocked("token-minimum-unavailable", null);
+      record.receipt ??= await this.tokenMinimum.resolve(String(record.params.tokenId));
+      this.tokenMinimum.validate(
+        record.receipt,
+        String(record.params.tokenId),
+        record.facts.shares,
+      );
+    } catch (error) {
+      if (!(error instanceof TokenMinimumBlocked)) throw error;
+      if (record.receipt) this.tokenMinimum?.consume(record.receipt);
+      record.receipt = null;
+      return {
+        kind: "local-minimum",
+        reason: error.reason,
+        minimum: error.minimum,
+        neverPosted: !record.invoked,
+      };
+    }
+    const { tokenMinimum } = this;
+    const { receipt } = record;
     const halfOpenProbe = this.claimTradingDisabledSubmission(record.side);
-    if (halfOpenProbe === "blocked") return this.tradingDisabledCooldownRejection();
+    if (halfOpenProbe === "blocked") {
+      tokenMinimum.consume(receipt);
+      record.receipt = null;
+      return this.tradingDisabledCooldownRejection();
+    }
 
     try {
-      const response = await timeDepCall(this.depHealthRecorder, "clob", () =>
-        (this.client as PreparedOrderClient).postOrder(
-          record.signedOrder,
-          record.orderType,
-          record.postOnly,
-        ),
+      const response = await timeDepCall(
+        this.depHealthRecorder,
+        "clob",
+        () => {
+          beforeInvoke?.();
+          tokenMinimum.consume(receipt);
+          record.receipt = null;
+          record.invoked = true;
+          return (this.client as PreparedOrderClient).postOrder(
+            record.signedOrder,
+            record.orderType,
+            record.postOnly,
+          );
+        },
+        { isOk: (response) => Boolean(extractOrderId(response)) },
       );
       const orderId = extractOrderId(response);
       if (!orderId) {
@@ -634,6 +738,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       if (halfOpenProbe) this.closeTradingDisabledBreaker();
       return { kind: "accepted", orderId };
     } catch (err) {
+      if (!record.invoked) throw err;
       const { code, message, details } = classifyError(err);
       if (isDefinitiveSubmissionRejection(err)) {
         if (halfOpenProbe) this.closeTradingDisabledBreaker();
@@ -642,6 +747,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
       if (halfOpenProbe) this.rearmTradingDisabledBreaker();
       return { kind: "unknown", errorMessage: message, errorDetails: details };
     } finally {
+      if (record.receipt) this.tokenMinimum?.consume(record.receipt);
+      record.receipt = null;
       if (halfOpenProbe) this.tradingDisabledSellProbeInFlight = false;
     }
   }
@@ -673,16 +780,6 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   private closeTradingDisabledBreaker(): void {
     this.tradingDisabledUntilMs = 0;
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async postMakerOnlyOrder(
-    userOrder: Record<string, unknown>,
-    options: any,
-    orderType: string,
-  ) {
-    const signedOrder = await this.client.createOrder(userOrder, options);
-    return this.client.postOrder(signedOrder, orderType, true);
   }
 
   async cancelOrder(params: CancelOrderParams): Promise<CancelOrderResult> {

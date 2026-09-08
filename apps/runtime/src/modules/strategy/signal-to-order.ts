@@ -935,7 +935,10 @@ export class SignalToOrderBridge {
       // book. If the fresh book is unavailable or disabled, fall back to the
       // embedded snapshot's bestBid/bestAsk.
       const pricing = await this.resolvePricingMarket(signal, baseMarket, policy);
-      const market = pricing.market;
+      const source = this.deps.candidateBookCache?.tokenMinimum;
+      const market = source
+        ? { ...pricing.market, minOrderSize: source.read(String(signal.tokenId)).remembered }
+        : pricing.market;
       const trackRFeeQuote = await this.resolveTrackRFeeQuote(signal, market, policy);
       const hydrationBlock =
         hydration && this.hydratedBuyBlock(hydration, market, gateWhitelistOverride);

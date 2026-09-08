@@ -525,6 +525,7 @@ export interface ProfileLadderOwnershipReader {
 // ─── Deps ────────────────────────────────────────────────────────────────────
 
 export interface AlgoDecisionModuleDeps {
+  tokenMinimum?: import("@krabs/domain").TokenMinimumSource | undefined;
   bus: EventBus;
   legStateRepo: LegStateRepository;
   algoRulesRepo: AlgoRulesRepository;
@@ -1186,6 +1187,12 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
+      this.deps.bus.subscribe("TokenMinimumChanged", async ({ tokenId }) => {
+        if (!this.marketCache.has(tokenId)) return;
+        this.releaseMinOrderSizeHydration(tokenId);
+        this.markDirty(tokenId);
+        this.scheduleDirtyEvaluation(0);
+      }),
       this.deps.bus.subscribe("MarketSnapshotHeartbeat", (p) => this.handleMarketHeartbeat(p)),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
       this.deps.bus.subscribe("SignalRejected", (p) => this.handleSignalRejected(p)),
@@ -2262,7 +2269,11 @@ export class AlgoDecisionModule implements RuntimeModule {
     const legState = this.getCachedLegState(tokenId);
     const openPosition = this.findOpenPositionByTokenId(tokenId);
     const selectedForEntry = this.deps.selectedMarketCache.isEligible(tokenId);
-    const market = this.marketCache.get(String(tokenId)) ?? null;
+    const cachedMarket = this.marketCache.get(String(tokenId)) ?? null;
+    const market =
+      cachedMarket && this.deps.tokenMinimum
+        ? { ...cachedMarket, minOrderSize: this.deps.tokenMinimum.read(String(tokenId)).remembered }
+        : cachedMarket;
     // GATE selection-bypass (docs/plans/2026-07-17-gate-entry-selection-bypass.md):
     // a whitelisted, tradable market that failed ONLY the v5.11 hard data filters is
     // admitted for evaluation here even when not `selectedForEntry`. It can then enter

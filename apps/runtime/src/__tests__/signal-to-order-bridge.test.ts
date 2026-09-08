@@ -1,9 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InProcessEventBus } from "@krabs/event-bus";
+import { bootstrapDatabase, SqliteOrderRepository, SqliteFillRepository } from "@krabs/db";
+import { LiveExchangeGateway } from "@krabs/exchange";
+import {
+  OrderBuilder,
+  type UserOrderV2,
+  type CreateOrderOptions,
+} from "@polymarket/clob-client-v2";
+import { ExecutionModule } from "../modules/execution/execution-module.js";
 import {
   createConditionId,
   createOrderId,
   createTokenId,
+  type TokenMinimumAuthority,
   BOUNCE_EXIT_TARGET_RULE_ID,
   SignalReason,
   GATE_ENTRY_RULE_ID,
@@ -41,7 +50,9 @@ import type {
   ExecutionPricingPolicy,
 } from "@krabs/domain";
 
-const TOKEN_ID = createTokenId("tok-yes");
+const TOKEN_ID = createTokenId(
+  "45129981312896806901985343654296891267756583650275648804422462955120827172683",
+);
 const NOW = Date.parse("2026-04-11T10:00:00.000Z");
 
 describe("resolveMidpointAnchoredSellPrice", () => {
@@ -274,11 +285,100 @@ function sellableFlowPolicy(overrides?: Partial<ExecutionPolicy["sellableFlow"]>
   };
 }
 
+function createObservedCache(deps: ConstructorParameters<typeof CandidateBookCache>[0]) {
+  let authority: TokenMinimumAuthority;
+  const gateway = deps.gateway;
+  return new CandidateBookCache({
+    ...deps,
+    gateway: {
+      setTokenMinimumAuthority: (source) => {
+        authority = source;
+      },
+      getOrderBooks: async (tokens) => {
+        const request = authority.begin(tokens);
+        let books = new Map<string, OrderBookSnapshot>();
+        try {
+          books = await gateway.getOrderBooks(tokens);
+          return books;
+        } finally {
+          authority.complete(
+            request,
+            new Map(tokens.map((id) => [id, books.get(id)?.minOrderSize ?? null])),
+          );
+        }
+      },
+    },
+  });
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
 
 describe("MINFIX live BUY hydration", () => {
+  it.each([1.22, 1.26, 1.27, 1.3, 5])(
+    "observes the SDK POST boundary for profile scale-in %s",
+    async (shares) => {
+      const h = harness();
+      const db = bootstrapDatabase(":memory:");
+      const orderRepo = new SqliteOrderRepository(db.db);
+      const fillRepo = new SqliteFillRepository(db.db);
+      const builder = new OrderBuilder(
+        {
+          getAddress: async () => "0x1111111111111111111111111111111111111111",
+          _signTypedData: async () => `0x${"11".repeat(65)}`,
+        },
+        137,
+      );
+      const client = {
+        chainId: 137,
+        createOrder: vi.fn((order: UserOrderV2, options: CreateOrderOptions) =>
+          builder.buildOrder(order, options, 2),
+        ),
+        postOrder: vi.fn(async () => ({ orderID: orderRepo.findOpen()[0]!.orderId })),
+      };
+      const gateway = new LiveExchangeGateway({ client });
+      gateway.setTokenMinimumSource(h.cache.tokenMinimum);
+      const execution = new ExecutionModule({
+        gateway,
+        bus: h.bus,
+        orderRepo,
+        fillRepo,
+        marketRepo: {
+          findByTokenId: () => ({ active: true, conditionId: makeMarket().conditionId }),
+        } as never,
+        tokenMinimum: h.cache.tokenMinimum,
+        runtimeMode: "live-lite",
+        runtimeControl: { isPaused: () => false },
+        botRunId: "scale-in-regression" as never,
+        log: makeLogger(),
+      });
+      try {
+        await execution.start();
+        await h.send(shares * 0.04);
+        await h.bus.drain();
+        expect(client.postOrder).toHaveBeenCalledTimes(shares >= 5 ? 1 : 0);
+        if (shares < 5) {
+          expect(h.placed).toHaveLength(0);
+          expect(orderRepo.findOpen()).toEqual([]);
+          expect(h.skipped[0]?.reasons).toEqual(["order-size-below-minimum"]);
+        } else {
+          expect(h.placed[0]?.command).toMatchObject({
+            tokenId: TOKEN_ID,
+            size: shares,
+            decisionRuleId: "EXECUTION_PROFILE_SCALE_IN",
+          });
+          expect(orderRepo.findOpen()[0]?.status).toBe("open");
+          expect(client.createOrder.mock.calls[0]?.[0].size).toBe(shares);
+        }
+      } finally {
+        await execution.stop();
+        h.close();
+        db.close();
+      }
+    },
+  );
+
   function book(minOrderSize: number | null | undefined = 5): OrderBookSnapshot {
     return {
       tokenId: TOKEN_ID,
@@ -303,7 +403,7 @@ describe("MINFIX live BUY hydration", () => {
   ) {
     const bus = new InProcessEventBus();
     const getOrderBooks = vi.fn(options.refresh ?? (async () => new Map([[TOKEN_ID, book()]])));
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway: { getOrderBooks },
       log: makeLogger(),
       ...(options.budget == null ? {} : { refreshBudgetPerWindow: options.budget }),
@@ -422,18 +522,27 @@ describe("MINFIX live BUY hydration", () => {
     },
   );
 
-  it.each(["base", "cache"])("accepts known %s minimum without REST", async (source) => {
-    const h = harness();
-    try {
-      if (source === "cache")
-        h.cache.upsertBooks(new Map([[TOKEN_ID, book()]]), Date.now(), "rest");
-      await h.send(0.4, source === "base" ? { minOrderSize: 5 } : {});
-      expect(h.getOrderBooks).not.toHaveBeenCalled();
-      expect(h.placed[0]?.command.size).toBe(10);
-    } finally {
-      h.close();
-    }
-  });
+  it.each(["base", "cache"])(
+    "requires source knowledge despite a known %s minimum",
+    async (source) => {
+      const h = harness();
+      try {
+        if (source === "cache")
+          h.cache.upsertBooks(new Map([[TOKEN_ID, book()]]), Date.now(), "rest");
+        await h.send(0.4, source === "base" ? { minOrderSize: 5 } : {});
+        expect(h.getOrderBooks).not.toHaveBeenCalled();
+        expect(h.placed).toHaveLength(0);
+        h.cache.tokenMinimum.complete(
+          h.cache.tokenMinimum.begin([TOKEN_ID]),
+          new Map([[TOKEN_ID, 5]]),
+        );
+        await h.send(0.4, { minOrderSize: 5 });
+        expect(h.placed[0]?.command.size).toBe(10);
+      } finally {
+        h.close();
+      }
+    },
+  );
 
   it("checks final concentration-clamped shares", async () => {
     const h = harness({
@@ -1191,6 +1300,7 @@ describe("SignalToOrderBridge", () => {
     const bus = new InProcessEventBus();
     const clobBook = {
       tokenId: TOKEN_ID,
+      minOrderSize: 5,
       bids: [{ price: 0.04, size: 10 }],
       asks: [{ price: 0.05, size: 10 }],
       bestBid: 0.04,
@@ -1199,7 +1309,7 @@ describe("SignalToOrderBridge", () => {
       spread: 0.01,
       timestamp: Date.now(),
     };
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway: {
         getOrderBooks: vi.fn(async (tokenIds: string[]) => {
           return new Map(tokenIds.map((tokenId) => [tokenId, clobBook]));
@@ -1673,7 +1783,7 @@ describe("SignalToOrderBridge", () => {
       spread: 0.01,
       timestamp: Date.now(),
     };
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway: {
         getOrderBooks: vi.fn(async (tokenIds: string[]) => {
           return new Map(tokenIds.map((tokenId) => [tokenId, clobBook]));
@@ -2496,7 +2606,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   }
 
   function makeCachedBook(overrides: Partial<OrderBookSnapshot>): CandidateBookCache {
-    const cache = new CandidateBookCache({
+    const cache = createObservedCache({
       gateway: { getOrderBooks: vi.fn(async () => new Map()) },
       log: makeLogger(),
     });
@@ -2517,6 +2627,10 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
           },
         ],
       ]),
+    );
+    cache.tokenMinimum.complete(
+      cache.tokenMinimum.begin([String(TOKEN_ID)]),
+      new Map([[String(TOKEN_ID), overrides.minOrderSize ?? null]]),
     );
     return cache;
   }
@@ -3150,7 +3264,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       expect.objectContaining({
         eventType: "taker_at_profit_activated",
         payload: expect.objectContaining({
-          tokenId: "tok-yes",
+          tokenId: TOKEN_ID,
           decisionRuleId: "D8",
           avgEntryPrice: 0.1,
           bestBid: 0.103,

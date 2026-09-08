@@ -86,6 +86,7 @@ type SellCoverageInputs = {
 };
 
 export interface RiskInventoryModuleDeps {
+  tokenMinimum?: import("@krabs/domain").TokenMinimumSource | undefined;
   bus: EventBus;
   positionRepo: PositionRepository;
   inventoryLotRepo: InventoryLotRepository;
@@ -172,6 +173,7 @@ export class RiskInventoryModule implements RuntimeModule {
   private backfillWorker: Promise<void> | null = null;
   private acceptingReplayWork = false;
   private lifecycleGeneration = 0;
+  private readonly minimumGenerations = new Map<string, number>();
   private readonly fillFailureLogState = new Map<string, number>();
   private readonly rejectionLogState = new Map<
     string,
@@ -268,6 +270,10 @@ export class RiskInventoryModule implements RuntimeModule {
   ): Promise<void> {
     for (const tokenId of payload.removedTokenIds) {
       this.tokenMinOrderSize.delete(String(tokenId));
+      this.minimumGenerations.set(
+        String(tokenId),
+        (this.minimumGenerations.get(String(tokenId)) ?? 0) + 1,
+      );
     }
   }
 
@@ -420,6 +426,7 @@ export class RiskInventoryModule implements RuntimeModule {
   }
 
   public getLatestMinOrderSize(tokenId: RuntimeEventMap["FillReceived"]["tokenId"]): number | null {
+    if (this.deps.tokenMinimum) return this.deps.tokenMinimum.read(String(tokenId)).remembered;
     return this.tokenMinOrderSize.get(String(tokenId)) ?? null;
   }
 
@@ -694,7 +701,31 @@ export class RiskInventoryModule implements RuntimeModule {
   private async handleSignal(payload: RuntimeEventMap["SignalProduced"]): Promise<void> {
     const startMs = performance.now();
     try {
-      const { signal, market } = payload;
+      const { signal } = payload;
+      const generation = this.lifecycleGeneration;
+      const tokenGeneration = this.minimumGenerations.get(String(signal.tokenId));
+      if (
+        this.deps.tokenMinimum &&
+        this.getLatestMinOrderSize(signal.tokenId) === null &&
+        signal.tokenId === payload.market.tokenId &&
+        signal.conditionId === payload.market.conditionId &&
+        !this.deps.runtimeControl?.isPaused()
+      ) {
+        try {
+          const receipt = await this.deps.tokenMinimum.resolve(String(signal.tokenId));
+          this.deps.tokenMinimum.consume(receipt);
+        } catch {
+          /* The ordinary unknown-minimum outcome remains recoverable upstream. */
+        }
+        if (
+          generation !== this.lifecycleGeneration ||
+          tokenGeneration !== this.minimumGenerations.get(String(signal.tokenId))
+        )
+          return;
+      }
+      const market = this.deps.tokenMinimum
+        ? { ...payload.market, minOrderSize: this.getLatestMinOrderSize(signal.tokenId) }
+        : payload.market;
       this.signalsProcessed++;
 
       if (this.deps.runtimeControl?.isPaused()) {

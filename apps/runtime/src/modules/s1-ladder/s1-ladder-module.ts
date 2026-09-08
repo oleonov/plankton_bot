@@ -1,3 +1,5 @@
+import { isLocalMinimumReason } from "../../internal-order-reasons.js";
+import { MIN_ORDER_SIZE_HYDRATION_RETRY_MS } from "../../min-order-size.js";
 import type {
   EventBus,
   Fill,
@@ -44,6 +46,8 @@ import { hasWorkingProfileLadderSell } from "../profile-ladder-order-helpers.js"
 export { S1_LADDER_RULE_ID };
 
 export interface S1LadderModuleDeps {
+  runtimeControl?: { isPaused(): boolean } | undefined;
+  tokenMinimum?: import("@krabs/domain").TokenMinimumSource | undefined;
   bus: EventBus;
   positionRepo: Pick<PositionRepository, "findOpen" | "findByTokenId">;
   orderRepo: Pick<OrderRepository, "findOpen" | "findByTokenId"> & {
@@ -97,6 +101,17 @@ export class S1LadderModule implements RuntimeModule {
   private readonly placementHistoryByToken = new Map<string, number[]>();
   private readonly handoffStartedTokens = new Set<string>();
   private readonly cleanupInFlight = new Map<string, number>();
+  private readonly minimumPlacements = new Map<
+    string,
+    {
+      position: Position;
+      market: NormalizedMarket;
+      placement: S1OrderPlacement;
+      minimum: number | null;
+      retryAt: number;
+      blocked: string | null;
+    }
+  >();
   private lifecycleEpoch = 0;
   private unsubs: Array<() => void> = [];
 
@@ -108,6 +123,28 @@ export class S1LadderModule implements RuntimeModule {
     this.recoverPhantomOwnerships();
     this.unsubs.push(
       this.deps.bus.subscribe("MarketSnapshotHeartbeat", (payload) => this.onHeartbeat(payload)),
+      this.deps.bus.subscribe("OrderSkipped", async (event) => {
+        const pending = event.signalId && this.minimumPlacements.get(event.signalId);
+        if (pending) {
+          if (isLocalMinimumReason(event.reasonCode)) {
+            pending.blocked = event.reasonCode;
+            pending.minimum =
+              this.deps.tokenMinimum?.read(String(pending.market.tokenId)).latest?.minimum ?? null;
+          } else this.minimumPlacements.delete(event.signalId);
+        }
+      }),
+      this.deps.bus.subscribe("OrderRejected", async (event) => {
+        if (event.signalId) this.minimumPlacements.delete(event.signalId);
+      }),
+      this.deps.bus.subscribe("TrackedMarketsChanged", async ({ removedTokenIds }) => {
+        if (removedTokenIds.length) this.lifecycleEpoch++;
+        for (const [id, pending] of this.minimumPlacements) {
+          if (removedTokenIds.includes(pending.market.tokenId)) this.minimumPlacements.delete(id);
+        }
+      }),
+      this.deps.bus.subscribe("OrderPlaced", async (event) => {
+        this.minimumPlacements.delete(String(event.commandId));
+      }),
       this.deps.bus.subscribe("OrderCancelled", async (payload) => {
         this.releaseIfTerminal(payload.tokenId, payload.timestamp, "order_cancelled");
       }),
@@ -123,6 +160,7 @@ export class S1LadderModule implements RuntimeModule {
   async stop(): Promise<void> {
     this.lifecycleEpoch++;
     this.cleanupInFlight.clear();
+    this.minimumPlacements.clear();
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     this.activePlacements.clear();
@@ -155,6 +193,8 @@ export class S1LadderModule implements RuntimeModule {
       if (epoch !== this.lifecycleEpoch) return;
       const position = this.findOpenPosition(market.tokenId);
       if (!position) continue;
+      await this.retryMinimumPlacements(position, market, payload.timestamp);
+      if (epoch !== this.lifecycleEpoch) return;
       const activeOrders = this.findActiveS1Orders(market.tokenId);
       if (activeOrders.length > 0) {
         const existing = this.activeLadders.get(String(market.tokenId));
@@ -191,6 +231,9 @@ export class S1LadderModule implements RuntimeModule {
           this.releaseOwnership(market.tokenId, payload.timestamp, "handoff_timeout");
         } else if (
           active.reason !== "handoff" &&
+          ![...this.minimumPlacements.values()].some(
+            (pending) => pending.blocked && pending.market.tokenId === market.tokenId,
+          ) &&
           !this.hasActivePlacement(market.tokenId, payload.timestamp) &&
           payload.timestamp - active.assumedAtMs > policy.phantomOwnershipReleaseSeconds * 1000
         ) {
@@ -571,6 +614,14 @@ export class S1LadderModule implements RuntimeModule {
     timestamp: number,
     placement: S1OrderPlacement,
   ): Promise<void> {
+    this.minimumPlacements.set(placement.signalId, {
+      position,
+      market,
+      placement,
+      minimum: this.deps.tokenMinimum?.read(String(market.tokenId)).latest?.minimum ?? null,
+      retryAt: timestamp + MIN_ORDER_SIZE_HYDRATION_RETRY_MS,
+      blocked: null,
+    });
     const metadata = {
       ...(placement.minOrderSize ? { marketData: { minOrderSize: placement.minOrderSize } } : {}),
       s1: {
@@ -613,6 +664,35 @@ export class S1LadderModule implements RuntimeModule {
     });
   }
 
+  private async retryMinimumPlacements(
+    position: Position,
+    market: NormalizedMarket,
+    timestamp: number,
+  ): Promise<void> {
+    if (
+      this.deps.runtimeControl?.isPaused() ||
+      this.shouldHandoff(market, timestamp, this.policy()) ||
+      this.getSnapshot(market.tokenId)?.reason === "handoff"
+    )
+      return;
+    const minimum = this.deps.tokenMinimum?.read(String(market.tokenId)).latest?.minimum ?? null;
+    for (const [id, pending] of this.minimumPlacements) {
+      if (pending.market.tokenId !== market.tokenId || !pending.blocked) continue;
+      if (pending.position.positionId !== position.positionId || !market.active) {
+        this.minimumPlacements.delete(id);
+        continue;
+      }
+      const changed = minimum !== pending.minimum || position.size !== pending.position.size;
+      if (
+        !changed &&
+        ((pending.blocked !== "token-minimum-unavailable" && minimum !== null) ||
+          timestamp < pending.retryAt)
+      )
+        continue;
+      await this.publishS1Order(position, market, timestamp, pending.placement);
+    }
+  }
+
   private async initiateHandoff(
     position: Position,
     market: NormalizedMarket,
@@ -638,6 +718,7 @@ export class S1LadderModule implements RuntimeModule {
       return;
     }
     this.handoffStartedTokens.add(key);
+    this.clearMinimumPlacements(market.tokenId);
     const active = this.activeLadders.get(key);
     if (active) {
       active.reason = "handoff";
@@ -767,7 +848,14 @@ export class S1LadderModule implements RuntimeModule {
     this.releaseOwnership(tokenId, timestamp, reason);
   }
 
+  private clearMinimumPlacements(tokenId: TokenId): void {
+    for (const [id, pending] of this.minimumPlacements) {
+      if (pending.market.tokenId === tokenId) this.minimumPlacements.delete(id);
+    }
+  }
+
   private releaseOwnership(tokenId: TokenId, timestamp: number, reason: string): void {
+    this.clearMinimumPlacements(tokenId);
     const key = String(tokenId);
     const active = this.activeLadders.get(key);
     if (!active) return;
@@ -860,6 +948,11 @@ export class S1LadderModule implements RuntimeModule {
     booksByToken: ReadonlyMap<string, OrderBookSnapshot> | undefined,
     market: NormalizedMarket,
   ): OrderBookSnapshot {
+    if (this.deps.tokenMinimum)
+      market = {
+        ...market,
+        minOrderSize: this.deps.tokenMinimum.read(String(market.tokenId)).remembered,
+      };
     const raw = booksByToken?.get(String(market.tokenId));
     if (!raw) {
       return {
@@ -876,11 +969,13 @@ export class S1LadderModule implements RuntimeModule {
         timestamp: market.snapshotTs,
       };
     }
-    const minOrderSize = isPositiveNumber(raw.minOrderSize)
-      ? raw.minOrderSize
-      : isPositiveNumber(market.minOrderSize)
-        ? market.minOrderSize
-        : null;
+    const minOrderSize = this.deps.tokenMinimum
+      ? (market.minOrderSize ?? null)
+      : isPositiveNumber(raw.minOrderSize)
+        ? raw.minOrderSize
+        : isPositiveNumber(market.minOrderSize)
+          ? market.minOrderSize
+          : null;
     return raw.minOrderSize === minOrderSize ? raw : { ...raw, minOrderSize };
   }
 

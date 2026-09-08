@@ -37,10 +37,15 @@ import {
 } from "../../maker-capture-reprice.js";
 import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 import type { Logger } from "../../logger.js";
+import { prepareSuccessorMinimum } from "../../min-order-size.js";
+import { isLocalMinimumReason } from "../../internal-order-reasons.js";
+import { hasNeverPostedMinimumEvidence, type ExchangeGateway } from "@krabs/domain";
 
 const EPSILON = 1e-9;
 
 export interface BounceAskCaptureLifecycleDeps {
+  readonly runtimeControl?: { isPaused(): boolean } | undefined;
+  readonly gateway?: ExchangeGateway | undefined;
   readonly bus: EventBus;
   readonly orderRepo: OrderRepository;
   readonly fillRepo: Pick<FillRepository, "findByOrderId" | "findByOrderIds" | "findByTokenId">;
@@ -65,6 +70,10 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.listen("NormalizedMarketUpdated", (event) => this.onMarket(event));
+    this.listen("TokenMinimumChanged", async ({ tokenId }) => {
+      if (this.started && this.markets.has(tokenId) && !this.deps.runtimeControl?.isPaused())
+        await this.recover(new Set([tokenId]));
+    });
     this.listen("TrackedMarketsChanged", (event) => this.onTrackedMarketsChanged(event));
     this.listen("OrderCancelled", (event) => this.onCancelled(event));
     this.listen("OrderPlaced", (event) => this.onPlaced(event));
@@ -291,7 +300,12 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
 
   private async advance(intent: BounceAskCaptureIntent): Promise<void> {
     const child = intent.childOrderId ? this.deps.orderRepo.findById(intent.childOrderId) : null;
-    if (child) {
+    if (child && hasNeverPostedMinimumEvidence(child)) {
+      if (!this.deps.orderRepo.resetBounceAskCaptureSubmitted?.(intent.intentId, child.orderId))
+        return;
+      intent = { ...intent, status: "ready", childOrderId: null };
+    }
+    if (child && !hasNeverPostedMinimumEvidence(child)) {
       if (child.status === "rejected") this.terminal(intent, "failed", "child-rejected");
       else if (child.status === "pending") {
         const predecessor = this.deps.orderRepo.findById(intent.predecessorOrderId);
@@ -358,12 +372,12 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       this.terminal(intent, "failed", candidate.reason);
       return null;
     }
-    const filled = this.deps.fillRepo
-      .findByOrderId(predecessor.orderId)
-      .reduce((sum, fill) => sum + fill.size, 0);
-    const replacementSize = Math.min(Math.max(0, predecessor.size - filled), state.position.size);
+    const replacementSize = bounceCaptureResidual(
+      predecessor.size,
+      state.position.size,
+      this.deps.fillRepo.findByOrderId(predecessor.orderId),
+    );
     if (replacementSize + EPSILON < minOrderSize) {
-      this.terminal(intent, "dust", "replacement-below-minimum");
       return null;
     }
     const trigger = proof.trigger;
@@ -439,12 +453,15 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
   }
 
   private async publishCancel(intent: BounceAskCaptureIntent): Promise<void> {
+    const successorMinimum = () => this.prepareCancelMinimum(intent);
+    if (!(await successorMinimum())?.()) return;
     const identity = buildBounceAskCaptureIdentity(
       intent.rootOrderId,
       intent.predecessorOrderId,
       intent.replacementIndex,
     );
     await this.deps.bus.publish("CancelOrderRequested", {
+      successorMinimum,
       command: {
         type: "CancelOrderCommand",
         commandId: createCommandId(identity.cancelCommandId),
@@ -460,7 +477,52 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     if (intent) this.terminal(intent, "completed");
   }
 
+  private async prepareCancelMinimum(intent: BounceAskCaptureIntent) {
+    const market = this.markets.get(String(intent.tokenId));
+    const entry = await primeFreshMakerCaptureBook(
+      this.deps.candidateBookCache,
+      String(intent.tokenId),
+      this.now(),
+    );
+    if (!entry || !this.deps.gateway) return null;
+    return prepareSuccessorMinimum(this.deps.gateway, () => {
+      const predecessor = this.deps.orderRepo.findById(intent.predecessorOrderId);
+      const lineage = predecessor && parseBounceAskCaptureLineage(predecessor);
+      const policy = this.deps.policySnapshot();
+      const state = predecessor && lineage && this.validateState(predecessor, lineage, policy);
+      if (
+        !this.started ||
+        this.deps.runtimeControl?.isPaused() ||
+        this.markets.get(String(intent.tokenId)) !== market ||
+        !predecessor ||
+        !lineage ||
+        !state ||
+        !["open", "partially-filled"].includes(predecessor.status)
+      )
+        return null;
+      const candidate = this.candidate(predecessor, lineage, entry.book, state.market.tickSize);
+      if (!candidate.ok) return null;
+      const fills = this.deps.fillRepo.findByOrderId(predecessor.orderId);
+      const size = bounceCaptureResidual(predecessor.size, state.position.size, fills);
+      return {
+        params: {
+          clientOrderId: intent.lifecycleSignalId,
+          tokenId: intent.tokenId,
+          side: "sell" as const,
+          size,
+          price: candidate.price,
+          orderType: predecessor.orderType,
+          postOnly: true,
+          tickSize: state.market.tickSize,
+          negRisk: state.market.negRisk,
+        },
+        state: JSON.stringify([predecessor, fills, state.position, state.market, policy]),
+      };
+    });
+  }
+
   private async failBySignal(signalId: string | null | undefined, reason: string): Promise<void> {
+    if (isLocalMinimumReason(reason)) return;
     if (!signalId) return;
     const intent = this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(signalId);
     if (intent) this.terminal(intent, "failed", reason);
@@ -502,6 +564,17 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       this.deps.bus.subscribe(event, (payload) => this.safe(() => handler(payload))),
     );
   }
+}
+
+function bounceCaptureResidual(
+  size: number,
+  positionSize: number,
+  fills: readonly { size: number }[],
+): number {
+  return Math.min(
+    Math.max(0, size - fills.reduce((sum, fill) => sum + fill.size, 0)),
+    positionSize,
+  );
 }
 
 function fresh(timestamp: number, now: number): boolean {

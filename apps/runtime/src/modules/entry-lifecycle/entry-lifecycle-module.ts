@@ -1,4 +1,21 @@
 import { randomUUID } from "node:crypto";
+
+function makerCaptureResidual(
+  usage: { predecessorRemainingShares: number; rootNotionalUsdc: number; chainFilledUsdc: number },
+  price: number,
+): number {
+  return Math.min(
+    usage.predecessorRemainingShares,
+    Math.max(0, (usage.rootNotionalUsdc - usage.chainFilledUsdc) / price),
+  );
+}
+import {
+  hasNeverPostedMinimumEvidence,
+  exchangeComparisonOrder,
+  createTokenId,
+} from "@krabs/domain";
+import { prepareSuccessorMinimum } from "../../min-order-size.js";
+import { isLocalMinimumReason } from "../../internal-order-reasons.js";
 import type {
   AlgoRulesRepository,
   EventBus,
@@ -85,6 +102,9 @@ interface EntryLifecycleMetrics {
 }
 
 export interface EntryLifecycleModuleDeps {
+  runtimeControl?: { isPaused(): boolean } | undefined;
+  gateway?: import("@krabs/domain").ExchangeGateway | undefined;
+  isOrderSubmissionActive?: (clientOrderId: string) => boolean;
   bus: EventBus;
   orderRepo: OrderRepository;
   // Release A Phase 3: read the current cycle's positionId to stamp ladder-step BUYs.
@@ -161,6 +181,14 @@ export class EntryLifecycleModule implements RuntimeModule {
       this.deps.bus.subscribe("OrderPlaced", (event) =>
         this.safeCaptureReprice(() => this.handleCaptureOrderPlaced(event)),
       ),
+      this.deps.bus.subscribe("TokenMinimumChanged", async ({ tokenId }) => {
+        if (
+          this.started &&
+          this.getMarket(createTokenId(tokenId)) &&
+          !this.deps.runtimeControl?.isPaused()
+        )
+          await this.recoverMakerCaptureReprices(false, new Set([tokenId]));
+      }),
       this.deps.bus.subscribe("PositionUpdated", (event) => this.handlePositionUpdated(event)),
       this.deps.bus.subscribe("MarketResolvedHint", (event) => this.handleMarketResolved(event)),
     );
@@ -444,7 +472,14 @@ export class EntryLifecycleModule implements RuntimeModule {
           side: "buy",
         }),
       );
+      if (child && hasNeverPostedMinimumEvidence(child)) child = null;
       if (child) {
+        if (
+          !startup &&
+          child.status === "pending" &&
+          this.deps.isOrderSubmissionActive?.(String(child.clientOrderId))
+        )
+          return;
         this.failCaptureIntent(intent, "child-before-submit-proof");
         return;
       }
@@ -566,7 +601,6 @@ export class EntryLifecycleModule implements RuntimeModule {
     if (!this.started) return null;
     const minOrderSize = entry?.book.minOrderSize;
     if (!entry || minOrderSize == null || !Number.isFinite(minOrderSize) || minOrderSize <= 0) {
-      this.failCaptureIntent(intent, "fresh-book-or-minimum-unavailable");
       return null;
     }
     const cancelledAtMs = window.permanent
@@ -605,13 +639,8 @@ export class EntryLifecycleModule implements RuntimeModule {
       return null;
     }
     this.clearCaptureConvergenceTimer(intent.intentId);
-    const rootResidualShares = Math.max(
-      0,
-      (usage.rootNotionalUsdc - usage.chainFilledUsdc) / candidate.price,
-    );
-    const size = Math.min(usage.predecessorRemainingShares, rootResidualShares);
+    const size = makerCaptureResidual(usage, candidate.price);
     if (!Number.isFinite(size) || size + EPSILON < minOrderSize) {
-      this.failCaptureIntent(intent, "replacement-below-minimum");
       return null;
     }
     const preparedProof = buildMakerCaptureBookDecisionProof({
@@ -658,6 +687,11 @@ export class EntryLifecycleModule implements RuntimeModule {
     predecessor: Order,
     predecessorRemainingShares: number,
   ) {
+    predecessorRemainingShares = Math.max(
+      0,
+      exchangeComparisonOrder(predecessor).size - predecessor.size + predecessorRemainingShares,
+    );
+    predecessor = exchangeComparisonOrder(predecessor);
     if (!this.deps.getOrderResult || !predecessor.exchangeOrderId) {
       return classifyMakerCaptureExactCancellation(predecessor, predecessorRemainingShares, null);
     }
@@ -677,6 +711,11 @@ export class EntryLifecycleModule implements RuntimeModule {
     predecessor: Order,
     predecessorRemainingShares: number,
   ): Promise<boolean> {
+    predecessorRemainingShares = Math.max(
+      0,
+      exchangeComparisonOrder(predecessor).size - predecessor.size + predecessorRemainingShares,
+    );
+    predecessor = exchangeComparisonOrder(predecessor);
     if (!this.deps.getOrderResult || !predecessor.exchangeOrderId) return false;
     try {
       const result = await this.deps.getOrderResult(predecessor.exchangeOrderId);
@@ -899,7 +938,10 @@ export class EntryLifecycleModule implements RuntimeModule {
       identity.lifecycleSignalId !== intent.lifecycleSignalId
     )
       return;
+    const successorMinimum = () => this.prepareCaptureCancelMinimum(intent);
+    if (!(await successorMinimum())?.()) return;
     await this.deps.bus.publish("CancelOrderRequested", {
+      successorMinimum,
       command: {
         type: "CancelOrderCommand",
         commandId: createCommandId(identity.cancelCommandId),
@@ -915,10 +957,64 @@ export class EntryLifecycleModule implements RuntimeModule {
     await this.handleCaptureTerminalBySignal(signal.signalId, reason);
   }
 
+  private async prepareCaptureCancelMinimum(intent: MakerCaptureRepriceIntent) {
+    const originalMarket = this.getMarket(intent.tokenId);
+    const entry = await primeFreshMakerCaptureBook(
+      this.deps.candidateBookCache,
+      String(intent.tokenId),
+      this.now(),
+    );
+    if (!entry || !this.deps.gateway) return null;
+    return prepareSuccessorMinimum(this.deps.gateway, () => {
+      const predecessor = this.deps.orderRepo.findById(intent.predecessorOrderId);
+      const state = predecessor && this.captureIntentState(intent, predecessor, this.now());
+      const market = this.getMarket(intent.tokenId);
+      if (
+        !this.started ||
+        this.deps.runtimeControl?.isPaused() ||
+        market !== originalMarket ||
+        !predecessor ||
+        !isWorking(predecessor) ||
+        !state ||
+        !market
+      )
+        return null;
+      const { usage, origin } = state;
+      const candidate = computeMakerCaptureCandidate({
+        book: entry.book,
+        tickSize: market.tickSize,
+        predecessorPrice: predecessor.price,
+        predecessorVisibleShares: usage.predecessorRemainingShares,
+        originalSuggestedPrice: origin.originalSuggestedPrice,
+        entryPriceCeiling: origin.entryPriceCeiling!,
+      });
+      if (!candidate.ok) return null;
+      const size = makerCaptureResidual(usage, candidate.price);
+      return {
+        params: {
+          clientOrderId: intent.lifecycleSignalId,
+          tokenId: intent.tokenId,
+          side: "buy" as const,
+          size,
+          price: candidate.price,
+          orderType: predecessor.orderType,
+          postOnly: true,
+          tickSize: market.tickSize,
+          negRisk: market.negRisk,
+        },
+        state: JSON.stringify([predecessor, state, market]),
+      };
+    });
+  }
+
   private async handleCaptureTerminalBySignal(
     signalId: string | null | undefined,
     reason: string,
   ): Promise<void> {
+    if (isLocalMinimumReason(reason)) {
+      if (signalId) this.captureSignalsPublished.delete(signalId);
+      return;
+    }
     if (!signalId) return;
     const intent = this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(signalId);
     if (!intent) return;

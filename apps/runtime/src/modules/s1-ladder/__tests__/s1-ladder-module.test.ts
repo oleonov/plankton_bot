@@ -27,6 +27,20 @@ import {
   type RiskEventRepository,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
+import {
+  bootstrapDatabase,
+  SqliteOrderRepository,
+  SqliteFillRepository,
+  SqlitePositionRepository,
+} from "@krabs/db";
+import { LiveExchangeGateway, LiveMarketDataGateway } from "@krabs/exchange";
+import { TokenMinimumAuthority, hasNeverPostedMinimumEvidence } from "@krabs/domain";
+import {
+  OrderBuilder,
+  type UserOrderV2,
+  type CreateOrderOptions,
+} from "@polymarket/clob-client-v2";
+import { ExecutionModule } from "../../execution/execution-module.js";
 import { RuntimeMetricWriter } from "../../../runtime-metric-writer.js";
 import type { Logger } from "../../../logger.js";
 import { evaluateDecisionPlan } from "../../algo-decision/decision-planner.js";
@@ -34,7 +48,7 @@ import { SellLoopGuardModule } from "../../sell-loop-guard/sell-loop-guard-modul
 import { S1_LADDER_RULE_ID, S1LadderModule } from "../s1-ladder-module.js";
 import type Database from "better-sqlite3";
 
-const tokenId = createTokenId("s1-align-token");
+const tokenId = createTokenId("333333333");
 const conditionId = createConditionId("s1-align-condition");
 const NOW = Date.parse("2026-06-12T10:00:00.000Z");
 
@@ -447,6 +461,153 @@ function readMetricValueByLabel(db: Database.Database, metricName: string, label
 }
 
 describe("S1LadderModule", () => {
+  it.each([false, true])(
+    "rearms the SQLite S1 child with unchanged minimum after budget denial: %s",
+    async (denyBudget) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(NOW);
+      const db = bootstrapDatabase(":memory:");
+      const orders = new SqliteOrderRepository(db.db);
+      const fills = new SqliteFillRepository(db.db);
+      const positions = new SqlitePositionRepository(db.db);
+      const owned = position({ exitOwner: null });
+      positions.save(owned);
+      const bus = new InProcessEventBus();
+      const builder = new OrderBuilder(
+        {
+          getAddress: async () => "0x1111111111111111111111111111111111111111",
+          _signTypedData: async () => `0x${"11".repeat(65)}`,
+        },
+        137,
+      );
+      const posted: string[] = [];
+      const client = {
+        chainId: 137,
+        createOrder: vi.fn((order: UserOrderV2, options: CreateOrderOptions) =>
+          builder.buildOrder(order, options, 2),
+        ),
+        getOrderBook: vi.fn().mockResolvedValue({ min_order_size: "5" }),
+        postOrder: vi.fn(async () => {
+          const pending = orders.findOpen().find((order) => order.status === "pending")!;
+          posted.push(String(pending.clientOrderId));
+          return { orderID: pending.orderId };
+        }),
+      };
+      const marketData = new LiveMarketDataGateway({ client });
+      const gateway = new LiveExchangeGateway({ client });
+      let budgetAvailable = true;
+      const source = new TokenMinimumAuthority(
+        async (id) => {
+          if (!budgetAvailable) return false;
+          await marketData.getOrderBook(createTokenId(id));
+          return true;
+        },
+        () => {},
+      );
+      marketData.setTokenMinimumAuthority(source);
+      gateway.setTokenMinimumSource(source);
+      await marketData.getOrderBook(tokenId);
+      const lots = {
+        findOpen: () => [{ remainingSize: owned.size, entryPrice: owned.avgEntryPrice }],
+      };
+      const policy = {
+        ...DEFAULT_EXECUTION_POLICY,
+        trackS1: { ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true },
+      };
+      const execution = new ExecutionModule({
+        bus,
+        gateway,
+        orderRepo: orders,
+        fillRepo: fills,
+        positionRepo: positions,
+        inventoryLotRepo: lots as never,
+        marketRepo: { findByTokenId: () => market() } as never,
+        tokenMinimum: source,
+        runtimeMode: "live-lite",
+        runtimeControl: { isPaused: () => false },
+        executionPolicy: () => policy,
+        botRunId: "s1-minimum" as never,
+        log: silentLog,
+      });
+      const module = new S1LadderModule({
+        bus,
+        positionRepo: positions,
+        orderRepo: orders,
+        fillRepo: fills,
+        tokenMinimum: source,
+        policy: () => policy.trackS1,
+        log: silentLog,
+        now: () => Date.now(),
+      });
+      const publish = () =>
+        bus.publish("MarketSnapshotHeartbeat", {
+          markets: [market({ minOrderSize: 5 })],
+          booksByToken: new Map([[String(tokenId), book({ minOrderSize: 5 })]]),
+          timestamp: Date.now(),
+          reason: "full_lifetime_active_position",
+          source: "market-data",
+        });
+      const save = orders.save.bind(orders);
+      let blocking = true;
+      vi.spyOn(orders, "save").mockImplementation((order) => {
+        save(order);
+        if (blocking && order.status === "pending")
+          source.complete(source.begin([tokenId]), new Map([[tokenId, 500]]));
+      });
+      const replace = vi.spyOn(orders, "replacePendingIdentity");
+      try {
+        await execution.start();
+        await module.start();
+        await bus.publish("NormalizedMarketUpdated", {
+          markets: [market({ minOrderSize: 5 })],
+          timestamp: NOW,
+        });
+        await publish();
+        await bus.drain();
+        expect(client.postOrder).not.toHaveBeenCalled();
+        const rejected = orders.findByTokenId(tokenId).find(hasNeverPostedMinimumEvidence)!;
+        expect(rejected).toBeDefined();
+        const signedCount = client.createOrder.mock.calls.length;
+        vi.setSystemTime(NOW + 60_000);
+        await publish();
+        expect(client.createOrder).toHaveBeenCalledTimes(signedCount);
+        blocking = false;
+        await marketData.getOrderBook(tokenId);
+        if (denyBudget) {
+          budgetAvailable = false;
+          await publish();
+          expect(client.postOrder).not.toHaveBeenCalled();
+          expect(source.read(tokenId).latest?.minimum).toBe(5);
+          budgetAvailable = true;
+          await publish();
+          expect(client.createOrder).toHaveBeenCalledTimes(signedCount);
+          vi.setSystemTime(Date.now() + 60_000);
+        }
+        await publish();
+        await bus.drain();
+        const accepted = orders.findByClientOrderId(rejected.clientOrderId)!;
+        expect(accepted.status).toBe("open");
+        expect(accepted.size).toBe(rejected.size);
+        expect(replace.mock.calls.filter(([id]) => id === rejected.orderId)).toHaveLength(1);
+        expect(posted.filter((id) => id === rejected.clientOrderId)).toHaveLength(1);
+        const count = client.postOrder.mock.calls.length;
+        await publish();
+        await bus.drain();
+        expect(client.postOrder).toHaveBeenCalledTimes(count);
+        expect(
+          orders
+            .findByTokenId(tokenId)
+            .filter((order) => order.clientOrderId === rejected.clientOrderId),
+        ).toHaveLength(1);
+      } finally {
+        await module.stop();
+        await execution.stop();
+        db.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   let metricsDb: Database.Database;
 
   beforeEach(async () => {
@@ -689,6 +850,98 @@ describe("S1LadderModule", () => {
     await loopGuard.stop();
     await module.stop();
   });
+
+  it.each([30_000, 60_000])(
+    "retires a deferred tier across handoff at %sms and cooldown expiry",
+    async (handoffAt) => {
+      const bus = new InProcessEventBus();
+      const orders: Order[] = [];
+      const placements: PlaceOrderCommand[] = [];
+      const cancels = vi.fn();
+      const source = new TokenMinimumAuthority(
+        async () => false,
+        () => {},
+      );
+      source.complete(source.begin([tokenId]), new Map([[tokenId, 5]]));
+      const module = new S1LadderModule({
+        bus,
+        positionRepo: makePositionRepo([position()]),
+        orderRepo: makeOrderRepo(orders),
+        tokenMinimum: source,
+        policy: () => ({ ...DEFAULT_EXECUTION_POLICY.trackS1, enabled: true }),
+        log: silentLog,
+        now: () => NOW,
+      });
+      bus.subscribe("PlaceOrderRequested", async ({ command, timestamp }) => {
+        placements.push(command);
+        if (placements.length === 1) {
+          await bus.publish("OrderSkipped", {
+            ...command,
+            reasonCode: "token-minimum-unavailable",
+            signalId: command.signalId!,
+            signalReason: command.signalReason ?? null,
+            decisionRuleId: command.decisionRuleId!,
+            signalTimestamp: command.signalTimestamp!,
+            details: {},
+            timestamp,
+          });
+          return;
+        }
+        const accepted = order({
+          orderId: createOrderId(String(command.commandId)),
+          clientOrderId: command.clientOrderId,
+          metadata: command.metadata ?? null,
+          price: command.price,
+          size: command.size,
+        });
+        orders.push(accepted);
+        await bus.publish("OrderPlaced", {
+          ...command,
+          orderId: accepted.orderId,
+          signalReason: command.signalReason ?? null,
+          timestamp,
+        });
+      });
+      bus.subscribe("CancelOrderRequested", async (event) => {
+        cancels(event);
+        const cancelled = orders.find((order) => order.orderId === event.command.orderId)!;
+        cancelled.status = "cancelled";
+        await bus.publish("OrderCancelled", {
+          ...event.command,
+          tokenId,
+          conditionId,
+          signalReason: null,
+          timestamp: event.timestamp,
+        });
+      });
+      const publish = (timestamp: number, endDate = market().endDate) =>
+        bus.publish("MarketSnapshotHeartbeat", {
+          markets: [market({ endDate })],
+          booksByToken: new Map([[String(tokenId), book()]]),
+          timestamp,
+          reason: "full_lifetime_active_position",
+          source: "market-data",
+        });
+      try {
+        await module.start();
+        await publish(NOW);
+        expect(placements).toHaveLength(4);
+        expect(orders.filter((order) => order.status === "open")).toHaveLength(3);
+        expect(cancels).not.toHaveBeenCalled();
+        const endDate = new Date(NOW + 30 * 60_000).toISOString();
+        await publish(NOW + handoffAt, endDate);
+        expect(cancels).toHaveBeenCalledTimes(3);
+        expect(module.getSnapshot(tokenId)).toBeNull();
+        await publish(NOW + 120_000, endDate);
+        await publish(NOW + 180_000, endDate);
+        expect(placements).toHaveLength(4);
+        expect(cancels).toHaveBeenCalledTimes(3);
+        expect(orders.every((order) => order.status === "cancelled")).toBe(true);
+      } finally {
+        await module.stop();
+      }
+    },
+  );
 
   it("initiates idempotent Q.D handoff when an active ladder is inside the last hour", async () => {
     const bus = new InProcessEventBus();

@@ -9,6 +9,7 @@ import {
   createOrderId,
   createPositionId,
   createTokenId,
+  TokenMinimumAuthority,
   type Fill,
   type InventoryLot,
   type NormalizedMarket,
@@ -16,6 +17,12 @@ import {
   type OrderBookSnapshot,
   type Position,
 } from "@krabs/domain";
+import { LiveExchangeGateway, LiveMarketDataGateway } from "@krabs/exchange";
+import {
+  OrderBuilder,
+  type UserOrderV2,
+  type CreateOrderOptions,
+} from "@polymarket/clob-client-v2";
 import { InProcessEventBus } from "@krabs/event-bus";
 import {
   computeBounceAskCaptureCandidate,
@@ -27,9 +34,39 @@ import { BounceAskCaptureLifecycleModule } from "../modules/bounce-ask-capture/b
 
 const NOW = Date.parse("2026-08-23T00:00:00.000Z");
 const COHORT = "2026-08-01T00:00:00.000Z";
-const tokenId = createTokenId("ask-token");
+const tokenId = createTokenId("123456789");
 const conditionId = createConditionId("ask-condition");
 const positionId = createPositionId("ask-position");
+
+function prospectiveGateway() {
+  const builder = new OrderBuilder(
+    {
+      getAddress: async () => "0x1111111111111111111111111111111111111111",
+      _signTypedData: async () => `0x${"11".repeat(65)}`,
+    },
+    137,
+  );
+  const client = {
+    chainId: 137,
+    createOrder: vi.fn((order: UserOrderV2, options: CreateOrderOptions) =>
+      builder.buildOrder(order, options, 2),
+    ),
+    postOrder: vi.fn(),
+    getOrderBook: vi.fn().mockResolvedValue({ min_order_size: "1" }),
+  };
+  const gateway = new LiveExchangeGateway({ client });
+  const marketData = new LiveMarketDataGateway({ client });
+  const source = new TokenMinimumAuthority(
+    async (id) => {
+      await marketData.getOrderBook(createTokenId(id));
+      return true;
+    },
+    () => {},
+  );
+  marketData.setTokenMinimumAuthority(source);
+  gateway.setTokenMinimumSource(source);
+  return gateway;
+}
 
 function order(id: string, overrides: Partial<Order> = {}): Order {
   return {
@@ -354,6 +391,7 @@ describe("bounce ASK capture", () => {
     const module = new BounceAskCaptureLifecycleModule({
       bus,
       orderRepo: repo,
+      gateway: prospectiveGateway(),
       fillRepo: { findByOrderId: () => [], findByOrderIds: () => [], findByTokenId: () => [fill] },
       positionRepo: { findById: () => currentPosition },
       inventoryLotRepo: { findOpen: () => [lot] },
@@ -432,6 +470,7 @@ describe("bounce ASK capture", () => {
     expect(terminal).toHaveBeenCalledWith(intent.intentId, "failed", "policy-cohort-lineage-drift");
     expect(effects).toEqual(["claim", "cancel-after-claim"]);
     policyEnabled = true;
+    terminal.mockClear();
 
     sell = { ...sell, status: "cancelled" };
     currentPosition.size = lot.remainingSize = 0.5;
@@ -444,7 +483,8 @@ describe("bounce ASK capture", () => {
       signalReason: sell.signalReason,
       timestamp: NOW,
     });
-    expect(terminal).toHaveBeenCalledWith(intent.intentId, "dust", "replacement-below-minimum");
+    expect(terminal).not.toHaveBeenCalled();
+    expect(effects).toEqual(["claim", "cancel-after-claim"]);
     await module.stop();
   });
 });

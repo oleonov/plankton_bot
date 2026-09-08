@@ -14,6 +14,12 @@
 import type { TokenId } from "./ids.js";
 import type { OrderSide, OrderType, ExchangeErrorCode, LiquidityRole } from "./enums.js";
 import type { MarketBookSource, OrderBookSnapshot } from "./types.js";
+import type {
+  TokenMinimumAuthority,
+  TokenMinimumSource,
+  SignedOrderFacts,
+  TokenMinimumReason,
+} from "./token-minimum.js";
 
 // ─── Market catalog types ─────────────────────────────────────────────────
 
@@ -187,10 +193,17 @@ export interface PlaceOrderResult {
  */
 export interface PreparedOrder {
   readonly orderId: string;
+  readonly signedFacts?: SignedOrderFacts;
   readonly __preparedOrderBrand: "PreparedOrder";
 }
 
 export type PreparedOrderSubmitResult =
+  | {
+      readonly kind: "local-minimum";
+      readonly reason: TokenMinimumReason;
+      readonly minimum: number | null;
+      readonly neverPosted: boolean;
+    }
   | { readonly kind: "accepted"; readonly orderId: string }
   | {
       readonly kind: "rejected";
@@ -489,6 +502,7 @@ export interface RedeemPositionsOptions {
  * The execution engine never calls this interface directly.
  */
 export interface MarketDataGateway {
+  setTokenMinimumAuthority?(authority: TokenMinimumAuthority): void;
   /** Fetch all active markets from the CLOB. Optional per-page progress callback. */
   getMarkets(onPage?: (page: number) => Promise<void> | void): Promise<ClobMarket[]>;
 
@@ -613,6 +627,8 @@ export type FetchResult<T> =
  * cancelAllOrders). This boundary is a non-negotiable runtime invariant.
  */
 export interface ExchangeGateway {
+  setTokenMinimumSource?(source: TokenMinimumSource): void;
+  validatePreparedMinimum?(prepared: PreparedOrder): void;
   /** Place a limit order. Never throws — errors are encoded in PlaceOrderResult. */
   placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult>;
 
@@ -620,7 +636,10 @@ export interface ExchangeGateway {
   prepareOrder?(params: PlaceOrderParams): Promise<PreparedOrder>;
 
   /** Submits a previously prepared order without re-signing it. */
-  submitPreparedOrder?(prepared: PreparedOrder): Promise<PreparedOrderSubmitResult>;
+  submitPreparedOrder?(
+    prepared: PreparedOrder,
+    beforeInvoke?: () => void,
+  ): Promise<PreparedOrderSubmitResult>;
 
   /** Cancel a single order by exchange-assigned ID. */
   cancelOrder(params: CancelOrderParams): Promise<CancelOrderResult>;

@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTokenId, type DepHealthRecorder, type DepKey } from "@krabs/domain";
 import { decodeFunctionData, parseAbi } from "viem";
+import { TokenMinimumAuthority } from "@krabs/domain";
+import {
+  OrderBuilder,
+  type UserOrderV2,
+  type CreateOrderOptions,
+} from "@polymarket/clob-client-v2";
+import type { PlaceOrderParams } from "@krabs/domain";
 import {
   LiveExchangeGateway,
   SettlementNotSubmittedError,
@@ -23,7 +30,13 @@ function createMockClient() {
   return {
     chainId: 137,
     createAndPostOrder: vi.fn(),
-    createOrder: vi.fn(),
+    createOrder: vi.fn().mockImplementation(async (order) => ({
+      ...signedV2Order(),
+      tokenId: order.tokenID,
+      side: order.side,
+      makerAmount: String(Math.round(order.size * 1e6)),
+      takerAmount: String(Math.round(order.size * 1e6)),
+    })),
     postOrder: vi.fn(),
     cancelOrder: vi.fn(),
     getOrder: vi.fn(),
@@ -43,7 +56,7 @@ function createMockClient() {
     getOk: vi.fn(),
     getMarkets: vi.fn(),
     getMarket: vi.fn(),
-    getOrderBook: vi.fn(),
+    getOrderBook: vi.fn().mockResolvedValue({ min_order_size: "5" }),
     getTickSize: vi.fn(),
     getClobMarketInfo: vi.fn(),
   };
@@ -66,6 +79,295 @@ function signedV2Order() {
     signature: "0xsignature",
   };
 }
+
+function createLiveGateway(config: ConstructorParameters<typeof LiveExchangeGateway>[0]) {
+  const gateway = new LiveExchangeGateway(config);
+  const marketData = new LiveMarketDataGateway({ client: config.client });
+  const source = new TokenMinimumAuthority(
+    async (tokenId) => {
+      await marketData.getOrderBook(createTokenId(tokenId));
+      return true;
+    },
+    () => {},
+  );
+  marketData.setTokenMinimumAuthority(source);
+  gateway.setTokenMinimumSource(source);
+  return gateway;
+}
+
+function minimumSdkFixture() {
+  const builder = new OrderBuilder(
+    {
+      getAddress: async () => "0x1111111111111111111111111111111111111111",
+      _signTypedData: async () => `0x${"11".repeat(65)}`,
+    },
+    137,
+  );
+  const client = {
+    chainId: 137,
+    createOrder: vi.fn((order: UserOrderV2, options: CreateOrderOptions) =>
+      builder.buildOrder(order, options, 2),
+    ),
+    postOrder: vi.fn().mockResolvedValue({ orderID: "accepted-minimum" }),
+    getOrderBook: vi.fn().mockResolvedValue({ min_order_size: "5" }),
+  };
+  const gateway = createLiveGateway({ client });
+  const marketData = new LiveMarketDataGateway({ client });
+  const changed = vi.fn();
+  const source = new TokenMinimumAuthority(async (id) => {
+    await marketData.getOrderBook(createTokenId(id));
+    return true;
+  }, changed);
+  gateway.setTokenMinimumSource(source);
+  marketData.setTokenMinimumAuthority(source);
+  const params: PlaceOrderParams = {
+    clientOrderId: "minimum-contract",
+    tokenId: createTokenId(
+      "25440768084173492596124660289664772112753850137373593713699019611407231160558",
+    ),
+    side: "sell",
+    size: 6.504000000000005,
+    price: 0.018,
+    orderType: "GTC",
+    postOnly: true,
+    tickSize: 0.001,
+    negRisk: false,
+  };
+  return { client, gateway, marketData, source, changed, params };
+}
+
+describe("attempt minimum contract at the SDK boundary", () => {
+  it.each([
+    "valid",
+    "omitted",
+    "conflicting-alias",
+    "duplicate",
+    "missing-minimum",
+    "unexpected",
+    "failure",
+  ])("ingests each batch completion once and blocks unusable %s metadata", async (outcome) => {
+    const f = minimumSdkFixture();
+    const prepared = await f.gateway.prepareOrder(f.params);
+    f.changed.mockClear();
+    const raw = { asset_id: String(f.params.tokenId), min_order_size: "5" };
+    const books =
+      outcome === "omitted"
+        ? []
+        : outcome === "conflicting-alias"
+          ? [{ ...raw, token_id: "other" }]
+          : outcome === "duplicate"
+            ? [raw, { ...raw, min_order_size: "7" }, raw]
+            : outcome === "missing-minimum"
+              ? [{ asset_id: raw.asset_id }]
+              : outcome === "unexpected"
+                ? [{ ...raw, asset_id: "other" }]
+                : [raw];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(books), { status: outcome === "failure" ? 400 : 200 }),
+      ),
+    );
+    const completion = vi.spyOn(f.source, "complete");
+    if (outcome === "failure")
+      await expect(f.marketData.getOrderBooks([raw.asset_id])).rejects.toThrow();
+    else await f.marketData.getOrderBooks([raw.asset_id]);
+    expect(completion).toHaveBeenCalledOnce();
+    expect(f.source.read(raw.asset_id).remembered).toBe(5);
+    expect(f.source.read(raw.asset_id).latest?.minimum).toBe(outcome === "valid" ? 5 : null);
+    expect(f.source.read("other").latest).toBeNull();
+    expect(f.changed).toHaveBeenCalledTimes(outcome === "valid" ? 0 : 1);
+    expect((await f.gateway.submitPreparedOrder(prepared)).kind).toBe(
+      outcome === "valid" ? "accepted" : "local-minimum",
+    );
+    expect(f.client.postOrder).toHaveBeenCalledTimes(outcome === "valid" ? 1 : 0);
+  });
+
+  it.each([
+    "mismatch",
+    "accepted",
+    "timeout",
+    "other-rejection",
+    "refresh-failed",
+    "minimum-increased",
+  ])("bounds direct version recovery after %s", async (outcome) => {
+    const f = minimumSdkFixture();
+    const resolveVersion = vi.fn(async () => {
+      if (outcome === "refresh-failed") throw new Error("version read failed");
+      return 2;
+    });
+    Object.assign(f.client, { cachedVersion: 1, resolveVersion });
+    f.client.postOrder.mockImplementationOnce(async () => {
+      if (outcome === "timeout") throw new Error("timeout");
+      if (outcome === "accepted") return { orderID: "first-accepted" };
+      if (outcome === "minimum-increased")
+        f.client.getOrderBook.mockResolvedValue({ min_order_size: "7" });
+      return {
+        status: 400,
+        error: outcome === "other-rejection" ? "unrelated rejection" : "order_version_mismatch",
+      };
+    });
+    const result = await f.gateway.placeOrder({ ...f.params, postOnly: false });
+    expect(f.client.postOrder).toHaveBeenCalledTimes(outcome === "mismatch" ? 2 : 1);
+    expect(f.client.createOrder).toHaveBeenCalledTimes(
+      ["mismatch", "minimum-increased"].includes(outcome) ? 2 : 1,
+    );
+    expect(result.success).toBe(["mismatch", "accepted"].includes(outcome));
+    if (["accepted", "timeout", "other-rejection"].includes(outcome))
+      expect(resolveVersion).not.toHaveBeenCalled();
+    if (outcome === "mismatch")
+      expect(f.client.createOrder.mock.calls[1]).toEqual(f.client.createOrder.mock.calls[0]);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(["buy", "sell"] as const)(
+    "uses SDK signed shares for %s while retaining logical size",
+    async (side) => {
+      const f = minimumSdkFixture();
+      const params = { ...f.params, side };
+      const prepared = await f.gateway.prepareOrder(params);
+      expect(prepared.signedFacts).toMatchObject({
+        shares: 6.5,
+        logicalSize: 6.504000000000005,
+        side,
+      });
+      expect(f.client.postOrder).not.toHaveBeenCalled();
+      expect(await f.gateway.submitPreparedOrder(prepared)).toMatchObject({ kind: "accepted" });
+      const signed = f.client.postOrder.mock.calls[0]![0];
+      expect(signed[side === "buy" ? "takerAmount" : "makerAmount"]).toBe("6500000");
+      expect(f.client.createOrder.mock.calls[0]![0].size).toBe(params.size);
+    },
+  );
+
+  it.each(["buy", "sell"] as const)(
+    "blocks %s when only logical shares meet the minimum",
+    async (side) => {
+      const f = minimumSdkFixture();
+      f.client.getOrderBook.mockResolvedValue({ min_order_size: "6.502" });
+      await expect(f.gateway.prepareOrder({ ...f.params, side })).rejects.toMatchObject({
+        reason: "token-minimum-below",
+      });
+      expect(f.client.postOrder).not.toHaveBeenCalled();
+      f.client.getOrderBook.mockResolvedValue({ min_order_size: "1" });
+      expect(await f.gateway.placeOrder({ ...f.params, side, size: 1.22 })).toMatchObject({
+        success: true,
+      });
+      expect(f.client.postOrder).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([5, 7, null])(
+    "delayed preparation uses latest completed minimum %s without a TTL",
+    async (minimum) => {
+      vi.useFakeTimers();
+      const f = minimumSdkFixture();
+      const prepared = await f.gateway.prepareOrder(f.params);
+      vi.advanceTimersByTime(60_000);
+      if (minimum !== 5) {
+        f.client.getOrderBook.mockResolvedValue(
+          minimum === null ? {} : { min_order_size: String(minimum) },
+        );
+        await f.marketData.getOrderBook(f.params.tokenId);
+      }
+      const callback = vi.fn();
+      const result = await f.gateway.submitPreparedOrder(prepared, callback);
+      expect(result.kind).toBe(minimum === 5 ? "accepted" : "local-minimum");
+      expect(f.client.postOrder).toHaveBeenCalledTimes(minimum === 5 ? 1 : 0);
+      expect(callback).toHaveBeenCalledTimes(minimum === 5 ? 1 : 0);
+    },
+  );
+
+  it("does not release an ambiguous identity after a later local minimum block", async () => {
+    const f = minimumSdkFixture();
+    const prepared = await f.gateway.prepareOrder(f.params);
+    f.client.postOrder.mockRejectedValueOnce(new Error("timeout"));
+    expect(await f.gateway.submitPreparedOrder(prepared)).toMatchObject({ kind: "unknown" });
+    f.client.getOrderBook.mockResolvedValue({ min_order_size: "7" });
+    expect(await f.gateway.submitPreparedOrder(prepared)).toMatchObject({
+      kind: "local-minimum",
+      neverPosted: false,
+    });
+    expect(f.client.postOrder).toHaveBeenCalledOnce();
+    expect(f.client.createOrder).toHaveBeenCalledOnce();
+  });
+
+  it("uses a decrease and ignores an unfinished newer request", async () => {
+    const f = minimumSdkFixture();
+    const prepared = await f.gateway.prepareOrder(f.params);
+    const token = String(f.params.tokenId);
+    const decreased = f.source.begin([token]);
+    f.source.complete(decreased, new Map([[token, 1]]));
+    f.source.begin([token]);
+    expect(await f.gateway.submitPreparedOrder(prepared)).toMatchObject({ kind: "accepted" });
+    expect(f.client.postOrder).toHaveBeenCalledOnce();
+  });
+
+  it.each(["asset_id", "token_id"] as const)(
+    "rejects mismatched raw %s before mapping",
+    async (field) => {
+      const f = minimumSdkFixture();
+      f.client.getOrderBook.mockResolvedValue({ min_order_size: "5", [field]: "unexpected" });
+      await expect(f.gateway.prepareOrder(f.params)).rejects.toMatchObject({
+        reason: "token-minimum-unavailable",
+      });
+      expect(f.client.createOrder).not.toHaveBeenCalled();
+      expect(f.client.postOrder).not.toHaveBeenCalled();
+    },
+  );
+
+  it("orders same-millisecond completions by request sequence and remembers older valid knowledge", async () => {
+    vi.useFakeTimers();
+    const f = minimumSdkFixture();
+    const token = String(f.params.tokenId);
+    const old = f.source.begin([token]);
+    const recent = f.source.begin([token]);
+    f.source.complete(recent, new Map([[token, null]]));
+    f.source.complete(old, new Map([[token, 5]]));
+    expect(f.source.read(token)).toMatchObject({
+      remembered: 5,
+      latest: { sequence: recent.sequence, minimum: null },
+    });
+    f.client.getOrderBook.mockResolvedValue({});
+    await expect(f.gateway.prepareOrder(f.params)).rejects.toMatchObject({
+      reason: "token-minimum-unavailable",
+    });
+    expect(f.client.postOrder).not.toHaveBeenCalled();
+  });
+
+  it("stops before SDK invocation when the write-ahead callback fails", async () => {
+    const f = minimumSdkFixture();
+    const prepared = await f.gateway.prepareOrder(f.params);
+    await expect(
+      f.gateway.submitPreparedOrder(prepared, () => {
+        throw new Error("sqlite write failed");
+      }),
+    ).rejects.toThrow("sqlite write failed");
+    expect(f.client.postOrder).not.toHaveBeenCalled();
+    f.client.getOrderBook.mockResolvedValue({ min_order_size: "7" });
+    expect(await f.gateway.submitPreparedOrder(prepared)).toMatchObject({
+      kind: "local-minimum",
+      neverPosted: true,
+    });
+  });
+
+  it("disposal revokes a prepared receipt and ignores late completions", async () => {
+    const f = minimumSdkFixture();
+    const prepared = await f.gateway.prepareOrder(f.params);
+    const request = f.source.begin([String(f.params.tokenId)]);
+    f.source.dispose();
+    f.source.complete(request, new Map([[String(f.params.tokenId), 1]]));
+    expect(await f.gateway.submitPreparedOrder(prepared)).toMatchObject({
+      kind: "local-minimum",
+      neverPosted: true,
+    });
+    expect(f.client.postOrder).not.toHaveBeenCalled();
+  });
+});
 
 function createMockSettlementClient() {
   return {
@@ -149,7 +451,7 @@ describe("LiveExchangeGateway", () => {
 
   beforeEach(() => {
     client = createMockClient();
-    gw = new LiveExchangeGateway({ client });
+    gw = createLiveGateway({ client });
   });
 
   afterEach(() => {
@@ -157,11 +459,11 @@ describe("LiveExchangeGateway", () => {
   });
 
   it("placeOrder calls createAndPostOrder and returns success", async () => {
-    client.createAndPostOrder.mockResolvedValue({ orderID: "live-ord-1" });
+    client.postOrder.mockResolvedValue({ orderID: "live-ord-1" });
 
     const result = await gw.placeOrder({
       clientOrderId: "cloid-1",
-      tokenId: createTokenId("tok-1"),
+      tokenId: createTokenId("9876543210123456789"),
       side: "buy",
       size: 100,
       price: 0.5,
@@ -172,23 +474,23 @@ describe("LiveExchangeGateway", () => {
 
     expect(result.success).toBe(true);
     expect(result.orderId).toBe("live-ord-1");
-    expect(client.createAndPostOrder).toHaveBeenCalledOnce();
+    expect(client.postOrder).toHaveBeenCalledOnce();
 
-    const [userOrder, options] = client.createAndPostOrder.mock.calls[0]!;
-    expect(userOrder.tokenID).toBe("tok-1");
+    const [userOrder, options] = client.createOrder.mock.calls[0]!;
+    expect(userOrder.tokenID).toBe("9876543210123456789");
     expect(userOrder.side).toBe("BUY");
     expect(options.tickSize).toBe("0.01");
     expect(options.negRisk).toBe(false);
   });
 
   it("placeOrder uses signed-order post path for post-only orders", async () => {
-    const signedOrder = { id: "signed-order" };
+    const signedOrder = signedV2Order();
     client.createOrder.mockResolvedValue(signedOrder);
     client.postOrder.mockResolvedValue({ orderID: "live-ord-post-only" });
 
     const result = await gw.placeOrder({
       clientOrderId: "cloid-post-only",
-      tokenId: createTokenId("tok-1"),
+      tokenId: createTokenId("9876543210123456789"),
       side: "buy",
       size: 100,
       price: 0.49,
@@ -212,7 +514,7 @@ describe("LiveExchangeGateway", () => {
 
     const prepared = await gw.prepareOrder({
       clientOrderId: "cloid-prepared",
-      tokenId: createTokenId("tok-1"),
+      tokenId: createTokenId("9876543210123456789"),
       side: "buy",
       size: 100,
       price: 0.5,
@@ -240,7 +542,7 @@ describe("LiveExchangeGateway", () => {
       client.createOrder.mockResolvedValue(signedV2Order());
       return gw.prepareOrder({
         clientOrderId: "cloid-prepared",
-        tokenId: createTokenId("tok-1"),
+        tokenId: createTokenId("9876543210123456789"),
         side: "buy",
         size: 100,
         price: 0.5,
@@ -275,7 +577,7 @@ describe("LiveExchangeGateway", () => {
     });
     expect((tradingDisabled as any).errorDetails).not.toHaveProperty("synthetic");
 
-    gw = new LiveExchangeGateway({ client });
+    gw = createLiveGateway({ client });
     client.postOrder.mockResolvedValue({ status: 503, message: "trading is disabled" });
     await expect(gw.submitPreparedOrder(await prepare())).resolves.toMatchObject({
       kind: "rejected",
@@ -283,7 +585,7 @@ describe("LiveExchangeGateway", () => {
       errorMessage: "trading is disabled",
     });
 
-    gw = new LiveExchangeGateway({ client });
+    gw = createLiveGateway({ client });
     client.postOrder.mockRejectedValue(
       Object.assign(new Error("request timeout"), { status: 408 }),
     );
@@ -322,16 +624,19 @@ describe("LiveExchangeGateway", () => {
 
   it("admits exactly one SELL half-open probe while BUYs and concurrent SELLs stay synthetic", async () => {
     let nowMs = 1_000;
-    gw = new LiveExchangeGateway({
+    gw = createLiveGateway({
       client,
       __now: () => nowMs,
       __tradingDisabledCooldownMs: 300_000,
     } as any);
-    client.createOrder.mockResolvedValue(signedV2Order());
+    client.createOrder.mockImplementation(async (order) => ({
+      ...signedV2Order(),
+      side: order.side,
+    }));
     const prepare = (side: "buy" | "sell") =>
       gw.prepareOrder({
         clientOrderId: `cloid-breaker-${side}-${nowMs}`,
-        tokenId: createTokenId("tok-1"),
+        tokenId: createTokenId("9876543210123456789"),
         side,
         size: 10,
         price: 0.5,
@@ -407,16 +712,19 @@ describe("LiveExchangeGateway", () => {
 
   it("rearms an unknown half-open POST and closes the breaker on a definitive response", async () => {
     let nowMs = 10_000;
-    gw = new LiveExchangeGateway({
+    gw = createLiveGateway({
       client,
       __now: () => nowMs,
       __tradingDisabledCooldownMs: 300_000,
     } as any);
-    client.createOrder.mockResolvedValue(signedV2Order());
+    client.createOrder.mockImplementation(async (order) => ({
+      ...signedV2Order(),
+      side: order.side,
+    }));
     const prepare = (side: "buy" | "sell" = "sell") =>
       gw.prepareOrder({
         clientOrderId: `cloid-breaker-${nowMs}`,
-        tokenId: createTokenId("tok-1"),
+        tokenId: createTokenId("9876543210123456789"),
         side,
         size: 10,
         price: 0.5,
@@ -469,11 +777,11 @@ describe("LiveExchangeGateway", () => {
   });
 
   it("placeOrder returns error result on SDK failure", async () => {
-    client.createAndPostOrder.mockRejectedValue(new Error("Insufficient balance"));
+    client.postOrder.mockRejectedValue(new Error("Insufficient balance"));
 
     const result = await gw.placeOrder({
       clientOrderId: "cloid-1",
-      tokenId: createTokenId("tok-1"),
+      tokenId: createTokenId("9876543210123456789"),
       side: "buy",
       size: 100,
       price: 0.5,
@@ -488,11 +796,11 @@ describe("LiveExchangeGateway", () => {
   });
 
   it("placeOrder rejects empty SDK success payload without order id", async () => {
-    client.createAndPostOrder.mockResolvedValue({});
+    client.postOrder.mockResolvedValue({});
 
     const result = await gw.placeOrder({
       clientOrderId: "cloid-1",
-      tokenId: createTokenId("tok-1"),
+      tokenId: createTokenId("9876543210123456789"),
       side: "buy",
       size: 100,
       price: 0.5,
@@ -511,10 +819,10 @@ describe("LiveExchangeGateway", () => {
     const recorder: DepHealthRecorder = {
       record: (dep, _latencyMs, ok) => calls.push({ dep, ok }),
     };
-    const gwR = new LiveExchangeGateway({ client, depHealthRecorder: recorder });
+    const gwR = createLiveGateway({ client, depHealthRecorder: recorder });
     const params = {
       clientOrderId: "cloid-1",
-      tokenId: createTokenId("tok-1"),
+      tokenId: createTokenId("9876543210123456789"),
       side: "buy" as const,
       size: 100,
       price: 0.5,
@@ -524,14 +832,14 @@ describe("LiveExchangeGateway", () => {
     };
 
     // Resolved payload with no order id → failed placement → dep ok=false.
-    client.createAndPostOrder.mockResolvedValue({});
+    client.postOrder.mockResolvedValue({});
     const bad = await gwR.placeOrder(params);
     expect(bad.success).toBe(false);
     expect(calls).toEqual([{ dep: "clob", ok: false }]);
 
     // A real order id → success → dep ok=true.
     calls.length = 0;
-    client.createAndPostOrder.mockResolvedValue({ orderID: "ord-ok" });
+    client.postOrder.mockResolvedValue({ orderID: "ord-ok" });
     const good = await gwR.placeOrder(params);
     expect(good.success).toBe(true);
     expect(calls).toEqual([{ dep: "clob", ok: true }]);
@@ -568,7 +876,7 @@ describe("LiveExchangeGateway", () => {
     client.getOpenOrders.mockResolvedValue([
       {
         id: "ord-1",
-        asset_id: "tok-1",
+        asset_id: "9876543210123456789",
         side: "BUY",
         original_size: "100",
         size_matched: "0",
@@ -589,7 +897,7 @@ describe("LiveExchangeGateway", () => {
       {
         id: "trade-1",
         taker_order_id: "ord-1",
-        asset_id: "tok-1",
+        asset_id: "9876543210123456789",
         side: "BUY",
         size: "50",
         price: "0.55",
@@ -611,7 +919,7 @@ describe("LiveExchangeGateway", () => {
     const trade = (id: string) => ({
       id,
       taker_order_id: `ord-${id}`,
-      asset_id: "tok-1",
+      asset_id: "9876543210123456789",
       side: "BUY",
       size: "1",
       price: "0.5",
@@ -678,7 +986,7 @@ describe("LiveExchangeGateway", () => {
   });
 
   it("imports only final successful trades and excludes reproduced FAILED maker fills", async () => {
-    gw = new LiveExchangeGateway({ client, traderAddress: "0xours" });
+    gw = createLiveGateway({ client, traderAddress: "0xours" });
     const makerTrade = (id: string, status: string, size: string) => ({
       id,
       taker_order_id: "ord-foreign",
@@ -721,7 +1029,7 @@ describe("LiveExchangeGateway", () => {
   it.each(["MATCHED", "MINED", "RETRYING"])(
     "holds the REST cursor until a %s trade becomes CONFIRMED",
     async (pendingStatus) => {
-      gw = new LiveExchangeGateway({ client, traderAddress: "0xours" });
+      gw = createLiveGateway({ client, traderAddress: "0xours" });
       const trade = (status: string) => ({
         id: "trade-late-finality",
         taker_order_id: "ord-ours",
@@ -753,7 +1061,7 @@ describe("LiveExchangeGateway", () => {
       {
         id: "trade-unknown",
         taker_order_id: "ord-1",
-        asset_id: "tok-1",
+        asset_id: "9876543210123456789",
         side: "BUY",
         size: "1",
         price: "0.5",
@@ -786,7 +1094,7 @@ describe("LiveExchangeGateway", () => {
       {
         id: "trade-1",
         taker_order_id: "ord-1",
-        asset_id: "tok-1",
+        asset_id: "9876543210123456789",
         side: "SELL",
         size: "0",
         price: "0.5",
@@ -798,7 +1106,7 @@ describe("LiveExchangeGateway", () => {
   });
 
   it("getFills extracts only personal legs when traderAddress is configured", async () => {
-    gw = new LiveExchangeGateway({ client, traderAddress: "0xours" });
+    gw = createLiveGateway({ client, traderAddress: "0xours" });
     client.getTrades.mockResolvedValue([
       {
         id: "trade-maker",
@@ -856,7 +1164,7 @@ describe("LiveExchangeGateway", () => {
         {
           order_id: "foreign-order",
           maker_address: "0xforeign",
-          asset_id: "tok-1",
+          asset_id: "9876543210123456789",
           side: "SELL",
           matched_amount: "1",
           price: "0.5",
@@ -864,12 +1172,12 @@ describe("LiveExchangeGateway", () => {
       ],
     },
   ])("fails authenticated fill snapshots for ambiguous personal rows %#", async (shape) => {
-    gw = new LiveExchangeGateway({ client, traderAddress: "0xours" });
+    gw = createLiveGateway({ client, traderAddress: "0xours" });
     client.getTrades.mockResolvedValue([
       {
         id: "trade-ambiguous",
         taker_order_id: "ord-1",
-        asset_id: "tok-1",
+        asset_id: "9876543210123456789",
         side: "SELL",
         size: "1",
         price: "0.5",
@@ -902,7 +1210,7 @@ describe("LiveExchangeGateway", () => {
 
   it("getOpenOrdersForToken returns empty array on SDK failure", async () => {
     client.getOpenOrders.mockRejectedValue(new Error("timeout"));
-    const orders = await gw.getOpenOrdersForToken(createTokenId("tok-1"));
+    const orders = await gw.getOpenOrdersForToken(createTokenId("9876543210123456789"));
     expect(orders).toEqual([]);
   });
 
@@ -920,17 +1228,19 @@ describe("LiveExchangeGateway", () => {
 
   it("getPositionBalance normalizes atomic units to human-readable", async () => {
     client.getBalanceAllowance.mockResolvedValue({ balance: "42000000" });
-    const balance = await gw.getPositionBalance(createTokenId("tok-1"));
+    const balance = await gw.getPositionBalance(createTokenId("9876543210123456789"));
     expect(balance).toBe(42);
     expect(client.getBalanceAllowance).toHaveBeenCalledWith({
       asset_type: "CONDITIONAL",
-      token_id: "tok-1",
+      token_id: "9876543210123456789",
     });
   });
 
   it("getPositionBalance throws on SDK failure instead of returning 0", async () => {
     client.getBalanceAllowance.mockRejectedValue(new Error("Network error"));
-    await expect(gw.getPositionBalance(createTokenId("tok-1"))).rejects.toThrow("Network error");
+    await expect(gw.getPositionBalance(createTokenId("9876543210123456789"))).rejects.toThrow(
+      "Network error",
+    );
   });
 
   it("createUserEventStream requires websocket auth", () => {
@@ -973,7 +1283,7 @@ describe("LiveExchangeGateway", () => {
     client.getBalanceAllowance
       .mockResolvedValueOnce({ balance: "1000000" })
       .mockResolvedValueOnce({ balance: "0" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     await gw.redeemPositions([
       "0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -1000,7 +1310,7 @@ describe("LiveExchangeGateway", () => {
       .mockResolvedValueOnce({ balance: "0" });
     const usdcLegacy = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
     const collateralResolver = vi.fn().mockResolvedValue(usdcLegacy);
-    gw = new LiveExchangeGateway({ client, settlementClient, collateralResolver });
+    gw = createLiveGateway({ client, settlementClient, collateralResolver });
 
     const conditionId = "0x1414141414141414141414141414141414141414141414141414141414141414";
     await gw.redeemPositions([conditionId]);
@@ -1029,7 +1339,7 @@ describe("LiveExchangeGateway", () => {
       .mockResolvedValueOnce({ balance: "1000000" })
       .mockResolvedValueOnce({ balance: "0" });
     const collateralResolver = vi.fn().mockResolvedValue(null);
-    gw = new LiveExchangeGateway({ client, settlementClient, collateralResolver });
+    gw = createLiveGateway({ client, settlementClient, collateralResolver });
 
     const conditionId = "0x1515151515151515151515151515151515151515151515151515151515151515";
     // Throw rather than silently skip — the upstream redeem-sweep caller
@@ -1053,7 +1363,7 @@ describe("LiveExchangeGateway", () => {
       .mockResolvedValueOnce({ balance: "1000000" })
       .mockResolvedValueOnce({ balance: "0" });
     const collateralResolver = vi.fn().mockRejectedValue(new Error("rpc timeout"));
-    gw = new LiveExchangeGateway({ client, settlementClient, collateralResolver });
+    gw = createLiveGateway({ client, settlementClient, collateralResolver });
 
     const conditionId = "0x1616161616161616161616161616161616161616161616161616161616161616";
     await expect(gw.redeemPositions([conditionId])).rejects.toThrow(
@@ -1076,7 +1386,7 @@ describe("LiveExchangeGateway", () => {
     const collateralResolver = vi
       .fn()
       .mockRejectedValue(new Error("RPC HTTP 429: Too Many Requests"));
-    gw = new LiveExchangeGateway({ client, settlementClient, collateralResolver, onInfraAlert });
+    gw = createLiveGateway({ client, settlementClient, collateralResolver, onInfraAlert });
 
     const conditionId = "0x1717171717171717171717171717171717171717171717171717171717171717";
     // Throws and also surfaces the rate-limit signal via onInfraAlert + bubbles
@@ -1100,7 +1410,7 @@ describe("LiveExchangeGateway", () => {
       tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
     });
     client.getBalanceAllowance.mockResolvedValueOnce({ balance: "25000000" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     const conditionId = "0x1212121212121212121212121212121212121212121212121212121212121212";
     await gw.redeemPositions([conditionId], {
@@ -1130,7 +1440,7 @@ describe("LiveExchangeGateway", () => {
       tokens: [{}, { token_id: "tok-no" }],
     });
     client.getBalanceAllowance.mockResolvedValueOnce({ balance: "25000000" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     const conditionId = "0x1313131313131313131313131313131313131313131313131313131313131313";
     await gw.redeemPositions([conditionId], {
@@ -1155,7 +1465,7 @@ describe("LiveExchangeGateway", () => {
     client.getBalanceAllowance
       .mockResolvedValueOnce({ balance: "111000000" })
       .mockResolvedValueOnce({ balance: "0" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     await gw.redeemPositions([
       "0x2222222222222222222222222222222222222222222222222222222222222222",
@@ -1177,7 +1487,7 @@ describe("LiveExchangeGateway", () => {
       tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
     });
     client.getBalanceAllowance.mockResolvedValueOnce({ balance: "31000000" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     const conditionId = "0x3434343434343434343434343434343434343434343434343434343434343434";
     await gw.redeemPositions([conditionId], {
@@ -1214,7 +1524,7 @@ describe("LiveExchangeGateway", () => {
       .mockResolvedValueOnce({ balance: "0" })
       .mockResolvedValueOnce({ balance: "2000000" })
       .mockResolvedValueOnce({ balance: "0" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     await gw.redeemPositions([
       "0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -1238,7 +1548,7 @@ describe("LiveExchangeGateway", () => {
     client.getBalanceAllowance
       .mockResolvedValueOnce({ balance: "0" })
       .mockResolvedValueOnce({ balance: "0" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     await expect(
       gw.redeemPositions(["0x3333333333333333333333333333333333333333333333333333333333333333"]),
@@ -1260,7 +1570,7 @@ describe("LiveExchangeGateway", () => {
       tokens: [{ token_id: "tok-yes" }],
     });
     client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     const conditionId = "0x6666666666666666666666666666666666666666666666666666666666666666";
     await gw.redeemPositions([conditionId]);
@@ -1279,7 +1589,7 @@ describe("LiveExchangeGateway", () => {
       tokens: [{ token_id: "tok-yes" }],
     });
     client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     const conditionId = "0x7777777777777777777777777777777777777777777777777777777777777777";
     const result = await gw.redeemPositions([conditionId]);
@@ -1304,7 +1614,7 @@ describe("LiveExchangeGateway", () => {
       tokens: [{ token_id: "tok-yes" }],
     });
     client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     const conditionId = "0x7878787878787878787878787878787878787878787878787878787878787878";
     await expect(gw.redeemPositions([conditionId])).resolves.toMatchObject({
@@ -1328,7 +1638,7 @@ describe("LiveExchangeGateway", () => {
     client.getBalanceAllowance
       .mockResolvedValueOnce({ balance: "1000000" })
       .mockResolvedValueOnce({ balance: "0" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     const conditionId = "0x8888888888888888888888888888888888888888888888888888888888888888";
     await expect(gw.redeemPositions([conditionId])).resolves.toMatchObject({
@@ -1353,7 +1663,7 @@ describe("LiveExchangeGateway", () => {
     client.getBalanceAllowance
       .mockResolvedValueOnce({ balance: "1000000" })
       .mockResolvedValueOnce({ balance: "1000000" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     const conditionId = "0x9999999999999999999999999999999999999999999999999999999999999999";
     await expect(gw.redeemPositions([conditionId])).rejects.toThrow(
@@ -1377,7 +1687,7 @@ describe("LiveExchangeGateway", () => {
     client.getBalanceAllowance
       .mockResolvedValueOnce({ balance: "1000000" })
       .mockResolvedValueOnce({ balance: "1000000" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     const conditionId = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     await expect(gw.redeemPositions([conditionId])).resolves.toMatchObject({
@@ -1403,7 +1713,7 @@ describe("LiveExchangeGateway", () => {
       tokens: [{ token_id: "tok-yes" }],
     });
     client.getBalanceAllowance.mockResolvedValue({ balance: "1000000" });
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     const first = gw.redeemPositions([
       "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1438,7 +1748,7 @@ describe("LiveExchangeGateway", () => {
         tokens: [{ token_id: "tok-yes" }],
       });
       client.getBalanceAllowance.mockResolvedValue({ balance: "1000000" });
-      gw = new LiveExchangeGateway({
+      gw = createLiveGateway({
         client,
         settlementClient,
         __settlementLaneBackstopMs: 1_000,
@@ -1481,7 +1791,7 @@ describe("LiveExchangeGateway", () => {
         tokens: [{ token_id: "tok-yes" }],
       });
       client.getBalanceAllowance.mockResolvedValue({ balance: "1000000" });
-      gw = new LiveExchangeGateway({
+      gw = createLiveGateway({
         client,
         settlementClient,
         __settlementLaneTaskTimeoutMs: 1_000,
@@ -1528,7 +1838,7 @@ describe("LiveExchangeGateway", () => {
       tokens: [{ token_id: "tok-yes" }],
     });
     client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
-    gw = new LiveExchangeGateway({ client, settlementClient, onInfraAlert });
+    gw = createLiveGateway({ client, settlementClient, onInfraAlert });
 
     await expect(
       gw.redeemPositions(["0x4444444444444444444444444444444444444444444444444444444444444444"]),
@@ -1557,7 +1867,7 @@ describe("LiveExchangeGateway", () => {
       tokens: [{ token_id: "tok-yes" }],
     });
     client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
-    gw = new LiveExchangeGateway({ client, settlementClient, onInfraAlert });
+    gw = createLiveGateway({ client, settlementClient, onInfraAlert });
 
     await expect(
       gw.redeemPositions(["0x5555555555555555555555555555555555555555555555555555555555555555"]),
@@ -1584,7 +1894,7 @@ describe("LiveExchangeGateway", () => {
 
   it("mergePositions builds and executes on-chain merge transactions", async () => {
     const settlementClient = createMockSettlementClient();
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     // Mock market tokens
     client.getMarket.mockResolvedValue({
@@ -1618,7 +1928,7 @@ describe("LiveExchangeGateway", () => {
         .mockResolvedValueOnce({ wait: vi.fn(() => firstWait.promise) })
         .mockResolvedValueOnce({ wait: vi.fn().mockResolvedValue({ state: "MINED" }) }),
     };
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
     client.getMarket.mockResolvedValue({
       condition_id: "0xcond",
       neg_risk: false,
@@ -1654,7 +1964,7 @@ describe("LiveExchangeGateway", () => {
     // Regression: same relayer validation as redeemPositions; metadata must be
     // a short alphanumeric slug, not a free-form string with conditionIds.
     const settlementClient = createMockSettlementClient();
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     client.getMarket.mockResolvedValue({
       tokens: [
@@ -1690,7 +2000,7 @@ describe("LiveExchangeGateway", () => {
     // was invisible forever. Same defect class as the no-merge-API case below, on the path live-lite
     // actually uses.
     const settlementClient = createMockSettlementClient();
-    gw = new LiveExchangeGateway({ client, settlementClient });
+    gw = createLiveGateway({ client, settlementClient });
 
     client.getMarket
       .mockResolvedValueOnce({
@@ -1763,7 +2073,7 @@ describe("LiveExchangeGateway", () => {
           wait: vi.fn().mockRejectedValue(new Error("confirmation stream closed")),
         }),
       };
-      gw = new LiveExchangeGateway({
+      gw = createLiveGateway({
         client,
         settlementClient,
         __settlementLaneBackstopMs: 1_000,
@@ -1809,7 +2119,7 @@ describe("LiveExchangeGateway", () => {
     // 'submitted'. Same verdict — the caller must not apply it locally.
     const settlementClient = { execute: vi.fn().mockResolvedValue({ transactionID: "0xabc" }) };
     const onInfraAlert = vi.fn();
-    gw = new LiveExchangeGateway({ client, settlementClient, onInfraAlert });
+    gw = createLiveGateway({ client, settlementClient, onInfraAlert });
     client.getMarket.mockResolvedValue({
       tokens: [
         { outcome: "Yes", token_id: "tok-yes" },
@@ -1869,7 +2179,7 @@ describe("LiveExchangeGateway", () => {
     // submitted. Rejecting instead would erase that cond-a was already broadcast and let the retry
     // path redeem it a second time.
     const onInfraAlert = vi.fn();
-    const gwWithAlert = new LiveExchangeGateway({ client, onInfraAlert });
+    const gwWithAlert = createLiveGateway({ client, onInfraAlert });
     const redeemOne = vi
       .fn()
       .mockResolvedValueOnce({ transactionHash: "0xpartial" })
@@ -2188,16 +2498,16 @@ describe("LiveMarketDataGateway", () => {
       asks: [{ price: "0.55", size: "200" }],
     });
 
-    const tokenId = createTokenId("tok-1");
+    const tokenId = createTokenId("9876543210123456789");
     const book = await gw.getOrderBook(tokenId);
-    expect(book.tokenId).toBe("tok-1");
+    expect(book.tokenId).toBe("9876543210123456789");
     expect(book.bestBid).toBe(0.5);
     expect(book.bestAsk).toBe(0.55);
   });
 
   it("getTickSize returns parsed number", async () => {
     client.getTickSize.mockResolvedValue("0.001");
-    const tick = await gw.getTickSize(createTokenId("tok-1"));
+    const tick = await gw.getTickSize(createTokenId("9876543210123456789"));
     expect(tick).toBe(0.001);
   });
 
@@ -2255,7 +2565,7 @@ describe("LiveMarketDataGateway", () => {
 
   it("getOrderBook returns empty book on SDK failure", async () => {
     client.getOrderBook.mockRejectedValue(new Error("timeout"));
-    const tokenId = createTokenId("tok-1");
+    const tokenId = createTokenId("9876543210123456789");
     const book = await gw.getOrderBook(tokenId);
     expect(book.bids).toEqual([]);
     expect(book.asks).toEqual([]);
@@ -2267,7 +2577,7 @@ describe("LiveMarketDataGateway", () => {
     // Real timeout enforcement is via axios.defaults.timeout (45 s, set at runtime init).
     // Here we verify that an SDK rejection (e.g. axios timeout) returns the empty-book fallback.
     client.getOrderBook.mockRejectedValue(new Error("axios timeout"));
-    const tokenId = createTokenId("tok-1");
+    const tokenId = createTokenId("9876543210123456789");
     const book = await gw.getOrderBook(tokenId);
     expect(book.bids).toEqual([]);
     expect(book.asks).toEqual([]);
@@ -2276,7 +2586,7 @@ describe("LiveMarketDataGateway", () => {
 
   it("getTickSize returns default 0.01 on SDK failure", async () => {
     client.getTickSize.mockRejectedValue(new Error("fetch failed"));
-    const tick = await gw.getTickSize(createTokenId("tok-1"));
+    const tick = await gw.getTickSize(createTokenId("9876543210123456789"));
     expect(tick).toBe(0.01);
   });
 
@@ -2449,7 +2759,7 @@ describe("LiveMarketDataGateway", () => {
     });
 
     try {
-      await expect(gw.getMarketPricing(["tok-1"])).rejects.toThrow(
+      await expect(gw.getMarketPricing(["9876543210123456789"])).rejects.toThrow(
         "Gamma pricing request failed: 400",
       );
     } finally {
@@ -2468,7 +2778,7 @@ describe("LiveMarketDataGateway", () => {
     });
 
     try {
-      await expect(gw.getMarketPricing(["tok-1"])).rejects.toThrow(
+      await expect(gw.getMarketPricing(["9876543210123456789"])).rejects.toThrow(
         "Gamma pricing request failed: 400",
       );
       expect(cancelMock).toHaveBeenCalledTimes(1);
@@ -2493,7 +2803,7 @@ describe("LiveMarketDataGateway", () => {
         json: () =>
           Promise.resolve([
             {
-              clobTokenIds: ["tok-1"],
+              clobTokenIds: ["9876543210123456789"],
               outcomePrices: "[0.45]",
               bestBid: 0.44,
               bestAsk: 0.46,
@@ -2503,11 +2813,11 @@ describe("LiveMarketDataGateway", () => {
     globalThis.fetch = fetchMock;
 
     try {
-      const result = await gw.getMarketPricing(["tok-1"]);
+      const result = await gw.getMarketPricing(["9876543210123456789"]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(cancelMock).toHaveBeenCalledTimes(1);
-      expect(result.get("tok-1")!.bestBid).toBe(0.44);
-      expect(result.get("tok-1")!.bestAsk).toBe(0.46);
+      expect(result.get("9876543210123456789")!.bestBid).toBe(0.44);
+      expect(result.get("9876543210123456789")!.bestAsk).toBe(0.46);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -2524,7 +2834,9 @@ describe("LiveMarketDataGateway", () => {
     });
 
     try {
-      await expect(gw.getOrderBooks(["tok-1"])).rejects.toThrow("CLOB books request failed: 502");
+      await expect(gw.getOrderBooks(["9876543210123456789"])).rejects.toThrow(
+        "CLOB books request failed: 502",
+      );
       expect(cancelMock).toHaveBeenCalledTimes(1);
     } finally {
       globalThis.fetch = originalFetch;
@@ -2540,7 +2852,7 @@ describe("LiveMarketDataGateway", () => {
     globalThis.fetch = fetchMock;
 
     try {
-      await gw.getMarketPricing(["tok-1"]);
+      await gw.getMarketPricing(["9876543210123456789"]);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const init = fetchMock.mock.calls[0]![1] as RequestInit | undefined;
       expect(init?.signal).toBeInstanceOf(AbortSignal);
@@ -2558,7 +2870,7 @@ describe("LiveMarketDataGateway", () => {
     globalThis.fetch = fetchMock;
 
     try {
-      await expect(gw.getMarketPricing(["tok-1"])).resolves.toEqual(new Map());
+      await expect(gw.getMarketPricing(["9876543210123456789"])).resolves.toEqual(new Map());
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(fetchMock.mock.calls[0]![0]).not.toBe("https://clob.polymarket.com/books");
     } finally {
@@ -2576,7 +2888,7 @@ describe("LiveMarketDataGateway", () => {
         json: () =>
           Promise.resolve([
             {
-              clobTokenIds: ["tok-1"],
+              clobTokenIds: ["9876543210123456789"],
               outcomePrices: "[0.45]",
               bestBid: 0.44,
               bestAsk: 0.46,
@@ -2586,10 +2898,10 @@ describe("LiveMarketDataGateway", () => {
     globalThis.fetch = fetchMock;
 
     try {
-      const result = await gw.getMarketPricing(["tok-1"]);
+      const result = await gw.getMarketPricing(["9876543210123456789"]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(result.get("tok-1")!.bestBid).toBe(0.44);
-      expect(result.get("tok-1")!.bestAsk).toBe(0.46);
+      expect(result.get("9876543210123456789")!.bestBid).toBe(0.44);
+      expect(result.get("9876543210123456789")!.bestAsk).toBe(0.46);
     } finally {
       globalThis.fetch = originalFetch;
     }

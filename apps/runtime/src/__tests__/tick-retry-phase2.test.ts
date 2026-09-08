@@ -122,7 +122,7 @@ function makeMarketRepo() {
   return {
     save: vi.fn(),
     saveBatch: vi.fn(),
-    findByTokenId: vi.fn().mockReturnValue({ active: true }),
+    findByTokenId: vi.fn().mockReturnValue({ active: true, conditionId: CONDITION_ID }),
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),

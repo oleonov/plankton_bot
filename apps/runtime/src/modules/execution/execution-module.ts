@@ -11,6 +11,13 @@
  * Does NOT contain strategy, risk, or reconciliation logic.
  */
 
+import {
+  TokenMinimumBlocked,
+  hasNeverPostedMinimumEvidence,
+  minimumRetryIdentity,
+  exchangeComparisonOrder,
+} from "@krabs/domain";
+import { prepareSuccessorMinimum } from "../../min-order-size.js";
 import type {
   RuntimeModule,
   EventBus,
@@ -137,7 +144,6 @@ import {
   WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
 } from "../../wallet-buy-budget.js";
 import {
-  DEFAULT_FALLBACK_MIN_ORDER_SIZE,
   MIN_ORDER_SIZE_HYDRATION_RETRY_MS,
   evaluateSellPreSubmitGuard,
   isExecutableOrderSize,
@@ -249,7 +255,10 @@ type OrderFillLookupGateway = ExchangeGateway & {
 
 type PreparedLiveGateway = ExchangeGateway & {
   prepareOrder?: (params: PlaceOrderParams) => Promise<PreparedOrder>;
-  submitPreparedOrder?: (prepared: PreparedOrder) => Promise<PreparedOrderSubmitResult>;
+  submitPreparedOrder?: (
+    prepared: PreparedOrder,
+    beforeInvoke?: () => void,
+  ) => Promise<PreparedOrderSubmitResult>;
 };
 
 type PostOnlyCrossPreSubmitSkip = {
@@ -366,8 +375,9 @@ function sellParity(
       remote?.side === "sell" &&
       String(remote.tokenId) === String(order.tokenId) &&
       Math.abs(remote.price - order.price) <= 1e-9 &&
-      Math.abs(remote.sizeTotal - order.size) <= 1e-9 &&
-      Math.abs(remote.sizeRemaining - Math.max(0, order.size - filled)) <= 1e-9
+      Math.abs(remote.sizeTotal - exchangeComparisonOrder(order).size) <= 1e-9 &&
+      Math.abs(remote.sizeRemaining - Math.max(0, exchangeComparisonOrder(order).size - filled)) <=
+        1e-9
     );
   });
 }
@@ -450,6 +460,7 @@ type ExitLossFloorPhase =
   | "startup-scan";
 
 export interface ExecutionModuleDeps {
+  tokenMinimum?: import("@krabs/domain").TokenMinimumSource | undefined;
   gateway: ExchangeGateway;
   bus: EventBus;
   marketRepo: MarketRepository;
@@ -593,6 +604,11 @@ export class ExecutionModule implements RuntimeModule {
 
   private readonly log: Logger;
   private readonly processedCommandIds = new Set<string>();
+  private readonly successorMinimumChecks = new Map<
+    string,
+    () => Promise<(() => boolean) | null>
+  >();
+  private readonly minimumTokenGeneration = new Map<string, number>();
   private readonly processedCommandOrder: string[] = [];
   private readonly makerCaptureGatewayAttempts = new Set<string>();
   private readonly pendingReservations = new Map<string, PendingReservation>();
@@ -605,7 +621,16 @@ export class ExecutionModule implements RuntimeModule {
   private readonly commandIdsPendingRelease = new Set<string>();
   private readonly sellReplaceLocks = new Map<
     string,
-    { orderId: OrderId; command: PlaceOrderCommand; createdAt: number }
+    {
+      orderId: OrderId;
+      command: PlaceOrderCommand;
+      createdAt: number;
+      publishing?: boolean;
+      minimum?: number | null;
+      positionSize?: number;
+      retryAt?: number;
+      minimumReason?: string;
+    }
   >();
   private readonly gatewayRejects: Array<{ ts: number; code: string }> = [];
   private tradingDisabledWarnUntilMs = 0;
@@ -773,8 +798,14 @@ export class ExecutionModule implements RuntimeModule {
     this.queue?.reopen();
     this.unsubs.push(
       this.deps.bus.subscribe("PlaceOrderRequested", (p) => this.handlePlace(p.command)),
-      this.deps.bus.subscribe("CancelOrderRequested", (p) => this.handleCancel(p.command)),
+      this.deps.bus.subscribe("CancelOrderRequested", (p) =>
+        this.handleCancel(p.command, p.successorMinimum),
+      ),
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
+      this.deps.bus.subscribe("TokenMinimumChanged", async ({ tokenId }) => {
+        const lock = this.sellReplaceLocks.get(tokenId);
+        if (lock) await this.releasePendingSellReplacement(lock.orderId);
+      }),
       this.deps.bus.subscribe("MarketLivenessConfirmed", async (p) =>
         this.handleMarketLivenessConfirmed(p),
       ),
@@ -826,6 +857,10 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
     this.started = true;
+    if (this.deps.runtimeMode === "live-lite") {
+      for (const position of this.deps.positionRepo?.findOpen() ?? [])
+        this.restoreMinimumSuccessor(position.tokenId);
+    }
     this.deps.makerBuyFastCancel?.setReady(true);
     this.log.info("execution module started");
   }
@@ -911,6 +946,8 @@ export class ExecutionModule implements RuntimeModule {
     payload: RuntimeEventMap["TrackedMarketsChanged"],
   ): Promise<void> {
     for (const tokenId of payload.removedTokenIds) {
+      const key = String(tokenId);
+      this.minimumTokenGeneration.set(key, (this.minimumTokenGeneration.get(key) ?? 0) + 1);
       this.marketCache.delete(String(tokenId));
     }
   }
@@ -1802,6 +1839,8 @@ export class ExecutionModule implements RuntimeModule {
    */
   private async reconcileAllTransitions(): Promise<void> {
     if (!this.started) return;
+    for (const lock of this.sellReplaceLocks.values())
+      await this.releasePendingSellReplacement(lock.orderId);
     for (const key of [...this.tokenTransitions.keys()]) {
       await this.reconcileTokenTransition(createTokenId(key));
     }
@@ -1991,7 +2030,10 @@ export class ExecutionModule implements RuntimeModule {
       // Completion signal 2 (finding 2): residual no longer executable → the position sold
       // out (the backstop filled, or a fill drained it). Complete the intent.
       const minOrderSize = this.resolveCommandMinOrderSize(pending.command);
-      if (remoteSize <= 0 || !isExecutableOrderSize(remoteSize, minOrderSize)) {
+      if (
+        remoteSize <= 0 ||
+        (!this.deps.tokenMinimum && !isExecutableOrderSize(remoteSize, minOrderSize))
+      ) {
         this.completeDeferredBackstop(key, "residual already sold");
         return;
       }
@@ -2392,6 +2434,7 @@ export class ExecutionModule implements RuntimeModule {
 
   private async makerCaptureFreshBookRejection(
     cmd: PlaceOrderCommand,
+    childOrderId: OrderId,
   ): Promise<MakerCaptureFinalBookResult> {
     let context = this.makerCaptureExecutionContext(cmd);
     if (!context) return { ok: false, ...this.makerCapRejection("maker-capture-reprice-invalid") };
@@ -2415,22 +2458,22 @@ export class ExecutionModule implements RuntimeModule {
     if (!entry) return { ok: false, ...this.makerCapRejection("maker-capture-book-unavailable") };
     context = this.makerCaptureExecutionContext(cmd);
     if (!context) return { ok: false, ...this.makerCapRejection("maker-capture-reprice-invalid") };
+    const comparison = exchangeComparisonOrder(context.predecessor);
+    const remaining = Math.max(
+      0,
+      comparison.size - context.predecessor.size + context.usage.predecessorRemainingShares,
+    );
     const permanent = context.origin.permanentR23ActivationId !== null;
     const exactCancellation = permanent
       ? classifyMakerCaptureExactCancellation(
-          context.predecessor,
-          context.usage.predecessorRemainingShares,
+          comparison,
+          remaining,
           exactResult?.ok ? exactResult.data : null,
         )
       : null;
     const exactCancellationProven = permanent
       ? exactCancellation?.kind === "proven"
-      : exactResult?.ok &&
-        isMakerCaptureExactCancellation(
-          context.predecessor,
-          context.usage.predecessorRemainingShares,
-          exactResult.data,
-        );
+      : exactResult?.ok && isMakerCaptureExactCancellation(comparison, remaining, exactResult.data);
     if (!exactCancellationProven) {
       return {
         ok: false,
@@ -2499,13 +2542,13 @@ export class ExecutionModule implements RuntimeModule {
           entryPriceCeiling: context.origin.entryPriceCeiling!,
           candidate,
           replacementSize: cmd.size,
-          minOrderSize: entry.book.minOrderSize ?? null,
+          minOrderSize: this.resolveCommandExplicitMinOrderSize(cmd),
           policySchemaVersion: context.policySchemaVersion,
           policyControlRevision: context.policyControlRevision,
           activatedAtUtc: context.activatedAtUtc,
           expiresAtUtc: context.expiresAtUtc,
         }),
-        childOrderId: String(context.intent.childOrderId),
+        childOrderId: String(childOrderId),
         clientOrderId: String(cmd.clientOrderId),
       },
     };
@@ -2513,6 +2556,7 @@ export class ExecutionModule implements RuntimeModule {
 
   private async bounceAskCaptureFinalProof(
     cmd: PlaceOrderCommand,
+    childOrderId: OrderId,
   ): Promise<{ ok: true; proof: BounceAskCaptureSubmitProofV1 } | { ok: false; reason: string }> {
     let context = this.bounceAskCaptureContext(cmd);
     if (
@@ -2632,8 +2676,6 @@ export class ExecutionModule implements RuntimeModule {
       if (
         !candidate.ok ||
         Math.abs(candidate.price - cmd.price) > ExecutionModule.PRICE_EPSILON ||
-        entry.book.minOrderSize == null ||
-        cmd.size + ExecutionModule.SIZE_EPSILON_SHARES < entry.book.minOrderSize ||
         cmd.size > context.position.size + ExecutionModule.SIZE_EPSILON_SHARES
       )
         return { ok: false, reason: "bounce-ask-book-size-drift" };
@@ -2659,7 +2701,7 @@ export class ExecutionModule implements RuntimeModule {
           sourcePolledAtMs: entry.sourcePolledAtMs,
           externalBestBid: candidate.externalBestBid,
           externalBestAsk: candidate.externalBestAsk,
-          childOrderId: String(context.intent.childOrderId),
+          childOrderId: String(childOrderId),
           clientOrderId: String(cmd.clientOrderId),
           authoritativeStateCapturedAtMs: capturedAt,
           authoritativeOpenOrderCount: exchangeSells.length,
@@ -2945,6 +2987,11 @@ export class ExecutionModule implements RuntimeModule {
   // ─── Place order handler ──────────────────────────────────────────────
 
   private async handlePlace(cmd: PlaceOrderCommand, recoveryOnly = false): Promise<void> {
+    if (this.deps.tokenMinimum)
+      cmd = {
+        ...cmd,
+        metadata: { ...cmd.metadata, minimumOriginalIntentV1: minimumRetryIdentity(cmd) },
+      };
     const staticCleanupKind = this.exitCoverageCleanupKind(cmd);
     const supplementalShape = this.isBounceSupplementalCandidateShape(cmd);
     const invalidBounceTransport =
@@ -3311,6 +3358,10 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
 
+    if (this.deps.tokenMinimum && this.getMinOrderSizeRejection(cmd)) {
+      await this.deferLocalMinimum(cmd, "token-minimum-below");
+      return;
+    }
     if (cmd.side !== "sell") {
       const minOrderSizeRejection = this.getMinOrderSizeRejection(cmd);
       if (minOrderSizeRejection) {
@@ -3347,7 +3398,9 @@ export class ExecutionModule implements RuntimeModule {
     // Deterministic clientOrderId reuse is unsafe even after terminal local rows:
     // CLOB may accept the resend while SQLite rejects the duplicate client ID.
     const existing = this.deps.orderRepo.findByClientOrderId(cmd.clientOrderId);
-    if (existing) {
+    if (existing && this.canRetryMinimumOrder(existing, cmd)) {
+      this.recoveryPendingReplacements.set(String(cmd.clientOrderId), existing);
+    } else if (existing) {
       const recovery = await this.recoverBounceAskPending(cmd, existing);
       if (recovery !== "retry") {
         if (recovery === "not-applicable") {
@@ -3437,6 +3490,10 @@ export class ExecutionModule implements RuntimeModule {
       if (decision.kind === "accept") this.preciseCleanupClientIds.add(String(cmd.clientOrderId));
     }
     if (decision.kind === "reject") {
+      if (this.deps.tokenMinimum && decision.reason === SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON) {
+        await this.deferLocalMinimum(cmd, "token-minimum-below");
+        return;
+      }
       this.recordInternalReservationReject(decision.reason);
       if (!decision.capacitySampleRecorded) {
         this.recordExecutionCapacityReject(cmd, decision.reason);
@@ -3463,6 +3520,10 @@ export class ExecutionModule implements RuntimeModule {
       const clampedCmd: PlaceOrderCommand = { ...cmd, size: decision.newSize };
       const postClampMinCheck = this.getMinOrderSizeRejection(clampedCmd);
       if (postClampMinCheck) {
+        if (this.deps.tokenMinimum) {
+          await this.deferLocalMinimum(cmd, "token-minimum-below");
+          return;
+        }
         this.recordInternalReservationReject("clamped-below-min-order-size");
         this.log.warn(
           {
@@ -3552,6 +3613,12 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     await this.dispatchCommand(effectiveCmd, recoveryAuthorized || cleanupKind != null);
+  }
+
+  isOrderSubmissionActive(clientOrderId: string): boolean {
+    return [...this.pendingReservations.values()].some(
+      (reservation) => reservation.clientOrderId === clientOrderId,
+    );
   }
 
   makerBuyInFlightCount(): number {
@@ -4005,9 +4072,9 @@ export class ExecutionModule implements RuntimeModule {
         String(exact.tokenId) === String(predecessor.tokenId) &&
         exact.side === "sell" &&
         this.sameShares(exact.price, predecessor.price) &&
-        this.sameShares(exact.sizeTotal, predecessor.size) &&
+        this.sameShares(exact.sizeTotal, exchangeComparisonOrder(predecessor).size) &&
         this.sameShares(exact.sizeFilled, 0) &&
-        this.sameShares(exact.sizeRemaining, predecessor.size) &&
+        this.sameShares(exact.sizeRemaining, exchangeComparisonOrder(predecessor).size) &&
         (exact.status === "CANCELLED" || exact.status === "EXPIRED" || exact.status === "REJECTED")
       )
     ) {
@@ -4188,9 +4255,9 @@ export class ExecutionModule implements RuntimeModule {
       exact.side === "sell" &&
       (exact.status === "CANCELLED" || exact.status === "EXPIRED" || exact.status === "REJECTED") &&
       this.sameShares(exact.price, local.price) &&
-      this.sameShares(exact.sizeTotal, local.size) &&
+      this.sameShares(exact.sizeTotal, exchangeComparisonOrder(local).size) &&
       this.sameShares(exact.sizeFilled, 0) &&
-      this.sameShares(exact.sizeRemaining, local.size)
+      this.sameShares(exact.sizeRemaining, exchangeComparisonOrder(local).size)
     );
   }
 
@@ -4304,6 +4371,9 @@ export class ExecutionModule implements RuntimeModule {
         predecessor.tokenId,
         reconciledCoverage === "partial" ? child.exchangeOrderId : null,
       );
+      if (reconciledCoverage === "terminal" && child.status === "partially-filled") {
+        this.deps.orderRepo.updateStatus(child.orderId, "filled", child.exchangeOrderId);
+      }
       this.refreshExchangeSellSnapshot(snapshot.openOrders);
       return fence.completedAt ?? new Date().toISOString();
     }
@@ -4331,9 +4401,9 @@ export class ExecutionModule implements RuntimeModule {
       exactChild.data.side !== "sell" ||
       exactChild.data.status !== "OPEN" ||
       !this.sameShares(exactChild.data.price, predecessor.price) ||
-      !this.sameShares(exactChild.data.sizeTotal, fence.residualShares) ||
+      !this.sameShares(exactChild.data.sizeTotal, exchangeComparisonOrder(child).size) ||
       !this.sameShares(exactChild.data.sizeFilled, 0) ||
-      !this.sameShares(exactChild.data.sizeRemaining, fence.residualShares) ||
+      !this.sameShares(exactChild.data.sizeRemaining, exchangeComparisonOrder(child).size) ||
       snapshot.fills.some(
         (fill) =>
           fill.orderId === child.exchangeOrderId ||
@@ -4591,9 +4661,9 @@ export class ExecutionModule implements RuntimeModule {
         exact.side === "sell" &&
         (exact.clientOrderId == null || exact.clientOrderId === String(order.clientOrderId)) &&
         this.sameShares(exact.price, order.price) &&
-        this.sameShares(exact.sizeTotal, order.size) &&
+        this.sameShares(exact.sizeTotal, exchangeComparisonOrder(order).size) &&
         this.sameShares(exact.sizeFilled, 0) &&
-        this.sameShares(exact.sizeRemaining, order.size)
+        this.sameShares(exact.sizeRemaining, exchangeComparisonOrder(order).size)
       );
     });
   }
@@ -4611,7 +4681,7 @@ export class ExecutionModule implements RuntimeModule {
       String(exactChild.tokenId) !== String(child.tokenId) ||
       exactChild.side !== "sell" ||
       !this.sameShares(exactChild.price, predecessor.price) ||
-      !this.sameShares(exactChild.sizeTotal, fence.residualShares)
+      !this.sameShares(exactChild.sizeTotal, exchangeComparisonOrder(child).size)
     ) {
       return null;
     }
@@ -4650,7 +4720,10 @@ export class ExecutionModule implements RuntimeModule {
       exchangeShares <= 0 ||
       !this.sameShares(exchangeShares, localShares) ||
       !this.sameShares(exchangeShares, exactChild.sizeFilled) ||
-      !this.sameShares(exactChild.sizeRemaining, fence.residualShares - exchangeShares) ||
+      !this.sameShares(
+        exactChild.sizeRemaining,
+        exchangeComparisonOrder(child).size - exchangeShares,
+      ) ||
       fillIds(exchangeFills) !== fillIds(localFills) ||
       localFills.some((fill) => unreconciledIds.has(String(fill.fillId))) ||
       effectiveWalletShares == null ||
@@ -4660,25 +4733,29 @@ export class ExecutionModule implements RuntimeModule {
       return null;
     }
     const fifoShares = lots.reduce((sum, lot) => sum + lot.remainingSize, 0);
-    if (exactChild.status === "PARTIALLY_FILLED" && child.status === "partially-filled") {
-      const position = positions[0];
-      return positions.length === 1 &&
+    const logicalRemaining = Math.max(0, fence.residualShares - exchangeShares);
+    const position = positions[0];
+    const residualMatches = this.sameShares(logicalRemaining, 0)
+      ? positions.length === 0
+      : positions.length === 1 &&
         String(position?.positionId) === String(predecessor.positionId) &&
         String(position?.conditionId) === String(predecessor.conditionId) &&
-        this.sameShares(position?.size ?? NaN, exactChild.sizeRemaining) &&
-        this.sameShares(fifoShares, exactChild.sizeRemaining) &&
-        this.sameShares(effectiveWalletShares, exactChild.sizeRemaining)
-        ? "partial"
-        : null;
+        this.sameShares(position?.size ?? NaN, logicalRemaining);
+    if (
+      !residualMatches ||
+      !this.sameShares(fifoShares, logicalRemaining) ||
+      !this.sameShares(effectiveWalletShares, logicalRemaining)
+    )
+      return null;
+    if (exactChild.status === "PARTIALLY_FILLED" && child.status === "partially-filled") {
+      return "partial";
     }
-    return child.status === "filled" &&
+    return (child.status === "filled" ||
+      (child.status === "partially-filled" && exchangeComparisonOrder(child).size < child.size)) &&
       (exactChild.status === "FILLED" ||
         exactChild.status === "CANCELLED" ||
         exactChild.status === "EXPIRED") &&
-      this.sameShares(exactChild.sizeFilled, fence.residualShares) &&
-      positions.length === 0 &&
-      this.sameShares(fifoShares, 0) &&
-      this.sameShares(effectiveWalletShares, 0)
+      this.sameShares(exactChild.sizeFilled, exchangeComparisonOrder(child).size)
       ? "terminal"
       : null;
   }
@@ -4689,7 +4766,10 @@ export class ExecutionModule implements RuntimeModule {
 
   // ─── Cancel order handler ─────────────────────────────────────────────
 
-  private async handleCancel(cmd: CancelOrderCommand): Promise<void> {
+  private async handleCancel(
+    cmd: CancelOrderCommand,
+    successorMinimum?: () => Promise<(() => boolean) | null>,
+  ): Promise<void> {
     const exactState = this.exactNullStartupQuarantine.get(String(cmd.orderId));
     const expectedReason = exactState ? this.exactStartupCancelReason(exactState) : null;
     if (cmd.reason === "submit_unknown_recovery" && !exactState) return;
@@ -4712,6 +4792,7 @@ export class ExecutionModule implements RuntimeModule {
     this.processedCommandOrder.push(String(cmd.commandId));
     this.pruneProcessedCommandIds();
     this.acceptedCommandAt.set(String(cmd.commandId), Date.now());
+    if (successorMinimum) this.successorMinimumChecks.set(String(cmd.commandId), successorMinimum);
 
     await this.dispatchCommand(cmd);
   }
@@ -4798,6 +4879,10 @@ export class ExecutionModule implements RuntimeModule {
         await this.executeCancel(cmd);
       }
       failed = false;
+    } catch (error) {
+      if (cmd.type !== "PlaceOrderCommand" || !(error instanceof TokenMinimumBlocked)) throw error;
+      await this.deferLocalMinimum(cmd, error.reason);
+      failed = false;
     } finally {
       if (cmd.type === "PlaceOrderCommand") {
         this.pendingReservations.delete(String(cmd.commandId));
@@ -4831,13 +4916,13 @@ export class ExecutionModule implements RuntimeModule {
       // LAST: every other trace of this attempt (reservation, in-flight slot,
       // deferred-submit marker) is gone by now, so the identical retry this
       // release exists to admit cannot collide with its own predecessor.
-      if (
-        cmd.type === "PlaceOrderCommand" &&
-        this.commandIdsPendingRelease.delete(String(cmd.commandId))
-      ) {
+      if (this.commandIdsPendingRelease.delete(String(cmd.commandId))) {
         this.releaseProcessedCommandId(String(cmd.commandId));
       }
-      if (cmd.type === "CancelOrderCommand") this.releaseExactStartupCancelClaim(cmd);
+      if (cmd.type === "CancelOrderCommand") {
+        this.successorMinimumChecks.delete(String(cmd.commandId));
+        this.releaseExactStartupCancelClaim(cmd);
+      }
       const attempted = this.makerCaptureGatewayAttempts.delete(String(cmd.commandId));
       if (failed && cmd.type === "PlaceOrderCommand" && !attempted) {
         this.releaseFailedMakerCaptureCommand(cmd);
@@ -5062,6 +5147,7 @@ export class ExecutionModule implements RuntimeModule {
    * SELL for the token; there is no prior-basis comparison.
    */
   private async handlePositionUpdated(payload: RuntimeEventMap["PositionUpdated"]): Promise<void> {
+    this.restoreMinimumSuccessor(payload.position.tokenId);
     // A scale-in that raised the max remaining lot can push a resting exit SELL
     // below the floor — re-check each of the token's resting SELLs independently.
     for (const order of this.findOpenSellOrdersForToken(payload.position.tokenId)) {
@@ -5157,6 +5243,13 @@ export class ExecutionModule implements RuntimeModule {
   // ─── Place execution (gateway call) ──────────────────────────────────
 
   private async executePlace(cmd: PlaceOrderCommand): Promise<void> {
+    if (this.deps.tokenMinimum) {
+      const revision = this.minimumGeneration(cmd);
+      const receipt = await this.deps.tokenMinimum.resolve(String(cmd.tokenId));
+      this.deps.tokenMinimum.validate(receipt, String(cmd.tokenId), cmd.size);
+      this.deps.tokenMinimum.consume(receipt);
+      this.assertMinimumLifecycle(cmd, revision);
+    }
     const sellMinOrderBlock = this.getSellPreSubmitMinOrderBlock(cmd);
     if (sellMinOrderBlock) {
       if (sellMinOrderBlock.reason === SELL_RESIDUAL_UNKNOWN_MIN_ORDER_SIZE_REASON) {
@@ -5452,7 +5545,10 @@ export class ExecutionModule implements RuntimeModule {
     // backstop — count the placement attempt + start the grace HERE, so a pre-gateway
     // reject/skip above (pause / fence / loss-floor / acceptingOrders) never consumes the
     // cap or sets the grace. Reached only for a real gateway submit.
-    if (effectiveCmd.metadata?.["__deferredBackstop"] === true) {
+    if (
+      this.deps.runtimeMode !== "live-lite" &&
+      effectiveCmd.metadata?.["__deferredBackstop"] === true
+    ) {
       const tk = String(effectiveCmd.tokenId);
       this.lastDeferredPlaceAt.set(tk, Date.now());
       this.deferredBackstopRetries.set(tk, (this.deferredBackstopRetries.get(tk) ?? 0) + 1);
@@ -5464,6 +5560,7 @@ export class ExecutionModule implements RuntimeModule {
       this.recoveryPendingReplacements.get(String(effectiveCmd.clientOrderId)),
     );
     if (preparedLive?.submit.kind === "unknown") return;
+    if (preparedLive?.submit.kind === "local-minimum") return;
     let result: import("@krabs/domain").PlaceOrderResult;
     if (preparedLive) {
       result = this.preparedSubmitResultToPlaceOrderResult(preparedLive.submit);
@@ -5709,6 +5806,25 @@ export class ExecutionModule implements RuntimeModule {
         "cancel skipped — a cancel for this order is already in flight",
       );
       return;
+    }
+    const successor = this.successorMinimumChecks.get(String(cmd.commandId));
+    if (
+      this.deps.runtimeMode === "live-lite" &&
+      (successor ||
+        [
+          "maker_capture_reprice",
+          "bounce_ask_capture_reprice",
+          "sell_replace_retry",
+          "sell_replace_reprice",
+          "sell_timeout_escalation",
+          "buy_duplicate_replacement",
+        ].includes(cmd.reason))
+    ) {
+      const check = await successor?.();
+      if (this.deps.runtimeControl?.isPaused() || !check?.()) {
+        this.commandIdsPendingRelease.add(String(cmd.commandId));
+        return;
+      }
     }
     this.cancelReservations.add(orderKey);
     this.pruneCancelReservations();
@@ -6967,7 +7083,13 @@ export class ExecutionModule implements RuntimeModule {
     const replacementKind = duplicatePair?.cancel === blocker ? "duplicate" : "stale";
     const cancelReason =
       replacementKind === "duplicate" ? "buy_duplicate_replacement" : "stale_entry_ttl";
+    const successorMinimum = this.successorMinimumResolver(cmd, blocker.orderId);
+    if (this.deps.runtimeMode === "live-lite" && !(await successorMinimum())?.()) {
+      await this.deferLocalMinimum(cmd, "token-minimum-unavailable");
+      return true;
+    }
     await this.deps.bus.publish("CancelOrderRequested", {
+      successorMinimum,
       command: {
         type: "CancelOrderCommand",
         commandId: createCommandId(
@@ -7140,7 +7262,8 @@ export class ExecutionModule implements RuntimeModule {
           remote.side !== existing.side ||
           String(remote.tokenId) !== String(existing.tokenId) ||
           Math.abs(remote.price - existing.price) > ExecutionModule.PRICE_EPSILON ||
-          Math.abs(remote.sizeTotal - existing.size) > ExecutionModule.SIZE_EPSILON_SHARES
+          Math.abs(remote.sizeTotal - exchangeComparisonOrder(existing).size) >
+            ExecutionModule.SIZE_EPSILON_SHARES
         )
           return "stop";
         this.deps.orderRepo.updateStatus(
@@ -7159,7 +7282,8 @@ export class ExecutionModule implements RuntimeModule {
             remote.side !== existing.side ||
             String(remote.tokenId) !== String(existing.tokenId) ||
             Math.abs(remote.price - existing.price) > ExecutionModule.PRICE_EPSILON ||
-            Math.abs(remote.sizeTotal - existing.size) > ExecutionModule.SIZE_EPSILON_SHARES ||
+            Math.abs(remote.sizeTotal - exchangeComparisonOrder(existing).size) >
+              ExecutionModule.SIZE_EPSILON_SHARES ||
             remote.sizeFilled > ExecutionModule.SIZE_EPSILON_SHARES))
       )
         return "stop";
@@ -7226,10 +7350,18 @@ export class ExecutionModule implements RuntimeModule {
       throw new Error("live-lite gateway does not support prepared order submission");
     }
 
+    const revision = this.minimumGeneration(cmd);
     const prepared = await gateway.prepareOrder(params);
-    const pending = this.buildPreparedOrder(cmd, params, prepared.orderId, "pending");
-    this.markMakerCaptureSubmittedOrThrow(cmd, pending.orderId);
-    this.markBounceAskCaptureSubmittedOrThrow(cmd, pending.orderId);
+    const base = this.buildPreparedOrder(cmd, params, prepared.orderId, "pending");
+    const pending = {
+      ...base,
+      metadata: { ...base.metadata, signedOrderFactsV1: prepared.signedFacts } as Record<
+        string,
+        unknown
+      >,
+    };
+    const captureMetadata = this.isMakerCaptureReplacement(cmd) ? pending.metadata : null;
+    if (captureMetadata) pending.metadata = { ...captureMetadata, makerCaptureLineageV1: null };
     let pendingPersisted = false;
     const persistPending = () => {
       if (replacement) {
@@ -7242,12 +7374,29 @@ export class ExecutionModule implements RuntimeModule {
             pending,
             replacement.metadata,
           );
+          pending.metadata = { ...replacement.metadata, ...pending.metadata };
         } else {
           if (!this.deps.orderRepo.replacePendingIdentity) {
             throw new Error("order repository does not support prepared identity replacement");
           }
+          if (hasNeverPostedMinimumEvidence(replacement)) {
+            const current = this.deps.orderRepo.findById(replacement.orderId);
+            if (
+              !current ||
+              !this.canRetryMinimumOrder(current, cmd) ||
+              !this.deps.orderRepo.updateMetadata
+            ) {
+              throw new Error("minimum retry identity changed");
+            }
+            this.deps.orderRepo.updateMetadata(current.orderId, {
+              ...current.metadata,
+              neverPostedMinimumV1: null,
+            });
+          }
           this.deps.orderRepo.replacePendingIdentity(replacement.orderId, pending);
         }
+        if (prepared.signedFacts)
+          this.deps.orderRepo.updateMetadata!(pending.orderId, pending.metadata);
       } else {
         this.deps.orderRepo.save(pending);
       }
@@ -7258,6 +7407,7 @@ export class ExecutionModule implements RuntimeModule {
       this.activeBounceSupplementalClientIds.has(String(cmd.clientOrderId));
     if (!cleanupPending) persistPending();
 
+    let persistCaptureProof = () => {};
     const submit = await withinLiveSubmissionLane(async () => {
       if (liveSubmissionLatched) {
         throw new Error("live submission latch is closed");
@@ -7272,7 +7422,7 @@ export class ExecutionModule implements RuntimeModule {
         };
       }
       if (this.isMakerCaptureReplacement(cmd)) {
-        const finalBook = await this.makerCaptureFreshBookRejection(cmd);
+        const finalBook = await this.makerCaptureFreshBookRejection(cmd, pending.orderId);
         if (!finalBook.ok) {
           return {
             kind: "rejected" as const,
@@ -7282,37 +7432,23 @@ export class ExecutionModule implements RuntimeModule {
           };
         }
         const context = this.makerCaptureExecutionContext(cmd);
-        if (
-          !context?.intent.childOrderId ||
-          !this.deps.orderRepo.markMakerCaptureRepriceSubmitProof?.(
-            context.intent.intentId,
-            context.intent.childOrderId,
-            String(cmd.clientOrderId),
-            finalBook.proof,
+        persistCaptureProof = () => {
+          if (
+            !context ||
+            !this.deps.orderRepo.markMakerCaptureRepriceSubmitProof?.(
+              context.intent.intentId,
+              pending.orderId,
+              String(cmd.clientOrderId),
+              finalBook.proof,
+            )
           )
-        ) {
-          return {
-            kind: "rejected" as const,
-            errorCode: ExchangeErrorCode.LivePolicyBlocked,
-            errorMessage: "maker-capture-submit-proof-cas-failed",
-            errorDetails: null,
-          };
-        }
-        this.makerCaptureGatewayAttempts.add(String(cmd.commandId));
+            throw new Error("maker-capture-submit-proof-cas-failed");
+        };
       }
       if (this.isBounceAskCaptureReplacement(cmd)) {
-        const final = await this.bounceAskCaptureFinalProof(cmd);
+        const final = await this.bounceAskCaptureFinalProof(cmd, pending.orderId);
         const context = this.bounceAskCaptureContext(cmd);
-        const persisted =
-          final.ok && context?.intent.childOrderId
-            ? this.deps.orderRepo.markBounceAskCaptureSubmitProof?.(
-                context.intent.intentId,
-                context.intent.childOrderId,
-                String(cmd.clientOrderId),
-                final.proof,
-              ) === true
-            : false;
-        if (!persisted) {
+        if (!final.ok || !context) {
           return {
             kind: "rejected" as const,
             errorCode: ExchangeErrorCode.LivePolicyBlocked,
@@ -7320,10 +7456,20 @@ export class ExecutionModule implements RuntimeModule {
             errorDetails: null,
           };
         }
+        persistCaptureProof = () => {
+          if (
+            !this.deps.orderRepo.markBounceAskCaptureSubmitProof?.(
+              context.intent.intentId,
+              pending.orderId,
+              String(cmd.clientOrderId),
+              final.proof,
+            )
+          )
+            throw new Error("bounce-ask-submit-proof-cas-failed");
+        };
       }
       if (this.activeExitRecoveryClientIds.has(String(cmd.clientOrderId))) {
         await this.assertRecoverySubmitBoundary(cmd);
-        this.recoverySubmissionAttempts.add(String(cmd.clientOrderId));
       }
       if (this.exitCoverageChanged(cmd, replacement)) {
         return {
@@ -7350,17 +7496,110 @@ export class ExecutionModule implements RuntimeModule {
         }
       }
       if (cleanupPending) persistPending();
-      const outcome = await gateway.submitPreparedOrder!(prepared);
+      const outcome = await gateway.submitPreparedOrder!(prepared, () => {
+        this.assertMinimumLifecycle(cmd, revision);
+        this.markMakerCaptureSubmittedOrThrow(cmd, pending.orderId);
+        if (captureMetadata) {
+          this.deps.orderRepo.updateMetadata!(pending.orderId, captureMetadata);
+          pending.metadata = captureMetadata;
+        }
+        this.markBounceAskCaptureSubmittedOrThrow(cmd, pending.orderId);
+        persistCaptureProof();
+        if (this.isMakerCaptureReplacement(cmd))
+          this.makerCaptureGatewayAttempts.add(String(cmd.commandId));
+        if (this.activeExitRecoveryClientIds.has(String(cmd.clientOrderId)))
+          this.recoverySubmissionAttempts.add(String(cmd.clientOrderId));
+        if (cmd.metadata?.["__deferredBackstop"] === true) {
+          const key = String(cmd.tokenId);
+          this.lastDeferredPlaceAt.set(key, Date.now());
+          this.deferredBackstopRetries.set(key, (this.deferredBackstopRetries.get(key) ?? 0) + 1);
+        }
+      });
       if (outcome.kind === "accepted" && outcome.orderId !== prepared.orderId) {
         this.closeLiveSubmissionLatch(prepared.orderId, outcome.orderId, cmd);
       }
       return outcome;
     });
 
-    if (submit.kind === "unknown") {
+    if (submit.kind === "local-minimum") {
+      if (submit.neverPosted && pendingPersisted) {
+        this.settleLocalMinimum(pending, submit.reason);
+        await this.deferLocalMinimum(cmd, submit.reason);
+      }
+    } else if (submit.kind === "unknown") {
       this.recordPreparedSubmitUnknown(cmd, pending, submit);
     }
     return { pending, submit, pendingPersisted };
+  }
+
+  private canRetryMinimumOrder(order: Order, cmd: PlaceOrderCommand): boolean {
+    return (
+      hasNeverPostedMinimumEvidence(order) &&
+      order.metadata?.minimumOriginalIntentV1 ===
+        (cmd.metadata?.minimumOriginalIntentV1 ?? minimumRetryIdentity(cmd)) &&
+      this.deps.fillRepo.findByOrderId(order.orderId).length === 0
+    );
+  }
+
+  private minimumGeneration(cmd: PlaceOrderCommand): string {
+    return `${this.cleanupLifecycleRevision}:${this.minimumTokenGeneration.get(String(cmd.tokenId)) ?? 0}`;
+  }
+
+  private assertMinimumLifecycle(cmd: PlaceOrderCommand, revision: string): void {
+    const pausedRecovery = this.activeExitRecoveryClientIds.has(String(cmd.clientOrderId));
+    const market = this.deps.marketRepo.findByTokenId(cmd.tokenId);
+    if (
+      !this.started ||
+      revision !== this.minimumGeneration(cmd) ||
+      this.startupFenceActive ||
+      (this.deps.runtimeControl?.isPaused() && !pausedRecovery) ||
+      market?.active === false ||
+      (market && market.conditionId !== cmd.conditionId) ||
+      this.exitOwnerIdentityRejection(cmd)
+    ) {
+      throw new Error("submission lifecycle changed during minimum resolution");
+    }
+  }
+
+  private settleLocalMinimum(pending: Order, reason: string): void {
+    const current = this.deps.orderRepo.findById(pending.orderId);
+    if (
+      !current ||
+      current.status !== "pending" ||
+      this.deps.fillRepo.findByOrderId(pending.orderId).length
+    ) {
+      throw new Error("local minimum settlement identity changed");
+    }
+    this.deps.orderRepo.save({
+      ...current,
+      status: "rejected",
+      fillProgressShares: 0,
+      exchangeErrorCode: ExchangeErrorCode.InvalidSize,
+      exchangeErrorMessage: reason,
+      metadata: {
+        ...current.metadata,
+        neverPostedMinimumV1: {
+          version: 1,
+          orderId: String(current.orderId),
+          identity: minimumRetryIdentity(current),
+          originalIdentity: current.metadata?.minimumOriginalIntentV1,
+        },
+      },
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  private async deferLocalMinimum(cmd: PlaceOrderCommand, reason: string): Promise<void> {
+    const existing = this.deps.orderRepo.findByClientOrderId(cmd.clientOrderId);
+    if (existing && !this.canRetryMinimumOrder(existing, cmd)) return;
+    const lock = this.sellReplaceLocks.get(String(cmd.tokenId));
+    if (lock?.command.clientOrderId === cmd.clientOrderId) lock.minimumReason = reason;
+    this.commandIdsPendingRelease.add(String(cmd.commandId));
+    await this.publishOrderSkipped(cmd, reason, {});
+    if (!this.acceptedCommandAt.has(String(cmd.commandId))) {
+      this.commandIdsPendingRelease.delete(String(cmd.commandId));
+      this.releaseProcessedCommandId(String(cmd.commandId));
+    }
   }
 
   private buildPreparedOrder(
@@ -7501,7 +7740,7 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   private preparedSubmitResultToPlaceOrderResult(
-    submit: Exclude<PreparedOrderSubmitResult, { kind: "unknown" }>,
+    submit: Exclude<PreparedOrderSubmitResult, { kind: "unknown" | "local-minimum" }>,
   ): import("@krabs/domain").PlaceOrderResult {
     if (submit.kind === "accepted") return { success: true, orderId: submit.orderId };
     return {
@@ -7681,10 +7920,12 @@ export class ExecutionModule implements RuntimeModule {
     const explicitMinOrderSize = this.resolveCommandExplicitMinOrderSize(cmd);
     if (explicitMinOrderSize != null) return explicitMinOrderSize;
 
-    return this.deps.runtimeMode === "live-lite" ? DEFAULT_FALLBACK_MIN_ORDER_SIZE : null;
+    return null;
   }
 
   private resolveCommandExplicitMinOrderSize(cmd: PlaceOrderCommand): number | null {
+    if (this.deps.tokenMinimum)
+      return this.deps.tokenMinimum.read(String(cmd.tokenId)).latest?.minimum ?? null;
     const cachedMinOrderSize = this.resolveCachedMinOrderSize(cmd.tokenId);
     if (cachedMinOrderSize != null) return cachedMinOrderSize;
 
@@ -7913,8 +8154,22 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
 
+    const successorMinimum = this.successorMinimumResolver(cmd, existingSell.orderId);
+    if (this.deps.runtimeMode === "live-lite" && !(await successorMinimum())?.()) {
+      await this.deferLocalMinimum(cmd, "token-minimum-unavailable");
+      return true;
+    }
     this.sellReplaceLocks.set(key, { orderId: existingSell.orderId, command: cmd, createdAt: now });
+    if (this.deps.runtimeMode === "live-lite") {
+      if (!this.deps.orderRepo.updateMetadata)
+        throw new Error("successor metadata persistence unavailable");
+      this.deps.orderRepo.updateMetadata(existingSell.orderId, {
+        ...existingSell.metadata,
+        minimumSuccessorV1: cmd,
+      });
+    }
     await this.deps.bus.publish("CancelOrderRequested", {
+      successorMinimum,
       command: {
         type: "CancelOrderCommand",
         commandId: createCommandId(`sell-replace-${String(existingSell.orderId)}-${now}`),
@@ -7947,6 +8202,39 @@ export class ExecutionModule implements RuntimeModule {
       ExchangeErrorCode.LivePolicyBlocked,
     );
     return true;
+  }
+
+  private successorMinimumResolver(cmd: PlaceOrderCommand, predecessorId: OrderId) {
+    const revision = this.minimumGeneration(cmd);
+    return () =>
+      prepareSuccessorMinimum(this.deps.gateway, () => {
+        const predecessor = this.deps.orderRepo.findById(predecessorId);
+        if (
+          !predecessor ||
+          !this.started ||
+          revision !== this.minimumGeneration(cmd) ||
+          this.deps.runtimeControl?.isPaused()
+        )
+          return null;
+        const market = this.deps.marketRepo.findByTokenId(cmd.tokenId);
+        if (market?.active === false || (market && market.conditionId !== cmd.conditionId))
+          return null;
+        const size =
+          cmd.side === "sell"
+            ? this.computeProspectiveReplacementSellSize(cmd, predecessorId)
+            : cmd.size;
+        if (size == null) return null;
+        return {
+          params: { ...cmd, size },
+          state: JSON.stringify([
+            predecessor,
+            this.deps.fillRepo.findByOrderId(predecessorId),
+            market,
+            this.deps.executionPolicy?.(),
+            this.deps.positionRepo?.findByTokenId(cmd.tokenId),
+          ]),
+        };
+      });
   }
 
   /**
@@ -7996,10 +8284,48 @@ export class ExecutionModule implements RuntimeModule {
     return validateProfileLadderReplacementSellTarget(oldOrderId, existingSells);
   }
 
+  private claimMinimumSuccessor(tokenKey: string): boolean {
+    if (this.deps.runtimeMode !== "live-lite") {
+      this.sellReplaceLocks.delete(tokenKey);
+      return true;
+    }
+    const lock = this.sellReplaceLocks.get(tokenKey)!;
+    const predecessor = this.deps.orderRepo.findById(lock.orderId);
+    if (
+      predecessor?.status !== "cancelled" ||
+      lock.publishing ||
+      this.deps.runtimeControl?.isPaused()
+    )
+      return false;
+    const child = this.deps.orderRepo.findByClientOrderId(lock.command.clientOrderId);
+    if (child && !hasNeverPostedMinimumEvidence(child)) {
+      this.sellReplaceLocks.delete(tokenKey);
+      this.deps.orderRepo.updateMetadata?.(predecessor.orderId, {
+        ...predecessor.metadata,
+        minimumSuccessorV1: null,
+      });
+      return false;
+    }
+    const minimum = this.resolveCommandExplicitMinOrderSize(lock.command);
+    const positionSize = this.deps.positionRepo?.findByTokenId(lock.command.tokenId)?.size;
+    if (
+      minimum === lock.minimum &&
+      positionSize === lock.positionSize &&
+      ((lock.minimumReason !== "token-minimum-unavailable" && minimum !== null) ||
+        Date.now() < (lock.retryAt ?? 0))
+    )
+      return false;
+    lock.minimum = minimum;
+    lock.positionSize = positionSize ?? 0;
+    lock.retryAt = Date.now() + MIN_ORDER_SIZE_HYDRATION_RETRY_MS;
+    return true;
+  }
+
   private async releasePendingSellReplacement(cancelledOrderId: OrderId): Promise<void> {
     for (const [tokenKey, lock] of this.sellReplaceLocks) {
       if (lock.orderId !== cancelledOrderId) continue;
-      this.sellReplaceLocks.delete(tokenKey);
+      if (!this.claimMinimumSuccessor(tokenKey)) return;
+      lock.publishing = true;
       const replacement: PlaceOrderCommand = {
         ...lock.command,
         commandId: createCommandId(`sell-replace-submit-${String(cancelledOrderId)}-${Date.now()}`),
@@ -8008,10 +8334,14 @@ export class ExecutionModule implements RuntimeModule {
           [SELL_REPLACEMENT_CANCELLED_ORDER_ID_METADATA_KEY]: String(cancelledOrderId),
         },
       };
-      await this.deps.bus.publish("PlaceOrderRequested", {
-        command: replacement,
-        timestamp: Date.now(),
-      });
+      try {
+        await this.deps.bus.publish("PlaceOrderRequested", {
+          command: replacement,
+          timestamp: Date.now(),
+        });
+      } finally {
+        lock.publishing = false;
+      }
       return;
     }
   }
@@ -8022,6 +8352,31 @@ export class ExecutionModule implements RuntimeModule {
       1,
       JSON.stringify({ bucket, source }),
     );
+  }
+
+  private restoreMinimumSuccessor(tokenId: TokenId): void {
+    if (this.sellReplaceLocks.has(String(tokenId))) return;
+    const position = this.deps.positionRepo?.findByTokenId(tokenId);
+    if (!position) return;
+    for (const order of this.deps.orderRepo.findByTokenId(tokenId)) {
+      const command = order.metadata?.minimumSuccessorV1 as PlaceOrderCommand | undefined;
+      if (
+        !command ||
+        command.type !== "PlaceOrderCommand" ||
+        command.tokenId !== tokenId ||
+        command.conditionId !== order.conditionId ||
+        command.positionId !== position.positionId ||
+        command.side !== "sell" ||
+        !["open", "partially-filled", "cancelled"].includes(order.status)
+      )
+        continue;
+      this.sellReplaceLocks.set(String(tokenId), {
+        orderId: order.orderId,
+        command,
+        createdAt: Date.parse(order.updatedAt),
+      });
+      return;
+    }
   }
 
   /**
@@ -8478,7 +8833,10 @@ export class ExecutionModule implements RuntimeModule {
 
     // Finding 2 (round 6-7): a deferred backstop reaching the gateway via the invalid-tick
     // retry path is a real submit too — count + set grace at this boundary.
-    if (retryCmd.metadata?.["__deferredBackstop"] === true) {
+    if (
+      this.deps.runtimeMode !== "live-lite" &&
+      retryCmd.metadata?.["__deferredBackstop"] === true
+    ) {
       const tk = String(retryCmd.tokenId);
       this.lastDeferredPlaceAt.set(tk, Date.now());
       this.deferredBackstopRetries.set(tk, (this.deferredBackstopRetries.get(tk) ?? 0) + 1);
@@ -8490,6 +8848,7 @@ export class ExecutionModule implements RuntimeModule {
       rejectedPreparedOrder,
     );
     if (retryPreparedLive?.submit.kind === "unknown") return true;
+    if (retryPreparedLive?.submit.kind === "local-minimum") return true;
     if (
       rejectedPreparedOrder &&
       (hasS1CoverageCleanupMarker(retryCmd.metadata) ||
