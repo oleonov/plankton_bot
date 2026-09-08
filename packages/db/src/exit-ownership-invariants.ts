@@ -265,7 +265,8 @@ function buildOwnershipInvariantRowSql(
            WHERE ${activeSellSql}
            GROUP BY o.token_id
          ) s
-) WHERE remaining_sell_shares > position_shares
+-- Match Execution/sell-sizing's 1e-9 tolerance for binary64 noise, below one microshare.
+) WHERE remaining_sell_shares > position_shares + 1e-9
  ORDER BY token_id`,
     },
     {

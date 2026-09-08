@@ -46,7 +46,7 @@ import { productionSqlite3 } from "./sqlite-cli.js";
  *
  * The comparison is split in two on purpose, because exactly one half of it crosses a text boundary:
  *
- *  - the VERDICT never crosses. `remaining_sell_shares > position_shares` and its five siblings are
+ *  - the VERDICT never crosses. I3's epsilon comparison and its five siblings are
  *    evaluated inside SQLite, on native doubles, on the real ledger. (b1) pins that half exactly, keyed on
  *    the non-REAL columns, and no float participates in it;
  *  - the DIAGNOSTIC columns do cross — the export renders them to JSON and Node parses them back. §5.1.10
@@ -257,8 +257,8 @@ function expectRowSetIdentity(run: CensusRun, verdict: ReferenceVerdict): void {
  * §9a.6 test 8(b2)'s REQUIRED fixture — order `0.9`, fill `0.06`, position `0.84`.
  *
  * Measured on this exact seed: the reference engine computes `remaining_sell_shares` as
- * `0.8400000000000001` and `position_shares` as `0.84` (`Object.is` is FALSE, and the violation is real —
- * the predicate is evaluated on those doubles). On arm64 macOS the pinned 3.37.2 renders BOTH as
+ * `0.8400000000000001` and `position_shares` as `0.84` (`Object.is` is FALSE, but I3 tolerates this noise).
+ * On arm64 macOS the pinned 3.37.2 renders BOTH as
  * `0.84000000000000003`: a deep-equality assertion over the diagnostics fails on it with both sides
  * correct, which is the reason §9a.6 makes the fixture required rather than optional. On x86_64 — where
  * the census actually runs — it is the same fixture demonstrating the converse. The wider `long double`
@@ -308,7 +308,7 @@ const CLASSES: readonly IdentityCase[] = [
     expected: { stalePointerSells: 1 },
   },
   { name: "I3 — the per-order zero floor", seed: OVERCOMMIT_FLOOR, expected: { overcommittedTokens: 1 } }, // prettier-ignore
-  { name: "I3 — the render collision (8(b2))", seed: RENDER_COLLISION, expected: { overcommittedTokens: 1 } }, // prettier-ignore
+  { name: "I3 — the render collision (8(b2))", seed: RENDER_COLLISION, expected: { overcommittedTokens: 0 } }, // prettier-ignore
   { name: "I4 — two nonclosed rows on a token", seed: DUPLICATE_TOKEN, expected: { duplicateNonclosedTokens: 1 } }, // prettier-ignore
   { name: "I5 — a bounce SELL on a profile row", seed: WRONG_OWNER_SELL, expected: { wrongOwnerSells: 1 } }, // prettier-ignore
 ];
@@ -352,11 +352,20 @@ describe("§9a.6 test 8(b) — the exported rows ARE the shared definition's row
 
   it("the render-collision fixture shows, per host, what (b2)'s rendering comparison is worth", () => {
     const run = runCensus(withClean(RENDER_COLLISION));
-    const row = referenceVerdict(run.fixture, projectionOf(run)).overcommittedTokens.rows[0];
-    const remaining = row?.remaining_sell_shares as number;
-    const shares = row?.position_shares as number;
+    expectInvariantCounts(referenceCounts(referenceVerdict(run.fixture, projectionOf(run))), {});
+    const { remaining, shares } = withReference(
+      run.fixture,
+      (db) =>
+        db
+          .prepare(
+            `SELECT o.size - (SELECT SUM(size) FROM fills WHERE order_id = o.order_id)
+        AS remaining, p.size AS shares FROM orders o JOIN positions p USING (position_id)
+        WHERE o.order_id = 'o-r'`,
+          )
+          .get() as { remaining: number; shares: number },
+    );
 
-    // Different doubles — so the violation is genuine and a deep-equality assertion WOULD fire here …
+    // I3 is clean, but the source quantities still expose the renderer's precision limits.
     expect(Object.is(remaining, shares)).toBe(false);
     expect(remaining).toBeGreaterThan(shares);
 

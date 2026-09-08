@@ -31,6 +31,7 @@ import {
   probeGuard,
   reevaluate,
 } from "./pipeline.js";
+import { OVERCOMMIT_FLOOR, withClean } from "./invariant-fixtures.js";
 
 /**
  * §7 tests 10 and 16 — the export as a TRANSPORT: what the ledger holds must be what the local dry run
@@ -87,13 +88,12 @@ const EXPORTED_REALS = [
  * SELL of `10` that has taken two fills, `0.015` and `0.211`.
  *
  * The numbers are the point. SQLite computes `0.015 + 0.211` as the double below `0.226`, so the remaining
- * shares are one ULP ABOVE the position's `9.774` and I3 fires. Route the same quantity through a bare
+ * shares are one ULP ABOVE the position's `9.774`, within I3's tolerance. Route it through a bare
  * `json_object` numeric and the sum becomes `0.226` exactly, the remainder becomes `9.774` exactly, and the
- * violation disappears — a difference of one ULP deciding whether two engines are selling the same shares.
+ * raw difference disappears. Serialization must preserve precision independently of I3's verdict.
  *
  * `decisionRuleId` is the bounce target rule so that I5 stays clean (the projected owner of a `GATE` lane
- * position on a whitelisted market is `bounce`, which is what the order implies): I3 must be the ONLY
- * violation, or the test could not tell which invariant the precision changed.
+ * position on a whitelisted market is `bounce`, which is what the order implies), keeping all gates clean.
  */
 const PRECISION_SEED = seedSql({
   markets: [{ tokenId: "tok-precision", conditionId: WHITELISTED_CONDITION }],
@@ -411,7 +411,7 @@ describe("§7.10 — the canonical payload digest is sensitive to every content 
   });
 });
 
-// ───────────────────────────── §7.16a — one ULP decides an invariant ─────────────────────────────
+// ───────────────────────────── §7.16a — one ULP survives serialization ─────────────────────────────
 
 /**
  * `realString`'s wrapper stripped back to the bare column, derived from the CURRENT exporter text rather
@@ -435,7 +435,7 @@ describe("§7.16a — the emitter is not json_object, and the precision case is 
     fixture.seed(PRECISION_SEED);
 
     // Production: the real invariant SQL, on the real doubles, run by the pinned 3.37.2 CLI.
-    expect(ledgerViolationCount(fixture, I3)).toBe(1);
+    expect(ledgerViolationCount(fixture, I3)).toBe(0);
 
     // The dry run reads that SAME verdict — after §5.1.11 it is computed by that SQL *inside* the export
     // and never recomputed here, so what crosses the JSON boundary is only the DISPLAY of the quantities:
@@ -443,10 +443,14 @@ describe("§7.16a — the emitter is not json_object, and the precision case is 
     const run = reevaluate(fixture);
     expect(run.gates.invariants.counts[I3]).toBe(ledgerViolationCount(fixture, I3));
 
-    const row = one(run.gates.invariants.rows[I3], () => true, "I3 violation");
-    expect(row.token_id).toBe("tok-precision");
-    expect(row.remaining_sell_shares).toBe("9.7740000000000009");
-    expect(row.position_shares).toBe("9.7739999999999991");
+    expect(run.gates.invariants.rows[I3]).toEqual([]);
+    const remaining =
+      fixture.query(`SELECT ${realString("o.size - (SELECT SUM(size) FROM fills WHERE order_id = o.order_id)")}
+      FROM orders o WHERE order_id = 'o-precision';`);
+    const shares = one(run.loaded.manifest.nonclosedPositions, () => true, "position").size;
+    expect(remaining).toBe("9.7740000000000009");
+    expect(shares).toBe("9.7739999999999991");
+    expect(Number(remaining)).toBeGreaterThan(Number(shares));
 
     // The fill aggregate the two are computed from, in the content group that carries it. Asked of the
     // ledger rather than pinned as a literal: `String(0.015 + 0.211)` is `…98`, and `%!.17g` emits `…97`
@@ -461,7 +465,7 @@ describe("§7.16a — the emitter is not json_object, and the precision case is 
   it("a bare json_object numeric truncates that to 0.226 — which is what makes this a regression test", () => {
     const fixture = createCensusFixture();
     fixture.seed(PRECISION_SEED);
-    expect(ledgerViolationCount(fixture, I3)).toBe(1);
+    expect(ledgerViolationCount(fixture, I3)).toBe(0);
 
     const emitted = fixture.runReadOnly(
       withBareNumericReals(buildCensusExportSql(fixture.controlPath)),
@@ -471,7 +475,7 @@ describe("§7.16a — the emitter is not json_object, and the precision case is 
 
     // The historical fact in observable form: SQLite computes `0.015 + 0.211` as 0.22599999999999998 and a
     // bare `json_object` emits three digits of it. `10 - 0.226` is exactly `9.774`, so a consumer of THAT
-    // number sees nothing over-committed on the very ledger the under-lock guard aborts on.
+    // number loses the raw difference even though both representations are epsilon-clean.
     const bare = one(
       rowsOf(document, "active_sell_orders"),
       () => true,
@@ -740,7 +744,8 @@ function exportedFilledSize(fixture: CensusFixture, sql: string): unknown {
 describe("§7.16d — the local decision and guard #6's re-derivation assign the same owner", () => {
   const AGREEMENT_FIXTURES = [
     { label: "a clean ledger", seed: cleanSeed(), commits: true },
-    { label: "§7.16a's overcommit", seed: PRECISION_SEED, commits: false },
+    { label: "§7.16a's epsilon-clean precision case", seed: PRECISION_SEED, commits: true },
+    { label: "meaningful overcommit", seed: withClean(OVERCOMMIT_FLOOR), commits: false },
   ];
 
   it.each(AGREEMENT_FIXTURES)("$label — decision and re-derivation agree", ({ seed, commits }) => {
@@ -761,7 +766,9 @@ describe("§7.16d — the local decision and guard #6's re-derivation assign the
       expect(applied.fixture.ownerMap()).toEqual(expect.objectContaining(applied.plannedOwners));
       // The clean fixture is the one that spans both owners, and it is worth stating: an all-`profile`
       // (or all-`bounce`) fixture would agree trivially.
-      expect(new Set(Object.values(applied.plannedOwners))).toEqual(new Set(["bounce", "profile"]));
+      expect(new Set(Object.values(applied.plannedOwners))).toEqual(
+        new Set(seed === PRECISION_SEED ? ["bounce"] : ["bounce", "profile"]),
+      );
     } else {
       expectRolledBack(applied, CHECK_FAILED);
     }

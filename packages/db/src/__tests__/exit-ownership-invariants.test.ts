@@ -234,6 +234,41 @@ describe("readOwnershipInvariantViolations — per-invariant specificity", () =>
     });
   });
 
+  it.each([
+    {
+      label: "Derek's four SELLs",
+      size: 39.129999999999995,
+      sells: [7.5539999999999985, 10.072000000000001, 14.999999999999996, 6.504000000000005],
+      blocked: false,
+    },
+    { label: "sub-epsilon excess", size: 1, sells: [1.0000000005], blocked: false },
+    { label: "above-epsilon excess", size: 1, sells: [1.000000002], blocked: true },
+    { label: "one microshare excess", size: 1, sells: [1.000001], blocked: true },
+  ])("overcommittedTokens (I3): $label", ({ size, sells, blocked }) => {
+    seedPosition({ positionId: "p-i3", tokenId: "tok-i3", exitOwner: "profile", size });
+    sells.forEach((quantity, i) =>
+      seedSell({ orderId: `o-i3-${i}`, tokenId: "tok-i3", positionId: "p-i3", size: quantity }),
+    );
+    const raw = db
+      .prepare(
+        `SELECT SUM(size) AS remaining_sell_shares,
+      (SELECT size FROM positions WHERE position_id = 'p-i3') AS position_shares
+      FROM orders WHERE token_id = 'tok-i3'`,
+      )
+      .get() as Record<string, number>;
+    expect(raw.position_shares).toBe(size);
+    if (sells.length === 4) {
+      expect(raw.remaining_sell_shares).toBeCloseTo(39.13, 12);
+    } else {
+      expect(raw.remaining_sell_shares).toBe(sells[0]);
+      expect(raw.remaining_sell_shares! - raw.position_shares!).toBeGreaterThan(0);
+    }
+    const v = readOwnershipInvariantViolations(db);
+    expectOnly(v.counts, "overcommittedTokens", blocked ? 1 : 0);
+    expect(v.rows.overcommittedTokens).toEqual(blocked ? [{ token_id: "tok-i3", ...raw }] : []);
+    expectGuardsOnly(runGuards(), blocked ? "overcommittedTokens" : null);
+  });
+
   it("overcommittedTokens (I3): fills are subtracted — remaining, not ordered, size", () => {
     seedCleanBaseline();
     seedPosition({ positionId: "p-i3", tokenId: "tok-i3", exitOwner: "profile", size: 100 });
