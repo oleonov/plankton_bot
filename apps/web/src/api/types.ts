@@ -1135,6 +1135,14 @@ export interface SystemHealthDep {
   hist: number[];
 }
 export interface SystemHealthErrors {
+  coverage?: {
+    startedAt: string | null;
+    lastFlushAt: string | null;
+    fresh: boolean;
+    complete1h: boolean;
+    complete24h: boolean;
+    precisionMs: number;
+  };
   l50_1h: number;
   l60_1h: number;
   l50_24h: number;

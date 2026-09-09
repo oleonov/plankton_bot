@@ -71,6 +71,10 @@ export function analyze(d: SystemHealthData): Analysis {
     probs.push({ sev: "crit", msg: `Circuit breaker ${d.errors.breakers}` });
   if (d.errors.l60_1h > 0)
     probs.push({ sev: "warn", msg: `${d.errors.l60_1h} level-60 error(s) in last 1h` });
+  if (d.errors.l50_1h > 0)
+    probs.push({ sev: "warn", msg: `${d.errors.l50_1h} runtime error(s) in last 1h` });
+  if (!d.errors.coverage?.complete24h)
+    probs.push({ sev: "warn", msg: "Runtime error collection coverage incomplete" });
 
   // db — only MEASURED values raise problems; unknown (null) never claims health.
   if (typeof d.db.locked === "number" && d.db.locked >= 4)
@@ -87,7 +91,10 @@ export function analyze(d: SystemHealthData): Analysis {
     errors:
       d.errors.breakers !== "closed"
         ? "crit"
-        : d.errors.l60_1h > 0 || d.errors.l60_24h > 0
+        : d.errors.l60_1h > 0 ||
+            d.errors.l60_24h > 0 ||
+            d.errors.l50_24h > 0 ||
+            !d.errors.coverage?.complete24h
           ? "warn"
           : "ok",
     db: lockedCrit ? "crit" : acctWarn ? "warn" : "ok",

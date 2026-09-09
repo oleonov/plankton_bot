@@ -79,6 +79,25 @@ describe("Status page", () => {
     expect(uptoday).not.toContain("100%");
   });
 
+  it("warns when runtime error coverage is missing and does not render zeroes as healthy", async () => {
+    server.use(
+      http.get("/api/v1/system-health", () =>
+        ok({
+          ...mockSystemHealth,
+          errors: { ...mockSystemHealth.errors, coverage: undefined },
+        }),
+      ),
+    );
+    const { container } = renderWithProviders(<Status />);
+
+    await screen.findByText("Runtime error collection coverage incomplete");
+    expect(screen.getByText(/Incomplete coverage · runtime only/)).toBeInTheDocument();
+    expect(screen.getByText("No recorded errors; coverage is incomplete.")).toBeInTheDocument();
+    expect(container.querySelectorAll(".errstat .n")[0]).toHaveTextContent("—");
+    expect(container.querySelectorAll(".errstat .n")[1]).toHaveTextContent("—");
+    expect(screen.queryByText("All systems nominal — no active problems")).not.toBeInTheDocument();
+  });
+
   it("shadow section carries no verdict text or status/lane badges", async () => {
     const { container } = renderWithProviders(<Status />);
     await screen.findByText("Entry fresh-edge shadow");

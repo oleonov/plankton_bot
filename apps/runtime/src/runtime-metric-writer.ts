@@ -15,6 +15,17 @@ const counterKey = (metricName: string, labels: string | null): string =>
   labels === null ? `${metricName}-NULL-` : `${metricName}-LABELED-${labels}`;
 
 const round1 = (n: number): number => Math.round(n * 10) / 10;
+const ERROR_SOURCES = new Set([
+  "entry-lifecycle",
+  "bounce-ask-capture-lifecycle",
+  "reconciliation",
+  "execution",
+  "algo-decision",
+  "market-data",
+  "market-scanner",
+  "normalization",
+  "resolution",
+]);
 
 export class RuntimeMetricWriter implements DepHealthRecorder {
   private readonly findLatest;
@@ -27,6 +38,61 @@ export class RuntimeMetricWriter implements DepHealthRecorder {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private flushIntervalMs = 0;
   private shuttingDown = false;
+  private errorCollection: {
+    startedAt: string;
+    continuousSince: string;
+    lastFlushAt: string | null;
+  } | null = null;
+
+  startErrorCollection(): void {
+    const startedAt = this.now().toISOString();
+    this.errorCollection = { startedAt, continuousSince: startedAt, lastFlushAt: null };
+    try {
+      this.replaceLatest(
+        "runtime_pino_coverage",
+        0,
+        JSON.stringify(this.errorCollection),
+        startedAt,
+      );
+    } catch {
+      /* Until the next successful flush, coverage remains unverified. */
+    }
+  }
+
+  observeLog(level: number, source: unknown): void {
+    if (!this.errorCollection || (level !== 50 && level !== 60)) return;
+    try {
+      this.writeCounter(
+        "runtime_pino_total",
+        1,
+        JSON.stringify({
+          level,
+          source: typeof source === "string" && ERROR_SOURCES.has(source) ? source : "other",
+        }),
+      );
+    } catch {
+      this.errorCollection.continuousSince = this.now().toISOString();
+    }
+  }
+
+  private flushErrorCoverage(capturedAt: string): void {
+    const collection = this.errorCollection;
+    if (!collection) return;
+    const previous = collection.lastFlushAt ?? collection.startedAt;
+    if (Date.parse(capturedAt) - Date.parse(previous) > 60_000)
+      collection.continuousSince = capturedAt;
+    this.replaceLatest(
+      "runtime_pino_coverage",
+      1,
+      JSON.stringify({
+        ...collection,
+        lastFlushAt: capturedAt,
+        precisionMs: 30_000,
+      }),
+      capturedAt,
+    );
+    collection.lastFlushAt = capturedAt;
+  }
 
   constructor(
     private readonly db: Database.Database,
@@ -194,6 +260,7 @@ export class RuntimeMetricWriter implements DepHealthRecorder {
   flushAll(capturedAt = this.now().toISOString()): void {
     this.flushCounters(capturedAt);
     this.flushDepHealth(capturedAt);
+    this.flushErrorCoverage(capturedAt);
   }
 
   /**

@@ -230,6 +230,161 @@ describe("ReconciliationModule", () => {
     });
   });
 
+  it("explains only bound signed facts and preserves the 11.1 pending unknown reservation", () => {
+    const signed = makeLocalOrder({ side: "sell", size: 10, exchangeOrderId: "signed" });
+    signed.metadata = {
+      signedOrderFactsV1: {
+        version: 1,
+        orderId: String(signed.orderId),
+        tokenId: String(signed.tokenId),
+        side: "sell",
+        logicalSize: 10,
+        shares: 9.5,
+      },
+    };
+    const legacy = makeLocalOrder({
+      orderId: createOrderId("legacy"),
+      side: "sell",
+      size: 10,
+      exchangeOrderId: "legacy",
+    });
+    const unknown = makeLocalOrder({
+      orderId: createOrderId("unknown"),
+      side: "sell",
+      status: "pending",
+      size: 11.1,
+      exchangeOrderId: "unknown",
+    });
+    unknown.metadata = {
+      submitUnknownRecoveryV1: {
+        version: 1,
+        ...Object.fromEntries(
+          [
+            "orderId",
+            "clientOrderId",
+            "exchangeOrderId",
+            "tokenId",
+            "conditionId",
+            "positionId",
+          ].map((key) => [key, String(unknown[key as keyof Order])]),
+        ),
+      },
+    };
+    const localOnly = makeLocalOrder({
+      orderId: createOrderId("local-only"),
+      side: "sell",
+      size: 2,
+      tokenId: createTokenId("local-only"),
+      exchangeOrderId: "local-only",
+    });
+    const orders = [signed, legacy, unknown, localOnly];
+    vi.mocked(orderRepo.findOpen).mockReturnValue(orders);
+    vi.mocked(fillRepo.findByOrderId).mockImplementation((id) =>
+      id === signed.orderId ? [{ orderId: signed.orderId, size: 1 } as never] : [],
+    );
+    let now = 10_000;
+    const store = new ExchangeStateStore({ now: () => now });
+    store.updateExchangeSellOrders([
+      { tokenId: TOK, orderId: "signed", sizeRemaining: 8.5 },
+      { tokenId: TOK, orderId: "legacy", sizeRemaining: 9.7 },
+      { tokenId: "remote-only", orderId: "remote-only", sizeRemaining: 4 },
+    ]);
+    const metrics = () =>
+      (
+        mod as unknown as {
+          computeStoreMetrics(
+            store: ExchangeStateStore,
+          ): ReturnType<ExchangeStateStore["computeMetrics"]>;
+        }
+      ).computeStoreMetrics(store);
+    expect(metrics().reservedSellDriftAbs).toBeCloseTo(17.9);
+    expect(metrics().reservedSellDiagnostics).toMatchObject({
+      rounding: 0.5,
+      pendingUnknown: 11.1,
+      quarantine: 0,
+      stale: false,
+    });
+    expect(metrics().reservedSellDiagnostics.unexplained).toBeCloseTo(6.3);
+    expect(
+      metrics().reservedSellDiagnostics.details.find((row) => row.tokenId === String(TOK))?.logical,
+    ).toBeCloseTo(30.1);
+    expect(unknown.status).toBe("pending");
+    expect(unknown.size).toBe(11.1);
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+    now += 300_001;
+    expect(metrics().reservedSellDiagnostics).toMatchObject({
+      stale: true,
+      captureAgeMs: 300_001,
+      pendingUnknown: 11.1,
+    });
+  });
+
+  it("does not await diagnostic REST, coalesces passes, and drains without late writes", async () => {
+    const startedAt = Date.now();
+    const resting = makeLocalOrder({
+      side: "sell",
+      entryStyle: "maker",
+      postOnly: true,
+      decisionRuleId: "BOUNCE_EXIT_TARGET",
+      metadata: {
+        quoteMotionV1: {
+          version: 1,
+          kind: "bounce_exit_target",
+          cohortId: "test",
+          originalSuggestedPrice: 0.5,
+          originalTargetPrice: 0.5,
+          entryPriceCeiling: null,
+          policySchemaVersion: 1,
+          policyControlRevision: 1,
+          initialBook: {
+            depthStatus: "full",
+            bestBid: 0.4,
+            bestAsk: 0.5,
+            tickSize: 0.01,
+            snapshotTs: startedAt,
+            source: "test",
+          },
+        },
+      },
+    });
+    const releases: Array<() => void> = [];
+    const read = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        releases.push(resolve);
+      });
+      return new Map();
+    });
+    const insert = vi.fn();
+    const isolated = buildModule({
+      quoteMotionShadow: {
+        orderRepo: { findOpen: () => [resting] },
+        fillRepo,
+        positionRepo: { findById: () => null },
+        inventoryLotRepo: { findOpen: () => [] },
+        riskEventRepo: { insert },
+        getFreshBooks: read,
+        maxBookAgeMs: 3_000,
+      },
+    });
+    await isolated.runReconciliation();
+    expect(read).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 3; i++) await isolated.runReconciliation();
+    expect(read).toHaveBeenCalledTimes(1);
+    releases[0]!();
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    expect(insert).toHaveBeenCalledTimes(1);
+    let stopped = false;
+    const stop = isolated.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    releases[1]!();
+    await stop;
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
   // Builds a module sharing the per-test deps, with optional dependency overrides.
   function buildModule(
     overrides: Partial<ConstructorParameters<typeof ReconciliationModule>[0]> = {},

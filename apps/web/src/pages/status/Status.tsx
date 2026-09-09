@@ -367,18 +367,31 @@ export function Status() {
           <div className="panel">
             <div className="ph">
               <span className={"sd " + sections.errors} />
-              <span className="pt">Errors · last 24h</span>
+              <span className="pt">Runtime Pino errors · last 24h</span>
+            </div>
+            <div className="empty">
+              {data.errors.coverage?.complete24h ? "24h coverage collected" : "Incomplete coverage"}
+              {" · runtime only; API/container stdout excluded. "}
+              Started {data.errors.coverage?.startedAt ?? "unknown"}; last flush{" "}
+              {data.errors.coverage?.lastFlushAt ?? "unknown"}.
+              {
+                " Counts use 30s flush-time buckets; abrupt shutdown can lose an unflushed interval."
+              }
             </div>
             <div className="errstat">
               <div className="es">
                 <span className={"n " + (data.errors.l50_24h > 0 ? "l50" : "ok")}>
-                  {data.errors.l50_24h}
+                  {data.errors.coverage?.fresh || data.errors.l50_24h > 0
+                    ? data.errors.l50_24h
+                    : "—"}
                 </span>
                 <span className="k">level 50 · 24h</span>
               </div>
               <div className="es">
                 <span className={"n " + (data.errors.l60_24h > 0 ? "l60" : "ok")}>
-                  {data.errors.l60_24h}
+                  {data.errors.coverage?.fresh || data.errors.l60_24h > 0
+                    ? data.errors.l60_24h
+                    : "—"}
                 </span>
                 <span className="k">level 60 · 24h</span>
               </div>
@@ -411,7 +424,11 @@ export function Status() {
             </div>
             <div className="codes">
               {data.errors.top.length === 0 ? (
-                <div className="empty">No operational errors in the window.</div>
+                <div className="empty">
+                  {data.errors.coverage?.complete24h
+                    ? "No runtime errors recorded in the window."
+                    : "No recorded errors; coverage is incomplete."}
+                </div>
               ) : (
                 data.errors.top.map((e, i) => (
                   <div className="crow" key={i}>

@@ -564,6 +564,14 @@ export const mockSystemHealth = {
     { nm: "Relayer / redeem", s: "ok" as const, lat: null, err: null, hist: [] },
   ],
   errors: {
+    coverage: {
+      startedAt: "2026-06-28T03:11:00Z",
+      lastFlushAt: "2026-06-29T03:11:00Z",
+      fresh: true,
+      complete1h: true,
+      complete24h: true,
+      precisionMs: 30_000,
+    },
     l50_1h: 0,
     l60_1h: 0,
     l50_24h: 0,

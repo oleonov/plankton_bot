@@ -16,6 +16,15 @@
  */
 import type { TokenId } from "@krabs/domain";
 
+export interface LocalSellComparison {
+  tokenId: string;
+  exchangeOrderId: string | null;
+  logicalRemaining: number;
+  signedRemaining: number;
+  pendingUnknown: boolean;
+  quarantined: boolean;
+}
+
 export interface ExchangeOpenSellSummary {
   /** Sum of exchange `sizeRemaining` across open SELL orders for the token. */
   readonly openSellSize: number;
@@ -42,6 +51,7 @@ export interface BalanceRejectBlock {
 export interface ExchangeStateStoreMetrics {
   /** Sum |localOpenSellSize - exchangeOpenSellSize| across tokens with snapshots. */
   readonly reservedSellDriftAbs: number;
+  readonly reservedSellDiagnostics: ReturnType<ExchangeStateStore["compareSellOrders"]>;
   /** Broad debug sum across local positions and all wallet snapshots, including remote-only rows. */
   readonly walletPositionDriftAbs: number;
   /** Actionable sum for local active/dust/open positions compared with current wallet snapshot. */
@@ -325,6 +335,7 @@ export class ExchangeStateStore {
   computeMetrics(input: {
     readonly localOpenSellSizeByToken: ReadonlyMap<string, number>;
     readonly localPositionSizeByToken: ReadonlyMap<string, number>;
+    readonly localSellOrders?: readonly LocalSellComparison[];
   }): ExchangeStateStoreMetrics {
     let reservedSellDriftAbs = 0;
     for (const [tokenKey, entry] of this.openSellByToken) {
@@ -356,6 +367,7 @@ export class ExchangeStateStore {
     }
     return {
       reservedSellDriftAbs,
+      reservedSellDiagnostics: this.compareSellOrders(input.localSellOrders ?? []),
       walletPositionDriftAbs,
       walletPositionActionableDriftAbs,
       walletPositionRemoteOnlyRedeemableAbs,
@@ -364,6 +376,83 @@ export class ExchangeStateStore {
       latestWalletCaptureMs: this.lastWalletCaptureMs,
     };
   }
+
+  compareSellOrders(localOrders: readonly LocalSellComparison[]) {
+    const tokens = new Set([
+      ...this.openSellByToken.keys(),
+      ...localOrders.map((row) => row.tokenId),
+    ]);
+    const details = [...tokens]
+      .map((tokenId) =>
+        compareSellToken(
+          tokenId,
+          localOrders.filter((row) => row.tokenId === tokenId),
+          this.openSellByToken.get(tokenId),
+        ),
+      )
+      .filter((row) => row.rounding || row.pendingUnknown || row.quarantine || row.unexplained);
+    const captureAgeMs =
+      this.lastExchangeOrdersCaptureMs === null
+        ? null
+        : this.now() - this.lastExchangeOrdersCaptureMs;
+    return {
+      rounding: details.reduce((sum, row) => sum + row.rounding, 0),
+      pendingUnknown: details.reduce((sum, row) => sum + row.pendingUnknown, 0),
+      quarantine: details.reduce((sum, row) => sum + row.quarantine, 0),
+      unexplained: details.reduce((sum, row) => sum + row.unexplained, 0),
+      captureAgeMs,
+      logicalTotal: localOrders.reduce((sum, row) => sum + row.logicalRemaining, 0),
+      exchangeTotal: [...this.openSellByToken.values()].reduce(
+        (sum, row) => sum + row.openSellSize,
+        0,
+      ),
+      stale: captureAgeMs === null || captureAgeMs > this.snapshotMaxAgeMs,
+      tokenCount: details.length,
+      details: details
+        .sort(
+          (a, b) =>
+            b.unexplained +
+            b.pendingUnknown +
+            b.quarantine -
+            a.unexplained -
+            a.pendingUnknown -
+            a.quarantine,
+        )
+        .slice(0, 20),
+    };
+  }
+}
+
+function compareSellToken(
+  tokenId: string,
+  localOrders: readonly LocalSellComparison[],
+  snapshot: ExchangeOpenSellSummary | undefined,
+) {
+  const remote = new Map(snapshot?.orders ?? []);
+  const result = {
+    tokenId,
+    logical: 0,
+    exchange: snapshot?.openSellSize ?? 0,
+    rounding: 0,
+    pendingUnknown: 0,
+    quarantine: 0,
+    unexplained: 0,
+    raw: 0,
+  };
+  for (const local of localOrders) {
+    result.logical += local.logicalRemaining;
+    const matched = local.exchangeOrderId === null ? undefined : remote.get(local.exchangeOrderId);
+    if (matched !== undefined) {
+      result.rounding += local.logicalRemaining - local.signedRemaining;
+      result.unexplained += Math.abs(local.signedRemaining - matched);
+      remote.delete(local.exchangeOrderId!);
+    } else if (local.pendingUnknown) result.pendingUnknown += local.logicalRemaining;
+    else if (local.quarantined) result.quarantine += local.logicalRemaining;
+    else result.unexplained += local.logicalRemaining;
+  }
+  for (const remaining of remote.values()) result.unexplained += remaining;
+  result.raw = result.logical - result.exchange;
+  return result;
 }
 
 /**

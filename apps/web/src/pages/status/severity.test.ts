@@ -43,6 +43,14 @@ function base(): SystemHealthData {
     resources: [res("Disk · krabs-data", 62), res("Memory", 61)],
     deps: [{ nm: "CLOB API", s: "ok", lat: 100, err: 0, hist: [] }],
     errors: {
+      coverage: {
+        startedAt: "2026-09-08T00:00:00.000Z",
+        lastFlushAt: "2026-09-09T00:00:00.000Z",
+        fresh: true,
+        complete1h: true,
+        complete24h: true,
+        precisionMs: 30_000,
+      },
       l50_1h: 0,
       l60_1h: 0,
       l50_24h: 0,
@@ -67,6 +75,16 @@ function base(): SystemHealthData {
 }
 
 describe("status severity model", () => {
+  it("surfaces level-50 runtime errors and missing coverage independently", () => {
+    const data = base();
+    data.errors.l50_1h = data.errors.l50_24h = 601;
+    expect(analyze(data).sections.errors).toBe("warn");
+    expect(analyze(data).probs.some((p) => p.msg.includes("601 runtime error"))).toBe(true);
+    data.errors.l50_1h = data.errors.l50_24h = 0;
+    delete data.errors.coverage;
+    expect(analyze(data).sections.errors).toBe("warn");
+    expect(analyze(data).probs.some((p) => p.msg.includes("coverage incomplete"))).toBe(true);
+  });
   it("a clean state is OK with an empty problem list", () => {
     const { global, probs } = analyze(base());
     expect(global).toBe("ok");

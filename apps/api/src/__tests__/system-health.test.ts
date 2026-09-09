@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { bootstrapDatabase } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
 import type { AppConfig } from "@krabs/config";
@@ -66,6 +66,70 @@ function authHeaders() {
 }
 
 describe("GET /api/v1/system-health", () => {
+  it("counts aggregate Pino values beyond 500 rows with clock-hour buckets and explicit coverage", async () => {
+    const now = Date.parse("2026-09-09T02:00:10.000Z");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    const insert = conn.db.prepare(
+      "INSERT INTO runtime_metrics(metric_name, value, labels, captured_at) VALUES (?, ?, ?, ?)",
+    );
+    const read = async () =>
+      (
+        await app.inject({ method: "GET", url: "/api/v1/system-health", headers: authHeaders() })
+      ).json().data.errors;
+    try {
+      expect((await read()).coverage).toMatchObject({
+        fresh: false,
+        complete1h: false,
+        complete24h: false,
+      });
+      for (let i = 0; i < 601; i++)
+        insert.run(
+          "runtime_pino_total",
+          2,
+          JSON.stringify({ level: 50, source: "execution" }),
+          "2026-09-09T02:00:00.000Z",
+        );
+      insert.run(
+        "runtime_pino_total",
+        3,
+        JSON.stringify({ level: 60, source: "other" }),
+        "2026-09-09T01:59:59.000Z",
+      );
+      insert.run(
+        "infra_alert",
+        999,
+        JSON.stringify({ severity: "error", code: "not-a-pino-record", source: "test" }),
+        "2026-09-09T02:00:00.000Z",
+      );
+      insert.run(
+        "runtime_pino_coverage",
+        1,
+        JSON.stringify({
+          startedAt: "2026-09-09T01:50:00.000Z",
+          continuousSince: "2026-09-09T01:50:00.000Z",
+          lastFlushAt: "2026-09-09T02:00:00.000Z",
+        }),
+        "2026-09-09T02:00:00.000Z",
+      );
+      const errors = await read();
+      expect(errors).toMatchObject({ l50_1h: 1202, l50_24h: 1202, l60_1h: 3, l60_24h: 3 });
+      expect(errors.hist.slice(-2)).toEqual([
+        { t: Date.parse("2026-09-09T01:00:00.000Z"), n: 3, crit: true },
+        { t: Date.parse("2026-09-09T02:00:00.000Z"), n: 1202, crit: false },
+      ]);
+      expect(errors.top[0]).toMatchObject({ lv: "l50", code: "execution", cnt: 1202 });
+      expect(errors.coverage).toMatchObject({ fresh: true, complete1h: false, complete24h: false });
+      clock.mockReturnValue(now + 60_000);
+      expect((await read()).coverage.fresh).toBe(false);
+    } finally {
+      clock.mockRestore();
+      conn.db
+        .prepare(
+          "DELETE FROM runtime_metrics WHERE metric_name IN ('runtime_pino_total', 'runtime_pino_coverage') OR labels LIKE '%not-a-pino-record%'",
+        )
+        .run();
+    }
+  });
   it("returns the required UI-facing fields without failing on missing probes", async () => {
     const res = await app.inject({
       method: "GET",

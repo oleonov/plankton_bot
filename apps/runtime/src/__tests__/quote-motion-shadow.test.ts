@@ -172,6 +172,47 @@ function harness(
 }
 
 describe("quote-motion shadow", () => {
+  it("uses completion time and reloads orders after a delayed diagnostic book read", async () => {
+    const orders = [order("r23_capture")];
+    const h = harness(orders);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fresh = h.deps.getFreshBooks.getMockImplementation()!;
+    let now = NOW;
+    h.deps.getFreshBooks.mockImplementation(async (tokens) => {
+      await held;
+      return fresh(tokens, now);
+    });
+    const pass = runQuoteMotionShadowPass(h.deps, h.states, NOW, {
+      current: () => true,
+      now: () => now,
+    });
+    now += 5_000;
+    release();
+    await pass;
+    expect(h.events[0]?.payload.sampledAt).toBe(new Date(now).toISOString());
+    expect(h.events[0]?.payload.bookSnapshotAt).toBe(new Date(now).toISOString());
+    expect(h.events[0]?.payload.classification).not.toBe("stale-book");
+    const next = runQuoteMotionShadowPass(h.deps, h.states, now);
+    orders.length = 0;
+    expect(await next).toMatchObject({ emitted: 0, skipped: 1 });
+    expect(h.events).toHaveLength(1);
+  });
+
+  it("discards a diagnostic result after lifecycle invalidation", async () => {
+    const h = harness([order("r23_capture")]);
+    let current = true;
+    const pass = runQuoteMotionShadowPass(h.deps, h.states, NOW, {
+      current: () => current,
+      now: () => NOW,
+    });
+    current = false;
+    expect(await pass).toMatchObject({ emitted: 0, skipped: 1 });
+    expect(h.deps.riskEventRepo.insert).not.toHaveBeenCalled();
+    expect(h.states.size).toBe(0);
+  });
   it("removes our visible bid before evaluating BID+1 and never self-chases", async () => {
     const current = order("r23_capture", { size: 10 });
     const h = harness([current], book(0.1, 0.13));

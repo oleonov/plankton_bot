@@ -1413,6 +1413,7 @@ describe("EntryLifecycleModule", () => {
 
       await module.start();
       await publishMarket(bus, makeMarket({ bestBid: 0.31 }));
+      await vi.waitFor(() => expect(cancels).toHaveLength(1));
       expect(cancels[0]?.command.commandId).toBe(
         buildMakerCaptureRepriceIdentity(root.orderId, root.orderId, 1).cancelCommandId,
       );
@@ -1447,6 +1448,7 @@ describe("EntryLifecycleModule", () => {
       }
       await bus.drain();
 
+      await vi.waitFor(() => expect(scheduled).toHaveLength(1));
       expect(signals).toHaveLength(0);
       expect(bookPolls).toBe(activationId ? 1 : 2);
       expect(getOrderResult).toHaveBeenCalledTimes(activationId ? 0 : 1);
@@ -1487,6 +1489,7 @@ describe("EntryLifecycleModule", () => {
       expect(bookPolls).toBe(activationId ? 2 : 3);
       downstreamFails = false;
       await publishMarket(bus, makeMarket({ bestBid: 0.32 }));
+      await vi.waitFor(() => expect(signals).toHaveLength(2));
       expect(signals.map((signal) => signal.signalId)).toEqual([
         intent!.lifecycleSignalId,
         intent!.lifecycleSignalId,
@@ -1564,6 +1567,7 @@ describe("EntryLifecycleModule", () => {
     const repo = makeOrderRepo(root);
     vi.mocked(repo.findById).mockImplementation((id) => (id === root.orderId ? root : null));
     repo.findRecoverableMakerCaptureRepriceIntents = vi.fn(() => [intent]);
+    repo.findMakerCaptureRepriceIntentBySignal = vi.fn(() => intent);
     repo.markMakerCaptureRepriceTerminal = vi.fn(() => true);
 
     const module = buildModule({ orderRepo: repo });
@@ -1652,6 +1656,7 @@ describe("EntryLifecycleModule", () => {
     };
     const repo = makeOrderRepo(predecessor);
     repo.findRecoverableMakerCaptureRepriceIntents = vi.fn(() => [intent]);
+    repo.findMakerCaptureRepriceIntentBySignal = vi.fn(() => intent);
     repo.markMakerCaptureRepriceTerminal = vi.fn(() => true);
     const bus = new InProcessEventBus();
     const cancels = vi.fn();

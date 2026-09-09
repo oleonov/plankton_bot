@@ -201,17 +201,27 @@ export async function runQuoteMotionShadowPass(
   deps: QuoteMotionShadowDeps,
   states: Map<string, QuoteMotionState>,
   nowMs: number,
-): Promise<{ eligible: number; emitted: number }> {
-  const openOrders = deps.orderRepo.findOpen();
-  const restingOrders = openOrders.filter(isConfirmedRestingOrder);
-  const eligible = restingOrders
+  lifecycle: { current(): boolean; now(): number } = { current: () => true, now: () => nowMs },
+): Promise<{ eligible: number; emitted: number; skipped?: number }> {
+  let restingOrders = deps.orderRepo.findOpen().filter(isConfirmedRestingOrder);
+  let eligible = restingOrders
     .map((order) => ({ order, origin: parseQuoteMotionOrigin(order) }))
     .filter((item): item is { order: Order; origin: QuoteMotionOriginV1 } => item.origin !== null);
   pruneStates(states, new Set(eligible.map(({ order }) => String(order.orderId))));
   if (eligible.length === 0) return { eligible: 0, emitted: 0 };
 
-  const fillsByOrder = loadFills(deps.fillRepo, restingOrders);
   const books = await loadBooks(deps, eligible, nowMs);
+  if (!lifecycle.current())
+    return { eligible: eligible.length, emitted: 0, skipped: eligible.length };
+  nowMs = lifecycle.now();
+  const originalCount = eligible.length;
+  const acquired = new Set(eligible.map(({ order }) => String(order.orderId)));
+  restingOrders = deps.orderRepo.findOpen().filter(isConfirmedRestingOrder);
+  eligible = restingOrders
+    .filter((order) => acquired.has(String(order.orderId)))
+    .map((order) => ({ order, origin: parseQuoteMotionOrigin(order) }))
+    .filter((item): item is { order: Order; origin: QuoteMotionOriginV1 } => item.origin !== null);
+  const fillsByOrder = loadFills(deps.fillRepo, restingOrders);
   let emitted = 0;
   for (const item of eligible) {
     const sample = evaluateOrder(
@@ -249,7 +259,11 @@ export async function runQuoteMotionShadowPass(
       deps.onWriteError?.(error, item.order);
     }
   }
-  return { eligible: eligible.length, emitted };
+  return {
+    eligible: eligible.length,
+    emitted,
+    ...(originalCount !== eligible.length ? { skipped: originalCount - eligible.length } : {}),
+  };
 }
 
 function evaluateOrder(

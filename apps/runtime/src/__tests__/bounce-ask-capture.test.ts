@@ -376,6 +376,7 @@ describe("bounce ASK capture", () => {
       },
       findRecoverableBounceAskCaptureIntents: () => [],
       findBounceAskCaptureIntentByPredecessor: () => intent,
+      findBounceAskCaptureIntentBySignal: () => intent,
       markBounceAskCaptureReady: (_id: unknown, price: number, size: number, prepared: unknown) => {
         intent = {
           ...intent,
@@ -448,7 +449,7 @@ describe("bounce ASK capture", () => {
     } as unknown as NormalizedMarket;
     await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: NOW });
     await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: NOW });
-    expect(effects).toEqual(["claim", "cancel-after-claim"]);
+    await vi.waitFor(() => expect(effects).toEqual(["claim", "cancel-after-claim"]));
     policyEnabled = false;
     if (activationId) {
       sell = { ...sell, status: "cancelled" };
@@ -461,7 +462,9 @@ describe("bounce ASK capture", () => {
         signalReason: sell.signalReason,
         timestamp: NOW,
       });
-      expect(effects).toEqual(["claim", "cancel-after-claim", "replacement-signal"]);
+      await vi.waitFor(() =>
+        expect(effects).toEqual(["claim", "cancel-after-claim", "replacement-signal"]),
+      );
       expect(terminal).not.toHaveBeenCalled();
       await module.stop();
       return;

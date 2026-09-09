@@ -189,21 +189,25 @@ export function matchesMakerCaptureIntent(
 export async function primeFreshMakerCaptureBook(
   cache: MakerCaptureBookCache | undefined,
   tokenId: string,
-  nowMs: number,
+  now: number | (() => number),
 ): Promise<CandidateBookCacheEntry | null> {
   if (!cache) return null;
   const entries = await cache.prime([tokenId]);
   const entry = entries.get(tokenId) ?? null;
   if (!entry || entry.sourceKind !== "rest" || entry.tokenId !== tokenId) return null;
+  return isFreshMakerCaptureEntry(entry, typeof now === "function" ? now() : now) ? entry : null;
+}
+
+export function isFreshMakerCaptureEntry(entry: CandidateBookCacheEntry, nowMs: number): boolean {
   if (
     !freshTimestamp(entry.cachedAtMs, nowMs) ||
     !freshTimestamp(entry.sourcePolledAtMs, nowMs) ||
     !freshTimestamp(entry.snapshotTs, nowMs) ||
-    String(entry.book.tokenId) !== tokenId
+    String(entry.book.tokenId) !== entry.tokenId
   ) {
-    return null;
+    return false;
   }
-  return entry;
+  return true;
 }
 
 export function isMakerCaptureBookAfterCancellation(

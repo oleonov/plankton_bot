@@ -39,7 +39,9 @@ import {
   createConditionId,
   nextRepriceChainState,
   resolveDynamicChainCapDetails,
+  exchangeComparisonOrder,
 } from "@krabs/domain";
+import { parseSubmitUnknownRecoveryV1 } from "../../startup-position-adoption.js";
 import type { Logger } from "../../logger.js";
 import { reconcileOrders, type OrderReconcileResult } from "./order-reconciler.js";
 import {
@@ -276,11 +278,18 @@ export class ReconciliationModule implements RuntimeModule {
   private readonly thinHoldReportedOrderIds = new Set<string>();
   private readonly replacementUnavailableLogState = new Map<string, string>();
   private readonly quoteMotionStates = new Map<string, QuoteMotionState>();
+  private quoteMotionTask: Promise<void> | null = null;
+  private quoteMotionPending = false;
+  private quoteMotionCoalesced = 0;
+  private diagnosticGeneration = 0;
+  private diagnosticsStopped = false;
   constructor(private readonly deps: ReconciliationModuleDeps) {
     this.log = deps.log.child({ module: "reconciliation" });
   }
 
   async start(): Promise<void> {
+    this.diagnosticsStopped = false;
+    this.diagnosticGeneration++;
     this.unsubs.push(
       this.deps.bus.subscribe("OrderCancelled", async (event) => {
         this.removeConfirmedSellReservation(event);
@@ -361,6 +370,9 @@ export class ReconciliationModule implements RuntimeModule {
   }
 
   async stop(): Promise<void> {
+    this.diagnosticsStopped = true;
+    this.diagnosticGeneration++;
+    this.quoteMotionPending = false;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -372,6 +384,7 @@ export class ReconciliationModule implements RuntimeModule {
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     this.started = false;
+    await this.quoteMotionTask;
     this.log.info("reconciliation module stopped");
   }
 
@@ -426,6 +439,7 @@ export class ReconciliationModule implements RuntimeModule {
           bus: this.deps.bus,
           log: this.log,
           fillCompletionTolerance,
+          runtimeMetrics: this.deps.runtimeMetrics,
         },
         sinceMs,
       );
@@ -466,7 +480,7 @@ export class ReconciliationModule implements RuntimeModule {
 
       // This diagnostic is cache-only, and its freshness boundary begins here rather than at the
       // start of fill/order reconciliation so slow exchange reads cannot backdate the sample.
-      await this.runQuoteMotionShadow(Date.now(), stageTimingsMs);
+      this.scheduleQuoteMotionShadow();
 
       // 3. Stale entry order cleanup
       const repriceChainGate =
@@ -701,19 +715,48 @@ export class ReconciliationModule implements RuntimeModule {
     }
   }
 
-  private async runQuoteMotionShadow(
-    nowMs: number,
-    stageTimingsMs: Record<string, number>,
-  ): Promise<void> {
-    if (!this.deps.quoteMotionShadow) return;
-    const startedAt = Date.now();
-    try {
-      await runQuoteMotionShadowPass(this.deps.quoteMotionShadow, this.quoteMotionStates, nowMs);
-    } catch (err) {
-      this.log.warn({ err }, "quote-motion shadow pass failed");
-    } finally {
-      stageTimingsMs.quoteMotionShadow = Date.now() - startedAt;
+  private scheduleQuoteMotionShadow(): void {
+    if (!this.deps.quoteMotionShadow || this.diagnosticsStopped) return;
+    this.quoteMotionPending = true;
+    if (this.quoteMotionTask) {
+      this.quoteMotionCoalesced++;
+      return;
     }
+    const generation = this.diagnosticGeneration;
+    this.quoteMotionTask = Promise.resolve()
+      .then(async () => {
+        while (this.quoteMotionPending && !this.diagnosticsStopped) {
+          this.quoteMotionPending = false;
+          const startedAt = Date.now();
+          const current = () =>
+            !this.diagnosticsStopped && generation === this.diagnosticGeneration;
+          try {
+            const result = await runQuoteMotionShadowPass(
+              this.deps.quoteMotionShadow!,
+              this.quoteMotionStates,
+              startedAt,
+              { current, now: Date.now },
+            );
+            if (current())
+              this.deps.runtimeMetrics?.writeEvent(
+                "quote_motion_pass_ms",
+                Date.now() - startedAt,
+                JSON.stringify({
+                  ...result,
+                  coalesced: this.quoteMotionCoalesced,
+                  startedAt,
+                  completedAt: Date.now(),
+                }),
+              );
+            this.quoteMotionCoalesced = 0;
+          } catch (err) {
+            if (current()) this.log.warn({ err }, "quote-motion shadow pass failed");
+          }
+        }
+      })
+      .finally(() => {
+        this.quoteMotionTask = null;
+      });
   }
 
   /**
@@ -1074,14 +1117,18 @@ export class ReconciliationModule implements RuntimeModule {
     this.deps.runtimeMetrics?.writeEvent(
       "reserved_sell_drift_abs",
       metrics.reservedSellDriftAbs,
-      JSON.stringify({ source: "reconciliation" }),
+      JSON.stringify({ source: "reconciliation", ...metrics.reservedSellDiagnostics }),
       new Date(ranAt).toISOString(),
     );
 
-    if (metrics.reservedSellDriftAbs >= 1) {
+    if (
+      metrics.reservedSellDiagnostics.unexplained >= 1 ||
+      metrics.reservedSellDiagnostics.pendingUnknown >= 1 ||
+      metrics.reservedSellDiagnostics.quarantine >= 1
+    ) {
       this.log.warn(
-        { reservedSellDriftAbs: metrics.reservedSellDriftAbs },
-        "reservedSell drift threshold exceeded (>=1 share)",
+        { reservedSellDriftAbs: metrics.reservedSellDriftAbs, ...metrics.reservedSellDiagnostics },
+        "reservedSell discrepancy or unresolved reservation (>=1 share)",
       );
     }
     if (
@@ -1112,10 +1159,26 @@ export class ReconciliationModule implements RuntimeModule {
     // fills — the exchange snapshot reports `sizeRemaining`, so comparing
     // against original `order.size` would falsely flag partially-filled SELLs
     // as drift.
-    const reservations = buildReservationSnapshot(
-      this.deps.orderRepo.findOpen(),
-      this.deps.fillRepo,
-    );
+    const orders = this.deps.orderRepo.findOpen();
+    const reservations = buildReservationSnapshot(orders, this.deps.fillRepo);
+    const localSellOrders = orders
+      .filter((order) => order.side === "sell")
+      .map((order) => {
+        const filled = this.deps.fillRepo
+          .findByOrderId(order.orderId)
+          .reduce((sum, fill) => sum + fill.size, 0);
+        return {
+          tokenId: String(order.tokenId),
+          exchangeOrderId: order.exchangeOrderId ?? null,
+          logicalRemaining: Math.max(0, order.size - filled),
+          signedRemaining: Math.max(0, exchangeComparisonOrder(order).size - filled),
+          pendingUnknown:
+            order.status === "pending" && parseSubmitUnknownRecoveryV1(order) !== null,
+          quarantined:
+            this.deps.exactNullStartupQuarantine?.isExactNullStartupOrderQuarantined(order) ??
+            false,
+        };
+      });
     for (const [key, remaining] of reservations.reservedSellByToken) {
       localOpenSellSizeByToken.set(key, remaining);
     }
@@ -1133,7 +1196,11 @@ export class ReconciliationModule implements RuntimeModule {
         );
       }
     }
-    return store.computeMetrics({ localOpenSellSizeByToken, localPositionSizeByToken });
+    return store.computeMetrics({
+      localOpenSellSizeByToken,
+      localPositionSizeByToken,
+      localSellOrders,
+    });
   }
 
   private readonly reconciliationLagSamplesMs: number[] = [];

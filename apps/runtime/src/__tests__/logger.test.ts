@@ -1,5 +1,29 @@
-import { describe, it, expect } from "vitest";
-import { compactErrSerializer } from "../logger.js";
+import { describe, it, expect, vi } from "vitest";
+import { compactErrSerializer, createLogger } from "../logger.js";
+
+describe("emitted error observation", () => {
+  it("observes child errors and fatal levels without exposing log objects and fails open", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      const observed = vi.fn();
+      const logger = createLogger("error", "test", observed);
+      const child = logger.child({ module: "execution" }).child({ tokenId: "not-a-category" });
+      child.warn("filtered");
+      child.error({ authorization: "test-private", err: new Error("private-message") }, "error");
+      child.fatal("fatal");
+      expect(observed.mock.calls).toEqual([
+        [50, "execution"],
+        [60, "execution"],
+      ]);
+      observed.mockImplementation(() => {
+        throw new Error("sink unavailable");
+      });
+      expect(() => child.error("still emitted")).not.toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
 
 describe("compactErrSerializer", () => {
   it("strips DOMException enum constants (INDEX_SIZE_ERR..DATA_CLONE_ERR)", () => {

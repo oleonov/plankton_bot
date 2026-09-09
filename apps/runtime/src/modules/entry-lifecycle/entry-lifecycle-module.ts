@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { CaptureWorkRunner } from "../../capture-work-runner.js";
 
 function makerCaptureResidual(
   usage: { predecessorRemainingShares: number; rootNotionalUsdc: number; chainFilledUsdc: number },
@@ -9,11 +10,7 @@ function makerCaptureResidual(
     Math.max(0, (usage.rootNotionalUsdc - usage.chainFilledUsdc) / price),
   );
 }
-import {
-  hasNeverPostedMinimumEvidence,
-  exchangeComparisonOrder,
-  createTokenId,
-} from "@krabs/domain";
+import { hasNeverPostedMinimumEvidence, exchangeComparisonOrder } from "@krabs/domain";
 import { prepareSuccessorMinimum } from "../../min-order-size.js";
 import { isLocalMinimumReason } from "../../internal-order-reasons.js";
 import type {
@@ -61,6 +58,7 @@ import {
   MAKER_CAPTURE_BOOK_MAX_AGE_MS,
   parseMakerCaptureLineage,
   primeFreshMakerCaptureBook,
+  isFreshMakerCaptureEntry,
   resolveMakerCaptureCancellationAnchorMs,
   type MakerCaptureBookCache,
 } from "../../maker-capture-reprice.js";
@@ -102,7 +100,7 @@ interface EntryLifecycleMetrics {
 }
 
 export interface EntryLifecycleModuleDeps {
-  runtimeControl?: { isPaused(): boolean } | undefined;
+  runtimeControl?: { isPaused(): boolean; generation?(): number } | undefined;
   gateway?: import("@krabs/domain").ExchangeGateway | undefined;
   isOrderSubmissionActive?: (clientOrderId: string) => boolean;
   bus: EventBus;
@@ -136,6 +134,8 @@ export class EntryLifecycleModule implements RuntimeModule {
   private readonly captureConvergenceInFlight = new Set<string>();
   private readonly marketCache = new Map<string, NormalizedMarket>();
   private readonly unsubs: Array<() => void> = [];
+  private readonly terminalUnsubs: Array<() => void> = [];
+  private readonly captureWork: CaptureWorkRunner;
   private readonly captureSignalsPublished = new Set<string>();
   private started = false;
   private lastStateGcAt = 0;
@@ -143,6 +143,7 @@ export class EntryLifecycleModule implements RuntimeModule {
 
   constructor(private readonly deps: EntryLifecycleModuleDeps) {
     this.log = deps.log.child({ module: "entry-lifecycle" });
+    this.captureWork = new CaptureWorkRunner(this.log, () => this.now(), deps.runtimeControl);
   }
 
   getRepriceCount(signalId: string | null): number {
@@ -155,6 +156,8 @@ export class EntryLifecycleModule implements RuntimeModule {
   }
 
   async start(): Promise<void> {
+    this.disposeTerminalListeners();
+    this.captureWork.start();
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (event) =>
         this.handleMarketUpdated(event),
@@ -162,6 +165,16 @@ export class EntryLifecycleModule implements RuntimeModule {
       this.deps.bus.subscribe("TrackedMarketsChanged", (event) =>
         this.handleTrackedMarketsChanged(event),
       ),
+      this.deps.bus.subscribe("TokenMinimumChanged", async ({ tokenId }) => {
+        if (!this.marketCache.has(tokenId)) return;
+        this.scheduleCapture(tokenId, () =>
+          this.recoverMakerCaptureReprices(false, new Set([tokenId])),
+        );
+      }),
+      this.deps.bus.subscribe("PositionUpdated", (event) => this.handlePositionUpdated(event)),
+      this.deps.bus.subscribe("MarketResolvedHint", (event) => this.handleMarketResolved(event)),
+    );
+    this.terminalUnsubs.push(
       this.deps.bus.subscribe("OrderCancelled", (event) => this.handleOrderCancelled(event)),
       this.deps.bus.subscribe("FillReceived", (event) => this.handleFillReceived(event)),
       this.deps.bus.subscribe("SignalConversionSkipped", (event) =>
@@ -181,16 +194,6 @@ export class EntryLifecycleModule implements RuntimeModule {
       this.deps.bus.subscribe("OrderPlaced", (event) =>
         this.safeCaptureReprice(() => this.handleCaptureOrderPlaced(event)),
       ),
-      this.deps.bus.subscribe("TokenMinimumChanged", async ({ tokenId }) => {
-        if (
-          this.started &&
-          this.getMarket(createTokenId(tokenId)) &&
-          !this.deps.runtimeControl?.isPaused()
-        )
-          await this.recoverMakerCaptureReprices(false, new Set([tokenId]));
-      }),
-      this.deps.bus.subscribe("PositionUpdated", (event) => this.handlePositionUpdated(event)),
-      this.deps.bus.subscribe("MarketResolvedHint", (event) => this.handleMarketResolved(event)),
     );
     this.started = true;
     await this.cancelExpiredMakerCaptures();
@@ -216,6 +219,8 @@ export class EntryLifecycleModule implements RuntimeModule {
   }
 
   async stop(): Promise<void> {
+    this.started = false;
+    const draining = this.captureWork.stop();
     for (const unsub of this.unsubs) unsub();
     this.unsubs.length = 0;
     for (const timer of this.ladderTimers.values()) this.clearTimer(timer);
@@ -223,8 +228,19 @@ export class EntryLifecycleModule implements RuntimeModule {
     for (const timer of this.captureConvergenceTimers.values()) this.clearTimer(timer);
     this.captureConvergenceTimers.clear();
     this.captureConvergenceInFlight.clear();
-    this.started = false;
+    await draining;
+    this.marketCache.clear();
     this.log.info("entry lifecycle module stopped");
+  }
+
+  // Execution stops after this module; accepted commands still publish terminal evidence.
+  disposeTerminalListeners(): void {
+    for (const unsub of this.terminalUnsubs) unsub();
+    this.terminalUnsubs.length = 0;
+  }
+
+  private scheduleCapture(tokenId: string, operation: () => Promise<void>): void {
+    this.captureWork.schedule(tokenId, () => this.safeCaptureReprice(operation, tokenId));
   }
 
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
@@ -235,7 +251,11 @@ export class EntryLifecycleModule implements RuntimeModule {
   }
 
   private async handleOrderCancelled(event: RuntimeEventMap["OrderCancelled"]): Promise<void> {
-    await this.safeCaptureReprice(() => this.advanceCaptureByPredecessor(event.orderId, false));
+    this.recordCaptureChildTerminal(event.orderId);
+    this.scheduleCapture(String(event.tokenId), () =>
+      this.advanceCaptureByPredecessor(event.orderId, false),
+    );
+    if (!this.started || this.deps.runtimeControl?.isPaused()) return;
     if (event.reason !== OUTBID_REPRICED_REASON) return;
     this.metrics.outbidRepriceCancels++;
     const order = this.deps.orderRepo.findById(event.orderId);
@@ -257,7 +277,11 @@ export class EntryLifecycleModule implements RuntimeModule {
   }
 
   private async handleFillReceived(event: RuntimeEventMap["FillReceived"]): Promise<void> {
-    await this.safeCaptureReprice(() => this.advanceCaptureByPredecessor(event.orderId, false));
+    this.recordCaptureChildTerminal(event.orderId);
+    this.scheduleCapture(String(event.tokenId), () =>
+      this.advanceCaptureByPredecessor(event.orderId, false),
+    );
+    if (!this.started) return;
     if (event.side !== "buy") return;
     if (event.signalId && this.repricedSignalIds.has(event.signalId)) {
       this.metrics.outbidRepriceFills++;
@@ -287,6 +311,7 @@ export class EntryLifecycleModule implements RuntimeModule {
     await this.safeCaptureReprice(() =>
       this.handleCaptureTerminalSignal(event.signal, event.reasons.join(",")),
     );
+    if (!this.started) return;
     if (!this.ladderSignalSteps.has(event.signal.signalId)) return;
     if (!event.reasons.includes("same-price-cooldown")) return;
     this.metrics.ladderCooldownPaused++;
@@ -302,23 +327,30 @@ export class EntryLifecycleModule implements RuntimeModule {
       if (market.active) {
         this.marketCache.set(key, market);
       } else {
+        this.captureWork.invalidate();
         this.marketCache.delete(key);
       }
     }
-    await this.safeCaptureReprice(() => this.handleCaptureMarketEvent(event));
+    for (const market of event.markets) {
+      this.scheduleCapture(String(market.tokenId), () =>
+        this.handleCaptureMarketEvent({ ...event, markets: [market] }),
+      );
+    }
   }
 
   private async handleCaptureMarketEvent(
     event: RuntimeEventMap["NormalizedMarketUpdated"],
   ): Promise<void> {
+    const current = this.captureWork.guard();
     const now = this.now();
     if (!freshEvent(event.timestamp, now)) return;
     const markets = new Map(event.markets.map((market) => [String(market.tokenId), market]));
     await this.recoverMakerCaptureReprices(false, new Set(markets.keys()));
     for (const order of this.deps.orderRepo.findOpen()) {
+      if (!current() || !freshEvent(event.timestamp, this.now())) return;
       const market = markets.get(String(order.tokenId));
       if (!market) continue;
-      const trigger = this.captureOrderTriggerProof(order, market, event.timestamp, now);
+      const trigger = this.captureOrderTriggerProof(order, market, event.timestamp, this.now());
       if (!trigger) continue;
       const lineage = parseMakerCaptureLineage(order);
       if (!lineage) continue;
@@ -346,7 +378,10 @@ export class EntryLifecycleModule implements RuntimeModule {
         proof: { version: 1, trigger, prepared: null, submit: null },
       };
       if (!this.deps.orderRepo.claimMakerCaptureRepriceIntent?.(intent)) continue;
-      await this.publishCaptureCancel(intent, order);
+      await this.safeCaptureReprice(
+        () => this.publishCaptureCancel(intent, order),
+        String(intent.tokenId),
+      );
     }
   }
 
@@ -435,27 +470,35 @@ export class EntryLifecycleModule implements RuntimeModule {
     startup: boolean,
     tokenIds?: ReadonlySet<string>,
   ): Promise<void> {
+    const current = this.captureWork.guard();
     const intents = this.deps.orderRepo.findRecoverableMakerCaptureRepriceIntents?.() ?? [];
     for (const intent of intents) {
+      if (!current()) return;
       if (!this.captureIntentProofValid(intent)) {
         this.failCaptureIntent(intent, "proof-invalid-or-incomplete");
         continue;
       }
       if (!tokenIds || tokenIds.has(String(intent.tokenId))) {
-        await this.advanceCaptureIntent(intent, startup);
+        await this.safeCaptureReprice(
+          () => this.advanceCaptureIntent(intent, startup),
+          String(intent.tokenId),
+        );
       }
     }
   }
 
   private async advanceCaptureByPredecessor(orderId: Order["orderId"], startup: boolean) {
+    const intent = this.deps.orderRepo.findMakerCaptureRepriceIntentByPredecessor?.(orderId);
+    if (intent) await this.advanceCaptureIntent(intent, startup);
+  }
+
+  private recordCaptureChildTerminal(orderId: Order["orderId"]): void {
     const childIntent = this.deps.orderRepo.findMakerCaptureRepriceIntentByChild?.(orderId);
     if (childIntent) {
       const child = this.deps.orderRepo.findById(orderId);
       if (child?.status === "rejected") this.failCaptureIntent(childIntent, "child-rejected");
       else if (child && child.status !== "pending") this.completeCaptureIntent(childIntent);
     }
-    const intent = this.deps.orderRepo.findMakerCaptureRepriceIntentByPredecessor?.(orderId);
-    if (intent) await this.advanceCaptureIntent(intent, startup);
   }
 
   private async advanceCaptureIntent(
@@ -463,6 +506,12 @@ export class EntryLifecycleModule implements RuntimeModule {
     startup: boolean,
     convergenceRetry = false,
   ): Promise<void> {
+    if (!this.captureWork.guard()()) return;
+    const current = this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(
+      intent.lifecycleSignalId,
+    );
+    if (!current || !["cancel_pending", "ready", "submitted"].includes(current.status)) return;
+    intent = current;
     let child = intent.childOrderId ? this.deps.orderRepo.findById(intent.childOrderId) : null;
     if (!child && intent.status === "ready") {
       child = this.deps.orderRepo.findByClientOrderId(
@@ -540,15 +589,20 @@ export class EntryLifecycleModule implements RuntimeModule {
     predecessor: Order,
     convergenceRetry: boolean,
   ): Promise<MakerCaptureRepriceIntent | null> {
+    const current = this.captureWork.guard();
+    const evidence = () =>
+      JSON.stringify([
+        this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(intent.lifecycleSignalId),
+        this.deps.orderRepo.findById(predecessor.orderId),
+        this.captureIntentState(intent, predecessor, this.now()),
+      ]);
+    const before = evidence();
     if (!this.captureIntentProofValid(intent)) {
       this.failCaptureIntent(intent, "proof-invalid-or-incomplete");
       return null;
     }
-    const market = this.getMarket(intent.tokenId);
-    if (!market) {
-      this.failCaptureIntent(intent, "policy-or-lineage-drift");
-      return null;
-    }
+    let market = this.getMarket(intent.tokenId);
+    if (!market) return null;
     const state = this.captureIntentState(intent, predecessor, this.now());
     if (!state) {
       this.failCaptureIntent(intent, "policy-or-lineage-drift");
@@ -573,7 +627,7 @@ export class EntryLifecycleModule implements RuntimeModule {
     const exactCancellation = window.permanent
       ? await this.classifyExactCaptureCancellation(predecessor, usage.predecessorRemainingShares)
       : null;
-    if (!this.started) return null;
+    if (!current() || evidence() !== before) return null;
     if (window.permanent) {
       if (exactCancellation!.kind === "conflict") {
         this.failCaptureIntent(intent, "predecessor-exact-cancel-conflict");
@@ -587,19 +641,27 @@ export class EntryLifecycleModule implements RuntimeModule {
         }
         return null;
       }
-    } else if (
-      !(await this.hasExactCaptureCancellation(predecessor, usage.predecessorRemainingShares))
-    ) {
-      this.failCaptureIntent(intent, "predecessor-not-exact-cancelled");
-      return null;
+    } else {
+      const exact = await this.hasExactCaptureCancellation(
+        predecessor,
+        usage.predecessorRemainingShares,
+      );
+      if (!current() || evidence() !== before) return null;
+      if (exact === null) return null;
+      if (!exact) {
+        this.failCaptureIntent(intent, "predecessor-not-exact-cancelled");
+        return null;
+      }
     }
     const entry = await primeFreshMakerCaptureBook(
       this.deps.candidateBookCache,
       String(intent.tokenId),
-      this.now(),
+      () => this.now(),
     );
-    if (!this.started) return null;
+    if (!current() || evidence() !== before) return null;
     const minOrderSize = entry?.book.minOrderSize;
+    market = this.getMarket(intent.tokenId);
+    if (!market || !canPlaceBuyOrderForMarket(market, this.now()).allowed) return null;
     if (!entry || minOrderSize == null || !Number.isFinite(minOrderSize) || minOrderSize <= 0) {
       return null;
     }
@@ -695,37 +757,27 @@ export class EntryLifecycleModule implements RuntimeModule {
     if (!this.deps.getOrderResult || !predecessor.exchangeOrderId) {
       return classifyMakerCaptureExactCancellation(predecessor, predecessorRemainingShares, null);
     }
-    try {
-      const result = await this.deps.getOrderResult(predecessor.exchangeOrderId);
-      return classifyMakerCaptureExactCancellation(
-        predecessor,
-        predecessorRemainingShares,
-        result.ok ? result.data : null,
-      );
-    } catch {
-      return classifyMakerCaptureExactCancellation(predecessor, predecessorRemainingShares, null);
-    }
+    const result = await this.deps.getOrderResult(predecessor.exchangeOrderId);
+    return classifyMakerCaptureExactCancellation(
+      predecessor,
+      predecessorRemainingShares,
+      result.ok ? result.data : null,
+    );
   }
 
   private async hasExactCaptureCancellation(
     predecessor: Order,
     predecessorRemainingShares: number,
-  ): Promise<boolean> {
+  ): Promise<boolean | null> {
     predecessorRemainingShares = Math.max(
       0,
       exchangeComparisonOrder(predecessor).size - predecessor.size + predecessorRemainingShares,
     );
     predecessor = exchangeComparisonOrder(predecessor);
     if (!this.deps.getOrderResult || !predecessor.exchangeOrderId) return false;
-    try {
-      const result = await this.deps.getOrderResult(predecessor.exchangeOrderId);
-      return (
-        result.ok &&
-        isMakerCaptureExactCancellation(predecessor, predecessorRemainingShares, result.data)
-      );
-    } catch {
-      return false;
-    }
+    const result = await this.deps.getOrderResult(predecessor.exchangeOrderId);
+    if (!result.ok) return null;
+    return isMakerCaptureExactCancellation(predecessor, predecessorRemainingShares, result.data);
   }
 
   private deferPermanentExactCancelConvergence(
@@ -778,17 +830,20 @@ export class EntryLifecycleModule implements RuntimeModule {
       () => {
         this.captureConvergenceTimers.delete(intent.intentId);
         if (!this.started) return;
-        this.captureConvergenceInFlight.add(intent.intentId);
-        void this.safeCaptureReprice(async () => {
-          try {
-            const current = this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(
-              intent.lifecycleSignalId,
-            );
-            if (current) await this.advanceCaptureIntent(current, false, true);
-          } finally {
-            this.captureConvergenceInFlight.delete(intent.intentId);
-          }
-        });
+        this.captureWork.schedule(`convergence:${intent.intentId}`, () =>
+          this.safeCaptureReprice(async () => {
+            this.captureConvergenceInFlight.add(intent.intentId);
+            try {
+              const current = this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(
+                intent.lifecycleSignalId,
+              );
+              if (current?.status === "cancel_pending")
+                await this.advanceCaptureIntent(current, false, true);
+            } finally {
+              this.captureConvergenceInFlight.delete(intent.intentId);
+            }
+          }, String(intent.tokenId)),
+        );
       },
       Math.max(1, deadlineMs - this.now()),
     );
@@ -844,6 +899,7 @@ export class EntryLifecycleModule implements RuntimeModule {
     intent: MakerCaptureRepriceIntent,
     predecessor: Order,
   ): Promise<void> {
+    if (!this.captureWork.guard()()) return;
     if (!this.captureIntentProofValid(intent)) {
       this.failCaptureIntent(intent, "proof-invalid-or-incomplete");
       return;
@@ -900,6 +956,7 @@ export class EntryLifecycleModule implements RuntimeModule {
         : {}),
     };
     this.captureSignalsPublished.add(intent.lifecycleSignalId);
+    this.captureWork.discardPending(String(intent.tokenId));
     let keepPublished = false;
     try {
       await this.publishSignal(signal, market);
@@ -938,7 +995,13 @@ export class EntryLifecycleModule implements RuntimeModule {
       identity.lifecycleSignalId !== intent.lifecycleSignalId
     )
       return;
-    const successorMinimum = () => this.prepareCaptureCancelMinimum(intent);
+    const current = this.captureWork.guard();
+    const successorMinimum = () =>
+      current()
+        ? this.captureWork.read(String(intent.tokenId), () =>
+            this.prepareCaptureCancelMinimum(intent, current),
+          )
+        : Promise.resolve(null);
     if (!(await successorMinimum())?.()) return;
     await this.deps.bus.publish("CancelOrderRequested", {
       successorMinimum,
@@ -957,26 +1020,34 @@ export class EntryLifecycleModule implements RuntimeModule {
     await this.handleCaptureTerminalBySignal(signal.signalId, reason);
   }
 
-  private async prepareCaptureCancelMinimum(intent: MakerCaptureRepriceIntent) {
+  private async prepareCaptureCancelMinimum(
+    intent: MakerCaptureRepriceIntent,
+    current: () => boolean,
+  ) {
     const originalMarket = this.getMarket(intent.tokenId);
+    if (!originalMarket || !current()) return null;
     const entry = await primeFreshMakerCaptureBook(
       this.deps.candidateBookCache,
       String(intent.tokenId),
-      this.now(),
+      () => this.now(),
     );
-    if (!entry || !this.deps.gateway) return null;
+    if (!current() || !entry || !this.deps.gateway) return null;
     return prepareSuccessorMinimum(this.deps.gateway, () => {
       const predecessor = this.deps.orderRepo.findById(intent.predecessorOrderId);
       const state = predecessor && this.captureIntentState(intent, predecessor, this.now());
       const market = this.getMarket(intent.tokenId);
       if (
-        !this.started ||
+        !current() ||
+        !isFreshMakerCaptureEntry(entry, this.now()) ||
+        this.deps.orderRepo.findMakerCaptureRepriceIntentBySignal?.(intent.lifecycleSignalId)
+          ?.status !== "cancel_pending" ||
         this.deps.runtimeControl?.isPaused() ||
         market !== originalMarket ||
         !predecessor ||
         !isWorking(predecessor) ||
         !state ||
-        !market
+        !market ||
+        !canPlaceBuyOrderForMarket(market, this.now()).allowed
       )
         return null;
       const { usage, origin } = state;
@@ -1090,9 +1161,13 @@ export class EntryLifecycleModule implements RuntimeModule {
     return this.deps.policySnapshot?.() ?? null;
   }
 
-  private async safeCaptureReprice(operation: () => Promise<void>): Promise<void> {
+  private async safeCaptureReprice(
+    operation: () => Promise<void>,
+    tokenId?: string,
+  ): Promise<void> {
     try {
-      await operation();
+      if (tokenId) await this.captureWork.read(tokenId, operation);
+      else await operation();
     } catch (err) {
       this.log.error({ err }, "maker capture reprice handler failed; durable intent retained");
     }
@@ -1101,6 +1176,7 @@ export class EntryLifecycleModule implements RuntimeModule {
   private async handleTrackedMarketsChanged(
     event: RuntimeEventMap["TrackedMarketsChanged"],
   ): Promise<void> {
+    if (event.removedTokenIds.length) this.captureWork.invalidate();
     for (const tokenId of event.removedTokenIds) this.marketCache.delete(String(tokenId));
   }
 
@@ -1110,6 +1186,8 @@ export class EntryLifecycleModule implements RuntimeModule {
   }
 
   private async handleMarketResolved(event: RuntimeEventMap["MarketResolvedHint"]): Promise<void> {
+    this.captureWork.invalidate();
+    for (const tokenId of event.tokenIds) this.marketCache.delete(String(tokenId));
     for (const tokenId of event.tokenIds) this.resetToken(tokenId, "market_resolved");
   }
 

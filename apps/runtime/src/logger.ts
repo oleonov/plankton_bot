@@ -79,9 +79,24 @@ const REDACT_PATHS = [
   "alert.details.headers.KRABS_API_KEY",
 ] as const;
 
-export function createLogger(level: string, mode?: string): Logger {
+export function createLogger(
+  level: string,
+  mode?: string,
+  observe?: (level: number, source: unknown) => void,
+): Logger {
   const opts: LoggerOptions = {
     level,
+    hooks: {
+      logMethod(args, method, emittedLevel) {
+        method.apply(this, args);
+        if (emittedLevel !== 50 && emittedLevel !== 60) return;
+        try {
+          observe?.(emittedLevel, this.bindings().module);
+        } catch {
+          // Logging observers cannot fail trading or recursively report their own failure.
+        }
+      },
+    },
     redact: { paths: [...REDACT_PATHS], censor: "********" },
     // Custom err serializer — whitelist type/message/stack/code/cause/errors.
     // pino.stdSerializers.err would re-add native DOMException's 25 enum

@@ -30,6 +30,54 @@ afterEach(() => {
 });
 
 describe("RuntimeMetricWriter", () => {
+  it("persists bounded runtime error totals and marks flush gaps and restarts", () => {
+    let now = new Date("2026-09-09T00:59:50.000Z");
+    const writer = new RuntimeMetricWriter(db, () => now);
+    writer.startErrorCollection();
+    for (let i = 0; i < 601; i++) writer.observeLog(50, `untrusted-source-${i}`);
+    writer.observeLog(60, "execution");
+    writer.observeLog(40, "execution");
+    now = new Date("2026-09-09T01:00:20.000Z");
+    writer.flushAll();
+    const rows = db
+      .prepare(
+        "SELECT value, labels, captured_at FROM runtime_metrics WHERE metric_name = 'runtime_pino_total' ORDER BY value DESC",
+      )
+      .all();
+    expect(rows).toEqual([
+      {
+        value: 601,
+        labels: JSON.stringify({ level: 50, source: "other" }),
+        captured_at: now.toISOString(),
+      },
+      {
+        value: 1,
+        labels: JSON.stringify({ level: 60, source: "execution" }),
+        captured_at: now.toISOString(),
+      },
+    ]);
+    const coverage = () =>
+      JSON.parse(
+        (
+          db
+            .prepare(
+              "SELECT labels FROM runtime_metrics WHERE metric_name = 'runtime_pino_coverage'",
+            )
+            .get() as { labels: string }
+        ).labels,
+      );
+    expect(coverage()).toMatchObject({
+      continuousSince: "2026-09-09T00:59:50.000Z",
+      lastFlushAt: now.toISOString(),
+    });
+    now = new Date("2026-09-09T01:02:00.000Z");
+    writer.flushAll();
+    expect(coverage().continuousSince).toBe(now.toISOString());
+    now = new Date("2026-09-09T01:02:01.000Z");
+    writer.startErrorCollection();
+    writer.flushAll();
+    expect(coverage().startedAt).toBe(now.toISOString());
+  });
   it("updates the latest row instead of appending state metrics", () => {
     const writer = new RuntimeMetricWriter(db);
 

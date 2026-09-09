@@ -76,6 +76,14 @@ interface SystemHealthData {
   resources: ResourceGauge[];
   deps: DepHealth[];
   errors: {
+    coverage: {
+      startedAt: string | null;
+      lastFlushAt: string | null;
+      fresh: boolean;
+      complete1h: boolean;
+      complete24h: boolean;
+      precisionMs: number;
+    };
     l50_1h: number;
     l60_1h: number;
     l50_24h: number;
@@ -207,13 +215,10 @@ function humanizeAgo(iso: string): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-// "level 50/60" are pino concepts not persisted in the DB. We map the persisted
-// infra_alert severity to the same panel: error => l60, warning => l50.
-function buildErrors(alerts24h: InfraAlertRow[]): SystemHealthData["errors"] {
-  const oneHourAgo = Date.now() - 3_600_000;
-  const inLastHour = (a: InfraAlertRow) => Date.parse(a.capturedAt) >= oneHourAgo;
-  const l50 = alerts24h.filter((a) => a.severity === "warning");
-  const l60 = alerts24h.filter((a) => a.severity === "error");
+function buildErrors(
+  db: Database.Database,
+  alerts24h: InfraAlertRow[],
+): SystemHealthData["errors"] {
   const breakerOpen = countOpenBreakers(alerts24h);
 
   // 24 hourly buckets, oldest first; each carries its hour-start timestamp for
@@ -226,35 +231,110 @@ function buildErrors(alerts24h: InfraAlertRow[]): SystemHealthData["errors"] {
     crit: false,
     t: nowHour - (23 - i) * hourMs,
   }));
-  for (const a of alerts24h) {
-    const ageH = Math.floor((now - Date.parse(a.capturedAt)) / hourMs);
-    const bucket = hist[23 - ageH];
-    if (bucket) {
-      bucket.n += 1;
-      if (a.severity === "error") bucket.crit = true;
-    }
-  }
-
-  const counts = new Map<string, { lv: "l50" | "l60"; cnt: number; when: string }>();
-  for (const a of alerts24h) {
-    const lv: "l50" | "l60" = a.severity === "error" ? "l60" : "l50";
-    const prev = counts.get(a.code);
-    if (prev) prev.cnt += 1;
-    else counts.set(a.code, { lv, cnt: 1, when: humanizeAgo(a.capturedAt) });
-  }
-  const top = [...counts.entries()]
-    .map(([code, v]) => ({ lv: v.lv, code, cnt: v.cnt, when: v.when }))
-    .sort((a, b) => b.cnt - a.cnt)
-    .slice(0, 6);
-
+  const rows = readErrorCounters(db, now);
+  const { totals, top } = summarizeErrorCounters(rows ?? [], hist);
   return {
-    l50_1h: l50.filter(inLastHour).length,
-    l60_1h: l60.filter(inLastHour).length,
-    l50_24h: l50.length,
-    l60_24h: l60.length,
+    ...totals,
+    coverage: {
+      ...readErrorCoverage(db, now),
+      ...(rows === null ? { fresh: false, complete1h: false, complete24h: false } : {}),
+    },
     breakers: breakerOpen > 0 ? `${breakerOpen} open` : "closed",
     hist,
     top,
+  };
+}
+
+type ErrorCounterRow = {
+  labels: string;
+  total: number;
+  recent: number;
+  lastAt: string;
+  hour: string;
+};
+
+function readErrorCounters(db: Database.Database, now: number): ErrorCounterRow[] | null {
+  return safe(
+    () =>
+      db
+        .prepare(
+          `
+    SELECT labels, SUM(value) AS total,
+      SUM(CASE WHEN captured_at >= ? THEN value ELSE 0 END) AS recent,
+      MAX(captured_at) AS lastAt, strftime('%Y-%m-%dT%H:00:00.000Z', captured_at) AS hour
+    FROM runtime_metrics WHERE metric_name = 'runtime_pino_total' AND captured_at >= ? AND captured_at <= ?
+    GROUP BY labels, hour ORDER BY hour
+  `,
+        )
+        .all(
+          new Date(now - 3_600_000).toISOString(),
+          new Date(now - 24 * 3_600_000).toISOString(),
+          new Date(now).toISOString(),
+        ) as ErrorCounterRow[],
+    null,
+  );
+}
+
+function summarizeErrorCounters(rows: ErrorCounterRow[], hist: SystemHealthData["errors"]["hist"]) {
+  const totals = { l50_1h: 0, l60_1h: 0, l50_24h: 0, l60_24h: 0 };
+  const counts = new Map<string, { lv: "l50" | "l60"; code: string; cnt: number; when: string }>();
+  for (const row of rows) {
+    const label = safe(() => JSON.parse(row.labels) as { level: number; source: string }, null);
+    if (!label || (label.level !== 50 && label.level !== 60)) continue;
+    const lv = label.level === 50 ? "l50" : "l60";
+    totals[`${lv}_1h`] += row.recent;
+    totals[`${lv}_24h`] += row.total;
+    const bucket = hist.find((item) => item.t === Date.parse(row.hour));
+    if (bucket) {
+      bucket.n += row.total;
+      if (label.level === 60) bucket.crit = true;
+    }
+    const key = `${lv}:${label.source}`;
+    const previous = counts.get(key);
+    counts.set(key, {
+      lv,
+      code: label.source,
+      cnt: (previous?.cnt ?? 0) + row.total,
+      when: humanizeAgo(row.lastAt),
+    });
+  }
+  const top = [...counts.values()].sort((a, b) => b.cnt - a.cnt).slice(0, 6);
+
+  return { totals, top };
+}
+
+function readErrorCoverage(
+  db: Database.Database,
+  now: number,
+): SystemHealthData["errors"]["coverage"] {
+  const row = safe(
+    () =>
+      db
+        .prepare(
+          "SELECT labels FROM runtime_metrics WHERE metric_name = 'runtime_pino_coverage' ORDER BY captured_at DESC, id DESC LIMIT 1",
+        )
+        .get() as { labels: string } | undefined,
+    undefined,
+  );
+  const coverage = safe(
+    () =>
+      JSON.parse(row?.labels ?? "null") as {
+        startedAt: string;
+        continuousSince: string;
+        lastFlushAt: string;
+      } | null,
+    null,
+  );
+  const lastFlush = Date.parse(coverage?.lastFlushAt ?? "");
+  const since = Date.parse(coverage?.continuousSince ?? "");
+  const fresh = Number.isFinite(lastFlush) && lastFlush <= now && now - lastFlush <= 60_000;
+  return {
+    startedAt: coverage?.startedAt ?? null,
+    lastFlushAt: coverage?.lastFlushAt ?? null,
+    fresh,
+    complete1h: fresh && since <= now - 3_600_000,
+    complete24h: fresh && since <= now - 24 * 3_600_000,
+    precisionMs: 30_000,
   };
 }
 
@@ -311,7 +391,7 @@ export const systemHealthRoutes: FastifyPluginAsync<SystemHealthOpts> = async (a
     const controlPath = safe(() => opts.controlDb?.name ?? "", "");
     const walMb = ledgerPath ? fileSizeMb(`${ledgerPath}-wal`) : 0;
 
-    const errors = buildErrors(alerts24h);
+    const errors = buildErrors(db, alerts24h);
     const sinceUptime = humanizeUptime(process.uptime());
 
     const modules: ModuleHealth[] = snapshot.modules.map((m) => ({

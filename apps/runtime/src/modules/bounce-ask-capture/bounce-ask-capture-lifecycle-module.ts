@@ -15,6 +15,7 @@ import type {
   RuntimeModule,
   Signal,
 } from "@krabs/domain";
+import { CaptureWorkRunner } from "../../capture-work-runner.js";
 import {
   BOUNCE_EXIT_TARGET_RULE_ID,
   createCommandId,
@@ -33,6 +34,7 @@ import {
 import {
   MAKER_CAPTURE_BOOK_MAX_AGE_MS,
   primeFreshMakerCaptureBook,
+  isFreshMakerCaptureEntry,
   type MakerCaptureBookCache,
 } from "../../maker-capture-reprice.js";
 import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
@@ -44,7 +46,7 @@ import { hasNeverPostedMinimumEvidence, type ExchangeGateway } from "@krabs/doma
 const EPSILON = 1e-9;
 
 export interface BounceAskCaptureLifecycleDeps {
-  readonly runtimeControl?: { isPaused(): boolean } | undefined;
+  readonly runtimeControl?: { isPaused(): boolean; generation?(): number } | undefined;
   readonly gateway?: ExchangeGateway | undefined;
   readonly bus: EventBus;
   readonly orderRepo: OrderRepository;
@@ -61,21 +63,29 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
   private readonly markets = new Map<string, NormalizedMarket>();
   private readonly publishing = new Set<string>();
   private readonly unsubs: Array<() => void> = [];
+  private readonly terminalUnsubs: Array<() => void> = [];
+  private readonly captureWork: CaptureWorkRunner;
   private readonly log: Logger;
   private started = false;
 
   constructor(private readonly deps: BounceAskCaptureLifecycleDeps) {
     this.log = deps.log.child({ module: "bounce-ask-capture-lifecycle" });
+    this.captureWork = new CaptureWorkRunner(this.log, () => this.now(), deps.runtimeControl);
   }
 
   async start(): Promise<void> {
+    this.disposeTerminalListeners();
+    this.captureWork.start();
     this.listen("NormalizedMarketUpdated", (event) => this.onMarket(event));
     this.listen("TokenMinimumChanged", async ({ tokenId }) => {
       if (this.started && this.markets.has(tokenId) && !this.deps.runtimeControl?.isPaused())
-        await this.recover(new Set([tokenId]));
+        this.schedule(tokenId, () => this.recover(new Set([tokenId])));
     });
     this.listen("TrackedMarketsChanged", (event) => this.onTrackedMarketsChanged(event));
     this.listen("OrderCancelled", (event) => this.onCancelled(event));
+    this.listen("FillReceived", async (event) => {
+      this.schedule(String(event.tokenId), () => this.recover(new Set([String(event.tokenId)])));
+    });
     this.listen("OrderPlaced", (event) => this.onPlaced(event));
     this.listen("OrderRejected", (event) => this.failBySignal(event.signalId, event.reason));
     this.listen("OrderSkipped", (event) => this.failBySignal(event.signalId, event.reasonCode));
@@ -92,10 +102,21 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
   }
 
   async stop(): Promise<void> {
+    this.started = false;
+    const draining = this.captureWork.stop();
     for (const unsub of this.unsubs) unsub();
     this.unsubs.length = 0;
     this.markets.clear();
-    this.started = false;
+    await draining;
+  }
+
+  disposeTerminalListeners(): void {
+    for (const unsub of this.terminalUnsubs) unsub();
+    this.terminalUnsubs.length = 0;
+  }
+
+  private schedule(tokenId: string, operation: () => Promise<void>): void {
+    this.captureWork.schedule(tokenId, () => this.safe(operation, tokenId));
   }
 
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
@@ -105,8 +126,18 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
   private async onMarket(event: RuntimeEventMap["NormalizedMarketUpdated"]): Promise<void> {
     for (const market of event.markets) {
       if (market.active) this.markets.set(String(market.tokenId), market);
-      else this.markets.delete(String(market.tokenId));
+      else {
+        this.captureWork.invalidate();
+        this.markets.delete(String(market.tokenId));
+      }
+      this.schedule(String(market.tokenId), () =>
+        this.captureMarket({ ...event, markets: [market] }),
+      );
     }
+  }
+
+  private async captureMarket(event: RuntimeEventMap["NormalizedMarketUpdated"]): Promise<void> {
+    const current = this.captureWork.guard();
     const now = this.now();
     if (!fresh(event.timestamp, now)) return;
     const tokenIds = new Set(event.markets.map((market) => String(market.tokenId)));
@@ -115,14 +146,16 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     const policy = snapshot.policy.bounceAskCapture;
     if (!policy.enabled || snapshot.controlRevision === null) return;
     for (const order of this.deps.orderRepo.findOpen()) {
+      if (!current() || !fresh(event.timestamp, this.now())) return;
       if (!tokenIds.has(String(order.tokenId))) continue;
-      await this.tryClaim(order, event.timestamp, snapshot);
+      await this.safe(() => this.tryClaim(order, event.timestamp, snapshot), String(order.tokenId));
     }
   }
 
   private async onTrackedMarketsChanged(
     event: RuntimeEventMap["TrackedMarketsChanged"],
   ): Promise<void> {
+    if (event.removedTokenIds.length) this.captureWork.invalidate();
     for (const tokenId of event.removedTokenIds) this.markets.delete(String(tokenId));
   }
 
@@ -131,20 +164,27 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     eventTimestampMs: number,
     snapshot: { policy: ExecutionPolicy; controlRevision: number | null },
   ): Promise<void> {
+    const current = this.captureWork.guard();
     const policy = snapshot.policy.bounceAskCapture;
     if (this.deps.orderRepo.isOrderManagedByNonterminalBounceAskCaptureIntent?.(order.orderId))
       return;
     let lineage = parseBounceAskCaptureLineage(order);
     if (!lineage) lineage = this.stampRootLineage(order, policy);
     if (!lineage || lineage.replacementIndex >= policy.maxRepricesPerRoot) return;
-    const state = this.validateState(order, lineage, snapshot);
+    let state = this.validateState(order, lineage, snapshot);
     if (!state) return;
     const entry = await primeFreshMakerCaptureBook(
       this.deps.candidateBookCache,
       String(order.tokenId),
-      this.now(),
+      () => this.now(),
     );
-    if (!entry) return;
+    if (!entry || !current() || !fresh(eventTimestampMs, this.now())) return;
+    const latest = this.deps.orderRepo.findById(order.orderId);
+    snapshot = this.deps.policySnapshot();
+    if (!latest || !["open", "partially-filled"].includes(latest.status)) return;
+    order = latest;
+    state = this.validateState(order, lineage, snapshot);
+    if (!state) return;
     const candidate = this.candidate(order, lineage, entry.book, state.market.tickSize);
     if (!candidate.ok) return;
     const identity = buildBounceAskCaptureIdentity(
@@ -289,16 +329,23 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       this.terminal(intent, "failed", `senior-cancel:${event.reason}`);
       return;
     }
-    await this.advance(intent);
+    this.schedule(String(intent.tokenId), () => this.advance(intent));
   }
 
   private async recover(tokenIds?: ReadonlySet<string>): Promise<void> {
     for (const intent of this.deps.orderRepo.findRecoverableBounceAskCaptureIntents?.() ?? []) {
-      if (!tokenIds || tokenIds.has(String(intent.tokenId))) await this.advance(intent);
+      if (!tokenIds || tokenIds.has(String(intent.tokenId)))
+        await this.safe(() => this.advance(intent), String(intent.tokenId));
     }
   }
 
   private async advance(intent: BounceAskCaptureIntent): Promise<void> {
+    if (!this.captureWork.guard()()) return;
+    const durable = this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(
+      intent.lifecycleSignalId,
+    );
+    if (!durable || !["cancel_pending", "ready", "submitted"].includes(durable.status)) return;
+    intent = durable;
     const child = intent.childOrderId ? this.deps.orderRepo.findById(intent.childOrderId) : null;
     if (child && hasNeverPostedMinimumEvidence(child)) {
       if (!this.deps.orderRepo.resetBounceAskCaptureSubmitted?.(intent.intentId, child.orderId))
@@ -346,15 +393,16 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     intent: BounceAskCaptureIntent,
     predecessor: Order,
   ): Promise<BounceAskCaptureIntent | null> {
+    const current = this.captureWork.guard();
     const proof = parseBounceAskCaptureProofV1(intent.proof);
     if (!proof) {
       this.terminal(intent, "failed", "malformed-proof");
       return null;
     }
     const lineage = parseBounceAskCaptureLineage(predecessor);
-    const snapshot = this.deps.policySnapshot();
+    let snapshot = this.deps.policySnapshot();
     if (!this.markets.has(String(intent.tokenId))) return null;
-    const state = lineage ? this.validateState(predecessor, lineage, snapshot, true) : null;
+    let state = lineage ? this.validateState(predecessor, lineage, snapshot, true) : null;
     if (!lineage || !state) {
       this.terminal(intent, "failed", "policy-cohort-lineage-drift");
       return null;
@@ -362,8 +410,19 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     const entry = await primeFreshMakerCaptureBook(
       this.deps.candidateBookCache,
       String(intent.tokenId),
-      this.now(),
+      () => this.now(),
     );
+    if (!current()) return null;
+    const latest = this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(
+      intent.lifecycleSignalId,
+    );
+    const latestOrder = this.deps.orderRepo.findById(predecessor.orderId);
+    if (latest?.status !== "cancel_pending" || !latestOrder || latestOrder.status !== "cancelled")
+      return null;
+    predecessor = latestOrder;
+    snapshot = this.deps.policySnapshot();
+    state = this.validateState(predecessor, lineage, snapshot, true);
+    if (!state) return null;
     const minOrderSize = entry?.book.minOrderSize;
     if (!entry || minOrderSize == null || !Number.isFinite(minOrderSize) || minOrderSize <= 0)
       return null;
@@ -413,6 +472,7 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
   }
 
   private async publishSignal(intent: BounceAskCaptureIntent, predecessor: Order): Promise<void> {
+    if (!this.captureWork.guard()()) return;
     if (
       intent.candidatePrice == null ||
       intent.replacementSize == null ||
@@ -445,6 +505,7 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       },
     };
     this.publishing.add(intent.lifecycleSignalId);
+    this.captureWork.discardPending(String(intent.tokenId));
     try {
       await this.deps.bus.publish("SignalProduced", { signal, market });
     } finally {
@@ -453,7 +514,13 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
   }
 
   private async publishCancel(intent: BounceAskCaptureIntent): Promise<void> {
-    const successorMinimum = () => this.prepareCancelMinimum(intent);
+    const current = this.captureWork.guard();
+    const successorMinimum = () =>
+      current()
+        ? this.captureWork.read(String(intent.tokenId), () =>
+            this.prepareCancelMinimum(intent, current),
+          )
+        : Promise.resolve(null);
     if (!(await successorMinimum())?.()) return;
     const identity = buildBounceAskCaptureIdentity(
       intent.rootOrderId,
@@ -477,21 +544,25 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     if (intent) this.terminal(intent, "completed");
   }
 
-  private async prepareCancelMinimum(intent: BounceAskCaptureIntent) {
+  private async prepareCancelMinimum(intent: BounceAskCaptureIntent, current: () => boolean) {
     const market = this.markets.get(String(intent.tokenId));
+    if (!market || !current()) return null;
     const entry = await primeFreshMakerCaptureBook(
       this.deps.candidateBookCache,
       String(intent.tokenId),
-      this.now(),
+      () => this.now(),
     );
-    if (!entry || !this.deps.gateway) return null;
+    if (!current() || !entry || !this.deps.gateway) return null;
     return prepareSuccessorMinimum(this.deps.gateway, () => {
       const predecessor = this.deps.orderRepo.findById(intent.predecessorOrderId);
       const lineage = predecessor && parseBounceAskCaptureLineage(predecessor);
       const policy = this.deps.policySnapshot();
       const state = predecessor && lineage && this.validateState(predecessor, lineage, policy);
       if (
-        !this.started ||
+        !current() ||
+        !isFreshMakerCaptureEntry(entry, this.now()) ||
+        this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(intent.lifecycleSignalId)
+          ?.status !== "cancel_pending" ||
         this.deps.runtimeControl?.isPaused() ||
         this.markets.get(String(intent.tokenId)) !== market ||
         !predecessor ||
@@ -529,7 +600,9 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
   }
 
   private async failResolved(event: RuntimeEventMap["MarketResolvedHint"]): Promise<void> {
+    this.captureWork.invalidate();
     const tokens = new Set(event.tokenIds.map(String));
+    for (const tokenId of tokens) this.markets.delete(tokenId);
     for (const intent of this.deps.orderRepo.findRecoverableBounceAskCaptureIntents?.() ?? []) {
       if (tokens.has(String(intent.tokenId))) this.terminal(intent, "failed", "market-resolved");
     }
@@ -548,9 +621,10 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     return this.deps.now?.() ?? Date.now();
   }
 
-  private async safe(operation: () => Promise<void>): Promise<void> {
+  private async safe(operation: () => Promise<void>, tokenId?: string): Promise<void> {
     try {
-      await operation();
+      if (tokenId) await this.captureWork.read(tokenId, operation);
+      else await operation();
     } catch (err) {
       this.log.error({ err }, "bounce ASK capture handler failed; durable state retained");
     }
@@ -560,7 +634,15 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     event: K,
     handler: (payload: RuntimeEventMap[K]) => Promise<void>,
   ): void {
-    this.unsubs.push(
+    const terminal = [
+      "OrderCancelled",
+      "OrderPlaced",
+      "OrderRejected",
+      "OrderSkipped",
+      "SignalRejected",
+      "SignalConversionSkipped",
+    ].includes(event);
+    (terminal ? this.terminalUnsubs : this.unsubs).push(
       this.deps.bus.subscribe(event, (payload) => this.safe(() => handler(payload))),
     );
   }

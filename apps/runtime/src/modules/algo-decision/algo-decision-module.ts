@@ -2053,6 +2053,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
 
     const evaluations = await this.decisionWorkerPool.evaluate(inputs);
+    this.recordDecisionStage("planning", Date.now() - now);
     if (this.bounceTradingDisabledUntilMs <= now) this.bounceTradingDisabledUntilMs = 0;
     for (const [index, plan] of evaluations.entries()) {
       this.observeAlgo(inputs[index]!.tokenId, "planner_result", {
@@ -2119,10 +2120,15 @@ export class AlgoDecisionModule implements RuntimeModule {
         return;
       }
       this.observePostPlannerGuard(result.signal, "publish_attempted");
-      await this.deps.bus.publish("SignalProduced", {
-        signal: result.signal,
-        market: result.market,
-      });
+      const publishingAt = Date.now();
+      try {
+        await this.deps.bus.publish("SignalProduced", {
+          signal: result.signal,
+          market: result.market,
+        });
+      } finally {
+        this.recordDecisionStage("publishing", Date.now() - publishingAt);
+      }
     }
 
     // Phase 3 — advance all open maker-entry shadows using latest market data.
@@ -2132,6 +2138,15 @@ export class AlgoDecisionModule implements RuntimeModule {
     // immediately reflects this sweep, not the previous one.
     this.lastTickRuleMix = this.currentTickRuleMix;
     this.lastEvalMetrics = this.currentEvalMetrics;
+  }
+
+  private recordDecisionStage(stage: "planning" | "publishing", ms: number): void {
+    try {
+      this.deps.runtimeMetrics?.writeCounter("decision_stage_ms", ms, JSON.stringify({ stage }));
+      this.deps.runtimeMetrics?.writeCounter("decision_stage_count", 1, JSON.stringify({ stage }));
+    } catch {
+      /* Timing cannot fail a trading decision. */
+    }
   }
 
   private hasActivePermanentR23Lineage(

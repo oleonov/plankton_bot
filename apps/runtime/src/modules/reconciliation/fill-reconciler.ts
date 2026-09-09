@@ -66,6 +66,9 @@ function isDuplicateFillConstraintError(error: unknown): boolean {
 // ─── Shared fill import (DRY) ─────────────────────────────────────────────
 
 export interface ImportFillsDeps {
+  runtimeMetrics?:
+    | { writeCounter?: (name: string, value?: number, labels?: string | null) => void }
+    | undefined;
   fillRepo: FillRepository;
   orderRepo: OrderRepository;
   bus: EventBus;
@@ -220,6 +223,7 @@ export async function importExchangeFills(
   deps: ImportFillsDeps,
 ): Promise<ImportFillsResult> {
   const { fillRepo, orderRepo, bus, log, gateway } = deps;
+  const importStartedAt = Date.now();
   let imported = 0;
   let skipped = 0;
   let deferred = 0;
@@ -334,6 +338,8 @@ export async function importExchangeFills(
   }
 
   // Phase 3: Publish FillReceived events (handlers now see correct order status)
+  recordFillTiming(deps, "import", Date.now() - importStartedAt);
+  const eventsStartedAt = Date.now();
   for (const saved of savedFills) {
     const { ef, fillId, orderId, conditionId, sizeUsdc, signalReason, clientOrderId } = saved;
     const feeInfo = feeInfoByCondition.get(String(conditionId)) ?? null;
@@ -360,12 +366,35 @@ export async function importExchangeFills(
     });
   }
 
+  recordFillTiming(deps, "events", Date.now() - eventsStartedAt);
   return { imported, skipped, deferred, deferredFillIds, details };
+}
+
+function recordFillTiming(
+  deps: Pick<ImportFillsDeps, "runtimeMetrics">,
+  stage: "fetch" | "import" | "events",
+  ms: number,
+): void {
+  try {
+    deps.runtimeMetrics?.writeCounter?.(
+      "reconciliation_fills_stage_ms",
+      ms,
+      JSON.stringify({ stage }),
+    );
+    deps.runtimeMetrics?.writeCounter?.(
+      "reconciliation_fills_stage_count",
+      1,
+      JSON.stringify({ stage }),
+    );
+  } catch {
+    /* Diagnostic storage cannot interrupt fill persistence. */
+  }
 }
 
 // ─── Reconciler (uses shared import) ──────────────────────────────────────
 
 export interface FillReconcilerDeps {
+  runtimeMetrics?: ImportFillsDeps["runtimeMetrics"];
   gateway: ExchangeGateway;
   fillRepo: FillRepository;
   orderRepo: OrderRepository;
@@ -407,7 +436,9 @@ export async function reconcileFills(
 ): Promise<FillReconcileResult> {
   const { gateway, fillRepo, orderRepo, bus, log } = deps;
 
+  const fetchStartedAt = Date.now();
   const snapshot = await resolveFillsSnapshot(gateway, sinceMs);
+  recordFillTiming(deps, "fetch", Date.now() - fetchStartedAt);
   if (!snapshot.ok) {
     // A failed fills fetch is NOT "no executions" — skip the import so we never
     // leave orders in a stale status from incomplete data (#36, Fix 1.5).
@@ -438,6 +469,7 @@ export async function reconcileFills(
     gateway,
     fillCompletionTolerance: deps.fillCompletionTolerance,
     deferPendingExactFills: true,
+    runtimeMetrics: deps.runtimeMetrics,
   });
 
   return {

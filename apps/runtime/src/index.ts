@@ -386,7 +386,10 @@ async function main(): Promise<void> {
 
   // 1. Load config
   const config = loadEnv();
-  const log = createLogger(config.logLevel, config.runtimeMode);
+  const errorMetricWriter = { current: undefined as RuntimeMetricWriter | undefined };
+  const log = createLogger(config.logLevel, config.runtimeMode, (level, source) =>
+    errorMetricWriter.current?.observeLog(level, source),
+  );
   const periodicTimers = new PeriodicTimers(log);
   log.info({ mode: config.runtimeMode }, "krabs runtime starting (env mode)");
   for (const issue of config.polygonRpcConfigIssues ?? []) {
@@ -554,6 +557,8 @@ async function main(): Promise<void> {
   // so the BUY-admission fail-closed path can report through the standard
   // `infra_alert` channel (surfaced in /status and the web banner).
   const runtimeMetrics = new RuntimeMetricWriter(ledgerConn.db);
+  runtimeMetrics.startErrorCollection();
+  errorMetricWriter.current = runtimeMetrics;
   const positionConcentration = new PositionConcentrationService({
     ledgerDb: ledgerConn.db,
     controlDb: controlConn.db,
@@ -647,7 +652,11 @@ async function main(): Promise<void> {
   const supervisorRef = { current: null as unknown as Supervisor };
   const statePublisherRef = { current: null as RuntimeStatePublisher | null };
   const resolutionModuleRef = { current: null as ResolutionModule | null };
-  const runtimeControl = { isPaused: () => supervisorRef.current.isPaused() };
+  let captureControlGeneration = 0;
+  const runtimeControl = {
+    isPaused: () => supervisorRef.current.isPaused(),
+    generation: () => captureControlGeneration,
+  };
 
   // Persist pause state to runtime_metrics so the API can read it
   const persistPauseState = (paused: boolean) => {
@@ -656,6 +665,7 @@ async function main(): Promise<void> {
 
   function setPausedAndPersist(paused: boolean): void {
     const wasPaused = supervisorRef.current.isPaused();
+    if (paused !== wasPaused) captureControlGeneration++;
     supervisorRef.current.setPaused(paused);
     persistPauseState(paused);
     if (paused) {
@@ -1888,13 +1898,14 @@ async function main(): Promise<void> {
         }
         if (missing.length === 0 || !marketDataGateway.getOrderBooks) return result;
         const fetched = await marketDataGateway.getOrderBooks(missing);
+        const acquiredAtMs = Date.now();
         for (const tokenId of missing) {
           const book = fetched.get(tokenId);
           const tickSize = entryLifecycleModule.getMarket(tokenId as TokenId)?.tickSize;
           if (!book || tickSize == null || !Number.isFinite(tickSize) || tickSize <= 0) continue;
           result.set(tokenId, {
             book,
-            cachedAtMs: nowMs,
+            cachedAtMs: acquiredAtMs,
             snapshotTs: book.timestamp,
             tickSize,
             source: "clob:rest-shadow",
@@ -2999,6 +3010,9 @@ async function main(): Promise<void> {
       // until `process.exit` (see the `finally` below), which is what makes a write from this tail
       // still land.
       await executionModule.drainAbandonedTail(Math.max(0, teardownDeadlineMs - Date.now()));
+
+      entryLifecycleModule.disposeTerminalListeners();
+      bounceAskCaptureLifecycleModule.disposeTerminalListeners();
 
       signalToOrderBridge.unsubscribe();
       loopLag.disable();
