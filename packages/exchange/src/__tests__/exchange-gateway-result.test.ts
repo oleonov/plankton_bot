@@ -212,6 +212,42 @@ describe("LiveExchangeGateway.getOrderResult", () => {
 });
 
 describe("LiveExchangeGateway.getFillsResult", () => {
+  it("measures each page attempt including retries without changing cursors or outcomes", async () => {
+    const client = createMockClient();
+    client.getTradesPaginated
+      .mockResolvedValueOnce(tradePage([], "next"))
+      .mockRejectedValueOnce(statusError("unavailable", 503))
+      .mockResolvedValueOnce(tradePage([]));
+    const gw = new LiveExchangeGateway({ client, fetchRetry: FAST_RETRY });
+    const measured = vi.fn();
+    expect(await gw.getFillsResult(42_000, measured)).toEqual({ ok: true, data: [] });
+    expect(measured.mock.calls.map(([, returned]) => returned)).toEqual([true, false, true]);
+    expect(client.getTradesPaginated.mock.calls.map(([, cursor]) => cursor)).toEqual([
+      "MA==",
+      "next",
+      "next",
+    ]);
+    expect(measured.mock.calls.every(([ms]) => ms >= 0)).toBe(true);
+  });
+
+  it("isolates page diagnostics exceptions and still rejects partial pagination", async () => {
+    const client = createMockClient();
+    client.getTradesPaginated
+      .mockResolvedValueOnce(tradePage([], "next"))
+      .mockRejectedValue(statusError("unavailable", 503));
+    const gw = new LiveExchangeGateway({ client, fetchRetry: { ...FAST_RETRY, retries: 0 } });
+    const measured = vi.fn(() => {
+      throw new Error("diagnostics unavailable");
+    });
+    expect(await gw.getFillsResult(0, measured)).toEqual({
+      ok: false,
+      reason: "server",
+      attempts: 1,
+    });
+    expect(client.getTradesPaginated).toHaveBeenCalledTimes(2);
+    expect(measured.mock.calls).toHaveLength(2);
+  });
+
   let client: ReturnType<typeof createMockClient>;
   let gw: LiveExchangeGateway;
 

@@ -1826,6 +1826,8 @@ async function main(): Promise<void> {
       state: "absent" | "working",
     ) => executionModule.observeExactNullStartupRemoteState(order, state),
     getExactNullStartupQuarantineCount: () => executionModule.getExactNullStartupQuarantineCount(),
+    getSubmitUnknownRecoveryContexts: (isCurrent?: () => boolean) =>
+      executionModule.getSubmitUnknownRecoveryContexts(isCurrent),
   };
   const reconciliationModule = new ReconciliationModule({
     gateway: exchangeGateway,
@@ -1952,6 +1954,7 @@ async function main(): Promise<void> {
       ? new UserOrderStreamModule({
           gateway: exchangeGateway,
           bus,
+          exactNullStartupQuarantine,
           marketRepo: repos.market,
           orderRepo: repos.order,
           fillRepo: repos.fill,

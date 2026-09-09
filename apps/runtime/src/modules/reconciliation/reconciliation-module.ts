@@ -424,6 +424,11 @@ export class ReconciliationModule implements RuntimeModule {
       const ranAt = Date.now();
       const allDetails: string[] = [];
       const stageTimingsMs: Record<string, number> = {};
+      const generation = this.diagnosticGeneration;
+      const recoveryContexts =
+        this.deps.exactNullStartupQuarantine?.getSubmitUnknownRecoveryContexts?.(
+          () => !this.diagnosticsStopped && generation === this.diagnosticGeneration,
+        ) ?? [];
 
       // 1. Import reliable fills before inspecting the open snapshot. A fill can
       // prove a terminal local status whereas open-snapshot absence cannot.
@@ -440,6 +445,7 @@ export class ReconciliationModule implements RuntimeModule {
           log: this.log,
           fillCompletionTolerance,
           runtimeMetrics: this.deps.runtimeMetrics,
+          recoveryContexts,
         },
         sinceMs,
       );
@@ -461,6 +467,9 @@ export class ReconciliationModule implements RuntimeModule {
         consecutiveMissThreshold: this.deps.consecutiveMissThreshold ?? 3,
         consecutiveMissCounts: this.consecutiveMissCounts,
         unresolvedStaleOrders: this.unresolvedStaleOrders,
+        recoveryContexts,
+        stageTimingsMs,
+        runtimeMetrics: this.deps.runtimeMetrics,
         fillCompletionTolerance,
         ...(this.deps.exactNullStartupQuarantine
           ? { exactNullStartupQuarantine: this.deps.exactNullStartupQuarantine }
@@ -572,7 +581,9 @@ export class ReconciliationModule implements RuntimeModule {
         );
       }
 
+      const stageWalletReadStart = Date.now();
       const walletPositions = await this.readWalletPositionsForPass(ranAt);
+      stageTimingsMs.walletRead = Date.now() - stageWalletReadStart;
 
       // 4. Wallet↔ledger sentinel
       const stageSentinelStart = Date.now();
@@ -589,7 +600,9 @@ export class ReconciliationModule implements RuntimeModule {
             skippedInvalidInputTokens: 0,
           };
       stageTimingsMs.sentinel = Date.now() - stageSentinelStart;
+      const stageWalletConfirmationStart = Date.now();
       const walletResult = await this.confirmWalletSentinelDrifts(rawWalletResult);
+      stageTimingsMs.walletConfirmation = Date.now() - stageWalletConfirmationStart;
       const walletSentinelSeverity = this.updateWalletSentinelConsecutiveCounts(walletResult);
       allDetails.push(...walletResult.details);
       if (walletResult.driftCount > 0) {

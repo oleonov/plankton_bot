@@ -9,6 +9,7 @@ import {
 import type { ClientOrderId, Order, OrderRepository } from "@krabs/domain";
 import {
   applyOrderVerdict,
+  inOrderLifecycleLane,
   hasExactMatchedCoverage,
   hasLocalFullCoverage,
   resolveOrderStatusVerdict,
@@ -34,6 +35,40 @@ const order: Order = {
 };
 
 describe("order status resolver", () => {
+  it("evaluates validity after entering the existing lifecycle lane before terminal mutation or events", async () => {
+    let current = true;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const lane = inOrderLifecycleLane(String(order.orderId), () => blocked);
+    const orderRepo = {
+      findById: vi.fn(() => order),
+      updateStatus: vi.fn(),
+    } as unknown as OrderRepository;
+    const publish = vi.fn();
+    const onVerdictApplied = vi.fn();
+    const pending = applyOrderVerdict({
+      orderRepo,
+      fillRepo: { findByOrderId: () => [] },
+      bus: { publish } as any,
+      log: {} as any,
+      orderId: order.orderId,
+      exchange: { status: "CANCELLED", sizeFilled: 0 },
+      publish: true,
+      isCurrent: () => current,
+      onVerdictApplied,
+    });
+    current = false;
+    release();
+    await lane;
+    expect(await pending).toEqual({ status: "unresolved" });
+    expect(orderRepo.findById).toHaveBeenCalledOnce();
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    expect(onVerdictApplied).not.toHaveBeenCalled();
+  });
+
   it("keeps the local 0.5% completion normalization separate from exact coverage", () => {
     expect(hasLocalFullCoverage(order, 99.5)).toBe(true);
     expect(hasExactMatchedCoverage({ sizeFilled: 100 } as never, 99.5)).toBe(false);

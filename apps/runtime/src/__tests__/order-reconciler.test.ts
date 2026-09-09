@@ -18,6 +18,89 @@ import {
 const TOK = createTokenId("tok-yes");
 const OLD = new Date(Date.now() - 300_000).toISOString(); // 5 min ago — beyond any grace
 
+describe("order reconciliation stage attribution", () => {
+  it("preserves serial call order and records bounded operation counts", async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const calls: string[] = [];
+      const gateway = createGateway({ openOrders: [] });
+      gateway.getOpenOrdersResult = vi.fn(async () => {
+        calls.push("open");
+        now += 13;
+        return { ok: true as const, data: [] };
+      });
+      gateway.getOrderResult = vi.fn(async () => {
+        calls.push("exact");
+        now += 17;
+        return { ok: true as const, data: null };
+      });
+      const orderRepo = createOrderRepo();
+      const order = makeLocalOrder();
+      vi.mocked(orderRepo.findOpen).mockReturnValue([order]);
+      vi.mocked(orderRepo.findById).mockReturnValue(order);
+      const stageTimingsMs: Record<string, number> = {};
+      const writeCounter = vi.fn();
+      await reconcileOrders({
+        ...baseDeps(gateway, orderRepo),
+        stageTimingsMs,
+        runtimeMetrics: { writeCounter },
+        consecutiveMissThreshold: 1,
+      });
+      expect(calls).toEqual(["open", "exact"]);
+      expect(stageTimingsMs).toEqual({
+        "orders.openFetch": 13,
+        "orders.unresolvedPrechecks": 0,
+        "orders.quarantineObservation": 0,
+        "orders.exactCandidates": 17,
+        "orders.staleCascade": 0,
+      });
+      expect(
+        writeCounter.mock.calls.filter(([name]) => name === "reconciliation_orders_operations"),
+      ).toEqual([
+        ["reconciliation_orders_operations", 1, '{"stage":"openFetch"}'],
+        ["reconciliation_orders_operations", 0, '{"stage":"unresolvedPrechecks"}'],
+        ["reconciliation_orders_operations", 0, '{"stage":"quarantineObservation"}'],
+        ["reconciliation_orders_operations", 1, '{"stage":"exactCandidates"}'],
+        ["reconciliation_orders_operations", 0, '{"stage":"staleCascade"}'],
+      ]);
+      expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it.each([false, true])(
+    "records failed fetch timing while isolating metrics exceptions (throws=%s)",
+    async (throws) => {
+      const gateway = createGateway({
+        openOrdersResult: { ok: false, reason: "server", attempts: 1 },
+      });
+      const failure = new Error("read failed");
+      if (throws) vi.mocked(gateway.getOpenOrdersResult!).mockRejectedValue(failure);
+      const stageTimingsMs: Record<string, number> = {};
+      const writeCounter = vi.fn(() => {
+        throw new Error("metrics failed");
+      });
+      const task = reconcileOrders({
+        ...baseDeps(gateway, createOrderRepo()),
+        stageTimingsMs,
+        runtimeMetrics: { writeCounter },
+      });
+      if (throws) await expect(task).rejects.toBe(failure);
+      else expect((await task).skipReason).toBe("unreliable_snapshot");
+      expect(stageTimingsMs["orders.openFetch"]).toBeGreaterThanOrEqual(0);
+      expect(writeCounter).toHaveBeenCalledWith(
+        "reconciliation_orders_stage_ms",
+        expect.any(Number),
+        '{"stage":"openFetch"}',
+      );
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    },
+  );
+});
+
 function makeExchangeOrder(overrides?: Partial<ExchangeOrder>): ExchangeOrder {
   return {
     orderId: "ex-ord-1",

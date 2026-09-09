@@ -319,6 +319,105 @@ describe("ReconciliationModule", () => {
     });
   });
 
+  it("attributes wallet reads and real confirmation reads separately while importing before open fetch", async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const calls: string[] = [];
+    const log = { ...silentLog, info: vi.fn(), child: () => log };
+    try {
+      gateway.getFills = vi.fn(async () => {
+        calls.push("fills");
+        now += 11;
+        return [];
+      });
+      gateway.getOpenOrders = vi.fn(async () => {
+        calls.push("orders");
+        now += 13;
+        return [];
+      });
+      gateway.getPositionBalance = vi.fn(async () => {
+        calls.push("confirmation");
+        now += 37;
+        return 10;
+      });
+      vi.mocked(marketRepo.findByTokenId).mockReturnValue({
+        tokenId: TOK,
+        conditionId: "cond-1",
+        slug: "timing-market",
+        endDate: new Date(now + 86_400_000).toISOString(),
+      } as any);
+      const closed: Position = {
+        positionId: createPositionId("timing-position"),
+        tokenId: TOK,
+        conditionId: createConditionId("cond-1"),
+        side: "buy",
+        size: 0,
+        avgEntryPrice: 0.1,
+        costBasisUsdc: 0,
+        currentValueUsdc: 0,
+        realizedPnl: 0,
+        status: "closed",
+        entryStyle: null,
+        openedAt: new Date(now - 60_000).toISOString(),
+        closedAt: new Date(now).toISOString(),
+        updatedAt: new Date(now).toISOString(),
+      };
+      const reader = {
+        read: vi.fn(async () => {
+          calls.push("wallet");
+          now += 23;
+          return [
+            {
+              tokenId: TOK,
+              conditionId: "cond-1",
+              size: 10,
+              currentValueUsdc: 1,
+              initialValueUsdc: 1,
+              slug: "timing-market",
+              marketSlug: "timing-market",
+              redeemable: false,
+              outcome: "Yes",
+              raw: {},
+            },
+          ];
+        }),
+      };
+      const timed = new ReconciliationModule({
+        gateway,
+        bus,
+        orderRepo,
+        fillRepo,
+        marketRepo,
+        log,
+        reconcileIntervalMs: 60_000,
+        walletPositionSentinel: {
+          reader,
+          positionRepo: { findAll: () => [closed] } as any,
+          marketRepo,
+          log,
+        },
+      });
+      const result = await timed.runReconciliation();
+      expect(result.positionDriftCount).toBe(1);
+      expect(calls).toEqual(["fills", "orders", "wallet", "confirmation"]);
+      expect(log.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          stageTimingsMs: expect.objectContaining({
+            fills: 11,
+            orders: 13,
+            walletRead: 23,
+            walletConfirmation: 37,
+            "orders.openFetch": 13,
+          }),
+        }),
+        "reconciliation pass complete",
+      );
+      expect(gateway.getPositionBalance).toHaveBeenCalledOnce();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("does not await diagnostic REST, coalesces passes, and drains without late writes", async () => {
     const startedAt = Date.now();
     const resting = makeLocalOrder({

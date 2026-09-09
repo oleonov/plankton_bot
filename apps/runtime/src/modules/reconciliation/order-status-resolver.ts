@@ -137,10 +137,19 @@ export async function applyOrderVerdict(args: {
   timestamp?: number;
   cancelTelemetry?: OrderCancelTelemetry;
   fillCompletionTolerance?: number | undefined;
+  isCurrent?: (() => boolean) | undefined;
+  onVerdictApplied?: ((verdict: TerminalVerdict) => void) | undefined;
 }): Promise<TerminalVerdict> {
   return inOrderLifecycleLane(String(args.orderId), async () => {
     const order = args.orderRepo.findById(args.orderId);
     if (!order) return { status: "unresolved" };
+    if (args.isCurrent && !args.isCurrent()) return { status: "unresolved" };
+    const applied = (verdict: TerminalVerdict): TerminalVerdict => {
+      // Publication can invalidate the owner. Commit proof after events, while
+      // still holding the lane; working verdicts revoke it without yielding.
+      if (!args.isCurrent || args.isCurrent()) args.onVerdictApplied?.(verdict);
+      return verdict;
+    };
     const gross = persistedGrossShares(args.fillRepo, order);
     const completionTolerance = args.fillCompletionTolerance ?? DEFAULT_FILL_COMPLETION_TOLERANCE;
     const verdict = resolveOrderStatusVerdict(order, args.exchange, gross, completionTolerance);
@@ -148,32 +157,32 @@ export async function applyOrderVerdict(args: {
       args.exchange?.status === "OPEN" || args.exchange?.status === "PARTIALLY_FILLED";
     if (exchangeWorking) {
       if (verdict.status !== "open" && verdict.status !== "partially-filled") {
-        return { status: "unresolved" };
+        return applied({ status: "unresolved" });
       }
       if (
         order.status === "filled" ||
         order.status === "cancelled" ||
         order.status === "rejected"
       ) {
-        return { status: "unresolved" };
+        return applied({ status: "unresolved" });
       }
       if (order.status !== verdict.status)
         args.orderRepo.updateStatus(order.orderId, verdict.status);
-      return verdict;
+      return applied(verdict);
     }
     if (order.status === "filled" || order.status === "cancelled" || order.status === "rejected") {
       if (hasLocalFullCoverage(order, gross, completionTolerance)) {
         if (order.status !== "filled") args.orderRepo.updateStatus(order.orderId, "filled");
-        return { status: "filled" };
+        return applied({ status: "filled" });
       }
       // A durable local terminal row is not proof that an exchange-live order stopped
       // working. Preserve the durable row, but report the exact verdict so a transition
       // fence cannot be released by local state alone.
       if (verdict.status === "open" || verdict.status === "partially-filled") {
-        return { status: "unresolved" };
+        return applied({ status: "unresolved" });
       }
-      if (verdict.status === "unresolved") return verdict;
-      return verdict;
+      if (verdict.status === "unresolved") return applied(verdict);
+      return applied(verdict);
     }
     if (
       verdict.status === "open" ||
@@ -182,7 +191,7 @@ export async function applyOrderVerdict(args: {
     ) {
       if (verdict.status !== "unresolved" && order.status !== verdict.status)
         args.orderRepo.updateStatus(order.orderId, verdict.status);
-      return verdict;
+      return applied(verdict);
     }
     const reason =
       verdict.status === "cancelled"
@@ -245,6 +254,6 @@ export async function applyOrderVerdict(args: {
         });
       }
     }
-    return verdict;
+    return applied(verdict);
   });
 }

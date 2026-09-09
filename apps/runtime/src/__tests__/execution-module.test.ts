@@ -47,7 +47,13 @@ import type {
   Signal,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
-import { bootstrapDatabase, SqliteFillRepository, SqliteOrderRepository } from "@krabs/db";
+import {
+  bootstrapDatabase,
+  SqliteFillRepository,
+  SqliteOrderRepository,
+  SqlitePositionRepository,
+  SqliteInventoryLotRepository,
+} from "@krabs/db";
 import { buildClientOrderId } from "@krabs/domain/node";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
@@ -61,6 +67,17 @@ import { buildMakerCaptureRepriceIdentity } from "../maker-capture-reprice.js";
 import { buildBounceAskCaptureIdentity } from "../bounce-ask-capture.js";
 import type { MakerBuyFastCancel } from "../modules/execution/maker-buy-fast-cancel.js";
 import { LIFECYCLE_STOP_WAIT_MS } from "../lifecycle-chain.js";
+import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
+import {
+  reconcileFills,
+  importExchangeFills,
+  buildLocalFillFromExchangeFill,
+} from "../modules/reconciliation/fill-reconciler.js";
+import { reconcileOrders } from "../modules/reconciliation/order-reconciler.js";
+import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
+import { UserOrderStreamModule } from "../modules/reconciliation/user-order-stream-module.js";
+import { inOrderLifecycleLane } from "../modules/reconciliation/order-status-resolver.js";
+import { discardStrandedFillAlert } from "../stranded-fill-alert.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
 
@@ -823,6 +840,1609 @@ describe("ExecutionModule", () => {
       botRunId: BOT_RUN_ID,
       runtimeMode: "live-lite",
     });
+
+  describe("acknowledged submit-unknown recovery", () => {
+    async function recoveryFixture(acknowledge = true, maxConcurrency?: number) {
+      const conn = bootstrapDatabase(":memory:");
+      const orders = new SqliteOrderRepository(conn.db);
+      const fills = new SqliteFillRepository(conn.db);
+      const positions = new SqlitePositionRepository(conn.db);
+      const lots = new SqliteInventoryLotRepository(conn.db);
+      const position = makePosition({
+        costBasisUsdc: 0.1,
+        avgEntryPrice: 0.01,
+        exitOwner: "bounce",
+      });
+      positions.save(position);
+      const origin = openSellAt(0.01, {
+        orderId: createOrderId("inventory-origin"),
+        clientOrderId: "inventory_origin" as ClientOrderId,
+        exchangeOrderId: "inventory-origin",
+        side: "buy",
+        size: 10,
+        status: "filled",
+      });
+      orders.save(origin);
+      for (const lot of createMockInventoryLotRepo(position).findOpen(position.positionId)) {
+        fills.save({
+          fillId: lot.fillId,
+          orderId: origin.orderId,
+          tokenId: position.tokenId,
+          conditionId: position.conditionId,
+          side: "buy",
+          price: 0.01,
+          size: 10,
+          sizeUsdc: 0.1,
+          fee: 0,
+          feeRateBps: 0,
+          liquidityRole: "maker",
+          filledAt: position.openedAt,
+        });
+        fills.markReconciled([lot.fillId]);
+        lots.save(lot);
+      }
+      const pending = {
+        ...submitUnknownStartupSell(position),
+        createdAt: new Date(Date.now() - 86_400_000).toISOString(),
+      };
+      const sibling = openSellAt(0.05, {
+        orderId: createOrderId("recovery-sibling"),
+        clientOrderId: "recovery_sibling" as ClientOrderId,
+        exchangeOrderId: "recovery-sibling",
+        positionId: position.positionId,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        entryStyle: "maker",
+        postOnly: true,
+        size: 2,
+        metadata: { bounceRung: { ladderId: "submit-ladder", rungIndex: 1 } },
+      });
+      orders.save(pending);
+      orders.save(sibling);
+      const exact = vi.fn().mockResolvedValue({ ok: true, data: null });
+      const history = vi.fn().mockResolvedValue({ ok: true, data: [] });
+      gateway.getOrderResult = exact;
+      gateway.getFillsResult = history;
+      gateway.getOpenOrdersResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+      gateway.cancelOrder = vi.fn().mockResolvedValue({ success: false });
+      const control = { isPaused: vi.fn(() => true) };
+      const exchangeStateStore = new ExchangeStateStore();
+      const execution = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo: orders,
+        fillRepo: fills,
+        positionRepo: positions,
+        inventoryLotRepo: lots,
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeMode: "live-lite",
+        runtimeControl: control,
+        exchangeStateStore,
+        maxConcurrency,
+      });
+      // Keep the production forwarding boundary in the regression fixture.
+      const owner = {
+        isExactNullStartupOrderQuarantined: (order: Order) =>
+          execution.isExactNullStartupOrderQuarantined(order),
+        isExactNullStartupTokenQuarantined: (tokenId: TokenId) =>
+          execution.isExactNullStartupTokenQuarantined(tokenId),
+        observeExactNullStartupRemoteState: (order: Order, state: "absent" | "working") =>
+          execution.observeExactNullStartupRemoteState(order, state),
+        getExactNullStartupQuarantineCount: () => execution.getExactNullStartupQuarantineCount(),
+        getSubmitUnknownRecoveryContexts: (isCurrent?: () => boolean) =>
+          execution.getSubmitUnknownRecoveryContexts(isCurrent),
+      };
+      const risk = new RiskInventoryModule({
+        bus,
+        positionRepo: positions,
+        inventoryLotRepo: lots,
+        orderRepo: orders,
+        fillRepo: fills,
+        log: silentLog,
+        db: conn.db,
+        emitStrandedFillAlert: discardStrandedFillAlert,
+      });
+      const reconcileDeps = {
+        gateway,
+        bus,
+        orderRepo: orders,
+        fillRepo: fills,
+        log: silentLog,
+        exactNullStartupQuarantine: owner,
+        suspiciousEmptyThreshold: 0,
+      };
+      const reconciliation = new ReconciliationModule({
+        ...reconcileDeps,
+        exchangeStateStore,
+        marketRepo: marketRepo as any,
+        reconcileIntervalMs: 60_000,
+      });
+      const target = drainTarget(pending, "exact-null-submit-unknown-sell");
+      if (acknowledge) execution.acknowledgeStartupTransitions([target]);
+      await execution.start();
+      if (acknowledge) await execution.seedStartupTransitions([target]);
+      if (maxConcurrency) await vi.waitFor(() => expect(execution.pendingCount).toBe(0));
+      await risk.start();
+      history.mockClear();
+      const fill = (fillId: string, size: number): ExchangeFill => ({
+        fillId,
+        orderId: pending.exchangeOrderId!,
+        clientOrderId: null,
+        tokenId: pending.tokenId,
+        side: "sell",
+        price: pending.price,
+        size,
+        fee: 0,
+        feeRateBps: 0,
+        liquidityRole: "maker",
+        timestamp: Date.parse(pending.createdAt) + 1_000,
+      });
+      const importFills = (rows: ExchangeFill[]) =>
+        importExchangeFills(rows, {
+          ...reconcileDeps,
+          deferPendingExactFills: true,
+          recoveryContexts: owner.getSubmitUnknownRecoveryContexts(),
+        });
+      const sweep = () => reconcileOrders(reconcileDeps);
+      const replay = async () => {
+        await risk.stop();
+        await risk.start();
+      };
+      const close = async () => {
+        await reconciliation.stop();
+        await execution.stop();
+        await risk.stop();
+        conn.close();
+      };
+      return {
+        conn,
+        orders,
+        fills,
+        positions,
+        lots,
+        pending,
+        sibling: orders.findById(sibling.orderId)!,
+        execution,
+        owner,
+        risk,
+        exact,
+        history,
+        control,
+        reconciliation,
+        exchangeStateStore,
+        reconcileDeps,
+        fill,
+        importFills,
+        sweep,
+        replay,
+        close,
+      };
+    }
+
+    function terminalRemote(
+      f: Awaited<ReturnType<typeof recoveryFixture>>,
+      status: ExchangeOrder["status"],
+      sizeFilled = 0,
+    ) {
+      return {
+        orderId: f.pending.exchangeOrderId!,
+        clientOrderId: null,
+        tokenId: f.pending.tokenId,
+        side: "sell" as const,
+        price: f.pending.price,
+        sizeTotal: f.pending.size,
+        sizeFilled,
+        sizeRemaining: f.pending.size - sizeFilled,
+        status,
+        createdAt: Date.parse(f.pending.createdAt),
+      };
+    }
+
+    async function recoveryStream(f: Awaited<ReturnType<typeof recoveryFixture>>, start = true) {
+      let handlers!: Parameters<NonNullable<ExchangeGateway["createUserEventStream"]>>[0];
+      gateway.createUserEventStream = (callbacks) => {
+        handlers = callbacks;
+        return { close: vi.fn(), setConditionIds: vi.fn() };
+      };
+      const stream = new UserOrderStreamModule({
+        ...f.reconcileDeps,
+        marketRepo: marketRepo as any,
+      });
+      if (start) await stream.start();
+      f.exact.mockResolvedValue({ ok: true, data: terminalRemote(f, "OPEN") });
+      await f.owner.getSubmitUnknownRecoveryContexts()[0]!.observe();
+      expect(f.orders.findById(f.pending.orderId)?.status).toBe("open");
+      f.exact.mockClear();
+      return {
+        stream,
+        callbacks: () => handlers,
+        gap: () => handlers.onGapDetected?.({ reason: "socket-close", timestamp: Date.now() }),
+        cancel: () =>
+          handlers.onOrderEvents([
+            {
+              type: "order",
+              event: "CANCELLATION",
+              orderId: f.pending.exchangeOrderId!,
+              clientOrderId: f.pending.clientOrderId,
+              tokenId: f.pending.tokenId,
+              side: "sell",
+              sizeTotal: f.pending.size,
+              sizeFilled: 0,
+              sizeRemaining: f.pending.size,
+              status: "CANCELLED",
+              timestamp: Date.now(),
+            },
+          ]),
+      };
+    }
+
+    async function recoveryCatchup(reason: "startup" | "gap") {
+      const f = await recoveryFixture();
+      const ws = await recoveryStream(f, false);
+      const open = vi.mocked(gateway.getOpenOrdersResult!);
+      open.mockResolvedValue({ ok: true, data: recoveryWorkingSnapshot(f).slice(1) });
+      f.exact.mockResolvedValue({ ok: true, data: null });
+      if (reason === "gap") await ws.stream.start();
+      f.exact.mockClear();
+      f.history.mockClear();
+      open.mockClear();
+      return { f, ws, open, run: () => (reason === "startup" ? ws.stream.start() : ws.gap()) };
+    }
+
+    it.each(
+      (["startup", "gap"] as const).flatMap((reason) =>
+        (["orders", "transitions"] as const).map((cleanup) => [reason, cleanup] as const),
+      ),
+    )(
+      "retains WS %s catch-up cancellation through rollback/replay and null %s cleanup",
+      async (reason, cleanup) => {
+        const { f, ws, open, run } = await recoveryCatchup(reason);
+        try {
+          const capture = vi.spyOn(f.owner, "getSubmitUnknownRecoveryContexts");
+          const fail = vi.spyOn(f.lots, "consumeFifo").mockImplementation(() => {
+            throw new Error("inventory write failed");
+          });
+          const cancelled = vi.fn();
+          bus.subscribe("OrderCancelled", cancelled);
+          f.history.mockResolvedValue({ ok: true, data: [f.fill("catchup-partial", 2)] });
+          f.exact.mockResolvedValue({ ok: true, data: terminalRemote(f, "CANCELLED", 2) });
+          await run();
+          expect(capture).toHaveBeenCalledExactlyOnceWith(expect.any(Function));
+          expect(f.history).toHaveBeenCalledOnce();
+          expect(open).toHaveBeenCalledOnce();
+          expect(f.exact).toHaveBeenCalledExactlyOnceWith(f.pending.exchangeOrderId);
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("cancelled");
+          expect(f.fills.findUnreconciled()).toHaveLength(1);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(10);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          f.exact.mockResolvedValue({ ok: true, data: null });
+          await ws.gap();
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          fail.mockRestore();
+          const received = vi.fn();
+          bus.subscribe("FillReceived", received);
+          await f.replay();
+          expect(f.fills.findUnreconciled()).toEqual([]);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(8);
+          if (cleanup === "orders") await ws.gap();
+          else await (f.execution as any).reconcileAllTransitions();
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(0);
+          expect(cancelled).toHaveBeenCalledOnce();
+          expect(received).not.toHaveBeenCalled();
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+          expect(
+            buildReservationSnapshot(f.orders.findOpen(), f.fills).reservedSellByToken.get(
+              f.pending.tokenId,
+            ),
+          ).toBe(2);
+          expect(gateway.placeOrder).not.toHaveBeenCalled();
+        } finally {
+          await ws.stream.stop();
+          await f.close();
+        }
+      },
+    );
+
+    it.each(
+      (["startup", "gap"] as const).flatMap((reason) =>
+        ["history", "open", "exact", "lane"].flatMap((hold) =>
+          ["ws-stop", "ws-restart", "owner-stop", "owner-restart", "identity"].map(
+            (fault) => [reason, hold, fault] as const,
+          ),
+        ),
+      ),
+    )("rejects WS %s catch-up authority held in %s across %s", async (reason, hold, fault) => {
+      const { f, ws, open, run } = await recoveryCatchup(reason);
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const lane =
+        hold === "lane"
+          ? inOrderLifecycleLane(String(f.pending.orderId), () => held)
+          : Promise.resolve();
+      let pass: ReturnType<typeof run> = undefined;
+      try {
+        const cancelled = vi.fn();
+        const received = vi.fn();
+        bus.subscribe("OrderCancelled", cancelled);
+        bus.subscribe("FillReceived", received);
+        const capture = vi.spyOn(f.owner, "getSubmitUnknownRecoveryContexts");
+        f.history.mockImplementation(async () => {
+          if (hold === "history") await held;
+          return { ok: true, data: hold === "history" ? [f.fill("stale-catchup", 2)] : [] };
+        });
+        open.mockImplementation(async () => {
+          if (hold === "open") await held;
+          return { ok: true, data: recoveryWorkingSnapshot(f).slice(1) };
+        });
+        f.exact.mockImplementation(async () => {
+          if (hold === "exact") await held;
+          return { ok: true, data: terminalRemote(f, "CANCELLED") };
+        });
+        pass = run();
+        const blockedRpc = hold === "history" ? f.history : hold === "open" ? open : f.exact;
+        await vi.waitFor(() => expect(blockedRpc).toHaveBeenCalledOnce());
+        expect(capture).toHaveBeenCalledExactlyOnceWith(expect.any(Function));
+        if (fault === "identity")
+          f.orders.save({ ...f.orders.findById(f.pending.orderId)!, postOnly: false });
+        else if (fault.startsWith("ws-")) {
+          await ws.stream.stop();
+          if (fault === "ws-restart") await ws.stream.start();
+        } else {
+          await f.execution.stop();
+          if (fault === "owner-restart") await f.execution.start();
+        }
+        release();
+        await lane;
+        await pass;
+        // Invalid tracked contexts must exclude this aged order from generic exact recovery.
+        expect(f.exact).toHaveBeenCalledTimes(hold === "history" || hold === "open" ? 0 : 1);
+        expect(capture).toHaveBeenCalledOnce();
+        expect(f.orders.findById(f.pending.orderId)?.status).toBe("open");
+        expect(f.fills.findByOrderId(f.pending.orderId)).toEqual([]);
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(10);
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+        expect(f.owner.getExactNullStartupQuarantineCount()).toBe(1);
+        expect(cancelled).not.toHaveBeenCalled();
+        expect(received).not.toHaveBeenCalled();
+        expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+        expect(
+          buildReservationSnapshot(f.orders.findOpen(), f.fills).reservedSellByToken.get(
+            f.pending.tokenId,
+          ),
+        ).toBe(7);
+        expect(gateway.placeOrder).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await lane;
+        await pass;
+        await ws.stream.stop();
+        await f.close();
+      }
+    });
+
+    it.each(
+      (["startup", "gap"] as const).flatMap((reason) =>
+        ["null", "uncovered", "token", "side", "hash"].map((fault) => [reason, fault] as const),
+      ),
+    )(
+      "retains WS %s quarantine after %s catch-up evidence and subsequent null",
+      async (reason, fault) => {
+        const { f, ws, run } = await recoveryCatchup(reason);
+        try {
+          await f.importFills([f.fill("catchup-unproven", 2)]);
+          const exchange = terminalRemote(f, "CANCELLED", 2);
+          if (fault === "uncovered") exchange.sizeFilled = 3;
+          if (fault === "token") exchange.tokenId = createTokenId("wrong-token");
+          if (fault === "side") Object.assign(exchange, { side: "buy" });
+          if (fault === "hash") exchange.orderId = "wrong-hash";
+          f.exact.mockResolvedValue({ ok: true, data: fault === "null" ? null : exchange });
+          const cancelled = vi.fn();
+          bus.subscribe("OrderCancelled", cancelled);
+          await run();
+          expect(f.exact).toHaveBeenCalledExactlyOnceWith(f.pending.exchangeOrderId);
+          f.exact.mockResolvedValue({ ok: true, data: null });
+          await ws.gap();
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("partially-filled");
+          expect(f.fills.findUnreconciled()).toEqual([]);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(8);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(1);
+          expect(cancelled).not.toHaveBeenCalled();
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+          expect(
+            buildReservationSnapshot(f.orders.findOpen(), f.fills).reservedSellByToken.get(
+              f.pending.tokenId,
+            ),
+          ).toBe(5);
+        } finally {
+          await ws.stream.stop();
+          await f.close();
+        }
+      },
+    );
+
+    it("does not renew catch-up authority when a closed stream delivers a gap after restart", async () => {
+      const { f, ws } = await recoveryCatchup("gap");
+      try {
+        const oldGap = ws.callbacks().onGapDetected!;
+        await ws.stream.stop();
+        await ws.stream.start();
+        f.exact.mockClear().mockResolvedValue({ ok: true, data: terminalRemote(f, "CANCELLED") });
+        f.history.mockResolvedValue({ ok: true, data: [f.fill("closed-gap", 2)] });
+        await oldGap({ reason: "socket-close", timestamp: Date.now() });
+        expect(f.exact).not.toHaveBeenCalled();
+        expect(f.fills.findByOrderId(f.pending.orderId)).toEqual([]);
+        expect(f.orders.findById(f.pending.orderId)?.status).toBe("open");
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+        expect(f.owner.getExactNullStartupQuarantineCount()).toBe(1);
+        expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+      } finally {
+        await ws.stream.stop();
+        await f.close();
+      }
+    });
+
+    it("releases only the working quarantine target from a zero-fill WS exact cancellation", async () => {
+      const f = await recoveryFixture();
+      const ws = await recoveryStream(f);
+      try {
+        const cancelled = vi.fn();
+        bus.subscribe("OrderCancelled", cancelled);
+        f.exact.mockResolvedValue({ ok: true, data: terminalRemote(f, "CANCELLED") });
+        await ws.cancel();
+        expect(f.exact).toHaveBeenCalledExactlyOnceWith(f.pending.exchangeOrderId);
+        expect(f.orders.findById(f.pending.orderId)?.status).toBe("cancelled");
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+        expect(f.owner.getExactNullStartupQuarantineCount()).toBe(0);
+        expect(cancelled).toHaveBeenCalledOnce();
+        expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(10);
+      } finally {
+        await ws.stream.stop();
+        await f.close();
+      }
+    });
+
+    it.each(["orders", "transitions"])(
+      "preserves working quarantine WS proof through partial rollback, replay and null %s cleanup",
+      async (sweep) => {
+        const f = await recoveryFixture();
+        const ws = await recoveryStream(f);
+        try {
+          const fail = vi.spyOn(f.lots, "consumeFifo").mockImplementation(() => {
+            throw new Error("inventory write failed");
+          });
+          await f.importFills([f.fill("ws-partial-rollback", 2)]);
+          const cancelled = vi.fn();
+          bus.subscribe("OrderCancelled", cancelled);
+          f.exact.mockResolvedValue({ ok: true, data: terminalRemote(f, "CANCELLED", 2) });
+          f.exact.mockClear();
+          await ws.cancel();
+          expect(f.exact).toHaveBeenCalledExactlyOnceWith(f.pending.exchangeOrderId);
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("cancelled");
+          expect(f.fills.findUnreconciled()).toHaveLength(1);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(10);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          f.exact.mockResolvedValue({ ok: true, data: null });
+          await f.sweep();
+          await (f.execution as any).reconcileAllTransitions();
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          fail.mockRestore();
+          const received = vi.fn();
+          bus.subscribe("FillReceived", received);
+          await f.replay();
+          expect(f.fills.findUnreconciled()).toEqual([]);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(8);
+          if (sweep === "orders") await f.sweep();
+          else await (f.execution as any).reconcileAllTransitions();
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(0);
+          expect(received).not.toHaveBeenCalled();
+          expect(cancelled).toHaveBeenCalledOnce();
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+          expect(gateway.placeOrder).not.toHaveBeenCalled();
+        } finally {
+          await ws.stream.stop();
+          await f.close();
+        }
+      },
+    );
+
+    it.each(["null", "error", "unknown", "token", "side", "hash", "uncovered"])(
+      "retains working quarantine for WS exact %s evidence",
+      async (fault) => {
+        const f = await recoveryFixture();
+        const ws = await recoveryStream(f);
+        try {
+          const exchange = terminalRemote(f, "CANCELLED");
+          if (fault === "unknown") Object.assign(exchange, { status: "UNKNOWN" });
+          if (fault === "token") exchange.tokenId = createTokenId("wrong-token");
+          if (fault === "side") Object.assign(exchange, { side: "buy" });
+          if (fault === "hash") exchange.orderId = "wrong-hash";
+          if (fault === "uncovered") exchange.sizeFilled = 2;
+          f.exact.mockResolvedValue(
+            fault === "error"
+              ? { ok: false, error: { message: "unavailable" } }
+              : { ok: true, data: fault === "null" ? null : exchange },
+          );
+          const cancelled = vi.fn();
+          bus.subscribe("OrderCancelled", cancelled);
+          await ws.cancel();
+          expect(f.exact).toHaveBeenCalledOnce();
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("open");
+          f.exact.mockResolvedValue({ ok: true, data: null });
+          await f.sweep();
+          await (f.execution as any).reconcileAllTransitions();
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(1);
+          expect(cancelled).not.toHaveBeenCalled();
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+        } finally {
+          await ws.stream.stop();
+          await f.close();
+        }
+      },
+    );
+
+    it.each(
+      ["rpc", "lane"].flatMap((hold) =>
+        ["ws-stop", "ws-restart", "owner-stop", "owner-restart", "identity"].map((fault) => [
+          hold,
+          fault,
+        ]),
+      ),
+    )("rejects WS terminal proof held in %s across %s", async (hold, fault) => {
+      const f = await recoveryFixture();
+      const ws = await recoveryStream(f);
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const lane =
+        hold === "lane"
+          ? inOrderLifecycleLane(String(f.pending.orderId), () => held)
+          : Promise.resolve();
+      try {
+        f.exact.mockImplementation(async () => {
+          if (hold === "rpc") await held;
+          return { ok: true, data: terminalRemote(f, "CANCELLED") };
+        });
+        const cancelled = vi.fn();
+        bus.subscribe("OrderCancelled", cancelled);
+        const pass = ws.cancel();
+        await vi.waitFor(() => expect(f.exact).toHaveBeenCalledOnce());
+        let restarted: Promise<void> | undefined;
+        // Restart catch-up must not supply a separate genuine terminal observation.
+        f.exact.mockResolvedValue({ ok: true, data: null });
+        if (fault === "identity")
+          f.orders.save({ ...f.orders.findById(f.pending.orderId)!, postOnly: false });
+        else if (fault.startsWith("ws-")) {
+          await ws.stream.stop();
+          if (fault === "ws-restart") restarted = ws.stream.start();
+        } else {
+          await f.execution.stop();
+          if (fault === "owner-restart") await f.execution.start();
+        }
+        release();
+        await lane;
+        await pass;
+        await restarted;
+        expect(f.orders.findById(f.pending.orderId)?.status, fault).toBe("open");
+        expect(f.execution.hasTransitionTarget(f.pending.orderId), fault).toBe(true);
+        expect(f.owner.getExactNullStartupQuarantineCount(), fault).toBe(1);
+        expect(cancelled, fault).not.toHaveBeenCalled();
+        expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+      } finally {
+        release();
+        await lane;
+        await ws.stream.stop();
+        await f.close();
+      }
+    });
+
+    it.each([
+      [null, 0, 0, "pending", true],
+      ["OPEN", 0, 0, "open", true],
+      ["PARTIALLY_FILLED", 2, 0, "partially-filled", true],
+      ["CANCELLED", 0, 0, "cancelled", false],
+      ["EXPIRED", 0, 0, "cancelled", false],
+      ["REJECTED", 0, 0, "rejected", false],
+      ["CANCELLED", 2, 0, "pending", true],
+      ["EXPIRED", 2, 1, "partially-filled", true],
+      ["FILLED", 5, 4, "partially-filled", true],
+      ["REJECTED", 1, 1, "partially-filled", true],
+      ["CANCELLED", 2, 2, "cancelled", false],
+      ["FILLED", 5, 5, "filled", false],
+      [null, 0, 5, "filled", false],
+      [null, 0, 4.98, "filled", false],
+    ] as const)(
+      "exact %s matched=%s local=%s => %s fenced=%s",
+      async (status, matched, filled, expected, fenced) => {
+        const f = await recoveryFixture();
+        try {
+          if (filled) await f.importFills([f.fill("matrix-fill", filled)]);
+          f.exact.mockResolvedValue({
+            ok: true,
+            data: status ? terminalRemote(f, status, matched) : null,
+          });
+          const events: string[] = [];
+          bus.subscribe("OrderCancelled", async () => {
+            events.push("cancelled");
+          });
+          bus.subscribe("OrderRejected", async () => {
+            events.push("rejected");
+          });
+          await f.sweep();
+          await f.sweep();
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe(expected);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(fenced);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(10 - filled);
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+          expect(
+            buildReservationSnapshot(f.orders.findOpen(), f.fills).reservedSellByToken.get(
+              f.pending.tokenId,
+            ),
+          ).toBe(fenced ? f.pending.size - filled + f.sibling.size : f.sibling.size);
+          expect(events).toEqual(
+            expected === "cancelled" || expected === "rejected" ? [expected] : [],
+          );
+          expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+          expect(gateway.placeOrder).not.toHaveBeenCalled();
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it.each(["error", "wrong-id", "wrong-token", "wrong-side", "unknown"])(
+      "retains quarantine for %s exact evidence",
+      async (fault) => {
+        const f = await recoveryFixture();
+        try {
+          const data = terminalRemote(f, "CANCELLED");
+          if (fault === "wrong-id") data.orderId = "sibling";
+          if (fault === "wrong-token") data.tokenId = createTokenId("other");
+          if (fault === "wrong-side") (data as any).side = "buy";
+          if (fault === "unknown") (data as any).status = "UNKNOWN";
+          f.exact.mockResolvedValue(
+            fault === "error" ? { ok: false, reason: "network", attempts: 1 } : { ok: true, data },
+          );
+          await f.sweep();
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("pending");
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          expect(f.fills.findByOrderId(f.pending.orderId)).toEqual([]);
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it("imports partial fills once, retains remaining reservations, and revisits creation history for late indexing", async () => {
+      const f = await recoveryFixture();
+      try {
+        await f.reconciliation.runReconciliation();
+        const late = f.fill("late-history", 2);
+        f.history.mockResolvedValue({ ok: true, data: [late] });
+        await f.reconciliation.runReconciliation();
+        await f.reconciliation.runReconciliation();
+        expect(f.history.mock.calls.map(([since]) => since)).toEqual([
+          0,
+          Date.parse(f.pending.createdAt),
+          Date.parse(f.pending.createdAt),
+        ]);
+        expect(f.fills.findByOrderId(f.pending.orderId)).toHaveLength(1);
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(8);
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+        const snapshot = buildReservationSnapshot(f.orders.findOpen(), f.fills);
+        expect(snapshot.reservedSellByToken.get(f.pending.tokenId)).toBe(5);
+        expect(f.orders.findById(f.pending.orderId)?.status).toBe("partially-filled");
+        expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+      } finally {
+        await f.close();
+      }
+    });
+
+    it("retains terminal quarantine through a rolled-back inventory claim and releases only after real replay", async () => {
+      const f = await recoveryFixture();
+      try {
+        const fail = vi.spyOn(f.lots, "consumeFifo").mockImplementation(() => {
+          throw new Error("inventory write failed");
+        });
+        await f.importFills([f.fill("rollback-a", 2), f.fill("rollback-b", 3)]);
+        expect(f.orders.findById(f.pending.orderId)?.status).toBe("filled");
+        expect(f.fills.findUnreconciled()).toHaveLength(2);
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(10);
+        await f.sweep();
+        await (f.execution as any).reconcileAllTransitions();
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+        expect(f.owner.getSubmitUnknownRecoveryContexts()).toHaveLength(1);
+        fail.mockRestore();
+        await f.replay();
+        expect(f.fills.findUnreconciled()).toEqual([]);
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(5);
+        await f.sweep();
+        await f.sweep();
+        await f.replay();
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(5);
+        expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+        expect(f.owner.getExactNullStartupQuarantineCount()).toBe(0);
+      } finally {
+        await f.close();
+      }
+    });
+
+    it.each([
+      ["observation", "orders"],
+      ["observation", "transitions"],
+      ["rearm", "orders"],
+      ["rearm", "transitions"],
+    ])(
+      "retains partial-fill %s proof through rollback/replay and null for the %s sweep",
+      async (path, sweep) => {
+        const f = await recoveryFixture();
+        try {
+          const cancelled = vi.fn();
+          bus.subscribe("OrderCancelled", cancelled);
+          const fail = vi.spyOn(f.lots, "consumeFifo").mockImplementation(() => {
+            throw new Error("inventory write failed");
+          });
+          await f.importFills([f.fill("partial-rollback", 2)]);
+          f.exact.mockResolvedValue({ ok: true, data: terminalRemote(f, "CANCELLED", 2) });
+          if (path === "rearm") {
+            await f.owner.observeExactNullStartupRemoteState(f.pending, "absent");
+            await f.owner.observeExactNullStartupRemoteState(f.pending, "working");
+          } else await f.sweep();
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("cancelled");
+          expect(f.fills.findUnreconciled()).toHaveLength(1);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(10);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          f.exact.mockResolvedValue({ ok: true, data: null });
+          await f.sweep();
+          await (f.execution as any).reconcileAllTransitions();
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          fail.mockRestore();
+          const received = vi.fn();
+          bus.subscribe("FillReceived", received);
+          await f.replay();
+          expect(f.fills.findUnreconciled()).toEqual([]);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(8);
+          if (sweep === "orders") await f.sweep();
+          else await (f.execution as any).reconcileAllTransitions();
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(0);
+          await f.sweep();
+          await f.replay();
+          expect(received).not.toHaveBeenCalled();
+          expect(cancelled).toHaveBeenCalledOnce();
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(8);
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+          expect(gateway.cancelOrder).toHaveBeenCalledTimes(path === "rearm" ? 2 : 1);
+          expect(gateway.placeOrder).not.toHaveBeenCalled();
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it.each([
+      ["applyExact", "observe", "event", "OPEN", false],
+      ["rearm", "applyExact", "event", "PARTIALLY_FILLED", false],
+      ["applyExact", "rearm", "lane", "OPEN", false],
+      ["observe", "applyExact", "lane", "PARTIALLY_FILLED", false],
+      ["applyExact", "observe", "lane", "OPEN", true],
+      ["rearm", "applyExact", "lane", "PARTIALLY_FILLED", true],
+    ] as const)(
+      "serializes %s terminal and %s %s-held %s proof (working first: %s)",
+      async (terminalPath, workingPath, hold, status, workingFirst) => {
+        const f = await recoveryFixture();
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const pending: Promise<unknown>[] = [];
+        try {
+          const fail = vi.spyOn(f.lots, "consumeFifo").mockImplementation(() => {
+            throw new Error("inventory write failed");
+          });
+          await f.importFills([f.fill("overlapping-partial", 2)]);
+          const context = f.owner.getSubmitUnknownRecoveryContexts()[0]!;
+          const cancelled = vi.fn(async () => {
+            await (f.execution as any).reconcileAllTransitions();
+            expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+            if (hold === "event") await held;
+          });
+          bus.subscribe("OrderCancelled", cancelled);
+          if (hold === "lane")
+            pending.push(inOrderLifecycleLane(String(f.pending.orderId), () => held));
+          const apply = async (path: string, remoteStatus: ExchangeOrder["status"]) => {
+            const remote = terminalRemote(f, remoteStatus, 2);
+            if (path === "applyExact") return context.applyExact(remote);
+            f.exact.mockResolvedValueOnce({ ok: true, data: remote });
+            if (path === "observe") return context.observe();
+            await f.owner.observeExactNullStartupRemoteState(f.pending, "absent");
+            await f.owner.observeExactNullStartupRemoteState(f.pending, "working");
+          };
+          f.exact.mockClear();
+          const sequence = workingFirst
+            ? ([
+                [workingPath, status],
+                [terminalPath, "CANCELLED"],
+              ] as const)
+            : ([
+                [terminalPath, "CANCELLED"],
+                [workingPath, status],
+              ] as const);
+          let reads = 0;
+          for (const [path, remoteStatus] of sequence) {
+            pending.push(apply(path, remoteStatus));
+            if (path !== "applyExact") {
+              reads++;
+              await vi.waitFor(() => expect(f.exact).toHaveBeenCalledTimes(reads));
+            }
+            if (hold === "event" && remoteStatus === "CANCELLED")
+              await vi.waitFor(() => expect(cancelled).toHaveBeenCalledOnce());
+          }
+          release();
+          await Promise.all(pending);
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("cancelled");
+          expect(f.fills.findUnreconciled()).toHaveLength(1);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(10);
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(1);
+          fail.mockRestore();
+          await f.replay();
+          expect(f.fills.findUnreconciled()).toEqual([]);
+          f.exact.mockResolvedValue({ ok: true, data: null });
+          if (hold === "event") await f.sweep();
+          else await (f.execution as any).reconcileAllTransitions();
+          await f.sweep();
+          await (f.execution as any).reconcileAllTransitions();
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(8);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(!workingFirst);
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(workingFirst ? 0 : 1);
+          expect(await context.observe()).toBe(
+            workingFirst ? f.pending.exchangeOrderId : undefined,
+          );
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+          expect(cancelled).toHaveBeenCalledOnce();
+          expect(gateway.placeOrder).not.toHaveBeenCalled();
+        } finally {
+          release();
+          await Promise.allSettled(pending);
+          await f.close();
+        }
+      },
+    );
+
+    it.each(
+      [
+        ["identity", "OPEN"],
+        ["queued-guard", "OPEN"],
+        ["identity", "CANCELLED"],
+        ["queued-guard", "FILLED"],
+      ].flatMap(([fault, status]) => [2, 4.98].map((filled) => ({ fault, status, filled }))),
+    )(
+      "preserves terminal proof when invalid $fault rejects contrary $status with $filled shares",
+      async ({ fault, status, filled }) => {
+        const f = await recoveryFixture();
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const pending: Promise<unknown>[] = [];
+        try {
+          const fail = vi.spyOn(f.lots, "consumeFifo").mockImplementation(() => {
+            throw new Error("inventory write failed");
+          });
+          await f.importFills([f.fill("invalid-contrary-partial", filled)]);
+          const owner = f.owner.getSubmitUnknownRecoveryContexts()[0]!;
+          await owner.applyExact(terminalRemote(f, "CANCELLED", filled));
+          let current = true;
+          const stale = f.owner.getSubmitUnknownRecoveryContexts(() => current)[0]!;
+          const working = terminalRemote(f, status as ExchangeOrder["status"], f.pending.size);
+          if (fault === "identity") working.tokenId = createTokenId("other");
+          pending.push(inOrderLifecycleLane(String(f.pending.orderId), () => held));
+          const observation = stale.applyExact(working);
+          pending.push(observation);
+          if (fault === "queued-guard") current = false;
+          release();
+          await Promise.all(pending);
+          expect(await observation).toBeUndefined();
+          expect(f.fills.findUnreconciled()).toHaveLength(1);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          fail.mockRestore();
+          await f.replay();
+          expect(await owner.observe()).toBe(f.pending.exchangeOrderId);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBeCloseTo(10 - filled);
+        } finally {
+          release();
+          await Promise.allSettled(pending);
+          await f.close();
+        }
+      },
+    );
+
+    it.each(
+      [
+        ["CANCELLED", "observe", "orders"],
+        ["CANCELLED", "rearm", "transitions"],
+        ["EXPIRED", "observe", "transitions"],
+        ["EXPIRED", "rearm", "orders"],
+        ["FILLED", "observe", "orders"],
+        ["FILLED", "rearm", "transitions"],
+        ["OPEN", "observe", "orders"],
+        ["PARTIALLY_FILLED", "rearm", "transitions"],
+        ["REJECTED", "observe", "transitions"],
+        ["UNKNOWN", "rearm", "orders"],
+      ].flatMap(([status, path, cleanup]) =>
+        [
+          [2, 3],
+          [4.98, 5],
+        ].map(([filled, matched]) => ({
+          status,
+          path,
+          cleanup,
+          filled: filled!,
+          matched: matched!,
+        })),
+      ),
+    )(
+      "revokes retained proof for uncovered $status $filled→$matched via $path before $cleanup cleanup",
+      async ({ status, path, cleanup, filled, matched }) => {
+        const f = await recoveryFixture();
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const pending: Promise<unknown>[] = [];
+        try {
+          const fail = vi.spyOn(f.lots, "consumeFifo").mockImplementation(() => {
+            throw new Error("inventory write failed");
+          });
+          f.fills.save(
+            buildLocalFillFromExchangeFill(f.fill("covered-terminal", filled), f.pending).fill,
+          );
+          await f.replay();
+          const context = f.owner.getSubmitUnknownRecoveryContexts()[0]!;
+          pending.push(inOrderLifecycleLane(String(f.pending.orderId), () => held));
+          pending.push(context.applyExact(terminalRemote(f, "CANCELLED", filled)));
+          f.exact.mockClear().mockResolvedValue({
+            ok: true,
+            data: terminalRemote(f, status as ExchangeOrder["status"], matched),
+          });
+          if (path === "observe") pending.push(context.observe());
+          else {
+            await f.owner.observeExactNullStartupRemoteState(f.pending, "absent");
+            pending.push(f.owner.observeExactNullStartupRemoteState(f.pending, "working"));
+          }
+          await vi.waitFor(() => expect(f.exact).toHaveBeenCalledOnce());
+          release();
+          await Promise.all(pending);
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe(
+            filled === 2 ? "cancelled" : "filled",
+          );
+          expect(f.fills.findUnreconciled()).toHaveLength(1);
+          fail.mockRestore();
+          await f.replay();
+          expect(f.fills.findUnreconciled()).toEqual([]);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBeCloseTo(10 - filled);
+          f.exact.mockResolvedValue({ ok: true, data: null });
+          if (cleanup === "orders") await f.sweep();
+          else await (f.execution as any).reconcileAllTransitions();
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          expect(await context.observe()).toBeUndefined();
+          for (const later of [
+            "UNKNOWN",
+            "CANCELLED",
+            "EXPIRED",
+            "FILLED",
+            "REJECTED",
+            "OPEN",
+            "PARTIALLY_FILLED",
+          ]) {
+            expect(
+              await context.applyExact(terminalRemote(f, later as ExchangeOrder["status"], filled)),
+            ).toBeUndefined();
+            expect(await context.observe()).toBeUndefined();
+            await (f.execution as any).reconcileAllTransitions();
+            expect(f.execution.hasTransitionTarget(f.pending.orderId), later).toBe(true);
+          }
+          await (f.execution as any).reconcileAllTransitions();
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(1);
+          expect(f.owner.getSubmitUnknownRecoveryContexts()).toHaveLength(1);
+          await f.reconciliation.runReconciliation();
+          await f.reconciliation.runReconciliation();
+          expect(f.history).toHaveBeenLastCalledWith(Date.parse(f.pending.createdAt));
+          const lateFail = vi.spyOn(f.lots, "consumeFifo").mockImplementation(() => {
+            throw new Error("late inventory write failed");
+          });
+          f.history.mockResolvedValue({
+            ok: true,
+            data: [f.fill("missing-terminal", matched - filled)],
+          });
+          await f.reconciliation.runReconciliation();
+          expect(f.history).toHaveBeenLastCalledWith(Date.parse(f.pending.createdAt));
+          expect(f.fills.findByOrderId(f.pending.orderId)).toHaveLength(2);
+          expect(f.fills.findUnreconciled()).toHaveLength(1);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBeCloseTo(10 - filled);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          lateFail.mockRestore();
+          await f.replay();
+          expect(f.fills.findUnreconciled()).toEqual([]);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBeCloseTo(10 - matched);
+          const terminal = ["OPEN", "PARTIALLY_FILLED", "REJECTED", "UNKNOWN"].includes(status!)
+            ? "CANCELLED"
+            : status;
+          expect(
+            await context.applyExact(
+              filled === 2 ? terminalRemote(f, terminal as ExchangeOrder["status"], matched) : null,
+            ),
+          ).toBe(f.pending.exchangeOrderId);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(0);
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+          expect(gateway.placeOrder).not.toHaveBeenCalled();
+        } finally {
+          release();
+          await Promise.allSettled(pending);
+          await f.close();
+        }
+      },
+    );
+
+    it.each(["OPEN", "PARTIALLY_FILLED"] as const)(
+      "revokes retained cancellation proof on contrary exact %s before replay cleanup",
+      async (status) => {
+        const f = await recoveryFixture();
+        try {
+          const fail = vi.spyOn(f.lots, "consumeFifo").mockImplementation(() => {
+            throw new Error("inventory write failed");
+          });
+          await f.importFills([f.fill("contrary-partial", 2)]);
+          f.exact.mockResolvedValue({ ok: true, data: terminalRemote(f, "CANCELLED", 2) });
+          await f.sweep();
+          f.exact.mockResolvedValue({ ok: true, data: terminalRemote(f, status, 2) });
+          await f.sweep();
+          fail.mockRestore();
+          await f.replay();
+          f.exact.mockResolvedValue({ ok: true, data: null });
+          await f.sweep();
+          await (f.execution as any).reconcileAllTransitions();
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(8);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(1);
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it.each(["local-row", "publication-invalidated", "accepted-before-restart"])(
+      "does not derive current proof from %s followed by exact null",
+      async (fault) => {
+        const f = await recoveryFixture();
+        try {
+          await f.importFills([f.fill("unproven-partial", 2)]);
+          if (fault === "local-row") {
+            f.orders.updateStatus(f.pending.orderId, "cancelled");
+          } else {
+            // Leave accounting outstanding so accepted proof survives until restart.
+            f.fills.save(
+              buildLocalFillFromExchangeFill(f.fill("unapplied-partial", 1), f.pending).fill,
+            );
+            if (fault === "publication-invalidated")
+              bus.subscribe("OrderCancelled", async () => f.reconciliation.stop());
+            f.exact.mockResolvedValue({ ok: true, data: terminalRemote(f, "CANCELLED", 3) });
+            await f.reconciliation.runReconciliation();
+            await f.replay();
+            if (fault === "accepted-before-restart") {
+              await f.execution.stop();
+              await f.execution.start();
+            }
+          }
+          f.exact.mockResolvedValue({ ok: true, data: null });
+          await f.sweep();
+          await (f.execution as any).reconcileAllTransitions();
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("cancelled");
+          expect(f.fills.findUnreconciled()).toEqual([]);
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    function recoveryWorkingSnapshot(f: Awaited<ReturnType<typeof recoveryFixture>>) {
+      const target = terminalRemote(f, "OPEN");
+      return [
+        target,
+        {
+          ...target,
+          orderId: f.sibling.exchangeOrderId!,
+          price: f.sibling.price,
+          sizeTotal: f.sibling.size,
+          sizeRemaining: f.sibling.size,
+        },
+      ];
+    }
+
+    it.each(["observation", "rearm", "working", "local-terminal", "invalid"])(
+      "publishes the production recovery snapshot without resurrecting terminal reservations: %s",
+      async (outcome) => {
+        const f = await recoveryFixture();
+        try {
+          const snapshot = recoveryWorkingSnapshot(f);
+          const target = snapshot[0]!;
+          vi.mocked(gateway.getOpenOrdersResult!).mockResolvedValue({ ok: true, data: snapshot });
+          f.exact.mockResolvedValue({ ok: true, data: target });
+          await f.reconciliation.start();
+          expect(f.exchangeStateStore.getOpenSellSizeForToken(f.pending.tokenId)).toBe(7);
+          if (outcome === "rearm")
+            await f.owner.observeExactNullStartupRemoteState(f.pending, "absent");
+          if (outcome === "local-terminal") f.orders.updateStatus(f.pending.orderId, "cancelled");
+          const removal = vi.spyOn(f.exchangeStateStore, "removeExchangeSellOrder");
+          f.exact.mockResolvedValue({
+            ok: true,
+            data:
+              outcome === "working" || outcome === "local-terminal"
+                ? target
+                : terminalRemote(f, "CANCELLED"),
+          });
+          if (outcome === "invalid")
+            f.exact.mockImplementationOnce(async () => {
+              await f.reconciliation.stop();
+              return { ok: true, data: terminalRemote(f, "CANCELLED") };
+            });
+          await f.reconciliation.runReconciliation();
+          const terminal = outcome === "observation" || outcome === "rearm";
+          expect(f.exchangeStateStore.getOpenSellSizeForToken(f.pending.tokenId)).toBe(
+            terminal ? 2 : 7,
+          );
+          const localIds = new Set(f.orders.findOpen().map((order) => order.exchangeOrderId!));
+          expect(
+            f.exchangeStateStore.getOpenSellSizeUnknownToLocal(f.pending.tokenId, localIds),
+          ).toBe(outcome === "local-terminal" ? 5 : 0);
+          expect(removal).toHaveBeenCalledTimes(terminal ? 1 : 0);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(!terminal);
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+          expect(gateway.placeOrder).not.toHaveBeenCalled();
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it.each([
+      "current",
+      "wrong-id",
+      "wrong-token",
+      "wrong-side",
+      "stop",
+      "restart",
+      "identity",
+      "reconciliation-stop",
+    ])(
+      "rechecks queued rearm proof after the observer read without granting stale authority: %s",
+      async (outcome) => {
+        const f = await recoveryFixture(true, 1);
+        let releaseCancel!: (value: { success: boolean }) => void;
+        const cancelHeld = new Promise<{ success: boolean }>((resolve) => {
+          releaseCancel = resolve;
+        });
+        let releaseObserver!: (value: { ok: true; data: null }) => void;
+        const observerHeld = new Promise<{ ok: true; data: null }>((resolve) => {
+          releaseObserver = resolve;
+        });
+        let pass: Promise<unknown> | undefined;
+        try {
+          const snapshot = recoveryWorkingSnapshot(f);
+          vi.mocked(gateway.getOpenOrdersResult!).mockResolvedValue({ ok: true, data: snapshot });
+          await f.reconciliation.start();
+          await vi.waitFor(() => expect(f.execution.pendingCount).toBe(0));
+          expect(f.exchangeStateStore.getOpenSellSizeForToken(f.pending.tokenId)).toBe(7);
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("pending");
+          await f.owner.observeExactNullStartupRemoteState(f.pending, "absent");
+          vi.mocked(gateway.cancelOrder).mockReturnValueOnce(cancelHeld);
+          const terminal = {
+            ...terminalRemote(f, "CANCELLED"),
+            side: outcome === "wrong-side" ? ("buy" as const) : ("sell" as const),
+          };
+          if (outcome === "wrong-id") terminal.orderId = f.sibling.exchangeOrderId!;
+          if (outcome === "wrong-token") terminal.tokenId = createTokenId("other");
+          f.exact.mockReset().mockReturnValueOnce(observerHeld).mockResolvedValue({
+            ok: true,
+            data: terminal,
+          });
+          const observed = vi.fn();
+          const getContexts = f.owner.getSubmitUnknownRecoveryContexts;
+          vi.spyOn(f.owner, "getSubmitUnknownRecoveryContexts").mockImplementation((isCurrent) =>
+            getContexts(isCurrent).map((context) => ({
+              ...context,
+              observe: async () => {
+                const result = await context.observe();
+                observed(result);
+                return result;
+              },
+            })),
+          );
+          const cancelled = vi.fn();
+          const rejected = vi.fn();
+          bus.subscribe("OrderCancelled", cancelled);
+          bus.subscribe("OrderRejected", rejected);
+          pass = f.reconciliation.runReconciliation();
+          await vi.waitFor(() => expect(f.exact).toHaveBeenCalledOnce());
+          expect(f.execution.pendingCount).toBe(1);
+          expect(observed).not.toHaveBeenCalled();
+          releaseCancel({ success: true });
+          await vi.waitFor(() => expect(f.execution.pendingCount).toBe(0));
+          expect(f.exact).toHaveBeenCalledTimes(2);
+          const mismatch = outcome.startsWith("wrong-");
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe(
+            mismatch ? "pending" : "cancelled",
+          );
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(mismatch);
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(mismatch ? 1 : 0);
+          expect(cancelled).toHaveBeenCalledTimes(mismatch ? 0 : 1);
+          expect(rejected).not.toHaveBeenCalled();
+          expect(f.exchangeStateStore.getOpenSellSizeForToken(f.pending.tokenId)).toBe(
+            mismatch ? 7 : 2,
+          );
+          if (outcome === "identity")
+            f.orders.save({ ...f.orders.findById(f.pending.orderId)!, postOnly: false });
+          if (outcome === "stop" || outcome === "restart") {
+            await f.execution.stop();
+            if (outcome === "restart") await f.execution.start();
+          }
+          if (outcome === "reconciliation-stop") await f.reconciliation.stop();
+          releaseObserver({ ok: true, data: null });
+          await pass;
+          expect(observed).toHaveBeenCalledExactlyOnceWith(
+            outcome === "current" ? f.pending.exchangeOrderId : undefined,
+          );
+          const filtered = outcome === "current";
+          expect(f.exchangeStateStore.getOpenSellSizeForToken(f.pending.tokenId)).toBe(
+            filtered ? 2 : 7,
+          );
+          const localIds = new Set(f.orders.findOpen().map((order) => order.exchangeOrderId!));
+          expect(
+            f.exchangeStateStore.getOpenSellSizeUnknownToLocal(f.pending.tokenId, localIds),
+          ).toBe(filtered || mismatch ? 0 : 5);
+          expect(
+            buildReservationSnapshot(f.orders.findOpen(), f.fills).reservedSellByToken.get(
+              f.pending.tokenId,
+            ),
+          ).toBe(mismatch ? 7 : 2);
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+          expect(gateway.placeOrder).not.toHaveBeenCalled();
+        } finally {
+          releaseCancel({ success: false });
+          releaseObserver({ ok: true, data: null });
+          await pass;
+          await f.close();
+        }
+      },
+    );
+
+    it.each(["stop", "restart", "identity", "reconciliation-stop", "reconciliation-restart"])(
+      "whole importer held in lifecycle lane invalidates on %s and current replay preserves authentic fills",
+      async (fault) => {
+        const f = await recoveryFixture();
+        let release!: () => void;
+        const blocked = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const lane = inOrderLifecycleLane(String(f.pending.orderId), () => blocked);
+        try {
+          f.history.mockResolvedValue({ ok: true, data: [f.fill("held-lane", 5)] });
+          const received: unknown[] = [];
+          bus.subscribe("FillReceived", async (event) => {
+            received.push(event);
+          });
+          const pass = f.reconciliation.runReconciliation();
+          await vi.waitFor(() => expect(f.fills.findUnreconciled()).toHaveLength(1));
+          if (fault.startsWith("reconciliation")) {
+            await f.reconciliation.stop();
+            if (fault.endsWith("restart")) await f.reconciliation.start();
+          } else if (fault === "identity") {
+            f.orders.save({ ...f.pending, postOnly: false });
+          } else {
+            await f.execution.stop();
+            if (fault === "restart") await f.execution.start();
+          }
+          release();
+          await lane;
+          await pass;
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("pending");
+          expect(received).toEqual([]);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(10);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          expect(f.fills.findUnreconciled()).toHaveLength(1);
+          if (fault === "identity") f.orders.save(f.pending);
+          if (fault === "stop") await f.execution.start();
+          await f.replay();
+          await f.sweep();
+          await f.replay();
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(5);
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+        } finally {
+          release();
+          await lane;
+          await f.close();
+        }
+      },
+    );
+
+    it("allows an admitted publication to finish, suppresses the next after invalidation, and replays only remaining data", async () => {
+      const f = await recoveryFixture();
+      try {
+        const received: string[] = [];
+        bus.subscribe("FillReceived", async ({ fillId }) => {
+          received.push(String(fillId));
+          await f.execution.stop();
+        });
+        await f.importFills([f.fill("publication-a", 2), f.fill("publication-b", 3)]);
+        expect(received).toEqual(["publication-a"]);
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(8);
+        expect(f.fills.findUnreconciled().map((row) => String(row.fillId))).toEqual([
+          "publication-b",
+        ]);
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+        await f.execution.start();
+        await f.replay();
+        await f.sweep();
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(5);
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+        expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+      } finally {
+        await f.close();
+      }
+    });
+
+    it.each(["fee", "history", "exact"] as const)(
+      "rechecks owner validity after held %s read",
+      async (stage) => {
+        for (const fault of ["pause", "stop", "restart", "identity"] as const) {
+          const f = await recoveryFixture();
+          let release!: (value: any) => void;
+          const held = new Promise<any>((resolve) => {
+            release = resolve;
+          });
+          const read = vi.fn().mockReturnValueOnce(held);
+          try {
+            const rows = [f.fill(`held-${stage}-${fault}`, 2)];
+            if (stage === "fee") gateway.getMarketFeeInfo = read;
+            if (stage === "history") f.history.mockImplementationOnce(read);
+            if (stage === "exact") f.exact.mockImplementationOnce(read);
+            const task =
+              stage === "fee"
+                ? f.importFills(rows)
+                : stage === "exact"
+                  ? f.sweep()
+                  : reconcileFills(
+                      {
+                        ...f.reconcileDeps,
+                        recoveryContexts: f.owner.getSubmitUnknownRecoveryContexts(),
+                      },
+                      Date.now(),
+                    );
+            await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+            if (fault === "pause") f.control.isPaused.mockReturnValue(false);
+            else if (fault === "identity") f.orders.save({ ...f.pending, postOnly: false });
+            else {
+              await f.execution.stop();
+              if (fault === "restart") await f.execution.start();
+            }
+            release(
+              stage === "fee"
+                ? null
+                : { ok: true, data: stage === "exact" ? terminalRemote(f, "CANCELLED") : rows },
+            );
+            await task;
+            const admitted = fault === "pause";
+            expect(f.orders.findById(f.pending.orderId)?.status).toBe(
+              admitted ? (stage === "exact" ? "cancelled" : "partially-filled") : "pending",
+            );
+            expect(f.fills.findByOrderId(f.pending.orderId)).toHaveLength(
+              admitted && stage !== "exact" ? 1 : 0,
+            );
+            expect(f.positions.findById(f.pending.positionId!)?.size).toBe(
+              admitted && stage !== "exact" ? 8 : 10,
+            );
+            expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(
+              !(admitted && stage === "exact"),
+            );
+            expect(gateway.placeOrder).not.toHaveBeenCalled();
+          } finally {
+            release(null);
+            delete gateway.getMarketFeeInfo;
+            await f.close();
+          }
+        }
+      },
+    );
+
+    it.each(["ordinary", "forged", "stopped", "identity"])(
+      "defers pending exact fills without current acknowledged authority: %s",
+      async (fault) => {
+        const f = await recoveryFixture(fault !== "ordinary" && fault !== "forged");
+        try {
+          if (fault === "stopped") await f.execution.stop();
+          if (fault === "identity") f.orders.save({ ...f.pending, postOnly: false });
+          const rows = [f.fill("unadmitted", 5)];
+          const contexts = f.owner.getSubmitUnknownRecoveryContexts();
+          if (fault === "ordinary") f.orders.save({ ...f.pending, metadata: {} });
+          const result = await importExchangeFills(rows, {
+            ...f.reconcileDeps,
+            deferPendingExactFills: true,
+            recoveryContexts: contexts,
+          });
+          expect(result.deferredFillIds).toEqual(["unadmitted"]);
+          expect(f.fills.findByOrderId(f.pending.orderId)).toEqual([]);
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("pending");
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it.each(["stop", "restart", "identity"] as const)(
+      "holds exact terminal observation in the lifecycle lane and invalidates on %s",
+      async (fault) => {
+        const f = await recoveryFixture();
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const lane = inOrderLifecycleLane(String(f.pending.orderId), () => held);
+        try {
+          f.exact.mockResolvedValue({ ok: true, data: terminalRemote(f, "CANCELLED") });
+          f.exact.mockClear();
+          const events = vi.fn();
+          bus.subscribe("OrderCancelled", events);
+          const pass = f.sweep();
+          await vi.waitFor(() => expect(f.exact).toHaveBeenCalledOnce());
+          if (fault === "identity") f.orders.save({ ...f.pending, postOnly: false });
+          else {
+            await f.execution.stop();
+            if (fault === "restart") await f.execution.start();
+          }
+          release();
+          await lane;
+          await pass;
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("pending");
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          expect(events).not.toHaveBeenCalled();
+          expect(
+            buildReservationSnapshot(f.orders.findOpen(), f.fills).reservedSellByToken.get(
+              f.pending.tokenId,
+            ),
+          ).toBe(7);
+        } finally {
+          release();
+          await lane;
+          await f.close();
+        }
+      },
+    );
+
+    it("guards the existing rearm cancel importer after an authentic save waits in the lifecycle lane", async () => {
+      const f = await recoveryFixture();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const lane = inOrderLifecycleLane(String(f.pending.orderId), () => held);
+      try {
+        f.history.mockResolvedValue({ ok: true, data: [f.fill("cancel-lane", 5)] });
+        const received = vi.fn();
+        bus.subscribe("FillReceived", received);
+        await f.owner.observeExactNullStartupRemoteState(f.pending, "absent");
+        const command = f.owner.observeExactNullStartupRemoteState(f.pending, "working");
+        await vi.waitFor(() => expect(f.fills.findUnreconciled()).toHaveLength(1));
+        // stop invalidates immediately; its drain can finish once the admitted command unwinds.
+        const stopped = f.execution.stop();
+        release();
+        await lane;
+        await command;
+        await stopped;
+        expect(received).not.toHaveBeenCalled();
+        expect(f.orders.findById(f.pending.orderId)?.status).toBe("pending");
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(10);
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+        await f.execution.start();
+        await f.replay();
+        await f.sweep();
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(5);
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+      } finally {
+        release();
+        await lane;
+        await f.close();
+      }
+    });
+
+    it("excludes a tracked but invalid identity from generic exact recovery and terminal pruning", async () => {
+      const f = await recoveryFixture();
+      try {
+        f.orders.save({ ...f.pending, postOnly: false });
+        f.exact.mockResolvedValue({ ok: true, data: terminalRemote(f, "CANCELLED") });
+        f.exact.mockClear();
+        await f.sweep();
+        expect(f.exact).not.toHaveBeenCalled();
+        expect(f.orders.findById(f.pending.orderId)?.status).toBe("pending");
+        f.orders.updateStatus(f.pending.orderId, "filled");
+        await (f.execution as any).reconcileAllTransitions();
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+      } finally {
+        await f.close();
+      }
+    });
+
+    it.each(["exchange-id", "token", "side"])(
+      "rejects a recovery fill with conflicting %s before persistence",
+      async (fault) => {
+        const f = await recoveryFixture();
+        try {
+          const row = f.fill("wrong-identity", 5);
+          const conflicting = {
+            ...row,
+            clientOrderId: f.pending.clientOrderId,
+            ...(fault === "exchange-id" ? { orderId: "unknown-hash" } : {}),
+            ...(fault === "token" ? { tokenId: createTokenId("wrong-token") } : {}),
+            ...(fault === "side" ? { side: "buy" as const } : {}),
+          };
+          expect((await f.importFills([conflicting])).deferredFillIds).toEqual(["wrong-identity"]);
+          expect(f.fills.findByOrderId(f.pending.orderId)).toEqual([]);
+          expect(f.positions.findById(f.pending.positionId!)?.size).toBe(10);
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it("keeps a failed paginated history read from importing or abandoning the creation bound", async () => {
+      const f = await recoveryFixture();
+      try {
+        await f.reconciliation.runReconciliation();
+        f.history.mockResolvedValueOnce({ ok: false, reason: "network", attempts: 4 });
+        await f.reconciliation.runReconciliation();
+        expect(f.fills.findByOrderId(f.pending.orderId)).toEqual([]);
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+        f.history.mockResolvedValue({ ok: true, data: [f.fill("after-page-failure", 2)] });
+        await f.reconciliation.runReconciliation();
+        expect(f.history.mock.calls.at(-1)?.[0]).toBe(Date.parse(f.pending.createdAt));
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(8);
+      } finally {
+        await f.close();
+      }
+    });
+
+    it("cleans already persisted and reconciled full coverage without another fill publication", async () => {
+      const f = await recoveryFixture();
+      try {
+        f.fills.save(buildLocalFillFromExchangeFill(f.fill("already-saved", 5), f.pending).fill);
+        await f.replay();
+        const received = vi.fn();
+        bus.subscribe("FillReceived", received);
+        await f.sweep();
+        await (f.execution as any).reconcileAllTransitions();
+        expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+        expect(f.orders.findById(f.pending.orderId)?.status).toBe("filled");
+        expect(f.positions.findById(f.pending.positionId!)?.size).toBe(5);
+        expect(received).not.toHaveBeenCalled();
+        expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+      } finally {
+        await f.close();
+      }
+    });
+  });
 
   // ─── Lifecycle ──────────────────────────────────────────────────────
 
@@ -6343,6 +7963,23 @@ describe("ExecutionModule", () => {
         orderId: pending.orderId,
         tokenId: pending.tokenId,
       } as any);
+      expect(liveMod.isExactNullStartupTransitionDraining(position.tokenId)).toBe(true);
+      vi.mocked(gateway.getOrderResult!).mockResolvedValue({
+        ok: true,
+        data: {
+          orderId: pending.exchangeOrderId!,
+          clientOrderId: null,
+          tokenId: pending.tokenId,
+          side: pending.side,
+          price: pending.price,
+          sizeTotal: pending.size,
+          sizeFilled: 1,
+          sizeRemaining: 0,
+          status: "CANCELLED",
+          createdAt: Date.parse(pending.createdAt),
+        },
+      });
+      await liveMod.getSubmitUnknownRecoveryContexts()[0]!.observe();
       expect(liveMod.isExactNullStartupTransitionDraining(position.tokenId)).toBe(false);
       await liveMod.stop();
     });

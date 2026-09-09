@@ -30,6 +30,7 @@ import {
   resolvePolymarketTakerFeeRate,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import type { SubmitUnknownRecoveryContext } from "../execution/execution-module.js";
 import {
   applyOrderVerdict,
   DEFAULT_FILL_COMPLETION_TOLERANCE,
@@ -89,6 +90,7 @@ export interface ImportFillsDeps {
   fillCompletionTolerance?: number | undefined;
   /** Hold exact-hash fills while an active live submission still awaits acknowledgement. */
   deferPendingExactFills?: boolean | undefined;
+  recoveryContexts?: readonly SubmitUnknownRecoveryContext[] | undefined;
 }
 
 export interface ImportFillsResult {
@@ -240,7 +242,7 @@ export async function importExchangeFills(
   }
 
   // Track which orders received new fills for status update
-  const ordersWithNewFills = new Set<string>();
+  const ordersWithNewFills = new Map<string, (() => boolean) | undefined>();
 
   // Collect saved fills for deferred FillReceived publish
   const savedFills: Array<{
@@ -254,6 +256,7 @@ export async function importExchangeFills(
     decisionRuleId: string | null;
     signalTimestamp: string | null;
     clientOrderId: Order["clientOrderId"];
+    isCurrent: (() => boolean) | undefined;
   }> = [];
 
   // Phase 1: Save fills to DB
@@ -278,7 +281,22 @@ export async function importExchangeFills(
       continue;
     }
 
-    if (deps.deferPendingExactFills && isPendingExactOrderForExchangeFill(localOrder, ef)) {
+    const recovery = deps.recoveryContexts?.find(
+      (context) => context.order.orderId === localOrder.orderId,
+    );
+    const recoveryAllowed = () =>
+      Boolean(
+        recovery?.isCurrent() &&
+        recovery.order.exchangeOrderId === ef.orderId &&
+        recovery.order.tokenId === ef.tokenId &&
+        recovery.order.side === ef.side,
+      );
+    if (
+      (recovery && !recoveryAllowed()) ||
+      (deps.deferPendingExactFills &&
+        isPendingExactOrderForExchangeFill(localOrder, ef) &&
+        !recoveryAllowed())
+    ) {
       deferred++;
       deferredFillIds.push(ef.fillId);
       const msg = `fill ${ef.fillId} exactly matches pending local order ${localOrder.orderId} — deferred until OrderPlaced`;
@@ -288,6 +306,11 @@ export async function importExchangeFills(
     }
 
     const feeInfo = await resolveFeeInfo(localOrder.conditionId);
+    if (recovery && !recoveryAllowed()) {
+      deferred++;
+      deferredFillIds.push(ef.fillId);
+      continue;
+    }
     const resolved = buildLocalFillFromExchangeFill(ef, localOrder, undefined, feeInfo);
 
     if (fillRepo.exists(fillId)) {
@@ -306,7 +329,7 @@ export async function importExchangeFills(
       throw error;
     }
     imported++;
-    ordersWithNewFills.add(String(resolved.orderId));
+    ordersWithNewFills.set(String(resolved.orderId), recovery?.isCurrent);
     savedFills.push({
       ef,
       fillId: resolved.fillId,
@@ -318,6 +341,7 @@ export async function importExchangeFills(
       decisionRuleId: localOrder.decisionRuleId ?? null,
       signalTimestamp: localOrder.signalTimestamp ?? null,
       clientOrderId: localOrder.clientOrderId,
+      isCurrent: recovery?.isCurrent,
     });
 
     const msg = `fill imported: ${ef.fillId} (order: ${ef.orderId}, side: ${ef.side}, size: ${ef.size}, role: ${ef.liquidityRole}, fee: ${resolved.fill.fee.toFixed(6)})`;
@@ -326,7 +350,7 @@ export async function importExchangeFills(
   }
 
   // Phase 2: Update order statuses (before publishing events so handlers see terminal status)
-  for (const oid of ordersWithNewFills) {
+  for (const [oid, isCurrent] of ordersWithNewFills) {
     await applyOrderVerdict({
       orderRepo,
       fillRepo,
@@ -334,6 +358,7 @@ export async function importExchangeFills(
       orderId: createOrderId(oid),
       exchange: null,
       fillCompletionTolerance: deps.fillCompletionTolerance,
+      isCurrent,
     });
   }
 
@@ -341,6 +366,8 @@ export async function importExchangeFills(
   recordFillTiming(deps, "import", Date.now() - importStartedAt);
   const eventsStartedAt = Date.now();
   for (const saved of savedFills) {
+    // Saved authentic fills remain available to current inventory replay if this worker expires.
+    if (saved.isCurrent && !saved.isCurrent()) continue;
     const { ef, fillId, orderId, conditionId, sizeUsdc, signalReason, clientOrderId } = saved;
     const feeInfo = feeInfoByCondition.get(String(conditionId)) ?? null;
     const resolved = buildLocalFillFromExchangeFill(ef, saved, undefined, feeInfo);
@@ -402,6 +429,7 @@ export interface FillReconcilerDeps {
   log: Logger;
   /** Relative completion tolerance forwarded to the import (Fix 4). Default {@link DEFAULT_FILL_COMPLETION_TOLERANCE}. */
   fillCompletionTolerance?: number | undefined;
+  recoveryContexts?: readonly SubmitUnknownRecoveryContext[] | undefined;
 }
 
 export interface FillReconcileResult {
@@ -421,11 +449,26 @@ export interface FillReconcileResult {
  * legacy array method (wrapped as `ok: true`) for gateways/mocks without it.
  */
 async function resolveFillsSnapshot(
-  gateway: ExchangeGateway,
+  gateway: ExchangeGateway & {
+    getFillsResult?: (
+      sinceMs: number,
+      onPageRead?: (ms: number, returned: boolean) => void,
+    ) => Promise<FetchResult<ExchangeFill[]>>;
+  },
   sinceMs: number,
+  runtimeMetrics: ImportFillsDeps["runtimeMetrics"],
 ): Promise<FetchResult<ExchangeFill[]>> {
   if (gateway.getFillsResult) {
-    return gateway.getFillsResult(sinceMs);
+    if (!runtimeMetrics?.writeCounter) return gateway.getFillsResult(sinceMs);
+    return gateway.getFillsResult(sinceMs, (ms, returned) => {
+      try {
+        const labels = JSON.stringify({ outcome: returned ? "returned" : "threw" });
+        runtimeMetrics?.writeCounter?.("reconciliation_fills_page_attempt_ms", ms, labels);
+        runtimeMetrics?.writeCounter?.("reconciliation_fills_page_attempt_count", 1, labels);
+      } catch {
+        /* Diagnostics never establish history completeness or interrupt importing. */
+      }
+    });
   }
   return { ok: true, data: await gateway.getFills(sinceMs) };
 }
@@ -437,8 +480,17 @@ export async function reconcileFills(
   const { gateway, fillRepo, orderRepo, bus, log } = deps;
 
   const fetchStartedAt = Date.now();
-  const snapshot = await resolveFillsSnapshot(gateway, sinceMs);
-  recordFillTiming(deps, "fetch", Date.now() - fetchStartedAt);
+  const recoverySinceMs = (deps.recoveryContexts ?? []).reduce(
+    (since, context) =>
+      context.isCurrent() ? Math.min(since, Date.parse(context.order.createdAt)) : since,
+    sinceMs,
+  );
+  let snapshot: FetchResult<ExchangeFill[]>;
+  try {
+    snapshot = await resolveFillsSnapshot(gateway, recoverySinceMs, deps.runtimeMetrics);
+  } finally {
+    recordFillTiming(deps, "fetch", Date.now() - fetchStartedAt);
+  }
   if (!snapshot.ok) {
     // A failed fills fetch is NOT "no executions" — skip the import so we never
     // leave orders in a stale status from incomplete data (#36, Fix 1.5).
@@ -470,6 +522,7 @@ export async function reconcileFills(
     fillCompletionTolerance: deps.fillCompletionTolerance,
     deferPendingExactFills: true,
     runtimeMetrics: deps.runtimeMetrics,
+    recoveryContexts: deps.recoveryContexts,
   });
 
   return {

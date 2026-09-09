@@ -100,6 +100,37 @@ describe("reconcileFills — Fix 1.5: unreliable fills snapshot skip", () => {
     return { gateway, fillRepo, orderRepo, bus, log: silentLog };
   }
 
+  it("records page attempts and isolates diagnostic errors without importing incomplete history", async () => {
+    const gateway = createGateway({ fills: [] });
+    gateway.getFillsResult = vi.fn(
+      async (_since, onPageRead?: (ms: number, returned: boolean) => void) => {
+        onPageRead?.(31, true);
+        onPageRead?.(47, false);
+        return { ok: false, reason: "server", attempts: 1 } as const;
+      },
+    );
+    const writeCounter = vi.fn();
+    const result = await reconcileFills({ ...deps(gateway), runtimeMetrics: { writeCounter } }, 42);
+    expect(result.skipReason).toBe("unreliable_fills");
+    expect(writeCounter).toHaveBeenCalledWith(
+      "reconciliation_fills_page_attempt_ms",
+      31,
+      '{"outcome":"returned"}',
+    );
+    expect(writeCounter).toHaveBeenCalledWith(
+      "reconciliation_fills_page_attempt_count",
+      1,
+      '{"outcome":"threw"}',
+    );
+    writeCounter.mockImplementation(() => {
+      throw new Error("metrics unavailable");
+    });
+    expect(
+      (await reconcileFills({ ...deps(gateway), runtimeMetrics: { writeCounter } }, 42)).skipReason,
+    ).toBe("unreliable_fills");
+    expect(fillRepo.save).not.toHaveBeenCalled();
+  });
+
   it("skips import when getFillsResult is ok:false (no terminal status writes)", async () => {
     const gateway = createGateway({
       fillsResult: { ok: false, reason: "rate_limit", attempts: 4 },

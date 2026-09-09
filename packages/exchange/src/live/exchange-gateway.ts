@@ -819,15 +819,26 @@ export class LiveExchangeGateway implements ExchangeGateway {
     });
   }
 
-  private tradePageLoader(): TradePageLoader {
+  private tradePageLoader(onPageRead?: (ms: number, returned: boolean) => void): TradePageLoader {
     const client = this.client as PaginatedTradesClient;
     if (typeof client.getTradesPaginated !== "function") {
       throw new FetchParseError("paginated trades API is unavailable");
     }
     return async (params, cursor) => {
-      const page = await client.getTradesPaginated!(params, cursor);
-      throwIfReturnedError(page);
-      return page;
+      const startedAt = Date.now();
+      let returned = false;
+      try {
+        const page = await client.getTradesPaginated!(params, cursor);
+        throwIfReturnedError(page);
+        returned = true;
+        return page;
+      } finally {
+        try {
+          onPageRead?.(Date.now() - startedAt, returned);
+        } catch {
+          /* Diagnostic failures cannot affect pagination or retries. */
+        }
+      }
     };
   }
 
@@ -915,9 +926,12 @@ export class LiveExchangeGateway implements ExchangeGateway {
     });
   }
 
-  private async fetchFillsSnapshot(sinceMs: number): Promise<FetchResult<ExchangeFill[]>> {
+  private async fetchFillsSnapshot(
+    sinceMs: number,
+    onPageRead?: (ms: number, returned: boolean) => void,
+  ): Promise<FetchResult<ExchangeFill[]>> {
     try {
-      const directLoad = this.tradePageLoader();
+      const directLoad = this.tradePageLoader(onPageRead);
       const reliableLoad: TradePageLoader = (params, cursor) =>
         this.fetchTradePageWithRetry(directLoad, params, cursor);
       return { ok: true, data: await this.fetchFills(sinceMs, reliableLoad) };
@@ -929,9 +943,12 @@ export class LiveExchangeGateway implements ExchangeGateway {
     }
   }
 
-  private async fetchFillsResultWithRetry(sinceMs: number): Promise<FetchResult<ExchangeFill[]>> {
+  private async fetchFillsResultWithRetry(
+    sinceMs: number,
+    onPageRead?: (ms: number, returned: boolean) => void,
+  ): Promise<FetchResult<ExchangeFill[]>> {
     const result = await executeWithRetry(
-      () => this.fetchFillsSnapshot(sinceMs),
+      () => this.fetchFillsSnapshot(sinceMs, onPageRead),
       classifyFetchError,
       {
         ...this.fillRetryConfig(),
@@ -1027,11 +1044,14 @@ export class LiveExchangeGateway implements ExchangeGateway {
   }
 
   /** Reliable variant of {@link getFills} — see {@link getOpenOrdersResult}. */
-  async getFillsResult(sinceMs: number): Promise<FetchResult<ExchangeFill[]>> {
+  async getFillsResult(
+    sinceMs: number,
+    onPageRead?: (ms: number, returned: boolean) => void,
+  ): Promise<FetchResult<ExchangeFill[]>> {
     return timeDepCall(
       this.depHealthRecorder,
       "clob",
-      () => this.fetchFillsResultWithRetry(sinceMs),
+      () => this.fetchFillsResultWithRetry(sinceMs, onPageRead),
       { isOk: fetchResultOk },
     );
   }

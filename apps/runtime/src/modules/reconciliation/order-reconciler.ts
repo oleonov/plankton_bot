@@ -28,7 +28,10 @@ import type {
   OrderRepository,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
-import type { ExactNullStartupQuarantine } from "../execution/execution-module.js";
+import type {
+  ExactNullStartupQuarantine,
+  SubmitUnknownRecoveryContext,
+} from "../execution/execution-module.js";
 import { applyOrderVerdict, resolveOrderStatusVerdict } from "./order-status-resolver.js";
 
 export interface OrderReconcilerDeps {
@@ -63,6 +66,11 @@ export interface OrderReconcilerDeps {
   /** Relative completion tolerance shared by every exact order verdict. */
   fillCompletionTolerance?: number | undefined;
   exactNullStartupQuarantine?: ExactNullStartupQuarantine;
+  recoveryContexts?: readonly SubmitUnknownRecoveryContext[] | undefined;
+  stageTimingsMs?: Record<string, number>;
+  runtimeMetrics?:
+    | { writeCounter?: (name: string, value?: number, labels?: string | null) => void }
+    | undefined;
 }
 
 export type ReconcileSkipReason = "unreliable_snapshot" | "suspicious_empty";
@@ -102,8 +110,12 @@ export interface OrderReconcileResult {
 
 export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderReconcileResult> {
   const { gateway, orderRepo, log } = deps;
+  const recoveryContexts =
+    deps.recoveryContexts ??
+    deps.exactNullStartupQuarantine?.getSubmitUnknownRecoveryContexts?.() ??
+    [];
 
-  const snapshot = await resolveSnapshot(gateway);
+  const snapshot = await measureOrderStage(deps, "openFetch", 1, () => resolveSnapshot(gateway));
   const capturedAtMs = Date.now();
   const localOrders = orderRepo.findOpen();
   const localOpenCount = localOrders.length;
@@ -134,14 +146,20 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   }
 
   const unresolvedStaleOrders = deps.unresolvedStaleOrders ?? new Map<string, ExchangeOrder>();
-  const unresolvedPrecheck = await resolveUnresolvedStaleOrders({
-    orders: unresolvedStaleOrders,
-    gateway,
-    orderRepo,
-    fillRepo: deps.fillRepo ?? EMPTY_FILL_READER,
-    log,
-    fillCompletionTolerance: deps.fillCompletionTolerance,
-  });
+  const unresolvedPrecheck = await measureOrderStage(
+    deps,
+    "unresolvedPrechecks",
+    unresolvedStaleOrders.size,
+    () =>
+      resolveUnresolvedStaleOrders({
+        orders: unresolvedStaleOrders,
+        gateway,
+        orderRepo,
+        fillRepo: deps.fillRepo ?? EMPTY_FILL_READER,
+        log,
+        fillCompletionTolerance: deps.fillCompletionTolerance,
+      }),
+  );
   const exchangeOrderIds = new Set(exchangeOrders.map((o) => o.orderId));
   const localExchangeIds = new Set(
     localOrders.filter((o) => o.exchangeOrderId !== null).map((o) => o.exchangeOrderId!),
@@ -154,11 +172,24 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     deps.exactNullStartupQuarantine?.isExactNullStartupOrderQuarantined(order),
   );
   const quarantineIds = new Set(quarantineOrders.map((order) => String(order.orderId)));
-  for (const order of quarantineOrders) {
-    const remoteState = exactRemoteState(order, exchangeOrders);
-    if (!remoteState) continue;
-    await deps.exactNullStartupQuarantine!.observeExactNullStartupRemoteState(order, remoteState);
+  const recoveredTerminalIds = new Set<string>();
+  for (const context of recoveryContexts) {
+    quarantineIds.add(String(context.order.orderId));
+    if (context.order.exchangeOrderId) localExchangeIds.add(context.order.exchangeOrderId);
   }
+  await measureOrderStage(deps, "quarantineObservation", recoveryContexts.length, async () => {
+    for (const order of quarantineOrders) {
+      const recovery = recoveryContexts.find((context) => context.order.orderId === order.orderId);
+      if (recovery && !recovery.isCurrent()) continue;
+      const remoteState = exactRemoteState(order, exchangeOrders);
+      if (!remoteState) continue;
+      await deps.exactNullStartupQuarantine!.observeExactNullStartupRemoteState(order, remoteState);
+    }
+    for (const context of recoveryContexts) {
+      const terminalId = await context.observe();
+      if (terminalId) recoveredTerminalIds.add(terminalId);
+    }
+  });
 
   const unresolved = reconcileMissingOrders({
     localOrders: localOrders.filter((order) => !quarantineIds.has(String(order.orderId))),
@@ -170,33 +201,42 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   });
 
   const fillRepo = deps.fillRepo ?? EMPTY_FILL_READER;
-  await resolveExactCandidates({
-    candidates: unresolved.exactCandidates,
-    gateway,
-    orderRepo,
-    fillRepo,
-    log,
-    fillCompletionTolerance: deps.fillCompletionTolerance,
-    ...(deps.bus ? { bus: deps.bus } : {}),
-  });
+  await measureOrderStage(deps, "exactCandidates", unresolved.exactCandidates.length, () =>
+    resolveExactCandidates({
+      candidates: unresolved.exactCandidates,
+      gateway,
+      orderRepo,
+      fillRepo,
+      log,
+      fillCompletionTolerance: deps.fillCompletionTolerance,
+      ...(deps.bus ? { bus: deps.bus } : {}),
+    }),
+  );
 
-  const cascade = await reconcileStaleExchangeOrders({
-    exchangeOrders,
-    localExchangeIds,
-    orderRepo,
-    fillRepo,
-    gateway,
-    log,
-    snapshotReliable: true,
-    fillCompletionTolerance: deps.fillCompletionTolerance,
-    unresolvedStaleOrders,
-    precheckedStaleOrderIds: unresolvedPrecheck.checkedOrderIds,
-    preconfirmedTerminalOrderIds: unresolvedPrecheck.terminalOrderIds,
-  });
+  const cascade = await measureOrderStage(
+    deps,
+    "staleCascade",
+    exchangeOrders.filter((order) => !localExchangeIds.has(order.orderId)).length,
+    () =>
+      reconcileStaleExchangeOrders({
+        exchangeOrders,
+        localExchangeIds,
+        orderRepo,
+        fillRepo,
+        gateway,
+        log,
+        snapshotReliable: true,
+        fillCompletionTolerance: deps.fillCompletionTolerance,
+        unresolvedStaleOrders,
+        precheckedStaleOrderIds: unresolvedPrecheck.checkedOrderIds,
+        preconfirmedTerminalOrderIds: unresolvedPrecheck.terminalOrderIds,
+      }),
+  );
 
   const survivingExchangeOrders = [...exchangeOrders, ...unresolvedStaleOrders.values()].filter(
     (order, index, orders) =>
       !cascade.terminalStaleOrderIds.has(order.orderId) &&
+      !recoveredTerminalIds.has(order.orderId) &&
       orders.findIndex((candidate) => candidate.orderId === order.orderId) === index,
   );
 
@@ -218,6 +258,34 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     cascadeSkipped: cascade.cascadeSkipped,
     acknowledgedExternalStateUnknown: quarantineOrders.length,
   };
+}
+
+async function measureOrderStage<T>(
+  deps: OrderReconcilerDeps,
+  stage:
+    | "openFetch"
+    | "unresolvedPrechecks"
+    | "exactCandidates"
+    | "quarantineObservation"
+    | "staleCascade",
+  operations: number,
+  action: () => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    return await action();
+  } finally {
+    const ms = Date.now() - startedAt;
+    if (deps.stageTimingsMs) deps.stageTimingsMs[`orders.${stage}`] = ms;
+    try {
+      const labels = JSON.stringify({ stage });
+      deps.runtimeMetrics?.writeCounter?.("reconciliation_orders_stage_ms", ms, labels);
+      deps.runtimeMetrics?.writeCounter?.("reconciliation_orders_stage_count", 1, labels);
+      deps.runtimeMetrics?.writeCounter?.("reconciliation_orders_operations", operations, labels);
+    } catch {
+      /* Diagnostics must not interrupt order recovery. */
+    }
+  }
 }
 
 const EMPTY_FILL_READER: Pick<FillRepository, "findByOrderId"> = {

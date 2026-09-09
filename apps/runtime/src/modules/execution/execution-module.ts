@@ -97,7 +97,10 @@ import {
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import {
   applyOrderVerdict,
+  hasExactMatchedCoverage,
+  persistedGrossShares,
   registerCancelIntent,
+  type TerminalVerdict,
 } from "../reconciliation/order-status-resolver.js";
 import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
 import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
@@ -583,6 +586,17 @@ export interface ExactNullStartupQuarantine {
   isExactNullStartupTokenQuarantined?(tokenId: TokenId): boolean;
   observeExactNullStartupRemoteState(order: Order, state: "absent" | "working"): Promise<void>;
   getExactNullStartupQuarantineCount(): number;
+  getSubmitUnknownRecoveryContexts?(isCurrent?: () => boolean): SubmitUnknownRecoveryContext[];
+}
+
+export interface SubmitUnknownRecoveryContext {
+  readonly order: Order;
+  readonly isCurrent: () => boolean;
+  readonly observe: () => Promise<string | undefined>;
+  readonly applyExact: (
+    exchange: ExchangeOrder | null,
+    timestamp?: number,
+  ) => Promise<string | undefined>;
 }
 
 interface ExactNullStartupQuarantineState {
@@ -595,6 +609,8 @@ interface ExactNullStartupQuarantineState {
   attemptedRemoteVersion: number;
   permittedCommandId: string | null;
   claimedCommandId: string | null;
+  acceptedTerminalRevision?: number;
+  knownMatchedShares?: number;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -1124,6 +1140,123 @@ export class ExecutionModule implements RuntimeModule {
     return this.exactNullStartupQuarantine.size;
   }
 
+  getSubmitUnknownRecoveryContexts(isCurrent = () => true): SubmitUnknownRecoveryContext[] {
+    const revision = this.cleanupLifecycleRevision;
+    return [...this.exactNullStartupQuarantine.values()]
+      .filter((state) => state.provenance === "exact-null-submit-unknown-sell")
+      .map((state) => {
+        const lifecycleCurrent = () => {
+          const current = this.deps.orderRepo.findById(state.order.orderId);
+          return Boolean(
+            isCurrent() &&
+            this.started &&
+            !this.cleanupStopping &&
+            revision === this.cleanupLifecycleRevision &&
+            current &&
+            this.sameStartupOrderIdentity(state.order, current),
+          );
+        };
+        const valid = () =>
+          lifecycleCurrent() &&
+          this.exactNullStartupQuarantine.get(String(state.order.orderId)) === state;
+        const acceptedTerminalId = () =>
+          lifecycleCurrent() &&
+          state.acceptedTerminalRevision === revision &&
+          !this.exactNullStartupQuarantine.has(String(state.order.orderId))
+            ? (state.order.exchangeOrderId ?? undefined)
+            : undefined;
+        return {
+          order: { ...state.order },
+          isCurrent: valid,
+          observe: async () => {
+            // A queued rearm can remove this owner before or during the exact read.
+            return (
+              acceptedTerminalId() ??
+              (await this.observeSubmitUnknownRecovery(state, valid)) ??
+              acceptedTerminalId()
+            );
+          },
+          applyExact: async (exchange, timestamp) =>
+            acceptedTerminalId() ??
+            (await this.applySubmitUnknownRecoveryExact(state, exchange, valid, timestamp)) ??
+            acceptedTerminalId(),
+        };
+      });
+  }
+
+  private async observeSubmitUnknownRecovery(
+    state: ExactNullStartupQuarantineState,
+    isCurrent: () => boolean,
+  ): Promise<string | undefined> {
+    const order = state.order;
+    if (!isCurrent() || !order.exchangeOrderId || !this.deps.gateway.getOrderResult) return;
+    const exact = await this.deps.gateway.getOrderResult(order.exchangeOrderId);
+    if (!isCurrent() || !exact.ok) return;
+    return this.applySubmitUnknownRecoveryExact(state, exact.data, isCurrent);
+  }
+
+  private async applySubmitUnknownRecoveryExact(
+    state: ExactNullStartupQuarantineState,
+    exchange: ExchangeOrder | null,
+    isCurrent: () => boolean,
+    timestamp?: number,
+  ): Promise<string | undefined> {
+    const order = state.order;
+    if (
+      !isCurrent() ||
+      !order.exchangeOrderId ||
+      (exchange && !this.matchesExactStartupOrderIdentity(order, exchange))
+    )
+      return;
+    const verdict = await applyOrderVerdict({
+      orderRepo: this.deps.orderRepo,
+      fillRepo: this.deps.fillRepo,
+      bus: this.deps.bus,
+      log: this.log,
+      orderId: order.orderId,
+      exchange,
+      publish: true,
+      ...(timestamp === undefined ? {} : { timestamp }),
+      fillCompletionTolerance: this.deps.fillCompletionTolerance,
+      isCurrent,
+      onVerdictApplied: (applied) =>
+        this.updateSubmitUnknownTerminalProof(state, exchange, applied, isCurrent),
+    });
+    if (
+      isCurrent() &&
+      state.acceptedTerminalRevision === this.cleanupLifecycleRevision &&
+      (exchange === null ||
+        (verdict.status !== "unresolved" && isTerminalOrderStatus(verdict.status)))
+    ) {
+      this.removeTransitionTargetIfTerminal(order.tokenId, order.orderId);
+      return order.exchangeOrderId;
+    }
+  }
+
+  private updateSubmitUnknownTerminalProof(
+    state: ExactNullStartupQuarantineState,
+    exchange: Pick<ExchangeOrder, "status" | "sizeFilled"> | null,
+    verdict: TerminalVerdict,
+    isCurrent: () => boolean,
+  ): void {
+    if (!isCurrent()) return;
+    const gross = persistedGrossShares(this.deps.fillRepo, state.order);
+    if (exchange && !hasExactMatchedCoverage(exchange, gross)) {
+      // Null or older exact observations cannot erase known missing fills.
+      state.knownMatchedShares = Math.max(state.knownMatchedShares ?? 0, exchange.sizeFilled);
+    }
+    if (
+      exchange?.status === "OPEN" ||
+      exchange?.status === "PARTIALLY_FILLED" ||
+      (state.knownMatchedShares !== undefined &&
+        !hasExactMatchedCoverage({ sizeFilled: state.knownMatchedShares }, gross))
+    ) {
+      delete state.acceptedTerminalRevision;
+    } else if (verdict.status !== "unresolved" && isTerminalOrderStatus(verdict.status)) {
+      state.acceptedTerminalRevision = this.cleanupLifecycleRevision;
+    }
+  }
+
   async observeExactNullStartupRemoteState(
     order: Order,
     remoteState: "absent" | "working",
@@ -1191,6 +1324,17 @@ export class ExecutionModule implements RuntimeModule {
       snapshot.postOnly === current.postOnly &&
       snapshot.createdAt === current.createdAt &&
       resolveMakerMicroLiveFillDeadlineMs(snapshot) === resolveMakerMicroLiveFillDeadlineMs(current)
+    );
+  }
+
+  private matchesExactStartupOrderIdentity(
+    order: Order,
+    exact: Partial<Pick<ExchangeOrder, "orderId" | "tokenId" | "side">>,
+  ): boolean {
+    return (
+      exact.orderId === order.exchangeOrderId &&
+      String(exact.tokenId) === String(order.tokenId) &&
+      exact.side === order.side
     );
   }
 
@@ -1730,7 +1874,6 @@ export class ExecutionModule implements RuntimeModule {
             throw new Error("startup exact-null maker proof changed before seeding");
           }
         } else {
-          this.exactNullStartupQuarantine.delete(orderKey);
           this.removeTransitionTargetIfTerminal(current.tokenId, current.orderId);
         }
         currentOrders.push(current);
@@ -1766,6 +1909,7 @@ export class ExecutionModule implements RuntimeModule {
 
     const order = this.deps.orderRepo.findById(orderId);
     if (!order || !isTerminalOrderStatus(order.status)) return;
+    if (!this.canRemoveSubmitUnknownTarget(order)) return;
 
     transition.targets.delete(orderKey);
     this.exactNullStartupQuarantine.delete(orderKey);
@@ -1774,6 +1918,18 @@ export class ExecutionModule implements RuntimeModule {
     // unboundedly (the transition closes and autonomous reconcile can't reach it).
     this.transitionCancelRetryAt.delete(orderKey);
     this.maybeCloseTokenTransition(tokenId);
+  }
+
+  private canRemoveSubmitUnknownTarget(order: Order): boolean {
+    const state = this.exactNullStartupQuarantine.get(String(order.orderId));
+    if (state?.provenance !== "exact-null-submit-unknown-sell") return true;
+    return (
+      this.started &&
+      !this.cleanupStopping &&
+      state.acceptedTerminalRevision === this.cleanupLifecycleRevision &&
+      this.sameStartupOrderIdentity(state.order, order) &&
+      !this.deps.fillRepo.findUnreconciled().some((fill) => fill.orderId === order.orderId)
+    );
   }
 
   private maybeCloseTokenTransition(tokenId: TokenId): void {
@@ -1815,7 +1971,12 @@ export class ExecutionModule implements RuntimeModule {
       // resolver path in executeCancel. Local terminal state (or a missing local row)
       // is not sufficient proof and must leave the token fail-closed.
       if (!order) continue;
-      if (this.exactNullStartupQuarantine.has(orderKey)) continue;
+      const quarantine = this.exactNullStartupQuarantine.get(orderKey);
+      if (quarantine) {
+        if (quarantine.provenance === "exact-null-submit-unknown-sell")
+          this.removeTransitionTargetIfTerminal(tokenId, order.orderId);
+        continue;
+      }
       // Finding 5 backoff: retry a stuck cancel at most once per backoff window, so a
       // token whose cancel keeps failing cannot cancel-storm on every reconcile tick.
       const lastRetry = this.transitionCancelRetryAt.get(orderKey) ?? 0;
@@ -5770,6 +5931,14 @@ export class ExecutionModule implements RuntimeModule {
       cmd.reason !== "submit_unknown_recovery"
     )
       return;
+    const recovery =
+      exactState?.provenance === "exact-null-submit-unknown-sell"
+        ? this.getSubmitUnknownRecoveryContexts().find(
+            (context) => context.order.orderId === cmd.orderId,
+          )
+        : undefined;
+    if (exactState?.provenance === "exact-null-submit-unknown-sell" && !recovery?.isCurrent())
+      return;
     const isTransitionTarget = this.hasTransitionTarget(cmd.orderId);
     if (existingOrder && isTerminalOrderStatus(existingOrder.status) && !isTransitionTarget) {
       this.log.debug(
@@ -5867,6 +6036,7 @@ export class ExecutionModule implements RuntimeModule {
             log: this.log,
             gateway: this.deps.gateway,
             fillCompletionTolerance: this.deps.fillCompletionTolerance,
+            recoveryContexts: recovery ? [recovery] : undefined,
           },
         );
       const exact = this.deps.gateway.getOrderResult
@@ -5878,6 +6048,13 @@ export class ExecutionModule implements RuntimeModule {
             }
           : null;
       if (!exact || !exact.ok) return;
+      if (recovery && !recovery.isCurrent()) return;
+      if (
+        recovery &&
+        exact.data &&
+        !this.matchesExactStartupOrderIdentity(recovery.order, exact.data)
+      )
+        return;
       const orderForTelemetry = this.deps.orderRepo.findById(cmd.orderId);
       const cancelTelemetry = orderForTelemetry
         ? buildCancelTelemetry({
@@ -5895,6 +6072,17 @@ export class ExecutionModule implements RuntimeModule {
         orderId: cmd.orderId,
         exchange: exact.data,
         publish: true,
+        isCurrent: recovery?.isCurrent,
+        onVerdictApplied:
+          recovery && exactState
+            ? (applied) =>
+                this.updateSubmitUnknownTerminalProof(
+                  exactState,
+                  exact.data,
+                  applied,
+                  recovery.isCurrent,
+                )
+            : undefined,
         ...(this.deps.fillCompletionTolerance === undefined
           ? {}
           : { fillCompletionTolerance: this.deps.fillCompletionTolerance }),
@@ -5906,6 +6094,7 @@ export class ExecutionModule implements RuntimeModule {
         verdict.status !== "rejected"
       )
         return;
+      if (recovery && !recovery.isCurrent()) return;
       const settledOrder = this.deps.orderRepo.findById(cmd.orderId);
       if (settledOrder) {
         if (verdict.status === "cancelled" || verdict.status === "rejected") {

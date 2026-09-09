@@ -10,6 +10,7 @@ import type {
   RuntimeModule,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import type { ExactNullStartupQuarantine } from "../execution/execution-module.js";
 import {
   findLocalOrderForExchangeFill,
   importExchangeFills,
@@ -62,6 +63,7 @@ export interface UserOrderStreamModuleDeps {
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
   log: Logger;
+  exactNullStartupQuarantine?: ExactNullStartupQuarantine;
   fillCatchupOverlapMs?: number;
   orphanTtlMs?: number;
   /** Relative fill-completion tolerance forwarded to fill imports (#36). */
@@ -97,6 +99,7 @@ export class UserOrderStreamModule implements RuntimeModule {
   private unsubs: Array<() => void> = [];
   private stream: ManagedUserEventStream | null = null;
   private started = false;
+  private generation = 0;
   private catchupInFlight = false;
   private seenPruneTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -110,6 +113,7 @@ export class UserOrderStreamModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.started = true;
+    const generation = ++this.generation;
     // Defense-in-depth: own the dedupe-map prune cadence instead of relying
     // solely on the external 30s getMetricsSnapshot() poll. DEDUPE_TTL_MS is
     // 1h, so pruning every 5 minutes is more than enough; unref'ed so tests
@@ -151,14 +155,14 @@ export class UserOrderStreamModule implements RuntimeModule {
         await this.handleTradeEvents(events);
       },
       onOrderEvents: async (events) => {
-        await this.handleOrderEvents(events);
+        await this.handleOrderEvents(events, generation);
       },
       onGapDetected: async ({ reason, timestamp }) => {
         this.rotateWindow(timestamp);
         this.window.wsEventGapDetected++;
         this.window.reconnectCount++;
         this.log.warn({ reason }, "user websocket gap detected — running catch-up sync");
-        await this.runCatchupSync("gap");
+        await this.runCatchupSync("gap", generation);
         this.refreshSubscribedConditions();
       },
       onError: async (error) => {
@@ -167,7 +171,7 @@ export class UserOrderStreamModule implements RuntimeModule {
     }) as ManagedUserEventStream;
 
     this.refreshSubscribedConditions();
-    await this.runCatchupSync("startup");
+    await this.runCatchupSync("startup", generation);
     await this.flushOrphanBuffer();
     this.log.info("user websocket stream module started");
   }
@@ -251,7 +255,10 @@ export class UserOrderStreamModule implements RuntimeModule {
     await this.flushOrphanBuffer();
   }
 
-  private async handleOrderEvents(events: readonly ExchangeUserOrderEvent[]): Promise<void> {
+  private async handleOrderEvents(
+    events: readonly ExchangeUserOrderEvent[],
+    generation: number,
+  ): Promise<void> {
     for (const event of events) {
       const nowMs = this.now();
       this.noteEvent(nowMs, event.timestamp);
@@ -266,7 +273,7 @@ export class UserOrderStreamModule implements RuntimeModule {
         this.preAckBuffer.set(dedupeKey, { kind: "order", event, orderId: pendingOrderId });
         continue;
       }
-      await this.applyOrderEvent(event);
+      await this.applyOrderEvent(event, generation);
     }
 
     await this.flushOrphanBuffer();
@@ -288,7 +295,10 @@ export class UserOrderStreamModule implements RuntimeModule {
     }
   }
 
-  private async applyOrderEvent(event: ExchangeUserOrderEvent): Promise<void> {
+  private async applyOrderEvent(
+    event: ExchangeUserOrderEvent,
+    generation = this.generation,
+  ): Promise<void> {
     const localOrder = this.findLocalOrderForOrderEvent(event);
     if (!localOrder) {
       this.log.debug(
@@ -305,10 +315,18 @@ export class UserOrderStreamModule implements RuntimeModule {
     const nextStatus = resolveLocalOrderStatus(event);
     const currentStatus = localOrder.status;
     if (nextStatus === "cancelled" || nextStatus === "filled" || nextStatus === "rejected") {
+      // Capture the owner before the RPC; a restart must not renew its authority.
+      const recovery = this.deps.exactNullStartupQuarantine
+        ?.getSubmitUnknownRecoveryContexts?.(() => this.started && generation === this.generation)
+        .find((context) => context.order.orderId === localOrder.orderId);
       const exact = this.deps.gateway.getOrderResult
         ? await this.deps.gateway.getOrderResult(event.orderId)
         : null;
       if (!exact || !exact.ok) return;
+      if (recovery) {
+        await recovery.applyExact(exact.data, event.timestamp);
+        return;
+      }
       await applyOrderVerdict({
         orderRepo: this.deps.orderRepo,
         fillRepo: this.deps.fillRepo,
@@ -364,10 +382,14 @@ export class UserOrderStreamModule implements RuntimeModule {
     }
   }
 
-  private async runCatchupSync(reason: "startup" | "gap"): Promise<void> {
+  private async runCatchupSync(reason: "startup" | "gap", generation: number): Promise<void> {
     if (this.catchupInFlight) return;
     this.catchupInFlight = true;
     try {
+      const recoveryContexts =
+        this.deps.exactNullStartupQuarantine?.getSubmitUnknownRecoveryContexts?.(
+          () => this.started && generation === this.generation,
+        ) ?? [];
       const latestFillTimestamp = this.deps.fillRepo.getLatestTimestamp() ?? 0;
       await reconcileFills(
         {
@@ -377,6 +399,7 @@ export class UserOrderStreamModule implements RuntimeModule {
           bus: this.deps.bus,
           log: this.log,
           fillCompletionTolerance: this.deps.fillCompletionTolerance,
+          recoveryContexts,
         },
         Math.max(0, latestFillTimestamp - this.fillCatchupOverlapMs),
       );
@@ -389,6 +412,10 @@ export class UserOrderStreamModule implements RuntimeModule {
         log: this.log,
         phantomGraceMs: PHANTOM_GRACE_MS,
         fillCompletionTolerance: this.deps.fillCompletionTolerance,
+        recoveryContexts,
+        ...(this.deps.exactNullStartupQuarantine
+          ? { exactNullStartupQuarantine: this.deps.exactNullStartupQuarantine }
+          : {}),
       });
       this.refreshSubscribedConditions();
       await this.flushOrphanBuffer();
