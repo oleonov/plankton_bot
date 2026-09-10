@@ -83,6 +83,54 @@ function captureProof(stage: "cancel_pending" | "ready" | "submitted", signalId 
 }
 
 describe("EntryLifecycleModule", () => {
+  it.each(["current", "stale", "invalidated"])(
+    "checks %s work after awaiting token recovery",
+    async (state) => {
+      let now = 1_000;
+      const repo = makeOrderRepo(makeOrder());
+      const module = buildModule({ orderRepo: repo, now: () => now });
+      await module.start();
+      let release!: () => void;
+      const recovery = vi
+        .spyOn(module as any, "recoverMakerCaptureReprices")
+        .mockImplementation(() => new Promise<void>((resolve) => (release = resolve)));
+      const trigger = vi.spyOn(module as any, "captureOrderTriggerProof").mockReturnValue(null);
+      vi.mocked(repo.findOpen).mockClear();
+      const work = (module as any).handleCaptureMarketEvent({
+        markets: [makeMarket()],
+        timestamp: now,
+      });
+      expect(recovery).toHaveBeenCalledWith(false, new Set([String(TOKEN)]));
+      expect(repo.findOpen).not.toHaveBeenCalled();
+      if (state === "stale") now += 3_001;
+      if (state === "invalidated") (module as any).captureWork.invalidate();
+      release();
+      await work;
+      expect(repo.findOpen).toHaveBeenCalledWith(TOKEN);
+      expect(trigger).toHaveBeenCalledTimes(state === "current" ? 1 : 0);
+      recovery.mockRestore();
+      await module.stop();
+    },
+  );
+
+  it("splits market batches into scoped open reads and skips empty batches", async () => {
+    const bus = new InProcessEventBus();
+    const repo = makeOrderRepo(null);
+    const module = buildModule({ bus, orderRepo: repo });
+    await module.start();
+    vi.mocked(repo.findOpen).mockClear();
+    await bus.publish("NormalizedMarketUpdated", { markets: [], timestamp: 1_000 });
+    expect(repo.findOpen).not.toHaveBeenCalled();
+    const other = createTokenId("other-capture-market");
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket(), makeMarket({ tokenId: other })],
+      timestamp: 1_000,
+    });
+    await vi.waitFor(() => expect(repo.findOpen).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(repo.findOpen).mock.calls).toEqual([[TOKEN], [other]]);
+    await module.stop();
+  });
+
   it.each(["accepted", "unknown", "minimum"])(
     "preserves an active capture during final proof with SDK outcome: %s",
     async (outcome) => {
@@ -1284,8 +1332,16 @@ describe("EntryLifecycleModule", () => {
       let intent: MakerCaptureRepriceIntent | null = null;
       const repo = makeOrderRepo(root);
       vi.mocked(repo.findById).mockImplementation(() => current);
-      vi.mocked(repo.findOpen).mockImplementation(() =>
-        current.status === "open" || current.status === "partially-filled" ? [current] : [],
+      const foreign = makeOrder({
+        orderId: createOrderId("foreign"),
+        tokenId: createTokenId("foreign"),
+      });
+      vi.mocked(repo.findOpen).mockImplementation((tokenId) =>
+        [foreign, current].filter(
+          (order) =>
+            (tokenId === undefined || order.tokenId === tokenId) &&
+            (order.status === "open" || order.status === "partially-filled"),
+        ),
       );
       repo.getMakerCaptureChainUsage = vi.fn(() => ({
         trusted: true,
@@ -1412,8 +1468,12 @@ describe("EntryLifecycleModule", () => {
       });
 
       await module.start();
+      vi.mocked(repo.findOpen).mockClear();
       await publishMarket(bus, makeMarket({ bestBid: 0.31 }));
       await vi.waitFor(() => expect(cancels).toHaveLength(1));
+      expect(vi.mocked(repo.findOpen).mock.calls).toEqual([[TOKEN]]);
+      expect(repo.claimMakerCaptureRepriceIntent).toHaveBeenCalledTimes(1);
+      expect(intent!.predecessorOrderId).toBe(root.orderId);
       expect(cancels[0]?.command.commandId).toBe(
         buildMakerCaptureRepriceIdentity(root.orderId, root.orderId, 1).cancelCommandId,
       );

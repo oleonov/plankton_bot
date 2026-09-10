@@ -185,7 +185,77 @@ function chainUsage(id: Order["orderId"]) {
   return { trusted: true, rootOrderId: id } as any;
 }
 
+function captureModule(
+  overrides: Partial<ConstructorParameters<typeof BounceAskCaptureLifecycleModule>[0]> = {},
+) {
+  return new BounceAskCaptureLifecycleModule({
+    bus: new InProcessEventBus(),
+    orderRepo: {} as any,
+    fillRepo: {} as any,
+    positionRepo: {} as any,
+    inventoryLotRepo: {} as any,
+    policySnapshot: () => ({
+      policy: {
+        ...DEFAULT_EXECUTION_POLICY,
+        bounceAskCapture: { ...DEFAULT_EXECUTION_POLICY.bounceAskCapture, enabled: true },
+      },
+      controlRevision: 7,
+    }),
+    log: { child: () => ({ info: vi.fn(), error: vi.fn() }) } as any,
+    now: () => NOW,
+    ...overrides,
+  });
+}
+
 describe("bounce ASK capture", () => {
+  it.each(["current", "stale", "invalidated"])(
+    "checks %s work after awaiting token recovery",
+    async (state) => {
+      let now = NOW;
+      const findOpen = vi.fn(() => [order("target")]);
+      const module = captureModule({
+        orderRepo: { findOpen } as any,
+        now: () => now,
+      });
+      await module.start();
+      let release!: () => void;
+      const recovery = vi
+        .spyOn(module as any, "recover")
+        .mockImplementation(() => new Promise<void>((resolve) => (release = resolve)));
+      const claim = vi.spyOn(module as any, "tryClaim").mockResolvedValue(undefined);
+      findOpen.mockClear();
+      const work = (module as any).captureMarket({ markets: [{ tokenId }], timestamp: NOW });
+      expect(recovery).toHaveBeenCalledWith(new Set([String(tokenId)]));
+      expect(findOpen).not.toHaveBeenCalled();
+      if (state === "stale") now += 3_001;
+      if (state === "invalidated") (module as any).captureWork.invalidate();
+      release();
+      await work;
+      expect(findOpen).toHaveBeenCalledWith(tokenId);
+      expect(claim).toHaveBeenCalledTimes(state === "current" ? 1 : 0);
+      recovery.mockRestore();
+      await module.stop();
+    },
+  );
+
+  it("splits market batches into scoped open reads and skips empty batches", async () => {
+    const bus = new InProcessEventBus();
+    const findOpen = vi.fn(() => []);
+    const module = captureModule({ bus, orderRepo: { findOpen } as any });
+    await module.start();
+    findOpen.mockClear();
+    await bus.publish("NormalizedMarketUpdated", { markets: [], timestamp: NOW });
+    expect(findOpen).not.toHaveBeenCalled();
+    const other = createTokenId("other-ask-market");
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [tokenId, other].map((id) => ({ tokenId: id, active: true }) as NormalizedMarket),
+      timestamp: NOW,
+    });
+    await vi.waitFor(() => expect(findOpen).toHaveBeenCalledTimes(2));
+    expect(findOpen.mock.calls).toEqual([[tokenId], [other]]);
+    await module.stop();
+  });
+
   it("bounds its market cache across tracked removal and restart", async () => {
     const bus = new InProcessEventBus();
     const module = new BounceAskCaptureLifecycleModule({
@@ -358,7 +428,11 @@ describe("bounce ASK capture", () => {
     const effects: string[] = [];
     const terminal = vi.fn();
     const repo: any = {
-      findOpen: () => [sell],
+      findOpen: vi.fn((scope?: Order["tokenId"]) =>
+        [order("foreign", { tokenId: createTokenId("foreign") }), sell].filter(
+          (candidate) => scope === undefined || candidate.tokenId === scope,
+        ),
+      ),
       findById: (id: Order["orderId"]) =>
         String(id) === String(buy.orderId)
           ? buy
@@ -447,9 +521,12 @@ describe("bounce ASK capture", () => {
       tickSize: 0.01,
       snapshotTs: NOW,
     } as unknown as NormalizedMarket;
+    repo.findOpen.mockClear();
     await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: NOW });
     await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: NOW });
     await vi.waitFor(() => expect(effects).toEqual(["claim", "cancel-after-claim"]));
+    expect(repo.findOpen).toHaveBeenCalledWith(tokenId);
+    expect(intent.predecessorOrderId).toBe(sell.orderId);
     policyEnabled = false;
     if (activationId) {
       sell = { ...sell, status: "cancelled" };

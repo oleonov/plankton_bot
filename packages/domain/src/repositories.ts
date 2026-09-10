@@ -310,8 +310,8 @@ export interface OrderRepository {
   /** Find an order by the exchange-assigned order ID (fallback for fill matching). */
   findByExchangeOrderId(exchangeOrderId: string): Order | null;
 
-  /** Return all orders whose status is pending or open. */
-  findOpen(): Order[];
+  /** Return pending, open, and partially-filled orders, optionally limited to one token. */
+  findOpen(tokenId?: TokenId): Order[];
 
   /** Return all orders for a specific outcome token. */
   findByTokenId(tokenId: TokenId): Order[];

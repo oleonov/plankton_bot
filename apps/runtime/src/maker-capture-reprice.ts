@@ -532,7 +532,6 @@ function currentPermanentRootContext(
 ): PermanentRootContext | null {
   const origin = parseQuoteMotionOrigin(root);
   const lineage = parseMakerCaptureLineage(root);
-  const usage = orderRepo.getMakerCaptureChainUsage?.(root.orderId);
   const lifecycle = root.metadata?.makerMicroLiveLifecycle as Record<string, unknown> | undefined;
   const deadlineMs = resolveMakerMicroLiveFillDeadlineMs(root);
   const activationId = policy.makerEntry.permanentR23ActivationId;
@@ -550,7 +549,6 @@ function currentPermanentRootContext(
     }) ||
     !origin ||
     !lineage ||
-    !usage?.trusted ||
     !activationId ||
     !activatedAtUtc ||
     origin.kind !== "r23_capture" ||
@@ -565,11 +563,17 @@ function currentPermanentRootContext(
     lineage.predecessorOrderId !== null ||
     String(lineage.rootOrderId) !== String(root.orderId) ||
     Math.abs(lineage.rootNotionalUsdc - root.sizeUsdc) > EPSILON ||
-    String(usage.rootOrderId) !== String(root.orderId) ||
-    usage.replacementIndex !== 0 ||
-    Math.abs(usage.rootNotionalUsdc - lineage.rootNotionalUsdc) > EPSILON ||
     deadlineMs === null ||
     nowMs >= deadlineMs
+  ) {
+    return null;
+  }
+  const usage = orderRepo.getMakerCaptureChainUsage?.(root.orderId);
+  if (
+    !usage?.trusted ||
+    String(usage.rootOrderId) !== String(root.orderId) ||
+    usage.replacementIndex !== 0 ||
+    Math.abs(usage.rootNotionalUsdc - lineage.rootNotionalUsdc) > EPSILON
   ) {
     return null;
   }

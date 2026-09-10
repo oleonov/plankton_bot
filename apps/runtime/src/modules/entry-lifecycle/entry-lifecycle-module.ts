@@ -344,9 +344,11 @@ export class EntryLifecycleModule implements RuntimeModule {
     const current = this.captureWork.guard();
     const now = this.now();
     if (!freshEvent(event.timestamp, now)) return;
+    const [eventMarket] = event.markets;
+    if (!eventMarket) return;
     const markets = new Map(event.markets.map((market) => [String(market.tokenId), market]));
     await this.recoverMakerCaptureReprices(false, new Set(markets.keys()));
-    for (const order of this.deps.orderRepo.findOpen()) {
+    for (const order of this.deps.orderRepo.findOpen(eventMarket.tokenId)) {
       if (!current() || !freshEvent(event.timestamp, this.now())) return;
       const market = markets.get(String(order.tokenId));
       if (!market) continue;

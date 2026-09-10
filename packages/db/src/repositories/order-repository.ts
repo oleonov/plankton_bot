@@ -129,10 +129,13 @@ export class SqliteOrderRepository implements OrderRepository {
     return row ? this.rowToOrder(row) : null;
   }
 
-  findOpen(): Order[] {
+  findOpen(tokenId?: TokenId): Order[] {
+    const tokenFilter = tokenId === undefined ? "" : " AND token_id = ?";
     const rows = this.db
-      .prepare("SELECT * FROM orders WHERE status IN ('pending', 'open', 'partially-filled')")
-      .all() as Record<string, unknown>[];
+      .prepare(
+        `SELECT * FROM orders WHERE status IN ('pending', 'open', 'partially-filled')${tokenFilter}`,
+      )
+      .all(...(tokenId === undefined ? [] : [tokenId])) as Record<string, unknown>[];
     return rows.map((r) => this.rowToOrder(r));
   }
 

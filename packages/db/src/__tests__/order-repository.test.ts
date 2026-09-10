@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
+import { runMigrations } from "../migrations/runner.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteOrderRepository } from "../repositories/order-repository.js";
 import {
@@ -620,6 +621,92 @@ describe("SqliteOrderRepository", () => {
 
     const statuses = open.map((o) => o.status).sort();
     expect(statuses).toEqual(["open", "partially-filled", "pending"]);
+  });
+
+  it("scopes all three working statuses in SQL using the existing token index", () => {
+    const tokenId = createTokenId("target'bound");
+    const statuses = [
+      "pending",
+      "open",
+      "partially-filled",
+      "filled",
+      "cancelled",
+      "rejected",
+    ] as const;
+    for (const token of [tokenId, createTokenId("other")]) {
+      for (const status of statuses) {
+        repo.save(
+          makeOrder({
+            orderId: createOrderId(`${token}-${status}`),
+            clientOrderId: `${token}-${status}` as ClientOrderId,
+            tokenId: token,
+            status,
+          }),
+        );
+      }
+    }
+    const prepare = vi.spyOn(conn.db, "prepare");
+    expect(
+      repo
+        .findOpen(tokenId)
+        .map((order) => order.orderId)
+        .sort(),
+    ).toEqual(
+      ["pending", "open", "partially-filled"].map((status) => `${tokenId}-${status}`).sort(),
+    );
+    const sql = prepare.mock.calls[0]![0];
+    prepare.mockRestore();
+    expect(sql).toMatch(/token_id\s*=\s*\?/);
+    expect(conn.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(tokenId)).toEqual([
+      expect.objectContaining({
+        detail: expect.stringContaining("USING INDEX idx_orders_token_status"),
+      }),
+    ]);
+    expect(repo.findOpen(createTokenId("missing"))).toEqual([]);
+    expect(repo.findOpen()).toHaveLength(6);
+  });
+
+  it("auto-discovers migration 108 and upgrades populated intents idempotently with a nonunique token index", () => {
+    const migration = "108_maker_capture_intents_token_index.sql";
+    expect(
+      conn.db.prepare("SELECT name FROM schema_migrations WHERE name = ?").get(migration),
+    ).toEqual({ name: migration });
+    conn.db.exec("DROP INDEX idx_maker_capture_reprice_intents_token");
+    conn.db.prepare("DELETE FROM schema_migrations WHERE name = ?").run(migration);
+    for (let i = 0; i < 3; i++) {
+      expect(
+        repo.claimMakerCaptureRepriceIntent(
+          makeIntent({
+            intentId: `upgrade-${i}`,
+            predecessorOrderId: createOrderId(`upgrade-${i}`),
+            lifecycleSignalId: `upgrade-${i}`,
+            tokenId: createTokenId(i < 2 ? "target" : "other"),
+          }),
+        ),
+      ).toBe(true);
+    }
+    const rows = () =>
+      conn.db.prepare("SELECT * FROM maker_capture_reprice_intents ORDER BY intent_id").all();
+    const before = rows();
+    const query = "SELECT * FROM maker_capture_reprice_intents WHERE token_id = ?";
+    expect(conn.db.prepare(`EXPLAIN QUERY PLAN ${query}`).all("target")).toEqual([
+      expect.objectContaining({ detail: "SCAN maker_capture_reprice_intents" }),
+    ]);
+    runMigrations(conn.db);
+    runMigrations(conn.db);
+    conn.db.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
+    expect(rows()).toEqual(before);
+    expect(conn.db.prepare(query).all("target")).toHaveLength(2);
+    expect(conn.db.prepare(`EXPLAIN QUERY PLAN ${query}`).all("target")).toEqual([
+      expect.objectContaining({
+        detail: expect.stringContaining("USING INDEX idx_maker_capture_reprice_intents_token"),
+      }),
+    ]);
+    expect(
+      conn.db.prepare("PRAGMA index_list(maker_capture_reprice_intents)").all(),
+    ).toContainEqual(
+      expect.objectContaining({ name: "idx_maker_capture_reprice_intents_token", unique: 0 }),
+    );
   });
 
   it("findByTokenId returns orders for token", () => {

@@ -124,6 +124,138 @@ function book(
   };
 }
 
+function rootRepo(orders: Order[]) {
+  const root = orders[0]!;
+  return {
+    findById: vi.fn(() => root),
+    findByTokenId: vi.fn(() => orders),
+    getMakerCaptureChainUsage: vi.fn(() => ({
+      trusted: true,
+      rootOrderId: root.orderId,
+      rootNotionalUsdc: root.sizeUsdc,
+      chainFilledUsdc: 0.2,
+      predecessorRemainingShares: 2.3,
+      replacementIndex: 0,
+      orderIds: [root.orderId],
+    })),
+  };
+}
+
+function rootMetadata(group: string, changes: Record<string, unknown>): Partial<Order> {
+  const metadata = captureOrder().metadata!;
+  return { metadata: { ...metadata, [group]: { ...(metadata[group] as object), ...changes } } };
+}
+
+describe("permanent root lookup cost", () => {
+  it.each<[string, Partial<Order>, number]>([
+    ["missing metadata", { metadata: null }, NOW],
+    ["non R23", { decisionRuleId: "R_OTHER" }, NOW],
+    ["sell", { side: "sell" }, NOW],
+    ["non maker", { entryStyle: "probe" }, NOW],
+    ["not post only", { postOnly: false }, NOW],
+    ["invalid timestamp", { createdAt: "invalid" }, NOW],
+    ["expired at boundary", {}, NOW + 110_000],
+    ["expired after boundary", {}, NOW + 110_001],
+    ["stale signal", { signalTimestamp: "2026-08-01T00:00:00.000Z" }, NOW],
+    ["wrong origin", rootMetadata("quoteMotionV1", { kind: "bounce_exit_target" }), NOW],
+    ["old schema", rootMetadata("quoteMotionV1", { policySchemaVersion: 999 }), NOW],
+    ["old cohort", rootMetadata("quoteMotionV1", { cohortId: "old" }), NOW],
+    ["old activation", rootMetadata("quoteMotionV1", { permanentR23ActivationId: "old" }), NOW],
+    [
+      "old activation time",
+      rootMetadata("quoteMotionV1", { permanentR23ActivatedAtUtc: "old" }),
+      NOW,
+    ],
+    ["wrong lifecycle", rootMetadata("makerMicroLiveLifecycle", { kind: "r23_capture" }), NOW],
+    [
+      "old lifecycle activation",
+      rootMetadata("makerMicroLiveLifecycle", { activationId: "old" }),
+      NOW,
+    ],
+    ["old lifecycle time", rootMetadata("makerMicroLiveLifecycle", { activatedAtUtc: "old" }), NOW],
+    [
+      "child lineage",
+      rootMetadata("makerCaptureLineageV1", { replacementIndex: 1, predecessorOrderId: "parent" }),
+      NOW,
+    ],
+    ["foreign root", rootMetadata("makerCaptureLineageV1", { rootOrderId: "foreign" }), NOW],
+    ["wrong notional", { sizeUsdc: 1 }, NOW],
+  ])("skips chain reads for %s", (_name, overrides, nowMs) => {
+    const orderRepo = rootRepo([captureOrder(overrides)]);
+    expect(
+      findPermanentR23LineageBlocker({
+        tokenId: TOKEN,
+        policy: permanentPolicy(),
+        orderRepo,
+        nowMs,
+      }),
+    ).toBeNull();
+    expect(orderRepo.getMakerCaptureChainUsage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { trusted: false },
+    { rootOrderId: createOrderId("foreign") },
+    { replacementIndex: 1 },
+    { rootNotionalUsdc: 1 },
+  ])("rejects inconsistent chain usage %j", (overrides) => {
+    const orderRepo = rootRepo([captureOrder()]);
+    orderRepo.getMakerCaptureChainUsage.mockReturnValue({
+      ...orderRepo.getMakerCaptureChainUsage(),
+      ...overrides,
+    });
+    orderRepo.getMakerCaptureChainUsage.mockClear();
+    expect(
+      findPermanentR23LineageBlocker({
+        tokenId: TOKEN,
+        policy: permanentPolicy(),
+        orderRepo,
+        nowMs: NOW,
+      }),
+    ).toBeNull();
+    expect(orderRepo.getMakerCaptureChainUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a cancelled root with a working child and observes later fills and policy changes", () => {
+    const root = captureOrder({ status: "cancelled", cancelReason: "operator_cancelled" });
+    const child = captureOrder({
+      ...rootMetadata("makerCaptureLineageV1", {
+        replacementIndex: 1,
+        predecessorOrderId: root.orderId,
+      }),
+      orderId: createOrderId("child"),
+    });
+    const history = Array.from({ length: 100 }, (_, i) =>
+      captureOrder({ orderId: createOrderId(`old-${i}`), metadata: null }),
+    );
+    const orderRepo = rootRepo([root]);
+    orderRepo.findByTokenId.mockReturnValue([...history, child, root]);
+    const input = { tokenId: TOKEN, policy: permanentPolicy(), orderRepo, nowMs: NOW + 109_999 };
+    expect(findPermanentR23LineageBlocker(input)).toEqual({
+      rootOrderId: root.orderId,
+      tokenId: TOKEN,
+      conditionId: CONDITION,
+      deadlineMs: NOW + 110_000,
+      residualNotionalUsdc: 0.7,
+    });
+    expect(orderRepo.getMakerCaptureChainUsage).toHaveBeenCalledTimes(1);
+    orderRepo.getMakerCaptureChainUsage.mockReturnValue({
+      trusted: true,
+      rootOrderId: root.orderId,
+      rootNotionalUsdc: 0.9,
+      chainFilledUsdc: 0.6,
+      predecessorRemainingShares: 1,
+      replacementIndex: 0,
+      orderIds: [root.orderId, child.orderId],
+    });
+    expect(findPermanentR23LineageBlocker(input)?.residualNotionalUsdc).toBeCloseTo(0.3);
+    expect(orderRepo.getMakerCaptureChainUsage).toHaveBeenCalledTimes(2);
+    input.policy.makerEntry.permanentR23ActivationId = "new-activation";
+    expect(findPermanentR23LineageBlocker(input)).toBeNull();
+    expect(orderRepo.getMakerCaptureChainUsage).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("maker capture reprice helper", () => {
   it("classifies permanent exact-cancel convergence without conflating retryable state and drift", () => {
     const predecessor = captureOrder({

@@ -140,12 +140,14 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     const current = this.captureWork.guard();
     const now = this.now();
     if (!fresh(event.timestamp, now)) return;
+    const [eventMarket] = event.markets;
+    if (!eventMarket) return;
     const tokenIds = new Set(event.markets.map((market) => String(market.tokenId)));
     await this.recover(tokenIds);
     const snapshot = this.deps.policySnapshot();
     const policy = snapshot.policy.bounceAskCapture;
     if (!policy.enabled || snapshot.controlRevision === null) return;
-    for (const order of this.deps.orderRepo.findOpen()) {
+    for (const order of this.deps.orderRepo.findOpen(eventMarket.tokenId)) {
       if (!current() || !fresh(event.timestamp, this.now())) return;
       if (!tokenIds.has(String(order.tokenId))) continue;
       await this.safe(() => this.tryClaim(order, event.timestamp, snapshot), String(order.tokenId));
