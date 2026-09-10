@@ -150,11 +150,11 @@ deploy_paths() {
 
 publish_image() {
   local full="$1" digest revision id
-  run docker build --platform linux/amd64 --build-arg "GIT_SHA=$full" -t "$IMAGE:$full" .
-  digest="$(run docker push "$IMAGE:$full" | sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' | tail -1)"
+  run docker build --platform linux/amd64 --build-arg "GIT_SHA=$full" -t "$IMAGE:$full" . || die 'image build failed'
+  digest="$(run docker push "$IMAGE:$full" | sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' | tail -1)" || die 'image push failed'
   [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die 'immutable registry digest is absent'
-  id="$(run docker image inspect --format '{{.Id}}' "$IMAGE:$full")"
-  revision="$(run docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE:$full")"
+  id="$(run docker image inspect --format '{{.Id}}' "$IMAGE:$full")" || die 'local image inspection failed'
+  revision="$(run docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE:$full")" || die 'local image revision inspection failed'
   [[ -n "$id" && "$revision" == "$full" ]] || die 'local full-SHA image does not prove its revision'
   printf '%s\n' "$digest"
 }
@@ -216,7 +216,7 @@ stage_runtime_env() {
   "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_HOST}" "set -eu; install -d -m 711 '${root}/config'; final='${runtime_env}'; temp='${runtime_env}.tmp'; recovery='${recovery}'; trap 'rm -f -- \"\$temp\"' EXIT; valid() { test -f \"\$final\" && test \"\$(stat -c '%U %G %a' \"\$final\")\" = 'root root 600' && test \"\$(sha256sum \"\$final\" | awk '{print \$1}')\" = '${env_hash}'; }; if valid; then exit 0; fi; if test -e \"\$final\"; then test ! -e \"\$recovery\" || exit 1; rm -f -- \"\$final\"; fi; cat > \"\$temp\"; chown root:root \"\$temp\"; chmod 600 \"\$temp\"; test \"\$(sha256sum \"\$temp\" | awk '{print \$1}')\" = '${env_hash}'; mv -n \"\$temp\" \"\$final\"; valid" < "$source"
 }
 
-stage_and_publish() { stage_runtime_env "$1" "$2" "$3"; publish_image "$1"; }
+stage_and_publish() { stage_runtime_env "$1" "$2" "$3" || die 'runtime environment staging failed'; publish_image "$1"; }
 
 recovery() { atomic "$RECOVERY" "$1"; }
 migration_gate() {
@@ -743,8 +743,9 @@ deadline_supersede() {
   test_mode || [[ "$source" == .env.production ]] || die 'production runtime environment path is invalid'
   env_hash="$(sha256sum "$source" | awk '{print $1}')"
   if test_mode; then
+    digest="$(publish_image "$full")" || die 'image publication failed'
     KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"
-    KRABS_REMOTE_SHA="$full" KRABS_REMOTE_DIGEST="$(publish_image "$full")" KRABS_REMOTE_COMPOSE="${KRABS_DEPLOY_COMPOSE:-docker-compose.yml}" KRABS_REMOTE_ENV="${KRABS_DEPLOY_ENV:-.env.production}" KRABS_RUNTIME_ENV_PATH="${KRABS_RUNTIME_ENV_PATH:-.env.production}" KRABS_RUNTIME_ENV_SHA256="${KRABS_RUNTIME_ENV_SHA256:-$env_hash}" real_deploy supersede "$expected_old"
+    KRABS_REMOTE_SHA="$full" KRABS_REMOTE_DIGEST="$digest" KRABS_REMOTE_COMPOSE="${KRABS_DEPLOY_COMPOSE:-docker-compose.yml}" KRABS_REMOTE_ENV="${KRABS_DEPLOY_ENV:-.env.production}" KRABS_RUNTIME_ENV_PATH="${KRABS_RUNTIME_ENV_PATH:-.env.production}" KRABS_RUNTIME_ENV_SHA256="${KRABS_RUNTIME_ENV_SHA256:-$env_hash}" real_deploy supersede "$expected_old"
   else
     preflight_supersede_recovery "$expected_old" "$full" "$env_hash"
     digest="$(stage_and_publish "$full" "$env_hash" "$source")"
@@ -760,7 +761,7 @@ main() {
     --supersede-stopped-recovery) [[ $# == 4 && "$3" == --gate-evidence ]] || die 'supersede requires --supersede-stopped-recovery <expected-old-full-sha> --gate-evidence <evidence>'; sha "$2" || die 'expected old recovery SHA must be full'; TIMEOUT="$(local_timeout)"; exec "$TIMEOUT" --signal=TERM --kill-after=60s "${DEPLOY_SECONDS}s" "$0" --deadline-supersede "$2" "$4" ;;
     --rollback-state-id) [[ $# == 2 ]] || die 'rollback requires exactly --rollback-state-id'; TIMEOUT="$(local_timeout)"; exec "$TIMEOUT" --signal=TERM --kill-after=60s "${DEPLOY_SECONDS}s" "$0" --deadline rollback "$2" ;;
     --deadline-supersede) [[ $# == 3 ]] || die 'supersede deadline invocation'; deadline_supersede "$2" "$3" ;;
-    --deadline) [[ $# == 3 ]] || die 'deadline invocation'; if [[ "$2" == release ]]; then verify_gate "$3"; test_mode || ordinary_preflight; else test_mode || rollback_preflight; fi; full="$(git rev-parse HEAD)"; sha "$full" || die 'HEAD must be a full SHA'; source="${KRABS_DEPLOY_LOCAL_ENV_PATH:-.env.production}"; test_mode || [[ "$source" == .env.production ]] || die 'production runtime environment path is invalid'; env_hash="$(sha256sum "$source" | awk '{print $1}')"; if test_mode; then KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"; KRABS_REMOTE_SHA="$full" KRABS_REMOTE_DIGEST="$(publish_image "$full")" KRABS_REMOTE_COMPOSE="${KRABS_DEPLOY_COMPOSE:-docker-compose.yml}" KRABS_REMOTE_ENV="${KRABS_DEPLOY_ENV:-.env.production}" KRABS_RUNTIME_ENV_PATH="${KRABS_RUNTIME_ENV_PATH:-.env.production}" KRABS_RUNTIME_ENV_SHA256="${KRABS_RUNTIME_ENV_SHA256:-$env_hash}" real_deploy "$2" "$3"; elif [[ "${KRABS_REMOTE_CONTROLLER:-}" == 1 ]]; then KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"; real_deploy "$2" "$3"; else preflight_recovery_env "$full" "$env_hash"; digest="$(stage_and_publish "$full" "$env_hash" "$source")"; stage_remote_controller "$2" "$3" "$full" "$digest" "$env_hash"; fi ;;
+    --deadline) [[ $# == 3 ]] || die 'deadline invocation'; if [[ "$2" == release ]]; then verify_gate "$3"; test_mode || ordinary_preflight; else test_mode || rollback_preflight; fi; full="$(git rev-parse HEAD)"; sha "$full" || die 'HEAD must be a full SHA'; source="${KRABS_DEPLOY_LOCAL_ENV_PATH:-.env.production}"; test_mode || [[ "$source" == .env.production ]] || die 'production runtime environment path is invalid'; env_hash="$(sha256sum "$source" | awk '{print $1}')"; if test_mode; then digest="$(publish_image "$full")" || die 'image publication failed'; KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"; KRABS_REMOTE_SHA="$full" KRABS_REMOTE_DIGEST="$digest" KRABS_REMOTE_COMPOSE="${KRABS_DEPLOY_COMPOSE:-docker-compose.yml}" KRABS_REMOTE_ENV="${KRABS_DEPLOY_ENV:-.env.production}" KRABS_RUNTIME_ENV_PATH="${KRABS_RUNTIME_ENV_PATH:-.env.production}" KRABS_RUNTIME_ENV_SHA256="${KRABS_RUNTIME_ENV_SHA256:-$env_hash}" real_deploy "$2" "$3"; elif [[ "${KRABS_REMOTE_CONTROLLER:-}" == 1 ]]; then KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"; real_deploy "$2" "$3"; else preflight_recovery_env "$full" "$env_hash"; digest="$(stage_and_publish "$full" "$env_hash" "$source")"; stage_remote_controller "$2" "$3" "$full" "$digest" "$env_hash"; fi ;;
     --test-local-release) [[ $# == 1 ]] && test_mode || die 'test local release only'; full="$(git rev-parse HEAD)"; source="${KRABS_DEPLOY_LOCAL_ENV_PATH:?}"; env_hash="$(sha256sum "$source" | awk '{print $1}')"; preflight_recovery_env "$full" "$env_hash"; digest="$(stage_and_publish "$full" "$env_hash" "$source")"; stage_remote_controller release test "$full" "$digest" "$env_hash" ;;
     --internal-supersede-preflight) [[ $# == 4 && "${KRABS_REMOTE_PREFLIGHT:-}" == 1 ]] || die 'supersede preflight is remote-only'; deploy_paths; validate_supersede_recovery "$2" "$3" "$4" ;;
     --internal) [[ $# == 3 && "${KRABS_REMOTE_CONTROLLER:-}" == 1 ]] || die 'internal invocation is remote-controller only'; deploy_paths; KRABS_ROLLBACK_STATE="${KRABS_ROLLBACK_STATE_PATH:-/var/lib/krabs-rollback-guard/state.json}"; real_deploy "$2" "$3" ;;

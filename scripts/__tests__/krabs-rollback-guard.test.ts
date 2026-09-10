@@ -91,6 +91,63 @@ afterEach(() => {
 const yieldToWorker = () => new Promise<void>((resolve) => setImmediate(resolve));
 beforeEach(yieldToWorker);
 describe("krabs rollback guard", () => {
+  it("T28l — failed image build stops publication and remote staging", () => {
+    const dir = mkdtempSync(join(tmpdir(), "krabs-publish-failfast-")),
+      calls = join(dir, "calls"),
+      adapter = join(dir, "adapter"),
+      ssh = join(dir, "ssh"),
+      runtimeEnv = join(dir, "runtime.env"),
+      deployTarget = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim(),
+      digest = "d".repeat(64);
+    dirs.push(dir);
+    writeFileSync(calls, "");
+    writeFileSync(runtimeEnv, "SAFE=test\n");
+    executable(
+      adapter,
+      `echo "$*" >> "$CALLS"; shift
+case "$1" in
+  build) if [[ "\${FAIL_BUILD:-}" == 1 ]]; then exit 17; fi ;;
+  push) echo 'digest: sha256:${digest}' ;;
+  image) [[ "$*" == *revision* ]] && echo '${deployTarget}' || echo 'sha256:${digest}' ;;
+esac
+exit 0`,
+    );
+    executable(
+      ssh,
+      `echo "ssh $*" >> "$CALLS"
+[[ "\${@: -1}" == *"exec /usr/bin/timeout"* ]] && echo remote-controller >> "$CALLS"
+cat >/dev/null`,
+    );
+    const runDeploy = (failBuild: boolean) =>
+      spawnSync(deploy, ["--test-local-release"], {
+        cwd: root,
+        env: {
+          ...process.env,
+          KRABS_DEPLOY_TEST_MODE: "1",
+          KRABS_DEPLOY_ADAPTER: adapter,
+          KRABS_DEPLOY_SSH: ssh,
+          KRABS_DEPLOY_LOCAL_ENV_PATH: runtimeEnv,
+          KRABS_DEPLOY_TEST_REMOTE_ROOT: join(dir, "remote"),
+          CALLS: calls,
+          FAIL_BUILD: failBuild ? "1" : "0",
+        },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+    const failed = runDeploy(true),
+      failedCalls = readFileSync(calls, "utf8");
+    expect(failed.status, failed.stderr).not.toBe(0);
+    expect(failed.stderr).toContain("image build failed");
+    expect(failedCalls).toContain("docker build");
+    expect(failedCalls).not.toContain("docker push");
+    expect(failedCalls).not.toContain("remote-controller");
+    writeFileSync(calls, "");
+    const succeeded = runDeploy(false),
+      succeededCalls = readFileSync(calls, "utf8");
+    expect(succeeded.status, succeeded.stderr).toBe(0);
+    expect(succeededCalls).toContain("docker push");
+    expect(succeededCalls).toContain("remote-controller");
+  });
   // prettier-ignore
   it("T28a — authoritative intent, cutoff, and receipt lifecycle", async () => { const fixture=makeFixture(false); begin(fixture); const rollback=state(fixture); expect(rollback.phase).toBe("prepared"); expect(rollback.preRollbackPaused).toBe(false); expect(rollback.baselineCommandHighWater).toBeLessThan(1); expect(JSON.parse(readFileSync(fixture.marker,"utf8")).rollbackStateId).toBe(rollback.rollbackStateId); targetReady(fixture); const finalize=run(fixture,"finalize",target); expect(finalize.status).toBe(0); expect(finalize.stdout).toContain("ROLLBACK_RECEIPT"); expect(readFileSync(fixture.api,"utf8").trim()).toBe("false"); expect(rows(fixture)).toMatchObject([{action:"pause",initiator_type:"system",initiator:`rollback:${rollback.rollbackStateId}:pause`,status:"applied"},{action:"resume",initiator_type:"system",initiator:`rollback:${rollback.rollbackStateId}:resume`,status:"applied"}]); expect(existsSync(fixture.marker)).toBe(false); expect(run(fixture,"status").stdout.trim()).toBe("ROLLBACK_STATUS_NONE"); await yieldToWorker(); t28aCutoff(); await yieldToWorker(); t28aEdges(); },90_000);
   // prettier-ignore
