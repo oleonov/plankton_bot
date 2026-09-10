@@ -604,6 +604,7 @@ export class SqliteMarketRepository implements MarketRepository {
       planktonSignature,
       entryCandidates,
       discoveryOnly,
+      discoveryCapacityCount: Math.max(0, admittedCandidates.length - remaining),
       signatureOverflow,
     };
     if (opts.targetTokenIds) {

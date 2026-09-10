@@ -656,6 +656,26 @@ describe("AlgoDecisionModule", () => {
     const mod = buildModule({
       positionRepo: positionRepo as never,
       decisionShadowObserver: { observeAlgo },
+      entryFollowupObserver: {
+        markCause: () => {
+          throw new Error("followup unavailable");
+        },
+        capturePass: () => {
+          throw new Error("followup unavailable");
+        },
+        observeVisit: () => {
+          throw new Error("followup unavailable");
+        },
+        finishPass: () => {
+          throw new Error("followup unavailable");
+        },
+        observeEvaluation: () => {
+          throw new Error("followup unavailable");
+        },
+        observePreflight: () => {
+          throw new Error("followup unavailable");
+        },
+      },
       runtimeControl: { isPaused: () => paused },
     } as never);
     await mod.start();
@@ -731,6 +751,59 @@ describe("AlgoDecisionModule", () => {
     expect((mod as any).dirtyTokenIds.has(tokenId)).toBe(true);
     expect((mod as any).positionCache.get(tokenId)).toEqual(position);
 
+    await mod.stop();
+  });
+
+  it("keeps causes arriving during a captured pass for the next scheduler pass", async () => {
+    const visits: string[] = [];
+    const capturePass = vi.fn((..._args: [readonly unknown[]]) => 0);
+    let action: "interleave" | "pause" | "throw" = "interleave";
+    let paused = false;
+    const observer = {
+      markCause: vi.fn(),
+      capturePass,
+      observeVisit: vi.fn((_passId: number, tokenId: unknown) => {
+        visits.push(String(tokenId));
+        if (action === "interleave" && visits.length === 1)
+          (mod as any).markDirty("cause-b", "minimum_change");
+        if (action === "pause" && visits.length === 1) paused = true;
+      }),
+      finishPass: vi.fn(),
+      observeEvaluation: vi.fn(),
+      observePreflight: vi.fn(),
+    };
+    const mod = buildModule({
+      entryFollowupObserver: observer,
+      runtimeControl: { isPaused: () => paused },
+    } as never);
+    await mod.start();
+    (mod as any).dirtyTokenIds.clear();
+    (mod as any).markDirty("cause-a", "market_update");
+    (mod as any).markDirty("cause-b", "market_update");
+    await (mod as any).evaluateDirtyTokens();
+    expect(capturePass.mock.calls[0]![0].map(String)).toEqual(["cause-a", "cause-b"]);
+    expect((mod as any).dirtyTokenIds.has("cause-b")).toBe(true);
+    await (mod as any).evaluateDirtyTokens();
+    expect(capturePass.mock.calls[1]![0].map(String)).toEqual(["cause-b"]);
+    expect(observer.finishPass).toHaveBeenCalledTimes(2);
+
+    action = "pause";
+    visits.length = 0;
+    for (const token of ["pause-a", "pause-b"]) (mod as any).markDirty(token, "market_update");
+    await (mod as any).evaluateDirtyTokens();
+    expect(visits).toEqual(["pause-a"]);
+    expect(observer.finishPass).toHaveBeenLastCalledWith(expect.any(Number), "paused");
+
+    action = "throw";
+    paused = false;
+    visits.length = 0;
+    (selectedMarketCache.isEligible as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error("input failed");
+    });
+    for (const token of ["throw-a", "throw-b"]) (mod as any).markDirty(token, "market_update");
+    await expect((mod as any).evaluateDirtyTokens()).rejects.toThrow("input failed");
+    expect(visits).toEqual(["throw-a"]);
+    expect(observer.finishPass).toHaveBeenLastCalledWith(expect.any(Number), "threw");
     await mod.stop();
   });
 
@@ -6187,16 +6260,42 @@ describe("AlgoDecisionModule", () => {
   });
 
   describe("wallet buy budget ownership", () => {
+    it("reads the current global cooldown and minimum passively without budget preflight", () => {
+      const canAttemptBuy = vi.fn();
+      const read = vi.fn(() => ({ remembered: null, latest: null }));
+      const resolve = vi.fn();
+      const mod = buildModule({
+        buySignalBudgetCircuitBreaker: { canAttemptBuy },
+        tokenMinimum: { read, resolve },
+      } as never);
+      const token = createTokenId("quiet-gate");
+      const cooldown = Date.now() + 60_000;
+      (mod as any).buyBudgetCooldownUntilMs = cooldown;
+      expect(mod.getEntryFollowupGateState([token])[0]).toMatchObject({
+        cooldownUntilMs: cooldown,
+        cooldownElapsed: false,
+        marketCache: "missing",
+        minimum: { remembered: null, observedAt: null, result: null },
+      });
+      (mod as any).buyBudgetCooldownUntilMs = 0;
+      expect(mod.getEntryFollowupGateState([token])[0]!.cooldownUntilMs).toBe(0);
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(resolve).not.toHaveBeenCalled();
+      expect(canAttemptBuy).not.toHaveBeenCalled();
+    });
+
     it.each(["absent", "null", "error"])(
       "keeps %s preflight unknown blocked only during cooldown",
       (mode) => {
+        const observePreflight = vi.fn();
         const canAttemptBuy = vi.fn(() => {
           if (mode === "error") throw new Error("budget unavailable");
           return { canAttempt: null };
         });
         const mod = buildModule({
           buySignalBudgetCircuitBreaker: mode === "absent" ? undefined : { canAttemptBuy },
-        });
+          entryFollowupObserver: { observePreflight } as never,
+        } as never);
         const signal = {
           signalId: "unknown",
           tokenId: "unknown",
@@ -6212,6 +6311,12 @@ describe("AlgoDecisionModule", () => {
         expect((mod as any).buyBudgetSuppressedSignals).toBe(10);
         expect((mod as any).buyBudgetCooldownUntilMs).toBe(now + 60_000);
         expect((mod as any).log.warn.mock.calls.length).toBe(mode === "error" ? 1 : 0);
+        expect(observePreflight).toHaveBeenCalledTimes(11);
+        expect(observePreflight.mock.calls.map((call) => call[1])).toEqual(
+          Array(11).fill(
+            mode === "absent" ? "unavailable" : mode === "error" ? "threw" : "unknown",
+          ),
+        );
         expect(
           (mod as any).buyBudgetSuppressionReason({ ...signal, side: "sell" }, now),
         ).toBeNull();

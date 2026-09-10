@@ -109,6 +109,7 @@ import {
 } from "./ledger-instance-lock.js";
 import { persistFailedStartupState } from "./persist-failed-startup-state.js";
 import { buildTradeCountObserver } from "./trade-count-observer.js";
+import { EntryFollowupObserver } from "./entry-followup-observer.js";
 import { LifecycleSupersededError, RUNTIME_STOP_WAIT_MS, waitAtMost } from "./lifecycle-chain.js";
 import { Supervisor } from "./supervisor/supervisor.js";
 import { CommandPoller } from "./supervisor/command-poller.js";
@@ -856,6 +857,13 @@ async function main(): Promise<void> {
     return { policy: withSellTimeout, controlRevision: executionPolicyProvider.version() };
   };
   const currentExecutionPolicy = () => currentExecutionPolicySnapshot().policy;
+  const entryFollowupObserver =
+    runtimeMode === "live-lite"
+      ? new EntryFollowupObserver({
+          dbPath: ledgerDbPath,
+          policy: () => executionPolicyProvider.snapshot(),
+        })
+      : null;
 
   // ADR-016 — market-wide trade-count provider for the post-entry continuation
   // gate. Also supplies D9's rolling 24h public trade count enrichment.
@@ -916,6 +924,7 @@ async function main(): Promise<void> {
       featureTtlMs: config.signatureFeatureTtlMs,
     },
     signatureTierMode: config.marketDataSignatureTierMode,
+    ...(entryFollowupObserver ? { entryFollowupObserver } : {}),
     ...(planktonEntryShadowModule
       ? {
           trackedMarketObserver: (tokenIds: readonly string[], observedAt: number) =>
@@ -1637,8 +1646,12 @@ async function main(): Promise<void> {
     log,
     sweepIntervalMs: config.strategyScanIntervalMs,
     plannerSuppressionRollupWindowMs: config.plannerSuppressionRollupWindowMs,
+    ...(entryFollowupObserver ? { entryFollowupObserver } : {}),
     ...(planktonEntryShadowModule ? { decisionShadowObserver: planktonEntryShadowModule } : {}),
   });
+  entryFollowupObserver?.setGateStateReader((ids) =>
+    algoDecisionModule.getEntryFollowupGateState(ids),
+  );
 
   const orderLifetimeModule = new OrderLifetimeModule({
     bus,
@@ -2539,6 +2552,7 @@ async function main(): Promise<void> {
 
   // Flush signal + scanner activity to DB every 30 seconds, reset windows every 10 minutes
   periodicTimers.every("metrics_flush", 30_000, () => {
+    entryFollowupObserver?.flush();
     const metricsFlushStartMs = performance.now();
     const serializeLabels = (value: unknown): string => {
       const startMs = performance.now();
@@ -2854,6 +2868,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    entryFollowupObserver?.stop();
     log.info({ signal }, "shutdown signal received");
 
     // FIRST, before the long `await` below. These timers write to SQLite at the full connection

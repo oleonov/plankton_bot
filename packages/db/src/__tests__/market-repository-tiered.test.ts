@@ -128,6 +128,7 @@ describe("findTrackedForPricingTiered", () => {
     expect(result.executionCritical).toHaveLength(0);
     expect(result.entryCandidates).toHaveLength(3);
     expect(result.discoveryOnly).toHaveLength(2);
+    expect(result.discoveryCapacityCount).toBe(2);
   });
 
   it("V4 priority pool excludes low-liquidity or low-volume markets from entryCandidates", () => {
@@ -145,6 +146,7 @@ describe("findTrackedForPricingTiered", () => {
       "low-liq",
       "low-vol",
     ]);
+    expect(result.discoveryCapacityCount).toBe(0);
   });
 
   it("exposes latest V4 admission telemetry from the tiered pricing scan", () => {

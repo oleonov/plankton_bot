@@ -80,6 +80,8 @@ export interface TrackedForPricing {
   entryCandidates: Market[];
   /** Active+tradable markets beyond the cap — polled via discovery loop, not WS. */
   discoveryOnly: Market[];
+  /** Prefix length of `discoveryOnly` admitted by V4 but displaced only by capacity. */
+  discoveryCapacityCount?: number;
   /** Count of signature-matching markets that did NOT get a live slot (coverage metric denominator). */
   signatureOverflow: number;
   /** Observe-only route facts for the explicitly requested target tokens. */

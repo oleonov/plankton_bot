@@ -168,6 +168,12 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
       createMarketPricingStream: () => ({ setTokenIds: () => {}, close: () => {} }),
       getMarketPricing,
     };
+    const entryFollowupObserver = {
+      observeDiscoveryTier: vi.fn(),
+      beginDiscoveryRequest: vi.fn(() => 17),
+      completeDiscoveryRequest: vi.fn(),
+      observeDiscoveryDownstreamFailure: vi.fn(),
+    };
     const published: Array<{ topic: string; payload: unknown }> = [];
     const fakeBus = {
       publish: async (topic: string, payload: unknown) => {
@@ -182,6 +188,7 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
         planktonSignature: [],
         entryCandidates: [],
         discoveryOnly: discoveryMarkets,
+        discoveryCapacityCount: 2,
         signatureOverflow: 0,
       }),
     };
@@ -206,6 +213,7 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
       discoveryPollIntervalMs: 10_000,
       discoveryBatchSize: 10,
       tieredPricingCacheTtlMs: 0,
+      entryFollowupObserver,
     });
 
     await module.start();
@@ -228,6 +236,16 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
     const bySomeToken = new Map(snapshot.markets.map((m) => [String(m.tokenId), m.midPrice]));
     expect(bySomeToken.get("disc-1")).toBe(0.42);
     expect(bySomeToken.get("disc-2")).toBe(0.55);
+    expect(entryFollowupObserver.observeDiscoveryTier).toHaveBeenCalledTimes(1);
+    expect(entryFollowupObserver.beginDiscoveryRequest).toHaveBeenCalledTimes(1);
+    expect(entryFollowupObserver.completeDiscoveryRequest).toHaveBeenCalledWith(
+      17,
+      new Map([
+        ["disc-1", "returned"],
+        ["disc-2", "returned"],
+      ]),
+      expect.any(Number),
+    );
 
     // Discovery must NOT seed the WS-tier caches — those stay bounded to
     // trackedMarketsByToken only, avoiding unbounded retention for the tail.
@@ -238,6 +256,22 @@ describe("MarketDataModule — discovery poll publishes snapshots (Finding #3)",
     expect(cache.has("disc-2")).toBe(false);
     expect(lastUpdate.has("disc-1")).toBe(false);
     expect(lastUpdate.has("disc-2")).toBe(false);
+
+    vi.spyOn(fakeBus, "publish").mockRejectedValueOnce(new Error("downstream publish failed"));
+    getMarketPricing.mockClear();
+    entryFollowupObserver.completeDiscoveryRequest.mockClear();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(getMarketPricing).toHaveBeenCalledTimes(1);
+    expect(entryFollowupObserver.completeDiscoveryRequest).toHaveBeenCalledTimes(1);
+    expect(entryFollowupObserver.observeDiscoveryDownstreamFailure).toHaveBeenCalledWith(
+      17,
+      expect.any(Number),
+    );
+    expect(entryFollowupObserver.completeDiscoveryRequest).not.toHaveBeenCalledWith(
+      17,
+      "request_failed",
+      expect.any(Number),
+    );
 
     await module.stop();
   });

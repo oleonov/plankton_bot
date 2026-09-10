@@ -1833,7 +1833,7 @@ describe("AlgoDecisionModule — unknown minimum pre-filter", () => {
       expect(markDirty).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(1_500);
-      expect(markDirty).toHaveBeenCalledWith(TOKEN);
+      expect(markDirty).toHaveBeenCalledWith(TOKEN, "retry");
       expect(schedule).toHaveBeenCalledWith(0);
 
       // Exactly once per window — the staging set is drained, not re-armed on
@@ -1882,7 +1882,7 @@ describe("AlgoDecisionModule — unknown minimum pre-filter", () => {
       // GATE-bypass token has no other route back and would wait out a discovery
       // rotation (~8 h) instead.
       await vi.advanceTimersByTimeAsync(1_500);
-      expect(markDirty).toHaveBeenCalledWith(TOKEN);
+      expect(markDirty).toHaveBeenCalledWith(TOKEN, "retry");
       expect(schedule).toHaveBeenCalledWith(0);
     } finally {
       vi.useRealTimers();

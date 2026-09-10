@@ -86,6 +86,11 @@ import { BUY_DUPLICATE_DEDUPED_REASON } from "../../buy-order-lifecycle.js";
 import type { EvalContext } from "@krabs/domain";
 import type { RuntimeControl } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import type {
+  EntryFollowupCause,
+  EntryFollowupGateState,
+  EntryFollowupObserver,
+} from "../../entry-followup-observer.js";
 import { isExitRecoveryFencedPredecessor } from "../execution/reservation-utils.js";
 import {
   classifyAddAgeBucket,
@@ -707,6 +712,7 @@ export interface AlgoDecisionModuleDeps {
         ): void;
       }
     | undefined;
+  entryFollowupObserver?: EntryFollowupObserver;
 }
 
 // ─── Module ──────────────────────────────────────────────────────────────────
@@ -1207,7 +1213,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.deps.bus.subscribe("TokenMinimumChanged", async ({ tokenId }) => {
         if (!this.marketCache.has(tokenId)) return;
         this.releaseMinOrderSizeHydration(tokenId);
-        this.markDirty(tokenId);
+        this.markDirty(tokenId, "minimum_change");
         this.scheduleDirtyEvaluation(0);
       }),
       this.deps.bus.subscribe("MarketSnapshotHeartbeat", (p) => this.handleMarketHeartbeat(p)),
@@ -1409,7 +1415,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       }
     }
     for (const market of payload.markets) {
-      if (market.active) this.markDirty(market.tokenId);
+      if (market.active) this.markDirty(market.tokenId, "market_update");
     }
     if (this.deps.deferMarketUpdateEvaluation) {
       this.scheduleDirtyEvaluation();
@@ -1488,7 +1494,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         1,
         JSON.stringify({ source: "full_lifetime_heartbeat" }),
       );
-      this.markDirty(candidate.tokenId);
+      this.markDirty(candidate.tokenId, "market_update");
       return true;
     } catch {
       if (epoch === this.lifecycleEpoch) {
@@ -1684,7 +1690,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.clearPendingByTokenId(String(payload.signal.tokenId));
     if (openPositionBlocked) return;
     if (this.deferBuyCapacityRejection(payload.signal.side, payload.reason)) return;
-    this.markDirty(payload.signal.tokenId);
+    this.markDirty(payload.signal.tokenId, "retry");
     this.scheduleDirtyEvaluation(0);
   }
 
@@ -1705,7 +1711,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       }
       return;
     }
-    this.markDirty(payload.signal.tokenId);
+    this.markDirty(payload.signal.tokenId, "retry");
     this.scheduleDirtyEvaluation(conversionSkipReEvalDelayMs(payload.reasons));
   }
 
@@ -1733,14 +1739,14 @@ export class AlgoDecisionModule implements RuntimeModule {
       const tokenIds = [...this.minOrderSizeRearmTokenIds];
       this.minOrderSizeRearmTokenIds.clear();
       if (tokenIds.length === 0) return;
-      for (const tokenId of tokenIds) this.markDirty(tokenId);
+      for (const tokenId of tokenIds) this.markDirty(tokenId, "retry");
       this.scheduleDirtyEvaluation(0);
     }, MIN_ORDER_SIZE_HYDRATION_RETRY_MS);
   }
 
   private async handleOrderCancelled(payload: RuntimeEventMap["OrderCancelled"]): Promise<void> {
     if (this.isCurrentBounceTargetStaleTtlCancellation(payload)) {
-      this.markDirty(payload.tokenId);
+      this.markDirty(payload.tokenId, "retry");
       this.scheduleDirtyEvaluation(0);
     }
 
@@ -1748,7 +1754,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     const tokenId = this.orderIdToToken.get(orderId);
     if (tokenId) {
       this.clearPendingByTokenId(tokenId);
-      this.markDirty(tokenId as TokenId);
+      this.markDirty(tokenId as TokenId, "retry");
       this.scheduleDirtyEvaluation(0);
     }
   }
@@ -1801,7 +1807,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.clearPendingByTokenId(tokenId);
       if (isMakerEntryInputsUnchangedReason(payload.reason)) return;
       if (this.deferBuyCapacityRejection(payload.side, payload.reason)) return;
-      this.markDirty(tokenId as TokenId);
+      this.markDirty(tokenId as TokenId, "retry");
       this.scheduleDirtyEvaluation(0);
     }
   }
@@ -1931,7 +1937,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     const openPositionTokenIds = this.refreshOpenPositionWorkingSet(Date.now(), false);
 
     for (const tokenId of new Set([...legStateTokenIds, ...eligibleSet, ...openPositionTokenIds])) {
-      this.dirtyTokenIds.add(tokenId);
+      this.markDirty(tokenId, "full_sweep");
     }
   }
 
@@ -1972,8 +1978,35 @@ export class AlgoDecisionModule implements RuntimeModule {
     );
   }
 
-  private markDirty(tokenId: TokenId | string): void {
+  private markDirty(tokenId: TokenId | string, cause: EntryFollowupCause = "lifecycle"): void {
     this.dirtyTokenIds.add(String(tokenId));
+    this.followup((observer) => observer.markCause(tokenId, cause));
+  }
+
+  private captureFollowupPass(tokenIds: readonly TokenId[]): number {
+    try {
+      return this.deps.entryFollowupObserver?.capturePass(tokenIds) ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private observeFollowupVisit(passId: number, tokenId: TokenId, at: number): void {
+    this.followup((observer) => observer.observeVisit(passId, tokenId, at));
+  }
+
+  private finishFollowupPass(passId: number, reason: string): void {
+    this.followup((observer) => observer.finishPass(passId, reason));
+  }
+
+  private followup(
+    action: (observer: NonNullable<AlgoDecisionModuleDeps["entryFollowupObserver"]>) => void,
+  ): void {
+    try {
+      if (this.deps.entryFollowupObserver) action(this.deps.entryFollowupObserver);
+    } catch {
+      // Diagnostic failures must not alter evaluation or scheduling.
+    }
   }
 
   private scheduleDirtyEvaluation(delayMs = DIRTY_EVALUATION_DELAY_MS): void {
@@ -1999,14 +2032,15 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (this.dirtyTokenIds.size === 0) return;
     const tokenIds = [...this.dirtyTokenIds] as TokenId[];
     this.dirtyTokenIds.clear();
-    await this.evaluateTokens(tokenIds);
+    const passId = this.captureFollowupPass(tokenIds);
+    await this.evaluateTokens(tokenIds, passId);
     if (this.dirtyTokenIds.size > 0) this.scheduleDirtyEvaluation();
   }
 
   // ─── Core evaluation ────────────────────────────────────────────────────────
 
   /** Evaluate a list of token IDs in one pass and emit CLOB trading signals. */
-  async evaluateTokens(tokenIds: readonly TokenId[]): Promise<void> {
+  async evaluateTokens(tokenIds: readonly TokenId[], capturedPassId?: number): Promise<void> {
     if (this.isPaused()) {
       this.observeAlgoBatch(tokenIds, "paused");
       return;
@@ -2016,17 +2050,23 @@ export class AlgoDecisionModule implements RuntimeModule {
       return;
     }
     const startedAt = Date.now();
+    const passId = capturedPassId ?? this.captureFollowupPass(tokenIds);
+    let completion: "completed" | "threw" = "completed";
     this.evaluating = true;
     try {
-      await this.evaluateTokensInner(tokenIds);
+      await this.evaluateTokensInner(tokenIds, passId);
+    } catch (err) {
+      completion = "threw";
+      throw err;
     } finally {
+      this.finishFollowupPass(passId, this.isPaused() ? "paused" : completion);
       this.decisionLatency.record(Date.now() - startedAt);
       this.evaluating = false;
       this.emitEvalMetricsSnapshot(Date.now());
     }
   }
 
-  private async evaluateTokensInner(tokenIds: readonly TokenId[]): Promise<void> {
+  private async evaluateTokensInner(tokenIds: readonly TokenId[], passId: number): Promise<void> {
     this.refreshContinuationMode();
     this.tickCounter++;
     // ADR-022 §D-F — start a fresh in-flight histogram for this sweep.
@@ -2065,6 +2105,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         if (this.isPaused()) return;
       }
       processed++;
+      this.observeFollowupVisit(passId, tokenId, Date.now());
       let input: DecisionPlanningInput | null;
       try {
         input = await this.createDecisionPlanningInput(
@@ -2091,6 +2132,10 @@ export class AlgoDecisionModule implements RuntimeModule {
         reasons: plan.suppressions.map((row) => row.reasonCode),
         decisionRuleId: plan.type === "signal" ? plan.signal.decisionRuleId : null,
         side: plan.type === "signal" ? plan.signal.side : null,
+        candidateNotionalUsdc:
+          plan.type === "signal" && plan.signal.side === "buy"
+            ? plan.signal.suggestedSizeUsdc
+            : null,
       });
       if (this.isPaused()) {
         if (plan.type === "signal") {
@@ -2511,8 +2556,9 @@ export class AlgoDecisionModule implements RuntimeModule {
     try {
       this.deps.decisionShadowObserver?.observeAlgo(tokenId, outcome, payload);
     } catch {
-      // Observe-only telemetry must never alter decision behavior.
+      // Each optional observer fails independently of the trading path.
     }
+    this.followup((observer) => observer.observeEvaluation(tokenId, outcome, payload));
   }
 
   private observePostPlannerGuard(
@@ -2525,19 +2571,28 @@ export class AlgoDecisionModule implements RuntimeModule {
     guardReason: string,
     budgetReason?: string,
   ): void {
+    const tokenId = signal.tokenId ?? signal.market?.tokenId;
+    if (!tokenId || !signal.decisionRuleId) return;
     try {
       const observer = this.deps.decisionShadowObserver;
-      const tokenId = signal.tokenId ?? signal.market?.tokenId;
-      if (!tokenId || !signal.decisionRuleId || !observer?.isTarget?.(String(tokenId))) return;
-      observer.observeAlgo(tokenId, "postplanner_guard", {
-        side: signal.side,
-        decisionRuleId: signal.decisionRuleId,
-        guardReason,
-        ...(budgetReason !== undefined ? { budgetReason } : {}),
-      });
+      if (observer?.isTarget?.(String(tokenId))) {
+        observer.observeAlgo(tokenId, "postplanner_guard", {
+          side: signal.side,
+          decisionRuleId: signal.decisionRuleId,
+          guardReason,
+          ...(budgetReason !== undefined ? { budgetReason } : {}),
+        });
+      }
     } catch {
       // Observe-only telemetry must never alter decision behavior.
     }
+    this.followup((observer) =>
+      observer.observeEvaluation(tokenId, "postplanner_guard", {
+        guardReason,
+        ...(budgetReason !== undefined ? { budgetReason } : {}),
+        cooldownUntilMs: this.buyBudgetCooldownUntilMs,
+      }),
+    );
   }
 
   private shouldSkipFlatProbeForActiveMarketCap(
@@ -5226,7 +5281,10 @@ export class AlgoDecisionModule implements RuntimeModule {
     signal: import("@krabs/domain").Signal,
   ): { allowed: boolean | null; reasonCode: string; activateCooldown: boolean } | null {
     const circuitBreaker = this.deps.buySignalBudgetCircuitBreaker;
-    if (!circuitBreaker) return null;
+    if (!circuitBreaker) {
+      this.observeFollowupPreflight(signal.tokenId, "unavailable", null);
+      return null;
+    }
 
     try {
       const pending = this.pendingPreOpenBuy(signal.tokenId);
@@ -5235,12 +5293,18 @@ export class AlgoDecisionModule implements RuntimeModule {
         pendingPreOpenBuyCountForToken: pending.countForToken,
         pendingPreOpenBuyNotionalUsdc: pending.notional,
       });
+      this.observeFollowupPreflight(
+        signal.tokenId,
+        result.canAttempt === true ? "true" : result.canAttempt === false ? "false" : "unknown",
+        result.reasonCode ?? null,
+      );
       return {
         allowed: result.canAttempt,
         reasonCode: result.reasonCode ?? WALLET_BUY_BUDGET_EXHAUSTED_REASON,
         activateCooldown: result.activateCooldown ?? true,
       };
     } catch (err) {
+      this.observeFollowupPreflight(signal.tokenId, "threw", null);
       if (!this.dedupeAllows(this.suppressionDedupe, "buy-budget-preflight-error", Date.now()))
         return null;
       this.log.warn(
@@ -5254,6 +5318,56 @@ export class AlgoDecisionModule implements RuntimeModule {
       );
       return null;
     }
+  }
+
+  private observeFollowupPreflight(
+    tokenId: TokenId,
+    outcome: "true" | "false" | "unknown" | "unavailable" | "threw",
+    reason: string | null,
+  ): void {
+    this.followup((observer) =>
+      observer.observePreflight(
+        tokenId,
+        outcome,
+        reason,
+        this.buyBudgetCooldownUntilMs,
+        Date.now(),
+      ),
+    );
+  }
+
+  getEntryFollowupGateState(tokenIds: readonly TokenId[]): EntryFollowupGateState[] {
+    return tokenIds.map((tokenId) => {
+      const key = String(tokenId);
+      const market = this.marketCache.get(key);
+      const minimum = this.deps.tokenMinimum?.read(key) ?? { remembered: null, latest: null };
+      return {
+        tokenId: key,
+        selected: this.deps.selectedMarketCache.isEligible(tokenId),
+        cooldownUntilMs: this.buyBudgetCooldownUntilMs,
+        cooldownElapsed:
+          this.buyBudgetCooldownUntilMs > 0 && Date.now() >= this.buyBudgetCooldownUntilMs,
+        bypass: this.deps.selectedMarketCache.isGateBypassEligible?.(tokenId) ?? false,
+        marketCache: market ? "present" : "missing",
+        marketFreshAt: market?.snapshotTs ?? null,
+        leg: this.cachedKnowledge(this.legStateCache, this.legStateCacheHydrated, key),
+        position: this.cachedKnowledge(this.positionCache, this.positionCacheHydrated, key),
+        minimum: {
+          remembered: minimum.remembered,
+          observedAt: minimum.latest?.completedAt ?? null,
+          result: minimum.latest?.minimum ?? null,
+        },
+      };
+    });
+  }
+
+  private cachedKnowledge<T>(
+    cache: ReadonlyMap<string, T | null>,
+    hydrated: boolean,
+    key: string,
+  ): "present" | "absent" | "unknown" {
+    if (cache.has(key)) return cache.get(key) ? "present" : "absent";
+    return hydrated ? "absent" : "unknown";
   }
 
   private isExactMakerCaptureSignal(signal: import("@krabs/domain").Signal, now: number): boolean {

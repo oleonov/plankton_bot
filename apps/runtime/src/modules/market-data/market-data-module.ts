@@ -43,6 +43,7 @@ import {
 } from "@krabs/domain";
 import { performance } from "node:perf_hooks";
 import type { Logger } from "../../logger.js";
+import type { EntryFollowupObserver } from "../../entry-followup-observer.js";
 import { isKnownMinOrderSize } from "../../min-order-size.js";
 import {
   classifyHttpError,
@@ -308,6 +309,13 @@ export interface MarketDataModuleDeps {
   trackedMarketObserver?: (activeTokenIds: readonly string[], observedAt: number) => void;
   /** Observe-only exact-target route and discovery attribution. */
   entryShadowObserver?: EntryShadowMarketDataObserver;
+  entryFollowupObserver?: Pick<
+    EntryFollowupObserver,
+    | "observeDiscoveryTier"
+    | "beginDiscoveryRequest"
+    | "completeDiscoveryRequest"
+    | "observeDiscoveryDownstreamFailure"
+  >;
   /** Interval in ms between discovery-tier poll batches. Default: 300_000. */
   discoveryPollIntervalMs?: number;
   /** Number of discovery-tier tokens to poll per batch cycle. Default: 50. */
@@ -1447,6 +1455,11 @@ export class MarketDataModule implements RuntimeModule {
         ? { signature: this.deps.signatureThresholds }
         : {}),
     });
+    try {
+      this.deps.entryFollowupObserver?.observeDiscoveryTier(value, nowMs);
+    } catch {
+      // Optional diagnostics must not interrupt fresh tier routing.
+    }
     this.observeRouting(value.targetRoutes ?? []);
     const v4Telemetry = readV4AdmissionTelemetry(this.deps.marketRepo);
     if (v4Telemetry) {
@@ -1616,6 +1629,7 @@ export class MarketDataModule implements RuntimeModule {
     }
     this.discoveryCursor = (cursor + batch.length) % this.discoveryTier.length;
     this.observeDiscoveryBatch(batch, "requested", nowMs);
+    const followupRequestId = this.beginFollowupRequest(batch, nowMs);
 
     let pricingReturned = false;
     try {
@@ -1623,6 +1637,13 @@ export class MarketDataModule implements RuntimeModule {
       const pricingMap = await this.deps.gateway.getMarketPricing(tokenIds, { timeoutMs });
       pricingReturned = true;
       const returnedAt = Date.now();
+      this.completeFollowupRequest(
+        followupRequestId,
+        new Map(
+          tokenIds.map((tokenId) => [tokenId, pricingMap.has(tokenId) ? "returned" : "missing"]),
+        ),
+        returnedAt,
+      );
       for (const market of batch) {
         this.observeDiscovery(
           market,
@@ -1674,6 +1695,9 @@ export class MarketDataModule implements RuntimeModule {
       await this.flushDiscoveryBatchEviction(new Set(tokenIds), nowMs);
       resetWarnThrottle(this.discoveryPollFailureWarn);
     } catch (err) {
+      if (pricingReturned) this.observeFollowupDownstreamFailure(followupRequestId, Date.now());
+      if (!pricingReturned)
+        this.completeFollowupRequest(followupRequestId, "request_failed", Date.now());
       this.recordHttpError("gamma-discovery", err);
       if (isRateLimitError(err)) {
         this.discoveryPollBackoffUntilMs = Date.now() + GAMMA_RATE_LIMIT_BACKOFF_MS;
@@ -1689,6 +1713,34 @@ export class MarketDataModule implements RuntimeModule {
         Date.now(),
         { errorClass: classifyHttpError(err) },
       );
+    }
+  }
+
+  private beginFollowupRequest(markets: readonly Market[], at: number): number {
+    try {
+      return this.deps.entryFollowupObserver?.beginDiscoveryRequest(markets, at) ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private completeFollowupRequest(
+    requestId: number,
+    results: ReadonlyMap<string, "returned" | "missing"> | "request_failed",
+    at: number,
+  ): void {
+    try {
+      this.deps.entryFollowupObserver?.completeDiscoveryRequest(requestId, results, at);
+    } catch {
+      // Optional diagnostics must not change pricing completion behavior.
+    }
+  }
+
+  private observeFollowupDownstreamFailure(requestId: number, at: number): void {
+    try {
+      this.deps.entryFollowupObserver?.observeDiscoveryDownstreamFailure(requestId, at);
+    } catch {
+      // Preserve the original downstream failure and its normal handling.
     }
   }
 
