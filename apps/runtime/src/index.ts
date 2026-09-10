@@ -97,17 +97,8 @@ import { createGateways } from "./gateway-factory.js";
 import { DEFAULT_LIVE_LITE_CONFIG, LiveLiteGuard } from "./live-lite-guard.js";
 import { runProfilePreflight, writePreflightReport } from "./profile-preflight.js";
 import {
-  evaluatePerTokenOrderCapacity,
-  evaluateTotalOrdersCapacity,
-  evaluateWalletBuyCapacity,
-  hasWalletBuyBudget,
-  normalizeBuyCapacityPolicy,
-  normalizeOrderCapacityPolicy,
+  createBuySignalBudgetCircuitBreaker,
   type OrderCapacityMetricsSample,
-  PER_TOKEN_BUY_LIMIT_REASON,
-  resolveProtectedWalletBuyRequirement,
-  resolveWalletBuyBudget,
-  TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
 } from "./wallet-buy-budget.js";
 
 import { createLogger } from "./logger.js";
@@ -1582,88 +1573,14 @@ async function main(): Promise<void> {
     selectedMarketCache,
     runtimeControl,
     controlDb: controlConn.db,
-    buySignalBudgetCircuitBreaker: {
-      canAttemptBuy: (requiredNotionalUsdc, signal, context) => {
-        const openOrders = repos.order.findOpen();
-        const pendingPreOpenBuyCount = context?.pendingPreOpenBuyCount ?? 0;
-        const openBuyOrderCount =
-          openOrders.filter((order) => order.side === "buy").length + pendingPreOpenBuyCount;
-        const openOrdersTotal = openOrders.length + pendingPreOpenBuyCount;
-        const perTokenOpenBuyOrderCount =
-          openOrders.filter((order) => order.side === "buy" && order.tokenId === signal.tokenId)
-            .length + (context?.pendingPreOpenBuyCountForToken ?? 0);
-        const policy = currentExecutionPolicy();
-        const buyPolicy = normalizeBuyCapacityPolicy(policy.buyCapacity);
-        const perTokenCapacity = evaluatePerTokenOrderCapacity({
-          side: "buy",
-          maxOpenOrdersPerToken: buyPolicy.maxOpenBuyOrdersPerToken,
-          openOrdersForToken: perTokenOpenBuyOrderCount,
-          enabled: buyPolicy.enabled,
-        });
-        if (!perTokenCapacity.allowed) {
-          return {
-            canAttempt: false,
-            reasonCode: PER_TOKEN_BUY_LIMIT_REASON,
-            activateCooldown: false,
-          };
-        }
-        const walletBudget = resolveWalletBuyBudget(
-          {
-            controlDb: controlConn.db,
-            activeProfile: activeProfile as import("@krabs/domain").ProfileId,
-            walletBufferPct: config.executionWalletBufferPct,
-            walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
-          },
-          repos.order.sumOpenBuyNotional("remaining"),
-        );
-        const protectedRequirement = resolveProtectedWalletBuyRequirement({
-          makerEntry: policy.makerEntry,
-          authorization: {
-            conditionId: signal.conditionId,
-            source: "strategy",
-            side: signal.side,
-            entryStyle: "maker",
-            postOnly: true,
-            decisionRuleId: signal.decisionRuleId,
-            signalReason: signal.reason,
-            signalTimestamp: signal.generatedAt,
-          },
-          proposedNotionalUsdc: requiredNotionalUsdc,
-          pendingBuyNotionalUsdc: context?.pendingPreOpenBuyNotionalUsdc ?? 0,
-          nowMs: Date.now(),
-        });
-        const buyCapacity = evaluateWalletBuyCapacity({
-          policy: buyPolicy,
-          snapshot: walletBudget,
-          requiredNotionalUsdc: protectedRequirement.requiredNotionalUsdc,
-          signalReason: signal.reason,
-          openBuyOrderCount,
-          protectedOpenBuySlots: protectedRequirement.protectedOpenBuySlots,
-        });
-        if (!buyCapacity.allowed) {
-          return {
-            canAttempt: false,
-            reasonCode: buyCapacity.reason!,
-            activateCooldown: buyCapacity.availableAfterOrderUsdc != null,
-          };
-        }
-        const totalCapacity = evaluateTotalOrdersCapacity({
-          policy: normalizeOrderCapacityPolicy(policy.orderCapacity),
-          openOrdersTotal,
-          protectedOpenOrderSlots: protectedRequirement.protectedOpenBuySlots,
-        });
-        if (!totalCapacity.allowed) {
-          return {
-            canAttempt: false,
-            reasonCode: TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
-            activateCooldown: false,
-          };
-        }
-        return {
-          canAttempt: hasWalletBuyBudget(walletBudget, protectedRequirement.requiredNotionalUsdc),
-        };
-      },
-    },
+    buySignalBudgetCircuitBreaker: createBuySignalBudgetCircuitBreaker({
+      orderRepo: repos.order,
+      executionPolicy: currentExecutionPolicy,
+      controlDb: controlConn.db,
+      activeProfile: activeProfile as import("@krabs/domain").ProfileId,
+      walletBufferPct: config.executionWalletBufferPct,
+      walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
+    }),
     tradeCountProvider,
     priceHistoryProvider,
     executionPolicy: currentExecutionPolicy,

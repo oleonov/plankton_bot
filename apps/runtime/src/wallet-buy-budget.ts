@@ -7,6 +7,8 @@ import {
   S1_LADDER_RULE_ID,
   SignalReason,
   type BuyCapacityPolicy,
+  type ExecutionPolicy,
+  type OrderRepository,
   type MakerEntryPolicy,
   type MakerMicroLiveAuthorizationInput,
   type OrderCapacityPolicy,
@@ -16,6 +18,7 @@ import {
   isMakerCaptureNextR23OrderAuthorized,
   isMakerMicroLiveWindowActive,
 } from "@krabs/domain";
+import type { BuySignalBudgetCircuitBreaker } from "./modules/algo-decision/algo-decision-module.js";
 
 const BUDGET_EPSILON_USDC = 1e-9;
 const CAPACITY_EPSILON_USDC = 1e-9;
@@ -67,6 +70,161 @@ export interface WalletBuyBudgetSnapshot {
   reservedBuyUsdc: number;
   walletBufferUsdc: number;
   freeUsdcForNewOrders: number;
+}
+
+export function createBuySignalBudgetCircuitBreaker(
+  config: WalletBuyBudgetConfig & {
+    orderRepo: Pick<OrderRepository, "findOpen" | "sumOpenBuyNotional">;
+    executionPolicy: () => ExecutionPolicy;
+  },
+): BuySignalBudgetCircuitBreaker {
+  function readFacts() {
+    const orders = config.orderRepo.findOpen();
+    const buysByToken = new Map<string, number>();
+    let buyCount = 0;
+    for (const order of orders) {
+      if (order.side !== "buy") continue;
+      buyCount++;
+      buysByToken.set(order.tokenId, (buysByToken.get(order.tokenId) ?? 0) + 1);
+    }
+    const wallet = resolveWalletBuyBudget(config, config.orderRepo.sumOpenBuyNotional("remaining"));
+    return { buysByToken, buyCount, total: orders.length, wallet };
+  }
+  type Facts = ReturnType<typeof readFacts>;
+  let cached: { facts: Facts } | { error: unknown } | undefined;
+  function snapshot(): Facts {
+    if (!cached) {
+      try {
+        cached = { facts: readFacts() };
+      } catch (error) {
+        cached = { error };
+      }
+      // A synchronous rejection burst can share reads, never a later publication/worker turn.
+      queueMicrotask(() => {
+        cached = undefined;
+      });
+    }
+    if ("error" in cached) throw cached.error;
+    return cached.facts;
+  }
+  type Candidate = Parameters<BuySignalBudgetCircuitBreaker["canAttemptBuy"]>;
+  function checkPerTokenCapacity(
+    facts: Facts,
+    buyPolicy: BuyCapacityPolicy,
+    signal: Candidate[1],
+    context: Candidate[2],
+  ) {
+    const perTokenCapacity = evaluatePerTokenOrderCapacity({
+      side: "buy",
+      maxOpenOrdersPerToken: buyPolicy.maxOpenBuyOrdersPerToken,
+      openOrdersForToken:
+        (facts.buysByToken.get(signal.tokenId) ?? 0) +
+        (context?.pendingPreOpenBuyCountForToken ?? 0),
+      enabled: buyPolicy.enabled,
+    });
+    if (!perTokenCapacity.allowed) {
+      return { canAttempt: false, reasonCode: PER_TOKEN_BUY_LIMIT_REASON, activateCooldown: false };
+    }
+  }
+  function resolveSignalRequirement(
+    policy: ExecutionPolicy,
+    [requiredNotionalUsdc, signal, context]: Candidate,
+  ) {
+    return resolveProtectedWalletBuyRequirement({
+      makerEntry: policy.makerEntry,
+      authorization: {
+        conditionId: signal.conditionId,
+        source: "strategy",
+        side: signal.side,
+        entryStyle: "maker",
+        postOnly: true,
+        decisionRuleId: signal.decisionRuleId,
+        signalReason: signal.reason,
+        signalTimestamp: signal.generatedAt,
+      },
+      proposedNotionalUsdc: requiredNotionalUsdc,
+      pendingBuyNotionalUsdc: context?.pendingPreOpenBuyNotionalUsdc ?? 0,
+      nowMs: Date.now(),
+    });
+  }
+  function checkBuyCapacity(
+    facts: Facts,
+    buyPolicy: BuyCapacityPolicy,
+    protectedRequirement: ProtectedWalletBuyRequirement,
+    signal: Candidate[1],
+    pendingCount: number,
+  ) {
+    const buyCapacity = evaluateWalletBuyCapacity({
+      policy: buyPolicy,
+      snapshot: facts.wallet,
+      requiredNotionalUsdc: protectedRequirement.requiredNotionalUsdc,
+      signalReason: signal.reason,
+      openBuyOrderCount: facts.buyCount + pendingCount,
+      protectedOpenBuySlots: protectedRequirement.protectedOpenBuySlots,
+    });
+    if (!buyCapacity.allowed) {
+      return {
+        canAttempt: false,
+        reasonCode: buyCapacity.reason!,
+        activateCooldown: buyCapacity.availableAfterOrderUsdc != null,
+      };
+    }
+  }
+  function checkTotalAndWalletBudget(
+    facts: Facts,
+    policy: ExecutionPolicy,
+    protectedRequirement: ProtectedWalletBuyRequirement,
+    pendingCount: number,
+  ) {
+    const totalCapacity = evaluateTotalOrdersCapacity({
+      policy: normalizeOrderCapacityPolicy(policy.orderCapacity),
+      openOrdersTotal: facts.total + pendingCount,
+      protectedOpenOrderSlots: protectedRequirement.protectedOpenBuySlots,
+    });
+    if (!totalCapacity.allowed) {
+      return {
+        canAttempt: false,
+        reasonCode: TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
+        activateCooldown: false,
+      };
+    }
+    return {
+      canAttempt:
+        facts.wallet == null
+          ? null
+          : hasWalletBuyBudget(facts.wallet, protectedRequirement.requiredNotionalUsdc),
+    };
+  }
+  function evaluate(facts: Facts, ...args: Candidate) {
+    const [, signal, context] = args;
+    const policy = config.executionPolicy();
+    const buyPolicy = normalizeBuyCapacityPolicy(policy.buyCapacity);
+    const pendingCount = context?.pendingPreOpenBuyCount ?? 0;
+    const perTokenRejection = checkPerTokenCapacity(facts, buyPolicy, signal, context);
+    if (perTokenRejection) return perTokenRejection;
+    const protectedRequirement = resolveSignalRequirement(policy, args);
+    const buyRejection = checkBuyCapacity(
+      facts,
+      buyPolicy,
+      protectedRequirement,
+      signal,
+      pendingCount,
+    );
+    if (buyRejection) return buyRejection;
+    return checkTotalAndWalletBudget(facts, policy, protectedRequirement, pendingCount);
+  }
+  return {
+    canAttemptBuy(...args) {
+      const reused = cached !== undefined;
+      let result = evaluate(snapshot(), ...args);
+      if (reused && result.canAttempt === true) {
+        cached = undefined;
+        result = evaluate(snapshot(), ...args);
+      }
+      if (result.canAttempt === true) cached = undefined;
+      return result;
+    },
+  };
 }
 
 export type BuyCapacityKind = "new-entry" | "add-buy";

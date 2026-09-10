@@ -30,7 +30,8 @@ import {
   type MarketDataWebSocketLike,
 } from "./market-data-stream-shared.js";
 
-const GAMMA_PRICING_BASE_URL = "https://gamma-api.polymarket.com/markets";
+const GAMMA_PRICING_LIMIT = 100;
+const GAMMA_PRICING_BASE_URL = `https://gamma-api.polymarket.com/markets?limit=${GAMMA_PRICING_LIMIT}`;
 const DEFAULT_CLOB_HOST = "https://clob.polymarket.com";
 const BOOKS_PATH = "/books";
 const BOOKS_BATCH_SIZE = 200;
@@ -385,10 +386,12 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     // Default to 15 s (legacy behaviour) when no caller-supplied timeout.
     const timeoutMs = opts?.timeoutMs ?? 15_000;
 
-    const batches = buildTokenIdBatches(GAMMA_PRICING_BASE_URL, tokenIds, MAX_URL_LENGTH);
+    const batches = buildTokenIdBatches(GAMMA_PRICING_BASE_URL, tokenIds, MAX_URL_LENGTH).flatMap(
+      (batch) => chunkItems(batch, GAMMA_PRICING_LIMIT),
+    );
     for (const batch of batches) {
       const params = batch.map((id) => `clob_token_ids=${id}`).join("&");
-      const url = `${GAMMA_PRICING_BASE_URL}?${params}`;
+      const url = `${GAMMA_PRICING_BASE_URL}&${params}`;
       const response = await this.fetchPricingBatchWithRetry(url, timeoutMs);
       if (!response.ok) {
         await drainResponseBody(response);

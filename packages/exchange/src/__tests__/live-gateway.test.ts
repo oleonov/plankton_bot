@@ -2721,25 +2721,43 @@ describe("LiveMarketDataGateway", () => {
     }
   });
 
-  it("getMarketPricing splits into multiple requests when URL would exceed limit", async () => {
+  it.each([3, 77])("getMarketPricing bounds 500 IDs of width %i", async (width) => {
     const originalFetch = globalThis.fetch;
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve([]),
+    const fetchMock = vi.fn(async (url: string) => {
+      const params = new URL(url).searchParams;
+      const ids = params.getAll("clob_token_ids");
+      const limit = Number(params.get("limit") ?? 20);
+      return {
+        ok: true,
+        json: async () =>
+          ids
+            .filter((id) => id !== "missing")
+            .slice(0, limit)
+            .map((id) => ({ clobTokenIds: [id], outcomePrices: ["0.45"] })),
+      };
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     try {
       // Real Polymarket token IDs are ~77 chars; generate enough to force multiple batches
-      const tokenIds = Array.from({ length: 50 }, (_, i) => String(i).padStart(77, "0"));
-      await gw.getMarketPricing(tokenIds);
+      const tokenIds = Array.from({ length: 500 }, (_, i) => String(i).padStart(width, "0"));
+      const result = await gw.getMarketPricing([...tokenIds, "missing"]);
+      expect([...result.keys()]).toEqual(tokenIds);
+      expect(result.has("missing")).toBe(false);
 
       // With 77-char IDs + "clob_token_ids=" overhead, each batch should stay under 3500 chars
       const gammaCalls = fetchMock.mock.calls.filter((call) => typeof call[0] === "string");
       expect(gammaCalls.length).toBeGreaterThan(1);
       for (const call of gammaCalls) {
-        expect((call[0] as string).length).toBeLessThanOrEqual(3500);
+        expect(call[0].length).toBeLessThanOrEqual(3500);
+        expect(new URL(call[0]).searchParams.get("limit")).toBe("100");
+        expect(new URL(call[0]).searchParams.getAll("clob_token_ids").length).toBeLessThanOrEqual(
+          100,
+        );
       }
+      expect(
+        gammaCalls.flatMap(([url]) => new URL(url).searchParams.getAll("clob_token_ids")),
+      ).toEqual([...tokenIds, "missing"]);
     } finally {
       globalThis.fetch = originalFetch;
     }

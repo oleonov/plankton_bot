@@ -82,6 +82,7 @@ import {
   readContinuationModeVersion,
 } from "@krabs/db";
 import { classifyExchangeRejectionReason } from "@krabs/exchange";
+import { BUY_DUPLICATE_DEDUPED_REASON } from "../../buy-order-lifecycle.js";
 import type { EvalContext } from "@krabs/domain";
 import type { RuntimeControl } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -113,7 +114,12 @@ import {
   isExecutableOrderSize,
   isKnownMinOrderSize,
 } from "../../min-order-size.js";
-import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js";
+import {
+  BUY_ORDER_COUNT_LIMIT_REASON,
+  PER_TOKEN_BUY_LIMIT_REASON,
+  TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
+  WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
+} from "../../wallet-buy-budget.js";
 import { isBounceLadderEligible } from "../exit-ownership/bounce-eligibility.js";
 import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import { SlidingLatencyWindow, type LatencySnapshot } from "./decision-metrics.js";
@@ -501,7 +507,7 @@ interface ControlDbReader {
 }
 
 export type BuySignalBudgetCircuitBreakerResult = {
-  canAttempt: boolean;
+  canAttempt: boolean | null;
   reasonCode?: string | undefined;
   activateCooldown?: boolean | undefined;
 };
@@ -841,6 +847,14 @@ const BUY_BUDGET_COOLDOWN_REASONS = new Set([
   WALLET_BUY_BUDGET_EXHAUSTED_REASON,
   WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
 ]);
+const BUY_CAPACITY_REJECTION_REASONS = new Set([
+  ...BUY_BUDGET_COOLDOWN_REASONS,
+  BUY_DUPLICATE_DEDUPED_REASON,
+  BUY_ORDER_COUNT_LIMIT_REASON,
+  PER_TOKEN_BUY_LIMIT_REASON,
+  TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
+  "reserved-usdc-limit",
+]);
 const D6_SUPPRESSED_REASON = "d6-suppressed";
 const DECISION_RULE_HOLD_REASON = "decision-rule-hold";
 // CHANGE B — R67 spec 11.5 dust abandonment risk-event codes (kept colocated
@@ -916,13 +930,16 @@ const ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS = new Set([
   DECISION_RULE_HOLD_REASON,
 ]);
 
-function findBuyBudgetCooldownReason(reason: string): string | null {
+function findBuyBudgetCooldownReason(
+  reason: string,
+  accepted = BUY_BUDGET_COOLDOWN_REASONS,
+): string | null {
   const reasons = reason
     .split(";")
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
   for (const exactReason of reasons.length > 0 ? reasons : [reason]) {
-    if (BUY_BUDGET_COOLDOWN_REASONS.has(exactReason)) return exactReason;
+    if (accepted.has(exactReason)) return exactReason;
   }
   return null;
 }
@@ -1666,6 +1683,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
     this.clearPendingByTokenId(String(payload.signal.tokenId));
     if (openPositionBlocked) return;
+    if (this.deferBuyCapacityRejection(payload.signal.side, payload.reason)) return;
     this.markDirty(payload.signal.tokenId);
     this.scheduleDirtyEvaluation(0);
   }
@@ -1782,9 +1800,20 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (tokenId) {
       this.clearPendingByTokenId(tokenId);
       if (isMakerEntryInputsUnchangedReason(payload.reason)) return;
+      if (this.deferBuyCapacityRejection(payload.side, payload.reason)) return;
       this.markDirty(tokenId as TokenId);
       this.scheduleDirtyEvaluation(0);
     }
+  }
+
+  private deferBuyCapacityRejection(side: string | null | undefined, reason: string): boolean {
+    // Final owners see reservations absent from preflight. Do not let that
+    // disagreement self-rearm; real input updates and existing sweeps can retry.
+    return (
+      side === "buy" &&
+      this.buyBudgetCooldownUntilMs > Date.now() &&
+      findBuyBudgetCooldownReason(reason, BUY_CAPACITY_REJECTION_REASONS) !== null
+    );
   }
 
   private activateBounceTradingDisabledCooldown(payload: RuntimeEventMap["OrderRejected"]): void {
@@ -5171,10 +5200,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
 
     if (this.buyBudgetCooldownUntilMs > now) {
-      if (this.isExactMakerCaptureSignal(signal, now)) {
-        const captureAttempt = this.canAttemptBuyNotional(signal.suggestedSizeUsdc, signal);
-        if (captureAttempt?.allowed === true) return null;
-      }
+      const attempt = this.canAttemptBuyNotional(signal.suggestedSizeUsdc, signal);
+      if (attempt?.allowed === true) return null;
       this.buyBudgetSuppressedSignals++;
       return "buy_budget_cooldown";
     }
@@ -5197,7 +5224,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private canAttemptBuyNotional(
     requiredNotionalUsdc: number,
     signal: import("@krabs/domain").Signal,
-  ): { allowed: boolean; reasonCode: string; activateCooldown: boolean } | null {
+  ): { allowed: boolean | null; reasonCode: string; activateCooldown: boolean } | null {
     const circuitBreaker = this.deps.buySignalBudgetCircuitBreaker;
     if (!circuitBreaker) return null;
 
@@ -5214,6 +5241,8 @@ export class AlgoDecisionModule implements RuntimeModule {
         activateCooldown: result.activateCooldown ?? true,
       };
     } catch (err) {
+      if (!this.dedupeAllows(this.suppressionDedupe, "buy-budget-preflight-error", Date.now()))
+        return null;
       this.log.warn(
         {
           err,
@@ -5221,9 +5250,9 @@ export class AlgoDecisionModule implements RuntimeModule {
           tokenId: String(signal.tokenId),
           requiredNotionalUsdc,
         },
-        "buy budget circuit breaker failed open",
+        "buy budget circuit breaker unavailable",
       );
-      return { allowed: true, reasonCode: "", activateCooldown: false };
+      return null;
     }
   }
 

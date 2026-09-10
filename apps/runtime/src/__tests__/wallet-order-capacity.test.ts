@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createBuySignalBudgetCircuitBreaker,
   computeDynamicSellCapacityLimits,
   evaluateTotalOrdersCapacity,
   evaluateWalletBuyCapacity,
@@ -13,6 +14,8 @@ import {
   type BuyCapacityPolicy,
   type ExecutionPolicy,
   type OrderCapacityPolicy,
+  type OrderRepository,
+  type Signal,
   type ProfileId,
   type SellCapacityPolicy,
 } from "@krabs/domain";
@@ -41,6 +44,98 @@ const orderPolicy: OrderCapacityPolicy = {
   enabled: true,
   maxOpenOrdersTotal: 22,
 };
+
+describe("candidate budget preflight", () => {
+  function fixture(balance: number | null = 10) {
+    const orderRepo = {
+      findOpen: vi.fn(() => [] as ReturnType<OrderRepository["findOpen"]>),
+      sumOpenBuyNotional: vi.fn(() => 0),
+    };
+    const policy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      buyCapacity: { ...buyPolicy },
+      orderCapacity: { ...orderPolicy },
+    };
+    const breaker = createBuySignalBudgetCircuitBreaker({
+      orderRepo,
+      executionPolicy: () => policy,
+      activeProfile: "paper" as ProfileId,
+      controlDb: { prepare: () => ({ get: () => ({ wallet_balance_usdc: balance }) }) },
+    });
+    const signal = { tokenId: "candidate", side: "buy", reason: "probe-entry" } as Signal;
+    return {
+      orderRepo,
+      policy,
+      signal,
+      attempt: (amount = 0.99, context?: Parameters<typeof breaker.canAttemptBuy>[2]) =>
+        breaker.canAttemptBuy(amount, signal, context),
+    };
+  }
+
+  it("shares failed-burst reads, refreshes before admission, and expires at the next microtask", async () => {
+    const f = fixture();
+    for (let i = 0; i < 20; i++) expect(f.attempt(8.41).canAttempt).toBe(false);
+    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(1);
+    expect(f.orderRepo.sumOpenBuyNotional).toHaveBeenCalledExactlyOnceWith("remaining");
+    f.orderRepo.sumOpenBuyNotional.mockReturnValue(3);
+    expect(f.attempt().canAttempt).toBe(false); // reused facts would admit, refreshed facts reject
+    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(2);
+    f.orderRepo.sumOpenBuyNotional.mockReturnValue(0);
+    expect(f.attempt().canAttempt).toBe(false);
+    await Promise.resolve();
+    expect(f.attempt().canAttempt).toBe(true);
+    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(3);
+    expect(f.attempt().canAttempt).toBe(true); // admission discards the snapshot
+    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(4);
+  });
+
+  it("caches failed DB reads only within the synchronous burst", async () => {
+    const f = fixture();
+    f.orderRepo.findOpen.mockImplementation(() => {
+      throw new Error("DB unavailable");
+    });
+    for (let i = 0; i < 20; i++) expect(() => f.attempt()).toThrow("DB unavailable");
+    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(1);
+    await Promise.resolve();
+    expect(() => f.attempt()).toThrow("DB unavailable");
+    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["per_token_buy_limit", { pendingPreOpenBuyCountForToken: 2 }],
+    ["buy_order_count_limit", { pendingPreOpenBuyCount: 25 }],
+    ["total_orders_capacity_exhausted", { pendingPreOpenBuyCount: 22 }],
+  ])("enforces %s before returning unknown wallet", (reasonCode, pending) => {
+    const f = fixture(null);
+    expect(f.attempt().canAttempt).toBeNull();
+    expect(
+      f.attempt(0.99, {
+        pendingPreOpenBuyCount: 0,
+        pendingPreOpenBuyCountForToken: 0,
+        pendingPreOpenBuyNotionalUsdc: 0,
+        ...pending,
+      }),
+    ).toMatchObject({ canAttempt: false, reasonCode, activateCooldown: false });
+  });
+
+  it("recomputes pending money, entry/add headroom and policy for each candidate", () => {
+    const f = fixture();
+    expect(f.attempt(8.41).canAttempt).toBe(false);
+    const pending = {
+      pendingPreOpenBuyCount: 1,
+      pendingPreOpenBuyCountForToken: 0,
+      pendingPreOpenBuyNotionalUsdc: 2,
+    };
+    expect(f.attempt(0.99, pending).canAttempt).toBe(false);
+    f.signal.reason = "scale-in" as Signal["reason"];
+    expect(f.attempt(0.99, pending).canAttempt).toBe(true);
+    f.policy.buyCapacity.maxOpenBuyOrders = 1;
+    expect(f.attempt(0.99, pending)).toMatchObject({
+      reasonCode: "buy_order_count_limit",
+      activateCooldown: false,
+    });
+  });
+});
 
 function evaluateBuyOrderSlots(
   maxOpenBuyOrders: number,
