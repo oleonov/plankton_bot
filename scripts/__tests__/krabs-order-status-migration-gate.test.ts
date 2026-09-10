@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,9 @@ const marker101 = "101_repair_filled_phantom_orders.sql";
 const marker102 = "102_maker_capture_reprice_intents.sql";
 const marker103 = "103_bounce_ask_capture_reprice_intents.sql";
 const marker106 = "106_repair_trading_disabled_pending_orders.sql";
+const marker108 = "108_maker_capture_intents_token_index.sql";
+const migration108 = join(root, "packages/db/src/migrations", marker108);
+const tokenIndex = "idx_maker_capture_reprice_intents_token";
 const sha = "a".repeat(40);
 const dirs: string[] = [];
 
@@ -42,10 +45,13 @@ function fixture() {
 }
 
 function run(db: string, ...args: string[]) {
-  return spawnSync("bash", [gate, ...args], {
+  const before = readFileSync(db);
+  const result = spawnSync("bash", [gate, ...args], {
     env: { ...process.env, KRABS_ORDER_STATUS_LEDGER_PATH: db },
     encoding: "utf8",
   });
+  expect(readFileSync(db).equals(before)).toBe(true);
+  return result;
 }
 
 function apply(db: string, migration: string, marker: string): void {
@@ -80,11 +86,118 @@ function expectPreRejected(createIntentTable: string): void {
   expect(run(db, "pre", sha, snapshot).status).not.toBe(0);
 }
 
+function populatedFixture() {
+  const result = fixture();
+  for (const [migration, marker] of [
+    [migration101, marker101],
+    [migration102, marker102],
+    [migration103, marker103],
+    [migration106, marker106],
+  ] as const)
+    apply(result.db, migration, marker);
+  insertIntent(result.db);
+  insertAskIntent(result.db);
+  return result;
+}
+
 afterEach(() => {
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
 });
 
 describe("krabs order-status migration gate", () => {
+  it.each(["between pre/post", "before pre", "legacy v4 snapshot"])(
+    "accepts real migration 108 applied %s with unchanged base schema and row proofs",
+    (timing) => {
+      const { db, snapshot } = populatedFixture();
+      const baseline = run(db, "pre", sha, snapshot + ".baseline");
+      expect(baseline.status, baseline.stderr).toBe(0);
+      if (timing === "before pre") apply(db, migration108, marker108);
+      const pre = run(db, "pre", sha, snapshot);
+      expect(pre.status, pre.stderr).toBe(0);
+      expect(JSON.parse(pre.stdout)).toEqual(JSON.parse(baseline.stdout));
+      const saved = JSON.parse(readFileSync(snapshot, "utf8"));
+      expect(saved.migration102.tokenIndexWasPresent).toBe(timing === "before pre");
+      if (timing === "legacy v4 snapshot") {
+        delete saved.migration102.tokenIndexWasPresent;
+        writeFileSync(snapshot, JSON.stringify(saved));
+      }
+      if (timing !== "before pre") apply(db, migration108, marker108);
+      const post = run(db, "post", sha, snapshot);
+      expect(post.status, post.stderr).toBe(0);
+      expect(JSON.parse(post.stdout)).toEqual(JSON.parse(baseline.stdout));
+      expect(JSON.parse(readFileSync(snapshot, "utf8"))).toEqual(saved);
+    },
+  );
+
+  it.each([
+    `DELETE FROM schema_migrations WHERE name='${marker108}'`,
+    `INSERT INTO schema_migrations VALUES('${marker108}')`,
+    `DROP INDEX ${tokenIndex}`,
+    `DROP INDEX ${tokenIndex}; DELETE FROM schema_migrations WHERE name='${marker108}'; CREATE INDEX ${tokenIndex} ON orders(client_order_id)`,
+    `DROP TABLE maker_capture_reprice_intents; DELETE FROM schema_migrations WHERE name='${marker102}'`,
+    ...[
+      `CREATE UNIQUE INDEX ${tokenIndex} ON maker_capture_reprice_intents(token_id)`,
+      `CREATE INDEX ${tokenIndex} ON maker_capture_reprice_intents(token_id) WHERE status='ready'`,
+      `CREATE INDEX ${tokenIndex} ON maker_capture_reprice_intents(status)`,
+      `CREATE INDEX ${tokenIndex} ON maker_capture_reprice_intents(token_id DESC)`,
+      `CREATE INDEX ${tokenIndex} ON maker_capture_reprice_intents(token_id COLLATE NOCASE)`,
+      `CREATE INDEX ${tokenIndex} ON maker_capture_reprice_intents(token_id, status)`,
+      `CREATE INDEX ${tokenIndex} ON maker_capture_reprice_intents(token_id ASC)`,
+    ].map((create) => `DROP INDEX ${tokenIndex}; ${create}`),
+    "CREATE INDEX unrelated ON maker_capture_reprice_intents(token_id)",
+    "DROP INDEX idx_maker_capture_reprice_intents_status",
+    "ALTER TABLE maker_capture_reprice_intents ADD COLUMN extra TEXT",
+    "DROP INDEX idx_bounce_ask_capture_one_nonterminal_per_position",
+  ])("rejects invalid migration 108 state or base schema drift: %s", (mutation) => {
+    const { db, snapshot } = populatedFixture();
+    expect(run(db, "pre", sha, snapshot).status).toBe(0);
+    apply(db, migration108, marker108);
+    sql(db, mutation);
+    const saved = readFileSync(snapshot);
+    for (const mode of ["pre", "post"]) {
+      const result = run(db, mode, sha, mode === "pre" ? snapshot + ".invalid" : snapshot);
+      expect(result.status, mutation).not.toBe(0);
+      expect(result.stderr).toMatch(/migration (102|103|108)/);
+    }
+    expect(readFileSync(snapshot).equals(saved)).toBe(true);
+  });
+
+  it("rejects removal of both migration 108 index and marker after pre", () => {
+    const { db, snapshot } = populatedFixture();
+    apply(db, migration108, marker108);
+    expect(run(db, "pre", sha, snapshot).status).toBe(0);
+    sql(db, `DROP INDEX ${tokenIndex}; DELETE FROM schema_migrations WHERE name='${marker108}'`);
+    const post = run(db, "post", sha, snapshot);
+    expect(post.status).not.toBe(0);
+    expect(post.stderr).toContain("migration 108 index was removed");
+  });
+
+  it.each(["maker", "bounce_ask"])(
+    "still rejects %s intent row changes with migration 108",
+    (kind) => {
+      const { db, snapshot } = populatedFixture();
+      expect(run(db, "pre", sha, snapshot).status).toBe(0);
+      apply(db, migration108, marker108);
+      sql(db, `UPDATE ${kind}_capture_reprice_intents SET status='failed'`);
+      const post = run(db, "post", sha, snapshot);
+      expect(post.status).not.toBe(0);
+      expect(post.stderr).toContain("intent rows changed during migration gate");
+    },
+  );
+
+  it("requires the original base schema hash in legacy v4 snapshots after migration 108", () => {
+    const { db, snapshot } = populatedFixture();
+    expect(run(db, "pre", sha, snapshot).status).toBe(0);
+    const saved = JSON.parse(readFileSync(snapshot, "utf8"));
+    delete saved.migration102.tokenIndexWasPresent;
+    saved.migration102.schemaHash = "0".repeat(64);
+    writeFileSync(snapshot, JSON.stringify(saved));
+    apply(db, migration108, marker108);
+    const post = run(db, "post", sha, snapshot);
+    expect(post.status).not.toBe(0);
+    expect(post.stderr).toContain("migration 102 schema proof changed");
+  });
+
   it("accepts migration 106 exact candidates repaired to the canonical rejected state", () => {
     const { db, snapshot } = fixture();
     insertTradingDisabledCandidate(db);

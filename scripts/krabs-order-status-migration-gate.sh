@@ -51,6 +51,7 @@ expected_indexes102=[
     {'name':'idx_maker_capture_reprice_intents_status','unique':False,'origin':'c','partial':False,'keys':[['status',0,'BINARY']],'sql':'createindexidx_maker_capture_reprice_intents_statusonmaker_capture_reprice_intents(status)'},
     {'name':'idx_maker_capture_reprice_intents_root','unique':False,'origin':'c','partial':False,'keys':[['root_order_id',0,'BINARY'],['replacement_index',0,'BINARY']],'sql':'createindexidx_maker_capture_reprice_intents_rootonmaker_capture_reprice_intents(root_order_id,replacement_index)'},
 ]
+expected_index108={'name':'idx_maker_capture_reprice_intents_token','unique':False,'origin':'c','partial':False,'keys':[['token_id',0,'BINARY']],'sql':'createindexidx_maker_capture_reprice_intents_tokenonmaker_capture_reprice_intents(token_id)'}
 expected_columns103=[
     [0,'intent_id','TEXT',0,None,1],
     [1,'predecessor_order_id','TEXT',1,None,0],
@@ -151,6 +152,15 @@ def index_shape(connection,table):
 expected_shape102={'columns':expected_columns102,'checks':expected_checks102,'indexes':sorted(expected_indexes102,key=canonical)}
 expected_shape103={'columns':expected_columns103,'checks':expected_checks103,'indexes':sorted(expected_indexes103,key=canonical)}
 
+def inspect_token_index(connection):
+    count=connection.execute('SELECT count(*) FROM schema_migrations WHERE name=?',('108_maker_capture_intents_token_index.sql',)).fetchone()[0]
+    if count not in (0,1): raise SystemExit('migration 108 marker is not unique')
+    owners=connection.execute("SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?",(expected_index108['name'],)).fetchall()
+    indexes=[index for index in index_shape(connection,table102) if index['name']==expected_index108['name']]
+    if owners!=([(table102,)] if count else []) or indexes!=([expected_index108] if count else []):
+        raise SystemExit('migration 108 marker/index state is not canonical')
+    return bool(count)
+
 def inspect_intents(connection,table,expected_shape,label):
     expected_schema_hash=digest(expected_shape)
     found=connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchall()
@@ -161,6 +171,8 @@ def inspect_intents(connection,table,expected_shape,label):
         'checks':extract_checks(found[0][0]),
         'indexes':index_shape(connection,table),
     }
+    # Preserve v4 base-schema proofs after validating the sole approved index addition.
+    if table==table102 and token_index_present: shape['indexes'].remove(expected_index108)
     if shape!=expected_shape or digest(shape)!=expected_schema_hash:
         raise SystemExit(f'{label} table shape is not canonical')
     rows=[list(row) for row in connection.execute(f'SELECT * FROM {table} ORDER BY intent_id')]
@@ -234,6 +246,7 @@ try:
         FROM candidates AS c JOIN orders AS o ON o.order_id=c.order_id
        WHERE c.response_body IS NOT NULL
        ORDER BY o.order_id""")]
+    token_index_present=inspect_token_index(con)
     table102_present,rows102,schema102_hash=inspect_intents(con,table102,expected_shape102,'migration 102')
     table103_present,rows103,schema103_hash=inspect_intents(con,table103,expected_shape103,'migration 103')
 except sqlite3.Error as error:
@@ -260,6 +273,7 @@ if mode=='pre':
     migration102['rowsHash']=digest(rows102)
     migration102['rowCount']=len(rows102)
     migration102['schemaHash']=schema102_hash
+    migration102['tokenIndexWasPresent']=token_index_present
     migration103={'markerWasPresent':bool(marker103_count),'tableWasPresent':table103_present,'rows':rows103}
     migration103['rowsHash']=digest(rows103)
     migration103['rowCount']=len(rows103)
@@ -281,6 +295,8 @@ elif mode=='post':
     if payload.get('schemaVersion')!=4 or payload.get('targetSha')!=sha: raise SystemExit('migration snapshot binding is invalid')
     if payload.get('orderColumns')!=order_columns: raise SystemExit('orders schema changed during migration gate')
     before101=payload['migration101']; before102=payload['migration102']; before103=payload['migration103']; before106=payload['migration106']
+    if before102.get('tokenIndexWasPresent',False) and not token_index_present:
+        raise SystemExit('migration 108 index was removed during migration gate')
     if marker101_count!=1: raise SystemExit('migration 101 marker was not applied exactly once')
     if marker102_count!=1 or not table102_present: raise SystemExit('migration 102 was not applied exactly once')
     if marker103_count!=1 or not table103_present: raise SystemExit('migration 103 was not applied exactly once')
