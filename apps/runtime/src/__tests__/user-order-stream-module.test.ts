@@ -673,7 +673,7 @@ describe("UserOrderStreamModule", () => {
     expect(mod.getMetricsSnapshot().dedupeHits).toBe(1);
   });
 
-  it("serializes a websocket cancellation with a registered execution reason and publishes one event", async () => {
+  it("CANCEL_ANCHOR propagates a valid websocket timestamp with the registered execution reason", async () => {
     const { registerCancelIntent } =
       await import("../modules/reconciliation/order-status-resolver.js");
     registerCancelIntent(String(order.orderId), "reprice-threshold");
@@ -682,6 +682,7 @@ describe("UserOrderStreamModule", () => {
       cancelled.push(payload);
     });
     await mod.start();
+    order.createdAt = new Date(1_699_999_994_500).toISOString();
 
     await stream.emitOrder({
       type: "order",
@@ -703,14 +704,15 @@ describe("UserOrderStreamModule", () => {
       undefined,
       "reprice-threshold",
       {
-        cancelAgeMs: null,
-        cancelAgeBucket: null,
+        cancelAgeMs: 5_000,
+        cancelAgeBucket: "<1min",
         fillProgressShares: 0,
         marketHorizon: null,
       },
     );
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0]?.reason).toBe("reprice-threshold");
+    expect(cancelled[0]).toMatchObject({ timestamp: 1_699_999_999_500 });
   });
 
   it("does not regress a terminal local order back to open on stale websocket placement", async () => {

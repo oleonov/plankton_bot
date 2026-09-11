@@ -68,6 +68,29 @@ function makeMarketRepo(horizon: string | null): MarketRepository {
 }
 
 describe("buildCancelTelemetry", () => {
+  it.each([NaN, Infinity, -Infinity, 1_000.5, Number.MAX_SAFE_INTEGER + 1])(
+    "CANCEL_ANCHOR rejects unusable numeric time %s",
+    (nowMs) => {
+      const telemetry = buildCancelTelemetry({
+        order: makeOrder({ createdAt: new Date(0).toISOString() }),
+        nowMs,
+        fillRepo: makeFillRepo(),
+        marketRepo: makeMarketRepo(null),
+      });
+      expect(telemetry).toMatchObject({ cancelAgeMs: null, cancelAgeBucket: null });
+    },
+  );
+
+  it("CANCEL_ANCHOR rejects unsafe age arithmetic even with a safe timestamp", () => {
+    const telemetry = buildCancelTelemetry({
+      order: makeOrder({ createdAt: new Date(-8_640_000_000_000_000).toISOString() }),
+      nowMs: 8_640_000_000_000_000,
+      fillRepo: makeFillRepo(),
+      marketRepo: makeMarketRepo(null),
+    });
+    expect(telemetry).toMatchObject({ cancelAgeMs: null, cancelAgeBucket: null });
+  });
+
   it("computes age, bucket, and zero fills for a fresh order", () => {
     const now = Date.now();
     const order = makeOrder({ createdAt: new Date(now - 5_000).toISOString() });

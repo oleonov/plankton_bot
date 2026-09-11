@@ -39,11 +39,11 @@ function lookupMarketHorizon(marketRepo: MarketRepository, order: Order): string
   }
 }
 
-function computeAgeMs(createdAtIso: string, nowMs: number): number | null {
+export function computeAgeMs(createdAtIso: string, nowMs: number): number | null {
   const createdMs = Date.parse(createdAtIso);
   if (!Number.isFinite(createdMs)) return null;
   const ageMs = nowMs - createdMs;
-  if (!Number.isFinite(ageMs) || ageMs < 0) return null;
+  if (!Number.isSafeInteger(nowMs) || !Number.isSafeInteger(ageMs) || ageMs < 0) return null;
   return ageMs;
 }
 

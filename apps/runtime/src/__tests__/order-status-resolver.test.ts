@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, onTestFinished } from "vitest";
 import {
   createBotRunId,
   createConditionId,
   createOrderId,
   createTokenId,
   ExchangeErrorCode,
+  RESOLVED_LOSER_LOCAL_CANCEL_REASON,
 } from "@krabs/domain";
 import type { ClientOrderId, Order, OrderRepository } from "@krabs/domain";
 import {
@@ -13,6 +14,8 @@ import {
   hasExactMatchedCoverage,
   hasLocalFullCoverage,
   resolveOrderStatusVerdict,
+  registerCancelIntent,
+  persistTerminalVerdictInLane,
 } from "../modules/reconciliation/order-status-resolver.js";
 
 const order: Order = {
@@ -33,6 +36,47 @@ const order: Order = {
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 };
+
+function cancellationFixture() {
+  let row: Order = { ...order, createdAt: new Date(1_000).toISOString() };
+  let gross = 5;
+  const updateStatus = vi.fn<OrderRepository["updateStatus"]>(
+    (_id, status, _code, reason, telemetry) => {
+      row = {
+        ...row,
+        status,
+        ...(reason === undefined ? {} : { cancelReason: reason }),
+        ...telemetry,
+      };
+    },
+  );
+  const publish = vi.fn(async () => {});
+  const args = {
+    orderRepo: { findById: () => row, updateStatus } as unknown as OrderRepository,
+    fillRepo: {
+      findByOrderId: () => [
+        { side: "buy", size: gross - 0.1, sizeUsdc: gross / 2, price: 0.5, liquidityRole: "taker" },
+      ],
+    } as any,
+    bus: { publish } as any,
+    log: {} as any,
+    orderId: order.orderId,
+    exchange: { status: "CANCELLED" as const, sizeFilled: 5 },
+    publish: true,
+  };
+  return {
+    args,
+    publish,
+    updateStatus,
+    row: () => row,
+    setRow: (next: Order) => {
+      row = next;
+    },
+    setGross: (next: number) => {
+      gross = next;
+    },
+  };
+}
 
 describe("order status resolver", () => {
   it("evaluates validity after entering the existing lifecycle lane before terminal mutation or events", async () => {
@@ -261,6 +305,7 @@ describe("order status resolver", () => {
       log: { child: () => undefined } as never,
       orderId: order.orderId,
       exchange: { status: "CANCELLED", sizeFilled: 5 } as never,
+      timestamp: Date.parse(order.createdAt) + 5_000,
     });
 
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(
@@ -269,11 +314,159 @@ describe("order status resolver", () => {
       undefined,
       "exchange-exact-cancelled",
       {
-        cancelAgeMs: null,
-        cancelAgeBucket: null,
+        cancelAgeMs: 5_000,
+        cancelAgeBucket: "<1min",
         fillProgressShares: 5,
         marketHorizon: null,
       },
     );
+  });
+
+  it.each([
+    { label: "omitted", timestamp: undefined, age: 1_000 },
+    { label: "supplied", timestamp: 1_500, age: 500 },
+    { label: "zero age", timestamp: 1_000, age: 0 },
+    { label: "invalid numeric", timestamp: NaN, age: null },
+    { label: "before creation", timestamp: 999, age: null },
+    { label: "explicit null telemetry", timestamp: undefined, age: null, explicit: true },
+    {
+      label: "explicit telemetry with different event time",
+      timestamp: 9_000,
+      age: 17,
+      explicit: true,
+    },
+  ])("CANCEL_ANCHOR first write: $label", async ({ timestamp, age, explicit }) => {
+    let clock = 2_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    onTestFinished(() => now.mockRestore());
+    const f = cancellationFixture();
+    const write = f.updateStatus.getMockImplementation()!;
+    f.updateStatus.mockImplementation((...args) => {
+      write(...args);
+      clock = 10_000;
+    });
+    const snapshots: Order[] = [];
+    f.publish.mockImplementation(async () => {
+      snapshots.push({ ...f.row() });
+    });
+    registerCancelIntent(String(order.orderId), "bounce_ask_capture_reprice");
+    await applyOrderVerdict({
+      ...f.args,
+      ...(timestamp === undefined ? {} : { timestamp }),
+      ...(explicit
+        ? {
+            cancelTelemetry: {
+              cancelAgeMs: age,
+              cancelAgeBucket: null,
+              marketHorizon: age === null ? null : "short",
+              fillProgressShares: 999,
+            },
+          }
+        : {}),
+    });
+    expect(snapshots[0]).toMatchObject({
+      cancelAgeMs: age,
+      cancelAgeBucket: explicit || age === null ? null : "<1min",
+      marketHorizon: explicit && age !== null ? "short" : null,
+      fillProgressShares: 5,
+      cancelReason: "bounce_ask_capture_reprice",
+    });
+    expect(f.publish).toHaveBeenCalledWith(
+      "OrderCancelled",
+      expect.objectContaining({ timestamp: timestamp ?? 2_000 }),
+    );
+    await applyOrderVerdict({ ...f.args, timestamp: 20_000 });
+    expect(f.row()).toEqual(snapshots[0]);
+    expect(f.updateStatus).toHaveBeenCalledOnce();
+    expect(f.publish).toHaveBeenCalledOnce();
+  });
+
+  it("CANCEL_ANCHOR samples the clock only after winning the lifecycle lane", async () => {
+    const f = cancellationFixture();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    onTestFinished(() => clock.mockRestore());
+    const release = Promise.withResolvers<void>();
+    const prior = inOrderLifecycleLane(String(order.orderId), () => release.promise);
+    const pending = applyOrderVerdict(f.args);
+    clock.mockReturnValue(3_000);
+    release.resolve();
+    await prior;
+    await pending;
+    expect(clock).toHaveBeenCalledOnce();
+    expect(f.row().cancelAgeMs).toBe(2_000);
+    expect(f.publish).toHaveBeenCalledWith(
+      "OrderCancelled",
+      expect.objectContaining({ timestamp: 3_000 }),
+    );
+  });
+
+  it.each([
+    "historical null",
+    "persistence throw",
+    "publication throw",
+    "publish false",
+    "no bus",
+    "coverage gap",
+    "full fills",
+    "missing row",
+    "resolved loser",
+  ])("CANCEL_ANCHOR terminal effects: %s", async (mode) => {
+    const f = cancellationFixture();
+    const args = { ...f.args, timestamp: 2_000 };
+    if (mode === "historical null")
+      f.setRow({ ...f.row(), status: "cancelled", cancelAgeMs: null, cancelReason: "historical" });
+    if (mode === "coverage gap") f.setGross(4);
+    if (mode === "full fills") f.setGross(100);
+    if (mode === "missing row") args.orderRepo.findById = () => null;
+    if (mode === "publish false") args.publish = false;
+    if (mode === "no bus") args.bus = undefined;
+    if (mode === "resolved loser") {
+      registerCancelIntent(String(order.orderId), "bounce_ask_capture_reprice");
+      await persistTerminalVerdictInLane(
+        args,
+        f.row(),
+        { status: "cancelled", reason: RESOLVED_LOSER_LOCAL_CANCEL_REASON },
+        5,
+      );
+      expect(f.row().cancelReason).toBe(RESOLVED_LOSER_LOCAL_CANCEL_REASON);
+      return;
+    }
+    if (mode === "persistence throw") {
+      registerCancelIntent(String(order.orderId), "bounce_ask_capture_reprice");
+      f.updateStatus.mockImplementationOnce(() => {
+        throw new Error("write failed");
+      });
+      await expect(applyOrderVerdict(args)).rejects.toThrow("write failed");
+      expect(f.publish).not.toHaveBeenCalled();
+      expect(f.row().status).toBe("open");
+      await applyOrderVerdict(args);
+      expect(f.row().cancelReason).toBe("bounce_ask_capture_reprice");
+      return;
+    }
+    if (mode === "publication throw") {
+      f.publish.mockRejectedValueOnce(new Error("publish failed"));
+      await expect(applyOrderVerdict(args)).rejects.toThrow("publish failed");
+      const first = { ...f.row() };
+      await applyOrderVerdict({ ...args, timestamp: 8_000 });
+      expect(f.row()).toEqual(first);
+      f.setGross(100);
+      await applyOrderVerdict({ ...args, timestamp: 9_000 });
+      expect(f.row()).toEqual({ ...first, status: "filled" });
+      expect(f.publish).toHaveBeenCalledOnce();
+      return;
+    }
+    await applyOrderVerdict(args);
+    expect(f.publish).not.toHaveBeenCalled();
+    if (["historical null", "coverage gap", "missing row"].includes(mode)) {
+      expect(f.updateStatus).not.toHaveBeenCalled();
+      if (mode === "historical null")
+        expect(f.row()).toMatchObject({ cancelAgeMs: null, cancelReason: "historical" });
+    } else if (mode === "full fills") expect(f.row().status).toBe("filled");
+    else
+      expect(f.row()).toMatchObject({
+        status: "cancelled",
+        cancelAgeMs: 1_000,
+        fillProgressShares: 5,
+      });
   });
 });

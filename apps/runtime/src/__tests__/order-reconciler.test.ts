@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, onTestFinished } from "vitest";
 import { createTokenId, createOrderId, createConditionId, createFillId } from "@krabs/domain";
 import type {
   ExchangeGateway,
@@ -463,9 +463,11 @@ describe("reconcileOrders — missing-order evidence", () => {
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(order.orderId, "open");
   });
 
-  it("forwards fillCompletionTolerance=0 through mature exact resolution", async () => {
+  it("CANCEL_ANCHOR samples first-write time and forwards fillCompletionTolerance=0", async () => {
     const orderRepo = createOrderRepo();
     const order = makeLocalOrder({ exchangeOrderId: "ex-mature", status: "open" });
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(order.createdAt) + 100_000);
+    onTestFinished(() => clock.mockRestore());
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
     orderRepo.findById = vi.fn().mockReturnValue(order);
     const fillRepo = createFillRepo();
@@ -498,8 +500,8 @@ describe("reconcileOrders — missing-order evidence", () => {
       undefined,
       "exchange-exact-cancelled",
       {
-        cancelAgeMs: null,
-        cancelAgeBucket: null,
+        cancelAgeMs: 100_000,
+        cancelAgeBucket: "1-10min",
         fillProgressShares: 9.97,
         marketHorizon: null,
       },

@@ -64,7 +64,10 @@ import {
   buildReservationSnapshot,
   canonicalRecoveryMetadata,
 } from "../modules/execution/reservation-utils.js";
-import { buildMakerCaptureRepriceIdentity } from "../maker-capture-reprice.js";
+import {
+  buildMakerCaptureRepriceIdentity,
+  resolveMakerCaptureCancellationAnchorMs,
+} from "../maker-capture-reprice.js";
 import { buildBounceAskCaptureIdentity } from "../bounce-ask-capture.js";
 import { BounceAskCaptureLifecycleModule } from "../modules/bounce-ask-capture/bounce-ask-capture-lifecycle-module.js";
 import type { MakerBuyFastCancel } from "../modules/execution/maker-buy-fast-cancel.js";
@@ -822,6 +825,385 @@ describe("ExecutionModule", () => {
       positionRepo: createMockPositionRepo(position),
       inventoryLotRepo: createMockInventoryLotRepo(position),
     });
+  });
+
+  it.each([
+    "WSS_FIRST",
+    "RECON_FIRST",
+    "EXECUTION_FIRST",
+    "EXPIRES_ON_ORIGINAL_DEADLINE",
+    "DELAYED_WSS_EXACT",
+    "INVALID_TIMESTAMP",
+    "MALFORMED_CREATED",
+    "NONCANONICAL_CREATED",
+    "BEFORE_CREATION",
+    "FUTURE_ANCHOR",
+    "STALE_ANCHOR",
+  ])("CANCEL_ANCHOR_%s", async (mode) => {
+    const now = Date.parse("2026-09-11T00:00:00.000Z");
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(now);
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    const reached = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const exactReached = Promise.withResolvers<void>();
+    const exactRelease = Promise.withResolvers<void>();
+    const cohort = "2026-08-01T00:00:00.000Z";
+    const position = makePosition({ size: 4, avgEntryPrice: 0.2, costBasisUsdc: 0.8 });
+    const buy = openSellAt(0.2, {
+      orderId: createOrderId("anchor-buy"),
+      side: "buy",
+      postOnly: true,
+      entryStyle: "maker",
+      signalReason: "probe-entry",
+      decisionRuleId: R23_DIP_TRIGGER_RULE_ID,
+      metadata: {
+        makerCaptureLineageV1: {
+          version: 1,
+          rootOrderId: "anchor-buy",
+          predecessorOrderId: null,
+          replacementIndex: 0,
+          rootNotionalUsdc: 1,
+        },
+        quoteMotionV1: {
+          version: 1,
+          kind: "r23_capture",
+          cohortId: cohort,
+          originalSuggestedPrice: 0.2,
+          originalTargetPrice: null,
+          entryPriceCeiling: 0.25,
+          policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+          policyControlRevision: 7,
+          initialBook: {
+            depthStatus: "full",
+            bestBid: 0.19,
+            bestAsk: 0.21,
+            tickSize: 0.01,
+            snapshotTs: now,
+            source: "clob",
+          },
+        },
+      },
+    });
+    let predecessor = openSellAt(0.4, {
+      positionId: position.positionId,
+      postOnly: true,
+      entryStyle: "maker",
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      createdAt: new Date(now - 100_000).toISOString(),
+    });
+    if (mode === "MALFORMED_CREATED") predecessor = { ...predecessor, createdAt: "bad-date" };
+    if (mode === "NONCANONICAL_CREATED")
+      predecessor = { ...predecessor, createdAt: predecessor.createdAt.replace(".000Z", "Z") };
+    const identity = buildBounceAskCaptureIdentity(predecessor.orderId, predecessor.orderId, 1);
+    const trigger = {
+      eventTimestampMs: now,
+      evaluatedAtMs: now,
+      policySchemaVersion: DEFAULT_EXECUTION_POLICY.version,
+      policyControlRevision: 7,
+      sourceCohortActivatedAtUtc: cohort,
+      originalTargetPrice: 0.3,
+      candidatePrice: 0.35,
+      externalBestBid: 0.34,
+      externalBestAsk: 0.36,
+      tickSize: 0.01,
+      positionResidualShares: 4,
+      sourceBuyRootOrderIds: [buy.orderId],
+    };
+    let intent: any = {
+      ...identity,
+      rootOrderId: predecessor.orderId,
+      predecessorOrderId: predecessor.orderId,
+      positionId: position.positionId,
+      tokenId: predecessor.tokenId,
+      conditionId: predecessor.conditionId,
+      replacementIndex: 1,
+      status: "cancel_pending",
+      candidatePrice: null,
+      replacementSize: null,
+      childOrderId: null,
+      proof: { version: 1, trigger, prepared: null, submit: null },
+    };
+    predecessor = {
+      ...predecessor,
+      metadata: {
+        bounceAskCaptureLineageV1: {
+          version: 1,
+          rootOrderId: predecessor.orderId,
+          predecessorOrderId: null,
+          replacementIndex: 0,
+          positionId: position.positionId,
+          originalTargetPrice: 0.3,
+          sourceCohortActivatedAtUtc: cohort,
+          sourceBuyRootOrderIds: [buy.orderId],
+        },
+        bounceAskCaptureRecoveryV1: {
+          version: 1,
+          intentId: identity.intentId,
+          recoveryClass: "data",
+        },
+      },
+    };
+    orderRepo.findById = vi.fn((id) => (id === buy.orderId ? buy : predecessor));
+    orderRepo.findByExchangeOrderId = vi.fn(() => predecessor);
+    orderRepo.findByClientOrderId = vi.fn(() => null);
+    orderRepo.findOpen = vi.fn(() => (predecessor.status === "open" ? [predecessor] : []));
+    orderRepo.updateStatus = vi.fn((_id, status, _code, reason, telemetry) => {
+      predecessor = { ...predecessor, status, cancelReason: reason ?? null, ...telemetry };
+    });
+    orderRepo.findBounceAskCaptureIntentBySignal = () => intent;
+    orderRepo.findBounceAskCaptureIntentByPredecessor = () => intent;
+    orderRepo.findRecoverableBounceAskCaptureIntents = () => [intent];
+    orderRepo.getMakerCaptureChainUsage = (id) => ({ trusted: true, rootOrderId: id }) as any;
+    orderRepo.updateMetadataIfUnchanged = (_id, _before, metadata) =>
+      (predecessor = { ...predecessor, metadata });
+    orderRepo.markBounceAskCaptureReady = (_id, price, size, prepared) => {
+      intent = {
+        ...intent,
+        status: "ready",
+        candidatePrice: price,
+        replacementSize: size,
+        proof: { ...intent.proof, prepared },
+      };
+      return true;
+    };
+    orderRepo.markBounceAskCaptureTerminal = (_id, status, failure) => {
+      intent = { ...intent, status, failure };
+      return true;
+    };
+    fillRepo.findByOrderId = vi.fn(() => [{ side: "sell", size: 1, price: 0.4 }] as Fill[]);
+    fillRepo.findByTokenId = vi.fn(
+      () =>
+        [
+          {
+            fillId: createFillId(`fill-${position.positionId}`),
+            orderId: buy.orderId,
+            tokenId: buy.tokenId,
+            side: "buy",
+            size: 5,
+          },
+        ] as Fill[],
+    );
+    const remote = {
+      orderId: predecessor.exchangeOrderId!,
+      status: "CANCELLED",
+      sizeFilled: 1,
+    } as ExchangeOrder;
+    vi.mocked(gateway.getOpenOrders).mockResolvedValue([{ ...remote, status: "OPEN" }]);
+    vi.mocked(gateway.cancelOrder).mockImplementation(async () => {
+      reached.resolve();
+      await release.promise;
+      return { success: true };
+    });
+    gateway.getOrderResult = vi.fn(async () => {
+      if (mode === "DELAYED_WSS_EXACT") {
+        exactReached.resolve();
+        await exactRelease.promise;
+      }
+      return { ok: true as const, data: remote };
+    });
+    marketRepo.findByTokenId.mockReturnValue({ horizon: "short" });
+    let handlers!: Parameters<NonNullable<ExchangeGateway["createUserEventStream"]>>[0];
+    gateway.createUserEventStream = (callbacks) => {
+      handlers = callbacks;
+      return { close: vi.fn(), setConditionIds: vi.fn() };
+    };
+    const stream = new UserOrderStreamModule({
+      gateway,
+      bus,
+      orderRepo,
+      fillRepo,
+      marketRepo: marketRepo as any,
+      log: silentLog,
+    });
+    const lifecycle = new BounceAskCaptureLifecycleModule({
+      bus,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      positionRepo: { findById: () => position },
+      inventoryLotRepo: createMockInventoryLotRepo(position),
+      policySnapshot: () => ({
+        controlRevision: 7,
+        policy: {
+          ...DEFAULT_EXECUTION_POLICY,
+          bounceAskCapture: {
+            ...DEFAULT_EXECUTION_POLICY.bounceAskCapture,
+            enabled: true,
+            sourceCohortActivatedAtUtc: cohort,
+          },
+        },
+      }),
+      candidateBookCache: {
+        prime: async () =>
+          new Map([
+            [
+              String(predecessor.tokenId),
+              {
+                tokenId: String(predecessor.tokenId),
+                sourceKind: "rest" as const,
+                bookSource: "clob" as const,
+                snapshotTs: Date.now(),
+                cachedAtMs: Date.now(),
+                sourcePolledAtMs: Date.now(),
+                book: {
+                  tokenId: predecessor.tokenId,
+                  bids: [{ price: 0.34, size: 20 }],
+                  asks: [{ price: 0.36, size: 10 }],
+                  minOrderSize: 1,
+                  timestamp: Date.now(),
+                } as any,
+              },
+            ],
+          ]),
+      },
+    });
+    const signals = vi.fn();
+    const snapshots: Array<{ row: Order; anchor: number | null; timestamp: number }> = [];
+    bus.subscribe("SignalProduced", signals);
+    bus.subscribe("OrderCancelled", async (event) => {
+      snapshots.push({
+        row: { ...predecessor },
+        anchor: resolveMakerCaptureCancellationAnchorMs(predecessor),
+        timestamp: event.timestamp,
+      });
+    });
+    await mod.start();
+    await stream.start();
+    await lifecycle.start();
+    let executionFinished = false;
+    onTestFinished(async () => {
+      release.resolve();
+      exactRelease.resolve();
+      await executing;
+      await lifecycle.stop();
+      await stream.stop();
+      await mod.stop();
+    });
+    const executing = bus
+      .publish("CancelOrderRequested", {
+        timestamp: now,
+        command: {
+          type: "CancelOrderCommand",
+          commandId: createCommandId("anchor-cancel"),
+          orderId: predecessor.orderId,
+          reason: "bounce_ask_capture_reprice",
+        },
+      })
+      .then(() => {
+        executionFinished = true;
+      });
+    await reached.promise;
+    vi.mocked(gateway.getOpenOrders).mockResolvedValue([]);
+    const timestamp =
+      mode === "INVALID_TIMESTAMP"
+        ? NaN
+        : mode === "BEFORE_CREATION"
+          ? now - 100_001
+          : mode === "FUTURE_ANCHOR"
+            ? now + 1
+            : mode === "STALE_ANCHOR"
+              ? now - 3_000
+              : now;
+    if (mode === "EXECUTION_FIRST") {
+      release.resolve();
+      await executing;
+    }
+    const competitor =
+      mode === "RECON_FIRST"
+        ? reconcileOrders({
+            gateway,
+            bus,
+            orderRepo,
+            fillRepo,
+            log: silentLog,
+            suspiciousEmptyThreshold: 0,
+          })
+        : handlers.onOrderEvents([
+            {
+              type: "order",
+              event: "CANCELLATION",
+              orderId: predecessor.exchangeOrderId!,
+              clientOrderId: predecessor.clientOrderId,
+              tokenId: predecessor.tokenId,
+              side: "sell",
+              sizeTotal: 5,
+              sizeFilled: 1,
+              sizeRemaining: 4,
+              status: "CANCELLED",
+              timestamp,
+            },
+          ]);
+    if (mode === "DELAYED_WSS_EXACT") {
+      await exactReached.promise;
+      vi.setSystemTime(now + 3_000);
+      exactRelease.resolve();
+    }
+    await competitor;
+    await (lifecycle as any).captureWork.drain();
+    expect(executionFinished).toBe(mode === "EXECUTION_FIRST");
+    expect(snapshots).toHaveLength(1);
+    const first = snapshots[0]!;
+    expect(first.row).toMatchObject({
+      status: "cancelled",
+      cancelReason: "bounce_ask_capture_reprice",
+      fillProgressShares: 1,
+      marketHorizon: mode === "EXECUTION_FIRST" ? "short" : null,
+    });
+    expect(first.timestamp).toBe(timestamp);
+    const invalid = [
+      "INVALID_TIMESTAMP",
+      "MALFORMED_CREATED",
+      "NONCANONICAL_CREATED",
+      "BEFORE_CREATION",
+      "FUTURE_ANCHOR",
+    ].includes(mode);
+    const stale = ["STALE_ANCHOR", "DELAYED_WSS_EXACT"].includes(mode);
+    if (invalid || stale) {
+      expect(intent.failure).toBe(
+        invalid ? "invalid-cancellation-anchor" : "post-cancel-data-expired",
+      );
+      expect(signals).not.toHaveBeenCalled();
+    } else {
+      expect(first.row.cancelAgeMs).toBe(100_000);
+      expect(first.row.cancelAgeBucket).toBe("1-10min");
+      expect(first.anchor).toBe(now);
+      expect(intent.status).toBe("cancel_pending");
+    }
+    if (!invalid && !stale && mode !== "EXPIRES_ON_ORIGINAL_DEADLINE") {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await bus.publish("NormalizedMarketUpdated", {
+        timestamp: Date.now(),
+        markets: [makeNormalizedMarket({ bestBid: 0.34, bestAsk: 0.36, minOrderSize: 1 })],
+      });
+      await (lifecycle as any).captureWork.drain();
+      expect(intent.status).toBe("ready");
+      expect(signals).toHaveBeenCalledOnce();
+      expect(signals.mock.calls[0]![0].signal.suggestedSize).toBe(4);
+      expect(executionFinished).toBe(mode === "EXECUTION_FIRST");
+      expect(predecessor.metadata?.bounceAskCaptureRecoveryV1).toMatchObject({
+        deadlineMs: now + 3_000,
+      });
+    }
+    await vi.advanceTimersByTimeAsync(Math.max(1_000, now + 2_000 - Date.now()));
+    release.resolve();
+    await executing;
+    expect(predecessor.cancelAgeMs).toBe(first.row.cancelAgeMs);
+    expect(predecessor.cancelReason).toBe(first.row.cancelReason);
+    expect(resolveMakerCaptureCancellationAnchorMs(predecessor)).toBe(first.anchor);
+    expect(snapshots).toHaveLength(1);
+    if (invalid || stale) return;
+    if (mode === "EXPIRES_ON_ORIGINAL_DEADLINE") {
+      await vi.advanceTimersByTimeAsync(999);
+      expect(intent.status).toBe("cancel_pending");
+      await vi.advanceTimersByTimeAsync(1);
+      expect(intent.failure).toBe("post-cancel-data-expired");
+      expect(signals).not.toHaveBeenCalled();
+      return;
+    }
+    expect(signals).toHaveBeenCalledOnce();
   });
 
   const startupModule = (

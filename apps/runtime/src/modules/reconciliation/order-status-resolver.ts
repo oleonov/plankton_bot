@@ -12,6 +12,8 @@ import {
   RESOLVED_LOSER_LOCAL_CANCEL_REASON,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import { classifyCancelAgeBucket } from "../../executable-price.js";
+import { computeAgeMs } from "./cancel-telemetry.js";
 
 export const DEFAULT_FILL_COMPLETION_TOLERANCE = 0.005;
 const EXCHANGE_FILL_EPSILON = 1e-9;
@@ -216,6 +218,12 @@ export async function persistTerminalVerdictInLane(
   verdict: Extract<TerminalVerdict, { status: "filled" | "cancelled" | "rejected" }>,
   gross: number,
 ): Promise<void> {
+  const cancellationTimestamp =
+    verdict.status === "cancelled" ? (args.timestamp ?? Date.now()) : undefined;
+  const fallbackAge =
+    cancellationTimestamp !== undefined && args.cancelTelemetry === undefined
+      ? computeAgeMs(order.createdAt, cancellationTimestamp)
+      : null;
   const reason =
     verdict.status === "cancelled"
       ? verdict.reason === RESOLVED_LOSER_LOCAL_CANCEL_REASON
@@ -227,10 +235,12 @@ export async function persistTerminalVerdictInLane(
   const cancelTelemetry =
     verdict.status === "cancelled"
       ? {
-          cancelAgeMs: args.cancelTelemetry?.cancelAgeMs ?? null,
-          cancelAgeBucket: args.cancelTelemetry?.cancelAgeBucket ?? null,
+          ...(args.cancelTelemetry ?? {
+            cancelAgeMs: fallbackAge,
+            cancelAgeBucket: classifyCancelAgeBucket(fallbackAge),
+            marketHorizon: null,
+          }),
           fillProgressShares: gross,
-          marketHorizon: args.cancelTelemetry?.marketHorizon ?? null,
         }
       : args.cancelTelemetry;
   if (reason === undefined && cancelTelemetry === undefined) {
@@ -242,7 +252,7 @@ export async function persistTerminalVerdictInLane(
   }
   clearCancelIntent(String(order.orderId));
   if (args.publish && args.bus) {
-    const timestamp = args.timestamp ?? Date.now();
+    const timestamp = cancellationTimestamp ?? args.timestamp ?? Date.now();
     const commandId = createCommandId(`exact-terminal-${String(order.orderId)}-${timestamp}`);
     if (verdict.status === "cancelled") {
       await args.bus.publish("OrderCancelled", {
