@@ -261,8 +261,10 @@ cat >/dev/null`,
     const result = spawnSync(guard, ["deploy-arbitrate", "slow-startup", "false", "0", original], {
       env: { ...fixture.env, ARBITRATION_APPLY_AFTER_POLLS: "61" },
       encoding: "utf8",
-      timeout: 10_000,
+      // This exercises 61 real subprocess polls, not a ten-second wall-clock contract.
+      timeout: 60_000,
     });
+    expect(result.error, result.stderr).toBeUndefined();
     expect(result.status, result.stderr).toBe(0);
     expect(Number(readFileSync(fixture.env.ARBITRATION_POLL_COUNTER, "utf8"))).toBeGreaterThan(60);
     expect(rows(fixture)).toEqual([
