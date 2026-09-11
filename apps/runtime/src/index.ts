@@ -1760,6 +1760,7 @@ async function main(): Promise<void> {
       executionModule.getSubmitUnknownRecoveryContexts(isCurrent),
   };
   const reconciliationModule = new ReconciliationModule({
+    positionRepo: repos.position,
     gateway: exchangeGateway,
     bus,
     orderRepo: repos.order,

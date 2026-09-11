@@ -26,6 +26,9 @@ import type {
   MarketRepository,
   Order,
   OrderRepository,
+  PositionRepository,
+  MarketResolutionRepository,
+  SettlementLedgerRepository,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import type {
@@ -33,10 +36,14 @@ import type {
   SubmitUnknownRecoveryContext,
 } from "../execution/execution-module.js";
 import { applyOrderVerdict, resolveOrderStatusVerdict } from "./order-status-resolver.js";
+import { closeResolvedLosers } from "./resolved-loser-local-closure.js";
 
 export interface OrderReconcilerDeps {
   gateway: ExchangeGateway;
   orderRepo: OrderRepository;
+  positionRepo?: PositionRepository | undefined;
+  marketResolutionRepo?: MarketResolutionRepository | undefined;
+  settlementLedgerRepo?: SettlementLedgerRepository | undefined;
   /** @deprecated Open-snapshot absence no longer needs fill state. */
   fillRepo?: FillRepository;
   /** @deprecated Open-snapshot absence no longer needs market state. */
@@ -203,10 +210,12 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   const fillRepo = deps.fillRepo ?? EMPTY_FILL_READER;
   await measureOrderStage(deps, "exactCandidates", unresolved.exactCandidates.length, () =>
     resolveExactCandidates({
+      ...deps,
       candidates: unresolved.exactCandidates,
       gateway,
       orderRepo,
       fillRepo,
+      closureDeps: deps,
       log,
       fillCompletionTolerance: deps.fillCompletionTolerance,
       ...(deps.bus ? { bus: deps.bus } : {}),
@@ -304,6 +313,7 @@ function exactRemoteState(
 }
 
 async function resolveExactCandidates(deps: {
+  closureDeps: OrderReconcilerDeps;
   candidates: readonly Order[];
   gateway: ExchangeGateway;
   orderRepo: OrderRepository;
@@ -313,9 +323,11 @@ async function resolveExactCandidates(deps: {
   fillCompletionTolerance?: number | undefined;
 }): Promise<void> {
   if (!deps.gateway.getOrderResult) return;
+  const exactNull: Order[] = [];
   for (const local of deps.candidates) {
     const exact = await deps.gateway.getOrderResult(local.exchangeOrderId!);
     if (!exact.ok) continue;
+    if (!exact.data) exactNull.push(local);
     await applyOrderVerdict({
       orderRepo: deps.orderRepo,
       fillRepo: deps.fillRepo,
@@ -327,6 +339,7 @@ async function resolveExactCandidates(deps: {
       ...(deps.bus ? { bus: deps.bus } : {}),
     });
   }
+  await closeResolvedLosers(exactNull, deps.closureDeps);
 }
 
 async function resolveUnresolvedStaleOrders(deps: {

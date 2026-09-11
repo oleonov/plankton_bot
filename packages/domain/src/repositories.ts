@@ -313,6 +313,8 @@ export interface OrderRepository {
   /** Return pending, open, and partially-filled orders, optionally limited to one token. */
   findOpen(tokenId?: TokenId): Order[];
 
+  findLocallyClosedResolvedLosers?(): Order[];
+
   /** Return all orders for a specific outcome token. */
   findByTokenId(tokenId: TokenId): Order[];
 
@@ -1177,6 +1179,22 @@ export interface SwitchRequestRepository {
 // ─── SettlementLedgerRepository ─────────────────────────────────────────
 
 export interface SettlementLedgerRepository {
+  /** Raw provenance and accounting for one explicitly linked position; no writes. */
+  findLocalClosureEvidence?(order: Order): {
+    metadataJson: string | null;
+    settlements: SettlementRecord[];
+    fills: Array<{
+      fillId: string;
+      orderId: string;
+      tokenId: string;
+      conditionId: string;
+      side: string;
+      reconciled: number;
+      filledAt: string;
+      accounting: Array<{ positionId: string; tokenId: string; createdAt: string }>;
+    }>;
+  } | null;
+
   save(settlement: SettlementRecord): void;
 
   /**

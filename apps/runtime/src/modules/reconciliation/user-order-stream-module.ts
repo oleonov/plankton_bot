@@ -10,6 +10,7 @@ import type {
   RuntimeModule,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import { RESOLVED_LOSER_LOCAL_CANCEL_REASON } from "@krabs/domain";
 import type { ExactNullStartupQuarantine } from "../execution/execution-module.js";
 import {
   findLocalOrderForExchangeFill,
@@ -93,6 +94,7 @@ export class UserOrderStreamModule implements RuntimeModule {
   private readonly orphanTtlMs: number;
   private readonly now: () => number;
   private readonly seenEventKeys = new Map<string, number>();
+  private readonly locallyClosedConditions = new Set<string>();
   private readonly orphanBuffer = new Map<string, BufferedTradeEvent>();
   private readonly preAckBuffer = new Map<string, BufferedPreAckEvent>();
   private readonly window: UserOrderStreamWindow;
@@ -112,6 +114,9 @@ export class UserOrderStreamModule implements RuntimeModule {
   }
 
   async start(): Promise<void> {
+    this.locallyClosedConditions.clear();
+    for (const order of this.deps.orderRepo.findLocallyClosedResolvedLosers?.() ?? [])
+      this.locallyClosedConditions.add(order.conditionId);
     this.started = true;
     const generation = ++this.generation;
     // Defense-in-depth: own the dedupe-map prune cadence instead of relying
@@ -135,7 +140,12 @@ export class UserOrderStreamModule implements RuntimeModule {
       }),
     );
     this.unsubs.push(
-      this.deps.bus.subscribe("OrderCancelled", async () => {
+      this.deps.bus.subscribe("OrderCancelled", async ({ orderId, reason }) => {
+        if (reason === RESOLVED_LOSER_LOCAL_CANCEL_REASON) {
+          const order = this.deps.orderRepo.findById(orderId);
+          if (order?.cancelReason === RESOLVED_LOSER_LOCAL_CANCEL_REASON)
+            this.locallyClosedConditions.add(order.conditionId);
+        }
         this.refreshSubscribedConditions();
       }),
     );
@@ -516,7 +526,7 @@ export class UserOrderStreamModule implements RuntimeModule {
 
   private refreshSubscribedConditions(): void {
     if (!this.stream) return;
-    const conditionIds = new Set<string>();
+    const conditionIds = new Set<string>(this.locallyClosedConditions);
     for (const order of this.deps.orderRepo.findOpen()) {
       const market = this.deps.marketRepo.findByTokenId(order.tokenId);
       if (!market) continue;

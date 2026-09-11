@@ -26,6 +26,7 @@ import type {
 } from "@krabs/domain";
 import {
   createOrderId,
+  RESOLVED_LOSER_LOCAL_CANCEL_REASON,
   createTokenId,
   createConditionId,
   createPositionId,
@@ -36,6 +37,14 @@ import {
 
 export class SqliteOrderRepository implements OrderRepository {
   constructor(private readonly db: Database.Database) {}
+
+  findLocallyClosedResolvedLosers(): Order[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM orders WHERE cancel_reason = ?")
+        .all(RESOLVED_LOSER_LOCAL_CANCEL_REASON) as Record<string, unknown>[]
+    ).map((row) => this.rowToOrder(row));
+  }
 
   save(order: Order): void {
     this.db

@@ -152,6 +152,7 @@ export interface ReconciliationModuleDeps {
   gateway: ExchangeGateway;
   bus: EventBus;
   orderRepo: OrderRepository;
+  positionRepo?: import("@krabs/domain").PositionRepository;
   fillRepo: FillRepository;
   marketRepo: MarketRepository;
   marketResolutionRepo?: MarketResolutionRepository;
@@ -457,6 +458,9 @@ export class ReconciliationModule implements RuntimeModule {
       const graceMs = this.deps.reconcileIntervalMs * 2 + 30_000;
       const stageOrdersStart = Date.now();
       const orderResult = await reconcileOrders({
+        positionRepo: this.deps.positionRepo,
+        marketResolutionRepo: this.deps.marketResolutionRepo,
+        settlementLedgerRepo: this.deps.settlementLedgerRepo,
         gateway: this.deps.gateway,
         orderRepo: this.deps.orderRepo,
         fillRepo: this.deps.fillRepo,

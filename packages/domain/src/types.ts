@@ -479,6 +479,8 @@ export interface RiskDecision {
 // sizeUsdc  — USDC notional at the limit price (= size × price).
 // Both fields are required; neither is nullable.
 
+export const RESOLVED_LOSER_LOCAL_CANCEL_REASON = "resolved_loser_settled_local";
+
 export interface Order {
   orderId: OrderId;
   clientOrderId: ClientOrderId;

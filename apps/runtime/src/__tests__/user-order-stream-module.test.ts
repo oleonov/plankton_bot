@@ -226,6 +226,40 @@ describe("UserOrderStreamModule", () => {
     await mod.stop();
   });
 
+  it.each([false, true])(
+    "retains the last locally closed condition across restart (prestart=%s)",
+    async (prestart) => {
+      const durable: Order = {
+        ...order,
+        cancelReason: "resolved_loser_settled_local",
+        status: "cancelled",
+      };
+      orderRepo.findLocallyClosedResolvedLosers = vi.fn(() => (prestart ? [durable] : []));
+      if (prestart) vi.mocked(orderRepo.findOpen).mockReturnValue([]);
+      await mod.start();
+      vi.mocked(orderRepo.findOpen).mockReturnValue([]);
+      vi.mocked(orderRepo.findById).mockReturnValue(durable);
+      vi.mocked(marketRepo.findByTokenId).mockReturnValue(null);
+      await bus.publish("OrderCancelled", {
+        commandId: "local-close" as any,
+        orderId: order.orderId,
+        tokenId: order.tokenId,
+        conditionId: order.conditionId,
+        reason: durable.cancelReason!,
+        signalReason: null,
+        timestamp: Date.now(),
+      });
+      expect(stream.conditionIds).toEqual([order.conditionId]);
+      expect(orderRepo.findLocallyClosedResolvedLosers).toHaveBeenCalledTimes(1);
+      durable.status = "filled";
+      await mod.stop();
+      vi.mocked(orderRepo.findLocallyClosedResolvedLosers).mockReturnValue([durable]);
+      await mod.start();
+      expect(stream.conditionIds).toEqual([order.conditionId]);
+      expect(orderRepo.findLocallyClosedResolvedLosers).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it("imports websocket trade fills and publishes FillReceived", async () => {
     const received: unknown[] = [];
     bus.subscribe("FillReceived", async (payload) => {
