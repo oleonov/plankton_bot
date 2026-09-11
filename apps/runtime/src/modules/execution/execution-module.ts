@@ -203,6 +203,7 @@ import {
 import type { PositionConcentrationService } from "../../position-concentration-service.js";
 import type { MakerBuyFastCancel } from "./maker-buy-fast-cancel.js";
 import type { MakerCaptureBookCache } from "../../maker-capture-reprice.js";
+import type { CandidateBookCacheEntry } from "../strategy/candidate-book-cache.js";
 import {
   buildMakerCaptureBookDecisionProof,
   computeMakerCaptureCandidate,
@@ -212,6 +213,7 @@ import {
   isMakerCaptureCancellationReason,
   isMakerCaptureBookAfterCancellation,
   isMakerCaptureExactCancellation,
+  isFreshMakerCaptureEntry,
   matchesMakerCaptureIntent,
   parseMakerCaptureLineage,
   parseMakerCaptureRepriceSignal,
@@ -286,6 +288,7 @@ export type MissingBounceExitRecoveryResult =
   | { readonly status: "rejected" };
 
 class UnsafeRecoveryChildError extends Error {}
+class BounceAskBookNotFreshError extends Error {}
 
 interface MakerCaptureExecutionContext {
   readonly intent: MakerCaptureRepriceIntent;
@@ -2718,7 +2721,10 @@ export class ExecutionModule implements RuntimeModule {
   private async bounceAskCaptureFinalProof(
     cmd: PlaceOrderCommand,
     childOrderId: OrderId,
-  ): Promise<{ ok: true; proof: BounceAskCaptureSubmitProofV1 } | { ok: false; reason: string }> {
+  ): Promise<
+    | { ok: true; proof: BounceAskCaptureSubmitProofV1; entry: CandidateBookCacheEntry }
+    | { ok: false; reason: string }
+  > {
     let context = this.bounceAskCaptureContext(cmd);
     if (
       !context ||
@@ -2740,7 +2746,7 @@ export class ExecutionModule implements RuntimeModule {
         this.deps.gateway.getFillsResult(rootCreatedAt),
         this.deps.gateway.getOrderResult(context.predecessor.exchangeOrderId),
         this.deps.gateway.getPositionBalance(cmd.tokenId),
-        primeFreshMakerCaptureBook(this.deps.candidateBookCache, String(cmd.tokenId), Date.now()),
+        primeFreshMakerCaptureBook(this.deps.candidateBookCache, String(cmd.tokenId), Date.now),
       ]);
       if (
         !openResult.ok ||
@@ -2763,6 +2769,9 @@ export class ExecutionModule implements RuntimeModule {
         gateway: this.deps.gateway,
         fillCompletionTolerance: this.deps.fillCompletionTolerance,
       });
+      if (!isFreshMakerCaptureEntry(entry, Date.now())) {
+        return { ok: false, reason: "bounce-ask-book-not-fresh" };
+      }
       context = this.bounceAskCaptureContext(cmd);
       if (!context) return { ok: false, reason: "bounce-ask-policy-cohort-lineage-drift" };
       const preparedProof = context.proof.prepared;
@@ -2854,6 +2863,7 @@ export class ExecutionModule implements RuntimeModule {
         .digest("hex");
       return {
         ok: true,
+        entry,
         proof: {
           ...preparedProof,
           evaluatedAtMs: capturedAt,
@@ -7597,6 +7607,7 @@ export class ExecutionModule implements RuntimeModule {
     if (!cleanupPending) persistPending();
 
     let persistCaptureProof = () => {};
+    let assertCaptureBookFresh = () => {};
     const submit = await withinLiveSubmissionLane(async () => {
       if (liveSubmissionLatched) {
         throw new Error("live submission latch is closed");
@@ -7645,6 +7656,11 @@ export class ExecutionModule implements RuntimeModule {
             errorDetails: null,
           };
         }
+        assertCaptureBookFresh = () => {
+          if (!isFreshMakerCaptureEntry(final.entry, Date.now())) {
+            throw new BounceAskBookNotFreshError("bounce-ask-book-not-fresh");
+          }
+        };
         persistCaptureProof = () => {
           if (
             !this.deps.orderRepo.markBounceAskCaptureSubmitProof?.(
@@ -7685,8 +7701,9 @@ export class ExecutionModule implements RuntimeModule {
         }
       }
       if (cleanupPending) persistPending();
-      const outcome = await gateway.submitPreparedOrder!(prepared, () => {
+      const beforeInvoke = () => {
         this.assertMinimumLifecycle(cmd, revision);
+        assertCaptureBookFresh();
         this.markMakerCaptureSubmittedOrThrow(cmd, pending.orderId);
         if (captureMetadata) {
           this.deps.orderRepo.updateMetadata!(pending.orderId, captureMetadata);
@@ -7703,7 +7720,21 @@ export class ExecutionModule implements RuntimeModule {
           this.lastDeferredPlaceAt.set(key, Date.now());
           this.deferredBackstopRetries.set(key, (this.deferredBackstopRetries.get(key) ?? 0) + 1);
         }
-      });
+        // Synchronous repository writes can outlast the book's freshness window.
+        assertCaptureBookFresh();
+      };
+      let outcome;
+      try {
+        outcome = await gateway.submitPreparedOrder!(prepared, beforeInvoke);
+      } catch (error) {
+        if (!(error instanceof BounceAskBookNotFreshError)) throw error;
+        return {
+          kind: "rejected" as const,
+          errorCode: ExchangeErrorCode.LivePolicyBlocked,
+          errorMessage: error.message,
+          errorDetails: null,
+        };
+      }
       if (outcome.kind === "accepted" && outcome.orderId !== prepared.orderId) {
         this.closeLiveSubmissionLatch(prepared.orderId, outcome.orderId, cmd);
       }

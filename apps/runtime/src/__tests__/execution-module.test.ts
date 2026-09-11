@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, onTestFinished } from "vitest";
 import {
   createTokenId,
   createOrderId,
@@ -57,6 +57,7 @@ import {
 import { buildClientOrderId } from "@krabs/domain/node";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
+import { CandidateBookCache } from "../modules/strategy/candidate-book-cache.js";
 import { ExchangeStateStore } from "../modules/execution/exchange-state-store.js";
 import { bounceTarget } from "../exit-coverage-cleanup.js";
 import {
@@ -4066,7 +4067,49 @@ describe("ExecutionModule", () => {
     "stale-recovery",
     "ordinary-first",
     "recovery-first",
+    "SELL_TS_FETCH_CLOCK",
+    "SELL_TS_FINAL_FRESHNESS_open",
+    "SELL_TS_FINAL_FRESHNESS_fills",
+    "SELL_TS_FINAL_FRESHNESS_exact",
+    "SELL_TS_FINAL_FRESHNESS_wallet",
+    "SELL_TS_FINAL_FRESHNESS_import",
+    "SELL_TS_CONTRACT_import_fresh",
+    "SELL_TS_INVOKE_FRESHNESS_old",
+    "SELL_TS_INVOKE_FRESHNESS_future",
+    "SELL_TS_INVOKE_FRESHNESS_nan",
+    "SELL_TS_INVOKE_FRESHNESS_positive_infinity",
+    "SELL_TS_INVOKE_FRESHNESS_negative_infinity",
+    "SELL_TS_INVOKE_FRESHNESS_replaced_cache",
+    "SELL_TS_CONTRACT_invoke_age_boundary",
+    "SELL_TS_CONTRACT_invoke_future_boundary",
+    "SELL_TS_CLEANUP_post_claim",
+    "SELL_TS_CLEANUP_post_proof",
+    "SELL_TS_CONTRACT_callback_error",
+    "SELL_TS_CONTRACT_cas_error",
   ] as const)("routes a submitted ASK signal through bridge recovery: %s", async (mode) => {
+    const timestamps = mode.startsWith("SELL_TS_");
+    const importing = mode.endsWith("_import") || mode.endsWith("_import_fresh");
+    const invocation = mode.includes("INVOKE_") || mode.includes("_invoke_");
+    const postWrite = mode.startsWith("SELL_TS_CLEANUP_");
+    const unrelated = mode.endsWith("_error");
+    let clockMs = Date.now();
+    if (timestamps) {
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => clockMs);
+      onTestFinished(() => clock.mockRestore());
+    }
+    const reached = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const bookReady = Promise.withResolvers<void>();
+    const hold = async () => {
+      reached.resolve();
+      await release.promise;
+    };
+    const post = vi.fn();
+    const rejected = vi.fn();
+    const placed = vi.fn();
+    const callbackFailure = new Error("bounce-ask-book-not-fresh");
+    let observedCallbackFailure: unknown;
+    let terminalFrom: string | undefined;
     const recovering = ["stale-recovery", "ordinary-first", "recovery-first"].includes(mode);
     const rootOrderId = createOrderId("ask-root");
     const predecessorOrderId = createOrderId("ask-predecessor");
@@ -4341,6 +4384,32 @@ describe("ExecutionModule", () => {
     });
     orderRepo.markBounceAskCaptureSubmitProof = vi.fn().mockReturnValue(true);
     orderRepo.markBounceAskCaptureTerminal = vi.fn();
+    if (timestamps) {
+      orderRepo.save = vi.fn((order) => (child = order));
+      orderRepo.markBounceAskCaptureTerminal = vi.fn((_id, status, failure) => {
+        terminalFrom = intent.status;
+        intent = { ...intent, status, failure };
+        return true;
+      });
+      orderRepo.markBounceAskCaptureSubmitProof = vi.fn((_id, _child, _client, proof) => {
+        if (mode === "SELL_TS_CONTRACT_cas_error") throw callbackFailure;
+        intent = { ...intent, proof: { ...intent.proof, submit: proof } };
+        return true;
+      });
+      gateway.submitPreparedOrder = vi.fn(async (signed, beforeInvoke) => {
+        if (invocation) await hold();
+        try {
+          beforeInvoke?.();
+        } catch (error) {
+          observedCallbackFailure = error;
+          throw error;
+        }
+        expect(intent.status).toBe("submitted");
+        expect(intent.proof.submit.childOrderId).toBe(signed.orderId);
+        post(signed.orderId);
+        return { kind: "accepted" as const, orderId: signed.orderId };
+      });
+    }
     if (recovering) {
       orderRepo.findRecoverableBounceAskCaptureIntents = () => [intent];
       orderRepo.updateMetadataIfUnchanged = (_id, _before, metadata) =>
@@ -4470,6 +4539,114 @@ describe("ExecutionModule", () => {
       }),
     };
     gateway.getPositionBalance = vi.fn().mockResolvedValue(currentPosition.size);
+    if (postWrite) {
+      const conn = bootstrapDatabase(":memory:");
+      onTestFinished(() => conn.close());
+      const persisted = new SqliteOrderRepository(conn.db);
+      new SqlitePositionRepository(conn.db).save(currentPosition);
+      persisted.save(existing);
+      expect(
+        persisted.claimBounceAskCaptureIntent({
+          ...intent,
+          createdAt: new Date(now).toISOString(),
+          updatedAt: new Date(now).toISOString(),
+          proof: { ...intent.proof, prepared: null, submit: null },
+        }),
+      ).toBe(true);
+      expect(persisted.markBounceAskCaptureReady(identity.intentId, 0.35, 5, prepared)).toBe(true);
+      expect(persisted.markBounceAskCaptureSubmitted(identity.intentId, existing.orderId)).toBe(
+        true,
+      );
+      intent = persisted.findBounceAskCaptureIntentBySignal(identity.lifecycleSignalId);
+      for (const method of [
+        "resetBounceAskCaptureSubmitted",
+        "markBounceAskCaptureSubmitted",
+        "markBounceAskCaptureSubmitProof",
+        "markBounceAskCaptureTerminal",
+      ] as const) {
+        orderRepo[method] = vi.fn((...args: any[]) => {
+          if (method === "markBounceAskCaptureTerminal") terminalFrom = intent.status;
+          const written = (persisted[method] as (...args: any[]) => boolean).apply(persisted, args);
+          expect(written).toBe(true);
+          intent = persisted.findBounceAskCaptureIntentBySignal(identity.lifecycleSignalId);
+          if (
+            (method === "markBounceAskCaptureSubmitted" && mode.endsWith("_claim")) ||
+            (method === "markBounceAskCaptureSubmitProof" && mode.endsWith("_proof"))
+          )
+            clockMs += 3_001;
+          return written;
+        });
+      }
+      orderRepo.replacePendingIdentity = vi.fn((id, replacement) => {
+        persisted.replacePendingIdentity(id, replacement);
+        child = persisted.findById(replacement.orderId);
+      });
+      orderRepo.save = vi.fn((order) => {
+        persisted.save(order);
+        child = persisted.findById(order.orderId);
+      });
+    }
+    if (timestamps) {
+      const fixturePrime = internal.deps.candidateBookCache.prime;
+      const cache = new CandidateBookCache({
+        log: silentLog,
+        gateway: {
+          getOrderBooks: async () => {
+            if (mode === "SELL_TS_FETCH_CLOCK") await hold();
+            const entries = await fixturePrime();
+            return new Map([
+              [String(existing.tokenId), entries.get(String(existing.tokenId)).book],
+            ]);
+          },
+        },
+      });
+      internal.deps.candidateBookCache = cache;
+      onTestFinished(() => cache.dispose());
+      const prime = cache.prime.bind(cache);
+      vi.spyOn(cache, "prime").mockImplementation(async (...args) => {
+        const entries = await prime(...args);
+        bookReady.resolve();
+        return entries;
+      });
+      const delayedRead = {
+        SELL_TS_FINAL_FRESHNESS_open: "getOpenOrdersResult",
+        SELL_TS_FINAL_FRESHNESS_fills: "getFillsResult",
+        SELL_TS_FINAL_FRESHNESS_exact: "getOrderResult",
+        SELL_TS_FINAL_FRESHNESS_wallet: "getPositionBalance",
+      }[mode as string] as keyof ExchangeGateway | undefined;
+      if (delayedRead) {
+        const read = gateway[delayedRead] as (...args: any[]) => Promise<unknown>;
+        (gateway as any)[delayedRead] = vi.fn(async (...args) => {
+          if (preparedOrder) await hold();
+          return read(...args);
+        });
+      }
+      if (importing) {
+        const imported: Fill[] = [];
+        const authentic = { ...fill, orderId: buyRoot.exchangeOrderId!, side: "buy" as const };
+        gateway.getFillsResult = vi.fn(async () => ({
+          ok: true as const,
+          data: preparedOrder ? [authentic] : [],
+        }));
+        orderRepo.findByExchangeOrderId = vi.fn((id) =>
+          id === authentic.orderId ? buyRoot : child,
+        );
+        fillRepo.save = vi.fn((fill) => imported.push(fill));
+        fillRepo.exists = vi.fn((id) => imported.some((fill) => fill.fillId === id));
+        fillRepo.findByOrderId = vi.fn((id) => imported.filter((fill) => fill.orderId === id));
+        bus.subscribe("FillReceived", hold);
+      }
+      if (mode === "SELL_TS_CONTRACT_callback_error") {
+        const assertLifecycle = internal.assertMinimumLifecycle.bind(internal);
+        internal.assertMinimumLifecycle = (...args: unknown[]) => {
+          assertLifecycle(...args);
+          if (preparedOrder) throw callbackFailure;
+        };
+      }
+      bus.subscribe("OrderRejected", rejected);
+      bus.subscribe("OrderPlaced", placed);
+      vi.spyOn(internal, "recordPreparedSubmitUnknown");
+    }
     marketRepo.findByTokenId.mockReturnValue({
       active: true,
       tradable: true,
@@ -4507,6 +4684,15 @@ describe("ExecutionModule", () => {
       endDate: new Date(Date.now() + 60_000).toISOString(),
     });
     await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: Date.now() });
+    let timestampLifecycle: BounceAskCaptureLifecycleModule | undefined;
+    if (timestamps) {
+      timestampLifecycle = new BounceAskCaptureLifecycleModule({
+        ...internal.deps,
+        policySnapshot: internal.deps.executionPolicySnapshot,
+      });
+      await timestampLifecycle.start();
+      onTestFinished(() => timestampLifecycle!.stop());
+    }
     if (recovering) {
       const lifecycle = new BounceAskCaptureLifecycleModule({
         ...internal.deps,
@@ -4569,16 +4755,110 @@ describe("ExecutionModule", () => {
           expect.objectContaining({ reason: "bounce-rung-already-working" }),
         );
       await lifecycle.stop();
-    } else
-      await bus.publish("SignalApproved", {
+    } else {
+      const dispatch = bus.publish("SignalApproved", {
         signal,
         market,
         approvedAt: Date.now(),
       });
+      if (timestamps && !postWrite && !unrelated) {
+        await reached.promise;
+        if (mode !== "SELL_TS_FETCH_CLOCK") {
+          await bookReady.promise;
+          await Promise.resolve();
+        }
+        clockMs +=
+          mode === "SELL_TS_FETCH_CLOCK"
+            ? 1_500
+            : mode.endsWith("_import_fresh")
+              ? 0
+              : mode.endsWith("_age_boundary")
+                ? 3_000
+                : mode.endsWith("_future_boundary")
+                  ? -1_000
+                  : mode.endsWith("_future")
+                    ? -1_001
+                    : mode.endsWith("_nan")
+                      ? NaN
+                      : mode.endsWith("_positive_infinity")
+                        ? Infinity
+                        : mode.endsWith("_negative_infinity")
+                          ? -Infinity
+                          : 3_001;
+        if (mode.endsWith("_replaced_cache")) {
+          await internal.deps.candidateBookCache.prime([String(existing.tokenId)]);
+        }
+        release.resolve();
+      }
+      await dispatch;
+    }
     await bus.drain();
     bridge.unsubscribe();
+    if (timestamps) {
+      expect(internal.pendingReservations.size).toBe(0);
+      expect(internal.directInFlight.size).toBe(0);
+      expect(internal.tokenInFlightCount.size).toBe(0);
+      expect(internal.recordPreparedSubmitUnknown).not.toHaveBeenCalled();
+      expect(orderRepo.resetBounceAskCaptureSubmitted).toHaveBeenCalledOnce();
+      expect(orderRepo.replacePendingIdentity).toHaveBeenCalledOnce();
+      if (importing)
+        expect(fillRepo.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            fillId: "ask-fill",
+            orderId: buyRootOrderId,
+            side: "buy",
+            size: 1,
+          }),
+        );
+      const accepted =
+        mode === "SELL_TS_FETCH_CLOCK" ||
+        mode.endsWith("_boundary") ||
+        mode.endsWith("_import_fresh");
+      if (accepted) {
+        expect(post).toHaveBeenCalledExactlyOnceWith("prepared-ord-1");
+        expect(rejected).not.toHaveBeenCalled();
+        expect(placed).toHaveBeenCalledOnce();
+        expect(intent.proof.submit).toMatchObject({
+          sourcePolledAtMs: now,
+          cachedAtMs: mode === "SELL_TS_FETCH_CLOCK" ? now + 1_500 : now,
+          snapshotTs: mode === "SELL_TS_FETCH_CLOCK" ? now + 1_500 : now,
+        });
+      } else {
+        expect(post).not.toHaveBeenCalled();
+        expect(placed).not.toHaveBeenCalled();
+        if (unrelated) {
+          expect(observedCallbackFailure).toBe(callbackFailure);
+          expect(rejected).not.toHaveBeenCalled();
+          expect(child?.status).toBe("pending");
+          expect(orderRepo.markBounceAskCaptureTerminal).not.toHaveBeenCalled();
+        } else {
+          expect(child).toMatchObject({
+            orderId: "prepared-ord-1",
+            clientOrderId,
+            status: "rejected",
+            exchangeErrorCode: ExchangeErrorCode.LivePolicyBlocked,
+            exchangeErrorMessage: "bounce-ask-book-not-fresh",
+          });
+          expect(rejected).toHaveBeenCalledOnce();
+          expect(intent.status).toBe("failed");
+          expect(terminalFrom).toBe(postWrite ? "submitted" : "ready");
+          if (postWrite) {
+            expect(intent.childOrderId).toBe("prepared-ord-1");
+            expect(intent.proof.submit.childOrderId).toBe("prepared-ord-1");
+            expect(orderRepo.markBounceAskCaptureSubmitted).toHaveBeenCalledOnce();
+            expect(orderRepo.markBounceAskCaptureSubmitProof).toHaveBeenCalledOnce();
+          } else {
+            expect(orderRepo.markBounceAskCaptureSubmitted).not.toHaveBeenCalled();
+            expect(orderRepo.markBounceAskCaptureSubmitProof).not.toHaveBeenCalled();
+          }
+          if (!invocation && !postWrite) expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+        }
+      }
+      await timestampLifecycle!.stop();
+    }
     await mod.stop();
 
+    if (timestamps) return;
     if (recovering) {
       expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
     } else if (mode === "open") {

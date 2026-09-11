@@ -17,6 +17,7 @@ import {
   isMakerCaptureCancellationReason,
   isMakerCaptureBookAfterCancellation,
   isMakerCaptureExactCancellation,
+  isFreshMakerCaptureEntry,
   parseMakerCaptureRepriceSignal,
   primeFreshMakerCaptureBook,
   resolveMakerCaptureCancellationAnchorMs,
@@ -553,6 +554,47 @@ describe("maker capture reprice helper", () => {
       isMakerCaptureBookAfterCancellation({ snapshotTs: 1_000, sourcePolledAtMs: 1_000 }, 1_000),
     ).toBe(true);
   });
+
+  it.each(["snapshotTs", "cachedAtMs", "sourcePolledAtMs"] as const)(
+    "SELL_TS_CONTRACT independently validates %s at inclusive boundaries and rejects malformed times",
+    async (field) => {
+      const entry = {
+        tokenId: String(TOKEN),
+        snapshotTs: 10_000,
+        cachedAtMs: 10_000,
+        sourcePolledAtMs: 10_000,
+        bookSource: "clob" as const,
+        sourceKind: "rest" as const,
+        book: book([{ price: 0.3, size: 10 }], [{ price: 0.4, size: 10 }]),
+      };
+      for (const [value, accepted] of [
+        [7_000, true],
+        [6_999, false],
+        [11_000, true],
+        [11_001, false],
+        [NaN, false],
+        [Infinity, false],
+        [-Infinity, false],
+      ] as const) {
+        const observed = { ...entry, [field]: value };
+        const cache = { prime: vi.fn().mockResolvedValue(new Map([[String(TOKEN), observed]])) };
+        expect(isFreshMakerCaptureEntry(observed, 10_000), String(value)).toBe(accepted);
+        await expect(
+          primeFreshMakerCaptureBook(cache, String(TOKEN), () => 10_000),
+        ).resolves.toEqual(accepted ? observed : null);
+      }
+      for (const changed of [
+        { ...entry, sourceKind: "ws" },
+        { ...entry, tokenId: "foreign" },
+        { ...entry, book: { ...entry.book, tokenId: createTokenId("foreign") } },
+      ]) {
+        const cache = { prime: vi.fn().mockResolvedValue(new Map([[String(TOKEN), changed]])) };
+        await expect(
+          primeFreshMakerCaptureBook(cache, String(TOKEN), () => 10_000),
+        ).resolves.toBeNull();
+      }
+    },
+  );
 
   it("fails closed for missing or stale REST books", async () => {
     const entry = {
