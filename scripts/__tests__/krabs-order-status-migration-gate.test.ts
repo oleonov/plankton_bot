@@ -216,30 +216,28 @@ describe("krabs order-status migration gate", () => {
     expect(JSON.parse(post.stdout).migration106).toMatchObject({ candidateCount: 1 });
   });
 
-  it("rejects every noncanonical migration 106 candidate result", () => {
-    for (const mutation of [
-      "status='pending'",
-      "fill_progress_shares=1",
-      "exchange_error_code='OTHER'",
-      "exchange_error_message='other'",
-      `exchange_error_payload='{"responseBody":{"status":503}}'`,
-      "exchange_rejection_reason='other'",
-      `metadata_json='{"keep":1,"makerCaptureLineageV1":{"version":1}}'`,
-      "updated_at='not-an-iso-timestamp'",
-      "updated_at='2026-08-21T00:00:00.000Z'",
-      "updated_at='2099-08-21T00:00:00.000Z'",
-      "cancel_reason='changed'",
-    ]) {
-      const { db, snapshot } = fixture();
-      insertTradingDisabledCandidate(db);
-      expect(run(db, "pre", sha, snapshot).status).toBe(0);
-      apply(db, migration101, marker101);
-      apply(db, migration102, marker102);
-      apply(db, migration103, marker103);
-      apply(db, migration106, marker106);
-      sql(db, `UPDATE orders SET ${mutation} WHERE order_id='disabled'`);
-      expect(run(db, "post", sha, snapshot).status, mutation).not.toBe(0);
-    }
+  it.each([
+    "status='pending'",
+    "fill_progress_shares=1",
+    "exchange_error_code='OTHER'",
+    "exchange_error_message='other'",
+    `exchange_error_payload='{"responseBody":{"status":503}}'`,
+    "exchange_rejection_reason='other'",
+    `metadata_json='{"keep":1,"makerCaptureLineageV1":{"version":1}}'`,
+    "updated_at='not-an-iso-timestamp'",
+    "updated_at='2026-08-21T00:00:00.000Z'",
+    "updated_at='2099-08-21T00:00:00.000Z'",
+    "cancel_reason='changed'",
+  ])("rejects noncanonical migration 106 candidate result: %s", (mutation) => {
+    const { db, snapshot } = fixture();
+    insertTradingDisabledCandidate(db);
+    expect(run(db, "pre", sha, snapshot).status).toBe(0);
+    apply(db, migration101, marker101);
+    apply(db, migration102, marker102);
+    apply(db, migration103, marker103);
+    apply(db, migration106, marker106);
+    sql(db, `UPDATE orders SET ${mutation} WHERE order_id='disabled'`);
+    expect(run(db, "post", sha, snapshot).status, mutation).not.toBe(0);
   });
 
   it("proves first apply with absent intent tables and preserves migration 101 proof", () => {
