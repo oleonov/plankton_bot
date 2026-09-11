@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InProcessEventBus } from "@krabs/event-bus";
 import {
   bootstrapLedgerDb,
+  bootstrapControlDb,
   SqliteOrderRepository,
   SqliteFillRepository,
   SqlitePositionRepository,
@@ -35,6 +36,11 @@ import { OrderLifetimeModule } from "../modules/order-lifetime/order-lifetime-mo
 import { SamePriceCooldownModule } from "../modules/same-price-cooldown/same-price-cooldown-module.js";
 import { PositionSettler } from "../modules/resolution/position-settler.js";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
+import {
+  assertBounceForAllOwnershipInvariant,
+  BounceForAllNullOwnerError,
+  runOwnershipInvariantStartupGate,
+} from "../modules/exit-ownership/assert-bounce-for-all-invariant.js";
 
 const log = {
   info: vi.fn(),
@@ -150,6 +156,8 @@ describe("resolved loser administrative closure with real ledger repositories", 
       settlementLedgerRepo: new SqliteSettlementLedgerRepository(conn.db),
       marketResolutionRepo: new SqliteMarketResolutionRepository(conn.db),
       suspiciousEmptyThreshold: 0,
+      consecutiveMissThreshold: 3,
+      consecutiveMissCounts: new Map(),
       gateway: {
         getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
         getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
@@ -158,6 +166,155 @@ describe("resolved loser administrative closure with real ledger repositories", 
     };
   });
   afterEach(() => conn.close());
+
+  it.each([false, true])(
+    "passes the real startup ownership gate after one default module pass (partial=%s)",
+    async (partial) => {
+      if (partial) partialSell();
+      const control = bootstrapControlDb(":memory:");
+      const store = new ExchangeStateStore();
+      const module = () =>
+        new ReconciliationModule({
+          bus: deps.bus,
+          gateway: deps.gateway,
+          orderRepo: deps.orderRepo,
+          fillRepo: deps.fillRepo,
+          positionRepo: deps.positionRepo!,
+          marketResolutionRepo: deps.marketResolutionRepo!,
+          settlementLedgerRepo: deps.settlementLedgerRepo!,
+          marketRepo: { findByTokenId: () => null } as unknown as MarketRepository,
+          log,
+          reconcileIntervalMs: 60_000,
+          exchangeStateStore: store,
+        });
+      const gate = () =>
+        runOwnershipInvariantStartupGate({
+          ledgerDb: conn.db,
+          controlDb: control.db,
+          applyToAllMarkets: true,
+          log: { ...log, fatal: vi.fn() },
+        });
+      const before = financialRows();
+      const reconciliation = module();
+      try {
+        expect(gate).toThrow(BounceForAllNullOwnerError);
+        store.updateExchangeSellOrders(
+          [{ orderId: "exchange", tokenId: order().tokenId, sizeRemaining: 10 }],
+          Date.now(),
+        );
+        // index.ts invokes this before module subscriptions are started.
+        await reconciliation.runReconciliation();
+        expect(order()).toMatchObject({
+          status: "cancelled",
+          cancelReason: RESOLVED_LOSER_LOCAL_CANCEL_REASON,
+          fillProgressShares: partial ? 2 : 0,
+        });
+        expect(gate).not.toThrow();
+        expect(store.getOpenSellSizeForToken(order().tokenId) ?? 0).toBe(0);
+        await reconciliation.runReconciliation();
+        await module().runReconciliation();
+        expect(gate).not.toThrow();
+        expect(events).toHaveLength(1);
+        expect(financialRows()).toEqual(before);
+        expect(deps.gateway.getOrderResult).toHaveBeenCalledTimes(2);
+        const lifetimeReads = vi
+          .mocked(deps.gateway.getFillsResult!)
+          .mock.calls.filter(([since]) => since === Date.parse("2026-08-01T00:00:09Z"));
+        expect(lifetimeReads).toHaveLength(1);
+      } finally {
+        control.close();
+      }
+    },
+  );
+
+  it.each(["working", "failed", "history"])(
+    "retains the first-miss SELL and fails ownership with %s evidence",
+    async (evidence) => {
+      if (evidence === "working")
+        vi.mocked(deps.gateway.getOrderResult!).mockResolvedValue({
+          ok: true,
+          data: {
+            orderId: "exchange",
+            clientOrderId: "client",
+            tokenId: order().tokenId,
+            side: "sell",
+            status: "OPEN",
+            price: 0.2,
+            sizeTotal: 10,
+            sizeFilled: 0,
+            sizeRemaining: 10,
+            createdAt: Date.parse(created),
+          },
+        });
+      if (evidence === "failed")
+        vi.mocked(deps.gateway.getOrderResult!).mockResolvedValue({
+          ok: false,
+          reason: "server",
+          attempts: 1,
+        });
+      if (evidence === "history")
+        vi.mocked(deps.gateway.getFillsResult!).mockResolvedValue({
+          ok: false,
+          reason: "parse",
+          attempts: 1,
+        });
+      const before = financialRows();
+      await reconcileOrders(deps);
+      expect(deps.gateway.getOrderResult).toHaveBeenCalledOnce();
+      expect(order().status).toBe("open");
+      expect(events).toEqual([]);
+      expect(financialRows()).toEqual(before);
+      expect(() => assertBounceForAllOwnershipInvariant(conn.db, true)).toThrow(
+        BounceForAllNullOwnerError,
+      );
+    },
+  );
+
+  it.each([
+    "UPDATE orders SET side='buy'",
+    "UPDATE positions SET status='open',size=10,closed_at=NULL",
+    "DELETE FROM settlement_ledger",
+  ])("keeps generic missing orders behind threshold three: %s", async (sql) => {
+    conn.db.exec(sql);
+    const before = financialRows();
+    await reconcileOrders(deps);
+    await reconcileOrders(deps);
+    expect(deps.consecutiveMissCounts!.get("exchange")).toBe(2);
+    expect(deps.gateway.getOrderResult).not.toHaveBeenCalled();
+    await reconcileOrders(deps);
+    expect(deps.gateway.getOrderResult).toHaveBeenCalledExactlyOnceWith("exchange");
+    expect(order().status).toBe("open");
+    expect(deps.gateway.getFillsResult).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    expect(financialRows()).toEqual(before);
+  });
+
+  it.each(["grace", "suspicious", "unreliable"])(
+    "withholds eligible first-miss recovery for %s snapshots",
+    async (guard) => {
+      if (guard === "grace") deps.phantomGraceMs = Date.now() - Date.parse(created) + 60_000;
+      if (guard === "suspicious") deps.suspiciousEmptyThreshold = 1;
+      if (guard === "unreliable")
+        vi.mocked(deps.gateway.getOpenOrdersResult!).mockResolvedValue({
+          ok: false,
+          reason: "server",
+          attempts: 1,
+        });
+      const result = await reconcileOrders(deps);
+      if (guard === "grace") expect(result.phantomsSkippedGrace).toBe(1);
+      else
+        expect(result.skipReason).toBe(
+          guard === "suspicious" ? "suspicious_empty" : "unreliable_snapshot",
+        );
+      expect(deps.consecutiveMissCounts!.size).toBe(0);
+      expect(deps.gateway.getOrderResult).not.toHaveBeenCalled();
+      expect(deps.gateway.getFillsResult).not.toHaveBeenCalled();
+      expect(order().status).toBe("open");
+      expect(() => assertBounceForAllOwnershipInvariant(conn.db, true)).toThrow(
+        BounceForAllNullOwnerError,
+      );
+    },
+  );
 
   function settleCurrentClobResolution() {
     const settler = new PositionSettler(
@@ -484,6 +641,9 @@ describe("resolved loser administrative closure with real ledger repositories", 
       await reconcileOrders(deps);
       expect(events).toEqual([]);
       expect(deps.gateway.getFillsResult).not.toHaveBeenCalled();
+      expect(() => assertBounceForAllOwnershipInvariant(conn.db, true)).toThrow(
+        BounceForAllNullOwnerError,
+      );
     }
   });
 
@@ -628,6 +788,9 @@ describe("resolved loser administrative closure with real ledger repositories", 
       expect(order().status).toBe("open");
       expect(events).toEqual([]);
       expect(deps.gateway.getFillsResult).not.toHaveBeenCalled();
+      expect(() => assertBounceForAllOwnershipInvariant(conn.db, true)).toThrow(
+        BounceForAllNullOwnerError,
+      );
     },
   );
 
@@ -746,7 +909,7 @@ describe("resolved loser administrative closure with real ledger repositories", 
     },
   );
 
-  it.each([false, true])(
+  it.each([false, "before-start", "after-start"] as const)(
     "keeps late WSS discovery and failed inventory claims visible (locallyClosed=%s)",
     async (locallyClosed) => {
       let handlers: any;
@@ -766,9 +929,10 @@ describe("resolved loser administrative closure with real ledger repositories", 
       const stream = new UserOrderStreamModule({ ...deps, marketRepo });
       const inventory = inventoryModule();
       await inventory.start();
+      if (locallyClosed === "before-start") await reconcileOrders(deps);
       await stream.start();
       try {
-        if (locallyClosed) await reconcileOrders(deps);
+        if (locallyClosed === "after-start") await reconcileOrders(deps);
         const before = financialRows();
         expect(conditions.at(-1)).toEqual(["condition"]);
         const received = vi.fn();

@@ -152,6 +152,13 @@ function recoveryOwned(order: Order, deps: OrderReconcilerDeps): boolean {
   );
 }
 
+export function hasResolvedLoserLocalClosureEvidence(
+  order: Order,
+  deps: OrderReconcilerDeps,
+): boolean {
+  return localClosureEvidence(order, deps) !== null;
+}
+
 function localClosureEvidence(order: Order, deps: OrderReconcilerDeps): Evidence | null {
   if (
     !deps.fillRepo ||

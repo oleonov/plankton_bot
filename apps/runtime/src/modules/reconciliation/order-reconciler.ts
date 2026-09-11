@@ -36,7 +36,10 @@ import type {
   SubmitUnknownRecoveryContext,
 } from "../execution/execution-module.js";
 import { applyOrderVerdict, resolveOrderStatusVerdict } from "./order-status-resolver.js";
-import { closeResolvedLosers } from "./resolved-loser-local-closure.js";
+import {
+  closeResolvedLosers,
+  hasResolvedLoserLocalClosureEvidence,
+} from "./resolved-loser-local-closure.js";
 
 export interface OrderReconcilerDeps {
   gateway: ExchangeGateway;
@@ -204,6 +207,7 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     missMap,
     graceMs: deps.phantomGraceMs ?? 90_000,
     consecutiveMissThreshold: deps.consecutiveMissThreshold ?? 1,
+    hasLocalClosureEvidence: (order) => hasResolvedLoserLocalClosureEvidence(order, deps),
     log,
   });
 
@@ -423,6 +427,7 @@ interface MissingOrderDeps {
   missMap: Map<string, number>;
   graceMs: number;
   consecutiveMissThreshold: number;
+  hasLocalClosureEvidence: (order: Order) => boolean;
   log: Logger;
 }
 
@@ -460,6 +465,8 @@ function reconcileMissingOrders(deps: MissingOrderDeps): MissingOrderResult {
 
     const misses = (missMap.get(exId) ?? 0) + 1;
     if (misses < consecutiveMissThreshold) {
+      // Startup's ownership gate runs before another miss can accumulate.
+      if (deps.hasLocalClosureEvidence(local)) exactCandidates.push(local);
       missMap.set(exId, misses);
       consecutiveMissTracked++;
       log.debug(

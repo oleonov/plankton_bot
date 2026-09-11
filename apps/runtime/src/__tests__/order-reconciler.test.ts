@@ -510,7 +510,7 @@ describe("reconcileOrders — missing-order evidence", () => {
     const orderRepo = createOrderRepo();
     const order = makeLocalOrder({ exchangeOrderId: "ex-miss" });
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
-    const gateway = createGateway({ openOrders: [] });
+    const gateway = createGateway({ openOrders: [], exactResult: { ok: true, data: null } });
     const missMap = new Map<string, number>();
 
     const deps = {
@@ -527,11 +527,13 @@ describe("reconcileOrders — missing-order evidence", () => {
     const r2 = await reconcileOrders(deps);
     expect(r2.phantomsCancelled).toBe(0);
     expect(missMap.get("ex-miss")).toBe(2);
+    expect(gateway.getOrderResult).not.toHaveBeenCalled();
 
     const r3 = await reconcileOrders(deps);
     expect(r3.phantomsCancelled).toBe(0);
     expect(r3.unresolvedMissingOnExchange).toBe(1);
     expect(missMap.get("ex-miss")).toBe(3);
+    expect(gateway.getOrderResult).toHaveBeenCalledExactlyOnceWith("ex-miss");
     expect(orderRepo.updateStatus).not.toHaveBeenCalled();
 
     const r4 = await reconcileOrders(deps);
