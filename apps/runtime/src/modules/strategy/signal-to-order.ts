@@ -355,29 +355,30 @@ export class SignalToOrderBridge {
     terms: Extract<ExecutionTermsResolution, { kind: "ok" }>,
     book: OrderBookSnapshot | null,
     policy: ExecutionPolicy,
-  ): number | null {
+  ) {
     const cfg = policy.bounceAskCapture;
     const { orderRepo, fillRepo, positionRepo, inventoryLotRepo } = this.deps;
+    if (signal.side !== "sell" || signal.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID) return null;
+    const skipped = (reason: string) => ({
+      version: 1 as const,
+      status: "skipped" as const,
+      reason,
+    });
+    if (!cfg.enabled) return skipped("policy-disabled");
+    if (!signal.positionId || terms.pricedMode !== "bounce-exit-target")
+      return skipped("ineligible-order");
+    if (!book) return skipped("book-data-missing");
+    if (!orderRepo || !fillRepo || !positionRepo || !inventoryLotRepo)
+      return skipped("dependencies-missing");
     if (
-      !cfg.enabled ||
-      signal.side !== "sell" ||
-      signal.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
-      !signal.positionId ||
-      terms.pricedMode !== "bounce-exit-target" ||
-      !book ||
-      !orderRepo ||
-      !fillRepo ||
-      !positionRepo ||
-      !inventoryLotRepo ||
       !resolveBounceAskPolicyOrigin(signal.positionId, signal.tokenId, cfg, {
         orderRepo,
         fillRepo,
         positionRepo,
         inventoryLotRepo,
       })
-    ) {
-      return null;
-    }
+    )
+      return skipped("unproven-origin");
     const ownSellOrders = orderRepo
       .findByTokenId(signal.tokenId)
       .filter((order) => order.side === "sell");
@@ -388,7 +389,14 @@ export class SignalToOrderBridge {
       fillsByOrder: loadBounceAskFills(fillRepo, ownSellOrders),
       originalTargetPrice: signal.suggestedPrice,
     });
-    return candidate.ok ? candidate.price : null;
+    return candidate.ok
+      ? {
+          version: 1 as const,
+          status: "applied" as const,
+          reason: "applied",
+          price: candidate.price,
+        }
+      : skipped(candidate.reason);
   }
 
   private isTrackRActive(policy: ExecutionPolicy): boolean {
@@ -988,9 +996,9 @@ export class SignalToOrderBridge {
             )
           : null;
       const executionTerms =
-        initialBounceAskPrice == null
+        initialBounceAskPrice?.status !== "applied"
           ? cappedExecutionTerms
-          : { ...cappedExecutionTerms, price: initialBounceAskPrice };
+          : { ...cappedExecutionTerms, price: initialBounceAskPrice.price };
 
       if (executionTerms.kind === "unavailable") {
         this.log.warn(
@@ -2039,6 +2047,7 @@ export class SignalToOrderBridge {
           ...(entryFreshEdgeAttribution ? { entryFreshEdgeAttribution } : {}),
           ...(makerMicroLiveLifecycle ? { makerMicroLiveLifecycle } : {}),
           ...(quoteMotionV1 ? { quoteMotionV1 } : {}),
+          ...(initialBounceAskPrice ? { bounceAskCaptureInitialV1: initialBounceAskPrice } : {}),
           // Bounce-exit ladder rung identity (docs/plans/2026-07-16-bounce-
           // exit-ladder-redesign.md), persisted on the order so the next
           // planning cycle's placedBounceRungIndices lookup can tell rungs

@@ -15,7 +15,8 @@ import type {
   RuntimeModule,
   Signal,
 } from "@krabs/domain";
-import { CaptureWorkRunner } from "../../capture-work-runner.js";
+import { CAPTURE_READ_RETRY_MS, CaptureWorkRunner } from "../../capture-work-runner.js";
+import { buildClientOrderId } from "@krabs/domain/node";
 import {
   BOUNCE_EXIT_TARGET_RULE_ID,
   createCommandId,
@@ -28,13 +29,14 @@ import {
   loadBounceAskFills,
   parseBounceAskCaptureLineage,
   resolveBounceAskPolicyOrigin,
-  resolveProvenBounceAskOrigin,
+  evaluateBounceAskPositionOrigin,
   sameBounceAskRoots,
 } from "../../bounce-ask-capture.js";
 import {
   MAKER_CAPTURE_BOOK_MAX_AGE_MS,
   primeFreshMakerCaptureBook,
   isFreshMakerCaptureEntry,
+  resolveMakerCaptureCancellationAnchorMs,
   type MakerCaptureBookCache,
 } from "../../maker-capture-reprice.js";
 import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
@@ -62,11 +64,13 @@ export interface BounceAskCaptureLifecycleDeps {
 export class BounceAskCaptureLifecycleModule implements RuntimeModule {
   private readonly markets = new Map<string, NormalizedMarket>();
   private readonly publishing = new Set<string>();
+  private readonly failedClaims = new Set<string>();
   private readonly unsubs: Array<() => void> = [];
   private readonly terminalUnsubs: Array<() => void> = [];
   private readonly captureWork: CaptureWorkRunner;
   private readonly log: Logger;
   private started = false;
+  private readonly expiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly deps: BounceAskCaptureLifecycleDeps) {
     this.log = deps.log.child({ module: "bounce-ask-capture-lifecycle" });
@@ -103,6 +107,7 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
 
   async stop(): Promise<void> {
     this.started = false;
+    for (const id of this.expiryTimers.keys()) this.clearExpiry(id);
     const draining = this.captureWork.stop();
     for (const unsub of this.unsubs) unsub();
     this.unsubs.length = 0;
@@ -125,11 +130,8 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
 
   private async onMarket(event: RuntimeEventMap["NormalizedMarketUpdated"]): Promise<void> {
     for (const market of event.markets) {
-      if (market.active) this.markets.set(String(market.tokenId), market);
-      else {
-        this.captureWork.invalidate();
-        this.markets.delete(String(market.tokenId));
-      }
+      if (!market.active) this.captureWork.invalidate();
+      this.markets.set(String(market.tokenId), market);
       this.schedule(String(market.tokenId), () =>
         this.captureMarket({ ...event, markets: [market] }),
       );
@@ -228,7 +230,28 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       updatedAt: nowIso,
     };
     if (!this.deps.orderRepo.claimBounceAskCaptureIntent?.(intent)) return;
+    if (!this.markClaimed(intent)) return;
     await this.publishCancel(intent);
+  }
+
+  private markClaimed(intent: BounceAskCaptureIntent): boolean {
+    try {
+      if (this.diagnose(intent, "claimed", "claimed", "data")) return true;
+    } catch (err) {
+      this.log.error(
+        { err, intentId: intent.intentId, reason: "diagnostic-write-conflict" },
+        "bounce ASK capture handler failed; durable state retained",
+      );
+    }
+    this.failClaim(intent);
+    return false;
+  }
+
+  private failClaim(intent: BounceAskCaptureIntent): void {
+    // A failed terminal write must not let this known failed claim recover as legacy.
+    this.failedClaims.add(intent.intentId);
+    this.terminal(intent, "failed", "diagnostic-write-conflict");
+    this.failedClaims.delete(intent.intentId);
   }
 
   private stampRootLineage(
@@ -259,7 +282,12 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     return updated ? parseBounceAskCaptureLineage(updated) : null;
   }
 
-  private validateState(
+  private validateState(...args: Parameters<BounceAskCaptureLifecycleModule["evaluateState"]>) {
+    const result = this.evaluateState(...args);
+    return result.kind === "valid" ? result : null;
+  }
+
+  private evaluateState(
     order: Order,
     lineage: BounceAskCaptureLineageV1,
     snapshot: { policy: ExecutionPolicy; controlRevision: number | null },
@@ -275,31 +303,49 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
           permanentR23ActivatedAtUtc: lineage.permanentR23ActivatedAtUtc!,
         }
       : lineage.sourceCohortActivatedAtUtc;
-    const proven = resolveProvenBounceAskOrigin(order, lineageSource, this.deps);
-    const sameRoots =
-      proven && sameBounceAskRoots(proven.sourceBuyRootOrderIds, lineage.sourceBuyRootOrderIds);
+    const terminal = (reason: string) => ({ kind: "terminal" as const, reason });
+    if (!policy.enabled && !(recovering && permanent)) return terminal("policy-disabled");
+    if (snapshot.controlRevision === null) return terminal("null-control-revision");
     if (
-      (!policy.enabled && !(recovering && permanent)) ||
-      snapshot.controlRevision === null ||
-      (!recovering &&
-        (permanent
-          ? lineage.permanentR23ActivationId !== policy.permanentR23ActivationId ||
-            lineage.permanentR23ActivatedAtUtc !== policy.permanentR23ActivatedAtUtc
-          : lineage.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc)) ||
-      String(lineage.positionId) !== String(order.positionId) ||
-      !sameRoots ||
-      !market ||
-      !market.active ||
-      !market.tradable ||
-      !market.acceptingOrders ||
-      !market.enableOrderBook ||
-      !fresh(market.snapshotTs, this.now()) ||
-      market.conditionId !== String(order.conditionId) ||
-      !Number.isFinite(market.tickSize) ||
-      market.tickSize <= 0
+      !(recovering && permanent) &&
+      (permanent
+        ? lineage.permanentR23ActivationId !== policy.permanentR23ActivationId ||
+          lineage.permanentR23ActivatedAtUtc !== policy.permanentR23ActivatedAtUtc
+        : lineage.sourceCohortActivatedAtUtc !== policy.sourceCohortActivatedAtUtc)
     )
-      return null;
-    return { market, position: proven.position, positionResidualShares: proven.position.size };
+      return terminal("invalid-cohort");
+    if (!order.positionId || String(lineage.positionId) !== String(order.positionId))
+      return terminal("invalid-position");
+    const proven = evaluateBounceAskPositionOrigin(
+      order.positionId,
+      order.tokenId,
+      lineageSource,
+      this.deps,
+    );
+    if (!proven.ok) return terminal(proven.reason);
+    if (!sameBounceAskRoots(proven.sourceBuyRootOrderIds, lineage.sourceBuyRootOrderIds))
+      return terminal("invalid-root-set");
+    if (!market) return { kind: "defer" as const, reason: "normalized-data-missing" };
+    if (!market.active || !market.tradable || !market.acceptingOrders || !market.enableOrderBook)
+      return terminal("market-prohibited");
+    if (market.conditionId !== String(order.conditionId))
+      return terminal("market-condition-mismatch");
+    if (!Number.isFinite(market.tickSize) || market.tickSize <= 0)
+      return terminal("malformed-tick");
+    if (!fresh(market.snapshotTs, this.now()))
+      return {
+        kind: "defer" as const,
+        reason:
+          !Number.isFinite(market.snapshotTs) || market.snapshotTs > this.now() + 1_000
+            ? "normalized-timestamp-invalid"
+            : "normalized-data-stale",
+      };
+    return {
+      kind: "valid" as const,
+      market,
+      position: proven.position,
+      positionResidualShares: proven.position.size,
+    };
   }
 
   private candidate(
@@ -331,6 +377,7 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       this.terminal(intent, "failed", `senior-cancel:${event.reason}`);
       return;
     }
+    this.checkDataWindow(intent);
     this.schedule(String(intent.tokenId), () => this.advance(intent));
   }
 
@@ -342,14 +389,19 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
   }
 
   private async advance(intent: BounceAskCaptureIntent): Promise<void> {
+    if (this.failedClaims.has(intent.intentId)) {
+      this.failClaim(intent);
+      return;
+    }
+    if (!this.checkDataWindow(intent)) return;
     if (!this.captureWork.guard()()) return;
     const durable = this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(
       intent.lifecycleSignalId,
     );
     if (!durable || !["cancel_pending", "ready", "submitted"].includes(durable.status)) return;
     intent = durable;
-    const child = intent.childOrderId ? this.deps.orderRepo.findById(intent.childOrderId) : null;
-    if (child && hasNeverPostedMinimumEvidence(child)) {
+    const child = this.findChild(intent);
+    if (intent.status === "submitted" && child && hasNeverPostedMinimumEvidence(child)) {
       if (!this.deps.orderRepo.resetBounceAskCaptureSubmitted?.(intent.intentId, child.orderId))
         return;
       intent = { ...intent, status: "ready", childOrderId: null };
@@ -363,7 +415,6 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       return;
     }
     if (intent.status === "submitted") {
-      this.terminal(intent, "failed", "submitted-child-missing");
       return;
     }
     const predecessor = this.deps.orderRepo.findById(intent.predecessorOrderId);
@@ -371,8 +422,9 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     if (predecessor.status === "open" || predecessor.status === "partially-filled") {
       if (!this.markets.has(String(intent.tokenId))) return;
       const lineage = parseBounceAskCaptureLineage(predecessor);
-      if (!lineage || !this.validateState(predecessor, lineage, this.deps.policySnapshot())) {
-        this.terminal(intent, "failed", "policy-cohort-lineage-drift");
+      const state = lineage && this.evaluateState(predecessor, lineage, this.deps.policySnapshot());
+      if (!state || state.kind !== "valid") {
+        this.terminal(intent, "failed", state?.reason ?? "invalid-lineage");
         return;
       }
       if (intent.status === "cancel_pending") await this.publishCancel(intent);
@@ -401,36 +453,34 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       this.terminal(intent, "failed", "malformed-proof");
       return null;
     }
-    const lineage = parseBounceAskCaptureLineage(predecessor);
-    let snapshot = this.deps.policySnapshot();
-    if (!this.markets.has(String(intent.tokenId))) return null;
-    let state = lineage ? this.validateState(predecessor, lineage, snapshot, true) : null;
-    if (!lineage || !state) {
-      this.terminal(intent, "failed", "policy-cohort-lineage-drift");
-      return null;
+    if (!this.recoveryState(intent, predecessor)) return null;
+    let entry;
+    try {
+      entry = await primeFreshMakerCaptureBook(
+        this.deps.candidateBookCache,
+        String(intent.tokenId),
+        () => this.now(),
+      );
+    } catch (err) {
+      if (current()) {
+        const latest = this.unsubmitted(intent);
+        const order = this.deps.orderRepo.findById(intent.predecessorOrderId);
+        if (latest && order && this.recoveryState(latest, order))
+          this.deferData(latest, "book-read-failed");
+      }
+      throw err;
     }
-    const entry = await primeFreshMakerCaptureBook(
-      this.deps.candidateBookCache,
-      String(intent.tokenId),
-      () => this.now(),
-    );
     if (!current()) return null;
-    const latest = this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(
-      intent.lifecycleSignalId,
-    );
+    const latest = this.unsubmitted(intent);
     const latestOrder = this.deps.orderRepo.findById(predecessor.orderId);
-    if (latest?.status !== "cancel_pending" || !latestOrder || latestOrder.status !== "cancelled")
-      return null;
+    if (latest?.status !== "cancel_pending" || !latestOrder) return null;
     predecessor = latestOrder;
-    snapshot = this.deps.policySnapshot();
-    state = this.validateState(predecessor, lineage, snapshot, true);
+    const state = this.recoveryState(latest, predecessor);
     if (!state) return null;
+    const lineage = parseBounceAskCaptureLineage(predecessor)!;
     const minOrderSize = entry?.book.minOrderSize;
-    if (!entry || minOrderSize == null || !Number.isFinite(minOrderSize) || minOrderSize <= 0)
-      return null;
-    const candidate = this.candidate(predecessor, lineage, entry.book, state.market.tickSize);
-    if (!candidate.ok) {
-      this.terminal(intent, "failed", candidate.reason);
+    if (!entry) {
+      this.deferData(intent, "book-data-missing");
       return null;
     }
     const replacementSize = bounceCaptureResidual(
@@ -438,7 +488,29 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       state.position.size,
       this.deps.fillRepo.findByOrderId(predecessor.orderId),
     );
-    if (replacementSize + EPSILON < minOrderSize) {
+    if (
+      minOrderSize == null ||
+      !Number.isFinite(minOrderSize) ||
+      minOrderSize <= 0 ||
+      replacementSize + EPSILON < minOrderSize
+    ) {
+      if (
+        this.diagnose(
+          intent,
+          "deferred",
+          minOrderSize == null || !Number.isFinite(minOrderSize) || minOrderSize <= 0
+            ? "minimum-unknown"
+            : "residual-below-minimum",
+          "minimum",
+          { residualShares: replacementSize, minOrderSize: minOrderSize ?? null },
+        )
+      )
+        this.clearExpiry(intent.intentId);
+      return null;
+    }
+    const candidate = this.candidate(predecessor, lineage, entry.book, state.market.tickSize);
+    if (!candidate.ok) {
+      this.terminal(intent, "failed", candidate.reason);
       return null;
     }
     const trigger = proof.trigger;
@@ -464,6 +536,10 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
       )
     )
       return null;
+    this.diagnose(intent, "ready", "ready", undefined, {
+      residualShares: replacementSize,
+      minOrderSize,
+    });
     return {
       ...intent,
       status: "ready",
@@ -475,6 +551,26 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
 
   private async publishSignal(intent: BounceAskCaptureIntent, predecessor: Order): Promise<void> {
     if (!this.captureWork.guard()()) return;
+    const durable = this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(
+      intent.lifecycleSignalId,
+    );
+    if (!durable || !["ready", "submitted"].includes(durable.status)) return;
+    intent = durable;
+    if (this.unsubmitted(intent) && intent.status === "ready") {
+      const latest = this.deps.orderRepo.findById(intent.predecessorOrderId);
+      const state = latest && this.recoveryState(intent, latest);
+      if (!latest || !state) return;
+      const residual = bounceCaptureResidual(
+        latest.size,
+        state.position.size,
+        this.deps.fillRepo.findByOrderId(latest.orderId),
+      );
+      if (residual !== intent.replacementSize) {
+        this.terminal(intent, "failed", "prepared-residual-changed");
+        return;
+      }
+      predecessor = latest;
+    }
     if (
       intent.candidatePrice == null ||
       intent.replacementSize == null ||
@@ -615,8 +711,194 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     status: "completed" | "failed" | "dust",
     failure?: string,
   ): void {
-    this.deps.orderRepo.markBounceAskCaptureTerminal?.(intent.intentId, status, failure ?? null);
+    if (
+      !this.deps.orderRepo.markBounceAskCaptureTerminal?.(intent.intentId, status, failure ?? null)
+    ) {
+      const latest = this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(
+        intent.lifecycleSignalId,
+      );
+      if (latest && ["cancel_pending", "ready", "submitted"].includes(latest.status))
+        throw new Error("bounce ASK capture terminal write failed; durable ownership retained");
+      this.clearExpiry(intent.intentId);
+      return;
+    }
+    this.clearExpiry(intent.intentId);
     this.publishing.delete(intent.lifecycleSignalId);
+    try {
+      this.diagnose(intent, status, failure ?? status);
+    } catch (err) {
+      this.log.error(
+        { err, intentId: intent.intentId },
+        "bounce ASK capture terminal diagnostic failed",
+      );
+    }
+  }
+
+  private findChild(intent: BounceAskCaptureIntent): Order | null {
+    const linked = intent.childOrderId ? this.deps.orderRepo.findById(intent.childOrderId) : null;
+    return (
+      linked ??
+      this.deps.orderRepo.findByClientOrderId?.(
+        buildClientOrderId({
+          signalId: intent.lifecycleSignalId,
+          tokenId: intent.tokenId,
+          side: "sell",
+        }),
+      ) ??
+      null
+    );
+  }
+
+  private unsubmitted(intent: BounceAskCaptureIntent): BounceAskCaptureIntent | null {
+    const latest = this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(
+      intent.lifecycleSignalId,
+    );
+    if (
+      !latest ||
+      latest.intentId !== intent.intentId ||
+      !["cancel_pending", "ready"].includes(latest.status)
+    )
+      return null;
+    const child = this.findChild(latest);
+    return child && !hasNeverPostedMinimumEvidence(child) ? null : latest;
+  }
+
+  private recoveryMarker(intent: BounceAskCaptureIntent) {
+    const marker = this.deps.orderRepo.findById(intent.predecessorOrderId)?.metadata
+      ?.bounceAskCaptureRecoveryV1 as Record<string, unknown> | undefined;
+    return marker?.version === 1 && marker.intentId === intent.intentId ? marker : undefined;
+  }
+
+  private diagnose(
+    intent: BounceAskCaptureIntent,
+    phase: string,
+    reason: string,
+    recoveryClass?: "data" | "minimum",
+    scalars: Record<string, unknown> = {},
+  ): boolean {
+    const order = this.deps.orderRepo.findById(intent.predecessorOrderId);
+    if (!order) return false;
+    const prior = this.recoveryMarker(intent);
+    if (
+      prior?.phase === phase &&
+      prior.reason === reason &&
+      (!recoveryClass || prior.recoveryClass === recoveryClass)
+    )
+      return true;
+    const anchor =
+      order.status === "cancelled" ? resolveMakerCaptureCancellationAnchorMs(order) : null;
+    const marker = {
+      ...prior,
+      version: 1,
+      intentId: intent.intentId,
+      ...(recoveryClass ? { recoveryClass } : {}),
+      phase,
+      reason,
+      startedAtMs: prior?.startedAtMs ?? this.now(),
+      updatedAtMs: this.now(),
+      cancellationAnchorMs: anchor,
+      deadlineMs: anchor == null ? null : anchor + MAKER_CAPTURE_BOOK_MAX_AGE_MS,
+      ...scalars,
+    };
+    return Boolean(
+      this.deps.orderRepo.updateMetadataIfUnchanged?.(order.orderId, order.metadata ?? null, {
+        ...order.metadata,
+        bounceAskCaptureRecoveryV1: marker,
+      }),
+    );
+  }
+
+  private clearExpiry(id: string): void {
+    clearTimeout(this.expiryTimers.get(id));
+    this.expiryTimers.delete(id);
+  }
+
+  private checkDataWindow(intent: BounceAskCaptureIntent): boolean {
+    if (!this.started) return false;
+    if (this.preserveMinimumWait(intent)) return true;
+    const latest = this.unsubmitted(intent);
+    if (!latest || this.recoveryMarker(latest)?.recoveryClass !== "data") {
+      this.clearExpiry(intent.intentId);
+      return true;
+    }
+    const order = this.deps.orderRepo.findById(latest.predecessorOrderId);
+    if (!order || order.status !== "cancelled") return true;
+    const anchor = resolveMakerCaptureCancellationAnchorMs(order);
+    if (
+      anchor === null ||
+      anchor > this.now() ||
+      this.now() >= anchor + MAKER_CAPTURE_BOOK_MAX_AGE_MS
+    ) {
+      this.terminal(
+        latest,
+        "failed",
+        anchor === null || anchor > this.now()
+          ? "invalid-cancellation-anchor"
+          : "post-cancel-data-expired",
+      );
+      return false;
+    }
+    this.armExpiry(intent, anchor + MAKER_CAPTURE_BOOK_MAX_AGE_MS - this.now());
+    return true;
+  }
+
+  private preserveMinimumWait(intent: BounceAskCaptureIntent): boolean {
+    const latest = this.deps.orderRepo.findBounceAskCaptureIntentBySignal?.(
+      intent.lifecycleSignalId,
+    );
+    if (!latest || !["cancel_pending", "ready", "submitted"].includes(latest.status)) return false;
+    const child = this.findChild(latest);
+    if (!child || !hasNeverPostedMinimumEvidence(child)) return false;
+    if (
+      this.recoveryMarker(latest)?.recoveryClass === "data" &&
+      !this.diagnose(latest, "deferred", child.exchangeErrorMessage!, "minimum")
+    )
+      throw new Error("bounce ASK capture minimum recovery classification write failed");
+    this.clearExpiry(intent.intentId);
+    return true;
+  }
+
+  private armExpiry(intent: BounceAskCaptureIntent, delayMs: number, retry = true): void {
+    if (!this.started || this.expiryTimers.has(intent.intentId)) return;
+    const timer = setTimeout(() => {
+      this.clearExpiry(intent.intentId);
+      try {
+        this.checkDataWindow(intent);
+      } catch (err) {
+        this.log.error(
+          { err, intentId: intent.intentId, retry },
+          retry
+            ? "bounce ASK capture expiry failed; retry scheduled"
+            : "bounce ASK capture expiry retry failed; durable ownership retained for event or restart recovery",
+        );
+        if (retry) this.armExpiry(intent, CAPTURE_READ_RETRY_MS, false);
+      }
+    }, delayMs);
+    timer.unref?.();
+    this.expiryTimers.set(intent.intentId, timer);
+  }
+
+  private deferData(intent: BounceAskCaptureIntent, reason: string): void {
+    if (this.checkDataWindow(intent)) this.diagnose(intent, "deferred", reason);
+  }
+
+  private recoveryState(intent: BounceAskCaptureIntent, order: Order) {
+    if (!this.checkDataWindow(intent)) return null;
+    const marker = this.recoveryMarker(intent);
+    if (marker?.recoveryClass !== "data" && !this.markets.has(String(intent.tokenId))) return null;
+    const lineage = parseBounceAskCaptureLineage(order);
+    const state = lineage
+      ? this.evaluateState(order, lineage, this.deps.policySnapshot(), true)
+      : ({ kind: "terminal", reason: "invalid-lineage" } as const);
+    if (order.status !== "cancelled") {
+      this.terminal(intent, "failed", `predecessor-${order.status}`);
+      return null;
+    }
+    if (state.kind === "valid") return state;
+    if (state.kind === "terminal" || marker?.recoveryClass !== "data")
+      this.terminal(intent, "failed", state.reason);
+    else this.deferData(intent, state.reason);
+    return null;
   }
 
   private now(): number {

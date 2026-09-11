@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createCommandId,
   BOUNCE_EXIT_TARGET_RULE_ID,
   DEFAULT_EXECUTION_POLICY,
   R23_DIP_TRIGGER_RULE_ID,
@@ -9,6 +10,7 @@ import {
   createOrderId,
   createPositionId,
   createTokenId,
+  minimumRetryIdentity,
   TokenMinimumAuthority,
   type Fill,
   type InventoryLot,
@@ -207,7 +209,619 @@ function captureModule(
   });
 }
 
+async function recoveryFixture(recoveryClass: "data" | "minimum" | null = "data") {
+  const bus = new InProcessEventBus();
+  const buy = buyRoot("recovery-buy");
+  const fill = fillFor(buy, "recovery-fill", 10);
+  const lot = lotFor(fill, "recovery-lot", 10);
+  const pos = position();
+  const lineage = {
+    version: 1,
+    rootOrderId: createOrderId("recovery-sell"),
+    predecessorOrderId: null,
+    replacementIndex: 0,
+    positionId,
+    sourceCohortActivatedAtUtc: COHORT,
+    originalTargetPrice: 0.3,
+    sourceBuyRootOrderIds: [buy.orderId],
+  };
+  const f = {
+    now: NOW,
+    paused: false,
+    revision: 7 as number | null,
+    minimum: 1 as number | null,
+    sell: order("recovery-sell", {
+      status: "open",
+      createdAt: new Date(NOW - 10_000).toISOString(),
+      cancelAgeMs: 10_000,
+      metadata: {
+        bounceAskCaptureLineageV1: lineage,
+      },
+    }),
+    intent: null as any,
+    child: null as Order | null,
+    fills: [] as Fill[],
+    pos,
+    lot,
+    buy,
+    market: {
+      tokenId,
+      conditionId,
+      active: true,
+      tradable: true,
+      acceptingOrders: true,
+      enableOrderBook: true,
+      tickSize: 0.01,
+      snapshotTs: NOW,
+    } as unknown as NormalizedMarket,
+  };
+  const repo: any = {
+    findById: (id: Order["orderId"]) =>
+      [f.sell, buy, f.child].find((order) => order?.orderId === id) ?? null,
+    findByClientOrderId: () => f.child,
+    findOpen: () => [],
+    getMakerCaptureChainUsage: chainUsage,
+    findRecoverableBounceAskCaptureIntents: () =>
+      ["cancel_pending", "ready", "submitted"].includes(f.intent?.status) ? [f.intent] : [],
+    claimBounceAskCaptureIntent: (intent: unknown) => {
+      f.intent = intent;
+      return true;
+    },
+    findBounceAskCaptureIntentBySignal: () => f.intent,
+    findBounceAskCaptureIntentByPredecessor: () => f.intent,
+    updateMetadataIfUnchanged: vi.fn((_id, before, metadata) => {
+      if (before !== f.sell.metadata) return null;
+      return (f.sell = { ...f.sell, metadata });
+    }),
+    markBounceAskCaptureReady: vi.fn((_id, price, size, prepared) => {
+      f.intent = {
+        ...f.intent,
+        status: "ready",
+        candidatePrice: price,
+        replacementSize: size,
+        proof: { ...f.intent.proof, prepared },
+      };
+      return true;
+    }),
+    markBounceAskCaptureTerminal: vi.fn((_id, status, failure) => {
+      f.intent = { ...f.intent, status, failure };
+      return true;
+    }),
+    resetBounceAskCaptureSubmitted: vi.fn((_id, childId) => {
+      if (f.intent.status !== "submitted" || f.intent.childOrderId !== childId) return false;
+      f.intent = {
+        ...f.intent,
+        status: "ready",
+        childOrderId: null,
+        proof: { ...f.intent.proof, submit: null },
+      };
+      return true;
+    }),
+  };
+  const prime = vi.fn(
+    async () =>
+      new Map([
+        [
+          String(tokenId),
+          {
+            tokenId: String(tokenId),
+            sourceKind: "rest" as const,
+            bookSource: "clob" as const,
+            snapshotTs: f.now,
+            cachedAtMs: f.now,
+            sourcePolledAtMs: f.now,
+            book: { ...book(), timestamp: f.now, minOrderSize: f.minimum },
+          },
+        ],
+      ]),
+  );
+  const module = captureModule({
+    bus,
+    orderRepo: repo,
+    runtimeControl: { isPaused: () => f.paused },
+    now: () => f.now,
+    fillRepo: {
+      findByOrderId: () => f.fills,
+      findByOrderIds: () => [],
+      findByTokenId: () => [fill],
+    },
+    positionRepo: { findById: () => pos },
+    inventoryLotRepo: { findOpen: () => [lot] },
+    candidateBookCache: { prime },
+    policySnapshot: () => ({
+      policy: {
+        ...DEFAULT_EXECUTION_POLICY,
+        bounceAskCapture: {
+          ...DEFAULT_EXECUTION_POLICY.bounceAskCapture,
+          enabled: true,
+          sourceCohortActivatedAtUtc: COHORT,
+        },
+      },
+      controlRevision: f.revision,
+    }),
+  });
+  const signals = vi.fn();
+  bus.subscribe("SignalProduced", signals);
+  await module.start();
+  (module as any).markets.set(String(tokenId), f.market);
+  await (module as any).tryClaim(f.sell, NOW, (module as any).deps.policySnapshot());
+  f.sell = {
+    ...f.sell,
+    status: "cancelled",
+    metadata: {
+      ...f.sell.metadata,
+      bounceAskCaptureRecoveryV1: recoveryClass
+        ? { ...(f.sell.metadata?.bounceAskCaptureRecoveryV1 as object), recoveryClass }
+        : undefined,
+    },
+  };
+  (module as any).markets.clear();
+  prime.mockClear();
+  await (module as any).advance(f.intent);
+  const advance = async () => {
+    (module as any).markets.set(String(tokenId), f.market);
+    await (module as any).advance(f.intent);
+  };
+  return { f, module, repo, prime, signals, advance, bus };
+}
+
 describe("bounce ASK capture", () => {
+  it.each(["diagnostic", "read", "terminal-throw", "terminal-false", "persistent"])(
+    "guards expiry storage failure: %s",
+    async (failure) => {
+      vi.useFakeTimers();
+      const { f, module, repo, signals } = await recoveryFixture();
+      try {
+        const busy = () => {
+          throw new Error("SQLITE_BUSY");
+        };
+        const terminal = repo.markBounceAskCaptureTerminal.getMockImplementation();
+        if (failure === "diagnostic")
+          repo.updateMetadataIfUnchanged.mockClear().mockImplementation(busy);
+        if (failure === "read")
+          vi.spyOn(repo, "findBounceAskCaptureIntentBySignal").mockImplementationOnce(busy);
+        if (failure === "terminal-throw")
+          repo.markBounceAskCaptureTerminal.mockImplementationOnce(busy);
+        if (failure === "terminal-false")
+          repo.markBounceAskCaptureTerminal.mockReturnValueOnce(false);
+        if (failure === "persistent") repo.markBounceAskCaptureTerminal.mockImplementation(busy);
+        f.paused = true;
+        f.now += 3_000;
+        await expect(vi.advanceTimersByTimeAsync(3_000)).resolves.toBe(vi);
+        expect(f.intent.status).toBe(failure === "diagnostic" ? "failed" : "cancel_pending");
+        if (failure === "diagnostic")
+          expect(repo.markBounceAskCaptureTerminal.mock.invocationCallOrder[0]).toBeLessThan(
+            repo.updateMetadataIfUnchanged.mock.invocationCallOrder[0],
+          );
+        f.now += 2_000;
+        await expect(vi.advanceTimersByTimeAsync(2_000)).resolves.toBe(vi);
+        if (failure === "persistent") {
+          expect(f.intent.status).toBe("cancel_pending");
+          expect(repo.markBounceAskCaptureTerminal).toHaveBeenCalledTimes(2);
+          expect(vi.getTimerCount()).toBe(0);
+          await module.stop();
+          repo.markBounceAskCaptureTerminal.mockImplementation(terminal);
+          await module.start();
+        }
+        expect(f.intent.failure).toBe("post-cancel-data-expired");
+        expect(signals).not.toHaveBeenCalled();
+      } finally {
+        await module.stop();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["submitted", "ready", "classification-conflict"])(
+    "preserves never-posted minimum recovery after expiry and restart: %s",
+    async (mode) => {
+      vi.useFakeTimers();
+      const { f, module, repo, advance, signals } = await recoveryFixture();
+      try {
+        await advance();
+        signals.mockClear();
+        f.child = order("minimum-child", {
+          status: "rejected",
+          exchangeErrorCode: "INVALID_SIZE",
+          exchangeErrorMessage: "token-minimum-unavailable",
+        });
+        const identity = minimumRetryIdentity(f.child);
+        f.child.metadata = {
+          minimumOriginalIntentV1: identity,
+          neverPostedMinimumV1: {
+            version: 1,
+            orderId: f.child.orderId,
+            identity,
+            originalIdentity: identity,
+          },
+        };
+        if (mode === "submitted") {
+          f.intent.status = "submitted";
+          f.intent.childOrderId = f.child.orderId;
+        }
+        if (mode === "classification-conflict")
+          repo.updateMetadataIfUnchanged.mockReturnValueOnce(null);
+        f.paused = true;
+        f.now += 3_001;
+        await vi.advanceTimersByTimeAsync(3_001);
+        expect(f.intent.status).toBe(mode === "submitted" ? "submitted" : "ready");
+        await module.stop();
+        await module.start();
+        expect(f.sell.metadata?.bounceAskCaptureRecoveryV1).toMatchObject({
+          recoveryClass: "minimum",
+        });
+        expect(signals).not.toHaveBeenCalled();
+        f.paused = false;
+        f.market.snapshotTs = f.now;
+        await advance();
+        expect(f.intent.status).toBe("ready");
+        expect(signals).toHaveBeenCalledOnce();
+        expect(repo.resetBounceAskCaptureSubmitted).toHaveBeenCalledTimes(
+          mode === "submitted" ? 1 : 0,
+        );
+      } finally {
+        await module.stop();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("fails a new claim before cancellation if its discriminator CAS conflicts", async () => {
+    const { f, module, repo, bus } = await recoveryFixture();
+    f.sell = { ...f.sell, status: "open" };
+    const cancelled = vi.fn();
+    bus.subscribe("CancelOrderRequested", async () => {
+      cancelled();
+    });
+    repo.updateMetadataIfUnchanged.mockReturnValue(null);
+    (module as any).markets.set(String(tokenId), f.market);
+    await (module as any).tryClaim(f.sell, NOW, (module as any).deps.policySnapshot());
+    expect(f.intent.failure).toBe("diagnostic-write-conflict");
+    expect(f.sell.status).toBe("open");
+    expect(cancelled).not.toHaveBeenCalled();
+    await module.stop();
+  });
+
+  it.each([
+    ["throw", "none"],
+    ["read-back", "none"],
+    ["throw", "throw"],
+    ["throw", "false"],
+    ["read-back", "throw"],
+    ["false", "throw"],
+    ["false", "false"],
+  ])("retains failed initial marker %s with terminal failure %s", async (marker, terminal) => {
+    const { f, module, repo, bus, signals } = await recoveryFixture();
+    await module.stop();
+    f.intent = null;
+    f.sell = {
+      ...f.sell,
+      status: "open",
+      metadata: { bounceAskCaptureLineageV1: f.sell.metadata?.bounceAskCaptureLineageV1 },
+    };
+    repo.findOpen = () => (f.intent ? [] : [f.sell]);
+    (module as any).deps.gateway = prospectiveGateway();
+    const logged = vi.spyOn((module as any).log, "error");
+    const cancelled = vi.fn();
+    bus.subscribe("CancelOrderRequested", cancelled);
+    const initialError = new Error("SQLITE_BUSY: initial marker");
+    const writeMarker = repo.updateMetadataIfUnchanged.getMockImplementation()!;
+    repo.updateMetadataIfUnchanged.mockImplementationOnce((...args: unknown[]) => {
+      if (marker === "false") return null;
+      if (marker === "read-back") writeMarker(...args);
+      throw initialError;
+    });
+    const writeTerminal = repo.markBounceAskCaptureTerminal.getMockImplementation()!;
+    if (terminal === "throw")
+      repo.markBounceAskCaptureTerminal.mockImplementation(() => {
+        throw new Error("SQLITE_BUSY: terminal");
+      });
+    if (terminal === "false") repo.markBounceAskCaptureTerminal.mockReturnValue(false);
+    const event = async () => {
+      await bus.publish("NormalizedMarketUpdated", { markets: [f.market], timestamp: f.now });
+      await (module as any).captureWork.drain();
+    };
+    try {
+      await module.start();
+      await event();
+      await event();
+      expect(cancelled).not.toHaveBeenCalled();
+      if (marker !== "false")
+        expect(logged).toHaveBeenCalledWith(
+          expect.objectContaining({ err: initialError }),
+          "bounce ASK capture handler failed; durable state retained",
+        );
+      if (terminal !== "none") {
+        expect(f.intent.status).toBe("cancel_pending");
+        await module.stop();
+        await module.start();
+        await event();
+        expect(cancelled).not.toHaveBeenCalled();
+        repo.markBounceAskCaptureTerminal.mockImplementation(writeTerminal);
+        await event();
+      }
+      expect(f.intent).toMatchObject({ status: "failed", failure: "diagnostic-write-conflict" });
+      expect(f.sell.status).toBe("open");
+      expect(cancelled).not.toHaveBeenCalled();
+      expect(signals).not.toHaveBeenCalled();
+    } finally {
+      await module.stop();
+    }
+  });
+
+  it("defers a stale cancelled ASK and prepares the current residual on fresh recovery", async () => {
+    const { f, module, advance, signals, repo } = await recoveryFixture();
+    f.market.snapshotTs = NOW - 3_001;
+    await advance();
+    expect(f.intent.status).toBe("cancel_pending");
+    repo.updateMetadataIfUnchanged.mockClear();
+    await advance();
+    expect(repo.updateMetadataIfUnchanged).not.toHaveBeenCalled();
+    expect(f.sell.metadata?.bounceAskCaptureRecoveryV1).toMatchObject({
+      recoveryClass: "data",
+      phase: "deferred",
+      reason: "normalized-data-stale",
+      deadlineMs: NOW + 3_000,
+    });
+    f.fills = [{ size: 2 } as Fill];
+    f.pos.size = f.lot.remainingSize = 8;
+    f.market.snapshotTs = NOW;
+    await advance();
+    expect(f.intent.replacementSize).toBe(8);
+    expect(repo.markBounceAskCaptureReady).toHaveBeenCalledOnce();
+    expect(signals.mock.calls[0]?.[0].signal.suggestedSize).toBe(8);
+    await module.stop();
+  });
+
+  it("expires missing data while paused without a future event or a book fetch", async () => {
+    vi.useFakeTimers();
+    try {
+      const { f, module, prime } = await recoveryFixture();
+      f.paused = true;
+      f.now += 3_000;
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(f.intent.failure).toBe("post-cancel-data-expired");
+      expect(prime).not.toHaveBeenCalled();
+      await module.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([1_000, 3_000])(
+    "leaves late cancellation recovery stopped and restores the fixed deadline after %sms",
+    async (elapsed) => {
+      vi.useFakeTimers();
+      const { f, module, repo, prime, signals, bus } = await recoveryFixture();
+      try {
+        await module.stop();
+        repo.updateMetadataIfUnchanged.mockClear();
+        f.now += elapsed;
+        await bus.publish("OrderCancelled", {
+          commandId: createCommandId("late-cancel"),
+          orderId: f.sell.orderId,
+          tokenId,
+          conditionId,
+          reason: "bounce_ask_capture_reprice",
+          signalReason: f.sell.signalReason,
+          timestamp: f.now,
+        });
+        expect(f.intent.status).toBe("cancel_pending");
+        expect(repo.markBounceAskCaptureTerminal).not.toHaveBeenCalled();
+        expect(repo.updateMetadataIfUnchanged).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+        f.paused = true;
+        await module.start();
+        expect(f.intent.status).toBe(elapsed === 3_000 ? "failed" : "cancel_pending");
+        f.now = NOW + 3_000;
+        await vi.advanceTimersByTimeAsync(3_000 - elapsed);
+        expect(f.intent.failure).toBe("post-cancel-data-expired");
+        expect(f.sell.metadata?.bounceAskCaptureRecoveryV1).toMatchObject({
+          cancellationAnchorMs: NOW,
+          deadlineMs: NOW + 3_000,
+        });
+        expect(prime).not.toHaveBeenCalled();
+        expect(signals).not.toHaveBeenCalled();
+      } finally {
+        await module.stop();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["data", "minimum", null] as const)(
+    "preserves %s history across paused missing-market restart",
+    async (kind) => {
+      vi.useFakeTimers();
+      try {
+        const { f, module, prime } = await recoveryFixture(kind);
+        await module.stop();
+        f.paused = true;
+        f.now += 1_000;
+        await module.start();
+        f.now += 2_000;
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(f.intent.status).toBe(kind === "data" ? "failed" : "cancel_pending");
+        await module.stop();
+        await module.start();
+        expect(f.intent.status).toBe(kind === "data" ? "failed" : "cancel_pending");
+        expect(prime).not.toHaveBeenCalled();
+        await module.stop();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["data", "minimum", null] as const)(
+    "classifies stale %s history explicitly",
+    async (kind) => {
+      const { f, module, advance } = await recoveryFixture(kind);
+      f.market.snapshotTs = NOW - 3_001;
+      await advance();
+      expect(f.intent.status).toBe(kind === "data" ? "cancel_pending" : "failed");
+      expect(f.sell.metadata?.bounceAskCaptureRecoveryV1).toMatchObject({
+        reason: "normalized-data-stale",
+      });
+      await module.stop();
+    },
+  );
+
+  it.each(["persisted", "conflict", "unknown"])(
+    "retires the data timer only after minimum classification is %s",
+    async (mode) => {
+      vi.useFakeTimers();
+      try {
+        const { f, module, advance, repo, signals } = await recoveryFixture();
+        f.pos.size = f.lot.remainingSize = 0.5;
+        if (mode === "unknown") f.minimum = null;
+        if (mode === "conflict") repo.updateMetadataIfUnchanged.mockReturnValue(null);
+        await advance();
+        expect(f.sell.metadata?.bounceAskCaptureRecoveryV1).toMatchObject({
+          recoveryClass: mode === "conflict" ? "data" : "minimum",
+        });
+        await module.stop();
+        f.paused = true;
+        f.now += 3_001;
+        await module.start();
+        expect(f.intent.status).toBe(mode === "conflict" ? "failed" : "cancel_pending");
+        expect(signals).not.toHaveBeenCalled();
+        await module.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["invalid-anchor", "unlinked-pending", "submitted-missing"])(
+    "checks durable expiry ownership: %s",
+    async (mode) => {
+      const { f, module, advance } = await recoveryFixture();
+      if (mode === "invalid-anchor") f.sell = { ...f.sell, cancelAgeMs: null };
+      if (mode === "unlinked-pending") f.child = order("child", { status: "pending" });
+      if (mode === "submitted-missing") f.intent.status = "submitted";
+      f.now += 3_001;
+      await advance();
+      expect(f.intent.failure).toBe(
+        mode === "invalid-anchor" ? "invalid-cancellation-anchor" : null,
+      );
+      await module.stop();
+    },
+  );
+
+  it.each([
+    ["stale", "normalized-data-stale"],
+    ["timestamp", "normalized-timestamp-invalid"],
+    ["position", "invalid-position"],
+    ["lots", "invalid-lots"],
+    ["buy", "invalid-buy-root"],
+    ["cohort", "invalid-cohort"],
+    ["roots", "invalid-root-set"],
+    ["market", "market-prohibited"],
+    ["revision", "null-control-revision"],
+    ["residual", null],
+    ["pause", null],
+    ["stop", null],
+  ] as const)("reloads %s after book await", async (mode, reason) => {
+    const { f, module, advance, prime, signals } = await recoveryFixture();
+    const read = prime.getMockImplementation()!;
+    let release!: () => void;
+    prime.mockImplementationOnce(async () => {
+      await new Promise<void>((done) => {
+        release = done;
+      });
+      return read();
+    });
+    const work = advance();
+    if (mode === "stale") f.market.snapshotTs = NOW - 3_001;
+    if (mode === "timestamp") f.market.snapshotTs = NaN;
+    if (mode === "position") f.pos.status = "closed";
+    if (mode === "lots") f.lot.remainingSize = 9;
+    if (mode === "buy") f.buy.side = "sell";
+    if (mode === "cohort")
+      f.buy.metadata = { ...f.buy.metadata, quoteMotionV1: quoteMotion("r23_capture", "other") };
+    if (mode === "roots")
+      (f.sell.metadata!.bounceAskCaptureLineageV1 as any).sourceBuyRootOrderIds = ["other"];
+    if (mode === "market") f.market.acceptingOrders = false;
+    if (mode === "revision") f.revision = null;
+    if (mode === "residual") {
+      f.fills = [{ size: 2 } as Fill];
+      f.pos.size = f.lot.remainingSize = 8;
+    }
+    if (mode === "pause") f.paused = true;
+    const stopping = mode === "stop" ? module.stop() : null;
+    release();
+    await work;
+    await stopping;
+    if (reason) expect(f.sell.metadata?.bounceAskCaptureRecoveryV1).toMatchObject({ reason });
+    expect(f.intent.status).toBe(
+      mode === "residual"
+        ? "ready"
+        : ["stale", "timestamp", "pause", "stop"].includes(mode)
+          ? "cancel_pending"
+          : "failed",
+    );
+    expect(signals).toHaveBeenCalledTimes(mode === "residual" ? 1 : 0);
+    if (mode === "residual") expect(f.intent.proof.prepared.replacementSize).toBe(8);
+    await module.stop();
+  });
+
+  it.each([false, true])(
+    "reclassifies a rejected await with permanent drift=%s",
+    async (permanent) => {
+      const { f, module, advance, prime } = await recoveryFixture();
+      prime.mockImplementationOnce(async () => {
+        if (permanent) f.pos.status = "closed";
+        throw new Error("read failed");
+      });
+      await expect(advance()).rejects.toThrow("read failed");
+      expect(f.intent.failure).toBe(permanent ? "invalid-position" : null);
+      expect(f.sell.metadata?.bounceAskCaptureRecoveryV1).toMatchObject({
+        reason: permanent ? "invalid-position" : "book-read-failed",
+        deadlineMs: NOW + 3_000,
+      });
+      await module.stop();
+    },
+  );
+
+  it("expires during a blocked read and prevents its late publication", async () => {
+    vi.useFakeTimers();
+    try {
+      const { f, module, advance, prime, signals } = await recoveryFixture();
+      const read = prime.getMockImplementation()!;
+      let release!: () => void;
+      prime.mockImplementationOnce(async () => {
+        await new Promise<void>((done) => {
+          release = done;
+        });
+        return read();
+      });
+      const work = advance();
+      f.now += 3_000;
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(f.intent.failure).toBe("post-cancel-data-expired");
+      release();
+      await work;
+      expect(signals).not.toHaveBeenCalled();
+      await module.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases an immutable ready proof after residual drift without rewriting it", async () => {
+    const { f, module, advance, repo, signals } = await recoveryFixture();
+    await advance();
+    const proof = f.intent.proof;
+    f.pos.size = f.lot.remainingSize = 8;
+    await advance();
+    expect(f.intent.failure).toBe("prepared-residual-changed");
+    expect(f.intent.proof).toBe(proof);
+    expect(repo.markBounceAskCaptureReady).toHaveBeenCalledOnce();
+    expect(signals).toHaveBeenCalledOnce();
+    await module.stop();
+  });
   it.each(["current", "stale", "invalidated"])(
     "checks %s work after awaiting token recovery",
     async (state) => {
@@ -421,12 +1035,17 @@ describe("bounce ASK capture", () => {
     const lot = lotFor(fill, "buy-lot", 10);
     const currentPosition = position();
     let sell = order("sell-root", {
+      createdAt: new Date(NOW - 10_000).toISOString(),
+      cancelAgeMs: 10_000,
       metadata: { bounceRung: { rungIndex: 0 }, quoteMotionV1: quoteMotion("bounce_exit_target") },
     });
     let intent: any = null;
     let policyEnabled = true;
     const effects: string[] = [];
-    const terminal = vi.fn();
+    const terminal = vi.fn((_id, status, failure) => {
+      intent = { ...intent, status, failure };
+      return true;
+    });
     const repo: any = {
       findOpen: vi.fn((scope?: Order["tokenId"]) =>
         [order("foreign", { tokenId: createTokenId("foreign") }), sell].filter(
@@ -547,7 +1166,7 @@ describe("bounce ASK capture", () => {
       return;
     }
     await (module as any).advance(intent);
-    expect(terminal).toHaveBeenCalledWith(intent.intentId, "failed", "policy-cohort-lineage-drift");
+    expect(terminal).toHaveBeenCalledWith(intent.intentId, "failed", "policy-disabled");
     expect(effects).toEqual(["claim", "cancel-after-claim"]);
     policyEnabled = true;
     terminal.mockClear();

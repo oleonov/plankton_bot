@@ -128,6 +128,13 @@ type BounceAskOriginDeps = {
 };
 
 export function resolveProvenBounceAskPositionOrigin(
+  ...args: Parameters<typeof evaluateBounceAskPositionOrigin>
+) {
+  const result = evaluateBounceAskPositionOrigin(...args);
+  return result.ok ? result : null;
+}
+
+export function evaluateBounceAskPositionOrigin(
   positionId: Position["positionId"],
   tokenId: Order["tokenId"],
   source: BounceAskOriginSource,
@@ -135,11 +142,12 @@ export function resolveProvenBounceAskPositionOrigin(
 ) {
   const position = deps.positionRepo.findById(positionId);
   if (!position || position.status === "closed" || String(position.tokenId) !== String(tokenId)) {
-    return null;
+    return { ok: false, reason: "invalid-position" } as const;
   }
   const lots = deps.inventoryLotRepo.findOpen(position.positionId);
   const fills = deps.fillRepo.findByTokenId(position.tokenId);
-  if (lots.length === 0 || !residualMatchesPosition(position, lots)) return null;
+  if (lots.length === 0 || !residualMatchesPosition(position, lots))
+    return { ok: false, reason: "invalid-lots" } as const;
   const fillsById = new Map(fills.map((fill) => [String(fill.fillId), fill]));
   const roots = new Map<string, OrderId>();
   for (const lot of lots) {
@@ -154,17 +162,20 @@ export function resolveProvenBounceAskPositionOrigin(
       fill.side !== "buy" ||
       String(fill.tokenId) !== String(position.tokenId) ||
       !root ||
-      origin?.kind !== "r23_capture" ||
-      (permanent
+      origin?.kind !== "r23_capture"
+    )
+      return { ok: false, reason: "invalid-buy-root" } as const;
+    if (
+      permanent
         ? origin.permanentR23ActivationId !== permanent ||
           origin.permanentR23ActivatedAtUtc !== permanentAt
-        : origin.cohortId !== cohort || origin.permanentR23ActivationId != null)
-    ) {
-      return null;
-    }
+        : origin.cohortId !== cohort || origin.permanentR23ActivationId != null
+    )
+      return { ok: false, reason: "invalid-cohort" } as const;
     roots.set(String(root.orderId), root.orderId);
   }
   return {
+    ok: true as const,
     position,
     sourceBuyRootOrderIds: [...roots.values()].sort((a, b) => String(a).localeCompare(String(b))),
   };

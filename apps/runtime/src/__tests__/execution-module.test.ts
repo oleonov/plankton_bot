@@ -65,6 +65,7 @@ import {
 } from "../modules/execution/reservation-utils.js";
 import { buildMakerCaptureRepriceIdentity } from "../maker-capture-reprice.js";
 import { buildBounceAskCaptureIdentity } from "../bounce-ask-capture.js";
+import { BounceAskCaptureLifecycleModule } from "../modules/bounce-ask-capture/bounce-ask-capture-lifecycle-module.js";
 import type { MakerBuyFastCancel } from "../modules/execution/maker-buy-fast-cancel.js";
 import { LIFECYCLE_STOP_WAIT_MS } from "../lifecycle-chain.js";
 import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
@@ -4062,7 +4063,11 @@ describe("ExecutionModule", () => {
     "sizeTotal",
     "permanent-disabled",
     "valid",
+    "stale-recovery",
+    "ordinary-first",
+    "recovery-first",
   ] as const)("routes a submitted ASK signal through bridge recovery: %s", async (mode) => {
+    const recovering = ["stale-recovery", "ordinary-first", "recovery-first"].includes(mode);
     const rootOrderId = createOrderId("ask-root");
     const predecessorOrderId = createOrderId("ask-predecessor");
     const buyRootOrderId = createOrderId("ask-buy-root");
@@ -4103,7 +4108,7 @@ describe("ExecutionModule", () => {
       status: "cancelled",
       metadata: { bounceAskCaptureLineageV1: rootLineage },
     });
-    const predecessor = openSellAt(0.36, {
+    let predecessor = openSellAt(0.36, {
       orderId: predecessorOrderId,
       exchangeOrderId: "ask-predecessor-exchange",
       positionId,
@@ -4155,6 +4160,21 @@ describe("ExecutionModule", () => {
       status: "pending",
     });
     const now = Date.now();
+    if (recovering)
+      predecessor = {
+        ...predecessor,
+        createdAt: new Date(now - 4_000).toISOString(),
+        cancelAgeMs: 4_000,
+        metadata: {
+          ...predecessor.metadata,
+          bounceRung: { ladderId: "recovery-ladder", rungIndex: 0 },
+          bounceAskCaptureRecoveryV1: {
+            version: 1,
+            intentId: identity.intentId,
+            recoveryClass: "data",
+          },
+        },
+      };
     const trigger = {
       eventTimestampMs: now,
       evaluatedAtMs: now,
@@ -4206,6 +4226,17 @@ describe("ExecutionModule", () => {
         },
       },
     };
+    if (recovering) {
+      child = null;
+      intent = {
+        ...intent,
+        status: "cancel_pending",
+        childOrderId: null,
+        candidatePrice: null,
+        replacementSize: null,
+        proof: { ...intent.proof, prepared: null, submit: null },
+      };
+    }
     const signal = {
       ...makePlaceCmd(),
       signalId: identity.lifecycleSignalId,
@@ -4310,6 +4341,25 @@ describe("ExecutionModule", () => {
     });
     orderRepo.markBounceAskCaptureSubmitProof = vi.fn().mockReturnValue(true);
     orderRepo.markBounceAskCaptureTerminal = vi.fn();
+    if (recovering) {
+      orderRepo.findRecoverableBounceAskCaptureIntents = () => [intent];
+      orderRepo.updateMetadataIfUnchanged = (_id, _before, metadata) =>
+        (predecessor = { ...predecessor, metadata });
+      orderRepo.markBounceAskCaptureReady = (_id, price, size, proof) => {
+        intent = {
+          ...intent,
+          status: "ready",
+          candidatePrice: price,
+          replacementSize: size,
+          proof: { ...intent.proof, prepared: proof },
+        };
+        return true;
+      };
+      orderRepo.save = (order) => {
+        child = order;
+      };
+      orderRepo.findByClientOrderId = (id) => (child?.clientOrderId === id ? child : null);
+    }
     orderRepo.replacePendingIdentity = vi.fn((_id, replacement) => (child = replacement));
     gateway.prepareOrder = vi.fn(async () => {
       preparedOrder = true;
@@ -4355,7 +4405,7 @@ describe("ExecutionModule", () => {
     );
     const currentPosition = makePosition({
       positionId,
-      size: 5,
+      size: recovering ? 10 : 5,
       avgEntryPrice: 0.2,
       costBasisUsdc: 1,
     });
@@ -4364,7 +4414,7 @@ describe("ExecutionModule", () => {
       orderId: buyRootOrderId,
       tokenId: existing.tokenId,
       side: "buy",
-      size: 5,
+      size: currentPosition.size,
     } as Fill;
     fillRepo.findByTokenId = vi.fn(() => [buyFill]);
     const internal = mod as any;
@@ -4419,7 +4469,7 @@ describe("ExecutionModule", () => {
         ]);
       }),
     };
-    gateway.getPositionBalance = vi.fn().mockResolvedValue(5);
+    gateway.getPositionBalance = vi.fn().mockResolvedValue(currentPosition.size);
     marketRepo.findByTokenId.mockReturnValue({
       active: true,
       tradable: true,
@@ -4429,6 +4479,7 @@ describe("ExecutionModule", () => {
     internal.getSellPreSubmitMinOrderBlock = () => null;
     internal.getNotAcceptingOrdersSkip = () => false;
     internal.getPostOnlyCrossPreSubmitSkip = () => null;
+    if (recovering) mod = new ExecutionModule({ ...internal.deps, maxConcurrency: 2 });
     const bridge = new SignalToOrderBridge({
       bus,
       log: silentLog,
@@ -4456,16 +4507,81 @@ describe("ExecutionModule", () => {
       endDate: new Date(Date.now() + 60_000).toISOString(),
     });
     await bus.publish("NormalizedMarketUpdated", { markets: [market], timestamp: Date.now() });
-    await bus.publish("SignalApproved", {
-      signal,
-      market,
-      approvedAt: Date.now(),
-    });
+    if (recovering) {
+      const lifecycle = new BounceAskCaptureLifecycleModule({
+        ...internal.deps,
+        policySnapshot: internal.deps.executionPolicySnapshot,
+      });
+      bus.subscribe("SignalProduced", async ({ signal, market }) => {
+        await bus.publish("SignalApproved", { signal, market, approvedAt: Date.now() });
+      });
+      await lifecycle.start();
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [{ ...market, snapshotTs: now - 3_001 }],
+        timestamp: Date.now(),
+      });
+      await vi.waitFor(() =>
+        expect(predecessor.metadata?.bounceAskCaptureRecoveryV1).toMatchObject({
+          reason: "normalized-data-stale",
+        }),
+      );
+      expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+      let release!: () => void;
+      const prepare = gateway.prepareOrder;
+      const skipped = vi.fn();
+      bus.subscribe("OrderRejected", skipped);
+      gateway.prepareOrder = vi.fn(async (...args: Parameters<typeof prepare>) => {
+        await new Promise<void>((done) => {
+          release = done;
+        });
+        return prepare(...args);
+      });
+      const ordinary = () =>
+        bus.publish("PlaceOrderRequested", {
+          command: makePlaceCmd({
+            side: "sell",
+            price: 0.4,
+            size: 5,
+            positionId,
+            decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+            postOnly: true,
+            entryStyle: "maker",
+            metadata: { bounceRung: predecessor.metadata?.bounceRung },
+          }),
+          timestamp: Date.now(),
+        });
+      const fresh = () =>
+        bus.publish("NormalizedMarketUpdated", {
+          markets: [{ ...market, snapshotTs: Date.now() }],
+          timestamp: Date.now(),
+        });
+      if (mode === "ordinary-first") await ordinary();
+      else await fresh();
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      if (mode === "ordinary-first") await fresh();
+      else if (mode === "recovery-first") await ordinary();
+      else await fresh();
+      await bus.drain();
+      release();
+      await vi.waitFor(() => expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce());
+      if (mode !== "stale-recovery")
+        expect(skipped).toHaveBeenCalledWith(
+          expect.objectContaining({ reason: "bounce-rung-already-working" }),
+        );
+      await lifecycle.stop();
+    } else
+      await bus.publish("SignalApproved", {
+        signal,
+        market,
+        approvedAt: Date.now(),
+      });
     await bus.drain();
     bridge.unsubscribe();
     await mod.stop();
 
-    if (mode === "open") {
+    if (recovering) {
+      expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    } else if (mode === "open") {
       expect(gateway.getOrderResult).toHaveBeenCalledWith(existing.exchangeOrderId);
       expect(orderRepo.updateStatus).toHaveBeenCalledWith(existing.orderId, "open", remote.orderId);
     } else if (mode === "absent" || mode === "valid" || mode === "permanent-disabled") {

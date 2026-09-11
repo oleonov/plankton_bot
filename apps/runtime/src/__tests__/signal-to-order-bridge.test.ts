@@ -41,6 +41,7 @@ import {
   type SignalToOrderBridgeDeps,
 } from "../modules/strategy/signal-to-order.js";
 import { CandidateBookCache } from "../modules/strategy/candidate-book-cache.js";
+import * as bounceAskCapture from "../bounce-ask-capture.js";
 import { DEFAULT_EXECUTION_POLICY } from "../execution-policy.js";
 import type {
   DeadSideGuardPolicy,
@@ -2501,6 +2502,92 @@ describe("dead-side-near-end guard", () => {
 });
 
 describe("bounded-midpoint pricing (ADR-014)", () => {
+  it.each([false, true])("preserves initial bounce pricing with cleanup=%s", async (cleanup) => {
+    const origin = vi
+      .spyOn(bounceAskCapture, "resolveBounceAskPolicyOrigin")
+      .mockReturnValue({} as never);
+    const bus = new InProcessEventBus();
+    const cache = makeCachedBook({
+      bestBid: 0.1,
+      bestAsk: 0.4,
+      bids: [{ price: 0.1, size: 20 }],
+      asks: [{ price: 0.4, size: 1 }],
+      minOrderSize: 1,
+    });
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      candidateBookCache: cache,
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        bounceAskCapture: { ...DEFAULT_EXECUTION_POLICY.bounceAskCapture, enabled: true },
+      }),
+      orderRepo: {
+        findByTokenId: () =>
+          cleanup ? [] : [{ side: "sell", status: "open", price: 0.4, size: 10 }],
+      } as never,
+      fillRepo: { findByOrderId: () => [] } as never,
+      positionRepo: positionRepo(0.1, 10),
+      inventoryLotRepo: {} as never,
+    });
+    const placed: RuntimeEventMap["PlaceOrderRequested"][] = [];
+    const skipped = vi.fn();
+    bus.subscribe("PlaceOrderRequested", async (event) => void placed.push(event));
+    bus.subscribe("SignalConversionSkipped", skipped);
+    bridge.subscribe();
+    try {
+      await bus.publish("SignalApproved", {
+        signal: {
+          ...makeSignal(),
+          side: "sell",
+          positionId: "position" as never,
+          suggestedPrice: 0.3,
+          suggestedSize: 10,
+          suggestedSizeUsdc: 3,
+          reason: "repricing-exit",
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          ...(cleanup
+            ? {
+                bounceRung: {
+                  ladderId: "cleanup",
+                  rungIndex: 0,
+                  anchorPrice: 0.1,
+                  fraction: 1,
+                  originalPositionSize: 10,
+                  remainingPositionSize: 10,
+                  isCleanupRung: true,
+                },
+              }
+            : {}),
+        },
+        market: makeMarket({ bestBid: 0.1, bestAsk: 0.4 }),
+        approvedAt: Date.now(),
+      });
+      expect(placed).toHaveLength(1);
+      expect(placed[0]?.command.price).toBe(cleanup ? 0.39 : 0.3);
+      expect(placed[0]?.command.metadata?.bounceAskCaptureInitialV1).toEqual(
+        cleanup
+          ? {
+              version: 1,
+              status: "applied",
+              reason: "applied",
+              price: 0.39,
+            }
+          : {
+              version: 1,
+              status: "skipped",
+              reason: "self-book-ambiguous",
+            },
+      );
+      expect(skipped).not.toHaveBeenCalled();
+    } finally {
+      bridge.unsubscribe();
+      cache.dispose();
+      origin.mockRestore();
+    }
+  });
+
   function makeBridgeWithPricing(
     pricingOverrides?: Partial<ExecutionPricingPolicy>,
     opts: {
