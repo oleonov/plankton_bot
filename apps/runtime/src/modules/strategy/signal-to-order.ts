@@ -720,19 +720,23 @@ export class SignalToOrderBridge {
 
   /**
    * R23 Phase 5 — micro-live maker-entry override. Returns non-null only when all
-   * conditions for a post-only BUY limit order are met and the book allows a
-   * non-crossing entry. Returns null (skips the override) in all other cases.
+   * authorization and the book allow a non-crossing entry. Invalid sizing is an
+   * explicit failure so callers cannot fall back to the pre-override order.
    */
   private tryMakerEntryOverride(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
     policy: ExecutionPolicy,
     orderSize: number,
-    executionTerms: { tickSize: number },
+    executionTerms: { tickSize: number; price: number },
     authorized: boolean,
     bidImproveTicks: number,
     applyMicroCap: boolean,
-  ): { price: number; size: number; postOnly: true; entryStyle: "maker" } | null {
+    preserveAcceptedNotional: boolean,
+  ):
+    | { price: number; size: number; postOnly: true; entryStyle: "maker" }
+    | { invalidSize: number }
+    | null {
     if (!authorized) return null;
 
     const bestBid = market.bestBid;
@@ -769,6 +773,19 @@ export class SignalToOrderBridge {
       return null;
     }
 
+    if (preserveAcceptedNotional) {
+      const acceptedNotionalUsdc = orderSize * executionTerms.price;
+      orderSize = acceptedNotionalUsdc / makerPrice;
+      // Validate before the micro cap can turn an overflow into a finite order.
+      if (
+        !Number.isFinite(acceptedNotionalUsdc) ||
+        acceptedNotionalUsdc <= 0 ||
+        !Number.isFinite(orderSize) ||
+        orderSize <= 0
+      ) {
+        return { invalidSize: orderSize };
+      }
+    }
     const cappedSize = applyMicroCap
       ? Math.min(orderSize, policy.makerEntry.microMaxOrderUsdc / makerPrice)
       : orderSize;
@@ -1494,6 +1511,34 @@ export class SignalToOrderBridge {
         };
       }
       let bounceRungOverride: BounceRungMetadata | null = null;
+      const skipBelowMinimum = async (orderSize: number) => {
+        const diagnostics = {
+          cacheStatus: pricing.cacheStatus,
+          orderSize,
+          minOrderSize: market.minOrderSize ?? null,
+          effectiveMinOrderSize,
+        };
+        this.log.info(
+          { signalId: signal.signalId, tokenId: signal.tokenId, side: signal.side, ...diagnostics },
+          "approved signal skipped — order size below exchange minimum",
+        );
+        await this.publishConversionSkipped(
+          signal,
+          "execution-terms",
+          ["order-size-below-minimum"],
+          diagnostics,
+        );
+        this.writeObservation({
+          signal,
+          clientOrderId: null,
+          market,
+          policy,
+          executionTerms,
+          canary,
+          sellPricingShadow,
+          skippedReason: "order-size-below-minimum",
+        });
+      };
       if (!isExecutableOrderSize(orderSize, market.minOrderSize)) {
         const rollover =
           signal.bounceRung && bounceOriginalPositionSize != null && bounceRolloverCeiling != null
@@ -1560,39 +1605,7 @@ export class SignalToOrderBridge {
           orderSize = rollover.size;
           bounceRungOverride = rollover.metadata;
         } else {
-          this.log.info(
-            {
-              signalId: signal.signalId,
-              tokenId: signal.tokenId,
-              side: signal.side,
-              orderSize,
-              minOrderSize: market.minOrderSize ?? null,
-              effectiveMinOrderSize,
-              cacheStatus: pricing.cacheStatus,
-            },
-            "approved signal skipped — order size below exchange minimum",
-          );
-          await this.publishConversionSkipped(
-            signal,
-            "execution-terms",
-            ["order-size-below-minimum"],
-            {
-              cacheStatus: pricing.cacheStatus,
-              orderSize,
-              minOrderSize: market.minOrderSize ?? null,
-              effectiveMinOrderSize,
-            },
-          );
-          this.writeObservation({
-            signal,
-            clientOrderId: null,
-            market,
-            policy,
-            executionTerms,
-            canary,
-            sellPricingShadow,
-            skippedReason: "order-size-below-minimum",
-          });
+          await skipBelowMinimum(orderSize);
           return;
         }
       }
@@ -1749,6 +1762,8 @@ export class SignalToOrderBridge {
         makerAuthorization,
       );
       const makerBidImproveTicks = makerCaptureAuthorized ? 1 : policy.makerEntry.bidImproveTicks;
+      const preserveAcceptedNotional =
+        isFlatFirstEntryBuy && signal.decisionRuleId === "R23_DIP_TRIGGER";
       const makerOverride = this.tryMakerEntryOverride(
         signal,
         market,
@@ -1758,7 +1773,12 @@ export class SignalToOrderBridge {
         makerAuthorized,
         makerBidImproveTicks,
         !permanentR23Authorized,
+        preserveAcceptedNotional,
       );
+      if (makerOverride && "invalidSize" in makerOverride) {
+        await skipBelowMinimum(makerOverride.invalidSize);
+        return;
+      }
       const permanentRootCapExceeded =
         permanentR23Authorized &&
         makerOverride != null &&
@@ -1928,6 +1948,17 @@ export class SignalToOrderBridge {
           sellPricingShadow,
           skippedReason: ENTRY_NOT_SELLABLE_REASON,
         });
+        return;
+      }
+
+      if (
+        makerOverride &&
+        preserveAcceptedNotional &&
+        (!Number.isFinite(orderSize) ||
+          orderSize <= 0 ||
+          !isExecutableOrderSize(orderSize, market.minOrderSize))
+      ) {
+        await skipBelowMinimum(orderSize);
         return;
       }
 

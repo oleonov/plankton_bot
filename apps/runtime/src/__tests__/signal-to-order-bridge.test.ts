@@ -915,7 +915,11 @@ describe("SignalToOrderBridge", () => {
     );
   });
 
-  it("clamps BUY notional through position concentration before publishing order", async () => {
+  it.each([
+    [false, 0.04, 0.04, 0.04, 50],
+    [true, 0.02, 0.04, 0.03, 66.66666666666667],
+    [true, 0.04, 0.08, 0.05, 40],
+  ])("preserves $2 clamp (%s, %s)", async (maker, bestBid, bestAsk, price, size) => {
     const bus = new InProcessEventBus();
     const evaluateBuy = vi.fn(() => ({
       action: "clamp",
@@ -930,7 +934,14 @@ describe("SignalToOrderBridge", () => {
       bus,
       log: makeLogger(),
       liveLiteGuard: { getWalletMode: () => "relayer" } as never,
-      policy: () => DEFAULT_EXECUTION_POLICY,
+      policy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        makerEntry: {
+          ...DEFAULT_EXECUTION_POLICY.makerEntry,
+          mode: maker ? "micro_live" : "off",
+          whitelistConditionIds: ["cond-1"],
+        },
+      }),
       positionConcentration: { evaluateBuy } as never,
       now: () => NOW,
     });
@@ -944,14 +955,15 @@ describe("SignalToOrderBridge", () => {
     });
 
     await bus.publish("SignalApproved", {
-      signal: makeSignal(),
-      market: makeMarket({ bestBid: 0.04, bestAsk: 0.04, midPrice: 0.04 }),
+      signal: { ...makeSignal(), decisionRuleId: "R23_DIP_TRIGGER" },
+      market: makeMarket({ bestBid, bestAsk, midPrice: 0.04 }),
       approvedAt: NOW,
     });
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.04);
-    expect(placed[0]!.command.size).toBeCloseTo(50);
+    expect(placed[0]!.command.price).toBe(price);
+    expect(placed[0]!.command.size).toBeCloseTo(size);
+    expect(placed[0]!.command.price * placed[0]!.command.size).toBeCloseTo(2, 12);
     expect(placed[0]!.command.metadata?.positionConcentration).toEqual(
       expect.objectContaining({
         action: "clamp",
@@ -1059,9 +1071,20 @@ describe("SignalToOrderBridge", () => {
     expect(skipped[0]!.reasons).toEqual(["position-concentration-below_min_after_clamp"]);
   });
 
-  it("bumps a flat-first-entry BUY up to the sellable-sizing floor when sellableFlow is enabled", async () => {
+  it.each([
+    [false, 0.04, 0.04, 10, 60],
+    [true, 0.02, 0.04, 10, 80],
+    [true, 0.04, 0.08, 10, null],
+    [true, 0.02, 0.04, 1, null],
+  ])("preserves floor (%s, %s)", async (maker, bestBid, bestAsk, microMaxOrderUsdc, size) => {
     const bus = new InProcessEventBus();
     const policy = sellableFlowPolicy();
+    policy.makerEntry = {
+      ...policy.makerEntry,
+      mode: maker ? "micro_live" : "off",
+      whitelistConditionIds: ["cond-1"],
+      microMaxOrderUsdc,
+    };
     const bridge = new SignalToOrderBridge({
       bus,
       log: makeLogger(),
@@ -1072,20 +1095,31 @@ describe("SignalToOrderBridge", () => {
     bridge.subscribe();
 
     const placed: Array<{ command: { size: number; price: number } }> = [];
+    const skipped: RuntimeEventMap["SignalConversionSkipped"][] = [];
+    bus.subscribe("SignalConversionSkipped", async (event) => {
+      skipped.push(event);
+    });
     bus.subscribe("PlaceOrderRequested", async (payload) => {
       placed.push(payload as never);
     });
 
     await bus.publish("SignalApproved", {
-      signal: { ...makeSignal(), suggestedSize: 25, suggestedSizeUsdc: 1 },
-      market: makeMarket({ bestBid: 0.04, bestAsk: 0.04, midPrice: 0.04, minOrderSize: 5 }),
+      signal: {
+        ...makeSignal(),
+        decisionRuleId: "R23_DIP_TRIGGER",
+        suggestedSize: 25,
+        suggestedSizeUsdc: 1,
+      },
+      market: makeMarket({ bestBid, bestAsk, midPrice: 0.04, minOrderSize: 5 }),
       approvedAt: NOW,
     });
 
-    // Unbumped size would be suggestedSizeUsdc / price = 1 / 0.04 = 25 shares,
-    // below the 60-share floor — the bridge must bump up to the floor, never down.
-    expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.size).toBeCloseTo(60);
+    expect(placed).toHaveLength(size == null ? 0 : 1);
+    if (size == null) expect(skipped).toMatchObject([{ reasons: ["entry_not_sellable"] }]);
+    else {
+      expect(placed[0]!.command.size).toBeCloseTo(size);
+      expect(placed[0]!.command.price * placed[0]!.command.size).toBeCloseTo(2.4, 12);
+    }
   });
 
   it("never bumps a scale-in BUY to the sellable-sizing floor (H6 — never averages down)", async () => {

@@ -23,7 +23,10 @@ import type {
   PositionRepository,
   Signal,
 } from "@krabs/domain";
-import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
+import {
+  SignalToOrderBridge,
+  type SignalToOrderBridgeDeps,
+} from "../modules/strategy/signal-to-order.js";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import {
@@ -201,6 +204,7 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
     signal: Signal,
     policy: Partial<typeof DEFAULT_EXECUTION_POLICY>,
     marketOverrides?: Partial<NormalizedMarket>,
+    deps: Partial<SignalToOrderBridgeDeps> = {},
   ) {
     const bus = new InProcessEventBus();
     const resolvedPolicy = { ...DEFAULT_EXECUTION_POLICY, ...policy };
@@ -212,6 +216,7 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
       policy: () => resolvedPolicy,
       policySnapshot: () => ({ policy: resolvedPolicy, controlRevision: 77 }),
       now: () => NOW,
+      ...deps,
     });
     bridge.subscribe();
 
@@ -337,7 +342,7 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
       "maker",
       true,
       0.1,
-      100,
+      90,
     ]);
     expect(command.metadata?.makerMicroLiveLifecycle).toMatchObject({
       kind: "permanent_r23",
@@ -455,6 +460,142 @@ describe("SignalToOrderBridge — tryMakerEntryOverride", () => {
     expect(placed[0]?.entryStyle).toBe("maker");
     expect(placed[0]?.metadata?.quoteMotionV1).toBeUndefined();
   });
+
+  it.each([
+    [0.002, 0.003, 330],
+    [0.015, 0.016, 61.875],
+    [0.029, 0.03, 33],
+  ])("preserves accepted $0.99 at maker price %s → %s", async (bestBid, price, size) => {
+    const { placed, skipped } = await runBridge(
+      makeSignal({ suggestedSizeUsdc: 0.99 }),
+      { makerEntry: makeMakerEntryPolicy() },
+      { bestBid, bestAsk: 0.08, tickSize: 0.001, minOrderSize: 1 },
+    );
+    expect(skipped).toEqual([]);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]).toMatchObject({
+      price,
+      size: expect.closeTo(size, 9),
+      postOnly: true,
+      entryStyle: "maker",
+    });
+    expect(placed[0]!.price * placed[0]!.size).toBeCloseTo(0.99, 12);
+  });
+
+  it.each([
+    ["SELL", { side: "sell" as const }, 100],
+    ["LADDER", { decisionRuleId: "LADDER", ladderTargetPrice: 0.09 }, 100],
+    ["GATE", { decisionRuleId: "GATE" }, 100],
+    ["generic BUY", { decisionRuleId: null }, 100],
+  ])("preserves legacy static-whitelist sizing for %s", async (_label, signal, size) => {
+    const { placed, skipped } = await runBridge(makeSignal(signal), {
+      makerEntry: makeMakerEntryPolicy(),
+      opportunisticTaker: { ...DEFAULT_EXECUTION_POLICY.opportunisticTaker, enabled: false },
+    });
+    expect(skipped).toEqual([]);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]).toMatchObject({ price: 0.1, size, postOnly: true, entryStyle: "maker" });
+  });
+
+  it.each(["static", "capture", "permanent"])(
+    "terminally skips invalid R23 arithmetic under %s authorization",
+    async (authorization) => {
+      const makerEntry = makeMakerEntryPolicy({
+        whitelistConditionIds: authorization === "static" ? [String(COND_ID)] : [],
+        ...(authorization === "permanent"
+          ? {
+              permanentR23ActivationId: "finite-check",
+              permanentR23ActivatedAtUtc: new Date(NOW - 1).toISOString(),
+            }
+          : {}),
+        ...(authorization === "capture"
+          ? {
+              microLiveWindow: {
+                activatedAtUtc: new Date(NOW).toISOString(),
+                expiresAtUtc: new Date(NOW + 60_000).toISOString(),
+                captureNextR23: true,
+                maxCumulativeAcceptedPendingUsdc: 40,
+              },
+            }
+          : {}),
+      });
+      for (const suggestedSizeUsdc of [Infinity, Number.MAX_VALUE, NaN, 0, -1]) {
+        const { placed, skipped } = await runBridge(
+          makeSignal({ suggestedPrice: 0.1, suggestedSizeUsdc }),
+          { makerEntry },
+        );
+        expect(placed).toEqual([]);
+        expect(skipped).toMatchObject([{ reasons: ["order-size-below-minimum"] }]);
+      }
+    },
+  );
+
+  it.each([
+    [0.25, 10, false],
+    [0.3, 10, true],
+    [0.29999999997, 10, true],
+    [0.29999999988, 10, false],
+    [0.5, 0.25, false],
+  ])(
+    "checks final maker minimum for budget %s and cap %s",
+    async (suggestedSizeUsdc, microMaxOrderUsdc, executable) => {
+      const { placed, skipped } = await runBridge(
+        makeSignal({ suggestedSizeUsdc }),
+        { makerEntry: makeMakerEntryPolicy({ bidImproveTicks: 2, microMaxOrderUsdc }) },
+        { bestBid: 0.04, bestAsk: 0.09, minOrderSize: 5 },
+      );
+      expect(placed).toHaveLength(executable ? 1 : 0);
+      if (executable) expect(placed[0]).toMatchObject({ price: 0.06, size: expect.closeTo(5, 8) });
+      else expect(skipped).toMatchObject([{ reasons: ["order-size-below-minimum"] }]);
+    },
+  );
+
+  it.each([
+    [0.12, 4, true],
+    [0.11, 4.05, false],
+  ])(
+    "uses rebased dollars at near-threshold capture open cap (ask %s)",
+    async (bestAsk, openUsdc, admitted) => {
+      const makerEntry = makeMakerEntryPolicy({
+        whitelistConditionIds: [],
+        microMaxOpenUsdc: 5,
+        microLiveWindow: {
+          activatedAtUtc: new Date(NOW).toISOString(),
+          expiresAtUtc: new Date(NOW + 60_000).toISOString(),
+          captureNextR23: true,
+          maxCumulativeAcceptedPendingUsdc: 40,
+        },
+      });
+      const { placed, skipped } = await runBridge(
+        makeSignal({ suggestedSizeUsdc: 0.99 }),
+        { makerEntry },
+        { bestAsk, minOrderSize: 1 },
+        {
+          orderRepo: {
+            findOpen: () => [
+              makeOrder({
+                entryStyle: "maker",
+                price: 0.1,
+                size: openUsdc * 10,
+                sizeUsdc: openUsdc,
+              }),
+            ],
+            findByTokenId: () => [],
+          } as never,
+          fillRepo: makeFillRepo() as FillRepository,
+        },
+      );
+      expect(placed).toHaveLength(admitted ? 1 : 0);
+      if (admitted) expect(placed[0]).toMatchObject({ price: 0.1, size: expect.closeTo(9.9, 12) });
+      else
+        expect(skipped).toMatchObject([
+          {
+            reasons: ["maker-capture-open-cap-saturated"],
+            diagnostics: { requestedUsdc: expect.closeTo(0.99, 12) },
+          },
+        ]);
+    },
+  );
 
   it.each([
     ["preactivation", NOW - 1],
