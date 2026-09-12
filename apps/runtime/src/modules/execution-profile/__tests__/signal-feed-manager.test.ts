@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { InProcessEventBus } from "@krabs/event-bus";
 import type { HotSample, NormalizedMarket, OhlcBucket, TokenId } from "@krabs/domain";
@@ -105,24 +105,132 @@ function makeRiskEvents() {
 }
 
 describe("SignalFeedHotBuffer", () => {
-  it("pushes samples in timestamp order and dedupes by token timestamp", () => {
+  it("keeps mixed timestamps stable and dedupes only the cached maximum", () => {
     const buffer = new SignalFeedHotBuffer(60_000);
 
-    expect(buffer.push(TOKEN, sample(2_000, 0.2))).toBe(true);
-    expect(buffer.push(TOKEN, sample(1_000, 0.1))).toBe(true);
-    expect(buffer.push(TOKEN, sample(2_000, 0.3))).toBe(false);
+    expect([
+      buffer.push(TOKEN, sample(2_000, 0.2)),
+      buffer.push(TOKEN, sample(1_000, 0.1)),
+      buffer.push(TOKEN, sample(1_000, 0.15)),
+      buffer.push(TOKEN, sample(2_000, 0.3)),
+    ]).toEqual([true, true, true, false]);
 
-    expect(buffer.getSamples(TOKEN)).toEqual([sample(1_000, 0.1), sample(2_000, 0.2)]);
+    expect(buffer.getSamples(TOKEN)).toEqual([
+      sample(1_000, 0.1),
+      sample(1_000, 0.15),
+      sample(2_000, 0.2),
+    ]);
+    expect(buffer.lastSampleTsMs(TOKEN)).toBe(2_000);
+
+    const tier = new SignalFeedWarmTier(60_000);
+    tier.ingestSamples(TOKEN, buffer.getSamples(TOKEN));
+    expect(tier.getBuckets(TOKEN)[0]).toMatchObject({
+      openMid: 0.1,
+      highMid: 0.2,
+      lowMid: 0.1,
+      closeMid: 0.2,
+      sampleCount: 3,
+    });
   });
 
-  it("evicts only samples older than the configured window", () => {
+  it("does no sorting or eviction filtering for 5,000 chronological samples", () => {
+    const buffer = new SignalFeedHotBuffer(60_000);
+    const sortSpy = vi.spyOn(Array.prototype, "sort");
+    const filterSpy = vi.spyOn(Array.prototype, "filter");
+    const accepted: boolean[] = [];
+    let sortCount = 0;
+    let filterCount = 0;
+
+    try {
+      for (let tsMs = 0; tsMs < 5_000; tsMs += 1) {
+        accepted.push(buffer.push(TOKEN, sample(tsMs, tsMs / 10_000)));
+      }
+    } finally {
+      sortCount = sortSpy.mock.calls.length;
+      filterCount = filterSpy.mock.calls.length;
+      sortSpy.mockRestore();
+      filterSpy.mockRestore();
+    }
+
+    expect(accepted).toEqual(Array.from({ length: 5_000 }, () => true));
+    expect(buffer.getSamples(TOKEN)).toEqual(
+      Array.from({ length: 5_000 }, (_, tsMs) => sample(tsMs, tsMs / 10_000)),
+    );
+    expect({ sortCount, filterCount }).toEqual({ sortCount: 0, filterCount: 0 });
+  });
+
+  it("uses the incoming timestamp for eviction and keeps the cutoff inclusive", () => {
+    const buffer = new SignalFeedHotBuffer(100);
+
+    buffer.push(TOKEN, sample(1_000, 0.1));
+    buffer.push(TOKEN, sample(1_100, 0.2));
+    buffer.push(TOKEN, sample(1_050, 0.15));
+    buffer.push(TOKEN, sample(900, 0.09));
+
+    expect(buffer.getSamples(TOKEN)).toEqual([
+      sample(900, 0.09),
+      sample(1_000, 0.1),
+      sample(1_050, 0.15),
+      sample(1_100, 0.2),
+    ]);
+    buffer.push(TOKEN, sample(1_101, 0.21));
+    expect(buffer.getSamples(TOKEN)).toEqual([
+      sample(1_050, 0.15),
+      sample(1_100, 0.2),
+      sample(1_101, 0.21),
+    ]);
+  });
+
+  it("handles no-op, full, absent, and drop eviction without stale cached maxima", () => {
+    const other = createTokenId("other-token");
+    const buffer = new SignalFeedHotBuffer(60_000);
+
+    buffer.push(TOKEN, sample(Number.POSITIVE_INFINITY, 0.2));
+    buffer.push(TOKEN, sample(2_000, 0.1));
+    buffer.push(other, sample(3_000, 0.3));
+    buffer.evictOlderThan(TOKEN, 1_000);
+
+    expect(buffer.getSamples(TOKEN)).toEqual([
+      sample(2_000, 0.1),
+      sample(Number.POSITIVE_INFINITY, 0.2),
+    ]);
+    expect(buffer.lastSampleTsMs(TOKEN)).toBe(Number.POSITIVE_INFINITY);
+    expect(buffer.push(TOKEN, sample(Number.POSITIVE_INFINITY, 0.4))).toBe(false);
+    expect(() => buffer.evictOlderThan(createTokenId("absent"), 0)).not.toThrow();
+    expect(buffer.getSamples(other)).toEqual([sample(3_000, 0.3)]);
+
+    buffer.evictOlderThan(TOKEN, Number.POSITIVE_INFINITY);
+    expect(buffer.getSamples(TOKEN)).toEqual([sample(Number.POSITIVE_INFINITY, 0.2)]);
+    buffer.dropToken(TOKEN);
+    expect(buffer.lastSampleTsMs(TOKEN)).toBeNull();
+    expect(buffer.push(TOKEN, sample(2_000, 0.5))).toBe(true);
+    buffer.evictOlderThan(TOKEN, 2_001);
+    expect(buffer.getSamples(TOKEN)).toEqual([]);
+    expect(buffer.lastSampleTsMs(TOKEN)).toBeNull();
+  });
+
+  it("returns a new array with the retained sample identities", () => {
+    const buffer = new SignalFeedHotBuffer(60_000);
+    const retained = sample(1_000, 0.1);
+
+    buffer.push(TOKEN, retained);
+    const first = buffer.getSamples(TOKEN);
+    const second = buffer.getSamples(TOKEN);
+
+    expect(first).not.toBe(second);
+    expect(first[0]).toBe(retained);
+    expect(second[0]).toBe(retained);
+    expect(retained.tsMs).toBe(1_000);
+  });
+
+  it("preserves NaN timestamp clearing behavior", () => {
     const buffer = new SignalFeedHotBuffer(60_000);
 
     buffer.push(TOKEN, sample(1_000, 0.1));
-    buffer.push(TOKEN, sample(61_000, 0.2));
-    buffer.push(TOKEN, sample(62_000, 0.3));
+    expect(buffer.push(TOKEN, sample(Number.NaN, 0.2))).toBe(true);
 
-    expect(buffer.getSamples(TOKEN)).toEqual([sample(61_000, 0.2), sample(62_000, 0.3)]);
+    expect(buffer.getSamples(TOKEN)).toEqual([]);
+    expect(buffer.lastSampleTsMs(TOKEN)).toBeNull();
   });
 
   it("returns inclusive samplesBetween results", () => {
@@ -618,7 +726,7 @@ describe("SignalFeedManager", () => {
     ]);
   });
 
-  it("clears subscriptions on stop and prunes cold buckets by retention", async () => {
+  it("preserves buffered samples across stop/start and prunes cold buckets", async () => {
     const bus = new InProcessEventBus();
     const repo = new RecordingSignalFeedRepository();
     const manager = new SignalFeedManager({
@@ -634,16 +742,24 @@ describe("SignalFeedManager", () => {
     });
 
     await manager.start();
-    await manager.stop();
     await bus.publish("MarketSnapshotHeartbeat", {
       markets: [market(TOKEN, 0.1)],
       timestamp: 1_000,
       reason: "full_lifetime_active_position",
       source: "market-data",
     });
+    await manager.stop();
+    await bus.publish("MarketSnapshotHeartbeat", {
+      markets: [market(TOKEN, 0.2)],
+      timestamp: 2_000,
+      reason: "full_lifetime_active_position",
+      source: "market-data",
+    });
+    await manager.start();
+    expect(manager.getHotSamples(TOKEN)).toEqual([sample(1_000, 0.1)]);
+
     manager.maintenancePrune(2 * 24 * 60 * 60_000);
 
-    expect(manager.getHotSamples(TOKEN)).toEqual([]);
     expect(repo.deleteArgs).toEqual([{ granularity: 3_600_000, beforeMs: 24 * 60 * 60_000 }]);
   });
 });

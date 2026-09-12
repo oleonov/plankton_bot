@@ -315,8 +315,11 @@ export class SignalFeedHotBuffer {
     const key = String(tokenId);
     if (this.lastSampleTsByToken.get(key) === sample.tsMs) return false;
     const samples = this.samplesByToken.get(key) ?? [];
+    const priorTailTsMs = samples[samples.length - 1]?.tsMs;
     samples.push(sample);
-    samples.sort((left, right) => left.tsMs - right.tsMs);
+    if (priorTailTsMs != null && sample.tsMs < priorTailTsMs) {
+      samples.sort((left, right) => left.tsMs - right.tsMs);
+    }
     this.samplesByToken.set(key, samples);
     this.lastSampleTsByToken.set(key, sample.tsMs);
     this.evictOlderThan(tokenId, sample.tsMs - this.windowMs);
@@ -359,7 +362,8 @@ export class SignalFeedHotBuffer {
     const key = String(tokenId);
     const current = this.samplesByToken.get(key);
     if (current == null) return;
-    const next = current.filter((sample) => sample.tsMs >= minTsMs);
+    const next =
+      current[0]!.tsMs >= minTsMs ? current : current.filter((sample) => sample.tsMs >= minTsMs);
     if (next.length === 0) {
       this.samplesByToken.delete(key);
       this.lastSampleTsByToken.delete(key);
