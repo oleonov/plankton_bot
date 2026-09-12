@@ -313,6 +313,9 @@ export interface OrderRepository {
   /** Return pending, open, and partially-filled orders, optionally limited to one token. */
   findOpen(tokenId?: TokenId): Order[];
 
+  /** Preserve every working order for capacity checks without hydrating metadata. */
+  findOpenCapacityProjection?(): Pick<Order, "tokenId" | "side">[];
+
   findLocallyClosedResolvedLosers?(): Order[];
 
   /** Return all orders for a specific outcome token. */

@@ -35,6 +35,8 @@ import {
   parseBounceAskCaptureProofV1,
 } from "@krabs/domain";
 
+const OPEN_ORDER_PREDICATE = "status IN ('pending', 'open', 'partially-filled')";
+
 export class SqliteOrderRepository implements OrderRepository {
   constructor(private readonly db: Database.Database) {}
 
@@ -141,11 +143,15 @@ export class SqliteOrderRepository implements OrderRepository {
   findOpen(tokenId?: TokenId): Order[] {
     const tokenFilter = tokenId === undefined ? "" : " AND token_id = ?";
     const rows = this.db
-      .prepare(
-        `SELECT * FROM orders WHERE status IN ('pending', 'open', 'partially-filled')${tokenFilter}`,
-      )
+      .prepare(`SELECT * FROM orders WHERE ${OPEN_ORDER_PREDICATE}${tokenFilter}`)
       .all(...(tokenId === undefined ? [] : [tokenId])) as Record<string, unknown>[];
     return rows.map((r) => this.rowToOrder(r));
+  }
+
+  findOpenCapacityProjection(): Pick<Order, "tokenId" | "side">[] {
+    return this.db
+      .prepare(`SELECT token_id AS tokenId, side FROM orders WHERE ${OPEN_ORDER_PREDICATE}`)
+      .all() as Pick<Order, "tokenId" | "side">[];
   }
 
   findStartupExitRecoveryBlocked(): Order[] {

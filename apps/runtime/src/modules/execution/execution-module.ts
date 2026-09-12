@@ -6021,7 +6021,12 @@ export class ExecutionModule implements RuntimeModule {
 
       if (!result.success) {
         this.log.warn(
-          { commandId: cmd.commandId, orderId: cmd.orderId, errorCode: result.errorCode },
+          {
+            commandId: cmd.commandId,
+            orderId: cmd.orderId,
+            errorCode: result.errorCode,
+            errorMessage: result.errorMessage,
+          },
           "cancel rejected by gateway",
         );
       }

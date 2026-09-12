@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { bootstrapLedgerDb, SqliteOrderRepository, SqliteFillRepository } from "@krabs/db";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   AlgoDecisionModule,
@@ -28,6 +29,7 @@ import type {
   Order,
   OrderRepository,
   Fill,
+  ProfileId,
 } from "@krabs/domain";
 import { createTokenId, createCommandId, createOrderId, createPositionId } from "@krabs/domain";
 import type { ConditionId } from "@krabs/domain";
@@ -40,6 +42,7 @@ import {
 import type { Logger } from "../../../logger.js";
 import { LiveLiteGuard } from "../../../live-lite-guard.js";
 import { BUY_DUPLICATE_DEDUPED_REASON } from "../../../buy-order-lifecycle.js";
+import { createBuySignalBudgetCircuitBreaker } from "../../../wallet-buy-budget.js";
 
 const PHASE_ONE_ACTIVE_MARKET_CAP = 250;
 
@@ -6260,6 +6263,122 @@ describe("AlgoDecisionModule", () => {
   });
 
   describe("wallet buy budget ownership", () => {
+    it.each([
+      ["pending slots", 2, 100, false, false, 2],
+      ["pending money", 25, 3, false, false, 2],
+      ["persisted slots after OrderPlaced", 2, 100, true, false, 2],
+      ["persisted money after OrderPlaced", 25, 3, true, false, 2],
+      ["partial fill remaining money", 25, 3, false, true, 1],
+    ] as const)(
+      "real capacity projection enforces %s at publication",
+      async (_label, maxOpenBuyOrders, balance, handoff, partial, admitted) => {
+        const conn = bootstrapLedgerDb(":memory:");
+        const orderRepo = new SqliteOrderRepository(conn.db);
+        const tokenIds = ["projection-1", "projection-2", "projection-3"];
+        selectedMarketCache = createMockSelectedMarketCache(tokenIds);
+        const policy = {
+          ...DEFAULT_EXECUTION_POLICY,
+          buyCapacity: {
+            ...DEFAULT_EXECUTION_POLICY.buyCapacity,
+            enabled: true,
+            maxOpenBuyOrders,
+            maxOpenBuyOrdersPerToken: 2,
+            minNewEntryWalletHeadroomUsdc: 0,
+            minAddWalletHeadroomUsdc: 0,
+          },
+          orderCapacity: { enabled: true, maxOpenOrdersTotal: 100 },
+        };
+        const breaker = createBuySignalBudgetCircuitBreaker({
+          orderRepo,
+          executionPolicy: () => policy,
+          activeProfile: "paper" as ProfileId,
+          controlDb: { prepare: () => ({ get: () => ({ wallet_balance_usdc: balance }) }) },
+        });
+        const canAttemptBuy = vi.spyOn(breaker, "canAttemptBuy");
+        const decisionSignalLogRepo = { insert: vi.fn() };
+        const riskEventRepo = { insert: vi.fn(), countSince: vi.fn() };
+        const mod = buildModule({
+          orderRepo,
+          decisionSignalLogRepo,
+          riskEventRepo,
+          buySignalBudgetCircuitBreaker: breaker,
+        });
+        try {
+          if (partial) {
+            const order = makeOrder("partial-source", {
+              side: "buy",
+              status: "partially-filled",
+              price: 0.1,
+              size: 100,
+              sizeUsdc: 10,
+            });
+            orderRepo.save(order);
+            new SqliteFillRepository(conn.db).save(
+              makeFill(order.orderId, 90, {
+                tokenId: order.tokenId,
+                side: "buy",
+              }),
+            );
+            expect(orderRepo.sumOpenBuyNotional("original")).toBe(10);
+            expect(orderRepo.sumOpenBuyNotional("remaining")).toBeCloseTo(1);
+          }
+          await mod.start();
+          bus.subscribe("SignalProduced", async ({ signal }) => {
+            if (!handoff) return;
+            const placed = makeOrderPlaced(String(signal.tokenId), "buy");
+            orderRepo.save(
+              makeOrder(String(signal.tokenId), {
+                orderId: placed.orderId,
+                clientOrderId: placed.clientOrderId,
+                side: "buy",
+                status: "pending",
+                signalId: signal.signalId,
+                price: signal.suggestedPrice,
+                size: signal.suggestedSizeUsdc / signal.suggestedPrice,
+                sizeUsdc: signal.suggestedSizeUsdc,
+              }),
+            );
+            await bus.emit("OrderPlaced", placed);
+          });
+          await bus.emit("NormalizedMarketUpdated", {
+            markets: tokenIds.map((tokenId) => makeMarket(tokenId, null, 0.45)),
+            timestamp: Date.now(),
+          });
+          const signals = vi
+            .mocked(bus.publish)
+            .mock.calls.filter(([event]) => event === "SignalProduced");
+          expect(
+            signals.map(
+              ([, payload]) => (payload as RuntimeEventMap["SignalProduced"]).signal.tokenId,
+            ),
+          ).toEqual(tokenIds.slice(0, admitted));
+          expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(admitted);
+          expect(
+            riskEventRepo.insert.mock.calls.filter(
+              ([event]) => event.eventType === "signal_emitted",
+            ),
+          ).toHaveLength(admitted);
+          expect(canAttemptBuy).toHaveBeenCalledTimes(3);
+          expect(canAttemptBuy.mock.results.map((result) => result.value.canAttempt)).toEqual(
+            tokenIds.map((_, i) => i < admitted),
+          );
+          expect(
+            canAttemptBuy.mock.calls.map(([, , context]) => context?.pendingPreOpenBuyCount),
+          ).toEqual(handoff ? [0, 0, 0] : partial ? [0, 1, 1] : [0, 1, 2]);
+          const reason =
+            maxOpenBuyOrders === 2 ? "buy_order_count_limit" : "wallet_buy_capacity_exhausted";
+          expect(canAttemptBuy.mock.results[admitted]!.value.reasonCode).toBe(reason);
+          if (handoff) {
+            expect(orderRepo.findOpenCapacityProjection()).toHaveLength(2);
+            expect(orderRepo.sumOpenBuyNotional("remaining")).toBeCloseTo(1.98);
+          }
+        } finally {
+          await mod.stop();
+          conn.close();
+        }
+      },
+    );
+
     it("reads the current global cooldown and minimum passively without budget preflight", () => {
       const canAttemptBuy = vi.fn();
       const read = vi.fn(() => ({ remembered: null, latest: null }));

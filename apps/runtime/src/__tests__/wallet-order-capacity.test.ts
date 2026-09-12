@@ -48,7 +48,9 @@ const orderPolicy: OrderCapacityPolicy = {
 describe("candidate budget preflight", () => {
   function fixture(balance: number | null = 10) {
     const orderRepo = {
-      findOpen: vi.fn(() => [] as ReturnType<OrderRepository["findOpen"]>),
+      findOpenCapacityProjection: vi.fn(
+        () => [] as ReturnType<NonNullable<OrderRepository["findOpenCapacityProjection"]>>,
+      ),
       sumOpenBuyNotional: vi.fn(() => 0),
     };
     const policy = {
@@ -75,30 +77,79 @@ describe("candidate budget preflight", () => {
   it("shares failed-burst reads, refreshes before admission, and expires at the next microtask", async () => {
     const f = fixture();
     for (let i = 0; i < 20; i++) expect(f.attempt(8.41).canAttempt).toBe(false);
-    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(1);
+    expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(1);
     expect(f.orderRepo.sumOpenBuyNotional).toHaveBeenCalledExactlyOnceWith("remaining");
     f.orderRepo.sumOpenBuyNotional.mockReturnValue(3);
     expect(f.attempt().canAttempt).toBe(false); // reused facts would admit, refreshed facts reject
-    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(2);
+    expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(2);
     f.orderRepo.sumOpenBuyNotional.mockReturnValue(0);
     expect(f.attempt().canAttempt).toBe(false);
     await Promise.resolve();
     expect(f.attempt().canAttempt).toBe(true);
-    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(3);
+    expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(3);
     expect(f.attempt().canAttempt).toBe(true); // admission discards the snapshot
-    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(4);
+    expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(4);
   });
 
-  it("caches failed DB reads only within the synchronous burst", async () => {
+  it("propagates projection errors, caches them within the burst, and recovers next microtask", async () => {
     const f = fixture();
-    f.orderRepo.findOpen.mockImplementation(() => {
-      throw new Error("DB unavailable");
+    const error = new Error("projection unavailable");
+    f.orderRepo.findOpenCapacityProjection.mockImplementation(() => {
+      throw error;
     });
-    for (let i = 0; i < 20; i++) expect(() => f.attempt()).toThrow("DB unavailable");
-    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 20; i++) expect(() => f.attempt()).toThrow(error);
+    expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(1);
+    expect(f.orderRepo.sumOpenBuyNotional).not.toHaveBeenCalled();
+    f.orderRepo.findOpenCapacityProjection.mockReturnValue([]);
+    expect(() => f.attempt()).toThrow(error);
     await Promise.resolve();
-    expect(() => f.attempt()).toThrow("DB unavailable");
-    expect(f.orderRepo.findOpen).toHaveBeenCalledTimes(2);
+    expect(f.attempt().canAttempt).toBe(true);
+    expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(2);
+    expect(f.orderRepo.sumOpenBuyNotional).toHaveBeenCalledExactlyOnceWith("remaining");
+  });
+
+  it.each([
+    ["same-token BUY", "candidate", "buy", 2, "per_token_buy_limit"],
+    ["global BUY", "other", "buy", 25, "buy_order_count_limit"],
+    ["SELL total", "other", "sell", 22, "total_orders_capacity_exhausted"],
+  ] as const)(
+    "refreshes %s counts before admitting from a cached rejection",
+    async (_label, tokenId, side, count, reasonCode) => {
+      const f = fixture();
+      expect(f.attempt(8.41).canAttempt).toBe(false);
+      f.orderRepo.findOpenCapacityProjection.mockReturnValue(
+        Array.from({ length: count }, () => ({ tokenId: tokenId as Signal["tokenId"], side })),
+      );
+      expect(f.attempt()).toMatchObject({ canAttempt: false, reasonCode, activateCooldown: false });
+      expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(2);
+      expect(f.orderRepo.sumOpenBuyNotional).toHaveBeenCalledTimes(2);
+      f.orderRepo.findOpenCapacityProjection.mockReturnValue([]);
+      expect(f.attempt()).toMatchObject({ canAttempt: false, reasonCode });
+      expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(2);
+      await Promise.resolve();
+      expect(f.attempt().canAttempt).toBe(true);
+      expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(3);
+      expect(f.attempt().canAttempt).toBe(true);
+      expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(4);
+      expect(f.orderRepo.sumOpenBuyNotional.mock.calls).toEqual(Array(4).fill(["remaining"]));
+    },
+  );
+
+  it("propagates a fresh projection failure instead of admitting from cached facts", async () => {
+    const f = fixture();
+    expect(f.attempt(8.41).canAttempt).toBe(false);
+    f.orderRepo.findOpenCapacityProjection.mockImplementation(() => {
+      throw new Error("refresh unavailable");
+    });
+    expect(() => f.attempt()).toThrow("refresh unavailable");
+    expect(() => f.attempt()).toThrow("refresh unavailable");
+    expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(2);
+    expect(f.orderRepo.sumOpenBuyNotional).toHaveBeenCalledTimes(1);
+    f.orderRepo.findOpenCapacityProjection.mockReturnValue([]);
+    await Promise.resolve();
+    expect(f.attempt().canAttempt).toBe(true);
+    expect(f.orderRepo.findOpenCapacityProjection).toHaveBeenCalledTimes(3);
+    expect(f.orderRepo.sumOpenBuyNotional).toHaveBeenCalledTimes(2);
   });
 
   it.each([

@@ -6821,6 +6821,17 @@ describe("ExecutionModule", () => {
   });
 
   it("does not publish OrderCancelled when gateway rejects cancel", async () => {
+    const savedOrder = openSellAt(0.5, {
+      orderId: createOrderId("sim-ord-1"),
+      exchangeOrderId: "sim-ord-1",
+      createdAt: "2026-09-12T00:00:00.000Z",
+    });
+    vi.mocked(orderRepo.findById).mockReturnValue(savedOrder);
+    gateway.getFillsResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+    gateway.getOrderResult = vi.fn().mockResolvedValue({
+      ok: true,
+      data: { orderId: "sim-ord-1", status: "OPEN", sizeFilled: 0 },
+    });
     (gateway.cancelOrder as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: false,
       errorCode: "ORDER_NOT_FOUND",
@@ -6839,6 +6850,29 @@ describe("ExecutionModule", () => {
       timestamp: Date.now(),
     });
 
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      {
+        commandId: createCommandId("cancel-1"),
+        orderId: savedOrder.orderId,
+        errorCode: "ORDER_NOT_FOUND",
+        errorMessage: "not found",
+      },
+      "cancel rejected by gateway",
+    );
+    expect(gateway.getFillsResult).toHaveBeenCalledWith(Date.parse(savedOrder.createdAt));
+    expect(gateway.getOrderResult).toHaveBeenCalledWith("sim-ord-1");
+    expect(cancelled).toHaveLength(0);
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+    expect((mod as any).cancelReservations.has("sim-ord-1")).toBe(false);
+
+    await bus.publish("CancelOrderRequested", {
+      command: makeCancelCmd({ commandId: createCommandId("cancel-2") }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledTimes(2);
+    expect(gateway.getFillsResult).toHaveBeenCalledTimes(2);
+    expect(gateway.getOrderResult).toHaveBeenCalledTimes(2);
     expect(cancelled).toHaveLength(0);
     expect(orderRepo.updateStatus).not.toHaveBeenCalled();
 

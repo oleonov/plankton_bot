@@ -846,24 +846,78 @@ describe("LiveExchangeGateway", () => {
   });
 
   it("cancelOrder accepts only an ACK that names the requested order", async () => {
-    client.cancelOrder.mockResolvedValue({ canceled: ["ord-1"], not_canceled: [] });
+    client.cancelOrder.mockResolvedValue({
+      canceled: ["ord-1"],
+      not_canceled: { "ord-1": "Order not found" },
+      error: "conflicting error",
+    });
 
     const result = await gw.cancelOrder({ orderId: "ord-1" });
-    expect(result.success).toBe(true);
+    expect(result).toEqual({ success: true });
     expect(client.cancelOrder).toHaveBeenCalledWith({ orderID: "ord-1" });
   });
 
-  it("cancelOrder treats empty or ambiguous responses as no acknowledgement", async () => {
-    client.cancelOrder.mockResolvedValue({ canceled: [], not_canceled: ["ord-1"] });
-    expect((await gw.cancelOrder({ orderId: "ord-1" })).success).toBe(false);
+  it.each([
+    [{ canceled: ["other"] }, undefined],
+    [{ canceled: [], not_canceled: ["ord-1"] }, undefined],
+    [{ not_canceled: { "ord-1": "requested reason" }, error: "top error" }, "requested reason"],
+    [{ not_canceled: { other: "unrelated reason" } }, undefined],
+    [{ not_canceled: Object.create({ "ord-1": "inherited reason" }) }, undefined],
+    [{ not_canceled: { "ord-1": " " }, error: "top error", message: "message" }, "top error"],
+    [{ not_canceled: { "ord-1": 42 }, error: {}, message: "message" }, "message"],
+    [{ not_canceled: "malformed", error: "top error" }, "top error"],
+    [{ not_canceled: null, message: "message" }, "message"],
+    [{ error: " ", message: "message" }, "message"],
+    [{ error: { message: "nested error" }, message: 42 }, undefined],
+    [{ error: "", message: " " }, undefined],
+    [{}, undefined],
+    [null, undefined],
+    [[{ error: "array error" }], undefined],
+  ])("cancelOrder extracts only a usable rejection reason: %j", async (raw, reason) => {
+    client.cancelOrder.mockResolvedValue(raw);
+    expect(await gw.cancelOrder({ orderId: "ord-1" })).toEqual({
+      success: false,
+      errorCode: "UNKNOWN",
+      errorMessage: reason ?? "Cancellation not acknowledged",
+    });
+  });
+
+  it("cancelOrder classifies and redacts the selected reason without serializing the payload", async () => {
+    const toJSON = vi.fn(() => "unrelated payload");
+    client.cancelOrder.mockResolvedValue({
+      not_canceled: {
+        "ord-1":
+          "Order not found Bearer fake-bearer POLY_API_KEY=fake-api POLY_PRIVATE_KEY=fake-key",
+      },
+      message: "unrelated payload",
+      toJSON,
+    });
+    const result = await gw.cancelOrder({ orderId: "ord-1" });
+    expect(result).toEqual({
+      success: false,
+      errorCode: "ORDER_NOT_FOUND",
+      errorMessage:
+        "Order not found Bearer ******** POLY_API_KEY: ******** POLY_PRIVATE_KEY: ********",
+    });
+    expect(toJSON).not.toHaveBeenCalled();
   });
 
   it("cancelOrder returns error on failure", async () => {
-    client.cancelOrder.mockRejectedValue(new Error("Order not found"));
+    client.cancelOrder.mockRejectedValue(
+      Object.assign(new Error("Order not found"), {
+        response: {
+          status: 404,
+          data: { message: "Bearer fake-thrown-bearer", POLY_API_KEY: "fake-thrown-api" },
+        },
+      }),
+    );
 
     const result = await gw.cancelOrder({ orderId: "nonexistent" });
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("ORDER_NOT_FOUND");
+    expect(result.errorMessage).toContain("Order not found | status 404");
+    expect(result.errorMessage).toContain("********");
+    expect(result.errorMessage).not.toContain("fake-thrown");
   });
 
   it("cancelAllOrders calls SDK cancelAll", async () => {

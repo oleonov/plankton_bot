@@ -572,6 +572,84 @@ describe("SqliteOrderRepository", () => {
     expect(notFound).toBeNull();
   });
 
+  it("capacity projection returns no rows for an empty ledger", () => {
+    expect(repo.findOpenCapacityProjection()).toEqual([]);
+  });
+
+  it("capacity projection preserves the working-order multiset without metadata hydration", () => {
+    const statuses = [
+      "pending",
+      "open",
+      "partially-filled",
+      "filled",
+      "cancelled",
+      "rejected",
+    ] as const;
+    const metadata = [
+      JSON.stringify({ large: "x".repeat(100_000) }),
+      '{"malformed":',
+      JSON.stringify({ startupExitRecoveryBlockV1: { blocked: true } }),
+      JSON.stringify({ exitRecoveryFenceV1: { predecessorOrderId: "recovery-root" } }),
+    ];
+    let id = 0;
+    for (const tokenId of [createTokenId("capacity-a"), createTokenId("capacity-b")]) {
+      for (const status of statuses) {
+        for (const side of ["buy", "sell"] as const) {
+          for (let duplicate = 0; duplicate < 2; duplicate++) {
+            const order = makeOrder({
+              orderId: createOrderId(`capacity-${id}`),
+              clientOrderId: `capacity-${id}` as ClientOrderId,
+              tokenId,
+              status,
+              side,
+              fillProgressShares: status === "partially-filled" ? 50 : null,
+            });
+            repo.save(order);
+            conn.db
+              .prepare("UPDATE orders SET metadata_json = ? WHERE order_id = ?")
+              .run(metadata[id++ % metadata.length], order.orderId);
+          }
+        }
+      }
+    }
+    const expected = repo.findOpen().map(({ tokenId, side }) => ({ tokenId, side }));
+    const prepare = vi.spyOn(conn.db, "prepare");
+    const parse = vi.spyOn(JSON, "parse");
+    const hydrate = vi.spyOn(
+      repo as unknown as { rowToOrder(row: Record<string, unknown>): Order },
+      "rowToOrder",
+    );
+    let projection: ReturnType<SqliteOrderRepository["findOpenCapacityProjection"]>;
+    let sql: string;
+    try {
+      projection = repo.findOpenCapacityProjection();
+      expect(prepare).toHaveBeenCalledTimes(1);
+      sql = prepare.mock.calls[0]![0];
+      expect(parse).not.toHaveBeenCalled();
+      expect(hydrate).not.toHaveBeenCalled();
+    } finally {
+      prepare.mockRestore();
+      parse.mockRestore();
+      hydrate.mockRestore();
+    }
+    expect(
+      conn.db
+        .prepare(sql)
+        .columns()
+        .map(({ name, column }) => ({ name, column })),
+    ).toEqual([
+      { name: "tokenId", column: "token_id" },
+      { name: "side", column: "side" },
+    ]);
+    const multiset = (rows: typeof projection) => rows.map((r) => `${r.tokenId}:${r.side}`).sort();
+    expect(multiset(projection)).toEqual(multiset(expected));
+    expect(projection).toHaveLength(24);
+    expect(projection.filter((r) => r.side === "buy")).toHaveLength(12);
+    for (const tokenId of ["capacity-a", "capacity-b"]) {
+      expect(projection.filter((r) => r.tokenId === tokenId && r.side === "buy")).toHaveLength(6);
+    }
+  });
+
   it("findOpen returns pending, open, and partially-filled orders", () => {
     repo.save(
       makeOrder({

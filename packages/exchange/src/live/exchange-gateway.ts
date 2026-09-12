@@ -787,7 +787,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
       const raw = await timeDepCall(this.depHealthRecorder, "clob", () =>
         this.client.cancelOrder({ orderID: params.orderId }),
       );
-      return cancelAcknowledged(raw, params.orderId) ? { success: true } : { success: false };
+      if (cancelAcknowledged(raw, params.orderId)) return { success: true };
+      const { code, message } = classifyError(cancelRejectionReason(raw, params.orderId));
+      return { success: false, errorCode: code, errorMessage: message };
     } catch (err) {
       const { code, message } = classifyError(err);
       return { success: false, errorCode: code, errorMessage: message };
@@ -2284,6 +2286,23 @@ function cancelAcknowledged(raw: unknown, orderId: string): boolean {
     Array.isArray(canceled) &&
     canceled.some((candidate) => typeof candidate === "string" && candidate === orderId)
   );
+}
+
+function cancelRejectionReason(raw: unknown, orderId: string): string {
+  const fallback = "Cancellation not acknowledged";
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
+  const notCanceled: unknown = Reflect.get(raw, "not_canceled");
+  const requestedReason: unknown =
+    notCanceled &&
+    typeof notCanceled === "object" &&
+    !Array.isArray(notCanceled) &&
+    Object.hasOwn(notCanceled, orderId)
+      ? Reflect.get(notCanceled, orderId)
+      : undefined;
+  for (const reason of [requestedReason, Reflect.get(raw, "error"), Reflect.get(raw, "message")]) {
+    if (typeof reason === "string" && requiredText(reason)) return reason;
+  }
+  return fallback;
 }
 
 function requiredText(value: unknown): boolean {

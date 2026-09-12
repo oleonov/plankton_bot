@@ -74,12 +74,12 @@ export interface WalletBuyBudgetSnapshot {
 
 export function createBuySignalBudgetCircuitBreaker(
   config: WalletBuyBudgetConfig & {
-    orderRepo: Pick<OrderRepository, "findOpen" | "sumOpenBuyNotional">;
+    orderRepo: Required<Pick<OrderRepository, "findOpenCapacityProjection" | "sumOpenBuyNotional">>;
     executionPolicy: () => ExecutionPolicy;
   },
 ): BuySignalBudgetCircuitBreaker {
   function readFacts() {
-    const orders = config.orderRepo.findOpen();
+    const orders = config.orderRepo.findOpenCapacityProjection();
     const buysByToken = new Map<string, number>();
     let buyCount = 0;
     for (const order of orders) {
