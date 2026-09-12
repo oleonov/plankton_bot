@@ -2502,6 +2502,117 @@ describe("dead-side-near-end guard", () => {
 });
 
 describe("bounded-midpoint pricing (ADR-014)", () => {
+  it.each([
+    ["signed", 0, 17.08, true],
+    ["signed", 5, 12.08, true],
+    ["legacy", 0, 17.08, false],
+    ["invalid", 0, 17.08, false],
+    ["signed", 5, 12, false],
+    ["aggregate", 0, 5, false],
+    ["aggregate-reversed", 0, 5, false],
+  ] as const)("SIGNED_ASK bridge %s fill=%s visible=%s", async (kind, filled, visible, applied) => {
+    const origin = vi
+      .spyOn(bounceAskCapture, "resolveBounceAskPolicyOrigin")
+      .mockReturnValue({} as never);
+    const sell = {
+      orderId: createOrderId("signed-sell"),
+      tokenId: TOKEN_ID,
+      side: "sell",
+      status: filled ? "partially-filled" : "open",
+      // Keep the own ask outside the duplicate guard's two-tick window around 0.09.
+      price: 0.12,
+      size: 17.08803,
+    } as Order;
+    if (kind !== "legacy")
+      sell.metadata = {
+        signedOrderFactsV1: {
+          version: 1,
+          orderId: kind === "invalid" ? "other" : sell.orderId,
+          tokenId: TOKEN_ID,
+          side: "sell",
+          logicalSize: sell.size,
+          shares: 17.08,
+        },
+      };
+    const orders = kind.startsWith("aggregate")
+      ? [5, 6].map((size, i) => ({
+          ...sell,
+          orderId: createOrderId(`same-${i}`),
+          size,
+          metadata: {},
+        }))
+      : [sell];
+    if (kind === "aggregate-reversed") orders.reverse();
+    const bus = new InProcessEventBus();
+    const cache = makeCachedBook({
+      bestBid: 0.06,
+      bestAsk: 0.1,
+      bids: [{ price: 0.06, size: 20 }],
+      asks: [
+        { price: 0.1, size: 20 },
+        { price: 0.12, size: visible },
+      ],
+      minOrderSize: 1,
+    });
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      candidateBookCache: cache,
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        bounceAskCapture: { ...DEFAULT_EXECUTION_POLICY.bounceAskCapture, enabled: true },
+      }),
+      orderRepo: { findByTokenId: () => orders } as never,
+      fillRepo: {
+        findByOrderId: () => (filled ? [{ orderId: sell.orderId, size: filled }] : []),
+      } as never,
+      positionRepo: positionRepo(0.05, 10),
+      inventoryLotRepo: {} as never,
+    });
+    const placed: RuntimeEventMap["PlaceOrderRequested"][] = [];
+    const skipped = vi.fn();
+    bus.subscribe("PlaceOrderRequested", async (event) => void placed.push(event));
+    bus.subscribe("SignalConversionSkipped", skipped);
+    bridge.subscribe();
+    try {
+      await bus.publish("SignalApproved", {
+        signal: {
+          ...makeSignal(),
+          side: "sell",
+          positionId: "position" as never,
+          suggestedPrice: 0.07,
+          suggestedSize: 10,
+          suggestedSizeUsdc: 0.7,
+          reason: "repricing-exit",
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        },
+        market: makeMarket({ bestBid: 0.06, bestAsk: 0.1, tickSize: 0.01 }),
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+      expect(placed).toHaveLength(1);
+      expect(placed[0]?.command).toMatchObject({
+        price: applied ? 0.09 : 0.07,
+        size: 10,
+        side: "sell",
+        postOnly: true,
+        entryStyle: "maker",
+        orderType: "GTC",
+      });
+      expect(placed[0]?.command.metadata?.bounceAskCaptureInitialV1).toEqual(
+        applied
+          ? { version: 1, status: "applied", reason: "applied", price: 0.09 }
+          : { version: 1, status: "skipped", reason: "self-book-ambiguous" },
+      );
+      expect(skipped).not.toHaveBeenCalled();
+    } finally {
+      bridge.unsubscribe();
+      cache.dispose();
+      origin.mockRestore();
+    }
+  });
+
   it.each([false, true])("preserves initial bounce pricing with cleanup=%s", async (cleanup) => {
     const origin = vi
       .spyOn(bounceAskCapture, "resolveBounceAskPolicyOrigin")

@@ -13,7 +13,7 @@ import type {
   Position,
   PositionRepository,
 } from "@krabs/domain";
-import { BOUNCE_EXIT_TARGET_RULE_ID } from "@krabs/domain";
+import { BOUNCE_EXIT_TARGET_RULE_ID, exchangeComparisonOrder } from "@krabs/domain";
 import { floorToTick, validateExecutablePrice } from "./executable-price.js";
 import { parseMakerCaptureLineage } from "./maker-capture-reprice.js";
 import { parseQuoteMotionOrigin } from "./quote-motion-shadow.js";
@@ -245,17 +245,8 @@ export function computeBounceAskCaptureCandidate(input: {
   const bids = aggregate(input.book.bids, tickSize);
   const asks = aggregate(input.book.asks, tickSize);
   if (!bids || !asks) return { ok: false, reason: "malformed-book" } as const;
-  for (const order of input.ownSellOrders) {
-    if (order.side !== "sell" || (order.status !== "open" && order.status !== "partially-filled")) {
-      continue;
-    }
-    const filled = (input.fillsByOrder.get(String(order.orderId)) ?? []).reduce(
-      (sum, fill) => sum + fill.size,
-      0,
-    );
-    const residual = Math.max(0, order.size - filled);
-    if (residual <= EPSILON) continue;
-    const key = Math.round(order.price / tickSize);
+  const ownResiduals = aggregateSellResiduals(input.ownSellOrders, input.fillsByOrder, tickSize);
+  for (const [key, residual] of ownResiduals) {
     const visible = asks.get(key);
     if (visible === undefined) continue;
     if (residual > visible + 1e-7) return { ok: false, reason: "self-book-ambiguous" } as const;
@@ -285,6 +276,28 @@ export function computeBounceAskCaptureCandidate(input: {
     return { ok: false, reason: "no-valid-move" } as const;
   }
   return { ok: true, price: candidate, externalBestBid, externalBestAsk } as const;
+}
+
+function aggregateSellResiduals(
+  orders: readonly Order[],
+  fillsByOrder: ReadonlyMap<string, readonly Fill[]>,
+  tickSize: number,
+): Map<number, number> {
+  const residuals = new Map<number, number>();
+  for (const order of orders) {
+    if (order.side !== "sell" || (order.status !== "open" && order.status !== "partially-filled")) {
+      continue;
+    }
+    const filled = (fillsByOrder.get(String(order.orderId)) ?? []).reduce(
+      (sum, fill) => sum + fill.size,
+      0,
+    );
+    const residual = Math.max(0, exchangeComparisonOrder(order).size - filled);
+    if (residual <= EPSILON) continue;
+    const key = Math.round(order.price / tickSize);
+    residuals.set(key, (residuals.get(key) ?? 0) + residual);
+  }
+  return residuals;
 }
 
 export function loadBounceAskFills(

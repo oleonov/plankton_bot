@@ -917,6 +917,171 @@ describe("bounce ASK capture", () => {
     await module.stop();
   });
 
+  describe("SIGNED_ASK external book", () => {
+    function input(visible = 17.08, filled = 0) {
+      const sell = order("signed-sell", { price: 0.11, size: 17.08803 });
+      sell.metadata = {
+        signedOrderFactsV1: {
+          version: 1,
+          orderId: sell.orderId,
+          tokenId,
+          side: "sell",
+          logicalSize: sell.size,
+          shares: 17.08,
+        },
+      };
+      return {
+        book: {
+          ...book(),
+          bids: [{ price: 0.06, size: 20 }],
+          asks: [
+            { price: 0.1, size: 20 },
+            { price: 0.11, size: visible },
+          ],
+        },
+        tickSize: 0.01,
+        ownSellOrders: [sell],
+        originalTargetPrice: 0.07,
+        fillsByOrder: new Map([
+          [
+            String(sell.orderId),
+            filled ? [{ ...fillFor(sell, "sell-fill", filled), side: "sell" as const }] : [],
+          ],
+        ]),
+      };
+    }
+
+    it.each([0, 5])("subtracts signed residual after fill %s without mutation", (filled) => {
+      const args = input(17.08 - filled, filled);
+      if (filled) args.ownSellOrders[0]!.status = "partially-filled";
+      const before = structuredClone(args);
+      const expected = { ok: true, price: 0.09, externalBestBid: 0.06, externalBestAsk: 0.1 };
+      expect(computeBounceAskCaptureCandidate(args)).toEqual(expected);
+      expect(computeBounceAskCaptureInitialPrice(args)).toEqual(expected);
+      expect(args).toEqual(before);
+    });
+
+    it.each([
+      undefined,
+      { version: 2 },
+      { orderId: "other" },
+      { tokenId: "other" },
+      { side: "buy" },
+      { logicalSize: 17.08 },
+      { shares: undefined },
+      { shares: NaN },
+      { shares: Infinity },
+      { shares: 0 },
+      { shares: -1 },
+      { shares: 18 },
+    ])("falls back to logical volume for invalid facts %j", (override) => {
+      const args = input();
+      const sell = args.ownSellOrders[0]!;
+      sell.metadata =
+        override === undefined
+          ? {}
+          : {
+              signedOrderFactsV1: { ...(sell.metadata!.signedOrderFactsV1 as object), ...override },
+            };
+      expect(computeBounceAskCaptureCandidate(args)).toEqual({
+        ok: false,
+        reason: "self-book-ambiguous",
+      });
+      args.book.asks = [
+        { price: 0.1, size: 20 },
+        { price: 0.11, size: sell.size },
+      ];
+      expect(computeBounceAskCaptureCandidate(args)).toMatchObject({ ok: true, price: 0.09 });
+    });
+
+    it("rejects a genuine signed-volume shortfall", () => {
+      expect(computeBounceAskCaptureCandidate(input(12, 5))).toEqual({
+        ok: false,
+        reason: "self-book-ambiguous",
+      });
+    });
+
+    it.each([
+      [5, 6],
+      [6, 5],
+      [5, 5],
+    ])("rejects visible 5 against own %j + %j", (a, b) => {
+      const args = input(5);
+      args.ownSellOrders = [a, b].map((size, i) => order(`same-${i}`, { price: 0.11, size }));
+      expect(computeBounceAskCaptureCandidate(args)).toEqual({
+        ok: false,
+        reason: "self-book-ambiguous",
+      });
+    });
+
+    it.each([11, 12])("subtracts a same-price total once from visible %s", (visible) => {
+      const args = input();
+      args.book.asks = [
+        { price: 0.09, size: visible },
+        { price: 0.11, size: 20 },
+      ];
+      args.ownSellOrders = [5, 6].map((size, i) => order(`same-${i}`, { price: 0.09, size }));
+      expect(computeBounceAskCaptureCandidate(args)).toMatchObject({
+        ok: true,
+        price: visible === 11 ? 0.1 : 0.08,
+        externalBestAsk: visible === 11 ? 0.11 : 0.09,
+      });
+    });
+
+    it.each([12.08, 17.08])("aggregates mixed signed/legacy partial fills at %s", (visible) => {
+      const args = input(visible, 5);
+      const legacy = order("legacy", { price: 0.11, size: 6, status: "partially-filled" });
+      args.ownSellOrders[0]!.status = "partially-filled";
+      args.ownSellOrders.push(legacy);
+      args.fillsByOrder.set(String(legacy.orderId), [
+        { ...fillFor(legacy, "legacy-fill", 1), side: "sell" },
+      ]);
+      args.book.asks = [
+        { price: 0.11, size: visible },
+        { price: 0.13, size: 20 },
+      ];
+      const expected =
+        visible === 12.08
+          ? { ok: false, reason: "self-book-ambiguous" }
+          : { ok: true, price: 0.12, externalBestBid: 0.06, externalBestAsk: 0.13 };
+      expect(computeBounceAskCaptureCandidate(args)).toEqual(expected);
+      args.ownSellOrders.reverse();
+      expect(computeBounceAskCaptureCandidate(args)).toEqual(expected);
+    });
+
+    it.each([
+      { side: "buy" },
+      { status: "pending" },
+      { status: "cancelled" },
+      { size: 0 },
+      { price: 0.12 },
+    ] satisfies Partial<Order>[])("preserves eligibility/absent-level behavior %j", (override) => {
+      const args = input(1);
+      Object.assign(args.ownSellOrders[0]!, override);
+      expect(computeBounceAskCaptureCandidate(args)).toMatchObject({ ok: true, price: 0.09 });
+    });
+
+    it.each([
+      ["malformed", "malformed-book"],
+      ["empty", "book-missing"],
+      ["spread", "no-valid-move"],
+      ["target", "no-valid-move"],
+      ["predecessor", "no-valid-move"],
+    ])("preserves %s guard", (kind, reason) => {
+      const args = input();
+      if (kind === "malformed") args.book.asks = [{ price: 0.1, size: -1 }];
+      if (kind === "empty") args.book.bids = [];
+      if (kind === "spread") args.book.bids = [{ price: 0.09, size: 20 }];
+      if (kind === "target") args.originalTargetPrice = 0.1;
+      expect(
+        computeBounceAskCaptureCandidate({
+          ...args,
+          ...(kind === "predecessor" ? { predecessorPrice: 0.09 } : {}),
+        }),
+      ).toEqual({ ok: false, reason });
+    });
+  });
+
   it("subtracts our confirmed SELL and enforces target and downward bounds", () => {
     const input = {
       book: book(),

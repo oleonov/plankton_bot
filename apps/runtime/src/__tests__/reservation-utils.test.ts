@@ -8,6 +8,7 @@ import {
   createTokenId,
 } from "@krabs/domain";
 import type { ClientOrderId, Fill, FillRepository, Order } from "@krabs/domain";
+import { computeBounceAskCaptureCandidate } from "../bounce-ask-capture.js";
 import {
   buildReservationSnapshot,
   getReservedSellSize,
@@ -56,6 +57,45 @@ function makeFill(orderId: string, size: number): Fill {
 }
 
 describe("reservation-utils", () => {
+  it.each([0, 5, 17.08])("SIGNED_ASK preserves logical reservation after fill %s", (filled) => {
+    const sell = makeOrder({ side: "sell", price: 0.11, size: 17.08803 });
+    sell.metadata = {
+      signedOrderFactsV1: {
+        version: 1,
+        orderId: sell.orderId,
+        tokenId: TOKEN_ID,
+        side: "sell",
+        logicalSize: sell.size,
+        shares: 17.08,
+      },
+    };
+    const fills = filled ? [{ ...makeFill(sell.orderId, filled), side: "sell" as const }] : [];
+    const before = structuredClone({ sell, fills });
+    const result = computeBounceAskCaptureCandidate({
+      book: {
+        tokenId: TOKEN_ID,
+        bids: [{ price: 0.06, size: 20 }],
+        asks: [
+          { price: 0.1, size: 20 },
+          { price: 0.11, size: filled === 17.08 ? 0.001 : 17.08 - filled },
+        ],
+        bestBid: 0.06,
+        bestAsk: 0.1,
+        midPrice: 0.08,
+        spread: 0.04,
+        timestamp: 0,
+      },
+      tickSize: 0.01,
+      ownSellOrders: [sell],
+      originalTargetPrice: 0.07,
+      fillsByOrder: new Map([[String(sell.orderId), fills]]),
+    });
+    const snapshot = buildReservationSnapshot([sell], { findByOrderId: () => fills });
+    expect(getReservedSellSize(snapshot, TOKEN_ID)).toBeCloseTo(17.08803 - filled, 9);
+    expect({ sell, fills }).toEqual(before);
+    expect(result).toMatchObject({ ok: true, price: 0.09 });
+  });
+
   it("uses bulk fill lookup for open-order reservations when available", () => {
     const buy = makeOrder({ orderId: createOrderId("ord-buy"), side: "buy", size: 10, price: 0.5 });
     const sell = makeOrder({
