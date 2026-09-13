@@ -484,3 +484,160 @@ it.each(["terminal", "ambiguous"] as const)(
     await module.stop();
   },
 );
+
+it("logs distinct local transport and whole-run persisted drop reasons without summing scopes", async () => {
+  const { module, port, ready, log } = fixture();
+  await module.start();
+  ready();
+  const transport = (module as any).transport as EvidenceTransport;
+  const local = [1, 2, 3, 4];
+  const reasons = ["enrollment_drop", "book_drop", "lifecycle_drop", "invalid_field"] as const;
+  reasons.forEach((reason, index) => {
+    for (let count = 0; count < local[index]!; count++) transport.drop(reason);
+  });
+  const now = Date.now();
+  port.emit("message", {
+    type: "progress",
+    credit: null,
+    quality: {
+      ...counters(),
+      enrollment_drop: 11,
+      book_drop: 12,
+      lifecycle_drop: 13,
+      invalid_field: 14,
+      link_ambiguous: 15,
+      catchup_incomplete: 16,
+    },
+    episodes: [],
+    run: {
+      started: now,
+      deadline: now + LIMITS.captureMs,
+      last_seen: now,
+      spent: 0,
+      event_count: 0,
+      book_count: 0,
+      disabled: 0,
+    },
+  });
+  (module as any).periodic();
+  const summary = log.info.mock.calls.at(-1)[0].exitEvidence;
+  expect(summary).toMatchObject({
+    dropCount: 10,
+    localTransportDrops: {
+      enrollment_drop: 1,
+      book_drop: 2,
+      lifecycle_drop: 3,
+      invalid_field: 4,
+    },
+    persistedWorkerDrops: {
+      enrollment_drop: 11,
+      book_drop: 12,
+      lifecycle_drop: 13,
+      invalid_field: 14,
+    },
+    lifecycleLost: 13,
+    linkAmbiguous: 15,
+    catchupIncomplete: 16,
+  });
+  await module.stop();
+});
+
+it.each(["ready", "ack"] as const)(
+  "keeps reset local drops at zero when %s restores positive persisted counters",
+  async (type) => {
+    const { module, port, ready, log } = fixture();
+    await module.start();
+    if (type === "ack") ready();
+    const now = Date.now();
+    port.emit("message", {
+      type,
+      credit: null,
+      quality: {
+        ...counters(),
+        enrollment_drop: 21,
+        book_drop: 22,
+        lifecycle_drop: 23,
+        invalid_field: 24,
+      },
+      episodes: [],
+      run: {
+        started: now,
+        deadline: now + LIMITS.captureMs,
+        last_seen: now,
+        spent: 0,
+        event_count: 0,
+        book_count: 0,
+        disabled: 0,
+      },
+    });
+    if (type === "ack") (module as any).periodic();
+    expect(log.info.mock.calls.at(-1)[0].exitEvidence).toMatchObject({
+      dropCount: 0,
+      localTransportDrops: {
+        enrollment_drop: 0,
+        book_drop: 0,
+        lifecycle_drop: 0,
+        invalid_field: 0,
+      },
+      persistedWorkerDrops: {
+        enrollment_drop: 21,
+        book_drop: 22,
+        lifecycle_drop: 23,
+        invalid_field: 24,
+      },
+    });
+    await module.stop();
+  },
+);
+
+it("keeps the emitted worst-case bounded summary within 1024 UTF8 bytes", async () => {
+  const { module, port, log } = fixture();
+  await module.start();
+  const maximum = Number.MAX_SAFE_INTEGER;
+  const quality = counters();
+  for (const reason of Object.keys(quality) as (keyof typeof quality)[]) quality[reason] = maximum;
+  const now = Date.now();
+  port.emit("message", {
+    type: "progress",
+    credit: null,
+    quality,
+    episodes: Array.from({ length: LIMITS.chains }, (_, slot) => ({
+      slot,
+      client: "client",
+      command: "command",
+      signal: "signal",
+      token: "token",
+      condition: "condition",
+      position: null,
+      terminal: false,
+      ambiguous: false,
+    })),
+    run: {
+      started: now,
+      deadline: now + LIMITS.captureMs,
+      last_seen: now,
+      spent: maximum,
+      event_count: maximum,
+      book_count: maximum,
+      disabled: 0,
+    },
+  });
+  const transport = (module as any).transport as EvidenceTransport;
+  for (const reason of Object.keys(transport.drops) as (keyof typeof transport.drops)[])
+    transport.drops[reason] = maximum;
+  const packet: Packet = {
+    slot: 1,
+    kind: "Book",
+    id: "book",
+    source: now,
+    received: now,
+    facts: {},
+  };
+  for (let count = 0; count < LIMITS.packets; count++) transport.enqueue(packet);
+  (module as any).periodic();
+  const summary = log.info.mock.calls.at(-1)[0];
+  expect(summary.exitEvidence).toMatchObject({ episodes: LIMITS.chains, queued: LIMITS.packets });
+  expect(Buffer.byteLength(JSON.stringify(summary), "utf8")).toBeLessThanOrEqual(1024);
+  transport.close();
+  await module.stop();
+});

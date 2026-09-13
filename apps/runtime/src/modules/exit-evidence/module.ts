@@ -16,7 +16,17 @@ import {
   type Facts,
   type WorkerMessage,
   type MainMessage,
+  type Counters,
 } from "./types.js";
+
+function dropBreakdown(counts: Partial<Counters>) {
+  return {
+    enrollment_drop: counts.enrollment_drop ?? 0,
+    book_drop: counts.book_drop ?? 0,
+    lifecycle_drop: counts.lifecycle_drop ?? 0,
+    invalid_field: counts.invalid_field ?? 0,
+  };
+}
 
 export interface EvidenceDeps {
   bus: EventBus;
@@ -302,10 +312,14 @@ export class ExitEvidenceModule implements RuntimeModule {
           ...stats,
           qualityCount: Object.values(quality).reduce((sum, n) => sum + n, 0),
           dropCount: Object.values(drops).reduce((sum, n) => sum + n, 0),
+          localTransportDrops: dropBreakdown(drops),
+          persistedWorkerDrops: dropBreakdown(this.quality),
           bookMissing: this.quality.book_missing,
           bookStale: this.quality.book_stale,
           lifecycleLost: this.quality.lifecycle_drop,
           linkUnknown: this.quality.link_unknown,
+          linkAmbiguous: this.quality.link_ambiguous,
+          catchupIncomplete: this.quality.catchup_incomplete,
           restartGaps: this.quality.restart_gap,
         },
       },
