@@ -9,13 +9,11 @@ import type {
 } from "@krabs/domain";
 import { computeEffectiveFillPrice } from "@krabs/domain";
 import { compareActivePositions } from "./active-positions.js";
+import { MARKET_SNAPSHOT_RETENTION_MS } from "./modules/retention/ledger-retention-module.js";
 
 export interface SnapshotWriterConfig {
   intervalMs: number;
-  pruneIntervalMs: number;
-  pruneTtlMs: number;
   enabled?: () => boolean;
-  preserveTokenIds?: () => readonly TokenId[];
   positionValuation?: SnapshotPositionValuationConfig;
 }
 
@@ -282,28 +280,18 @@ export class SnapshotWriter {
   }
 
   private maybePrune(timestamp: number): void {
-    if (timestamp - this.lastPruneAt > this.config.pruneIntervalMs) {
-      const cutoff = new Date(timestamp - this.config.pruneTtlMs).toISOString();
-      const preserveTokenIds = this.config.preserveTokenIds?.() ?? [];
-      this.repo.prune(cutoff, { preserveTokenIds });
-      // Mirror the DB prune in memory: drop tokens we haven't written beyond
-      // the TTL. Without this, lastWrittenAt grew unbounded across tracked-
-      // universe churn even though the DB rows were gone.
-      const cutoffMs = timestamp - this.config.pruneTtlMs;
-      this.pruneMemory(this.lastRealWrittenAt, cutoffMs, preserveTokenIds);
-      this.pruneMemory(this.lastHeartbeatWrittenAt, cutoffMs, preserveTokenIds);
+    if (timestamp - this.lastPruneAt > 60 * 60_000) {
+      // LedgerRetention alone deletes rows; these maps only throttle capture during churn.
+      const cutoffMs = timestamp - MARKET_SNAPSHOT_RETENTION_MS;
+      this.pruneMemory(this.lastRealWrittenAt, cutoffMs);
+      this.pruneMemory(this.lastHeartbeatWrittenAt, cutoffMs);
       this.lastPruneAt = timestamp;
     }
   }
 
-  private pruneMemory(
-    writeState: Map<TokenId, number>,
-    cutoffMs: number,
-    preserveTokenIds: readonly TokenId[],
-  ): void {
-    const preserve = new Set(preserveTokenIds.map(String));
+  private pruneMemory(writeState: Map<TokenId, number>, cutoffMs: number): void {
     for (const [tokenId, writtenAt] of writeState) {
-      if (writtenAt < cutoffMs && !preserve.has(String(tokenId))) writeState.delete(tokenId);
+      if (writtenAt < cutoffMs) writeState.delete(tokenId);
     }
   }
 }

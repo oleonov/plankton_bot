@@ -38,6 +38,10 @@ const reconciliationBackoffSchema = z.preprocess((value) => {
 
 const envSchema = z
   .object({
+    EXIT_EVIDENCE_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((v) => v === "true"),
     RUNTIME_MODE: runtimeModeSchema.optional(),
     LOG_LEVEL: logLevelSchema.default("info"),
     DB_PATH: z.string().default("./apps/runtime/data/krabs.db"),
@@ -261,6 +265,7 @@ const envSchema = z
   });
 
 export interface AppConfig {
+  exitEvidenceEnabled?: boolean;
   runtimeMode: "live-lite" | undefined;
   logLevel: "debug" | "info" | "warn" | "error";
   dbPath: string;
@@ -406,6 +411,7 @@ export function loadEnv(envPath?: string): AppConfig {
   });
 
   return {
+    exitEvidenceEnabled: env.EXIT_EVIDENCE_ENABLED,
     runtimeMode: env.RUNTIME_MODE,
     logLevel: env.LOG_LEVEL,
     dbPath: path.resolve(root, env.DB_PATH),

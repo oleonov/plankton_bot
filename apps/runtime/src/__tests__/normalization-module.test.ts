@@ -107,8 +107,6 @@ describe("NormalizationModule", () => {
     const repo = { saveBatch: vi.fn(), prune: vi.fn() };
     const snapshotWriter = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
-      pruneIntervalMs: 60 * 60 * 1000,
-      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
     });
     const normalized: NormalizedMarket[][] = [];
     const observeMarket = vi.fn();
@@ -150,6 +148,7 @@ describe("NormalizationModule", () => {
     expect(signalCount).toBe(0);
     expect(placeOrderCount).toBe(0);
     expect(cancelOrderCount).toBe(0);
+    expect(repo.prune).not.toHaveBeenCalled();
 
     await mod.stop();
   });

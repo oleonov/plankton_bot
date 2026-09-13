@@ -48,8 +48,6 @@ describe("SnapshotWriter", () => {
     repo = { saveBatch: vi.fn(), saveBatchWithPositionValuations: vi.fn(), prune: vi.fn() };
     writer = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
-      pruneIntervalMs: 60 * 60 * 1000,
-      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
     });
   });
 
@@ -115,8 +113,6 @@ describe("SnapshotWriter", () => {
     const metrics = { writeCounter: vi.fn(), writeEvent: vi.fn() };
     writer = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
-      pruneIntervalMs: 60 * 60 * 1000,
-      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
       positionValuation: {
         activePositions: () => [makePosition("tok-1", 100)],
         runtimeMetrics: metrics,
@@ -155,8 +151,6 @@ describe("SnapshotWriter", () => {
     // winner and writing it `WHERE token_id = ?` stamped the open row's value onto the dust row.
     writer = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
-      pruneIntervalMs: 60 * 60 * 1000,
-      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
       positionValuation: {
         activePositions: () => [
           makePosition("tok-both", 100, { positionId: createPositionId("pos-open") }),
@@ -195,8 +189,6 @@ describe("SnapshotWriter", () => {
     // live tradable position) claims it all, leaving the dust row nothing.
     writer = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
-      pruneIntervalMs: 60 * 60 * 1000,
-      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
       positionValuation: {
         activePositions: () => [
           makePosition("tok-scarce", 100, { positionId: createPositionId("pos-open") }),
@@ -236,8 +228,6 @@ describe("SnapshotWriter", () => {
     // mirrors the "atomically on heartbeat" test's numbers to pin that property explicitly.
     writer = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
-      pruneIntervalMs: 60 * 60 * 1000,
-      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
       positionValuation: {
         activePositions: () => [makePosition("tok-solo", 100)],
       },
@@ -264,8 +254,6 @@ describe("SnapshotWriter", () => {
     const metrics = { writeCounter: vi.fn(), writeEvent: vi.fn() };
     writer = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
-      pruneIntervalMs: 60 * 60 * 1000,
-      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
       positionValuation: {
         activePositions: () => [makePosition("tok-thin", 100)],
         runtimeMetrics: metrics,
@@ -303,8 +291,6 @@ describe("SnapshotWriter", () => {
   it("uses available bid value when visible depth is exhausted", () => {
     writer = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
-      pruneIntervalMs: 60 * 60 * 1000,
-      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
       positionValuation: {
         activePositions: () => [makePosition("tok-exhausted", 100)],
       },
@@ -333,8 +319,6 @@ describe("SnapshotWriter", () => {
     const metrics = { writeCounter: vi.fn(), writeEvent: vi.fn() };
     writer = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
-      pruneIntervalMs: 60 * 60 * 1000,
-      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
       positionValuation: {
         activePositions: () => [makePosition("tok-no-book", 100)],
         runtimeMetrics: metrics,
@@ -421,8 +405,6 @@ describe("SnapshotWriter", () => {
     let enabled = false;
     writer = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
-      pruneIntervalMs: 60 * 60 * 1000,
-      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
       enabled: () => enabled,
     });
     const now = Date.now();
@@ -436,30 +418,39 @@ describe("SnapshotWriter", () => {
     expect(repo.saveBatch.mock.calls[0]![0]).toHaveLength(1);
   });
 
-  it("prunes after pruneIntervalMs", () => {
+  it("never deletes snapshot rows after the old prune interval", () => {
     const now = Date.now();
     writer.onSnapshot([makeMarket("tok-1")], now);
 
     expect(repo.prune).not.toHaveBeenCalled();
 
     writer.onSnapshot([makeMarket("tok-1")], now + 60 * 60 * 1000 + 1);
-    expect(repo.prune).toHaveBeenCalledTimes(1);
+    expect(repo.prune).not.toHaveBeenCalled();
   });
 
-  it("prunes from heartbeat-only writes and preserves configured active tokens", () => {
+  it("bounds independent real/heartbeat throttle maps during token churn without SQL deletion", () => {
+    const now = Date.now();
+    writer.onSnapshot([makeMarket("real-old")], now);
+    writer.onHeartbeat([makeMarket("heartbeat-old")], now);
+    writer.onSnapshot([makeMarket("current")], now + 3 * 86_400_000 + 1);
+    const state = writer as unknown as {
+      lastRealWrittenAt: Map<string, number>;
+      lastHeartbeatWrittenAt: Map<string, number>;
+    };
+    expect([...state.lastRealWrittenAt.keys()]).toEqual(["current"]);
+    expect(state.lastHeartbeatWrittenAt.size).toBe(0);
+    expect(repo.prune).not.toHaveBeenCalled();
+  });
+
+  it("heartbeat-only capture leaves deletion to LedgerRetention", () => {
     writer = new SnapshotWriter(repo, {
       intervalMs: 5 * 60 * 1000,
-      pruneIntervalMs: 60 * 60 * 1000,
-      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
-      preserveTokenIds: () => [createTokenId("tok-active")],
     });
     const now = Date.now();
 
     writer.onHeartbeat([makeMarket("tok-active")], now + 60 * 60 * 1000 + 1);
 
-    expect(repo.prune).toHaveBeenCalledWith(expect.any(String), {
-      preserveTokenIds: [createTokenId("tok-active")],
-    });
+    expect(repo.prune).not.toHaveBeenCalled();
   });
 
   it("propagates lastPrice, volume24h, liquidity, and public trade count", () => {

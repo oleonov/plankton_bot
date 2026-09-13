@@ -17,6 +17,7 @@ function clearEnvVars(keys: string[]): void {
 }
 
 const ALL_KEYS = [
+  "EXIT_EVIDENCE_ENABLED",
   "RUNTIME_MODE",
   "LOG_LEVEL",
   "DB_PATH",
@@ -54,6 +55,17 @@ describe("loadEnv", () => {
   const emptyEnvDir = mkdtempSync(path.join(os.tmpdir(), "krabs-env-test-"));
   const emptyEnvPath = path.join(emptyEnvDir, "empty.env");
   writeFileSync(emptyEnvPath, "");
+
+  it("defaults exit evidence off and parses explicit enable/disable strictly", () => {
+    expect(loadEnv(emptyEnvPath).exitEvidenceEnabled).toBe(false);
+    process.env.EXIT_EVIDENCE_ENABLED = "true";
+    expect(loadEnv(emptyEnvPath).exitEvidenceEnabled).toBe(true);
+    expect(loadEnv(emptyEnvPath).exitEvidenceEnabled).toBe(true);
+    process.env.EXIT_EVIDENCE_ENABLED = "false";
+    expect(loadEnv(emptyEnvPath).exitEvidenceEnabled).toBe(false);
+    process.env.EXIT_EVIDENCE_ENABLED = "yes";
+    expect(() => loadEnv(emptyEnvPath)).toThrow("EXIT_EVIDENCE_ENABLED");
+  });
 
   beforeEach(() => {
     for (const key of ALL_KEYS) {

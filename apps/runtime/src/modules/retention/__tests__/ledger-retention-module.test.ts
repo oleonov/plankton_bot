@@ -119,6 +119,42 @@ afterEach(() => {
   db.close();
 });
 
+it.each([false, true])(
+  "keeps the exact rolling three-day boundary while paused=%s across restart",
+  async (paused) => {
+    const cutoff = NOW - 3 * DAY_MS;
+    const insert = db.prepare("INSERT INTO market_snapshots(token_id,captured_at) VALUES(?,?)");
+    for (const token of ["active", "closed"]) {
+      for (const delta of [-1, 0, 1]) insert.run(token, new Date(cutoff + delta).toISOString());
+    }
+    insert.run("invalid-old", "!invalid");
+    insert.run("invalid-new", "malformed");
+    const make = () =>
+      new LedgerRetentionModule({
+        db,
+        log,
+        config: { runOnStart: false },
+        runtimeControl: { isPaused: () => paused } as any,
+      });
+    await make().runOnce(NOW);
+    expect(
+      db
+        .prepare("SELECT token_id,captured_at FROM market_snapshots ORDER BY token_id,captured_at")
+        .all(),
+    ).toEqual(
+      ["active", "closed"]
+        .flatMap((token_id) =>
+          [0, 1].map((delta) => ({
+            token_id,
+            captured_at: new Date(cutoff + delta).toISOString(),
+          })),
+        )
+        .concat([{ token_id: "invalid-new", captured_at: "malformed" }]),
+    );
+    expect((await make().runOnce(NOW)).deleted.market_snapshots ?? 0).toBe(0);
+  },
+);
+
 function insertMetric(metricName: string, capturedAt: string): void {
   db.prepare("INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES (?, 1, ?)").run(
     metricName,

@@ -105,6 +105,7 @@ export interface LedgerRetentionModuleDeps {
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+export const MARKET_SNAPSHOT_RETENTION_MS = 3 * DAY_MS;
 
 /**
  * How long the off-thread checkpoint may wait for readers. The wait costs a worker thread, not the
@@ -168,7 +169,7 @@ const DEFAULT_CONFIG: Required<LedgerRetentionConfig> = {
   // interval, so a large backlog drains over many passes instead of one long freeze.
   maxRunDurationMs: 150_000,
   runtimeMetricsTtlMs: 30 * DAY_MS,
-  marketSnapshotsTtlMs: 3 * DAY_MS,
+  marketSnapshotsTtlMs: MARKET_SNAPSHOT_RETENTION_MS,
   // v063: 90d TTLs would have held ~17 GB/day each on a 100 GB disk — observed
   // ledger growth filled `/dev/vda2` in ~12h after v062 deploy. 7d caps keep
   // steady-state size to a workable footprint while preserving recent windows

@@ -195,6 +195,7 @@ import {
   SqliteMakerShadowOrderRepository,
 } from "@krabs/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
+import { ExitEvidenceModule } from "./modules/exit-evidence/module.js";
 import { createTrackRFeeProvider } from "./track-r-fee-provider.js";
 import { createHybridFeeScheduleProvider } from "./fee-schedule-provider.js";
 import { findActivePositionRows } from "./active-positions.js";
@@ -2060,6 +2061,23 @@ async function main(): Promise<void> {
   });
 
   const modules: Array<[string, import("@krabs/domain").RuntimeModule]> = [
+    ...(config.exitEvidenceEnabled
+      ? [
+          [
+            "exit-evidence",
+            new ExitEvidenceModule({
+              bus,
+              ledgerPath: ledgerDbPath,
+              log,
+              // The collector also observes existing heartbeat books for its selected tokens.
+              book: (token, now) => ({
+                book: candidateBookCache?.getEntry(token)?.book ?? null,
+                fresh: candidateBookCache?.getFreshEntry(token, now) != null,
+              }),
+            }),
+          ] as [string, import("@krabs/domain").RuntimeModule],
+        ]
+      : []),
     ["command-poller", commandPoller],
     ...(planktonEntryShadowModule
       ? [
@@ -2162,13 +2180,10 @@ async function main(): Promise<void> {
     );
   });
 
-  // 7n. Persist downsampled market snapshots (5-min per token, 7-day TTL)
+  // 7n. Five-minute capture; LedgerRetention owns the rolling three-day history.
   const snapshotWriter = new SnapshotWriter(repos.marketSnapshot, {
     intervalMs: 5 * 60 * 1000,
-    pruneIntervalMs: 60 * 60 * 1000,
-    pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
     enabled: () => !runtimeControl.isPaused(),
-    preserveTokenIds: () => marketDataModule.getFullLifetimeSnapshotPreserveTokenIds(),
     positionValuation: {
       // Valuation is per ROW, not per token: each row's mark comes from its own `size`, and the
       // deduped read left every dust sibling's `current_value_usdc` frozen at its last write.
