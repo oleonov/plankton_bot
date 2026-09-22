@@ -123,6 +123,10 @@ export const mockProfiles = {
 export const mockStatus = {
   runtimeMode: "paper",
   uptimeSeconds: 3600,
+  runtimeState: "running" as const,
+  runtimeAlive: true,
+  runtimeHeartbeatAt: new Date().toISOString(),
+  runtimeHeartbeatFreshnessMs: 90_000,
   paused: false,
   lastReconciliationAt: "2026-03-31T00:00:00Z",
   marketDataStale: false,
@@ -148,6 +152,7 @@ export const mockStatus = {
   polymarketPortfolio: null,
   marketDataSource: "live",
   executionMode: "simulation",
+  reconciliation: { kind: "ok" as const, detail: "clean" },
   reconciliationDriftDetected: false,
   tradingState: "ACTIVELY_TRADING",
   signalActivity: null,

@@ -312,7 +312,12 @@ describe("GET /status", () => {
     const body = json(res);
     expect(body.ok).toBe(true);
     expect(typeof body.data.runtimeMode).toBe("string");
-    expect(typeof body.data.uptimeSeconds).toBe("number");
+    expect(body.data.uptimeSeconds).toBeNull();
+    expect(body.data.runtimeState).toBe("unknown");
+    expect(body.data.runtimeAlive).toBe(false);
+    expect(body.data.runtimeHeartbeatAt).toBeNull();
+    expect(body.data.runtimeHeartbeatFreshnessMs).toBe(90_000);
+    expect(body.data.reconciliation).toHaveProperty("kind");
     expect(typeof body.data.ordersPlacedLastMin).toBe("number");
     expect(typeof body.data.positionsOpenedLastMin).toBe("number");
     expect(typeof body.data.paused).toBe("boolean");

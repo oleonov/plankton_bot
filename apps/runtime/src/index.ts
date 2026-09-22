@@ -3285,7 +3285,17 @@ async function main(): Promise<void> {
   );
   const ownershipWaivedOrderIds = drainedOrderIds;
   const recoveryPredecessorOrderIds = new Set(startupAdoption.recoveryPredecessorOrderIds);
+  const buyRecovery = {
+    orderIds: startupAdoption.drainTargets.flatMap(({ orders }) =>
+      orders
+        .filter((order) => order.metadata?.pendingBuyRecovery !== undefined)
+        .map((order) => order.orderId),
+    ),
+    orderRepo: repos.order,
+    isTransitionTarget: (id: OrderId) => executionModule.hasTransitionTarget(id),
+  };
   runOwnershipInvariantStartupGate({
+    buyRecovery,
     ledgerDb: ledgerConn.db,
     controlDb: controlConn.db,
     applyToAllMarkets: bounceAppliesToAllMarkets,
@@ -3399,6 +3409,7 @@ async function main(): Promise<void> {
     // it. This does NOT extend to fire-and-forget startup work (`ResolutionModule.start()` kicks
     // `runCheck()` without awaiting it) — no boot-time read can cover mutations that land after it.
     runOwnershipInvariantStartupGate({
+      buyRecovery,
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
       applyToAllMarkets: bounceAppliesAtFenceRelease,

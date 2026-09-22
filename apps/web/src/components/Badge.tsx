@@ -3,8 +3,14 @@ const MODE_STYLES: Record<string, string> = {
   paper: "badge-orange",
   "paper-trade": "badge-orange",
   "live-lite": "badge-red",
-  PAUSED: "badge-red",
+  PAUSED: "badge-orange",
   RUNNING: "badge-green",
+  STARTING: "badge-orange",
+  STOPPING: "badge-orange",
+  STOPPED: "badge-blue",
+  FAILED: "badge-red",
+  STALE: "badge-red",
+  UNKNOWN: "badge-blue",
 };
 
 const STATUS_STYLES: Record<string, string> = {

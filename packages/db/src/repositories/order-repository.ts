@@ -14,6 +14,7 @@ import type {
   BounceAskCaptureIntentStatus,
   BounceAskCaptureBookDecisionProofV1,
   BounceAskCaptureSubmitProofV1,
+  ExchangeOrder,
 } from "@krabs/domain";
 import { nowIso } from "../db-timestamp.js";
 import type {
@@ -33,12 +34,198 @@ import {
   createBotRunId,
   parseMakerCaptureRepriceProofV1,
   parseBounceAskCaptureProofV1,
+  readPendingBuyRecovery,
+  pendingBuyIdentity,
+  pendingBuyExactMatches,
 } from "@krabs/domain";
 
 const OPEN_ORDER_PREDICATE = "status IN ('pending', 'open', 'partially-filled')";
+const recoveryDiscovery = new WeakMap<
+  Database.Database,
+  { dataVersion: number; ids: Set<string> }
+>();
+const APPLIED_BUY_FILL = `f.reconciled = 1 AND f.side = 'buy'
+  AND f.token_id = o.token_id AND f.condition_id = o.condition_id
+  AND (SELECT COUNT(*) FROM inventory_lots l WHERE l.fill_id = f.fill_id) = 1
+  AND EXISTS (SELECT 1 FROM inventory_lots l JOIN positions p ON p.position_id = l.position_id
+    WHERE l.fill_id = f.fill_id AND l.token_id = f.token_id AND l.side = 'buy'
+      AND p.token_id = f.token_id AND p.condition_id = f.condition_id
+      AND ABS(l.size - f.size) <= 1e-9)`;
 
 export class SqliteOrderRepository implements OrderRepository {
   constructor(private readonly db: Database.Database) {}
+
+  findPendingBuyRecovery(): Order[] {
+    const dataVersion = this.db.pragma("data_version", { simple: true }) as number;
+    let discovered = recoveryDiscovery.get(this.db);
+    if (!discovered || discovered.dataVersion !== dataVersion) {
+      const rows = this.db
+        .prepare(`SELECT order_id FROM orders WHERE metadata_json LIKE '%pendingBuyRecovery%'`)
+        .all() as { order_id: string }[];
+      discovered = { dataVersion, ids: new Set(rows.map((row) => row.order_id)) };
+      // A transaction may see uncommitted changes that disappear on rollback.
+      if (!this.db.inTransaction) recoveryDiscovery.set(this.db, discovered);
+    }
+    // Cache only candidate IDs: completion, inventory and rollback are always read live.
+    return [...discovered.ids].flatMap((id) => {
+      const row = this.db.prepare("SELECT * FROM orders WHERE order_id = ?").get(id) as
+        | Record<string, unknown>
+        | undefined;
+      if (!row || !String(row.metadata_json).includes("pendingBuyRecovery")) return [];
+      const order = this.rowToOrder(row);
+      if (!readPendingBuyRecovery(order)) throw new Error("pending BUY recovery marker is invalid");
+      return [order];
+    });
+  }
+
+  registerPendingBuyRecovery(
+    orders: readonly Order[],
+    anchorId: OrderId,
+    observations: ReadonlyMap<string, ExchangeOrder | null>,
+  ): void {
+    this.db.transaction(() => {
+      const members = orders.map((order) => String(order.orderId)).sort();
+      if (!members.includes(anchorId) || new Set(members).size !== members.length)
+        throw new Error("pending BUY recovery group is invalid");
+      for (const snapshot of orders) {
+        const current = this.findById(snapshot.orderId);
+        if (
+          !current ||
+          pendingBuyIdentity(current) !== pendingBuyIdentity(snapshot) ||
+          JSON.stringify(current.metadata) !== JSON.stringify(snapshot.metadata) ||
+          current.status !== snapshot.status ||
+          readPendingBuyRecovery(current)
+        )
+          throw new Error("pending BUY recovery registration changed");
+        const exact = observations.get(String(current.orderId));
+        if (exact === undefined || (exact && !pendingBuyExactMatches(current, exact)))
+          throw new Error("pending BUY recovery registration evidence mismatch");
+        const marker = {
+          version: 1,
+          groupId: String(anchorId),
+          members,
+          role: current.orderId === anchorId ? "unknown" : "working",
+          identity: pendingBuyIdentity(current),
+          matched: exact?.sizeFilled ?? 0,
+          completed: false,
+        };
+        readPendingBuyRecovery({
+          ...current,
+          metadata: { ...current.metadata, pendingBuyRecovery: marker },
+        });
+        this.writeRecovery(current, marker);
+      }
+    })();
+  }
+
+  observePendingBuyRecovery(id: OrderId, exact: Partial<ExchangeOrder> | null): void {
+    const order = this.findById(id);
+    const marker = order && readPendingBuyRecovery(order);
+    if (!order || !marker || marker.completed || !exact) return;
+    if (!pendingBuyExactMatches(order, exact))
+      throw new Error("pending BUY exact identity mismatch");
+    if (exact.sizeFilled! > marker.matched)
+      this.writeRecovery(order, { ...marker, matched: exact.sizeFilled! });
+  }
+
+  restorePendingBuyRecovery(id: OrderId): void {
+    const order = this.findById(id);
+    if (!order || !readPendingBuyRecovery(order) || readPendingBuyRecovery(order)!.completed)
+      throw new Error("pending BUY recovery restore requires active marker");
+    this.db
+      .prepare("UPDATE orders SET status = 'open', updated_at = ? WHERE order_id = ?")
+      .run(nowIso(), id);
+  }
+
+  completePendingBuyRecovery(
+    snapshot: Order,
+    exact: Partial<ExchangeOrder>,
+    isCurrent: () => boolean,
+  ): boolean {
+    return this.db.transaction(() => {
+      const order = this.findById(snapshot.orderId);
+      const marker = order && readPendingBuyRecovery(order);
+      if (
+        !order ||
+        !marker ||
+        marker.completed ||
+        !isCurrent() ||
+        pendingBuyIdentity(order) !== pendingBuyIdentity(snapshot) ||
+        JSON.stringify(order.metadata) !== JSON.stringify(snapshot.metadata) ||
+        !pendingBuyExactMatches(order, exact) ||
+        !["FILLED", "CANCELLED", "EXPIRED", "REJECTED"].includes(exact.status ?? "")
+      )
+        return false;
+      if (!this.hasRecoveryInventoryCoverage(order, exact, marker.matched) || !isCurrent())
+        return false;
+      const status =
+        exact.status === "FILLED"
+          ? "filled"
+          : exact.status === "REJECTED"
+            ? "rejected"
+            : "cancelled";
+      this.writeRecovery(order, {
+        ...marker,
+        matched: Math.max(marker.matched, exact.sizeFilled!),
+        completed: true,
+      });
+      this.db
+        .prepare("UPDATE orders SET status = ?, updated_at = ? WHERE order_id = ?")
+        .run(status, nowIso(), order.orderId);
+      return true;
+    })();
+  }
+
+  private hasRecoveryInventoryCoverage(
+    order: Order,
+    exact: Partial<ExchangeOrder>,
+    matched: number,
+  ): boolean {
+    const coverage = this.db
+      .prepare(
+        `SELECT
+      COALESCE(SUM(CASE WHEN f.side = 'buy' AND f.liquidity_role = 'taker' AND f.price > 0
+        AND f.size_usdc > 0 THEN f.size_usdc / f.price ELSE f.size END), 0) AS gross,
+      COALESCE(SUM(CASE WHEN ${APPLIED_BUY_FILL} THEN 0 ELSE 1 END), 0) AS missing
+      FROM fills f JOIN orders o ON o.order_id = f.order_id WHERE f.order_id = ?`,
+      )
+      .get(order.orderId) as { gross: number; missing: number };
+    return (
+      coverage.missing === 0 &&
+      coverage.gross + 1e-9 >= Math.max(matched, exact.sizeFilled!) &&
+      (exact.status !== "REJECTED" || (coverage.gross === 0 && exact.sizeFilled === 0))
+    );
+  }
+
+  private writeRecovery(order: Order, marker: unknown): void {
+    const result = this.db
+      .prepare(
+        "UPDATE orders SET metadata_json = ?, updated_at = ? WHERE order_id = ? AND metadata_json IS ?",
+      )
+      .run(
+        JSON.stringify({ ...order.metadata, pendingBuyRecovery: marker }),
+        nowIso(),
+        order.orderId,
+        order.metadata ? JSON.stringify(order.metadata) : null,
+      );
+    if (result.changes !== 1) throw new Error("pending BUY recovery evidence CAS failed");
+    // All marker creation goes through this writer; rolled-back IDs are harmless candidates.
+    recoveryDiscovery.get(this.db)?.ids.add(String(order.orderId));
+  }
+
+  private guardRecoveryWrite(current: Order | null, next: Order): void {
+    const marker = current && readPendingBuyRecovery(current);
+    if (
+      JSON.stringify(current?.metadata?.pendingBuyRecovery) !==
+        JSON.stringify(next.metadata?.pendingBuyRecovery) ||
+      (marker &&
+        (pendingBuyIdentity(current) !== pendingBuyIdentity(next) ||
+          (!marker.completed && ["filled", "cancelled", "rejected"].includes(next.status)) ||
+          (marker.completed && next.status !== current.status)))
+    ) {
+      throw new Error("protected pending BUY recovery write refused");
+    }
+  }
 
   findLocallyClosedResolvedLosers(): Order[] {
     return (
@@ -49,6 +236,7 @@ export class SqliteOrderRepository implements OrderRepository {
   }
 
   save(order: Order): void {
+    this.guardRecoveryWrite(this.findById(order.orderId), order);
     this.db
       .prepare(
         `INSERT INTO orders
@@ -219,6 +407,13 @@ export class SqliteOrderRepository implements OrderRepository {
     telemetry?: OrderCancelTelemetry,
   ): void {
     const assignments = ["status = ?", "updated_at = ?"];
+    const current = this.findById(id);
+    if (current)
+      this.guardRecoveryWrite(current, {
+        ...current,
+        status,
+        exchangeOrderId: exchangeOrderId ?? current.exchangeOrderId,
+      });
     const params: unknown[] = [status, nowIso()];
 
     if (exchangeOrderId !== undefined) {
@@ -279,6 +474,8 @@ export class SqliteOrderRepository implements OrderRepository {
   ): void {
     const replace = this.db.transaction(() => {
       const current = this.findById(currentOrderId);
+      if (current && readPendingBuyRecovery(current))
+        throw new Error("protected pending BUY identity replacement refused");
       if (!current || !allowedStatuses.includes(current.status)) {
         throw new Error(
           `Prepared identity replacement requires ${allowedStatuses.join("/")} order: ${String(currentOrderId)}`,
@@ -355,6 +552,8 @@ export class SqliteOrderRepository implements OrderRepository {
     expectedMetadata: Readonly<Record<string, unknown>> | null,
     metadata: Readonly<Record<string, unknown>>,
   ): Order | null {
+    const current = this.findById(id);
+    if (current) this.guardRecoveryWrite(current, { ...current, metadata });
     const result = this.db
       .prepare(
         `UPDATE orders
@@ -390,6 +589,16 @@ export class SqliteOrderRepository implements OrderRepository {
   }
 
   sumOpenBuyNotional(basis: "original" | "remaining" = "original"): number {
+    const active = this.findPendingBuyRecovery().filter(
+      (order) => !readPendingBuyRecovery(order)!.completed,
+    );
+    const protectedIds = active.map((order) => String(order.orderId));
+    const protectedNotional = active.reduce((sum, order) => {
+      if (basis === "original") return sum + order.sizeUsdc;
+      return (
+        sum + Math.max(0, order.size - this.sumAppliedBuyFillSize(order.orderId)) * order.price
+      );
+    }, 0);
     const notional =
       basis === "remaining"
         ? `MAX(0, o.size - COALESCE((
@@ -399,9 +608,20 @@ export class SqliteOrderRepository implements OrderRepository {
     const row = this.db
       .prepare(
         `SELECT COALESCE(SUM(${notional}), 0) AS total FROM orders o
-         WHERE o.status IN ('pending', 'open', 'partially-filled') AND o.side = 'buy'`,
+         WHERE o.status IN ('pending', 'open', 'partially-filled') AND o.side = 'buy'
+           AND o.order_id NOT IN (SELECT value FROM json_each(?))`,
       )
-      .get() as { total: number };
+      .get(JSON.stringify(protectedIds)) as { total: number };
+    return row.total + protectedNotional;
+  }
+
+  sumAppliedBuyFillSize(orderId: OrderId): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(f.size), 0) AS total FROM fills f
+         JOIN orders o ON o.order_id = f.order_id WHERE f.order_id = ? AND ${APPLIED_BUY_FILL}`,
+      )
+      .get(orderId) as { total: number };
     return row.total;
   }
 
@@ -866,6 +1086,8 @@ export class SqliteOrderRepository implements OrderRepository {
   }
 
   private runMetadataUpdate(id: OrderId, metadata: Readonly<Record<string, unknown>>): void {
+    const current = this.findById(id);
+    if (current) this.guardRecoveryWrite(current, { ...current, metadata });
     const result = this.db
       .prepare(
         `UPDATE orders

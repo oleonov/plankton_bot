@@ -10,6 +10,7 @@ import {
   createCommandId,
   ExchangeErrorCode,
   RESOLVED_LOSER_LOCAL_CANCEL_REASON,
+  readPendingBuyRecovery,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { classifyCancelAgeBucket } from "../../executable-price.js";
@@ -78,13 +79,16 @@ export function resolveOrderStatusVerdict(
   grossShares: number,
   completionTolerance = DEFAULT_FILL_COMPLETION_TOLERANCE,
 ): TerminalVerdict {
+  const recovery = readPendingBuyRecovery(order);
+  if (recovery && !recovery.completed && !exchange) return { status: "unresolved" };
   // Exact working evidence dominates the local completion heuristic: a
   // near-complete fill set cannot terminalize an order still live on exchange.
   if (exchange?.status === "OPEN") {
     return { status: grossShares > 0 ? "partially-filled" : "open" };
   }
   if (exchange?.status === "PARTIALLY_FILLED") return { status: "partially-filled" };
-  if (hasLocalFullCoverage(order, grossShares, completionTolerance)) return { status: "filled" };
+  if (!recovery && hasLocalFullCoverage(order, grossShares, completionTolerance))
+    return { status: "filled" };
   if (!exchange) return { status: grossShares > 0 ? "partially-filled" : "unresolved" };
   if (exchange.status === "FILLED" && hasExactMatchedCoverage(exchange, grossShares)) {
     return { status: "filled" };
@@ -138,12 +142,13 @@ type ApplyOrderVerdictArgs = {
   bus?: EventBus;
   log: Logger;
   orderId: Order["orderId"];
-  exchange: Pick<ExchangeOrder, "status" | "sizeFilled"> | null;
+  exchange: (Pick<ExchangeOrder, "status" | "sizeFilled"> & Partial<ExchangeOrder>) | null;
   publish?: boolean;
   timestamp?: number;
   cancelTelemetry?: OrderCancelTelemetry;
   fillCompletionTolerance?: number | undefined;
   isCurrent?: (() => boolean) | undefined;
+  recoveryOwner?: (() => boolean) | undefined;
   onVerdictApplied?: ((verdict: TerminalVerdict) => void) | undefined;
 };
 
@@ -155,7 +160,7 @@ export async function applyOrderVerdict(args: ApplyOrderVerdictArgs): Promise<Te
 export async function applyOrderVerdictInLane(
   args: ApplyOrderVerdictArgs,
 ): Promise<TerminalVerdict> {
-  const order = args.orderRepo.findById(args.orderId);
+  let order = args.orderRepo.findById(args.orderId);
   if (!order) return { status: "unresolved" };
   if (args.isCurrent && !args.isCurrent()) return { status: "unresolved" };
   const applied = (verdict: TerminalVerdict): TerminalVerdict => {
@@ -164,6 +169,28 @@ export async function applyOrderVerdictInLane(
     if (!args.isCurrent || args.isCurrent()) args.onVerdictApplied?.(verdict);
     return verdict;
   };
+  const recovery = readPendingBuyRecovery(order);
+  if (recovery && !recovery.completed) {
+    args.orderRepo.observePendingBuyRecovery?.(order.orderId, args.exchange);
+    order = args.orderRepo.findById(order.orderId)!;
+    const gross = persistedGrossShares(args.fillRepo, order);
+    const verdict = resolveOrderStatusVerdict(order, args.exchange, gross);
+    if (
+      verdict.status === "filled" ||
+      verdict.status === "cancelled" ||
+      verdict.status === "rejected"
+    ) {
+      const committed = await persistTerminalVerdictInLane(args, order, verdict, gross);
+      return applied(committed ? verdict : { status: "unresolved" });
+    }
+    if (
+      (verdict.status === "open" || verdict.status === "partially-filled") &&
+      order.status !== verdict.status &&
+      !["filled", "cancelled", "rejected"].includes(order.status)
+    )
+      args.orderRepo.updateStatus(order.orderId, verdict.status);
+    return applied(verdict);
+  }
   const gross = persistedGrossShares(args.fillRepo, order);
   const completionTolerance = args.fillCompletionTolerance ?? DEFAULT_FILL_COMPLETION_TOLERANCE;
   const verdict = resolveOrderStatusVerdict(order, args.exchange, gross, completionTolerance);
@@ -217,7 +244,29 @@ export async function persistTerminalVerdictInLane(
   order: Order,
   verdict: Extract<TerminalVerdict, { status: "filled" | "cancelled" | "rejected" }>,
   gross: number,
-): Promise<void> {
+): Promise<boolean> {
+  const current = args.orderRepo.findById(order.orderId);
+  const recovery = current && readPendingBuyRecovery(current);
+  if (recovery) {
+    const expected =
+      args.exchange?.status === "FILLED"
+        ? "filled"
+        : args.exchange?.status === "REJECTED"
+          ? "rejected"
+          : "cancelled";
+    if (
+      recovery.completed ||
+      !args.exchange ||
+      !args.recoveryOwner ||
+      expected !== verdict.status ||
+      !args.orderRepo.completePendingBuyRecovery?.(
+        order,
+        args.exchange,
+        () => args.recoveryOwner!() && (args.isCurrent?.() ?? true),
+      )
+    )
+      return false;
+  }
   const cancellationTimestamp =
     verdict.status === "cancelled" ? (args.timestamp ?? Date.now()) : undefined;
   const fallbackAge =
@@ -283,4 +332,5 @@ export async function persistTerminalVerdictInLane(
       });
     }
   }
+  return true;
 }

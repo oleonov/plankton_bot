@@ -27,6 +27,9 @@ import {
   createOrderId,
   createTokenId,
   R23_DIP_TRIGGER_RULE_ID,
+  readPendingBuyRecovery,
+  pendingBuyExactMatches,
+  clobSubmittedSize,
 } from "@krabs/domain";
 import { ledgerInstant, parseLedgerInstantMs, withImmediate } from "@krabs/db";
 import type { Logger } from "./logger.js";
@@ -42,7 +45,10 @@ import {
   importExchangeFills,
 } from "./modules/reconciliation/fill-reconciler.js";
 import { updateLegStateForFill } from "./modules/leg-state/update-leg-state-for-fill.js";
-import { applyOrderVerdict } from "./modules/reconciliation/order-status-resolver.js";
+import {
+  applyOrderVerdict,
+  grossFillShares,
+} from "./modules/reconciliation/order-status-resolver.js";
 import {
   canonicalRecoveryMetadata,
   isRecoveryChildLocalIdentity,
@@ -117,6 +123,7 @@ export interface StartupDrainTarget {
 export type StartupDrainProvenance =
   | "exchange-working"
   | "exact-null-expired-maker"
+  | "startup-pending-buy"
   | "exact-null-submit-unknown-sell";
 
 interface SubmitUnknownRecoveryV1 {
@@ -220,7 +227,20 @@ function buildExactLocalOwnerEvidence(
   fill: ExchangeFill,
   order: Order | null,
 ): ExactLocalOwnerEvidence | null {
-  if (!isExactR23MakerOrder(fill, order)) return null;
+  const recovery = order && readPendingBuyRecovery(order);
+  const recoveryFill =
+    recovery &&
+    order &&
+    fill.orderId === order.exchangeOrderId &&
+    fill.tokenId === order.tokenId &&
+    fill.side === "buy" &&
+    Number.isFinite(fill.size) &&
+    fill.size > 0 &&
+    fill.size <= order.size &&
+    fill.price > 0 &&
+    fill.price <= order.price;
+  if (!isExactR23MakerOrder(fill, order) && !recoveryFill) return null;
+  if (!order) return null;
   const market = deps.marketRepo.findByTokenId(fill.tokenId);
   if (!market || market.conditionId !== order.conditionId) return null;
   const sizeUsdc = fill.sizeUsdc ?? (fill.grossSize ?? fill.size) * fill.price;
@@ -238,8 +258,8 @@ function buildExactLocalOwnerEvidence(
       sizeUsdc,
       fee: fill.fee ?? 0,
       signalReason: order.signalReason,
-      entryStyle: "maker",
-      decisionRuleId: R23_DIP_TRIGGER_RULE_ID,
+      entryStyle: order.entryStyle ?? null,
+      decisionRuleId: order.decisionRuleId ?? null,
       timestamp: fill.timestamp,
     },
   };
@@ -250,6 +270,8 @@ function matchesExactLegacyPosition(
   evidence: ExactLocalOwnerEvidence,
   position: Position,
 ): boolean {
+  if (readPendingBuyRecovery(evidence.order))
+    return matchesRecoveryOwnerLineage(deps, evidence, position);
   const fills = deps.fillRepo.findByTokenId(position.tokenId);
   const lotCount = (
     deps.db
@@ -272,6 +294,80 @@ function matchesExactLegacyPosition(
     position.conditionId === evidence.order.conditionId &&
     matchesExactSavedFill(evidence, saved) &&
     matchesFullRemainingLot(position, saved, lot)
+  );
+}
+
+function matchesRecoveryOwnerLineage(
+  deps: StartupPositionAdoptionDeps,
+  evidence: ExactLocalOwnerEvidence,
+  position: Position,
+): boolean {
+  const first = deps.db
+    .prepare(
+      `SELECT fill_id, created_at,
+    (SELECT COUNT(*) FROM inventory_lots WHERE position_id = ?) AS count
+    FROM inventory_lots WHERE position_id = ? ORDER BY rowid LIMIT 1`,
+    )
+    .get(position.positionId, position.positionId) as
+    | { fill_id: string; created_at: string; count: number }
+    | undefined;
+  const lots = deps.inventoryLotRepo
+    .findByTokenId(position.tokenId)
+    .filter((lot) => lot.positionId === position.positionId);
+  const saved = deps.fillRepo
+    .findByOrderId(evidence.order.orderId)
+    .find((fill) => String(fill.fillId) === first?.fill_id);
+  if (
+    !first ||
+    !saved ||
+    first.created_at !== position.openedAt ||
+    first.count !== lots.length ||
+    !matchesExactSavedFill(evidence, saved) ||
+    position.exitOwner !== null ||
+    position.side !== "buy" ||
+    !["open", "dust"].includes(position.status) ||
+    position.conditionId !== evidence.order.conditionId ||
+    position.realizedPnl !== 0
+  )
+    return false;
+  const groupId = readPendingBuyRecovery(evidence.order)!.groupId;
+  if (!lots.every((lot) => isAppliedRecoveryOwnerLot(deps, lot, position, groupId))) return false;
+  const size = lots.reduce((sum, lot) => sum + lot.size, 0);
+  const cost = lots.reduce((sum, lot) => sum + lot.costUsdc, 0);
+  return (
+    Math.abs(position.size - size) <= 1e-9 &&
+    Math.abs(position.costBasisUsdc - cost) <= 1e-9 &&
+    size > 0 &&
+    Math.abs(position.avgEntryPrice - cost / size) <= 1e-9
+  );
+}
+
+function isAppliedRecoveryOwnerLot(
+  deps: StartupPositionAdoptionDeps,
+  lot: InventoryLot,
+  position: Position,
+  groupId: string,
+): boolean {
+  const row = deps.db
+    .prepare("SELECT order_id FROM fills WHERE fill_id = ? AND reconciled = 1")
+    .get(lot.fillId) as { order_id: string } | undefined;
+  const order = row && deps.orderRepo.findById(createOrderId(row.order_id));
+  const fill =
+    order && deps.fillRepo.findByOrderId(order.orderId).find((item) => item.fillId === lot.fillId);
+  return (
+    !!order &&
+    !!fill &&
+    readPendingBuyRecovery(order)?.groupId === groupId &&
+    order.tokenId === position.tokenId &&
+    order.conditionId === position.conditionId &&
+    fill.tokenId === position.tokenId &&
+    fill.conditionId === position.conditionId &&
+    fill.side === "buy" &&
+    lot.side === "buy" &&
+    lot.size === fill.size &&
+    lot.remainingSize === lot.size &&
+    lot.costUsdc === fill.sizeUsdc &&
+    lot.entryPrice === fill.sizeUsdc / fill.size
   );
 }
 
@@ -315,7 +411,7 @@ function assignExactLocalOwner(
     .prepare(
       `UPDATE positions SET exit_owner = ?
         WHERE position_id = ? AND token_id = ? AND condition_id = ?
-          AND status = ? AND entry_style = ? AND entry_lane = ?
+          AND status = ? AND entry_style IS ? AND entry_lane IS ?
           AND size = ? AND avg_entry_price = ? AND cost_basis_usdc = ?
           AND realized_pnl = 0 AND exit_owner IS NULL`,
     )
@@ -344,7 +440,11 @@ function repairExactLocalExitOwner(
       return false;
     }
     const position = positions[0]!;
-    const owner = deps.resolveNewExitOwner!(evidence.fillEvent, "R23", position.openedAt);
+    const owner = deps.resolveNewExitOwner!(
+      evidence.fillEvent,
+      position.entryLane ?? null,
+      position.openedAt,
+    );
     if (owner === null) return false;
     assignExactLocalOwner(deps, position, owner);
     return true;
@@ -384,6 +484,7 @@ export async function runStartupPositionAdoption(
     .findOpen()
     .filter((order) => order.status === "pending")
     .map((order) => order.orderId);
+  const durableBuys = deps.orderRepo.findPendingBuyRecovery?.() ?? [];
 
   // FAIL CLOSED (Gap 2): use the reliable result-returning API that distinguishes
   // an authoritative empty snapshot (ok:true, data:[]) from a transport/parse
@@ -399,6 +500,26 @@ export async function runStartupPositionAdoption(
     throw new StartupSnapshotUnreliableError(fillsResult.reason, fillsResult.attempts);
   }
   const rawFills = fillsResult.data;
+  const startupOpenOrders = await readStartupOpenOrders(deps, log);
+  const stagedExact = new Map<string, ExchangeOrder | null>();
+  for (const id of pendingOrderIds) {
+    const order = deps.orderRepo.findById(id)!;
+    const owner = order.positionId && deps.positionRepo.findById(order.positionId);
+    if (order.side !== "buy" || !owner || owner.status !== "closed" || owner.size !== 0) continue;
+    if (!order.exchangeOrderId || !deps.gateway.getOrderResult) continue;
+    const exact = await deps.gateway.getOrderResult(order.exchangeOrderId);
+    if (!exact.ok)
+      throw new StartupSnapshotUnreliableError("pending order exact lookup unreliable", 1);
+    stagedExact.set(String(id), exact.data);
+  }
+  await stagePendingBuyRecovery(
+    deps,
+    pendingOrderIds,
+    durableBuys,
+    startupOpenOrders,
+    rawFills,
+    stagedExact,
+  );
   const result: StartupPositionAdoptionResult = {
     scannedFills: rawFills.length,
     alreadyKnownFills: 0,
@@ -457,7 +578,14 @@ export async function runStartupPositionAdoption(
     const directOrder = fill.orderId ? deps.orderRepo.findByExchangeOrderId(fill.orderId) : null;
     const exactEvidence = buildExactLocalOwnerEvidence(deps, fill, directOrder);
     if (exactEvidence) ownerEvidence.set(String(fill.fillId), exactEvidence);
-    if (deps.fillRepo.exists(createFillId(fill.fillId))) {
+    if (
+      deps.fillRepo.exists(createFillId(fill.fillId)) &&
+      !(
+        directOrder &&
+        readPendingBuyRecovery(directOrder) &&
+        deps.fillRepo.findUnreconciled().some((saved) => String(saved.fillId) === fill.fillId)
+      )
+    ) {
       result.alreadyKnownFills++;
       continue;
     }
@@ -540,7 +668,7 @@ export async function runStartupPositionAdoption(
         fillCompletionTolerance: deps.fillCompletionTolerance,
       });
 
-      if (importResult.imported === 0) {
+      if (importResult.imported === 0 && !readPendingBuyRecovery(localOrder)) {
         continue;
       }
 
@@ -609,16 +737,18 @@ export async function runStartupPositionAdoption(
     )
       pendingOrderIds.push(order.orderId);
   }
-  const startupOpenOrders = await readStartupOpenOrders(deps, log);
 
   for (const orderId of pendingOrderIds) {
     const order = deps.orderRepo.findById(orderId);
+    if (order && readPendingBuyRecovery(order)) continue;
     if (!order?.exchangeOrderId || !deps.gateway.getOrderResult) {
       throw new Error(
         `startup aborted — pending order ${String(orderId)} lacks exact terminal proof`,
       );
     }
-    const exact = await deps.gateway.getOrderResult(order.exchangeOrderId);
+    const exact = stagedExact.has(String(orderId))
+      ? { ok: true as const, data: stagedExact.get(String(orderId))! }
+      : await deps.gateway.getOrderResult(order.exchangeOrderId);
     if (!exact.ok)
       throw new Error(
         `startup aborted — exact lookup unreliable for pending order ${String(orderId)}`,
@@ -683,8 +813,233 @@ export async function runStartupPositionAdoption(
     exactNullSubmitUnknownSells,
     startupOpenOrders,
   );
+  for (const order of deps.orderRepo.findPendingBuyRecovery?.() ?? []) {
+    const marker = readPendingBuyRecovery(order)!;
+    if (marker.completed) continue;
+    let target = result.drainTargets.find((candidate) => candidate.tokenId === order.tokenId);
+    if (!target) {
+      target = {
+        tokenId: order.tokenId,
+        activePositionId:
+          deps.positionRepo.findActiveByTokenId(order.tokenId)[0]?.positionId ?? null,
+        orders: [],
+        provenanceByOrderId: new Map(),
+      };
+      result.drainTargets.push(target);
+    }
+    if (!target.orders.some((candidate) => candidate.orderId === order.orderId))
+      target.orders.push(order);
+    target.provenanceByOrderId.set(
+      String(order.orderId),
+      marker.role === "unknown" ? "startup-pending-buy" : "exchange-working",
+    );
+  }
 
   return result;
+}
+
+async function stagePendingBuyRecovery(
+  deps: StartupPositionAdoptionDeps,
+  pending: readonly Order["orderId"][],
+  durable: readonly Order[],
+  remote: readonly ExchangeOrder[],
+  fills: ExchangeFill[],
+  exact: Map<string, ExchangeOrder | null>,
+): Promise<void> {
+  const candidates = pending
+    .map((id) => deps.orderRepo.findById(id)!)
+    .filter(
+      (order) =>
+        order.side === "buy" &&
+        order.positionId &&
+        exact.get(String(order.orderId)) === null &&
+        !readPendingBuyRecovery(order),
+    );
+  const tokens = new Set(
+    [...candidates, ...durable.filter((order) => !readPendingBuyRecovery(order)!.completed)].map(
+      (order) => order.tokenId,
+    ),
+  );
+  for (const token of tokens) {
+    const group = pendingBuyStartupGroup(
+      deps,
+      token,
+      durable.filter((order) => order.tokenId === token),
+      candidates.filter((order) => order.tokenId === token),
+    );
+    for (const order of group.orders)
+      await stagePendingBuyMember(deps, group, order, remote, fills, exact);
+    persistPendingBuyGroup(deps.orderRepo, group, remote, exact);
+  }
+  includePersistedRecoveryFills(deps, fills);
+}
+
+interface PendingBuyStartupGroup {
+  anchor: Order;
+  orders: Order[];
+  restored: boolean;
+}
+
+function pendingBuyStartupGroup(
+  deps: StartupPositionAdoptionDeps,
+  token: TokenId,
+  persisted: Order[],
+  unknown: Order[],
+): PendingBuyStartupGroup {
+  const anchor =
+    persisted.find((order) => readPendingBuyRecovery(order)!.role === "unknown") ?? unknown[0];
+  const working = deps.orderRepo.findByTokenId(token).filter(isWorkingOrder);
+  const orders = persisted.length ? persisted : working;
+  const owner = anchor?.positionId && deps.positionRepo.findById(anchor.positionId);
+  if (
+    !anchor ||
+    (!persisted.length && unknown.length !== 1) ||
+    (persisted.length && unknown.length) ||
+    !owner ||
+    owner.tokenId !== token ||
+    owner.conditionId !== anchor.conditionId ||
+    owner.status !== "closed" ||
+    owner.size !== 0 ||
+    working.some((order) => !orders.some((member) => member.orderId === order.orderId))
+  )
+    throw new Error("pending BUY recovery group/owner mismatch");
+  return { anchor, orders, restored: persisted.length > 0 };
+}
+
+async function stagePendingBuyMember(
+  deps: StartupPositionAdoptionDeps,
+  group: PendingBuyStartupGroup,
+  order: Order,
+  remote: readonly ExchangeOrder[],
+  fills: readonly ExchangeFill[],
+  exact: Map<string, ExchangeOrder | null>,
+): Promise<void> {
+  const { anchor } = group;
+  if (
+    order.side !== "buy" ||
+    order.positionId !== anchor.positionId ||
+    order.conditionId !== anchor.conditionId ||
+    !order.exchangeOrderId ||
+    String(order.orderId) !== order.exchangeOrderId ||
+    order.orderType !== "GTC" ||
+    !order.postOnly
+  )
+    throw new Error("pending BUY recovery member identity mismatch");
+  if (!exact.has(String(order.orderId))) {
+    const response = await deps.gateway.getOrderResult?.(order.exchangeOrderId);
+    if (!response?.ok) throw new Error("pending BUY recovery exact lookup unreliable");
+    exact.set(String(order.orderId), response.data);
+  }
+  const observation = exact.get(String(order.orderId)) ?? null;
+  const working = assertPendingBuySnapshot(group, order, observation, remote);
+  if (!group.restored && working && observation)
+    assertPendingBuyFillParity(deps.fillRepo, order, observation, fills);
+}
+
+function assertPendingBuySnapshot(
+  group: PendingBuyStartupGroup,
+  order: Order,
+  observation: ExchangeOrder | null,
+  remote: readonly ExchangeOrder[],
+): boolean {
+  const marker = readPendingBuyRecovery(order);
+  if (
+    group.restored &&
+    (!marker ||
+      marker.groupId !== String(group.anchor.orderId) ||
+      marker.members.join() !== readPendingBuyRecovery(group.anchor)!.members.join() ||
+      marker.members.length !== group.orders.length)
+  )
+    throw new Error("pending BUY recovery incomplete group");
+  const snapshots = remote.filter((item) => item.orderId === order.exchangeOrderId);
+  const working = !!observation && ["OPEN", "PARTIALLY_FILLED"].includes(observation.status);
+  if (
+    (observation && !pendingBuyExactMatches(order, observation)) ||
+    snapshots.length > 1 ||
+    (working
+      ? snapshots.length !== 1 ||
+        !pendingBuyExactMatches(order, snapshots[0]!) ||
+        snapshots[0]!.sizeFilled !== observation.sizeFilled
+      : snapshots.length !== 0) ||
+    (!group.restored && order.orderId !== group.anchor.orderId && !working) ||
+    (marker?.completed && working)
+  )
+    throw new Error("pending BUY recovery snapshot mismatch");
+  return working;
+}
+
+function assertPendingBuyFillParity(
+  fillRepo: FillRepository,
+  order: Order,
+  observation: ExchangeOrder,
+  fills: readonly ExchangeFill[],
+): void {
+  const known = new Map(
+    fillRepo
+      .findByOrderId(order.orderId)
+      .map((fill) => [String(fill.fillId), grossFillShares(fill)]),
+  );
+  for (const fill of fills.filter((fill) => fill.orderId === order.exchangeOrderId)) {
+    if (fill.tokenId !== order.tokenId || fill.side !== "buy")
+      throw new Error("pending BUY fill identity mismatch");
+    known.set(fill.fillId, fill.grossSize ?? grossFillShares(fill));
+  }
+  if (
+    Math.abs([...known.values()].reduce((sum, size) => sum + size, 0) - observation.sizeFilled) >
+    1e-9
+  )
+    throw new Error("pending BUY recovery fill parity mismatch");
+}
+
+function persistPendingBuyGroup(
+  repo: OrderRepository,
+  group: PendingBuyStartupGroup,
+  remote: readonly ExchangeOrder[],
+  exact: Map<string, ExchangeOrder | null>,
+): void {
+  if (
+    remote.some(
+      (item) =>
+        item.tokenId === group.anchor.tokenId &&
+        !group.orders.some((order) => order.exchangeOrderId === item.orderId),
+    )
+  )
+    throw new Error("pending BUY recovery remote parity mismatch");
+  if (!group.restored) {
+    if (!repo.registerPendingBuyRecovery)
+      throw new Error("pending BUY recovery repository unavailable");
+    repo.registerPendingBuyRecovery(group.orders, group.anchor.orderId, exact);
+  }
+  for (const order of group.orders) {
+    repo.observePendingBuyRecovery?.(order.orderId, exact.get(String(order.orderId))!);
+    if (!readPendingBuyRecovery(repo.findById(order.orderId)!)!.completed)
+      repo.restorePendingBuyRecovery?.(order.orderId);
+  }
+}
+
+function includePersistedRecoveryFills(
+  deps: StartupPositionAdoptionDeps,
+  fills: ExchangeFill[],
+): void {
+  const persisted = (deps.orderRepo.findPendingBuyRecovery?.() ?? []).flatMap((order) =>
+    deps.fillRepo.findByOrderId(order.orderId),
+  );
+  for (const saved of persisted) {
+    const order = deps.orderRepo.findById(saved.orderId);
+    if (
+      !order ||
+      !readPendingBuyRecovery(order) ||
+      fills.some((fill) => fill.fillId === String(saved.fillId))
+    )
+      continue;
+    fills.push({
+      ...saved,
+      fillId: String(saved.fillId),
+      orderId: order.exchangeOrderId!,
+      clientOrderId: String(order.clientOrderId),
+      timestamp: Date.parse(saved.filledAt),
+    });
+  }
 }
 
 export function parseSubmitUnknownRecoveryV1(order: Order): SubmitUnknownRecoveryV1 | null {
@@ -1307,11 +1662,6 @@ function remoteOrderMatchesLocal(
     Math.abs(remote.sizeFilled - filled) <= 1e-9 &&
     Math.abs(remote.sizeRemaining - sizeRemaining) <= 1e-9
   );
-}
-
-function clobSubmittedSize(size: number): number {
-  const decimalPlaces = size.toString().split(".")[1]?.length ?? 0;
-  return decimalPlaces <= 2 ? size : Math.floor(size * 100) / 100;
 }
 
 function persistSubmitUnknownMarker(orderRepo: OrderRepository, snapshot: Order): Order {

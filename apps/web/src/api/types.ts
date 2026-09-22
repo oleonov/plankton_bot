@@ -308,9 +308,30 @@ export interface PolymarketPortfolioStatus {
 }
 
 /** GET /status */
+export type RuntimeLifecycleState =
+  | "running"
+  | "ready_paused"
+  | "starting"
+  | "stopping"
+  | "stopped"
+  | "failed"
+  | "unknown";
+
+export type ReconciliationHealthKind =
+  | "ok"
+  | "position_drift"
+  | "unresolved_missing"
+  | "acknowledged_external_state_unknown"
+  | "other_drift"
+  | "unknown";
+
 export interface StatusData {
   runtimeMode: string;
-  uptimeSeconds: number;
+  uptimeSeconds: number | null;
+  runtimeState?: RuntimeLifecycleState;
+  runtimeAlive?: boolean;
+  runtimeHeartbeatAt?: string | null;
+  runtimeHeartbeatFreshnessMs?: number;
   paused: boolean;
   lastReconciliationAt: string | null;
   marketDataStale: boolean;
@@ -352,6 +373,10 @@ export interface StatusData {
     activeMarketCapUtilizationPct?: number;
     walletMode?: "eoa" | "relayer";
     minOrderUsdc?: number | null;
+  };
+  reconciliation?: {
+    kind: ReconciliationHealthKind;
+    detail: string;
   };
   reconciliationDriftDetected: boolean;
   marketDataPoll?: { active: boolean; page: number };

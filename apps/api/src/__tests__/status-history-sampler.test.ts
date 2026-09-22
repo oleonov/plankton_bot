@@ -14,13 +14,25 @@ beforeEach(() => {
   ctrl = bootstrapControlDb(":memory:");
   // The runtime seeds this row in prod; a bare bootstrap does not, so ensure it.
   ctrl.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
-  ctrl.db.prepare("UPDATE runtime_control_state SET paused = 0 WHERE id = 1").run();
+  ctrl.db
+    .prepare(
+      `UPDATE runtime_control_state
+          SET current_profile = 'simulation', current_run_id = 'run-1',
+              current_instance_id = 'i1', runtime_status = 'running', paused = 0
+        WHERE id = 1`,
+    )
+    .run();
   ledger = new Database(":memory:");
   ledger.exec(
     `CREATE TABLE runtime_metrics (
        id INTEGER PRIMARY KEY AUTOINCREMENT, metric_name TEXT NOT NULL,
        value REAL NOT NULL, labels TEXT, captured_at TEXT NOT NULL);
-     CREATE TABLE position_drifts (status TEXT NOT NULL)`,
+     CREATE TABLE position_drifts (status TEXT NOT NULL);
+     CREATE TABLE bot_runs (
+       run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, started_at TEXT NOT NULL,
+       finished_at TEXT, summary TEXT);
+     INSERT INTO bot_runs (run_id, mode, started_at)
+       VALUES ('run-1', 'simulation', '2026-07-01T11:00:00.000Z')`,
   );
 });
 afterEach(() => {
@@ -31,9 +43,12 @@ afterEach(() => {
 function seedHeartbeat(atMs: number): void {
   ctrl.db
     .prepare(
-      `INSERT INTO service_heartbeats (service_name, instance_id, last_heartbeat_at)
-       VALUES ('runtime', 'i1', ?)
-       ON CONFLICT(service_name, instance_id) DO UPDATE SET last_heartbeat_at = excluded.last_heartbeat_at`,
+      `INSERT INTO service_heartbeats
+         (service_name, instance_id, profile, run_id, last_heartbeat_at)
+       VALUES ('runtime', 'i1', 'simulation', 'run-1', ?)
+       ON CONFLICT(service_name, instance_id) DO UPDATE SET
+         profile = excluded.profile, run_id = excluded.run_id,
+         last_heartbeat_at = excluded.last_heartbeat_at`,
     )
     .run(new Date(atMs).toISOString());
 }
@@ -56,7 +71,9 @@ function seedMarket(atMs: number): void {
     .run("reconciliation_clean", at);
 }
 function setPaused(paused: boolean): void {
-  ctrl.db.prepare("UPDATE runtime_control_state SET paused = ? WHERE id = 1").run(paused ? 1 : 0);
+  ctrl.db
+    .prepare("UPDATE runtime_control_state SET paused = ?, runtime_status = ? WHERE id = 1")
+    .run(paused ? 1 : 0, paused ? "ready_paused" : "running");
 }
 
 function sampler(): StatusHistorySampler {

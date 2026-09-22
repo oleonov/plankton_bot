@@ -209,12 +209,198 @@ function reconciliationDrift(kind: ReconciliationHealthKind): boolean {
 // use a stricter/looser window for its warm-up logic.
 export const RUNTIME_HEARTBEAT_STALE_MS = 90_000;
 
+export type RuntimeLifecycleState =
+  | "running"
+  | "ready_paused"
+  | "starting"
+  | "stopping"
+  | "stopped"
+  | "failed"
+  | "unknown";
+
+export interface RuntimeHealthEvidence {
+  runtimeState: RuntimeLifecycleState;
+  controlPaused: boolean | null;
+  runtimeAlive: boolean;
+  runtimeHeartbeatAtMs: number | null;
+  runtimeHeartbeatFreshnessMs: number;
+  runtimeUptimeSeconds: number | null;
+}
+
 // SQLite `datetime('now')` yields "YYYY-MM-DD HH:MM:SS" in UTC with NO timezone.
 // Parsing that with the JS Date parser treats it as LOCAL time, which is wrong on
 // a non-UTC host. Force UTC when the string carries no timezone marker.
 function parseDbTimestampMs(ts: string): number {
   const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(ts);
   return Date.parse(hasTz ? ts : `${ts.replace(" ", "T")}Z`);
+}
+
+const RUNTIME_LIFECYCLE_STATES = new Set<RuntimeLifecycleState>([
+  "running",
+  "ready_paused",
+  "starting",
+  "stopping",
+  "stopped",
+  "failed",
+  "unknown",
+]);
+
+function normalizeRuntimeState(value: unknown): RuntimeLifecycleState {
+  return typeof value === "string" && RUNTIME_LIFECYCLE_STATES.has(value as RuntimeLifecycleState)
+    ? (value as RuntimeLifecycleState)
+    : "unknown";
+}
+
+interface RuntimeControlEvidence {
+  profile: string | null;
+  runId: string | null;
+  instanceId: string | null;
+  runtimeState: RuntimeLifecycleState;
+  controlPaused: boolean | null;
+}
+
+function unavailableRuntimeHealthEvidence(
+  runtimeState: RuntimeLifecycleState = "unknown",
+  controlPaused: boolean | null = null,
+): RuntimeHealthEvidence {
+  return {
+    runtimeState,
+    controlPaused,
+    runtimeAlive: false,
+    runtimeHeartbeatAtMs: null,
+    runtimeHeartbeatFreshnessMs: RUNTIME_HEARTBEAT_STALE_MS,
+    runtimeUptimeSeconds: null,
+  };
+}
+
+function readRuntimeControlEvidence(controlDb: Database.Database): RuntimeControlEvidence {
+  const control = controlDb
+    .prepare(
+      `SELECT current_profile, current_run_id, current_instance_id, runtime_status, paused
+         FROM runtime_control_state WHERE id = 1`,
+    )
+    .get() as
+    | {
+        current_profile?: unknown;
+        current_run_id?: unknown;
+        current_instance_id?: unknown;
+        runtime_status?: unknown;
+        paused?: unknown;
+      }
+    | undefined;
+  const nonEmptyString = (value: unknown): string | null =>
+    typeof value === "string" && value ? value : null;
+  return {
+    profile: nonEmptyString(control?.current_profile),
+    runId: nonEmptyString(control?.current_run_id),
+    instanceId: nonEmptyString(control?.current_instance_id),
+    runtimeState: normalizeRuntimeState(control?.runtime_status),
+    controlPaused: control?.paused === 1 ? true : control?.paused === 0 ? false : null,
+  };
+}
+
+function readActiveRunStartedAtMs(
+  ledgerDb: Database.Database,
+  runId: string,
+  profile: string,
+  nowMs: number,
+): number | null {
+  const run = ledgerDb
+    .prepare("SELECT run_id, mode, started_at, finished_at FROM bot_runs WHERE run_id = ?")
+    .get(runId) as
+    | { run_id?: unknown; mode?: unknown; started_at?: unknown; finished_at?: unknown }
+    | undefined;
+  const startedAtMs =
+    typeof run?.started_at === "string" ? parseDbTimestampMs(run.started_at) : Number.NaN;
+  const active =
+    run?.run_id === runId &&
+    run.mode === profile &&
+    run.finished_at === null &&
+    Number.isFinite(startedAtMs) &&
+    startedAtMs <= nowMs;
+  return active ? startedAtMs : null;
+}
+
+function readCorrelatedRuntimeHeartbeatAtMs(
+  controlDb: Database.Database,
+  instanceId: string,
+  profile: string,
+  runId: string,
+): number | null {
+  const heartbeat = controlDb
+    .prepare(
+      `SELECT instance_id, profile, run_id, last_heartbeat_at
+         FROM service_heartbeats
+        WHERE service_name = 'runtime' AND instance_id = ?`,
+    )
+    .get(instanceId) as
+    | { instance_id?: unknown; profile?: unknown; run_id?: unknown; last_heartbeat_at?: unknown }
+    | undefined;
+  if (
+    heartbeat?.instance_id !== instanceId ||
+    heartbeat.profile !== profile ||
+    heartbeat.run_id !== runId ||
+    typeof heartbeat.last_heartbeat_at !== "string"
+  ) {
+    return null;
+  }
+  const heartbeatAtMs = parseDbTimestampMs(heartbeat.last_heartbeat_at);
+  return Number.isFinite(heartbeatAtMs) ? heartbeatAtMs : null;
+}
+
+function buildRuntimeHealthEvidence(
+  control: RuntimeControlEvidence,
+  startedAtMs: number,
+  runtimeHeartbeatAtMs: number,
+  nowMs: number,
+): RuntimeHealthEvidence {
+  const operationalState =
+    control.runtimeState === "running" || control.runtimeState === "ready_paused";
+  const consistentPause =
+    (control.runtimeState === "running" && control.controlPaused === false) ||
+    (control.runtimeState === "ready_paused" && control.controlPaused === true);
+  const heartbeatFresh =
+    runtimeHeartbeatAtMs <= nowMs && nowMs - runtimeHeartbeatAtMs < RUNTIME_HEARTBEAT_STALE_MS;
+  const runtimeAlive = operationalState && consistentPause && heartbeatFresh;
+  return {
+    runtimeState: control.runtimeState,
+    controlPaused: control.controlPaused,
+    runtimeAlive,
+    runtimeHeartbeatAtMs: operationalState && consistentPause ? runtimeHeartbeatAtMs : null,
+    runtimeHeartbeatFreshnessMs: RUNTIME_HEARTBEAT_STALE_MS,
+    runtimeUptimeSeconds: runtimeAlive ? Math.floor((nowMs - startedAtMs) / 1000) : null,
+  };
+}
+
+export function readRuntimeHealthEvidence(
+  ledgerDb: Database.Database,
+  controlDb: Database.Database | undefined,
+  nowMs = Date.now(),
+): RuntimeHealthEvidence {
+  if (!controlDb) return unavailableRuntimeHealthEvidence();
+
+  let observedState: RuntimeLifecycleState = "unknown";
+  let observedPaused: boolean | null = null;
+  try {
+    const control = readRuntimeControlEvidence(controlDb);
+    observedState = control.runtimeState;
+    observedPaused = control.controlPaused;
+    const fallback = () => unavailableRuntimeHealthEvidence(observedState, observedPaused);
+    if (!control.profile || !control.runId || !control.instanceId) return fallback();
+
+    const startedAtMs = readActiveRunStartedAtMs(ledgerDb, control.runId, control.profile, nowMs);
+    if (startedAtMs === null) return fallback();
+    const runtimeHeartbeatAtMs = readCorrelatedRuntimeHeartbeatAtMs(
+      controlDb,
+      control.instanceId,
+      control.profile,
+      control.runId,
+    );
+    if (runtimeHeartbeatAtMs === null) return fallback();
+    return buildRuntimeHealthEvidence(control, startedAtMs, runtimeHeartbeatAtMs, nowMs);
+  } catch {
+    return unavailableRuntimeHealthEvidence(observedState, observedPaused);
+  }
 }
 
 // Latest runtime heartbeat (epoch ms) — the robust liveness signal. A dead runtime
@@ -334,6 +520,9 @@ export interface SystemHealthSnapshot {
   modules: ModuleSeverity[];
   // Raw liveness evidence for the sampler's warm-up / readiness logic.
   runtimeHeartbeatAtMs: number | null;
+  runtimeState: RuntimeLifecycleState;
+  runtimeHeartbeatFreshnessMs: number;
+  runtimeUptimeSeconds: number | null;
   marketDataUpdatedAtMs: number | null;
 }
 
@@ -348,13 +537,9 @@ export function collectSystemHealthSnapshot(
   staleThresholdMs: number,
   nowMs = Date.now(),
 ): { snapshot: SystemHealthSnapshot; alerts1h: InfraAlertRow[]; alerts24h: InfraAlertRow[] } {
-  const control = readControlState(controlDb);
-  const paused = control.paused;
-
-  // Liveness from the heartbeat (robust), NOT runtime_status (stale-prone).
-  const runtimeHeartbeatAtMs = readRuntimeHeartbeatAtMs(controlDb);
-  const runtimeAlive =
-    runtimeHeartbeatAtMs !== null && nowMs - runtimeHeartbeatAtMs < RUNTIME_HEARTBEAT_STALE_MS;
+  const runtime = readRuntimeHealthEvidence(ledgerDb, controlDb, nowMs);
+  const paused = runtime.controlPaused ?? false;
+  const { runtimeAlive, runtimeHeartbeatAtMs } = runtime;
   const marketDataUpdatedAtMs = readMarketDataUpdatedAtMs(ledgerDb);
   const marketDataStale = readMarketDataStale(ledgerDb, staleThresholdMs);
 
@@ -383,6 +568,9 @@ export function collectSystemHealthSnapshot(
       uptime,
       modules,
       runtimeHeartbeatAtMs,
+      runtimeState: runtime.runtimeState,
+      runtimeHeartbeatFreshnessMs: runtime.runtimeHeartbeatFreshnessMs,
+      runtimeUptimeSeconds: runtime.runtimeUptimeSeconds,
       marketDataUpdatedAtMs,
     },
     alerts1h,

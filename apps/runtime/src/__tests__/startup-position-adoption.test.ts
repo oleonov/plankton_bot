@@ -38,6 +38,7 @@ import {
   runOwnershipInvariantStartupGate,
 } from "../modules/exit-ownership/assert-bounce-for-all-invariant.js";
 import { canonicalRecoveryMetadata } from "../modules/execution/reservation-utils.js";
+import { incidentIds, pendingBuyFixture } from "./fixtures/pending-buy-recovery.js";
 
 const TOKEN_ID = createTokenId("tok-btc-yes");
 
@@ -314,6 +315,20 @@ describe("runStartupPositionAdoption", () => {
     while (connections.length > 0) {
       connections.pop()!.close();
     }
+  });
+
+  it("admits the September 22 two-BUY closed-owner incident before adoption", async () => {
+    const fixture = pendingBuyFixture();
+    connections.push(fixture.conn);
+    const result = await fixture.adopt();
+    expect(result.drainTargets).toHaveLength(1);
+    expect(result.drainTargets[0]!.orders.map((order) => String(order.orderId)).sort()).toEqual(
+      [...incidentIds].sort(),
+    );
+    expect(result.drainTargets[0]!.provenanceByOrderId.get(incidentIds[0])).toBe(
+      "startup-pending-buy",
+    );
+    expect(fixture.deps.orderRepo.sumOpenBuyNotional("remaining")).toBeCloseTo(1.38);
   });
 
   it("adopts orphan buy fills into local order/fill/position/lot state", async () => {

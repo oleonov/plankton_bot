@@ -6,6 +6,7 @@ import { buildServer } from "../server.js";
 import {
   collectSystemHealthSnapshot,
   readReconciliationHealth,
+  RUNTIME_HEARTBEAT_STALE_MS,
 } from "../system-health-snapshot.js";
 import { stubLedgerPool, MARKET_DATA_TEST_DEFAULTS } from "./test-helpers.js";
 
@@ -66,6 +67,128 @@ function authHeaders() {
 }
 
 describe("GET /api/v1/system-health", () => {
+  it("requires matching lifecycle, run, profile, instance, and timestamps for runtime liveness", () => {
+    conn.db.exec(`
+      CREATE TABLE IF NOT EXISTS runtime_control_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        current_profile TEXT,
+        desired_profile TEXT,
+        current_run_id TEXT,
+        current_instance_id TEXT,
+        runtime_status TEXT NOT NULL DEFAULT 'stopped',
+        paused INTEGER NOT NULL DEFAULT 1
+      );
+      CREATE TABLE IF NOT EXISTS service_heartbeats (
+        service_name TEXT NOT NULL,
+        instance_id TEXT NOT NULL,
+        profile TEXT,
+        run_id TEXT,
+        last_heartbeat_at TEXT NOT NULL,
+        status_json TEXT,
+        PRIMARY KEY (service_name, instance_id)
+      )
+    `);
+    const now = Date.parse("2026-09-22T12:00:00.000Z");
+    const runId = "health-runtime-run";
+    const instanceId = "health-runtime-instance";
+    const setControl = (status: string, currentInstanceId = instanceId) =>
+      conn.db
+        .prepare(
+          `INSERT INTO runtime_control_state
+             (id, current_profile, desired_profile, current_run_id, current_instance_id,
+              runtime_status, paused)
+           VALUES (1, 'simulation', 'simulation', ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             current_profile = excluded.current_profile,
+             current_run_id = excluded.current_run_id,
+             current_instance_id = excluded.current_instance_id,
+             runtime_status = excluded.runtime_status,
+             paused = excluded.paused`,
+        )
+        .run(runId, currentInstanceId, status, status === "ready_paused" ? 1 : 0);
+    const setHeartbeat = (at: string, profile = "simulation") =>
+      conn.db
+        .prepare(
+          `INSERT OR REPLACE INTO service_heartbeats
+             (service_name, instance_id, profile, run_id, last_heartbeat_at, status_json)
+           VALUES ('runtime', ?, ?, ?, ?, NULL)`,
+        )
+        .run(instanceId, profile, runId, at);
+    const readSnapshot = () => collectSystemHealthSnapshot(conn.db, conn.db, 120_000, now).snapshot;
+
+    try {
+      conn.db
+        .prepare(
+          "INSERT INTO bot_runs (run_id, mode, started_at, finished_at) VALUES (?, 'simulation', ?, NULL)",
+        )
+        .run(runId, new Date(now - 3_600_000).toISOString());
+      setControl("running");
+      setHeartbeat(new Date(now - 1_000).toISOString());
+
+      expect(readSnapshot()).toMatchObject({
+        runtimeState: "running",
+        runtimeAlive: true,
+        runtimeHeartbeatFreshnessMs: RUNTIME_HEARTBEAT_STALE_MS,
+        runtimeUptimeSeconds: 3_600,
+      });
+
+      setControl("ready_paused");
+      expect(readSnapshot()).toMatchObject({
+        runtimeState: "ready_paused",
+        runtimeAlive: true,
+        runtimeUptimeSeconds: 3_600,
+      });
+
+      setControl("failed");
+      expect(readSnapshot()).toMatchObject({
+        runtimeState: "failed",
+        runtimeAlive: false,
+        runtimeHeartbeatAtMs: null,
+        runtimeUptimeSeconds: null,
+      });
+
+      setControl("running", "replacement-instance");
+      expect(readSnapshot().runtimeAlive).toBe(false);
+
+      setControl("running");
+      setHeartbeat(new Date(now + 1_000).toISOString());
+      expect(readSnapshot()).toMatchObject({
+        runtimeAlive: false,
+        runtimeUptimeSeconds: null,
+      });
+
+      setHeartbeat(new Date(now - RUNTIME_HEARTBEAT_STALE_MS).toISOString());
+      expect(readSnapshot()).toMatchObject({
+        runtimeAlive: false,
+        runtimeUptimeSeconds: null,
+      });
+
+      setHeartbeat(new Date(now - 1_000).toISOString(), "paper");
+      expect(readSnapshot().runtimeAlive).toBe(false);
+
+      setHeartbeat(new Date(now - 1_000).toISOString());
+      conn.db
+        .prepare("UPDATE bot_runs SET finished_at = ? WHERE run_id = ?")
+        .run(new Date(now).toISOString(), runId);
+      expect(readSnapshot()).toMatchObject({
+        runtimeAlive: false,
+        runtimeHeartbeatAtMs: null,
+        runtimeUptimeSeconds: null,
+      });
+    } finally {
+      conn.db.prepare("DELETE FROM service_heartbeats WHERE instance_id = ?").run(instanceId);
+      conn.db.prepare("DELETE FROM bot_runs WHERE run_id = ?").run(runId);
+      conn.db
+        .prepare(
+          `UPDATE runtime_control_state
+              SET current_run_id = NULL, current_instance_id = NULL,
+                  runtime_status = 'stopped', paused = 1
+            WHERE id = 1`,
+        )
+        .run();
+    }
+  });
+
   it("counts aggregate Pino values beyond 500 rows with clock-hour buckets and explicit coverage", async () => {
     const now = Date.parse("2026-09-09T02:00:10.000Z");
     const clock = vi.spyOn(Date, "now").mockReturnValue(now);

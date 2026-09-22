@@ -16,6 +16,8 @@ import {
   hasNeverPostedMinimumEvidence,
   minimumRetryIdentity,
   exchangeComparisonOrder,
+  readPendingBuyRecovery,
+  pendingBuyExactMatches,
 } from "@krabs/domain";
 import { prepareSuccessorMinimum } from "../../min-order-size.js";
 import type {
@@ -1063,6 +1065,11 @@ export class ExecutionModule implements RuntimeModule {
 
   acknowledgeStartupTransitions(targets: ReadonlyArray<StartupDrainTarget>): void {
     for (const target of targets) {
+      if (this.isPendingBuyStartupGroup(target)) {
+        for (const order of target.orders)
+          this.acknowledgeExactNullStartupOrder(order, "startup-pending-buy");
+        continue;
+      }
       const exact = target.orders.filter((order) => {
         const provenance = target.provenanceByOrderId.get(String(order.orderId));
         return (
@@ -1084,12 +1091,43 @@ export class ExecutionModule implements RuntimeModule {
     }
   }
 
+  private isPendingBuyStartupGroup(target: StartupDrainTarget): boolean {
+    const markers = target.orders.map(readPendingBuyRecovery);
+    if (!markers.some(Boolean)) return false;
+    const first = markers.find(Boolean)!;
+    const members = first.members.map((id) => this.deps.orderRepo.findById(createOrderId(id)));
+    if (
+      markers.some(
+        (marker, index) =>
+          !marker ||
+          marker.groupId !== first.groupId ||
+          marker.members.join() !== first.members.join() ||
+          target.provenanceByOrderId.get(String(target.orders[index]!.orderId)) !==
+            (marker.role === "unknown" ? "startup-pending-buy" : "exchange-working"),
+      ) ||
+      members.some(
+        (order) =>
+          !order ||
+          !readPendingBuyRecovery(order) ||
+          (!readPendingBuyRecovery(order)!.completed &&
+            !target.orders.some((item) => item.orderId === order.orderId)),
+      )
+    )
+      throw new Error("startup pending BUY recovery group is incomplete");
+    return true;
+  }
+
   private acknowledgeExactNullStartupOrder(
     snapshot: Order,
     provenance: Exclude<StartupDrainProvenance, "exchange-working">,
   ): void {
     const current = this.deps.orderRepo.findById(snapshot.orderId);
-    if (current && isTerminalOrderStatus(current.status)) return;
+    if (
+      current &&
+      isTerminalOrderStatus(current.status) &&
+      (!readPendingBuyRecovery(current) || readPendingBuyRecovery(current)!.completed)
+    )
+      return;
     if (!current) {
       throw new Error("startup exact-null quarantine changed before acknowledgement");
     }
@@ -1129,7 +1167,8 @@ export class ExecutionModule implements RuntimeModule {
     return Boolean(
       state &&
       current &&
-      !isTerminalOrderStatus(current.status) &&
+      (!isTerminalOrderStatus(current.status) ||
+        readPendingBuyRecovery(current)?.completed === false) &&
       this.sameStartupOrderIdentity(state.order, current) &&
       this.sameStartupOrderIdentity(current, order),
     );
@@ -1146,7 +1185,11 @@ export class ExecutionModule implements RuntimeModule {
   getSubmitUnknownRecoveryContexts(isCurrent = () => true): SubmitUnknownRecoveryContext[] {
     const revision = this.cleanupLifecycleRevision;
     return [...this.exactNullStartupQuarantine.values()]
-      .filter((state) => state.provenance === "exact-null-submit-unknown-sell")
+      .filter(
+        (state) =>
+          state.provenance === "exact-null-submit-unknown-sell" ||
+          state.provenance === "startup-pending-buy",
+      )
       .map((state) => {
         const lifecycleCurrent = () => {
           const current = this.deps.orderRepo.findById(state.order.orderId);
@@ -1222,6 +1265,7 @@ export class ExecutionModule implements RuntimeModule {
       ...(timestamp === undefined ? {} : { timestamp }),
       fillCompletionTolerance: this.deps.fillCompletionTolerance,
       isCurrent,
+      recoveryOwner: state.provenance === "startup-pending-buy" ? isCurrent : undefined,
       onVerdictApplied: (applied) =>
         this.updateSubmitUnknownTerminalProof(state, exchange, applied, isCurrent),
     });
@@ -1285,6 +1329,8 @@ export class ExecutionModule implements RuntimeModule {
     provenance: Exclude<StartupDrainProvenance, "exchange-working">,
   ): boolean {
     if (!this.sameStartupOrderIdentity(snapshot, current) || !this.deps.positionRepo) return false;
+    if (provenance === "startup-pending-buy")
+      return readPendingBuyRecovery(current)?.completed === false;
     if (provenance === "exact-null-expired-maker") {
       return isExactNullExpiredMakerDrainCandidate(
         current,
@@ -1334,6 +1380,7 @@ export class ExecutionModule implements RuntimeModule {
     order: Order,
     exact: Partial<Pick<ExchangeOrder, "orderId" | "tokenId" | "side">>,
   ): boolean {
+    if (readPendingBuyRecovery(order)) return pendingBuyExactMatches(order, exact);
     return (
       exact.orderId === order.exchangeOrderId &&
       String(exact.tokenId) === String(order.tokenId) &&
@@ -1835,6 +1882,7 @@ export class ExecutionModule implements RuntimeModule {
     this.acknowledgeStartupTransitions(targets);
     for (const target of targets) {
       if (target.orders.length === 0) continue;
+      const buyGroup = this.isPendingBuyStartupGroup(target);
       const currentOrders: Order[] = [];
       const knownExchangeLiveOrderIds = new Set<string>();
       const exactNullCount = [...target.provenanceByOrderId.values()].filter(
@@ -1842,7 +1890,7 @@ export class ExecutionModule implements RuntimeModule {
       ).length;
       if (
         target.provenanceByOrderId.size !== target.orders.length ||
-        (exactNullCount > 0 && (exactNullCount !== 1 || target.orders.length !== 1))
+        (!buyGroup && exactNullCount > 0 && (exactNullCount !== 1 || target.orders.length !== 1))
       ) {
         throw new Error("startup drain provenance is incomplete");
       }
@@ -1860,19 +1908,24 @@ export class ExecutionModule implements RuntimeModule {
           current.exchangeOrderId !== snapshot.exchangeOrderId ||
           (provenance !== "exchange-working" &&
             provenance !== "exact-null-expired-maker" &&
+            provenance !== "startup-pending-buy" &&
             provenance !== "exact-null-submit-unknown-sell")
         ) {
           throw new Error("startup drain target changed before seeding");
         }
         if (provenance === "exchange-working") knownExchangeLiveOrderIds.add(orderKey);
-        else if (!isTerminalOrderStatus(current.status)) {
+        if (
+          (buyGroup || provenance !== "exchange-working") &&
+          (!isTerminalOrderStatus(current.status) ||
+            readPendingBuyRecovery(current)?.completed === false)
+        ) {
           const exactState = this.exactNullStartupQuarantine.get(orderKey);
           if (
             !exactState ||
-            exactState.provenance !== provenance ||
+            exactState.provenance !== (buyGroup ? "startup-pending-buy" : provenance) ||
             !this.isExactNullStartupOrderQuarantined(current) ||
             (!exactState.seedAttempted &&
-              !this.matchesExactNullStartupProof(exactState.order, current, provenance))
+              !this.matchesExactNullStartupProof(exactState.order, current, exactState.provenance))
           ) {
             throw new Error("startup exact-null maker proof changed before seeding");
           }
@@ -1925,7 +1978,13 @@ export class ExecutionModule implements RuntimeModule {
 
   private canRemoveSubmitUnknownTarget(order: Order): boolean {
     const state = this.exactNullStartupQuarantine.get(String(order.orderId));
-    if (state?.provenance !== "exact-null-submit-unknown-sell") return true;
+    const marker = readPendingBuyRecovery(order);
+    if (marker && !marker.completed) return false;
+    if (
+      state?.provenance !== "exact-null-submit-unknown-sell" &&
+      state?.provenance !== "startup-pending-buy"
+    )
+      return true;
     return (
       this.started &&
       !this.cleanupStopping &&
@@ -4943,9 +5002,14 @@ export class ExecutionModule implements RuntimeModule {
   ): Promise<void> {
     const exactState = this.exactNullStartupQuarantine.get(String(cmd.orderId));
     const expectedReason = exactState ? this.exactStartupCancelReason(exactState) : null;
-    if (cmd.reason === "submit_unknown_recovery" && !exactState) return;
     if (
-      exactState?.provenance === "exact-null-submit-unknown-sell" &&
+      (cmd.reason === "submit_unknown_recovery" || cmd.reason === "startup_pending_buy_recovery") &&
+      !exactState
+    )
+      return;
+    if (
+      (exactState?.provenance === "exact-null-submit-unknown-sell" ||
+        exactState?.provenance === "startup-pending-buy") &&
       cmd.reason !== expectedReason
     )
       return;
@@ -5299,10 +5363,10 @@ export class ExecutionModule implements RuntimeModule {
       this.deps.orderRepo.findOpen(),
       cmd,
     ).filter((order) => order.orderId !== excludeOrderId);
-    return buildReservationSnapshot(
+    return this.buildRecoveryReservationSnapshot(
       openOrders,
-      this.deps.fillRepo,
       this.pendingReservations.values(),
+      excludeOrderId,
     );
   }
 
@@ -5389,6 +5453,7 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   private exactStartupCancelReason(state: ExactNullStartupQuarantineState): CancelOrderReason {
+    if (state.provenance === "startup-pending-buy") return "startup_pending_buy_recovery";
     return state.provenance === "exact-null-submit-unknown-sell"
       ? "submit_unknown_recovery"
       : "stale_entry_ttl";
@@ -5934,20 +5999,30 @@ export class ExecutionModule implements RuntimeModule {
     // the local terminal row, so only the exact resolver may release that fence.
     const existingOrder = this.deps.orderRepo.findById(cmd.orderId);
     const exactStartupCancel = this.isClaimedExactStartupCancel(cmd, existingOrder);
-    if (cmd.reason === "submit_unknown_recovery" && !exactStartupCancel) return;
+    if (
+      (cmd.reason === "submit_unknown_recovery" || cmd.reason === "startup_pending_buy_recovery") &&
+      !exactStartupCancel
+    )
+      return;
     const exactState = this.exactNullStartupQuarantine.get(orderKey);
     if (
-      exactState?.provenance === "exact-null-submit-unknown-sell" &&
-      cmd.reason !== "submit_unknown_recovery"
+      (exactState?.provenance === "exact-null-submit-unknown-sell" ||
+        exactState?.provenance === "startup-pending-buy") &&
+      cmd.reason !== this.exactStartupCancelReason(exactState)
     )
       return;
     const recovery =
-      exactState?.provenance === "exact-null-submit-unknown-sell"
+      exactState?.provenance === "exact-null-submit-unknown-sell" ||
+      exactState?.provenance === "startup-pending-buy"
         ? this.getSubmitUnknownRecoveryContexts().find(
             (context) => context.order.orderId === cmd.orderId,
           )
         : undefined;
-    if (exactState?.provenance === "exact-null-submit-unknown-sell" && !recovery?.isCurrent())
+    if (
+      (exactState?.provenance === "exact-null-submit-unknown-sell" ||
+        exactState?.provenance === "startup-pending-buy") &&
+      !recovery?.isCurrent()
+    )
       return;
     const isTransitionTarget = this.hasTransitionTarget(cmd.orderId);
     if (existingOrder && isTerminalOrderStatus(existingOrder.status) && !isTransitionTarget) {
@@ -6088,6 +6163,8 @@ export class ExecutionModule implements RuntimeModule {
         exchange: exact.data,
         publish: true,
         isCurrent: recovery?.isCurrent,
+        recoveryOwner:
+          exactState?.provenance === "startup-pending-buy" ? recovery?.isCurrent : undefined,
         onVerdictApplied:
           recovery && exactState
             ? (applied) =>
@@ -6152,7 +6229,30 @@ export class ExecutionModule implements RuntimeModule {
 
   private getReservationSnapshot(cmd?: PlaceOrderCommand) {
     const openOrders = this.excludeBounceTargetBeingReplaced(this.deps.orderRepo.findOpen(), cmd);
-    return buildReservationSnapshot(openOrders, this.deps.fillRepo, this.capacityReservations(cmd));
+    return this.buildRecoveryReservationSnapshot(openOrders, this.capacityReservations(cmd));
+  }
+
+  private buildRecoveryReservationSnapshot(
+    openOrders: Order[],
+    pending: Iterable<PendingReservation>,
+    excludeOrderId?: OrderId,
+  ): ReservationSnapshot {
+    const protectedOrders = (this.deps.orderRepo.findPendingBuyRecovery?.() ?? []).filter(
+      (order) => order.orderId !== excludeOrderId && !readPendingBuyRecovery(order)!.completed,
+    );
+    const protectedIds = new Set(protectedOrders.map((order) => order.orderId));
+    const held = protectedOrders.map((order) => ({
+      ...order,
+      size: Math.max(
+        0,
+        order.size - (this.deps.orderRepo.sumAppliedBuyFillSize?.(order.orderId) ?? 0),
+      ),
+    }));
+    return buildReservationSnapshot(
+      openOrders.filter((order) => !protectedIds.has(order.orderId)),
+      this.deps.fillRepo,
+      [...pending, ...held],
+    );
   }
 
   private isWalletOnlyCleanupClamp(
@@ -6278,7 +6378,7 @@ export class ExecutionModule implements RuntimeModule {
     const pending = this.capacityReservations(cmd).filter(
       (reservation) => reservation !== ownReservation,
     );
-    return buildReservationSnapshot(open, this.deps.fillRepo, pending);
+    return this.buildRecoveryReservationSnapshot(open, pending, ownPrepared?.orderId);
   }
 
   private matchesPreciseCleanupIdentity(

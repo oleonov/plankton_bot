@@ -7,6 +7,7 @@ import {
   type OwnershipInvariantId,
 } from "@krabs/db";
 import type { Database } from "better-sqlite3";
+import { readPendingBuyRecovery, type OrderId, type OrderRepository } from "@krabs/domain";
 
 import { persistFailedStartupState } from "../../persist-failed-startup-state.js";
 
@@ -93,6 +94,11 @@ const PHASE_DIAGNOSIS: Readonly<Record<OwnershipGatePhase, string>> = {
 };
 
 export interface OwnershipInvariantStartupGate {
+  buyRecovery?: {
+    orderIds: readonly OrderId[];
+    orderRepo: OrderRepository;
+    isTransitionTarget: (id: OrderId) => boolean;
+  };
   ledgerDb: Database;
   controlDb: Database;
   applyToAllMarkets: boolean;
@@ -127,6 +133,7 @@ export interface OwnershipInvariantStartupGate {
 export function runOwnershipInvariantStartupGate(gate: OwnershipInvariantStartupGate): void {
   const phase = gate.phase ?? "pre-start";
   try {
+    assertPendingBuyRecoveryFenced(gate.buyRecovery);
     assertBounceForAllOwnershipInvariant(
       gate.ledgerDb,
       gate.applyToAllMarkets,
@@ -144,6 +151,28 @@ export function runOwnershipInvariantStartupGate(gate: OwnershipInvariantStartup
       gate.log.fatal({ err, phase }, "startup ownership-invariant check failed");
     }
     throw err;
+  }
+}
+
+function assertPendingBuyRecoveryFenced(
+  recovery: OwnershipInvariantStartupGate["buyRecovery"],
+): void {
+  if (!recovery) return;
+  const ids = new Set([
+    ...recovery.orderIds,
+    ...(recovery.orderRepo.findPendingBuyRecovery?.() ?? []).map((order) => order.orderId),
+  ]);
+  for (const id of ids) {
+    const order = recovery.orderRepo.findById(id);
+    const marker = order && readPendingBuyRecovery(order);
+    if (
+      !order ||
+      !marker ||
+      (marker.completed
+        ? !["filled", "cancelled", "rejected"].includes(order.status)
+        : !recovery.isTransitionTarget(id))
+    )
+      throw new DrainedOrderUnfencedError([String(id)]);
   }
 }
 

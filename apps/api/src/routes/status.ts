@@ -11,7 +11,7 @@ import {
   resolveLiveLiteFunderAddress,
 } from "../polymarket-portfolio.js";
 import type { PolymarketPositionPortfolio } from "../polymarket-portfolio.js";
-import { readReconciliationHealth } from "../system-health-snapshot.js";
+import { readReconciliationHealth, readRuntimeHealthEvidence } from "../system-health-snapshot.js";
 
 interface StatusOpts {
   db: Database.Database;
@@ -21,8 +21,6 @@ interface StatusOpts {
   envMode?: string | undefined;
   defaultInitialBalanceUsdc?: number | null | undefined;
 }
-
-const startedAt = Date.now();
 
 interface LiveLiteStatus {
   maxOpenValueUsdc: number;
@@ -449,7 +447,9 @@ export function buildStatusSnapshot(
   envMode?: string,
   defaultInitialBalanceUsdc?: number | null,
 ): Record<string, unknown> {
-  const oneMinuteAgoIso = new Date(Date.now() - 60_000).toISOString();
+  const nowMs = Date.now();
+  const oneMinuteAgoIso = new Date(nowMs - 60_000).toISOString();
+  const runtimeHealth = readRuntimeHealthEvidence(db, controlDb, nowMs);
 
   const openPositions = db
     .prepare("SELECT COUNT(*) as cnt FROM positions WHERE status = 'open'")
@@ -517,7 +517,7 @@ export function buildStatusSnapshot(
 
   const marketDataLastUpdateAt = lastMarketData?.ts ?? null;
   const marketDataStale = marketDataLastUpdateAt
-    ? Date.now() - new Date(marketDataLastUpdateAt).getTime() > staleThresholdMs
+    ? nowMs - new Date(marketDataLastUpdateAt).getTime() > staleThresholdMs
     : true; // no data yet = stale
 
   const runtimeMode = profileOverride ?? botRun?.mode ?? "simulation";
@@ -533,13 +533,14 @@ export function buildStatusSnapshot(
           .get() as { labels: string } | undefined)
       : undefined;
 
-  const reconciliationKind = readReconciliationHealth(db, Date.now()).kind;
+  const reconciliation = readReconciliationHealth(db, nowMs);
+  const reconciliationKind = reconciliation.kind;
   const reconciliationDriftDetected =
     reconciliationKind === "position_drift" ||
     reconciliationKind === "unresolved_missing" ||
     reconciliationKind === "other_drift";
 
-  const paused = pausedMetric?.value === 1;
+  const paused = runtimeHealth.controlPaused ?? pausedMetric?.value === 1;
 
   const { tradingState, signalActivity } = computeTradingState(db, paused);
 
@@ -611,7 +612,7 @@ export function buildStatusSnapshot(
   const executionTelemetry24h = {
     windowHours: 24,
     ...computeExecutionTelemetry(db, {
-      sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      sinceIso: new Date(nowMs - 24 * 60 * 60 * 1000).toISOString(),
     }),
   };
   const executionQueueRow = db
@@ -690,7 +691,14 @@ export function buildStatusSnapshot(
     desiredProfile,
     currentProfile,
     ledgerProfile: profileOverride ?? runtimeMode,
-    uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
+    uptimeSeconds: runtimeHealth.runtimeUptimeSeconds,
+    runtimeState: runtimeHealth.runtimeState,
+    runtimeAlive: runtimeHealth.runtimeAlive,
+    runtimeHeartbeatAt:
+      runtimeHealth.runtimeHeartbeatAtMs === null
+        ? null
+        : new Date(runtimeHealth.runtimeHeartbeatAtMs).toISOString(),
+    runtimeHeartbeatFreshnessMs: runtimeHealth.runtimeHeartbeatFreshnessMs,
     paused,
     lastReconciliationAt: lastRecon?.ts ?? null,
     marketDataStale,
@@ -717,6 +725,7 @@ export function buildStatusSnapshot(
       ? ((JSON.parse(execMode.labels) as { value?: string }).value ?? "simulation")
       : "simulation",
     liveLite: buildLiveLiteStatus(runtimeMode, db, controlDb, envelopeRow?.labels),
+    reconciliation,
     reconciliationDriftDetected,
     tradingState,
     signalActivity,

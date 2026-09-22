@@ -95,6 +95,7 @@ export type CancelOrderReason =
   | "bounce_ask_capture_reprice"
   | "phantom_missing_on_exchange"
   | "submit_unknown_recovery"
+  | "startup_pending_buy_recovery"
   | "exit_loss_floor";
 
 export interface CancelOrderCommand {

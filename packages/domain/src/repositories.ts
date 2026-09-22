@@ -43,6 +43,7 @@ import type {
 import type { TradingCalendarException, TradingCalendarMetadata } from "./effective-resolution.js";
 import { toCanonicalIso } from "./timestamp.js";
 import type { V4SelectionCategory, V4SelectionResult } from "./v4-selection.js";
+import type { ExchangeOrder } from "./gateway.js";
 
 /**
  * ADR-025 §D-B telemetry payload, persisted on transition into
@@ -297,7 +298,105 @@ export interface MarketScoreUpdate {
 
 // ─── OrderRepository ─────────────────────────────────────────────────────
 
+export interface PendingBuyRecovery {
+  version: 1;
+  groupId: string;
+  members: string[];
+  role: "unknown" | "working";
+  identity: string;
+  matched: number;
+  completed: boolean;
+}
+
+export function pendingBuyIdentity(order: Order): string {
+  return JSON.stringify([
+    order.orderId,
+    order.clientOrderId,
+    order.exchangeOrderId,
+    order.tokenId,
+    order.conditionId,
+    order.positionId,
+    order.side,
+    order.orderType,
+    order.postOnly ?? false,
+    order.price,
+    order.size,
+    order.sizeUsdc,
+    order.createdAt,
+    order.entryStyle ?? null,
+    order.decisionRuleId ?? null,
+    order.signalReason ?? null,
+  ]);
+}
+
+export function readPendingBuyRecovery(order: Order): PendingBuyRecovery | null {
+  const raw = order.metadata?.pendingBuyRecovery;
+  if (raw === undefined) return null;
+  const marker = raw as PendingBuyRecovery | null;
+  if (
+    !marker ||
+    marker.version !== 1 ||
+    order.side !== "buy" ||
+    !order.exchangeOrderId ||
+    String(order.orderId) !== order.exchangeOrderId ||
+    !order.positionId ||
+    marker.identity !== pendingBuyIdentity(order) ||
+    typeof marker.groupId !== "string" ||
+    !Array.isArray(marker.members) ||
+    !marker.members.every((id) => typeof id === "string" && id.length > 0) ||
+    new Set(marker.members).size !== marker.members.length ||
+    !marker.members.includes(marker.groupId) ||
+    !marker.members.includes(String(order.orderId)) ||
+    (marker.role !== "unknown" && marker.role !== "working") ||
+    (marker.role === "unknown") !== (marker.groupId === String(order.orderId)) ||
+    !Number.isFinite(marker.matched) ||
+    marker.matched < 0 ||
+    typeof marker.completed !== "boolean"
+  ) {
+    throw new Error("pending BUY recovery marker is invalid");
+  }
+  return marker;
+}
+
+export function pendingBuyExactMatches(order: Order, exact: Partial<ExchangeOrder>): boolean {
+  const size = clobSubmittedSize(order.size);
+  return (
+    exact.orderId === order.exchangeOrderId &&
+    exact.tokenId === order.tokenId &&
+    exact.side === "buy" &&
+    (exact.clientOrderId == null || exact.clientOrderId === order.clientOrderId) &&
+    exact.price === order.price &&
+    exact.sizeTotal === size &&
+    typeof exact.sizeFilled === "number" &&
+    Number.isFinite(exact.sizeFilled) &&
+    exact.sizeFilled >= 0 &&
+    exact.sizeFilled <= size &&
+    typeof exact.sizeRemaining === "number" &&
+    Math.abs(exact.sizeRemaining - (size - exact.sizeFilled)) <= 1e-9
+  );
+}
+
+export function clobSubmittedSize(size: number): number {
+  const decimalPlaces = size.toString().split(".")[1]?.length ?? 0;
+  return decimalPlaces <= 2 ? size : Math.floor(size * 100) / 100;
+}
+
 export interface OrderRepository {
+  findPendingBuyRecovery?(): Order[];
+  /** BUY shares backed by reconciled fills and matching committed inventory lots. */
+  sumAppliedBuyFillSize?(orderId: OrderId): number;
+  registerPendingBuyRecovery?(
+    orders: readonly Order[],
+    anchorId: OrderId,
+    observations: ReadonlyMap<string, ExchangeOrder | null>,
+  ): void;
+  observePendingBuyRecovery?(id: OrderId, exact: Partial<ExchangeOrder> | null): void;
+  restorePendingBuyRecovery?(id: OrderId): void;
+  completePendingBuyRecovery?(
+    order: Order,
+    exact: Partial<ExchangeOrder>,
+    isCurrent: () => boolean,
+  ): boolean;
   /** Persist a new order row. */
   save(order: Order): void;
 
