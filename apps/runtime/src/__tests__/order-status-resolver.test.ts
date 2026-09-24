@@ -4,7 +4,9 @@ import {
   createConditionId,
   createOrderId,
   createTokenId,
+  createPositionId,
   ExchangeErrorCode,
+  pendingBuyIdentity,
   RESOLVED_LOSER_LOCAL_CANCEL_REASON,
 } from "@krabs/domain";
 import type { ClientOrderId, Order, OrderRepository } from "@krabs/domain";
@@ -15,7 +17,9 @@ import {
   hasLocalFullCoverage,
   resolveOrderStatusVerdict,
   registerCancelIntent,
+  clearCancelIntent,
   persistTerminalVerdictInLane,
+  EXCHANGE_ABSENT_CANCEL_REASON,
 } from "../modules/reconciliation/order-status-resolver.js";
 
 const order: Order = {
@@ -468,5 +472,57 @@ describe("order status resolver", () => {
         cancelAgeMs: 1_000,
         fillProgressShares: 5,
       });
+  });
+});
+
+describe("exchange-absence terminal flag", () => {
+  const absentTerminal = (target: Order, gross: number) =>
+    resolveOrderStatusVerdict(target, null, gross, undefined, true);
+
+  it("leaves an exact null non-terminal unless the reconciler sets the flag", () => {
+    expect(resolveOrderStatusVerdict(order, null, 0)).toEqual({ status: "unresolved" });
+    expect(resolveOrderStatusVerdict(order, null, 5)).toEqual({ status: "partially-filled" });
+    expect(absentTerminal(order, 5)).toEqual({
+      status: "cancelled",
+      reason: EXCHANGE_ABSENT_CANCEL_REASON,
+    });
+  });
+
+  it("still lets full local coverage win over the absence cancel", () => {
+    expect(absentTerminal(order, 100)).toEqual({ status: "filled" });
+  });
+
+  it("never terminalizes an open pending-BUY recovery on the flag", () => {
+    const base = { ...order, exchangeOrderId: "order-1", positionId: createPositionId("pos-1") };
+    const recovery: Order = {
+      ...base,
+      metadata: {
+        pendingBuyRecovery: {
+          version: 1,
+          groupId: "order-1",
+          members: ["order-1"],
+          role: "unknown",
+          identity: pendingBuyIdentity(base),
+          matched: 0,
+          completed: false,
+        },
+      },
+    };
+    expect(absentTerminal(recovery, 5)).toEqual({ status: "unresolved" });
+  });
+
+  it("stores and publishes the absence reason over a leftover execution cancel intent", async () => {
+    const f = cancellationFixture();
+    registerCancelIntent(String(order.orderId), "stale_exit_ttl");
+    onTestFinished(() => clearCancelIntent(String(order.orderId)));
+    await applyOrderVerdict({ ...f.args, exchange: null, exchangeNullTerminal: true });
+    expect(f.row()).toMatchObject({
+      status: "cancelled",
+      cancelReason: EXCHANGE_ABSENT_CANCEL_REASON,
+    });
+    expect(f.publish).toHaveBeenCalledWith(
+      "OrderCancelled",
+      expect.objectContaining({ reason: EXCHANGE_ABSENT_CANCEL_REASON }),
+    );
   });
 });

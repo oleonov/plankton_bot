@@ -116,11 +116,13 @@ export type ReconciliationHealthKind =
   | "unresolved_missing"
   | "acknowledged_external_state_unknown"
   | "other_drift"
-  | "unknown";
+  | "unknown"
+  | "exchange_absent_quarantine";
 
 export interface ReconciliationHealth {
   kind: ReconciliationHealthKind;
   detail: string;
+  quarantine?: { count: number; nextCloseAt: string | null };
 }
 
 const RECONCILIATION_STALE_MS = 90_000;
@@ -131,7 +133,26 @@ const RECONCILIATION_MARKERS = [
   "reconciliation_skipped_unreliable",
   "reconciliation_skipped_suspicious_empty",
   "reconciliation_fills_skipped_unreliable",
+  "reconciliation_exchange_absent_quarantined",
 ] as const;
+
+// Quarantine is a calm, non-drift status: excluded from the clean=1 contradiction
+// check below (it is expected to coexist with a clean pass) and read separately
+// from `labels` for its `nextCloseAt` hint.
+function readQuarantineNextCloseAt(db: Database.Database, capturedAt: string): string | null {
+  return safe<string | null>(() => {
+    const row = db
+      .prepare(
+        `SELECT labels FROM runtime_metrics
+          WHERE captured_at = ? AND metric_name = 'reconciliation_exchange_absent_quarantined'
+          ORDER BY id DESC LIMIT 1`,
+      )
+      .get(capturedAt) as { labels?: string | null } | undefined;
+    if (!row?.labels) return null;
+    const parsed = JSON.parse(row.labels) as { nextCloseAt?: unknown };
+    return typeof parsed.nextCloseAt === "string" ? parsed.nextCloseAt : null;
+  }, null);
+}
 
 export function readReconciliationHealth(
   db: Database.Database,
@@ -175,7 +196,8 @@ export function readReconciliationHealth(
     const clean = values.get("reconciliation_clean")!;
     const unresolved = values.get("reconciliation_unresolved_missing_on_exchange")!;
     const quarantine = values.get("reconciliation_acknowledged_external_state_unknown")!;
-    const skipped = RECONCILIATION_MARKERS.slice(3).reduce(
+    const exchangeAbsentQuarantined = values.get("reconciliation_exchange_absent_quarantined")!;
+    const skipped = RECONCILIATION_MARKERS.slice(3, 6).reduce(
       (sum, name) => sum + values.get(name)!,
       0,
     );
@@ -190,6 +212,16 @@ export function readReconciliationHealth(
       return {
         kind: "acknowledged_external_state_unknown",
         detail: "startup quarantine — external state unknown",
+      };
+    }
+    if (clean === 1 && exchangeAbsentQuarantined > 0) {
+      return {
+        kind: "exchange_absent_quarantine",
+        detail: `quarantined ${exchangeAbsentQuarantined} order${exchangeAbsentQuarantined === 1 ? "" : "s"} — awaiting exchange-absence close`,
+        quarantine: {
+          count: exchangeAbsentQuarantined,
+          nextCloseAt: readQuarantineNextCloseAt(db, latest.ts),
+        },
       };
     }
     return clean === 1

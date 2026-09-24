@@ -151,4 +151,38 @@ describe("StatusBar", () => {
     );
     await waitFor(() => expect(screen.getByText("POSITION DRIFT")).toBeInTheDocument());
   });
+
+  it("renders a calm quarantine badge with count and close time, never RECON DRIFT", async () => {
+    neverResolveStatus();
+    const status = {
+      ...statusFixture,
+      reconciliation: {
+        kind: "exchange_absent_quarantine",
+        detail: "quarantined 3 orders — awaiting exchange-absence close",
+        quarantine: { count: 3, nextCloseAt: new Date(Date.now() + 21 * 3_600_000).toISOString() },
+      },
+    } satisfies StatusData;
+    renderCachedStatus(status);
+
+    expect(await screen.findByText(/QUARANTINE 3/)).toBeInTheDocument();
+    expect(screen.getByText(/QUARANTINE 3/)).toHaveTextContent(/closes in 21h/);
+    expect(screen.queryByText("RECON DRIFT")).not.toBeInTheDocument();
+  });
+
+  it("omits the close-time fragment when nextCloseAt is unknown", async () => {
+    neverResolveStatus();
+    const status = {
+      ...statusFixture,
+      reconciliation: {
+        kind: "exchange_absent_quarantine",
+        detail: "quarantined 1 order — awaiting exchange-absence close",
+        quarantine: { count: 1, nextCloseAt: null },
+      },
+    } satisfies StatusData;
+    renderCachedStatus(status);
+
+    const badge = await screen.findByText(/QUARANTINE 1/);
+    expect(badge).toHaveTextContent("QUARANTINE 1");
+    expect(badge.textContent).not.toMatch(/closes in/);
+  });
 });

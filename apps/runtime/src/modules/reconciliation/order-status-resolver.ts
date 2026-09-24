@@ -15,10 +15,17 @@ import {
 import type { Logger } from "../../logger.js";
 import { classifyCancelAgeBucket } from "../../executable-price.js";
 import { computeAgeMs } from "./cancel-telemetry.js";
+import { clearExchangeAbsence, readExchangeAbsence } from "./exchange-absence.js";
 
 export const DEFAULT_FILL_COMPLETION_TOLERANCE = 0.005;
+export const EXCHANGE_ABSENT_CANCEL_REASON = "exchange-exact-null-absent";
 const EXCHANGE_FILL_EPSILON = 1e-9;
 const lanes = new Map<string, Promise<void>>();
+/** Local closures whose reason a leftover execution cancel intent must not overwrite. */
+const LOCAL_CANCEL_REASONS: ReadonlySet<string> = new Set([
+  RESOLVED_LOSER_LOCAL_CANCEL_REASON,
+  EXCHANGE_ABSENT_CANCEL_REASON,
+]);
 const cancelIntents = new Map<string, string>();
 
 export type TerminalVerdict =
@@ -78,6 +85,8 @@ export function resolveOrderStatusVerdict(
   exchange: Pick<ExchangeOrder, "status" | "sizeFilled"> | null,
   grossShares: number,
   completionTolerance = DEFAULT_FILL_COMPLETION_TOLERANCE,
+  /** Set only by the reconciler once the exchange-absence rule is due; see exchange-absence.ts. */
+  exchangeNullTerminal = false,
 ): TerminalVerdict {
   const recovery = readPendingBuyRecovery(order);
   if (recovery && !recovery.completed && !exchange) return { status: "unresolved" };
@@ -89,6 +98,9 @@ export function resolveOrderStatusVerdict(
   if (exchange?.status === "PARTIALLY_FILLED") return { status: "partially-filled" };
   if (!recovery && hasLocalFullCoverage(order, grossShares, completionTolerance))
     return { status: "filled" };
+  if (!exchange && exchangeNullTerminal) {
+    return { status: "cancelled", reason: EXCHANGE_ABSENT_CANCEL_REASON };
+  }
   if (!exchange) return { status: grossShares > 0 ? "partially-filled" : "unresolved" };
   if (exchange.status === "FILLED" && hasExactMatchedCoverage(exchange, grossShares)) {
     return { status: "filled" };
@@ -147,6 +159,8 @@ type ApplyOrderVerdictArgs = {
   timestamp?: number;
   cancelTelemetry?: OrderCancelTelemetry;
   fillCompletionTolerance?: number | undefined;
+  /** See {@link resolveOrderStatusVerdict}; ignored while a pending-BUY recovery is open. */
+  exchangeNullTerminal?: boolean | undefined;
   isCurrent?: (() => boolean) | undefined;
   recoveryOwner?: (() => boolean) | undefined;
   onVerdictApplied?: ((verdict: TerminalVerdict) => void) | undefined;
@@ -163,6 +177,10 @@ export async function applyOrderVerdictInLane(
   let order = args.orderRepo.findById(args.orderId);
   if (!order) return { status: "unresolved" };
   if (args.isCurrent && !args.isCurrent()) return { status: "unresolved" };
+  // Any exact answer is a sign of life that restarts the exchange-absence window.
+  if (args.exchange && readExchangeAbsence(order)) {
+    clearExchangeAbsence(args.orderRepo, order.orderId, args.log);
+  }
   const applied = (verdict: TerminalVerdict): TerminalVerdict => {
     // Publication can invalidate the owner. Commit proof after events, while
     // still holding the lane; working verdicts revoke it without yielding.
@@ -193,7 +211,13 @@ export async function applyOrderVerdictInLane(
   }
   const gross = persistedGrossShares(args.fillRepo, order);
   const completionTolerance = args.fillCompletionTolerance ?? DEFAULT_FILL_COMPLETION_TOLERANCE;
-  const verdict = resolveOrderStatusVerdict(order, args.exchange, gross, completionTolerance);
+  const verdict = resolveOrderStatusVerdict(
+    order,
+    args.exchange,
+    gross,
+    completionTolerance,
+    args.exchangeNullTerminal,
+  );
   const exchangeWorking =
     args.exchange?.status === "OPEN" || args.exchange?.status === "PARTIALLY_FILLED";
   if (exchangeWorking) {
@@ -275,7 +299,7 @@ export async function persistTerminalVerdictInLane(
       : null;
   const reason =
     verdict.status === "cancelled"
-      ? verdict.reason === RESOLVED_LOSER_LOCAL_CANCEL_REASON
+      ? LOCAL_CANCEL_REASONS.has(verdict.reason)
         ? verdict.reason
         : (cancelIntents.get(String(order.orderId)) ?? verdict.reason)
       : verdict.status === "rejected"

@@ -2607,3 +2607,48 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.staleTtlCancelled).toBe(reasons.length);
   });
 });
+
+describe("cleanStaleEntryOrders — exchange-absence quarantine", () => {
+  const longAgo = new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString();
+  const marker = { exchangeAbsenceV1: { firstNullAt: new Date().toISOString() } };
+
+  function expiredOrders(quarantined: boolean): Order[] {
+    const buy = makeOrder({ orderId: createOrderId("expired-buy"), createdAt: longAgo });
+    const target = makeBounceTargetOrder(0.8, 0.8);
+    const sell = { ...target, orderId: createOrderId("expired-sell"), createdAt: longAgo };
+    if (!quarantined) return [buy, sell];
+    return [
+      { ...buy, metadata: marker },
+      { ...sell, metadata: { ...sell.metadata, ...marker } },
+    ];
+  }
+
+  async function runWith(orders: Order[]) {
+    const published: string[] = [];
+    const bus = new InProcessEventBus();
+    bus.subscribe("CancelOrderRequested", async ({ command }) => {
+      published.push(String(command.orderId));
+    });
+    const orderRepo = createMockOrderRepo();
+    orderRepo.findOpen = vi.fn().mockReturnValue(orders);
+    const result = await cleanStaleEntryOrders(
+      { orderRepo, marketRepo: createMockMarketRepo(), bus, log: silentLog, exitOrderTtlMs: 0 },
+      new Map(),
+    );
+    return { published, result };
+  }
+
+  it("requests no cancel and bumps no counter for expired orders carrying the marker", async () => {
+    const { published, result } = await runWith(expiredOrders(true));
+    expect(published).toEqual([]);
+    expect(result.staleTtlCancelled).toBe(0);
+    expect(result.staleExitTtlCancelled).toBe(0);
+  });
+
+  it("still cancels the same expired orders without the marker", async () => {
+    const { published, result } = await runWith(expiredOrders(false));
+    expect(published.sort()).toEqual(["expired-buy", "expired-sell"]);
+    expect(result.staleTtlCancelled).toBe(1);
+    expect(result.staleExitTtlCancelled).toBe(1);
+  });
+});

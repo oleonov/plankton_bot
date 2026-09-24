@@ -33,6 +33,7 @@ import type {
   RepriceChainPolicyConfig,
   RiskEventRepository,
   RuntimeEventMap,
+  Order,
 } from "@krabs/domain";
 import {
   createTokenId,
@@ -44,6 +45,7 @@ import {
 import { parseSubmitUnknownRecoveryV1 } from "../../startup-position-adoption.js";
 import type { Logger } from "../../logger.js";
 import { reconcileOrders, type OrderReconcileResult } from "./order-reconciler.js";
+import { isExchangeAbsenceDue, readExchangeAbsence } from "./exchange-absence.js";
 import {
   DEFAULT_FILL_COMPLETION_TOLERANCE,
   reconcileFills,
@@ -426,6 +428,17 @@ export class ReconciliationModule implements RuntimeModule {
     };
   }
 
+  /** Pre-filter only; the reconciler re-checks each order after the fills import. */
+  private exchangeAbsenceBackfillCandidates(ranAt: number): Order[] {
+    return this.deps.orderRepo
+      .findOpen()
+      .filter(
+        (order) =>
+          readExchangeAbsence(order) !== null &&
+          isExchangeAbsenceDue(order, this.deps.fillRepo.findByOrderId(order.orderId), ranAt),
+      );
+  }
+
   /** Exposed for testing — in production driven by startup + interval timer. */
   async runReconciliation(): Promise<ReconciliationResult> {
     if (this.reconciling) {
@@ -448,10 +461,16 @@ export class ReconciliationModule implements RuntimeModule {
       // prove a terminal local status whereas open-snapshot absence cannot. The
       // fetch is throttled: `sinceMs` still starts at the last reliable fetch,
       // so a skipped pass leaves no gap in the imported history.
-      const sinceMs = this.lastRunAt ?? 0;
       const fetchFills =
         this.lastFillsFetchAt === null ||
         ranAt - this.lastFillsFetchAt >= RECONCILIATION_FILLS_SAFETY_NET_MS;
+      // `/data/trades` can index a match after the incremental cursor passed it, so
+      // an order due for absence terminalization re-reads its whole fill history.
+      const backfillCandidates = fetchFills ? this.exchangeAbsenceBackfillCandidates(ranAt) : [];
+      const sinceMs = Math.min(
+        this.lastRunAt ?? 0,
+        ...backfillCandidates.map((order) => Date.parse(order.createdAt)),
+      );
       const stageFillsStart = Date.now();
       const fillCompletionTolerance =
         this.deps.fillCompletionTolerance ?? DEFAULT_FILL_COMPLETION_TOLERANCE;
@@ -472,6 +491,9 @@ export class ReconciliationModule implements RuntimeModule {
         : skippedFillsResult();
       stageTimingsMs.fills = fetchFills ? Date.now() - stageFillsStart : 0;
       const fillsFetchedReliably = fetchFills && fillResult.skipReason !== "unreliable_fills";
+      const historyBackfilledOrderIds = new Set(
+        fillsFetchedReliably ? backfillCandidates.map((order) => String(order.orderId)) : [],
+      );
       allDetails.push(...fillResult.details);
 
       // 2. Open-order reconciliation. Absence only emits unresolved evidence;
@@ -491,6 +513,7 @@ export class ReconciliationModule implements RuntimeModule {
         suspiciousEmptyThreshold: this.deps.suspiciousEmptyThreshold ?? 3,
         consecutiveMissThreshold: this.deps.consecutiveMissThreshold ?? 3,
         consecutiveMissCounts: this.consecutiveMissCounts,
+        historyBackfilledOrderIds,
         unresolvedStaleOrders: this.unresolvedStaleOrders,
         recoveryContexts,
         stageTimingsMs,
@@ -678,6 +701,15 @@ export class ReconciliationModule implements RuntimeModule {
         "reconciliation_acknowledged_external_state_unknown",
         quarantineCount,
         null,
+        new Date(ranAt).toISOString(),
+      );
+      const nextCloseAtMs = orderResult.exchangeAbsentNextCloseAtMs ?? null;
+      this.deps.runtimeMetrics?.writeLatest?.(
+        "reconciliation_exchange_absent_quarantined",
+        orderResult.exchangeAbsentQuarantinedOrderIds?.length ?? 0,
+        JSON.stringify({
+          nextCloseAt: nextCloseAtMs === null ? null : new Date(nextCloseAtMs).toISOString(),
+        }),
         new Date(ranAt).toISOString(),
       );
 

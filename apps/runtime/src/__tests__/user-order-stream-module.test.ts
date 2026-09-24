@@ -19,7 +19,10 @@ import type {
   Order,
   TokenId,
 } from "@krabs/domain";
+import { bootstrapLedgerDb, SqliteFillRepository, SqliteOrderRepository } from "@krabs/db";
 import { UserOrderStreamModule } from "../modules/reconciliation/user-order-stream-module.js";
+import { readExchangeAbsence } from "../modules/reconciliation/exchange-absence.js";
+import { inOrderLifecycleLane } from "../modules/reconciliation/order-status-resolver.js";
 
 class FakeUserEventStream implements ExchangeUserEventStream {
   handlers: {
@@ -806,4 +809,108 @@ describe("UserOrderStreamModule", () => {
 
     expect(stream.conditionIds).toEqual([]);
   });
+});
+
+describe("UserOrderStreamModule — exchange-absence marker", () => {
+  const DAY = 24 * 60 * 60_000;
+  const ZOMBIE = createOrderId("zombie");
+  const markedAt = Date.now() - 2 * DAY;
+  let conn: ReturnType<typeof bootstrapLedgerDb>;
+  let orders: SqliteOrderRepository;
+  let stream: FakeUserEventStream;
+  let gateway: ExchangeGateway;
+  let mod: UserOrderStreamModule;
+  const zombie = () => orders.findById(ZOMBIE)!;
+  const marker = () => readExchangeAbsence(zombie())?.firstNullAtMs ?? null;
+
+  beforeEach(async () => {
+    conn = bootstrapLedgerDb(":memory:");
+    orders = new SqliteOrderRepository(conn.db);
+    const { order } = createMockOrderRepo();
+    orders.save({
+      ...order,
+      orderId: ZOMBIE,
+      clientOrderId: "zombie-client" as any,
+      side: "sell",
+      status: "partially-filled",
+      exchangeOrderId: "zx",
+      createdAt: new Date(Date.now() - 30 * DAY).toISOString(),
+      metadata: { exchangeAbsenceV1: { firstNullAt: new Date(markedAt).toISOString() } },
+    });
+    stream = new FakeUserEventStream();
+    gateway = createMockGateway(stream);
+    gateway.getOrderResult = vi.fn().mockResolvedValue({ ok: true, data: null });
+    mod = new UserOrderStreamModule({
+      gateway,
+      fillRepo: new SqliteFillRepository(conn.db),
+      marketRepo: createMockMarketRepo(order.tokenId),
+      orderRepo: orders,
+      bus: new InProcessEventBus(),
+      log: silentLog,
+    });
+    await mod.start();
+  });
+
+  afterEach(async () => {
+    await mod.stop();
+    conn.close();
+  });
+
+  it("catch-up reconcile keeps a due order open and its marker intact", async () => {
+    expect(gateway.getOrderResult).toHaveBeenCalledWith("zx");
+    await stream.emitGap();
+    expect(zombie().status).toBe("partially-filled");
+    expect(marker()).toBe(markedAt);
+  });
+
+  it("never resurrects a status a lane holder terminalized while the event was in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const held = inOrderLifecycleLane(String(ZOMBIE), () => gate);
+    const handled = stream.emitOrder({
+      type: "order",
+      event: "UPDATE",
+      orderId: "zx",
+      clientOrderId: "zombie-client",
+      tokenId: zombie().tokenId,
+      side: "sell",
+      sizeTotal: 10,
+      sizeFilled: 2,
+      sizeRemaining: 8,
+      status: "PARTIALLY_FILLED",
+      timestamp: Date.now(),
+    });
+    orders.updateStatus(ZOMBIE, "cancelled");
+    release();
+    await Promise.all([held, handled]);
+    expect(zombie().status).toBe("cancelled");
+    expect(marker()).toBeNull();
+  });
+
+  it.each([
+    ["PLACEMENT", "OPEN", { ok: true, data: null }],
+    ["UPDATE", "PARTIALLY_FILLED", { ok: true, data: null }],
+    ["CANCELLATION", "CANCELLED", { ok: false, reason: "server" }],
+    ["CANCELLATION", "CANCELLED", { ok: true, data: null }],
+  ] as const)(
+    "clears the marker on a websocket %s event (exact lookup %j)",
+    async (event, status, exact) => {
+      vi.mocked(gateway.getOrderResult!).mockResolvedValue(exact as never);
+      await stream.emitOrder({
+        type: "order",
+        event,
+        orderId: "zx",
+        clientOrderId: "zombie-client",
+        tokenId: zombie().tokenId,
+        side: "sell",
+        sizeTotal: 10,
+        sizeFilled: 2,
+        sizeRemaining: 8,
+        status,
+        timestamp: Date.now(),
+      });
+      expect(marker()).toBeNull();
+      expect(zombie().status).toBe("partially-filled");
+    },
+  );
 });

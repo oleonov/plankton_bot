@@ -16,6 +16,20 @@ type RuntimeDisplayState =
   | "STALE"
   | "UNKNOWN";
 
+// "closes in Xh" for the quarantine badge; null once nextCloseAt is unknown, "closing"
+// once the close time has passed (the calm badge never shows a negative duration).
+function formatClosesIn(nextCloseAt: string | null | undefined, nowMs: number): string | null {
+  if (!nextCloseAt) return null;
+  const closeAtMs = Date.parse(nextCloseAt);
+  if (!Number.isFinite(closeAtMs)) return null;
+  const diffMs = closeAtMs - nowMs;
+  if (diffMs <= 0) return "closing";
+  const hours = diffMs / 3_600_000;
+  return hours < 1
+    ? `closes in ${Math.max(1, Math.round(diffMs / 60_000))}m`
+    : `closes in ${Math.round(hours)}h`;
+}
+
 function runtimeDisplayState(status: StatusData | undefined, nowMs: number): RuntimeDisplayState {
   if (!status) return "UNKNOWN";
 
@@ -85,6 +99,8 @@ export function StatusBar() {
     status && (status.marketDataSource !== "live" || status.executionMode !== "live");
   const reconciliationKind = status?.reconciliation?.kind;
   const showLegacyReconDrift = !reconciliationKind && status?.reconciliationDriftDetected;
+  const quarantine = status?.reconciliation?.quarantine;
+  const quarantineClosesIn = formatClosesIn(quarantine?.nextCloseAt, nowMs);
 
   return (
     <div
@@ -135,6 +151,16 @@ export function StatusBar() {
       {reconciliationKind === "acknowledged_external_state_unknown" && (
         <span className="badge badge-orange" style={{ fontWeight: 700 }}>
           EXTERNAL STATE UNKNOWN
+        </span>
+      )}
+      {reconciliationKind === "exchange_absent_quarantine" && (
+        <span
+          className="badge badge-blue"
+          style={{ fontWeight: 700 }}
+          title={status?.reconciliation?.detail}
+        >
+          QUARANTINE {quarantine?.count ?? 0}
+          {quarantineClosesIn ? ` · ${quarantineClosesIn}` : ""}
         </span>
       )}
       {topInfraAlert && (

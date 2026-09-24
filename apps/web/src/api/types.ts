@@ -323,7 +323,8 @@ export type ReconciliationHealthKind =
   | "unresolved_missing"
   | "acknowledged_external_state_unknown"
   | "other_drift"
-  | "unknown";
+  | "unknown"
+  | "exchange_absent_quarantine";
 
 export interface StatusData {
   runtimeMode: string;
@@ -377,6 +378,7 @@ export interface StatusData {
   reconciliation?: {
     kind: ReconciliationHealthKind;
     detail: string;
+    quarantine?: { count: number; nextCloseAt: string | null };
   };
   reconciliationDriftDetected: boolean;
   marketDataPoll?: { active: boolean; page: number };

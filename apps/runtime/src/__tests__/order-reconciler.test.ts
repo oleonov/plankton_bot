@@ -1,5 +1,20 @@
-import { describe, it, expect, vi, beforeEach, onTestFinished } from "vitest";
-import { createTokenId, createOrderId, createConditionId, createFillId } from "@krabs/domain";
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from "vitest";
+import {
+  createTokenId,
+  createOrderId,
+  createConditionId,
+  createFillId,
+  RESOLVED_LOSER_LOCAL_CANCEL_REASON,
+} from "@krabs/domain";
+import {
+  bootstrapLedgerDb,
+  SqliteFillRepository,
+  SqliteMarketResolutionRepository,
+  SqliteOrderRepository,
+  SqlitePositionRepository,
+  SqliteSettlementLedgerRepository,
+} from "@krabs/db";
+import { InProcessEventBus } from "@krabs/event-bus";
 import type {
   ExchangeGateway,
   ExchangeOrder,
@@ -13,7 +28,14 @@ import type {
 import {
   reconcileOrders,
   reconcileStaleExchangeOrders,
+  type OrderReconcilerDeps,
 } from "../modules/reconciliation/order-reconciler.js";
+import {
+  clearCancelIntent,
+  EXCHANGE_ABSENT_CANCEL_REASON,
+  registerCancelIntent,
+} from "../modules/reconciliation/order-status-resolver.js";
+import { readExchangeAbsence } from "../modules/reconciliation/exchange-absence.js";
 
 const TOK = createTokenId("tok-yes");
 const OLD = new Date(Date.now() - 300_000).toISOString(); // 5 min ago — beyond any grace
@@ -929,5 +951,230 @@ describe("reconcileStaleExchangeOrders — Fix 5: cascade guard", () => {
     expect(result.cascadeSkipped).toBe(1);
     expect(result.cascadeCancelled).toBe(0);
     expect(gateway.cancelOrder).not.toHaveBeenCalled();
+  });
+});
+
+describe("exchange-absence quarantine (real ledger)", () => {
+  const DAY = 24 * 60 * 60_000;
+  const NOW = Date.parse("2026-09-24T00:00:00.000Z");
+  const ZOMBIE = createOrderId("zombie");
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as any;
+  let conn: ReturnType<typeof bootstrapLedgerDb>;
+  let orders: SqliteOrderRepository;
+  let fills: SqliteFillRepository;
+  let bus: InProcessEventBus;
+  let cancelled: { orderId: string; reason: string }[];
+  let gateway: ExchangeGateway;
+
+  const zombie = () => orders.findById(ZOMBIE)!;
+  const marker = () => readExchangeAbsence(zombie())?.firstNullAtMs ?? null;
+  const seedMarker = (ms: number) =>
+    orders.updateMetadata(ZOMBIE, { exchangeAbsenceV1: { firstNullAt: iso(ms) } });
+  const seedFill = (id: string, ms: number) =>
+    fills.save({
+      fillId: createFillId(id),
+      orderId: ZOMBIE,
+      tokenId: TOK,
+      conditionId: createConditionId("cond-1"),
+      side: "sell",
+      price: 0.4,
+      size: 2,
+      sizeUsdc: 0.8,
+      liquidityRole: "maker",
+      fee: 0,
+      feeRateBps: 0,
+      filledAt: iso(ms),
+    });
+  const run = (extra: Partial<OrderReconcilerDeps> = {}) =>
+    reconcileOrders({
+      gateway,
+      orderRepo: orders,
+      fillRepo: fills,
+      bus,
+      log,
+      suspiciousEmptyThreshold: 0,
+      consecutiveMissThreshold: 1,
+      ...extra,
+    });
+  const backfilled = { historyBackfilledOrderIds: new Set([String(ZOMBIE)]) };
+  const absentWarned = () =>
+    log.warn.mock.calls.some(([, msg]: [unknown, string]) => msg.includes("working order absent"));
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    conn = bootstrapLedgerDb(":memory:");
+    orders = new SqliteOrderRepository(conn.db);
+    fills = new SqliteFillRepository(conn.db);
+    orders.save(
+      makeLocalOrder({
+        orderId: ZOMBIE,
+        side: "sell",
+        status: "partially-filled",
+        exchangeOrderId: "zx",
+        createdAt: iso(NOW - 30 * DAY),
+      }),
+    );
+    seedFill("old-fill", NOW - 29 * DAY);
+    bus = new InProcessEventBus();
+    cancelled = [];
+    bus.subscribe("OrderCancelled", async (event) => {
+      cancelled.push({ orderId: String(event.orderId), reason: event.reason });
+    });
+    gateway = createGateway({ openOrders: [] });
+    gateway.getOpenOrdersResult = vi.fn(async () => ({ ok: true as const, data: [] }));
+    gateway.getOrderResult = vi.fn(async () => ({ ok: true as const, data: null }));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    clearCancelIntent(String(ZOMBIE));
+    conn.close();
+  });
+
+  it("starts the marker on a threshold-eligible exact null and moves the order out of drift", async () => {
+    const result = await run();
+    expect(marker()).toBe(NOW);
+    expect(zombie().status).toBe("partially-filled");
+    expect(result.unresolvedMissingOnExchange).toBe(0);
+    expect(result.details).toEqual([]);
+    expect(result.exchangeAbsentQuarantinedOrderIds).toEqual([String(ZOMBIE)]);
+    expect(result.exchangeAbsentNextCloseAtMs).toBe(NOW + DAY);
+    expect(absentWarned()).toBe(true);
+  });
+
+  it("keeps an unreliable exact read out of the marker and in drift", async () => {
+    vi.mocked(gateway.getOrderResult!).mockResolvedValue({ ok: false, reason: "server" } as never);
+    const result = await run();
+    expect(marker()).toBeNull();
+    expect(result.unresolvedMissingOnExchange).toBe(1);
+    seedMarker(NOW - DAY / 2);
+    await run();
+    expect(marker()).toBe(NOW - DAY / 2);
+  });
+
+  it("clears the marker when the order reappears in the open snapshot", async () => {
+    seedMarker(NOW - 2 * DAY);
+    vi.mocked(gateway.getOpenOrdersResult!).mockResolvedValue({
+      ok: true,
+      data: [makeExchangeOrder({ orderId: "zx", side: "sell" })],
+    });
+    await run();
+    expect(marker()).toBeNull();
+    expect(gateway.getOrderResult).not.toHaveBeenCalled();
+  });
+
+  it("clears the marker on an exact non-null answer", async () => {
+    seedMarker(NOW - 2 * DAY);
+    vi.mocked(gateway.getOrderResult!).mockResolvedValue({
+      ok: true,
+      data: makeExchangeOrder({ orderId: "zx", side: "sell", status: "PARTIALLY_FILLED" }),
+    });
+    const result = await run(backfilled);
+    expect(marker()).toBeNull();
+    expect(zombie().status).toBe("partially-filled");
+    expect(result.unresolvedMissingOnExchange).toBe(1);
+  });
+
+  it("drops a marker disproved by a fill since it started and does not terminalize", async () => {
+    seedMarker(NOW - 9 * DAY);
+    seedFill("late-fill", NOW - 8 * DAY);
+    const result = await run(backfilled);
+    expect(marker()).toBeNull();
+    expect(zombie().status).toBe("partially-filled");
+    expect(result.unresolvedMissingOnExchange).toBe(1);
+  });
+
+  it("waits out the 24h observation window", async () => {
+    seedMarker(NOW - DAY + 1);
+    const result = await run(backfilled);
+    expect(zombie().status).toBe("partially-filled");
+    expect(result.exchangeAbsentNextCloseAtMs).toBe(NOW + 1);
+    expect(absentWarned()).toBe(false);
+  });
+
+  it("waits out 7 days without activity", async () => {
+    seedMarker(NOW - 2 * DAY);
+    seedFill("recent-fill", NOW - 3 * DAY);
+    const result = await run(backfilled);
+    expect(zombie().status).toBe("partially-filled");
+    expect(result.exchangeAbsentNextCloseAtMs).toBe(NOW + 4 * DAY);
+  });
+
+  it("never terminalizes without a same-pass history backfill (catch-up path)", async () => {
+    seedMarker(NOW - 2 * DAY);
+    const result = await run();
+    expect(zombie().status).toBe("partially-filled");
+    expect(marker()).toBe(NOW - 2 * DAY);
+    expect(result.exchangeAbsentQuarantinedOrderIds).toEqual([String(ZOMBIE)]);
+  });
+
+  it("cancels with the absence reason over a leftover cancel intent once every condition holds", async () => {
+    seedMarker(NOW - 2 * DAY);
+    registerCancelIntent(String(ZOMBIE), "stale_exit_ttl");
+    const result = await run(backfilled);
+    expect(zombie()).toMatchObject({
+      status: "cancelled",
+      cancelReason: EXCHANGE_ABSENT_CANCEL_REASON,
+    });
+    expect(cancelled).toEqual([{ orderId: String(ZOMBIE), reason: EXCHANGE_ABSENT_CANCEL_REASON }]);
+    expect(result.exchangeAbsentQuarantinedOrderIds).toEqual([]);
+  });
+
+  it("does not start the marker for an early local-closure candidate below the miss threshold", async () => {
+    conn.db
+      .prepare(
+        `INSERT INTO positions (position_id,token_id,condition_id,side,size,status,opened_at,closed_at)
+         VALUES ('position','loser','condition','buy',0,'closed','2026-08-01T00:00:00.000Z',
+         '2026-08-02T00:00:00.000Z')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT INTO orders (order_id,client_order_id,exchange_order_id,token_id,condition_id,
+         position_id,side,order_type,price,size,size_usdc,status,bot_run_id,created_at)
+         VALUES ('sell','client','exchange','loser','condition','position','sell','GTC',0.2,10,2,
+         'open','run','2026-08-01T00:00:10.500Z')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT INTO market_resolutions (condition_id,resolution,resolved_at,detected_at,source,
+         raw_response,status)
+         VALUES ('condition','Yes','2026-08-02T00:00:00.000Z','2026-08-02T00:00:00.000Z',
+         'clob-api',?,'settled')`,
+      )
+      .run(
+        JSON.stringify({
+          conditionId: "condition",
+          closed: true,
+          acceptingOrders: false,
+          enableOrderBook: false,
+          tokens: [
+            { tokenId: "loser", outcome: "No", winner: false },
+            { tokenId: "winner", outcome: "Yes", winner: true },
+          ],
+        }),
+      );
+    conn.db
+      .prepare(
+        `INSERT INTO settlement_ledger (settlement_id,condition_id,position_id,token_id,resolution,
+         settlement_price,size,delta,settled_at,created_at)
+         VALUES ('settlement','condition','position','loser','Yes',0,8,-0.8,
+         '2026-08-02T00:00:00.000Z','2026-08-02 00:00:05')`,
+      )
+      .run();
+    gateway.getFillsResult = vi.fn(async () => ({ ok: true as const, data: [] }));
+    await run({
+      consecutiveMissThreshold: 3,
+      positionRepo: new SqlitePositionRepository(conn.db),
+      settlementLedgerRepo: new SqliteSettlementLedgerRepository(conn.db),
+      marketResolutionRepo: new SqliteMarketResolutionRepository(conn.db),
+    });
+    const early = orders.findById(createOrderId("sell"))!;
+    expect(gateway.getOrderResult).toHaveBeenCalledWith("exchange");
+    expect(early.cancelReason).toBe(RESOLVED_LOSER_LOCAL_CANCEL_REASON);
+    expect(readExchangeAbsence(early)).toBeNull();
+    expect(marker()).toBeNull();
   });
 });

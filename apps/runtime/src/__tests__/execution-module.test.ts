@@ -302,6 +302,20 @@ function openSellAt(price: number, overrides?: Partial<Order>): Order {
   };
 }
 
+/**
+ * The reconciler may legitimately start an exchange-absence marker on a snapshot-absent,
+ * exact-null sibling; every other field must still prove recovery never mutated it.
+ */
+function expectSiblingUntouchedExceptAbsence(actual: Order | null, expected: Order): void {
+  const strip = (order: Order | null) => {
+    if (!order) return order;
+    const { updatedAt: _updatedAt, metadata, ...rest } = order;
+    const { exchangeAbsenceV1: _marker, ...otherMetadata } = metadata ?? {};
+    return { ...rest, metadata: otherMetadata };
+  };
+  expect(strip(actual)).toEqual(strip(expected));
+}
+
 function expiredStartupMaker(): Order {
   const createdAtMs = Date.now() - 120_000;
   return openSellAt(0.01, {
@@ -1934,7 +1948,7 @@ describe("ExecutionModule", () => {
         const snapshot = buildReservationSnapshot(f.orders.findOpen(), f.fills);
         expect(snapshot.reservedSellByToken.get(f.pending.tokenId)).toBe(5);
         expect(f.orders.findById(f.pending.orderId)?.status).toBe("partially-filled");
-        expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+        expectSiblingUntouchedExceptAbsence(f.orders.findById(f.sibling.orderId), f.sibling);
       } finally {
         await f.close();
       }
@@ -2279,7 +2293,7 @@ describe("ExecutionModule", () => {
           ).toBe(f.pending.exchangeOrderId);
           expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
           expect(f.owner.getExactNullStartupQuarantineCount()).toBe(0);
-          expect(f.orders.findById(f.sibling.orderId)).toEqual(f.sibling);
+          expectSiblingUntouchedExceptAbsence(f.orders.findById(f.sibling.orderId), f.sibling);
           expect(gateway.placeOrder).not.toHaveBeenCalled();
         } finally {
           release();

@@ -51,6 +51,7 @@ import {
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import type { ExactNullStartupQuarantine } from "../execution/execution-module.js";
+import { readExchangeAbsence } from "./exchange-absence.js";
 import {
   resolveEntryBuyOrderTtlMs,
   resolveMakerMicroLiveFillDeadlineMs,
@@ -320,7 +321,8 @@ export async function cleanStaleEntryOrders(
     if (
       deps.exactNullStartupQuarantine?.isExactNullStartupTokenQuarantined?.(order.tokenId) ===
         true ||
-      deps.exactNullStartupQuarantine?.isExactNullStartupOrderQuarantined(order) === true
+      deps.exactNullStartupQuarantine?.isExactNullStartupOrderQuarantined(order) === true ||
+      readExchangeAbsence(order) !== null
     ) {
       continue;
     }
@@ -414,7 +416,9 @@ export async function cleanStaleEntryOrders(
   let trackCCircuitOpen = false;
   for (const order of exitSells) {
     if (
-      deps.exactNullStartupQuarantine?.isExactNullStartupTokenQuarantined?.(order.tokenId) === true
+      deps.exactNullStartupQuarantine?.isExactNullStartupTokenQuarantined?.(order.tokenId) ===
+        true ||
+      readExchangeAbsence(order) !== null
     ) {
       continue;
     }

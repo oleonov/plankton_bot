@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   createTokenId,
   createOrderId,
@@ -33,7 +33,10 @@ import type {
 } from "@krabs/domain";
 import type { PolymarketPositionReader } from "@krabs/exchange";
 import { InProcessEventBus } from "@krabs/event-bus";
+import { bootstrapLedgerDb, SqliteFillRepository, SqliteOrderRepository } from "@krabs/db";
 import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
+import { readExchangeAbsence } from "../modules/reconciliation/exchange-absence.js";
+import { EXCHANGE_ABSENT_CANCEL_REASON } from "../modules/reconciliation/order-status-resolver.js";
 import { reconcileOrders } from "../modules/reconciliation/order-reconciler.js";
 import { ExchangeStateStore } from "../modules/execution/exchange-state-store.js";
 import { RedeemSweepModule } from "../modules/redeem-sweep/redeem-sweep-module.js";
@@ -3270,5 +3273,168 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
     expect(retries).toHaveLength(0);
     expect(driftRepo.upsertCalls).toHaveLength(0);
     expect(driftRepo.resolvedIds).toEqual([row.settlementId]);
+  });
+});
+
+// ─── Exchange-absence quarantine ───────────────────────────────────────────
+
+describe("ReconciliationModule — exchange-absence quarantine", () => {
+  const DAY = 24 * 60 * 60_000;
+  const T0 = Date.parse("2026-09-24T00:00:00.000Z");
+  const CREATED = T0 - 30 * DAY;
+  const ZOMBIE = createOrderId("zombie");
+  const iso = (ms: number) => new Date(ms).toISOString();
+  let now: number;
+  let conn: ReturnType<typeof bootstrapLedgerDb>;
+  let orders: SqliteOrderRepository;
+  let fills: SqliteFillRepository;
+  let gateway: ReturnType<typeof createMockGateway>;
+  let bus: InProcessEventBus;
+  let writeLatest: ReturnType<typeof vi.fn>;
+  let cancelRequests: string[];
+
+  const zombie = () => orders.findById(ZOMBIE)!;
+  const marker = () => readExchangeAbsence(zombie())?.firstNullAtMs ?? null;
+  const seedMarker = (ms: number) =>
+    orders.updateMetadata(ZOMBIE, { exchangeAbsenceV1: { firstNullAt: iso(ms) } });
+  const newModule = () =>
+    new ReconciliationModule({
+      gateway,
+      bus,
+      orderRepo: orders,
+      fillRepo: fills,
+      marketRepo: createMockMarketRepo(),
+      log: silentLog,
+      reconcileIntervalMs: 60_000,
+      consecutiveMissThreshold: 1,
+      runtimeMetrics: { writeEvent: vi.fn(), writeLatest } as any,
+    });
+  const passAt = (mod: ReconciliationModule, ms: number) => {
+    now = ms;
+    return mod.runReconciliation();
+  };
+  const quarantineMetric = () =>
+    writeLatest.mock.calls.filter(
+      ([name]) => name === "reconciliation_exchange_absent_quarantined",
+    );
+  const fillsSince = () => vi.mocked(gateway.getFills).mock.calls.map(([since]) => since);
+
+  beforeEach(() => {
+    now = T0;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    conn = bootstrapLedgerDb(":memory:");
+    orders = new SqliteOrderRepository(conn.db);
+    fills = new SqliteFillRepository(conn.db);
+    orders.save(
+      makeLocalOrder({
+        orderId: ZOMBIE,
+        side: "sell",
+        status: "partially-filled",
+        exchangeOrderId: "zx",
+        signalReason: "repricing-exit",
+        createdAt: iso(CREATED),
+        updatedAt: iso(CREATED),
+      }),
+    );
+    gateway = createMockGateway();
+    gateway.getOrderResult = vi.fn().mockResolvedValue({ ok: true, data: null });
+    bus = new InProcessEventBus();
+    cancelRequests = [];
+    bus.subscribe("CancelOrderRequested", async ({ command }) => {
+      cancelRequests.push(String(command.orderId));
+    });
+    writeLatest = vi.fn();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    conn.close();
+  });
+
+  it("re-reads fills from creation only on a fetching pass, then terminalizes", async () => {
+    seedMarker(T0 - 60 * 60_000);
+    const mod = newModule();
+    const dueAt = T0 + 23 * 60 * 60_000;
+    await passAt(mod, T0);
+    await passAt(mod, dueAt - 60_000);
+    await passAt(mod, dueAt + 60_000); // due, but the fills fetch is throttled
+    expect(zombie().status).toBe("partially-filled");
+    expect(fillsSince()).toEqual([0, T0]);
+    await passAt(mod, dueAt - 60_000 + 5 * 60_000);
+    expect(fillsSince()).toEqual([0, T0, CREATED]);
+    expect(zombie()).toMatchObject({
+      status: "cancelled",
+      cancelReason: EXCHANGE_ABSENT_CANCEL_REASON,
+    });
+    expect(quarantineMetric().at(-1)).toEqual([
+      "reconciliation_exchange_absent_quarantined",
+      0,
+      JSON.stringify({ nextCloseAt: null }),
+      iso(now),
+    ]);
+  });
+
+  it("keeps the order open when the backfill fetch is unreliable and retries next pass", async () => {
+    seedMarker(T0 - 2 * DAY);
+    gateway.getFillsResult = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, reason: "server", attempts: 1 })
+      .mockResolvedValue({ ok: true, data: [] });
+    const mod = newModule();
+    await passAt(mod, T0);
+    expect(zombie().status).toBe("partially-filled");
+    await passAt(mod, T0 + 60_000);
+    expect(gateway.getFillsResult).toHaveBeenCalledTimes(2);
+    expect(zombie().status).toBe("cancelled");
+  });
+
+  it("imports a late fill found by the backfill, clears the marker, and does not terminalize", async () => {
+    seedMarker(T0 - 2 * DAY);
+    const late = makeExchangeFill({
+      fillId: "late",
+      orderId: "zx",
+      side: "sell",
+      size: 2,
+      timestamp: T0 - DAY,
+    });
+    vi.mocked(gateway.getFills).mockImplementation(async (since: number) =>
+      since <= CREATED ? [late] : [],
+    );
+    await passAt(newModule(), T0);
+    expect(fills.findByOrderId(ZOMBIE).map((fill) => String(fill.fillId))).toEqual(["late"]);
+    expect(marker()).toBeNull();
+    expect(zombie().status).toBe("partially-filled");
+  });
+
+  it("keeps a quarantine-only pass clean even when the quarantined order is past its TTL", async () => {
+    const drift = vi.fn();
+    bus.subscribe("ReconciliationDriftDetected", drift);
+    const result = await passAt(newModule(), T0);
+    expect(marker()).toBe(T0);
+    expect(cancelRequests).toEqual([]);
+    expect(result.clean).toBe(true);
+    expect(drift).not.toHaveBeenCalled();
+    expect(quarantineMetric()).toEqual([
+      [
+        "reconciliation_exchange_absent_quarantined",
+        1,
+        JSON.stringify({ nextCloseAt: iso(T0 + DAY) }),
+        iso(T0),
+      ],
+    ]);
+  });
+
+  it("counts the same expired order as drift when no marker can start", async () => {
+    gateway.getOrderResult = vi.fn().mockResolvedValue({ ok: false, reason: "server" });
+    const result = await passAt(newModule(), T0);
+    expect(marker()).toBeNull();
+    expect(cancelRequests).toEqual([String(ZOMBIE)]);
+    expect(result.clean).toBe(false);
+  });
+
+  it("keeps the first observation across a module restart", async () => {
+    await passAt(newModule(), T0);
+    await passAt(newModule(), T0 + 60 * 60_000);
+    expect(marker()).toBe(T0);
+    expect(zombie().status).toBe("partially-filled");
   });
 });

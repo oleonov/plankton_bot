@@ -19,6 +19,7 @@ import {
 } from "./fill-reconciler.js";
 import { reconcileOrders } from "./order-reconciler.js";
 import { applyOrderVerdict } from "./order-status-resolver.js";
+import { clearExchangeAbsence, readExchangeAbsence } from "./exchange-absence.js";
 
 const METRICS_WINDOW_MS = 10 * 60 * 1000;
 const ORPHAN_TTL_MS = 60 * 1000;
@@ -320,6 +321,13 @@ export class UserOrderStreamModule implements RuntimeModule {
         "user websocket order event has no matching local order",
       );
       return;
+    }
+    // Any exchange event for the order is a sign of life, whatever its type and
+    // whether the exact lookup below succeeds. Cleared synchronously, outside the lane:
+    // the CAS write is atomic and the reconciler's record→decide→persist path has no
+    // await to interleave with, while awaiting the lane would let `localOrder` go stale.
+    if (readExchangeAbsence(localOrder)) {
+      clearExchangeAbsence(this.deps.orderRepo, localOrder.orderId, this.log);
     }
 
     const nextStatus = resolveLocalOrderStatus(event);

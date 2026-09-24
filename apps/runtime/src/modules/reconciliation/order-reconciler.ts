@@ -35,7 +35,20 @@ import type {
   ExactNullStartupQuarantine,
   SubmitUnknownRecoveryContext,
 } from "../execution/execution-module.js";
-import { applyOrderVerdict, resolveOrderStatusVerdict } from "./order-status-resolver.js";
+import {
+  applyOrderVerdict,
+  applyOrderVerdictInLane,
+  inOrderLifecycleLane,
+  persistedGrossShares,
+  resolveOrderStatusVerdict,
+} from "./order-status-resolver.js";
+import {
+  clearExchangeAbsence,
+  exchangeAbsenceCloseAtMs,
+  lastActivityMs,
+  readExchangeAbsence,
+  recordExactNullAbsence,
+} from "./exchange-absence.js";
 import {
   closeResolvedLosers,
   hasResolvedLoserLocalClosureEvidence,
@@ -70,6 +83,12 @@ export interface OrderReconcilerDeps {
    * counter never accumulates beyond a single pass.
    */
   consecutiveMissCounts?: Map<string, number>;
+  /**
+   * Orders whose fill history this same pass re-read from creation with a
+   * reliable fetch. Only these may be terminalized by the exchange-absence rule;
+   * an earlier pass's re-read misses fills `/data/trades` indexed since.
+   */
+  historyBackfilledOrderIds?: ReadonlySet<string>;
   /** Exchange SELLs whose prior stale-cancel attempt lacks exact terminal proof. */
   unresolvedStaleOrders?: Map<string, ExchangeOrder>;
   bus?: import("@krabs/domain").EventBus;
@@ -116,6 +135,10 @@ export interface OrderReconcileResult {
   /** Set to 1 when the cancel cascade was skipped on an unreliable snapshot. */
   cascadeSkipped?: number;
   acknowledgedExternalStateUnknown?: number;
+  /** Snapshot-absent, exact-null orders held by the exchange-absence marker; not drift. */
+  exchangeAbsentQuarantinedOrderIds?: readonly string[];
+  /** Earliest time one of them may be terminalized; null when none. */
+  exchangeAbsentNextCloseAtMs?: number | null;
 }
 
 export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderReconcileResult> {
@@ -212,18 +235,25 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   });
 
   const fillRepo = deps.fillRepo ?? EMPTY_FILL_READER;
-  await measureOrderStage(deps, "exactCandidates", unresolved.exactCandidates.length, () =>
-    resolveExactCandidates({
-      ...deps,
-      candidates: unresolved.exactCandidates,
-      gateway,
-      orderRepo,
-      fillRepo,
-      closureDeps: deps,
-      log,
-      fillCompletionTolerance: deps.fillCompletionTolerance,
-      ...(deps.bus ? { bus: deps.bus } : {}),
-    }),
+  await clearReappearedAbsence(unresolved.reappeared, orderRepo, log);
+  const exactNullIds = await measureOrderStage(
+    deps,
+    "exactCandidates",
+    unresolved.exactCandidates.length,
+    () =>
+      resolveExactCandidates({
+        ...deps,
+        candidates: unresolved.exactCandidates,
+        thresholdEligibleIds: new Set(unresolved.thresholdEligible.map((o) => String(o.orderId))),
+        historyBackfilledOrderIds: deps.historyBackfilledOrderIds ?? new Set<string>(),
+        gateway,
+        orderRepo,
+        fillRepo,
+        closureDeps: deps,
+        log,
+        fillCompletionTolerance: deps.fillCompletionTolerance,
+        ...(deps.bus ? { bus: deps.bus } : {}),
+      }),
   );
 
   const cascade = await measureOrderStage(
@@ -246,6 +276,12 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
       }),
   );
 
+  const absence = splitExchangeAbsent(unresolved.thresholdEligible, exactNullIds, {
+    orderRepo,
+    fillRepo,
+    log,
+  });
+
   const survivingExchangeOrders = [...exchangeOrders, ...unresolvedStaleOrders.values()].filter(
     (order, index, orders) =>
       !cascade.terminalStaleOrderIds.has(order.orderId) &&
@@ -263,13 +299,15 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     phantomsSkippedGrace: unresolved.phantomsSkippedGrace,
     exchangeOpenOrders: survivingExchangeOrders,
     capturedAtMs,
-    details: [...unresolved.details, ...cascade.details],
+    details: [...unresolvedMissingDetails(absence.unresolvedMissing), ...cascade.details],
     consecutiveMissTracked: unresolved.consecutiveMissTracked,
-    unresolvedMissingOnExchange: unresolved.unresolvedMissingOnExchange,
+    unresolvedMissingOnExchange: absence.unresolvedMissing.length,
     cascadeEvaluated: cascade.cascadeEvaluated,
     cascadeCancelled: cascade.cascadeCancelled,
     cascadeSkipped: cascade.cascadeSkipped,
     acknowledgedExternalStateUnknown: quarantineOrders.length,
+    exchangeAbsentQuarantinedOrderIds: absence.quarantinedOrderIds,
+    exchangeAbsentNextCloseAtMs: absence.nextCloseAtMs,
   };
 }
 
@@ -316,34 +354,141 @@ function exactRemoteState(
     : null;
 }
 
-async function resolveExactCandidates(deps: {
+interface ExactCandidateDeps {
   closureDeps: OrderReconcilerDeps;
   candidates: readonly Order[];
+  /** Snapshot-absent past the miss threshold — the only orders the absence rule touches. */
+  thresholdEligibleIds: ReadonlySet<string>;
+  historyBackfilledOrderIds: ReadonlySet<string>;
   gateway: ExchangeGateway;
   orderRepo: OrderRepository;
   fillRepo: Pick<FillRepository, "findByOrderId">;
   log: Logger;
   bus?: import("@krabs/domain").EventBus;
   fillCompletionTolerance?: number | undefined;
-}): Promise<void> {
-  if (!deps.gateway.getOrderResult) return;
+}
+
+/** Returns the ids of candidates whose exact read was authoritative not-found. */
+async function resolveExactCandidates(deps: ExactCandidateDeps): Promise<Set<string>> {
+  const exactNullIds = new Set<string>();
+  if (!deps.gateway.getOrderResult) return exactNullIds;
   const exactNull: Order[] = [];
   for (const local of deps.candidates) {
     const exact = await deps.gateway.getOrderResult(local.exchangeOrderId!);
     if (!exact.ok) continue;
-    if (!exact.data) exactNull.push(local);
-    await applyOrderVerdict({
-      orderRepo: deps.orderRepo,
-      fillRepo: deps.fillRepo,
-      log: deps.log,
-      orderId: local.orderId,
-      exchange: exact.data,
-      publish: true,
-      fillCompletionTolerance: deps.fillCompletionTolerance,
-      ...(deps.bus ? { bus: deps.bus } : {}),
-    });
+    if (!exact.data) {
+      exactNull.push(local);
+      exactNullIds.add(String(local.orderId));
+    }
+    const absenceTracked = !exact.data && deps.thresholdEligibleIds.has(String(local.orderId));
+    await inOrderLifecycleLane(String(local.orderId), () =>
+      applyExactCandidateInLane(deps, local, exact.data, absenceTracked),
+    );
   }
   await closeResolvedLosers(exactNull, deps.closureDeps);
+  return exactNullIds;
+}
+
+async function applyExactCandidateInLane(
+  deps: ExactCandidateDeps,
+  local: Order,
+  exchange: ExchangeOrder | null,
+  absenceTracked: boolean,
+): Promise<void> {
+  const exchangeNullTerminal =
+    absenceTracked &&
+    recordExactNullAbsence(deps.orderRepo, deps.fillRepo, local.orderId, Date.now(), deps.log) &&
+    deps.historyBackfilledOrderIds.has(String(local.orderId));
+  const verdict = await applyOrderVerdictInLane({
+    orderRepo: deps.orderRepo,
+    fillRepo: deps.fillRepo,
+    log: deps.log,
+    orderId: local.orderId,
+    exchange,
+    publish: true,
+    fillCompletionTolerance: deps.fillCompletionTolerance,
+    exchangeNullTerminal,
+    ...(deps.bus ? { bus: deps.bus } : {}),
+  });
+  if (exchangeNullTerminal && verdict.status === "cancelled") logAbsenceTerminal(deps, local);
+}
+
+function logAbsenceTerminal(deps: ExactCandidateDeps, local: Order): void {
+  const order = deps.orderRepo.findById(local.orderId) ?? local;
+  const absence = readExchangeAbsence(order);
+  deps.log.info(
+    {
+      orderId: local.orderId,
+      exchangeOrderId: local.exchangeOrderId,
+      firstNullAt: isoOrNull(absence?.firstNullAtMs ?? null),
+      lastActivity: isoOrNull(lastActivityMs(order, deps.fillRepo.findByOrderId(local.orderId))),
+      grossFills: persistedGrossShares(deps.fillRepo, order),
+    },
+    "exchange-absent order terminalized after 24h exact not-found and 7d quiet",
+  );
+}
+
+/** Snapshot presence is a sign of life: drop the marker (only rows carrying one are written). */
+async function clearReappearedAbsence(
+  reappeared: readonly Order[],
+  orderRepo: OrderRepository,
+  log: Logger,
+): Promise<void> {
+  for (const order of reappeared) {
+    if (!readExchangeAbsence(order)) continue;
+    await inOrderLifecycleLane(String(order.orderId), async () =>
+      clearExchangeAbsence(orderRepo, order.orderId, log),
+    );
+  }
+}
+
+/**
+ * Splits threshold-eligible orders into unresolved drift and exchange-absence
+ * quarantine: exact-null this pass, still working, and carrying a live marker.
+ */
+function splitExchangeAbsent(
+  thresholdEligible: readonly Order[],
+  exactNullIds: ReadonlySet<string>,
+  deps: {
+    orderRepo: OrderRepository;
+    fillRepo: Pick<FillRepository, "findByOrderId">;
+    log: Logger;
+  },
+): { unresolvedMissing: Order[]; quarantinedOrderIds: string[]; nextCloseAtMs: number | null } {
+  const unresolvedMissing: Order[] = [];
+  const quarantinedOrderIds: string[] = [];
+  let nextCloseAtMs: number | null = null;
+  for (const local of thresholdEligible) {
+    const closeAtMs = exactNullIds.has(String(local.orderId))
+      ? quarantineCloseAtMs(local, deps)
+      : null;
+    if (closeAtMs === null) {
+      unresolvedMissing.push(local);
+      continue;
+    }
+    quarantinedOrderIds.push(String(local.orderId));
+    nextCloseAtMs = nextCloseAtMs === null ? closeAtMs : Math.min(nextCloseAtMs, closeAtMs);
+  }
+  if (quarantinedOrderIds.length > 0) {
+    deps.log.info(
+      { orderIds: quarantinedOrderIds, nextCloseAt: isoOrNull(nextCloseAtMs) },
+      "exchange-absent orders quarantined pending terminal proof",
+    );
+  }
+  return { unresolvedMissing, quarantinedOrderIds, nextCloseAtMs };
+}
+
+function quarantineCloseAtMs(
+  local: Order,
+  deps: { orderRepo: OrderRepository; fillRepo: Pick<FillRepository, "findByOrderId"> },
+): number | null {
+  const order = deps.orderRepo.findById(local.orderId);
+  if (!order || isTerminalVerdict(order.status)) return null;
+  return exchangeAbsenceCloseAtMs(order, deps.fillRepo.findByOrderId(order.orderId));
+}
+
+function isoOrNull(ms: number | null): string | null {
+  return ms === null || !Number.isFinite(ms) ? null : new Date(ms).toISOString();
 }
 
 async function resolveUnresolvedStaleOrders(deps: {
@@ -434,18 +579,20 @@ interface MissingOrderDeps {
 interface MissingOrderResult {
   phantomsSkippedGrace: number;
   consecutiveMissTracked: number;
-  unresolvedMissingOnExchange: number;
-  details: string[];
   exactCandidates: Order[];
+  /** Crossed the consecutive-miss threshold (not the early local-closure candidates). */
+  thresholdEligible: Order[];
+  /** Present in the snapshot this pass. */
+  reappeared: Order[];
 }
 
 function reconcileMissingOrders(deps: MissingOrderDeps): MissingOrderResult {
   const { localOrders, exchangeOrderIds, missMap, graceMs, consecutiveMissThreshold, log } = deps;
-  const details: string[] = [];
   let phantomsSkippedGrace = 0;
   let consecutiveMissTracked = 0;
-  let unresolvedMissingOnExchange = 0;
   const exactCandidates: Order[] = [];
+  const thresholdEligible: Order[] = [];
+  const reappeared: Order[] = [];
 
   for (const local of localOrders) {
     const exId = local.exchangeOrderId;
@@ -453,6 +600,7 @@ function reconcileMissingOrders(deps: MissingOrderDeps): MissingOrderResult {
 
     if (exchangeOrderIds.has(exId)) {
       missMap.delete(exId); // reappeared — reset the consecutive-miss streak
+      reappeared.push(local);
       continue;
     }
 
@@ -478,11 +626,10 @@ function reconcileMissingOrders(deps: MissingOrderDeps): MissingOrderResult {
 
     if (misses >= consecutiveMissThreshold) {
       exactCandidates.push(local);
-      unresolvedMissingOnExchange++;
-      if (details.length < MAX_UNRESOLVED_DETAILS) {
-        details.push(`unresolved missing order: ${local.orderId} (exchange: ${exId})`);
-      }
-      log.warn(
+      thresholdEligible.push(local);
+      // An already-quarantined order is expected to stay absent; repeating the warn is noise.
+      const logFn = readExchangeAbsence(local) ? log.debug.bind(log) : log.warn.bind(log);
+      logFn(
         { orderId: local.orderId, exchangeOrderId: exId, misses },
         "working order absent from open snapshot — retained pending #137b terminal proof",
       );
@@ -493,10 +640,18 @@ function reconcileMissingOrders(deps: MissingOrderDeps): MissingOrderResult {
   return {
     phantomsSkippedGrace,
     consecutiveMissTracked,
-    unresolvedMissingOnExchange,
-    details,
     exactCandidates,
+    thresholdEligible,
+    reappeared,
   };
+}
+
+function unresolvedMissingDetails(orders: readonly Order[]): string[] {
+  return orders
+    .slice(0, MAX_UNRESOLVED_DETAILS)
+    .map(
+      (order) => `unresolved missing order: ${order.orderId} (exchange: ${order.exchangeOrderId})`,
+    );
 }
 
 export interface ReconcileStaleDeps {
@@ -670,7 +825,7 @@ function isTerminalExchangeStatus(status: ExchangeOrder["status"]): boolean {
 }
 
 function isTerminalVerdict(
-  status: ReturnType<typeof resolveOrderStatusVerdict>["status"],
+  status: ReturnType<typeof resolveOrderStatusVerdict>["status"] | Order["status"],
 ): boolean {
   return status === "filled" || status === "cancelled" || status === "rejected";
 }

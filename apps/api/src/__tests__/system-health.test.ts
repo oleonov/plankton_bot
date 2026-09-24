@@ -374,6 +374,94 @@ describe("GET /api/v1/system-health", () => {
     reset();
   });
 
+  it("surfaces exchange-absence quarantine only on an otherwise-clean pass", () => {
+    const now = Date.now();
+    const at = new Date(now - 1_000).toISOString();
+    const insert = conn.db.prepare(
+      "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, ?, ?, ?)",
+    );
+    const reset = () =>
+      conn.db
+        .prepare(
+          "DELETE FROM runtime_metrics WHERE metric_name LIKE 'reconciliation_%' OR metric_name = 'last_reconciliation'",
+        )
+        .run();
+
+    // Clean pass + quarantine > 0 -> the new calm kind; count + nextCloseAt surfaced.
+    reset();
+    insert.run("last_reconciliation", 1, null, at);
+    insert.run("reconciliation_clean", 1, null, at);
+    insert.run(
+      "reconciliation_exchange_absent_quarantined",
+      3,
+      JSON.stringify({ nextCloseAt: "2026-09-25T12:00:00.000Z" }),
+      at,
+    );
+    expect(readReconciliationHealth(conn.db, now)).toEqual({
+      kind: "exchange_absent_quarantine",
+      detail: "quarantined 3 orders — awaiting exchange-absence close",
+      quarantine: { count: 3, nextCloseAt: "2026-09-25T12:00:00.000Z" },
+    });
+
+    // Quarantine alongside an independent unclean pass -> existing other_drift logic wins.
+    reset();
+    insert.run("last_reconciliation", 1, null, at);
+    insert.run("reconciliation_clean", 0, null, at);
+    insert.run(
+      "reconciliation_exchange_absent_quarantined",
+      2,
+      JSON.stringify({ nextCloseAt: null }),
+      at,
+    );
+    expect(readReconciliationHealth(conn.db, now).kind).toBe("other_drift");
+    expect(collectSystemHealthSnapshot(conn.db, undefined, 120_000, now).snapshot.reconDrift).toBe(
+      true,
+    );
+
+    // Quarantine alongside unresolved-missing -> unresolved_missing still wins.
+    reset();
+    insert.run("last_reconciliation", 1, null, at);
+    insert.run("reconciliation_unresolved_missing_on_exchange", 1, null, at);
+    insert.run(
+      "reconciliation_exchange_absent_quarantined",
+      1,
+      JSON.stringify({ nextCloseAt: null }),
+      at,
+    );
+    expect(readReconciliationHealth(conn.db, now).kind).toBe("unresolved_missing");
+
+    // Quarantine alongside startup quarantine -> acknowledged_external_state_unknown still wins.
+    reset();
+    insert.run("last_reconciliation", 1, null, at);
+    insert.run("reconciliation_acknowledged_external_state_unknown", 1, null, at);
+    insert.run(
+      "reconciliation_exchange_absent_quarantined",
+      1,
+      JSON.stringify({ nextCloseAt: null }),
+      at,
+    );
+    expect(readReconciliationHealth(conn.db, now).kind).toBe("acknowledged_external_state_unknown");
+
+    // Malformed labels -> nextCloseAt reads as null; health is still returned, not failed.
+    reset();
+    insert.run("last_reconciliation", 1, null, at);
+    insert.run("reconciliation_clean", 1, null, at);
+    insert.run("reconciliation_exchange_absent_quarantined", 1, "not-json", at);
+    expect(readReconciliationHealth(conn.db, now)).toEqual({
+      kind: "exchange_absent_quarantine",
+      detail: "quarantined 1 order — awaiting exchange-absence close",
+      quarantine: { count: 1, nextCloseAt: null },
+    });
+
+    // Clean pass with quarantine 0 (unwritten metric defaults to 0) -> plain ok.
+    reset();
+    insert.run("last_reconciliation", 1, null, at);
+    insert.run("reconciliation_clean", 1, null, at);
+    expect(readReconciliationHealth(conn.db, now).kind).toBe("ok");
+
+    reset();
+  });
+
   it("returns history bars as a bounded window of objects with a numeric uptimePct", async () => {
     const res = await app.inject({
       method: "GET",
