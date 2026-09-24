@@ -347,6 +347,7 @@ describe("GET /api/v1/system-health", () => {
     expect(readReconciliationHealth(conn.db, now)).toEqual({
       kind: "acknowledged_external_state_unknown",
       detail: "startup quarantine — external state unknown",
+      quarantine: { count: 1, nextCloseAt: null },
     });
     expect(collectSystemHealthSnapshot(conn.db, undefined, 120_000, now).snapshot.reconDrift).toBe(
       false,
@@ -440,7 +441,10 @@ describe("GET /api/v1/system-health", () => {
       JSON.stringify({ nextCloseAt: null }),
       at,
     );
-    expect(readReconciliationHealth(conn.db, now).kind).toBe("acknowledged_external_state_unknown");
+    expect(readReconciliationHealth(conn.db, now)).toMatchObject({
+      kind: "acknowledged_external_state_unknown",
+      quarantine: { count: 2, nextCloseAt: null },
+    });
 
     // Malformed labels -> nextCloseAt reads as null; health is still returned, not failed.
     reset();

@@ -148,12 +148,8 @@ export function StatusBar() {
           RECON DRIFT
         </span>
       )}
-      {reconciliationKind === "acknowledged_external_state_unknown" && (
-        <span className="badge badge-orange" style={{ fontWeight: 700 }}>
-          EXTERNAL STATE UNKNOWN
-        </span>
-      )}
-      {reconciliationKind === "exchange_absent_quarantine" && (
+      {(reconciliationKind === "acknowledged_external_state_unknown" ||
+        reconciliationKind === "exchange_absent_quarantine") && (
         <span
           className="badge badge-blue"
           style={{ fontWeight: 700 }}

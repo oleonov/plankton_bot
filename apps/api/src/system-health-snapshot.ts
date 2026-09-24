@@ -212,6 +212,8 @@ export function readReconciliationHealth(
       return {
         kind: "acknowledged_external_state_unknown",
         detail: "startup quarantine — external state unknown",
+        // Startup-quarantined orders have no scheduled close, so no close time is shown.
+        quarantine: { count: quarantine + exchangeAbsentQuarantined, nextCloseAt: null },
       };
     }
     if (clean === 1 && exchangeAbsentQuarantined > 0) {

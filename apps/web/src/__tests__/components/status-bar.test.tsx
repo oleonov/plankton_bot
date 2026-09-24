@@ -137,10 +137,13 @@ describe("StatusBar", () => {
       reconciliation: {
         kind: "acknowledged_external_state_unknown",
         detail: "startup quarantine",
+        quarantine: { count: 4, nextCloseAt: null },
       },
     } satisfies StatusData;
     const queryClient = renderCachedStatus(status);
-    expect(screen.getByText("EXTERNAL STATE UNKNOWN")).toBeInTheDocument();
+    const badge = screen.getByText(/QUARANTINE 4/);
+    expect(badge).toHaveClass("badge-blue");
+    expect(badge).not.toHaveTextContent(/closes in/);
     expect(screen.queryByText("POSITION DRIFT")).not.toBeInTheDocument();
 
     await act(() =>
