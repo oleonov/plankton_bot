@@ -1369,6 +1369,14 @@ describe("ExecutionModule", () => {
           recoveryContexts: owner.getSubmitUnknownRecoveryContexts(),
         });
       const sweep = () => reconcileOrders(reconcileDeps);
+      // Each pass lands past the fills safety-net throttle, as production passes do.
+      const realNow = Date.now.bind(Date);
+      let clockOffsetMs = 0;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + clockOffsetMs);
+      const reconcile = () => {
+        clockOffsetMs += 5 * 60_000;
+        return reconciliation.runReconciliation();
+      };
       const replay = async () => {
         await risk.stop();
         await risk.start();
@@ -1378,6 +1386,7 @@ describe("ExecutionModule", () => {
         await execution.stop();
         await risk.stop();
         conn.close();
+        clock.mockRestore();
       };
       return {
         conn,
@@ -1394,6 +1403,7 @@ describe("ExecutionModule", () => {
         history,
         control,
         reconciliation,
+        reconcile,
         exchangeStateStore,
         reconcileDeps,
         fill,
@@ -1908,11 +1918,11 @@ describe("ExecutionModule", () => {
     it("imports partial fills once, retains remaining reservations, and revisits creation history for late indexing", async () => {
       const f = await recoveryFixture();
       try {
-        await f.reconciliation.runReconciliation();
+        await f.reconcile();
         const late = f.fill("late-history", 2);
         f.history.mockResolvedValue({ ok: true, data: [late] });
-        await f.reconciliation.runReconciliation();
-        await f.reconciliation.runReconciliation();
+        await f.reconcile();
+        await f.reconcile();
         expect(f.history.mock.calls.map(([since]) => since)).toEqual([
           0,
           Date.parse(f.pending.createdAt),
@@ -2239,8 +2249,8 @@ describe("ExecutionModule", () => {
           await (f.execution as any).reconcileAllTransitions();
           expect(f.owner.getExactNullStartupQuarantineCount()).toBe(1);
           expect(f.owner.getSubmitUnknownRecoveryContexts()).toHaveLength(1);
-          await f.reconciliation.runReconciliation();
-          await f.reconciliation.runReconciliation();
+          await f.reconcile();
+          await f.reconcile();
           expect(f.history).toHaveBeenLastCalledWith(Date.parse(f.pending.createdAt));
           const lateFail = vi.spyOn(f.lots, "consumeFifo").mockImplementation(() => {
             throw new Error("late inventory write failed");
@@ -2249,7 +2259,7 @@ describe("ExecutionModule", () => {
             ok: true,
             data: [f.fill("missing-terminal", matched - filled)],
           });
-          await f.reconciliation.runReconciliation();
+          await f.reconcile();
           expect(f.history).toHaveBeenLastCalledWith(Date.parse(f.pending.createdAt));
           expect(f.fills.findByOrderId(f.pending.orderId)).toHaveLength(2);
           expect(f.fills.findUnreconciled()).toHaveLength(1);
@@ -2794,13 +2804,13 @@ describe("ExecutionModule", () => {
     it("keeps a failed paginated history read from importing or abandoning the creation bound", async () => {
       const f = await recoveryFixture();
       try {
-        await f.reconciliation.runReconciliation();
+        await f.reconcile();
         f.history.mockResolvedValueOnce({ ok: false, reason: "network", attempts: 4 });
-        await f.reconciliation.runReconciliation();
+        await f.reconcile();
         expect(f.fills.findByOrderId(f.pending.orderId)).toEqual([]);
         expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
         f.history.mockResolvedValue({ ok: true, data: [f.fill("after-page-failure", 2)] });
-        await f.reconciliation.runReconciliation();
+        await f.reconcile();
         expect(f.history.mock.calls.at(-1)?.[0]).toBe(Date.parse(f.pending.createdAt));
         expect(f.positions.findById(f.pending.positionId!)?.size).toBe(8);
       } finally {

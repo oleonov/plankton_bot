@@ -303,6 +303,7 @@ export class AlgoRiskGateImpl implements RiskGate {
         openProfileLadderSellOrderCount: sellCounts.openProfileLadderSellOrderCount,
         openNonProfileLadderSellOrderCount: sellCounts.openNonProfileLadderSellOrderCount,
         profileOwnedOpenPositionCount: this.profileOwnedOpenPositionCount?.() ?? 0,
+        perTokenOpenSellOrderCount: sellCounts.perTokenOpenSellOrderCount,
       });
       if (!sellCapacity.allowed && !isBounceBackstopSignal) {
         rejected.push(WALLET_SELL_CAPACITY_EXHAUSTED_REASON);

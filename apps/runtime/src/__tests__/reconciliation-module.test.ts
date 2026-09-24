@@ -2684,17 +2684,90 @@ describe("ReconciliationModule", () => {
     });
   });
 
+  // ─── Fills safety-net throttle ────────────────────────────────────
+
+  describe("fills safety-net throttle", () => {
+    it("skips the fills fetch on a pass within 5 minutes while orders still reconcile", async () => {
+      const start = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+      try {
+        await mod.runReconciliation();
+        clock.mockReturnValue(start + 4 * 60_000);
+        const second = await mod.runReconciliation();
+
+        expect(gateway.getFills).toHaveBeenCalledTimes(1);
+        expect(gateway.getOpenOrders).toHaveBeenCalledTimes(2);
+        expect(second.clean).toBe(true);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it("keeps recovery-context widening on the next fetching pass", async () => {
+      const start = Date.now();
+      const recoveryCreatedAt = new Date(start - 3 * 60 * 60_000).toISOString();
+      const recoveryOrder = makeLocalOrder({
+        orderId: createOrderId("ord-recovery"),
+        exchangeOrderId: "ex-recovery",
+        createdAt: recoveryCreatedAt,
+      });
+      const recoveryMod = new ReconciliationModule({
+        gateway,
+        bus,
+        orderRepo,
+        fillRepo,
+        marketRepo,
+        log: silentLog,
+        reconcileIntervalMs: 60_000,
+        exactNullStartupQuarantine: {
+          isExactNullStartupOrderQuarantined: () => false,
+          observeExactNullStartupRemoteState: vi.fn(),
+          getExactNullStartupQuarantineCount: () => 0,
+          getSubmitUnknownRecoveryContexts: () => [
+            {
+              order: recoveryOrder,
+              isCurrent: () => true,
+              observe: async () => undefined,
+              applyExact: async () => undefined,
+            },
+          ],
+        } as never,
+      });
+      const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+
+      try {
+        await recoveryMod.runReconciliation();
+        // An open recovery context does not force a fetch inside the window.
+        clock.mockReturnValue(start + 60_000);
+        await recoveryMod.runReconciliation();
+        clock.mockReturnValue(start + 6 * 60_000);
+        await recoveryMod.runReconciliation();
+      } finally {
+        clock.mockRestore();
+      }
+
+      expect(gateway.getFills).toHaveBeenCalledTimes(2);
+      expect(gateway.getFills).toHaveBeenNthCalledWith(2, Date.parse(recoveryCreatedAt));
+    });
+  });
+
   // ─── Periodic sinceMs ─────────────────────────────────────────────
 
   describe("periodic fill lookback", () => {
     it("uses sinceMs=0 on first run, then last run timestamp", async () => {
-      await mod.runReconciliation();
-      const firstCallSince = (gateway.getFills as any).mock.calls[0][0];
-      expect(firstCallSince).toBe(0);
+      const start = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+      try {
+        await mod.runReconciliation();
+        expect((gateway.getFills as any).mock.calls[0][0]).toBe(0);
 
-      await mod.runReconciliation();
-      const secondCallSince = (gateway.getFills as any).mock.calls[1][0];
-      expect(secondCallSince).toBeGreaterThan(0);
+        // The safety-net fetch is throttled, so the next fetching pass is 5 min out.
+        clock.mockReturnValue(start + 6 * 60_000);
+        await mod.runReconciliation();
+        expect((gateway.getFills as any).mock.calls[1][0]).toBe(start);
+      } finally {
+        clock.mockRestore();
+      }
     });
 
     it("does not advance the recovery cursor after an unreliable fills snapshot", async () => {
@@ -2702,14 +2775,22 @@ describe("ReconciliationModule", () => {
         .fn()
         .mockResolvedValueOnce({ ok: false, reason: "parse", attempts: 1 })
         .mockResolvedValue({ ok: true, data: [] });
+      const start = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(start);
 
-      await mod.runReconciliation();
-      await mod.runReconciliation();
-      await mod.runReconciliation();
+      try {
+        await mod.runReconciliation();
+        // An unreliable fetch never counts as coverage, so the retry is immediate.
+        await mod.runReconciliation();
+        clock.mockReturnValue(start + 6 * 60_000);
+        await mod.runReconciliation();
+      } finally {
+        clock.mockRestore();
+      }
 
       expect(gateway.getFillsResult).toHaveBeenNthCalledWith(1, 0);
       expect(gateway.getFillsResult).toHaveBeenNthCalledWith(2, 0);
-      expect((gateway.getFillsResult as any).mock.calls[2][0]).toBeGreaterThan(0);
+      expect((gateway.getFillsResult as any).mock.calls[2][0]).toBe(start);
     });
   });
 });

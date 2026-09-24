@@ -79,6 +79,12 @@ import {
 } from "../../quote-motion-shadow.js";
 
 const DRIFT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+/**
+ * The reconciliation fills fetch is only a safety net behind FillPoller's 5s
+ * polls, and upstream `/data/trades` pages cost tens of seconds each. Fetching
+ * on every pass made the whole pass slower than its own interval.
+ */
+const RECONCILIATION_FILLS_SAFETY_NET_MS = 5 * 60 * 1000;
 const DEFAULT_DRIFT_INTERVAL_MS = 5 * 60 * 1000;
 const WALLET_SENTINEL_FATAL_AFTER_CONSECUTIVE = 3;
 const WALLET_SENTINEL_BALANCE_EPSILON = 1e-3;
@@ -86,6 +92,11 @@ const DEFAULT_WALLET_POSITION_READ_TIMEOUT_MS = 2_000;
 const WALLET_POSITION_SLOW_WARN_MS = 2_000;
 const WALLET_POSITION_READ_TIMEOUT = Symbol("wallet-position-read-timeout");
 const WALLET_ACTIONABLE_DRIFT_WARN_COOLDOWN_MS = 5 * 60 * 1000;
+
+/** A throttled-away fills stage imports nothing, so the pass stays clean and metric-free. */
+function skippedFillsResult(): FillReconcileResult {
+  return { exchangeFillCount: 0, missingFillsImported: 0, details: [] };
+}
 
 function computePercentile(samples: readonly number[], percentile: number): number {
   if (samples.length === 0) return 0;
@@ -273,6 +284,8 @@ export class ReconciliationModule implements RuntimeModule {
    * reset on restart is an accepted risk (covered by age-grace + Fix 1/2).
    */
   private readonly consecutiveMissCounts = new Map<string, number>();
+  /** Start of the last reliable fills fetch; null until one has run. */
+  private lastFillsFetchAt: number | null = null;
   private readonly unresolvedStaleOrders = new Map<string, import("@krabs/domain").ExchangeOrder>();
   private readonly staleBackoffMap = new Map<string, number>();
   private readonly sellDownpriceRepriceMap: SellDownpriceRepriceStateMap = new Map();
@@ -432,25 +445,33 @@ export class ReconciliationModule implements RuntimeModule {
         ) ?? [];
 
       // 1. Import reliable fills before inspecting the open snapshot. A fill can
-      // prove a terminal local status whereas open-snapshot absence cannot.
+      // prove a terminal local status whereas open-snapshot absence cannot. The
+      // fetch is throttled: `sinceMs` still starts at the last reliable fetch,
+      // so a skipped pass leaves no gap in the imported history.
       const sinceMs = this.lastRunAt ?? 0;
+      const fetchFills =
+        this.lastFillsFetchAt === null ||
+        ranAt - this.lastFillsFetchAt >= RECONCILIATION_FILLS_SAFETY_NET_MS;
       const stageFillsStart = Date.now();
       const fillCompletionTolerance =
         this.deps.fillCompletionTolerance ?? DEFAULT_FILL_COMPLETION_TOLERANCE;
-      const fillResult = await reconcileFills(
-        {
-          gateway: this.deps.gateway,
-          fillRepo: this.deps.fillRepo,
-          orderRepo: this.deps.orderRepo,
-          bus: this.deps.bus,
-          log: this.log,
-          fillCompletionTolerance,
-          runtimeMetrics: this.deps.runtimeMetrics,
-          recoveryContexts,
-        },
-        sinceMs,
-      );
-      stageTimingsMs.fills = Date.now() - stageFillsStart;
+      const fillResult = fetchFills
+        ? await reconcileFills(
+            {
+              gateway: this.deps.gateway,
+              fillRepo: this.deps.fillRepo,
+              orderRepo: this.deps.orderRepo,
+              bus: this.deps.bus,
+              log: this.log,
+              fillCompletionTolerance,
+              runtimeMetrics: this.deps.runtimeMetrics,
+              recoveryContexts,
+            },
+            sinceMs,
+          )
+        : skippedFillsResult();
+      stageTimingsMs.fills = fetchFills ? Date.now() - stageFillsStart : 0;
+      const fillsFetchedReliably = fetchFills && fillResult.skipReason !== "unreliable_fills";
       allDetails.push(...fillResult.details);
 
       // 2. Open-order reconciliation. Absence only emits unresolved evidence;
@@ -672,7 +693,10 @@ export class ReconciliationModule implements RuntimeModule {
       };
 
       this.runCount++;
-      if (fillResult.skipReason !== "unreliable_fills") this.lastRunAt = ranAt;
+      if (fillsFetchedReliably) {
+        this.lastRunAt = ranAt;
+        this.lastFillsFetchAt = ranAt;
+      }
       this.lastResult = result;
 
       // 6. Publish events
@@ -707,6 +731,7 @@ export class ReconciliationModule implements RuntimeModule {
           phantoms: orderResult.phantomsCancelled,
           phantomsSkippedGrace: orderResult.phantomsSkippedGrace,
           missingFills: fillResult.missingFillsImported,
+          fillsSkipped: !fetchFills,
           unknownOrders: orderResult.unknownExchangeOrders,
           staleCancelled: orderResult.staleCancelled,
           staleCancelFailed: orderResult.staleCancelFailed,

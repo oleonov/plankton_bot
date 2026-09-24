@@ -294,6 +294,7 @@ export interface WalletSellCapacityDecision {
   source: SellCapacitySource;
   mode: SellCapacityPolicy["mode"];
   dynamic: DynamicSellCapacityLimits | null;
+  firstExitReserve: number;
 }
 
 export interface TotalOrdersCapacityDecision {
@@ -342,7 +343,8 @@ export type SellCapacitySource = "profile_ladder" | "D8" | "D7" | "D9" | "S1" | 
 export type SellCapacityRejectReason =
   | "legacy_global_cap"
   | "profile_ladder_cap"
-  | "dynamic_global_cap";
+  | "dynamic_global_cap"
+  | "additional_sell_reserve";
 
 export interface DynamicSellCapacityLimits {
   profileOwnedOpenPositionCount: number;
@@ -515,6 +517,7 @@ export function evaluateWalletSellCapacity(args: {
   openProfileLadderSellOrderCount?: number | undefined;
   openNonProfileLadderSellOrderCount?: number | undefined;
   profileOwnedOpenPositionCount?: number | undefined;
+  perTokenOpenSellOrderCount?: number | undefined;
 }): WalletSellCapacityDecision {
   const policy = normalizeSellCapacityPolicy(args.policy);
   const source = args.source ?? "other";
@@ -526,6 +529,17 @@ export function evaluateWalletSellCapacity(args: {
         })
       : null;
   const maxOpenSellOrders = dynamic?.dynamicGlobalCap ?? policy.maxOpenSellOrders;
+  // First exits outrank additional rungs: a SELL for a token that already has an open SELL
+  // must leave the last `minNonLadderReserve` slots of the global cap for still-uncovered
+  // positions, so every slot freed in that band goes to a first exit. The reserve is carved
+  // only from headroom above itself — a cap below twice the reserve (the default legacy cap, a
+  // dynamic cap with few open positions) would otherwise ban additional SELLs outright
+  // instead of deprioritizing them.
+  const firstExitReserve =
+    (args.perTokenOpenSellOrderCount ?? 0) > 0
+      ? resolveFirstExitReserve(maxOpenSellOrders, policy.minNonLadderReserve)
+      : 0;
+  const effectiveGlobalCap = Math.max(0, maxOpenSellOrders - firstExitReserve);
   const base = {
     openSellOrderCount: args.openSellOrderCount,
     openProfileLadderSellOrderCount: args.openProfileLadderSellOrderCount ?? 0,
@@ -536,30 +550,33 @@ export function evaluateWalletSellCapacity(args: {
     source,
     mode: policy.mode,
     dynamic,
+    firstExitReserve,
   };
+  const globalCapDetail = (hardCapDetail: SellCapacityRejectReason): SellCapacityRejectReason =>
+    args.openSellOrderCount >= maxOpenSellOrders ? hardCapDetail : "additional_sell_reserve";
 
   if (!policy.enabled) {
     return { ...base, allowed: true, reason: null, rejectionDetail: null };
   }
 
   if (policy.mode === "legacy_global") {
-    if (policy.maxOpenSellOrders > 0 && args.openSellOrderCount >= policy.maxOpenSellOrders) {
+    if (policy.maxOpenSellOrders > 0 && args.openSellOrderCount >= effectiveGlobalCap) {
       return {
         ...base,
         allowed: false,
         reason: WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
-        rejectionDetail: "legacy_global_cap",
+        rejectionDetail: globalCapDetail("legacy_global_cap"),
       };
     }
     return { ...base, allowed: true, reason: null, rejectionDetail: null };
   }
 
-  if (dynamic && args.openSellOrderCount >= dynamic.dynamicGlobalCap) {
+  if (dynamic && args.openSellOrderCount >= effectiveGlobalCap) {
     return {
       ...base,
       allowed: false,
       reason: WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
-      rejectionDetail: "dynamic_global_cap",
+      rejectionDetail: globalCapDetail("dynamic_global_cap"),
     };
   }
 
@@ -577,6 +594,11 @@ export function evaluateWalletSellCapacity(args: {
   }
 
   return { ...base, allowed: true, reason: null, rejectionDetail: null };
+}
+
+function resolveFirstExitReserve(globalCap: number, minNonLadderReserve: number): number {
+  const reserve = nonNegativeInt(minNonLadderReserve);
+  return Math.min(reserve, Math.max(0, globalCap - reserve));
 }
 
 export function computeDynamicSellCapacityLimits(args: {

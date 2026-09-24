@@ -6864,6 +6864,7 @@ export class ExecutionModule implements RuntimeModule {
 
     const sellPolicy = normalizeSellCapacityPolicy(this.currentSellCapacityPolicy());
     const sellCapacitySource = classifySellCapacitySource(cmd);
+    const perTokenOpenSellOrderCount = getOpenOrderCountForToken(reservations, cmd.tokenId, "sell");
     const sellCapacity = evaluateWalletSellCapacity({
       policy: sellPolicy,
       source: sellCapacitySource,
@@ -6871,6 +6872,7 @@ export class ExecutionModule implements RuntimeModule {
       openProfileLadderSellOrderCount: reservations.openProfileLadderSellOrderCount,
       openNonProfileLadderSellOrderCount: reservations.openNonProfileLadderSellOrderCount,
       profileOwnedOpenPositionCount: this.currentProfileOwnedOpenPositionCount(),
+      perTokenOpenSellOrderCount,
     });
     if (!sellCapacity.allowed && !isBounceBackstop) {
       this.recordExecutionSellCapacitySample(
@@ -6904,7 +6906,7 @@ export class ExecutionModule implements RuntimeModule {
         sellPolicy,
         isExitCoverageCleanup,
       ),
-      openOrdersForToken: getOpenOrderCountForToken(reservations, cmd.tokenId, "sell"),
+      openOrdersForToken: perTokenOpenSellOrderCount,
       enabled: sellPolicy.enabled,
     });
     if (!perTokenSell.allowed && !isBounceBackstop) {

@@ -2003,6 +2003,7 @@ async function main(): Promise<void> {
     pollIntervalMs: config.fillPollIntervalMs,
     overlapMs: 5_000,
     fillCompletionTolerance: config.reconciliationFillCompletionTolerance,
+    runtimeMetrics,
     onImportObserved: userOrderStreamModule
       ? ({ imported }) => userOrderStreamModule.recordPollingFills(imported)
       : undefined,

@@ -1454,6 +1454,69 @@ describe("AlgoRiskGateImpl", () => {
     expect(decision.approved).toBe(true);
   });
 
+  it("keeps the last SELL slots for first exits while additional rungs yield", async () => {
+    // dynamicGlobalCap = 200, occupancy 199: only the uncovered token may take the free slot.
+    const orders = Array.from({ length: 199 }, (_, index) =>
+      makeOpenSellOrder({
+        orderId: `first-exit-reserve-${index}` as any,
+        clientOrderId: `first-exit-reserve-cl-${index}` as any,
+        ...(index === 0 ? {} : { tokenId: createTokenId(`first-exit-reserve-token-${index}`) }),
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      }),
+    );
+    const samples: Array<{
+      approved: boolean;
+      rejectionReason: string | null;
+      sellCapacityRejectReason?: string | null | undefined;
+    }> = [];
+    const makeGate = () =>
+      new AlgoRiskGateImpl(
+        makeOrderRepo(orders),
+        makePositionRepo(makeOpenPosition()),
+        makeLogger(),
+        undefined,
+        undefined,
+        undefined,
+        () =>
+          makeExecutionPolicy({
+            sellCapacity: {
+              ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+              mode: "source_aware_dynamic",
+              profileLadderLiveRungsPerPosition: 2,
+              minNonLadderReserve: 10,
+              nonLadderReserveRatio: 0.25,
+              hardMaxOpenSellOrders: 200,
+            },
+            orderCapacity: {
+              ...DEFAULT_EXECUTION_POLICY.orderCapacity,
+              maxOpenOrdersTotal: 250,
+            },
+          }),
+        (sample) => samples.push(sample),
+        undefined,
+        undefined,
+        undefined,
+        () => 100,
+      );
+    const bounceSignal = (overrides?: Partial<Signal>) =>
+      makeSignal({
+        side: "sell",
+        reason: "repricing-exit",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        ...overrides,
+      });
+
+    const additional = await makeGate().evaluate(bounceSignal());
+    expect(additional.approved).toBe(false);
+    expect(additional.rejectionReasons).toContain("wallet_sell_capacity_exhausted");
+    expect(samples.at(-1)?.sellCapacityRejectReason).toBe("additional_sell_reserve");
+
+    const firstExit = await makeGate().evaluate(
+      bounceSignal({ tokenId: createTokenId("first-exit-uncovered-token") }),
+    );
+    expect(firstExit.approved).toBe(true);
+  });
+
   it("allows SELL when BUY capacity is exhausted", async () => {
     const gate = new AlgoRiskGateImpl(
       makeOrderRepo([makeOpenBuyOrder(), { ...makeOpenBuyOrder(), orderId: "ord-2" as any }]),

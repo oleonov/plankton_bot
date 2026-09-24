@@ -270,6 +270,32 @@ describe("FillPollerModule", () => {
     expect(gateway.getFills).toHaveBeenCalledTimes(1);
   });
 
+  it("records fetch latency for the hot-path getFills call", async () => {
+    const writeCounter = vi.fn();
+    mod = new FillPollerModule({
+      gateway,
+      fillRepo,
+      orderRepo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 5000,
+      overlapMs: 5000,
+      runtimeMetrics: { writeCounter },
+    });
+    (gateway.getFills as any).mockRejectedValueOnce(new Error("upstream down"));
+
+    await mod.start();
+    await expect(mod.poll()).rejects.toThrow("upstream down");
+    await mod.poll();
+
+    // Both the failed and the successful fetch are measured — the failures are
+    // exactly the slow ones the metric exists to expose.
+    expect(
+      writeCounter.mock.calls.filter(([name]) => name === "fill_poller_fetch_ms"),
+    ).toHaveLength(2);
+    expect(writeCounter).toHaveBeenCalledWith("fill_poller_fetch_count", 1);
+  });
+
   it("healthCheck reports ok after start", async () => {
     await mod.start();
     const h = await mod.healthCheck();

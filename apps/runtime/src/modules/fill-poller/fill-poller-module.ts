@@ -11,6 +11,7 @@
 
 import type {
   RuntimeModule,
+  ExchangeFill,
   ExchangeGateway,
   FillRepository,
   OrderRepository,
@@ -29,6 +30,10 @@ export interface FillPollerModuleDeps {
   overlapMs: number;
   /** Relative fill-completion tolerance forwarded to importExchangeFills (#36). */
   fillCompletionTolerance?: number | undefined;
+  /** Diagnostics sink for the hot-path fetch latency, otherwise invisible. */
+  runtimeMetrics?:
+    | { writeCounter?: (name: string, value?: number, labels?: string | null) => void }
+    | undefined;
   onImportObserved?:
     | ((summary: {
         imported: number;
@@ -96,7 +101,7 @@ export class FillPollerModule implements RuntimeModule {
         ...this.deferredFillTimestamps.values(),
       );
       const sinceMs = Math.max(0, deferredSinceMs - this.deps.overlapMs);
-      const fills = await this.deps.gateway.getFills(sinceMs);
+      const fills = await this.fetchFills(sinceMs);
 
       if (fills.length > 0) {
         const result = await importExchangeFills(fills, {
@@ -144,6 +149,21 @@ export class FillPollerModule implements RuntimeModule {
       this.pollCount++;
     } finally {
       this.polling = false;
+    }
+  }
+
+  /** Upstream page latency dominates the real poll cadence — measure it, failures included. */
+  private async fetchFills(sinceMs: number): Promise<ExchangeFill[]> {
+    const startedAt = Date.now();
+    try {
+      return await this.deps.gateway.getFills(sinceMs);
+    } finally {
+      try {
+        this.deps.runtimeMetrics?.writeCounter?.("fill_poller_fetch_ms", Date.now() - startedAt);
+        this.deps.runtimeMetrics?.writeCounter?.("fill_poller_fetch_count", 1);
+      } catch {
+        /* Diagnostics must not interrupt fill import. */
+      }
     }
   }
 }

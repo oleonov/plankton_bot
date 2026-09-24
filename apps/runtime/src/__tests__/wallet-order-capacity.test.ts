@@ -576,6 +576,132 @@ describe("order capacity policy evaluators", () => {
   });
 });
 
+describe("first-exit reserve inside the SELL cap", () => {
+  // dynamicGlobalCap = min(100 * 2 + max(10, ceil(200 * 0.25)), 200) = 200; the first-exit
+  // reserve is the configured minNonLadderReserve (10), not the computed nonLadderReserve (50).
+  const dynamicPolicy: SellCapacityPolicy = {
+    ...sellPolicy,
+    mode: "source_aware_dynamic",
+    profileLadderLiveRungsPerPosition: 2,
+    minNonLadderReserve: 10,
+    nonLadderReserveRatio: 0.25,
+    hardMaxOpenSellOrders: 200,
+  };
+
+  function dynamicDecision(openSellOrderCount: number, perTokenOpenSellOrderCount?: number) {
+    return evaluateWalletSellCapacity({
+      policy: dynamicPolicy,
+      source: "other",
+      openSellOrderCount,
+      openProfileLadderSellOrderCount: 0,
+      openNonProfileLadderSellOrderCount: openSellOrderCount,
+      profileOwnedOpenPositionCount: 100,
+      ...(perTokenOpenSellOrderCount == null ? {} : { perTokenOpenSellOrderCount }),
+    });
+  }
+
+  it("admits a first exit inside the reserve band but rejects an additional SELL", () => {
+    expect(dynamicDecision(195, 0)).toMatchObject({
+      allowed: true,
+      rejectionDetail: null,
+      firstExitReserve: 0,
+    });
+    expect(dynamicDecision(195, 1)).toMatchObject({
+      allowed: false,
+      reason: "wallet_sell_capacity_exhausted",
+      rejectionDetail: "additional_sell_reserve",
+      firstExitReserve: 10,
+    });
+  });
+
+  it("admits an additional SELL just below the reserve band", () => {
+    expect(dynamicDecision(189, 1).allowed).toBe(true);
+    expect(dynamicDecision(190, 1).allowed).toBe(false);
+  });
+
+  it("keeps the global cap hard for first exits", () => {
+    expect(dynamicDecision(200, 0)).toMatchObject({
+      allowed: false,
+      rejectionDetail: "dynamic_global_cap",
+    });
+  });
+
+  it("hands a slot freed at the cap to a first exit, not to another rung", () => {
+    expect(dynamicDecision(200, 0).allowed).toBe(false);
+    expect(dynamicDecision(200, 2)).toMatchObject({
+      allowed: false,
+      rejectionDetail: "dynamic_global_cap",
+    });
+
+    // One rung terminates: occupancy cap - 1.
+    expect(dynamicDecision(199, 2)).toMatchObject({
+      allowed: false,
+      rejectionDetail: "additional_sell_reserve",
+    });
+    expect(dynamicDecision(199, 0).allowed).toBe(true);
+  });
+
+  it("applies the same yield rule in legacy_global mode", () => {
+    const legacyPolicy: SellCapacityPolicy = {
+      ...sellPolicy,
+      mode: "legacy_global",
+      maxOpenSellOrders: 20,
+      minNonLadderReserve: 5,
+    };
+    const legacyDecision = (openSellOrderCount: number, perTokenOpenSellOrderCount: number) =>
+      evaluateWalletSellCapacity({
+        policy: legacyPolicy,
+        source: "D8",
+        openSellOrderCount,
+        perTokenOpenSellOrderCount,
+      });
+
+    expect(legacyDecision(14, 1).allowed).toBe(true);
+    expect(legacyDecision(15, 1)).toMatchObject({
+      allowed: false,
+      rejectionDetail: "additional_sell_reserve",
+    });
+    expect(legacyDecision(19, 0).allowed).toBe(true);
+    expect(legacyDecision(20, 0)).toMatchObject({
+      allowed: false,
+      rejectionDetail: "legacy_global_cap",
+    });
+  });
+
+  it("shrinks the reserve to the headroom above it on small caps", () => {
+    const decide = (maxOpenSellOrders: number, openSellOrderCount: number) =>
+      evaluateWalletSellCapacity({
+        policy: { ...sellPolicy, maxOpenSellOrders },
+        source: "D8",
+        openSellOrderCount,
+        perTokenOpenSellOrderCount: 1,
+      });
+
+    // cap 10 == reserve 10: no headroom, so additional SELLs keep today's cap.
+    expect(decide(10, 9)).toMatchObject({ allowed: true, firstExitReserve: 0 });
+    // cap 14: reserve min(10, 14 - 10) = 4 — additional SELLs stop at 10.
+    expect(decide(14, 9)).toMatchObject({ allowed: true, firstExitReserve: 4 });
+    expect(decide(14, 10)).toMatchObject({
+      allowed: false,
+      rejectionDetail: "additional_sell_reserve",
+    });
+  });
+
+  it("keeps the pre-reserve behavior when the per-token count is omitted", () => {
+    expect(dynamicDecision(195)).toMatchObject({
+      allowed: true,
+      rejectionDetail: null,
+      firstExitReserve: 0,
+    });
+    expect(evaluateWalletSellCapacity({ policy: sellPolicy, openSellOrderCount: 9 }).allowed).toBe(
+      true,
+    );
+    expect(
+      evaluateWalletSellCapacity({ policy: sellPolicy, openSellOrderCount: 10 }),
+    ).toMatchObject({ allowed: false, rejectionDetail: "legacy_global_cap" });
+  });
+});
+
 describe("resolveEntriesBlocked (diagnostic-only)", () => {
   it("blocks when hard-blocked regardless of capacity", () => {
     expect(
