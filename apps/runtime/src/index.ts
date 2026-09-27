@@ -3085,6 +3085,7 @@ async function main(): Promise<void> {
     positionRepo: repos.position,
     inventoryLotRepo: repos.inventoryLot,
     legStateRepo: repos.legState,
+    marketResolutionRepo,
     log,
     db: ledgerConn.db,
     botRunId,

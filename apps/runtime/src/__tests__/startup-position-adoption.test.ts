@@ -7,6 +7,7 @@ import {
   SqliteInventoryLotRepository,
   SqliteLegStateRepository,
   SqliteMarketRepository,
+  SqliteMarketResolutionRepository,
   SqliteOrderRepository,
   SqlitePositionRepository,
 } from "@krabs/db";
@@ -21,6 +22,7 @@ import {
   BOUNCE_EXIT_TARGET_RULE_ID,
   GATE_ENTRY_RULE_ID,
   R23_DIP_TRIGGER_RULE_ID,
+  RESOLVED_MARKET_ORPHAN_CANCEL_REASON,
   type ClientOrderId,
   type ExchangeFill,
   type ExchangeOrder,
@@ -243,6 +245,49 @@ function asExchangeOrder(order: Order, overrides: Partial<ExchangeOrder> = {}): 
     createdAt: Date.parse(order.createdAt),
     ...overrides,
   };
+}
+
+function resolveAsLoser(
+  conn: ReturnType<typeof bootstrapLedgerDb>,
+  seeded: ReturnType<typeof seedSubmitUnknownBounceCandidate>,
+): void {
+  const settledAt = new Date().toISOString();
+  const positionId = seeded.candidate.positionId!;
+  conn.db
+    .prepare(
+      "UPDATE positions SET status = 'closed', size = 0, closed_at = ? WHERE position_id = ?",
+    )
+    .run(settledAt, positionId);
+  conn.db
+    .prepare("UPDATE inventory_lots SET remaining_size = 0 WHERE position_id = ?")
+    .run(positionId);
+  for (const sibling of seeded.siblings)
+    seeded.orderRepo.updateStatus(sibling.orderId, "cancelled");
+  conn.db
+    .prepare(
+      `INSERT INTO market_resolutions
+         (condition_id, resolution, resolved_at, detected_at, source, raw_response, status)
+       VALUES ('cond-1', 'No', ?, ?, 'gamma-api', ?, 'settled')`,
+    )
+    .run(
+      settledAt,
+      settledAt,
+      JSON.stringify({
+        conditionId: "cond-1",
+        closed: true,
+        umaResolutionStatus: "resolved",
+        clobTokenIds: JSON.stringify([TOKEN_ID, "tok-btc-no"]),
+        outcomes: '["Yes","No"]',
+        outcomePrices: '["0","1"]',
+      }),
+    );
+  conn.db
+    .prepare(
+      `INSERT INTO settlement_ledger
+         (settlement_id, condition_id, position_id, token_id, resolution, settlement_price, size, delta, settled_at)
+       VALUES ('settle-orphan', 'cond-1', ?, ?, 'No', 0, 5, -1, ?)`,
+    )
+    .run(positionId, TOKEN_ID, settledAt);
 }
 
 function adoptionDeps(
@@ -948,6 +993,109 @@ describe("runStartupPositionAdoption", () => {
     await expect(runStartupPositionAdoption(deps)).rejects.toThrow(
       "submit-unknown sibling parity mismatch",
     );
+  });
+
+  function resolvedLoserOrphanDeps() {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+    const seeded = seedSubmitUnknownBounceCandidate(conn);
+    resolveAsLoser(conn, seeded);
+    const deps = {
+      ...adoptionDeps(conn, {
+        getOpenOrdersResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getFillsResult: vi.fn().mockResolvedValue({ ok: true, data: [] }),
+        getOrderResult: vi.fn().mockResolvedValue({ ok: true, data: null }),
+      }),
+      marketResolutionRepo: new SqliteMarketResolutionRepository(conn.db),
+    };
+    return { conn, candidate: seeded.candidate, deps };
+  }
+
+  it("closes an exact-null submit-unknown SELL orphaned by a settled loser market", async () => {
+    const { candidate, deps } = resolvedLoserOrphanDeps();
+
+    const result = await runStartupPositionAdoption(deps);
+
+    expect(deps.orderRepo.findById(candidate.orderId)).toMatchObject({
+      status: "cancelled",
+      cancelReason: RESOLVED_MARKET_ORPHAN_CANCEL_REASON,
+    });
+    expect(result.drainTargets.flatMap((target) => target.orders)).not.toContainEqual(
+      expect.objectContaining({ orderId: candidate.orderId }),
+    );
+  });
+
+  it.each([
+    [
+      "no resolution row",
+      "PRAGMA foreign_keys = OFF; DELETE FROM market_resolutions; PRAGMA foreign_keys = ON",
+    ],
+    ["a detected (unsettled) resolution", "UPDATE market_resolutions SET status = 'detected'"],
+    [
+      "an inferred Gamma resolution",
+      "UPDATE market_resolutions SET raw_response = json_set(raw_response, '$.umaResolutionStatus', 'proposed')",
+    ],
+    [
+      "the order's token as winner",
+      `UPDATE market_resolutions SET resolution = 'Yes',
+         raw_response = json_set(raw_response, '$.outcomePrices', '["1","0"]')`,
+    ],
+    ["no settlement row", "DELETE FROM settlement_ledger"],
+    ["a settlement at price 1", "UPDATE settlement_ledger SET settlement_price = 1"],
+    [
+      "a local fill for the order",
+      `INSERT INTO fills
+         (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, filled_at)
+       VALUES ('orphan-fill', 'ord-missing-bounce-predecessor', 'tok-btc-yes', 'cond-1', 'sell',
+               .3, .5, .15, '2026-09-27T00:00:00.000Z')`,
+    ],
+    ["an open lot remaining", "UPDATE inventory_lots SET remaining_size = 1"],
+    [
+      "an active position on the token",
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price, cost_basis_usdc,
+          status, entry_style, entry_lane, exit_owner, opened_at, updated_at)
+       VALUES ('pos-new-cycle', 'tok-btc-yes', 'cond-1', 'buy', 5, 0.2, 1, 'open', 'maker', 'R23',
+               'bounce', '2026-09-27T00:00:00.000Z', '2026-09-27T00:00:00.000Z')`,
+    ],
+    ["no market resolution repository", null],
+  ] as const)("keeps the submit-unknown orphan fatal with %s", async (_case, mutation) => {
+    const { conn, candidate, deps } = resolvedLoserOrphanDeps();
+    if (mutation) conn.db.exec(mutation);
+    const run = mutation ? deps : { ...deps, marketResolutionRepo: undefined };
+
+    await expect(runStartupPositionAdoption(run)).rejects.toThrow(
+      "submit-unknown local proof mismatch",
+    );
+    expect(deps.orderRepo.findById(candidate.orderId)?.status).not.toBe("cancelled");
+  });
+
+  it("keeps the submit-unknown orphan fatal when exchange history has its fill", async () => {
+    const { candidate, deps } = resolvedLoserOrphanDeps();
+    vi.mocked(deps.gateway.getFillsResult).mockResolvedValue({
+      ok: true,
+      data: [
+        makeExchangeFill({
+          orderId: candidate.exchangeOrderId!,
+          clientOrderId: String(candidate.clientOrderId),
+          side: "sell",
+          price: candidate.price,
+          size: 0.5,
+        }),
+      ],
+    });
+
+    await expect(runStartupPositionAdoption(deps)).rejects.toThrow();
+  });
+
+  it("keeps the submit-unknown orphan fatal when an order rests on its token", async () => {
+    const { candidate, deps } = resolvedLoserOrphanDeps();
+    vi.mocked(deps.gateway.getOpenOrdersResult).mockResolvedValue({
+      ok: true,
+      data: [asExchangeOrder({ ...candidate, exchangeOrderId: "remote-resting-sell" })],
+    });
+
+    await expect(runStartupPositionAdoption(deps)).rejects.toThrow();
   });
 
   it.each([

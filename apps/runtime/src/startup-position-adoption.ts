@@ -12,6 +12,7 @@ import type {
   InventoryLot,
   LegStateRepository,
   MarketRepository,
+  MarketResolutionRepository,
   Order,
   OrderRepository,
   Position,
@@ -27,6 +28,7 @@ import {
   createOrderId,
   createTokenId,
   R23_DIP_TRIGGER_RULE_ID,
+  RESOLVED_MARKET_ORPHAN_CANCEL_REASON,
   readPendingBuyRecovery,
   pendingBuyExactMatches,
   clobSubmittedSize,
@@ -49,6 +51,10 @@ import {
   applyOrderVerdict,
   grossFillShares,
 } from "./modules/reconciliation/order-status-resolver.js";
+import {
+  matchingClosedPosition,
+  provesLoser,
+} from "./modules/reconciliation/resolved-loser-local-closure.js";
 import {
   canonicalRecoveryMetadata,
   isRecoveryChildLocalIdentity,
@@ -95,6 +101,8 @@ export interface StartupPositionAdoptionDeps {
   positionRepo: PositionRepository;
   inventoryLotRepo: InventoryLotRepository;
   legStateRepo: LegStateRepository;
+  /** Absent keeps every exact-null submit-unknown SELL on the fatal local-proof path. */
+  marketResolutionRepo?: Pick<MarketResolutionRepository, "findByConditionId"> | undefined;
   log: Logger;
   db: Database.Database;
   botRunId: BotRunId;
@@ -764,7 +772,8 @@ export async function runStartupPositionAdoption(
         continue;
       }
       if (isSubmitUnknownSellShape(order) && hasSubmitUnknownStartupEvidence(deps.db, order)) {
-        exactNullSubmitUnknownSells.push(order);
+        if (!closeResolvedLoserOrphanSell(order, deps, rawFills, startupOpenOrders, result, log))
+          exactNullSubmitUnknownSells.push(order);
         continue;
       }
       throw new Error(
@@ -1145,9 +1154,7 @@ export function matchesSubmitUnknownRecoveryLocalProof(
   }
   const rungs = working.map(bounceRungMetadata);
   const ladderId = bounceRungMetadata(order)?.ladderId;
-  const fifo = deps.inventoryLotRepo
-    .findOpen(position.positionId)
-    .reduce((sum, lot) => sum + lot.remainingSize, 0);
+  const fifo = openLotShares(deps.inventoryLotRepo, position.positionId);
   return (
     working.every(
       (candidate, index) =>
@@ -1259,6 +1266,94 @@ function hasStartupFillEvidence(
   );
 }
 
+function openLotShares(
+  inventoryLotRepo: Pick<InventoryLotRepository, "findOpen">,
+  positionId: PositionId,
+): number {
+  return inventoryLotRepo.findOpen(positionId).reduce((sum, lot) => sum + lot.remainingSize, 0);
+}
+
+function isRestingExchangeOrder(order: ExchangeOrder): boolean {
+  return order.status === "OPEN" || order.status === "PARTIALLY_FILLED";
+}
+
+/**
+ * A settled loser's book is closed and its inventory is already written off, so an exact-null
+ * submit-unknown SELL left on it cannot execute against anything we hold. Without this, the
+ * one-active-bounce-position proof fails on every restart.
+ */
+function closeResolvedLoserOrphanSell(
+  order: Order,
+  deps: StartupPositionAdoptionDeps,
+  exchangeFills: readonly ExchangeFill[],
+  exchangeOpenOrders: readonly ExchangeOrder[],
+  result: StartupPositionAdoptionResult,
+  log: Logger,
+): boolean {
+  if (!isResolvedLoserOrphanSubmitUnknownSell(order, deps, exchangeFills, exchangeOpenOrders))
+    return false;
+  deps.orderRepo.updateStatus(
+    order.orderId,
+    "cancelled",
+    undefined,
+    RESOLVED_MARKET_ORPHAN_CANCEL_REASON,
+  );
+  log.warn(
+    {
+      orderId: order.orderId,
+      positionId: order.positionId,
+      conditionId: order.conditionId,
+      resolutionSource: deps.marketResolutionRepo?.findByConditionId(order.conditionId)?.source,
+    },
+    "startup closed an exact-null submit-unknown SELL orphaned by a resolved loser market",
+  );
+  result.details.push(
+    `pending order ${String(order.orderId)} cancelled — resolved-loser orphan submit-unknown SELL`,
+  );
+  return true;
+}
+
+function isResolvedLoserOrphanSubmitUnknownSell(
+  order: Order,
+  deps: StartupPositionAdoptionDeps,
+  exchangeFills: readonly ExchangeFill[],
+  exchangeOpenOrders: readonly ExchangeOrder[],
+): boolean {
+  if (!isSubmitUnknownSellShape(order) || !isWorkingOrder(order) || !order.positionId) return false;
+  const resolution = deps.marketResolutionRepo?.findByConditionId(order.conditionId);
+  return (
+    !!resolution &&
+    provesLoser(resolution, order.tokenId) &&
+    matchingClosedPosition(order, deps.positionRepo) !== null &&
+    openLotShares(deps.inventoryLotRepo, order.positionId) === 0 &&
+    hasSingleLoserSettlement(deps.db, order) &&
+    !exchangeOpenOrders.some(
+      (remote) =>
+        String(remote.tokenId) === String(order.tokenId) && isRestingExchangeOrder(remote),
+    ) &&
+    !hasStartupFillEvidence(deps.fillRepo, order, exchangeFills)
+  );
+}
+
+function hasSingleLoserSettlement(db: Database.Database, order: Order): boolean {
+  const rows = db
+    .prepare(
+      "SELECT token_id, condition_id, settlement_price FROM settlement_ledger WHERE position_id = ?",
+    )
+    .all(String(order.positionId)) as Array<{
+    token_id: string;
+    condition_id: string;
+    settlement_price: number;
+  }>;
+  const [row] = rows;
+  return (
+    rows.length === 1 &&
+    row!.token_id === String(order.tokenId) &&
+    row!.condition_id === String(order.conditionId) &&
+    row!.settlement_price === 0
+  );
+}
+
 async function allowMissingBounceExitRecoveryStartup(
   deps: StartupPositionAdoptionDeps,
   order: Order,
@@ -1330,9 +1425,7 @@ async function persistMissingBounceExitRecoveryBlock(
   }
   const market = deps.marketRepo.findByTokenId(order.tokenId);
   if (!market?.active || String(market.conditionId) !== String(order.conditionId)) return false;
-  const fifoShares = deps.inventoryLotRepo
-    .findOpen(positions[0]!.positionId)
-    .reduce((sum, lot) => sum + lot.remainingSize, 0);
+  const fifoShares = openLotShares(deps.inventoryLotRepo, positions[0]!.positionId);
   if (
     !Number.isFinite(fifoShares) ||
     Math.abs(fifoShares - positions[0]!.size) > 1e-7 ||
@@ -1454,7 +1547,7 @@ function classifyStartupTransitionTargets(
 ): StartupDrainTarget[] {
   const restingByToken = new Map<string, ExchangeOrder[]>();
   for (const exchangeOrder of exchangeOpenOrders) {
-    if (exchangeOrder.status !== "OPEN" && exchangeOrder.status !== "PARTIALLY_FILLED") continue;
+    if (!isRestingExchangeOrder(exchangeOrder)) continue;
     const key = String(exchangeOrder.tokenId);
     const bucket = restingByToken.get(key) ?? [];
     bucket.push(exchangeOrder);

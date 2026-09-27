@@ -43,7 +43,7 @@ function ordinaryMetadata(raw: string | null): boolean {
   }
 }
 
-function provesLoser(resolution: MarketResolution, tokenId: string): boolean {
+export function provesLoser(resolution: MarketResolution, tokenId: string): boolean {
   if (
     resolution.status !== "settled" ||
     !resolution.resolution.trim() ||
@@ -217,7 +217,7 @@ function settledAccountingMatches(
   return evidence.fills.every((fill) => accounted(fill, order, settled, inserted));
 }
 
-function matchingClosedPosition(order: Order, repo: PositionRepository): Position | null {
+export function matchingClosedPosition(order: Order, repo: PositionRepository): Position | null {
   const position = repo.findById(order.positionId!);
   if (
     !position ||
