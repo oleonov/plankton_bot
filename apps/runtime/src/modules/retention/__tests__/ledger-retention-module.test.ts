@@ -340,9 +340,12 @@ describe("LedgerRetentionModule", () => {
     expect(rows).toEqual([{ event_type: "signal_rejected" }]);
   });
 
-  it("keeps quote-motion diagnostics for the regular 90-day evidence window", async () => {
+  it("expires diagnostic risk events after 7 days but keeps operational events", async () => {
     insertRiskEvent("quote_motion_shadow_sample", "{}", "2026-04-23T00:00:00.000Z");
-    insertRiskEvent("quote_motion_shadow_sample", "{}", "2026-01-01T00:00:00.000Z");
+    insertRiskEvent("quote_motion_shadow_sample", "{}", "2026-04-10T00:00:00.000Z");
+    insertRiskEvent("exit_downprice_reprice_held", "{}", "2026-04-23T00:00:00.000Z");
+    insertRiskEvent("exit_downprice_reprice_held", "{}", "2026-04-10T00:00:00.000Z");
+    insertRiskEvent("signal_rejected", "{}", "2026-04-10T00:00:00.000Z");
 
     const mod = new LedgerRetentionModule({
       db,
@@ -353,8 +356,14 @@ describe("LedgerRetentionModule", () => {
     await mod.runOnce(NOW);
 
     expect(
-      db.prepare("SELECT event_type FROM risk_events").all() as Array<{ event_type: string }>,
-    ).toEqual([{ event_type: "quote_motion_shadow_sample" }]);
+      db.prepare("SELECT event_type FROM risk_events ORDER BY event_type").all() as Array<{
+        event_type: string;
+      }>,
+    ).toEqual([
+      { event_type: "exit_downprice_reprice_held" },
+      { event_type: "quote_motion_shadow_sample" },
+      { event_type: "signal_rejected" },
+    ]);
   });
 
   it("deletes planner suppression rollups with the signal telemetry TTL", async () => {

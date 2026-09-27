@@ -2,7 +2,10 @@ import { statSync } from "node:fs";
 import type Database from "better-sqlite3";
 import type { RuntimeControl, RuntimeModule } from "@krabs/domain";
 import { ACTIVE_REDEEM_LOG_STATUS_SQL, ledgerInstant, toSqliteDateTime } from "@krabs/db";
-import { SIGNAL_TELEMETRY_RISK_EVENT_TYPES } from "../../risk-event-volume.js";
+import {
+  NON_OPERATIONAL_DIAGNOSTIC_RISK_EVENT_TYPES,
+  SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
+} from "../../risk-event-volume.js";
 import type { LifecycleToken } from "../../lifecycle-chain.js";
 import { LifecycleChain, LIFECYCLE_STOP_WAIT_MS, waitAtMost } from "../../lifecycle-chain.js";
 import type { Logger } from "../../logger.js";
@@ -61,6 +64,7 @@ export interface LedgerRetentionConfig {
   highVolumeRuntimeMetricsTtlMs?: number;
   signalTelemetryRiskEventsTtlMs?: number;
   highVolumeRiskEventsTtlMs?: number;
+  diagnosticRiskEventsTtlMs?: number;
   orderRejectedRiskEventsTtlMs?: number;
   riskEventsTtlMs?: number;
   criticalRiskEventsTtlMs?: number;
@@ -186,6 +190,10 @@ const DEFAULT_CONFIG: Required<LedgerRetentionConfig> = {
   // bucket effectively only sees signal_suppressed (~8k/h). 1d cap is plenty.
   signalTelemetryRiskEventsTtlMs: 1 * DAY_MS,
   highVolumeRiskEventsTtlMs: DAY_MS,
+  // At the 90-day operational TTL these grew to ~11.5 GB of a 30 GB ledger and tripped the
+  // db-size guard (2026-09-27): quote_motion_shadow_sample ~10 GB, exit_downprice_reprice_held
+  // ~1.5 GB. A week still covers readouts over recent cohorts.
+  diagnosticRiskEventsTtlMs: 7 * DAY_MS,
   orderRejectedRiskEventsTtlMs: 14 * DAY_MS,
   riskEventsTtlMs: 90 * DAY_MS,
   criticalRiskEventsTtlMs: 90 * DAY_MS,
@@ -241,6 +249,11 @@ const HIGH_VOLUME_RUNTIME_METRICS = [
 const HIGH_VOLUME_RISK_EVENTS = [
   "track_r_margin_threshold_sampled",
   "d9_suppressed_on_profile_owned",
+] as const;
+
+const DIAGNOSTIC_RISK_EVENTS = [
+  ...NON_OPERATIONAL_DIAGNOSTIC_RISK_EVENT_TYPES,
+  "exit_downprice_reprice_held",
 ] as const;
 
 type DeleteTask = {
@@ -620,6 +633,15 @@ export class LedgerRetentionModule implements RuntimeModule {
         nowMs - this.config.highVolumeRiskEventsTtlMs,
         `event_type IN (${HIGH_VOLUME_RISK_EVENTS.map(() => "?").join(", ")})`,
         [...HIGH_VOLUME_RISK_EVENTS],
+        { timestampFormat: "sqliteSpace" },
+      ),
+      this.deleteOlderThanTask(
+        "risk_events.diagnostic",
+        "risk_events",
+        "created_at",
+        nowMs - this.config.diagnosticRiskEventsTtlMs,
+        `event_type IN (${DIAGNOSTIC_RISK_EVENTS.map(() => "?").join(", ")})`,
+        [...DIAGNOSTIC_RISK_EVENTS],
         { timestampFormat: "sqliteSpace" },
       ),
       this.deleteOlderThanTask(
