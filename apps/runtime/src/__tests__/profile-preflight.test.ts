@@ -282,10 +282,10 @@ describe("runProfilePreflight", () => {
       polyBuilderCodeConfigured: true,
     });
 
-    expect(result.blockers.some((b) => b.code === "MARKETS_EXCEED_CAP")).toBe(false);
+    expect(result.warnings.some((w) => w.code === "MARKETS_EXCEED_CAP")).toBe(false);
   });
 
-  it("fails MARKETS_EXCEED_CAP when open positions alone exceed the cap", () => {
+  it("warns without blocking startup when held open markets exceed the cap", () => {
     seedProfile(controlConn.db, "live-lite");
 
     const insertPos = ledgerConn.db.prepare(
@@ -302,8 +302,9 @@ describe("runProfilePreflight", () => {
       polyBuilderCodeConfigured: true,
     });
 
-    expect(result.status).toBe("failed");
-    expect(result.blockers.some((b) => b.code === "MARKETS_EXCEED_CAP")).toBe(true);
+    expect(result.status).toBe("passed_with_warnings");
+    expect(result.blockers).toEqual([]);
+    expect(result.warnings.some((w) => w.code === "MARKETS_EXCEED_CAP")).toBe(true);
   });
 
   it("returns passed_with_warnings when exposure near cap (>80%)", () => {

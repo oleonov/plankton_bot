@@ -159,10 +159,13 @@ function runLiveLiteChecks(
   const activeMarkets = db
     .prepare("SELECT COUNT(DISTINCT token_id) as cnt FROM positions WHERE status = 'open'")
     .get() as { cnt: number };
+  // Only a warning: fills of already-admitted BUYs can push held markets past the cap,
+  // and those positions still need the runtime to manage their exits. The runtime
+  // guards keep blocking new-market BUYs until the count is back under the cap.
   if (activeMarkets.cnt > envelope.maxActiveMarkets) {
-    blockers.push({
+    warnings.push({
       code: "MARKETS_EXCEED_CAP",
-      message: `active markets ${activeMarkets.cnt} exceeds cap ${envelope.maxActiveMarkets}`,
+      message: `active markets ${activeMarkets.cnt} exceeds cap ${envelope.maxActiveMarkets}; new markets are blocked until below cap`,
     });
   }
 

@@ -46,12 +46,13 @@ The runtime will **exit immediately** if:
 - Missing `LIVE_LITE_CONFIRM=true`
 - Missing API credentials (`POLY_API_KEY`, `POLY_API_SECRET`, `POLY_PASSPHRASE`)
 
-## Start Paused Conditions
+## Startup Preflight Caps
 
-The runtime will **start in paused state** if:
-
-- Existing active markets count exceeds `MAX_ACTIVE_MARKETS`
-- Combined exposure (positions + open buy order notional) exceeds `MAX_OPEN_VALUE_USDC`
+- Combined exposure (positions + open buy order notional) over `maxOpenValueUsdc` is a blocker
+  (`EXPOSURE_EXCEEDS_CAP`): startup fails.
+- Held open markets over `maxActiveMarkets` only warn (`MARKETS_EXCEED_CAP`): startup continues
+  so existing positions stay managed, and new-market BUYs stay blocked until the count is back
+  under the cap.
 
 ## Steps
 
